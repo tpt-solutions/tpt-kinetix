@@ -7,5 +7,6 @@
 
 pub mod analysis;
 pub mod codegen;
+pub mod extraction;
 pub mod graph;
 pub mod ingestion;

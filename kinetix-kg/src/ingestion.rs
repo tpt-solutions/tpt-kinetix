@@ -1,18 +1,48 @@
-//! C source ingestion: parse codec source into an AST representation.
-//!
-//! TODO (Phase 1): Evaluate `tree-sitter-c` vs `libclang` bindings and
-//! implement the chosen approach.
+//! C source ingestion: parse codec source into an AST representation using tree-sitter.
 
-/// A placeholder for the ingested C AST.
+use tree_sitter::{Language, Parser, Tree};
+
+/// A parsed C AST backed by tree-sitter.
 pub struct CAst {
-    pub source_path: String,
+    source: String,
+    tree: Tree,
+    language: Language,
 }
 
 impl CAst {
-    /// Ingest the C source file at `path` and return an AST handle.
-    ///
-    /// TODO (Phase 1): Implement via tree-sitter or libclang.
-    pub fn from_file(path: impl Into<String>) -> anyhow::Result<Self> {
-        Ok(Self { source_path: path.into() })
+    /// Parse `source` as C and return a [`CAst`].
+    pub fn from_source(source: &str) -> anyhow::Result<Self> {
+        let language: Language = tree_sitter_c::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&language)?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse C source"))?;
+        Ok(Self {
+            source: source.to_string(),
+            tree,
+            language,
+        })
+    }
+
+    /// Read the file at `path`, then call [`Self::from_source`].
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let source = std::fs::read_to_string(path)?;
+        Self::from_source(&source)
+    }
+
+    /// Return the root node of the parsed tree.
+    pub fn root_node(&self) -> tree_sitter::Node<'_> {
+        self.tree.root_node()
+    }
+
+    /// Return the original source text.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Return the tree-sitter [`Language`] used to parse this AST.
+    pub fn language(&self) -> &Language {
+        &self.language
     }
 }

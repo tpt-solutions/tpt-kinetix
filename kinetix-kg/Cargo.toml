@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Knowledge-graph ingestion, analysis, and code generation tooling"
+keywords = ["codegen", "knowledge-graph", "codec", "ast", "rayon"]
+categories = ["development-tools", "multimedia"]
+readme = "README.md"
+documentation = "https://docs.rs/kinetix-kg"
 
 [[bin]]
 name = "kinetix-kg"
@@ -16,3 +20,6 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tree-sitter = "0.24"
+tree-sitter-c = "0.23"
+clap = { version = "4.5", features = ["derive"] }

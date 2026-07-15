@@ -1,7 +1,7 @@
 //! `kinetix-demux` — container demuxers for the TPT Kinetix engine.
 //!
-//! Supported (or in-progress) formats:
-//! - [`mp4`] — ISO BMFF / MP4 (Phase 0 skeleton)
+//! Supported formats:
+//! - [`mp4`] — ISO BMFF / MP4
 //!
 //! All demuxers implement the [`Demuxer`] trait, allowing them to be used
 //! interchangeably in the pipeline.

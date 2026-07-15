@@ -60,3 +60,21 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - run: cargo deny check
+
+  fuzz-check:
+    name: Fuzz targets compile
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Check fuzz targets compile (demux)
+        run: cargo fuzz build fuzz_mp4_box
+        working-directory: kinetix-demux
+      - name: Check fuzz targets compile (av1)
+        run: cargo fuzz build fuzz_obu_parse
+        working-directory: kinetix-av1

@@ -9,7 +9,9 @@ members = [
   "kinetix-pipeline",
   "kinetix-stream",
   "kinetix-cli",
+  "kinetix-test-utils",
 ]
+exclude = ["kinetix-demux/fuzz", "kinetix-av1/fuzz"]
 
 [workspace.package]
 edition = "2021"

@@ -1,10 +1,14 @@
 //! H.264/AVC decoder for the TPT Kinetix media processing engine.
 //!
-//! In Phase 3 the KG tooling will ingest FFmpeg's `h264dec.c` and emit
-//! Rust scaffolding into this crate.  Phase 0 establishes the module
-//! layout and public API surface.
+//! Phase 3 implementation: NAL parsing, SPS/PPS stores, macroblock
+//! reconstruction with rayon parallel row processing.
 
+pub mod bitreader;
 pub mod decoder;
+pub mod macroblock;
 pub mod nal;
+pub mod pps;
+pub mod slice;
+pub mod sps;
 
 pub use decoder::H264Decoder;

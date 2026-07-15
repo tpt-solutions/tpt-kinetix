@@ -25,6 +25,13 @@ impl PixelFormat {
     }
 
     /// Returns the number of bits per pixel (averaged across all planes).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kinetix_core::PixelFormat;
+    /// assert_eq!(PixelFormat::Yuv420p.bits_per_pixel(), 12);
+    /// ```
     pub fn bits_per_pixel(self) -> u32 {
         match self {
             PixelFormat::Yuv420p => 12,

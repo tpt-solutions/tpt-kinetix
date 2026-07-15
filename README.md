@@ -1,5 +1,8 @@
 # TPT Kinetix
 
+[![CI](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/tpt-solutions/tpt-kinetix/branch/master/graph/badge.svg)](https://codecov.io/gh/tpt-solutions/tpt-kinetix)
+
 A memory-safe, hyper-concurrent media processing engine written in Rust — designed as a long-term
 successor to FFmpeg for production transcoding and streaming pipelines.
 
@@ -124,6 +127,45 @@ cargo run -p kinetix-cli -- --help
 cargo run -p kinetix-cli -- transcode --help
 cargo run -p kinetix-cli -- stream --help
 ```
+
+---
+
+## Release & Versioning
+
+### Semver policy
+
+All crates in this workspace share the same version number (monorepo style). When a breaking change
+is made to any public API, **all** crates are bumped together. This keeps the dependency graph
+coherent and avoids mixed-version combinations.
+
+`v0.1.0` is the initial development release. API stability is **not guaranteed** until `v1.0.0`.
+
+### Publish order
+
+Crates must be published to crates.io in dependency order to satisfy the registry resolver:
+
+1. `kinetix-core`
+2. `kinetix-demux`, `kinetix-h264`, `kinetix-av1`, `kinetix-kg` *(depend only on `kinetix-core`)*
+3. `kinetix-pipeline` *(depends on the four above)*
+4. `kinetix-stream` *(independent of pipeline, but published after for consistency)*
+5. `kinetix-cli` *(depends on `kinetix-pipeline` and `kinetix-stream`)*
+
+### crates.io name reservation
+
+Before running `cargo publish` for the first time, **manually reserve each crate name** on
+crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
+entry. This prevents name squatting. The names to reserve are:
+
+`kinetix-core`, `kinetix-demux`, `kinetix-h264`, `kinetix-av1`, `kinetix-kg`,
+`kinetix-pipeline`, `kinetix-stream`, `kinetix-cli`
+
+---
+
+## Roadmap
+
+- **Phase 9 (stretch)**: See [`docs/adding-a-codec.md`](docs/adding-a-codec.md) for the process of adding new codecs via the KG pipeline.
+- **Future codecs**: See [`docs/codec-backlog.md`](docs/codec-backlog.md) for the prioritised list.
+- **Codec evaluations**: [`docs/codec-evaluations/aac.md`](docs/codec-evaluations/aac.md), [`docs/codec-evaluations/hevc.md`](docs/codec-evaluations/hevc.md)
 
 ---
 

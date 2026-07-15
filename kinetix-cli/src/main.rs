@@ -46,17 +46,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Transcode { input, output, vcodec } => {
+        Commands::Transcode {
+            input,
+            output,
+            vcodec,
+        } => {
             tracing::info!(%input, %output, %vcodec, "transcode requested");
-            anyhow::bail!(
-                "Transcode not yet implemented — see todo.md Phase 2–5"
-            );
+            anyhow::bail!("Transcode not yet implemented — see todo.md Phase 2–5");
         }
         Commands::Stream { rtmp_addr, hls_dir } => {
             tracing::info!(%rtmp_addr, %hls_dir, "stream server requested");
-            anyhow::bail!(
-                "Streaming not yet implemented — see todo.md Phase 6"
-            );
+            anyhow::bail!("Streaming not yet implemented — see todo.md Phase 6");
         }
     }
 }
