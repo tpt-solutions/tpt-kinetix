@@ -126,7 +126,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ## Phase 9 — Stretch / Future Codec Expansion
 
-- [ ] Document the repeatable process for adding a new codec via the `kinetix-kg` tooling (ingest → graph → codegen → hand-complete → validate → fuzz)
-- [ ] Evaluate adding AAC audio decode/encode support using the KG process
-- [ ] Evaluate adding HEVC/H.265 decode support using the KG process
-- [ ] Maintain a backlog note: the full ~400-codec FFmpeg surface is explicitly out of scope for the phases above; track candidate codecs here as they're prioritized
+- [x] Document the repeatable process for adding a new codec via the `kinetix-kg` tooling (ingest → graph → codegen → hand-complete → validate → fuzz)
+- [x] Evaluate adding AAC audio decode/encode support using the KG process
+- [x] Evaluate adding HEVC/H.265 decode support using the KG process
+- [x] Maintain a backlog note: the full ~400-codec FFmpeg surface is explicitly out of scope for the phases above; track candidate codecs here as they're prioritized
