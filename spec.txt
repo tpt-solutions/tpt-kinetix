@@ -1,0 +1,11 @@
+TPT Kinetix (The FFmpeg Successor)
+The Purpose: A memory-safe, hyper-concurrent media processing, transcoding, and streaming engine.
+Why We Are Upgrading It: FFmpeg processes untrusted video files from the internet. A malformed MP4 can exploit a memory bug in the C decoder to hack the server. Furthermore, FFmpeg's architecture is largely single-threaded per stream. Modern servers have 64+ cores, but FFmpeg struggles to utilize them efficiently for a single video transcode.
+Target Tech Stack:
+Language: Rust
+Core Libraries: rayon (for data parallelism), nom (for complex bitstream parsing), dav1d (as a reference for AV1 decoding).
+Testing Tools: The original FFmpeg binary (to compare the raw decoded pixel frames against TPT Kinetix's output).
+The TPT AI + Knowledge Graph Strategy:
+The Interface: You don't tackle all 400 codecs at once. The AI ingests the C source code for one complex codec (e.g., H.264). It extracts the Bitstream Parsing Tree and Macroblock State Machine into a Knowledge Graph.
+The Generation: The AI writes the H.264 decoder in Rust. It uses the graph to identify which parts of the decoding loop are independent (like decoding separate video slices). It then automatically injects rayon parallel iterators to decode those slices concurrently.
+The Innovation: TPT Kinetix doesn't just make the code safe; it fundamentally changes the architecture. By mapping the codec's state machine in a graph, the AI can design a "pipeline" architecture where demuxing, decoding, and filtering happen in parallel streams, vastly outperforming the C original.

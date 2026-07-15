@@ -1,0 +1,33 @@
+# Rust / Cargo
+/target/
+**/target/
+Cargo.lock
+*.rs.bk
+*.pdb
+
+# Fuzzing
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+
+# Large media samples / test fixtures (track via LFS or external fetch instead)
+*.mp4
+*.mkv
+*.webm
+*.ts
+*.m3u8
+*.y4m
+*.ivf
+!tests/**/*.mp4
+!tests/**/*.mkv
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env / local config
+.env
+.env.local
