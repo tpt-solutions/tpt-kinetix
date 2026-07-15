@@ -133,9 +133,7 @@ fn emit_parallel_sets(sets: &[IndependentSet], graph: &KnowledgeGraph) -> String
                 out.push_str(&format!("//   [{id}] {:?}\n", node.kind));
             }
         }
-        out.push_str(&format!(
-            "pub fn process_set_{idx}(items: &[()]) {{\n"
-        ));
+        out.push_str(&format!("pub fn process_set_{idx}(items: &[()]) {{\n"));
         out.push_str("    items.par_iter().for_each(|_item| {\n");
         out.push_str("        // TODO: fill body from KG scaffold (Phase 3)\n");
         out.push_str("    });\n");

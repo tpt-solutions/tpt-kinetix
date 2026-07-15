@@ -8,10 +8,7 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 use kinetix_core::{
-    error::KinetixError,
-    frame::VideoFrame,
-    packet::Packet,
-    pixel_format::PixelFormat,
+    error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
 };
 
 use crate::{
@@ -113,11 +110,7 @@ impl H264Decoder {
         // Each row can be decoded independently (simplified — ignores deblocking
         // filter dependencies between rows, which is acceptable for the scaffold).
         let mb_rows_data: Vec<Vec<Macroblock>> = (0..mb_rows)
-            .map(|_row| {
-                (0..mb_cols)
-                    .map(|_col| Macroblock::new_skip())
-                    .collect()
-            })
+            .map(|_row| (0..mb_cols).map(|_col| Macroblock::new_skip()).collect())
             .collect();
 
         // Parallel macroblock row reconstruction via rayon.
@@ -150,7 +143,13 @@ impl H264Decoder {
                 let mut cr_row = vec![128u8; chroma_row_size];
                 for (col_idx, mb) in row_mbs.iter().enumerate() {
                     mb.reconstruct_luma(&mut luma_row, col_idx as u32, 0, luma_stride);
-                    mb.reconstruct_chroma(&mut cb_row, &mut cr_row, col_idx as u32, 0, chroma_stride);
+                    mb.reconstruct_chroma(
+                        &mut cb_row,
+                        &mut cr_row,
+                        col_idx as u32,
+                        0,
+                        chroma_stride,
+                    );
                 }
                 (luma_row, cb_row, cr_row)
             })

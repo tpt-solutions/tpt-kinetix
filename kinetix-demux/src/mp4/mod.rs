@@ -11,10 +11,9 @@ pub mod boxes;
 pub mod container;
 
 pub use boxes::{
-    parse_box_header, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco, parse_stsc,
-    parse_stss, parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box, FtypBox,
-    MdhdBox, MvhdBox, StcoBox, StscBox, StscEntry, StssBox, StszBox, SttsBox,
-    SttsEntry, TkhdBox,
+    parse_box_header, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco, parse_stsc, parse_stss,
+    parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box, FtypBox, MdhdBox, MvhdBox, StcoBox,
+    StscBox, StscEntry, StssBox, StszBox, SttsBox, SttsEntry, TkhdBox,
 };
 pub use container::{parse_mp4, Mp4Track};
 
@@ -57,7 +56,12 @@ impl Mp4Demuxer {
     /// ```
     pub fn new(data: Vec<u8>) -> anyhow::Result<Self> {
         let tracks = container::parse_mp4(&data)?;
-        Ok(Self { data, tracks, current_track: 0, current_sample: 0 })
+        Ok(Self {
+            data,
+            tracks,
+            current_track: 0,
+            current_sample: 0,
+        })
     }
 
     /// Returns the parsed tracks.
@@ -100,7 +104,14 @@ impl Mp4Demuxer {
             // first sample of this chunk in the global sample list
             let first_sample_of_chunk = sample_index - sample_in_chunk;
             (0..sample_in_chunk)
-                .map(|i| track.stsz.sample_sizes.get(first_sample_of_chunk + i).copied().unwrap_or(0))
+                .map(|i| {
+                    track
+                        .stsz
+                        .sample_sizes
+                        .get(first_sample_of_chunk + i)
+                        .copied()
+                        .unwrap_or(0)
+                })
                 .sum()
         };
 
@@ -144,11 +155,7 @@ impl Mp4Demuxer {
 
 /// Given a 0-based `sample_index`, returns `(chunk_index, sample_in_chunk)`
 /// using the `stsc` table.  `chunk_index` is 0-based.
-fn sample_to_chunk(
-    stsc: &StscBox,
-    sample_index: usize,
-    stsz: &StszBox,
-) -> Option<(usize, usize)> {
+fn sample_to_chunk(stsc: &StscBox, sample_index: usize, stsz: &StszBox) -> Option<(usize, usize)> {
     // Build a synthetic list of (first_chunk_0based, samples_per_chunk) from
     // the stsc run-length encoded table.
     //
@@ -270,8 +277,7 @@ impl Demuxer for Mp4Demuxer {
         // (the primary track).  For simplicity we seek track 0 and reset
         // others to 0.
         for (ti, track) in self.tracks.iter().enumerate() {
-            let target_ticks =
-                target_pts_ms as i128 * track.timescale as i128 / 1_000;
+            let target_ticks = target_pts_ms as i128 * track.timescale as i128 / 1_000;
 
             // Walk stts to find the sample whose PTS is closest to target.
             let mut pts: u64 = 0;

@@ -55,8 +55,7 @@ impl Timestamp {
         if self.is_none() || self.time_base.1 == 0 {
             return None;
         }
-        let ms = self.value as i128 * self.time_base.0 as i128 * 1_000
-            / self.time_base.1 as i128;
+        let ms = self.value as i128 * self.time_base.0 as i128 * 1_000 / self.time_base.1 as i128;
         Some(ms as i64)
     }
 
@@ -69,9 +68,7 @@ impl Timestamp {
         }
         // value_new = value * (old_num / old_den) / (new_num / new_den)
         //           = value * old_num * new_den / (old_den * new_num)
-        let num = self.value as i128
-            * self.time_base.0 as i128
-            * new_base.1 as i128;
+        let num = self.value as i128 * self.time_base.0 as i128 * new_base.1 as i128;
         let den = self.time_base.1 as i128 * new_base.0 as i128;
         Some(Self::new((num / den) as i64, new_base))
     }

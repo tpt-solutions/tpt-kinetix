@@ -31,16 +31,14 @@ impl PicParameterSet {
 
         let pic_parameter_set_id = r.read_ue().context("pic_parameter_set_id")?;
         let seq_parameter_set_id = r.read_ue().context("seq_parameter_set_id")?;
-        let entropy_coding_mode_flag =
-            r.read_bit().context("entropy_coding_mode_flag")? == 1;
-        let _bottom_field_pic_order_in_frame_present_flag =
-            r.read_bit().context("bottom_field_pic_order_in_frame_present_flag")?;
-        let num_slice_groups_minus1 =
-            r.read_ue().context("num_slice_groups_minus1")?;
+        let entropy_coding_mode_flag = r.read_bit().context("entropy_coding_mode_flag")? == 1;
+        let _bottom_field_pic_order_in_frame_present_flag = r
+            .read_bit()
+            .context("bottom_field_pic_order_in_frame_present_flag")?;
+        let num_slice_groups_minus1 = r.read_ue().context("num_slice_groups_minus1")?;
 
         if num_slice_groups_minus1 > 0 {
-            let slice_group_map_type =
-                r.read_ue().context("slice_group_map_type")?;
+            let slice_group_map_type = r.read_ue().context("slice_group_map_type")?;
             match slice_group_map_type {
                 0 => {
                     for _ in 0..=num_slice_groups_minus1 {
@@ -60,8 +58,7 @@ impl PicParameterSet {
                 6 => {
                     let pic_size_in_map_units_minus1 =
                         r.read_ue().context("pic_size_in_map_units_minus1")?;
-                    let bits_needed =
-                        u32::BITS - num_slice_groups_minus1.leading_zeros();
+                    let bits_needed = u32::BITS - num_slice_groups_minus1.leading_zeros();
                     for _ in 0..=pic_size_in_map_units_minus1 {
                         let _ = r
                             .read_bits(bits_needed as u8)
@@ -72,18 +69,21 @@ impl PicParameterSet {
             }
         }
 
-        let num_ref_idx_l0_default_active_minus1 =
-            r.read_ue().context("num_ref_idx_l0_default_active_minus1")?;
-        let num_ref_idx_l1_default_active_minus1 =
-            r.read_ue().context("num_ref_idx_l1_default_active_minus1")?;
+        let num_ref_idx_l0_default_active_minus1 = r
+            .read_ue()
+            .context("num_ref_idx_l0_default_active_minus1")?;
+        let num_ref_idx_l1_default_active_minus1 = r
+            .read_ue()
+            .context("num_ref_idx_l1_default_active_minus1")?;
         let weighted_pred_flag = r.read_bit().context("weighted_pred_flag")? == 1;
-        let weighted_bipred_idc =
-            r.read_bits(2).context("weighted_bipred_idc")? as u8;
+        let weighted_bipred_idc = r.read_bits(2).context("weighted_bipred_idc")? as u8;
         let pic_init_qp_minus26 = r.read_se().context("pic_init_qp_minus26")?;
         let _pic_init_qs_minus26 = r.read_se().context("pic_init_qs_minus26")?;
         let _chroma_qp_index_offset = r.read_se().context("chroma_qp_index_offset")?;
-        let deblocking_filter_control_present_flag =
-            r.read_bit().context("deblocking_filter_control_present_flag")? == 1;
+        let deblocking_filter_control_present_flag = r
+            .read_bit()
+            .context("deblocking_filter_control_present_flag")?
+            == 1;
 
         Ok(Self {
             pic_parameter_set_id,

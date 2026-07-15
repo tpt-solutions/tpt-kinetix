@@ -90,7 +90,14 @@ pub fn parse_ftyp(input: &[u8]) -> IResult<&[u8], FtypBox> {
         remaining = rest;
     }
 
-    Ok((remaining, FtypBox { major_brand, minor_version, compatible_brands }))
+    Ok((
+        remaining,
+        FtypBox {
+            major_brand,
+            minor_version,
+            compatible_brands,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +134,14 @@ pub fn parse_mvhd(input: &[u8]) -> IResult<&[u8], MvhdBox> {
         (i, ts, dur as u64)
     };
 
-    Ok((input, MvhdBox { version, timescale, duration }))
+    Ok((
+        input,
+        MvhdBox {
+            version,
+            timescale,
+            duration,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +232,14 @@ pub fn parse_mdhd(input: &[u8]) -> IResult<&[u8], MdhdBox> {
         (i, ts, dur as u64)
     };
 
-    Ok((input, MdhdBox { version, timescale, duration }))
+    Ok((
+        input,
+        MdhdBox {
+            version,
+            timescale,
+            duration,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +297,13 @@ pub fn parse_stts(input: &[u8]) -> IResult<&[u8], SttsBox> {
         |i| {
             let (i, sc) = be_u32(i)?;
             let (i, sd) = be_u32(i)?;
-            Ok((i, SttsEntry { sample_count: sc, sample_delta: sd }))
+            Ok((
+                i,
+                SttsEntry {
+                    sample_count: sc,
+                    sample_delta: sd,
+                },
+            ))
         },
         entry_count as usize,
     )(input)?;
@@ -325,7 +352,13 @@ pub fn parse_stsz(input: &[u8]) -> IResult<&[u8], StszBox> {
     } else {
         (input, Vec::new())
     };
-    Ok((input, StszBox { default_size, sample_sizes }))
+    Ok((
+        input,
+        StszBox {
+            default_size,
+            sample_sizes,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +427,14 @@ pub fn parse_stsc(input: &[u8]) -> IResult<&[u8], StscBox> {
             let (i, fc) = be_u32(i)?;
             let (i, spc) = be_u32(i)?;
             let (i, sdi) = be_u32(i)?;
-            Ok((i, StscEntry { first_chunk: fc, samples_per_chunk: spc, sample_description_index: sdi }))
+            Ok((
+                i,
+                StscEntry {
+                    first_chunk: fc,
+                    samples_per_chunk: spc,
+                    sample_description_index: sdi,
+                },
+            ))
         },
         entry_count as usize,
     )(input)?;

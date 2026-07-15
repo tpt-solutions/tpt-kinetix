@@ -12,7 +12,11 @@ pub enum MbType {
     /// Intra 4×4 prediction — each 4×4 luma block predicted independently.
     Intra4x4,
     /// Intra 16×16 prediction — whole macroblock predicted as one.
-    Intra16x16 { pred_mode: u8, cbp_chroma: u8, cbp_luma: u8 },
+    Intra16x16 {
+        pred_mode: u8,
+        cbp_chroma: u8,
+        cbp_luma: u8,
+    },
     /// Inter P skip — motion vector inherited from spatial neighbours.
     PSkip,
     /// Inter P 16×16 — single motion vector for the whole macroblock.
@@ -56,13 +60,7 @@ impl Macroblock {
     /// For each of the 16 4×4 luma blocks: inverse-quantise the zigzag coefficients,
     /// apply the H.264 4×4 integer IDCT, and add to the prediction plane.
     /// The prediction plane is assumed to already contain the intra/inter prediction.
-    pub fn reconstruct_luma(
-        &self,
-        plane: &mut [u8],
-        mb_x: u32,
-        mb_y: u32,
-        stride: usize,
-    ) {
+    pub fn reconstruct_luma(&self, plane: &mut [u8], mb_x: u32, mb_y: u32, stride: usize) {
         if self.skip {
             return;
         }
@@ -169,12 +167,7 @@ fn iquant_idct_4x4(coeffs: &[i16; 16], qp: i32) -> [i32; 16] {
     // Column pass.
     let mut res = [0i32; 16];
     for col in 0..4 {
-        let (g0, g1, g2, g3) = (
-            out[col],
-            out[4 + col],
-            out[8 + col],
-            out[12 + col],
-        );
+        let (g0, g1, g2, g3) = (out[col], out[4 + col], out[8 + col], out[12 + col]);
         let h0 = g0 + g2;
         let h1 = g0 - g2;
         let h2 = (g1 >> 1) - g3;
@@ -196,9 +189,9 @@ pub fn new_video_frame(
 ) -> Result<kinetix_core::frame::VideoFrame, KinetixError> {
     let luma_size = (width * height) as usize;
     let chroma_size = luma_size / 4;
-    let mut data = vec![16u8; luma_size];        // Y = 16 (black)
-    data.extend(vec![128u8; chroma_size]);        // Cb = 128
-    data.extend(vec![128u8; chroma_size]);        // Cr = 128
+    let mut data = vec![16u8; luma_size]; // Y = 16 (black)
+    data.extend(vec![128u8; chroma_size]); // Cb = 128
+    data.extend(vec![128u8; chroma_size]); // Cr = 128
     Ok(kinetix_core::frame::VideoFrame {
         pts: kinetix_core::timestamp::Timestamp::NONE,
         dts: kinetix_core::timestamp::Timestamp::NONE,

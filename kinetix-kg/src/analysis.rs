@@ -34,10 +34,8 @@ pub fn find_independent_sets(graph: &KnowledgeGraph) -> Vec<IndependentSet> {
 
     // ── build in-degree map using only DataDependency edges ─────────────────
     let node_ids: Vec<u64> = graph.nodes.iter().map(|n| n.id).collect();
-    let mut in_degree: HashMap<u64, usize> =
-        node_ids.iter().map(|&id| (id, 0usize)).collect();
-    let mut successors: HashMap<u64, Vec<u64>> =
-        node_ids.iter().map(|&id| (id, vec![])).collect();
+    let mut in_degree: HashMap<u64, usize> = node_ids.iter().map(|&id| (id, 0usize)).collect();
+    let mut successors: HashMap<u64, Vec<u64>> = node_ids.iter().map(|&id| (id, vec![])).collect();
 
     for edge in &graph.edges {
         if matches!(edge.kind, EdgeKind::DataDependency) {
@@ -120,10 +118,7 @@ pub fn mark_parallel_regions(graph: &mut KnowledgeGraph, sets: &[IndependentSet]
 
         // Add a ParallelRegion meta-node and connect it to each member.
         let region_id = graph.add_node(NodeKind::ParallelRegion {
-            description: format!(
-                "Parallel region #{idx} — {} nodes",
-                set.node_ids.len()
-            ),
+            description: format!("Parallel region #{idx} — {} nodes", set.node_ids.len()),
         });
         for &member_id in ids {
             graph.add_edge(region_id, member_id, EdgeKind::Independent);

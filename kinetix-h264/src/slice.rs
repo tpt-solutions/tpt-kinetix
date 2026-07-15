@@ -122,7 +122,9 @@ impl SliceHeader {
 fn read_coeff_token_vlc0(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
     let mut code: u32 = 0;
     for len in 1u8..=16 {
-        let bit = r.read_bit().ok_or_else(|| anyhow!("EOF reading coeff_token (VLC0)"))?;
+        let bit = r
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading coeff_token (VLC0)"))?;
         code = (code << 1) | bit as u32;
         let hit: Option<(u8, u8)> = match (len, code) {
             // (len, code) → (TotalCoeff, TrailingOnes)
@@ -164,14 +166,18 @@ fn read_coeff_token_vlc0(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
             return Ok(pair);
         }
     }
-    Err(anyhow!("Unknown coeff_token (VLC0) after 16 bits, code=0x{code:04X}"))
+    Err(anyhow!(
+        "Unknown coeff_token (VLC0) after 16 bits, code=0x{code:04X}"
+    ))
 }
 
 /// Read a CAVLC coeff_token for VLC table 1 (nC in [2,4)).
 fn read_coeff_token_vlc1(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
     let mut code: u32 = 0;
     for len in 1u8..=16 {
-        let bit = r.read_bit().ok_or_else(|| anyhow!("EOF reading coeff_token (VLC1)"))?;
+        let bit = r
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading coeff_token (VLC1)"))?;
         code = (code << 1) | bit as u32;
         let hit: Option<(u8, u8)> = match (len, code) {
             (2, 0b11) => Some((0, 0)),
@@ -213,7 +219,9 @@ fn read_coeff_token_vlc1(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
 fn read_coeff_token_vlc2(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
     let mut code: u32 = 0;
     for len in 1u8..=8 {
-        let bit = r.read_bit().ok_or_else(|| anyhow!("EOF reading coeff_token (VLC2)"))?;
+        let bit = r
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading coeff_token (VLC2)"))?;
         code = (code << 1) | bit as u32;
         let hit: Option<(u8, u8)> = match (len, code) {
             (4, 0b1111) => Some((0, 0)),
@@ -260,7 +268,9 @@ fn read_coeff_token_vlc2(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
 /// The code encodes TotalCoeff and TrailingOnes directly as a 6-bit value:
 /// code = TotalCoeff * 4 + min(TrailingOnes, 3)
 fn read_coeff_token_vlc3(r: &mut BitReader) -> anyhow::Result<(u8, u8)> {
-    let code = r.read_bits(6).ok_or_else(|| anyhow!("EOF reading coeff_token (VLC3)"))?;
+    let code = r
+        .read_bits(6)
+        .ok_or_else(|| anyhow!("EOF reading coeff_token (VLC3)"))?;
     let total_coeff = ((code >> 2) & 0x0F) as u8;
     let trailing_ones = (code & 0x03) as u8;
     if trailing_ones > 3 || trailing_ones > total_coeff {
@@ -300,7 +310,9 @@ fn read_total_zeros(r: &mut BitReader, total_coeff: u8) -> anyhow::Result<u8> {
     let max_zeros = (16 - total_coeff) as u32;
     let mut code: u32 = 0;
     for len in 1u8..=9 {
-        let bit = r.read_bit().ok_or_else(|| anyhow!("EOF reading total_zeros"))?;
+        let bit = r
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading total_zeros"))?;
         code = (code << 1) | bit as u32;
         // Simplified lookup: use Unary code approximation for small values.
         // For vlc_idx 0 (TotalCoeff=1), the table from spec is:
@@ -345,7 +357,9 @@ fn read_run_before(r: &mut BitReader, zeros_left: u8) -> anyhow::Result<u8> {
     }
     let mut code: u32 = 0;
     for len in 1u8..=11 {
-        let bit = r.read_bit().ok_or_else(|| anyhow!("EOF reading run_before"))?;
+        let bit = r
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading run_before"))?;
         code = (code << 1) | bit as u32;
         let hit: Option<u8> = if zeros_left >= 7 {
             // zeros_left >= 7: 3-bit fixed codes for 0-6, then longer
@@ -433,7 +447,9 @@ pub fn parse_cavlc_residual(reader: &mut BitReader, n_c: i32) -> anyhow::Result<
     // 2. Read sign bits for the TrailingOnes coefficients (all have magnitude 1).
     let mut level = vec![0i16; total_coeff as usize];
     for i in 0..t1 {
-        let sign = reader.read_bit().ok_or_else(|| anyhow!("EOF reading T1 sign"))?;
+        let sign = reader
+            .read_bit()
+            .ok_or_else(|| anyhow!("EOF reading T1 sign"))?;
         level[total_coeff as usize - 1 - i] = if sign == 1 { -1 } else { 1 };
     }
 

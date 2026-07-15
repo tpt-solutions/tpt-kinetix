@@ -1,11 +1,7 @@
 //! Integration tests for the kinetix-pipeline stage wiring and message flow.
 
 use crossbeam_channel::bounded;
-use kinetix_core::{
-    frame::VideoFrame,
-    pixel_format::PixelFormat,
-    timestamp::Timestamp,
-};
+use kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
 use kinetix_pipeline::{
     channel::PipelineMessage,
     stage::{DecodeStage, FilterStage, SinkStage, Stage},
@@ -47,11 +43,21 @@ fn test_passthrough_pipeline() {
         .expect("send flush");
     drop(filter_in_tx);
 
-    filter_handle.join().expect("filter thread panicked").expect("filter error");
-    sink_handle.join().expect("sink thread panicked").expect("sink error");
+    filter_handle
+        .join()
+        .expect("filter thread panicked")
+        .expect("filter error");
+    sink_handle
+        .join()
+        .expect("sink thread panicked")
+        .expect("sink error");
 
     let collected = frames.lock().expect("mutex poisoned");
-    assert_eq!(collected.len(), 1, "sink should have collected exactly one frame");
+    assert_eq!(
+        collected.len(),
+        1,
+        "sink should have collected exactly one frame"
+    );
     assert_eq!(collected[0].width, 10);
     assert_eq!(collected[0].height, 10);
 }
@@ -68,10 +74,15 @@ fn test_pipeline_flush_propagates() {
     input_tx.send(PipelineMessage::Flush).expect("send flush");
     drop(input_tx);
 
-    handle.join().expect("decode thread panicked").expect("decode error");
+    handle
+        .join()
+        .expect("decode thread panicked")
+        .expect("decode error");
 
     // The Flush sentinel must appear on the output channel.
-    let msg = output_rx.recv().expect("expected a message on output channel");
+    let msg = output_rx
+        .recv()
+        .expect("expected a message on output channel");
     assert!(
         matches!(msg, PipelineMessage::Flush),
         "expected Flush, got {:?}",
@@ -100,7 +111,9 @@ fn test_filter_passes_multiple_frames() {
     // Last message should be Flush; the 5 before should be Frames.
     assert_eq!(frames.len(), 6);
     assert!(matches!(frames[5], PipelineMessage::Flush));
-    assert!(frames[..5].iter().all(|m| matches!(m, PipelineMessage::Frame(_))));
+    assert!(frames[..5]
+        .iter()
+        .all(|m| matches!(m, PipelineMessage::Frame(_))));
 }
 
 /// Verify that [`Pipeline::run_to_completion`] works with FilterStage + SinkStage

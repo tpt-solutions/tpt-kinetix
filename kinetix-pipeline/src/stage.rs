@@ -220,10 +220,7 @@ impl Stage for SinkStage {
             for msg in input {
                 match msg {
                     PipelineMessage::Frame(frame) => {
-                        self.frames
-                            .lock()
-                            .expect("sink mutex poisoned")
-                            .push(frame);
+                        self.frames.lock().expect("sink mutex poisoned").push(frame);
                     }
                     PipelineMessage::Flush => {
                         break;

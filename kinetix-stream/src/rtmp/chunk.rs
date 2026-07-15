@@ -96,15 +96,11 @@ impl ChunkParser {
                 let ts_raw = u32::from_be_bytes([0, rest[0], rest[1], rest[2]]);
                 let msg_len = u32::from_be_bytes([0, rest[3], rest[4], rest[5]]);
                 let type_id = rest[6];
-                let stream_id =
-                    u32::from_le_bytes([rest[7], rest[8], rest[9], rest[10]]);
+                let stream_id = u32::from_le_bytes([rest[7], rest[8], rest[9], rest[10]]);
 
                 let timestamp = if ts_raw == 0x00FF_FFFF {
                     // extended timestamp: next 4 bytes
-                    anyhow::ensure!(
-                        rest.len() >= 15,
-                        "truncated extended timestamp"
-                    );
+                    anyhow::ensure!(rest.len() >= 15, "truncated extended timestamp");
                     u32::from_be_bytes([rest[11], rest[12], rest[13], rest[14]])
                 } else {
                     ts_raw
@@ -133,10 +129,7 @@ impl ChunkParser {
 
                 let base = prev.as_ref().map(|h| h.timestamp).unwrap_or(0);
                 let (timestamp, consumed) = if ts_delta == 0x00FF_FFFF {
-                    anyhow::ensure!(
-                        rest.len() >= 11,
-                        "truncated extended timestamp (type 1)"
-                    );
+                    anyhow::ensure!(rest.len() >= 11, "truncated extended timestamp (type 1)");
                     let ext = u32::from_be_bytes([rest[7], rest[8], rest[9], rest[10]]);
                     (base.wrapping_add(ext), 11)
                 } else {
@@ -164,10 +157,7 @@ impl ChunkParser {
                 let ts_delta = u32::from_be_bytes([0, rest[0], rest[1], rest[2]]);
 
                 let (timestamp, consumed) = if ts_delta == 0x00FF_FFFF {
-                    anyhow::ensure!(
-                        rest.len() >= 7,
-                        "truncated extended timestamp (type 2)"
-                    );
+                    anyhow::ensure!(rest.len() >= 7, "truncated extended timestamp (type 2)");
                     let ext = u32::from_be_bytes([rest[3], rest[4], rest[5], rest[6]]);
                     let base = prev.as_ref().map(|h| h.timestamp).unwrap_or(0);
                     (base.wrapping_add(ext), 7)
@@ -218,8 +208,7 @@ impl ChunkParser {
         // Store as the most-recent header for this CS ID.
         self.prev_headers.insert(chunk_stream_id, header.clone());
 
-        Ok((&rest[msg_header_len..], header))
-            .map(|(remaining, h)| (h, remaining))
+        Ok((&rest[msg_header_len..], header)).map(|(remaining, h)| (h, remaining))
     }
 }
 

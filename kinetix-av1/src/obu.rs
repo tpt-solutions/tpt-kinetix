@@ -17,7 +17,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, byte_pos: 0, bit_pos: 0 }
+        Self {
+            data,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
     }
 
     /// Read `n` bits (1–32) and return as u32.  Returns None on underflow.
@@ -49,7 +53,11 @@ impl<'a> BitReader<'a> {
     /// Number of bytes fully consumed (rounds up to byte boundary).
     #[allow(dead_code)]
     fn bytes_consumed(&self) -> usize {
-        if self.bit_pos == 0 { self.byte_pos } else { self.byte_pos + 1 }
+        if self.bit_pos == 0 {
+            self.byte_pos
+        } else {
+            self.byte_pos + 1
+        }
     }
 }
 
@@ -195,7 +203,12 @@ impl Obu {
         }
 
         let payload = data[offset..end].to_vec();
-        let obu = Obu { obu_type, extension_flag, has_size_field, payload };
+        let obu = Obu {
+            obu_type,
+            extension_flag,
+            has_size_field,
+            payload,
+        };
         Some((obu, end))
     }
 }
@@ -255,9 +268,9 @@ impl SequenceHeaderObu {
     pub fn parse(payload: &[u8]) -> anyhow::Result<Self> {
         let mut br = BitReader::new(payload);
 
-        let seq_profile = br
-            .read_bits(3)
-            .ok_or_else(|| anyhow::anyhow!("truncated: seq_profile"))? as u8;
+        let seq_profile =
+            br.read_bits(3)
+                .ok_or_else(|| anyhow::anyhow!("truncated: seq_profile"))? as u8;
 
         let still_picture = br
             .read_flag()
@@ -327,9 +340,12 @@ impl SequenceHeaderObu {
             if decoder_model_info_present {
                 // decoder_model_info(): buffer_delay_length_minus_1(5), …
                 // We skip these 24 bits (5+32+1+1+5+1+1 simplified to fixed skip)
-                br.read_bits(5).ok_or_else(|| anyhow::anyhow!("truncated: dmi"))?;
-                br.read_bits(32).ok_or_else(|| anyhow::anyhow!("truncated: dmi2"))?;
-                br.read_bits(10).ok_or_else(|| anyhow::anyhow!("truncated: dmi3"))?;
+                br.read_bits(5)
+                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi"))?;
+                br.read_bits(32)
+                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi2"))?;
+                br.read_bits(10)
+                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi3"))?;
             }
         }
 
@@ -380,10 +396,12 @@ impl SequenceHeaderObu {
 
         let frame_width_bits_minus_1 = br
             .read_bits(4)
-            .ok_or_else(|| anyhow::anyhow!("truncated: frame_width_bits_minus_1"))? as u8;
+            .ok_or_else(|| anyhow::anyhow!("truncated: frame_width_bits_minus_1"))?
+            as u8;
         let frame_height_bits_minus_1 = br
             .read_bits(4)
-            .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))? as u8;
+            .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))?
+            as u8;
         let max_frame_width_minus_1 = br
             .read_bits(frame_width_bits_minus_1 + 1)
             .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
@@ -405,10 +423,7 @@ impl SequenceHeaderObu {
         })
     }
 
-    fn parse_color_config(
-        br: &mut BitReader<'_>,
-        seq_profile: u8,
-    ) -> anyhow::Result<ColorConfig> {
+    fn parse_color_config(br: &mut BitReader<'_>, seq_profile: u8) -> anyhow::Result<ColorConfig> {
         let high_bitdepth = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: high_bitdepth"))?;
@@ -436,14 +451,16 @@ impl SequenceHeaderObu {
             if color_description_present {
                 let cp = br
                     .read_bits(8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: color_primaries"))? as u8;
+                    .ok_or_else(|| anyhow::anyhow!("truncated: color_primaries"))?
+                    as u8;
                 let tc = br
                     .read_bits(8)
                     .ok_or_else(|| anyhow::anyhow!("truncated: transfer_characteristics"))?
                     as u8;
                 let mc = br
                     .read_bits(8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: matrix_coefficients"))? as u8;
+                    .ok_or_else(|| anyhow::anyhow!("truncated: matrix_coefficients"))?
+                    as u8;
                 (cp, tc, mc)
             } else {
                 (2, 2, 2) // CP_UNSPECIFIED, TC_UNSPECIFIED, MC_UNSPECIFIED
@@ -452,9 +469,7 @@ impl SequenceHeaderObu {
         let color_range = if mono_chrome {
             br.read_flag()
                 .ok_or_else(|| anyhow::anyhow!("truncated: color_range_mono"))?
-        } else if color_primaries == 1
-            && transfer_characteristics == 13
-            && matrix_coefficients == 0
+        } else if color_primaries == 1 && transfer_characteristics == 13 && matrix_coefficients == 0
         {
             // sRGB: full range, 4:4:4
             true

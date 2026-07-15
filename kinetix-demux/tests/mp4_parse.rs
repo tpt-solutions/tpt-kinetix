@@ -30,7 +30,7 @@ fn test_parse_ftyp() {
     //   compatible_brand = b"mp41"  (4 bytes)
     let payload: Vec<u8> = vec![
         b'i', b's', b'o', b'm', // major_brand
-        0, 0, 0, 0,             // minor_version
+        0, 0, 0, 0, // minor_version
         b'i', b's', b'o', b'm', // compat
         b'm', b'p', b'4', b'1', // compat
     ];
@@ -116,8 +116,8 @@ fn test_box_header_largesize() {
     // size field = 1  →  largesize follows as u64
     let largesize: u64 = 0x0000_0001_0000_0000; // 4 GiB
     let mut buf = vec![];
-    buf.extend_from_slice(&be32(1));        // size = 1 (largesize indicator)
-    buf.extend_from_slice(b"mdat");         // box_type
+    buf.extend_from_slice(&be32(1)); // size = 1 (largesize indicator)
+    buf.extend_from_slice(b"mdat"); // box_type
     buf.extend_from_slice(&be64(largesize)); // actual 64-bit size
 
     let (rest, hdr) = parse_box_header(&buf).expect("parse_box_header should succeed");
@@ -133,7 +133,10 @@ fn test_box_header_largesize() {
 #[test]
 fn test_empty_demuxer_returns_err() {
     let result = Mp4Demuxer::new(vec![]);
-    assert!(result.is_err(), "Mp4Demuxer::new on empty data should return Err");
+    assert!(
+        result.is_err(),
+        "Mp4Demuxer::new on empty data should return Err"
+    );
 }
 
 #[test]

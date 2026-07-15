@@ -47,14 +47,8 @@ impl HlsPlaylist {
 
         out.push_str("#EXTM3U\n");
         out.push_str("#EXT-X-VERSION:3\n");
-        out.push_str(&format!(
-            "#EXT-X-TARGETDURATION:{}\n",
-            self.target_duration
-        ));
-        out.push_str(&format!(
-            "#EXT-X-MEDIA-SEQUENCE:{}\n",
-            self.media_sequence
-        ));
+        out.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", self.target_duration));
+        out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{}\n", self.media_sequence));
 
         for seg in &self.segments {
             out.push_str(&format!("#EXTINF:{:.3},\n", seg.duration_secs));

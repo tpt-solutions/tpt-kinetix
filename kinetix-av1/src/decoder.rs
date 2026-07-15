@@ -1,10 +1,7 @@
 //! AV1 decoder state machine.
 
 use kinetix_core::{
-    error::KinetixError,
-    frame::VideoFrame,
-    packet::Packet,
-    pixel_format::PixelFormat,
+    error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
     timestamp::Timestamp,
 };
 
@@ -18,7 +15,10 @@ pub struct Av1Decoder {
 
 impl Av1Decoder {
     pub fn new() -> Self {
-        Self { sequence_header: None, frame_count: 0 }
+        Self {
+            sequence_header: None,
+            frame_count: 0,
+        }
     }
 
     /// Decode a compressed AV1 [`Packet`] into a [`VideoFrame`].
@@ -26,28 +26,23 @@ impl Av1Decoder {
     /// Parses OBUs from `packet.data`.  Handles SequenceHeader OBUs to learn
     /// the stream dimensions.  For Frame / FrameHeader OBUs a placeholder grey
     /// frame is returned (full AV1 frame reconstruction is out of Phase 4 scope).
-    pub fn decode(
-        &mut self,
-        packet: &Packet,
-    ) -> Result<Option<VideoFrame>, KinetixError> {
+    pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
         let obus = parse_obu_sequence(&packet.data);
 
         let mut produced_frame = false;
 
         for obu in &obus {
             match obu.obu_type {
-                ObuType::SequenceHeader => {
-                    match SequenceHeaderObu::parse(&obu.payload) {
-                        Ok(sh) => {
-                            self.sequence_header = Some(sh);
-                        }
-                        Err(e) => {
-                            return Err(KinetixError::Parse(format!(
-                                "SequenceHeaderObu parse error: {e}"
-                            )));
-                        }
+                ObuType::SequenceHeader => match SequenceHeaderObu::parse(&obu.payload) {
+                    Ok(sh) => {
+                        self.sequence_header = Some(sh);
                     }
-                }
+                    Err(e) => {
+                        return Err(KinetixError::Parse(format!(
+                            "SequenceHeaderObu parse error: {e}"
+                        )));
+                    }
+                },
                 ObuType::Frame | ObuType::FrameHeader => {
                     produced_frame = true;
                 }

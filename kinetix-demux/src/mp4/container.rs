@@ -3,9 +3,9 @@
 use anyhow::{anyhow, Result};
 
 use super::boxes::{
-    parse_box_header, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco, parse_co64,
-    parse_stsc, parse_stss, parse_stsz, parse_stts, parse_tkhd,
-    MdhdBox, StscBox, StssBox, StszBox, SttsBox, TkhdBox,
+    parse_box_header, parse_co64, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco, parse_stsc,
+    parse_stss, parse_stsz, parse_stts, parse_tkhd, MdhdBox, StscBox, StssBox, StszBox, SttsBox,
+    TkhdBox,
 };
 
 /// A fully-parsed MP4 track, including its complete sample table.
@@ -37,7 +37,11 @@ impl Mp4Track {
     pub fn sample_count(&self) -> usize {
         if self.stsz.default_size != 0 {
             // We don't store a separate count in that case; derive from stts.
-            self.stts.entries.iter().map(|e| e.sample_count as usize).sum()
+            self.stts
+                .entries
+                .iter()
+                .map(|e| e.sample_count as usize)
+                .sum()
         } else {
             self.stsz.sample_sizes.len()
         }
@@ -117,18 +121,24 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
                                     for (stbl_type, stbl_payload) in walk_boxes(minf_payload) {
                                         match &stbl_type {
                                             b"stts" => {
-                                                stts = parse_stts(stbl_payload).ok().map(|(_, v)| v);
+                                                stts =
+                                                    parse_stts(stbl_payload).ok().map(|(_, v)| v);
                                             }
                                             b"stss" => {
-                                                stss = parse_stss(stbl_payload).ok().map(|(_, v)| v);
+                                                stss =
+                                                    parse_stss(stbl_payload).ok().map(|(_, v)| v);
                                             }
                                             b"stsz" => {
-                                                stsz = parse_stsz(stbl_payload).ok().map(|(_, v)| v);
+                                                stsz =
+                                                    parse_stsz(stbl_payload).ok().map(|(_, v)| v);
                                             }
                                             b"stco" => {
                                                 if let Ok((_, co)) = parse_stco(stbl_payload) {
                                                     chunk_offsets = Some(
-                                                        co.offsets.into_iter().map(|o| o as u64).collect(),
+                                                        co.offsets
+                                                            .into_iter()
+                                                            .map(|o| o as u64)
+                                                            .collect(),
                                                     );
                                                 }
                                             }
@@ -138,7 +148,8 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
                                                 }
                                             }
                                             b"stsc" => {
-                                                stsc = parse_stsc(stbl_payload).ok().map(|(_, v)| v);
+                                                stsc =
+                                                    parse_stsc(stbl_payload).ok().map(|(_, v)| v);
                                             }
                                             _ => {}
                                         }

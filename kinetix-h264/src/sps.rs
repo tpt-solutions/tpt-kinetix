@@ -48,12 +48,14 @@ impl SeqParameterSet {
         if high_profile {
             let chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
             if chroma_format_idc == 3 {
-                let _separate_colour_plane_flag = r.read_bit().context("separate_colour_plane_flag")?;
+                let _separate_colour_plane_flag =
+                    r.read_bit().context("separate_colour_plane_flag")?;
             }
             let _bit_depth_luma_minus8 = r.read_ue().context("bit_depth_luma_minus8")?;
             let _bit_depth_chroma_minus8 = r.read_ue().context("bit_depth_chroma_minus8")?;
-            let _qpprime_y_zero_transform_bypass_flag =
-                r.read_bit().context("qpprime_y_zero_transform_bypass_flag")?;
+            let _qpprime_y_zero_transform_bypass_flag = r
+                .read_bit()
+                .context("qpprime_y_zero_transform_bypass_flag")?;
             let seq_scaling_matrix_present_flag =
                 r.read_bit().context("seq_scaling_matrix_present_flag")?;
             if seq_scaling_matrix_present_flag == 1 {
@@ -81,8 +83,7 @@ impl SeqParameterSet {
             }
         }
 
-        let log2_max_frame_num_minus4 =
-            r.read_ue().context("log2_max_frame_num_minus4")?;
+        let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
         let pic_order_cnt_type = r.read_ue().context("pic_order_cnt_type")?;
 
         let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
@@ -92,22 +93,21 @@ impl SeqParameterSet {
         } else if pic_order_cnt_type == 1 {
             let _delta_pic_order_always_zero_flag =
                 r.read_bit().context("delta_pic_order_always_zero_flag")?;
-            let _offset_for_non_ref_pic =
-                r.read_se().context("offset_for_non_ref_pic")?;
+            let _offset_for_non_ref_pic = r.read_se().context("offset_for_non_ref_pic")?;
             let _offset_for_top_to_bottom_field =
                 r.read_se().context("offset_for_top_to_bottom_field")?;
-            let num_ref_frames_in_poc_cycle =
-                r.read_ue().context("num_ref_frames_in_poc_cycle")?;
+            let num_ref_frames_in_poc_cycle = r.read_ue().context("num_ref_frames_in_poc_cycle")?;
             for _ in 0..num_ref_frames_in_poc_cycle {
                 let _offset = r.read_se().context("offset_for_ref_frame")?;
             }
         }
 
         let num_ref_frames = r.read_ue().context("num_ref_frames")?;
-        let gaps_in_frame_num_value_allowed_flag =
-            r.read_bit().context("gaps_in_frame_num_value_allowed_flag")? == 1;
-        let pic_width_in_mbs_minus1 =
-            r.read_ue().context("pic_width_in_mbs_minus1")?;
+        let gaps_in_frame_num_value_allowed_flag = r
+            .read_bit()
+            .context("gaps_in_frame_num_value_allowed_flag")?
+            == 1;
+        let pic_width_in_mbs_minus1 = r.read_ue().context("pic_width_in_mbs_minus1")?;
         let pic_height_in_map_units_minus1 =
             r.read_ue().context("pic_height_in_map_units_minus1")?;
         let frame_mbs_only_flag = r.read_bit().context("frame_mbs_only_flag")? == 1;
@@ -115,21 +115,23 @@ impl SeqParameterSet {
             let _mb_adaptive_frame_field_flag =
                 r.read_bit().context("mb_adaptive_frame_field_flag")?;
         }
-        let _direct_8x8_inference_flag =
-            r.read_bit().context("direct_8x8_inference_flag")?;
+        let _direct_8x8_inference_flag = r.read_bit().context("direct_8x8_inference_flag")?;
         let frame_cropping_flag = r.read_bit().context("frame_cropping_flag")? == 1;
-        let (frame_crop_left_offset, frame_crop_right_offset,
-             frame_crop_top_offset, frame_crop_bottom_offset) =
-            if frame_cropping_flag {
-                (
-                    r.read_ue().context("frame_crop_left_offset")?,
-                    r.read_ue().context("frame_crop_right_offset")?,
-                    r.read_ue().context("frame_crop_top_offset")?,
-                    r.read_ue().context("frame_crop_bottom_offset")?,
-                )
-            } else {
-                (0, 0, 0, 0)
-            };
+        let (
+            frame_crop_left_offset,
+            frame_crop_right_offset,
+            frame_crop_top_offset,
+            frame_crop_bottom_offset,
+        ) = if frame_cropping_flag {
+            (
+                r.read_ue().context("frame_crop_left_offset")?,
+                r.read_ue().context("frame_crop_right_offset")?,
+                r.read_ue().context("frame_crop_top_offset")?,
+                r.read_ue().context("frame_crop_bottom_offset")?,
+            )
+        } else {
+            (0, 0, 0, 0)
+        };
 
         // vui_parameters_present_flag and everything after: skip for now.
 
@@ -200,7 +202,7 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 1,
             gaps_in_frame_num_value_allowed_flag: false,
-            pic_width_in_mbs_minus1: 19,  // (19+1)*16 = 320 px
+            pic_width_in_mbs_minus1: 19,        // (19+1)*16 = 320 px
             pic_height_in_map_units_minus1: 14, // (14+1)*16 = 240 px
             frame_mbs_only_flag: true,
             frame_cropping_flag: false,
@@ -225,7 +227,7 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 2,
             gaps_in_frame_num_value_allowed_flag: false,
-            pic_width_in_mbs_minus1: 119, // (119+1)*16 = 1920
+            pic_width_in_mbs_minus1: 119,       // (119+1)*16 = 1920
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
             frame_cropping_flag: true,

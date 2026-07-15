@@ -175,8 +175,7 @@ async fn serve_connection(
     // Read and serve the file.
     match tokio::fs::read(&file_path).await {
         Ok(contents) => {
-            let content_type = if file_path.extension().and_then(|e| e.to_str()) == Some("m3u8")
-            {
+            let content_type = if file_path.extension().and_then(|e| e.to_str()) == Some("m3u8") {
                 "application/vnd.apple.mpegurl"
             } else {
                 "video/MP2T"

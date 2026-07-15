@@ -1,7 +1,9 @@
 //! AV1 encoder backed by `rav1e`.
 
 use anyhow::Context as _;
-use kinetix_core::{frame::VideoFrame, packet::Packet, pixel_format::PixelFormat, timestamp::Timestamp};
+use kinetix_core::{
+    frame::VideoFrame, packet::Packet, pixel_format::PixelFormat, timestamp::Timestamp,
+};
 use rav1e::prelude::*;
 
 /// Configuration for the AV1 encoder.
@@ -65,10 +67,7 @@ impl Av1Encoder {
     /// Converts the frame to a `rav1e::Frame<u8>`, sends it to the encoder,
     /// then tries to receive a packet.  Because rav1e buffers frames internally
     /// the caller may receive `None` until enough frames have been submitted.
-    pub fn encode_frame(
-        &mut self,
-        frame: &VideoFrame,
-    ) -> anyhow::Result<Option<Packet>> {
+    pub fn encode_frame(&mut self, frame: &VideoFrame) -> anyhow::Result<Option<Packet>> {
         anyhow::ensure!(
             frame.pixel_format == PixelFormat::Yuv420p,
             "Av1Encoder only supports Yuv420p input, got {:?}",
@@ -131,9 +130,7 @@ impl Av1Encoder {
                     return Ok(None)
                 }
                 Err(EncoderStatus::Encoded) => continue,
-                Err(e) => {
-                    return Err(anyhow::anyhow!("rav1e receive_packet: {e:?}"))
-                }
+                Err(e) => return Err(anyhow::anyhow!("rav1e receive_packet: {e:?}")),
             }
         }
     }
