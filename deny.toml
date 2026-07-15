@@ -10,9 +10,9 @@ targets = []
 # ---------------------------------------------------------------------------
 [advisories]
 version = 2
-unmaintained = "deny"
-unsound = "deny"
-yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+yanked = "all"
 ignore = []
 
 # ---------------------------------------------------------------------------
