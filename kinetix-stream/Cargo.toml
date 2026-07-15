@@ -16,3 +16,8 @@ tracing = { workspace = true }
 tokio = { version = "1.38", features = ["full"] }
 kinetix-core = { workspace = true }
 kinetix-pipeline = { workspace = true }
+bytes = "1.5"
+nom = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
