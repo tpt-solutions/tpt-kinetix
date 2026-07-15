@@ -8,25 +8,25 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ## Phase 0 — Project & Workspace Bootstrap
 
-- [ ] Initialize git repository, `.gitignore` (Rust/Cargo defaults + fuzz corpora + large media samples)
-- [ ] Create Cargo workspace `Cargo.toml` at project root
-- [ ] Scaffold crate: `kinetix-core` (shared types: frames, packets, timestamps, pixel formats, error types)
-- [ ] Scaffold crate: `kinetix-demux` (container/demux layer)
-- [ ] Scaffold crate: `kinetix-h264` (H.264 decoder)
-- [ ] Scaffold crate: `kinetix-av1` (AV1 decode + `rav1e`-backed encode)
-- [ ] Scaffold crate: `kinetix-kg` (knowledge-graph ingestion/codegen tooling)
-- [ ] Scaffold crate: `kinetix-pipeline` (parallel demux/decode/filter pipeline orchestration)
-- [ ] Scaffold crate: `kinetix-stream` (RTMP ingest + HLS output streaming engine)
-- [ ] Scaffold crate: `kinetix-cli` (end-user binary tying everything together)
-- [ ] Add `rust-toolchain.toml` pinning MSRV, document MSRV policy in root README
-- [ ] Add `LICENSE-MIT` and `LICENSE-APACHE` files at workspace root
-- [ ] Add root `README.md`: project overview, architecture diagram placeholder, quickstart
-- [ ] Add per-crate `README.md` stubs
-- [ ] Set up CI skeleton (GitHub Actions): `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`
-- [ ] Add `deny.toml` + wire `cargo-deny` into CI (license/advisory/duplicate-dependency checks)
-- [ ] Add `.editorconfig` and workspace-wide `rustfmt.toml` / `clippy.toml` conventions
-- [ ] Decide and document workspace dependency versioning strategy (workspace `[workspace.dependencies]` table)
-- [ ] Add root `CHANGELOG.md` (Keep a Changelog format) and per-crate changelog stubs
+- [x] Initialize git repository, `.gitignore` (Rust/Cargo defaults + fuzz corpora + large media samples)
+- [x] Create Cargo workspace `Cargo.toml` at project root
+- [x] Scaffold crate: `kinetix-core` (shared types: frames, packets, timestamps, pixel formats, error types)
+- [x] Scaffold crate: `kinetix-demux` (container/demux layer)
+- [x] Scaffold crate: `kinetix-h264` (H.264 decoder)
+- [x] Scaffold crate: `kinetix-av1` (AV1 decode + `rav1e`-backed encode)
+- [x] Scaffold crate: `kinetix-kg` (knowledge-graph ingestion/codegen tooling)
+- [x] Scaffold crate: `kinetix-pipeline` (parallel demux/decode/filter pipeline orchestration)
+- [x] Scaffold crate: `kinetix-stream` (RTMP ingest + HLS output streaming engine)
+- [x] Scaffold crate: `kinetix-cli` (end-user binary tying everything together)
+- [x] Add `rust-toolchain.toml` pinning MSRV, document MSRV policy in root README
+- [x] Add `LICENSE-MIT` and `LICENSE-APACHE` files at workspace root
+- [x] Add root `README.md`: project overview, architecture diagram placeholder, quickstart
+- [x] Add per-crate `README.md` stubs
+- [x] Set up CI skeleton (GitHub Actions): `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`
+- [x] Add `deny.toml` + wire `cargo-deny` into CI (license/advisory/duplicate-dependency checks)
+- [x] Add `.editorconfig` and workspace-wide `rustfmt.toml` / `clippy.toml` conventions
+- [x] Decide and document workspace dependency versioning strategy (workspace `[workspace.dependencies]` table)
+- [x] Add root `CHANGELOG.md` (Keep a Changelog format) and per-crate changelog stubs
 
 ## Phase 1 — Knowledge Graph Tooling (AI-assisted codec ingestion)
 

@@ -1,0 +1,18 @@
+[package]
+name = "kinetix-stream"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Async streaming output (RTMP push, HLS packaging) for the TPT Kinetix engine"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# tokio is not in workspace deps because it carries async-runtime weight;
+# only streaming crates need it.
+tokio = { version = "1.38", features = ["full"] }
+kinetix-core = { workspace = true }
+kinetix-pipeline = { workspace = true }

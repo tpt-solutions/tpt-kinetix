@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+  "kinetix-core",
+  "kinetix-demux",
+  "kinetix-h264",
+  "kinetix-av1",
+  "kinetix-kg",
+  "kinetix-pipeline",
+  "kinetix-stream",
+  "kinetix-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-kinetix"
+
+[workspace.dependencies]
+# Parallelism
+rayon = "1.10"
+
+# Parsing
+nom = "7.1"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialisation
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Channels
+crossbeam-channel = "0.5"
+
+# Internal crates
+kinetix-core = { path = "kinetix-core" }
+kinetix-demux = { path = "kinetix-demux" }
+kinetix-h264 = { path = "kinetix-h264" }
+kinetix-av1 = { path = "kinetix-av1" }
+kinetix-pipeline = { path = "kinetix-pipeline" }
+kinetix-stream = { path = "kinetix-stream" }

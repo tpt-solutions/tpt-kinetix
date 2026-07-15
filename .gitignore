@@ -1,25 +1,25 @@
-# Rust / Cargo
-/target/
-**/target/
-Cargo.lock
-*.rs.bk
-*.pdb
+# Rust/Cargo
+/target
+**/*.rs.bk
 
-# Fuzzing
-fuzz/target/
+# Cargo.lock: committed for binary crates / workspace, excluded for pure libraries.
+# This workspace contains binaries, so Cargo.lock is tracked (not ignored).
+
+# Fuzz testing
 fuzz/corpus/
 fuzz/artifacts/
 
-# Large media samples / test fixtures (track via LFS or external fetch instead)
+# Large media samples — never commit binary media to the repo
 *.mp4
 *.mkv
-*.webm
+*.mov
+*.avi
 *.ts
-*.m3u8
-*.y4m
-*.ivf
-!tests/**/*.mp4
-!tests/**/*.mkv
+*.flv
+*.yuv
+*.h264
+*.h265
+*.av1
 
 # Editor / OS
 .vscode/

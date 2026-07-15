@@ -1,0 +1,6 @@
+[toolchain]
+channel = "stable"
+# Minimum version required by this workspace
+# `rustup` will install exactly this release when the field is a version string.
+version = "1.82.0"
+components = ["rustfmt", "clippy"]

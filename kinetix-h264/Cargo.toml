@@ -1,0 +1,15 @@
+[package]
+name = "kinetix-h264"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "H.264/AVC decoder for the TPT Kinetix media processing engine"
+
+[dependencies]
+nom = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+kinetix-core = { workspace = true }

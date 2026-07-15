@@ -1,0 +1,18 @@
+[package]
+name = "kinetix-kg"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Knowledge-graph ingestion, analysis, and code generation tooling"
+
+[[bin]]
+name = "kinetix-kg"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
