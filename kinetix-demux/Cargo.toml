@@ -12,3 +12,4 @@ nom = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 kinetix-core = { workspace = true }
+byteorder = "1.5"
