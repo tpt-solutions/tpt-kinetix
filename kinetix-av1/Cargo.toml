@@ -13,3 +13,11 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }
 kinetix-core = { workspace = true }
+rav1e = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "av1_encode"
+harness = false

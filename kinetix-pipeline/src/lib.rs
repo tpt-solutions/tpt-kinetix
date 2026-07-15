@@ -3,9 +3,11 @@
 //! The pipeline connects a demux stage → decode stage → filter stage as
 //! concurrent producer/consumer streams using `crossbeam-channel` for
 //! backpressure-aware inter-stage communication.
-//!
-//! Phase 5 will flesh out the full architecture.
 
 pub mod channel;
+pub mod error;
 pub mod pipeline;
 pub mod stage;
+
+pub use pipeline::Pipeline;
+pub use stage::{DecodeStage, DemuxStage, FilterStage, SinkStage};

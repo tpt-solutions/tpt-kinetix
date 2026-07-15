@@ -14,8 +14,6 @@ tracing = { workspace = true }
 # tokio is not in workspace deps because it carries async-runtime weight;
 # only streaming crates need it.
 tokio = { version = "1.38", features = ["full"] }
-kinetix-core = { workspace = true }
-kinetix-pipeline = { workspace = true }
 bytes = "1.5"
 nom = { workspace = true }
 

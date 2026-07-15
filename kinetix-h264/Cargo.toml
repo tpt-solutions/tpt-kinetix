@@ -13,3 +13,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 rayon = { workspace = true }
 kinetix-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "decode_throughput"
+harness = false
