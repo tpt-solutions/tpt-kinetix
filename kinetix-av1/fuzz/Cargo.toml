@@ -4,6 +4,11 @@ version = "0.0.1"
 edition = "2021"
 publish = false
 
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 kinetix-av1 = { path = ".." }
