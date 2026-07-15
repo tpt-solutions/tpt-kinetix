@@ -38,7 +38,10 @@ fn test_playlist_render() {
         rendered.contains("segment00002.ts"),
         "missing segment00002.ts"
     );
-    assert!(!rendered.contains("#EXT-X-ENDLIST"), "unexpected #EXT-X-ENDLIST");
+    assert!(
+        !rendered.contains("#EXT-X-ENDLIST"),
+        "unexpected #EXT-X-ENDLIST"
+    );
 }
 
 #[test]
@@ -53,8 +56,7 @@ fn test_playlist_window_sliding() {
 
     // media_sequence should have incremented by 2
     assert_eq!(
-        playlist.media_sequence,
-        2,
+        playlist.media_sequence, 2,
         "media_sequence should be 2 after 2 evictions"
     );
     // Only `window` segments should remain

@@ -12,7 +12,7 @@ targets = []
 version = 2
 unmaintained = "all"
 unsound = "all"
-yanked = "all"
+yanked = "deny"
 ignore = []
 
 # ---------------------------------------------------------------------------

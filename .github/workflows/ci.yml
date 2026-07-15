@@ -64,6 +64,8 @@ jobs:
   fuzz-check:
     name: Fuzz targets compile
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

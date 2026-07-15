@@ -14,7 +14,9 @@ pub struct RtmpConfig {
 
 impl Default for RtmpConfig {
     fn default() -> Self {
-        Self { bind_addr: "0.0.0.0:1935".into() }
+        Self {
+            bind_addr: "0.0.0.0:1935".into(),
+        }
     }
 }
 
