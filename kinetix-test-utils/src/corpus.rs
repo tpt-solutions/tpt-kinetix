@@ -39,7 +39,9 @@ impl Corpus {
         // A repeating pattern that can stress many parsers.
         self.add(
             "alternating_00_ff",
-            (0..64).map(|i| if i % 2 == 0 { 0x00 } else { 0xFF }).collect(),
+            (0..64)
+                .map(|i| if i % 2 == 0 { 0x00 } else { 0xFF })
+                .collect(),
         );
     }
 

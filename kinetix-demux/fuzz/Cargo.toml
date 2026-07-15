@@ -17,6 +17,8 @@ path = "fuzz_targets/fuzz_mp4_box.rs"
 test = false
 doc = false
 
+[workspace]
+
 [profile.release]
 debug = 1
 opt-level = 3
