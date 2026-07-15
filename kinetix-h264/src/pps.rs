@@ -53,7 +53,7 @@ impl PicParameterSet {
                         let _ = r.read_ue().context("bottom_right")?;
                     }
                 }
-                3 | 4 | 5 => {
+                3..=5 => {
                     let _ = r.read_bit().context("slice_group_change_direction_flag")?;
                     let _ = r.read_ue().context("slice_group_change_rate_minus1")?;
                 }

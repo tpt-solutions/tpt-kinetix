@@ -94,7 +94,7 @@ impl<'a> BitReader<'a> {
         let se = if ue == 0 {
             0
         } else if ue % 2 == 1 {
-            ((ue + 1) / 2) as i32
+            (ue + 1).div_ceil(2) as i32
         } else {
             -((ue / 2) as i32)
         };
