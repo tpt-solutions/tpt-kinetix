@@ -1,13 +1,9 @@
-use kinetix_core::{
-    frame::VideoFrame,
-    pixel_format::PixelFormat,
-    timestamp::Timestamp,
-};
+use kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
 
 /// Build a YUV420p `VideoFrame` where every sample is set to `value`.
 fn yuv420p_frame_filled(width: u32, height: u32, y: u8, u: u8, v: u8) -> VideoFrame {
     let luma_size = (width as usize) * (height as usize);
-    let chroma_size = ((width as usize + 1) / 2) * ((height as usize + 1) / 2);
+    let chroma_size = (width as usize).div_ceil(2) * (height as usize).div_ceil(2);
     let mut data = Vec::with_capacity(luma_size + 2 * chroma_size);
     data.resize(luma_size, y);
     data.resize(luma_size + chroma_size, u);
@@ -32,7 +28,7 @@ pub fn grey_yuv420p_frame(width: u32, height: u32) -> VideoFrame {
 /// (right) across the width, and both chroma planes are set to 128.
 pub fn ramp_yuv420p_frame(width: u32, height: u32) -> VideoFrame {
     let luma_size = (width as usize) * (height as usize);
-    let chroma_size = ((width as usize + 1) / 2) * ((height as usize + 1) / 2);
+    let chroma_size = (width as usize).div_ceil(2) * (height as usize).div_ceil(2);
     let mut data = Vec::with_capacity(luma_size + 2 * chroma_size);
 
     // Y plane: value ramps 0→255 based on the x-coordinate.

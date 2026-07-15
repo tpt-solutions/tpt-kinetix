@@ -11,6 +11,7 @@ members = [
   "kinetix-cli",
   "kinetix-test-utils",
 ]
+exclude = ["kinetix-demux/fuzz"]
 
 [workspace.package]
 edition = "2021"

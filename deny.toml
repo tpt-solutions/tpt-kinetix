@@ -10,8 +10,9 @@ targets = []
 # ---------------------------------------------------------------------------
 [advisories]
 version = 2
-# Deny all known vulnerabilities and unmaintained crates
-deny = ["unmaintained", "unsound", "yanked"]
+unmaintained = "deny"
+unsound = "deny"
+yanked = "deny"
 ignore = []
 
 # ---------------------------------------------------------------------------

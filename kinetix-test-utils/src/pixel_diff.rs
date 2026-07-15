@@ -10,8 +10,8 @@ fn yuv420p_planes(frame: &VideoFrame) -> Option<(usize, usize, usize, usize, usi
     }
     let w = frame.width as usize;
     let h = frame.height as usize;
-    let cw = (w + 1) / 2;
-    let ch = (h + 1) / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let y_size = w * h;
     let cb_size = cw * ch;
     let cr_size = cw * ch;

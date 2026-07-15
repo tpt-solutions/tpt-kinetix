@@ -1,6 +1,6 @@
 // Tests that run across codec/demux boundaries using kinetix-test-utils helpers.
-use kinetix_test_utils::synthetic::*;
 use kinetix_test_utils::pixel_diff::*;
+use kinetix_test_utils::synthetic::*;
 
 #[test]
 fn grey_frame_is_identical_to_itself() {
