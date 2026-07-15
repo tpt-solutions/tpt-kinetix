@@ -13,7 +13,11 @@ version = 2
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+  # paste is unmaintained (RUSTSEC-2024-0436) but pulled in transitively by
+  # rav1e with no available upgrade path.
+  "RUSTSEC-2024-0436",
+]
 
 # ---------------------------------------------------------------------------
 # License policy
@@ -28,6 +32,10 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "Unicode-DFS-2016",
+  # libfuzzer-sys uses (MIT OR Apache-2.0) AND NCSA
+  "NCSA",
+  # unicode-ident uses (MIT OR Apache-2.0) AND Unicode-3.0
+  "Unicode-3.0",
 ]
 
 [[licenses.clarify]]
@@ -48,6 +56,14 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 deny = []
+# Crates with multiple major versions pulled in transitively by rav1e;
+# no workspace-level upgrade path exists for these.
+skip = [
+  { name = "getrandom" },
+  { name = "nom" },
+  { name = "thiserror" },
+  { name = "thiserror-impl" },
+]
 
 # ---------------------------------------------------------------------------
 # Source policy
