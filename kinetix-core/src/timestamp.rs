@@ -19,6 +19,14 @@ impl Timestamp {
     };
 
     /// Creates a new `Timestamp`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kinetix_core::Timestamp;
+    /// let ts = Timestamp::new(90_000, (1, 90_000));
+    /// assert!((ts.as_secs_f64() - 1.0).abs() < 1e-9);
+    /// ```
     #[inline]
     pub fn new(value: i64, time_base: (u32, u32)) -> Self {
         Self { value, time_base }

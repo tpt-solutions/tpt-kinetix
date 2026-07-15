@@ -23,7 +23,7 @@ use crate::{
 
 /// Stateful H.264 / AVC decoder.
 ///
-/// Feed compressed [`Packet`]s via [`decode`] and receive decoded [`VideoFrame`]s.
+/// Feed compressed [`Packet`]s via [`H264Decoder::decode`] and receive decoded [`VideoFrame`]s.
 pub struct H264Decoder {
     sps_store: HashMap<u32, SeqParameterSet>,
     pps_store: HashMap<u32, PicParameterSet>,

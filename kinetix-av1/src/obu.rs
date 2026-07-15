@@ -61,6 +61,16 @@ impl<'a> BitReader<'a> {
 ///
 /// Returns `(value, bytes_consumed)` on success, or `None` if the data is
 /// too short or the value overflows `u64`.
+///
+/// # Examples
+///
+/// ```
+/// use kinetix_av1::obu::read_leb128;
+/// // Single byte: value 5
+/// assert_eq!(read_leb128(&[5]), Some((5, 1)));
+/// // Two byte: 0x80 | 1, 0x01 = 128+1=129... actually 0xE5 0x8E 0x26 = 624485
+/// assert_eq!(read_leb128(&[0x00]), Some((0, 1)));
+/// ```
 pub fn read_leb128(data: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     for (i, &byte) in data.iter().enumerate().take(8) {

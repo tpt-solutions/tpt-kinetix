@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "AV1 decoder and encoder for the TPT Kinetix media processing engine"
+keywords = ["av1", "video", "decoder", "encoder", "rav1e"]
+categories = ["multimedia", "parser-implementations"]
+readme = "README.md"
+documentation = "https://docs.rs/kinetix-av1"
 
 [dependencies]
 nom = { workspace = true }
@@ -17,6 +21,7 @@ rav1e = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = "1.5"
 
 [[bench]]
 name = "av1_encode"

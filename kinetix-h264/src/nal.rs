@@ -97,6 +97,15 @@ impl NalUnit {
 /// removes those `03` bytes.
 ///
 /// Example: `[0x00, 0x00, 0x03, 0x01]` → `[0x00, 0x00, 0x01]`.
+///
+/// # Examples
+///
+/// ```
+/// use kinetix_h264::nal::remove_emulation_prevention_bytes;
+/// // 00 00 03 01 -> 00 00 01 (emulation prevention byte removed)
+/// let input = [0x00, 0x00, 0x03, 0x01];
+/// assert_eq!(remove_emulation_prevention_bytes(&input), vec![0x00, 0x00, 0x01]);
+/// ```
 pub fn remove_emulation_prevention_bytes(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;

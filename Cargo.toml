@@ -9,6 +9,7 @@ members = [
   "kinetix-pipeline",
   "kinetix-stream",
   "kinetix-cli",
+  "kinetix-test-utils",
 ]
 
 [workspace.package]

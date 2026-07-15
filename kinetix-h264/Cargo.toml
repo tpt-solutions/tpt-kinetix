@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "H.264/AVC decoder for the TPT Kinetix media processing engine"
+keywords = ["h264", "avc", "video", "decoder", "codec"]
+categories = ["multimedia", "parser-implementations"]
+readme = "README.md"
+documentation = "https://docs.rs/kinetix-h264"
 
 [dependencies]
 nom = { workspace = true }
@@ -16,6 +20,7 @@ kinetix-core = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+proptest = "1.5"
 
 [[bench]]
 name = "decode_throughput"
