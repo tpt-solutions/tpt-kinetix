@@ -11,6 +11,34 @@ successor to FFmpeg for production transcoding and streaming pipelines.
 
 ---
 
+## Current status
+
+TPT Kinetix is **early-stage and pre-1.0**. This table summarizes what works
+end-to-end today versus what is scaffolded or in progress. Each crate's README
+has a more detailed LIMITATIONS section, and decoders expose their state
+programmatically via `DecoderCapabilities` (`capabilities()`).
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
+| MKV / WebM demux | 🟡 Basic | EBML parsing; subset of elements |
+| MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
+| H.264 decode | 🟡 Not pixel-exact | Bitstream + CAVLC scaffold; no CABAC/prediction/deblocking |
+| AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; placeholder frames |
+| AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
+| Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
+| RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
+| HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
+| AAC audio | ⛔ Planned | No audio path yet |
+| CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
+
+> ⚠️ **Decode correctness:** the H.264 and AV1 decoders do **not** yet produce
+> pixel-exact output. Call `capabilities()` (or `tpt-kinetix probe`) to detect
+> this at runtime; in strict mode the decoders return `KinetixError::NotPixelExact`
+> instead of returning placeholder frames.
+
+---
+
 ## Why TPT Kinetix?
 
 **FFmpeg** is the de facto standard for media processing. It is battle-tested and feature-complete,
@@ -49,6 +77,8 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-demux       — container demuxers (MP4 first; MKV / TS planned)
 │
+├── tpt-kinetix-mux         — container muxers (progressive MP4 for H.264)
+│
 ├── tpt-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
 │
 ├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
@@ -59,7 +89,7 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-stream      — async streaming output: RTMP push, HLS packaging
 │
-└── tpt-kinetix-cli         — `kinetix` binary: transcode / stream subcommands
+└── tpt-kinetix-cli         — `tpt-kinetix` binary: probe / transcode / stream subcommands
 ```
 
 ### Architecture Diagram (ASCII)

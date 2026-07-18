@@ -12,7 +12,7 @@ members = [
   "tpt-kinetix-cli",
   "tpt-kinetix-test-utils",
 ]
-exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-h264/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz"]
 
 [workspace.package]
 edition = "2021"

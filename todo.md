@@ -154,7 +154,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
 - [x] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
 - [ ] Add audio codec support (start with AAC decode/encode) — no audio path exists today
-- [ ] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
+- [x] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
 - [ ] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker)
 
 ### Innovation
@@ -166,15 +166,15 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Add a `cargo doc --workspace --no-deps` build-check job to CI
 - [x] Add an MSRV-pin verification job to CI
 - [x] Add a Windows (and/or macOS) runner to CI, not just ubuntu-latest
-- [ ] Wire new fuzz targets (MKV, RTMP, HLS playlist) into the existing `fuzz.yml` nightly schedule
+- [x] Wire new fuzz targets (MKV, RTMP, HLS playlist) into the existing `fuzz.yml` nightly schedule
 - [ ] Set up release automation (`release-plz` or `cargo-workspaces`) for the shared-version monorepo publish sequence
-- [ ] Add Dependabot config for `Cargo.toml` dependency updates
-- [ ] Add a `cargo xtask` or `justfile`/`Makefile` wrapper bundling fmt/clippy/deny/test for fast local contributor feedback
+- [x] Add Dependabot config for `Cargo.toml` dependency updates
+- [x] Add a `cargo xtask` or `justfile`/`Makefile` wrapper bundling fmt/clippy/deny/test for fast local contributor feedback
 
 ### Adoption
 - [ ] Add an `examples/` directory with at least one runnable example per functional crate (e.g. `kinetix-demux/examples/probe_mp4.rs`, `kinetix-pipeline/examples/basic_transcode.rs`)
-- [ ] Add a prominent "Current status" section near the top of the root README summarizing what works today vs. in-progress, mirroring the per-crate README limitations sections
-- [ ] Add GitHub issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) and a PR template referencing the `CONTRIBUTING.md` checklist
+- [x] Add a prominent "Current status" section near the top of the root README summarizing what works today vs. in-progress, mirroring the per-crate README limitations sections
+- [x] Add GitHub issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) and a PR template referencing the `CONTRIBUTING.md` checklist
 - [ ] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" GitHub issues with file pointers
 - [ ] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md`
 - [ ] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz`

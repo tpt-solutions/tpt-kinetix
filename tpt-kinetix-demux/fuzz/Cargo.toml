@@ -17,6 +17,12 @@ path = "fuzz_targets/fuzz_mp4_box.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_mkv_ebml"
+path = "fuzz_targets/fuzz_mkv_ebml.rs"
+test = false
+doc = false
+
 [workspace]
 
 [profile.release]

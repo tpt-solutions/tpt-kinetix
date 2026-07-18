@@ -31,10 +31,20 @@ jobs:
         include:
           - crate: tpt-kinetix-demux
             target: fuzz_mp4_box
+          - crate: tpt-kinetix-demux
+            target: fuzz_mkv_ebml
           - crate: tpt-kinetix-av1
             target: fuzz_obu_parse
           - crate: tpt-kinetix-h264
             target: fuzz_h264_nal
+          - crate: tpt-kinetix-stream
+            target: fuzz_rtmp_chunk
+          - crate: tpt-kinetix-stream
+            target: fuzz_rtmp_amf
+          - crate: tpt-kinetix-stream
+            target: fuzz_rtmp_flv
+          - crate: tpt-kinetix-stream
+            target: fuzz_hls_playlist
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

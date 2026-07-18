@@ -1,0 +1,42 @@
+[package]
+name = "tpt-kinetix-stream-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-stream = { path = ".." }
+
+[[bin]]
+name = "fuzz_rtmp_chunk"
+path = "fuzz_targets/fuzz_rtmp_chunk.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_rtmp_amf"
+path = "fuzz_targets/fuzz_rtmp_amf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_rtmp_flv"
+path = "fuzz_targets/fuzz_rtmp_flv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_hls_playlist"
+path = "fuzz_targets/fuzz_hls_playlist.rs"
+test = false
+doc = false
+
+[workspace]
+
+[profile.release]
+debug = 1
+opt-level = 3
