@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Shared types for the TPT Kinetix media processing engine"
 keywords = ["media", "video", "codec", "frame", "packet"]
 categories = ["multimedia", "data-structures"]

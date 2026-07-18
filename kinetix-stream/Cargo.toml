@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Async streaming output (RTMP push, HLS packaging) for the TPT Kinetix engine"
 keywords = ["rtmp", "hls", "streaming", "video", "live"]
 categories = ["multimedia", "network-programming"]

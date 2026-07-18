@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Knowledge-graph ingestion, analysis, and code generation tooling"
 keywords = ["codegen", "knowledge-graph", "codec", "ast", "rayon"]
 categories = ["development-tools", "multimedia"]

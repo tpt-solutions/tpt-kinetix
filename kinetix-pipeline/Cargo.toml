@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Lock-free multi-stage processing pipeline for the TPT Kinetix engine"
 keywords = ["pipeline", "video", "parallel", "crossbeam", "media"]
 categories = ["multimedia", "concurrency"]

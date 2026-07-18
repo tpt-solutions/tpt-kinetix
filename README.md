@@ -2,6 +2,9 @@
 
 [![CI](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/tpt-solutions/tpt-kinetix/branch/master/graph/badge.svg)](https://codecov.io/gh/tpt-solutions/tpt-kinetix)
+[![crates.io](https://img.shields.io/crates/v/kinetix-core.svg)](https://crates.io/crates/kinetix-core)
+[![docs.rs](https://img.shields.io/docsrs/kinetix-core)](https://docs.rs/kinetix-core)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A memory-safe, hyper-concurrent media processing engine written in Rust — designed as a long-term
 successor to FFmpeg for production transcoding and streaming pipelines.

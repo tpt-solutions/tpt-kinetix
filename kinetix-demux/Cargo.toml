@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
 description = "Container demuxers for the TPT Kinetix media processing engine"
 keywords = ["mp4", "demux", "iso-bmff", "video", "parser"]
 categories = ["multimedia", "parser-implementations"]
