@@ -54,7 +54,7 @@ of streaming use cases. SBR/PS support can follow.
 **KG applicability rating: High**
 
 FFmpeg's `aac.c` (and `aacdec.c` / `aacdectab.c`) has a clear state-machine structure
-that the `kinetix-kg` ingestion pass handles well:
+that the `tpt-kinetix-kg` ingestion pass handles well:
 
 - The top-level `aac_decode_frame` function is a well-defined decode entry point.
 - Spectral coefficient decoding loops (`decode_spectrum_and_dequant`) are LoopBody

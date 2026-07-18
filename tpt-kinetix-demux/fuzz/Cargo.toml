@@ -1,0 +1,24 @@
+[package]
+name = "tpt-kinetix-demux-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-demux = { path = ".." }
+
+[[bin]]
+name = "fuzz_mp4_box"
+path = "fuzz_targets/fuzz_mp4_box.rs"
+test = false
+doc = false
+
+[workspace]
+
+[profile.release]
+debug = 1
+opt-level = 3

@@ -93,7 +93,7 @@ FFmpeg's HEVC implementation spans multiple files:
 Total: approximately 10 700 lines across primary decoder files; additional SIMD
 optimisation files bring the total to ~20 000 lines.
 
-The `kinetix-kg` ingest pass will handle this successfully — tree-sitter-c can parse
+The `tpt-kinetix-kg` ingest pass will handle this successfully — tree-sitter-c can parse
 large files without issue. However, the resulting graph will be large (~8 000–12 000
 nodes), and the dependency analysis will identify fewer clean parallelism opportunities
 than for simpler codecs because HEVC's CTU quad-tree creates more inter-node
@@ -141,7 +141,7 @@ Rationale:
 
 1. **Shared foundations**: HEVC and H.264 share CABAC as the entropy coding method,
    though with different context models. The CABAC engine implemented for H.264 can be
-   refactored into a shared `kinetix-entropy` crate and reused, significantly reducing
+   refactored into a shared `tpt-kinetix-entropy` crate and reused, significantly reducing
    HEVC effort.
 
 2. **CTU complexity requires stable base**: the recursive CTU/CU/PU/TU decoder is easier

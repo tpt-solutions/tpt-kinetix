@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-  "kinetix-core",
-  "kinetix-demux",
-  "kinetix-h264",
-  "kinetix-av1",
-  "kinetix-kg",
-  "kinetix-pipeline",
-  "kinetix-stream",
-  "kinetix-cli",
-  "kinetix-test-utils",
+  "tpt-kinetix-core",
+  "tpt-kinetix-demux",
+  "tpt-kinetix-h264",
+  "tpt-kinetix-av1",
+  "tpt-kinetix-kg",
+  "tpt-kinetix-pipeline",
+  "tpt-kinetix-stream",
+  "tpt-kinetix-cli",
+  "tpt-kinetix-test-utils",
 ]
-exclude = ["kinetix-demux/fuzz", "kinetix-av1/fuzz", "kinetix-h264/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-h264/fuzz"]
 
 [workspace.package]
 edition = "2021"
@@ -46,12 +46,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 crossbeam-channel = "0.5"
 
 # Internal crates
-kinetix-core = { path = "kinetix-core" }
-kinetix-demux = { path = "kinetix-demux" }
-kinetix-h264 = { path = "kinetix-h264" }
-kinetix-av1 = { path = "kinetix-av1" }
-kinetix-pipeline = { path = "kinetix-pipeline" }
-kinetix-stream = { path = "kinetix-stream" }
+tpt-kinetix-core = { path = "tpt-kinetix-core" }
+tpt-kinetix-demux = { path = "tpt-kinetix-demux" }
+tpt-kinetix-h264 = { path = "tpt-kinetix-h264" }
+tpt-kinetix-av1 = { path = "tpt-kinetix-av1" }
+tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline" }
+tpt-kinetix-stream = { path = "tpt-kinetix-stream" }
 
 [profile.dev]
 opt-level = 1

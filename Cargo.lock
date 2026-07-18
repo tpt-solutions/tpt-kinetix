@@ -590,120 +590,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kinetix-av1"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "kinetix-core",
- "nom 7.1.3",
- "proptest",
- "rav1e",
- "rayon",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "kinetix-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "kinetix-core",
- "kinetix-pipeline",
- "kinetix-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "kinetix-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "kinetix-demux"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "kinetix-core",
- "nom 7.1.3",
- "proptest",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "kinetix-h264"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "kinetix-core",
- "nom 7.1.3",
- "proptest",
- "rayon",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "kinetix-kg"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tree-sitter",
- "tree-sitter-c",
-]
-
-[[package]]
-name = "kinetix-pipeline"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "crossbeam-channel",
- "kinetix-av1",
- "kinetix-core",
- "kinetix-demux",
- "kinetix-h264",
- "kinetix-test-utils",
- "rayon",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "kinetix-stream"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "nom 7.1.3",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tracing",
-]
-
-[[package]]
-name = "kinetix-test-utils"
-version = "0.1.0"
-dependencies = [
- "kinetix-av1",
- "kinetix-core",
- "kinetix-demux",
- "kinetix-h264",
- "proptest",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1557,6 +1443,121 @@ dependencies = [
  "serde_spanned",
  "toml_datetime",
  "winnow",
+]
+
+[[package]]
+name = "tpt-kinetix-av1"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "nom 7.1.3",
+ "proptest",
+ "rav1e",
+ "rayon",
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+]
+
+[[package]]
+name = "tpt-kinetix-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-pipeline",
+ "tpt-kinetix-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tpt-kinetix-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tpt-kinetix-demux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "nom 7.1.3",
+ "proptest",
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+]
+
+[[package]]
+name = "tpt-kinetix-h264"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "nom 7.1.3",
+ "proptest",
+ "rayon",
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+]
+
+[[package]]
+name = "tpt-kinetix-kg"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tree-sitter",
+ "tree-sitter-c",
+]
+
+[[package]]
+name = "tpt-kinetix-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "crossbeam-channel",
+ "rayon",
+ "thiserror 2.0.18",
+ "tpt-kinetix-av1",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-h264",
+ "tpt-kinetix-test-utils",
+ "tracing",
+]
+
+[[package]]
+name = "tpt-kinetix-stream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "nom 7.1.3",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "tpt-kinetix-test-utils"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "tpt-kinetix-av1",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-h264",
 ]
 
 [[package]]

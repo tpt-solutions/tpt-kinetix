@@ -1,0 +1,18 @@
+[package]
+name = "tpt-kinetix-test-utils"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared test helpers for the TPT Kinetix workspace"
+publish = false
+
+[dependencies]
+tpt-kinetix-core = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.5"
+tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-h264 = { workspace = true }
+tpt-kinetix-av1 = { workspace = true }

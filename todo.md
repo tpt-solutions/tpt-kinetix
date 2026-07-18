@@ -137,3 +137,44 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Evaluate adding AAC audio decode/encode support using the KG process
 - [x] Evaluate adding HEVC/H.265 decode support using the KG process
 - [x] Maintain a backlog note: the full ~400-codec FFmpeg surface is explicitly out of scope for the phases above; track candidate codecs here as they're prioritized
+
+## Phase 10 — Platform Review Follow-ups (2026-07-18)
+
+> Source: full-repo review covering bugs, missing features, innovation ideas, and adoption levers.
+
+### Naming
+- [x] Rename all crates from `kinetix-*` to `tpt-kinetix-*` (package names, directory names, path deps, `use`/`extern crate` references, binary names, README/docs/CI references) to match the `tpt-kinetix` repo name
+
+### Bugs & correctness
+- [ ] Replace silent-wrong-output decode paths with an explicit typed error/capability signal: `kinetix-h264` (`decoder.rs:138-143`, skip-macroblock stubs) and `kinetix-av1` (`decoder.rs:27-28,57,98`, grey placeholder frames) should surface "not pixel-exact yet" instead of returning `Ok` with wrong data
+- [ ] Design and implement a `DecoderCapabilities` struct (e.g. `supports_cabac`, `pixel_exact`) exposed per codec so callers/CLI can detect incomplete decode paths programmatically
+
+### Missing features
+- [ ] Design and implement a muxer layer (MP4 at minimum) in `kinetix-demux` or a new `kinetix-mux` crate — currently no way to write out any container format
+- [ ] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
+- [ ] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
+- [ ] Add audio codec support (start with AAC decode/encode) — no audio path exists today
+- [ ] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
+- [ ] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker)
+
+### Innovation
+- [ ] Evaluate publishing/positioning `kinetix-kg` as a public "bring your own codec" tool rather than internal-only tooling
+- [ ] Prototype a `wasm32` build of `kinetix-demux` + `kinetix-core` for in-browser container/codec inspection
+- [x] Implement a `kinetix probe <file>` CLI subcommand that exercises only the working demux/identification path (real, runnable today unlike `transcode`/`stream`)
+
+### Usability & automation
+- [x] Add a `cargo doc --workspace --no-deps` build-check job to CI
+- [x] Add an MSRV-pin verification job to CI
+- [x] Add a Windows (and/or macOS) runner to CI, not just ubuntu-latest
+- [ ] Wire new fuzz targets (MKV, RTMP, HLS playlist) into the existing `fuzz.yml` nightly schedule
+- [ ] Set up release automation (`release-plz` or `cargo-workspaces`) for the shared-version monorepo publish sequence
+- [ ] Add Dependabot config for `Cargo.toml` dependency updates
+- [ ] Add a `cargo xtask` or `justfile`/`Makefile` wrapper bundling fmt/clippy/deny/test for fast local contributor feedback
+
+### Adoption
+- [ ] Add an `examples/` directory with at least one runnable example per functional crate (e.g. `kinetix-demux/examples/probe_mp4.rs`, `kinetix-pipeline/examples/basic_transcode.rs`)
+- [ ] Add a prominent "Current status" section near the top of the root README summarizing what works today vs. in-progress, mirroring the per-crate README limitations sections
+- [ ] Add GitHub issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) and a PR template referencing the `CONTRIBUTING.md` checklist
+- [ ] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" GitHub issues with file pointers
+- [ ] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md`
+- [ ] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz`

@@ -1,7 +1,7 @@
-# Adding a New Codec via the `kinetix-kg` Pipeline
+# Adding a New Codec via the `tpt-kinetix-kg` Pipeline
 
 This document describes the repeatable process for integrating a new audio or video codec
-into TPT Kinetix using the `kinetix-kg` knowledge-graph tooling. Following this process
+into TPT Kinetix using the `tpt-kinetix-kg` knowledge-graph tooling. Following this process
 consistently keeps each codec crate coherent, fuzz-hardened, and parallelism-aware from
 the start.
 
@@ -9,7 +9,7 @@ the start.
 
 ## Overview
 
-The `kinetix-kg` pipeline converts C source code (typically from FFmpeg's `libavcodec/`
+The `tpt-kinetix-kg` pipeline converts C source code (typically from FFmpeg's `libavcodec/`
 directory) into a structured knowledge graph and then generates a Rust scaffold. That
 scaffold is the starting point for a hand-completed, production-quality decoder or encoder
 crate. The full flow looks like this:
@@ -18,16 +18,16 @@ crate. The full flow looks like this:
 FFmpeg C source
     │
     ▼
-kinetix-kg ingest    ← parse C AST, emit graph statistics
+tpt-kinetix-kg ingest    ← parse C AST, emit graph statistics
     │
     ▼
-kinetix-kg graph     ← export full knowledge graph as JSON
+tpt-kinetix-kg graph     ← export full knowledge graph as JSON
     │
     ▼
-kinetix-kg analyze   ← identify independent decode units / parallelism points
+tpt-kinetix-kg analyze   ← identify independent decode units / parallelism points
     │
     ▼
-kinetix-kg codegen   ← emit Rust scaffold crate
+tpt-kinetix-kg codegen   ← emit Rust scaffold crate
     │
     ▼
 Hand-completion      ← parser tables, entropy decoding, transforms, prediction
@@ -36,7 +36,7 @@ Hand-completion      ← parser tables, entropy decoding, transforms, prediction
 Validation harness   ← pixel-diff against `ffmpeg -f rawvideo`
     │
     ▼
-Fuzz + conformance   ← cargo-fuzz + kinetix-test-utils
+Fuzz + conformance   ← cargo-fuzz + tpt-kinetix-test-utils
 ```
 
 ---
@@ -64,7 +64,7 @@ across different developer machines.
 ## Step 2 — Ingest and Get Graph Statistics
 
 ```bash
-kinetix-kg ingest path/to/codec_decoder.c
+tpt-kinetix-kg ingest path/to/codec_decoder.c
 ```
 
 This command parses the C source, builds the internal graph, and prints a summary:
@@ -88,12 +88,12 @@ for entropy-coded bitstream parsers.
 ## Step 3 — Export the Full Graph
 
 ```bash
-kinetix-kg graph path/to/codec_decoder.c -o codec.json
+tpt-kinetix-kg graph path/to/codec_decoder.c -o codec.json
 ```
 
 The output is a JSON document containing every node and edge the ingestion pass
 extracted. It is the input to all subsequent pipeline steps. Keep `codec.json` under
-version control in `kinetix-kg/graphs/` so graph evolution can be tracked alongside
+version control in `tpt-kinetix-kg/graphs/` so graph evolution can be tracked alongside
 code changes.
 
 ---
@@ -139,7 +139,7 @@ iterations), `rayon` can safely parallelise it.
 ## Step 5 — Identify Independent Sets
 
 ```bash
-kinetix-kg analyze codec.json
+tpt-kinetix-kg analyze codec.json
 ```
 
 This command runs a dependency-analysis pass over the graph and emits a report of
@@ -164,8 +164,8 @@ calls during hand-completion.
 ## Step 6 — Generate the Rust Scaffold
 
 ```bash
-kinetix-kg codegen codec.json \
-    --crate-name kinetix-{codec} \
+tpt-kinetix-kg codegen codec.json \
+    --crate-name tpt-kinetix-{codec} \
     --inject-rayon \
     --output-dir src/generated/
 ```
@@ -220,16 +220,16 @@ Before declaring correctness, compare decoded output frame-by-frame against FFmp
 ffmpeg -i test_clip.mp4 -f rawvideo -pix_fmt yuv420p reference.yuv
 
 # Decode the same clip with kinetix and write raw YUV
-cargo run -p kinetix-cli -- decode --input test_clip.mp4 --output candidate.yuv
+cargo run -p tpt-kinetix-cli -- decode --input test_clip.mp4 --output candidate.yuv
 
 # Diff the two files
 cmp reference.yuv candidate.yuv
 ```
 
-For automated testing, integrate the comparison into `kinetix-test-utils`:
+For automated testing, integrate the comparison into `tpt-kinetix-test-utils`:
 
 ```rust
-use kinetix_test_utils::pixel_diff::assert_frames_match;
+use tpt_kinetix_test_utils::pixel_diff::assert_frames_match;
 
 assert_frames_match("tests/fixtures/test_clip.mp4", tolerance_psnr_db: 60.0);
 ```
@@ -249,7 +249,7 @@ production-ready:
 // fuzz/fuzz_targets/fuzz_<codec>_parser.rs
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use kinetix_{codec}::parse_bitstream;
+use tpt_kinetix_{codec}::parse_bitstream;
 
 fuzz_target!(|data: &[u8]| {
     let _ = parse_bitstream(data);
@@ -263,7 +263,7 @@ crash-inducing inputs as regression fixtures in `fuzz/corpus/`.
 
 ## Step 10 — Write Conformance Tests
 
-Add conformance tests using `kinetix-test-utils` that cover:
+Add conformance tests using `tpt-kinetix-test-utils` that cover:
 
 - ITU-T or IETF conformance test vectors (if available for the codec)
 - Boundary conditions: zero-length frames, maximum resolution, all-intra streams
@@ -272,7 +272,7 @@ Add conformance tests using `kinetix-test-utils` that cover:
 ```rust
 #[cfg(test)]
 mod conformance {
-    use kinetix_test_utils::conformance::run_vector;
+    use tpt_kinetix_test_utils::conformance::run_vector;
 
     #[test]
     fn itu_t_h264_bp_cavlc_420_baseline() {

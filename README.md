@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-kinetix/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/tpt-solutions/tpt-kinetix/branch/master/graph/badge.svg)](https://codecov.io/gh/tpt-solutions/tpt-kinetix)
-[![crates.io](https://img.shields.io/crates/v/kinetix-core.svg)](https://crates.io/crates/kinetix-core)
-[![docs.rs](https://img.shields.io/docsrs/kinetix-core)](https://docs.rs/kinetix-core)
+[![crates.io](https://img.shields.io/crates/v/tpt-kinetix-core.svg)](https://crates.io/crates/tpt-kinetix-core)
+[![docs.rs](https://img.shields.io/docsrs/tpt-kinetix-core)](https://docs.rs/tpt-kinetix-core)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A memory-safe, hyper-concurrent media processing engine written in Rust — designed as a long-term
@@ -28,7 +28,7 @@ but it carries decades of technical debt:
 
 ## AI / Knowledge-Graph Strategy
 
-`kinetix-kg` is a companion crate that ingests the FFmpeg source tree, codec specifications, and
+`tpt-kinetix-kg` is a companion crate that ingests the FFmpeg source tree, codec specifications, and
 related RFCs into a structured knowledge graph. This graph drives:
 
 1. **Code generation** — boilerplate codec tables and dispatch glue.
@@ -36,7 +36,7 @@ related RFCs into a structured knowledge graph. This graph drives:
 3. **Regression triage** — mapping failing test vectors back to spec sections.
 
 The knowledge graph is stored as a set of JSON-LD documents and queried at build time via the
-`kinetix-kg` CLI.
+`tpt-kinetix-kg` CLI.
 
 ---
 
@@ -45,33 +45,33 @@ The knowledge graph is stored as a set of JSON-LD documents and queried at build
 ```
 tpt-kinetix (workspace)
 │
-├── kinetix-core        — shared types: Frame, Packet, Timestamp, PixelFormat, Error
+├── tpt-kinetix-core        — shared types: Frame, Packet, Timestamp, PixelFormat, Error
 │
-├── kinetix-demux       — container demuxers (MP4 first; MKV / TS planned)
+├── tpt-kinetix-demux       — container demuxers (MP4 first; MKV / TS planned)
 │
-├── kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
+├── tpt-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
 │
-├── kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
+├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
 │
-├── kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
+├── tpt-kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
 │
-├── kinetix-pipeline    — lock-free multi-stage processing pipeline
+├── tpt-kinetix-pipeline    — lock-free multi-stage processing pipeline
 │
-├── kinetix-stream      — async streaming output: RTMP push, HLS packaging
+├── tpt-kinetix-stream      — async streaming output: RTMP push, HLS packaging
 │
-└── kinetix-cli         — `kinetix` binary: transcode / stream subcommands
+└── tpt-kinetix-cli         — `kinetix` binary: transcode / stream subcommands
 ```
 
 ### Architecture Diagram (ASCII)
 
 ```
  ┌──────────────────────────────────────────────────────────────┐
- │                        kinetix-cli                           │
+ │                        tpt-kinetix-cli                           │
  │          transcode subcommand │ stream subcommand            │
  └───────────────────┬──────────────────────┬───────────────────┘
                      │                      │
           ┌──────────▼──────────┐  ┌────────▼────────┐
-          │  kinetix-pipeline   │  │ kinetix-stream  │
+          │  tpt-kinetix-pipeline   │  │ tpt-kinetix-stream  │
           │  Stage graph /      │  │  RTMP / HLS     │
           │  crossbeam channels │  └────────┬────────┘
           └──────┬──────────────┘           │
@@ -86,7 +86,7 @@ tpt-kinetix (workspace)
     └────────────┴────────────┴─────────────┘
                          │
                  ┌───────▼──────┐
-                 │ kinetix-core │
+                 │ tpt-kinetix-core │
                  │ Frame/Packet │
                  │ Timestamp    │
                  └──────────────┘
@@ -126,9 +126,9 @@ cargo deny check
 ### Run the CLI
 
 ```bash
-cargo run -p kinetix-cli -- --help
-cargo run -p kinetix-cli -- transcode --help
-cargo run -p kinetix-cli -- stream --help
+cargo run -p tpt-kinetix-cli -- --help
+cargo run -p tpt-kinetix-cli -- transcode --help
+cargo run -p tpt-kinetix-cli -- stream --help
 ```
 
 ---
@@ -147,11 +147,11 @@ coherent and avoids mixed-version combinations.
 
 Crates must be published to crates.io in dependency order to satisfy the registry resolver:
 
-1. `kinetix-core`
-2. `kinetix-demux`, `kinetix-h264`, `kinetix-av1`, `kinetix-kg` *(depend only on `kinetix-core`)*
-3. `kinetix-pipeline` *(depends on the four above)*
-4. `kinetix-stream` *(independent of pipeline, but published after for consistency)*
-5. `kinetix-cli` *(depends on `kinetix-pipeline` and `kinetix-stream`)*
+1. `tpt-kinetix-core`
+2. `tpt-kinetix-demux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
+3. `tpt-kinetix-pipeline` *(depends on the four above)*
+4. `tpt-kinetix-stream` *(independent of pipeline, but published after for consistency)*
+5. `tpt-kinetix-cli` *(depends on `tpt-kinetix-pipeline` and `tpt-kinetix-stream`)*
 
 ### crates.io name reservation
 
@@ -159,8 +159,8 @@ Before running `cargo publish` for the first time, **manually reserve each crate
 crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
 entry. This prevents name squatting. The names to reserve are:
 
-`kinetix-core`, `kinetix-demux`, `kinetix-h264`, `kinetix-av1`, `kinetix-kg`,
-`kinetix-pipeline`, `kinetix-stream`, `kinetix-cli`
+`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
+`tpt-kinetix-pipeline`, `tpt-kinetix-stream`, `tpt-kinetix-cli`
 
 ---
 

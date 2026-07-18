@@ -1,0 +1,28 @@
+[package]
+name = "tpt-kinetix-h264"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "H.264/AVC decoder for the TPT Kinetix media processing engine"
+keywords = ["h264", "avc", "video", "decoder", "codec"]
+categories = ["multimedia", "parser-implementations"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-h264"
+
+[dependencies]
+nom = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+tpt-kinetix-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = "1.5"
+
+[[bench]]
+name = "decode_throughput"
+harness = false

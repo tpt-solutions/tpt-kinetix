@@ -9,28 +9,32 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo build --workspace
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: mozilla-actions/sccache-action@v0.0.7
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --lib --bins --tests
@@ -44,7 +48,6 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: mozilla-actions/sccache-action@v0.0.7
       - run: cargo clippy --workspace -- -D warnings
 
   fmt:
@@ -56,6 +59,38 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  docs:
+    name: Docs (cargo doc)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+
+  msrv:
+    name: MSRV (pinned toolchain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads the version pinned in rust-toolchain.toml (must match
+      # workspace.package.rust-version). This job fails if the workspace no
+      # longer builds on the declared MSRV.
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          MSRV="$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')"
+          echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+          echo "Detected MSRV: $MSRV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
 
   deny:
     name: Deny (licenses / advisories)
@@ -81,10 +116,10 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Check fuzz targets compile (demux)
         run: cargo fuzz build fuzz_mp4_box
-        working-directory: kinetix-demux
+        working-directory: tpt-kinetix-demux
       - name: Check fuzz targets compile (av1)
         run: cargo fuzz build fuzz_obu_parse
-        working-directory: kinetix-av1
+        working-directory: tpt-kinetix-av1
       - name: Check fuzz targets compile (h264)
         run: cargo fuzz build fuzz_h264_nal
-        working-directory: kinetix-h264
+        working-directory: tpt-kinetix-h264

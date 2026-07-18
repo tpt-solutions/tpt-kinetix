@@ -35,12 +35,12 @@ cargo test --workspace
 ```
 
 This runs all unit tests, integration tests, proptest property tests, and the
-cross-codec conformance suite in `kinetix-test-utils/tests/`.
+cross-codec conformance suite in `tpt-kinetix-test-utils/tests/`.
 
 To run tests for a specific crate only:
 
 ```sh
-cargo test -p kinetix-demux
+cargo test -p tpt-kinetix-demux
 ```
 
 ---
@@ -67,19 +67,19 @@ keeps them under its own `fuzz/` directory.
 
 ```sh
 # Run the MP4 box fuzzer for 60 seconds
-cd kinetix-demux
+cd tpt-kinetix-demux
 cargo fuzz run fuzz_mp4_box -- -max_total_time=60
 
 # Run the AV1 OBU fuzzer for 60 seconds
-cd kinetix-av1
+cd tpt-kinetix-av1
 cargo fuzz run fuzz_obu_parse -- -max_total_time=60
 ```
 
 To just check that all fuzz targets compile (no fuzzing):
 
 ```sh
-cd kinetix-demux && cargo fuzz build
-cd kinetix-av1   && cargo fuzz build
+cd tpt-kinetix-demux && cargo fuzz build
+cd tpt-kinetix-av1   && cargo fuzz build
 ```
 
 If cargo-fuzz finds a crash it writes a reproducer to
@@ -104,48 +104,48 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Adding a new codec using the KG pipeline
 
-`kinetix-kg` is the knowledge-graph tool that turns C codec source into
+`tpt-kinetix-kg` is the knowledge-graph tool that turns C codec source into
 parallel Rust scaffolding.  The full workflow:
 
 1. **Ingest** the C source and inspect statistics:
 
    ```sh
-   kinetix-kg ingest path/to/codec.c
+   tpt-kinetix-kg ingest path/to/codec.c
    ```
 
 2. **Build the graph JSON** (commit this alongside the source):
 
    ```sh
-   kinetix-kg graph path/to/codec.c -o mycodec.kg.json
+   tpt-kinetix-kg graph path/to/codec.c -o mycodec.kg.json
    ```
 
 3. **Analyse** the dependency graph to find independent parallel sets:
 
    ```sh
-   kinetix-kg analyze mycodec.kg.json
+   tpt-kinetix-kg analyze mycodec.kg.json
    ```
 
 4. **Generate** the Rust scaffolding with rayon injection:
 
    ```sh
-   kinetix-kg codegen mycodec.kg.json \
-     --crate-name kinetix-mycodec \
+   tpt-kinetix-kg codegen mycodec.kg.json \
+     --crate-name tpt-kinetix-mycodec \
      --inject-rayon \
-     --output-dir kinetix-mycodec/
+     --output-dir tpt-kinetix-mycodec/
    ```
 
 5. **Run end-to-end** (steps 1–4 in one command):
 
    ```sh
-   kinetix-kg run path/to/codec.c \
-     --crate-name kinetix-mycodec \
+   tpt-kinetix-kg run path/to/codec.c \
+     --crate-name tpt-kinetix-mycodec \
      --inject-rayon \
-     --output-dir kinetix-mycodec/
+     --output-dir tpt-kinetix-mycodec/
    ```
 
 After code generation, add the new crate to `Cargo.toml`'s `[workspace]
-members` list and wire in any `kinetix-core` types as needed.  See
-`kinetix-kg/DEVELOPER.md` for the full reference.
+members` list and wire in any `tpt-kinetix-core` types as needed.  See
+`tpt-kinetix-kg/DEVELOPER.md` for the full reference.
 
 ---
 
@@ -162,7 +162,7 @@ functions at the boundary of a single module.  Run with `cargo test`.
 
 Files under `<crate>/tests/`.  Each file is a separate integration test binary
 that exercises the public API of the crate end-to-end.  Examples:
-`kinetix-demux/tests/mp4_parse.rs`, `kinetix-av1/tests/encode_smoke.rs`.
+`tpt-kinetix-demux/tests/mp4_parse.rs`, `tpt-kinetix-av1/tests/encode_smoke.rs`.
 
 ### Proptest (property-based tests)
 
@@ -176,9 +176,9 @@ Current proptest suites:
 
 | File | Tested invariant |
 |------|-----------------|
-| `kinetix-demux/tests/proptest_mp4.rs` | `parse_mp4` and `parse_box_header` never panic |
-| `kinetix-h264/tests/proptest_nal.rs` | `parse_nal_units_from_annexb` and `remove_emulation_prevention_bytes` never panic |
-| `kinetix-av1/tests/proptest_obu.rs` | `parse_obu_sequence` never panics |
+| `tpt-kinetix-demux/tests/proptest_mp4.rs` | `parse_mp4` and `parse_box_header` never panic |
+| `tpt-kinetix-h264/tests/proptest_nal.rs` | `parse_nal_units_from_annexb` and `remove_emulation_prevention_bytes` never panic |
+| `tpt-kinetix-av1/tests/proptest_obu.rs` | `parse_obu_sequence` never panics |
 
 ### Fuzz testing
 
@@ -189,8 +189,8 @@ seconds before submitting a parser change.
 
 ### Conformance tests
 
-`kinetix-test-utils/tests/conformance.rs` uses the shared helpers in
-`kinetix-test-utils` to run cross-boundary assertions — for example, checking
+`tpt-kinetix-test-utils/tests/conformance.rs` uses the shared helpers in
+`tpt-kinetix-test-utils` to run cross-boundary assertions — for example, checking
 that a synthetic frame is pixel-identical to itself, that different synthetic
 frames actually differ, and that all corpus edge cases pass through the demuxer
 without panicking.

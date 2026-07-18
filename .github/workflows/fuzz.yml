@@ -29,11 +29,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - crate: kinetix-demux
+          - crate: tpt-kinetix-demux
             target: fuzz_mp4_box
-          - crate: kinetix-av1
+          - crate: tpt-kinetix-av1
             target: fuzz_obu_parse
-          - crate: kinetix-h264
+          - crate: tpt-kinetix-h264
             target: fuzz_h264_nal
     steps:
       - uses: actions/checkout@v4
