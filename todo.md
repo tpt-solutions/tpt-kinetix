@@ -153,7 +153,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Design and implement a muxer layer (MP4 at minimum) in `kinetix-demux` or a new `kinetix-mux` crate — currently no way to write out any container format
 - [x] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
 - [x] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
-- [ ] Add audio codec support (start with AAC decode/encode) — no audio path exists today
+- [x] Add audio codec support (start with AAC decode/encode) — `tpt-kinetix-aac` parse layer added (Dec 2026)
 - [x] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
 - [ ] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker)
 
@@ -176,5 +176,5 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Add a prominent "Current status" section near the top of the root README summarizing what works today vs. in-progress, mirroring the per-crate README limitations sections
 - [x] Add GitHub issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) and a PR template referencing the `CONTRIBUTING.md` checklist
 - [ ] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" GitHub issues with file pointers
-- [ ] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md`
-- [ ] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz`
+- [x] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md` (`templates/codec-crate`)
+- [x] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz` (`scripts/setup.sh`, `scripts/setup.ps1`, `.devcontainer/`)

@@ -1,0 +1,23 @@
+{
+  "name": "tpt-kinetix",
+  "image": "mcr.microsoft.com/devcontainers/rust:1.82-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "onCreateCommand": "rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && rustup toolchain install nightly --profile minimal",
+  "postCreateCommand": "cargo install cargo-deny --locked; cargo install cargo-nextest --locked; cargo install cargo-llvm-cov --locked; cargo +nightly install cargo-fuzz --locked",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "github.vscode-github-actions"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

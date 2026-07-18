@@ -26,6 +26,25 @@ cd tpt-kinetix
 cargo build --workspace
 ```
 
+### One-command setup
+
+A `scripts/setup.sh` (Linux/macOS) and `scripts/setup.ps1` (Windows) install the
+extra cargo subcommands CI relies on (`cargo-deny`, `cargo-nextest`,
+`cargo-llvm-cov`, `cargo-fuzz`), add the `wasm32-unknown-unknown` target, and run
+a first sanity check. A ready-to-use [devcontainer](.devcontainer/devcontainer.json)
+is also provided for GitHub Codespaces / VS Code Remote.
+
+### Adding a new codec crate
+
+Use the `cargo-generate` template to scaffold a new codec crate that follows the
+workspace conventions:
+
+```sh
+cargo generate --git https://github.com/tpt-solutions/tpt-kinetix --path templates/codec-crate
+```
+
+Then follow [`docs/adding-a-codec.md`](docs/adding-a-codec.md) to implement it.
+
 ---
 
 ## Running the test suite

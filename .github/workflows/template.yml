@@ -1,0 +1,42 @@
+name: template
+
+on:
+  push:
+    paths:
+      - "templates/**"
+      - ".github/workflows/template.yml"
+  pull_request:
+    paths:
+      - "templates/**"
+      - ".github/workflows/template.yml"
+
+jobs:
+  scaffold-smoke:
+    name: codec-crate template smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-generate
+        run: cargo install cargo-generate --locked
+      - name: Generate a sample codec crate
+        run: |
+          cargo generate --path templates/codec-crate \
+            --name tpt-kinetix-samplecodec \
+            --define codec_name=samplecodec \
+            --define codec_cap=Samplecodec \
+            --define codec_title="Sample Codec" \
+            --define codec_kind=video \
+            --init
+          # Drop the generated crate into a temp dir so it doesn't pollute the workspace.
+          mkdir -p /tmp/gen && cp -r tpt-kinetix-samplecodec /tmp/gen/
+          rm -rf tpt-kinetix-samplecodec
+      - name: Build the generated crate against the workspace
+        run: |
+          cd /tmp/gen/tpt-kinetix-samplecodec
+          cargo build --workspace 2>/dev/null || true
+          cargo build
+      - name: Test the generated crate
+        run: |
+          cd /tmp/gen/tpt-kinetix-samplecodec
+          cargo test

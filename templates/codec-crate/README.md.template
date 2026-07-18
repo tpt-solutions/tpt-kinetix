@@ -1,0 +1,16 @@
+# tpt-kinetix-{{codec_name}}
+
+A {{codec_title}} {{codec_kind}} codec crate for the
+[TPT Kinetix](https://github.com/tpt-solutions/tpt-kinetix) media engine.
+
+> **Status: scaffold.** Generated from the `codec-crate` template. Follow
+> [`docs/adding-a-codec.md`](../../docs/adding-a-codec.md) to implement decode.
+
+## Current capabilities
+
+- Bitstream parser scaffolding (TODO)
+- `{{codec_cap}}Decoder::capabilities()` reports `pixel_exact = false`
+
+## License
+
+MIT OR Apache-2.0

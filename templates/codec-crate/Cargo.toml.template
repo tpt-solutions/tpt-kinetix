@@ -1,0 +1,26 @@
+[package]
+name = "tpt-kinetix-{{codec_name}}"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "{{codec_title}} decoder/encoder for the TPT Kinetix media processing engine"
+keywords = ["tpt-kinetix", "{{codec_name}}", "codec", "multimedia", "{{codec_kind}}"]
+categories = ["multimedia::video", "multimedia::audio"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-{{codec_name}}"
+
+[dependencies]
+# Core types come from the workspace sibling; adjust the path if you relocate the
+# crate. Other deps are pinned explicitly so the scaffold builds standalone.
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+thiserror = "2"
+nom = "7"
+
+[dev-dependencies]
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,9 @@
+[template]
+cargo_generate_version = "0.18"
+include = ["Cargo.toml.template", "src/**/*", "README.md.template", "fuzz/**/*", ".github/**/*"]
+
+[placeholders]
+codec_name = { type = "string", prompt = "Codec crate short name (snake_case, e.g. vp9, hevc, mp3)?", default = "newcodec" }
+codec_cap = { type = "string", prompt = "Codec PascalCase type prefix (e.g. Vp9, Hevc, Mp3)?", default = "Newcodec" }
+codec_title = { type = "string", prompt = "Human-readable codec title (e.g. VP9, HEVC/H.265)?" }
+codec_kind = { type = "string", prompt = "Codec kind: video or audio?", choices = ["video", "audio"], default = "video" }
