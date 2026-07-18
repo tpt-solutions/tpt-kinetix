@@ -2,7 +2,7 @@
 //! fixtures.
 
 use kinetix_demux::mp4::{
-    boxes::{parse_box_header, parse_ftyp, parse_stco, parse_stsz, parse_stts},
+    boxes::{parse_box_header, parse_ftyp, parse_stco, parse_stsd, parse_stsz, parse_stts},
     Mp4Demuxer,
 };
 
@@ -144,4 +144,70 @@ fn test_truncated_demuxer_does_not_panic() {
     // Random garbage — should fail gracefully, not panic.
     let garbage = vec![0x00u8, 0xFF, 0xAB, 0xCD, 0x01, 0x02];
     let _ = Mp4Demuxer::new(garbage); // we only care that it doesn't panic
+}
+
+// ---------------------------------------------------------------------------
+// 7. stsd — sample descriptions / codec identification
+// ---------------------------------------------------------------------------
+
+/// Builds a minimal `stsd` payload containing a single sample entry whose box
+/// type is `fourcc` with `entry_extra` bytes of payload.
+fn build_stsd(fourcc: &[u8; 4], entry_extra: &[u8]) -> Vec<u8> {
+    let mut payload = vec![0u8, 0, 0, 0]; // version + flags
+    payload.extend_from_slice(&be32(1)); // entry_count = 1
+
+    // Sample entry box: size(4) + type(4) + extra.
+    let entry_size = 8 + entry_extra.len() as u32;
+    payload.extend_from_slice(&be32(entry_size));
+    payload.extend_from_slice(fourcc);
+    payload.extend_from_slice(entry_extra);
+    payload
+}
+
+#[test]
+fn test_parse_stsd_avc1() {
+    // A realistic-ish avc1 entry has a fixed 78-byte VisualSampleEntry header
+    // before the avcC box; we only need enough bytes to exercise the parser.
+    let extra = vec![0u8; 78];
+    let payload = build_stsd(b"avc1", &extra);
+
+    let (rest, stsd) = parse_stsd(&payload).expect("parse_stsd should succeed");
+    assert!(rest.is_empty());
+    assert_eq!(stsd.entries.len(), 1);
+    assert_eq!(&stsd.entries[0].format, b"avc1");
+    assert_eq!(stsd.codec_fourcc(), Some(*b"avc1"));
+    assert_eq!(stsd.entries[0].extra.len(), 78);
+}
+
+#[test]
+fn test_parse_stsd_mp4a() {
+    let payload = build_stsd(b"mp4a", &[0u8; 28]);
+    let (_, stsd) = parse_stsd(&payload).expect("parse_stsd should succeed");
+    assert_eq!(stsd.codec_fourcc(), Some(*b"mp4a"));
+}
+
+#[test]
+fn test_parse_stsd_empty_entries() {
+    // entry_count = 0 → no sample entries, codec_fourcc is None.
+    let payload = {
+        let mut p = vec![0u8, 0, 0, 0];
+        p.extend_from_slice(&be32(0));
+        p
+    };
+    let (rest, stsd) = parse_stsd(&payload).expect("parse_stsd should succeed");
+    assert!(rest.is_empty());
+    assert!(stsd.entries.is_empty());
+    assert_eq!(stsd.codec_fourcc(), None);
+}
+
+#[test]
+fn test_parse_stsd_truncated_entry_does_not_panic() {
+    // Claims one entry with a huge size but no payload bytes — must not panic.
+    let mut payload = vec![0u8, 0, 0, 0];
+    payload.extend_from_slice(&be32(1)); // entry_count = 1
+    payload.extend_from_slice(&be32(9999)); // absurd entry size
+    payload.extend_from_slice(b"avc1");
+    // (no further bytes)
+    let (_, stsd) = parse_stsd(&payload).expect("parse_stsd should not error");
+    assert_eq!(stsd.codec_fourcc(), Some(*b"avc1"));
 }

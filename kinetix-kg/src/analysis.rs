@@ -125,3 +125,118 @@ pub fn mark_parallel_regions(graph: &mut KnowledgeGraph, sets: &[IndependentSet]
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::NodeKind;
+
+    fn func_node(g: &mut KnowledgeGraph, name: &str) -> u64 {
+        g.add_node(NodeKind::Function {
+            name: name.to_string(),
+        })
+    }
+
+    #[test]
+    fn empty_graph_has_no_sets() {
+        let g = KnowledgeGraph::new();
+        assert!(find_independent_sets(&g).is_empty());
+    }
+
+    #[test]
+    fn nodes_without_dependencies_form_single_level() {
+        let mut g = KnowledgeGraph::new();
+        func_node(&mut g, "a");
+        func_node(&mut g, "b");
+        func_node(&mut g, "c");
+        let sets = find_independent_sets(&g);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].node_ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn data_dependencies_create_levels() {
+        let mut g = KnowledgeGraph::new();
+        let a = func_node(&mut g, "a");
+        let b = func_node(&mut g, "b");
+        let c = func_node(&mut g, "c");
+        g.add_edge(a, b, EdgeKind::DataDependency);
+        g.add_edge(b, c, EdgeKind::DataDependency);
+        let sets = find_independent_sets(&g);
+        assert_eq!(sets.len(), 3);
+        assert_eq!(sets[0].node_ids, vec![a]);
+        assert_eq!(sets[1].node_ids, vec![b]);
+        assert_eq!(sets[2].node_ids, vec![c]);
+    }
+
+    #[test]
+    fn diamond_dependency_groups_middle_level() {
+        let mut g = KnowledgeGraph::new();
+        let a = func_node(&mut g, "a");
+        let b = func_node(&mut g, "b");
+        let c = func_node(&mut g, "c");
+        let d = func_node(&mut g, "d");
+        g.add_edge(a, b, EdgeKind::DataDependency);
+        g.add_edge(a, c, EdgeKind::DataDependency);
+        g.add_edge(b, d, EdgeKind::DataDependency);
+        g.add_edge(c, d, EdgeKind::DataDependency);
+        let sets = find_independent_sets(&g);
+        assert_eq!(sets.len(), 3);
+        assert_eq!(sets[0].node_ids, vec![a]);
+        assert_eq!(sets[1].node_ids, vec![b, c]);
+        assert_eq!(sets[2].node_ids, vec![d]);
+    }
+
+    #[test]
+    fn non_data_edges_do_not_constrain() {
+        let mut g = KnowledgeGraph::new();
+        let a = func_node(&mut g, "a");
+        let b = func_node(&mut g, "b");
+        g.add_edge(a, b, EdgeKind::Calls);
+        let sets = find_independent_sets(&g);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].node_ids, vec![a, b]);
+    }
+
+    #[test]
+    fn mark_parallel_regions_adds_region_and_independent_edges() {
+        let mut g = KnowledgeGraph::new();
+        func_node(&mut g, "a");
+        func_node(&mut g, "b");
+        let sets = find_independent_sets(&g);
+        assert_eq!(sets[0].node_ids.len(), 2);
+
+        mark_parallel_regions(&mut g, &sets);
+
+        let regions = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::ParallelRegion { .. }))
+            .count();
+        assert_eq!(regions, 1);
+
+        let independent_edges = g
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::Independent))
+            .count();
+        // 2 pairwise (a<->b) + 2 region->member = 4.
+        assert_eq!(independent_edges, 4);
+    }
+
+    #[test]
+    fn mark_parallel_regions_skips_singletons() {
+        let mut g = KnowledgeGraph::new();
+        let a = func_node(&mut g, "a");
+        let b = func_node(&mut g, "b");
+        g.add_edge(a, b, EdgeKind::DataDependency);
+        let sets = find_independent_sets(&g);
+        mark_parallel_regions(&mut g, &sets);
+        let regions = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::ParallelRegion { .. }))
+            .count();
+        assert_eq!(regions, 0);
+    }
+}

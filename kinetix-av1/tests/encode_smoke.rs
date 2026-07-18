@@ -31,7 +31,6 @@ fn encode_16x16_grey_yields_packet() {
         quantizer: 100,
         speed: 10, // fastest — keeps test quick
         keyframe_interval: 1,
-        ..Default::default()
     };
     let mut encoder = Av1Encoder::new(&config).expect("create encoder");
 

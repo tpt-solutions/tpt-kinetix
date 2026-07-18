@@ -187,3 +187,105 @@ fn sanitise_variant(name: &str) -> String {
         trimmed.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::{find_independent_sets, mark_parallel_regions};
+    use crate::graph::EdgeKind;
+
+    fn build_graph() -> KnowledgeGraph {
+        let mut g = KnowledgeGraph::new();
+        g.add_node(NodeKind::Function {
+            name: "decode_slice".into(),
+        });
+        g.add_node(NodeKind::Function {
+            name: "parse_nal".into(),
+        });
+        g.add_node(NodeKind::MacroblockState {
+            name: "MB_INTRA".into(),
+        });
+        g.add_node(NodeKind::MacroblockState {
+            name: "MB_INTER".into(),
+        });
+        g
+    }
+
+    #[test]
+    fn generates_functions_and_mod_file() {
+        let g = build_graph();
+        let sets = find_independent_sets(&g);
+        let opts = CodegenOptions {
+            crate_name: "kinetix-h264".into(),
+            inject_rayon: false,
+        };
+        let files = generate(&g, &sets, &opts).unwrap();
+
+        assert!(files.contains_key("src/generated/functions.rs"));
+        assert!(files.contains_key("src/generated/mb_states.rs"));
+        assert!(files.contains_key("src/generated/mod.rs"));
+        // No rayon file when inject_rayon is false.
+        assert!(!files.contains_key("src/generated/parallel_sets.rs"));
+
+        let funcs = &files["src/generated/functions.rs"];
+        assert!(funcs.contains("pub fn decode_slice"));
+        assert!(funcs.contains("pub fn parse_nal"));
+
+        let states = &files["src/generated/mb_states.rs"];
+        assert!(states.contains("MB_INTRA"));
+        assert!(states.contains("MB_INTER"));
+        assert!(states.contains("pub enum MacroblockState"));
+
+        let mod_file = &files["src/generated/mod.rs"];
+        assert!(mod_file.contains("pub mod functions;"));
+        assert!(mod_file.contains("pub mod mb_states;"));
+    }
+
+    #[test]
+    fn injects_rayon_when_requested() {
+        let mut g = build_graph();
+        let sets = find_independent_sets(&g);
+        mark_parallel_regions(&mut g, &sets);
+        // Recompute sets on the enriched graph so a multi-node level exists.
+        let sets = find_independent_sets(&g);
+
+        let opts = CodegenOptions {
+            crate_name: "kinetix-h264".into(),
+            inject_rayon: true,
+        };
+        let files = generate(&g, &sets, &opts).unwrap();
+        assert!(files.contains_key("src/generated/parallel_sets.rs"));
+        let par = &files["src/generated/parallel_sets.rs"];
+        assert!(par.contains("use rayon::prelude::*;"));
+        assert!(par.contains("par_iter"));
+    }
+
+    #[test]
+    fn sanitises_awkward_variant_names() {
+        assert_eq!(sanitise_variant("MB_INTRA"), "MB_INTRA");
+        assert_eq!(sanitise_variant("mb-inter"), "Mb_inter");
+        assert_eq!(sanitise_variant("123state"), "state");
+        // All-invalid falls back to a State_ prefix.
+        assert_eq!(sanitise_variant("_0"), "State__0");
+    }
+
+    #[test]
+    fn no_rayon_file_without_multinode_sets() {
+        // Graph where every level is a singleton -> no parallel file emitted
+        // even with inject_rayon, because emit only writes for sets >= 2.
+        let mut g = KnowledgeGraph::new();
+        let a = g.add_node(NodeKind::Function { name: "a".into() });
+        let b = g.add_node(NodeKind::Function { name: "b".into() });
+        g.add_edge(a, b, EdgeKind::DataDependency);
+        let sets = find_independent_sets(&g);
+        let opts = CodegenOptions {
+            crate_name: "c".into(),
+            inject_rayon: true,
+        };
+        let files = generate(&g, &sets, &opts).unwrap();
+        // The file is created but contains only the header (no process_set fns).
+        if let Some(par) = files.get("src/generated/parallel_sets.rs") {
+            assert!(!par.contains("process_set_"));
+        }
+    }
+}

@@ -2,10 +2,12 @@
 
 use anyhow::{anyhow, Result};
 
+use kinetix_core::codec::{media_type_from_handler, CodecId, MediaType};
+
 use super::boxes::{
     parse_box_header, parse_co64, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco, parse_stsc,
-    parse_stss, parse_stsz, parse_stts, parse_tkhd, MdhdBox, StscBox, StssBox, StszBox, SttsBox,
-    TkhdBox,
+    parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, MdhdBox, StscBox, StssBox, StszBox,
+    SttsBox, TkhdBox,
 };
 
 /// A fully-parsed MP4 track, including its complete sample table.
@@ -16,6 +18,10 @@ pub struct Mp4Track {
     pub duration: u64,
     /// `b"vide"` for video, `b"soun"` for audio.
     pub handler_type: [u8; 4],
+    /// Broad media category, derived from the handler type.
+    pub media_type: MediaType,
+    /// Codec identified from the first `stsd` sample entry, if present.
+    pub codec: Option<CodecId>,
     /// Pixel width (0 for audio tracks).
     pub width: u32,
     /// Pixel height (0 for audio tracks).
@@ -96,6 +102,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let mut stsz: Option<StszBox> = None;
     let mut chunk_offsets: Option<Vec<u64>> = None;
     let mut stsc: Option<StscBox> = None;
+    let mut codec: Option<CodecId> = None;
 
     for (box_type, payload) in walk_boxes(trak_payload) {
         match &box_type {
@@ -151,6 +158,13 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
                                                 stsc =
                                                     parse_stsc(stbl_payload).ok().map(|(_, v)| v);
                                             }
+                                            b"stsd" => {
+                                                if let Ok((_, stsd)) = parse_stsd(stbl_payload) {
+                                                    codec = stsd
+                                                        .codec_fourcc()
+                                                        .map(CodecId::from_fourcc);
+                                                }
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -177,6 +191,8 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
         timescale: mdhd.timescale,
         duration: mdhd.duration,
         handler_type,
+        media_type: media_type_from_handler(handler_type),
+        codec,
         width: tkhd.width,
         height: tkhd.height,
         stts,

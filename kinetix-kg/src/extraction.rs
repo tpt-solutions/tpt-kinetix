@@ -282,3 +282,115 @@ fn collect_enum_states(enum_node: Node<'_>, source: &[u8], graph: &mut Knowledge
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::NodeKind;
+
+    fn ast(src: &str) -> CAst {
+        CAst::from_source(src).unwrap()
+    }
+
+    #[test]
+    fn extracts_functions_and_calls() {
+        let src = r#"
+            int helper(int x) { return x + 1; }
+            int decode(int y) { return helper(y); }
+        "#;
+        let g = extract_bitstream_parsing_tree(&ast(src));
+
+        let funcs: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                NodeKind::Function { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(funcs.contains(&"helper"));
+        assert!(funcs.contains(&"decode"));
+
+        let has_call = g.edges.iter().any(|e| matches!(e.kind, EdgeKind::Calls));
+        assert!(has_call, "expected a Calls edge from decode to helper");
+    }
+
+    #[test]
+    fn extracts_switch_cases() {
+        let src = r#"
+            void parse(int nal) {
+                switch (nal) {
+                    case 1: break;
+                    case 5: break;
+                    case 7: break;
+                }
+            }
+        "#;
+        let g = extract_bitstream_parsing_tree(&ast(src));
+        let cases: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                NodeKind::SwitchCase { value } => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cases.len(), 3);
+        assert!(cases.contains(&"1"));
+        assert!(cases.contains(&"5"));
+        assert!(cases.contains(&"7"));
+    }
+
+    #[test]
+    fn extracts_loop_bodies() {
+        let src = r#"
+            void run(void) {
+                for (int i = 0; i < 10; i++) {}
+                int j = 0;
+                while (j < 5) { j++; }
+            }
+        "#;
+        let g = extract_bitstream_parsing_tree(&ast(src));
+        let loops = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::LoopBody { .. }))
+            .count();
+        assert_eq!(loops, 2);
+    }
+
+    #[test]
+    fn extracts_enum_states() {
+        let src = r#"
+            enum MbState { MB_INTRA, MB_INTER, MB_SKIP };
+        "#;
+        let g = extract_macroblock_state_machine(&ast(src));
+        let states: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                NodeKind::MacroblockState { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, vec!["MB_INTRA", "MB_INTER", "MB_SKIP"]);
+
+        let transitions = g
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::Transition))
+            .count();
+        assert_eq!(transitions, 2);
+    }
+
+    #[test]
+    fn pointer_return_function_name_resolved() {
+        let src = "int *get_buffer(int size) { return 0; }";
+        let g = extract_bitstream_parsing_tree(&ast(src));
+        let found = g
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.kind, NodeKind::Function { name } if name == "get_buffer"));
+        assert!(found, "pointer-returning function name should resolve");
+    }
+}

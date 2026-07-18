@@ -30,7 +30,6 @@ fn bench_encode_320x240(c: &mut Criterion) {
         quantizer: 100,
         speed: 10, // fastest preset to keep bench duration reasonable
         keyframe_interval: 240,
-        ..Default::default()
     };
 
     let frame = grey_frame(320, 240);

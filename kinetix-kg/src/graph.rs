@@ -139,3 +139,63 @@ impl KnowledgeGraph {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> KnowledgeGraph {
+        let mut g = KnowledgeGraph::new();
+        let a = g.add_node(NodeKind::Function {
+            name: "decode".into(),
+        });
+        let b = g.add_node(NodeKind::Function {
+            name: "parse".into(),
+        });
+        g.add_edge(a, b, EdgeKind::Calls);
+        g
+    }
+
+    #[test]
+    fn add_node_assigns_sequential_ids() {
+        let mut g = KnowledgeGraph::new();
+        let a = g.add_node(NodeKind::Function { name: "a".into() });
+        let b = g.add_node(NodeKind::Function { name: "b".into() });
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert_eq!(g.nodes.len(), 2);
+    }
+
+    #[test]
+    fn predecessors_and_successors() {
+        let g = sample();
+        assert_eq!(g.successors(0), vec![1]);
+        assert_eq!(g.predecessors(1), vec![0]);
+        assert!(g.successors(1).is_empty());
+        assert!(g.predecessors(0).is_empty());
+    }
+
+    #[test]
+    fn nodes_by_kind_filters() {
+        let g = sample();
+        let funcs = g.nodes_by_kind(|k| matches!(k, NodeKind::Function { .. }));
+        assert_eq!(funcs.len(), 2);
+    }
+
+    #[test]
+    fn json_round_trips() {
+        let g = sample();
+        let json = g.to_json().unwrap();
+        let back = KnowledgeGraph::from_json(&json).unwrap();
+        assert_eq!(back.nodes.len(), g.nodes.len());
+        assert_eq!(back.edges.len(), g.edges.len());
+    }
+
+    #[test]
+    fn stats_reports_counts() {
+        let g = sample();
+        let s = g.stats();
+        assert!(s.contains("nodes=2"));
+        assert!(s.contains("functions=2"));
+    }
+}

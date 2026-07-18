@@ -11,9 +11,10 @@ pub mod boxes;
 pub mod container;
 
 pub use boxes::{
-    parse_box_header, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco, parse_stsc, parse_stss,
-    parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box, FtypBox, MdhdBox, MvhdBox, StcoBox,
-    StscBox, StscEntry, StssBox, StszBox, SttsBox, SttsEntry, TkhdBox,
+    parse_box_header, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco, parse_stsc, parse_stsd,
+    parse_stss, parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box, FtypBox, MdhdBox, MvhdBox,
+    SampleEntry, StcoBox, StscBox, StscEntry, StsdBox, StssBox, StszBox, SttsBox, SttsEntry,
+    TkhdBox,
 };
 pub use container::{parse_mp4, Mp4Track};
 
@@ -23,14 +24,28 @@ use crate::Demuxer;
 
 /// Stateful MP4 demuxer backed by an in-memory byte buffer.
 ///
+/// After construction each [`Mp4Track`] exposes its `media_type` and the
+/// `codec` identified from the track's `stsd` sample entry, so callers can
+/// route packets to the right decoder.
+///
 /// # Examples
 ///
 /// ```rust,no_run
 /// use kinetix_demux::mp4::Mp4Demuxer;
+/// use kinetix_core::codec::{CodecId, MediaType};
 ///
 /// let data = std::fs::read("video.mp4").unwrap();
-/// let mut demuxer = Mp4Demuxer::new(data).unwrap();
-/// println!("tracks: {}", demuxer.tracks().len());
+/// let demuxer = Mp4Demuxer::new(data).unwrap();
+/// for track in demuxer.tracks() {
+///     match track.media_type {
+///         MediaType::Video => println!("video track, codec = {:?}", track.codec),
+///         MediaType::Audio => println!("audio track, codec = {:?}", track.codec),
+///         MediaType::Other => println!("other track"),
+///     }
+///     if track.codec == Some(CodecId::H264) {
+///         println!("  -> H.264, {}x{}", track.width, track.height);
+///     }
+/// }
 /// ```
 pub struct Mp4Demuxer {
     data: Vec<u8>,

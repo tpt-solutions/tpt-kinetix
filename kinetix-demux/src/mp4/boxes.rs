@@ -440,3 +440,74 @@ pub fn parse_stsc(input: &[u8]) -> IResult<&[u8], StscBox> {
     )(input)?;
     Ok((input, StscBox { entries }))
 }
+
+// ---------------------------------------------------------------------------
+// stsd
+// ---------------------------------------------------------------------------
+
+/// A single sample entry inside an `stsd` box.
+///
+/// Only the four-character format code (e.g. `avc1`, `mp4a`) is retained here
+/// alongside the raw entry payload.  The format code is sufficient for codec
+/// identification; the payload in [`SampleEntry::extra`] is available for
+/// callers that need codec-specific configuration (e.g. the `avcC` box for
+/// H.264).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleEntry {
+    /// The sample-entry format four-character code (the codec fourcc).
+    pub format: [u8; 4],
+    /// The remaining bytes of the sample entry after its box header.
+    pub extra: Vec<u8>,
+}
+
+/// `stsd` (Sample Description) box.
+#[derive(Debug, Clone)]
+pub struct StsdBox {
+    /// One entry per sample description; the first is normally the codec used.
+    pub entries: Vec<SampleEntry>,
+}
+
+impl StsdBox {
+    /// Returns the format fourcc of the first sample entry, if any.
+    ///
+    /// This is the codec identifier for the track.
+    pub fn codec_fourcc(&self) -> Option<[u8; 4]> {
+        self.entries.first().map(|e| e.format)
+    }
+}
+
+/// Parses the payload of an `stsd` box.
+///
+/// The `stsd` payload is a full box (version + flags) followed by an
+/// `entry_count` and then that many child sample-entry boxes.  Each child box
+/// uses the standard box header, whose type *is* the codec fourcc.
+pub fn parse_stsd(input: &[u8]) -> IResult<&[u8], StsdBox> {
+    let (input, _version) = be_u8(input)?;
+    let (input, _flags) = take(3usize)(input)?;
+    let (mut input, entry_count) = be_u32(input)?;
+
+    let mut entries = Vec::with_capacity(entry_count as usize);
+    for _ in 0..entry_count {
+        // Each entry is a box: [size u32][type 4] then payload.
+        let (after_hdr, hdr) = parse_box_header(input)?;
+        let header_len = input.len() - after_hdr.len();
+        let payload_len = (hdr.size as usize).saturating_sub(header_len);
+        // Clamp to available bytes to stay panic-free on malformed input.
+        let payload_len = payload_len.min(after_hdr.len());
+        let (extra, rest) = after_hdr.split_at(payload_len);
+
+        entries.push(SampleEntry {
+            format: hdr.box_type,
+            extra: extra.to_vec(),
+        });
+        input = rest;
+
+        if hdr.size == 0 {
+            // size==0 means "rest of buffer"; nothing more to read.
+            input = &[];
+            break;
+        }
+    }
+
+    Ok((input, StsdBox { entries }))
+}

@@ -46,3 +46,30 @@ impl CAst {
         &self.language
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_function() {
+        let ast = CAst::from_source("int add(int a, int b) { return a + b; }").unwrap();
+        let root = ast.root_node();
+        assert_eq!(root.kind(), "translation_unit");
+        assert!(!root.has_error());
+        assert!(root.named_child_count() >= 1);
+    }
+
+    #[test]
+    fn source_round_trips() {
+        let src = "void f(void) {}";
+        let ast = CAst::from_source(src).unwrap();
+        assert_eq!(ast.source(), src);
+    }
+
+    #[test]
+    fn empty_source_is_ok() {
+        let ast = CAst::from_source("").unwrap();
+        assert_eq!(ast.root_node().kind(), "translation_unit");
+    }
+}

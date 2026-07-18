@@ -5,10 +5,12 @@
 //!
 //! - [`error`] — the top-level [`error::KinetixError`] enum
 //! - [`timestamp`] — rational media timestamps
+//! - [`codec`] — codec and media-type identifiers
 //! - [`pixel_format`] — supported pixel / chroma-sampling formats
 //! - [`frame`] — decoded [`frame::VideoFrame`]
 //! - [`packet`] — compressed [`packet::Packet`] as produced by a demuxer
 
+pub mod codec;
 pub mod error;
 pub mod frame;
 pub mod packet;
@@ -16,6 +18,7 @@ pub mod pixel_format;
 pub mod timestamp;
 
 // Convenience re-exports of the most commonly used types.
+pub use codec::{CodecId, MediaType};
 pub use error::KinetixError;
 pub use frame::VideoFrame;
 pub use packet::Packet;

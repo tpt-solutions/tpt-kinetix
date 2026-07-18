@@ -30,30 +30,30 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ## Phase 1 — Knowledge Graph Tooling (AI-assisted codec ingestion)
 
-- [ ] Research/choose C source ingestion approach (`tree-sitter-c` vs `clang`/`libclang` bindings) and document tradeoffs
-- [ ] Implement C source ingestion module in `kinetix-kg`: parse FFmpeg's H.264 decoder C source into an AST
-- [ ] Design the knowledge graph schema (nodes: parsing states, syntax elements, macroblock states; edges: transitions, data dependencies)
-- [ ] Implement extraction pass: walk AST → build Bitstream Parsing Tree representation
-- [ ] Implement extraction pass: walk AST → build Macroblock/State Machine representation
-- [ ] Implement graph serialization (e.g. JSON or a graph-native format) for inspection/debugging
-- [ ] Implement dependency analysis: identify independent decode units (e.g. slice-level independence) from the graph
-- [ ] Implement Rust codegen layer: emit decoder scaffolding (structs, state enums, parse function stubs) from the graph
-- [ ] Implement `rayon` parallel-iterator injection at points the dependency analysis marks independent
-- [ ] Add a CLI entry point (`kinetix-kg` binary or subcommand) to run ingestion → graph → codegen end-to-end
-- [ ] Validate tooling output against real FFmpeg H.264 decoder source (`h264dec.c` et al.) as the proof-of-concept target
-- [ ] Write developer docs on how to run the KG tool against a new codec's C source
+- [x] Research/choose C source ingestion approach (`tree-sitter-c` vs `clang`/`libclang` bindings) and document tradeoffs
+- [x] Implement C source ingestion module in `kinetix-kg`: parse FFmpeg's H.264 decoder C source into an AST
+- [x] Design the knowledge graph schema (nodes: parsing states, syntax elements, macroblock states; edges: transitions, data dependencies)
+- [x] Implement extraction pass: walk AST → build Bitstream Parsing Tree representation
+- [x] Implement extraction pass: walk AST → build Macroblock/State Machine representation
+- [x] Implement graph serialization (e.g. JSON or a graph-native format) for inspection/debugging
+- [x] Implement dependency analysis: identify independent decode units (e.g. slice-level independence) from the graph
+- [x] Implement Rust codegen layer: emit decoder scaffolding (structs, state enums, parse function stubs) from the graph
+- [x] Implement `rayon` parallel-iterator injection at points the dependency analysis marks independent
+- [x] Add a CLI entry point (`kinetix-kg` binary or subcommand) to run ingestion → graph → codegen end-to-end
+- [x] Validate tooling output against real FFmpeg H.264 decoder source (`h264dec.c` et al.) as the proof-of-concept target
+- [x] Write developer docs on how to run the KG tool against a new codec's C source
 
 ## Phase 2 — Container / Demux Layer
 
-- [ ] Implement `nom`-based MP4/ISO-BMFF box parser (ftyp, moov, mdat, trak, mdia, etc.) in `kinetix-demux`
-- [ ] Implement track/stream extraction (video/audio track discovery, codec identification via sample entry boxes)
-- [ ] Implement sample/chunk table parsing (stss, stts, stsz, stco/co64) for random access and timing
-- [ ] Implement packet/frame extraction API exposed to `kinetix-core` types
-- [ ] Add unit tests using small known-good MP4 fixtures
-- [ ] Set up `cargo-fuzz` target for the MP4 box parser
-- [ ] Collect/generate a corpus of malformed MP4 samples (fuzzer-found + hand-crafted) for regression testing
+- [x] Implement `nom`-based MP4/ISO-BMFF box parser (ftyp, moov, mdat, trak, mdia, etc.) in `kinetix-demux`
+- [x] Implement track/stream extraction (video/audio track discovery, codec identification via sample entry boxes)
+- [x] Implement sample/chunk table parsing (stss, stts, stsz, stco/co64) for random access and timing
+- [x] Implement packet/frame extraction API exposed to `kinetix-core` types
+- [x] Add unit tests using small known-good MP4 fixtures
+- [x] Set up `cargo-fuzz` target for the MP4 box parser
+- [x] Collect/generate a corpus of malformed MP4 samples (fuzzer-found + hand-crafted) for regression testing
 - [ ] (Stretch) Implement basic MKV/WebM (EBML) parsing support
-- [ ] Document demux crate's public API with doc examples
+- [x] Document demux crate's public API with doc examples
 
 ## Phase 3 — H.264 Decoder (via KG pipeline)
 

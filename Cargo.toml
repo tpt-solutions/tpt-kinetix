@@ -52,3 +52,18 @@ kinetix-h264 = { path = "kinetix-h264" }
 kinetix-av1 = { path = "kinetix-av1" }
 kinetix-pipeline = { path = "kinetix-pipeline" }
 kinetix-stream = { path = "kinetix-stream" }
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+incremental = true
+
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package.rav1e]
+opt-level = 3
+
+[profile.dev.package.tree-sitter]
+opt-level = 3
