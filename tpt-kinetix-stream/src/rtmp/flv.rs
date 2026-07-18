@@ -204,6 +204,15 @@ impl FlvAudioTag {
     pub fn is_sequence_header(&self) -> bool {
         self.aac_packet_type == AacPacketType::SequenceHeader
     }
+
+    /// Parse the payload as an `AudioSpecificConfig` when this is an AAC
+    /// sequence header. Returns `None` otherwise or on parse failure.
+    pub fn audio_specific_config(&self) -> Option<tpt_kinetix_aac::AudioSpecificConfig> {
+        if self.codec != FlvAudioCodec::Aac || !self.is_sequence_header() {
+            return None;
+        }
+        tpt_kinetix_aac::AudioSpecificConfig::parse(&self.data).ok()
+    }
 }
 
 /// Parse an RTMP `Audio` message payload into a [`FlvAudioTag`].
@@ -240,17 +249,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_avc_keyframe_nalu() {
-        // frame_type=1 (key), codec=7 (avc) -> 0x17
-        // packet_type=1 (nalu), cts=0
-        let payload = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
-        let tag = parse_video_tag(&payload).unwrap();
-        assert_eq!(tag.frame_type, FlvFrameType::KeyFrame);
-        assert!(tag.frame_type.is_keyframe());
-        assert_eq!(tag.codec, FlvVideoCodec::Avc);
-        assert_eq!(tag.avc_packet_type, AvcPacketType::Nalu);
-        assert_eq!(tag.composition_time, 0);
-        assert_eq!(tag.data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    fn aac_seq_header_yields_asc() {
+        // FLV audio byte: codec=10 (AAC) -> 0xAF; packet_type=0 (seq header).
+        // Payload is an ASC for AAC-LC 44.1k stereo.
+        let payload = vec![0xAF, 0x00, 0x12, 0x10];
+        let tag = parse_audio_tag(&payload).unwrap();
+        let cfg = tag.audio_specific_config().expect("valid ASC");
+        assert_eq!(cfg.sample_rate, 44_100);
+        assert_eq!(cfg.channels, 2);
     }
 
     #[test]

@@ -1446,6 +1446,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpt-kinetix-aac"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+]
+
+[[package]]
 name = "tpt-kinetix-av1"
 version = "0.1.0"
 dependencies = [
@@ -1465,6 +1473,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tpt-kinetix-aac",
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
@@ -1557,6 +1566,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "tpt-kinetix-aac",
  "tracing",
 ]
 

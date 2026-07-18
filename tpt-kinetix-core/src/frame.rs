@@ -32,3 +32,39 @@ impl VideoFrame {
         Some(bits.div_ceil(8))
     }
 }
+
+/// Interleaved sample format for decoded audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SampleFormat {
+    /// Signed 16-bit interleaved PCM.
+    S16,
+    /// 32-bit float interleaved PCM.
+    F32,
+}
+
+/// A decoded audio frame: a block of interleaved PCM samples.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFrame {
+    /// Presentation timestamp — when this block should be played.
+    pub pts: Timestamp,
+    /// Raw interleaved PCM sample bytes. Layout depends on `sample_format`.
+    pub data: Vec<u8>,
+    /// Sample rate in Hz (e.g. 44_100, 48_000).
+    pub sample_rate: u32,
+    /// Number of interleaved channels.
+    pub channels: u8,
+    /// Sample format of `data`.
+    pub sample_format: SampleFormat,
+}
+
+impl AudioFrame {
+    /// Number of samples per channel in this frame.
+    pub fn samples_per_channel(&self) -> usize {
+        let bytes_per_sample = match self.sample_format {
+            SampleFormat::S16 => 2,
+            SampleFormat::F32 => 4,
+        };
+        let denom = bytes_per_sample * self.channels.max(1) as usize;
+        self.data.len().checked_div(denom).unwrap_or(0)
+    }
+}

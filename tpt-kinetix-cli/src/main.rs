@@ -129,6 +129,7 @@ fn decoder_capabilities_for(
     match codec {
         Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
         Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
+        Some(CodecId::Aac) => Some(tpt_kinetix_aac::AacDecoder::new().capabilities()),
         _ => None,
     }
 }

@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tokio = { version = "1.38", features = ["full"] }
 bytes = "1.5"
 nom = { workspace = true }
+tpt-kinetix-aac = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

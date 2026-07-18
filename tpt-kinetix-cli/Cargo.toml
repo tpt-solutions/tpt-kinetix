@@ -26,5 +26,6 @@ tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-h264 = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
+tpt-kinetix-aac = { workspace = true }
 tpt-kinetix-pipeline = { workspace = true }
 tpt-kinetix-stream = { workspace = true }

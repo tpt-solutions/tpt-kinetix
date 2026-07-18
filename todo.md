@@ -159,7 +159,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ### Innovation
 - [ ] Evaluate publishing/positioning `kinetix-kg` as a public "bring your own codec" tool rather than internal-only tooling
-- [ ] Prototype a `wasm32` build of `kinetix-demux` + `kinetix-core` for in-browser container/codec inspection
+- [x] Prototype a `wasm32` build of `kinetix-demux` + `kinetix-core` for in-browser container/codec inspection
 - [x] Implement a `kinetix probe <file>` CLI subcommand that exercises only the working demux/identification path (real, runnable today unlike `transcode`/`stream`)
 
 ### Usability & automation

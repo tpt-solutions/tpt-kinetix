@@ -1,0 +1,17 @@
+[package]
+name = "tpt-kinetix-aac"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "AAC audio bitstream parsing (ADTS, AudioSpecificConfig) for the TPT Kinetix engine"
+keywords = ["aac", "audio", "adts", "codec", "parser"]
+categories = ["multimedia", "parser-implementations"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-aac"
+
+[dependencies]
+thiserror = { workspace = true }
+tpt-kinetix-core = { workspace = true }

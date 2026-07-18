@@ -26,7 +26,7 @@ pub use capabilities::DecoderCapabilities;
 pub use codec::{CodecId, MediaType};
 pub use encode::{EncodeConfig, RateControl, SpeedPreset};
 pub use error::KinetixError;
-pub use frame::VideoFrame;
+pub use frame::{AudioFrame, SampleFormat, VideoFrame};
 pub use packet::Packet;
 pub use pixel_format::PixelFormat;
 pub use timestamp::Timestamp;
