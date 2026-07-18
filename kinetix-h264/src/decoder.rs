@@ -27,6 +27,10 @@ pub struct H264Decoder {
     /// Decoded Picture Buffer — stores reference frames for inter prediction.
     dpb: Vec<VideoFrame>,
     frame_count: u64,
+    /// When `true` (the default), macroblock rows are reconstructed with `rayon`
+    /// parallel iterators. Set to `false` to force serial reconstruction, which
+    /// is useful for benchmarking the parallel speedup.
+    parallel: bool,
 }
 
 impl H264Decoder {
@@ -36,7 +40,32 @@ impl H264Decoder {
             pps_store: HashMap::new(),
             dpb: Vec::new(),
             frame_count: 0,
+            parallel: true,
         }
+    }
+
+    /// Enable or disable `rayon` parallel macroblock-row reconstruction.
+    ///
+    /// Parallel reconstruction is enabled by default. Disabling it is primarily
+    /// useful for benchmarks that compare single-threaded vs. parallel throughput.
+    pub fn set_parallel(&mut self, parallel: bool) {
+        self.parallel = parallel;
+    }
+
+    /// Builder-style variant of [`H264Decoder::set_parallel`].
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
+        self
+    }
+
+    /// Directly insert a parsed SPS into the decoder's parameter-set store.
+    ///
+    /// This is primarily intended for tests and benchmarks that need to drive
+    /// slice reconstruction at a chosen resolution without hand-crafting a
+    /// byte-exact SPS bitstream.
+    #[doc(hidden)]
+    pub fn insert_sps(&mut self, sps: SeqParameterSet) {
+        self.sps_store.insert(sps.seq_parameter_set_id, sps);
     }
 
     /// Decode a compressed bitstream [`Packet`] into a [`VideoFrame`].
@@ -127,33 +156,37 @@ impl H264Decoder {
 
         // Use rayon to process macroblock rows concurrently.
         // Each row writes to a disjoint 16-row band of the luma/chroma planes.
-        let row_results: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = mb_rows_data
-            .par_iter()
-            .enumerate()
-            .map(|(row_idx, row_mbs)| {
-                let row_height = if (row_idx + 1) * 16 > height as usize {
-                    height as usize - row_idx * 16
-                } else {
-                    16
-                };
-                let luma_row_size = luma_stride * row_height;
-                let chroma_row_size = chroma_stride * (row_height / 2).max(1);
-                let mut luma_row = vec![128u8; luma_row_size];
-                let mut cb_row = vec![128u8; chroma_row_size];
-                let mut cr_row = vec![128u8; chroma_row_size];
-                for (col_idx, mb) in row_mbs.iter().enumerate() {
-                    mb.reconstruct_luma(&mut luma_row, col_idx as u32, 0, luma_stride);
-                    mb.reconstruct_chroma(
-                        &mut cb_row,
-                        &mut cr_row,
-                        col_idx as u32,
-                        0,
-                        chroma_stride,
-                    );
-                }
-                (luma_row, cb_row, cr_row)
-            })
-            .collect();
+        let reconstruct_row = |row_idx: usize, row_mbs: &Vec<Macroblock>| {
+            let row_height = if (row_idx + 1) * 16 > height as usize {
+                height as usize - row_idx * 16
+            } else {
+                16
+            };
+            let luma_row_size = luma_stride * row_height;
+            let chroma_row_size = chroma_stride * (row_height / 2).max(1);
+            let mut luma_row = vec![128u8; luma_row_size];
+            let mut cb_row = vec![128u8; chroma_row_size];
+            let mut cr_row = vec![128u8; chroma_row_size];
+            for (col_idx, mb) in row_mbs.iter().enumerate() {
+                mb.reconstruct_luma(&mut luma_row, col_idx as u32, 0, luma_stride);
+                mb.reconstruct_chroma(&mut cb_row, &mut cr_row, col_idx as u32, 0, chroma_stride);
+            }
+            (luma_row, cb_row, cr_row)
+        };
+
+        let row_results: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = if self.parallel {
+            mb_rows_data
+                .par_iter()
+                .enumerate()
+                .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
+                .collect()
+        } else {
+            mb_rows_data
+                .iter()
+                .enumerate()
+                .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
+                .collect()
+        };
 
         for (row_idx, (luma_row, cb_row, cr_row)) in row_results.iter().enumerate() {
             let y_off = row_idx * 16 * luma_stride;

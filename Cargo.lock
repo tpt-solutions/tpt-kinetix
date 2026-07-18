@@ -694,8 +694,10 @@ dependencies = [
 name = "kinetix-test-utils"
 version = "0.1.0"
 dependencies = [
+ "kinetix-av1",
  "kinetix-core",
  "kinetix-demux",
+ "kinetix-h264",
  "proptest",
 ]
 

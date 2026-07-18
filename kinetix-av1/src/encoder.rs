@@ -2,7 +2,8 @@
 
 use anyhow::Context as _;
 use kinetix_core::{
-    frame::VideoFrame, packet::Packet, pixel_format::PixelFormat, timestamp::Timestamp,
+    encode::EncodeConfig, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
+    timestamp::Timestamp,
 };
 use rav1e::prelude::*;
 
@@ -36,6 +37,31 @@ impl Default for Av1EncoderConfig {
     }
 }
 
+impl From<EncodeConfig> for Av1EncoderConfig {
+    /// Map a codec-agnostic [`EncodeConfig`] onto AV1 encoder settings.
+    ///
+    /// Rate control, speed preset, and keyframe interval are translated through
+    /// the shared `kinetix-core` types so callers never need to reach into
+    /// codec-specific knobs.
+    fn from(cfg: EncodeConfig) -> Self {
+        Av1EncoderConfig {
+            width: cfg.width,
+            height: cfg.height,
+            bitrate: cfg.bitrate(),
+            quantizer: cfg.quantizer(),
+            speed: cfg.speed.to_speed(),
+            keyframe_interval: cfg.keyframe_interval,
+        }
+    }
+}
+
+impl Av1EncoderConfig {
+    /// Build AV1 encoder settings from a codec-agnostic [`EncodeConfig`].
+    pub fn from_encode_config(cfg: EncodeConfig) -> Self {
+        cfg.into()
+    }
+}
+
 /// Stateful AV1 encoder wrapping `rav1e`.
 pub struct Av1Encoder {
     context: Context<u8>,
@@ -60,6 +86,11 @@ impl Av1Encoder {
             .with_context(|| "rav1e Config::new_context failed")?;
 
         Ok(Self { context })
+    }
+
+    /// Build a new encoder from a codec-agnostic [`EncodeConfig`].
+    pub fn from_encode_config(config: EncodeConfig) -> anyhow::Result<Self> {
+        Self::new(&Av1EncoderConfig::from(config))
     }
 
     /// Encode one [`VideoFrame`] (yuv420p) and return a packet if one is ready.

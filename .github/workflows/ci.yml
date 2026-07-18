@@ -85,3 +85,6 @@ jobs:
       - name: Check fuzz targets compile (av1)
         run: cargo fuzz build fuzz_obu_parse
         working-directory: kinetix-av1
+      - name: Check fuzz targets compile (h264)
+        run: cargo fuzz build fuzz_h264_nal
+        working-directory: kinetix-h264

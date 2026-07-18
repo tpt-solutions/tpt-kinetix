@@ -1,0 +1,55 @@
+name: Fuzz (scheduled)
+
+# Runs the fuzz targets for a bounded time on a schedule (nightly) and on manual
+# dispatch. The per-PR `fuzz-check` job in ci.yml only *compiles* the targets;
+# this workflow actually *executes* them to surface new crashes.
+
+on:
+  schedule:
+    # 03:17 UTC every day
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Seconds to run each fuzz target"
+        required: false
+        default: "120"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Run fuzz targets
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: kinetix-demux
+            target: fuzz_mp4_box
+          - crate: kinetix-av1
+            target: fuzz_obu_parse
+          - crate: kinetix-h264
+            target: fuzz_h264_nal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run ${{ matrix.target }}
+        working-directory: ${{ matrix.crate }}
+        run: |
+          MAX_TIME="${{ github.event.inputs.max_total_time || '120' }}"
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$MAX_TIME
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: ${{ matrix.crate }}/fuzz/artifacts/**
+          if-no-files-found: ignore

@@ -1,0 +1,21 @@
+[package]
+name = "kinetix-h264-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kinetix-h264 = { path = ".." }
+kinetix-core = { path = "../../kinetix-core" }
+
+[[bin]]
+name = "fuzz_h264_nal"
+path = "fuzz_targets/fuzz_h264_nal.rs"
+test = false
+doc = false

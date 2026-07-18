@@ -9,8 +9,10 @@
 //! - [`pixel_format`] — supported pixel / chroma-sampling formats
 //! - [`frame`] — decoded [`frame::VideoFrame`]
 //! - [`packet`] — compressed [`packet::Packet`] as produced by a demuxer
+//! - [`encode`] — codec-agnostic encoder configuration
 
 pub mod codec;
+pub mod encode;
 pub mod error;
 pub mod frame;
 pub mod packet;
@@ -19,6 +21,7 @@ pub mod timestamp;
 
 // Convenience re-exports of the most commonly used types.
 pub use codec::{CodecId, MediaType};
+pub use encode::{EncodeConfig, RateControl, SpeedPreset};
 pub use error::KinetixError;
 pub use frame::VideoFrame;
 pub use packet::Packet;

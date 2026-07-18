@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Shared test helpers for the TPT Kinetix workspace"
+publish = false
 
 [dependencies]
 kinetix-core = { workspace = true }
@@ -13,3 +14,5 @@ kinetix-core = { workspace = true }
 [dev-dependencies]
 proptest = "1.5"
 kinetix-demux = { workspace = true }
+kinetix-h264 = { workspace = true }
+kinetix-av1 = { workspace = true }

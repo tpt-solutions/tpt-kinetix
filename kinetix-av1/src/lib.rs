@@ -13,6 +13,13 @@
 //! [`kinetix_core::Packet`] types. It is consumed by `kinetix-pipeline`, which schedules decode
 //! work across rayon thread-pool workers.
 
+//! # Status
+//!
+//! The **encoder** ([`Av1Encoder`], backed by `rav1e`) is functional. The
+//! **decoder** ([`Av1Decoder`]) currently parses OBUs and the sequence header
+//! but emits placeholder (grey) frames rather than reconstructing pixels — full
+//! AV1 frame reconstruction is future work. See the crate README for details.
+
 pub mod decoder;
 pub mod encoder;
 pub mod obu;
