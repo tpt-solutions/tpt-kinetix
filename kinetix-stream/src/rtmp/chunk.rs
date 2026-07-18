@@ -218,6 +218,121 @@ impl Default for ChunkParser {
     }
 }
 
+/// A fully reassembled RTMP message (all its chunks concatenated).
+#[derive(Debug, Clone)]
+pub struct RtmpMessage {
+    /// The message type id (see [`MessageTypeId`]).
+    pub message_type_id: u8,
+    /// The message stream id.
+    pub message_stream_id: u32,
+    /// The (absolute) timestamp of the message.
+    pub timestamp: u32,
+    /// The complete message payload.
+    pub payload: Vec<u8>,
+}
+
+/// Reassembles RTMP chunk streams into complete [`RtmpMessage`]s.
+///
+/// Feed raw bytes with [`ChunkAssembler::push`]; it buffers incomplete data and
+/// returns whatever complete messages it can decode. Chunks belonging to the
+/// same message (split across `chunk_size` boundaries) are concatenated using
+/// the per-chunk-stream continuation state.
+pub struct ChunkAssembler {
+    parser: ChunkParser,
+    buf: Vec<u8>,
+    /// In-progress payload accumulation per chunk-stream id.
+    partial: HashMap<u32, PartialMessage>,
+}
+
+struct PartialMessage {
+    header: ChunkHeader,
+    data: Vec<u8>,
+}
+
+impl ChunkAssembler {
+    /// Create a new assembler with the default (128-byte) chunk size.
+    pub fn new() -> Self {
+        Self {
+            parser: ChunkParser::new(),
+            buf: Vec::new(),
+            partial: HashMap::new(),
+        }
+    }
+
+    /// Update the negotiated chunk size (e.g. after a `SetChunkSize` message).
+    pub fn set_chunk_size(&mut self, size: u32) {
+        if size > 0 {
+            self.parser.chunk_size = size;
+        }
+    }
+
+    /// The current negotiated chunk size.
+    pub fn chunk_size(&self) -> u32 {
+        self.parser.chunk_size
+    }
+
+    /// Append `bytes` to the internal buffer and return any messages that became
+    /// complete as a result.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<RtmpMessage> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+
+        loop {
+            // Try to parse one chunk header from the front of the buffer.
+            let (header, after_header_len) = match self.parser.parse_chunk_header(&self.buf) {
+                Ok((h, remaining)) => (h, self.buf.len() - remaining.len()),
+                // Not enough bytes yet for a header — wait for more data.
+                Err(_) => break,
+            };
+
+            let cs_id = header.chunk_stream_id;
+
+            // Determine how many payload bytes this chunk carries.
+            let already = self.partial.get(&cs_id).map(|p| p.data.len()).unwrap_or(0);
+            let remaining_msg = (header.message_length as usize).saturating_sub(already);
+            let this_chunk = remaining_msg.min(self.parser.chunk_size as usize);
+
+            // Do we have the whole chunk payload buffered?
+            if self.buf.len() < after_header_len + this_chunk {
+                // Roll back: we consumed header parsing state but not enough
+                // payload. Since parse_chunk_header mutated prev_headers, we must
+                // still wait; leave buffer intact and break. (Header state is
+                // idempotent enough for the next attempt on the same bytes.)
+                break;
+            }
+
+            let payload = self.buf[after_header_len..after_header_len + this_chunk].to_vec();
+            // Remove consumed bytes from the front of the buffer.
+            self.buf.drain(..after_header_len + this_chunk);
+
+            let entry = self.partial.entry(cs_id).or_insert_with(|| PartialMessage {
+                header: header.clone(),
+                data: Vec::with_capacity(header.message_length as usize),
+            });
+            entry.header = header.clone();
+            entry.data.extend_from_slice(&payload);
+
+            if entry.data.len() >= header.message_length as usize {
+                let complete = self.partial.remove(&cs_id).expect("just inserted");
+                out.push(RtmpMessage {
+                    message_type_id: complete.header.message_type_id,
+                    message_stream_id: complete.header.message_stream_id,
+                    timestamp: complete.header.timestamp,
+                    payload: complete.data,
+                });
+            }
+        }
+
+        out
+    }
+}
+
+impl Default for ChunkAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Known RTMP message type IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -260,5 +375,85 @@ impl MessageTypeId {
             22 => Some(Self::Aggregate),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a Type-0 chunk (basic header cs_id=3) carrying `payload` as a single
+    /// chunk (payload must be <= chunk_size).
+    fn type0_chunk(type_id: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(0x03); // fmt=0, cs_id=3
+        v.extend_from_slice(&[0, 0, 0]); // timestamp
+        let len = payload.len() as u32;
+        v.extend_from_slice(&len.to_be_bytes()[1..]); // message_length (3 bytes)
+        v.push(type_id);
+        v.extend_from_slice(&stream_id.to_le_bytes()); // message_stream_id (LE)
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn parses_single_chunk_message() {
+        let mut asm = ChunkAssembler::new();
+        let chunk = type0_chunk(9 /* video */, 1, b"hello");
+        let msgs = asm.push(&chunk);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].message_type_id, 9);
+        assert_eq!(msgs[0].message_stream_id, 1);
+        assert_eq!(msgs[0].payload, b"hello");
+    }
+
+    #[test]
+    fn waits_for_incomplete_data() {
+        let mut asm = ChunkAssembler::new();
+        let chunk = type0_chunk(9, 1, b"partial-body");
+        // Feed only the first half.
+        let half = chunk.len() / 2;
+        assert!(asm.push(&chunk[..half]).is_empty());
+        // Feed the rest — now it completes.
+        let msgs = asm.push(&chunk[half..]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload, b"partial-body");
+    }
+
+    #[test]
+    fn reassembles_message_split_across_chunks() {
+        let mut asm = ChunkAssembler::new();
+        asm.set_chunk_size(4); // force multi-chunk messages
+        assert_eq!(asm.chunk_size(), 4);
+
+        // A 10-byte video message = 4 + 4 + 2 across three chunks.
+        // First chunk: Type-0 header + 4 payload bytes.
+        let mut bytes = Vec::new();
+        {
+            let mut v = Vec::new();
+            v.push(0x03);
+            v.extend_from_slice(&[0, 0, 0]);
+            v.extend_from_slice(&10u32.to_be_bytes()[1..]);
+            v.push(9);
+            v.extend_from_slice(&1u32.to_le_bytes());
+            v.extend_from_slice(b"AAAA");
+            bytes.extend_from_slice(&v);
+        }
+        // Continuation chunks: Type-3 (0xC3), 4 bytes then 2 bytes.
+        bytes.push(0xC3);
+        bytes.extend_from_slice(b"BBBB");
+        bytes.push(0xC3);
+        bytes.extend_from_slice(b"CC");
+
+        let msgs = asm.push(&bytes);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload, b"AAAABBBBCC");
+    }
+
+    #[test]
+    fn message_type_id_roundtrip() {
+        assert_eq!(MessageTypeId::from_u8(9), Some(MessageTypeId::Video));
+        assert_eq!(MessageTypeId::from_u8(8), Some(MessageTypeId::Audio));
+        assert_eq!(MessageTypeId::from_u8(200), None);
     }
 }
