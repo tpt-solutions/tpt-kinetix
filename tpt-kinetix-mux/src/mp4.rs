@@ -261,7 +261,7 @@ impl Mp4Muxer {
         // AVCDecoderConfigurationRecord
         let mut b = Vec::new();
         b.push(1); // configurationVersion
-        // profile/compat/level taken from the SPS payload (bytes after NAL header)
+                   // profile/compat/level taken from the SPS payload (bytes after NAL header)
         let (profile, compat, level) = if sps.len() >= 4 {
             (sps[1], sps[2], sps[3])
         } else {
@@ -465,8 +465,14 @@ mod tests {
     #[test]
     fn moov_contains_expected_boxes() {
         let bytes = sample_muxer().finish();
-        for ty in [b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"avc1", b"avcC"] {
-            assert!(find_box(&bytes, ty).is_some(), "missing box {:?}", std::str::from_utf8(ty));
+        for ty in [
+            b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"avc1", b"avcC",
+        ] {
+            assert!(
+                find_box(&bytes, ty).is_some(),
+                "missing box {:?}",
+                std::str::from_utf8(ty)
+            );
         }
     }
 

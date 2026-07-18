@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 
 use super::playlist::HlsPlaylist;
 use super::segment::HlsSegment;
+use super::ts::TsMuxer;
 
 /// Configuration for the HLS packager and its HTTP server.
 #[derive(Debug, Clone)]
@@ -85,6 +86,25 @@ impl HlsPackager {
     /// Return a reference to the current playlist state.
     pub fn playlist(&self) -> &HlsPlaylist {
         &self.playlist
+    }
+
+    /// Mux a batch of H.264 access units (AVCC form) into an MPEG-TS segment
+    /// and write it out via [`HlsPackager::write_segment`].
+    ///
+    /// Each element of `access_units` is `(avcc_bytes, pts_90khz, is_keyframe)`.
+    /// Returns the number of bytes written.
+    pub fn write_ts_segment(
+        &mut self,
+        access_units: &[(Vec<u8>, u64, bool)],
+    ) -> anyhow::Result<usize> {
+        let mut mux = TsMuxer::new();
+        for (avcc, pts, key) in access_units {
+            mux.write_access_unit(avcc, *pts, *key);
+        }
+        let ts = mux.finish();
+        let len = ts.len();
+        self.write_segment(&ts)?;
+        Ok(len)
     }
 
     /// Start a minimal HTTP/1.1 server (tokio-only, no external HTTP library)

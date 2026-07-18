@@ -151,8 +151,8 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ### Missing features
 - [x] Design and implement a muxer layer (MP4 at minimum) in `kinetix-demux` or a new `kinetix-mux` crate — currently no way to write out any container format
-- [ ] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
-- [ ] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
+- [x] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
+- [x] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
 - [ ] Add audio codec support (start with AAC decode/encode) — no audio path exists today
 - [ ] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
 - [ ] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker)

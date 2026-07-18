@@ -27,16 +27,23 @@ quickstart guide.
 ## Quickstart: RTMP ingest
 
 ```rust,no_run
-use tpt_kinetix_stream::rtmp::{RtmpServer, RtmpConfig, MessageTypeId};
+use tpt_kinetix_stream::rtmp::{RtmpServer, RtmpConfig, RtmpMediaEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let server = RtmpServer::new(RtmpConfig::default()) // binds 0.0.0.0:1935
-        .with_handler(|msg| {
-            if MessageTypeId::from_u8(msg.message_type_id) == Some(MessageTypeId::Video) {
-                // Forward `msg.payload` into tpt-kinetix-pipeline here.
-                println!("video message: {} bytes @ ts {}", msg.payload.len(), msg.timestamp);
+        .with_handler(|event| match event {
+            RtmpMediaEvent::PublishStart { stream_key } => {
+                println!("publish started: {stream_key}");
             }
+            RtmpMediaEvent::Video { timestamp, tag } => {
+                // Forward `tag.data` (AVCC NALUs) into tpt-kinetix-pipeline here.
+                println!("video @ {timestamp}: {} bytes", tag.data.len());
+            }
+            RtmpMediaEvent::Audio { timestamp, tag } => {
+                println!("audio @ {timestamp}: {} bytes", tag.data.len());
+            }
+            RtmpMediaEvent::PublishStop => println!("publish stopped"),
         });
     server.run().await
 }

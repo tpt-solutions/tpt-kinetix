@@ -1,11 +1,11 @@
 //! AV1 encoder backed by `rav1e`.
 
 use anyhow::Context as _;
+use rav1e::prelude::*;
 use tpt_kinetix_core::{
     encode::EncodeConfig, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
     timestamp::Timestamp,
 };
-use rav1e::prelude::*;
 
 /// Configuration for the AV1 encoder.
 #[derive(Debug, Clone)]
