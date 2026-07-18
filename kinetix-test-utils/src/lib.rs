@@ -4,9 +4,9 @@
 //! provides:
 //!
 //! - [`pixel_diff`] — PSNR and tolerance helpers for comparing decoded frames
-//! - [`reference`] — drive external reference decoders (`ffmpeg`, `dav1d`) and
-//!   diff their output against Kinetix decoders, skipping gracefully when the
-//!   binaries are unavailable
+//! - `reference` (see [`crate::reference`]) — drive external reference decoders
+//!   (`ffmpeg`, `dav1d`) and diff their output against Kinetix decoders, skipping
+//!   gracefully when the binaries are unavailable
 //! - [`synthetic`] — generate synthetic frames and minimal bitstreams
 //! - [`corpus`] — reusable malformed-input corpora for fuzz-regression tests
 
