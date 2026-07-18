@@ -1,8 +1,8 @@
 //! AV1 decoder state machine.
 
 use tpt_kinetix_core::{
-    error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
-    timestamp::Timestamp,
+    capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
+    pixel_format::PixelFormat, timestamp::Timestamp,
 };
 
 use crate::obu::{parse_obu_sequence, ObuType, SequenceHeaderObu};
@@ -11,6 +11,10 @@ use crate::obu::{parse_obu_sequence, ObuType, SequenceHeaderObu};
 pub struct Av1Decoder {
     sequence_header: Option<SequenceHeaderObu>,
     frame_count: u64,
+    /// When `true`, [`Av1Decoder::decode`] returns
+    /// [`KinetixError::NotPixelExact`] instead of emitting placeholder grey
+    /// frames. Off by default so existing pipelines keep working.
+    strict: bool,
 }
 
 impl Av1Decoder {
@@ -18,7 +22,51 @@ impl Av1Decoder {
         Self {
             sequence_header: None,
             frame_count: 0,
+            strict: false,
         }
+    }
+
+    /// Reports what this decoder can and cannot do.
+    ///
+    /// The AV1 decoder is **not yet pixel-exact**: it parses OBUs and the
+    /// sequence header but emits placeholder grey frames rather than real
+    /// reconstructed pixels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tpt_kinetix_av1::Av1Decoder;
+    ///
+    /// let caps = Av1Decoder::new().capabilities();
+    /// assert!(!caps.pixel_exact);
+    /// ```
+    pub fn capabilities(&self) -> DecoderCapabilities {
+        DecoderCapabilities {
+            codec: "AV1",
+            pixel_exact: false,
+            supports_cabac: false,
+            supports_cavlc: false,
+            supports_intra_prediction: false,
+            supports_inter_prediction: false,
+            supports_deblocking: false,
+            notes: "OBU + sequence-header parsing only; emits placeholder grey frames \
+                    (no tile/frame reconstruction)",
+        }
+    }
+
+    /// Enable strict mode.
+    ///
+    /// In strict mode, [`Av1Decoder::decode`] returns
+    /// [`KinetixError::NotPixelExact`] whenever it would otherwise emit a
+    /// placeholder frame.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
+    /// Builder-style variant of [`Av1Decoder::set_strict`].
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
     }
 
     /// Decode a compressed AV1 [`Packet`] into a [`VideoFrame`].
@@ -52,6 +100,14 @@ impl Av1Decoder {
 
         if !produced_frame {
             return Ok(None);
+        }
+
+        if self.strict {
+            return Err(KinetixError::NotPixelExact(
+                "AV1: frame reconstruction not implemented; only OBU/sequence-header parsing \
+                 (see Av1Decoder::capabilities)"
+                    .to_string(),
+            ));
         }
 
         // TODO(phase-4): decode tiles in parallel

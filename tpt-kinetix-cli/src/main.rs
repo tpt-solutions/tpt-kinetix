@@ -105,7 +105,30 @@ fn probe(input: &std::path::Path) -> Result<()> {
         if track.width != 0 || track.height != 0 {
             println!("    resolution: {}x{}", track.width, track.height);
         }
+
+        // Report decoder readiness so users know which tracks can actually be
+        // decoded pixel-exactly today.
+        if let Some(caps) = decoder_capabilities_for(track.codec) {
+            let status = if caps.pixel_exact {
+                "pixel-exact"
+            } else {
+                "NOT pixel-exact (placeholder output)"
+            };
+            println!("    decoder: {status} — {}", caps.notes);
+        }
     }
 
     Ok(())
+}
+
+/// Returns the [`DecoderCapabilities`] for a given codec, if a decoder exists.
+fn decoder_capabilities_for(
+    codec: Option<tpt_kinetix_core::codec::CodecId>,
+) -> Option<tpt_kinetix_core::capabilities::DecoderCapabilities> {
+    use tpt_kinetix_core::codec::CodecId;
+    match codec {
+        Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
+        Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
+        _ => None,
+    }
 }

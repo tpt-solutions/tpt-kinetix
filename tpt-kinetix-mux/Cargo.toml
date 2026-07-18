@@ -1,0 +1,20 @@
+[package]
+name = "tpt-kinetix-mux"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Container muxers (MP4/ISO-BMFF) for the TPT Kinetix media processing engine"
+keywords = ["mp4", "mux", "iso-bmff", "video", "muxer"]
+categories = ["multimedia", "encoding"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-mux"
+
+[dependencies]
+thiserror = { workspace = true }
+tpt-kinetix-core = { workspace = true }
+
+[dev-dependencies]
+tpt-kinetix-demux = { workspace = true }

@@ -1465,8 +1465,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+ "tpt-kinetix-h264",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tracing",
@@ -1517,6 +1519,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-c",
+]
+
+[[package]]
+name = "tpt-kinetix-mux"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
 ]
 
 [[package]]

@@ -146,11 +146,11 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Rename all crates from `kinetix-*` to `tpt-kinetix-*` (package names, directory names, path deps, `use`/`extern crate` references, binary names, README/docs/CI references) to match the `tpt-kinetix` repo name
 
 ### Bugs & correctness
-- [ ] Replace silent-wrong-output decode paths with an explicit typed error/capability signal: `kinetix-h264` (`decoder.rs:138-143`, skip-macroblock stubs) and `kinetix-av1` (`decoder.rs:27-28,57,98`, grey placeholder frames) should surface "not pixel-exact yet" instead of returning `Ok` with wrong data
-- [ ] Design and implement a `DecoderCapabilities` struct (e.g. `supports_cabac`, `pixel_exact`) exposed per codec so callers/CLI can detect incomplete decode paths programmatically
+- [x] Replace silent-wrong-output decode paths with an explicit typed error/capability signal: `kinetix-h264` (`decoder.rs:138-143`, skip-macroblock stubs) and `kinetix-av1` (`decoder.rs:27-28,57,98`, grey placeholder frames) should surface "not pixel-exact yet" instead of returning `Ok` with wrong data
+- [x] Design and implement a `DecoderCapabilities` struct (e.g. `supports_cabac`, `pixel_exact`) exposed per codec so callers/CLI can detect incomplete decode paths programmatically
 
 ### Missing features
-- [ ] Design and implement a muxer layer (MP4 at minimum) in `kinetix-demux` or a new `kinetix-mux` crate — currently no way to write out any container format
+- [x] Design and implement a muxer layer (MP4 at minimum) in `kinetix-demux` or a new `kinetix-mux` crate — currently no way to write out any container format
 - [ ] Complete RTMP AMF `connect`/`publish` negotiation and FLV depacketization in `kinetix-stream`
 - [ ] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
 - [ ] Add audio codec support (start with AAC decode/encode) — no audio path exists today

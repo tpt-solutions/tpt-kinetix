@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 use tpt_kinetix_core::{
-    error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
+    capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
+    pixel_format::PixelFormat,
 };
 
 use crate::{
@@ -31,6 +32,11 @@ pub struct H264Decoder {
     /// parallel iterators. Set to `false` to force serial reconstruction, which
     /// is useful for benchmarking the parallel speedup.
     parallel: bool,
+    /// When `true`, [`H264Decoder::decode`] returns
+    /// [`KinetixError::NotPixelExact`] instead of emitting placeholder frames.
+    /// Off by default so existing pipelines keep working; opt in when callers
+    /// need correctness guarantees.
+    strict: bool,
 }
 
 impl H264Decoder {
@@ -41,7 +47,53 @@ impl H264Decoder {
             dpb: Vec::new(),
             frame_count: 0,
             parallel: true,
+            strict: false,
         }
+    }
+
+    /// Reports what this decoder can and cannot do.
+    ///
+    /// The H.264 decoder is **not yet pixel-exact**: it parses the bitstream and
+    /// runs a scaffold reconstruction (CAVLC scaffold only, no CABAC, no
+    /// intra/inter prediction, no deblocking). Callers should check
+    /// [`DecoderCapabilities::pixel_exact`] before trusting output frames.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tpt_kinetix_h264::H264Decoder;
+    ///
+    /// let caps = H264Decoder::new().capabilities();
+    /// assert!(!caps.pixel_exact);
+    /// assert!(caps.is_incomplete());
+    /// ```
+    pub fn capabilities(&self) -> DecoderCapabilities {
+        DecoderCapabilities {
+            codec: "H.264",
+            pixel_exact: false,
+            supports_cabac: false,
+            supports_cavlc: true,
+            supports_intra_prediction: false,
+            supports_inter_prediction: false,
+            supports_deblocking: false,
+            notes: "bitstream + CAVLC scaffold only; reconstruction emits \
+                    placeholder pixels (no CABAC/prediction/deblocking)",
+        }
+    }
+
+    /// Enable strict mode.
+    ///
+    /// In strict mode, [`H264Decoder::decode`] returns
+    /// [`KinetixError::NotPixelExact`] for any slice it cannot decode
+    /// pixel-exactly, rather than returning placeholder frames.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
+    /// Builder-style variant of [`H264Decoder::set_strict`].
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
     }
 
     /// Enable or disable `rayon` parallel macroblock-row reconstruction.
@@ -96,6 +148,14 @@ impl H264Decoder {
                     }
                 }
                 NalUnitType::IdrSlice | NalUnitType::NonIdrSlice => {
+                    if self.strict {
+                        return Err(KinetixError::NotPixelExact(
+                            "H.264: no CABAC/intra/inter prediction or deblocking implemented \
+                             (see H264Decoder::capabilities)"
+                                .to_string(),
+                        ));
+                    }
+
                     // Look up the active SPS/PPS (use the first available as a fallback).
                     let sps = match self.sps_store.values().next() {
                         Some(s) => s,

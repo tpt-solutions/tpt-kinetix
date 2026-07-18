@@ -6,6 +6,7 @@ members = [
   "tpt-kinetix-h264",
   "tpt-kinetix-av1",
   "tpt-kinetix-kg",
+  "tpt-kinetix-mux",
   "tpt-kinetix-pipeline",
   "tpt-kinetix-stream",
   "tpt-kinetix-cli",
@@ -50,6 +51,7 @@ tpt-kinetix-core = { path = "tpt-kinetix-core" }
 tpt-kinetix-demux = { path = "tpt-kinetix-demux" }
 tpt-kinetix-h264 = { path = "tpt-kinetix-h264" }
 tpt-kinetix-av1 = { path = "tpt-kinetix-av1" }
+tpt-kinetix-mux = { path = "tpt-kinetix-mux" }
 tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline" }
 tpt-kinetix-stream = { path = "tpt-kinetix-stream" }
 

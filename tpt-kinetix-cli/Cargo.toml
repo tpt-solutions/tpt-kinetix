@@ -24,5 +24,7 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-h264 = { workspace = true }
+tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-pipeline = { workspace = true }
 tpt-kinetix-stream = { workspace = true }

@@ -10,7 +10,9 @@
 //! - [`frame`] — decoded [`frame::VideoFrame`]
 //! - [`packet`] — compressed [`packet::Packet`] as produced by a demuxer
 //! - [`encode`] — codec-agnostic encoder configuration
+//! - [`capabilities`] — per-decoder [`capabilities::DecoderCapabilities`] introspection
 
+pub mod capabilities;
 pub mod codec;
 pub mod encode;
 pub mod error;
@@ -20,6 +22,7 @@ pub mod pixel_format;
 pub mod timestamp;
 
 // Convenience re-exports of the most commonly used types.
+pub use capabilities::DecoderCapabilities;
 pub use codec::{CodecId, MediaType};
 pub use encode::{EncodeConfig, RateControl, SpeedPreset};
 pub use error::KinetixError;
