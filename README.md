@@ -178,8 +178,8 @@ coherent and avoids mixed-version combinations.
 Crates must be published to crates.io in dependency order to satisfy the registry resolver:
 
 1. `tpt-kinetix-core`
-2. `tpt-kinetix-demux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
-3. `tpt-kinetix-pipeline` *(depends on the four above)*
+2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
+3. `tpt-kinetix-pipeline` *(depends on the codec/demux crates above)*
 4. `tpt-kinetix-stream` *(independent of pipeline, but published after for consistency)*
 5. `tpt-kinetix-cli` *(depends on `tpt-kinetix-pipeline` and `tpt-kinetix-stream`)*
 
@@ -189,7 +189,7 @@ Before running `cargo publish` for the first time, **manually reserve each crate
 crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
 entry. This prevents name squatting. The names to reserve are:
 
-`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
+`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
 `tpt-kinetix-pipeline`, `tpt-kinetix-stream`, `tpt-kinetix-cli`
 
 ---

@@ -1,0 +1,60 @@
+# release-plz configuration for the TPT Kinetix workspace.
+#
+# The workspace uses a **shared version**: all crates are versioned and released
+# together. release-plz opens a single release PR bumping every crate, then
+# publishes them to crates.io in dependency order (core → codecs/demux/mux →
+# pipeline → stream → cli) automatically based on the dependency graph.
+
+[workspace]
+# Keep every crate on the same version number.
+dependencies_update = true
+# Group all crate changelog entries under the workspace root changelog too.
+changelog_update = true
+# git tag like "v0.1.0" for the shared release.
+git_tag_name = "v{{version}}"
+git_release_name = "v{{version}}"
+# Treat all crates as one release unit (shared version).
+release_always = true
+
+# Per-crate overrides: nothing is excluded; publish order is derived from the
+# path-dependency graph by cargo/release-plz.
+[[package]]
+name = "tpt-kinetix-core"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-demux"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-mux"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-h264"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-av1"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-kg"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-pipeline"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-stream"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-cli"
+publish = true
+
+# Internal test helpers are never published.
+[[package]]
+name = "tpt-kinetix-test-utils"
+release = false
