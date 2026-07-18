@@ -121,7 +121,8 @@ fn probe(input: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Returns the [`DecoderCapabilities`] for a given codec, if a decoder exists.
+/// Returns the [`tpt_kinetix_core::capabilities::DecoderCapabilities`] for a given
+/// codec, if a decoder exists.
 fn decoder_capabilities_for(
     codec: Option<tpt_kinetix_core::codec::CodecId>,
 ) -> Option<tpt_kinetix_core::capabilities::DecoderCapabilities> {

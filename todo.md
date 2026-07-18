@@ -175,6 +175,6 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Add an `examples/` directory with at least one runnable example per functional crate (e.g. `kinetix-demux/examples/probe_mp4.rs`, `kinetix-pipeline/examples/basic_transcode.rs`)
 - [x] Add a prominent "Current status" section near the top of the root README summarizing what works today vs. in-progress, mirroring the per-crate README limitations sections
 - [x] Add GitHub issue templates (`.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`) and a PR template referencing the `CONTRIBUTING.md` checklist
-- [ ] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" GitHub issues with file pointers
+- [x] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" candidates with file pointers (`docs/good-first-issues.md`; open the GitHub issues manually with the `good first issue` label)
 - [x] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md` (`templates/codec-crate`)
 - [x] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz` (`scripts/setup.sh`, `scripts/setup.ps1`, `.devcontainer/`)
