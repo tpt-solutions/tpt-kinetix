@@ -21,3 +21,11 @@ kinetix-core = { workspace = true }
 kinetix-demux = { workspace = true }
 kinetix-h264 = { workspace = true }
 kinetix-av1 = { workspace = true }
+
+[dev-dependencies]
+kinetix-test-utils = { path = "../kinetix-test-utils" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "transcode_throughput"
+harness = false

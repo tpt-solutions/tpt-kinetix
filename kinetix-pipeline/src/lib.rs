@@ -6,8 +6,9 @@
 
 pub mod channel;
 pub mod error;
+pub mod filter;
 pub mod pipeline;
 pub mod stage;
 
 pub use pipeline::Pipeline;
-pub use stage::{DecodeStage, DemuxStage, FilterStage, SinkStage};
+pub use stage::{DecodeStage, DemuxStage, EncodeStage, FilterStage, PacketSinkStage, SinkStage};

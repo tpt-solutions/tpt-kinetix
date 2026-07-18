@@ -667,11 +667,13 @@ name = "kinetix-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "crossbeam-channel",
  "kinetix-av1",
  "kinetix-core",
  "kinetix-demux",
  "kinetix-h264",
+ "kinetix-test-utils",
  "rayon",
  "thiserror 2.0.18",
  "tracing",

@@ -144,6 +144,27 @@ impl FilterStage {
             transform: Box::new(|f| f),
         }
     }
+
+    /// Constructs a filter that scales every YUV420p frame to `dst_w`x`dst_h`
+    /// using nearest-neighbour sampling.
+    ///
+    /// Non-YUV420p frames and frames already at the target size are forwarded
+    /// unchanged.
+    pub fn scale(dst_w: u32, dst_h: u32) -> Self {
+        Self {
+            transform: Box::new(move |f| crate::filter::scale_yuv420p(&f, dst_w, dst_h)),
+        }
+    }
+
+    /// Constructs a filter from an arbitrary per-frame closure.
+    pub fn from_fn<F>(f: F) -> Self
+    where
+        F: Fn(VideoFrame) -> VideoFrame + Send + 'static,
+    {
+        Self {
+            transform: Box::new(f),
+        }
+    }
 }
 
 impl Stage for FilterStage {
@@ -164,6 +185,92 @@ impl Stage for FilterStage {
                         output.send(PipelineMessage::Frame(transformed)).ok();
                     }
                     PipelineMessage::Flush => {
+                        output.send(PipelineMessage::Flush).ok();
+                        break;
+                    }
+                    other => {
+                        output.send(other).ok();
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── EncodeStage ──────────────────────────────────────────────────────────────
+
+/// Encode stage: receives decoded [`PipelineMessage::Frame`]s and emits
+/// compressed [`PipelineMessage::Packet`]s using the AV1 (`rav1e`) encoder.
+///
+/// On [`PipelineMessage::Flush`] the encoder is drained and any buffered
+/// packets are forwarded before the flush sentinel is propagated downstream.
+pub struct EncodeStage {
+    config: kinetix_core::encode::EncodeConfig,
+}
+
+impl EncodeStage {
+    /// Create an encode stage from a codec-agnostic [`kinetix_core::encode::EncodeConfig`].
+    pub fn new(config: kinetix_core::encode::EncodeConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Stage for EncodeStage {
+    fn name(&self) -> &'static str {
+        "encode"
+    }
+
+    fn spawn(
+        self: Box<Self>,
+        input: Receiver<PipelineMessage>,
+        output: Sender<PipelineMessage>,
+    ) -> JoinHandle<Result<(), KinetixError>> {
+        std::thread::spawn(move || {
+            let mut encoder: Option<kinetix_av1::Av1Encoder> = None;
+            let mut cfg = self.config;
+
+            for msg in input {
+                match msg {
+                    PipelineMessage::Frame(frame) => {
+                        // Lazily create the encoder sized to the first frame so
+                        // it matches actual decoded geometry.
+                        if encoder.is_none() {
+                            cfg.width = frame.width;
+                            cfg.height = frame.height;
+                            match kinetix_av1::Av1Encoder::from_encode_config(cfg) {
+                                Ok(e) => encoder = Some(e),
+                                Err(e) => {
+                                    output.send(PipelineMessage::Error(e.to_string())).ok();
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(enc) = encoder.as_mut() {
+                            match enc.encode_frame(&frame) {
+                                Ok(Some(pkt)) => {
+                                    output.send(PipelineMessage::Packet(pkt)).ok();
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    output.send(PipelineMessage::Error(e.to_string())).ok();
+                                }
+                            }
+                        }
+                    }
+                    PipelineMessage::Flush => {
+                        if let Some(enc) = encoder.as_mut() {
+                            match enc.flush() {
+                                Ok(packets) => {
+                                    for pkt in packets {
+                                        output.send(PipelineMessage::Packet(pkt)).ok();
+                                    }
+                                }
+                                Err(e) => {
+                                    output.send(PipelineMessage::Error(e.to_string())).ok();
+                                }
+                            }
+                        }
                         output.send(PipelineMessage::Flush).ok();
                         break;
                     }
@@ -227,8 +334,68 @@ impl Stage for SinkStage {
                     }
                     PipelineMessage::Error(e) => {
                         tracing::error!(stage = "sink", error = %e, "upstream error");
+                        return Err(KinetixError::Parse(format!("upstream stage error: {e}")));
                     }
                     PipelineMessage::Packet(_) => {}
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── PacketSinkStage ──────────────────────────────────────────────────────────
+
+/// Sink stage that collects compressed [`kinetix_core::packet::Packet`]s (e.g.
+/// the output of [`EncodeStage`]) into a shared `Vec` for inspection.
+pub struct PacketSinkStage {
+    /// Shared storage for collected packets.
+    pub packets: Arc<Mutex<Vec<kinetix_core::packet::Packet>>>,
+}
+
+impl PacketSinkStage {
+    /// Creates a new packet sink and returns it together with a clone of the
+    /// shared packet buffer.
+    pub fn new() -> (Self, Arc<Mutex<Vec<kinetix_core::packet::Packet>>>) {
+        let packets = Arc::new(Mutex::new(Vec::new()));
+        let stage = Self {
+            packets: Arc::clone(&packets),
+        };
+        (stage, packets)
+    }
+}
+
+impl Default for PacketSinkStage {
+    fn default() -> Self {
+        Self::new().0
+    }
+}
+
+impl Stage for PacketSinkStage {
+    fn name(&self) -> &'static str {
+        "packet_sink"
+    }
+
+    fn spawn(
+        self: Box<Self>,
+        input: Receiver<PipelineMessage>,
+        _output: Sender<PipelineMessage>,
+    ) -> JoinHandle<Result<(), KinetixError>> {
+        std::thread::spawn(move || {
+            for msg in input {
+                match msg {
+                    PipelineMessage::Packet(pkt) => {
+                        self.packets
+                            .lock()
+                            .expect("packet sink mutex poisoned")
+                            .push(pkt);
+                    }
+                    PipelineMessage::Flush => break,
+                    PipelineMessage::Error(e) => {
+                        tracing::error!(stage = "packet_sink", error = %e, "upstream error");
+                        return Err(KinetixError::Parse(format!("upstream stage error: {e}")));
+                    }
+                    PipelineMessage::Frame(_) => {}
                 }
             }
             Ok(())
