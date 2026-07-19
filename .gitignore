@@ -9,6 +9,9 @@
 fuzz/corpus/
 fuzz/artifacts/
 
+# wasm-pack build output (regenerate with `just wasm-demo`)
+/web-demo/pkg/
+
 # Large media samples — never commit binary media to the repo
 *.mp4
 *.mkv

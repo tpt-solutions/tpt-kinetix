@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 
-use super::playlist::HlsPlaylist;
-use super::segment::HlsSegment;
-use super::ts::TsMuxer;
+use super::{playlist::HlsPlaylist, segment::HlsSegment, ts::TsMuxer};
 
 /// Configuration for the HLS packager and its HTTP server.
 #[derive(Debug, Clone)]

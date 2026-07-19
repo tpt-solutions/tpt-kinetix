@@ -13,7 +13,6 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-
 use tpt_kinetix_kg::{
     analysis::{find_independent_sets, mark_parallel_regions},
     codegen::{generate, CodegenOptions},

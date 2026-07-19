@@ -1,7 +1,6 @@
 //! HLS `.m3u8` playlist generation with a sliding window.
 
-use std::collections::VecDeque;
-use std::io::Write as _;
+use std::{collections::VecDeque, io::Write as _};
 
 use super::segment::HlsSegment;
 

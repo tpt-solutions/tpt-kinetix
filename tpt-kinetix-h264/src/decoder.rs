@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use rayon::prelude::*;
-
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
     pixel_format::PixelFormat,
@@ -288,8 +287,9 @@ impl Default for H264Decoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tpt_kinetix_core::Timestamp;
+
+    use super::*;
 
     #[test]
     fn empty_packet_returns_none() {

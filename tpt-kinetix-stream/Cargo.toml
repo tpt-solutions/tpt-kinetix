@@ -25,3 +25,5 @@ tpt-kinetix-aac = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+tpt-kinetix-core = { workspace = true }

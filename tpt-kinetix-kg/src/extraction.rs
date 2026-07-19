@@ -10,8 +10,10 @@ use std::collections::HashMap;
 
 use tree_sitter::Node;
 
-use crate::graph::{EdgeKind, KnowledgeGraph, NodeKind};
-use crate::ingestion::CAst;
+use crate::{
+    graph::{EdgeKind, KnowledgeGraph, NodeKind},
+    ingestion::CAst,
+};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

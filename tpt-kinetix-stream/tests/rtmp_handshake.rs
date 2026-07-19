@@ -1,6 +1,7 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 use tpt_kinetix_stream::rtmp::handshake::perform_server_handshake;
 
 const HANDSHAKE_SIZE: usize = 1536;

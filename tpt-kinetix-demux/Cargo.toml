@@ -12,12 +12,20 @@ categories = ["multimedia", "parser-implementations"]
 readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-demux"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 nom = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 byteorder = "1.5"
+wasm-bindgen = { version = "0.2", optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+wasm = ["dep:wasm-bindgen", "dep:serde_json"]
 
 [dev-dependencies]
 proptest = "1.5"

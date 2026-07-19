@@ -186,9 +186,11 @@ fn test_scale_filter_resizes_frames() {
 /// it is not a pixel-conformance test.
 #[test]
 fn test_decode_scale_encode_pipeline() {
-    use tpt_kinetix_core::encode::{EncodeConfig, SpeedPreset};
-    use tpt_kinetix_core::packet::Packet;
-    use tpt_kinetix_core::timestamp::Timestamp as Ts;
+    use tpt_kinetix_core::{
+        encode::{EncodeConfig, SpeedPreset},
+        packet::Packet,
+        timestamp::Timestamp as Ts,
+    };
     use tpt_kinetix_pipeline::stage::{DecodeStage, EncodeStage, PacketSinkStage};
     use tpt_kinetix_test_utils::synthetic::minimal_h264_annexb_sps_pps;
 

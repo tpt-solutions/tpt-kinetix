@@ -15,3 +15,5 @@ documentation = "https://docs.rs/tpt-kinetix-aac"
 [dependencies]
 thiserror = { workspace = true }
 tpt-kinetix-core = { workspace = true }
+symphonia-codec-aac = { workspace = true }
+symphonia-core = "0.5"

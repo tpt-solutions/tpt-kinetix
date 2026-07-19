@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use tpt_kinetix_stream::hls::playlist::HlsPlaylist;
-use tpt_kinetix_stream::hls::segment::HlsSegment;
+use tpt_kinetix_stream::hls::{playlist::HlsPlaylist, segment::HlsSegment};
 
 fn make_segment(index: u64) -> HlsSegment {
     HlsSegment {

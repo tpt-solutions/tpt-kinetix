@@ -11,8 +11,10 @@
 
 use std::collections::HashMap;
 
-use crate::analysis::IndependentSet;
-use crate::graph::{KnowledgeGraph, NodeKind};
+use crate::{
+    analysis::IndependentSet,
+    graph::{KnowledgeGraph, NodeKind},
+};
 
 /// Options controlling the emitted Rust code.
 #[derive(Debug, Default)]
@@ -191,8 +193,10 @@ fn sanitise_variant(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::{find_independent_sets, mark_parallel_regions};
-    use crate::graph::EdgeKind;
+    use crate::{
+        analysis::{find_independent_sets, mark_parallel_regions},
+        graph::EdgeKind,
+    };
 
     fn build_graph() -> KnowledgeGraph {
         let mut g = KnowledgeGraph::new();

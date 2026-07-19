@@ -35,7 +35,7 @@ pub mod config;
 pub mod decoder;
 
 pub use adts::AdtsHeader;
-pub use config::AudioSpecificConfig;
+pub use config::{sample_rate_index, AudioSpecificConfig};
 pub use decoder::AacDecoder;
 
 /// The 13 MPEG-4 sampling frequencies indexed by the 4-bit sampling frequency

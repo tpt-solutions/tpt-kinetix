@@ -47,6 +47,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Channels
 crossbeam-channel = "0.5"
 
+# AAC decode (wraps symphonia's pure-Rust AAC-LC decoder)
+symphonia-codec-aac = "0.5"
+
 # Internal crates
 tpt-kinetix-core = { path = "tpt-kinetix-core" }
 tpt-kinetix-demux = { path = "tpt-kinetix-demux" }

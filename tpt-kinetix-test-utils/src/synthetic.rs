@@ -56,7 +56,7 @@ pub fn ramp_yuv420p_frame(width: u32, height: u32) -> VideoFrame {
     }
 }
 
-/// Returns a minimal Annex B byte stream containing a hard-coded SPS + PPS for
+/// Builds a minimal H.264 Annex B byte stream containing a hard-coded SPS + PPS for
 /// a 16×16 baseline H.264 stream.  The SPS RBSP is bit-exact for a 16×16
 /// baseline (profile_idc=66) Level 1.0 stream and parses to 16×16 dimensions.
 pub fn minimal_h264_annexb_sps_pps() -> Vec<u8> {
@@ -119,6 +119,50 @@ pub fn synthetic_mp4_ftyp_box() -> Vec<u8> {
     // compatible_brands
     out.extend_from_slice(b"isom");
     out
+}
+
+/// Generate a tiny AV1 bitstream in IVF container form using `ffmpeg`'s AV1
+/// encoder, so the `dav1d` reference harness has real, decodeable input to run
+/// against.
+///
+/// Returns `None` if `ffmpeg` is unavailable or the encode fails. The produced
+/// stream is a short `testsrc` clip at the given dimensions.
+pub fn minimal_av1_ivf() -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=128x96:rate=15:duration=2",
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "ivf",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]

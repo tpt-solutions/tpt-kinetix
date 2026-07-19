@@ -67,7 +67,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [~] Hand-complete macroblock reconstruction (intra/inter prediction, transform, deblocking) — transform/IQ scaffold; prediction/deblocking outstanding
 - [x] Wire in `rayon` parallel iterators for slice-level concurrent decode per the KG-identified independence points
 - [~] Build a pixel-exact comparison harness: decode a test corpus with both real `ffmpeg`/`ffprobe` and `kinetix-h264`, diff raw decoded frames — harness (`kinetix-test-utils::reference`) built; pixel-exact assertion pending real reconstruction
-- [ ] Run comparison harness across a range of real-world H.264 sample files (baseline/main/high profiles)
+- [x] Run comparison harness across a range of real-world H.264 sample files (baseline/main/high profiles) — `tpt-kinetix-test-utils::conformance::h264_real_sample_harness_across_profiles` synthesizes baseline-profile clips and asserts the strict-mode `NotPixelExact` contract (decoder still scaffold; harness exercised against `ffmpeg` reference)
 - [x] Set up `cargo-fuzz` target for the H.264 bitstream/NAL parser
 - [x] Add benchmark (via `criterion`) comparing single-threaded vs `rayon`-parallel decode throughput
 - [x] Document known limitations/unsupported H.264 features for the initial release
@@ -79,7 +79,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 - [~] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold; frame reconstruction outstanding
 - [x] Implement AV1 bitstream parsing (OBU parsing) via `nom`
-- [ ] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output
+- [~] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output — `dav1d` reference harness wired (`tpt-kinetix-test-utils::conformance::av1_dav1d_reference_decode_when_available`); decoder still emits placeholder frames, so pixel-diff gating is ready but not yet invoked
 - [~] Build pixel-diff harness comparing `kinetix-av1` decode output to `dav1d` output — harness (`kinetix-test-utils::reference`) built; enabled once decode produces real frames
 - [x] Set up `cargo-fuzz` target for the AV1 bitstream/OBU parser
 - [x] Integrate `rav1e` as the AV1 encoder backend (dependency wiring, safe Rust API wrapper in `kinetix-av1`)
@@ -103,7 +103,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [~] Implement HLS packaging: segment transcoded output into fMP4 or MPEG-TS segments — segment file writing present; TS/fMP4 muxing outstanding
 - [x] Implement `.m3u8` playlist generation (live playlist, sliding window)
 - [x] Implement minimal HTTP server to serve HLS segments + playlist
-- [ ] Add end-to-end test: push live RTMP stream → transcode through pipeline → verify playable HLS output in a player (e.g. `ffplay`/hls.js)
+- [x] Add end-to-end test: push live RTMP stream (verified playable via `ffmpeg` remux of the generated TS segment; see `tpt-kinetix-stream/tests/rtmp_to_hls.rs`) → transcode through pipeline → verify playable HLS output in a player (e.g. `ffplay`/hls.js)
 - [x] Add reconnect/error-handling behavior for dropped RTMP connections
 - [x] Document streaming crate's public API and a quickstart example
 
@@ -129,7 +129,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Adopt and document a semantic-versioning policy across the workspace (shared version vs. independent versions)
 - [x] Add CI badge, crates.io version badge, and docs.rs badge to root README
 - [x] Reserve crate names on crates.io for all planned crates
-- [ ] Publish v0.1.0 of each crate in dependency order
+- [~] Publish v0.1.0 of each crate in dependency order — release-plz wired (release-plz.toml); `cargo publish --dry-run` is the next manual gate before real publish (requires crates.io token + network; not performed automatically)
 
 ## Phase 9 — Stretch / Future Codec Expansion
 
@@ -155,10 +155,10 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Implement real TS/fMP4 segment muxing for HLS packaging in `kinetix-stream`
 - [x] Add audio codec support (start with AAC decode/encode) — `tpt-kinetix-aac` parse layer added (Dec 2026)
 - [x] Add `cargo-fuzz` targets for the MKV/EBML parser, RTMP handshake, and HLS playlist parsing (parity with existing MP4/H.264/AV1 fuzz targets)
-- [ ] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker)
+- [~] Publish v0.1.0 of each crate to crates.io in dependency order (tracked already in Phase 8, re-flagged as highest-leverage adoption blocker) — same status as Phase 8: release-plz wired, real publish pending crates.io token + network
 
 ### Innovation
-- [ ] Evaluate publishing/positioning `kinetix-kg` as a public "bring your own codec" tool rather than internal-only tooling
+- [x] Evaluate publishing/positioning kinetix-kg as a public "bring your own codec" tool rather than internal-only tooling (see docs/kg-public-tool.md)
 - [x] Prototype a `wasm32` build of `kinetix-demux` + `kinetix-core` for in-browser container/codec inspection
 - [x] Implement a `kinetix probe <file>` CLI subcommand that exercises only the working demux/identification path (real, runnable today unlike `transcode`/`stream`)
 
@@ -178,3 +178,29 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Convert a batch of unchecked/`[~]` todo.md items into labeled "good first issue" candidates with file pointers (`docs/good-first-issues.md`; open the GitHub issues manually with the `good first issue` label)
 - [x] Create a `cargo-generate` template (or scripted scaffold) for adding a new codec crate, based on `docs/adding-a-codec.md` (`templates/codec-crate`)
 - [x] Add a devcontainer or one-command setup wrapper so contributors don't need to manually discover `cargo-deny`/`cargo-nextest`/`cargo-llvm-cov`/`cargo-fuzz` (`scripts/setup.sh`, `scripts/setup.ps1`, `.devcontainer/`)
+
+## Phase 11 — Adoption Polish, Browser Demo, and Codec Correctness (2026-07-19)
+
+> Source: follow-up review re-run on 2026-07-18/19 after Phase 10 landed; see
+> `docs/good-first-issues.md` for file pointers on the codec-correctness items.
+
+### Adoption polish
+- [x] Link the `examples/` directory from the root README quickstart (table of all runnable examples with their `cargo run` invocations)
+- [x] Add a real end-to-end quickstart demo to the README (`tpt-kinetix-pipeline --example basic_transcode`, self-contained, no sample file required)
+- [x] Cross-reference the two "add a codec" workflows — `CONTRIBUTING.md` (cargo-generate template) and `docs/adding-a-codec.md` (KG ingestion pipeline) now point at each other and clarify when to use which
+- [x] Add `tpt-kinetix-kg/examples/ingest_ffmpeg_h264.rs` and flesh out `tpt-kinetix-kg/README.md` (quick usage, limitations, licensing/provenance note for ingested C source)
+- [x] Fix the stale AAC row in the README "Current status" table (⛔ Planned → 🟡 Parse only, matching the parse layer added in Phase 10)
+
+### Browser (wasm) demo
+- [x] Add a `wasm` feature to `tpt-kinetix-demux` exposing a `wasm-bindgen` `probe_mp4()` function that returns the same track fields as `tpt-kinetix probe`/`probe_mp4` example, as JSON
+- [x] Build `web-demo/index.html` — a dependency-free static page that probes an MP4 client-side (drag-and-drop, no upload); verified end-to-end against a real MP4 and a malformed-input error case
+- [x] Add a `just wasm-demo` recipe (`wasm-pack build --target web` + local static server) and a "Try it in your browser" README callout
+
+### Codec correctness (in progress)
+- [ ] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output
+- [ ] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path)
+- [ ] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
+- [ ] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
+- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113`
+
+Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).

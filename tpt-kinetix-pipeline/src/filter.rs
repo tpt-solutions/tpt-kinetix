@@ -95,8 +95,9 @@ fn scale_plane(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tpt_kinetix_core::timestamp::Timestamp;
+
+    use super::*;
 
     fn frame(w: u32, h: u32, fill: u8) -> VideoFrame {
         let cw = (w as usize).div_ceil(2);

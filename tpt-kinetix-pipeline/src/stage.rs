@@ -5,8 +5,10 @@
 //! channels provide natural backpressure so a fast stage cannot outrun a slow
 //! downstream stage indefinitely.
 
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::{
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+};
 
 use crossbeam_channel::{Receiver, Sender};
 use tpt_kinetix_core::{error::KinetixError, frame::VideoFrame};

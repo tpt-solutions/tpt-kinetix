@@ -5,8 +5,7 @@
 
 use anyhow::{anyhow, Context};
 
-use crate::bitreader::BitReader;
-use crate::nal::NalUnitType;
+use crate::{bitreader::BitReader, nal::NalUnitType};
 
 /// H.264 slice types (raw ue(v) values 0-9 mod 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
