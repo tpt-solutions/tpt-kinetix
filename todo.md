@@ -63,7 +63,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 - [x] Run Phase 1 KG tooling against FFmpeg's H.264 decoder source to generate initial Rust scaffolding into `kinetix-h264`
 - [x] Hand-complete NAL unit parsing (SPS/PPS/slice header parsing) via `nom`
-- [~] Hand-complete entropy decoding (CAVLC and/or CABAC) logic — CAVLC scaffold present; CABAC not implemented
+- [~] Hand-complete entropy decoding (CAVLC and/or CABAC) logic — CAVLC scaffold present; CABAC arithmetic decoding engine + context init present (`entropy.rs`), syntax-element context tables and macroblock-level parsing outstanding
 - [~] Hand-complete macroblock reconstruction (intra/inter prediction, transform, deblocking) — transform/IQ scaffold; prediction/deblocking outstanding
 - [x] Wire in `rayon` parallel iterators for slice-level concurrent decode per the KG-identified independence points
 - [~] Build a pixel-exact comparison harness: decode a test corpus with both real `ffmpeg`/`ffprobe` and `kinetix-h264`, diff raw decoded frames — harness (`kinetix-test-utils::reference`) built; pixel-exact assertion pending real reconstruction
@@ -197,8 +197,8 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Add a `just wasm-demo` recipe (`wasm-pack build --target web` + local static server) and a "Try it in your browser" README callout
 
 ### Codec correctness (in progress)
-- [ ] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output
-- [ ] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path)
+- [x] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output — `AacDecoder::decode()` delegates AAC-LC reconstruction to `symphonia-codec-aac`, returning interleaved `f32` PCM; verified by the `ffmpeg`-gated round-trip test `tpt-kinetix-aac/tests/decode_pcm.rs` (HE-AAC SBR/PS still unsupported by the wrapped decoder)
+- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; still missing: the per-syntax-element context-index tables (spec Tables 9-12..9-33) and macroblock-level CABAC syntax parsing (mb_type, cbf, residual) wired into `decoder.rs`
 - [ ] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
 - [ ] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
 - [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113`

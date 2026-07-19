@@ -165,6 +165,55 @@ pub fn minimal_av1_ivf() -> Option<Vec<u8>> {
     }
 }
 
+/// Generate a short raw AAC-LC elementary stream in ADTS framing using
+/// `ffmpeg`, so the AAC decoder has real, decodeable input to run against.
+///
+/// The stream is a 440 Hz sine tone. Returns `None` if `ffmpeg` is unavailable
+/// or the encode fails, along with the sample rate and channel count the tone
+/// was encoded at so callers can assert the decoded PCM geometry.
+pub fn minimal_aac_adts(sample_rate: u32, channels: u8, duration_secs: f32) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let sine = format!("sine=frequency=440:duration={duration_secs}:sample_rate={sample_rate}");
+    let ac = channels.to_string();
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &sine,
+            "-ac",
+            &ac,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            // Force ADTS framing so each output packet is self-describing.
+            "-f",
+            "adts",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,9 +13,11 @@
 
 pub mod bitreader;
 pub mod decoder;
+pub mod entropy;
 pub mod macroblock;
 pub mod nal;
 pub mod pps;
+pub mod prediction;
 pub mod slice;
 pub mod sps;
 

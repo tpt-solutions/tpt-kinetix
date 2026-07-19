@@ -2,9 +2,15 @@
 //!
 //! Implements the H.264 4×4 integer IDCT (spec §8.5.12) and inverse
 //! quantisation, along with the macroblock data structures needed by the
-//! decoder.
+//! decoder. When a macroblock is intra-coded, the prediction step
+//! ([`crate::prediction`]) is applied before the residual is added.
 
 use tpt_kinetix_core::error::KinetixError;
+
+use crate::prediction::{
+    predict_16x16, predict_4x4, Intra16x16Mode, Intra4x4Mode, IntraNeighbours16x16,
+    IntraNeighbours4x4,
+};
 
 /// H.264 macroblock coding types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +119,100 @@ impl Macroblock {
                     if off < cr.len() {
                         cr[off] = (cr[off] as i32 + cr_res[row * 4 + col]).clamp(0, 255) as u8;
                     }
+                }
+            }
+        }
+    }
+
+    /// Reconstruct a luma macroblock that was coded with Intra_4×4 prediction.
+    ///
+    /// `pred_modes` holds the 16 per-block 4×4 prediction modes (raster order).
+    /// `top`/`left`/`top_left` supply the already-reconstructed neighbour
+    /// samples for each of the 16 4×4 blocks; `None` marks an unavailable
+    /// sample (frame edge or not-yet-decoded neighbour, substituted with `R`).
+    ///
+    /// For each block the prediction is generated, the residual IDCT added, and
+    /// the result written into `plane` at the macroblock position.
+    pub fn reconstruct_luma_intra_4x4(
+        &self,
+        plane: &mut [u8],
+        mb_x: u32,
+        mb_y: u32,
+        stride: usize,
+        pred_modes: &[Intra4x4Mode; 16],
+        top: &[Option<u8>; 16],
+        left: &[Option<u8>; 16],
+        top_left: &[Option<u8>; 16],
+    ) {
+        let base_x = (mb_x * 16) as usize;
+        let base_y = (mb_y * 16) as usize;
+        for block_idx in 0..16usize {
+            let bx = (block_idx % 4) * 4;
+            let by = (block_idx / 4) * 4;
+            let mut pred = [0u8; 16];
+            let n = IntraNeighbours4x4 {
+                top: [
+                    top[block_idx * 4],
+                    top[block_idx * 4 + 1],
+                    top[block_idx * 4 + 2],
+                    top[block_idx * 4 + 3],
+                ],
+                left: [
+                    left[block_idx * 4],
+                    left[block_idx * 4 + 1],
+                    left[block_idx * 4 + 2],
+                    left[block_idx * 4 + 3],
+                ],
+                top_left: top_left[block_idx],
+            };
+            predict_4x4(pred_modes[block_idx], &n, &mut pred);
+            let res = iquant_idct_4x4(&self.luma_coeffs[block_idx], self.qp);
+            for row in 0..4usize {
+                for col in 0..4usize {
+                    let x = base_x + bx + col;
+                    let y = base_y + by + row;
+                    let off = y * stride + x;
+                    if off < plane.len() {
+                        let v = pred[row * 4 + col] as i32 + res[row * 4 + col];
+                        plane[off] = v.clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reconstruct a luma macroblock coded with Intra_16×16 prediction.
+    pub fn reconstruct_luma_intra_16x16(
+        &self,
+        plane: &mut [u8],
+        mb_x: u32,
+        mb_y: u32,
+        stride: usize,
+        mode: Intra16x16Mode,
+        top: &[Option<u8>; 16],
+        left: &[Option<u8>; 16],
+        top_left: Option<u8>,
+    ) {
+        let base_x = (mb_x * 16) as usize;
+        let base_y = (mb_y * 16) as usize;
+        let mut pred = [0u8; 256];
+        let n = IntraNeighbours16x16 {
+            top: *top,
+            left: *left,
+            top_left,
+        };
+        predict_16x16(mode, &n, &mut pred);
+        for row in 0..16usize {
+            for col in 0..16usize {
+                let x = base_x + col;
+                let y = base_y + row;
+                let off = y * stride + x;
+                if off < plane.len() {
+                    let block = (row >> 2) * 4 + (col >> 2);
+                    let res = iquant_idct_4x4(&self.luma_coeffs[block], self.qp);
+                    let br = (row % 4) * 4 + (col % 4);
+                    let v = pred[row * 16 + col] as i32 + res[br];
+                    plane[off] = v.clamp(0, 255) as u8;
                 }
             }
         }

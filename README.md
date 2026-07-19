@@ -29,7 +29,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| AAC audio | 🟡 Parse only | ADTS / AudioSpecificConfig parsing works; no PCM decode yet (`tpt-kinetix-aac`) |
+| AAC audio | ✅ AAC-LC decode | ADTS / AudioSpecificConfig parsing + real PCM decode via `symphonia-codec-aac`; HE-AAC (SBR/PS) unsupported (`tpt-kinetix-aac`) |
 | CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
 
 > ⚠️ **Decode correctness:** the H.264 and AV1 decoders do **not** yet produce
@@ -83,7 +83,7 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
 │
-├── tpt-kinetix-aac         — AAC audio parsing (ADTS / AudioSpecificConfig); PCM TBD
+├── tpt-kinetix-aac         — AAC audio parsing (ADTS / AudioSpecificConfig) + AAC-LC PCM decode
 │
 ├── tpt-kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
 │

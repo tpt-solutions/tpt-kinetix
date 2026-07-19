@@ -195,68 +195,95 @@ impl H264Decoder {
         let total_mbs = (mb_cols * mb_rows) as usize;
 
         // Build a row-indexed list of macroblock stubs.
-        // Each row can be decoded independently (simplified — ignores deblocking
-        // filter dependencies between rows, which is acceptable for the scaffold).
         let mb_rows_data: Vec<Vec<Macroblock>> = (0..mb_rows)
             .map(|_row| (0..mb_cols).map(|_col| Macroblock::new_skip()).collect())
             .collect();
 
-        // Parallel macroblock row reconstruction via rayon.
+        let any_intra = mb_rows_data
+            .iter()
+            .flatten()
+            .any(|mb| matches!(mb.mb_type, MbType::Intra4x4 | MbType::Intra16x16 { .. }));
+
         let luma_stride = width as usize;
         let chroma_stride = (width / 2) as usize;
         let luma_size = luma_stride * height as usize;
         let chroma_size = chroma_stride * (height as usize / 2);
 
-        // Reconstruct each row into its own plane slice, then assemble.
-        // Each row writes to non-overlapping regions so parallel access is safe.
         let mut luma = vec![128u8; luma_size];
         let mut chroma_cb = vec![128u8; chroma_size];
         let mut chroma_cr = vec![128u8; chroma_size];
 
-        // Use rayon to process macroblock rows concurrently.
-        // Each row writes to a disjoint 16-row band of the luma/chroma planes.
-        let reconstruct_row = |row_idx: usize, row_mbs: &Vec<Macroblock>| {
-            let row_height = if (row_idx + 1) * 16 > height as usize {
-                height as usize - row_idx * 16
-            } else {
-                16
-            };
-            let luma_row_size = luma_stride * row_height;
-            let chroma_row_size = chroma_stride * (row_height / 2).max(1);
-            let mut luma_row = vec![128u8; luma_row_size];
-            let mut cb_row = vec![128u8; chroma_row_size];
-            let mut cr_row = vec![128u8; chroma_row_size];
-            for (col_idx, mb) in row_mbs.iter().enumerate() {
-                mb.reconstruct_luma(&mut luma_row, col_idx as u32, 0, luma_stride);
-                mb.reconstruct_chroma(&mut cb_row, &mut cr_row, col_idx as u32, 0, chroma_stride);
+        if any_intra {
+            // Intra prediction needs already-reconstructed top/left neighbours, so
+            // reconstruction is strictly top-to-bottom, left-to-right (the H.264
+            // decode order). `rayon` row-parallelism is not safe here because the
+            // row above must be fully committed before the row below is predicted.
+            for (row_idx, row_mbs) in mb_rows_data.iter().enumerate() {
+                for (col_idx, mb) in row_mbs.iter().enumerate() {
+                    reconstruct_mb(
+                        mb,
+                        &mut luma,
+                        &mut chroma_cb,
+                        &mut chroma_cr,
+                        col_idx as u32,
+                        row_idx as u32,
+                        luma_stride,
+                        chroma_stride,
+                    );
+                }
             }
-            (luma_row, cb_row, cr_row)
-        };
-
-        let row_results: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = if self.parallel {
-            mb_rows_data
-                .par_iter()
-                .enumerate()
-                .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
-                .collect()
         } else {
-            mb_rows_data
-                .iter()
-                .enumerate()
-                .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
-                .collect()
-        };
+            // All-skip scaffold: rows are independent, so reconstruct them with
+            // `rayon` (respecting the `parallel` toggle) and copy into the planes.
+            let reconstruct_row = |row_idx: usize, row_mbs: &Vec<Macroblock>| {
+                let row_height = if (row_idx + 1) * 16 > height as usize {
+                    height as usize - row_idx * 16
+                } else {
+                    16
+                };
+                let luma_row_size = luma_stride * row_height;
+                let chroma_row_size = chroma_stride * (row_height / 2).max(1);
+                let mut luma_row = vec![128u8; luma_row_size];
+                let mut cb_row = vec![128u8; chroma_row_size];
+                let mut cr_row = vec![128u8; chroma_row_size];
+                for (col_idx, mb) in row_mbs.iter().enumerate() {
+                    mb.reconstruct_luma(&mut luma_row, col_idx as u32, 0, luma_stride);
+                    mb.reconstruct_chroma(
+                        &mut cb_row,
+                        &mut cr_row,
+                        col_idx as u32,
+                        0,
+                        chroma_stride,
+                    );
+                }
+                (luma_row, cb_row, cr_row)
+            };
 
-        for (row_idx, (luma_row, cb_row, cr_row)) in row_results.iter().enumerate() {
-            let y_off = row_idx * 16 * luma_stride;
-            let copy_len = luma_row.len().min(luma.len() - y_off);
-            luma[y_off..y_off + copy_len].copy_from_slice(&luma_row[..copy_len]);
+            let row_results: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = if self.parallel {
+                mb_rows_data
+                    .par_iter()
+                    .enumerate()
+                    .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
+                    .collect()
+            } else {
+                mb_rows_data
+                    .iter()
+                    .enumerate()
+                    .map(|(row_idx, row_mbs)| reconstruct_row(row_idx, row_mbs))
+                    .collect()
+            };
 
-            let c_off = row_idx * 8 * chroma_stride;
-            let cc_len = cb_row.len().min(chroma_cb.len().saturating_sub(c_off));
-            if cc_len > 0 {
-                chroma_cb[c_off..c_off + cc_len].copy_from_slice(&cb_row[..cc_len]);
-                chroma_cr[c_off..c_off + cc_len].copy_from_slice(&cr_row[..cc_len]);
+            for (row_idx, (luma_row, cb_row, cr_row)) in row_results.iter().enumerate() {
+                let y_off = row_idx * 16 * luma_stride;
+                let copy_len = luma_row.len().min(luma.len() - y_off);
+                luma[y_off..y_off + copy_len].copy_from_slice(&luma_row[..copy_len]);
+
+                let c_off = row_idx * 8 * chroma_stride;
+                let cc_len = cb_row.len().min(chroma_cb.len().saturating_sub(c_off));
+                if cc_len > 0 {
+                    chroma_cb[c_off..c_off + cc_len].copy_from_slice(&cb_row[..cc_len]);
+                    chroma_cr[c_off..c_off + cc_len].copy_from_slice(&cr_row[..cc_len]);
+                }
             }
         }
 
@@ -276,6 +303,162 @@ impl H264Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal_type, NalUnitType::IdrSlice),
         })
+    }
+}
+
+/// Reconstruct a single macroblock into the luma/chroma planes, applying the
+/// correct prediction path for its type.
+///
+/// Neighbour samples (top row, left column, and the above-left corner) are read
+/// back from `luma`/`chroma_cb`/`chroma_cr`, which must already hold the
+/// reconstructed output of the macroblocks above and to the left.
+fn reconstruct_mb(
+    mb: &Macroblock,
+    luma: &mut [u8],
+    chroma_cb: &mut [u8],
+    chroma_cr: &mut [u8],
+    mb_x: u32,
+    mb_y: u32,
+    luma_stride: usize,
+    chroma_stride: usize,
+) {
+    use crate::prediction::{Intra16x16Mode, Intra4x4Mode, IntraChromaMode};
+
+    let base_x = (mb_x * 16) as usize;
+    let base_y = (mb_y * 16) as usize;
+
+    match mb.mb_type {
+        MbType::Intra4x4 => {
+            // Neighbour sample extraction per 4×4 block.
+            let mut top = [None; 16];
+            let mut left = [None; 16];
+            let mut top_left = [None; 16];
+            for b in 0..16usize {
+                let bx = (b % 4) * 4;
+                let by = (b / 4) * 4;
+                for i in 0..4 {
+                    // Top sample (above the block).
+                    let tx = base_x + bx + i;
+                    let ty = base_y + by - 1;
+                    top[b * 4 + i] = if ty < base_y || ty >= luma.len() / luma_stride {
+                        None
+                    } else {
+                        luma.get(ty * luma_stride + tx).copied()
+                    };
+                    // Left sample.
+                    let lx = base_x + bx - 1;
+                    let ly = base_y + by + i;
+                    left[b * 4 + i] = if lx < base_x {
+                        None
+                    } else {
+                        luma.get(ly * luma_stride + lx).copied()
+                    };
+                }
+                // Above-left corner.
+                let cx = base_x + bx - 1;
+                let cy = base_y + by - 1;
+                top_left[b] = if cx < base_x || cy < base_y {
+                    None
+                } else {
+                    luma.get(cy * luma_stride + cx).copied()
+                };
+            }
+            let modes = [Intra4x4Mode::Dc; 16];
+            mb.reconstruct_luma_intra_4x4(
+                luma, mb_x, mb_y, luma_stride, &modes, &top, &left, &top_left,
+            );
+        }
+        MbType::Intra16x16 {
+            pred_mode,
+            cbp_chroma: _,
+            cbp_luma: _,
+        } => {
+            let mut top = [None; 16];
+            let mut left = [None; 16];
+            for i in 0..16 {
+                // Top row above the macroblock.
+                top[i] = luma
+                    .get((base_y as isize - 1).max(0) as usize * luma_stride + base_x + i)
+                    .copied();
+                // Left column to the left of the macroblock.
+                left[i] = if (base_x as isize - 1) >= 0 {
+                    luma.get(base_y * luma_stride + (base_x - 1) + i * luma_stride)
+                        .copied()
+                } else {
+                    None
+                };
+            }
+            let tl = if base_x > 0 && base_y > 0 {
+                luma.get((base_y - 1) * luma_stride + (base_x - 1)).copied()
+            } else {
+                None
+            };
+            mb.reconstruct_luma_intra_16x16(
+                luma,
+                mb_x,
+                mb_y,
+                luma_stride,
+                Intra16x16Mode::from_u8(pred_mode),
+                &top,
+                &left,
+                tl,
+            );
+        }
+        _ => {
+            mb.reconstruct_luma(luma, mb_x, mb_y, luma_stride);
+            mb.reconstruct_chroma(chroma_cb, chroma_cr, mb_x, mb_y, chroma_stride);
+        }
+    }
+
+    // Chroma prediction (DC) for intra macroblocks.
+    if matches!(mb.mb_type, MbType::Intra4x4 | MbType::Intra16x16 { .. }) {
+        let cbx = (mb_x * 8) as usize;
+        let cby = (mb_y * 8) as usize;
+        let mut ctop = [None; 8];
+        let mut cleft = [None; 8];
+        for i in 0..8 {
+            ctop[i] = chroma_cb
+                .get((cby as isize - 1).max(0) as usize * chroma_stride + cbx + i)
+                .copied();
+            cleft[i] = if (cbx as isize - 1) >= 0 {
+                chroma_cb
+                    .get(cby * chroma_stride + (cbx - 1) + i * chroma_stride)
+                    .copied()
+            } else {
+                None
+            };
+        }
+        let ctl = if cbx > 0 && cby > 0 {
+            chroma_cb.get((cby - 1) * chroma_stride + (cbx - 1)).copied()
+        } else {
+            None
+        };
+        let mut cbp = [0u8; 64];
+        crate::prediction::predict_chroma(
+            IntraChromaMode::Dc,
+            &ctop,
+            &cleft,
+            ctl,
+            &mut cbp,
+        );
+        // Add chroma residual on top of the chroma prediction.
+        for row in 0..8usize {
+            for col in 0..8usize {
+                let x = cbx + col;
+                let y = cby + row;
+                let off = y * chroma_stride + x;
+                if off < chroma_cb.len() {
+                    let res = 0i32; // residual handled by Macroblock when coeffs present
+                    let _ = res;
+                    chroma_cb[off] = (chroma_cb[off] as i32 + cbp[row * 8 + col] as i32
+                        - 128)
+                        .clamp(0, 255) as u8;
+                    chroma_cr[off] = (chroma_cr[off] as i32 + cbp[row * 8 + col] as i32
+                        - 128)
+                        .clamp(0, 255) as u8;
+                }
+            }
+        }
     }
 }
 

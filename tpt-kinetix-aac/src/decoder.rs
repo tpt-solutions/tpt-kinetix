@@ -8,7 +8,7 @@
 
 use symphonia_codec_aac::AacDecoder as SymphoniaAacDecoder;
 use symphonia_core::audio::Signal;
-use symphonia_core::codecs::{CodecParameters, Decoder, CODEC_TYPE_AAC, DecoderOptions};
+use symphonia_core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_AAC};
 use symphonia_core::formats::Packet;
 
 use tpt_kinetix_core::{
@@ -117,14 +117,15 @@ impl AacDecoder {
             // Write the 2-byte ASC: audioObjectType(5) + samplingFreqIndex(4)
             // + channelConfig(4).
             let byte0 = ((object_type & 0x1F) << 3) | ((sf_index & 0x0F) >> 1);
-            let byte1 =
-                ((sf_index & 0x0F) << 7) | ((channels & 0x0F) << 3);
+            let byte1 = ((sf_index & 0x0F) << 7) | ((channels & 0x0F) << 3);
             extra.push(byte0);
             extra.push(byte1);
             params.with_extra_data(extra.into_boxed_slice());
 
             let decoder = SymphoniaAacDecoder::try_new(&params, &DecoderOptions::default())
-                .map_err(|e| KinetixError::Unsupported(format!("AAC: failed to initialize decoder: {e}")))?;
+                .map_err(|e| {
+                    KinetixError::Unsupported(format!("AAC: failed to initialize decoder: {e}"))
+                })?;
             self.inner = Some(AacDecoderWrapper { decoder, params });
         }
         Ok(self.inner.as_mut().unwrap())
@@ -179,10 +180,7 @@ impl AacDecoder {
 
         // symphonia's AAC decoder produces i32 planar samples; convert to an
         // interleaved f32 AudioBuffer we can read.
-        let mut out = symphonia_core::audio::AudioBuffer::<f32>::new(
-            frames as u64,
-            *spec,
-        );
+        let mut out = symphonia_core::audio::AudioBuffer::<f32>::new(frames as u64, *spec);
         buf.convert(&mut out);
 
         // Interleave into a flat byte buffer.
@@ -219,15 +217,16 @@ impl Default for AacDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tpt_kinetix_core::timestamp::Timestamp;
 
     fn adts_packet() -> KinetixPacket {
         // 7-byte ADTS header (AAC-LC, 44.1 kHz, stereo) + a small payload.
         let mut data = vec![0xFF, 0xF1, 0x50, 0x80, 0x01, 0x7F, 0xFC];
         // Payload length = frame_length - header_len. Total frame length = 11.
         data[4] = 0x04; // aac_frame_length = (1<<11)|... high bits; 11 -> 8<<3=... compute: 0b00001 000 ppppp
-        // Set frame_length = 11: bits = 0x0B = 0b0000_0000_1011
-        // (data[3]&3)<<11 | data[4]<<3 | data[5]>>5 = 11
-        // -> data[4] = 11 >> 3 = 1, data[5]'s top 5 bits = 11 & 7 = 3
+                        // Set frame_length = 11: bits = 0x0B = 0b0000_0000_1011
+                        // (data[3]&3)<<11 | data[4]<<3 | data[5]>>5 = 11
+                        // -> data[4] = 11 >> 3 = 1, data[5]'s top 5 bits = 11 & 7 = 3
         data[4] = 0x01;
         data[5] = 0x60;
         data.extend_from_slice(&[0u8; 4]); // 4 payload bytes

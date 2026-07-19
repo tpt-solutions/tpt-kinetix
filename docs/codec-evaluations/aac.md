@@ -1,7 +1,7 @@
 # Codec Evaluation: AAC Audio Decode/Encode
 
-**Status**: Under evaluation — Post-MVP candidate  
-**Last updated**: Phase 9 evaluation
+**Status**: ✅ Implemented (AAC-LC) — `symphonia-codec-aac` wrapped in `tpt-kinetix-aac`  
+**Last updated**: Phase 11 (AAC PCM decode landed)
 
 ---
 
@@ -96,6 +96,11 @@ Relevant crates:
 
 **For the initial release, wrap `symphonia::codec::aac` rather than generating a new
 implementation from the KG scaffold.**
+
+> **Implemented (Phase 11).** `tpt-kinetix-aac`'s `AacDecoder::decode()` now
+> returns real interleaved `f32` PCM by delegating AAC-LC reconstruction to
+> `symphonia-codec-aac`. See `tpt-kinetix-aac/src/decoder.rs` and the
+> `ffmpeg`-gated round-trip test in `tpt-kinetix-aac/tests/decode_pcm.rs`.
 
 Rationale:
 
