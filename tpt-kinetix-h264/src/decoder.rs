@@ -12,7 +12,7 @@ use tpt_kinetix_core::{
 };
 
 use crate::{
-    macroblock::{MbType, Macroblock},
+    macroblock::{MbPos, MbType, Macroblock},
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
     sps::SeqParameterSet,
@@ -218,18 +218,16 @@ impl H264Decoder {
             // reconstruction is strictly top-to-bottom, left-to-right (the H.264
             // decode order). `rayon` row-parallelism is not safe here because the
             // row above must be fully committed before the row below is predicted.
+            let mut planes = FramePlanes {
+                luma: &mut luma,
+                chroma_cb: &mut chroma_cb,
+                chroma_cr: &mut chroma_cr,
+                luma_stride,
+                chroma_stride,
+            };
             for (row_idx, row_mbs) in mb_rows_data.iter().enumerate() {
                 for (col_idx, mb) in row_mbs.iter().enumerate() {
-                    reconstruct_mb(
-                        mb,
-                        &mut luma,
-                        &mut chroma_cb,
-                        &mut chroma_cr,
-                        col_idx as u32,
-                        row_idx as u32,
-                        luma_stride,
-                        chroma_stride,
-                    );
+                    reconstruct_mb(mb, &mut planes, col_idx as u32, row_idx as u32);
                 }
             }
         } else {
@@ -306,23 +304,30 @@ impl H264Decoder {
     }
 }
 
+/// The frame's luma/chroma output planes, borrowed together for the duration
+/// of macroblock reconstruction.
+struct FramePlanes<'a> {
+    luma: &'a mut [u8],
+    chroma_cb: &'a mut [u8],
+    chroma_cr: &'a mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+}
+
 /// Reconstruct a single macroblock into the luma/chroma planes, applying the
 /// correct prediction path for its type.
 ///
 /// Neighbour samples (top row, left column, and the above-left corner) are read
-/// back from `luma`/`chroma_cb`/`chroma_cr`, which must already hold the
-/// reconstructed output of the macroblocks above and to the left.
-fn reconstruct_mb(
-    mb: &Macroblock,
-    luma: &mut [u8],
-    chroma_cb: &mut [u8],
-    chroma_cr: &mut [u8],
-    mb_x: u32,
-    mb_y: u32,
-    luma_stride: usize,
-    chroma_stride: usize,
-) {
+/// back from `planes`, which must already hold the reconstructed output of the
+/// macroblocks above and to the left.
+fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y: u32) {
     use crate::prediction::{Intra16x16Mode, Intra4x4Mode, IntraChromaMode};
+
+    let luma: &mut [u8] = &mut *planes.luma;
+    let chroma_cb: &mut [u8] = &mut *planes.chroma_cb;
+    let chroma_cr: &mut [u8] = &mut *planes.chroma_cr;
+    let luma_stride = planes.luma_stride;
+    let chroma_stride = planes.chroma_stride;
 
     let base_x = (mb_x * 16) as usize;
     let base_y = (mb_y * 16) as usize;
@@ -364,9 +369,12 @@ fn reconstruct_mb(
                 };
             }
             let modes = [Intra4x4Mode::Dc; 16];
-            mb.reconstruct_luma_intra_4x4(
-                luma, mb_x, mb_y, luma_stride, &modes, &top, &left, &top_left,
-            );
+            let pos = MbPos {
+                mb_x,
+                mb_y,
+                stride: luma_stride,
+            };
+            mb.reconstruct_luma_intra_4x4(luma, pos, &modes, &top, &left, &top_left);
         }
         MbType::Intra16x16 {
             pred_mode,
@@ -393,11 +401,14 @@ fn reconstruct_mb(
             } else {
                 None
             };
-            mb.reconstruct_luma_intra_16x16(
-                luma,
+            let pos = MbPos {
                 mb_x,
                 mb_y,
-                luma_stride,
+                stride: luma_stride,
+            };
+            mb.reconstruct_luma_intra_16x16(
+                luma,
+                pos,
                 Intra16x16Mode::from_u8(pred_mode),
                 &top,
                 &left,

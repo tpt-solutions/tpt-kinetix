@@ -33,6 +33,14 @@ pub enum MbType {
     BDirect16x16,
 }
 
+/// A macroblock's raster position and the destination plane's row stride.
+#[derive(Debug, Clone, Copy)]
+pub struct MbPos {
+    pub mb_x: u32,
+    pub mb_y: u32,
+    pub stride: usize,
+}
+
 /// A decoded H.264 macroblock ready for reconstruction.
 #[derive(Debug, Clone)]
 pub struct Macroblock {
@@ -136,14 +144,13 @@ impl Macroblock {
     pub fn reconstruct_luma_intra_4x4(
         &self,
         plane: &mut [u8],
-        mb_x: u32,
-        mb_y: u32,
-        stride: usize,
+        pos: MbPos,
         pred_modes: &[Intra4x4Mode; 16],
         top: &[Option<u8>; 16],
         left: &[Option<u8>; 16],
         top_left: &[Option<u8>; 16],
     ) {
+        let MbPos { mb_x, mb_y, stride } = pos;
         let base_x = (mb_x * 16) as usize;
         let base_y = (mb_y * 16) as usize;
         for block_idx in 0..16usize {
@@ -185,14 +192,13 @@ impl Macroblock {
     pub fn reconstruct_luma_intra_16x16(
         &self,
         plane: &mut [u8],
-        mb_x: u32,
-        mb_y: u32,
-        stride: usize,
+        pos: MbPos,
         mode: Intra16x16Mode,
         top: &[Option<u8>; 16],
         left: &[Option<u8>; 16],
         top_left: Option<u8>,
     ) {
+        let MbPos { mb_x, mb_y, stride } = pos;
         let base_x = (mb_x * 16) as usize;
         let base_y = (mb_y * 16) as usize;
         let mut pred = [0u8; 256];

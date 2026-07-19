@@ -159,7 +159,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         }
         Intra4x4Mode::DiagonalDownLeft => {
             // Need top-right samples; reuse available top samples by clamping.
-            let tr = (0..4i32).map(|i| t(i)).collect::<Vec<_>>();
+            let tr = (0..4i32).map(&t).collect::<Vec<_>>();
             // t(i) for i in 4..8 unavailable -> use t(3)
             let get = |i: i32| -> i32 {
                 if i < 4 {
@@ -180,9 +180,9 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             // (x+y) <= 4 uses left/X border; otherwise top border samples.
             for y in 0..4i32 {
                 for x in 0..4i32 {
-                    let s = x as i32 + y as i32;
+                    let s = x + y;
                     let v = if s <= 4 {
-                        diag_down_right_border_sample(&l, &t, tl, x as i32, y as i32)
+                        diag_down_right_border_sample(&l, &t, tl, x, y)
                     } else {
                         (t(s) + t(s + 1) + 1) / 2
                     };
@@ -194,7 +194,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             // For each (x,y): z = x - (y>>1)*2 + (y&1); p = (z-1)>>1; k = (z-1)&1.
             for y in 0..4i32 {
                 for x in 0..4i32 {
-                    let z = x as i32 - (y as i32 >> 1) * 2 + (y & 1) as i32;
+                    let z = x - (y >> 1) * 2 + (y & 1);
                     let (v, _) = angular_from_z(&l, &t, tl, z, 4);
                     set(x, y, v);
                 }
@@ -204,7 +204,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             // Mirror of VerticalRight across the main diagonal.
             for y in 0..4i32 {
                 for x in 0..4i32 {
-                    let z = y as i32 - (x as i32 >> 1) * 2 + (x & 1) as i32;
+                    let z = y - (x >> 1) * 2 + (x & 1);
                     let (v, _) = angular_from_z(&l, &t, tl, z, 4);
                     set(x, y, v);
                 }
@@ -213,7 +213,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         Intra4x4Mode::VerticalLeft => {
             for y in 0..4i32 {
                 for x in 0..4i32 {
-                    let z = x as i32 - (y as i32 >> 1) * 2 + (y & 1) as i32;
+                    let z = x - (y >> 1) * 2 + (y & 1);
                     let (v, _) = angular_from_z_top(&t, z);
                     set(x, y, v);
                 }
@@ -222,7 +222,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         Intra4x4Mode::HorizontalUp => {
             for y in 0..4i32 {
                 for x in 0..4i32 {
-                    let z = y as i32 - (x as i32 >> 1) * 2 + (x & 1) as i32;
+                    let z = y - (x >> 1) * 2 + (x & 1);
                     let (v, _) = angular_from_z_left(&l, z);
                     set(x, y, v);
                 }
@@ -419,7 +419,7 @@ pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], 
         Intra4x4Mode::DiagonalDownRight => {
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let i = x as i32 - y as i32;
+                    let i = x - y;
                     let v = if i <= 0 {
                         let p = -i;
                         if p <= 1 {
@@ -444,7 +444,7 @@ pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], 
         Intra4x4Mode::VerticalRight => {
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let i = (x as i32 - (y as i32 >> 1) * 2 + (y & 1) - 1) as i32;
+                    let i = x - (y >> 1) * 2 + (y & 1) - 1;
                     let v = if i <= 0 {
                         let p = -i;
                         if p == 1 {
@@ -469,7 +469,7 @@ pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], 
         Intra4x4Mode::HorizontalDown => {
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let i = (y as i32 - (x as i32 >> 1) * 2 + (x & 1) - 1) as i32;
+                    let i = y - (x >> 1) * 2 + (x & 1) - 1;
                     let v = if i <= 0 {
                         let p = -i;
                         if p == 1 {
@@ -494,7 +494,7 @@ pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], 
         Intra4x4Mode::VerticalLeft => {
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let i = (x as i32 - (y as i32 >> 1) * 2 + (y & 1) - 1) as i32;
+                    let i = x - (y >> 1) * 2 + (y & 1) - 1;
                     let v = if i < 7 {
                         let q = i;
                         if i <= 0 {
@@ -517,7 +517,7 @@ pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], 
         Intra4x4Mode::HorizontalUp => {
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let i = (y as i32 - (x as i32 >> 1) * 2 + (x & 1) - 1) as i32;
+                    let i = y - (x >> 1) * 2 + (x & 1) - 1;
                     let v = if i < 7 {
                         let q = i;
                         if i <= 0 {
@@ -601,11 +601,11 @@ pub fn predict_16x16(mode: Intra16x16Mode, n: &IntraNeighbours16x16, out: &mut [
         Intra16x16Mode::Plane => {
             let mut h = 0i32;
             for i in 1..8i32 {
-                h += i * (t(8 + i) as i32 - t(8 - i) as i32);
+                h += i * (t(8 + i) - t(8 - i));
             }
             let mut v = 0i32;
             for i in 1..8i32 {
-                v += i * (l(8 + i) as i32 - l(8 - i) as i32);
+                v += i * (l(8 + i) - l(8 - i));
             }
             // a = (top_left + top_15) << 4
             let a = (tl + t(15)) << 4;
@@ -613,7 +613,7 @@ pub fn predict_16x16(mode: Intra16x16Mode, n: &IntraNeighbours16x16, out: &mut [
             let c = (5 * v + 32) >> 6;
             for y in 0..16i32 {
                 for x in 0..16i32 {
-                    let val = a + b * (x as i32 - 7) + c * (y as i32 - 7);
+                    let val = a + b * (x - 7) + c * (y - 7);
                     set(x, y, (val + 16) >> 5);
                 }
             }
@@ -664,18 +664,18 @@ pub fn predict_chroma(mode: IntraChromaMode, top: &[Option<u8>; 8], left: &[Opti
         IntraChromaMode::Plane => {
             let mut h = 0i32;
             for i in 1..4i32 {
-                h += i * (t(4 + i) as i32 - t(4 - i) as i32);
+                h += i * (t(4 + i) - t(4 - i));
             }
             let mut v = 0i32;
             for i in 1..4i32 {
-                v += i * (l(4 + i) as i32 - l(4 - i) as i32);
+                v += i * (l(4 + i) - l(4 - i));
             }
             let a = (tl + t(7)) << 4;
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    let val = a + b * (x as i32 - 3) + c * (y as i32 - 3);
+                    let val = a + b * (x - 3) + c * (y - 3);
                     set(x, y, (val + 16) >> 5);
                 }
             }
