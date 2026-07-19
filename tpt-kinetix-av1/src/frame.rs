@@ -563,7 +563,7 @@ impl FrameHeader {
 
         // --- CDEF ---
         let cdef_damping = if !lossless {
-            (read_f8(&mut br, 2)? + 3) as u8
+            read_f8(&mut br, 2)? + 3
         } else {
             0
         };
