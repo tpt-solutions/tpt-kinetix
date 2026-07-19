@@ -138,7 +138,10 @@ pub fn decode_value(data: &[u8]) -> Result<(Amf0Value, usize), AmfError> {
                     .unwrap(),
             ) as usize;
             let mut pos = 4;
-            let mut items = Vec::with_capacity(count);
+            // `count` is attacker-controlled; each element needs at least one
+            // byte on the wire, so cap the pre-allocation by the remaining
+            // input length to avoid an unbounded allocation / OOM.
+            let mut items = Vec::with_capacity(count.min(rest.len().saturating_sub(4)));
             for _ in 0..count {
                 let (v, c) = decode_value(&rest[pos..])?;
                 items.push(v);
@@ -294,6 +297,15 @@ mod tests {
     fn truncated_string_errors() {
         // marker 0x02, length says 5 but no bytes follow
         let bytes = [0x02, 0x00, 0x05];
+        assert!(matches!(decode_value(&bytes), Err(AmfError::Truncated)));
+    }
+
+    #[test]
+    fn strict_array_huge_count_does_not_oom() {
+        // marker 0x0A (strict array), count = 0x4F4F4F4F (~1.3 billion), no
+        // element data follows: must error, not attempt a huge allocation.
+        // (regression for fuzz_rtmp_amf crash-bcb1735b40b8dda77ab0c8fae38c85455847d407)
+        let bytes = [0x0A, 0x4F, 0x4F, 0x4F, 0x4F];
         assert!(matches!(decode_value(&bytes), Err(AmfError::Truncated)));
     }
 

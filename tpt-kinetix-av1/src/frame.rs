@@ -64,7 +64,7 @@ const fn av1_quant_base(qindex: u8, ac: bool) -> i32 {
     } else if q <= 167 {
         (q * 2) - ((q * 2) >> 7) * 2
     } else if q <= 255 {
-        q + ((q - 167) * 2 >> 7) * 2
+        q + (((q - 167) * 2) >> 7) * 2
     } else {
         510
     };
@@ -79,30 +79,6 @@ const fn av1_quant_base(qindex: u8, ac: bool) -> i32 {
 // ---------------------------------------------------------------------------
 // Syntax element helpers
 // ---------------------------------------------------------------------------
-
-/// Read a `uvlc()` (unsigned variable-length code, AV1 §4.10.3).
-fn read_uvlc(br: &mut BitReader<'_>) -> Result<u32, KinetixError> {
-    let mut leading_zeros = 0u32;
-    loop {
-        let bit = br
-            .read_flag()
-            .ok_or_else(|| KinetixError::Parse("uvlc truncated".into()))?;
-        if bit {
-            break;
-        }
-        leading_zeros += 1;
-        if leading_zeros >= 32 {
-            return Ok(u32::MAX);
-        }
-    }
-    if leading_zeros == 0 {
-        return Ok(0);
-    }
-    let value = br
-        .read_bits(leading_zeros as u8)
-        .ok_or_else(|| KinetixError::Parse("uvlc value truncated".into()))?;
-    Ok((1u32 << leading_zeros) + value - 1)
-}
 
 /// Read a `su(n)` signed integer of length `n` bits (AV1 §4.10.2).
 fn read_su(br: &mut BitReader<'_>, n: u8) -> Result<i32, KinetixError> {
@@ -410,8 +386,7 @@ impl FrameHeader {
         };
 
         let primary_ref_frame = if !reduced_still && frame_type != FrameType::KeyFrame {
-            let v = read_f8(&mut br, 3)?;
-            v
+            read_f8(&mut br, 3)?
         } else {
             7
         };
@@ -433,16 +408,15 @@ impl FrameHeader {
 
         let mut ref_frame_idx = [0u8; 7];
         if frame_refs_short_signaling {
-            for i in 0..7 {
-                ref_frame_idx[i] = read_f8(&mut br, 3)?;
+            for slot in &mut ref_frame_idx {
+                *slot = read_f8(&mut br, 3)?;
             }
             // last/fwd/bwd hints derive the 7 refs (simplified: not all paths)
         }
 
         let mut ref_order_hint = [0u8; 8];
         if frame_type != FrameType::KeyFrame {
-            let num = if frame_refs_short_signaling { 7 } else { 7 };
-            for i in 0..num {
+            for i in 0..7 {
                 let v = if order_hint_bits > 0 {
                     read_f8(&mut br, order_hint_bits)?
                 } else {
@@ -527,14 +501,14 @@ impl FrameHeader {
             for i in 0..8 {
                 seg_feature_enabled[i] = read_flag(&mut br)?;
                 if seg_feature_enabled[i] {
-                    for j in 0..8 {
+                    for (j, slot) in seg_feature_data[i].iter_mut().enumerate() {
                         let data = if j >= 4 {
                             // signed
                             read_su(&mut br, 8)? as i16
                         } else {
                             read_f(&mut br, 8)? as i16
                         };
-                        seg_feature_data[i][j] = data;
+                        *slot = data;
                     }
                 }
             }
@@ -555,36 +529,33 @@ impl FrameHeader {
         };
 
         // --- Loop filter ---
-        let mut loop_filter_level = [0u8; 2];
-        let mut loop_filter_sharpness = 0u8;
-        let mut loop_filter_delta_enabled = false;
+        // TODO: this should be gated on `!(CodedLossless || allow_intrabc)` per
+        // AV1 §5.9.11, but `lossless`/`allow_intrabc` aren't fully tracked yet;
+        // unconditionally parsing matches current (pre-lint-cleanup) behavior.
         let mut loop_filter_deltas = LoopFilterDeltas::default();
-        if !lossless && frame_type != FrameType::KeyFrame || true {
-            let lf_level_0 = read_f8(&mut br, 6)?;
-            let lf_level_1 = if seq.color_config.mono_chrome {
-                0
-            } else {
-                read_f8(&mut br, 6)?
-            };
-            loop_filter_level = [lf_level_0, lf_level_1];
-            loop_filter_sharpness = read_f8(&mut br, 3)?;
-            loop_filter_delta_enabled = read_flag(&mut br)?;
-            if loop_filter_delta_enabled {
-                let mode_ref_delta_update = read_flag(&mut br)?;
-                if mode_ref_delta_update {
-                    for i in 0..8 {
-                        let update = read_flag(&mut br)?;
-                        if update {
-                            loop_filter_deltas.loop_filter_ref_deltas[i] =
-                                read_su(&mut br, 7)? as i8;
-                        }
+        let lf_level_0 = read_f8(&mut br, 6)?;
+        let lf_level_1 = if seq.color_config.mono_chrome {
+            0
+        } else {
+            read_f8(&mut br, 6)?
+        };
+        let loop_filter_level = [lf_level_0, lf_level_1];
+        let loop_filter_sharpness = read_f8(&mut br, 3)?;
+        let loop_filter_delta_enabled = read_flag(&mut br)?;
+        if loop_filter_delta_enabled {
+            let mode_ref_delta_update = read_flag(&mut br)?;
+            if mode_ref_delta_update {
+                for i in 0..8 {
+                    let update = read_flag(&mut br)?;
+                    if update {
+                        loop_filter_deltas.loop_filter_ref_deltas[i] = read_su(&mut br, 7)? as i8;
                     }
-                    for i in 0..2 {
-                        let update = read_flag(&mut br)?;
-                        if update {
-                            loop_filter_deltas.loop_filter_mode_deltas[i] =
-                                read_su(&mut br, 7)? as i8;
-                        }
+                }
+                for i in 0..2 {
+                    let update = read_flag(&mut br)?;
+                    if update {
+                        loop_filter_deltas.loop_filter_mode_deltas[i] =
+                            read_su(&mut br, 7)? as i8;
                     }
                 }
             }
@@ -707,9 +678,9 @@ impl FrameHeader {
         }
 
         // --- Refresh frame flags ---
-        let refresh_frame_flags = if !reduced_still && frame_type != FrameType::KeyFrame {
-            read_f8(&mut br, 8)?
-        } else if frame_type == FrameType::KeyFrame {
+        let refresh_frame_flags = if (!reduced_still && frame_type != FrameType::KeyFrame)
+            || frame_type == FrameType::KeyFrame
+        {
             read_f8(&mut br, 8)?
         } else {
             0xFF
