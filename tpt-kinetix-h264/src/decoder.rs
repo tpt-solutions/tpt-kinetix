@@ -12,7 +12,7 @@ use tpt_kinetix_core::{
 };
 
 use crate::{
-    macroblock::Macroblock,
+    macroblock::{MbType, Macroblock},
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
     sps::SeqParameterSet,

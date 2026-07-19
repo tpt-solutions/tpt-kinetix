@@ -840,10 +840,10 @@ fn parse_tile_info(
     use_128: bool,
 ) -> Result<(u8, u8, u32, u32, u32, u32), KinetixError> {
     let sb_size = if use_128 { 128u32 } else { 64u32 };
-    let mi_cols = (*width + 7) / 8;
-    let mi_rows = (*height + 7) / 8;
-    let sb_cols = (mi_cols + (sb_size / 8 - 1)) / (sb_size / 8);
-    let sb_rows = (mi_rows + (sb_size / 8 - 1)) / (sb_size / 8);
+    let mi_cols = (*width).div_ceil(8);
+    let mi_rows = (*height).div_ceil(8);
+    let sb_cols = mi_cols.div_ceil(sb_size / 8);
+    let sb_rows = mi_rows.div_ceil(sb_size / 8);
 
     let uniform_tile_spacing = read_flag(br)?;
     let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing {
@@ -860,8 +860,8 @@ fn parse_tile_info(
 
     let tile_cols = 1u32 << tile_cols_log2;
     let tile_rows = 1u32 << tile_rows_log2;
-    let tile_width_in_sb = (sb_cols + tile_cols - 1) / tile_cols;
-    let tile_height_in_sb = (sb_rows + tile_rows - 1) / tile_rows;
+    let tile_width_in_sb = sb_cols.div_ceil(tile_cols);
+    let tile_height_in_sb = sb_rows.div_ceil(tile_rows);
 
     Ok((
         tile_cols_log2,
