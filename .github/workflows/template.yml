@@ -21,16 +21,15 @@ jobs:
         run: cargo install cargo-generate --locked
       - name: Generate a sample codec crate
         run: |
+          # Generate straight into a temp dir so it doesn't pollute the workspace.
+          mkdir -p /tmp/gen
           cargo generate --path templates/codec-crate \
             --name tpt-kinetix-samplecodec \
             --define codec_name=samplecodec \
             --define codec_cap=Samplecodec \
             --define codec_title="Sample Codec" \
             --define codec_kind=video \
-            --init
-          # Drop the generated crate into a temp dir so it doesn't pollute the workspace.
-          mkdir -p /tmp/gen && cp -r tpt-kinetix-samplecodec /tmp/gen/
-          rm -rf tpt-kinetix-samplecodec
+            --destination /tmp/gen
       - name: Build the generated crate against the workspace
         run: |
           cd /tmp/gen/tpt-kinetix-samplecodec

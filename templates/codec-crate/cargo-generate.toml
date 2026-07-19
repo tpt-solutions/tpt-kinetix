@@ -1,5 +1,5 @@
 [template]
-cargo_generate_version = "0.18"
+cargo_generate_version = ">=0.18.0"
 include = ["Cargo.toml.template", "src/**/*", "README.md.template", "fuzz/**/*", ".github/**/*"]
 
 [placeholders]
