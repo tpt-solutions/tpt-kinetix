@@ -58,3 +58,4 @@ publish = true
 [[package]]
 name = "tpt-kinetix-test-utils"
 release = false
+publish = false
