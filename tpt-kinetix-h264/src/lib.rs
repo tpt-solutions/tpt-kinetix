@@ -25,6 +25,8 @@ pub mod reconstruct;
 pub mod slice;
 pub mod slice_data;
 pub mod sps;
+pub mod trace;
 pub mod transform;
 
 pub use decoder::H264Decoder;
+pub use trace::{DecodeTracer, NoopTracer, TracePlane};

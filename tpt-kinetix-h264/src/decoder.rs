@@ -16,6 +16,7 @@ use crate::{
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
     sps::SeqParameterSet,
+    trace::{DecodeTracer, NoopTracer},
 };
 
 /// Stateful H.264 / AVC decoder.
@@ -128,6 +129,27 @@ impl H264Decoder {
     /// NAL units are extracted from Annex B byte-stream format.
     /// Slice-level parallelism is applied via `rayon` at the macroblock-row boundary.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
+        self.decode_impl(packet, &mut NoopTracer)
+    }
+
+    /// Like [`H264Decoder::decode`], but drives `tracer`'s hooks
+    /// (see [`crate::trace::DecodeTracer`]) with per-macroblock intermediate
+    /// values as the CAVLC I-slice path parses and reconstructs the frame.
+    /// Only exercises the tracer for slices the real CAVLC path handles; the
+    /// scaffold/placeholder fallback path never calls the tracer.
+    pub fn decode_with_tracer<T: DecodeTracer>(
+        &mut self,
+        packet: &Packet,
+        tracer: &mut T,
+    ) -> Result<Option<VideoFrame>, KinetixError> {
+        self.decode_impl(packet, tracer)
+    }
+
+    fn decode_impl<T: DecodeTracer>(
+        &mut self,
+        packet: &Packet,
+        tracer: &mut T,
+    ) -> Result<Option<VideoFrame>, KinetixError> {
         let nal_units = parse_nal_units_from_annexb(&packet.data);
         if nal_units.is_empty() {
             return Ok(None);
@@ -162,8 +184,15 @@ impl H264Decoder {
                     }
 
                     // Attempt the real CAVLC I-slice decode path first.
-                    match self.try_decode_real_slice(nal, &sps, pps.as_ref(), width, height, packet)
-                    {
+                    match self.try_decode_real_slice(
+                        nal,
+                        &sps,
+                        pps.as_ref(),
+                        width,
+                        height,
+                        packet,
+                        tracer,
+                    ) {
                         Ok(Some(frame)) => {
                             output_frame = Some(frame);
                             continue;
@@ -200,7 +229,8 @@ impl H264Decoder {
     ///
     /// Returns `Ok(Some(frame))` on success, `Ok(None)` if the slice is not a
     /// CAVLC I-slice this path handles yet, or `Err` on a parse failure.
-    fn try_decode_real_slice(
+    #[allow(clippy::too_many_arguments)]
+    fn try_decode_real_slice<T: DecodeTracer>(
         &mut self,
         nal: &crate::nal::NalUnit,
         sps: &SeqParameterSet,
@@ -208,6 +238,7 @@ impl H264Decoder {
         width: u32,
         height: u32,
         packet: &Packet,
+        tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
         use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
 
@@ -282,6 +313,7 @@ impl H264Decoder {
             mb_rows,
             slice_qp,
             chroma_qp_index_offset,
+            tracer,
         ) {
             Ok(p) => p,
             Err(_) => return Ok(None),
@@ -294,6 +326,7 @@ impl H264Decoder {
             width,
             height,
             chroma_qp_index_offset,
+            tracer,
         );
 
         // Assemble the planar YUV420p frame.

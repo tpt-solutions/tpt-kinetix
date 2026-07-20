@@ -1556,6 +1556,7 @@ dependencies = [
  "rayon",
  "thiserror 2.0.18",
  "tpt-kinetix-core",
+ "tpt-kinetix-test-utils",
 ]
 
 [[package]]

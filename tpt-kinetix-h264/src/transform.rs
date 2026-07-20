@@ -141,57 +141,54 @@ fn idct_4x4(d: &[i32; 16]) -> [i32; 16] {
 
 /// Intra_16×16 luma DC inverse transform (§8.5.10).
 ///
-/// `dc_coeffs` are the 16 luma DC levels in **raster** order (already inverse
-/// zigzag-scanned by the caller if they were parsed in scan order). Applies the
-/// 4×4 Hadamard transform then DC-specific inverse quantisation, returning the
-/// 16 reconstructed DC values in raster order, one per 4×4 sub-block.
+/// `dc_coeffs` are the 16 luma DC levels in **raster** order. The 4×4 Hadamard
+/// transform is applied with a `/2` per butterfly stage (matching the reference
+/// decoder, which cancels the `H·H = 16·I` gain), and each coefficient is
+/// inverse-quantised with `qbits = 6` (matching libavc `INV_QUANT(.., 6)`). The
+/// result is the 16 reconstructed per-4×4-block DC values in raster order.
 pub fn luma_dc_transform(dc_coeffs: &[i32; 16], qp: i32) -> [i32; 16] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
     let shift = qp / 6;
+    let ls = level_scale_flat(m, 0);
 
-    // 4×4 Hadamard transform (§8.5.10, equations 8-326..8-329).
-    let mut f = [0i32; 16];
-    // Horizontal.
+    // 1. 4×4 Hadamard transform (§8.5.10). Unlike the AC 4×4 transform
+    // (`idct_4x4`), the Hadamard basis is a plain ±1 matrix — there is no
+    // `>>1` scaling on any term within the butterfly itself.
     let mut tmp = [0i32; 16];
     for row in 0..4 {
         let b = row * 4;
-        let (c0, c1, c2, c3) = (
-            dc_coeffs[b],
-            dc_coeffs[b + 1],
-            dc_coeffs[b + 2],
-            dc_coeffs[b + 3],
-        );
-        let e0 = c0 + c2;
-        let e1 = c0 - c2;
-        let e2 = c1 - c3;
-        let e3 = c1 + c3;
+        let (x0, x1, x2, x3) = (dc_coeffs[b], dc_coeffs[b + 1], dc_coeffs[b + 2], dc_coeffs[b + 3]);
+        let e0 = x0 + x2;
+        let e1 = x0 - x2;
+        let e2 = x1 - x3;
+        let e3 = x1 + x3;
         tmp[b] = e0 + e3;
         tmp[b + 1] = e1 + e2;
         tmp[b + 2] = e1 - e2;
         tmp[b + 3] = e0 - e3;
     }
-    // Vertical.
+    let mut f = [0i32; 16];
     for col in 0..4 {
-        let (c0, c1, c2, c3) = (tmp[col], tmp[col + 4], tmp[col + 8], tmp[col + 12]);
-        let e0 = c0 + c2;
-        let e1 = c0 - c2;
-        let e2 = c1 - c3;
-        let e3 = c1 + c3;
+        let (x0, x1, x2, x3) = (tmp[col], tmp[col + 4], tmp[col + 8], tmp[col + 12]);
+        let e0 = x0 + x2;
+        let e1 = x0 - x2;
+        let e2 = x1 - x3;
+        let e3 = x1 + x3;
         f[col] = e0 + e3;
         f[col + 4] = e1 + e2;
         f[col + 8] = e1 - e2;
         f[col + 12] = e0 - e3;
     }
 
-    // DC scaling (§8.5.10): uses LevelScale4x4[m][0] (group 0).
-    let ls = level_scale_flat(m, 0);
+    // 2. Inverse quantisation (§8.5.10, `qbits = 6`).
     let mut out = [0i32; 16];
     for i in 0..16 {
         out[i] = if shift >= 6 {
             (f[i] * ls) << (shift - 6)
         } else {
-            (f[i] * ls + (1 << (5 - shift))) >> (6 - shift)
+            let add = 1 << (5 - shift);
+            (f[i] * ls + add) >> (6 - shift)
         };
     }
     out

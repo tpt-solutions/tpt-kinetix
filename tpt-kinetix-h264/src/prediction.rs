@@ -162,11 +162,35 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             }
         }
         Intra4x4Mode::Dc => {
-            let mut sum = 0i32;
-            for i in 0..4 {
-                sum += t(i) + l(i);
-            }
-            let dc = (sum + 4) / 8;
+            // §8.3.1.2.3: the average is taken over whichever of top/left is
+            // actually available — substituting a phantom `R` (128) for a
+            // missing side into an 8-sample average (as `t`/`l` do for the
+            // directional modes) would corrupt the DC value, not just fill in
+            // a border sample, so availability must be checked explicitly
+            // here rather than delegated to the `t`/`l` helpers.
+            let top_avail = n.top[0..4].iter().any(|s| s.is_some());
+            let left_avail = n.left.iter().any(|s| s.is_some());
+            let dc = if top_avail && left_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += t(i) + l(i);
+                }
+                (sum + 4) >> 3
+            } else if top_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += t(i);
+                }
+                (sum + 2) >> 2
+            } else if left_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += l(i);
+                }
+                (sum + 2) >> 2
+            } else {
+                R
+            };
             for y in 0..4i32 {
                 for x in 0..4i32 {
                     set(x, y, dc);
@@ -203,7 +227,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         }
         Intra4x4Mode::DiagonalDownRight => {
             // Spec-exact (MultimediaWiki / Table 8-2).
-            let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
+            let (lt, t0) = (tl, t(0));
             let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
             let d = (l3 + 2 * l2 + l1 + 2) / 4;
             let e = (l2 + 2 * l1 + l0 + 2) / 4;
@@ -670,11 +694,36 @@ pub fn predict_chroma(
             }
         }
         IntraChromaMode::Dc => {
-            let mut s = 0i32;
-            for i in 0..8 {
-                s += t(i) + l(i);
-            }
-            let dc = (s + 8) / 16;
+            // §8.3.4.1 computes DC per 4×4 quadrant with different
+            // top/left-only rules per quadrant; this uses one whole-block
+            // average (matching this decoder's existing simplified approach,
+            // same as the 16×16 luma DC path above) rather than the full
+            // per-quadrant derivation. Still: availability must gate which
+            // samples enter the average, or a missing side is silently
+            // replaced by a phantom `R` (128) and corrupts the DC value.
+            let top_avail = top.iter().any(|s| s.is_some());
+            let left_avail = left.iter().any(|s| s.is_some());
+            let dc = if top_avail && left_avail {
+                let mut s = 0i32;
+                for i in 0..8 {
+                    s += t(i) + l(i);
+                }
+                (s + 8) / 16
+            } else if top_avail {
+                let mut s = 0i32;
+                for i in 0..8 {
+                    s += t(i);
+                }
+                (s + 4) / 8
+            } else if left_avail {
+                let mut s = 0i32;
+                for i in 0..8 {
+                    s += l(i);
+                }
+                (s + 4) / 8
+            } else {
+                R
+            };
             for y in 0..8i32 {
                 for x in 0..8i32 {
                     set(x, y, dc);

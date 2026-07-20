@@ -22,6 +22,7 @@ tpt-kinetix-core = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = "1.5"
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
 
 [[bench]]
 name = "decode_throughput"

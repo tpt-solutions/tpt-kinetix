@@ -85,6 +85,30 @@ pub struct ParsedSlice {
     pub nz: Vec<MbNz>,
 }
 
+/// Per-macroblock Intra_4×4 prediction-mode context, kept so neighbouring
+/// macroblocks can derive `predIntra4x4PredMode` (§8.3.1.1). Indexed by luma
+/// 4×4 block raster index (0..15) within the MB, matching `pred_modes_4x4`.
+#[derive(Clone, Copy)]
+pub struct MbPredCtx {
+    /// Whether this MB position was coded (not outside the picture).
+    pub present: bool,
+    /// Whether this MB was coded as `Intra4x4` (vs. `Intra16x16`/inter/PCM).
+    /// Per §8.3.1.1, a neighbour that is unavailable or not Intra_4×4 (or
+    /// Intra_8×8) is treated as predicting DC (mode 2).
+    pub is_intra4x4: bool,
+    pub modes: [Intra4x4Mode; 16],
+}
+
+impl Default for MbPredCtx {
+    fn default() -> Self {
+        MbPredCtx {
+            present: false,
+            is_intra4x4: false,
+            modes: [Intra4x4Mode::Dc; 16],
+        }
+    }
+}
+
 /// Parse the macroblock layer of an I-slice.
 ///
 /// `reader` must be positioned at the first macroblock (i.e. at
@@ -94,33 +118,38 @@ pub struct ParsedSlice {
 ///
 /// Only CAVLC I-slices are handled. `I_PCM` and inter macroblocks return an
 /// `Unsupported` error so callers can fall back rather than emit wrong pixels.
-pub fn parse_i_slice(
+pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     reader: &mut BitReader,
     mb_cols: u32,
     mb_rows: u32,
     slice_qp: i32,
     chroma_qp_index_offset: i32,
+    tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
     let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
+    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut qp = slice_qp;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
         let mb_y = (mb_idx as u32) / mb_cols;
 
-        let (mb, this_nz, new_qp) = parse_i_macroblock(
+        let (mb, this_nz, this_pred_ctx, new_qp) = parse_i_macroblock(
             reader,
             mb_x,
             mb_y,
             mb_cols,
             &nz,
+            &pred_ctx,
             qp,
             chroma_qp_index_offset,
+            tracer,
         )?;
         qp = new_qp;
         nz[mb_idx] = this_nz;
+        pred_ctx[mb_idx] = this_pred_ctx;
         macroblocks.push(mb);
     }
 
@@ -209,18 +238,24 @@ fn combine_nc(left: Option<u8>, top: Option<u8>) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn parse_i_macroblock(
+fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     r: &mut BitReader,
     mb_x: u32,
     mb_y: u32,
     mb_cols: u32,
     nz_grid: &[MbNz],
+    pred_ctx_grid: &[MbPredCtx],
     prev_qp: i32,
     _chroma_qp_index_offset: i32,
-) -> R<(Macroblock, MbNz, i32)> {
+    tracer: &mut T,
+) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
     let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_pred_ctx = MbPredCtx {
         present: true,
         ..Default::default()
     };
@@ -250,29 +285,63 @@ fn parse_i_macroblock(
         mb.cbp = cbp_luma | (cbp_chroma << 4);
     } else {
         mb.mb_type = MbType::Intra4x4;
-        // prev_intra4x4_pred_mode_flag / rem_intra4x4_pred_mode ×16 (§7.3.5.1).
-        // Full most-probable-mode derivation needs neighbour modes; here we read
-        // the signalled modes and reconstruct the MPM using neighbour pred modes
-        // that the decoder tracks. For now we parse them into an explicit array
-        // and let the reconstruction path use them directly (MPM = DC fallback
-        // when neighbours are unavailable).
+        // prev_intra4x4_pred_mode_flag / rem_intra4x4_pred_mode ×16 (§7.3.5.1),
+        // read in luma4x4BlkIdx (Z-scan) order and converted to raster position
+        // via `raster_of_8x8_sub` so the result lines up with how
+        // `reconstruct.rs`/`luma_nc` index `pred_modes_4x4`/`nz`. For each block
+        // the most-probable mode is derived from the left/top neighbour modes
+        // (§8.3.1.1); a neighbour is treated as predicting DC when it's off the
+        // picture or wasn't coded as Intra_4×4.
         let mut modes = [Intra4x4Mode::Dc; 16];
-        for m in modes.iter_mut() {
+        for blk_idx in 0..16usize {
+            let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
+            let bx = (raster % 4) as i32;
+            let by = (raster / 4) as i32;
+
+            let left_mode: Option<u8> = if bx > 0 {
+                Some(modes[(by * 4 + bx - 1) as usize] as u8)
+            } else if mb_x > 0 {
+                let n = &pred_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize];
+                (n.present && n.is_intra4x4).then(|| n.modes[(by * 4 + 3) as usize] as u8)
+            } else {
+                None
+            };
+
+            let top_mode: Option<u8> = if by > 0 {
+                Some(modes[((by - 1) * 4 + bx) as usize] as u8)
+            } else if mb_y > 0 {
+                let n = &pred_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize];
+                (n.present && n.is_intra4x4).then(|| n.modes[(3 * 4 + bx) as usize] as u8)
+            } else {
+                None
+            };
+
+            // §8.3.1.1: dcPredModePredictedFlag => both neighbours contribute
+            // DC (mode 2) when unavailable/not-Intra4x4.
+            let pred_mode = left_mode.unwrap_or(2).min(top_mode.unwrap_or(2));
+
             let prev_flag = r
                 .read_bit()
                 .ok_or(SliceDataError::Eof("prev_intra4x4_pred_mode_flag"))?;
-            if prev_flag == 1 {
-                // Use most-probable mode; without full neighbour tracking we use
-                // DC as the conservative MPM. (Refined in the prediction phase.)
-                *m = Intra4x4Mode::Dc;
+            let final_mode = if prev_flag == 1 {
+                pred_mode
             } else {
                 let rem = r
                     .read_bits(3)
-                    .ok_or(SliceDataError::Eof("rem_intra4x4_pred_mode"))?;
-                *m = Intra4x4Mode::from_u8(rem as u8);
-            }
+                    .ok_or(SliceDataError::Eof("rem_intra4x4_pred_mode"))?
+                    as u8;
+                // §7.4.5.1: rem is coded relative to predMode, skipping it.
+                if rem < pred_mode {
+                    rem
+                } else {
+                    rem + 1
+                }
+            };
+            modes[raster] = Intra4x4Mode::from_u8(final_mode);
         }
         mb.pred_modes_4x4 = Box::new(modes);
+        this_pred_ctx.is_intra4x4 = true;
+        this_pred_ctx.modes = modes;
     }
 
     // intra_chroma_pred_mode (§7.3.5.1), present for 4:2:0/4:2:2.
@@ -317,13 +386,14 @@ fn parse_i_macroblock(
         is_i16x16,
         cbp_l,
         cbp_c,
+        tracer,
     )?;
 
-    Ok((mb, this_nz, qp))
+    Ok((mb, this_nz, this_pred_ctx, qp))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn parse_intra_residuals(
+fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     r: &mut BitReader,
     mb: &mut Macroblock,
     this_nz: &mut MbNz,
@@ -334,12 +404,16 @@ fn parse_intra_residuals(
     is_i16x16: bool,
     cbp_luma: u8,
     cbp_chroma: u8,
+    tracer: &mut T,
 ) -> R<()> {
+    use crate::trace::TracePlane;
+
     // Intra_16×16 luma DC block (16 coeffs) — always present for I_16×16.
     if is_i16x16 {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, 0);
         let (coeffs, _tc) = parse_cavlc_block(r, nc, 16)?;
         mb.luma_dc = coeffs;
+        tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, 16, &coeffs);
     }
 
     // Luma AC / 4×4 blocks: 4 8×8 groups of 4 blocks; present per cbp_luma bit.
@@ -359,8 +433,10 @@ fn parse_intra_residuals(
                 let mut shifted = [0i16; 16];
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
                 mb.luma_coeffs[block] = shifted;
+                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
             } else {
                 mb.luma_coeffs[block] = coeffs;
+                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
             }
         }
     }
@@ -384,6 +460,8 @@ fn parse_intra_residuals(
                 // AC coeffs occupy zigzag positions 1..=15 (DC handled above).
                 let mut shifted = [0i16; 16];
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
+                let plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
+                tracer.on_cavlc_coeffs(mb_x, mb_y, plane, block as u8, &shifted);
                 if comp == 0 {
                     mb.chroma_cb_coeffs[block] = shifted;
                 } else {
@@ -421,13 +499,14 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     let mut levels = [0i32; 16];
 
     // Trailing-one signs.
-    for i in 0..t1 {
+    for level in levels.iter_mut().take(t1) {
         let sign = r.read_bit().ok_or(SliceDataError::Eof("T1 sign"))?;
-        levels[i] = if sign == 1 { -1 } else { 1 };
+        *level = if sign == 1 { -1 } else { 1 };
     }
 
     // Remaining levels (§9.2.2).
     let mut suffix_length: u32 = if tc > 10 && t1 < 3 { 1 } else { 0 };
+    #[allow(clippy::needless_range_loop)]
     for i in t1..tc {
         // level_prefix: count leading zeros then the terminating 1.
         let mut level_prefix: u32 = 0;
@@ -495,8 +574,8 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     let mut zeros_left = total_zeros;
     // Place coefficients from highest-frequency to lowest.
     let mut pos = (tc as i32) - 1 + total_zeros;
-    for i in 0..tc {
-        out[pos as usize] = levels[i] as i16;
+    for (i, &level) in levels.iter().enumerate().take(tc) {
+        out[pos as usize] = level as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
                 cavlc_tables::read_run_before(r, zeros_left.min(255) as u8)? as i32
@@ -523,12 +602,13 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
     let t1 = trailing_ones as usize;
     let mut levels = [0i32; 4];
 
-    for i in 0..t1 {
+    for level in levels.iter_mut().take(t1) {
         let sign = r.read_bit().ok_or(SliceDataError::Eof("chroma T1 sign"))?;
-        levels[i] = if sign == 1 { -1 } else { 1 };
+        *level = if sign == 1 { -1 } else { 1 };
     }
 
     let mut suffix_length: u32 = 0;
+    #[allow(clippy::needless_range_loop)]
     for i in t1..tc {
         let mut level_prefix: u32 = 0;
         loop {
@@ -588,9 +668,9 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
 
     let mut zeros_left = total_zeros;
     let mut pos = (tc as i32) - 1 + total_zeros;
-    for i in 0..tc {
+    for (i, &level) in levels.iter().enumerate().take(tc) {
         if (0..4).contains(&pos) {
-            out[pos as usize] = levels[i] as i16;
+            out[pos as usize] = level as i16;
         }
         if i < tc - 1 {
             let run = if zeros_left > 0 {

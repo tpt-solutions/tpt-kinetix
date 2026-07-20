@@ -10,9 +10,9 @@ publish = false
 
 [dependencies]
 tpt-kinetix-core = { workspace = true }
+tpt-kinetix-h264 = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.5"
 tpt-kinetix-demux = { workspace = true }
-tpt-kinetix-h264 = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
