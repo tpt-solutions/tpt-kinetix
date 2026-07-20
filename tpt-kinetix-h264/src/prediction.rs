@@ -96,14 +96,16 @@ impl Intra16x16Mode {
     }
 }
 
-/// Neighbouring samples needed by the Intra_4×4 / 8×8 predictors.
+/// Neighbouring samples needed by the Intra_4×4 predictor.
 ///
-/// `top[x]` is the sample directly above the current block at column `x`
-/// (`spec` `B` samples), `left[y]` the sample to the left (`A` samples), and
-/// `top_left` the single diagonal sample above-left (`spec` `X`). `None`
-/// denotes an unavailable sample.
+/// `top[0..4]` are the samples directly above the block; `top[4..8]` are the
+/// four **top-right** samples (spec §8.3.1.2.1) needed by the DiagonalDownLeft
+/// and VerticalLeft modes. When top-right samples are unavailable the spec
+/// substitutes `top[3]`; callers may pass `None` and the predictor applies that
+/// substitution. `left[y]` is the sample to the left, and `top_left` the
+/// above-left diagonal sample.
 pub struct IntraNeighbours4x4 {
-    pub top: [Option<u8>; 4],
+    pub top: [Option<u8>; 8],
     pub left: [Option<u8>; 4],
     pub top_left: Option<u8>,
 }
@@ -121,7 +123,21 @@ fn sample(v: Option<u8>) -> i32 {
 
 /// Predict a 4×4 block (`out[4][4]`) for the given [`Intra4x4Mode`].
 pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16]) {
-    let t = |i: i32| sample(n.top[i as usize]);
+    // Top samples with spec top-right substitution: if a top-right sample
+    // (index 4..8) is unavailable, it is replaced by top[3] (§8.3.1.2.1).
+    let top3 = n.top[3];
+    let t = |i: i32| -> i32 {
+        let idx = i as usize;
+        if idx < 8 {
+            match n.top[idx] {
+                Some(v) => v as i32,
+                None if idx >= 4 => sample(top3),
+                None => R,
+            }
+        } else {
+            sample(top3)
+        }
+    };
     let l = |i: i32| sample(n.left[i as usize]);
     let tl = sample(n.top_left);
 
@@ -158,211 +174,203 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             }
         }
         Intra4x4Mode::DiagonalDownLeft => {
-            // Need top-right samples; reuse available top samples by clamping.
-            let tr = (0..4i32).map(&t).collect::<Vec<_>>();
-            // t(i) for i in 4..8 unavailable -> use t(3)
-            let get = |i: i32| -> i32 {
-                if i < 4 {
-                    tr[i as usize]
-                } else {
-                    t(3)
-                }
-            };
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let idx = x + y;
-                    let v = (get(idx) + get(idx + 1) + 1) / 2;
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2). `t` supplies T0..T7.
+            let (t0, t1, t2, t3, t4, t5, t6, t7) = (t(0), t(1), t(2), t(3), t(4), t(5), t(6), t(7));
+            let a = (t0 + 2 * t1 + t2 + 2) / 4;
+            let b = (t1 + 2 * t2 + t3 + 2) / 4;
+            let c = (t2 + 2 * t3 + t4 + 2) / 4;
+            let d = (t3 + 2 * t4 + t5 + 2) / 4;
+            let e = (t4 + 2 * t5 + t6 + 2) / 4;
+            let f = (t5 + 2 * t6 + t7 + 2) / 4;
+            let g = (t6 + 3 * t7 + 2) / 4;
+            // out[y][x]: (0,0)=a, (0,1)=b, ... diagonal sweep.
+            set(0, 0, a);
+            set(1, 0, b);
+            set(2, 0, c);
+            set(3, 0, d);
+            set(0, 1, b);
+            set(1, 1, c);
+            set(2, 1, d);
+            set(3, 1, e);
+            set(0, 2, c);
+            set(1, 2, d);
+            set(2, 2, e);
+            set(3, 2, f);
+            set(0, 3, d);
+            set(1, 3, e);
+            set(2, 3, f);
+            set(3, 3, g);
         }
         Intra4x4Mode::DiagonalDownRight => {
-            // (x+y) <= 4 uses left/X border; otherwise top border samples.
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let s = x + y;
-                    let v = if s <= 4 {
-                        diag_down_right_border_sample(&l, &t, tl, x, y)
-                    } else {
-                        (t(s) + t(s + 1) + 1) / 2
-                    };
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2).
+            let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
+            let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
+            let d = (l3 + 2 * l2 + l1 + 2) / 4;
+            let e = (l2 + 2 * l1 + l0 + 2) / 4;
+            let f = (l1 + 2 * l0 + lt + 2) / 4;
+            let g = (l0 + 2 * lt + t0 + 2) / 4;
+            // Wiki layout (rows L0..L3, top->bottom), with wiki a=g, b=f, c=e:
+            //   L0 | d  e  f  g
+            //   L1 | e  d  e  f
+            //   L2 | f  e  d  e
+            //   L3 | g  f  e  d
+            set(0, 0, d);
+            set(1, 0, e);
+            set(2, 0, f);
+            set(3, 0, g);
+            set(0, 1, e);
+            set(1, 1, d);
+            set(2, 1, e);
+            set(3, 1, f);
+            set(0, 2, f);
+            set(1, 2, e);
+            set(2, 2, d);
+            set(3, 2, e);
+            set(0, 3, g);
+            set(1, 3, f);
+            set(2, 3, e);
+            set(3, 3, d);
         }
         Intra4x4Mode::VerticalRight => {
-            // For each (x,y): z = x - (y>>1)*2 + (y&1); p = (z-1)>>1; k = (z-1)&1.
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let z = x - (y >> 1) * 2 + (y & 1);
-                    let (v, _) = angular_from_z(&l, &t, tl, z, 4);
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2).
+            let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
+            let (l0, l1, l2) = (l(0), l(1), l(2));
+            let a = (lt + t0 + 1) / 2;
+            let b = (t0 + t1 + 1) / 2;
+            let c = (t1 + t2 + 1) / 2;
+            let d = (t2 + t3 + 1) / 2;
+            let e = (l0 + 2 * lt + t0 + 2) / 4;
+            let f = (lt + 2 * t0 + t1 + 2) / 4;
+            let g = (t0 + 2 * t1 + t2 + 2) / 4;
+            let h = (t1 + 2 * t2 + t3 + 2) / 4;
+            let i = (lt + 2 * l0 + l1 + 2) / 4;
+            let j = (l0 + 2 * l1 + l2 + 2) / 4;
+            // Wiki layout rows:
+            //   L0 | a b c d
+            //   L1 | e f g h
+            //   L2 | i a b c
+            //       j e f g
+            set(0, 0, a);
+            set(1, 0, b);
+            set(2, 0, c);
+            set(3, 0, d);
+            set(0, 1, e);
+            set(1, 1, f);
+            set(2, 1, g);
+            set(3, 1, h);
+            set(0, 2, i);
+            set(1, 2, a);
+            set(2, 2, b);
+            set(3, 2, c);
+            set(0, 3, j);
+            set(1, 3, e);
+            set(2, 3, f);
+            set(3, 3, g);
         }
         Intra4x4Mode::HorizontalDown => {
-            // Mirror of VerticalRight across the main diagonal.
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let z = y - (x >> 1) * 2 + (x & 1);
-                    let (v, _) = angular_from_z(&l, &t, tl, z, 4);
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2).
+            let (lt, t0, t1, t2) = (tl, t(0), t(1), t(2));
+            let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
+            let a = (lt + l0 + 1) / 2;
+            let b = (l0 + 2 * lt + t0 + 2) / 4;
+            let c = (lt + 2 * t0 + t1 + 2) / 4;
+            let d = (t0 + 2 * t1 + t2 + 2) / 4;
+            let e = (l0 + l1 + 1) / 2;
+            let f = (lt + 2 * l0 + l1 + 2) / 4;
+            let g = (l1 + l2 + 1) / 2;
+            let h = (l0 + 2 * l1 + l2 + 2) / 4;
+            let i = (l2 + l3 + 1) / 2;
+            let j = (l1 + 2 * l2 + l3 + 2) / 4;
+            // Wiki layout rows:
+            //   L0 | a b c d
+            //   L1 | e f a b
+            //   L2 | g h e f
+            //   L3 | i j g h
+            set(0, 0, a);
+            set(1, 0, b);
+            set(2, 0, c);
+            set(3, 0, d);
+            set(0, 1, e);
+            set(1, 1, f);
+            set(2, 1, a);
+            set(3, 1, b);
+            set(0, 2, g);
+            set(1, 2, h);
+            set(2, 2, e);
+            set(3, 2, f);
+            set(0, 3, i);
+            set(1, 3, j);
+            set(2, 3, g);
+            set(3, 3, h);
         }
         Intra4x4Mode::VerticalLeft => {
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let z = x - (y >> 1) * 2 + (y & 1);
-                    let (v, _) = angular_from_z_top(&t, z);
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2).
+            let (t0, t1, t2, t3, t4, t5, t6) =
+                (t(0), t(1), t(2), t(3), t(4), t(5), t(6));
+            let a = (t0 + t1 + 1) / 2;
+            let b = (t1 + t2 + 1) / 2;
+            let c = (t2 + t3 + 1) / 2;
+            let d = (t3 + t4 + 1) / 2;
+            let e = (t4 + t5 + 1) / 2;
+            let f = (t0 + 2 * t1 + t2 + 2) / 4;
+            let g = (t1 + 2 * t2 + t3 + 2) / 4;
+            let h = (t2 + 2 * t3 + t4 + 2) / 4;
+            let i = (t3 + 2 * t4 + t5 + 2) / 4;
+            let j = (t4 + 2 * t5 + t6 + 2) / 4;
+            // Wiki layout rows:
+            //   T0 | a b c d
+            //   L1 | f g h i
+            //   L2 | b c d e
+            //   L3 | g h i j
+            set(0, 0, a);
+            set(1, 0, b);
+            set(2, 0, c);
+            set(3, 0, d);
+            set(0, 1, f);
+            set(1, 1, g);
+            set(2, 1, h);
+            set(3, 1, i);
+            set(0, 2, b);
+            set(1, 2, c);
+            set(2, 2, d);
+            set(3, 2, e);
+            set(0, 3, g);
+            set(1, 3, h);
+            set(2, 3, i);
+            set(3, 3, j);
         }
         Intra4x4Mode::HorizontalUp => {
-            for y in 0..4i32 {
-                for x in 0..4i32 {
-                    let z = y - (x >> 1) * 2 + (x & 1);
-                    let (v, _) = angular_from_z_left(&l, z);
-                    set(x, y, v);
-                }
-            }
+            // Spec-exact (MultimediaWiki / Table 8-2).
+            let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
+            let a = (l0 + l1 + 1) / 2;
+            let b = (l0 + 2 * l1 + l2 + 2) / 4;
+            let c = (l1 + l2 + 1) / 2;
+            let d = (l1 + 2 * l2 + l3 + 2) / 4;
+            let e = (l2 + l3 + 1) / 2;
+            let f = (l2 + 3 * l3 + 2) / 4;
+            let g = l3;
+            // Wiki layout rows:
+            //   L0 | a b c d
+            //   L1 | c d e f
+            //   L2 | e f g g
+            //   L3 | g g g g
+            set(0, 0, a);
+            set(1, 0, b);
+            set(2, 0, c);
+            set(3, 0, d);
+            set(0, 1, c);
+            set(1, 1, d);
+            set(2, 1, e);
+            set(3, 1, f);
+            set(0, 2, e);
+            set(1, 2, f);
+            set(2, 2, g);
+            set(3, 2, g);
+            set(0, 3, g);
+            set(1, 3, g);
+            set(2, 3, g);
+            set(3, 3, g);
         }
-    }
-}
-
-// --- Diagonal sample helpers (spec §8.3.1.2, Table 8-2) -------------------------
-
-/// Sample used by DiagonalDownRight for the (x+y) ≤ 4 region, which falls on the
-/// left/`X` border instead of the top border.
-fn diag_down_right_border_sample(
-    l: &dyn Fn(i32) -> i32,
-    t: &dyn Fn(i32) -> i32,
-    tl: i32,
-    x: i32,
-    y: i32,
-) -> i32 {
-    let s = x + y;
-    match s {
-        0 => tl,
-        1 => {
-            // (x,y) in {(0,1),(1,0)}
-            if x == 0 {
-                (l(0) + tl + 1) / 2
-            } else {
-                (tl + t(0) + 1) / 2
-            }
-        }
-        2 => {
-            // (0,2)->(l(1)+l(0))/2 ; (1,1)->(l(0)+t(0))/2 ; (2,0)->(t(0)+t(1))/2
-            if x == 0 {
-                (l(1) + l(0) + 1) / 2
-            } else if x == 1 {
-                (l(0) + t(0) + 1) / 2
-            } else {
-                (t(0) + t(1) + 1) / 2
-            }
-        }
-        3 => {
-            // (0,3)->(l(2)+l(1))/2 ; (1,2)->(l(1)+l(0))/2 ; (2,1)->(l(0)+t(0))/2 ; (3,0)->(t(0)+t(1))/2
-            if x == 0 {
-                (l(2) + l(1) + 1) / 2
-            } else if x == 1 {
-                (l(1) + l(0) + 1) / 2
-            } else if x == 2 {
-                (l(0) + t(0) + 1) / 2
-            } else {
-                (t(0) + t(1) + 1) / 2
-            }
-        }
-        4 => {
-            // (0,4)->(l(3)+l(2))/2 ; (1,3)->(l(2)+l(1))/2 ; (2,2)->(l(1)+l(0))/2 ; (3,1)->(l(0)+t(0))/2
-            if x == 0 {
-                (l(3) + l(2) + 1) / 2
-            } else if x == 1 {
-                (l(2) + l(1) + 1) / 2
-            } else if x == 2 {
-                (l(1) + l(0) + 1) / 2
-            } else {
-                (l(0) + t(0) + 1) / 2
-            }
-        }
-        _ => t(s),
-    }
-}
-
-/// VerticalRight / HorizontalDown sample for a given `z`, returning `(value, k)`.
-///
-/// `p = (z-1) >> 1`, `k = (z-1) & 1`. k==0 → `(x + x_p)/2`; k==1 →
-/// `(3x_p + x)/4`. We derive the needed border sample from the left/top/`X`
-/// set; `block` is the block size (4 for 4×4, 8 for 8×8) used to wrap into the
-/// top border when `z` exceeds the left column count.
-fn angular_from_z(
-    l: &dyn Fn(i32) -> i32,
-    t: &dyn Fn(i32) -> i32,
-    tl: i32,
-    z: i32,
-    block: i32,
-) -> (i32, usize) {
-    let (s, k) = if z <= 0 {
-        // z <= 0: use X (z==0) or diagonal extrapolation into the left border.
-        let p = (-z).max(0);
-        let base = if z == 0 { tl } else { l(p.min(block - 1)) };
-        (base, 0usize)
-    } else {
-        let p = (z - 1) >> 1;
-        let k = ((z - 1) & 1) as usize;
-        let (xp, x) = if p + 1 < block {
-            (l(p), l(p + 1))
-        } else {
-            // Beyond the left column: borrow from the top border.
-            let to = p + 1 - block;
-            (t(p - block), t(to))
-        };
-        (((xp) + (x) + 1) / 2, k)
-    };
-    (s, k)
-}
-
-/// VerticalLeft sample: derived from the top border only (z indexes top).
-fn angular_from_z_top(t: &dyn Fn(i32) -> i32, z: i32) -> (i32, usize) {
-    if z <= 0 {
-        (t(0), 0usize)
-    } else {
-        let p = (z - 1) >> 1;
-        let k = ((z - 1) & 1) as usize;
-        let (xp, x) = if p + 1 < 8 {
-            (t(p), t(p + 1))
-        } else {
-            (t(7), t(7))
-        };
-        let v = if k == 0 {
-            (xp + x + 1) / 2
-        } else {
-            (3 * xp + x + 2) / 4
-        };
-        (v, k)
-    }
-}
-
-/// HorizontalUp sample: derived from the left border only (z indexes left).
-fn angular_from_z_left(l: &dyn Fn(i32) -> i32, z: i32) -> (i32, usize) {
-    if z <= 0 {
-        (l(0), 0usize)
-    } else {
-        let p = (z - 1) >> 1;
-        let k = ((z - 1) & 1) as usize;
-        let (xp, x) = if p + 1 < 8 {
-            (l(p), l(p + 1))
-        } else {
-            (l(7), l(7))
-        };
-        let v = if k == 0 {
-            (xp + x + 1) / 2
-        } else {
-            (3 * xp + x + 2) / 4
-        };
-        (v, k)
     }
 }
 
@@ -713,7 +721,7 @@ mod tests {
 
     fn n4() -> IntraNeighbours4x4 {
         IntraNeighbours4x4 {
-            top: [Some(100); 4],
+            top: [Some(100); 8],
             left: [Some(50); 4],
             top_left: Some(128),
         }
@@ -757,7 +765,7 @@ mod tests {
     #[test]
     fn mode_dc_unavailable_borders_use_r() {
         let n = IntraNeighbours4x4 {
-            top: [None; 4],
+            top: [None; 8],
             left: [None; 4],
             top_left: None,
         };

@@ -1,0 +1,23 @@
+[package]
+name = "tpt-kinetix-lean"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Lean: an original, embedded-first video codec for the TPT Kinetix media processing engine"
+keywords = ["tpt-kinetix", "lean", "codec", "multimedia", "embedded"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-lean"
+
+[dependencies]
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+thiserror = "2"
+
+[dev-dependencies]
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+
+[lib]
+path = "src/lib.rs"

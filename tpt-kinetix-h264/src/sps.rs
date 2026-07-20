@@ -13,6 +13,11 @@ pub struct SeqParameterSet {
     pub profile_idc: u8,
     pub level_idc: u8,
     pub seq_parameter_set_id: u32,
+    /// `chroma_format_idc`: 0 = monochrome, 1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4.
+    /// Defaults to 1 (4:2:0) for non-high profiles where it is not signalled.
+    pub chroma_format_idc: u32,
+    /// `separate_colour_plane_flag` (only meaningful for 4:4:4).
+    pub separate_colour_plane_flag: bool,
     pub log2_max_frame_num_minus4: u32,
     pub pic_order_cnt_type: u32,
     /// Only present when `pic_order_cnt_type == 0`.
@@ -45,11 +50,13 @@ impl SeqParameterSet {
             profile_idc,
             100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138
         );
+        let mut chroma_format_idc = 1u32; // default 4:2:0 when not signalled
+        let mut separate_colour_plane_flag = false;
         if high_profile {
-            let chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
+            chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
             if chroma_format_idc == 3 {
-                let _separate_colour_plane_flag =
-                    r.read_bit().context("separate_colour_plane_flag")?;
+                separate_colour_plane_flag =
+                    r.read_bit().context("separate_colour_plane_flag")? == 1;
             }
             let _bit_depth_luma_minus8 = r.read_ue().context("bit_depth_luma_minus8")?;
             let _bit_depth_chroma_minus8 = r.read_ue().context("bit_depth_chroma_minus8")?;
@@ -143,6 +150,8 @@ impl SeqParameterSet {
             profile_idc,
             level_idc,
             seq_parameter_set_id,
+            chroma_format_idc,
+            separate_colour_plane_flag,
             log2_max_frame_num_minus4,
             pic_order_cnt_type,
             log2_max_pic_order_cnt_lsb_minus4,
@@ -197,6 +206,8 @@ mod tests {
             profile_idc: 66,
             level_idc: 30,
             seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
             log2_max_frame_num_minus4: 0,
             pic_order_cnt_type: 0,
             log2_max_pic_order_cnt_lsb_minus4: 4,
@@ -222,6 +233,8 @@ mod tests {
             profile_idc: 100,
             level_idc: 40,
             seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
             log2_max_frame_num_minus4: 0,
             pic_order_cnt_type: 0,
             log2_max_pic_order_cnt_lsb_minus4: 4,

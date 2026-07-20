@@ -109,6 +109,28 @@ impl<'a> BitReader<'a> {
         (self.data.len() - self.byte_pos) * 8 - self.bit_pos as usize
     }
 
+    /// Absolute bit position from the start of the stream (number of bits already
+    /// consumed).
+    #[inline]
+    pub fn bit_position(&self) -> usize {
+        self.byte_pos * 8 + self.bit_pos as usize
+    }
+
+    /// Seek to an absolute bit position from the start of the stream.
+    pub fn seek_to_bit(&mut self, bit: usize) {
+        self.byte_pos = bit / 8;
+        self.bit_pos = (bit % 8) as u8;
+    }
+
+    /// Align to the next byte boundary (used before CABAC data). No-op when
+    /// already aligned.
+    pub fn byte_align(&mut self) {
+        if self.bit_pos != 0 {
+            self.byte_pos += 1;
+            self.bit_pos = 0;
+        }
+    }
+
     /// Returns `true` if the current position is byte-aligned (`bit_pos == 0`).
     #[inline]
     pub fn is_aligned(&self) -> bool {

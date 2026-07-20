@@ -1572,6 +1572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpt-kinetix-lean"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tpt-kinetix-core",
+ "tpt-kinetix-test-utils",
+]
+
+[[package]]
 name = "tpt-kinetix-mux"
 version = "0.1.0"
 dependencies = [

@@ -57,9 +57,10 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ## Phase 3 — H.264 Decoder (via KG pipeline)
 
-> Status: bitstream parsing, CAVLC scaffold, and rayon parallel reconstruction
-> are implemented; the decoder is **not yet pixel-exact** (no CABAC, intra/inter
-> prediction, or deblocking). See `kinetix-h264/README.md` (LIMITATIONS).
+> Status: bitstream parsing, CAVLC scaffold, intra prediction, the in-loop
+> deblocking filter, and rayon parallel reconstruction are implemented; the
+> decoder is **not yet pixel-exact** (no CABAC, no inter prediction). See
+> `kinetix-h264/README.md` (LIMITATIONS).
 
 - [x] Run Phase 1 KG tooling against FFmpeg's H.264 decoder source to generate initial Rust scaffolding into `kinetix-h264`
 - [x] Hand-complete NAL unit parsing (SPS/PPS/slice header parsing) via `nom`
@@ -199,8 +200,155 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 ### Codec correctness (in progress)
 - [x] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output — `AacDecoder::decode()` delegates AAC-LC reconstruction to `symphonia-codec-aac`, returning interleaved `f32` PCM; verified by the `ffmpeg`-gated round-trip test `tpt-kinetix-aac/tests/decode_pcm.rs` (HE-AAC SBR/PS still unsupported by the wrapped decoder)
 - [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; still missing: the per-syntax-element context-index tables (spec Tables 9-12..9-33) and macroblock-level CABAC syntax parsing (mb_type, cbf, residual) wired into `decoder.rs`
-- [ ] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
-- [ ] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
+- [x] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
+- [x] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
 - [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113`
 
 Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).
+
+## Phase 12 — Full From-Scratch Conformant Decoders (2026-07-20)
+
+> Goal: genuine pixel-exact, conformant decode for H.264 (and AV1), built
+> from scratch. Every normative table is transcribed from an authoritative
+> source (ITU-T H.264 spec; cross-checked against permissively-licensed
+> references) with citations — no guessed/approximated tables. Each phase must
+> compile, be unit-tested, and validated bit-exact against `ffmpeg`/`dav1d`
+> before its box is checked. Do NOT flip `capabilities().pixel_exact = true`
+> for a codec until its conformance harness passes.
+
+### Foundations & correctness fixes (blockers)
+- [x] Replace the approximated CAVLC tables in `slice.rs` with spec-exact
+      `coeff_token` (Table 9-5), `level_prefix` (Table 9-6), `total_zeros`
+      (Tables 9-7/9-8), chroma-DC `total_zeros` (Table 9-9), and `run_before`
+      (Table 9-10) tables, with unit tests per table — done in
+      `src/cavlc_tables.rs` (exhaustive prefix-code roundtrip tests pass)
+- [x] Replace the simplified single-scale inverse-quant/IDCT in `macroblock.rs`
+      with the spec `LevelScale4x4` weighting + correct 4×4 residual transform
+      (§8.5.12), and add the Intra_16×16 luma DC Hadamard transform (§8.5.10)
+      and chroma DC transform (§8.5.11) — done in `src/transform.rs` (unit-tested)
+- [x] Extend SPS/PPS/slice-header parsers to retain all fields needed for
+      reconstruction (chroma_format_idc, transform_8x8_mode_flag,
+      chroma_qp_index_offset, num_ref_idx overrides, ref_pic_list_modification,
+      pred_weight_table, dec_ref_pic_marking) — SPS/PPS extended; slice header
+      fully rewritten (§7.3.3) exposing `data_bit_offset`
+
+### H.264 — Phase A: I-frame / baseline pixel-exact
+- [~] Implement the real slice-data parsing loop (§7.3.4): mb_type,
+      coded_block_pattern, mb_qp_delta, CAVLC residual parsing dispatch —
+      I-slice parser done in `src/slice_data.rs` (mb_type Table 7-11, CBP
+      Table 9-4, nC neighbour derivation, spec §9.2.2 level decoding, unit
+      tested). STILL TODO: wire into `decoder.rs::decode_slice()` replacing the
+      all-skip stub; I_PCM + Intra_4×4 MPM neighbour tracking
+- [ ] Neighbour-availability + Intra_4×4/16×16 mode signalling
+      (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — modes are
+      parsed; most-probable-mode neighbour derivation still uses a DC fallback
+- [ ] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus
+
+### H.264 — Phase B: complete CAVLC
+- [ ] Wire the spec-exact CAVLC tables into residual parsing; correct nC
+      derivation from left/top neighbour TotalCoeff; validate on P/I CAVLC clips
+
+### H.264 — Phase C: inter prediction (P-frames)
+- [ ] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
+- [ ] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
+- [ ] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
+- [ ] Validate bit-exact P-frame decode vs `ffmpeg`
+
+### H.264 — Phase D: CABAC
+- [ ] Per-syntax-element context-index tables (Tables 9-12..9-33) and
+      binarizations (§9.3.2) wired into the arithmetic engine in `entropy.rs`
+- [ ] CABAC macroblock/residual syntax parsing in the slice loop
+- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg`
+
+### H.264 — Phase E/F/G: advanced tools
+- [ ] B-frames, weighted prediction, ref_pic_list_modification, MMCO
+- [ ] 8×8 transform + High-profile scaling matrices
+- [ ] Field/interlaced coding (PAFF/MBAFF)
+
+### H.264 — Phase H: conformance & capability flip
+- [ ] Cross-codec conformance harness vs ITU test vectors + `ffmpeg`; on pass,
+      set `H264Decoder::capabilities().pixel_exact = true`, enable the gated
+      pixel-exact assertions, and update `lib.rs`/README/`todo.md` status
+
+### AV1 — from-scratch reconstruction
+- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs`
+      (replace the grey placeholder path), incl. the parallel tile-decode
+      `TODO(phase-4)` at `decoder.rs:113`; validate vs `dav1d`; flip
+      `Av1Decoder::capabilities().pixel_exact` only after conformance passes
+
+## Phase 13 — `tpt-kinetix-lean`: Original Embedded-First Codec (2026-07-20)
+
+> Goal: an original (not ported) codec design prioritizing bounded-memory,
+> bounded-time decode on constrained hardware over maximum compression ratio.
+> Independent track — does not block on or get blocked by Phase 12. Accepts
+> ~10-15% worse compression than AV1 in exchange for a decoder implementable
+> in a few thousand lines with genuinely parallel entropy decode.
+
+### Design
+- [~] Write the format design doc: header layout, fixed block-partition
+      scheme, rANS stream-interleaving/framing — documented in
+      `tpt-kinetix-lean/src/headers.rs` (byte layout table) and
+      `tpt-kinetix-lean/src/rans.rs` (stream-set framing) module docs.
+      STILL TODO: integer transform sizes, intra mode set (~8-16
+      directions), inter/motion-vector approach, in-loop filter placement
+- [x] Document the memory/perf budget for v1 (target max resolution, arena
+      size ceiling, per-frame decode time budget) sized for embedded-Linux
+      SBC-class hardware (e.g. Raspberry Pi–class), noted as revisitable —
+      `tpt-kinetix-lean/src/lib.rs` crate-level docs, "v1 target envelope"
+
+### Scaffold
+- [x] Generate `tpt-kinetix-lean` crate from `templates/codec-crate/`, add to
+      workspace `members`
+- [x] Implement `headers.rs`: sequence/frame header struct definitions
+      (max dimensions, max ref count, block size range, quant params)
+- [x] Implement `bitreader.rs`: bit-level reader for the new format
+- [x] Implement `rans.rs`: rANS/tANS encode/decode primitives + stream
+      interleaving skeleton, with a stubbed extension point for the
+      per-symbol probability model — `RansEncoder`/`RansDecoder` are real
+      and round-trip-tested against a uniform `StaticModel`; the adaptive/
+      context-selected `SymbolModel` real coefficient coding will use is
+      the still-open extension point
+- [x] Implement `decoder.rs` shell: `DecoderCapabilities` honesty pattern
+      (`pixel_exact: false`, `with_strict()` → `NotPixelExact`), header
+      parsing entry point
+- [x] Add `fuzz/` target for the header/bitstream parser
+- [x] Add round-trip test scaffolding (header parse round-trip;
+      `DecoderCapabilities` not-pixel-exact contract) — full encode/decode
+      round-trip test lands once reconstruction exists
+
+### Open questions (flagged, not decided here)
+- [ ] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
+      now that this would be the second hand-rolled bit reader in the
+      workspace (alongside `tpt-kinetix-h264/src/bitreader.rs`), or keep them
+      independent per-codec
+- [ ] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
+      hot path is in place and proven on embedded Linux
+
+## Phase 14 — Specialist Codec Roadmap (backlog) (2026-07-20)
+
+> Status: backlog only — none of these are started. Full rationale table
+> lives in `docs/codec-backlog.md` ("Original Specialist Codec Concepts");
+> this phase tracks getting each one designed/scaffolded when prioritized,
+> the same way Phase 13 was written only once `tpt-kinetix-lean` was
+> actually decided on. Do not start implementation on any of these without
+> first writing its own Phase-13-style design section here.
+
+- [ ] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
+      classifier accuracy per bit rather than human perceptual quality;
+      chroma-optional, model-matched bit depth, tensor-output decode path
+      (see `docs/codec-backlog.md` for design notes)
+- [ ] `tpt-kinetix-realtime` — ultra-low-latency, loss-resilient real-time
+      codec for cloud gaming/video conferencing/AR overlay; sub-frame
+      latency, no B-frame lookahead, built-in partial-frame loss recovery
+- [ ] `tpt-kinetix-lossless` — bit-exact reversible, high-bit-depth codec
+      for medical/scientific/archival capture
+- [ ] `tpt-kinetix-screen` — screen/UI capture codec tuned for sharp edges,
+      flat regions, and repeated glyphs instead of natural-image statistics
+- [ ] `tpt-kinetix-face` — talking-head/video-conferencing codec via
+      landmark-driven generative synthesis instead of pixel coding
+- [ ] `tpt-kinetix-volumetric` — point-cloud/volumetric/AR-VR codec; a
+      fundamentally different (3D, not 2D-frame) data shape from every
+      other entry here
+- [ ] Prioritize this list (pick the next one to move from backlog to an
+      actual Phase-13-style design + scaffold effort) once `tpt-kinetix-lean`
+      reaches a stable v1

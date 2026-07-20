@@ -1,0 +1,25 @@
+[package]
+name = "tpt-kinetix-lean-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-lean = { path = ".." }
+tpt-kinetix-core = { path = "../../tpt-kinetix-core" }
+
+[[bin]]
+name = "fuzz_lean_parser"
+path = "fuzz_targets/fuzz_lean_parser.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1

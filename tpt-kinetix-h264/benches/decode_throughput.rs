@@ -16,6 +16,8 @@ fn sps_for(width_mbs: u32, height_mbs: u32) -> SeqParameterSet {
         profile_idc: 66,
         level_idc: 40,
         seq_parameter_set_id: 0,
+        chroma_format_idc: 1,
+        separate_colour_plane_flag: false,
         log2_max_frame_num_minus4: 0,
         pic_order_cnt_type: 0,
         log2_max_pic_order_cnt_lsb_minus4: 0,
