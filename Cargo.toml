@@ -28,7 +28,7 @@ repository = "https://github.com/tpt-solutions/tpt-kinetix"
 rayon = "1.10"
 
 # Parsing
-nom = "7.1"
+nom = "8.0"
 
 # Error handling
 thiserror = "2.0"
