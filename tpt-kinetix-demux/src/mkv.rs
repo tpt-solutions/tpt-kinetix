@@ -353,10 +353,7 @@ mod tests {
     #[test]
     fn vint_size_eight_byte_does_not_panic() {
         // 0x01 => length 8 (full-width marker), value from the remaining 7 bytes.
-        assert_eq!(
-            read_vint_size(&[0x01, 0, 0, 0, 0, 0, 0, 1]),
-            Some((1, 8))
-        );
+        assert_eq!(read_vint_size(&[0x01, 0, 0, 0, 0, 0, 0, 1]), Some((1, 8)));
     }
 
     #[test]

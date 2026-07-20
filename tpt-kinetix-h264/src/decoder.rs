@@ -12,7 +12,7 @@ use tpt_kinetix_core::{
 };
 
 use crate::{
-    macroblock::{MbPos, MbType, Macroblock},
+    macroblock::{Macroblock, MbPos, MbType},
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
     sps::SeqParameterSet,
@@ -440,18 +440,14 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
             };
         }
         let ctl = if cbx > 0 && cby > 0 {
-            chroma_cb.get((cby - 1) * chroma_stride + (cbx - 1)).copied()
+            chroma_cb
+                .get((cby - 1) * chroma_stride + (cbx - 1))
+                .copied()
         } else {
             None
         };
         let mut cbp = [0u8; 64];
-        crate::prediction::predict_chroma(
-            IntraChromaMode::Dc,
-            &ctop,
-            &cleft,
-            ctl,
-            &mut cbp,
-        );
+        crate::prediction::predict_chroma(IntraChromaMode::Dc, &ctop, &cleft, ctl, &mut cbp);
         // Add chroma residual on top of the chroma prediction.
         for row in 0..8usize {
             for col in 0..8usize {
@@ -461,11 +457,9 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
                 if off < chroma_cb.len() {
                     let res = 0i32; // residual handled by Macroblock when coeffs present
                     let _ = res;
-                    chroma_cb[off] = (chroma_cb[off] as i32 + cbp[row * 8 + col] as i32
-                        - 128)
+                    chroma_cb[off] = (chroma_cb[off] as i32 + cbp[row * 8 + col] as i32 - 128)
                         .clamp(0, 255) as u8;
-                    chroma_cr[off] = (chroma_cr[off] as i32 + cbp[row * 8 + col] as i32
-                        - 128)
+                    chroma_cr[off] = (chroma_cr[off] as i32 + cbp[row * 8 + col] as i32 - 128)
                         .clamp(0, 255) as u8;
                 }
             }

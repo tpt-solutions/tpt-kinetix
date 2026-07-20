@@ -293,10 +293,7 @@ impl FrameHeader {
     /// Parse the uncompressed frame header from `data` (the OBU payload minus
     /// the OBU header).  `seq_header` provides the fields needed to decode the
     /// frame header (dimensions bounds, color config, order-hint bits, etc.).
-    pub fn parse(
-        data: &[u8],
-        seq: &crate::obu::SequenceHeaderObu,
-    ) -> Result<Self, KinetixError> {
+    pub fn parse(data: &[u8], seq: &crate::obu::SequenceHeaderObu) -> Result<Self, KinetixError> {
         let mut br = BitReader::new(data);
 
         let reduced_still = seq.reduced_still_picture_header;
@@ -315,8 +312,7 @@ impl FrameHeader {
             // not yet store a DPB to "show" a previously decoded frame.
             let _ = read_f8(&mut br, 2)?; // frame_type
             return Err(KinetixError::Unsupported(
-                "AV1 show_existing_frame (frame display from DPB) not yet implemented"
-                    .into(),
+                "AV1 show_existing_frame (frame display from DPB) not yet implemented".into(),
             ));
         }
 
@@ -331,8 +327,7 @@ impl FrameHeader {
         } else {
             read_flag(&mut br)?
         };
-        let showable_frame = if !reduced_still && frame_type != FrameType::KeyFrame && !show_frame
-        {
+        let showable_frame = if !reduced_still && frame_type != FrameType::KeyFrame && !show_frame {
             read_flag(&mut br)?
         } else {
             false
@@ -352,7 +347,9 @@ impl FrameHeader {
             false
         };
 
-        let allow_screen_content_tools = if frame_type == FrameType::KeyFrame || !seq.reduced_still_picture_header && error_resilient_mode {
+        let allow_screen_content_tools = if frame_type == FrameType::KeyFrame
+            || !seq.reduced_still_picture_header && error_resilient_mode
+        {
             // For key frames, if reduced still, screen tools always allowed.
             if reduced_still {
                 true
@@ -365,17 +362,20 @@ impl FrameHeader {
             true
         };
 
-        let force_integer_mv = if allow_screen_content_tools && (frame_type == FrameType::KeyFrame || error_resilient_mode) {
+        let force_integer_mv = if allow_screen_content_tools
+            && (frame_type == FrameType::KeyFrame || error_resilient_mode)
+        {
             read_flag(&mut br)?
         } else {
             false
         };
 
-        let frame_size_override_flag = if !reduced_still && !error_resilient_mode && frame_type != FrameType::KeyFrame {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
+        let frame_size_override_flag =
+            if !reduced_still && !error_resilient_mode && frame_type != FrameType::KeyFrame {
+                read_flag(&mut br)?
+            } else {
+                false
+            };
 
         // order_hint
         let order_hint_bits = seq.order_hint_bits_minus_1.wrapping_add(1);
@@ -400,11 +400,12 @@ impl FrameHeader {
         };
 
         // frame_refs_short_signaling
-        let frame_refs_short_signaling = if frame_type != FrameType::KeyFrame && !error_resilient_mode {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
+        let frame_refs_short_signaling =
+            if frame_type != FrameType::KeyFrame && !error_resilient_mode {
+                read_flag(&mut br)?
+            } else {
+                false
+            };
 
         let mut ref_frame_idx = [0u8; 7];
         if frame_refs_short_signaling {
@@ -440,8 +441,14 @@ impl FrameHeader {
         )?;
 
         // --- Tiles ---
-        let (tile_cols_log2, tile_rows_log2, tile_cols, tile_rows, tile_width_in_sb, tile_height_in_sb) =
-            parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
+        let (
+            tile_cols_log2,
+            tile_rows_log2,
+            tile_cols,
+            tile_rows,
+            tile_width_in_sb,
+            tile_height_in_sb,
+        ) = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
 
         // --- Quantizer ---
         let base_q_idx = read_f8(&mut br, 8)?;
@@ -554,8 +561,7 @@ impl FrameHeader {
                 for i in 0..2 {
                     let update = read_flag(&mut br)?;
                     if update {
-                        loop_filter_deltas.loop_filter_mode_deltas[i] =
-                            read_su(&mut br, 7)? as i8;
+                        loop_filter_deltas.loop_filter_mode_deltas[i] = read_su(&mut br, 7)? as i8;
                     }
                 }
             }
@@ -687,7 +693,12 @@ impl FrameHeader {
         };
 
         // Trailing bits: ensure byte alignment + superframe marker handled by caller.
-        let _ = (show_frame, frame_id_none(seq), buffer_removal_time_present, force_integer_mv);
+        let _ = (
+            show_frame,
+            frame_id_none(seq),
+            buffer_removal_time_present,
+            force_integer_mv,
+        );
 
         Ok(FrameHeader {
             frame_type,
@@ -791,7 +802,12 @@ fn parse_frame_size(
         (max_w, max_h)
     };
 
-    let (rw, rh) = if !seq.reduced_still_picture_header && br.read_bit().ok_or_else(|| KinetixError::Parse("render size flag truncated".into()))? != 0 {
+    let (rw, rh) = if !seq.reduced_still_picture_header
+        && br
+            .read_bit()
+            .ok_or_else(|| KinetixError::Parse("render size flag truncated".into()))?
+            != 0
+    {
         let rw = read_ns(br, w)? + 1;
         let rh = read_ns(br, h)? + 1;
         (rw, rh)
@@ -845,7 +861,10 @@ fn parse_tile_info(
 }
 
 /// Read the increment-coded tile counts (non-uniform path) and return log2.
-fn compute_log2_from_increments(br: &mut BitReader<'_>, sb_total: u32) -> Result<u32, KinetixError> {
+fn compute_log2_from_increments(
+    br: &mut BitReader<'_>,
+    sb_total: u32,
+) -> Result<u32, KinetixError> {
     let mut start_sb = 0u32;
     let mut tile_count = 0u32;
     while start_sb < sb_total && tile_count < 64 {
@@ -854,7 +873,11 @@ fn compute_log2_from_increments(br: &mut BitReader<'_>, sb_total: u32) -> Result
         start_sb = sb_total; // simplified: assumes full coverage
         tile_count += 1;
     }
-    Ok(if tile_count == 0 { 0 } else { 32 - (tile_count).leading_zeros() - 1 })
+    Ok(if tile_count == 0 {
+        0
+    } else {
+        32 - (tile_count).leading_zeros() - 1
+    })
 }
 
 // ---------------------------------------------------------------------------

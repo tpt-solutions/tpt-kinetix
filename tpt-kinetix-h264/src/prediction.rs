@@ -371,7 +371,13 @@ fn angular_from_z_left(l: &dyn Fn(i32) -> i32, z: i32) -> (i32, usize) {
 /// The 8×8 modes share the same geometry as the 4×4 modes but operate on the
 /// 8×8 sample grid and use the extended neighbour set (the 8 samples above plus
 /// the top-right extension, and the 8 left samples plus the single `X`).
-pub fn predict_8x8(mode: Intra4x4Mode, top: &[Option<u8>], left: &[Option<u8>], top_left: Option<u8>, out: &mut [u8; 64]) {
+pub fn predict_8x8(
+    mode: Intra4x4Mode,
+    top: &[Option<u8>],
+    left: &[Option<u8>],
+    top_left: Option<u8>,
+    out: &mut [u8; 64],
+) {
     let t = |i: i32| sample(top.get(i as usize).and_then(|x| *x));
     let l = |i: i32| sample(left.get(i as usize).and_then(|x| *x));
     let tl = sample(top_left);
@@ -626,7 +632,13 @@ pub fn predict_16x16(mode: Intra16x16Mode, n: &IntraNeighbours16x16, out: &mut [
 /// Chroma 4×4 blocks share the same 8×8 prediction geometry (`spec §8.3.4`).
 /// `top`/`left` are the 8 samples above/left of the 8×8 chroma block, `tl` the
 /// single diagonal sample.
-pub fn predict_chroma(mode: IntraChromaMode, top: &[Option<u8>; 8], left: &[Option<u8>; 8], tl: Option<u8>, out: &mut [u8; 64]) {
+pub fn predict_chroma(
+    mode: IntraChromaMode,
+    top: &[Option<u8>; 8],
+    left: &[Option<u8>; 8],
+    tl: Option<u8>,
+    out: &mut [u8; 64],
+) {
     let t = |i: i32| sample(top[i as usize]);
     let l = |i: i32| sample(left[i as usize]);
     let tl = sample(tl);
@@ -691,10 +703,7 @@ pub fn predict_chroma(mode: IntraChromaMode, top: &[Option<u8>; 8], left: &[Opti
 pub fn mb_is_intra(mb_type: MbType) -> bool {
     matches!(
         mb_type,
-        MbType::Intra4x4
-            | MbType::Intra16x16 { .. }
-            | MbType::PL016x16
-            | MbType::BDirect16x16
+        MbType::Intra4x4 | MbType::Intra16x16 { .. } | MbType::PL016x16 | MbType::BDirect16x16
     ) || matches!(mb_type, MbType::Intra16x16 { .. })
 }
 
