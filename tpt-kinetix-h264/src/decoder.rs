@@ -157,7 +157,15 @@ impl H264Decoder {
 
                     let width = sps.pic_width_pixels();
                     let height = sps.pic_height_pixels();
-                    if width == 0 || height == 0 {
+                    // Reject implausible dimensions from a malformed/adversarial SPS
+                    // before allocating frame buffers or macroblock grids sized from
+                    // them (an attacker-controlled `pic_width_in_mbs_minus1` can be
+                    // close to `u32::MAX`, which would otherwise attempt a
+                    // multi-gigabyte allocation). 8192 covers H.264 level 6.2 (the
+                    // highest defined level, up to 8192x4320).
+                    const MAX_DIMENSION: u32 = 8192;
+                    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION
+                    {
                         continue;
                     }
 
@@ -684,5 +692,27 @@ mod tests {
         let mut dec = H264Decoder::new();
         let frames = dec.flush().unwrap();
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn fuzz_regression_oom_fd9f0adb2952389dda8d5ad0feab8c75168ee1b0() {
+        // An SPS claiming an implausible resolution used to make `decode_slice`
+        // build a macroblock grid and frame buffers sized from the raw
+        // (attacker-controlled) width/height, exhausting memory instead of
+        // being rejected.
+        let data = vec![
+            33, 31, 0, 0, 1, 255, 243, 0, 0, 1, 39, 255, 0, 1, 105, 164, 0, 0, 0, 105, 105, 105,
+            3, 3, 3, 255, 255, 255, 255, 255, 255, 255, 15, 0, 0, 1, 33, 5, 4, 1, 33, 5, 4, 217,
+        ];
+        let mut dec = H264Decoder::new();
+        let pkt = Packet {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data,
+            stream_index: 0,
+            is_key_frame: false,
+        };
+        // Must return promptly without attempting a huge allocation.
+        let _ = dec.decode(&pkt);
     }
 }
