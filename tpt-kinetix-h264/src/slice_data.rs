@@ -421,14 +421,14 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     let mut levels = [0i32; 16];
 
     // Trailing-one signs.
-    for i in 0..t1 {
+    for level in levels.iter_mut().take(t1) {
         let sign = r.read_bit().ok_or(SliceDataError::Eof("T1 sign"))?;
-        levels[i] = if sign == 1 { -1 } else { 1 };
+        *level = if sign == 1 { -1 } else { 1 };
     }
 
     // Remaining levels (§9.2.2).
     let mut suffix_length: u32 = if tc > 10 && t1 < 3 { 1 } else { 0 };
-    for i in t1..tc {
+    for (i, out_level) in levels.iter_mut().enumerate().take(tc).skip(t1) {
         // level_prefix: count leading zeros then the terminating 1.
         let mut level_prefix: u32 = 0;
         loop {
@@ -475,7 +475,7 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
         } else {
             (-level_code - 1) >> 1
         };
-        levels[i] = level;
+        *out_level = level;
 
         if suffix_length == 0 {
             suffix_length = 1;
@@ -495,8 +495,8 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     let mut zeros_left = total_zeros;
     // Place coefficients from highest-frequency to lowest.
     let mut pos = (tc as i32) - 1 + total_zeros;
-    for i in 0..tc {
-        out[pos as usize] = levels[i] as i16;
+    for (i, &level) in levels.iter().enumerate().take(tc) {
+        out[pos as usize] = level as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
                 cavlc_tables::read_run_before(r, zeros_left.min(255) as u8)? as i32
@@ -523,13 +523,13 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
     let t1 = trailing_ones as usize;
     let mut levels = [0i32; 4];
 
-    for i in 0..t1 {
+    for level in levels.iter_mut().take(t1) {
         let sign = r.read_bit().ok_or(SliceDataError::Eof("chroma T1 sign"))?;
-        levels[i] = if sign == 1 { -1 } else { 1 };
+        *level = if sign == 1 { -1 } else { 1 };
     }
 
     let mut suffix_length: u32 = 0;
-    for i in t1..tc {
+    for (i, out_level) in levels.iter_mut().enumerate().take(tc).skip(t1) {
         let mut level_prefix: u32 = 0;
         loop {
             let bit = r
@@ -571,7 +571,7 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
         } else {
             (-level_code - 1) >> 1
         };
-        levels[i] = level;
+        *out_level = level;
         if suffix_length == 0 {
             suffix_length = 1;
         }
@@ -588,9 +588,9 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
 
     let mut zeros_left = total_zeros;
     let mut pos = (tc as i32) - 1 + total_zeros;
-    for i in 0..tc {
+    for (i, &level) in levels.iter().enumerate().take(tc) {
         if (0..4).contains(&pos) {
-            out[pos as usize] = levels[i] as i16;
+            out[pos as usize] = level as i16;
         }
         if i < tc - 1 {
             let run = if zeros_left > 0 {

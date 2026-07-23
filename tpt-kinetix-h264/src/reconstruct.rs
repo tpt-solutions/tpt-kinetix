@@ -113,10 +113,10 @@ fn reconstruct_luma(mb: &Macroblock, plane: &mut [u8], stride: usize, mb_x: u32,
             let dc_out = luma_dc_transform(&dc_raster, mb.qp);
 
             // Each 4×4 sub-block: dequant AC with its DC replaced by dc_out[block].
-            for block in 0..16usize {
+            for (block, (coeffs, &dc)) in mb.luma_coeffs.iter().zip(dc_out.iter()).enumerate() {
                 let bx = (block % 4) * 4;
                 let by = (block / 4) * 4;
-                let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, Some(dc_out[block]));
+                let res = dequant_idct_4x4(coeffs, mb.qp, Some(dc));
                 for row in 0..4 {
                     for col in 0..4 {
                         let px = base_x + bx + col;
