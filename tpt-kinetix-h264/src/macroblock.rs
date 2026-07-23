@@ -248,7 +248,7 @@ impl Macroblock {
     }
 }
 
-/// Public wrapper around [`iquant_idct_4x4`] so the decoder can add chroma
+/// Public wrapper around `iquant_idct_4x4` so the decoder can add chroma
 /// residuals during intra reconstruction without duplicating the IDCT.
 pub fn iquant_idct_4x4_public(coeffs: &[i16; 16], qp: i32) -> [i32; 16] {
     iquant_idct_4x4(coeffs, qp)

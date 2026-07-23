@@ -17,7 +17,7 @@ use crate::bitreader::BitReader;
 /// One CABAC context variable: probability state index and most-probable-symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CabacContext {
-    /// `pStateIdx` in the spec: index into [`RANGE_TAB_LPS`] / [`TRANS_IDX_LPS`], 0..=63.
+    /// `pStateIdx` in the spec: index into `RANGE_TAB_LPS` / `TRANS_IDX_LPS`, 0..=63.
     pub state: u8,
     /// `valMPS` in the spec: the most-probable-symbol value, 0 or 1.
     pub mps: u8,
@@ -270,7 +270,7 @@ pub struct MbSkipFlagContext {
 
 impl MbSkipFlagContext {
     /// Initialise the three `mb_skip_flag` contexts for a P/SP slice at the
-    /// given slice QP. See [`MB_SKIP_FLAG_P_INIT`] for the provenance caveat
+    /// given slice QP. See `MB_SKIP_FLAG_P_INIT` for the provenance caveat
     /// on these init values.
     pub fn new_p_slice(slice_qp_y: i32) -> Self {
         let ctx = MB_SKIP_FLAG_P_INIT.map(|(m, n)| CabacContext::init(m, n, slice_qp_y));

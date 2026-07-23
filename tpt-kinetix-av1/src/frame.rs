@@ -5,8 +5,8 @@
 //! ([`FrameHeader`]) is the input that later decode stages (partition tree,
 //! transform, prediction) consume.
 //!
-//! This module is intentionally self-contained: it reuses the [`BitReader`]
-//! from [`crate::obu`] and adds the few AV1-specific primitives the spec
+//! This module is intentionally self-contained: it reuses the `BitReader`
+//! from `crate::obu` and adds the few AV1-specific primitives the spec
 //! needs (uvlc, su(1), ns(.), read_*_with_default, delta handling).
 
 use tpt_kinetix_core::error::KinetixError;

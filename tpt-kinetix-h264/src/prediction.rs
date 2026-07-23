@@ -203,7 +203,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         }
         Intra4x4Mode::DiagonalDownRight => {
             // Spec-exact (MultimediaWiki / Table 8-2).
-            let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
+            let (lt, t0) = (tl, t(0));
             let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
             let d = (l3 + 2 * l2 + l1 + 2) / 4;
             let e = (l2 + 2 * l1 + l0 + 2) / 4;
