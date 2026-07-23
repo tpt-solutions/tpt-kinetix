@@ -715,4 +715,24 @@ mod tests {
         // Must return promptly without attempting a huge allocation.
         let _ = dec.decode(&pkt);
     }
+
+    #[test]
+    fn fuzz_regression_panic_7beba6be278af7cb1bf0e7065b6a81860bb29716() {
+        // An SPS with an out-of-range log2_max_frame_num_minus4 (63, spec
+        // limits it to 0..=12) used to make the slice header parser request
+        // a 67-bit `frame_num` read, tripping `read_bits`'s `n <= 32` guard.
+        let data = vec![
+            0, 0, 1, 103, 0, 129, 129, 129, 1, 5, 255, 255, 255, 0, 0, 0, 1, 5, 255, 255, 255, 254,
+            255, 255, 255, 1, 1, 129, 129, 129, 126, 129, 43,
+        ];
+        let mut dec = H264Decoder::new();
+        let pkt = Packet {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data,
+            stream_index: 0,
+            is_key_frame: false,
+        };
+        let _ = dec.decode(&pkt);
+    }
 }

@@ -35,12 +35,15 @@ impl<'a> BitReader<'a> {
         Some(bit)
     }
 
-    /// Read up to 32 bits, MSB first.  Returns `None` if the stream runs out.
+    /// Read up to 32 bits, MSB first.  Returns `None` if the stream runs out
+    /// or if `n > 32` (the result cannot fit in a `u32`).
     pub fn read_bits(&mut self, n: u8) -> Option<u32> {
         if n == 0 {
             return Some(0);
         }
-        debug_assert!(n <= 32, "read_bits: n > 32 is not supported");
+        if n > 32 {
+            return None;
+        }
         let mut result = 0u32;
         for _ in 0..n {
             let bit = self.read_bit()?;
