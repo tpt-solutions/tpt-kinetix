@@ -211,6 +211,9 @@ pub fn deblock_luma_edge(
             if x < 1 || x + 3 >= stride {
                 continue;
             }
+            if y * stride + x + 3 >= plane.len() {
+                continue;
+            }
              let o = y * stride;
              // Spec order: p0 is adjacent to the edge (x-1), p3 is furthest (x-4).
              let mut pp = [

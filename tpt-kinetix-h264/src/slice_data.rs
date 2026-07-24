@@ -496,6 +496,9 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     // Place coefficients from highest-frequency to lowest.
     let mut pos = (tc as i32) - 1 + total_zeros;
     for i in 0..tc {
+        if !(0..16).contains(&pos) {
+            return Err(SliceDataError::Cavlc);
+        }
         out[pos as usize] = levels[i] as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
