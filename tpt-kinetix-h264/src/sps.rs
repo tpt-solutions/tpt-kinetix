@@ -91,12 +91,25 @@ impl SeqParameterSet {
         }
 
         let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
+        // Per spec (§7.4.2.1.1) this is in 0..=12; downstream code widens it to a
+        // bit count (+4) that must fit the bitreader's 32-bit read_bits limit.
+        if log2_max_frame_num_minus4 > 12 {
+            return Err(anyhow!(
+                "log2_max_frame_num_minus4 {log2_max_frame_num_minus4} out of range (0..=12)"
+            ));
+        }
         let pic_order_cnt_type = r.read_ue().context("pic_order_cnt_type")?;
 
         let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
         if pic_order_cnt_type == 0 {
             log2_max_pic_order_cnt_lsb_minus4 =
                 r.read_ue().context("log2_max_pic_order_cnt_lsb_minus4")?;
+            // Same spec-mandated range as log2_max_frame_num_minus4 above.
+            if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+                return Err(anyhow!(
+                    "log2_max_pic_order_cnt_lsb_minus4 {log2_max_pic_order_cnt_lsb_minus4} out of range (0..=12)"
+                ));
+            }
         } else if pic_order_cnt_type == 1 {
             let _delta_pic_order_always_zero_flag =
                 r.read_bit().context("delta_pic_order_always_zero_flag")?;
