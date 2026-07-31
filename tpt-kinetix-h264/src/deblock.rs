@@ -1,24 +1,47 @@
 //! H.264 in-loop deblocking filter (spec §8.7).
 //!
 //! Implements the adaptive in-loop deblocking filter applied to a fully
-//! reconstructed macroblock (or picture). The filter derives a per-edge
-//! boundary-strength `bS` from the macroblock's coding type and motion/transform
-//! state, then applies the spec's `filtering` decision and 4-tap edge filter to
-//! the luma and chroma sample arrays in place.
+//! reconstructed picture. The filter derives a per-edge boundary-strength `bS`
+//! from the macroblock's coding type and coefficient state, then applies the
+//! spec's `filtering` decision and the strong (bS = 4) / weak (bS = 1..3)
+//! edge filters to the luma and chroma sample arrays in place.
 //!
-//! The boundary-strength derivation here supports the inputs the rest of the
-//! decoder can currently produce: skip / intra / inter macroblocks at the
-//! macroblock edge (the `bS = 4` intra case and the skip/`bS = 0` and
-//! coded-coefficient cases). Full motion-vector-dependent `bS` derivation
-//! (`bS = 1..3`, spec §8.7.2.1) additionally needs per-macroblock motion vectors
-//! and reference indices, which are not yet parsed; those edges fall back to the
-//! `bS = 0`/`bS = 4` end-points that the current decode graph can distinguish.
+//! The per-sample math replicates ffmpeg's `h264dsp_template.c` primitives
+//! (`h264_loop_filter_luma{,_intra}`, `h264_loop_filter_chroma{,_intra}`) and
+//! the per-edge orchestration of `libavcodec/h264_loopfilter.c`
+//! (`h264_filter_mb_fast_internal`), which is the conformance reference:
+//!
+//! - Intra macroblock boundary edges (either side intra) use the strong filter
+//!   (bS = 4). The interior 4×4 edges of an intra macroblock use the *weak*
+//!   filter with bS = 3 (§8.7.2.1, "interior edge of an intra MB").
+//! - Non-intra edges derive bS from coded-block state (bS = 2 both coded,
+//!   bS = 1 exactly one coded, bS = 0 none). Motion-vector-dependent bS (1..3)
+//!   needs per-block motion data that is not parsed yet.
+//! - Boundary-edge QP is the average `(qp_p + qp_q + 1) >> 1`; interior edges
+//!   use the current macroblock's QP. Chroma uses the spec's chroma-QP mapping
+//!   (§8.5.8 Table 8-15) before averaging.
+//! - `slice_alpha_c0_offset_div2` / `slice_beta_offset_div2` are doubled before
+//!   being added to the QP (spec: FilterOffsetA/B = 2 * div2).
+//!
+//! The filter operates directly on tight, unpadded planar buffers (luma stride
+//! = width, chroma stride = width / 2), so edges that would read outside the
+//! picture are skipped rather than filtered with padded samples.
 
 use crate::macroblock::MbType;
 
 /// Luma QP offset range guard.
 fn clip_qp(qp: i32) -> i32 {
     qp.clamp(0, 51)
+}
+
+/// Clamp a filtered sample back into the 8-bit pixel range.
+#[inline]
+fn clip_pixel(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+fn clip3(v: i32, lo: i32, hi: i32) -> i32 {
+    v.clamp(lo, hi)
 }
 
 /// Per-macroblock data the deblocking filter needs to derive boundary strength.
@@ -42,93 +65,39 @@ impl DeblockMbInfo {
     }
 }
 
-/// Boundary-strength derivation (`bS`) for the edge between two luma 4×4 blocks
-/// belonging to macroblocks `p` (left/top) and `q` (right/bottom).
-///
-/// Returns one of `0`, `1`, `2`, `3`, `4`. `bS = 4` is the special intra-coded
-/// case (spec §8.7.2.1, intra macroblocks on both sides of the edge). `bS = 3`
-/// is reserved for motion-vector/reference mismatch, which requires motion data
-/// not yet parsed and therefore is not produced here.
-pub fn derive_bs_luma(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
-    let p_intra = matches!(p.mb_type, MbType::Intra4x4 | MbType::Intra16x16 { .. });
-    let q_intra = matches!(q.mb_type, MbType::Intra4x4 | MbType::Intra16x16 { .. });
+#[inline]
+fn is_intra(t: MbType) -> bool {
+    matches!(t, MbType::Intra4x4 | MbType::Intra16x16 { .. })
+}
 
-    if p_intra || q_intra {
-        // Spec 8.7.2.1: if one of the blocks is intra-coded, bS = 4 if both are
-        // coded (i.e. belong to intra macroblocks); otherwise bS = 3. Because the
-        // current parser cannot distinguish the two sub-cases, it uses 4 which is
-        // the more conservative (stronger) filter and matches intra-coded edges.
+/// Boundary-strength for a *macroblock-boundary* edge (§8.7.2.1).
+///
+/// If either side is intra-coded the edge gets the strong filter (bS = 4).
+/// Otherwise the strength comes from the coded-block state: 2 when both sides
+/// carry coefficients, 1 when exactly one does, 0 when neither does (the
+/// motion-vector dependent bS = 1 case is not yet derivable).
+pub fn derive_bs_luma(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
+    if is_intra(p.mb_type) || is_intra(q.mb_type) {
         return 4;
     }
-
-    // Neither block is intra coded.
-    let p_coded = p.has_coeffs;
-    let q_coded = q.has_coeffs;
-    match (p_coded, q_coded) {
+    match (p.has_coeffs, q.has_coeffs) {
         (true, true) => 2,
         (true, false) | (false, true) => 1,
         (false, false) => 0,
     }
 }
 
-/// Chroma boundary-strength is the maximum of the two chroma blocks' luma `bS`
-/// (spec §8.7.2: chroma uses the same derivation, one value per edge).
-pub fn derive_bs_chroma(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
-    derive_bs_luma(p, q)
-}
-
-/// Strong/weak filter dispatch. The spec's actual filter (§8.7.2.3) is encoded
-/// here with the `bS` parameter so both the strong intra filter (`bS = 4`) and
-/// the weak filters (`bS = 1..3`) are reachable.
-pub fn filter_edge_bs(
-    p: &mut [i32; 4],
-    q: &mut [i32; 4],
-    alpha: i32,
-    beta: i32,
-    tc0: i32,
-    bs: u8,
-) {
-    let cond_p = (p[0] - q[0]).abs() < alpha && (p[0] - p[1]).abs() < beta;
-    let cond_q = (p[0] - q[0]).abs() < alpha && (q[0] - q[1]).abs() < beta;
-    if !cond_p || !cond_q {
-        return;
-    }
-
-    let mut tc = tc0;
-    if bs < 4 {
-        tc -= (bs as i32) - 1;
-    }
-    if tc <= 0 {
-        return;
-    }
-
-    if bs == 4 {
-        // Strong luma filter (8.7.2.4).
-        let p0 = p[0] + clip3(p[1] + p[2] + p[0] - q[0] - 2, -tc, tc);
-        let p1 = p[1] + clip3(p[1] + p[2] + p[3] - q[0] - q[1] - 2, -tc, tc);
-        let p2 = p[2] + clip3(p[2] + p[3] - q[0] - q[1] - q[2], -tc, tc);
-        let q0 = q[0] + clip3(q[1] + q[2] + q[0] - p[0] - 2, -tc, tc);
-        let q1 = q[1] + clip3(q[1] + q[2] + q[3] - p[0] - p[1] - 2, -tc, tc);
-        let q2 = q[2] + clip3(q[2] + q[3] - p[0] - p[1] - p[2], -tc, tc);
-        p[0] = p0;
-        p[1] = p1;
-        p[2] = p2;
-        q[0] = q0;
-        q[1] = q1;
-        q[2] = q2;
+/// Boundary-strength for an *interior* 4×4 edge (both sides inside the same
+/// macroblock). An intra macroblock's interior edges filter with bS = 3
+/// (§8.7.2.1); non-intra interior edges fall back to the coefficient rule.
+pub fn derive_bs_interior(cur: &DeblockMbInfo) -> u8 {
+    if is_intra(cur.mb_type) {
+        3
+    } else if cur.has_coeffs {
+        2
     } else {
-        // Weak filter (8.7.2.3).
-        p[0] = p[0] + clip3(p[1] - p[0] + p[2] - q[0] + 2, -tc, tc) / 2;
-        q[0] = q[0] + clip3(q[1] - q[0] + q[2] - p[0] + 2, -tc, tc) / 2;
-        if tc > 0 {
-            p[1] = p[1] + clip3(p[2] - p[1] - tc, -tc, tc) / 2;
-            q[1] = q[1] + clip3(q[2] - q[1] - tc, -tc, tc) / 2;
-        }
+        0
     }
-}
-
-fn clip3(v: i32, lo: i32, hi: i32) -> i32 {
-    v.clamp(lo, hi)
 }
 
 /// `α` table (spec Table 8-16), indexed by `FilterOffsetA` + QP.
@@ -147,21 +116,21 @@ const BETA_TAB: [i32; 52] = [
     8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18,
 ];
 
-/// `tC0` table (spec Table 8-18), indexed by `bS` (1..4) then QP.
+/// `tC0` table (spec Table 8-18), rows for bS = 1, 2, 3 indexed by QP.
+///
+/// Values extracted from ffmpeg's `tc0_table` (columns bS = 1..3, rows
+/// `index_a = QP + 52`). bS = 4 uses the strong filter, which needs no tC0.
 #[rustfmt::skip]
-const TC0_TAB: [[i32; 52]; 4] = [
-    // bS = 1 (spec Table 8-18)
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-     0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5],
+const TC0_TAB: [[i32; 52]; 3] = [
+    // bS = 1
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13],
     // bS = 2
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-     0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 10, 11, 12, 13, 15, 17],
     // bS = 3
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-     0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 8, 8, 9],
-    // bS = 4
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-     0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 7, 8, 9, 10, 11],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2,
+     2, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 23, 25],
 ];
 
 /// Deblocking filter configuration carried from slice/picture parameters.
@@ -169,10 +138,98 @@ const TC0_TAB: [[i32; 52]; 4] = [
 pub struct DeblockParams {
     /// `disable_deblocking_filter_idc` (0 = filter all, 1 = disable).
     pub disable_idc: u8,
-    /// `slice_alpha_c0_offset_div2` (spec: added to QP before `α`/`tC0` lookup).
+    /// `slice_alpha_c0_offset_div2` (spec: FilterOffsetA = 2 × this value, added
+    /// to QP before `α`/`tC0` lookup).
     pub alpha_offset_div2: i32,
-    /// `slice_beta_offset_div2` (spec: added to QP before `β` lookup).
+    /// `slice_beta_offset_div2` (spec: FilterOffsetB = 2 × this value, added to
+    /// QP before `β` lookup).
     pub beta_offset_div2: i32,
+    /// `chroma_qp_index_offset` used to map luma QP to chroma QP (§8.5.8).
+    pub chroma_qp_index_offset: i32,
+}
+
+/// Filter one luma edge position (4 samples each side).
+///
+/// Mirrors ffmpeg's `h264_loop_filter_luma` (bS < 4) and
+/// `h264_loop_filter_luma_intra` (bS == 4) exactly, including the tC handling:
+/// the weak filter starts `tc` at the table's `tC0`, increments it per side
+/// that passes the `|p2-p0| < β` / `|q2-q0| < β` test, and gates the p1/q1
+/// refinement on `tC0 != 0`.
+fn filter_luma_edge(p: &mut [i32; 4], q: &mut [i32; 4], alpha: i32, beta: i32, tc0: i32, bs: u8) {
+    let (p0, p1, p2) = (p[0], p[1], p[2]);
+    let (q0, q1, q2) = (q[0], q[1], q[2]);
+
+    if (p0 - q0).abs() < alpha && (p1 - p0).abs() < beta && (q1 - q0).abs() < beta {
+        if bs == 4 {
+            // Strong filter (h264_loop_filter_luma_intra).
+            if (p0 - q0).abs() < (alpha >> 2) + 2 {
+                if (p2 - p0).abs() < beta {
+                    let p3 = p[3];
+                    p[0] = (p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3;
+                    p[1] = (p2 + p1 + p0 + q0 + 2) >> 2;
+                    p[2] = (2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3;
+                } else {
+                    p[0] = (2 * p1 + p0 + q1 + 2) >> 2;
+                }
+                if (q2 - q0).abs() < beta {
+                    let q3 = q[3];
+                    q[0] = (p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3;
+                    q[1] = (p0 + q0 + q1 + q2 + 2) >> 2;
+                    q[2] = (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3;
+                } else {
+                    q[0] = (2 * q1 + q0 + p1 + 2) >> 2;
+                }
+            } else {
+                p[0] = (2 * p1 + p0 + q1 + 2) >> 2;
+                q[0] = (2 * q1 + q0 + p1 + 2) >> 2;
+            }
+        } else {
+            // Weak filter (h264_loop_filter_luma). p1/q1 are the *original*
+            // samples; the delta below uses them even though p/q arrays have
+            // since been updated in place.
+            let mut tc = tc0;
+            if (p2 - p0).abs() < beta {
+                if tc0 != 0 {
+                    p[1] = p1 + clip3(((p2 + ((p0 + q0 + 1) >> 1)) >> 1) - p1, -tc0, tc0);
+                }
+                tc += 1;
+            }
+            if (q2 - q0).abs() < beta {
+                if tc0 != 0 {
+                    q[1] = q1 + clip3(((q2 + ((p0 + q0 + 1) >> 1)) >> 1) - q1, -tc0, tc0);
+                }
+                tc += 1;
+            }
+            let delta = clip3((((q0 - p0) * 4) + (p1 - q1) + 4) >> 3, -tc, tc);
+            p[0] = p0 + delta;
+            q[0] = q0 - delta;
+        }
+    }
+}
+
+/// Filter one chroma edge position (2 samples each side) with the weak filter
+/// (h264_loop_filter_chroma). Chroma uses `tC0 + 1`; only p0/q0 are adjusted.
+fn filter_chroma_edge(p: &mut [i32; 2], q: &mut [i32; 2], alpha: i32, beta: i32, tc: i32) {
+    let (p0, p1) = (p[0], p[1]);
+    let (q0, q1) = (q[0], q[1]);
+
+    if (p0 - q0).abs() < alpha && (p1 - p0).abs() < beta && (q1 - q0).abs() < beta {
+        let delta = clip3((((q0 - p0) * 4) + (p1 - q1) + 4) >> 3, -tc, tc);
+        p[0] = p0 + delta;
+        q[0] = q0 - delta;
+    }
+}
+
+/// Filter one chroma edge position with the strong filter
+/// (h264_loop_filter_chroma_intra).
+fn filter_chroma_intra_edge(p: &mut [i32; 2], q: &mut [i32; 2], alpha: i32, beta: i32) {
+    let (p0, p1) = (p[0], p[1]);
+    let (q0, q1) = (q[0], q[1]);
+
+    if (p0 - q0).abs() < alpha && (p1 - p0).abs() < beta && (q1 - q0).abs() < beta {
+        p[0] = (2 * p1 + p0 + q1 + 2) >> 2;
+        q[0] = (2 * q1 + q0 + p1 + 2) >> 2;
+    }
 }
 
 /// One vertical or horizontal deblocking pass over a single macroblock edge.
@@ -180,9 +237,9 @@ pub struct DeblockParams {
 /// Operates on a `stride`-laid planar buffer (`plane`) covering the whole frame
 /// (not just the macroblock), so samples from the neighbouring macroblock on the
 /// other side of `edge_mb` are reachable. `edge_index` is the 4×4-block column
-/// (vertical edge) or row (horizontal edge) at which the boundary sits; for a
-/// macroblock this is one of `1, 2, 3` (vertical interior edges) or `0` (block
-/// boundary between macroblocks).
+/// (vertical edge) or row (horizontal edge) at which the boundary sits: 0 for a
+/// macroblock boundary, 1..3 for interior edges. `qp` is the edge QP (already
+/// averaged for macroblock-boundary edges).
 #[allow(clippy::too_many_arguments)]
 pub fn deblock_luma_edge(
     plane: &mut [u8],
@@ -199,24 +256,24 @@ pub fn deblock_luma_edge(
         return;
     }
 
-    let qpi = clip_qp(qp + p.alpha_offset_div2);
-    let qpb = clip_qp(qp + p.beta_offset_div2);
+    let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+    let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
-    let tc0 = TC0_TAB[(bs as usize).min(3)][qpi as usize];
+    let tc0 = if bs == 4 { 0 } else { TC0_TAB[(bs as usize - 1)][qpi as usize] };
 
     if vertical {
         // Vertical edge: filter samples along the column boundary at
         // x = edge_mb_x*16 + edge_index*4, for each of the 16 rows of the MB.
         let x = edge_mb_x * 16 + edge_index * 4;
+        if x < 4 || x + 3 >= stride {
+            return;
+        }
         for dy in 0..16usize {
             let y = edge_mb_y * 16 + dy;
-            if x < 1 || x + 3 >= stride {
-                continue;
-            }
-             let o = y * stride;
-             // Spec order: p0 is adjacent to the edge (x-1), p3 is furthest (x-4).
-             let mut pp = [
+            let o = y * stride;
+            // Spec order: p0 is adjacent to the edge (x-1), p3 is furthest (x-4).
+            let mut pp = [
                 plane[o + x - 1] as i32,
                 plane[o + x - 2] as i32,
                 plane[o + x - 3] as i32,
@@ -228,54 +285,58 @@ pub fn deblock_luma_edge(
                 plane[o + x + 2] as i32,
                 plane[o + x + 3] as i32,
             ];
-            filter_edge_bs(&mut pp, &mut qq, alpha, beta, tc0, bs);
-            plane[o + x - 1] = pp[0] as u8;
-            plane[o + x] = qq[0] as u8;
-            plane[o + x - 2] = pp[1] as u8;
-            plane[o + x + 1] = qq[1] as u8;
-            plane[o + x - 3] = pp[2] as u8;
-            plane[o + x + 2] = qq[2] as u8;
-            plane[o + x - 4] = pp[3] as u8;
-            plane[o + x + 3] = qq[3] as u8;
+            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bs);
+            plane[o + x - 1] = clip_pixel(pp[0]);
+            plane[o + x] = clip_pixel(qq[0]);
+            plane[o + x - 2] = clip_pixel(pp[1]);
+            plane[o + x + 1] = clip_pixel(qq[1]);
+            plane[o + x - 3] = clip_pixel(pp[2]);
+            plane[o + x + 2] = clip_pixel(qq[2]);
+            plane[o + x - 4] = clip_pixel(pp[3]);
+            plane[o + x + 3] = clip_pixel(qq[3]);
         }
     } else {
+        // Horizontal edge at row y: p0..p3 are the 4 luma samples above the
+        // edge (p0 = the row directly above), q0..q3 the 4 below (q0 = row y).
         let y = edge_mb_y * 16 + edge_index * 4;
+        let height = plane.len() / stride.max(1);
+        if y < 4 || y + 3 >= height {
+            return;
+        }
         for dx in 0..16usize {
             let x = edge_mb_x * 16 + dx;
-            if y < 1 || y + 3 >= plane.len() / stride.max(1) {
-                continue;
-            }
-            // Horizontal edge at row `y`: p0..p3 are the 4 luma samples above the
-            // edge (p0 = q0's neighbour directly above), q0..q3 are the 4 below.
-            let o1 = y * stride + x;
-            let o0 = (y - 1) * stride + x;
-            let o2 = (y + 1) * stride + x;
-            let o3 = (y + 2) * stride + x;
-            if o3 + stride > plane.len() {
-                continue;
-            }
             let mut pp = [
-                plane[o1] as i32,
-                plane[o0] as i32,
-                plane[o1 - stride] as i32,
-                plane[o0 - stride] as i32,
+                plane[(y - 1) * stride + x] as i32,
+                plane[(y - 2) * stride + x] as i32,
+                plane[(y - 3) * stride + x] as i32,
+                plane[(y - 4) * stride + x] as i32,
             ];
             let mut qq = [
-                plane[o2] as i32,
-                plane[o3] as i32,
-                plane[o2 + stride] as i32,
-                plane[o3 + stride] as i32,
+                plane[y * stride + x] as i32,
+                plane[(y + 1) * stride + x] as i32,
+                plane[(y + 2) * stride + x] as i32,
+                plane[(y + 3) * stride + x] as i32,
             ];
-            filter_edge_bs(&mut pp, &mut qq, alpha, beta, tc0, bs);
-            plane[o1] = pp[0] as u8;
-            plane[o2] = qq[0] as u8;
-            plane[o0] = pp[1] as u8;
-            plane[o3] = qq[1] as u8;
+            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bs);
+            plane[(y - 1) * stride + x] = clip_pixel(pp[0]);
+            plane[y * stride + x] = clip_pixel(qq[0]);
+            plane[(y - 2) * stride + x] = clip_pixel(pp[1]);
+            plane[(y + 1) * stride + x] = clip_pixel(qq[1]);
+            plane[(y - 3) * stride + x] = clip_pixel(pp[2]);
+            plane[(y + 2) * stride + x] = clip_pixel(qq[2]);
+            plane[(y - 4) * stride + x] = clip_pixel(pp[3]);
+            plane[(y + 3) * stride + x] = clip_pixel(qq[3]);
         }
     }
 }
 
 /// Deblock a full 8×8 chroma block edge (chroma resolution is half luma).
+///
+/// `stride` is the chroma plane stride (width / 2 for 4:2:0). `edge_index` is 0
+/// for the macroblock boundary or 2 for the interior 4×4 sub-block boundary; the
+/// chroma edge sits at chroma offset `edge_index * 2` (0 or 4). `qp` is the
+/// chroma QP for the edge, already mapped via Table 8-15 and averaged for
+/// macroblock-boundary edges.
 #[allow(clippy::too_many_arguments)]
 pub fn deblock_chroma_edge(
     plane: &mut [u8],
@@ -291,76 +352,56 @@ pub fn deblock_chroma_edge(
     if p.disable_idc == 1 || bs == 0 {
         return;
     }
-    // Chroma QP offset mapping is the full 4:2:0 table; apply a simple +0 here
-    // (the decoder does not yet parse chroma_qp_index_offset, default 0).
-    let qpi = clip_qp(qp + p.alpha_offset_div2);
-    let qpb = clip_qp(qp + p.beta_offset_div2);
+
+    let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+    let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
-    let tc0 = TC0_TAB[(bs as usize).min(3)][qpi as usize];
-
-    let cstride = stride.div_ceil(2).max(1);
-    let cheight = plane.len().div_ceil(cstride).max(1);
+    let height = plane.len() / stride.max(1);
 
     if vertical {
-        let x = edge_mb_x * 8 + edge_index * 4;
+        let x = edge_mb_x * 8 + edge_index * 2;
+        if x < 2 || x + 1 >= stride {
+            return;
+        }
         for dy in 0..8usize {
             let y = edge_mb_y * 8 + dy;
-            if x < 1 || x + 3 >= cstride || y * cstride + x + 3 >= plane.len() {
-                continue;
+            let o = y * stride;
+            let mut pp = [plane[o + x - 1] as i32, plane[o + x - 2] as i32];
+            let mut qq = [plane[o + x] as i32, plane[o + x + 1] as i32];
+            if bs == 4 {
+                filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
+            } else {
+                let tc = TC0_TAB[(bs as usize - 1)][qpi as usize] + 1;
+                filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
             }
-            let o = y * cstride;
-            // Spec order: p0 adjacent to edge (x-1), p3 furthest (x-4).
-            let mut pp = [
-                plane[o + x - 1] as i32,
-                plane[o + x - 2] as i32,
-                plane[o + x - 3] as i32,
-                plane[o + x - 4] as i32,
-            ];
-            let mut qq = [
-                plane[o + x] as i32,
-                plane[o + x + 1] as i32,
-                plane[o + x + 2] as i32,
-                plane[o + x + 3] as i32,
-            ];
-            filter_edge_bs(&mut pp, &mut qq, alpha, beta, tc0, bs);
-            plane[o + x - 1] = pp[0] as u8;
-            plane[o + x] = qq[0] as u8;
-            plane[o + x - 2] = pp[1] as u8;
-            plane[o + x + 1] = qq[1] as u8;
-            plane[o + x - 3] = pp[2] as u8;
-            plane[o + x + 2] = qq[2] as u8;
-            plane[o + x - 4] = pp[3] as u8;
-            plane[o + x + 3] = qq[3] as u8;
+            plane[o + x - 1] = clip_pixel(pp[0]);
+            plane[o + x] = clip_pixel(qq[0]);
+            plane[o + x - 2] = clip_pixel(pp[1]);
+            plane[o + x + 1] = clip_pixel(qq[1]);
         }
     } else {
-        let y = edge_mb_y * 8 + edge_index * 4;
+        let y = edge_mb_y * 8 + edge_index * 2;
+        if y < 2 || y + 1 >= height {
+            return;
+        }
         for dx in 0..8usize {
             let x = edge_mb_x * 8 + dx;
-            if y < 1 || y + 3 >= cheight || (y + 3) * cstride + x >= plane.len() {
-                continue;
+            let mut pp = [
+                plane[(y - 1) * stride + x] as i32,
+                plane[(y - 2) * stride + x] as i32,
+            ];
+            let mut qq = [plane[y * stride + x] as i32, plane[(y + 1) * stride + x] as i32];
+            if bs == 4 {
+                filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
+            } else {
+                let tc = TC0_TAB[(bs as usize - 1)][qpi as usize] + 1;
+                filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
             }
-            let o1 = y * cstride + x;
-            let o0 = (y - 1) * cstride + x;
-            let o2 = (y + 1) * cstride + x;
-            let o3 = (y + 2) * cstride + x;
-            let mut pp2 = [
-                plane[o1] as i32,
-                plane[o0] as i32,
-                plane[o1 - cstride] as i32,
-                plane[o0 - cstride] as i32,
-            ];
-            let mut qq2 = [
-                plane[o2] as i32,
-                plane[o3] as i32,
-                plane[o2 + cstride] as i32,
-                plane[o3 + cstride] as i32,
-            ];
-            filter_edge_bs(&mut pp2, &mut qq2, alpha, beta, tc0, bs);
-            plane[o1] = pp2[0] as u8;
-            plane[o2] = qq2[0] as u8;
-            plane[o0] = pp2[1] as u8;
-            plane[o3] = qq2[1] as u8;
+            plane[(y - 1) * stride + x] = clip_pixel(pp[0]);
+            plane[y * stride + x] = clip_pixel(qq[0]);
+            plane[(y - 2) * stride + x] = clip_pixel(pp[1]);
+            plane[(y + 1) * stride + x] = clip_pixel(qq[1]);
         }
     }
 }
@@ -369,6 +410,11 @@ pub fn deblock_chroma_edge(
 /// coding info (used to compute `bS` for the block boundary edges).
 ///
 /// `plane` is the full-frame luma buffer; `mb_x`/`mb_y` index the macroblock.
+///
+/// Follows ffmpeg's edge order: all vertical edges (left boundary, then the
+/// three interior 4×4 edges), then all horizontal edges (top boundary, then the
+/// three interior edges). Boundary-edge QP is averaged with the neighbour;
+/// interior edges use the current macroblock's QP.
 #[allow(clippy::too_many_arguments)]
 pub fn deblock_luma_mb(
     plane: &mut [u8],
@@ -383,23 +429,32 @@ pub fn deblock_luma_mb(
     // Block-boundary (inter-MB) vertical edge at edge_index = 0.
     if let Some(l) = left {
         let bs = derive_bs_luma(l, cur);
-        deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, cur.qp);
+        let qp = (cur.qp + l.qp + 1) >> 1;
+        deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, qp);
+    }
+    // Interior vertical edges (edge_index 1,2,3) — always within the same MB.
+    for ei in 1..=3 {
+        let bs = derive_bs_interior(cur);
+        deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, cur.qp);
     }
     // Block-boundary (inter-MB) horizontal edge at edge_index = 0.
     if let Some(t) = top {
         let bs = derive_bs_luma(t, cur);
-        deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, cur.qp);
+        let qp = (cur.qp + t.qp + 1) >> 1;
+        deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, qp);
     }
-    // Interior 4x4 edges (edge_index 1,2,3) — always within the same MB; bS from
-    // coefficient presence.
+    // Interior horizontal edges.
     for ei in 1..=3 {
-        let bs = if cur.has_coeffs { 2 } else { 0 };
-        deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, cur.qp);
+        let bs = derive_bs_interior(cur);
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, cur.qp);
     }
 }
 
-/// Deblock one macroblock's chroma plane in place (Cb and Cr share the same `bS`).
+/// Deblock one macroblock's chroma planes in place (Cb and Cr share `bS`).
+///
+/// `stride` is the chroma plane stride. Filters the boundary edges plus the
+/// interior 4×4 chroma edge (4:2:0). Chroma QP is derived via Table 8-15 and
+/// averaged with the neighbour for boundary edges, matching ffmpeg.
 #[allow(clippy::too_many_arguments)]
 pub fn deblock_chroma_mb(
     cb: &mut [u8],
@@ -412,31 +467,48 @@ pub fn deblock_chroma_mb(
     top: Option<&DeblockMbInfo>,
     p: DeblockParams,
 ) {
+    let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
+
     if let Some(l) = left {
-        let bs = derive_bs_chroma(l, cur);
-        deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, cur.qp);
-        deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 0, bs, p, cur.qp);
+        let bs = derive_bs_luma(l, cur);
+        let qpc = (cqp(cur.qp) + cqp(l.qp) + 1) >> 1;
+        deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, qpc);
+        deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 0, bs, p, qpc);
+    }
+    let bs = derive_bs_interior(cur);
+    if bs != 0 {
+        let qpc = cqp(cur.qp);
+        deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 2, bs, p, qpc);
+        deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 2, bs, p, qpc);
     }
     if let Some(t) = top {
-        let bs = derive_bs_chroma(t, cur);
-        deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, cur.qp);
-        deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, cur.qp);
+        let bs = derive_bs_luma(t, cur);
+        let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
+        deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
+        deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
+    }
+    let bs = derive_bs_interior(cur);
+    if bs != 0 {
+        let qpc = cqp(cur.qp);
+        deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 2, bs, p, qpc);
+        deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 2, bs, p, qpc);
     }
 }
 
 /// Alpha-table lookup for a given (QP + offset) — exposed for tests.
 pub fn alpha_for_qp(qp: i32, alpha_offset: i32) -> i32 {
-    ALPHA_TAB[clip_qp(qp + alpha_offset) as usize]
+    ALPHA_TAB[clip_qp(qp + 2 * alpha_offset) as usize]
 }
 
 /// Beta-table lookup for a given (QP + offset) — exposed for tests.
 pub fn beta_for_qp(qp: i32, beta_offset: i32) -> i32 {
-    BETA_TAB[clip_qp(qp + beta_offset) as usize]
+    BETA_TAB[clip_qp(qp + 2 * beta_offset) as usize]
 }
 
 /// tC0-table lookup — exposed for tests.
 pub fn tc0_for_qp(bs: u8, qp: i32, alpha_offset: i32) -> i32 {
-    TC0_TAB[(bs as usize).min(3)][clip_qp(qp + alpha_offset) as usize]
+    debug_assert!(bs >= 1 && bs <= 3);
+    TC0_TAB[(bs as usize - 1)][clip_qp(qp + 2 * alpha_offset) as usize]
 }
 
 #[cfg(test)]
@@ -449,9 +521,17 @@ mod tests {
     }
 
     #[test]
-    fn bs_intra_edge_is_four() {
+    fn bs_intra_boundary_edge_is_four() {
         let a = info(MbType::Intra16x16 { pred_mode: 0, cbp_chroma: 0, cbp_luma: 0 }, true);
         let b = info(MbType::Intra4x4, true);
+        assert_eq!(derive_bs_luma(&a, &b), 4);
+        assert_eq!(derive_bs_interior(&a), 3);
+    }
+
+    #[test]
+    fn bs_intra_vs_skip_boundary_edge_is_four() {
+        let a = info(MbType::Intra4x4, true);
+        let b = info(MbType::PSkip, false);
         assert_eq!(derive_bs_luma(&a, &b), 4);
     }
 
@@ -479,15 +559,21 @@ mod tests {
     #[test]
     fn alpha_beta_tc_tables_match_spec_at_qp26() {
         // Spec Table 8-16/8-17/8-18: the low-QP band (QP <= 15) yields alpha=beta=0,
-        // while QP=26 sits in the active band (alpha=15, beta=10). Spot-check tC0 at
-        // QP=45 (bS=1 -> 3, bS=4 -> 6) and the monotonic QP increase.
+        // QP=45 sits in the active band (alpha=15, beta=10). Spot-check tC0 at
+        // QP=45 (bS=3 -> 13 per ffmpeg Table 8-18 column 3) and the monotonic QP
+        // increase.
         assert_eq!(alpha_for_qp(10, 0), 0);
         assert_eq!(beta_for_qp(10, 0), 0);
         assert_eq!(alpha_for_qp(26, 0), 15);
         assert_eq!(beta_for_qp(26, 0), 6);
-        assert_eq!(tc0_for_qp(4, 45, 0), 6);
+        assert_eq!(tc0_for_qp(3, 45, 0), 13);
         // Higher QP strictly increases tc0 for the same bS.
-        assert!(tc0_for_qp(4, 50, 0) > tc0_for_qp(4, 40, 0));
+        assert!(tc0_for_qp(3, 50, 0) > tc0_for_qp(3, 40, 0));
+        // bS = 1 starts at QP 23 (column 1 of Table 8-18).
+        assert_eq!(tc0_for_qp(1, 22, 0), 0);
+        assert_eq!(tc0_for_qp(1, 23, 0), 1);
+        // QP offsets are doubled before lookup (FilterOffsetA = 2 * div2).
+        assert_eq!(alpha_for_qp(24, 1), alpha_for_qp(26, 0));
     }
 
     #[test]
@@ -512,8 +598,7 @@ mod tests {
         deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, 4, params, cur.qp);
         // The strong filter is an active edge operation: p0 (the sample nearest the
         // edge, at x=3) is pulled toward the brighter right block (increases), and
-        // the result stays a valid luma sample. Full smoothing of a uniform-step
-        // edge is not expected (the strong filter can overshoot on flat blocks).
+        // the result stays a valid luma sample.
         assert!(plane[3] > 100, "p0 = {}", plane[3]);
     }
 

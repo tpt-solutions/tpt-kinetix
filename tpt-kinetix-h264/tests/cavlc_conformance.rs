@@ -55,7 +55,9 @@ fn generate(
         "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0",
     ];
     if disable_deblocking {
-        args.push("--no-deblock");
+        // x264's `--no-deblock` CLI flag maps to the `deblock=0` encoder param.
+        let idx = args.iter().position(|a| *a == "-x264-params").unwrap();
+        args[idx + 1] = "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0";
     }
     args.push(h264.to_str()?);
     let ok = run(Command::new("ffmpeg").args(&args));

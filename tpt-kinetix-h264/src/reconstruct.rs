@@ -291,7 +291,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
 }
 
 /// Derive QPc from QPy and the chroma QP index offset (§8.5.8, Table 8-15).
-fn chroma_qp(qpy: i32, offset: i32) -> i32 {
+pub(crate) fn chroma_qp(qpy: i32, offset: i32) -> i32 {
     let qpi = (qpy + offset).clamp(-12, 51);
     if qpi < 30 {
         qpi

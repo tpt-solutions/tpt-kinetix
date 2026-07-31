@@ -338,12 +338,11 @@ impl H264Decoder {
         );
 
         // Apply the in-loop deblocking filter (spec §8.7).
-        // TEMPORARY: force deblocking OFF to isolate residual reconstruction errors.
-        // Revert after conformance is achieved.
         let deblock_params = crate::deblock::DeblockParams {
-            disable_idc: 1, // header.disable_deblocking_filter_idc as u8,
+            disable_idc: header.disable_deblocking_filter_idc as u8,
             alpha_offset_div2: header.slice_alpha_c0_offset_div2,
             beta_offset_div2: header.slice_beta_offset_div2,
+            chroma_qp_index_offset,
         };
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
             .macroblocks
