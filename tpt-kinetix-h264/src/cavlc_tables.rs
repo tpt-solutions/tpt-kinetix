@@ -27,11 +27,7 @@ pub struct CavlcVlcError;
 /// `entries` yields `(len, bits, symbol)`. Reads up to the maximum `len` present
 /// and returns the symbol of the entry whose codeword matches the bits read so
 /// far. Entries with `len == 0` are treated as "not present" and skipped.
-fn decode_vlc(
-    r: &mut BitReader,
-    lens: &[u8],
-    bits: &[u16],
-) -> Result<usize, CavlcVlcError> {
+fn decode_vlc(r: &mut BitReader, lens: &[u8], bits: &[u16]) -> Result<usize, CavlcVlcError> {
     debug_assert_eq!(lens.len(), bits.len());
     let max_len = lens.iter().copied().max().unwrap_or(0);
     let mut code: u32 = 0;
@@ -234,15 +230,16 @@ const CHROMA_DC_TOTAL_ZEROS_BITS: [[u16; 4]; 3] = [
 ];
 
 /// Read `total_zeros` for a chroma-DC 2×2 block. `total_coeff` in 1..=3.
-pub fn read_total_zeros_chroma_dc(
-    r: &mut BitReader,
-    total_coeff: u8,
-) -> Result<u8, CavlcVlcError> {
+pub fn read_total_zeros_chroma_dc(r: &mut BitReader, total_coeff: u8) -> Result<u8, CavlcVlcError> {
     if total_coeff == 0 || total_coeff >= 4 {
         return Ok(0);
     }
     let vlc = (total_coeff - 1) as usize;
-    let idx = decode_vlc(r, &CHROMA_DC_TOTAL_ZEROS_LEN[vlc], &CHROMA_DC_TOTAL_ZEROS_BITS[vlc])?;
+    let idx = decode_vlc(
+        r,
+        &CHROMA_DC_TOTAL_ZEROS_LEN[vlc],
+        &CHROMA_DC_TOTAL_ZEROS_BITS[vlc],
+    )?;
     Ok(idx as u8)
 }
 
@@ -319,7 +316,10 @@ mod tests {
             roundtrip(&TOTAL_ZEROS_LEN[t], &TOTAL_ZEROS_BITS[t]);
         }
         for t in 0..3 {
-            roundtrip(&CHROMA_DC_TOTAL_ZEROS_LEN[t], &CHROMA_DC_TOTAL_ZEROS_BITS[t]);
+            roundtrip(
+                &CHROMA_DC_TOTAL_ZEROS_LEN[t],
+                &CHROMA_DC_TOTAL_ZEROS_BITS[t],
+            );
         }
     }
 

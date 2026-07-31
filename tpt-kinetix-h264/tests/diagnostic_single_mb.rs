@@ -36,24 +36,51 @@ fn single_mb_block_level_compare() {
     // Encode a single 16x16 MB with no deblocking
     let enc = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=16x16:rate=1:duration=1",
-            "-frames:v", "1",
-            "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=16x16:rate=1:duration=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "1",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
             h264_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
-    assert!(enc.status.success(), "encode failed: {}", String::from_utf8_lossy(&enc.stderr));
+    assert!(
+        enc.status.success(),
+        "encode failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
 
     // Decode with ffmpeg
     let dec_ref = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264_path.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264_path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             ref_path.to_str().unwrap(),
         ])
         .output()
@@ -66,8 +93,21 @@ fn single_mb_block_level_compare() {
     // Dump hex of the bitstream for manual analysis
     eprintln!("Bitstream ({} bytes):", annexb.len());
     for (i, chunk) in annexb.chunks(16).enumerate() {
-        let hex: String = chunk.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
-        let ascii: String = chunk.iter().map(|&b| if b >= 0x20 && b < 0x7f { b as char } else { '.' }).collect();
+        let hex: String = chunk
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if b >= 0x20 && b < 0x7f {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
         eprintln!("  {i:04X}: {hex:<48} |{ascii}|");
     }
 
@@ -126,7 +166,8 @@ fn single_mb_block_level_compare() {
             }
             // Also dump our traced coefficients
             let coeffs_key = tpt_kinetix_test_utils::trace_dump::TraceKey {
-                mb_x: 0, mb_y: 0,
+                mb_x: 0,
+                mb_y: 0,
                 plane: tpt_kinetix_h264::TracePlane::Luma,
                 blk: blk_idx as u8,
                 stage: Stage::CavlcCoeffs,
@@ -184,7 +225,9 @@ fn single_mb_block_level_compare() {
         let mut nd = 0usize;
         for i in 0..frame.data.len().min(ref_bytes.len()) {
             let d = (frame.data[i] as i32 - ref_bytes[i] as i32).abs();
-            if d > 0 { nd += 1; }
+            if d > 0 {
+                nd += 1;
+            }
             md = md.max(d);
         }
         (md, nd, frame.data.len().min(ref_bytes.len()))

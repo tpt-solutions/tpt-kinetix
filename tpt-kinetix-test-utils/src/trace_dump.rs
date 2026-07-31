@@ -65,52 +65,138 @@ impl MapTracer {
     }
 
     /// Look up a captured buffer by macroblock/plane/block/stage.
-    pub fn get(&self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, stage: Stage) -> Option<&[i32]> {
+    pub fn get(
+        &self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        stage: Stage,
+    ) -> Option<&[i32]> {
         self.values
-            .get(&TraceKey { mb_x, mb_y, plane, blk, stage })
+            .get(&TraceKey {
+                mb_x,
+                mb_y,
+                plane,
+                blk,
+                stage,
+            })
             .map(|v| v.as_slice())
     }
 }
 
 impl DecodeTracer for MapTracer {
-    fn on_cavlc_coeffs(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, coeffs: &[i16; 16]) {
-        let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::CavlcCoeffs };
-        self.values.insert(key, coeffs.iter().map(|&v| v as i32).collect());
+    fn on_cavlc_coeffs(
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        coeffs: &[i16; 16],
+    ) {
+        let key = TraceKey {
+            mb_x,
+            mb_y,
+            plane,
+            blk,
+            stage: Stage::CavlcCoeffs,
+        };
+        self.values
+            .insert(key, coeffs.iter().map(|&v| v as i32).collect());
     }
 
     fn on_cavlc_block_info(
-        &mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8,
-        n_c: i32, total_coeff: u8, trailing_ones: u8, suffix_len: u32,
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        n_c: i32,
+        total_coeff: u8,
+        trailing_ones: u8,
+        suffix_len: u32,
     ) {
-        let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::CavlcBlockInfo };
-        self.block_info.insert(key, CavlcBlockInfo { n_c, total_coeff, trailing_ones, suffix_len });
+        let key = TraceKey {
+            mb_x,
+            mb_y,
+            plane,
+            blk,
+            stage: Stage::CavlcBlockInfo,
+        };
+        self.block_info.insert(
+            key,
+            CavlcBlockInfo {
+                n_c,
+                total_coeff,
+                trailing_ones,
+                suffix_len,
+            },
+        );
     }
 
     fn on_intra_pred(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, pred: &[u8]) {
-        let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::IntraPred };
-        self.values.insert(key, pred.iter().map(|&v| v as i32).collect());
+        let key = TraceKey {
+            mb_x,
+            mb_y,
+            plane,
+            blk,
+            stage: Stage::IntraPred,
+        };
+        self.values
+            .insert(key, pred.iter().map(|&v| v as i32).collect());
     }
 
-    fn on_reconstructed(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, samples: &[u8]) {
-        let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::Reconstructed };
-        self.values.insert(key, samples.iter().map(|&v| v as i32).collect());
+    fn on_reconstructed(
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        samples: &[u8],
+    ) {
+        let key = TraceKey {
+            mb_x,
+            mb_y,
+            plane,
+            blk,
+            stage: Stage::Reconstructed,
+        };
+        self.values
+            .insert(key, samples.iter().map(|&v| v as i32).collect());
     }
 
     fn on_deblocked(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, samples: &[u8]) {
-        let key = TraceKey { mb_x, mb_y, plane, blk: 0, stage: Stage::Deblocked };
-        self.values.insert(key, samples.iter().map(|&v| v as i32).collect());
+        let key = TraceKey {
+            mb_x,
+            mb_y,
+            plane,
+            blk: 0,
+            stage: Stage::Deblocked,
+        };
+        self.values
+            .insert(key, samples.iter().map(|&v| v as i32).collect());
     }
 
     fn on_mb_parsed(
-        &mut self, mb_x: u32, mb_y: u32,
-        mb_type: &str, qp: i32, cbp: u8,
-        intra_chroma_pred_mode: u8, pred_modes: &[u8; 16],
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        mb_type: &str,
+        qp: i32,
+        cbp: u8,
+        intra_chroma_pred_mode: u8,
+        pred_modes: &[u8; 16],
     ) {
-        self.mb_info.insert((mb_x, mb_y), MbInfo {
-            mb_type: mb_type.to_string(),
-            qp, cbp, intra_chroma_pred_mode,
-            pred_modes: *pred_modes,
-        });
+        self.mb_info.insert(
+            (mb_x, mb_y),
+            MbInfo {
+                mb_type: mb_type.to_string(),
+                qp,
+                cbp,
+                intra_chroma_pred_mode,
+                pred_modes: *pred_modes,
+            },
+        );
     }
 }
 
@@ -123,8 +209,12 @@ mod tests {
         let mut t = MapTracer::new();
         let samples = [7u8; 16];
         t.on_reconstructed(0, 0, TracePlane::Luma, 3, &samples);
-        let got = t.get(0, 0, TracePlane::Luma, 3, Stage::Reconstructed).unwrap();
+        let got = t
+            .get(0, 0, TracePlane::Luma, 3, Stage::Reconstructed)
+            .unwrap();
         assert_eq!(got, [7i32; 16]);
-        assert!(t.get(0, 0, TracePlane::Luma, 4, Stage::Reconstructed).is_none());
+        assert!(t
+            .get(0, 0, TracePlane::Luma, 4, Stage::Reconstructed)
+            .is_none());
     }
 }

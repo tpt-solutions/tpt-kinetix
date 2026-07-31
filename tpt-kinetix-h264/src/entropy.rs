@@ -299,7 +299,7 @@ impl MbTypeICabacContext {
             + (dec.decode_decision(&mut self.ctx[5]) as u32) * 2;
         // Reconstruct mb_type from the decoded components.
         // I_16x16 table: mb_type = 1 + pred_mode + cbp_chroma*4 + cbp_luma*12
-        1 + pred_mode + cbp_chroma * 4 + cbp_luma * 12
+        return 1 + pred_mode + cbp_chroma * 4 + cbp_luma * 12;
     }
 }
 
@@ -357,7 +357,11 @@ impl MbQpDeltaCabacContext {
         let code_num = ((abs_delta - 1) as i32) + suffix as i32;
         let sign = dec.decode_bypass();
         let val = code_num + 1;
-        if sign == 1 { -val } else { val }
+        if sign == 1 {
+            -val
+        } else {
+            val
+        }
     }
 }
 
@@ -617,7 +621,10 @@ mod tests {
         let mut dec = CabacDecoder::new(&data).unwrap();
         let mut ctx = MbTypeICabacContext::new(26);
         let mb_type = ctx.decode(&mut dec);
-        assert!(mb_type <= 24, "I-slice mb_type must be 0..=24, got {mb_type}");
+        assert!(
+            mb_type <= 24,
+            "I-slice mb_type must be 0..=24, got {mb_type}"
+        );
     }
 
     #[test]

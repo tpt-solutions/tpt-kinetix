@@ -30,29 +30,60 @@ fn diagnostic_decode_dump() {
     // Generate a small test clip with x264 baseline, NO deblocking
     let enc = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1:duration=1",
-            "-frames:v", "1",
-            "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=1:duration=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "1",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
             h264_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
-    assert!(enc.status.success(), "ffmpeg encode failed: {}", String::from_utf8_lossy(&enc.stderr));
+    assert!(
+        enc.status.success(),
+        "ffmpeg encode failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
 
     // Decode with ffmpeg to get reference
     let dec_ref = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264_path.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264_path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             ref_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
-    assert!(dec_ref.status.success(), "ffmpeg decode failed: {}", String::from_utf8_lossy(&dec_ref.stderr));
+    assert!(
+        dec_ref.status.success(),
+        "ffmpeg decode failed: {}",
+        String::from_utf8_lossy(&dec_ref.stderr)
+    );
 
     let ref_bytes = std::fs::read(&ref_path).unwrap();
     let annexb = std::fs::read(&h264_path).unwrap();
@@ -68,7 +99,12 @@ fn diagnostic_decode_dump() {
     };
     let frame = dec.decode(&pkt).expect("decode error").expect("no frame");
 
-    eprintln!("Frame: {}x{}, data.len={}", frame.width, frame.height, frame.data.len());
+    eprintln!(
+        "Frame: {}x{}, data.len={}",
+        frame.width,
+        frame.height,
+        frame.data.len()
+    );
     eprintln!("Reference: data.len={}", ref_bytes.len());
     assert_eq!(frame.data.len(), ref_bytes.len());
 
@@ -84,12 +120,18 @@ fn diagnostic_decode_dump() {
     let mut y_count = 0usize;
     for i in 0..y_size {
         let d = (frame.data[i] as i32 - ref_bytes[i] as i32).abs();
-        if d > 0 { y_count += 1; }
+        if d > 0 {
+            y_count += 1;
+        }
         y_diff += d;
         y_max = y_max.max(d);
     }
-    eprintln!("Y plane: max_diff={y_max}, avg_diff={:.1}, diff_samples={}/{}", 
-        y_diff as f64 / y_size as f64, y_count, y_size);
+    eprintln!(
+        "Y plane: max_diff={y_max}, avg_diff={:.1}, diff_samples={}/{}",
+        y_diff as f64 / y_size as f64,
+        y_count,
+        y_size
+    );
 
     let cb_off = y_size;
     let mut cb_diff = 0i32;
@@ -97,12 +139,18 @@ fn diagnostic_decode_dump() {
     let mut cb_count = 0usize;
     for i in 0..(cw * ch) {
         let d = (frame.data[cb_off + i] as i32 - ref_bytes[cb_off + i] as i32).abs();
-        if d > 0 { cb_count += 1; }
+        if d > 0 {
+            cb_count += 1;
+        }
         cb_diff += d;
         cb_max = cb_max.max(d);
     }
-    eprintln!("Cb plane: max_diff={cb_max}, avg_diff={:.1}, diff_samples={}/{}",
-        cb_diff as f64 / (cw * ch) as f64, cb_count, cw * ch);
+    eprintln!(
+        "Cb plane: max_diff={cb_max}, avg_diff={:.1}, diff_samples={}/{}",
+        cb_diff as f64 / (cw * ch) as f64,
+        cb_count,
+        cw * ch
+    );
 
     let cr_off = cb_off + cw * ch;
     let mut cr_diff = 0i32;
@@ -110,12 +158,18 @@ fn diagnostic_decode_dump() {
     let mut cr_count = 0usize;
     for i in 0..(cw * ch) {
         let d = (frame.data[cr_off + i] as i32 - ref_bytes[cr_off + i] as i32).abs();
-        if d > 0 { cr_count += 1; }
+        if d > 0 {
+            cr_count += 1;
+        }
         cr_diff += d;
         cr_max = cr_max.max(d);
     }
-    eprintln!("Cr plane: max_diff={cr_max}, avg_diff={:.1}, diff_samples={}/{}",
-        cr_diff as f64 / (cw * ch) as f64, cr_count, cw * ch);
+    eprintln!(
+        "Cr plane: max_diff={cr_max}, avg_diff={:.1}, diff_samples={}/{}",
+        cr_diff as f64 / (cw * ch) as f64,
+        cr_count,
+        cw * ch
+    );
 
     // Per-MB analysis (luma only)
     let mb_cols = w / 16;
@@ -134,11 +188,16 @@ fn diagnostic_decode_dump() {
                     let d = (frame.data[off] as i32 - ref_bytes[off] as i32).abs();
                     mb_max = mb_max.max(d);
                     mb_sum += d;
-                    if d > 0 { mb_count += 1; }
+                    if d > 0 {
+                        mb_count += 1;
+                    }
                 }
             }
-            eprint!("MB({mb_x},{mb_y}): max={mb_max} avg={:.1} diff={}/256  ", 
-                mb_sum as f64 / 256.0, mb_count);
+            eprint!(
+                "MB({mb_x},{mb_y}): max={mb_max} avg={:.1} diff={}/256  ",
+                mb_sum as f64 / 256.0,
+                mb_count
+            );
         }
         eprintln!();
     }
@@ -150,9 +209,12 @@ fn diagnostic_decode_dump() {
         if frame.data[i] != ref_bytes[i] && shown < 20 {
             let x = i % w;
             let y = i / w;
-            eprintln!("  [{x},{y}] ours={} ref={} diff={}", 
-                frame.data[i], ref_bytes[i], 
-                (frame.data[i] as i32 - ref_bytes[i] as i32).abs());
+            eprintln!(
+                "  [{x},{y}] ours={} ref={} diff={}",
+                frame.data[i],
+                ref_bytes[i],
+                (frame.data[i] as i32 - ref_bytes[i] as i32).abs()
+            );
             shown += 1;
         }
     }

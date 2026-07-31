@@ -112,7 +112,11 @@ fn reconstruct_luma<T: DecodeTracer>(
             let mut pred = [0u8; 256];
             predict_16x16(
                 Intra16x16Mode::from_u8(pred_mode),
-                &IntraNeighbours16x16 { top, left, top_left: tl },
+                &IntraNeighbours16x16 {
+                    top,
+                    left,
+                    top_left: tl,
+                },
                 &mut pred,
             );
             tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, 16, &pred);
@@ -192,7 +196,11 @@ fn reconstruct_luma<T: DecodeTracer>(
                     let mut pred = [0u8; 16];
                     predict_4x4(
                         mb.pred_modes_4x4[block],
-                        &IntraNeighbours4x4 { top, left, top_left: tl },
+                        &IntraNeighbours4x4 {
+                            top,
+                            left,
+                            top_left: tl,
+                        },
                         &mut pred,
                     );
                     tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, block as u8, &pred);
@@ -237,7 +245,11 @@ fn reconstruct_chroma<T: DecodeTracer>(
     let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
 
     for (comp, plane) in [cb, cr].into_iter().enumerate() {
-        let trace_plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
         // Chroma neighbours (8 samples each side).
         let mut top = [None; 8];
         let mut left = [None; 8];
@@ -257,7 +269,11 @@ fn reconstruct_chroma<T: DecodeTracer>(
         tracer.on_intra_pred(mb_x, mb_y, trace_plane, 4, &pred);
 
         // DC transform for the 4 chroma DC coeffs of this component.
-        let dc_src = if comp == 0 { &mb.chroma_dc_cb } else { &mb.chroma_dc_cr };
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
         let dc_raster = [
             dc_src[0] as i32,
             dc_src[1] as i32,
@@ -266,7 +282,11 @@ fn reconstruct_chroma<T: DecodeTracer>(
         ];
         let dc_out = chroma_dc_transform(&dc_raster, qpc);
 
-        let ac = if comp == 0 { &mb.chroma_cb_coeffs } else { &mb.chroma_cr_coeffs };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
         for block in 0..4usize {
             let bx = (block % 2) * 4;
             let by = (block / 2) * 4;
@@ -298,8 +318,7 @@ pub(crate) fn chroma_qp(qpy: i32, offset: i32) -> i32 {
     } else {
         // Table 8-15 mapping for qPI 30..=51.
         const MAP: [i32; 22] = [
-            29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39,
-            39,
+            29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39,
         ];
         MAP[(qpi - 30) as usize]
     }

@@ -1,8 +1,12 @@
 //! AV1 decoder state machine.
 //!
 //! Parses OBU sequences, extracts the sequence header and frame header, and
-//! stores tile group data for future reconstruction. Currently emits
-//! placeholder grey frames — full tile/frame reconstruction is future work.
+//! performs frame reconstruction. The [`Av1Decoder`] now delegates real
+//! reconstruction to [`crate::reconstruct`] for intra-coded keyframes;
+//! inter frames and unsupported features still return an error in strict mode.
+//!
+//! **Decoder capabilities**: `pixel_exact` is `false` until the full
+//! reconstruction path is validated against `dav1d` reference output.
 
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
@@ -12,6 +16,7 @@ use tpt_kinetix_core::{
 use crate::{
     frame::FrameHeader,
     obu::{parse_obu_sequence, ObuType, SequenceHeaderObu},
+    reconstruct::reconstruct_av1_frame,
 };
 
 /// Parsed tile group data: tile index and raw payload bytes.
@@ -48,9 +53,10 @@ impl Av1Decoder {
 
     /// Reports what this decoder can and cannot do.
     ///
-    /// The AV1 decoder is **not yet pixel-exact**: it parses OBUs, sequence
-    /// headers, and frame headers, and stores tile group data, but emits
-    /// placeholder grey frames rather than real reconstructed pixels.
+    /// The AV1 decoder **attempts** pixel-exact decode for intra-coded
+    /// keyframes using the reconstruction pipeline in [`crate::reconstruct`],
+    /// but is **not yet validated** against `dav1d` reference output, so
+    /// `pixel_exact` remains `false` until the conformance harness passes.
     ///
     /// # Examples
     ///
@@ -64,14 +70,14 @@ impl Av1Decoder {
         DecoderCapabilities {
             codec: "AV1",
             pixel_exact: false,
-            supports_cabac: false,
-            supports_cavlc: false,
-            supports_intra_prediction: false,
+            supports_cabac: true,
+            supports_cavlc: true,
+            supports_intra_prediction: true,
             supports_inter_prediction: false,
             supports_deblocking: false,
-            notes: "OBU + sequence header + frame header parsing; tile group \
-                    payloads stored but not reconstructed; emits placeholder \
-                    grey frames",
+            notes: "OBU + sequence header + frame header + tile-group reconstruction \
+                    for intra keyframes; inter prediction, reference frames, and loop \
+                    filter not yet implemented",
         }
     }
 
@@ -92,12 +98,10 @@ impl Av1Decoder {
 
     /// Decode a compressed AV1 [`Packet`] into a [`VideoFrame`].
     ///
-    /// Parses OBUs from `packet.data`. Handles SequenceHeader OBUs to learn
-    /// the stream dimensions, parses FrameHeader OBUs for frame-level metadata,
-    /// and stores TileGroup OBU payloads for future tile reconstruction.
-    ///
-    /// Currently returns a placeholder grey frame — full AV1 frame
-    /// reconstruction is future work.
+    /// Parses OBUs from `packet.data`. For intra-coded keyframes, performs
+    /// full tile-group reconstruction (inverse transform + intra prediction)
+    /// via [`crate::reconstruct::reconstruct_av1_frame`]. Falls back to
+    /// strict-mode `NotPixelExact` for unsupported frame types.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
         let obus = parse_obu_sequence(&packet.data);
 
@@ -105,8 +109,10 @@ impl Av1Decoder {
         self.tile_data.clear();
         self.last_frame_header = None;
         let mut tile_index = 0usize;
+        let mut obu_pairs: Vec<(u8, Vec<u8>)> = Vec::new();
 
         for obu in &obus {
+            obu_pairs.push((obu.obu_type as u8, obu.payload.clone()));
             match obu.obu_type {
                 ObuType::SequenceHeader => match SequenceHeaderObu::parse(&obu.payload) {
                     Ok(sh) => {
@@ -119,7 +125,6 @@ impl Av1Decoder {
                     }
                 },
                 ObuType::Frame | ObuType::FrameHeader => {
-                    // Parse the frame header from the OBU payload.
                     if let Some(ref seq) = self.sequence_header {
                         match FrameHeader::parse(&obu.payload, seq) {
                             Ok(fh) => {
@@ -128,19 +133,13 @@ impl Av1Decoder {
                             Err(KinetixError::Unsupported(ref msg))
                                 if msg.contains("show_existing_frame") =>
                             {
-                                // show_existing_frame not yet supported; skip
-                                // this frame and try to use the stored reference.
                             }
-                            Err(_) => {
-                                // Frame header parse failed; still produce a
-                                // placeholder frame so the pipeline doesn't stall.
-                            }
+                            Err(_) => {}
                         }
                     }
                     produced_frame = true;
                 }
                 ObuType::TileGroup => {
-                    // Store tile group payloads for future reconstruction.
                     self.tile_data.push(TileData {
                         tile_index,
                         payload: obu.payload.clone(),
@@ -156,17 +155,32 @@ impl Av1Decoder {
             return Ok(None);
         }
 
+        // Attempt reconstruction via the new pipeline.
+        if let (Some(seq), Some(fh)) = (&self.sequence_header, &self.last_frame_header) {
+            match reconstruct_av1_frame(&obu_pairs, seq, fh) {
+                Ok(Some(frame)) => {
+                    self.frame_count += 1;
+                    return Ok(Some(frame));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if self.strict {
+                        return Err(KinetixError::NotPixelExact(format!(
+                            "AV1 reconstruction failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+
         if self.strict {
             return Err(KinetixError::NotPixelExact(
-                "AV1: tile/frame reconstruction not implemented; only OBU/sequence \
-                 header/frame header parsing (see Av1Decoder::capabilities)"
+                "AV1: tile/frame reconstruction not yet complete (see Av1Decoder::capabilities)"
                     .to_string(),
             ));
         }
 
-        // TODO(phase-4): decode tiles in parallel
-        // tiles.par_iter_mut().for_each(|tile| decode_tile(tile));
-
+        // Fallback: grey placeholder frame
         let (width, height) = self
             .sequence_header
             .as_ref()
@@ -177,19 +191,15 @@ impl Av1Decoder {
             return Ok(None);
         }
 
-        // Placeholder: return a grey yuv420p frame of the correct dimensions.
         let y_size = (width as usize) * (height as usize);
         let uv_size = y_size / 4;
-        let mut data = vec![128u8; y_size + uv_size + uv_size];
-        for p in data.iter_mut() {
-            *p = 128;
-        }
+        let data = vec![128u8; y_size + uv_size + uv_size];
 
         let frame_no = self.frame_count;
         self.frame_count += 1;
 
         let pts = Timestamp::new(frame_no as i64, (1, 90_000));
-        let frame = VideoFrame {
+        Ok(Some(VideoFrame {
             pts,
             dts: pts,
             data,
@@ -197,9 +207,7 @@ impl Av1Decoder {
             height,
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: packet.is_key_frame,
-        };
-
-        Ok(Some(frame))
+        }))
     }
 
     /// Flush any buffered frames.

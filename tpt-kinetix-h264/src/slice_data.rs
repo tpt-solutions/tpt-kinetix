@@ -156,16 +156,34 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     Ok(ParsedSlice { macroblocks, nz })
 }
 
+/// One side's contribution to the Intra_4×4 MPM derivation (§8.3.1.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NeighbourSide {
+    /// The neighbouring macroblock is off-picture (or otherwise not coded):
+    /// triggers `dcPredModePredictedFlag`, forcing *both* sides to DC.
+    Unavailable,
+    /// The neighbouring macroblock is present but not Intra_4×4/Intra_8×8:
+    /// this side alone is defined as DC (2); the other side is unaffected.
+    ForcedDc,
+    /// The neighbouring macroblock is present and Intra_4×4: its stored mode.
+    Real(u8),
+}
+
+impl NeighbourSide {
+    /// This side's `intraMxMPredMode` value once
+    /// `dcPredModePredictedFlag` has already been resolved to 0
+    /// (i.e. neither side is [`NeighbourSide::Unavailable`]).
+    fn value(self) -> u8 {
+        match self {
+            NeighbourSide::Real(v) => v,
+            _ => 2,
+        }
+    }
+}
+
 /// Derive `nC` for a luma 4×4 block (§9.2.1) from the left and top neighbour
 /// TotalCoeff counts. `block` is the raster index (0..15) within the current MB.
-fn luma_nc(
-    nz: &[MbNz],
-    mb_x: u32,
-    mb_y: u32,
-    mb_cols: u32,
-    cur: &MbNz,
-    block: usize,
-) -> i32 {
+fn luma_nc(nz: &[MbNz], mb_x: u32, mb_y: u32, mb_cols: u32, cur: &MbNz, block: usize) -> i32 {
     let bx = (block % 4) as i32;
     let by = (block / 4) as i32;
 
@@ -199,7 +217,7 @@ fn chroma_nc(
     mb_y: u32,
     mb_cols: u32,
     cur: &MbNz,
-    comp: usize, // 0 = Cb, 1 = Cr
+    comp: usize,  // 0 = Cb, 1 = Cr
     block: usize, // 0..3 within component
 ) -> i32 {
     let base = comp * 4;
@@ -263,9 +281,26 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     let mb_type = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
 
     if mb_type == 25 {
-        return Err(SliceDataError::Unsupported(
-            "I_PCM macroblock (raw samples; not yet supported)",
-        ));
+        let total_bytes = 384usize;
+        if r.remaining_bits() < total_bytes * 8 {
+            return Err(SliceDataError::Eof("I_PCM insufficient bytes"));
+        }
+        mb.mb_type = MbType::IPcm;
+        mb.skip = false;
+        mb.pcm_samples = (0..total_bytes)
+            .map(|_| r.read_u8().expect("I_PCM byte"))
+            .collect();
+        let mb_type_str = "IPcm".to_string();
+        tracer.on_mb_parsed(
+            mb_x,
+            mb_y,
+            &mb_type_str,
+            mb.qp,
+            mb.cbp,
+            mb.intra_chroma_pred_mode,
+            &[0; 16],
+        );
+        return Ok((mb, this_nz, this_pred_ctx, prev_qp));
     }
 
     // Determine intra mb_type semantics.
@@ -300,33 +335,51 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
             let bx = (raster % 4) as i32;
             let by = (raster / 4) as i32;
 
-            let left_mode: Option<u8> = if bx > 0 {
-                Some(modes[(by * 4 + bx - 1) as usize] as u8)
+            // §8.3.1.1: each side is one of three states — the neighbouring
+            // *macroblock* is off-picture (`Unavailable`), present but not
+            // coded Intra_4×4/Intra_8×8 (`ForcedDc`, its intraMxMPredMode is
+            // defined as 2 regardless of the other side), or present and
+            // Intra_4×4 (`Real`, the actual stored mode). These are distinct:
+            // an unavailable *macroblock* forces dcPredModePredictedFlag = 1
+            // (both sides become DC, short-circuiting the min entirely), while
+            // a present-but-non-4x4 neighbour only forces *that side* to DC
+            // and the other side's real mode still participates in the min.
+            let left_side = if bx > 0 {
+                NeighbourSide::Real(modes[(by * 4 + bx - 1) as usize] as u8)
             } else if mb_x > 0 {
                 let n = &pred_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize];
-                (n.present && n.is_intra4x4).then(|| n.modes[(by * 4 + 3) as usize] as u8)
+                if !n.present {
+                    NeighbourSide::Unavailable
+                } else if n.is_intra4x4 {
+                    NeighbourSide::Real(n.modes[(by * 4 + 3) as usize] as u8)
+                } else {
+                    NeighbourSide::ForcedDc
+                }
             } else {
-                None
+                NeighbourSide::Unavailable
             };
 
-            let top_mode: Option<u8> = if by > 0 {
-                Some(modes[((by - 1) * 4 + bx) as usize] as u8)
+            let top_side = if by > 0 {
+                NeighbourSide::Real(modes[((by - 1) * 4 + bx) as usize] as u8)
             } else if mb_y > 0 {
                 let n = &pred_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize];
-                (n.present && n.is_intra4x4).then(|| n.modes[(3 * 4 + bx) as usize] as u8)
+                if !n.present {
+                    NeighbourSide::Unavailable
+                } else if n.is_intra4x4 {
+                    NeighbourSide::Real(n.modes[(3 * 4 + bx) as usize] as u8)
+                } else {
+                    NeighbourSide::ForcedDc
+                }
             } else {
-                None
+                NeighbourSide::Unavailable
             };
 
-            // §8.3.1.1: dcPredModePredictedFlag => when both neighbours are
-            // unavailable or not Intra_4×4, both predict DC (mode 2). When only
-            // one is available its mode is used directly; when both are available
-            // the pred mode is min(A, B).
-            let pred_mode = match (left_mode, top_mode) {
-                (Some(l), Some(t)) => l.min(t),
-                (Some(l), None) => l,
-                (None, Some(t)) => t,
-                (None, None) => 2,
+            let dc_predicted = left_side == NeighbourSide::Unavailable
+                || top_side == NeighbourSide::Unavailable;
+            let pred_mode = if dc_predicted {
+                2u8
+            } else {
+                left_side.value().min(top_side.value())
             };
 
             let prev_flag = r
@@ -402,7 +455,11 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     {
         let mb_type_str = match mb.mb_type {
             MbType::Intra4x4 => "Intra4x4".to_string(),
-            MbType::Intra16x16 { pred_mode, cbp_chroma, cbp_luma } => {
+            MbType::Intra16x16 {
+                pred_mode,
+                cbp_chroma,
+                cbp_luma,
+            } => {
                 format!("Intra16x16(pred={pred_mode},cbp_chroma={cbp_chroma},cbp_luma={cbp_luma})")
             }
             _ => "Other".to_string(),
@@ -411,7 +468,15 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
         for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
             modes[i] = *m as u8;
         }
-        tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, mb.intra_chroma_pred_mode, &modes);
+        tracer.on_mb_parsed(
+            mb_x,
+            mb_y,
+            &mb_type_str,
+            mb.qp,
+            mb.cbp,
+            mb.intra_chroma_pred_mode,
+            &modes,
+        );
     }
 
     Ok((mb, this_nz, this_pred_ctx, qp))
@@ -460,11 +525,29 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
                 mb.luma_coeffs[block] = shifted;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
-                tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0);
+                tracer.on_cavlc_block_info(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    0,
+                );
             } else {
                 mb.luma_coeffs[block] = coeffs;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
-                tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0);
+                tracer.on_cavlc_block_info(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    0,
+                );
             }
         }
     }
@@ -488,7 +571,11 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 // AC coeffs occupy zigzag positions 1..=15 (DC handled above).
                 let mut shifted = [0i16; 16];
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
-                let plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
+                let plane = if comp == 0 {
+                    TracePlane::Cb
+                } else {
+                    TracePlane::Cr
+                };
                 tracer.on_cavlc_coeffs(mb_x, mb_y, plane, block as u8, &shifted);
                 tracer.on_cavlc_block_info(mb_x, mb_y, plane, block as u8, nc, tc, t1, 0);
                 if comp == 0 {
@@ -735,7 +822,7 @@ mod tests {
     fn combine_nc_rules() {
         assert_eq!(combine_nc(None, None), 0);
         assert_eq!(combine_nc(Some(4), None), 4);
-        assert_eq!(combine_nc(None, Some(6), ), 6);
+        assert_eq!(combine_nc(None, Some(6),), 6);
         assert_eq!(combine_nc(Some(3), Some(4)), (3 + 4 + 1) >> 1);
     }
 

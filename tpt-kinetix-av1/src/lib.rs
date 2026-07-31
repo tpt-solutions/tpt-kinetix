@@ -4,6 +4,8 @@
 //! - [`obu`] — Open Bitstream Unit (OBU) header and payload parsing per the AV1 spec §5.3,
 //!   including Sequence Header decoding and LEB128 integer decoding.
 //! - [`decoder`] — [`Av1Decoder`]: frame-level OBU sequencing and decode dispatch.
+//! - [`reconstruct`] — AV1 frame/tile reconstruction (inverse transforms, intra prediction,
+//!   tile-group decode) for intra-coded keyframes.
 //! - [`encoder`] — [`Av1Encoder`] and [`Av1EncoderConfig`]: thin safe wrapper around the
 //!   `rav1e` encoder for producing AV1 elementary streams.
 //!
@@ -16,14 +18,16 @@
 //! # Status
 //!
 //! The **encoder** ([`Av1Encoder`], backed by `rav1e`) is functional. The
-//! **decoder** ([`Av1Decoder`]) currently parses OBUs and the sequence header
-//! but emits placeholder (grey) frames rather than reconstructing pixels — full
-//! AV1 frame reconstruction is future work. See the crate README for details.
+//! **decoder** ([`Av1Decoder`]) now performs tile-group reconstruction for
+//! intra-coded keyframes via [`crate::reconstruct`] but is not yet validated
+//! against `dav1d` reference output. Inter prediction and loop filtering are
+//! not yet implemented. See the crate README for details.
 
 pub mod decoder;
 pub mod encoder;
 pub mod frame;
 pub mod obu;
+pub mod reconstruct;
 
 pub use decoder::{Av1Decoder, TileData};
 pub use encoder::{Av1Encoder, Av1EncoderConfig};

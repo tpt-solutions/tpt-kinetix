@@ -1,0 +1,24 @@
+[package]
+name = "tpt-kinetix-vision"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Vision: an original video-for-machines codec optimizing ML model accuracy per bit"
+keywords = ["tpt-kinetix", "vision", "codec", "multimedia", "machine-learning"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-vision"
+
+[dependencies]
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+thiserror = "2"
+nom = "7"
+
+[dev-dependencies]
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+
+[lib]
+path = "src/lib.rs"

@@ -217,7 +217,7 @@ impl H264Decoder {
                         ));
                     }
 
-                    let frame = self.decode_slice(nal.nal_unit_type, width, height, packet)?;
+                    let frame = self.decode_slice(nal, width, height, packet)?;
                     output_frame = Some(frame);
                 }
                 _ => {}
@@ -409,7 +409,207 @@ impl H264Decoder {
         }))
     }
 
+    /// Fallback slice decode: attempt the real CAVLC I-slice path first,
+    /// then I_PCM, otherwise emit an all-skip scaffold frame.
     fn decode_slice(
+        &mut self,
+        nal: &crate::nal::NalUnit,
+        width: u32,
+        height: u32,
+        packet: &Packet,
+    ) -> Result<VideoFrame, KinetixError> {
+        let mb_cols = width.div_ceil(16);
+        let mb_rows = height.div_ceil(16);
+
+        let sps = match self.sps_store.values().next() {
+            Some(s) => s.clone(),
+            None => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
+        };
+        let pps = self.pps_store.values().next().cloned();
+
+        let ctx = crate::slice::SliceHeaderContext {
+            log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
+            pic_order_cnt_type: sps.pic_order_cnt_type,
+            log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
+            frame_mbs_only_flag: sps.frame_mbs_only_flag,
+            bottom_field_pic_order_in_frame_present_flag: pps
+                .as_ref()
+                .map(|p| p.bottom_field_pic_order_in_frame_present_flag)
+                .unwrap_or(false),
+            delta_pic_order_always_zero_flag: false,
+            num_ref_idx_l0_default_active_minus1: pps
+                .as_ref()
+                .map(|p| p.num_ref_idx_l0_default_active_minus1)
+                .unwrap_or(0),
+            num_ref_idx_l1_default_active_minus1: pps
+                .as_ref()
+                .map(|p| p.num_ref_idx_l1_default_active_minus1)
+                .unwrap_or(0),
+            weighted_pred_flag: pps.as_ref().map(|p| p.weighted_pred_flag).unwrap_or(false),
+            weighted_bipred_idc: pps.as_ref().map(|p| p.weighted_bipred_idc).unwrap_or(0),
+            entropy_coding_mode_flag: pps
+                .as_ref()
+                .map(|p| p.entropy_coding_mode_flag)
+                .unwrap_or(false),
+            deblocking_filter_control_present_flag: pps
+                .as_ref()
+                .map(|p| p.deblocking_filter_control_present_flag)
+                .unwrap_or(false),
+            redundant_pic_cnt_present_flag: pps
+                .as_ref()
+                .map(|p| p.redundant_pic_cnt_present_flag)
+                .unwrap_or(false),
+            num_slice_groups_minus1: pps.as_ref().map(|p| p.num_slice_groups_minus1).unwrap_or(0),
+            chroma_array_type: if sps.separate_colour_plane_flag {
+                0
+            } else {
+                sps.chroma_format_idc
+            },
+        };
+
+        let header =
+            match crate::slice::SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, &ctx)
+            {
+                Ok(h) => h,
+                Err(_) => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
+            };
+
+        let is_i_slice = header.slice_type == crate::slice::SliceType::I
+            || header.slice_type == crate::slice::SliceType::Si;
+
+        // Attempt the real CAVLC I-slice decode path.
+        if is_i_slice && header.first_mb_in_slice == 0 {
+            let slice_qp = 26
+                + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
+                + header.slice_qp_delta;
+            let chroma_qp_index_offset =
+                pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
+
+            let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+            reader.seek_to_bit(header.data_bit_offset);
+            match crate::slice_data::parse_i_slice(
+                &mut reader,
+                mb_cols,
+                mb_rows,
+                slice_qp,
+                chroma_qp_index_offset,
+                &mut crate::trace::NoopTracer,
+            ) {
+                Ok(parsed) => {
+                    let mut recon = crate::reconstruct::reconstruct_intra_frame(
+                        &parsed.macroblocks,
+                        mb_cols,
+                        mb_rows,
+                        width,
+                        height,
+                        chroma_qp_index_offset,
+                        &mut crate::trace::NoopTracer,
+                    );
+
+                    let deblock_params = crate::deblock::DeblockParams {
+                        disable_idc: header.disable_deblocking_filter_idc as u8,
+                        alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                        beta_offset_div2: header.slice_beta_offset_div2,
+                        chroma_qp_index_offset,
+                    };
+                    let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+                        .macroblocks
+                        .chunks(mb_cols as usize)
+                        .map(|row| {
+                            row.iter()
+                                .map(|mb| {
+                                    let has_coeffs =
+                                        mb.cbp != 0 || mb.luma_dc.iter().any(|&v| v != 0);
+                                    crate::deblock::DeblockMbInfo::new(
+                                        mb.mb_type, has_coeffs, mb.qp,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    for (row_idx, row_info) in mb_info.iter().enumerate() {
+                        for (col_idx, cur) in row_info.iter().enumerate() {
+                            let left = if col_idx > 0 {
+                                Some(&row_info[col_idx - 1])
+                            } else {
+                                None
+                            };
+                            let top = if row_idx > 0 {
+                                Some(&mb_info[row_idx - 1][col_idx])
+                            } else {
+                                None
+                            };
+                            crate::deblock::deblock_luma_mb(
+                                &mut recon.luma,
+                                recon.luma_stride,
+                                col_idx,
+                                row_idx,
+                                cur,
+                                left,
+                                top,
+                                deblock_params,
+                            );
+                            crate::deblock::deblock_chroma_mb(
+                                &mut recon.chroma_cb,
+                                &mut recon.chroma_cr,
+                                recon.chroma_stride,
+                                col_idx,
+                                row_idx,
+                                cur,
+                                left,
+                                top,
+                                deblock_params,
+                            );
+                        }
+                    }
+
+                    let mut data = recon.luma;
+                    data.extend(recon.chroma_cb);
+                    data.extend(recon.chroma_cr);
+
+                    self.frame_count += 1;
+                    return Ok(VideoFrame {
+                        pts: packet.pts,
+                        dts: packet.dts,
+                        data,
+                        width,
+                        height,
+                        pixel_format: PixelFormat::Yuv420p,
+                        is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                    });
+                }
+                Err(_) => {
+                    // Fall through to I_PCM or skip.
+                }
+            }
+        }
+
+        // Attempt I_PCM path for I/SI slices.
+        if is_i_slice && header.first_mb_in_slice == 0 {
+            let slice_qp = 26
+                + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
+                + header.slice_qp_delta;
+            let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+            reader.seek_to_bit(header.data_bit_offset);
+            if let Ok(mb_rows_data) =
+                self.parse_i_pcm_slice(&mut reader, mb_cols, mb_rows, slice_qp)
+            {
+                return self.reconstruct_mb_rows(
+                    nal.nal_unit_type,
+                    width,
+                    height,
+                    packet,
+                    mb_rows_data,
+                );
+            }
+        }
+
+        // Fallback: all-skip scaffold.
+        self.emit_skip_frame(nal.nal_unit_type, width, height, packet)
+    }
+
+    /// Emit a flat-grey skip frame as the scaffold fallback.
+    fn emit_skip_frame(
         &mut self,
         nal_type: NalUnitType,
         width: u32,
@@ -418,32 +618,38 @@ impl H264Decoder {
     ) -> Result<VideoFrame, KinetixError> {
         let mb_cols = width.div_ceil(16);
         let mb_rows = height.div_ceil(16);
-        let total_mbs = (mb_cols * mb_rows) as usize;
+        let mb_rows_data = self.build_skip_mb_rows(mb_cols, mb_rows, 26);
+        self.reconstruct_mb_rows(nal_type, width, height, packet, mb_rows_data)
+    }
 
-        // Build a row-indexed list of macroblock stubs.
-        let mb_rows_data: Vec<Vec<Macroblock>> = (0..mb_rows)
-            .map(|_row| (0..mb_cols).map(|_col| Macroblock::new_skip()).collect())
-            .collect();
-
-        let any_intra = mb_rows_data
-            .iter()
-            .flatten()
-            .any(|mb| matches!(mb.mb_type, MbType::Intra4x4 | MbType::Intra16x16 { .. }));
-
+    /// Reconstruct a grid of macroblock rows into a `VideoFrame`.
+    fn reconstruct_mb_rows(
+        &mut self,
+        nal_type: NalUnitType,
+        width: u32,
+        height: u32,
+        packet: &Packet,
+        mb_rows_data: Vec<Vec<Macroblock>>,
+    ) -> Result<VideoFrame, KinetixError> {
+        let _mb_cols = width.div_ceil(16);
+        let _mb_rows = height.div_ceil(16);
         let luma_stride = width as usize;
         let chroma_stride = (width / 2) as usize;
         let luma_size = luma_stride * height as usize;
-        let chroma_size = chroma_stride * (height as usize / 2);
+        let chroma_size = chroma_stride * (height as usize / 2).max(1);
 
         let mut luma = vec![128u8; luma_size];
         let mut chroma_cb = vec![128u8; chroma_size];
         let mut chroma_cr = vec![128u8; chroma_size];
 
+        let any_intra = mb_rows_data.iter().flatten().any(|mb| {
+            matches!(
+                mb.mb_type,
+                MbType::Intra4x4 | MbType::Intra16x16 { .. } | MbType::IPcm
+            )
+        });
+
         if any_intra {
-            // Intra prediction needs already-reconstructed top/left neighbours, so
-            // reconstruction is strictly top-to-bottom, left-to-right (the H.264
-            // decode order). `rayon` row-parallelism is not safe here because the
-            // row above must be fully committed before the row below is predicted.
             let mut planes = FramePlanes {
                 luma: &mut luma,
                 chroma_cb: &mut chroma_cb,
@@ -457,8 +663,6 @@ impl H264Decoder {
                 }
             }
         } else {
-            // All-skip scaffold: rows are independent, so reconstruct them with
-            // `rayon` (respecting the `parallel` toggle) and copy into the planes.
             let reconstruct_row = |row_idx: usize, row_mbs: &Vec<Macroblock>| {
                 let row_height = if (row_idx + 1) * 16 > height as usize {
                     height as usize - row_idx * 16
@@ -499,9 +703,10 @@ impl H264Decoder {
 
             for (row_idx, (luma_row, cb_row, cr_row)) in row_results.iter().enumerate() {
                 let y_off = row_idx * 16 * luma_stride;
-                let copy_len = luma_row.len().min(luma.len() - y_off);
-                luma[y_off..y_off + copy_len].copy_from_slice(&luma_row[..copy_len]);
-
+                let copy_len = luma_row.len().min(luma.len().saturating_sub(y_off));
+                if copy_len > 0 {
+                    luma[y_off..y_off + copy_len].copy_from_slice(&luma_row[..copy_len]);
+                }
                 let c_off = row_idx * 8 * chroma_stride;
                 let cc_len = cb_row.len().min(chroma_cb.len().saturating_sub(c_off));
                 if cc_len > 0 {
@@ -511,14 +716,6 @@ impl H264Decoder {
             }
         }
 
-        let _ = total_mbs;
-
-        // In-loop deblocking pass (spec §8.7). We derive a per-MB
-        // [`DeblockMbInfo`] from the reconstructed macroblock grid and filter
-        // every macroblock edge against its left/top neighbour. With the current
-        // skip-only reconstruction the planes are flat, so this is a no-op here,
-        // but the code path is real and unit-tested in `deblock.rs`; it becomes
-        // active once CABAC/CAVLC reconstruction emits non-flat blocks.
         let deblock_params = crate::deblock::DeblockParams::default();
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = mb_rows_data
             .iter()
@@ -579,6 +776,55 @@ impl H264Decoder {
             is_key_frame: matches!(nal_type, NalUnitType::IdrSlice),
         })
     }
+
+    /// Build a `mb_rows × mb_cols` grid of skip macroblocks at `qp`.
+    fn build_skip_mb_rows(&self, mb_cols: u32, mb_rows: u32, qp: i32) -> Vec<Vec<Macroblock>> {
+        (0..mb_rows)
+            .map(|_| {
+                (0..mb_cols)
+                    .map(|_| {
+                        let mut mb = Macroblock::new_skip();
+                        mb.qp = qp;
+                        mb
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Parse an I-slice where every macroblock is I_PCM (§7.4.4).
+    ///
+    /// Each I_PCM macroblock carries 384 raw bytes (256 luma + 64 Cb + 64 Cr
+    /// for 4:2:0). Returns `Err` on EOF.
+    fn parse_i_pcm_slice(
+        &self,
+        r: &mut crate::bitreader::BitReader,
+        mb_cols: u32,
+        mb_rows: u32,
+        qp: i32,
+    ) -> Result<Vec<Vec<Macroblock>>, crate::slice_data::SliceDataError> {
+        let mut rows: Vec<Vec<Macroblock>> = Vec::with_capacity(mb_rows as usize);
+        for _mb_y in 0..mb_rows {
+            let mut row = Vec::with_capacity(mb_cols as usize);
+            for _mb_x in 0..mb_cols {
+                let mut mb = Macroblock::new_skip();
+                mb.mb_type = MbType::IPcm;
+                mb.skip = false;
+                mb.qp = qp;
+                let mut samples = Vec::with_capacity(384);
+                for _ in 0..384 {
+                    let byte = r
+                        .read_u8()
+                        .ok_or_else(|| crate::slice_data::SliceDataError::Eof("I_PCM byte"))?;
+                    samples.push(byte);
+                }
+                mb.pcm_samples = samples;
+                row.push(mb);
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    }
 }
 
 /// The frame's luma/chroma output planes, borrowed together for the duration
@@ -610,9 +856,44 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
     let base_y = (mb_y * 16) as usize;
 
     match mb.mb_type {
+        MbType::IPcm => {
+            let y_size = 16 * 16;
+            let c_size = 8 * 8;
+            let samples = &mb.pcm_samples;
+            if samples.len() >= y_size {
+                for row in 0..16usize {
+                    let src_off = row * 16;
+                    let dst_off = (base_y + row) * luma_stride + base_x;
+                    let copy_len = 16.min(planes.luma.len().saturating_sub(dst_off));
+                    if copy_len > 0 {
+                        planes.luma[dst_off..dst_off + copy_len]
+                            .copy_from_slice(&samples[src_off..src_off + copy_len]);
+                    }
+                }
+            }
+            if samples.len() >= y_size + c_size * 2 {
+                for comp in 0..2usize {
+                    let (dst_off, dst) = if comp == 0 {
+                        let off = (base_y * chroma_stride + base_x) as usize;
+                        (off, &mut *chroma_cb)
+                    } else {
+                        let off = (base_y * chroma_stride + base_x) as usize;
+                        (off, &mut *chroma_cr)
+                    };
+                    let src_off = y_size + comp * c_size;
+                    for row in 0..8usize {
+                        let off = dst_off + row * chroma_stride;
+                        let copy_len = 8.min(dst.len().saturating_sub(off));
+                        if copy_len > 0 {
+                            dst[off..off + copy_len].copy_from_slice(
+                                &samples[src_off + row * 8..src_off + row * 8 + copy_len],
+                            );
+                        }
+                    }
+                }
+            }
+        }
         MbType::Intra4x4 => {
-            // Neighbour sample extraction per 4×4 block (64 neighbour slots:
-            // 4 top/left/corner samples per block × 16 blocks).
             let mut top = [None; 64];
             let mut left = [None; 64];
             let mut top_left = [None; 64];
@@ -620,8 +901,7 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
             for b in 0..16usize {
                 let bx = (b % 4) * 4;
                 let by = (b / 4) * 4;
-                for i in 0..4 {
-                    // Top sample (directly above the block).
+                for i in 0..4usize {
                     let tx = base_x + bx + i;
                     let ty = base_y as isize + by as isize - 1;
                     top[b * 4 + i] = if ty >= 0 && (ty as usize) < height {
@@ -629,7 +909,6 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
                     } else {
                         None
                     };
-                    // Left sample (directly left of the block).
                     let lx = base_x as isize + bx as isize - 1;
                     let ly = base_y + by + i;
                     left[b * 4 + i] = if lx >= 0 {
@@ -638,13 +917,10 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
                         None
                     };
                 }
-                // Above-left corner sample.
                 let cx = base_x as isize + bx as isize - 1;
                 let cy = base_y as isize + by as isize - 1;
                 top_left[b] = if cx >= 0 && cy >= 0 {
-                    luma
-                        .get(cy as usize * luma_stride + cx as usize)
-                        .copied()
+                    luma.get(cy as usize * luma_stride + cx as usize).copied()
                 } else {
                     None
                 };
@@ -663,14 +939,12 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
         } => {
             let mut top = [None; 16];
             let mut left = [None; 16];
-            for i in 0..16 {
-                // Top row above the macroblock.
+            for i in 0..16usize {
                 top[i] = luma
                     .get((base_y as isize - 1).max(0) as usize * luma_stride + base_x + i)
                     .copied();
-                // Left column to the left of the macroblock.
                 left[i] = if (base_x as isize - 1) >= 0 {
-                    luma.get(base_y * luma_stride + (base_x - 1) + i * luma_stride)
+                    luma.get(base_y * luma_stride + base_x - 1 + i * luma_stride)
                         .copied()
                 } else {
                     None
@@ -707,7 +981,7 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
         let cby = (mb_y * 8) as usize;
         let mut ctop = [None; 8];
         let mut cleft = [None; 8];
-        for i in 0..8 {
+        for i in 0..8usize {
             ctop[i] = chroma_cb
                 .get((cby as isize - 1).max(0) as usize * chroma_stride + cbx + i)
                 .copied();
@@ -728,9 +1002,6 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
         };
         let mut cbp = [0u8; 64];
         crate::prediction::predict_chroma(IntraChromaMode::Dc, &ctop, &cleft, ctl, &mut cbp);
-        // The chroma prediction (`cbp`, already in 8-bit sample range) is written
-        // into the plane, and the per-block residual (from the CAVLC/CABAC
-        // decoded coefficients) is added on top when present.
         for row in 0..8usize {
             for col in 0..8usize {
                 let x = cbx + col;
@@ -789,8 +1060,8 @@ mod tests {
         // (attacker-controlled) width/height, exhausting memory instead of
         // being rejected.
         let data = vec![
-            33, 31, 0, 0, 1, 255, 243, 0, 0, 1, 39, 255, 0, 1, 105, 164, 0, 0, 0, 105, 105, 105,
-            3, 3, 3, 255, 255, 255, 255, 255, 255, 255, 15, 0, 0, 1, 33, 5, 4, 1, 33, 5, 4, 217,
+            33, 31, 0, 0, 1, 255, 243, 0, 0, 1, 39, 255, 0, 1, 105, 164, 0, 0, 0, 105, 105, 105, 3,
+            3, 3, 255, 255, 255, 255, 255, 255, 255, 15, 0, 0, 1, 33, 5, 4, 1, 33, 5, 4, 217,
         ];
         let mut dec = H264Decoder::new();
         let pkt = Packet {

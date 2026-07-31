@@ -223,9 +223,9 @@ impl SliceHeader {
         }
 
         // pred_weight_table (§7.3.3.2).
-        let weighted =
-            (ctx.weighted_pred_flag && matches!(slice_type, SliceType::P | SliceType::Sp))
-                || (ctx.weighted_bipred_idc == 1 && slice_type == SliceType::B);
+        let weighted = (ctx.weighted_pred_flag
+            && matches!(slice_type, SliceType::P | SliceType::Sp))
+            || (ctx.weighted_bipred_idc == 1 && slice_type == SliceType::B);
         if weighted {
             parse_pred_weight_table(
                 &mut r,
@@ -248,9 +248,7 @@ impl SliceHeader {
             parse_dec_ref_pic_marking(&mut r, is_idr).context("dec_ref_pic_marking")?;
         }
 
-        if ctx.entropy_coding_mode_flag
-            && !matches!(slice_type, SliceType::I | SliceType::Si)
-        {
+        if ctx.entropy_coding_mode_flag && !matches!(slice_type, SliceType::I | SliceType::Si) {
             let _cabac_init_idc = r.read_ue().context("cabac_init_idc")?;
         }
 
@@ -267,11 +265,9 @@ impl SliceHeader {
         let mut slice_alpha_c0_offset_div2 = 0i32;
         let mut slice_beta_offset_div2 = 0i32;
         if ctx.deblocking_filter_control_present_flag {
-            disable_deblocking_filter_idc =
-                r.read_ue().context("disable_deblocking_filter_idc")?;
+            disable_deblocking_filter_idc = r.read_ue().context("disable_deblocking_filter_idc")?;
             if disable_deblocking_filter_idc != 1 {
-                slice_alpha_c0_offset_div2 =
-                    r.read_se().context("slice_alpha_c0_offset_div2")?;
+                slice_alpha_c0_offset_div2 = r.read_se().context("slice_alpha_c0_offset_div2")?;
                 slice_beta_offset_div2 = r.read_se().context("slice_beta_offset_div2")?;
             }
         }
@@ -320,8 +316,9 @@ fn parse_ref_pic_list_modification(r: &mut BitReader) -> anyhow::Result<()> {
                     .read_ue()
                     .ok_or_else(|| anyhow!("EOF abs_diff_pic_num_minus1"))?;
             } else if op == 2 {
-                let _long_term_pic_num =
-                    r.read_ue().ok_or_else(|| anyhow!("EOF long_term_pic_num"))?;
+                let _long_term_pic_num = r
+                    .read_ue()
+                    .ok_or_else(|| anyhow!("EOF long_term_pic_num"))?;
             } else {
                 return Err(anyhow!("invalid modification_of_pic_nums_idc {op}"));
             }
@@ -370,8 +367,7 @@ fn parse_pred_weight_table(
 /// Parse `dec_ref_pic_marking` (§7.3.3.3) to advance the bit position.
 fn parse_dec_ref_pic_marking(r: &mut BitReader, is_idr: bool) -> anyhow::Result<()> {
     if is_idr {
-        let _no_output_of_prior_pics_flag =
-            r.read_bit().context("no_output_of_prior_pics_flag")?;
+        let _no_output_of_prior_pics_flag = r.read_bit().context("no_output_of_prior_pics_flag")?;
         let _long_term_reference_flag = r.read_bit().context("long_term_reference_flag")?;
     } else {
         let adaptive = r.read_bit().context("adaptive_ref_pic_marking_mode_flag")? == 1;

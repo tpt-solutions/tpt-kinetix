@@ -25,15 +25,39 @@ pub trait DecodeTracer {
     /// Called once per residual block after CAVLC parsing, with the
     /// coefficients in zigzag scan order. `blk` is the raster 4x4 block index
     /// (0..15 for luma, 0..3 for chroma AC).
-    fn on_cavlc_coeffs(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8, _coeffs: &[i16; 16]) {}
+    fn on_cavlc_coeffs(
+        &mut self,
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _coeffs: &[i16; 16],
+    ) {
+    }
 
     /// Called once per 4x4/16x16 block after intra prediction, before the
     /// residual is added.
-    fn on_intra_pred(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8, _pred: &[u8]) {}
+    fn on_intra_pred(
+        &mut self,
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _pred: &[u8],
+    ) {
+    }
 
     /// Called once per 4x4 block after prediction + residual have been
     /// summed into the frame buffer (pre-deblock).
-    fn on_reconstructed(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8, _samples: &[u8]) {}
+    fn on_reconstructed(
+        &mut self,
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _samples: &[u8],
+    ) {
+    }
 
     /// Called once per macroblock edge after the in-loop deblocking filter
     /// runs (not yet wired into the live intra decode path — see
@@ -46,37 +70,50 @@ pub trait DecodeTracer {
     /// `suffix_len` is the suffix length used for the last level.
     fn on_cavlc_block_info(
         &mut self,
-        _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8,
-        _n_c: i32, _total_coeff: u8, _trailing_ones: u8, _suffix_len: u32,
-    ) {}
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _n_c: i32,
+        _total_coeff: u8,
+        _trailing_ones: u8,
+        _suffix_len: u32,
+    ) {
+    }
 
     /// Same as `on_cavlc_block_info` but also receives the bit reader position
     /// *after* the block was consumed, useful for tracking bit alignment.
     fn on_cavlc_block_info_with_pos(
         &mut self,
-        _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8,
-        _n_c: i32, _total_coeff: u8, _trailing_ones: u8, _suffix_len: u32,
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _n_c: i32,
+        _total_coeff: u8,
+        _trailing_ones: u8,
+        _suffix_len: u32,
         _bit_pos_after: usize,
-    ) {}
+    ) {
+    }
 
     /// Called once per macroblock after it is fully parsed (mb_type, QP,
     /// cbp, intra_pred_modes, chroma_pred_mode all resolved).
     fn on_mb_parsed(
         &mut self,
-        _mb_x: u32, _mb_y: u32,
+        _mb_x: u32,
+        _mb_y: u32,
         _mb_type: &str,
         _qp: i32,
         _cbp: u8,
         _intra_chroma_pred_mode: u8,
         _pred_modes: &[u8; 16],
-    ) {}
+    ) {
+    }
 
     /// Called once at the start of slice data parsing with the initial
     /// bit position (data_bit_offset from the slice header).
-    fn on_slice_data_start(
-        &mut self,
-        _data_bit_offset: usize,
-    ) {}
+    fn on_slice_data_start(&mut self, _data_bit_offset: usize) {}
 }
 
 /// The default, zero-overhead tracer: every hook is a no-op.

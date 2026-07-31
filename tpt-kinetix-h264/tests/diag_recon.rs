@@ -10,7 +10,14 @@ struct DumpTracer {
 }
 
 impl DecodeTracer for DumpTracer {
-    fn on_cavlc_coeffs(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, coeffs: &[i16; 16]) {
+    fn on_cavlc_coeffs(
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        coeffs: &[i16; 16],
+    ) {
         if plane == TracePlane::Luma && blk == 16 {
             self.dc.push((mb_x, mb_y, *coeffs));
         }
@@ -25,7 +32,15 @@ impl DecodeTracer for DumpTracer {
         chroma_mode: u8,
         modes: &[u8; 16],
     ) {
-        self.mbs.push((mb_x, mb_y, mb_type.to_string(), qp, cbp, chroma_mode, *modes));
+        self.mbs.push((
+            mb_x,
+            mb_y,
+            mb_type.to_string(),
+            qp,
+            cbp,
+            chroma_mode,
+            *modes,
+        ));
     }
 }
 

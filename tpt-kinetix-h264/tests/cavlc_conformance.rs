@@ -39,20 +39,41 @@ fn generate(
     h: u32,
     disable_deblocking: bool,
 ) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
-    let h264 = dir.join(if disable_deblocking { "t_nodblk.h264" } else { "t.h264" });
-    let refyuv = dir.join(if disable_deblocking { "t_nodblk.yuv" } else { "t.yuv" });
+    let h264 = dir.join(if disable_deblocking {
+        "t_nodblk.h264"
+    } else {
+        "t.h264"
+    });
+    let refyuv = dir.join(if disable_deblocking {
+        "t_nodblk.yuv"
+    } else {
+        "t.yuv"
+    });
 
     let input_spec = format!("testsrc=size={w}x{h}:rate=1:duration=1");
     let mut args: Vec<&str> = vec![
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi",
-        "-i", &input_spec,
-        "-frames:v", "1",
-        "-c:v", "libx264",
-        "-profile:v", "baseline",
-        "-g", "1", "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input_spec,
+        "-frames:v",
+        "1",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-g",
+        "1",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0",
     ];
     if disable_deblocking {
         // x264's `--no-deblock` CLI flag maps to the `deblock=0` encoder param.

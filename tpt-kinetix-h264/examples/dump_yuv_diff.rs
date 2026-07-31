@@ -118,7 +118,9 @@ fn main() {
 
     let ref_frames = decode_h264_with_ffmpeg(&annexb, WIDTH, HEIGHT)
         .expect("ffmpeg reference decode of the same bytes must succeed");
-    let ref_frame = ref_frames.first().expect("ffmpeg produced at least one frame");
+    let ref_frame = ref_frames
+        .first()
+        .expect("ffmpeg produced at least one frame");
 
     let mut dec = H264Decoder::new();
     let pkt = Packet {

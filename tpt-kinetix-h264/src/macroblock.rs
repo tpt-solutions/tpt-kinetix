@@ -23,6 +23,8 @@ pub enum MbType {
         cbp_chroma: u8,
         cbp_luma: u8,
     },
+    /// I_PCM — raw uncompressed 16×16 luma + 2×8×8 chroma samples (§7.4.4).
+    IPcm,
     /// Inter P skip — motion vector inherited from spatial neighbours.
     PSkip,
     /// Inter P 16×16 — single motion vector for the whole macroblock.
@@ -68,6 +70,10 @@ pub struct Macroblock {
     pub chroma_dc_cr: [i16; 4],
     /// Coded-block-pattern (luma nibble | chroma << 4) for this macroblock.
     pub cbp: u8,
+    /// Raw PCM samples for `MbType::IPcm` macroblocks (§7.4.4).  For 4:2:0
+    /// this is 256 luma bytes followed by 128 Cb bytes then 128 Cr bytes
+    /// (512 bytes total per macroblock).
+    pub pcm_samples: Vec<u8>,
 }
 
 impl Macroblock {
@@ -85,6 +91,7 @@ impl Macroblock {
             chroma_dc_cb: [0; 4],
             chroma_dc_cr: [0; 4],
             cbp: 0,
+            pcm_samples: Vec::new(),
         }
     }
 
@@ -363,6 +370,7 @@ mod tests {
             chroma_dc_cb: [0; 4],
             chroma_dc_cr: [0; 4],
             cbp: 0,
+            pcm_samples: Vec::new(),
         }
     }
 
@@ -374,7 +382,11 @@ mod tests {
         let mut plane = vec![0u8; 16 * 16];
         mb.reconstruct_luma_intra_16x16(
             &mut plane,
-            MbPos { mb_x: 0, mb_y: 0, stride: 16 },
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
             Intra16x16Mode::Dc,
             &[Some(100); 16],
             &[Some(100); 16],
@@ -392,7 +404,11 @@ mod tests {
         let mut plane = vec![0u8; 16 * 16];
         mb.reconstruct_luma_intra_16x16(
             &mut plane,
-            MbPos { mb_x: 0, mb_y: 0, stride: 16 },
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
             Intra16x16Mode::Vertical,
             &top,
             &[Some(0); 16],
@@ -422,6 +438,7 @@ mod tests {
             chroma_dc_cb: [0; 4],
             chroma_dc_cr: [0; 4],
             cbp: 0,
+            pcm_samples: Vec::new(),
         };
         // Each 4-row band has a constant value so vertical prediction is
         // deterministic: band0=200, band1=50, band2=10, band3=240.
@@ -461,7 +478,11 @@ mod tests {
         }
         mb.reconstruct_luma_intra_4x4(
             &mut plane,
-            MbPos { mb_x: 0, mb_y: 0, stride: 16 },
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
             &mb.pred_modes_4x4,
             &top,
             &left,
@@ -489,8 +510,14 @@ mod tests {
         for row in 0..8usize {
             for col in 0..8usize {
                 let off = row * 16 + col;
-                let cb_idct = iquant_idct_4x4_public(&mb.chroma_cb_coeffs[(row >> 2) * 2 + (col >> 2)], mb.qp);
-                let cr_idct = iquant_idct_4x4_public(&mb.chroma_cr_coeffs[(row >> 2) * 2 + (col >> 2)], mb.qp);
+                let cb_idct = iquant_idct_4x4_public(
+                    &mb.chroma_cb_coeffs[(row >> 2) * 2 + (col >> 2)],
+                    mb.qp,
+                );
+                let cr_idct = iquant_idct_4x4_public(
+                    &mb.chroma_cr_coeffs[(row >> 2) * 2 + (col >> 2)],
+                    mb.qp,
+                );
                 let br = (row % 4) * 4 + (col % 4);
                 cb[off] = (cbp[row * 8 + col] as i32 + cb_idct[br]).clamp(0, 255) as u8;
                 cr[off] = (cbp[row * 8 + col] as i32 + cr_idct[br]).clamp(0, 255) as u8;
@@ -515,6 +542,7 @@ mod tests {
             chroma_dc_cb: [0; 4],
             chroma_dc_cr: [0; 4],
             cbp: 0,
+            pcm_samples: Vec::new(),
         };
         // 16×16 plane pre-filled with 128 (DC prediction).
         let mut plane = vec![128u8; 16 * 16];

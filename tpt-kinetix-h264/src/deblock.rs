@@ -260,7 +260,11 @@ pub fn deblock_luma_edge(
     let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
-    let tc0 = if bs == 4 { 0 } else { TC0_TAB[(bs as usize - 1)][qpi as usize] };
+    let tc0 = if bs == 4 {
+        0
+    } else {
+        TC0_TAB[bs as usize - 1][qpi as usize]
+    };
 
     if vertical {
         // Vertical edge: filter samples along the column boundary at
@@ -372,7 +376,7 @@ pub fn deblock_chroma_edge(
             if bs == 4 {
                 filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
             } else {
-                let tc = TC0_TAB[(bs as usize - 1)][qpi as usize] + 1;
+                let tc = TC0_TAB[bs as usize - 1][qpi as usize] + 1;
                 filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
             }
             plane[o + x - 1] = clip_pixel(pp[0]);
@@ -391,11 +395,14 @@ pub fn deblock_chroma_edge(
                 plane[(y - 1) * stride + x] as i32,
                 plane[(y - 2) * stride + x] as i32,
             ];
-            let mut qq = [plane[y * stride + x] as i32, plane[(y + 1) * stride + x] as i32];
+            let mut qq = [
+                plane[y * stride + x] as i32,
+                plane[(y + 1) * stride + x] as i32,
+            ];
             if bs == 4 {
                 filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
             } else {
-                let tc = TC0_TAB[(bs as usize - 1)][qpi as usize] + 1;
+                let tc = TC0_TAB[bs as usize - 1][qpi as usize] + 1;
                 filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
             }
             plane[(y - 1) * stride + x] = clip_pixel(pp[0]);
@@ -508,7 +515,7 @@ pub fn beta_for_qp(qp: i32, beta_offset: i32) -> i32 {
 /// tC0-table lookup — exposed for tests.
 pub fn tc0_for_qp(bs: u8, qp: i32, alpha_offset: i32) -> i32 {
     debug_assert!(bs >= 1 && bs <= 3);
-    TC0_TAB[(bs as usize - 1)][clip_qp(qp + 2 * alpha_offset) as usize]
+    TC0_TAB[bs as usize - 1][clip_qp(qp + 2 * alpha_offset) as usize]
 }
 
 #[cfg(test)]
@@ -522,7 +529,14 @@ mod tests {
 
     #[test]
     fn bs_intra_boundary_edge_is_four() {
-        let a = info(MbType::Intra16x16 { pred_mode: 0, cbp_chroma: 0, cbp_luma: 0 }, true);
+        let a = info(
+            MbType::Intra16x16 {
+                pred_mode: 0,
+                cbp_chroma: 0,
+                cbp_luma: 0,
+            },
+            true,
+        );
         let b = info(MbType::Intra4x4, true);
         assert_eq!(derive_bs_luma(&a, &b), 4);
         assert_eq!(derive_bs_interior(&a), 3);
@@ -590,7 +604,11 @@ mod tests {
             }
         }
         let cur = crate::deblock::DeblockMbInfo::new(
-            MbType::Intra16x16 { pred_mode: 0, cbp_chroma: 0, cbp_luma: 0 },
+            MbType::Intra16x16 {
+                pred_mode: 0,
+                cbp_chroma: 0,
+                cbp_luma: 0,
+            },
             true,
             40,
         );
@@ -635,7 +653,14 @@ mod tests {
             }
         }
         let before = plane.to_vec();
-        let _cur = info(MbType::Intra16x16 { pred_mode: 0, cbp_chroma: 0, cbp_luma: 0 }, true);
+        let _cur = info(
+            MbType::Intra16x16 {
+                pred_mode: 0,
+                cbp_chroma: 0,
+                cbp_luma: 0,
+            },
+            true,
+        );
         deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, 4, params, 40);
         assert_eq!(plane, before);
     }

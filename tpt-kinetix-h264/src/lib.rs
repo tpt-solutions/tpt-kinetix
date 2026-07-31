@@ -14,8 +14,8 @@
 
 pub mod bitreader;
 pub mod cavlc_tables;
-pub mod decoder;
 pub mod deblock;
+pub mod decoder;
 pub mod entropy;
 pub mod macroblock;
 pub mod nal;

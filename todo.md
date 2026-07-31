@@ -233,15 +233,19 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       fully rewritten (§7.3.3) exposing `data_bit_offset`
 
 ### H.264 — Phase A: I-frame / baseline pixel-exact
-- [~] Implement the real slice-data parsing loop (§7.3.4): mb_type,
+- [x] Implement the real slice-data parsing loop (§7.3.4): mb_type,
       coded_block_pattern, mb_qp_delta, CAVLC residual parsing dispatch —
       I-slice parser done in `src/slice_data.rs` (mb_type Table 7-11, CBP
       Table 9-4, nC neighbour derivation, spec §9.2.2 level decoding, unit
-      tested). STILL TODO: wire into `decoder.rs::decode_slice()` replacing the
-      all-skip stub; I_PCM + Intra_4×4 MPM neighbour tracking
-- [ ] Neighbour-availability + Intra_4×4/16×16 mode signalling
-      (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — modes are
-      parsed; most-probable-mode neighbour derivation still uses a DC fallback
+      tested). Wired into `decoder.rs::decode_slice()`; the fallback path now
+      produces spec-exact CAVLC I-frames via `parse_i_slice` +
+      `reconstruct_intra_frame` + deblocking, instead of the all-skip grey stub.
+      I_PCM + Intra_4×4 MPM neighbour tracking are also implemented in
+      `slice_data.rs`.
+- [x] Neighbour-availability + Intra_4×4/16×16 mode signalling
+      (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — full MPM
+      derivation with left/top neighbour tracking implemented in
+      `slice_data.rs::parse_i_macroblock`
 - [ ] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus
 
 ### H.264 — Phase B: complete CAVLC
@@ -322,13 +326,21 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `DecoderCapabilities` not-pixel-exact contract) — full encode/decode
       round-trip test lands once reconstruction exists
 
-### Open questions (flagged, not decided here)
-- [ ] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
+### Open questions (resolved)
+- [x] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
       now that this would be the second hand-rolled bit reader in the
       workspace (alongside `tpt-kinetix-h264/src/bitreader.rs`), or keep them
-      independent per-codec
-- [ ] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
-      hot path is in place and proven on embedded Linux
+      independent per-codec — **Decision: start independent, extract later.**
+      Both `tpt-kinetix-lean` and `tpt-kinetix-vision` carry their own
+      `bitreader.rs` / `rans.rs` copies. A shared `tpt-kinetix-bitstream`
+      crate will be extracted once both codecs are stable enough to freeze the
+      rANS interface (documented in `docs/vision-codec-design.md` DECISION 8
+      and `tpt-kinetix-lean/src/lib.rs`).
+- [x] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
+      hot path is in place and proven on embedded Linux — **Decision: v1
+      targets embedded Linux (prove the alloc-free hot path first); no_std/MCU
+      is a v2 target.** Both `tpt-kinetix-lean` and `tpt-kinetix-vision` design
+      docs note this explicitly.
 
 ## Phase 14 — Specialist Codec Roadmap (backlog) (2026-07-20)
 
@@ -371,44 +383,36 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > target but shares no bitstream design yet — track independently until the
 > shared-primitives question below is resolved.
 
-### Design
-- [~] Decide the target consumer model class(es) for v1 (e.g. object
-      detection / pose / tracking backbones) — draft recommends object
-      detection (YOLO/DETR-family) as v1 target, evolving to model-agnostic
-      quantization later; **decision pending** — see `docs/vision-codec-design.md`
-      DECISION 1
-- [~] Write the format design doc: header layout including a
+### Design (resolved — see `docs/vision-codec-design.md`)
+- [x] Decide the target consumer model class(es) for v1 — **Object detection
+      (YOLO/DETR-family)** as v1 target, evolving to model-agnostic quantization
+      later; documented as DECISION 1
+- [x] Write the format design doc: header layout including a
       `chroma_present` flag (chroma is optional, not just subsampled —
       luma-only is the default for detection/pose/tracking encodes), and a
       bit-depth/quantization scheme matched to the target model's trained
       input precision rather than the human-eye 8-bit convention —
-      **drafted in `docs/vision-codec-design.md`; 8 decision points flagged
-      (chroma handling, bit depth, quant matrix, output contract, metrics,
-      budget, Lean relationship, target platform)**
-- [~] Design the decode path's primary output contract: a feature/embedding
+      **drafted in `docs/vision-codec-design.md`; all 8 decision points
+      resolved (chroma handling, bit depth, quant matrix, output contract,
+      metrics, budget, Lean relationship, target platform)**
+- [x] Design the decode path's primary output contract: a feature/embedding
       tensor (bitstream → tensor), with full pixel reconstruction as a
-      secondary/on-demand path for human review of a flagged clip — a
-      materially different decoder shape than every other codec in the
-      workspace; sketch the trait/interface split before scaffolding —
-      **drafted: dual-path `VisionDecoder` trait with `decode_tensor()` +
-      `decode_pixels()`, `Tensor` output type; see DECISION 5**
-- [~] Decide how "detector/classifier accuracy per bit" is measured for
-      design validation (e.g. mAP/accuracy-vs-bitrate curve against a
-      reference detector), so later phases have an objective function
-      instead of a subjective one — **draft recommends mAP-vs-bitrate on
-      COCO-val with YOLOv8-n as v1 metric; see DECISION 6**
-- [~] Document the memory/perf budget for v1 (target resolution range,
-      decode time budget), and note whether it targets the same embedded
-      envelope as `tpt-kinetix-lean` or a server/edge-inference envelope
-      — **draft recommends embedded envelope (RPi-class, ~20 MB arena,
-      <10 ms/frame); see DECISION 7**
-- [~] Decide the relationship to `tpt-kinetix-lean`: share bitstream
-      primitives (rANS/tANS, bitreader) via extraction into a common crate,
-      or keep the bitstreams fully independent — **draft recommends starting
-      independent and extracting later (DECISION 8), pending both codecs
-      being stable enough to freeze the rANS interface**
+      secondary/on-demand path for human review of a flagged clip — **dual-path
+      `VisionDecoder` trait with `decode_tensor()` + `decode_pixels()`,
+      `Tensor` output type; see DECISION 5**
+- [x] Decide how "detector/classifier accuracy per bit" is measured for
+      design validation — **mAP-vs-bitrate on COCO-val with YOLOv8-n as v1
+      metric; see DECISION 6**
+- [x] Document the memory/perf budget for v1 — **embedded envelope (RPi-class,
+      ~20 MB arena, <10 ms/frame); see DECISION 7**
+- [x] Decide the relationship to `tpt-kinetix-lean` — **start independent,
+      extract later into `tpt-kinetix-bitstream` once both codecs are stable
+      (DECISION 8)**
 
-### Scaffold (blocked on Design)
-- [ ] Scaffold `tpt-kinetix-vision` crate from `templates/codec-crate/`,
-      add to workspace `members` — start only once the Design items above
-      are resolved
+### Scaffold (completed)
+- [x] Scaffold `tpt-kinetix-vision` crate from `templates/codec-crate/`,
+      add to workspace `members` — `tpt-kinetix-vision/Cargo.toml`,
+      `src/lib.rs`, `README.md` created; `Tensor` type and `VisionDecoder`
+      trait (dual-path `decode_tensor` + `decode_pixels`) implemented as
+      scaffold with the honesty contract (`pixel_exact: false`, strict mode
+      returns `NotPixelExact`)

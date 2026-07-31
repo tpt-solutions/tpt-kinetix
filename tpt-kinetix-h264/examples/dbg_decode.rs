@@ -30,7 +30,10 @@ fn main() {
                 let mut nd = 0;
                 for i in 0..n {
                     let d = (refy[i] as i32 - y[i] as i32).abs();
-                    if d != 0 { nd += 1; maxd = maxd.max(d); }
+                    if d != 0 {
+                        nd += 1;
+                        maxd = maxd.max(d);
+                    }
                 }
                 println!("ref Y[0..16]: {:?}", &refy[0..16.min(refy.len())]);
                 println!("vs ref: max_diff={maxd} ndiff={nd}/{n}");

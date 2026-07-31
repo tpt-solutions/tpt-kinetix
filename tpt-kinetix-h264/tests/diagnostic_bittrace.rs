@@ -14,12 +14,28 @@ fn gen_single_mb_h264() -> Option<Vec<u8>> {
     let h264 = dir.join("single.h264");
     Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=16x16:rate=1:duration=1",
-            "-frames:v", "1",
-            "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=16x16:rate=1:duration=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "1",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
             h264.to_str()?,
         ])
         .output()
@@ -31,7 +47,10 @@ fn gen_single_mb_h264() -> Option<Vec<u8>> {
 fn trace_single_mb_structure() {
     let annexb = match gen_single_mb_h264() {
         Some(b) => b,
-        None => { eprintln!("ffmpeg not available"); return; }
+        None => {
+            eprintln!("ffmpeg not available");
+            return;
+        }
     };
 
     // Decode with tracer to get all the intermediate values
@@ -55,15 +74,26 @@ fn trace_single_mb_structure() {
     keys.sort_by_key(|k| (k.plane as u8, k.blk));
     for key in &keys {
         let info = tracer.block_info.get(key).unwrap();
-        let coeffs = tracer.values.get(&tpt_kinetix_test_utils::trace_dump::TraceKey {
-            mb_x: key.mb_x, mb_y: key.mb_y,
-            plane: key.plane, blk: key.blk,
-            stage: Stage::CavlcCoeffs,
-        });
-        let nz = coeffs.map(|c| c.iter().filter(|&&v| v != 0).count()).unwrap_or(0);
+        let coeffs = tracer
+            .values
+            .get(&tpt_kinetix_test_utils::trace_dump::TraceKey {
+                mb_x: key.mb_x,
+                mb_y: key.mb_y,
+                plane: key.plane,
+                blk: key.blk,
+                stage: Stage::CavlcCoeffs,
+            });
+        let nz = coeffs
+            .map(|c| c.iter().filter(|&&v| v != 0).count())
+            .unwrap_or(0);
         eprintln!(
             "  {:?} blk={:>2}: nC={:>3} TC={:>2} T1={} nonzero={:>2} coeffs={:?}",
-            key.plane, key.blk, info.n_c, info.total_coeff, info.trailing_ones, nz,
+            key.plane,
+            key.blk,
+            info.n_c,
+            info.total_coeff,
+            info.trailing_ones,
+            nz,
             coeffs.map(|c| c.as_slice()).unwrap_or(&[])
         );
     }
@@ -72,13 +102,15 @@ fn trace_single_mb_structure() {
     eprintln!("\n=== Per-block intra prediction vs reconstructed ===");
     for blk in 0u8..16u8 {
         let pred_key = tpt_kinetix_test_utils::trace_dump::TraceKey {
-            mb_x: 0, mb_y: 0,
+            mb_x: 0,
+            mb_y: 0,
             plane: tpt_kinetix_h264::TracePlane::Luma,
             blk,
             stage: Stage::IntraPred,
         };
         let recon_key = tpt_kinetix_test_utils::trace_dump::TraceKey {
-            mb_x: 0, mb_y: 0,
+            mb_x: 0,
+            mb_y: 0,
             plane: tpt_kinetix_h264::TracePlane::Luma,
             blk,
             stage: Stage::Reconstructed,
@@ -101,15 +133,25 @@ fn trace_single_mb_structure() {
     std::fs::write(&h264_path, &annexb).unwrap();
     Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264_path.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264_path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             ref_path.to_str().unwrap(),
         ])
         .output()
         .ok();
     let ref_bytes = std::fs::read(&ref_path).unwrap_or_default();
-    if ref_bytes.is_empty() { eprintln!("ffmpeg decode not available"); return; }
+    if ref_bytes.is_empty() {
+        eprintln!("ffmpeg decode not available");
+        return;
+    }
 
     let w = 16usize;
     eprintln!("\n=== Block-by-block comparison ===");
@@ -131,7 +173,8 @@ fn trace_single_mb_structure() {
                 }
             }
             let info_key = tpt_kinetix_test_utils::trace_dump::TraceKey {
-                mb_x: 0, mb_y: 0,
+                mb_x: 0,
+                mb_y: 0,
                 plane: tpt_kinetix_h264::TracePlane::Luma,
                 blk,
                 stage: Stage::CavlcBlockInfo,
@@ -152,8 +195,14 @@ fn trace_single_mb_structure() {
     eprintln!("\n=== First 2 rows luma: ours vs ref ===");
     for py in 0..8 {
         let off = py * w;
-        let ours: Vec<_> = frame.data[off..off+w].iter().map(|b| format!("{b:>3}")).collect();
-        let refs: Vec<_> = ref_bytes[off..off+w].iter().map(|b| format!("{b:>3}")).collect();
+        let ours: Vec<_> = frame.data[off..off + w]
+            .iter()
+            .map(|b| format!("{b:>3}"))
+            .collect();
+        let refs: Vec<_> = ref_bytes[off..off + w]
+            .iter()
+            .map(|b| format!("{b:>3}"))
+            .collect();
         eprintln!("  y={py}: ours=[{}]", ours.join(","));
         eprintln!("        ref = [{}]", refs.join(","));
     }
