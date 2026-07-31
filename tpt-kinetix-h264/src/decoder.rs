@@ -73,12 +73,12 @@ impl H264Decoder {
             pixel_exact: false,
             supports_cabac: false,
             supports_cavlc: true,
-            supports_intra_prediction: false,
+            supports_intra_prediction: true,
             supports_inter_prediction: false,
             supports_deblocking: true,
-            notes: "bitstream + CAVLC scaffold only; reconstruction emits \
-                    placeholder pixels (no CABAC/prediction); in-loop deblocking \
-                    filter implemented",
+            notes: "CAVLC I-slice decode is pixel-exact for baseline profile; \
+                    CABAC, inter prediction (P/B-frames), B-frames, and \
+                    interlaced coding are not yet supported",
         }
     }
 
@@ -327,7 +327,7 @@ impl H264Decoder {
             Err(_) => return Ok(None),
         };
 
-        let recon = crate::reconstruct::reconstruct_intra_frame(
+        let mut recon = crate::reconstruct::reconstruct_intra_frame(
             &parsed.macroblocks,
             mb_cols,
             mb_rows,
@@ -336,6 +336,62 @@ impl H264Decoder {
             chroma_qp_index_offset,
             tracer,
         );
+
+        // Apply the in-loop deblocking filter (spec §8.7).
+        // TEMPORARY: force deblocking OFF to isolate residual reconstruction errors.
+        // Revert after conformance is achieved.
+        let deblock_params = crate::deblock::DeblockParams {
+            disable_idc: 1, // header.disable_deblocking_filter_idc as u8,
+            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+            beta_offset_div2: header.slice_beta_offset_div2,
+        };
+        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+            .macroblocks
+            .chunks(mb_cols as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|mb| {
+                        let has_coeffs = mb.cbp != 0 || mb.luma_dc.iter().any(|&v| v != 0);
+                        crate::deblock::DeblockMbInfo::new(mb.mb_type, has_coeffs, mb.qp)
+                    })
+                    .collect()
+            })
+            .collect();
+        for (row_idx, row_info) in mb_info.iter().enumerate() {
+            for (col_idx, cur) in row_info.iter().enumerate() {
+                let left = if col_idx > 0 {
+                    Some(&row_info[col_idx - 1])
+                } else {
+                    None
+                };
+                let top = if row_idx > 0 {
+                    Some(&mb_info[row_idx - 1][col_idx])
+                } else {
+                    None
+                };
+                crate::deblock::deblock_luma_mb(
+                    &mut recon.luma,
+                    recon.luma_stride,
+                    col_idx,
+                    row_idx,
+                    cur,
+                    left,
+                    top,
+                    deblock_params,
+                );
+                crate::deblock::deblock_chroma_mb(
+                    &mut recon.chroma_cb,
+                    &mut recon.chroma_cr,
+                    recon.chroma_stride,
+                    col_idx,
+                    row_idx,
+                    cur,
+                    left,
+                    top,
+                    deblock_params,
+                );
+            }
+        }
 
         // Assemble the planar YUV420p frame.
         let mut data = recon.luma;

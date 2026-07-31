@@ -15,19 +15,21 @@
 
 /// `normAdjust4x4[m][group]` — the base weighting matrix (spec §8.5.9,
 /// derived from Table 8-13). `m = qP % 6`; `group` is the position class:
-/// 0 = (even,even), 1 = (odd,odd), 2 = otherwise.
+/// 0 = (even row, even col), 1 = odd col (any row), 2 = (odd row, even col).
 #[rustfmt::skip]
 const NORM_ADJUST_4X4: [[i32; 3]; 6] = [
-    [10, 13, 16],
-    [11, 14, 18],
-    [13, 16, 20],
-    [14, 18, 23],
-    [16, 20, 25],
-    [18, 23, 29],
+    [10, 16, 13],
+    [11, 18, 14],
+    [13, 20, 16],
+    [14, 23, 18],
+    [16, 25, 20],
+    [18, 29, 23],
 ];
 
-/// Position class for a 4×4 raster index (§8.5.9): both even -> 0,
-/// both odd -> 1, otherwise -> 2.
+/// Position class for a 4×4 raster index (§8.5.9, Table 8-13):
+/// - group 0: (even row, even col) → normAdjust value v[m][0]
+/// - group 1: odd col (any row) → normAdjust value v[m][1] (= v[m][3])
+/// - group 2: (odd row, even col) → normAdjust value v[m][2]
 #[inline]
 const fn pos_group(idx: usize) -> usize {
     let row = idx / 4;
@@ -36,7 +38,7 @@ const fn pos_group(idx: usize) -> usize {
     let ce = col & 1;
     if re == 0 && ce == 0 {
         0
-    } else if re == 1 && ce == 1 {
+    } else if ce == 1 {
         1
     } else {
         2
@@ -231,13 +233,14 @@ mod tests {
 
     #[test]
     fn pos_group_classification() {
-        // (0,0)->0, (1,1)->1, (0,1)->2, (2,2)->0, (3,3)->1, (3,0)->2
-        assert_eq!(pos_group(0), 0);
-        assert_eq!(pos_group(5), 1);
-        assert_eq!(pos_group(1), 2);
-        assert_eq!(pos_group(10), 0);
-        assert_eq!(pos_group(15), 1);
-        assert_eq!(pos_group(12), 2);
+        // (0,0) even,even -> 0, (1,1) odd,odd col -> 1, (0,1) even,row odd col -> 1,
+        // (2,2) even,even -> 0, (3,3) odd,odd col -> 1, (3,0) odd,even -> 2
+        assert_eq!(pos_group(0), 0);   // (0,0) even row, even col
+        assert_eq!(pos_group(5), 1);   // (1,1) odd row, odd col
+        assert_eq!(pos_group(1), 1);   // (0,1) even row, odd col
+        assert_eq!(pos_group(10), 0);  // (2,2) even row, even col
+        assert_eq!(pos_group(15), 1);  // (3,3) odd row, odd col
+        assert_eq!(pos_group(12), 2);  // (3,0) odd row, even col
     }
 
     #[test]

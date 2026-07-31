@@ -21,12 +21,12 @@ use crate::{
 /// Index by `mb_type - 1` (0..=23) -> (Intra16x16PredMode, CBPChroma, CBPLuma).
 #[rustfmt::skip]
 const I16X16_TABLE: [(u8, u8, u8); 24] = [
-    (2,0,0),(1,0,0),(0,0,0),(3,0,0),
-    (2,1,0),(1,1,0),(0,1,0),(3,1,0),
-    (2,2,0),(1,2,0),(0,2,0),(3,2,0),
-    (2,0,15),(1,0,15),(0,0,15),(3,0,15),
-    (2,1,15),(1,1,15),(0,1,15),(3,1,15),
-    (2,2,15),(1,2,15),(0,2,15),(3,2,15),
+    (0,0,0),(1,0,0),(2,0,0),(3,0,0),
+    (0,1,0),(1,1,0),(2,1,0),(3,1,0),
+    (0,2,0),(1,2,0),(2,2,0),(3,2,0),
+    (0,0,15),(1,0,15),(2,0,15),(3,0,15),
+    (0,1,15),(1,1,15),(2,1,15),(3,1,15),
+    (0,2,15),(1,2,15),(2,2,15),(3,2,15),
 ];
 
 /// coded_block_pattern (Table 9-4) — codeNum -> CBP for Intra_4×4 macroblocks.
@@ -263,7 +263,9 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     let mb_type = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
 
     if mb_type == 25 {
-        return Err(SliceDataError::Unsupported("I_PCM"));
+        return Err(SliceDataError::Unsupported(
+            "I_PCM macroblock (raw samples; not yet supported)",
+        ));
     }
 
     // Determine intra mb_type semantics.
@@ -316,9 +318,16 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
                 None
             };
 
-            // §8.3.1.1: dcPredModePredictedFlag => both neighbours contribute
-            // DC (mode 2) when unavailable/not-Intra4x4.
-            let pred_mode = left_mode.unwrap_or(2).min(top_mode.unwrap_or(2));
+            // §8.3.1.1: dcPredModePredictedFlag => when both neighbours are
+            // unavailable or not Intra_4×4, both predict DC (mode 2). When only
+            // one is available its mode is used directly; when both are available
+            // the pred mode is min(A, B).
+            let pred_mode = match (left_mode, top_mode) {
+                (Some(l), Some(t)) => l.min(t),
+                (Some(l), None) => l,
+                (None, Some(t)) => t,
+                (None, None) => 2,
+            };
 
             let prev_flag = r
                 .read_bit()
@@ -389,6 +398,22 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
         tracer,
     )?;
 
+    // Emit MB-level trace after full parse.
+    {
+        let mb_type_str = match mb.mb_type {
+            MbType::Intra4x4 => "Intra4x4".to_string(),
+            MbType::Intra16x16 { pred_mode, cbp_chroma, cbp_luma } => {
+                format!("Intra16x16(pred={pred_mode},cbp_chroma={cbp_chroma},cbp_luma={cbp_luma})")
+            }
+            _ => "Other".to_string(),
+        };
+        let mut modes = [0u8; 16];
+        for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
+            modes[i] = *m as u8;
+        }
+        tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, mb.intra_chroma_pred_mode, &modes);
+    }
+
     Ok((mb, this_nz, this_pred_ctx, qp))
 }
 
@@ -411,9 +436,10 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     // Intra_16×16 luma DC block (16 coeffs) — always present for I_16×16.
     if is_i16x16 {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, 0);
-        let (coeffs, _tc) = parse_cavlc_block(r, nc, 16)?;
+        let (coeffs, _tc, t1) = parse_cavlc_block(r, nc, 16)?;
         mb.luma_dc = coeffs;
         tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, 16, &coeffs);
+        tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, 16, nc, _tc, t1, 0);
     }
 
     // Luma AC / 4×4 blocks: 4 8×8 groups of 4 blocks; present per cbp_luma bit.
@@ -426,7 +452,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
             // Map 8×8-group + sub index to raster 4×4 index within the MB.
             let block = raster_of_8x8_sub(blk8, sub);
             let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
-            let (coeffs, tc) = parse_cavlc_block(r, nc, luma_max)?;
+            let (coeffs, tc, t1) = parse_cavlc_block(r, nc, luma_max)?;
             this_nz.luma[block] = tc;
             // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
             if is_i16x16 {
@@ -434,9 +460,11 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
                 mb.luma_coeffs[block] = shifted;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
+                tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0);
             } else {
                 mb.luma_coeffs[block] = coeffs;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
+                tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0);
             }
         }
     }
@@ -455,13 +483,14 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         for comp in 0..2usize {
             for block in 0..4usize {
                 let nc = chroma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block);
-                let (coeffs, tc) = parse_cavlc_block(r, nc, 15)?;
+                let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 15)?;
                 this_nz.chroma[comp * 4 + block] = tc;
                 // AC coeffs occupy zigzag positions 1..=15 (DC handled above).
                 let mut shifted = [0i16; 16];
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
                 let plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
                 tracer.on_cavlc_coeffs(mb_x, mb_y, plane, block as u8, &shifted);
+                tracer.on_cavlc_block_info(mb_x, mb_y, plane, block as u8, nc, tc, t1, 0);
                 if comp == 0 {
                     mb.chroma_cb_coeffs[block] = shifted;
                 } else {
@@ -487,11 +516,11 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 
 /// Parse a CAVLC-coded residual block (§9.2). Returns the coefficients in
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
-fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8)> {
+fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
     let mut out = [0i16; 16];
     let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)?;
     if total_coeff == 0 {
-        return Ok((out, 0));
+        return Ok((out, 0, 0));
     }
 
     let tc = total_coeff as usize;
@@ -587,7 +616,7 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
         }
     }
 
-    Ok((out, total_coeff))
+    Ok((out, total_coeff, trailing_ones))
 }
 
 /// Parse a chroma-DC CAVLC block (4 coefficients, nC = -1).
@@ -715,7 +744,7 @@ mod tests {
         // coeff_token for nC=0, TotalCoeff=0 is the single bit "1".
         let data = [0b1000_0000u8];
         let mut r = BitReader::new(&data);
-        let (coeffs, tc) = parse_cavlc_block(&mut r, 0, 16).unwrap();
+        let (coeffs, tc, _t1) = parse_cavlc_block(&mut r, 0, 16).unwrap();
         assert_eq!(tc, 0);
         assert_eq!(coeffs, [0i16; 16]);
     }

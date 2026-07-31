@@ -637,16 +637,21 @@ pub fn predict_16x16(mode: Intra16x16Mode, n: &IntraNeighbours16x16, out: &mut [
             }
         }
         Intra16x16Mode::Plane => {
+            // §8.3.3.4: H = Σ_{x'=0}^{7} (x'+1)*(p[8+x',-1] - p[6-x',-1]),
+            // where p[6-x',-1] for x'=7 is p[-1,-1] = `tl` — handled as a
+            // separate 8th term since `t`/`l` can't index -1 directly.
             let mut h = 0i32;
-            for i in 1..8i32 {
-                h += i * (t(8 + i) - t(8 - i));
+            for xp in 0..7i32 {
+                h += (xp + 1) * (t(8 + xp) - t(6 - xp));
             }
+            h += 8 * (t(15) - tl);
             let mut v = 0i32;
-            for i in 1..8i32 {
-                v += i * (l(8 + i) - l(8 - i));
+            for yp in 0..7i32 {
+                v += (yp + 1) * (l(8 + yp) - l(6 - yp));
             }
-            // a = (top_left + top_15) << 4
-            let a = (tl + t(15)) << 4;
+            v += 8 * (l(15) - tl);
+            // a = 16 * (p[-1,15] + p[15,-1])
+            let a = 16 * (l(15) + t(15));
             let b = (5 * h + 32) >> 6;
             let c = (5 * v + 32) >> 6;
             for y in 0..16i32 {
@@ -694,52 +699,68 @@ pub fn predict_chroma(
             }
         }
         IntraChromaMode::Dc => {
-            // §8.3.4.1 computes DC per 4×4 quadrant with different
-            // top/left-only rules per quadrant; this uses one whole-block
-            // average (matching this decoder's existing simplified approach,
-            // same as the 16×16 luma DC path above) rather than the full
-            // per-quadrant derivation. Still: availability must gate which
-            // samples enter the average, or a missing side is silently
-            // replaced by a phantom `R` (128) and corrupts the DC value.
+            // §8.3.4.1: each of the four 4×4 quadrants gets its own DC value
+            // (not one flat average for the whole 8×8). When both sides are
+            // available, the top-left and bottom-right quadrants average
+            // *both* their top and left samples, but the top-right quadrant
+            // uses *only* its top samples and the bottom-left quadrant uses
+            // *only* its left samples — an asymmetric rule, not a simplified
+            // whole-block DC. When only one side is available (or neither),
+            // every quadrant falls back to that side's samples (or `R`).
             let top_avail = top.iter().any(|s| s.is_some());
             let left_avail = left.iter().any(|s| s.is_some());
-            let dc = if top_avail && left_avail {
-                let mut s = 0i32;
-                for i in 0..8 {
-                    s += t(i) + l(i);
-                }
-                (s + 8) / 16
-            } else if top_avail {
-                let mut s = 0i32;
-                for i in 0..8 {
-                    s += t(i);
-                }
-                (s + 4) / 8
-            } else if left_avail {
-                let mut s = 0i32;
-                for i in 0..8 {
-                    s += l(i);
-                }
-                (s + 4) / 8
-            } else {
-                R
+
+            // avg of `vals` (1..=4 samples), rounded per §8.3.4.1.
+            let avg = |vals: &[i32]| -> i32 {
+                let n = vals.len() as i32;
+                let sum: i32 = vals.iter().sum();
+                (sum + n / 2) / n
             };
+
+            let top_l = [t(0), t(1), t(2), t(3)];
+            let top_r = [t(4), t(5), t(6), t(7)];
+            let left_t = [l(0), l(1), l(2), l(3)];
+            let left_b = [l(4), l(5), l(6), l(7)];
+
+            let (dc0, dc1, dc2, dc3) = if top_avail && left_avail {
+                let both_tl: Vec<i32> = top_l.iter().chain(left_t.iter()).copied().collect();
+                let both_br: Vec<i32> = top_r.iter().chain(left_b.iter()).copied().collect();
+                (avg(&both_tl), avg(&top_r), avg(&left_b), avg(&both_br))
+            } else if top_avail {
+                (avg(&top_l), avg(&top_r), avg(&top_l), avg(&top_r))
+            } else if left_avail {
+                (avg(&left_t), avg(&left_t), avg(&left_b), avg(&left_b))
+            } else {
+                (R, R, R, R)
+            };
+
             for y in 0..8i32 {
                 for x in 0..8i32 {
+                    let dc = match (x < 4, y < 4) {
+                        (true, true) => dc0,
+                        (false, true) => dc1,
+                        (true, false) => dc2,
+                        (false, false) => dc3,
+                    };
                     set(x, y, dc);
                 }
             }
         }
         IntraChromaMode::Plane => {
+            // §8.3.4.4: H = Σ_{x'=0}^{3} (x'+1)*(p[4+x',-1] - p[2-x',-1]),
+            // where p[2-x',-1] for x'=3 is p[-1,-1] = `tl` — handled as a
+            // separate 4th term since `t`/`l` can't index -1 directly.
             let mut h = 0i32;
-            for i in 1..4i32 {
-                h += i * (t(4 + i) - t(4 - i));
+            for xp in 0..3i32 {
+                h += (xp + 1) * (t(4 + xp) - t(2 - xp));
             }
+            h += 4 * (t(7) - tl);
             let mut v = 0i32;
-            for i in 1..4i32 {
-                v += i * (l(4 + i) - l(4 - i));
+            for yp in 0..3i32 {
+                v += (yp + 1) * (l(4 + yp) - l(2 - yp));
             }
-            let a = (tl + t(7)) << 4;
+            v += 4 * (l(7) - tl);
+            let a = 16 * (l(7) + t(7));
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
             for y in 0..8i32 {
@@ -855,13 +876,26 @@ mod tests {
 
     #[test]
     fn predict_chroma_dc() {
+        // §8.3.4.1: top-left/bottom-right quadrants blend both sides;
+        // top-right uses only top, bottom-left uses only left.
         let top = [Some(120u8); 8];
         let left = [Some(80u8); 8];
         let mut out = [0u8; 64];
         predict_chroma(IntraChromaMode::Dc, &top, &left, Some(128), &mut out);
-        let dc = (8 * 120 + 8 * 80 + 8) / 16; // 100
-        for v in out {
-            assert_eq!(v, dc as u8);
+        let dc_tl = (4 * 120 + 4 * 80 + 4) / 8; // 100
+        let dc_tr = (4 * 120 + 2) / 4; // 120
+        let dc_bl = (4 * 80 + 2) / 4; // 80
+        let dc_br = dc_tl; // 100
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let expected = match (x < 4, y < 4) {
+                    (true, true) => dc_tl,
+                    (false, true) => dc_tr,
+                    (true, false) => dc_bl,
+                    (false, false) => dc_br,
+                };
+                assert_eq!(out[y * 8 + x], expected as u8, "at ({x},{y})");
+            }
         }
     }
 }

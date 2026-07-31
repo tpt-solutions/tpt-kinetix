@@ -39,6 +39,44 @@ pub trait DecodeTracer {
     /// runs (not yet wired into the live intra decode path — see
     /// `tpt-kinetix-h264/src/deblock.rs`).
     fn on_deblocked(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, _samples: &[u8]) {}
+
+    /// Called once per residual block with the CAVLC parsing metadata:
+    /// `n_c` is the context coefficient (−1 for chroma DC / Intra16x16 DC),
+    /// `total_coeff` and `trailing_ones` are from the coeff_token, and
+    /// `suffix_len` is the suffix length used for the last level.
+    fn on_cavlc_block_info(
+        &mut self,
+        _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8,
+        _n_c: i32, _total_coeff: u8, _trailing_ones: u8, _suffix_len: u32,
+    ) {}
+
+    /// Same as `on_cavlc_block_info` but also receives the bit reader position
+    /// *after* the block was consumed, useful for tracking bit alignment.
+    fn on_cavlc_block_info_with_pos(
+        &mut self,
+        _mb_x: u32, _mb_y: u32, _plane: TracePlane, _blk: u8,
+        _n_c: i32, _total_coeff: u8, _trailing_ones: u8, _suffix_len: u32,
+        _bit_pos_after: usize,
+    ) {}
+
+    /// Called once per macroblock after it is fully parsed (mb_type, QP,
+    /// cbp, intra_pred_modes, chroma_pred_mode all resolved).
+    fn on_mb_parsed(
+        &mut self,
+        _mb_x: u32, _mb_y: u32,
+        _mb_type: &str,
+        _qp: i32,
+        _cbp: u8,
+        _intra_chroma_pred_mode: u8,
+        _pred_modes: &[u8; 16],
+    ) {}
+
+    /// Called once at the start of slice data parsing with the initial
+    /// bit position (data_bit_offset from the slice header).
+    fn on_slice_data_start(
+        &mut self,
+        _data_bit_offset: usize,
+    ) {}
 }
 
 /// The default, zero-overhead tracer: every hook is a no-op.

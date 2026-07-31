@@ -199,10 +199,10 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ### Codec correctness (in progress)
 - [x] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output — `AacDecoder::decode()` delegates AAC-LC reconstruction to `symphonia-codec-aac`, returning interleaved `f32` PCM; verified by the `ffmpeg`-gated round-trip test `tpt-kinetix-aac/tests/decode_pcm.rs` (HE-AAC SBR/PS still unsupported by the wrapped decoder)
-- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; still missing: the per-syntax-element context-index tables (spec Tables 9-12..9-33) and macroblock-level CABAC syntax parsing (mb_type, cbf, residual) wired into `decoder.rs`
+- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; mb_type I-slice context (Table 9-11), coded_block_pattern (Table 9-12), and mb_qp_delta (Table 9-20) context tables implemented and tested; still missing: the remaining per-syntax-element context-index tables (Tables 9-13..9-33) and macroblock-level CABAC syntax parsing wired into `decoder.rs`
 - [x] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
 - [x] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
-- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113`
+- [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113` — FrameHeader and TileGroup OBUs now parsed and stored; `TileData` struct captures per-tile payloads for future parallel decode; full coefficient reconstruction pending
 
 Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).
 
@@ -255,8 +255,11 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [ ] Validate bit-exact P-frame decode vs `ffmpeg`
 
 ### H.264 — Phase D: CABAC
-- [ ] Per-syntax-element context-index tables (Tables 9-12..9-33) and
+- [~] Per-syntax-element context-index tables (Tables 9-12..9-33) and
       binarizations (§9.3.2) wired into the arithmetic engine in `entropy.rs`
+      — mb_type I-slice (Table 9-11), coded_block_pattern (Table 9-12), and
+      mb_qp_delta (Table 9-20) implemented and tested; remaining tables
+      (9-13..9-33) still outstanding
 - [ ] CABAC macroblock/residual syntax parsing in the slice loop
 - [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg`
 
@@ -271,9 +274,10 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       pixel-exact assertions, and update `lib.rs`/README/`todo.md` status
 
 ### AV1 — from-scratch reconstruction
-- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs`
+- [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs`
       (replace the grey placeholder path), incl. the parallel tile-decode
-      `TODO(phase-4)` at `decoder.rs:113`; validate vs `dav1d`; flip
+      `TODO(phase-4)` at `decoder.rs:113` — FrameHeader/TileGroup OBU parsing
+      and TileData storage implemented; validate vs `dav1d` and flip
       `Av1Decoder::capabilities().pixel_exact` only after conformance passes
 
 ## Phase 13 — `tpt-kinetix-lean`: Original Embedded-First Codec (2026-07-20)
@@ -285,12 +289,14 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > in a few thousand lines with genuinely parallel entropy decode.
 
 ### Design
-- [~] Write the format design doc: header layout, fixed block-partition
+- [x] Write the format design doc: header layout, fixed block-partition
       scheme, rANS stream-interleaving/framing — documented in
       `tpt-kinetix-lean/src/headers.rs` (byte layout table) and
-      `tpt-kinetix-lean/src/rans.rs` (stream-set framing) module docs.
-      STILL TODO: integer transform sizes, intra mode set (~8-16
-      directions), inter/motion-vector approach, in-loop filter placement
+      `tpt-kinetix-lean/src/rans.rs` (stream-set framing) module docs;
+      integer transform sizes, intra mode set (14 modes), inter/motion-vector
+      approach (unidirectional, quarter-pel, 6-tap), in-loop filter placement
+      (single-stage deblocking) documented in `tpt-kinetix-lean/src/lib.rs`
+      crate-level docs
 - [x] Document the memory/perf budget for v1 (target max resolution, arena
       size ceiling, per-frame decode time budget) sized for embedded-Linux
       SBC-class hardware (e.g. Raspberry Pi–class), noted as revisitable —
@@ -333,10 +339,11 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > actually decided on. Do not start implementation on any of these without
 > first writing its own Phase-13-style design section here.
 
-- [ ] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
+- [~] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
       classifier accuracy per bit rather than human perceptual quality;
       chroma-optional, model-matched bit depth, tensor-output decode path
-      (see `docs/codec-backlog.md` for design notes)
+      (see `docs/codec-backlog.md` for design notes) — design phase started,
+      see Phase 15
 - [ ] `tpt-kinetix-realtime` — ultra-low-latency, loss-resilient real-time
       codec for cloud gaming/video conferencing/AR overlay; sub-frame
       latency, no B-frame lookahead, built-in partial-frame loss recovery
@@ -352,3 +359,56 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [ ] Prioritize this list (pick the next one to move from backlog to an
       actual Phase-13-style design + scaffold effort) once `tpt-kinetix-lean`
       reaches a stable v1
+
+## Phase 15 — `tpt-kinetix-vision`: Video-for-Machines Codec (design phase) (2026-07-20)
+
+> Goal: an original codec design that optimizes rate-distortion for
+> downstream detector/classifier/embedding-model accuracy per bit, rather
+> than human perceptual quality. Backlog item promoted to a design phase per
+> the Phase 14 rule (design section required before implementation starts).
+> Full rationale in `docs/codec-backlog.md` ("Original Specialist Codec
+> Concepts" table). Overlaps `tpt-kinetix-lean`'s embedded/edge-camera
+> target but shares no bitstream design yet — track independently until the
+> shared-primitives question below is resolved.
+
+### Design
+- [~] Decide the target consumer model class(es) for v1 (e.g. object
+      detection / pose / tracking backbones) — draft recommends object
+      detection (YOLO/DETR-family) as v1 target, evolving to model-agnostic
+      quantization later; **decision pending** — see `docs/vision-codec-design.md`
+      DECISION 1
+- [~] Write the format design doc: header layout including a
+      `chroma_present` flag (chroma is optional, not just subsampled —
+      luma-only is the default for detection/pose/tracking encodes), and a
+      bit-depth/quantization scheme matched to the target model's trained
+      input precision rather than the human-eye 8-bit convention —
+      **drafted in `docs/vision-codec-design.md`; 8 decision points flagged
+      (chroma handling, bit depth, quant matrix, output contract, metrics,
+      budget, Lean relationship, target platform)**
+- [~] Design the decode path's primary output contract: a feature/embedding
+      tensor (bitstream → tensor), with full pixel reconstruction as a
+      secondary/on-demand path for human review of a flagged clip — a
+      materially different decoder shape than every other codec in the
+      workspace; sketch the trait/interface split before scaffolding —
+      **drafted: dual-path `VisionDecoder` trait with `decode_tensor()` +
+      `decode_pixels()`, `Tensor` output type; see DECISION 5**
+- [~] Decide how "detector/classifier accuracy per bit" is measured for
+      design validation (e.g. mAP/accuracy-vs-bitrate curve against a
+      reference detector), so later phases have an objective function
+      instead of a subjective one — **draft recommends mAP-vs-bitrate on
+      COCO-val with YOLOv8-n as v1 metric; see DECISION 6**
+- [~] Document the memory/perf budget for v1 (target resolution range,
+      decode time budget), and note whether it targets the same embedded
+      envelope as `tpt-kinetix-lean` or a server/edge-inference envelope
+      — **draft recommends embedded envelope (RPi-class, ~20 MB arena,
+      <10 ms/frame); see DECISION 7**
+- [~] Decide the relationship to `tpt-kinetix-lean`: share bitstream
+      primitives (rANS/tANS, bitreader) via extraction into a common crate,
+      or keep the bitstreams fully independent — **draft recommends starting
+      independent and extracting later (DECISION 8), pending both codecs
+      being stable enough to freeze the rANS interface**
+
+### Scaffold (blocked on Design)
+- [ ] Scaffold `tpt-kinetix-vision` crate from `templates/codec-crate/`,
+      add to workspace `members` — start only once the Design items above
+      are resolved

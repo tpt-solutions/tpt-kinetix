@@ -98,6 +98,9 @@ pub fn filter_edge_bs(
     if bs < 4 {
         tc -= (bs as i32) - 1;
     }
+    if tc <= 0 {
+        return;
+    }
 
     if bs == 4 {
         // Strong luma filter (8.7.2.4).

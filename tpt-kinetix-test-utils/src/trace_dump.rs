@@ -11,6 +11,7 @@ use tpt_kinetix_h264::{DecodeTracer, TracePlane};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
     CavlcCoeffs,
+    CavlcBlockInfo,
     IntraPred,
     Reconstructed,
     Deblocked,
@@ -27,6 +28,25 @@ pub struct TraceKey {
     pub stage: Stage,
 }
 
+/// Parsed CAVLC block metadata captured by `on_cavlc_block_info`.
+#[derive(Debug, Clone, Copy)]
+pub struct CavlcBlockInfo {
+    pub n_c: i32,
+    pub total_coeff: u8,
+    pub trailing_ones: u8,
+    pub suffix_len: u32,
+}
+
+/// Macroblock-level metadata captured by `on_mb_parsed`.
+#[derive(Debug, Clone)]
+pub struct MbInfo {
+    pub mb_type: String,
+    pub qp: i32,
+    pub cbp: u8,
+    pub intra_chroma_pred_mode: u8,
+    pub pred_modes: [u8; 16],
+}
+
 /// Collects every traced value into a map for later inspection.
 ///
 /// CAVLC coefficients are stored as `i32` (widened from `i16`) and
@@ -35,6 +55,8 @@ pub struct TraceKey {
 #[derive(Debug, Default)]
 pub struct MapTracer {
     pub values: HashMap<TraceKey, Vec<i32>>,
+    pub block_info: HashMap<TraceKey, CavlcBlockInfo>,
+    pub mb_info: HashMap<(u32, u32), MbInfo>,
 }
 
 impl MapTracer {
@@ -56,6 +78,14 @@ impl DecodeTracer for MapTracer {
         self.values.insert(key, coeffs.iter().map(|&v| v as i32).collect());
     }
 
+    fn on_cavlc_block_info(
+        &mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8,
+        n_c: i32, total_coeff: u8, trailing_ones: u8, suffix_len: u32,
+    ) {
+        let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::CavlcBlockInfo };
+        self.block_info.insert(key, CavlcBlockInfo { n_c, total_coeff, trailing_ones, suffix_len });
+    }
+
     fn on_intra_pred(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, pred: &[u8]) {
         let key = TraceKey { mb_x, mb_y, plane, blk, stage: Stage::IntraPred };
         self.values.insert(key, pred.iter().map(|&v| v as i32).collect());
@@ -69,6 +99,18 @@ impl DecodeTracer for MapTracer {
     fn on_deblocked(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, samples: &[u8]) {
         let key = TraceKey { mb_x, mb_y, plane, blk: 0, stage: Stage::Deblocked };
         self.values.insert(key, samples.iter().map(|&v| v as i32).collect());
+    }
+
+    fn on_mb_parsed(
+        &mut self, mb_x: u32, mb_y: u32,
+        mb_type: &str, qp: i32, cbp: u8,
+        intra_chroma_pred_mode: u8, pred_modes: &[u8; 16],
+    ) {
+        self.mb_info.insert((mb_x, mb_y), MbInfo {
+            mb_type: mb_type.to_string(),
+            qp, cbp, intra_chroma_pred_mode,
+            pred_modes: *pred_modes,
+        });
     }
 }
 

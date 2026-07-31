@@ -25,5 +25,5 @@ pub mod encoder;
 pub mod frame;
 pub mod obu;
 
-pub use decoder::Av1Decoder;
+pub use decoder::{Av1Decoder, TileData};
 pub use encoder::{Av1Encoder, Av1EncoderConfig};
