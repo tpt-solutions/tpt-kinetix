@@ -15,6 +15,7 @@ use crate::{
     macroblock::{Macroblock, MbPos, MbType},
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
+    ref_pic::{Dpb, DpbEntry, PocState},
     sps::SeqParameterSet,
     trace::{DecodeTracer, NoopTracer},
 };
@@ -26,7 +27,9 @@ pub struct H264Decoder {
     sps_store: HashMap<u32, SeqParameterSet>,
     pps_store: HashMap<u32, PicParameterSet>,
     /// Decoded Picture Buffer — stores reference frames for inter prediction.
-    dpb: Vec<VideoFrame>,
+    dpb: Dpb,
+    /// POC derivation state carried between pictures (§8.2.1).
+    poc_state: PocState,
     frame_count: u64,
     /// When `true` (the default), macroblock rows are reconstructed with `rayon`
     /// parallel iterators. Set to `false` to force serial reconstruction, which
@@ -44,7 +47,8 @@ impl H264Decoder {
         Self {
             sps_store: HashMap::new(),
             pps_store: HashMap::new(),
-            dpb: Vec::new(),
+            dpb: Dpb::new(),
+            poc_state: PocState::default(),
             frame_count: 0,
             parallel: true,
             strict: false,
@@ -229,7 +233,7 @@ impl H264Decoder {
 
     /// Flush any buffered frames from the decoded picture buffer.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
-        let frames = self.dpb.drain(..).collect();
+        let frames = self.dpb.take_frames();
         Ok(frames)
     }
 
@@ -398,7 +402,7 @@ impl H264Decoder {
         data.extend(recon.chroma_cr);
 
         self.frame_count += 1;
-        Ok(Some(VideoFrame {
+        let frame = VideoFrame {
             pts: packet.pts,
             dts: packet.dts,
             data,
@@ -406,7 +410,36 @@ impl H264Decoder {
             height,
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
-        }))
+        };
+
+        // Reference-picture management: derive POC (§8.2.1), advance the POC
+        // state, and store reference pictures in the DPB (§8.2.5) so later
+        // P/B slices can build reference lists (§8.2.4).
+        let is_reference = nal.nal_ref_idc != 0;
+        if is_reference {
+            if let Ok(poc) = crate::ref_pic::derive_pic_order_cnt(
+                sps,
+                matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                is_reference,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                &mut self.poc_state,
+            ) {
+                self.dpb.push(
+                    DpbEntry {
+                        frame: frame.clone(),
+                        frame_num: header.frame_num,
+                        pic_order_cnt: poc,
+                        is_short_term: true,
+                        is_long_term: false,
+                        long_term_pic_num: -1,
+                    },
+                    sps.num_ref_frames,
+                );
+            }
+        }
+
+        Ok(Some(frame))
     }
 
     /// Fallback slice decode: attempt the real CAVLC I-slice path first,
@@ -580,6 +613,130 @@ impl H264Decoder {
                 }
                 Err(_) => {
                     // Fall through to I_PCM or skip.
+                }
+            }
+        }
+
+        // Real CAVLC P-slice decode: motion-compensate against the DPB's
+        // RefPicList0 (§8.4/§8.5). Falls through to the skip scaffold when the
+        // slice references no available picture.
+        let is_p_slice = header.slice_type == crate::slice::SliceType::P;
+        if is_p_slice && header.first_mb_in_slice == 0 {
+            let slice_qp = 26
+                + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
+                + header.slice_qp_delta;
+            let chroma_qp_index_offset =
+                pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
+            let num_ref_idx_l0_active = pps
+                .as_ref()
+                .map(|p| p.num_ref_idx_l0_default_active_minus1 + 1)
+                .unwrap_or(1);
+
+            if let Some(ref_list) =
+                crate::ref_pic::build_ref_list_l0(&self.dpb, num_ref_idx_l0_active as usize)
+            {
+                let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> =
+                    ref_list.iter().map(|e| e.frame.clone()).collect();
+                let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+                reader.seek_to_bit(header.data_bit_offset);
+                match crate::slice_data::parse_p_slice(
+                    &mut reader,
+                    mb_cols,
+                    mb_rows,
+                    slice_qp,
+                    num_ref_idx_l0_active,
+                    chroma_qp_index_offset,
+                    &mut crate::trace::NoopTracer,
+                ) {
+                    Ok(parsed) => {
+                        let mut recon = crate::reconstruct::reconstruct_inter_frame(
+                            &parsed.macroblocks,
+                            &parsed.mv_store,
+                            &ref_frames,
+                            mb_cols,
+                            mb_rows,
+                            width,
+                            height,
+                            chroma_qp_index_offset,
+                            &mut crate::trace::NoopTracer,
+                        );
+
+                        let deblock_params = crate::deblock::DeblockParams {
+                            disable_idc: header.disable_deblocking_filter_idc as u8,
+                            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                            beta_offset_div2: header.slice_beta_offset_div2,
+                            chroma_qp_index_offset,
+                        };
+                        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+                            .macroblocks
+                            .chunks(mb_cols as usize)
+                            .map(|row| {
+                                row.iter()
+                                    .map(|mb| {
+                                        let has_coeffs = mb.cbp != 0
+                                            || mb.luma_dc.iter().any(|&v| v != 0);
+                                        crate::deblock::DeblockMbInfo::new(
+                                            mb.mb_type, has_coeffs, mb.qp,
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        for (row_idx, row_info) in mb_info.iter().enumerate() {
+                            for (col_idx, cur) in row_info.iter().enumerate() {
+                                let left = if col_idx > 0 {
+                                    Some(&row_info[col_idx - 1])
+                                } else {
+                                    None
+                                };
+                                let top = if row_idx > 0 {
+                                    Some(&mb_info[row_idx - 1][col_idx])
+                                } else {
+                                    None
+                                };
+                                crate::deblock::deblock_luma_mb(
+                                    &mut recon.luma,
+                                    recon.luma_stride,
+                                    col_idx,
+                                    row_idx,
+                                    cur,
+                                    left,
+                                    top,
+                                    deblock_params,
+                                );
+                                crate::deblock::deblock_chroma_mb(
+                                    &mut recon.chroma_cb,
+                                    &mut recon.chroma_cr,
+                                    recon.chroma_stride,
+                                    col_idx,
+                                    row_idx,
+                                    cur,
+                                    left,
+                                    top,
+                                    deblock_params,
+                                );
+                            }
+                        }
+
+                        let mut data = recon.luma;
+                        data.extend(recon.chroma_cb);
+                        data.extend(recon.chroma_cr);
+
+                        self.frame_count += 1;
+                        return Ok(VideoFrame {
+                            pts: packet.pts,
+                            dts: packet.dts,
+                            data,
+                            width,
+                            height,
+                            pixel_format: PixelFormat::Yuv420p,
+                            is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("P-path: parse error: {e:?}");
+                        // Fall through to the skip scaffold.
+                    }
                 }
             }
         }

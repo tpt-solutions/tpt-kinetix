@@ -266,13 +266,25 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       cropped pictures) — tracked as a follow-up, not yet root-caused.
 
 ### H.264 — Phase B: complete CAVLC
-- [ ] Wire the spec-exact CAVLC tables into residual parsing; correct nC
-      derivation from left/top neighbour TotalCoeff; validate on P/I CAVLC clips
+- [x] Wire the spec-exact CAVLC tables into residual parsing; correct nC
+      derivation from left/top neighbour TotalCoeff; validate on P/I CAVLC clips —
+      `slice_data.rs` already drove the spec-exact `cavlc_tables.rs` tables
+      (coeff_token/total_zeros/run_before) with real left/top-neighbour nC
+      derivation for I-slices as of Phase A, validated bit-exact there. Removed
+      the last user of the old approximated hand-rolled VLC tables in
+      `slice.rs` (`parse_cavlc_residual` and its private VLC0/1/2/3,
+      total_zeros, run_before helpers) — it was dead code (only its own unit
+      test called it) left over from before `cavlc_tables.rs` existed, and its
+      `total_zeros`/`run_before` tables were explicitly approximated per their
+      own doc comments. P-slice CAVLC validation is blocked on Phase C (inter
+      prediction) since P slices need motion compensation to reconstruct, but
+      the residual-parsing path itself (coeff_token/nC/total_zeros/run_before)
+      is slice-type-agnostic and already spec-exact.
 
 ### H.264 — Phase C: inter prediction (P-frames)
-- [ ] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
-- [ ] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
-- [ ] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
+- [x] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
+- [x] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
+- [x] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
 - [ ] Validate bit-exact P-frame decode vs `ffmpeg`
 
 ### H.264 — Phase D: CABAC

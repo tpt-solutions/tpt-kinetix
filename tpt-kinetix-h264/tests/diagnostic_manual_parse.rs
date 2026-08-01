@@ -178,6 +178,7 @@ fn manual_parse_single_mb() {
     let mut pps_r = BitReader::new(&pps_nal.rbsp);
     eprintln!("\n=== PPS ({} RBSP bytes) ===", pps_nal.rbsp.len());
     let pps_id_from_pps = read_ue_log(&mut pps_r, "pic_parameter_set_id");
+    let _seq_parameter_set_id_from_pps = read_ue_log(&mut pps_r, "seq_parameter_set_id");
     let _entropy_coding_mode_flag = read_bit_log(&mut pps_r, "entropy_coding_mode_flag");
     let bottom_field_pic_order_in_frame_present_flag =
         read_bit_log(&mut pps_r, "bottom_field_pic_order_in_frame_present_flag");

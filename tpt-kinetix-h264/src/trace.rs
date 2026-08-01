@@ -97,6 +97,22 @@ pub trait DecodeTracer {
     ) {
     }
 
+    /// Called once per 4x4 inter block after motion compensation, before the
+    /// residual is added. `mv` is the block's committed motion vector and
+    /// `ref_idx` the RefPicList0 index used.
+    #[allow(clippy::too_many_arguments)]
+    fn on_motion_comp(
+        &mut self,
+        _mb_x: u32,
+        _mb_y: u32,
+        _plane: TracePlane,
+        _blk: u8,
+        _pred: &[u8],
+        _mv: [i32; 2],
+        _ref_idx: usize,
+    ) {
+    }
+
     /// Called once per macroblock after it is fully parsed (mb_type, QP,
     /// cbp, intra_pred_modes, chroma_pred_mode all resolved).
     fn on_mb_parsed(

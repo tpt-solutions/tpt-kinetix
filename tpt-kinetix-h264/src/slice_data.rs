@@ -14,6 +14,7 @@ use crate::{
     bitreader::BitReader,
     cavlc_tables,
     macroblock::{Macroblock, MbType},
+    mv::MvStore,
     prediction::Intra4x4Mode,
 };
 
@@ -37,6 +38,19 @@ const GOLOMB_TO_INTRA4X4_CBP: [u8; 48] = [
      8, 17, 18, 20, 24,  6,  9, 22, 25, 32, 33, 34, 36, 40, 38, 41,
 ];
 
+/// coded_block_pattern (Table 9-4) — codeNum -> CBP for **inter** macroblocks
+/// (§7.4.5). Same codeNum range, different luma-nibble ordering than intra
+/// (matches ffmpeg's `golomb_to_inter_cbp`).
+#[rustfmt::skip]
+const GOLOMB_TO_INTER_CBP: [u8; 48] = [
+     0,  1,  2,  4,  8,  3,  5, 10, 12, 15,  7, 11, 13, 14,  6,  9,
+    16, 17, 18, 20, 24, 19, 21, 26, 28, 31, 23, 27, 29, 30, 22, 25,
+    32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43, 45, 46, 38, 41,
+];
+
+/// sub_macroblock types for P_8x8 (Table 7-13) — number of sub-partitions.
+const P_SUB_MB_PARTS: [usize; 4] = [1, 2, 2, 4];
+
 /// Errors surfaced while parsing slice data.
 #[derive(Debug)]
 pub enum SliceDataError {
@@ -59,7 +73,14 @@ impl std::error::Error for SliceDataError {}
 
 impl From<cavlc_tables::CavlcVlcError> for SliceDataError {
     fn from(_: cavlc_tables::CavlcVlcError) -> Self {
+        eprintln!("cavlc vlc decode error");
         SliceDataError::Cavlc
+    }
+}
+
+impl From<&'static str> for SliceDataError {
+    fn from(e: &'static str) -> Self {
+        SliceDataError::Unsupported(e)
     }
 }
 
@@ -78,11 +99,13 @@ pub struct MbNz {
     pub present: bool,
 }
 
-/// Parsed output of one I-slice: the macroblocks in raster order plus the
-/// non-zero-coefficient grid used for neighbour context.
+/// Parsed output of one slice: the macroblocks in raster order plus the
+/// non-zero-coefficient grid used for neighbour context. Inter slices also
+/// carry the motion-vector store produced by the §8.4.1 prediction pass.
 pub struct ParsedSlice {
     pub macroblocks: Vec<Macroblock>,
     pub nz: Vec<MbNz>,
+    pub mv_store: MvStore,
 }
 
 /// Per-macroblock Intra_4×4 prediction-mode context, kept so neighbouring
@@ -136,7 +159,8 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         let mb_x = (mb_idx as u32) % mb_cols;
         let mb_y = (mb_idx as u32) / mb_cols;
 
-        let (mb, this_nz, this_pred_ctx, new_qp) = parse_i_macroblock(
+        let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+        let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
             reader,
             mb_x,
             mb_y,
@@ -146,6 +170,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
             qp,
             chroma_qp_index_offset,
             tracer,
+            mb_type,
         )?;
         qp = new_qp;
         nz[mb_idx] = this_nz;
@@ -153,7 +178,11 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         macroblocks.push(mb);
     }
 
-    Ok(ParsedSlice { macroblocks, nz })
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store: MvStore::new(total),
+    })
 }
 
 /// One side's contribution to the Intra_4×4 MPM derivation (§8.3.1.1).
@@ -256,7 +285,7 @@ fn combine_nc(left: Option<u8>, top: Option<u8>) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
+fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     r: &mut BitReader,
     mb_x: u32,
     mb_y: u32,
@@ -266,6 +295,7 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     prev_qp: i32,
     _chroma_qp_index_offset: i32,
     tracer: &mut T,
+    mb_type: u32,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -277,8 +307,6 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
         present: true,
         ..Default::default()
     };
-
-    let mb_type = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
 
     if mb_type == 25 {
         let total_bytes = 384usize;
@@ -446,6 +474,7 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
         mb_y,
         mb_cols,
         is_i16x16,
+        false,
         cbp_l,
         cbp_c,
         tracer,
@@ -482,6 +511,278 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
     Ok((mb, this_nz, this_pred_ctx, qp))
 }
 
+/// Parse the macroblock layer of a P slice (CAVLC, §7.3.4).
+///
+/// `reader` must be positioned at `SliceHeader::data_bit_offset`. P-slice
+/// inter macroblocks use mb_type 0..=4 (Table 7-11); intra macroblocks inside
+/// a P slice use I-table mb_type + 5 (§7.4.5). Skip runs are signalled with
+/// `mb_skip_run` (ue(v)), read once per slice and again after each coded MB.
+pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
+    reader: &mut BitReader,
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    num_ref_idx_l0_active: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) -> R<ParsedSlice> {
+    let total = (mb_cols * mb_rows) as usize;
+    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
+    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    let mut qp = slice_qp;
+    // `mb_skip_run` is signalled once per slice and again after each coded MB
+    // (§7.4.5); `None` means a fresh value must be read for the next MB.
+    let mut mb_skip_run: Option<u32> = None;
+
+    for mb_idx in 0..total {
+        let mb_x = (mb_idx as u32) % mb_cols;
+        let mb_y = (mb_idx as u32) / mb_cols;
+
+        if mb_skip_run.is_none() {
+            let run = reader.read_ue().ok_or(SliceDataError::Eof("mb_skip_run"))?;
+            if run > total as u32 {
+                return Err(SliceDataError::Unsupported("mb_skip_run out of range"));
+            }
+            mb_skip_run = Some(run);
+        }
+        let run = mb_skip_run.as_mut().expect("set above");
+        if *run > 0 {
+            *run -= 1;
+            let mut mb = Macroblock::new_skip();
+            mb.qp = qp;
+            mb.skip = true;
+            nz[mb_idx] = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            macroblocks.push(mb);
+            continue;
+        }
+        mb_skip_run = None;
+
+        let (mb, this_nz, this_pred_ctx, new_qp) = parse_p_macroblock(
+            reader,
+            mb_x,
+            mb_y,
+            mb_cols,
+            &nz,
+            &pred_ctx,
+            qp,
+            num_ref_idx_l0_active,
+            chroma_qp_index_offset,
+            tracer,
+        )?;
+        eprintln!(
+            "parse_p_mb {}: type={:?} cbp={} qp={} pos={}",
+            mb_idx,
+            mb.mb_type,
+            mb.cbp,
+            new_qp,
+            reader.bit_position()
+        );
+        qp = new_qp;
+        nz[mb_idx] = this_nz;
+        pred_ctx[mb_idx] = this_pred_ctx;
+        macroblocks.push(mb);
+    }
+
+    // Derive motion vectors for every inter macroblock (§8.4.1). The store is
+    // per-slice; single-slice pictures use slice id 0.
+    let mut mv_store = MvStore::new(total);
+    crate::mv::predict_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
+
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+    })
+}
+
+/// Decode `refIdxL0` for one partition (§7.3.5.1). A reference count of 1
+/// implies index 0 with no bits; 2 implies a single bit (`^1`); otherwise ue(v).
+fn read_ref_idx(r: &mut BitReader, ref_count: u32) -> R<i32> {
+    let val = if ref_count == 1 {
+        0
+    } else if ref_count == 2 {
+        (r.read_bit().ok_or(SliceDataError::Eof("ref_idx_l0"))? ^ 1) as u32
+    } else {
+        r.read_ue().ok_or(SliceDataError::Eof("ref_idx_l0"))?
+    };
+    if val >= ref_count {
+        return Err(SliceDataError::Unsupported("ref_idx_l0 overflow"));
+    }
+    Ok(val as i32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
+    r: &mut BitReader,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    nz_grid: &[MbNz],
+    pred_ctx_grid: &[MbPredCtx],
+    prev_qp: i32,
+    num_ref_idx_l0_active: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
+    let mut mb = Macroblock::new_skip();
+    mb.skip = false;
+    let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let this_pred_ctx = MbPredCtx {
+        present: true,
+        ..Default::default()
+    };
+
+    let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+    eprintln!("p_mb({mb_x},{mb_y}) mb_type_raw={mb_type_raw} pos={}", r.bit_position());
+    if mb_type_raw >= 5 {
+        let i_type = mb_type_raw - 5;
+        if i_type > 25 {
+            return Err(SliceDataError::Unsupported("mb_type out of range in P slice"));
+        }
+        return parse_intra_macroblock(
+            r,
+            mb_x,
+            mb_y,
+            mb_cols,
+            nz_grid,
+            pred_ctx_grid,
+            prev_qp,
+            chroma_qp_index_offset,
+            tracer,
+            i_type,
+        );
+    }
+
+    // Inter macroblock — Table 7-11 P slice mb_type 0..=4.
+    let (mb_type, ref0) = match mb_type_raw {
+        0 => (MbType::PL016x16, false),
+        1 => (MbType::P16x8, false),
+        2 => (MbType::P8x16, false),
+        3 => (MbType::P8x8, false),
+        4 => (MbType::P8x8ref0, true),
+        _ => unreachable!(),
+    };
+    mb.mb_type = mb_type;
+    let mut motion = crate::macroblock::InterMotion::default();
+
+    if mb_type_raw == 3 || mb_type_raw == 4 {
+        // P_8x8: four sub-partitions with their own sub_mb_type / refs / mvd.
+        let mut sub_types = [0u8; 4];
+        for sub in sub_types.iter_mut() {
+            let raw = r.read_ue().ok_or(SliceDataError::Eof("sub_mb_type"))?;
+            if raw >= 4 {
+                return Err(SliceDataError::Unsupported("sub_mb_type out of range"));
+            }
+            *sub = raw as u8;
+        }
+        motion.sub_mb_type = Some(sub_types);
+        let ref_count = if ref0 { 1 } else { num_ref_idx_l0_active };
+        for part in 0..4 {
+            motion.ref_idx_l0.push(read_ref_idx(r, ref_count)?);
+            let n_sub = P_SUB_MB_PARTS[sub_types[part] as usize];
+            for _ in 0..n_sub {
+                let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+                let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+                motion.mvd_l0.push((mx, my));
+            }
+        }
+    } else {
+        let n_parts = if mb_type_raw == 0 { 1 } else { 2 };
+        for _ in 0..n_parts {
+            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+            let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+            motion.mvd_l0.push((mx, my));
+        }
+    }
+    mb.motion = Some(motion);
+    eprintln!("p_mb({mb_x},{mb_y}) after motion pos={}", r.bit_position());
+
+    // coded_block_pattern for inter macroblocks (Table 9-4, inter ordering).
+    let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
+    if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
+        return Err(SliceDataError::Unsupported("cbp code_num out of range"));
+    }
+    let cbp = GOLOMB_TO_INTER_CBP[code_num as usize];
+    mb.cbp = cbp;
+    eprintln!("p_mb({mb_x},{mb_y}) cbp={cbp} pos={}", r.bit_position());
+    let cbp_l = cbp & 0x0F;
+    let cbp_c = cbp >> 4;
+
+    // mb_qp_delta present when any residual block is coded.
+    let mut qp = prev_qp;
+    if cbp_l != 0 || cbp_c != 0 {
+        let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
+        qp = (prev_qp + dqp + 52).rem_euclid(52);
+        eprintln!("p_mb({mb_x},{mb_y}) dqp={dqp} pos={}", r.bit_position());
+    {
+        let p = r.bit_position();
+        let bits: String = (0..600)
+            .map(|i| {
+                if let Some(b) = r.read_bit() {
+                    b.to_string()
+                } else {
+                    "-".to_string()
+                }
+            })
+            .collect();
+        r.seek_to_bit(p);
+        for (n, chunk) in bits.as_bytes().chunks(32).enumerate() {
+            eprintln!(
+                "  raw bits @{} +{}: {}",
+                p,
+                n * 32,
+                String::from_utf8_lossy(chunk)
+            );
+        }
+        let _ = std::fs::write(
+            std::env::temp_dir().join("tpt_residual_bits.txt"),
+            &bits,
+        );
+    }
+    }
+    mb.qp = qp;
+
+    parse_intra_residuals(
+        r,
+        &mut mb,
+        &mut this_nz,
+        nz_grid,
+        mb_x,
+        mb_y,
+        mb_cols,
+        false,
+        true,
+        cbp_l,
+        cbp_c,
+        tracer,
+    )?;
+
+    let mb_type_str = format!("{:?}", mb_type);
+    let mut modes = [0u8; 16];
+    for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
+        modes[i] = *m as u8;
+    }
+    tracer.on_mb_parsed(
+        mb_x,
+        mb_y,
+        &mb_type_str,
+        mb.qp,
+        mb.cbp,
+        mb.intra_chroma_pred_mode,
+        &modes,
+    );
+
+    Ok((mb, this_nz, this_pred_ctx, qp))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     r: &mut BitReader,
@@ -492,6 +793,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     mb_y: u32,
     mb_cols: u32,
     is_i16x16: bool,
+    is_inter: bool,
     cbp_luma: u8,
     cbp_chroma: u8,
     tracer: &mut T,
@@ -507,48 +809,68 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, 16, nc, _tc, t1, 0);
     }
 
-    // Luma AC / 4×4 blocks: 4 8×8 groups of 4 blocks; present per cbp_luma bit.
+    // Luma 4×4 blocks. Block iteration order differs between coding types:
+    // intra uses the 8×8-group scan (Figure 6-10) with a cbp bit per group;
+    // inter uses pure *raster* order (§7.3.5.1) with the cbp bit gating the
+    // raster 8×8 group `block >> 2`.
     let luma_max = if is_i16x16 { 15 } else { 16 };
-    for blk8 in 0..4usize {
-        if (cbp_luma >> blk8) & 1 == 0 {
-            continue;
-        }
-        for sub in 0..4usize {
-            // Map 8×8-group + sub index to raster 4×4 index within the MB.
-            let block = raster_of_8x8_sub(blk8, sub);
-            let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
-            let (coeffs, tc, t1) = parse_cavlc_block(r, nc, luma_max)?;
-            this_nz.luma[block] = tc;
-            // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
-            if is_i16x16 {
-                let mut shifted = [0i16; 16];
-                shifted[1..16].copy_from_slice(&coeffs[0..15]);
-                mb.luma_coeffs[block] = shifted;
-                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
-                tracer.on_cavlc_block_info(
-                    mb_x,
-                    mb_y,
-                    TracePlane::Luma,
-                    block as u8,
-                    nc,
-                    tc,
-                    t1,
-                    0,
-                );
-            } else {
-                mb.luma_coeffs[block] = coeffs;
-                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
-                tracer.on_cavlc_block_info(
-                    mb_x,
-                    mb_y,
-                    TracePlane::Luma,
-                    block as u8,
-                    nc,
-                    tc,
-                    t1,
-                    0,
-                );
+    let blocks: Vec<usize> = if is_inter {
+        let mut v = Vec::with_capacity(16);
+        for blk8 in 0..4usize {
+            if (cbp_luma >> blk8) & 1 == 0 {
+                continue;
             }
+            for sub in 0..4usize {
+                v.push(raster_of_8x8_sub(blk8, sub));
+            }
+        }
+        v
+    } else {
+        let mut v = Vec::with_capacity(16);
+        for blk8 in 0..4usize {
+            if (cbp_luma >> blk8) & 1 == 0 {
+                continue;
+            }
+            for sub in 0..4usize {
+                v.push(raster_of_8x8_sub(blk8, sub));
+            }
+        }
+        v
+    };
+    for block in blocks {
+        let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
+        eprintln!("  luma block {block} nc={nc} pos={}", r.bit_position());
+        let (coeffs, tc, t1) = parse_cavlc_block(r, nc, luma_max)?;
+        this_nz.luma[block] = tc;
+        // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
+        if is_i16x16 {
+            let mut shifted = [0i16; 16];
+            shifted[1..16].copy_from_slice(&coeffs[0..15]);
+            mb.luma_coeffs[block] = shifted;
+            tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
+            tracer.on_cavlc_block_info(
+                mb_x,
+                mb_y,
+                TracePlane::Luma,
+                block as u8,
+                nc,
+                tc,
+                t1,
+                0,
+            );
+        } else {
+            mb.luma_coeffs[block] = coeffs;
+            tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
+            tracer.on_cavlc_block_info(
+                mb_x,
+                mb_y,
+                TracePlane::Luma,
+                block as u8,
+                nc,
+                tc,
+                t1,
+                0,
+            );
         }
     }
 
@@ -604,11 +926,17 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 /// Parse a CAVLC-coded residual block (§9.2). Returns the coefficients in
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
 fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
+    let start_pos = r.bit_position();
     let mut out = [0i16; 16];
-    let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)?;
+    let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)
+        .map_err(|e| {
+            eprintln!("  CAVLC coeff_token FAIL at pos={start_pos} n_c={n_c}: {e:?}");
+            e
+        })?;
     if total_coeff == 0 {
         return Ok((out, 0, 0));
     }
+    eprintln!("  CAVLC block start={start_pos} n_c={n_c} tc={total_coeff} t1={trailing_ones}");
 
     let tc = total_coeff as usize;
     let t1 = trailing_ones as usize;
@@ -686,6 +1014,10 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     } else {
         0
     };
+    eprintln!(
+        "    block@{} tc={} t1={} levels={:?} tz={}",
+        start_pos, total_coeff, trailing_ones, &levels[..tc as usize], total_zeros
+    );
 
     let mut zeros_left = total_zeros;
     // Place coefficients from highest-frequency to lowest.
@@ -694,7 +1026,10 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
         out[pos as usize] = level as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
-                cavlc_tables::read_run_before(r, zeros_left.min(255) as u8)? as i32
+                cavlc_tables::read_run_before(r, zeros_left.min(255) as u8).map_err(|e| {
+                    eprintln!("  CAVLC run_before FAIL at pos={} zeros_left={zeros_left}", r.bit_position());
+                    e
+                })? as i32
             } else {
                 0
             };
@@ -834,5 +1169,99 @@ mod tests {
         let (coeffs, tc, _t1) = parse_cavlc_block(&mut r, 0, 16).unwrap();
         assert_eq!(tc, 0);
         assert_eq!(coeffs, [0i16; 16]);
+    }
+
+    #[test]
+    fn p_slice_single_16x16_mb() {
+        // 1×1 picture, one P_L0_16x16 MB with no residual:
+        //   mb_skip_run=0 → "1", mb_type=0 → "1", ref_idx(rc=1) no bits,
+        //   mvd(0,0) → "1" "1", cbp=0 → "1" → 111111, then rbsp stop bit.
+        let data = [0xFFu8, 0x80];
+        let mut r = BitReader::new(&data);
+        let parsed =
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+        assert_eq!(parsed.macroblocks.len(), 1);
+        let mb = &parsed.macroblocks[0];
+        assert_eq!(mb.mb_type, MbType::PL016x16);
+        assert!(!mb.skip);
+        assert_eq!(mb.cbp, 0);
+        let motion = mb.motion.as_ref().unwrap();
+        assert_eq!(motion.ref_idx_l0, vec![0]);
+        assert_eq!(motion.mvd_l0, vec![(0, 0)]);
+        assert!(motion.sub_mb_type.is_none());
+        // MV store: predicted (0,0) ref 0 for the whole 16×16 grid.
+        let grid = parsed.mv_store.cells_of(0).unwrap();
+        assert_eq!(grid[0].mv, [0, 0]);
+        assert_eq!(grid[0].ref_idx, 0);
+        assert_eq!(grid[15].mv, [0, 0]);
+    }
+
+    #[test]
+    fn p_slice_skip_run_then_coded_mb() {
+        // 1×4 picture: mb_skip_run=3 ("00100") skips MB0-2, then a coded
+        // P_L0_16x16 MB3 (mb_skip_run=0 "1", mb_type=0 "1", ref no bits,
+        // mvd(0,0) "1" "1", cbp=0 "1") + rbsp stop bit.
+        // bits: 00100 11111 1(pad) → 0x27 0xE0.
+        let data = [0x27u8, 0xE0];
+        let mut r = BitReader::new(&data);
+        let parsed =
+            parse_p_slice(&mut r, 1, 4, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+        assert_eq!(parsed.macroblocks.len(), 4);
+        for mb in &parsed.macroblocks[..3] {
+            assert!(mb.skip, "MB should be skip");
+            assert_eq!(mb.mb_type, MbType::PSkip);
+            assert!(mb.motion.is_none());
+        }
+        let last = &parsed.macroblocks[3];
+        assert!(!last.skip);
+        assert_eq!(last.mb_type, MbType::PL016x16);
+        // All four MBs committed to the MV store; skip MBs get (0,0) ref 0.
+        for mb_idx in 0..4 {
+            let grid = parsed.mv_store.cells_of(mb_idx).unwrap();
+            assert_eq!(grid[0].mv, [0, 0]);
+            assert_eq!(grid[0].ref_idx, 0);
+        }
+    }
+
+    #[test]
+    fn p_slice_16x8_partitions() {
+        // 1×1 picture, P_L0_L0_16x8 (mb_type 1): two partitions, each with
+        // ref=0 (rc=1, no bits) and mvd(0,0) ("1" "1" each).
+        // bits: run=0 "1", mb_type=1 → ue(1)="010", refs no bits,
+        //       mvd0 "1" "1", mvd1 "1" "1", cbp=0 "1"
+        //   = 1 010 11111 → 0b1010_1111 = 0xAF, then rbsp stop.
+        let data = [0xAFu8, 0x80];
+        let mut r = BitReader::new(&data);
+        let parsed =
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+        let mb = &parsed.macroblocks[0];
+        assert_eq!(mb.mb_type, MbType::P16x8);
+        let motion = mb.motion.as_ref().unwrap();
+        assert_eq!(motion.ref_idx_l0, vec![0, 0]);
+        assert_eq!(motion.mvd_l0, vec![(0, 0), (0, 0)]);
+    }
+
+    #[test]
+    fn p_slice_8x8_with_sub_mb_types() {
+        // 1×1 picture, P_8x8 (mb_type 3): four sub_mb_types (all 0 = 8×8 →
+        // 1 sub-partition each), refs = 0 (rc=1), mvd(0,0) per sub-partition.
+        // bits: run=0 "1", mb_type=3 → ue(3)="00100",
+        //       sub_types: ue(0) "1" ×4,
+        //       4× [ref no bits + mvd "1" "1"],
+        //       cbp=0 "1"
+        //   = 1,00100,1,1,1,1,1,1,1,1,1,1,1,1,1,1 → count: 1+5+4+8+1 = 19 bits
+        //   byte0 = 10010011 = 0x93, byte1 = 11111111 = 0xFF,
+        //   byte2 = 1(data)+1(stop)+pad = 11100000 = 0xE0
+        let data = [0x93u8, 0xFF, 0xE0];
+        let mut r = BitReader::new(&data);
+        let parsed =
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+        let mb = &parsed.macroblocks[0];
+        assert_eq!(mb.mb_type, MbType::P8x8);
+        let motion = mb.motion.as_ref().unwrap();
+        assert_eq!(motion.sub_mb_type, Some([0, 0, 0, 0]));
+        assert_eq!(motion.ref_idx_l0, vec![0, 0, 0, 0]);
+        assert_eq!(motion.mvd_l0.len(), 4);
+        assert!(motion.mvd_l0.iter().all(|&m| m == (0, 0)));
     }
 }
