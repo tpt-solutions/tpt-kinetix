@@ -374,8 +374,8 @@ fn parse_i_macroblock<T: crate::trace::DecodeTracer>(
                 NeighbourSide::Unavailable
             };
 
-            let dc_predicted = left_side == NeighbourSide::Unavailable
-                || top_side == NeighbourSide::Unavailable;
+            let dc_predicted =
+                left_side == NeighbourSide::Unavailable || top_side == NeighbourSide::Unavailable;
             let pred_mode = if dc_predicted {
                 2u8
             } else {

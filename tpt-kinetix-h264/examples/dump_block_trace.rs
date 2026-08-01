@@ -72,7 +72,9 @@ fn main() {
 
     let ref_frames = decode_h264_with_ffmpeg(&annexb, WIDTH, HEIGHT)
         .expect("ffmpeg reference decode of the same bytes must succeed");
-    let ref_frame = ref_frames.first().expect("ffmpeg produced at least one frame");
+    let ref_frame = ref_frames
+        .first()
+        .expect("ffmpeg produced at least one frame");
 
     let mut dec = H264Decoder::new();
     let mut tracer = MapTracer::new();
@@ -138,12 +140,11 @@ fn main() {
                     stage: Stage::IntraPred,
                 });
                 let mb_info = tracer.mb_info.get(&(mbx, mby));
+                println!("MB({mbx},{mby}) blk={blk:>2} (px {px0},{py0}) max_diff={max_d:>3}");
                 println!(
-                    "MB({mbx},{mby}) blk={blk:>2} (px {px0},{py0}) max_diff={max_d:>3}"
-                );
-                println!(
-                    "  mb_type={:?} pred_mode(blk)={:?}",
+                    "  mb_type={:?} qp={:?} pred_mode(blk)={:?}",
                     mb_info.map(|m| m.mb_type.as_str()),
+                    mb_info.map(|m| m.qp),
                     mb_info.map(|m| m.pred_modes[blk as usize])
                 );
                 println!(

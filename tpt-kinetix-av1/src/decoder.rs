@@ -131,9 +131,7 @@ impl Av1Decoder {
                                 self.last_frame_header = Some(fh);
                             }
                             Err(KinetixError::Unsupported(ref msg))
-                                if msg.contains("show_existing_frame") =>
-                            {
-                            }
+                                if msg.contains("show_existing_frame") => {}
                             Err(_) => {}
                         }
                     }

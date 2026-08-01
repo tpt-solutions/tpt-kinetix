@@ -14,12 +14,28 @@ fn encode_testsrc(w: u32, h: u32, extra_args: &[&str]) -> Option<Vec<u8>> {
     let h264 = dir.join(format!("test_{w}x{h}.h264"));
     let input = format!("testsrc=size={w}x{h}:rate=1:duration=1");
     let mut args = vec![
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", &input,
-        "-frames:v", "1",
-        "-c:v", "libx264", "-profile:v", "baseline",
-        "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
-        "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input,
+        "-frames:v",
+        "1",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-g",
+        "1",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
     ];
     args.extend(extra_args);
     args.push(h264.to_str()?);
@@ -55,7 +71,12 @@ fn decode_and_dump(label: &str, annexb: &[u8]) {
         let modes_str: Vec<String> = info.pred_modes.iter().map(|m| m.to_string()).collect();
         eprintln!(
             "  MB({},{}) type={} qp={} cbp={} chroma_pred={} modes=[{}]",
-            key.0, key.1, info.mb_type, info.qp, info.cbp, info.intra_chroma_pred_mode,
+            key.0,
+            key.1,
+            info.mb_type,
+            info.qp,
+            info.cbp,
+            info.intra_chroma_pred_mode,
             modes_str.join(","),
         );
     }
@@ -65,14 +86,22 @@ fn decode_and_dump(label: &str, annexb: &[u8]) {
     let mut block_keys: Vec<_> = tracer.block_info.keys().collect();
     block_keys.sort_by_key(|k| (k.plane as u8, k.blk));
     for key in &block_keys {
-        if key.mb_x != 0 || key.mb_y != 0 { continue; }
+        if key.mb_x != 0 || key.mb_y != 0 {
+            continue;
+        }
         let info = tracer.block_info.get(key).unwrap();
-        let coeffs = tracer.values.get(&tpt_kinetix_test_utils::trace_dump::TraceKey {
-            mb_x: key.mb_x, mb_y: key.mb_y,
-            plane: key.plane, blk: key.blk,
-            stage: Stage::CavlcCoeffs,
-        });
-        let nonzero = coeffs.map(|c| c.iter().filter(|&&v| v != 0).count()).unwrap_or(0);
+        let coeffs = tracer
+            .values
+            .get(&tpt_kinetix_test_utils::trace_dump::TraceKey {
+                mb_x: key.mb_x,
+                mb_y: key.mb_y,
+                plane: key.plane,
+                blk: key.blk,
+                stage: Stage::CavlcCoeffs,
+            });
+        let nonzero = coeffs
+            .map(|c| c.iter().filter(|&&v| v != 0).count())
+            .unwrap_or(0);
         eprintln!(
             "  {:?} blk={:>2}: nC={:>3} TC={:>2} T1={} nonzero={:>2}",
             key.plane, key.blk, info.n_c, info.total_coeff, info.trailing_ones, nonzero,
@@ -90,9 +119,16 @@ fn decode_and_dump(label: &str, annexb: &[u8]) {
     std::fs::write(&h264_path, annexb).ok();
     Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264_path.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264_path.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             ref_path.to_str().unwrap(),
         ])
         .output()
@@ -128,7 +164,10 @@ fn decode_and_dump(label: &str, annexb: &[u8]) {
 fn dump_mb_info_16x16() {
     let annexb = match encode_testsrc(16, 16, &[]) {
         Some(b) => b,
-        None => { eprintln!("ffmpeg not available"); return; }
+        None => {
+            eprintln!("ffmpeg not available");
+            return;
+        }
     };
     decode_and_dump("16x16_single_mb", &annexb);
 }
@@ -137,7 +176,10 @@ fn dump_mb_info_16x16() {
 fn dump_mb_info_64x48() {
     let annexb = match encode_testsrc(64, 48, &[]) {
         Some(b) => b,
-        None => { eprintln!("ffmpeg not available"); return; }
+        None => {
+            eprintln!("ffmpeg not available");
+            return;
+        }
     };
     decode_and_dump("64x48_multi_mb", &annexb);
 }

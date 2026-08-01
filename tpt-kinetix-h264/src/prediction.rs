@@ -226,33 +226,36 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             set(3, 3, g);
         }
         Intra4x4Mode::DiagonalDownRight => {
-            // Spec-exact (MultimediaWiki / Table 8-2).
-            let (lt, t0) = (tl, t(0));
+            // Spec §8.3.1.2.5 / ffmpeg `pred4x4_down_right_c`. Cross-checked
+            // against libavcodec/h264pred_template.c.
+            let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
             let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
-            let d = (l3 + 2 * l2 + l1 + 2) / 4;
-            let e = (l2 + 2 * l1 + l0 + 2) / 4;
-            let f = (l1 + 2 * l0 + lt + 2) / 4;
-            let g = (l0 + 2 * lt + t0 + 2) / 4;
-            // Wiki layout (rows L0..L3, top->bottom), with wiki a=g, b=f, c=e:
+            let a = (l3 + 2 * l2 + l1 + 2) / 4;
+            let b = (l2 + 2 * l1 + l0 + 2) / 4;
+            let c = (l1 + 2 * l0 + lt + 2) / 4;
+            let d = (l0 + 2 * lt + t0 + 2) / 4; // main diagonal
+            let e = (lt + 2 * t0 + t1 + 2) / 4;
+            let f = (t0 + 2 * t1 + t2 + 2) / 4;
+            let g = (t1 + 2 * t2 + t3 + 2) / 4;
             //   L0 | d  e  f  g
-            //   L1 | e  d  e  f
-            //   L2 | f  e  d  e
-            //   L3 | g  f  e  d
+            //   L1 | c  d  e  f
+            //   L2 | b  c  d  e
+            //   L3 | a  b  c  d
             set(0, 0, d);
             set(1, 0, e);
             set(2, 0, f);
             set(3, 0, g);
-            set(0, 1, e);
+            set(0, 1, c);
             set(1, 1, d);
             set(2, 1, e);
             set(3, 1, f);
-            set(0, 2, f);
-            set(1, 2, e);
+            set(0, 2, b);
+            set(1, 2, c);
             set(2, 2, d);
             set(3, 2, e);
-            set(0, 3, g);
-            set(1, 3, f);
-            set(2, 3, e);
+            set(0, 3, a);
+            set(1, 3, b);
+            set(2, 3, c);
             set(3, 3, d);
         }
         Intra4x4Mode::VerticalRight => {

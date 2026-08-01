@@ -273,8 +273,14 @@ pub fn deblock_luma_edge(
         if x < 4 || x + 3 >= stride {
             return;
         }
+        let height = plane.len() / stride.max(1);
         for dy in 0..16usize {
             let y = edge_mb_y * 16 + dy;
+            if y >= height {
+                // Bottom-row macroblocks in a non-16-aligned picture partially
+                // extend past the actual (cropped) picture height.
+                continue;
+            }
             let o = y * stride;
             // Spec order: p0 is adjacent to the edge (x-1), p3 is furthest (x-4).
             let mut pp = [
@@ -309,6 +315,11 @@ pub fn deblock_luma_edge(
         }
         for dx in 0..16usize {
             let x = edge_mb_x * 16 + dx;
+            if x >= stride {
+                // Right-edge macroblocks in a non-16-aligned picture partially
+                // extend past the actual (cropped) picture width.
+                continue;
+            }
             let mut pp = [
                 plane[(y - 1) * stride + x] as i32,
                 plane[(y - 2) * stride + x] as i32,
@@ -370,6 +381,9 @@ pub fn deblock_chroma_edge(
         }
         for dy in 0..8usize {
             let y = edge_mb_y * 8 + dy;
+            if y >= height {
+                continue;
+            }
             let o = y * stride;
             let mut pp = [plane[o + x - 1] as i32, plane[o + x - 2] as i32];
             let mut qq = [plane[o + x] as i32, plane[o + x + 1] as i32];
@@ -391,6 +405,9 @@ pub fn deblock_chroma_edge(
         }
         for dx in 0..8usize {
             let x = edge_mb_x * 8 + dx;
+            if x >= stride {
+                continue;
+            }
             let mut pp = [
                 plane[(y - 1) * stride + x] as i32,
                 plane[(y - 2) * stride + x] as i32,

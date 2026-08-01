@@ -246,7 +246,24 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — full MPM
       derivation with left/top neighbour tracking implemented in
       `slice_data.rs::parse_i_macroblock`
-- [ ] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus
+- [x] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus —
+      found and fixed a real bug: `Intra4x4Mode::DiagonalDownRight` in
+      `prediction.rs` used the wrong sample weighting (only left/top-left
+      samples, mismapped to the wrong output positions) instead of the spec
+      §8.3.1.2.5 formula (cross-checked against ffmpeg's
+      `pred4x4_down_right_c`); the other 7 Intra_4×4 modes were individually
+      re-verified against the same ffmpeg reference and are correct. Also
+      fixed an OOB panic in `deblock.rs` for non-16-aligned picture
+      dimensions (missing per-sample x/y bounds checks in the last partial
+      row/column of macroblocks). `cavlc_iframe_no_deblock_is_bitexact` and
+      `cavlc_iframe_with_deblock_tracks_progress` are now both bit-exact
+      (max_diff=0, not just <=20), and an ad hoc corpus of 8 MB-aligned
+      clips (`tpt-kinetix-h264/examples/corpus_check.rs`, varied resolution
+      48x32..128x96, testsrc/smptebars content) all decode bit-exact.
+      Remaining known gap: non-16-aligned picture dimensions still show
+      small (≤53) pixel diffs clustered at the partial right/bottom
+      macroblock edges (deblocking/prediction edge-sample handling for
+      cropped pictures) — tracked as a follow-up, not yet root-caused.
 
 ### H.264 — Phase B: complete CAVLC
 - [ ] Wire the spec-exact CAVLC tables into residual parsing; correct nC

@@ -12,11 +12,13 @@
 //! * Dequantization per §7.11.
 
 use crate::{
-    obu::{BitReader, SequenceHeaderObu},
     frame::FrameHeader,
+    obu::{BitReader, SequenceHeaderObu},
 };
 
-use tpt_kinetix_core::{error::KinetixError, frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
+use tpt_kinetix_core::{
+    error::KinetixError, frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp,
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -445,7 +447,8 @@ fn predict_smooth_v(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [
         for x in 0..size {
             let wt = (x + 1) * (size - y);
             let wb = (y + 1) * (size - x);
-            let s = (wt as i32 * top[x] + wb as i32 * left[y]
+            let s = (wt as i32 * top[x]
+                + wb as i32 * left[y]
                 + rc * (x + 1) as i32 * (y + 1) as i32
                 + bc * (size - x) as i32 * (size - y) as i32)
                 / (size * size) as i32;
@@ -472,7 +475,8 @@ fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [
         for x in 0..size {
             let wt = (y + 1) * (size - x);
             let wb = (x + 1) * (size - y);
-            let s = (wt as i32 * top[x] + wb as i32 * left[y]
+            let s = (wt as i32 * top[x]
+                + wb as i32 * left[y]
                 + rc * (x + 1) as i32 * (y + 1) as i32
                 + bc * (size - x) as i32 * (size - y) as i32)
                 / (size * size) as i32;
@@ -485,15 +489,21 @@ fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [
 fn predict_smooth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
     let rc = tl;
     let bc = tl;
-    let avg_top = if size > 0 { top[..size].iter().sum::<i32>() / size as i32 } else { 128 };
-    let avg_left = if size > 0 { left[..size].iter().sum::<i32>() / size as i32 } else { 128 };
+    let avg_top = if size > 0 {
+        top[..size].iter().sum::<i32>() / size as i32
+    } else {
+        128
+    };
+    let avg_left = if size > 0 {
+        left[..size].iter().sum::<i32>() / size as i32
+    } else {
+        128
+    };
     for y in 0..size {
         for x in 0..size {
             let wt = size - x;
             let wb = size - y;
-            let s = (wt as i32 * top[x] + wb as i32 * left[y]
-                + rc * wb as i32
-                + bc * wt as i32)
+            let s = (wt as i32 * top[x] + wb as i32 * left[y] + rc * wb as i32 + bc * wt as i32)
                 / (size * size) as i32;
             out[y * size + x] = s.clamp(0, 255);
         }
@@ -542,7 +552,11 @@ fn predict_directional(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize
                 ext[i]
             } else {
                 let j = 2 * size - 1 - i;
-                if j < size { left[j] } else { ext[j - size] }
+                if j < size {
+                    left[j]
+                } else {
+                    ext[j - size]
+                }
             };
             out[y * size + x] = val.clamp(0, 255);
         }
@@ -550,14 +564,7 @@ fn predict_directional(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize
 }
 
 /// Predict a single intra block.
-fn predict_intra_block(
-    mode: u8,
-    top: &[i32],
-    left: &[i32],
-    tl: i32,
-    size: usize,
-    out: &mut [i32],
-) {
+fn predict_intra_block(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
     match mode {
         DC_PRED => predict_dc(top, left, size, out),
         V_PRED => predict_vertical(top, size, out),
@@ -677,8 +684,14 @@ pub fn decode_tile_group(
     let sb_size: usize = 64;
     let start_x = tile_x * sb_size;
     let start_y = tile_y * sb_size;
-    let sb_w = (start_x + sb_size).min(width).saturating_sub(start_x).max(1);
-    let sb_h = (start_y + sb_size).min(height).saturating_sub(start_y).max(1);
+    let sb_w = (start_x + sb_size)
+        .min(width)
+        .saturating_sub(start_x)
+        .max(1);
+    let sb_h = (start_y + sb_size)
+        .min(height)
+        .saturating_sub(start_y)
+        .max(1);
 
     // Process 8×8 transform blocks within this superblock
     for by in (0..sb_h).step_by(8) {
@@ -698,8 +711,8 @@ pub fn decode_tile_group(
                 // Fill with DC prediction
                 if px_x < width && px_y < height {
                     let (top, left, tl) = tile_borders(
-                        y_plane, y_stride, width, height,
-                        tx_px, tile_x, tile_y, tile_cols, tile_rows,
+                        y_plane, y_stride, width, height, tx_px, tile_x, tile_y, tile_cols,
+                        tile_rows,
                     );
                     let mut pred = vec![0i32; num_coeffs];
                     predict_dc(&top, &left, tx_px, &mut pred);
@@ -850,8 +863,7 @@ pub fn decode_tile_group(
             // Add prediction and write to output
             if px_x < width && px_y < height {
                 let (top, left, tl) = tile_borders(
-                    y_plane, y_stride, width, height,
-                    tx_px, tile_x, tile_y, tile_cols, tile_rows,
+                    y_plane, y_stride, width, height, tx_px, tile_x, tile_y, tile_cols, tile_rows,
                 );
                 let mut pred = vec![0i32; num_coeffs];
                 predict_dc(&top, &left, tx_px, &mut pred);
@@ -875,14 +887,7 @@ pub fn decode_tile_group(
                 let cbf_chroma = br.read_bit().unwrap_or(0) == 1;
                 if cbf_chroma {
                     let _ = decode_chroma_tx(
-                        &mut br,
-                        u_plane,
-                        v_plane,
-                        uv_stride,
-                        uv_px_x,
-                        uv_px_y,
-                        width,
-                        height,
+                        &mut br, u_plane, v_plane, uv_stride, uv_px_x, uv_px_y, width, height,
                         qindex,
                     );
                 }
