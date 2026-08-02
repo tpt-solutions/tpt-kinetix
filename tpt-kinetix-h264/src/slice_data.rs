@@ -815,17 +815,17 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     // raster 8×8 group `block >> 2`.
     let luma_max = if is_i16x16 { 15 } else { 16 };
     let blocks: Vec<usize> = if is_inter {
+        // Inter: raster order 0..15, but only blocks whose 8×8 group has cbp bit set.
         let mut v = Vec::with_capacity(16);
-        for blk8 in 0..4usize {
-            if (cbp_luma >> blk8) & 1 == 0 {
-                continue;
-            }
-            for sub in 0..4usize {
-                v.push(raster_of_8x8_sub(blk8, sub));
+        for block in 0..16usize {
+            let blk8 = block >> 2; // 8×8 group index (0..3)
+            if (cbp_luma >> blk8) & 1 == 1 {
+                v.push(block);
             }
         }
         v
     } else {
+        // Intra: 8×8-group scan order (Figure 6-10).
         let mut v = Vec::with_capacity(16);
         for blk8 in 0..4usize {
             if (cbp_luma >> blk8) & 1 == 0 {
