@@ -75,7 +75,9 @@ const COEFF_TOKEN_LEN: [[u8; 4 * 17]; 4] = [
         10, 9, 9, 9,    10,10,10,10,    10,10,10,10,    10,10,10,10,
     ],
     [
-         6, 0, 0, 0,
+         // tc=0 has two decoder aliases: code 3 (canonical) and code 2.
+         // Both are accepted on input; t1 is irrelevant when tc=0.
+         6, 6, 0, 0,
          6, 6, 0, 0,     6, 6, 6, 0,     6, 6, 6, 6,     6, 6, 6, 6,
          6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,
          6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,
@@ -107,7 +109,9 @@ const COEFF_TOKEN_BITS: [[u16; 4 * 17]; 4] = [
         13, 7, 9,12,     9,12,11,10,     5, 8, 7, 6,     1, 4, 3, 2,
     ],
     [
-         3, 0, 0, 0,
+         // tc=0: code 3 canonical; code 2 also accepted as a decoder alias
+         // (x264 emits both in different streams). t1 is irrelevant when tc=0.
+         3, 2, 0, 0,
          0, 1, 0, 0,     4, 5, 6, 0,     8, 9,10,11,    12,13,14,15,
         16,17,18,19,    20,21,22,23,    24,25,26,27,    28,29,30,31,
         32,33,34,35,    36,37,38,39,    40,41,42,43,    44,45,46,47,

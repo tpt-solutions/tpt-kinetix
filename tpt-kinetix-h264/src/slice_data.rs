@@ -73,7 +73,6 @@ impl std::error::Error for SliceDataError {}
 
 impl From<cavlc_tables::CavlcVlcError> for SliceDataError {
     fn from(_: cavlc_tables::CavlcVlcError) -> Self {
-        eprintln!("cavlc vlc decode error");
         SliceDataError::Cavlc
     }
 }
@@ -573,14 +572,6 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
             chroma_qp_index_offset,
             tracer,
         )?;
-        eprintln!(
-            "parse_p_mb {}: type={:?} cbp={} qp={} pos={}",
-            mb_idx,
-            mb.mb_type,
-            mb.cbp,
-            new_qp,
-            reader.bit_position()
-        );
         qp = new_qp;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
@@ -639,8 +630,9 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         ..Default::default()
     };
 
+    let pos_mb_start = r.bit_position();
     let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
-    eprintln!("p_mb({mb_x},{mb_y}) mb_type_raw={mb_type_raw} pos={}", r.bit_position());
+    eprintln!("P-MB({mb_x},{mb_y}): mb_type={mb_type_raw} pos_after_mb_type={}", r.bit_position());
     if mb_type_raw >= 5 {
         let i_type = mb_type_raw - 5;
         if i_type > 25 {
@@ -703,8 +695,8 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         }
     }
     mb.motion = Some(motion);
-    eprintln!("p_mb({mb_x},{mb_y}) after motion pos={}", r.bit_position());
 
+    eprintln!("  after MVDs: pos={}", r.bit_position());
     // coded_block_pattern for inter macroblocks (Table 9-4, inter ordering).
     let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
     if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
@@ -712,41 +704,16 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     }
     let cbp = GOLOMB_TO_INTER_CBP[code_num as usize];
     mb.cbp = cbp;
-    eprintln!("p_mb({mb_x},{mb_y}) cbp={cbp} pos={}", r.bit_position());
     let cbp_l = cbp & 0x0F;
     let cbp_c = cbp >> 4;
+    eprintln!("  cbp_code_num={code_num} cbp={cbp:#04x} cbp_l={cbp_l:#x} cbp_c={cbp_c} pos_after_cbp={}", r.bit_position());
 
     // mb_qp_delta present when any residual block is coded.
     let mut qp = prev_qp;
     if cbp_l != 0 || cbp_c != 0 {
         let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
         qp = (prev_qp + dqp + 52).rem_euclid(52);
-        eprintln!("p_mb({mb_x},{mb_y}) dqp={dqp} pos={}", r.bit_position());
-    {
-        let p = r.bit_position();
-        let bits: String = (0..600)
-            .map(|i| {
-                if let Some(b) = r.read_bit() {
-                    b.to_string()
-                } else {
-                    "-".to_string()
-                }
-            })
-            .collect();
-        r.seek_to_bit(p);
-        for (n, chunk) in bits.as_bytes().chunks(32).enumerate() {
-            eprintln!(
-                "  raw bits @{} +{}: {}",
-                p,
-                n * 32,
-                String::from_utf8_lossy(chunk)
-            );
-        }
-        let _ = std::fs::write(
-            std::env::temp_dir().join("tpt_residual_bits.txt"),
-            &bits,
-        );
-    }
+        eprintln!("  mb_qp_delta={dqp} qp={qp} pos_after_qp={}", r.bit_position());
     }
     mb.qp = qp;
 
@@ -809,23 +776,12 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, 16, nc, _tc, t1, 0);
     }
 
-    // Luma 4×4 blocks. Block iteration order differs between coding types:
-    // intra uses the 8×8-group scan (Figure 6-10) with a cbp bit per group;
-    // inter uses pure *raster* order (§7.3.5.1) with the cbp bit gating the
-    // raster 8×8 group `block >> 2`.
+    // Luma 4×4 blocks. Both intra and inter use the BlkIdx scan order defined
+    // by §7.3.5.2: iterate i8x8 (0..4), gate on CodedBlockPatternLuma bit i8x8,
+    // then iterate i4x4 (0..4). BlkIdx = i8x8*4 + i4x4. raster_of_8x8_sub maps
+    // (i8x8, i4x4) → raster position for nC neighbor lookups and coeff storage.
     let luma_max = if is_i16x16 { 15 } else { 16 };
-    let blocks: Vec<usize> = if is_inter {
-        // Inter: raster order 0..15, but only blocks whose 8×8 group has cbp bit set.
-        let mut v = Vec::with_capacity(16);
-        for block in 0..16usize {
-            let blk8 = block >> 2; // 8×8 group index (0..3)
-            if (cbp_luma >> blk8) & 1 == 1 {
-                v.push(block);
-            }
-        }
-        v
-    } else {
-        // Intra: 8×8-group scan order (Figure 6-10).
+    let blocks: Vec<usize> = {
         let mut v = Vec::with_capacity(16);
         for blk8 in 0..4usize {
             if (cbp_luma >> blk8) & 1 == 0 {
@@ -839,8 +795,21 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     };
     for block in blocks {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
-        eprintln!("  luma block {block} nc={nc} pos={}", r.bit_position());
-        let (coeffs, tc, t1) = parse_cavlc_block(r, nc, luma_max)?;
+        let pos_before = r.bit_position();
+        let result = parse_cavlc_block(r, nc, luma_max);
+        if is_inter {
+            match &result {
+                Ok((_, tc, _)) => eprintln!("  luma blk {block:2} nc={nc:2} pos={pos_before} after={} tc={tc}", r.bit_position()),
+                Err(_) => {
+                    let saved = r.bit_position();
+                    r.seek_to_bit(pos_before);
+                    let peek6 = r.read_bits(6);
+                    r.seek_to_bit(saved);
+                    eprintln!("  luma blk {block:2} nc={nc:2} pos={pos_before} FAIL bits6={peek6:?} ({peek6:06b})", peek6=peek6.unwrap_or(0));
+                }
+            }
+        }
+        let (coeffs, tc, t1) = result?;
         this_nz.luma[block] = tc;
         // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
         if is_i16x16 {
@@ -926,17 +895,11 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 /// Parse a CAVLC-coded residual block (§9.2). Returns the coefficients in
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
 fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
-    let start_pos = r.bit_position();
     let mut out = [0i16; 16];
-    let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)
-        .map_err(|e| {
-            eprintln!("  CAVLC coeff_token FAIL at pos={start_pos} n_c={n_c}: {e:?}");
-            e
-        })?;
+    let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)?;
     if total_coeff == 0 {
         return Ok((out, 0, 0));
     }
-    eprintln!("  CAVLC block start={start_pos} n_c={n_c} tc={total_coeff} t1={trailing_ones}");
 
     let tc = total_coeff as usize;
     let t1 = trailing_ones as usize;
@@ -1014,22 +977,18 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
     } else {
         0
     };
-    eprintln!(
-        "    block@{} tc={} t1={} levels={:?} tz={}",
-        start_pos, total_coeff, trailing_ones, &levels[..tc as usize], total_zeros
-    );
 
     let mut zeros_left = total_zeros;
     // Place coefficients from highest-frequency to lowest.
     let mut pos = (tc as i32) - 1 + total_zeros;
     for (i, &level) in levels.iter().enumerate().take(tc) {
+        if pos < 0 || pos >= out.len() as i32 {
+            return Err(SliceDataError::Cavlc);
+        }
         out[pos as usize] = level as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
-                cavlc_tables::read_run_before(r, zeros_left.min(255) as u8).map_err(|e| {
-                    eprintln!("  CAVLC run_before FAIL at pos={} zeros_left={zeros_left}", r.bit_position());
-                    e
-                })? as i32
+                cavlc_tables::read_run_before(r, zeros_left.min(255) as u8)? as i32
             } else {
                 0
             };
