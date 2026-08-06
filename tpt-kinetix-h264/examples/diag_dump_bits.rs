@@ -97,7 +97,8 @@ fn main() {
 
     for n in &nals {
         if n.nal_unit_type == NalUnitType::NonIdrSlice {
-            let header = SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, &ctx)
+            let header =
+                SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx)
                 .expect("slice header parse");
             eprintln!(
                 "P slice: slice_type={:?} first_mb={} data_bit_offset={} qp_delta={}",

@@ -39,13 +39,15 @@ const GOLOMB_TO_INTRA4X4_CBP: [u8; 48] = [
 ];
 
 /// coded_block_pattern (Table 9-4) — codeNum -> CBP for **inter** macroblocks
-/// (§7.4.5). Same codeNum range, different luma-nibble ordering than intra
-/// (matches ffmpeg's `golomb_to_inter_cbp`).
+/// (§7.4.5). CBP layout is chroma in bits 4-5 and luma (4×4 8×8 groups) in bits
+/// 0-3. Values match FFmpeg's `golomb_to_inter_cbp` (the spec Table 9-4
+/// mapping — NOT the `golomb_to_inter_cbp_gray` permutation, which is a
+/// different table and was previously used here in error).
 #[rustfmt::skip]
 const GOLOMB_TO_INTER_CBP: [u8; 48] = [
-     0,  1,  2,  4,  8,  3,  5, 10, 12, 15,  7, 11, 13, 14,  6,  9,
-    16, 17, 18, 20, 24, 19, 21, 26, 28, 31, 23, 27, 29, 30, 22, 25,
-    32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43, 45, 46, 38, 41,
+     0, 16,  1,  2,  4,  8, 32,  3,  5, 10, 12, 15, 47,  7, 11, 13,
+    14,  6,  9, 31, 35, 37, 42, 44, 33, 34, 36, 40, 39, 43, 45, 46,
+    17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
 ];
 
 /// sub_macroblock types for P_8x8 (Table 7-13) — number of sub-partitions.
@@ -473,7 +475,6 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         mb_y,
         mb_cols,
         is_i16x16,
-        false,
         cbp_l,
         cbp_c,
         tracer,
@@ -630,9 +631,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         ..Default::default()
     };
 
-    let pos_mb_start = r.bit_position();
     let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
-    eprintln!("P-MB({mb_x},{mb_y}): mb_type={mb_type_raw} pos_after_mb_type={}", r.bit_position());
     if mb_type_raw >= 5 {
         let i_type = mb_type_raw - 5;
         if i_type > 25 {
@@ -696,7 +695,6 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     }
     mb.motion = Some(motion);
 
-    eprintln!("  after MVDs: pos={}", r.bit_position());
     // coded_block_pattern for inter macroblocks (Table 9-4, inter ordering).
     let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
     if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
@@ -706,14 +704,12 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     mb.cbp = cbp;
     let cbp_l = cbp & 0x0F;
     let cbp_c = cbp >> 4;
-    eprintln!("  cbp_code_num={code_num} cbp={cbp:#04x} cbp_l={cbp_l:#x} cbp_c={cbp_c} pos_after_cbp={}", r.bit_position());
 
     // mb_qp_delta present when any residual block is coded.
     let mut qp = prev_qp;
     if cbp_l != 0 || cbp_c != 0 {
         let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
         qp = (prev_qp + dqp + 52).rem_euclid(52);
-        eprintln!("  mb_qp_delta={dqp} qp={qp} pos_after_qp={}", r.bit_position());
     }
     mb.qp = qp;
 
@@ -726,7 +722,6 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         mb_y,
         mb_cols,
         false,
-        true,
         cbp_l,
         cbp_c,
         tracer,
@@ -760,7 +755,6 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     mb_y: u32,
     mb_cols: u32,
     is_i16x16: bool,
-    is_inter: bool,
     cbp_luma: u8,
     cbp_chroma: u8,
     tracer: &mut T,
@@ -795,21 +789,9 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     };
     for block in blocks {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
-        let pos_before = r.bit_position();
         let result = parse_cavlc_block(r, nc, luma_max);
-        if is_inter {
-            match &result {
-                Ok((_, tc, _)) => eprintln!("  luma blk {block:2} nc={nc:2} pos={pos_before} after={} tc={tc}", r.bit_position()),
-                Err(_) => {
-                    let saved = r.bit_position();
-                    r.seek_to_bit(pos_before);
-                    let peek6 = r.read_bits(6);
-                    r.seek_to_bit(saved);
-                    eprintln!("  luma blk {block:2} nc={nc:2} pos={pos_before} FAIL bits6={peek6:?} ({peek6:06b})", peek6=peek6.unwrap_or(0));
-                }
-            }
-        }
         let (coeffs, tc, t1) = result?;
+        let pos_after = r.bit_position();
         this_nz.luma[block] = tc;
         // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
         if is_i16x16 {
@@ -827,6 +809,9 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 t1,
                 0,
             );
+            tracer.on_cavlc_block_info_with_pos(
+                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0, pos_after,
+            );
         } else {
             mb.luma_coeffs[block] = coeffs;
             tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
@@ -839,6 +824,9 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 tc,
                 t1,
                 0,
+            );
+            tracer.on_cavlc_block_info_with_pos(
+                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0, pos_after,
             );
         }
     }
@@ -928,7 +916,6 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
             }
         }
 
-        let mut level_code: i32;
         let level_suffix_size: u32 = if level_prefix == 14 && suffix_length == 0 {
             4
         } else if level_prefix >= 15 {
@@ -944,7 +931,7 @@ fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 
             0
         };
 
-        level_code = (level_prefix.min(15) << suffix_length) as i32 + level_suffix;
+        let mut level_code = (level_prefix.min(15) << suffix_length) as i32 + level_suffix;
         if level_prefix >= 15 && suffix_length == 0 {
             level_code += 15;
         }

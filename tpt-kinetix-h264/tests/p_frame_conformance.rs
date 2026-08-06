@@ -158,8 +158,12 @@ fn cavlc_pframe_no_deblock_is_bitexact() {
     assert_eq!(frame.data.len(), frame_len);
 
     let (max_diff, num_diff, total) = compare(&frame.data, ref_p);
+    // TEMP diagnostic: split luma vs chroma.
+    let luma_n = (WIDTH as usize) * (HEIGHT as usize);
+    let (ld, ln, _) = compare(&frame.data[..luma_n], &ref_p[..luma_n]);
+    let (cd, cn, _) = compare(&frame.data[luma_n..], &ref_p[luma_n..]);
     eprintln!(
-        "H.264 CAVLC P-frame (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
+        "H.264 CAVLC P-frame (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
     );
 
     assert_eq!(

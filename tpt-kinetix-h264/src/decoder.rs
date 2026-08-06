@@ -302,7 +302,7 @@ impl H264Decoder {
             },
         };
 
-        let header = match SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, &ctx) {
+        let header = match SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, nal.nal_ref_idc, &ctx) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("[DEBUG] try_decode_real_slice: slice header parse failed: {e:?}");
@@ -515,7 +515,7 @@ impl H264Decoder {
         };
 
         let header =
-            match crate::slice::SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, &ctx)
+            match crate::slice::SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, nal.nal_ref_idc, &ctx)
             {
                 Ok(h) => h,
                 Err(_) => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
@@ -646,7 +646,6 @@ impl H264Decoder {
                 .map(|p| p.num_ref_idx_l0_default_active_minus1 + 1)
                 .unwrap_or(1);
 
-            eprintln!("[DEBUG] P-slice: dpb_len={} num_ref_idx_l0_active={}", self.dpb.len(), num_ref_idx_l0_active);
             if let Some(ref_list) =
                 crate::ref_pic::build_ref_list_l0(&self.dpb, num_ref_idx_l0_active as usize)
             {

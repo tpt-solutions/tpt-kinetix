@@ -18,7 +18,7 @@ thiserror = "2"
 nom = "7"
 
 [dev-dependencies]
-tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
 
 [lib]
 path = "src/lib.rs"

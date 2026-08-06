@@ -109,7 +109,7 @@ impl SliceHeader {
             num_slice_groups_minus1: 0,
             chroma_array_type: 1,
         };
-        Self::parse_with_context(rbsp, nal_unit_type, &ctx)
+        Self::parse_with_context(rbsp, nal_unit_type, 1, &ctx)
     }
 
     /// Back-compat shim for the older three-argument signature.
@@ -138,7 +138,7 @@ impl SliceHeader {
             num_slice_groups_minus1: 0,
             chroma_array_type: 1,
         };
-        Self::parse_with_context(rbsp, nal_unit_type, &ctx)
+        Self::parse_with_context(rbsp, nal_unit_type, 1, &ctx)
     }
 
     /// Parse the full slice header (§7.3.3) consuming every section in order so
@@ -146,6 +146,7 @@ impl SliceHeader {
     pub fn parse_with_context(
         rbsp: &[u8],
         nal_unit_type: NalUnitType,
+        nal_ref_idc: u8,
         ctx: &SliceHeaderContext,
     ) -> anyhow::Result<Self> {
         let mut r = BitReader::new(rbsp);
@@ -241,11 +242,12 @@ impl SliceHeader {
             .context("pred_weight_table")?;
         }
 
-        // dec_ref_pic_marking (§7.3.3.3). Present when nal_ref_idc != 0; we
-        // approximate by parsing it for IDR and for the reference slice types.
-        let nal_ref = !matches!(nal_unit_type, NalUnitType::NonIdrSlice)
-            || matches!(slice_type, SliceType::P | SliceType::B | SliceType::I);
-        if nal_ref {
+        // dec_ref_pic_marking (§7.3.3.3). Present when nal_ref_idc != 0 (i.e. the
+        // slice is a reference picture). This is driven by the NAL header
+        // `nal_ref_idc` field, NOT by slice_type: a non-reference P/B slice has
+        // nal_ref_idc == 0 and must omit dec_ref_pic_marking, while an IDR (which
+        // always has nal_ref_idc != 0) always includes it.
+        if nal_ref_idc != 0 {
             parse_dec_ref_pic_marking(&mut r, is_idr).context("dec_ref_pic_marking")?;
         }
 

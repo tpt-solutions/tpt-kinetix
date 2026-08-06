@@ -218,11 +218,17 @@ pub fn chroma_dc_transform(dc: &[i32; 4], qp: i32) -> [i32; 4] {
     let f3 = dc[0] - dc[1] - dc[2] + dc[3];
     let f = [f0, f1, f2, f3];
 
-    // DC scaling (§8.5.11): d = ((f * LevelScale4x4[m][0]) << (qP/6)) >> 5.
+    // DC scaling (§8.5.11):
+    //   if qP/6 >= 5: d = (f * LevelScale4x4[m][0]) << (qP/6 - 5)
+    //   else:          d = (f * LevelScale4x4[m][0] + 2^(4 - qP/6)) >> (5 - qP/6)
     let ls = level_scale_flat(m, 0);
     let mut out = [0i32; 4];
     for i in 0..4 {
-        out[i] = ((f[i] * ls) << shift) >> 5;
+        out[i] = if shift >= 5 {
+            (f[i] * ls) << (shift - 5)
+        } else {
+            (f[i] * ls + (1 << (4 - shift))) >> (5 - shift)
+        };
     }
     out
 }

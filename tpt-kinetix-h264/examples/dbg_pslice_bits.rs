@@ -53,6 +53,7 @@ fn main() {
         let header = tpt_kinetix_h264::slice::SliceHeader::parse_with_context(
             &nal.rbsp,
             nal.nal_unit_type,
+            nal.nal_ref_idc,
             &ctx,
         )
         .unwrap();

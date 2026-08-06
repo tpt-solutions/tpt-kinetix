@@ -38,7 +38,9 @@ fn main() {
     };
     for n in &nals {
         if n.nal_unit_type == NalUnitType::NonIdrSlice {
-            let h = SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, &ctx).unwrap();
+            let h =
+                SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx)
+                    .unwrap();
             let mut r = BitReader::new(&n.rbsp);
             r.seek_to_bit(h.data_bit_offset);
             let skip_run = read_ue(&mut r);
