@@ -105,10 +105,10 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
         (0, 2) => hv(0),
         (1, 2) => avg(hv(0), j(0, 0)),
         (2, 2) => j(0, 0),
-        (3, 2) => avg(j(0, 0), j(1, 0)),
+        (3, 2) => avg(j(0, 0), g(1, 0)),
         (0, 3) => avg(hv(0), g(0, 1)),
-        (1, 3) => avg(hv(0), hv(1)),
-        (2, 3) => avg(j(0, 0), hv(1)),
+        (1, 3) => avg(hv(0), j(0, 1)),
+        (2, 3) => avg(j(0, 0), g(1, 1)),
         (3, 3) => avg(j(0, 0), j(1, 1)),
         _ => unreachable!(),
     }
@@ -339,6 +339,41 @@ mod tests {
         let mut dst = [0u8; 1];
         interpolate_chroma(&mut dst, 1, &c, 4, 4, 4, 0, 0, 4, 0, 1, 1);
         assert_eq!(dst[0], 1);
+    }
+
+    /// Spec quarter-sample positions (§8.4.2.2.1): the three diagonal quarter
+    /// samples (1,3)/(2,3)/(3,2) average against an *integer* reference sample,
+    /// not another interpolated sample. With a ramp plane the interpolated and
+    /// integer samples are distinct, so recombining the documented brackets
+    /// must reproduce the decoder output exactly.
+    #[test]
+    fn quarter_pel_positions_match_spec_table() {
+        let (l, _) = ramp_luma();
+
+        // (3,2): avg(J(x,y), G(x+1,y)).
+        let mut j00 = [0u8; 1];
+        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // mv (2,2) -> j(0,0)
+        let mut g10 = [0u8; 1];
+        interpolate_luma(&mut g10, 1, &l, 8, 8, 8, 0, 0, 4, 0, 1, 1); // mv (4,0) -> G(1,0)
+        let mut got = [0u8; 1];
+        interpolate_luma(&mut got, 1, &l, 8, 8, 8, 0, 0, 3, 2, 1, 1); // mv (3,2) -> (3,2)
+        assert_eq!(got[0], ((j00[0] as i32 + g10[0] as i32 + 1) >> 1) as u8);
+
+        // (2,3): avg(J(x,y), G(x+1,y+1)).
+        let mut g11 = [0u8; 1];
+        interpolate_luma(&mut g11, 1, &l, 8, 8, 8, 0, 0, 4, 4, 1, 1); // mv (4,4) -> G(1,1)
+        let mut got23 = [0u8; 1];
+        interpolate_luma(&mut got23, 1, &l, 8, 8, 8, 0, 0, 2, 3, 1, 1); // mv (2,3) -> (2,3)
+        assert_eq!(got23[0], ((j00[0] as i32 + g11[0] as i32 + 1) >> 1) as u8);
+
+        // (1,3): avg(H(x,y), J(x,y+1)).
+        let mut h00 = [0u8; 1];
+        interpolate_luma(&mut h00, 1, &l, 8, 8, 8, 0, 0, 0, 2, 1, 1); // mv (0,2) -> H(0,0)
+        let mut j01 = [0u8; 1];
+        interpolate_luma(&mut j01, 1, &l, 8, 8, 8, 0, 0, 2, 6, 1, 1); // mv (2,6) -> J(0,1)
+        let mut got13 = [0u8; 1];
+        interpolate_luma(&mut got13, 1, &l, 8, 8, 8, 0, 0, 1, 3, 1, 1); // mv (1,3) -> (1,3)
+        assert_eq!(got13[0], ((h00[0] as i32 + j01[0] as i32 + 1) >> 1) as u8);
     }
 
     #[test]

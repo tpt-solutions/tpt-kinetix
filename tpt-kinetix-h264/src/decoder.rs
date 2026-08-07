@@ -206,15 +206,12 @@ impl H264Decoder {
                         tracer,
                     ) {
                         Ok(Some(frame)) => {
-                            eprintln!("[DEBUG] try_decode_real_slice Ok(Some) for {:?}", nal.nal_unit_type);
                             output_frame = Some(frame);
                             continue;
                         }
-                        Ok(None) => {
-                            eprintln!("[DEBUG] try_decode_real_slice Ok(None) for {:?}", nal.nal_unit_type);
-                        }
+                        Ok(None) => {}
                         Err(_e) => {
-                            eprintln!("[DEBUG] try_decode_real_slice Err({_e:?}) for {:?}", nal.nal_unit_type);
+                            let _ = _e;
                         }
                     }
 
@@ -261,12 +258,10 @@ impl H264Decoder {
 
         // CABAC is not handled by this path yet.
         if pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false) {
-            eprintln!("[DEBUG] try_decode_real_slice: bailing on CABAC");
             return Ok(None);
         }
         // Interlaced not handled.
         if !sps.frame_mbs_only_flag {
-            eprintln!("[DEBUG] try_decode_real_slice: bailing on interlaced");
             return Ok(None);
         }
 
@@ -305,14 +300,13 @@ impl H264Decoder {
         let header = match SliceHeader::parse_with_context(&nal.rbsp, nal.nal_unit_type, nal.nal_ref_idc, &ctx) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("[DEBUG] try_decode_real_slice: slice header parse failed: {e:?}");
+                let _ = e;
                 return Ok(None);
             }
         };
 
         // Only fully-intra slices are handled by this path.
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
-            eprintln!("[DEBUG] try_decode_real_slice: not I/SI slice, type={:?}", header.slice_type);
             return Ok(None);
         }
         // Only single-slice pictures starting at MB 0.
@@ -340,7 +334,7 @@ impl H264Decoder {
         ) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[DEBUG] try_decode_real_slice: parse_i_slice failed: {e:?}");
+                let _ = e;
                 return Ok(None);
             }
         };
@@ -748,7 +742,7 @@ impl H264Decoder {
                         });
                     }
                     Err(e) => {
-                        eprintln!("P-path: parse error: {e:?}");
+                        let _ = e;
                         // Fall through to the skip scaffold.
                     }
                 }

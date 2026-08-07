@@ -349,7 +349,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     tracer,
                 );
                 reconstruct_inter_chroma(
-                    mb,
+                    &mb,
                     mv_store,
                     ref_frames,
                     &mut cb,

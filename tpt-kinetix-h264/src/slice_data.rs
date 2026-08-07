@@ -789,6 +789,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     };
     for block in blocks {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
+        let pos_before = r.bit_position() as u32;
         let result = parse_cavlc_block(r, nc, luma_max);
         let (coeffs, tc, t1) = result?;
         let pos_after = r.bit_position();
@@ -810,7 +811,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 0,
             );
             tracer.on_cavlc_block_info_with_pos(
-                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0, pos_after,
+                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, pos_before, pos_after,
             );
         } else {
             mb.luma_coeffs[block] = coeffs;
@@ -826,7 +827,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 0,
             );
             tracer.on_cavlc_block_info_with_pos(
-                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, 0, pos_after,
+                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, pos_before, pos_after,
             );
         }
     }
@@ -882,7 +883,7 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 
 /// Parse a CAVLC-coded residual block (§9.2). Returns the coefficients in
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
-fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
+pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
     let mut out = [0i16; 16];
     let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)?;
     if total_coeff == 0 {

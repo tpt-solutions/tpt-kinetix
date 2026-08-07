@@ -4,6 +4,9 @@
 //! - [`obu`] — Open Bitstream Unit (OBU) header and payload parsing per the AV1 spec §5.3,
 //!   including Sequence Header decoding and LEB128 integer decoding.
 //! - [`decoder`] — [`Av1Decoder`]: frame-level OBU sequencing and decode dispatch.
+//! - [`entropy`] — the real AV1 symbol (arithmetic) decoder (§8.2), distinct from the
+//!   ad hoc `BitReader` scheme `reconstruct::decode_tile_group` currently uses.
+//! - [`entropy_cdf`] — default CDF tables (§10) consumed by [`entropy::SymbolDecoder`].
 //! - [`reconstruct`] — AV1 frame/tile reconstruction (inverse transforms, intra prediction,
 //!   tile-group decode) for intra-coded keyframes.
 //! - [`encoder`] — [`Av1Encoder`] and [`Av1EncoderConfig`]: thin safe wrapper around the
@@ -25,6 +28,8 @@
 
 pub mod decoder;
 pub mod encoder;
+pub mod entropy;
+pub mod entropy_cdf;
 pub mod frame;
 pub mod obu;
 pub mod reconstruct;
