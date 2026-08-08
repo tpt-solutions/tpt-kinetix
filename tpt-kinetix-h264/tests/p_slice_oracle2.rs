@@ -28,7 +28,7 @@ use tpt_kinetix_h264::trace::{DecodeTracer, TracePlane};
 // separately from parse_cavlc_block so any bug there is not mirrored here.
 fn ref_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> [i16; 16] {
     let mut out = [0i16; 16];
-    let (total_coeff, trailing_ones) = read_coeff_token(r, n_c);
+    let (total_coeff, trailing_ones) = read_coeff_token(r, n_c).expect("coeff_token");
     if total_coeff == 0 {
         return out;
     }
@@ -89,9 +89,9 @@ fn ref_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> [i16; 16] {
 
     let total_zeros = if tc < max_coeff {
         if n_c == -1 {
-            read_total_zeros_chroma_dc(r, total_coeff)
+            read_total_zeros_chroma_dc(r, total_coeff).expect("total_zeros_chroma_dc")
         } else {
-            read_total_zeros_4x4(r, total_coeff)
+            read_total_zeros_4x4(r, total_coeff).expect("total_zeros_4x4")
         }
     } else {
         0
@@ -103,7 +103,7 @@ fn ref_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> [i16; 16] {
         out[pos as usize] = level as i16;
         if i < tc - 1 {
             let run = if zeros_left > 0 {
-                read_run_before(r, zeros_left.min(255) as u8) as i32
+                read_run_before(r, zeros_left.min(255) as u8).expect("run_before") as i32
             } else {
                 0
             };
@@ -200,8 +200,8 @@ fn ref_residuals(
         out.insert((mb_x, mb_y, 1, 16), cb_dc);
         out.insert((mb_x, mb_y, 2, 16), cr_dc);
     }
+    let mut this_chroma = [0u8; 8];
     if cbp_chroma == 2 {
-        let mut this_chroma = [0u8; 8];
         for comp in 0..2usize {
             let base = comp * 4;
             for block in 0..4usize {
@@ -242,7 +242,7 @@ fn ref_residuals(
         luma_present: true,
         c_present: cbp_chroma != 0,
         luma: this_luma,
-        chroma: [0u8; 8],
+        chroma: this_chroma,
     };
 }
 

@@ -57,9 +57,9 @@ impl H264Decoder {
 
     /// Reports what this decoder can and cannot do.
     ///
-    /// The H.264 decoder is **not yet pixel-exact**: it parses the bitstream and
-    /// runs a scaffold reconstruction (CAVLC scaffold only, no CABAC, no
-    /// intra/inter prediction, no deblocking). Callers should check
+    /// The H.264 decoder is **not yet fully pixel-exact**: I-slice CAVLC and
+    /// CABAC decode are bit-exact; P/B-slice CABAC, the 8x8 transform, and
+    /// interlaced coding are not yet supported. Callers should check
     /// [`DecoderCapabilities::pixel_exact`] before trusting output frames.
     ///
     /// # Examples
@@ -75,14 +75,16 @@ impl H264Decoder {
         DecoderCapabilities {
             codec: "H.264",
             pixel_exact: false,
-            supports_cabac: false,
+            supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
             supports_inter_prediction: false,
             supports_deblocking: true,
-            notes: "CAVLC I-slice decode is pixel-exact for baseline profile; \
-                    CABAC, inter prediction (P/B-frames), B-frames, and \
-                    interlaced coding are not yet supported",
+            notes: "CAVLC I-slice decode and CABAC I-slice decode (4:2:0, \
+                    frame-only, no 8x8 transform) are pixel-exact; CABAC \
+                    P/B-slice, I_PCM under CABAC, inter prediction \
+                    (P/B-frames), B-frames, and interlaced coding are not \
+                    yet supported",
         }
     }
 
@@ -256,8 +258,11 @@ impl H264Decoder {
     ) -> Result<Option<VideoFrame>, KinetixError> {
         use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
 
-        // CABAC is not handled by this path yet.
-        if pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false) {
+        let entropy_coding_mode_flag = pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
+        // CABAC I-slice decoding doesn't support the 8x8 transform (High
+        // profile) yet; P/B-slice CABAC isn't implemented at all (checked
+        // further down once the slice type is known).
+        if entropy_coding_mode_flag && pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false) {
             return Ok(None);
         }
         // Interlaced not handled.
@@ -282,7 +287,7 @@ impl H264Decoder {
                 .unwrap_or(0),
             weighted_pred_flag: pps.map(|p| p.weighted_pred_flag).unwrap_or(false),
             weighted_bipred_idc: pps.map(|p| p.weighted_bipred_idc).unwrap_or(0),
-            entropy_coding_mode_flag: false,
+            entropy_coding_mode_flag,
             deblocking_filter_control_present_flag: pps
                 .map(|p| p.deblocking_filter_control_present_flag)
                 .unwrap_or(false),
@@ -324,18 +329,43 @@ impl H264Decoder {
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
 
-        let parsed = match crate::slice_data::parse_i_slice(
-            &mut reader,
-            mb_cols,
-            mb_rows,
-            slice_qp,
-            chroma_qp_index_offset,
-            tracer,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = e;
-                return Ok(None);
+        let parsed = if entropy_coding_mode_flag {
+            // §7.3.4: consume cabac_alignment_one_bit padding, then hand the
+            // byte-aligned remainder to the CABAC arithmetic engine.
+            reader.byte_align();
+            eprintln!(
+                "DBG cabac payload bytes ({}): {:02x?}",
+                reader.remaining_bytes().len(),
+                &reader.remaining_bytes()[..reader.remaining_bytes().len().min(40)]
+            );
+            eprintln!("DBG slice_qp={slice_qp}");
+            match crate::slice_data::parse_i_slice_cabac(
+                reader.remaining_bytes(),
+                mb_cols,
+                mb_rows,
+                slice_qp,
+                tracer,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("CABAC parse_i_slice_cabac error: {e:?}");
+                    return Ok(None);
+                }
+            }
+        } else {
+            match crate::slice_data::parse_i_slice(
+                &mut reader,
+                mb_cols,
+                mb_rows,
+                slice_qp,
+                chroma_qp_index_offset,
+                tracer,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = e;
+                    return Ok(None);
+                }
             }
         };
 
@@ -359,11 +389,18 @@ impl H264Decoder {
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
             .macroblocks
             .chunks(mb_cols as usize)
-            .map(|row| {
+            .enumerate()
+            .map(|(row_idx, row)| {
                 row.iter()
-                    .map(|mb| {
-                        let has_coeffs = mb.cbp != 0 || mb.luma_dc.iter().any(|&v| v != 0);
-                        crate::deblock::DeblockMbInfo::new(mb.mb_type, has_coeffs, mb.qp)
+                    .enumerate()
+                    .map(|(col_idx, mb)| {
+                        let idx = row_idx * mb_cols as usize + col_idx;
+                        let nz = parsed.nz[idx].luma;
+                        let cells = parsed
+                            .mv_store
+                            .cells_of(idx)
+                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                        crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
                     })
                     .collect()
             })
@@ -556,13 +593,19 @@ impl H264Decoder {
                     let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
                         .macroblocks
                         .chunks(mb_cols as usize)
-                        .map(|row| {
+                        .enumerate()
+                        .map(|(row_idx, row)| {
                             row.iter()
-                                .map(|mb| {
-                                    let has_coeffs =
-                                        mb.cbp != 0 || mb.luma_dc.iter().any(|&v| v != 0);
+                                .enumerate()
+                                .map(|(col_idx, mb)| {
+                                    let idx = row_idx * mb_cols as usize + col_idx;
+                                    let nz = parsed.nz[idx].luma;
+                                    let cells = parsed
+                                        .mv_store
+                                        .cells_of(idx)
+                                        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
                                     crate::deblock::DeblockMbInfo::new(
-                                        mb.mb_type, has_coeffs, mb.qp,
+                                        mb.mb_type, nz, cells, mb.qp,
                                     )
                                 })
                                 .collect()
@@ -678,13 +721,19 @@ impl H264Decoder {
                         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
                             .macroblocks
                             .chunks(mb_cols as usize)
-                            .map(|row| {
+                            .enumerate()
+                            .map(|(row_idx, row)| {
                                 row.iter()
-                                    .map(|mb| {
-                                        let has_coeffs = mb.cbp != 0
-                                            || mb.luma_dc.iter().any(|&v| v != 0);
+                                    .enumerate()
+                                    .map(|(col_idx, mb)| {
+                                        let idx = row_idx * mb_cols as usize + col_idx;
+                                        let nz = parsed.nz[idx].luma;
+                                        let cells = parsed
+                                            .mv_store
+                                            .cells_of(idx)
+                                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
                                         crate::deblock::DeblockMbInfo::new(
-                                            mb.mb_type, has_coeffs, mb.qp,
+                                            mb.mb_type, nz, cells, mb.qp,
                                         )
                                     })
                                     .collect()
@@ -886,7 +935,18 @@ impl H264Decoder {
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|mb| crate::deblock::DeblockMbInfo::new(mb.mb_type, !mb.skip, mb.qp))
+                    .map(|mb| {
+                        // Scaffold fallback path: no real per-block coefficient/motion
+                        // data is available, so approximate with the old whole-MB
+                        // proxy broadcast uniformly (matches prior behaviour).
+                        let nz = if mb.skip { [0u8; 16] } else { [1u8; 16] };
+                        crate::deblock::DeblockMbInfo::new(
+                            mb.mb_type,
+                            nz,
+                            [crate::mv::MvCell::default(); 16],
+                            mb.qp,
+                        )
+                    })
                     .collect()
             })
             .collect();

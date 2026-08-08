@@ -14,12 +14,16 @@
 //! - Intra macroblock boundary edges (either side intra) use the strong filter
 //!   (bS = 4). The interior 4×4 edges of an intra macroblock use the *weak*
 //!   filter with bS = 3 (§8.7.2.1, "interior edge of an intra MB").
-//! - Non-intra edges derive bS from coded-block state (bS = 2 both coded,
-//!   bS = 1 exactly one coded, bS = 0 none). Motion-vector-dependent bS (1..3)
-//!   needs per-block motion data that is not parsed yet.
+//! - Non-intra edges derive bS per 4-sample segment (i.e. per pair of 4×4
+//!   luma blocks straddling the edge, not once for the whole 16-sample MB
+//!   edge): bS = 2 if either block has non-zero transform coefficients,
+//!   else bS = 1 if the two blocks use different reference pictures or their
+//!   motion vectors differ by >= 4 quarter-luma-samples in either component,
+//!   else bS = 0.
 //! - Boundary-edge QP is the average `(qp_p + qp_q + 1) >> 1`; interior edges
 //!   use the current macroblock's QP. Chroma uses the spec's chroma-QP mapping
-//!   (§8.5.8 Table 8-15) before averaging.
+//!   (§8.5.8 Table 8-15) before averaging, and reuses the *luma* block's bS
+//!   for the co-located chroma samples (chroma has no bS of its own).
 //! - `slice_alpha_c0_offset_div2` / `slice_beta_offset_div2` are doubled before
 //!   being added to the QP (spec: FilterOffsetA/B = 2 * div2).
 //!
@@ -28,6 +32,7 @@
 //! picture are skipped rather than filtered with padded samples.
 
 use crate::macroblock::MbType;
+use crate::mv::MvCell;
 
 /// Luma QP offset range guard.
 fn clip_qp(qp: i32) -> i32 {
@@ -48,18 +53,23 @@ fn clip3(v: i32, lo: i32, hi: i32) -> i32 {
 #[derive(Debug, Clone, Copy)]
 pub struct DeblockMbInfo {
     pub mb_type: MbType,
-    /// True when the macroblock has any non-zero transform coefficient (CodedPb
-    /// / CodedBlk for luma, used for the `bS` coefficient rule).
-    pub has_coeffs: bool,
+    /// TotalCoeff per 4×4 luma block (raster order 0..15 within the MB), used
+    /// for the per-segment coded-block `bS` rule (§8.7.2.1).
+    pub nz: [u8; 16],
+    /// Per-4×4-luma-block motion state (MV + ref index), used for the
+    /// per-segment motion-vector `bS` rule. Unused (and may be any value)
+    /// when the macroblock is intra.
+    pub cells: [MvCell; 16],
     /// Luma quantisation parameter for this macroblock.
     pub qp: i32,
 }
 
 impl DeblockMbInfo {
-    pub fn new(mb_type: MbType, has_coeffs: bool, qp: i32) -> Self {
+    pub fn new(mb_type: MbType, nz: [u8; 16], cells: [MvCell; 16], qp: i32) -> Self {
         Self {
             mb_type,
-            has_coeffs,
+            nz,
+            cells,
             qp,
         }
     }
@@ -70,34 +80,63 @@ fn is_intra(t: MbType) -> bool {
     matches!(t, MbType::Intra4x4 | MbType::Intra16x16 { .. })
 }
 
-/// Boundary-strength for a *macroblock-boundary* edge (§8.7.2.1).
-///
-/// If either side is intra-coded the edge gets the strong filter (bS = 4).
-/// Otherwise the strength comes from the coded-block state: 2 when both sides
-/// carry coefficients, 1 when exactly one does, 0 when neither does (the
-/// motion-vector dependent bS = 1 case is not yet derivable).
-pub fn derive_bs_luma(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
-    if is_intra(p.mb_type) || is_intra(q.mb_type) {
-        return 4;
+/// Boundary-strength for one pair of 4×4 luma blocks straddling an edge
+/// (§8.7.2.1). `is_mb_edge` distinguishes the strong (bS = 4, macroblock
+/// boundary) from weak (bS = 3, interior) intra case; both sides are always
+/// the same macroblock (hence the same intra/non-intra state) when
+/// `is_mb_edge` is false.
+#[allow(clippy::too_many_arguments)]
+fn derive_bs_pair(
+    p_intra: bool,
+    q_intra: bool,
+    is_mb_edge: bool,
+    p_nz: u8,
+    q_nz: u8,
+    p_cell: MvCell,
+    q_cell: MvCell,
+) -> u8 {
+    if p_intra || q_intra {
+        return if is_mb_edge { 4 } else { 3 };
     }
-    match (p.has_coeffs, q.has_coeffs) {
-        (true, true) => 2,
-        (true, false) | (false, true) => 1,
-        (false, false) => 0,
+    if p_nz != 0 || q_nz != 0 {
+        return 2;
     }
+    if p_cell.ref_idx != q_cell.ref_idx
+        || (p_cell.mv[0] - q_cell.mv[0]).abs() >= 4
+        || (p_cell.mv[1] - q_cell.mv[1]).abs() >= 4
+    {
+        return 1;
+    }
+    0
 }
 
-/// Boundary-strength for an *interior* 4×4 edge (both sides inside the same
-/// macroblock). An intra macroblock's interior edges filter with bS = 3
-/// (§8.7.2.1); non-intra interior edges fall back to the coefficient rule.
-pub fn derive_bs_interior(cur: &DeblockMbInfo) -> u8 {
-    if is_intra(cur.mb_type) {
-        3
-    } else if cur.has_coeffs {
-        2
-    } else {
-        0
+/// Boundary strengths for the four 4-sample segments of a luma edge, given
+/// the raster 4×4 block index feeding each segment on the `p` (already
+/// decoded) and `q` (current) side. `is_mb_edge` is true for a macroblock
+/// boundary edge, false for an interior edge (where `p` and `q` are the same
+/// macroblock).
+fn derive_bs_segments(
+    p: &DeblockMbInfo,
+    q: &DeblockMbInfo,
+    is_mb_edge: bool,
+    p_blocks: [usize; 4],
+    q_blocks: [usize; 4],
+) -> [u8; 4] {
+    let p_intra = is_intra(p.mb_type);
+    let q_intra = is_intra(q.mb_type);
+    let mut out = [0u8; 4];
+    for seg in 0..4 {
+        out[seg] = derive_bs_pair(
+            p_intra,
+            q_intra,
+            is_mb_edge,
+            p.nz[p_blocks[seg]],
+            q.nz[q_blocks[seg]],
+            p.cells[p_blocks[seg]],
+            q.cells[q_blocks[seg]],
+        );
     }
+    out
 }
 
 /// `α` table (spec Table 8-16), indexed by `FilterOffsetA` + QP.
@@ -248,11 +287,11 @@ pub fn deblock_luma_edge(
     edge_mb_y: usize,
     vertical: bool,
     edge_index: usize,
-    bs: u8,
+    bs: [u8; 4],
     p: DeblockParams,
     qp: i32,
 ) {
-    if p.disable_idc == 1 || bs == 0 {
+    if p.disable_idc == 1 || bs.iter().all(|&b| b == 0) {
         return;
     }
 
@@ -260,10 +299,12 @@ pub fn deblock_luma_edge(
     let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
-    let tc0 = if bs == 4 {
-        0
-    } else {
-        TC0_TAB[bs as usize - 1][qpi as usize]
+    let tc0_for = |b: u8| -> i32 {
+        if b == 4 {
+            0
+        } else {
+            TC0_TAB[b as usize - 1][qpi as usize]
+        }
     };
 
     if vertical {
@@ -275,12 +316,17 @@ pub fn deblock_luma_edge(
         }
         let height = plane.len() / stride.max(1);
         for dy in 0..16usize {
+            let bseg = bs[dy / 4];
+            if bseg == 0 {
+                continue;
+            }
             let y = edge_mb_y * 16 + dy;
             if y >= height {
                 // Bottom-row macroblocks in a non-16-aligned picture partially
                 // extend past the actual (cropped) picture height.
                 continue;
             }
+            let tc0 = tc0_for(bseg);
             let o = y * stride;
             // Spec order: p0 is adjacent to the edge (x-1), p3 is furthest (x-4).
             let mut pp = [
@@ -295,7 +341,7 @@ pub fn deblock_luma_edge(
                 plane[o + x + 2] as i32,
                 plane[o + x + 3] as i32,
             ];
-            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bs);
+            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bseg);
             plane[o + x - 1] = clip_pixel(pp[0]);
             plane[o + x] = clip_pixel(qq[0]);
             plane[o + x - 2] = clip_pixel(pp[1]);
@@ -314,12 +360,17 @@ pub fn deblock_luma_edge(
             return;
         }
         for dx in 0..16usize {
+            let bseg = bs[dx / 4];
+            if bseg == 0 {
+                continue;
+            }
             let x = edge_mb_x * 16 + dx;
             if x >= stride {
                 // Right-edge macroblocks in a non-16-aligned picture partially
                 // extend past the actual (cropped) picture width.
                 continue;
             }
+            let tc0 = tc0_for(bseg);
             let mut pp = [
                 plane[(y - 1) * stride + x] as i32,
                 plane[(y - 2) * stride + x] as i32,
@@ -332,7 +383,7 @@ pub fn deblock_luma_edge(
                 plane[(y + 2) * stride + x] as i32,
                 plane[(y + 3) * stride + x] as i32,
             ];
-            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bs);
+            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bseg);
             plane[(y - 1) * stride + x] = clip_pixel(pp[0]);
             plane[y * stride + x] = clip_pixel(qq[0]);
             plane[(y - 2) * stride + x] = clip_pixel(pp[1]);
@@ -360,11 +411,11 @@ pub fn deblock_chroma_edge(
     edge_mb_y: usize,
     vertical: bool,
     edge_index: usize,
-    bs: u8,
+    bs: [u8; 4],
     p: DeblockParams,
     qp: i32,
 ) {
-    if p.disable_idc == 1 || bs == 0 {
+    if p.disable_idc == 1 || bs.iter().all(|&b| b == 0) {
         return;
     }
 
@@ -373,6 +424,14 @@ pub fn deblock_chroma_edge(
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
     let height = plane.len() / stride.max(1);
+    let filter_at = |pp: &mut [i32; 2], qq: &mut [i32; 2], bseg: u8| {
+        if bseg == 4 {
+            filter_chroma_intra_edge(pp, qq, alpha, beta);
+        } else {
+            let tc = TC0_TAB[bseg as usize - 1][qpi as usize] + 1;
+            filter_chroma_edge(pp, qq, alpha, beta, tc);
+        }
+    };
 
     if vertical {
         let x = edge_mb_x * 8 + edge_index * 2;
@@ -380,6 +439,10 @@ pub fn deblock_chroma_edge(
             return;
         }
         for dy in 0..8usize {
+            let bseg = bs[dy / 2];
+            if bseg == 0 {
+                continue;
+            }
             let y = edge_mb_y * 8 + dy;
             if y >= height {
                 continue;
@@ -387,12 +450,7 @@ pub fn deblock_chroma_edge(
             let o = y * stride;
             let mut pp = [plane[o + x - 1] as i32, plane[o + x - 2] as i32];
             let mut qq = [plane[o + x] as i32, plane[o + x + 1] as i32];
-            if bs == 4 {
-                filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
-            } else {
-                let tc = TC0_TAB[bs as usize - 1][qpi as usize] + 1;
-                filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
-            }
+            filter_at(&mut pp, &mut qq, bseg);
             plane[o + x - 1] = clip_pixel(pp[0]);
             plane[o + x] = clip_pixel(qq[0]);
             plane[o + x - 2] = clip_pixel(pp[1]);
@@ -404,6 +462,10 @@ pub fn deblock_chroma_edge(
             return;
         }
         for dx in 0..8usize {
+            let bseg = bs[dx / 2];
+            if bseg == 0 {
+                continue;
+            }
             let x = edge_mb_x * 8 + dx;
             if x >= stride {
                 continue;
@@ -416,12 +478,7 @@ pub fn deblock_chroma_edge(
                 plane[y * stride + x] as i32,
                 plane[(y + 1) * stride + x] as i32,
             ];
-            if bs == 4 {
-                filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
-            } else {
-                let tc = TC0_TAB[bs as usize - 1][qpi as usize] + 1;
-                filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
-            }
+            filter_at(&mut pp, &mut qq, bseg);
             plane[(y - 1) * stride + x] = clip_pixel(pp[0]);
             plane[y * stride + x] = clip_pixel(qq[0]);
             plane[(y - 2) * stride + x] = clip_pixel(pp[1]);
@@ -450,26 +507,36 @@ pub fn deblock_luma_mb(
     top: Option<&DeblockMbInfo>,
     p: DeblockParams,
 ) {
-    // Block-boundary (inter-MB) vertical edge at edge_index = 0.
+    // Block-boundary (inter-MB) vertical edge at edge_index = 0. Segments are
+    // grouped by raster ROW; p-side block is the left MB's rightmost column
+    // (3,7,11,15), q-side is this MB's leftmost column (0,4,8,12).
     if let Some(l) = left {
-        let bs = derive_bs_luma(l, cur);
+        let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
         let qp = (cur.qp + l.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, qp);
     }
-    // Interior vertical edges (edge_index 1,2,3) — always within the same MB.
+    // Interior vertical edges (edge_index 1,2,3) — always within the same MB;
+    // segments grouped by row, p-side column `ei-1`, q-side column `ei`.
     for ei in 1..=3 {
-        let bs = derive_bs_interior(cur);
+        let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
+        let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
+        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, cur.qp);
     }
-    // Block-boundary (inter-MB) horizontal edge at edge_index = 0.
+    // Block-boundary (inter-MB) horizontal edge at edge_index = 0. Segments
+    // grouped by raster COLUMN; p-side block is the top MB's bottom row
+    // (12,13,14,15), q-side is this MB's top row (0,1,2,3).
     if let Some(t) = top {
-        let bs = derive_bs_luma(t, cur);
+        let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
         let qp = (cur.qp + t.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, qp);
     }
-    // Interior horizontal edges.
+    // Interior horizontal edges; segments grouped by column, p-side row
+    // `ei-1`, q-side row `ei`.
     for ei in 1..=3 {
-        let bs = derive_bs_interior(cur);
+        let p_blocks = [(ei - 1) * 4, (ei - 1) * 4 + 1, (ei - 1) * 4 + 2, (ei - 1) * 4 + 3];
+        let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
+        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, cur.qp);
     }
 }
@@ -493,29 +560,39 @@ pub fn deblock_chroma_mb(
 ) {
     let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
 
+    // Chroma reuses the co-located luma blocks' bS (§8.7.2.1); see
+    // `deblock_luma_mb` for the same raster-block mappings.
     if let Some(l) = left {
-        let bs = derive_bs_luma(l, cur);
+        let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
         let qpc = (cqp(cur.qp) + cqp(l.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 0, bs, p, qpc);
     }
-    let bs = derive_bs_interior(cur);
-    if bs != 0 {
-        let qpc = cqp(cur.qp);
-        deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 2, bs, p, qpc);
-        deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 2, bs, p, qpc);
+    // Interior chroma vertical edge (chroma offset 4) sits at the luma
+    // column-1/column-2 boundary.
+    {
+        let bs = derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14]);
+        if bs.iter().any(|&b| b != 0) {
+            let qpc = cqp(cur.qp);
+            deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 2, bs, p, qpc);
+            deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 2, bs, p, qpc);
+        }
     }
     if let Some(t) = top {
-        let bs = derive_bs_luma(t, cur);
+        let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
     }
-    let bs = derive_bs_interior(cur);
-    if bs != 0 {
-        let qpc = cqp(cur.qp);
-        deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 2, bs, p, qpc);
-        deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 2, bs, p, qpc);
+    // Interior chroma horizontal edge (chroma offset 4) sits at the luma
+    // row-1/row-2 boundary.
+    {
+        let bs = derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11]);
+        if bs.iter().any(|&b| b != 0) {
+            let qpc = cqp(cur.qp);
+            deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 2, bs, p, qpc);
+            deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 2, bs, p, qpc);
+        }
     }
 }
 
@@ -540,8 +617,24 @@ mod tests {
     use super::*;
     use crate::macroblock::MbType;
 
+    /// Build a `DeblockMbInfo` with uniform per-block state (every block has
+    /// the same coefficient/motion status) — enough for tests that only care
+    /// about the whole-MB-uniform cases.
     fn info(t: MbType, coeffs: bool) -> DeblockMbInfo {
-        DeblockMbInfo::new(t, coeffs, 26)
+        let nz = if coeffs { [1u8; 16] } else { [0u8; 16] };
+        DeblockMbInfo::new(t, nz, [MvCell::default(); 16], 26)
+    }
+
+    /// Boundary-strength for a macroblock-boundary edge, using segment 0 of
+    /// the standard left-edge block mapping (uniform-info tests only care
+    /// about one representative segment).
+    fn bs_boundary(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
+        derive_bs_segments(p, q, true, [3, 7, 11, 15], [0, 4, 8, 12])[0]
+    }
+
+    /// Boundary-strength for an interior edge (both sides `cur`), segment 0.
+    fn bs_interior(cur: &DeblockMbInfo) -> u8 {
+        derive_bs_segments(cur, cur, false, [0, 4, 8, 12], [1, 5, 9, 13])[0]
     }
 
     #[test]
@@ -555,36 +648,68 @@ mod tests {
             true,
         );
         let b = info(MbType::Intra4x4, true);
-        assert_eq!(derive_bs_luma(&a, &b), 4);
-        assert_eq!(derive_bs_interior(&a), 3);
+        assert_eq!(bs_boundary(&a, &b), 4);
+        assert_eq!(bs_interior(&a), 3);
     }
 
     #[test]
     fn bs_intra_vs_skip_boundary_edge_is_four() {
         let a = info(MbType::Intra4x4, true);
         let b = info(MbType::PSkip, false);
-        assert_eq!(derive_bs_luma(&a, &b), 4);
+        assert_eq!(bs_boundary(&a, &b), 4);
     }
 
     #[test]
     fn bs_skip_edge_is_zero() {
         let a = info(MbType::PSkip, false);
         let b = info(MbType::PSkip, false);
-        assert_eq!(derive_bs_luma(&a, &b), 0);
+        assert_eq!(bs_boundary(&a, &b), 0);
     }
 
     #[test]
-    fn bs_one_coded_is_one() {
+    fn bs_one_coded_is_two() {
+        // Spec §8.7.2.1: bS = 2 if *either* side has coefficients (an OR
+        // rule, not "both" vs "exactly one" — coding a residual on just one
+        // side is already enough to warrant the coded-block strength).
         let a = info(MbType::PL016x16, true);
         let b = info(MbType::PSkip, false);
-        assert_eq!(derive_bs_luma(&a, &b), 1);
+        assert_eq!(bs_boundary(&a, &b), 2);
     }
 
     #[test]
     fn bs_both_coded_is_two() {
         let a = info(MbType::PL016x16, true);
         let b = info(MbType::PL016x16, true);
-        assert_eq!(derive_bs_luma(&a, &b), 2);
+        assert_eq!(bs_boundary(&a, &b), 2);
+    }
+
+    #[test]
+    fn bs_mv_difference_without_coeffs_is_one() {
+        // Neither side has coefficients, but the MVs differ by >= 4
+        // quarter-samples: bS = 1 per the motion-vector rule.
+        let mut a = info(MbType::PL016x16, false);
+        let mut b = info(MbType::PL016x16, false);
+        a.cells = [MvCell { mv: [0, 0], ref_idx: 0 }; 16];
+        b.cells = [MvCell { mv: [4, 0], ref_idx: 0 }; 16];
+        assert_eq!(bs_boundary(&a, &b), 1);
+    }
+
+    #[test]
+    fn bs_different_ref_idx_without_coeffs_is_one() {
+        let mut a = info(MbType::PL016x16, false);
+        let mut b = info(MbType::PL016x16, false);
+        a.cells = [MvCell { mv: [0, 0], ref_idx: 0 }; 16];
+        b.cells = [MvCell { mv: [0, 0], ref_idx: 1 }; 16];
+        assert_eq!(bs_boundary(&a, &b), 1);
+    }
+
+    #[test]
+    fn bs_small_mv_difference_without_coeffs_is_zero() {
+        let mut a = info(MbType::PL016x16, false);
+        let mut b = info(MbType::PL016x16, false);
+        a.cells = [MvCell { mv: [0, 0], ref_idx: 0 }; 16];
+        b.cells = [MvCell { mv: [3, 0], ref_idx: 0 }; 16];
+        assert_eq!(bs_boundary(&a, &b), 0);
     }
 
     #[test]
@@ -620,17 +745,8 @@ mod tests {
                 plane[row * stride + col] = if col < 4 { 100 } else { 120 };
             }
         }
-        let cur = crate::deblock::DeblockMbInfo::new(
-            MbType::Intra16x16 {
-                pred_mode: 0,
-                cbp_chroma: 0,
-                cbp_luma: 0,
-            },
-            true,
-            40,
-        );
         // Edge at mb_x=0, edge_index=1 -> x = 4 (interior 4x4 edge).
-        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, 4, params, cur.qp);
+        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, [4; 4], params, 40);
         // The strong filter is an active edge operation: p0 (the sample nearest the
         // edge, at x=3) is pulled toward the brighter right block (increases), and
         // the result stays a valid luma sample.
@@ -650,8 +766,7 @@ mod tests {
             }
         }
         let before = plane.to_vec();
-        let _cur = info(MbType::PL016x16, true);
-        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, 2, params, 26);
+        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, [2; 4], params, 26);
         // bS=2 with a ramp that violates beta => no change expected.
         assert_eq!(plane, before);
     }
@@ -670,15 +785,7 @@ mod tests {
             }
         }
         let before = plane.to_vec();
-        let _cur = info(
-            MbType::Intra16x16 {
-                pred_mode: 0,
-                cbp_chroma: 0,
-                cbp_luma: 0,
-            },
-            true,
-        );
-        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, 4, params, 40);
+        deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, [4; 4], params, 40);
         assert_eq!(plane, before);
     }
 }

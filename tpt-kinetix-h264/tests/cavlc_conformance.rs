@@ -1,12 +1,12 @@
 //! Pixel-exact conformance test for the H.264 CAVLC I-frame decode path.
 //!
 //! Two test modes:
-//! 1. **Deblocking disabled**: encode with `deblock=-1,-1` (x264 syntax for
-//!    `deblocking_filter_idc=1`), decode with both ffmpeg and our decoder,
-//!    compare pixel-by-pixel. This should be bit-exact.
+//! 1. **Deblocking disabled**: encode with `no-deblock=1` (the x264-params key
+//!    that actually sets `disable_deblocking_filter_idc=1`; `deblock=0` only
+//!    zeroes the alpha/beta offset and leaves the filter enabled), decode with
+//!    both ffmpeg and our decoder, compare pixel-by-pixel. Bit-exact.
 //! 2. **Deblocking enabled**: encode with default deblocking, decode with both.
-//!    Our deblocking filter has minor discrepancies vs ffmpeg; the assertion
-//!    is loosened but progress is tracked.
+//!    Bit-exact.
 //!
 //! The test is gated on `ffmpeg` being present on `PATH`; it is skipped (passes
 //! trivially) otherwise so CI without ffmpeg stays green.
@@ -76,9 +76,11 @@ fn generate(
         "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0",
     ];
     if disable_deblocking {
-        // x264's `--no-deblock` CLI flag maps to the `deblock=0` encoder param.
+        // x264's `--no-deblock` CLI flag maps to the `no-deblock=1` encoder
+        // param (NOT `deblock=0`, which only zeroes the alpha/beta offset and
+        // leaves the in-loop filter enabled).
         let idx = args.iter().position(|a| *a == "-x264-params").unwrap();
-        args[idx + 1] = "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0";
+        args[idx + 1] = "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1";
     }
     args.push(h264.to_str()?);
     let ok = run(Command::new("ffmpeg").args(&args));
@@ -180,11 +182,10 @@ fn cavlc_iframe_no_deblock_is_bitexact() {
     );
 }
 
-/// Decode a baseline CAVLC I-frame with deblocking enabled and compare to
-/// ffmpeg. Our deblocking filter implementation has minor discrepancies vs
-/// ffmpeg's at edge samples; this test tracks progress toward matching.
+/// Decode a baseline CAVLC I-frame with deblocking enabled (default settings)
+/// and compare to ffmpeg. Bit-exact.
 #[test]
-fn cavlc_iframe_with_deblock_tracks_progress() {
+fn cavlc_iframe_with_deblock_is_bitexact() {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not available; skipping conformance test");
         return;
@@ -224,11 +225,8 @@ fn cavlc_iframe_with_deblock_tracks_progress() {
         "H.264 CAVLC I-frame (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // Deblocking filter has minor discrepancies; track progress with a bound.
-    // The solid-color test (no AC residuals) is already bit-exact; this test
-    // uses testsrc with non-trivial residuals where deblocking differences appear.
-    assert!(
-        max_diff <= 20,
-        "deblocking filter progress: max_diff should be <=20 (got {max_diff}, diff_samples={num_diff}/{total})"
+    assert_eq!(
+        max_diff, 0,
+        "CAVLC I-frame decode should be bit-exact with deblocking enabled (max_diff={max_diff}, diff_samples={num_diff}/{total})",
     );
 }

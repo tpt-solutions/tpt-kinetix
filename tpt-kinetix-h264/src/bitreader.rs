@@ -139,6 +139,15 @@ impl<'a> BitReader<'a> {
     pub fn is_aligned(&self) -> bool {
         self.bit_pos == 0
     }
+
+    /// The remaining bytes from the current (byte-aligned) position to the
+    /// end of the stream. Used to hand off to [`crate::entropy::CabacDecoder`],
+    /// which operates on a raw byte slice rather than a `BitReader`. Panics if
+    /// not currently byte-aligned (call [`BitReader::byte_align`] first).
+    pub fn remaining_bytes(&self) -> &'a [u8] {
+        assert!(self.is_aligned(), "remaining_bytes called mid-byte");
+        &self.data[self.byte_pos..]
+    }
 }
 
 #[cfg(test)]

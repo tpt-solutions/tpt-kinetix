@@ -13,6 +13,7 @@
 //! `LIMITATIONS` section for details.
 
 pub mod bitreader;
+pub mod cabac_tables;
 pub mod cavlc_tables;
 pub mod deblock;
 pub mod decoder;

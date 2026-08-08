@@ -133,6 +133,131 @@ impl Default for MbPredCtx {
     }
 }
 
+/// Per-macroblock CABAC-only neighbour state (§9.3.3.1.1.3/.4/.8/.9) that
+/// CAVLC doesn't need: `mb_type`'s I16x16-or-PCM flag, `intra_chroma_pred_mode`
+/// nonzero-ness, and a `cbp_word` mirroring FFmpeg's `cbp_table` layout (bits
+/// 0-3 luma cbp / bits 4-5 chroma cbp -- matching
+/// [`crate::macroblock::Macroblock::cbp`] -- bit 6/7 chroma-DC
+/// `coded_block_flag`, bit 8 luma-DC `coded_block_flag`) so the neighbour
+/// lookups in [`crate::entropy::CbpCabacContext`]/[`crate::entropy::CodedBlockFlagContext`]
+/// can be ported directly from FFmpeg's `decode_cabac_mb_cbp_*`/
+/// `get_cabac_cbf_ctx`.
+#[derive(Clone, Copy, Default)]
+pub struct MbCabacCtx {
+    /// Whether this MB position was coded (not outside the picture).
+    pub present: bool,
+    pub is_intra16x16_or_pcm: bool,
+    pub chroma_pred_mode: u8,
+    pub cbp_word: u16,
+}
+
+/// Sentinel `cbp_word` for an off-picture neighbour: treated as "fully
+/// coded" for CBP/cbf context purposes, matching FFmpeg's
+/// `IS_INTRA(mb_type) ? 0x7CF : 0x00F` convention for an always-intra
+/// current macroblock (this decoder only handles I-slices).
+const CABAC_CBP_UNAVAILABLE: u16 = 0x7CF;
+
+/// Look up `left_cbp`/`top_cbp` (see [`MbCabacCtx::cbp_word`]) for `mb_x`,
+/// `mb_y`, applying [`CABAC_CBP_UNAVAILABLE`] when a neighbour is off-picture.
+fn cabac_cbp_neighbors(
+    grid: &[MbCabacCtx],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+) -> (u16, u16) {
+    let left = if mb_x > 0 {
+        grid[((mb_y * mb_cols) + mb_x - 1) as usize].cbp_word
+    } else {
+        CABAC_CBP_UNAVAILABLE
+    };
+    let top = if mb_y > 0 {
+        grid[(((mb_y - 1) * mb_cols) + mb_x) as usize].cbp_word
+    } else {
+        CABAC_CBP_UNAVAILABLE
+    };
+    (left, top)
+}
+
+/// `coded_block_flag` neighbour lookup for a DC block (luma-DC or one
+/// chroma-DC component): "coded" comes from the neighbour macroblock's own
+/// `coded_block_flag` for that DC block (tracked via `cbp_word`'s bit 6/7/8),
+/// not a per-4×4-block count. An off-picture neighbour is treated as coded.
+fn dc_cbf_neighbor(grid: &[MbCabacCtx], idx: Option<usize>, bit: u16) -> bool {
+    match idx {
+        None => true,
+        Some(i) => grid[i].cbp_word & bit != 0,
+    }
+}
+
+/// `coded_block_flag` neighbour lookup for a luma AC / Luma4x4 4×4 block
+/// (ctxBlockCat 1/2), mirroring `luma_nc`'s neighbour walk but returning
+/// simple "was this block coded" booleans. An off-picture neighbour is
+/// treated as coded (this decoder only handles always-intra I-slices,
+/// matching FFmpeg's sentinel-64 convention for that case).
+fn luma_cbf_neighbors(
+    nz: &[MbNz],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    cur: &MbNz,
+    block: usize,
+) -> (bool, bool) {
+    let bx = (block % 4) as i32;
+    let by = (block / 4) as i32;
+
+    let left = if bx > 0 {
+        cur.luma[(by * 4 + bx - 1) as usize] > 0
+    } else if mb_x > 0 {
+        nz[((mb_y * mb_cols) + mb_x - 1) as usize].luma[(by * 4 + 3) as usize] > 0
+    } else {
+        true
+    };
+
+    let top = if by > 0 {
+        cur.luma[((by - 1) * 4 + bx) as usize] > 0
+    } else if mb_y > 0 {
+        nz[(((mb_y - 1) * mb_cols) + mb_x) as usize].luma[(3 * 4 + bx) as usize] > 0
+    } else {
+        true
+    };
+
+    (left, top)
+}
+
+/// `coded_block_flag` neighbour lookup for a chroma AC 4×4 block (ctxBlockCat
+/// 4), mirroring `chroma_nc`'s neighbour walk. See [`luma_cbf_neighbors`].
+fn chroma_cbf_neighbors(
+    nz: &[MbNz],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    cur: &MbNz,
+    comp: usize,
+    block: usize,
+) -> (bool, bool) {
+    let base = comp * 4;
+    let bx = (block % 2) as i32;
+    let by = (block / 2) as i32;
+
+    let left = if bx > 0 {
+        cur.chroma[base + (by * 2 + bx - 1) as usize] > 0
+    } else if mb_x > 0 {
+        nz[((mb_y * mb_cols) + mb_x - 1) as usize].chroma[base + (by * 2 + 1) as usize] > 0
+    } else {
+        true
+    };
+
+    let top = if by > 0 {
+        cur.chroma[base + ((by - 1) * 2 + bx) as usize] > 0
+    } else if mb_y > 0 {
+        nz[(((mb_y - 1) * mb_cols) + mb_x) as usize].chroma[base + (2 + bx) as usize] > 0
+    } else {
+        true
+    };
+
+    (left, top)
+}
+
 /// Parse the macroblock layer of an I-slice.
 ///
 /// `reader` must be positioned at the first macroblock (i.e. at
@@ -208,6 +333,70 @@ impl NeighbourSide {
             NeighbourSide::Real(v) => v,
             _ => 2,
         }
+    }
+}
+
+/// Derive the most-probable Intra_4x4 prediction mode (`predIntra4x4PredMode`,
+/// §8.3.1.1) for luma block `raster` (0..15 raster index within the current
+/// MB) from the left/top neighbours. Shared by the CAVLC and CABAC I-slice
+/// parsers -- entropy coding only changes how `prev_intra4x4_pred_mode_flag`/
+/// `rem_intra4x4_pred_mode` are read, not this prediction.
+fn mpm_pred_mode(
+    pred_ctx_grid: &[MbPredCtx],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    modes: &[Intra4x4Mode; 16],
+    raster: usize,
+) -> u8 {
+    let bx = (raster % 4) as i32;
+    let by = (raster / 4) as i32;
+
+    // §8.3.1.1: each side is one of three states — the neighbouring
+    // *macroblock* is off-picture (`Unavailable`), present but not coded
+    // Intra_4×4/Intra_8×8 (`ForcedDc`, its intraMxMPredMode is defined as 2
+    // regardless of the other side), or present and Intra_4×4 (`Real`, the
+    // actual stored mode). These are distinct: an unavailable *macroblock*
+    // forces dcPredModePredictedFlag = 1 (both sides become DC,
+    // short-circuiting the min entirely), while a present-but-non-4x4
+    // neighbour only forces *that side* to DC and the other side's real mode
+    // still participates in the min.
+    let left_side = if bx > 0 {
+        NeighbourSide::Real(modes[(by * 4 + bx - 1) as usize] as u8)
+    } else if mb_x > 0 {
+        let n = &pred_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize];
+        if !n.present {
+            NeighbourSide::Unavailable
+        } else if n.is_intra4x4 {
+            NeighbourSide::Real(n.modes[(by * 4 + 3) as usize] as u8)
+        } else {
+            NeighbourSide::ForcedDc
+        }
+    } else {
+        NeighbourSide::Unavailable
+    };
+
+    let top_side = if by > 0 {
+        NeighbourSide::Real(modes[((by - 1) * 4 + bx) as usize] as u8)
+    } else if mb_y > 0 {
+        let n = &pred_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize];
+        if !n.present {
+            NeighbourSide::Unavailable
+        } else if n.is_intra4x4 {
+            NeighbourSide::Real(n.modes[(3 * 4 + bx) as usize] as u8)
+        } else {
+            NeighbourSide::ForcedDc
+        }
+    } else {
+        NeighbourSide::Unavailable
+    };
+
+    let dc_predicted =
+        left_side == NeighbourSide::Unavailable || top_side == NeighbourSide::Unavailable;
+    if dc_predicted {
+        2u8
+    } else {
+        left_side.value().min(top_side.value())
     }
 }
 
@@ -361,55 +550,7 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         let mut modes = [Intra4x4Mode::Dc; 16];
         for blk_idx in 0..16usize {
             let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-            let bx = (raster % 4) as i32;
-            let by = (raster / 4) as i32;
-
-            // §8.3.1.1: each side is one of three states — the neighbouring
-            // *macroblock* is off-picture (`Unavailable`), present but not
-            // coded Intra_4×4/Intra_8×8 (`ForcedDc`, its intraMxMPredMode is
-            // defined as 2 regardless of the other side), or present and
-            // Intra_4×4 (`Real`, the actual stored mode). These are distinct:
-            // an unavailable *macroblock* forces dcPredModePredictedFlag = 1
-            // (both sides become DC, short-circuiting the min entirely), while
-            // a present-but-non-4x4 neighbour only forces *that side* to DC
-            // and the other side's real mode still participates in the min.
-            let left_side = if bx > 0 {
-                NeighbourSide::Real(modes[(by * 4 + bx - 1) as usize] as u8)
-            } else if mb_x > 0 {
-                let n = &pred_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize];
-                if !n.present {
-                    NeighbourSide::Unavailable
-                } else if n.is_intra4x4 {
-                    NeighbourSide::Real(n.modes[(by * 4 + 3) as usize] as u8)
-                } else {
-                    NeighbourSide::ForcedDc
-                }
-            } else {
-                NeighbourSide::Unavailable
-            };
-
-            let top_side = if by > 0 {
-                NeighbourSide::Real(modes[((by - 1) * 4 + bx) as usize] as u8)
-            } else if mb_y > 0 {
-                let n = &pred_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize];
-                if !n.present {
-                    NeighbourSide::Unavailable
-                } else if n.is_intra4x4 {
-                    NeighbourSide::Real(n.modes[(3 * 4 + bx) as usize] as u8)
-                } else {
-                    NeighbourSide::ForcedDc
-                }
-            } else {
-                NeighbourSide::Unavailable
-            };
-
-            let dc_predicted =
-                left_side == NeighbourSide::Unavailable || top_side == NeighbourSide::Unavailable;
-            let pred_mode = if dc_predicted {
-                2u8
-            } else {
-                left_side.value().min(top_side.value())
-            };
+            let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
 
             let prev_flag = r
                 .read_bit()
@@ -509,6 +650,358 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     }
 
     Ok((mb, this_nz, this_pred_ctx, qp))
+}
+
+/// Bundles the CABAC context-variable state for every I-slice syntax element
+/// implemented here. Context adaptation persists across the *whole slice*
+/// (not per macroblock), so this is created once per slice and threaded
+/// through every macroblock decode.
+pub struct CabacSliceContexts {
+    pub mb_type: crate::entropy::MbTypeICabacContext,
+    pub cbp: crate::entropy::CbpCabacContext,
+    pub qp_delta: crate::entropy::MbQpDeltaCabacContext,
+    pub chroma_pred: crate::entropy::IntraChromaPredModeCabacContext,
+    pub intra4x4: crate::entropy::Intra4x4PredModeCabacContext,
+    pub cbf: crate::entropy::CodedBlockFlagContext,
+    pub residual: crate::entropy::ResidualCabacContext,
+}
+
+impl CabacSliceContexts {
+    pub fn new(slice_qp_y: i32) -> Self {
+        Self {
+            mb_type: crate::entropy::MbTypeICabacContext::new(slice_qp_y),
+            cbp: crate::entropy::CbpCabacContext::new(slice_qp_y),
+            qp_delta: crate::entropy::MbQpDeltaCabacContext::new(slice_qp_y),
+            chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new(slice_qp_y),
+            intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new(slice_qp_y),
+            cbf: crate::entropy::CodedBlockFlagContext::new(slice_qp_y),
+            residual: crate::entropy::ResidualCabacContext::new(slice_qp_y),
+        }
+    }
+}
+
+/// Parse the macroblock layer of a CABAC-coded I-slice (§7.3.4, §9.3).
+///
+/// `data` must already be byte-aligned to the start of `slice_data()`'s
+/// CABAC payload (i.e. after consuming any `cabac_alignment_one_bit`s via
+/// `BitReader::byte_align` + `BitReader::remaining_bytes`).
+///
+/// Scope: 4:2:0, frame-only (no MBAFF/field), no 8x8 transform, no I_PCM
+/// (returns `Unsupported` so callers fall back like any other unhandled
+/// slice — see `todo.md` Phase D for the rationale). P/B-slice CABAC is not
+/// implemented at all yet.
+pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
+    data: &[u8],
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    tracer: &mut T,
+) -> R<ParsedSlice> {
+    let mut dec =
+        crate::entropy::CabacDecoder::new(data).map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
+    let mut ctxs = CabacSliceContexts::new(slice_qp);
+
+    let total = (mb_cols * mb_rows) as usize;
+    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
+    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    let mut cabac_ctx: Vec<MbCabacCtx> = vec![MbCabacCtx::default(); total];
+    let mut qp = slice_qp;
+    let mut prev_dqp_nonzero = false;
+
+    for mb_idx in 0..total {
+        let mb_x = (mb_idx as u32) % mb_cols;
+        let mb_y = (mb_idx as u32) / mb_cols;
+
+        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) =
+            parse_intra_macroblock_cabac(
+                &mut dec,
+                &mut ctxs,
+                mb_x,
+                mb_y,
+                mb_cols,
+                &nz,
+                &pred_ctx,
+                &cabac_ctx,
+                qp,
+                prev_dqp_nonzero,
+                tracer,
+            )?;
+        qp = new_qp;
+        prev_dqp_nonzero = dqp_nonzero;
+        nz[mb_idx] = this_nz;
+        pred_ctx[mb_idx] = this_pred_ctx;
+        cabac_ctx[mb_idx] = this_cabac_ctx;
+        eprintln!(
+            "DBG mb_idx={mb_idx} mb_type={:?} cbp={} qp={}",
+            mb.mb_type, mb.cbp, mb.qp
+        );
+        macroblocks.push(mb);
+
+        // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*
+        // macroblock, not just as an early-exit check; for a well-formed
+        // single-slice-per-picture stream it must be 0 until the last MB and
+        // 1 exactly there.
+        let end_of_slice = dec.decode_terminate() == 1;
+        let is_last = mb_idx + 1 == total;
+        eprintln!("DBG mb_idx={mb_idx} end_of_slice={end_of_slice} is_last={is_last}");
+        if end_of_slice != is_last {
+            eprintln!("DBG WARN end_of_slice_flag mismatch, continuing anyway for debug");
+        }
+    }
+
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store: MvStore::new(total),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
+    dec: &mut crate::entropy::CabacDecoder,
+    ctxs: &mut CabacSliceContexts,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    nz_grid: &[MbNz],
+    pred_ctx_grid: &[MbPredCtx],
+    cabac_ctx_grid: &[MbCabacCtx],
+    prev_qp: i32,
+    prev_dqp_nonzero: bool,
+    tracer: &mut T,
+) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, i32, bool)> {
+    use crate::cabac_tables::{CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4, CAT_LUMA_AC, CAT_LUMA_DC};
+
+    let mut mb = Macroblock::new_skip();
+    mb.skip = false;
+    let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_pred_ctx = MbPredCtx {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_cabac_ctx = MbCabacCtx {
+        present: true,
+        ..Default::default()
+    };
+
+    let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
+    let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+
+    // mb_type.
+    let mb_type_neighbors = crate::entropy::MbTypeNeighbors {
+        left_is_16x16_or_pcm: left_idx
+            .map(|i| cabac_ctx_grid[i].is_intra16x16_or_pcm)
+            .unwrap_or(false),
+        top_is_16x16_or_pcm: top_idx
+            .map(|i| cabac_ctx_grid[i].is_intra16x16_or_pcm)
+            .unwrap_or(false),
+    };
+    let mb_type = ctxs.mb_type.decode(dec, &mb_type_neighbors);
+    eprintln!("  DBG mb_type={mb_type} state={:?}", dec.debug_state());
+    if mb_type == 25 {
+        return Err(SliceDataError::Unsupported(
+            "I_PCM under CABAC not supported",
+        ));
+    }
+
+    let (is_i16x16, i16_mode, cbp_chroma_mbtype, cbp_luma_mbtype) = if mb_type == 0 {
+        (false, 0u8, 0u8, 0u8)
+    } else if (1..=24).contains(&mb_type) {
+        let (m, cc, cl) = I16X16_TABLE[(mb_type - 1) as usize];
+        (true, m, cc, cl)
+    } else {
+        return Err(SliceDataError::Unsupported("mb_type out of range"));
+    };
+
+    if is_i16x16 {
+        mb.mb_type = MbType::Intra16x16 {
+            pred_mode: i16_mode,
+            cbp_chroma: cbp_chroma_mbtype,
+            cbp_luma: cbp_luma_mbtype,
+        };
+        mb.cbp = cbp_luma_mbtype | (cbp_chroma_mbtype << 4);
+        this_cabac_ctx.is_intra16x16_or_pcm = true;
+    } else {
+        mb.mb_type = MbType::Intra4x4;
+        // prev_intra4x4_pred_mode_flag / rem_intra4x4_pred_mode ×16, in the
+        // same Z-scan block order and MPM derivation as the CAVLC path (see
+        // `mpm_pred_mode`) — only the bit-level decode of the flag/rem
+        // differs between entropy modes.
+        let mut modes = [Intra4x4Mode::Dc; 16];
+        for blk_idx in 0..16usize {
+            let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
+            let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+            let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
+            modes[raster] = Intra4x4Mode::from_u8(final_mode);
+            eprintln!(
+                "    DBG blk_idx={blk_idx} raster={raster} pred_mode={pred_mode} final_mode={final_mode} state={:?}",
+                dec.debug_state()
+            );
+        }
+        mb.pred_modes_4x4 = Box::new(modes);
+        this_pred_ctx.is_intra4x4 = true;
+        this_pred_ctx.modes = modes;
+        eprintln!("  DBG intra4x4 modes={:?} state={:?}", modes.map(|m| m as u8), dec.debug_state());
+    }
+
+    // intra_chroma_pred_mode.
+    let left_chroma_nonzero = left_idx
+        .map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0)
+        .unwrap_or(false);
+    let top_chroma_nonzero = top_idx
+        .map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0)
+        .unwrap_or(false);
+    let chroma_pred = ctxs
+        .chroma_pred
+        .decode(dec, left_chroma_nonzero, top_chroma_nonzero);
+    mb.intra_chroma_pred_mode = chroma_pred as u8;
+    this_cabac_ctx.chroma_pred_mode = chroma_pred as u8;
+    eprintln!("  DBG chroma_pred={chroma_pred} state={:?}", dec.debug_state());
+
+    // coded_block_pattern (I_16×16 carries it in mb_type; I_NxN decodes it).
+    let (cbp_l, cbp_c) = if is_i16x16 {
+        (cbp_luma_mbtype, cbp_chroma_mbtype)
+    } else {
+        let (left_cbp, top_cbp) = cabac_cbp_neighbors(cabac_ctx_grid, mb_x, mb_y, mb_cols);
+        let (l, c) = ctxs.cbp.decode(dec, left_cbp, top_cbp);
+        mb.cbp = l | (c << 4);
+        (l, c)
+    };
+    eprintln!("  DBG cbp_l={cbp_l} cbp_c={cbp_c} state={:?}", dec.debug_state());
+
+    // mb_qp_delta, present when CBP != 0 or I_16×16.
+    let mut qp = prev_qp;
+    let mut dqp_nonzero = false;
+    if cbp_l != 0 || cbp_c != 0 || is_i16x16 {
+        let dqp = ctxs.qp_delta.decode(dec, prev_dqp_nonzero);
+        dqp_nonzero = dqp != 0;
+        qp = (prev_qp + dqp + 52).rem_euclid(52);
+    }
+    mb.qp = qp;
+
+    // ---- Residual parsing ----
+    let mut cbp_word: u16 = mb.cbp as u16;
+
+    if is_i16x16 {
+        let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, 0x100);
+        let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, 0x100);
+        if ctxs.cbf.decode(dec, CAT_LUMA_DC, left_coded, top_coded) {
+            let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_LUMA_DC, 16);
+            mb.luma_dc = coeffs;
+            cbp_word |= 0x100;
+        }
+    }
+
+    let luma_max = if is_i16x16 { 15usize } else { 16usize };
+    let luma_cat = if is_i16x16 { CAT_LUMA_AC } else { CAT_LUMA_4X4 };
+    let blocks: Vec<usize> = {
+        let mut v = Vec::with_capacity(16);
+        for blk8 in 0..4usize {
+            if (cbp_l >> blk8) & 1 == 0 {
+                continue;
+            }
+            for sub in 0..4usize {
+                v.push(raster_of_8x8_sub(blk8, sub));
+            }
+        }
+        v
+    };
+    for block in blocks {
+        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block);
+        let coded = ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded);
+        eprintln!("  DBG luma block={block} left_coded={left_coded} top_coded={top_coded} cbf={coded}");
+        if coded {
+            let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
+            eprintln!("    DBG luma block={block} count={count} coeffs={coeffs:?}");
+            this_nz.luma[block] = count;
+            if is_i16x16 {
+                let mut shifted = [0i16; 16];
+                shifted[1..16].copy_from_slice(&coeffs[0..15]);
+                mb.luma_coeffs[block] = shifted;
+            } else {
+                mb.luma_coeffs[block] = coeffs;
+            }
+        }
+    }
+
+    if cbp_c != 0 {
+        for comp in 0..2usize {
+            let bit = 0x40u16 << comp;
+            let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, bit);
+            let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, bit);
+            let dc_coded = ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded);
+            eprintln!("  DBG chroma_dc comp={comp} coded={dc_coded}");
+            if dc_coded {
+                let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
+                let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
+                if comp == 0 {
+                    mb.chroma_dc_cb = dc;
+                } else {
+                    mb.chroma_dc_cr = dc;
+                }
+                cbp_word |= bit;
+            }
+        }
+    }
+
+    if cbp_c == 2 {
+        for comp in 0..2usize {
+            for block in 0..4usize {
+                let (left_coded, top_coded) =
+                    chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block);
+                let ac_coded = ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded);
+                eprintln!("  DBG chroma_ac comp={comp} block={block} coded={ac_coded}");
+                if ac_coded {
+                    let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
+                    eprintln!("    DBG chroma_ac comp={comp} block={block} count={count} coeffs={coeffs:?}");
+                    this_nz.chroma[comp * 4 + block] = count;
+                    let mut shifted = [0i16; 16];
+                    shifted[1..16].copy_from_slice(&coeffs[0..15]);
+                    if comp == 0 {
+                        mb.chroma_cb_coeffs[block] = shifted;
+                    } else {
+                        mb.chroma_cr_coeffs[block] = shifted;
+                    }
+                }
+            }
+        }
+    }
+
+    this_cabac_ctx.cbp_word = cbp_word;
+
+    // Emit MB-level trace after full parse (mirrors the CAVLC path).
+    {
+        let mb_type_str = match mb.mb_type {
+            MbType::Intra4x4 => "Intra4x4".to_string(),
+            MbType::Intra16x16 {
+                pred_mode,
+                cbp_chroma,
+                cbp_luma,
+            } => {
+                format!("Intra16x16(pred={pred_mode},cbp_chroma={cbp_chroma},cbp_luma={cbp_luma})")
+            }
+            _ => "Other".to_string(),
+        };
+        let mut modes = [0u8; 16];
+        for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
+            modes[i] = *m as u8;
+        }
+        tracer.on_mb_parsed(
+            mb_x,
+            mb_y,
+            &mb_type_str,
+            mb.qp,
+            mb.cbp,
+            mb.intra_chroma_pred_mode,
+            &modes,
+        );
+    }
+
+    Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, qp, dqp_nonzero))
 }
 
 /// Parse the macroblock layer of a P slice (CAVLC, §7.3.4).
@@ -839,6 +1332,12 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         let (cr_dc, _tc2) = parse_cavlc_chroma_dc(r)?;
         mb.chroma_dc_cb = cb_dc;
         mb.chroma_dc_cr = cr_dc;
+        let mut cb_padded = [0i16; 16];
+        cb_padded[..4].copy_from_slice(&cb_dc);
+        let mut cr_padded = [0i16; 16];
+        cr_padded[..4].copy_from_slice(&cr_dc);
+        tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Cb, 16, &cb_padded);
+        tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Cr, 16, &cr_padded);
     }
 
     // Chroma AC present only when cbp_chroma == 2.

@@ -285,7 +285,7 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [x] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
 - [x] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
 - [x] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
-- [ ] Validate bit-exact P-frame decode vs `ffmpeg` — **IN PROGRESS**
+- [x] Validate bit-exact P-frame decode vs `ffmpeg` — **DONE (2026-08-08)**
 
   #### Phase C.1 — unblock P-slice parsing (RESOLVED)
 
@@ -310,38 +310,50 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
         spec-correct).
   - [x] `parse_p_slice` / `parse_p_macroblock` run end-to-end without panic.
 
-  #### Phase C.2 — P-frame reconstruction correctness — **NEARLY DONE**
+  #### Phase C.2 — P-frame reconstruction correctness — **DONE (2026-08-08)**
 
-  The P-frame now decodes to **max_diff=2 over 49/4608 samples** (was 127)
-  against `ffmpeg` on the 64×48 baseline CAVLC IP clip (deblocking disabled).
-  All P-slice MVs are (0,0)/ref 0, so every MB is a copy of the reference
-  frame plus a residual; the MC/reference path is therefore exercised and the
-  residual is the only remaining source of error. Investigation (residual
-  zeroing + per-MB/MV dump) confirmed:
-  - MC/reference copy is correct (skip MBs in rows 0–1 reproduce the reference
-    frame exactly; output vs `ffmpeg` frame2 is max_diff=2, vs frame1 is the
-    residual magnitude as expected).
-  - The residual reconstruction for I-frames is bit-exact (shared
-    `dequant_idct_4x4` / `idct_4x4` / `chroma_dc_transform`), so the remaining
-    ±1–2 errors are in the **P-slice CAVLC coefficient decode of coded MBs**
-    (49 samples, max 2, scattered in smooth-gradient regions — consistent with
-    a single low-frequency coefficient level off by 1, not a table desync).
+  The earlier "max_diff=2 over 49/4608 samples" gap was **not** a CAVLC
+  residual bug — it was a false premise in the test harness. `-x264-params
+  deblock=0` only zeroes x264's alpha/beta filter *offset*; it does not set
+  `disable_deblocking_filter_idc=1`, so every P-frame conformance test was
+  unknowingly comparing against an ffmpeg reference with deblocking **on**
+  while assuming it was off (`no-deblock=1` is the key that actually disables
+  it). Two independent lines of evidence closed this out:
+  1. A fixed differential CAVLC oracle (`p_slice_oracle2.rs` — an independent
+     re-implementation of the §9.2.2 level-assembly walk, sharing only the
+     already-verified VLC tables) found **0 mismatches** across all 104
+     luma/chroma-AC/chroma-DC residual blocks of the 64×48 clip. (The oracle
+     itself had a bug — it discarded computed chroma-AC `TotalCoeff` back into
+     the nC neighbour grid as all-zero — which is what caused the earlier
+     apparent desync; fixed alongside.)
+  2. With deblocking genuinely disabled (`no-deblock=1`), P-frame decode is
+     **bit-exact (max_diff=0)** against ffmpeg — proving CAVLC, MV
+     prediction, motion compensation, and dequant/IDCT are all already
+     correct.
+  3. That pointed the real gap at the deblocking filter: `deblock.rs` derived
+     one boundary-strength (`bS`) value per *whole macroblock edge* from a
+     whole-MB `has_coeffs` flag, and had no motion-vector/ref-index rule at
+     all (documented as a known gap). Spec §8.7.2.1 requires `bS` per
+     4-sample segment (i.e. per pair of 4×4 blocks straddling the edge), with
+     a coefficient-OR rule (bS=2 if *either* side's block has nonzero coeffs
+     — the old code's "both vs exactly one coded" distinction, giving bS=1,
+     was itself non-spec) and a fallback bS=1 rule for differing ref_idx or
+     MV components differing by ≥4 quarter-pel. Rewired `DeblockMbInfo` to
+     carry the per-4×4-block `nz` grid and `MvStore` cells, and restructured
+     `deblock_luma_edge`/`deblock_chroma_edge` to filter each 4-sample (luma)
+     / 2-sample (chroma) segment with its own bS. Result: bit-exact
+     (max_diff=0) with deblocking **enabled** too (`p_frame_conformance.rs`
+     now covers both variants; `cavlc_conformance.rs`'s I-frame equivalent
+     tightened from a loosened `<=20` bound to exact 0 as well).
 
   - [x] Confirm P-slice `parse_p_macroblock` runs end-to-end without panic.
   - [x] Motion-compensated reconstruction (MV prediction + 6-tap/bilinear
-        interp) produces correct reference-block fetches (max_diff=2, not 127).
-  - [~] Validate bit-exact P-frame decode vs `ffmpeg` — **at max_diff=2
-        (49 samples)**; remaining 49-sample/±1–2 residual error in coded MBs
-        needs an oracle (independent coeff decode vs an ffmpeg-exported
-        reference, or a hand-decode of the residual blocks) to pin the exact
-        off-by-one coefficient.
-  - [ ] Pin the remaining ≤2-pixel residual diff: build an independent CAVLC
-        residual decoder (or extract ffmpeg per-block coeffs via a debug build)
-        and diff `parse_cavlc_block` output for the coded MBs of the 64×48 clip.
-  - [ ] Fix the off-by-one (likely a single `level`/`run_before`/`total_zeros`
-        case in a high-activity block) and flip C.2 to done.
-  - [ ] Re-confirm the chroma diffs (20 samples, max 1) track the same residual
-        bug, not a separate MC path issue.
+        interp) produces correct reference-block fetches.
+  - [x] Validate bit-exact P-frame decode vs `ffmpeg` — **max_diff=0**, both
+        with deblocking disabled and with deblocking enabled.
+  - [x] Independent CAVLC oracle confirms residual decode was never the bug.
+  - [x] Per-4×4-block deblocking `bS` (coefficient-OR + MV/ref rule) fixes the
+        real remaining gap; chroma reuses the co-located luma `bS` per spec.
 
 ### H.264 — Phase D: CABAC
 - [~] Per-syntax-element context-index tables (Tables 9-12..9-33) and
