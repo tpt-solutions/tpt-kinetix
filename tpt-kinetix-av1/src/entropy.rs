@@ -3,12 +3,12 @@
 //!
 //! This is the multi-symbol adaptive range decoder that all CDF-coded (`S()`)
 //! syntax elements in a real AV1 tile go through. It is a distinct entropy
-//! coding engine from both H.264 CABAC (`tpt-kinetix-h264`) and the ad hoc
+//! coding engine from H.264 CABAC (`tpt-kinetix-h264`) and from the ad hoc
 //! `BitReader`-based exp-golomb-like scheme `reconstruct::decode_tile_group`
-//! currently uses to read coefficients — that scheme cannot decode a real AV1
-//! bitstream, since real encoders never produce it. This module is the
-//! foundation `decode_tile_group` will be rewired onto (see `todo.md`,
-//! "AV1 Phase B").
+//! used to read coefficients before AV1 Phase B — that scheme could not
+//! decode a real AV1 bitstream, since real encoders never produce it.
+//! [`crate::coeff`] now drives this decoder with the spec `coeffs()` syntax,
+//! and `decode_tile_group` calls into that.
 //!
 //! Implements, verbatim per spec:
 //! * §8.2.2 `init_symbol` — decoder initialization
@@ -19,8 +19,8 @@
 //! **Not implemented here**: §8.2.4 `exit_symbol` (trailing-bit validation
 //! and the Tile*→Saved* CDF snapshot copy), since that is tied to per-tile
 //! bookkeeping (`context_update_tile_id`, `disable_frame_end_update_cdf`,
-//! the full set of named CDF arrays) that doesn't exist yet — that lands
-//! alongside the Phase B/C rewiring that actually needs it.
+//! the full set of named CDF arrays) that arrives with the real tile/
+//! partition syntax in AV1 Phase C.
 //!
 //! CDF arrays use the spec's representation directly: an array of length
 //! `N + 1` for an `N`-symbol alphabet, where `cdf[N - 1] == 1 << 15` (32768,
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn txb_skip_context0_matches_reference_trace() {
-        // Default_Txb_Skip_Cdf[0][0][0] from the AV1 spec's default CDF
+        // Default_Txb_Skip_Cdf[3][3][0] from the AV1 spec's default CDF
         // table (10.additional.tables.md).
         let mut cdf = [31671u16, 32768, 0];
         let mut dec = SymbolDecoder::new(&[0x7E, 0x91, 0x2D, 0x44, 0xC3, 0x0F, 0xAA, 0x55]);
@@ -279,8 +279,7 @@ mod tests {
 
     #[test]
     fn read_literal32_forces_multiple_renormalization_refills() {
-        let mut dec =
-            SymbolDecoder::new(&[0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF]);
+        let mut dec = SymbolDecoder::new(&[0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF]);
         assert_eq!(dec.read_literal(32), 16_325_324);
     }
 

@@ -5,8 +5,12 @@
 //!   including Sequence Header decoding and LEB128 integer decoding.
 //! - [`decoder`] — [`Av1Decoder`]: frame-level OBU sequencing and decode dispatch.
 //! - [`entropy`] — the real AV1 symbol (arithmetic) decoder (§8.2), distinct from the
-//!   ad hoc `BitReader` scheme `reconstruct::decode_tile_group` currently uses.
+//!   ad hoc `BitReader` scheme previously used to read coefficients.
 //! - [`entropy_cdf`] — default CDF tables (§10) consumed by [`entropy::SymbolDecoder`].
+//! - [`coeff_tables`] — normative scan orders, transform-size tables, and coefficient
+//!   context-offset tables, mechanically extracted from the spec.
+//! - [`coeff`] — the AV1 `coeffs()` syntax structure (§5.11.39) read through
+//!   [`entropy::SymbolDecoder`].
 //! - [`reconstruct`] — AV1 frame/tile reconstruction (inverse transforms, intra prediction,
 //!   tile-group decode) for intra-coded keyframes.
 //! - [`encoder`] — [`Av1Encoder`] and [`Av1EncoderConfig`]: thin safe wrapper around the
@@ -22,10 +26,14 @@
 //!
 //! The **encoder** ([`Av1Encoder`], backed by `rav1e`) is functional. The
 //! **decoder** ([`Av1Decoder`]) now performs tile-group reconstruction for
-//! intra-coded keyframes via [`crate::reconstruct`] but is not yet validated
-//! against `dav1d` reference output. Inter prediction and loop filtering are
-//! not yet implemented. See the crate README for details.
+//! intra-coded keyframes via [`crate::reconstruct`], reading coefficients
+//! through the real AV1 symbol decoder, but the surrounding partition and
+//! mode syntax is still a fixed placeholder grid and nothing is yet
+//! validated against `dav1d` reference output. Inter prediction and loop
+//! filtering are not implemented. See the crate README for details.
 
+pub mod coeff;
+pub mod coeff_tables;
 pub mod decoder;
 pub mod encoder;
 pub mod entropy;

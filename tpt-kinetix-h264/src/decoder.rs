@@ -127,6 +127,21 @@ impl H264Decoder {
         self.sps_store.insert(sps.seq_parameter_set_id, sps);
     }
 
+    /// Read-only view of the Decoded Picture Buffer (§8.2.5).
+    ///
+    /// Holds the pictures the decoded reference picture marking process left
+    /// marked "used for short-term reference" or "used for long-term
+    /// reference" after the most recently decoded picture — i.e. exactly the
+    /// pictures a following P/B slice may build its reference lists from
+    /// (§8.2.4). Non-reference pictures (`nal_ref_idc == 0`) never enter it.
+    ///
+    /// Exposed for inspection and for tests that need to observe what the
+    /// slice header's `dec_ref_pic_marking` (sliding-window or MMCO) actually
+    /// did, rather than inferring it from decoded pixels.
+    pub fn dpb(&self) -> &Dpb {
+        &self.dpb
+    }
+
     /// Decode a compressed bitstream [`Packet`] into a [`VideoFrame`].
     ///
     /// Returns `Ok(None)` when the decoder needs more data before a frame can
@@ -333,12 +348,6 @@ impl H264Decoder {
             // §7.3.4: consume cabac_alignment_one_bit padding, then hand the
             // byte-aligned remainder to the CABAC arithmetic engine.
             reader.byte_align();
-            eprintln!(
-                "DBG cabac payload bytes ({}): {:02x?}",
-                reader.remaining_bytes().len(),
-                &reader.remaining_bytes()[..reader.remaining_bytes().len().min(40)]
-            );
-            eprintln!("DBG slice_qp={slice_qp}");
             match crate::slice_data::parse_i_slice_cabac(
                 reader.remaining_bytes(),
                 mb_cols,
@@ -348,7 +357,7 @@ impl H264Decoder {
             ) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("CABAC parse_i_slice_cabac error: {e:?}");
+                    let _ = e;
                     return Ok(None);
                 }
             }
@@ -460,31 +469,74 @@ impl H264Decoder {
         // Reference-picture management: derive POC (§8.2.1), advance the POC
         // state, and store reference pictures in the DPB (§8.2.5) so later
         // P/B slices can build reference lists (§8.2.4).
-        let is_reference = nal.nal_ref_idc != 0;
-        if is_reference {
-            if let Ok(poc) = crate::ref_pic::derive_pic_order_cnt(
-                sps,
-                matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
-                is_reference,
-                header.frame_num,
-                header.pic_order_cnt_lsb,
-                &mut self.poc_state,
-            ) {
-                self.dpb.push(
-                    DpbEntry {
-                        frame: frame.clone(),
-                        frame_num: header.frame_num,
-                        pic_order_cnt: poc,
-                        is_short_term: true,
-                        is_long_term: false,
-                        long_term_pic_num: -1,
-                    },
-                    sps.num_ref_frames,
-                );
-            }
-        }
+        self.store_reference_picture(nal, sps, &header, &frame);
 
         Ok(Some(frame))
+    }
+
+    /// Run the decoded reference picture marking process (§8.2.5) for a
+    /// just-decoded picture and store it in the DPB.
+    ///
+    /// Non-reference pictures (`nal_ref_idc == 0`) are not stored at all. For
+    /// reference pictures the slice header's `dec_ref_pic_marking` (§7.3.3.3)
+    /// selects sliding-window or adaptive (MMCO) marking; a header that omitted
+    /// the syntax falls back to sliding-window marking.
+    fn store_reference_picture(
+        &mut self,
+        nal: &crate::nal::NalUnit,
+        sps: &SeqParameterSet,
+        header: &crate::slice::SliceHeader,
+        frame: &VideoFrame,
+    ) {
+        use crate::slice::DecRefPicMarking;
+
+        if nal.nal_ref_idc == 0 {
+            return;
+        }
+        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let Ok(poc) = crate::ref_pic::derive_pic_order_cnt(
+            sps,
+            is_idr,
+            true,
+            header.frame_num,
+            header.pic_order_cnt_lsb,
+            &mut self.poc_state,
+        ) else {
+            return;
+        };
+
+        let marking = header
+            .dec_ref_pic_marking
+            .clone()
+            .unwrap_or(DecRefPicMarking::SlidingWindow);
+        let entry = DpbEntry {
+            frame: frame.clone(),
+            frame_num: header.frame_num,
+            pic_order_cnt: poc,
+            is_short_term: true,
+            is_long_term: false,
+            long_term_pic_num: -1,
+        };
+        let ctx = crate::ref_pic::PicNumContext::new(sps, header.frame_num);
+        match self
+            .dpb
+            .mark_decoded_picture(entry, &marking, ctx, sps.num_ref_frames)
+        {
+            Ok(outcome) => {
+                if outcome.mmco5 {
+                    // §8.2.1.1/§7.4.3: MMCO 5 rebases POC and makes the
+                    // current picture's frame_num 0 for everything that
+                    // follows.
+                    self.poc_state.reset_after_mmco5();
+                }
+            }
+            Err(_e) => {
+                // `mark_decoded_picture` already emptied the DPB, so the next
+                // inter slice falls back rather than predicting from a
+                // wrongly-marked reference.
+                let _ = _e;
+            }
+        }
     }
 
     /// Fallback slice decode: attempt the real CAVLC I-slice path first,
@@ -678,14 +730,19 @@ impl H264Decoder {
                 + header.slice_qp_delta;
             let chroma_qp_index_offset =
                 pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
-            let num_ref_idx_l0_active = pps
-                .as_ref()
-                .map(|p| p.num_ref_idx_l0_default_active_minus1 + 1)
-                .unwrap_or(1);
+            // §7.4.3: the slice header's effective value (which already folds
+            // in any `num_ref_idx_active_override_flag`) governs both the
+            // ref_idx binarisation and the RefPicList0 length, not the raw PPS
+            // default.
+            let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+            let pic_num_ctx = crate::ref_pic::PicNumContext::new(&sps, header.frame_num);
 
-            if let Some(ref_list) =
-                crate::ref_pic::build_ref_list_l0(&self.dpb, num_ref_idx_l0_active as usize)
-            {
+            if let Some(ref_list) = crate::ref_pic::build_ref_list_l0(
+                &self.dpb,
+                num_ref_idx_l0_active as usize,
+                pic_num_ctx,
+                &header.ref_pic_list_modification_l0,
+            ) {
                 let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> =
                     ref_list.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
@@ -780,7 +837,7 @@ impl H264Decoder {
                         data.extend(recon.chroma_cr);
 
                         self.frame_count += 1;
-                        return Ok(VideoFrame {
+                        let frame = VideoFrame {
                             pts: packet.pts,
                             dts: packet.dts,
                             data,
@@ -788,7 +845,13 @@ impl H264Decoder {
                             height,
                             pixel_format: PixelFormat::Yuv420p,
                             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
-                        });
+                        };
+                        // A reference P picture joins the DPB under the marking
+                        // its own slice header requested (§8.2.5) — this is the
+                        // path that carries MMCO commands, since only non-IDR
+                        // slices have a `dec_ref_pic_marking` command list.
+                        self.store_reference_picture(nal, &sps, &header, &frame);
+                        return Ok(frame);
                     }
                     Err(e) => {
                         let _ = e;

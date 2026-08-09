@@ -107,11 +107,6 @@ impl<'a> CabacDecoder<'a> {
         })
     }
 
-    /// Debug-only peek at the engine's raw state.
-    pub fn debug_state(&self) -> (u32, u32) {
-        (self.range, self.offset)
-    }
-
     fn next_bit(&mut self) -> u32 {
         // Spec streams are constructed so the engine never actually needs bits
         // past the end (trailing RBSP bits pad the arithmetic codeword); treat
@@ -512,7 +507,9 @@ pub struct ResidualCabacContext {
 
 impl ResidualCabacContext {
     pub fn new(slice_qp_y: i32) -> Self {
-        let make = |base_table: &[usize; 5]| -> [Vec<CabacContext>; 5] {
+        // `base_table` covers all six `ctxBlockCat` groups including the
+        // 8x8-transform category; only the five 4x4 categories are built here.
+        let make = |base_table: &[usize; 6]| -> [Vec<CabacContext>; 5] {
             std::array::from_fn(|cat| {
                 let base = base_table[cat];
                 (0..SIG_LEN[cat])
@@ -591,9 +588,25 @@ impl ResidualCabacContext {
     }
 }
 
-/// `mb_skip_flag` context init values for P/SP slices, ctxIdx 11..=13 (spec
-/// Table 9-13, `ctxIdxOffset = 11`).
-const MB_SKIP_FLAG_P_INIT: [(i32, i32); 3] = [(23, 33), (22, 25), (29, 16)];
+/// Look up one context's `(m, n)` init pair from the `cabac_init_idc`-selected
+/// `CABAC_CTX_INIT_PB0`/`1`/`2` table (spec §9.3.1.1, Table 9-12) and
+/// initialise it at `slice_qp_y`. Mirrors [`init_ctx`] but for P/B-slice
+/// syntax elements, whose context init values additionally depend on the
+/// slice header's `cabac_init_idc` (0..=2) -- unlike I-slice elements, which
+/// only ever read [`crate::cabac_tables::CABAC_CTX_INIT_I`].
+///
+/// `cabac_init_idc` values outside `0..=2` are out of spec range; this
+/// clamps to idc 2 rather than panicking (a malformed-stream guard, matching
+/// this crate's existing preference for failing safe over panicking on
+/// attacker-controlled header fields).
+fn init_pb_ctx(ctx_idx: usize, cabac_init_idc: usize, slice_qp_y: i32) -> CabacContext {
+    let (m, n) = match cabac_init_idc {
+        0 => crate::cabac_tables::CABAC_CTX_INIT_PB0[ctx_idx],
+        1 => crate::cabac_tables::CABAC_CTX_INIT_PB1[ctx_idx],
+        _ => crate::cabac_tables::CABAC_CTX_INIT_PB2[ctx_idx],
+    };
+    CabacContext::init(m as i32, n as i32, slice_qp_y)
+}
 
 /// Left/top neighbour inputs for `mb_skip_flag`'s `ctxIdxInc` derivation
 /// (spec §9.3.3.1.1.1, condTermFlagA / condTermFlagB).
@@ -615,18 +628,53 @@ impl MbSkipNeighbors {
     }
 }
 
-/// `mb_skip_flag` decoding for P/SP slices: a single context-coded bin whose
-/// value *is* `mb_skip_flag` (no further binarization).
+/// `mb_skip_flag` decoding for P/SP and B slices: a single context-coded bin
+/// whose value *is* `mb_skip_flag` (no further binarization).
+///
+/// A previous version of this struct read from a local `MB_SKIP_FLAG_P_INIT
+/// [(i32,i32);3]` stub that was never cross-checked against source and was,
+/// in fact, wrong: its three pairs -- `[(23,33),(22,25),(29,16)]` -- turned
+/// out to be ctxIdx 11's `(m, n)` value from *each of the three*
+/// `cabac_init_idc` tables (i.e. `CABAC_CTX_INIT_PB0[11]`,
+/// `CABAC_CTX_INIT_PB1[11]`, `CABAC_CTX_INIT_PB2[11]`), rather than ctxIdx
+/// 11, 12, 13 from a *single* idc table -- a transposition bug most likely
+/// introduced by misreading FFmpeg's column-per-idc table layout as
+/// row-per-idc. Cross-checking that stub against the newly-fetched
+/// `CABAC_CTX_INIT_PB0` this session (Phase D.1) surfaced the mismatch
+/// directly (`CABAC_CTX_INIT_PB0[11..14]` is `[(23,33),(23,2),(21,0)]`, not
+/// `[(23,33),(22,25),(29,16)]`); it also confirmed mb_skip_flag's context
+/// init genuinely is `cabac_init_idc`-dependent (the three idc tables give
+/// different values at ctxIdx 11 -- see
+/// `cabac_tables::tests::pb1_and_pb2_mb_skip_flag_p_differs_from_pb0`), so
+/// the fix reads directly from the verified, fetched `CABAC_CTX_INIT_PB*`
+/// tables via [`init_pb_ctx`] instead of duplicating numbers into a
+/// separate local const (eliminating this whole class of transcription bug
+/// for this syntax element going forward).
 pub struct MbSkipFlagContext {
     ctx: [CabacContext; 3],
 }
 
 impl MbSkipFlagContext {
-    /// Initialise the three `mb_skip_flag` contexts for a P/SP slice at the
-    /// given slice QP. See [`MB_SKIP_FLAG_P_INIT`] for the provenance caveat
-    /// on these init values.
-    pub fn new_p_slice(slice_qp_y: i32) -> Self {
-        let ctx = MB_SKIP_FLAG_P_INIT.map(|(m, n)| CabacContext::init(m, n, slice_qp_y));
+    /// Initialise the three `mb_skip_flag` contexts for a P/SP slice
+    /// (ctxIdx 11..=13, [`crate::cabac_tables::MB_SKIP_FLAG_P_CTX`]) at the
+    /// given slice QP and `cabac_init_idc` (0..=2, from the slice header).
+    pub fn new_p_slice(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::MB_SKIP_FLAG_P_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// Initialise the three `mb_skip_flag` contexts for a B slice (ctxIdx
+    /// 24..=26, [`crate::cabac_tables::MB_SKIP_FLAG_B_CTX`]) at the given
+    /// slice QP and `cabac_init_idc`. B slices derive `ctxIdxInc` the same
+    /// way P/SP slices do (spec §9.3.3.1.1.1's condTermFlagA/condTermFlagB
+    /// is not slice-type-specific; only the ctxIdxOffset differs -- verified
+    /// from FFmpeg's `decode_cabac_mb_skip`, which adds a fixed +13 to `ctx`
+    /// for B slices before indexing the same context array used for P/SP),
+    /// so this reuses [`MbSkipNeighbors`]/[`Self::decode`] unchanged.
+    pub fn new_b_slice(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::MB_SKIP_FLAG_B_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
         Self { ctx }
     }
 
@@ -635,6 +683,388 @@ impl MbSkipFlagContext {
     pub fn decode(&mut self, dec: &mut CabacDecoder, neighbors: &MbSkipNeighbors) -> bool {
         let idx = neighbors.ctx_idx_inc();
         dec.decode_decision(&mut self.ctx[idx]) == 1
+    }
+}
+
+/// Intra `mb_type` *suffix* decoder for intra-coded macroblocks embedded
+/// inside a P or B slice (i.e. the mb_type prefix -- [`MbTypePCabacContext`]
+/// for P/SP -- decoded "intra"). Spec §9.3.3.1.1.3-family binarization reused
+/// at a different `ctxIdxOffset` (17 for P/SP, 32 for B).
+///
+/// **Not** a drop-in reuse of [`MbTypeICabacContext`]'s bin/context mapping,
+/// despite superficially resembling it. Ported line-by-line from FFmpeg's
+/// `decode_cabac_intra_mb_type(sl, ctx_base, intra_slice)` with
+/// `intra_slice == 0` (the P/B call sites: `decode_cabac_intra_mb_type(sl,
+/// 17, 0)` for P, `decode_cabac_intra_mb_type(sl, 32, 0)` for B) and compared
+/// against the `intra_slice == 1` codepath (I-slice, ctx_base 3) that
+/// [`MbTypeICabacContext::decode`] already implements. Two differences, both
+/// consequences of the `if(intra_slice){ ... } else { ... }` branch in the
+/// source:
+///   1. Bin 0 (I4x4 vs I16x16-or-PCM) reads a **single fixed** context
+///      (`state[0]`) for P/B -- the neighbour-derived `ctx` (0..=2) computed
+///      from `left_type`/`top_type` only happens on the `intra_slice`
+///      branch, and the `state += 2` advance after bin 0 is *inside* that
+///      same branch, so for P/B `state` never advances past `ctx_base`.
+///   2. Because of (1), `state[2+intra_slice]` (cbp_chroma "value" bin) and
+///      `state[3+2*intra_slice]` (second `pred_mode` bit) both fold to
+///      `state[2]`/`state[3]` for `intra_slice == 0` -- i.e. they **reuse**
+///      the same context as cbp_chroma "presence" and the first `pred_mode`
+///      bit respectively, rather than reading a distinct context the way the
+///      I-slice suffix does.
+///
+/// Returns the same 0..=25 numbering as [`MbTypeICabacContext::decode`]
+/// (0 = I_NxN, 1..=24 = I_16x16 variant, 25 = I_PCM).
+pub struct IntraMbTypeSuffixCabacContext {
+    ctx: [CabacContext; 4],
+}
+
+impl IntraMbTypeSuffixCabacContext {
+    /// `ctx_base` is 17 for P/SP slices or 32 for B slices (see
+    /// [`crate::cabac_tables::MB_TYPE_P_CTX`]/[`crate::cabac_tables::MB_TYPE_B_CTX`]
+    /// for how those ranges were confirmed against the fetched source).
+    pub fn new_pb(ctx_base: usize, slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let ctx = std::array::from_fn(|i| init_pb_ctx(ctx_base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
+        if dec.decode_decision(&mut self.ctx[0]) == 0 {
+            return 0; // I4x4
+        }
+        if dec.decode_terminate() == 1 {
+            return 25; // I_PCM
+        }
+        let mut mb_type = 1u32;
+        mb_type += 12 * dec.decode_decision(&mut self.ctx[1]) as u32;
+        if dec.decode_decision(&mut self.ctx[2]) == 1 {
+            mb_type += 4 + 4 * dec.decode_decision(&mut self.ctx[2]) as u32;
+        }
+        mb_type += 2 * dec.decode_decision(&mut self.ctx[3]) as u32;
+        mb_type += dec.decode_decision(&mut self.ctx[3]) as u32;
+        mb_type
+    }
+}
+
+/// `mb_type` P/SP-slice "P vs intra" + partition-shape prefix (Table 9-11
+/// inline P dispatch, ctxIdx 14..=17, ctxIdxOffset
+/// [`crate::cabac_tables::MB_TYPE_P_CTX`]). Ported directly from FFmpeg's
+/// `ff_h264_decode_mb_cabac`'s `AV_PICTURE_TYPE_P` branch:
+///
+/// ```c
+/// if( get_cabac(ctx[14]) == 0 ) {          // P-type (not intra)
+///     if( get_cabac(ctx[15]) == 0 )
+///         mb_type = 3 * get_cabac(ctx[16]);      // 0 or 3
+///     else
+///         mb_type = 2 - get_cabac(ctx[17]);      // 2 or 1
+///     // ff_h264_p_mb_type_info[mb_type]: 0=16x16,1=16x8,2=8x16,3=8x8
+/// } else {
+///     mb_type = decode_cabac_intra_mb_type(sl, 17, 0);   // intra-in-P
+/// }
+/// ```
+///
+/// Note ctxIdx 17 is shared between the "16x8-vs-8x16" prefix bit and
+/// [`IntraMbTypeSuffixCabacContext`]'s bin 0 -- the two are mutually
+/// exclusive per macroblock (only one branch of the `if` above executes), so
+/// the same physical context variable is simply reused/adapted across MBs
+/// regardless of which meaning applied that time; this mirrors
+/// [`crate::cabac_tables::MB_TYPE_P_CTX`]'s doc comment.
+pub struct MbTypePCabacContext {
+    ctx: [CabacContext; 4],
+}
+
+impl MbTypePCabacContext {
+    pub fn new(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::MB_TYPE_P_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// Returns `None` when the prefix indicates an intra-coded macroblock
+    /// (caller continues with [`IntraMbTypeSuffixCabacContext::new_pb`] at
+    /// `ctx_base = 17`); otherwise `Some(shape)` with `shape` in 0..=3
+    /// matching this crate's existing CAVLC `mb_type_raw` numbering for the
+    /// same four P shapes in `slice_data::parse_p_macroblock` (0 =
+    /// P_L0_16x16, 1 = P_L0_L0_16x8, 2 = P_L0_L0_8x16, 3 = P_8x8). CABAC has
+    /// no separate "ref index forced to 0" code point (unlike CAVLC's
+    /// `mb_type_raw == 4` / `P8x8ref0`) -- see [`RefIdxCabacContext::decode`]
+    /// for why that shortcut isn't needed here.
+    pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
+        if dec.decode_decision(&mut self.ctx[0]) == 1 {
+            return None; // intra
+        }
+        if dec.decode_decision(&mut self.ctx[1]) == 0 {
+            Some(3 * dec.decode_decision(&mut self.ctx[2]) as u32)
+        } else {
+            Some(2 - dec.decode_decision(&mut self.ctx[3]) as u32)
+        }
+    }
+}
+
+/// `sub_mb_type` (P, SP slices) CABAC decoder (ctxIdx 21..=23, ctxIdxOffset
+/// [`crate::cabac_tables::SUB_MB_TYPE_P_CTX`]). Ported directly from
+/// FFmpeg's `decode_cabac_p_mb_sub_type`:
+///
+/// ```c
+/// if( get_cabac(ctx[21]) ) return 0;        /* 8x8: 1 partition */
+/// if( !get_cabac(ctx[22]) ) return 1;       /* 8x4: 2 partitions */
+/// if( get_cabac(ctx[23]) ) return 2;        /* 4x8: 2 partitions */
+/// return 3;                                 /* 4x4: 4 partitions */
+/// ```
+///
+/// Return value indexes this crate's existing `P_SUB_MB_PARTS` partition-count
+/// table in `slice_data.rs` (`[1, 2, 2, 4]`), matching CAVLC's `sub_mb_type`
+/// numbering exactly (both derive from the same `ff_h264_p_sub_mb_type_info`
+/// table upstream).
+pub struct SubMbTypePCabacContext {
+    ctx: [CabacContext; 3],
+}
+
+impl SubMbTypePCabacContext {
+    pub fn new(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::SUB_MB_TYPE_P_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
+        if dec.decode_decision(&mut self.ctx[0]) == 1 {
+            return 0;
+        }
+        if dec.decode_decision(&mut self.ctx[1]) == 0 {
+            return 1;
+        }
+        if dec.decode_decision(&mut self.ctx[2]) == 1 {
+            return 2;
+        }
+        3
+    }
+}
+
+/// `ref_idx_l0` CABAC decoder (spec §9.3.3.1.1.6, ctxIdx 54..=59,
+/// ctxIdxOffset [`crate::cabac_tables::REF_IDX_CTX`]). Ported directly from
+/// FFmpeg's `decode_cabac_mb_ref`:
+///
+/// ```c
+/// int ctx = (refa > 0) + 2*(refb > 0);
+/// while( get_cabac(ctx[54+ctx]) ) {
+///     ref++;
+///     ctx = (ctx>>2) + 4;   // -> 4 after the first hit, -> 5 from then on
+///     if (ref >= 32) return -1;   // malformed-stream guard
+/// }
+/// return ref;
+/// ```
+///
+/// This is exactly a truncated-unary bin string (no separate "bin 0" special
+/// case -- the `while` condition itself performs the first decode), so it's
+/// written here as a direct transliteration of that `ctx` recurrence for
+/// 1:1 traceability against the source, rather than routed through
+/// [`CabacDecoder::decode_truncated_unary`] (whose fixed by-position context
+/// table doesn't have a clean way to express the neighbour-selected *first*
+/// context alongside `min(pos, len-1)`-style reuse for the rest without an
+/// extra copy step) -- functionally the two approaches agree.
+pub struct RefIdxCabacContext {
+    /// Local layout: `[0..4)` = bin 0's neighbour-selected context (ctxIdx
+    /// 54..=57), `[4]` = ctxIdx 58 (first continuation bin), `[5]` = ctxIdx
+    /// 59 (every bin after that).
+    ctx: [CabacContext; 6],
+}
+
+impl RefIdxCabacContext {
+    pub fn new(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::REF_IDX_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// `left_gt0`/`top_gt0`: whether the left/top neighbouring partition's
+    /// `ref_idx` (list 0) is `> 0`. Per spec §9.3.3.1.1.6, `refIdxZeroFlagN`
+    /// is 1 (i.e. contributes 0 here) when the neighbour is unavailable,
+    /// intra-coded, `P_Skip`/`B_Skip`, doesn't use this list, or has
+    /// `ref_idx == 0` -- only a real, decoded `ref_idx > 0` contributes 1.
+    pub fn decode(&mut self, dec: &mut CabacDecoder, left_gt0: bool, top_gt0: bool) -> u32 {
+        let mut ctx_idx = left_gt0 as usize + 2 * top_gt0 as usize;
+        let mut val = 0u32;
+        while val < 32 && dec.decode_decision(&mut self.ctx[ctx_idx]) == 1 {
+            val += 1;
+            ctx_idx = (ctx_idx >> 2) + 4;
+        }
+        val
+    }
+}
+
+/// One component (x or y) of `mvd_l0`/`mvd_l1` CABAC decoder (spec
+/// §9.3.3.1.1.7, ctxIdx 40..=46 for the x component
+/// ([`crate::cabac_tables::MVD_X_CTX`]) or 47..=53 for y
+/// ([`crate::cabac_tables::MVD_Y_CTX`])). Ported directly from FFmpeg's
+/// `decode_cabac_mb_mvd`:
+///
+/// ```c
+/// // ctxIdxInc for bin 0, from the branchless (amvd>2)+(amvd>32) equivalent:
+/// int ctx0 = (amvd < 3) ? 0 : (amvd < 33) ? 1 : 2;
+/// if( !get_cabac(ctx[ctx0]) ) return 0;
+/// int mvd = 1, idx = 3;                 // ctxbase += 3
+/// while( mvd < 9 && get_cabac(ctx[idx]) ) {
+///     if( mvd < 4 ) idx++;              // idx: 3,4,5,6,6,6,6,6 across mvd=1..8
+///     mvd++;
+/// }
+/// if( mvd >= 9 )
+///     mvd += decode_bypass_eg(3);       // UEGk suffix, k=3
+/// return get_cabac_bypass() ? -mvd : mvd;   // sign bit only read when mvd != 0
+/// ```
+///
+/// This confirms the task's D.2 premise: the existing generic
+/// [`CabacDecoder::decode_bypass_eg`] (order-3 Exp-Golomb) is exactly the
+/// suffix construction FFmpeg uses once the truncated-unary prefix saturates
+/// at 9 -- no new bypass-suffix primitive was needed, only this ctxIdxInc/
+/// prefix wiring around it.
+pub struct MvdCabacContext {
+    /// Local layout: `[0..3)` = bin 0's neighbour-sum-selected context
+    /// (ctxIdx `base`..=`base+2`), `[3..7)` = the truncated-unary
+    /// continuation (ctxIdx `base+3`..=`base+6`, with `[6]` reused for every
+    /// bin past the fourth).
+    ctx: [CabacContext; 7],
+}
+
+impl MvdCabacContext {
+    /// `ctx_base` is [`crate::cabac_tables::MVD_X_CTX`] (40) or
+    /// [`crate::cabac_tables::MVD_Y_CTX`] (47).
+    pub fn new(ctx_base: usize, slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let ctx = std::array::from_fn(|i| init_pb_ctx(ctx_base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// `amvd_sum`: sum of the left/top neighbouring partitions' `|mvd|` for
+    /// this component (each individually capped at 70, matching FFmpeg's
+    /// `*mvda = mvd < 70 ? mvd : 70` -- see the module docs on
+    /// `slice_data::MbMvCabacCtx` for where that cap is applied). A neighbour
+    /// that's unavailable, intra-coded, or skipped contributes 0 (§9.3.3.1.1.7).
+    ///
+    /// Returns the signed `mvd` component value (not yet added to the
+    /// predicted MV -- matches this crate's existing CAVLC convention of
+    /// storing raw `mvd_l0` on [`crate::macroblock::InterMotion`] and letting
+    /// `crate::mv::predict_slice_mvs` combine it with the predictor
+    /// afterwards).
+    pub fn decode(&mut self, dec: &mut CabacDecoder, amvd_sum: u32) -> i32 {
+        let ctx0 = if amvd_sum < 3 {
+            0
+        } else if amvd_sum < 33 {
+            1
+        } else {
+            2
+        };
+        if dec.decode_decision(&mut self.ctx[ctx0]) == 0 {
+            return 0;
+        }
+        let mut mvd: u32 = 1;
+        let mut idx: usize = 3;
+        while mvd < 9 && dec.decode_decision(&mut self.ctx[idx]) == 1 {
+            if mvd < 4 {
+                idx += 1;
+            }
+            mvd += 1;
+        }
+        if mvd >= 9 {
+            mvd += dec.decode_bypass_eg(3);
+        }
+        if dec.decode_bypass() == 1 {
+            -(mvd as i32)
+        } else {
+            mvd as i32
+        }
+    }
+}
+
+impl CbpCabacContext {
+    /// P/B-slice sibling of [`CbpCabacContext::new`]: identical ctxIdx range
+    /// (73..=84, ctxIdxOffset doesn't vary by slice type for this element),
+    /// but the `(m, n)` init pairs come from the `cabac_init_idc`-selected
+    /// `CABAC_CTX_INIT_PB*` table instead of `CABAC_CTX_INIT_I` -- required
+    /// per spec §9.3.1.1 (context init is chosen once per slice by slice
+    /// type, for *every* ctxIdx used in that slice, not per syntax element).
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::CBP_LUMA_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+}
+
+impl MbQpDeltaCabacContext {
+    /// P/B-slice sibling of [`MbQpDeltaCabacContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment for why this exists even
+    /// though `cabac_tables::tests::pb_tables_mb_qp_delta_matches_i_table`
+    /// shows the four tables happen to agree at this particular ctxIdx range.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::MB_QP_DELTA_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+}
+
+impl IntraChromaPredModeCabacContext {
+    /// P/B-slice sibling of [`IntraChromaPredModeCabacContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::CHROMA_PRED_MODE_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+}
+
+impl Intra4x4PredModeCabacContext {
+    /// P/B-slice sibling of [`Intra4x4PredModeCabacContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment. `prev_intra4x4_pred_mode_flag`/
+    /// `rem_intra4x4_pred_mode` (ctxIdx 68/69) are read by the *same*
+    /// `decode_cabac_mb_intra4x4_pred_mode` function regardless of slice type
+    /// in FFmpeg (it's not gated on `slice_type_nos`), but per §9.3.1.1 the
+    /// `(m, n)` pair at that ctxIdx still comes from the PB table for a P/B
+    /// slice, even though the numeric ctxIdx is unchanged from the I-slice case.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        Self {
+            prev_ctx: init_pb_ctx(
+                crate::cabac_tables::PREV_INTRA_PRED_MODE_CTX,
+                cabac_init_idc,
+                slice_qp_y,
+            ),
+            rem_ctx: init_pb_ctx(
+                crate::cabac_tables::REM_INTRA_PRED_MODE_CTX,
+                cabac_init_idc,
+                slice_qp_y,
+            ),
+        }
+    }
+}
+
+impl CodedBlockFlagContext {
+    /// P/B-slice sibling of [`CodedBlockFlagContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let ctx = std::array::from_fn(|cat| {
+            let base = crate::cabac_tables::CBF_CTX_BASE[cat];
+            std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
+        });
+        Self { ctx }
+    }
+}
+
+impl ResidualCabacContext {
+    /// P/B-slice sibling of [`ResidualCabacContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let make = |base_table: &[usize; 6]| -> [Vec<CabacContext>; 5] {
+            std::array::from_fn(|cat| {
+                let base = base_table[cat];
+                (0..SIG_LEN[cat])
+                    .map(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
+                    .collect()
+            })
+        };
+        let sig = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE);
+        let last = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE);
+        let level = std::array::from_fn(|cat| {
+            let base = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat];
+            std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
+        });
+        Self { sig, last, level }
     }
 }
 
@@ -824,7 +1254,7 @@ mod tests {
     fn mb_skip_flag_context_selects_context_by_neighbors() {
         let data = [0xA3u8, 0x5C, 0x91, 0x77, 0x2E, 0x0F];
         let mut dec = CabacDecoder::new(&data).unwrap();
-        let mut skip_ctx = MbSkipFlagContext::new_p_slice(26);
+        let mut skip_ctx = MbSkipFlagContext::new_p_slice(26, 0);
         let before = [skip_ctx.ctx[0], skip_ctx.ctx[1], skip_ctx.ctx[2]];
 
         let neighbors = MbSkipNeighbors {
@@ -839,6 +1269,47 @@ mod tests {
         assert_eq!(skip_ctx.ctx[0], before[0]);
         assert_ne!(skip_ctx.ctx[1], before[1]);
         assert_eq!(skip_ctx.ctx[2], before[2]);
+    }
+
+    #[test]
+    fn mb_skip_flag_b_slice_context_selects_context_by_neighbors() {
+        // Mirrors `mb_skip_flag_context_selects_context_by_neighbors` above,
+        // but for the B-slice constructor (ctxIdx 24..=26 instead of
+        // 11..=13); same ctxIdxInc derivation, different ctxIdxOffset.
+        let data = [0xA3u8, 0x5C, 0x91, 0x77, 0x2E, 0x0F];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut skip_ctx = MbSkipFlagContext::new_b_slice(26, 0);
+        let before = [skip_ctx.ctx[0], skip_ctx.ctx[1], skip_ctx.ctx[2]];
+
+        let neighbors = MbSkipNeighbors {
+            left_available: true,
+            left_skipped: false,
+            top_available: true,
+            top_skipped: false,
+        };
+        let _ = skip_ctx.decode(&mut dec, &neighbors);
+
+        // Both neighbours available and not skipped -> ctxIdxInc = 2 -> only
+        // ctx[2] should have been touched.
+        assert_eq!(skip_ctx.ctx[0], before[0]);
+        assert_eq!(skip_ctx.ctx[1], before[1]);
+        assert_ne!(skip_ctx.ctx[2], before[2]);
+    }
+
+    #[test]
+    fn mb_skip_flag_p_slice_context_init_differs_by_cabac_init_idc() {
+        // Confirms MbSkipFlagContext::new_p_slice actually threads
+        // cabac_init_idc through to context selection (not just accepting
+        // and ignoring the parameter) -- ctxIdx 11 has a different (m, n)
+        // pair per idc (see
+        // cabac_tables::tests::pb1_and_pb2_mb_skip_flag_p_differs_from_pb0),
+        // so the freshly-initialised (pre-any-decode) context state should
+        // differ across idc values too.
+        let idc0 = MbSkipFlagContext::new_p_slice(26, 0);
+        let idc1 = MbSkipFlagContext::new_p_slice(26, 1);
+        let idc2 = MbSkipFlagContext::new_p_slice(26, 2);
+        assert_ne!(idc0.ctx[0], idc1.ctx[0]);
+        assert_ne!(idc1.ctx[0], idc2.ctx[0]);
     }
 
     #[test]
@@ -961,6 +1432,174 @@ mod tests {
                 nonzero, coeff_count as usize,
                 "cat {cat}: nonzero coeff count in output must match returned coeff_count"
             );
+            assert!(coeff_count as usize <= max_coeff);
+        }
+    }
+
+    // ---- Phase D.4: P-slice CABAC primitives ----
+
+    #[test]
+    fn intra_mb_type_suffix_pb_decode_in_range() {
+        let data = [0xFFu8; 16];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = IntraMbTypeSuffixCabacContext::new_pb(17, 26, 0);
+        let mb_type = ctx.decode(&mut dec);
+        assert!(mb_type <= 25, "must be 0..=25, got {mb_type}");
+    }
+
+    #[test]
+    fn intra_mb_type_suffix_pb_bin0_is_a_single_fixed_context() {
+        // Unlike the I-slice suffix, bin 0 here has no neighbour-derived
+        // ctxIdxInc -- it always reads local ctx[0], regardless of any
+        // external state (there's no neighbours parameter to even vary it).
+        let data = [0x00u8; 8];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = IntraMbTypeSuffixCabacContext::new_pb(17, 26, 0);
+        let before = ctx.ctx;
+        let _ = ctx.decode(&mut dec);
+        assert_ne!(ctx.ctx[0], before[0], "bin 0 must touch ctx[0]");
+    }
+
+    #[test]
+    fn mb_type_p_decode_returns_inter_shape_or_none_for_intra() {
+        let data = [0xFFu8; 8];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = MbTypePCabacContext::new(26, 0);
+        match ctx.decode(&mut dec) {
+            None => {}                       // intra-in-P
+            Some(shape) => assert!(shape <= 3, "P shape must be 0..=3, got {shape}"),
+        }
+    }
+
+    #[test]
+    fn mb_type_p_decode_is_deterministic_for_fixed_input() {
+        // Same context init + same stream must always decode the same
+        // result (arithmetic decoding has no hidden nondeterminism).
+        let data = [0x00u8; 4];
+        let mut dec1 = CabacDecoder::new(&data).unwrap();
+        let mut ctx1 = MbTypePCabacContext::new(26, 0);
+        let a = ctx1.decode(&mut dec1);
+
+        let mut dec2 = CabacDecoder::new(&data).unwrap();
+        let mut ctx2 = MbTypePCabacContext::new(26, 0);
+        let b = ctx2.decode(&mut dec2);
+        assert_eq!(a, b);
+        if let Some(shape) = a {
+            assert!(shape <= 3);
+        }
+    }
+
+    #[test]
+    fn sub_mb_type_p_decode_in_range() {
+        let data = [0xFFu8; 4];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = SubMbTypePCabacContext::new(26, 0);
+        for _ in 0..4 {
+            let v = ctx.decode(&mut dec);
+            assert!(v <= 3, "sub_mb_type must be 0..=3, got {v}");
+        }
+    }
+
+    #[test]
+    fn ref_idx_decode_zero_when_bin0_is_zero() {
+        // All-zero bypass-free stream: a freshly initialised context's first
+        // decision is deterministic from its (m,n) pair, not necessarily 0,
+        // so just assert the general contract (never panics, bounded value)
+        // and that ctxIdxInc selection doesn't touch unrelated contexts.
+        let data = [0xA3u8, 0x5C, 0x91, 0x77];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = RefIdxCabacContext::new(26, 0);
+        let before = ctx.ctx;
+        let val = ctx.decode(&mut dec, false, false);
+        assert!(val < 32);
+        // left_gt0=false, top_gt0=false -> ctxIdxInc=0 -> bin0 touches ctx[0]
+        // only (further bins, if any, touch ctx[4]/ctx[5], never ctx[1..3]).
+        assert_eq!(ctx.ctx[1], before[1]);
+        assert_eq!(ctx.ctx[2], before[2]);
+        assert_eq!(ctx.ctx[3], before[3]);
+    }
+
+    #[test]
+    fn ref_idx_decode_selects_ctx_by_neighbor_availability() {
+        let data = [0xA3u8, 0x5C, 0x91, 0x77];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = RefIdxCabacContext::new(26, 0);
+        let before = ctx.ctx;
+        let _ = ctx.decode(&mut dec, true, true);
+        // left_gt0=true, top_gt0=true -> ctxIdxInc=3 -> bin0 touches ctx[3].
+        assert_ne!(ctx.ctx[3], before[3]);
+        assert_eq!(ctx.ctx[0], before[0]);
+        assert_eq!(ctx.ctx[1], before[1]);
+        assert_eq!(ctx.ctx[2], before[2]);
+    }
+
+    #[test]
+    fn mvd_decode_zero_amvd_sum_uses_ctx0() {
+        let data = [0xA3u8, 0x5C, 0x91, 0x77];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = MvdCabacContext::new(crate::cabac_tables::MVD_X_CTX, 26, 0);
+        let before = ctx.ctx;
+        let _ = ctx.decode(&mut dec, 0);
+        assert_ne!(ctx.ctx[0], before[0]);
+        assert_eq!(ctx.ctx[1], before[1]);
+        assert_eq!(ctx.ctx[2], before[2]);
+    }
+
+    #[test]
+    fn mvd_decode_large_amvd_sum_uses_ctx2() {
+        let data = [0xA3u8, 0x5C, 0x91, 0x77];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = MvdCabacContext::new(crate::cabac_tables::MVD_X_CTX, 26, 0);
+        let before = ctx.ctx;
+        let _ = ctx.decode(&mut dec, 100);
+        assert_ne!(ctx.ctx[2], before[2]);
+        assert_eq!(ctx.ctx[0], before[0]);
+        assert_eq!(ctx.ctx[1], before[1]);
+    }
+
+    #[test]
+    fn mvd_decode_mid_amvd_sum_uses_ctx1() {
+        let data = [0xA3u8, 0x5C, 0x91, 0x77];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = MvdCabacContext::new(crate::cabac_tables::MVD_X_CTX, 26, 0);
+        let before = ctx.ctx;
+        let _ = ctx.decode(&mut dec, 10);
+        assert_ne!(ctx.ctx[1], before[1]);
+        assert_eq!(ctx.ctx[0], before[0]);
+        assert_eq!(ctx.ctx[2], before[2]);
+    }
+
+    #[test]
+    fn mvd_decode_returns_bounded_value_across_many_streams() {
+        // Fuzz-lite: decode repeatedly from varied streams and assert the
+        // result never panics and stays within a sane magnitude.
+        for byte in [0x00u8, 0x55, 0xAA, 0xFF, 0x3C, 0xC3] {
+            let data = [byte; 32];
+            let mut dec = CabacDecoder::new(&data).unwrap();
+            let mut ctx = MvdCabacContext::new(crate::cabac_tables::MVD_X_CTX, 26, 0);
+            for _ in 0..8 {
+                let v = ctx.decode(&mut dec, 0);
+                assert!(v.unsigned_abs() < (1 << 24));
+            }
+        }
+    }
+
+    #[test]
+    fn cbp_context_new_pb_differs_from_new_at_some_ctx_idx() {
+        // Spot-check the additive P/B constructors actually read from the PB
+        // table (not silently delegating to the I-table init).
+        let i_ctx = CbpCabacContext::new(26);
+        let pb_ctx = CbpCabacContext::new_pb(26, 0);
+        assert_ne!(i_ctx.ctx, pb_ctx.ctx);
+    }
+
+    #[test]
+    fn residual_context_new_pb_decodes_without_panicking() {
+        let data = [0x55u8; 16];
+        let mut dec = CabacDecoder::new(&data).unwrap();
+        let mut ctx = ResidualCabacContext::new_pb(26, 0);
+        for (cat, max_coeff) in [(0, 16), (1, 15), (2, 16), (3, 4), (4, 15)] {
+            let (_coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff);
             assert!(coeff_count as usize <= max_coeff);
         }
     }

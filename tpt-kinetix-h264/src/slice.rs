@@ -18,6 +18,91 @@ pub enum SliceType {
     Si,
 }
 
+/// One `ref_pic_list_modification` command (§7.3.3.1).
+///
+/// The syntax is a list of `modification_of_pic_nums_idc` values terminated by
+/// `3`; each non-terminating value carries one further syntax element. These
+/// commands drive the reference-picture-list modification process (§8.2.4.3)
+/// implemented in [`crate::ref_pic::modify_ref_pic_list`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefPicListModification {
+    /// `modification_of_pic_nums_idc == 0` — the picture to move to the front
+    /// of the remaining list has a `PicNum` *below* the running prediction.
+    ShortTermSubtract { abs_diff_pic_num_minus1: u32 },
+    /// `modification_of_pic_nums_idc == 1` — as above, but *above* the running
+    /// prediction.
+    ShortTermAdd { abs_diff_pic_num_minus1: u32 },
+    /// `modification_of_pic_nums_idc == 2` — select the long-term reference
+    /// picture with this `LongTermPicNum`.
+    LongTerm { long_term_pic_num: u32 },
+}
+
+/// One `memory_management_control_operation` command (§7.3.3.3, Table 7-9).
+///
+/// The syntax is a list of `memory_management_control_operation` values
+/// terminated by `0`; each non-terminating value carries one or two further
+/// syntax elements. These commands drive the adaptive memory control decoded
+/// reference picture marking process (§8.2.5.4) implemented in
+/// [`crate::ref_pic::Dpb::mark_decoded_picture`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmcoOp {
+    /// MMCO 1 (§8.2.5.4.1) — mark the short-term reference picture with
+    /// `PicNum == CurrPicNum − (difference_of_pic_nums_minus1 + 1)` as
+    /// "unused for reference".
+    ShortTermUnused { difference_of_pic_nums_minus1: u32 },
+    /// MMCO 2 (§8.2.5.4.2) — mark the long-term reference picture with this
+    /// `LongTermPicNum` as "unused for reference".
+    LongTermUnused { long_term_pic_num: u32 },
+    /// MMCO 3 (§8.2.5.4.3) — assign `long_term_frame_idx` to the short-term
+    /// reference picture selected by `difference_of_pic_nums_minus1`,
+    /// converting it to a long-term reference.
+    ShortTermToLongTerm {
+        difference_of_pic_nums_minus1: u32,
+        long_term_frame_idx: u32,
+    },
+    /// MMCO 4 (§8.2.5.4.4) — set `MaxLongTermFrameIdx` to
+    /// `max_long_term_frame_idx_plus1 − 1` (or "no long-term frame indices"
+    /// when 0), marking every long-term picture above it unused.
+    SetMaxLongTermFrameIdx { max_long_term_frame_idx_plus1: u32 },
+    /// MMCO 5 (§8.2.5.4.5) — mark *all* reference pictures "unused for
+    /// reference" and reset `MaxLongTermFrameIdx`.
+    ResetAll,
+    /// MMCO 6 (§8.2.5.4.6) — mark the *current* picture as a long-term
+    /// reference with this `LongTermFrameIdx`.
+    CurrentToLongTerm { long_term_frame_idx: u32 },
+}
+
+/// Parsed `dec_ref_pic_marking` (§7.3.3.3).
+///
+/// Present only when `nal_ref_idc != 0`; see
+/// [`SliceHeader::dec_ref_pic_marking`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecRefPicMarking {
+    /// IDR picture: the DPB is emptied and the current picture becomes the
+    /// only reference (§8.2.5.1).
+    Idr {
+        no_output_of_prior_pics_flag: bool,
+        /// When set, the IDR is stored as a long-term reference with
+        /// `LongTermFrameIdx == 0` instead of a short-term one.
+        long_term_reference_flag: bool,
+    },
+    /// Non-IDR with `adaptive_ref_pic_marking_mode_flag == 0`: the
+    /// sliding-window marking process (§8.2.5.3) applies.
+    SlidingWindow,
+    /// Non-IDR with `adaptive_ref_pic_marking_mode_flag == 1`: the MMCO
+    /// command list (the terminating `0` is not represented). Sliding-window
+    /// marking is *not* applied for such a picture (§8.2.5.1).
+    Adaptive(Vec<MmcoOp>),
+}
+
+/// Upper bound on the number of MMCO commands accepted from one slice header.
+///
+/// The spec bounds the list implicitly (each command must reference a distinct
+/// picture, and the DPB holds at most 16 frames), but the syntax itself is a
+/// `0`-terminated loop. Matching FFmpeg's `MAX_MMCO_COUNT` keeps a malformed
+/// stream from making the decoder allocate and replay an unbounded list.
+const MAX_MMCO_COUNT: usize = 66;
+
 impl SliceType {
     fn from_ue(val: u32) -> anyhow::Result<Self> {
         match val % 5 {
@@ -57,6 +142,25 @@ pub struct SliceHeader {
     pub disable_deblocking_filter_idc: u32,
     pub slice_alpha_c0_offset_div2: i32,
     pub slice_beta_offset_div2: i32,
+    /// `ref_pic_list_modification` commands for list 0 (§7.3.3.1). Empty when
+    /// `ref_pic_list_modification_flag_l0` was 0 (or the slice is intra), in
+    /// which case `RefPicList0` keeps its initialisation order (§8.2.4.2).
+    pub ref_pic_list_modification_l0: Vec<RefPicListModification>,
+    /// `ref_pic_list_modification` commands for list 1 (B slices only).
+    pub ref_pic_list_modification_l1: Vec<RefPicListModification>,
+    /// Parsed `dec_ref_pic_marking` (§7.3.3.3), or `None` when the slice is a
+    /// non-reference picture (`nal_ref_idc == 0`) and the syntax is absent.
+    /// Drives the decoded reference picture marking process (§8.2.5) in
+    /// [`crate::ref_pic::Dpb::mark_decoded_picture`].
+    pub dec_ref_pic_marking: Option<DecRefPicMarking>,
+    /// `cabac_init_idc` (§7.3.3, 0..=2): selects which of the three
+    /// `cabac_context_init_PB` tables (spec §9.3.1.1) initialises every CABAC
+    /// context used in a P/SP/B slice. Present only when
+    /// `entropy_coding_mode_flag` is set and the slice isn't I/SI (where the
+    /// syntax is absent and this defaults to 0, matching the spec's implicit
+    /// "not used" for I/SI slices, which always use `cabac_context_init_I`
+    /// regardless of this field).
+    pub cabac_init_idc: u32,
     /// Bit offset within the slice RBSP where macroblock data begins (after the
     /// header, before any CABAC byte-alignment). Callers use this to seek the
     /// residual/macroblock parser to the correct position.
@@ -217,11 +321,17 @@ impl SliceHeader {
         }
 
         // ref_pic_list_modification (§7.3.3.1).
+        let mut ref_pic_list_modification_l0 = Vec::new();
+        let mut ref_pic_list_modification_l1 = Vec::new();
         if !matches!(slice_type, SliceType::I | SliceType::Si) {
-            parse_ref_pic_list_modification(&mut r).context("ref_pic_list_modification l0")?;
+            ref_pic_list_modification_l0 =
+                parse_ref_pic_list_modification(&mut r, num_ref_idx_l0_active_minus1)
+                    .context("ref_pic_list_modification l0")?;
         }
         if slice_type == SliceType::B {
-            parse_ref_pic_list_modification(&mut r).context("ref_pic_list_modification l1")?;
+            ref_pic_list_modification_l1 =
+                parse_ref_pic_list_modification(&mut r, num_ref_idx_l1_active_minus1)
+                    .context("ref_pic_list_modification l1")?;
         }
 
         // pred_weight_table (§7.3.3.2).
@@ -247,13 +357,19 @@ impl SliceHeader {
         // `nal_ref_idc` field, NOT by slice_type: a non-reference P/B slice has
         // nal_ref_idc == 0 and must omit dec_ref_pic_marking, while an IDR (which
         // always has nal_ref_idc != 0) always includes it.
-        if nal_ref_idc != 0 {
-            parse_dec_ref_pic_marking(&mut r, is_idr).context("dec_ref_pic_marking")?;
-        }
+        let dec_ref_pic_marking = if nal_ref_idc != 0 {
+            Some(parse_dec_ref_pic_marking(&mut r, is_idr).context("dec_ref_pic_marking")?)
+        } else {
+            None
+        };
 
-        if ctx.entropy_coding_mode_flag && !matches!(slice_type, SliceType::I | SliceType::Si) {
-            let _cabac_init_idc = r.read_ue().context("cabac_init_idc")?;
-        }
+        let cabac_init_idc = if ctx.entropy_coding_mode_flag
+            && !matches!(slice_type, SliceType::I | SliceType::Si)
+        {
+            r.read_ue().context("cabac_init_idc")?
+        } else {
+            0
+        };
 
         let slice_qp_delta = r.read_se().context("slice_qp_delta")?;
 
@@ -295,14 +411,32 @@ impl SliceHeader {
             disable_deblocking_filter_idc,
             slice_alpha_c0_offset_div2,
             slice_beta_offset_div2,
+            cabac_init_idc,
+            ref_pic_list_modification_l0,
+            ref_pic_list_modification_l1,
+            dec_ref_pic_marking,
             data_bit_offset,
         })
     }
 }
 
-/// Parse `ref_pic_list_modification` (§7.3.3.1) — consumed only to advance the
-/// bit position correctly; the modifications themselves are applied elsewhere.
-fn parse_ref_pic_list_modification(r: &mut BitReader) -> anyhow::Result<()> {
+/// Parse `ref_pic_list_modification` (§7.3.3.1), returning the decoded command
+/// list so the caller can apply the modification process (§8.2.4.3).
+///
+/// An empty result means "no modification" — either
+/// `ref_pic_list_modification_flag_lX` was 0, or the flag was 1 but the list
+/// terminated immediately with `modification_of_pic_nums_idc == 3`.
+///
+/// `num_ref_idx_active_minus1` bounds the command count: §7.4.3.1 requires the
+/// number of `modification_of_pic_nums_idc` values not equal to 3 to be at most
+/// `num_ref_idx_lX_active_minus1 + 1`. Enforcing it keeps a malformed stream
+/// from making the decoder allocate and replay an unbounded command list.
+fn parse_ref_pic_list_modification(
+    r: &mut BitReader,
+    num_ref_idx_active_minus1: u32,
+) -> anyhow::Result<Vec<RefPicListModification>> {
+    let max_commands = num_ref_idx_active_minus1 as usize + 1;
+    let mut mods = Vec::new();
     let flag = r
         .read_bit()
         .ok_or_else(|| anyhow!("EOF ref_pic_list_modification_flag"))?;
@@ -314,20 +448,37 @@ fn parse_ref_pic_list_modification(r: &mut BitReader) -> anyhow::Result<()> {
             if op == 3 {
                 break;
             }
-            if op == 0 || op == 1 {
-                let _abs_diff_pic_num_minus1 = r
-                    .read_ue()
-                    .ok_or_else(|| anyhow!("EOF abs_diff_pic_num_minus1"))?;
-            } else if op == 2 {
-                let _long_term_pic_num = r
-                    .read_ue()
-                    .ok_or_else(|| anyhow!("EOF long_term_pic_num"))?;
-            } else {
-                return Err(anyhow!("invalid modification_of_pic_nums_idc {op}"));
+            if mods.len() >= max_commands {
+                return Err(anyhow!(
+                    "ref_pic_list_modification: more than {max_commands} commands (§7.4.3.1)"
+                ));
+            }
+            match op {
+                0 | 1 => {
+                    let abs_diff_pic_num_minus1 = r
+                        .read_ue()
+                        .ok_or_else(|| anyhow!("EOF abs_diff_pic_num_minus1"))?;
+                    mods.push(if op == 0 {
+                        RefPicListModification::ShortTermSubtract {
+                            abs_diff_pic_num_minus1,
+                        }
+                    } else {
+                        RefPicListModification::ShortTermAdd {
+                            abs_diff_pic_num_minus1,
+                        }
+                    });
+                }
+                2 => {
+                    let long_term_pic_num = r
+                        .read_ue()
+                        .ok_or_else(|| anyhow!("EOF long_term_pic_num"))?;
+                    mods.push(RefPicListModification::LongTerm { long_term_pic_num });
+                }
+                _ => return Err(anyhow!("invalid modification_of_pic_nums_idc {op}")),
             }
         }
     }
-    Ok(())
+    Ok(mods)
 }
 
 /// Parse `pred_weight_table` (§7.3.3.2) to advance the bit position.
@@ -367,37 +518,119 @@ fn parse_pred_weight_table(
     Ok(())
 }
 
-/// Parse `dec_ref_pic_marking` (§7.3.3.3) to advance the bit position.
-fn parse_dec_ref_pic_marking(r: &mut BitReader, is_idr: bool) -> anyhow::Result<()> {
+/// Parse `dec_ref_pic_marking` (§7.3.3.3), returning the decoded marking so the
+/// caller can run the decoded reference picture marking process (§8.2.5).
+///
+/// The `memory_management_control_operation` values and their operands are
+/// Table 7-9:
+///
+/// | MMCO | operands                                               |
+/// |------|--------------------------------------------------------|
+/// | 0    | (end of list)                                          |
+/// | 1    | `difference_of_pic_nums_minus1`                        |
+/// | 2    | `long_term_pic_num`                                    |
+/// | 3    | `difference_of_pic_nums_minus1`, `long_term_frame_idx` |
+/// | 4    | `max_long_term_frame_idx_plus1`                        |
+/// | 5    | (none)                                                 |
+/// | 6    | `long_term_frame_idx`                                  |
+///
+/// Operand ranges are validated here so a malformed stream is rejected at parse
+/// time rather than silently marking the wrong picture: §7.4.3.3 bounds
+/// `long_term_frame_idx` by `MaxLongTermFrameIdx` (at most 15 for the
+/// frame-only case this decoder handles, since `num_ref_frames <= 16`) and
+/// `max_long_term_frame_idx_plus1` by `num_ref_frames`. This mirrors FFmpeg's
+/// `ff_h264_decode_ref_pic_marking`, which rejects `long_arg >= 16` except for
+/// `MMCO_SET_MAX_LONG` with exactly 16 (i.e. `MaxLongTermFrameIdx == 15`).
+fn parse_dec_ref_pic_marking(
+    r: &mut BitReader,
+    is_idr: bool,
+) -> anyhow::Result<DecRefPicMarking> {
     if is_idr {
-        let _no_output_of_prior_pics_flag = r.read_bit().context("no_output_of_prior_pics_flag")?;
-        let _long_term_reference_flag = r.read_bit().context("long_term_reference_flag")?;
-    } else {
-        let adaptive = r.read_bit().context("adaptive_ref_pic_marking_mode_flag")? == 1;
-        if adaptive {
-            loop {
-                let op = r.read_ue().context("memory_management_control_operation")?;
-                if op == 0 {
-                    break;
-                }
-                if op == 1 || op == 3 {
-                    let _difference_of_pic_nums_minus1 =
-                        r.read_ue().context("difference_of_pic_nums_minus1")?;
-                }
-                if op == 2 {
-                    let _long_term_pic_num = r.read_ue().context("long_term_pic_num")?;
-                }
-                if op == 3 || op == 6 {
-                    let _long_term_frame_idx = r.read_ue().context("long_term_frame_idx")?;
-                }
-                if op == 4 {
-                    let _max_long_term_frame_idx_plus1 =
-                        r.read_ue().context("max_long_term_frame_idx_plus1")?;
+        let no_output_of_prior_pics_flag =
+            r.read_bit().context("no_output_of_prior_pics_flag")? == 1;
+        let long_term_reference_flag = r.read_bit().context("long_term_reference_flag")? == 1;
+        return Ok(DecRefPicMarking::Idr {
+            no_output_of_prior_pics_flag,
+            long_term_reference_flag,
+        });
+    }
+
+    let adaptive = r.read_bit().context("adaptive_ref_pic_marking_mode_flag")? == 1;
+    if !adaptive {
+        return Ok(DecRefPicMarking::SlidingWindow);
+    }
+
+    let mut ops = Vec::new();
+    loop {
+        let op = r.read_ue().context("memory_management_control_operation")?;
+        if op == 0 {
+            break;
+        }
+        if ops.len() >= MAX_MMCO_COUNT {
+            return Err(anyhow!(
+                "dec_ref_pic_marking: more than {MAX_MMCO_COUNT} memory management control operations"
+            ));
+        }
+        let parsed = match op {
+            1 => MmcoOp::ShortTermUnused {
+                difference_of_pic_nums_minus1: r
+                    .read_ue()
+                    .context("difference_of_pic_nums_minus1")?,
+            },
+            2 => MmcoOp::LongTermUnused {
+                long_term_pic_num: check_long_term_idx(
+                    r.read_ue().context("long_term_pic_num")?,
+                    "long_term_pic_num",
+                )?,
+            },
+            3 => {
+                let difference_of_pic_nums_minus1 =
+                    r.read_ue().context("difference_of_pic_nums_minus1")?;
+                MmcoOp::ShortTermToLongTerm {
+                    difference_of_pic_nums_minus1,
+                    long_term_frame_idx: check_long_term_idx(
+                        r.read_ue().context("long_term_frame_idx")?,
+                        "long_term_frame_idx",
+                    )?,
                 }
             }
-        }
+            4 => {
+                let max_long_term_frame_idx_plus1 =
+                    r.read_ue().context("max_long_term_frame_idx_plus1")?;
+                if max_long_term_frame_idx_plus1 > 16 {
+                    return Err(anyhow!(
+                        "max_long_term_frame_idx_plus1 {max_long_term_frame_idx_plus1} exceeds 16 (§7.4.3.3)"
+                    ));
+                }
+                MmcoOp::SetMaxLongTermFrameIdx {
+                    max_long_term_frame_idx_plus1,
+                }
+            }
+            5 => MmcoOp::ResetAll,
+            6 => MmcoOp::CurrentToLongTerm {
+                long_term_frame_idx: check_long_term_idx(
+                    r.read_ue().context("long_term_frame_idx")?,
+                    "long_term_frame_idx",
+                )?,
+            },
+            _ => {
+                return Err(anyhow!(
+                    "invalid memory_management_control_operation {op} (§7.4.3.3)"
+                ))
+            }
+        };
+        ops.push(parsed);
     }
-    Ok(())
+    Ok(DecRefPicMarking::Adaptive(ops))
+}
+
+/// §7.4.3.3: long-term frame indices / picture numbers address at most 16
+/// long-term frames, so any value above 15 is malformed for a frame picture.
+fn check_long_term_idx(value: u32, name: &'static str) -> anyhow::Result<u32> {
+    if value > 15 {
+        return Err(anyhow!("{name} {value} exceeds 15 (§7.4.3.3)"));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -409,5 +642,363 @@ mod tests {
         assert_eq!(SliceType::from_ue(0).unwrap(), SliceType::P);
         assert_eq!(SliceType::from_ue(2).unwrap(), SliceType::I);
         assert_eq!(SliceType::from_ue(7).unwrap(), SliceType::I); // 7 % 5 = 2
+    }
+
+    /// Minimal MSB-first bit writer for building synthetic slice headers.
+    struct BitWriter {
+        buf: Vec<u8>,
+        cur: u8,
+        nbits: u8,
+    }
+
+    impl BitWriter {
+        fn new() -> Self {
+            Self {
+                buf: Vec::new(),
+                cur: 0,
+                nbits: 0,
+            }
+        }
+
+        fn bit(&mut self, b: u8) {
+            self.cur = (self.cur << 1) | (b & 1);
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.buf.push(self.cur);
+                self.cur = 0;
+                self.nbits = 0;
+            }
+        }
+
+        fn bits(&mut self, value: u32, count: u8) {
+            for i in (0..count).rev() {
+                self.bit(((value >> i) & 1) as u8);
+            }
+        }
+
+        /// `ue(v)` (§9.1) — Exp-Golomb.
+        fn ue(&mut self, v: u32) {
+            let code = v + 1;
+            let leading = 31 - code.leading_zeros();
+            for _ in 0..leading {
+                self.bit(0);
+            }
+            for i in (0..=leading).rev() {
+                self.bit(((code >> i) & 1) as u8);
+            }
+        }
+
+        fn se(&mut self, v: i32) {
+            self.ue(if v <= 0 {
+                (-2 * v) as u32
+            } else {
+                (2 * v - 1) as u32
+            });
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            // rbsp_trailing_bits.
+            self.bit(1);
+            while self.nbits != 0 {
+                self.bit(0);
+            }
+            self.buf
+        }
+    }
+
+    fn p_slice_ctx() -> SliceHeaderContext {
+        SliceHeaderContext {
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            frame_mbs_only_flag: true,
+            bottom_field_pic_order_in_frame_present_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            num_ref_idx_l0_default_active_minus1: 0,
+            num_ref_idx_l1_default_active_minus1: 0,
+            weighted_pred_flag: false,
+            weighted_bipred_idc: 0,
+            entropy_coding_mode_flag: false,
+            deblocking_filter_control_present_flag: false,
+            redundant_pic_cnt_present_flag: false,
+            num_slice_groups_minus1: 0,
+            chroma_array_type: 1,
+        }
+    }
+
+    /// Build a non-IDR P-slice header carrying `mods` as its
+    /// `ref_pic_list_modification_l0` command list, with
+    /// `num_ref_idx_l0_active_minus1` overridden to `num_ref_l0_minus1`.
+    fn p_slice_rbsp(num_ref_l0_minus1: u32, mods: &[(u32, u32)]) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(1, 4); // frame_num (log2_max_frame_num_minus4 = 0 -> 4 bits)
+        w.bits(2, 4); // pic_order_cnt_lsb (4 bits)
+        w.bit(1); // num_ref_idx_active_override_flag
+        w.ue(num_ref_l0_minus1);
+        w.bit(1); // ref_pic_list_modification_flag_l0
+        for &(idc, value) in mods {
+            w.ue(idc);
+            w.ue(value);
+        }
+        w.ue(3); // modification_of_pic_nums_idc = 3 (terminator)
+        w.bit(0); // dec_ref_pic_marking: adaptive_ref_pic_marking_mode_flag
+        w.se(0); // slice_qp_delta
+        w.finish()
+    }
+
+    fn parse_p(rbsp: &[u8]) -> anyhow::Result<SliceHeader> {
+        SliceHeader::parse_with_context(rbsp, NalUnitType::NonIdrSlice, 1, &p_slice_ctx())
+    }
+
+    #[test]
+    fn slice_header_carries_ref_pic_list_modification_commands() {
+        // idc 0 (subtract, abs_diff_pic_num_minus1 = 2), idc 2 (long-term
+        // pic num 5), idc 1 (add, abs_diff_pic_num_minus1 = 0).
+        let rbsp = p_slice_rbsp(2, &[(0, 2), (2, 5), (1, 0)]);
+        let header = parse_p(&rbsp).expect("parse");
+
+        assert_eq!(header.num_ref_idx_l0_active_minus1, 2);
+        assert_eq!(
+            header.ref_pic_list_modification_l0,
+            vec![
+                RefPicListModification::ShortTermSubtract {
+                    abs_diff_pic_num_minus1: 2
+                },
+                RefPicListModification::LongTerm {
+                    long_term_pic_num: 5
+                },
+                RefPicListModification::ShortTermAdd {
+                    abs_diff_pic_num_minus1: 0
+                },
+            ]
+        );
+        assert!(header.ref_pic_list_modification_l1.is_empty());
+    }
+
+    #[test]
+    fn slice_header_without_modification_flag_yields_no_commands() {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(1, 4); // frame_num
+        w.bits(2, 4); // pic_order_cnt_lsb
+        w.bit(0); // num_ref_idx_active_override_flag
+        w.bit(0); // ref_pic_list_modification_flag_l0 = 0
+        w.bit(0); // adaptive_ref_pic_marking_mode_flag
+        w.se(0); // slice_qp_delta
+        let header = parse_p(&w.finish()).expect("parse");
+        assert!(header.ref_pic_list_modification_l0.is_empty());
+    }
+
+    /// §7.4.3.1 caps the command count at `num_ref_idx_lX_active_minus1 + 1`;
+    /// a stream exceeding it is rejected rather than replayed.
+    #[test]
+    fn slice_header_rejects_over_long_modification_list() {
+        // num_ref_idx_l0_active_minus1 = 0 allows exactly one command.
+        assert!(parse_p(&p_slice_rbsp(0, &[(0, 0)])).is_ok());
+        let err = parse_p(&p_slice_rbsp(0, &[(0, 0), (0, 0)])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("§7.4.3.1"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    // ---- dec_ref_pic_marking (§7.3.3.3) ---------------------------------
+
+    /// A non-IDR P slice whose `dec_ref_pic_marking` carries the given
+    /// `(memory_management_control_operation, operands...)` list. An empty list
+    /// writes `adaptive_ref_pic_marking_mode_flag == 0`.
+    fn p_slice_with_marking(mmco: &[&[u32]]) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(3, 4); // frame_num
+        w.bits(6, 4); // pic_order_cnt_lsb
+        w.bit(0); // num_ref_idx_active_override_flag
+        w.bit(0); // ref_pic_list_modification_flag_l0
+        if mmco.is_empty() {
+            w.bit(0); // adaptive_ref_pic_marking_mode_flag = 0
+        } else {
+            w.bit(1); // adaptive_ref_pic_marking_mode_flag = 1
+            for command in mmco {
+                for &value in *command {
+                    w.ue(value);
+                }
+            }
+            w.ue(0); // memory_management_control_operation = 0 (terminator)
+        }
+        w.se(0); // slice_qp_delta
+        w.finish()
+    }
+
+    fn mmco_of(header: &SliceHeader) -> Vec<MmcoOp> {
+        match header.dec_ref_pic_marking.as_ref().expect("marking present") {
+            DecRefPicMarking::Adaptive(ops) => ops.clone(),
+            other => panic!("expected adaptive marking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slice_header_carries_every_mmco_operation() {
+        // Table 7-9 operand layout: 1 → diff; 2 → long_term_pic_num;
+        // 3 → diff + idx; 4 → max_plus1; 5 → none; 6 → idx.
+        let rbsp = p_slice_with_marking(&[
+            &[1, 2],
+            &[2, 4],
+            &[3, 0, 1],
+            &[4, 3],
+            &[5],
+            &[6, 7],
+        ]);
+        let header = parse_p(&rbsp).expect("parse");
+        assert_eq!(
+            mmco_of(&header),
+            vec![
+                MmcoOp::ShortTermUnused {
+                    difference_of_pic_nums_minus1: 2
+                },
+                MmcoOp::LongTermUnused {
+                    long_term_pic_num: 4
+                },
+                MmcoOp::ShortTermToLongTerm {
+                    difference_of_pic_nums_minus1: 0,
+                    long_term_frame_idx: 1
+                },
+                MmcoOp::SetMaxLongTermFrameIdx {
+                    max_long_term_frame_idx_plus1: 3
+                },
+                MmcoOp::ResetAll,
+                MmcoOp::CurrentToLongTerm {
+                    long_term_frame_idx: 7
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn slice_header_without_adaptive_flag_is_sliding_window() {
+        let header = parse_p(&p_slice_with_marking(&[])).expect("parse");
+        assert_eq!(
+            header.dec_ref_pic_marking,
+            Some(DecRefPicMarking::SlidingWindow)
+        );
+    }
+
+    /// The MMCO command list must not shift the bit position: `slice_qp_delta`
+    /// follows it, so a mis-sized operand read would corrupt the whole slice.
+    #[test]
+    fn mmco_commands_do_not_desync_the_rest_of_the_header() {
+        for mmco in [
+            vec![],
+            vec![&[1u32, 5][..]],
+            vec![&[2u32, 3][..]],
+            vec![&[3u32, 1, 2][..]],
+            vec![&[4u32, 0][..]],
+            vec![&[5u32][..]],
+            vec![&[6u32, 15][..]],
+            vec![&[1u32, 0][..], &[6u32, 0][..]],
+        ] {
+            let header = parse_p(&p_slice_with_marking(&mmco)).expect("parse");
+            assert_eq!(header.slice_qp_delta, 0, "desync after {mmco:?}");
+            assert_eq!(header.frame_num, 3, "desync after {mmco:?}");
+        }
+    }
+
+    #[test]
+    fn idr_slice_header_carries_the_long_term_reference_flag() {
+        let build = |no_output: u8, long_term: u8| {
+            let mut w = BitWriter::new();
+            w.ue(0); // first_mb_in_slice
+            w.ue(2); // slice_type = I
+            w.ue(0); // pic_parameter_set_id
+            w.bits(0, 4); // frame_num
+            w.ue(0); // idr_pic_id
+            w.bits(0, 4); // pic_order_cnt_lsb
+            w.bit(no_output); // no_output_of_prior_pics_flag
+            w.bit(long_term); // long_term_reference_flag
+            w.se(0); // slice_qp_delta
+            w.finish()
+        };
+        let parse_idr = |rbsp: &[u8]| {
+            SliceHeader::parse_with_context(rbsp, NalUnitType::IdrSlice, 1, &p_slice_ctx())
+                .expect("parse")
+        };
+
+        assert_eq!(
+            parse_idr(&build(0, 0)).dec_ref_pic_marking,
+            Some(DecRefPicMarking::Idr {
+                no_output_of_prior_pics_flag: false,
+                long_term_reference_flag: false,
+            })
+        );
+        assert_eq!(
+            parse_idr(&build(1, 1)).dec_ref_pic_marking,
+            Some(DecRefPicMarking::Idr {
+                no_output_of_prior_pics_flag: true,
+                long_term_reference_flag: true,
+            })
+        );
+    }
+
+    /// `nal_ref_idc == 0` omits the syntax entirely (§7.3.3).
+    #[test]
+    fn non_reference_slice_has_no_dec_ref_pic_marking() {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(3, 4); // frame_num
+        w.bits(6, 4); // pic_order_cnt_lsb
+        w.bit(0); // num_ref_idx_active_override_flag
+        w.bit(0); // ref_pic_list_modification_flag_l0
+        w.se(0); // slice_qp_delta (no dec_ref_pic_marking in between)
+        let header =
+            SliceHeader::parse_with_context(&w.finish(), NalUnitType::NonIdrSlice, 0, &p_slice_ctx())
+                .expect("parse");
+        assert_eq!(header.dec_ref_pic_marking, None);
+        assert_eq!(header.slice_qp_delta, 0);
+    }
+
+    #[test]
+    fn slice_header_rejects_malformed_mmco_values() {
+        // memory_management_control_operation 7 is not in Table 7-9.
+        let err = parse_p(&p_slice_with_marking(&[&[7]])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("memory_management_control_operation 7"),
+            "unexpected error: {err:#}"
+        );
+
+        // long_term_frame_idx addresses at most 16 long-term frames.
+        let err = parse_p(&p_slice_with_marking(&[&[6, 16]])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("long_term_frame_idx 16"),
+            "unexpected error: {err:#}"
+        );
+
+        // max_long_term_frame_idx_plus1 is bounded by num_ref_frames <= 16.
+        let err = parse_p(&p_slice_with_marking(&[&[4, 17]])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("max_long_term_frame_idx_plus1 17"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// The `0`-terminated MMCO loop must be bounded, or a malformed stream can
+    /// make the parser allocate an arbitrarily long command list.
+    #[test]
+    fn slice_header_rejects_unbounded_mmco_list() {
+        let ops: Vec<&[u32]> = vec![&[5u32][..]; MAX_MMCO_COUNT + 1];
+        let err = parse_p(&p_slice_with_marking(&ops)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("memory management control operations"),
+            "unexpected error: {err:#}"
+        );
+        let ok: Vec<&[u32]> = vec![&[5u32][..]; MAX_MMCO_COUNT];
+        assert!(parse_p(&p_slice_with_marking(&ok)).is_ok());
     }
 }

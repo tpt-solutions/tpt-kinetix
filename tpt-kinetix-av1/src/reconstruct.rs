@@ -10,10 +10,19 @@
 //! * All AV1 intra prediction modes.
 //! * WHT-4, DCT-4/8, ADST-4 inverse transforms.
 //! * Dequantization per §7.11.
+//!
+//! Coefficients are read with the real AV1 symbol decoder
+//! ([`crate::entropy::SymbolDecoder`]) driving the spec `coeffs()` syntax in
+//! [`crate::coeff`] — see that module for what is and is not implemented.
+//! The block partitioning and prediction-mode syntax around it is still a
+//! fixed 8×8-luma / 4×4-chroma DC-predicted grid (AV1 Phase C).
 
 use crate::{
+    coeff::{read_coeffs, CoeffContexts, TileCdfs, TxBlockCtx},
+    coeff_tables as av1,
+    entropy::SymbolDecoder,
     frame::FrameHeader,
-    obu::{BitReader, SequenceHeaderObu},
+    obu::SequenceHeaderObu,
 };
 
 use tpt_kinetix_core::{
@@ -47,6 +56,8 @@ const PAETH: u8 = 12;
 const TX_TYPE_DCT: u8 = 0;
 const TX_TYPE_IDTX: u8 = 1;
 const TX_TYPE_DST7: u8 = 2;
+/// Walsh-Hadamard, used when `Lossless` is set (AV1 §7.13.3).
+const TX_TYPE_WHT: u8 = 3;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Dequantization
@@ -87,6 +98,11 @@ fn dc_dequant(qindex: u8) -> i32 {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// 4×4 Walsh-Hadamard transform (AV1 spec §6.10.3).
+///
+/// Selected when `Lossless` is set: AV1 §7.13.3 substitutes the inverse WHT
+/// for the regular inverse transform in that case. Like the other transforms
+/// in this module, the exact spec scaling (the shift argument the spec passes
+/// alongside the transform) is simplified — see the module header.
 #[inline]
 fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
     let mut tmp = [0i32; 16];
@@ -231,7 +247,7 @@ fn adst_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
         tmp[i + 2] = s0 - s1;
         // Approximate ADST basis using sin tables
         let a = (s3 * 106 + s2 * 213 + 256) >> 9;
-        let b = (s2 * 106 - s3 * 213 + 256) >> 9;
+        let _b = (s2 * 106 - s3 * 213 + 256) >> 9;
         tmp[i + 1] = a + ((s3 + s2) >> 1);
         tmp[i + 3] = a - ((s3 + s2) >> 1);
     }
@@ -322,11 +338,11 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
     match tx_size {
         TX_4X4 => {
             let mut c = [0i32; 16];
-            for i in 0..16.min(coeffs.len()) {
-                c[i] = coeffs[i];
-            }
+            let n = 16.min(coeffs.len());
+            c[..n].copy_from_slice(&coeffs[..n]);
             let mut d = [0i32; 16];
             match tx_type {
+                TX_TYPE_WHT => wht_4x4(&c, &mut d),
                 TX_TYPE_IDTX => d = c,
                 TX_TYPE_DST7 => adst_4x4(&c, &mut d),
                 _ => dct_4x4(&c, &mut d),
@@ -335,9 +351,8 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
         }
         TX_8X8 => {
             let mut c = [0i32; 64];
-            for i in 0..64.min(coeffs.len()) {
-                c[i] = coeffs[i];
-            }
+            let n = 64.min(coeffs.len());
+            c[..n].copy_from_slice(&coeffs[..n]);
             let mut d = [0i32; 64];
             match tx_type {
                 TX_TYPE_IDTX => d.copy_from_slice(&c),
@@ -347,20 +362,17 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
         }
         TX_16X16 => {
             let mut c = [0i32; 256];
-            for i in 0..256.min(coeffs.len()) {
-                c[i] = coeffs[i];
-            }
+            let n = 256.min(coeffs.len());
+            c[..n].copy_from_slice(&coeffs[..n]);
             let mut d = [0i32; 256];
             dct_16x16(&c, &mut d);
-            for i in 0..256 {
-                dst[i] = (d[i] + 128) >> 8;
+            for (slot, value) in dst.iter_mut().zip(d.iter()) {
+                *slot = (value + 128) >> 8;
             }
         }
         _ => {
             let n = num_coeffs.min(coeffs.len());
-            for i in 0..n {
-                dst[i] = coeffs[i];
-            }
+            dst[..n].copy_from_slice(&coeffs[..n]);
         }
     }
 }
@@ -489,12 +501,12 @@ fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [
 fn predict_smooth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
     let rc = tl;
     let bc = tl;
-    let avg_top = if size > 0 {
+    let _avg_top = if size > 0 {
         top[..size].iter().sum::<i32>() / size as i32
     } else {
         128
     };
-    let avg_left = if size > 0 {
+    let _avg_left = if size > 0 {
         left[..size].iter().sum::<i32>() / size as i32
     } else {
         128
@@ -511,43 +523,39 @@ fn predict_smooth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i3
 }
 
 /// Directional prediction.
-fn predict_directional(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
+///
+/// The sample-offset expressions below are genuinely signed (they can select
+/// a position above/left of the block before clamping), so they are evaluated
+/// in `i32` and clamped once. Written in `usize` they underflowed instead —
+/// a latent panic that only stayed hidden because the placeholder block grid
+/// never selects a directional mode. Real mode syntax arrives in AV1 Phase C.
+fn predict_directional(
+    mode: u8,
+    top: &[i32],
+    left: &[i32],
+    _tl: i32,
+    size: usize,
+    out: &mut [i32],
+) {
     let mut ext = [0i32; 128];
-    for i in 0..size {
-        ext[i] = top[i];
-    }
+    ext[..size].copy_from_slice(&top[..size]);
     for i in size..2 * size {
         ext[i] = ext[i - 1];
     }
+    let size_i = size as i32;
     for y in 0..size {
         for x in 0..size {
-            let (i, flip) = match mode {
-                D45_PRED => {
-                    let i = (4 * x + 2 - y).max(0).min(2 * size - 1) as usize;
-                    (i, false)
-                }
-                D135_PRED => {
-                    let i = (4 * y + 2 * x - 2 * size).max(0).min(2 * size - 1) as usize;
-                    (i, false)
-                }
-                D113_PRED => {
-                    let i = (4 * x + 4 - 2 * y).max(0).min(2 * size - 1) as usize;
-                    (i, true)
-                }
-                D157_PRED => {
-                    let i = (4 * y - x + 4 * size).min(2 * size - 1) as usize;
-                    (i, false)
-                }
-                D207_PRED => {
-                    let i = (4 * x + 2 * y - 3 * size).max(0).min(2 * size - 1) as usize;
-                    (i, false)
-                }
-                D67_PRED => {
-                    let i = (4 * y + x).min(2 * size - 1) as usize;
-                    (i, false)
-                }
-                _ => (x, false),
+            let (xi, yi) = (x as i32, y as i32);
+            let (raw, flip) = match mode {
+                D45_PRED => (4 * xi + 2 - yi, false),
+                D135_PRED => (4 * yi + 2 * xi - 2 * size_i, false),
+                D113_PRED => (4 * xi + 4 - 2 * yi, true),
+                D157_PRED => (4 * yi - xi + 4 * size_i, false),
+                D207_PRED => (4 * xi + 2 * yi - 3 * size_i, false),
+                D67_PRED => (4 * yi + xi, false),
+                _ => (xi, false),
             };
+            let i = raw.clamp(0, 2 * size_i - 1) as usize;
             let val = if !flip {
                 ext[i]
             } else {
@@ -581,86 +589,175 @@ fn predict_intra_block(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Zigzag maps
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Standard zigzag scan order for an N×N block (N = 2^log2_n).
-fn zigzag_map(log2_n: usize) -> Vec<usize> {
-    let n = 1usize << log2_n;
-    let total = n * n;
-    let mut map = vec![0usize; total];
-    let mut pos = 0usize;
-    for s in 0..(2 * n - 1) {
-        let max_x = (s + 1).min(n).saturating_sub(1);
-        for x in (0..=max_x).rev() {
-            let y = s - x;
-            if y < n && x < n && pos < total {
-                map[pos] = y * n + x;
-                pos += 1;
-            }
-        }
-    }
-    map
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Tile group decoder
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Build border arrays for a given tile position.
-fn tile_borders(
+/// Luma transform block size used by the fixed block grid below.
+///
+/// Real AV1 chooses this per block from the partition tree and `tx_size`
+/// syntax; that is AV1 Phase C. Phase B only replaced how the *coefficients*
+/// inside each block are read.
+const LUMA_TX_PX: usize = 8;
+
+/// Chroma transform block size, co-located with an 8×8 luma block at 4:2:0.
+const CHROMA_TX_PX: usize = 4;
+
+/// Build the top / left / top-left neighbour arrays for the transform block
+/// whose top-left sample sits at (`px_x`, `px_y`) within `plane`.
+///
+/// Samples above or left of the frame fall back to the neutral value 128.
+fn block_borders(
     plane: &[u8],
     stride: usize,
     width: usize,
     height: usize,
     tx_px: usize,
-    tile_x: usize,
-    tile_y: usize,
-    tile_cols: usize,
-    tile_rows: usize,
+    px_x: usize,
+    px_y: usize,
 ) -> (Vec<i32>, Vec<i32>, i32) {
+    let sample = |x: usize, y: usize| -> i32 {
+        plane
+            .get(y * stride + x)
+            .copied()
+            .map(i32::from)
+            .unwrap_or(128)
+    };
+
     let mut top = vec![128i32; tx_px * 2];
     let mut left = vec![128i32; tx_px * 2];
-    let start_x = tile_x * tx_px;
-    let start_y = tile_y * tx_px;
 
-    if tile_y > 0 {
-        let src_y = start_y;
+    if px_y > 0 {
         for x in 0..tx_px {
-            let px = start_x + x;
-            if px < width && src_y > 0 {
-                top[x] = plane[(src_y - 1) * stride + px] as i32;
+            let sx = px_x + x;
+            if sx < width {
+                top[x] = sample(sx, px_y - 1);
                 top[x + tx_px] = top[x];
             }
         }
     }
-    if tile_x > 0 {
-        let src_x = start_x;
+    if px_x > 0 {
         for y in 0..tx_px {
-            let py = start_y + y;
-            if py < height && src_x > 0 {
-                left[y] = plane[py * stride + (src_x - 1)] as i32;
+            let sy = px_y + y;
+            if sy < height {
+                left[y] = sample(px_x - 1, sy);
                 left[y + tx_px] = left[y];
             }
         }
     }
-    let tl = if tile_x > 0 && tile_y > 0 {
-        let px = start_x - 1;
-        let py = start_y - 1;
-        if px < width && py < height {
-            plane[py * stride + px] as i32
-        } else {
-            128
-        }
+    let tl = if px_x > 0 && px_y > 0 {
+        sample(px_x - 1, px_y - 1)
     } else {
         128
     };
     (top, left, tl)
 }
 
+/// Map an AV1 `TxType` onto the simplified inverse transforms implemented by
+/// [`inverse_transform`].
+///
+/// This module currently provides a DCT, an identity transform, a 4×4 ADST,
+/// and the lossless 4×4 WHT. The full AV1 set — independent row/column
+/// transform pairs, the flipped ADST variants, and the exact spec scaling —
+/// is separate future work; everything unrepresentable falls back to the
+/// DCT, which is what the previous code used unconditionally.
+///
+/// `lossless` takes priority because AV1 §7.13.3 replaces the transform
+/// entirely (rather than choosing a `TxType`) when `Lossless` is set. Real
+/// lossless streams only ever use `TX_4X4`; a larger block can only reach
+/// here through the placeholder block grid, and falls back to the DCT.
+fn internal_tx_type(av1_tx_type: usize, internal_tx_size: usize, lossless: bool) -> u8 {
+    if lossless && internal_tx_size == TX_4X4 {
+        return TX_TYPE_WHT;
+    }
+    match av1_tx_type {
+        av1::IDTX => TX_TYPE_IDTX,
+        av1::ADST_ADST | av1::ADST_DCT | av1::DCT_ADST if internal_tx_size == TX_4X4 => {
+            TX_TYPE_DST7
+        }
+        _ => TX_TYPE_DCT,
+    }
+}
+
+/// Decode one intra transform block: read its coefficients with the symbol
+/// decoder, dequantize, inverse transform, predict, and write the result back
+/// into `samples`.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_tx_block(
+    dec: &mut SymbolDecoder,
+    cdfs: &mut TileCdfs,
+    ctxs: &mut CoeffContexts,
+    blk: &TxBlockCtx,
+    samples: &mut [u8],
+    stride: usize,
+    plane_w: usize,
+    plane_h: usize,
+    px_x: usize,
+    px_y: usize,
+    tx_px: usize,
+    internal_tx_size: usize,
+    qindex: u8,
+    pred_mode: u8,
+) -> Result<(), KinetixError> {
+    let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+    let num_coeffs = tx_px * tx_px;
+
+    let mut residual = vec![0i32; num_coeffs];
+    if coeffs.eob > 0 {
+        let mut dequant = vec![0i32; num_coeffs];
+        let dc = dc_dequant(qindex) / 4;
+        let ac = ac_dequant(qindex) / 4;
+        for (i, slot) in dequant.iter_mut().enumerate() {
+            *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
+        }
+        inverse_transform(
+            &dequant,
+            internal_tx_type(coeffs.tx_type, internal_tx_size, blk.lossless),
+            internal_tx_size,
+            &mut residual,
+        );
+    }
+
+    let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_px, px_x, px_y);
+    let mut pred = vec![0i32; num_coeffs];
+    predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred);
+
+    for dy in 0..tx_px {
+        let sy = px_y + dy;
+        if sy >= plane_h {
+            break;
+        }
+        for dx in 0..tx_px {
+            let sx = px_x + dx;
+            if sx >= plane_w {
+                break;
+            }
+            if let Some(slot) = samples.get_mut(sy * stride + sx) {
+                *slot = (pred[dy * tx_px + dx] + residual[dy * tx_px + dx]).clamp(0, 255) as u8;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Decode one tile group's bitstream into the output planes.
 ///
-/// Handles intra-coded transform blocks with 4×4 and 8×8 sizes.
+/// Coefficients are read through the AV1 symbol decoder using the spec
+/// `coeffs()` syntax (`all_zero`, `intra_tx_type`, `eob_pt_*`, `eob_extra`,
+/// `coeff_base_eob`, `coeff_base`, `coeff_br`, `dc_sign` / `sign_bit`, and
+/// the Exp-Golomb tail) — see [`crate::coeff`].
+///
+/// The surrounding block structure is still a placeholder: a fixed grid of
+/// DC-predicted 8×8 luma transform blocks, each with a co-located 4×4 U and
+/// V block, instead of a real superblock partition tree. Replacing that is
+/// AV1 Phase C.
+///
+/// # Errors
+///
+/// Returns an error if the coefficient syntax decodes to something
+/// self-inconsistent, which means the decoder has lost sync with the
+/// bitstream and the rest of the tile cannot be trusted.
+#[allow(clippy::too_many_arguments)]
 pub fn decode_tile_group(
     data: &[u8],
     width: usize,
@@ -670,343 +767,108 @@ pub fn decode_tile_group(
     _use_128x128_sb: bool,
     tile_x: usize,
     tile_y: usize,
-    tile_cols: usize,
-    tile_rows: usize,
+    _tile_cols: usize,
+    _tile_rows: usize,
     y_plane: &mut [u8],
     u_plane: &mut [u8],
     v_plane: &mut [u8],
     y_stride: usize,
     uv_stride: usize,
 ) -> Result<(), KinetixError> {
-    let mut br = BitReader::new(data);
+    // Simplified tile layout: one 64×64 superblock-sized region per tile.
+    const SB_SIZE: usize = 64;
+    let start_x = tile_x * SB_SIZE;
+    let start_y = tile_y * SB_SIZE;
+    if start_x >= width || start_y >= height {
+        return Ok(());
+    }
+    let sb_w = (start_x + SB_SIZE).min(width) - start_x;
+    let sb_h = (start_y + SB_SIZE).min(height) - start_y;
 
-    // Determine superblock size from tile layout (simplified: use 64)
-    let sb_size: usize = 64;
-    let start_x = tile_x * sb_size;
-    let start_y = tile_y * sb_size;
-    let sb_w = (start_x + sb_size)
-        .min(width)
-        .saturating_sub(start_x)
-        .max(1);
-    let sb_h = (start_y + sb_size)
-        .min(height)
-        .saturating_sub(start_y)
-        .max(1);
+    let uv_w = uv_plane_width(width);
+    let uv_h = uv_plane_height(height);
 
-    // Process 8×8 transform blocks within this superblock
-    for by in (0..sb_h).step_by(8) {
-        for bx in (0..sb_w).step_by(8) {
-            let tx_w = (bx + 8).min(sb_w) - bx;
-            let tx_h = (by + 8).min(sb_h) - by;
-            let tx_px = 8usize;
-            let num_coeffs = tx_px * tx_px;
+    let mut dec = SymbolDecoder::new(data);
+    let mut cdfs = TileCdfs::new(qindex);
+    let mut ctxs = CoeffContexts::new(width.div_ceil(4), height.div_ceil(4));
 
+    let luma_max_x4 = width.div_ceil(4);
+    let luma_max_y4 = height.div_ceil(4);
+    let chroma_max_x4 = uv_w.div_ceil(4);
+    let chroma_max_y4 = uv_h.div_ceil(4);
+
+    // `base_q_idx == 0` is the only lossless configuration this path can see:
+    // segmentation and per-plane deltas are not parsed yet.
+    let lossless = qindex == 0;
+
+    for by in (0..sb_h).step_by(LUMA_TX_PX) {
+        for bx in (0..sb_w).step_by(LUMA_TX_PX) {
             let px_x = start_x + bx;
             let px_y = start_y + by;
 
-            // Read coded block flag for luma
-            let cbf_luma = br.read_bit().unwrap_or(0) == 1;
+            let luma = TxBlockCtx {
+                plane: 0,
+                tx_size: av1::TX_8X8,
+                x4: px_x / 4,
+                y4: px_y / 4,
+                max_x4: luma_max_x4,
+                max_y4: luma_max_y4,
+                block_w: LUMA_TX_PX,
+                block_h: LUMA_TX_PX,
+                intra_dir: DC_PRED as usize,
+                uv_mode: DC_PRED as usize,
+                qindex_positive: !lossless,
+                reduced_tx_set: false,
+                lossless,
+            };
+            reconstruct_tx_block(
+                &mut dec, &mut cdfs, &mut ctxs, &luma, y_plane, y_stride, width, height, px_x,
+                px_y, LUMA_TX_PX, TX_8X8, qindex, DC_PRED,
+            )?;
 
-            if !cbf_luma {
-                // Fill with DC prediction
-                if px_x < width && px_y < height {
-                    let (top, left, tl) = tile_borders(
-                        y_plane, y_stride, width, height, tx_px, tile_x, tile_y, tile_cols,
-                        tile_rows,
-                    );
-                    let mut pred = vec![0i32; num_coeffs];
-                    predict_dc(&top, &left, tx_px, &mut pred);
-                    for dy in 0..tx_h.min(tx_px) {
-                        for dx in 0..tx_w.min(tx_px) {
-                            let px = (px_y + dy) * y_stride + (px_x + dx);
-                            if px < y_plane.len() {
-                                y_plane[px] = pred[dy * tx_px + dx].clamp(0, 255) as u8;
-                            }
-                        }
-                    }
-                }
+            let uv_x = px_x / 2;
+            let uv_y = px_y / 2;
+            if uv_x >= uv_w || uv_y >= uv_h {
                 continue;
             }
 
-            // Read transform type (ue)
-            let tx_type = read_ue_simple(&mut br) as u8;
-
-            // Read coefficient levels
-            let mut levels: Vec<i32> = Vec::with_capacity(num_coeffs);
-            let mut num_nonzero: usize = 0;
-
-            // Trailing ones
-            let t1_raw = br.read_bits(2).unwrap_or(0) as usize;
-            let trailing_ones = t1_raw.min(3).min(num_coeffs);
-            for i in 0..trailing_ones {
-                let sign = br.read_bit().unwrap_or(0);
-                levels.push(if sign == 1 { -1 } else { 1 });
-                num_nonzero += 1;
-            }
-
-            // Remaining levels
-            let mut suffix_len: u32 = 0;
-            for i in trailing_ones..num_coeffs {
-                let mut level_prefix: u32 = 0;
-                loop {
-                    if br.read_bit().unwrap_or(1) == 1 {
-                        break;
-                    }
-                    level_prefix += 1;
-                    if level_prefix > 63 {
-                        break;
-                    }
-                }
-
-                let level_suffix_size = if level_prefix == 14 && suffix_len == 0 {
-                    4
-                } else if level_prefix >= 15 {
-                    level_prefix - 3
-                } else {
-                    suffix_len
+            for (plane, samples) in [(1usize, &mut *u_plane), (2usize, &mut *v_plane)] {
+                let chroma = TxBlockCtx {
+                    plane,
+                    tx_size: av1::TX_4X4,
+                    x4: uv_x / 4,
+                    y4: uv_y / 4,
+                    max_x4: chroma_max_x4,
+                    max_y4: chroma_max_y4,
+                    block_w: CHROMA_TX_PX,
+                    block_h: CHROMA_TX_PX,
+                    intra_dir: DC_PRED as usize,
+                    uv_mode: DC_PRED as usize,
+                    qindex_positive: !lossless,
+                    reduced_tx_set: false,
+                    lossless,
                 };
-
-                let level_suffix = if level_suffix_size > 0 {
-                    br.read_bits(level_suffix_size as u8).unwrap_or(0) as i32
-                } else {
-                    0
-                };
-
-                let mut level_code = (level_prefix.min(15) << suffix_len) as i32 + level_suffix;
-                if level_prefix >= 15 && suffix_len == 0 {
-                    level_code += 15;
-                }
-                if level_prefix >= 16 {
-                    level_code += (1 << (level_prefix - 3)) - 4096;
-                }
-                if i == trailing_ones && trailing_ones < 3 {
-                    level_code += 2;
-                }
-
-                let level = if level_code % 2 == 0 {
-                    (level_code + 2) >> 1
-                } else {
-                    (-level_code - 1) >> 1
-                };
-
-                if level != 0 {
-                    num_nonzero += 1;
-                }
-                levels.push(level);
-
-                if suffix_len == 0 && level_prefix < 15 {
-                    suffix_len = 1;
-                }
-                if (level.unsigned_abs() as u32) > (3u32 << (suffix_len - 1)) && suffix_len < 6 {
-                    suffix_len += 1;
-                }
-            }
-
-            // Read total zeros
-            let total_zeros = if num_nonzero > 0 && num_nonzero < num_coeffs {
-                let mut tz: u32 = 0;
-                loop {
-                    if br.read_bit().unwrap_or(1) == 1 {
-                        break;
-                    }
-                    tz += 1;
-                }
-                tz.min((num_coeffs - num_nonzero) as u32)
-            } else {
-                0
-            };
-
-            // Place coefficients using zigzag scan
-            let zz_map = zigzag_map(3); // 8×8 = 2^3
-            let mut coeffs = vec![0i32; num_coeffs];
-            let mut zeros_left = total_zeros;
-            let mut pos = num_nonzero as i32 - 1 + total_zeros as i32;
-
-            for (i, &level) in levels.iter().enumerate().take(num_nonzero) {
-                let zz_idx = if pos >= 0 && (pos as usize) < zz_map.len() {
-                    zz_map[pos as usize]
-                } else {
-                    0
-                };
-                if zz_idx < num_coeffs {
-                    coeffs[zz_idx] = level;
-                }
-                if i < num_nonzero - 1 {
-                    let run = if zeros_left > 0 {
-                        let mut run: u32 = 0;
-                        loop {
-                            if br.read_bit().unwrap_or(1) == 1 {
-                                break;
-                            }
-                            run += 1;
-                        }
-                        run.min(zeros_left)
-                    } else {
-                        0
-                    };
-                    pos -= 1 + run as i32;
-                    zeros_left -= run;
-                }
-            }
-
-            // Dequantize
-            let mut dequant = vec![0i32; num_coeffs];
-            dequant[0] = coeffs[0] * dc_dequant(qindex) / 4;
-            for i in 1..num_coeffs {
-                dequant[i] = coeffs[i] * ac_dequant(qindex) / 4;
-            }
-
-            // Inverse transform
-            let mut residual = vec![0i32; num_coeffs];
-            inverse_transform(&dequant, tx_type, TX_8X8, &mut residual);
-
-            // Add prediction and write to output
-            if px_x < width && px_y < height {
-                let (top, left, tl) = tile_borders(
-                    y_plane, y_stride, width, height, tx_px, tile_x, tile_y, tile_cols, tile_rows,
-                );
-                let mut pred = vec![0i32; num_coeffs];
-                predict_dc(&top, &left, tx_px, &mut pred);
-
-                for dy in 0..tx_h.min(tx_px) {
-                    for dx in 0..tx_w.min(tx_px) {
-                        let px = (px_y + dy) * y_stride + (px_x + dx);
-                        if px < y_plane.len() {
-                            let recon =
-                                (pred[dy * tx_px + dx] + residual[dy * tx_px + dx]).clamp(0, 255);
-                            y_plane[px] = recon as u8;
-                        }
-                    }
-                }
-            }
-
-            // Chroma (simplified: 4×4 chroma blocks)
-            let uv_px_x = px_x / 2;
-            let uv_px_y = px_y / 2;
-            if uv_px_x < uv_plane_width(width) && uv_px_y < uv_plane_height(height) {
-                let cbf_chroma = br.read_bit().unwrap_or(0) == 1;
-                if cbf_chroma {
-                    let _ = decode_chroma_tx(
-                        &mut br, u_plane, v_plane, uv_stride, uv_px_x, uv_px_y, width, height,
-                        qindex,
-                    );
-                }
+                reconstruct_tx_block(
+                    &mut dec,
+                    &mut cdfs,
+                    &mut ctxs,
+                    &chroma,
+                    samples,
+                    uv_stride,
+                    uv_w,
+                    uv_h,
+                    uv_x,
+                    uv_y,
+                    CHROMA_TX_PX,
+                    TX_4X4,
+                    qindex,
+                    DC_PRED,
+                )?;
             }
         }
     }
 
     Ok(())
-}
-
-/// Decode a chroma transform block (simplified 4×4).
-fn decode_chroma_tx(
-    br: &mut BitReader,
-    u_plane: &mut [u8],
-    v_plane: &mut [u8],
-    uv_stride: usize,
-    uv_px_x: usize,
-    uv_px_y: usize,
-    width: usize,
-    height: usize,
-    qindex: u8,
-) -> Result<(), KinetixError> {
-    let tx_px = 4;
-    let num_coeffs = 16;
-
-    let tx_type = read_ue_simple(br) as u8;
-    let mut levels: Vec<i32> = Vec::with_capacity(num_coeffs);
-    let t1_raw = br.read_bits(2).unwrap_or(0) as usize;
-    let trailing_ones = t1_raw.min(3).min(num_coeffs);
-    for i in 0..trailing_ones {
-        let sign = br.read_bit().unwrap_or(0);
-        levels.push(if sign == 1 { -1 } else { 1 });
-    }
-    let mut suffix_len: u32 = 0;
-    for i in trailing_ones..num_coeffs {
-        let mut lp: u32 = 0;
-        loop {
-            if br.read_bit().unwrap_or(1) == 1 {
-                break;
-            }
-            lp += 1;
-            if lp > 63 {
-                break;
-            }
-        }
-        let lss = if lp == 14 && suffix_len == 0 {
-            4
-        } else if lp >= 15 {
-            lp - 3
-        } else {
-            suffix_len
-        };
-        let ls = if lss > 0 {
-            br.read_bits(lss as u8).unwrap_or(0) as i32
-        } else {
-            0
-        };
-        let mut lc = (lp.min(15) << suffix_len) as i32 + ls;
-        if lp >= 15 && suffix_len == 0 {
-            lc += 15;
-        }
-        if lp >= 16 {
-            lc += (1 << (lp - 3)) - 4096;
-        }
-        let level = if lc % 2 == 0 {
-            (lc + 2) >> 1
-        } else {
-            (-lc - 1) >> 1
-        };
-        levels.push(level);
-        if suffix_len == 0 && lp < 15 {
-            suffix_len = 1;
-        }
-    }
-
-    let mut coeffs = [0i32; 16];
-    for (i, &lvl) in levels.iter().enumerate().take(16) {
-        coeffs[i] = lvl * ac_dequant(qindex) / 4;
-    }
-
-    let mut residual = [0i32; 16];
-    inverse_transform(&coeffs, tx_type, TX_4X4, &mut residual);
-
-    let mut pred = [0i32; 16];
-    predict_dc(&[128i32; 8], &[128i32; 8], 4, &mut pred);
-
-    for dy in 0..4 {
-        for dx in 0..4 {
-            let px = (uv_px_y + dy) * uv_stride + (uv_px_x + dx);
-            if px < u_plane.len() {
-                let recon = (pred[dy * 4 + dx] + residual[dy * 4 + dx]).clamp(0, 255);
-                u_plane[px] = recon as u8;
-                v_plane[px] = recon as u8;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Simple unsigned Exp-Golomb decoder.
-fn read_ue_simple(br: &mut BitReader) -> u32 {
-    let mut zeros: u32 = 0;
-    loop {
-        match br.read_bit() {
-            Some(1) => break,
-            Some(_) => zeros += 1,
-            None => break,
-        }
-        if zeros > 31 {
-            break;
-        }
-    }
-    let suffix = if zeros > 0 {
-        br.read_bits(zeros as u8).unwrap_or(0)
-    } else {
-        0
-    };
-    (1u32 << zeros) - 1 + suffix
 }
 
 #[inline]
@@ -1027,9 +889,17 @@ fn uv_plane_height(height: usize) -> usize {
 ///
 /// Supports intra-coded keyframes with tile-group reconstruction.
 /// Returns `Ok(None)` for unsupported frame types.
+///
+/// # Errors
+///
+/// Propagates the coefficient-parsing errors raised by
+/// [`decode_tile_group`]: rather than returning a half-decoded frame with
+/// silently wrong samples, a tile that loses sync with the bitstream fails
+/// the whole frame, which [`crate::decoder::Av1Decoder`] then reports as
+/// [`KinetixError::NotPixelExact`] in strict mode.
 pub fn reconstruct_av1_frame(
     obus: &[(u8, Vec<u8>)],
-    seq: &SequenceHeaderObu,
+    _seq: &SequenceHeaderObu,
     frame_header: &FrameHeader,
 ) -> Result<Option<VideoFrame>, KinetixError> {
     if !frame_header.frame_type.is_intra() {
@@ -1077,7 +947,7 @@ pub fn reconstruct_av1_frame(
         let tg_col = tg_idx % tile_cols;
         let tg_row = tg_idx / tile_cols;
 
-        let _ = decode_tile_group(
+        decode_tile_group(
             payload,
             width,
             height,
@@ -1093,7 +963,7 @@ pub fn reconstruct_av1_frame(
             &mut v_plane,
             width,
             uv_w,
-        );
+        )?;
     }
 
     let mut data = y_plane;
@@ -1109,4 +979,90 @@ pub fn reconstruct_av1_frame(
         pixel_format: PixelFormat::Yuv420p,
         is_key_frame: true,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The same generated buffer the `coeff` module's oracle tests use, so
+    /// this exercises a payload that is known to decode to real coefficients
+    /// rather than immediately hitting `all_zero` everywhere.
+    fn ramp(len: usize, mul: usize, add: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * mul + add) & 0xFF) as u8).collect()
+    }
+
+    fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let uv_w = width / 2;
+        let uv_h = height / 2;
+        let mut y = vec![128u8; width * height];
+        let mut u = vec![128u8; uv_w * uv_h];
+        let mut v = vec![128u8; uv_w * uv_h];
+        decode_tile_group(
+            data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
+        )
+        .expect("tile group decodes");
+        (y, u, v)
+    }
+
+    #[test]
+    fn tile_group_residual_actually_reaches_the_planes() {
+        // Regression guard for the Phase B rewiring: a payload that the
+        // symbol decoder reads real coefficients from must change samples,
+        // not leave the neutral 128 fill in place.
+        let (y, _u, _v) = decode(&ramp(512, 37, 11), 32, 32, 100);
+        assert!(
+            y.iter().any(|&s| s != 128),
+            "decoded luma plane is still the neutral fill"
+        );
+    }
+
+    #[test]
+    fn empty_tile_group_leaves_the_neutral_fill() {
+        // With no payload the symbol decoder reads zero padding; whatever it
+        // decodes must still land inside the planes without panicking.
+        let (y, u, v) = decode(&[], 32, 32, 100);
+        assert_eq!(y.len(), 32 * 32);
+        assert_eq!(u.len(), 16 * 16);
+        assert_eq!(v.len(), 16 * 16);
+    }
+
+    #[test]
+    fn directional_prediction_covers_all_modes_without_panicking() {
+        // These modes are unreachable until Phase C selects them, but the
+        // offset arithmetic used to underflow in `usize`; make sure every
+        // mode/size combination stays in bounds and in range.
+        for &mode in &[
+            D45_PRED, D135_PRED, D113_PRED, D157_PRED, D207_PRED, D67_PRED,
+        ] {
+            for &size in &[4usize, 8, 16, 32] {
+                let top: Vec<i32> = (0..2 * size).map(|i| (i * 7 % 256) as i32).collect();
+                let left: Vec<i32> = (0..2 * size).map(|i| (i * 13 % 256) as i32).collect();
+                let mut out = vec![0i32; size * size];
+                predict_intra_block(mode, &top, &left, 128, size, &mut out);
+                assert!(
+                    out.iter().all(|&v| (0..=255).contains(&v)),
+                    "mode {mode} size {size} produced an out-of-range sample"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_blocks_select_the_walsh_hadamard_transform() {
+        // AV1 §7.13.3 substitutes the inverse WHT when `Lossless` is set,
+        // regardless of the `TxType` `coeffs()` reported.
+        assert_eq!(internal_tx_type(av1::DCT_DCT, TX_4X4, true), TX_TYPE_WHT);
+        assert_eq!(internal_tx_type(av1::IDTX, TX_4X4, true), TX_TYPE_WHT);
+        assert_eq!(internal_tx_type(av1::IDTX, TX_4X4, false), TX_TYPE_IDTX);
+        assert_eq!(internal_tx_type(av1::ADST_DCT, TX_4X4, false), TX_TYPE_DST7);
+
+        let mut coeffs = vec![0i32; 16];
+        coeffs[0] = 64;
+        let mut wht = vec![0i32; 16];
+        inverse_transform(&coeffs, TX_TYPE_WHT, TX_4X4, &mut wht);
+        let mut dct = vec![0i32; 16];
+        inverse_transform(&coeffs, TX_TYPE_DCT, TX_4X4, &mut dct);
+        assert_ne!(wht, dct, "the WHT must not be aliased onto the DCT");
+    }
 }

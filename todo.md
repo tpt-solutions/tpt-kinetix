@@ -76,11 +76,15 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 ## Phase 4 — AV1 Support
 
 > Status: OBU parsing, encoder (rav1e), and encode-config plumbing are done; the
-> AV1 **decoder** emits placeholder frames pending full reconstruction.
+> AV1 **decoder** now performs intra keyframe tile-group reconstruction via the
+> real symbol decoder (`coeffs()` syntax), wired in `reconstruct`/`coeff`.
+> Block structure is still a placeholder grid (Phase C), so output is not yet
+> pixel-exact against `dav1d`; real streams fail loudly rather than decode to
+> silent garbage.
 
-- [~] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold; frame reconstruction outstanding
+- [~] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold + intra tile-group reconstruction done; partition/mode syntax outstanding
 - [x] Implement AV1 bitstream parsing (OBU parsing) via `nom`
-- [~] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output — `dav1d` reference harness wired (`tpt-kinetix-test-utils::conformance::av1_dav1d_reference_decode_when_available`); decoder still emits placeholder frames, so pixel-diff gating is ready but not yet invoked
+- [~] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output — `dav1d` reference harness wired (`tpt-kinetix-test-utils::conformance::av1_dav1d_reference_decode_when_available`); intra keyframe coefficients now decode via the symbol decoder, but placeholder block grid means pixel-diff gating is ready but not yet invoked
 - [~] Build pixel-diff harness comparing `kinetix-av1` decode output to `dav1d` output — harness (`kinetix-test-utils::reference`) built; enabled once decode produces real frames
 - [x] Set up `cargo-fuzz` target for the AV1 bitstream/OBU parser
 - [x] Integrate `rav1e` as the AV1 encoder backend (dependency wiring, safe Rust API wrapper in `kinetix-av1`)
@@ -202,7 +206,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; mb_type I-slice context (Table 9-11), coded_block_pattern (Table 9-12), and mb_qp_delta (Table 9-20) context tables implemented and tested; still missing: the remaining per-syntax-element context-index tables (Tables 9-13..9-33) and macroblock-level CABAC syntax parsing wired into `decoder.rs`
 - [x] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
 - [x] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
-- [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113` — FrameHeader and TileGroup OBUs now parsed and stored; `TileData` struct captures per-tile payloads for future parallel decode; full coefficient reconstruction pending
+- [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/reconstruct.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item — FrameHeader and TileGroup OBUs now parsed and stored; `TileData` struct captures per-tile payloads for future parallel decode; **AV1 Phase B is done (2026-08-09): intra keyframe coefficients now decode through the real symbol decoder via `coeffs()` (all_zero / intra_tx_type / eob_pt_* / eob_extra / coeff_base(_eob) / coeff_br / dc_sign / sign_bit / Exp-Golomb tail) in `coeff.rs`, rewiring the old `BitReader` scheme in `decode_tile_group`/`decode_chroma_tx`**; still outstanding: real superblock partition + mode syntax (Phase C), inter prediction, non-square transforms, full AV1 transform set, and loop filters
 
 Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).
 
@@ -355,37 +359,163 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
   - [x] Per-4×4-block deblocking `bS` (coefficient-OR + MV/ref rule) fixes the
         real remaining gap; chroma reuses the co-located luma `bS` per spec.
 
-### H.264 — Phase D: CABAC
-- [~] Per-syntax-element context-index tables (Tables 9-12..9-33) and
-      binarizations (§9.3.2) wired into the arithmetic engine in `entropy.rs`
-      — mb_type I-slice (Table 9-11), coded_block_pattern (Table 9-12), and
-      mb_qp_delta (Table 9-20) implemented and tested; remaining tables
-      (9-13..9-33) still outstanding
-- [ ] CABAC macroblock/residual syntax parsing in the slice loop
-- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg`
+  #### Phase C.3 — multi-P-frame chaining (open, found 2026-08-09)
 
-  #### Phase D.1 — remaining context-index tables (Tables 9-13..9-33)
-  - [ ] Table 9-13/9-14: mb_type P/B-slice context init (split with 9-15..9-18)
-  - [ ] Tables 9-15..9-18: sub_mb_type / ref_idx / mvd context init
-  - [ ] Tables 9-19: mb_qp_delta (note: 9-20 already done) — verify 9-19 wiring
-  - [ ] Tables 9-21..9-25: coded_block_pattern / CBF context (verify overlap w/ 9-12)
-  - [ ] Tables 9-26..9-33: residual (significant_coeff, last_sig, coeff_abs,
-        level, run) context init for 4×4 / 8×8 / chroma
-  - [ ] Add unit tests per table (range-tab mapping + a sampled decode) mirroring
-        the 9-11/9-12/9-20 test pattern
+  > Found while running the full `tpt-kinetix-h264` suite during Phase E.2.
+  > Not caused by (and not fixed by) Phase E.1/E.2 — reference-list
+  > construction and DPB marking are both exercised bit-exactly by the tests
+  > that *do* pass, and the divergence is a small localised residual/MC
+  > difference rather than a whole-frame wrong-reference difference.
+
+  - [ ] `tests/multi_frame_dpb.rs::ipppp_clip_decodes_bitexact_frame_by_frame`
+        (untracked, ffmpeg-gated) fails on a 5-frame 64×48 IPPPP clip: frames 0
+        and 1 are bit-exact (max_diff=0) but frame 2 — the **second** P picture,
+        the first one that predicts from another P picture — differs by
+        max_diff=33 over 124/4608 samples. `p_frame_conformance.rs` only covers
+        a single IDR→P step, so it stays green. The untracked
+        `examples/dbg_ipp.rs` / `examples/dbg_p2.rs` debug harnesses from the
+        previous session were already narrowing this to macroblock 9 of that
+        slice; start there (dump `mb_type`, the per-4×4 MV grid, and the luma
+        coefficients for MB 9 and diff them against `ffmpeg -debug mb_type+mv`).
+  - [ ] `tests/fuzz_from_seed.rs::fuzz_structured_seeds` trips its own 300 ms
+        per-decode soft timeout after ~1.5 M mutation iterations on a fast
+        desktop (slowest *completed* decode observed: 245 ms, i.e. the budget is
+        marginal rather than the decode being hung). The timing-out inputs are
+        mutated large-dimension SPS seeds, so this is a decode-throughput /
+        allocation-cost issue on huge pictures, not a panic. Either profile the
+        large-picture path or make the budget machine-relative before this can
+        be a reliable CI gate.
+
+### H.264 — Phase D: CABAC
+
+> Updated 2026-08-09: the engine + I-slice context tables/binarizations from
+> the previous entry were re-verified against FFmpeg's `libavcodec/h264_cabac.c`
+> (cross-checked the same way this repo's CAVLC tables already are) and found
+> to have real bugs, not just missing coverage — `MbTypeICabacContext`'s bin-0
+> context was static instead of neighbor-derived and was missing the I_PCM
+> `decode_terminate()` check; `CbpCabacContext` had no neighbor input at all;
+> `MbQpDeltaCabacContext` used a truncated-unary+EG0 binarization instead of
+> the real unbounded-unary one. All three were rewritten, and the previously
+> "outstanding" I-slice-relevant tables (chroma pred mode, intra4x4 pred mode,
+> coded_block_flag, significant/last_significant_coeff_flag, coeff_abs_level)
+> were implemented — see Phase D.1/D.3 below for what's actually done now.
+
+- [~] Context-index tables + binarizations for **I-slice** syntax elements
+      (mb_type, intra_chroma_pred_mode, prev/rem_intra4x4_pred_mode,
+      coded_block_pattern, mb_qp_delta, coded_block_flag,
+      significant_coeff_flag/last_significant_coeff_flag/coeff_abs_level_minus1)
+      implemented in `entropy.rs`/`cabac_tables.rs` and unit-tested. P/B-slice
+      tables (mb_skip_flag refinement, mb_type P/B, sub_mb_type, ref_idx, mvd)
+      not started.
+- [~] CABAC macroblock/residual syntax parsing wired into the slice loop
+      (`slice_data.rs::parse_i_slice_cabac`/`parse_intra_macroblock_cabac`,
+      wired into `decoder.rs`) for I-slices only, reusing the existing
+      CAVLC-path reconstruction/dequant/IDCT/deblock code unchanged.
+- [ ] **Known bug, unresolved**: for a slice where an early macroblock is
+      Intra_4x4 with real (nonzero) residual, the decoder desyncs partway
+      through — `end_of_slice_flag` never fires and only ~45% of the CABAC
+      payload gets consumed (verified on a minimal single-macroblock 16×16
+      repro). Macroblocks where the *first* macroblock is Intra_16×16 (with
+      or without residual), or where Intra_4x4 macroblocks occur *after* the
+      first (with real neighbour data), decode and terminate correctly — so
+      this reproduces specifically for "Intra_4x4 as an early/first
+      macroblock with real residual", independent of resolution or cbp value.
+      Extensively cross-checked (mb_type/intra4x4-pred-mode/chroma-pred-mode/
+      coded_block_pattern/mb_qp_delta/residual significance-map/level/sign
+      decode all matched bit-for-bit against a from-scratch independent
+      Python reimplementation of the same FFmpeg-derived algorithm, and
+      `mb_type`/QP were independently confirmed via `ffmpeg -debug mb_type+qp`)
+      without finding the root cause. Given both implementations share the
+      same understanding, the bug is most likely a shared misunderstanding of
+      one syntax element rather than a transcription error. The decoder fails
+      safe (falls back rather than emitting wrong pixels — see
+      `slice_data.rs`'s `end_of_slice_flag mismatch` check), so this is a
+      correctness gap, not a soundness one. **Next step for whoever picks
+      this up**: reproduce with a 16×16 single-MB `testsrc` clip at low QP
+      (`ffmpeg -f lavfi -i testsrc=size=16x16 -c:v libx264 -profile:v main
+      -x264-params cabac=1:8x8dct=0:qp=17`), dump the raw CABAC payload bytes,
+      and re-derive the independent reference decoder (the approach used this
+      session) to bisect further — e.g. try porting FFmpeg's `residual_luma`
+      dispatch even more literally (block-by-block byte offsets) in case
+      there's a category (`ctxBlockCat`) misassignment for some I_NxN
+      sub-case not exercised by the multi-MB tests that happened to pass.
+- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg` — blocked on the
+      bug above; `cabac_conformance.rs` exists (mirrors `cavlc_conformance.rs`)
+      but both tests are `#[ignore]`d until it's fixed.
+
+  #### Phase D.1 — remaining context-index tables
+
+  > Updated 2026-08-09: the three remaining Phase D.1 checkboxes are now
+  > done, but this is **context-index-table work only** (init values +
+  > ctxIdxOffset layout + ctxIdxInc derivation *data*), not P/B-slice syntax
+  > parsing — Phase D.4 below (mb_type-P/B/sub_mb_type/ref_idx/mvd
+  > *binarization and decode-loop wiring*) remains not started. Added
+  > `CABAC_CTX_INIT_PB0`/`1`/`2` (1024-entry `(m,n)` tables per
+  > `cabac_init_idc`) plus ctxIdxOffset constants for mb_skip_flag/mb_type/
+  > sub_mb_type (P/SP and B) and mvd_x/mvd_y/ref_idx, all fetched and
+  > cross-checked from FFmpeg's `libavcodec/h264_cabac.c` two independent
+  > ways (the source's own `/* lo - hi */` block comments plus the literal
+  > ctxIdx arithmetic in `decode_cabac_mb_skip`/`decode_cabac_p_mb_sub_type`/
+  > `decode_cabac_b_mb_sub_type`/`decode_cabac_mb_ref`/`decode_cabac_mb_mvd`).
+  > Found and fixed a real bug in the process: the pre-existing
+  > `MB_SKIP_FLAG_P_INIT` stub's three `(m,n)` pairs turned out to be ctxIdx
+  > 11's value from *each of the three* `cabac_init_idc` tables, not ctxIdx
+  > 11/12/13 from one table — `MbSkipFlagContext::new_p_slice` now takes a
+  > `cabac_init_idc` parameter and reads the verified `CABAC_CTX_INIT_PB*`
+  > tables directly (see `entropy.rs`'s `MbSkipFlagContext` doc comment for
+  > the full story); a `new_b_slice` constructor (ctxIdx 24..=26) was added
+  > alongside it, confirmed from source to reuse the same condTermFlag
+  > derivation as P/SP. Also added `ctxBlockCat` 5 (Luma8x8) residual
+  > contexts: extended `SIG_COEFF_CTX_BASE`/`LAST_COEFF_CTX_BASE`/
+  > `COEFF_ABS_LEVEL_M1_CTX_BASE` to 6 entries, and confirmed from FFmpeg's
+  > `decode_cabac_residual_nondc` that `coded_block_flag` is *not* separately
+  > signalled for Luma8x8 in the non-4:4:4 case this crate targets (so
+  > `CBF_CTX_BASE` deliberately stays at 5 entries, documented on
+  > `CAT_LUMA_8X8`); added the `significant_coeff_flag`/
+  > `last_significant_coeff_flag` many-to-one ctxIdxInc indirection tables
+  > (`SIG_COEFF_CTX_INC_8X8_FRAME`/`LAST_COEFF_CTX_INC_8X8_FRAME`, 63 entries
+  > each) as standalone consts — **not** wired into
+  > `ResidualCabacContext::decode_block`, which still assumes ctxIdxInc ==
+  > scan position (only valid for cats 0..=4); that restructuring, plus all
+  > actual P/B mb_type/sub_mb_type/ref_idx/mvd binarization, is Phase D.4.
+  > All new tables/consts are unit-tested in `cabac_tables.rs`.
+
+  - [x] mb_type I-slice, coded_block_pattern, mb_qp_delta, intra_chroma_pred_mode,
+        prev/rem_intra4x4_pred_mode, coded_block_flag, significant_coeff_flag,
+        last_significant_coeff_flag, coeff_abs_level_minus1 — all I-slice-only,
+        frame coding (no MBAFF/field), no 8x8 transform.
+  - [x] mb_type P/B-slice, sub_mb_type, ref_idx, mvd context init (needed for
+        Phase D.4 P/B-slice CABAC) — tables + ctxIdxOffset constants only,
+        see `cabac_tables.rs`; no binarization/parsing implemented yet.
+  - [x] mb_skip_flag refinement for P/B — old `MB_SKIP_FLAG_P_INIT` stub was
+        wrong (see note above), fixed and extended with a B-slice
+        constructor; both now `cabac_init_idc`-dependent per source.
+  - [x] 8x8-transform-specific residual contexts (ctxBlockCat 5, Luma8x8) —
+        context-index tables + ctxIdxInc indirection LUTs only; still not
+        wired into `decode_block`, so the `!pps.transform_8x8_mode_flag`
+        gate elsewhere in the codebase must stay in place until Phase D.4.
 
   #### Phase D.2 — binarizations (§9.3.2)
-  - [ ] Implement/verify ue(v)/se(v), me(v), te(v), and fixed-length +
-        truncated unary binarizations used by the tables above
-  - [ ] Unit-test each binarization round-trip against the spec examples
+  - [x] Truncated-unary, FL (LSB-first per §9.3.2.5, distinct from CAVLC's
+        MSB-first `u(v)`), and UEG0 (via `decode_bypass_eg`) binarizations
+        used by the I-slice tables above are implemented; see `entropy.rs`.
+  - [ ] Binarizations specific to P/B-slice elements (mvd's UEGk suffix beyond
+        what `decode_bypass_eg` already covers, ref_idx's truncated unary)
 
   #### Phase D.3 — CABAC syntax parsing in the slice loop
-  - [ ] Wire context tables + binarizations into `entropy.rs` decode of
-        mb_type / coded_block_pattern / residual in the slice loop
-  - [ ] Reuse existing CAVLC reconstruction (transform/prediction/deblock) for
-        CABAC-decoded syntax
+  - [x] I-slice mb_type / intra pred modes / coded_block_pattern / mb_qp_delta
+        / residual wired into `slice_data.rs`'s CABAC-specific parser,
+        reusing existing CAVLC reconstruction (transform/prediction/deblock)
+        unchanged (see `parse_i_slice_cabac`).
+  - [ ] Fix the known desync bug above.
   - [ ] Add a Main/High-profile CABAC clip to the corpus and validate bit-exact
-        vs `ffmpeg`
+        vs `ffmpeg` (test scaffolding — `cabac_conformance.rs` — already exists,
+        currently `#[ignore]`d)
+
+  #### Phase D.4 — P/B-slice CABAC (not started)
+  - [ ] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
+        parsing, following the same I-slice-first-then-P-slice pattern used
+        for CAVLC
 
 ### H.264 — Phase E/F/G: advanced tools
 
@@ -401,22 +531,117 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > SPS/PPS `scaling_list` values are parsed but never applied at dequant.
 > `field_pic_flag` is parsed in `slice.rs` but `bottom_field_flag` is
 > discarded and there is no field/MBAFF decode logic anywhere.
+>
+> Updated 2026-08-09: Phase E.1 is done —
+> `parse_ref_pic_list_modification`'s values are no longer discarded; they now
+> drive `ref_pic::modify_ref_pic_list` (§8.2.4.3). Phase E.2 is done too —
+> `parse_dec_ref_pic_marking`'s values now drive `ref_pic::Dpb::mark_decoded_picture`
+> (§8.2.5). The rest of the paragraph above still holds:
+> `parse_pred_weight_table` (E.4) remains parse-only.
 
 #### Phase E.1 — ref_pic_list_modification (wire the existing parse-only stub)
-- [ ] Thread `modification_of_pic_nums_idc` + `abs_diff_pic_num_minus1` /
+- [x] Thread `modification_of_pic_nums_idc` + `abs_diff_pic_num_minus1` /
       `long_term_pic_num` from `parse_ref_pic_list_modification` (`slice.rs:305`)
       into `ref_pic.rs`'s reference-list construction so it actually reorders
       `RefPicList0`/`RefPicList1` per §8.2.4.3, instead of discarding the values
-- [ ] Unit test: a P-slice with an explicit reorder command produces a
-      different `RefPicList0` order than default construction (§8.2.4.2)
+      — **DONE (2026-08-09)**. `ref_pic.rs` gained `modify_ref_pic_list`
+      (§8.2.4.3.1 short-term `picNumLXPred`/`picNumLXNoWrap`/`picNumLX`
+      derivation with `MaxPicNum` wrap, §8.2.4.3.2 long-term selection, and the
+      shared 8-38/8-39 insert-shift-dedupe splice via `splice_into_list`, using
+      `PicNumF`/`LongTermPicNumF` as `Option<i64>` "never matches" sentinels).
+      `build_ref_list_l0` now takes `PicNumContext` + the header's
+      `ref_pic_list_modification_l0` and applies §8.2.4.2.1 initialisation then
+      §8.2.4.3 modification; `decoder.rs` passes them through. Two adjacent
+      correctness fixes landed with it: (a) §8.2.4.2.1 P-slice initialisation
+      ordered short-term refs by descending **PicOrderCnt**, which is the
+      B-slice rule — it now orders by descending **PicNum** (`FrameNumWrap`),
+      so `frame_num`-wrapped references sort correctly; (b) `decoder.rs` sized
+      RefPicList0 from the raw PPS `num_ref_idx_l0_default_active_minus1`,
+      ignoring the slice header's `num_ref_idx_active_override_flag` — it now
+      uses the header's effective value (§7.4.3). Malformed streams fail safe:
+      a command naming a picture absent from the DPB yields
+      `RefPicListError`/`None` so the caller falls back rather than decoding
+      against a wrong reference list, and the parser now enforces §7.4.3.1's
+      cap of `num_ref_idx_lX_active_minus1 + 1` commands (previously an
+      unbounded loop, harmless only because the values were discarded).
+      **Note: L1 is parsed and stored but not yet applied — B-slice decode
+      does not exist (Phase E.3), so there is no `RefPicList1` to modify.**
+- [x] Unit test: a P-slice with an explicit reorder command produces a
+      different `RefPicList0` order than default construction (§8.2.4.2) —
+      `ref_pic.rs::tests::modification_reorders_p_slice_list_away_from_default`
+      plus 7 sibling unit tests (pred carried across commands, `MaxPicNum`
+      wrap on `ShortTermAdd`, long-term promotion, list length invariance
+      across `num_active` 1..=4, pulling in a picture the truncation dropped,
+      absent-picture error, empty-list no-op), and the end-to-end
+      `tests/ref_pic_list_modification.rs` which drives the reorder from real
+      slice-header bitstream syntax (3 tests) plus 3 new `slice.rs` header
+      round-trip/§7.4.3.1-rejection tests. Existing bit-exact I/P-frame
+      conformance (`cavlc_conformance.rs`, `p_frame_conformance.rs`,
+      max_diff=0) is unaffected.
 
 #### Phase E.2 — MMCO / dec_ref_pic_marking (wire the existing parse-only stub)
-- [ ] Thread `memory_management_control_operation` values 1–6 from
+- [x] Thread `memory_management_control_operation` values 1–6 from
       `parse_dec_ref_pic_marking` (`slice.rs:371`) into real DPB marking in
       `ref_pic.rs` (mark-unused-for-reference, long-term conversion, sliding
-      window override), instead of discarding the values
-- [ ] Unit test: MMCO 5 (reset) and MMCO 1 (mark short-term unused) each
-      produce the expected DPB state
+      window override), instead of discarding the values — **DONE (2026-08-09)**.
+      `parse_dec_ref_pic_marking` now returns a typed `DecRefPicMarking`
+      (`Idr { no_output_of_prior_pics_flag, long_term_reference_flag }` /
+      `SlidingWindow` / `Adaptive(Vec<MmcoOp>)`) stored on
+      `SliceHeader::dec_ref_pic_marking`, and `ref_pic.rs` gained
+      `Dpb::mark_decoded_picture`, the §8.2.5 decoded reference picture marking
+      process, which `decoder.rs::store_reference_picture` runs for every
+      reference picture on both decode paths. All six operations are
+      implemented: MMCO 1 (§8.2.5.4.1, `picNumX = CurrPicNum −
+      (difference_of_pic_nums_minus1 + 1)`, equation 8-40, matched against
+      `PicNum`/`FrameNumWrap` so pre-wrap negatives work), MMCO 2 (§8.2.5.4.2),
+      MMCO 3 (§8.2.5.4.3, short-term → long-term, evicting whichever picture
+      already held that `LongTermFrameIdx`), MMCO 4 (§8.2.5.4.4,
+      `MaxLongTermFrameIdx`, dropping every long-term above the new maximum,
+      `plus1 == 0` meaning "no long-term frame indices"), MMCO 5 (§8.2.5.4.5,
+      empty the DPB, reset `MaxLongTermFrameIdx`, and rebase the current
+      picture to `frame_num == 0` / `PicOrderCnt == 0` per §7.4.3/§8.2.1.1 —
+      reported back through `MarkingOutcome::mmco5` so `decoder.rs` also runs
+      `PocState::reset_after_mmco5`), and MMCO 6 (§8.2.5.4.6, current picture →
+      long-term). §8.2.5.1's "adaptive marking replaces sliding-window marking"
+      rule is honoured: `Adaptive` never runs `apply_sliding_window`, and the
+      current picture is marked short-term afterwards unless MMCO 6 claimed it.
+      IDR marking (including `long_term_reference_flag`) goes through the same
+      entry point. Malformed streams fail safe rather than half-marking: a
+      command naming a picture that is not in the DPB with the required marking
+      returns `MmcoError` **and empties the DPB**, so the next inter slice
+      cannot predict from a wrongly-marked reference; the parser additionally
+      rejects out-of-range operands at parse time (§7.4.3.3: `long_term_frame_idx`
+      / `long_term_pic_num` > 15, `max_long_term_frame_idx_plus1` > 16, unknown
+      MMCO values) and caps the command list at FFmpeg's `MAX_MMCO_COUNT` (66)
+      so a `0`-terminated loop cannot be made unbounded. A defensive
+      post-marking capacity clamp mirrors FFmpeg's
+      `ff_h264_execute_ref_pic_marking` "reference frames exceeds max (probably
+      corrupt input)" behaviour, since each DPB entry owns a full decoded frame
+      and is therefore a memory-exhaustion vector for the fuzzers.
+- [x] Unit test: MMCO 5 (reset) and MMCO 1 (mark short-term unused) each
+      produce the expected DPB state — the two headline cases are
+      `ref_pic.rs::tests::mmco1_marks_the_selected_short_term_picture_unused`
+      and `::mmco5_resets_the_dpb_and_rebases_the_current_picture`, alongside 12
+      sibling unit tests (MMCO 2/3/4/6, `LongTermFrameIdx` reuse eviction,
+      adaptive-overrides-sliding-window, in-order application, absent-picture
+      fail-safe, overfull-DPB clamp, IDR with/without `long_term_reference_flag`,
+      the MMCO-5 POC-state reset, and an MMCO 3 → §8.2.4.3.2 hand-off proving
+      Phase E.1 and E.2 compose). Two further layers were added on top:
+      `tests/dec_ref_pic_marking.rs` drives the same operations from **real
+      slice-header bitstream syntax** (7 tests), and — new this session — from
+      **whole Annex B access units through the public `H264Decoder::decode`
+      API** (6 tests), which is the only layer that covers
+      `decoder.rs::store_reference_picture` itself: POC derivation, the
+      `nal_ref_idc == 0` "non-reference pictures never enter the DPB" gate, the
+      `PocState::reset_after_mmco5` rebase, and the fail-safe error branch. The
+      decoder-level tests were mutation-checked (severing the header→marking
+      wiring fails 5 of the 6; deleting the `reset_after_mmco5()` call fails the
+      MMCO 5 one, which needed `pic_order_cnt_lsb` values chosen so the missing
+      reset actually changes the derived POC — 12 → 2 reads as an MSB wrap and
+      yields 18). `H264Decoder::dpb()` was added as a read-only accessor so the
+      marking result is observable without inferring it from pixels. Existing
+      bit-exact I/P-frame conformance (`cavlc_conformance.rs`,
+      `p_frame_conformance.rs`, max_diff=0) is unaffected.
 
 #### Phase E.3 — B-slice parsing + direct mode
 - [ ] Parse B-slice `mb_type`/`sub_mb_type` (Tables 7-14..7-18) in
@@ -497,15 +722,17 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > `dct_8x8`, `dct_16x16`, `adst_4x4`, `wht_4x4`) and intra-prediction
 > (DC/vertical/horizontal/paeth/smooth/directional) code — this is
 > substantially more than "grey placeholder frames." **However**,
-> `decode_tile_group` (`reconstruct.rs:664`) reads coefficients with a plain
-> `BitReader` using an invented exp-golomb-like scheme (trailing-ones +
-> level-prefix/suffix, modeled on H.264 CAVLC) — real AV1 uses a multi-symbol
-> arithmetic decoder over adaptive CDFs (§8.2, the "symbol decoder"). **This
-> means the current reconstruction path still cannot decode any real AV1
-> bitstream** — it only round-trips against data shaped like its own
-> invented format. Phase A (below) has since landed the symbol decoder
-> engine itself in `entropy.rs`/`entropy_cdf.rs`, but `decode_tile_group`
-> has not been rewired onto it yet — that's Phase B.
+> `decode_tile_group` (`reconstruct.rs:664`) previously read coefficients with a
+> plain `BitReader` using an invented exp-golomb-like scheme (trailing-ones +
+> level-prefix/suffix, modeled on H.264 CAVLC). Phase A landed the symbol
+> decoder engine in `entropy.rs`/`entropy_cdf.rs`, and **Phase B (2026-08-09)
+> rewired `decode_tile_group`/`decode_chroma_tx` onto real `coeffs()` syntax
+> (`coeff.rs::read_coeffs`)** read via that symbol decoder — the reconstruction
+> math (`inverse_transform`/`predict_intra_block`) is unchanged, and the
+> lossless WHT path is now wired. Intra keyframe coefficients now decode through
+> the real arithmetic decoder (cross-checked against an independent Python
+> `coeffs()` oracle); output is still not pixel-exact because superblock
+> partition/mode syntax is a fixed placeholder grid (Phase C).
 
 #### AV1 Phase A — real entropy: the symbol decoder (blocker for everything below)
 
@@ -539,13 +766,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       literal spec example
 
 #### AV1 Phase B — rewire coefficient decode onto the symbol decoder
-- [ ] Replace the `BitReader`-based level/trailing-ones/total-zeros decode in
+- [x] Replace the `BitReader`-based level/trailing-ones/total-zeros decode in
       `decode_tile_group` (`reconstruct.rs:664`) and `decode_chroma_tx`
       (`reconstruct.rs:902`) with real coefficient syntax (`all_zero`,
-      `eob_pt`, `coeff_base`, `coeff_br`, sign) read via the Phase A symbol
-      decoder (§5.11.39)
-- [ ] Keep the existing `inverse_transform`/`predict_intra_block` reconstruction
-      math — only the bits-in path changes
+      `eob_pt*`, `eob_extra`, `coeff_base(_eob)`, `coeff_br`, `dc_sign`,
+      sign, Exp-Golomb tail) read via the Phase A symbol decoder (§5.11.39),
+      in `coeff.rs::read_coeffs` — landed and cross-checked against an
+      independent Python `coeffs()` oracle for golden vectors
+- [x] Keep the existing `inverse_transform`/`predict_intra_block` reconstruction
+      math — only the bits-in path changes (also wired the previously-dead
+      `wht_4x4` lossless WHT via `internal_tx_type`/`TX_TYPE_WHT`)
 
 #### AV1 Phase C — partition + mode syntax
 - [ ] Parse superblock partition tree (§5.11.4) instead of the current fixed

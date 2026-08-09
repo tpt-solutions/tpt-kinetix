@@ -87,6 +87,18 @@ impl From<&'static str> for SliceDataError {
 
 type R<T> = Result<T, SliceDataError>;
 
+/// Largest `level_prefix` (§9.2.2.1) this decoder will accept.
+///
+/// `level_prefix` is a unary count of zero bits, so a malformed stream can make
+/// it arbitrarily large. The §9.2.2.1 escape path computes
+/// `levelCode += ( 1 << ( level_prefix − 3 ) ) − 4096`, which overflows `i32`
+/// (a debug-build panic) once `level_prefix` reaches 34, and reads a
+/// `level_prefix − 3`-bit suffix, which exceeds the bit reader's 32-bit width
+/// even earlier. FFmpeg's `h264_cavlc.c` rejects anything above `25 + 3` with
+/// "Invalid level prefix"; the same bound is used here so a corrupt slice is a
+/// clean decode error instead of a panic.
+const MAX_LEVEL_PREFIX: u32 = 28;
+
 /// Per-macroblock TotalCoeff counts, kept so neighbouring macroblocks can derive
 /// `nC` (§9.2.1). Indexed by luma 4×4 block raster index 0..15 and chroma
 /// block index. Stored on a grid so the parser can look left/up.
@@ -732,21 +744,21 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
         cabac_ctx[mb_idx] = this_cabac_ctx;
-        eprintln!(
-            "DBG mb_idx={mb_idx} mb_type={:?} cbp={} qp={}",
-            mb.mb_type, mb.cbp, mb.qp
-        );
         macroblocks.push(mb);
 
         // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*
         // macroblock, not just as an early-exit check; for a well-formed
         // single-slice-per-picture stream it must be 0 until the last MB and
-        // 1 exactly there.
+        // 1 exactly there. A mismatch means the decode has desynced from the
+        // bitstream (see `todo.md` Phase D: known remaining gap for streams
+        // where an early macroblock is Intra_4x4 with real residual), so
+        // bail rather than risk emitting wrong pixels.
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
-        eprintln!("DBG mb_idx={mb_idx} end_of_slice={end_of_slice} is_last={is_last}");
         if end_of_slice != is_last {
-            eprintln!("DBG WARN end_of_slice_flag mismatch, continuing anyway for debug");
+            return Err(SliceDataError::Unsupported(
+                "end_of_slice_flag mismatch (CABAC decode desynced)",
+            ));
         }
     }
 
@@ -801,7 +813,6 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             .unwrap_or(false),
     };
     let mb_type = ctxs.mb_type.decode(dec, &mb_type_neighbors);
-    eprintln!("  DBG mb_type={mb_type} state={:?}", dec.debug_state());
     if mb_type == 25 {
         return Err(SliceDataError::Unsupported(
             "I_PCM under CABAC not supported",
@@ -837,15 +848,10 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
             let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
             modes[raster] = Intra4x4Mode::from_u8(final_mode);
-            eprintln!(
-                "    DBG blk_idx={blk_idx} raster={raster} pred_mode={pred_mode} final_mode={final_mode} state={:?}",
-                dec.debug_state()
-            );
         }
         mb.pred_modes_4x4 = Box::new(modes);
         this_pred_ctx.is_intra4x4 = true;
         this_pred_ctx.modes = modes;
-        eprintln!("  DBG intra4x4 modes={:?} state={:?}", modes.map(|m| m as u8), dec.debug_state());
     }
 
     // intra_chroma_pred_mode.
@@ -860,7 +866,6 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         .decode(dec, left_chroma_nonzero, top_chroma_nonzero);
     mb.intra_chroma_pred_mode = chroma_pred as u8;
     this_cabac_ctx.chroma_pred_mode = chroma_pred as u8;
-    eprintln!("  DBG chroma_pred={chroma_pred} state={:?}", dec.debug_state());
 
     // coded_block_pattern (I_16×16 carries it in mb_type; I_NxN decodes it).
     let (cbp_l, cbp_c) = if is_i16x16 {
@@ -871,7 +876,6 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         mb.cbp = l | (c << 4);
         (l, c)
     };
-    eprintln!("  DBG cbp_l={cbp_l} cbp_c={cbp_c} state={:?}", dec.debug_state());
 
     // mb_qp_delta, present when CBP != 0 or I_16×16.
     let mut qp = prev_qp;
@@ -913,10 +917,8 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
     for block in blocks {
         let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block);
         let coded = ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded);
-        eprintln!("  DBG luma block={block} left_coded={left_coded} top_coded={top_coded} cbf={coded}");
         if coded {
             let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
-            eprintln!("    DBG luma block={block} count={count} coeffs={coeffs:?}");
             this_nz.luma[block] = count;
             if is_i16x16 {
                 let mut shifted = [0i16; 16];
@@ -934,7 +936,6 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, bit);
             let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, bit);
             let dc_coded = ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded);
-            eprintln!("  DBG chroma_dc comp={comp} coded={dc_coded}");
             if dc_coded {
                 let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
@@ -954,10 +955,8 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (left_coded, top_coded) =
                     chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block);
                 let ac_coded = ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded);
-                eprintln!("  DBG chroma_ac comp={comp} block={block} coded={ac_coded}");
                 if ac_coded {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
-                    eprintln!("    DBG chroma_ac comp={comp} block={block} count={count} coeffs={coeffs:?}");
                     this_nz.chroma[comp * 4 + block] = count;
                     let mut shifted = [0i16; 16];
                     shifted[1..16].copy_from_slice(&coeffs[0..15]);
@@ -1411,7 +1410,7 @@ pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i
                 break;
             }
             level_prefix += 1;
-            if level_prefix > 63 {
+            if level_prefix > MAX_LEVEL_PREFIX {
                 return Err(SliceDataError::Cavlc);
             }
         }
@@ -1516,7 +1515,7 @@ fn parse_cavlc_chroma_dc(r: &mut BitReader) -> R<([i16; 4], u8)> {
                 break;
             }
             level_prefix += 1;
-            if level_prefix > 63 {
+            if level_prefix > MAX_LEVEL_PREFIX {
                 return Err(SliceDataError::Cavlc);
             }
         }
