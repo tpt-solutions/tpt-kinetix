@@ -161,6 +161,10 @@ pub struct SliceHeader {
     /// "not used" for I/SI slices, which always use `cabac_context_init_I`
     /// regardless of this field).
     pub cabac_init_idc: u32,
+    /// `direct_spatial_mv_pred_flag` (B slices only, §7.4.3). When `true`,
+    /// B-slice direct mode uses spatial derivation (§8.4.1.2.2); when `false`,
+    /// temporal derivation (§8.4.1.2.3) is used. Always `false` for non-B slices.
+    pub direct_spatial_mv_pred_flag: bool,
     /// Bit offset within the slice RBSP where macroblock data begins (after the
     /// header, before any CABAC byte-alignment). Callers use this to seek the
     /// residual/macroblock parser to the correct position.
@@ -300,10 +304,11 @@ impl SliceHeader {
             let _redundant_pic_cnt = r.read_ue().context("redundant_pic_cnt")?;
         }
 
-        if slice_type == SliceType::B {
-            let _direct_spatial_mv_pred_flag =
-                r.read_bit().context("direct_spatial_mv_pred_flag")?;
-        }
+        let direct_spatial_mv_pred_flag = if slice_type == SliceType::B {
+            r.read_bit().context("direct_spatial_mv_pred_flag")? == 1
+        } else {
+            false
+        };
 
         // num_ref_idx_active_override.
         let mut num_ref_idx_l0_active_minus1 = ctx.num_ref_idx_l0_default_active_minus1;
@@ -415,6 +420,7 @@ impl SliceHeader {
             ref_pic_list_modification_l0,
             ref_pic_list_modification_l1,
             dec_ref_pic_marking,
+            direct_spatial_mv_pred_flag,
             data_bit_offset,
         })
     }

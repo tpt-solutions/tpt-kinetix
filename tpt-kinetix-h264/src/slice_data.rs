@@ -53,6 +53,32 @@ const GOLOMB_TO_INTER_CBP: [u8; 48] = [
 /// sub_macroblock types for P_8x8 (Table 7-13) — number of sub-partitions.
 const P_SUB_MB_PARTS: [usize; 4] = [1, 2, 2, 4];
 
+/// B-slice mb_type 4..=21 table: (is_16x8, dir0, dir1).
+/// Index = mb_type_raw − 4.
+const B_2PART_TABLE: [(bool, crate::macroblock::BPredDir, crate::macroblock::BPredDir); 18] = {
+    use crate::macroblock::BPredDir;
+    [
+        (true,  BPredDir::L0, BPredDir::L0),  // 4
+        (false, BPredDir::L0, BPredDir::L0),  // 5
+        (true,  BPredDir::L1, BPredDir::L1),  // 6
+        (false, BPredDir::L1, BPredDir::L1),  // 7
+        (true,  BPredDir::L0, BPredDir::L1),  // 8
+        (false, BPredDir::L0, BPredDir::L1),  // 9
+        (true,  BPredDir::L1, BPredDir::L0),  // 10
+        (false, BPredDir::L1, BPredDir::L0),  // 11
+        (true,  BPredDir::L0, BPredDir::Bi),  // 12
+        (false, BPredDir::L0, BPredDir::Bi),  // 13
+        (true,  BPredDir::L1, BPredDir::Bi),  // 14
+        (false, BPredDir::L1, BPredDir::Bi),  // 15
+        (true,  BPredDir::Bi, BPredDir::L0),  // 16
+        (false, BPredDir::Bi, BPredDir::L0),  // 17
+        (true,  BPredDir::Bi, BPredDir::L1),  // 18
+        (false, BPredDir::Bi, BPredDir::L1),  // 19
+        (true,  BPredDir::Bi, BPredDir::Bi),  // 20
+        (false, BPredDir::Bi, BPredDir::Bi),  // 21
+    ]
+};
+
 /// Errors surfaced while parsing slice data.
 #[derive(Debug)]
 pub enum SliceDataError {
@@ -1048,6 +1074,17 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
                 present: true,
                 ..Default::default()
             };
+            // A skipped macroblock is present in the picture but is not coded
+            // Intra_4×4/Intra_8×8, so neighbours must see it as `present` with
+            // `is_intra4x4 = false` (i.e. ForcedDc). Leaving it at the grid
+            // default (`present = false`) would make a later Intra_4×4 macroblock
+            // treat the skip neighbour as off-picture and force its
+            // `predIntra4x4PredMode` to DC, corrupting the prediction mode (and
+            // cascading to its own neighbours).
+            pred_ctx[mb_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
             macroblocks.push(mb);
             continue;
         }
@@ -1233,6 +1270,290 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         mb.intra_chroma_pred_mode,
         &modes,
     );
+
+    Ok((mb, this_nz, this_pred_ctx, qp))
+}
+
+/// Parse the macroblock layer of a B slice (CAVLC, §7.3.4).
+///
+/// B-slice inter macroblocks use mb_type 0..=22 (Table 7-14, §7.4.5); intra
+/// macroblocks inside a B slice use I-table mb_type + 23 (§7.4.5). Skip runs
+/// are signalled with `mb_skip_run` (ue(v)), read once per slice and again
+/// after each coded MB, and produce `MbType::BSkip` (not PSkip).
+#[allow(clippy::too_many_arguments)]
+pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
+    reader: &mut BitReader,
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    num_ref_idx_l0_active: u32,
+    num_ref_idx_l1_active: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) -> R<ParsedSlice> {
+    let total = (mb_cols * mb_rows) as usize;
+    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
+    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    let mut qp = slice_qp;
+    let mut mb_skip_run: Option<u32> = None;
+
+    for mb_idx in 0..total {
+        let mb_x = (mb_idx as u32) % mb_cols;
+        let mb_y = (mb_idx as u32) / mb_cols;
+
+        if mb_skip_run.is_none() {
+            let run = reader.read_ue().ok_or(SliceDataError::Eof("mb_skip_run"))?;
+            if run > total as u32 {
+                return Err(SliceDataError::Unsupported("mb_skip_run out of range"));
+            }
+            mb_skip_run = Some(run);
+        }
+        let run = mb_skip_run.as_mut().expect("set above");
+        if *run > 0 {
+            *run -= 1;
+            let mut mb = Macroblock::new_skip();
+            mb.mb_type = MbType::BSkip;
+            mb.qp = qp;
+            mb.skip = true;
+            nz[mb_idx] = MbNz { present: true, ..Default::default() };
+            pred_ctx[mb_idx] = MbPredCtx { present: true, ..Default::default() };
+            macroblocks.push(mb);
+            continue;
+        }
+        mb_skip_run = None;
+
+        let (mb, this_nz, this_pred_ctx, new_qp) = parse_b_macroblock(
+            reader,
+            mb_x,
+            mb_y,
+            mb_cols,
+            &nz,
+            &pred_ctx,
+            qp,
+            num_ref_idx_l0_active,
+            num_ref_idx_l1_active,
+            chroma_qp_index_offset,
+            tracer,
+        )?;
+        qp = new_qp;
+        nz[mb_idx] = this_nz;
+        pred_ctx[mb_idx] = this_pred_ctx;
+        macroblocks.push(mb);
+    }
+
+    let mut mv_store = MvStore::new(total);
+    crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
+
+    Ok(ParsedSlice { macroblocks, nz, mv_store })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
+    r: &mut BitReader,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    nz_grid: &[MbNz],
+    pred_ctx_grid: &[MbPredCtx],
+    prev_qp: i32,
+    num_ref_idx_l0_active: u32,
+    num_ref_idx_l1_active: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
+    use crate::macroblock::BPredDir;
+
+    let mut mb = Macroblock::new_skip();
+    mb.skip = false;
+    let mut this_nz = MbNz { present: true, ..Default::default() };
+    let this_pred_ctx = MbPredCtx { present: true, ..Default::default() };
+
+    let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+
+    // mb_type >= 23 → intra macroblock (subtract 23 to get I-slice index).
+    if mb_type_raw >= 23 {
+        let i_type = mb_type_raw - 23;
+        if i_type > 25 {
+            return Err(SliceDataError::Unsupported("mb_type out of range in B slice"));
+        }
+        return parse_intra_macroblock(
+            r, mb_x, mb_y, mb_cols, nz_grid, pred_ctx_grid, prev_qp, chroma_qp_index_offset,
+            tracer, i_type,
+        );
+    }
+
+    // B-inter types (Table 7-14).
+    let mut motion = crate::macroblock::InterMotion::default();
+
+    match mb_type_raw {
+        0 => {
+            // B_Direct_16x16 — no motion data in bitstream.
+            mb.mb_type = MbType::BDirect16x16;
+        }
+        1 => {
+            // B_L0_16x16
+            mb.mb_type = MbType::BL016x16;
+            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+            let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+            motion.mvd_l0.push((mx, my));
+        }
+        2 => {
+            // B_L1_16x16
+            mb.mb_type = MbType::BL116x16;
+            motion.ref_idx_l1.push(read_ref_idx(r, num_ref_idx_l1_active)?);
+            let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
+            let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
+            motion.mvd_l1.push((mx, my));
+        }
+        3 => {
+            // B_Bi_16x16
+            mb.mb_type = MbType::BBi16x16;
+            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            motion.ref_idx_l1.push(read_ref_idx(r, num_ref_idx_l1_active)?);
+            let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+            let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+            motion.mvd_l0.push((mx, my));
+            let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
+            let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
+            motion.mvd_l1.push((mx, my));
+        }
+        4..=21 => {
+            // Two-partition B types (16×8 or 8×16).
+            let idx = (mb_type_raw - 4) as usize;
+            let (is_16x8, dir0, dir1) = B_2PART_TABLE[idx];
+            mb.mb_type = if is_16x8 { MbType::B16x8 } else { MbType::B8x16 };
+            motion.pred_dirs = vec![dir0, dir1];
+
+            // Pre-fill ref_idx with LIST_NOT_USED, overwrite for applicable partitions.
+            motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 2];
+            motion.ref_idx_l1 = vec![crate::mv::LIST_NOT_USED; 2];
+
+            // Read all L0 ref indices first.
+            for part in 0..2usize {
+                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi {
+                    motion.ref_idx_l0[part] = read_ref_idx(r, num_ref_idx_l0_active)?;
+                }
+            }
+            // Then all L1 ref indices.
+            for part in 0..2usize {
+                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi {
+                    motion.ref_idx_l1[part] = read_ref_idx(r, num_ref_idx_l1_active)?;
+                }
+            }
+            // All L0 MVDs first (§7.3.5.1), then all L1 MVDs.
+            for part in 0..2usize {
+                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi {
+                    let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+                    let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+                    motion.mvd_l0.push((mx, my));
+                }
+            }
+            for part in 0..2usize {
+                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi {
+                    let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
+                    let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
+                    motion.mvd_l1.push((mx, my));
+                }
+            }
+        }
+        22 => {
+            // B_8x8 — four 8×8 sub-partitions.
+            mb.mb_type = MbType::BB8x8;
+            let mut sub_types = [0u8; 4];
+            for st in sub_types.iter_mut() {
+                let raw = r.read_ue().ok_or(SliceDataError::Eof("sub_mb_type"))?;
+                if raw >= 13 {
+                    return Err(SliceDataError::Unsupported("B sub_mb_type out of range"));
+                }
+                *st = raw as u8;
+            }
+            motion.sub_mb_type_b = Some(sub_types);
+
+            // Pre-fill ref indices with LIST_NOT_USED.
+            motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 4];
+            motion.ref_idx_l1 = vec![crate::mv::LIST_NOT_USED; 4];
+            motion.pred_dirs = sub_types.iter()
+                .map(|&st| if (st as usize) < 13 { crate::mv::B_SUB_MB_DIR[st as usize] } else { BPredDir::Direct })
+                .collect();
+
+            // All L0 ref indices.
+            for part in 0..4usize {
+                let dir = motion.pred_dirs[part];
+                if dir != BPredDir::Direct && (dir == BPredDir::L0 || dir == BPredDir::Bi) {
+                    motion.ref_idx_l0[part] = read_ref_idx(r, num_ref_idx_l0_active)?;
+                }
+            }
+            // All L1 ref indices.
+            for part in 0..4usize {
+                let dir = motion.pred_dirs[part];
+                if dir != BPredDir::Direct && (dir == BPredDir::L1 || dir == BPredDir::Bi) {
+                    motion.ref_idx_l1[part] = read_ref_idx(r, num_ref_idx_l1_active)?;
+                }
+            }
+            // All L0 mvds (all parts × sub-parts, skipping Direct).
+            for part in 0..4usize {
+                let dir = motion.pred_dirs[part];
+                if dir == BPredDir::Direct { continue; }
+                if dir == BPredDir::L0 || dir == BPredDir::Bi {
+                    let n_sub = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
+                    for _ in 0..n_sub {
+                        let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
+                        let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
+                        motion.mvd_l0.push((mx, my));
+                    }
+                }
+            }
+            // All L1 mvds.
+            for part in 0..4usize {
+                let dir = motion.pred_dirs[part];
+                if dir == BPredDir::Direct { continue; }
+                if dir == BPredDir::L1 || dir == BPredDir::Bi {
+                    let n_sub = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
+                    for _ in 0..n_sub {
+                        let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
+                        let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
+                        motion.mvd_l1.push((mx, my));
+                    }
+                }
+            }
+        }
+        _ => unreachable!("B mb_type_raw bounded to 0..=22 above"),
+    }
+
+    // Attach motion data for inter MBs (Direct has no motion struct).
+    if mb_type_raw != 0 {
+        mb.motion = Some(motion);
+    }
+
+    // coded_block_pattern for inter macroblocks.
+    let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
+    if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
+        return Err(SliceDataError::Unsupported("cbp code_num out of range"));
+    }
+    let cbp = GOLOMB_TO_INTER_CBP[code_num as usize];
+    mb.cbp = cbp;
+    let cbp_l = cbp & 0x0F;
+    let cbp_c = cbp >> 4;
+
+    let mut qp = prev_qp;
+    if cbp_l != 0 || cbp_c != 0 {
+        let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
+        qp = (prev_qp + dqp + 52).rem_euclid(52);
+    }
+    mb.qp = qp;
+
+    parse_intra_residuals(
+        r, &mut mb, &mut this_nz, nz_grid, mb_x, mb_y, mb_cols, false, cbp_l, cbp_c, tracer,
+    )?;
+
+    let mb_type_str = format!("{:?}", mb.mb_type);
+    let mut modes = [0u8; 16];
+    for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
+        modes[i] = *m as u8;
+    }
+    tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, mb.intra_chroma_pred_mode, &modes);
 
     Ok((mb, this_nz, this_pred_ctx, qp))
 }

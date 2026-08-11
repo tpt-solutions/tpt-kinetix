@@ -16,3 +16,4 @@ tpt-kinetix-h264 = { workspace = true }
 proptest = "1.5"
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
+tpt-kinetix-aac = { workspace = true }

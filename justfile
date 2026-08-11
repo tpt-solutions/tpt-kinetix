@@ -70,3 +70,26 @@ setup:
     cargo install cargo-deny --locked || true
     cargo install cargo-llvm-cov --locked || true
     @echo "For fuzzing: rustup toolchain install nightly && cargo install cargo-fuzz --locked"
+
+# Print each decoder's capabilities (machine-readable status).
+conformance:
+    cargo run -p tpt-kinetix-test-utils --example codec_status
+
+# Assert every decoder is pixel-exact. Currently a non-passing check
+# (h264/av1 CABAC paths are not yet pixel-exact); becomes the real gate
+# once those decoders reach pixel_exact.
+conformance-strict:
+    cargo run -p tpt-kinetix-test-utils --example codec_status -- --strict
+
+# Generate the ad-hoc test-src corpus, then decode/diff every file in it.
+corpus-check:
+    cargo run -p tpt-kinetix-h264 --example gen_corpus
+    cargo run -p tpt-kinetix-h264 --example corpus_check
+
+# Run every Criterion bench in the workspace.
+bench:
+    cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline
+
+# Run the benches and print a consolidated timing report.
+bench-report:
+    cargo run -p tpt-kinetix-test-utils --example bench_report -- --release

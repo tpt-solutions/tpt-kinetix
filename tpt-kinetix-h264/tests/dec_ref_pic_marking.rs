@@ -177,6 +177,7 @@ fn decoded_picture(frame_num: u32) -> DpbEntry {
         is_short_term: true,
         is_long_term: false,
         long_term_pic_num: -1,
+        mv_grid: None,
     }
 }
 

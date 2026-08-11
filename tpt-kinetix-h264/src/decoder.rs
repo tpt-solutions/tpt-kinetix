@@ -211,6 +211,15 @@ impl H264Decoder {
                     {
                         continue;
                     }
+                    // Also cap total macroblock count so O(MB_count) paths (e.g.
+                    // emit_skip_frame) can't be abused by a malformed SPS that
+                    // encodes near-8192×8192 dimensions (≈262 k MBs → timeout).
+                    const MAX_MB_COUNT: u32 = 36_864; // ≈3072×3072 (generous for 4K)
+                    let mb_cols = width.div_ceil(16);
+                    let mb_rows = height.div_ceil(16);
+                    if mb_cols * mb_rows > MAX_MB_COUNT {
+                        continue;
+                    }
 
                     // Attempt the real CAVLC I-slice decode path first.
                     match self.try_decode_real_slice(
@@ -516,6 +525,7 @@ impl H264Decoder {
             is_short_term: true,
             is_long_term: false,
             long_term_pic_num: -1,
+            mv_grid: None,
         };
         let ctx = crate::ref_pic::PicNumContext::new(sps, header.frame_num);
         match self
@@ -850,6 +860,168 @@ impl H264Decoder {
                         // its own slice header requested (§8.2.5) — this is the
                         // path that carries MMCO commands, since only non-IDR
                         // slices have a `dec_ref_pic_marking` command list.
+                        self.store_reference_picture(nal, &sps, &header, &frame);
+                        return Ok(frame);
+                    }
+                    Err(e) => {
+                        let _ = e;
+                        // Fall through to the skip scaffold.
+                    }
+                }
+            }
+        }
+
+        // Real CAVLC B-slice decode: bi-predictive motion compensation against
+        // RefPicList0 and RefPicList1 (§8.4/§8.5).
+        let is_b_slice = header.slice_type == crate::slice::SliceType::B;
+        if is_b_slice && header.first_mb_in_slice == 0 {
+            let slice_qp = 26
+                + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
+                + header.slice_qp_delta;
+            let chroma_qp_index_offset =
+                pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
+            let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+            let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
+            let pic_num_ctx = crate::ref_pic::PicNumContext::new(&sps, header.frame_num);
+            // Compute current POC using a scratch state so we don't advance the
+            // real poc_state (store_reference_picture handles that later).
+            let is_idr_b = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let current_poc = {
+                let mut scratch = self.poc_state.clone();
+                crate::ref_pic::derive_pic_order_cnt(
+                    &sps,
+                    is_idr_b,
+                    nal.nal_ref_idc != 0,
+                    header.frame_num,
+                    header.pic_order_cnt_lsb,
+                    &mut scratch,
+                )
+                .unwrap_or(0)
+            };
+
+            let l0_list = crate::ref_pic::build_ref_list_l0_b_slice(
+                &self.dpb,
+                num_ref_idx_l0_active as usize,
+                current_poc,
+                pic_num_ctx,
+                &header.ref_pic_list_modification_l0,
+            );
+            let l1_list = crate::ref_pic::build_ref_list_l1(
+                &self.dpb,
+                num_ref_idx_l1_active as usize,
+                current_poc,
+                pic_num_ctx,
+                &header.ref_pic_list_modification_l1,
+            );
+
+            if let (Some(ref_l0), Some(ref_l1)) = (l0_list, l1_list) {
+                let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> =
+                    ref_l0.iter().map(|e| e.frame.clone()).collect();
+                let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> =
+                    ref_l1.iter().map(|e| e.frame.clone()).collect();
+                let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+                reader.seek_to_bit(header.data_bit_offset);
+                match crate::slice_data::parse_b_slice(
+                    &mut reader,
+                    mb_cols,
+                    mb_rows,
+                    slice_qp,
+                    num_ref_idx_l0_active,
+                    num_ref_idx_l1_active,
+                    chroma_qp_index_offset,
+                    &mut crate::trace::NoopTracer,
+                ) {
+                    Ok(parsed) => {
+                        let mut recon = crate::reconstruct::reconstruct_b_frame(
+                            &parsed.macroblocks,
+                            &parsed.mv_store,
+                            &ref_frames_l0,
+                            &ref_frames_l1,
+                            mb_cols,
+                            mb_rows,
+                            width,
+                            height,
+                            chroma_qp_index_offset,
+                            &mut crate::trace::NoopTracer,
+                        );
+
+                        let deblock_params = crate::deblock::DeblockParams {
+                            disable_idc: header.disable_deblocking_filter_idc as u8,
+                            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                            beta_offset_div2: header.slice_beta_offset_div2,
+                            chroma_qp_index_offset,
+                        };
+                        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+                            .macroblocks
+                            .chunks(mb_cols as usize)
+                            .enumerate()
+                            .map(|(row_idx, row)| {
+                                row.iter()
+                                    .enumerate()
+                                    .map(|(col_idx, mb)| {
+                                        let idx = row_idx * mb_cols as usize + col_idx;
+                                        let nz = parsed.nz[idx].luma;
+                                        let cells = parsed
+                                            .mv_store
+                                            .cells_of(idx)
+                                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                                        crate::deblock::DeblockMbInfo::new(
+                                            mb.mb_type, nz, cells, mb.qp,
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        for (row_idx, row_info) in mb_info.iter().enumerate() {
+                            for (col_idx, cur) in row_info.iter().enumerate() {
+                                let left = if col_idx > 0 {
+                                    Some(&row_info[col_idx - 1])
+                                } else {
+                                    None
+                                };
+                                let top = if row_idx > 0 {
+                                    Some(&mb_info[row_idx - 1][col_idx])
+                                } else {
+                                    None
+                                };
+                                crate::deblock::deblock_luma_mb(
+                                    &mut recon.luma,
+                                    recon.luma_stride,
+                                    col_idx,
+                                    row_idx,
+                                    cur,
+                                    left,
+                                    top,
+                                    deblock_params,
+                                );
+                                crate::deblock::deblock_chroma_mb(
+                                    &mut recon.chroma_cb,
+                                    &mut recon.chroma_cr,
+                                    recon.chroma_stride,
+                                    col_idx,
+                                    row_idx,
+                                    cur,
+                                    left,
+                                    top,
+                                    deblock_params,
+                                );
+                            }
+                        }
+
+                        let mut data = recon.luma;
+                        data.extend(recon.chroma_cb);
+                        data.extend(recon.chroma_cr);
+
+                        self.frame_count += 1;
+                        let frame = VideoFrame {
+                            pts: packet.pts,
+                            dts: packet.dts,
+                            data,
+                            width,
+                            height,
+                            pixel_format: PixelFormat::Yuv420p,
+                            is_key_frame: false,
+                        };
                         self.store_reference_picture(nal, &sps, &header, &frame);
                         return Ok(frame);
                     }

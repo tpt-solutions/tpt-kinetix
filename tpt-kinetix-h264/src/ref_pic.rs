@@ -34,6 +34,10 @@ pub struct DpbEntry {
     /// this field doubles as the `LongTermFrameIdx` assigned by MMCO 3 / MMCO 6
     /// and compared against `MaxLongTermFrameIdx` by MMCO 4.
     pub long_term_pic_num: i32,
+    /// Per-macroblock motion vector grid of this picture, used as the co-located
+    /// picture for B-slice temporal direct mode (§8.4.1.2.3). `None` until this
+    /// picture's B/P slice MV store is recorded (e.g. by `predict_b_slice_mvs`).
+    pub mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
 }
 
 impl DpbEntry {
@@ -847,6 +851,109 @@ pub fn build_ref_list_l0(
     Some(list)
 }
 
+/// Build `RefPicList0` for a B-slice (§8.2.4.2.3).
+///
+/// Distinct from the P-slice ordering: short-term references are grouped by
+/// `PicOrderCnt` relative to `current_poc`:
+/// 1. Short-term with `POC < current_poc`, descending POC.
+/// 2. Short-term with `POC >= current_poc`, ascending POC.
+/// 3. Long-term, ascending `LongTermPicNum`.
+///
+/// Returns `None` when the DPB holds no reference pictures.
+pub fn build_ref_list_l0_b_slice(
+    dpb: &Dpb,
+    num_ref_idx_l0_active: usize,
+    current_poc: i64,
+    ctx: PicNumContext,
+    modifications: &[RefPicListModification],
+) -> Option<Vec<DpbEntry>> {
+    let num_active = num_ref_idx_l0_active.max(1);
+
+    let mut before: Vec<&DpbEntry> = dpb
+        .iter()
+        .filter(|e| e.is_short_term && e.pic_order_cnt < current_poc)
+        .collect();
+    before.sort_by_key(|e| std::cmp::Reverse(e.pic_order_cnt));
+
+    let mut at_or_after: Vec<&DpbEntry> = dpb
+        .iter()
+        .filter(|e| e.is_short_term && e.pic_order_cnt >= current_poc)
+        .collect();
+    at_or_after.sort_by_key(|e| e.pic_order_cnt);
+
+    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    longs.sort_by_key(|e| e.long_term_pic_num);
+
+    if before.is_empty() && at_or_after.is_empty() && longs.is_empty() {
+        return None;
+    }
+
+    let mut list: Vec<DpbEntry> = before
+        .into_iter()
+        .chain(at_or_after)
+        .chain(longs)
+        .cloned()
+        .collect();
+    list.truncate(num_active);
+    modify_ref_pic_list(&mut list, dpb, ctx, num_active, modifications).ok()?;
+    while list.len() < num_ref_idx_l0_active {
+        let last = list.last()?.clone();
+        list.push(last);
+    }
+    Some(list)
+}
+
+/// Build `RefPicList1` for a B-slice (§8.2.4.2.3).
+///
+/// The initial list ordering is:
+/// 1. Short-term references with `PicOrderCnt > current_poc`, ascending POC.
+/// 2. Short-term references with `PicOrderCnt <= current_poc`, descending POC.
+/// 3. Long-term references, ascending `LongTermPicNum`.
+///
+/// Returns `None` when the DPB holds no reference pictures.
+pub fn build_ref_list_l1(
+    dpb: &Dpb,
+    num_ref_idx_l1_active: usize,
+    current_poc: i64,
+    ctx: PicNumContext,
+    modifications: &[RefPicListModification],
+) -> Option<Vec<DpbEntry>> {
+    let num_active = num_ref_idx_l1_active.max(1);
+
+    let mut after: Vec<&DpbEntry> = dpb
+        .iter()
+        .filter(|e| e.is_short_term && e.pic_order_cnt > current_poc)
+        .collect();
+    after.sort_by_key(|e| e.pic_order_cnt);
+
+    let mut at_or_before: Vec<&DpbEntry> = dpb
+        .iter()
+        .filter(|e| e.is_short_term && e.pic_order_cnt <= current_poc)
+        .collect();
+    at_or_before.sort_by_key(|e| std::cmp::Reverse(e.pic_order_cnt));
+
+    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    longs.sort_by_key(|e| e.long_term_pic_num);
+
+    if after.is_empty() && at_or_before.is_empty() && longs.is_empty() {
+        return None;
+    }
+
+    let mut list: Vec<DpbEntry> = after
+        .into_iter()
+        .chain(at_or_before)
+        .chain(longs)
+        .cloned()
+        .collect();
+    list.truncate(num_active);
+    modify_ref_pic_list(&mut list, dpb, ctx, num_active, modifications).ok()?;
+    while list.len() < num_ref_idx_l1_active {
+        let last = list.last()?.clone();
+        list.push(last);
+    }
+    Some(list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,6 +1003,7 @@ mod tests {
             is_short_term: true,
             is_long_term: false,
             long_term_pic_num: -1,
+            mv_grid: None,
         }
     }
 

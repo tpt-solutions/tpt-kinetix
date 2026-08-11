@@ -145,3 +145,33 @@ jobs:
           cargo fuzz build fuzz_rtmp_flv
           cargo fuzz build fuzz_hls_playlist
         working-directory: tpt-kinetix-stream
+
+  conformance:
+    name: Conformance (ffmpeg-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run ffmpeg-gated conformance tests
+        # These are the tests that actually exercise decode-vs-ffmpeg/dav1d
+        # assertions (previously silently skipped when ffmpeg was absent).
+        run: |
+          cargo nextest run \
+            -p tpt-kinetix-h264 \
+            -p tpt-kinetix-aac \
+            -p tpt-kinetix-av1 \
+            -p tpt-kinetix-stream \
+            -p tpt-kinetix-test-utils
+      - name: Print decoder capabilities
+        run: cargo run -p tpt-kinetix-test-utils --example codec_status
+      # Non-blocking until h264/av1 CABAC paths reach pixel-exact; flip this to
+      # a hard `run:` (and drop `continue-on-error`) once capabilities report
+      # pixel_exact for those decoders.
+      - name: Assert pixel-exact (strict, currently non-blocking)
+        continue-on-error: true
+        run: cargo run -p tpt-kinetix-test-utils --example codec_status -- --strict

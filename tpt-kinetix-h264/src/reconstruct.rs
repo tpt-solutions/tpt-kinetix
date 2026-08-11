@@ -386,6 +386,299 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
     }
 }
 
+/// Reconstruct a full B-slice frame: inter macroblocks are motion-compensated
+/// from `ref_frames_l0` and `ref_frames_l1` using bi-predictive averaging
+/// (§8.4.2); intra macroblocks inside the slice use the intra path (§8.3).
+///
+/// Bi-prediction for each 4×4 block: `(pred_l0 + pred_l1 + 1) >> 1`.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_b_frame<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_frames_l0: &[VideoFrame],
+    ref_frames_l1: &[VideoFrame],
+    mb_cols: u32,
+    mb_rows: u32,
+    width: u32,
+    height: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) -> ReconstructedFrame {
+    let luma_stride = width as usize;
+    let chroma_stride = (width / 2) as usize;
+    let mut luma = vec![0u8; luma_stride * height as usize];
+    let mut cb = vec![0u8; chroma_stride * (height as usize / 2)];
+    let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
+
+    for mb_y in 0..mb_rows {
+        for mb_x in 0..mb_cols {
+            let idx = (mb_y * mb_cols + mb_x) as usize;
+            let mb = &macroblocks[idx];
+            let is_inter = mb.motion.is_some()
+                || mb.skip
+                || matches!(
+                    mb.mb_type,
+                    MbType::BSkip
+                        | MbType::BDirect16x16
+                        | MbType::BL016x16
+                        | MbType::BL116x16
+                        | MbType::BBi16x16
+                        | MbType::B16x8
+                        | MbType::B8x16
+                        | MbType::BB8x8
+                );
+            if is_inter {
+                reconstruct_b_inter_luma(
+                    mb,
+                    mv_store,
+                    ref_frames_l0,
+                    ref_frames_l1,
+                    &mut luma,
+                    luma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    tracer,
+                );
+                reconstruct_b_inter_chroma(
+                    mb,
+                    mv_store,
+                    ref_frames_l0,
+                    ref_frames_l1,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    tracer,
+                );
+            } else {
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, tracer);
+                reconstruct_chroma(
+                    mb,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    tracer,
+                );
+            }
+        }
+    }
+
+    ReconstructedFrame {
+        luma,
+        chroma_cb: cb,
+        chroma_cr: cr,
+        luma_stride,
+        chroma_stride,
+    }
+}
+
+/// B-slice luma inter reconstruction: supports L0-only, L1-only, and
+/// bi-predictive averaging per 4×4 block.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_b_inter_luma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_frames_l0: &[VideoFrame],
+    ref_frames_l1: &[VideoFrame],
+    plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    let base_y = (mb_y * 16) as usize;
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (block, &cell) in grid.iter().enumerate() {
+        let bx = (block % 4) * 4;
+        let by = (block / 4) * 4;
+        let x0 = (base_x + bx) as i32;
+        let y0 = (base_y + by) as i32;
+
+        let l0_active = cell.ref_idx >= 0;
+        let l1_active = cell.ref_idx_l1 >= 0;
+
+        let mut pred_l0 = [0u8; 16];
+        if l0_active {
+            let ref_idx = cell.ref_idx as usize;
+            if let Some(frame) = ref_frames_l0.get(ref_idx).or_else(|| ref_frames_l0.first()) {
+                let w = frame.width as usize;
+                let h = frame.height as usize;
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l0, 4, &frame.data[..w * h], w, w, h,
+                    x0, y0, cell.mv[0], cell.mv[1], 4, 4,
+                );
+            }
+        }
+        let mut pred_l1 = [0u8; 16];
+        if l1_active {
+            let ref_idx = cell.ref_idx_l1 as usize;
+            if let Some(frame) = ref_frames_l1.get(ref_idx).or_else(|| ref_frames_l1.first()) {
+                let w = frame.width as usize;
+                let h = frame.height as usize;
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l1, 4, &frame.data[..w * h], w, w, h,
+                    x0, y0, cell.mv_l1[0], cell.mv_l1[1], 4, 4,
+                );
+            }
+        }
+
+        let pred = if l0_active && l1_active {
+            // Bi-prediction: (L0 + L1 + 1) >> 1
+            let mut avg = [0u8; 16];
+            for i in 0..16 {
+                avg[i] = ((pred_l0[i] as u16 + pred_l1[i] as u16 + 1) >> 1) as u8;
+            }
+            avg
+        } else if l0_active {
+            pred_l0
+        } else if l1_active {
+            pred_l1
+        } else {
+            [128u8; 16]
+        };
+
+        tracer.on_motion_comp(
+            mb_x, mb_y, TracePlane::Luma, block as u8, &pred,
+            cell.mv, cell.ref_idx.max(0) as usize,
+        );
+
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
+        for row in 0..4 {
+            for col in 0..4 {
+                let px = x0 as usize + col;
+                let py = y0 as usize + row;
+                let off = py * stride + px;
+                let p = pred[row * 4 + col] as i32;
+                let v = (p + res[row * 4 + col]).clamp(0, 255) as u8;
+                if off < plane.len() && px < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+    }
+}
+
+/// B-slice chroma inter reconstruction: supports L0-only, L1-only, and
+/// bi-predictive averaging per 4×4 chroma block.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_b_inter_chroma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_frames_l0: &[VideoFrame],
+    ref_frames_l1: &[VideoFrame],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 8) as usize;
+    let base_y = (mb_y * 8) as usize;
+    let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (comp, plane) in [cb as &mut [u8], cr].into_iter().enumerate() {
+        let dc_src = if comp == 0 { &mb.chroma_dc_cb } else { &mb.chroma_dc_cr };
+        let ac = if comp == 0 { &mb.chroma_cb_coeffs } else { &mb.chroma_cr_coeffs };
+        let trace_plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
+        let dc_raster = [
+            dc_src[0] as i32, dc_src[1] as i32, dc_src[2] as i32, dc_src[3] as i32,
+        ];
+        let dc_out = chroma_dc_transform(&dc_raster, qpc);
+
+        for block in 0..4usize {
+            let bx = (block % 2) * 4;
+            let by = (block / 2) * 4;
+            let x0 = (base_x + bx) as i32;
+            let y0 = (base_y + by) as i32;
+            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+
+            let l0_active = cell.ref_idx >= 0;
+            let l1_active = cell.ref_idx_l1 >= 0;
+
+            let mut pred_l0 = [0u8; 16];
+            if l0_active {
+                let ref_idx = cell.ref_idx as usize;
+                if let Some(frame) = ref_frames_l0.get(ref_idx).or_else(|| ref_frames_l0.first()) {
+                    let w = frame.width as usize;
+                    let h = frame.height as usize;
+                    let luma_len = w * h;
+                    let chroma_len = (w / 2) * (h / 2);
+                    let off = luma_len + comp * chroma_len;
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l0, 4, &frame.data[off..off + chroma_len],
+                        w / 2, w / 2, h / 2, x0, y0, cell.mv[0], cell.mv[1], 4, 4,
+                    );
+                }
+            }
+            let mut pred_l1 = [0u8; 16];
+            if l1_active {
+                let ref_idx = cell.ref_idx_l1 as usize;
+                if let Some(frame) = ref_frames_l1.get(ref_idx).or_else(|| ref_frames_l1.first()) {
+                    let w = frame.width as usize;
+                    let h = frame.height as usize;
+                    let luma_len = w * h;
+                    let chroma_len = (w / 2) * (h / 2);
+                    let off = luma_len + comp * chroma_len;
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l1, 4, &frame.data[off..off + chroma_len],
+                        w / 2, w / 2, h / 2, x0, y0, cell.mv_l1[0], cell.mv_l1[1], 4, 4,
+                    );
+                }
+            }
+
+            let pred = if l0_active && l1_active {
+                let mut avg = [0u8; 16];
+                for i in 0..16 {
+                    avg[i] = ((pred_l0[i] as u16 + pred_l1[i] as u16 + 1) >> 1) as u8;
+                }
+                avg
+            } else if l0_active {
+                pred_l0
+            } else if l1_active {
+                pred_l1
+            } else {
+                [128u8; 16]
+            };
+
+            tracer.on_motion_comp(
+                mb_x, mb_y, trace_plane, block as u8, &pred,
+                cell.mv, cell.ref_idx.max(0) as usize,
+            );
+
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]));
+            for row in 0..4 {
+                for col in 0..4 {
+                    let px = x0 as usize + col;
+                    let py = y0 as usize + row;
+                    let off = py * stride + px;
+                    let p = pred[row * 4 + col] as i32;
+                    let v = (p + res[row * 4 + col]).clamp(0, 255) as u8;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+            tracer.on_reconstructed(mb_x, mb_y, trace_plane, block as u8, &[0u8; 16]);
+        }
+    }
+}
+
 /// Motion-compensated luma reconstruction for one inter macroblock: per 4×4
 /// block, interpolate from the reference picture (§8.4.2.2.1/2) using the
 /// block's committed motion vector, then add the inverse-quantised residual
@@ -619,7 +912,7 @@ mod tests {
     fn inter_skip_copies_reference() {
         let mb = Macroblock::new_skip();
         let mut store = crate::mv::MvStore::new(1);
-        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0 }; 16], 0);
+        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
         let mut ref_frame = crate::macroblock::new_video_frame(16, 16).unwrap();
         for px in ref_frame.data.iter_mut() {
             *px = 123;
@@ -665,9 +958,9 @@ mod tests {
         mb.mb_type = crate::macroblock::MbType::PL016x16;
         let mut store = crate::mv::MvStore::new(2);
         // MB 0 (left): no motion.
-        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0 }; 16], 0);
+        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
         // MB 1 (right): +1 luma px (4,0) -> +1/2 chroma px.
-        store.commit(1, [crate::mv::MvCell { mv: [4, 0], ref_idx: 0 }; 16], 0);
+        store.commit(1, [crate::mv::MvCell { mv: [4, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
 
         let f = reconstruct_inter_frame(
             &[mb.clone(), mb],

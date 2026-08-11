@@ -107,6 +107,11 @@ impl<'a> CabacDecoder<'a> {
         })
     }
 
+    /// DEBUG ONLY: expose internal engine state for tracing.
+    pub fn debug_state(&self) -> (u32, u32) {
+        (self.range, self.offset)
+    }
+
     fn next_bit(&mut self) -> u32 {
         // Spec streams are constructed so the engine never actually needs bits
         // past the end (trailing RBSP bits pad the arithmetic codeword); treat
@@ -572,8 +577,13 @@ impl ResidualCabacContext {
                 let gt1_idx = crate::cabac_tables::COEFF_ABS_LEVELGT1_CTX[node_ctx];
                 node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[1][node_ctx];
                 let mut abs_val: u32 = 2;
+                let mut nbits = 0u32;
                 while abs_val < 15 && dec.decode_decision(&mut self.level[cat][gt1_idx]) == 1 {
                     abs_val += 1;
+                    nbits += 1;
+                }
+                if std::env::var("CABAC_TRACE").is_ok() {
+                    eprintln!("  RUST iter pos={pos} node_ctx_before={node_ctx} l1={level1_idx} b0=1 gt1={gt1_idx} nbits={nbits}");
                 }
                 if abs_val >= 15 {
                     abs_val = 15 + dec.decode_bypass_eg(0);
@@ -582,6 +592,9 @@ impl ResidualCabacContext {
             }
             let sign = dec.decode_bypass();
             out[pos] = (if sign == 1 { -level_abs } else { level_abs }) as i16;
+            if std::env::var("CABAC_TRACE").is_ok() {
+                eprintln!("  RUST pos={pos} abs={level_abs} sign={sign}");
+            }
         }
 
         (out, coeff_count)

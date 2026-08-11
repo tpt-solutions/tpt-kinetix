@@ -91,6 +91,8 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
     let g = |dx: i32, dy: i32| get(plane, stride, pw, ph, x0 + dx, y0 + dy);
     let b = |dx: i32| half_h(plane, stride, pw, ph, x0 + dx, y0);
     let hv = |dy: i32| half_v(plane, stride, pw, ph, x0, y0 + dy);
+    // half_v at (x0+dx, y0+dy) — needed for the (3,1) and (3,3) positions.
+    let hv_x = |dx: i32, dy: i32| half_v(plane, stride, pw, ph, x0 + dx, y0 + dy);
     let j = |dx: i32, dy: i32| half_j(plane, stride, pw, ph, x0 + dx, y0 + dy);
 
     match (fx, fy) {
@@ -101,7 +103,9 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
         (0, 1) => avg(g(0, 0), hv(0)),
         (1, 1) => avg(b(0), hv(0)),
         (2, 1) => avg(b(0), j(0, 0)),
-        (3, 1) => avg(b(0), j(1, 0)),
+        // i = avg(b(x0,y0), h(x0+1,y0)) — §8.4.2.2.1: nearest half-pars to (3/4,1/4)
+        // are the horizontal half-pel at (x0,y0) and the vertical half-pel at (x0+1,y0).
+        (3, 1) => avg(b(0), hv_x(1, 0)),
         (0, 2) => hv(0),
         (1, 2) => avg(hv(0), j(0, 0)),
         (2, 2) => j(0, 0),
@@ -109,7 +113,9 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
         (0, 3) => avg(hv(0), g(0, 1)),
         (1, 3) => avg(hv(0), j(0, 1)),
         (2, 3) => avg(j(0, 0), g(1, 1)),
-        (3, 3) => avg(j(0, 0), j(1, 1)),
+        // r = avg(j(x0,y0), G(x0+1,y0+1)) — §8.4.2.2.1: midpoint of diagonal half-pel
+        // and the integer to the lower-right lands at (3/4,3/4).
+        (3, 3) => avg(j(0, 0), g(1, 1)),
         _ => unreachable!(),
     }
 }
@@ -339,6 +345,42 @@ mod tests {
         let mut dst = [0u8; 1];
         interpolate_chroma(&mut dst, 1, &c, 4, 4, 4, 0, 0, 4, 0, 1, 1);
         assert_eq!(dst[0], 1);
+    }
+
+    /// (3,1) = i = avg(j(x,y), b(x+1,y))  [§8.4.2.2.1]
+    /// (3,3) = r = avg(j(x+1,y), j(x,y+1))  [§8.4.2.2.1]
+    /// These two positions were previously wrong (b and j swapped / wrong offsets).
+    #[test]
+    fn quarter_pel_positions_3_1_and_3_3() {
+        let (l, _) = ramp_luma();
+
+        // (3,1): i = avg(j(x0,y0), b(x0+1,y0)).
+        // At base (0,0): j(0,0) = half_j(0,0), b(1,0) = half_h(1,0).
+        let mut j00 = [0u8; 1];
+        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // (fx=2,fy=2) -> j(0,0)
+        let mut b10 = [0u8; 1];
+        interpolate_luma(&mut b10, 1, &l, 8, 8, 8, 0, 0, 6, 0, 1, 1); // (fx=2 but base x=1,fy=0)
+        // b(x0+1,y0): px = 4*(x+1)+2 = 6 when x=0. Already encoded as mv=(6,0).
+        let mut got31 = [0u8; 1];
+        interpolate_luma(&mut got31, 1, &l, 8, 8, 8, 0, 0, 3, 1, 1, 1); // (fx=3,fy=1)
+        assert_eq!(
+            got31[0],
+            ((j00[0] as u16 + b10[0] as u16 + 1) >> 1) as u8,
+            "(3,1) must be avg(j(x0,y0), b(x0+1,y0))"
+        );
+
+        // (3,3): r = avg(j(x0+1,y0), j(x0,y0+1)).
+        let mut j10 = [0u8; 1];
+        interpolate_luma(&mut j10, 1, &l, 8, 8, 8, 0, 0, 6, 2, 1, 1); // j(x0+1,y0): px=6,py=2
+        let mut j01 = [0u8; 1];
+        interpolate_luma(&mut j01, 1, &l, 8, 8, 8, 0, 0, 2, 6, 1, 1); // j(x0,y0+1): px=2,py=6
+        let mut got33 = [0u8; 1];
+        interpolate_luma(&mut got33, 1, &l, 8, 8, 8, 0, 0, 3, 3, 1, 1); // (fx=3,fy=3)
+        assert_eq!(
+            got33[0],
+            ((j10[0] as u16 + j01[0] as u16 + 1) >> 1) as u8,
+            "(3,3) must be avg(j(x0+1,y0), j(x0,y0+1))"
+        );
     }
 
     /// Spec quarter-sample positions (§8.4.2.2.1): the three diagonal quarter

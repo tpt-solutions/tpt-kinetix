@@ -114,5 +114,46 @@ fn main() {
             line.push('\n');
         }
         println!("  MB diff map:\n{line}");
+
+        if i == 2 {
+            // Per-4x4-block diff within MB 9 (row 2, col 1).
+            let mbx = 1u32;
+            let mby = 2u32;
+            print!("  MB9 per-4x4-block luma diff: ");
+            for blk in 0..16usize {
+                let bx = (blk % 4) as u32 * 4 + mbx * 16;
+                let by = (blk / 4) as u32 * 4 + mby * 16;
+                let mut nd = 0usize;
+                let mut md = 0i32;
+                for yy in 0..4u32 {
+                    for xx in 0..4u32 {
+                        let px = (bx + xx) as usize;
+                        let py = (by + yy) as usize;
+                        let d = (frame.data[py * (w as usize) + px] as i32
+                            - refd[py * (w as usize) + px] as i32)
+                            .abs();
+                        if d != 0 {
+                            nd += 1;
+                            md = md.max(d);
+                        }
+                    }
+                }
+                print!("b{blk}:{nd}/{md} ");
+            }
+            println!();
+            // Exact differing luma samples in frame 2.
+            print!("  exact luma diffs: ");
+            for py in 0..(h as usize) {
+                for px in 0..(w as usize) {
+                    let d = (frame.data[py * (w as usize) + px] as i32
+                        - refd[py * (w as usize) + px] as i32)
+                        .abs();
+                    if d != 0 {
+                        print!("({px},{py}:{}-{} ) ", frame.data[py * (w as usize) + px], refd[py * (w as usize) + px]);
+                    }
+                }
+            }
+            println!();
+        }
     }
 }

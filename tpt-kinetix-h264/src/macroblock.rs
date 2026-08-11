@@ -12,6 +12,19 @@ use crate::prediction::{
     IntraNeighbours4x4,
 };
 
+/// Bi-prediction direction for B-slice macroblock partitions (§7.3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BPredDir {
+    /// Forward prediction from RefPicList0.
+    L0,
+    /// Backward prediction from RefPicList1.
+    L1,
+    /// Bi-directional prediction (average of L0 and L1).
+    Bi,
+    /// Direct (spatial or temporal) mode — no explicit MVD.
+    Direct,
+}
+
 /// H.264 macroblock coding types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MbType {
@@ -43,6 +56,18 @@ pub enum MbType {
     BSkip,
     /// Inter B direct 16×16.
     BDirect16x16,
+    /// Inter B L0 16×16 — forward prediction, whole macroblock.
+    BL016x16,
+    /// Inter B L1 16×16 — backward prediction, whole macroblock.
+    BL116x16,
+    /// Inter B Bi 16×16 — bi-directional prediction, whole macroblock.
+    BBi16x16,
+    /// Inter B 16×8 — two 16×8 partitions, each with an explicit direction.
+    B16x8,
+    /// Inter B 8×16 — two 8×16 partitions, each with an explicit direction.
+    B8x16,
+    /// Inter B 8×8 — four 8×8 sub-macroblocks with individual B directions.
+    BB8x8,
 }
 
 /// A macroblock's raster position and the destination plane's row stride.
@@ -53,18 +78,26 @@ pub struct MbPos {
     pub stride: usize,
 }
 
-/// Inter partition motion data for P-slice macroblocks.
+/// Inter partition motion data for P-slice and B-slice macroblocks.
 #[derive(Debug, Clone, Default)]
 pub struct InterMotion {
     /// `refIdxL0` for each partition. Length is 1 (16×16), 2 (16×8 / 8×16),
-    /// or 4 (P_8x8 / P_8x8ref0).
+    /// or 4 (P_8x8 / P_8x8ref0 / B_8x8). `LIST_NOT_USED` for L1-only/Direct parts.
     pub ref_idx_l0: Vec<i32>,
     /// Raw `mvd_l0` (before motion-vector prediction, §8.4.1) per partition /
-    /// sub-partition. For P_8x8 the per-8×8-partition sub-partitions are
-    /// concatenated in 8×8 order.
+    /// sub-partition. Only includes entries for L0 and Bi partitions (in order).
     pub mvd_l0: Vec<(i32, i32)>,
     /// `sub_mb_type` per 8×8 partition (0..3), present for `P8x8`/`P8x8ref0`.
     pub sub_mb_type: Option<[u8; 4]>,
+    /// `refIdxL1` for each partition (B-slice only). `LIST_NOT_USED` for L0-only/Direct parts.
+    pub ref_idx_l1: Vec<i32>,
+    /// Raw `mvd_l1` per partition / sub-partition (B-slice only). Only includes
+    /// entries for L1 and Bi partitions (in order).
+    pub mvd_l1: Vec<(i32, i32)>,
+    /// Prediction direction for each partition (B-slice only).
+    pub pred_dirs: Vec<BPredDir>,
+    /// `sub_mb_type` per 8×8 partition for `BB8x8` (B-slice only).
+    pub sub_mb_type_b: Option<[u8; 4]>,
 }
 
 /// A decoded H.264 macroblock ready for reconstruction.

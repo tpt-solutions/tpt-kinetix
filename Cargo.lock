@@ -1485,6 +1485,7 @@ dependencies = [
 name = "tpt-kinetix-aac"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "symphonia-codec-aac",
  "symphonia-core",
  "thiserror 2.0.18",
@@ -1628,6 +1629,7 @@ name = "tpt-kinetix-test-utils"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "tpt-kinetix-aac",
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",

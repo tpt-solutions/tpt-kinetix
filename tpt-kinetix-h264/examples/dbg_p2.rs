@@ -58,6 +58,31 @@ fn main() {
             format!("{:?}", header.slice_type),
             header.num_ref_idx_l0_active_minus1 + 1,
         );
+        let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
+        let num_ref_idx = header.num_ref_idx_l0_active_minus1 + 1;
+        let chroma_qp_index_offset = pps.chroma_qp_index_offset;
+        let mut r = BitReader::new(&n.rbsp);
+        r.seek_to_bit(header.data_bit_offset);
+        let parsed = tpt_kinetix_h264::slice_data::parse_p_slice(
+            &mut r,
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            num_ref_idx,
+            chroma_qp_index_offset,
+            &mut tpt_kinetix_h264::trace::NoopTracer,
+        )
+        .unwrap();
+        // Dump every MB's type (to see if frame 1 had any intra MBs with residual).
+        let mut type_counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for (i, mb) in parsed.macroblocks.iter().enumerate() {
+            let s = format!("{:?}", mb.mb_type);
+            *type_counts.entry(s.clone()).or_insert(0) += 1;
+            if (seen_p == 1 || seen_p == 2) && (i == 9) {
+                println!("  slice#{seen_p} MB{i}: type={s} qp={} cbp={}", mb.qp, mb.cbp);
+            }
+        }
+        println!("  slice#{seen_p} MB type histogram: {type_counts:?}");
         if seen_p != 2 {
             // only dump the 2nd P (frame_num == 2)
             continue;
@@ -100,5 +125,25 @@ fn main() {
                 println!("  luma block {b}: nz={nz} vals={:?}", &blk[..]);
             }
         }
+
+        // Dump MB 11 (idx 11) — the bottom-right MB showing 2 samples off in frame 2.
+        let idx = 11usize;
+        let mb = &parsed.macroblocks[idx];
+        println!("MB11 mb_type = {:?}", mb.mb_type);
+        println!("MB11 qp = {}", mb.qp);
+        let grid = parsed.mv_store.cells_of(idx).unwrap();
+        for (i, c) in grid.iter().enumerate() {
+            println!("  MB11 blk{i}: mv=({},{}) ref={}", c.mv[0], c.mv[1], c.ref_idx);
+        }
+        println!("MB11 luma coeffs nz per block:");
+        for b in 0..16usize {
+            let nz: usize = mb.luma_coeffs[b].iter().map(|&x| (x != 0) as usize).sum();
+            if nz > 0 {
+                println!("  luma block {b}: nz={nz} vals={:?}", &mb.luma_coeffs[b][..]);
+            } else {
+                print!(" {b}:0");
+            }
+        }
+        println!();
     }
 }

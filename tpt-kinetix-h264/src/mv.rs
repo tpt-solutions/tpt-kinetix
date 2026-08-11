@@ -29,13 +29,17 @@ pub const LIST_NOT_USED: i32 = -1;
 /// 8×8=1, 8×4=2, 4×8=2, 4×4=4.
 const P_SUB_MB_PARTS: [usize; 4] = [1, 2, 2, 4];
 
-/// Motion state of a single 4×4 block.
+/// Motion state of a single 4×4 block (holds both L0 and L1 for B-slices).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MvCell {
-    /// Motion vector in quarter-luma-sample units.
+    /// L0 motion vector in quarter-luma-sample units.
     pub mv: [i32; 2],
-    /// Reference picture list index (`LIST_NOT_USED` for intra).
+    /// L0 reference picture index (`LIST_NOT_USED` for intra or L1-only).
     pub ref_idx: i32,
+    /// L1 motion vector (B-slice bi-prediction / L1 partitions).
+    pub mv_l1: [i32; 2],
+    /// L1 reference picture index (`LIST_NOT_USED` for intra, P-slice, or L0-only).
+    pub ref_idx_l1: i32,
 }
 
 impl MvCell {
@@ -43,11 +47,15 @@ impl MvCell {
     pub const INTRA: MvCell = MvCell {
         mv: [0, 0],
         ref_idx: LIST_NOT_USED,
+        mv_l1: [0, 0],
+        ref_idx_l1: LIST_NOT_USED,
     };
     /// State of a 4×4 block that has not been decoded yet.
     pub const UNAVAILABLE: MvCell = MvCell {
         mv: [0, 0],
         ref_idx: PART_NOT_AVAILABLE,
+        mv_l1: [0, 0],
+        ref_idx_l1: PART_NOT_AVAILABLE,
     };
 }
 
@@ -104,6 +112,12 @@ impl MvStore {
 
     fn cell(&self, mb_idx: usize, blk: usize) -> MvNeighbor {
         self.mbs[mb_idx].expect("available MB")[blk].into()
+    }
+
+    /// Extract the L1 fields of a committed cell as a neighbour.
+    fn cell_l1(&self, mb_idx: usize, blk: usize) -> MvNeighbor {
+        let c = self.mbs[mb_idx].expect("available MB")[blk];
+        MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 }
     }
 }
 
@@ -265,6 +279,157 @@ fn neighbor_above_left(
 }
 
 // ---------------------------------------------------------------------------
+// L1 neighbour helpers (identical to L0 versions but extract mv_l1/ref_idx_l1).
+// ---------------------------------------------------------------------------
+
+fn neighbor_left_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    py_off: usize,
+    px_off: usize,
+    slice_id: u32,
+) -> Option<MvNeighbor> {
+    if px_off > 0 {
+        let blk = (py_off / 4) * 4 + (px_off - 4) / 4;
+        let c = cur[blk];
+        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+    }
+    if mb_idx % mb_width == 0 {
+        return None;
+    }
+    let left_mb = mb_idx - 1;
+    if !store.is_available(left_mb, slice_id) {
+        return None;
+    }
+    let blk = (py_off / 4) * 4 + 3;
+    Some(store.cell_l1(left_mb, blk))
+}
+
+fn neighbor_above_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    py_off: usize,
+    px_off: usize,
+    slice_id: u32,
+) -> Option<MvNeighbor> {
+    if py_off > 0 {
+        let blk = ((py_off - 4) / 4) * 4 + px_off / 4;
+        let c = cur[blk];
+        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+    }
+    if mb_idx / mb_width == 0 {
+        return None;
+    }
+    let above_mb = mb_idx - mb_width;
+    if !store.is_available(above_mb, slice_id) {
+        return None;
+    }
+    let blk = 3 * 4 + px_off / 4;
+    Some(store.cell_l1(above_mb, blk))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn neighbor_above_right_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    py_off: usize,
+    px_off: usize,
+    part_w: usize,
+    slice_id: u32,
+) -> Option<MvNeighbor> {
+    let right_col = px_off + part_w;
+    if py_off > 0 {
+        if right_col < 16 {
+            let cur_8x8_col = px_off / 8;
+            let tgt_8x8_col = right_col / 8;
+            let cur_8x8_row = py_off / 8;
+            let tgt_8x8_row = (py_off - 4) / 8;
+            let cur_8x8 = cur_8x8_row * 2 + cur_8x8_col;
+            let tgt_8x8 = tgt_8x8_row * 2 + tgt_8x8_col;
+            if tgt_8x8 > cur_8x8 {
+                return None;
+            }
+            let blk = ((py_off - 4) / 4) * 4 + right_col / 4;
+            let c = cur[blk];
+            return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+        }
+        return None;
+    }
+    if mb_idx / mb_width == 0 {
+        return None;
+    }
+    if right_col < 16 {
+        let above_mb = mb_idx - mb_width;
+        if !store.is_available(above_mb, slice_id) {
+            return None;
+        }
+        let blk = 3 * 4 + right_col / 4;
+        Some(store.cell_l1(above_mb, blk))
+    } else if mb_idx % mb_width + 1 < mb_width {
+        let above_right_mb = mb_idx - mb_width + 1;
+        if !store.is_available(above_right_mb, slice_id) {
+            return None;
+        }
+        Some(store.cell_l1(above_right_mb, 3 * 4))
+    } else {
+        None
+    }
+}
+
+fn neighbor_above_left_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    py_off: usize,
+    px_off: usize,
+    slice_id: u32,
+) -> Option<MvNeighbor> {
+    if py_off > 0 && px_off > 0 {
+        let blk = ((py_off - 4) / 4) * 4 + (px_off - 4) / 4;
+        let c = cur[blk];
+        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+    }
+    if py_off == 0 && px_off == 0 {
+        if mb_idx / mb_width == 0 || mb_idx % mb_width == 0 {
+            return None;
+        }
+        let al_mb = mb_idx - mb_width - 1;
+        if !store.is_available(al_mb, slice_id) {
+            return None;
+        }
+        Some(store.cell_l1(al_mb, 3 * 4 + 3))
+    } else if py_off == 0 && px_off > 0 {
+        if mb_idx / mb_width == 0 {
+            return None;
+        }
+        let above_mb = mb_idx - mb_width;
+        if !store.is_available(above_mb, slice_id) {
+            return None;
+        }
+        let blk = 3 * 4 + (px_off - 4) / 4;
+        Some(store.cell_l1(above_mb, blk))
+    } else {
+        // py_off > 0 && px_off == 0
+        if mb_idx % mb_width == 0 {
+            return None;
+        }
+        let left_mb = mb_idx - 1;
+        if !store.is_available(left_mb, slice_id) {
+            return None;
+        }
+        let blk = ((py_off - 4) / 4) * 4 + 3;
+        Some(store.cell_l1(left_mb, blk))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Predictors
 // ---------------------------------------------------------------------------
 
@@ -419,7 +584,72 @@ pub(crate) fn predict_skip_mv(
     predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, 0, slice_id)
 }
 
-/// Write a partition's cells into the current macroblock grid.
+/// Predict the L1 MV of a 16×16 / 16×8 / 8×16 macroblock partition.
+/// Identical to [`predict_mv`] but uses L1 neighbour fields.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predict_mv_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    part_idx: usize,
+    part_w: usize,
+    part_h: usize,
+    ref_idx: i32,
+    slice_id: u32,
+) -> [i32; 2] {
+    let py_off = if part_h == 8 && part_w == 16 { part_idx * 8 } else { 0 };
+    let px_off = if part_w == 8 && part_h == 16 { part_idx * 8 } else { 0 };
+
+    let a = neighbor_left_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
+    let b = neighbor_above_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
+    let c = neighbor_above_right_l1(store, cur, mb_idx, mb_width, py_off, px_off, part_w, slice_id)
+        .or_else(|| neighbor_above_left_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id));
+
+    if part_w == 16 && part_h == 8 {
+        if part_idx == 0 {
+            if let Some(n) = b {
+                if n.ref_idx == ref_idx { return n.mv; }
+            }
+        } else if let Some(n) = a {
+            if n.ref_idx == ref_idx { return n.mv; }
+        }
+    }
+    if part_w == 8 && part_h == 16 {
+        if part_idx == 0 {
+            if let Some(n) = a {
+                if n.ref_idx == ref_idx { return n.mv; }
+            }
+        } else if let Some(n) = c {
+            if n.ref_idx == ref_idx { return n.mv; }
+        }
+    }
+
+    median_pred(a, b, c, ref_idx)
+}
+
+/// Predict the L1 MV of a B_8x8 sub-macroblock partition.
+/// Identical to [`predict_mv_sub`] but uses L1 neighbour fields.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predict_mv_sub_l1(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    px: usize,
+    py: usize,
+    spw: usize,
+    ref_idx: i32,
+    slice_id: u32,
+) -> [i32; 2] {
+    let a = neighbor_left_l1(store, cur, mb_idx, mb_width, py, px, slice_id);
+    let b = neighbor_above_l1(store, cur, mb_idx, mb_width, py, px, slice_id);
+    let c = neighbor_above_right_l1(store, cur, mb_idx, mb_width, py, px, spw, slice_id)
+        .or_else(|| neighbor_above_left_l1(store, cur, mb_idx, mb_width, py, px, slice_id));
+    median_pred(a, b, c, ref_idx)
+}
+
+/// Write a partition's L0 and L1 cells into the current macroblock grid.
 fn commit_rect(
     cur: &mut [MvCell; 16],
     px: usize,
@@ -428,10 +658,12 @@ fn commit_rect(
     h: usize,
     mv: [i32; 2],
     ref_idx: i32,
+    mv_l1: [i32; 2],
+    ref_idx_l1: i32,
 ) {
     for by in (py / 4)..(py / 4 + h / 4) {
         for bx in (px / 4)..(px / 4 + w / 4) {
-            cur[by * 4 + bx] = MvCell { mv, ref_idx };
+            cur[by * 4 + bx] = MvCell { mv, ref_idx, mv_l1, ref_idx_l1 };
         }
     }
 }
@@ -451,7 +683,7 @@ pub(crate) fn predict_inter_macroblock(
     match mb.mb_type {
         MbType::PSkip => {
             let mv = predict_skip_mv(store, cur, mb_idx, mb_width, slice_id);
-            commit_rect(cur, 0, 0, 16, 16, mv, 0);
+            commit_rect(cur, 0, 0, 16, 16, mv, 0, [0, 0], LIST_NOT_USED);
             Ok(())
         }
         MbType::PL016x16 => {
@@ -466,7 +698,7 @@ pub(crate) fn predict_inter_macroblock(
                 .ok_or("P_16x16 without mvd_l0")?;
             let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
             let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
-            commit_rect(cur, 0, 0, 16, 16, mv, ref_idx);
+            commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, [0, 0], LIST_NOT_USED);
             Ok(())
         }
         MbType::P16x8 => {
@@ -480,7 +712,7 @@ pub(crate) fn predict_inter_macroblock(
                 let pred =
                     predict_mv(store, cur, mb_idx, mb_width, part, 16, 8, ref_idx, slice_id);
                 let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
-                commit_rect(cur, 0, 8 * part, 16, 8, mv, ref_idx);
+                commit_rect(cur, 0, 8 * part, 16, 8, mv, ref_idx, [0, 0], LIST_NOT_USED);
             }
             Ok(())
         }
@@ -495,7 +727,7 @@ pub(crate) fn predict_inter_macroblock(
                 let pred =
                     predict_mv(store, cur, mb_idx, mb_width, part, 8, 16, ref_idx, slice_id);
                 let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
-                commit_rect(cur, 8 * part, 0, 8, 16, mv, ref_idx);
+                commit_rect(cur, 8 * part, 0, 8, 16, mv, ref_idx, [0, 0], LIST_NOT_USED);
             }
             Ok(())
         }
@@ -528,7 +760,7 @@ pub(crate) fn predict_inter_macroblock(
                     let pred =
                         predict_mv_sub(store, cur, mb_idx, mb_width, px, py, w, ref_idx, slice_id);
                     let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
-                    commit_rect(cur, px, py, w, h, mv, ref_idx);
+                    commit_rect(cur, px, py, w, h, mv, ref_idx, [0, 0], LIST_NOT_USED);
                 }
             }
             Ok(())
@@ -566,12 +798,234 @@ pub(crate) fn predict_slice_mvs(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// B-slice constants (Table 7-15)
+// ---------------------------------------------------------------------------
+
+/// Number of sub-partitions per B_8x8 `sub_mb_type` (0..=12).
+pub(crate) const B_SUB_MB_PARTS: [usize; 13] = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4, 4, 4];
+
+/// Prediction direction per B_8x8 `sub_mb_type` (0..=12).
+pub(crate) const B_SUB_MB_DIR: [crate::macroblock::BPredDir; 13] = {
+    use crate::macroblock::BPredDir;
+    [
+        BPredDir::Direct, BPredDir::L0,     BPredDir::L1,  BPredDir::Bi,
+        BPredDir::L0,     BPredDir::L0,     BPredDir::L1,  BPredDir::L1,
+        BPredDir::Bi,     BPredDir::Bi,
+        BPredDir::L0,     BPredDir::L1,     BPredDir::Bi,
+    ]
+};
+
+/// Compute (px, py, width, height) for sub-partition `j` of a B_8x8 sub_mb_type
+/// within the 8×8 block whose top-left corner is at `(bx, by)`.
+fn b8x8_sub_rect(sub_type: usize, bx: usize, by: usize, j: usize) -> (usize, usize, usize, usize) {
+    match sub_type {
+        // 8×8: one sub-part
+        1 | 2 | 3 => (bx, by, 8, 8),
+        // 8×4: two sub-parts
+        4 | 6 | 8 => (bx, by + 4 * j, 8, 4),
+        // 4×8: two sub-parts
+        5 | 7 | 9 => (bx + 4 * j, by, 4, 8),
+        // 4×4: four sub-parts
+        10 | 11 | 12 => (bx + 4 * (j % 2), by + 4 * (j / 2), 4, 4),
+        _ => (bx, by, 8, 8),
+    }
+}
+
+/// Compute and commit the 16-block motion grid of one inter B macroblock.
+///
+/// Handles all B-slice partition types. Direct mode (`BSkip`/`BDirect16x16`
+/// and `B_Direct_8x8` sub-partitions) uses a simplified fill — pixel-exact
+/// direct mode (spatial/temporal derivation per §8.4.1.2) is a Phase E.5 task.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predict_inter_b_macroblock(
+    store: &MvStore,
+    cur: &mut [MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    slice_id: u32,
+    mb: &Macroblock,
+) -> Result<(), &'static str> {
+    use crate::macroblock::{BPredDir, MbType};
+
+    match mb.mb_type {
+        MbType::BSkip | MbType::BDirect16x16 => {
+            // Simplified direct mode: fill with (0,0) ref 0 for both L0 and L1.
+            // Phase E.5 will replace this with the proper spatial/temporal derivation.
+            for blk in cur.iter_mut() {
+                *blk = MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: 0 };
+            }
+            Ok(())
+        }
+        MbType::BL016x16 => {
+            let motion = inter_motion(mb)?;
+            let ref_idx = *motion.ref_idx_l0.first().ok_or("BL0_16x16 without ref_idx_l0")?;
+            let mvd = *motion.mvd_l0.first().ok_or("BL0_16x16 without mvd_l0")?;
+            let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
+            let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
+            commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, [0, 0], LIST_NOT_USED);
+            Ok(())
+        }
+        MbType::BL116x16 => {
+            let motion = inter_motion(mb)?;
+            let ref_idx_l1 = *motion.ref_idx_l1.first().ok_or("BL1_16x16 without ref_idx_l1")?;
+            let mvd_l1 = *motion.mvd_l1.first().ok_or("BL1_16x16 without mvd_l1")?;
+            let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id);
+            let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
+            commit_rect(cur, 0, 0, 16, 16, [0, 0], LIST_NOT_USED, mv_l1, ref_idx_l1);
+            Ok(())
+        }
+        MbType::BBi16x16 => {
+            let motion = inter_motion(mb)?;
+            let ref_idx = *motion.ref_idx_l0.first().ok_or("BBi_16x16 without ref_idx_l0")?;
+            let mvd_l0 = *motion.mvd_l0.first().ok_or("BBi_16x16 without mvd_l0")?;
+            let ref_idx_l1 = *motion.ref_idx_l1.first().ok_or("BBi_16x16 without ref_idx_l1")?;
+            let mvd_l1 = *motion.mvd_l1.first().ok_or("BBi_16x16 without mvd_l1")?;
+            let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
+            let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id);
+            let mv = [pred[0] + mvd_l0.0, pred[1] + mvd_l0.1];
+            let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
+            commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, mv_l1, ref_idx_l1);
+            Ok(())
+        }
+        MbType::B16x8 | MbType::B8x16 => {
+            let motion = inter_motion(mb)?;
+            let is_16x8 = mb.mb_type == MbType::B16x8;
+            let (part_w, part_h) = if is_16x8 { (16, 8) } else { (8, 16) };
+            let mut l0_cur = 0usize;
+            let mut l1_cur = 0usize;
+            for part in 0..2usize {
+                let dir = motion.pred_dirs.get(part).copied().ok_or("B16x8/B8x16 without pred_dirs")?;
+                let ref_idx = if dir == BPredDir::L0 || dir == BPredDir::Bi {
+                    *motion.ref_idx_l0.get(part).ok_or("B2part without ref_idx_l0")?
+                } else {
+                    LIST_NOT_USED
+                };
+                let ref_idx_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
+                    *motion.ref_idx_l1.get(part).ok_or("B2part without ref_idx_l1")?
+                } else {
+                    LIST_NOT_USED
+                };
+                let mv = if dir == BPredDir::L0 || dir == BPredDir::Bi {
+                    let mvd = *motion.mvd_l0.get(l0_cur).ok_or("B2part without mvd_l0")?;
+                    l0_cur += 1;
+                    let pred = predict_mv(store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx, slice_id);
+                    [pred[0] + mvd.0, pred[1] + mvd.1]
+                } else {
+                    [0, 0]
+                };
+                let mv_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
+                    let mvd = *motion.mvd_l1.get(l1_cur).ok_or("B2part without mvd_l1")?;
+                    l1_cur += 1;
+                    let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx_l1, slice_id);
+                    [pred_l1[0] + mvd.0, pred_l1[1] + mvd.1]
+                } else {
+                    [0, 0]
+                };
+                let (px, py) = if is_16x8 { (0, 8 * part) } else { (8 * part, 0) };
+                commit_rect(cur, px, py, part_w, part_h, mv, ref_idx, mv_l1, ref_idx_l1);
+            }
+            Ok(())
+        }
+        MbType::BB8x8 => {
+            let motion = inter_motion(mb)?;
+            let sub_types = motion.sub_mb_type_b.ok_or("BB8x8 without sub_mb_type_b")?;
+            let mut l0_cur = 0usize;
+            let mut l1_cur = 0usize;
+            for part in 0..4usize {
+                let bx = 8 * (part % 2);
+                let by = 8 * (part / 2);
+                let sub_type = sub_types[part] as usize;
+                let dir = if sub_type < 13 { B_SUB_MB_DIR[sub_type] } else { BPredDir::Direct };
+                let n_sub = if sub_type < 13 { B_SUB_MB_PARTS[sub_type] } else { 1 };
+
+                if dir == BPredDir::Direct {
+                    // Simplified direct mode for B_Direct_8x8 sub-partition.
+                    commit_rect(cur, bx, by, 8, 8, [0, 0], 0, [0, 0], 0);
+                    continue;
+                }
+
+                let ref_idx = if dir == BPredDir::L0 || dir == BPredDir::Bi {
+                    *motion.ref_idx_l0.get(part).ok_or("BB8x8 without ref_idx_l0")?
+                } else {
+                    LIST_NOT_USED
+                };
+                let ref_idx_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
+                    *motion.ref_idx_l1.get(part).ok_or("BB8x8 without ref_idx_l1")?
+                } else {
+                    LIST_NOT_USED
+                };
+
+                for j in 0..n_sub {
+                    let (spx, spy, spw, sph) = b8x8_sub_rect(sub_type, bx, by, j);
+                    let mv = if dir == BPredDir::L0 || dir == BPredDir::Bi {
+                        let mvd = *motion.mvd_l0.get(l0_cur).ok_or("BB8x8 without mvd_l0")?;
+                        l0_cur += 1;
+                        let pred = predict_mv_sub(store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx, slice_id);
+                        [pred[0] + mvd.0, pred[1] + mvd.1]
+                    } else {
+                        [0, 0]
+                    };
+                    let mv_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
+                        let mvd = *motion.mvd_l1.get(l1_cur).ok_or("BB8x8 without mvd_l1")?;
+                        l1_cur += 1;
+                        let pred_l1 = predict_mv_sub_l1(store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx_l1, slice_id);
+                        [pred_l1[0] + mvd.0, pred_l1[1] + mvd.1]
+                    } else {
+                        [0, 0]
+                    };
+                    commit_rect(cur, spx, spy, spw, sph, mv, ref_idx, mv_l1, ref_idx_l1);
+                }
+            }
+            Ok(())
+        }
+        _ => Err("not an inter B macroblock"),
+    }
+}
+
+/// Run B-slice MV prediction over a slice's macroblocks and commit their grids.
+///
+/// B-inter macroblocks are predicted with `predict_inter_b_macroblock`; intra
+/// macroblocks are stored as fully-`LIST_NOT_USED` grids.
+pub(crate) fn predict_b_slice_mvs(
+    store: &mut MvStore,
+    mb_cols: u32,
+    slice_id: u32,
+    first_mb: u32,
+    mbs: &[Macroblock],
+) -> Result<(), &'static str> {
+    use crate::macroblock::MbType;
+    let mut cur = [MvCell::INTRA; 16];
+    for (i, mb) in mbs.iter().enumerate() {
+        let mb_idx = first_mb as usize + i;
+        let is_b_inter = mb.skip
+            || matches!(
+                mb.mb_type,
+                MbType::BSkip
+                    | MbType::BDirect16x16
+                    | MbType::BL016x16
+                    | MbType::BL116x16
+                    | MbType::BBi16x16
+                    | MbType::B16x8
+                    | MbType::B8x16
+                    | MbType::BB8x8
+            );
+        if is_b_inter {
+            predict_inter_b_macroblock(store, &mut cur, mb_idx, mb_cols as usize, slice_id, mb)?;
+        } else {
+            cur = [MvCell::INTRA; 16];
+        }
+        store.commit(mb_idx, cur, slice_id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cell(mv: [i32; 2], ref_idx: i32) -> MvCell {
-        MvCell { mv, ref_idx }
+        MvCell { mv, ref_idx, mv_l1: [0, 0], ref_idx_l1: LIST_NOT_USED }
     }
 
     /// A store with a single committed macroblock.
