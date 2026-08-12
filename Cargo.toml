@@ -8,6 +8,7 @@ members = [
   "tpt-kinetix-aac",
   "tpt-kinetix-kg",
   "tpt-kinetix-lean",
+  "tpt-kinetix-vision",
   "tpt-kinetix-mux",
   "tpt-kinetix-pipeline",
   "tpt-kinetix-stream",
@@ -51,15 +52,15 @@ crossbeam-channel = "0.5"
 # AAC decode (wraps symphonia's pure-Rust AAC-LC decoder)
 symphonia-codec-aac = "0.6"
 
-# Internal crates
-tpt-kinetix-core = { path = "tpt-kinetix-core" }
-tpt-kinetix-demux = { path = "tpt-kinetix-demux" }
-tpt-kinetix-h264 = { path = "tpt-kinetix-h264" }
-tpt-kinetix-av1 = { path = "tpt-kinetix-av1" }
-tpt-kinetix-aac = { path = "tpt-kinetix-aac" }
-tpt-kinetix-mux = { path = "tpt-kinetix-mux" }
-tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline" }
-tpt-kinetix-stream = { path = "tpt-kinetix-stream" }
+# Internal crates (path for local dev; version required for crates.io publish)
+tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.0" }
+tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.0" }
+tpt-kinetix-h264 = { path = "tpt-kinetix-h264", version = "0.1.0" }
+tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.0" }
+tpt-kinetix-aac = { path = "tpt-kinetix-aac", version = "0.1.0" }
+tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.0" }
+tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0" }
+tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0" }
 
 [profile.dev]
 opt-level = 1

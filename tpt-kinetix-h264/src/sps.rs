@@ -188,9 +188,18 @@ impl SeqParameterSet {
     ///   FrameWidth = PicWidthInSamplesL − SubWidthC × (crop_left + crop_right)
     ///
     /// Assumes 4:2:0 chroma format (SubWidthC = 2).
+    ///
+    /// Saturating arithmetic: `pic_width_in_mbs_minus1` and the crop offsets
+    /// are attacker-controlled `ue(v)` fields that can be close to `u32::MAX`,
+    /// which overflows a plain `(x + 1) * 16` in debug builds. Callers reject
+    /// implausible dimensions afterwards (see `H264Decoder::decode_impl`), so
+    /// saturating here only affects streams that are already malformed.
     pub fn pic_width_pixels(&self) -> u32 {
-        let raw = (self.pic_width_in_mbs_minus1 + 1) * 16;
-        let crop = 2 * (self.frame_crop_left_offset + self.frame_crop_right_offset);
+        let raw = self.pic_width_in_mbs_minus1.saturating_add(1).saturating_mul(16);
+        let crop = self
+            .frame_crop_left_offset
+            .saturating_add(self.frame_crop_right_offset)
+            .saturating_mul(2);
         raw.saturating_sub(crop)
     }
 
@@ -201,10 +210,17 @@ impl SeqParameterSet {
     ///   FrameHeight = PicHeightInSamplesL − SubHeightC × (crop_top + crop_bottom)
     ///
     /// Assumes 4:2:0 chroma format and `frame_mbs_only_flag = 1` (SubHeightC = 2).
+    /// Saturating for the same reason as [`SeqParameterSet::pic_width_pixels`].
     pub fn pic_height_pixels(&self) -> u32 {
-        let raw = (self.pic_height_in_map_units_minus1 + 1) * 16;
+        let raw = self
+            .pic_height_in_map_units_minus1
+            .saturating_add(1)
+            .saturating_mul(16);
         let sub_h = if self.frame_mbs_only_flag { 2u32 } else { 4 };
-        let crop = sub_h * (self.frame_crop_top_offset + self.frame_crop_bottom_offset);
+        let crop = self
+            .frame_crop_top_offset
+            .saturating_add(self.frame_crop_bottom_offset)
+            .saturating_mul(sub_h);
         raw.saturating_sub(crop)
     }
 }

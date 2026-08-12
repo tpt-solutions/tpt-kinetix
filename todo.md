@@ -76,11 +76,15 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 ## Phase 4 — AV1 Support
 
 > Status: OBU parsing, encoder (rav1e), and encode-config plumbing are done; the
-> AV1 **decoder** emits placeholder frames pending full reconstruction.
+> AV1 **decoder** now performs intra keyframe tile-group reconstruction via the
+> real symbol decoder (`coeffs()` syntax), wired in `reconstruct`/`coeff`.
+> Block structure is still a placeholder grid (Phase C), so output is not yet
+> pixel-exact against `dav1d`; real streams fail loudly rather than decode to
+> silent garbage.
 
-- [~] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold; frame reconstruction outstanding
+- [~] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold + intra tile-group reconstruction done; partition/mode syntax outstanding
 - [x] Implement AV1 bitstream parsing (OBU parsing) via `nom`
-- [~] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output — `dav1d` reference harness wired (`tpt-kinetix-test-utils::conformance::av1_dav1d_reference_decode_when_available`); decoder still emits placeholder frames, so pixel-diff gating is ready but not yet invoked
+- [~] Implement AV1 decode logic, validated incrementally against `dav1d`'s reference decoded output — `dav1d` reference harness wired (`tpt-kinetix-test-utils::conformance::av1_dav1d_reference_decode_when_available`); intra keyframe coefficients now decode via the symbol decoder, but placeholder block grid means pixel-diff gating is ready but not yet invoked
 - [~] Build pixel-diff harness comparing `kinetix-av1` decode output to `dav1d` output — harness (`kinetix-test-utils::reference`) built; enabled once decode produces real frames
 - [x] Set up `cargo-fuzz` target for the AV1 bitstream/OBU parser
 - [x] Integrate `rav1e` as the AV1 encoder backend (dependency wiring, safe Rust API wrapper in `kinetix-av1`)
@@ -199,10 +203,10 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ### Codec correctness (in progress)
 - [x] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output — `AacDecoder::decode()` delegates AAC-LC reconstruction to `symphonia-codec-aac`, returning interleaved `f32` PCM; verified by the `ffmpeg`-gated round-trip test `tpt-kinetix-aac/tests/decode_pcm.rs` (HE-AAC SBR/PS still unsupported by the wrapped decoder)
-- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; still missing: the per-syntax-element context-index tables (spec Tables 9-12..9-33) and macroblock-level CABAC syntax parsing (mb_type, cbf, residual) wired into `decoder.rs`
+- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; mb_type I-slice context (Table 9-11), coded_block_pattern (Table 9-12), and mb_qp_delta (Table 9-20) context tables implemented and tested; still missing: the remaining per-syntax-element context-index tables (Tables 9-13..9-33) and macroblock-level CABAC syntax parsing wired into `decoder.rs`
 - [x] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
 - [x] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
-- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item at `decoder.rs:113`
+- [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/reconstruct.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item — FrameHeader and TileGroup OBUs now parsed and stored; `TileData` struct captures per-tile payloads for future parallel decode; **AV1 Phase B is done (2026-08-09): intra keyframe coefficients now decode through the real symbol decoder via `coeffs()` (all_zero / intra_tx_type / eob_pt_* / eob_extra / coeff_base(_eob) / coeff_br / dc_sign / sign_bit / Exp-Golomb tail) in `coeff.rs`, rewiring the old `BitReader` scheme in `decode_tile_group`/`decode_chroma_tx`**; still outstanding: real superblock partition + mode syntax (Phase C), inter prediction, non-square transforms, full AV1 transform set, and loop filters
 
 Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).
 
@@ -233,37 +237,477 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       fully rewritten (§7.3.3) exposing `data_bit_offset`
 
 ### H.264 — Phase A: I-frame / baseline pixel-exact
-- [~] Implement the real slice-data parsing loop (§7.3.4): mb_type,
+- [x] Implement the real slice-data parsing loop (§7.3.4): mb_type,
       coded_block_pattern, mb_qp_delta, CAVLC residual parsing dispatch —
       I-slice parser done in `src/slice_data.rs` (mb_type Table 7-11, CBP
       Table 9-4, nC neighbour derivation, spec §9.2.2 level decoding, unit
-      tested). STILL TODO: wire into `decoder.rs::decode_slice()` replacing the
-      all-skip stub; I_PCM + Intra_4×4 MPM neighbour tracking
-- [ ] Neighbour-availability + Intra_4×4/16×16 mode signalling
-      (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — modes are
-      parsed; most-probable-mode neighbour derivation still uses a DC fallback
-- [ ] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus
+      tested). Wired into `decoder.rs::decode_slice()`; the fallback path now
+      produces spec-exact CAVLC I-frames via `parse_i_slice` +
+      `reconstruct_intra_frame` + deblocking, instead of the all-skip grey stub.
+      I_PCM + Intra_4×4 MPM neighbour tracking are also implemented in
+      `slice_data.rs`.
+- [x] Neighbour-availability + Intra_4×4/16×16 mode signalling
+      (prev_intra4x4_pred_mode / rem_intra4x4_pred_mode, §8.3.1.1) — full MPM
+      derivation with left/top neighbour tracking implemented in
+      `slice_data.rs::parse_i_macroblock`
+- [x] Validate bit-exact I-frame baseline decode vs `ffmpeg` on a generated corpus —
+      found and fixed a real bug: `Intra4x4Mode::DiagonalDownRight` in
+      `prediction.rs` used the wrong sample weighting (only left/top-left
+      samples, mismapped to the wrong output positions) instead of the spec
+      §8.3.1.2.5 formula (cross-checked against ffmpeg's
+      `pred4x4_down_right_c`); the other 7 Intra_4×4 modes were individually
+      re-verified against the same ffmpeg reference and are correct. Also
+      fixed an OOB panic in `deblock.rs` for non-16-aligned picture
+      dimensions (missing per-sample x/y bounds checks in the last partial
+      row/column of macroblocks). `cavlc_iframe_no_deblock_is_bitexact` and
+      `cavlc_iframe_with_deblock_tracks_progress` are now both bit-exact
+      (max_diff=0, not just <=20), and an ad hoc corpus of 8 MB-aligned
+      clips (`tpt-kinetix-h264/examples/corpus_check.rs`, varied resolution
+      48x32..128x96, testsrc/smptebars content) all decode bit-exact.
+      Remaining known gap: non-16-aligned picture dimensions still show
+      small (≤53) pixel diffs clustered at the partial right/bottom
+      macroblock edges (deblocking/prediction edge-sample handling for
+      cropped pictures) — tracked as a follow-up, not yet root-caused.
 
 ### H.264 — Phase B: complete CAVLC
-- [ ] Wire the spec-exact CAVLC tables into residual parsing; correct nC
-      derivation from left/top neighbour TotalCoeff; validate on P/I CAVLC clips
+- [x] Wire the spec-exact CAVLC tables into residual parsing; correct nC
+      derivation from left/top neighbour TotalCoeff; validate on P/I CAVLC clips —
+      `slice_data.rs` already drove the spec-exact `cavlc_tables.rs` tables
+      (coeff_token/total_zeros/run_before) with real left/top-neighbour nC
+      derivation for I-slices as of Phase A, validated bit-exact there. Removed
+      the last user of the old approximated hand-rolled VLC tables in
+      `slice.rs` (`parse_cavlc_residual` and its private VLC0/1/2/3,
+      total_zeros, run_before helpers) — it was dead code (only its own unit
+      test called it) left over from before `cavlc_tables.rs` existed, and its
+      `total_zeros`/`run_before` tables were explicitly approximated per their
+      own doc comments. P-slice CAVLC validation is blocked on Phase C (inter
+      prediction) since P slices need motion compensation to reconstruct, but
+      the residual-parsing path itself (coeff_token/nC/total_zeros/run_before)
+      is slice-type-agnostic and already spec-exact.
 
 ### H.264 — Phase C: inter prediction (P-frames)
-- [ ] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
-- [ ] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
-- [ ] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
-- [ ] Validate bit-exact P-frame decode vs `ffmpeg`
+- [x] DPB + POC derivation (§8.2.1), reference-picture-list construction (§8.2.4)
+- [x] Motion-vector prediction (§8.4.1) and mb_type/sub_mb partition parsing
+- [x] Luma 6-tap + chroma bilinear sub-pel interpolation (§8.4.2.2)
+- [x] Validate bit-exact P-frame decode vs `ffmpeg` — **DONE (2026-08-08)**
+
+  #### Phase C.1 — unblock P-slice parsing (RESOLVED)
+
+  **Status (2026-08-07):** The CAVLC bit-position desync is **resolved**.
+  `p_slice_cavlc_invariant::p_slice_cavlc_parse_succeeds` now passes (the
+  slice parses to completion without a `run_before > zeros_left` error), and the
+  P-slice path (`parse_p_slice` → `parse_p_macroblock`) runs end-to-end. The
+  prior desync was fixed by the `0ee3386` line of work (inter CBP table,
+  `coeff_token` FLC codes, `dec_ref_pic_marking` gating). The `level_code`
+  assembly in `parse_cavlc_block`/`parse_cavlc_chroma_dc` is the spec form
+  (`base = (level_prefix << suffixLength)`, escape `+15` for `prefix>=14 &&
+  sl==0`, and `+(15 - (1<<(prefix-3)) + 4096)` for `prefix>=15`); this was
+  cross-checked against the IJERT reference algorithm and against I-frame
+  bit-exactness (changing it to a `level_prefix.min(15)` form regressed the
+  I-frame tests, confirming the committed form is correct).
+
+  - [x] Reproduce deterministically (was `max_diff=127`, now resolved).
+  - [x] Static 2-frame clip (identical frames → zero residual, cbp=0) is
+        BIT-EXACT (`inter_skip_copies_reference` + live decode).
+  - [x] CAVLC tables cross-checked against FFmpeg `h264data.c`; chroma-AC
+        `total_zeros` "bug" confirmed NOT a bug (single combined table is
+        spec-correct).
+  - [x] `parse_p_slice` / `parse_p_macroblock` run end-to-end without panic.
+
+  #### Phase C.2 — P-frame reconstruction correctness — **DONE (2026-08-08)**
+
+  The earlier "max_diff=2 over 49/4608 samples" gap was **not** a CAVLC
+  residual bug — it was a false premise in the test harness. `-x264-params
+  deblock=0` only zeroes x264's alpha/beta filter *offset*; it does not set
+  `disable_deblocking_filter_idc=1`, so every P-frame conformance test was
+  unknowingly comparing against an ffmpeg reference with deblocking **on**
+  while assuming it was off (`no-deblock=1` is the key that actually disables
+  it). Two independent lines of evidence closed this out:
+  1. A fixed differential CAVLC oracle (`p_slice_oracle2.rs` — an independent
+     re-implementation of the §9.2.2 level-assembly walk, sharing only the
+     already-verified VLC tables) found **0 mismatches** across all 104
+     luma/chroma-AC/chroma-DC residual blocks of the 64×48 clip. (The oracle
+     itself had a bug — it discarded computed chroma-AC `TotalCoeff` back into
+     the nC neighbour grid as all-zero — which is what caused the earlier
+     apparent desync; fixed alongside.)
+  2. With deblocking genuinely disabled (`no-deblock=1`), P-frame decode is
+     **bit-exact (max_diff=0)** against ffmpeg — proving CAVLC, MV
+     prediction, motion compensation, and dequant/IDCT are all already
+     correct.
+  3. That pointed the real gap at the deblocking filter: `deblock.rs` derived
+     one boundary-strength (`bS`) value per *whole macroblock edge* from a
+     whole-MB `has_coeffs` flag, and had no motion-vector/ref-index rule at
+     all (documented as a known gap). Spec §8.7.2.1 requires `bS` per
+     4-sample segment (i.e. per pair of 4×4 blocks straddling the edge), with
+     a coefficient-OR rule (bS=2 if *either* side's block has nonzero coeffs
+     — the old code's "both vs exactly one coded" distinction, giving bS=1,
+     was itself non-spec) and a fallback bS=1 rule for differing ref_idx or
+     MV components differing by ≥4 quarter-pel. Rewired `DeblockMbInfo` to
+     carry the per-4×4-block `nz` grid and `MvStore` cells, and restructured
+     `deblock_luma_edge`/`deblock_chroma_edge` to filter each 4-sample (luma)
+     / 2-sample (chroma) segment with its own bS. Result: bit-exact
+     (max_diff=0) with deblocking **enabled** too (`p_frame_conformance.rs`
+     now covers both variants; `cavlc_conformance.rs`'s I-frame equivalent
+     tightened from a loosened `<=20` bound to exact 0 as well).
+
+  - [x] Confirm P-slice `parse_p_macroblock` runs end-to-end without panic.
+  - [x] Motion-compensated reconstruction (MV prediction + 6-tap/bilinear
+        interp) produces correct reference-block fetches.
+  - [x] Validate bit-exact P-frame decode vs `ffmpeg` — **max_diff=0**, both
+        with deblocking disabled and with deblocking enabled.
+  - [x] Independent CAVLC oracle confirms residual decode was never the bug.
+  - [x] Per-4×4-block deblocking `bS` (coefficient-OR + MV/ref rule) fixes the
+        real remaining gap; chroma reuses the co-located luma `bS` per spec.
+
+  #### Phase C.3 — multi-P-frame chaining (open, found 2026-08-09)
+
+  > Found while running the full `tpt-kinetix-h264` suite during Phase E.2.
+  > Not caused by (and not fixed by) Phase E.1/E.2 — reference-list
+  > construction and DPB marking are both exercised bit-exactly by the tests
+  > that *do* pass, and the divergence is a small localised residual/MC
+  > difference rather than a whole-frame wrong-reference difference.
+
+  - [ ] `tests/multi_frame_dpb.rs::ipppp_clip_decodes_bitexact_frame_by_frame`
+        (untracked, ffmpeg-gated) fails on a 5-frame 64×48 IPPPP clip: frames 0
+        and 1 are bit-exact (max_diff=0) but frame 2 — the **second** P picture,
+        the first one that predicts from another P picture — differs by
+        max_diff=33 over 124/4608 samples. `p_frame_conformance.rs` only covers
+        a single IDR→P step, so it stays green. The untracked
+        `examples/dbg_ipp.rs` / `examples/dbg_p2.rs` debug harnesses from the
+        previous session were already narrowing this to macroblock 9 of that
+        slice; start there (dump `mb_type`, the per-4×4 MV grid, and the luma
+        coefficients for MB 9 and diff them against `ffmpeg -debug mb_type+mv`).
+  - [ ] `tests/fuzz_from_seed.rs::fuzz_structured_seeds` trips its own 300 ms
+        per-decode soft timeout after ~1.5 M mutation iterations on a fast
+        desktop (slowest *completed* decode observed: 245 ms, i.e. the budget is
+        marginal rather than the decode being hung). The timing-out inputs are
+        mutated large-dimension SPS seeds, so this is a decode-throughput /
+        allocation-cost issue on huge pictures, not a panic. Either profile the
+        large-picture path or make the budget machine-relative before this can
+        be a reliable CI gate.
 
 ### H.264 — Phase D: CABAC
-- [ ] Per-syntax-element context-index tables (Tables 9-12..9-33) and
-      binarizations (§9.3.2) wired into the arithmetic engine in `entropy.rs`
-- [ ] CABAC macroblock/residual syntax parsing in the slice loop
-- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg`
+
+> Updated 2026-08-09: the engine + I-slice context tables/binarizations from
+> the previous entry were re-verified against FFmpeg's `libavcodec/h264_cabac.c`
+> (cross-checked the same way this repo's CAVLC tables already are) and found
+> to have real bugs, not just missing coverage — `MbTypeICabacContext`'s bin-0
+> context was static instead of neighbor-derived and was missing the I_PCM
+> `decode_terminate()` check; `CbpCabacContext` had no neighbor input at all;
+> `MbQpDeltaCabacContext` used a truncated-unary+EG0 binarization instead of
+> the real unbounded-unary one. All three were rewritten, and the previously
+> "outstanding" I-slice-relevant tables (chroma pred mode, intra4x4 pred mode,
+> coded_block_flag, significant/last_significant_coeff_flag, coeff_abs_level)
+> were implemented — see Phase D.1/D.3 below for what's actually done now.
+
+- [~] Context-index tables + binarizations for **I-slice** syntax elements
+      (mb_type, intra_chroma_pred_mode, prev/rem_intra4x4_pred_mode,
+      coded_block_pattern, mb_qp_delta, coded_block_flag,
+      significant_coeff_flag/last_significant_coeff_flag/coeff_abs_level_minus1)
+      implemented in `entropy.rs`/`cabac_tables.rs` and unit-tested. P/B-slice
+      tables (mb_skip_flag refinement, mb_type P/B, sub_mb_type, ref_idx, mvd)
+      not started.
+- [~] CABAC macroblock/residual syntax parsing wired into the slice loop
+      (`slice_data.rs::parse_i_slice_cabac`/`parse_intra_macroblock_cabac`,
+      wired into `decoder.rs`) for I-slices only, reusing the existing
+      CAVLC-path reconstruction/dequant/IDCT/deblock code unchanged.
+- [ ] **Known bug, unresolved**: for a slice where an early macroblock is
+      Intra_4x4 with real (nonzero) residual, the decoder desyncs partway
+      through — `end_of_slice_flag` never fires and only ~45% of the CABAC
+      payload gets consumed (verified on a minimal single-macroblock 16×16
+      repro). Macroblocks where the *first* macroblock is Intra_16×16 (with
+      or without residual), or where Intra_4x4 macroblocks occur *after* the
+      first (with real neighbour data), decode and terminate correctly — so
+      this reproduces specifically for "Intra_4x4 as an early/first
+      macroblock with real residual", independent of resolution or cbp value.
+      Extensively cross-checked (mb_type/intra4x4-pred-mode/chroma-pred-mode/
+      coded_block_pattern/mb_qp_delta/residual significance-map/level/sign
+      decode all matched bit-for-bit against a from-scratch independent
+      Python reimplementation of the same FFmpeg-derived algorithm, and
+      `mb_type`/QP were independently confirmed via `ffmpeg -debug mb_type+qp`)
+      without finding the root cause. Given both implementations share the
+      same understanding, the bug is most likely a shared misunderstanding of
+      one syntax element rather than a transcription error. The decoder fails
+      safe (falls back rather than emitting wrong pixels — see
+      `slice_data.rs`'s `end_of_slice_flag mismatch` check), so this is a
+      correctness gap, not a soundness one. **Next step for whoever picks
+      this up**: reproduce with a 16×16 single-MB `testsrc` clip at low QP
+      (`ffmpeg -f lavfi -i testsrc=size=16x16 -c:v libx264 -profile:v main
+      -x264-params cabac=1:8x8dct=0:qp=17`), dump the raw CABAC payload bytes,
+      and re-derive the independent reference decoder (the approach used this
+      session) to bisect further — e.g. try porting FFmpeg's `residual_luma`
+      dispatch even more literally (block-by-block byte offsets) in case
+      there's a category (`ctxBlockCat`) misassignment for some I_NxN
+      sub-case not exercised by the multi-MB tests that happened to pass.
+- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg` — blocked on the
+      bug above; `cabac_conformance.rs` exists (mirrors `cavlc_conformance.rs`)
+      but both tests are `#[ignore]`d until it's fixed.
+
+  #### Phase D.1 — remaining context-index tables
+
+  > Updated 2026-08-09: the three remaining Phase D.1 checkboxes are now
+  > done, but this is **context-index-table work only** (init values +
+  > ctxIdxOffset layout + ctxIdxInc derivation *data*), not P/B-slice syntax
+  > parsing — Phase D.4 below (mb_type-P/B/sub_mb_type/ref_idx/mvd
+  > *binarization and decode-loop wiring*) remains not started. Added
+  > `CABAC_CTX_INIT_PB0`/`1`/`2` (1024-entry `(m,n)` tables per
+  > `cabac_init_idc`) plus ctxIdxOffset constants for mb_skip_flag/mb_type/
+  > sub_mb_type (P/SP and B) and mvd_x/mvd_y/ref_idx, all fetched and
+  > cross-checked from FFmpeg's `libavcodec/h264_cabac.c` two independent
+  > ways (the source's own `/* lo - hi */` block comments plus the literal
+  > ctxIdx arithmetic in `decode_cabac_mb_skip`/`decode_cabac_p_mb_sub_type`/
+  > `decode_cabac_b_mb_sub_type`/`decode_cabac_mb_ref`/`decode_cabac_mb_mvd`).
+  > Found and fixed a real bug in the process: the pre-existing
+  > `MB_SKIP_FLAG_P_INIT` stub's three `(m,n)` pairs turned out to be ctxIdx
+  > 11's value from *each of the three* `cabac_init_idc` tables, not ctxIdx
+  > 11/12/13 from one table — `MbSkipFlagContext::new_p_slice` now takes a
+  > `cabac_init_idc` parameter and reads the verified `CABAC_CTX_INIT_PB*`
+  > tables directly (see `entropy.rs`'s `MbSkipFlagContext` doc comment for
+  > the full story); a `new_b_slice` constructor (ctxIdx 24..=26) was added
+  > alongside it, confirmed from source to reuse the same condTermFlag
+  > derivation as P/SP. Also added `ctxBlockCat` 5 (Luma8x8) residual
+  > contexts: extended `SIG_COEFF_CTX_BASE`/`LAST_COEFF_CTX_BASE`/
+  > `COEFF_ABS_LEVEL_M1_CTX_BASE` to 6 entries, and confirmed from FFmpeg's
+  > `decode_cabac_residual_nondc` that `coded_block_flag` is *not* separately
+  > signalled for Luma8x8 in the non-4:4:4 case this crate targets (so
+  > `CBF_CTX_BASE` deliberately stays at 5 entries, documented on
+  > `CAT_LUMA_8X8`); added the `significant_coeff_flag`/
+  > `last_significant_coeff_flag` many-to-one ctxIdxInc indirection tables
+  > (`SIG_COEFF_CTX_INC_8X8_FRAME`/`LAST_COEFF_CTX_INC_8X8_FRAME`, 63 entries
+  > each) as standalone consts — **not** wired into
+  > `ResidualCabacContext::decode_block`, which still assumes ctxIdxInc ==
+  > scan position (only valid for cats 0..=4); that restructuring, plus all
+  > actual P/B mb_type/sub_mb_type/ref_idx/mvd binarization, is Phase D.4.
+  > All new tables/consts are unit-tested in `cabac_tables.rs`.
+
+  - [x] mb_type I-slice, coded_block_pattern, mb_qp_delta, intra_chroma_pred_mode,
+        prev/rem_intra4x4_pred_mode, coded_block_flag, significant_coeff_flag,
+        last_significant_coeff_flag, coeff_abs_level_minus1 — all I-slice-only,
+        frame coding (no MBAFF/field), no 8x8 transform.
+  - [x] mb_type P/B-slice, sub_mb_type, ref_idx, mvd context init (needed for
+        Phase D.4 P/B-slice CABAC) — tables + ctxIdxOffset constants only,
+        see `cabac_tables.rs`; no binarization/parsing implemented yet.
+  - [x] mb_skip_flag refinement for P/B — old `MB_SKIP_FLAG_P_INIT` stub was
+        wrong (see note above), fixed and extended with a B-slice
+        constructor; both now `cabac_init_idc`-dependent per source.
+  - [x] 8x8-transform-specific residual contexts (ctxBlockCat 5, Luma8x8) —
+        context-index tables + ctxIdxInc indirection LUTs only; still not
+        wired into `decode_block`, so the `!pps.transform_8x8_mode_flag`
+        gate elsewhere in the codebase must stay in place until Phase D.4.
+
+  #### Phase D.2 — binarizations (§9.3.2)
+  - [x] Truncated-unary, FL (LSB-first per §9.3.2.5, distinct from CAVLC's
+        MSB-first `u(v)`), and UEG0 (via `decode_bypass_eg`) binarizations
+        used by the I-slice tables above are implemented; see `entropy.rs`.
+  - [ ] Binarizations specific to P/B-slice elements (mvd's UEGk suffix beyond
+        what `decode_bypass_eg` already covers, ref_idx's truncated unary)
+
+  #### Phase D.3 — CABAC syntax parsing in the slice loop
+  - [x] I-slice mb_type / intra pred modes / coded_block_pattern / mb_qp_delta
+        / residual wired into `slice_data.rs`'s CABAC-specific parser,
+        reusing existing CAVLC reconstruction (transform/prediction/deblock)
+        unchanged (see `parse_i_slice_cabac`).
+  - [ ] Fix the known desync bug above.
+  - [ ] Add a Main/High-profile CABAC clip to the corpus and validate bit-exact
+        vs `ffmpeg` (test scaffolding — `cabac_conformance.rs` — already exists,
+        currently `#[ignore]`d)
+
+  #### Phase D.4 — P/B-slice CABAC (not started)
+  - [ ] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
+        parsing, following the same I-slice-first-then-P-slice pattern used
+        for CAVLC
 
 ### H.264 — Phase E/F/G: advanced tools
-- [ ] B-frames, weighted prediction, ref_pic_list_modification, MMCO
-- [ ] 8×8 transform + High-profile scaling matrices
-- [ ] Field/interlaced coding (PAFF/MBAFF)
+
+> Broken down 2026-08-06: each of the three items below previously bundled
+> several independent features into one checkbox. Grounded against the
+> actual code state: `parse_ref_pic_list_modification` (`slice.rs:305`),
+> `parse_dec_ref_pic_marking` (`slice.rs:371`), and `parse_pred_weight_table`
+> (`slice.rs:334`) all already parse their syntax but only to advance the bit
+> position — every decoded value (`_long_term_pic_num`, `_lw`, `_cw`, etc.) is
+> discarded, per their own doc comments. `slice_data.rs` has no B-slice
+> `mb_type`/`sub_mb_type` handling at all yet. `transform_8x8_mode_flag` is
+> parsed into `pps.rs` but `transform.rs` has no 8×8 transform path, and the
+> SPS/PPS `scaling_list` values are parsed but never applied at dequant.
+> `field_pic_flag` is parsed in `slice.rs` but `bottom_field_flag` is
+> discarded and there is no field/MBAFF decode logic anywhere.
+>
+> Updated 2026-08-09: Phase E.1 is done —
+> `parse_ref_pic_list_modification`'s values are no longer discarded; they now
+> drive `ref_pic::modify_ref_pic_list` (§8.2.4.3). Phase E.2 is done too —
+> `parse_dec_ref_pic_marking`'s values now drive `ref_pic::Dpb::mark_decoded_picture`
+> (§8.2.5). The rest of the paragraph above still holds:
+> `parse_pred_weight_table` (E.4) remains parse-only.
+
+#### Phase E.1 — ref_pic_list_modification (wire the existing parse-only stub)
+- [x] Thread `modification_of_pic_nums_idc` + `abs_diff_pic_num_minus1` /
+      `long_term_pic_num` from `parse_ref_pic_list_modification` (`slice.rs:305`)
+      into `ref_pic.rs`'s reference-list construction so it actually reorders
+      `RefPicList0`/`RefPicList1` per §8.2.4.3, instead of discarding the values
+      — **DONE (2026-08-09)**. `ref_pic.rs` gained `modify_ref_pic_list`
+      (§8.2.4.3.1 short-term `picNumLXPred`/`picNumLXNoWrap`/`picNumLX`
+      derivation with `MaxPicNum` wrap, §8.2.4.3.2 long-term selection, and the
+      shared 8-38/8-39 insert-shift-dedupe splice via `splice_into_list`, using
+      `PicNumF`/`LongTermPicNumF` as `Option<i64>` "never matches" sentinels).
+      `build_ref_list_l0` now takes `PicNumContext` + the header's
+      `ref_pic_list_modification_l0` and applies §8.2.4.2.1 initialisation then
+      §8.2.4.3 modification; `decoder.rs` passes them through. Two adjacent
+      correctness fixes landed with it: (a) §8.2.4.2.1 P-slice initialisation
+      ordered short-term refs by descending **PicOrderCnt**, which is the
+      B-slice rule — it now orders by descending **PicNum** (`FrameNumWrap`),
+      so `frame_num`-wrapped references sort correctly; (b) `decoder.rs` sized
+      RefPicList0 from the raw PPS `num_ref_idx_l0_default_active_minus1`,
+      ignoring the slice header's `num_ref_idx_active_override_flag` — it now
+      uses the header's effective value (§7.4.3). Malformed streams fail safe:
+      a command naming a picture absent from the DPB yields
+      `RefPicListError`/`None` so the caller falls back rather than decoding
+      against a wrong reference list, and the parser now enforces §7.4.3.1's
+      cap of `num_ref_idx_lX_active_minus1 + 1` commands (previously an
+      unbounded loop, harmless only because the values were discarded).
+      **Note: L1 is parsed and stored but not yet applied — B-slice decode
+      does not exist (Phase E.3), so there is no `RefPicList1` to modify.**
+- [x] Unit test: a P-slice with an explicit reorder command produces a
+      different `RefPicList0` order than default construction (§8.2.4.2) —
+      `ref_pic.rs::tests::modification_reorders_p_slice_list_away_from_default`
+      plus 7 sibling unit tests (pred carried across commands, `MaxPicNum`
+      wrap on `ShortTermAdd`, long-term promotion, list length invariance
+      across `num_active` 1..=4, pulling in a picture the truncation dropped,
+      absent-picture error, empty-list no-op), and the end-to-end
+      `tests/ref_pic_list_modification.rs` which drives the reorder from real
+      slice-header bitstream syntax (3 tests) plus 3 new `slice.rs` header
+      round-trip/§7.4.3.1-rejection tests. Existing bit-exact I/P-frame
+      conformance (`cavlc_conformance.rs`, `p_frame_conformance.rs`,
+      max_diff=0) is unaffected.
+
+#### Phase E.2 — MMCO / dec_ref_pic_marking (wire the existing parse-only stub)
+- [x] Thread `memory_management_control_operation` values 1–6 from
+      `parse_dec_ref_pic_marking` (`slice.rs:371`) into real DPB marking in
+      `ref_pic.rs` (mark-unused-for-reference, long-term conversion, sliding
+      window override), instead of discarding the values — **DONE (2026-08-09)**.
+      `parse_dec_ref_pic_marking` now returns a typed `DecRefPicMarking`
+      (`Idr { no_output_of_prior_pics_flag, long_term_reference_flag }` /
+      `SlidingWindow` / `Adaptive(Vec<MmcoOp>)`) stored on
+      `SliceHeader::dec_ref_pic_marking`, and `ref_pic.rs` gained
+      `Dpb::mark_decoded_picture`, the §8.2.5 decoded reference picture marking
+      process, which `decoder.rs::store_reference_picture` runs for every
+      reference picture on both decode paths. All six operations are
+      implemented: MMCO 1 (§8.2.5.4.1, `picNumX = CurrPicNum −
+      (difference_of_pic_nums_minus1 + 1)`, equation 8-40, matched against
+      `PicNum`/`FrameNumWrap` so pre-wrap negatives work), MMCO 2 (§8.2.5.4.2),
+      MMCO 3 (§8.2.5.4.3, short-term → long-term, evicting whichever picture
+      already held that `LongTermFrameIdx`), MMCO 4 (§8.2.5.4.4,
+      `MaxLongTermFrameIdx`, dropping every long-term above the new maximum,
+      `plus1 == 0` meaning "no long-term frame indices"), MMCO 5 (§8.2.5.4.5,
+      empty the DPB, reset `MaxLongTermFrameIdx`, and rebase the current
+      picture to `frame_num == 0` / `PicOrderCnt == 0` per §7.4.3/§8.2.1.1 —
+      reported back through `MarkingOutcome::mmco5` so `decoder.rs` also runs
+      `PocState::reset_after_mmco5`), and MMCO 6 (§8.2.5.4.6, current picture →
+      long-term). §8.2.5.1's "adaptive marking replaces sliding-window marking"
+      rule is honoured: `Adaptive` never runs `apply_sliding_window`, and the
+      current picture is marked short-term afterwards unless MMCO 6 claimed it.
+      IDR marking (including `long_term_reference_flag`) goes through the same
+      entry point. Malformed streams fail safe rather than half-marking: a
+      command naming a picture that is not in the DPB with the required marking
+      returns `MmcoError` **and empties the DPB**, so the next inter slice
+      cannot predict from a wrongly-marked reference; the parser additionally
+      rejects out-of-range operands at parse time (§7.4.3.3: `long_term_frame_idx`
+      / `long_term_pic_num` > 15, `max_long_term_frame_idx_plus1` > 16, unknown
+      MMCO values) and caps the command list at FFmpeg's `MAX_MMCO_COUNT` (66)
+      so a `0`-terminated loop cannot be made unbounded. A defensive
+      post-marking capacity clamp mirrors FFmpeg's
+      `ff_h264_execute_ref_pic_marking` "reference frames exceeds max (probably
+      corrupt input)" behaviour, since each DPB entry owns a full decoded frame
+      and is therefore a memory-exhaustion vector for the fuzzers.
+- [x] Unit test: MMCO 5 (reset) and MMCO 1 (mark short-term unused) each
+      produce the expected DPB state — the two headline cases are
+      `ref_pic.rs::tests::mmco1_marks_the_selected_short_term_picture_unused`
+      and `::mmco5_resets_the_dpb_and_rebases_the_current_picture`, alongside 12
+      sibling unit tests (MMCO 2/3/4/6, `LongTermFrameIdx` reuse eviction,
+      adaptive-overrides-sliding-window, in-order application, absent-picture
+      fail-safe, overfull-DPB clamp, IDR with/without `long_term_reference_flag`,
+      the MMCO-5 POC-state reset, and an MMCO 3 → §8.2.4.3.2 hand-off proving
+      Phase E.1 and E.2 compose). Two further layers were added on top:
+      `tests/dec_ref_pic_marking.rs` drives the same operations from **real
+      slice-header bitstream syntax** (7 tests), and — new this session — from
+      **whole Annex B access units through the public `H264Decoder::decode`
+      API** (6 tests), which is the only layer that covers
+      `decoder.rs::store_reference_picture` itself: POC derivation, the
+      `nal_ref_idc == 0` "non-reference pictures never enter the DPB" gate, the
+      `PocState::reset_after_mmco5` rebase, and the fail-safe error branch. The
+      decoder-level tests were mutation-checked (severing the header→marking
+      wiring fails 5 of the 6; deleting the `reset_after_mmco5()` call fails the
+      MMCO 5 one, which needed `pic_order_cnt_lsb` values chosen so the missing
+      reset actually changes the derived POC — 12 → 2 reads as an MSB wrap and
+      yields 18). `H264Decoder::dpb()` was added as a read-only accessor so the
+      marking result is observable without inferring it from pixels. Existing
+      bit-exact I/P-frame conformance (`cavlc_conformance.rs`,
+      `p_frame_conformance.rs`, max_diff=0) is unaffected.
+
+#### Phase E.3 — B-slice parsing + direct mode
+- [ ] Parse B-slice `mb_type`/`sub_mb_type` (Tables 7-14..7-18) in
+      `slice_data.rs` (currently absent)
+- [ ] Implement spatial direct mode MV derivation (§8.4.1.2.2)
+- [ ] Implement temporal direct mode MV derivation (§8.4.1.2.3)
+- [ ] Implement bi-predictive motion compensation: average two
+      motion-compensated blocks (§8.4.2.3)
+
+#### Phase E.4 — Weighted prediction (wire the existing parse-only stub)
+- [ ] Thread `luma_weight`/`luma_offset`/`chroma_weight`/`chroma_offset` from
+      `parse_pred_weight_table` (`slice.rs:334`) into explicit weighted
+      prediction (§8.4.2.3.2) for P and B slices, instead of discarding them
+- [ ] Implement implicit weighted prediction (§8.4.2.3.2, B-slices only,
+      distance-based weight derivation)
+- [ ] Unit test: explicit weighted P-slice reconstruction matches hand-computed
+      weight/offset for a synthetic block
+
+#### Phase E.5 — Validate B-frame decode
+- [ ] Generate an IBP-structured corpus clip with `ffmpeg`
+- [ ] Validate bit-exact B-frame decode vs `ffmpeg` on that corpus
+
+#### Phase F.1 — 8×8 transform: parsing
+- [ ] Parse `transform_size_8x8_flag` per-macroblock in `slice_data.rs` when
+      `pps.transform_8x8_mode_flag` is set
+- [ ] Parse the 8×8 residual block CAVLC syntax (distinct coeff scan/context
+      from the 4×4 path, §7.3.5.3.3)
+
+#### Phase F.2 — 8×8 transform: reconstruction
+- [ ] Implement the 8×8 inverse transform (§8.5.12.3) in `transform.rs`
+- [ ] Implement the four 8×8 intra prediction modes (§8.3.2.2) in
+      `prediction.rs`
+
+#### Phase F.3 — High-profile scaling matrices
+- [ ] Apply the already-parsed SPS/PPS `scaling_list` values (Table 7-... /
+      §8.5.9) to 4×4 dequant in `transform.rs` (currently parsed but unused)
+- [ ] Apply the same scaling lists to the new 8×8 dequant path from Phase F.2
+
+#### Phase F.4 — Validate High-profile 8×8-transform decode
+- [ ] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
+      `ffmpeg`, validate bit-exact decode
+
+#### Phase G.1 — PAFF: field-picture parsing
+- [ ] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, currently
+      discarded as `_bottom_field_flag`) through slice/header state instead of
+      dropping it
+- [ ] Implement field-picture POC derivation (§8.2.1.2/8.2.1.3, distinct from
+      the existing frame-picture path)
+
+#### Phase G.2 — PAFF: field-picture reconstruction
+- [ ] Field-picture reference list construction (§8.2.4.2.5)
+- [ ] Field-based (odd/even scanline) macroblock reconstruction and output
+      interleaving back into a full frame
+
+#### Phase G.3 — MBAFF: parsing
+- [ ] Parse `mb_field_decoding_flag` and macroblock-pair decode ordering
+      (§7.3.4, §7.4.4) when `mb_adaptive_frame_field_flag` is set
+
+#### Phase G.4 — MBAFF: neighbour derivation + reconstruction
+- [ ] Adjust neighbour derivation (nC, MPM, motion prediction) for mixed
+      field/frame macroblock pairs (§6.4.10.1)
+- [ ] Field/frame-adaptive reconstruction per macroblock pair
+
+#### Phase G.5 — Validate interlaced decode
+- [ ] Generate a PAFF corpus clip and a separate MBAFF corpus clip with
+      `ffmpeg`; validate bit-exact decode vs `ffmpeg` for each independently
 
 ### H.264 — Phase H: conformance & capability flip
 - [ ] Cross-codec conformance harness vs ITU test vectors + `ffmpeg`; on pass,
@@ -271,10 +715,96 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       pixel-exact assertions, and update `lib.rs`/README/`todo.md` status
 
 ### AV1 — from-scratch reconstruction
-- [ ] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/decoder.rs`
-      (replace the grey placeholder path), incl. the parallel tile-decode
-      `TODO(phase-4)` at `decoder.rs:113`; validate vs `dav1d`; flip
-      `Av1Decoder::capabilities().pixel_exact` only after conformance passes
+
+> Status corrected 2026-08-06 (previous wording was stale): `decoder.rs`
+> already calls into `reconstruct.rs::reconstruct_av1_frame` for intra
+> keyframes, and `reconstruct.rs` has real inverse-transform (`dct_4x4`,
+> `dct_8x8`, `dct_16x16`, `adst_4x4`, `wht_4x4`) and intra-prediction
+> (DC/vertical/horizontal/paeth/smooth/directional) code — this is
+> substantially more than "grey placeholder frames." **However**,
+> `decode_tile_group` (`reconstruct.rs:664`) previously read coefficients with a
+> plain `BitReader` using an invented exp-golomb-like scheme (trailing-ones +
+> level-prefix/suffix, modeled on H.264 CAVLC). Phase A landed the symbol
+> decoder engine in `entropy.rs`/`entropy_cdf.rs`, and **Phase B (2026-08-09)
+> rewired `decode_tile_group`/`decode_chroma_tx` onto real `coeffs()` syntax
+> (`coeff.rs::read_coeffs`)** read via that symbol decoder — the reconstruction
+> math (`inverse_transform`/`predict_intra_block`) is unchanged, and the
+> lossless WHT path is now wired. Intra keyframe coefficients now decode through
+> the real arithmetic decoder (cross-checked against an independent Python
+> `coeffs()` oracle); output is still not pixel-exact because superblock
+> partition/mode syntax is a fixed placeholder grid (Phase C).
+
+#### AV1 Phase A — real entropy: the symbol decoder (blocker for everything below)
+
+> Done 2026-08-07. Landed in `tpt-kinetix-av1/src/entropy.rs`
+> (`SymbolDecoder`: `init_symbol`/`read_symbol`/`read_bool`/`read_literal`,
+> spec §8.2.2/8.2.3/8.2.5/8.2.6 — not §8.2.2/§8.2.4 as originally cited
+> above, which are actually "Initialization" and "Exit process"
+> respectively) and `entropy_cdf.rs` (mechanically extracted `Default_*_Cdf`
+> tables for `txb_skip`/`cbf`, `tx_type` (intra sets 1/2, inter sets 1/2/3,
+> full), and coefficient levels (`eob_pt_*`, `coeff_base_eob`,
+> `coeff_base`, `coeff_br`, `dc_sign`, full)). The AV1 spec has no literal
+> worked numeric example for the symbol decoder (confirmed by fetching
+> `09.parsing.process.md` directly) — substituted an independent Python
+> transcription of the same §8.2 pseudocode as a differential oracle;
+> golden vectors from it are embedded in `entropy.rs`'s tests. `exit_symbol`
+> (§8.2.4) is intentionally not implemented yet — it needs per-tile
+> bookkeeping (`context_update_tile_id`, the full named `Tile*`/`Saved*`
+> CDF set) that only exists once Phase B/C wire up real tile parsing.
+> `decode_tile_group` itself is untouched — that rewiring is Phase B.
+
+- [x] Implement the AV1 boolean/multi-symbol arithmetic decoder (§8.2.6,
+      `read_symbol`) operating over an adaptive CDF table, distinct from both
+      H.264 CABAC and the current ad hoc `BitReader` usage in
+      `decode_tile_group`
+- [x] Implement default CDF tables + adaptation/update rule (§8.2.6) for at
+      minimum the symbols `decode_tile_group` currently reads with raw bits
+      (coefficient levels, `cbf`, `tx_type`)
+- [x] Unit test the symbol decoder against the spec's worked arithmetic-coding
+      example, independent of any real tile bitstream — see note above on
+      why this is a cross-validated synthetic vector set rather than a
+      literal spec example
+
+#### AV1 Phase B — rewire coefficient decode onto the symbol decoder
+- [x] Replace the `BitReader`-based level/trailing-ones/total-zeros decode in
+      `decode_tile_group` (`reconstruct.rs:664`) and `decode_chroma_tx`
+      (`reconstruct.rs:902`) with real coefficient syntax (`all_zero`,
+      `eob_pt*`, `eob_extra`, `coeff_base(_eob)`, `coeff_br`, `dc_sign`,
+      sign, Exp-Golomb tail) read via the Phase A symbol decoder (§5.11.39),
+      in `coeff.rs::read_coeffs` — landed and cross-checked against an
+      independent Python `coeffs()` oracle for golden vectors
+- [x] Keep the existing `inverse_transform`/`predict_intra_block` reconstruction
+      math — only the bits-in path changes (also wired the previously-dead
+      `wht_4x4` lossless WHT via `internal_tx_type`/`TX_TYPE_WHT`)
+
+#### AV1 Phase C — partition + mode syntax
+- [ ] Parse superblock partition tree (§5.11.4) instead of the current fixed
+      8×8-block-per-superblock loop in `decode_tile_group`
+      (`reconstruct.rs:697`)
+- [ ] Parse per-block intra mode / `tx_size` selection via the symbol decoder
+      rather than assuming a fixed DC-predicted 8×8 transform block
+
+#### AV1 Phase D — loop filter / CDEF / restoration
+- [ ] Implement the deblocking loop filter (§7.14)
+- [ ] Implement CDEF (§7.15)
+- [ ] Implement loop restoration (§7.17) — can be a no-op passthrough for v1
+      if `enable_restoration` is false in the sequence header
+
+#### AV1 Phase E — inter prediction
+- [ ] Reference frame buffer management (§7.20, `RefFrameStore` equivalent)
+- [ ] Motion vector prediction (§7.10) and inter block reconstruction (§7.11.3)
+
+#### AV1 Phase F — parallel tile decode
+- [ ] Wire `rayon` over the existing `TileData` (`decoder.rs:24`) now that
+      Phase A–C produce real per-tile reconstruction worth parallelizing —
+      this was the standing `TODO(phase-4)` previously at `decoder.rs:113`
+
+#### AV1 Phase G — conformance
+- [ ] Validate decode vs `dav1d` reference output on a generated intra-only
+      corpus first (Phases A–C only), then again once inter prediction
+      (Phase E) lands
+- [ ] Flip `Av1Decoder::capabilities().pixel_exact` only after the conformance
+      harness passes
 
 ## Phase 13 — `tpt-kinetix-lean`: Original Embedded-First Codec (2026-07-20)
 
@@ -285,12 +815,14 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > in a few thousand lines with genuinely parallel entropy decode.
 
 ### Design
-- [~] Write the format design doc: header layout, fixed block-partition
+- [x] Write the format design doc: header layout, fixed block-partition
       scheme, rANS stream-interleaving/framing — documented in
       `tpt-kinetix-lean/src/headers.rs` (byte layout table) and
-      `tpt-kinetix-lean/src/rans.rs` (stream-set framing) module docs.
-      STILL TODO: integer transform sizes, intra mode set (~8-16
-      directions), inter/motion-vector approach, in-loop filter placement
+      `tpt-kinetix-lean/src/rans.rs` (stream-set framing) module docs;
+      integer transform sizes, intra mode set (14 modes), inter/motion-vector
+      approach (unidirectional, quarter-pel, 6-tap), in-loop filter placement
+      (single-stage deblocking) documented in `tpt-kinetix-lean/src/lib.rs`
+      crate-level docs
 - [x] Document the memory/perf budget for v1 (target max resolution, arena
       size ceiling, per-frame decode time budget) sized for embedded-Linux
       SBC-class hardware (e.g. Raspberry Pi–class), noted as revisitable —
@@ -316,13 +848,21 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `DecoderCapabilities` not-pixel-exact contract) — full encode/decode
       round-trip test lands once reconstruction exists
 
-### Open questions (flagged, not decided here)
-- [ ] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
+### Open questions (resolved)
+- [x] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
       now that this would be the second hand-rolled bit reader in the
       workspace (alongside `tpt-kinetix-h264/src/bitreader.rs`), or keep them
-      independent per-codec
-- [ ] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
-      hot path is in place and proven on embedded Linux
+      independent per-codec — **Decision: start independent, extract later.**
+      Both `tpt-kinetix-lean` and `tpt-kinetix-vision` carry their own
+      `bitreader.rs` / `rans.rs` copies. A shared `tpt-kinetix-bitstream`
+      crate will be extracted once both codecs are stable enough to freeze the
+      rANS interface (documented in `docs/vision-codec-design.md` DECISION 8
+      and `tpt-kinetix-lean/src/lib.rs`).
+- [x] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
+      hot path is in place and proven on embedded Linux — **Decision: v1
+      targets embedded Linux (prove the alloc-free hot path first); no_std/MCU
+      is a v2 target.** Both `tpt-kinetix-lean` and `tpt-kinetix-vision` design
+      docs note this explicitly.
 
 ## Phase 14 — Specialist Codec Roadmap (backlog) (2026-07-20)
 
@@ -333,22 +873,314 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > actually decided on. Do not start implementation on any of these without
 > first writing its own Phase-13-style design section here.
 
-- [ ] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
+- [~] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
       classifier accuracy per bit rather than human perceptual quality;
       chroma-optional, model-matched bit depth, tensor-output decode path
-      (see `docs/codec-backlog.md` for design notes)
-- [ ] `tpt-kinetix-realtime` — ultra-low-latency, loss-resilient real-time
-      codec for cloud gaming/video conferencing/AR overlay; sub-frame
-      latency, no B-frame lookahead, built-in partial-frame loss recovery
-- [ ] `tpt-kinetix-lossless` — bit-exact reversible, high-bit-depth codec
-      for medical/scientific/archival capture
-- [ ] `tpt-kinetix-screen` — screen/UI capture codec tuned for sharp edges,
-      flat regions, and repeated glyphs instead of natural-image statistics
-- [ ] `tpt-kinetix-face` — talking-head/video-conferencing codec via
-      landmark-driven generative synthesis instead of pixel coding
-- [ ] `tpt-kinetix-volumetric` — point-cloud/volumetric/AR-VR codec; a
-      fundamentally different (3D, not 2D-frame) data shape from every
-      other entry here
+      (see `docs/codec-backlog.md` for design notes) — design phase started,
+      see Phase 15
+
+> Expanded 2026-08-06: the five items below were each a single line standing
+> in for an entire future effort the size of Phase 13/15 (design doc →
+> scaffold → implement). None of this is active work — the "Prioritize this
+> list" gate at the bottom still applies, and per the rule above, real
+> implementation on any of these still waits on its own design section (the
+> same one Phase 15 wrote for `tpt-kinetix-vision`). What's new is that each
+> codec now has its *design-phase* checklist pre-drafted, grounded in the
+> rationale already in `docs/codec-backlog.md`, so whichever one gets picked
+> next has a session-sized starting point instead of a blank page.
+
+#### `tpt-kinetix-realtime` — design-phase checklist (start here once prioritized)
+- [ ] Decide the target profile for v1 (cloud gaming vs. video conferencing
+      vs. AR/smart-glasses overlay) — `docs/codec-backlog.md` flags AR overlay
+      as the most demanding of the three (extreme power budget,
+      foveated/gaze-contingent rendering, real-world latency sensitivity)
+- [ ] Write the format design doc: partial-frame loss-recovery mechanism
+      (forward error correction vs. concealment vs. both) and how the
+      no-B-frame-lookahead constraint shapes GOP structure
+- [ ] Design the per-frame latency budget and how it's enforced (encode-side
+      deadline, decode-side bounded work)
+- [ ] Decide how loss resilience is measured for design validation (e.g. a
+      simulated packet-loss-vs-quality curve, the loss-resilience analogue of
+      Phase 15's mAP-vs-bitrate metric)
+- [ ] Document the memory/perf/latency budget for v1 (target hardware class,
+      ms/frame ceiling)
+- [ ] Decide the relationship to `tpt-kinetix-lean` — `docs/codec-backlog.md`
+      notes they share a power/latency-conscious embedded target
+
+#### `tpt-kinetix-lossless` — design-phase checklist (start here once prioritized)
+- [ ] Decide the target domain for v1 (medical imaging vs. scientific capture
+      vs. archival) and the bit-depth range it must support (10/12/16-bit)
+- [ ] Write the format design doc: reversible compression approach
+      (predictive + entropy coding, à la FFV1, vs. a reversible wavelet
+      transform)
+- [ ] Design the decode path's correctness contract — how bit-exact
+      round-trip is verified as part of the format itself (e.g. a built-in
+      checksum), not just left to external testing
+- [ ] Decide how compression ratio at guaranteed losslessness is measured for
+      design validation (baseline against FFV1 / lossless HEVC)
+- [ ] Document the memory/perf budget for v1 (archival-quality capture means
+      large uncompressed frame sizes)
+- [ ] Decide the relationship to existing kinetix bitstream primitives
+      (reuse `tpt-kinetix-lean`'s `bitreader.rs`/`rans.rs` shape or diverge)
+
+#### `tpt-kinetix-screen` — design-phase checklist (start here once prioritized)
+- [ ] Decide the target content class for v1 (desktop capture vs. mobile UI
+      vs. mixed screen+video content)
+- [ ] Write the format design doc: per-block mode classification (flat-fill
+      run-length, glyph/edge palette mode, natural-image fallback)
+- [ ] Design cross-frame glyph/palette dictionary reuse for repeated UI
+      elements
+- [ ] Decide how compression efficiency is measured for design validation
+      (baseline against H.264 screen-content-coding extensions or VP9
+      lossless)
+- [ ] Document the memory/perf budget for v1
+- [ ] Decide the relationship to existing kinetix bitstream primitives
+
+#### `tpt-kinetix-face` — design-phase checklist (start here once prioritized)
+- [ ] Decide the landmark/parametric face representation for v1 (3DMM, sparse
+      keypoints, or a learned latent code)
+- [ ] Write the format design doc: keyframe (real pixel image) + per-frame
+      parameter-delta bitstream — a materially different shape from every
+      pixel-coding entry in this table
+- [ ] Design the decode path's dependency contract: synthesis requires
+      running a generative model at decode time, so decide whether that model
+      ships with the decoder or is a pluggable external dependency
+- [ ] Design the fallback/failure path for content the trained face model
+      can't represent (occlusion, non-face content, extreme pose)
+- [ ] Decide how synthesis quality is measured for design validation
+      (perceptual similarity to source, not a pixel-exact diff)
+- [ ] Document the memory/perf budget for v1 — unlike every other entry here,
+      the generative model's inference cost is part of the decode budget
+
+#### `tpt-kinetix-volumetric` — design-phase checklist (start here once prioritized)
+- [ ] Decide the target volumetric representation for v1 (point cloud vs.
+      voxel grid vs. mesh+texture)
+- [ ] Write the format design doc: since this is 3D, not 2D-frame, data,
+      decide whether it reuses any `tpt-kinetix-core` frame/packet types or
+      needs new core types entirely
+- [ ] Design the spatial-partitioning + entropy-coding approach for
+      point/voxel data (e.g. octree)
+- [ ] Decide how compression efficiency is measured for design validation
+      (baseline against Draco / MPEG point-cloud-compression)
+- [ ] Document the memory/perf budget for v1
+- [ ] Confirm explicitly that this shares no primitives with any other
+      kinetix codec — `docs/codec-backlog.md` flags it as fundamentally
+      different, but that should be a stated decision here, not an assumption
+
 - [ ] Prioritize this list (pick the next one to move from backlog to an
-      actual Phase-13-style design + scaffold effort) once `tpt-kinetix-lean`
-      reaches a stable v1
+      actual Phase-13-style design + scaffold effort, using its
+      design-phase checklist above as the starting task list) once
+      `tpt-kinetix-lean` reaches a stable v1
+
+## Phase 15 — `tpt-kinetix-vision`: Video-for-Machines Codec (design phase) (2026-07-20)
+
+> Goal: an original codec design that optimizes rate-distortion for
+> downstream detector/classifier/embedding-model accuracy per bit, rather
+> than human perceptual quality. Backlog item promoted to a design phase per
+> the Phase 14 rule (design section required before implementation starts).
+> Full rationale in `docs/codec-backlog.md` ("Original Specialist Codec
+> Concepts" table). Overlaps `tpt-kinetix-lean`'s embedded/edge-camera
+> target but shares no bitstream design yet — track independently until the
+> shared-primitives question below is resolved.
+
+### Design (resolved — see `docs/vision-codec-design.md`)
+- [x] Decide the target consumer model class(es) for v1 — **Object detection
+      (YOLO/DETR-family)** as v1 target, evolving to model-agnostic quantization
+      later; documented as DECISION 1
+- [x] Write the format design doc: header layout including a
+      `chroma_present` flag (chroma is optional, not just subsampled —
+      luma-only is the default for detection/pose/tracking encodes), and a
+      bit-depth/quantization scheme matched to the target model's trained
+      input precision rather than the human-eye 8-bit convention —
+      **drafted in `docs/vision-codec-design.md`; all 8 decision points
+      resolved (chroma handling, bit depth, quant matrix, output contract,
+      metrics, budget, Lean relationship, target platform)**
+- [x] Design the decode path's primary output contract: a feature/embedding
+      tensor (bitstream → tensor), with full pixel reconstruction as a
+      secondary/on-demand path for human review of a flagged clip — **dual-path
+      `VisionDecoder` trait with `decode_tensor()` + `decode_pixels()`,
+      `Tensor` output type; see DECISION 5**
+- [x] Decide how "detector/classifier accuracy per bit" is measured for
+      design validation — **mAP-vs-bitrate on COCO-val with YOLOv8-n as v1
+      metric; see DECISION 6**
+- [x] Document the memory/perf budget for v1 — **embedded envelope (RPi-class,
+      ~20 MB arena, <10 ms/frame); see DECISION 7**
+- [x] Decide the relationship to `tpt-kinetix-lean` — **start independent,
+      extract later into `tpt-kinetix-bitstream` once both codecs are stable
+      (DECISION 8)**
+
+### Scaffold (completed)
+- [x] Scaffold `tpt-kinetix-vision` crate from `templates/codec-crate/`,
+      add to workspace `members` — `tpt-kinetix-vision/Cargo.toml`,
+      `src/lib.rs`, `README.md` created; `Tensor` type and `VisionDecoder`
+      trait (dual-path `decode_tensor` + `decode_pixels`) implemented as
+      scaffold with the honesty contract (`pixel_exact: false`, strict mode
+      returns `NotPixelExact`)
+
+## Phase 16 — Granular Next Steps (2026-08-06)
+
+> Session broke the P-frame CAVLC desync investigation out of the single
+> `[-]` blocker in Phase 12 C.1 and into concrete, individually-verifiable
+> sub-tasks. The deep codec items (full CABAC, AV1 reconstruction, crates.io
+> publish with token) remain large; the items here are the tractable ones that
+> can be landed without a per-block CAVLC oracle or a crates.io credential.
+
+### Codec-correctness (small, verifiable)
+- [x] Clean up all debug `eprintln!`s added during the P-frame investigation
+      (`slice_data.rs`, `decoder.rs`, `cavlc_tables.rs`) and restore clean
+      `parse_cavlc_block`. NOTE (2026-08-07): the `decoder.rs` debug `eprintln!`s
+      (`[DEBUG] try_decode_real_slice …`, `P-path: parse error`) were in fact
+      still present and have now been removed; `cargo build` is warning-free.
+- [x] Keep the `dec_ref_pic_marking` slice-header fix: it is now driven by
+      `nal_ref_idc` (not `slice_type`) in `slice::parse_with_context`, and
+      `parse_with_context` takes the new `nal_ref_idc` argument. This was the
+      most likely candidate root-cause for the P-slice (non-reference) desync.
+- [x] Write a minimal, self-contained P-frame CAVLC characterization test
+      (`tests/p_slice_cavlc_invariant.rs`): generates a 2-frame IP clip with
+      `ffmpeg`, extracts the P-slice NAL, and calls `parse_p_slice` **directly**
+       (bypassing the decoder's skip-frame fallback). It now PASSES — the
+       Phase 12 C.1 desync is resolved (the slice parses to completion). It
+       serves as the regression guard for the CAVLC P-slice parse path.
+- [ ] Pin the exact P-frame residual off-by-one with a CAVLC oracle. Two
+       viable routes: (a) extract per-block `TotalCoeff`/coefficient ground
+       truth from a known-good decoder (FFmpeg `h264`/`libavcodec`, or `dav1d`
+       for AV1) and diff against `parse_cavlc_block`; or (b) build a second
+       independent `parse_cavlc_block` in a throwaway test, feed it the exact
+       P-slice bytes, and compare positions/values for the coded MBs (the
+       current diff is 49 samples at max_diff=2, so the error is a single
+       low-frequency coefficient level off by ~1, not a bit-position desync).
+- [ ] Once pinned, fix the offending routine (most likely a single
+       `level`/`run_before`/`total_zeros` case in a high-activity block) and
+       restore a clean error path; then re-enable the strict `max_diff=0`
+       assertion in `p_frame_conformance`.
+
+### Publishing (tractable, no credential needed)
+- [x] `cargo publish --dry-run` revealed `tpt-kinetix-core@0.1.0` **already
+      exists on crates.io** — so the real publish (Phases 8/10) has been done by
+      a maintainer already; the remaining step is re-publish after version bump.
+- [x] Fixed the publish blocker: internal crate deps in `[workspace.dependencies]`
+      and the inline `tpt-kinetix-test-utils` dev-deps lacked a `version`
+      requirement, which crates.io rejects (`all dependencies must have a version
+      requirement specified when publishing`). Added `version = "0.1.0"` to all
+      internal `path` deps. Dry-run now fails only on the *uncommitted-changes*
+      guard (expected during dev) rather than the version error — i.e. the
+      packaging gate is cleared. A maintainer must commit, bump versions, and run
+      the real `cargo publish` with a token.
+- [ ] Run `cargo package --list` per crate to confirm no stray files are
+      packaged (optional tidy-up before the next tagged release).
+
+### Status notes
+- The P-frame CAVLC **bit-position desync is resolved**: `p_slice_cavlc_invariant`
+  passes and the P-slice parses to completion. The remaining error is a
+  **residual precision issue**, not a desync: `cavlc_pframe_no_deblock_is_bitexact`
+  is at `max_diff=2` over `49/4608` samples on the 64×48 baseline CAVLC IP clip
+  (deblocking off). All P-slice MVs are (0,0)/ref 0, so MC/reference copy is
+  exercised and correct (zeroing residuals makes the output equal the reference
+  frame); the ±1–2 errors are confined to coded MBs, consistent with a single
+  low-frequency residual coefficient level off by ~1 in the CAVLC decode. The
+  `coeff_token`, `total_zeros`, and `run_before` tables match FFmpeg `h264data.h`
+  exactly, and the I-frame path (shared residual math) is bit-exact, so the fix
+  is a localized off-by-one in one high-activity block's coefficient decode,
+  pinnable with a CAVLC oracle.
+- `crates.io` real publish (Phases 8/10) is **not** performed: it needs a
+  crates.io token and network access and must be done deliberately by a
+  maintainer.
+
+## Phase 17 — Codec Conformance & Benchmark Reporting (2026-08-07)
+
+> Source: session plan `judt-thinking-about-all-moonlit-flute` (prompted by
+> "can we test that these codecs work / benchmark them against ffmpeg?").
+> Ground truth established this session: `tpt-kinetix-test-utils` already has
+> real ffmpeg-comparison plumbing (`reference.rs`, `pixel_diff.rs`,
+> `synthetic.rs`) and ~20 ffmpeg-gated tests exist across the workspace, but
+> (a) there is no single command that reports per-codec status, and (b) CI
+> never installs `ffmpeg`/`dav1d`, so every gated test silently skips there —
+> CI has been "green" without ever running a real comparison. Likewise, the 3
+> existing criterion benches report per-crate with no single glanceable
+> cross-codec table. This phase does **not** touch codec-correctness work
+> (H.264 CABAC/P-frame residual, AV1 entropy decoder — tracked in Phase 12);
+> it makes existing per-codec maturity queryable in one command and
+> CI-enforced (correctness), adds one unified cross-codec performance table
+> (speed), and fills two measurement gaps along the way (AAC benchmark; AV1
+> encode size/quality vs ffmpeg). Refined mid-session per user ask: benchmark
+> results should be presented as a side-by-side table, not just criterion's
+> own per-crate HTML reports — added as a new standalone `bench_report` tool
+> (§ below) rather than a criterion-JSON scraper (criterion's
+> `target/criterion/*/base/estimates.json` is undocumented/unstable, not
+> worth building a parser against).
+
+### Status reporting tool
+- [ ] Add `tpt-kinetix-test-utils/src/audio_diff.rs` (`pcm_within_tolerance`,
+      `pcm_max_abs_diff`) and wire `pub mod audio_diff;` into `lib.rs`
+- [ ] Add `reference::decode_av1_with_ffmpeg(obu, w, h)` and
+      `reference::decode_aac_with_ffmpeg(adts)` to
+      `tpt-kinetix-test-utils/src/reference.rs` (ffmpeg `-f obu` / `-f adts`
+      round trips — no standalone `dav1d` CLI needed; live-verified this
+      session that `ffmpeg -f obu` round-trips our own encoder's OBU packets
+      byte-exact on frame count)
+- [ ] Add `synthetic::generate_h264_cavlc_iframe_clip` and
+      `generate_h264_cavlc_ip_clip` to `synthetic.rs` (ported from the
+      `generate()` helpers in `cavlc_conformance.rs` / `p_frame_conformance.rs`
+      as new functions — leave those two test files untouched)
+- [ ] Add `tpt-kinetix-aac`, `tpt-kinetix-lean`, `tpt-kinetix-vision` as
+      `tpt-kinetix-test-utils` dev-dependencies
+- [ ] Add `tpt-kinetix-test-utils/examples/codec_status.rs`: prints a
+      markdown table of per-codec/per-path status (H.264 I-frame no-deblock
+      = BitExact, I-frame deblock = Approx≤20, P-frame = Approx{2} WIP; AV1
+      decode = N/A, encode = SmokeOk+PSNR; AAC decode = numeric PCM diff vs
+      ffmpeg; Lean/Vision = N/A via `.capabilities()`); `--strict` flag exits
+      1 only if a row that should already be BitExact isn't
+
+### Benchmarks
+- [ ] Add `tpt-kinetix-aac/benches/decode_throughput.rs` (criterion,
+      mirrors `tpt-kinetix-h264/benches/decode_throughput.rs`; ffmpeg-gated,
+      no non-ffmpeg fallback exists for AAC test input) + `criterion` dev-dep
+      and `[[bench]]` in `tpt-kinetix-aac/Cargo.toml`
+- [ ] Extend `tpt-kinetix-av1/benches/av1_encode.rs`: extend the existing
+      single `bench_function` into a 3-way `benchmark_group` (`kinetix`,
+      `ffmpeg_librav1e` matched `-speed 10 -qp 100`, `ffmpeg_libaom`
+      `-cpu-used 8`) for wall-clock only — size/PSNR comparison lives in
+      `bench_report` instead, not duplicated here; add `tpt-kinetix-test-utils`
+      dev-dep to `tpt-kinetix-av1/Cargo.toml` to reuse `reference`/`synthetic`
+      helpers instead of a 4th local `Command::new("ffmpeg")` copy
+- [ ] Add `tpt-kinetix-test-utils/examples/bench_report.rs`: standalone
+      (non-criterion) tool doing its own quick `--release` timing across
+      every path with a genuine kinetix-vs-ffmpeg comparison, printing one
+      markdown table — H.264 decode (frames/sec, kinetix vs
+      `decode_h264_with_ffmpeg`), AV1 encode (frames/sec for kinetix vs
+      `ffmpeg_librav1e`/`ffmpeg_libaom`, plus one-shot size + decode-back
+      Y-PSNR per encoder — this is where the size/quality comparison lives),
+      AAC decode (realtime-multiple, kinetix vs `decode_aac_with_ffmpeg`),
+      and a pipeline-transcode row reported as an explicit N/A pointer to
+      `cargo bench -p tpt-kinetix-pipeline` (multi-stage, not force-fit into
+      a single-op row here) rather than silently omitted
+
+### Discoverability & CI
+- [ ] Add `tpt-kinetix-h264/examples/gen_corpus.rs` (writes a small
+      `testsrc_WxH.h264` corpus into `$TMPDIR/h264_corpus`, same ffmpeg
+      pattern as `cavlc_conformance.rs::generate()`) so the existing but
+      undiscoverable `corpus_check.rs` example is runnable with one command
+- [ ] Add `justfile` recipes: `conformance` (runs `codec_status`),
+      `corpus-check` (runs `gen_corpus` then `corpus_check`), `bench` (runs
+      all 4 criterion benches: h264, av1, aac, pipeline), `bench-report`
+      (runs `bench_report` in `--release`)
+- [ ] Add a new **blocking** `conformance` job to `.github/workflows/ci.yml`
+      (ubuntu-only): installs ffmpeg via `apt-get`, runs
+      `cargo nextest run -p tpt-kinetix-h264 -p tpt-kinetix-aac -p tpt-kinetix-av1 -p tpt-kinetix-stream -p tpt-kinetix-test-utils -E 'not test(cavlc_pframe_no_deblock_is_bitexact)'`
+      (excludes only the one test known to currently fail, per Phase 16),
+      then `codec_status -- --strict`. This is the first CI job to ever
+      actually execute the ~15+ ffmpeg-gated assertions instead of silently
+      skipping them. Pre-merge: run the exact nextest command locally first
+      to confirm no other test in that package set is unexpectedly red.
+- [ ] Fix the stale `tpt-kinetix-h264/README.md` "Status & known
+      limitations" section (still claims skip-only placeholder macroblocks
+      and lists intra prediction/deblocking as unimplemented, contradicting
+      the actual bit-exact-I-frame state from Phase 12); point it at
+      `just conformance` / `just bench-report` as the living source of truth
+
+### Verification
+- [ ] `cargo build --workspace` / `cargo test --workspace` still pass
+- [ ] `just conformance`, `just bench`, `just bench-report`, `just corpus-check`
+      all run end-to-end locally and produce the expected output
+- [ ] New CI `conformance` job's nextest filter verified locally before push
+
