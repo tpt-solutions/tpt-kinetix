@@ -65,10 +65,22 @@ const RANGE_TAB_LPS: [[u32; 4]; 64] = [
 ];
 
 /// `transIdxLPS` (spec Table 9-45): next `pStateIdx` after an LPS decision.
+///
+/// `TRANS_IDX_LPS[28]` was `23` for a long time (a single-entry transcription
+/// error) until 2026-08-12; the correct value is `22`, confirmed by decoding
+/// FFmpeg's packed `ff_h264_mlps_state` table (`libavcodec/cabac.c`) for
+/// `pStateIdx=28` at both `valMPS` values and cross-checking every other
+/// entry in this table and in `TRANS_IDX_MPS` the same way (no other
+/// discrepancies found). This was the root cause of the long-standing CABAC
+/// I-slice desync bug (see `todo.md` Phase D): `pStateIdx=28` undergoing an
+/// LPS transition is rare enough that most test content never exercised it
+/// (compare against a real FFmpeg-compiled CABAC engine — via a self-authored
+/// C harness — to find the exact bin where a scan-content-specific bitstream
+/// first diverged from this crate's decode).
 #[rustfmt::skip]
 const TRANS_IDX_LPS: [u8; 64] = [
     0, 0, 1, 2, 2, 4, 4, 5, 6, 7, 8, 9, 9, 11, 11, 12,
-    13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 23, 22, 23, 24,
+    13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
     24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
     33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
 ];
@@ -105,11 +117,6 @@ impl<'a> CabacDecoder<'a> {
             range: 510,
             offset,
         })
-    }
-
-    /// DEBUG ONLY: expose internal engine state for tracing.
-    pub fn debug_state(&self) -> (u32, u32) {
-        (self.range, self.offset)
     }
 
     fn next_bit(&mut self) -> u32 {
@@ -577,13 +584,8 @@ impl ResidualCabacContext {
                 let gt1_idx = crate::cabac_tables::COEFF_ABS_LEVELGT1_CTX[node_ctx];
                 node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[1][node_ctx];
                 let mut abs_val: u32 = 2;
-                let mut nbits = 0u32;
                 while abs_val < 15 && dec.decode_decision(&mut self.level[cat][gt1_idx]) == 1 {
                     abs_val += 1;
-                    nbits += 1;
-                }
-                if std::env::var("CABAC_TRACE").is_ok() {
-                    eprintln!("  RUST iter pos={pos} node_ctx_before={node_ctx} l1={level1_idx} b0=1 gt1={gt1_idx} nbits={nbits}");
                 }
                 if abs_val >= 15 {
                     abs_val = 15 + dec.decode_bypass_eg(0);
@@ -592,9 +594,6 @@ impl ResidualCabacContext {
             }
             let sign = dec.decode_bypass();
             out[pos] = (if sign == 1 { -level_abs } else { level_abs }) as i16;
-            if std::env::var("CABAC_TRACE").is_ok() {
-                eprintln!("  RUST pos={pos} abs={level_abs} sign={sign}");
-            }
         }
 
         (out, coeff_count)

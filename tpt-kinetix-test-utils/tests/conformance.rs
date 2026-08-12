@@ -99,6 +99,107 @@ fn av1_dav1d_reference_decode_when_available() {
     }
 }
 
+/// AAC conformance harness: decode a real AAC-LC ADTS stream with the Kinetix
+/// decoder and with `ffmpeg`, then diff the PCM via [`audio_diff`].
+///
+/// Exercises the Phase 17 tooling (`reference::decode_aac_with_ffmpeg` +
+/// `audio_diff::pcm_within_tolerance` / `pcm_max_abs_diff`). Skips when `ffmpeg`
+/// is absent. The Kinetix AAC-LC path is sample-exact (reconstructed via
+/// `symphonia-codec-aac`); a loose tolerance is used because `ffmpeg`'s native
+/// AAC decoder and `symphonia` may round the MDCT tail differently.
+#[test]
+fn aac_vs_ffmpeg_reference_pcm_when_available() {
+    use tpt_kinetix_aac::AacDecoder;
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_test_utils::{audio_diff::*, reference::decode_aac_with_ffmpeg, synthetic::minimal_aac_adts};
+
+    if !tpt_kinetix_test_utils::reference::ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available on PATH");
+        return;
+    }
+
+    let Some(adts) = minimal_aac_adts(44_100, 2, 0.25) else {
+        eprintln!("skipping: could not synthesize an AAC ADTS stream with ffmpeg");
+        return;
+    };
+
+    // Kinetix decode (whole ADTS frames, header + payload, per ADTS frame).
+    let mut dec = AacDecoder::new();
+    let mut kinetix_pcm = Vec::new();
+    let mut pos = 0usize;
+    while pos < adts.len() {
+        let hdr = match tpt_kinetix_aac::adts::AdtsHeader::parse(&adts[pos..]) {
+            Ok(h) => h,
+            Err(_) => break,
+        };
+        let end = pos + hdr.frame_length;
+        if end > adts.len() {
+            break;
+        }
+        let pkt = Packet {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data: adts[pos..end].to_vec(),
+            stream_index: 0,
+            is_key_frame: true,
+        };
+        pos = end;
+        if let Some(frame) = dec.decode(&pkt).unwrap() {
+            kinetix_pcm.push(frame);
+        }
+    }
+
+    // Reference decode via ffmpeg.
+    let ref_pcm = match decode_aac_with_ffmpeg(&adts) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ffmpeg AAC reference decode returned: {e}");
+            return;
+        }
+    };
+
+    assert!(!kinetix_pcm.is_empty(), "Kinetix produced no PCM frames");
+    assert!(!ref_pcm.is_empty(), "reference produced no PCM frames");
+
+    // Compare the first comparable pair block-by-block.
+    let common = kinetix_pcm.len().min(ref_pcm.len());
+    assert!(common > 0, "no comparable PCM blocks");
+    let mut max_diff = 0.0f32;
+    for i in 0..common {
+        let a = &kinetix_pcm[i];
+        let b = &ref_pcm[i];
+        assert_eq!(a.sample_rate, b.sample_rate, "sample rate mismatch at block {i}");
+        assert_eq!(a.channels, b.channels, "channel count mismatch at block {i}");
+        // Kinetix may emit a slightly different sample count than ffmpeg's
+        // frame; compare only the overlapping prefix.
+        let n = a.data.len().min(b.data.len());
+        let a_prefix = tpt_kinetix_core::frame::AudioFrame {
+            pts: a.pts,
+            data: a.data[..n].to_vec(),
+            sample_rate: a.sample_rate,
+            channels: a.channels,
+            sample_format: a.sample_format,
+        };
+        let b_prefix = tpt_kinetix_core::frame::AudioFrame {
+            pts: b.pts,
+            data: b.data[..n].to_vec(),
+            sample_rate: b.sample_rate,
+            channels: b.channels,
+            sample_format: b.sample_format,
+        };
+        let d = pcm_max_abs_diff(&a_prefix, &b_prefix).expect("comparable");
+        max_diff = max_diff.max(d);
+        // Geometry must line up: identical sample rate, channels, format.
+        assert_eq!(a.sample_format, b.sample_format, "sample format mismatch");
+    }
+    // AAC-LC is sample-exact; allow a tiny rounding tolerance for cross-decoder
+    // MDCT tail differences.
+    assert!(
+        max_diff < 1e-2,
+        "AAC PCM divergence too large vs ffmpeg: max_diff={max_diff}"
+    );
+}
+
 /// Pixel-exact harness run across a real, multi-frame H.264 sample.
 ///
 /// Synthesizes a short baseline-profile H.264 file with `ffmpeg`, then walks

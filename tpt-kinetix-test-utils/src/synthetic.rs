@@ -214,6 +214,102 @@ pub fn minimal_aac_adts(sample_rate: u32, channels: u8, duration_secs: f32) -> O
     }
 }
 
+/// Encode a short CAVLC baseline-profile H.264 clip with `ffmpeg`, returning
+/// the raw Annex B bytestream (read from stdout, so no temp file is needed).
+///
+/// Returns `None` if `ffmpeg` is unavailable or the encode fails. The produced
+/// stream uses `cabac=0` and the supplied `x264_params` fragment, and is the
+/// same class of clip the per-crate `*_conformance.rs` tests decode against.
+fn ffmpeg_encode_h264(
+    width: u32,
+    height: u32,
+    frames: u32,
+    x264_params: &str,
+    gop: u32,
+) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let input_spec = format!("testsrc=size={width}x{height}:rate=1:duration={frames}");
+    let frames_str = frames.to_string();
+    let gop_str = gop.to_string();
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &input_spec,
+            "-frames:v",
+            &frames_str,
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            &gop_str,
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            x264_params,
+            "-f",
+            "h264",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Generate a single-frame baseline CAVLC I-frame H.264 clip with `ffmpeg`.
+///
+/// When `disable_deblocking` is true the encoder sets `no-deblock=1` (which
+/// actually sets `disable_deblocking_filter_idc=1`, unlike `deblock=0`). Returns
+/// `None` if `ffmpeg` is unavailable.
+pub fn generate_h264_cavlc_iframe_clip(
+    width: u32,
+    height: u32,
+    disable_deblocking: bool,
+) -> Option<Vec<u8>> {
+    let params = if disable_deblocking {
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1"
+    } else {
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0"
+    };
+    ffmpeg_encode_h264(width, height, 1, params, 1)
+}
+
+/// Generate a two-frame (IDR, P) baseline CAVLC H.264 clip with `ffmpeg`, using
+/// `deblock_param` as the x264 deblocking fragment (e.g. `"no-deblock=1"` or
+/// `"deblock=0"`). Returns `None` if `ffmpeg` is unavailable.
+pub fn generate_h264_cavlc_ip_clip(
+    width: u32,
+    height: u32,
+    deblock_param: &str,
+) -> Option<Vec<u8>> {
+    let params = format!(
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock_param}:keyint=2:min-keyint=2"
+    );
+    ffmpeg_encode_h264(width, height, 2, &params, 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

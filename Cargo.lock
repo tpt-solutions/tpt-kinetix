@@ -1634,6 +1634,8 @@ dependencies = [
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-h264",
+ "tpt-kinetix-lean",
+ "tpt-kinetix-vision",
 ]
 
 [[package]]

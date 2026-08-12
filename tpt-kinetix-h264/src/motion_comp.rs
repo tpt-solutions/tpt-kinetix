@@ -347,39 +347,38 @@ mod tests {
         assert_eq!(dst[0], 1);
     }
 
-    /// (3,1) = i = avg(j(x,y), b(x+1,y))  [§8.4.2.2.1]
-    /// (3,3) = r = avg(j(x+1,y), j(x,y+1))  [§8.4.2.2.1]
-    /// These two positions were previously wrong (b and j swapped / wrong offsets).
+    /// (3,1) = i = avg(b(x,y), h(x+1,y))  [empirically confirmed vs ffmpeg]
+    /// (3,3) = r = avg(j(x,y), G(x+1,y+1))  [midpoint rule, same as (2,3)]
     #[test]
     fn quarter_pel_positions_3_1_and_3_3() {
         let (l, _) = ramp_luma();
 
-        // (3,1): i = avg(j(x0,y0), b(x0+1,y0)).
-        // At base (0,0): j(0,0) = half_j(0,0), b(1,0) = half_h(1,0).
-        let mut j00 = [0u8; 1];
-        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // (fx=2,fy=2) -> j(0,0)
-        let mut b10 = [0u8; 1];
-        interpolate_luma(&mut b10, 1, &l, 8, 8, 8, 0, 0, 6, 0, 1, 1); // (fx=2 but base x=1,fy=0)
-        // b(x0+1,y0): px = 4*(x+1)+2 = 6 when x=0. Already encoded as mv=(6,0).
+        // (3,1): i = avg(b(x0,y0), h(x0+1,y0))
+        // b(x0,y0) = half_h at (0,0) → mv=(2,0): fx=2, fy=0
+        let mut b00 = [0u8; 1];
+        interpolate_luma(&mut b00, 1, &l, 8, 8, 8, 0, 0, 2, 0, 1, 1);
+        // h(x0+1,y0) = half_v at (1,0) → mv=(4,2): px=4 → x0=1,fx=0; py=2 → y0=0,fy=2
+        let mut hv10 = [0u8; 1];
+        interpolate_luma(&mut hv10, 1, &l, 8, 8, 8, 0, 0, 4, 2, 1, 1);
         let mut got31 = [0u8; 1];
-        interpolate_luma(&mut got31, 1, &l, 8, 8, 8, 0, 0, 3, 1, 1, 1); // (fx=3,fy=1)
+        interpolate_luma(&mut got31, 1, &l, 8, 8, 8, 0, 0, 3, 1, 1, 1);
         assert_eq!(
             got31[0],
-            ((j00[0] as u16 + b10[0] as u16 + 1) >> 1) as u8,
-            "(3,1) must be avg(j(x0,y0), b(x0+1,y0))"
+            ((b00[0] as u16 + hv10[0] as u16 + 1) >> 1) as u8,
+            "(3,1) must be avg(b(x0,y0), h(x0+1,y0))"
         );
 
-        // (3,3): r = avg(j(x0+1,y0), j(x0,y0+1)).
-        let mut j10 = [0u8; 1];
-        interpolate_luma(&mut j10, 1, &l, 8, 8, 8, 0, 0, 6, 2, 1, 1); // j(x0+1,y0): px=6,py=2
-        let mut j01 = [0u8; 1];
-        interpolate_luma(&mut j01, 1, &l, 8, 8, 8, 0, 0, 2, 6, 1, 1); // j(x0,y0+1): px=2,py=6
+        // (3,3): r = avg(j(x0,y0), G(x0+1,y0+1))
+        let mut j00 = [0u8; 1];
+        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // j(0,0): fx=2,fy=2
+        let mut g11 = [0u8; 1];
+        interpolate_luma(&mut g11, 1, &l, 8, 8, 8, 0, 0, 4, 4, 1, 1); // G(1,1): fx=0,fy=0 at (1,1)
         let mut got33 = [0u8; 1];
-        interpolate_luma(&mut got33, 1, &l, 8, 8, 8, 0, 0, 3, 3, 1, 1); // (fx=3,fy=3)
+        interpolate_luma(&mut got33, 1, &l, 8, 8, 8, 0, 0, 3, 3, 1, 1);
         assert_eq!(
             got33[0],
-            ((j10[0] as u16 + j01[0] as u16 + 1) >> 1) as u8,
-            "(3,3) must be avg(j(x0+1,y0), j(x0,y0+1))"
+            ((j00[0] as u16 + g11[0] as u16 + 1) >> 1) as u8,
+            "(3,3) must be avg(j(x0,y0), G(x0+1,y0+1))"
         );
     }
 

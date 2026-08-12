@@ -58,6 +58,8 @@ tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.0" }
 tpt-kinetix-h264 = { path = "tpt-kinetix-h264", version = "0.1.0" }
 tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.0" }
 tpt-kinetix-aac = { path = "tpt-kinetix-aac", version = "0.1.0" }
+tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.1.0" }
+tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.1.0" }
 tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.0" }
 tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0" }
 tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0" }

@@ -10,6 +10,8 @@ use tpt_kinetix_aac::AacDecoder;
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::capabilities::DecoderCapabilities;
 use tpt_kinetix_h264::H264Decoder;
+use tpt_kinetix_lean::LeanDecoder;
+use tpt_kinetix_vision::VisionDecoderImpl;
 
 fn main() {
     let strict = std::env::args().any(|a| a == "--strict");
@@ -18,6 +20,8 @@ fn main() {
         ("h264", H264Decoder::new().capabilities()),
         ("av1", Av1Decoder::new().capabilities()),
         ("aac", AacDecoder::new().capabilities()),
+        ("lean", LeanDecoder::new().capabilities()),
+        ("vision", VisionDecoderImpl::new().capabilities()),
     ];
 
     let mut any_incomplete = false;
