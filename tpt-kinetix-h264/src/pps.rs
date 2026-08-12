@@ -98,8 +98,7 @@ impl PicParameterSet {
             .read_bit()
             .context("deblocking_filter_control_present_flag")?
             == 1;
-        let constrained_intra_pred_flag =
-            r.read_bit().context("constrained_intra_pred_flag")? == 1;
+        let constrained_intra_pred_flag = r.read_bit().context("constrained_intra_pred_flag")? == 1;
         let redundant_pic_cnt_present_flag =
             r.read_bit().context("redundant_pic_cnt_present_flag")? == 1;
 
@@ -137,9 +136,7 @@ impl PicParameterSet {
                     }
                 }
             }
-            second_chroma_qp_index_offset = r
-                .read_se()
-                .context("second_chroma_qp_index_offset")?;
+            second_chroma_qp_index_offset = r.read_se().context("second_chroma_qp_index_offset")?;
         }
 
         Ok(Self {

@@ -40,8 +40,11 @@ correct YUV420p frames but **not pixel-exact output**.
   reference frames are not sampled
 - **B-frames** and weighted prediction
 - **Field / interlaced coding** (`frame_mbs_only_flag == 0`)
-- Full `ref_pic_list_modification`, `pred_weight_table`, and
-  `dec_ref_pic_marking` slice-header sections
+- `pred_weight_table` is parsed but its values are discarded (weighted
+  prediction is not applied). `ref_pic_list_modification` *and*
+  `dec_ref_pic_marking` (sliding-window + MMCO 1–6) **are** applied — see
+  `ref_pic::modify_ref_pic_list` (§8.2.4.3) and `ref_pic::Dpb::mark_decoded_picture`
+  (§8.2.5); the resulting reference pictures are visible via `H264Decoder::dpb`
 - Multiple/arbitrary slice groups (FMO) reconstruction
 - Complete `total_zeros` / `run_before` CAVLC tables for all VLC indices
 

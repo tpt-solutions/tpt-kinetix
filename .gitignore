@@ -5,9 +5,13 @@
 # Cargo.lock: committed for binary crates / workspace, excluded for pure libraries.
 # This workspace contains binaries, so Cargo.lock is tracked (not ignored).
 
-# Fuzz testing
-fuzz/corpus/
-fuzz/artifacts/
+# Fuzz testing (unanchored so this matches fuzz/ dirs nested under any crate,
+# e.g. tpt-kinetix-h264/fuzz/ — a mid-path slash would otherwise anchor the
+# pattern to the repo root and silently miss them)
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/
+**/fuzz/coverage/
 
 # wasm-pack build output (regenerate with `just wasm-demo`)
 /web-demo/pkg/

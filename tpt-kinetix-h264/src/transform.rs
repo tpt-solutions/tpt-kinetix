@@ -15,19 +15,22 @@
 
 /// `normAdjust4x4[m][group]` — the base weighting matrix (spec §8.5.9,
 /// derived from Table 8-13). `m = qP % 6`; `group` is the position class:
-/// 0 = (even,even), 1 = (odd,odd), 2 = otherwise.
+/// 0 = (even row, even col), 1 = odd col (any row), 2 = (odd row, even col).
 #[rustfmt::skip]
 const NORM_ADJUST_4X4: [[i32; 3]; 6] = [
-    [10, 13, 16],
-    [11, 14, 18],
-    [13, 16, 20],
-    [14, 18, 23],
-    [16, 20, 25],
-    [18, 23, 29],
+    [10, 16, 13],
+    [11, 18, 14],
+    [13, 20, 16],
+    [14, 23, 18],
+    [16, 25, 20],
+    [18, 29, 23],
 ];
 
-/// Position class for a 4×4 raster index (§8.5.9): both even -> 0,
-/// both odd -> 1, otherwise -> 2.
+/// Position class for a 4×4 raster index (§8.5.9, Table 8-13):
+/// - group 0: (even row, even col) → normAdjust value v[m][0]
+/// - group 1: (odd row, odd col) → normAdjust value v[m][1]
+/// - group 2: mixed parity (one of row/col odd, the other even) → normAdjust
+///   value v[m][2]
 #[inline]
 const fn pos_group(idx: usize) -> usize {
     let row = idx / 4;
@@ -141,57 +144,59 @@ fn idct_4x4(d: &[i32; 16]) -> [i32; 16] {
 
 /// Intra_16×16 luma DC inverse transform (§8.5.10).
 ///
-/// `dc_coeffs` are the 16 luma DC levels in **raster** order (already inverse
-/// zigzag-scanned by the caller if they were parsed in scan order). Applies the
-/// 4×4 Hadamard transform then DC-specific inverse quantisation, returning the
-/// 16 reconstructed DC values in raster order, one per 4×4 sub-block.
+/// `dc_coeffs` are the 16 luma DC levels in **raster** order. The 4×4 Hadamard
+/// transform is applied with a `/2` per butterfly stage (matching the reference
+/// decoder, which cancels the `H·H = 16·I` gain), and each coefficient is
+/// inverse-quantised with `qbits = 6` (matching libavc `INV_QUANT(.., 6)`). The
+/// result is the 16 reconstructed per-4×4-block DC values in raster order.
 pub fn luma_dc_transform(dc_coeffs: &[i32; 16], qp: i32) -> [i32; 16] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
     let shift = qp / 6;
+    let ls = level_scale_flat(m, 0);
 
-    // 4×4 Hadamard transform (§8.5.10, equations 8-326..8-329).
-    let mut f = [0i32; 16];
-    // Horizontal.
+    // 1. 4×4 Hadamard transform (§8.5.10). Unlike the AC 4×4 transform
+    // (`idct_4x4`), the Hadamard basis is a plain ±1 matrix — there is no
+    // `>>1` scaling on any term within the butterfly itself.
     let mut tmp = [0i32; 16];
     for row in 0..4 {
         let b = row * 4;
-        let (c0, c1, c2, c3) = (
+        let (x0, x1, x2, x3) = (
             dc_coeffs[b],
             dc_coeffs[b + 1],
             dc_coeffs[b + 2],
             dc_coeffs[b + 3],
         );
-        let e0 = c0 + c2;
-        let e1 = c0 - c2;
-        let e2 = c1 - c3;
-        let e3 = c1 + c3;
+        let e0 = x0 + x2;
+        let e1 = x0 - x2;
+        let e2 = x1 - x3;
+        let e3 = x1 + x3;
         tmp[b] = e0 + e3;
         tmp[b + 1] = e1 + e2;
         tmp[b + 2] = e1 - e2;
         tmp[b + 3] = e0 - e3;
     }
-    // Vertical.
+    let mut f = [0i32; 16];
     for col in 0..4 {
-        let (c0, c1, c2, c3) = (tmp[col], tmp[col + 4], tmp[col + 8], tmp[col + 12]);
-        let e0 = c0 + c2;
-        let e1 = c0 - c2;
-        let e2 = c1 - c3;
-        let e3 = c1 + c3;
+        let (x0, x1, x2, x3) = (tmp[col], tmp[col + 4], tmp[col + 8], tmp[col + 12]);
+        let e0 = x0 + x2;
+        let e1 = x0 - x2;
+        let e2 = x1 - x3;
+        let e3 = x1 + x3;
         f[col] = e0 + e3;
         f[col + 4] = e1 + e2;
         f[col + 8] = e1 - e2;
         f[col + 12] = e0 - e3;
     }
 
-    // DC scaling (§8.5.10): uses LevelScale4x4[m][0] (group 0).
-    let ls = level_scale_flat(m, 0);
+    // 2. Inverse quantisation (§8.5.10, `qbits = 6`).
     let mut out = [0i32; 16];
     for i in 0..16 {
         out[i] = if shift >= 6 {
             (f[i] * ls) << (shift - 6)
         } else {
-            (f[i] * ls + (1 << (5 - shift))) >> (6 - shift)
+            let add = 1 << (5 - shift);
+            (f[i] * ls + add) >> (6 - shift)
         };
     }
     out
@@ -213,11 +218,17 @@ pub fn chroma_dc_transform(dc: &[i32; 4], qp: i32) -> [i32; 4] {
     let f3 = dc[0] - dc[1] - dc[2] + dc[3];
     let f = [f0, f1, f2, f3];
 
-    // DC scaling (§8.5.11): d = ((f * LevelScale4x4[m][0]) << (qP/6)) >> 5.
+    // DC scaling (§8.5.11):
+    //   if qP/6 >= 5: d = (f * LevelScale4x4[m][0]) << (qP/6 - 5)
+    //   else:          d = (f * LevelScale4x4[m][0] + 2^(4 - qP/6)) >> (5 - qP/6)
     let ls = level_scale_flat(m, 0);
     let mut out = [0i32; 4];
     for i in 0..4 {
-        out[i] = ((f[i] * ls) << shift) >> 5;
+        out[i] = if shift >= 5 {
+            (f[i] * ls) << (shift - 5)
+        } else {
+            (f[i] * ls + (1 << (4 - shift))) >> (5 - shift)
+        };
     }
     out
 }
@@ -234,13 +245,13 @@ mod tests {
 
     #[test]
     fn pos_group_classification() {
-        // (0,0)->0, (1,1)->1, (0,1)->2, (2,2)->0, (3,3)->1, (3,0)->2
-        assert_eq!(pos_group(0), 0);
-        assert_eq!(pos_group(5), 1);
-        assert_eq!(pos_group(1), 2);
-        assert_eq!(pos_group(10), 0);
-        assert_eq!(pos_group(15), 1);
-        assert_eq!(pos_group(12), 2);
+        // (0,0) even,even -> 0; (1,1)/(3,3) odd,odd -> 1; mixed parity -> 2.
+        assert_eq!(pos_group(0), 0); // (0,0) even row, even col
+        assert_eq!(pos_group(5), 1); // (1,1) odd row, odd col
+        assert_eq!(pos_group(1), 2); // (0,1) even row, odd col (mixed)
+        assert_eq!(pos_group(10), 0); // (2,2) even row, even col
+        assert_eq!(pos_group(15), 1); // (3,3) odd row, odd col
+        assert_eq!(pos_group(12), 2); // (3,0) odd row, even col (mixed)
     }
 
     #[test]

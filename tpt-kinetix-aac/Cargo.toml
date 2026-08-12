@@ -19,4 +19,4 @@ symphonia-codec-aac = { workspace = true }
 symphonia-core = "0.6"
 
 [dev-dependencies]
-tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }

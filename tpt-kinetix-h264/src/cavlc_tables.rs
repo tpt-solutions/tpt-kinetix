@@ -27,11 +27,7 @@ pub struct CavlcVlcError;
 /// `entries` yields `(len, bits, symbol)`. Reads up to the maximum `len` present
 /// and returns the symbol of the entry whose codeword matches the bits read so
 /// far. Entries with `len == 0` are treated as "not present" and skipped.
-fn decode_vlc(
-    r: &mut BitReader,
-    lens: &[u8],
-    bits: &[u16],
-) -> Result<usize, CavlcVlcError> {
+fn decode_vlc(r: &mut BitReader, lens: &[u8], bits: &[u16]) -> Result<usize, CavlcVlcError> {
     debug_assert_eq!(lens.len(), bits.len());
     let max_len = lens.iter().copied().max().unwrap_or(0);
     let mut code: u32 = 0;
@@ -79,6 +75,10 @@ const COEFF_TOKEN_LEN: [[u8; 4 * 17]; 4] = [
         10, 9, 9, 9,    10,10,10,10,    10,10,10,10,    10,10,10,10,
     ],
     [
+         // nC >= 8 (case 3 / FLC): fixed 6-bit codewords, TrailingOnes always 0.
+         // tc=0 has two decoder aliases: code 3 (canonical) and code 2; tc=0,t1!=0
+         // is impossible and marked len 0. Values below are the actual H.264
+         // codewords (cross-checked against FFmpeg h264data.h coeff_token_bits[3]).
          6, 0, 0, 0,
          6, 6, 0, 0,     6, 6, 6, 0,     6, 6, 6, 6,     6, 6, 6, 6,
          6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,     6, 6, 6, 6,
@@ -111,6 +111,9 @@ const COEFF_TOKEN_BITS: [[u16; 4 * 17]; 4] = [
         13, 7, 9,12,     9,12,11,10,     5, 8, 7, 6,     1, 4, 3, 2,
     ],
     [
+         // nC >= 8 (case 3 / FLC): fixed 6-bit codewords, indexed by
+         // trailing_ones + 4*total_coeff. Cross-checked against FFmpeg
+         // h264data.h coeff_token_bits[3] (the actual spec codewords).
          3, 0, 0, 0,
          0, 1, 0, 0,     4, 5, 6, 0,     8, 9,10,11,    12,13,14,15,
         16,17,18,19,    20,21,22,23,    24,25,26,27,    28,29,30,31,
@@ -234,15 +237,16 @@ const CHROMA_DC_TOTAL_ZEROS_BITS: [[u16; 4]; 3] = [
 ];
 
 /// Read `total_zeros` for a chroma-DC 2×2 block. `total_coeff` in 1..=3.
-pub fn read_total_zeros_chroma_dc(
-    r: &mut BitReader,
-    total_coeff: u8,
-) -> Result<u8, CavlcVlcError> {
+pub fn read_total_zeros_chroma_dc(r: &mut BitReader, total_coeff: u8) -> Result<u8, CavlcVlcError> {
     if total_coeff == 0 || total_coeff >= 4 {
         return Ok(0);
     }
     let vlc = (total_coeff - 1) as usize;
-    let idx = decode_vlc(r, &CHROMA_DC_TOTAL_ZEROS_LEN[vlc], &CHROMA_DC_TOTAL_ZEROS_BITS[vlc])?;
+    let idx = decode_vlc(
+        r,
+        &CHROMA_DC_TOTAL_ZEROS_LEN[vlc],
+        &CHROMA_DC_TOTAL_ZEROS_BITS[vlc],
+    )?;
     Ok(idx as u8)
 }
 
@@ -319,7 +323,10 @@ mod tests {
             roundtrip(&TOTAL_ZEROS_LEN[t], &TOTAL_ZEROS_BITS[t]);
         }
         for t in 0..3 {
-            roundtrip(&CHROMA_DC_TOTAL_ZEROS_LEN[t], &CHROMA_DC_TOTAL_ZEROS_BITS[t]);
+            roundtrip(
+                &CHROMA_DC_TOTAL_ZEROS_LEN[t],
+                &CHROMA_DC_TOTAL_ZEROS_BITS[t],
+            );
         }
     }
 

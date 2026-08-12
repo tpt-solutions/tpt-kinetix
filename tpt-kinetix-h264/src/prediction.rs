@@ -162,11 +162,35 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             }
         }
         Intra4x4Mode::Dc => {
-            let mut sum = 0i32;
-            for i in 0..4 {
-                sum += t(i) + l(i);
-            }
-            let dc = (sum + 4) / 8;
+            // §8.3.1.2.3: the average is taken over whichever of top/left is
+            // actually available — substituting a phantom `R` (128) for a
+            // missing side into an 8-sample average (as `t`/`l` do for the
+            // directional modes) would corrupt the DC value, not just fill in
+            // a border sample, so availability must be checked explicitly
+            // here rather than delegated to the `t`/`l` helpers.
+            let top_avail = n.top[0..4].iter().any(|s| s.is_some());
+            let left_avail = n.left.iter().any(|s| s.is_some());
+            let dc = if top_avail && left_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += t(i) + l(i);
+                }
+                (sum + 4) >> 3
+            } else if top_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += t(i);
+                }
+                (sum + 2) >> 2
+            } else if left_avail {
+                let mut sum = 0i32;
+                for i in 0..4 {
+                    sum += l(i);
+                }
+                (sum + 2) >> 2
+            } else {
+                R
+            };
             for y in 0..4i32 {
                 for x in 0..4i32 {
                     set(x, y, dc);
@@ -202,33 +226,36 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
             set(3, 3, g);
         }
         Intra4x4Mode::DiagonalDownRight => {
-            // Spec-exact (MultimediaWiki / Table 8-2).
+            // Spec §8.3.1.2.5 / ffmpeg `pred4x4_down_right_c`. Cross-checked
+            // against libavcodec/h264pred_template.c.
             let (lt, t0, t1, t2, t3) = (tl, t(0), t(1), t(2), t(3));
             let (l0, l1, l2, l3) = (l(0), l(1), l(2), l(3));
-            let d = (l3 + 2 * l2 + l1 + 2) / 4;
-            let e = (l2 + 2 * l1 + l0 + 2) / 4;
-            let f = (l1 + 2 * l0 + lt + 2) / 4;
-            let g = (l0 + 2 * lt + t0 + 2) / 4;
-            // Wiki layout (rows L0..L3, top->bottom), with wiki a=g, b=f, c=e:
+            let a = (l3 + 2 * l2 + l1 + 2) / 4;
+            let b = (l2 + 2 * l1 + l0 + 2) / 4;
+            let c = (l1 + 2 * l0 + lt + 2) / 4;
+            let d = (l0 + 2 * lt + t0 + 2) / 4; // main diagonal
+            let e = (lt + 2 * t0 + t1 + 2) / 4;
+            let f = (t0 + 2 * t1 + t2 + 2) / 4;
+            let g = (t1 + 2 * t2 + t3 + 2) / 4;
             //   L0 | d  e  f  g
-            //   L1 | e  d  e  f
-            //   L2 | f  e  d  e
-            //   L3 | g  f  e  d
+            //   L1 | c  d  e  f
+            //   L2 | b  c  d  e
+            //   L3 | a  b  c  d
             set(0, 0, d);
             set(1, 0, e);
             set(2, 0, f);
             set(3, 0, g);
-            set(0, 1, e);
+            set(0, 1, c);
             set(1, 1, d);
             set(2, 1, e);
             set(3, 1, f);
-            set(0, 2, f);
-            set(1, 2, e);
+            set(0, 2, b);
+            set(1, 2, c);
             set(2, 2, d);
             set(3, 2, e);
-            set(0, 3, g);
-            set(1, 3, f);
-            set(2, 3, e);
+            set(0, 3, a);
+            set(1, 3, b);
+            set(2, 3, c);
             set(3, 3, d);
         }
         Intra4x4Mode::VerticalRight => {
@@ -305,8 +332,7 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
         }
         Intra4x4Mode::VerticalLeft => {
             // Spec-exact (MultimediaWiki / Table 8-2).
-            let (t0, t1, t2, t3, t4, t5, t6) =
-                (t(0), t(1), t(2), t(3), t(4), t(5), t(6));
+            let (t0, t1, t2, t3, t4, t5, t6) = (t(0), t(1), t(2), t(3), t(4), t(5), t(6));
             let a = (t0 + t1 + 1) / 2;
             let b = (t1 + t2 + 1) / 2;
             let c = (t2 + t3 + 1) / 2;
@@ -613,16 +639,21 @@ pub fn predict_16x16(mode: Intra16x16Mode, n: &IntraNeighbours16x16, out: &mut [
             }
         }
         Intra16x16Mode::Plane => {
+            // §8.3.3.4: H = Σ_{x'=0}^{7} (x'+1)*(p[8+x',-1] - p[6-x',-1]),
+            // where p[6-x',-1] for x'=7 is p[-1,-1] = `tl` — handled as a
+            // separate 8th term since `t`/`l` can't index -1 directly.
             let mut h = 0i32;
-            for i in 1..8i32 {
-                h += i * (t(8 + i) - t(8 - i));
+            for xp in 0..7i32 {
+                h += (xp + 1) * (t(8 + xp) - t(6 - xp));
             }
+            h += 8 * (t(15) - tl);
             let mut v = 0i32;
-            for i in 1..8i32 {
-                v += i * (l(8 + i) - l(8 - i));
+            for yp in 0..7i32 {
+                v += (yp + 1) * (l(8 + yp) - l(6 - yp));
             }
-            // a = (top_left + top_15) << 4
-            let a = (tl + t(15)) << 4;
+            v += 8 * (l(15) - tl);
+            // a = 16 * (p[-1,15] + p[15,-1])
+            let a = 16 * (l(15) + t(15));
             let b = (5 * h + 32) >> 6;
             let c = (5 * v + 32) >> 6;
             for y in 0..16i32 {
@@ -670,27 +701,68 @@ pub fn predict_chroma(
             }
         }
         IntraChromaMode::Dc => {
-            let mut s = 0i32;
-            for i in 0..8 {
-                s += t(i) + l(i);
-            }
-            let dc = (s + 8) / 16;
+            // §8.3.4.1: each of the four 4×4 quadrants gets its own DC value
+            // (not one flat average for the whole 8×8). When both sides are
+            // available, the top-left and bottom-right quadrants average
+            // *both* their top and left samples, but the top-right quadrant
+            // uses *only* its top samples and the bottom-left quadrant uses
+            // *only* its left samples — an asymmetric rule, not a simplified
+            // whole-block DC. When only one side is available (or neither),
+            // every quadrant falls back to that side's samples (or `R`).
+            let top_avail = top.iter().any(|s| s.is_some());
+            let left_avail = left.iter().any(|s| s.is_some());
+
+            // avg of `vals` (1..=4 samples), rounded per §8.3.4.1.
+            let avg = |vals: &[i32]| -> i32 {
+                let n = vals.len() as i32;
+                let sum: i32 = vals.iter().sum();
+                (sum + n / 2) / n
+            };
+
+            let top_l = [t(0), t(1), t(2), t(3)];
+            let top_r = [t(4), t(5), t(6), t(7)];
+            let left_t = [l(0), l(1), l(2), l(3)];
+            let left_b = [l(4), l(5), l(6), l(7)];
+
+            let (dc0, dc1, dc2, dc3) = if top_avail && left_avail {
+                let both_tl: Vec<i32> = top_l.iter().chain(left_t.iter()).copied().collect();
+                let both_br: Vec<i32> = top_r.iter().chain(left_b.iter()).copied().collect();
+                (avg(&both_tl), avg(&top_r), avg(&left_b), avg(&both_br))
+            } else if top_avail {
+                (avg(&top_l), avg(&top_r), avg(&top_l), avg(&top_r))
+            } else if left_avail {
+                (avg(&left_t), avg(&left_t), avg(&left_b), avg(&left_b))
+            } else {
+                (R, R, R, R)
+            };
+
             for y in 0..8i32 {
                 for x in 0..8i32 {
+                    let dc = match (x < 4, y < 4) {
+                        (true, true) => dc0,
+                        (false, true) => dc1,
+                        (true, false) => dc2,
+                        (false, false) => dc3,
+                    };
                     set(x, y, dc);
                 }
             }
         }
         IntraChromaMode::Plane => {
+            // §8.3.4.4: H = Σ_{x'=0}^{3} (x'+1)*(p[4+x',-1] - p[2-x',-1]),
+            // where p[2-x',-1] for x'=3 is p[-1,-1] = `tl` — handled as a
+            // separate 4th term since `t`/`l` can't index -1 directly.
             let mut h = 0i32;
-            for i in 1..4i32 {
-                h += i * (t(4 + i) - t(4 - i));
+            for xp in 0..3i32 {
+                h += (xp + 1) * (t(4 + xp) - t(2 - xp));
             }
+            h += 4 * (t(7) - tl);
             let mut v = 0i32;
-            for i in 1..4i32 {
-                v += i * (l(4 + i) - l(4 - i));
+            for yp in 0..3i32 {
+                v += (yp + 1) * (l(4 + yp) - l(2 - yp));
             }
-            let a = (tl + t(7)) << 4;
+            v += 4 * (l(7) - tl);
+            let a = 16 * (l(7) + t(7));
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
             for y in 0..8i32 {
@@ -806,13 +878,26 @@ mod tests {
 
     #[test]
     fn predict_chroma_dc() {
+        // §8.3.4.1: top-left/bottom-right quadrants blend both sides;
+        // top-right uses only top, bottom-left uses only left.
         let top = [Some(120u8); 8];
         let left = [Some(80u8); 8];
         let mut out = [0u8; 64];
         predict_chroma(IntraChromaMode::Dc, &top, &left, Some(128), &mut out);
-        let dc = (8 * 120 + 8 * 80 + 8) / 16; // 100
-        for v in out {
-            assert_eq!(v, dc as u8);
+        let dc_tl = (4 * 120 + 4 * 80 + 4) / 8; // 100
+        let dc_tr = (4 * 120 + 2) / 4; // 120
+        let dc_bl = (4 * 80 + 2) / 4; // 80
+        let dc_br = dc_tl; // 100
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let expected = match (x < 4, y < 4) {
+                    (true, true) => dc_tl,
+                    (false, true) => dc_tr,
+                    (true, false) => dc_bl,
+                    (false, false) => dc_br,
+                };
+                assert_eq!(out[y * 8 + x], expected as u8, "at ({x},{y})");
+            }
         }
     }
 }
