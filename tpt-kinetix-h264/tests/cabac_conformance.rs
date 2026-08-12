@@ -175,27 +175,20 @@ fn run_case(disable_deblocking: bool, label: &str) {
 
 /// Main-profile CABAC I-frame with deblocking disabled. Bit-exact.
 ///
-/// Currently `#[ignore]`d: `todo.md` Phase D has a known, unresolved bug where
-/// the CABAC decoder desyncs (`end_of_slice_flag` never fires) whenever an
-/// early macroblock in the slice is Intra_4x4 with real residual — which
-/// `testsrc` content reliably triggers. The decode path fails safe (falls
-/// back rather than emitting wrong pixels; see `slice_data.rs`'s
-/// `end_of_slice_flag mismatch` check), so this test would currently fail at
-/// `a frame should be produced` rather than a pixel mismatch. Re-enable once
-/// that desync is root-caused; see `debug_cabac_*` test scaffolding pattern
-/// in the removed `diagnostic_cabac.rs` for how to reproduce with a
-/// single-macroblock repro.
+/// Was `#[ignore]`d pending the CABAC I-slice desync bug in `todo.md` Phase D;
+/// root-caused and fixed 2026-08-12 (`entropy.rs::TRANS_IDX_LPS[28]` was `23`
+/// instead of the correct `22` — a single-entry transcription error in the
+/// `transIdxLPS` state-transition table that only manifested when
+/// `pStateIdx=28` underwent an LPS transition during `coeff_abs_level_minus1`
+/// decoding, a combination most test content never happened to hit).
 #[test]
-#[ignore]
 fn cabac_iframe_no_deblock_is_bitexact() {
     run_case(true, "no deblock");
 }
 
 /// Main-profile CABAC I-frame with deblocking enabled (default settings).
-/// Bit-exact. See [`cabac_iframe_no_deblock_is_bitexact`] for why this is
-/// currently `#[ignore]`d.
+/// Bit-exact. See [`cabac_iframe_no_deblock_is_bitexact`] for the fix.
 #[test]
-#[ignore]
 fn cabac_iframe_with_deblock_is_bitexact() {
     run_case(false, "with deblock");
 }

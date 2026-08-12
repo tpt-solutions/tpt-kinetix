@@ -927,10 +927,13 @@ pub fn reconstruct_av1_frame(
     }
 
     if tile_payloads.is_empty() {
+        let mut data = y_plane;
+        data.extend(u_plane);
+        data.extend(v_plane);
         return Ok(Some(VideoFrame {
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,
-            data: y_plane,
+            data,
             width: frame_header.width,
             height: frame_header.height,
             pixel_format: PixelFormat::Yuv420p,

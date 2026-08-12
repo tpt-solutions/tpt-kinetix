@@ -411,87 +411,54 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (`slice_data.rs::parse_i_slice_cabac`/`parse_intra_macroblock_cabac`,
       wired into `decoder.rs`) for I-slices only, reusing the existing
       CAVLC-path reconstruction/dequant/IDCT/deblock code unchanged.
-- [ ] **Known bug, unresolved**: for some slices, the decoder desyncs partway
-      through the first macroblock — `end_of_slice_flag` never fires and only
-      part of the CABAC payload gets consumed. **Updated 2026-08-12: the old
-      "Intra_4x4 as early/first macroblock with real residual" trigger theory
-      is disproven.** Built five new single-MB 16×16 CABAC repros this
-      session (`ffmpeg -f lavfi -i '<source>=size=16x16:rate=1:duration=1'
-      -c:v libx264 -profile:v main -x264-params
-      cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:qp=<qp>`, `<source>` =
-      `color=c=gray` piped through `geq` for checkerboard/gradient, or
-      `nullsrc`+`geq=lum='random(1)*255'`), all producing an early/first
-      Intra_4x4 MB with real, sometimes-maximal residual (significant-coeff
-      count up to 16/16, coefficient magnitudes up to 184 forcing the
-      Exp-Golomb escape path) — **and all of them decode and terminate
-      correctly, bit-exact against ffmpeg**. Only `ffmpeg`'s built-in test-
-      pattern source filters (`testsrc`, `testsrc2`, `rgbtestsrc`,
-      `smptebars`, all at `size=16x16`) reproduce the desync; `yuvtestsrc` at
-      the same size does not. So the trigger is specific to those test-
-      pattern filters' pixel content, not to "early Intra_4x4 with residual"
-      in general (that description now has *passing* counter-examples).
+- [x] **CABAC I-slice desync bug — RESOLVED 2026-08-12.** Root cause:
+      `entropy.rs::TRANS_IDX_LPS[28]` was `23`; the correct value is `22` — a
+      single-entry transcription error in the `transIdxLPS` (spec Table 9-45)
+      state-transition table, present since the table was first added. It
+      only manifested when `pStateIdx` reached exactly `28` *and* underwent
+      an LPS (least-probable-symbol) transition while decoding
+      `coeff_abs_level_minus1`'s truncated-unary continuation bins — a
+      specific (state, branch) combination most test content never hit,
+      which is why CAVLC conformance, the I-slice mb_type/cbp/residual unit
+      tests, and even several new bespoke CABAC repros (flat/checkerboard/
+      random-noise/gradient content, including ones exercising the
+      significant-coefficient-count-16/16 edge case and the Exp-Golomb escape
+      path) all passed while `ffmpeg`'s `testsrc`/`testsrc2`/`rgbtestsrc`/
+      `smptebars` filters at `size=16x16` reliably triggered it.
       \
-      Went further than the previous session's cross-check: independently
-      re-verified, directly against a freshly-fetched copy of FFmpeg's
-      `libavcodec/{cabac.c,cabac_functions.h,h264_cabac.c,h264_mvpred.h,
-      h264pred_template.c,h264_parse.c}` (not from memory/paraphrase), that
-      for the failing `testsrc` repro: the CABAC engine primitives, the
-      `(m,n)` context-init values actually used (byte-diffed several ranges:
-      ctxIdx 93–104, 105–148, 166–209, 227–266 all match FFmpeg's table
-      verbatim), `mb_type`/`coded_block_pattern`/`mb_qp_delta`/intra4x4-pred-
-      mode/chroma-pred-mode binarization and neighbour-derived `ctxIdxInc`
-      (including the off-picture/intra "coded" sentinel and the
-      `0x7CF`/64-style unavailable-neighbour conventions), and the
-      significant/last-significant/level/sign residual decode (including the
-      `node_ctx` level state machine and the order-0 Exp-Golomb escape) all
-      match FFmpeg's source line-for-line. Wrote a **fresh** Python transliteration
-      of the engine + these exact syntax elements (not reusing or comparing
-      against the prior session's Python reimplementation) and ran it
-      against the real 290-byte CABAC payload dumped from the Rust decoder:
-      it reproduces the *identical* engine trace (range/offset/bit-position
-      at every step) and the *identical* decoded values — `mb_type=I_NxN`,
-      `cbp=0x2f`, `mb_qp_delta=0`, and block 0's 15 residual coefficients —
-      as the Rust decoder. Also hand-verified the dequant + 4×4 IDCT
-      (`transform.rs::dequant_idct_4x4`) output for block 0's coefficients by
-      redoing the arithmetic from scratch (inverse zigzag → per-position
-      `NORM_ADJUST_4X4`/`level_scale_flat` dequant → row/column IDCT
-      butterfly) and got the same raster output the function produces.
+      Found by building a self-contained C harness (MSVC via
+      `vcvars64.bat`+`cl.exe`; no mingw/gcc available on this box) that
+      copies FFmpeg's actual `libavcodec/cabac.c` engine and
+      `ff_h264_cabac_tables` verbatim (fetched fresh from
+      github.com/FFmpeg/FFmpeg — not reimplemented from memory), then running
+      it against the real 290-byte CABAC payload from the `testsrc` repro
+      side-by-side with the Rust decoder's own per-bin trace
+      (`entropy.rs::CabacDecoder::debug_state()`, temporary, removed after).
+      The two engines' `range` value (directly comparable — it isn't
+      rescaled differently between representations) matched at every single
+      call through the significance map and the first several level
+      decodes, then diverged at one specific `coeff_abs_level_minus1`
+      continuation bin. Isolating that one call and decoding FFmpeg's packed
+      `ff_h264_mlps_state` table by hand for the same `(pStateIdx, valMPS)`
+      pair going in — cross-checked programmatically for *all* 64 states in
+      both `TRANS_IDX_LPS` and `TRANS_IDX_MPS`, not just the one that
+      failed — found exactly one mismatch: index 28 of `TRANS_IDX_LPS`.
       \
-      So: engine, context tables, syntax parsing, and the transform math are
-      now about as thoroughly cross-checked against primary source as is
-      practical, and none of it disagrees with itself. Yet the reconstructed
-      pixel for MB(0,0) block 0 (predicted flat 128 — confirmed forced DC via
-      FFmpeg's `ff_h264_check_intra4x4_pred_mode`/`pred_intra_mode` cascade
-      for a fully-unavailable top-left block, `h264_parse.c`/`h264_mvpred.h`
-      — plus the verified-correct residual) does not match ffmpeg's real
-      decoded frame for the `testsrc` repro (confirmed via `ffmpeg -c:v h264`
-      forcing the native/software decoder, and confirmed deblocking is off
-      via the `trace_headers` bitstream filter showing
-      `disable_deblocking_filter_idc=1`, so neither hwaccel nor deblocking
-      explain it). This is a genuine unresolved paradox, not just an
-      unverified claim — **do not re-spend time re-deriving the engine,
-      tables, or per-element binarizations from FFmpeg source; that work is
-      done and self-consistent.** The decoder fails safe (falls back rather
-      than emitting wrong pixels — see `slice_data.rs`'s `end_of_slice_flag
-      mismatch` check), so this is a correctness gap, not a soundness one.
-      **Next step for whoever picks this up**: the remaining candidates are
-      (a) something in NAL/RBSP extraction or SPS/PPS/slice-header
-      interpretation specific to how `ffmpeg`'s test-pattern filters'
-      encodes differ byte-for-byte from the passing repros' encodes — SPS/PPS
-      were confirmed byte-identical between one passing and one failing
-      16×16 repro this session, so look elsewhere in the slice header/NAL
-      layer, not PPS-level flags; or (b) a genuine encoder-side edge case in
-      x264's test-pattern-source encodes that this decoder needs to handle
-      differently (check x264's own `--verbose`/PSNR debug output, or try
-      building a minimal FFmpeg+cabac.c C harness — network access to
-      github.com/FFmpeg/FFmpeg was available in this session — to get a
-      byte-level trace from the *real* compiled decoder rather than another
-      from-scratch reimplementation, since two independent
-      from-scratch reimplementations already agree with each other and that
-      no longer moves the investigation forward).
-- [ ] Validate bit-exact Main/High CABAC decode vs `ffmpeg` — blocked on the
-      bug above; `cabac_conformance.rs` exists (mirrors `cavlc_conformance.rs`)
-      but both tests are `#[ignore]`d until it's fixed.
+      This means the extensive engine/context-table verification from the
+      previous investigation pass (re-checking against real FFmpeg source,
+      writing an independent from-scratch Python reimplementation) was
+      thorough but insufficient: two implementations built from the *same*
+      transcribed table inevitably agree with each other while both being
+      wrong, so the only way this surfaced was comparing against the actual
+      *compiled* reference engine rather than another reimplementation from
+      the same source reading. Worth remembering as a lesson if a similar
+      "two independent implementations agree but still don't match ffmpeg"
+      situation comes up elsewhere (AV1 entropy decoder, P/B-slice CABAC).
+      \
+      `cabac_conformance.rs`'s two tests (Main-profile CABAC I-frame,
+      deblocking on/off, real `testsrc` content at 64×48) are un-`#[ignore]`d
+      and pass bit-exact; all 191 `tpt-kinetix-h264` unit tests still pass.
+- [x] Validate bit-exact Main/High CABAC decode vs `ffmpeg` — done, see above.
 
   #### Phase D.1 — remaining context-index tables
 
@@ -549,18 +516,30 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
   - [x] Truncated-unary, FL (LSB-first per §9.3.2.5, distinct from CAVLC's
         MSB-first `u(v)`), and UEG0 (via `decode_bypass_eg`) binarizations
         used by the I-slice tables above are implemented; see `entropy.rs`.
-  - [ ] Binarizations specific to P/B-slice elements (mvd's UEGk suffix beyond
-        what `decode_bypass_eg` already covers, ref_idx's truncated unary)
+  - [x] Binarizations specific to P/B-slice elements (mvd's UEGk suffix beyond
+        what `decode_bypass_eg` already covers, ref_idx's truncated unary) —
+        **already implemented**, found while starting this phase: commit
+        `a8e4b56` (labeled "MMCO/ref-list wiring") landed `RefIdxCabacContext`
+        and `MvdCabacContext` in `entropy.rs` alongside the ref-pic-list work,
+        but never got its own checkbox here. `RefIdxCabacContext::decode` is a
+        1:1 transliteration of FFmpeg's `decode_cabac_mb_ref` ctxIdx recurrence
+        (truncated unary, no separate bin-0 special case). `MvdCabacContext::decode`
+        does the context-coded truncated-unary prefix (saturating at 9) then
+        falls through to the existing `decode_bypass_eg(3)` for the UEGk
+        suffix — confirming no new bypass primitive was needed. Both are
+        unit-tested (`ref_idx_decode_*`, `mvd_decode_*`, 6 tests, all passing).
+        Neither is wired into `slice_data.rs`'s parser yet — that's still
+        Phase D.4, unchanged below.
 
   #### Phase D.3 — CABAC syntax parsing in the slice loop
   - [x] I-slice mb_type / intra pred modes / coded_block_pattern / mb_qp_delta
         / residual wired into `slice_data.rs`'s CABAC-specific parser,
         reusing existing CAVLC reconstruction (transform/prediction/deblock)
         unchanged (see `parse_i_slice_cabac`).
-  - [ ] Fix the known desync bug above.
-  - [ ] Add a Main/High-profile CABAC clip to the corpus and validate bit-exact
-        vs `ffmpeg` (test scaffolding — `cabac_conformance.rs` — already exists,
-        currently `#[ignore]`d)
+  - [x] Fix the known desync bug above (`TRANS_IDX_LPS[28]` fix, 2026-08-12).
+  - [x] Add a Main/High-profile CABAC clip to the corpus and validate bit-exact
+        vs `ffmpeg` — `cabac_conformance.rs`'s two tests are un-`#[ignore]`d
+        and passing (64×48 `testsrc`, deblocking on/off).
 
   #### Phase D.4 — P/B-slice CABAC (not started)
   - [ ] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
@@ -815,6 +794,25 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > the real arithmetic decoder (cross-checked against an independent Python
 > `coeffs()` oracle); output is still not pixel-exact because superblock
 > partition/mode syntax is a fixed placeholder grid (Phase C).
+>
+> **Bitstream-ingest status (2026-08-12)**: the OBU splitter
+> (`obu::parse_obu_sequence`) and **Sequence Header OBU parser
+> (`obu::SequenceHeaderObu::parse`) now decode correctly against real
+> `ffmpeg`-generated keyframes** — verified by the new ffmpeg-gated
+> conformance test `tpt-kinetix-test-utils/tests/conformance.rs::
+> av1_vs_ffmpeg_reference_when_available`, which asserts the declared
+> frame geometry (`128x96`) matches. The earlier truncation at
+> `matrix_coefficients` was a missing `frame_id_numbers_present_flag` /
+> `enable_*` feature-flag block in the non-reduced Sequence Header path
+> (§5.5.2), now filled in; `read_ns` was also hardened against `n<=1`.
+> The **uncompressed frame-header parser (`frame.rs::FrameHeader::parse`,
+> AV1 §5.9) still drifts on real keyframes** (it produces wrong
+> dimensions), so the decoder cannot yet reconstruct real frames — that
+> parser, then the superblock partition tree + per-block intra mode + tx
+> size (Phase C), then CDEF + deblock + restoration (Phase D), are the
+> remaining blockers to a pixel-exact intra decode. The conformance
+> harness already prints the Kinetix-vs-reference PSNR/diff so progress on
+> those phases is measurable.
 
 #### AV1 Phase A — real entropy: the symbol decoder (blocker for everything below)
 
@@ -882,6 +880,13 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       this was the standing `TODO(phase-4)` previously at `decoder.rs:113`
 
 #### AV1 Phase G — conformance
+- [~] Conformance harness in place: `tpt-kinetix-test-utils/tests/conformance.rs::
+      av1_vs_ffmpeg_reference_when_available` synthesizes an AV1 keyframe OBU with
+      `ffmpeg`, decodes it with both `Av1Decoder` and `ffmpeg`'s AV1 decoder, and
+      prints the per-plane PSNR/diff (gated on `ffmpeg`, asserts the sequence-header
+      geometry contract today; the pixel-exact `within_tolerance(.., 0)` assertion is
+      commented out until Phase C/D land). Sequence Header OBU parsing is exercised
+      and passes against real `ffmpeg` keyframes.
 - [ ] Validate decode vs `dav1d` reference output on a generated intra-only
       corpus first (Phases A–C only), then again once inter prediction
       (Phase E) lands

@@ -16,6 +16,7 @@ use crate::{
         predict_16x16, predict_4x4, predict_chroma, Intra16x16Mode, IntraChromaMode,
         IntraNeighbours16x16, IntraNeighbours4x4,
     },
+    slice::WeightEntry,
     slice_data::raster_of_8x8_sub,
     trace::{DecodeTracer, TracePlane},
     transform::{chroma_dc_transform, dequant_idct_4x4, luma_dc_transform},
@@ -29,6 +30,197 @@ pub struct ReconstructedFrame {
     pub chroma_cr: Vec<u8>,
     pub luma_stride: usize,
     pub chroma_stride: usize,
+}
+
+/// How a slice's inter prediction combines reference samples (§8.4.2.3):
+/// plain default averaging, or one of the two weighted-prediction modes.
+/// Threaded through [`reconstruct_inter_frame`] (P/SP slices, `l0` weights
+/// only, no bi-prediction) and [`reconstruct_b_frame`] (B slices, both lists).
+#[derive(Debug, Clone)]
+pub enum WeightedPred {
+    /// Default weighted sample prediction (§8.4.2.3.1): plain sample copy for
+    /// uni-prediction, `(l0 + l1 + 1) >> 1` averaging for bi-prediction.
+    Default,
+    /// Explicit weighted prediction (§8.4.2.3.2), from a slice's
+    /// `pred_weight_table` (P/SP with `weighted_pred_flag`, or B with
+    /// `weighted_bipred_idc == 1`). `l0`/`l1` are indexed by `ref_idx`.
+    Explicit {
+        luma_log2_wd: u32,
+        chroma_log2_wd: u32,
+        l0: Vec<WeightEntry>,
+        l1: Vec<WeightEntry>,
+    },
+    /// Implicit weighted prediction (§8.4.2.3.2), B slices only
+    /// (`weighted_bipred_idc == 2`): weights are derived per-block from POC
+    /// distance rather than signalled explicitly. Only applies to
+    /// bi-predicted blocks; uni-predicted blocks fall back to
+    /// [`WeightedPred::Default`] (§8.4.2.3, "otherwise" clause). `l0_poc`/
+    /// `l1_poc` are indexed by `ref_idx`; `cur_poc` is the current picture's
+    /// `PicOrderCnt`.
+    Implicit {
+        l0_poc: Vec<i64>,
+        l1_poc: Vec<i64>,
+        cur_poc: i64,
+    },
+}
+
+#[inline]
+fn clip1(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+/// Explicit/implicit single-direction weighted sample prediction (§8.4.2.3.2).
+fn weighted_uni(pred: &[u8; 16], w: i32, o: i32, log_wd: u32) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let p = pred[i] as i32;
+        let v = if log_wd >= 1 {
+            ((p * w + (1 << (log_wd - 1))) >> log_wd) + o
+        } else {
+            p * w + o
+        };
+        out[i] = clip1(v);
+    }
+    out
+}
+
+/// Explicit/implicit bi-predictive weighted sample prediction (§8.4.2.3.2).
+#[allow(clippy::too_many_arguments)]
+fn weighted_bi(
+    l0: &[u8; 16],
+    l1: &[u8; 16],
+    w0: i32,
+    o0: i32,
+    w1: i32,
+    o1: i32,
+    log_wd: u32,
+) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let p0 = l0[i] as i32;
+        let p1 = l1[i] as i32;
+        let v = if log_wd >= 1 {
+            ((p0 * w0 + p1 * w1 + (1 << log_wd)) >> (log_wd + 1)) + ((o0 + o1 + 1) >> 1)
+        } else {
+            (p0 * w0 + p1 * w1 + o0 + o1 + 1) >> 1
+        };
+        out[i] = clip1(v);
+    }
+    out
+}
+
+/// Derive the implicit bi-prediction weights `(w0, w1)` (§8.4.2.3.2) from the
+/// POC distance between the current picture and each of the two references.
+/// Falls back to equal weighting (32, 32) when the two references coincide,
+/// `td == 0`, or the derived scale factor falls outside the spec's valid
+/// range -- the same fallback the spec uses for same-picture/long-term
+/// references, which this decoder doesn't yet distinguish here.
+fn implicit_weights(cur_poc: i64, l0_poc: i64, l1_poc: i64) -> (i32, i32) {
+    if l0_poc == l1_poc {
+        return (32, 32);
+    }
+    let td = (l1_poc - l0_poc).clamp(-128, 127);
+    if td == 0 {
+        return (32, 32);
+    }
+    let tb = (cur_poc - l0_poc).clamp(-128, 127);
+    let tx = (16384 + (td.abs() / 2)) / td;
+    let dist_scale_factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let w1 = dist_scale_factor >> 2;
+    if !(-64..=128).contains(&w1) {
+        return (32, 32);
+    }
+    (64 - w1 as i32, w1 as i32)
+}
+
+/// Default (unweighted) sample combination (§8.4.2.3.1): plain copy for
+/// uni-prediction, `(l0 + l1 + 1) >> 1` averaging for bi-prediction.
+fn default_combine(l0_active: bool, l1_active: bool, pred_l0: &[u8; 16], pred_l1: &[u8; 16]) -> [u8; 16] {
+    if l0_active && l1_active {
+        let mut avg = [0u8; 16];
+        for i in 0..16 {
+            avg[i] = ((pred_l0[i] as u16 + pred_l1[i] as u16 + 1) >> 1) as u8;
+        }
+        avg
+    } else if l0_active {
+        *pred_l0
+    } else if l1_active {
+        *pred_l1
+    } else {
+        [128u8; 16]
+    }
+}
+
+/// Pick `(weight, offset)` for one [`WeightEntry`]: `chroma_comp` is `None`
+/// for luma or `Some(0|1)` (Cb/Cr) for chroma.
+fn weight_offset(e: &WeightEntry, chroma_comp: Option<usize>) -> (i32, i32) {
+    match chroma_comp {
+        Some(c) => (e.chroma_weight[c], e.chroma_offset[c]),
+        None => (e.luma_weight, e.luma_offset),
+    }
+}
+
+/// Combine per-block L0/L1 prediction samples per §8.4.2.3, dispatching on the
+/// slice's [`WeightedPred`] mode. `ref_idx0`/`ref_idx1` are only consulted
+/// when the corresponding list is active. `chroma_comp` selects luma (`None`)
+/// or one chroma component (`Some(0)` = Cb, `Some(1)` = Cr).
+#[allow(clippy::too_many_arguments)]
+fn combine_weighted(
+    weighted: &WeightedPred,
+    l0_active: bool,
+    l1_active: bool,
+    ref_idx0: usize,
+    ref_idx1: usize,
+    pred_l0: &[u8; 16],
+    pred_l1: &[u8; 16],
+    chroma_comp: Option<usize>,
+) -> [u8; 16] {
+    match weighted {
+        WeightedPred::Default => default_combine(l0_active, l1_active, pred_l0, pred_l1),
+        WeightedPred::Explicit {
+            luma_log2_wd,
+            chroma_log2_wd,
+            l0,
+            l1,
+        } => {
+            let log_wd = chroma_comp.map_or(*luma_log2_wd, |_| *chroma_log2_wd);
+            let default_entry = || WeightEntry::default_for(*luma_log2_wd, *chroma_log2_wd);
+            if l0_active && l1_active {
+                let e0 = l0.get(ref_idx0).copied().unwrap_or_else(default_entry);
+                let e1 = l1.get(ref_idx1).copied().unwrap_or_else(default_entry);
+                let (w0, o0) = weight_offset(&e0, chroma_comp);
+                let (w1, o1) = weight_offset(&e1, chroma_comp);
+                weighted_bi(pred_l0, pred_l1, w0, o0, w1, o1, log_wd)
+            } else if l0_active {
+                let e0 = l0.get(ref_idx0).copied().unwrap_or_else(default_entry);
+                let (w0, o0) = weight_offset(&e0, chroma_comp);
+                weighted_uni(pred_l0, w0, o0, log_wd)
+            } else if l1_active {
+                let e1 = l1.get(ref_idx1).copied().unwrap_or_else(default_entry);
+                let (w1, o1) = weight_offset(&e1, chroma_comp);
+                weighted_uni(pred_l1, w1, o1, log_wd)
+            } else {
+                [128u8; 16]
+            }
+        }
+        WeightedPred::Implicit {
+            l0_poc,
+            l1_poc,
+            cur_poc,
+        } => {
+            if l0_active && l1_active {
+                let poc0 = l0_poc.get(ref_idx0).copied().unwrap_or(*cur_poc);
+                let poc1 = l1_poc.get(ref_idx1).copied().unwrap_or(*cur_poc);
+                let (w0, w1) = implicit_weights(*cur_poc, poc0, poc1);
+                weighted_bi(pred_l0, pred_l1, w0, 0, w1, 0, 5)
+            } else {
+                // §8.4.2.3.2: implicit mode only derives weights for
+                // bi-predicted blocks; a uni-predicted block under
+                // weighted_bipred_idc == 2 uses the default process.
+                default_combine(l0_active, l1_active, pred_l0, pred_l1)
+            }
+        }
+    }
 }
 
 /// Reconstruct a full frame of intra macroblocks.
@@ -324,6 +516,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
     width: u32,
     height: u32,
     chroma_qp_index_offset: i32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
     let luma_stride = width as usize;
@@ -346,6 +539,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     mb_cols,
                     mb_x,
                     mb_y,
+                    weighted,
                     tracer,
                 );
                 reconstruct_inter_chroma(
@@ -359,6 +553,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    weighted,
                     tracer,
                 );
             } else {
@@ -402,6 +597,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
     width: u32,
     height: u32,
     chroma_qp_index_offset: i32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
     let luma_stride = width as usize;
@@ -438,6 +634,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     mb_cols,
                     mb_x,
                     mb_y,
+                    weighted,
                     tracer,
                 );
                 reconstruct_b_inter_chroma(
@@ -452,6 +649,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    weighted,
                     tracer,
                 );
             } else {
@@ -492,6 +690,7 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
     mb_cols: u32,
     mb_x: u32,
     mb_y: u32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 16) as usize;
@@ -507,11 +706,12 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
 
         let l0_active = cell.ref_idx >= 0;
         let l1_active = cell.ref_idx_l1 >= 0;
+        let ref_idx0 = cell.ref_idx.max(0) as usize;
+        let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
 
         let mut pred_l0 = [0u8; 16];
         if l0_active {
-            let ref_idx = cell.ref_idx as usize;
-            if let Some(frame) = ref_frames_l0.get(ref_idx).or_else(|| ref_frames_l0.first()) {
+            if let Some(frame) = ref_frames_l0.get(ref_idx0).or_else(|| ref_frames_l0.first()) {
                 let w = frame.width as usize;
                 let h = frame.height as usize;
                 crate::motion_comp::interpolate_luma(
@@ -522,8 +722,7 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
         }
         let mut pred_l1 = [0u8; 16];
         if l1_active {
-            let ref_idx = cell.ref_idx_l1 as usize;
-            if let Some(frame) = ref_frames_l1.get(ref_idx).or_else(|| ref_frames_l1.first()) {
+            if let Some(frame) = ref_frames_l1.get(ref_idx1).or_else(|| ref_frames_l1.first()) {
                 let w = frame.width as usize;
                 let h = frame.height as usize;
                 crate::motion_comp::interpolate_luma(
@@ -533,24 +732,13 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
             }
         }
 
-        let pred = if l0_active && l1_active {
-            // Bi-prediction: (L0 + L1 + 1) >> 1
-            let mut avg = [0u8; 16];
-            for i in 0..16 {
-                avg[i] = ((pred_l0[i] as u16 + pred_l1[i] as u16 + 1) >> 1) as u8;
-            }
-            avg
-        } else if l0_active {
-            pred_l0
-        } else if l1_active {
-            pred_l1
-        } else {
-            [128u8; 16]
-        };
+        let pred = combine_weighted(
+            weighted, l0_active, l1_active, ref_idx0, ref_idx1, &pred_l0, &pred_l1, None,
+        );
 
         tracer.on_motion_comp(
             mb_x, mb_y, TracePlane::Luma, block as u8, &pred,
-            cell.mv, cell.ref_idx.max(0) as usize,
+            cell.mv, ref_idx0,
         );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
@@ -584,6 +772,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
     mb_x: u32,
     mb_y: u32,
     chroma_qp_index_offset: i32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 8) as usize;
@@ -610,11 +799,12 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
 
             let l0_active = cell.ref_idx >= 0;
             let l1_active = cell.ref_idx_l1 >= 0;
+            let ref_idx0 = cell.ref_idx.max(0) as usize;
+            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
 
             let mut pred_l0 = [0u8; 16];
             if l0_active {
-                let ref_idx = cell.ref_idx as usize;
-                if let Some(frame) = ref_frames_l0.get(ref_idx).or_else(|| ref_frames_l0.first()) {
+                if let Some(frame) = ref_frames_l0.get(ref_idx0).or_else(|| ref_frames_l0.first()) {
                     let w = frame.width as usize;
                     let h = frame.height as usize;
                     let luma_len = w * h;
@@ -628,8 +818,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
             }
             let mut pred_l1 = [0u8; 16];
             if l1_active {
-                let ref_idx = cell.ref_idx_l1 as usize;
-                if let Some(frame) = ref_frames_l1.get(ref_idx).or_else(|| ref_frames_l1.first()) {
+                if let Some(frame) = ref_frames_l1.get(ref_idx1).or_else(|| ref_frames_l1.first()) {
                     let w = frame.width as usize;
                     let h = frame.height as usize;
                     let luma_len = w * h;
@@ -642,23 +831,14 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
                 }
             }
 
-            let pred = if l0_active && l1_active {
-                let mut avg = [0u8; 16];
-                for i in 0..16 {
-                    avg[i] = ((pred_l0[i] as u16 + pred_l1[i] as u16 + 1) >> 1) as u8;
-                }
-                avg
-            } else if l0_active {
-                pred_l0
-            } else if l1_active {
-                pred_l1
-            } else {
-                [128u8; 16]
-            };
+            let pred = combine_weighted(
+                weighted, l0_active, l1_active, ref_idx0, ref_idx1, &pred_l0, &pred_l1,
+                Some(comp),
+            );
 
             tracer.on_motion_comp(
                 mb_x, mb_y, trace_plane, block as u8, &pred,
-                cell.mv, cell.ref_idx.max(0) as usize,
+                cell.mv, ref_idx0,
             );
 
             let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]));
@@ -693,6 +873,7 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
     mb_cols: u32,
     mb_x: u32,
     mb_y: u32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 16) as usize;
@@ -725,6 +906,8 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
                 4,
             );
         }
+        let pred =
+            combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
         tracer.on_motion_comp(mb_x, mb_y, TracePlane::Luma, block as u8, &pred, cell.mv, ref_idx);
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
@@ -764,6 +947,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
     mb_x: u32,
     mb_y: u32,
     chroma_qp_index_offset: i32,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 8) as usize;
@@ -826,6 +1010,8 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                     4,
                 );
             }
+            let pred =
+                combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], Some(comp));
             tracer.on_motion_comp(
                 mb_x,
                 mb_y,
@@ -926,6 +1112,7 @@ mod tests {
             16,
             16,
             0,
+            &WeightedPred::Default,
             &mut crate::trace::NoopTracer,
         );
         assert!(f.luma.iter().all(|&v| v == 123));
@@ -971,6 +1158,7 @@ mod tests {
             32,
             16,
             0,
+            &WeightedPred::Default,
             &mut crate::trace::NoopTracer,
         );
         // Left MB: identity.
@@ -984,5 +1172,52 @@ mod tests {
         // average of the ramp neighbours.
         assert_eq!(f.chroma_cb[8], 9);
         assert_eq!(f.chroma_cr[8], 17);
+    }
+
+    /// Explicit weighted P-slice prediction (§8.4.2.3.2) against a
+    /// hand-computed weight/offset for a flat synthetic reference block.
+    /// `logWD = 5, w = 48, o = 10` over a flat `predSampleLX = 100` gives
+    /// `((100*48 + 16) >> 5) + 10 = (4816 >> 5) + 10 = 150 + 10 = 160`; the
+    /// chroma entry uses the "unweighted" identity `w = 1 << logWD, o = 0`
+    /// so chroma passes through unchanged.
+    #[test]
+    fn explicit_weighted_p_slice_matches_hand_computed_formula() {
+        let mb = Macroblock::new_skip();
+        let mut store = crate::mv::MvStore::new(1);
+        store.commit(
+            0,
+            [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16],
+            0,
+        );
+        let mut ref_frame = crate::macroblock::new_video_frame(16, 16).unwrap();
+        for px in ref_frame.data.iter_mut() {
+            *px = 100;
+        }
+        let weighted = WeightedPred::Explicit {
+            luma_log2_wd: 5,
+            chroma_log2_wd: 5,
+            l0: vec![WeightEntry {
+                luma_weight: 48,
+                luma_offset: 10,
+                chroma_weight: [1 << 5, 1 << 5],
+                chroma_offset: [0, 0],
+            }],
+            l1: Vec::new(),
+        };
+        let f = reconstruct_inter_frame(
+            &[mb],
+            &store,
+            &[ref_frame],
+            1,
+            1,
+            16,
+            16,
+            0,
+            &weighted,
+            &mut crate::trace::NoopTracer,
+        );
+        assert!(f.luma.iter().all(|&v| v == 160));
+        assert!(f.chroma_cb.iter().all(|&v| v == 100));
+        assert!(f.chroma_cr.iter().all(|&v| v == 100));
     }
 }

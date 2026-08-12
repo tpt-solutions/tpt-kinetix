@@ -119,6 +119,12 @@ fn read_tile_log2(br: &mut BitReader<'_>) -> Result<u8, KinetixError> {
 /// range optionally spilling into one extra bit.
 fn read_ns(br: &mut BitReader<'_>, n: u32) -> Result<u32, KinetixError> {
     debug_assert!(n > 0);
+    // `ns(1)` has a single symbol and consumes zero bits (always decodes to 0);
+    // `n - 1` would underflow the floor(log2) computation below, so special-case
+    // it. `ns(2)` similarly has `w == 0` and always decodes to 0.
+    if n <= 2 {
+        return Ok(0);
+    }
     let w = 32 - (n - 1).leading_zeros() - 1; // floor(log2(n - 1))
     if w == 0 {
         // m == 0: value is always 0, no bits consumed.
@@ -293,7 +299,17 @@ impl FrameHeader {
     /// Parse the uncompressed frame header from `data` (the OBU payload minus
     /// the OBU header).  `seq_header` provides the fields needed to decode the
     /// frame header (dimensions bounds, color config, order-hint bits, etc.).
-    pub fn parse(data: &[u8], seq: &crate::obu::SequenceHeaderObu) -> Result<Self, KinetixError> {
+    /// Parse the uncompressed frame header from `data` (the OBU payload minus
+    /// the OBU header).  `seq_header` provides the fields needed to decode the
+    /// frame header (dimensions bounds, color config, order-hint bits, etc.).
+    ///
+    /// Returns the parsed header and the number of **bits** consumed, so the
+    /// caller can slice the trailing tile-group payload out of a combined
+    /// `Frame` OBU (type 6).
+    pub fn parse(
+        data: &[u8],
+        seq: &crate::obu::SequenceHeaderObu,
+    ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
         let reduced_still = seq.reduced_still_picture_header;
@@ -434,7 +450,6 @@ impl FrameHeader {
         let (width, height, render_width, render_height) = parse_frame_size(
             &mut br,
             seq,
-            frame_type == FrameType::KeyFrame,
             frame_size_override_flag,
             seq.frame_width(),
             seq.frame_height(),
@@ -700,7 +715,7 @@ impl FrameHeader {
             force_integer_mv,
         );
 
-        Ok(FrameHeader {
+        Ok((FrameHeader {
             frame_type,
             show_frame,
             show_existing_frame,
@@ -761,7 +776,9 @@ impl FrameHeader {
             tile_height_in_sb,
             lossless,
             buffer_removal_time_present,
-        })
+        }),
+        br.bits_read(),
+        ))
     }
 }
 
@@ -789,12 +806,16 @@ fn seq_bit_depth(seq: &crate::obu::SequenceHeaderObu) -> u8 {
 fn parse_frame_size(
     br: &mut BitReader<'_>,
     seq: &crate::obu::SequenceHeaderObu,
-    is_key: bool,
     frame_size_override: bool,
     max_w: u32,
     max_h: u32,
 ) -> Result<(u32, u32, u32, u32), KinetixError> {
-    let (w, h) = if is_key || frame_size_override {
+    // §5.9.9 `frame_size()`: the width/height are only read as `ns` values
+    // when `frame_size_override_flag == 1`. (A keyframe forces that flag to 0,
+    // so it uses the sequence-header maximums directly.) The old code also read
+    // `ns` for keyframes, which consumed stray bits and drifted every field
+    // after it (e.g. decoding width = 5 instead of 128).
+    let (w, h) = if frame_size_override {
         let w = read_ns(br, max_w)? + 1;
         let h = read_ns(br, max_h)? + 1;
         (w, h)
@@ -1049,7 +1070,7 @@ mod tests {
 
         let bits = bw.finish();
         let seq = minimal_seq();
-        let fh = FrameHeader::parse(&bits, &seq).expect("frame header parse");
+        let (fh, _bits) = FrameHeader::parse(&bits, &seq).expect("frame header parse");
 
         assert_eq!(fh.frame_type, FrameType::KeyFrame);
         assert!(fh.show_frame);

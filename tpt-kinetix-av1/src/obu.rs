@@ -56,6 +56,11 @@ impl<'a> BitReader<'a> {
         self.read_bits(1).map(|v| v != 0)
     }
 
+    /// Number of bits consumed so far (byte position × 8 + residual bits).
+    pub(crate) fn bits_read(&self) -> usize {
+        self.byte_pos * 8 + self.bit_pos as usize
+    }
+
     /// Number of bytes fully consumed (rounds up to byte boundary).
     #[allow(dead_code)]
     fn bytes_consumed(&self) -> usize {
@@ -396,16 +401,19 @@ impl SequenceHeaderObu {
                     .ok_or_else(|| anyhow::anyhow!("truncated: seq_tier"))?;
             }
             if timing_info_present {
-                // decoder_model_present_for_this_op
-                let dm_present = br
-                    .read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: dm_present"))?;
-                if dm_present {
-                    // operating_parameters_info — skip 3*buffer_delay_length bits; we
-                    // approximated buffer_delay_length as 5 bits → 15 bits total
-                    br.read_bits(15)
-                        .ok_or_else(|| anyhow::anyhow!("truncated: opi"))?;
-                }
+                // decoder_model_present_for_this_op is always present in the
+            // operating-points loop (§5.5.2), independent of `timing_info_present`.
+            let dm_present = br
+                .read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: dm_present"))?;
+            if dm_present {
+                // operating_parameters_info: 3 * buffer_delay_length bits.
+                // `buffer_delay_length` defaults to 5 when decoder model info is
+                // present, else 0 (spec §5.5.2 `decoder_model_info()`).
+                let bdl = if decoder_model_info_present { 5u32 } else { 0 };
+                br.read_bits((3 * (bdl + 1)) as u8)
+                    .ok_or_else(|| anyhow::anyhow!("truncated: opi"))?;
+            }
             }
             if initial_display_delay_present {
                 let idd = br
@@ -429,41 +437,82 @@ impl SequenceHeaderObu {
             .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))?
             as u8;
 
-        // superblock size: use_128x128_superblock(1)
+        let max_frame_width_minus_1 = br
+            .read_bits(frame_width_bits_minus_1 + 1)
+            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
+        let max_frame_height_minus_1 = br
+            .read_bits(frame_height_bits_minus_1 + 1)
+            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_height_minus_1"))?;
+
+        // frame_id_numbers_present_flag(1) + optional sub-fields
+        let frame_id_numbers_present = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: frame_id_numbers_present_flag"))?;
+        if frame_id_numbers_present {
+            br.read_bits(4)
+                .ok_or_else(|| anyhow::anyhow!("truncated: delta_frame_id_length_minus_2"))?;
+            br.read_bits(3)
+                .ok_or_else(|| anyhow::anyhow!("truncated: additional_frame_id_length_minus_1"))?;
+        }
+
+        // use_128x128_superblock(1) + feature enable flags
         let use_128x128_superblock = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: use_128x128_superblock"))?;
+        let _enable_filter_intra = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_filter_intra"))?;
+        let _enable_intra_edge_filter = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_intra_edge_filter"))?;
+        let _enable_interintra_compound = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_interintra_compound"))?;
+        let _enable_masked_compound = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_masked_compound"))?;
+        let _enable_warped_motion = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_warped_motion"))?;
+        let _enable_dual_filter = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_dual_filter"))?;
+        let enable_order_hint = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_order_hint"))?;
+        let _enable_jnt_comp = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_jnt_comp"))?;
+        let _enable_ref_frame_mvs = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_ref_frame_mvs"))?;
 
-        // order_hint_bits_minus_1(3) when !reduced_still_picture_header
-        let order_hint_bits_minus_1 = br
-            .read_bits(3)
-            .ok_or_else(|| anyhow::anyhow!("truncated: order_hint_bits_minus_1"))?
-            as u8;
-
-        // screen content tools (§5.5.3)
+        // Screen-content tools (§5.5.2 / §5.5.3)
         let seq_force_screen_content_tools = if reduced_still_picture_header {
             true
         } else {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_screen_content_tools"))?
+            let choose = br
+                .read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: seq_choose_screen_content_tools"))?;
+            if choose {
+                true
+            } else {
+                br.read_flag()
+                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_screen_content_tools"))?
+            }
         };
         let seq_force_integer_mv = if seq_force_screen_content_tools {
-            if reduced_still_picture_header {
+            let choose = br
+                .read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: seq_choose_integer_mv"))?;
+            if choose {
                 false
             } else {
                 br.read_flag()
                     .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv"))?
             }
         } else {
-            let present = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv_present"))?;
-            if present {
-                br.read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv"))?
-            } else {
-                false
-            }
+            false
         };
 
         // allow_intrabc(1) when screen content tools enabled and not forced integer mv
@@ -474,12 +523,24 @@ impl SequenceHeaderObu {
             false
         };
 
-        let max_frame_width_minus_1 = br
-            .read_bits(frame_width_bits_minus_1 + 1)
-            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
-        let max_frame_height_minus_1 = br
-            .read_bits(frame_height_bits_minus_1 + 1)
-            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_height_minus_1"))?;
+        let _enable_superres = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_superres"))?;
+        let _enable_cdef = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_cdef"))?;
+        let _enable_restoration = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: enable_restoration"))?;
+
+        // order_hint_bits_minus_1(3) only when order hint is enabled
+        let order_hint_bits_minus_1 = if enable_order_hint {
+            br.read_bits(3)
+                .ok_or_else(|| anyhow::anyhow!("truncated: order_hint_bits_minus_1"))?
+                as u8
+        } else {
+            0
+        };
 
         let color_config = Self::parse_color_config(&mut br, seq_profile)?;
 

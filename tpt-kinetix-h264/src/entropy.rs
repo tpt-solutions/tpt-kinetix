@@ -986,6 +986,121 @@ impl MvdCabacContext {
     }
 }
 
+/// `mb_type` B-slice inter-prefix decoder (ctxIdx 27..=32, ctxIdxOffset
+/// [`crate::cabac_tables::MB_TYPE_B_CTX`]). Ported from FFmpeg's inline
+/// B-slice `mb_type` dispatch (`cabac_state[27+ctx]` for `ctx` 0..=5):
+///
+/// - ctx[0] (ctxIdx 27): 0 → B_Direct_16x16 (type 0)
+/// - ctx[1] (ctxIdx 28): 0 → types 1/2 (L0/L1 16x16), selected by ctx[2]
+/// - ctx[2] (ctxIdx 29): used for types 1/2 and 3/4 branches
+/// - ctx[3] (ctxIdx 30): used for types 3/4 and 5/6 branches
+/// - ctx[4] (ctxIdx 31): reused for all types 7..=21 pair-wise decisions
+/// - ctx[5] (ctxIdx 32): final inter/intra gate (0 → B_8x8=type22, 1 → intra)
+///   — ctxIdx 32 is also the base of [`IntraMbTypeSuffixCabacContext::new_pb`]
+///   for B slices, following the same mutual-exclusion pattern as ctxIdx 17 on
+///   the P-slice path.
+///
+/// Returns `None` when the prefix indicates an intra-coded macroblock (caller
+/// uses `IntraMbTypeSuffixCabacContext::new_pb(32, ...)`); otherwise `Some(n)`
+/// with `n` in 0..=22.
+pub struct MbTypeBCabacContext {
+    ctx: [CabacContext; 6],
+}
+
+impl MbTypeBCabacContext {
+    pub fn new(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::MB_TYPE_B_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
+        if dec.decode_decision(&mut self.ctx[0]) == 0 {
+            return Some(0); // B_Direct_16x16
+        }
+        if dec.decode_decision(&mut self.ctx[1]) == 0 {
+            // types 1 (L0) or 2 (L1)
+            return Some(1 + dec.decode_decision(&mut self.ctx[2]) as u32);
+        }
+        if dec.decode_decision(&mut self.ctx[2]) == 0 {
+            // types 3 (Bi) or 4 (L0L0_16x8)
+            return Some(3 + dec.decode_decision(&mut self.ctx[3]) as u32);
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            // types 5 (L0L0_8x16) or 6 (L1L1_16x8)
+            return Some(5 + dec.decode_decision(&mut self.ctx[4]) as u32);
+        }
+        // ctx[4] (ctxIdx 31) is reused for all subsequent pair-wise decisions.
+        // Each loop iteration handles one "0 → return pair" check.
+        let mut base = 7u32;
+        loop {
+            if dec.decode_decision(&mut self.ctx[4]) == 0 {
+                return Some(base + dec.decode_decision(&mut self.ctx[4]) as u32);
+            }
+            base += 2;
+            if base == 21 {
+                break;
+            }
+        }
+        // After base reaches 21: one more ctx[4] read for type 21.
+        if dec.decode_decision(&mut self.ctx[4]) == 0 {
+            return Some(21);
+        }
+        // ctx[5] (ctxIdx 32): 0 → B_8x8 (type 22), 1 → intra.
+        if dec.decode_decision(&mut self.ctx[5]) == 0 {
+            return Some(22);
+        }
+        None // intra — caller uses IntraMbTypeSuffixCabacContext::new_pb(32, ...)
+    }
+}
+
+/// `sub_mb_type` (B slices) CABAC decoder (ctxIdx 36..=39, ctxIdxOffset
+/// [`crate::cabac_tables::SUB_MB_TYPE_B_CTX`]). Ported directly from FFmpeg's
+/// `decode_cabac_b_mb_sub_type` (`cabac_state[36]`, `[37]`, `[38]`, `[39]`):
+///
+/// Returns 0..=12 matching this crate's existing CAVLC numbering for B
+/// sub_mb_type (Table 7-15). The B_Direct (0) case produces no motion data.
+/// Values 1..=12 map through `crate::mv::B_SUB_MB_PARTS` and `B_SUB_MB_DIR`.
+pub struct SubMbTypeBCabacContext {
+    ctx: [CabacContext; 4],
+}
+
+impl SubMbTypeBCabacContext {
+    pub fn new(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::SUB_MB_TYPE_B_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
+        if dec.decode_decision(&mut self.ctx[0]) == 0 {
+            return 0; // B_Direct
+        }
+        if dec.decode_decision(&mut self.ctx[1]) == 0 {
+            return 1 + dec.decode_decision(&mut self.ctx[2]) as u32; // 1 or 2
+        }
+        if dec.decode_decision(&mut self.ctx[2]) == 0 {
+            return 3 + dec.decode_decision(&mut self.ctx[3]) as u32; // 3 or 4
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            return 5 + dec.decode_decision(&mut self.ctx[3]) as u32; // 5 or 6
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            return 7 + dec.decode_decision(&mut self.ctx[3]) as u32; // 7 or 8
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            return 9;
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            return 10;
+        }
+        if dec.decode_decision(&mut self.ctx[3]) == 0 {
+            return 11;
+        }
+        12
+    }
+}
+
 impl CbpCabacContext {
     /// P/B-slice sibling of [`CbpCabacContext::new`]: identical ctxIdx range
     /// (73..=84, ctxIdxOffset doesn't vary by slice type for this element),

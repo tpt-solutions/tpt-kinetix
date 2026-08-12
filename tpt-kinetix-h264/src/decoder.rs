@@ -283,9 +283,8 @@ impl H264Decoder {
         use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
 
         let entropy_coding_mode_flag = pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
-        // CABAC I-slice decoding doesn't support the 8x8 transform (High
-        // profile) yet; P/B-slice CABAC isn't implemented at all (checked
-        // further down once the slice type is known).
+        // CABAC: 8x8 transform (High profile) not yet supported.
+        // P/B CABAC is now implemented (Phase D.4).
         if entropy_coding_mode_flag && pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false) {
             return Ok(None);
         }
@@ -757,16 +756,47 @@ impl H264Decoder {
                     ref_list.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
-                match crate::slice_data::parse_p_slice(
-                    &mut reader,
-                    mb_cols,
-                    mb_rows,
-                    slice_qp,
-                    num_ref_idx_l0_active,
-                    chroma_qp_index_offset,
-                    &mut crate::trace::NoopTracer,
-                ) {
+                let p_result = if entropy_coding_mode_flag {
+                    reader.byte_align();
+                    crate::slice_data::parse_p_slice_cabac(
+                        reader.remaining_bytes(),
+                        mb_cols,
+                        mb_rows,
+                        slice_qp,
+                        header.cabac_init_idc as usize,
+                        num_ref_idx_l0_active,
+                        chroma_qp_index_offset,
+                        &mut crate::trace::NoopTracer,
+                    )
+                } else {
+                    crate::slice_data::parse_p_slice(
+                        &mut reader,
+                        mb_cols,
+                        mb_rows,
+                        slice_qp,
+                        num_ref_idx_l0_active,
+                        chroma_qp_index_offset,
+                        &mut crate::trace::NoopTracer,
+                    )
+                };
+                match p_result {
                     Ok(parsed) => {
+                        // Explicit weighted prediction (§8.4.2.3.2): only P/SP
+                        // slices with `weighted_pred_flag` carry a
+                        // `pred_weight_table`; P-slices never use implicit
+                        // weighting (that's a B-slice-only, bi-pred concept).
+                        let weighted_pred = match (
+                            pps.as_ref().map(|p| p.weighted_pred_flag).unwrap_or(false),
+                            &header.pred_weight_table,
+                        ) {
+                            (true, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                                luma_log2_wd: pwt.luma_log2_weight_denom,
+                                chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                                l0: pwt.l0.clone(),
+                                l1: Vec::new(),
+                            },
+                            _ => crate::reconstruct::WeightedPred::Default,
+                        };
                         let mut recon = crate::reconstruct::reconstruct_inter_frame(
                             &parsed.macroblocks,
                             &parsed.mv_store,
@@ -776,6 +806,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
+                            &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );
 
@@ -921,17 +952,55 @@ impl H264Decoder {
                     ref_l1.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
-                match crate::slice_data::parse_b_slice(
-                    &mut reader,
-                    mb_cols,
-                    mb_rows,
-                    slice_qp,
-                    num_ref_idx_l0_active,
-                    num_ref_idx_l1_active,
-                    chroma_qp_index_offset,
-                    &mut crate::trace::NoopTracer,
-                ) {
+                let b_result = if entropy_coding_mode_flag {
+                    reader.byte_align();
+                    crate::slice_data::parse_b_slice_cabac(
+                        reader.remaining_bytes(),
+                        mb_cols,
+                        mb_rows,
+                        slice_qp,
+                        header.cabac_init_idc as usize,
+                        num_ref_idx_l0_active,
+                        num_ref_idx_l1_active,
+                        chroma_qp_index_offset,
+                        &mut crate::trace::NoopTracer,
+                    )
+                } else {
+                    crate::slice_data::parse_b_slice(
+                        &mut reader,
+                        mb_cols,
+                        mb_rows,
+                        slice_qp,
+                        num_ref_idx_l0_active,
+                        num_ref_idx_l1_active,
+                        chroma_qp_index_offset,
+                        &mut crate::trace::NoopTracer,
+                    )
+                };
+                match b_result {
                     Ok(parsed) => {
+                        // Weighted bi-prediction (§8.4.2.3.2): explicit when
+                        // `weighted_bipred_idc == 1` (uses the parsed
+                        // `pred_weight_table`), implicit when `== 2` (weights
+                        // derived per-block from each reference's POC
+                        // distance to the current picture).
+                        let weighted_bipred_idc =
+                            pps.as_ref().map(|p| p.weighted_bipred_idc).unwrap_or(0);
+                        let weighted_pred = match (weighted_bipred_idc, &header.pred_weight_table)
+                        {
+                            (1, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                                luma_log2_wd: pwt.luma_log2_weight_denom,
+                                chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                                l0: pwt.l0.clone(),
+                                l1: pwt.l1.clone(),
+                            },
+                            (2, _) => crate::reconstruct::WeightedPred::Implicit {
+                                l0_poc: ref_l0.iter().map(|e| e.pic_order_cnt).collect(),
+                                l1_poc: ref_l1.iter().map(|e| e.pic_order_cnt).collect(),
+                                cur_poc: current_poc,
+                            },
+                            _ => crate::reconstruct::WeightedPred::Default,
+                        };
                         let mut recon = crate::reconstruct::reconstruct_b_frame(
                             &parsed.macroblocks,
                             &parsed.mv_store,
@@ -942,6 +1011,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
+                            &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );
 

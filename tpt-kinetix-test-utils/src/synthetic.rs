@@ -165,6 +165,55 @@ pub fn minimal_av1_ivf() -> Option<Vec<u8>> {
     }
 }
 
+/// Generate a tiny AV1 bitstream in **OBU** form (section 5 low-overhead
+/// bitstream) using `ffmpeg`'s AV1 encoder, so both the Kinetix
+/// [`tpt_kinetix_av1::Av1Decoder`] (which consumes OBU bytes directly) and the
+/// `ffmpeg`-backed reference decoder (`reference::decode_av1_with_ffmpeg`,
+/// which also takes OBU bytes) can decode the same input.
+///
+/// Returns `None` if `ffmpeg` is unavailable or the encode fails. The produced
+/// stream is a single `testsrc` keyframe at the given dimensions.
+pub fn minimal_av1_obu(width: u32, height: u32) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let src = format!("testsrc=size={width}x{height}:rate=1:duration=1");
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &src,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "obu",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Generate a short raw AAC-LC elementary stream in ADTS framing using
 /// `ffmpeg`, so the AAC decoder has real, decodeable input to run against.
 ///

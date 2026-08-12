@@ -169,6 +169,55 @@ pub struct SliceHeader {
     /// header, before any CABAC byte-alignment). Callers use this to seek the
     /// residual/macroblock parser to the correct position.
     pub data_bit_offset: usize,
+    /// Parsed `pred_weight_table` (§7.3.3.2), present only when the slice uses
+    /// explicit weighted prediction: P/SP slices with `weighted_pred_flag`, or
+    /// B slices with `weighted_bipred_idc == 1`. Drives the explicit weighted
+    /// sample prediction process (§8.4.2.3.2) in
+    /// [`crate::reconstruct::WeightedPred::Explicit`]. `None` for unweighted
+    /// slices and for B slices using implicit weighting
+    /// (`weighted_bipred_idc == 2`, which carries no `pred_weight_table` in
+    /// the bitstream and derives weights from POC distance instead).
+    pub pred_weight_table: Option<PredWeightTable>,
+}
+
+/// One reference index's explicit weighted-prediction parameters
+/// (§8.4.2.3.2), decoded from one iteration of `pred_weight_table`'s
+/// per-reference loop (§7.3.3.2).
+#[derive(Debug, Clone, Copy)]
+pub struct WeightEntry {
+    pub luma_weight: i32,
+    pub luma_offset: i32,
+    /// Indexed `[0] = Cb, [1] = Cr`.
+    pub chroma_weight: [i32; 2],
+    /// Indexed `[0] = Cb, [1] = Cr`.
+    pub chroma_offset: [i32; 2],
+}
+
+impl WeightEntry {
+    /// Default entry used when the corresponding `_weight_flag` is 0: weight
+    /// `1 << log2_weight_denom` makes the explicit formula's shift-by-`logWD`
+    /// a no-op, offset 0 (§7.4.3.2's default derivation for
+    /// `luma_weight_lX`/`chroma_weight_lX`).
+    pub fn default_for(luma_log2_wd: u32, chroma_log2_wd: u32) -> Self {
+        Self {
+            luma_weight: 1 << luma_log2_wd,
+            luma_offset: 0,
+            chroma_weight: [1 << chroma_log2_wd; 2],
+            chroma_offset: [0; 2],
+        }
+    }
+}
+
+/// Parsed `pred_weight_table` (§7.3.3.2). `l0`/`l1` are indexed by `ref_idx`
+/// and always have `num_ref_idx_lX_active_minus1 + 1` entries (missing
+/// `_weight_flag`s already resolved to their spec default via
+/// [`WeightEntry::default_for`]).
+#[derive(Debug, Clone)]
+pub struct PredWeightTable {
+    pub luma_log2_weight_denom: u32,
+    pub chroma_log2_weight_denom: u32,
+    pub l0: Vec<WeightEntry>,
+    pub l1: Vec<WeightEntry>,
 }
 
 /// Parameters the slice-header parser needs from the active SPS/PPS.
@@ -343,19 +392,23 @@ impl SliceHeader {
         let weighted = (ctx.weighted_pred_flag
             && matches!(slice_type, SliceType::P | SliceType::Sp))
             || (ctx.weighted_bipred_idc == 1 && slice_type == SliceType::B);
-        if weighted {
-            parse_pred_weight_table(
-                &mut r,
-                ctx.chroma_array_type,
-                num_ref_idx_l0_active_minus1,
-                if slice_type == SliceType::B {
-                    Some(num_ref_idx_l1_active_minus1)
-                } else {
-                    None
-                },
+        let pred_weight_table = if weighted {
+            Some(
+                parse_pred_weight_table(
+                    &mut r,
+                    ctx.chroma_array_type,
+                    num_ref_idx_l0_active_minus1,
+                    if slice_type == SliceType::B {
+                        Some(num_ref_idx_l1_active_minus1)
+                    } else {
+                        None
+                    },
+                )
+                .context("pred_weight_table")?,
             )
-            .context("pred_weight_table")?;
-        }
+        } else {
+            None
+        };
 
         // dec_ref_pic_marking (§7.3.3.3). Present when nal_ref_idc != 0 (i.e. the
         // slice is a reference picture). This is driven by the NAL header
@@ -422,6 +475,7 @@ impl SliceHeader {
             dec_ref_pic_marking,
             direct_spatial_mv_pred_flag,
             data_bit_offset,
+            pred_weight_table,
         })
     }
 }
@@ -487,41 +541,71 @@ fn parse_ref_pic_list_modification(
     Ok(mods)
 }
 
-/// Parse `pred_weight_table` (§7.3.3.2) to advance the bit position.
+/// §7.4.3 bounds `num_ref_idx_lX_active_minus1` to at most 31 for the
+/// frame-only case this decoder handles (`num_ref_frames <= 16` plus
+/// short/long-term duplicates), so a `pred_weight_table` list has at most 32
+/// entries. Rejecting anything larger up front keeps a malformed
+/// `num_ref_idx_lX_active_minus1` (itself parsed as an unbounded `ue(v)`,
+/// like everywhere else in this header) from driving an oversized
+/// allocation or loop -- a prior version of this parser preallocated
+/// `Vec::with_capacity(count)` directly from that value and OOM'd the fuzz
+/// harness on a malformed seed.
+const MAX_PRED_WEIGHT_ENTRIES: usize = 32;
+
+/// Parse `pred_weight_table` (§7.3.3.2) into explicit per-reference weights
+/// (§8.4.2.3.2) instead of just advancing the bit position.
 fn parse_pred_weight_table(
     r: &mut BitReader,
     chroma_array_type: u32,
     num_ref_l0_minus1: u32,
     num_ref_l1_minus1: Option<u32>,
-) -> anyhow::Result<()> {
-    let _luma_log2_weight_denom = r.read_ue().context("luma_log2_weight_denom")?;
-    if chroma_array_type != 0 {
-        let _chroma_log2_weight_denom = r.read_ue().context("chroma_log2_weight_denom")?;
-    }
-    let read_list = |r: &mut BitReader, count: u32| -> anyhow::Result<()> {
-        for _ in 0..=count {
+) -> anyhow::Result<PredWeightTable> {
+    let luma_log2_weight_denom = r.read_ue().context("luma_log2_weight_denom")?;
+    let chroma_log2_weight_denom = if chroma_array_type != 0 {
+        r.read_ue().context("chroma_log2_weight_denom")?
+    } else {
+        0
+    };
+    let read_list = |r: &mut BitReader, count: u32| -> anyhow::Result<Vec<WeightEntry>> {
+        let n = count as usize + 1;
+        if n > MAX_PRED_WEIGHT_ENTRIES {
+            return Err(anyhow!(
+                "pred_weight_table: {n} entries exceeds the {MAX_PRED_WEIGHT_ENTRIES}-entry bound (§7.4.3)"
+            ));
+        }
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut entry = WeightEntry::default_for(luma_log2_weight_denom, chroma_log2_weight_denom);
             let luma_flag = r.read_bit().context("luma_weight_flag")?;
             if luma_flag == 1 {
-                let _lw = r.read_se().context("luma_weight")?;
-                let _lo = r.read_se().context("luma_offset")?;
+                entry.luma_weight = r.read_se().context("luma_weight")?;
+                entry.luma_offset = r.read_se().context("luma_offset")?;
             }
             if chroma_array_type != 0 {
                 let chroma_flag = r.read_bit().context("chroma_weight_flag")?;
                 if chroma_flag == 1 {
-                    for _ in 0..2 {
-                        let _cw = r.read_se().context("chroma_weight")?;
-                        let _co = r.read_se().context("chroma_offset")?;
+                    for c in 0..2 {
+                        entry.chroma_weight[c] = r.read_se().context("chroma_weight")?;
+                        entry.chroma_offset[c] = r.read_se().context("chroma_offset")?;
                     }
                 }
             }
+            out.push(entry);
         }
-        Ok(())
+        Ok(out)
     };
-    read_list(r, num_ref_l0_minus1)?;
-    if let Some(n1) = num_ref_l1_minus1 {
-        read_list(r, n1)?;
-    }
-    Ok(())
+    let l0 = read_list(r, num_ref_l0_minus1)?;
+    let l1 = if let Some(n1) = num_ref_l1_minus1 {
+        read_list(r, n1)?
+    } else {
+        Vec::new()
+    };
+    Ok(PredWeightTable {
+        luma_log2_weight_denom,
+        chroma_log2_weight_denom,
+        l0,
+        l1,
+    })
 }
 
 /// Parse `dec_ref_pic_marking` (§7.3.3.3), returning the decoded marking so the

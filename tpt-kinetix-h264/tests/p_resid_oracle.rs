@@ -15,7 +15,7 @@ use tpt_kinetix_core::pixel_format::PixelFormat;
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
 use tpt_kinetix_h264::pps::PicParameterSet;
-use tpt_kinetix_h264::reconstruct::reconstruct_inter_frame;
+use tpt_kinetix_h264::reconstruct::{reconstruct_inter_frame, WeightedPred};
 use tpt_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use tpt_kinetix_h264::slice_data::parse_p_slice;
 use tpt_kinetix_h264::sps::SeqParameterSet;
@@ -263,6 +263,7 @@ fn residual_block_oracle() {
         w as u32,
         48,
         chroma_qp_index_offset,
+        &WeightedPred::Default,
         &mut cap,
     );
 

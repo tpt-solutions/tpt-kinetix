@@ -127,8 +127,26 @@ impl Av1Decoder {
                 ObuType::Frame | ObuType::FrameHeader => {
                     if let Some(ref seq) = self.sequence_header {
                         match FrameHeader::parse(&obu.payload, seq) {
-                            Ok(fh) => {
+                            Ok((fh, header_bits)) => {
                                 self.last_frame_header = Some(fh);
+                                // A combined `Frame` OBU (type 6) carries the
+                                // uncompressed header *followed by* the tile
+                                // group data. Slice that remainder off and feed
+                                // it to reconstruction as if it were a standalone
+                                // TileGroup OBU (type 13) — this is what
+                                // `reconstruct_av1_frame` collects. For a single
+                                // tile the tile group begins immediately after
+                                // the (byte-aligned) uncompressed header.
+                                let consumed = (header_bits + 7) / 8;
+                                if consumed < obu.payload.len() {
+                                    let tg = obu.payload[consumed..].to_vec();
+                                    obu_pairs.push((13, tg.clone()));
+                                    self.tile_data.push(TileData {
+                                        tile_index: tile_index,
+                                        payload: tg,
+                                    });
+                                    tile_index += 1;
+                                }
                             }
                             Err(KinetixError::Unsupported(ref msg))
                                 if msg.contains("show_existing_frame") => {}
