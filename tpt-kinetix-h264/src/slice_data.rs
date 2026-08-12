@@ -369,10 +369,8 @@ fn dc_cbf_neighbor(grid: &[MbCabacCtx], idx: Option<usize>, bit: u16) -> bool {
 }
 
 /// `coded_block_flag` neighbour lookup for a luma AC / Luma4x4 4×4 block
-/// (ctxBlockCat 1/2), mirroring `luma_nc`'s neighbour walk but returning
-/// simple "was this block coded" booleans. An off-picture neighbour is
-/// treated as coded (this decoder only handles always-intra I-slices,
-/// matching FFmpeg's sentinel-64 convention for that case).
+/// (ctxBlockCat 1/2). An off-picture neighbour is treated as coded for intra
+/// MBs and as not-coded for inter MBs (spec §9.3.3.1.1.9).
 fn luma_cbf_neighbors(
     nz: &[MbNz],
     mb_x: u32,
@@ -380,6 +378,7 @@ fn luma_cbf_neighbors(
     mb_cols: u32,
     cur: &MbNz,
     block: usize,
+    is_intra: bool,
 ) -> (bool, bool) {
     let bx = (block % 4) as i32;
     let by = (block / 4) as i32;
@@ -389,7 +388,7 @@ fn luma_cbf_neighbors(
     } else if mb_x > 0 {
         nz[((mb_y * mb_cols) + mb_x - 1) as usize].luma[(by * 4 + 3) as usize] > 0
     } else {
-        true
+        is_intra
     };
 
     let top = if by > 0 {
@@ -397,14 +396,15 @@ fn luma_cbf_neighbors(
     } else if mb_y > 0 {
         nz[(((mb_y - 1) * mb_cols) + mb_x) as usize].luma[(3 * 4 + bx) as usize] > 0
     } else {
-        true
+        is_intra
     };
 
     (left, top)
 }
 
 /// `coded_block_flag` neighbour lookup for a chroma AC 4×4 block (ctxBlockCat
-/// 4), mirroring `chroma_nc`'s neighbour walk. See [`luma_cbf_neighbors`].
+/// 4), mirroring `chroma_nc`'s neighbour walk. Off-picture: coded for intra,
+/// not-coded for inter (spec §9.3.3.1.1.9). See [`luma_cbf_neighbors`].
 fn chroma_cbf_neighbors(
     nz: &[MbNz],
     mb_x: u32,
@@ -413,6 +413,7 @@ fn chroma_cbf_neighbors(
     cur: &MbNz,
     comp: usize,
     block: usize,
+    is_intra: bool,
 ) -> (bool, bool) {
     let base = comp * 4;
     let bx = (block % 2) as i32;
@@ -423,7 +424,7 @@ fn chroma_cbf_neighbors(
     } else if mb_x > 0 {
         nz[((mb_y * mb_cols) + mb_x - 1) as usize].chroma[base + (by * 2 + 1) as usize] > 0
     } else {
-        true
+        is_intra
     };
 
     let top = if by > 0 {
@@ -431,7 +432,7 @@ fn chroma_cbf_neighbors(
     } else if mb_y > 0 {
         nz[(((mb_y - 1) * mb_cols) + mb_x) as usize].chroma[base + (2 + bx) as usize] > 0
     } else {
-        true
+        is_intra
     };
 
     (left, top)
@@ -1171,7 +1172,7 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         v
     };
     for block in blocks {
-        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block);
+        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true);
         let coded = ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded);
         if coded {
             let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
@@ -1209,7 +1210,7 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         for comp in 0..2usize {
             for block in 0..4usize {
                 let (left_coded, top_coded) =
-                    chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block);
+                    chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true);
                 let ac_coded = ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded);
                 if ac_coded {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
@@ -1298,6 +1299,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             top_skipped: top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        eprintln!("[DBG P] mb=({mb_x},{mb_y}) is_skip={is_skip}");
         if is_skip {
             let mut mb = Macroblock::new_skip();
             mb.mb_type = MbType::PSkip;
@@ -1309,11 +1311,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             inter_ctx[mb_idx] = MbInterCabacCtx { present: true, ..Default::default() };
             prev_was_skip = true;
             macroblocks.push(mb);
-            let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            if end_of_slice != is_last {
-                return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC skip)"));
-            }
+            // end_of_slice_flag is NOT coded for skip MBs (spec §7.3.4 — only for coded MBs).
             continue;
         }
         prev_was_skip = false;
@@ -1337,6 +1335,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
 
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
+        eprintln!("[DBG P] mb=({mb_x},{mb_y}) end_of_slice={end_of_slice} is_last={is_last}");
         if end_of_slice != is_last {
             return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC)"));
         }
@@ -1369,6 +1368,7 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
 
     let inter_type = ctxs.mb_type_p.decode(dec);
+    eprintln!("[DBG P] mb=({mb_x},{mb_y}) inter_type={inter_type:?}");
     match inter_type {
         None => {
             // Intra macroblock inside P slice.
@@ -1407,13 +1407,16 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     *st = ctxs.sub_mb_p.decode(dec) as u8;
                 }
                 motion.sub_mb_type = Some(sub_types);
-                // ref_idx per 8×8 partition.
+                // ref_idx per 8×8 partition (only coded when num_ref_idx_l0_active > 1, spec §7.3.5.2).
                 for part in 0..4 {
                     let (col4, row4, _, _) = partition_dims(mb_type, part);
-                    let (xp, yp) = (col4 as u32 * 4, row4 as u32 * 4);
-                    let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &this_inter, left_idx, top_idx, xp, yp, 8, 8, 0);
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                    let ri = if num_ref_idx_l0_active > 1 {
+                        let (xp, yp) = (col4 as u32 * 4, row4 as u32 * 4);
+                        let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &this_inter, left_idx, top_idx, xp, yp, 8, 8, 0);
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                        r
+                    } else { 0 };
                     motion.ref_idx_l0.push(ri as i32);
                     // fill 2×2 blocks in the 8×8 quadrant with ref_idx
                     let blks = partition_blocks(col4, row4, 2, 2);
@@ -1438,18 +1441,23 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 }
             } else {
                 // 16×16, 16×8, or 8×16.
+                // ref_idx is only coded when num_ref_idx_l0_active > 1 (spec §7.3.5.2).
                 for part in 0..n_parts {
                     let (col4, row4, w4, h4) = partition_dims(mb_type, part);
                     let (xp, yp, wp, hp) = (col4 as u32 * 4, row4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
-                    let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0);
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                    let ri = if num_ref_idx_l0_active > 1 {
+                        let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0);
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                        r
+                    } else { 0 };
                     motion.ref_idx_l0.push(ri as i32);
                     let blks = partition_blocks(col4, row4, w4, h4);
                     if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
 
                     let mvd_x = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
                     let mvd_y = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
+                    eprintln!("[DBG P] mb=({mb_x},{mb_y}) part={part} mvd=({mvd_x},{mvd_y})");
                     motion.mvd_l0.push((mvd_x, mvd_y));
                     this_inter.set_partition_l0(&blks, mvd_x, mvd_y, ri as i32);
                 }
@@ -1457,6 +1465,7 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
 
             mb.motion = Some(motion);
             let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+            eprintln!("[DBG P] mb=({mb_x},{mb_y}) cbp_l={cbp_l} cbp_c={cbp_c}");
             let cbp = cbp_l | (cbp_c << 4);
             mb.cbp = cbp;
             let mut qp = prev_qp;
@@ -1529,11 +1538,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             cabac_ctx[mb_idx] = MbCabacCtx { present: true, cbp_word: 0, ..Default::default() };
             inter_ctx[mb_idx] = MbInterCabacCtx { present: true, ..Default::default() };
             macroblocks.push(mb);
-            let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            if end_of_slice != is_last {
-                return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (B-CABAC skip)"));
-            }
+            // end_of_slice_flag is NOT coded for skip MBs (spec §7.3.4 — only for coded MBs).
             continue;
         }
 
@@ -1924,7 +1929,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         v
     };
     for block in blocks {
-        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block);
+        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true);
         if ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded) {
             let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
             this_nz.luma[block] = count;
@@ -1948,7 +1953,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     if cbp_c == 2 {
         for comp in 0..2 {
             for block in 0..4 {
-                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block);
+                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true);
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
                     this_nz.chroma[comp * 4 + block] = count;
@@ -2013,9 +2018,12 @@ fn decode_inter_residual_cabac(
         v
     };
     for block in blocks {
-        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
-        if ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded) {
+        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false);
+        let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
+        eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} left_coded={left_coded} top_coded={top_coded} has_coeff={has_coeff}");
+        if has_coeff {
             let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_LUMA_4X4, 16);
+            eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} count={count} coeffs[0]={}", coeffs[0]);
             this_nz.luma[block] = count;
             mb.luma_coeffs[block] = coeffs;
         }
@@ -2036,7 +2044,7 @@ fn decode_inter_residual_cabac(
     if cbp_c == 2 {
         for comp in 0..2 {
             for block in 0..4 {
-                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block);
+                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block, false);
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
                     this_nz.chroma[comp * 4 + block] = count;

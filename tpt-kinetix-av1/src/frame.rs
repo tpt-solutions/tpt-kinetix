@@ -776,7 +776,7 @@ impl FrameHeader {
             tile_height_in_sb,
             lossless,
             buffer_removal_time_present,
-        }),
+        },
         br.bits_read(),
         ))
     }

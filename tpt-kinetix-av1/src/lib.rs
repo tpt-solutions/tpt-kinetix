@@ -32,6 +32,7 @@
 //! validated against `dav1d` reference output. Inter prediction and loop
 //! filtering are not implemented. See the crate README for details.
 
+pub mod cdf_tables_gen;
 pub mod coeff;
 pub mod coeff_tables;
 pub mod decoder;

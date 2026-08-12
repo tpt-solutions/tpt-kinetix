@@ -82,6 +82,17 @@ impl<'a> SymbolDecoder<'a> {
         dec
     }
 
+    /// Construct a decoder over `data` that begins reading at `bit_offset`
+    /// bits into the buffer (0..8). Used when a tile group's entropy-coded
+    /// payload immediately follows a (not necessarily byte-aligned) frame
+    /// header: the symbol decoder state must start at the exact bit the
+    /// header ended on.
+    pub fn new_with_bit_offset(data: &'a [u8], bit_offset: usize) -> Self {
+        let mut dec = Self::new(data);
+        dec.bit_pos = bit_offset;
+        dec
+    }
+
     /// Raw bitstream bit read, MSB-first, byte-aligned start. Returns 0 for
     /// positions past the end of `data` (spec §8.2.2 padding behavior).
     fn read_bit(&mut self) -> u32 {

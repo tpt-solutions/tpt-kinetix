@@ -706,13 +706,29 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       added to `decoder.rs`. All 190 existing tests pass.
 
 #### Phase E.4 — Weighted prediction (wire the existing parse-only stub)
-- [ ] Thread `luma_weight`/`luma_offset`/`chroma_weight`/`chroma_offset` from
+- [x] Thread `luma_weight`/`luma_offset`/`chroma_weight`/`chroma_offset` from
       `parse_pred_weight_table` (`slice.rs:334`) into explicit weighted
       prediction (§8.4.2.3.2) for P and B slices, instead of discarding them
-- [ ] Implement implicit weighted prediction (§8.4.2.3.2, B-slices only,
+- [x] Implement implicit weighted prediction (§8.4.2.3.2, B-slices only,
       distance-based weight derivation)
-- [ ] Unit test: explicit weighted P-slice reconstruction matches hand-computed
+- [x] Unit test: explicit weighted P-slice reconstruction matches hand-computed
       weight/offset for a synthetic block
+
+  **Completed 2026-08-12.** `parse_pred_weight_table` now returns a
+  `PredWeightTable` (`slice.rs`) instead of just advancing the bit position;
+  `SliceHeader::pred_weight_table` carries it. `reconstruct.rs` gained a
+  `WeightedPred` enum (`Default`/`Explicit`/`Implicit`) threaded through
+  `reconstruct_inter_frame`/`reconstruct_b_frame` down to the per-4×4-block
+  `combine_weighted` helper, implementing the explicit uni/bi-pred formulas
+  and the POC-distance-based implicit-weight derivation (§8.4.2.3.2), both
+  per FFmpeg-cross-checked spec formulas. `decoder.rs` selects the mode from
+  `pps.weighted_pred_flag`/`weighted_bipred_idc`. Caught and fixed a real bug
+  along the way via the existing fuzz harness: the first cut of
+  `parse_pred_weight_table` preallocated `Vec::with_capacity` directly from
+  the attacker-controlled `num_ref_idx_lX_active_minus1` `ue(v)`, which
+  OOM'd `fuzz_structured_seeds` on a malformed seed (64GB alloc); fixed by
+  dropping the capacity hint and adding an explicit 32-entry bound (§7.4.3),
+  matching the pattern `parse_ref_pic_list_modification` already uses.
 
 #### Phase E.5 — Validate B-frame decode
 - [x] Generate an IBP-structured corpus clip with `ffmpeg`

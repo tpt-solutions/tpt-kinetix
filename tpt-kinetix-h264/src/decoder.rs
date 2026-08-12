@@ -756,6 +756,8 @@ impl H264Decoder {
                     ref_list.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
+                let entropy_coding_mode_flag =
+                    pps.as_ref().map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
                 let p_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     crate::slice_data::parse_p_slice_cabac(
@@ -895,7 +897,7 @@ impl H264Decoder {
                         return Ok(frame);
                     }
                     Err(e) => {
-                        let _ = e;
+                        eprintln!("[DEBUG] P-slice CABAC/CAVLC parse error: {e:?}");
                         // Fall through to the skip scaffold.
                     }
                 }
@@ -952,6 +954,8 @@ impl H264Decoder {
                     ref_l1.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
+                let entropy_coding_mode_flag =
+                    pps.as_ref().map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
                 let b_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     crate::slice_data::parse_b_slice_cabac(
