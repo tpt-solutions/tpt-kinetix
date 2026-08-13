@@ -26,9 +26,10 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
     let mut y = vec![128u8; width * height];
     let mut u = vec![128u8; uv_w * uv_h];
     let mut v = vec![128u8; uv_w * uv_h];
+    let mut meta = tpt_kinetix_av1::loop_filter::FrameMeta::new(width, height);
     decode_tile_group(
         data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-        true, false,
+        true, false, false, false, false, &mut meta,
     )
     .is_ok()
 }

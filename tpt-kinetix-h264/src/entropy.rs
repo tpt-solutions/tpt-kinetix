@@ -979,14 +979,15 @@ impl RefIdxCabacContext {
 ///     mvd++;
 /// }
 /// if( mvd >= 9 )
-///     mvd += decode_bypass_golomb(3);   // Golomb-Rice k=3 suffix
+///     mvd += decode_bypass_eg(3);       // Exp-Golomb order-3 suffix (§9.3.3.1.1.7)
 /// return get_cabac_bypass() ? -mvd : mvd;   // sign bit only read when mvd != 0
 /// ```
 ///
-/// Uses [`CabacDecoder::decode_bypass_golomb`] (fixed-k Golomb-Rice, k=3),
-/// which reads exactly k0=3 suffix bits after the unary prefix. This is
-/// distinct from [`CabacDecoder::decode_bypass_eg`] (level coding with
-/// variable suffix length), which is used for coeff_abs_level_minus1.
+/// Uses [`CabacDecoder::decode_bypass_eg`] (Exp-Golomb of order k=3) for the
+/// bypass-coded suffix once the context-coded TU prefix saturates at 9, per
+/// spec §9.3.2.3 / §9.3.3.1.1.7. This is distinct from the Golomb-Rice helper
+/// [`CabacDecoder::decode_bypass_golomb`], which must NOT be used here: it reads
+/// a different number of bits and would desync the decoder.
 pub struct MvdCabacContext {
     /// Local layout: `[0..3)` = bin 0's neighbour-sum-selected context
     /// (ctxIdx `base`..=`base+2`), `[3..7)` = the truncated-unary
@@ -1034,7 +1035,27 @@ impl MvdCabacContext {
             mvd += 1;
         }
         if mvd >= 9 {
-            mvd += dec.decode_bypass_golomb(3);
+            // §9.3.3.1.1.7 mvd suffix. This is a variable-k Rice code (the
+            // reference FFmpeg `decode_cabac_mb_mvd`): a unary bypass prefix
+            // `q` where each `1` bin adds `1 << (3 + q_run)` with the shift
+            // growing (`k` starts at 3 and increments per `1`), followed by
+            // `(3 + q)` bypass suffix bits. It is NOT fixed-k Golomb-Rice and
+            // NOT fixed-k Exp-Golomb — those consume a different bit count and
+            // desync every following syntax element.
+            let mut k = 3u32;
+            while dec.decode_bypass() == 1 {
+                mvd += 1u32 << k;
+                k += 1;
+                if k > 24 {
+                    break;
+                }
+            }
+            while k > 0 {
+                k -= 1;
+                if dec.decode_bypass() == 1 {
+                    mvd += 1u32 << k;
+                }
+            }
         }
         if dec.decode_bypass() == 1 {
             -(mvd as i32)

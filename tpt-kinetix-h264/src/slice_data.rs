@@ -863,10 +863,14 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     }
     mb.qp = qp;
 
-    // 8x8 transform applies to Intra_4×4 (mb_type 0) macroblocks when the PPS
-    // enables it. The decoder gates out `transform_8x8_mode_flag` slices, so in
-    // reachable code this is always false; kept correct if that gate is lifted.
-    let is_8x8 = transform_8x8_mode && mb_type == 0;
+    // `is_8x8` already reflects the per-macroblock `transform_size_8x8_flag`
+    // bit read above (line ~745). It is intentionally NOT re-derived from
+    // `transform_8x8_mode && mb_type == 0` here: that would force every
+    // Intra_4×4 macroblock into the 8×8 residual layout whenever the PPS
+    // enables the High-profile 8×8 transform, even for MBs that signalled
+    // `transform_size_8x8_flag == 0` — those would then be parsed into
+    // `luma_coeffs_8x8` but reconstructed via the 4×4 path (which reads the
+    // all-zero `luma_coeffs`), producing silent wrong pixels.
 
     // ---- Residual parsing ----
     parse_intra_residuals(
@@ -2741,7 +2745,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
                 let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
                 // Coeffs are in 4×4 zigzag order; place them at the matching slice
-                // of the 8×8 zigzag scan.
+                // of the 8×8 zigzag scan (FFmpeg `scan8x8 + 16*sub`).
                 block64[sub * 16..sub * 16 + 16].copy_from_slice(&coeffs[..16]);
                 this_nz.luma[raster] = tc;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, &coeffs);
@@ -2749,6 +2753,20 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                     mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, nc, tc, t1, 0,
                 );
             }
+            // FFmpeg (`ff_h264_decode_mb_cavlc`, 8×8 branch): the 8×8 block's
+            // TotalCoeff for nC context is the *sum* of its four 4×4 sub-blocks.
+            // It accumulates them into the top-left 4×4 position of the 8×8
+            // block (`nnz[0] += nnz[1] + nnz[8] + nnz[9]`), leaving the other
+            // three sub-blocks carrying their own individual totals. Replicate
+            // that exactly so neighbouring 8×8 / 4×4 blocks derive nC identically.
+            let p0 = raster_of_8x8_sub(i8x8, 0);
+            let p1 = raster_of_8x8_sub(i8x8, 1);
+            let p2 = raster_of_8x8_sub(i8x8, 2);
+            let p3 = raster_of_8x8_sub(i8x8, 3);
+            this_nz.luma[p0] = this_nz.luma[p0]
+                .saturating_add(this_nz.luma[p1])
+                .saturating_add(this_nz.luma[p2])
+                .saturating_add(this_nz.luma[p3]);
             mb.luma_coeffs_8x8[i8x8] = block64;
         }
     } else {

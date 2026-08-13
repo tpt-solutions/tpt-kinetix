@@ -13,6 +13,8 @@
 //!   [`entropy::SymbolDecoder`].
 //! - [`reconstruct`] — AV1 frame/tile reconstruction (inverse transforms, intra prediction,
 //!   tile-group decode) for intra-coded keyframes.
+//! - [`loop_filter`] — AV1 in-loop post-filters: deblocking loop filter (§7.14), CDEF (§7.15),
+//!   and loop restoration (§7.17, passthrough when `enable_restoration` is false).
 //! - [`encoder`] — [`Av1Encoder`] and [`Av1EncoderConfig`]: thin safe wrapper around the
 //!   `rav1e` encoder for producing AV1 elementary streams.
 //!
@@ -25,12 +27,14 @@
 //! # Status
 //!
 //! The **encoder** ([`Av1Encoder`], backed by `rav1e`) is functional. The
-//! **decoder** ([`Av1Decoder`]) now performs tile-group reconstruction for
-//! intra-coded keyframes via [`crate::reconstruct`], reading coefficients
-//! through the real AV1 symbol decoder, but the surrounding partition and
-//! mode syntax is still a fixed placeholder grid and nothing is yet
-//! validated against `dav1d` reference output. Inter prediction and loop
-//! filtering are not implemented. See the crate README for details.
+//! **decoder** ([`Av1Decoder`]) performs tile-group reconstruction for
+//! intra-coded keyframes via [`crate::reconstruct`] (real superblock partition
+//! tree, per-block intra mode / `tx_size` syntax, coefficients read through
+//! the real AV1 symbol decoder) and runs the in-loop post-filters
+//! ([`crate::loop_filter`]: deblocking loop filter + CDEF, with loop
+//! restoration as a passthrough) after reconstruction. Inter prediction is not
+//! yet implemented and the decoder is not yet validated pixel-exact against
+//! `dav1d` reference output. See the crate README for details.
 
 pub mod cdf_tables_gen;
 pub mod coeff;
@@ -40,6 +44,7 @@ pub mod encoder;
 pub mod entropy;
 pub mod entropy_cdf;
 pub mod frame;
+pub mod loop_filter;
 pub mod obu;
 pub mod reconstruct;
 

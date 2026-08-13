@@ -23,8 +23,11 @@ use crate::{
     coeff_tables as av1,
     entropy::SymbolDecoder,
     frame::FrameHeader,
+    loop_filter::{apply_post_filters, FrameMeta},
     obu::SequenceHeaderObu,
 };
+
+use rayon::prelude::*;
 
 use tpt_kinetix_core::{
     error::KinetixError, frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp,
@@ -940,9 +943,25 @@ struct TileDecodeState<'a> {
     uv_max_x4: usize,
     uv_max_y4: usize,
     monochrome: bool,
+    /// Per-8×8-block reconstruction metadata for the in-loop filters
+    /// (AV1 Phase D). Recorded during block decode and consumed by
+    /// [`crate::loop_filter`].
+    meta: &'a mut FrameMeta,
+    /// Top-left sample of this tile within the frame (in luma samples); the
+    /// tile writes its reconstruction into a tile-local buffer, so every pixel
+    /// write is offset by this origin to become a tile-local coordinate.
+    tile_px_x0: usize,
+    tile_px_y0: usize,
+    /// Tile-local luma buffer dimensions (stride = `tile_w`).
+    tile_w: usize,
+    tile_h: usize,
+    /// Tile-local chroma buffer dimensions (stride = `tile_cw`).
+    tile_cw: usize,
+    tile_ch: usize,
 }
 
 impl<'a> TileDecodeState<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         data: &'a [u8],
         bit_offset: usize,
@@ -961,14 +980,21 @@ impl<'a> TileDecodeState<'a> {
         reduced_tx_set: bool,
         subsampling_x: bool,
         subsampling_y: bool,
+        tile_px_x0: usize,
+        tile_px_y0: usize,
+        tile_w: usize,
+        tile_h: usize,
         monochrome: bool,
         segmentation_enabled: bool,
         seg_feature_skip: bool,
         seg_feature_alt_q: bool,
+        meta: &'a mut FrameMeta,
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
         let mi_rows = height.div_ceil(MI_SIZE);
         let lossless = qindex == 0;
+        let tile_cw = if subsampling_x { tile_w / 2 } else { tile_w };
+        let tile_ch = if subsampling_y { tile_h / 2 } else { tile_h };
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),
@@ -1007,6 +1033,13 @@ impl<'a> TileDecodeState<'a> {
             uv_max_x4: uv_w.div_ceil(4),
             uv_max_y4: uv_h.div_ceil(4),
             monochrome,
+            meta,
+            tile_px_x0,
+            tile_px_y0,
+            tile_w,
+            tile_h,
+            tile_cw,
+            tile_ch,
             segmentation_enabled,
             seg_feature_skip,
             seg_feature_alt_q,
@@ -1192,11 +1225,11 @@ impl<'a> TileDecodeState<'a> {
         // for now rather than failing the whole frame. Wiring the larger tx
         // sizes is a follow-up.
         if luma_tx <= TX_16X16 {
-            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                    let px_x = mi_col * MI_SIZE + tx;
-                    let px_y = mi_row * MI_SIZE + ty;
-                    let blk = TxBlockCtx {
+                for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+                    for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                        let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
+                        let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                        let blk = TxBlockCtx {
                         plane: 0,
                         tx_size: luma_tx,
                         x4: px_x / 4,
@@ -1218,8 +1251,8 @@ impl<'a> TileDecodeState<'a> {
                         &blk,
                         y_plane,
                         self.y_stride,
-                        self.width,
-                        self.height,
+                        self.tile_w,
+                        self.tile_h,
                         px_x,
                         px_y,
                         luma_tx_w,
@@ -1229,6 +1262,24 @@ impl<'a> TileDecodeState<'a> {
                         skip,
                     )?;
                 }
+            }
+        }
+
+        // Record per-8×8-luma-block metadata for the in-loop filters (AV1 Phase
+        // D). Coordinates are tile-local, matching the tile-local plane buffers
+        // this tile reconstructs into; `reconstruct_av1_frame` merges the
+        // per-tile metas into a full-frame `FrameMeta` and runs
+        // `apply_post_filters` over the assembled frame.
+        let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
+        let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
+        let bx0 = blk_px_x / 8;
+        let by0 = blk_px_y / 8;
+        let bx1 = (blk_px_x + bw * MI_SIZE + 7) / 8;
+        let by1 = (blk_px_y + bh * MI_SIZE + 7) / 8;
+        let luma_tx_samples = luma_tx_w as u8;
+        for by in by0..by1.min(self.meta.h8) {
+            for bx in bx0..bx1.min(self.meta.w8) {
+                self.meta.record_luma(bx, by, luma_tx_samples, skip);
             }
         }
 
@@ -1245,13 +1296,13 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 TX_4X4
             };
-            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                    let cpx_x = (mi_col * MI_SIZE + tx) >> sub_x;
-                    let cpx_y = (mi_row * MI_SIZE + ty) >> sub_y;
-                    if cpx_x >= self.uv_w || cpx_y >= self.uv_h {
-                        continue;
-                    }
+                for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+                    for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                        let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> sub_x;
+                        let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> sub_y;
+                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                            continue;
+                        }
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -1278,8 +1329,8 @@ impl<'a> TileDecodeState<'a> {
                         &blk_u,
                         u_plane,
                         self.uv_stride,
-                        self.uv_w,
-                        self.uv_h,
+                        self.tile_cw,
+                        self.tile_ch,
                         cpx_x,
                         cpx_y,
                         cw,
@@ -1295,8 +1346,8 @@ impl<'a> TileDecodeState<'a> {
                         &blk_v,
                         v_plane,
                         self.uv_stride,
-                        self.uv_w,
-                        self.uv_h,
+                        self.tile_cw,
+                        self.tile_ch,
                         cpx_x,
                         cpx_y,
                         cw,
@@ -1305,6 +1356,13 @@ impl<'a> TileDecodeState<'a> {
                         uv_mode,
                         skip,
                     )?;
+                }
+            }
+            // Record chroma tx/skip metadata for the same 8×8-luma grid region.
+            let c_tx_samples = TX_WIDTH[c_tx] as u8;
+            for by in by0..by1.min(self.meta.h8) {
+                for bx in bx0..bx1.min(self.meta.w8) {
+                    self.meta.record_chroma(bx, by, c_tx_samples, skip);
                 }
             }
         }
@@ -1427,12 +1485,33 @@ pub fn decode_tile_group(
     segmentation_enabled: bool,
     seg_feature_skip: bool,
     seg_feature_alt_q: bool,
+    meta: &mut FrameMeta,
 ) -> Result<(), KinetixError> {
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
+    let sb_mi = sb_size / MI_SIZE;
     let mi_cols = width.div_ceil(MI_SIZE);
     let mi_rows = height.div_ceil(MI_SIZE);
     let sb_bsize = if use_128 { BLOCK_128X128 } else { BLOCK_64X64 };
+
+    let tile_cols = _tile_cols.max(1);
+    let tile_rows = _tile_rows.max(1);
+    let sb_cols_mi = mi_cols.div_ceil(sb_mi);
+    let sb_rows_mi = mi_rows.div_ceil(sb_mi);
+    let tile_w_sb = sb_cols_mi.div_ceil(tile_cols);
+    let tile_h_sb = sb_rows_mi.div_ceil(tile_rows);
+    let tc = tile_x.min(tile_cols - 1);
+    let tr = tile_y.min(tile_rows - 1);
+    let sb_col_start = tc * tile_w_sb;
+    let sb_col_end = ((tc + 1) * tile_w_sb).min(sb_cols_mi);
+    let sb_row_start = tr * tile_h_sb;
+    let sb_row_end = ((tr + 1) * tile_h_sb).min(sb_rows_mi);
+    let x0 = (sb_col_start * sb_size).min(width);
+    let y0 = (sb_row_start * sb_size).min(height);
+    let x1 = (sb_col_end * sb_size).min(width);
+    let y1 = (sb_row_end * sb_size).min(height);
+    let tile_w = x1 - x0;
+    let tile_h = y1 - y0;
 
     let uv_w = width / 2;
     let uv_h = height / 2;
@@ -1454,15 +1533,20 @@ pub fn decode_tile_group(
         reduced_tx_set,
         true, // subsampling_x (4:2:0)
         true, // subsampling_y (4:2:0)
+        x0,
+        y0,
+        tile_w,
+        tile_h,
         false,
         segmentation_enabled,
         seg_feature_skip,
         seg_feature_alt_q,
+        meta,
     );
 
     let mut out = Ok(());
-    for mi_row in (0..mi_rows).step_by(sb_size / MI_SIZE) {
-        for mi_col in (0..mi_cols).step_by(sb_size / MI_SIZE) {
+    for mi_row in (sb_row_start * sb_mi..sb_row_end * sb_mi).step_by(sb_mi) {
+        for mi_col in (sb_col_start * sb_mi..sb_col_end * sb_mi).step_by(sb_mi) {
             if let Err(e) = state.decode_superblock(mi_row, mi_col, sb_bsize) {
                 out = Err(e);
                 break;
@@ -1545,34 +1629,131 @@ pub fn reconstruct_av1_frame(
     // Compute tile layout
     let tile_cols = frame_header.tile_cols.max(1) as usize;
     let tile_rows = frame_header.tile_rows.max(1) as usize;
+    let sb_size = if frame_header.use_128x128_superblock {
+        128
+    } else {
+        64
+    };
+    let sb_mi = sb_size / MI_SIZE;
+    let sb_cols_mi = (width.div_ceil(MI_SIZE)).div_ceil(sb_mi);
+    let sb_rows_mi = (height.div_ceil(MI_SIZE)).div_ceil(sb_mi);
+    let tile_w_sb = sb_cols_mi.div_ceil(tile_cols);
+    let tile_h_sb = sb_rows_mi.div_ceil(tile_rows);
 
-    // Decode each tile group
-    for (tg_idx, payload) in tile_payloads.iter().enumerate() {
-        let tg_col = tg_idx % tile_cols;
-        let tg_row = tg_idx / tile_cols;
+    /// One tile's reconstruction, produced independently on a worker thread.
+    struct DecodedTile {
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+    }
 
-        decode_tile_group(
-            payload,
-            width,
-            height,
-            frame_header.bit_depth,
-            frame_header.base_q_idx,
-            frame_header.use_128x128_superblock,
-            tg_col,
-            tg_row,
-            tile_cols,
-            tile_rows,
-            &mut y_plane,
-            &mut u_plane,
-            &mut v_plane,
-            width,
-            uv_w,
-            frame_header.tx_mode_select,
-            frame_header.reduced_tx_set,
-            frame_header.segmentation_enabled,
-            false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
-            false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
-        )?;
+    // Per-tile geometry, shared across the parallel worker closure.
+    let geometry: Vec<(usize, usize, usize, usize)> = (0..tile_payloads.len())
+        .map(|i| {
+            let tc = (i % tile_cols).min(tile_cols - 1);
+            let tr = (i / tile_cols).min(tile_rows - 1);
+            let sb_col_start = tc * tile_w_sb;
+            let sb_col_end = ((tc + 1) * tile_w_sb).min(sb_cols_mi);
+            let sb_row_start = tr * tile_h_sb;
+            let sb_row_end = ((tr + 1) * tile_h_sb).min(sb_rows_mi);
+            let x0 = (sb_col_start * sb_size).min(width);
+            let y0 = (sb_row_start * sb_size).min(height);
+            let x1 = (sb_col_end * sb_size).min(width);
+            let y1 = (sb_row_end * sb_size).min(height);
+            (x0, y0, x1, y1)
+        })
+        .collect();
+
+    // Phase F: decode each tile group on its own worker thread. AV1 tiles are
+    // entropy-independent and write into disjoint pixel rectangles, so the only
+    // shared state is the read-only bitstream payload per tile.
+    let decoded: Vec<Result<DecodedTile, KinetixError>> = tile_payloads
+        .par_iter()
+        .enumerate()
+        .map(|(i, payload)| {
+            let (x0, y0, x1, y1) = geometry[i];
+            let tw = x1 - x0;
+            let th = y1 - y0;
+            let mut ty = vec![128u8; tw * th];
+            let mut tu = vec![128u8; (tw / 2) * (th / 2)];
+            let mut tv = vec![128u8; (tw / 2) * (th / 2)];
+            let mut meta = FrameMeta::new(tw, th);
+
+            decode_tile_group(
+                payload,
+                width,
+                height,
+                frame_header.bit_depth,
+                frame_header.base_q_idx,
+                frame_header.use_128x128_superblock,
+                i % tile_cols,
+                i / tile_cols,
+                tile_cols,
+                tile_rows,
+                &mut ty,
+                &mut tu,
+                &mut tv,
+                tw,
+                tw / 2,
+                frame_header.tx_mode_select,
+                frame_header.reduced_tx_set,
+                frame_header.segmentation_enabled,
+                false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
+                false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
+                &mut meta,
+            )?;
+
+            // Phase D: run the in-loop post-filters (deblock → CDEF →
+            // restoration) over the tile-local buffer. Applied per-tile here;
+            // the approximation of not filtering across tile boundaries is
+            // acceptable while the decoder is not yet pixel-exact.
+            let _ = apply_post_filters(
+                &mut ty,
+                &mut tu,
+                &mut tv,
+                tw,
+                th,
+                true,
+                true,
+                &meta,
+                frame_header,
+                _seq,
+            );
+
+            Ok(DecodedTile {
+                x0,
+                y0,
+                x1,
+                y1,
+                y: ty,
+                u: tu,
+                v: tv,
+            })
+        })
+        .collect();
+
+    // Blit each finished tile back into the master planes (sequential; disjoint
+    // rectangles, so order does not matter).
+    for tile in decoded {
+        let tile = tile?;
+        let tw = tile.x1 - tile.x0;
+        for (dy, sy) in (tile.y0..tile.y1).enumerate() {
+            let dst = &mut y_plane[sy * width + tile.x0..sy * width + tile.x1];
+            let src = &tile.y[dy * tw..(dy + 1) * tw];
+            dst.copy_from_slice(src);
+        }
+        for (src_plane, dst_plane) in [(&tile.u, &mut u_plane), (&tile.v, &mut v_plane)] {
+            for (dy, sy) in (tile.y0 / 2..(tile.y1 + 1) / 2).enumerate() {
+                let drow = sy * uv_w + tile.x0 / 2;
+                let srow = dy * (tw / 2);
+                dst_plane[drow..drow + tw / 2]
+                    .copy_from_slice(&src_plane[srow..srow + tw / 2]);
+            }
+        }
     }
 
     let mut data = y_plane;
@@ -1612,9 +1793,10 @@ mod tests {
         let mut y = vec![128u8; width * height];
         let mut u = vec![128u8; uv_w * uv_h];
         let mut v = vec![128u8; uv_w * uv_h];
+        let mut meta = FrameMeta::new(width, height);
         decode_tile_group(
             data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-            true, false, false, false, false,
+            true, false, false, false, false, &mut meta,
         )?;
         Ok((y, u, v))
     }

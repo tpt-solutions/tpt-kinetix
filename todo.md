@@ -9,12 +9,25 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > Phase F.1 + F.2 first bullet (8×8 flag parse / 8×8 inverse transform) landed;
 > AV1 Phase C (superblock partition tree + per-block intra mode/`tx_size`) is
 > implemented; `tpt-kinetix-realtime` gained the `deadline_ms`/`max_decode_ms`
-> rate-control contract. Still open (unchanged): H.264 F.3/F.4 (scaling-list
-> apply + 8×8 High-profile validation), G (interlaced), AV1 D/E/F/G, Phase 18
-> native AAC, realtime harness/foveation, volumetric octree. NOTE:
-> `tests/conformance_matrix.rs` still labels CABAC P/B as "known non-conformant"
-> — that classification is stale (contradicted by the live `cabac_conformance.rs`
-> bit-exact P/B tests) and should be corrected in the test file.
+> rate-control contract. **Working-tree additions (uncommitted):** H.264 F.3
+> scaling-list application is now spec-correct — `decoder.rs` merges the PPS
+> list over the SPS list (§8.5.9) and passes the active `ScalingLists` into
+> `dequant_idct_4x4`/`dequant_idct_8x8`, which apply it; H.264 G.3 MBAFF parsing
+> landed (`mb_adaptive_frame_field_flag` in SPS with a round-trip test,
+> `mb_field_decoding_flag` decoded per macroblock pair in CAVLC + CABAC and
+> stored on `Macroblock`, `MbFieldDecodingFlagContext` added); G.2 field
+> deinterleave/merge helpers drafted in `reconstruct.rs`; AV1 Phase D loop
+> filter / CDEF / restoration is now **wired** — `loop_filter.rs` is declared
+> and invoked per-tile from `reconstruct.rs::reconstruct_av1_frame` (deblock →
+> CDEF → restoration passthrough), with per-8×8-block tx/skip metadata
+> collected into a `FrameMeta` during `decode_block`. Still open: H.264 F.4
+> (wire 8×8 reconstruction +
+> remove the High-profile gate, High-profile validation), G.2/G.4/G.5
+> (interlaced reconstruction), AV1 E/F/G, Phase 18 native AAC, realtime
+> harness/foveation, volumetric octree. NOTE: `tests/conformance_matrix.rs`
+> still labels CABAC P/B as "known non-conformant" — that classification is
+> stale (contradicted by the live `cabac_conformance.rs` bit-exact P/B tests)
+> and should be corrected in the test file.
 
 ---
 
@@ -806,9 +819,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       **Not wired into reconstruction either** (see Phase F.4 gate below).
 
 #### Phase F.3 — High-profile scaling matrices
-- [ ] Apply the already-parsed SPS/PPS `scaling_list` values (Table 7-... /
-      §8.5.9) to 4×4 dequant in `transform.rs` (currently parsed but unused)
-- [ ] Apply the same scaling lists to the new 8×8 dequant path from Phase F.2
+
+- [x] Apply the already-parsed SPS/PPS `scaling_list` values (Table 7-... /
+      §8.5.9) to 4×4 dequant in `transform.rs` — `dequant_idct_4x4` derives
+      `LevelScale4x4` from the active `ScalingLists` (§8.5.9). `decoder.rs` now
+      merges the PPS list over the SPS list (§8.5.9 fallback) and passes the
+      merged set into reconstruction; `pps.rs` defaults the PPS list to the SPS
+      list so the active set is always correct.
+- [x] Apply the same scaling lists to the 8×8 dequant path from Phase F.2 —
+      `dequant_idct_8x8` reads `scaling.scaling_8x8(scale_list)` per coefficient
+      (§8.5.9); same merged active set is threaded through `decoder.rs`.
 
 #### Phase F.4 — Validate High-profile 8×8-transform decode
 - [ ] **Wire 8×8 reconstruction into `reconstruct.rs`** (`MbType::Intra4x4` +
@@ -837,11 +857,26 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 #### Phase G.2 — PAFF: field-picture reconstruction
 - [ ] Field-picture reference list construction (§8.2.4.2.5)
 - [ ] Field-based (odd/even scanline) macroblock reconstruction and output
-      interleaving back into a full frame
+       interleaving back into a full frame
+
+  **Drafted (working tree):** `reconstruct.rs` gained `ReconstructedFrame::
+  deinterleave_luma`/`deinterleave_chroma` and the free `merge_field_into`
+  helper that place a field's samples on every other scanline (parity from
+  `bottom_field_flag`) and merge two complementary fields into one interlaced
+  frame. These are the field→frame plumbing; the actual field reconstruction
+  and reference-list construction above are still unimplemented.
 
 #### Phase G.3 — MBAFF: parsing
-- [ ] Parse `mb_field_decoding_flag` and macroblock-pair decode ordering
-      (§7.3.4, §7.4.4) when `mb_adaptive_frame_field_flag` is set
+- [x] Parse `mb_field_decoding_flag` and macroblock-pair decode ordering
+       (§7.3.4, §7.4.4) when `mb_adaptive_frame_field_flag` is set — SPS gained
+       `mb_adaptive_frame_field_flag` (parsed, round-trip tested in
+       `sps.rs::tests::sps_mb_adaptive_frame_field_flag_round_trips`); in MBAFF
+       frames (`mb_adaptive_frame_field_flag && !field_pic_flag`)
+       `slice_data.rs` reads `mb_field_decoding_flag` once per macroblock pair
+       (CAVLC `parse_i_slice` and CABAC `parse_i_slice_cabac`, via the new
+       `MbFieldDecodingFlagContext` in `entropy.rs`) and stores it on
+       `Macroblock::mb_field_flag`. Reconstruction-side macroblock-pair ordering
+       (neighbour derivation / output interleave) is still Phase G.4.
 
 #### Phase G.4 — MBAFF: neighbour derivation + reconstruction
 - [ ] Adjust neighbour derivation (nC, MPM, motion prediction) for mixed
@@ -898,9 +933,10 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > math (`inverse_transform`/`predict_intra_block`) is unchanged, and the
 > lossless WHT path is now wired. Intra keyframe coefficients now decode through
 > the real arithmetic decoder (cross-checked against an independent Python
-> `coeffs()` oracle); output is still not pixel-exact because the loop filter /
-> CDEF / loop restoration (Phase D) and inter prediction (Phase E) are not yet
-> implemented. **Phase C (superblock partition tree + per-block intra mode /
+> `coeffs()` oracle); output is still not pixel-exact because inter prediction
+> (Phase E) is not yet implemented — the in-loop post-filters (deblock + CDEF +
+> restoration passthrough, Phase D) are now wired and run after tile-group
+> reconstruction. **Phase C (superblock partition tree + per-block intra mode /
 > `tx_size` syntax) is now done** — the "fixed placeholder grid" gap is closed.
 >
 > **Bitstream-ingest status (2026-08-12)**: the OBU splitter
@@ -985,11 +1021,24 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [x] Parse per-block intra mode / `tx_size` selection via the symbol decoder
       rather than assuming a fixed DC-predicted 8×8 transform block
 
-#### AV1 Phase D — loop filter / CDEF / restoration
-- [ ] Implement the deblocking loop filter (§7.14)
-- [ ] Implement CDEF (§7.15)
-- [ ] Implement loop restoration (§7.17) — can be a no-op passthrough for v1
-      if `enable_restoration` is false in the sequence header
+#### AV1 Phase D — loop filter / CDEF / restoration — **WIRED (2026-08-14)**
+- [x] Implement the deblocking loop filter (§7.14)
+- [x] Implement CDEF (§7.15)
+- [x] Implement loop restoration (§7.17) — no-op passthrough (spec-permitted
+       when `enable_restoration` is false)
+
+  **Done (2026-08-14):** `tpt-kinetix-av1/src/loop_filter.rs` (deblocking
+  loop filter §7.14 + CDEF §7.15 from the normative algorithms, `apply_loop_restoration`
+  no-op passthrough) is now declared (`pub mod loop_filter` in `lib.rs`) and
+  invoked. `reconstruct.rs::reconstruct_av1_frame` runs `apply_post_filters`
+  (deblock → CDEF → restoration) over each tile's reconstructed buffer after
+  tile-group decode; per-8×8-block tx-size / skip metadata is collected during
+  `decode_block` into a `FrameMeta` (threaded through `TileDecodeState` →
+  `decode_tile_group`) and consumed by the filters. The CDEF strength packing
+  was corrected (`pri = packed & 0x0F`, `sec = packed & 0x30`) and the
+  variance-dependent strength clamp fixed. `Av1Decoder::capabilities()` reports
+  `supports_deblocking = true`. Pixel-exact decode still awaits inter
+  prediction (Phase E) + conformance (Phase G); `pixel_exact` stays `false`.
 
 #### AV1 Phase E — inter prediction
 - [ ] Reference frame buffer management (§7.20, `RefFrameStore` equivalent)

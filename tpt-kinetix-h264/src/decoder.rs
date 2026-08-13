@@ -31,6 +31,11 @@ pub struct H264Decoder {
     /// POC derivation state carried between pictures (§8.2.1).
     poc_state: PocState,
     frame_count: u64,
+    /// Pending complementary field of an interlaced (PAFF / MBAFF) frame that
+    /// has not yet been paired with its other field for output interleaving.
+    /// A field picture decodes to a half-height buffer; the full frame is only
+    /// emitted once both its top and bottom fields have been reconstructed.
+    field_accum: Option<FieldAccum>,
     /// When `true` (the default), macroblock rows are reconstructed with `rayon`
     /// parallel iterators. Set to `false` to force serial reconstruction, which
     /// is useful for benchmarking the parallel speedup.
@@ -40,6 +45,43 @@ pub struct H264Decoder {
     /// Off by default so existing pipelines keep working; opt in when callers
     /// need correctness guarantees.
     strict: bool,
+}
+
+/// Accumulated fields of one interlaced frame awaiting output interleaving.
+///
+/// In PAFF / MBAFF the two fields of a coded frame are decoded as separate
+/// access units. `pending` holds the first field to arrive; `paired` becomes
+/// `Some` once both the top and bottom field have been reconstructed, at which
+/// point they are interleaved into the full output frame.
+#[derive(Debug, Default)]
+struct FieldAccum {
+    /// Pairing key — the field's `frame_num` (PAFF) or frame `PicOrderCnt`
+    /// rounded to the frame (MBAFF). Two fields sharing a key belong to the
+    /// same display frame.
+    key: u32,
+    /// The reconstructed top field (half-height YUV420p plane set).
+    top: Option<VideoFrame>,
+    /// The reconstructed bottom field (half-height YUV420p plane set).
+    bottom: Option<VideoFrame>,
+    /// Whether the most recently stored field was the bottom field (used to
+    /// detect a key change when the second field of a new frame appears before
+    /// the first was paired).
+    last_bottom: bool,
+}
+
+/// Result of attempting to decode an interlaced (PAFF / MBAFF) slice.
+enum InterlacedOutcome {
+    /// A full interlaced frame is ready (both of its fields were reconstructed
+    /// and interleaved into a progressive frame buffer).
+    Frame(VideoFrame),
+    /// A field was reconstructed and buffered; the paired field has not arrived
+    /// yet, so no frame is emitted. The slice is fully handled (do not fall
+    /// through to the scaffold / strict path).
+    Handled,
+    /// This interlaced flavour is not yet supported; behave like any other
+    /// unsupported slice (the caller falls through to the strict / scaffold
+    /// path).
+    Fallback,
 }
 
 impl H264Decoder {
@@ -52,6 +94,7 @@ impl H264Decoder {
             frame_count: 0,
             parallel: true,
             strict: false,
+            field_accum: None,
         }
     }
 
@@ -249,6 +292,31 @@ impl H264Decoder {
                     let mb_rows = height.div_ceil(16);
                     if mb_cols * mb_rows > MAX_MB_COUNT {
                         continue;
+                    }
+
+                    // Interlaced (PAFF / MBAFF) streams are decoded by a dedicated
+                    // path. `Frame` means a full interlaced frame is ready (both
+                    // its fields were reconstructed); `Handled` means a field was
+                    // reconstructed and buffered but its pair has not arrived yet
+                    // (no frame emitted — the slice is fully handled, so the
+                    // caller must not fall through to the scaffold / strict
+                    // path); `Fallback` means this interlaced flavour is not yet
+                    // supported and the caller should treat it like any other
+                    // unsupported slice.
+                    if !sps.frame_mbs_only_flag {
+                        match self.decode_interlaced(
+                            nal, &sps, pps.as_ref(), width, height, packet, tracer,
+                        ) {
+                            Ok(InterlacedOutcome::Frame(frame)) => {
+                                output_frame = Some(frame);
+                                continue;
+                            }
+                            Ok(InterlacedOutcome::Handled) => {
+                                continue;
+                            }
+                            Ok(InterlacedOutcome::Fallback) => {}
+                            Err(_) => {}
+                        }
                     }
 
                     // Attempt the real CAVLC I-slice decode path first.
@@ -1637,6 +1705,334 @@ impl Default for H264Decoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl H264Decoder {
+/// Reconstruct an interlaced (PAFF / MBAFF) slice.
+///
+/// Currently handles **PAFF field pictures** (`field_pic_flag == true`):
+/// each field is decoded into a half-height YUV420p buffer, stored in the DPB
+/// as a field, and paired with its complementary field for output interleaving
+/// once both have been reconstructed (see `decode_interlaced` / `accumulate_field`).
+///
+/// PAFF frame pictures and MBAFF (which require the macroblock-pair decode
+/// ordering and neighbour derivation of §6.4.10.1) return [`InterlacedOutcome::Fallback`]
+/// so the caller treats them as unsupported and applies the strict / scaffold
+/// path.
+#[allow(clippy::too_many_arguments)]
+fn decode_interlaced<T: DecodeTracer>(
+    &mut self,
+    nal: &crate::nal::NalUnit,
+    sps: &SeqParameterSet,
+    pps: Option<&PicParameterSet>,
+    width: u32,
+    height: u32,
+    packet: &Packet,
+    tracer: &mut T,
+) -> Result<InterlacedOutcome, KinetixError> {
+    use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
+
+    let entropy_coding_mode_flag = pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
+    let mb_adaptive = sps.mb_adaptive_frame_field_flag;
+
+    let ctx = SliceHeaderContext {
+        log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
+        pic_order_cnt_type: sps.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
+        frame_mbs_only_flag: sps.frame_mbs_only_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .map(|p| p.bottom_field_pic_order_in_frame_present_flag)
+            .unwrap_or(false),
+        delta_pic_order_always_zero_flag: false,
+        num_ref_idx_l0_default_active_minus1: pps
+            .map(|p| p.num_ref_idx_l0_default_active_minus1)
+            .unwrap_or(0),
+        num_ref_idx_l1_default_active_minus1: pps
+            .map(|p| p.num_ref_idx_l1_default_active_minus1)
+            .unwrap_or(0),
+        weighted_pred_flag: pps.map(|p| p.weighted_pred_flag).unwrap_or(false),
+        weighted_bipred_idc: pps.map(|p| p.weighted_bipred_idc).unwrap_or(0),
+        entropy_coding_mode_flag,
+        deblocking_filter_control_present_flag: pps
+            .map(|p| p.deblocking_filter_control_present_flag)
+            .unwrap_or(false),
+        redundant_pic_cnt_present_flag: pps
+            .map(|p| p.redundant_pic_cnt_present_flag)
+            .unwrap_or(false),
+        num_slice_groups_minus1: pps.map(|p| p.num_slice_groups_minus1).unwrap_or(0),
+        chroma_array_type: if sps.separate_colour_plane_flag {
+            0
+        } else {
+            sps.chroma_format_idc
+        },
+    };
+
+    let header = match SliceHeader::parse_with_context(
+        &nal.rbsp,
+        nal.nal_unit_type,
+        nal.nal_ref_idc,
+        &ctx,
+    ) {
+        Ok(h) => h,
+        Err(_) => return Ok(InterlacedOutcome::Fallback),
+    };
+
+    // Only PAFF field pictures are handled in this phase.
+    if mb_adaptive || !header.field_pic_flag {
+        return Ok(InterlacedOutcome::Fallback);
+    }
+    if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+        // Inter (P/B) field pictures: handled once field reference lists and
+        // field MV scaling land (G.2). Fall back for now.
+        return Ok(InterlacedOutcome::Fallback);
+    }
+    if header.first_mb_in_slice != 0 {
+        return Ok(InterlacedOutcome::Fallback);
+    }
+
+    let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+    let slice_qp = pic_init_qp + header.slice_qp_delta;
+    let chroma_qp_index_offset = pps.map(|p| p.chroma_qp_index_offset).unwrap_or(0);
+
+    let mb_cols = width.div_ceil(16);
+    let mb_rows_field = height.div_ceil(32);
+    let field_height = height / 2;
+
+    let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+
+    let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+    reader.seek_to_bit(header.data_bit_offset);
+
+    let parsed = if entropy_coding_mode_flag {
+        reader.byte_align();
+        crate::slice_data::parse_i_slice_cabac(
+            reader.remaining_bytes(),
+            mb_cols,
+            mb_rows_field,
+            slice_qp,
+            mb_adaptive,
+            header.field_pic_flag,
+            tracer,
+        )
+    } else {
+        crate::slice_data::parse_i_slice(
+            &mut reader,
+            mb_cols,
+            mb_rows_field,
+            slice_qp,
+            chroma_qp_index_offset,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+            mb_adaptive,
+            header.field_pic_flag,
+            tracer,
+        )
+    };
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(_) => return Ok(InterlacedOutcome::Fallback),
+    };
+
+    let mut recon = crate::reconstruct::reconstruct_intra_frame(
+        &parsed.macroblocks,
+        mb_cols,
+        mb_rows_field,
+        width,
+        field_height,
+        chroma_qp_index_offset,
+        scaling,
+        &crate::reconstruct::WeightedPred::Default,
+        tracer,
+    );
+
+    // Apply the in-loop deblocking filter on the half-height field buffer
+    // (per-field deblocking — the filter never crosses the field boundary
+    // because the other field is not in this buffer).
+    let deblock_params = crate::deblock::DeblockParams {
+        disable_idc: header.disable_deblocking_filter_idc as u8,
+        alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+        beta_offset_div2: header.slice_beta_offset_div2,
+        chroma_qp_index_offset,
+    };
+    let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+        .macroblocks
+        .chunks(mb_cols as usize)
+        .enumerate()
+        .map(|(row_idx, row)| {
+            row.iter()
+                .enumerate()
+                .map(|(col_idx, mb)| {
+                    let idx = row_idx * mb_cols as usize + col_idx;
+                    let nz = parsed.nz[idx].luma;
+                    let cells = parsed
+                        .mv_store
+                        .cells_of(idx)
+                        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                    crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                })
+                .collect()
+        })
+        .collect();
+    for (row_idx, row_info) in mb_info.iter().enumerate() {
+        for (col_idx, cur) in row_info.iter().enumerate() {
+            let left = if col_idx > 0 {
+                Some(&row_info[col_idx - 1])
+            } else {
+                None
+            };
+            let top = if row_idx > 0 {
+                Some(&mb_info[row_idx - 1][col_idx])
+            } else {
+                None
+            };
+            crate::deblock::deblock_luma_mb(
+                &mut recon.luma,
+                recon.luma_stride,
+                col_idx,
+                row_idx,
+                cur,
+                left,
+                top,
+                deblock_params,
+            );
+            crate::deblock::deblock_chroma_mb(
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                col_idx,
+                row_idx,
+                cur,
+                left,
+                top,
+                deblock_params,
+            );
+        }
+    }
+
+    let mut data = recon.luma;
+    data.extend(recon.chroma_cb);
+    data.extend(recon.chroma_cr);
+
+    let field_frame = VideoFrame {
+        pts: packet.pts,
+        dts: packet.dts,
+        data,
+        width,
+        height: field_height,
+        pixel_format: PixelFormat::Yuv420p,
+        is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+    };
+
+    // Store the half-height field in the DPB so later inter slices can build
+    // their field reference lists from it (§8.2.4.2.5).
+    self.store_reference_picture(nal, sps, &header, &field_frame);
+
+    // Buffer the field and emit the interleaved frame once the pair is complete.
+    match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
+        Some(full) => Ok(InterlacedOutcome::Frame(full)),
+        None => Ok(InterlacedOutcome::Handled),
+    }
+}
+
+/// Buffer one reconstructed field and, when its complementary field has also
+/// been decoded, interleave the two half-height fields into a full (progressive)
+/// frame suitable for output.
+fn accumulate_field(
+    &mut self,
+    field: VideoFrame,
+    bottom: bool,
+    key: u32,
+) -> Option<VideoFrame> {
+    match self.field_accum.take() {
+        Some(mut accum) if accum.key == key => {
+            if bottom {
+                accum.bottom = Some(field);
+            } else {
+                accum.top = Some(field);
+            }
+            if let (Some(top), Some(bottom)) = (&accum.top, &accum.bottom) {
+                let full = Self::interleave_fields(top, bottom);
+                self.field_accum = None;
+                Some(full)
+            } else {
+                self.field_accum = Some(accum);
+                None
+            }
+        }
+        // Either empty, or the key changed (a new frame's first field arrived
+        // before the previous pair completed): start a fresh accumulator.
+        _ => {
+            let mut accum = FieldAccum {
+                key,
+                top: None,
+                bottom: None,
+                last_bottom: bottom,
+            };
+            if bottom {
+                accum.bottom = Some(field);
+            } else {
+                accum.top = Some(field);
+            }
+            self.field_accum = Some(accum);
+            None
+        }
+    }
+}
+
+/// Interleave two complementary half-height fields into a full (progressive)
+/// frame: the top field's rows occupy the even scanlines, the bottom field's
+/// rows the odd scanlines (§6.4.10.1 / §8.4.2.2.1).
+fn interleave_fields(top: &VideoFrame, bottom: &VideoFrame) -> VideoFrame {
+    let w = top.width as usize;
+    let field_h = top.height as usize; // half height
+    let full_h = field_h * 2;
+    let luma_len = w * field_h;
+    let chroma_w = w / 2;
+    let chroma_field_h = field_h / 2;
+    let chroma_len = chroma_w * chroma_field_h;
+
+    let mut data = vec![0u8; w * full_h + 2 * chroma_w * chroma_field_h * 2];
+
+    // Luma.
+    for y in 0..field_h {
+        let src = &top.data[y * w..(y + 1) * w];
+        data[(2 * y) * w..(2 * y + 1) * w].copy_from_slice(src);
+        let src = &bottom.data[y * w..(y + 1) * w];
+        data[((2 * y + 1) * w)..((2 * y + 2) * w)].copy_from_slice(src);
+    }
+    // Chroma Cb then Cr, each half-height plane interleaved the same way.
+    let mut dst_off = w * full_h;
+    for comp in 0..2 {
+        let (src_top, src_bottom) = if comp == 0 {
+            (
+                &top.data[luma_len..luma_len + chroma_len],
+                &bottom.data[luma_len..luma_len + chroma_len],
+            )
+        } else {
+            (
+                &top.data[luma_len + chroma_len..luma_len + 2 * chroma_len],
+                &bottom.data[luma_len + chroma_len..luma_len + 2 * chroma_len],
+            )
+        };
+        for y in 0..chroma_field_h {
+            let ro = dst_off + 2 * y * chroma_w;
+            data[ro..ro + chroma_w].copy_from_slice(&src_top[y * chroma_w..(y + 1) * chroma_w]);
+            let ro = dst_off + (2 * y + 1) * chroma_w;
+            data[ro..ro + chroma_w].copy_from_slice(&src_bottom[y * chroma_w..(y + 1) * chroma_w]);
+        }
+        dst_off += 2 * chroma_w * chroma_field_h;
+    }
+
+    VideoFrame {
+        pts: top.pts,
+        dts: top.dts,
+        data,
+        width: top.width,
+        height: full_h as u32,
+        pixel_format: PixelFormat::Yuv420p,
+        is_key_frame: top.is_key_frame,
+    }
+}
+
 }
 
 #[cfg(test)]

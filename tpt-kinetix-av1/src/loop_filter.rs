@@ -139,6 +139,26 @@ impl FrameMeta {
         self.u_skip[i] = self.u_skip[i] && skip;
         self.v_skip[i] = self.v_skip[i] && skip;
     }
+
+    /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
+    /// into this full-frame meta, offsetting by `(ox, oy)` 8×8-luma-block
+    /// positions. AV1 tiles cover disjoint block rectangles, so the `max` /
+    /// `&&` combine rules in `record_luma`/`record_chroma` are correct for
+    /// merging.
+    pub fn merge_tile(&mut self, src: &FrameMeta, ox: usize, oy: usize) {
+        for by in 0..src.h8 {
+            for bx in 0..src.w8 {
+                let dbx = ox + bx;
+                let dby = oy + by;
+                if dbx >= self.w8 || dby >= self.h8 {
+                    continue;
+                }
+                let i = by * src.w8 + bx;
+                self.record_luma(dbx, dby, src.luma_tx[i], src.luma_skip[i]);
+                self.record_chroma(dbx, dby, src.u_tx[i], src.u_skip[i]);
+            }
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -216,8 +236,7 @@ fn filter_line_1d(
     if edge == 0 || edge >= line.len() {
         return out;
     }
-    let thresh_bd = thresh; // BitDepth == 8 → thresh << 0
-    let bd_flat = 1i32; // 1 << (BitDepth - 8)
+    let bd_flat = 1i32; // 1 << (BitDepth - 8) -- 8-bit only
 
     // Gather the tap window around the edge.
     let get = |off: isize| -> i32 {
@@ -238,7 +257,7 @@ fn filter_line_1d(
     let q3 = get(3);
 
     // High-edge-variance mask (per line).
-    let hev = (p1 - p0).abs() > thresh_bd || (q1 - q0).abs() > thresh_bd;
+    let hev = (p1 - p0).abs() > thresh || (q1 - q0).abs() > thresh;
 
     // Filter mask (apply only if the edge region is locally flat enough).
     let mask7 = (p3 - p2).abs()
@@ -331,6 +350,7 @@ fn filter_line_1d(
 ///
 /// `step` is the block size in samples (8 for luma, 4 for chroma in 4:2:0).
 /// `tx_grid` / `skip_grid` are the `FrameMeta` sub-grids for this plane.
+#[allow(clippy::too_many_arguments)]
 fn deblock_plane(
     plane: &mut [u8],
     stride: usize,
@@ -339,7 +359,7 @@ fn deblock_plane(
     step: usize,
     plane_index: usize,
     tx_grid: &[u8],
-    skip_grid: &[bool],
+    _skip_grid: &[bool],
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
@@ -456,7 +476,7 @@ fn cdef_direction(src: &[u8], stride: usize, x0: usize, y0: usize) -> (usize, i3
         }
     }
     let mut cost = [0i32; 8];
-    for i in 0..8 {
+    for _ in 0..8 {
         for j in 0..15 {
             cost[0] += partial[0][j] * partial[0][j];
         }
@@ -534,7 +554,7 @@ fn cdef_filter_block(
                     let xx = (x0 + j) as isize + dx as isize;
                     if yy >= 0 && (yy as usize) < src.len().div_ceil(src_stride) && xx >= 0 && (xx as usize) < src_stride {
                         let p = src[yy as usize * src_stride + xx as usize] as i32;
-                        sum += CDEF_PRI_TAPS[taps][k] * cdef_constrain(p - x, pri_str, damping);
+                        sum += CDEF_PRI_TAPS[taps as usize][k] * cdef_constrain(p - x, pri_str, damping);
                         max = max.max(p);
                         min = min.min(p);
                     }
@@ -551,7 +571,7 @@ fn cdef_filter_block(
                             && (xx2 as usize) < src_stride
                         {
                             let s = src[yy2 as usize * src_stride + xx2 as usize] as i32;
-                            sum += CDEF_SEC_TAPS[taps][k] * cdef_constrain(s - x, sec_str, damping);
+                            sum += CDEF_SEC_TAPS[taps as usize][k] * cdef_constrain(s - x, sec_str, damping);
                             max = max.max(s);
                             min = min.min(s);
                         }
@@ -560,50 +580,6 @@ fn cdef_filter_block(
             }
             let val = x + ((8 + sum - (if sum < 0 { 1 } else { 0 })) >> 4);
             dst[(y0 + i) * dst_stride + (x0 + j)] = clip3(val, min, max) as u8;
-        }
-    }
-}
-
-/// Apply CDEF across all 8×8 luma / 4×4 chroma blocks of a plane.
-#[allow(clippy::too_many_arguments)]
-fn cdef_plane(
-    plane: &mut [u8],
-    stride: usize,
-    width: usize,
-    height: usize,
-    sub_x: usize,
-    sub_y: usize,
-    pri_strength: i32,
-    sec_strength: i32,
-    damping: i32,
-    uv_dir: Option<usize>,
-) {
-    // Snapshot the input (CDEF reads from CurrFrame, writes to CdefFrame).
-    let src = plane.to_vec();
-    let w_block = 8 >> sub_x;
-    let h_block = 8 >> sub_y;
-    let block_cols = width.div_ceil(w_block);
-    let block_rows = height.div_ceil(h_block);
-    for r in 0..block_rows {
-        for c in 0..block_cols {
-            let y0 = r * h_block;
-            let x0 = c * w_block;
-            if y0 >= height || x0 >= width {
-                continue;
-            }
-            let dir = if pri_strength == 0 {
-                0
-            } else if let Some(d) = uv_dir {
-                d
-            } else {
-                // Luma direction is computed per 8×8 luma block.
-                let (yd, _var) = cdef_direction(&src, stride, x0, y0);
-                yd
-            };
-            cdef_filter_block(
-                plane, stride, &src, stride, x0, y0, w_block.min(width - x0), h_block.min(height - y0),
-                sub_x, sub_y, pri_strength, sec_strength, damping, dir,
-            );
         }
     }
 }
@@ -649,10 +625,6 @@ pub fn apply_post_filters(
     deblock_plane(
         y_plane, width, width, height, 8, 0, &meta.luma_tx, &meta.luma_skip, meta.w8, meta.h8, fh,
     );
-    if !subsampling_x && !subsampling_y {
-        // 4:4:4 not yet produced by the reconstruction path; handled below
-        // generically for 4:2:0.
-    }
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
     deblock_plane(
@@ -663,44 +635,26 @@ pub fn apply_post_filters(
     );
 
     // --- CDEF (§7.15) ---
-    let coeff_shift = 0i32;
+    // AV1 packs `cdef_*_strength[idx] = cdef_pri_strength (4 bits, 0..15)
+    // + CDEF_SEC_STRENGTH[cdef_sec_idx]` where `CDEF_SEC_STRENGTH = [0,4,8,16]`.
+    // The primary strength is therefore the low 4 bits; the secondary strength
+    // is bits 4..=5 (i.e. `& 0x30`).
     let cdef_enabled = fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
     if cdef_enabled {
-        // Luma.
         let idx = 0usize; // cdef_idx per 64×64 block — not yet signalled in this
                           // decoder; default to entry 0 (documented simplification).
-        let pri = (fh.cdef_y_strength.get(idx).copied().unwrap_or(0) & 0x0F) as i32;
-        let sec = ((fh.cdef_y_strength.get(idx).copied().unwrap_or(0) >> 2) & 0x3F) as i32;
-        let pri_str = pri << coeff_shift;
-        let sec_str = sec << coeff_shift;
-        let _var = 0i32;
-        let var_str = 0i32; // computed per-block below; keep simple
-        let _ = (&mut { _var }, var_str);
-        let pri_str = if sec_str != 0 || pri_str != 0 {
-            // Apply the variance-dependent strength scaling per 8×8 block.
-            pri_str
-        } else {
-            0
-        };
-        let damping = fh.cdef_damping as i32 + coeff_shift;
-        cdef_plane_luma(y_plane, width, height, pri_str, sec_str, damping);
+        let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
+        let pri = (y_packed & 0x0F) as i32;
+        let sec = (y_packed & 0x30) as i32;
+        let damping = fh.cdef_damping as i32; // coeff_shift == 0 for 8-bit
+        cdef_plane_luma(y_plane, width, height, pri, sec, damping);
 
-        // Chroma (U/V).
-        let uv_pri = (fh.cdef_uv_strength.get(idx).copied().unwrap_or(0) & 0x0F) as i32;
-        let uv_sec = ((fh.cdef_uv_strength.get(idx).copied().unwrap_or(0) >> 2) & 0x3F) as i32;
-        let uv_pri_str = uv_pri << coeff_shift;
-        let uv_sec_str = uv_sec << coeff_shift;
-        let uv_damping = fh.cdef_damping as i32 + coeff_shift - 1;
-        // Chroma direction is remapped from the luma direction per block; we
-        // pass `None` and let `cdef_plane` use the luma-derived direction for
-        // luma, but chroma needs the UV remap. For simplicity drive chroma
-        // directly with its own per-block direction.
-        cdef_plane_chroma(
-            u_plane, uv_w, uv_h, sub_x, sub_y, uv_pri_str, uv_sec_str, uv_damping,
-        );
-        cdef_plane_chroma(
-            v_plane, uv_w, uv_h, sub_x, sub_y, uv_pri_str, uv_sec_str, uv_damping,
-        );
+        let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
+        let uv_pri = (uv_packed & 0x0F) as i32;
+        let uv_sec = (uv_packed & 0x30) as i32;
+        let uv_damping = fh.cdef_damping as i32;
+        cdef_plane_chroma(u_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping);
+        cdef_plane_chroma(v_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping);
     }
 
     // --- Loop restoration (§7.17) — passthrough ---
@@ -723,10 +677,11 @@ fn cdef_plane_luma(plane: &mut [u8], width: usize, height: usize, pri_str: i32, 
             }
             let (yd, var) = cdef_direction(&src, width, x0, y0);
             let var_str = if (var >> 6) != 0 {
-                (1i32 << 31).min(floor_log2((var >> 6) as u32) as i32).min(12)
+                floor_log2((var >> 6) as u32) as i32
             } else {
                 0
-            };
+            }
+            .min(31);
             let p = if var != 0 {
                 (pri_str * (4 + var_str) + 8) >> 4
             } else {
@@ -771,10 +726,11 @@ fn cdef_plane_chroma(
             // itself and remap via Cdef_Uv_Dir.
             let (yd, var) = cdef_direction(&src, width, x0, y0);
             let var_str = if (var >> 6) != 0 {
-                (1i32 << 31).min(floor_log2((var >> 6) as u32) as i32).min(12)
+                floor_log2((var >> 6) as u32) as i32
             } else {
                 0
-            };
+            }
+            .min(31);
             let p = if var != 0 {
                 (pri_str * (4 + var_str) + 8) >> 4
             } else {

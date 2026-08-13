@@ -961,6 +961,212 @@ pub fn build_ref_list_l0(
     Some(list)
 }
 
+/// A reference *field* for interlaced (PAFF / MBAFF) motion compensation.
+///
+/// A field reference is either a genuine field (a half-height YUV420p buffer
+/// stored in the DPB, [`is_field`](FieldRef::is_field) == true) or one field of
+/// a stored frame picture (a full-height buffer, sampled at field parity via a
+/// doubled vertical stride). Motion compensation in interlaced mode operates on
+/// field-line coordinates and uses [`FieldRef::sample_y`] to map a field line to
+/// the underlying buffer row (§8.4.2.2.1 / §6.4.10.1).
+#[derive(Debug, Clone)]
+pub struct FieldRef {
+    /// The underlying reconstructed plane set (half-height for a field,
+    /// full-height for a frame).
+    pub frame: VideoFrame,
+    /// `true` when `frame` is a full-height *frame* picture: its two fields are
+    /// addressed at even / odd rows rather than as a contiguous half-height
+    /// buffer.
+    pub is_frame: bool,
+    /// When `is_frame`, the parity of the field this reference denotes
+    /// (`false` = top, `true` = bottom).
+    pub bottom: bool,
+    /// `PicOrderCnt` of the underlying picture (used for weighted / temporal
+    /// direct-mode derivation).
+    pub pic_order_cnt: i64,
+}
+
+impl FieldRef {
+    /// Whether this reference is a genuine (half-height) field rather than one
+    /// field of a full-height frame.
+    pub fn is_field(&self) -> bool {
+        !self.is_frame
+    }
+
+    /// Map a field-line index `y_field` (in field-sample units) to the row in
+    /// the underlying buffer. For a field reference the mapping is identity;
+    /// for a frame reference the field's samples live at stride-2 spacing with
+    /// the field's parity offset (§6.4.10.1).
+    pub fn sample_y(&self, y_field: i32) -> i32 {
+        if self.is_frame {
+            2 * y_field + self.bottom as i32
+        } else {
+            y_field
+        }
+    }
+
+    /// The height of one field in samples (half the frame height for a frame
+    /// reference, the buffer height for a field reference).
+    pub fn field_height(&self) -> u32 {
+        if self.is_frame {
+            self.frame.height / 2
+        } else {
+            self.frame.height
+        }
+    }
+}
+
+/// Build the `RefPicList0` for an interlaced *field* picture (§8.2.4.2.5).
+///
+/// Reference fields are collected from the DPB — a stored field contributes one
+/// field reference, while a stored frame contributes its two fields (top and
+/// bottom). They are ordered by descending `PicNum` (short-term) then ascending
+/// `LongTermPicNum` (long-term), with the top/bottom group order swapped when
+/// the current picture is a bottom field.
+///
+/// `ref_pic_list_modification` is not yet applied to field lists (most simple
+/// interlaced clips do not use it); the list is truncated to
+/// `num_ref_idx_l0_active` and padded by repetition like the frame path.
+pub fn build_field_ref_list_l0(
+    dpb: &Dpb,
+    current_bottom: bool,
+    num_ref_idx_l0_active: usize,
+    ctx: PicNumContext,
+) -> Option<Vec<FieldRef>> {
+    let num_active = num_ref_idx_l0_active.max(1);
+    let mut fields: Vec<FieldRef> = Vec::new();
+    for e in dpb.iter() {
+        if e.field_pic_flag {
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: false,
+                bottom: e.bottom_field_flag,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+        } else {
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+        }
+    }
+    if fields.is_empty() {
+        return None;
+    }
+
+    // Compute each candidate field's PicNum (short-term) for ordering.
+    let mut st_top: Vec<&FieldRef> = Vec::new();
+    let mut st_bottom: Vec<&FieldRef> = Vec::new();
+    let mut lt_top: Vec<&FieldRef> = Vec::new();
+    let mut lt_bottom: Vec<&FieldRef> = Vec::new();
+    for f in &fields {
+        // Determine the underlying DPB short/long status by matching the frame.
+        let is_short = dpb
+            .iter()
+            .filter(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
+            .any(|e| e.is_short_term);
+        let is_long = !is_short;
+        let pic_num = dpb
+            .iter()
+            .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
+            .map(|e| e.pic_num(ctx))
+            .unwrap_or(0);
+        if is_short {
+            if f.bottom {
+                st_bottom.push(f);
+            } else {
+                st_top.push(f);
+            }
+        } else if is_long {
+            if f.bottom {
+                lt_bottom.push(f);
+            } else {
+                lt_top.push(f);
+            }
+        } else {
+            let _ = pic_num;
+        }
+    }
+    st_top.sort_by_key(|f| std::cmp::Reverse(field_pic_num(f, dpb, ctx)));
+    st_bottom.sort_by_key(|f| std::cmp::Reverse(field_pic_num(f, dpb, ctx)));
+    lt_top.sort_by_key(|f| field_long_num(f, dpb));
+    lt_bottom.sort_by_key(|f| field_long_num(f, dpb));
+
+    let mut ordered: Vec<FieldRef> = Vec::new();
+    if current_bottom {
+        for f in st_bottom {
+            ordered.push(f.clone());
+        }
+        for f in st_top {
+            ordered.push(f.clone());
+        }
+        for f in lt_bottom {
+            ordered.push(f.clone());
+        }
+        for f in lt_top {
+            ordered.push(f.clone());
+        }
+    } else {
+        for f in st_top {
+            ordered.push(f.clone());
+        }
+        for f in st_bottom {
+            ordered.push(f.clone());
+        }
+        for f in lt_top {
+            ordered.push(f.clone());
+        }
+        for f in lt_bottom {
+            ordered.push(f.clone());
+        }
+    }
+
+    ordered.truncate(num_active);
+    while ordered.len() < num_ref_idx_l0_active {
+        let last = ordered.last()?.clone();
+        ordered.push(last);
+    }
+    Some(ordered)
+}
+
+/// Build the `RefPicList1` for an interlaced *field* picture (§8.2.4.2.5).
+///
+/// For field pictures both reference lists are constructed by the same
+/// field-ordering rule (unlike frame pictures, where L0 / L1 differ by POC
+/// direction); see [`build_field_ref_list_l0`].
+pub fn build_field_ref_list_l1(
+    dpb: &Dpb,
+    current_bottom: bool,
+    num_ref_idx_l1_active: usize,
+    ctx: PicNumContext,
+) -> Option<Vec<FieldRef>> {
+    build_field_ref_list_l0(dpb, current_bottom, num_ref_idx_l1_active, ctx)
+}
+
+/// `PicNum` of a candidate field reference (§8.2.4.2.5), doubled for fields.
+fn field_pic_num(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
+    dpb.iter()
+        .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
+        .map(|e| e.pic_num(ctx))
+        .unwrap_or(0)
+}
+
+/// `LongTermPicNum` of a candidate long-term field reference.
+fn field_long_num(f: &FieldRef, dpb: &Dpb) -> i64 {
+    dpb.iter()
+        .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
+        .map(|e| e.long_term_pic_num as i64)
+        .unwrap_or(0)
+}
+
 /// Build `RefPicList0` for a B-slice (§8.2.4.2.3).
 ///
 /// Distinct from the P-slice ordering: short-term references are grouped by

@@ -13,13 +13,15 @@
 use crate::{
     macroblock::{Macroblock, MbType},
     prediction::{
-        predict_16x16, predict_4x4, predict_chroma, Intra16x16Mode, IntraChromaMode,
-        IntraNeighbours16x16, IntraNeighbours4x4,
+        predict_16x16, predict_4x4, predict_8x8, predict_chroma, Intra16x16Mode, Intra4x4Mode,
+        IntraChromaMode, IntraNeighbours16x16, IntraNeighbours4x4,
     },
     slice::WeightEntry,
     slice_data::raster_of_8x8_sub,
     trace::{DecodeTracer, TracePlane},
-    transform::{chroma_dc_transform, dequant_idct_4x4, luma_dc_transform, ScalingLists},
+    transform::{
+        chroma_dc_transform, dequant_idct_4x4, dequant_idct_8x8, luma_dc_transform, ScalingLists,
+    },
 };
 use tpt_kinetix_core::frame::VideoFrame;
 
@@ -395,6 +397,12 @@ fn reconstruct_luma<T: DecodeTracer>(
             }
         }
         MbType::Intra4x4 => {
+            // High-profile 8×8 transform: the luma residual lives in four 8×8
+            // blocks (`luma_coeffs_8x8`), each predicted with its own
+            // Intra_8×8 mode and reconstructed via the 8×8 inverse transform.
+            if mb.transform_size_8x8 {
+                reconstruct_luma_8x8(mb, plane, stride, mb_x, mb_y, scaling, tracer);
+            } else {
             // Process 4×4 blocks in decode (block-scan) order so neighbours are
             // reconstructed first.
             for blk8 in 0..4usize {
@@ -468,10 +476,74 @@ fn reconstruct_luma<T: DecodeTracer>(
                     tracer.on_reconstructed(mb_x, mb_y, TracePlane::Luma, block as u8, &recon_blk);
                 }
             }
+            }
         }
         _ => {
             // Non-intra in an I-frame should not occur; leave as-is (black).
         }
+    }
+}
+
+/// Reconstruct the luma plane of an Intra_4×4 macroblock that used the
+/// High-profile 8×8 transform (`transform_size_8x8_flag` set). The luma
+/// residual is carried in four 8×8 blocks (`luma_coeffs_8x8`), each predicted
+/// with its own Intra_8×8 mode (§8.3.2.2) and reconstructed via the 8×8
+/// inverse transform (§8.5.12.3).
+fn reconstruct_luma_8x8<T: DecodeTracer>(
+    mb: &Macroblock,
+    plane: &mut [u8],
+    stride: usize,
+    mb_x: u32,
+    mb_y: u32,
+    scaling: &ScalingLists,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    let base_y = (mb_y * 16) as usize;
+
+    for i8 in 0..4usize {
+        let bx = (i8 % 2) * 8;
+        let by = (i8 / 2) * 8;
+        let px0 = base_x + bx;
+        let py0 = base_y + by;
+
+        // Full 8×8 neighbour set: 16 top samples (incl. the top-right
+        // extension) and 8 left samples, plus the single top-left `X` (§8.3.2.2).
+        let mut top = [None; 16];
+        for i in 0..16 {
+            top[i] = get_luma(plane, stride, (px0 + i) as isize, py0 as isize - 1);
+        }
+        let mut left = [None; 8];
+        for i in 0..8 {
+            left[i] = get_luma(plane, stride, px0 as isize - 1, (py0 + i) as isize);
+        }
+        let tl = get_luma(plane, stride, px0 as isize - 1, py0 as isize - 1);
+
+        let mut pred = [0u8; 64];
+        predict_8x8(
+            Intra4x4Mode::from_u8(mb.pred_modes_8x8[i8]),
+            &top,
+            &left,
+            tl,
+            &mut pred,
+        );
+        tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, 64 + i8 as u8, &pred);
+
+        let res = dequant_idct_8x8(&mb.luma_coeffs_8x8[i8], mb.qp, 0, scaling);
+        let mut recon_blk = [0u8; 64];
+        for row in 0..8 {
+            for col in 0..8 {
+                let x = px0 + col;
+                let y = py0 + row;
+                let off = y * stride + x;
+                let v = (pred[row * 8 + col] as i32 + res[row * 8 + col]).clamp(0, 255) as u8;
+                recon_blk[row * 8 + col] = v;
+                if off < plane.len() && x < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+        tracer.on_reconstructed(mb_x, mb_y, TracePlane::Luma, 64 + i8 as u8, &recon_blk);
     }
 }
 
