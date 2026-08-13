@@ -25,6 +25,16 @@ doc = false
 
 [workspace]
 
+[workspace.dependencies]
+# Mirror the main workspace so `workspace = true` inheritance resolves to the
+# pinned versions instead of `*`. Without this, the fuzz crate's standalone
+# workspace pulls nom 8.x whose `count`/`be_u32` return `impl Parser` (not
+# `impl FnMut`), breaking the `parser(input)` call convention used by demux.
+nom = "7.1"
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
 [profile.release]
 debug = 1
 opt-level = 3

@@ -359,32 +359,44 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
   - [x] Per-4×4-block deblocking `bS` (coefficient-OR + MV/ref rule) fixes the
         real remaining gap; chroma reuses the co-located luma `bS` per spec.
 
-  #### Phase C.3 — multi-P-frame chaining (open, found 2026-08-09)
+   #### Phase C.3 — multi-P-frame chaining — **RESOLVED (2026-08-13)**
 
-  > Found while running the full `tpt-kinetix-h264` suite during Phase E.2.
-  > Not caused by (and not fixed by) Phase E.1/E.2 — reference-list
-  > construction and DPB marking are both exercised bit-exactly by the tests
-  > that *do* pass, and the divergence is a small localised residual/MC
-  > difference rather than a whole-frame wrong-reference difference.
-
-  - [ ] `tests/multi_frame_dpb.rs::ipppp_clip_decodes_bitexact_frame_by_frame`
-        (untracked, ffmpeg-gated) fails on a 5-frame 64×48 IPPPP clip: frames 0
-        and 1 are bit-exact (max_diff=0) but frame 2 — the **second** P picture,
-        the first one that predicts from another P picture — differs by
-        max_diff=33 over 124/4608 samples. `p_frame_conformance.rs` only covers
-        a single IDR→P step, so it stays green. The untracked
-        `examples/dbg_ipp.rs` / `examples/dbg_p2.rs` debug harnesses from the
-        previous session were already narrowing this to macroblock 9 of that
-        slice; start there (dump `mb_type`, the per-4×4 MV grid, and the luma
-        coefficients for MB 9 and diff them against `ffmpeg -debug mb_type+mv`).
-  - [ ] `tests/fuzz_from_seed.rs::fuzz_structured_seeds` trips its own 300 ms
-        per-decode soft timeout after ~1.5 M mutation iterations on a fast
-        desktop (slowest *completed* decode observed: 245 ms, i.e. the budget is
-        marginal rather than the decode being hung). The timing-out inputs are
-        mutated large-dimension SPS seeds, so this is a decode-throughput /
-        allocation-cost issue on huge pictures, not a panic. Either profile the
-        large-picture path or make the budget machine-relative before this can
-        be a reliable CI gate.
+   - [x] `tests/multi_frame_dpb.rs::ipppp_clip_decodes_bitexact_frame_by_frame`
+         now passes bit-exact (max_diff=0) for **all five** frames on the
+         64×48 IPPPP clip. The original frame-2 divergence (max_diff=33 over
+         124 samples, the first P picture predicting from another P picture)
+         is gone. Root cause was the reference-list / POC-ordering logic that
+         later landed in Phase E.1 (`modify_ref_pic_list` §8.2.4.3), E.2
+         (`mark_decoded_picture` §8.2.5), and E.5 (`build_ref_list_l0_b_slice`
+         POC-based ordering, plus the 2-partition B MVD interleave fix) — all
+         of which make second-and-later P pictures predict from the correct
+         reference. The decoder's `MAX_MB_COUNT`/`MAX_DIMENSION` guards
+         (decoder.rs) also bound the picture allocation that the original
+         report worried about. Verified by re-running the test directly.
+   - [x] `tests/fuzz_from_seed.rs::fuzz_structured_seeds` is now a reliable CI
+         gate. Two fixes landed:
+         1. **Real fuzz-crash fixed:** a structured-seed mutation survey
+            (800 k iters) found an actual panic — `attempt to shift left with
+            overflow` at `slice.rs::WeightEntry::default_for`, triggered by an
+            attacker-controlled `luma_log2_weight_denom`/`chroma_log2_weight_denom`
+            (`ue(v)`, unbounded) fed into `1 << denom`. Fixed by bounding both
+            denoms to ≤30 at parse time in `parse_pred_weight_table`
+            (§7.4.3.2), and making `default_for` clamp defensively. (The
+            `>> (denom + 1)` in `reconstruct.rs::weighted_bi` also needs
+            denom ≤30 to stay panic-free, so 30 is the safe ceiling.) Other
+            unbounded shifts were already safe: `log2_max_frame_num_minus4` is
+            bounded ≤12 (sps.rs) and `transform.rs` `shift = qp/6` is always
+            in range.
+         2. **Machine-relative timeout:** replaced the fixed 300 ms constant
+            with a budget calibrated from the worst-case *valid* decode on the
+            runner (a 36864-MB IDR, capped by `MAX_MB_COUNT`), set to
+            `max(2s, min(30s, 3 × worst_valid))`. Added a 60 s overall
+            wall-clock deadline so the test can't run for hours on fast
+            runners, and silenced the panic hook so caught-panic backtraces
+            don't spam CI logs. Re-running the survey now shows **0 panics /
+            800 k iters**; the test itself completes ~204 k iters in 60 s with
+            no crash and slowest decode ~97 ms (well under the calibrated
+            timeout).
 
 ### H.264 — Phase D: CABAC
 

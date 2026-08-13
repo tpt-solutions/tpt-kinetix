@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Context};
 
 use crate::bitreader::BitReader;
+use crate::transform::ScalingLists;
 
 /// Sequence Parameter Set — carries the picture/sequence-level coding parameters.
 #[derive(Debug, Clone)]
@@ -32,6 +33,9 @@ pub struct SeqParameterSet {
     pub frame_crop_right_offset: u32,
     pub frame_crop_top_offset: u32,
     pub frame_crop_bottom_offset: u32,
+    /// Scaling lists derived from this SPS (§8.5.9). Flat (all 16) when no
+    /// scaling matrix is signalled; merged with any PPS override at decode time.
+    pub scaling: ScalingLists,
 }
 
 impl SeqParameterSet {
@@ -63,32 +67,8 @@ impl SeqParameterSet {
             let _qpprime_y_zero_transform_bypass_flag = r
                 .read_bit()
                 .context("qpprime_y_zero_transform_bypass_flag")?;
-            let seq_scaling_matrix_present_flag =
-                r.read_bit().context("seq_scaling_matrix_present_flag")?;
-            if seq_scaling_matrix_present_flag == 1 {
-                let n_lists = if chroma_format_idc != 3 { 8 } else { 12 };
-                for _i in 0..n_lists {
-                    let present = r.read_bit().context("scaling_list_present_flag")?;
-                    if present == 1 {
-                        // Skip the scaling list: 16 or 64 deltas (se values).
-                        let list_size = if _i < 6 { 16usize } else { 64 };
-                        let mut last_scale: i32 = 8;
-                        let mut next_scale: i32 = 8;
-                        for _j in 0..list_size {
-                            if next_scale != 0 {
-                                let delta = r.read_se().context("scaling_list delta")?;
-                                next_scale = (last_scale + delta + 256) % 256;
-                            }
-                            last_scale = if next_scale == 0 {
-                                last_scale
-                            } else {
-                                next_scale
-                            };
-                        }
-                    }
-                }
-            }
-        }
+             let scaling = ScalingLists::parse_sps(&mut r, chroma_format_idc)?;
+         }
 
         let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
         // Per spec (§7.4.2.1.1) this is in 0..=12; downstream code widens it to a
@@ -178,6 +158,7 @@ impl SeqParameterSet {
             frame_crop_right_offset,
             frame_crop_top_offset,
             frame_crop_bottom_offset,
+            scaling,
         })
     }
 

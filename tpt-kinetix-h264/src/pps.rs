@@ -6,6 +6,7 @@
 use anyhow::Context;
 
 use crate::bitreader::BitReader;
+use crate::transform::ScalingLists;
 
 /// Picture Parameter Set — carries per-picture coding parameters.
 #[derive(Debug, Clone)]
@@ -35,11 +36,15 @@ pub struct PicParameterSet {
     /// High-profile extension: `second_chroma_qp_index_offset` (se). Defaults to
     /// `chroma_qp_index_offset` when absent.
     pub second_chroma_qp_index_offset: i32,
+    /// Scaling lists derived from this PPS (§8.5.9), already merged over the SPS
+    /// set via `merge_pps` at decode time. Flat (all 16) when no PPS scaling
+    /// matrix is signalled.
+    pub scaling: ScalingLists,
 }
 
 impl PicParameterSet {
     /// Parse a PPS from its RBSP bytes (the header byte must already be removed).
-    pub fn parse(rbsp: &[u8]) -> anyhow::Result<Self> {
+    pub fn parse(rbsp: &[u8], sps_scaling: Option<&ScalingLists>) -> anyhow::Result<Self> {
         let mut r = BitReader::new(rbsp);
 
         let pic_parameter_set_id = r.read_ue().context("pic_parameter_set_id")?;
@@ -111,31 +116,11 @@ impl PicParameterSet {
         let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
         if more_rbsp_data(&r) {
             transform_8x8_mode_flag = r.read_bit().context("transform_8x8_mode_flag")? == 1;
-            let pic_scaling_matrix_present_flag =
-                r.read_bit().context("pic_scaling_matrix_present_flag")? == 1;
-            if pic_scaling_matrix_present_flag {
-                // Skip the scaling lists (6 + 2*transform_8x8 lists).
-                let n_lists = 6 + if transform_8x8_mode_flag { 2 } else { 0 };
-                for i in 0..n_lists {
-                    let present = r.read_bit().context("scaling_list_present_flag")?;
-                    if present == 1 {
-                        let list_size = if i < 6 { 16usize } else { 64 };
-                        let mut last_scale: i32 = 8;
-                        let mut next_scale: i32 = 8;
-                        for _ in 0..list_size {
-                            if next_scale != 0 {
-                                let delta = r.read_se().context("scaling_list delta")?;
-                                next_scale = (last_scale + delta + 256) % 256;
-                            }
-                            last_scale = if next_scale == 0 {
-                                last_scale
-                            } else {
-                                next_scale
-                            };
-                        }
-                    }
-                }
-            }
+            let scaling = ScalingLists::parse_pps(
+                &mut r,
+                sps_scaling.unwrap_or(&ScalingLists::flat()),
+                transform_8x8_mode_flag,
+            )?;
             second_chroma_qp_index_offset = r.read_se().context("second_chroma_qp_index_offset")?;
         }
 
@@ -156,6 +141,7 @@ impl PicParameterSet {
             redundant_pic_cnt_present_flag,
             transform_8x8_mode_flag,
             second_chroma_qp_index_offset,
+            scaling,
         })
     }
 }
@@ -198,7 +184,7 @@ mod tests {
         // byte1: 0011 1100 = 0x3C
         // byte2: 1... pad  = 1000 0000 = 0x80
         let rbsp = [0xCEu8, 0x3C, 0x80];
-        let pps = PicParameterSet::parse(&rbsp).unwrap();
+        let pps = PicParameterSet::parse(&rbsp, None).unwrap();
         assert!(!pps.entropy_coding_mode_flag);
         assert_eq!(pps.num_slice_groups_minus1, 0);
         assert!(pps.deblocking_filter_control_present_flag);

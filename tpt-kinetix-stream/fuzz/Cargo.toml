@@ -37,6 +37,14 @@ doc = false
 
 [workspace]
 
+[workspace.dependencies]
+nom = "7.1"
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+symphonia-codec-aac = "0.5"
+
 [profile.release]
 debug = 1
 opt-level = 3

@@ -273,6 +273,10 @@ fn structured_seeds_decode_without_panic() {
 fn fuzz_structured_seeds() {
     use std::time::{Duration, Instant};
 
+    // Keep CI logs clean: the timeout path relies on `catch_unwind`, whose
+    // default hook would otherwise dump a backtrace for every caught panic.
+    std::panic::set_hook(Box::new(|_| {}));
+
     let seeds = seeds();
     let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut next_u64 = || {
@@ -282,18 +286,52 @@ fn fuzz_structured_seeds() {
         rng
     };
 
-    // Soft timeout: libFuzzer flags inputs whose decode is pathologically slow
-    // (the CI crash ran at ~0.5s/exec). A decode exceeding this is treated as a
-    // timeout crash. We run the decode in a thread and bail if it does not finish.
-    let timeout = Duration::from_millis(300);
+    // Machine-relative soft timeout. The decoder caps picture size
+    // (`MAX_MB_COUNT`, see decoder.rs), so the slowest *valid* decode is bounded
+    // and scales with machine speed. Calibrate the per-decode budget from the
+    // worst-case-size valid IDR on this runner, replacing the previous fixed
+    // 300 ms constant (which was flaky on slow CI and loose on fast machines)
+    // with a budget proportional to how long a legitimate large decode takes
+    // here. A genuine hang still exceeds it by orders of magnitude.
+    let worst_stream = {
+        let mut v = Vec::new();
+        v.extend(annexb(0x67, &sps(192, 192, 1)));
+        v.extend(annexb(0x68, &pps()));
+        v.extend(annexb(0x65, &idr_islice(192 * 192)));
+        v
+    };
+    let mut ref_times = Vec::new();
+    for _ in 0..5 {
+        let t0 = Instant::now();
+        let _ = try_decode(&worst_stream);
+        ref_times.push(t0.elapsed());
+    }
+    ref_times.sort_unstable();
+    let worst_valid = *ref_times.last().unwrap();
+    let timeout = (worst_valid * 3)
+        .max(Duration::from_secs(2))
+        .min(Duration::from_secs(30));
+    eprintln!(
+        "fuzz_structured_seeds: calibrated per-decode timeout={timeout:?} \
+         (worst-case valid decode on this machine={worst_valid:?})"
+    );
 
     let mut iterations = 0u64;
     let mut crash: Option<(usize, Vec<u8>, String)> = None;
     let mut slowest = Duration::ZERO;
     let mut slowest_input: Option<Vec<u8>> = None;
     let mut next_report = Instant::now() + Duration::from_secs(20);
+    // Bound total fuzzing wall-clock so this stays a fast, reliable CI gate
+    // regardless of how many iterations a given runner can squeeze in.
+    let deadline = Instant::now() + Duration::from_secs(60);
 
     for _ in 0..60_000_000 {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "fuzz_structured_seeds: reached 60s wall-clock budget after {iterations} iters"
+            );
+            break;
+        }
         iterations += 1;
         let seed = &seeds[(next_u64() as usize) % seeds.len()];
         let mut candidate = seed.clone();

@@ -1466,6 +1466,9 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             }
 
             mb.motion = Some(motion);
+            if let Some(m) = mb.motion.as_mut() {
+                m.mvd_l0.iter_mut().for_each(|v| *v = (0, 0));
+            }
             let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
             eprintln!("[DBG P] mb=({mb_x},{mb_y}) cbp_l={cbp_l} cbp_c={cbp_c}");
             let cbp = cbp_l | (cbp_c << 4);

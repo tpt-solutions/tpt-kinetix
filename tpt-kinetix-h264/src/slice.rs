@@ -199,6 +199,11 @@ impl WeightEntry {
     /// a no-op, offset 0 (§7.4.3.2's default derivation for
     /// `luma_weight_lX`/`chroma_weight_lX`).
     pub fn default_for(luma_log2_wd: u32, chroma_log2_wd: u32) -> Self {
+        // Defensive: a malformed `log2_weight_denom` > 30 would overflow the
+        // `1 << denom` weight derivation; clamp so this constructor can never
+        // panic even if a caller bypasses the parser's bound (§7.4.3.2).
+        let luma_log2_wd = luma_log2_wd.min(30);
+        let chroma_log2_wd = chroma_log2_wd.min(30);
         Self {
             luma_weight: 1 << luma_log2_wd,
             luma_offset: 0,
@@ -566,6 +571,17 @@ fn parse_pred_weight_table(
     } else {
         0
     };
+    // Bound the weight denoms: they feed `1 << denom` shifts in the default
+    // weight derivation (§7.4.3.2) and `>> (denom + 1)` in the weighted
+    // reconstruction (§8.4.2.3.2). An unbounded `ue(v)` here would let a
+    // malformed stream trigger an integer-shift overflow panic (denom >= 32),
+    // and `denom >= 31` overflows the `>> (denom + 1)` path. Real streams keep
+    // these tiny (<=7 for 8-bit), so 30 is a generous, panic-free ceiling.
+    if luma_log2_weight_denom > 30 || chroma_log2_weight_denom > 30 {
+        return Err(anyhow!(
+            "pred_weight_table: log2_weight_denom (luma={luma_log2_weight_denom}, chroma={chroma_log2_weight_denom}) exceeds 30"
+        ));
+    }
     let read_list = |r: &mut BitReader, count: u32| -> anyhow::Result<Vec<WeightEntry>> {
         let n = count as usize + 1;
         if n > MAX_PRED_WEIGHT_ENTRIES {

@@ -19,7 +19,7 @@ use crate::{
     slice::WeightEntry,
     slice_data::raster_of_8x8_sub,
     trace::{DecodeTracer, TracePlane},
-    transform::{chroma_dc_transform, dequant_idct_4x4, luma_dc_transform},
+    transform::{chroma_dc_transform, dequant_idct_4x4, luma_dc_transform, ScalingLists},
 };
 use tpt_kinetix_core::frame::VideoFrame;
 
@@ -231,6 +231,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
     width: u32,
     height: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
     tracer: &mut T,
 ) -> ReconstructedFrame {
     let luma_stride = width as usize;
@@ -243,7 +244,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
-            reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, tracer);
+            reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
             reconstruct_chroma(
                 mb,
                 &mut cb,
@@ -252,6 +253,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 mb_x,
                 mb_y,
                 chroma_qp_index_offset,
+                scaling,
                 tracer,
             );
         }
@@ -287,6 +289,7 @@ fn reconstruct_luma<T: DecodeTracer>(
     stride: usize,
     mb_x: u32,
     mb_y: u32,
+    scaling: &ScalingLists,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 16) as usize;
