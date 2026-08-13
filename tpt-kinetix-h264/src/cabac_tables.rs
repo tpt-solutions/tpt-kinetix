@@ -32,6 +32,10 @@
 
 /// `(m, n)` context-initialisation pairs for all 1024 I-slice CABAC context
 /// indices, keyed directly by `ctxIdx`.
+///
+/// Re-verifiable with `cargo run -p tpt-kinetix-kg -- verify-tables
+/// tpt-kinetix-h264/src/cabac_tables.rs` (see `docs/adding-a-codec.md`).
+// verify-tables: rust=CABAC_CTX_INIT_I symbol=cabac_context_init_I commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/h264_cabac.c
 #[rustfmt::skip]
 pub const CABAC_CTX_INIT_I: [(i8, i8); 1024] = [
     (20,-15), (2,54), (3,74), (20,-15), (2,54), (3,74), (-28,127), (-23,104),
@@ -168,6 +172,7 @@ pub const CABAC_CTX_INIT_I: [(i8, i8); 1024] = [
 /// indices at `cabac_init_idc == 0`, keyed directly by `ctxIdx`. Extracted
 /// from FFmpeg's `cabac_context_init_PB[0][1024][2]` -- see the module docs
 /// for provenance (same fetch as `CABAC_CTX_INIT_I`).
+// verify-tables: rust=CABAC_CTX_INIT_PB0 symbol=cabac_context_init_PB commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/h264_cabac.c range=0:2048
 #[rustfmt::skip]
 pub const CABAC_CTX_INIT_PB0: [(i8, i8); 1024] = [
     (20,-15), (2,54), (3,74), (20,-15), (2,54), (3,74), (-28,127), (-23,104),
@@ -303,6 +308,7 @@ pub const CABAC_CTX_INIT_PB0: [(i8, i8); 1024] = [
 /// `(m, n)` context-initialisation pairs for all 1024 P/B-slice CABAC context
 /// indices at `cabac_init_idc == 1`. Extracted from FFmpeg's
 /// `cabac_context_init_PB[1][1024][2]` -- see the module docs for provenance.
+// verify-tables: rust=CABAC_CTX_INIT_PB1 symbol=cabac_context_init_PB commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/h264_cabac.c range=2048:4096
 #[rustfmt::skip]
 pub const CABAC_CTX_INIT_PB1: [(i8, i8); 1024] = [
     (20,-15), (2,54), (3,74), (20,-15), (2,54), (3,74), (-28,127), (-23,104),
@@ -438,6 +444,7 @@ pub const CABAC_CTX_INIT_PB1: [(i8, i8); 1024] = [
 /// `(m, n)` context-initialisation pairs for all 1024 P/B-slice CABAC context
 /// indices at `cabac_init_idc == 2`. Extracted from FFmpeg's
 /// `cabac_context_init_PB[2][1024][2]` -- see the module docs for provenance.
+// verify-tables: rust=CABAC_CTX_INIT_PB2 symbol=cabac_context_init_PB commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/h264_cabac.c range=4096:6144
 #[rustfmt::skip]
 pub const CABAC_CTX_INIT_PB2: [(i8, i8); 1024] = [
     (20,-15), (2,54), (3,74), (20,-15), (2,54), (3,74), (-28,127), (-23,104),

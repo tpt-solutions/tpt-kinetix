@@ -8,5 +8,7 @@
 pub mod analysis;
 pub mod codegen;
 pub mod extraction;
+pub mod fetch_source;
 pub mod graph;
 pub mod ingestion;
+pub mod table_extract;

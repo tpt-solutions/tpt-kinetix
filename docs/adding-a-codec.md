@@ -267,6 +267,58 @@ crash-inducing inputs as regression fixtures in `fuzz/corpus/`.
 
 ---
 
+## Step 9.5 — Extracting Spec-Mandated Numeric Tables
+
+Codecs are full of numeric tables the spec mandates exactly (CABAC context-init tables,
+VLC tables, scan orders, quantization matrices, CDF tables, ...). These are usually
+transcribed once by hand from a reference decoder like FFmpeg — and a single wrong digit
+is easy to miss and hard to catch: H.264's `TRANS_IDX_LPS[28]` was wrong for a long time
+and was only found by building a whole separate C harness and diffing bit-exact decode
+output. Don't repeat that: use `tpt-kinetix-kg`'s table-extraction tooling instead of
+retyping tables from a PDF or C file by hand.
+
+1. Find the array in FFmpeg's C source (`libavcodec/<codec>*.c`) and note its exact name
+   and the commit hash you're reading it at.
+2. Sanity-check the extractor against it:
+   ```sh
+   cargo run -p tpt-kinetix-kg -- fetch-source \
+     --commit <commit-hash> --file libavcodec/foo.c
+   cargo run -p tpt-kinetix-kg -- extract-tables \
+     .cache/ffmpeg/<commit-hash>/libavcodec/foo.c --symbol some_table_name
+   ```
+   This prints the array flattened to a plain integer list in source order — paste it
+   into your new Rust `const`, reshaping to whatever `[T; N]` / tuple layout you need
+   (the tool doesn't infer Rust types, only extracts the raw numbers).
+3. Above the resulting `const`, add a `// verify-tables:` marker so it stays checked
+   against upstream forever after, instead of being a one-shot transcription:
+   ```rust
+   // verify-tables: rust=SOME_TABLE symbol=some_table_name commit=<commit-hash> file=libavcodec/foo.c
+   pub const SOME_TABLE: [i8; 64] = [ ... ];
+   ```
+   If your Rust const only covers part of a larger combined C array (see
+   `CABAC_CTX_INIT_PB0/1/2` in `tpt-kinetix-h264/src/cabac_tables.rs`, each a slice of
+   FFmpeg's single `cabac_context_init_PB[3][1024][2]`), add `range=start:end` — the
+   half-open index range into the *flattened* C array your const corresponds to.
+4. `cargo run -p tpt-kinetix-kg -- verify-tables path/to/your_file.rs` re-fetches the
+   pinned commit and re-diffs every marked const, failing loudly with the exact
+   mismatched indices if anything drifted — this is the check that would have caught
+   `TRANS_IDX_LPS[28]` immediately instead of requiring a bespoke harness. It's wired
+   into `just check` via `just verify-tables`.
+
+Note this needs network access to fetch the pinned FFmpeg commit — nothing from FFmpeg
+(LGPL/GPL) is ever committed into this repo (Apache/MIT); fetched files land in the
+gitignored `tpt-kinetix-kg/.cache/` and are re-fetched on demand. See
+`tpt-kinetix-kg/src/fetch_source.rs` and `tpt-kinetix-kg/src/table_extract.rs`.
+
+Not every table is a simple named C array — some (like H.264's `RANGE_TAB_LPS`/
+`TRANS_IDX_LPS`/`TRANS_IDX_MPS` in `tpt-kinetix-h264/src/entropy.rs`) are packed by
+FFmpeg into one combined byte blob (`ff_h264_cabac_tables`) with hand-computed offsets;
+those aren't yet wired to `verify-tables` and still rely on the doc-comment provenance
+trail instead. Extending the extractor to unpack a unified byte blob is a reasonable
+follow-up if you hit one of these for a new codec.
+
+---
+
 ## Step 10 — Write Conformance Tests
 
 Add conformance tests using `tpt-kinetix-test-utils` that cover:

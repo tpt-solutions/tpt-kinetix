@@ -59,8 +59,14 @@ wasm-demo:
     cd tpt-kinetix-demux && wasm-pack build --target web --out-dir ../web-demo/pkg -- --features wasm
     cd web-demo && python3 -m http.server 8787 || python -m http.server 8787
 
-# The full local pre-commit gate: format check, lint, build, test.
-check: fmt-check clippy build test
+# Cross-check `// verify-tables:`-annotated spec tables against pinned upstream
+# C source (requires network access to fetch the pinned commit; see
+# docs/adding-a-codec.md "Extracting spec tables").
+verify-tables:
+    cargo run -p tpt-kinetix-kg -- verify-tables tpt-kinetix-h264/src/cabac_tables.rs
+
+# The full local pre-commit gate: format check, lint, build, test, spec tables.
+check: fmt-check clippy build test verify-tables
     @echo "All local checks passed."
 
 # One-shot contributor bootstrap: install the tools CI expects.

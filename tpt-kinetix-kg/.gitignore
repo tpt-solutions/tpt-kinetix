@@ -1,0 +1,4 @@
+# Pinned-commit FFmpeg source fetched on demand by `verify-tables` / `fetch-source`.
+# Never committed: FFmpeg is LGPL/GPL, this workspace is Apache/MIT. See
+# src/fetch_source.rs.
+/.cache/

@@ -9,6 +9,9 @@
 //! | `analyze` | Run dependency analysis on a graph JSON file |
 //! | `codegen` | Generate Rust scaffold from a graph JSON file |
 //! | `run`     | End-to-end: ingest → graph → analyze → codegen |
+//! | `fetch-source` | Fetch one pinned-commit FFmpeg file into a gitignored cache dir |
+//! | `extract-tables` | Print a named C array's initializer, flattened to integers |
+//! | `verify-tables` | Cross-check `// verify-tables:`-annotated Rust consts against their C source |
 
 use std::path::PathBuf;
 
@@ -17,8 +20,10 @@ use tpt_kinetix_kg::{
     analysis::{find_independent_sets, mark_parallel_regions},
     codegen::{generate, CodegenOptions},
     extraction::{extract_bitstream_parsing_tree, extract_macroblock_state_machine},
+    fetch_source::fetch_pinned_file,
     graph::KnowledgeGraph,
     ingestion::CAst,
+    table_extract::{extract_c_symbol_numbers, verify_file},
 };
 
 // ── CLI definition ────────────────────────────────────────────────────────────
@@ -93,6 +98,41 @@ enum Commands {
         #[arg(long)]
         inject_rayon: bool,
     },
+
+    /// Fetch `libavcodec/<file>` at a pinned commit into a gitignored cache dir.
+    FetchSource {
+        /// FFmpeg commit hash to pin the fetch to.
+        #[arg(long)]
+        commit: String,
+
+        /// Path under FFmpeg's tree, e.g. `libavcodec/h264_cabac.c`.
+        #[arg(long)]
+        file: String,
+
+        /// Cache directory to fetch into (files land under `<cache_dir>/<commit>/<file>`).
+        #[arg(long, default_value = "tpt-kinetix-kg/.cache/ffmpeg")]
+        cache_dir: PathBuf,
+    },
+
+    /// Print a named C array's initializer, flattened to a plain integer list.
+    ExtractTables {
+        /// Path to the C source file (e.g. a file fetched by `fetch-source`).
+        c_source_path: PathBuf,
+
+        /// Name of the array to extract, e.g. `cabac_context_init_I`.
+        #[arg(long)]
+        symbol: String,
+    },
+
+    /// Cross-check `// verify-tables:`-annotated Rust consts against their C source.
+    VerifyTables {
+        /// Rust source files to scan for `// verify-tables:` markers.
+        rust_files: Vec<PathBuf>,
+
+        /// Cache directory for fetched C source (see `fetch-source`).
+        #[arg(long, default_value = "tpt-kinetix-kg/.cache/ffmpeg")]
+        cache_dir: PathBuf,
+    },
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -119,6 +159,19 @@ fn main() -> anyhow::Result<()> {
             output_dir,
             inject_rayon,
         } => cmd_run(&c_source_path, &crate_name, inject_rayon, &output_dir),
+        Commands::FetchSource {
+            commit,
+            file,
+            cache_dir,
+        } => cmd_fetch_source(&commit, &file, &cache_dir),
+        Commands::ExtractTables {
+            c_source_path,
+            symbol,
+        } => cmd_extract_tables(&c_source_path, &symbol),
+        Commands::VerifyTables {
+            rust_files,
+            cache_dir,
+        } => cmd_verify_tables(&rust_files, &cache_dir),
     }
 }
 
@@ -234,6 +287,60 @@ fn cmd_run(
         files.len(),
         output_dir.display()
     );
+    Ok(())
+}
+
+fn cmd_fetch_source(commit: &str, file: &str, cache_dir: &std::path::Path) -> anyhow::Result<()> {
+    let path = fetch_pinned_file(commit, file, cache_dir)?;
+    println!("Fetched {file}@{commit} -> {}", path.display());
+    Ok(())
+}
+
+fn cmd_extract_tables(c_source_path: &std::path::Path, symbol: &str) -> anyhow::Result<()> {
+    let ast = CAst::from_file(c_source_path)?;
+    let numbers = extract_c_symbol_numbers(&ast, symbol)?;
+    println!("{symbol}: {} numbers", numbers.len());
+    println!("{numbers:?}");
+    Ok(())
+}
+
+fn cmd_verify_tables(rust_files: &[PathBuf], cache_dir: &std::path::Path) -> anyhow::Result<()> {
+    let mut total = 0;
+    let mut failed = 0;
+
+    for rust_file in rust_files {
+        let outcomes = verify_file(rust_file, cache_dir)?;
+        for outcome in outcomes {
+            total += 1;
+            if outcome.mismatches.is_empty() {
+                println!("OK   {} ({})", outcome.rust_name, rust_file.display());
+            } else {
+                failed += 1;
+                println!(
+                    "FAIL {} ({}): {} mismatched entr{}",
+                    outcome.rust_name,
+                    rust_file.display(),
+                    outcome.mismatches.len(),
+                    if outcome.mismatches.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                );
+                for (i, rust_val, c_val) in outcome.mismatches.iter().take(10) {
+                    println!("       [{i}] Rust={rust_val} C={c_val}");
+                }
+                if outcome.mismatches.len() > 10 {
+                    println!("       ... and {} more", outcome.mismatches.len() - 10);
+                }
+            }
+        }
+    }
+
+    println!("\n{}/{total} table(s) verified OK", total - failed);
+    if failed > 0 {
+        anyhow::bail!("{failed} table(s) failed verification against upstream C source");
+    }
     Ok(())
 }
 

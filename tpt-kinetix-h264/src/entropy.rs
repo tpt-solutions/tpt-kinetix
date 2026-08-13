@@ -178,6 +178,8 @@ impl<'a> CabacDecoder<'a> {
         val
     }
 
+    pub fn debug_state(&self) -> (u32, u32) { (self.range, self.offset) }
+
     /// Decode the `end_of_slice_flag` / `mb_field_decoding_flag`-terminate bin
     /// (spec §9.3.3.2.4).
     pub fn decode_terminate(&mut self) -> u8 {
@@ -209,6 +211,28 @@ impl<'a> CabacDecoder<'a> {
             }
         }
         code_num
+    }
+
+    /// Decode a fixed-k Golomb-Rice bypass-coded suffix (spec §9.3.2.3).
+    ///
+    /// Used for `mvd_lX` when |mvd| >= 9: reads unary prefix (quotient q),
+    /// then exactly k0 bits for the remainder r. Returns q * 2^k0 + r.
+    /// Distinct from `decode_bypass_eg` (level coding, variable suffix length).
+    pub fn decode_bypass_golomb(&mut self, k0: u32) -> u32 {
+        let mut q = 0u32;
+        while self.decode_bypass() == 1 {
+            q = q.saturating_add(1);
+            if q >= 32 {
+                break;
+            }
+        }
+        let mut r = 0u32;
+        for i in (0..k0).rev() {
+            if self.decode_bypass() == 1 {
+                r |= 1 << i;
+            }
+        }
+        q.saturating_mul(1u32 << k0).saturating_add(r)
     }
 
     /// Decode a truncated-unary bin string using per-position context-coded
@@ -928,15 +952,14 @@ impl RefIdxCabacContext {
 ///     mvd++;
 /// }
 /// if( mvd >= 9 )
-///     mvd += decode_bypass_eg(3);       // UEGk suffix, k=3
+///     mvd += decode_bypass_golomb(3);   // Golomb-Rice k=3 suffix
 /// return get_cabac_bypass() ? -mvd : mvd;   // sign bit only read when mvd != 0
 /// ```
 ///
-/// This confirms the task's D.2 premise: the existing generic
-/// [`CabacDecoder::decode_bypass_eg`] (order-3 Exp-Golomb) is exactly the
-/// suffix construction FFmpeg uses once the truncated-unary prefix saturates
-/// at 9 -- no new bypass-suffix primitive was needed, only this ctxIdxInc/
-/// prefix wiring around it.
+/// Uses [`CabacDecoder::decode_bypass_golomb`] (fixed-k Golomb-Rice, k=3),
+/// which reads exactly k0=3 suffix bits after the unary prefix. This is
+/// distinct from [`CabacDecoder::decode_bypass_eg`] (level coding with
+/// variable suffix length), which is used for coeff_abs_level_minus1.
 pub struct MvdCabacContext {
     /// Local layout: `[0..3)` = bin 0's neighbour-sum-selected context
     /// (ctxIdx `base`..=`base+2`), `[3..7)` = the truncated-unary
@@ -984,7 +1007,7 @@ impl MvdCabacContext {
             mvd += 1;
         }
         if mvd >= 9 {
-            mvd += dec.decode_bypass_eg(3);
+            mvd += dec.decode_bypass_golomb(3);
         }
         if dec.decode_bypass() == 1 {
             -(mvd as i32)

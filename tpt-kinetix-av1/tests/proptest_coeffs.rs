@@ -28,6 +28,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
     let mut v = vec![128u8; uv_w * uv_h];
     decode_tile_group(
         data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
+        true, false,
     )
     .is_ok()
 }

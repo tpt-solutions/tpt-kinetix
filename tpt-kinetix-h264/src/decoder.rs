@@ -760,8 +760,11 @@ impl H264Decoder {
                     pps.as_ref().map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
                 let p_result = if entropy_coding_mode_flag {
                     reader.byte_align();
+                    let cabac_data = reader.remaining_bytes();
+                    let preview: Vec<String> = cabac_data.iter().take(16).map(|b| format!("{b:02X}")).collect();
+                    eprintln!("[DEBUG P-CABAC] slice_qp={slice_qp} cabac_init_idc={} num_ref_idx_l0_active={num_ref_idx_l0_active} mb_cols={mb_cols} mb_rows={mb_rows} data_len={} first_bytes=[{}]", header.cabac_init_idc, cabac_data.len(), preview.join(" "));
                     crate::slice_data::parse_p_slice_cabac(
-                        reader.remaining_bytes(),
+                        cabac_data,
                         mb_cols,
                         mb_rows,
                         slice_qp,

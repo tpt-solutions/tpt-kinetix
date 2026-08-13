@@ -1298,3 +1298,61 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       not invoked via `just`. CI `conformance` job's nextest filter (Phase 17
       §Discoverability) remains to be re-verified locally before push.
 
+## Phase 18 — Native AAC-LC Decoder (remove symphonia MPL-2.0 dependency) (2026-08-13)
+
+> `cargo deny check` fails CI ("Deny (licenses / advisories)" job, run
+> 30184382291) because `tpt-kinetix-aac` depends on `symphonia-core` /
+> `symphonia-codec-aac`, both MPL-2.0, which isn't in `deny.toml`'s
+> `licenses.allow` list (plus an unrelated `bitflags` v1/v2 duplicate-version
+> ban from the same dependency). Rather than allow-list MPL-2.0,
+> `docs/codec-evaluations/aac.md`'s original build-vs-wrap tradeoff is being
+> revisited: replace symphonia with a native from-scratch AAC-LC decoder,
+> consistent with the H.264/AV1 native-reimplementation approach. This is a
+> multi-week effort; per explicit decision, the "Deny" CI job is left **red**
+> for the duration (no temporary `deny.toml` MPL-2.0 stopgap) until Phase 7
+> below removes symphonia entirely. Constraint: new code must be written from
+> the public ISO/IEC 13818-7 / 14496-3 spec, not transcribed from the local
+> MPL-2.0 symphonia-codec-aac source (which may only be read for algorithm
+> structure). The `tpt-kinetix-kg` FFmpeg-C-ingest pipeline is intentionally
+> not used (FFmpeg's AAC decoder is LGPL/GPL — worse license posture than the
+> problem being solved). Full phased plan:
+> `C:\Users\phill\.claude\plans\https-github-com-tpt-solutions-tpt-kinet-squishy-lemur.md`.
+
+- [ ] Phase 1 — `tpt-kinetix-aac/src/bitreader.rs` (MSB-first, AAC escape-value
+      helpers, modeled on `tpt-kinetix-h264/src/bitreader.rs`'s shape) +
+      parse-only syntax structs (`IcsInfo`, `SectionData`, SCE/CPE/LFE/FIL/END
+      element dispatch). Exit: unit tests on hand-built fixtures +
+      `*_never_panics` proptest.
+- [ ] Phase 2 — `src/codebooks.rs`: the 11 (+1 escape) Huffman spectral
+      codebooks, independently transcribed from spec tables, tree-walk decode
+      + escape handling. Exit: unit tests per codebook against hand-encoded
+      sequences + bounded-consumption/no-panic proptest.
+- [ ] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
+      `src/tns.rs`, `src/pulse.rs`: DPCM scalefactor decode, dequantization
+      formula, perceptual noise substitution, temporal noise shaping, pulse
+      data. Exit: unit tests against hand-computed values; TNS filter
+      validated against an independently computed reference.
+- [ ] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
+      channel_pair_element. Exit: unit tests reconstructing L/R from known
+      coded spectra.
+- [ ] Phase 5 — `src/mdct.rs` (1024/128-point IMDCT, written from scratch —
+      new to the whole workspace, no existing MDCT code anywhere) +
+      `src/window.rs` (KBD/sine windows, window-sequence transitions,
+      overlap-add state). Exit: IMDCT(MDCT(x))≈x round-trip test,
+      window-value tests at known points, proptest over window-sequence
+      combinations.
+- [ ] Phase 6 — Wire phases 1-5 into `decode_raw_data_block`, swap
+      `decoder.rs`'s internals onto the native path (public
+      `AacDecoder::new/with_config/set_config/set_strict/capabilities/decode/config`
+      API unchanged), new `tests/conformance_aac.rs` via
+      `tpt-kinetix-test-utils`'s `decode_aac_with_ffmpeg` + `audio_diff`
+      reference harness, `tests/proptest_decode_never_panics.rs`,
+      `just fuzz tpt-kinetix-aac fuzz_aac_decode 60`. Exit: conformance test
+      passes at a documented tolerance, bench recorded, fuzz run clean.
+- [ ] Phase 7 — Remove `symphonia-codec-aac`/`symphonia-core` from
+      `tpt-kinetix-aac/Cargo.toml` and root `Cargo.toml`; update
+      `docs/codec-evaluations/aac.md`, both READMEs' status tables, and
+      module doc comments (drop "delegated to symphonia-codec-aac" language).
+      Exit: `grep -rn symphonia` empty; `just check` and `just deny` both
+      green.
+

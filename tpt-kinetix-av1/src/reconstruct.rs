@@ -98,12 +98,74 @@ fn dc_dequant(qindex: u8) -> i32 {
 // Inverse transforms (AV1 spec §6.10)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Orthonormal DCT-IV basis matrix of size `n` (AV1's `DCT_DCT` transform
+/// type, AV1 spec §6.10.2). `M[r][c] = sqrt(2/n) * cos(pi (2r+1)(2c+1) / 4n)`.
+/// Because it is orthonormal (`M * Mᵀ = I`), the inverse transform is simply
+/// `Mᵀ` applied to rows and columns — no extra scaling step is needed beyond
+/// what the (already dequantized) transform-domain coefficients carry.
+fn dct_iv_matrix(n: usize) -> Vec<Vec<f64>> {
+    let s = (2.0 / n as f64).sqrt();
+    let mut m = vec![vec![0f64; n]; n];
+    for r in 0..n {
+        for c in 0..n {
+            m[r][c] = s
+                * (std::f64::consts::PI * (2 * r + 1) as f64 * (2 * c + 1) as f64
+                    / (4.0 * n as f64))
+                .cos();
+        }
+    }
+    m
+}
+
+/// Orthonormal DST-VII basis matrix of size `n` (AV1's `ADST` transform type,
+/// AV1 spec §6.10.4). `M[r][c] = sqrt(4/(2n+1)) * sin(pi (2r+1)(c+1) / 2(2n+1))`.
+fn dst_vii_matrix(n: usize) -> Vec<Vec<f64>> {
+    let s = (4.0 / (2 * n + 1) as f64).sqrt();
+    let mut m = vec![vec![0f64; n]; n];
+    for r in 0..n {
+        for c in 0..n {
+            m[r][c] = s
+                * (std::f64::consts::PI * (2 * r + 1) as f64 * (c + 1) as f64
+                    / (2.0 * (2 * n + 1) as f64))
+                .sin();
+        }
+    }
+    m
+}
+
+/// Apply a 2-D inverse transform: transform the rows with `row`, then the
+/// columns with `col`, on a `n`×`n` raster-ordered coefficient buffer, and
+/// return the integer residual buffer.
+fn apply_inverse(row: &[Vec<f64>], col: &[Vec<f64>], coeffs: &[i32], n: usize) -> Vec<i32> {
+    let mut tmp = vec![0f64; n * n];
+    for c in 0..n {
+        for r in 0..n {
+            let mut s = 0f64;
+            for k in 0..n {
+                s += coeffs[k * n + c] as f64 * row[r][k];
+            }
+            tmp[r * n + c] = s;
+        }
+    }
+    let mut out = vec![0i32; n * n];
+    for r in 0..n {
+        for c in 0..n {
+            let mut s = 0f64;
+            for l in 0..n {
+                s += tmp[r * n + l] * col[c][l];
+            }
+            out[r * n + c] = s.round() as i32;
+        }
+    }
+    out
+}
+
 /// 4×4 Walsh-Hadamard transform (AV1 spec §6.10.3).
 ///
 /// Selected when `Lossless` is set: AV1 §7.13.3 substitutes the inverse WHT
-/// for the regular inverse transform in that case. Like the other transforms
-/// in this module, the exact spec scaling (the shift argument the spec passes
-/// alongside the transform) is simplified — see the module header.
+/// for the regular inverse transform in that case. The 4×4 WHT output is
+/// already at residual scale (the lossless dequant step is unity), so no
+/// further scaling is applied beyond the spec's `+2 >> 2` rounding.
 #[inline]
 fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
     let mut tmp = [0i32; 16];
@@ -130,252 +192,45 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
     }
 }
 
-/// 4×4 inverse DCT (AV1 spec §6.10.2).
-#[inline]
-fn dct_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
-    let mut tmp = [0i32; 16];
-    for row in 0..4 {
-        let i = row * 4;
-        let x0 = src[i];
-        let x1 = src[i + 1];
-        let x2 = src[i + 2];
-        let x3 = src[i + 3];
-        let x0px3 = x0 + x3;
-        let x1px2 = x1 + x2;
-        let x1mx2 = x1 - x2;
-        let x0mx3 = x0 - x3;
-        tmp[i] = x0px3 + x1px2;
-        tmp[i + 2] = x0px3 - x1px2;
-        let t0 = ((x0mx3 + x1mx2) >> 1) + x0mx3;
-        let t1 = ((x1mx2 - x0mx3) >> 1) - x0mx3;
-        tmp[i + 1] = t0;
-        tmp[i + 3] = t1;
-    }
-    for col in 0..4 {
-        let x0px3 = tmp[col] + tmp[col + 12];
-        let x1px2 = tmp[col + 4] + tmp[col + 8];
-        let x1mx2 = tmp[col + 4] - tmp[col + 8];
-        let x0mx3 = tmp[col] - tmp[col + 12];
-        dst[col] = (x0px3 + x1px2 + 2) >> 2;
-        dst[col + 4] = ((x0mx3 + x1mx2 + 2) >> 1) - x0mx3;
-        dst[col + 8] = x0px3 - x1px2;
-        dst[col + 12] = ((x1mx2 - x0mx3 + 2) >> 1) - x0mx3;
-    }
-}
-
-/// 8×8 inverse DCT (AV1 spec §6.10.2).
-#[inline]
-fn dct_8x8(src: &[i32; 64], dst: &mut [i32; 64]) {
-    let mut tmp = [0i32; 64];
-    for row in 0..8 {
-        let i = row * 8;
-        let x0 = src[i];
-        let x1 = src[i + 1];
-        let x2 = src[i + 2];
-        let x3 = src[i + 3];
-        let x4 = src[i + 4];
-        let x5 = src[i + 5];
-        let x6 = src[i + 6];
-        let x7 = src[i + 7];
-        let s0 = x0 + x7;
-        let s1 = x1 + x6;
-        let s2 = x2 + x5;
-        let s3 = x3 + x4;
-        let s4 = x1 - x6;
-        let s5 = x2 - x5;
-        let s6 = x3 - x4;
-        let s7 = x0 - x7;
-        let t0 = s0 + s3;
-        let t1 = s1 + s2;
-        let t2 = s1 - s2;
-        let t3 = s0 - s3;
-        let t4 = ((s4 + s6) >> 1) + s4;
-        let t5 = ((s5 + s7) >> 1) + s7;
-        let t6 = s5 - s7;
-        let t7 = s4 - s6;
-        tmp[i] = t0 + t1;
-        tmp[i + 1] = t3 + t2;
-        tmp[i + 2] = t4 + t6;
-        tmp[i + 3] = t7 - t5;
-        tmp[i + 4] = t0 - t1;
-        tmp[i + 5] = t2 - t3;
-        tmp[i + 6] = -t4 + t6;
-        tmp[i + 7] = t5 + t7;
-    }
-    for col in 0..8 {
-        let s0 = tmp[col] + tmp[col + 56];
-        let s1 = tmp[col + 8] + tmp[col + 48];
-        let s2 = tmp[col + 16] + tmp[col + 40];
-        let s3 = tmp[col + 24] + tmp[col + 32];
-        let s4 = tmp[col + 8] - tmp[col + 48];
-        let s5 = tmp[col + 16] - tmp[col + 40];
-        let s6 = tmp[col + 24] - tmp[col + 32];
-        let s7 = tmp[col] - tmp[col + 56];
-        let t0 = s0 + s3;
-        let t1 = s1 + s2;
-        let t2 = s1 - s2;
-        let t3 = s0 - s3;
-        let t4 = ((s4 + s6) >> 1) + s4;
-        let t5 = ((s5 + s7) >> 1) + s7;
-        let t6 = s5 - s7;
-        let t7 = s4 - s6;
-        dst[col] = (t0 + t1 + 2) >> 2;
-        dst[col + 8] = (t4 + t6 + 2) >> 2;
-        dst[col + 16] = t3 + t2;
-        dst[col + 24] = t7 - t5;
-        dst[col + 32] = t0 - t1;
-        dst[col + 40] = t2 - t3;
-        dst[col + 48] = -t4 + t6;
-        dst[col + 56] = t5 + t7;
-    }
-}
-
-/// 4×4 inverse ADST (DST-7) (AV1 spec §6.10.4).
-#[inline]
-fn adst_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
-    let mut tmp = [0i32; 16];
-    for row in 0..4 {
-        let i = row * 4;
-        let x0 = src[i];
-        let x1 = src[i + 1];
-        let x2 = src[i + 2];
-        let x3 = src[i + 3];
-        let s0 = x0 + x3;
-        let s1 = x1 + x2;
-        let s2 = 2 * x1 - x2;
-        let s3 = x0 - 2 * x3;
-        tmp[i] = s0 + s1;
-        tmp[i + 2] = s0 - s1;
-        // Approximate ADST basis using sin tables
-        let a = (s3 * 106 + s2 * 213 + 256) >> 9;
-        let _b = (s2 * 106 - s3 * 213 + 256) >> 9;
-        tmp[i + 1] = a + ((s3 + s2) >> 1);
-        tmp[i + 3] = a - ((s3 + s2) >> 1);
-    }
-    for col in 0..4 {
-        let x0 = tmp[col];
-        let x1 = tmp[col + 4];
-        let x2 = tmp[col + 8];
-        let x3 = tmp[col + 12];
-        let s0 = x0 + x3;
-        let s1 = x1 + x2;
-        let s2 = x1 - x2;
-        let s3 = x0 - x3;
-        dst[col] = (s0 + s1 + 2) >> 2;
-        dst[col + 4] = ((s3 + s2 + 2) >> 1) - s3;
-        dst[col + 8] = s0 - s1;
-        dst[col + 12] = ((s2 - s3 + 2) >> 1) - s3;
-    }
-}
-
-/// 16×16 inverse DCT.
-#[inline]
-fn dct_16x16(src: &[i32; 256], dst: &mut [i32; 256]) {
-    let mut tmp = [0i32; 256];
-    for row in 0..16 {
-        let i = row * 16;
-        let mut e = [0i32; 8];
-        let mut o = [0i32; 8];
-        for j in 0..8 {
-            e[j] = src[i + j] + src[i + 15 - j];
-            o[j] = src[i + j] - src[i + 15 - j];
-        }
-        let even = dct8_1d(&e);
-        let odd = dct8_1d(&o);
-        for k in 0..8 {
-            tmp[i + k] = even[k];
-            tmp[i + 15 - k] = odd[k];
-        }
-    }
-    for col in 0..16 {
-        let mut e = [0i32; 8];
-        let mut o = [0i32; 8];
-        for j in 0..8 {
-            e[j] = tmp[col + j * 16] + tmp[col + (15 - j) * 16];
-            o[j] = tmp[col + j * 16] - tmp[col + (15 - j) * 16];
-        }
-        let even = dct8_1d(&e);
-        let odd = dct8_1d(&o);
-        for k in 0..8 {
-            dst[col + k * 16] = (even[k] + 128) >> 8;
-            dst[col + (15 - k) * 16] = (odd[k] + 128) >> 8;
-        }
-    }
-}
-
-/// 1D 8-point DCT helper.
-fn dct8_1d(x: &[i32; 8]) -> [i32; 8] {
-    let s0 = x[0] + x[7];
-    let s1 = x[1] + x[6];
-    let s2 = x[2] + x[5];
-    let s3 = x[3] + x[4];
-    let s4 = x[1] - x[6];
-    let s5 = x[2] - x[5];
-    let s6 = x[3] - x[4];
-    let s7 = x[0] - x[7];
-    let t0 = s0 + s3;
-    let t1 = s1 + s2;
-    let t2 = s1 - s2;
-    let t3 = s0 - s3;
-    let t4 = ((s4 + s6) >> 1) + s4;
-    let t5 = ((s5 + s7) >> 1) + s7;
-    let t6 = s5 - s7;
-    let t7 = ((s4 - s6) >> 1) - s6;
-    [
-        t0 + t1,
-        t3 + t2,
-        t4 + t6,
-        t7 - t5,
-        t0 - t1,
-        t2 - t3,
-        -t4 + t6,
-        t5 + t7,
-    ]
-}
-
 /// Dispatch inverse transform by type and block size.
+///
+/// Uses the orthonormal DCT-IV / DST-VII reference matrices (see
+/// [`dct_iv_matrix`] / [`dst_vii_matrix`]) so the spatial residual comes out at
+/// the correct AV1 scale — the already-dequantized coefficients are passed in
+/// `coeffs` (raster order) and this returns the residual buffer. The lossless
+/// path uses the 4×4 WHT; the identity transform (`IDTX`) passes the
+/// coefficients through unchanged.
 fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32]) {
-    let num_coeffs = (1usize << tx_size) * (1usize << tx_size);
-    match tx_size {
-        TX_4X4 => {
+    let n = 1usize << tx_size;
+    let num_coeffs = n * n;
+    if n > 16 {
+        // Larger transforms are not yet produced by the reconstruction paths
+        // (they are skipped in `decode_block`); fall back to a straight copy so
+        // we never build a giant matrix.
+        let m = num_coeffs.min(coeffs.len());
+        dst[..m].copy_from_slice(&coeffs[..m]);
+        return;
+    }
+    let res = match tx_type {
+        TX_TYPE_WHT => {
             let mut c = [0i32; 16];
-            let n = 16.min(coeffs.len());
-            c[..n].copy_from_slice(&coeffs[..n]);
+            let nn = 16.min(coeffs.len());
+            c[..nn].copy_from_slice(&coeffs[..nn]);
             let mut d = [0i32; 16];
-            match tx_type {
-                TX_TYPE_WHT => wht_4x4(&c, &mut d),
-                TX_TYPE_IDTX => d = c,
-                TX_TYPE_DST7 => adst_4x4(&c, &mut d),
-                _ => dct_4x4(&c, &mut d),
-            }
-            dst[..16].copy_from_slice(&d);
+            wht_4x4(&c, &mut d);
+            d.to_vec()
         }
-        TX_8X8 => {
-            let mut c = [0i32; 64];
-            let n = 64.min(coeffs.len());
-            c[..n].copy_from_slice(&coeffs[..n]);
-            let mut d = [0i32; 64];
-            match tx_type {
-                TX_TYPE_IDTX => d.copy_from_slice(&c),
-                _ => dct_8x8(&c, &mut d),
-            }
-            dst[..64].copy_from_slice(&d);
-        }
-        TX_16X16 => {
-            let mut c = [0i32; 256];
-            let n = 256.min(coeffs.len());
-            c[..n].copy_from_slice(&coeffs[..n]);
-            let mut d = [0i32; 256];
-            dct_16x16(&c, &mut d);
-            for (slot, value) in dst.iter_mut().zip(d.iter()) {
-                *slot = (value + 128) >> 8;
-            }
+        TX_TYPE_IDTX => coeffs[..num_coeffs].to_vec(),
+        TX_TYPE_DST7 => {
+            let m = dst_vii_matrix(n);
+            apply_inverse(&m, &m, coeffs, n)
         }
         _ => {
-            let n = num_coeffs.min(coeffs.len());
-            dst[..n].copy_from_slice(&coeffs[..n]);
+            let m = dct_iv_matrix(n);
+            apply_inverse(&m, &m, coeffs, n)
         }
-    }
+    };
+    dst[..num_coeffs].copy_from_slice(&res);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -706,8 +561,8 @@ fn reconstruct_tx_block(
     let mut residual = vec![0i32; num_coeffs];
     if coeffs.eob > 0 {
         let mut dequant = vec![0i32; num_coeffs];
-        let dc = dc_dequant(qindex) / 4;
-        let ac = ac_dequant(qindex) / 4;
+        let dc = dc_dequant(qindex) / 2;
+        let ac = ac_dequant(qindex) / 2;
         for (i, slot) in dequant.iter_mut().enumerate() {
             *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
         }
@@ -1123,6 +978,14 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
     ) -> Result<(), KinetixError> {
+        // AV1 §5.11.4: a partition block entirely outside the frame (i.e. in
+        // the superblock-padding region past the bottom/right edge) is never
+        // decoded. Without this, the recursion walks a sub-block whose top-left
+        // mi position equals `mi_rows`/`mi_cols`, indexing the neighbour-context
+        // arrays out of bounds.
+        if mi_row >= self.mi_rows || mi_col >= self.mi_cols {
+            return Ok(());
+        }
         if bsize < BLOCK_8X8 {
             return self.decode_block(mi_row, mi_col, bsize);
         }
@@ -1140,8 +1003,19 @@ impl<'a> TileDecodeState<'a> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
         let subs = split_into_subblocks(bw, bh, partition);
-        for (sub_bsize, ro, co) in subs {
-            self.decode_partition(mi_row + ro, mi_col + co, sub_bsize)?;
+
+        // Only `PARTITION_SPLIT` (and the 1:4 variants that recurse) descend into
+        // smaller blocks; every other partition resolves into leaf blocks at the
+        // current recursion level. Recursing for a `PARTITION_NONE` would push a
+        // same-size, same-position sub-block and overflow the stack.
+        if partition == PARTITION_SPLIT && bsize > BLOCK_8X8 {
+            for (sub_bsize, ro, co) in subs {
+                self.decode_partition(mi_row + ro, mi_col + co, sub_bsize)?;
+            }
+        } else {
+            for (sub_bsize, ro, co) in subs {
+                self.decode_block(mi_row + ro, mi_col + co, sub_bsize)?;
+            }
         }
         Ok(())
     }
@@ -1429,6 +1303,8 @@ pub fn decode_tile_group(
     v_plane: &mut [u8],
     y_stride: usize,
     uv_stride: usize,
+    tx_mode_select: bool,
+    reduced_tx_set: bool,
 ) -> Result<(), KinetixError> {
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
@@ -1436,10 +1312,6 @@ pub fn decode_tile_group(
     let mi_rows = height.div_ceil(MI_SIZE);
     let sb_bsize = if use_128 { BLOCK_128X128 } else { BLOCK_64X64 };
 
-    // tx_mode_select / cfl_allowed / reduced_tx_set are frame-level; we derive
-    // conservative defaults here and the caller may override via the frame
-    // header. For keyframes we assume TX_MODE_SELECT is possible and cfl is
-    // allowed (the common ffmpeg keyframe configuration).
     let uv_w = width / 2;
     let uv_h = height / 2;
     let mut state = TileDecodeState::new(
@@ -1455,9 +1327,9 @@ pub fn decode_tile_group(
         y_stride,
         uv_stride,
         qindex,
+        tx_mode_select,
         true,
-        true,
-        false,
+        reduced_tx_set,
         true, // subsampling_x (4:2:0)
         true, // subsampling_y (4:2:0)
         false,
@@ -1570,6 +1442,8 @@ pub fn reconstruct_av1_frame(
             &mut v_plane,
             width,
             uv_w,
+            frame_header.tx_mode_select,
+            frame_header.reduced_tx_set,
         )?;
     }
 
@@ -1612,6 +1486,7 @@ mod tests {
         let mut v = vec![128u8; uv_w * uv_h];
         decode_tile_group(
             data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
+            true, false,
         )?;
         Ok((y, u, v))
     }
@@ -1674,5 +1549,34 @@ mod tests {
         let mut dct = vec![0i32; 16];
         inverse_transform(&coeffs, TX_TYPE_DCT, TX_4X4, &mut dct);
         assert_ne!(wht, dct, "the WHT must not be aliased onto the DCT");
+    }
+
+    #[test]
+    fn inverse_transform_basis_is_orthonormal() {
+        // The inverse transform relies on an orthonormal basis (M·Mᵀ = I) so
+        // the residual comes out at the correct AV1 scale. Verify the DCT-IV
+        // and DST-VII matrices satisfy that, independent of the decoder.
+        for (n, maker) in [
+            (4usize, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
+            (8, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
+            (16, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
+            (4, dst_vii_matrix as fn(usize) -> Vec<Vec<f64>>),
+        ] {
+            let m = maker(n);
+            eprintln!("[diag] n={n} m.len={} m[0]={:?}", m.len(), &m[0]);
+            for r in 0..n {
+                for c in 0..n {
+                    let mut dot = 0f64;
+                    for k in 0..n {
+                        dot += m[r][k] * m[c][k];
+                    }
+                    let expected = if r == c { 1.0 } else { 0.0 };
+                    assert!(
+                        (dot - expected).abs() < 1e-9,
+                        "orthonormality failed at ({r},{c}) for n={n}: {dot}"
+                    );
+                }
+            }
+        }
     }
 }

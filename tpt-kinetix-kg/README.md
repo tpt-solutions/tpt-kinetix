@@ -27,7 +27,23 @@ cargo run -p tpt-kinetix-kg -- codegen codec.kg.json --crate-name tpt-kinetix-my
 
 # All of the above in one step
 cargo run -p tpt-kinetix-kg -- run path/to/codec.c --crate-name tpt-kinetix-mycodec --inject-rayon
+
+# Fetch one pinned-commit FFmpeg file into a gitignored cache dir (never committed —
+# FFmpeg is LGPL/GPL, this workspace is Apache/MIT)
+cargo run -p tpt-kinetix-kg -- fetch-source --commit <hash> --file libavcodec/foo.c
+
+# Print a named C array's initializer, flattened to a plain integer list
+cargo run -p tpt-kinetix-kg -- extract-tables .cache/ffmpeg/<hash>/libavcodec/foo.c --symbol some_table
+
+# Cross-check `// verify-tables:`-annotated Rust consts against their pinned C source
+cargo run -p tpt-kinetix-kg -- verify-tables path/to/some_file.rs
 ```
+
+See [`docs/adding-a-codec.md`](../docs/adding-a-codec.md)'s "Extracting spec-mandated
+numeric tables" section for the full table-verification workflow — it exists because
+spec tables transcribed by hand from a reference decoder are easy to get subtly wrong
+(see `TRANS_IDX_LPS[28]` in `tpt-kinetix-h264/src/entropy.rs`'s history) and hard to
+re-check without tooling.
 
 See [`examples/ingest_ffmpeg_h264.rs`](examples/ingest_ffmpeg_h264.rs) for the equivalent
 ingest → graph → analyze flow driven from library code instead of the CLI.

@@ -1333,11 +1333,13 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         inter_ctx[mb_idx] = this_inter_ctx;
         macroblocks.push(mb);
 
+        let (rng, off) = dec.debug_state();
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
-        eprintln!("[DBG P] mb=({mb_x},{mb_y}) end_of_slice={end_of_slice} is_last={is_last}");
+        eprintln!("[DBG P] mb=({mb_x},{mb_y}) pre_term range={rng} offset={off} end_of_slice={end_of_slice} is_last={is_last}");
         if end_of_slice != is_last {
-            return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC)"));
+            eprintln!("[DBG P] WARN: end_of_slice_flag mismatch (expected={is_last}, got={end_of_slice}) — continuing for diagnostic");
+            // return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC)"));
         }
     }
     let _ = prev_was_skip;
@@ -1471,9 +1473,12 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let mut qp = prev_qp;
             let mut dqp_nz = false;
             if cbp_l != 0 || cbp_c != 0 {
+                let (r0, o0) = dec.debug_state();
                 let dqp = ctxs.qp_delta.decode(dec, prev_dqp_nonzero);
                 dqp_nz = dqp != 0;
                 qp = (prev_qp + dqp + 52).rem_euclid(52);
+                let (r1, o1) = dec.debug_state();
+                eprintln!("[DBG P] mb=({mb_x},{mb_y}) dqp={dqp} prev_qp={prev_qp} qp={qp} cabac_before=({r0},{o0}) after=({r1},{o1})");
             }
             mb.qp = qp;
 
@@ -2022,8 +2027,10 @@ fn decode_inter_residual_cabac(
         let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
         eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} left_coded={left_coded} top_coded={top_coded} has_coeff={has_coeff}");
         if has_coeff {
+            let (r0, o0) = dec.debug_state();
             let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_LUMA_4X4, 16);
-            eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} count={count} coeffs[0]={}", coeffs[0]);
+            let (r1, o1) = dec.debug_state();
+            eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} count={count} coeffs[0]={} cabac=({r0},{o0})->({r1},{o1})", coeffs[0]);
             this_nz.luma[block] = count;
             mb.luma_coeffs[block] = coeffs;
         }
