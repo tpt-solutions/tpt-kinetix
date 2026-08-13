@@ -128,7 +128,7 @@ fn localize_pframe_diffs() {
     };
     let units = parse_nal_units_from_annexb(&annexb);
     let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).and_then(|u| SeqParameterSet::parse(&u.rbsp).ok()).expect("sps");
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp).ok()).expect("pps");
+    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok()).expect("pps");
     let p = units.iter().find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice).expect("P slice");
     let ctx = SliceHeaderContext {
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
@@ -161,7 +161,7 @@ fn localize_pframe_diffs() {
     // Re-parse the P slice to learn per-MB skip/coded + cbp.
     let mut reader = BitReader::new(&p.rbsp);
     reader.seek_to_bit(header.data_bit_offset);
-    let parsed = parse_p_slice(&mut reader, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, &mut tpt_kinetix_h264::trace::NoopTracer).expect("parse");
+    let parsed = parse_p_slice(&mut reader, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, false, &mut tpt_kinetix_h264::trace::NoopTracer).expect("parse");
 
     for mi in [7usize, 11usize] {
         let mb_x = mi as u32 % mb_cols;

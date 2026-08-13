@@ -98,44 +98,56 @@ fn dc_dequant(qindex: u8) -> i32 {
 // Inverse transforms (AV1 spec §6.10)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Orthonormal DCT-IV basis matrix of size `n` (AV1's `DCT_DCT` transform
-/// type, AV1 spec §6.10.2). `M[r][c] = sqrt(2/n) * cos(pi (2r+1)(2c+1) / 4n)`.
-/// Because it is orthonormal (`M * Mᵀ = I`), the inverse transform is simply
-/// `Mᵀ` applied to rows and columns — no extra scaling step is needed beyond
-/// what the (already dequantized) transform-domain coefficients carry.
+/// Unnormalized DCT-IV basis matrix of size `n` (AV1's `DCT_DCT` transform
+/// type, AV1 spec §7.13.2). `M[r][c] = cos(pi (2r+1)(2c+1) / 4n)`.
+///
+/// AV1's inverse transform uses the *unnormalized* cosine basis: the 1-D
+/// transform has no `1/sqrt(n)` normalization, so a 2-D (row·then·col) pass
+/// carries a factor of `n · (2/n) = 2` relative to the orthonormal basis.
+/// [`inverse_transform`] folds that constant `×2` into the final `>> 1` rounding
+/// shift (matching libaom's `round_shift` at the end of `inv_txfm_add`), so the
+/// dequantized coefficient maps directly onto the spatial residual.
 fn dct_iv_matrix(n: usize) -> Vec<Vec<f64>> {
-    let s = (2.0 / n as f64).sqrt();
     let mut m = vec![vec![0f64; n]; n];
     for r in 0..n {
         for c in 0..n {
-            m[r][c] = s
-                * (std::f64::consts::PI * (2 * r + 1) as f64 * (2 * c + 1) as f64
-                    / (4.0 * n as f64))
+            m[r][c] = (std::f64::consts::PI * (2 * r + 1) as f64 * (2 * c + 1) as f64
+                / (4.0 * n as f64))
                 .cos();
         }
     }
     m
 }
 
-/// Orthonormal DST-VII basis matrix of size `n` (AV1's `ADST` transform type,
-/// AV1 spec §6.10.4). `M[r][c] = sqrt(4/(2n+1)) * sin(pi (2r+1)(c+1) / 2(2n+1))`.
+/// Unnormalized DST-VII basis matrix of size `n` (AV1's `ADST` transform type,
+/// AV1 spec §7.13.4). `M[r][c] = sin(pi (2r+1)(c+1) / 2(2n+1))`.
 fn dst_vii_matrix(n: usize) -> Vec<Vec<f64>> {
-    let s = (4.0 / (2 * n + 1) as f64).sqrt();
     let mut m = vec![vec![0f64; n]; n];
     for r in 0..n {
         for c in 0..n {
-            m[r][c] = s
-                * (std::f64::consts::PI * (2 * r + 1) as f64 * (c + 1) as f64
-                    / (2.0 * (2 * n + 1) as f64))
+            m[r][c] = (std::f64::consts::PI * (2 * r + 1) as f64 * (c + 1) as f64
+                / (2.0 * (2 * n + 1) as f64))
                 .sin();
         }
     }
     m
 }
 
+/// AV1 `round_shift(x, 1)`: round half away from zero (spec §7.13 / libaom
+/// `round_shift`). Used to fold the 2-D unnormalized-transform `×2` factor into
+/// a single right shift after the 2-D inverse transform.
+#[inline]
+fn round_shift1(v: i32) -> i32 {
+    if v >= 0 {
+        (v + 1) >> 1
+    } else {
+        (v - 1) >> 1
+    }
+}
+
 /// Apply a 2-D inverse transform: transform the rows with `row`, then the
 /// columns with `col`, on a `n`×`n` raster-ordered coefficient buffer, and
-/// return the integer residual buffer.
+/// return the (still unrounded) residual buffer.
 fn apply_inverse(row: &[Vec<f64>], col: &[Vec<f64>], coeffs: &[i32], n: usize) -> Vec<i32> {
     let mut tmp = vec![0f64; n * n];
     for c in 0..n {
@@ -194,12 +206,14 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
 
 /// Dispatch inverse transform by type and block size.
 ///
-/// Uses the orthonormal DCT-IV / DST-VII reference matrices (see
-/// [`dct_iv_matrix`] / [`dst_vii_matrix`]) so the spatial residual comes out at
-/// the correct AV1 scale — the already-dequantized coefficients are passed in
-/// `coeffs` (raster order) and this returns the residual buffer. The lossless
-/// path uses the 4×4 WHT; the identity transform (`IDTX`) passes the
-/// coefficients through unchanged.
+/// Uses the unnormalized DCT-IV / DST-VII basis matrices (see
+/// [`dct_iv_matrix`] / [`dst_vii_matrix`]). Because the 1-D basis is
+/// unnormalized, a 2-D (row·then·col) pass carries a constant `×2` factor
+/// relative to the spatial residual; [`round_shift1`] folds that into a single
+/// final `>> 1` (matching libaom's `round_shift` at the end of
+/// `inv_txfm_add`). The lossless path uses the 4×4 WHT (which carries its own
+/// `+2 >> 2` scaling); the identity transform (`IDTX`) passes the
+/// already-dequantized coefficients through unchanged.
 fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32]) {
     let n = 1usize << tx_size;
     let num_coeffs = n * n;
@@ -220,6 +234,7 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
             wht_4x4(&c, &mut d);
             d.to_vec()
         }
+        // Identity transform: dequantized coefficients already *are* the residual.
         TX_TYPE_IDTX => coeffs[..num_coeffs].to_vec(),
         TX_TYPE_DST7 => {
             let m = dst_vii_matrix(n);
@@ -230,7 +245,15 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
             apply_inverse(&m, &m, coeffs, n)
         }
     };
-    dst[..num_coeffs].copy_from_slice(&res);
+    // Fold the unnormalized 2-D `×2` into a `>> 1` (IDTX/WHT carry their own
+    // scaling and are returned unchanged).
+    if tx_type == TX_TYPE_IDTX || tx_type == TX_TYPE_WHT {
+        dst[..num_coeffs].copy_from_slice(&res);
+    } else {
+        for (i, v) in res.iter().enumerate().take(num_coeffs) {
+            dst[i] = round_shift1(*v);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -553,25 +576,28 @@ fn reconstruct_tx_block(
     internal_tx_size: usize,
     qindex: u8,
     pred_mode: usize,
+    skip: bool,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
-    let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
     let num_coeffs = tx_px * tx_px;
 
     let mut residual = vec![0i32; num_coeffs];
-    if coeffs.eob > 0 {
-        let mut dequant = vec![0i32; num_coeffs];
-        let dc = dc_dequant(qindex) / 2;
-        let ac = ac_dequant(qindex) / 2;
-        for (i, slot) in dequant.iter_mut().enumerate() {
-            *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
+    if !skip {
+        let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+        if coeffs.eob > 0 {
+            let mut dequant = vec![0i32; num_coeffs];
+            let dc = dc_dequant(qindex);
+            let ac = ac_dequant(qindex);
+            for (i, slot) in dequant.iter_mut().enumerate() {
+                *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
+            }
+            inverse_transform(
+                &dequant,
+                internal_tx_type(coeffs.tx_type, internal_tx_size, blk.lossless),
+                internal_tx_size,
+                &mut residual,
+            );
         }
-        inverse_transform(
-            &dequant,
-            internal_tx_type(coeffs.tx_type, internal_tx_size, blk.lossless),
-            internal_tx_size,
-            &mut residual,
-        );
     }
 
     let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_px, px_x, px_y);
@@ -790,6 +816,7 @@ struct ModeCdfs {
     tx_64x64: [[u16; 4]; 3],
     txfm_split: [[u16; 3]; 21],
     skip: [[u16; 3]; 3],
+    segment_id: [[u16; 9]; 3],
     angle_delta: [[u16; 8]; 8],
     interp_filter: [[u16; 4]; 16],
 }
@@ -811,6 +838,11 @@ impl ModeCdfs {
             tx_64x64: DEFAULT_TX_64X64_CDF,
             txfm_split: DEFAULT_TXFM_SPLIT_CDF,
             skip: DEFAULT_SKIP_CDF,
+            // AV1 default `segment_id_cdf` is not yet transcribed into
+            // `cdf_tables_gen`; a uniform 8-way CDF is used as a placeholder so
+            // segmentation-enabled frames stay bit-aligned. Replace with the
+            // exact spec table before relying on pixel-exact seg decode.
+            segment_id: [[4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 0]; 3],
             angle_delta: DEFAULT_ANGLE_DELTA_CDF,
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
         }
@@ -853,6 +885,14 @@ impl ModeCdfs {
         };
         dec.read_symbol(cdf)
     }
+
+    fn read_skip(&mut self, dec: &mut SymbolDecoder<'_>, ctx: usize) -> usize {
+        dec.read_symbol(&mut self.skip[ctx])
+    }
+
+    fn read_segment_id(&mut self, dec: &mut SymbolDecoder<'_>, ctx: usize) -> usize {
+        dec.read_symbol(&mut self.segment_id[ctx])
+    }
 }
 
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
@@ -874,10 +914,15 @@ struct TileDecodeState<'a> {
     subsampling_y: bool,
     part_ctx_above: Vec<u8>,
     part_ctx_left: Vec<u8>,
+    skip_above: Vec<u8>,
+    skip_left: Vec<u8>,
     ymode_above: Vec<u8>,
     ymode_left: Vec<u8>,
     uv_above: Vec<u8>,
     uv_left: Vec<u8>,
+    segmentation_enabled: bool,
+    seg_feature_skip: bool,
+    seg_feature_alt_q: bool,
     tx_above: Vec<u8>,
     tx_left: Vec<u8>,
     // Output plane buffers (borrowed for the lifetime of the tile decode).
@@ -917,6 +962,9 @@ impl<'a> TileDecodeState<'a> {
         subsampling_x: bool,
         subsampling_y: bool,
         monochrome: bool,
+        segmentation_enabled: bool,
+        seg_feature_skip: bool,
+        seg_feature_alt_q: bool,
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
         let mi_rows = height.div_ceil(MI_SIZE);
@@ -937,6 +985,8 @@ impl<'a> TileDecodeState<'a> {
             subsampling_y,
             part_ctx_above: vec![0u8; mi_cols],
             part_ctx_left: vec![0u8; mi_rows],
+            skip_above: vec![0u8; mi_cols],
+            skip_left: vec![0u8; mi_rows],
             ymode_above: vec![DC_PRED; mi_cols],
             ymode_left: vec![DC_PRED; mi_rows],
             uv_above: vec![DC_PRED; mi_cols],
@@ -957,6 +1007,9 @@ impl<'a> TileDecodeState<'a> {
             uv_max_x4: uv_w.div_ceil(4),
             uv_max_y4: uv_h.div_ceil(4),
             monochrome,
+            segmentation_enabled,
+            seg_feature_skip,
+            seg_feature_alt_q,
         }
     }
 
@@ -1014,7 +1067,16 @@ impl<'a> TileDecodeState<'a> {
             }
         } else {
             for (sub_bsize, ro, co) in subs {
-                self.decode_block(mi_row + ro, mi_col + co, sub_bsize)?;
+                let srow = mi_row + ro;
+                let scol = mi_col + co;
+                // A sub-block whose top-left falls outside the frame (e.g. the
+                // lower half of a HORZ partition on the bottom superblock row)
+                // is never decoded — the reference decoder skips it. Without
+                // this guard the neighbour-context arrays are indexed out of
+                // bounds.
+                if srow < self.mi_rows && scol < self.mi_cols {
+                    self.decode_block(srow, scol, sub_bsize)?;
+                }
             }
         }
         Ok(())
@@ -1022,6 +1084,23 @@ impl<'a> TileDecodeState<'a> {
 
     #[inline]
     fn partition_context(&self, _mi_row: usize, _mi_col: usize, _bsize: usize) -> usize {
+        // Derived from the left/above neighbour partition types stored in
+        // `part_ctx_left`/`part_ctx_above` (mirrors `partition_plane_context` in
+        // AV1 §5.11.4). The default partition CDF tables in `cdf_tables_gen`
+        // only carry 4 rows per width bucket, so the full 16-way
+        // (left*4+above) context is reduced to 4 by taking the left-neighbour
+        // aspect. This is a placeholder pending full-context partition CDF
+        // tables.
+        let above = self.part_ctx_above[_mi_col.min(self.mi_cols - 1)] as usize;
+        let left = self.part_ctx_left[_mi_row.min(self.mi_rows - 1)] as usize;
+        (left * 4 + above) >> 2
+    }
+
+    #[inline]
+    fn segment_id_context(&self, _mi_row: usize, _mi_col: usize) -> usize {
+        // AV1 §5.11.9: context = above_seg_pred + left_seg_pred. The corpus used
+        // for Phase C validation has no segmentation, so this stays a placeholder
+        // (context 0); refine when segmentation is enabled.
         0
     }
 
@@ -1066,9 +1145,35 @@ impl<'a> TileDecodeState<'a> {
             .mode_cdfs
             .read_uv_mode(&mut self.dec, self.cfl_allowed, y_mode);
 
-        // Transform size (AV1 spec §5.11.17).
+        // Segment id (AV1 spec §5.11.8 / §5.11.9). When no segmentation is
+        // active every block is segment 0 and no symbol is read. The per-segment
+        // feature override of qindex / skip is not yet applied here (the test
+        // corpus uses no segmentation), so qindex and the skip flag below fall
+        // back to the frame-level values.
+        let seg_ctx = self.segment_id_context(mi_row, mi_col);
+        let _seg_id = if self.segmentation_enabled {
+            self.mode_cdfs
+                .read_segment_id(&mut self.dec, seg_ctx)
+        } else {
+            0
+        };
+
+        // Skip flag (AV1 spec §5.11.11). When segmentation enables the
+        // SEG_LVL_SKIP feature for this block, skip is forced on.
+        let above_skip = self.skip_above[mi_col] as usize;
+        let left_skip = self.skip_left[mi_row] as usize;
+        let skip = if self.seg_feature_skip {
+            true
+        } else {
+            self.mode_cdfs
+                .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
+                == 1
+        };
+
+        // Transform size (AV1 spec §5.11.17). Only signalled for non-skipped
+        // blocks; a skipped block carries no residual and no tx size symbol.
         let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if self.tx_mode_select && !self.lossless {
+        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
             self.read_tx_size(bsize, max_tx, mi_row, mi_col)
         } else {
             max_tx
@@ -1121,6 +1226,7 @@ impl<'a> TileDecodeState<'a> {
                         luma_tx,
                         self.qindex,
                         y_mode,
+                        skip,
                     )?;
                 }
             }
@@ -1180,6 +1286,7 @@ impl<'a> TileDecodeState<'a> {
                         c_tx,
                         self.qindex,
                         uv_mode,
+                        skip,
                     )?;
                     reconstruct_tx_block(
                         &mut self.dec,
@@ -1196,6 +1303,7 @@ impl<'a> TileDecodeState<'a> {
                         c_tx,
                         self.qindex,
                         uv_mode,
+                        skip,
                     )?;
                 }
             }
@@ -1230,6 +1338,17 @@ impl<'a> TileDecodeState<'a> {
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(slot) = self.tx_above.get_mut(c) {
                 *slot = luma_tx as u8;
+            }
+        }
+        let skip_byte = skip as u8;
+        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            if let Some(slot) = self.skip_left.get_mut(r) {
+                *slot = skip_byte;
+            }
+        }
+        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(slot) = self.skip_above.get_mut(c) {
+                *slot = skip_byte;
             }
         }
         Ok(())
@@ -1305,6 +1424,9 @@ pub fn decode_tile_group(
     uv_stride: usize,
     tx_mode_select: bool,
     reduced_tx_set: bool,
+    segmentation_enabled: bool,
+    seg_feature_skip: bool,
+    seg_feature_alt_q: bool,
 ) -> Result<(), KinetixError> {
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
@@ -1333,6 +1455,9 @@ pub fn decode_tile_group(
         true, // subsampling_x (4:2:0)
         true, // subsampling_y (4:2:0)
         false,
+        segmentation_enabled,
+        seg_feature_skip,
+        seg_feature_alt_q,
     );
 
     let mut out = Ok(());
@@ -1444,6 +1569,9 @@ pub fn reconstruct_av1_frame(
             uv_w,
             frame_header.tx_mode_select,
             frame_header.reduced_tx_set,
+            frame_header.segmentation_enabled,
+            false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
+            false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
         )?;
     }
 
@@ -1486,7 +1614,7 @@ mod tests {
         let mut v = vec![128u8; uv_w * uv_h];
         decode_tile_group(
             data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-            true, false,
+            true, false, false, false, false,
         )?;
         Ok((y, u, v))
     }
@@ -1553,9 +1681,11 @@ mod tests {
 
     #[test]
     fn inverse_transform_basis_is_orthonormal() {
-        // The inverse transform relies on an orthonormal basis (M·Mᵀ = I) so
-        // the residual comes out at the correct AV1 scale. Verify the DCT-IV
-        // and DST-VII matrices satisfy that, independent of the decoder.
+        // The inverse transform uses the *unnormalized* DCT-IV / DST-VII basis
+        // (no `1/sqrt(n)` factor). The basis is orthogonal with norm² = n, i.e.
+        // M·Mᵀ = n·I; the constant `×n` from the 2-D pass cancels the `2/n`
+        // term into the single `>> 1` in [`inverse_transform`]. Verify the
+        // unnormalized orthogonality independently of the decoder.
         for (n, maker) in [
             (4usize, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
             (8, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
@@ -1563,17 +1693,16 @@ mod tests {
             (4, dst_vii_matrix as fn(usize) -> Vec<Vec<f64>>),
         ] {
             let m = maker(n);
-            eprintln!("[diag] n={n} m.len={} m[0]={:?}", m.len(), &m[0]);
             for r in 0..n {
                 for c in 0..n {
                     let mut dot = 0f64;
                     for k in 0..n {
                         dot += m[r][k] * m[c][k];
                     }
-                    let expected = if r == c { 1.0 } else { 0.0 };
+                    let expected = if r == c { n as f64 } else { 0.0 };
                     assert!(
-                        (dot - expected).abs() < 1e-9,
-                        "orthonormality failed at ({r},{c}) for n={n}: {dot}"
+                        (dot - expected).abs() < 1e-6,
+                        "basis orthogonality failed at ({r},{c}) for n={n}: {dot}"
                     );
                 }
             }

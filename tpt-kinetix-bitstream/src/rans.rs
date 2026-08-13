@@ -16,10 +16,14 @@
 //! The core byte-renormalizing rANS primitives ([`RansEncoder`],
 //! [`RansDecoder`]) are real and round-trip-tested against a uniform
 //! [`StaticModel`]. What's *not* implemented yet is the actual per-symbol
-//! probability model Lean's coefficient/mode coding will use (context
+//! probability model a real codec's coefficient/mode coding will use (context
 //! selection, adaptive frequency tables) — that's the extension point
 //! [`SymbolModel`], stubbed here with only the uniform byte model as a
 //! concrete (but not yet useful for real compression) implementation.
+//!
+//! This crate is the shared home of these primitives; the individual original
+//! codecs (lean / vision / realtime) depend on it rather than carrying their
+//! own copies.
 
 use tpt_kinetix_core::error::KinetixError;
 
@@ -182,12 +186,12 @@ impl<'a> RansDecoder<'a> {
 /// Frames `n` independently-decodable rANS sub-streams into a single byte
 /// buffer, and splits one back apart.
 ///
-/// This is the mechanism that makes Lean's entropy stage parallel: each
+/// This is the mechanism that makes the entropy stage parallel: each
 /// sub-stream is a self-contained rANS-coded byte range with no dependency
 /// on the others, so a decoder can hand each range to a separate
-/// thread/SIMD lane. The sequence header's `num_rans_streams` field (see
-/// [`crate::headers::SequenceHeader`]) declares how many sub-streams a
-/// conforming decoder should expect per frame.
+/// thread/SIMD lane. The codec sequence header declares how many sub-streams
+/// a conforming decoder should expect per frame (e.g. one per slice in
+/// `tpt-kinetix-realtime`).
 ///
 /// # Wire format
 ///

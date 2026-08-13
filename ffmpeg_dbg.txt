@@ -1,0 +1,9 @@
+ matched as AVOption 'debug' with argument 'mb_type'.
+Reading option '-i' ... matched as output url with argument 'C:\Users\phill\AppData\Local\Temp\tpt_kinetix_h264_cabac_pframe_conformance_nodeblock\ip.h264'.
+Reading option '-f' ... matched as option 'f' (force format) with argument 'rawvideo'.
+Reading option '-y' ... matched as option 'y' (overwrite output files) with argument '1'.
+Reading option 'nul' ... matched as output url.
+Finished splitting the commandline.
+Parsing a group of options: global .
+Applying option hide_banner (do not show program banner) with argument 1.
+Applying option v (set logging level) with argument 3.

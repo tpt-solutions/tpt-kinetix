@@ -1,12 +1,13 @@
 //! Decoder capability introspection.
 //!
 //! Several Kinetix decoders are still under construction and do **not** yet
-//! produce pixel-exact output (for example, the H.264 decoder has no CABAC or
-//! intra/inter prediction, and the AV1 decoder emits placeholder frames). To
-//! avoid silently returning wrong pixel data as if it were correct, every
-//! decoder exposes a [`DecoderCapabilities`] value so that callers, the CLI,
-//! and tests can detect an incomplete decode path *programmatically* rather
-//! than by reading source comments.
+//! produce fully pixel-exact output (for example, the H.264 decoder is
+//! bit-exact for CAVLC/CABAC I/P/B slices but not yet for the 8×8 transform,
+//! interlaced coding, or non-16-aligned dimensions; the AV1 decoder is still
+//! under reconstruction). To avoid silently returning wrong pixel data as if it
+//! were correct, every decoder exposes a [`DecoderCapabilities`] value so that
+//! callers, the CLI, and tests can detect an incomplete decode path
+//! *programmatically* rather than by reading source comments.
 //!
 //! # Examples
 //!

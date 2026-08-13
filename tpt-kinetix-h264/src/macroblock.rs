@@ -119,6 +119,18 @@ pub struct Macroblock {
     /// Per-4×4-block intra prediction modes (raster order), used when
     /// `mb_type == MbType::Intra4x4`. Ignored for other types.
     pub pred_modes_4x4: Box<[Intra4x4Mode; 16]>,
+    /// Whether this macroblock used the High-profile 8×8 transform
+    /// (`transform_size_8x8_flag`). Only meaningful for `Intra4x4` macroblocks:
+    /// when set the luma residual lives in `luma_coeffs_8x8` (not `luma_coeffs`)
+    /// and the prediction modes in `pred_modes_8x8`.
+    pub transform_size_8x8: bool,
+    /// Per-8×8-block intra prediction mode (raster 8×8 order, 4 entries), valid
+    /// only when `transform_size_8x8` is set. Each value is an `Intra4x4Mode`.
+    pub pred_modes_8x8: Box<[u8; 4]>,
+    /// Luma residual for the 8×8 transform: four 64-coefficient blocks (one per
+    /// 8×8 luma region) in **8×8 zigzag** scan order. Used instead of
+    /// `luma_coeffs` when `transform_size_8x8` is set.
+    pub luma_coeffs_8x8: Box<[[i16; 64]; 4]>,
     /// Intra chroma prediction mode (0=DC, 1=Horizontal, 2=Vertical, 3=Plane).
     pub intra_chroma_pred_mode: u8,
     /// Intra_16×16 luma DC coefficients in raster order (only meaningful for
@@ -152,6 +164,9 @@ impl Macroblock {
             chroma_dc_cr: [0; 4],
             cbp: 0,
             pcm_samples: Vec::new(),
+            transform_size_8x8: false,
+            pred_modes_8x8: Box::new([0u8; 4]),
+            luma_coeffs_8x8: Box::new([[0i16; 64]; 4]),
         }
     }
 
@@ -432,6 +447,9 @@ mod tests {
             chroma_dc_cr: [0; 4],
             cbp: 0,
             pcm_samples: Vec::new(),
+            transform_size_8x8: false,
+            pred_modes_8x8: Box::new([0u8; 4]),
+            luma_coeffs_8x8: Box::new([[0i16; 64]; 4]),
         }
     }
 
@@ -501,6 +519,9 @@ mod tests {
             chroma_dc_cr: [0; 4],
             cbp: 0,
             pcm_samples: Vec::new(),
+            transform_size_8x8: false,
+            pred_modes_8x8: Box::new([0u8; 4]),
+            luma_coeffs_8x8: Box::new([[0i16; 64]; 4]),
         };
         // Each 4-row band has a constant value so vertical prediction is
         // deterministic: band0=200, band1=50, band2=10, band3=240.
@@ -606,6 +627,9 @@ mod tests {
             chroma_dc_cr: [0; 4],
             cbp: 0,
             pcm_samples: Vec::new(),
+            transform_size_8x8: false,
+            pred_modes_8x8: Box::new([0u8; 4]),
+            luma_coeffs_8x8: Box::new([[0i16; 64]; 4]),
         };
         // 16×16 plane pre-filled with 128 (DC prediction).
         let mut plane = vec![128u8; 16 * 16];

@@ -22,6 +22,9 @@ use tpt_kinetix_h264::pps::PicParameterSet;
 use tpt_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use tpt_kinetix_h264::slice_data::parse_p_slice;
 use tpt_kinetix_h264::sps::SeqParameterSet;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
+use tpt_kinetix_h264::H264Decoder;
 use tpt_kinetix_h264::trace::{DecodeTracer, TracePlane};
 
 // Fresh, independent level assembly. Mirrors §9.2.2 exactly but is written
@@ -277,17 +280,28 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-fn gen() -> Option<Vec<u8>> {
+fn gen(content: &str, w: u32, h: u32, deblock: &str) -> Option<Vec<u8>> {
+    gen_clip(content, w, h, deblock).map(|(a, _)| a)
+}
+
+/// Generate a two-frame (IDR, P) baseline CAVLC `.h264` clip and its ffmpeg
+/// reference `.yuv` decode for the given content/resolution.
+fn gen_clip(content: &str, w: u32, h: u32, deblock: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = std::env::temp_dir().join("tpt_kinetix_h264_oracle2");
     std::fs::create_dir_all(&dir).ok()?;
-    let h264 = dir.join("ip.h264");
+    let h264 = dir.join(format!("ip_{content}_{w}x{h}.h264"));
+    let refyuv = dir.join(format!("ip_{content}_{w}x{h}.yuv"));
+    let input_spec = format!("{content}=size={w}x{h}:rate=1:duration=2");
+    let x264_params = format!(
+        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock}:keyint=2:min-keyint=2"
+    );
     let ok = Command::new("ffmpeg")
         .args([
             "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1:duration=2",
+            "-f", "lavfi", "-i", &input_spec,
             "-frames:v", "2", "-c:v", "libx264", "-profile:v", "baseline",
             "-g", "2", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0:keyint=2:min-keyint=2",
+            "-x264-params", &x264_params,
             h264.to_str()?,
         ])
         .output()
@@ -296,25 +310,26 @@ fn gen() -> Option<Vec<u8>> {
     if !ok {
         return None;
     }
-    Some(std::fs::read(&h264).ok()?)
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-i", h264.to_str()?,
+            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            refyuv.to_str()?,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
 
-#[test]
-fn differential_level_assembly_oracle() {
-    if !ffmpeg_available() {
-        eprintln!("ffmpeg not available; skipping");
-        return;
-    }
-    let annexb = match gen() {
-        Some(b) => b,
-        None => {
-            eprintln!("gen failed");
-            return;
-        }
-    };
-    let units = parse_nal_units_from_annexb(&annexb);
+fn oracle_mismatches(annexb: &[u8]) -> usize {
+    let units = parse_nal_units_from_annexb(annexb);
     let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).and_then(|u| SeqParameterSet::parse(&u.rbsp).ok()).expect("sps");
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp).ok()).expect("pps");
+    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok()).expect("pps");
     let p = units.iter().find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice).expect("P slice");
     let ctx = SliceHeaderContext {
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
@@ -344,7 +359,7 @@ fn differential_level_assembly_oracle() {
     let mut reader = BitReader::new(&p.rbsp);
     reader.seek_to_bit(header.data_bit_offset);
     let mut rec = CoeffRecorder::default();
-    let _ = parse_p_slice(&mut reader, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, &mut rec);
+    let _ = parse_p_slice(&mut reader, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, false, &mut rec);
     let decoder_coeffs = rec.map.into_inner().unwrap();
 
     // Reference coeffs (independent level assembly, verified tables).
@@ -423,5 +438,83 @@ fn differential_level_assembly_oracle() {
         }
     }
     eprintln!("total mismatches = {mismatches} (decoder blocks={}, ref blocks={})", decoder_coeffs.len(), ref_map.len());
-    assert_eq!(mismatches, 0, "level-assembly oracle found mismatches");
+    mismatches
+}
+
+/// Pixel-level conformance: decode the P frame and compare against ffmpeg's
+/// reference decode. Ground-truth check that no residual off-by-one exists.
+fn pixel_conformance(annexb: &[u8], ref_yuv: &[u8], w: u32, h: u32) -> (i32, usize, usize) {
+    let frame_len = (w as usize * h as usize * 3) / 2;
+    assert_eq!(ref_yuv.len(), frame_len * 2, "ref should hold exactly two frames");
+    let ref_p = &ref_yuv[frame_len..frame_len * 2];
+    let mut dec = H264Decoder::new();
+    let pkt = Packet {
+        pts: Timestamp::new(0, (1, 30)),
+        dts: Timestamp::new(0, (1, 30)),
+        data: annexb.to_vec(),
+        stream_index: 0,
+        is_key_frame: true,
+    };
+    let frame = dec
+        .decode(&pkt)
+        .expect("decode should not error")
+        .expect("a frame should be produced");
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
+    let n = frame.data.len().min(ref_p.len());
+    let mut max_diff = 0i32;
+    let mut num_diff = 0usize;
+    for i in 0..n {
+        let d = (frame.data[i] as i32 - ref_p[i] as i32).abs();
+        if d != 0 {
+            num_diff += 1;
+            max_diff = max_diff.max(d);
+        }
+    }
+    (max_diff, num_diff, n)
+}
+
+#[test]
+fn differential_level_assembly_oracle() {
+    if !ffmpeg_available() {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    }
+
+    // (1) Differential CAVLC coeff-oracle on the proven 64x48 testsrc clip: an
+    //     independent level-assembly re-implementation must agree with the
+    //     decoder's `parse_cavlc_block` on every block.
+    let annexb = gen("testsrc", 64, 48, "deblock=0").expect("gen testsrc 64x48");
+    let m = oracle_mismatches(&annexb);
+    eprintln!("[testsrc 64x48] coeff mismatches={m}");
+    assert_eq!(m, 0, "differential CAVLC coeff oracle found mismatches");
+
+    // (2) Pixel-level conformance vs ffmpeg across a content/resolution corpus.
+    //     This is the ground-truth check that no residual off-by-one exists:
+    //     if the decoder were off by ~1 on any coefficient, the P frame would
+    //     differ from ffmpeg's reference decode. All clips are 16-aligned so the
+    //     known non-aligned-edge caveat does not apply.
+    let corpus: Vec<(&str, u32, u32, &str)> = vec![
+        ("testsrc", 64, 48, "deblock=0"),
+        ("smptebars", 64, 48, "deblock=0"),
+        ("testsrc2", 96, 64, "deblock=0"),
+        ("rgbtestsrc", 128, 96, "deblock=0"),
+    ];
+    let mut failed = 0usize;
+    for (content, w, h, deblock) in corpus {
+        let (annexb, refyuv) = match gen_clip(content, w, h, deblock) {
+            Some(t) => t,
+            None => {
+                eprintln!("gen failed for {content} {w}x{h}");
+                failed += 1;
+                continue;
+            }
+        };
+        let (max_diff, num_diff, total) = pixel_conformance(&annexb, &refyuv, w, h);
+        eprintln!("[{content} {w}x{h}] max_abs_diff={max_diff}, diff={num_diff}/{total}");
+        if max_diff != 0 {
+            failed += 1;
+        }
+    }
+    assert_eq!(failed, 0, "P-frame pixel conformance failed on some corpus clip");
 }

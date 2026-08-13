@@ -139,6 +139,8 @@ fn dpb_with_four_refs() -> Dpb {
                     is_key_frame: false,
                 },
                 frame_num,
+                field_pic_flag: false,
+                bottom_field_flag: false,
                 pic_order_cnt: frame_num as i64 * 2,
                 is_short_term: true,
                 is_long_term: false,
@@ -148,6 +150,8 @@ fn dpb_with_four_refs() -> Dpb {
             PicNumContext {
                 curr_frame_num: frame_num,
                 max_frame_num: 16,
+                field_pic_flag: false,
+                bottom_field_flag: false,
             },
             4,
         );
@@ -159,6 +163,8 @@ fn list_frame_nums(dpb: &Dpb, header: &SliceHeader) -> Vec<u32> {
     let pic_num_ctx = PicNumContext {
         curr_frame_num: header.frame_num,
         max_frame_num: 16,
+        field_pic_flag: false,
+        bottom_field_flag: false,
     };
     build_ref_list_l0(
         dpb,
@@ -209,6 +215,8 @@ fn reorder_selects_a_different_reference_picture_for_ref_idx_0() {
     let pic_num_ctx = PicNumContext {
         curr_frame_num: 4,
         max_frame_num: 16,
+        field_pic_flag: false,
+        bottom_field_flag: false,
     };
 
     let default_l0 = build_ref_list_l0(&dpb, 4, pic_num_ctx, &[]).unwrap();

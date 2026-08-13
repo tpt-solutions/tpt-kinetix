@@ -108,7 +108,7 @@ fn record_p_slice() {
     let pps = units
         .iter()
         .find(|u| u.nal_unit_type == NalUnitType::Pps)
-        .and_then(|u| PicParameterSet::parse(&u.rbsp).ok())
+        .and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok())
         .expect("pps");
     let p = units
         .iter()
@@ -155,6 +155,7 @@ fn record_p_slice() {
         slice_qp,
         num_ref_idx_l0_active,
         chroma_qp_index_offset,
+        false,
         &mut rec,
     );
     let log = rec.blocks.lock().unwrap();

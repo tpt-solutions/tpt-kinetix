@@ -582,15 +582,19 @@ impl FrameHeader {
             }
         }
 
-        // --- CDEF ---
-        let cdef_damping = if !lossless {
+        // --- CDEF (AV1 §5.9.14) ---
+        // Gated on the *sequence-header* `enable_cdef` flag, not on `lossless`.
+        // When CDEF is disabled at the sequence level the frame header carries no
+        // CDEF parameters at all; reading them unconditionally (the old `!lossless`
+        // gate) desyncs the tile-group bitstream.
+        let cdef_damping = if seq.enable_cdef {
             read_f8(&mut br, 2)? + 3
         } else {
             0
         };
         let mut cdef_y_strength = Vec::new();
         let mut cdef_uv_strength = Vec::new();
-        if !lossless {
+        if seq.enable_cdef {
             let cdef_bits = read_f8(&mut br, 2)?;
             let cdef_y_sec_strength = [0u8, 4, 8, 16];
             let cdef_uv_sec_strength = [0u8, 4, 8, 16];
@@ -608,21 +612,23 @@ impl FrameHeader {
             }
         }
 
-        // --- Loop restoration ---
-        if !lossless {
-            let lr_type_bits = if seq.color_config.mono_chrome { 1 } else { 2 };
-            let _ = lr_type_bits;
-            // Wiener (3) / SGR (2) need a bit each; we read but ignore restoration.
-            let _uses_lr = if seq.color_config.mono_chrome {
-                read_f8(&mut br, 1)?
+        // --- Loop restoration (AV1 §5.9.15) ---
+        // Gated on `!lossless && seq.enable_restoration`. When disabled the
+        // frame header carries no restoration parameters.
+        if !lossless && seq.enable_restoration {
+            let num_planes_rest = if seq.color_config.subsampling_x == false
+                && seq.color_config.subsampling_y == false
+            {
+                3
             } else {
-                let u = read_f8(&mut br, 1)?;
-                let v = read_f8(&mut br, 1)?;
-                u.max(v)
+                2
             };
-            if false {
-                // restoration_unit_size / type is after; skip detail
-                let _ = read_f(&mut br, 2)?;
+            for _ in 0..num_planes_rest {
+                let lr_type = read_f8(&mut br, 2)?;
+                if lr_type != 0 {
+                    // FrameRestorationType[i] != RESTORE_NONE → 1-bit unit-shift delta.
+                    let _lr_unit_shift_delta = read_f(&mut br, 1)?;
+                }
             }
         }
 

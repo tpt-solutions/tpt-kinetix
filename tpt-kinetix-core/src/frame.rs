@@ -68,3 +68,74 @@ impl AudioFrame {
         self.data.len().checked_div(denom).unwrap_or(0)
     }
 }
+
+/// The kind of per-point attribute carried by a [`PointCloud`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointAttributeKind {
+    /// 8- or 10-16-bit RGB colour (three samples per point at the attribute's
+    /// bit depth).
+    ColorRgb,
+    /// Scalar reflectance / intensity (e.g. LiDAR), 8-16 bit, one sample per
+    /// point.
+    Reflectance,
+    /// Unit normal vector (nx, ny, nz), quantized to the attribute bit depth,
+    /// three samples per point.
+    Normal,
+}
+
+/// A single per-point attribute channel of a [`PointCloud`].
+///
+/// `data` holds the packed per-point values; `bit_depth` records the
+/// quantization resolution (8 for typical AR/VR capture, 10-16 for HDR /
+/// scientific capture, per the volumetric codec design DECISION 4). The packing
+/// matches `kind`: colour and normal are `3 * num_points` samples, reflectance
+/// is `num_points`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointAttribute {
+    /// Semantic kind of this attribute channel.
+    pub kind: PointAttributeKind,
+    /// Quantization resolution in bits (8-16).
+    pub bit_depth: u8,
+    /// Packed per-point attribute values.
+    pub data: Vec<u8>,
+}
+
+/// A decoded volumetric point cloud.
+///
+/// This is the primary output type of `tpt-kinetix-volumetric`, parallel to
+/// [`VideoFrame`] for the 2D codecs. A cloud is an *unstructured* set of 3D
+/// points: `positions` holds `3 * num_points` `f32` values (x, y, z per point)
+/// and `attributes` holds zero or more per-point attribute channels (colour,
+/// reflectance, normal). There is no fixed 2D tiling — the data shape is
+/// fundamentally 3D, which is why a separate representation from a pixel frame
+/// is required.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointCloud {
+    /// Number of points in the cloud.
+    pub num_points: usize,
+    /// Flat `f32` position buffer: `positions[3 * i + 0..3]` is point `i`'s
+    /// (x, y, z) coordinates.
+    pub positions: Vec<f32>,
+    /// Per-point attribute channels (colour, reflectance, normal, ...).
+    pub attributes: Vec<PointAttribute>,
+}
+
+impl PointCloud {
+    /// Expected length of `positions` (`3 * num_points`).
+    #[must_use]
+    pub fn expected_positions_len(num_points: usize) -> usize {
+        num_points.saturating_mul(3)
+    }
+
+    /// `true` if this cloud carries no points.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.num_points == 0
+    }
+
+    /// Number of attribute channels carried by this cloud.
+    #[must_use]
+    pub fn attribute_count(&self) -> usize {
+        self.attributes.len()
+    }
+}

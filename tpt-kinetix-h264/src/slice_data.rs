@@ -453,6 +453,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     mb_rows: u32,
     slice_qp: i32,
     chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
@@ -477,6 +478,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
             chroma_qp_index_offset,
             tracer,
             mb_type,
+            transform_8x8_mode,
         )?;
         qp = new_qp;
         nz[mb_idx] = this_nz;
@@ -666,6 +668,7 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     _chroma_qp_index_offset: i32,
     tracer: &mut T,
     mb_type: u32,
+    transform_8x8_mode: bool,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -711,6 +714,19 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         return Err(SliceDataError::Unsupported("non-intra mb_type in I-slice"));
     };
 
+    // `transform_size_8x8_flag` is read (after the mb_type decision but before the
+    // prediction modes, §7.3.5.1) when the active PPS enables the High-profile 8×8
+    // transform, and promotes an Intra_4×4 macroblock to Intra_8×8. Declared here
+    // (function scope) so the residual stage below can see it.
+    let mut is_8x8 = false;
+    if !is_i16x16 {
+        is_8x8 = transform_8x8_mode
+            && r
+                .read_bit()
+                .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?
+                == 1;
+    }
+
     if is_i16x16 {
         mb.mb_type = MbType::Intra16x16 {
             pred_mode: i16_mode,
@@ -720,36 +736,75 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         mb.cbp = cbp_luma | (cbp_chroma << 4);
     } else {
         mb.mb_type = MbType::Intra4x4;
-        // prev_intra4x4_pred_mode_flag / rem_intra4x4_pred_mode ×16 (§7.3.5.1),
-        // read in luma4x4BlkIdx (Z-scan) order and converted to raster position
-        // via `raster_of_8x8_sub` so the result lines up with how
-        // `reconstruct.rs`/`luma_nc` index `pred_modes_4x4`/`nz`. For each block
-        // the most-probable mode is derived from the left/top neighbour modes
-        // (§8.3.1.1); a neighbour is treated as predicting DC when it's off the
-        // picture or wasn't coded as Intra_4×4.
+        // `transform_size_8x8_flag` (already read above) promotes this Intra_4×4
+        // macroblock to an Intra_8×8 one: prediction modes and the luma residual
+        // are then coded/written per-8×8 block instead of per-4×4 block.
         let mut modes = [Intra4x4Mode::Dc; 16];
-        for blk_idx in 0..16usize {
-            let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-            let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
-
-            let prev_flag = r
-                .read_bit()
-                .ok_or(SliceDataError::Eof("prev_intra4x4_pred_mode_flag"))?;
-            let final_mode = if prev_flag == 1 {
-                pred_mode
-            } else {
-                let rem = r
-                    .read_bits(3)
-                    .ok_or(SliceDataError::Eof("rem_intra4x4_pred_mode"))?
-                    as u8;
-                // §7.4.5.1: rem is coded relative to predMode, skipping it.
-                if rem < pred_mode {
-                    rem
+        if is_8x8 {
+            mb.transform_size_8x8 = true;
+            let mut modes8 = [0u8; 4];
+            // Four 8×8 blocks; each carries one prediction mode, replicated into
+            // its four 4×4 sub-blocks so neighbouring macroblocks derive the
+            // most-probable mode from the correct neighbour block (§8.3.2.1.1).
+            for i8 in 0..4usize {
+                let raster = raster_of_8x8_sub(i8, 0);
+                let pred_mode =
+                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+                let prev_flag = r
+                    .read_bit()
+                    .ok_or(SliceDataError::Eof("prev_intra8x8_pred_mode_flag"))?;
+                let final_mode = if prev_flag == 1 {
+                    pred_mode
                 } else {
-                    rem + 1
+                    let rem = r
+                        .read_bits(3)
+                        .ok_or(SliceDataError::Eof("rem_intra8x8_pred_mode"))?
+                        as u8;
+                    // §7.4.5.1: rem is coded relative to predMode, skipping it.
+                    if rem < pred_mode {
+                        rem
+                    } else {
+                        rem + 1
+                    }
+                };
+                modes8[i8] = final_mode;
+                for sub in 0..4usize {
+                    modes[raster_of_8x8_sub(i8, sub)] = Intra4x4Mode::from_u8(final_mode);
                 }
-            };
-            modes[raster] = Intra4x4Mode::from_u8(final_mode);
+            }
+            mb.pred_modes_8x8 = Box::new(modes8);
+        } else {
+            // prev_intra4x4_pred_mode_flag / rem_intra4x4_pred_mode ×16 (§7.3.5.1),
+            // read in luma4x4BlkIdx (Z-scan) order and converted to raster position
+            // via `raster_of_8x8_sub` so the result lines up with how
+            // `reconstruct.rs`/`luma_nc` index `pred_modes_4x4`/`nz`. For each block
+            // the most-probable mode is derived from the left/top neighbour modes
+            // (§8.3.1.1); a neighbour is treated as predicting DC when it's off the
+            // picture or wasn't coded as Intra_4×4.
+            for blk_idx in 0..16usize {
+                let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
+                let pred_mode =
+                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+
+                let prev_flag = r
+                    .read_bit()
+                    .ok_or(SliceDataError::Eof("prev_intra4x4_pred_mode_flag"))?;
+                let final_mode = if prev_flag == 1 {
+                    pred_mode
+                } else {
+                    let rem = r
+                        .read_bits(3)
+                        .ok_or(SliceDataError::Eof("rem_intra4x4_pred_mode"))?
+                        as u8;
+                    // §7.4.5.1: rem is coded relative to predMode, skipping it.
+                    if rem < pred_mode {
+                        rem
+                    } else {
+                        rem + 1
+                    }
+                };
+                modes[raster] = Intra4x4Mode::from_u8(final_mode);
+            }
         }
         mb.pred_modes_4x4 = Box::new(modes);
         this_pred_ctx.is_intra4x4 = true;
@@ -786,6 +841,11 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     }
     mb.qp = qp;
 
+    // 8x8 transform applies to Intra_4×4 (mb_type 0) macroblocks when the PPS
+    // enables it. The decoder gates out `transform_8x8_mode_flag` slices, so in
+    // reachable code this is always false; kept correct if that gate is lifted.
+    let is_8x8 = transform_8x8_mode && mb_type == 0;
+
     // ---- Residual parsing ----
     parse_intra_residuals(
         r,
@@ -798,6 +858,7 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         is_i16x16,
         cbp_l,
         cbp_c,
+        is_8x8,
         tracer,
     )?;
 
@@ -1299,7 +1360,6 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             top_skipped: top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
-        eprintln!("[DBG P] mb=({mb_x},{mb_y}) is_skip={is_skip}");
         if is_skip {
             let mut mb = Macroblock::new_skip();
             mb.mb_type = MbType::PSkip;
@@ -1336,9 +1396,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         let (rng, off) = dec.debug_state();
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
-        eprintln!("[DBG P] mb=({mb_x},{mb_y}) pre_term range={rng} offset={off} end_of_slice={end_of_slice} is_last={is_last}");
         if end_of_slice != is_last {
-            eprintln!("[DBG P] WARN: end_of_slice_flag mismatch (expected={is_last}, got={end_of_slice}) — continuing for diagnostic");
             // return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC)"));
         }
     }
@@ -1370,7 +1428,6 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
 
     let inter_type = ctxs.mb_type_p.decode(dec);
-    eprintln!("[DBG P] mb=({mb_x},{mb_y}) inter_type={inter_type:?}");
     match inter_type {
         None => {
             // Intra macroblock inside P slice.
@@ -1459,18 +1516,13 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
 
                     let mvd_x = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
                     let mvd_y = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
-                    eprintln!("[DBG P] mb=({mb_x},{mb_y}) part={part} mvd=({mvd_x},{mvd_y})");
                     motion.mvd_l0.push((mvd_x, mvd_y));
                     this_inter.set_partition_l0(&blks, mvd_x, mvd_y, ri as i32);
                 }
             }
 
             mb.motion = Some(motion);
-            if let Some(m) = mb.motion.as_mut() {
-                m.mvd_l0.iter_mut().for_each(|v| *v = (0, 0));
-            }
             let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
-            eprintln!("[DBG P] mb=({mb_x},{mb_y}) cbp_l={cbp_l} cbp_c={cbp_c}");
             let cbp = cbp_l | (cbp_c << 4);
             mb.cbp = cbp;
             let mut qp = prev_qp;
@@ -1481,7 +1533,7 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 dqp_nz = dqp != 0;
                 qp = (prev_qp + dqp + 52).rem_euclid(52);
                 let (r1, o1) = dec.debug_state();
-                eprintln!("[DBG P] mb=({mb_x},{mb_y}) dqp={dqp} prev_qp={prev_qp} qp={qp} cabac_before=({r0},{o0}) after=({r1},{o1})");
+                let _ = (r0, o0, r1, o1);
             }
             mb.qp = qp;
 
@@ -2028,12 +2080,8 @@ fn decode_inter_residual_cabac(
     for block in blocks {
         let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false);
         let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
-        eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} left_coded={left_coded} top_coded={top_coded} has_coeff={has_coeff}");
         if has_coeff {
-            let (r0, o0) = dec.debug_state();
             let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_LUMA_4X4, 16);
-            let (r1, o1) = dec.debug_state();
-            eprintln!("[DBG RESID] mb=({mb_x},{mb_y}) blk={block} count={count} coeffs[0]={} cabac=({r0},{o0})->({r1},{o1})", coeffs[0]);
             this_nz.luma[block] = count;
             mb.luma_coeffs[block] = coeffs;
         }
@@ -2080,6 +2128,7 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
     slice_qp: i32,
     num_ref_idx_l0_active: u32,
     chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
@@ -2138,6 +2187,7 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
             qp,
             num_ref_idx_l0_active,
             chroma_qp_index_offset,
+            transform_8x8_mode,
             tracer,
         )?;
         qp = new_qp;
@@ -2185,6 +2235,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     prev_qp: i32,
     num_ref_idx_l0_active: u32,
     chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
@@ -2215,6 +2266,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             chroma_qp_index_offset,
             tracer,
             i_type,
+            transform_8x8_mode,
         );
     }
 
@@ -2291,6 +2343,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         false,
         cbp_l,
         cbp_c,
+        false,
         tracer,
     )?;
 
@@ -2327,6 +2380,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
@@ -2372,6 +2426,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
             num_ref_idx_l0_active,
             num_ref_idx_l1_active,
             chroma_qp_index_offset,
+            transform_8x8_mode,
             tracer,
         )?;
         qp = new_qp;
@@ -2398,6 +2453,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     use crate::macroblock::BPredDir;
@@ -2417,7 +2473,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         }
         return parse_intra_macroblock(
             r, mb_x, mb_y, mb_cols, nz_grid, pred_ctx_grid, prev_qp, chroma_qp_index_offset,
-            tracer, i_type,
+            tracer, i_type, transform_8x8_mode,
         );
     }
 
@@ -2583,7 +2639,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     mb.qp = qp;
 
     parse_intra_residuals(
-        r, &mut mb, &mut this_nz, nz_grid, mb_x, mb_y, mb_cols, false, cbp_l, cbp_c, tracer,
+        r, &mut mb, &mut this_nz, nz_grid, mb_x, mb_y, mb_cols, false, cbp_l, cbp_c, false, tracer,
     )?;
 
     let mb_type_str = format!("{:?}", mb.mb_type);
@@ -2608,6 +2664,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     is_i16x16: bool,
     cbp_luma: u8,
     cbp_chroma: u8,
+    is_8x8: bool,
     tracer: &mut T,
 ) -> R<()> {
     use crate::trace::TracePlane;
@@ -2621,6 +2678,34 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         tracer.on_cavlc_block_info(mb_x, mb_y, TracePlane::Luma, 16, nc, _tc, t1, 0);
     }
 
+    // Luma residual blocks. With the 8×8 transform each of the four 8×8 luma
+    // regions is coded as four 16-coefficient CAVLC scans — the 8×8 zigzag scan
+    // (§8.5.6) groups the four 4×4 quadrants, so the four 16-coeff scans occupy
+    // zigzag positions [0,16), [16,32), [32,48), [48,64) — concatenated into a
+    // single 64-coeff zigzag-order block stored in `luma_coeffs_8x8` (§7.3.5.3.3).
+    if is_8x8 {
+        let mut block64 = [0i16; 64];
+        for i8x8 in 0..4usize {
+            if (cbp_luma >> i8x8) & 1 == 0 {
+                continue;
+            }
+            block64.fill(0);
+            for sub in 0..4usize {
+                let raster = raster_of_8x8_sub(i8x8, sub);
+                let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
+                let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
+                // Coeffs are in 4×4 zigzag order; place them at the matching slice
+                // of the 8×8 zigzag scan.
+                block64[sub * 16..sub * 16 + 16].copy_from_slice(&coeffs[..16]);
+                this_nz.luma[raster] = tc;
+                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, &coeffs);
+                tracer.on_cavlc_block_info(
+                    mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, nc, tc, t1, 0,
+                );
+            }
+            mb.luma_coeffs_8x8[i8x8] = block64;
+        }
+    } else {
     // Luma 4×4 blocks. Both intra and inter use the BlkIdx scan order defined
     // by §7.3.5.2: iterate i8x8 (0..4), gate on CodedBlockPatternLuma bit i8x8,
     // then iterate i4x4 (0..4). BlkIdx = i8x8*4 + i4x4. raster_of_8x8_sub maps
@@ -2681,6 +2766,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, pos_before, pos_after,
             );
         }
+    }
     }
 
     // Chroma DC (Cb, Cr) present when cbp_chroma & 3 (i.e. == 1 or 2).
@@ -2983,7 +3069,7 @@ mod tests {
         let data = [0xFFu8, 0x80];
         let mut r = BitReader::new(&data);
         let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
         assert_eq!(parsed.macroblocks.len(), 1);
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::PL016x16);
@@ -3009,7 +3095,7 @@ mod tests {
         let data = [0x27u8, 0xE0];
         let mut r = BitReader::new(&data);
         let parsed =
-            parse_p_slice(&mut r, 1, 4, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+            parse_p_slice(&mut r, 1, 4, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
         assert_eq!(parsed.macroblocks.len(), 4);
         for mb in &parsed.macroblocks[..3] {
             assert!(mb.skip, "MB should be skip");
@@ -3037,7 +3123,7 @@ mod tests {
         let data = [0xAFu8, 0x80];
         let mut r = BitReader::new(&data);
         let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::P16x8);
         let motion = mb.motion.as_ref().unwrap();
@@ -3059,7 +3145,7 @@ mod tests {
         let data = [0x93u8, 0xFF, 0xE0];
         let mut r = BitReader::new(&data);
         let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, &mut crate::trace::NoopTracer).unwrap();
+            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::P8x8);
         let motion = mb.motion.as_ref().unwrap();

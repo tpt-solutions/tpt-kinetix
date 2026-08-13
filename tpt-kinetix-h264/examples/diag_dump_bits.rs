@@ -69,7 +69,7 @@ fn main() {
                 sps = Some(SeqParameterSet::parse(&n.rbsp).expect("sps parse"));
             }
             NalUnitType::Pps => {
-                pps = Some(PicParameterSet::parse(&n.rbsp).expect("pps parse"));
+                pps = Some(PicParameterSet::parse(&n.rbsp, None).expect("pps parse"));
             }
             _ => {}
         }

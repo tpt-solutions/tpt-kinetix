@@ -7,7 +7,7 @@
 //! - [`timestamp`] — rational media timestamps
 //! - [`codec`] — codec and media-type identifiers
 //! - [`pixel_format`] — supported pixel / chroma-sampling formats
-//! - [`frame`] — decoded [`frame::VideoFrame`]
+//! - [`frame`] — decoded [`frame::VideoFrame`] and [`frame::PointCloud`]
 //! - [`packet`] — compressed [`packet::Packet`] as produced by a demuxer
 //! - [`encode`] — codec-agnostic encoder configuration
 //! - [`capabilities`] — per-decoder [`capabilities::DecoderCapabilities`] introspection
@@ -26,7 +26,9 @@ pub use capabilities::DecoderCapabilities;
 pub use codec::{CodecId, MediaType};
 pub use encode::{EncodeConfig, RateControl, SpeedPreset};
 pub use error::KinetixError;
-pub use frame::{AudioFrame, SampleFormat, VideoFrame};
+pub use frame::{
+    AudioFrame, PointAttribute, PointAttributeKind, PointCloud, SampleFormat, VideoFrame,
+};
 pub use packet::Packet;
 pub use pixel_format::PixelFormat;
 pub use timestamp::Timestamp;

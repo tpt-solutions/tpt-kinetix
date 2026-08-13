@@ -34,7 +34,7 @@ viewer's perceptual quality across arbitrary natural-image content.
 | `tpt-kinetix-realtime` | Sub-frame latency + graceful degradation under packet loss | Cloud gaming/video conferencing need built-in loss resilience (partial-frame recovery, no B-frame lookahead), which general codecs support only as a configuration, not a design center. AR/smart-glasses overlay content is an especially demanding target profile for this codec (see note below), alongside `tpt-kinetix-lean`'s power constraints. |
 | `tpt-kinetix-lossless` | Bit-exact reversibility, high bit depth (medical/scientific/archival) | "Perceptually close enough" is disqualifying for this use case; existing lossless modes (FFV1, lossless HEVC) aren't simple/embeddable |
 | `tpt-kinetix-screen` | Screen/UI capture: sharp edges, flat regions, repeated glyphs | General codecs are tuned for natural-image statistics, not synthetic/screen content |
-| `tpt-kinetix-face` | Talking-head/video-conferencing via landmark-driven synthesis instead of pixel coding | Pixel-based codecs can't exploit the fact that the content is a constrained class (a face) the way a generative model can |
+| `tpt-kinetix-face` | Talking-head/video-conferencing via landmark-driven synthesis instead of pixel coding | Pixel-based codecs can't exploit the fact that the content is a constrained class (a face) the way a generative model can. Design draft: `docs/face-codec-design.md` |
 | `tpt-kinetix-volumetric` | Point-cloud / volumetric / AR-VR content | Fundamentally different data shape (3D, not 2D frames) — 2D video codecs don't apply at all |
 
 **Considered and deliberately excluded:** a codec tuned per display density

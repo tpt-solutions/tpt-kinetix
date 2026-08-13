@@ -14,6 +14,7 @@ documentation = "https://docs.rs/tpt-kinetix-lean"
 
 [dependencies]
 tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+tpt-kinetix-bitstream = { path = "../tpt-kinetix-bitstream" }
 thiserror = "2"
 
 [dev-dependencies]

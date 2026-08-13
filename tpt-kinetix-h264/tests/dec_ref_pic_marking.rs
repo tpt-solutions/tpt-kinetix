@@ -155,6 +155,8 @@ fn pic_num_ctx(frame_num: u32) -> PicNumContext {
     PicNumContext {
         curr_frame_num: frame_num,
         max_frame_num: MAX_FRAME_NUM,
+        field_pic_flag: false,
+        bottom_field_flag: false,
     }
 }
 
@@ -173,6 +175,8 @@ fn decoded_picture(frame_num: u32) -> DpbEntry {
             is_key_frame: false,
         },
         frame_num,
+        field_pic_flag: false,
+        bottom_field_flag: false,
         pic_order_cnt: frame_num as i64 * 2,
         is_short_term: true,
         is_long_term: false,

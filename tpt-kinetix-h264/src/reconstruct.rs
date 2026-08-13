@@ -232,6 +232,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
     height: u32,
     chroma_qp_index_offset: i32,
     scaling: &ScalingLists,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
     let luma_stride = width as usize;
@@ -254,6 +255,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 mb_y,
                 chroma_qp_index_offset,
                 scaling,
+                weighted,
                 tracer,
             );
         }
@@ -319,14 +321,14 @@ fn reconstruct_luma<T: DecodeTracer>(
 
             // Luma DC Hadamard transform across the 16 sub-block DC coeffs.
             let dc_raster = inverse_scan_dc(&mb.luma_dc);
-            let dc_out = luma_dc_transform(&dc_raster, mb.qp);
+            let dc_out = luma_dc_transform(&dc_raster, mb.qp, scaling);
 
             // Each 4×4 sub-block: dequant AC with its DC replaced by dc_out[block].
             #[allow(clippy::needless_range_loop)]
             for block in 0..16usize {
                 let bx = (block % 4) * 4;
                 let by = (block / 4) * 4;
-                let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, Some(dc_out[block]));
+                let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, Some(dc_out[block]), 0, scaling);
                 let mut recon_blk = [0u8; 16];
                 for row in 0..4 {
                     for col in 0..4 {
@@ -400,7 +402,7 @@ fn reconstruct_luma<T: DecodeTracer>(
                         &mut pred,
                     );
                     tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, block as u8, &pred);
-                    let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
+                    let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
                     let mut recon_blk = [0u8; 16];
                     for row in 0..4 {
                         for col in 0..4 {
@@ -434,6 +436,8 @@ fn reconstruct_chroma<T: DecodeTracer>(
     mb_x: u32,
     mb_y: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
     tracer: &mut T,
 ) {
     let base_x = (mb_x * 8) as usize;
@@ -476,7 +480,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
 
         let ac = if comp == 0 {
             &mb.chroma_cb_coeffs
@@ -486,7 +490,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
         for block in 0..4usize {
             let bx = (block % 2) * 4;
             let by = (block / 2) * 4;
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]));
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
             let mut recon_blk = [0u8; 16];
             for row in 0..4 {
                 for col in 0..4 {
@@ -519,6 +523,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
     width: u32,
     height: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
@@ -542,6 +547,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     mb_cols,
                     mb_x,
                     mb_y,
+                    scaling,
                     weighted,
                     tracer,
                 );
@@ -556,11 +562,12 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    scaling,
                     weighted,
                     tracer,
                 );
             } else {
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, tracer);
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -569,6 +576,8 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    scaling,
+                    weighted,
                     tracer,
                 );
             }
@@ -600,6 +609,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
     width: u32,
     height: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
@@ -637,6 +647,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     mb_cols,
                     mb_x,
                     mb_y,
+                    scaling,
                     weighted,
                     tracer,
                 );
@@ -652,11 +663,12 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    scaling,
                     weighted,
                     tracer,
                 );
             } else {
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, tracer);
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -665,6 +677,8 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     mb_x,
                     mb_y,
                     chroma_qp_index_offset,
+                    scaling,
+                    weighted,
                     tracer,
                 );
             }
@@ -693,6 +707,7 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
     mb_cols: u32,
     mb_x: u32,
     mb_y: u32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) {
@@ -744,7 +759,7 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
             cell.mv, ref_idx0,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
         for row in 0..4 {
             for col in 0..4 {
                 let px = x0 as usize + col;
@@ -775,6 +790,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
     mb_x: u32,
     mb_y: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) {
@@ -791,7 +807,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
         let dc_raster = [
             dc_src[0] as i32, dc_src[1] as i32, dc_src[2] as i32, dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -844,7 +860,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
                 cell.mv, ref_idx0,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]));
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
             for row in 0..4 {
                 for col in 0..4 {
                     let px = x0 as usize + col;
@@ -876,6 +892,7 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
     mb_cols: u32,
     mb_x: u32,
     mb_y: u32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) {
@@ -913,7 +930,7 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
             combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
         tracer.on_motion_comp(mb_x, mb_y, TracePlane::Luma, block as u8, &pred, cell.mv, ref_idx);
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None);
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
         let mut recon_blk = [0u8; 16];
         for row in 0..4 {
             for col in 0..4 {
@@ -950,6 +967,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
     mb_x: u32,
     mb_y: u32,
     chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) {
@@ -981,7 +999,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -1025,7 +1043,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                 ref_idx,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]));
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
             let mut recon_blk = [0u8; 16];
             for row in 0..4 {
                 for col in 0..4 {
@@ -1090,7 +1108,7 @@ mod tests {
     #[test]
     fn empty_frame_reconstructs_without_panic() {
         let mbs = vec![Macroblock::new_skip(); 1];
-        let f = reconstruct_intra_frame(&mbs, 1, 1, 16, 16, 0, &mut crate::trace::NoopTracer);
+        let f = reconstruct_intra_frame(&mbs, 1, 1, 16, 16, 0, &crate::transform::ScalingLists::flat(), &WeightedPred::Default, &mut crate::trace::NoopTracer);
         assert_eq!(f.luma.len(), 16 * 16);
         assert_eq!(f.chroma_cb.len(), 8 * 8);
     }
@@ -1115,6 +1133,7 @@ mod tests {
             16,
             16,
             0,
+            &crate::transform::ScalingLists::flat(),
             &WeightedPred::Default,
             &mut crate::trace::NoopTracer,
         );
@@ -1161,6 +1180,7 @@ mod tests {
             32,
             16,
             0,
+            &crate::transform::ScalingLists::flat(),
             &WeightedPred::Default,
             &mut crate::trace::NoopTracer,
         );
@@ -1216,6 +1236,7 @@ mod tests {
             16,
             16,
             0,
+            &crate::transform::ScalingLists::flat(),
             &weighted,
             &mut crate::trace::NoopTracer,
         );

@@ -774,11 +774,19 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `ffmpeg`, validate bit-exact decode
 
 #### Phase G.1 — PAFF: field-picture parsing
-- [ ] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, currently
+- [x] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, previously
       discarded as `_bottom_field_flag`) through slice/header state instead of
-      dropping it
-- [ ] Implement field-picture POC derivation (§8.2.1.2/8.2.1.3, distinct from
-      the existing frame-picture path)
+      dropping it — `SliceHeader` now carries `field_pic_flag`, `bottom_field_flag`,
+      and `delta_pic_order_cnt_bottom` (§7.3.3); the slice header parser reads and
+      stores them, and round-trip unit tests assert both field and frame pictures
+      parse correctly
+- [x] Implement field-picture POC derivation (§8.2.1.2/8.2.1.3, distinct from the
+      existing frame-picture path) — `derive_pic_order_cnt` now takes
+      `field_pic_flag`/`bottom_field_flag`/`delta_pic_order_cnt_bottom`; `PocState`
+      tracks per-field `prev_top_field_order_cnt`/`prev_bottom_field_order_cnt`
+      (the MSB/LSB predictor is derived from their max, per §8.2.1.1) so type-0
+      (separate per-field `pic_order_cnt_lsb`) and type-2 (`base + 1` for the
+      bottom field) field POC both derive correctly and are unit-tested
 
 #### Phase G.2 — PAFF: field-picture reconstruction
 - [ ] Field-picture reference list construction (§8.2.4.2.5)
@@ -799,9 +807,33 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `ffmpeg`; validate bit-exact decode vs `ffmpeg` for each independently
 
 ### H.264 — Phase H: conformance & capability flip
-- [ ] Cross-codec conformance harness vs ITU test vectors + `ffmpeg`; on pass,
-      set `H264Decoder::capabilities().pixel_exact = true`, enable the gated
-      pixel-exact assertions, and update `lib.rs`/README/`todo.md` status
+
+- [x] Cross-codec conformance harness vs `ffmpeg`: `tpt-kinetix-h264/tests/conformance_matrix.rs`
+      enumerates a profile × entropy × frame-structure × deblock × resolution
+      matrix (CAVLC/CABAC I/P/B, 4:2:0, progressive, 16-px-aligned, no 8×8) and
+      asserts **bit-exact** (`max_abs_diff == 0`) decode vs `ffmpeg` for every
+      supported cell; the already-present `*_conformance.rs` suites are the
+      per-feature gated pixel-exact assertions. The harness additionally asserts
+      the **honesty contract** for the unsupported subset (8×8 transform / High
+      profile, interlaced PAFF): under `with_strict(true)` the decoder returns
+      `KinetixError::NotPixelExact` rather than emitting wrong pixels. Gated on
+      `ffmpeg` presence (skips on runners without it).
+- [x] Update `H264Decoder::capabilities()` to the *actual* achieved state:
+      `supports_inter_prediction = true` (P/B + B-frames are bit-exact),
+      accurate `notes` (CAVLC/CABAC I/P/B bit-exact; 8×8 / interlaced /
+      non-16-aligned still open). Stale claim that B-frames, CABAC P/B, and
+      weighted prediction were unimplemented — contradicting the passing
+      conformance suites — has been corrected. `tpt-kinetix-core` `capabilities.rs`
+      and `tpt-kinetix-h264/README.md` status sections updated to match.
+- [~] **Global `pixel_exact` flip — gated (NOT flipped).** The decoder is
+      bit-exact for its supported subset, but `pixel_exact` is a *global* honesty
+      flag, and genuine gaps remain: the 8×8 transform / High profile (Phase F),
+      interlaced PAFF/MBAFF (Phase G), and a non-16-aligned-dimension crop-edge
+      gap (Phase 12 A follow-up). Flipping the flag while those exist would make
+      callers/CLI trust approximate output, directly contradicting the project's
+      `NotPixelExact` honesty design. The flip stays `false` until Phases F/G and
+      the crop-edge gap land; the `conformance_matrix.rs` gate asserts
+      `!capabilities().pixel_exact` so the constraint is enforced in CI.
 
 ### AV1 — from-scratch reconstruction
 
@@ -1004,52 +1036,113 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > rationale already in `docs/codec-backlog.md`, so whichever one gets picked
 > next has a session-sized starting point instead of a blank page.
 
-#### `tpt-kinetix-realtime` — design-phase checklist (start here once prioritized)
-- [ ] Decide the target profile for v1 (cloud gaming vs. video conferencing
-      vs. AR/smart-glasses overlay) — `docs/codec-backlog.md` flags AR overlay
-      as the most demanding of the three (extreme power budget,
-      foveated/gaze-contingent rendering, real-world latency sensitivity)
-- [ ] Write the format design doc: partial-frame loss-recovery mechanism
+#### `tpt-kinetix-realtime` — design-phase checklist (RESOLVED 2026-08-13; promoted to Phase 16 scaffold)
+- [x] Decide the target profile for v1 — **profile-agnostic** (2026-08-13):
+      design the bitstream around the shared realtime core (no-B-frame
+      lookahead / low-latency GOP + partial-frame loss recovery) and expose
+      cloud gaming, video conferencing, and AR/smart-glasses overlay as
+      *decode profiles / config knobs* (latency ceiling, power budget,
+      foveation enable, loss-resilience strength), not as separate codecs.
+      Rationale: (a) all three share the same latency + loss-resilience center,
+      so a single forkable core avoids 3× surface; (b) `docs/codec-backlog.md`
+      flags AR overlay as the most demanding of the three (extreme power
+      budget, foveated/gaze-contingent rendering, real-world latency), so AR
+      becomes the *hardest* profile (the stress test), not the v1 baseline —
+      it leans on `tpt-kinetix-lean`'s power-conscious embedded primitives
+      rather than being invented independently here; (c) cloud-gaming and
+      conferencing are near-identical profiles differing only in decode
+      complexity + symmetry, so they collapse to one default profile with two
+      preset parameter sets. Next items below should design the core to be
+      profile-parameterized from day one.
+- [x] Write the format design doc: partial-frame loss-recovery mechanism
       (forward error correction vs. concealment vs. both) and how the
-      no-B-frame-lookahead constraint shapes GOP structure
-- [ ] Design the per-frame latency budget and how it's enforced (encode-side
-      deadline, decode-side bounded work)
-- [ ] Decide how loss resilience is measured for design validation (e.g. a
+      no-B-frame-lookahead constraint shapes GOP structure — **designed
+      (2026-08-13), see `docs/realtime-codec-design.md`** (DECISION 1 hybrid
+      FEC + intra-refresh + concealment; DECISION 2 rolling intra-refresh +
+      on-demand IDR, single reference, no B-frames)
+- [x] Design the per-frame latency budget and how it's enforced (encode-side
+      deadline, decode-side bounded work) — **designed**, see
+      `docs/realtime-codec-design.md` DECISION 4 (encode `deadline_ms` rate
+      control fallback + decode bounded work via no-B / single-ref / fixed
+      slice grid / lean-style single deblock + `max_decode_ms` capability)
+- [x] Decide how loss resilience is measured for design validation (e.g. a
       simulated packet-loss-vs-quality curve, the loss-resilience analogue of
-      Phase 15's mAP-vs-bitrate metric)
-- [ ] Document the memory/perf/latency budget for v1 (target hardware class,
-      ms/frame ceiling)
-- [ ] Decide the relationship to `tpt-kinetix-lean` — `docs/codec-backlog.md`
-      notes they share a power/latency-conscious embedded target
+      Phase 15's mAP-vs-bitrate metric) — **decided**, see DECISION 5:
+      PSNR/SSIM-vs-loss curve + stall/freeze-rate-vs-loss (latency half);
+      gaze-weighted variant deferred to AR profile; harness in
+      `tpt-kinetix-test-utils` behind `realtime-bench`
+- [x] Document the memory/perf/latency budget for v1 (target hardware class,
+      ms/frame ceiling) — **documented**, see DECISION 6: one envelope with
+      three profile presets (cloud gaming / conferencing / AR-foveated); AR
+      is the hardest preset (fine slice grid, 20-30% FEC, <10 MB arena,
+      foveation on)
+- [x] Decide the relationship to `tpt-kinetix-lean` — `docs/codec-backlog.md`
+      notes they share a power/latency-conscious embedded target — **decided**,
+      see DECISION 7: extract `tpt-kinetix-bitstream` now (lean + vision +
+      realtime are 3 copies of `BitReader`/rANS/partition/transform/deblock);
+      realtime adds slice-grid framing, intra-refresh masking, FEC framing,
+      optional foveation, latency-deadline fields on top
 
 #### `tpt-kinetix-lossless` — design-phase checklist (start here once prioritized)
-- [ ] Decide the target domain for v1 (medical imaging vs. scientific capture
+
+> v1 scope **decided (2026-08-13):** a single unified lossless format serving
+> all three target domains (medical imaging, scientific capture, archival),
+> guaranteeing bit-exact round-trip for **10/12/16-bit** samples. Design doc:
+> `docs/lossless-codec-design.md` (DECISION 1 resolved; 2–6 specified).
+
+- [x] Decide the target domain for v1 (medical imaging vs. scientific capture
       vs. archival) and the bit-depth range it must support (10/12/16-bit)
-- [ ] Write the format design doc: reversible compression approach
+      — **unified across all three domains; 10/12/16-bit bit-exact** (DECISION 1)
+- [x] Write the format design doc: reversible compression approach
       (predictive + entropy coding, à la FFV1, vs. a reversible wavelet
-      transform)
-- [ ] Design the decode path's correctness contract — how bit-exact
+      transform) — **done**, `docs/lossless-codec-design.md` DECISION 2:
+      predictive+entropy (FFV1-like) primary; reversible wavelet mode reserved
+      via `transform_id` for a later phase
+- [x] Design the decode path's correctness contract — how bit-exact
       round-trip is verified as part of the format itself (e.g. a built-in
-      checksum), not just left to external testing
-- [ ] Decide how compression ratio at guaranteed losslessness is measured for
-      design validation (baseline against FFV1 / lossless HEVC)
-- [ ] Document the memory/perf budget for v1 (archival-quality capture means
-      large uncompressed frame sizes)
-- [ ] Decide the relationship to existing kinetix bitstream primitives
-      (reuse `tpt-kinetix-lean`'s `bitreader.rs`/`rans.rs` shape or diverge)
+      checksum), not just left to external testing — **designed** (DECISION 3):
+      per-frame CRC32/CRC64 + stream SHA-256, decoder returns `ReversibilityError`
+      on mismatch; round-trip harness in `tpt-kinetix-test-utils`
+- [x] Decide how compression ratio at guaranteed losslessness is measured for
+      design validation (baseline against FFV1 / lossless HEVC) — **decided**
+      (DECISION 4): ratio-vs-FFV1 bpp metric on a 10/12/16-bit corpus, within
+      ~10% of FFV1 as the v1 acceptance bar
+- [x] Document the memory/perf budget for v1 (archival-quality capture means
+      large uncompressed frame sizes) — **documented** (DECISION 5): ≤4096²
+      per plane, bounded arena via `max_*` header, parallel rANS sub-streams,
+      integer-only math, no real-time budget
+- [x] Decide the relationship to existing kinetix bitstream primitives
+      (reuse `tpt-kinetix-lean`'s `bitreader.rs`/`rans.rs` shape or diverge) —
+      **decided** (DECISION 6): depend on `tpt-kinetix-lean` for `Rans`/
+      `BitReader`; add a new reversible prediction stage (Lean's DCT bank is not
+      reused)
 
 #### `tpt-kinetix-screen` — design-phase checklist (start here once prioritized)
-- [ ] Decide the target content class for v1 (desktop capture vs. mobile UI
-      vs. mixed screen+video content)
-- [ ] Write the format design doc: per-block mode classification (flat-fill
-      run-length, glyph/edge palette mode, natural-image fallback)
-- [ ] Design cross-frame glyph/palette dictionary reuse for repeated UI
-      elements
-- [ ] Decide how compression efficiency is measured for design validation
+- [x] Decide the target content class for v1 (desktop capture vs. mobile UI
+      vs. mixed screen+video content) — **Decision: desktop capture** (mobile
+      UI → higher-DPI profile, mixed screen+video → stretch/validation corpus);
+      see `docs/screen-codec-design.md` DECISION 1
+- [x] Write the format design doc: per-block mode classification (flat-fill
+      run-length, glyph/edge palette mode, natural-image fallback) — **DECISION 2
+      resolved** in `docs/screen-codec-design.md` (fixed 16x16 CB grid + mode map
+      rANS stream + FLAT run-length + GLYPH dict ref + NATURAL reuses Lean)
+- [x] Design cross-frame glyph/palette dictionary reuse for repeated UI
+      elements — **DECISION 3 resolved** in `docs/screen-codec-design.md`
+      (encoder-authoritative global glyph dict + color palette, inline-at-first-use,
+      key-frame/flag reset; no implicit LRU)
+- [x] Decide how compression efficiency is measured for design validation
       (baseline against H.264 screen-content-coding extensions or VP9
-      lossless)
-- [ ] Document the memory/perf budget for v1
-- [ ] Decide the relationship to existing kinetix bitstream primitives
+      lossless) — **DECISION 4 resolved** in `docs/screen-codec-design.md`
+      (PSNR RD vs H.264 SCC + VP9 lossless primary; edge-F1 differentiator;
+      VMAF guard; ffmpeg-gated `screen-bench` harness)
+- [x] Document the memory/perf budget for v1 — **DECISION 5 resolved** in
+      `docs/screen-codec-design.md` (1080p/60fps, dict_cap 256, palette_cap 64,
+      glyph_max_dim 32, ~12 MB arena, <8 ms RPi-5 decode)
+- [x] Decide the relationship to existing kinetix bitstream primitives —
+      **DECISION 6 resolved** in `docs/screen-codec-design.md` (depend on
+      `tpt-kinetix-bitstream` for BitReader+rANS+SymbolModel; NATURAL fallback
+      reuses transform/partition/intra/deblock from bitstream once promoted, lean
+      interim; screen owns only classifier/dict/palette/RLE)
 
 #### `tpt-kinetix-face` — design-phase checklist (start here once prioritized)
 - [ ] Decide the landmark/parametric face representation for v1 (3DMM, sparse
@@ -1082,10 +1175,14 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       kinetix codec — `docs/codec-backlog.md` flags it as fundamentally
       different, but that should be a stated decision here, not an assumption
 
-- [ ] Prioritize this list (pick the next one to move from backlog to an
+- [x] Prioritize this list (pick the next one to move from backlog to an
       actual Phase-13-style design + scaffold effort, using its
       design-phase checklist above as the starting task list) once
-      `tpt-kinetix-lean` reaches a stable v1
+      `tpt-kinetix-lean` reaches a stable v1 — **realtime chosen (2026-08-13)**:
+      design doc `docs/realtime-codec-design.md` written (all 7 DECISION blocks
+      resolved), and the scaffold is started — `tpt-kinetix-bitstream` (shared
+      BitReader + rANS) + `tpt-kinetix-realtime` (profile-aware headers +
+      decoder shell) created and compiling. See Phase 16.
 
 ## Phase 15 — `tpt-kinetix-vision`: Video-for-Machines Codec (design phase) (2026-07-20)
 
@@ -1156,18 +1253,29 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        (bypassing the decoder's skip-frame fallback). It now PASSES — the
        Phase 12 C.1 desync is resolved (the slice parses to completion). It
        serves as the regression guard for the CAVLC P-slice parse path.
-- [ ] Pin the exact P-frame residual off-by-one with a CAVLC oracle. Two
-       viable routes: (a) extract per-block `TotalCoeff`/coefficient ground
-       truth from a known-good decoder (FFmpeg `h264`/`libavcodec`, or `dav1d`
-       for AV1) and diff against `parse_cavlc_block`; or (b) build a second
-       independent `parse_cavlc_block` in a throwaway test, feed it the exact
-       P-slice bytes, and compare positions/values for the coded MBs (the
-       current diff is 49 samples at max_diff=2, so the error is a single
-       low-frequency coefficient level off by ~1, not a bit-position desync).
-- [ ] Once pinned, fix the offending routine (most likely a single
-       `level`/`run_before`/`total_zeros` case in a high-activity block) and
-       restore a clean error path; then re-enable the strict `max_diff=0`
-       assertion in `p_frame_conformance`.
+- [x] Pin the exact P-frame residual off-by-one with a CAVLC oracle. **RESOLVED
+        2026-08-08 (Phase C.2) — verified 2026-08-13.** The throwaway
+        independent oracle (`tests/p_slice_oracle2.rs`, route (b): a fresh
+        §9.2.2 level-assembly re-implementation sharing only the ffmpeg-verified
+        VLC tables, walked over the exact 64×48 IP P-slice bytes and diffed
+        per-block against `parse_cavlc_block`'s traced coeffs) reports
+        **0 mismatches across all 104 luma/chroma-AC/chroma-DC blocks**. So the
+        residual decode path is correct and no off-by-one exists in
+        `level`/`run_before`/`total_zeros` assembly. The earlier `max_diff=2`
+        over 49/4608 samples was a **false premise in the test harness**, not a
+        decoder bug: `-x264-params deblock=0` only zeroes x264's alpha/beta
+        offset and does *not* set `disable_deblocking_filter_idc=1`, so the
+        conformance test was comparing against an ffmpeg reference with the
+        in-loop deblocking **on** while assuming it off. With deblocking
+        genuinely disabled (`no-deblock=1`) the P-frame decode is bit-exact
+        (`max_diff=0`), and with it enabled the per-4×4-block `bS` deblocking
+        fix (Phase C.2) also makes it bit-exact. The strict `max_diff=0`
+        assertion in `p_frame_conformance` is live and passing.
+- [x] Once pinned, fix the offending routine — **nothing to fix**. The oracle
+        confirmed the residual decode was never the bug; the real (and already
+        fixed) gap was the deblocking `bS` per-4×4-block derivation in
+        `deblock.rs` (Phase C.2). The strict `max_diff=0` assertion in
+        `p_frame_conformance` is re-enabled and passing (both deblocking on/off).
 
 ### Publishing (tractable, no credential needed)
 - [x] `cargo publish --dry-run` revealed `tpt-kinetix-core@0.1.0` **already
@@ -1188,18 +1296,22 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        `.exe`, `.wasm`, or media samples).
 
 ### Status notes
-- The P-frame CAVLC **bit-position desync is resolved**: `p_slice_cavlc_invariant`
-  passes and the P-slice parses to completion. The remaining error is a
-  **residual precision issue**, not a desync: `cavlc_pframe_no_deblock_is_bitexact`
-  is at `max_diff=2` over `49/4608` samples on the 64×48 baseline CAVLC IP clip
-  (deblocking off). All P-slice MVs are (0,0)/ref 0, so MC/reference copy is
-  exercised and correct (zeroing residuals makes the output equal the reference
-  frame); the ±1–2 errors are confined to coded MBs, consistent with a single
-  low-frequency residual coefficient level off by ~1 in the CAVLC decode. The
-  `coeff_token`, `total_zeros`, and `run_before` tables match FFmpeg `h264data.h`
-  exactly, and the I-frame path (shared residual math) is bit-exact, so the fix
-  is a localized off-by-one in one high-activity block's coefficient decode,
-  pinnable with a CAVLC oracle.
+- The P-frame CAVLC **bit-position desync is resolved** (`p_slice_cavlc_invariant`
+   passes). The once-suspected **residual precision issue is also resolved**:
+   the independent CAVLC oracle (`tests/p_slice_oracle2.rs`) finds **0
+   mismatches** across all 104 blocks of the 64×48 IP clip, and
+   `p_frame_conformance` decodes **bit-exact (`max_diff=0`)** both with
+   deblocking disabled (`no-deblock=1`) and enabled. The earlier `max_diff=2`
+   over 49/4608 samples was a **test-harness false premise**, not a decoder bug:
+   `-x264-params deblock=0` only zeroes x264's alpha/beta offset and does not
+   set `disable_deblocking_filter_idc=1`, so the conformance test was comparing
+   against an ffmpeg reference with the in-loop deblocking **on** while assuming
+   it off. The real fix (Phase C.2) was the per-4×4-block deblocking `bS`
+   derivation in `deblock.rs`. All P-slice MVs are (0,0)/ref 0, so MC/reference
+   copy is exercised and correct; `coeff_token`, `total_zeros`, and
+   `run_before` tables match FFmpeg `h264data.h` exactly, and the I-frame path
+   (shared residual math) is bit-exact — confirming the residual decode has no
+   off-by-one.
 - `crates.io` real publish (Phases 8/10) is **not** performed: it needs a
   crates.io token and network access and must be done deliberately by a
   maintainer.
@@ -1367,4 +1479,133 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       module doc comments (drop "delegated to symphonia-codec-aac" language).
       Exit: `grep -rn symphonia` empty; `just check` and `just deny` both
       green.
+
+## Phase 16 — `tpt-kinetix-realtime`: Realtime Codec (scaffold + implementation) (2026-08-13)
+
+> Goal: an original codec whose design center is **sub-frame latency** and
+> **graceful degradation under packet loss** (not max compression ratio).
+> Promoted from the Phase 14 backlog per the Phase 14 rule: the design-phase
+> checklist is fully resolved and `docs/realtime-codec-design.md` is written
+> (7 DECISION blocks: hybrid loss recovery, rolling-intra + on-demand-IDR GOP,
+> fixed slice grid, encode-deadline/decode-bounded-work contract,
+> packet-loss-vs-quality + stall-rate validation, profile-parameterized v1
+> budget, and extraction of a shared `tpt-kinetix-bitstream` crate).
+>
+> **Profile decision:** profile-agnostic — cloud gaming / conferencing / AR
+> are three preset parameter sets over one shared bitstream, not separate
+> codecs. AR is the hardest preset (leans on `tpt-kinetix-lean`'s power
+> primitives). See the design doc for the full rationale.
+
+### Scaffold (done 2026-08-13)
+
+- [x] Extract `tpt-kinetix-bitstream` from lean (DECISION 7) — `BitReader` +
+      rANS (`RansEncoder`/`RansDecoder`/`RansStreamSet`/`SymbolModel`/
+      `StaticModel`) copied verbatim and now the single source of truth;
+      `tpt-kinetix-lean` and `tpt-kinetix-vision` still carry their own copies
+      (migration to depend on `tpt-kinetix-bitstream` is the immediate
+      follow-up — see Phase 16 item below). Crate compiles + clippy-clean,
+      11 tests pass.
+- [x] Create `tpt-kinetix-realtime` crate: `Cargo.toml` (deps on `core` +
+      `bitstream`), `lib.rs` (profile-agnostic module docs), `headers.rs`
+      (profile-aware `SequenceHeader`/`FrameHeader`: `ProfilePreset` enum,
+      slice-grid, FEC overhead, foveation flag, intra-refresh mask,
+      `deadline_ms`, `force_idr`; parse + to_bytes + validation, round-trips),
+      `decoder.rs` (`RealtimeDecoder` shell reporting `pixel_exact: false`
+      per the honesty contract). Wired into workspace `Cargo.toml` (members +
+      `workspace.dependencies`). Compiles + clippy-clean, 11 tests pass.
+
+### Implementation (remaining, per design doc "Implementation order")
+
+- [x] Migrate `tpt-kinetix-lean` + `tpt-kinetix-vision` to depend on
+      `tpt-kinetix-bitstream` (delete their now-duplicated `bitreader.rs` /
+      `rans.rs`); true "extract now" completion of DECISION 7 — **done for
+      lean (2026-08-13)**: added `tpt-kinetix-bitstream` dep, repointed
+      `headers.rs`/`decoder.rs`/`lib.rs` doc links at it, deleted
+      `lean/src/bitreader.rs` + `lean/src/rans.rs`, and updated the fuzz
+      target (`tpt_kinetix_lean::bitreader::BitReader` →
+      `tpt_kinetix_bitstream::BitReader`). **vision had no duplicated
+      primitives** — its `src` is a single decode-shell `lib.rs` with no
+      `BitReader`/`rANS` code — so there was nothing to migrate; vision will
+      depend on `tpt-kinetix-bitstream` when its reconstruction is
+      implemented.
+- [ ] Port lean's intra + unidirectional-P reconstruction into realtime
+      (DECISION 2) — **BLOCKED**: `tpt-kinetix-lean`'s reconstruction
+      (prediction/transform/deblock) is itself still an unimplemented scaffold
+      (its `decoder.rs` reports `pixel_exact: false`), so there is no real
+      reconstruction path to port yet. Revisit once lean's reconstruction
+      lands. The header/refresh/slice scaffolding realtime needs is already in
+      place.
+- [x] Add slice-grid framing: each slice = one independent rANS sub-stream,
+      self-contained (DECISION 3); wire `RansStreamSet` per-frame — **done
+      (2026-08-13)**: `src/slice.rs` `SliceGrid` frames/unframes the
+      `cols*rows` slice payloads via `tpt_kinetix_bitstream::RansStreamSet`,
+      with count validation and the 255-sub-stream cap.
+- [x] Add intra-refresh masking (`refresh_mask`) + on-demand `force_idr`
+      resync path (DECISION 2) — **done (2026-08-13)**: `src/refresh.rs`
+      `IntraRefreshScheduler` computes the per-frame `intra_refresh_mask`
+      bitmask (cycling `ceil(rows/period)` rows/frame, wrapping, covering all
+      rows within `period`); `force_idr` is already a frame-header field.
+- [x] Add FEC packet framing (RaptorQ or RS) + decoder concealment as the
+      terminal fallback (DECISION 1) — **done (2026-08-13)**: `src/fec.rs`
+      `Fec` is a systematic XOR erasure coder over the framed frame payload
+      (fixed 256-byte source symbols), emitting `repair_count` parity symbols
+      (one per round-robin group) that recover up to one loss per group; losses
+      beyond that fall through to intra-refresh/concealment as the hybrid
+      design intends (RS/RaptorQ noted as the v2 MDS upgrade). `src/conceal.rs`
+      `conceal()` does temporal concealment (reuse previous frame's slice) so
+      the decoder never stalls. Both round-trip tested (29 realtime tests pass).
+- [ ] Add `deadline_ms` encode-side rate-control hook + `max_decode_ms`
+      decoder capability (DECISION 4).
+- [ ] Build the packet-loss-vs-quality + stall-rate validation harness
+      (DECISION 5) in `tpt-kinetix-test-utils` behind a `realtime-bench`
+      feature (loss injector + the realtime decoder; no model weights).
+- [ ] (AR profile) Add foveation / gaze-map support (DECISION 6).
+
+## Phase 15 — `tpt-kinetix-volumetric` (design phase, 2026-08-13)
+
+> Source: prioritized original specialist codec from `docs/codec-backlog.md`
+> (`tpt-kinetix-volumetric` — point-cloud / volumetric / AR-VR content;
+> 2D video codecs don't apply). Design doc: `docs/volumetric-codec-design.md`.
+> Each checklist item maps to a `DECISION:` block in that doc. Nothing is
+> implemented yet; resolve all decisions before scaffolding begins.
+
+### Design decisions
+- [x] Decide the target volumetric representation for v1 (point cloud vs.
+      voxel grid vs. mesh+texture) — **DECISION 1 resolved: point cloud**
+      (see `docs/volumetric-codec-design.md`; voxel/mesh deferred to v2 as
+      output representations derived from the decoded cloud)
+- [x] Decide the geometry coding method for the v1 point cloud (octree vs.
+      predictive vs. trisoup) — **DECISION 2 resolved: octree** (context-
+      modeled occupancy bitmap per node; predictive trisoup deferred to v2,
+      see `docs/volumetric-codec-design.md`)
+- [x] Decide the attribute coding method (RAHT vs. region-adaptive
+      predictive/lift vs. direct) — **DECISION 3 resolved: both normative,
+      lift primary / RAHT selectable** (see `docs/volumetric-codec-design.md`)
+- [x] Decide attribute bit depth + lossless vs. lossy mode — **DECISION 4
+      resolved: per-attribute bit depth (8-bit default, 10–16-bit HDR),
+      lossless + lossy via shared quantizer; strict mode rejects lossy**
+- [x] Decide static-single-cloud (v1) vs. dynamic inter-frame prediction —
+      **DECISION 5 resolved: static for v1**, `dynamic` flag reserved →
+      `Unsupported` on v1 decoder
+- [x] Decide bitstream alignment: G-PCC/V-PCC-faithful core with Kinetix
+      framing (recommended) vs. pure original bitstream — **DECISION 6
+      resolved: (C) G-PCC-faithful core, Kinetix framing** (`magic b"VOLU"`)
+- [x] Decide relationship to `tpt-kinetix-bitstream` (rANS), the 2D codecs
+      (V-PCC projection path), and the `PointCloud` core output type —
+      **DECISION 7 resolved: depends on core + bitstream only; `PointCloud`
+      output type in core; V-PCC is optional feature-gated dep**
+- [x] Set memory/perf budget + conformance oracle (MPEG-I G-PCC TMC13) for
+      v1 — **DECISION 8 resolved: 10M-point cap, ~64 MB arena, TMC13 oracle**
+
+### Pre-scaffold (after decisions resolve)
+- [x] Add `tpt-kinetix-volumetric` to workspace `Cargo.toml` members
+      (design-phase only — not added to `release-plz.toml` publish list,
+      matching `tpt-kinetix-vision`/`lean`/`screen`)
+- [x] Add `PointCloud` decoded-output type to `tpt-kinetix-core`
+      (`frame.rs`: `PointCloud` + `PointAttribute` + `PointAttributeKind`)
+- [x] Implement sequence/frame header parsing (DECISION 6 framing) — `src/header.rs`: byte-aligned `b"VOLU"` sequence + frame headers, rejects dynamic/reserved/over-cap streams
+- [ ] Implement octree geometry decode (DECISION 2)
+- [ ] Implement attribute lift/RAHT decode (DECISION 3)
+- [ ] Build a TMC13-oracle conformance harness (DECISION 8)
+- [ ] Add `cargo-fuzz` target for the header + octree parser
 

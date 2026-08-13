@@ -51,7 +51,15 @@ name = "tpt-kinetix-stream"
 publish = true
 
 [[package]]
-name = "tpt-kinetix-cli"
+name = "tpt-kinetix-vision"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-face"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-lossless"
 publish = true
 
 # Internal test helpers are never published.

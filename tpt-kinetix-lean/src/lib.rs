@@ -15,9 +15,10 @@
 //!   block partitioning is a fixed, shallow scheme, not a recursive
 //!   quad/multi-type tree.
 //! - **Parallel entropy decode.** Coefficients are coded with an rANS/tANS
-//!   family coder ([`rans`]) split across independently-decodable
-//!   interleaved sub-streams, instead of CABAC's bit-serial adaptive
-//!   arithmetic coding, which cannot be parallelized across a single slice.
+//!   family coder (see [`tpt_kinetix_bitstream`]) split across
+//!   independently-decodable interleaved sub-streams, instead of CABAC's
+//!   bit-serial adaptive arithmetic coding, which cannot be parallelized
+//!   across a single slice.
 //! - **Integer-only math**, so the pipeline has no floating-point dependency
 //!   and can eventually run on MCU-class targets with no FPU.
 //!
@@ -140,10 +141,8 @@
 //! of post-filter quality for keeping the decode pipeline to a single
 //! filter pass that runs in-place on the reconstructed frame buffer.
 
-pub mod bitreader;
 pub mod decoder;
 pub mod headers;
-pub mod rans;
 
 pub use decoder::LeanDecoder;
 pub use headers::{FrameHeader, FrameType, SequenceHeader};

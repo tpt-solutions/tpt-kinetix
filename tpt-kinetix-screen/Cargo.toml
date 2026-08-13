@@ -1,0 +1,25 @@
+[package]
+name = "tpt-kinetix-screen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Screen: an original screen/UI-capture codec tuned for sharp edges, flat regions, and repeated glyphs"
+keywords = ["tpt-kinetix", "screen", "codec", "multimedia", "screen-capture"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-screen"
+
+[dependencies]
+tpt-kinetix-core = { workspace = true }
+tpt-kinetix-bitstream = { workspace = true }
+thiserror = { workspace = true }
+nom = { workspace = true }
+
+[dev-dependencies]
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
+
+[lib]
+path = "src/lib.rs"

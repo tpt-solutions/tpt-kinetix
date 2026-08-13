@@ -22,7 +22,7 @@ fn main() {
     for n in &nals {
         match n.nal_unit_type {
             NalUnitType::Sps => sps = Some(SeqParameterSet::parse(&n.rbsp).unwrap()),
-            NalUnitType::Pps => pps = Some(PicParameterSet::parse(&n.rbsp).unwrap()),
+            NalUnitType::Pps => pps = Some(PicParameterSet::parse(&n.rbsp, None).unwrap()),
             _ => {}
         }
     }
@@ -76,6 +76,7 @@ fn main() {
             slice_qp,
             num_ref_idx,
             chroma_qp_index_offset,
+            false,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         )
         .unwrap();

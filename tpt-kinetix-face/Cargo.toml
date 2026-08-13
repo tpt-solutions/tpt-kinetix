@@ -1,0 +1,24 @@
+[package]
+name = "tpt-kinetix-face"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Face: an original talking-head/video-conferencing codec using landmark-driven parametric synthesis instead of pixel coding"
+keywords = ["tpt-kinetix", "face", "codec", "multimedia", "video"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-face"
+
+[dependencies]
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+thiserror = "2"
+nom = "7"
+
+[dev-dependencies]
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
+
+[lib]
+path = "src/lib.rs"

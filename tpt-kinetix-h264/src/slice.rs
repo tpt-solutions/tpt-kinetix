@@ -128,10 +128,24 @@ pub struct SliceHeader {
     pub slice_type: SliceType,
     pub pic_parameter_set_id: u32,
     pub frame_num: u32,
+    /// `field_pic_flag` (§7.3.3) — true when this slice is a coded field rather
+    /// than a frame. Present in the bitstream only when `!frame_mbs_only_flag`
+    /// (i.e. interlaced coding); for progressive streams it is implicitly false.
+    pub field_pic_flag: bool,
+    /// `bottom_field_flag` (§7.3.3) — for a field-coded slice, true when it is
+    /// the bottom field. Only present in the bitstream when `field_pic_flag` is
+    /// true; meaningless (and left `false`) for frame-coded slices.
+    pub bottom_field_flag: bool,
     /// Present only for IDR slices.
     pub idr_pic_id: Option<u32>,
     /// Present when `pic_order_cnt_type == 0`.
     pub pic_order_cnt_lsb: Option<u32>,
+    /// `delta_pic_order_cnt_bottom` (§7.3.3) — read from the bitstream for
+    /// *frame* pictures only when `bottom_field_pic_order_in_frame_present_flag`
+    /// is set; it derives `BottomFieldOrderCnt` via §8.2.1.1. Always `None` for
+    /// field pictures (where the bottom field carries its own `pic_order_cnt_lsb`
+    /// in a separate slice) and when the flag is not set.
+    pub delta_pic_order_cnt_bottom: Option<i64>,
     pub slice_qp_delta: i32,
     /// Effective `num_ref_idx_l0_active_minus1` after any slice-header override.
     pub num_ref_idx_l0_active_minus1: u32,
@@ -325,10 +339,11 @@ impl SliceHeader {
 
         // field_pic_flag / bottom_field_flag only when !frame_mbs_only_flag.
         let mut field_pic_flag = false;
+        let mut bottom_field_flag = false;
         if !ctx.frame_mbs_only_flag {
             field_pic_flag = r.read_bit().context("field_pic_flag")? == 1;
             if field_pic_flag {
-                let _bottom_field_flag = r.read_bit().context("bottom_field_flag")?;
+                bottom_field_flag = r.read_bit().context("bottom_field_flag")? == 1;
             }
         }
 
@@ -340,12 +355,16 @@ impl SliceHeader {
         };
 
         let mut pic_order_cnt_lsb = None;
+        let mut delta_pic_order_cnt_bottom: Option<i64> = None;
         if ctx.pic_order_cnt_type == 0 {
             let bits = (ctx.log2_max_pic_order_cnt_lsb_minus4 + 4) as u8;
             pic_order_cnt_lsb = Some(r.read_bits(bits).context("pic_order_cnt_lsb")?);
+            // §7.3.3 reads `delta_pic_order_cnt_bottom` only for frame pictures
+            // (`!field_pic_flag`) when `bottom_field_pic_order_in_frame_present_flag`
+            // is set; field pictures carry it in a separate slice, so it is absent.
             if ctx.bottom_field_pic_order_in_frame_present_flag && !field_pic_flag {
-                let _delta_pic_order_cnt_bottom =
-                    r.read_se().context("delta_pic_order_cnt_bottom")?;
+                delta_pic_order_cnt_bottom =
+                    Some(r.read_se().context("delta_pic_order_cnt_bottom")? as i64);
             }
         } else if ctx.pic_order_cnt_type == 1 && !ctx.delta_pic_order_always_zero_flag {
             let _d0 = r.read_se().context("delta_pic_order_cnt[0]")?;
@@ -466,8 +485,11 @@ impl SliceHeader {
             slice_type,
             pic_parameter_set_id,
             frame_num,
+            field_pic_flag,
+            bottom_field_flag,
             idr_pic_id,
             pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom,
             slice_qp_delta,
             num_ref_idx_l0_active_minus1,
             num_ref_idx_l1_active_minus1,
@@ -1106,5 +1128,86 @@ mod tests {
         );
         let ok: Vec<&[u32]> = vec![&[5u32][..]; MAX_MMCO_COUNT];
         assert!(parse_p(&p_slice_with_marking(&ok)).is_ok());
+    }
+
+    /// Phase G.1 — field-picture (`field_pic_flag` / `bottom_field_flag`) parsing
+    /// round-trips through the bitstream. Requires `frame_mbs_only_flag == false`
+    /// in the active SPS; a frame-only context must NOT read the field bits.
+    fn interlaced_ctx() -> SliceHeaderContext {
+        let mut ctx = p_slice_ctx();
+        ctx.frame_mbs_only_flag = false;
+        ctx.bottom_field_pic_order_in_frame_present_flag = true;
+        ctx
+    }
+
+    fn parse_interlaced(rbsp: &[u8]) -> anyhow::Result<SliceHeader> {
+        SliceHeader::parse_with_context(rbsp, NalUnitType::NonIdrSlice, 1, &interlaced_ctx())
+    }
+
+    fn field_slice_rbsp(bottom_field_flag: u8, delta_bottom: Option<i32>) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(1, 4); // frame_num
+        w.bit(1); // field_pic_flag = 1 (only present when !frame_mbs_only_flag)
+        w.bit(bottom_field_flag); // bottom_field_flag
+        w.bits(5, 4); // pic_order_cnt_lsb
+        // frame_mbs_only_flag is false but field_pic_flag is true, so
+        // delta_pic_order_cnt_bottom is NOT present (it belongs to frame pics).
+        w.bit(0); // num_ref_idx_active_override_flag
+        w.bit(0); // ref_pic_list_modification_flag_l0
+        w.bit(0); // adaptive_ref_pic_marking_mode_flag
+        w.se(0); // slice_qp_delta
+        let _ = delta_bottom;
+        w.finish()
+    }
+
+    #[test]
+    fn field_pic_flag_and_bottom_field_flag_round_trip() {
+        // Top field slice.
+        let top = parse_interlaced(&field_slice_rbsp(0, None)).expect("parse top");
+        assert!(top.field_pic_flag);
+        assert!(!top.bottom_field_flag);
+        assert_eq!(top.pic_order_cnt_lsb, Some(5));
+
+        // Bottom field slice.
+        let bot = parse_interlaced(&field_slice_rbsp(1, None)).expect("parse bottom");
+        assert!(bot.field_pic_flag);
+        assert!(bot.bottom_field_flag);
+
+        // Sanity: a frame-only context (frame_mbs_only_flag == true) never reads
+        // the field bits, so `field_pic_flag` is structurally false there
+        // regardless of the bitstream.
+        let framed = SliceHeader::parse_with_context(
+            &field_slice_rbsp(0, None),
+            NalUnitType::NonIdrSlice,
+            1,
+            &p_slice_ctx(),
+        );
+        assert!(framed.map(|h| h.field_pic_flag).unwrap_or(false) == false);
+    }
+
+    /// `delta_pic_order_cnt_bottom` is parsed for frame pictures (with
+    /// `bottom_field_pic_order_in_frame_present_flag`) and stored, but must be
+    /// `None` for field pictures.
+    #[test]
+    fn frame_pic_delta_pic_order_cnt_bottom_is_read() {
+        let mut w = BitWriter::new();
+        w.ue(0); // first_mb_in_slice
+        w.ue(0); // slice_type = P
+        w.ue(0); // pic_parameter_set_id
+        w.bits(1, 4); // frame_num
+        w.bit(0); // field_pic_flag = 0 (frame picture; interlaced_ctx requires it)
+        w.bits(2, 4); // pic_order_cnt_lsb
+        w.se(7); // delta_pic_order_cnt_bottom (present: field_pic_flag is false)
+        w.bit(0); // num_ref_idx_active_override_flag
+        w.bit(0); // ref_pic_list_modification_flag_l0
+        w.bit(0); // adaptive_ref_pic_marking_mode_flag
+        w.se(0); // slice_qp_delta
+        let header = parse_interlaced(&w.finish()).expect("parse");
+        assert!(!header.field_pic_flag);
+        assert_eq!(header.pic_order_cnt_lsb, Some(2));
+        assert_eq!(header.delta_pic_order_cnt_bottom, Some(7));
     }
 }

@@ -114,9 +114,10 @@ impl PicParameterSet {
         // present.
         let mut transform_8x8_mode_flag = false;
         let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
+        let mut scaling = ScalingLists::flat();
         if more_rbsp_data(&r) {
             transform_8x8_mode_flag = r.read_bit().context("transform_8x8_mode_flag")? == 1;
-            let scaling = ScalingLists::parse_pps(
+            scaling = ScalingLists::parse_pps(
                 &mut r,
                 sps_scaling.unwrap_or(&ScalingLists::flat()),
                 transform_8x8_mode_flag,

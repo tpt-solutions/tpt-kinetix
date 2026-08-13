@@ -14,7 +14,7 @@ fn main() {
     for nal in &nals {
         match nal.nal_unit_type {
             NalUnitType::Sps => sps = SeqParameterSet::parse(&nal.rbsp).ok(),
-            NalUnitType::Pps => pps = PicParameterSet::parse(&nal.rbsp).ok(),
+            NalUnitType::Pps => pps = PicParameterSet::parse(&nal.rbsp, None).ok(),
             _ => {}
         }
     }

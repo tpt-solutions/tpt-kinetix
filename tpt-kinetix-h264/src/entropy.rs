@@ -825,21 +825,22 @@ impl MbTypePCabacContext {
     /// `mb_type_raw == 4` / `P8x8ref0`) -- see [`RefIdxCabacContext::decode`]
     /// for why that shortcut isn't needed here.
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
-        // H.264 spec Table 9-37 / FFmpeg decode_cabac_mb_type_p:
-        //   ctx14=0             → P_L0_16x16 (most common; 1 bin)
-        //   ctx14=1, ctx15=0, ctx16=0 → P_L0_L0_16x8  (Some(1))
-        //   ctx14=1, ctx15=0, ctx16=1 → P_L0_L0_8x16  (Some(2))
-        //   ctx14=1, ctx15=1, ctx16=0 → P_8x8          (Some(3))
-        //   ctx14=1, ctx15=1, ctx16=1 → intra (None); suffix reads from ctx17
+        // FFmpeg `ff_h264_decode_mb_cabac` P-branch (AV_PICTURE_TYPE_P):
+        //   get_cabac(14)==0                       → 0  (P_L0_16x16)
+        //   get_cabac(14)==1, get_cabac(15)==0     → 3 * get_cabac(16)
+        //                                             (0 → P_8x8, 3 → P_8x8)
+        //   get_cabac(14)==1, get_cabac(15)==1     → 2 - get_cabac(17)
+        //                                             (2 → P_8x16, 1 → P_16x8)
+        //   get_cabac(14)==1, get_cabac(15)==1, get_cabac(17)==0 (after the
+        //     2 - ... branch has consumed bit 17)  → intra (None); the
+        //     intra suffix is then read from ctx 17.
         if dec.decode_decision(&mut self.ctx[0]) == 0 {
             return Some(0); // P_L0_16x16
         }
         if dec.decode_decision(&mut self.ctx[1]) == 0 {
-            Some(1 + dec.decode_decision(&mut self.ctx[2]) as u32)
-        } else if dec.decode_decision(&mut self.ctx[2]) == 0 {
-            Some(3) // P_8x8
+            Some(3 * dec.decode_decision(&mut self.ctx[2]) as u32)
         } else {
-            None // intra
+            Some(2 - dec.decode_decision(&mut self.ctx[3]) as u32)
         }
     }
 }

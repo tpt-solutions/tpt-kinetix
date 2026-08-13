@@ -56,6 +56,7 @@ impl SeqParameterSet {
         );
         let mut chroma_format_idc = 1u32; // default 4:2:0 when not signalled
         let mut separate_colour_plane_flag = false;
+        let mut scaling = ScalingLists::flat();
         if high_profile {
             chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
             if chroma_format_idc == 3 {
@@ -67,7 +68,7 @@ impl SeqParameterSet {
             let _qpprime_y_zero_transform_bypass_flag = r
                 .read_bit()
                 .context("qpprime_y_zero_transform_bypass_flag")?;
-             let scaling = ScalingLists::parse_sps(&mut r, chroma_format_idc)?;
+            scaling = ScalingLists::parse_sps(&mut r, chroma_format_idc)?;
          }
 
         let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
@@ -231,6 +232,7 @@ mod tests {
             frame_crop_right_offset: 0,
             frame_crop_top_offset: 0,
             frame_crop_bottom_offset: 0,
+            scaling: ScalingLists::flat(),
         };
         assert_eq!(sps.pic_width_pixels(), 320);
         assert_eq!(sps.pic_height_pixels(), 240);
@@ -258,6 +260,7 @@ mod tests {
             frame_crop_right_offset: 0,
             frame_crop_top_offset: 0,
             frame_crop_bottom_offset: 4, // 4 * 2 = 8 pixels
+            scaling: ScalingLists::flat(),
         };
         assert_eq!(sps.pic_width_pixels(), 1920);
         assert_eq!(sps.pic_height_pixels(), 1080);

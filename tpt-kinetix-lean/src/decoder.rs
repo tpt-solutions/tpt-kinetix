@@ -14,9 +14,9 @@
 //! malformed streams and to size a decode arena — the two things a
 //! bounded-memory decoder needs before reconstruction exists at all.
 
+use tpt_kinetix_bitstream::BitReader;
 use tpt_kinetix_core::{capabilities::DecoderCapabilities, error::KinetixError, packet::Packet};
 
-use crate::bitreader::BitReader;
 use crate::headers::{FrameHeader, SequenceHeader};
 
 /// A Lean decoder.

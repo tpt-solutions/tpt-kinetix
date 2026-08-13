@@ -278,6 +278,13 @@ pub struct SequenceHeaderObu {
     pub use_128x128_superblock: bool,
     /// Whether intra block copy is enabled (`allow_intrabc`).
     pub allow_intrabc: bool,
+    /// Whether CDEF is enabled at the sequence level. When `false`, the frame
+    /// header does **not** carry CDEF parameters (AV1 §5.9.14 gates them on this
+    /// flag, not on `lossless`).
+    pub enable_cdef: bool,
+    /// Whether loop restoration is enabled at the sequence level. When `false`,
+    /// the frame header does not carry loop-restoration parameters (AV1 §5.9.15).
+    pub enable_restoration: bool,
     /// Whether film grain parameters are present in frame headers.
     pub film_grain_params_present: bool,
     /// Whether decoder model info is present (operating points).
@@ -338,6 +345,8 @@ impl SequenceHeaderObu {
                 order_hint_bits_minus_1: 0,
                 use_128x128_superblock: false,
                 allow_intrabc: false,
+                enable_cdef: true,
+                enable_restoration: true,
                 film_grain_params_present: false,
                 decoder_model_info_present: false,
             });
@@ -526,10 +535,10 @@ impl SequenceHeaderObu {
         let _enable_superres = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_superres"))?;
-        let _enable_cdef = br
+        let enable_cdef = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_cdef"))?;
-        let _enable_restoration = br
+        let enable_restoration = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_restoration"))?;
 
@@ -561,6 +570,8 @@ impl SequenceHeaderObu {
             order_hint_bits_minus_1,
             use_128x128_superblock,
             allow_intrabc,
+            enable_cdef,
+            enable_restoration,
             film_grain_params_present,
             decoder_model_info_present,
         })

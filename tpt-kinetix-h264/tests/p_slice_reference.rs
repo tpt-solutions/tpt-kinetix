@@ -38,7 +38,7 @@ fn reference_parse_p_slice() {
     let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).unwrap();
     let sps = SeqParameterSet::parse(&sps.rbsp).expect("sps");
     let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).unwrap();
-    let pps = PicParameterSet::parse(&pps.rbsp).expect("pps");
+    let pps = PicParameterSet::parse(&pps.rbsp, None).expect("pps");
 
     let p = units
         .iter()

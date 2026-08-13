@@ -1,0 +1,19 @@
+[package]
+name = "tpt-kinetix-bitstream"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared bitstream primitives (BitReader, rANS) for the TPT Kinetix original codecs (lean/vision/realtime)"
+keywords = ["tpt-kinetix", "bitstream", "rans", "codec", "multimedia"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-bitstream"
+
+[dependencies]
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+
+[lib]
+path = "src/lib.rs"

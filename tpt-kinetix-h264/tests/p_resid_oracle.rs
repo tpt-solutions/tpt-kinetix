@@ -197,7 +197,7 @@ fn residual_block_oracle() {
     };
     let units = parse_nal_units_from_annexb(&annexb);
     let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).and_then(|u| SeqParameterSet::parse(&u.rbsp).ok()).expect("sps");
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp).ok()).expect("pps");
+    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok()).expect("pps");
     let p = units.iter().find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice).expect("P slice");
 
     let ctx = SliceHeaderContext {
@@ -234,6 +234,7 @@ fn residual_block_oracle() {
         slice_qp,
         num_ref_idx_l0_active,
         chroma_qp_index_offset,
+        false,
         &mut cap,
     )
     .expect("parse_p_slice");
@@ -263,6 +264,7 @@ fn residual_block_oracle() {
         w as u32,
         48,
         chroma_qp_index_offset,
+        &sps.scaling,
         &WeightedPred::Default,
         &mut cap,
     );

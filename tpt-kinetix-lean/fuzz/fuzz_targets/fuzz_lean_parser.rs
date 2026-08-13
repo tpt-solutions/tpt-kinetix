@@ -3,7 +3,7 @@
 //!
 //! Run with: `cargo +nightly fuzz run fuzz_lean_parser`
 use libfuzzer_sys::fuzz_target;
-use tpt_kinetix_lean::bitreader::BitReader;
+use tpt_kinetix_bitstream::BitReader;
 use tpt_kinetix_lean::{FrameHeader, SequenceHeader};
 
 fuzz_target!(|data: &[u8]| {

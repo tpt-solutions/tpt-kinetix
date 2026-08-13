@@ -3,7 +3,7 @@
 //! # Format design (v1)
 //!
 //! Both headers are **byte-aligned** — Lean spends its bit-packing budget on
-//! the rANS-coded payload ([`crate::rans`]), not the headers, so a plain
+//! the rANS-coded payload ([`tpt_kinetix_bitstream`]), not the headers, so a plain
 //! byte reader is enough here and no bit-writer is needed for this scaffold.
 //!
 //! ## Sequence header (once per stream, 14 bytes)
@@ -18,7 +18,7 @@
 //! | `block_size_log2` | `u8` | packed `min_block_size_log2 << 4 \| max_block_size_log2` — fixed shallow partition range, e.g. 8x8..64x64 is `3 << 4 \| 6` |
 //! | `bit_depth` | `u8` | 8 or 10 |
 //! | `chroma_format` | `u8` | [`ChromaFormat`] discriminant |
-//! | `num_rans_streams` | `u8` | independently-decodable entropy sub-streams per frame (see [`crate::rans`]) |
+//! | `num_rans_streams` | `u8` | independently-decodable entropy sub-streams per frame (see [`tpt_kinetix_bitstream`]) |
 //!
 //! Declaring `max_width`/`max_height`/`max_ref_frames`/`num_rans_streams` up
 //! front is what lets a decoder allocate its working arena exactly once at
@@ -38,7 +38,7 @@
 
 use tpt_kinetix_core::error::KinetixError;
 
-use crate::bitreader::BitReader;
+use tpt_kinetix_bitstream::BitReader;
 
 const MAGIC: [u8; 4] = *b"LEAN";
 const SEQUENCE_HEADER_LEN: usize = 14;

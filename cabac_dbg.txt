@@ -1,0 +1,97 @@
+warning: unused variable: `chroma_qp_index_offset`
+    --> tpt-kinetix-h264\src\slice_data.rs:1366:5
+     |
+1366 |     chroma_qp_index_offset: i32,
+     |     ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chroma_qp_index_offset`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `chroma_qp_index_offset`
+    --> tpt-kinetix-h264\src\slice_data.rs:1594:5
+     |
+1594 |     chroma_qp_index_offset: i32,
+     |     ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chroma_qp_index_offset`
+
+warning: `tpt-kinetix-h264` (lib) generated 2 warnings (run `cargo fix --lib -p tpt-kinetix-h264` to apply 2 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.32s
+     Running tests\cabac_pframe_conformance.rs (target\debug\deps\cabac_pframe_conformance-a4b8ab379b390ece.exe)
+
+running 1 test
+[DEBUG P-CABAC] slice_qp=24 cabac_init_idc=0 num_ref_idx_l0_active=1 mb_cols=4 mb_rows=3 data_len=307 first_bytes=[06 04 33 FB FF 8C 40 9F E2 1F A8 63 02 A0 FB BF]
+[DBG P] mb=(0,0) is_skip=true
+[DBG P] mb=(1,0) is_skip=true
+[DBG P] mb=(2,0) is_skip=true
+[DBG P] mb=(3,0) is_skip=true
+[DBG P] mb=(0,1) is_skip=true
+[DBG P] mb=(1,1) is_skip=true
+[DBG P] mb=(2,1) is_skip=true
+[DBG P] mb=(3,1) is_skip=true
+[DBG P] mb=(0,2) is_skip=false
+[DBG P] mb=(0,2) inter_type=Some(0)
+[DBG MVD] pre_golomb=(476,417) suffix=24 post_golomb=(476,143) mvd_before_sign=33
+[DBG P] mb=(0,2) part=0 mvd=(33,0)
+[DBG P] mb=(0,2) cbp_l=1 cbp_c=0
+[DBG P] mb=(0,2) dqp=-2 prev_qp=24 qp=22 cabac_before=(290,283) after=(334,269)
+[DBG RESID] mb=(0,2) blk=0 left_coded=false top_coded=false has_coeff=false
+[DBG RESID] mb=(0,2) blk=1 left_coded=false top_coded=false has_coeff=true
+[DBG RESID] mb=(0,2) blk=1 count=3 coeffs[0]=0 cabac=(308,283)->(267,29)
+[DBG RESID] mb=(0,2) blk=4 left_coded=false top_coded=false has_coeff=true
+[DBG RESID] mb=(0,2) blk=4 count=3 coeffs[0]=-1 cabac=(312,58)->(442,356)
+[DBG RESID] mb=(0,2) blk=5 left_coded=true top_coded=true has_coeff=true
+[DBG RESID] mb=(0,2) blk=5 count=2 coeffs[0]=0 cabac=(391,356)->(484,203)
+[DBG P] mb=(0,2) pre_term range=484 offset=203 end_of_slice=false is_last=false
+[DBG P] mb=(1,2) is_skip=false
+[DBG P] mb=(1,2) inter_type=Some(0)
+[DBG P] mb=(1,2) part=0 mvd=(1,0)
+[DBG P] mb=(1,2) cbp_l=0 cbp_c=0
+[DBG P] mb=(1,2) pre_term range=359 offset=254 end_of_slice=false is_last=false
+[DBG P] mb=(2,2) is_skip=false
+[DBG P] mb=(2,2) inter_type=Some(0)
+[DBG P] mb=(2,2) part=0 mvd=(0,0)
+[DBG P] mb=(2,2) cbp_l=5 cbp_c=0
+[DBG P] mb=(2,2) dqp=0 prev_qp=22 qp=22 cabac_before=(444,342) after=(363,342)
+[DBG RESID] mb=(2,2) blk=0 left_coded=false top_coded=false has_coeff=false
+[DBG RESID] mb=(2,2) blk=1 left_coded=false top_coded=false has_coeff=false
+[DBG RESID] mb=(2,2) blk=4 left_coded=false top_coded=false has_coeff=false
+[DBG RESID] mb=(2,2) blk=5 left_coded=false top_coded=false has_coeff=true
+[DBG RESID] mb=(2,2) blk=5 count=2 coeffs[0]=-1 cabac=(470,198)->(291,119)
+[DBG RESID] mb=(2,2) blk=8 left_coded=false top_coded=false has_coeff=true
+[DBG RESID] mb=(2,2) blk=8 count=5 coeffs[0]=0 cabac=(326,239)->(315,124)
+[DBG RESID] mb=(2,2) blk=9 left_coded=true top_coded=true has_coeff=true
+[DBG RESID] mb=(2,2) blk=9 count=2 coeffs[0]=1 cabac=(282,124)->(278,24)
+[DBG RESID] mb=(2,2) blk=12 left_coded=false top_coded=true has_coeff=true
+[DBG RESID] mb=(2,2) blk=12 count=2 coeffs[0]=1 cabac=(394,49)->(510,402)
+[DBG RESID] mb=(2,2) blk=13 left_coded=true top_coded=true has_coeff=true
+[DBG RESID] mb=(2,2) blk=13 count=2 coeffs[0]=0 cabac=(457,402)->(470,365)
+[DBG P] mb=(2,2) pre_term range=470 offset=365 end_of_slice=false is_last=false
+[DBG P] mb=(3,2) is_skip=false
+[DBG P] mb=(3,2) inter_type=Some(0)
+[DBG P] mb=(3,2) part=0 mvd=(0,-1)
+[DBG P] mb=(3,2) cbp_l=8 cbp_c=0
+[DBG P] mb=(3,2) dqp=1 prev_qp=22 qp=23 cabac_before=(299,280) after=(416,117)
+[DBG RESID] mb=(3,2) blk=10 left_coded=false top_coded=false has_coeff=true
+[DBG RESID] mb=(3,2) blk=10 count=1 coeffs[0]=1 cabac=(476,234)->(329,283)
+[DBG RESID] mb=(3,2) blk=11 left_coded=true top_coded=false has_coeff=false
+[DBG RESID] mb=(3,2) blk=14 left_coded=false top_coded=true has_coeff=true
+[DBG RESID] mb=(3,2) blk=14 count=6 coeffs[0]=0 cabac=(492,318)->(434,212)
+[DBG RESID] mb=(3,2) blk=15 left_coded=true top_coded=false has_coeff=true
+[DBG RESID] mb=(3,2) blk=15 count=2 coeffs[0]=0 cabac=(317,212)->(416,280)
+[DBG P] mb=(3,2) pre_term range=416 offset=280 end_of_slice=false is_last=true
+[DBG P] WARN: end_of_slice_flag mismatch (expected=true, got=false) — continuing for diagnostic
+H.264 CABAC P-frame (deblocking disabled) vs ffmpeg: max_abs_diff=208, differing_samples=1310/4608 | LUMA d=166 n=818 | CHROMA d=208 n=492
+
+thread 'cabac_pframe_no_deblock_is_bitexact' (21632) panicked at tpt-kinetix-h264\tests\cabac_pframe_conformance.rs:156:5:
+assertion `left == right` failed: CABAC P-frame decode should be bit-exact (deblocking disabled) (max_diff=208, diff_samples=1310/4608)
+  left: 208
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cabac_pframe_no_deblock_is_bitexact ... FAILED
+
+failures:
+
+failures:
+    cabac_pframe_no_deblock_is_bitexact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.02s
+
+error: test failed, to rerun pass `-p tpt-kinetix-h264 --test cabac_pframe_conformance`

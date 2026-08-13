@@ -1,0 +1,22 @@
+[package]
+name = "tpt-kinetix-lossless"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Lossless, bit-exact reversible codec for high-bit-depth medical/scientific/archival frames (TPT Kinetix)"
+keywords = ["tpt-kinetix", "lossless", "codec", "multimedia", "medical-imaging"]
+categories = ["multimedia::video", "multimedia::images"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-lossless"
+
+[dependencies]
+tpt-kinetix-core = { workspace = true }
+tpt-kinetix-bitstream = { workspace = true }
+thiserror = { workspace = true }
+nom = { workspace = true }
+
+[lib]
+path = "src/lib.rs"

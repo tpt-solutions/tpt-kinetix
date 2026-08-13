@@ -57,9 +57,26 @@ impl H264Decoder {
 
     /// Reports what this decoder can and cannot do.
     ///
-    /// The H.264 decoder is **not yet fully pixel-exact**: I-slice CAVLC and
-    /// CABAC decode are bit-exact; P/B-slice CABAC, the 8x8 transform, and
-    /// interlaced coding are not yet supported. Callers should check
+    /// The H.264 decoder's **CAVLC I/P/B and CABAC I paths are bit-exact** (max
+    /// abs diff == 0) against `ffmpeg` for 4:2:0, progressive, 16-px-aligned
+    /// pictures without the 8×8 transform, validated continuously by
+    /// `tests/conformance_matrix.rs` and the per-feature `*_conformance.rs`
+    /// suites. These are guarded by `Expect::BitExact` assertions, so any
+    /// regression fails CI.
+    ///
+    /// The **CABAC P/B paths are implemented but NOT yet bit-exact** (a Phase D.4
+    /// regression): they decode without error but differ from `ffmpeg` by up to
+    /// ~130 luma levels over roughly a quarter of the samples for P, and almost
+    /// the entire frame for B. This is tracked and measured by the conformance
+    /// harness (`Expect::NotConformant`) rather than hidden.
+    ///
+    /// The remaining hard gaps (which the decoder honestly rejects in strict
+    /// mode) are the 8×8 transform / High profile (`transform_8x8_mode_flag`),
+    /// interlaced coding (PAFF/MBAFF), and non-16-aligned picture dimensions.
+    ///
+    /// For any stream it cannot decode pixel-exactly, [`H264Decoder::with_strict`]
+    /// makes [`H264Decoder::decode`] return [`tpt_kinetix_core::error::KinetixError::NotPixelExact`]
+    /// instead of emitting approximate frames. Callers should check
     /// [`DecoderCapabilities::pixel_exact`] before trusting output frames.
     ///
     /// # Examples
@@ -70,6 +87,7 @@ impl H264Decoder {
     /// let caps = H264Decoder::new().capabilities();
     /// assert!(!caps.pixel_exact);
     /// assert!(caps.is_incomplete());
+    /// assert!(caps.supports_inter_prediction);
     /// ```
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
@@ -78,13 +96,14 @@ impl H264Decoder {
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
-            supports_inter_prediction: false,
+            supports_inter_prediction: true,
             supports_deblocking: true,
-            notes: "CAVLC I-slice decode and CABAC I-slice decode (4:2:0, \
-                    frame-only, no 8x8 transform) are pixel-exact; CABAC \
-                    P/B-slice, I_PCM under CABAC, inter prediction \
-                    (P/B-frames), B-frames, and interlaced coding are not \
-                    yet supported",
+            notes: "CAVLC I/P/B and CABAC I slices (4:2:0, progressive, \
+                    16-px-aligned, no 8x8 transform) are bit-exact vs ffmpeg; \
+                    CABAC P/B slices decode but are NOT yet bit-exact (Phase D.4 \
+                    regression); the 8x8 transform (High profile), interlaced \
+                    (PAFF/MBAFF), and non-16-aligned dimensions are not yet \
+                    pixel-exact (Phases F/G)",
         }
     }
 
@@ -186,7 +205,7 @@ impl H264Decoder {
                     }
                 }
                 NalUnitType::Pps => {
-                    if let Ok(pps) = PicParameterSet::parse(&nal.rbsp) {
+                    if let Ok(pps) = PicParameterSet::parse(&nal.rbsp, None) {
                         self.pps_store.insert(pps.pic_parameter_set_id, pps);
                     }
                 }
@@ -376,6 +395,7 @@ impl H264Decoder {
                 mb_rows,
                 slice_qp,
                 chroma_qp_index_offset,
+                pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                 tracer,
             ) {
                 Ok(p) => p,
@@ -393,6 +413,8 @@ impl H264Decoder {
             width,
             height,
             chroma_qp_index_offset,
+            &sps.scaling,
+            &crate::reconstruct::WeightedPred::Default,
             tracer,
         );
 
@@ -508,6 +530,9 @@ impl H264Decoder {
             true,
             header.frame_num,
             header.pic_order_cnt_lsb,
+            header.field_pic_flag,
+            header.bottom_field_flag,
+            header.delta_pic_order_cnt_bottom,
             &mut self.poc_state,
         ) else {
             return;
@@ -520,13 +545,20 @@ impl H264Decoder {
         let entry = DpbEntry {
             frame: frame.clone(),
             frame_num: header.frame_num,
+            field_pic_flag: header.field_pic_flag,
+            bottom_field_flag: header.bottom_field_flag,
             pic_order_cnt: poc,
             is_short_term: true,
             is_long_term: false,
             long_term_pic_num: -1,
             mv_grid: None,
         };
-        let ctx = crate::ref_pic::PicNumContext::new(sps, header.frame_num);
+        let ctx = crate::ref_pic::PicNumContext::new(
+            sps,
+            header.frame_num,
+            header.field_pic_flag,
+            header.bottom_field_flag,
+        );
         match self
             .dpb
             .mark_decoded_picture(entry, &marking, ctx, sps.num_ref_frames)
@@ -632,6 +664,7 @@ impl H264Decoder {
                 mb_rows,
                 slice_qp,
                 chroma_qp_index_offset,
+                pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                 &mut crate::trace::NoopTracer,
             ) {
                 Ok(parsed) => {
@@ -642,6 +675,8 @@ impl H264Decoder {
                         width,
                         height,
                         chroma_qp_index_offset,
+                        &sps.scaling,
+                        &crate::reconstruct::WeightedPred::Default,
                         &mut crate::trace::NoopTracer,
                     );
 
@@ -744,7 +779,12 @@ impl H264Decoder {
             // ref_idx binarisation and the RefPicList0 length, not the raw PPS
             // default.
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
-            let pic_num_ctx = crate::ref_pic::PicNumContext::new(&sps, header.frame_num);
+            let pic_num_ctx = crate::ref_pic::PicNumContext::new(
+                &sps,
+                header.frame_num,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+            );
 
             if let Some(ref_list) = crate::ref_pic::build_ref_list_l0(
                 &self.dpb,
@@ -758,12 +798,11 @@ impl H264Decoder {
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag =
                     pps.as_ref().map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
-                let p_result = if entropy_coding_mode_flag {
-                    reader.byte_align();
-                    let cabac_data = reader.remaining_bytes();
-                    let preview: Vec<String> = cabac_data.iter().take(16).map(|b| format!("{b:02X}")).collect();
-                    eprintln!("[DEBUG P-CABAC] slice_qp={slice_qp} cabac_init_idc={} num_ref_idx_l0_active={num_ref_idx_l0_active} mb_cols={mb_cols} mb_rows={mb_rows} data_len={} first_bytes=[{}]", header.cabac_init_idc, cabac_data.len(), preview.join(" "));
-                    crate::slice_data::parse_p_slice_cabac(
+                    let p_result = if entropy_coding_mode_flag {
+                        reader.byte_align();
+                        let cabac_data = reader.remaining_bytes();
+                        let preview: Vec<String> = cabac_data.iter().take(16).map(|b| format!("{b:02X}")).collect();
+                        crate::slice_data::parse_p_slice_cabac(
                         cabac_data,
                         mb_cols,
                         mb_rows,
@@ -781,6 +820,7 @@ impl H264Decoder {
                         slice_qp,
                         num_ref_idx_l0_active,
                         chroma_qp_index_offset,
+                        pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                         &mut crate::trace::NoopTracer,
                     )
                 };
@@ -811,6 +851,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
+                            &sps.scaling,
                             &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );
@@ -900,7 +941,7 @@ impl H264Decoder {
                         return Ok(frame);
                     }
                     Err(e) => {
-                        eprintln!("[DEBUG] P-slice CABAC/CAVLC parse error: {e:?}");
+                        eprintln!("P CABAC parse error: {e:?}");
                         // Fall through to the skip scaffold.
                     }
                 }
@@ -918,7 +959,12 @@ impl H264Decoder {
                 pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
             let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
-            let pic_num_ctx = crate::ref_pic::PicNumContext::new(&sps, header.frame_num);
+            let pic_num_ctx = crate::ref_pic::PicNumContext::new(
+                &sps,
+                header.frame_num,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+            );
             // Compute current POC using a scratch state so we don't advance the
             // real poc_state (store_reference_picture handles that later).
             let is_idr_b = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
@@ -930,6 +976,9 @@ impl H264Decoder {
                     nal.nal_ref_idc != 0,
                     header.frame_num,
                     header.pic_order_cnt_lsb,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0)
@@ -981,6 +1030,7 @@ impl H264Decoder {
                         num_ref_idx_l0_active,
                         num_ref_idx_l1_active,
                         chroma_qp_index_offset,
+                        pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                         &mut crate::trace::NoopTracer,
                     )
                 };
@@ -1018,6 +1068,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
+                            &sps.scaling,
                             &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );

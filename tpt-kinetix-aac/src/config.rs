@@ -4,6 +4,7 @@
 //! AAC sequence headers. It declares the audio object type, sample rate, and
 //! channel configuration needed to initialize an AAC decoder.
 
+use crate::bitreader::BitReader;
 use crate::{sample_rate_from_index, SAMPLE_RATES};
 
 /// Map a sample rate in Hz to its 4-bit `AudioSpecificConfig` sampling
@@ -52,52 +53,28 @@ impl AudioSpecificConfig {
         let mut reader = BitReader::new(data);
 
         // audioObjectType: 5 bits, with an escape to 6 more bits if == 31.
-        let mut object_type = reader.read(5).ok_or(ConfigError::Truncated)? as u8;
+        let mut object_type = reader.read_bits(5).ok_or(ConfigError::Truncated)? as u8;
         if object_type == 31 {
-            let ext = reader.read(6).ok_or(ConfigError::Truncated)? as u8;
+            let ext = reader.read_bits(6).ok_or(ConfigError::Truncated)? as u8;
             object_type = 32 + ext;
         }
 
         // samplingFrequencyIndex: 4 bits; if 15, a 24-bit explicit rate follows.
-        let sf_index = reader.read(4).ok_or(ConfigError::Truncated)? as u8;
+        let sf_index = reader.read_bits(4).ok_or(ConfigError::Truncated)? as u8;
         let sample_rate = if sf_index == 15 {
-            reader.read(24).ok_or(ConfigError::Truncated)?
+            reader.read_bits(24).ok_or(ConfigError::Truncated)?
         } else {
             sample_rate_from_index(sf_index).ok_or(ConfigError::BadSampleRate)?
         };
 
         // channelConfiguration: 4 bits.
-        let channels = reader.read(4).ok_or(ConfigError::Truncated)? as u8;
+        let channels = reader.read_bits(4).ok_or(ConfigError::Truncated)? as u8;
 
         Ok(AudioSpecificConfig {
             object_type,
             sample_rate,
             channels,
         })
-    }
-}
-
-/// A tiny MSB-first bit reader.
-struct BitReader<'a> {
-    data: &'a [u8],
-    bit_pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, bit_pos: 0 }
-    }
-
-    /// Read up to 32 bits, MSB-first. Returns `None` if not enough bits remain.
-    fn read(&mut self, n: u32) -> Option<u32> {
-        let mut value = 0u32;
-        for _ in 0..n {
-            let byte = self.data.get(self.bit_pos / 8)?;
-            let bit = (byte >> (7 - (self.bit_pos % 8))) & 1;
-            value = (value << 1) | bit as u32;
-            self.bit_pos += 1;
-        }
-        Some(value)
     }
 }
 

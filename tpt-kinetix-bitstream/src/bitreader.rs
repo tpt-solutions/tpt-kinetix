@@ -1,11 +1,8 @@
 //! Bit-level reader over a byte slice, MSB-first within each byte.
 //!
-//! This is Lean's own copy rather than a shared dependency — the workspace
-//! has no shared bitstream-utility crate yet (`tpt-kinetix-h264` has its own
-//! equivalent in `bitreader.rs`). Whether to factor a shared
-//! `tpt-kinetix-bitstream` crate now that this is the second hand-rolled
-//! reader is an open question tracked in `todo.md` (Phase 13), not decided
-//! here.
+//! Shared across the TPT Kinetix original codecs (lean / vision / realtime).
+//! Previously each of those crates carried its own copy; this is the single
+//! source of truth (see `docs/realtime-codec-design.md` DECISION 7).
 
 /// Efficient bit-level reader over a byte slice.
 pub struct BitReader<'a> {

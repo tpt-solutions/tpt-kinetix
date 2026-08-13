@@ -34,12 +34,15 @@
 //! ```
 
 pub mod adts;
+pub mod bitreader;
 pub mod config;
 pub mod decoder;
+pub mod syntax;
 
 pub use adts::AdtsHeader;
 pub use config::{sample_rate_index, AudioSpecificConfig};
 pub use decoder::AacDecoder;
+pub use syntax::{AacParseError, Element, IcsInfo, RawDataBlock, Section, SectionData};
 
 /// The 13 MPEG-4 sampling frequencies indexed by the 4-bit sampling frequency
 /// index used in both ADTS headers and `AudioSpecificConfig`.
