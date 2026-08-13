@@ -722,6 +722,32 @@ impl MbSkipFlagContext {
     }
 }
 
+/// `mb_field_decoding_flag` CABAC context (spec §9.3.3.1.1.11, ctxIdx 70..=72).
+///
+/// Signalled once per *macroblock pair* in an MBAFF frame (§7.4.4), before the
+/// pair's top macroblock. Its single bin's `ctxIdxInc` (0..=2) is the sum of the
+/// left and top neighbours' `mb_field_decoding_flag` values (each 0 or 1). The
+/// three contexts initialise from [`crate::cabac_tables::CABAC_CTX_INIT_I`]
+/// indices 70, 71, 72 (I-slice init table — `mb_field_decoding_flag` uses the
+/// same init for all slice types).
+pub struct MbFieldDecodingFlagContext {
+    ctx: [CabacContext; 3],
+}
+
+impl MbFieldDecodingFlagContext {
+    /// Initialise the three contexts at the given slice QP.
+    pub fn new(slice_qp_y: i32) -> Self {
+        let ctx = std::array::from_fn(|i| init_ctx(70 + i, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// Decode `mb_field_decoding_flag` given the left and top neighbours' flags.
+    pub fn decode(&mut self, dec: &mut CabacDecoder, left_field: bool, top_field: bool) -> bool {
+        let idx = (left_field as usize) + (top_field as usize);
+        dec.decode_decision(&mut self.ctx[idx]) == 1
+    }
+}
+
 /// Intra `mb_type` *suffix* decoder for intra-coded macroblocks embedded
 /// inside a P or B slice (i.e. the mb_type prefix -- [`MbTypePCabacContext`]
 /// for P/SP -- decoded "intra"). Spec §9.3.3.1.1.3-family binarization reused

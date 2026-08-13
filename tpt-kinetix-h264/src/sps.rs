@@ -28,6 +28,11 @@ pub struct SeqParameterSet {
     pub pic_width_in_mbs_minus1: u32,
     pub pic_height_in_map_units_minus1: u32,
     pub frame_mbs_only_flag: bool,
+    /// `mb_adaptive_frame_field_flag` (§7.3.2.1) — true when macroblocks may be
+    /// coded in mixed frame/field mode within a picture (MBAFF). Only present in
+    /// the bitstream when `!frame_mbs_only_flag`; for progressive (`frame_mbs_only_flag
+    /// == 1`) streams it is implicitly false.
+    pub mb_adaptive_frame_field_flag: bool,
     pub frame_cropping_flag: bool,
     pub frame_crop_left_offset: u32,
     pub frame_crop_right_offset: u32,
@@ -112,10 +117,11 @@ impl SeqParameterSet {
         let pic_height_in_map_units_minus1 =
             r.read_ue().context("pic_height_in_map_units_minus1")?;
         let frame_mbs_only_flag = r.read_bit().context("frame_mbs_only_flag")? == 1;
-        if !frame_mbs_only_flag {
-            let _mb_adaptive_frame_field_flag =
-                r.read_bit().context("mb_adaptive_frame_field_flag")?;
-        }
+        let mb_adaptive_frame_field_flag = if !frame_mbs_only_flag {
+            r.read_bit().context("mb_adaptive_frame_field_flag")? == 1
+        } else {
+            false
+        };
         let _direct_8x8_inference_flag = r.read_bit().context("direct_8x8_inference_flag")?;
         let frame_cropping_flag = r.read_bit().context("frame_cropping_flag")? == 1;
         let (
@@ -154,6 +160,7 @@ impl SeqParameterSet {
             pic_width_in_mbs_minus1,
             pic_height_in_map_units_minus1,
             frame_mbs_only_flag,
+            mb_adaptive_frame_field_flag,
             frame_cropping_flag,
             frame_crop_left_offset,
             frame_crop_right_offset,
@@ -187,17 +194,21 @@ impl SeqParameterSet {
 
     /// Luma picture height in pixels (after cropping).
     ///
-    /// Formula:
-    ///   PicHeightInSamplesL = (pic_height_in_map_units_minus1 + 1) × 16
+    /// Formula (H.264 §7.4.2.1.1):
+    ///   PicHeightInSamplesL = (2 − frame_mbs_only_flag)
+    ///                        × (pic_height_in_map_units_minus1 + 1) × 16
     ///   FrameHeight = PicHeightInSamplesL − SubHeightC × (crop_top + crop_bottom)
     ///
-    /// Assumes 4:2:0 chroma format and `frame_mbs_only_flag = 1` (SubHeightC = 2).
-    /// Saturating for the same reason as [`SeqParameterSet::pic_width_pixels`].
+    /// For an interlaced (`frame_mbs_only_flag == 0`) picture each macroblock row
+    /// spans two fields, so the picture is twice as tall as the MB-row count
+    /// implies (the `2 − frame_mbs_only_flag` factor). Assumes 4:2:0 chroma
+    /// format (SubHeightC = 2). Saturating for the same reason as
+    /// [`SeqParameterSet::pic_width_pixels`].
     pub fn pic_height_pixels(&self) -> u32 {
-        let raw = self
-            .pic_height_in_map_units_minus1
-            .saturating_add(1)
-            .saturating_mul(16);
+        let mb_rows = self.pic_height_in_map_units_minus1.saturating_add(1);
+        let raw = mb_rows
+            .saturating_mul(16)
+            .saturating_mul(2 - self.frame_mbs_only_flag as u32);
         let sub_h = if self.frame_mbs_only_flag { 2u32 } else { 4 };
         let crop = self
             .frame_crop_top_offset
@@ -227,6 +238,7 @@ mod tests {
             pic_width_in_mbs_minus1: 19,        // (19+1)*16 = 320 px
             pic_height_in_map_units_minus1: 14, // (14+1)*16 = 240 px
             frame_mbs_only_flag: true,
+            mb_adaptive_frame_field_flag: false,
             frame_cropping_flag: false,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,
@@ -255,6 +267,7 @@ mod tests {
             pic_width_in_mbs_minus1: 119,       // (119+1)*16 = 1920
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
+            mb_adaptive_frame_field_flag: false,
             frame_cropping_flag: true,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,
@@ -264,5 +277,82 @@ mod tests {
         };
         assert_eq!(sps.pic_width_pixels(), 1920);
         assert_eq!(sps.pic_height_pixels(), 1080);
+    }
+
+    /// Minimal MSB-first bit writer for synthesizing an SPS RBSP.
+    struct BitWriter {
+        buf: Vec<u8>,
+        cur: u8,
+        nbits: u8,
+    }
+    impl BitWriter {
+        fn new() -> Self {
+            Self { buf: Vec::new(), cur: 0, nbits: 0 }
+        }
+        fn bit(&mut self, b: u8) {
+            self.cur = (self.cur << 1) | (b & 1);
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.buf.push(self.cur);
+                self.cur = 0;
+                self.nbits = 0;
+            }
+        }
+        fn bits(&mut self, value: u32, count: u8) {
+            for i in (0..count).rev() {
+                self.bit(((value >> i) & 1) as u8);
+            }
+        }
+        fn ue(&mut self, v: u32) {
+            let code = v + 1;
+            let leading = 31 - code.leading_zeros();
+            for _ in 0..leading {
+                self.bit(0);
+            }
+            for i in (0..=leading).rev() {
+                self.bit(((code >> i) & 1) as u8);
+            }
+        }
+        fn finish(mut self) -> Vec<u8> {
+            self.bit(1);
+            while self.nbits != 0 {
+                self.bit(0);
+            }
+            self.buf
+        }
+    }
+
+    /// Phase G.3 — `mb_adaptive_frame_field_flag` round-trips through the SPS.
+    ///
+    /// An interlaced SPS (`frame_mbs_only_flag == 0`) must carry and expose the
+    /// MBAFF enable flag; a progressive SPS (`frame_mbs_only_flag == 1`) must
+    /// implicitly leave it false even though the bit is absent from the stream.
+    #[test]
+    fn sps_mb_adaptive_frame_field_flag_round_trips() {
+        // Build a baseline (profile 66) interlaced SPS with
+        // `mb_adaptive_frame_field_flag == 1`.
+        let mut w = BitWriter::new();
+        w.bits(66, 8); // profile_idc
+        w.bits(0, 8); // constraint_set flags + reserved
+        w.bits(30, 8); // level_idc
+        w.ue(0); // seq_parameter_set_id
+        w.ue(0); // log2_max_frame_num_minus4
+        w.ue(0); // pic_order_cnt_type
+        w.ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.ue(1); // num_ref_frames
+        w.bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.ue(1); // pic_width_in_mbs_minus1 (= 2 MBs)
+        w.ue(1); // pic_height_in_map_units_minus1 (= 2 MBs)
+        w.bit(0); // frame_mbs_only_flag = 0 (interlaced)
+        w.bit(1); // mb_adaptive_frame_field_flag = 1
+        w.bit(1); // direct_8x8_inference_flag
+        w.bit(0); // frame_cropping_flag = 0
+        let rbsp = w.finish();
+
+        let sps = SeqParameterSet::parse(&rbsp).expect("parse interlaced sps");
+        assert!(!sps.frame_mbs_only_flag);
+        assert!(sps.mb_adaptive_frame_field_flag);
+        assert_eq!(sps.pic_width_pixels(), 32);
+        assert_eq!(sps.pic_height_pixels(), 64); // 2 MBs * 32 / 4 sub_height
     }
 }

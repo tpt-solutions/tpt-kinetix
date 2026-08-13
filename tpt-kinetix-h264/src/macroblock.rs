@@ -104,6 +104,11 @@ pub struct InterMotion {
 #[derive(Debug, Clone)]
 pub struct Macroblock {
     pub mb_type: MbType,
+    /// `mb_field_decoding_flag` (§7.4.4) — true when this macroblock belongs to a
+    /// coded *field* within an MBAFF frame (i.e. the MB-pair it is part of is
+    /// decoded in field mode). Only meaningful when the active SPS sets
+    /// `mb_adaptive_frame_field_flag`; always false for frame-only / PAFF streams.
+    pub mb_field_flag: bool,
     /// Luma quantisation parameter.
     pub qp: i32,
     /// 16 luma 4×4 residual blocks in raster order (16 coefficients each, zigzag).
@@ -151,6 +156,7 @@ impl Macroblock {
     pub fn new_skip() -> Self {
         Self {
             mb_type: MbType::PSkip,
+            mb_field_flag: false,
             qp: 26,
             luma_coeffs: Box::new([[0; 16]; 16]),
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),
@@ -434,6 +440,7 @@ mod tests {
                 cbp_chroma: 0,
                 cbp_luma: 0,
             },
+            mb_field_flag: false,
             qp: 26,
             luma_coeffs: Box::new([[0; 16]; 16]),
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),
@@ -506,6 +513,7 @@ mod tests {
         // directly above it from the plane.
         let mb = Macroblock {
             mb_type: MbType::Intra4x4,
+            mb_field_flag: false,
             qp: 26,
             luma_coeffs: Box::new([[0; 16]; 16]),
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),
@@ -614,6 +622,7 @@ mod tests {
     fn all_zero_coeffs_produce_zero_residual() {
         let mb = Macroblock {
             mb_type: MbType::Intra4x4,
+            mb_field_flag: false,
             qp: 26,
             luma_coeffs: Box::new([[0; 16]; 16]),
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),

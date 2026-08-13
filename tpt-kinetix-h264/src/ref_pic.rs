@@ -1090,6 +1090,7 @@ mod tests {
             pic_width_in_mbs_minus1: 9,
             pic_height_in_map_units_minus1: 9,
             frame_mbs_only_flag: true,
+            mb_adaptive_frame_field_flag: false,
             frame_cropping_flag: false,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,

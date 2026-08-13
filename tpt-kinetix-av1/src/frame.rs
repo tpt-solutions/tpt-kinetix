@@ -218,6 +218,7 @@ pub struct FrameHeader {
     pub frame_type: FrameType,
     pub show_frame: bool,
     pub show_existing_frame: bool,
+    pub showable_frame: bool,
     pub frame_id: Option<u32>,
     pub width: u32,
     pub height: u32,
@@ -239,6 +240,12 @@ pub struct FrameHeader {
     pub tx_mode_select: bool,
     pub skip_mode_allowed: bool,
 
+    // Computed helpers used by the reconstruction stage.
+    /// `true` when the frame carries no inter prediction (KEY / INTRA_ONLY).
+    pub frame_is_intra: bool,
+    /// `true` when every plane of this frame is coded lossless (§5.9.17).
+    pub coded_lossless: bool,
+
     // Quantizer
     pub base_q_idx: u8,
     pub delta_q_y_dc: i32,
@@ -259,19 +266,23 @@ pub struct FrameHeader {
     pub seg_feature_data: [[i16; 8]; 8],
 
     // Loop filter
-    pub loop_filter_level: [u8; 2],
+    pub loop_filter_level: [u8; 4],
     pub loop_filter_sharpness: u8,
     pub loop_filter_delta_enabled: bool,
     pub loop_filter_deltas: LoopFilterDeltas,
 
     // CDEF
     pub cdef_damping: u8,
+    pub cdef_bits: u8,
     pub cdef_y_strength: Vec<u8>,
     pub cdef_uv_strength: Vec<u8>,
 
     // Delta quant / frame
     pub delta_q_present: bool,
+    pub delta_q_res: u8,
     pub delta_lf_present: bool,
+    pub delta_lf_res: u8,
+    pub delta_lf_multi: bool,
 
     // Reference frames
     pub ref_frame_idx: [u8; 7],
@@ -293,6 +304,12 @@ pub struct FrameHeader {
 
     // Remaining bits detail (for padding / trailing bits)
     pub buffer_removal_time_present: bool,
+
+    // Sequence-level feature gating used during reconstruction.
+    pub enable_intra_edge_filter: bool,
+    pub enable_filter_intra: bool,
+    pub enable_cdef: bool,
+    pub enable_restoration: bool,
 }
 
 impl FrameHeader {
@@ -312,110 +329,138 @@ impl FrameHeader {
     ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
-        let reduced_still = seq.reduced_still_picture_header;
+        let all_frames_intra = seq.reduced_still_picture_header;
+        let force_screen = seq.seq_force_screen_content_tools;
+        let force_integer = seq.seq_force_integer_mv;
+        let enable_superres = seq.enable_superres;
+        let enable_cdef = seq.enable_cdef;
+        let enable_restoration = seq.enable_restoration;
+        let enable_intra_edge_filter = seq.enable_intra_edge_filter;
+        let enable_filter_intra = seq.enable_filter_intra;
+        let enable_warped_motion = seq.enable_warped_motion;
+        let enable_order_hint = seq.enable_order_hint;
+        let film_grain_params_present = seq.film_grain_params_present;
+        let decoder_model_info_present = seq.decoder_model_info_present;
+        let mono_chrome = seq.color_config.mono_chrome;
+        let subsampling_x = seq.color_config.subsampling_x;
+        let subsampling_y = seq.color_config.subsampling_y;
 
-        // show_existing_frame
-        let show_existing_frame = if !reduced_still {
-            read_flag(&mut br)?
-        } else {
+        // --- show_existing_frame ---
+        let show_existing_frame = if all_frames_intra {
             false
+        } else {
+            read_flag(&mut br)?
         };
-
         if show_existing_frame {
-            // frame_type(2), frame_id(..), display_frame_id, ...
-            // Minimal: read frame_type but the rest is mostly padding for the
-            // existing-frame case. We surface a dedicated error because we do
-            // not yet store a DPB to "show" a previously decoded frame.
-            let _ = read_f8(&mut br, 2)?; // frame_type
+            let _frame_type = read_f8(&mut br, 2)?;
+            if !all_frames_intra {
+                let _display_frame_id = read_f(&mut br, seq.additional_frame_id_length_minus_1 + 1)?;
+            }
             return Err(KinetixError::Unsupported(
                 "AV1 show_existing_frame (frame display from DPB) not yet implemented".into(),
             ));
         }
 
-        let frame_type = if reduced_still {
+        // --- frame_type ---
+        let frame_type = if all_frames_intra {
             FrameType::KeyFrame
         } else {
-            let ft = read_f8(&mut br, 2)?;
-            FrameType::from_u8(ft)
+            FrameType::from_u8(read_f8(&mut br, 2)?)
         };
-        let show_frame = if reduced_still {
+
+        // --- show_frame / showable_frame ---
+        let show_frame = if all_frames_intra {
             true
         } else {
             read_flag(&mut br)?
         };
-        let showable_frame = if !reduced_still && frame_type != FrameType::KeyFrame && !show_frame {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
-        let _ = showable_frame;
-
-        let error_resilient_mode = if !reduced_still && frame_type != FrameType::KeyFrame {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
-
-        // disable_cdf_update
-        let disable_cdf_update = if !reduced_still {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
-
-        let allow_screen_content_tools = if frame_type == FrameType::KeyFrame
-            || !seq.reduced_still_picture_header && error_resilient_mode
+        let showable_frame = if !all_frames_intra
+            && frame_type != FrameType::KeyFrame
+            && !show_frame
         {
-            // For key frames, if reduced still, screen tools always allowed.
-            if reduced_still {
-                true
+            read_flag(&mut br)?
+        } else {
+            false
+        };
+
+        // --- error_resilient_mode ---
+        let error_resilient_mode = if frame_type == FrameType::KeyFrame || all_frames_intra {
+            false
+        } else {
+            read_flag(&mut br)?
+        };
+
+        // --- disable_cdf_update (not present for reduced-still / key frames) ---
+        let disable_cdf_update = if !all_frames_intra && frame_type != FrameType::KeyFrame {
+            read_flag(&mut br)?
+        } else {
+            false
+        };
+
+        // --- allow_screen_content_tools ---
+        let allow_screen_content_tools = if force_screen || frame_type == FrameType::KeyFrame {
+            force_screen
+        } else {
+            read_flag(&mut br)?
+        };
+
+        // --- force_integer_mv ---
+        let force_integer_mv = if allow_screen_content_tools
+            && (frame_type == FrameType::KeyFrame || error_resilient_mode || all_frames_intra)
+        {
+            if force_screen {
+                false
             } else {
                 read_flag(&mut br)?
             }
-        } else if !reduced_still {
-            read_flag(&mut br)?
-        } else {
-            true
-        };
-
-        let force_integer_mv = if allow_screen_content_tools
-            && (frame_type == FrameType::KeyFrame || error_resilient_mode)
-        {
-            read_flag(&mut br)?
         } else {
             false
         };
 
+        // --- frame_size_override_flag ---
         let frame_size_override_flag =
-            if !reduced_still && !error_resilient_mode && frame_type != FrameType::KeyFrame {
+            if !all_frames_intra && !error_resilient_mode && frame_type != FrameType::KeyFrame {
                 read_flag(&mut br)?
             } else {
                 false
             };
 
-        // order_hint
-        let order_hint_bits = seq.order_hint_bits_minus_1.wrapping_add(1);
-        let order_hint = if !reduced_still && order_hint_bits > 0 {
+        // --- order_hint ---
+        let order_hint_bits = if enable_order_hint {
+            seq.order_hint_bits_minus_1 + 1
+        } else {
+            0
+        };
+        let order_hint = if !all_frames_intra && order_hint_bits > 0 {
             read_f(&mut br, order_hint_bits)?
         } else {
             0
         };
 
-        let primary_ref_frame = if !reduced_still && frame_type != FrameType::KeyFrame {
-            read_f8(&mut br, 3)?
-        } else {
+        // --- primary_ref_frame ---
+        let primary_ref_frame = if frame_type == FrameType::KeyFrame || all_frames_intra {
             7
+        } else {
+            read_f8(&mut br, 3)?
         };
 
-        // buffer_removal_time
-        let buffer_removal_time_present = if !reduced_still && seq.decoder_model_info_present {
-            // simplified: we never set decoder_model_info_present, so this is false.
-            false
+        // --- buffer_removal_time (decoder model) ---
+        let buffer_removal_time_present = if decoder_model_info_present
+            && !all_frames_intra
+            && !show_existing_frame
+        {
+            // one bit per operating point that has decoder_model_present
+            read_flag(&mut br)?
         } else {
             false
         };
+        if buffer_removal_time_present {
+            // In this workspace no operating points declare decoder model info,
+            // so this branch is effectively unreachable; read is a no-op guard.
+            let _ = read_flag(&mut br)?;
+        }
 
-        // frame_refs_short_signaling
+        // --- frame_refs_short_signaling ---
         let frame_refs_short_signaling =
             if frame_type != FrameType::KeyFrame && !error_resilient_mode {
                 read_flag(&mut br)?
@@ -425,14 +470,13 @@ impl FrameHeader {
 
         let mut ref_frame_idx = [0u8; 7];
         if frame_refs_short_signaling {
-            for slot in &mut ref_frame_idx {
+            for slot in ref_frame_idx.iter_mut() {
                 *slot = read_f8(&mut br, 3)?;
             }
-            // last/fwd/bwd hints derive the 7 refs (simplified: not all paths)
         }
 
         let mut ref_order_hint = [0u8; 8];
-        if frame_type != FrameType::KeyFrame {
+        if frame_type != FrameType::KeyFrame && !all_frames_intra {
             for i in 0..7 {
                 let v = if order_hint_bits > 0 {
                     read_f8(&mut br, order_hint_bits)?
@@ -441,21 +485,26 @@ impl FrameHeader {
                 };
                 ref_order_hint[i] = v;
                 if !frame_refs_short_signaling {
-                    ref_frame_idx[i] = (i + 1) as u8; // default LAST=1..
+                    ref_frame_idx[i] = (i + 1) as u8;
                 }
             }
         }
 
-        // --- Dimensions ---
+        // --- frame_size() / render_size() ---
+        let frame_size_override = if all_frames_intra {
+            false
+        } else {
+            frame_size_override_flag
+        };
         let (width, height, render_width, render_height) = parse_frame_size(
             &mut br,
             seq,
-            frame_size_override_flag,
+            frame_size_override,
             seq.frame_width(),
             seq.frame_height(),
         )?;
 
-        // --- Tiles ---
+        // --- tile info ---
         let (
             tile_cols_log2,
             tile_rows_log2,
@@ -465,25 +514,27 @@ impl FrameHeader {
             tile_height_in_sb,
         ) = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
 
-        // --- Quantizer ---
+        let frame_is_intra = all_frames_intra
+            || frame_type == FrameType::KeyFrame
+            || frame_type == FrameType::IntraOnlyFrame;
+
+        // --- quantization_params() ---
         let base_q_idx = read_f8(&mut br, 8)?;
         let delta_q_y_dc = read_delta(&mut br)?;
-        let delta_q_u_dc = if seq.color_config.mono_chrome {
+        let separate_uv_delta_q = if !mono_chrome {
+            read_flag(&mut br)?
+        } else {
+            false
+        };
+        let delta_q_u_dc = if mono_chrome { 0 } else { read_delta(&mut br)? };
+        let delta_q_u_ac = if mono_chrome { 0 } else { read_delta(&mut br)? };
+        let diff_uv_delta = separate_uv_delta_q;
+        let delta_q_v_dc = if mono_chrome || !diff_uv_delta {
             0
         } else {
             read_delta(&mut br)?
         };
-        let delta_q_u_ac = if seq.color_config.mono_chrome {
-            0
-        } else {
-            read_delta(&mut br)?
-        };
-        let delta_q_v_dc = if seq.color_config.mono_chrome {
-            0
-        } else {
-            read_delta(&mut br)?
-        };
-        let delta_q_v_ac = if seq.color_config.mono_chrome {
+        let delta_q_v_ac = if mono_chrome || !diff_uv_delta {
             0
         } else {
             read_delta(&mut br)?
@@ -500,14 +551,15 @@ impl FrameHeader {
             (0, 0, 0)
         };
 
-        let lossless = base_q_idx == 0
+        let coded_lossless = base_q_idx == 0
             && delta_q_y_dc == 0
             && delta_q_u_dc == 0
             && delta_q_u_ac == 0
             && delta_q_v_dc == 0
-            && delta_q_v_ac == 0;
+            && delta_q_v_ac == 0
+            && !using_qmatrix;
 
-        // --- Segmentation ---
+        // --- segmentation_params() ---
         let segmentation_enabled = read_flag(&mut br)?;
         let mut seg_feature_enabled = [false; 8];
         let mut seg_feature_data = [[0i16; 8]; 8];
@@ -525,7 +577,6 @@ impl FrameHeader {
                 if seg_feature_enabled[i] {
                     for (j, slot) in seg_feature_data[i].iter_mut().enumerate() {
                         let data = if j >= 4 {
-                            // signed
                             read_su(&mut br, 8)? as i16
                         } else {
                             read_f(&mut br, 8)? as i16
@@ -536,120 +587,121 @@ impl FrameHeader {
             }
         }
 
-        // --- DeltaQ / DeltaLF present ---
-        let delta_q_present = read_flag(&mut br)?;
-        let _delta_q_res = if delta_q_present {
-            read_f8(&mut br, 2)?
+        // --- delta_q_params / delta_lf_params ---
+        let delta_q_present =
+            if !coded_lossless && !seq.allow_intrabc { read_flag(&mut br)? } else { false };
+        let delta_q_res = if delta_q_present {
+            read_f8(&mut br, 2)? as u8
         } else {
             0
         };
-        let delta_lf_present = read_flag(&mut br)?;
-        let _delta_lf_res = if delta_lf_present {
-            read_f8(&mut br, 2)?
+        let delta_lf_present = if delta_q_present && !seq.allow_intrabc {
+            read_flag(&mut br)?
+        } else {
+            false
+        };
+        let delta_lf_res = if delta_lf_present {
+            read_f8(&mut br, 2)? as u8
         } else {
             0
+        };
+        let delta_lf_multi = if delta_lf_present && !all_frames_intra {
+            read_flag(&mut br)?
+        } else {
+            false
         };
 
-        // --- Loop filter ---
-        // TODO: this should be gated on `!(CodedLossless || allow_intrabc)` per
-        // AV1 §5.9.11, but `lossless`/`allow_intrabc` aren't fully tracked yet;
-        // unconditionally parsing matches current (pre-lint-cleanup) behavior.
+        // --- loop_filter_params() (gated on !CodedLossless && !allow_intrabc) ---
         let mut loop_filter_deltas = LoopFilterDeltas::default();
-        let lf_level_0 = read_f8(&mut br, 6)?;
-        let lf_level_1 = if seq.color_config.mono_chrome {
-            0
-        } else {
-            read_f8(&mut br, 6)?
-        };
-        let loop_filter_level = [lf_level_0, lf_level_1];
-        let loop_filter_sharpness = read_f8(&mut br, 3)?;
-        let loop_filter_delta_enabled = read_flag(&mut br)?;
-        if loop_filter_delta_enabled {
-            let mode_ref_delta_update = read_flag(&mut br)?;
-            if mode_ref_delta_update {
-                for i in 0..8 {
-                    let update = read_flag(&mut br)?;
-                    if update {
-                        loop_filter_deltas.loop_filter_ref_deltas[i] = read_su(&mut br, 7)? as i8;
+        let mut loop_filter_level = [0u8; 4];
+        let mut loop_filter_sharpness: u8 = 0;
+        let mut loop_filter_delta_enabled: bool = false;
+        if !coded_lossless && !seq.allow_intrabc {
+            let n_planes = if mono_chrome { 1 } else { 2 };
+            for i in 0..(2 * n_planes) {
+                loop_filter_level[i] = read_f8(&mut br, 6)?;
+            }
+            loop_filter_sharpness = read_f8(&mut br, 3)?;
+            loop_filter_delta_enabled = read_flag(&mut br)?;
+            if loop_filter_delta_enabled {
+                let mode_ref_delta_update = read_flag(&mut br)?;
+                if mode_ref_delta_update {
+                    for i in 0..8 {
+                        let update = read_flag(&mut br)?;
+                        if update {
+                            loop_filter_deltas.loop_filter_ref_deltas[i] =
+                                read_su(&mut br, 7)? as i8;
+                        }
                     }
-                }
-                for i in 0..2 {
-                    let update = read_flag(&mut br)?;
-                    if update {
-                        loop_filter_deltas.loop_filter_mode_deltas[i] = read_su(&mut br, 7)? as i8;
+                    for i in 0..2 {
+                        let update = read_flag(&mut br)?;
+                        if update {
+                            loop_filter_deltas.loop_filter_mode_deltas[i] =
+                                read_su(&mut br, 7)? as i8;
+                        }
                     }
                 }
             }
         }
-
-        // --- CDEF (AV1 §5.9.14) ---
-        // Gated on the *sequence-header* `enable_cdef` flag, not on `lossless`.
-        // When CDEF is disabled at the sequence level the frame header carries no
-        // CDEF parameters at all; reading them unconditionally (the old `!lossless`
-        // gate) desyncs the tile-group bitstream.
-        let cdef_damping = if seq.enable_cdef {
-            read_f8(&mut br, 2)? + 3
-        } else {
-            0
-        };
-        let mut cdef_y_strength = Vec::new();
-        let mut cdef_uv_strength = Vec::new();
-        if seq.enable_cdef {
-            let cdef_bits = read_f8(&mut br, 2)?;
-            let cdef_y_sec_strength = [0u8, 4, 8, 16];
-            let cdef_uv_sec_strength = [0u8, 4, 8, 16];
-            for _ in 0..(1 << cdef_bits) {
-                let pri = read_f8(&mut br, 4)?;
-                let sec = read_f8(&mut br, 2)?;
-                cdef_y_strength.push(pri + cdef_y_sec_strength[sec as usize]);
-            }
-            if !seq.color_config.mono_chrome {
-                for _ in 0..(1 << cdef_bits) {
+        // --- cdef_params() (gated on enable_cdef && !CodedLossless && !allow_intrabc) ---
+        let (cdef_damping, cdef_bits, cdef_y_strength, cdef_uv_strength) =
+            if enable_cdef && !coded_lossless && !seq.allow_intrabc {
+                let damping = read_f8(&mut br, 2)? + 3;
+                let bits = read_f8(&mut br, 2)?;
+                let cdef_y_sec_strength = [0u8, 4, 8, 16];
+                let cdef_uv_sec_strength = [0u8, 4, 8, 16];
+                let mut y = Vec::new();
+                let mut uv = Vec::new();
+                for _ in 0..(1u32 << bits) {
                     let pri = read_f8(&mut br, 4)?;
                     let sec = read_f8(&mut br, 2)?;
-                    cdef_uv_strength.push(pri + cdef_uv_sec_strength[sec as usize]);
+                    y.push(pri + cdef_y_sec_strength[sec as usize]);
                 }
-            }
-        }
-
-        // --- Loop restoration (AV1 §5.9.15) ---
-        // Gated on `!lossless && seq.enable_restoration`. When disabled the
-        // frame header carries no restoration parameters.
-        if !lossless && seq.enable_restoration {
-            let num_planes_rest = if seq.color_config.subsampling_x == false
-                && seq.color_config.subsampling_y == false
-            {
-                3
+                if !mono_chrome {
+                    for _ in 0..(1u32 << bits) {
+                        let pri = read_f8(&mut br, 4)?;
+                        let sec = read_f8(&mut br, 2)?;
+                        uv.push(pri + cdef_uv_sec_strength[sec as usize]);
+                    }
+                }
+                (damping, bits, y, uv)
             } else {
-                2
+                (0u8, 0u8, Vec::new(), Vec::new())
             };
-            for _ in 0..num_planes_rest {
+
+        // --- loop_restoration_params() (gated on !CodedLossless && enable_restoration) ---
+        if !coded_lossless && enable_restoration {
+            let num_planes = if mono_chrome { 1 } else { 3 };
+            for _ in 0..num_planes {
                 let lr_type = read_f8(&mut br, 2)?;
                 if lr_type != 0 {
-                    // FrameRestorationType[i] != RESTORE_NONE → 1-bit unit-shift delta.
-                    let _lr_unit_shift_delta = read_f(&mut br, 1)?;
+                    let _ = read_f(&mut br, 1)?;
                 }
             }
         }
 
-        // --- Tx mode ---
-        let reduced_tx_set = if frame_type == FrameType::KeyFrame || error_resilient_mode {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
-        let tx_mode_select = if reduced_tx_set {
-            false
-        } else if frame_type == FrameType::KeyFrame || error_resilient_mode {
-            // tx_mode is implicitly TX_MODE_SELECT for non-key
-            read_flag(&mut br)?
-        } else {
-            read_flag(&mut br)?
-        };
-        let _ = tx_mode_select;
+        // --- tx_mode (gated on !CodedLossless && !allow_intrabc) ---
+        let (reduced_tx_set, tx_mode_select) =
+            if coded_lossless || seq.allow_intrabc {
+                (false, false)
+            } else {
+                let rt = if frame_type == FrameType::KeyFrame || error_resilient_mode || all_frames_intra
+                {
+                    read_flag(&mut br)?
+                } else {
+                    false
+                };
+                let select = if rt {
+                    false
+                } else {
+                    read_flag(&mut br)?
+                };
+                (rt, select)
+            };
 
-        // --- Skip mode / reference select ---
+        // --- skip_mode_params() ---
         let skip_mode_allowed = if frame_type != FrameType::KeyFrame
+            && !all_frames_intra
             && !error_resilient_mode
             && !frame_refs_short_signaling
         {
@@ -658,17 +710,21 @@ impl FrameHeader {
             false
         };
         let _ = skip_mode_allowed;
-        let _reference_select = if frame_type != FrameType::KeyFrame && !error_resilient_mode {
+        let _reference_select = if frame_type != FrameType::KeyFrame
+            && !all_frames_intra
+            && !error_resilient_mode
+        {
             read_flag(&mut br)?
         } else {
             false
         };
 
-        // --- Allow warp ---
+        // --- allow_warped_motion ---
         let allow_warp = if frame_type != FrameType::KeyFrame
-            && !reduced_still
+            && !all_frames_intra
             && !error_resilient_mode
             && !force_integer_mv
+            && enable_warped_motion
         {
             read_flag(&mut br)?
         } else {
@@ -676,62 +732,69 @@ impl FrameHeader {
         };
         let _ = allow_warp;
 
-        // --- Global motion ---
-        if frame_type != FrameType::KeyFrame {
-            for i in 0..7 {
-                // Skip global motion params for LAST_FRAME..ALTREF_FRAME
-                let _ = i;
-                let _gm_type = read_f8(&mut br, 3)?;
-                // For non-identity we would read params; we skip detail here.
-                // Identity: no extra bits. Otherwise we must read, but a robust
-                // parser reads the full params; for now assume identity paths
-                // are the common case and bail on non-identity in reconstruction.
-                let _ = read_flag(&mut br)?; // is_integer
+        // --- global_motion_params() (only for non-intra) ---
+        if !frame_is_intra {
+            for _ in 0..7 {
+                let is_identity = read_f8(&mut br, 3)? == 0;
+                if is_identity {
+                    let _ = read_flag(&mut br)?;
+                } else {
+                    let _is_integer = read_flag(&mut br)?;
+                    // gm_params: 2 + 2*(is_integer?0:1) + (is_integer?3:6) values of su(16)
+                    let params_count = if is_identity {
+                        0
+                    } else if _is_integer {
+                        3 * 2 + 3
+                    } else {
+                        3 * 2 + 6
+                    };
+                    for _ in 0..params_count {
+                        let _ = read_su(&mut br, 16)?;
+                    }
+                }
             }
         }
 
-        // --- Film grain ---
-        let film_grain_params_present = if seq.film_grain_params_present {
+        // --- film_grain_params() ---
+        let film_grain_params_present = if film_grain_params_present && !all_frames_intra {
             read_flag(&mut br)?
         } else {
             false
         };
         let _ = film_grain_params_present;
         if film_grain_params_present {
-            // We currently do not apply film grain; skip the syntax.
             let _apply_grain = read_flag(&mut br)?;
             let _ = _apply_grain;
-            // (full grain params skipped — reconstruction treats as no-op)
         }
 
-        // --- Refresh frame flags ---
-        let refresh_frame_flags = if (!reduced_still && frame_type != FrameType::KeyFrame)
-            || frame_type == FrameType::KeyFrame
+        // --- refresh_frame_flags ---
+        let refresh_frame_flags = if !all_frames_intra
+            && frame_type != FrameType::KeyFrame
+            && !show_frame
+            && !show_existing_frame
         {
-            read_f8(&mut br, 8)?
+            // no refresh flags in this case (refresh_frame_flags is only present
+            // for shown/key frames); default to none.
+            0
         } else {
-            0xFF
+            read_f8(&mut br, 8)?
         };
 
-        // Trailing bits: ensure byte alignment + superframe marker handled by caller.
-        let _ = (
-            show_frame,
-            frame_id_none(seq),
-            buffer_removal_time_present,
-            force_integer_mv,
-        );
+        // --- trailing bits ---
+        let _ = frame_id_none(seq);
 
         Ok((FrameHeader {
             frame_type,
             show_frame,
             show_existing_frame,
+            showable_frame,
             frame_id: None,
             width,
             height,
             render_width,
             render_height,
-            subsampling_x: seq.color_config.subsampling_x,
-            subsampling_y: seq.color_config.subsampling_y,
+            subsampling_x,
+            subsampling_y,
             bit_depth: seq_bit_depth(seq),
             use_128x128_superblock: seq.use_128x128_superblock,
             allow_screen_content_tools,
@@ -745,6 +808,8 @@ impl FrameHeader {
             reduced_tx_set,
             tx_mode_select,
             skip_mode_allowed,
+            frame_is_intra,
+            coded_lossless,
             base_q_idx,
             delta_q_y_dc,
             delta_q_u_dc,
@@ -765,10 +830,14 @@ impl FrameHeader {
             loop_filter_delta_enabled,
             loop_filter_deltas,
             cdef_damping,
+            cdef_bits,
             cdef_y_strength,
             cdef_uv_strength,
             delta_q_present,
+            delta_q_res,
             delta_lf_present,
+            delta_lf_res,
+            delta_lf_multi,
             ref_frame_idx,
             ref_order_hint,
             order_hint,
@@ -780,8 +849,12 @@ impl FrameHeader {
             tile_rows,
             tile_width_in_sb,
             tile_height_in_sb,
-            lossless,
+            lossless: coded_lossless,
             buffer_removal_time_present,
+            enable_intra_edge_filter,
+            enable_filter_intra,
+            enable_cdef,
+            enable_restoration,
         },
         br.bits_read(),
         ))
@@ -935,8 +1008,18 @@ mod tests {
                 subsampling_y: true,
             },
             order_hint_bits_minus_1: 0,
+            seq_force_screen_content_tools: true,
+            seq_force_integer_mv: false,
+            additional_frame_id_length_minus_1: 0,
             use_128x128_superblock: false,
+            enable_superres: false,
+            enable_intra_edge_filter: true,
+            enable_filter_intra: true,
+            enable_warped_motion: true,
             allow_intrabc: false,
+            enable_order_hint: false,
+            enable_cdef: true,
+            enable_restoration: true,
             film_grain_params_present: false,
             decoder_model_info_present: false,
         }
@@ -1086,5 +1169,100 @@ mod tests {
         assert_eq!(fh.tile_cols, 1);
         assert_eq!(fh.tile_rows, 1);
         assert!(!fh.lossless);
+    }
+
+
+    #[test]
+    fn parse_libaom_keyframe_matches_trace_headers() {
+        // Generate a real `libaom-av1` 128×96 `testsrc` keyframe (IVF) via
+        // `ffmpeg`, decode its Frame OBU payload, and assert the parsed
+        // uncompressed-header fields match `ffmpeg -bsf trace_headers` ground
+        // truth (the 88-bit header length, base_q_idx=128, tx_mode=SELECT, the
+        // four loop-filter levels, and the CDEF strengths). Skips when ffmpeg
+        // is unavailable.
+        use std::io::Read;
+        use std::process::Command;
+
+        let ffmpeg_available = Command::new("ffmpeg")
+            .args(["-hide_banner", "-version"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ffmpeg_available {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+
+        let tmp = std::env::temp_dir().join("tpt_av1_fhtest.ivf");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                "testsrc=size=128x96:rate=1:duration=1", "-c:v", "libaom-av1",
+                "-strict", "experimental", "-cpu-used", "8", "-pix_fmt", "yuv420p",
+                "-y", "-f", "ivf", tmp.to_str().unwrap(),
+            ])
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success(), "ffmpeg keyframe encode failed");
+
+        let ivf = std::fs::read(&tmp).expect("read ivf");
+        // IVF: 32-byte file header, then frames of [u32 LE size][u64 LE pts][size bytes].
+        assert!(ivf.len() >= 32 + 12);
+        let size = u32::from_le_bytes([ivf[32], ivf[33], ivf[34], ivf[35]]) as usize;
+        let start = 32 + 12;
+        let frame_obus = ivf[start..start + size].to_vec();
+
+        // Pull the Sequence Header OBU so the frame header parser has correct
+        // sequence-level gating.
+        let seq = {
+            let obus = crate::obu::parse_obu_sequence(&frame_obus);
+            eprintln!("DBG n_obus={}", obus.len());
+            for (i, o) in obus.iter().enumerate() {
+                eprintln!("DBG obu[{}] type={:?} plen={}", i, o.obu_type as u8, o.payload.len());
+            }
+            obus.into_iter()
+                .find(|o| o.obu_type == crate::obu::ObuType::SequenceHeader)
+                .and_then(|o| crate::obu::SequenceHeaderObu::parse(&o.payload).ok())
+                .expect("sequence header present")
+        };
+        assert_eq!(seq.frame_width(), 128);
+        assert_eq!(seq.frame_height(), 96);
+        eprintln!("DBG seq.enable_cdef={} profile={} sb128={} ohb={}", seq.enable_cdef, seq.seq_profile, seq.use_128x128_superblock, seq.order_hint_bits_minus_1);
+        assert!(seq.enable_cdef);
+
+        let frame_obu = {
+            let obus = crate::obu::parse_obu_sequence(&frame_obus);
+            for o in &obus {
+                eprintln!("debug obu type={:?} payload_len={}", o.obu_type as u8, o.payload.len());
+            }
+            obus.into_iter()
+                .find(|o| o.obu_type == crate::obu::ObuType::Frame)
+                .expect("Frame OBU present")
+        };
+
+        let (fh, bits) =
+            FrameHeader::parse(&frame_obu.payload, &seq).expect("frame header parse");
+
+        // 88 bits = 11 bytes of uncompressed header per ffmpeg trace_headers.
+        assert_eq!(bits, 88, "uncompressed header bit length must match the encoder");
+        assert_eq!(fh.frame_type, FrameType::KeyFrame);
+        assert!(fh.show_frame);
+        assert_eq!(fh.width, 128);
+        assert_eq!(fh.height, 96);
+        assert_eq!(fh.tile_cols, 1);
+        assert_eq!(fh.tile_rows, 1);
+        assert_eq!(fh.base_q_idx, 128);
+        assert!(!fh.lossless);
+        // tx_mode on the wire is 2 (TX_MODE_SELECT) → tx_mode_select true.
+        assert!(fh.tx_mode_select, "tx_mode_select must be true");
+        assert!(!fh.reduced_tx_set, "reduced_tx_set must be false");
+        // loop filter levels (Y, Y, U, V): 6, 6, 14, 9.
+        assert_eq!(fh.loop_filter_level, [6, 6, 14, 9]);
+        // cdef_damping_minus_3 = 2 → damping 5; cdef_bits = 0 → one entry.
+        assert_eq!(fh.cdef_damping, 5);
+        assert_eq!(fh.cdef_bits, 0);
+        // cdef_y_pri=11, sec=2 → 11 + (2<<2) = 19; uv pri=0, sec=2 → 8.
+        assert_eq!(fh.cdef_y_strength, vec![11 + (2 << 2)]);
+        assert_eq!(fh.cdef_uv_strength, vec![0 + (2 << 2)]);
     }
 }

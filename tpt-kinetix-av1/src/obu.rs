@@ -274,10 +274,30 @@ pub struct SequenceHeaderObu {
     pub color_config: ColorConfig,
     /// `order_hint_bits_minus_1` (from `operating_parameter_info` / `order_hint_bits`).
     pub order_hint_bits_minus_1: u8,
+    /// `true` when screen-content-tools are enabled at the sequence level
+    /// (either chosen or forced via `seq_force_screen_content_tools`). Needed
+    /// by the frame-header parser to decide whether `allow_screen_content_tools`
+    /// is read or implied.
+    pub seq_force_screen_content_tools: bool,
+    /// `true` when `seq_force_integer_mv` is forced true at the sequence level.
+    pub seq_force_integer_mv: bool,
+    /// `additional_frame_id_length_minus_1` (§5.5.2) used only when
+    /// `frame_id_numbers_present_flag` is set.
+    pub additional_frame_id_length_minus_1: u8,
     /// Whether 128x128 superblocks are used (`use_128x128_superblock`).
     pub use_128x128_superblock: bool,
+    /// Whether superres is enabled at the sequence level.
+    pub enable_superres: bool,
+    /// Whether intra edge filtering is enabled (`enable_intra_edge_filter`).
+    pub enable_intra_edge_filter: bool,
+    /// Whether filter-intra is enabled (`enable_filter_intra`).
+    pub enable_filter_intra: bool,
+    /// Whether warped motion is enabled (`enable_warped_motion`).
+    pub enable_warped_motion: bool,
     /// Whether intra block copy is enabled (`allow_intrabc`).
     pub allow_intrabc: bool,
+    /// Whether order hint is enabled at the sequence level.
+    pub enable_order_hint: bool,
     /// Whether CDEF is enabled at the sequence level. When `false`, the frame
     /// header does **not** carry CDEF parameters (AV1 §5.9.14 gates them on this
     /// flag, not on `lossless`).
@@ -343,8 +363,16 @@ impl SequenceHeaderObu {
                 max_frame_height_minus_1,
                 color_config,
                 order_hint_bits_minus_1: 0,
+                seq_force_screen_content_tools: true,
+                seq_force_integer_mv: false,
+                additional_frame_id_length_minus_1: 0,
                 use_128x128_superblock: false,
+                enable_superres: false,
+                enable_intra_edge_filter: true,
+                enable_filter_intra: true,
+                enable_warped_motion: true,
                 allow_intrabc: false,
+                enable_order_hint: false,
                 enable_cdef: true,
                 enable_restoration: true,
                 film_grain_params_present: false,
@@ -468,10 +496,10 @@ impl SequenceHeaderObu {
         let use_128x128_superblock = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: use_128x128_superblock"))?;
-        let _enable_filter_intra = br
+        let enable_filter_intra = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_filter_intra"))?;
-        let _enable_intra_edge_filter = br
+        let enable_intra_edge_filter = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_intra_edge_filter"))?;
         let _enable_interintra_compound = br
@@ -480,7 +508,7 @@ impl SequenceHeaderObu {
         let _enable_masked_compound = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_masked_compound"))?;
-        let _enable_warped_motion = br
+        let enable_warped_motion = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_warped_motion"))?;
         let _enable_dual_filter = br
@@ -532,7 +560,7 @@ impl SequenceHeaderObu {
             false
         };
 
-        let _enable_superres = br
+        let enable_superres = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: enable_superres"))?;
         let enable_cdef = br
@@ -568,8 +596,16 @@ impl SequenceHeaderObu {
             max_frame_height_minus_1,
             color_config,
             order_hint_bits_minus_1,
+            seq_force_screen_content_tools,
+            seq_force_integer_mv,
+            additional_frame_id_length_minus_1: 0,
             use_128x128_superblock,
+            enable_superres,
+            enable_intra_edge_filter,
+            enable_filter_intra,
+            enable_warped_motion,
             allow_intrabc,
+            enable_order_hint,
             enable_cdef,
             enable_restoration,
             film_grain_params_present,

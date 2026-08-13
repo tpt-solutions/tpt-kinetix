@@ -402,184 +402,248 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &IntraNeighbours4x4, out: &mut [u8; 16
 
 /// Predict an 8×8 luma block (`out[64]`, row-major) for the given mode.
 ///
-/// The 8×8 modes share the same geometry as the 4×4 modes but operate on the
-/// 8×8 sample grid and use the extended neighbour set (the 8 samples above plus
-/// the top-right extension, and the 8 left samples plus the single `X`).
+/// Faithful port of FFmpeg's `pred8x8l_*` functions (libavcodec/h264pred),
+/// which implement the spec's Intra_8×8 prediction (§8.3.2.2). The neighbour
+/// set is the full 8×8 one: `top[0..8]` are the samples directly above the
+/// block, `top[8..16]` are the top-right extension (the samples to the upper
+/// right, from the already-reconstructed MB/row to the right), `left[0..8]` are
+/// the left samples, and `top_left` is the single above-left sample `X`.
+///
+/// Availability is resolved exactly as FFmpeg does: `p[-1,-1]` (top-left) is
+/// available only when *both* the top and left rows are present; the
+/// top-right samples are available only when the whole top-right extension row
+/// is present. Each array entry is `None` when the corresponding sample is
+/// outside the picture or not yet reconstructed, and is substituted with `R`
+/// (128) by the loader below — except where FFmpeg's `has_topleft` /
+/// `has_topright` flags dictate a different fallback (which the loader also
+/// applies verbatim).
 pub fn predict_8x8(
     mode: Intra4x4Mode,
-    top: &[Option<u8>],
-    left: &[Option<u8>],
+    top: &[Option<u8>; 16],
+    left: &[Option<u8>; 8],
     top_left: Option<u8>,
     out: &mut [u8; 64],
 ) {
-    let t = |i: i32| sample(top.get(i as usize).and_then(|x| *x));
-    let l = |i: i32| sample(left.get(i as usize).and_then(|x| *x));
-    let tl = sample(top_left);
-    let mut set = |x: i32, y: i32, v: i32| {
-        out[(y as usize) * 8 + (x as usize)] = v.clamp(0, 255) as u8;
+    let tval = |x: usize| -> i32 { top.get(x).copied().flatten().map(|v| v as i32).unwrap_or(R) };
+    let lval = |y: usize| -> i32 { left.get(y).copied().flatten().map(|v| v as i32).unwrap_or(R) };
+    let tl = top_left.map(|v| v as i32).unwrap_or(R);
+    let has_topleft = top[0].is_some() && left[0].is_some();
+    let has_topright = top[8..16].iter().all(|s| s.is_some());
+
+    // §8.3.2.2 neighbour loading (mirrors FFmpeg's PREDICT_8x8_LOAD_TOP /
+    // LOAD_LEFT / LOAD_TOPRIGHT / LOAD_TOPLEFT).
+    let t0 = ((if has_topleft { tl } else { tval(0) }) + 2 * tval(0) + tval(1) + 2) >> 2;
+    let t1 = (tval(0) + 2 * tval(1) + tval(2) + 2) >> 2;
+    let t2 = (tval(1) + 2 * tval(2) + tval(3) + 2) >> 2;
+    let t3 = (tval(2) + 2 * tval(3) + tval(4) + 2) >> 2;
+    let t4 = (tval(3) + 2 * tval(4) + tval(5) + 2) >> 2;
+    let t5 = (tval(4) + 2 * tval(5) + tval(6) + 2) >> 2;
+    let t6 = (tval(5) + 2 * tval(6) + tval(7) + 2) >> 2;
+    let t7 = ((if has_topright { tval(8) } else { tval(7) }) + 2 * tval(7) + tval(6) + 2) >> 2;
+    let (t8, t9, t10, t11, t12, t13, t14, t15) = if has_topright {
+        (
+            (tval(7) + 2 * tval(8) + tval(9) + 2) >> 2,
+            (tval(8) + 2 * tval(9) + tval(10) + 2) >> 2,
+            (tval(9) + 2 * tval(10) + tval(11) + 2) >> 2,
+            (tval(10) + 2 * tval(11) + tval(12) + 2) >> 2,
+            (tval(11) + 2 * tval(12) + tval(13) + 2) >> 2,
+            (tval(12) + 2 * tval(13) + tval(14) + 2) >> 2,
+            (tval(13) + 2 * tval(14) + tval(15) + 2) >> 2,
+            (tval(14) + 3 * tval(15) + 2) >> 2,
+        )
+    } else {
+        let v = tval(7);
+        (v, v, v, v, v, v, v, v)
+    };
+
+    let l0 = ((if has_topleft { tl } else { lval(0) }) + 2 * lval(0) + lval(1) + 2) >> 2;
+    let l1 = (lval(0) + 2 * lval(1) + lval(2) + 2) >> 2;
+    let l2 = (lval(1) + 2 * lval(2) + lval(3) + 2) >> 2;
+    let l3 = (lval(2) + 2 * lval(3) + lval(4) + 2) >> 2;
+    let l4 = (lval(3) + 2 * lval(4) + lval(5) + 2) >> 2;
+    let l5 = (lval(4) + 2 * lval(5) + lval(6) + 2) >> 2;
+    let l6 = (lval(5) + 2 * lval(6) + lval(7) + 2) >> 2;
+    let l7 = (lval(6) + 3 * lval(7) + 2) >> 2;
+
+    // PREDICT_8x8_LOAD_TOPLEFT.
+    let lt = (lval(0) + 2 * tl + tval(0) + 2) >> 2;
+
+    let mut s = |pts: &[(i32, i32)], v: i32| {
+        for &(x, y) in pts {
+            out[(y as usize) * 8 + (x as usize)] = v.clamp(0, 255) as u8;
+        }
     };
 
     match mode {
         Intra4x4Mode::Vertical => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    set(x, y, t(x));
+            for x in 0..8i32 {
+                let v = [t0, t1, t2, t3, t4, t5, t6, t7][x as usize];
+                for y in 0..8i32 {
+                    s(&[(x, y)], v);
                 }
             }
         }
         Intra4x4Mode::Horizontal => {
             for y in 0..8i32 {
+                let v = [l0, l1, l2, l3, l4, l5, l6, l7][y as usize];
                 for x in 0..8i32 {
-                    set(x, y, l(y));
+                    s(&[(x, y)], v);
                 }
             }
         }
         Intra4x4Mode::Dc => {
-            let mut sum = 0i32;
-            for i in 0..8 {
-                sum += t(i) + l(i);
-            }
-            let dc = (sum + 8) / 16;
+            let dc = (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7
+                + t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7
+                + 8)
+                >> 4;
             for y in 0..8i32 {
                 for x in 0..8i32 {
-                    set(x, y, dc);
+                    s(&[(x, y)], dc);
                 }
             }
         }
         Intra4x4Mode::DiagonalDownLeft => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let idx = x + y;
-                    let a = if idx < 8 { t(idx) } else { t(7) };
-                    let b = if idx + 1 < 8 { t(idx + 1) } else { t(7) };
-                    set(x, y, (a + b + 1) / 2);
-                }
-            }
+            s(&[(0, 0)], (t0 + 2 * t1 + t2 + 2) >> 2);
+            s(&[(0, 1), (1, 0)], (t1 + 2 * t2 + t3 + 2) >> 2);
+            s(&[(0, 2), (1, 1), (2, 0)], (t2 + 2 * t3 + t4 + 2) >> 2);
+            s(&[(0, 3), (1, 2), (2, 1), (3, 0)], (t3 + 2 * t4 + t5 + 2) >> 2);
+            s(&[(0, 4), (1, 3), (2, 2), (3, 1), (4, 0)], (t4 + 2 * t5 + t6 + 2) >> 2);
+            s(&[(0, 5), (1, 4), (2, 3), (3, 2), (4, 1), (5, 0)], (t5 + 2 * t6 + t7 + 2) >> 2);
+            s(&[(0, 6), (1, 5), (2, 4), (3, 3), (4, 2), (5, 1), (6, 0)], (t6 + 2 * t7 + t8 + 2) >> 2);
+            s(
+                &[(0, 7), (1, 6), (2, 5), (3, 4), (4, 3), (5, 2), (6, 1), (7, 0)],
+                (t7 + 2 * t8 + t9 + 2) >> 2,
+            );
+            s(&[(1, 7), (2, 6), (3, 5), (4, 4), (5, 3), (6, 2), (7, 1)], (t8 + 2 * t9 + t10 + 2) >> 2);
+            s(&[(2, 7), (3, 6), (4, 5), (5, 4), (6, 3), (7, 2)], (t9 + 2 * t10 + t11 + 2) >> 2);
+            s(&[(3, 7), (4, 6), (5, 5), (6, 4), (7, 3)], (t10 + 2 * t11 + t12 + 2) >> 2);
+            s(&[(4, 7), (5, 6), (6, 5), (7, 4)], (t11 + 2 * t12 + t13 + 2) >> 2);
+            s(&[(5, 7), (6, 6), (7, 5)], (t12 + 2 * t13 + t14 + 2) >> 2);
+            s(&[(6, 7), (7, 6)], (t13 + 2 * t14 + t15 + 2) >> 2);
+            s(&[(7, 7)], (t14 + 3 * t15 + 2) >> 2);
         }
         Intra4x4Mode::DiagonalDownRight => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let i = x - y;
-                    let v = if i <= 0 {
-                        let p = -i;
-                        if p <= 1 {
-                            if p == 0 {
-                                tl
-                            } else {
-                                (l(0) + tl * 2 + t(0) + 2) / 4
-                            }
-                        } else if p <= 4 {
-                            (l(p - 2) + l(p - 1) * 2 + l(p) + 2) / 4
-                        } else {
-                            l(3)
-                        }
-                    } else {
-                        let q = i;
-                        (t(q - 1) + t(q) + 1) / 2
-                    };
-                    set(x, y, v);
-                }
-            }
+            s(&[(0, 7)], (l7 + 2 * l6 + l5 + 2) >> 2);
+            s(&[(0, 6), (1, 7)], (l6 + 2 * l5 + l4 + 2) >> 2);
+            s(&[(0, 5), (1, 6), (2, 7)], (l5 + 2 * l4 + l3 + 2) >> 2);
+            s(&[(0, 4), (1, 5), (2, 6), (3, 7)], (l4 + 2 * l3 + l2 + 2) >> 2);
+            s(&[(0, 3), (1, 4), (2, 5), (3, 6), (4, 7)], (l3 + 2 * l2 + l1 + 2) >> 2);
+            s(&[(0, 2), (1, 3), (2, 4), (3, 5), (4, 6), (5, 7)], (l2 + 2 * l1 + l0 + 2) >> 2);
+            s(
+                &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)],
+                (l1 + 2 * l0 + lt + 2) >> 2,
+            );
+            s(
+                &[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7)],
+                (l0 + 2 * lt + t0 + 2) >> 2,
+            );
+            s(
+                &[(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)],
+                (lt + 2 * t0 + t1 + 2) >> 2,
+            );
+            s(&[(2, 0), (3, 1), (4, 2), (5, 3), (6, 4), (7, 5)], (t0 + 2 * t1 + t2 + 2) >> 2);
+            s(&[(3, 0), (4, 1), (5, 2), (6, 3), (7, 4)], (t1 + 2 * t2 + t3 + 2) >> 2);
+            s(&[(4, 0), (5, 1), (6, 2), (7, 3)], (t2 + 2 * t3 + t4 + 2) >> 2);
+            s(&[(5, 0), (6, 1), (7, 2)], (t3 + 2 * t4 + t5 + 2) >> 2);
+            s(&[(6, 0), (7, 1)], (t4 + 2 * t5 + t6 + 2) >> 2);
+            s(&[(7, 0)], (t5 + 2 * t6 + t7 + 2) >> 2);
         }
         Intra4x4Mode::VerticalRight => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let i = x - (y >> 1) * 2 + (y & 1) - 1;
-                    let v = if i <= 0 {
-                        let p = -i;
-                        if p == 1 {
-                            (tl + l(0) + 1) / 2
-                        } else if p <= 4 {
-                            (l(p - 2) + l(p - 1) + 1) / 2
-                        } else {
-                            l(3)
-                        }
-                    } else {
-                        let q = i;
-                        if q < 8 {
-                            (t(q) + t(q - 1) + 1) / 2
-                        } else {
-                            t(7)
-                        }
-                    };
-                    set(x, y, v);
-                }
-            }
+            s(&[(0, 6)], (l5 + 2 * l4 + l3 + 2) >> 2);
+            s(&[(0, 7)], (l6 + 2 * l5 + l4 + 2) >> 2);
+            s(&[(0, 4), (1, 6)], (l3 + 2 * l2 + l1 + 2) >> 2);
+            s(&[(0, 2), (1, 4), (2, 6)], (l1 + 2 * l0 + lt + 2) >> 2);
+            s(&[(0, 3), (1, 5), (2, 7)], (l2 + 2 * l1 + l0 + 2) >> 2);
+            s(&[(0, 1), (1, 3), (2, 5), (3, 7)], (l0 + 2 * lt + t0 + 2) >> 2);
+            s(&[(0, 0), (1, 2), (2, 4), (3, 6)], (lt + t0 + 1) >> 1);
+            s(&[(1, 1), (2, 3), (3, 5), (4, 7)], (lt + 2 * t0 + t1 + 2) >> 2);
+            s(&[(1, 0), (2, 2), (3, 4), (4, 6)], (t0 + t1 + 1) >> 1);
+            s(&[(2, 1), (3, 3), (4, 5), (5, 7)], (t0 + 2 * t1 + t2 + 2) >> 2);
+            s(&[(2, 0), (3, 2), (4, 4), (5, 6)], (t1 + t2 + 1) >> 1);
+            s(&[(3, 1), (4, 3), (5, 5), (6, 7)], (t1 + 2 * t2 + t3 + 2) >> 2);
+            s(&[(3, 0), (4, 2), (5, 4), (6, 6)], (t2 + t3 + 1) >> 1);
+            s(&[(4, 1), (5, 3), (6, 5), (7, 7)], (t2 + 2 * t3 + t4 + 2) >> 2);
+            s(&[(4, 0), (5, 2), (6, 4), (7, 6)], (t3 + t4 + 1) >> 1);
+            s(&[(5, 1), (6, 3), (7, 5)], (t3 + 2 * t4 + t5 + 2) >> 2);
+            s(&[(5, 0), (6, 2), (7, 4)], (t4 + t5 + 1) >> 1);
+            s(&[(6, 1), (7, 3)], (t4 + 2 * t5 + t6 + 2) >> 2);
+            s(&[(6, 0), (7, 2)], (t5 + t6 + 1) >> 1);
+            s(&[(7, 1)], (t5 + 2 * t6 + t7 + 2) >> 2);
+            s(&[(7, 0)], (t6 + t7 + 1) >> 1);
         }
         Intra4x4Mode::HorizontalDown => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let i = y - (x >> 1) * 2 + (x & 1) - 1;
-                    let v = if i <= 0 {
-                        let p = -i;
-                        if p == 1 {
-                            (tl + t(0) + 1) / 2
-                        } else if p <= 4 {
-                            (t(p - 2) + t(p - 1) + 1) / 2
-                        } else {
-                            t(3)
-                        }
-                    } else {
-                        let q = i;
-                        if q < 8 {
-                            (l(q) + l(q - 1) + 1) / 2
-                        } else {
-                            l(7)
-                        }
-                    };
-                    set(x, y, v);
-                }
-            }
+            s(&[(0, 7)], (l6 + l7 + 1) >> 1);
+            s(&[(1, 7)], (l5 + 2 * l6 + l7 + 2) >> 2);
+            s(&[(0, 6), (2, 7)], (l5 + l6 + 1) >> 1);
+            s(&[(1, 6), (3, 7)], (l4 + 2 * l5 + l6 + 2) >> 2);
+            s(&[(0, 5), (2, 6), (4, 7)], (l4 + l5 + 1) >> 1);
+            s(&[(1, 5), (3, 6), (5, 7)], (l3 + 2 * l4 + l5 + 2) >> 2);
+            s(&[(0, 4), (2, 5), (4, 6), (6, 7)], (l3 + l4 + 1) >> 1);
+            s(&[(1, 4), (3, 5), (5, 6), (7, 7)], (l2 + 2 * l3 + l4 + 2) >> 2);
+            s(&[(0, 3), (2, 4), (4, 5), (6, 6)], (l2 + l3 + 1) >> 1);
+            s(&[(1, 3), (3, 4), (5, 5), (7, 6)], (l1 + 2 * l2 + l3 + 2) >> 2);
+            s(&[(0, 2), (2, 3), (4, 4), (6, 5)], (l1 + l2 + 1) >> 1);
+            s(&[(1, 2), (3, 3), (5, 4), (7, 5)], (l0 + 2 * l1 + l2 + 2) >> 2);
+            s(&[(0, 1), (2, 2), (4, 3), (6, 4)], (l0 + l1 + 1) >> 1);
+            s(&[(1, 1), (3, 2), (5, 3), (7, 4)], (lt + 2 * l0 + l1 + 2) >> 2);
+            s(&[(0, 0), (2, 1), (4, 2), (6, 3)], (lt + l0 + 1) >> 1);
+            s(&[(1, 0), (3, 1), (5, 2), (7, 3)], (l0 + 2 * lt + t0 + 2) >> 2);
+            s(&[(2, 0), (4, 1), (6, 2)], (t1 + 2 * t0 + lt + 2) >> 2);
+            s(&[(3, 0), (5, 1), (7, 2)], (t2 + 2 * t1 + t0 + 2) >> 2);
+            s(&[(4, 0), (6, 1)], (t3 + 2 * t2 + t1 + 2) >> 2);
+            s(&[(5, 0), (7, 1)], (t4 + 2 * t3 + t2 + 2) >> 2);
+            s(&[(6, 0)], (t5 + 2 * t4 + t3 + 2) >> 2);
+            s(&[(7, 0)], (t6 + 2 * t5 + t4 + 2) >> 2);
         }
         Intra4x4Mode::VerticalLeft => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let i = x - (y >> 1) * 2 + (y & 1) - 1;
-                    let v = if i < 7 {
-                        let q = i;
-                        if i <= 0 {
-                            let p = -i;
-                            if p <= 1 {
-                                t(0)
-                            } else {
-                                t(p - 1).max(0)
-                            }
-                        } else {
-                            (t(q) + t(q + 1) + 1) / 2
-                        }
-                    } else {
-                        t(7)
-                    };
-                    set(x, y, v);
-                }
-            }
+            s(&[(0, 0)], (t0 + t1 + 1) >> 1);
+            s(&[(0, 1)], (t0 + 2 * t1 + t2 + 2) >> 2);
+            s(&[(0, 2), (1, 0)], (t1 + t2 + 1) >> 1);
+            s(&[(0, 3), (1, 1)], (t1 + 2 * t2 + t3 + 2) >> 2);
+            s(&[(0, 4), (1, 2), (2, 0)], (t2 + t3 + 1) >> 1);
+            s(&[(0, 5), (1, 3), (2, 1)], (t2 + 2 * t3 + t4 + 2) >> 2);
+            s(&[(0, 6), (1, 4), (2, 2), (3, 0)], (t3 + t4 + 1) >> 1);
+            s(&[(0, 7), (1, 5), (2, 3), (3, 1)], (t3 + 2 * t4 + t5 + 2) >> 2);
+            s(&[(1, 6), (2, 4), (3, 2), (4, 0)], (t4 + t5 + 1) >> 1);
+            s(&[(1, 7), (2, 5), (3, 3), (4, 1)], (t4 + 2 * t5 + t6 + 2) >> 2);
+            s(&[(2, 6), (3, 4), (4, 2), (5, 0)], (t5 + t6 + 1) >> 1);
+            s(&[(2, 7), (3, 5), (4, 3), (5, 1)], (t5 + 2 * t6 + t7 + 2) >> 2);
+            s(&[(3, 6), (4, 4), (5, 2), (6, 0)], (t6 + t7 + 1) >> 1);
+            s(&[(3, 7), (4, 5), (5, 3), (6, 1)], (t6 + 2 * t7 + t8 + 2) >> 2);
+            s(&[(4, 6), (5, 4), (6, 2), (7, 0)], (t7 + t8 + 1) >> 1);
+            s(&[(4, 7), (5, 5), (6, 3), (7, 1)], (t7 + 2 * t8 + t9 + 2) >> 2);
+            s(&[(5, 6), (6, 4), (7, 2)], (t8 + t9 + 1) >> 1);
+            s(&[(5, 7), (6, 5), (7, 3)], (t8 + 2 * t9 + t10 + 2) >> 2);
+            s(&[(6, 6), (7, 4)], (t9 + t10 + 1) >> 1);
+            s(&[(6, 7), (7, 5)], (t9 + 2 * t10 + t11 + 2) >> 2);
+            s(&[(7, 6)], (t10 + t11 + 1) >> 1);
+            s(&[(7, 7)], (t10 + 2 * t11 + t12 + 2) >> 2);
         }
         Intra4x4Mode::HorizontalUp => {
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let i = y - (x >> 1) * 2 + (x & 1) - 1;
-                    let v = if i < 7 {
-                        let q = i;
-                        if i <= 0 {
-                            let p = -i;
-                            if p <= 1 {
-                                l(0)
-                            } else {
-                                l(p - 1).max(0)
-                            }
-                        } else {
-                            (l(q) + l(q + 1) + 1) / 2
-                        }
-                    } else {
-                        l(7)
-                    };
-                    set(x, y, v);
-                }
-            }
+            s(&[(0, 0)], (l0 + l1 + 1) >> 1);
+            s(&[(1, 0)], (l0 + 2 * l1 + l2 + 2) >> 2);
+            s(&[(0, 1), (2, 0)], (l1 + l2 + 1) >> 1);
+            s(&[(1, 1), (3, 0)], (l1 + 2 * l2 + l3 + 2) >> 2);
+            s(&[(0, 2), (2, 1), (4, 0)], (l2 + l3 + 1) >> 1);
+            s(&[(1, 2), (3, 1), (5, 0)], (l2 + 2 * l3 + l4 + 2) >> 2);
+            s(&[(0, 3), (2, 2), (4, 1), (6, 0)], (l3 + l4 + 1) >> 1);
+            s(&[(1, 3), (3, 2), (5, 1), (7, 0)], (l3 + 2 * l4 + l5 + 2) >> 2);
+            s(&[(0, 4), (2, 3), (4, 2), (6, 1)], (l4 + l5 + 1) >> 1);
+            s(&[(1, 4), (3, 3), (5, 2), (7, 1)], (l4 + 2 * l5 + l6 + 2) >> 2);
+            s(&[(0, 5), (2, 4), (4, 3), (6, 2)], (l5 + l6 + 1) >> 1);
+            s(&[(1, 5), (3, 4), (5, 3), (7, 2)], (l5 + 2 * l6 + l7 + 2) >> 2);
+            s(&[(0, 6), (2, 5), (4, 4), (6, 3)], (l6 + l7 + 1) >> 1);
+            s(&[(1, 6), (3, 5), (5, 4), (7, 3)], (l6 + 3 * l7 + 2) >> 2);
+            s(
+                &[
+                    (0, 7), (1, 7), (2, 6), (2, 7), (3, 6), (3, 7), (4, 5), (4, 6), (4, 7), (5, 5),
+                    (5, 6), (5, 7), (6, 4), (6, 5), (6, 6), (6, 7), (7, 4), (7, 5), (7, 6), (7, 7),
+                ],
+                l7,
+            );
         }
     }
 }
-
 /// Predict a 16×16 luma macroblock (`out[256]`) for the given [`Intra16x16Mode`].
 ///
 /// `top`/`left` are the 16 samples above/left of the macroblock plus the single
@@ -850,7 +914,7 @@ mod tests {
 
     #[test]
     fn predict_8x8_vertical() {
-        let top = [Some(200u8); 8];
+        let top = [Some(200u8); 16];
         let left = [Some(10u8); 8];
         let mut out = [0u8; 64];
         predict_8x8(Intra4x4Mode::Vertical, &top, &left, Some(128), &mut out);

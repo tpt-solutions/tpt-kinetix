@@ -187,6 +187,10 @@ pub struct MbCabacCtx {
     pub is_intra16x16_or_pcm: bool,
     pub chroma_pred_mode: u8,
     pub cbp_word: u16,
+    /// `mb_field_decoding_flag` of this macroblock, used to derive the
+    /// `ctxIdxInc` for the *next* macroblock pair's `mb_field_decoding_flag`
+    /// decode in MBAFF frames (§9.3.3.1.1.11).
+    pub mb_field_flag: bool,
 }
 
 /// Sentinel `cbp_word` for an off-picture neighbour: treated as "fully
@@ -454,6 +458,8 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     slice_qp: i32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
+    mb_aff: bool,
+    field_pic_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
@@ -461,10 +467,24 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut qp = slice_qp;
+    // §7.4.4: `mb_field_decoding_flag` is read once per *macroblock pair* (i.e.
+    // before every even-indexed macroblock) when the picture is an MBAFF frame
+    // (the SPS enables `mb_adaptive_frame_field_flag` and the slice is not itself
+    // a field picture). The flag applies to both the top and bottom macroblock of
+    // the pair; for frame-only / PAFF streams it is simply absent.
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut cur_pair_field = false;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
         let mb_y = (mb_idx as u32) / mb_cols;
+
+        if mbaff_frame && mb_idx % 2 == 0 {
+            cur_pair_field = reader
+                .read_bit()
+                .ok_or(SliceDataError::Eof("mb_field_decoding_flag"))?
+                == 1;
+        }
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
@@ -483,6 +503,8 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         qp = new_qp;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
+        let mut mb = mb;
+        mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
     }
 
@@ -905,6 +927,7 @@ pub struct CabacSliceContexts {
     pub intra4x4: crate::entropy::Intra4x4PredModeCabacContext,
     pub cbf: crate::entropy::CodedBlockFlagContext,
     pub residual: crate::entropy::ResidualCabacContext,
+    pub mb_field: crate::entropy::MbFieldDecodingFlagContext,
 }
 
 impl CabacSliceContexts {
@@ -917,6 +940,7 @@ impl CabacSliceContexts {
             intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new(slice_qp_y),
             cbf: crate::entropy::CodedBlockFlagContext::new(slice_qp_y),
             residual: crate::entropy::ResidualCabacContext::new(slice_qp_y),
+            mb_field: crate::entropy::MbFieldDecodingFlagContext::new(slice_qp_y),
         }
     }
 }
@@ -1025,6 +1049,8 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     mb_cols: u32,
     mb_rows: u32,
     slice_qp: i32,
+    mb_aff: bool,
+    field_pic_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let mut dec =
@@ -1038,10 +1064,26 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut cabac_ctx: Vec<MbCabacCtx> = vec![MbCabacCtx::default(); total];
     let mut qp = slice_qp;
     let mut prev_dqp_nonzero = false;
+    // §7.4.4: `mb_field_decoding_flag` is decoded once per macroblock pair in an
+    // MBAFF frame (the SPS enables `mb_adaptive_frame_field_flag` and the slice is
+    // not itself a field picture). The flag applies to both the top and bottom
+    // macroblock of the pair; for frame-only / PAFF streams it is absent.
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut cur_pair_field = false;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
         let mb_y = (mb_idx as u32) / mb_cols;
+
+        if mbaff_frame && mb_idx % 2 == 0 {
+            let left_field = (mb_x > 0)
+                .then(|| cabac_ctx[(mb_y * mb_cols + mb_x - 1) as usize].mb_field_flag)
+                .unwrap_or(false);
+            let top_field = (mb_y > 0)
+                .then(|| cabac_ctx[((mb_y - 1) * mb_cols + mb_x) as usize].mb_field_flag)
+                .unwrap_or(false);
+            cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+        }
 
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) =
             parse_intra_macroblock_cabac(
@@ -1061,7 +1103,11 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         prev_dqp_nonzero = dqp_nonzero;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
+        let mut this_cabac_ctx = this_cabac_ctx;
+        this_cabac_ctx.mb_field_flag = cur_pair_field;
         cabac_ctx[mb_idx] = this_cabac_ctx;
+        let mut mb = mb;
+        mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
 
         // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*

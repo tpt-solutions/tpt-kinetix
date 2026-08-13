@@ -77,7 +77,7 @@ fn bits(v: u32) -> u32 {
 /// regions) use a small `k` and large residuals use a larger one. Clamped to
 /// `[0, 15]`.
 pub fn rice_k(left_mag: u32, up_mag: u32) -> u32 {
-    let ctx = (bits(left_mag) + bits(up_mag) + 1) / 2;
+    let ctx = (bits(left_mag) + bits(up_mag)).div_ceil(2);
     ctx.min(15)
 }
 

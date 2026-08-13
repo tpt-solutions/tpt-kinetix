@@ -32,6 +32,54 @@ pub struct ReconstructedFrame {
     pub chroma_stride: usize,
 }
 
+/// Interlaced (field) reconstruction helpers (Phase G.2 / G.4).
+///
+/// In a field-coded picture a macroblock row covers 16 *field* lines, i.e. 32
+/// frame lines; the field's samples therefore land on every other frame scanline,
+/// offset by 0 for the top field or 1 for the bottom field (§6.4.10.1, §8.4.2.2.1).
+/// These helpers turn a reconstructed *field* (half-height) plane into a full
+/// (interlaced) frame plane, and merge two complementary fields into one frame.
+impl ReconstructedFrame {
+    /// De-interleave a field luma plane into a full-height frame plane. `field_h`
+    /// is the field plane height in samples (`mb_rows * 16`); the returned plane
+    /// has height `field_h * 2` (one sample every other line, parity set by
+    /// `bottom`).
+    pub fn deinterleave_luma(&self, bottom: bool, full_stride: usize) -> Vec<u8> {
+        deinterleave(&self.luma, self.luma_stride, self.luma.len() / self.luma_stride, bottom, full_stride)
+    }
+
+    /// De-interleave a field chroma plane into a full-height (interlaced) frame
+    /// plane. `field_h` is the field chroma height in samples (`mb_rows * 8`).
+    pub fn deinterleave_chroma(field: &[u8], field_stride: usize, bottom: bool, full_stride: usize) -> Vec<u8> {
+        let field_h = field.len() / field_stride;
+        deinterleave(field, field_stride, field_h, bottom, full_stride)
+    }
+}
+
+/// Copy every other scanline of `field` into `out`, at parity `bottom ? 1 : 0`.
+/// `field_h` is the field plane height; `out` height is `field_h * 2`.
+fn deinterleave(field: &[u8], field_stride: usize, field_h: usize, bottom: bool, out_stride: usize) -> Vec<u8> {
+    let out_h = field_h * 2;
+    let mut out = vec![0u8; out_stride * out_h];
+    for y in 0..field_h {
+        let src = &field[y * field_stride..(y + 1) * field_stride];
+        let dst_y = 2 * y + (bottom as usize);
+        out[dst_y * out_stride..(dst_y + 1) * out_stride].copy_from_slice(src);
+    }
+    out
+}
+
+/// Merge two complementary field planes (top already in `out`, bottom in
+/// `new` or vice versa) by copying the new field's parity scanlines into `out`.
+/// Both planes must be full interlaced frames of the same dimensions.
+pub fn merge_field_into(out: &mut [u8], new_field: &[u8], out_stride: usize, out_h: usize, bottom: bool) {
+    for y in 0..out_h {
+        if y % 2 == bottom as usize {
+            out[y * out_stride..(y + 1) * out_stride].copy_from_slice(&new_field[y * out_stride..(y + 1) * out_stride]);
+        }
+    }
+}
+
 /// How a slice's inter prediction combines reference samples (§8.4.2.3):
 /// plain default averaging, or one of the two weighted-prediction modes.
 /// Threaded through [`reconstruct_inter_frame`] (P/SP slices, `l0` weights

@@ -32,7 +32,8 @@ pub struct SequenceHeader {
     pub planes: Vec<PlaneSpec>,
 }
 
-/// Per-frame header: dimensions plus one checksum per plane (DECISION 3).
+/// Per-frame header: dimensions, one checksum per plane, and the byte length of
+/// each plane's residual payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {
     pub width: u16,
@@ -40,6 +41,10 @@ pub struct FrameHeader {
     /// One checksum (CRC-32 for <16-bit, CRC-64 for 16-bit) per plane, in
     /// plane order.
     pub plane_checksums: Vec<Vec<u8>>,
+    /// Byte length of each plane's residual payload, in plane order. Lets the
+    /// decoder slice each plane's bitstream out of the concatenated frame body
+    /// (each payload is byte-aligned) and decode it from its own reader.
+    pub plane_lengths: Vec<u32>,
 }
 
 impl SequenceHeader {
@@ -86,11 +91,12 @@ impl FrameHeader {
         w.write_bits(u32::from(self.width), 16);
         w.write_bits(u32::from(self.height), 16);
         w.write_bits(u32::from(self.plane_checksums.len() as u8), 8);
-        for crc in &self.plane_checksums {
+        for (crc, len) in self.plane_checksums.iter().zip(&self.plane_lengths) {
             w.write_bits(u32::from(crc.len() as u8), 8);
             for &b in crc {
                 w.write_bits(u32::from(b), 8);
             }
+            w.write_bits(*len, 32);
         }
     }
 
@@ -99,18 +105,22 @@ impl FrameHeader {
         let height = read_bits_u16(r, 16)?;
         let count = read_bits_u8(r, 8)?;
         let mut plane_checksums = Vec::with_capacity(count as usize);
+        let mut plane_lengths = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let len = read_bits_u8(r, 8)?;
             let mut crc = Vec::with_capacity(len as usize);
             for _ in 0..len {
                 crc.push(read_bits_u8(r, 8)?);
             }
+            let plen = r.read_bits(32)?;
             plane_checksums.push(crc);
+            plane_lengths.push(plen);
         }
         Some(FrameHeader {
             width,
             height,
             plane_checksums,
+            plane_lengths,
         })
     }
 }

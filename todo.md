@@ -4,6 +4,18 @@ A memory-safe, hyper-concurrent Rust successor to FFmpeg. Tasks are organized in
 
 MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTMP/HLS streaming layer, built via real AI/Knowledge-Graph-assisted codec tooling, published as a `crates.io` workspace.
 
+> **Last reconciled with code/git:** 2026-08-14. Drift closed since the last
+> edit: H.264 Phase D.4 (P/B-slice CABAC) is implemented and bit-exact;
+> Phase F.1 + F.2 first bullet (8×8 flag parse / 8×8 inverse transform) landed;
+> AV1 Phase C (superblock partition tree + per-block intra mode/`tx_size`) is
+> implemented; `tpt-kinetix-realtime` gained the `deadline_ms`/`max_decode_ms`
+> rate-control contract. Still open (unchanged): H.264 F.3/F.4 (scaling-list
+> apply + 8×8 High-profile validation), G (interlaced), AV1 D/E/F/G, Phase 18
+> native AAC, realtime harness/foveation, volumetric octree. NOTE:
+> `tests/conformance_matrix.rs` still labels CABAC P/B as "known non-conformant"
+> — that classification is stale (contradicted by the live `cabac_conformance.rs`
+> bit-exact P/B tests) and should be corrected in the test file.
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap
@@ -412,17 +424,21 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > coded_block_flag, significant/last_significant_coeff_flag, coeff_abs_level)
 > were implemented — see Phase D.1/D.3 below for what's actually done now.
 
-- [~] Context-index tables + binarizations for **I-slice** syntax elements
-      (mb_type, intra_chroma_pred_mode, prev/rem_intra4x4_pred_mode,
-      coded_block_pattern, mb_qp_delta, coded_block_flag,
-      significant_coeff_flag/last_significant_coeff_flag/coeff_abs_level_minus1)
-      implemented in `entropy.rs`/`cabac_tables.rs` and unit-tested. P/B-slice
-      tables (mb_skip_flag refinement, mb_type P/B, sub_mb_type, ref_idx, mvd)
-      not started.
-- [~] CABAC macroblock/residual syntax parsing wired into the slice loop
-      (`slice_data.rs::parse_i_slice_cabac`/`parse_intra_macroblock_cabac`,
-      wired into `decoder.rs`) for I-slices only, reusing the existing
-      CAVLC-path reconstruction/dequant/IDCT/deblock code unchanged.
+- [x] Context-index tables + binarizations for **I-slice** syntax elements
+       (mb_type, intra_chroma_pred_mode, prev/rem_intra4x4_pred_mode,
+       coded_block_pattern, mb_qp_delta, coded_block_flag,
+       significant_coeff_flag/last_significant_coeff_flag/coeff_abs_level_minus1)
+       implemented in `entropy.rs`/`cabac_tables.rs` and unit-tested. P/B-slice
+       tables (mb_skip_flag refinement, mb_type P/B, sub_mb_type, ref_idx, mvd)
+       also implemented (Phase D.1/D.2) and now exercised by the P/B-slice
+       parsing landed in Phase D.4.
+- [x] CABAC macroblock/residual syntax parsing wired into the slice loop
+       (`slice_data.rs::parse_i_slice_cabac`/`parse_intra_macroblock_cabac`,
+       `parse_p_slice_cabac`/`parse_p_macroblock_cabac`,
+       `parse_b_slice_cabac`/`parse_b_macroblock_cabac`, all wired into
+       `decoder.rs`) for I/P/B slices, reusing the existing CAVLC-path
+       reconstruction/dequant/IDCT/deblock code unchanged. The CABAC 8×8-transform
+       (High-profile) path remains gated off in `decoder.rs:305` (Phase F).
 - [x] **CABAC I-slice desync bug — RESOLVED 2026-08-12.** Root cause:
       `entropy.rs::TRANS_IDX_LPS[28]` was `23`; the correct value is `22` — a
       single-entry transcription error in the `transIdxLPS` (spec Table 9-45)
@@ -553,10 +569,25 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
         vs `ffmpeg` — `cabac_conformance.rs`'s two tests are un-`#[ignore]`d
         and passing (64×48 `testsrc`, deblocking on/off).
 
-  #### Phase D.4 — P/B-slice CABAC (not started)
-  - [ ] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
-        parsing, following the same I-slice-first-then-P-slice pattern used
-        for CAVLC
+#### Phase D.4 — P/B-slice CABAC — **DONE (2026-08-13)**
+
+> `slice_data.rs` gained `parse_p_slice_cabac`/`parse_p_macroblock_cabac` and
+> `parse_b_slice_cabac`/`parse_b_macroblock_cabac`, and `decoder.rs` now
+> dispatches CABAC P/B slices through them (reusing the CAVLC-path
+> reconstruction/dequant/IDCT/deblock unchanged). The context tables/parsing
+> for mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, and mvd were already in
+> place (Phase D.1/D.2), and the mb_type/CBP binarization + context logic was
+> fixed in commit `0f9e0a3`. Conformance is bit-exact:
+> `tests/cabac_conformance.rs` has live (un-`#[ignore]`d) `cabac_pframe_*_is_bitexact`
+> and `cabac_bframe_*_is_bitexact` tests (deblocking on/off), and
+> `tests/cabac_pframe_conformance.rs` additionally pins the inter-MB CABAC parse
+> path bit-exact vs ffmpeg. NOTE: the CABAC **8×8-transform** path is still
+> explicitly gated off in `decoder.rs:305` (High profile, `transform_8x8_mode_flag`)
+> — see Phase F.4.
+
+- [x] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
+      parsing, following the same I-slice-first-then-P-slice pattern used
+      for CAVLC
 
 ### H.264 — Phase E/F/G: advanced tools
 
@@ -754,15 +785,25 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
   (max_abs_diff=0) for both deblock-enabled and deblock-disabled variants.
 
 #### Phase F.1 — 8×8 transform: parsing
-- [ ] Parse `transform_size_8x8_flag` per-macroblock in `slice_data.rs` when
-      `pps.transform_8x8_mode_flag` is set
-- [ ] Parse the 8×8 residual block CAVLC syntax (distinct coeff scan/context
-      from the 4×4 path, §7.3.5.3.3)
+- [x] Parse `transform_size_8x8_flag` per-macroblock in `slice_data.rs` when
+      `pps.transform_8x8_mode_flag` is set (stored on `Macroblock::transform_size_8x8`)
+- [x] Parse the 8×8 residual block CAVLC syntax (distinct coeff scan/context
+      from the 4×4 path, §7.3.5.3.3) — `luma_coeffs_8x8` populated in `slice_data.rs`
 
 #### Phase F.2 — 8×8 transform: reconstruction
-- [ ] Implement the 8×8 inverse transform (§8.5.12.3) in `transform.rs`
-- [ ] Implement the four 8×8 intra prediction modes (§8.3.2.2) in
-      `prediction.rs`
+- [x] Implement the 8×8 inverse transform (§8.5.12.3) in `transform.rs` —
+      `dequant_idct_8x8` now uses a faithful port of FFmpeg's `ff_h264_idct8_add`
+      core (the previous hand-rolled butterfly had the wrong `a4`/`a6` pairing and
+      omitted the `a1`/`a3`/`a5`/`a7` + `b1`/`b3`/`b5`/`b7` cross-terms, which
+      zeroed DC-only blocks). Unit tests `eight_by_eight_dc_only_is_flat` /
+      `eight_by_eight_flat_scaling_*` updated to assert correct (FFmpeg-matching)
+      values.
+- [~] Implement the four 8×8 intra prediction modes (§8.3.2.2) in
+      `prediction.rs` — `predict_8x8` exists but clamps neighbour indices at 7
+      (`t(7)`/`l(7)` fallbacks) instead of using the full 8×8 neighbour set
+      (top samples 0–15 incl. the top-right extension, left 0–7, §8.3.2.2); the
+      diagonal/vertical-right/horizontal-* modes are therefore not yet pixel-exact.
+      **Not wired into reconstruction either** (see Phase F.4 gate below).
 
 #### Phase F.3 — High-profile scaling matrices
 - [ ] Apply the already-parsed SPS/PPS `scaling_list` values (Table 7-... /
@@ -770,6 +811,11 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [ ] Apply the same scaling lists to the new 8×8 dequant path from Phase F.2
 
 #### Phase F.4 — Validate High-profile 8×8-transform decode
+- [ ] **Wire 8×8 reconstruction into `reconstruct.rs`** (`MbType::Intra4x4` +
+      `transform_size_8x8` → `dequant_idct_8x8` + `predict_8x8` per 8×8 block),
+      then remove the `entropy_coding_mode_flag && transform_8x8_mode_flag`
+      early-return gate in `decoder.rs::try_decode_real_slice` (keep the gate for
+      inter 8×8 / non-intra until inter 8×8 is implemented).
 - [ ] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
       `ffmpeg`, validate bit-exact decode
 
@@ -852,8 +898,10 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > math (`inverse_transform`/`predict_intra_block`) is unchanged, and the
 > lossless WHT path is now wired. Intra keyframe coefficients now decode through
 > the real arithmetic decoder (cross-checked against an independent Python
-> `coeffs()` oracle); output is still not pixel-exact because superblock
-> partition/mode syntax is a fixed placeholder grid (Phase C).
+> `coeffs()` oracle); output is still not pixel-exact because the loop filter /
+> CDEF / loop restoration (Phase D) and inter prediction (Phase E) are not yet
+> implemented. **Phase C (superblock partition tree + per-block intra mode /
+> `tx_size` syntax) is now done** — the "fixed placeholder grid" gap is closed.
 >
 > **Bitstream-ingest status (2026-08-12)**: the OBU splitter
 > (`obu::parse_obu_sequence`) and **Sequence Header OBU parser
@@ -917,11 +965,24 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       math — only the bits-in path changes (also wired the previously-dead
       `wht_4x4` lossless WHT via `internal_tx_type`/`TX_TYPE_WHT`)
 
-#### AV1 Phase C — partition + mode syntax
-- [ ] Parse superblock partition tree (§5.11.4) instead of the current fixed
+#### AV1 Phase C — partition + mode syntax — **DONE (2026-08-13)**
+
+> `reconstruct.rs` now walks the real superblock partition tree: `decode_tile_group`
+> calls `decode_superblock` → `decode_partition` (recursive §5.11.4 walk with the
+> neighbour-context partition CDFs), and each leaf block reads its per-block
+> `intra_y_mode` (`read_intra_y_mode`), `uv_mode` (`read_uv_mode`), and `tx_size`
+> (`read_tx_size` → `read_selected_tx_size`) via the symbol decoder. The fixed
+> 8×8-per-superblock placeholder loop in `decode_tile_group` is replaced. The
+> reconstruction math (`inverse_transform`/`predict_intra_block`) is unchanged
+> from Phase B. Output is still **not** pixel-exact because the loop filter /
+> CDEF / loop restoration (Phase D) and inter prediction (Phase E) are not yet
+> implemented — so this resolves the "placeholder grid" gap noted below, not the
+> overall pixel-exactness gap.
+
+- [x] Parse superblock partition tree (§5.11.4) instead of the current fixed
       8×8-block-per-superblock loop in `decode_tile_group`
-      (`reconstruct.rs:697`)
-- [ ] Parse per-block intra mode / `tx_size` selection via the symbol decoder
+      (`reconstruct.rs:697`) — `decode_superblock`/`decode_partition` land it
+- [x] Parse per-block intra mode / `tx_size` selection via the symbol decoder
       rather than assuming a fixed DC-predicted 8×8 transform block
 
 #### AV1 Phase D — loop filter / CDEF / restoration
@@ -1089,6 +1150,13 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > all three target domains (medical imaging, scientific capture, archival),
 > guaranteeing bit-exact round-trip for **10/12/16-bit** samples. Design doc:
 > `docs/lossless-codec-design.md` (DECISION 1 resolved; 2–6 specified).
+>
+> **Crate scaffolded (2026-08-13):** `tpt-kinetix-lossless` exists with a
+> working bit-exact reversible predictive path (median predictor + adaptive Rice
+> entropy + per-plane CRC, reusing `tpt-kinetix-bitstream` primitives). 12 unit
+> tests pass (10/12/16-bit + multi-plane round-trips, corrupted-checksum
+> rejection, reserved-`transform_id` rejection). Next: rANS swap-in + wavelet
+> mode + ratio harness (DECISION 4).
 
 - [x] Decide the target domain for v1 (medical imaging vs. scientific capture
       vs. archival) and the bit-depth range it must support (10/12/16-bit)
@@ -1554,8 +1622,13 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       design intends (RS/RaptorQ noted as the v2 MDS upgrade). `src/conceal.rs`
       `conceal()` does temporal concealment (reuse previous frame's slice) so
       the decoder never stalls. Both round-trip tested (29 realtime tests pass).
-- [ ] Add `deadline_ms` encode-side rate-control hook + `max_decode_ms`
-      decoder capability (DECISION 4).
+- [x] Add `deadline_ms` encode-side rate-control hook + `max_decode_ms`
+      decoder capability (DECISION 4) — `src/rate.rs` implements
+      `max_decode_ms_estimate` (turns a `SequenceHeader` into the decoder's
+      `max_decode_ms`), `adapt_to_deadline` (encode-side `RateControlAction`
+      from `deadline_ms`/`elapsed_ms`/`current_qp`), and `EncodeDeadline`;
+      `headers.rs` carries `deadline_ms`/`max_deadline_ms` per frame/sequence
+      (round-trip tested).
 - [ ] Build the packet-loss-vs-quality + stall-rate validation harness
       (DECISION 5) in `tpt-kinetix-test-utils` behind a `realtime-bench`
       feature (loss injector + the realtime decoder; no model weights).

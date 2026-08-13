@@ -87,18 +87,18 @@ fn encode_plane(plane: &Plane, w: &mut BitWriter) -> Result<(), KinetixError> {
     let mut up_mag = vec![0u32; pw];
     let mut left_mag: u32 = 0;
     for y in 0..ph {
-        for x in 0..pw {
+        for (x, slot) in up_mag.iter_mut().enumerate() {
             let pred = u32::from(predict(&plane.data, pw, ph, x, y));
             let sample = u32::from(plane.data[y * pw + x]);
             let residual = (sample as i32) - (pred as i32);
             let k = if x == 0 && y == 0 {
                 0
             } else {
-                rice_k(left_mag, up_mag[x])
+                rice_k(left_mag, *slot)
             };
             write_rice(w, k, residual);
             let mag = residual.unsigned_abs();
-            up_mag[x] = mag;
+            *slot = mag;
             left_mag = mag;
         }
     }
@@ -285,9 +285,30 @@ impl LosslessDecoder {
                 "lossless: frame header plane count mismatch".to_string(),
             ));
         }
+        if fh.plane_lengths.len() != seq.plane_count() {
+            return Err(KinetixError::Parse(
+                "lossless: frame header plane count mismatch".to_string(),
+            ));
+        }
+        // The frame body is the byte range after the (byte-aligned) header. Each
+        // plane payload is byte-aligned and decoded from its own reader so one
+        // plane's padding bits cannot leak into the next.
+        let header_len = {
+            let mut hw = BitWriter::new();
+            fh.encode(&mut hw);
+            hw.finish().len()
+        };
+        let body = &data[header_len..];
+        let mut pos = 0usize;
         let mut planes = Vec::with_capacity(seq.plane_count());
-        for (spec, crc) in seq.planes.iter().zip(&fh.plane_checksums) {
-            planes.push(decode_plane(&mut r, seq, spec, fh.width, fh.height, crc)?);
+        for (idx, (spec, crc)) in seq.planes.iter().zip(&fh.plane_checksums).enumerate() {
+            let len = fh.plane_lengths[idx] as usize;
+            let slice = body.get(pos..pos + len).ok_or_else(|| {
+                KinetixError::Parse("lossless: truncated plane payload".to_string())
+            })?;
+            let mut pr = BitReader::new(slice);
+            planes.push(decode_plane(&mut pr, seq, spec, fh.width, fh.height, crc)?);
+            pos += len;
         }
         Ok(planes)
     }
@@ -322,7 +343,7 @@ mod tests {
             data,
         };
         let enc = LosslessEncoder::new();
-        let bytes = enc.encode_frame(&seq, &[plane.clone()]).unwrap();
+        let bytes = enc.encode_frame(&seq, std::slice::from_ref(&plane)).unwrap();
         let mut dec = LosslessDecoder::new();
         let out = dec.decode_frame(&seq, &bytes).unwrap();
         assert_eq!(out.len(), 1);

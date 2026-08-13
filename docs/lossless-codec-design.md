@@ -174,22 +174,23 @@ metric before any tuning:
 
 ## DECISION 6: Relationship to existing kinetix bitstream primitives
 
-*Resolved (2026-08-13):* **reuse `tpt-kinetix-lean`'s `BitReader` / `Rans`
-shape.**
+*Resolved (2026-08-13):* **reuse the shared `tpt-kinetix-bitstream` crate for
+`BitReader` / `Rans` primitives** (these originated in `tpt-kinetix-lean` and
+were extracted into `tpt-kinetix-bitstream` per the realtime codec's DECISION 7,
+the "third hand-rolled reader" consolidation the open question below anticipated).
 
-- `tpt-kinetix-lossless` **depends on** `tpt-kinetix-lean` for entropy
-  primitives (`rans::Rans`, the bit-reader framing) rather than re-deriving
+- `tpt-kinetix-lossless` **depends on** `tpt-kinetix-bitstream` for entropy
+  primitives (`bitreader::BitReader`, the `rans` framing) rather than re-deriving
   them — consistent with the Phase 13/14 intent to share a bitstream-utility
   layer. The lossless crate adds its own **reversible prediction/residual**
   stage (Lean's transform bank is lossy DCT-based and is *not* reused for the
   prediction — lossless needs integer-reversible prediction instead).
 - The `RansStreamSet` framing (interleaved, independently-decodable sub-streams
-  per `DECISION 5` parallelism) is shared with Lean/Vision unchanged.
-- Open question (not a v1 blocker): whether to factor a shared
-  `tpt-kinetix-bitstream` crate (already flagged in `todo.md` Phase 13 / Lean's
-  `bitreader.rs` doc comment) once this is the third hand-rolled reader. The
-  lossless crate should consume Lean's primitives behind a thin re-export so that
-  migration to a shared crate later is a one-file change.
+  per `DECISION 5` parallelism) is shared with Lean/Vision/realtime unchanged,
+  now via `tpt-kinetix-bitstream`.
+- The earlier open question (factor a shared `tpt-kinetix-bitstream` crate) is
+  **now resolved**: that crate exists and is the home of these primitives, so the
+  lossless crate consumes them directly rather than via a Lean re-export.
 
 ---
 
@@ -201,7 +202,8 @@ shape.**
    `lean`/`vision`, this one *is* intended for publish — confirm).
 3. Sequence/frame header parsing (byte-aligned, `max_*` arena sizing like Lean).
 4. Reversible predictive path: median + context-adaptive predictor → residual →
-   rANS (reusing Lean) → reconstruct. Prove bit-exact on a synthetic corpus.
+   rANS (reusing `tpt-kinetix-bitstream`) → reconstruct. Prove bit-exact on a
+   synthetic corpus.
 5. Wire `DECISION 3` checksums (per-frame CRC32/CRC64 + stream SHA-256) into
    encode + decode, returning `ReversibilityError` on mismatch.
 6. Build the `DECISION 4` ratio harness vs FFV1 / lossless HEVC; tune contexts.

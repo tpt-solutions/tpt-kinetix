@@ -205,8 +205,18 @@ impl H264Decoder {
                     }
                 }
                 NalUnitType::Pps => {
-                    if let Ok(pps) = PicParameterSet::parse(&nal.rbsp, None) {
-                        self.pps_store.insert(pps.pic_parameter_set_id, pps);
+                    // Probe the PPS first to discover its `seq_parameter_set_id`
+                    // so the SPS scaling lists can be merged into the PPS set
+                    // (§8.5.9: an absent PPS list falls back to the corresponding
+                    // SPS list). Then parse again with the SPS scaling context.
+                    if let Ok(pps_probe) = PicParameterSet::parse(&nal.rbsp, None) {
+                        let sps_scaling = self
+                            .sps_store
+                            .get(&pps_probe.seq_parameter_set_id)
+                            .map(|s| &s.scaling);
+                        if let Ok(pps) = PicParameterSet::parse(&nal.rbsp, sps_scaling) {
+                            self.pps_store.insert(pps.pic_parameter_set_id, pps);
+                        }
                     }
                 }
                 NalUnitType::IdrSlice | NalUnitType::NonIdrSlice => {
@@ -215,7 +225,8 @@ impl H264Decoder {
                         Some(s) => s.clone(),
                         None => continue,
                     };
-                    let pps = self.pps_store.values().next().cloned();
+        let pps = self.pps_store.values().next().cloned();
+
 
                     let width = sps.pic_width_pixels();
                     let height = sps.pic_height_pixels();
@@ -352,6 +363,11 @@ impl H264Decoder {
             }
         };
 
+        // Active scaling lists: the PPS override (if any) merged over the SPS set
+        // (§8.5.9). When no PPS scaling is present `pps.scaling` already equals the
+        // SPS set, so this is always the correct merged set.
+        let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+
         // Only fully-intra slices are handled by this path.
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
             return Ok(None);
@@ -380,6 +396,8 @@ impl H264Decoder {
                 mb_cols,
                 mb_rows,
                 slice_qp,
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
                 tracer,
             ) {
                 Ok(p) => p,
@@ -396,6 +414,8 @@ impl H264Decoder {
                 slice_qp,
                 chroma_qp_index_offset,
                 pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
                 tracer,
             ) {
                 Ok(p) => p,
@@ -413,7 +433,7 @@ impl H264Decoder {
             width,
             height,
             chroma_qp_index_offset,
-            &sps.scaling,
+            scaling,
             &crate::reconstruct::WeightedPred::Default,
             tracer,
         );
@@ -597,6 +617,8 @@ impl H264Decoder {
             None => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
         };
         let pps = self.pps_store.values().next().cloned();
+        // Active scaling lists: PPS override merged over SPS set (§8.5.9).
+        let scaling = pps.as_ref().map(|p| &p.scaling).unwrap_or(&sps.scaling);
 
         let ctx = crate::slice::SliceHeaderContext {
             log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
@@ -665,6 +687,8 @@ impl H264Decoder {
                 slice_qp,
                 chroma_qp_index_offset,
                 pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
                 &mut crate::trace::NoopTracer,
             ) {
                 Ok(parsed) => {
@@ -675,7 +699,7 @@ impl H264Decoder {
                         width,
                         height,
                         chroma_qp_index_offset,
-                        &sps.scaling,
+                        scaling,
                         &crate::reconstruct::WeightedPred::Default,
                         &mut crate::trace::NoopTracer,
                     );
@@ -851,7 +875,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
-                            &sps.scaling,
+                            scaling,
                             &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );
@@ -1068,7 +1092,7 @@ impl H264Decoder {
                             width,
                             height,
                             chroma_qp_index_offset,
-                            &sps.scaling,
+                            scaling,
                             &weighted_pred,
                             &mut crate::trace::NoopTracer,
                         );
