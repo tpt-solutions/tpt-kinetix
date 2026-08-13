@@ -36,14 +36,24 @@ is also provided for GitHub Codespaces / VS Code Remote.
 
 ### Adding a new codec crate
 
-Use the `cargo-generate` template to scaffold a new codec crate that follows the
-workspace conventions:
+There are two complementary starting points, and most new codecs use both:
 
-```sh
-cargo generate --git https://github.com/tpt-solutions/tpt-kinetix --path templates/codec-crate
-```
+1. **`cargo-generate` template** — scaffolds an empty crate skeleton (Cargo.toml, lib.rs,
+   fuzz target) that follows workspace conventions. Use this first, regardless of whether
+   you're hand-writing the decoder or generating it from C source:
 
-Then follow [`docs/adding-a-codec.md`](docs/adding-a-codec.md) to implement it.
+   ```sh
+   cargo generate --git https://github.com/tpt-solutions/tpt-kinetix --path templates/codec-crate
+   ```
+
+2. **The KG ingestion pipeline** — if a reference C implementation exists (e.g. in FFmpeg's
+   `libavcodec/`), use `tpt-kinetix-kg` to derive the initial parsing/state-machine scaffolding
+   from it instead of writing it by hand. See the ["Adding a new codec using the KG pipeline"](#adding-a-new-codec-using-the-kg-pipeline)
+   section below, or the full walkthrough in [`docs/adding-a-codec.md`](docs/adding-a-codec.md).
+
+In short: the cargo-generate template gives you the crate shell; the KG pipeline (optionally)
+fills in the decoder internals from existing C source. Skip step 2 if you're implementing a
+codec from a written spec rather than porting an existing C decoder.
 
 ---
 

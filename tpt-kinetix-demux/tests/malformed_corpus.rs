@@ -14,8 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tpt_kinetix_demux::mp4::container::parse_mp4;
-use tpt_kinetix_demux::mp4::Mp4Demuxer;
+use tpt_kinetix_demux::mp4::{container::parse_mp4, Mp4Demuxer};
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

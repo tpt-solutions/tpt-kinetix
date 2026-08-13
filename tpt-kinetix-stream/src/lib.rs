@@ -7,6 +7,8 @@
 pub mod hls;
 pub mod rtmp;
 
-pub use hls::playlist::HlsPlaylist;
-pub use hls::server::{HlsConfig, HlsPackager};
+pub use hls::{
+    playlist::HlsPlaylist,
+    server::{HlsConfig, HlsPackager},
+};
 pub use rtmp::server::{RtmpConfig, RtmpServer};

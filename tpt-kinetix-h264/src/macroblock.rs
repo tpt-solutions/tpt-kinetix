@@ -2,9 +2,15 @@
 //!
 //! Implements the H.264 4×4 integer IDCT (spec §8.5.12) and inverse
 //! quantisation, along with the macroblock data structures needed by the
-//! decoder.
+//! decoder. When a macroblock is intra-coded, the prediction step
+//! ([`crate::prediction`]) is applied before the residual is added.
 
 use tpt_kinetix_core::error::KinetixError;
+
+use crate::prediction::{
+    predict_16x16, predict_4x4, Intra16x16Mode, Intra4x4Mode, IntraNeighbours16x16,
+    IntraNeighbours4x4,
+};
 
 /// H.264 macroblock coding types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,14 +23,48 @@ pub enum MbType {
         cbp_chroma: u8,
         cbp_luma: u8,
     },
+    /// I_PCM — raw uncompressed 16×16 luma + 2×8×8 chroma samples (§7.4.4).
+    IPcm,
     /// Inter P skip — motion vector inherited from spatial neighbours.
     PSkip,
     /// Inter P 16×16 — single motion vector for the whole macroblock.
     PL016x16,
+    /// Inter P 16×8 — two motion vectors, each for a 16×8 half (§7.3.5.1,
+    /// Table 7-11 P mb_type 1).
+    P16x8,
+    /// Inter P 8×16 — two motion vectors, each for an 8×16 half (mb_type 2).
+    P8x16,
+    /// Inter P 8×8 — four 8×8 partitions, each with its own ref index and
+    /// sub-partitions (mb_type 3).
+    P8x8,
+    /// Inter P 8×8 with all ref indices forced to 0 (mb_type 4).
+    P8x8ref0,
     /// Inter B skip.
     BSkip,
     /// Inter B direct 16×16.
     BDirect16x16,
+}
+
+/// A macroblock's raster position and the destination plane's row stride.
+#[derive(Debug, Clone, Copy)]
+pub struct MbPos {
+    pub mb_x: u32,
+    pub mb_y: u32,
+    pub stride: usize,
+}
+
+/// Inter partition motion data for P-slice macroblocks.
+#[derive(Debug, Clone, Default)]
+pub struct InterMotion {
+    /// `refIdxL0` for each partition. Length is 1 (16×16), 2 (16×8 / 8×16),
+    /// or 4 (P_8x8 / P_8x8ref0).
+    pub ref_idx_l0: Vec<i32>,
+    /// Raw `mvd_l0` (before motion-vector prediction, §8.4.1) per partition /
+    /// sub-partition. For P_8x8 the per-8×8-partition sub-partitions are
+    /// concatenated in 8×8 order.
+    pub mvd_l0: Vec<(i32, i32)>,
+    /// `sub_mb_type` per 8×8 partition (0..3), present for `P8x8`/`P8x8ref0`.
+    pub sub_mb_type: Option<[u8; 4]>,
 }
 
 /// A decoded H.264 macroblock ready for reconstruction.
@@ -41,6 +81,25 @@ pub struct Macroblock {
     pub chroma_cr_coeffs: Box<[[i16; 16]; 4]>,
     /// True when this macroblock was coded as a skip.
     pub skip: bool,
+    /// Inter partition motion data, present when the macroblock is inter-coded.
+    pub motion: Option<InterMotion>,
+    /// Per-4×4-block intra prediction modes (raster order), used when
+    /// `mb_type == MbType::Intra4x4`. Ignored for other types.
+    pub pred_modes_4x4: Box<[Intra4x4Mode; 16]>,
+    /// Intra chroma prediction mode (0=DC, 1=Horizontal, 2=Vertical, 3=Plane).
+    pub intra_chroma_pred_mode: u8,
+    /// Intra_16×16 luma DC coefficients in raster order (only meaningful for
+    /// `MbType::Intra16x16`). These are transformed via the Hadamard DC path.
+    pub luma_dc: [i16; 16],
+    /// Chroma DC coefficients (Cb then Cr), 4 each, raster order (4:2:0).
+    pub chroma_dc_cb: [i16; 4],
+    pub chroma_dc_cr: [i16; 4],
+    /// Coded-block-pattern (luma nibble | chroma << 4) for this macroblock.
+    pub cbp: u8,
+    /// Raw PCM samples for `MbType::IPcm` macroblocks (§7.4.4).  For 4:2:0
+    /// this is 256 luma bytes followed by 128 Cb bytes then 128 Cr bytes
+    /// (512 bytes total per macroblock).
+    pub pcm_samples: Vec<u8>,
 }
 
 impl Macroblock {
@@ -52,6 +111,14 @@ impl Macroblock {
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),
             chroma_cr_coeffs: Box::new([[0; 16]; 4]),
             skip: true,
+            motion: None,
+            pred_modes_4x4: Box::new([Intra4x4Mode::Dc; 16]),
+            intra_chroma_pred_mode: 0,
+            luma_dc: [0; 16],
+            chroma_dc_cb: [0; 4],
+            chroma_dc_cr: [0; 4],
+            cbp: 0,
+            pcm_samples: Vec::new(),
         }
     }
 
@@ -117,6 +184,108 @@ impl Macroblock {
             }
         }
     }
+
+    /// Reconstruct a luma macroblock that was coded with Intra_4×4 prediction.
+    ///
+    /// `pred_modes` holds the 16 per-block 4×4 prediction modes (raster order).
+    /// `top`/`left`/`top_left` supply the already-reconstructed neighbour
+    /// samples for each of the 16 4×4 blocks; `None` marks an unavailable
+    /// sample (frame edge or not-yet-decoded neighbour, substituted with `R`).
+    ///
+    /// For each block the prediction is generated, the residual IDCT added, and
+    /// the result written into `plane` at the macroblock position.
+    pub fn reconstruct_luma_intra_4x4(
+        &self,
+        plane: &mut [u8],
+        pos: MbPos,
+        pred_modes: &[Intra4x4Mode; 16],
+        top: &[Option<u8>; 64],
+        left: &[Option<u8>; 64],
+        top_left: &[Option<u8>; 64],
+    ) {
+        let MbPos { mb_x, mb_y, stride } = pos;
+        let base_x = (mb_x * 16) as usize;
+        let base_y = (mb_y * 16) as usize;
+        for block_idx in 0..16usize {
+            let bx = (block_idx % 4) * 4;
+            let by = (block_idx / 4) * 4;
+            let mut pred = [0u8; 16];
+            let n = IntraNeighbours4x4 {
+                top: [
+                    top[block_idx * 4],
+                    top[block_idx * 4 + 1],
+                    top[block_idx * 4 + 2],
+                    top[block_idx * 4 + 3],
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                left: [
+                    left[block_idx * 4],
+                    left[block_idx * 4 + 1],
+                    left[block_idx * 4 + 2],
+                    left[block_idx * 4 + 3],
+                ],
+                top_left: top_left[block_idx],
+            };
+            predict_4x4(pred_modes[block_idx], &n, &mut pred);
+            let res = iquant_idct_4x4(&self.luma_coeffs[block_idx], self.qp);
+            for row in 0..4usize {
+                for col in 0..4usize {
+                    let x = base_x + bx + col;
+                    let y = base_y + by + row;
+                    let off = y * stride + x;
+                    if off < plane.len() {
+                        let v = pred[row * 4 + col] as i32 + res[row * 4 + col];
+                        plane[off] = v.clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reconstruct a luma macroblock coded with Intra_16×16 prediction.
+    pub fn reconstruct_luma_intra_16x16(
+        &self,
+        plane: &mut [u8],
+        pos: MbPos,
+        mode: Intra16x16Mode,
+        top: &[Option<u8>; 16],
+        left: &[Option<u8>; 16],
+        top_left: Option<u8>,
+    ) {
+        let MbPos { mb_x, mb_y, stride } = pos;
+        let base_x = (mb_x * 16) as usize;
+        let base_y = (mb_y * 16) as usize;
+        let mut pred = [0u8; 256];
+        let n = IntraNeighbours16x16 {
+            top: *top,
+            left: *left,
+            top_left,
+        };
+        predict_16x16(mode, &n, &mut pred);
+        for row in 0..16usize {
+            for col in 0..16usize {
+                let x = base_x + col;
+                let y = base_y + row;
+                let off = y * stride + x;
+                if off < plane.len() {
+                    let block = (row >> 2) * 4 + (col >> 2);
+                    let res = iquant_idct_4x4(&self.luma_coeffs[block], self.qp);
+                    let br = (row % 4) * 4 + (col % 4);
+                    let v = pred[row * 16 + col] as i32 + res[br];
+                    plane[off] = v.clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Public wrapper around [`iquant_idct_4x4`] so the decoder can add chroma
+/// residuals during intra reconstruction without duplicating the IDCT.
+pub fn iquant_idct_4x4_public(coeffs: &[i16; 16], qp: i32) -> [i32; 16] {
+    iquant_idct_4x4(coeffs, qp)
 }
 
 /// Inverse quantise and apply the H.264 4×4 integer IDCT to one 4×4 block.
@@ -206,6 +375,186 @@ pub fn new_video_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prediction::{Intra16x16Mode, Intra4x4Mode, IntraChromaMode};
+
+    /// Build an `Intra16x16` macroblock with the given luma pred mode, all-zero
+    /// coefficients, and optional chroma coefficients.
+    fn intra16x16_mb(pred_mode: u8) -> Macroblock {
+        Macroblock {
+            mb_type: MbType::Intra16x16 {
+                pred_mode,
+                cbp_chroma: 0,
+                cbp_luma: 0,
+            },
+            qp: 26,
+            luma_coeffs: Box::new([[0; 16]; 16]),
+            chroma_cb_coeffs: Box::new([[0; 16]; 4]),
+            chroma_cr_coeffs: Box::new([[0; 16]; 4]),
+            skip: false,
+            motion: None,
+            pred_modes_4x4: Box::new([Intra4x4Mode::Dc; 16]),
+            intra_chroma_pred_mode: 0,
+            luma_dc: [0; 16],
+            chroma_dc_cb: [0; 4],
+            chroma_dc_cr: [0; 4],
+            cbp: 0,
+            pcm_samples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn intra16x16_dc_prediction_matches_neighbour_average() {
+        // DC prediction averages the 16 top + 16 left neighbours; with all 100 it
+        // fills 100 across the whole 16×16 block (residual is zero).
+        let mb = intra16x16_mb(Intra16x16Mode::Dc as u8);
+        let mut plane = vec![0u8; 16 * 16];
+        mb.reconstruct_luma_intra_16x16(
+            &mut plane,
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
+            Intra16x16Mode::Dc,
+            &[Some(100); 16],
+            &[Some(100); 16],
+            Some(100),
+        );
+        assert!(plane.iter().all(|&v| v == 100));
+    }
+
+    #[test]
+    fn intra16x16_vertical_copies_top_row() {
+        // Top neighbours are a ramp 0..15; Vertical mode copies the top row into
+        // every row of the 16×16 block.
+        let mb = intra16x16_mb(Intra16x16Mode::Vertical as u8);
+        let top: [Option<u8>; 16] = (0u8..16).map(Some).collect::<Vec<_>>().try_into().unwrap();
+        let mut plane = vec![0u8; 16 * 16];
+        mb.reconstruct_luma_intra_16x16(
+            &mut plane,
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
+            Intra16x16Mode::Vertical,
+            &top,
+            &[Some(0); 16],
+            Some(0),
+        );
+        for r in 0..16 {
+            for c in 0..16 {
+                assert_eq!(plane[r * 16 + c], c as u8, "pixel ({r},{c})");
+            }
+        }
+    }
+
+    #[test]
+    fn intra4x4_vertical_copies_top_for_each_block() {
+        // All 16 blocks use Vertical mode; each block's prediction copies the row
+        // directly above it from the plane.
+        let mb = Macroblock {
+            mb_type: MbType::Intra4x4,
+            qp: 26,
+            luma_coeffs: Box::new([[0; 16]; 16]),
+            chroma_cb_coeffs: Box::new([[0; 16]; 4]),
+            chroma_cr_coeffs: Box::new([[0; 16]; 4]),
+            skip: false,
+            motion: None,
+            pred_modes_4x4: Box::new([Intra4x4Mode::Vertical; 16]),
+            intra_chroma_pred_mode: 0,
+            luma_dc: [0; 16],
+            chroma_dc_cb: [0; 4],
+            chroma_dc_cr: [0; 4],
+            cbp: 0,
+            pcm_samples: Vec::new(),
+        };
+        // Each 4-row band has a constant value so vertical prediction is
+        // deterministic: band0=200, band1=50, band2=10, band3=240.
+        let mut plane = vec![0u8; 16 * 16];
+        for r in 0..16 {
+            for c in 0..16 {
+                plane[r * 16 + c] = [200u8, 50, 10, 240][r / 4];
+            }
+        }
+        let mut top = [None; 64];
+        let mut left = [None; 64];
+        let mut top_left = [None; 64];
+        for b in 0..16usize {
+            let bx = (b % 4) * 4;
+            let by = (b / 4) * 4;
+            for i in 0..4 {
+                let ty = by as isize - 1;
+                top[b * 4 + i] = if ty >= 0 {
+                    Some(plane[ty as usize * 16 + (bx + i)])
+                } else {
+                    None
+                };
+                let lx = bx as isize - 1;
+                left[b * 4 + i] = if lx >= 0 {
+                    Some(plane[(by + i) * 16 + lx as usize])
+                } else {
+                    None
+                };
+            }
+            let cx = bx as isize - 1;
+            let cy = by as isize - 1;
+            top_left[b] = if cx >= 0 && cy >= 0 {
+                Some(plane[cy as usize * 16 + cx as usize])
+            } else {
+                None
+            };
+        }
+        mb.reconstruct_luma_intra_4x4(
+            &mut plane,
+            MbPos {
+                mb_x: 0,
+                mb_y: 0,
+                stride: 16,
+            },
+            &mb.pred_modes_4x4,
+            &top,
+            &left,
+            &top_left,
+        );
+        // Block at band 1 (by=4) should now equal band 0's value (200), since
+        // vertical prediction copies the row above.
+        for c in 0..4 {
+            assert_eq!(plane[4 * 16 + c], 200, "block1 col {c}");
+        }
+    }
+
+    #[test]
+    fn intra_chroma_dc_prediction_fills_128() {
+        // DC chroma prediction with a 128 border yields 128 across the 8×8 block.
+        let mb = intra16x16_mb(Intra16x16Mode::Dc as u8);
+        let mut cb = vec![128u8; 16 * 16];
+        let mut cr = vec![128u8; 16 * 16];
+        let top: [Option<u8>; 8] = [Some(128); 8];
+        let cbp = {
+            let mut p = [0u8; 64];
+            crate::prediction::predict_chroma(IntraChromaMode::Dc, &top, &top, Some(128), &mut p);
+            p
+        };
+        for row in 0..8usize {
+            for col in 0..8usize {
+                let off = row * 16 + col;
+                let cb_idct = iquant_idct_4x4_public(
+                    &mb.chroma_cb_coeffs[(row >> 2) * 2 + (col >> 2)],
+                    mb.qp,
+                );
+                let cr_idct = iquant_idct_4x4_public(
+                    &mb.chroma_cr_coeffs[(row >> 2) * 2 + (col >> 2)],
+                    mb.qp,
+                );
+                let br = (row % 4) * 4 + (col % 4);
+                cb[off] = (cbp[row * 8 + col] as i32 + cb_idct[br]).clamp(0, 255) as u8;
+                cr[off] = (cbp[row * 8 + col] as i32 + cr_idct[br]).clamp(0, 255) as u8;
+            }
+        }
+        assert!(cb.iter().all(|&v| v == 128));
+        assert!(cr.iter().all(|&v| v == 128));
+    }
 
     #[test]
     fn all_zero_coeffs_produce_zero_residual() {
@@ -216,6 +565,14 @@ mod tests {
             chroma_cb_coeffs: Box::new([[0; 16]; 4]),
             chroma_cr_coeffs: Box::new([[0; 16]; 4]),
             skip: false,
+            motion: None,
+            pred_modes_4x4: Box::new([Intra4x4Mode::Dc; 16]),
+            intra_chroma_pred_mode: 0,
+            luma_dc: [0; 16],
+            chroma_dc_cb: [0; 4],
+            chroma_dc_cr: [0; 4],
+            cbp: 0,
+            pcm_samples: Vec::new(),
         };
         // 16×16 plane pre-filled with 128 (DC prediction).
         let mut plane = vec![128u8; 16 * 16];

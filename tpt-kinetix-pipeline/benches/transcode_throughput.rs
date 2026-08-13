@@ -7,8 +7,10 @@
 //!
 //! Run with `cargo bench -p tpt-kinetix-pipeline`.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam_channel::bounded;

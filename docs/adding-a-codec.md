@@ -5,6 +5,12 @@ into TPT Kinetix using the `tpt-kinetix-kg` knowledge-graph tooling. Following t
 consistently keeps each codec crate coherent, fuzz-hardened, and parallelism-aware from
 the start.
 
+> This is the "hand-completion from real C source" path. If you just need an empty crate
+> skeleton (Cargo.toml, lib.rs, fuzz target) — e.g. because you're implementing a codec from
+> a written spec rather than porting a C decoder — start with the `cargo-generate` template
+> described in [`CONTRIBUTING.md`](../CONTRIBUTING.md#adding-a-new-codec-crate) instead. Most
+> new codecs use the template first, then optionally layer this KG workflow on top.
+
 ---
 
 ## Overview

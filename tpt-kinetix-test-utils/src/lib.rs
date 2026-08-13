@@ -14,3 +14,4 @@ pub mod corpus;
 pub mod pixel_diff;
 pub mod reference;
 pub mod synthetic;
+pub mod trace_dump;

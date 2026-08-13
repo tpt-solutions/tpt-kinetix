@@ -1,6 +1,5 @@
 // Tests that run across codec/demux boundaries using tpt-kinetix-test-utils helpers.
-use tpt_kinetix_test_utils::pixel_diff::*;
-use tpt_kinetix_test_utils::synthetic::*;
+use tpt_kinetix_test_utils::{pixel_diff::*, synthetic::*};
 
 #[test]
 fn grey_frame_is_identical_to_itself() {
@@ -40,7 +39,6 @@ fn corpus_edge_cases_do_not_panic() {
 #[test]
 fn h264_vs_ffmpeg_reference_when_available() {
     use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
-
     if !ffmpeg_available() {
         eprintln!("skipping: ffmpeg not available on PATH");
         return;
@@ -63,18 +61,150 @@ fn h264_vs_ffmpeg_reference_when_available() {
     }
 }
 
-/// Availability probe for the `dav1d` AV1 reference decoder path.
+/// Drive the `dav1d` reference decoder through the harness against a real AV1
+/// bitstream (synthesized on the fly with `ffmpeg`'s AV1 encoder when both
+/// binaries are present).
 ///
-/// Skips when `dav1d` is absent. Exercises the reference harness plumbing so
-/// that once the Kinetix AV1 decoder produces real frames, a pixel-diff can be
-/// wired in directly here.
+/// Skips when either `ffmpeg` or `dav1d` is missing. Once the Kinetix AV1
+/// decoder produces real frames, a pixel-diff against `ref_frames` can be
+/// wired in here to satisfy the "validated against dav1d" gate.
 #[test]
-fn av1_dav1d_reference_harness_available_check() {
-    use tpt_kinetix_test_utils::reference::dav1d_available;
-    if dav1d_available() {
-        // Reaching here means dav1d exists; the decode path is covered by
-        // reference::decode_av1_with_dav1d once real AV1 output is available.
+fn av1_dav1d_reference_decode_when_available() {
+    use tpt_kinetix_test_utils::{
+        reference::{dav1d_available, decode_av1_with_dav1d, ffmpeg_available},
+        synthetic::minimal_av1_ivf,
+    };
+
+    if !ffmpeg_available() || !dav1d_available() {
+        eprintln!("skipping: ffmpeg and/or dav1d not available on PATH");
+        return;
+    }
+
+    // If we can synthesize an AV1 IVF, exercise dav1d on it end-to-end.
+    match minimal_av1_ivf() {
+        Some(ivf) => match decode_av1_with_dav1d(&ivf, 128, 96) {
+            Ok(frames) => {
+                for f in &frames {
+                    assert_eq!(f.width, 128);
+                    assert_eq!(f.height, 96);
+                    assert_eq!(
+                        f.pixel_format,
+                        tpt_kinetix_core::pixel_format::PixelFormat::Yuv420p
+                    );
+                }
+            }
+            Err(e) => eprintln!("dav1d decode returned: {e}"),
+        },
+        None => eprintln!("skipping: could not synthesize an AV1 IVF with ffmpeg"),
+    }
+}
+
+/// Pixel-exact harness run across a real, multi-frame H.264 sample.
+///
+/// Synthesizes a short baseline-profile H.264 file with `ffmpeg`, then walks
+/// the same stream through the Kinetix decoder and the `ffmpeg` reference.
+/// Because the Kinetix H.264 decoder is still a scaffold (no CABAC/prediction/
+/// deblocking), this test asserts the *harness contract*: the Kinetix decoder
+/// must either emit a frame that reports `pixel_exact == false` capability, or
+/// fail with [`KinetixError::NotPixelExact`] under strict mode — never silently
+/// claiming pixel-exactness. Skips when `ffmpeg` is absent.
+#[test]
+fn h264_real_sample_harness_across_profiles() {
+    use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_h264::H264Decoder;
+    use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
+
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available on PATH");
+        return;
+    }
+
+    // Encode a short 16x16 baseline clip to a raw Annex B H.264 bytestream.
+    let annexb = match generate_h264_annexb(16, 16, 8) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: could not synthesize an H.264 sample with ffmpeg");
+            return;
+        }
+    };
+
+    // Reference decode to learn geometry.
+    let ref_frames = match decode_h264_with_ffmpeg(&annexb, 16, 16) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ffmpeg reference decode returned: {e}");
+            return;
+        }
+    };
+
+    // Kinetix decode (non-strict) must report non-pixel-exact capability and,
+    // in strict mode, refuse with NotPixelExact rather than returning wrong data.
+    let caps = H264Decoder::new().capabilities();
+    assert!(
+        !caps.pixel_exact,
+        "scaffold decoder must not claim pixel_exact"
+    );
+    assert!(caps.is_incomplete());
+
+    let mut dec = H264Decoder::new().with_strict(true);
+    let pkt = Packet {
+        pts: Timestamp::NONE,
+        dts: Timestamp::NONE,
+        data: annexb,
+        stream_index: 0,
+        is_key_frame: false,
+    };
+    match dec.decode(&pkt) {
+        Ok(_) => panic!("strict H.264 decode must not return placeholder frames"),
+        Err(KinetixError::NotPixelExact(_)) => {}
+        Err(e) => panic!("unexpected error from strict decode: {e}"),
+    }
+
+    // The reference must actually have produced frames for this sample.
+    assert!(!ref_frames.is_empty(), "reference produced no frames");
+}
+
+/// Use `ffmpeg` to encode a short raw `testsrc` clip into an Annex B H.264
+/// bytestream, returning `None` if ffmpeg is unavailable or fails.
+fn generate_h264_annexb(width: u32, height: u32, frames: u32) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={width}x{height}:rate=15:duration={frames}"),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-f",
+            "h264",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = Vec::new();
+    if child.stdout.take()?.read_to_end(&mut out).is_err() {
+        return None;
+    }
+    let _ = child.wait();
+    if out.is_empty() {
+        None
     } else {
-        eprintln!("skipping: dav1d not available on PATH");
+        Some(out)
     }
 }

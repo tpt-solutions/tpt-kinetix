@@ -1,7 +1,6 @@
 //! Top-level `moov` walker that assembles [`Mp4Track`] structs from box data.
 
 use anyhow::{anyhow, Result};
-
 use tpt_kinetix_core::codec::{media_type_from_handler, CodecId, MediaType};
 
 use super::boxes::{

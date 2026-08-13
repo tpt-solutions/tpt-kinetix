@@ -141,8 +141,11 @@ fn read_vint_size(data: &[u8]) -> Option<(u64, usize)> {
     if len > 8 || data.len() < len {
         return None;
     }
-    // Clear the marker bit.
-    let mut value = (first & (0xFF >> len)) as u64;
+    // Clear the marker bit. `len` can be 8 (full-width length prefix `0x01`),
+    // and `0xFFu8 >> 8` would panic (shift amount == bit width), so mask in a
+    // wider type.
+    let mask = (0xFFu64 >> len) as u8;
+    let mut value = (first & mask) as u64;
     let mut all_ones = (first as u64 | !(0xFFu64 >> len)) == 0xFF;
     for &b in &data[1..len] {
         value = (value << 8) | b as u64;
@@ -322,7 +325,7 @@ fn parse_block(body: &[u8], cluster_ts: u64, simple: bool) -> Option<Packet> {
     // For SimpleBlock the keyframe flag is the top bit of the flags byte.
     let is_key = if simple { flags & 0x80 != 0 } else { false };
 
-    let pts_ticks = cluster_ts as i64 + rel_ts as i64;
+    let pts_ticks = (cluster_ts as i64).saturating_add(rel_ts as i64);
     // Matroska timestamps are in TimestampScale units (default 1ms); expose as ms.
     let pts = Timestamp::new(pts_ticks, (1, 1000));
 
@@ -345,6 +348,45 @@ mod tests {
         assert_eq!(read_vint_size(&[0x81]), Some((1, 1)));
         // 0xA3 => length 1, value 0x23.
         assert_eq!(read_vint_size(&[0xA3]), Some((0x23, 1)));
+    }
+
+    #[test]
+    fn vint_size_eight_byte_does_not_panic() {
+        // 0x01 => length 8 (full-width marker), value from the remaining 7 bytes.
+        assert_eq!(read_vint_size(&[0x01, 0, 0, 0, 0, 0, 0, 1]), Some((1, 8)));
+    }
+
+    #[test]
+    fn fuzz_regression_crash_d06ac77249c00a8361756de4544f20343593e189() {
+        let data = vec![
+            0x1a, 0x45, 0xdf, 0xa3, 0x85, 0xff, 0x6f, 0x6f, 0x6f, 0xb2, 0xa3, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x85, 0xff, 0xb2, 0xa3, 0x86, 0xb2, 0xa3, 0x45, 0xdf,
+            0xa3, 0x35,
+        ];
+        // Must not panic; error is acceptable.
+        let _ = MkvDemuxer::new(data);
+    }
+
+    #[test]
+    fn fuzz_regression_crash_9cc84c6dcdd0ddd1601891a18e882db3143ac72d() {
+        // Cluster Timestamp near u64::MAX combined with a block's relative
+        // timecode used to overflow `cluster_ts as i64 + rel_ts as i64`.
+        let data = vec![
+            26, 69, 223, 163, 129, 68, 163, 137, 129, 26, 69, 223, 163, 129, 129, 22, 84, 174, 107,
+            1, 231, 163, 127, 255, 255, 255, 255, 255, 255, 255, 255, 161, 161, 161, 161, 161, 161,
+            161, 161, 161, 129, 129, 22, 84, 174, 107, 1, 231, 128, 128, 128, 22, 84, 174, 107,
+            137, 129, 26, 69, 223, 163, 129, 129, 22, 84, 174, 107, 1, 231, 128, 163, 137, 129, 26,
+            69, 223, 163, 129, 129, 22, 84, 231, 128, 128, 128, 128, 128, 128, 128, 128, 174, 174,
+            215, 174, 174, 174, 174, 174, 174, 255, 0, 0, 0, 0, 0, 0, 255, 255, 26, 69, 231, 128,
+            163, 137, 129, 26, 69, 223, 163, 129, 129, 22, 84, 231, 128, 128, 128, 128, 128, 128,
+            128, 128, 174, 174, 215, 174, 174, 174, 174, 174, 174, 255, 0, 0, 0, 0, 0, 0, 255, 255,
+            26, 69, 223, 163, 127, 255, 255, 255, 255, 235, 17, 234, 26, 161, 161, 161, 161, 161,
+            161, 161, 161, 161, 129, 129, 22, 84, 174, 107, 1, 231, 128, 128, 128, 22, 84, 174,
+            107, 137, 129, 26, 69, 223, 163, 129, 129, 22, 84, 174, 107, 1, 231, 66, 128, 128, 128,
+            129, 128, 22, 129, 129, 0, 0, 22, 129, 129, 0, 0,
+        ];
+        // Must not panic; error is acceptable.
+        let _ = MkvDemuxer::new(data);
     }
 
     #[test]

@@ -4,7 +4,18 @@
 //! AAC sequence headers. It declares the audio object type, sample rate, and
 //! channel configuration needed to initialize an AAC decoder.
 
-use crate::sample_rate_from_index;
+use crate::{sample_rate_from_index, SAMPLE_RATES};
+
+/// Map a sample rate in Hz to its 4-bit `AudioSpecificConfig` sampling
+/// frequency index (0..=15). Returns 15 (the "explicit rate" escape) for rates
+/// not present in the table.
+pub fn sample_rate_index(sample_rate: u32) -> u8 {
+    SAMPLE_RATES
+        .iter()
+        .position(|&r| r == sample_rate)
+        .map(|i| i as u8)
+        .unwrap_or(15)
+}
 
 /// Errors from ASC parsing.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

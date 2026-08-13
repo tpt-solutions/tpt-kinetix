@@ -17,7 +17,6 @@ pub use boxes::{
     TkhdBox,
 };
 pub use container::{parse_mp4, Mp4Track};
-
 use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 
 use crate::Demuxer;

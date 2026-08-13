@@ -54,6 +54,11 @@ fuzz-build:
 fuzz crate target seconds="60":
     cd {{crate}} && cargo fuzz run {{target}} -- -max_total_time={{seconds}}
 
+# Build the browser wasm demo and serve it locally (requires wasm-pack; see web-demo/README.md).
+wasm-demo:
+    cd tpt-kinetix-demux && wasm-pack build --target web --out-dir ../web-demo/pkg -- --features wasm
+    cd web-demo && python3 -m http.server 8787 || python -m http.server 8787
+
 # The full local pre-commit gate: format check, lint, build, test.
 check: fmt-check clippy build test
     @echo "All local checks passed."

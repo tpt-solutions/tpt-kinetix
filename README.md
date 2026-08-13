@@ -29,7 +29,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| AAC audio | ⛔ Planned | No audio path yet |
+| AAC audio | ✅ AAC-LC decode | ADTS / AudioSpecificConfig parsing + real PCM decode via `symphonia-codec-aac`; HE-AAC (SBR/PS) unsupported (`tpt-kinetix-aac`) |
 | CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
 
 > ⚠️ **Decode correctness:** the H.264 and AV1 decoders do **not** yet produce
@@ -83,7 +83,7 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
 │
-├── tpt-kinetix-aac         — AAC audio parsing (ADTS / AudioSpecificConfig); PCM TBD
+├── tpt-kinetix-aac         — AAC audio parsing (ADTS / AudioSpecificConfig) + AAC-LC PCM decode
 │
 ├── tpt-kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
 │
@@ -161,6 +161,46 @@ cargo deny check
 cargo run -p tpt-kinetix-cli -- --help
 cargo run -p tpt-kinetix-cli -- transcode --help
 cargo run -p tpt-kinetix-cli -- stream --help
+```
+
+### See it work: a 30-second demo
+
+The fastest way to see TPT Kinetix actually do something is the pipeline example — it's
+self-contained (no sample media file required): it generates synthetic YUV420p frames, scales
+them through the pipeline's filter stage, and encodes them to AV1 with `rav1e`.
+
+```bash
+cargo run -p tpt-kinetix-pipeline --example basic_transcode
+```
+
+If you have an MP4 file handy, you can also probe it directly with the CLI or the demux crate:
+
+```bash
+cargo run -p tpt-kinetix-cli -- probe path/to/video.mp4
+```
+
+### Examples
+
+Every functional crate ships at least one runnable, self-contained example under its
+`examples/` directory:
+
+| Example | What it shows |
+| --- | --- |
+| `cargo run -p tpt-kinetix-demux --example probe_mp4 -- path/to/video.mp4` | Probe an MP4 file and print its tracks |
+| `cargo run -p tpt-kinetix-mux --example write_mp4 -- out.mp4` | Write a minimal single-track H.264 MP4 |
+| `cargo run -p tpt-kinetix-pipeline --example basic_transcode` | Synthetic frames → filter → AV1 encode |
+| `cargo run -p tpt-kinetix-stream --example hls_segment` | Generate an HLS TS segment + `.m3u8` playlist |
+| `cargo run -p tpt-kinetix-aac --example parse_aac` | Parse an AudioSpecificConfig and ADTS frames |
+| `cargo run -p tpt-kinetix-kg --example ingest_ffmpeg_h264 -- path/to/h264dec.c` | Ingest C source into a knowledge graph |
+
+### Try it in your browser
+
+`tpt-kinetix-demux` also builds for `wasm32-unknown-unknown`. See
+[`web-demo/`](web-demo/) for a small, dependency-free page that probes an MP4 file entirely
+client-side — drag a file in and see its tracks, no upload, no server. Build and serve it with:
+
+```bash
+just wasm-demo
 ```
 
 ---

@@ -9,10 +9,11 @@
 
 pub mod mkv;
 pub mod mp4;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use mkv::MkvDemuxer;
 pub use mp4::Mp4Demuxer;
-
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};
 
 /// Common interface implemented by all container demuxers.

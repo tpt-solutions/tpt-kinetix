@@ -2,8 +2,7 @@
 //! `tpt-kinetix-demux` and verify the tracks and samples survive.
 
 use tpt_kinetix_core::codec::{CodecId, MediaType};
-use tpt_kinetix_demux::mp4::Mp4Demuxer;
-use tpt_kinetix_demux::Demuxer;
+use tpt_kinetix_demux::{mp4::Mp4Demuxer, Demuxer};
 use tpt_kinetix_mux::{Mp4Muxer, Mp4MuxerConfig};
 
 fn build_mp4() -> (Vec<u8>, Vec<Vec<u8>>) {

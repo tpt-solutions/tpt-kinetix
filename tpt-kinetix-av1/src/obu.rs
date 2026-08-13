@@ -7,7 +7,7 @@
 // Minimal bit-reader (independent of tpt-kinetix-h264; same pattern).
 // ---------------------------------------------------------------------------
 
-struct BitReader<'a> {
+pub(crate) struct BitReader<'a> {
     data: &'a [u8],
     /// Current byte index.
     byte_pos: usize,
@@ -16,7 +16,7 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self {
             data,
             byte_pos: 0,
@@ -25,7 +25,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `n` bits (1–32) and return as u32.  Returns None on underflow.
-    fn read_bits(&mut self, n: u8) -> Option<u32> {
+    pub(crate) fn read_bits(&mut self, n: u8) -> Option<u32> {
         debug_assert!(n > 0 && n <= 32);
         let mut result: u32 = 0;
         for _ in 0..n {
@@ -44,9 +44,15 @@ impl<'a> BitReader<'a> {
         Some(result)
     }
 
+    /// Read a single bit.
+    #[inline]
+    pub(crate) fn read_bit(&mut self) -> Option<u8> {
+        self.read_bits(1).map(|v| v as u8)
+    }
+
     /// Read a single flag bit.
     #[inline]
-    fn read_flag(&mut self) -> Option<bool> {
+    pub(crate) fn read_flag(&mut self) -> Option<bool> {
         self.read_bits(1).map(|v| v != 0)
     }
 
@@ -261,6 +267,16 @@ pub struct SequenceHeaderObu {
     pub max_frame_width_minus_1: u32,
     pub max_frame_height_minus_1: u32,
     pub color_config: ColorConfig,
+    /// `order_hint_bits_minus_1` (from `operating_parameter_info` / `order_hint_bits`).
+    pub order_hint_bits_minus_1: u8,
+    /// Whether 128x128 superblocks are used (`use_128x128_superblock`).
+    pub use_128x128_superblock: bool,
+    /// Whether intra block copy is enabled (`allow_intrabc`).
+    pub allow_intrabc: bool,
+    /// Whether film grain parameters are present in frame headers.
+    pub film_grain_params_present: bool,
+    /// Whether decoder model info is present (operating points).
+    pub decoder_model_info_present: bool,
 }
 
 impl SequenceHeaderObu {
@@ -303,6 +319,8 @@ impl SequenceHeaderObu {
 
             let color_config = Self::parse_color_config(&mut br, seq_profile)?;
 
+            // Reduced still picture: superblock size flag, order_hint, intrabc,
+            // and film grain are not present.
             return Ok(Self {
                 seq_profile,
                 still_picture,
@@ -312,10 +330,16 @@ impl SequenceHeaderObu {
                 max_frame_width_minus_1,
                 max_frame_height_minus_1,
                 color_config,
+                order_hint_bits_minus_1: 0,
+                use_128x128_superblock: false,
+                allow_intrabc: false,
+                film_grain_params_present: false,
+                decoder_model_info_present: false,
             });
         }
 
         // Non-reduced path: skip timing_info_present_flag and decoder_model_info
+        let mut decoder_model_info_present = false;
         let timing_info_present = br
             .read_flag()
             .ok_or_else(|| anyhow::anyhow!("truncated: timing_info_present"))?;
@@ -334,7 +358,7 @@ impl SequenceHeaderObu {
                 let _ = read_uvlc(&mut br)?;
             }
 
-            let decoder_model_info_present = br
+            decoder_model_info_present = br
                 .read_flag()
                 .ok_or_else(|| anyhow::anyhow!("truncated: decoder_model_info_present"))?;
             if decoder_model_info_present {
@@ -394,6 +418,8 @@ impl SequenceHeaderObu {
             }
         }
 
+        // --- Post operating-points fields (§5.5.2) ---
+        // frame_width_bits_minus_1(4), frame_height_bits_minus_1(4)
         let frame_width_bits_minus_1 = br
             .read_bits(4)
             .ok_or_else(|| anyhow::anyhow!("truncated: frame_width_bits_minus_1"))?
@@ -402,6 +428,52 @@ impl SequenceHeaderObu {
             .read_bits(4)
             .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))?
             as u8;
+
+        // superblock size: use_128x128_superblock(1)
+        let use_128x128_superblock = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: use_128x128_superblock"))?;
+
+        // order_hint_bits_minus_1(3) when !reduced_still_picture_header
+        let order_hint_bits_minus_1 = br
+            .read_bits(3)
+            .ok_or_else(|| anyhow::anyhow!("truncated: order_hint_bits_minus_1"))?
+            as u8;
+
+        // screen content tools (§5.5.3)
+        let seq_force_screen_content_tools = if reduced_still_picture_header {
+            true
+        } else {
+            br.read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_screen_content_tools"))?
+        };
+        let seq_force_integer_mv = if seq_force_screen_content_tools {
+            if reduced_still_picture_header {
+                false
+            } else {
+                br.read_flag()
+                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv"))?
+            }
+        } else {
+            let present = br
+                .read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv_present"))?;
+            if present {
+                br.read_flag()
+                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv"))?
+            } else {
+                false
+            }
+        };
+
+        // allow_intrabc(1) when screen content tools enabled and not forced integer mv
+        let allow_intrabc = if seq_force_screen_content_tools && !seq_force_integer_mv {
+            br.read_flag()
+                .ok_or_else(|| anyhow::anyhow!("truncated: allow_intrabc"))?
+        } else {
+            false
+        };
+
         let max_frame_width_minus_1 = br
             .read_bits(frame_width_bits_minus_1 + 1)
             .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
@@ -410,6 +482,11 @@ impl SequenceHeaderObu {
             .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_height_minus_1"))?;
 
         let color_config = Self::parse_color_config(&mut br, seq_profile)?;
+
+        // film_grain_params_present(1) (after color config)
+        let film_grain_params_present = br
+            .read_flag()
+            .ok_or_else(|| anyhow::anyhow!("truncated: film_grain_params_present"))?;
 
         Ok(Self {
             seq_profile,
@@ -420,6 +497,11 @@ impl SequenceHeaderObu {
             max_frame_width_minus_1,
             max_frame_height_minus_1,
             color_config,
+            order_hint_bits_minus_1,
+            use_128x128_superblock,
+            allow_intrabc,
+            film_grain_params_present,
+            decoder_model_info_present,
         })
     }
 

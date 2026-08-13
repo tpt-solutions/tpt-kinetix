@@ -5,13 +5,17 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
-use super::amf::{self, Amf0Value};
-use super::chunk::{ChunkAssembler, MessageTypeId, RtmpMessage};
-use super::flv::{self, FlvAudioTag, FlvVideoTag};
-use super::handshake::perform_server_handshake;
+use super::{
+    amf::{self, Amf0Value},
+    chunk::{ChunkAssembler, MessageTypeId, RtmpMessage},
+    flv::{self, FlvAudioTag, FlvVideoTag},
+    handshake::perform_server_handshake,
+};
 
 /// Configuration for the RTMP ingest server.
 #[derive(Debug, Clone)]

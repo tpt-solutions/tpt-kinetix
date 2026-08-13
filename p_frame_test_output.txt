@@ -1,0 +1,61 @@
+warning: field `ctx_rem` is never read
+   --> tpt-kinetix-h264\src\entropy.rs:711:5
+    |
+709 | pub struct Intra4x4PredModeContext {
+    |            ----------------------- field in this struct
+710 |     ctx_prev: [CabacContext; 1],
+711 |     ctx_rem: [CabacContext; 1],
+    |     ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GOLOMB_TO_INTER_CBP` is never used
+  --> tpt-kinetix-h264\src\slice_data.rs:45:7
+   |
+45 | const GOLOMB_TO_INTER_CBP: [u8; 48] = [
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: `tpt-kinetix-h264` (lib) generated 2 warnings
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.18s
+     Running tests\p_frame_conformance.rs (target\debug\deps\p_frame_conformance-bb689281acd3a95e.exe)
+
+running 1 test
+    inter blocks cbp_luma=15 blocks=[0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+  luma block 0 nc=0 pos=57
+  CAVLC block start=57 n_c=0 tc=1 t1=0
+    block@57 tc=1 t1=0 levels=[-56] tz=0
+  luma block 1 nc=1 pos=91
+  luma block 4 nc=1 pos=92
+  luma block 5 nc=0 pos=93
+  luma block 2 nc=0 pos=94
+  luma block 3 nc=0 pos=95
+  CAVLC block start=95 n_c=0 tc=1 t1=0
+    block@95 tc=1 t1=0 levels=[32] tz=0
+  luma block 6 nc=0 pos=129
+  luma block 7 nc=1 pos=130
+  CAVLC block start=130 n_c=1 tc=14 t1=0
+    block@130 tc=14 t1=0 levels=[-3, 4, 4, -1, -3, -1, -2, -2, 3, 9, 3, -9, -9, 9] tz=2
+  luma block 8 nc=0 pos=217
+  CAVLC block start=217 n_c=0 tc=14 t1=0
+    block@217 tc=14 t1=0 levels=[-3, 3, 3, -1, -1, -1, 1, -1, -1, 1, 1, 2, 1, -1] tz=2
+  luma block 9 nc=7 pos=282
+  CAVLC block start=282 n_c=7 tc=6 t1=3
+    block@282 tc=6 t1=3 levels=[1, -1, -1, -1, -2, -1] tz=6
+  luma block 12 nc=14 pos=309
+  CAVLC coeff_token FAIL at pos=315 n_c=14 remaining=7101: CavlcVlcError
+cavlc vlc decode error
+
+thread 'cavlc_pframe_no_deblock_is_bitexact' (15572) panicked at tpt-kinetix-h264\tests\p_frame_conformance.rs:153:10:
+decode should not error: NotPixelExact("H.264: slice not decodable by the pixel-exact path yet (inter/CABAC/unsupported feature); see H264Decoder::capabilities")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cavlc_pframe_no_deblock_is_bitexact ... FAILED
+
+failures:
+
+failures:
+    cavlc_pframe_no_deblock_is_bitexact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `-p tpt-kinetix-h264 --test p_frame_conformance`
+

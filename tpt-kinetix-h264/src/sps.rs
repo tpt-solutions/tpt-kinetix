@@ -13,6 +13,11 @@ pub struct SeqParameterSet {
     pub profile_idc: u8,
     pub level_idc: u8,
     pub seq_parameter_set_id: u32,
+    /// `chroma_format_idc`: 0 = monochrome, 1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4.
+    /// Defaults to 1 (4:2:0) for non-high profiles where it is not signalled.
+    pub chroma_format_idc: u32,
+    /// `separate_colour_plane_flag` (only meaningful for 4:4:4).
+    pub separate_colour_plane_flag: bool,
     pub log2_max_frame_num_minus4: u32,
     pub pic_order_cnt_type: u32,
     /// Only present when `pic_order_cnt_type == 0`.
@@ -45,11 +50,13 @@ impl SeqParameterSet {
             profile_idc,
             100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138
         );
+        let mut chroma_format_idc = 1u32; // default 4:2:0 when not signalled
+        let mut separate_colour_plane_flag = false;
         if high_profile {
-            let chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
+            chroma_format_idc = r.read_ue().context("chroma_format_idc")?;
             if chroma_format_idc == 3 {
-                let _separate_colour_plane_flag =
-                    r.read_bit().context("separate_colour_plane_flag")?;
+                separate_colour_plane_flag =
+                    r.read_bit().context("separate_colour_plane_flag")? == 1;
             }
             let _bit_depth_luma_minus8 = r.read_ue().context("bit_depth_luma_minus8")?;
             let _bit_depth_chroma_minus8 = r.read_ue().context("bit_depth_chroma_minus8")?;
@@ -84,12 +91,25 @@ impl SeqParameterSet {
         }
 
         let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
+        // Per spec (§7.4.2.1.1) this is in 0..=12; downstream code widens it to a
+        // bit count (+4) that must fit the bitreader's 32-bit read_bits limit.
+        if log2_max_frame_num_minus4 > 12 {
+            return Err(anyhow!(
+                "log2_max_frame_num_minus4 {log2_max_frame_num_minus4} out of range (0..=12)"
+            ));
+        }
         let pic_order_cnt_type = r.read_ue().context("pic_order_cnt_type")?;
 
         let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
         if pic_order_cnt_type == 0 {
             log2_max_pic_order_cnt_lsb_minus4 =
                 r.read_ue().context("log2_max_pic_order_cnt_lsb_minus4")?;
+            // Same spec-mandated range as log2_max_frame_num_minus4 above.
+            if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+                return Err(anyhow!(
+                    "log2_max_pic_order_cnt_lsb_minus4 {log2_max_pic_order_cnt_lsb_minus4} out of range (0..=12)"
+                ));
+            }
         } else if pic_order_cnt_type == 1 {
             let _delta_pic_order_always_zero_flag =
                 r.read_bit().context("delta_pic_order_always_zero_flag")?;
@@ -143,6 +163,8 @@ impl SeqParameterSet {
             profile_idc,
             level_idc,
             seq_parameter_set_id,
+            chroma_format_idc,
+            separate_colour_plane_flag,
             log2_max_frame_num_minus4,
             pic_order_cnt_type,
             log2_max_pic_order_cnt_lsb_minus4,
@@ -166,9 +188,18 @@ impl SeqParameterSet {
     ///   FrameWidth = PicWidthInSamplesL − SubWidthC × (crop_left + crop_right)
     ///
     /// Assumes 4:2:0 chroma format (SubWidthC = 2).
+    ///
+    /// Saturating arithmetic: `pic_width_in_mbs_minus1` and the crop offsets
+    /// are attacker-controlled `ue(v)` fields that can be close to `u32::MAX`,
+    /// which overflows a plain `(x + 1) * 16` in debug builds. Callers reject
+    /// implausible dimensions afterwards (see `H264Decoder::decode_impl`), so
+    /// saturating here only affects streams that are already malformed.
     pub fn pic_width_pixels(&self) -> u32 {
-        let raw = (self.pic_width_in_mbs_minus1 + 1) * 16;
-        let crop = 2 * (self.frame_crop_left_offset + self.frame_crop_right_offset);
+        let raw = self.pic_width_in_mbs_minus1.saturating_add(1).saturating_mul(16);
+        let crop = self
+            .frame_crop_left_offset
+            .saturating_add(self.frame_crop_right_offset)
+            .saturating_mul(2);
         raw.saturating_sub(crop)
     }
 
@@ -179,10 +210,17 @@ impl SeqParameterSet {
     ///   FrameHeight = PicHeightInSamplesL − SubHeightC × (crop_top + crop_bottom)
     ///
     /// Assumes 4:2:0 chroma format and `frame_mbs_only_flag = 1` (SubHeightC = 2).
+    /// Saturating for the same reason as [`SeqParameterSet::pic_width_pixels`].
     pub fn pic_height_pixels(&self) -> u32 {
-        let raw = (self.pic_height_in_map_units_minus1 + 1) * 16;
+        let raw = self
+            .pic_height_in_map_units_minus1
+            .saturating_add(1)
+            .saturating_mul(16);
         let sub_h = if self.frame_mbs_only_flag { 2u32 } else { 4 };
-        let crop = sub_h * (self.frame_crop_top_offset + self.frame_crop_bottom_offset);
+        let crop = self
+            .frame_crop_top_offset
+            .saturating_add(self.frame_crop_bottom_offset)
+            .saturating_mul(sub_h);
         raw.saturating_sub(crop)
     }
 }
@@ -197,6 +235,8 @@ mod tests {
             profile_idc: 66,
             level_idc: 30,
             seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
             log2_max_frame_num_minus4: 0,
             pic_order_cnt_type: 0,
             log2_max_pic_order_cnt_lsb_minus4: 4,
@@ -222,6 +262,8 @@ mod tests {
             profile_idc: 100,
             level_idc: 40,
             seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
             log2_max_frame_num_minus4: 0,
             pic_order_cnt_type: 0,
             log2_max_pic_order_cnt_lsb_minus4: 4,

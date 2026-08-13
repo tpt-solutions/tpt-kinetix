@@ -9,6 +9,7 @@ pub mod server;
 pub use amf::{Amf0Value, AmfError};
 pub use chunk::{ChunkAssembler, ChunkParser, MessageTypeId, RtmpMessage};
 pub use flv::{
-    parse_audio_tag, parse_video_tag, AacPacketType, AvcPacketType, FlvAudioTag, FlvVideoTag,
+    parse_audio_tag, parse_video_tag, AacPacketType, AvcPacketType, FlvAudioTag, FlvVideoCodec,
+    FlvVideoTag,
 };
 pub use server::{RtmpConfig, RtmpMediaEvent, RtmpServer};

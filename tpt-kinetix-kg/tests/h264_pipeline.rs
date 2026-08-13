@@ -7,13 +7,13 @@
 
 use std::path::PathBuf;
 
-use tpt_kinetix_kg::analysis::{find_independent_sets, mark_parallel_regions};
-use tpt_kinetix_kg::codegen::{generate, CodegenOptions};
-use tpt_kinetix_kg::extraction::{
-    extract_bitstream_parsing_tree, extract_macroblock_state_machine,
+use tpt_kinetix_kg::{
+    analysis::{find_independent_sets, mark_parallel_regions},
+    codegen::{generate, CodegenOptions},
+    extraction::{extract_bitstream_parsing_tree, extract_macroblock_state_machine},
+    graph::{Edge, KnowledgeGraph, Node, NodeKind},
+    ingestion::CAst,
 };
-use tpt_kinetix_kg::graph::{Edge, KnowledgeGraph, Node, NodeKind};
-use tpt_kinetix_kg::ingestion::CAst;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
