@@ -161,3 +161,53 @@ pub fn decode_spectral_data(
 
     Ok(coeffs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::{IcsInfo, Section, SectionData, WindowSequence};
+
+    fn ics_long(max_sfb: u8) -> IcsInfo {
+        IcsInfo {
+            window_sequence: WindowSequence::OnlyLong,
+            window_shape: false,
+            max_sfb,
+            scale_factor_grouping: 0,
+            predictor_data_present: false,
+            predictor_reset_mode: None,
+        }
+    }
+
+    #[test]
+    fn dequant_scale_hand_computed() {
+        // 2^((global_gain - 100 - sf) / 4)
+        assert!((dequant_scale(100, 0) - 1.0).abs() < 1e-6);
+        assert!((dequant_scale(104, 0) - 2.0).abs() < 1e-6);
+        assert!((dequant_scale(100, 4) - 0.5).abs() < 1e-6);
+        assert!((dequant_scale(96, 0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dequant_coeff_hand_computed() {
+        // |q|^(4/3) * scale
+        assert_eq!(dequant_coeff(0, 1.0), 0.0);
+        assert!((dequant_coeff(1, 1.0) - 1.0).abs() < 1e-6);
+        // 8^(4/3) = (2^3)^(4/3) = 2^4 = 16
+        assert!((dequant_coeff(8, 1.0) - 16.0).abs() < 1e-6);
+        // sign preserved, scale applied
+        assert!((dequant_coeff(-1, 2.0) + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expand_band_types_fills_sections() {
+        let ics = ics_long(4);
+        let sections = SectionData {
+            groups: vec![vec![
+                Section { sect_cb: 1, sect_len: 2 },
+                Section { sect_cb: 0, sect_len: 2 },
+            ]],
+        };
+        let bt = expand_band_types(&sections, &ics);
+        assert_eq!(bt, vec![1u8, 1, 0, 0]);
+    }
+}

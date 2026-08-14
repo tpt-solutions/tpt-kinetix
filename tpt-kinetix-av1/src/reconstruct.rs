@@ -23,6 +23,10 @@ use crate::{
     coeff_tables as av1,
     entropy::SymbolDecoder,
     frame::FrameHeader,
+    inter::{
+        build_mv_candidates, decode_ref_and_mv, motion_compensate, read_single_ref_name, InterCdfs,
+        Mv, NONE_FRAME, RefSlot, RefFrames,
+    },
     loop_filter::{apply_post_filters, FrameMeta},
     obu::SequenceHeaderObu,
 };
@@ -935,6 +939,31 @@ struct TileDecodeState<'a> {
     seg_feature_alt_q: bool,
     tx_above: Vec<u8>,
     tx_left: Vec<u8>,
+    // ── Inter-prediction (AV1 Phase E) state ───────────────────────────────
+    /// `true` when the current frame carries no inter blocks (KEY / INTRA_ONLY).
+    frame_is_intra: bool,
+    /// `allow_high_precision_mv` (§5.9.2): 1/8-pel vs 1/4-pel MV precision.
+    allow_high_precision_mv: bool,
+    /// `reference_select` (§6.8.2): compound prediction allowed.
+    reference_select: bool,
+    /// Frame-level `interpolation_filter` (0..4, §6.8.2); `SWITCHABLE`=4 means a
+    /// per-block filter is read.
+    interpolation_filter: u8,
+    /// Maps a reference *name* (LAST..ALTREF, indices 2..8) to a DPB slot 0..7.
+    ref_to_slot: [u8; 9],
+    /// The 8 DPB reference slots the inter blocks may draw from.
+    ref_slots: RefFrames<'a>,
+    /// Adaptive CDF state for inter symbols.
+    map_inter_cdfs: InterCdfs,
+    /// Per-mi-row/col neighbour "is this block inter" flags.
+    is_inter_above: Vec<u8>,
+    is_inter_left: Vec<u8>,
+    /// Per-mi-row/col neighbour reference names (slot 0 used for single ref).
+    ref_above: Vec<[u8; 2]>,
+    ref_left: Vec<[u8; 2]>,
+    /// Per-mi-row/col neighbour motion vectors (slot 0 used for single ref).
+    mv_above: Vec<[Mv; 2]>,
+    mv_left: Vec<[Mv; 2]>,
     // Output plane buffers (borrowed for the lifetime of the tile decode).
     y_plane: &'a mut [u8],
     u_plane: &'a mut [u8],
@@ -995,6 +1024,12 @@ impl<'a> TileDecodeState<'a> {
         segmentation_enabled: bool,
         seg_feature_skip: bool,
         seg_feature_alt_q: bool,
+        frame_is_intra: bool,
+        allow_high_precision_mv: bool,
+        reference_select: bool,
+        interpolation_filter: u8,
+        ref_to_slot: [u8; 9],
+        ref_slots: RefFrames<'a>,
         meta: &'a mut FrameMeta,
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
@@ -1026,6 +1061,19 @@ impl<'a> TileDecodeState<'a> {
             uv_left: vec![DC_PRED; mi_rows],
             tx_above: vec![TX_4X4 as u8; mi_cols],
             tx_left: vec![TX_4X4 as u8; mi_rows],
+            frame_is_intra,
+            allow_high_precision_mv,
+            reference_select,
+            interpolation_filter,
+            ref_to_slot,
+            ref_slots,
+            map_inter_cdfs: InterCdfs::new(),
+            is_inter_above: vec![0u8; mi_cols],
+            is_inter_left: vec![0u8; mi_rows],
+            ref_above: vec![[NONE_FRAME; 2]; mi_cols],
+            ref_left: vec![[NONE_FRAME; 2]; mi_rows],
+            mv_above: vec![[Mv::default(); 2]; mi_cols],
+            mv_left: vec![[Mv::default(); 2]; mi_rows],
             y_plane,
             u_plane,
             v_plane,
@@ -1161,7 +1209,479 @@ impl<'a> TileDecodeState<'a> {
 
     /// Decode one leaf block: intra luma mode, chroma mode, transform size,
     /// then reconstruct every transform block (luma + chroma).
+    /// Block decode dispatcher: intra-coded frame → intra path; inter-coded
+    /// frame → inter path (AV1 Phase E). Leaf blocks in the partition tree route
+    /// here.
     fn decode_block(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+    ) -> Result<(), KinetixError> {
+        if !self.frame_is_intra {
+            return self.decode_inter_block(mi_row, mi_col, bsize);
+        }
+        self.decode_intra_block(mi_row, mi_col, bsize)
+    }
+
+    /// Inter-coded leaf block (AV1 Phase E): MV prediction (§7.10) + motion
+    /// compensation (§7.11.3). Reconstructs a single/compound-reference block and
+    /// adds the residual.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_inter_block(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+    ) -> Result<(), KinetixError> {
+        let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let allow_hp = self.allow_high_precision_mv;
+        let frame_filter = self.interpolation_filter;
+        let reference_select = self.reference_select;
+
+        // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
+        // syntax order.
+        let above_skip = self.skip_above[mi_col] as usize;
+        let left_skip = self.skip_left[mi_row] as usize;
+        let above_inter = self.is_inter_above[mi_col] as usize;
+        let left_inter = self.is_inter_left[mi_row] as usize;
+        let skip = if self.seg_feature_skip {
+            true
+        } else {
+            self.mode_cdfs
+                .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
+                == 1
+        };
+
+        // is_inter (Y) — context from neighbour inter flags.
+        let inter_ctx = (left_inter + above_inter).min(3);
+        let is_inter = self.dec.read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx]) == 1;
+
+        if !is_inter {
+            // Intra-coded block inside an inter frame: reconstruct via the shared
+            // intra machinery (mode symbols still read in inter order: skip above
+            // is already consumed, so read y/uv mode then dispatch).
+            let above_mode = self.ymode_above[mi_col] as usize;
+            let left_mode = self.ymode_left[mi_row] as usize;
+            let y_ctx = INTRA_MODE_CONTEXT[above_mode] + INTRA_MODE_CONTEXT[left_mode];
+            let y_mode = self
+                .mode_cdfs
+                .read_intra_y_mode(&mut self.dec, y_ctx.min(4), (y_ctx / 5).min(4));
+            let uv_mode = self
+                .mode_cdfs
+                .read_uv_mode(&mut self.dec, self.cfl_allowed, y_mode);
+            let max_tx = max_tx_size_for_bsize(bsize);
+            let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
+                self.read_tx_size(bsize, max_tx, mi_row, mi_col)
+            } else {
+                max_tx
+            };
+            self.reconstruct_intra_subblock(mi_row, mi_col, bsize, y_mode, uv_mode, skip, luma_tx)?;
+            // Update inter neighbour state (this block is not inter).
+            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+                if let Some(s) = self.is_inter_left.get_mut(r) {
+                    *s = 0;
+                }
+            }
+            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                if let Some(s) = self.is_inter_above.get_mut(c) {
+                    *s = 0;
+                }
+            }
+            return Ok(());
+        }
+
+        // Compound vs single reference (§6.8.2). comp_mode is read only when
+        // compound prediction is allowed (here: `reference_select`).
+        let compound = if reference_select {
+            self.dec.read_symbol(&mut self.map_inter_cdfs.comp_mode[0]) == 1
+        } else {
+            false
+        };
+
+        // Reference name(s).
+        let mut ref_names = [NONE_FRAME; 2];
+        if compound {
+            // Compound reference-frame tree (§6.8.2). We consume the same symbols
+            // the encoder wrote to stay in bit-sync; the actual forward/backward
+            // names are derived from the same decisions.
+            let _ct = self.dec.read_symbol(&mut self.map_inter_cdfs.comp_ref_type[0]);
+            let fwd = if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][0]) == 0 {
+                if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][1]) == 0 {
+                    LAST_FRAME
+                } else {
+                    LAST2_FRAME
+                }
+            } else if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][2]) == 0 {
+                LAST3_FRAME
+            } else {
+                GOLDEN_FRAME
+            };
+            let bwd = if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[1][0]) == 0 {
+                if self.dec.read_symbol(&mut self.map_inter_cdfs.comp_ref[0][0]) == 0 {
+                    BWDREF_FRAME
+                } else {
+                    ALTREF_FRAME
+                }
+            } else if self.dec.read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[0][0]) == 0 {
+                ALTREF2_FRAME
+            } else {
+                BWDREF_FRAME
+            };
+            ref_names = [fwd, bwd];
+        } else {
+            ref_names[0] = read_single_ref_name(&mut self.dec, &mut self.map_inter_cdfs, 0);
+        }
+
+        // Build the spatial MV candidate list (§7.10) from neighbours.
+        let above = [
+            (self.ref_above[mi_col][0], self.mv_above[mi_col][0]),
+            (self.ref_above[mi_col][1], self.mv_above[mi_col][1]),
+        ];
+        let left = [
+            (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
+            (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
+        ];
+        let block_refs: Vec<u8> = ref_names.iter().copied().filter(|r| *r != NONE_FRAME).collect();
+        let candidates = build_mv_candidates(&above, &left, &block_refs, 2);
+
+        // Per reference: read mode + MV (§5.11.23).
+        let mut mvs = [Mv::default(); 2];
+        let use_hp_row = allow_hp && frame_filter != INTERP_BILINEAR;
+        let use_hp_col = allow_hp && frame_filter != INTERP_BILINEAR;
+        for i in 0..2 {
+            let r = ref_names[i];
+            if r == NONE_FRAME {
+                continue;
+            }
+            let (_rn, mv) = decode_ref_and_mv(
+                &mut self.dec,
+                &mut self.map_inter_cdfs,
+                r,
+                &candidates,
+                use_hp_row,
+                use_hp_col,
+                0,
+                false,
+            )?;
+            mvs[i] = mv;
+        }
+
+        // Per-block interpolation filter (read only when switchable).
+        let filter = if frame_filter == INTERP_SWITCHABLE {
+            self.dec
+                .read_symbol(&mut self.interp_filter[0]) as u8
+        } else {
+            frame_filter
+        };
+
+        // Motion-compensated prediction into the output planes (Y then chroma),
+        // using the reference slots mapped from the reference names.
+        let px_x0 = mi_col * MI_SIZE - self.tile_px_x0;
+        let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
+        let bw_px = bw * MI_SIZE;
+        let bh_px = bh * MI_SIZE;
+
+        // Y plane.
+        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, filter)?;
+        // Chroma planes (sub-sampled MV).
+        let cmv: [Mv; 2] = [mvs[0].scaled_chroma(), mvs[1].scaled_chroma()];
+        let cpx_x0 = px_x0 / 2;
+        let cpx_y0 = px_y0 / 2;
+        let cbw_px = (bw_px / 2).max(4);
+        let cbh_px = (bh_px / 2).max(4);
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
+
+        // Residual: read coefficients per transform block and add to the
+        // prediction already written into the planes.
+        self.add_inter_residual(mi_row, mi_col, bsize, skip)?;
+
+        // Update inter neighbour state.
+        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            if let Some(s) = self.is_inter_left.get_mut(r) {
+                *s = 1;
+            }
+            if let Some(slot) = self.ref_left.get_mut(r) {
+                slot[0] = ref_names[0];
+                slot[1] = ref_names[1];
+            }
+            if let Some(slot) = self.mv_left.get_mut(r) {
+                slot[0] = mvs[0];
+                slot[1] = mvs[1];
+            }
+        }
+        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(s) = self.is_inter_above.get_mut(c) {
+                *s = 1;
+            }
+            if let Some(slot) = self.ref_above.get_mut(c) {
+                slot[0] = ref_names[0];
+                slot[1] = ref_names[1];
+            }
+            if let Some(slot) = self.mv_above.get_mut(c) {
+                slot[0] = mvs[0];
+                slot[1] = mvs[1];
+            }
+        }
+        Ok(())
+    }
+
+    /// Motion-compensate one plane for an inter block: for single reference, copy
+    /// the reference block; for compound, average the two reference predictions.
+    /// Writes directly into the tile-local plane (the prediction values).
+    #[allow(clippy::too_many_arguments)]
+    fn inter_predict_plane(
+        &self,
+        plane: usize,
+        px_x: usize,
+        px_y: usize,
+        bw: usize,
+        bh: usize,
+        ref_names: &[u8; 2],
+        mvs: &[Mv; 2],
+        filter: u8,
+    ) -> Result<(), KinetixError> {
+        let (dst, stride, w, h) = match plane {
+            1 | 2 => (
+                if plane == 1 { &self.u_plane } else { &self.v_plane },
+                self.uv_stride,
+                self.tile_cw,
+                self.tile_ch,
+            ),
+            _ => (&self.y_plane, self.y_stride, self.tile_w, self.tile_h),
+        };
+        let mut dst = dst; // borrow splitter
+        let _ = (w, h);
+
+        let slot0 = self.ref_to_slot[ref_names[0] as usize];
+        let slot1 = self.ref_to_slot[ref_names[1] as usize];
+        let ref0 = self.ref_slots.slots[slot0 as usize];
+        let ref1 = self.ref_slots.slots[slot1 as usize];
+
+        // Reborrow mutably for writing.
+        let dst = if plane == 1 {
+            &mut *self.u_plane
+        } else if plane == 2 {
+            &mut *self.v_plane
+        } else {
+            &mut *self.y_plane
+        };
+
+        // Single reference.
+        if ref_names[1] == NONE_FRAME || ref1.is_none() {
+            if let Some(rf) = ref0 {
+                let (rp, rw, rh) = rf.plane(plane);
+                motion_compensate(dst, stride, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+            }
+            return Ok(());
+        }
+
+        // Compound: average the two predictions into a temp, then write.
+        if let (Some(r0), Some(r1)) = (ref0, ref1) {
+            let (rp0, rw0, rh0) = r0.plane(plane);
+            let (rp1, rw1, rh1) = r1.plane(plane);
+            let mut tmp0 = vec![0u8; bw * bh];
+            let mut tmp1 = vec![0u8; bw * bh];
+            motion_compensate(
+                &mut tmp0,
+                bw,
+                rp0,
+                rw0,
+                rw0,
+                rh0,
+                px_x,
+                px_y,
+                bw,
+                bh,
+                mvs[0],
+                filter,
+            );
+            motion_compensate(
+                &mut tmp1,
+                bw,
+                rp1,
+                rw1,
+                rw1,
+                rh1,
+                px_x,
+                px_y,
+                bw,
+                bh,
+                mvs[1],
+                filter,
+            );
+            for i in 0..bw * bh {
+                let v = (tmp0[i] as u32 + tmp1[i] as u32 + 1) >> 1;
+                dst[px_y * stride + px_x + (i / bw) * stride + (i % bw)] = v as u8;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the residual coefficients per transform block of an inter block and add
+    /// them to the motion-compensated prediction already present in the planes.
+    #[allow(clippy::too_many_arguments)]
+    fn add_inter_residual(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        skip: bool,
+    ) -> Result<(), KinetixError> {
+        let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let max_tx = max_tx_size_for_bsize(bsize);
+        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
+            self.read_tx_size(bsize, max_tx, mi_row, mi_col)
+        } else {
+            max_tx
+        };
+        let luma_tx_w = TX_WIDTH[luma_tx];
+        let luma_tx_h = TX_HEIGHT[luma_tx];
+        let subsampling_x = self.subsampling_x as u8;
+        let subsampling_y = self.subsampling_y as u8;
+
+        if skip || luma_tx > TX_16X16 {
+            return Ok(());
+        }
+
+        // Y residual.
+        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
+                let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                let mut residual = vec![0i32; luma_tx_w * luma_tx_h];
+                if !skip {
+                    let blk = TxBlockCtx {
+                        plane: 0,
+                        tx_size: luma_tx,
+                        x4: px_x / 4,
+                        y4: px_y / 4,
+                        max_x4: self.luma_max_x4,
+                        max_y4: self.luma_max_y4,
+                        block_w: luma_tx_w,
+                        block_h: luma_tx_h,
+                        intra_dir: 0,
+                        uv_mode: 0,
+                        qindex_positive: !self.lossless,
+                        reduced_tx_set: self.reduced_tx_set,
+                        lossless: self.lossless,
+                    };
+                    let coeffs = read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk)?;
+                    if coeffs.eob > 0 {
+                        let mut dequant = vec![0i32; luma_tx_w * luma_tx_h];
+                        let dc = dc_dequant(self.qindex);
+                        let ac = ac_dequant(self.qindex);
+                        for (i, slot) in dequant.iter_mut().enumerate() {
+                            *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
+                        }
+                        inverse_transform(
+                            &dequant,
+                            internal_tx_type(coeffs.tx_type, luma_tx, self.lossless),
+                            luma_tx,
+                            &mut residual,
+                        );
+                    }
+                }
+                for dy in 0..luma_tx_h {
+                    let sy = px_y + dy;
+                    if sy >= self.tile_h {
+                        break;
+                    }
+                    for dx in 0..luma_tx_w {
+                        let sx = px_x + dx;
+                        if sx >= self.tile_w {
+                            break;
+                        }
+                        if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
+                            *slot = (slot.wrapping_add_signed(residual[dy * luma_tx_w + dx]))
+                                .clamp(0, 255) as u8;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Chroma residual.
+        let cw = (luma_tx_w >> subsampling_x).max(4);
+        let ch = (luma_tx_h >> subsampling_y).max(4);
+        let c_tx = if cw >= 16 && ch >= 16 {
+            TX_16X16
+        } else if cw >= 8 && ch >= 8 {
+            TX_8X8
+        } else {
+            TX_4X4
+        };
+        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> subsampling_x;
+                let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> subsampling_y;
+                if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                    continue;
+                }
+                for (plane, dst, stride, w, h) in [
+                    (1usize, &mut *self.u_plane, self.uv_stride, self.tile_cw, self.tile_ch),
+                    (2usize, &mut *self.v_plane, self.uv_stride, self.tile_cw, self.tile_ch),
+                ] {
+                    let mut residual = vec![0i32; cw * ch];
+                    if !skip {
+                        let blk = TxBlockCtx {
+                            plane,
+                            tx_size: c_tx,
+                            x4: cpx_x / 4,
+                            y4: cpx_y / 4,
+                            max_x4: self.uv_max_x4,
+                            max_y4: self.uv_max_y4,
+                            block_w: cw,
+                            block_h: ch,
+                            intra_dir: 0,
+                            uv_mode: 0,
+                            qindex_positive: !self.lossless,
+                            reduced_tx_set: self.reduced_tx_set,
+                            lossless: self.lossless,
+                        };
+                        let coeffs =
+                            read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk)?;
+                        if coeffs.eob > 0 {
+                            let mut dequant = vec![0i32; cw * ch];
+                            let dc = dc_dequant(self.qindex);
+                            let ac = ac_dequant(self.qindex);
+                            for (i, slot) in dequant.iter_mut().enumerate() {
+                                *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
+                            }
+                            inverse_transform(
+                                &dequant,
+                                internal_tx_type(coeffs.tx_type, c_tx, self.lossless),
+                                c_tx,
+                                &mut residual,
+                            );
+                        }
+                    }
+                    for dy in 0..ch {
+                        let sy = cpx_y + dy;
+                        if sy >= h {
+                            break;
+                        }
+                        for dx in 0..cw {
+                            let sx = cpx_x + dx;
+                            if sx >= w {
+                                break;
+                            }
+                            if let Some(slot) = dst.get_mut(sy * stride + sx) {
+                                *slot = (slot.wrapping_add_signed(residual[dy * cw + dx]))
+                                    .clamp(0, 255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_intra_block(
         &mut self,
         mi_row: usize,
         mi_col: usize,
@@ -1219,6 +1739,27 @@ impl<'a> TileDecodeState<'a> {
             max_tx
         };
 
+        self.reconstruct_intra_subblock(mi_row, mi_col, bsize, y_mode, uv_mode, skip, luma_tx)
+    }
+
+    /// Reconstruct an intra-coded block's luma + chroma transform blocks once the
+    /// luma/chroma prediction modes, skip flag, and (already-decoded) luma
+    /// transform size are known. Shared by the intra-frame path
+    /// ([`Self::decode_intra_block`]) and the intra-in-inter path (AV1 Phase E)
+    /// so both feed the same inverse-transform + intra-prediction machinery.
+    #[allow(clippy::too_many_arguments)]
+    fn reconstruct_intra_subblock(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        y_mode: usize,
+        uv_mode: usize,
+        skip: bool,
+        luma_tx: usize,
+    ) -> Result<(), KinetixError> {
+        let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
         // Reconstruct luma transform blocks.
         let luma_tx_w = TX_WIDTH[luma_tx];
         let luma_tx_h = TX_HEIGHT[luma_tx];

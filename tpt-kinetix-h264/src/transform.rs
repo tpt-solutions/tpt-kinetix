@@ -492,6 +492,46 @@ pub const ZIGZAG_8X8: [usize; 64] = [
     53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// Inverse of [`ZIGZAG_8X8`]: raster position → zigzag scan position.
+/// `INVERSE_ZIGZAG_8X8[ZIGZAG_8X8[z]] == z` for all `z`.
+pub const INVERSE_ZIGZAG_8X8: [usize; 64] = {
+    let mut inv = [0usize; 64];
+    let mut z = 0;
+    while z < 64 {
+        inv[ZIGZAG_8X8[z]] = z;
+        z += 1;
+    }
+    inv
+};
+
+/// CAVLC 8×8-residual scan table (raster position `x + 8*y`), indexed by the
+/// flat position `16*i4x4 + k` where `i4x4` (0..4) is the CAVLC sub-stream
+/// ("one of the four 4×4-style bit-substreams that together code an 8×8
+/// block", §7.3.5.3.3-adjacent, not itself a spec syntax element name) and
+/// `k` (0..16) is that sub-stream's own 4×4-zigzag scan position (the same
+/// order `parse_cavlc_block` already returns coefficients in for the plain
+/// 4×4 path).
+///
+/// This is **not** the same as a plain `4*k + i4x4` interleave of the four
+/// sub-streams into the combined 8×8 zigzag order — CAVLC's 8×8 residual
+/// coding uses its own dedicated scan (FFmpeg's `zigzag_scan8x8_cavlc`,
+/// `libavcodec/h264_slice.c`, defined as
+/// `zigzag_scan8x8_cavlc[i] = zigzag_scan8x8[(i/4) + 16*(i%4)]` and
+/// transcribed here verbatim as literal raster offsets, fetched via
+/// `tpt-kinetix-kg fetch-source --commit c3ff71680805267bc8f3fff86c1cf917f810c0d9
+/// --file libavcodec/h264_slice.c`). A prior (incorrect) `4*k + sub`
+/// interleave assumption placed every sub-stream's coefficients at the wrong
+/// raster/zigzag positions once more than the DC term was nonzero,
+/// corrupting the reconstructed 8×8 block for any real (non-trivial)
+/// coefficient pattern -- see `high_profile_8x8_conformance.rs`.
+#[rustfmt::skip]
+pub const CAVLC_SCAN8X8: [u8; 64] = [
+     0,  9, 17, 18, 12, 40, 27,  7, 35, 57, 29, 30, 58, 38, 53, 47,
+     1,  2, 24, 11, 19, 48, 20, 14, 42, 50, 22, 37, 59, 31, 60, 55,
+     8,  3, 32,  4, 26, 41, 13, 21, 49, 43, 15, 44, 52, 39, 61, 62,
+    16, 10, 25,  5, 33, 34,  6, 28, 56, 36, 23, 51, 45, 46, 54, 63,
+];
+
 /// The full 2-D 8×8 inverse transform (§8.5.12.3) over a raster-order block.
 ///
 /// Faithful port of FFmpeg's `ff_h264_idct8_add` core (the two separable

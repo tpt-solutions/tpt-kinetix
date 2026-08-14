@@ -13,5 +13,15 @@
 pub mod bitreader;
 pub mod rans;
 
+/// Precision of the frequency table shared by every [`rans::SymbolModel`]: all
+/// symbol frequencies for a model must sum to exactly `PROB_SCALE`.
+///
+/// Exposed so downstream codecs can build their own [`rans::SymbolModel`]
+/// implementations (e.g. a zero-biased coefficient model) against the same
+/// scale instead of re-deriving the private constant.
+pub const PROB_BITS: u32 = 12;
+/// Total cumulative-frequency slots: `1 << PROB_BITS`.
+pub const PROB_SCALE: u32 = 1 << PROB_BITS;
+
 pub use bitreader::BitReader;
 pub use rans::{RansDecoder, RansEncoder, RansStreamSet, StaticModel, SymbolInfo, SymbolModel};

@@ -12,7 +12,10 @@
 //! - [`coeff`] — the AV1 `coeffs()` syntax structure (§5.11.39) read through
 //!   [`entropy::SymbolDecoder`].
 //! - [`reconstruct`] — AV1 frame/tile reconstruction (inverse transforms, intra prediction,
-//!   tile-group decode) for intra-coded keyframes.
+//!   tile-group decode) for intra-coded keyframes, with inter-prediction support
+//!   ([`inter`]) for inter-coded frames.
+//! - [`inter`] — AV1 inter prediction: motion-vector prediction (§7.10) and
+//!   sub-pel motion-compensated block reconstruction (§7.11.3).
 //! - [`loop_filter`] — AV1 in-loop post-filters: deblocking loop filter (§7.14), CDEF (§7.15),
 //!   and loop restoration (§7.17, passthrough when `enable_restoration` is false).
 //! - [`encoder`] — [`Av1Encoder`] and [`Av1EncoderConfig`]: thin safe wrapper around the
@@ -32,11 +35,13 @@
 //! tree, per-block intra mode / `tx_size` syntax, coefficients read through
 //! the real AV1 symbol decoder) and runs the in-loop post-filters
 //! ([`crate::loop_filter`]: deblocking loop filter + CDEF, with loop
-//! restoration as a passthrough) after reconstruction. Inter prediction is not
-//! yet implemented and the decoder is not yet validated pixel-exact against
-//! `dav1d` reference output. See the crate README for details.
+//! restoration as a passthrough) after reconstruction. Inter prediction is
+//! implemented ([`inter`]: MV prediction + motion compensation) but the decoder
+//! is not yet validated pixel-exact against `dav1d` reference output. See the
+//! crate README for details.
 
 pub mod cdf_tables_gen;
+pub mod inter;
 pub mod coeff;
 pub mod coeff_tables;
 pub mod decoder;

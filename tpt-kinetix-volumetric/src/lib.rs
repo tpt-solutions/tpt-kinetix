@@ -344,8 +344,8 @@ mod tests {
         // Morton-sorted, so compare as multisets).
         let mut a: Vec<[u8; 3]> = Vec::new();
         let mut b: Vec<[u8; 3]> = Vec::new();
-        for p in 0..5 {
-            a.push([cols[p][0], cols[p][1], cols[p][2]]);
+        for (p, col) in cols.iter().enumerate().take(5) {
+            a.push([col[0], col[1], col[2]]);
             b.push([
                 decoded.attributes[0].data[p * 3],
                 decoded.attributes[0].data[p * 3 + 1],
@@ -398,8 +398,8 @@ mod tests {
         assert_eq!(decoded.num_points, 6);
         let mut a: Vec<[u8; 3]> = Vec::new();
         let mut b: Vec<[u8; 3]> = Vec::new();
-        for p in 0..6 {
-            a.push([cols[p][0], cols[p][1], cols[p][2]]);
+        for (p, col) in cols.iter().enumerate().take(6) {
+            a.push([col[0], col[1], col[2]]);
             b.push([
                 decoded.attributes[0].data[p * 3],
                 decoded.attributes[0].data[p * 3 + 1],

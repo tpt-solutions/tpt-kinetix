@@ -56,3 +56,72 @@ pub fn apply_pns(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scalefactors::{NOISE_HCB, ZERO_HCB};
+    use crate::syntax::{IcsInfo, WindowSequence};
+
+    fn ics_long() -> IcsInfo {
+        IcsInfo {
+            window_sequence: WindowSequence::OnlyLong,
+            window_shape: false,
+            max_sfb: 1,
+            scale_factor_grouping: 0,
+            predictor_data_present: false,
+            predictor_reset_mode: None,
+        }
+    }
+
+    #[test]
+    fn pns_is_deterministic_and_fills_band() {
+        let ics = ics_long();
+        let bt = vec![NOISE_HCB];
+        let sf = vec![0i32];
+        let swb = [0u16, 4];
+        let gindex = [0usize];
+        let mut a = [0.0f32; 1024];
+        let mut b = [0.0f32; 1024];
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut a);
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut b);
+        // Deterministic: same inputs → identical output.
+        assert_eq!(a, b);
+        // The PNS band (lines 0..4) is filled with non-zero noise.
+        let energy: f32 = a[0..4].iter().map(|x| x * x).sum();
+        assert!(energy > 0.0, "PNS band must contain noise energy");
+    }
+
+    #[test]
+    fn pns_noise_scales_with_gain() {
+        // Higher global_gain → larger noise magnitude (energy ∝ scale²).
+        let ics = ics_long();
+        let bt = vec![NOISE_HCB];
+        let sf = vec![0i32];
+        let swb = [0u16, 4];
+        let gindex = [0usize];
+
+        let mut low = [0.0f32; 1024];
+        apply_pns(&ics, &bt, &sf, &swb, 90, &gindex, &mut low);
+        let mut high = [0.0f32; 1024];
+        apply_pns(&ics, &bt, &sf, &swb, 110, &gindex, &mut high);
+        let e_low: f32 = low[0..4].iter().map(|x| x * x).sum();
+        let e_high: f32 = high[0..4].iter().map(|x| x * x).sum();
+        // 2^((110-100-0)/4) / 2^((90-100-0)/4) = 2^(10/4 - (-10/4)) = 2^5 = 32 in scale,
+        // so energy ratio ≈ 32² = 1024.
+        assert!((e_high / e_low - 1024.0).abs() / 1024.0 < 0.1, "energy ratio {}/{}", e_high, e_low);
+    }
+
+    #[test]
+    fn pns_zero_hcb_band_untouched() {
+        let ics = ics_long();
+        let bt = vec![ZERO_HCB];
+        let sf = vec![0i32];
+        let swb = [0u16, 4];
+        let gindex = [0usize];
+        let mut a = [1.0f32; 1024];
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut a);
+        // No PNS band → no writes.
+        assert_eq!(a[0], 1.0);
+    }
+}

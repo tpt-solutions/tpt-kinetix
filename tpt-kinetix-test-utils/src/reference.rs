@@ -84,9 +84,30 @@ pub fn ffmpeg_available() -> bool {
     binary_available("ffmpeg")
 }
 
-/// Returns `true` if `dav1d` is callable on this machine.
+/// Returns `true` if `dav1d` is callable on this machine, either as a
+/// standalone `dav1d` binary or via `ffmpeg`'s built-in `libdav1d` decoder
+/// (many `ffmpeg` builds vendor `dav1d` as a decoder library without
+/// shipping the standalone CLI).
 pub fn dav1d_available() -> bool {
-    binary_available("dav1d")
+    binary_available("dav1d") || ffmpeg_libdav1d_available()
+}
+
+/// Returns `true` if the `ffmpeg` on `PATH` was built with `libdav1d`
+/// decoder support (`ffmpeg -decoders` lists `libdav1d`).
+pub fn ffmpeg_libdav1d_available() -> bool {
+    if !binary_available("ffmpeg") {
+        return false;
+    }
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-decoders"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.contains("libdav1d"))
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn binary_available(bin: &str) -> bool {
@@ -209,6 +230,52 @@ pub fn decode_av1_with_dav1d(
         ivf_or_obu,
     )?;
     split_raw_yuv420p(&raw, width, height)
+}
+
+/// Decode a raw low-overhead-bitstream AV1 OBU stream against `dav1d`,
+/// preferring the standalone `dav1d` binary and falling back to `ffmpeg`'s
+/// `libdav1d` decoder when only that is available (see
+/// [`ffmpeg_libdav1d_available`]).
+///
+/// This is the OBU-format counterpart to [`decode_av1_with_dav1d`] (which is
+/// IVF-oriented and only drives the standalone binary): it accepts the same
+/// raw OBU bytes that `tpt_kinetix_av1::Av1Decoder` and
+/// [`decode_av1_with_ffmpeg`] consume, so a corpus of OBU samples can be
+/// diffed against the *same* `dav1d` decode path regardless of which form of
+/// `dav1d` is installed. Returns [`RefDecodeError::BinaryUnavailable`] when
+/// neither path is usable.
+pub fn decode_av1_obu_with_dav1d(
+    obu: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<VideoFrame>, RefDecodeError> {
+    if binary_available("dav1d") {
+        let raw = run_piped("dav1d", &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"], obu)?;
+        return split_raw_yuv420p(&raw, width, height);
+    }
+    if ffmpeg_libdav1d_available() {
+        let raw = run_piped(
+            "ffmpeg",
+            &[
+                "-loglevel",
+                "error",
+                "-f",
+                "obu",
+                "-c:v",
+                "libdav1d",
+                "-i",
+                "pipe:0",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ],
+            obu,
+        )?;
+        return split_raw_yuv420p(&raw, width, height);
+    }
+    Err(RefDecodeError::BinaryUnavailable("dav1d"))
 }
 
 /// Decode an AV1 OBU bitstream with `ffmpeg` (no standalone `dav1d` binary

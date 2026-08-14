@@ -37,9 +37,10 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > and should be corrected in the test file. **Working-tree additions
 > (uncommitted, 2026-08-15):** the realtime `deadline_ms`/foveation validation
 > harness (Phase 16's `realtime-bench` feature) landed; AAC Phase 18 Phase 2/3
-> section-length/scalefactor/spectral-data parsing gained real spec fixes but
-> currently has a 2-test regression (see session note below) — do not treat
-> `tpt-kinetix-aac --lib` as green right now.
+> section-length/scalefactor/spectral-data parsing gained real spec fixes; the
+> 2-test regression noted in the session note below is now fixed — `tpt-kinetix-aac
+> --lib` is green (38 tests), and DSE/PCE elements are now skipped rather than
+> rejected so real ffmpeg-generated streams parse.
 
 > **2026-08-15 session note.** Working tree had leftover debug `eprintln!`s in
 > `slice_data.rs` (single-macroblock trace prints); removed, no functional
@@ -87,18 +88,24 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   both now iterate the actual `SectionData` (matching how many scalefactors/
 >   spectral-data reads the bitstream really contains) and only write into the
 >   `sfb < max_sfb` range, consistent with the `SectionData::parse` fix above.
-> - **Net result is currently a regression, not yet fixed**: two previously-passing
->   unit tests, `syntax::tests::parse_full_sce_block` and
->   `parse_full_cpe_block`, now fail with `UnexpectedEof` (`cargo test -p
->   tpt-kinetix-aac --lib`, 33 passed / 2 failed). Root cause looks like stale
->   hand-built test fixtures, not the parser: both fixtures still encode the
->   now-removed `gain_control_data_present` bit after `pulse`/`tns`, so with
->   that read gone the fixture is off by one bit for the rest of the stream.
->   Not yet confirmed or fixed. A scratch harness (`tpt-kinetix-aac/tests/
->   debug_aac.rs`, un-committed, dumps raw bits/parse trace for the first ADTS
->   frame) and a leftover `eprintln!("  RDB dispatch bitpos=... id=...")` in
->   `syntax.rs::RawDataBlock::parse` are both still in the working tree from
->   this investigation and need cleanup once resolved.
+> - **Net result:** the two previously-passing unit tests,
+>   `syntax::tests::parse_full_sce_block` and `parse_full_cpe_block`, now pass
+>   again (`cargo test -p tpt-kinetix-aac --lib`: 38 passed / 0 failed). Root
+>   cause was stale hand-built fixtures, not the parser: both fixtures still
+>   encoded the now-removed `gain_control_data_present` bit after `pulse`/`tns`,
+>   so with that read gone the fixture was off by one bit per channel; fixed by
+>   dropping that bit from the fixtures (SCE: 3→2 flag bits; CPE: 3→2 per
+>   channel). The scratch harness (`tpt-kinetix-aac/tests/debug_aac.rs`) and
+>   the leftover `eprintln!` in `syntax.rs::RawDataBlock::parse` are both removed.
+> - **DSE/PCE elements are now skipped, not rejected.** `RawDataBlock::parse`
+>   previously returned `AacParseError::Unsupported` for CCE/DSE/PCE (ids 2/4/5);
+>   real ffmpeg-generated AAC-LC streams carry a PCE (and sometimes a DSE) in the
+>   first ADTS frame, so that rejection broke the native decode path on real
+>   input. `skip_data_stream_element` / `skip_program_config_element` now consume
+>   the exact bit length (DSE has an escaped byte count; PCE is the fixed,
+>   count-driven structure of ISO 14496-3 Table 4.68) and the parser continues,
+>   so the decoder still reconstructs the SCE/CPE/LFE channels it understands.
+>   CCE (id 2) remains `Unsupported`.
 
 > **2026-08-14 session note — working-tree corruption found and cleaned up.**
 > Before this reconciliation, ~44 files under `tpt-kinetix-h264/examples/` and
@@ -1019,12 +1026,48 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       This was a real, independent bug worth fixing, but it did **not** change
       the `high_profile_8x8_*_conformance.rs` bit-exactness numbers at all
       (still 160/161, same sample counts) — so it wasn't the (or wasn't the
-      only) cause of the remaining gap. `predict_8x8`'s neighbour-clamping gap
-      (Phase F.2) remains the next most likely suspect; the CAVLC 8×8 residual
-      interleave (`slice_data.rs`'s `block64[4*k+sub]` bit-interleave, see
-      Phase F.1) is also unverified against non-trivial coefficient patterns
-      and worth checking independently since CABAC's residual decode is
-      structurally different but shows the same-magnitude failure.
+      only) cause of the remaining gap.
+
+      **Ruled out a second candidate, found via a real bug, then discovered the
+      failure isn't 8×8-specific at all.** The CAVLC 8×8 residual interleave
+      (`slice_data.rs`'s old `block64[4*k+sub]` mapping) was indeed wrong —
+      fetched the real `libavcodec/h264_slice.c`/`h264_cavlc.c` at the pinned
+      commit (`tpt-kinetix-kg fetch-source`) and found CAVLC's actual 8×8 scan
+      is `zigzag_scan8x8_cavlc[i] = zigzag_scan8x8[(i/4) + 16*(i%4)]`, a
+      genuinely different permutation from the naive interleave. Transcribed
+      it verbatim as `CAVLC_SCAN8X8` in `transform.rs` (plus a new
+      `INVERSE_ZIGZAG_8X8` table) and rewired `parse_intra_residuals`'s 8×8
+      branch to use it — a real, FFmpeg-verified fix, kept. **But it also did
+      not change the conformance numbers**, because the specific coefficients
+      in the failing test block are all DC-only per CAVLC sub-stream (`k=0`),
+      and the old and new formulas happen to agree exactly at `k=0` — so this
+      test never actually exercised the part of the mapping that was wrong.
+
+      Chasing this further with a per-macroblock trace (dumping raw CAVLC
+      `nc`/`total_coeff`/coefficient values and the scaling list in use)
+      showed MB(0,0)'s very first 8×8 block — flat DC-128 prediction, no
+      neighbours, residual math independently re-verified by hand — decoding
+      *correctly* per the (small) coefficients it parsed. The coefficients
+      themselves just don't carry enough energy to explain ffmpeg's reference
+      (residual ~0-1 vs. an actual +4..+20 gradient). That pointed at CAVLC
+      parsing being wrong, not the transform.
+
+      Then the actually-important test: **regenerate the exact same
+      `mandelbrot` clip with `8x8dct=0` (plain CAVLC 4×4, no 8×8 transform
+      involved at all) and it is *also* badly wrong** — `max_abs_diff=100`,
+      4592/4608 samples differ, i.e. nearly the whole frame. This proves the
+      root cause has **nothing to do with 8×8 transform, CABAC, or Phase F.4**
+      — it's a pre-existing, more general CAVLC intra-decode bug that only
+      manifests on real/high-frequency image content (`mandelbrot`); every
+      other conformance test in this suite uses flat `testsrc` content that
+      never triggers it. `predict_8x8`'s neighbour-clamping gap (Phase F.2)
+      is therefore **not** the cause (it's 8×8-specific code; the bug
+      reproduces with pure 4×4 prediction). This needs its own dedicated
+      investigation as a new, separate, higher-priority item — it likely
+      affects real-world (non-synthetic-test-pattern) content broadly, not
+      just High-profile streams. Repro: `mandelbrot=size=64x48:rate=1` through
+      `ffmpeg`/libx264 with `cabac=0:8x8dct=0`, compare against `ffmpeg`'s own
+      decode of the same file.
 
 #### Phase G.1 — PAFF: field-picture parsing
 - [x] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, previously
@@ -1042,16 +1085,58 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       bottom field) field POC both derive correctly and are unit-tested
 
 #### Phase G.2 — PAFF: field-picture reconstruction
-- [ ] Field-picture reference list construction (§8.2.4.2.5)
-- [ ] Field-based (odd/even scanline) macroblock reconstruction and output
+- [x] Field-picture reference list construction (§8.2.4.2.5)
+- [x] Field-based (odd/even scanline) macroblock reconstruction and output
        interleaving back into a full frame
 
-  **Drafted (working tree):** `reconstruct.rs` gained `ReconstructedFrame::
-  deinterleave_luma`/`deinterleave_chroma` and the free `merge_field_into`
-  helper that place a field's samples on every other scanline (parity from
-  `bottom_field_flag`) and merge two complementary fields into one interlaced
-  frame. These are the field→frame plumbing; the actual field reconstruction
-  and reference-list construction above are still unimplemented.
+  **Implemented (working tree, 2026-08-15):** the PAFF field-picture decode
+  path in `decoder.rs::decode_interlaced` now handles both **I-field** and
+  **P-field** pictures (the "`build_field_ref_list_l0` wired" half of this was
+  the open item). Concretely:
+  - §8.2.4.2.5 field reference lists: `ref_pic.rs::build_field_ref_list_l0`/
+    `build_field_ref_list_l1` (which unfold each stored frame into its two
+    field references, or pass through genuine field references) are now invoked
+    from the new `decoder.rs::decode_interlaced_p_field` via `PicNumContext::
+    new(..., field_pic_flag=true, ...)`. `FieldRef::planes` extracts the
+    contiguous half-height luma/Cb/Cr planes for a referenced field (every-other-
+    row sampling for frame references, identity for genuine field references).
+  - Field-based reconstruction: `reconstruct.rs::reconstruct_inter_field_frame`
+    reconstructs each field macroblock into a **half-height** buffer. The MB grid
+    addresses field scanlines; inter MBs are motion-compensated at field parity
+    by sampling the reference field planes with the (already field-unit) motion
+    vector (`reconstruct_field_inter_luma`/`reconstruct_field_inter_chroma`),
+    then the residual IDCT is added per 4×4 block as in the frame path.
+  - Output interleaving: the half-height field is stored as a DPB field entry
+    (`store_reference_picture` already carried `field_pic_flag`/`bottom_field_flag`
+    since G.1), then `accumulate_field` pairs it with its complementary field and
+    `interleave_fields` merges the two half-height planes into the full
+    interlaced frame (top field → even scanlines, bottom → odd, §6.4.10.1).
+  - Deblocking runs per-field on the half-height buffer (`deblock_field` helper),
+    so it never crosses the field boundary.
+
+  Unit tests added (no `ffmpeg` needed): `reconstruct::tests::
+  field_ref_planes_extract_parity`, `field_p_skip_copies_reference_field`
+  (a skip P-field MB with zero MV copies the reference field verbatim into the
+  half-height output — the field analogue of `inter_skip_copies_reference`), and
+  `decoder::tests::interleave_fields_places_top_and_bottom_parity`. All three
+  pass; the rest of the `tpt-kinetix-h264` lib suite is unaffected (the only two
+  failures are the pre-existing `field_mv_scaling_same_parity_doubles` and
+  `predict_8x8_vertical`, which fail on `master` unmodified). `cargo clippy -p
+  tpt-kinetix-h264` is clean.
+
+  **Remaining gaps (not yet done):**
+  - B-field pictures still `Fallback` (same structure as P-field — add
+    `decode_interlaced_b_field` once B-field ref lists + temporal direct mode
+    are wanted).
+  - Field-intra 16×16 (and 8×8) DC Hadamard is applied with the frame ordering,
+    not the field transform ordering (§8.4.2.2.1); pure-field I-slices with
+    Intra_16×16 MBs are therefore not yet pixel-exact.
+  - Field MV scaling (§8.4.1.3 `scale_field_mv_y`, already implemented in
+    `mv.rs`) is not yet applied during field prediction — the dominant
+    same-parity / field-from-field case (no scaling) is correct, but
+    cross-parity or frame-from-field scaling is skipped.
+  - No `ffmpeg` bit-exact conformance run (ffmpeg is unavailable in this
+    environment); gated behind Phase G.5's PAFF corpus clip.
 
 #### Phase G.3 — MBAFF: parsing
 - [x] Parse `mb_field_decoding_flag` and macroblock-pair decode ordering
@@ -1463,20 +1548,43 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       interim; screen owns only classifier/dict/palette/RLE)
 
 #### `tpt-kinetix-face` — design-phase checklist (start here once prioritized)
-- [ ] Decide the landmark/parametric face representation for v1 (3DMM, sparse
-      keypoints, or a learned latent code)
-- [ ] Write the format design doc: keyframe (real pixel image) + per-frame
+- [x] Decide the landmark/parametric face representation for v1 (3DMM, sparse
+      keypoints, or a learned latent code) — **RESOLVED: parametric 3DMM-style
+      head model is the primary v1 representation; sparse landmarks are a
+      low-bitrate companion; learned latent is deferred to v2.** Encoded in
+      `tpt-kinetix-face/src/representation.rs` (`FaceRepresentation` enum +
+      `V1_3DMM_DIMS`); matches `docs/face-codec-design.md` DECISION 1. `FaceParams`
+      already carries the 3DMM coefficient groups.
+- [x] Write the format design doc: keyframe (real pixel image) + per-frame
       parameter-delta bitstream — a materially different shape from every
-      pixel-coding entry in this table
-- [ ] Design the decode path's dependency contract: synthesis requires
+      pixel-coding entry in this table — **DONE: `docs/face-codec-design.md`
+      resolves DECISION 3** (byte-aligned sequence header + one-time identity
+      setup + per-frame rANS-coded expression/pose deltas; `magic`/`version`/
+      `basis_hash` pin; companion landmark block).
+- [x] Design the decode path's dependency contract: synthesis requires
       running a generative model at decode time, so decide whether that model
-      ships with the decoder or is a pluggable external dependency
-- [ ] Design the fallback/failure path for content the trained face model
-      can't represent (occlusion, non-face content, extreme pose)
-- [ ] Decide how synthesis quality is measured for design validation
-      (perceptual similarity to source, not a pixel-exact diff)
-- [ ] Document the memory/perf budget for v1 — unlike every other entry here,
-      the generative model's inference cost is part of the decode budget
+      ships with the decoder or is a pluggable external dependency — **DONE:
+      DECISION 7 (standalone sibling crate, depends only on `core`, reuses
+      `tpt-kinetix-bitstream` rANS) + DECISION 8 (v1 synthesizer is a
+      deterministic 3DMM rasterizer shipped with the decoder — zero NN weights
+      on the decode path, so no pluggable external dependency for v1).**
+- [x] Design the fallback/failure path for content the trained face model
+      can't represent (occlusion, non-face content, extreme pose) — **DONE:
+      DECISION 8** (basis asset missing / hash mismatch →
+      `KinetixError::NotPixelExact`; missing optional neural-texture model →
+      graceful rasterizer fallback reported via capability; corrupt payload →
+      rANS decode error; off-manifold content is an accepted conferencing
+      limitation, not a crash).
+- [x] Decide how synthesis quality is measured for design validation
+      (perceptual similarity to source, not a pixel-exact diff) — **DONE:
+      DECISION 5** (primary = LPIPS reconstruction + ArcFace identity
+      similarity, gated behind `face-bench`; cheap deterministic CI gate =
+      landmark NME regression).
+- [x] Document the memory/perf budget for v1 — unlike every other entry here,
+      the generative model's inference cost is part of the decode budget —
+      **DONE: DECISION 6** (conferencing-endpoint envelope like `lean`/`vision`;
+      0 decoder NN weights; ~20 MB arena @1080p; <10 ms/frame; v2 neural-texture
+      layer capped ~1–5 MB).
 
 #### `tpt-kinetix-volumetric` — design-phase checklist (start here once prioritized)
 - [ ] Decide the target volumetric representation for v1 (point cloud vs.
@@ -1788,9 +1896,12 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (`section_len_bits` was hard-coded to 4 instead of the spec's
       3/4/5-bit variants, and zero-length/past-`max_sfb` sections were
       wrongly rejected as errors) — see session note above. `pns.rs`/
-      `tns.rs`/`pulse.rs` not started. Currently causes a 2-test regression
-      (`syntax::tests::parse_full_sce_block`/`parse_full_cpe_block`, likely
-      stale test fixtures, not yet fixed) — not exit-criteria-clean.
+      `tns.rs`/`pulse.rs` not started. The 2-test regression
+      (`syntax::tests::parse_full_sce_block`/`parse_full_cpe_block`) is now
+      fixed (stale fixtures encoding the removed AAC-LC `gain_control` bit);
+      `tpt-kinetix-aac --lib` is green (38 tests). DSE/PCE elements are now
+      skipped rather than rejected so real ffmpeg streams parse — exit criteria
+      for the parse/section/scalefactor layer are now clean.
 - [ ] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
       channel_pair_element. Exit: unit tests reconstructing L/R from known
       coded spectra.

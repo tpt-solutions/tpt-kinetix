@@ -17,19 +17,24 @@
 //! `_with_deblock_is_bitexact`, since switching the source from a flat
 //! `testsrc` pattern to `mandelbrot` so the "exercises 8×8" assertion is
 //! non-vacuous): decode is not yet bit-exact once real (non-DC,
-//! non-transpose-symmetric) 8×8-block coefficients are involved. Fixed one
-//! real bug this way -- `idct_8x8`'s second pass wrote row results into a
-//! column (see the regression test
-//! `transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`
-//! in `transform.rs`) -- but a residual, larger-magnitude discrepancy
-//! remains (max_abs_diff ~160/255), most likely in `predict_8x8`'s 8×8
-//! intra-prediction neighbour handling (`prediction.rs`), the neighbour
-//! loading in `reconstruct_luma_8x8` (`reconstruct.rs`), or elsewhere in
-//! `dequant_idct_8x8`'s scaling-list/scan handling (`transform.rs`). See the
-//! CABAC sibling test's identical failure signature
-//! (`high_profile_8x8_cabac_conformance.rs`) -- same magnitude regardless of
-//! entropy mode confirms the bug is in this shared reconstruction code.
-//! Needs a dedicated investigation pass.
+//! non-transpose-symmetric) 8×8-block coefficients are involved. Two real,
+//! independent bugs were found and fixed this way -- `idct_8x8`'s second
+//! pass wrote row results into a column (see
+//! `transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`),
+//! and the CAVLC 8×8 residual interleave used the wrong scan (fixed via
+//! `CAVLC_SCAN8X8`, transcribed from the real
+//! `libavcodec/h264_slice.c`/`h264_cavlc.c` FFmpeg source) -- but **neither
+//! changed this test's numbers** (still max_abs_diff ~160/255). Root-caused
+//! further: the *same* `mandelbrot` clip re-encoded with `8x8dct=0` (plain
+//! CAVLC 4×4, no 8×8 transform involved at all) is **also** badly wrong
+//! (`max_abs_diff=100`, ~99% of samples differ). This proves the remaining
+//! bug has nothing to do with the 8×8 transform, CABAC, or this crate's High-
+//! profile work specifically -- it's a pre-existing, more general CAVLC
+//! intra-decode bug that only manifests on real/high-frequency image content;
+//! every other conformance test in this suite uses flat `testsrc` content
+//! that never triggers it. See `todo.md` Phase F.4's session note for the
+//! full investigation trail; needs its own dedicated follow-up, independent
+//! of Phase F.4.
 
 use std::process::Command;
 

@@ -104,3 +104,101 @@ pub fn decode_scalefactors(
     }
     Ok(sf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codebooks::SCALEFACTOR_BOOK;
+    use crate::dequant::expand_band_types;
+    use crate::syntax::{IcsInfo, Section, SectionData, WindowSequence};
+
+    fn ics_long(max_sfb: u8) -> IcsInfo {
+        IcsInfo {
+            window_sequence: WindowSequence::OnlyLong,
+            window_shape: false,
+            max_sfb,
+            scale_factor_grouping: 0,
+            predictor_data_present: false,
+            predictor_reset_mode: None,
+        }
+    }
+
+    /// Encode one scalefactor codeword (index `idx` in the ISO scalefactor book)
+    /// into a byte buffer. `decode_scalefactor` returns `idx - 60`.
+    fn encode_scalefactor(idx: usize) -> Vec<u8> {
+        let (code, len) = SCALEFACTOR_BOOK[idx];
+        let mut bits = Vec::new();
+        for b in 0..len {
+            bits.push(((code >> (len - 1 - b)) & 1) as u8);
+        }
+        let mut out = Vec::new();
+        let mut cur = 0u8;
+        let mut n = 0u32;
+        for &b in &bits {
+            cur = (cur << 1) | b;
+            n += 1;
+            if n == 8 {
+                out.push(cur);
+                cur = 0;
+                n = 0;
+            }
+        }
+        if n > 0 {
+            out.push(cur << (8 - n));
+        }
+        out
+    }
+
+    #[test]
+    fn decode_scalefactor_zero_and_signed() {
+        // Single non-zero band; decode_scalefactor returns dpcm = idx - 60.
+        // val = predictor(0) - dpcm.
+        let ics = ics_long(1);
+        let sections = SectionData {
+            groups: vec![vec![Section { sect_cb: 1, sect_len: 1 }]],
+        };
+        let bt = expand_band_types(&sections, &ics);
+
+        // idx 60 → dpcm 0 → val 0
+        let mut r = BitReader::new(&encode_scalefactor(60));
+        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
+
+        // idx 61 → dpcm 1 → val -1
+        let mut r = BitReader::new(&encode_scalefactor(61));
+        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![-1]);
+
+        // idx 59 → dpcm -1 → val 1
+        let mut r = BitReader::new(&encode_scalefactor(59));
+        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn zero_hcb_band_carries_no_scalefactor() {
+        // A ZERO_HCB band contributes an implicit 0 scalefactor and consumes no bits.
+        let ics = ics_long(1);
+        let sections = SectionData {
+            groups: vec![vec![Section { sect_cb: 0, sect_len: 1 }]],
+        };
+        let bt = expand_band_types(&sections, &ics);
+        let mut r = BitReader::new(&[0u8; 4]);
+        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
+    }
+
+    #[test]
+    fn scalefactor_dpcm_carries_across_bands() {
+        // Two non-zero bands: first val 0 (dpcm 0), second val 2 (dpcm = 0 - 2 = -2
+        // → idx 58). The predictor advances by the previous value.
+        let ics = ics_long(2);
+        let sections = SectionData {
+            groups: vec![vec![Section { sect_cb: 1, sect_len: 2 }]],
+        };
+        let bt = expand_band_types(&sections, &ics);
+        let mut bits = encode_scalefactor(60); // band0: dpcm 0 → val 0
+        bits.extend_from_slice(&encode_scalefactor(58)); // band1: dpcm -2 → val 2
+        let mut r = BitReader::new(&bits);
+        assert_eq!(
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            vec![0, 2]
+        );
+    }
+}

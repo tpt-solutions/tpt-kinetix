@@ -25,6 +25,8 @@ use crate::{
 };
 use tpt_kinetix_core::frame::VideoFrame;
 
+use crate::ref_pic::FieldRef;
+
 /// The reconstructed YUV420p planes for one frame.
 pub struct ReconstructedFrame {
     pub luma: Vec<u8>,
@@ -726,6 +728,287 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
     }
 }
 
+/// Reconstruct a PAFF *field* P-slice into a half-height `ReconstructedFrame`
+/// (§8.4.2 / §8.4.2.2.1).
+///
+/// A field picture's macroblocks address **field** lines: a field macroblock is
+/// a 16×16 luma block spanning 16 `field` scanlines (i.e. 32 frame scanlines in
+/// the eventual interlaced output). Motion compensation therefore samples each
+/// reference at field parity, using the contiguous half-height field plane
+/// produced by [`crate::ref_pic::FieldRef::planes`] (§8.2.4.2.5), with the
+/// motion vector already expressed in 1/4-`field`-sample units. The residual
+/// inverse transform and per-block reconstruction mirror the frame path.
+///
+/// The returned planes are half-height (`field_height`); the caller (the
+/// decoder's PAFF interleave stage) pairs them with the complementary field and
+/// merges the two into the full interlaced frame.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_fields: &[FieldRef],
+    mb_cols: u32,
+    mb_rows_field: u32,
+    width: u32,
+    field_height: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) -> ReconstructedFrame {
+    let luma_stride = width as usize;
+    let chroma_stride = (width / 2) as usize;
+    let luma_h = field_height as usize;
+    let chroma_h = (field_height / 2) as usize;
+    let mut luma = vec![0u8; luma_stride * luma_h];
+    let mut cb = vec![0u8; chroma_stride * chroma_h];
+    let mut cr = vec![0u8; chroma_stride * chroma_h];
+
+    // Pre-extract the contiguous half-height field planes for every reference
+    // field once, so per-block motion compensation can sample them directly.
+    let mut ref_luma: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let mut ref_cb: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let mut ref_cr: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let extracts: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+        ref_fields.iter().map(|f| f.planes()).collect();
+    for (l, c1, c2) in &extracts {
+        ref_luma.push(l);
+        ref_cb.push(c1);
+        ref_cr.push(c2);
+    }
+
+    for mb_y in 0..mb_rows_field {
+        for mb_x in 0..mb_cols {
+            let idx = (mb_y * mb_cols + mb_x) as usize;
+            let mb = &macroblocks[idx];
+            if mb.motion.is_some() || mb.skip {
+                reconstruct_field_inter_luma(
+                    mb,
+                    mv_store,
+                    &ref_luma,
+                    &mut luma,
+                    luma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+                reconstruct_field_inter_chroma(
+                    mb,
+                    mv_store,
+                    &ref_cb,
+                    &ref_cr,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+            } else {
+                // Intra macroblock inside a field P-slice: reuse the existing
+                // intra reconstruction, addressing the half-height field plane.
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                reconstruct_chroma(
+                    mb,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+            }
+        }
+    }
+
+    ReconstructedFrame {
+        luma,
+        chroma_cb: cb,
+        chroma_cr: cr,
+        luma_stride,
+        chroma_stride,
+    }
+}
+
+/// Field-coordinate luma inter reconstruction for one field macroblock (§8.4.2.2).
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_field_inter_luma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_luma: &[&[u8]],
+    plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    let base_y = (mb_y * 16) as usize;
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (block, &cell) in grid.iter().enumerate() {
+        let bx = (block % 4) * 4;
+        let by = (block / 4) * 4;
+        let x0 = (base_x + bx) as i32;
+        let y0 = (base_y + by) as i32;
+        let ref_idx = cell.ref_idx.max(0) as usize;
+
+        let mut pred = [0u8; 16];
+        if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
+            let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
+            crate::motion_comp::interpolate_luma(
+                &mut pred,
+                4,
+                plane_ref,
+                plane_w,
+                plane_w,
+                luma_h_of(plane_ref, stride),
+                x0,
+                y0,
+                cell.mv[0],
+                cell.mv[1],
+                4,
+                4,
+            );
+        }
+        let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
+
+        tracer.on_motion_comp(mb_x, mb_y, TracePlane::Luma, block as u8, &pred, cell.mv, ref_idx);
+
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        for row in 0..4 {
+            for col in 0..4 {
+                let px = x0 as usize + col;
+                let py = y0 as usize + row;
+                let off = py * stride + px;
+                let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                if off < plane.len() && px < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+    }
+}
+
+/// Field-coordinate chroma inter reconstruction for one field macroblock.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_field_inter_chroma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_cb: &[&[u8]],
+    ref_cr: &[&[u8]],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 8) as usize;
+    let base_y = (mb_y * 8) as usize;
+    let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (comp, plane) in [cb as &mut [u8], cr].into_iter().enumerate() {
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
+        let ref_plane = if comp == 0 { ref_cb } else { ref_cr };
+        let dc_raster = [
+            dc_src[0] as i32,
+            dc_src[1] as i32,
+            dc_src[2] as i32,
+            dc_src[3] as i32,
+        ];
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+
+        for block in 0..4usize {
+            let bx = (block % 2) * 4;
+            let by = (block / 2) * 4;
+            let x0 = (base_x + bx) as i32;
+            let y0 = (base_y + by) as i32;
+            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+            let ref_idx = cell.ref_idx.max(0) as usize;
+
+            let mut pred = [0u8; 16];
+            if let Some(plane_ref) = ref_plane.get(ref_idx).or_else(|| ref_plane.last()) {
+                let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
+                crate::motion_comp::interpolate_chroma(
+                    &mut pred,
+                    4,
+                    plane_ref,
+                    plane_w,
+                    plane_w,
+                    chroma_h_of(plane_ref, stride),
+                    x0,
+                    y0,
+                    cell.mv[0],
+                    cell.mv[1],
+                    4,
+                    4,
+                );
+            }
+            let pred =
+                combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], Some(comp));
+            tracer.on_motion_comp(mb_x, mb_y, trace_plane, block as u8, &pred, cell.mv, ref_idx);
+
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            for row in 0..4 {
+                for col in 0..4 {
+                    let px = x0 as usize + col;
+                    let py = y0 as usize + row;
+                    let off = py * stride + px;
+                    let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Field-plane height helper for a half-height luma reference plane.
+fn luma_h_of(plane: &[u8], stride: usize) -> usize {
+    plane.len() / stride.max(1)
+}
+
+/// Field-plane height helper for a half-height chroma reference plane.
+fn chroma_h_of(plane: &[u8], stride: usize) -> usize {
+    plane.len() / stride.max(1)
+}
+
 /// Reconstruct a full B-slice frame: inter macroblocks are motion-compensated
 /// from `ref_frames_l0` and `ref_frames_l1` using bi-predictive averaging
 /// (§8.4.2); intra macroblocks inside the slice use the intra path (§8.3).
@@ -1376,5 +1659,111 @@ mod tests {
         assert!(f.luma.iter().all(|&v| v == 160));
         assert!(f.chroma_cb.iter().all(|&v| v == 100));
         assert!(f.chroma_cr.iter().all(|&v| v == 100));
+    }
+
+    /// Field reference plane extraction (§8.2.4.2.5 / §6.4.10.1): a genuine
+    /// field reference returns its stored half-height planes unchanged, while a
+    /// frame reference returns every-other-row (parity) slices.
+    #[test]
+    fn field_ref_planes_extract_parity() {
+        // Genuine field reference (16x8 luma half-height).
+        let mut field_frame = crate::macroblock::new_video_frame(16, 8).unwrap();
+        for (i, px) in field_frame.data.iter_mut().enumerate() {
+            *px = i as u8;
+        }
+        let fr = FieldRef {
+            frame: field_frame,
+            is_frame: false,
+            bottom: false,
+            pic_order_cnt: 0,
+        };
+        let (l, cb, _cr) = fr.planes();
+        assert_eq!(l.len(), 16 * 8);
+        assert_eq!(l[0], 0);
+        assert_eq!(l[1], 1);
+        assert_eq!(cb.len(), 8 * 4);
+
+        // Frame reference (16x16 full): top field = even rows.
+        let mut frame = crate::macroblock::new_video_frame(16, 16).unwrap();
+        for (i, px) in frame.data.iter_mut().enumerate() {
+            *px = i as u8;
+        }
+        let top = FieldRef {
+            frame: frame.clone(),
+            is_frame: true,
+            bottom: false,
+            pic_order_cnt: 0,
+        };
+        let (tl, _, _) = top.planes();
+        assert_eq!(tl.len(), 16 * 8);
+        assert_eq!(tl[0], 0);
+        // field row 1 == frame row 2.
+        assert_eq!(tl[16], frame.data[2 * 16]);
+        let bot = FieldRef {
+            frame,
+            is_frame: true,
+            bottom: true,
+            pic_order_cnt: 0,
+        };
+        let (bl, _, _) = bot.planes();
+        // bottom field row 0 == frame row 1.
+        assert_eq!(bl[0], 16);
+    }
+
+    /// A PAFF P-field skip macroblock (zero MV, ref 0) reconstructs to a verbatim
+    /// copy of the reference field, written into the half-height output plane
+    /// (§8.4.2.2.1 field sampling). This is the field analogue of
+    /// `inter_skip_copies_reference`.
+    #[test]
+    fn field_p_skip_copies_reference_field() {
+        // Reference field: 16x16 luma half-height, ramp.
+        let mut ref_frame = crate::macroblock::new_video_frame(16, 16).unwrap();
+        for (i, px) in ref_frame.data.iter_mut().enumerate() {
+            *px = (i % 256) as u8;
+        }
+        let field_ref = FieldRef {
+            frame: ref_frame,
+            is_frame: false,
+            bottom: false,
+            pic_order_cnt: 0,
+        };
+
+        let mut mb = Macroblock::new_skip();
+        mb.skip = true;
+        let mut store = crate::mv::MvStore::new(1);
+        store.commit(
+            0,
+            [crate::mv::MvCell {
+                mv: [0, 0],
+                ref_idx: 0,
+                mv_l1: [0, 0],
+                ref_idx_l1: -1,
+            }; 16],
+            0,
+        );
+
+        let f = reconstruct_inter_field_frame(
+            &[mb],
+            &store,
+            &[field_ref],
+            1,
+            1,
+            16,
+            16,
+            0,
+            &crate::transform::ScalingLists::flat(),
+            &WeightedPred::Default,
+            &mut crate::trace::NoopTracer,
+        );
+        // Output is half-height: luma 16x16.
+        assert_eq!(f.luma.len(), 16 * 16);
+        // Skip with zero MV and zero residual copies the reference field verbatim.
+        for (i, &v) in f.luma.iter().enumerate() {
+            assert_eq!(v, (i % 256) as u8, "luma sample {i} mismatch");
+        }
+        // Chroma (8x8) likewise.
+        for (i, &v) in f.chroma_cb.iter().enumerate() {
+            assert_eq!(v, (i % 256) as u8, "cb sample {i} mismatch");
+        }
     }
 }

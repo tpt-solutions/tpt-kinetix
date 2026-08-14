@@ -99,6 +99,112 @@ fn av1_dav1d_reference_decode_when_available() {
     }
 }
 
+/// AV1 Phase G intra-only corpus harness: decode a spread of synthesized AV1
+/// intra keyframes (varied content pattern + resolution, see
+/// [`tpt_kinetix_test_utils::synthetic::av1_intra_corpus`]) with both
+/// `Av1Decoder` and the `dav1d` reference decoder (standalone binary or
+/// `ffmpeg`'s `libdav1d`, see `reference::dav1d_available`), then report the
+/// per-entry PSNR/diff gap.
+///
+/// This is the "generated intra-only corpus" validation called for by AV1
+/// Phase G (todo.md) for Phases A-C, ahead of inter prediction (Phase E)
+/// landing. It does not yet hard-assert pixel-exactness — Phase G's gate
+/// (`capabilities().pixel_exact`) flips only once every corpus entry is
+/// bit-exact against `dav1d`; today it measures and reports the gap so
+/// regressions/improvements are visible across runs. Skips when neither
+/// `dav1d` nor `ffmpeg` is available, or when the corpus could not be
+/// synthesized (no `ffmpeg` AV1 encoder).
+#[test]
+fn av1_intra_corpus_vs_dav1d_when_available() {
+    use tpt_kinetix_av1::Av1Decoder;
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_test_utils::{
+        pixel_diff::*,
+        reference::{dav1d_available, decode_av1_obu_with_dav1d},
+        synthetic::av1_intra_corpus,
+    };
+
+    if !dav1d_available() {
+        eprintln!("skipping: dav1d not available (neither standalone binary nor ffmpeg+libdav1d)");
+        return;
+    }
+
+    let corpus = av1_intra_corpus();
+    if corpus.is_empty() {
+        eprintln!("skipping: could not synthesize an AV1 intra-only corpus with ffmpeg");
+        return;
+    }
+
+    assert!(
+        !Av1Decoder::new().capabilities().pixel_exact,
+        "AV1 decoder must not claim pixel_exact before the Phase G corpus gate passes"
+    );
+
+    let mut exact_count = 0usize;
+    let mut compared_count = 0usize;
+    for entry in &corpus {
+        let ref_frames = match decode_av1_obu_with_dav1d(&entry.obu, entry.width, entry.height) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[{}] dav1d reference decode returned: {e}", entry.label);
+                continue;
+            }
+        };
+        let Some(ref_frame) = ref_frames.first() else {
+            eprintln!("[{}] dav1d produced no frames", entry.label);
+            continue;
+        };
+
+        let mut dec = Av1Decoder::new();
+        let packet = Packet {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data: entry.obu.clone(),
+            stream_index: 0,
+            is_key_frame: true,
+        };
+        let kinetix_frame = match dec.decode(&packet) {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                eprintln!("[{}] Kinetix produced no frame", entry.label);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[{}] Kinetix decode errored: {e}", entry.label);
+                continue;
+            }
+        };
+
+        compared_count += 1;
+        let exact = within_tolerance(&kinetix_frame, ref_frame, 0);
+        if exact {
+            exact_count += 1;
+        }
+        let (psnr_y, psnr_u, psnr_v) =
+            psnr_yuv420p(&kinetix_frame, ref_frame).unwrap_or((0.0, 0.0, 0.0));
+        eprintln!(
+            "[{}] {}x{}, PSNR Y/U/V = {:.2}/{:.2}/{:.2} dB, luma diff samples = {}, exact = {}",
+            entry.label,
+            entry.width,
+            entry.height,
+            psnr_y,
+            psnr_u,
+            psnr_v,
+            luma_diff_count(&kinetix_frame, ref_frame),
+            exact,
+        );
+    }
+
+    assert!(
+        compared_count > 0,
+        "no corpus entries produced a comparable Kinetix/dav1d frame pair"
+    );
+    eprintln!("AV1 intra corpus: {exact_count}/{compared_count} entries bit-exact vs dav1d");
+
+    // Phase G gate (uncomment once every corpus entry is bit-exact):
+    // assert_eq!(exact_count, compared_count);
+}
+
 /// AV1 conformance harness: decode a real `ffmpeg`-synthesized AV1 keyframe
 /// OBU with both the Kinetix [`tpt_kinetix_av1::Av1Decoder`] and the
 /// `ffmpeg`-backed reference decoder, then measure the per-plane gap.

@@ -1014,6 +1014,51 @@ impl FieldRef {
             self.frame.height
         }
     }
+
+    /// Extract the contiguous half-height YUV420p planes for the referenced
+    /// field, suitable for field-coordinate motion compensation (§8.4.2.2.1 /
+    /// §6.4.10.1).
+    ///
+    /// For a frame reference (`is_frame == true`) the field's samples live at
+    /// stride-2 spacing with the field's parity offset, so every other row is
+    /// copied into the contiguous half-height output. For a genuine field
+    /// reference the stored buffer is already half-height and is copied as-is.
+    /// Returns `(luma, chroma_cb, chroma_cr)`.
+    pub fn planes(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let w = self.frame.width as usize;
+        let full_h = self.frame.height as usize;
+        let luma_len = w * full_h;
+        let chroma_w = w / 2;
+        let chroma_h = full_h / 2;
+        let chroma_len = chroma_w * chroma_h;
+        if self.is_frame {
+            let fh = full_h / 2;
+            let cfh = chroma_h / 2;
+            let mut luma = vec![0u8; w * fh];
+            let mut cb = vec![0u8; chroma_w * cfh];
+            let mut cr = vec![0u8; chroma_w * cfh];
+            for y in 0..fh {
+                let sy = 2 * y + self.bottom as usize;
+                luma[y * w..(y + 1) * w]
+                    .copy_from_slice(&self.frame.data[sy * w..(sy + 1) * w]);
+            }
+            for y in 0..cfh {
+                let sy = 2 * y + self.bottom as usize;
+                let lo = luma_len + sy * chroma_w;
+                cb[y * chroma_w..(y + 1) * chroma_w]
+                    .copy_from_slice(&self.frame.data[lo..lo + chroma_w]);
+                let lo = luma_len + chroma_len + sy * chroma_w;
+                cr[y * chroma_w..(y + 1) * chroma_w]
+                    .copy_from_slice(&self.frame.data[lo..lo + chroma_w]);
+            }
+            (luma, cb, cr)
+        } else {
+            let luma = self.frame.data[..luma_len].to_vec();
+            let cb = self.frame.data[luma_len..luma_len + chroma_len].to_vec();
+            let cr = self.frame.data[luma_len + chroma_len..luma_len + 2 * chroma_len].to_vec();
+            (luma, cb, cr)
+        }
+    }
 }
 
 /// Build the `RefPicList0` for an interlaced *field* picture (§8.2.4.2.5).

@@ -455,6 +455,82 @@ pub struct RawDataBlock {
     pub elements: Vec<Element>,
 }
 
+/// Skip a `data_stream_element()` (DSE, id 4) in place.
+///
+/// Reads the instance tag and the (possibly escaped) byte count, then discards
+/// the payload bytes. DSEs carry ancillary data (e.g. metadata) and carry no
+/// channels, so the decoder simply ignores them.
+fn skip_data_stream_element(reader: &mut BitReader) -> Result<(), AacParseError> {
+    let mut count = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+    if count == 255 {
+        count += reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+    }
+    for _ in 0..count {
+        reader.read_u8().ok_or(AacParseError::UnexpectedEof)?;
+    }
+    reader.byte_align();
+    Ok(())
+}
+
+/// Skip a `program_config_element()` (PCE, id 5) in place.
+///
+/// Reads every field of the (fixed-shape, count-driven) PCE so the exact bit
+/// length is consumed, then byte-aligns. PCEs describe the channel topology and
+/// are redundant with the ADTS header's `channel_config` for AAC-LC, so the
+/// decoder ignores them.
+fn skip_program_config_element(reader: &mut BitReader) -> Result<(), AacParseError> {
+    let _object_type = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)?;
+    let _sf = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    let num_front = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
+    let num_side = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
+    let num_back = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
+    let num_lfe = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as usize;
+    let num_assoc = reader.read_bits(3).ok_or(AacParseError::UnexpectedEof)? as usize;
+    let num_cc = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
+
+    let mono_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+    if mono_present != 0 {
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    let stereo_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+    if stereo_present != 0 {
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    let matrix_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+    if matrix_present != 0 {
+        let _ = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)?;
+        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_front {
+        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_side {
+        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_back {
+        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_lfe {
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_assoc {
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    for _ in 0..num_cc {
+        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+    }
+    let comment_bytes = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+    for _ in 0..comment_bytes {
+        let _ = reader.read_u8().ok_or(AacParseError::UnexpectedEof)?;
+    }
+    reader.byte_align();
+    Ok(())
+}
+
 impl RawDataBlock {
     /// Parse a raw data block from `data`, dispatching on each syntactic element
     /// id until `END` or the bitstream is exhausted. `sf_index` is the 4-bit
@@ -464,7 +540,6 @@ impl RawDataBlock {
         let mut elements = Vec::new();
         loop {
             let id = reader.read_bits(3).ok_or(AacParseError::UnexpectedEof)? as u8;
-            eprintln!("  RDB dispatch bitpos={} id={id}", reader.bit_position() - 3);
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
@@ -537,9 +612,22 @@ impl RawDataBlock {
                 }
                 // CCE (2), DSE (4), PCE (5): out of Phase 1 scope.
                 2 | 4 | 5 => {
-                    return Err(AacParseError::Unsupported(
-                        "CCE / DSE / PCE element parsing is not in Phase 1 scope",
-                    ));
+                    // CCE (2) / DSE (4) / PCE (5) are out of the AAC-LC
+                    // reconstruction scope, but real streams legitimately carry
+                    // them (e.g. ffmpeg emits a PCE in the first ADTS frame for
+                    // many channel configs). Skip them rather than failing the
+                    // whole raw-data-block parse, so the decoder can still
+                    // reconstruct the channels it does understand.
+                    let _tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
+                    if id == 4 {
+                        skip_data_stream_element(&mut reader)?;
+                    } else if id == 5 {
+                        skip_program_config_element(&mut reader)?;
+                    } else {
+                        return Err(AacParseError::Unsupported(
+                            "CCE element parsing is not in Phase 1 scope",
+                        ));
+                    }
                 }
                 _ => return Err(AacParseError::BadElementId),
             }
@@ -624,7 +712,7 @@ mod tests {
         bits.push(ZERO); // predictor_data_present = 0
         bits.push(ZERO); // sect_cb = 0
         bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len = 10
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain = 0
+        bits.extend_from_slice(&[ZERO, ZERO]); // pulse/tns = 0 (AAC-LC: no gain_control flag)
         bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();
@@ -657,12 +745,12 @@ mod tests {
         bits.extend_from_slice(&[ZERO; 8]);
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO]);
-        // right channel: global_gain=0xff (8 bits), sect_cb=0, sect_len=8, flags=000
+        bits.extend_from_slice(&[ZERO, ZERO]); // left pulse/tns = 0 (AAC-LC: no gain_control flag)
+        // right channel: global_gain=0xff (8 bits), sect_cb=0, sect_len=8, flags=00
         bits.extend_from_slice(&[ONE; 8]);
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO]);
+        bits.extend_from_slice(&[ZERO, ZERO]); // right pulse/tns = 0 (AAC-LC: no gain_control flag)
         bits.extend_from_slice(&[ONE, ONE, ONE]); // END
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();
@@ -715,7 +803,7 @@ mod tests {
         bits.push(ONE); // sect_cb codeword "10" -> cb 1
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len=10
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain = 0
+        bits.extend_from_slice(&[ZERO, ZERO]); // pulse/tns = 0 (AAC-LC: no gain_control flag)
         let bytes = bits_to_bytes(&bits);
         // No spectral data present -> an error (EOF), not a panic.
         assert!(RawDataBlock::parse(&bytes, 4).is_err());
@@ -729,5 +817,69 @@ mod tests {
             RawDataBlock::parse(&bytes, 4),
             Err(AacParseError::UnexpectedEof)
         ));
+    }
+
+    #[test]
+    fn skips_data_stream_element_before_end() {
+        // id=4 (DSE): tag=0, count=0 (no payload) -> 12 bits, byte-aligned to 16.
+        // Then END. The DSE must be consumed without desyncing the END marker.
+        let mut bits: Vec<u8> = Vec::new();
+        bits.extend_from_slice(&[ONE, ZERO, ZERO]); // id_syn_ele = DSE (4)
+        bits.extend_from_slice(&[ZERO; 4]); // instance_tag = 0
+        bits.extend_from_slice(&[ZERO; 8]); // count = 0
+        bits.push(ZERO); // byte-align padding (skipped by the parser)
+        bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
+        let bytes = bits_to_bytes(&bits);
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
+        assert!(matches!(block.elements.first(), Some(Element::End)));
+    }
+
+    #[test]
+    fn skips_data_stream_element_with_payload() {
+        // id=4 (DSE): tag=0, count=2, two payload bytes, then byte-aligned END.
+        let mut bits: Vec<u8> = Vec::new();
+        bits.extend_from_slice(&[ONE, ZERO, ZERO]); // id_syn_ele = DSE (4)
+        bits.extend_from_slice(&[ZERO; 4]); // instance_tag = 0
+        bits.push(ZERO);
+        bits.push(ZERO);
+        bits.push(ZERO);
+        bits.push(ZERO); // 4 bits of 0 (part of count)
+        bits.push(ZERO);
+        bits.push(ZERO);
+        bits.push(ONE);
+        bits.push(ZERO); // count = 2
+        bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE]); // payload byte 0xA5
+        bits.extend_from_slice(&[ZERO, ZERO, ONE, ONE, ONE, ONE, ZERO, ZERO]); // payload byte 0x3C
+        bits.push(ZERO); // byte-align padding (skipped by the parser)
+        bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
+        let bytes = bits_to_bytes(&bits);
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
+        assert!(matches!(block.elements.first(), Some(Element::End)));
+    }
+
+    #[test]
+    fn skips_program_config_element_before_end() {
+        // id=5 (PCE) with every channel count zero and an empty comment field:
+        // 46 bits of fixed structure, byte-aligned to 48, then END.
+        let mut bits: Vec<u8> = Vec::new();
+        bits.extend_from_slice(&[ONE, ZERO, ONE]); // id_syn_ele = PCE (5)
+        bits.extend_from_slice(&[ZERO; 4]); // instance_tag = 0
+        bits.extend_from_slice(&[ZERO; 2]); // object_type
+        bits.extend_from_slice(&[ZERO; 4]); // sampling_frequency_index
+        bits.extend_from_slice(&[ZERO; 4]); // num_front
+        bits.extend_from_slice(&[ZERO; 4]); // num_side
+        bits.extend_from_slice(&[ZERO; 4]); // num_back
+        bits.extend_from_slice(&[ZERO; 2]); // num_lfe
+        bits.extend_from_slice(&[ZERO; 3]); // num_assoc
+        bits.extend_from_slice(&[ZERO; 4]); // num_valid_cc
+        bits.push(ZERO); // mono_mixdown_present
+        bits.push(ZERO); // stereo_mixdown_present
+        bits.push(ZERO); // matrix_mixdown_idx_present
+        bits.extend_from_slice(&[ZERO; 8]); // comment_field_bytes = 0
+        bits.extend_from_slice(&[ZERO; 3]); // byte-align padding (skipped)
+        bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
+        let bytes = bits_to_bytes(&bits);
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
+        assert!(matches!(block.elements.first(), Some(Element::End)));
     }
 }

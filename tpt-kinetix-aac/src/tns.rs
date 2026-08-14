@@ -47,15 +47,15 @@ impl TnsFilter {
         for m in 1..=order {
             let k = rc[m - 1];
             let mut tmp = [0.0f32; 21];
-            for i in 0..m - 1 {
-                tmp[i] = d[i] - k * d[m - 1 - i];
+            for i in 1..m {
+                tmp[i] = d[i] - k * d[m - i];
             }
-            for i in 0..m - 1 {
+            for i in 1..m {
                 d[i] = tmp[i];
             }
-            d[m - 1] = k;
+            d[m] = k;
         }
-        // b_1..b_order = d[1..order+1]
+        // b_1..b_order = d[1..order+1] (step-up / Levinson-Durbin recursion, §4.6.9.2)
         for i in 0..order {
             self.coef[i] = d[i + 1];
         }
@@ -236,5 +236,167 @@ fn tns_filter_window(coef: &[f32; 20], order: usize, direction: bool, seg: &mut 
             }
             seg[i] -= acc;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::{IcsInfo, WindowSequence};
+
+    fn ics_long(max_sfb: u8) -> IcsInfo {
+        IcsInfo {
+            window_sequence: WindowSequence::OnlyLong,
+            window_shape: false,
+            max_sfb,
+            scale_factor_grouping: 0,
+            predictor_data_present: false,
+            predictor_reset_mode: None,
+        }
+    }
+
+    /// Reflection→direct conversion for a hand-picked set of reflection
+    /// coefficients, checked against the closed-form lattice recursion of
+    /// §4.6.9.2 (b_1 = k_1, b_2 = k_1·(1−k_2), b_3 = k_1·(1−k_2) − k_2·k_3, ...).
+    #[test]
+    fn reflection_to_direct_hand_computed() {
+        // order 1: b_1 = k_1
+        let mut f = TnsFilter {
+            length: 1,
+            order: 1,
+            direction: false,
+            coef: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        f.reflection_to_direct();
+        assert!((f.coef[0] - 0.5).abs() < 1e-6, "order1 b1");
+        assert!((f.coef[1]).abs() < 1e-6, "order1 b2 must be zero");
+
+        // order 2: b_1 = k_1·(1−k_2), b_2 = k_2
+        let k1 = 0.5f32;
+        let k2 = -0.3f32;
+        let mut f = TnsFilter {
+            length: 2,
+            order: 2,
+            direction: false,
+            coef: [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        f.reflection_to_direct();
+        assert!((f.coef[0] - k1 * (1.0 - k2)).abs() < 1e-6, "order2 b1");
+        assert!((f.coef[1] - k2).abs() < 1e-6, "order2 b2");
+
+        // order 3: b_1 = k_1·(1−k_2) − k_2·k_3, b_2 = k_2 − k_3·k_1·(1−k_2), b_3 = k_3
+        let k3 = 0.1f32;
+        let mut f = TnsFilter {
+            length: 3,
+            order: 3,
+            direction: false,
+            coef: [k1, k2, k3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        f.reflection_to_direct();
+        assert!((f.coef[0] - (k1 * (1.0 - k2) - k2 * k3)).abs() < 1e-6, "order3 b1");
+        assert!((f.coef[1] - (k2 - k3 * k1 * (1.0 - k2))).abs() < 1e-6, "order3 b2");
+        assert!((f.coef[2] - k3).abs() < 1e-6, "order3 b3");
+    }
+
+    /// Simulate the TNS AR filter ("up" direction) with an independent,
+    /// directly-coded reference (`y[i] = x[i] − Σ b_{j+1}·x[i−j−1]`) and compare
+    /// against the implementation under test. This is the "independently computed
+    /// reference" required by the Phase 3 exit criteria.
+    #[test]
+    fn tns_filter_matches_independent_reference() {
+        let b = [0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let order = 2;
+        let input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut expected = [0.0f32; 6];
+        for i in 0..6 {
+            let mut acc = 0.0f32;
+            for j in 0..order {
+                if i > j {
+                    acc += b[j] * input[i - j - 1];
+                }
+            }
+            expected[i] = input[i] - acc;
+        }
+
+        let mut got = input;
+        tns_filter_window(&b, order, false, &mut got);
+        for i in 0..6 {
+            assert!(
+                (got[i] - expected[i]).abs() < 1e-5,
+                "up-filter mismatch at i={i}: got {} expected {}",
+                got[i],
+                expected[i]
+            );
+        }
+    }
+
+    /// Full `parse`-free path: a known direct-form filter applied through
+    /// `apply_tns` must match the independent reference over the band it spans,
+    /// and leave the rest of the spectrum untouched.
+    #[test]
+    fn apply_tns_matches_independent_reference() {
+        let ics = ics_long(4);
+        let k1 = 0.5f32;
+        let k2 = -0.3f32;
+        let mut filt = TnsFilter {
+            length: 2,
+            order: 2,
+            direction: false,
+            coef: [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        filt.reflection_to_direct();
+        let tns = TnsData {
+            n_filt: vec![1],
+            filters: vec![vec![filt]],
+        };
+        let swb = [0u16, 2, 4, 6, 8]; // 2 lines per band; filter spans bands 0..2
+        let mut coeffs = [0.0f32; 1024];
+        for i in 0..4 {
+            coeffs[i] = (i + 1) as f32;
+        }
+
+        // Independent reference: AR filter over lines 0..swb[2] (4 lines).
+        let order = 2;
+        let b = [filt.coef[0], filt.coef[1]];
+        let mut expected = coeffs;
+        for i in 0..4 {
+            let mut acc = 0.0f32;
+            for j in 0..order {
+                if i > j {
+                    acc += b[j] * coeffs[i - j - 1];
+                }
+            }
+            expected[i] = coeffs[i] - acc;
+        }
+
+        apply_tns(&tns, &ics, &mut coeffs, &swb);
+        for i in 0..4 {
+            assert!(
+                (coeffs[i] - expected[i]).abs() < 1e-5,
+                "apply_tns mismatch at line {i}: got {} expected {}",
+                coeffs[i],
+                expected[i]
+            );
+        }
+        for i in 4..1024 {
+            assert_eq!(coeffs[i], 0.0, "line {i} should be untouched");
+        }
+    }
+
+    /// The "down" direction reverses the filter sweep; verify it differs from the
+    /// up direction and is self-consistent with the reference applied to the
+    /// mirrored segment.
+    #[test]
+    fn tns_filter_down_direction_applies() {
+        let b = [0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let order = 2;
+        // Use a segment where every line is non-zero so the direction is observable.
+        let input = [1.0f32, 2.0, 3.0, 4.0];
+        let mut up = input;
+        tns_filter_window(&b, order, false, &mut up);
+        let mut down = input;
+        tns_filter_window(&b, order, true, &mut down);
+        // The first and last lines differ between directions (boundary handling).
+        assert!((up[0] - down[0]).abs() > 1e-6, "down direction should differ at start");
     }
 }

@@ -18,18 +18,15 @@
 //! **Known failing** (`high_profile_8x8_cabac_no_deblock_is_bitexact` /
 //! `_with_deblock_is_bitexact`, as of the mandelbrot-source switch that made
 //! this test non-vacuous): decode is not yet bit-exact once real (non-DC,
-//! non-transpose-symmetric) 8×8-block coefficients are involved. A real
-//! `idct_8x8` transpose bug (Pass 2 wrote row results into a column) was
-//! found and fixed via this test — see the regression test
-//! `transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`
-//! — but a residual, larger-magnitude discrepancy remains (max_abs_diff
-//! ~161/255) that also reproduces identically in the sibling CAVLC test
-//! (`high_profile_8x8_conformance.rs`), confirming the remaining bug is in
-//! shared 8×8 prediction/reconstruction code (`predict_8x8` in
-//! `prediction.rs`, `reconstruct_luma_8x8`'s neighbour loading in
-//! `reconstruct.rs`, or `dequant_idct_8x8`'s scaling-list/scan handling in
-//! `transform.rs`), not in the CABAC parsing added here. Needs a dedicated
-//! investigation pass; not a regression introduced by the CABAC work.
+//! non-transpose-symmetric) 8×8-block coefficients are involved. Not a
+//! regression from the CABAC work added in this phase -- see the sibling
+//! CAVLC test's doc comment (`high_profile_8x8_conformance.rs`) for the full
+//! investigation trail. Short version: two real bugs were found and fixed
+//! (`idct_8x8`'s row/column transpose, and the CAVLC 8×8 scan table), but the
+//! remaining ~161/255 discrepancy was proven to be a pre-existing, general
+//! CAVLC intra-decode bug unrelated to 8×8/CABAC/High-profile entirely (it
+//! reproduces on the same `mandelbrot` content with the 8×8 transform fully
+//! disabled). Needs its own dedicated follow-up.
 
 use std::process::Command;
 

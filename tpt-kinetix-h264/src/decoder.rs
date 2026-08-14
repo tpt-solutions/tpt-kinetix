@@ -15,7 +15,9 @@ use crate::{
     macroblock::{Macroblock, MbPos, MbType},
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
+    reconstruct::ReconstructedFrame,
     ref_pic::{Dpb, DpbEntry, PocState},
+    slice_data::ParsedSlice,
     sps::SeqParameterSet,
     trace::{DecodeTracer, NoopTracer},
 };
@@ -348,9 +350,11 @@ impl H264Decoder {
                             output_frame = Some(frame);
                             continue;
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            eprintln!("DBG try_decode_real_slice returned Ok(None)");
+                        }
                         Err(_e) => {
-                            let _ = _e;
+                            eprintln!("DBG try_decode_real_slice ERR: {_e:?}");
                         }
                     }
 
@@ -504,7 +508,7 @@ impl H264Decoder {
             ) {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = e;
+                    eprintln!("DBG parse_i_slice ERR: {e:?}");
                     return Ok(None);
                 }
             }
@@ -1799,24 +1803,45 @@ fn decode_interlaced<T: DecodeTracer>(
     if mb_adaptive || !header.field_pic_flag {
         return Ok(InterlacedOutcome::Fallback);
     }
-    if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
-        // Inter (P/B) field pictures: handled once field reference lists and
-        // field MV scaling land (G.2). Fall back for now.
-        return Ok(InterlacedOutcome::Fallback);
-    }
     if header.first_mb_in_slice != 0 {
         return Ok(InterlacedOutcome::Fallback);
     }
 
-    let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
-    let slice_qp = pic_init_qp + header.slice_qp_delta;
     let chroma_qp_index_offset = pps.map(|p| p.chroma_qp_index_offset).unwrap_or(0);
-
     let mb_cols = width.div_ceil(16);
     let mb_rows_field = height.div_ceil(32);
     let field_height = height / 2;
 
+    // PAFF P-field picture: field-based inter prediction (§8.2.4.2.5 +
+    // §8.4.2.2.1). The reference list is built from field references and each
+    // field macroblock is motion-compensated at field parity into a half-height
+    // buffer, which is then interleaved with its complementary field.
+    if matches!(header.slice_type, SliceType::P) {
+        return self.decode_interlaced_p_field(
+            nal,
+            sps,
+            &header,
+            entropy_coding_mode_flag,
+            pps,
+            mb_cols,
+            mb_rows_field,
+            field_height,
+            width,
+            chroma_qp_index_offset,
+            tracer,
+            packet,
+        );
+    }
+
+    if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+        // Inter (B) field pictures: not yet handled (G.2). Fall back so they
+        // are treated as unsupported slices by the caller.
+        return Ok(InterlacedOutcome::Fallback);
+    }
+
     let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+    let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+    let slice_qp = pic_init_qp + header.slice_qp_delta;
 
     let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
     reader.seek_to_bit(header.data_bit_offset);
@@ -1863,15 +1888,136 @@ fn decode_interlaced<T: DecodeTracer>(
         tracer,
     );
 
-    // Apply the in-loop deblocking filter on the half-height field buffer
-    // (per-field deblocking — the filter never crosses the field boundary
-    // because the other field is not in this buffer).
     let deblock_params = crate::deblock::DeblockParams {
         disable_idc: header.disable_deblocking_filter_idc as u8,
         alpha_offset_div2: header.slice_alpha_c0_offset_div2,
         beta_offset_div2: header.slice_beta_offset_div2,
         chroma_qp_index_offset,
     };
+    Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+    self.finalize_field(recon, nal, sps, &header, packet)
+}
+
+/// PAFF P-field picture decode: build the field reference list (§8.2.4.2.5),
+/// parse the field P-slice, motion-compensate each field macroblock at field
+/// parity into a half-height buffer, deblock, and interleave with its
+/// complementary field for output.
+#[allow(clippy::too_many_arguments)]
+fn decode_interlaced_p_field<T: DecodeTracer>(
+    &mut self,
+    nal: &crate::nal::NalUnit,
+    sps: &SeqParameterSet,
+    header: &crate::slice::SliceHeader,
+    entropy_coding_mode_flag: bool,
+    pps: Option<&PicParameterSet>,
+    mb_cols: u32,
+    mb_rows_field: u32,
+    field_height: u32,
+    width: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+    packet: &Packet,
+) -> Result<InterlacedOutcome, KinetixError> {
+    use crate::ref_pic::{build_field_ref_list_l0, PicNumContext};
+
+    let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+    let pic_num_ctx = PicNumContext::new(sps, header.frame_num, true, header.bottom_field_flag);
+    let ref_list = match build_field_ref_list_l0(
+        &self.dpb,
+        header.bottom_field_flag,
+        num_ref_idx_l0_active as usize,
+        pic_num_ctx,
+    ) {
+        Some(l) => l,
+        None => return Ok(InterlacedOutcome::Fallback),
+    };
+
+    let weighted_pred = match (
+        pps.map(|p| p.weighted_pred_flag).unwrap_or(false),
+        &header.pred_weight_table,
+    ) {
+        (true, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+            luma_log2_wd: pwt.luma_log2_weight_denom,
+            chroma_log2_wd: pwt.chroma_log2_weight_denom,
+            l0: pwt.l0.clone(),
+            l1: Vec::new(),
+        },
+        _ => crate::reconstruct::WeightedPred::Default,
+    };
+
+    let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+    let slice_qp = pic_init_qp + header.slice_qp_delta;
+    let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+
+    let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+    reader.seek_to_bit(header.data_bit_offset);
+
+    let transform_8x8 = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
+    let parsed = if entropy_coding_mode_flag {
+        reader.byte_align();
+        crate::slice_data::parse_p_slice_cabac(
+            reader.remaining_bytes(),
+            mb_cols,
+            mb_rows_field,
+            slice_qp,
+            header.cabac_init_idc as usize,
+            num_ref_idx_l0_active,
+            chroma_qp_index_offset,
+            transform_8x8,
+            tracer,
+        )
+    } else {
+        crate::slice_data::parse_p_slice(
+            &mut reader,
+            mb_cols,
+            mb_rows_field,
+            slice_qp,
+            num_ref_idx_l0_active,
+            chroma_qp_index_offset,
+            transform_8x8,
+            tracer,
+        )
+    };
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(_) => return Ok(InterlacedOutcome::Fallback),
+    };
+
+    let mut recon = crate::reconstruct::reconstruct_inter_field_frame(
+        &parsed.macroblocks,
+        &parsed.mv_store,
+        &ref_list,
+        mb_cols,
+        mb_rows_field,
+        width,
+        field_height,
+        chroma_qp_index_offset,
+        scaling,
+        &weighted_pred,
+        tracer,
+    );
+
+    let deblock_params = crate::deblock::DeblockParams {
+        disable_idc: header.disable_deblocking_filter_idc as u8,
+        alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+        beta_offset_div2: header.slice_beta_offset_div2,
+        chroma_qp_index_offset,
+    };
+    Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+    self.finalize_field(recon, nal, sps, header, packet)
+}
+
+/// Apply the in-loop deblocking filter to a half-height field buffer
+/// (`ReconstructedFrame`). The deblocking runs per-field, so it never crosses
+/// the field boundary (the complementary field is not in this buffer). `parsed`
+/// supplies the per-block non-zero / motion state needed for boundary strength.
+fn deblock_field(
+    recon: &mut ReconstructedFrame,
+    parsed: &ParsedSlice,
+    mb_cols: u32,
+    _mb_rows_field: u32,
+    params: crate::deblock::DeblockParams,
+) {
     let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
         .macroblocks
         .chunks(mb_cols as usize)
@@ -1911,7 +2057,7 @@ fn decode_interlaced<T: DecodeTracer>(
                 cur,
                 left,
                 top,
-                deblock_params,
+                params,
             );
             crate::deblock::deblock_chroma_mb(
                 &mut recon.chroma_cb,
@@ -1922,11 +2068,25 @@ fn decode_interlaced<T: DecodeTracer>(
                 cur,
                 left,
                 top,
-                deblock_params,
+                params,
             );
         }
     }
+}
 
+/// Assemble a half-height `ReconstructedFrame` into a `VideoFrame`, store it in
+/// the DPB as a field reference (so later inter slices can build their field
+/// reference lists per §8.2.4.2.5), and pair it with its complementary field
+/// for output interleaving.
+fn finalize_field(
+    &mut self,
+    recon: ReconstructedFrame,
+    nal: &crate::nal::NalUnit,
+    sps: &SeqParameterSet,
+    header: &crate::slice::SliceHeader,
+    packet: &Packet,
+) -> Result<InterlacedOutcome, KinetixError> {
+    let field_height = (recon.luma.len() / recon.luma_stride) as u32;
     let mut data = recon.luma;
     data.extend(recon.chroma_cb);
     data.extend(recon.chroma_cr);
@@ -1935,7 +2095,7 @@ fn decode_interlaced<T: DecodeTracer>(
         pts: packet.pts,
         dts: packet.dts,
         data,
-        width,
+        width: recon.luma_stride as u32,
         height: field_height,
         pixel_format: PixelFormat::Yuv420p,
         is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
@@ -1943,7 +2103,7 @@ fn decode_interlaced<T: DecodeTracer>(
 
     // Store the half-height field in the DPB so later inter slices can build
     // their field reference lists from it (§8.2.4.2.5).
-    self.store_reference_picture(nal, sps, &header, &field_frame);
+    self.store_reference_picture(nal, sps, header, &field_frame);
 
     // Buffer the field and emit the interleaved frame once the pair is complete.
     match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
@@ -2120,5 +2280,39 @@ mod tests {
             is_key_frame: false,
         };
         let _ = dec.decode(&pkt);
+    }
+
+    /// Interleaving two complementary half-height fields reproduces an interlaced
+    /// frame: the top field's samples land on even scanlines, the bottom field's
+    /// on odd scanlines (§6.4.10.1 / §8.4.2.2.1).
+    #[test]
+    fn interleave_fields_places_top_and_bottom_parity() {
+        let w = 16u32;
+        let field_h = 8u32;
+        let full_h = field_h * 2;
+
+        let mut top = crate::macroblock::new_video_frame(w, field_h).unwrap();
+        for px in top.data.iter_mut() {
+            *px = 10;
+        }
+        let mut bottom = crate::macroblock::new_video_frame(w, field_h).unwrap();
+        for px in bottom.data.iter_mut() {
+            *px = 20;
+        }
+
+        let full = H264Decoder::interleave_fields(&top, &bottom);
+        assert_eq!(full.width, w);
+        assert_eq!(full.height, full_h);
+        // Luma: even rows from top (10), odd rows from bottom (20).
+        for y in 0..full_h {
+            for x in 0..w {
+                let v = full.data[(y * w + x) as usize];
+                if y % 2 == 0 {
+                    assert_eq!(v, 10, "row {y} should be top field");
+                } else {
+                    assert_eq!(v, 20, "row {y} should be bottom field");
+                }
+            }
+        }
     }
 }

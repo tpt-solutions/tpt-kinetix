@@ -214,6 +214,100 @@ pub fn minimal_av1_obu(width: u32, height: u32) -> Option<Vec<u8>> {
     }
 }
 
+/// One entry in [`av1_intra_corpus`]: a label, declared frame geometry, and
+/// the raw OBU bytes of a single synthesized AV1 intra keyframe.
+pub struct Av1CorpusEntry {
+    pub label: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub obu: Vec<u8>,
+}
+
+/// Generate a small corpus of single-keyframe AV1 OBU streams covering a
+/// spread of content patterns and resolutions, for validating intra-only
+/// decode (AV1 Phases A-C) against a reference decoder across more than one
+/// sample.
+///
+/// Each entry is produced the same way as [`minimal_av1_obu`] (a single
+/// `-frames:v 1` keyframe encoded with `ffmpeg`'s AV1 encoder), so the output
+/// is directly consumable by both `tpt_kinetix_av1::Av1Decoder` and
+/// `reference::decode_av1_with_ffmpeg`/`reference::decode_av1_with_dav1d`.
+/// Entries whose encode fails (e.g. `ffmpeg` missing) are silently omitted;
+/// callers should treat an empty corpus as "skip this test".
+pub fn av1_intra_corpus() -> Vec<Av1CorpusEntry> {
+    const SOURCES: &[(&str, &str, Option<&str>, u32, u32)] = &[
+        ("testsrc", "testsrc", None, 128, 96),
+        ("testsrc2", "testsrc2", None, 96, 64),
+        ("smptebars", "smptebars", None, 64, 64),
+        ("mandelbrot", "mandelbrot", None, 80, 64),
+        ("solid_red", "color", Some("c=red"), 32, 32),
+    ];
+
+    SOURCES
+        .iter()
+        .filter_map(|&(label, filter, extra, width, height)| {
+            let obu = encode_av1_obu_keyframe(filter, extra, width, height)?;
+            Some(Av1CorpusEntry {
+                label,
+                width,
+                height,
+                obu,
+            })
+        })
+        .collect()
+}
+
+/// Shared implementation behind [`minimal_av1_obu`] and [`av1_intra_corpus`]:
+/// encode one `lavfi` source filter into a single AV1 OBU keyframe.
+fn encode_av1_obu_keyframe(
+    lavfi_filter: &str,
+    extra_params: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let src = match extra_params {
+        Some(extra) => format!("{lavfi_filter}={extra}:size={width}x{height}:rate=1"),
+        None => format!("{lavfi_filter}=size={width}x{height}:rate=1"),
+    };
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &src,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "obu",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Generate a short raw AAC-LC elementary stream in ADTS framing using
 /// `ffmpeg`, so the AAC decoder has real, decodeable input to run against.
 ///
