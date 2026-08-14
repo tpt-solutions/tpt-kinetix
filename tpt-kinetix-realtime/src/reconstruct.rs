@@ -26,18 +26,15 @@
 
 use tpt_kinetix_bitstream::{RansDecoder, RansEncoder, StaticModel};
 use tpt_kinetix_core::{
-    error::KinetixError,
-    frame::VideoFrame,
-    pixel_format::PixelFormat,
-    timestamp::Timestamp,
+    error::KinetixError, frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp,
 };
 
+use crate::deblock::{deblock_chroma, deblock_luma, DeblockBlock};
 use crate::headers::{ChromaFormat, FrameHeader, FrameType, SequenceHeader};
 use crate::prediction::{
     chroma_subpel, predict_inter_luma, predict_intra_block, IntraMode, MotionVector,
 };
-use crate::transform::{dequant, inverse_2d, quant};
-use crate::deblock::{deblock_chroma, deblock_luma, DeblockBlock};
+use crate::transform::{dequant, inverse_2d, quant, transform_2d};
 
 /// Substitution constant for unavailable intra-neighbour samples.
 const R: i32 = 128;
@@ -100,7 +97,9 @@ impl FrameBuffer {
             || cb.len() != cw * ch
             || cr.len() != cw * ch
         {
-            return Err(KinetixError::Parse("from_yuv420: buffer size mismatch".into()));
+            return Err(KinetixError::Parse(
+                "from_yuv420: buffer size mismatch".into(),
+            ));
         }
         Ok(Self {
             width: width as usize,
@@ -137,13 +136,13 @@ pub enum BlockSyntax {
     Intra {
         mode: u8,
         /// Quantised coefficients, raster order, first `num_coeff` positions.
-        coeffs: Vec<i16>,
+        coeffs: Vec<i32>,
     },
     Inter {
         /// 0 = skip (zero MV, 0 bits), 1 = NEWMV, 2 = NEARESTMV.
         sub: u8,
         mv: MotionVector,
-        coeffs: Vec<i16>,
+        coeffs: Vec<i32>,
     },
 }
 
@@ -175,6 +174,23 @@ fn read_i16(r: &mut &[u8]) -> Result<i16, KinetixError> {
     Ok(i16::from_le_bytes(b))
 }
 
+/// Coefficients are stored as `i32`: the integer transform's unnormalised
+/// coefficients can exceed `i16` for larger blocks (e.g. a 16×16 block yields
+/// values up to `n²·residual`).
+fn write_i32(out: &mut Vec<u8>, v: i32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn read_i32(r: &mut &[u8]) -> Result<i32, KinetixError> {
+    if r.len() < 4 {
+        return Err(KinetixError::Parse("block syntax: truncated i32".into()));
+    }
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&r[0..4]);
+    *r = &r[4..];
+    Ok(i32::from_le_bytes(b))
+}
+
 fn write_block(out: &mut Vec<u8>, b: &BlockSyntax) {
     match b {
         BlockSyntax::Intra { mode, coeffs } => {
@@ -182,7 +198,7 @@ fn write_block(out: &mut Vec<u8>, b: &BlockSyntax) {
             out.push(*mode);
             out.push(coeffs.len() as u8);
             for &c in coeffs.iter() {
-                write_i16(out, c);
+                write_i32(out, c);
             }
         }
         BlockSyntax::Inter { sub, mv, coeffs } => {
@@ -194,7 +210,7 @@ fn write_block(out: &mut Vec<u8>, b: &BlockSyntax) {
             }
             out.push(coeffs.len() as u8);
             for &c in coeffs.iter() {
-                write_i16(out, c);
+                write_i32(out, c);
             }
         }
     }
@@ -220,7 +236,7 @@ fn read_block(r: &mut &[u8]) -> Result<BlockSyntax, KinetixError> {
             *r = &r[1..];
             let mut coeffs = Vec::with_capacity(n);
             for _ in 0..n {
-                coeffs.push(read_i16(r)?);
+                coeffs.push(read_i32(r)?);
             }
             Ok(BlockSyntax::Intra { mode, coeffs })
         }
@@ -243,7 +259,7 @@ fn read_block(r: &mut &[u8]) -> Result<BlockSyntax, KinetixError> {
             *r = &r[1..];
             let mut coeffs = Vec::with_capacity(n);
             for _ in 0..n {
-                coeffs.push(read_i16(r)?);
+                coeffs.push(read_i32(r)?);
             }
             Ok(BlockSyntax::Inter { sub, mv, coeffs })
         }
@@ -346,7 +362,8 @@ pub fn reconstruct_frame(
         let local = bi - chunk_range(luma_total, n_slices, slice).start;
         let block = &slices[slice][local];
         let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
-        luma_db[bi] = reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
+        luma_db[bi] =
+            reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
     }
 
     // Chroma (Cb, then Cr) — same grid as luma after subsampling.
@@ -362,8 +379,9 @@ pub fn reconstruct_frame(
                 .get(idx)
                 .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
             let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
-            chroma_db[bi] =
-                reconstruct_chroma_block(&mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, seq, frame)?;
+            chroma_db[bi] = reconstruct_chroma_block(
+                &mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, seq, frame,
+            )?;
         }
     }
 
@@ -474,7 +492,17 @@ fn reconstruct_chroma_block(
         BlockSyntax::Inter { sub, mv, .. } => {
             let ref_ = reference.expect("inter without reference");
             let ref_plane = if plane_idx == 0 { &ref_.cb } else { &ref_.cr };
-            predict_chroma_block(&mut pred, b, ref_plane, ref_.chroma_w, ref_.chroma_w, ref_.chroma_h, x0, y0, *mv);
+            predict_chroma_block(
+                &mut pred,
+                b,
+                ref_plane,
+                ref_.chroma_w,
+                ref_.chroma_w,
+                ref_.chroma_h,
+                x0,
+                y0,
+                *mv,
+            );
             if *sub == 0 {
                 DeblockBlock::inter(MotionVector::zero(), 0, qp)
             } else {
@@ -512,7 +540,7 @@ fn add_residual(
         if k >= coeffs.len() {
             break;
         }
-        coeffs[k] = dequant(c as i32, qp as u8);
+        coeffs[k] = dequant(c, qp as u8);
     }
     let mut residual = vec![0i32; n * n];
     inverse_2d(&coeffs, n, &mut residual);
@@ -589,7 +617,12 @@ fn neighbours_luma(fb: &FrameBuffer, x0: usize, y0: usize, b: usize) -> (Vec<i32
     (above, left, above_left)
 }
 
-fn neighbours_chroma(fb: &FrameBuffer, x0: usize, y0: usize, b: usize) -> (Vec<i32>, Vec<i32>, i32) {
+fn neighbours_chroma(
+    fb: &FrameBuffer,
+    x0: usize,
+    y0: usize,
+    b: usize,
+) -> (Vec<i32>, Vec<i32>, i32) {
     let stride = fb.chroma_w;
     let mut above = vec![R; b];
     let mut left = vec![R; b];
@@ -644,17 +677,31 @@ pub fn encode_frame_slices(
     for bi in 0..luma_total {
         let sx = bi % gw;
         let sy = bi / gw;
-        let qp = crate::foveation::slice_qp_by_index(seq, frame, slice_index_for(luma_total, n_slices, bi));
-        luma_syntax.push(encode_luma_block(src, reference, sx, sy, luma_b, qp, is_inter)?);
+        let qp = crate::foveation::slice_qp_by_index(
+            seq,
+            frame,
+            slice_index_for(luma_total, n_slices, bi),
+        );
+        luma_syntax.push(encode_luma_block(
+            src, reference, sx, sy, luma_b, qp, is_inter,
+        )?);
     }
     let mut cb_syntax = Vec::with_capacity(chroma_total);
     let mut cr_syntax = Vec::with_capacity(chroma_total);
     for bi in 0..chroma_total {
         let sx = bi % cgw;
         let sy = bi / cgw;
-        let qp = crate::foveation::slice_qp_by_index(seq, frame, slice_index_for(chroma_total, n_slices, bi));
-        cb_syntax.push(encode_chroma_block(src, reference, 0, sx, sy, chroma_b, qp, is_inter)?);
-        cr_syntax.push(encode_chroma_block(src, reference, 1, sx, sy, chroma_b, qp, is_inter)?);
+        let qp = crate::foveation::slice_qp_by_index(
+            seq,
+            frame,
+            slice_index_for(chroma_total, n_slices, bi),
+        );
+        cb_syntax.push(encode_chroma_block(
+            src, reference, 0, sx, sy, chroma_b, qp, is_inter,
+        )?);
+        cr_syntax.push(encode_chroma_block(
+            src, reference, 1, sx, sy, chroma_b, qp, is_inter,
+        )?);
     }
 
     let mut out = Vec::with_capacity(n_slices);
@@ -699,7 +746,17 @@ fn encode_luma_block(
     if is_inter {
         if let Some(ref_) = reference {
             let mut pred = vec![0i32; n];
-            predict_inter_luma(&mut pred, b, &ref_.luma, ref_.width, ref_.width, ref_.height, x0, y0, MotionVector::zero());
+            predict_inter_luma(
+                &mut pred,
+                b,
+                &ref_.luma,
+                ref_.width,
+                ref_.width,
+                ref_.height,
+                x0,
+                y0,
+                MotionVector::zero(),
+            );
             let coeffs = encode_residual(&orig, &pred, b, qp);
             if coeffs_is_lossless(&orig, &pred, &coeffs, b, qp) {
                 return Ok(BlockSyntax::Inter {
@@ -764,7 +821,17 @@ fn encode_chroma_block(
         if let Some(ref_) = reference {
             let ref_plane = if plane_idx == 0 { &ref_.cb } else { &ref_.cr };
             let mut pred = vec![0i32; n];
-            predict_chroma_block(&mut pred, b, ref_plane, ref_.chroma_w, ref_.chroma_w, ref_.chroma_h, x0, y0, MotionVector::zero());
+            predict_chroma_block(
+                &mut pred,
+                b,
+                ref_plane,
+                ref_.chroma_w,
+                ref_.chroma_w,
+                ref_.chroma_h,
+                x0,
+                y0,
+                MotionVector::zero(),
+            );
             let coeffs = encode_residual(&orig, &pred, b, qp);
             if coeffs_is_lossless(&orig, &pred, &coeffs, b, qp) {
                 return Ok(BlockSyntax::Inter {
@@ -797,14 +864,23 @@ fn encode_chroma_block(
     })
 }
 
-/// Quantise `orig - pred` and return the (trimmed) coefficient list.
-fn encode_residual(orig: &[i32], pred: &[i32], b: usize, qp: u8) -> Vec<i16> {
+/// Transform `orig - pred`, quantise, and return the (trimmed) coefficient
+/// list. The forward transform ([`transform_2d`]) must run here so that the
+/// decode side's [`inverse_2d`] is the exact inverse — otherwise the stored
+/// coefficients would be spatial residuals mis-decoded as frequency data.
+fn encode_residual(orig: &[i32], pred: &[i32], b: usize, qp: u8) -> Vec<i32> {
     let n = b * b;
+    let mut residual = vec![0i32; n];
+    for i in 0..n {
+        residual[i] = orig[i] - pred[i];
+    }
+    let mut transformed = vec![0i32; n];
+    transform_2d(&residual, b, &mut transformed);
     let mut coeffs = Vec::with_capacity(n);
     let mut last = 0;
-    for i in 0..n {
-        let q = quant(orig[i] - pred[i], qp);
-        coeffs.push(q as i16);
+    for (i, &t) in transformed.iter().enumerate() {
+        let q = quant(t, qp);
+        coeffs.push(q);
         if q != 0 {
             last = i + 1;
         }
@@ -813,14 +889,14 @@ fn encode_residual(orig: &[i32], pred: &[i32], b: usize, qp: u8) -> Vec<i16> {
     coeffs
 }
 
-fn apply_reconstruct(pred: &[i32], coeffs: &[i16], b: usize, qp: u8) -> Vec<i32> {
+fn apply_reconstruct(pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> Vec<i32> {
     let n = b * b;
     let mut full = vec![0i32; n];
     for (k, &c) in coeffs.iter().enumerate() {
         if k >= n {
             break;
         }
-        full[k] = dequant(c as i32, qp);
+        full[k] = dequant(c, qp);
     }
     let mut residual = vec![0i32; n];
     inverse_2d(&full, b, &mut residual);
@@ -831,11 +907,11 @@ fn apply_reconstruct(pred: &[i32], coeffs: &[i16], b: usize, qp: u8) -> Vec<i32>
     out
 }
 
-fn coeffs_is_lossless(orig: &[i32], pred: &[i32], coeffs: &[i16], b: usize, qp: u8) -> bool {
+fn coeffs_is_lossless(orig: &[i32], pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> bool {
     residual_error(orig, pred, coeffs, b, qp) == 0
 }
 
-fn residual_error(orig: &[i32], pred: &[i32], coeffs: &[i16], b: usize, qp: u8) -> i64 {
+fn residual_error(orig: &[i32], pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> i64 {
     let recon = apply_reconstruct(pred, coeffs, b, qp);
     orig.iter()
         .zip(recon.iter())

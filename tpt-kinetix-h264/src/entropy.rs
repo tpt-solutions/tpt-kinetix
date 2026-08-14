@@ -531,14 +531,28 @@ impl CodedBlockFlagContext {
 /// -- the final position's significance is implicit).
 const SIG_LEN: [usize; 5] = [15, 14, 15, 3, 14];
 
+/// Number of distinct `significant_coeff_flag`/`last_significant_coeff_flag`
+/// contexts for the Luma8x8 category (`ctxBlockCat == 5`), per spec Table
+/// 9-43: unlike cats 0..=4 (where `ctxIdxInc == scan position`), the 8x8
+/// category maps its 63 scan positions onto a much smaller set of contexts
+/// via [`crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FRAME`] /
+/// [`crate::cabac_tables::LAST_COEFF_CTX_INC_8X8_FRAME`].
+const SIG_LEN_8X8: usize = 15;
+const LAST_LEN_8X8: usize = 9;
+
 /// Residual-block CABAC decoder: `significant_coeff_flag` /
 /// `last_significant_coeff_flag` (§9.3.3.1.2) and `coeff_abs_level_minus1`
-/// (§9.3.3.1.3) for the five I-slice block categories (Intra16x16 DC/AC,
-/// Luma4x4, ChromaDC, ChromaAC -- no 8x8-transform or field-coding support).
+/// (§9.3.3.1.3) for the five I-slice 4x4/DC block categories (Intra16x16
+/// DC/AC, Luma4x4, ChromaDC, ChromaAC) plus the Luma8x8 category (`ctxBlockCat
+/// == 5`, High-profile `transform_size_8x8_flag` intra macroblocks). No
+/// field-coding (MBAFF/PAFF) support.
 pub struct ResidualCabacContext {
     sig: [Vec<CabacContext>; 5],
     last: [Vec<CabacContext>; 5],
     level: [[CabacContext; 10]; 5],
+    sig8x8: Vec<CabacContext>,
+    last8x8: Vec<CabacContext>,
+    level8x8: [CabacContext; 10],
 }
 
 impl ResidualCabacContext {
@@ -559,7 +573,69 @@ impl ResidualCabacContext {
             let base = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat];
             std::array::from_fn(|i| init_ctx(base + i, slice_qp_y))
         });
-        Self { sig, last, level }
+        let sig8x8 = (0..SIG_LEN_8X8)
+            .map(|i| init_ctx(crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y))
+            .collect();
+        let last8x8 = (0..LAST_LEN_8X8)
+            .map(|i| init_ctx(crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y))
+            .collect();
+        let level8x8 = std::array::from_fn(|i| {
+            init_ctx(crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y)
+        });
+        Self { sig, last, level, sig8x8, last8x8, level8x8 }
+    }
+
+    /// Decode one Luma8x8 residual block (`ctxBlockCat == 5`, §9.3.3.1.2/.3).
+    /// No `coded_block_flag` is signalled for this category (non-4:4:4) --
+    /// the caller gates the call on the relevant `CodedBlockPatternLuma` bit,
+    /// mirroring `slice_data::parse_intra_residuals`'s CAVLC 8x8 branch.
+    /// Returns coefficients in scan-position order (64 entries) and the
+    /// significant-coefficient count (for the neighbour cbf/nnz context).
+    pub fn decode_block_8x8(&mut self, dec: &mut CabacDecoder) -> ([i16; 64], u8) {
+        let mut out = [0i16; 64];
+        const SIG_LEN: usize = 63;
+        let mut positions: Vec<usize> = Vec::with_capacity(64);
+        let mut found_last = false;
+        for pos in 0..SIG_LEN {
+            let sig_idx = crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FRAME[pos] as usize;
+            if dec.decode_decision(&mut self.sig8x8[sig_idx]) == 1 {
+                positions.push(pos);
+                let last_idx = crate::cabac_tables::LAST_COEFF_CTX_INC_8X8_FRAME[pos] as usize;
+                if dec.decode_decision(&mut self.last8x8[last_idx]) == 1 {
+                    found_last = true;
+                    break;
+                }
+            }
+        }
+        if !found_last {
+            positions.push(SIG_LEN);
+        }
+        let coeff_count = positions.len() as u8;
+
+        let mut node_ctx = 0usize;
+        for &pos in positions.iter().rev() {
+            let level_abs: i32;
+            let level1_idx = crate::cabac_tables::COEFF_ABS_LEVEL1_CTX[node_ctx];
+            if dec.decode_decision(&mut self.level8x8[level1_idx]) == 0 {
+                level_abs = 1;
+                node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[0][node_ctx];
+            } else {
+                let gt1_idx = crate::cabac_tables::COEFF_ABS_LEVELGT1_CTX[node_ctx];
+                node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[1][node_ctx];
+                let mut abs_val: u32 = 2;
+                while abs_val < 15 && dec.decode_decision(&mut self.level8x8[gt1_idx]) == 1 {
+                    abs_val += 1;
+                }
+                if abs_val >= 15 {
+                    abs_val = 15 + dec.decode_bypass_eg(0);
+                }
+                level_abs = abs_val as i32;
+            }
+            let sign = dec.decode_bypass();
+            out[pos] = (if sign == 1 { -level_abs } else { level_abs }) as i16;
+        }
+
+        (out, coeff_count)
     }
 
     /// Decode one residual block for category `cat` (0..=4) with `max_coeff`
@@ -1274,7 +1350,49 @@ impl ResidualCabacContext {
             let base = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat];
             std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
         });
-        Self { sig, last, level }
+        let sig8x8 = (0..SIG_LEN_8X8)
+            .map(|i| init_pb_ctx(crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y))
+            .collect();
+        let last8x8 = (0..LAST_LEN_8X8)
+            .map(|i| init_pb_ctx(crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y))
+            .collect();
+        let level8x8 = std::array::from_fn(|i| {
+            init_pb_ctx(crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y)
+        });
+        Self { sig, last, level, sig8x8, last8x8, level8x8 }
+    }
+}
+
+/// `transform_size_8x8_flag` CABAC context (spec §9.3.3.1.1.10, ctxIdxOffset
+/// 399, 3 contexts). `ctxIdxInc = condTermFlagA + condTermFlagB`, where each
+/// term is the neighbour macroblock's own `transform_size_8x8_flag` value (0
+/// if the neighbour is unavailable or wasn't itself 8x8-transform-coded).
+/// Single-bin FL(cMax=1) binarization -- same shape as
+/// [`MbFieldDecodingFlagContext`].
+pub struct TransformSize8x8FlagContext {
+    ctx: [CabacContext; 3],
+}
+
+impl TransformSize8x8FlagContext {
+    pub fn new(slice_qp_y: i32) -> Self {
+        let base = crate::cabac_tables::TRANSFORM_SIZE_8X8_FLAG_CTX;
+        let ctx = std::array::from_fn(|i| init_ctx(base + i, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// P/B-slice sibling of [`TransformSize8x8FlagContext::new`] -- see
+    /// [`CbpCabacContext::new_pb`]'s doc comment.
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let base = crate::cabac_tables::TRANSFORM_SIZE_8X8_FLAG_CTX;
+        let ctx = std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// Decode `transform_size_8x8_flag` given the left and top neighbours'
+    /// `transform_size_8x8` state.
+    pub fn decode(&mut self, dec: &mut CabacDecoder, left_is_8x8: bool, top_is_8x8: bool) -> bool {
+        let idx = (left_is_8x8 as usize) + (top_is_8x8 as usize);
+        dec.decode_decision(&mut self.ctx[idx]) == 1
     }
 }
 

@@ -248,10 +248,41 @@ pub fn parse_obu_sequence(data: &[u8]) -> Vec<Obu> {
 // Sequence Header OBU payload
 // ---------------------------------------------------------------------------
 
-/// Color configuration (sub-section of SequenceHeaderObu).
+/// Maximum number of operating points a sequence header can signal
+/// (`operating_points_cnt_minus_1` is `f(5)`, AV1 §5.5.1).
+pub const MAX_OPERATING_POINTS: usize = 32;
+
+/// `SELECT_SCREEN_CONTENT_TOOLS` (AV1 §3): the value of
+/// `seq_force_screen_content_tools` meaning "coded in each frame header".
+const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+/// `SELECT_INTEGER_MV` (AV1 §3): the value of `seq_force_integer_mv` meaning
+/// "coded in each frame header".
+const SELECT_INTEGER_MV: u8 = 2;
+
+/// Read `n` bits, mapping underflow to a descriptive error.
+fn f(br: &mut BitReader<'_>, n: u8, what: &'static str) -> anyhow::Result<u32> {
+    if n == 0 {
+        return Ok(0);
+    }
+    br.read_bits(n)
+        .ok_or_else(|| anyhow::anyhow!("truncated: {what}"))
+}
+
+/// Read one bit as a flag, mapping underflow to a descriptive error.
+fn flag(br: &mut BitReader<'_>, what: &'static str) -> anyhow::Result<bool> {
+    br.read_flag()
+        .ok_or_else(|| anyhow::anyhow!("truncated: {what}"))
+}
+
+/// Color configuration (`color_config()`, AV1 §5.5.4).
 #[derive(Debug, Clone)]
 pub struct ColorConfig {
     pub high_bitdepth: bool,
+    /// `twelve_bit` (§5.5.4): only coded for `seq_profile == 2` together with
+    /// `high_bitdepth`; selects 12-bit over 10-bit.
+    pub twelve_bit: bool,
+    /// `BitDepth` as derived in §5.5.4 (8, 10 or 12).
+    pub bit_depth: u8,
     pub mono_chrome: bool,
     pub color_primaries: u8,
     pub transfer_characteristics: u8,
@@ -259,6 +290,11 @@ pub struct ColorConfig {
     pub color_range: bool,
     pub subsampling_x: bool,
     pub subsampling_y: bool,
+    /// `chroma_sample_position` (§5.5.4): only coded for 4:2:0 chroma.
+    pub chroma_sample_position: u8,
+    /// `separate_uv_delta_q` (§5.5.4). `quantization_params()` (§5.9.12) reads
+    /// `diff_uv_delta` (and a distinct `qm_v`) only when this is set.
+    pub separate_uv_delta_q: bool,
 }
 
 /// Parsed AV1 Sequence Header OBU payload (AV1 spec §5.5).
@@ -272,16 +308,32 @@ pub struct SequenceHeaderObu {
     pub max_frame_width_minus_1: u32,
     pub max_frame_height_minus_1: u32,
     pub color_config: ColorConfig,
-    /// `order_hint_bits_minus_1` (from `operating_parameter_info` / `order_hint_bits`).
+    /// `order_hint_bits_minus_1` (§5.5.1). Only coded when `enable_order_hint`
+    /// is set; use [`SequenceHeaderObu::order_hint_bits`] for `OrderHintBits`.
     pub order_hint_bits_minus_1: u8,
-    /// `true` when screen-content-tools are enabled at the sequence level
-    /// (either chosen or forced via `seq_force_screen_content_tools`). Needed
-    /// by the frame-header parser to decide whether `allow_screen_content_tools`
-    /// is read or implied.
+    /// `seq_choose_screen_content_tools` (§5.5.1). When set,
+    /// `seq_force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS` (2) and
+    /// every frame header codes its own `allow_screen_content_tools` bit.
+    pub seq_choose_screen_content_tools: bool,
+    /// `seq_force_screen_content_tools > 0` (§5.5.1). When
+    /// `seq_choose_screen_content_tools` is clear this is the literal forced
+    /// value used by the frame header instead of a coded bit.
     pub seq_force_screen_content_tools: bool,
-    /// `true` when `seq_force_integer_mv` is forced true at the sequence level.
+    /// `seq_choose_integer_mv` (§5.5.1). When set, `seq_force_integer_mv ==
+    /// SELECT_INTEGER_MV` (2) and the frame header codes `force_integer_mv`.
+    /// Note the element is only present when
+    /// `seq_force_screen_content_tools > 0`; it defaults to `true` (SELECT)
+    /// otherwise.
+    pub seq_choose_integer_mv: bool,
+    /// `seq_force_integer_mv > 0` (§5.5.1); the forced value used by the frame
+    /// header when `seq_choose_integer_mv` is clear.
     pub seq_force_integer_mv: bool,
-    /// `additional_frame_id_length_minus_1` (§5.5.2) used only when
+    /// `frame_id_numbers_present_flag` (§5.5.1).
+    pub frame_id_numbers_present_flag: bool,
+    /// `delta_frame_id_length_minus_2` (§5.5.1), only coded when
+    /// `frame_id_numbers_present_flag` is set.
+    pub delta_frame_id_length_minus_2: u8,
+    /// `additional_frame_id_length_minus_1` (§5.5.1) used only when
     /// `frame_id_numbers_present_flag` is set.
     pub additional_frame_id_length_minus_1: u8,
     /// Whether 128x128 superblocks are used (`use_128x128_superblock`).
@@ -292,299 +344,236 @@ pub struct SequenceHeaderObu {
     pub enable_intra_edge_filter: bool,
     /// Whether filter-intra is enabled (`enable_filter_intra`).
     pub enable_filter_intra: bool,
+    /// `enable_interintra_compound` (§5.5.1): inter-intra compound modes.
+    pub enable_interintra_compound: bool,
+    /// `enable_masked_compound` (§5.5.1): wedge / difference-weighted compound.
+    pub enable_masked_compound: bool,
     /// Whether warped motion is enabled (`enable_warped_motion`).
     pub enable_warped_motion: bool,
-    /// Whether intra block copy is enabled (`allow_intrabc`).
+    /// `enable_dual_filter` (§5.5.1): distinct vertical/horizontal interp filters.
+    pub enable_dual_filter: bool,
+    /// Always `false`: `allow_intrabc` is a *frame-level* element (§5.9.2), not
+    /// a sequence-header one. Retained for API compatibility; consult
+    /// [`crate::frame::FrameHeader::allow_intrabc`] instead.
     pub allow_intrabc: bool,
     /// Whether order hint is enabled at the sequence level.
     pub enable_order_hint: bool,
+    /// `enable_jnt_comp` (§5.5.1): distance-weighted compound prediction. Only
+    /// coded when `enable_order_hint` is set.
+    pub enable_jnt_comp: bool,
+    /// `enable_ref_frame_mvs` (§5.5.1): temporal MV prediction. Only coded when
+    /// `enable_order_hint` is set.
+    pub enable_ref_frame_mvs: bool,
     /// Whether CDEF is enabled at the sequence level. When `false`, the frame
-    /// header does **not** carry CDEF parameters (AV1 §5.9.14 gates them on this
+    /// header does **not** carry CDEF parameters (AV1 §5.9.19 gates them on this
     /// flag, not on `lossless`).
     pub enable_cdef: bool,
     /// Whether loop restoration is enabled at the sequence level. When `false`,
-    /// the frame header does not carry loop-restoration parameters (AV1 §5.9.15).
+    /// the frame header does not carry loop-restoration parameters (AV1 §5.9.20).
     pub enable_restoration: bool,
     /// Whether film grain parameters are present in frame headers.
     pub film_grain_params_present: bool,
     /// Whether decoder model info is present (operating points).
     pub decoder_model_info_present: bool,
+    /// `equal_picture_interval` from `timing_info()` (§5.5.3). Gates
+    /// `temporal_point_info()` in the frame header (§5.9.2).
+    pub equal_picture_interval: bool,
+    /// `buffer_delay_length_minus_1` from `decoder_model_info()` (§5.5.5).
+    pub buffer_delay_length_minus_1: u8,
+    /// `buffer_removal_time_length_minus_1` from `decoder_model_info()` (§5.5.5).
+    pub buffer_removal_time_length_minus_1: u8,
+    /// `frame_presentation_time_length_minus_1` from `decoder_model_info()`
+    /// (§5.5.5), i.e. the width of `frame_presentation_time` (§5.9.31).
+    pub frame_presentation_time_length_minus_1: u8,
+    /// `operating_points_cnt_minus_1` (§5.5.1).
+    pub operating_points_cnt_minus_1: u8,
+    /// `operating_point_idc[]` (§5.5.1) for the signalled operating points.
+    pub operating_point_idc: [u16; MAX_OPERATING_POINTS],
+    /// `decoder_model_present_for_this_op[]` (§5.5.1); selects which operating
+    /// points carry `buffer_removal_time` in the frame header (§5.9.2).
+    pub decoder_model_present_for_this_op: [bool; MAX_OPERATING_POINTS],
 }
 
 impl SequenceHeaderObu {
-    /// Parse a Sequence Header OBU payload.
+    /// `OrderHintBits` (§5.5.1): width of `order_hint` in every frame header.
+    pub fn order_hint_bits(&self) -> u8 {
+        if self.enable_order_hint {
+            self.order_hint_bits_minus_1 + 1
+        } else {
+            0
+        }
+    }
+
+    /// `idLen` (§5.9.2): width of `current_frame_id` / `display_frame_id`.
+    pub fn frame_id_len(&self) -> u8 {
+        self.additional_frame_id_length_minus_1 + self.delta_frame_id_length_minus_2 + 3
+    }
+
+    /// Parse a Sequence Header OBU payload (`sequence_header_obu()`, AV1 §5.5.1).
     pub fn parse(payload: &[u8]) -> anyhow::Result<Self> {
         let mut br = BitReader::new(payload);
 
-        let seq_profile =
-            br.read_bits(3)
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_profile"))? as u8;
+        let seq_profile = f(&mut br, 3, "seq_profile")? as u8;
+        let still_picture = flag(&mut br, "still_picture")?;
+        let reduced_still_picture_header = flag(&mut br, "reduced_still_picture_header")?;
 
-        let still_picture = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: still_picture"))?;
-
-        let reduced_still_picture_header = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: reduced_still_picture_header"))?;
-
-        // Simplified parsing for the reduced_still_picture_header path only.
-        // Full parsing would require many more fields; we parse enough to extract
-        // frame dimensions and color config which is what Phase 4 needs.
-        if reduced_still_picture_header {
-            // In reduced mode there is no timing / operating points info; skip to
-            // frame size.
-            let frame_width_bits_minus_1 = br
-                .read_bits(4)
-                .ok_or_else(|| anyhow::anyhow!("truncated: frame_width_bits_minus_1"))?
-                as u8;
-            let frame_height_bits_minus_1 = br
-                .read_bits(4)
-                .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))?
-                as u8;
-            let max_frame_width_minus_1 = br
-                .read_bits(frame_width_bits_minus_1 + 1)
-                .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
-            let max_frame_height_minus_1 = br
-                .read_bits(frame_height_bits_minus_1 + 1)
-                .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_height_minus_1"))?;
-
-            let color_config = Self::parse_color_config(&mut br, seq_profile)?;
-
-            // Reduced still picture: superblock size flag, order_hint, intrabc,
-            // and film grain are not present.
-            return Ok(Self {
-                seq_profile,
-                still_picture,
-                reduced_still_picture_header,
-                frame_width_bits_minus_1,
-                frame_height_bits_minus_1,
-                max_frame_width_minus_1,
-                max_frame_height_minus_1,
-                color_config,
-                order_hint_bits_minus_1: 0,
-                seq_force_screen_content_tools: true,
-                seq_force_integer_mv: false,
-                additional_frame_id_length_minus_1: 0,
-                use_128x128_superblock: false,
-                enable_superres: false,
-                enable_intra_edge_filter: true,
-                enable_filter_intra: true,
-                enable_warped_motion: true,
-                allow_intrabc: false,
-                enable_order_hint: false,
-                enable_cdef: true,
-                enable_restoration: true,
-                film_grain_params_present: false,
-                decoder_model_info_present: false,
-            });
-        }
-
-        // Non-reduced path: skip timing_info_present_flag and decoder_model_info
+        // --- Timing info / decoder model / operating points (§5.5.1) ---
         let mut decoder_model_info_present = false;
-        let timing_info_present = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: timing_info_present"))?;
-        if timing_info_present {
-            // timing_info(): num_units_in_display_tick(32), time_scale(32),
-            //               equal_picture_interval(1) [+ num_ticks_per_picture_minus_1 uvlc]
-            br.read_bits(32)
-                .ok_or_else(|| anyhow::anyhow!("truncated: num_units_in_display_tick"))?;
-            br.read_bits(32)
-                .ok_or_else(|| anyhow::anyhow!("truncated: time_scale"))?;
-            let equal_pic = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: equal_picture_interval"))?;
-            if equal_pic {
-                // uvlc — skip by reading until leading zero
-                let _ = read_uvlc(&mut br)?;
-            }
+        let mut equal_picture_interval = false;
+        let mut buffer_delay_length_minus_1 = 0u8;
+        let mut buffer_removal_time_length_minus_1 = 0u8;
+        let mut frame_presentation_time_length_minus_1 = 0u8;
+        let mut operating_points_cnt_minus_1 = 0u8;
+        let mut operating_point_idc = [0u16; MAX_OPERATING_POINTS];
+        let mut decoder_model_present_for_this_op = [false; MAX_OPERATING_POINTS];
 
-            decoder_model_info_present = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: decoder_model_info_present"))?;
-            if decoder_model_info_present {
-                // decoder_model_info(): buffer_delay_length_minus_1(5), …
-                // We skip these 24 bits (5+32+1+1+5+1+1 simplified to fixed skip)
-                br.read_bits(5)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi"))?;
-                br.read_bits(32)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi2"))?;
-                br.read_bits(10)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: dmi3"))?;
-            }
-        }
-
-        // initial_display_delay_present_flag
-        let initial_display_delay_present = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: initial_display_delay_present"))?;
-
-        // operating_points_cnt_minus_1
-        let op_cnt = br
-            .read_bits(5)
-            .ok_or_else(|| anyhow::anyhow!("truncated: operating_points_cnt_minus_1"))?;
-
-        for _ in 0..=op_cnt {
-            // operating_point_idc (12) + seq_level_idx (5)
-            br.read_bits(12)
-                .ok_or_else(|| anyhow::anyhow!("truncated: operating_point_idc"))?;
-            let seq_level_idx = br
-                .read_bits(5)
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_level_idx"))?;
-            if seq_level_idx > 7 {
-                // seq_tier
-                br.read_bits(1)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_tier"))?;
-            }
+        if reduced_still_picture_header {
+            // Reduced headers code nothing but `seq_level_idx[0]` here; all the
+            // timing / operating-point state keeps its implied defaults.
+            let _seq_level_idx0 = f(&mut br, 5, "seq_level_idx[0]")?;
+        } else {
+            let timing_info_present = flag(&mut br, "timing_info_present_flag")?;
             if timing_info_present {
-                // decoder_model_present_for_this_op is always present in the
-            // operating-points loop (§5.5.2), independent of `timing_info_present`.
-            let dm_present = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: dm_present"))?;
-            if dm_present {
-                // operating_parameters_info: 3 * buffer_delay_length bits.
-                // `buffer_delay_length` defaults to 5 when decoder model info is
-                // present, else 0 (spec §5.5.2 `decoder_model_info()`).
-                let bdl = if decoder_model_info_present { 5u32 } else { 0 };
-                br.read_bits((3 * (bdl + 1)) as u8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: opi"))?;
+                // timing_info() (§5.5.3)
+                f(&mut br, 32, "num_units_in_display_tick")?;
+                f(&mut br, 32, "time_scale")?;
+                equal_picture_interval = flag(&mut br, "equal_picture_interval")?;
+                if equal_picture_interval {
+                    let _num_ticks_per_picture_minus_1 = read_uvlc(&mut br)?;
+                }
+                decoder_model_info_present = flag(&mut br, "decoder_model_info_present_flag")?;
+                if decoder_model_info_present {
+                    // decoder_model_info() (§5.5.5)
+                    buffer_delay_length_minus_1 =
+                        f(&mut br, 5, "buffer_delay_length_minus_1")? as u8;
+                    f(&mut br, 32, "num_units_in_decoding_tick")?;
+                    buffer_removal_time_length_minus_1 =
+                        f(&mut br, 5, "buffer_removal_time_length_minus_1")? as u8;
+                    frame_presentation_time_length_minus_1 =
+                        f(&mut br, 5, "frame_presentation_time_length_minus_1")? as u8;
+                }
             }
-            }
-            if initial_display_delay_present {
-                let idd = br
-                    .read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: idd_present"))?;
-                if idd {
-                    br.read_bits(4)
-                        .ok_or_else(|| anyhow::anyhow!("truncated: initial_display_delay"))?;
+
+            let initial_display_delay_present =
+                flag(&mut br, "initial_display_delay_present_flag")?;
+            operating_points_cnt_minus_1 = f(&mut br, 5, "operating_points_cnt_minus_1")? as u8;
+
+            for i in 0..=operating_points_cnt_minus_1 as usize {
+                operating_point_idc[i] = f(&mut br, 12, "operating_point_idc")? as u16;
+                let seq_level_idx = f(&mut br, 5, "seq_level_idx")?;
+                if seq_level_idx > 7 {
+                    f(&mut br, 1, "seq_tier")?;
+                }
+                // `decoder_model_present_for_this_op` is gated on the *decoder
+                // model* flag, not on `timing_info_present_flag` (§5.5.1).
+                if decoder_model_info_present {
+                    decoder_model_present_for_this_op[i] =
+                        flag(&mut br, "decoder_model_present_for_this_op")?;
+                    if decoder_model_present_for_this_op[i] {
+                        // operating_parameters_info() (§5.5.6): two f(n) buffer
+                        // delays plus low_delay_mode_flag.
+                        let n = buffer_delay_length_minus_1 + 1;
+                        f(&mut br, n, "decoder_buffer_delay")?;
+                        f(&mut br, n, "encoder_buffer_delay")?;
+                        f(&mut br, 1, "low_delay_mode_flag")?;
+                    }
+                }
+                if initial_display_delay_present
+                    && flag(&mut br, "initial_display_delay_present_for_this_op")?
+                {
+                    f(&mut br, 4, "initial_display_delay_minus_1")?;
                 }
             }
         }
 
-        // --- Post operating-points fields (§5.5.2) ---
-        // frame_width_bits_minus_1(4), frame_height_bits_minus_1(4)
-        let frame_width_bits_minus_1 = br
-            .read_bits(4)
-            .ok_or_else(|| anyhow::anyhow!("truncated: frame_width_bits_minus_1"))?
-            as u8;
-        let frame_height_bits_minus_1 = br
-            .read_bits(4)
-            .ok_or_else(|| anyhow::anyhow!("truncated: frame_height_bits_minus_1"))?
-            as u8;
+        // --- Maximum frame size (§5.5.1) ---
+        let frame_width_bits_minus_1 = f(&mut br, 4, "frame_width_bits_minus_1")? as u8;
+        let frame_height_bits_minus_1 = f(&mut br, 4, "frame_height_bits_minus_1")? as u8;
+        let max_frame_width_minus_1 =
+            f(&mut br, frame_width_bits_minus_1 + 1, "max_frame_width_minus_1")?;
+        let max_frame_height_minus_1 = f(
+            &mut br,
+            frame_height_bits_minus_1 + 1,
+            "max_frame_height_minus_1",
+        )?;
 
-        let max_frame_width_minus_1 = br
-            .read_bits(frame_width_bits_minus_1 + 1)
-            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_width_minus_1"))?;
-        let max_frame_height_minus_1 = br
-            .read_bits(frame_height_bits_minus_1 + 1)
-            .ok_or_else(|| anyhow::anyhow!("truncated: max_frame_height_minus_1"))?;
+        // --- Frame id numbers (§5.5.1) ---
+        let frame_id_numbers_present_flag = if reduced_still_picture_header {
+            false
+        } else {
+            flag(&mut br, "frame_id_numbers_present_flag")?
+        };
+        let (delta_frame_id_length_minus_2, additional_frame_id_length_minus_1) =
+            if frame_id_numbers_present_flag {
+                (
+                    f(&mut br, 4, "delta_frame_id_length_minus_2")? as u8,
+                    f(&mut br, 3, "additional_frame_id_length_minus_1")? as u8,
+                )
+            } else {
+                (0, 0)
+            };
 
-        // frame_id_numbers_present_flag(1) + optional sub-fields
-        let frame_id_numbers_present = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: frame_id_numbers_present_flag"))?;
-        if frame_id_numbers_present {
-            br.read_bits(4)
-                .ok_or_else(|| anyhow::anyhow!("truncated: delta_frame_id_length_minus_2"))?;
-            br.read_bits(3)
-                .ok_or_else(|| anyhow::anyhow!("truncated: additional_frame_id_length_minus_1"))?;
+        let use_128x128_superblock = flag(&mut br, "use_128x128_superblock")?;
+        let enable_filter_intra = flag(&mut br, "enable_filter_intra")?;
+        let enable_intra_edge_filter = flag(&mut br, "enable_intra_edge_filter")?;
+
+        // --- Inter tools, screen-content tools and order hint (§5.5.1) ---
+        //
+        // A reduced still-picture header implies every inter tool is off and
+        // both force values are SELECT_*, and codes none of these bits.
+        let mut enable_interintra_compound = false;
+        let mut enable_masked_compound = false;
+        let mut enable_warped_motion = false;
+        let mut enable_dual_filter = false;
+        let mut enable_order_hint = false;
+        let mut enable_jnt_comp = false;
+        let mut enable_ref_frame_mvs = false;
+        let mut seq_force_screen_content_tools = SELECT_SCREEN_CONTENT_TOOLS;
+        let mut seq_force_integer_mv = SELECT_INTEGER_MV;
+        let mut order_hint_bits_minus_1 = 0u8;
+
+        if !reduced_still_picture_header {
+            enable_interintra_compound = flag(&mut br, "enable_interintra_compound")?;
+            enable_masked_compound = flag(&mut br, "enable_masked_compound")?;
+            enable_warped_motion = flag(&mut br, "enable_warped_motion")?;
+            enable_dual_filter = flag(&mut br, "enable_dual_filter")?;
+            enable_order_hint = flag(&mut br, "enable_order_hint")?;
+            if enable_order_hint {
+                enable_jnt_comp = flag(&mut br, "enable_jnt_comp")?;
+                enable_ref_frame_mvs = flag(&mut br, "enable_ref_frame_mvs")?;
+            }
+            // `seq_choose_screen_content_tools` selects SELECT_SCREEN_CONTENT_-
+            // TOOLS; otherwise the forced 0/1 value follows explicitly (§5.5.1).
+            seq_force_screen_content_tools = if flag(&mut br, "seq_choose_screen_content_tools")? {
+                SELECT_SCREEN_CONTENT_TOOLS
+            } else {
+                f(&mut br, 1, "seq_force_screen_content_tools")? as u8
+            };
+            // `seq_choose_integer_mv` / `seq_force_integer_mv` are only coded
+            // when screen content tools can be used at all (§5.5.1).
+            seq_force_integer_mv = if seq_force_screen_content_tools > 0 {
+                if flag(&mut br, "seq_choose_integer_mv")? {
+                    SELECT_INTEGER_MV
+                } else {
+                    f(&mut br, 1, "seq_force_integer_mv")? as u8
+                }
+            } else {
+                SELECT_INTEGER_MV
+            };
+            // `order_hint_bits_minus_1` precedes `enable_superres` and is only
+            // present when order hints are enabled (§5.5.1).
+            if enable_order_hint {
+                order_hint_bits_minus_1 = f(&mut br, 3, "order_hint_bits_minus_1")? as u8;
+            }
         }
 
-        // use_128x128_superblock(1) + feature enable flags
-        let use_128x128_superblock = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: use_128x128_superblock"))?;
-        let enable_filter_intra = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_filter_intra"))?;
-        let enable_intra_edge_filter = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_intra_edge_filter"))?;
-        let _enable_interintra_compound = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_interintra_compound"))?;
-        let _enable_masked_compound = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_masked_compound"))?;
-        let enable_warped_motion = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_warped_motion"))?;
-        let _enable_dual_filter = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_dual_filter"))?;
-        let enable_order_hint = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_order_hint"))?;
-        let _enable_jnt_comp = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_jnt_comp"))?;
-        let _enable_ref_frame_mvs = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_ref_frame_mvs"))?;
-
-        // Screen-content tools (§5.5.2 / §5.5.3)
-        let seq_force_screen_content_tools = if reduced_still_picture_header {
-            true
-        } else {
-            let choose = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_choose_screen_content_tools"))?;
-            if choose {
-                true
-            } else {
-                br.read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_screen_content_tools"))?
-            }
-        };
-        let seq_force_integer_mv = if seq_force_screen_content_tools {
-            let choose = br
-                .read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: seq_choose_integer_mv"))?;
-            if choose {
-                false
-            } else {
-                br.read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: seq_force_integer_mv"))?
-            }
-        } else {
-            false
-        };
-
-        // allow_intrabc(1) when screen content tools enabled and not forced integer mv
-        let allow_intrabc = if seq_force_screen_content_tools && !seq_force_integer_mv {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: allow_intrabc"))?
-        } else {
-            false
-        };
-
-        let enable_superres = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_superres"))?;
-        let enable_cdef = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_cdef"))?;
-        let enable_restoration = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: enable_restoration"))?;
-
-        // order_hint_bits_minus_1(3) only when order hint is enabled
-        let order_hint_bits_minus_1 = if enable_order_hint {
-            br.read_bits(3)
-                .ok_or_else(|| anyhow::anyhow!("truncated: order_hint_bits_minus_1"))?
-                as u8
-        } else {
-            0
-        };
+        let enable_superres = flag(&mut br, "enable_superres")?;
+        let enable_cdef = flag(&mut br, "enable_cdef")?;
+        let enable_restoration = flag(&mut br, "enable_restoration")?;
 
         let color_config = Self::parse_color_config(&mut br, seq_profile)?;
 
-        // film_grain_params_present(1) (after color config)
-        let film_grain_params_present = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: film_grain_params_present"))?;
+        let film_grain_params_present = flag(&mut br, "film_grain_params_present")?;
 
         Ok(Self {
             seq_profile,
@@ -596,102 +585,136 @@ impl SequenceHeaderObu {
             max_frame_height_minus_1,
             color_config,
             order_hint_bits_minus_1,
-            seq_force_screen_content_tools,
-            seq_force_integer_mv,
-            additional_frame_id_length_minus_1: 0,
+            seq_choose_screen_content_tools: seq_force_screen_content_tools
+                == SELECT_SCREEN_CONTENT_TOOLS,
+            seq_force_screen_content_tools: seq_force_screen_content_tools > 0,
+            seq_choose_integer_mv: seq_force_integer_mv == SELECT_INTEGER_MV,
+            seq_force_integer_mv: seq_force_integer_mv > 0,
+            frame_id_numbers_present_flag,
+            delta_frame_id_length_minus_2,
+            additional_frame_id_length_minus_1,
             use_128x128_superblock,
             enable_superres,
             enable_intra_edge_filter,
             enable_filter_intra,
+            enable_interintra_compound,
+            enable_masked_compound,
             enable_warped_motion,
-            allow_intrabc,
+            enable_dual_filter,
+            // `allow_intrabc` is frame-level (§5.9.2); never coded here.
+            allow_intrabc: false,
             enable_order_hint,
+            enable_jnt_comp,
+            enable_ref_frame_mvs,
             enable_cdef,
             enable_restoration,
             film_grain_params_present,
             decoder_model_info_present,
+            equal_picture_interval,
+            buffer_delay_length_minus_1,
+            buffer_removal_time_length_minus_1,
+            frame_presentation_time_length_minus_1,
+            operating_points_cnt_minus_1,
+            operating_point_idc,
+            decoder_model_present_for_this_op,
         })
     }
 
+    /// `color_config()` (AV1 §5.5.4).
     fn parse_color_config(br: &mut BitReader<'_>, seq_profile: u8) -> anyhow::Result<ColorConfig> {
-        let high_bitdepth = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: high_bitdepth"))?;
-
+        let high_bitdepth = flag(br, "high_bitdepth")?;
         let twelve_bit = if seq_profile == 2 && high_bitdepth {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: twelve_bit"))?
+            flag(br, "twelve_bit")?
         } else {
             false
         };
-        let _ = twelve_bit;
+        let bit_depth = if seq_profile == 2 && high_bitdepth {
+            if twelve_bit {
+                12
+            } else {
+                10
+            }
+        } else if high_bitdepth {
+            10
+        } else {
+            8
+        };
 
         let mono_chrome = if seq_profile == 1 {
             false
         } else {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: mono_chrome"))?
+            flag(br, "mono_chrome")?
         };
 
-        let color_description_present = br
-            .read_flag()
-            .ok_or_else(|| anyhow::anyhow!("truncated: color_description_present"))?;
-
+        let color_description_present = flag(br, "color_description_present_flag")?;
         let (color_primaries, transfer_characteristics, matrix_coefficients) =
             if color_description_present {
-                let cp = br
-                    .read_bits(8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: color_primaries"))?
-                    as u8;
-                let tc = br
-                    .read_bits(8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: transfer_characteristics"))?
-                    as u8;
-                let mc = br
-                    .read_bits(8)
-                    .ok_or_else(|| anyhow::anyhow!("truncated: matrix_coefficients"))?
-                    as u8;
-                (cp, tc, mc)
+                (
+                    f(br, 8, "color_primaries")? as u8,
+                    f(br, 8, "transfer_characteristics")? as u8,
+                    f(br, 8, "matrix_coefficients")? as u8,
+                )
             } else {
-                (2, 2, 2) // CP_UNSPECIFIED, TC_UNSPECIFIED, MC_UNSPECIFIED
+                // CP_UNSPECIFIED / TC_UNSPECIFIED / MC_UNSPECIFIED
+                (2, 2, 2)
             };
 
-        let color_range = if mono_chrome {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: color_range_mono"))?
-        } else if color_primaries == 1 && transfer_characteristics == 13 && matrix_coefficients == 0
-        {
-            // sRGB: full range, 4:4:4
-            true
-        } else {
-            br.read_flag()
-                .ok_or_else(|| anyhow::anyhow!("truncated: color_range"))?
-        };
+        if mono_chrome {
+            // Monochrome streams code `color_range` and then stop: no
+            // `chroma_sample_position` and no `separate_uv_delta_q` (§5.5.4).
+            let color_range = flag(br, "color_range")?;
+            return Ok(ColorConfig {
+                high_bitdepth,
+                twelve_bit,
+                bit_depth,
+                mono_chrome,
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                color_range,
+                subsampling_x: true,
+                subsampling_y: true,
+                chroma_sample_position: 0, // CSP_UNKNOWN
+                separate_uv_delta_q: false,
+            });
+        }
 
-        let (subsampling_x, subsampling_y) = if seq_profile == 0 {
-            (true, true)
-        } else if seq_profile == 1 {
-            (false, false)
-        } else {
-            // profile 2
-            if high_bitdepth {
-                let sx = br
-                    .read_flag()
-                    .ok_or_else(|| anyhow::anyhow!("truncated: subsampling_x"))?;
-                let sy = if sx {
-                    br.read_flag()
-                        .ok_or_else(|| anyhow::anyhow!("truncated: subsampling_y"))?
-                } else {
-                    false
-                };
-                (sx, sy)
+        let (color_range, subsampling_x, subsampling_y, chroma_sample_position) =
+            if color_primaries == 1 && transfer_characteristics == 13 && matrix_coefficients == 0 {
+                // CP_BT_709 + TC_SRGB + MC_IDENTITY implies full-range 4:4:4.
+                (true, false, false, 0)
             } else {
-                (true, false) // 4:2:2
-            }
-        };
+                let color_range = flag(br, "color_range")?;
+                let (sx, sy) = if seq_profile == 0 {
+                    (true, true) // 4:2:0
+                } else if seq_profile == 1 {
+                    (false, false) // 4:4:4
+                } else if bit_depth == 12 {
+                    let sx = flag(br, "subsampling_x")?;
+                    let sy = if sx {
+                        flag(br, "subsampling_y")?
+                    } else {
+                        false
+                    };
+                    (sx, sy)
+                } else {
+                    (true, false) // profile 2, <= 10 bit: 4:2:2
+                };
+                let csp = if sx && sy {
+                    f(br, 2, "chroma_sample_position")? as u8
+                } else {
+                    0
+                };
+                (color_range, sx, sy, csp)
+            };
+
+        // `separate_uv_delta_q` closes color_config() for all non-mono streams.
+        let separate_uv_delta_q = flag(br, "separate_uv_delta_q")?;
 
         Ok(ColorConfig {
             high_bitdepth,
+            twelve_bit,
+            bit_depth,
             mono_chrome,
             color_primaries,
             transfer_characteristics,
@@ -699,6 +722,8 @@ impl SequenceHeaderObu {
             color_range,
             subsampling_x,
             subsampling_y,
+            chroma_sample_position,
+            separate_uv_delta_q,
         })
     }
 

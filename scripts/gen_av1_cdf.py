@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate Rust default-CDF consts for tpt-kinetix-av1 from the AV1 spec
-``10.additional.tables.md``.
+``10.additional.tables.md`` (and ``08.decoding.process.md`` for the
+inter-prediction subpel filter kernels).
 
 The spec publishes every default CDF as a C-style initializer list fenced in a
 ``~~~~~ c`` block.  We locate each named table, extract the balanced-brace
@@ -10,6 +11,14 @@ block, and recursively parse it into nested integer lists, then emit a Rust
 These tables are the *exact* default probabilities the AV1 arithmetic decoder
 must start from (identical to every conformant encoder), so they are
 transcribed verbatim from the spec rather than approximated.
+
+Usage::
+
+    python scripts/gen_av1_cdf.py 10.additional.tables.md [out.rs] \
+        [--extra 08.decoding.process.md]
+
+Multiple input files may be supplied; the first positional argument is the
+primary table file and ``--extra`` adds further spec files to search.
 """
 import re
 import sys
@@ -33,30 +42,62 @@ TARGETS = [
     "Default_Skip_Cdf",
     "Default_Angle_Delta_Cdf",
     "Default_Interp_Filter_Cdf",
+    "Default_Segment_Id_Cdf",
+    # AV1 Phase E — inter prediction: inter mode / reference frame syntax.
+    "Default_Is_Inter_Cdf",
+    "Default_Skip_Mode_Cdf",
+    "Default_Comp_Mode_Cdf",
+    "Default_Comp_Ref_Type_Cdf",
+    "Default_Uni_Comp_Ref_Cdf",
+    "Default_Comp_Ref_Cdf",
+    "Default_Comp_Bwd_Ref_Cdf",
+    "Default_Single_Ref_Cdf",
+    "Default_Compound_Mode_Cdf",
+    "Default_New_Mv_Cdf",
+    "Default_Zero_Mv_Cdf",
+    "Default_Ref_Mv_Cdf",
+    "Default_Drl_Mode_Cdf",
+    "Default_Motion_Mode_Cdf",
+    "Default_Use_Obmc_Cdf",
+    # AV1 Phase E — motion vector syntax (§5.11.31-5.11.32).
+    "Default_Mv_Joint_Cdf",
+    "Default_Mv_Sign_Cdf",
+    "Default_Mv_Class_Cdf",
+    "Default_Mv_Class0_Bit_Cdf",
+    "Default_Mv_Class0_Fr_Cdf",
+    "Default_Mv_Class0_Hp_Cdf",
+    "Default_Mv_Bit_Cdf",
+    "Default_Mv_Fr_Cdf",
+    "Default_Mv_Hp_Cdf",
 ]
 
-# Small non-CDF lookup tables are hardcoded in Rust (see reconstruct.rs);
-# they are small, fixed, and not probability tables.
-LOOKUP_TARGETS = []
+# Small non-CDF lookup tables. `Subpel_Filters` (AV1 §7.11.3.4) is the
+# normative 6x16x8 set of inter-prediction interpolation kernels; its taps are
+# signed, so it is emitted as `i32` rather than the unsigned CDF type.
+LOOKUP_TARGETS = [
+    "Subpel_Filters",
+]
 
 
 def find_blocks(text):
-    """Return dict name -> raw brace content (string inside outermost {})."""
+    """Return dict name -> raw brace content (string inside outermost {}).
+
+    Only *definitions* of the form ``Name[ dim ]...[ dim ] = { ... }`` are
+    matched.  Some target names (notably ``Subpel_Filters``) also appear as
+    array *subscripts* inside spec pseudo-code, e.g.
+    ``Subpel_Filters[ interpFilter ][ (p >> 6) & SUBPEL_MASK ][ t ] * ...``;
+    requiring an ``=`` immediately after the bracket list skips those.
+    """
     out = {}
-    # Match:  Name[ ... ] = {  ...  };
-    # We anchor on the name then scan for the first '{' and its matching '}'.
-    for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\s*\[", text):
+    wanted = set(TARGETS) | set(LOOKUP_TARGETS)
+    # Declaration: the name, one or more `[...]` dimensions, then `=`.
+    decl = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*((?:\[[^\]]*\]\s*)+)=")
+    for m in decl.finditer(text):
         name = m.group(1)
-        if name not in set(TARGETS) | set(LOOKUP_TARGETS):
+        if name not in wanted or name in out:
             continue
-        if name in out:
-            continue
-        # find '=' after this point
-        eq = text.find("=", m.end())
-        if eq == -1:
-            continue
-        # find first '{' after '='
-        brace = text.find("{", eq)
+        # find first '{' after the '='
+        brace = text.find("{", m.end() - 1)
         if brace == -1:
             continue
         # match braces
@@ -78,7 +119,9 @@ def find_blocks(text):
 def parse_value(s, i):
     """Parse one value starting at index i. Returns (value, next_index).
 
-    value is either an int or a list of values.
+    value is either an int or a list of values.  Scalars may be written as a
+    product (the spec writes several default CDF probabilities as ``128*128``),
+    which is evaluated here.
     """
     # skip whitespace and commas
     while i < len(s) and s[i] in " \t\r\n,":
@@ -99,15 +142,18 @@ def parse_value(s, i):
                 break
             lst.append(v)
         return lst, i
-    # integer
-    m = re.match(r"-?\d+", s[i:])
+    # integer, or a product of integers (`128*128`)
+    m = re.match(r"-?\d+(?:\s*\*\s*-?\d+)*", s[i:])
     if not m:
         # skip a stray token (e.g. a comment start)
         j = i
         while j < len(s) and s[j] not in ",{} \t\r\n":
             j += 1
         return None, j
-    return int(m.group(0)), i + m.end()
+    value = 1
+    for part in m.group(0).split("*"):
+        value *= int(part.strip())
+    return value, i + m.end()
 
 
 def to_rust_type(node):
@@ -129,8 +175,10 @@ def to_rust_literal(node):
 def fmt_rust(name, node, is_lookup):
     rust_name = name.upper()
     if is_lookup:
-        # flat-ish int arrays (may be nested 2D)
-        ty = to_rust_type(node).replace("u16", "u8" if max_int(node) < 256 else "u16")
+        # Signed lookup tables (e.g. the subpel filter taps) need a signed
+        # element type; CDF-shaped tables stay `u16`.
+        elem = "i32" if min_int(node) < 0 else ("u8" if max_int(node) < 256 else "u16")
+        ty = to_rust_type(node).replace("u16", elem)
         return f"pub static {rust_name}: {ty} = {to_rust_literal(node)};\n"
     ty = to_rust_type(node)
     return f"pub static {rust_name}: {ty} = {to_rust_literal(node)};\n"
@@ -142,14 +190,30 @@ def max_int(node):
     return max((max_int(x) for x in node), default=0)
 
 
+def min_int(node):
+    if isinstance(node, int):
+        return node
+    return min((min_int(x) for x in node), default=0)
+
+
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "av1_tables.md"
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
+    args = [a for a in sys.argv[1:]]
+    extra = []
+    while "--extra" in args:
+        i = args.index("--extra")
+        extra.append(args[i + 1])
+        del args[i : i + 2]
+    path = args[0] if args else "av1_tables.md"
+
+    text = ""
+    for p in [path] + extra:
+        with open(p, "r", encoding="utf-8") as f:
+            text += f.read() + "\n"
     blocks = find_blocks(text)
 
     lines = []
     lines.append("// @generated by scripts/gen_av1_cdf.py from AV1 spec 10.additional.tables.md\n")
+    lines.append("// (Subpel_Filters from 08.decoding.process.md).\n")
     lines.append("// Exact default CDF / lookup tables. Do not edit by hand.\n")
     missing = []
     for name in TARGETS:
@@ -167,8 +231,8 @@ def main():
     if missing:
         sys.stderr.write("MISSING: " + ", ".join(missing) + "\n")
     out = "".join(lines)
-    if len(sys.argv) > 2:
-        with open(sys.argv[2], "w", encoding="utf-8") as f:
+    if len(args) > 1:
+        with open(args[1], "w", encoding="utf-8") as f:
             f.write(out)
     else:
         sys.stdout.write(out)

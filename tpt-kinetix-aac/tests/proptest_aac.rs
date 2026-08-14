@@ -14,7 +14,7 @@ proptest! {
     /// returns a typed [`AacParseError`].
     #[test]
     fn raw_data_block_parse_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        let _ = tpt_kinetix_aac::RawDataBlock::parse(&data);
+        let _ = tpt_kinetix_aac::RawDataBlock::parse(&data, 4);
     }
 
     /// Every primitive reader method must be safe on untrusted input.

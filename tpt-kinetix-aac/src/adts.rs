@@ -30,6 +30,8 @@ pub struct AdtsHeader {
     pub object_type: u8,
     /// Decoded sample rate in Hz.
     pub sample_rate: u32,
+    /// The 4-bit sampling-frequency index (into the ISO sample-rate table).
+    pub sampling_frequency_index: u8,
     /// Channel count derived from the channel configuration.
     pub channels: u8,
     /// Whether a 2-byte CRC follows the fixed header (header is 9 bytes if so).
@@ -84,6 +86,7 @@ impl AdtsHeader {
         Ok(AdtsHeader {
             object_type,
             sample_rate,
+            sampling_frequency_index: sf_index,
             channels,
             has_crc,
             frame_length,

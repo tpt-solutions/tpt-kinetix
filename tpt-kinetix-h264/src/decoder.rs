@@ -396,11 +396,11 @@ impl H264Decoder {
         use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
 
         let entropy_coding_mode_flag = pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
-        // CABAC: 8x8 transform (High profile) not yet supported.
-        // P/B CABAC is now implemented (Phase D.4).
-        if entropy_coding_mode_flag && pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false) {
-            return Ok(None);
-        }
+        // CABAC 8x8 transform (High profile) is supported for intra
+        // macroblocks (Phase F.4); inter (P_8x8/B_Direct) 8x8 transform is
+        // not yet implemented for either entropy mode, matching the CAVLC
+        // path's existing scope, so no gate is needed here for that case.
+        let transform_8x8_mode_flag = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
         // Interlaced not handled.
         if !sps.frame_mbs_only_flag {
             return Ok(None);
@@ -481,6 +481,7 @@ impl H264Decoder {
                 slice_qp,
                 sps.mb_adaptive_frame_field_flag,
                 header.field_pic_flag,
+                transform_8x8_mode_flag,
                 tracer,
             ) {
                 Ok(p) => p,
@@ -917,6 +918,7 @@ impl H264Decoder {
                         header.cabac_init_idc as usize,
                         num_ref_idx_l0_active,
                         chroma_qp_index_offset,
+                        pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                         &mut crate::trace::NoopTracer,
                     )
                 } else {
@@ -1126,6 +1128,7 @@ impl H264Decoder {
                         num_ref_idx_l0_active,
                         num_ref_idx_l1_active,
                         chroma_qp_index_offset,
+                        pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                         &mut crate::trace::NoopTracer,
                     )
                 } else {
@@ -1827,6 +1830,7 @@ fn decode_interlaced<T: DecodeTracer>(
             slice_qp,
             mb_adaptive,
             header.field_pic_flag,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
             tracer,
         )
     } else {

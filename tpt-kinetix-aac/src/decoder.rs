@@ -1,211 +1,75 @@
-//! AAC decoder shell.
+//! Native AAC-LC decoder (no third-party codec dependency).
 //!
-//! Parses ADTS frames / `AudioSpecificConfig` and reconstructs PCM. PCM
-//! reconstruction is delegated to `symphonia-codec-aac` (a pure-Rust AAC-LC
-//! decoder, Apache-2.0/MIT — see `docs/codec-evaluations/aac.md`), which keeps
-//! this crate's decode path sample-exact for the common AAC-LC streaming
-//! profiles without hand-rolling an MDCT/Huffman/TNS pipeline.
+//! Decodes ADTS-framed AAC-LC into interleaved `f32` PCM. The pipeline per AAC
+//! frame is: parse the raw data block → per-channel Huffman spectral decode +
+//! inverse quantize → pulse / PNS → joint stereo (M/S, intensity) → TNS → IMDCT
+//! with sine/KBD windows and 50% overlap-add.
 
-use symphonia_codec_aac::AacDecoder as SymphoniaAacDecoder;
-use symphonia_core::codecs::audio::{
-    AudioCodecParameters, AudioDecoder, AudioDecoderOptions,
-};
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
-use symphonia_core::packet::Packet;
-use symphonia_core::units::{Duration, Timestamp};
+use tpt_kinetix_core::frame::{AudioFrame, SampleFormat};
+use tpt_kinetix_core::packet::Packet;
 
-use tpt_kinetix_core::{
-    capabilities::DecoderCapabilities,
-    error::KinetixError,
-    frame::{AudioFrame, SampleFormat},
-    packet::Packet as KinetixPacket,
-};
+use crate::adts::AdtsHeader;
+use crate::dequant::group_base_offsets;
+use crate::mdct::Imdct;
+use crate::pns::apply_pns;
+use crate::pulse::apply_pulse;
+use crate::stereo::apply_stereo;
+use crate::syntax::{AacParseError, ChannelStream, Element, IcsInfo, RawDataBlock, WindowSequence};
+use crate::tables::{SWB_OFFSET_1024, SWB_OFFSET_128};
+use crate::tns::apply_tns;
+use crate::window::build_window;
 
-use crate::{adts::AdtsHeader, config::AudioSpecificConfig};
+/// Errors raised by [`AacDecoder`].
+#[derive(Debug, thiserror::Error)]
+pub enum AacError {
+    /// The ADTS header could not be parsed.
+    #[error("ADTS header error: {0}")]
+    Adts(#[from] crate::adts::AdtsError),
+    /// The raw data block could not be parsed.
+    #[error("AAC syntax error: {0}")]
+    Parse(#[from] AacParseError),
+}
 
-/// Stateful AAC decoder.
+/// Precomputed synthesis windows for both shapes and both lengths.
+struct Windows {
+    long: [Vec<f32>; 2],
+    short: [Vec<f32>; 2],
+}
+
+impl Windows {
+    fn new() -> Self {
+        Windows {
+            long: [build_window(1024, false, false), build_window(1024, true, false)],
+            short: [build_window(128, false, true), build_window(128, true, true)],
+        }
+    }
+}
+
+/// Per-output-channel overlap-add and window-shape state.
+struct ChannelState {
+    overlap: [f32; 1024],
+    prev_shape: u8,
+    init: bool,
+}
+
+impl Default for ChannelState {
+    fn default() -> Self {
+        ChannelState {
+            overlap: [0.0f32; 1024],
+            prev_shape: 0,
+            init: false,
+        }
+    }
+}
+
+/// A native AAC-LC decoder.
 pub struct AacDecoder {
-    config: Option<AudioSpecificConfig>,
-    /// Inner `symphonia` decoder, created lazily once we know the config.
-    inner: Option<AacDecoderWrapper>,
-    strict: bool,
-}
-
-/// Thin owning wrapper around `symphonia_codec_aac::AacDecoder` so the public
-/// `AacDecoder` type does not leak the third-party decoder type.
-struct AacDecoderWrapper {
-    decoder: SymphoniaAacDecoder,
-    /// The CODEC parameters used to build the decoder (kept for resets).
-    #[allow(dead_code)]
-    params: AudioCodecParameters,
-}
-
-impl AacDecoder {
-    /// Create a new decoder without a known configuration.
-    pub fn new() -> Self {
-        Self {
-            config: None,
-            inner: None,
-            strict: false,
-        }
-    }
-
-    /// Initialize the decoder from an `AudioSpecificConfig` (e.g. an MP4 `esds`
-    /// blob or FLV AAC sequence header).
-    pub fn with_config(config: AudioSpecificConfig) -> Self {
-        Self {
-            config: Some(config),
-            inner: None,
-            strict: false,
-        }
-    }
-
-    /// Provide/replace the `AudioSpecificConfig`.
-    pub fn set_config(&mut self, config: AudioSpecificConfig) {
-        self.config = Some(config);
-        // Configuration changed; drop any existing inner decoder so it is rebuilt.
-        self.inner = None;
-    }
-
-    /// Enable strict mode. The AAC decode path is sample-exact, so strict mode
-    /// never triggers a [`KinetixError::NotPixelExact`] on its own — it is kept
-    /// for API symmetry with the other codecs.
-    pub fn set_strict(&mut self, strict: bool) {
-        self.strict = strict;
-    }
-
-    /// Reports what this decoder can and cannot do.
-    ///
-    /// The AAC decoder is **sample-exact** for AAC-LC via `symphonia-codec-aac`.
-    /// HE-AAC v1/v2 (SBR/PS) and AAC-Main/Scalable profiles are not supported by
-    /// the wrapped decoder (`symphonia` returns an error for those).
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use tpt_kinetix_aac::AacDecoder;
-    ///
-    /// let caps = AacDecoder::new().capabilities();
-    /// assert!(caps.pixel_exact);
-    /// ```
-    pub fn capabilities(&self) -> DecoderCapabilities {
-        DecoderCapabilities {
-            codec: "AAC",
-            pixel_exact: true,
-            supports_cabac: false,
-            supports_cavlc: false,
-            supports_intra_prediction: false,
-            supports_inter_prediction: false,
-            supports_deblocking: false,
-            notes: "AAC-LC PCM reconstruction via symphonia-codec-aac; HE-AAC (SBR/PS) \
-                    and AAC-Main/Scalable not supported by the wrapped decoder",
-        }
-    }
-
-    /// Build the inner `symphonia` decoder from the current config if needed.
-    fn ensure_inner(&mut self) -> Result<&mut AacDecoderWrapper, KinetixError> {
-        if self.inner.is_none() {
-            let cfg = self
-                .config
-                .ok_or_else(|| KinetixError::Unsupported("AAC: no configuration available to initialize the decoder; feed an AudioSpecificConfig or an ADTS-framed packet".into()))?;
-
-            let mut params = AudioCodecParameters::new();
-            params.for_codec(CODEC_ID_AAC);
-            params.with_sample_rate(cfg.sample_rate);
-            // AudioSpecificConfig doubles as the codec extra data.
-            let mut extra = Vec::with_capacity(2);
-            let object_type = cfg.object_type;
-            let sf_index = crate::sample_rate_index(cfg.sample_rate);
-            let channels = cfg.channels;
-            // Write the 2-byte ASC: audioObjectType(5) + samplingFreqIndex(4)
-            // + channelConfig(4).
-            let byte0 = ((object_type & 0x1F) << 3) | ((sf_index & 0x0F) >> 1);
-            let byte1 = ((sf_index & 0x0F) << 7) | ((channels & 0x0F) << 3);
-            extra.push(byte0);
-            extra.push(byte1);
-            params.with_extra_data(extra.into_boxed_slice());
-
-            let decoder = SymphoniaAacDecoder::try_new(&params, &AudioDecoderOptions::default())
-                .map_err(|e| {
-                    KinetixError::Unsupported(format!("AAC: failed to initialize decoder: {e}"))
-                })?;
-            self.inner = Some(AacDecoderWrapper { decoder, params });
-        }
-        Ok(self.inner.as_mut().unwrap())
-    }
-
-    /// Decode an AAC packet into a PCM [`AudioFrame`].
-    ///
-    /// ADTS-framed packets are detected to learn the stream parameters; the raw
-    /// AAC payload is then handed to `symphonia` for decode. The resulting
-    /// planar PCM is converted to interleaved `F32` samples.
-    pub fn decode(&mut self, packet: &KinetixPacket) -> Result<Option<AudioFrame>, KinetixError> {
-        // Detect ADTS framing (12-bit syncword) and learn the stream parameters.
-        if let Ok(hdr) = AdtsHeader::parse(&packet.data) {
-            self.config = Some(AudioSpecificConfig {
-                object_type: hdr.object_type,
-                sample_rate: hdr.sample_rate,
-                channels: hdr.channels,
-            });
-        }
-
-        // Determine the payload to submit to symphonia: for ADTS, strip the
-        // header; otherwise pass the whole packet (assumed raw AAC / ASC-bearing).
-        let payload = match AdtsHeader::parse(&packet.data) {
-            Ok(hdr) => &packet.data[hdr.header_len..],
-            Err(_) => &packet.data[..],
-        };
-
-        if payload.is_empty() {
-            return Ok(None);
-        }
-
-        let wrapper = self.ensure_inner()?;
-        let sym_packet = Packet::new(
-            0,
-            Timestamp::new(packet.pts.value.max(0)),
-            Duration::new(1024),
-            payload.to_vec(),
-        );
-
-        let buf = wrapper
-            .decoder
-            .decode(&sym_packet)
-            .map_err(|e| KinetixError::Unsupported(format!("AAC: decode failed: {e}")))?;
-
-        let spec = buf.spec();
-        let channels = spec.channels().count();
-        let rate = spec.rate();
-        let frames = buf.frames();
-        if frames == 0 {
-            return Ok(None);
-        }
-
-        // symphonia's AAC decoder produces i32 planar samples; convert to an
-        // interleaved f32 PCM buffer we can read.
-        let mut samples: Vec<f32> = Vec::with_capacity(frames * channels);
-        buf.copy_to_vec_interleaved::<f32>(&mut samples);
-
-        // Interleave into a flat byte buffer.
-        let mut data = Vec::with_capacity(samples.len() * 4);
-        for s in samples {
-            data.extend_from_slice(&s.to_le_bytes());
-        }
-
-        let _ = self.strict;
-        Ok(Some(AudioFrame {
-            pts: packet.pts,
-            data,
-            sample_rate: rate,
-            channels: channels as u8,
-            sample_format: SampleFormat::F32,
-        }))
-    }
-
-    /// The current known configuration, if any.
-    pub fn config(&self) -> Option<&AudioSpecificConfig> {
-        self.config.as_ref()
-    }
+    imdct_long: Imdct,
+    imdct_short: Imdct,
+    windows: Windows,
+    channels: Vec<ChannelState>,
+    sample_rate: u32,
+    sf_index: usize,
 }
 
 impl Default for AacDecoder {
@@ -214,50 +78,296 @@ impl Default for AacDecoder {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tpt_kinetix_core::timestamp::Timestamp;
-
-    fn adts_packet() -> KinetixPacket {
-        // 7-byte ADTS header (AAC-LC, 44.1 kHz, stereo) + a small payload.
-        let mut data = vec![0xFF, 0xF1, 0x50, 0x80, 0x01, 0x7F, 0xFC];
-        // Payload length = frame_length - header_len. Total frame length = 11.
-        data[4] = 0x04; // aac_frame_length = (1<<11)|... high bits; 11 -> 8<<3=... compute: 0b00001 000 ppppp
-                        // Set frame_length = 11: bits = 0x0B = 0b0000_0000_1011
-                        // (data[3]&3)<<11 | data[4]<<3 | data[5]>>5 = 11
-                        // -> data[4] = 11 >> 3 = 1, data[5]'s top 5 bits = 11 & 7 = 3
-        data[4] = 0x01;
-        data[5] = 0x60;
-        data.extend_from_slice(&[0u8; 4]); // 4 payload bytes
-        KinetixPacket {
-            pts: Timestamp::NONE,
-            dts: Timestamp::NONE,
-            data,
-            stream_index: 0,
-            is_key_frame: true,
+impl AacDecoder {
+    /// Create a new decoder. Configuration is learned from the first ADTS header.
+    pub fn new() -> Self {
+        AacDecoder {
+            imdct_long: Imdct::new(1024),
+            imdct_short: Imdct::new(128),
+            windows: Windows::new(),
+            channels: Vec::new(),
+            sample_rate: 0,
+            sf_index: 4,
         }
     }
 
-    #[test]
-    fn capabilities_report_sample_exact() {
-        assert!(AacDecoder::new().capabilities().pixel_exact);
+    /// Decode one ADTS frame, returning one 1024-sample-per-channel PCM frame.
+    pub fn decode(&mut self, packet: &Packet) -> Result<Option<AudioFrame>, AacError> {
+        let header = AdtsHeader::parse(&packet.data)?;
+        if header.frame_length > packet.data.len() {
+            return Ok(None);
+        }
+        let sf_index = header.sampling_frequency_index as usize;
+        self.sf_index = sf_index;
+        self.sample_rate = header.sample_rate;
+        let payload = &packet.data[header.header_len..header.frame_length];
+
+        let block = RawDataBlock::parse(payload, sf_index)?;
+
+        let mut frame_channels: Vec<[f32; 1024]> = Vec::new();
+        for el in &block.elements {
+            match el {
+                Element::Sce(_) | Element::Lfe(_) => {
+                    let ch = frame_channels.len();
+                    let stream = elem_stream(el);
+                    let mut coeffs = stream.coeffs;
+                    let swb = if stream.ics.window_sequence.is_eight_short() {
+                        SWB_OFFSET_128[sf_index]
+                    } else {
+                        SWB_OFFSET_1024[sf_index]
+                    };
+                    if let Some(p) = &stream.pulse {
+                        apply_pulse(p, swb, &mut coeffs);
+                    }
+                    let gindex = group_base_offsets(&stream.ics);
+                    apply_pns(&stream.ics, &stream.band_type, &stream.scalefactor, swb, stream.global_gain, &gindex, &mut coeffs);
+                    if let Some(tns) = &stream.tns {
+                        apply_tns(tns, &stream.ics, &mut coeffs, swb);
+                    }
+                    let pcm = self.synthesize_channel(ch, &stream.ics, &coeffs);
+                    frame_channels.push(pcm);
+                }
+                Element::Cpe(cpe) => {
+                    let ch_l = frame_channels.len();
+                    let ch_r = ch_l + 1;
+
+                    let mut l = cpe.left.coeffs;
+                    let mut r = cpe.right.coeffs;
+
+                    let swb = if cpe.left.ics.window_sequence.is_eight_short() {
+                        SWB_OFFSET_128[sf_index]
+                    } else {
+                        SWB_OFFSET_1024[sf_index]
+                    };
+                    if let Some(p) = &cpe.left.pulse {
+                        apply_pulse(p, swb, &mut l);
+                    }
+                    if let Some(p) = &cpe.right.pulse {
+                        apply_pulse(p, swb, &mut r);
+                    }
+                    let gindex_l = group_base_offsets(&cpe.left.ics);
+                    let gindex_r = group_base_offsets(&cpe.right.ics);
+                    apply_pns(&cpe.left.ics, &cpe.left.band_type, &cpe.left.scalefactor, swb, cpe.left.global_gain, &gindex_l, &mut l);
+                    apply_pns(&cpe.right.ics, &cpe.right.band_type, &cpe.right.scalefactor, swb, cpe.right.global_gain, &gindex_r, &mut r);
+
+                    apply_stereo(
+                        &mut l,
+                        &mut r,
+                        &cpe.left.ics,
+                        &cpe.left.band_type,
+                        &cpe.right.band_type,
+                        &cpe.left.scalefactor,
+                        &cpe.right.scalefactor,
+                        cpe.ms_mask_present,
+                        &cpe.ms_mask,
+                        swb,
+                    );
+
+                    if let Some(tns) = &cpe.left.tns {
+                        apply_tns(tns, &cpe.left.ics, &mut l, swb);
+                    }
+                    if let Some(tns) = &cpe.right.tns {
+                        apply_tns(tns, &cpe.right.ics, &mut r, swb);
+                    }
+
+                    let pcm_l = self.synthesize_channel(ch_l, &cpe.left.ics, &l);
+                    let pcm_r = self.synthesize_channel(ch_r, &cpe.right.ics, &r);
+                    frame_channels.push(pcm_l);
+                    frame_channels.push(pcm_r);
+                }
+                Element::Fil(_) | Element::End => {}
+            }
+        }
+
+        let nch = frame_channels.len();
+        if nch == 0 {
+            return Ok(None);
+        }
+        let mut interleaved = Vec::with_capacity(1024 * nch);
+        for s in 0..1024 {
+            for c in 0..nch {
+                interleaved.push(frame_channels[c][s]);
+            }
+        }
+
+        let mut data = Vec::with_capacity(interleaved.len() * 4);
+        for &s in &interleaved {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+
+        Ok(Some(AudioFrame {
+            pts: packet.pts,
+            data,
+            sample_rate: header.sample_rate,
+            channels: header.channels.max(1),
+            sample_format: SampleFormat::F32,
+        }))
     }
 
-    #[test]
-    fn decode_learns_config_from_adts() {
-        let mut dec = AacDecoder::new();
-        let _ = dec.decode(&adts_packet()).unwrap();
-        let cfg = dec.config().expect("config learned from ADTS");
-        assert_eq!(cfg.sample_rate, 44_100);
-        assert_eq!(cfg.channels, 2);
+    /// Run the filterbank for one output channel, reusing overlap state.
+    fn synthesize_channel(
+        &mut self,
+        ch: usize,
+        ics: &IcsInfo,
+        coeffs: &[f32; 1024],
+    ) -> [f32; 1024] {
+        if self.channels.len() <= ch {
+            self.channels.resize_with(ch + 1, ChannelState::default);
+        }
+        let im_l = &self.imdct_long;
+        let im_s = &self.imdct_short;
+        let win = &self.windows;
+        let st: &mut ChannelState = &mut self.channels[ch];
+        synthesize(im_l, im_s, win, st, ics, coeffs)
+    }
+}
+
+/// Return the decoded channel stream for an SCE or LFE element.
+fn elem_stream(el: &Element) -> &ChannelStream {
+    match el {
+        Element::Sce(s) => &s.stream,
+        Element::Lfe(l) => &l.stream,
+        _ => unreachable!("elem_stream called on non-single-channel element"),
+    }
+}
+
+/// Run the filterbank (IMDCT + window + overlap-add) for one channel.
+fn synthesize(
+    imdct_long: &Imdct,
+    imdct_short: &Imdct,
+    windows: &Windows,
+    state: &mut ChannelState,
+    ics: &IcsInfo,
+    coeffs: &[f32; 1024],
+) -> [f32; 1024] {
+    let ws = ics.window_shape as usize;
+    if !state.init {
+        state.prev_shape = ws as u8;
+        state.init = true;
     }
 
-    #[test]
-    fn strict_mode_no_error_for_sample_exact() {
-        let mut dec = AacDecoder::new();
-        dec.set_strict(true);
-        // Even in strict mode the AAC-LC path is sample-exact and must not error.
-        let _ = dec.decode(&adts_packet()).unwrap();
+    let mut out = [0.0f32; 1024];
+    if ics.window_sequence.is_eight_short() {
+        let mut buf = [0.0f32; 2048];
+        for w in 0..8 {
+            imdct_short.transform(&coeffs[w * 128..w * 128 + 128], &mut buf[w * 256..w * 256 + 256]);
+        }
+        short_synthesis(&buf, state, ws, windows, &mut out);
+    } else {
+        let mut buf = [0.0f32; 2048];
+        imdct_long.transform(coeffs, &mut buf);
+        long_synthesis(&buf, state, ics.window_sequence, ws, windows, &mut out);
+    }
+    state.prev_shape = ws as u8;
+    out
+}
+
+fn long_synthesis(
+    buf: &[f32; 2048],
+    state: &mut ChannelState,
+    seq: WindowSequence,
+    ws: usize,
+    windows: &Windows,
+    out: &mut [f32; 1024],
+) {
+    let nlong = 1024;
+    let nshort = 128;
+    let nflat_ls = (nlong - nshort) / 2; // 448
+    let w_prev_long = &windows.long[state.prev_shape as usize];
+    let w_cur_long = &windows.long[ws];
+    let w_prev_short = &windows.short[state.prev_shape as usize];
+    let w_cur_short = &windows.short[ws];
+
+    match seq {
+        WindowSequence::OnlyLong => {
+            for i in 0..nlong {
+                out[i] = state.overlap[i] + buf[i] * w_prev_long[i];
+            }
+            for i in 0..nlong {
+                state.overlap[i] = buf[nlong + i] * w_cur_long[nlong - 1 - i];
+            }
+        }
+        WindowSequence::LongStart => {
+            for i in 0..nlong {
+                out[i] = state.overlap[i] + buf[i] * w_prev_long[i];
+            }
+            for i in 0..nflat_ls {
+                state.overlap[i] = buf[nlong + i];
+            }
+            for i in 0..nshort {
+                state.overlap[nflat_ls + i] = buf[nlong + nflat_ls + i] * w_cur_short[nshort - 1 - i];
+            }
+            for i in 0..nflat_ls {
+                state.overlap[nflat_ls + nshort + i] = 0.0;
+            }
+        }
+        WindowSequence::LongStop => {
+            for i in 0..nflat_ls {
+                out[i] = state.overlap[i];
+            }
+            for i in 0..nshort {
+                out[nflat_ls + i] = state.overlap[nflat_ls + i] + buf[nflat_ls + i] * w_prev_short[i];
+            }
+            for i in 0..nflat_ls {
+                out[nflat_ls + nshort + i] = state.overlap[nflat_ls + nshort + i] + buf[nflat_ls + nshort + i];
+            }
+            for i in 0..nlong {
+                state.overlap[i] = buf[nlong + i] * w_cur_long[nlong - 1 - i];
+            }
+        }
+        WindowSequence::EightShort => unreachable!("handled by short_synthesis"),
+    }
+}
+
+fn short_synthesis(
+    buf: &[f32; 2048],
+    state: &mut ChannelState,
+    ws: usize,
+    windows: &Windows,
+    out: &mut [f32; 1024],
+) {
+    let nlong = 1024;
+    let nshort = 128;
+    let nflat_ls = (nlong - nshort) / 2; // 448
+    let trans = nshort / 2; // 64
+    let w_prev = &windows.short[state.prev_shape as usize];
+    let w_cur = &windows.short[ws];
+
+    for i in 0..nflat_ls {
+        out[i] = state.overlap[i];
+    }
+    for i in 0..nshort {
+        out[nflat_ls + i] = state.overlap[nflat_ls + i] + buf[nshort * 0 + i] * w_prev[i];
+        out[nflat_ls + nshort + i] = state.overlap[nflat_ls + nshort + i]
+            + buf[nshort * 1 + i] * w_cur[nshort - 1 - i]
+            + buf[nshort * 2 + i] * w_cur[i];
+        out[nflat_ls + 2 * nshort + i] = state.overlap[nflat_ls + 2 * nshort + i]
+            + buf[nshort * 3 + i] * w_cur[nshort - 1 - i]
+            + buf[nshort * 4 + i] * w_cur[i];
+        out[nflat_ls + 3 * nshort + i] = state.overlap[nflat_ls + 3 * nshort + i]
+            + buf[nshort * 5 + i] * w_cur[nshort - 1 - i]
+            + buf[nshort * 6 + i] * w_cur[i];
+        if i < trans {
+            out[nflat_ls + 4 * nshort + i] = state.overlap[nflat_ls + 4 * nshort + i]
+                + buf[nshort * 7 + i] * w_cur[nshort - 1 - i]
+                + buf[nshort * 8 + i] * w_cur[i];
+        }
+    }
+
+    for i in 0..nshort {
+        if i >= trans {
+            state.overlap[nflat_ls + 4 * nshort + i - nlong] =
+                buf[nshort * 7 + i] * w_cur[nshort - 1 - i] + buf[nshort * 8 + i] * w_cur[i];
+        }
+        state.overlap[nflat_ls + 5 * nshort + i - nlong] =
+            buf[nshort * 9 + i] * w_cur[nshort - 1 - i] + buf[nshort * 10 + i] * w_cur[i];
+        state.overlap[nflat_ls + 6 * nshort + i - nlong] =
+            buf[nshort * 11 + i] * w_cur[nshort - 1 - i] + buf[nshort * 12 + i] * w_cur[i];
+        state.overlap[nflat_ls + 7 * nshort + i - nlong] =
+            buf[nshort * 13 + i] * w_cur[nshort - 1 - i] + buf[nshort * 14 + i] * w_cur[i];
+        state.overlap[nflat_ls + 8 * nshort + i - nlong] = buf[nshort * 15 + i] * w_cur[nshort - 1 - i];
+    }
+    for i in 0..nflat_ls {
+        state.overlap[nflat_ls + nshort + i] = 0.0;
     }
 }

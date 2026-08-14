@@ -14,6 +14,11 @@
 //! This keeps the surface honest and panic-free on untrusted input.
 
 use crate::bitreader::BitReader;
+use crate::dequant::{decode_spectral_data, expand_band_types};
+use crate::pulse::{parse_pulse, PulseData};
+use crate::scalefactors::decode_scalefactors;
+use crate::tables::{SWB_OFFSET_1024, SWB_OFFSET_128, TNS_MAX_BANDS_1024, TNS_MAX_BANDS_128};
+use crate::tns::{parse_tns, TnsData};
 
 /// Errors raised while parsing AAC syntax.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -91,14 +96,51 @@ pub struct IcsInfo {
 impl IcsInfo {
     /// Number of window groups this configuration produces.
     ///
-    /// Eight short windows always form 8 groups; every other sequence is a
-    /// single group.
+    /// Eight short windows are partitioned into window groups by
+    /// `scale_factor_grouping` (a set bit at position `i` joins window `i+1` to
+    /// window `i`'s group); every non-short sequence is a single group.
     pub fn num_window_groups(&self) -> usize {
-        if self.window_sequence.is_eight_short() {
-            8
-        } else {
-            1
+        if !self.window_sequence.is_eight_short() {
+            return 1;
         }
+        let mut n = 1usize;
+        for i in 0..7 {
+            // The first grouping bit read (MSB of the 7-bit field) joins windows
+            // 0 and 1; bit `i` joins window `i` and `i+1`.
+            if (self.scale_factor_grouping >> (6 - i)) & 1 == 1 {
+                // extend current group
+            } else {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Length (number of short windows) of window group `g`.
+    pub fn group_len(&self, g: usize) -> usize {
+        if !self.window_sequence.is_eight_short() {
+            return 1;
+        }
+        let groups = self.window_groups();
+        groups.get(g).copied().unwrap_or(1)
+    }
+
+    /// Per-group short-window lengths (sums to 8 for `EIGHT_SHORT_SEQUENCE`).
+    fn window_groups(&self) -> Vec<usize> {
+        if !self.window_sequence.is_eight_short() {
+            return vec![1];
+        }
+        let mut groups = vec![1usize];
+        for i in 0..7 {
+            if (self.scale_factor_grouping >> (6 - i)) & 1 == 1 {
+                if let Some(last) = groups.last_mut() {
+                    *last += 1;
+                }
+            } else {
+                groups.push(1);
+            }
+        }
+        groups
     }
 
     /// Parse `ics_info()` from `reader`.
@@ -218,8 +260,9 @@ impl SectionData {
     }
 }
 
-/// A single channel's decoded stream header (global gain + ICS + sections).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A single channel's fully decoded stream: global gain, ICS, sections, the
+/// dequantized frequency-ordered spectrum, and the parsed pulse / TNS side data.
+#[derive(Debug, Clone)]
 pub struct ChannelStream {
     /// `global_gain` (8 bits).
     pub global_gain: u8,
@@ -227,18 +270,29 @@ pub struct ChannelStream {
     pub ics: IcsInfo,
     /// Per-group section maps.
     pub sections: SectionData,
+    /// Dequantized, frequency-ordered spectral coefficients (1024 lines).
+    pub coeffs: [f32; 1024],
+    /// Band (section) codebook per `(group * max_sfb + sfb)`.
+    pub band_type: Vec<u8>,
+    /// Scalefactor / intensity position / noise energy per `(group * max_sfb + sfb)`.
+    pub scalefactor: Vec<i32>,
+    /// Parsed TNS data, if present.
+    pub tns: Option<TnsData>,
+    /// Parsed pulse data, if present.
+    pub pulse: Option<PulseData>,
 }
 
 impl ChannelStream {
     /// Parse an `individual_channel_stream()`, optionally reusing a shared
     /// `ics_info()` (the CPE `common_window` case).
     ///
-    /// Only the structural skeleton (global gain, `ics_info`, `section_data`,
-    /// and the presence flags) is parsed. If the stream requires actual
-    /// Huffman `scale_factor_data` / `spectral_data` decode — a non-zero section
-    /// codebook, or pulse / TNS / gain-control data — this returns
-    /// [`AacParseError::Unsupported`] (a later phase adds the Huffman tables).
-    fn parse(reader: &mut BitReader, shared_ics: Option<&IcsInfo>) -> Result<Self, AacParseError> {
+    /// `sf_index` is the 4-bit sampling-frequency index used to select the
+    /// scalefactor-band offset tables.
+    fn parse(
+        reader: &mut BitReader,
+        shared_ics: Option<&IcsInfo>,
+        sf_index: usize,
+    ) -> Result<Self, AacParseError> {
         let global_gain = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as u8;
         let ics = match shared_ics {
             Some(shared) => *shared,
@@ -246,40 +300,62 @@ impl ChannelStream {
         };
         let sections = SectionData::parse(reader, &ics)?;
 
-        let pulse = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let tns = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let gain = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        let band_type = expand_band_types(&sections, &ics);
+        let scalefactor = decode_scalefactors(reader, &ics, &band_type)?;
 
-        if pulse != 0 || gain != 0 {
-            return Err(AacParseError::Unsupported(
-                "pulse_data / gain_control_data require Huffman decode (later phase)",
-            ));
+        let pulse = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+        let pulse = if pulse {
+            Some(parse_pulse(reader)?)
+        } else {
+            None
+        };
+
+        let tns = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+        let tns = if tns {
+            let tns_max = if ics.window_sequence.is_eight_short() {
+                TNS_MAX_BANDS_128[sf_index]
+            } else {
+                TNS_MAX_BANDS_1024[sf_index]
+            };
+            Some(parse_tns(reader, &ics, tns_max)?)
+        } else {
+            None
+        };
+
+        // gain_control_data_present (1 bit) — unused by AAC-LC (SSR/ER only).
+        let gain = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+        if gain != 0 {
+            return Err(AacParseError::Unsupported("gain_control_data is not part of AAC-LC"));
         }
-        if tns != 0 {
-            return Err(AacParseError::Unsupported(
-                "tns_data requires Huffman decode (later phase)",
-            ));
-        }
-        if sections
-            .groups
-            .iter()
-            .any(|g| g.iter().any(|s| s.sect_cb != 0))
-        {
-            return Err(AacParseError::Unsupported(
-                "non-zero section codebook requires Huffman scale-factor / spectral decode (later phase)",
-            ));
-        }
+
+        let swb_long = SWB_OFFSET_1024[sf_index];
+        let swb_short = SWB_OFFSET_128[sf_index];
+        let coeffs = decode_spectral_data(
+            reader,
+            &ics,
+            &sections,
+            &band_type,
+            &scalefactor,
+            swb_long,
+            swb_short,
+            global_gain,
+        )?;
 
         Ok(ChannelStream {
             global_gain,
             ics,
             sections,
+            coeffs,
+            band_type,
+            scalefactor,
+            tns,
+            pulse,
         })
     }
 }
 
 /// Single Channel Element (id 0).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SingleChannelElement {
     /// `element_instance_tag` (4 bits).
     pub instance_tag: u8,
@@ -288,7 +364,7 @@ pub struct SingleChannelElement {
 }
 
 /// Channel Pair Element (id 1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ChannelPairElement {
     /// `element_instance_tag` (4 bits).
     pub instance_tag: u8,
@@ -307,7 +383,7 @@ pub struct ChannelPairElement {
 }
 
 /// Low Frequency Element (id 3) — structurally an SCE with TNS-only constraint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LfeElement {
     /// `element_instance_tag` (4 bits).
     pub instance_tag: u8,
@@ -316,7 +392,7 @@ pub struct LfeElement {
 }
 
 /// Fill Element (id 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FillElement {
     /// `element_instance_tag` (4 bits).
     pub instance_tag: u8,
@@ -325,7 +401,7 @@ pub struct FillElement {
 }
 
 /// A parsed AAC syntactic element.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Element {
     /// Single Channel Element.
     Sce(SingleChannelElement),
@@ -340,7 +416,7 @@ pub enum Element {
 }
 
 /// A parsed AAC raw data block: an ordered list of syntactic elements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RawDataBlock {
     /// Elements in stream order, ending at `Element::End` (if present).
     pub elements: Vec<Element>,
@@ -348,8 +424,9 @@ pub struct RawDataBlock {
 
 impl RawDataBlock {
     /// Parse a raw data block from `data`, dispatching on each syntactic element
-    /// id until `END` or the bitstream is exhausted.
-    pub fn parse(data: &[u8]) -> Result<Self, AacParseError> {
+    /// id until `END` or the bitstream is exhausted. `sf_index` is the 4-bit
+    /// sampling-frequency index (used to select scalefactor-band tables).
+    pub fn parse(data: &[u8], sf_index: usize) -> Result<Self, AacParseError> {
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
         loop {
@@ -357,7 +434,7 @@ impl RawDataBlock {
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                    let stream = ChannelStream::parse(&mut reader, None)?;
+                    let stream = ChannelStream::parse(&mut reader, None, sf_index)?;
                     elements.push(Element::Sce(SingleChannelElement {
                         instance_tag: tag,
                         stream,
@@ -384,8 +461,8 @@ impl RawDataBlock {
                     } else {
                         None
                     };
-                    let left = ChannelStream::parse(&mut reader, shared.as_ref())?;
-                    let right = ChannelStream::parse(&mut reader, shared.as_ref())?;
+                    let left = ChannelStream::parse(&mut reader, shared.as_ref(), sf_index)?;
+                    let right = ChannelStream::parse(&mut reader, shared.as_ref(), sf_index)?;
                     elements.push(Element::Cpe(ChannelPairElement {
                         instance_tag: tag,
                         common_window,
@@ -398,7 +475,7 @@ impl RawDataBlock {
                 }
                 3 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                    let stream = ChannelStream::parse(&mut reader, None)?;
+                    let stream = ChannelStream::parse(&mut reader, None, sf_index)?;
                     elements.push(Element::Lfe(LfeElement {
                         instance_tag: tag,
                         stream,
@@ -516,7 +593,7 @@ mod tests {
         bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain = 0
         bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
         let bytes = bits_to_bytes(&bits);
-        let block = RawDataBlock::parse(&bytes).unwrap();
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
         assert_eq!(block.elements.len(), 2);
         match &block.elements[0] {
             Element::Sce(sce) => {
@@ -554,7 +631,7 @@ mod tests {
         bits.extend_from_slice(&[ZERO, ZERO, ZERO]);
         bits.extend_from_slice(&[ONE, ONE, ONE]); // END
         let bytes = bits_to_bytes(&bits);
-        let block = RawDataBlock::parse(&bytes).unwrap();
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
         match &block.elements[0] {
             Element::Cpe(cpe) => {
                 assert!(cpe.common_window);
@@ -579,7 +656,7 @@ mod tests {
         bits.extend_from_slice(&[ONE, ONE, ZERO, ZERO, ONE, ONE, ZERO, ONE]); // 0xCD
         bits.extend_from_slice(&[ONE, ONE, ONE]); // END
         let bytes = bits_to_bytes(&bits);
-        let block = RawDataBlock::parse(&bytes).unwrap();
+        let block = RawDataBlock::parse(&bytes, 4).unwrap();
         match &block.elements[0] {
             Element::Fil(fil) => {
                 assert_eq!(fil.payload, vec![0xAB, 0xCD]);
@@ -589,8 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_nonzero_section() {
-        // SCE whose only section uses sect_cb=1 (codeword "10") -> needs Huffman.
+    fn nonzero_section_now_decodes_after_scalefactors() {
+        // SCE whose only section uses sect_cb=1 (codeword "10"). The structural
+        // parser now proceeds past sections; with no spectral data present it
+        // errors out (truncated), which is the honest non-panic behaviour.
         let mut bits: Vec<u8> = Vec::new();
         bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // SCE
         bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // instance_tag
@@ -602,12 +681,10 @@ mod tests {
         bits.push(ONE); // sect_cb codeword "10" -> cb 1
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len=10
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // flags
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain = 0
         let bytes = bits_to_bytes(&bits);
-        assert!(matches!(
-            RawDataBlock::parse(&bytes),
-            Err(AacParseError::Unsupported(_))
-        ));
+        // No spectral data present -> an error (EOF), not a panic.
+        assert!(RawDataBlock::parse(&bytes, 4).is_err());
     }
 
     #[test]
@@ -615,7 +692,7 @@ mod tests {
         // Just an SCE id and instance tag, then EOF.
         let bytes = bits_to_bytes(&[ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ZERO]);
         assert!(matches!(
-            RawDataBlock::parse(&bytes),
+            RawDataBlock::parse(&bytes, 4),
             Err(AacParseError::UnexpectedEof)
         ));
     }

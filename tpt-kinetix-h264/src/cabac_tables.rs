@@ -717,6 +717,14 @@ pub const SIG_COEFF_CTX_BASE: [usize; 6] = [105, 120, 134, 149, 152, 402];
 /// (Luma8x8) see [`LAST_COEFF_CTX_INC_8X8_FRAME`].
 pub const LAST_COEFF_CTX_BASE: [usize; 6] = [166, 181, 195, 210, 213, 417];
 
+/// `transform_size_8x8_flag` ctxIdxOffset (Table 9-11/9-34), 3 contexts.
+/// Confirmed from FFmpeg's `cabac_state[399 + sl->neighbor_transform_size]`
+/// at both its intra (`h264_cabac.c:2077`) and inter (`h264_cabac.c:2348`)
+/// call sites (`libavcodec/h264_cabac.c` at the pinned commit referenced
+/// above). ctxIdxInc = left neighbour's `transform_size_8x8` value + top
+/// neighbour's (each 0 if unavailable or not itself 8x8-coded).
+pub const TRANSFORM_SIZE_8X8_FLAG_CTX: usize = 399;
+
 /// `coeff_abs_level_minus1` ctxIdxOffset per `ctxBlockCat` 0..=5. Combined
 /// with [`COEFF_ABS_LEVEL1_CTX`] / [`COEFF_ABS_LEVELGT1_CTX`] via the
 /// `node_ctx` state machine (§9.3.3.1.3); the node_ctx state machine itself

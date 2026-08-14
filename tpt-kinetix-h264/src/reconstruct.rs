@@ -543,10 +543,6 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
         tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, 64 + i8 as u8, &pred);
 
         let res = dequant_idct_8x8(&mb.luma_coeffs_8x8[i8], mb.qp, 0, scaling);
-        if mb_x == 1 && mb_y == 0 && i8 == 0 {
-            eprintln!("MB(1,0) i8=0 qp={} coeffs={:?}", mb.qp, mb.luma_coeffs_8x8[i8]);
-            eprintln!("MB(1,0) i8=0 res={res:?}");
-        }
         let mut recon_blk = [0u8; 64];
         for row in 0..8 {
             for col in 0..8 {
