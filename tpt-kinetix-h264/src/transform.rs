@@ -506,6 +506,18 @@ pub const ZIGZAG_8X8: [usize; 64] = [
 /// fractional scaling that yields the correct transform gain. The previous
 /// hand-rolled butterfly had the wrong `a4`/`a6` pairing and omitted the cross
 /// terms entirely, which zeroed-out DC-only blocks.
+///
+/// The two passes are transposed relative to FFmpeg's own row-then-column
+/// order (this port does columns-then-rows), which is a valid reformulation
+/// of the same separable 2-D transform *provided* each pass writes its
+/// results back along the same axis it read from. Pass 2 previously read
+/// each row (`b[i*8 + k]` for the 8 values of row `i`) but wrote the results
+/// into column `i` (`out[i + k*8]`) instead of back into row `i`
+/// (`out[i*8 + k]`) — an axis mismatch that silently transposed every
+/// non-DC-symmetric residual block. It was undetected because no prior test
+/// exercised the 8×8 path with content complex enough to produce
+/// non-transpose-symmetric coefficients (see `high_profile_8x8_conformance.rs`'s
+/// switch from a flat `testsrc` source to `mandelbrot`, Phase F.4).
 #[inline]
 fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
     let mut b = *block;
@@ -567,14 +579,14 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
         let b5 = (a3 >> 2) - a5;
         let b7 = a7 - (a1 >> 2);
 
-        out[i] = (b0 + b7) >> 6;
-        out[i + 8] = (b2 + b5) >> 6;
-        out[i + 2 * 8] = (b4 + b3) >> 6;
-        out[i + 3 * 8] = (b6 + b1) >> 6;
-        out[i + 4 * 8] = (b6 - b1) >> 6;
-        out[i + 5 * 8] = (b4 - b3) >> 6;
-        out[i + 6 * 8] = (b2 - b5) >> 6;
-        out[i + 7 * 8] = (b0 - b7) >> 6;
+        out[i * 8] = (b0 + b7) >> 6;
+        out[i * 8 + 1] = (b2 + b5) >> 6;
+        out[i * 8 + 2] = (b4 + b3) >> 6;
+        out[i * 8 + 3] = (b6 + b1) >> 6;
+        out[i * 8 + 4] = (b6 - b1) >> 6;
+        out[i * 8 + 5] = (b4 - b3) >> 6;
+        out[i * 8 + 6] = (b2 - b5) >> 6;
+        out[i * 8 + 7] = (b0 - b7) >> 6;
     }
     out
 }
@@ -768,6 +780,36 @@ mod tests {
         let out = dequant_idct_8x8(&coeffs, 0, 0, &ScalingLists::flat());
         assert!(out.iter().all(|&v| v == out[0]), "block not flat: {out:?}");
         assert_ne!(out[0], 0);
+    }
+
+    #[test]
+    fn eight_by_eight_horizontal_ac_varies_along_columns_not_rows() {
+        // A single horizontal-frequency AC coefficient (zigzag position 1,
+        // which is raster position 1 = row0/col1, i.e. `ZIGZAG_8X8[1] == 1`)
+        // must produce a residual that varies along x (columns) and is
+        // constant along y (rows) — regression test for a transpose bug where
+        // the 8×8 IDCT's second pass read each row but wrote the result into
+        // a column, silently swapping rows and columns for any non-DC,
+        // non-transpose-symmetric coefficient block (caught only once a real
+        // clip with actual 8×8-transform macroblocks was decoded, since every
+        // prior test used DC-only or all-zero coefficients).
+        assert_eq!(ZIGZAG_8X8[1], 1);
+        let mut coeffs = [0i16; 64];
+        coeffs[1] = 100;
+        let out = dequant_idct_8x8(&coeffs, 28, 0, &ScalingLists::flat());
+        for row in 0..8usize {
+            for col in 0..8usize {
+                assert_eq!(
+                    out[row * 8 + col],
+                    out[col],
+                    "row {row} should match row 0 at col {col} (horizontal AC varies along columns, not rows): {out:?}"
+                );
+            }
+        }
+        assert!(
+            out[0] != out[1],
+            "horizontal AC coefficient should vary across columns of a row: {out:?}"
+        );
     }
 
     #[test]

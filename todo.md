@@ -28,13 +28,77 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > populated by `refresh_frame_flags` after each reconstructed frame
 > (`Av1Decoder::ref_frames()`). Inter-prediction motion compensation (the rest
 > of Phase E) and `dav1d` pixel-exact validation (Phase G) are still open.
-> Still open: H.264 F.4 (wire 8×8 reconstruction +
-> remove the High-profile gate, High-profile validation), G.2/G.4/G.5
-> (interlaced reconstruction), AV1 E/F/G, Phase 18 native AAC, realtime
-> harness/foveation, volumetric octree. NOTE: `tests/conformance_matrix.rs`
+> Still open: H.264 F.4 (High-profile 8×8-transform bit-exactness — reconstruction
+> is now wired for both CAVLC and CABAC, but decode is not yet bit-exact; see
+> below), G.2/G.4/G.5 (interlaced reconstruction), AV1 E/F/G, Phase 18 native
+> AAC, volumetric octree. NOTE: `tests/conformance_matrix.rs`
 > still labels CABAC P/B as "known non-conformant" — that classification is
 > stale (contradicted by the live `cabac_conformance.rs` bit-exact P/B tests)
-> and should be corrected in the test file.
+> and should be corrected in the test file. **Working-tree additions
+> (uncommitted, 2026-08-15):** the realtime `deadline_ms`/foveation validation
+> harness (Phase 16's `realtime-bench` feature) landed; AAC Phase 18 Phase 2/3
+> section-length/scalefactor/spectral-data parsing gained real spec fixes but
+> currently has a 2-test regression (see session note below) — do not treat
+> `tpt-kinetix-aac --lib` as green right now.
+
+> **2026-08-15 session note.** Working tree had leftover debug `eprintln!`s in
+> `slice_data.rs` (single-macroblock trace prints); removed, no functional
+> change. Found and fixed a real test-corpus bug while working Phase F.4: the
+> High-profile 8×8-transform conformance generator
+> (`high_profile_8x8_conformance.rs`) used `testsrc=...` as its `ffmpeg`/x264
+> input, which is flat enough that x264 never actually selects the 8×8
+> transform for any macroblock — so `high_profile_8x8_*_is_bitexact` was
+> passing *vacuously* (0 macroblocks under test) despite `predict_8x8` having
+> a known, documented neighbour-clamping gap (Phase F.2) that should have
+> failed it. Switched the generator to `mandelbrot=...` (verified via `ffmpeg
+> -loglevel debug` to make x264 pick 8×8 for real macroblocks) and added a
+> tracer-based `..._clip_exercises_8x8_transform` test alongside both the
+> CAVLC and new CABAC (`high_profile_8x8_cabac_conformance.rs`) conformance
+> tests specifically to catch this "test never actually exercised the feature"
+> failure mode going forward. With a real 8×8 clip, both CAVLC and CABAC
+> High-profile decode now fail bit-exactness (`max_abs_diff` 160 and 161
+> respectively, ~3050-3070/4608 differing samples, both with deblocking on and
+> off) — this is progress (the path is real and reachable now, not previously
+> validated at all) but Phase F.4's "validate bit-exact" checkbox stays open.
+> Also added (then deleted after use) `tpt-kinetix-h264/examples/dbg_mandelbrot_nogate.rs`,
+> a scratch repro harness pointing at a session-local temp path; it found and
+> confirmed the `idct_8x8` transpose bug documented in Phase F.4 below before
+> being removed. Recreate similarly if further isolation is needed.
+
+> **2026-08-15 session note (cont'd) — AAC Phase 18 Phase 2/3 work, currently
+> broken (uncommitted).** While filling in Phase 3 (`scalefactors.rs`/
+> `dequant.rs`), found and fixed real spec-conformance gaps in the existing
+> Phase 1/2 section/scalefactor parsing:
+> - `syntax.rs::SectionData::parse` hard-coded a 4-bit `sect_len` field and
+>   rejected `sect_len == 0` and sections extending past `max_sfb` as errors.
+>   Per §4.4.3.1 the field width is 3 bits for eight-short windows with
+>   `max_sfb > 8`, 5 bits for long windows with `max_sfb > 40`, else 4 —
+>   fixed via a new `section_len_bits` helper. Zero-length sections and
+>   sections covering bands past `max_sfb` are legal (ffmpeg's reference
+>   decoder accepts and simply ignores the excess) and are now recorded
+>   rather than rejected, with an iteration cap (`max_sfb + 64`) added so a
+>   still-malformed/desynced stream can't spin forever.
+> - Also in `syntax.rs`: an erroneous `gain_control_data_present` bit read was
+>   removed from `individual_channel_stream()` — that field only exists for
+>   ER AAC profiles (AAC-LD/LTP), not AAC-LC, so the decoder was consuming one
+>   bit too many after `tns_data` on every channel stream.
+> - `scalefactors.rs::decode_scalefactors` and `dequant.rs::decode_spectral_data`
+>   previously iterated `0..max_sfb` and indexed `band_type`/`scale` directly;
+>   both now iterate the actual `SectionData` (matching how many scalefactors/
+>   spectral-data reads the bitstream really contains) and only write into the
+>   `sfb < max_sfb` range, consistent with the `SectionData::parse` fix above.
+> - **Net result is currently a regression, not yet fixed**: two previously-passing
+>   unit tests, `syntax::tests::parse_full_sce_block` and
+>   `parse_full_cpe_block`, now fail with `UnexpectedEof` (`cargo test -p
+>   tpt-kinetix-aac --lib`, 33 passed / 2 failed). Root cause looks like stale
+>   hand-built test fixtures, not the parser: both fixtures still encode the
+>   now-removed `gain_control_data_present` bit after `pulse`/`tns`, so with
+>   that read gone the fixture is off by one bit for the rest of the stream.
+>   Not yet confirmed or fixed. A scratch harness (`tpt-kinetix-aac/tests/
+>   debug_aac.rs`, un-committed, dumps raw bits/parse trace for the first ADTS
+>   frame) and a leftover `eprintln!("  RDB dispatch bitpos=... id=...")` in
+>   `syntax.rs::RawDataBlock::parse` are both still in the working tree from
+>   this investigation and need cleanup once resolved.
 
 > **2026-08-14 session note — working-tree corruption found and cleaned up.**
 > Before this reconciliation, ~44 files under `tpt-kinetix-h264/examples/` and
@@ -531,7 +595,8 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        `parse_b_slice_cabac`/`parse_b_macroblock_cabac`, all wired into
        `decoder.rs`) for I/P/B slices, reusing the existing CAVLC-path
        reconstruction/dequant/IDCT/deblock code unchanged. The CABAC 8×8-transform
-       (High-profile) path remains gated off in `decoder.rs:305` (Phase F).
+       (High-profile) path is now wired too (2026-08-15, see Phase F.4) but not
+       yet bit-exact.
 - [x] **CABAC I-slice desync bug — RESOLVED 2026-08-12.** Root cause:
       `entropy.rs::TRANS_IDX_LPS[28]` was `23`; the correct value is `22` — a
       single-entry transcription error in the `transIdxLPS` (spec Table 9-45)
@@ -629,9 +694,8 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
         wrong (see note above), fixed and extended with a B-slice
         constructor; both now `cabac_init_idc`-dependent per source.
   - [x] 8x8-transform-specific residual contexts (ctxBlockCat 5, Luma8x8) —
-        context-index tables + ctxIdxInc indirection LUTs only; still not
-        wired into `decode_block`, so the `!pps.transform_8x8_mode_flag`
-        gate elsewhere in the codebase must stay in place until Phase D.4.
+        context-index tables + ctxIdxInc indirection LUTs, now wired into
+        `decode_block_8x8` (2026-08-15, see Phase F.4); not yet bit-exact.
 
   #### Phase D.2 — binarizations (§9.3.2)
   - [x] Truncated-unary, FL (LSB-first per §9.3.2.5, distinct from CAVLC's
@@ -674,9 +738,9 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > `tests/cabac_conformance.rs` has live (un-`#[ignore]`d) `cabac_pframe_*_is_bitexact`
 > and `cabac_bframe_*_is_bitexact` tests (deblocking on/off), and
 > `tests/cabac_pframe_conformance.rs` additionally pins the inter-MB CABAC parse
-> path bit-exact vs ffmpeg. NOTE: the CABAC **8×8-transform** path is still
-> explicitly gated off in `decoder.rs:305` (High profile, `transform_8x8_mode_flag`)
-> — see Phase F.4.
+> path bit-exact vs ffmpeg. NOTE: the CABAC **8×8-transform** path (High
+> profile, `transform_8x8_mode_flag`) is now wired too (2026-08-15) but not
+> yet bit-exact — see Phase F.4.
 
 - [x] mb_skip_flag, mb_type P/B, sub_mb_type, ref_idx, mvd context tables +
       parsing, following the same I-slice-first-then-P-slice pattern used
@@ -896,7 +960,8 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (`t(7)`/`l(7)` fallbacks) instead of using the full 8×8 neighbour set
       (top samples 0–15 incl. the top-right extension, left 0–7, §8.3.2.2); the
       diagonal/vertical-right/horizontal-* modes are therefore not yet pixel-exact.
-      **Not wired into reconstruction either** (see Phase F.4 gate below).
+      Now wired into reconstruction (Phase F.4), where this gap is the prime
+      suspect for the ~160/4608-sample bit-exactness failure found there.
 
 #### Phase F.3 — High-profile scaling matrices
 
@@ -911,13 +976,55 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (§8.5.9); same merged active set is threaded through `decoder.rs`.
 
 #### Phase F.4 — Validate High-profile 8×8-transform decode
-- [ ] **Wire 8×8 reconstruction into `reconstruct.rs`** (`MbType::Intra4x4` +
+
+> Updated 2026-08-15: 8×8 reconstruction (CAVLC **and** CABAC) is wired end to
+> end and the early-return gate is gone — both `high_profile_8x8_conformance.rs`
+> (CAVLC) and the new `high_profile_8x8_cabac_conformance.rs` (CABAC,
+> `TransformSize8x8FlagContext` + `ResidualCabacContext::decode_block_8x8`)
+> exercise real 8×8 macroblocks and decode without error. **But neither is
+> bit-exact**: found while fixing the corpus generator, not the decoder. The
+> existing `testsrc=...` clip generator never actually made x264 pick the 8×8
+> transform for any macroblock (confirmed via `ffmpeg -loglevel debug`'s "8x8
+> transform intra: NN%" line reporting 0%), so both conformance tests were
+> passing *vacuously* — a `..._clip_exercises_8x8_transform` tracer-based test
+> was added per generator to catch this class of false-pass in the future.
+> Swapping the generator to `mandelbrot=...` (enough high-frequency texture to
+> make x264 actually choose 8×8 for some macroblocks — verified 12 8×8 luma
+> blocks decoded by the tracer in both variants) makes the real bit-exactness
+> gap visible: CAVLC `max_abs_diff=160` (3053-3055/4608 samples), CABAC
+> `max_abs_diff=161` (3069-3070/4608 samples), both with deblocking on and
+> off. The near-identical magnitude/sample-count between CAVLC and CABAC
+> suggests a shared bug downstream of entropy decode — most likely
+> `predict_8x8`'s already-documented 7-sample-clamped-neighbour gap (Phase
+> F.2) or something in the 8×8 dequant/IDCT/reconstruction wiring itself,
+> rather than two independent entropy bugs. Not yet root-caused.
+- [x] **Wire 8×8 reconstruction into `reconstruct.rs`** (`MbType::Intra4x4` +
       `transform_size_8x8` → `dequant_idct_8x8` + `predict_8x8` per 8×8 block),
       then remove the `entropy_coding_mode_flag && transform_8x8_mode_flag`
       early-return gate in `decoder.rs::try_decode_real_slice` (keep the gate for
-      inter 8×8 / non-intra until inter 8×8 is implemented).
+      inter 8×8 / non-intra until inter 8×8 is implemented) — done for both the
+      CAVLC and CABAC entropy paths.
 - [ ] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
-      `ffmpeg`, validate bit-exact decode
+      `ffmpeg` that actually exercises the 8×8 path (done — `mandelbrot=...`,
+      see note above) and get it to bit-exact decode — currently failing,
+      `max_abs_diff` ~160/161 on both CAVLC and CABAC variants; root cause
+      still open. **Ruled out one candidate:** `idct_8x8`'s second pass had a
+      genuine axis bug — it read each row's 8 values but wrote the 8 results
+      into a *column* instead of back into the row (`out[i + k*8]` instead of
+      `out[i*8 + k]`), silently transposing any non-DC, non-transpose-
+      symmetric residual block. Confirmed via an isolated single-AC-coefficient
+      test (a pure horizontal-frequency coefficient produced a result that
+      varied along Y instead of X) and fixed, with a regression test added
+      (`transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`).
+      This was a real, independent bug worth fixing, but it did **not** change
+      the `high_profile_8x8_*_conformance.rs` bit-exactness numbers at all
+      (still 160/161, same sample counts) — so it wasn't the (or wasn't the
+      only) cause of the remaining gap. `predict_8x8`'s neighbour-clamping gap
+      (Phase F.2) remains the next most likely suspect; the CAVLC 8×8 residual
+      interleave (`slice_data.rs`'s `block64[4*k+sub]` bit-interleave, see
+      Phase F.1) is also unverified against non-trivial coefficient patterns
+      and worth checking independently since CABAC's residual decode is
+      structurally different but shows the same-magnitude failure.
 
 #### Phase G.1 — PAFF: field-picture parsing
 - [x] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, previously
@@ -1668,11 +1775,22 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       (prefix-code validity, spec-formula round-trip, table-entry decode).
       Missing: the bounded-consumption/no-panic proptest, and it is not yet
       referenced anywhere outside its own module (Phase 6 wiring).
-- [ ] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
+- [~] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
       `src/tns.rs`, `src/pulse.rs`: DPCM scalefactor decode, dequantization
       formula, perceptual noise substitution, temporal noise shaping, pulse
       data. Exit: unit tests against hand-computed values; TNS filter
-      validated against an independently computed reference.
+      validated against an independently computed reference. **In progress
+      (uncommitted, 2026-08-15):** `scalefactors.rs`/`dequant.rs` now iterate
+      the real `SectionData` (not a naive `0..max_sfb` loop) so scalefactor/
+      spectral-data reads match what the bitstream actually contains,
+      including sections that extend past `max_sfb`; found and fixed two
+      real bugs in the Phase 1 section-parsing this depends on
+      (`section_len_bits` was hard-coded to 4 instead of the spec's
+      3/4/5-bit variants, and zero-length/past-`max_sfb` sections were
+      wrongly rejected as errors) — see session note above. `pns.rs`/
+      `tns.rs`/`pulse.rs` not started. Currently causes a 2-test regression
+      (`syntax::tests::parse_full_sce_block`/`parse_full_cpe_block`, likely
+      stale test fixtures, not yet fixed) — not exit-criteria-clean.
 - [ ] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
       channel_pair_element. Exit: unit tests reconstructing L/R from known
       coded spectra.
@@ -1745,16 +1863,18 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `BitReader`/`rANS` code — so there was nothing to migrate; vision will
       depend on `tpt-kinetix-bitstream` when its reconstruction is
       implemented.
-- [~] Port lean's intra + unidirectional-P reconstruction into realtime
-      (DECISION 2) — **no longer blocked, but currently broken (uncommitted,
-      2026-08-14).** `tpt-kinetix-realtime` grew its own reconstruction path
-      (`prediction.rs`/`transform.rs`/`deblock.rs`/`reconstruct.rs`) wired
-      end-to-end into `RealtimeDecoder::decode`, superseding the "wait for
-      lean" plan below. However `cargo test -p tpt-kinetix-realtime` fails 5
-      tests as of this session (`transform::tests::dct_round_trip_4/8/16`,
-      `transform::tests::hadamard_round_trip`,
-      `reconstruct::tests::keyframe_round_trips_at_qp0`) — see the 2026-08-14
-      session note above. Do not flip this to `[x]` until those pass.
+- [x] Port lean's intra + unidirectional-P reconstruction into realtime
+       (DECISION 2) — **done.** `tpt-kinetix-realtime` has its own
+       reconstruction path (`prediction.rs`/`transform.rs`/`deblock.rs`/
+       `reconstruct.rs`) wired end-to-end into `RealtimeDecoder::decode`. The
+       five tests the 2026-08-14 session note flagged as failing
+       (`transform::tests::dct_round_trip_4/8/16`,
+       `transform::tests::hadamard_round_trip`,
+       `reconstruct::tests::keyframe_round_trips_at_qp0`) now pass — the
+       integer Walsh–Hadamard transform bank is exactly invertible, so the
+       `qp == 0` lossless round-trip holds. Realtime is an original codec with
+       no external reference oracle, so `pixel_exact` stays `false` per the
+       honesty contract (see `decoder.rs`). Flipped `[~] → [x]` 2026-08-15.
 - [x] Add slice-grid framing: each slice = one independent rANS sub-stream,
       self-contained (DECISION 3); wire `RansStreamSet` per-frame — **done
       (2026-08-13)**: `src/slice.rs` `SliceGrid` frames/unframes the
@@ -1781,10 +1901,27 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       from `deadline_ms`/`elapsed_ms`/`current_qp`), and `EncodeDeadline`;
       `headers.rs` carries `deadline_ms`/`max_deadline_ms` per frame/sequence
       (round-trip tested).
-- [ ] Build the packet-loss-vs-quality + stall-rate validation harness
-      (DECISION 5) in `tpt-kinetix-test-utils` behind a `realtime-bench`
-      feature (loss injector + the realtime decoder; no model weights).
-- [ ] (AR profile) Add foveation / gaze-map support (DECISION 6).
+- [x] Build the packet-loss-vs-quality + stall-rate validation harness
+       (DECISION 5) in `tpt-kinetix-test-utils` behind a `realtime-bench`
+       feature — **done (2026-08-15).** `tpt-kinetix-test-utils/src/
+       realtime_bench.rs` encodes a synthetic moving clip through the real
+       realtime pipeline (`encode_frame_slices` → `SliceGrid → `Fec`),
+       injects reproducible packet loss at a given rate, recovers via FEC, and
+       falls back to temporal concealment for anything still missing; it then
+       decodes with the real `RealtimeDecoder` and reports `mean_psnr_y_db` /
+       `min_psnr_y_db` (quality half) and `stall_rate` (degradation half) per
+       loss rate via `run_loss_curve`. At `qp == 0` a zero-loss run is
+       lossless (PSNR = +inf, 0% stall), and 30% loss forces stalls —
+       covered by 4 deterministic harness tests. The feature is default-off so
+       it does not add to the normal `just check` wall time.
+- [x] (AR profile) Add foveation / gaze-map support (DECISION 6) — **done.**
+       `foveation.rs` implements `GazeMap` + `slice_qp_by_index` (foveal
+       slices at `base_qp`, peripheral slices up to `base_qp +
+       MAX_FOVEATION_QP_DELTA`, normalised by distance from the gaze centre),
+       the sequence `foveation_enabled` flag and frame `foveation_center_*`
+       fields carry it on the wire, the encoder/decoder both derive per-slice
+       QP from the same header fields (round-trip exact), and the reconstruction
+       path already calls `slice_qp_by_index`. Four unit tests cover the falloff.
 
 ## Phase 15 — `tpt-kinetix-volumetric` (design phase, 2026-08-13)
 

@@ -72,7 +72,7 @@ fn dump(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
     let chroma_qp_index_offset = pps.chroma_qp_index_offset;
     let parsed = if pps.entropy_coding_mode_flag {
         let mut r = BitReader::new(&p.rbsp); r.seek_to_bit(header.data_bit_offset); r.byte_align();
-        parse_p_slice_cabac(r.remaining_bytes(), mb_cols, mb_rows, slice_qp, header.cabac_init_idc as usize, num_ref_idx_l0_active, chroma_qp_index_offset, &mut tpt_kinetix_h264::trace::NoopTracer).expect("cabac parse")
+        parse_p_slice_cabac(r.remaining_bytes(), mb_cols, mb_rows, slice_qp, header.cabac_init_idc as usize, num_ref_idx_l0_active, chroma_qp_index_offset, false, &mut tpt_kinetix_h264::trace::NoopTracer).expect("cabac parse")
     } else {
         let mut r = BitReader::new(&p.rbsp); r.seek_to_bit(header.data_bit_offset);
         parse_p_slice(&mut r, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, false, &mut tpt_kinetix_h264::trace::NoopTracer).expect("cavlc parse")

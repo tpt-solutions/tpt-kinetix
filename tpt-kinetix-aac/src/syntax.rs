@@ -229,25 +229,58 @@ fn decode_section_cb(reader: &mut BitReader) -> Result<u8, AacParseError> {
 }
 
 impl SectionData {
+    /// Number of bits used to code each `sect_len` increment (ISO 14496-3
+    /// §4.4.3.1). The width grows when a single window can have more than a
+    /// 4-bit value's worth of scalefactor bands, so very wide long-block
+    /// streams (e.g. 44.1/48 kHz families) need 5 bits, while eight-short
+    /// windows — which never exceed ~15 bands — drop to 3 bits when `max_sfb`
+    /// is large.
+    fn section_len_bits(ics: &IcsInfo) -> u32 {
+        if ics.window_sequence.is_eight_short() {
+            if ics.max_sfb > 8 {
+                3
+            } else {
+                4
+            }
+        } else if ics.max_sfb > 40 {
+            5
+        } else {
+            4
+        }
+    }
+
     /// Parse `section_data()` for the given [`IcsInfo`].
     pub fn parse(reader: &mut BitReader, ics: &IcsInfo) -> Result<Self, AacParseError> {
         let num_groups = ics.num_window_groups();
         let max_sfb = ics.max_sfb as usize;
+        let sect_len_bits = Self::section_len_bits(ics);
         let mut groups = Vec::with_capacity(num_groups);
         for _g in 0..num_groups {
             let mut sections = Vec::new();
             let mut covered = 0usize;
+            // Bound the number of sections so a hostile or desynced stream cannot
+            // drive an infinite loop (e.g. a run of zero-length sections). A
+            // valid stream needs at most `max_sfb` non-zero sections; the small
+            // fixed slack also accommodates the occasional zero-length section
+            // some encoders (and the ffmpeg reference decoder) emit.
+            let mut iterations = 0usize;
+            let iteration_cap = max_sfb + 64;
             while covered < max_sfb {
-                let sect_cb = decode_section_cb(reader)?;
-                let sect_len = reader
-                    .read_section_length(4)
-                    .ok_or(AacParseError::UnexpectedEof)? as usize;
-                if sect_len == 0 {
-                    return Err(AacParseError::BadSectionCodebook);
-                }
-                if covered + sect_len > max_sfb {
+                iterations += 1;
+                if iterations > iteration_cap {
                     return Err(AacParseError::SectionLengthOverflow);
                 }
+                let sect_cb = decode_section_cb(reader)?;
+                let sect_len = reader
+                    .read_section_length(sect_len_bits)
+                    .ok_or(AacParseError::UnexpectedEof)? as usize;
+                // A zero-length section is legal (the ffmpeg reference decoder
+                // accepts it); it covers no scalefactor bands. More generally a
+                // section may extend past `max_sfb` — the ffmpeg decoder reads the
+                // full section structure and simply ignores the excess bands, so
+                // we record the true length and let the loop end once `covered`
+                // reaches/passes `max_sfb`. Downstream band loops use the section
+                // structure as the source of truth and skip out-of-range bands.
                 sections.push(Section {
                     sect_cb,
                     sect_len: sect_len as u32,
@@ -301,7 +334,7 @@ impl ChannelStream {
         let sections = SectionData::parse(reader, &ics)?;
 
         let band_type = expand_band_types(&sections, &ics);
-        let scalefactor = decode_scalefactors(reader, &ics, &band_type)?;
+        let scalefactor = decode_scalefactors(reader, &ics, &sections, &band_type)?;
 
         let pulse = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
         let pulse = if pulse {
@@ -322,11 +355,11 @@ impl ChannelStream {
             None
         };
 
-        // gain_control_data_present (1 bit) — unused by AAC-LC (SSR/ER only).
-        let gain = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        if gain != 0 {
-            return Err(AacParseError::Unsupported("gain_control_data is not part of AAC-LC"));
-        }
+        // NOTE: `gain_control_data_present` is part of `individual_channel_stream()`
+        // only for ER AAC profiles (AAC-LD/LTP, AOT 17/23/29). AAC-LC (AOT 2) has
+        // no gain-control syntax, so — matching the ffmpeg AAC-LC decoder — the
+        // channel stream ends after `tns_data` and `spectral_data` follows
+        // immediately.
 
         let swb_long = SWB_OFFSET_1024[sf_index];
         let swb_short = SWB_OFFSET_128[sf_index];
@@ -431,6 +464,7 @@ impl RawDataBlock {
         let mut elements = Vec::new();
         loop {
             let id = reader.read_bits(3).ok_or(AacParseError::UnexpectedEof)? as u8;
+            eprintln!("  RDB dispatch bitpos={} id={id}", reader.bit_position() - 3);
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;

@@ -1,35 +1,35 @@
 //! Pixel-exact conformance test for the H.264 High-profile **8×8 transform**
-//! (Intra_8×8, `transform_size_8x8_flag`) CAVLC I-frame decode path.
+//! (Intra_8×8, `transform_size_8x8_flag`) **CABAC** I-frame decode path.
 //!
-//! This exercises the work landed in phases F.2 (8×8 intra prediction +
-//! 8×8 inverse transform), F.3 (scaling-list application to the 8×8 dequant
-//! path), and F.4 (wiring 8×8 reconstruction into `reconstruct_luma`).
+//! Sibling of `high_profile_8x8_conformance.rs` (the CAVLC variant), covering
+//! Phase F.4's CABAC extension: `TransformSize8x8FlagContext` (ctxIdxOffset
+//! 399) and `ResidualCabacContext::decode_block_8x8` (`ctxBlockCat == 5`) in
+//! `entropy.rs`, wired into `parse_intra_macroblock_cabac` in `slice_data.rs`.
 //!
-//! The clip is generated with `-profile:v high -x264-params "cabac=0:8x8dct=1"`
-//! so the PPS enables the 8×8 transform and individual macroblocks may take
-//! the 8×8 path. Two deblocking variants are checked bit-exact against ffmpeg,
-//! and a separate test asserts the 8×8 path is actually taken (otherwise the
-//! test would pass trivially without exercising the code under test).
+//! The clip is generated with `-profile:v high -x264-params "cabac=1:8x8dct=1"`
+//! (the CAVLC test's own generator with `cabac=0` swapped for `cabac=1`) so
+//! the PPS enables both CABAC and the 8×8 transform. Two deblocking variants
+//! are checked bit-exact against ffmpeg, and a separate test asserts the 8×8
+//! path is actually taken (otherwise the test would pass trivially without
+//! exercising the code under test).
 //!
 //! Gated on `ffmpeg` being present on `PATH`.
 //!
-//! **Known failing** (`high_profile_8x8_no_deblock_is_bitexact` /
-//! `_with_deblock_is_bitexact`, since switching the source from a flat
-//! `testsrc` pattern to `mandelbrot` so the "exercises 8×8" assertion is
-//! non-vacuous): decode is not yet bit-exact once real (non-DC,
-//! non-transpose-symmetric) 8×8-block coefficients are involved. Fixed one
-//! real bug this way -- `idct_8x8`'s second pass wrote row results into a
-//! column (see the regression test
+//! **Known failing** (`high_profile_8x8_cabac_no_deblock_is_bitexact` /
+//! `_with_deblock_is_bitexact`, as of the mandelbrot-source switch that made
+//! this test non-vacuous): decode is not yet bit-exact once real (non-DC,
+//! non-transpose-symmetric) 8×8-block coefficients are involved. A real
+//! `idct_8x8` transpose bug (Pass 2 wrote row results into a column) was
+//! found and fixed via this test — see the regression test
 //! `transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`
-//! in `transform.rs`) -- but a residual, larger-magnitude discrepancy
-//! remains (max_abs_diff ~160/255), most likely in `predict_8x8`'s 8×8
-//! intra-prediction neighbour handling (`prediction.rs`), the neighbour
-//! loading in `reconstruct_luma_8x8` (`reconstruct.rs`), or elsewhere in
-//! `dequant_idct_8x8`'s scaling-list/scan handling (`transform.rs`). See the
-//! CABAC sibling test's identical failure signature
-//! (`high_profile_8x8_cabac_conformance.rs`) -- same magnitude regardless of
-//! entropy mode confirms the bug is in this shared reconstruction code.
-//! Needs a dedicated investigation pass.
+//! — but a residual, larger-magnitude discrepancy remains (max_abs_diff
+//! ~161/255) that also reproduces identically in the sibling CAVLC test
+//! (`high_profile_8x8_conformance.rs`), confirming the remaining bug is in
+//! shared 8×8 prediction/reconstruction code (`predict_8x8` in
+//! `prediction.rs`, `reconstruct_luma_8x8`'s neighbour loading in
+//! `reconstruct.rs`, or `dequant_idct_8x8`'s scaling-list/scan handling in
+//! `transform.rs`), not in the CABAC parsing added here. Needs a dedicated
+//! investigation pass; not a regression introduced by the CABAC work.
 
 use std::process::Command;
 
@@ -50,11 +50,10 @@ fn run(cmd: &mut Command) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-/// Generate a High-profile CAVLC I-frame `.h264` with the 8×8 transform enabled
-/// and its reference `.yuv` decode. `disable_deblocking` adds `no-deblock=1`.
-/// `tag` disambiguates the output filenames so concurrently-running tests
-/// (cargo test runs test binaries multi-threaded by default) never share a
-/// path with another test.
+/// Generate a High-profile CABAC I-frame `.h264` with the 8×8 transform
+/// enabled and its reference `.yuv` decode. `disable_deblocking` adds
+/// `no-deblock=1`. `tag` disambiguates the output filenames so concurrently-
+/// running tests never share a path with another test.
 /// Returns `(annexb_bytes, ref_yuv, width, height)`.
 fn generate(
     dir: &std::path::Path,
@@ -63,8 +62,8 @@ fn generate(
     h: u32,
     disable_deblocking: bool,
 ) -> Option<(Vec<u8>, Vec<u8>, u32, u32)> {
-    let h264 = dir.join(format!("t_8x8_{tag}.h264"));
-    let refyuv = dir.join(format!("t_8x8_{tag}.yuv"));
+    let h264 = dir.join(format!("t_8x8_cabac_{tag}.h264"));
+    let refyuv = dir.join(format!("t_8x8_cabac_{tag}.yuv"));
 
     // `mandelbrot` has enough high-frequency texture that x264 actually
     // selects the 8×8 transform for some macroblocks (confirmed via
@@ -75,9 +74,9 @@ fn generate(
     // `8x8dct=1` requires at least High profile; x264 needs that spelled out
     // explicitly since `-profile:v high` alone doesn't imply it.
     let x264_params = if disable_deblocking {
-        "cabac=0:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0:no-deblock=1"
+        "cabac=1:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0:no-deblock=1"
     } else {
-        "cabac=0:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0"
+        "cabac=1:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0"
     };
     let args: Vec<&str> = vec![
         "-hide_banner",
@@ -167,16 +166,17 @@ impl DecodeTracer for EightByEightCounter {
     }
 }
 
-/// Assert the generated High-profile clip actually uses the 8×8 transform for at
-/// least one macroblock, so the conformance tests below are non-vacuous.
+/// Assert the generated High-profile CABAC clip actually uses the 8×8
+/// transform for at least one macroblock, so the conformance tests below are
+/// non-vacuous.
 #[test]
-fn high_profile_clip_exercises_8x8_transform() {
+fn high_profile_cabac_clip_exercises_8x8_transform() {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not available; skipping");
         return;
     }
 
-    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8");
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8_cabac");
     std::fs::create_dir_all(&dir).unwrap();
 
     let (annexb, _refyuv, _w, _h) = match generate(&dir, "exercise", 64, 48, true) {
@@ -198,10 +198,10 @@ fn high_profile_clip_exercises_8x8_transform() {
     };
     dec.decode_with_tracer(&pkt, &mut tracer).ok();
 
-    eprintln!("High-profile clip reconstructed 8×8 luma blocks: {}", tracer.count);
+    eprintln!("High-profile CABAC clip reconstructed 8×8 luma blocks: {}", tracer.count);
     assert!(
         tracer.count > 0,
-        "expected the High-profile clip to exercise the 8×8 transform, but 0 8×8 blocks were decoded"
+        "expected the High-profile CABAC clip to exercise the 8×8 transform, but 0 8×8 blocks were decoded"
     );
 }
 
@@ -232,42 +232,42 @@ fn decode_bitexact(
     compare(&frame.data, &refyuv)
 }
 
-/// Decode a High-profile CAVLC I-frame with the 8×8 transform and deblocking
+/// Decode a High-profile CABAC I-frame with the 8×8 transform and deblocking
 /// disabled, compare to ffmpeg. Bit-exact.
 #[test]
-fn high_profile_8x8_no_deblock_is_bitexact() {
+fn high_profile_8x8_cabac_no_deblock_is_bitexact() {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not available; skipping");
         return;
     }
-    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8");
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8_cabac");
     std::fs::create_dir_all(&dir).unwrap();
     let (max_diff, num_diff, total) = decode_bitexact(&dir, "nodblk", 64, 48, true);
     eprintln!(
-        "H.264 High-profile 8×8 (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
+        "H.264 High-profile 8×8 CABAC (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
     assert_eq!(
         max_diff, 0,
-        "High-profile 8×8 I-frame decode should be bit-exact when deblocking is disabled (max_diff={max_diff}, diff_samples={num_diff}/{total})"
+        "High-profile 8×8 CABAC I-frame decode should be bit-exact when deblocking is disabled (max_diff={max_diff}, diff_samples={num_diff}/{total})"
     );
 }
 
-/// Decode a High-profile CAVLC I-frame with the 8×8 transform and deblocking
+/// Decode a High-profile CABAC I-frame with the 8×8 transform and deblocking
 /// enabled (default settings), compare to ffmpeg. Bit-exact.
 #[test]
-fn high_profile_8x8_with_deblock_is_bitexact() {
+fn high_profile_8x8_cabac_with_deblock_is_bitexact() {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not available; skipping");
         return;
     }
-    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8");
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8_cabac");
     std::fs::create_dir_all(&dir).unwrap();
     let (max_diff, num_diff, total) = decode_bitexact(&dir, "dblk", 64, 48, false);
     eprintln!(
-        "H.264 High-profile 8×8 (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
+        "H.264 High-profile 8×8 CABAC (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
     assert_eq!(
         max_diff, 0,
-        "High-profile 8×8 I-frame decode should be bit-exact with deblocking enabled (max_diff={max_diff}, diff_samples={num_diff}/{total})"
+        "High-profile 8×8 CABAC I-frame decode should be bit-exact with deblocking enabled (max_diff={max_diff}, diff_samples={num_diff}/{total})"
     );
 }

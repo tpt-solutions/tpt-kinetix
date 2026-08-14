@@ -12,7 +12,7 @@
 
 use crate::bitreader::BitReader;
 use crate::codebooks::decode_scalefactor;
-use crate::syntax::IcsInfo;
+use crate::syntax::{AacParseError, IcsInfo, SectionData};
 
 /// Section codebook for an all-zero band (no data).
 pub const ZERO_HCB: u8 = 0;
@@ -39,15 +39,19 @@ pub fn is_noise(cb: u8) -> bool {
 
 /// Decode the DPCM scalefactor sequence for one channel.
 ///
-/// `band_type[g * max_sfb + sfb]` (length `num_groups * max_sfb`) must already
-/// be populated from the section data. Returns the decoded scalefactor for each
-/// (group, sfb) — for normal bands this is the linear scale factor; for
-/// intensity bands the intensity position; for PNS bands the noise energy.
+/// `band_type` (length `num_groups * max_sfb`) is populated from the section
+/// data; `sections` is the raw section structure and is iterated directly so
+/// that every band the bitstream covers (including any past `max_sfb`, which the
+/// reference decoder reads but ignores) consumes its scalefactor. Returns the
+/// decoded scalefactor for each `(group, sfb)` — for normal bands this is the
+/// linear scale factor; for intensity bands the intensity position; for PNS
+/// bands the noise energy.
 pub fn decode_scalefactors(
     reader: &mut BitReader,
     ics: &IcsInfo,
+    sections: &SectionData,
     band_type: &[u8],
-) -> Result<Vec<i32>, crate::syntax::AacParseError> {
+) -> Result<Vec<i32>, AacParseError> {
     let num_groups = ics.num_window_groups();
     let max_sfb = ics.max_sfb as usize;
     let mut sf = vec![0i32; num_groups * max_sfb];
@@ -58,39 +62,45 @@ pub fn decode_scalefactors(
         // chain (predictor = previous value); the first one resets to 0.
         let mut chain_active = false;
         let mut prev = 0i32;
-        let mut prev_was_is = false;
-
-        for sfb in 0..max_sfb {
-            let idx = g * max_sfb + sfb;
-            let bt = band_type[idx];
-            if bt == ZERO_HCB {
-                sf[idx] = 0;
-                continue;
-            }
-            let hcod = decode_scalefactor(reader).ok_or(crate::syntax::AacParseError::UnexpectedEof)?;
-
-            let predictor = if is_intensity(bt) || is_noise(bt) {
-                if !chain_active {
-                    // First intensity/noise band in the group: reset predictor.
-                    0
+        let mut sfb = 0usize;
+        for sec in &sections.groups[g] {
+            let sect_cb = sec.sect_cb;
+            for _ in 0..sec.sect_len as usize {
+                let idx = g * max_sfb + sfb;
+                if sect_cb == ZERO_HCB {
+                    // Zero book: no scalefactor is transmitted.
+                    if sfb < max_sfb {
+                        sf[idx] = 0;
+                    }
                 } else {
-                    prev
-                }
-            } else if g == 0 && sfb == 0 {
-                0
-            } else {
-                prev
-            };
+                    let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
 
-            let val = predictor - hcod;
-            sf[idx] = val;
-            prev = val;
-            if is_intensity(bt) || is_noise(bt) {
-                chain_active = true;
+                    let predictor = if is_intensity(sect_cb) || is_noise(sect_cb) {
+                        if !chain_active {
+                            // First intensity/noise band in the group: reset predictor.
+                            0
+                        } else {
+                            prev
+                        }
+                    } else if g == 0 && sfb == 0 {
+                        0
+                    } else {
+                        prev
+                    };
+
+                    let val = predictor - hcod;
+                    if sfb < max_sfb {
+                        sf[idx] = val;
+                    }
+                    prev = val;
+                    if is_intensity(sect_cb) || is_noise(sect_cb) {
+                        chain_active = true;
+                    }
+                }
+                sfb += 1;
             }
-            prev_was_is = is_intensity(bt) || is_noise(bt);
-            let _ = prev_was_is;
         }
+        let _ = band_type;
     }
     Ok(sf)
 }

@@ -1839,6 +1839,7 @@ dependencies = [
  "tpt-kinetix-demux",
  "tpt-kinetix-h264",
  "tpt-kinetix-lean",
+ "tpt-kinetix-realtime",
  "tpt-kinetix-vision",
 ]
 

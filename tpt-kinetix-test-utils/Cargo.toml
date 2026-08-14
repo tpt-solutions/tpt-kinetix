@@ -11,6 +11,11 @@ publish = false
 [dependencies]
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-h264 = { workspace = true }
+tpt-kinetix-realtime = { workspace = true, optional = true }
+
+[features]
+# DECISION 5 validation harness (loss injector + realtime decoder, no model weights).
+realtime-bench = ["tpt-kinetix-realtime"]
 
 [dev-dependencies]
 proptest = "1.5"

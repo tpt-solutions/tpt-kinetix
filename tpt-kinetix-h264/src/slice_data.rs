@@ -863,9 +863,6 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
         // §7.4.5, 8-bit (QpBdOffsetY = 0): QPY = (QPY_prev + dqp + 52) % 52.
         qp = (prev_qp + dqp + 52).rem_euclid(52);
-        if mb_x == 1 && mb_y == 0 {
-            eprintln!("MB(1,0) prev_qp={prev_qp} dqp={dqp} qp={qp}");
-        }
     }
     mb.qp = qp;
 
@@ -2854,9 +2851,6 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 let raster = raster_of_8x8_sub(i8x8, sub);
                 let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
                 let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
-                if mb_x == 1 && mb_y == 0 && i8x8 == 0 {
-                    eprintln!("MB(1,0) i8x8=0 sub={sub} nc={nc} tc={tc} t1={t1} coeffs={coeffs:?}");
-                }
                 for k in 0..16usize {
                     block64[4 * k + sub] = coeffs[k];
                 }

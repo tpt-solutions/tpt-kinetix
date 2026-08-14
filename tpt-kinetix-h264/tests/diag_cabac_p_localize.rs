@@ -135,6 +135,7 @@ fn localize_cabac_pframe_diffs() {
         header.cabac_init_idc as usize,
         num_ref_idx_l0_active,
         chroma_qp_index_offset,
+        false,
         &mut tpt_kinetix_h264::trace::NoopTracer,
     )
     .expect("cabac p parse");

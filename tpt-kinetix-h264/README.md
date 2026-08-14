@@ -63,8 +63,11 @@ This prose describes current reality; the canonical, machine-readable status is
 
 ### Not yet pixel-exact / unsupported
 
-- **8×8 transform** (`transform_8x8_mode_flag`) — parsed but not yet decoded
-  (High-profile streams are rejected in strict mode). Tracked as Phase F.
+- **8×8 transform** (`transform_8x8_mode_flag`) — parsed and reconstructed for
+  **intra** macroblocks in both CAVLC and CABAC (Phase F.4); not yet
+  bit-exact against `ffmpeg` on real (non-DC) coefficient content, so
+  High-profile streams remain rejected in strict mode. Inter (P_8x8/B_Direct)
+  8×8 transform is unimplemented for both entropy modes. Tracked as Phase F.
 - **Field / interlaced coding** (`frame_mbs_only_flag == 0`, MBAFF/PAFF) —
   rejected in strict mode. Tracked as Phase G.
 - **Non-16-aligned picture dimensions** — cropped-edge edge-sample handling for

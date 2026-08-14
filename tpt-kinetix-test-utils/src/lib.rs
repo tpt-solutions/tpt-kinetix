@@ -17,6 +17,8 @@
 pub mod audio_diff;
 pub mod corpus;
 pub mod pixel_diff;
+#[cfg(feature = "realtime-bench")]
+pub mod realtime_bench;
 pub mod reference;
 pub mod synthetic;
 pub mod tmc13;
