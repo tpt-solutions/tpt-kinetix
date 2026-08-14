@@ -509,8 +509,21 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
 
         // Full 8×8 neighbour set: 16 top samples (incl. the top-right
         // extension) and 8 left samples, plus the single top-left `X` (§8.3.2.2).
+        // The top-right extension (top[8..16]) is only spec-available when
+        // `by == 0` (it then comes from the already-fully-decoded row of
+        // macroblocks above) or `bx == 0` (it comes from this MB's own
+        // top-right 8×8 block, decoded earlier in raster i8 order: 0,1,2,3).
+        // The one case where both are false — the bottom-right 8×8 block
+        // (`bx == 8 && by == 8`) — would read columns from the macroblock to
+        // the right, which hasn't been decoded yet even though those plane
+        // samples are in-bounds and hold stale data; must be left `None` so
+        // `predict_8x8` falls back to replicating the last real top sample
+        // (§8.3.2.2.1), matching the equivalent `top_right_available` guard
+        // in the 4×4 path just below.
+        let top_right_available = by == 0 || bx == 0;
         let mut top = [None; 16];
-        for i in 0..16 {
+        let top_len = if top_right_available { 16 } else { 8 };
+        for i in 0..top_len {
             top[i] = get_luma(plane, stride, (px0 + i) as isize, py0 as isize - 1);
         }
         let mut left = [None; 8];

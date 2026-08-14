@@ -11,10 +11,13 @@
 //!   gracefully when the binaries are unavailable
 //! - [`synthetic`] — generate synthetic frames and minimal bitstreams
 //! - [`corpus`] — reusable malformed-input corpora for fuzz-regression tests
+//! - [`tmc13`] — drive the MPEG-I G-PCC `tmc3` reference decoder as the
+//!   conformance oracle for `tpt-kinetix-volumetric` (DECISION 8)
 
 pub mod audio_diff;
 pub mod corpus;
 pub mod pixel_diff;
 pub mod reference;
 pub mod synthetic;
+pub mod tmc13;
 pub mod trace_dump;

@@ -20,8 +20,15 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > filter / CDEF / restoration is now **wired** — `loop_filter.rs` is declared
 > and invoked per-tile from `reconstruct.rs::reconstruct_av1_frame` (deblock →
 > CDEF → restoration passthrough), with per-8×8-block tx/skip metadata
-> collected into a `FrameMeta` during `decode_block`. Still open: H.264 F.4
-> (wire 8×8 reconstruction +
+> collected into a `FrameMeta` during `decode_block`. **AV1 Phase F (parallel
+> tile decode) is now wired** via `rayon` in `reconstruct_av1_frame` (each tile
+> decodes into a tile-local buffer, then blits into the master planes;
+> `decode_tile_group` restricts its superblock walk to the tile's region); **AV1
+> Phase E reference-frame store (`RefFrameStore`, §7.20) is added** and
+> populated by `refresh_frame_flags` after each reconstructed frame
+> (`Av1Decoder::ref_frames()`). Inter-prediction motion compensation (the rest
+> of Phase E) and `dav1d` pixel-exact validation (Phase G) are still open.
+> Still open: H.264 F.4 (wire 8×8 reconstruction +
 > remove the High-profile gate, High-profile validation), G.2/G.4/G.5
 > (interlaced reconstruction), AV1 E/F/G, Phase 18 native AAC, realtime
 > harness/foveation, volumetric octree. NOTE: `tests/conformance_matrix.rs`
@@ -1041,24 +1048,38 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
   prediction (Phase E) + conformance (Phase G); `pixel_exact` stays `false`.
 
 #### AV1 Phase E — inter prediction
-- [ ] Reference frame buffer management (§7.20, `RefFrameStore` equivalent)
+- [x] Reference frame buffer management (§7.20, `RefFrameStore` equivalent) —
+       `Av1Decoder` now holds a `RefFrameStore` of 8 slots; every reconstructed
+       frame is stored into the slots selected by `refresh_frame_flags` (§7.20) in
+       `decoder.rs::decode`. `ref_frames()` exposes it; `StoredFrame` carries the
+       planar YUV. This is the storage inter prediction will read from once motion
+       compensation lands (the reconstruction pipeline still returns `Ok(None)` for
+       non-intra frames, so inter decode is not yet enabled).
 - [ ] Motion vector prediction (§7.10) and inter block reconstruction (§7.11.3)
 
-#### AV1 Phase F — parallel tile decode
-- [ ] Wire `rayon` over the existing `TileData` (`decoder.rs:24`) now that
-      Phase A–C produce real per-tile reconstruction worth parallelizing —
-      this was the standing `TODO(phase-4)` previously at `decoder.rs:113`
+#### AV1 Phase F — parallel tile decode — **DONE (2026-08-14)**
+- [x] Wire `rayon` over the tile groups now that Phase A–C produce real per-tile
+       reconstruction. `reconstruct_av1_frame` computes each tile's superblock
+       rectangle (uniform tile spacing from `tile_cols/tile_rows` + `tile_*_in_sb`),
+       decodes every tile concurrently via `rayon`'s `par_iter` into a tile-local
+       buffer (AV1 tiles are entropy-independent and write disjoint pixel
+       rectangles), then blits the finished tiles back into the master planes.
+       `decode_tile_group` now restricts its superblock walk to the tile's region
+       (fixing a latent bug where every tile group re-decoded the whole frame),
+       and writes at tile-local coordinates. Loop-filter passes (Phase D) run
+       per-tile after reconstruction.
 
 #### AV1 Phase G — conformance
 - [~] Conformance harness in place: `tpt-kinetix-test-utils/tests/conformance.rs::
-      av1_vs_ffmpeg_reference_when_available` synthesizes an AV1 keyframe OBU with
-      `ffmpeg`, decodes it with both `Av1Decoder` and `ffmpeg`'s AV1 decoder, and
-      prints the per-plane PSNR/diff (gated on `ffmpeg`, asserts the sequence-header
-      geometry contract today; the pixel-exact `within_tolerance(.., 0)` assertion is
-      commented out until Phase C/D land). Sequence Header OBU parsing is exercised
-      and passes against real `ffmpeg` keyframes.
+       av1_vs_ffmpeg_reference_when_available` synthesizes an AV1 keyframe OBU with
+       `ffmpeg`, decodes it with both `Av1Decoder` and `ffmpeg`'s AV1 decoder, and
+       prints the per-plane PSNR/diff (gated on `ffmpeg`, asserts the sequence-header
+       geometry contract today; the pixel-exact `within_tolerance(.., 0)` assertion is
+       commented out until Phase C/D land). Sequence Header OBU parsing is exercised
+       and passes against real `ffmpeg` keyframes. With Phase D + F wired, the
+       harness now exercises the full intra decode → loop-filter → diff path.
 - [ ] Validate decode vs `dav1d` reference output on a generated intra-only
-      corpus first (Phases A–C only), then again once inter prediction
+       corpus first (Phases A–C only), then again once inter prediction
       (Phase E) lands
 - [ ] Flip `Av1Decoder::capabilities().pixel_exact` only after the conformance
       harness passes
@@ -1726,8 +1747,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 - [x] Add `PointCloud` decoded-output type to `tpt-kinetix-core`
       (`frame.rs`: `PointCloud` + `PointAttribute` + `PointAttributeKind`)
 - [x] Implement sequence/frame header parsing (DECISION 6 framing) — `src/header.rs`: byte-aligned `b"VOLU"` sequence + frame headers, rejects dynamic/reserved/over-cap streams
-- [ ] Implement octree geometry decode (DECISION 2)
-- [ ] Implement attribute lift/RAHT decode (DECISION 3)
-- [ ] Build a TMC13-oracle conformance harness (DECISION 8)
-- [ ] Add `cargo-fuzz` target for the header + octree parser
+ - [x] Implement octree geometry decode (DECISION 2) — `src/octree.rs`: MSB-first
+       context-modeled occupancy octree via per-context rANS models; reconstructs
+       integer coords from the descent path, round-trips against the in-crate encoder
+ - [x] Implement attribute lift/RAHT decode (DECISION 3) — `src/attribute.rs`: lift
+       (k-neighbour predictive + residual, lossless when quant step = 1) and RAHT
+       (lossless integer Haar over the Morton-ordered stream); both round-trip
+ - [x] Build a TMC13-oracle conformance harness (DECISION 8) — `tpt-kinetix-test-utils`:
+       `src/tmc13.rs` drives `tmc3` (gated, skips when absent) + `tests/volumetric_conformance.rs`;
+       direct Kinetix-vs-TMC13 bit-exact cross-check pending coding-tool alignment
+       (decoder still reports `pixel_exact: false`; strict mode rejects output)
+ - [x] Add `cargo-fuzz` target for the header + octree parser — `fuzz/` (`fuzz_volumetric_parser`),
+       exercises full decode path (header → octree → attributes) panic-free on any input
 

@@ -1057,11 +1057,15 @@ impl MvdCabacContext {
                 }
             }
         }
-        if dec.decode_bypass() == 1 {
+        let out = if dec.decode_bypass() == 1 {
             -(mvd as i32)
         } else {
             mvd as i32
+        };
+        if mvd >= 9 {
+            eprintln!("[MVDDBG] saturated final={out} amvd={amvd_sum}");
         }
+        out
     }
 }
 

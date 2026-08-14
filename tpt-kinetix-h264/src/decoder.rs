@@ -244,10 +244,14 @@ impl H264Decoder {
             match nal.nal_unit_type {
                 NalUnitType::Sps => {
                     if let Ok(sps) = SeqParameterSet::parse(&nal.rbsp) {
+                        eprintln!("SPS_NAL rbsp_len={} profile_idc={}", nal.rbsp.len(), sps.profile_idc);
                         self.sps_store.insert(sps.seq_parameter_set_id, sps);
+                    } else {
+                        eprintln!("SPS_NAL rbsp_len={} PARSE_FAIL", nal.rbsp.len());
                     }
                 }
                 NalUnitType::Pps => {
+                    eprintln!("PPS_NAL rbsp_len={}", nal.rbsp.len());
                     // Probe the PPS first to discover its `seq_parameter_set_id`
                     // so the SPS scaling lists can be merged into the PPS set
                     // (§8.5.9: an absent PPS list falls back to the corresponding

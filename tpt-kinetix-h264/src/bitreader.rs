@@ -140,6 +140,28 @@ impl<'a> BitReader<'a> {
         self.bit_pos == 0
     }
 
+    /// Spec §7.2 `more_rbsp_data()`: `true` while bits remain other than the
+    /// mandatory `rbsp_trailing_bits()` (a single `1` stop bit followed by `0`
+    /// padding out to the next byte boundary). The stop bit can land anywhere
+    /// in the trailing byte, so a fixed "N bits remaining" threshold is wrong
+    /// whenever a payload happens to end exactly byte-aligned (payload bits +
+    /// stop bit == 8) — this instead locates the stop bit itself by scanning
+    /// backward for the last set bit in the remaining data (bits are MSB-first,
+    /// so the stop bit is followed only by zero padding) and compares the
+    /// current read position against it.
+    pub fn more_rbsp_data(&self) -> bool {
+        if self.byte_pos >= self.data.len() {
+            return false;
+        }
+        let remaining = &self.data[self.byte_pos..];
+        let Some(last_nonzero) = remaining.iter().rposition(|&b| b != 0) else {
+            return false;
+        };
+        let byte = remaining[last_nonzero];
+        let stop_bit_pos = last_nonzero * 8 + (7 - byte.trailing_zeros() as usize);
+        (self.bit_pos as usize) < stop_bit_pos
+    }
+
     /// The remaining bytes from the current (byte-aligned) position to the
     /// end of the stream. Used to hand off to [`crate::entropy::CabacDecoder`],
     /// which operates on a raw byte slice rather than a `BitReader`. Panics if

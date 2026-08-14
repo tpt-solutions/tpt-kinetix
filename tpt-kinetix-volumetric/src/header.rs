@@ -33,7 +33,7 @@ use nom::{
     bytes::complete::tag,
     number::complete::{be_u32, be_u8},
     sequence::tuple,
-    IResult,
+    IResult, Parser,
 };
 use tpt_kinetix_core::error::KinetixError;
 use tpt_kinetix_core::frame::PointAttributeKind;
@@ -64,6 +64,15 @@ pub struct AttributeInfo {
     pub kind: PointAttributeKind,
     /// Quantization resolution in bits (8-16).
     pub bit_depth: u8,
+}
+
+/// Serialize an attribute kind to its on-wire byte.
+pub fn attribute_kind_byte(kind: PointAttributeKind) -> u8 {
+    match kind {
+        PointAttributeKind::ColorRgb => 0,
+        PointAttributeKind::Reflectance => 1,
+        PointAttributeKind::Normal => 2,
+    }
 }
 
 /// Sequence-level (decode-once) parameters.
@@ -113,13 +122,13 @@ fn map_err<'a, T>(
 /// payload). Rejects unknown versions, dynamic streams (DECISION 5), unknown
 /// attribute kinds/codings, and point counts above [`MAX_POINTS`] (DECISION 8).
 pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), KinetixError> {
-    let (rest, _) = map_err("magic", tag(MAGIC)(input))?;
+    let (rest, _) = map_err("magic", tag(MAGIC).parse(input))?;
     let (
         rest,
         (version, max_points, octree_depth, attr_count, coding, lossless, dynamic, intra_leaf),
     ) = map_err(
         "sequence header",
-        tuple((be_u8, be_u32, be_u8, be_u8, be_u8, be_u8, be_u8, be_u8))(rest),
+        tuple((be_u8, be_u32, be_u8, be_u8, be_u8, be_u8, be_u8, be_u8)).parse(rest),
     )?;
 
     if version != VERSION {
@@ -139,6 +148,13 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
             "volumetric: declared max_points {max_points} exceeds the {MAX_POINTS}-point cap"
         )));
     }
+    // Bound octree depth so `1 << octree_depth` (used to size the cube during
+    // decode) cannot overflow a `u32` (DECISION 8 budget is 10-12).
+    if octree_depth > 24 {
+        return Err(KinetixError::Unsupported(format!(
+            "volumetric: octree_depth {octree_depth} exceeds the supported maximum of 24"
+        )));
+    }
 
     let attribute_coding = match coding {
         0 => AttributeCoding::Lift,
@@ -153,7 +169,8 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
     let mut attributes = Vec::with_capacity(attr_count as usize);
     let mut cur = rest;
     for _ in 0..attr_count {
-        let (r, (kind_byte, bit_depth)) = map_err("attribute info", tuple((be_u8, be_u8))(cur))?;
+        let (r, (kind_byte, bit_depth)) =
+            map_err("attribute info", tuple((be_u8, be_u8)).parse(cur))?;
         let kind = match kind_byte {
             0 => PointAttributeKind::ColorRgb,
             1 => PointAttributeKind::Reflectance,
@@ -183,8 +200,10 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
 
 /// Parse the frame header that immediately follows the sequence header.
 pub fn parse_frame_header(input: &[u8]) -> Result<(&[u8], FrameHeader), KinetixError> {
-    let (rest, (frame_type, num_points, payload_len, geometry_coding)) =
-        map_err("frame header", tuple((be_u8, be_u32, be_u32, be_u8))(input))?;
+    let (rest, (frame_type, num_points, payload_len, geometry_coding)) = map_err(
+        "frame header",
+        tuple((be_u8, be_u32, be_u32, be_u8)).parse(input),
+    )?;
     if frame_type != 0 {
         return Err(KinetixError::Unsupported(format!(
             "volumetric: frame_type {frame_type} is reserved for v2; v1 only supports static frames"
@@ -271,9 +290,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_point_cap_exceeded() {
+    fn rejects_excessive_octree_depth() {
         let mut b = build_sequence(&[(0, 8)]);
-        b[5..9].copy_from_slice(&(MAX_POINTS + 1).to_be_bytes());
+        b[9] = 30; // octree_depth = 30 (> 24)
         assert!(matches!(
             parse_sequence_header(&b),
             Err(KinetixError::Unsupported(_))

@@ -89,7 +89,7 @@ pub fn dav1d_available() -> bool {
     binary_available("dav1d")
 }
 
-fn binary_available(bin: &str) -> bool {
+pub(crate) fn binary_available(bin: &str) -> bool {
     Command::new(bin)
         .arg("-version")
         .stdout(Stdio::null())
@@ -314,13 +314,14 @@ fn adts_geometry(adts: &[u8]) -> Result<(u32, u8), RefDecodeError> {
 
     // sampling_frequency_index: byte 2 bits 5-2.
     let sf_index = (h[2] >> 2) & 0x0F;
-    let sample_rate = SAMPLE_RATE_TABLE
-        .get(sf_index as usize)
-        .copied()
-        .ok_or(RefDecodeError::DecoderFailed {
-            binary: "ffmpeg",
-            stderr: "invalid ADTS sampling frequency index".into(),
-        })?;
+    let sample_rate =
+        SAMPLE_RATE_TABLE
+            .get(sf_index as usize)
+            .copied()
+            .ok_or(RefDecodeError::DecoderFailed {
+                binary: "ffmpeg",
+                stderr: "invalid ADTS sampling frequency index".into(),
+            })?;
 
     // channel_configuration: byte 2 bit 0 + byte 3 bits 7-6.
     let channel_config = ((h[2] & 0x01) << 2) | ((h[3] >> 6) & 0x03);

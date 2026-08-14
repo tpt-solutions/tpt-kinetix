@@ -7,7 +7,7 @@ use nom::{
     bytes::complete::take,
     multi::count,
     number::complete::{be_u32, be_u64, be_u8},
-    IResult,
+    Parser, IResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -306,7 +306,8 @@ pub fn parse_stts(input: &[u8]) -> IResult<&[u8], SttsBox> {
             ))
         },
         entry_count as usize,
-    )(input)?;
+    )
+    .parse(input)?;
     Ok((input, SttsBox { entries: raw }))
 }
 
@@ -325,7 +326,7 @@ pub fn parse_stss(input: &[u8]) -> IResult<&[u8], StssBox> {
     let (input, _version) = be_u8(input)?;
     let (input, _flags) = take(3usize)(input)?;
     let (input, entry_count) = be_u32(input)?;
-    let (input, sample_numbers) = count(be_u32, entry_count as usize)(input)?;
+    let (input, sample_numbers) = count(be_u32, entry_count as usize).parse(input)?;
     Ok((input, StssBox { sample_numbers }))
 }
 
@@ -348,7 +349,7 @@ pub fn parse_stsz(input: &[u8]) -> IResult<&[u8], StszBox> {
     let (input, default_size) = be_u32(input)?;
     let (input, sample_count) = be_u32(input)?;
     let (input, sample_sizes) = if default_size == 0 {
-        count(be_u32, sample_count as usize)(input)?
+        count(be_u32, sample_count as usize).parse(input)?
     } else {
         (input, Vec::new())
     };
@@ -376,7 +377,7 @@ pub fn parse_stco(input: &[u8]) -> IResult<&[u8], StcoBox> {
     let (input, _version) = be_u8(input)?;
     let (input, _flags) = take(3usize)(input)?;
     let (input, entry_count) = be_u32(input)?;
-    let (input, offsets) = count(be_u32, entry_count as usize)(input)?;
+    let (input, offsets) = count(be_u32, entry_count as usize).parse(input)?;
     Ok((input, StcoBox { offsets }))
 }
 
@@ -395,7 +396,7 @@ pub fn parse_co64(input: &[u8]) -> IResult<&[u8], Co64Box> {
     let (input, _version) = be_u8(input)?;
     let (input, _flags) = take(3usize)(input)?;
     let (input, entry_count) = be_u32(input)?;
-    let (input, offsets) = count(be_u64, entry_count as usize)(input)?;
+    let (input, offsets) = count(be_u64, entry_count as usize).parse(input)?;
     Ok((input, Co64Box { offsets }))
 }
 
@@ -437,7 +438,8 @@ pub fn parse_stsc(input: &[u8]) -> IResult<&[u8], StscBox> {
             ))
         },
         entry_count as usize,
-    )(input)?;
+    )
+    .parse(input)?;
     Ok((input, StscBox { entries }))
 }
 

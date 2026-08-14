@@ -21,7 +21,7 @@ members = [
   "tpt-kinetix-cli",
   "tpt-kinetix-test-utils",
 ]
-exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz"]
 
 [workspace.package]
 edition = "2021"
@@ -56,7 +56,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam-channel = "0.5"
 
 # AAC decode (wraps symphonia's pure-Rust AAC-LC decoder)
-symphonia-codec-aac = "0.5"
+symphonia-codec-aac = "0.6"
 
 # Internal crates (path for local dev; version required for crates.io publish)
 tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.0" }

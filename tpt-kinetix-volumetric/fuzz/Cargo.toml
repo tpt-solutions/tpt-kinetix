@@ -1,0 +1,26 @@
+[package]
+name = "tpt-kinetix-volumetric-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-volumetric = { path = ".." }
+tpt-kinetix-core = { path = "../../tpt-kinetix-core" }
+tpt-kinetix-bitstream = { path = "../../tpt-kinetix-bitstream" }
+
+[[bin]]
+name = "fuzz_volumetric_parser"
+path = "fuzz_targets/fuzz_volumetric_parser.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1

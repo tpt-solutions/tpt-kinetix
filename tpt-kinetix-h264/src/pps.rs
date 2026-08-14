@@ -107,15 +107,11 @@ impl PicParameterSet {
         let redundant_pic_cnt_present_flag =
             r.read_bit().context("redundant_pic_cnt_present_flag")? == 1;
 
-        // High-profile extension (present only if more_rbsp_data()). We probe by
-        // checking whether more than the trailing stop bit remains. The RBSP
-        // trailing bits are a single `1` followed by zero padding, so if more
-        // than 8 bits (a conservative bound) remain we treat the extension as
-        // present.
+        // High-profile extension (present only if more_rbsp_data(), §7.2).
         let mut transform_8x8_mode_flag = false;
         let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
         let mut scaling = sps_scaling.cloned().unwrap_or_else(ScalingLists::flat);
-        if more_rbsp_data(&r) {
+        if r.more_rbsp_data() {
             transform_8x8_mode_flag = r.read_bit().context("transform_8x8_mode_flag")? == 1;
             scaling = ScalingLists::parse_pps(
                 &mut r,
@@ -145,14 +141,6 @@ impl PicParameterSet {
             scaling,
         })
     }
-}
-
-/// Conservative `more_rbsp_data()` check (spec §7.2): returns `true` while more
-/// than the RBSP trailing stop-bit region remains. The trailing bits are a
-/// single `1` bit followed by `0` padding to a byte boundary, so once the reader
-/// is within the final byte we treat the data as exhausted.
-fn more_rbsp_data(r: &BitReader) -> bool {
-    r.remaining_bits() > 8
 }
 
 #[cfg(test)]

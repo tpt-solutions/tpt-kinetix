@@ -219,7 +219,9 @@ fn av1_vs_ffmpeg_reference_when_available() {
 fn aac_vs_ffmpeg_reference_pcm_when_available() {
     use tpt_kinetix_aac::AacDecoder;
     use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
-    use tpt_kinetix_test_utils::{audio_diff::*, reference::decode_aac_with_ffmpeg, synthetic::minimal_aac_adts};
+    use tpt_kinetix_test_utils::{
+        audio_diff::*, reference::decode_aac_with_ffmpeg, synthetic::minimal_aac_adts,
+    };
 
     if !tpt_kinetix_test_utils::reference::ffmpeg_available() {
         eprintln!("skipping: ffmpeg not available on PATH");
@@ -276,8 +278,14 @@ fn aac_vs_ffmpeg_reference_pcm_when_available() {
     for i in 0..common {
         let a = &kinetix_pcm[i];
         let b = &ref_pcm[i];
-        assert_eq!(a.sample_rate, b.sample_rate, "sample rate mismatch at block {i}");
-        assert_eq!(a.channels, b.channels, "channel count mismatch at block {i}");
+        assert_eq!(
+            a.sample_rate, b.sample_rate,
+            "sample rate mismatch at block {i}"
+        );
+        assert_eq!(
+            a.channels, b.channels,
+            "channel count mismatch at block {i}"
+        );
         // Kinetix may emit a slightly different sample count than ffmpeg's
         // frame; compare only the overlapping prefix.
         let n = a.data.len().min(b.data.len());

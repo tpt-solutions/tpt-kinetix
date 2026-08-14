@@ -7,9 +7,12 @@
 //! profiles without hand-rolling an MDCT/Huffman/TNS pipeline.
 
 use symphonia_codec_aac::AacDecoder as SymphoniaAacDecoder;
-use symphonia_core::audio::Signal;
-use symphonia_core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_AAC};
-use symphonia_core::formats::Packet;
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions,
+};
+use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
+use symphonia_core::packet::Packet;
+use symphonia_core::units::{Duration, Timestamp};
 
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities,
@@ -34,7 +37,7 @@ struct AacDecoderWrapper {
     decoder: SymphoniaAacDecoder,
     /// The CODEC parameters used to build the decoder (kept for resets).
     #[allow(dead_code)]
-    params: CodecParameters,
+    params: AudioCodecParameters,
 }
 
 impl AacDecoder {
@@ -106,8 +109,8 @@ impl AacDecoder {
                 .config
                 .ok_or_else(|| KinetixError::Unsupported("AAC: no configuration available to initialize the decoder; feed an AudioSpecificConfig or an ADTS-framed packet".into()))?;
 
-            let mut params = CodecParameters::new();
-            params.for_codec(CODEC_TYPE_AAC);
+            let mut params = AudioCodecParameters::new();
+            params.for_codec(CODEC_ID_AAC);
             params.with_sample_rate(cfg.sample_rate);
             // AudioSpecificConfig doubles as the codec extra data.
             let mut extra = Vec::with_capacity(2);
@@ -122,7 +125,7 @@ impl AacDecoder {
             extra.push(byte1);
             params.with_extra_data(extra.into_boxed_slice());
 
-            let decoder = SymphoniaAacDecoder::try_new(&params, &DecoderOptions::default())
+            let decoder = SymphoniaAacDecoder::try_new(&params, &AudioDecoderOptions::default())
                 .map_err(|e| {
                     KinetixError::Unsupported(format!("AAC: failed to initialize decoder: {e}"))
                 })?;
@@ -158,11 +161,11 @@ impl AacDecoder {
         }
 
         let wrapper = self.ensure_inner()?;
-        let sym_packet = Packet::new_from_boxed_slice(
+        let sym_packet = Packet::new(
             0,
-            packet.pts.value.max(0) as u64,
-            1024,
-            payload.to_vec().into_boxed_slice(),
+            Timestamp::new(packet.pts.value.max(0)),
+            Duration::new(1024),
+            payload.to_vec(),
         );
 
         let buf = wrapper
@@ -171,25 +174,22 @@ impl AacDecoder {
             .map_err(|e| KinetixError::Unsupported(format!("AAC: decode failed: {e}")))?;
 
         let spec = buf.spec();
-        let channels = spec.channels.count();
-        let rate = spec.rate;
+        let channels = spec.channels().count();
+        let rate = spec.rate();
         let frames = buf.frames();
         if frames == 0 {
             return Ok(None);
         }
 
         // symphonia's AAC decoder produces i32 planar samples; convert to an
-        // interleaved f32 AudioBuffer we can read.
-        let mut out = symphonia_core::audio::AudioBuffer::<f32>::new(frames as u64, *spec);
-        buf.convert(&mut out);
+        // interleaved f32 PCM buffer we can read.
+        let mut samples: Vec<f32> = Vec::with_capacity(frames * channels);
+        buf.copy_to_vec_interleaved::<f32>(&mut samples);
 
         // Interleave into a flat byte buffer.
-        let mut data = Vec::with_capacity(frames * channels * 4);
-        for f in 0..frames {
-            for c in 0..channels {
-                let sample = out.chan(c)[f];
-                data.extend_from_slice(&sample.to_le_bytes());
-            }
+        let mut data = Vec::with_capacity(samples.len() * 4);
+        for s in samples {
+            data.extend_from_slice(&s.to_le_bytes());
         }
 
         let _ = self.strict;

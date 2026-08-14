@@ -18,24 +18,35 @@
 //!
 //! # Status
 //!
-//! This crate is a **scaffold**. Sequence / frame header parsing is implemented
-//! (see [`header`]), but the geometry (octree) and attribute (lift/RAHT) decode
-//! paths are not yet wired. The decoder therefore reports `pixel_exact: false`
-//! and returns [`KinetixError::NotPixelExact`] in strict mode when it reaches a
-//! coded payload. Malformed streams and any stream declaring the reserved
-//! `dynamic` flag fail with [`KinetixError::Parse`] / [`KinetixError::Unsupported`]
-//! respectively. See [`VolumetricDecoder::capabilities`] for what is and isn't
-//! supported.
+//! Geometry (octree) and attribute (lift/RAHT) decode are implemented and
+//! round-trip against the in-crate [`encode`] path. The decoder is **not yet
+//! validated bit-exact against the TMC13 oracle**, so
+//! [`VolumetricDecoderImpl::capabilities`] reports `pixel_exact: false` and
+//! strict mode rejects output with [`KinetixError::NotPixelExact`]. Malformed
+//! streams and any stream declaring the reserved `dynamic` flag fail with
+//! [`KinetixError::Parse`] / [`KinetixError::Unsupported`] respectively. See
+//! [`VolumetricDecoder::capabilities`] for what is and isn't supported.
 //!
 //! # References
 //!
 //! - Design doc: `docs/volumetric-codec-design.md`
 
+pub mod attribute;
+pub mod encode;
+pub mod entropy;
 pub mod header;
+pub mod octree;
+pub mod payload;
 
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::PointCloud, packet::Packet,
 };
+
+use crate::attribute::{decode_attributes, pack_streams, samples_per_attr};
+use crate::header::parse_frame_header;
+use crate::header::parse_sequence_header;
+use crate::octree::decode_geometry;
+use crate::payload::unframe_payload;
 
 /// Decode interface for the volumetric (point-cloud) codec.
 ///
@@ -46,9 +57,8 @@ use tpt_kinetix_core::{
 pub trait VolumetricDecoder {
     /// Decode a compressed packet into a [`PointCloud`].
     ///
-    /// In non-strict mode, before the reconstruction pipeline is implemented,
-    /// this returns `Ok(None)`. In strict mode it returns
-    /// [`KinetixError::NotPixelExact`] instead of placeholder output.
+    /// In strict mode, when the decoder cannot guarantee bit-exact output, this
+    /// returns [`KinetixError::NotPixelExact`] instead of a reconstructed cloud.
     fn decode(&mut self, packet: &Packet) -> Result<Option<PointCloud>, KinetixError>;
 }
 
@@ -59,10 +69,12 @@ pub trait VolumetricDecoder {
 ///
 /// # Honesty contract
 ///
-/// This decoder is **not yet implemented**. In non-strict mode it returns
-/// `Ok(None)` for every packet. In strict mode it returns
-/// [`KinetixError::NotPixelExact`]. Callers should check
-/// [`DecoderCapabilities::pixel_exact`] before trusting output.
+/// Geometry/attribute decode is implemented and round-trips against the in-crate
+/// encoder, but it has **not** been validated bit-exact against the TMC13
+/// reference oracle. Callers that require bit-exact output must enable strict
+/// mode; in strict mode `decode` returns [`KinetixError::NotPixelExact`] rather
+/// than reconstructed points. Check [`DecoderCapabilities::pixel_exact`] before
+/// trusting output.
 pub struct VolumetricDecoderImpl {
     strict: bool,
 }
@@ -76,7 +88,8 @@ impl VolumetricDecoderImpl {
     /// Enable strict mode.
     ///
     /// In strict mode, [`VolumetricDecoderImpl::decode`] returns
-    /// [`KinetixError::NotPixelExact`] instead of placeholder/empty output.
+    /// [`KinetixError::NotPixelExact`] when the reconstructed output cannot be
+    /// guaranteed bit-exact (the current state for this decoder).
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
         self
@@ -84,9 +97,10 @@ impl VolumetricDecoderImpl {
 
     /// Report what this decoder can and cannot do.
     ///
-    /// The volumetric decoder is **not yet implemented** (geometry octree and
-    /// attribute lift/RAHT decode are scaffolded but not wired). Callers should
-    /// check [`DecoderCapabilities::pixel_exact`] before trusting output.
+    /// Geometry (octree) and attribute (lift/RAHT) decode are implemented and
+    /// round-trip against the in-crate encoder, but the decoder is **not** yet
+    /// validated bit-exact against the TMC13 oracle, so `pixel_exact` is
+    /// `false`. Callers requiring exact output should use strict mode.
     ///
     /// # Examples
     ///
@@ -106,9 +120,9 @@ impl VolumetricDecoderImpl {
             supports_intra_prediction: false,
             supports_inter_prediction: false,
             supports_deblocking: false,
-            notes: "sequence/frame header parsing implemented; \
-                    point-cloud geometry (octree) and attribute (lift/RAHT) \
-                    decode not yet wired",
+            notes: "octree geometry + lift/RAHT attribute decode implemented and \
+                    round-trip tested; not yet validated bit-exact against the \
+                    TMC13 oracle (strict mode rejects output)",
         }
     }
 }
@@ -121,27 +135,79 @@ impl Default for VolumetricDecoderImpl {
 
 impl VolumetricDecoder for VolumetricDecoderImpl {
     fn decode(&mut self, packet: &Packet) -> Result<Option<PointCloud>, KinetixError> {
-        // Parse the headers up front so malformed or reserved streams fail
-        // loudly instead of being silently treated as empty output. A valid
-        // static stream reaches the (not-yet-implemented) geometry payload.
-        let (rest, _seq) = header::parse_sequence_header(&packet.data)?;
-        let (_rest, _frame) = header::parse_frame_header(rest)?;
+        let (rest, seq) = parse_sequence_header(&packet.data)?;
+        let (rest, frame) = parse_frame_header(rest)?;
+
+        // Empty cloud (or empty payload) is valid and decodes to no points.
+        if frame.num_points == 0 || frame.payload_len == 0 {
+            return if self.strict {
+                Err(KinetixError::NotPixelExact(
+                    "volumetric: empty stream; output not bit-exact validated".into(),
+                ))
+            } else {
+                Ok(Some(PointCloud {
+                    num_points: 0,
+                    positions: Vec::new(),
+                    attributes: Vec::new(),
+                }))
+            };
+        }
+
+        let payload_len = frame.payload_len as usize;
+        let payload = rest.get(..payload_len).ok_or_else(|| {
+            KinetixError::Parse("volumetric: payload length overruns packet".into())
+        })?;
+
+        let (occ, leaf, attr) = unframe_payload(payload)?;
+
+        let geom = decode_geometry(occ, leaf, seq.octree_depth, frame.num_points)?;
+
+        let num_streams: usize = seq
+            .attributes
+            .iter()
+            .map(|a| samples_per_attr(a.kind))
+            .sum();
+        let streams = decode_attributes(
+            attr,
+            num_streams,
+            frame.num_points as usize,
+            seq.attribute_coding,
+            seq.lossless,
+        )?;
+        let attributes = pack_streams(&streams, &seq.attributes, frame.num_points as usize);
+
+        let scale = (1u32 << seq.octree_depth) as f32;
+        let mut positions = Vec::with_capacity(geom.points.len() * 3);
+        for c in &geom.points {
+            positions.push(c[0] as f32 / scale);
+            positions.push(c[1] as f32 / scale);
+            positions.push(c[2] as f32 / scale);
+        }
+
+        let cloud = PointCloud {
+            num_points: geom.points.len(),
+            positions,
+            attributes,
+        };
 
         if self.strict {
             return Err(KinetixError::NotPixelExact(
-                "volumetric: point-cloud geometry/attribute decode not implemented yet; \
-                 see capabilities()"
-                    .to_string(),
+                "volumetric: decoded output is not yet validated bit-exact against the \
+                 TMC13 oracle (pixel_exact=false)"
+                    .into(),
             ));
         }
-        Ok(None)
+        Ok(Some(cloud))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode::{encode_volumetric, EncodeParams};
+    use crate::header::{AttributeCoding, AttributeInfo};
     use tpt_kinetix_core::error::KinetixError;
+    use tpt_kinetix_core::frame::{PointAttribute, PointAttributeKind};
     use tpt_kinetix_core::timestamp::Timestamp;
 
     /// A minimal valid v1 static stream (sequence + frame header, empty payload).
@@ -188,11 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn non_strict_mode_returns_none_until_implemented() {
+    fn non_strict_mode_returns_cloud_for_empty_payload() {
         let mut dec = VolumetricDecoderImpl::new();
         assert!(matches!(
             dec.decode(&packet_with(valid_static_stream())),
-            Ok(None)
+            Ok(Some(_))
         ));
     }
 
@@ -215,5 +281,133 @@ mod tests {
             dec.decode(&packet_with(vec![])),
             Err(KinetixError::Parse(_))
         ));
+    }
+
+    fn rgb_cloud(points: &[[f32; 3]], colors: &[[u8; 3]]) -> PointCloud {
+        let mut positions = Vec::with_capacity(points.len() * 3);
+        for p in points {
+            positions.extend_from_slice(p);
+        }
+        let mut data = Vec::with_capacity(colors.len() * 3);
+        for c in colors {
+            data.extend_from_slice(c);
+        }
+        PointCloud {
+            num_points: points.len(),
+            positions,
+            attributes: vec![PointAttribute {
+                kind: PointAttributeKind::ColorRgb,
+                bit_depth: 8,
+                data,
+            }],
+        }
+    }
+
+    #[test]
+    fn geometry_and_attributes_round_trip_lift() {
+        let pts = [
+            [0.1, 0.2, 0.3],
+            [0.9, 0.8, 0.7],
+            [0.5, 0.5, 0.5],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ];
+        let cols = [
+            [10u8, 20, 30],
+            [200, 100, 50],
+            [0, 255, 128],
+            [1, 2, 3],
+            [250, 250, 250],
+        ];
+        let cloud = rgb_cloud(&pts, &cols);
+
+        let params = EncodeParams {
+            octree_depth: 8,
+            attributes: vec![AttributeInfo {
+                kind: PointAttributeKind::ColorRgb,
+                bit_depth: 8,
+            }],
+            attribute_coding: AttributeCoding::Lift,
+            lossless: true,
+            intra_leaf_bits: 0,
+        };
+        let bytes = encode_volumetric(&cloud, &params);
+
+        let mut dec = VolumetricDecoderImpl::new();
+        let decoded = dec
+            .decode(&packet_with(bytes))
+            .expect("decode")
+            .expect("some");
+
+        assert_eq!(decoded.num_points, 5);
+        // Attributes are lossless: compare the decoded color bytes (order is
+        // Morton-sorted, so compare as multisets).
+        let mut a: Vec<[u8; 3]> = Vec::new();
+        let mut b: Vec<[u8; 3]> = Vec::new();
+        for p in 0..5 {
+            a.push([cols[p][0], cols[p][1], cols[p][2]]);
+            b.push([
+                decoded.attributes[0].data[p * 3],
+                decoded.attributes[0].data[p * 3 + 1],
+                decoded.attributes[0].data[p * 3 + 2],
+            ]);
+        }
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn attributes_round_trip_raht() {
+        let pts = [
+            [0.1, 0.2, 0.3],
+            [0.9, 0.8, 0.7],
+            [0.5, 0.5, 0.5],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.3, 0.6, 0.9],
+        ];
+        let cols = [
+            [10u8, 20, 30],
+            [200, 100, 50],
+            [0, 255, 128],
+            [1, 2, 3],
+            [250, 250, 250],
+            [40, 60, 80],
+        ];
+        let cloud = rgb_cloud(&pts, &cols);
+
+        let params = EncodeParams {
+            octree_depth: 8,
+            attributes: vec![AttributeInfo {
+                kind: PointAttributeKind::ColorRgb,
+                bit_depth: 8,
+            }],
+            attribute_coding: AttributeCoding::Raht,
+            lossless: true,
+            intra_leaf_bits: 0,
+        };
+        let bytes = encode_volumetric(&cloud, &params);
+
+        let mut dec = VolumetricDecoderImpl::new();
+        let decoded = dec
+            .decode(&packet_with(bytes))
+            .expect("decode")
+            .expect("some");
+
+        assert_eq!(decoded.num_points, 6);
+        let mut a: Vec<[u8; 3]> = Vec::new();
+        let mut b: Vec<[u8; 3]> = Vec::new();
+        for p in 0..6 {
+            a.push([cols[p][0], cols[p][1], cols[p][2]]);
+            b.push([
+                decoded.attributes[0].data[p * 3],
+                decoded.attributes[0].data[p * 3 + 1],
+                decoded.attributes[0].data[p * 3 + 2],
+            ]);
+        }
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
     }
 }

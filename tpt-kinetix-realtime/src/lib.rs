@@ -46,6 +46,7 @@
 pub mod decoder;
 pub mod conceal;
 pub mod deblock;
+pub mod foveation;
 pub mod fec;
 pub mod headers;
 pub mod prediction;
@@ -58,6 +59,7 @@ pub mod transform;
 pub use decoder::RealtimeDecoder;
 pub use deblock::{deblock_chroma, deblock_luma, DeblockBlock};
 pub use fec::{Fec, DEFAULT_SYMBOL_SIZE};
+pub use foveation::{slice_qp_by_index, GazeMap, MAX_FOVEATION_QP_DELTA};
 pub use conceal::conceal;
 pub use headers::{FrameHeader, FrameType, ProfilePreset, SequenceHeader};
 pub use prediction::{predict_intra_block, predict_inter_luma, IntraMode, MotionVector};

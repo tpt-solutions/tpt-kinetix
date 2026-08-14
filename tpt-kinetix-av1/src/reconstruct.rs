@@ -219,7 +219,10 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
 /// already-dequantized coefficients through unchanged.
 fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32]) {
     let n = 1usize << tx_size;
-    let num_coeffs = n * n;
+    // The lossless WHT always operates on a fixed 4×4 block regardless of
+    // `tx_size` (AV1 §7.13.3), so its output is 16 coefficients even when
+    // `tx_size == TX_4X4` (`n == 1`).
+    let num_coeffs = if tx_type == TX_TYPE_WHT { 16 } else { n * n };
     if n > 16 {
         // Larger transforms are not yet produced by the reconstruction paths
         // (they are skipped in `decode_block`); fall back to a straight copy so

@@ -134,8 +134,9 @@ fn filter_vertical_segment(plane: &mut [u8], stride: usize, x: usize, y: usize, 
     }
 }
 
-/// Filter one 4-sample horizontal segment straddling row `y` (between y-1 and y)
-/// at columns `x..x+4`.
+/// Filter one 4-sample horizontal segment straddling the block edge between
+/// rows `y-1` and `y` (matching `filter_vertical_segment`, which straddles
+/// columns `x-1` and `x`), at columns `x..x+4`.
 fn filter_horizontal_segment(
     plane: &mut [u8],
     stride: usize,
@@ -150,14 +151,14 @@ fn filter_horizontal_segment(
         return;
     }
     for xx in x..x + 4 {
-        let p3 = plane[(y - 3) * stride + xx] as i32;
-        let p2 = plane[(y - 2) * stride + xx] as i32;
-        let p1 = plane[(y - 1) * stride + xx] as i32;
-        let p0 = plane[y * stride + xx] as i32;
-        let q0 = plane[(y + 1) * stride + xx] as i32;
-        let q1 = plane[(y + 2) * stride + xx] as i32;
-        let q2 = plane[(y + 3) * stride + xx] as i32;
-        let q3 = plane[(y + 4) * stride + xx] as i32;
+        let p3 = plane[(y - 4) * stride + xx] as i32;
+        let p2 = plane[(y - 3) * stride + xx] as i32;
+        let p1 = plane[(y - 2) * stride + xx] as i32;
+        let p0 = plane[(y - 1) * stride + xx] as i32;
+        let q0 = plane[y * stride + xx] as i32;
+        let q1 = plane[(y + 1) * stride + xx] as i32;
+        let q2 = plane[(y + 2) * stride + xx] as i32;
+        let q3 = plane[(y + 3) * stride + xx] as i32;
         if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
             continue;
         }
@@ -168,24 +169,24 @@ fn filter_horizontal_segment(
             let nq1 = (p0 + q0 + q1 + q2 + 2) >> 2;
             let np2 = (2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3;
             let nq2 = (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3;
-            plane[y * stride + xx] = clip(np0, 0, 255) as u8;
-            plane[(y + 1) * stride + xx] = clip(nq0, 0, 255) as u8;
-            plane[(y - 1) * stride + xx] = clip(np1, 0, 255) as u8;
-            plane[(y + 2) * stride + xx] = clip(nq1, 0, 255) as u8;
-            plane[(y - 2) * stride + xx] = clip(np2, 0, 255) as u8;
-            plane[(y + 3) * stride + xx] = clip(nq2, 0, 255) as u8;
+            plane[(y - 1) * stride + xx] = clip(np0, 0, 255) as u8;
+            plane[y * stride + xx] = clip(nq0, 0, 255) as u8;
+            plane[(y - 2) * stride + xx] = clip(np1, 0, 255) as u8;
+            plane[(y + 1) * stride + xx] = clip(nq1, 0, 255) as u8;
+            plane[(y - 3) * stride + xx] = clip(np2, 0, 255) as u8;
+            plane[(y + 2) * stride + xx] = clip(nq2, 0, 255) as u8;
         } else {
             let tc = TC0[tbl_qp(qp)] + (bs - 1);
             let delta = clip((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3, -tc, tc);
-            plane[y * stride + xx] = clip(p0 + delta, 0, 255) as u8;
-            plane[(y + 1) * stride + xx] = clip(q0 - delta, 0, 255) as u8;
+            plane[(y - 1) * stride + xx] = clip(p0 + delta, 0, 255) as u8;
+            plane[y * stride + xx] = clip(q0 - delta, 0, 255) as u8;
             if (p2 - p0).abs() < beta {
                 let d = clip((p2 + ((p0 + q0 + 1) >> 1) - 2 * p1) >> 1, -tc, tc);
-                plane[(y - 1) * stride + xx] = clip(p1 + d, 0, 255) as u8;
+                plane[(y - 2) * stride + xx] = clip(p1 + d, 0, 255) as u8;
             }
             if (q2 - q0).abs() < beta {
                 let d = clip((q2 + ((p0 + q0 + 1) >> 1) - 2 * q1) >> 1, -tc, tc);
-                plane[(y + 2) * stride + xx] = clip(q1 + d, 0, 255) as u8;
+                plane[(y + 1) * stride + xx] = clip(q1 + d, 0, 255) as u8;
             }
         }
     }
@@ -234,7 +235,11 @@ pub fn deblock_luma(
                     let y = by * block_size;
                     for sx in 0..seg {
                         let xx = x + sx * 4;
-                        if xx + 3 < width && y >= 4 {
+                        // Keep the 4-tap samples (`xx-4 .. xx+3` and rows
+                        // `y-4 .. y+3`) inside the plane: mirror the vertical
+                        // edge's `x >= 4` safety on the column side, and bound
+                        // the row side at `y+3 < height`.
+                        if xx >= 4 && xx + 3 < width && y >= 4 && y + 3 < height {
                             filter_horizontal_segment(plane, stride, xx, y, bs, qp);
                         }
                     }

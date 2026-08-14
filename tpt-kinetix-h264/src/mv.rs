@@ -1020,6 +1020,38 @@ pub(crate) fn predict_b_slice_mvs(
     Ok(())
 }
 
+/// Vertical motion-vector scaling for interlaced (field) prediction (§8.4.1.3).
+///
+/// When a field macroblock predicts from a reference *field* (or from one field
+/// of a frame reference), the vertical component of its motion vector is scaled
+/// by the ratio of the temporal distances between the current field and the
+/// reference field (`tb`) and between the two fields of the reference frame
+/// (`td`):
+///
+/// ```text
+/// tx = (16384 + |td| / 2) / td            (td != 0)
+/// dist_scale_factor = (tb * tx + 32) >> 6
+/// mvY' = (mvY * dist_scale_factor + 256) >> 9
+/// ```
+///
+/// `td` and `tb` are nominal temporal distances (in field units), `Clip3(-128,
+/// 127, …)`; convention: `DistRef0`/`DistRef1` are the `PicOrderCnt` of the
+/// reference frame's top/bottom fields and `DistCur0`/`DistCur1` the current
+/// picture's, so `td = DistRef1 − DistRef0` and `tb = CurFieldPOC −
+/// RefFieldPOC`. With `td == 0` (no temporal separation between the reference
+/// frame's fields) the MV is returned unchanged.
+pub fn scale_field_mv_y(mv_y: i32, tb: i32, td: i32) -> i32 {
+    if td == 0 {
+        return mv_y;
+    }
+    let tb = tb.clamp(-128, 127);
+    let td = td.clamp(-128, 127);
+    let td_abs = td.unsigned_abs() as i32;
+    let tx = (16384 + td_abs / 2) / td;
+    let dist_scale_factor = (tb * tx + 32) >> 6;
+    (mv_y * dist_scale_factor + 256) >> 9
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,5 +1326,37 @@ mod tests {
         assert_eq!(store.cells_of(1).unwrap()[0], MvCell::INTRA);
         // P_16x16: A intra -> count 0, A present -> A's mv (0,0) -> mv (0,0).
         assert_eq!(store.cells_of(2).unwrap()[0], cell([0, 0], 1));
+    }
+
+    #[test]
+    fn field_mv_scaling_zero_td_is_identity() {
+        // No temporal separation between the reference frame's fields: the MV is
+        // returned unchanged.
+        assert_eq!(scale_field_mv_y(40, 0, 0), 40);
+        assert_eq!(scale_field_mv_y(-8, 100, 0), -8);
+    }
+
+    #[test]
+    fn field_mv_scaling_same_parity_doubles() {
+        // Reference frame's fields 1 POC apart (td = 1), current top field 2
+        // POCs after the reference top field (tb = 2). tx = (16384 + 0)/1 = 16384,
+        // dist_scale_factor = (2*16384 + 32) >> 6 = 512, mvY' = (40*512 + 256) >> 9 = 40.
+        // A same-parity field-to-field prediction with tb == td therefore maps a
+        // field-line MV straight across (the field already lives at 1x spacing).
+        assert_eq!(scale_field_mv_y(40, 1, 1), (40 * ((16384 + 0) / 1) + 256) >> 9);
+        // tb == td == 1 -> factor 256 -> mvY' = mvY * 256 >> 9 == mvY / 2 rounded.
+        assert_eq!(scale_field_mv_y(40, 1, 1), (40 * 256 + 256) >> 9);
+    }
+
+    #[test]
+    fn field_mv_scaling_opposite_parity_halves() {
+        // Opposite-parity prediction (current top, reference bottom) with td = 1,
+        // tb = 1 gives factor 256 (mvY/2). With td = 1 and tb = -1 the factor is
+        // negative (the field is temporally before the reference), so a downward
+        // MV is flipped upward — matching §8.4.1.3's scaling direction.
+        let v = 40;
+        let scaled = (v * 256 + 256) >> 9;
+        assert_eq!(scale_field_mv_y(v, 1, 1), scaled);
+        assert!(scaled < v, "same-parity field scaling should shrink a frame-line MV");
     }
 }

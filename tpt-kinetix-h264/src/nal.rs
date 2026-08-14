@@ -182,6 +182,14 @@ pub fn parse_nal_units_from_annexb(data: &[u8]) -> Vec<NalUnit> {
 
         if start < end {
             if let Some(unit) = NalUnit::from_raw(&data[start..end]) {
+                eprintln!(
+                    "NAL type={:?} raw_len={} rbsp_len={} start={} end={}",
+                    unit.nal_unit_type,
+                    end - start,
+                    unit.rbsp.len(),
+                    start,
+                    end
+                );
                 units.push(unit);
             }
         }

@@ -742,11 +742,9 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     // (function scope) so the residual stage below can see it.
     let mut is_8x8 = false;
     if !is_i16x16 {
-        is_8x8 = transform_8x8_mode
-            && r
-                .read_bit()
-                .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?
-                == 1;
+        let t8 = transform_8x8_mode;
+        let bit = r.read_bit().ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?;
+        is_8x8 = t8 && bit == 1;
     }
 
     if is_i16x16 {
@@ -2733,21 +2731,38 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     // (§8.5.6) groups the four 4×4 quadrants, so the four 16-coeff scans occupy
     // zigzag positions [0,16), [16,32), [32,48), [48,64) — concatenated into a
     // single 64-coeff zigzag-order block stored in `luma_coeffs_8x8` (§7.3.5.3.3).
-    if is_8x8 {
-        let mut block64 = [0i16; 64];
-        for i8x8 in 0..4usize {
-            if (cbp_luma >> i8x8) & 1 == 0 {
-                continue;
+        if is_8x8 {
+            let mut block64 = [0i16; 64];
+            // Inverse of the 8×8 zigzag scan: raster position → zigzag position
+            // (spec §8.5.6, frame scan). Used to place each 4×4 sub-block's
+            // 4×4-zigzag coefficients at the correct 8×8-zigzag position.
+            let mut inv_zigzag_8x8 = [0usize; 64];
+            for (z, &raster) in crate::transform::ZIGZAG_8X8.iter().enumerate() {
+                inv_zigzag_8x8[raster] = z;
             }
-            block64.fill(0);
-            for sub in 0..4usize {
-                let raster = raster_of_8x8_sub(i8x8, sub);
-                let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
-                let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
-                // Coeffs are in 4×4 zigzag order; place them at the matching slice
-                // of the 8×8 zigzag scan (FFmpeg `scan8x8 + 16*sub`).
-                block64[sub * 16..sub * 16 + 16].copy_from_slice(&coeffs[..16]);
-                this_nz.luma[raster] = tc;
+            for i8x8 in 0..4usize {
+                if (cbp_luma >> i8x8) & 1 == 0 {
+                    continue;
+                }
+                block64.fill(0);
+                for sub in 0..4usize {
+                    let raster = raster_of_8x8_sub(i8x8, sub);
+                    let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
+                    let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
+                    // Each 4×4 sub-block is decoded in 4×4 zigzag order. The
+                    // 8×8 zigzag scan (§8.5.6) interleaves the four quadrants, so
+                    // a sub-block coefficient at 4×4 zigzag position `k` must be
+                    // placed at the 8×8 zigzag position of its actual raster
+                    // location (quadrant `sub`, local 4×4 raster from `ZIGZAG_4X4[k]`).
+                    for k in 0..16usize {
+                        let local4 = crate::transform::ZIGZAG_4X4[k];
+                        let lr = local4 / 4;
+                        let lc = local4 % 4;
+                        let r8 = ((sub / 2) * 4 + lr) * 8 + ((sub % 2) * 4 + lc);
+                        let z = inv_zigzag_8x8[r8];
+                        block64[z] = coeffs[k];
+                    }
+                    this_nz.luma[raster] = tc;
                 tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, &coeffs);
                 tracer.on_cavlc_block_info(
                     mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, nc, tc, t1, 0,

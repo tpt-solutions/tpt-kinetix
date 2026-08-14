@@ -88,7 +88,10 @@ fn hadamard1d(x: [i32; 4]) -> [i32; 4] {
     let b = x[0] - x[1];
     let c = x[2] + x[3];
     let d = x[2] - x[3];
-    [a + c, a - c, b - d, b + d]
+    // Natural-order Walsh–Hadamard: [x0+x1+x2+x3, x0-x1+x2-x3,
+    // x0+x1-x2-x3, x0-x1-x2+x3]. (The previous ordering swapped outputs 1
+    // and 3, which broke the 4×4 transform's exact invertibility.)
+    [a + c, b + d, a - c, b - d]
 }
 
 /// 2-D 4×4 Walsh–Hadamard transform (and its own inverse: the full 2-D

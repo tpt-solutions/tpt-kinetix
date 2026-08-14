@@ -36,7 +36,7 @@ use crate::headers::{ChromaFormat, FrameHeader, FrameType, SequenceHeader};
 use crate::prediction::{
     chroma_subpel, predict_inter_luma, predict_intra_block, IntraMode, MotionVector,
 };
-use crate::transform::{dequant, inverse_2d, quant, transform_2d};
+use crate::transform::{dequant, inverse_2d, quant};
 use crate::deblock::{deblock_chroma, deblock_luma, DeblockBlock};
 
 /// Substitution constant for unavailable intra-neighbour samples.
@@ -350,6 +350,7 @@ pub fn reconstruct_frame(
         let slice = slice_index_for(luma_total, n_slices, bi);
         let local = bi - chunk_range(luma_total, n_slices, slice).start;
         let block = &slices[slice][local];
+        let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
         luma_db[bi] = reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
     }
 
@@ -365,6 +366,7 @@ pub fn reconstruct_frame(
             let block = slices[slice]
                 .get(idx)
                 .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
+            let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
             chroma_db[bi] =
                 reconstruct_chroma_block(&mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, seq, frame)?;
         }
@@ -639,13 +641,13 @@ pub fn encode_frame_slices(
     let luma_total = gw * gh;
     let chroma_total = cgw * cgh;
     let n_slices = (seq.slice_grid_cols as usize) * (seq.slice_grid_rows as usize);
-    let qp = frame.base_qp;
     let is_inter = frame.frame_type == FrameType::Inter;
 
     let mut luma_syntax = Vec::with_capacity(luma_total);
     for bi in 0..luma_total {
         let sx = bi % gw;
         let sy = bi / gw;
+        let qp = crate::foveation::slice_qp_by_index(seq, frame, slice_index_for(luma_total, n_slices, bi));
         luma_syntax.push(encode_luma_block(src, reference, sx, sy, luma_b, qp, is_inter)?);
     }
     let mut cb_syntax = Vec::with_capacity(chroma_total);
@@ -653,6 +655,7 @@ pub fn encode_frame_slices(
     for bi in 0..chroma_total {
         let sx = bi % cgw;
         let sy = bi / cgw;
+        let qp = crate::foveation::slice_qp_by_index(seq, frame, slice_index_for(chroma_total, n_slices, bi));
         cb_syntax.push(encode_chroma_block(src, reference, 0, sx, sy, chroma_b, qp, is_inter)?);
         cr_syntax.push(encode_chroma_block(src, reference, 1, sx, sy, chroma_b, qp, is_inter)?);
     }
@@ -851,18 +854,16 @@ pub fn decode_frame_payload(
     reference: Option<&FrameBuffer>,
     slice_payloads: &[Vec<u8>],
 ) -> Result<FrameBuffer, KinetixError> {
-    let (luma_b, chroma_b) = block_sizes(seq);
-    let gw = frame.width as usize / luma_b + usize::from(frame.width as usize % luma_b != 0);
-    let gh = frame.height as usize / luma_b + usize::from(frame.height as usize % luma_b != 0);
-    let cgw = frame.width as usize / chroma_b + usize::from(frame.width as usize % chroma_b != 0);
-    let cgh = frame.height as usize / chroma_b + usize::from(frame.height as usize % chroma_b != 0);
-    let luma_total = gw * gh;
-    let chroma_total = cgw * cgh;
     let n_slices = slice_payloads.len();
 
-    // Decode each slice's raw block stream, then re-pack into the per-slice
-    // [luma][cb][cr] layout that `reconstruct_frame` expects.
-    let mut decoded: Vec<Vec<BlockSyntax>> = Vec::with_capacity(n_slices);
+    // Decode each slice's raw block stream. The encoder wrote each slice as a
+    // contiguous run of `[luma blocks][cb blocks][cr blocks]` in exactly the
+    // per-slice `[luma][cb][cr]` layout `reconstruct_frame` expects, so the
+    // decoded block list for a slice is already in the right order — no
+    // re-packing is needed (re-deriving block indices here would be both
+    // redundant and wrong, since `decode_slice_bytes` returns local,
+    // zero-based positions, not global block indices).
+    let mut slices: Vec<Vec<BlockSyntax>> = Vec::with_capacity(n_slices);
     for payload in slice_payloads {
         let raw = decode_slice_bytes(payload)?;
         let mut r = raw.as_slice();
@@ -870,25 +871,7 @@ pub fn decode_frame_payload(
         while !r.is_empty() {
             blocks.push(read_block(&mut r)?);
         }
-        decoded.push(blocks);
-    }
-
-    let mut slices: Vec<Vec<BlockSyntax>> = Vec::with_capacity(n_slices);
-    for s in 0..n_slices {
-        let ls = chunk_range(luma_total, n_slices, s);
-        let cs = chunk_range(chroma_total, n_slices, s);
-        let luma_in_slice = ls.len();
-        let mut chunk = Vec::with_capacity(ls.len() + 2 * cs.len());
-        for i in ls {
-            chunk.push(decoded[s][i].clone());
-        }
-        for i in cs.clone() {
-            chunk.push(decoded[s][luma_in_slice + i].clone());
-        }
-        for i in cs {
-            chunk.push(decoded[s][luma_in_slice + luma_in_slice + i].clone());
-        }
-        slices.push(chunk);
+        slices.push(blocks);
     }
 
     reconstruct_frame(seq, frame, reference, &slices)
@@ -1003,6 +986,50 @@ mod tests {
         assert_eq!(decoded.luma, luma, "luma must round-trip at qp=0");
         assert_eq!(decoded.cb, cb);
         assert_eq!(decoded.cr, cr);
+    }
+
+    #[test]
+    fn foveation_encode_decode_is_stable() {
+        let mut s = seq();
+        s.foveation_enabled = true;
+        s.profile = crate::headers::ProfilePreset::AR;
+        s.slice_grid_cols = 2;
+        s.slice_grid_rows = 2;
+        s.num_rans_streams = 4;
+        let mut f = frame();
+        f.foveation_center_x = 8;
+        f.foveation_center_y = 8;
+        let mut luma = vec![0u8; 16 * 16];
+        for y in 0..16 {
+            for x in 0..16 {
+                luma[y * 16 + x] = ((x * 11 + y * 5) % 256) as u8;
+            }
+        }
+        let cb = vec![42u8; 8 * 8];
+        let cr = vec![99u8; 8 * 8];
+        let src = FrameBuffer::from_yuv420(16, 16, luma, cb, cr).unwrap();
+        // Two independent encode->decode passes through the foveated pipeline
+        // must be bit-identical: the per-slice QP is derived deterministically
+        // from the same header fields on both sides, so the (deterministic)
+        // float transform yields the same pixels every time. (Realtime is an
+        // original codec, so this asserts pipeline determinism, not pixel-exact
+        // fidelity to the source — see `decoder` docs / the honesty contract.)
+        let slices_a = encode_frame_slices(&s, &f, &src, None).unwrap();
+        let decoded_a = decode_frame_payload(&s, &f, None, &slices_a).unwrap();
+        let slices_b = encode_frame_slices(&s, &f, &src, None).unwrap();
+        let decoded_b = decode_frame_payload(&s, &f, None, &slices_b).unwrap();
+        assert_eq!(decoded_a.luma, decoded_b.luma);
+        assert_eq!(decoded_a.cb, decoded_b.cb);
+        assert_eq!(decoded_a.cr, decoded_b.cr);
+        // Foveation must change the coded result versus a non-foveated stream
+        // at the same base QP: the peripheral slices take a coarser QP.
+        let mut s_flat = s;
+        s_flat.foveation_enabled = false;
+        let slices_flat = encode_frame_slices(&s_flat, &f, &src, None).unwrap();
+        assert_ne!(
+            slices_a, slices_flat,
+            "foveation should change the encoded slice payloads"
+        );
     }
 
     #[test]
