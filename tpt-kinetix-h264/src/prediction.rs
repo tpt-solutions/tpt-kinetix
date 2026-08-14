@@ -492,10 +492,26 @@ pub fn predict_8x8(
             }
         }
         Intra4x4Mode::Dc => {
-            let dc = (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7
-                + t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7
-                + 8)
-                >> 4;
+            // §8.3.2.2.3: like the 4×4/16×16 DC modes, the average is taken
+            // over whichever of top/left is actually available — averaging
+            // in the filtered `t`/`l` values unconditionally would silently
+            // blend in the phantom `R` (128) substituted for a missing side
+            // (see the 4×4 Dc arm above for the same issue), pulling the DC
+            // value toward 128 instead of the real neighbour average.
+            let top_avail = top[0..8].iter().any(|s| s.is_some());
+            let left_avail = left.iter().any(|s| s.is_some());
+            let dc = if top_avail && left_avail {
+                (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7
+                    + t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7
+                    + 8)
+                    >> 4
+            } else if top_avail {
+                (t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7 + 4) >> 3
+            } else if left_avail {
+                (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7 + 4) >> 3
+            } else {
+                R
+            };
             for y in 0..8i32 {
                 for x in 0..8i32 {
                     s(&[(x, y)], dc);

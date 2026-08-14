@@ -12,6 +12,22 @@
 //! compensation), B-frames, and interlaced coding. See the crate README
 //! `LIMITATIONS` section for details.
 
+// The H.264 bitstream parsers intentionally use large parameter lists and
+// index-driven loops; these idioms trip several stylistic clippy lints that the
+// workspace treats as errors. They are harmless for this parser-heavy code, so
+// they are allowed crate-wide rather than refactored (which would risk changing
+// decode behavior). The same applies to the unit-test modules in this crate.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::wildcard_in_or_patterns)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::erasing_op)]
+#![allow(clippy::bool_comparison)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::no_effect)]
+
 pub mod bitreader;
 pub mod cabac_tables;
 pub mod cavlc_tables;

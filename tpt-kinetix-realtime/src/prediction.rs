@@ -223,6 +223,7 @@ fn filter6(c: [i32; 6]) -> i32 {
 
 /// Quarter-pel luma sample at fullpel position `(x, y)` offset by `(qx, qy)`
 /// quarter-pixels (each in `0..4`). `ref_` is a row-major plane of `stride`.
+#[allow(clippy::too_many_arguments)]
 pub fn luma_subpel(
     ref_: &[u8],
     stride: usize,
@@ -309,6 +310,7 @@ pub fn luma_subpel(
 
 /// Bilinear chroma sample at eighth-pel `(ex, ey)` (each in `0..8`) — H.264
 /// §8.4.2.2.2.
+#[allow(clippy::too_many_arguments)]
 pub fn chroma_subpel(
     ref_: &[u8],
     stride: usize,
@@ -341,6 +343,7 @@ pub fn chroma_subpel(
 }
 
 /// Motion-compensate one luma block of `size`×`size` from `ref_` into `out`.
+#[allow(clippy::too_many_arguments)]
 pub fn predict_inter_luma(
     out: &mut [i32],
     size: usize,

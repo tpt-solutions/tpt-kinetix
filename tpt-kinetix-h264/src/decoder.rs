@@ -66,6 +66,7 @@ struct FieldAccum {
     /// Whether the most recently stored field was the bottom field (used to
     /// detect a key change when the second field of a new frame appears before
     /// the first was paired).
+    #[allow(dead_code)]
     last_bottom: bool,
 }
 
@@ -256,14 +257,24 @@ impl H264Decoder {
                     // so the SPS scaling lists can be merged into the PPS set
                     // (§8.5.9: an absent PPS list falls back to the corresponding
                     // SPS list). Then parse again with the SPS scaling context.
-                    if let Ok(pps_probe) = PicParameterSet::parse(&nal.rbsp, None) {
-                        let sps_scaling = self
-                            .sps_store
-                            .get(&pps_probe.seq_parameter_set_id)
-                            .map(|s| &s.scaling);
-                        if let Ok(pps) = PicParameterSet::parse(&nal.rbsp, sps_scaling) {
-                            self.pps_store.insert(pps.pic_parameter_set_id, pps);
+                    match PicParameterSet::parse(&nal.rbsp, None) {
+                        Ok(pps_probe) => {
+                            let sps_scaling = self
+                                .sps_store
+                                .get(&pps_probe.seq_parameter_set_id)
+                                .map(|s| &s.scaling);
+                            match PicParameterSet::parse(&nal.rbsp, sps_scaling) {
+                                Ok(pps) => {
+                                    eprintln!(
+                                        "PPS_OK t8={} pps_id={}",
+                                        pps.transform_8x8_mode_flag, pps.pic_parameter_set_id
+                                    );
+                                    self.pps_store.insert(pps.pic_parameter_set_id, pps);
+                                }
+                                Err(e) => eprintln!("PPS_PARSE_ERR(2): {e:?}"),
+                            }
                         }
+                        Err(e) => eprintln!("PPS_PARSE_ERR(1): {e:?}"),
                     }
                 }
                 NalUnitType::IdrSlice | NalUnitType::NonIdrSlice => {
@@ -897,7 +908,7 @@ impl H264Decoder {
                     let p_result = if entropy_coding_mode_flag {
                         reader.byte_align();
                         let cabac_data = reader.remaining_bytes();
-                        let preview: Vec<String> = cabac_data.iter().take(16).map(|b| format!("{b:02X}")).collect();
+                        let _preview: Vec<String> = cabac_data.iter().take(16).map(|b| format!("{b:02X}")).collect();
                         crate::slice_data::parse_p_slice_cabac(
                         cabac_data,
                         mb_cols,
@@ -1499,7 +1510,7 @@ impl H264Decoder {
                 for _ in 0..384 {
                     let byte = r
                         .read_u8()
-                        .ok_or_else(|| crate::slice_data::SliceDataError::Eof("I_PCM byte"))?;
+                        .ok_or(crate::slice_data::SliceDataError::Eof("I_PCM byte"))?;
                     samples.push(byte);
                 }
                 mb.pcm_samples = samples;
@@ -1558,10 +1569,10 @@ fn reconstruct_mb(mb: &Macroblock, planes: &mut FramePlanes<'_>, mb_x: u32, mb_y
             if samples.len() >= y_size + c_size * 2 {
                 for comp in 0..2usize {
                     let (dst_off, dst) = if comp == 0 {
-                        let off = (base_y * chroma_stride + base_x) as usize;
+                        let off = base_y * chroma_stride + base_x;
                         (off, &mut *chroma_cb)
                     } else {
-                        let off = (base_y * chroma_stride + base_x) as usize;
+                        let off = base_y * chroma_stride + base_x;
                         (off, &mut *chroma_cr)
                     };
                     let src_off = y_size + comp * c_size;

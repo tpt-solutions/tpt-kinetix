@@ -35,6 +35,7 @@
 
 pub mod adts;
 pub mod bitreader;
+pub mod codebooks;
 pub mod config;
 pub mod decoder;
 pub mod syntax;

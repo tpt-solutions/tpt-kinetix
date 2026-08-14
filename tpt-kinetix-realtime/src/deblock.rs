@@ -196,6 +196,7 @@ fn filter_horizontal_segment(
 ///
 /// Internal block edges are filtered (vertical and horizontal), each in
 /// `block_size/4` segments of 4 samples per H.264 §8.7.2.3.
+#[allow(clippy::too_many_arguments)]
 pub fn deblock_luma(
     plane: &mut [u8],
     stride: usize,
@@ -251,6 +252,7 @@ pub fn deblock_luma(
 
 /// Deblock a chroma plane the same way (uses the luma `bS` per co-located
 /// block; chroma has no `bS` of its own, matching H.264 §8.7.2.1).
+#[allow(clippy::too_many_arguments)]
 pub fn deblock_chroma(
     plane: &mut [u8],
     stride: usize,

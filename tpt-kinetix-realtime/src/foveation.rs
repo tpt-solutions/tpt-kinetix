@@ -10,7 +10,7 @@
 //! slices, is the v2 upgrade; QP falloff is concrete and lossless at the
 //! fovea boundary.)
 
-use crate::headers::{FrameHeader, FrameType, SequenceHeader};
+use crate::headers::{FrameHeader, SequenceHeader};
 
 /// Maximum extra QP applied to the most peripheral slice.
 pub const MAX_FOVEATION_QP_DELTA: u8 = 18;
@@ -94,7 +94,7 @@ pub fn slice_qp_by_index(seq: &SequenceHeader, frame: &FrameHeader, slice: usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headers::ProfilePreset;
+    use crate::headers::{FrameType, ProfilePreset};
 
     fn seq(foveation: bool) -> SequenceHeader {
         SequenceHeader {

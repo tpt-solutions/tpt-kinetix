@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn integer_haar_is_lossless() {
         let mut v = vec![10, 20, 5, 40, 100, 99, 0, 7];
-        let mut w = v.clone();
+        let w = v.clone();
         raht_forward(&mut v);
         raht_inverse(&mut v);
         assert_eq!(v, w);

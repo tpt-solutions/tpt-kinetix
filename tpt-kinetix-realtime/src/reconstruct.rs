@@ -270,16 +270,11 @@ pub fn decode_slice_bytes(payload: &[u8]) -> Result<Vec<u8>, KinetixError> {
     let mut out = Vec::with_capacity(payload.len().saturating_sub(4));
     let max = payload.len() * 4 + 1024;
     let mut guard = 0usize;
-    loop {
-        match dec.decode(&model) {
-            Ok(s) => {
-                out.push(s);
-                guard += 1;
-                if guard > max {
-                    break;
-                }
-            }
-            Err(_) => break,
+    while let Ok(s) = dec.decode(&model) {
+        out.push(s);
+        guard += 1;
+        if guard > max {
+            break;
         }
     }
     Ok(out)
@@ -496,6 +491,7 @@ fn reconstruct_chroma_block(
     Ok(db)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_residual(
     plane: &mut [u8],
     stride: usize,
@@ -533,6 +529,7 @@ fn add_residual(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn predict_chroma_block(
     out: &mut [i32],
     b: usize,

@@ -405,16 +405,14 @@ impl FrameHeader {
         };
 
         // --- force_integer_mv ---
+        // AV1 §6.8.2: read when `allow_screen_content_tools == 1` for a key /
+        // error-resilient / reduced-still frame; otherwise it is implicitly 1.
         let force_integer_mv = if allow_screen_content_tools
             && (frame_type == FrameType::KeyFrame || error_resilient_mode || all_frames_intra)
         {
-            if force_screen {
-                false
-            } else {
-                read_flag(&mut br)?
-            }
+            read_flag(&mut br)?
         } else {
-            false
+            true
         };
 
         // --- frame_size_override_flag ---
@@ -1113,19 +1111,18 @@ mod tests {
         let h = 16u32;
         let mut bw = BitWriter::new();
 
-        // force_integer_mv(1)  [allow_screen_content_tools && keyframe]
+        // force_integer_mv(0)  [allow_screen_content_tools && keyframe]
         bw.bit(0);
-        // frame_size: ns(max_w), ns(max_h)
-        bw.ns(w - 1, w);
-        bw.ns(h - 1, h);
+        // A keyframe uses the sequence-header max for width/height and reads no
+        // `ns` frame-size values, so no bits are emitted here.
         // tile info: uniform spacing(1); tile_cols_log2=0, tile_rows_log2=0
         bw.bit(1);
         bw.tile_log2(0);
         bw.tile_log2(0);
         // quantizer: base_q_idx(8) = 100
         bw.bits(100, 8);
-        // delta_q_y_dc(0); chroma deltas 0 each (4 flags)
-        bw.bit(0);
+        // delta_q_y_dc(0); separate_uv_delta_q(0); delta_q_u_dc(0); delta_q_u_ac(0).
+        // (delta_q_v dc/ac are absent when separate_uv_delta_q == 0.)
         bw.bit(0);
         bw.bit(0);
         bw.bit(0);
@@ -1136,19 +1133,26 @@ mod tests {
         bw.bit(0);
         // delta_q_present(0)
         bw.bit(0);
-        // delta_lf_present(0)
-        bw.bit(0);
-        // loop filter (not lossless): level_0(6), level_1(6), sharpness(3), delta_enabled(0)
+        // loop filter (not lossless): 4 levels(6), sharpness(3), delta_enabled(0)
+        bw.bits(0, 6);
+        bw.bits(0, 6);
         bw.bits(0, 6);
         bw.bits(0, 6);
         bw.bits(0, 3);
         bw.bit(0);
-        // cdef (not lossless): damping(2)=0, cdef_bits(2)=0, then 1 y + 1 uv strength
+        // cdef (not lossless): damping(2)=0, cdef_bits(2)=0, then 1 y + 1 uv
+        // (each strength is pri(4) + sec(2) bits)
         bw.bits(0, 2);
         bw.bits(0, 2);
         bw.bits(0, 4);
+        bw.bits(0, 2);
         bw.bits(0, 4);
-        // loop restoration (not mono): 2 bits 0,0
+        bw.bits(0, 2);
+        // loop restoration (not mono): 3 planes × 2 bits
+        bw.bit(0);
+        bw.bit(0);
+        bw.bit(0);
+        bw.bit(0);
         bw.bit(0);
         bw.bit(0);
         // tx mode: reduced_tx_set(0), tx_mode_select(0)
@@ -1180,7 +1184,6 @@ mod tests {
         // truth (the 88-bit header length, base_q_idx=128, tx_mode=SELECT, the
         // four loop-filter levels, and the CDEF strengths). Skips when ffmpeg
         // is unavailable.
-        use std::io::Read;
         use std::process::Command;
 
         let ffmpeg_available = Command::new("ffmpeg")

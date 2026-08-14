@@ -608,7 +608,7 @@ pub fn beta_for_qp(qp: i32, beta_offset: i32) -> i32 {
 
 /// tC0-table lookup — exposed for tests.
 pub fn tc0_for_qp(bs: u8, qp: i32, alpha_offset: i32) -> i32 {
-    debug_assert!(bs >= 1 && bs <= 3);
+    debug_assert!((1..=3).contains(&bs));
     TC0_TAB[bs as usize - 1][clip_qp(qp + 2 * alpha_offset) as usize]
 }
 

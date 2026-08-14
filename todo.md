@@ -36,6 +36,79 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > stale (contradicted by the live `cabac_conformance.rs` bit-exact P/B tests)
 > and should be corrected in the test file.
 
+> **2026-08-14 session note — working-tree corruption found and cleaned up.**
+> Before this reconciliation, ~44 files under `tpt-kinetix-h264/examples/` and
+> `tpt-kinetix-h264/tests/` had been corrupted by some prior process that
+> repeatedly concatenated other files' full contents into each other (e.g.
+> `tests/high_profile_8x8_conformance.rs` had grown from 250 lines to 213,613
+> lines of duplicated content from unrelated test files, and the crate failed
+> to compile with 45k+ errors). These were reverted to their committed HEAD
+> versions (`git restore`) and two newly-added, equally-corrupted debug
+> examples (`examples/dbg_dequant8.rs`, `examples/dbg_hp_localize.rs`) were
+> deleted outright — the workspace now builds clean again
+> (`cargo build --workspace`). Real, legitimate work was mixed into the same
+> uncommitted session (in `src/` files, which were untouched by the cleanup)
+> and is captured below rather than lost:
+> - **AV1 `FrameHeader::parse` (`frame.rs`) gained real bitstream-parsing
+>   fixes**: `force_integer_mv` now defaults to `true` (not `false`) when not
+>   explicitly read as spec §6.8.2 requires, and no longer has a bogus
+>   `force_screen` short-circuit; the loop-filter block now reads all 4
+>   levels (was reading 2); CDEF/delta-q/loop-restoration bit-widths were
+>   corrected to match the real syntax. This directly targets the
+>   long-standing "frame header parser still drifts on real keyframes" gap
+>   noted in the AV1 status block below — not yet re-validated against the
+>   ffmpeg conformance harness.
+> - **AV1 inverse-transform bug fixed**: the DST-VII (ADST) basis matrix
+>   formula in `reconstruct.rs::dst_vii_matrix` was mathematically wrong
+>   (`sin(pi(2r+1)(c+1)/(2(2n+1)))`, an off-spec formula) and is now the
+>   correct unnormalized DST-VII basis (`sin(pi(2r+1)(2c+1)/(4n))`,
+>   orthogonal with norm² = n/2); the orthonormality unit test and doc
+>   comments were updated to match. This affects any AV1 block using an
+>   ADST transform type.
+> - **H.264 8×8 CAVLC residual interleave bug found (uncommitted, in
+>   `slice_data.rs`)**: the four 4×4 CAVLC sub-streams within an 8×8 luma
+>   block were being placed at the wrong 8×8-zigzag positions (an incorrect
+>   raster/inverse-zigzag mapping); the fix interleaves them
+>   `block64[4*k + sub] = coeffs[k]` per FFmpeg's `ff_h264_decode_mb_cavlc`
+>   reference. Debug `eprintln!`s for one specific macroblock are still
+>   present in `slice_data.rs`/`reconstruct.rs`/`decoder.rs` (not cleaned
+>   up), and this fix has **not been re-validated** — the debug tooling
+>   built to investigate it (`dbg_dequant8.rs`/`dbg_hp_localize.rs`) was
+>   part of the corrupted-file cleanup above and no longer exists. Re-run
+>   `just corpus-check` / a High-profile conformance pass before trusting
+>   this fix.
+> - **H.264 8×8 intra DC prediction fixed** (`prediction.rs::predict_8x8`):
+>   the DC mode unconditionally averaged all 16 top/left neighbour samples
+>   even when one side was unavailable (silently blending in the phantom
+>   128 substitute value); now matches the 4×4/16×16 DC modes'
+>   top-only/left-only/neither fallback per §8.3.2.2.3. `predict_8x8`'s
+>   other known gap (7-sample-clamped neighbour indexing on the non-DC
+>   modes, not the full 16-sample top row) is still open.
+> - **`tpt-kinetix-realtime` reconstruction is now wired end-to-end**
+>   (intra + unidirectional-P + deblock all run via `decode()`, per
+>   `decoder.rs`'s updated honesty-contract doc comment) — this resolves the
+>   Phase 16 "port lean's reconstruction into realtime — BLOCKED" item below,
+>   **but it is currently broken**: `cargo test -p tpt-kinetix-realtime`
+>   fails 5 tests (`transform::tests::dct_round_trip_4/8/16`,
+>   `transform::tests::hadamard_round_trip`,
+>   `reconstruct::tests::keyframe_round_trips_at_qp0`). Do not mark the
+>   Phase 16 reconstruction item done until these pass.
+> - **AAC native Huffman codebooks (`codebooks.rs`) are substantially
+>   implemented and unit-tested**: all 11 spectral codebooks + the book-11
+>   escape sequence + the scalefactor codebook, with `decode_codeword`/
+>   `decode_spectral_quad`/`decode_scalefactor` entry points (5 passing unit
+>   tests). This is real progress on Phase 18 Phase 2, but it is **not yet
+>   wired into `decoder.rs`**, which still fully delegates to
+>   `symphonia-codec-aac` — Phase 18's actual blocker (the MPL-2.0
+>   dependency) is unresolved until Phase 6/7 land.
+> - **Two H.264 unit-test failures pre-date this session** (confirmed by
+>   testing a clean `git stash` against HEAD, not something introduced
+>   here): `mv::tests::field_mv_scaling_same_parity_doubles` and
+>   `prediction::tests::predict_8x8_vertical` both fail on `master` as
+>   committed. Neither is tracked elsewhere in this file — worth a follow-up
+>   item since they contradict the "unit tests pass" assumption baked into
+>   several `[x]` checkboxes above.
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap
@@ -1585,10 +1658,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       parse-only syntax structs (`IcsInfo`, `SectionData`, SCE/CPE/LFE/FIL/END
       element dispatch). Exit: unit tests on hand-built fixtures +
       `*_never_panics` proptest.
-- [ ] Phase 2 — `src/codebooks.rs`: the 11 (+1 escape) Huffman spectral
+- [~] Phase 2 — `src/codebooks.rs`: the 11 (+1 escape) Huffman spectral
       codebooks, independently transcribed from spec tables, tree-walk decode
       + escape handling. Exit: unit tests per codebook against hand-encoded
-      sequences + bounded-consumption/no-panic proptest.
+      sequences + bounded-consumption/no-panic proptest. **Substantially done
+      (uncommitted, 2026-08-14):** `decode_codeword`/`decode_spectral_quad`/
+      `decode_scalefactor` implement all 11 spectral codebooks + the book-11
+      escape sequence + the scalefactor codebook, with 5 passing unit tests
+      (prefix-code validity, spec-formula round-trip, table-entry decode).
+      Missing: the bounded-consumption/no-panic proptest, and it is not yet
+      referenced anywhere outside its own module (Phase 6 wiring).
 - [ ] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
       `src/tns.rs`, `src/pulse.rs`: DPCM scalefactor decode, dequantization
       formula, perceptual noise substitution, temporal noise shaping, pulse
@@ -1666,13 +1745,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       `BitReader`/`rANS` code — so there was nothing to migrate; vision will
       depend on `tpt-kinetix-bitstream` when its reconstruction is
       implemented.
-- [ ] Port lean's intra + unidirectional-P reconstruction into realtime
-      (DECISION 2) — **BLOCKED**: `tpt-kinetix-lean`'s reconstruction
-      (prediction/transform/deblock) is itself still an unimplemented scaffold
-      (its `decoder.rs` reports `pixel_exact: false`), so there is no real
-      reconstruction path to port yet. Revisit once lean's reconstruction
-      lands. The header/refresh/slice scaffolding realtime needs is already in
-      place.
+- [~] Port lean's intra + unidirectional-P reconstruction into realtime
+      (DECISION 2) — **no longer blocked, but currently broken (uncommitted,
+      2026-08-14).** `tpt-kinetix-realtime` grew its own reconstruction path
+      (`prediction.rs`/`transform.rs`/`deblock.rs`/`reconstruct.rs`) wired
+      end-to-end into `RealtimeDecoder::decode`, superseding the "wait for
+      lean" plan below. However `cargo test -p tpt-kinetix-realtime` fails 5
+      tests as of this session (`transform::tests::dct_round_trip_4/8/16`,
+      `transform::tests::hadamard_round_trip`,
+      `reconstruct::tests::keyframe_round_trips_at_qp0`) — see the 2026-08-14
+      session note above. Do not flip this to `[x]` until those pass.
 - [x] Add slice-grid framing: each slice = one independent rANS sub-stream,
       self-contained (DECISION 3); wire `RansStreamSet` per-frame — **done
       (2026-08-13)**: `src/slice.rs` `SliceGrid` frames/unframes the

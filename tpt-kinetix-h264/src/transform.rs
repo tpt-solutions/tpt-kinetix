@@ -514,8 +514,8 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
 
     // Pass 1 — separable 1-D transform across rows, in place.
     for i in 0..8 {
-        let a0 = b[i + 0 * 8] + b[i + 4 * 8];
-        let a2 = b[i + 0 * 8] - b[i + 4 * 8];
+        let a0 = b[i] + b[i + 4 * 8];
+        let a2 = b[i] - b[i + 4 * 8];
         let a4 = (b[i + 2 * 8] >> 1) - b[i + 6 * 8];
         let a6 = (b[i + 6 * 8] >> 1) + b[i + 2 * 8];
 
@@ -525,18 +525,18 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
         let b6 = a0 - a6;
 
         let a1 = -b[i + 3 * 8] + b[i + 5 * 8] - b[i + 7 * 8] - (b[i + 7 * 8] >> 1);
-        let a3 = b[i + 1 * 8] + b[i + 7 * 8] - b[i + 3 * 8] - (b[i + 3 * 8] >> 1);
-        let a5 = -b[i + 1 * 8] + b[i + 7 * 8] + b[i + 5 * 8] + (b[i + 5 * 8] >> 1);
-        let a7 = b[i + 3 * 8] + b[i + 5 * 8] + b[i + 1 * 8] + (b[i + 1 * 8] >> 1);
+        let a3 = b[i + 8] + b[i + 7 * 8] - b[i + 3 * 8] - (b[i + 3 * 8] >> 1);
+        let a5 = -b[i + 8] + b[i + 7 * 8] + b[i + 5 * 8] + (b[i + 5 * 8] >> 1);
+        let a7 = b[i + 3 * 8] + b[i + 5 * 8] + b[i + 8] + (b[i + 8] >> 1);
 
         let b1 = (a7 >> 2) + a1;
         let b3 = a3 + (a5 >> 2);
         let b5 = (a3 >> 2) - a5;
         let b7 = a7 - (a1 >> 2);
 
-        b[i + 0 * 8] = b0 + b7;
+        b[i] = b0 + b7;
         b[i + 7 * 8] = b0 - b7;
-        b[i + 1 * 8] = b2 + b5;
+        b[i + 8] = b2 + b5;
         b[i + 6 * 8] = b2 - b5;
         b[i + 2 * 8] = b4 + b3;
         b[i + 5 * 8] = b4 - b3;
@@ -547,8 +547,8 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
     // Pass 2 — separable 1-D transform across columns, producing raster output.
     let mut out = [0i32; 64];
     for i in 0..8 {
-        let a0 = b[0 + i * 8] + b[4 + i * 8];
-        let a2 = b[0 + i * 8] - b[4 + i * 8];
+        let a0 = b[i * 8] + b[4 + i * 8];
+        let a2 = b[i * 8] - b[4 + i * 8];
         let a4 = (b[2 + i * 8] >> 1) - b[6 + i * 8];
         let a6 = (b[6 + i * 8] >> 1) + b[2 + i * 8];
 
@@ -567,8 +567,8 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
         let b5 = (a3 >> 2) - a5;
         let b7 = a7 - (a1 >> 2);
 
-        out[i + 0 * 8] = (b0 + b7) >> 6;
-        out[i + 1 * 8] = (b2 + b5) >> 6;
+        out[i] = (b0 + b7) >> 6;
+        out[i + 8] = (b2 + b5) >> 6;
         out[i + 2 * 8] = (b4 + b3) >> 6;
         out[i + 3 * 8] = (b6 + b1) >> 6;
         out[i + 4 * 8] = (b6 - b1) >> 6;
@@ -626,7 +626,6 @@ pub fn dequant_idct_8x8(
     for z in 0..64 {
         block[ZIGZAG_8X8[z]] = d[z];
     }
-
     // 3. 8×8 inverse transform.
     idct_8x8(&block)
 }

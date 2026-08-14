@@ -123,13 +123,17 @@ fn dct_iv_matrix(n: usize) -> Vec<Vec<f64>> {
 }
 
 /// Unnormalized DST-VII basis matrix of size `n` (AV1's `ADST` transform type,
-/// AV1 spec §7.13.4). `M[r][c] = sin(pi (2r+1)(c+1) / 2(2n+1))`.
+/// AV1 spec §7.13.4). `M[r][c] = sin(pi (2r+1)(2c+1) / 4n)`.
+///
+/// Like [`dct_iv_matrix`], the unnormalized basis is orthogonal with norm² =
+/// `n/2` (i.e. `M·Mᵀ = (n/2)·I`); the 2-D inverse transform folds the `×2`
+/// constant into the final `>> 1` in [`inverse_transform`].
 fn dst_vii_matrix(n: usize) -> Vec<Vec<f64>> {
     let mut m = vec![vec![0f64; n]; n];
     for r in 0..n {
         for c in 0..n {
-            m[r][c] = (std::f64::consts::PI * (2 * r + 1) as f64 * (c + 1) as f64
-                / (2.0 * (2 * n + 1) as f64))
+            m[r][c] = (std::f64::consts::PI * (2 * r + 1) as f64 * (2 * c + 1) as f64
+                / (4.0 * n as f64))
                 .sin();
         }
     }
@@ -1867,16 +1871,19 @@ mod tests {
     #[test]
     fn inverse_transform_basis_is_orthonormal() {
         // The inverse transform uses the *unnormalized* DCT-IV / DST-VII basis
-        // (no `1/sqrt(n)` factor). The basis is orthogonal with norm² = n, i.e.
-        // M·Mᵀ = n·I; the constant `×n` from the 2-D pass cancels the `2/n`
-        // term into the single `>> 1` in [`inverse_transform`]. Verify the
-        // unnormalized orthogonality independently of the decoder.
+        // (no `1/sqrt(n)` / `1/sqrt(2n+1)` factor). The unnormalized basis is
+        // orthogonal: M·Mᵀ = (n/2)·I for DCT-IV and ((2n+1)/2)·I for DST-VII.
+        // The constant `×2` from the 2-D (row·then·col) pass folds into the
+        // single `>> 1` in [`inverse_transform`]. Verify that orthogonality
+        // independently of the decoder.
         for (n, maker) in [
             (4usize, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
             (8, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
             (16, dct_iv_matrix as fn(usize) -> Vec<Vec<f64>>),
             (4, dst_vii_matrix as fn(usize) -> Vec<Vec<f64>>),
         ] {
+            // Both the DCT-IV and DST-VII bases are unnormalized: M·Mᵀ = (n/2)·I.
+            let diag = n as f64 / 2.0;
             let m = maker(n);
             for r in 0..n {
                 for c in 0..n {
@@ -1884,7 +1891,7 @@ mod tests {
                     for k in 0..n {
                         dot += m[r][k] * m[c][k];
                     }
-                    let expected = if r == c { n as f64 } else { 0.0 };
+                    let expected = if r == c { diag } else { 0.0 };
                     assert!(
                         (dot - expected).abs() < 1e-6,
                         "basis orthogonality failed at ({r},{c}) for n={n}: {dot}"

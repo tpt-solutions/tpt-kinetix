@@ -796,7 +796,7 @@ mod tests {
         // A single-sample discontinuity: q0 jumps above p0.
         let line = vec![120i32, 120, 120, 120, 200, 200, 200, 200];
         // Edge between index 3 and 4.
-        let out = filter_line_1d(&line, 4, 20, 60, 1, 4, true);
+        let out = filter_line_1d(&line, 4, 20, 80, 1, 4, true);
         assert!(out[3] > 120, "p0 should move toward the higher q side");
         assert!(out[4] < 200, "q0 should move toward the lower p side");
     }

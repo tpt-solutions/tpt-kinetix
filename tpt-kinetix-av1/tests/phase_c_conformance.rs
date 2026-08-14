@@ -84,7 +84,7 @@ fn first_ivf_frame(ivf: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Decode an IVF to raw YUV420p planar bytes via `ffmpeg`.
-fn ffmpeg_decode_to_yuv(ivf: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+fn ffmpeg_decode_to_yuv(ivf: &[u8], _w: u32, _h: u32) -> Option<Vec<u8>> {
     // Write the IVF to a temp file (ffmpeg reads from a path more reliably).
     let tmp = std::env::temp_dir().join("tpt_av1_phasec_ref.ivf");
     std::fs::write(&tmp, ivf).ok()?;

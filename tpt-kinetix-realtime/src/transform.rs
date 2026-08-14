@@ -106,7 +106,7 @@ pub fn hadamard_2d(src: &[i32; 16], dst: &mut [i32; 16]) {
         }
     }
     for c in 0..4 {
-        let col = [t[0 * 4 + c], t[1 * 4 + c], t[2 * 4 + c], t[3 * 4 + c]];
+        let col = [t[c], t[4 + c], t[8 + c], t[12 + c]];
         let o = hadamard1d(col);
         for r in 0..4 {
             dst[r * 4 + c] = div4(o[r]);

@@ -485,7 +485,7 @@ impl Intra4x4PredModeCabacContext {
         }
         let mut mode = 0u8;
         for i in 0..3u8 {
-            mode += (dec.decode_decision(&mut self.rem_ctx) as u8) << i;
+            mode += dec.decode_decision(&mut self.rem_ctx) << i;
         }
         mode + (mode >= pred_mode) as u8
     }

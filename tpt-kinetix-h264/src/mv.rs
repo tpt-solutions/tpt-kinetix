@@ -821,13 +821,13 @@ pub(crate) const B_SUB_MB_DIR: [crate::macroblock::BPredDir; 13] = {
 fn b8x8_sub_rect(sub_type: usize, bx: usize, by: usize, j: usize) -> (usize, usize, usize, usize) {
     match sub_type {
         // 8×8: one sub-part
-        1 | 2 | 3 => (bx, by, 8, 8),
+        1..=3 => (bx, by, 8, 8),
         // 8×4: two sub-parts
         4 | 6 | 8 => (bx, by + 4 * j, 8, 4),
         // 4×8: two sub-parts
         5 | 7 | 9 => (bx + 4 * j, by, 4, 8),
         // 4×4: four sub-parts
-        10 | 11 | 12 => (bx + 4 * (j % 2), by + 4 * (j / 2), 4, 4),
+        10..=12 => (bx + 4 * (j % 2), by + 4 * (j / 2), 4, 4),
         _ => (bx, by, 8, 8),
     }
 }
