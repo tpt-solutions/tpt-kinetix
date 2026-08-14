@@ -492,7 +492,6 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         }
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
-        eprintln!("DBG mb_idx={mb_idx} mb_x={mb_x} mb_y={mb_y} mb_type={mb_type}");
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
             reader,
             mb_x,
@@ -505,11 +504,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
             tracer,
             mb_type,
             transform_8x8_mode,
-        )
-        .map_err(|e| {
-            eprintln!("DBG parse_intra_macroblock FAILED at mb_x={mb_x} mb_y={mb_y}: {e:?}");
-            e
-        })?;
+        )?;
         qp = new_qp;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
@@ -751,10 +746,9 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     // transform, and promotes an Intra_4×4 macroblock to Intra_8×8. Declared here
     // (function scope) so the residual stage below can see it.
     let mut is_8x8 = false;
-    if !is_i16x16 {
-        let t8 = transform_8x8_mode;
+    if !is_i16x16 && transform_8x8_mode {
         let bit = r.read_bit().ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?;
-        is_8x8 = t8 && bit == 1;
+        is_8x8 = bit == 1;
     }
 
     if is_i16x16 {
@@ -2904,13 +2898,8 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
     for block in blocks {
         let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block);
         let pos_before = r.bit_position() as u32;
-        eprintln!("DBG luma4x4 mb=({mb_x},{mb_y}) block={block} nc={nc} pos_before={pos_before} luma_max={luma_max}");
         let result = parse_cavlc_block(r, nc, luma_max);
-        let (coeffs, tc, t1) = result.map_err(|e| {
-            eprintln!("DBG luma4x4 FAILED mb=({mb_x},{mb_y}) block={block} nc={nc} pos_before={pos_before}: {e:?}");
-            e
-        })?;
-        eprintln!("DBG luma4x4 OK mb=({mb_x},{mb_y}) block={block} nc={nc} tc={tc} t1={t1} coeffs={coeffs:?} pos_after={}", r.bit_position());
+        let (coeffs, tc, t1) = result?;
         let pos_after = r.bit_position();
         this_nz.luma[block] = tc;
         // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
@@ -2954,11 +2943,9 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
 
     // Chroma DC (Cb, Cr) present when cbp_chroma & 3 (i.e. == 1 or 2).
     if cbp_chroma != 0 {
-        eprintln!("DBG chroma_dc mb=({mb_x},{mb_y}) pos_before={} cbp_chroma={cbp_chroma}", r.bit_position());
         // chroma DC: 4 coeffs each, nC = -1 selects the chroma-DC coeff_token.
-        let (cb_dc, _tc) = parse_cavlc_chroma_dc(r).map_err(|e| { eprintln!("DBG chroma_dc cb FAILED: {e:?}"); e })?;
-        let (cr_dc, _tc2) = parse_cavlc_chroma_dc(r).map_err(|e| { eprintln!("DBG chroma_dc cr FAILED: {e:?}"); e })?;
-        eprintln!("DBG chroma_dc cb={cb_dc:?} cr={cr_dc:?} pos_after={}", r.bit_position());
+        let (cb_dc, _tc) = parse_cavlc_chroma_dc(r)?;
+        let (cr_dc, _tc2) = parse_cavlc_chroma_dc(r)?;
         mb.chroma_dc_cb = cb_dc;
         mb.chroma_dc_cr = cr_dc;
         let mut cb_padded = [0i16; 16];
@@ -2974,13 +2961,7 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
         for comp in 0..2usize {
             for block in 0..4usize {
                 let nc = chroma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block);
-                let pos_before = r.bit_position();
-                eprintln!("DBG chroma_ac mb=({mb_x},{mb_y}) comp={comp} block={block} nc={nc} pos_before={pos_before}");
-                let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 15).map_err(|e| {
-                    eprintln!("DBG chroma_ac FAILED comp={comp} block={block} nc={nc} pos_before={pos_before}: {e:?}");
-                    e
-                })?;
-                eprintln!("DBG chroma_ac OK comp={comp} block={block} nc={nc} tc={tc} t1={t1} coeffs={coeffs:?} pos_after={}", r.bit_position());
+                let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 15)?;
                 this_nz.chroma[comp * 4 + block] = tc;
                 // AC coeffs occupy zigzag positions 1..=15 (DC handled above).
                 let mut shifted = [0i16; 16];

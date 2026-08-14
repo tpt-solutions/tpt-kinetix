@@ -160,15 +160,18 @@ mod tests {
         let bt = expand_band_types(&sections, &ics);
 
         // idx 60 → dpcm 0 → val 0
-        let mut r = BitReader::new(&encode_scalefactor(60));
+        let bytes = encode_scalefactor(60);
+        let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
 
         // idx 61 → dpcm 1 → val -1
-        let mut r = BitReader::new(&encode_scalefactor(61));
+        let bytes = encode_scalefactor(61);
+        let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![-1]);
 
         // idx 59 → dpcm -1 → val 1
-        let mut r = BitReader::new(&encode_scalefactor(59));
+        let bytes = encode_scalefactor(59);
+        let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![1]);
     }
 

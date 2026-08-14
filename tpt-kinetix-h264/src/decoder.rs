@@ -350,11 +350,9 @@ impl H264Decoder {
                             output_frame = Some(frame);
                             continue;
                         }
-                        Ok(None) => {
-                            eprintln!("DBG try_decode_real_slice returned Ok(None)");
-                        }
+                        Ok(None) => {}
                         Err(_e) => {
-                            eprintln!("DBG try_decode_real_slice ERR: {_e:?}");
+                            let _ = _e;
                         }
                     }
 
@@ -508,7 +506,7 @@ impl H264Decoder {
             ) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("DBG parse_i_slice ERR: {e:?}");
+                    let _ = e;
                     return Ok(None);
                 }
             }

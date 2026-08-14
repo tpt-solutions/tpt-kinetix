@@ -1062,12 +1062,38 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       other conformance test in this suite uses flat `testsrc` content that
       never triggers it. `predict_8x8`'s neighbour-clamping gap (Phase F.2)
       is therefore **not** the cause (it's 8×8-specific code; the bug
-      reproduces with pure 4×4 prediction). This needs its own dedicated
-      investigation as a new, separate, higher-priority item — it likely
-      affects real-world (non-synthetic-test-pattern) content broadly, not
-      just High-profile streams. Repro: `mandelbrot=size=64x48:rate=1` through
-      `ffmpeg`/libx264 with `cabac=0:8x8dct=0`, compare against `ffmpeg`'s own
-      decode of the same file.
+      reproduces with pure 4×4 prediction).
+
+      **RESOLVED (2026-08-15).** Root cause: `parse_intra_macroblock`
+      (`slice_data.rs`) read the `transform_size_8x8_flag` bit
+      *unconditionally* for every `Intra_4x4` macroblock instead of gating it
+      on the PPS's `transform_8x8_mode_flag` (§7.3.5.1 — that bit is only
+      present in the bitstream at all when the PPS enables the 8×8
+      transform). Baseline/Main-profile PPS always has that flag `false`, so
+      every real `Intra_4x4` macroblock consumed one phantom bit too many,
+      desyncing the rest of the CAVLC residual parse for that macroblock (and
+      usually the whole slice) — surfacing as a bitstream-level `Cavlc` parse
+      error, silently caught by `decode_impl` and falling back to the flat
+      mid-grey scaffold frame (the "`max_abs_diff=100`, ~99% of samples
+      differ" numbers above were the scaffold-vs-content diff, not a fine-grained
+      pixel bug). Every prior CAVLC conformance test used flat `testsrc`
+      content, which x264 always codes as `Intra_16x16` — the buggy branch was
+      simply never exercised until `mandelbrot`'s high-frequency detail forced
+      x264 to choose `Intra_4x4`. Found via a per-macroblock/per-block CAVLC
+      trace (`DecodeTracer`, temporary `eprintln!` instrumentation) that
+      localized the first divergence to MB(0,0)'s chroma-AC parse producing an
+      out-of-range `total_zeros`/position — traced back through the whole
+      macroblock to the unconditional bit read right after `mb_type`. Fixed by
+      gating the read on `transform_8x8_mode` (matches the already-correct
+      CABAC path in `parse_intra_macroblock_cabac`, which was never affected).
+      Regression test: `tests/cavlc_intra4x4_conformance.rs` (mandelbrot,
+      baseline profile, asserts ≥1 real `Intra_4x4` macroblock decoded and
+      bit-exact vs ffmpeg, both deblock variants) — now bit-exact
+      (`max_abs_diff=0`). `high_profile_8x8_conformance.rs` /
+      `high_profile_conformance.rs` still fail (`max_abs_diff≈160-171`) —
+      that's the distinct, still-open 8×8-transform-specific bug from Phase
+      F.4 above (`predict_8x8` neighbour-clamping / dequant-IDCT wiring),
+      unaffected by this fix and confirmed via `git stash` to pre-date it.
 
 #### Phase G.1 — PAFF: field-picture parsing
 - [x] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, previously

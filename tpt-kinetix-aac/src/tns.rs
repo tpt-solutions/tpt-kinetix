@@ -345,6 +345,8 @@ mod tests {
             coef: [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };
         filt.reflection_to_direct();
+        // Capture the direct-form coefficients before `filt` is moved into TnsData.
+        let b = [filt.coef[0], filt.coef[1]];
         let tns = TnsData {
             n_filt: vec![1],
             filters: vec![vec![filt]],
@@ -357,7 +359,6 @@ mod tests {
 
         // Independent reference: AR filter over lines 0..swb[2] (4 lines).
         let order = 2;
-        let b = [filt.coef[0], filt.coef[1]];
         let mut expected = coeffs;
         for i in 0..4 {
             let mut acc = 0.0f32;
