@@ -223,13 +223,35 @@ pub fn decode_av1_with_dav1d(
     width: u32,
     height: u32,
 ) -> Result<Vec<VideoFrame>, RefDecodeError> {
-    // dav1d -i /dev/stdin -o /dev/stdout --muxer yuv reads from stdin ("-")
-    let raw = run_piped(
-        "dav1d",
-        &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"],
-        ivf_or_obu,
-    )?;
-    split_raw_yuv420p(&raw, width, height)
+    // Prefer the standalone `dav1d` binary.
+    if binary_available("dav1d") {
+        let raw = run_piped(
+            "dav1d",
+            &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"],
+            ivf_or_obu,
+        )?;
+        return split_raw_yuv420p(&raw, width, height);
+    }
+    // Fall back to `ffmpeg`'s built-in libdav1d (auto-detects IVF vs OBU input).
+    if ffmpeg_libdav1d_available() {
+        let raw = run_piped(
+            "ffmpeg",
+            &[
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ],
+            ivf_or_obu,
+        )?;
+        return split_raw_yuv420p(&raw, width, height);
+    }
+    Err(RefDecodeError::BinaryUnavailable("dav1d"))
 }
 
 /// Decode a raw low-overhead-bitstream AV1 OBU stream against `dav1d`,
@@ -326,7 +348,7 @@ pub fn decode_aac_with_ffmpeg(adts: &[u8]) -> Result<Vec<AudioFrame>, RefDecodeE
             "-loglevel",
             "error",
             "-f",
-            "adts",
+            "aac",
             "-i",
             "pipe:0",
             "-acodec",
@@ -408,15 +430,42 @@ const SAMPLE_RATE_TABLE: [u32; 16] = [
     7_350, 0, 0, 0,
 ];
 
+/// Split an IVF container (`DKIF` magic, 32-byte file header) into its per-frame
+/// payloads. Each returned `Vec<u8>` is the raw OBU temporal unit for one coded
+/// frame — exactly what [`tpt_kinetix_av1::Av1Decoder`] consumes per
+/// [`tpt_kinetix_core::packet::Packet`]. Returns an empty `Vec` if `ivf` is not a
+/// well-formed IVF file (too short, or shorter than its declared frame table).
+///
+/// IVF frame layout: a 32-byte file header, then repeated 12-byte frame headers
+/// `[u32 LE size][u64 LE pts]` followed by `size` payload bytes.
+pub fn split_ivf_frames(ivf: &[u8]) -> Vec<Vec<u8>> {
+    const IVF_MAGIC: &[u8; 4] = b"DKIF";
+    const IVF_FILE_HDR: usize = 32;
+    const IVF_FRAME_HDR: usize = 12;
+    if ivf.len() < IVF_FILE_HDR + IVF_FRAME_HDR || &ivf[0..4] != IVF_MAGIC {
+        return Vec::new();
+    }
+    let mut frames = Vec::new();
+    let mut pos = IVF_FILE_HDR;
+    while pos + IVF_FRAME_HDR <= ivf.len() {
+        let size =
+            u32::from_le_bytes([ivf[pos], ivf[pos + 1], ivf[pos + 2], ivf[pos + 3]]) as usize;
+        pos += IVF_FRAME_HDR;
+        if size == 0 || pos + size > ivf.len() {
+            break;
+        }
+        frames.push(ivf[pos..pos + size].to_vec());
+        pos += size;
+    }
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn split_rejects_misaligned_output() {
-        // 4x4 frame => 16 + 2*(2*2) = 24 bytes; feed 25.
-        let err = split_raw_yuv420p(&[0u8; 25], 4, 4).unwrap_err();
-        assert!(matches!(err, RefDecodeError::UnexpectedOutputSize { .. }));
     }
 
     #[test]

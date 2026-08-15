@@ -4,7 +4,7 @@ A memory-safe, hyper-concurrent Rust successor to FFmpeg. Tasks are organized in
 
 MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTMP/HLS streaming layer, built via real AI/Knowledge-Graph-assisted codec tooling, published as a `crates.io` workspace.
 
-> **Last reconciled with code/git:** 2026-08-14. Drift closed since the last
+> **Last reconciled with code/git:** 2026-08-15. Drift closed since the last
 > edit: H.264 Phase D.4 (P/B-slice CABAC) is implemented and bit-exact;
 > Phase F.1 + F.2 first bullet (8×8 flag parse / 8×8 inverse transform) landed;
 > AV1 Phase C (superblock partition tree + per-block intra mode/`tx_size`) is
@@ -40,7 +40,22 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > section-length/scalefactor/spectral-data parsing gained real spec fixes; the
 > 2-test regression noted in the session note below is now fixed — `tpt-kinetix-aac
 > --lib` is green (38 tests), and DSE/PCE elements are now skipped rather than
-> rejected so real ffmpeg-generated streams parse.
+> rejected so real ffmpeg-generated streams parse. **Further working-tree
+> additions (uncommitted, 2026-08-15, later in the same session):** the H.264
+> CAVLC Intra_4x4 transform-flag bitstream desync is fixed and validated
+> bit-exact (see Phase F.4/Phase G notes below) — this was the actual root
+> cause of the CABAC 8×8-transform investigation's confusing "whole-frame"
+> diffs, not a High-profile-specific bug; G.4 MBAFF field/frame-adaptive
+> macroblock-pair *placement* (`mbaff.rs`) is now wired into `reconstruct.rs`,
+> though MBAFF-aware neighbour derivation (nC/MPM) is still not; two real AV1
+> bugs were found and fixed (`parse_tile_info`'s unbounded tile-log2 read,
+> and `inverse_transform`'s wrong transform-size-index-to-edge-length
+> mapping) but the corpus is still far from pixel-exact (Phase AV1 G below);
+> all 8 `tpt-kinetix-volumetric` design decisions are now resolved. An early,
+> currently-vacuous AAC Phase 6 conformance test scaffold
+> (`tests/conformance_aac.rs`) was also added, along with untracked scratch
+> files (`conformance_backup.rs`, `fix_conformance.ps1`,
+> `conformance_aac.rs.test`) that should be deleted rather than committed.
 
 > **2026-08-15 session note.** Working tree had leftover debug `eprintln!`s in
 > `slice_data.rs` (single-macroblock trace prints); removed, no functional
@@ -1095,6 +1110,25 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       F.4 above (`predict_8x8` neighbour-clamping / dequant-IDCT wiring),
       unaffected by this fix and confirmed via `git stash` to pre-date it.
 
+      **Further localization (uncommitted scratch harness, `tpt-kinetix-h264/
+      examples/dbg_8x8_localize.rs`, per-macroblock max/avg diff dump — not
+      committed, recreate similarly if needed):** on the same 64×48
+      `mandelbrot` clip at `8x8dct=1`, **every** macroblock in the frame shows
+      a nonzero diff (max 39-43 for 11 of the 12 macroblocks, one outlier —
+      MB(0,2) — at max=160, matching the conformance test's headline number),
+      not just the macroblocks that actually select the 8×8 transform. The
+      matching `8x8dct=0` run of the *same* clip/generator is confirmed
+      bit-exact (`max_abs_diff=0`), isolating the bug to the 8×8-specific
+      code path (as expected) but showing it corrupts the whole frame rather
+      than only the 8×8-coded blocks — consistent with a neighbour/prediction
+      state bug that propagates from one macroblock into the next (e.g. a
+      wrongly-updated "last mb was 8×8" neighbour-availability or MPM-context
+      flag) rather than a per-block dequant/IDCT arithmetic bug, which would
+      be expected to stay localized to the 8×8-coded blocks themselves. Not
+      yet root-caused; worth checking `predict_8x8`'s neighbour bookkeeping
+      and whatever in `slice_data.rs`/`reconstruct.rs` threads
+      `transform_size_8x8_flag` state between consecutive macroblocks next.
+
 #### Phase G.1 — PAFF: field-picture parsing
 - [x] Thread the already-parsed `bottom_field_flag` (`slice.rs:169`, previously
       discarded as `_bottom_field_flag`) through slice/header state instead of
@@ -1177,9 +1211,24 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        (neighbour derivation / output interleave) is still Phase G.4.
 
 #### Phase G.4 — MBAFF: neighbour derivation + reconstruction
+
+> **Updated 2026-08-15 (uncommitted):** new `src/mbaff.rs` (431 lines) adds
+> both pieces per §6.4.10.1, cross-checked against FFmpeg's
+> `fill_decode_neighbors`/`hl_decode_mb`. `place_mbaff_luma_pair`/
+> `place_mbaff_chroma_pair` (field/frame-adaptive pair placement) are wired
+> into `reconstruct.rs` and run for real MBAFF frames. `derive_neighbours`
+> (nC/MPM/motion-prediction neighbour addressing for mixed field/frame pairs)
+> exists and is unit-tested in isolation but is **not yet called from
+> `slice_data.rs`** — CAVLC/CABAC parsing still uses the non-MBAFF neighbour
+> derivation, so nC/MPM context for MBAFF macroblocks is not yet correct.
+> Not re-validated against `ffmpeg` (blocked on G.5 corpus generation below).
+
+- [x] Field/frame-adaptive reconstruction per macroblock pair — `mbaff.rs`'s
+      `place_mbaff_luma_pair`/`place_mbaff_chroma_pair`, wired into
+      `reconstruct.rs`
 - [ ] Adjust neighbour derivation (nC, MPM, motion prediction) for mixed
-      field/frame macroblock pairs (§6.4.10.1)
-- [ ] Field/frame-adaptive reconstruction per macroblock pair
+      field/frame macroblock pairs (§6.4.10.1) — `mbaff.rs::derive_neighbours`
+      implemented but not yet wired into `slice_data.rs`'s parsing path
 
 #### Phase G.5 — Validate interlaced decode
 - [ ] Generate a PAFF corpus clip and a separate MBAFF corpus clip with
@@ -1361,6 +1410,75 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        per-tile after reconstruction.
 
 #### AV1 Phase G — conformance
+
+> **Status update 2026-08-15.** Ran the existing dav1d/ffmpeg-gated corpus
+> tests for the first time with `--nocapture` to actually read the PSNR
+> numbers (previously only pass/fail on the geometry assertion was checked).
+> Result: every entry, including trivial single-color intra keyframes, was
+> decoding to ~9–17 dB PSNR — noise level, not "missing a feature." Root
+> caused and fixed two real bugs in this session (both still leave the corpus
+> far from pixel-exact — see below — but are necessary, not sufficient,
+> fixes; do not re-introduce either):
+> 1. **`frame.rs::parse_tile_info` bitstream desync.** `MiCols`/`MiRows` used
+>    `width.div_ceil(8)` instead of the spec's `2 * width.div_ceil(8)`, and —
+>    the more serious bug — `tile_cols_log2`/`tile_rows_log2` were read by
+>    looping "read a bit, stop at 0" with no bound, instead of implementing
+>    §5.9.15's `minLog2TileCols`/`maxLog2TileCols`-gated
+>    `while (TileColsLog2 < maxLog2TileCols) { increment_tile_cols_log2 f(1); ... }`.
+>    Any real frame where the superblock grid is already at
+>    `maxLog2TileCols` (i.e. most single-superblock-row/column frames) had
+>    the old code read 1-2 phantom bits the encoder never wrote, desyncing
+>    every field parsed afterward (`base_q_idx`, loop filter, CDEF, tx mode,
+>    ...). Confirmed via a debug harness on a real ffmpeg-encoded 32×32
+>    keyframe: `base_q_idx` came out `0`/`lossless=true`/`tile_cols=2`
+>    before the fix, `128`/`false`/`1` (correct) after. Fixed by implementing
+>    the real spec algorithm (`tile_log2_calc` + the bounded while-loops).
+> 2. **`reconstruct.rs::inverse_transform` transform-size bug.** `let n = 1usize
+>    << tx_size` computed the DCT/DST basis-matrix edge length from the
+>    transform-size *index* (`TX_4X4=0, TX_8X8=1, TX_16X16=2, ...`) directly,
+>    giving `n=1,2,4` instead of the correct `n=4,8,16`. Every non-WHT,
+>    non-identity (i.e. every ordinary `DCT_DCT`) transform block above the
+>    degenerate 1-coefficient case was built from the wrong-size basis
+>    matrix and produced the wrong number of output samples. This is the
+>    dominant correctness bug: it affects effectively every DCT-coded block
+>    in every frame, not just >16×16 blocks (which separately still hit the
+>    "not yet reconstructable" skip below). Fixed by using `4usize <<
+>    tx_size` instead.
+> 3. **Still open, found but not fixed this session:** `reconstruct_intra_subblock`
+>    silently skips writing *any* pixels for a block whose selected luma
+>    `tx_size` is `TX_32X32`/`TX_64X64` (`if luma_tx <= TX_16X16 { ... }`,
+>    `reconstruct.rs` ~line 1816) — the block is left at the 128-gray neutral
+>    fill. Confirmed via the debug harness that this is exactly what happens
+>    to the `solid_red` 32×32 corpus entry (encoder picks one 64×64
+>    `PARTITION_NONE` block with `TX_64X64`; decoder reconstructs nothing).
+>    `inverse_transform` itself already refuses `n > 16` for the same reason
+>    (no 32-point/64-point DCT-IV basis implemented yet). This is very likely
+>    high-impact (large flat/low-detail regions routinely pick large
+>    transforms) and is the natural next debugging target.
+> 4. Even after fixes 1–2, PSNR across the corpus did **not** recover to
+>    anything close to pixel-exact (still ~6–11 dB on most entries) — so
+>    there is at least one more substantial bug beyond tx-size skip #3,
+>    somewhere in coefficient scan/context, dequant, or intra prediction for
+>    non-4×4 blocks. Not yet isolated. A scratch debug harness for this
+>    investigation lives at
+>    `tpt-kinetix-test-utils/tests/dbg_av1_solid_red.rs` (dumps top-left 8×8
+>    luma samples + `FrameHeader`/`SequenceHeaderObu` fields for the
+>    `solid_red` corpus entry against dav1d) — reuse or delete once
+>    root-caused, following the same "keep debug scratch files uncommitted
+>    until resolved" convention as `tpt-kinetix-h264/examples/dbg_*.rs`.
+> 5. Also fixed, unrelated to the above: `frame::tests::
+>    parse_frame_header_reduced_still_keyframe` was itself failing (a stale
+>    hand-built synthetic bitstream that didn't match the fields the parser
+>    actually reads for the seq-header flags it set), which meant `cargo
+>    test -p tpt-kinetix-av1` was red before this session. Fixed by
+>    correcting the test's bit sequence; all 47 `tpt-kinetix-av1` unit tests
+>    pass now.
+>
+> Conformance harness itself (`tpt-kinetix-test-utils/tests/conformance.rs`)
+> was already in place and working correctly *as a harness* — it correctly
+> reported bad PSNR the whole time; the gap was that nobody had read its
+> `--nocapture` output closely before this session.
+
 - [~] Conformance harness in place: `tpt-kinetix-test-utils/tests/conformance.rs::
        av1_vs_ffmpeg_reference_when_available` synthesizes an AV1 keyframe OBU with
        `ffmpeg`, decodes it with both `Av1Decoder` and `ffmpeg`'s AV1 decoder, and
@@ -1369,6 +1487,8 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        commented out until Phase C/D land). Sequence Header OBU parsing is exercised
        and passes against real `ffmpeg` keyframes. With Phase D + F wired, the
        harness now exercises the full intra decode → loop-filter → diff path.
+- [ ] Root-cause and fix items 3–4 above (tx_size > 16×16 reconstruction skip;
+      remaining non-4×4 correctness gap) before re-measuring corpus PSNR
 - [ ] Validate decode vs `dav1d` reference output on a generated intra-only
        corpus first (Phases A–C only), then again once inter prediction
       (Phase E) lands
@@ -1613,19 +1733,38 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       layer capped ~1–5 MB).
 
 #### `tpt-kinetix-volumetric` — design-phase checklist (start here once prioritized)
-- [ ] Decide the target volumetric representation for v1 (point cloud vs.
-      voxel grid vs. mesh+texture)
-- [ ] Write the format design doc: since this is 3D, not 2D-frame, data,
+
+> **Resolved 2026-08-15.** All six items map to `DECISION:` blocks in
+> `docs/volumetric-codec-design.md`. Items 1/2/3/5 were already covered by
+> DECISION 1/2/3/7/8; items 4 (efficiency measurement vs Draco + TMC13) and 6
+> (explicit shared-primitive statement) were added as DECISION 9 and DECISION
+> 10 this revision to close the two gaps that had no prior `DECISION`. See the
+> "todo.md design-phase checklist — item → decision map" table in that doc.
+> (The full scaffold + pre-scaffold work is tracked under Phase 15 below,
+> `tpt-kinetix-volumetric`.)
+
+- [x] Decide the target volumetric representation for v1 (point cloud vs.
+      voxel grid vs. mesh+texture) — **DECISION 1: point cloud**
+- [x] Write the format design doc: since this is 3D, not 2D-frame, data,
       decide whether it reuses any `tpt-kinetix-core` frame/packet types or
-      needs new core types entirely
-- [ ] Design the spatial-partitioning + entropy-coding approach for
-      point/voxel data (e.g. octree)
-- [ ] Decide how compression efficiency is measured for design validation
-      (baseline against Draco / MPEG point-cloud-compression)
-- [ ] Document the memory/perf budget for v1
-- [ ] Confirm explicitly that this shares no primitives with any other
+      needs new core types entirely — **new `PointCloud` core type; reuses
+      only `KinetixError`/`DecoderCapabilities`/`Packet`/`Timestamp` contract
+      plumbing, never `VideoFrame`/`AudioFrame`/`PixelFormat` (item 2 note)**
+- [x] Design the spatial-partitioning + entropy-coding approach for
+      point/voxel data (e.g. octree) — **DECISION 2 octree + DECISION 3
+      lift/RAHT attributes + DECISION 7 rANS from `tpt-kinetix-bitstream`**
+- [x] Decide how compression efficiency is measured for design validation
+      (baseline against Draco / MPEG point-cloud-compression) — **DECISION 9:
+      D1/D2 geometry PSNR + per-attribute PSNR at bits-per-point, baselined
+      against TMC13 (oracle) and Draco (external third-party)**
+- [x] Document the memory/perf budget for v1 — **DECISION 8: 10M-point cap,
+      ~64 MB arena, server/edge class**
+- [x] Confirm explicitly that this shares no primitives with any other
       kinetix codec — `docs/codec-backlog.md` flags it as fundamentally
       different, but that should be a stated decision here, not an assumption
+      — **DECISION 10: shares zero codec-domain primitives; deliberately
+      reuses `tpt-kinetix-bitstream` (rANS) + `tpt-kinetix-core`
+      (output/error/capability) infra, same as every other original codec**
 
 - [x] Prioritize this list (pick the next one to move from backlog to an
       actual Phase-13-style design + scaffold effort, using its
@@ -1945,6 +2084,20 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       reference harness, `tests/proptest_decode_never_panics.rs`,
       `just fuzz tpt-kinetix-aac fuzz_aac_decode 60`. Exit: conformance test
       passes at a documented tolerance, bench recorded, fuzz run clean.
+      **Started early, uncommitted 2026-08-15:** a `tests/conformance_aac.rs`
+      scaffold exists (still exercising the current symphonia-backed
+      `AacDecoder::decode()`, since Phase 6 wiring itself hasn't happened) and
+      currently no-ops — `decode_native` returns zero frames against a real
+      `ffmpeg`-encoded 2-channel stream, and the test's own comment guesses
+      this is because the parse layer's `CCE` element is still
+      `Unsupported`, but that's unconfirmed (not root-caused this session;
+      verify what element id `ffmpeg`'s stream actually uses before trusting
+      the comment). The assertion is skipped whenever `native` is empty, so
+      the test does not currently validate anything. Leftover scratch
+      artifacts from this investigation — `conformance_backup.rs` (repo
+      root), `fix_conformance.ps1` (repo root), and
+      `tpt-kinetix-aac/tests/conformance_aac.rs.test` — are untracked and
+      should be deleted once the real fix lands, not committed as-is.
 - [ ] Phase 7 — Remove `symphonia-codec-aac`/`symphonia-core` from
       `tpt-kinetix-aac/Cargo.toml` and root `Cargo.toml`; update
       `docs/codec-evaluations/aac.md`, both READMEs' status tables, and
@@ -2065,8 +2218,16 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > Source: prioritized original specialist codec from `docs/codec-backlog.md`
 > (`tpt-kinetix-volumetric` — point-cloud / volumetric / AR-VR content;
 > 2D video codecs don't apply). Design doc: `docs/volumetric-codec-design.md`.
-> Each checklist item maps to a `DECISION:` block in that doc. Nothing is
-> implemented yet; resolve all decisions before scaffolding begins.
+> Each checklist item maps to a `DECISION:` block in that doc.
+>
+> **Updated:** all 8 design decisions are resolved and pre-scaffold work is
+> substantially implemented — header parsing (`src/header.rs`), octree
+> geometry decode (`src/octree.rs`), lift/RAHT attribute decode
+> (`src/attribute.rs`), a TMC13-oracle conformance harness, and a
+> `cargo-fuzz` target all exist and round-trip/pass today. What remains is
+> the direct Kinetix-vs-TMC13 bit-exact cross-check (pending coding-tool
+> alignment) — until that lands, the decoder still reports
+> `pixel_exact: false` and strict mode rejects its output.
 
 ### Design decisions
 - [x] Decide the target volumetric representation for v1 (point cloud vs.

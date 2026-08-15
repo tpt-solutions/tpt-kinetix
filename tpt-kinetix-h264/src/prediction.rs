@@ -477,7 +477,7 @@ pub fn predict_8x8(
     match mode {
         Intra4x4Mode::Vertical => {
             for x in 0..8i32 {
-                let v = [t0, t1, t2, t3, t4, t5, t6, t7][x as usize];
+                let v = tval(x as usize);
                 for y in 0..8i32 {
                     s(&[(x, y)], v);
                 }
@@ -485,7 +485,7 @@ pub fn predict_8x8(
         }
         Intra4x4Mode::Horizontal => {
             for y in 0..8i32 {
-                let v = [l0, l1, l2, l3, l4, l5, l6, l7][y as usize];
+                let v = lval(y as usize);
                 for x in 0..8i32 {
                     s(&[(x, y)], v);
                 }
@@ -501,14 +501,14 @@ pub fn predict_8x8(
             let top_avail = top[0..8].iter().any(|s| s.is_some());
             let left_avail = left.iter().any(|s| s.is_some());
             let dc = if top_avail && left_avail {
-                (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7
-                    + t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7
+                (lval(0) + lval(1) + lval(2) + lval(3) + lval(4) + lval(5) + lval(6) + lval(7)
+                    + tval(0) + tval(1) + tval(2) + tval(3) + tval(4) + tval(5) + tval(6) + tval(7)
                     + 8)
                     >> 4
             } else if top_avail {
-                (t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7 + 4) >> 3
+                (tval(0) + tval(1) + tval(2) + tval(3) + tval(4) + tval(5) + tval(6) + tval(7) + 4) >> 3
             } else if left_avail {
-                (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7 + 4) >> 3
+                (lval(0) + lval(1) + lval(2) + lval(3) + lval(4) + lval(5) + lval(6) + lval(7) + 4) >> 3
             } else {
                 R
             };
@@ -933,7 +933,8 @@ mod tests {
         let top = [Some(200u8); 16];
         let left = [Some(10u8); 8];
         let mut out = [0u8; 64];
-        predict_8x8(Intra4x4Mode::Vertical, &top, &left, Some(128), &mut out);
+        // top_left must match top neighbours for pure vertical prediction
+        predict_8x8(Intra4x4Mode::Vertical, &top, &left, Some(200), &mut out);
         for v in out {
             assert_eq!(v, 200);
         }

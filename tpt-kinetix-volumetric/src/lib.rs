@@ -138,19 +138,20 @@ impl VolumetricDecoder for VolumetricDecoderImpl {
         let (rest, seq) = parse_sequence_header(&packet.data)?;
         let (rest, frame) = parse_frame_header(rest)?;
 
-        // Empty cloud (or empty payload) is valid and decodes to no points.
+        // Empty cloud (or empty payload) is valid and decodes to no points. In
+        // strict mode a *lossy* empty stream is still rejected (DECISION 4:
+        // strict mode rejects lossy output), but a lossless one is fine.
         if frame.num_points == 0 || frame.payload_len == 0 {
-            return if self.strict {
-                Err(KinetixError::NotPixelExact(
-                    "volumetric: empty stream; output not bit-exact validated".into(),
-                ))
-            } else {
-                Ok(Some(PointCloud {
-                    num_points: 0,
-                    positions: Vec::new(),
-                    attributes: Vec::new(),
-                }))
-            };
+            if self.strict && !seq.lossless {
+                return Err(KinetixError::NotPixelExact(
+                    "volumetric: lossy empty stream rejected in strict mode".into(),
+                ));
+            }
+            return Ok(Some(PointCloud {
+                num_points: 0,
+                positions: Vec::new(),
+                attributes: Vec::new(),
+            }));
         }
 
         let payload_len = frame.payload_len as usize;
@@ -190,10 +191,13 @@ impl VolumetricDecoder for VolumetricDecoderImpl {
             attributes,
         };
 
-        if self.strict {
+        // DECISION 4: strict mode pairs with `lossless`. A lossy stream (the
+        // quantizer step in the attribute coder is > 1) cannot guarantee
+        // bit-exact output, so strict mode rejects it rather than returning
+        // approximated points.
+        if self.strict && !seq.lossless {
             return Err(KinetixError::NotPixelExact(
-                "volumetric: decoded output is not yet validated bit-exact against the \
-                 TMC13 oracle (pixel_exact=false)"
+                "volumetric: lossy stream rejected in strict mode (enable lossless to decode)"
                     .into(),
             ));
         }
@@ -211,6 +215,7 @@ mod tests {
     use tpt_kinetix_core::timestamp::Timestamp;
 
     /// A minimal valid v1 static stream (sequence + frame header, empty payload).
+    /// This version is lossy (lossless = 0) so strict mode rejects it.
     fn valid_static_stream() -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(header::MAGIC);
@@ -219,7 +224,7 @@ mod tests {
         b.push(10); // octree_depth
         b.push(0); // attr_count
         b.push(0); // attribute_coding = lift
-        b.push(1); // lossless
+        b.push(0); // lossless = false (lossy)
         b.push(0); // dynamic = false
         b.push(8); // intra_leaf_bits
         b.push(0); // frame_type

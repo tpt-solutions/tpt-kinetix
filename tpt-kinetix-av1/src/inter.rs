@@ -79,6 +79,20 @@ impl Mv {
             col: ((self.col * num) + (den >> 1)) / den,
         }
     }
+
+    /// Derive the chroma-plane motion vector for a subsampled (4:2:0) plane
+    /// from this luma MV (AV1 §7.11.3): `mv_chroma = (mv * 2 ± 1) >> 2`, with
+    /// the rounding term matching the sign of `mv` (libaom/dav1d `scaled_chroma`).
+    pub fn scaled_chroma(&self) -> Mv {
+        let scale = |v: i32| -> i32 {
+            if v >= 0 {
+                (v * 2 + 1) >> 2
+            } else {
+                (v * 2 - 1) >> 2
+            }
+        };
+        Mv::new(scale(self.row), scale(self.col))
+    }
 }
 
 /// An immutable view of one decoded reference frame's three planes. Indexed by
@@ -147,7 +161,7 @@ fn subpel_kernel(kind: u8, frac: i32) -> &'static [i32; 8] {
         INTERP_EIGHTTAP_SHARP => 2,
         _ => 3, // BILINEAR and any unknown value use the bilinear kernels.
     };
-    let pos = (frac & 7) as usize;
+    let pos = ((frac & 7) * 2) as usize;
     &defaults::SUBPEL_FILTERS[f][pos]
 }
 
@@ -202,6 +216,10 @@ pub fn motion_compensate(
     }
 
     // Vertical pass from `tmp` into `dest`, with vertical border extension.
+    // `dest` is the destination *block* buffer (stride `dest_stride`, sized
+    // `bw`×`bh`), so the block is written at local coordinates `(y, x)`; the
+    // reference is sampled at frame/superblock coordinates `dst_x`/`dst_y`
+    // above. This lets callers pass a small per-block temp buffer.
     for y in 0..bh {
         for x in 0..bw {
             let mut s = 0i32;
@@ -211,7 +229,7 @@ pub fn motion_compensate(
                 s += tmp[ty as usize * bw + x] * kh[k as usize];
             }
             let v = ((s + 64) >> 7).clamp(0, 255) as u8;
-            dest[(dst_y + y) * dest_stride + (dst_x + x)] = v;
+            dest[y * dest_stride + x] = v;
         }
     }
 }
@@ -291,7 +309,7 @@ pub struct InterCdfs {
     pub drl_mode: [[u16; 3]; 3],
     pub mv_joint: [u16; 5],
     pub mv_sign: [u16; 3],
-    pub mv_class: [[u16; 3]; 2],
+    pub mv_class: [[u16; 12]; 2],
     pub mv_class0_bit: [u16; 3],
     pub mv_class0_fr: [[[u16; 5]; 2]; 2],
     pub mv_class0_hp: [u16; 3],
@@ -416,7 +434,7 @@ pub fn read_mv(
 ///
 /// Walks the six `single_ref_cdf` decisions in order; `ctx` is the frame-level
 /// single-ref context (0..3). Returns one of LAST..ALTREF.
-fn read_single_ref_name(dec: &mut SymbolDecoder<'_>, cdfs: &mut InterCdfs, ctx: usize) -> u8 {
+pub fn read_single_ref_name(dec: &mut SymbolDecoder<'_>, cdfs: &mut InterCdfs, ctx: usize) -> u8 {
     if dec.read_symbol(&mut cdfs.single_ref[ctx][0]) == 0 {
         return LAST_FRAME;
     }
@@ -448,6 +466,10 @@ pub const GLOBAL_NEWMV: u8 = 5;
 
 /// Decode the single-reference block mode (§6.8.2). Returns the mode plus the
 /// chosen reference name. `ctx` is the per-block mode context (0..6).
+///
+/// AV1 `read_inter_mode` is a *cascade*: `new_mv`, then `zero_mv` only if the
+/// block is not NEW, then `ref_mv` only if it is not ZERO. Reading every symbol
+/// unconditionally would desync the bitstream on every non-NEWMV block.
 fn read_single_inter_mode(
     dec: &mut SymbolDecoder<'_>,
     cdfs: &mut InterCdfs,
@@ -455,26 +477,19 @@ fn read_single_inter_mode(
     nearest_nonzero: bool,
     near_nonzero: bool,
 ) -> u8 {
-    let new_mv = dec.read_symbol(&mut cdfs.new_mv[ctx]) == 1;
-    let zero_mv = dec.read_symbol(&mut cdfs.zero_mv[if nearest_nonzero { 1 } else { 0 }]) == 1;
-    let ref_mv = dec.read_symbol(&mut cdfs.ref_mv[ctx]) == 1;
-    match (new_mv, zero_mv, ref_mv) {
-        (true, _, _) => NEWMV,
-        (false, true, _) => ZEROMV,
-        (false, false, false) => {
-            if nearest_nonzero {
-                NEARESTMV
-            } else {
-                NEARMV
-            }
-        }
-        (false, false, true) => {
-            if near_nonzero {
-                NEARMV
-            } else {
-                NEARESTMV
-            }
-        }
+    if dec.read_symbol(&mut cdfs.new_mv[ctx]) == 1 {
+        return NEWMV;
+    }
+    if dec.read_symbol(&mut cdfs.zero_mv[if nearest_nonzero { 1 } else { 0 }]) == 1 {
+        return ZEROMV;
+    }
+    if dec.read_symbol(&mut cdfs.ref_mv[ctx]) == 1 {
+        return if near_nonzero { NEARMV } else { NEARESTMV };
+    }
+    if nearest_nonzero {
+        NEARESTMV
+    } else {
+        NEARMV
     }
 }
 
@@ -600,11 +615,11 @@ mod tests {
     #[test]
     fn motion_compensate_clamps_to_border() {
         let refp = vec![200u8; 64 * 64];
-        let mut dest = vec![0u8; 16 * 16];
+        let mut dest = vec![0u8; 8 * 8];
         // MV pointing well outside the frame: output must stay in valid range.
         motion_compensate(
             &mut dest,
-            16,
+            8,
             &refp,
             64,
             64,

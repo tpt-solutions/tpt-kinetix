@@ -124,18 +124,26 @@ mod tests {
     }
 
     /// Encode one scalefactor codeword (index `idx` in the ISO scalefactor book)
-    /// into a byte buffer. `decode_scalefactor` returns `idx - 60`.
-    fn encode_scalefactor(idx: usize) -> Vec<u8> {
+    /// into a raw MSB-first bit vector (0/1 per element). The caller packs the
+    /// full bit vector into bytes once, so concatenating multiple codewords does
+    /// not introduce spurious zero padding bits between them. `decode_scalefactor`
+    /// returns `idx - 60`.
+    fn encode_scalefactor_bits(idx: usize) -> Vec<u8> {
         let (code, len) = SCALEFACTOR_BOOK[idx];
         let mut bits = Vec::new();
         for b in 0..len {
             bits.push(((code >> (len - 1 - b)) & 1) as u8);
         }
+        bits
+    }
+
+    /// Pack a 0/1 bit vector into MSB-first bytes.
+    fn pack_bits(bits: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut cur = 0u8;
         let mut n = 0u32;
-        for &b in &bits {
-            cur = (cur << 1) | b;
+        for &b in bits {
+            cur = (cur << 1) | (b & 1);
             n += 1;
             if n == 8 {
                 out.push(cur);
@@ -160,17 +168,17 @@ mod tests {
         let bt = expand_band_types(&sections, &ics);
 
         // idx 60 → dpcm 0 → val 0
-        let bytes = encode_scalefactor(60);
+        let bytes = pack_bits(&encode_scalefactor_bits(60));
         let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
 
         // idx 61 → dpcm 1 → val -1
-        let bytes = encode_scalefactor(61);
+        let bytes = pack_bits(&encode_scalefactor_bits(61));
         let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![-1]);
 
         // idx 59 → dpcm -1 → val 1
-        let bytes = encode_scalefactor(59);
+        let bytes = pack_bits(&encode_scalefactor_bits(59));
         let mut r = BitReader::new(&bytes);
         assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![1]);
     }
@@ -196,9 +204,10 @@ mod tests {
             groups: vec![vec![Section { sect_cb: 1, sect_len: 2 }]],
         };
         let bt = expand_band_types(&sections, &ics);
-        let mut bits = encode_scalefactor(60); // band0: dpcm 0 → val 0
-        bits.extend_from_slice(&encode_scalefactor(58)); // band1: dpcm -2 → val 2
-        let mut r = BitReader::new(&bits);
+        let mut bits = encode_scalefactor_bits(60); // band0: dpcm 0 → val 0
+        bits.extend_from_slice(&encode_scalefactor_bits(58)); // band1: dpcm -2 → val 2
+        let bytes = pack_bits(&bits);
+        let mut r = BitReader::new(&bytes);
         assert_eq!(
             decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![0, 2]

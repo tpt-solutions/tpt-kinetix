@@ -140,6 +140,139 @@ impl Default for RansEncoder {
     }
 }
 
+/// A **static** context-adaptive symbol model over a 256-symbol alphabet.
+///
+/// "Static" means the cumulative-frequency table is fixed at construction and
+/// never updated per symbol. That is a hard requirement for rANS: the encoder
+/// pushes symbols in *reverse* decode order, so any model that mutated its
+/// frequencies as symbols stream past would diverge between the forward-order
+/// decoder and the reverse-order encoder. A fixed table keeps both sides in
+/// lock-step — exactly what FFV1's per-context `quant_table` does.
+///
+/// The table is skewed toward symbol `0` (see [`Self::new`]) so low-value
+/// symbols (small residuals, common predictor magnitudes) get the bulk of the
+/// probability mass. Build one per context — e.g. [`lossless_context_models`]
+/// hands back a bank of 16, more concentrated at `0` for the low-activity
+/// contexts — and select per symbol by the context id.
+pub struct SkewedModel {
+    /// Cumulative frequency table of length 257; `cum[s+1] - cum[s]` is the
+    /// frequency of symbol `s`, and `cum[256] == PROB_SCALE`.
+    cum: Vec<u32>,
+}
+
+impl SkewedModel {
+    /// Build a static model whose frequencies fall off with symbol value.
+    ///
+    /// `skew` controls the concentration: `1.0` is a gentle `1/(value+1)` falloff,
+    /// larger values pile almost all mass on symbol `0`. Frequencies are
+    /// normalized to sum to exactly `PROB_SCALE` so the rANS machinery is happy.
+    pub fn new(skew: f64) -> Self {
+        // Exponential decay: symbol `s` gets weight `e^(-lambda * s)`, so mass
+        // piles on symbol `0` and falls off smoothly. `lambda = 0` is the
+        // uniform (flat) model; larger `lambda` concentrates more on `0`.
+        let lambda = skew.max(0.0);
+        let weights: Vec<f64> = (0..256)
+            .map(|s| (-(lambda) * s as f64).exp())
+            .collect();
+        let total: f64 = weights.iter().sum();
+        // Ideal (fractional) frequency per symbol, summing to exactly PROB_SCALE.
+        let ideal: Vec<f64> = weights
+            .iter()
+            .map(|w| w / total * (PROB_SCALE as f64))
+            .collect();
+        // Floor each (so the partial sum can never exceed PROB_SCALE) and then
+        // hand the leftover units to the symbols with the largest fractional
+        // part — the largest-remainder (Hamilton) method.
+        let mut freqs: Vec<u32> = ideal.iter().map(|v| v.floor().max(0.0) as u32).collect();
+        let allocated: i64 = freqs.iter().map(|&f| f as i64).sum();
+        let mut remainder = PROB_SCALE as i64 - allocated;
+        let mut idx: Vec<usize> = (0..256).collect();
+        idx.sort_by(|&a, &b| {
+            let fa = ideal[a] - ideal[a].floor();
+            let fb = ideal[b] - ideal[b].floor();
+            fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut i = 0;
+        while remainder > 0 {
+            freqs[idx[i % 256]] += 1;
+            remainder -= 1;
+            i += 1;
+        }
+        // Ensure every symbol has a positive frequency (rANS cannot code a
+        // zero-frequency symbol). Borrow a unit from the current most-frequent
+        // symbol, which keeps the total at PROB_SCALE.
+        for s in 0..256 {
+            if freqs[s] == 0 {
+                let mut mi = 0;
+                let mut mv = 0u32;
+                for (j, &f) in freqs.iter().enumerate() {
+                    if f > mv {
+                        mv = f;
+                        mi = j;
+                    }
+                }
+                freqs[s] = 1;
+                if freqs[mi] > 1 {
+                    freqs[mi] -= 1;
+                }
+            }
+        }
+        let mut cum = vec![0u32; 257];
+        for s in 0..256 {
+            cum[s + 1] = cum[s] + freqs[s];
+        }
+        cum[256] = PROB_SCALE;
+        Self { cum }
+    }
+
+    /// Number of symbols in the alphabet (256).
+    pub fn len(&self) -> usize {
+        256
+    }
+
+    /// Always `false` (the model covers a full 256-symbol alphabet).
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl SymbolModel for SkewedModel {
+    fn info(&self, symbol: u8) -> SymbolInfo {
+        let s = symbol as usize;
+        SymbolInfo {
+            start: self.cum[s],
+            freq: self.cum[s + 1] - self.cum[s],
+        }
+    }
+
+    fn find(&self, cum_freq: u32) -> (u8, SymbolInfo) {
+        // Largest symbol `s` with `cum[s] <= cum_freq`. `partition_point` gives
+        // the first index whose value exceeds `cum_freq`; back off by one.
+        let s = self.cum.partition_point(|&c| c <= cum_freq).saturating_sub(1).min(255);
+        (s as u8, self.info(s as u8))
+    }
+}
+
+/// Build the bank of 16 static context models the lossless codec uses for its
+/// residual stream.
+///
+/// Context id `0` is the lowest-activity (most predictable) context, so it gets
+/// the most aggressive concentration toward symbol `0`; context `15` is the
+/// most active and gets the flattest table. All are static (see
+/// [`SkewedModel`]), which is what makes reverse-order rANS encode / forward
+/// rANS decode agree.
+pub fn lossless_context_models() -> Vec<SkewedModel> {
+    (0..16)
+        .map(|c| {
+            // Lower-activity context (small `c`) gets a more peaked model
+            // (more mass on small residuals); higher-activity contexts get a
+            // flatter one. Exponential-decay lambda range.
+            let lambda = 0.2 + (15 - c) as f64 * 0.15;
+            SkewedModel::new(lambda)
+        })
+        .collect()
+}
+
 /// Byte-oriented rANS decoder, the inverse of [`RansEncoder`].
 pub struct RansDecoder<'a> {
     state: u32,
@@ -260,6 +393,56 @@ impl RansStreamSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skewed_model_tables_sum_to_scale() {
+        for skew in [0.5f64, 1.0, 2.5, 4.0] {
+            let m = SkewedModel::new(skew);
+            assert_eq!(m.cum.last().copied(), Some(PROB_SCALE));
+            // Every symbol keeps a strictly positive frequency.
+            for s in 0..256u32 {
+                assert!(m.cum[s as usize + 1] > m.cum[s as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn skewed_model_concentrates_on_zero_for_high_skew() {
+        let flat = SkewedModel::new(0.0);
+        let peaked = SkewedModel::new(4.0);
+        // Peakier model gives symbol 0 more mass than the flat one.
+        assert!(peaked.info(0).freq > flat.info(0).freq);
+        assert!(peaked.info(255).freq < flat.info(255).freq);
+    }
+
+    #[test]
+    fn skewed_model_round_trips_sequence() {
+        let model = SkewedModel::new(2.0);
+        let symbols: Vec<u8> = (0..256u32).map(|i| ((i * 17) % 256) as u8).collect();
+        let mut enc = RansEncoder::new();
+        for &s in symbols.iter().rev() {
+            enc.encode(&model, s);
+        }
+        let bytes = enc.finish();
+        let mut dec = RansDecoder::new(&bytes).expect("decoder init");
+        let decoded: Vec<u8> = (0..symbols.len())
+            .map(|_| dec.decode(&model).expect("decode"))
+            .collect();
+        assert_eq!(decoded, symbols);
+    }
+
+    #[test]
+    fn lossless_context_bank_is_static_and_full() {
+        let bank = lossless_context_models();
+        assert_eq!(bank.len(), 16);
+        for m in &bank {
+            assert!(!m.is_empty());
+            assert_eq!(m.cum.last().copied(), Some(PROB_SCALE));
+        }
+        // Lower-activity context (0) is more peaked on symbol 0 than the
+        // highest-activity context (15).
+        assert!(bank[0].info(0).freq > bank[15].info(0).freq);
+    }
 
     #[test]
     fn single_symbol_round_trips() {

@@ -4,7 +4,7 @@
 //! the IMDCT produces 2·N time-domain samples:
 //!
 //! ```text
-//! x[n] = (1/N) · Σ_{k=0}^{N-1} X[k] · cos( (π/(2·N)) · (2·n + 1 + N) · (2·k + 1) / 2 )
+//! x[n] = (1/N) · Σ_{k=0}^{N-1} X[k] · cos( (π/(2·N)) · (2·n + 1 + N/2) · (2·k + 1) )
 //!                                                                   n = 0 .. 2·N-1
 //! ```
 //!
@@ -18,7 +18,7 @@ use std::f64::consts::PI;
 /// IMDCT without per-sample transcendental calls.
 pub struct Imdct {
     n: usize,
-    /// Row-major `2·N × N` table of `cos(π/(2N)·(2n+1+N)·(2k+1)/2)`.
+    /// Row-major `2·N × N` table of `cos(π/(2N)·(2n+1+N/2)·(2k+1))`.
     table: Vec<f32>,
 }
 
@@ -28,10 +28,13 @@ impl Imdct {
         assert!(n.is_power_of_two() && n >= 8, "IMDCT block size must be a power of two ≥ 8");
         let mut table = vec![0.0f32; 2 * n * n];
         for nn in 0..2 * n {
-            let a = (2 * nn + 1 + n) as f64;
+            // AAC IMDCT (ISO 13818-7 §3.A.4): the time index is doubled in the
+            // basis-function argument and offset by N/2 so that the 50%
+            // overlap-add satisfies Time-Domain Aliasing Cancellation (TDAC).
+            let a = (2 * nn + 1 + n / 2) as f64;
             let row_base = nn * n;
             for k in 0..n {
-                let arg = (PI / (2.0 * n as f64)) * a * (2 * k + 1) as f64 / 2.0;
+                let arg = (PI / (2.0 * n as f64)) * a * (2 * k + 1) as f64;
                 table[row_base + k] = arg.cos() as f32;
             }
         }
@@ -105,7 +108,7 @@ mod tests {
         for k in 0..16 {
             let mut s = 0.0;
             for t in 0..32 {
-                let arg = (PI / (2.0 * n as f64)) * (2 * t + 1 + n) as f64 * (2 * k + 1) as f64 / 2.0;
+                let arg = (PI / (2.0 * n as f64)) * (2 * t + 1 + n / 2) as f64 * (2 * k + 1) as f64;
                 s += windowed[t] * arg.cos();
             }
             spec[k] = s;
@@ -136,5 +139,69 @@ mod tests {
         assert!(time.iter().all(|&v| v.is_finite()));
         // First half and second half should differ (otherwise the transform is flat).
         assert!((time[0] - time[n]).abs() > 1e-3);
+    }
+
+    /// IMDCT(e_k) equals `(1/N)·cos( π/(2N)·(2n+1+N/2)·(2k+1) )` exactly: a direct
+    /// check that [`Imdct::transform`] computes the correct inverse-transform basis
+    /// (matched against the ISO/IEC 13818-7 §3.A.4 formula), independent of any
+    /// windowing / TDAC. The full windowed overlap-add round-trip that reconstructs
+    /// the original signal is validated end-to-end against an ffmpeg reference by
+    /// `tests/conformance_aac.rs`.
+    #[test]
+    fn imdct_basis_vector_is_cosine() {
+        let n = 16usize;
+        let imdct = Imdct::new(n);
+        for k in [0usize, 3, 7, 15] {
+            let mut freq = vec![0.0f32; n];
+            freq[k] = 1.0;
+            let mut time = vec![0.0f32; 2 * n];
+            imdct.transform(&freq, &mut time);
+            for nn in 0..2 * n {
+                let a = (2 * nn + 1 + n / 2) as f64;
+                let expected = ((1.0 / n as f64)
+                    * (PI / (2.0 * n as f64) * a * (2 * k + 1) as f64).cos())
+                    as f32;
+                assert!(
+                    (time[nn] - expected).abs() < 1e-5,
+                    "basis k={k} n={nn}: got {} want {expected}",
+                    time[nn]
+                );
+            }
+        }
+    }
+
+    /// The IMDCT basis is orthonormal: each basis column has unit energy and the
+    /// columns are mutually orthogonal. This is the precondition for the analysis
+    /// MDCT + windowed overlap-add to reconstruct the original signal (TDAC), which
+    /// `tests/conformance_aac.rs` checks against ffmpeg.
+    #[test]
+    fn imdct_basis_is_orthonormal() {
+        let n = 16usize;
+        let imdct = Imdct::new(n);
+        // Probe two distinct basis vectors and confirm their inner product (over the
+        // 2N time samples, unscaled by 1/N) matches N·δ_{jk}.
+        for (j, k) in [(0usize, 0), (0, 5), (3, 11)] {
+            let mut fj = vec![0.0f32; 2 * n];
+            let mut fk = vec![0.0f32; 2 * n];
+            imdct.transform(&unit(n, j), &mut fj);
+            imdct.transform(&unit(n, k), &mut fk);
+            let dot: f64 = fj.iter().zip(&fk).map(|(a, b)| *a as f64 * *b as f64).sum();
+            // The IMDCT applies a (1/N) factor, so the output basis vectors have
+            // norm² 1/N and the columns of the underlying cosine matrix satisfy
+            // Σ_nn C[nn][j]·C[nn][k] = N·δ_{jk}; the (1/N)² from both sides leaves
+            // 1/N on the diagonal.
+            let expected = if j == k { 1.0 / n as f64 } else { 0.0 };
+            assert!(
+                (dot - expected).abs() < 1e-4,
+                "basis inner product ({j},{k}) = {dot}, expected {expected}"
+            );
+        }
+    }
+
+    /// Unit spectrum `e_k` (length `n`).
+    fn unit(n: usize, k: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; n];
+        v[k] = 1.0;
+        v
     }
 }

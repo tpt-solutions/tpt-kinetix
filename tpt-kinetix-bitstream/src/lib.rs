@@ -24,4 +24,7 @@ pub const PROB_BITS: u32 = 12;
 pub const PROB_SCALE: u32 = 1 << PROB_BITS;
 
 pub use bitreader::BitReader;
-pub use rans::{RansDecoder, RansEncoder, RansStreamSet, StaticModel, SymbolInfo, SymbolModel};
+pub use rans::{
+    lossless_context_models, RansDecoder, RansEncoder, RansStreamSet, SkewedModel, StaticModel,
+    SymbolInfo, SymbolModel,
+};

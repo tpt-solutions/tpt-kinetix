@@ -94,7 +94,6 @@ pub fn parse_tns(
 
         let mut group_filters = Vec::with_capacity(nf as usize);
         // running band offset within this group's filters
-        let mut band = 0u8;
         for _f in 0..nf {
             let coef_res = if reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0 {
                 4u8
@@ -106,9 +105,14 @@ pub fn parse_tns(
                 .read_bits(length_bits)
                 .ok_or(AacParseError::UnexpectedEof)? as u8;
             let order_bits = if short { 3 } else { 5 };
-            let order = reader
+            let raw_order = reader
                 .read_bits(order_bits)
                 .ok_or(AacParseError::UnexpectedEof)? as u8;
+            // AAC caps the TNS filter order at 20 (long) / 7 (short) windows.
+            // Clamp defensively so a hostile or non-conformant stream cannot
+            // overflow the fixed `coef` buffer (and to match conformant encoders).
+            let max_order = if short { 7u8 } else { 20u8 };
+            let order = raw_order.min(max_order);
 
             let mut filt = TnsFilter {
                 length,
@@ -138,9 +142,8 @@ pub fn parse_tns(
                 filt.reflection_to_direct();
             }
 
-            let _ = tns_max_bands;
-            let _ = band;
-            group_filters.push(filt);
+                let _ = tns_max_bands;
+                group_filters.push(filt);
         }
         filters.push(group_filters);
     }
@@ -181,9 +184,14 @@ pub fn apply_tns(
                 continue;
             }
             let start_band = band_start;
+            if start_band >= swb.len() {
+                // Filter references a scalefactor band beyond the table; there is
+                // nothing left to filter in this window group.
+                break;
+            }
             let end_band = (band_start + filt.length as usize).min(swb.len() - 1);
-            let mut line_start = swb[start_band] as usize;
-            let mut line_end = swb[end_band] as usize;
+            let line_start = swb[start_band] as usize;
+            let line_end = swb[end_band] as usize;
             if line_end <= line_start {
                 band_start += filt.length as usize;
                 continue;
@@ -201,7 +209,6 @@ pub fn apply_tns(
                 );
             }
             band_start += filt.length as usize;
-            let _ = line_end;
         }
     }
 }
@@ -307,19 +314,24 @@ mod tests {
         let b = [0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let order = 2;
         let input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut expected = [0.0f32; 6];
+
+        let mut got = input;
+        tns_filter_window(&b, order, false, &mut got);
+
+        // Independent recursive reference: the AR filter is applied in place
+        // (each output line is predicted from the already-filtered lines below
+        // it), matching the spec/ffmpeg TNS recursion.
+        let mut expected = input;
         for i in 0..6 {
             let mut acc = 0.0f32;
             for j in 0..order {
                 if i > j {
-                    acc += b[j] * input[i - j - 1];
+                    acc += b[j] * expected[i - j - 1];
                 }
             }
-            expected[i] = input[i] - acc;
+            expected[i] -= acc;
         }
 
-        let mut got = input;
-        tns_filter_window(&b, order, false, &mut got);
         for i in 0..6 {
             assert!(
                 (got[i] - expected[i]).abs() < 1e-5,
@@ -357,17 +369,18 @@ mod tests {
             coeffs[i] = (i + 1) as f32;
         }
 
-        // Independent reference: AR filter over lines 0..swb[2] (4 lines).
+        // Independent recursive reference: AR filter over lines 0..swb[2] (4
+        // lines), applied in place to match the spec/ffmpeg TNS recursion.
         let order = 2;
         let mut expected = coeffs;
         for i in 0..4 {
             let mut acc = 0.0f32;
             for j in 0..order {
                 if i > j {
-                    acc += b[j] * coeffs[i - j - 1];
+                    acc += b[j] * expected[i - j - 1];
                 }
             }
-            expected[i] = coeffs[i] - acc;
+            expected[i] -= acc;
         }
 
         apply_tns(&tns, &ics, &mut coeffs, &swb);

@@ -97,21 +97,15 @@ fn read_su(br: &mut BitReader<'_>, n: u8) -> Result<i32, KinetixError> {
 
 /// Read a tile-size `log2` value (AV1 §5.9.12): a run of `1` bits terminated
 /// by a `0` bit. `tile_cols_log2`/`tile_rows_log2` are encoded this way.
-fn read_tile_log2(br: &mut BitReader<'_>) -> Result<u8, KinetixError> {
-    let mut v = 0u8;
-    loop {
-        let bit = br
-            .read_bit()
-            .ok_or_else(|| KinetixError::Parse("tile log2 truncated".into()))?;
-        if bit == 0 {
-            break;
-        }
-        v += 1;
-        if v == 6 {
-            break;
-        }
+/// `tile_log2(blkSize, target)` (§5.9.15): the smallest `k` such that
+/// `blkSize << k >= target`. A pure computation, not a bitstream read —
+/// distinct from the `increment_tile_*_log2` bits read in `parse_tile_info`.
+fn tile_log2_calc(blk_size: u32, target: u32) -> u32 {
+    let mut k = 0u32;
+    while (blk_size << k) < target {
+        k += 1;
     }
-    Ok(v)
+    k
 }
 
 /// Read a non-symmetric unsigned integer `ns(n)` (AV1 §4.10.7): the smallest
@@ -765,38 +759,11 @@ impl FrameHeader {
             subsampling_y,
         )?;
 
-        #[cfg(test)]
-        {
-            let pos = br.bits_read();
-            let byte = pos / 8;
-            let rem = &data[byte..(byte + 3).min(data.len())];
-            eprintln!("DBG stop bits={} byte={} bitinbyte={} nextbytes={:?}", pos, byte, pos % 8, rem);
-        }
-
         // `frame_obu()` performs `byte_alignment()` between the uncompressed
         // header and the tile-group payload (§6.8.1), so consume the trailing
         // padding (all-ones) here; this also positions `br` at the tile group.
         byte_align(&mut br)?;
 
-        #[cfg(test)]
-        {
-            eprintln!(
-                "PARSE bits={} q={} lf={:?} cdef_d={} cdef_y={:?} cdef_uv={:?} txsel={} rtx={} oh={} dlfp={} dlp={} dqp={} dqr={}",
-                br.bits_read(),
-                base_q_idx,
-                loop_filter_level,
-                cdef_damping,
-                cdef_y_strength,
-                cdef_uv_strength,
-                tx_mode_select,
-                reduced_tx_set,
-                order_hint,
-                delta_lf_present,
-                delta_lf_multi,
-                delta_q_present,
-                delta_q_res,
-            );
-        }
         Ok((
             FrameHeader {
                 frame_type,
@@ -890,16 +857,18 @@ impl FrameHeader {
 // Frame header sub-parsers (AV1 spec §5.9 uncompressed_header helpers)
 // ===========================================================================
 
-/// `byte_alignment()` (§6.8.1): consume `1`-valued padding bits up to the next
-/// byte boundary.
+/// `trailing_bits()` (§6.8.2): pad with `0`-valued bits up to the next byte
+/// boundary. The `frame_header_obu` terminates with `trailing_bits()`, not
+/// `byte_alignment()` (which would consume the first tile-group bit expecting it
+/// to be `1` and desync the following tile payload).
 fn byte_align(br: &mut BitReader<'_>) -> Result<(), KinetixError> {
     while br.bits_read() & 7 != 0 {
         let b = br
             .read_bit()
-            .ok_or_else(|| KinetixError::Parse("byte_alignment truncated".into()))?;
-        if b == 0 {
+            .ok_or_else(|| KinetixError::Parse("trailing_bits truncated".into()))?;
+        if b != 0 {
             return Err(KinetixError::Parse(
-                "byte_alignment padding bit was not 1".into(),
+                "trailing_bits padding bit was not 0".into(),
             ));
         }
     }
@@ -1483,17 +1452,54 @@ fn parse_tile_info(
     height: &u32,
     use_128: bool,
 ) -> Result<(u8, u8, u32, u32, u32, u32), KinetixError> {
-    let sb_size = if use_128 { 128u32 } else { 64u32 };
-    let mi_cols = (*width).div_ceil(8);
-    let mi_rows = (*height).div_ceil(8);
-    let sb_cols = mi_cols.div_ceil(sb_size / 8);
-    let sb_rows = mi_rows.div_ceil(sb_size / 8);
+    // §5.9.15 `MiCols`/`MiRows`: mode-info units are 4×4 pixels, but the
+    // count is rounded up to an even number (`2 * ceil(dim / 8)`), not a
+    // plain `ceil(dim / 4)` — an 8-pixel, not 4-pixel, unit divisor.
+    let mi_cols = 2 * (*width).div_ceil(8);
+    let mi_rows = 2 * (*height).div_ceil(8);
+    let sb_mi_shift = if use_128 { 5 } else { 4 }; // 32 or 16 MI units per superblock
+    let sb_cols = mi_cols.div_ceil(1 << sb_mi_shift);
+    let sb_rows = mi_rows.div_ceil(1 << sb_mi_shift);
+
+    const MAX_TILE_WIDTH: u32 = 4096;
+    const MAX_TILE_AREA: u32 = 4096 * 2304;
+    const MAX_TILE_COLS: u32 = 64;
+    const MAX_TILE_ROWS: u32 = 64;
+    let sb_size_log2 = if use_128 { 7 } else { 6 }; // log2(128) / log2(64) pixels
+    let max_tile_width_sb = MAX_TILE_WIDTH >> sb_size_log2;
+    let max_tile_area_sb = MAX_TILE_AREA >> (2 * sb_size_log2);
+    let min_log2_tile_cols = tile_log2_calc(max_tile_width_sb, sb_cols);
+    let max_log2_tile_cols = tile_log2_calc(1, sb_cols.min(MAX_TILE_COLS));
+    let max_log2_tile_rows = tile_log2_calc(1, sb_rows.min(MAX_TILE_ROWS));
+    let min_log2_tiles =
+        min_log2_tile_cols.max(tile_log2_calc(max_tile_area_sb, sb_rows * sb_cols));
 
     let uniform_tile_spacing = read_flag(br)?;
     let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing {
-        let cols = read_tile_log2(br)?;
-        let rows = read_tile_log2(br)?;
-        (cols, rows)
+        // §5.9.15: `TileColsLog2`/`TileRowsLog2` start at their spec-mandated
+        // minimum and only read an `increment_tile_*_log2` bit while still
+        // below the maximum — reading unconditionally until a `0` bit (the
+        // previous behaviour) consumes bits the encoder never wrote whenever
+        // the maximum is already reached (e.g. any frame with `sb_cols <= 1`),
+        // desyncing every field parsed after it.
+        let mut cols_log2 = min_log2_tile_cols;
+        while cols_log2 < max_log2_tile_cols {
+            if read_flag(br)? {
+                cols_log2 += 1;
+            } else {
+                break;
+            }
+        }
+        let min_log2_tile_rows = min_log2_tiles.saturating_sub(cols_log2);
+        let mut rows_log2 = min_log2_tile_rows;
+        while rows_log2 < max_log2_tile_rows {
+            if read_flag(br)? {
+                rows_log2 += 1;
+            } else {
+                break;
+            }
+        }
+        (cols_log2 as u8, rows_log2 as u8)
     } else {
         // Non-uniform tile widths: explicit increments read until sb_cols.
         // We compute log2 of the count for the common uniform-equivalent case.
@@ -1569,10 +1575,10 @@ mod tests {
                 separate_uv_delta_q: false,
             },
             order_hint_bits_minus_1: 0,
-            seq_choose_screen_content_tools: true,
-            seq_force_screen_content_tools: true,
-            seq_choose_integer_mv: true,
-            seq_force_integer_mv: true,
+            seq_choose_screen_content_tools: false,
+            seq_force_screen_content_tools: false,
+            seq_choose_integer_mv: false,
+            seq_force_integer_mv: false,
             frame_id_numbers_present_flag: false,
             delta_frame_id_length_minus_2: 0,
             additional_frame_id_length_minus_1: 0,
@@ -1632,13 +1638,6 @@ mod tests {
                 self.bit(((val >> i) & 1) as u8);
             }
         }
-        /// Encode a tile-size `log2` value: `v` one-bits followed by a zero-bit.
-        fn tile_log2(&mut self, v: u8) {
-            for _ in 0..v {
-                self.bit(1);
-            }
-            self.bit(0);
-        }
         /// Encode an `ns(n)` non-symmetric unsigned value (mirrors [`read_ns`]).
         fn ns(&mut self, v: u32, n: u32) {
             let w = 32 - (n - 1).leading_zeros() - 1;
@@ -1690,19 +1689,22 @@ mod tests {
         let h = 16u32;
         let mut bw = BitWriter::new();
 
-        // force_integer_mv(0)  [allow_screen_content_tools && keyframe]
+        // disable_cdf_update(0) — always present. `allow_screen_content_tools`
+        // and `force_integer_mv` are *not* read: `minimal_seq()` sets
+        // seq_choose_screen_content_tools/seq_choose_integer_mv to false, so
+        // both are taken from the (false) seq_force_* constants without
+        // consuming any bits.
         bw.bit(0);
         // A keyframe uses the sequence-header max for width/height and reads no
         // `ns` frame-size values, so no bits are emitted here.
-        // tile info: uniform spacing(1); tile_cols_log2=0, tile_rows_log2=0
+        // tile info: uniform spacing(1); for this 16x16 frame sb_cols==sb_rows==1
+        // so maxLog2TileCols/Rows are already 0 and no increment bits are read.
         bw.bit(1);
-        bw.tile_log2(0);
-        bw.tile_log2(0);
         // quantizer: base_q_idx(8) = 100
         bw.bits(100, 8);
-        // delta_q_y_dc(0); separate_uv_delta_q(0); delta_q_u_dc(0); delta_q_u_ac(0).
-        // (delta_q_v dc/ac are absent when separate_uv_delta_q == 0.)
-        bw.bit(0);
+        // delta_q_y_dc(0); delta_q_u_dc(0); delta_q_u_ac(0) — no bit for
+        // `separate_uv_delta_q` since that's a sequence-header constant
+        // (`minimal_seq()` sets it false), not a per-frame flag.
         bw.bit(0);
         bw.bit(0);
         bw.bit(0);
@@ -1712,9 +1714,9 @@ mod tests {
         bw.bit(0);
         // delta_q_present(0)
         bw.bit(0);
-        // loop filter (not lossless): 4 levels(6), sharpness(3), delta_enabled(0)
-        bw.bits(0, 6);
-        bw.bits(0, 6);
+        // loop filter (not lossless): 2 levels(6) — levels[2]/[3] are only
+        // read when level[0] or level[1] is nonzero — then sharpness(3),
+        // delta_enabled(0)
         bw.bits(0, 6);
         bw.bits(0, 6);
         bw.bits(0, 3);
@@ -1734,11 +1736,17 @@ mod tests {
         bw.bit(0);
         bw.bit(0);
         bw.bit(0);
-        // tx mode: reduced_tx_set(0), tx_mode_select(0)
+        // tx mode: tx_mode_select(0); reference_select/skip_mode/allow_warp
+        // are all unread for an intra frame; then reduced_tx_set(0)
+        // (always present).
         bw.bit(0);
         bw.bit(0);
-        // refresh_frame_flags(8) = 0xFF
-        bw.bits(0xFF, 8);
+        // `frame_obu()` byte-aligns between the uncompressed header and the
+        // tile group (`byte_align` requires the pad bits to be zero, unlike
+        // `finish()`'s all-ones trailing pad), so pad explicitly here.
+        while bw.nbits != 0 {
+            bw.bit(0);
+        }
 
         let bits = bw.finish();
         let seq = minimal_seq();

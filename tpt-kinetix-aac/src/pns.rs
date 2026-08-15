@@ -40,10 +40,8 @@ pub fn apply_pns(
             if band_type[idx] != ZERO_HCB && is_noise(band_type[idx]) {
                 let scale = dequant_scale(global_gain, scalefactor[idx]);
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
-                let mut state = (global_gain as u32)
-                    .wrapping_mul(265_443_5761)
-                    .wrapping_add((idx as u32).wrapping_mul(40_503))
-                    .wrapping_add(1);
+                let mut state =
+                    (idx as u32).wrapping_mul(40_503).wrapping_add(1);
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     for line in 0..width {

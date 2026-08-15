@@ -91,6 +91,20 @@ impl AacDecoder {
         }
     }
 
+    /// Report what this decoder can do today.
+    pub fn capabilities(&self) -> tpt_kinetix_core::capabilities::DecoderCapabilities {
+        tpt_kinetix_core::capabilities::DecoderCapabilities {
+            codec: "AAC-LC",
+            pixel_exact: false, // not yet sample-exact vs reference
+            supports_cabac: false,
+            supports_cavlc: false,
+            supports_intra_prediction: false,
+            supports_inter_prediction: false,
+            supports_deblocking: false,
+            notes: "native AAC-LC decoder (ADTS framing, Huffman, IMDCT, TNS, PNS, stereo); conformance validation pending",
+        }
+    }
+
     /// Decode one ADTS frame, returning one 1024-sample-per-channel PCM frame.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<AudioFrame>, AacError> {
         let header = AdtsHeader::parse(&packet.data)?;

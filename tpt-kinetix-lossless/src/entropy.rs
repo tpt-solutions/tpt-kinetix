@@ -1,15 +1,18 @@
 //! Bit-level I/O and the reversible entropy stage for the lossless codec.
 //!
-//! The encode side uses a local MSB-first [`BitWriter`]. The decode side reuses
-//! `tpt-kinetix-bitstream`'s `BitReader` (DECISION 6 of the design doc: share the
-//! extracted bitstream primitives — these originated in `tpt-kinetix-lean` and
-//! were factored into `tpt-kinetix-bitstream` per the realtime codec's
-//! DECISION 7). Residuals are coded with an adaptive Rice code whose parameter
-//! `k` is derived per-sample from the magnitudes of the already-coded left/up
-//! residuals, so both encoder and decoder compute it identically without
-//! signalling it.
+//! The encode side uses a local MSB-first [`BitWriter`] for the *headers* (the
+//! same framing `tpt-kinetix-bitstream`'s `BitReader` decodes). The *residual*
+//! stream uses the shared rANS primitives (DECISION 6 of the design doc: reuse
+//! `tpt-kinetix-bitstream`'s `RansEncoder`/`RansDecoder` rather than a
+//! hand-rolled coder), with a per-context static probability model
+//! ([`lossless_context_models`]) selected by the same activity measure FFV1
+//! uses for its `quant_table`. Because rANS encodes symbols in reverse decode
+//! order, the model must be *static* (not updated per symbol) so the forward
+//! decoder and reverse encoder agree — see `tpt-kinetix-bitstream`'s
+//! `SkewedModel`.
 
 use tpt_kinetix_bitstream::bitreader::BitReader;
+use tpt_kinetix_bitstream::{lossless_context_models, RansDecoder, RansEncoder, SkewedModel};
 
 /// MSB-first bit writer. Bytes are filled from the most-significant bit; the
 /// final partial byte is zero-padded on [`BitWriter::finish`].
@@ -109,49 +112,74 @@ pub fn read_bits_u16(r: &mut BitReader<'_>, n: u8) -> Option<u16> {
     r.read_bits(n).map(|v| v as u16)
 }
 
-/// Write a signed residual using a Rice code with parameter `k`.
-pub fn write_rice(w: &mut BitWriter, k: u32, residual: i32) {
-    let m = map_residual(residual);
-    let q = m >> k;
-    for _ in 0..q {
-        w.write_bit(0);
+/// Encode a plane's folded residuals as a single reverse-ordered rANS stream.
+///
+/// `residuals[i]` is the signed residual and `contexts[i]` its activity context
+/// (the same `rice_k` measure FFV1 uses). Each folded residual `m` is split into
+/// three bytes `(m & 0xFF, m>>8 & 0xFF, m>>16 & 0xFF)` and coded with the
+/// static model for that context. The encoder pushes in reverse so the decoder
+/// reconstructs symbols in the original order.
+pub fn encode_residual_stream(residuals: &[i32], contexts: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(residuals.len(), contexts.len());
+    let models = lossless_context_models();
+    let mut enc = RansEncoder::new();
+    for i in (0..residuals.len()).rev() {
+        let m = map_residual(residuals[i]) as u32;
+        let model = &models[contexts[i] as usize];
+        enc.encode(model, (m >> 16) as u8);
+        enc.encode(model, ((m >> 8) & 0xFF) as u8);
+        enc.encode(model, (m & 0xFF) as u8);
     }
-    w.write_bit(1);
-    w.write_bits(m & ((1u32 << k) - 1), k as u8);
+    enc.finish()
 }
 
-/// Read a signed residual coded with a Rice code of parameter `k`.
-pub fn read_rice(r: &mut BitReader<'_>, k: u32) -> Option<i32> {
-    let mut q: u32 = 0;
-    loop {
-        let bit = r.read_bit()?;
-        if bit == 1 {
-            break;
-        }
-        q += 1;
-    }
-    let rem = r.read_bits(k as u8)?;
-    let m = (q << k) | rem;
-    Some(unmap_residual(m))
+/// Decode one folded residual from `dec` using the static model for `ctx`.
+pub fn decode_one_residual(
+    dec: &mut RansDecoder<'_>,
+    ctx: u8,
+    models: &[SkewedModel],
+) -> Result<i32, tpt_kinetix_core::error::KinetixError> {
+    let model = &models[ctx as usize];
+    let b0 = dec.decode(model)?;
+    let b1 = dec.decode(model)?;
+    let b2 = dec.decode(model)?;
+    let m = u32::from(b0) | (u32::from(b1) << 8) | (u32::from(b2) << 16);
+    Ok(unmap_residual(m))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tpt_kinetix_core::error::KinetixError;
 
     #[test]
-    fn rice_roundtrip_various_k() {
-        let values = [0i32, 1, -1, 2, -2, 255, -255, 4096, -4096, 32767, -32768];
-        for &v in &values {
-            for k in 0..=8u32 {
-                let mut w = BitWriter::new();
-                write_rice(&mut w, k, v);
-                let bytes = w.finish();
-                let mut r = BitReader::new(&bytes);
-                let got = read_rice(&mut r, k).unwrap();
-                assert_eq!(got, v, "k={k}, v={v}");
-            }
+    fn residual_stream_round_trips() {
+        let residuals: Vec<i32> = vec![
+            0, 1, -1, 2, -2, 255, -255, 4096, -4096, 32767, -32768, 65535, -65535, 131070,
+        ];
+        let contexts: Vec<u8> = (0..residuals.len() as u8)
+            .map(|i| (i % 16) as u8)
+            .collect();
+        let bytes = encode_residual_stream(&residuals, &contexts);
+        let models = lossless_context_models();
+        let mut dec = RansDecoder::new(&bytes).expect("decoder init");
+        let mut out = Vec::with_capacity(residuals.len());
+        for &ctx in &contexts {
+            out.push(decode_one_residual(&mut dec, ctx, &models).expect("decode"));
         }
+        assert_eq!(out, residuals);
+    }
+
+    #[test]
+    fn residual_stream_rejects_truncated_input() {
+        let residuals = [1000i32, -2000, 42];
+        let contexts = [3u8, 7, 1];
+        let mut bytes = encode_residual_stream(&residuals, &contexts);
+        bytes.truncate(bytes.len() / 2); // drop half the stream
+        let models = lossless_context_models();
+        let mut dec = RansDecoder::new(&bytes).expect("decoder init");
+        let res = decode_one_residual(&mut dec, contexts[0], &models);
+        assert!(matches!(res, Err(KinetixError::Parse(_))));
     }
 
     #[test]

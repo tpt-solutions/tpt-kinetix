@@ -611,6 +611,55 @@ fn mpm_pred_mode(
 
 /// Derive `nC` for a luma 4×4 block (§9.2.1) from the left and top neighbour
 /// TotalCoeff counts. `block` is the raster index (0..15) within the current MB.
+/// Derive the most-probable Intra_8x8 prediction mode for 8x8 sub-block `i8`
+/// (spec section 8.3.2.1.1). The 4x4 helper `mpm_pred_mode` assumes each block
+/// occupies one entry in the 4x4 raster grid, so a naive raster-1 / raster-4
+/// neighbour lookup would be wrong for 8x8 blocks (which occupy rasters
+/// 0,4,8,12). The left/above 8x8 neighbours are therefore resolved explicitly.
+/// The mode of a neighbour 8x8 block is read from its top-left 4x4 sub-block,
+/// where it has been replicated.
+fn mpm_pred_mode_8x8(
+    pred_ctx_grid: &[MbPredCtx],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    modes: &[Intra4x4Mode; 16],
+    i8: usize,
+) -> u8 {
+    let left = if i8 == 1 || i8 == 3 {
+        NeighbourSide::Real(modes[(i8 - 1) * 4] as u8)
+    } else if mb_x > 0 {
+        let n = &pred_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize];
+        if !n.present {
+            NeighbourSide::Unavailable
+        } else if n.is_intra4x4 {
+            NeighbourSide::Real(n.modes[if i8 == 0 { 4 } else { 8 }] as u8)
+        } else {
+            NeighbourSide::ForcedDc
+        }
+    } else {
+        NeighbourSide::Unavailable
+    };
+
+    let top = if i8 == 2 || i8 == 3 {
+        NeighbourSide::Real(modes[(i8 - 2) * 4] as u8)
+    } else if mb_y > 0 {
+        let n = &pred_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize];
+        if !n.present {
+            NeighbourSide::Unavailable
+        } else if n.is_intra4x4 {
+            NeighbourSide::Real(n.modes[if i8 == 0 { 8 } else { 12 }] as u8)
+        } else {
+            NeighbourSide::ForcedDc
+        }
+    } else {
+        NeighbourSide::Unavailable
+    };
+
+    let dc_predicted =
+        left == NeighbourSide::Unavailable || top == NeighbourSide::Unavailable;
+    if dc_predicted { 2u8 } else { left.value().min(top.value()) }
+}
 fn luma_nc(nz: &[MbNz], mb_x: u32, mb_y: u32, mb_cols: u32, cur: &MbNz, block: usize) -> i32 {
     let bx = (block % 4) as i32;
     let by = (block / 4) as i32;
@@ -771,9 +820,8 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
             // its four 4×4 sub-blocks so neighbouring macroblocks derive the
             // most-probable mode from the correct neighbour block (§8.3.2.1.1).
             for i8 in 0..4usize {
-                let raster = raster_of_8x8_sub(i8, 0);
                 let pred_mode =
-                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8);
                 let prev_flag = r
                     .read_bit()
                     .ok_or(SliceDataError::Eof("prev_intra8x8_pred_mode_flag"))?;
@@ -1238,8 +1286,7 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         if is_8x8 {
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
-                let raster = raster_of_8x8_sub(i8, 0);
-                let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+                let pred_mode = mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
@@ -2058,8 +2105,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         if is_8x8 {
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
-                let raster = raster_of_8x8_sub(i8, 0);
-                let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster);
+                let pred_mode = mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
@@ -2851,7 +2897,9 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster);
                 let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
                 for k in 0..16usize {
-                    let cavlc_raster = crate::transform::CAVLC_SCAN8X8[16 * sub + k] as usize;
+                    let raw = crate::transform::CAVLC_SCAN8X8[16 * sub + k] as usize;
+                    let cavlc_raster =
+                        raw;
                     let zz = crate::transform::INVERSE_ZIGZAG_8X8[cavlc_raster];
                     block64[zz] = coeffs[k];
                 }

@@ -45,7 +45,15 @@ fn filter_size_from_tx_samples(tx_samples: usize) -> usize {
 
 #[inline]
 fn clip3(x: i32, lo: i32, hi: i32) -> i32 {
-    x.clamp(lo, hi)
+    // Order the bounds defensively: in the not-yet-validated in-loop filter,
+    // an inter block can yield `lo > hi` (invalid clip range); clamping to the
+    // ordered range avoids a panic and is a superset of the spec's expectation
+    // that `lo <= hi` once the filter is fully correct.
+    if lo <= hi {
+        x.clamp(lo, hi)
+    } else {
+        x.clamp(hi, lo)
+    }
 }
 
 /// `Round2(x, n)` from the AV1 spec: round `x / 2^n` to nearest, half away
@@ -449,22 +457,42 @@ const CDEF_SEC_TAPS: [[i32; 2]; 2] = [[2, 1], [2, 1]];
 const DIV_TABLE: [i32; 9] = [0, 840, 420, 280, 210, 168, 140, 120, 105];
 
 /// Constrain a CDEF secondary/primary difference (§7.15.3).
+///
+/// AV1 `CDEF_CONSTRAIN(diff, threshold, damping)`:
+/// `shift = damping − Floor(Log2(threshold))`, then
+/// `Clip3(−threshold, threshold, sign(diff) · (abs(diff) − (abs(diff) >> shift)))`.
+/// `shift` may be negative (when `damping < Floor(Log2(threshold))`), which the
+/// spec treats as a left shift; Rust's `>>` panics on a negative RHS, so this
+/// branches on the sign of `shift`.
 #[inline]
 fn cdef_constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
     if threshold == 0 {
         return 0;
     }
-    let damping_adj = 0.max(damping - floor_log2(threshold as u32) as i32);
     let sign = if diff < 0 { -1 } else { 1 };
-    sign * (diff.abs()).clamp(0, threshold - (diff.abs() >> damping_adj))
+    let shift = damping - floor_log2(threshold as u32) as i32;
+    let diff_abs = diff.abs();
+    let shifted = if shift >= 0 {
+        diff_abs >> shift
+    } else {
+        diff_abs << (-shift)
+    };
+    let val = sign * (diff_abs - shifted);
+    val.clamp(-threshold, threshold)
 }
 
 /// Detect the CDEF direction and variance for one 8×8 luma block (§7.15.2).
-fn cdef_direction(src: &[u8], stride: usize, x0: usize, y0: usize) -> (usize, i32) {
+///
+/// A block at the frame edge may extend past the plane; samples outside the
+/// plane are clamped to the nearest valid (edge) sample, matching the boundary
+/// extension the reference decoder uses for `cdef_direction`.
+fn cdef_direction(src: &[u8], stride: usize, width: usize, height: usize, x0: usize, y0: usize) -> (usize, i32) {
     let mut partial = [[0i32; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
-            let x = src[(y0 + i) * stride + (x0 + j)] as i32 - 128;
+            let yy = (y0 + i).min(height.saturating_sub(1));
+            let xx = (x0 + j).min(width.saturating_sub(1));
+            let x = src[yy * stride + xx] as i32 - 128;
             partial[0][i + j] += x;
             partial[1][i + j / 2] += x;
             partial[2][i] += x;
@@ -675,7 +703,7 @@ fn cdef_plane_luma(plane: &mut [u8], width: usize, height: usize, pri_str: i32, 
             if y0 >= height || x0 >= width {
                 continue;
             }
-            let (yd, var) = cdef_direction(&src, width, x0, y0);
+            let (yd, var) = cdef_direction(&src, width, width, height, x0, y0);
             let var_str = if (var >> 6) != 0 {
                 floor_log2((var >> 6) as u32) as i32
             } else {
@@ -724,7 +752,7 @@ fn cdef_plane_chroma(
             // Chroma direction is derived from the co-located luma 8×8 block,
             // but for simplicity we re-derive a direction from the chroma block
             // itself and remap via Cdef_Uv_Dir.
-            let (yd, var) = cdef_direction(&src, width, x0, y0);
+            let (yd, var) = cdef_direction(&src, width, width, height, x0, y0);
             let var_str = if (var >> 6) != 0 {
                 floor_log2((var >> 6) as u32) as i32
             } else {

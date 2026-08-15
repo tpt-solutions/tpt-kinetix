@@ -1,13 +1,56 @@
 # `tpt-kinetix-volumetric` — Design Draft
 
-> **Status:** Design decisions **all resolved (2026-08-13)**. Nothing is
-> implemented yet. Each `DECISION:` block below lists the alternatives, a
-> recommendation, and the resolved outcome. The crate may now enter the
-> pre-scaffold checklist in `todo.md` (Phase 15).
+> **Status:** Design decisions **all resolved**. The original eight `DECISION:`
+> blocks were resolved 2026-08-13; **DECISION 9** (compression-efficiency
+> measurement / Draco + TMC13 baselines) and **DECISION 10** (explicit
+> shared-primitive reconciliation — the `todo.md` checklist item 6 "shares no
+> primitives" statement) were added 2026-08-15 to close the two checklist items
+> that had no prior `DECISION`. The crate may now enter the pre-scaffold
+> checklist in `todo.md` (Phase 15).
 >
 > This doc is the home for the `tpt-kinetix-volumetric` design-phase checklist
 > in `todo.md` (the volumetric design phase). Each checklist item maps to a
 > `DECISION:` block here.
+
+### todo.md design-phase checklist — item → decision map
+
+The six-item checklist ("`tpt-kinetix-volumetric` — design-phase checklist,
+start here once prioritized") maps onto the `DECISION:` blocks below. Items 4
+(compression-efficiency measurement) and 6 (explicit shared-primitive
+statement) had no dedicated `DECISION` before this revision and are resolved
+here as **DECISION 9** and **DECISION 10** respectively.
+
+| # | Checklist item | Resolved by |
+|---|---|---|
+| 1 | Target representation (point cloud / voxel grid / mesh+texture) | DECISION 1 |
+| 2 | Reuse `tpt-kinetix-core` frame/packet types or new core types entirely | DECISION 7 + "Core-type reuse (item 2)" note below |
+| 3 | Spatial-partitioning + entropy coding (e.g. octree) | DECISION 2 (octree geometry) + DECISION 3 (attribute) + DECISION 7 (rANS) |
+| 4 | How compression efficiency is measured (Draco / MPEG PCC baseline) | DECISION 9 (new) |
+| 5 | Memory / perf budget for v1 | DECISION 8 |
+| 6 | Confirm it shares no primitives with other codecs (stated, not assumed) | DECISION 10 (new) |
+
+#### Core-type reuse (checklist item 2)
+
+This is explicit rather than assumed. The v1 point cloud is a **new** decoded
+output type added to `tpt-kinetix-core` — `PointCloud` (`frame.rs`), parallel
+to `VideoFrame`/`AudioFrame`. It does **not** reuse `VideoFrame`, `AudioFrame`,
+or `PixelFormat`: those are 2D-lattice abstractions (fixed-width plane array,
+pixel-format-driven layout) and have no meaning for an unstructured ℝ³ point
+set. What *is* reused from core is only the cross-cutting contract plumbing
+shared by every codec:
+
+- `KinetixError` / `DecoderCapabilities` — the same error + capability
+  introspection the 2D decoders expose, so the CLI / pipeline can detect an
+  incomplete path (`NotPixelExact` analog: volumetric reports
+  `pixel_exact = false` until the Kinetix-vs-TMC13 bit-exact cross-check
+  passes).
+- `Packet` / `Timestamp` — *only* as a thin transport envelope if a cloud is
+  carried inside a container/demux path; they never describe the decoded
+  representation itself.
+
+So the representation is new core types entirely; the shared surface is the
+codec-agnostic error/capability/transport infrastructure, not any frame or
+sample data type.
 
 ## Goal
 
@@ -302,6 +345,117 @@ the **MPEG-I G-PCC TMC13 reference software**, run as an ffmpeg-gated external
 oracle in `tpt-kinetix-test-utils` (bit-exact geometry + attribute diff),
 exactly as the 2D codecs gate on `ffmpeg`/`dav1d`. All design decisions are
 now resolved; the crate may enter scaffolding (Phase 15 pre-scaffold list).
+
+---
+
+## DECISION 9: Compression-efficiency measurement & baselines (checklist item 4)
+
+A codec with no objective function cannot judge whether a design change is an
+improvement. For a point cloud this is *not* PSNR on a 2D raster — the metric
+space is different, which is the whole point of the "fundamentally different
+data shape" flag. v1 validation measures two axes:
+
+**Geometry fidelity**
+
+| Metric | Definition | Use |
+|---|---|---|
+| **D1 PSNR** | Peak-Signal-to-Noise on point-to-point (nearest-neighbour) Euclidean distance | Primary geometry loss metric, matches how G-PCC reports geometry |
+| **D2 PSNR** | PSNR on point-to-plane (Hausdorff / plane-distance) error | Better for surface-capture clouds; the second G-PCC geometry metric |
+| **Voxel recall / precision** | Overlap of reconstructed vs. source occupancy on a fixed voxel grid | Invariant check that the cloud occupies the right volume |
+
+**Attribute fidelity**
+
+| Metric | Definition | Use |
+|---|---|---|
+| **Y/U/V or RGB PSNR** | Per-attribute channel PSNR on the decoded colour/reflectance | Color fidelity at the chosen bit depth |
+| **Bitrate** | Total coded bytes ÷ `num_points` → **bits-per-point** | The rate denominator for any rate-distortion curve |
+
+**Baselines the v1 design is validated against** (the "design validation"
+requirement from the checklist):
+
+1. **MPEG-I G-PCC reference (TMC13)** — the bit-exact oracle (DECISION 8). The
+   primary baseline: at matched D1/D2 PSNR, Kinetix-coded bitrate should be
+   within a small, documented delta of TMC13 (the "faithful core" of DECISION
+   6 means we expect *parity*, not superiority — the win is our framing /
+   parallelism / Rust-safety, not better compression).
+2. **Google Draco** — the dominant open point-cloud/mesh codec, used as the
+   *external* third-party baseline (not oracle). Draco is a different design
+   center (mesh- and octree-geometry tuned for delivery/streaming), so the
+   comparison documents where volumetric's G-PCC-derived tools win (rate at
+   matched geometry for captured AR-VR clouds) vs. where Draco wins (small
+   static meshes). This is the "baseline against Draco" the checklist asks for.
+
+The harness lives in `tpt-kinetix-test-utils` as an ffmpeg-gated (here:
+`tmc3`/`draco`/gated) external-oracle integration test, emitting a
+rate–distortion table (bits-per-point vs. D1/D2 PSNR, vs. TMC13 and Draco)
+saved as a test artifact — same gating philosophy as the 2D codecs' reference
+harnesses, and the same role `cargo nextest` plays for the bit-exact tests.
+
+**Resolved (this revision):** efficiency is measured by D1/D2 geometry PSNR +
+per-attribute PSNR at **bits-per-point**, validated against **TMC13** (oracle
++ primary baseline) and **Draco** (external third-party baseline), with the
+rate–distortion curve persisted as a test artifact. TMC13 parity is the target;
+Draco is the benchmark that proves the design is competitive against a widely
+deployed alternative.
+
+---
+
+## DECISION 10: Shared-primitive reconciliation — "shares no primitives" (checklist item 6)
+
+`docs/codec-backlog.md` flags volumetric as "fundamentally different … 2D
+video codecs don't apply at all" and the checklist asks to **confirm
+explicitly** that it shares no primitives with any other kinetix codec —
+deliberately *stated*, not assumed.
+
+This requires splitting "primitive" into two distinct categories, because the
+blanket "shares no primitives" from the backlog is **too broad as written**
+and would be wrong if taken literally:
+
+**A) Codec-domain primitives — NONE shared. (This is the real, correct claim.)**
+
+Every algorithmic primitive that makes a codec *that codec* is unique to
+volumetric and does not exist in any other crate:
+
+- No 2D block/macroblock partition, no 8×8/16×16/64×64 transform bank, no
+  intra prediction modes, no inter/MV prediction, no deblocking/CDEF/loop-
+  restoration — none of the H.264/AV1/Lean/Vision machinery applies.
+- No CABAC/CAVLC/2D-rANS-symbol-framing for a 2D lattice; the geometry
+  coder is an **octree occupancy descent** (DECISION 2), an entirely different
+  entropy structure.
+- The attribute coder (RAHT / region-adaptive lift over a 3D neighbour graph,
+  DECISION 3) shares nothing with 2D transform/quantization.
+- No `VideoFrame`/`AudioFrame`/`PixelFormat` reuse (DECISION 7 + item 2 note).
+
+So the *codec* shares **zero** primitives with any sibling crate. The
+backlog's "fundamentally different data shape (3D, not 2D frames)" is exactly
+right and is now a stated decision, not an assumption.
+
+**B) Cross-cutting low-level infrastructure — DELIBERATELY shared.** This is
+the correction to the backlog's blanket wording. Volumetric reuses the same
+*engineering* primitives that `lean`, `vision`, `realtime`, `face`, `screen`,
+and `lossless` already share:
+
+- **`tpt-kinetix-bitstream`** — `BitReader` + rANS (`RansDecoder` /
+  `RansStreamSet`) + the `SymbolModel` context-model trait. The octree
+  occupancy bitmap (DECISION 2) and lift/RAHT residuals (DECISION 3) are
+  entropy-coded *through* this crate, exactly as the other original codecs do.
+  No bitreader/rANS is reimplemented here.
+- **`tpt-kinetix-core`** — the `PointCloud` output type (DECISION 7), plus
+  `KinetixError` / `DecoderCapabilities` / `Packet` / `Timestamp` contract
+  plumbing (item 2 note).
+- **Optional, feature-gated** V-PCC projection path could feed geometry
+  patches through `tpt-kinetix-h264` / `tpt-kinetix-av1` as the 2D layer
+  (DECISION 1/7) — an explicit *optional* dependency, never on the v1 core
+  path.
+
+**Resolved (this revision):** the stated decision is — *volumetric shares no
+codec-domain primitives with any other kinetix codec (its geometry, attribute,
+and entropy structure are unique to 3D point clouds), but it deliberately
+reuses the shared `tpt-kinetix-bitstream` (rANS) + `tpt-kinetix-core`
+(output-type / error / capability) infrastructure, consistent with every other
+original codec in the workspace.* The backlog's "shares no primitives" is
+therefore correct specifically for *codec* primitives and is now recorded as an
+explicit, scoped decision rather than an unexamined assumption.
 
 ---
 

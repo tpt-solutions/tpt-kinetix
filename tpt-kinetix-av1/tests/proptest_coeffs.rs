@@ -8,6 +8,7 @@
 
 use proptest::prelude::*;
 
+use tpt_kinetix_av1::inter::RefFrames;
 use tpt_kinetix_av1::reconstruct::decode_tile_group;
 
 fn cases() -> u32 {
@@ -28,8 +29,33 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
     let mut v = vec![128u8; uv_w * uv_h];
     let mut meta = tpt_kinetix_av1::loop_filter::FrameMeta::new(width, height);
     decode_tile_group(
-        data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-        true, false, false, false, false, &mut meta,
+        data,
+        width,
+        height,
+        8,
+        qindex,
+        false,
+        0,
+        0,
+        1,
+        1,
+        &mut y,
+        &mut u,
+        &mut v,
+        width,
+        uv_w,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true, // frame_is_intra — these robustness tests exercise the intra path
+        false, // allow_high_precision_mv
+        false, // reference_select
+        0,     // interpolation_filter (EIGHTTAP_REGULAR)
+        [0u8; 9], // ref_to_slot
+        RefFrames::empty(),
+        &mut meta,
     )
     .is_ok()
 }

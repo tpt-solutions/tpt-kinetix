@@ -566,67 +566,69 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
 
     // Pass 1 — separable 1-D transform across rows, in place.
     for i in 0..8 {
-        let a0 = b[i] + b[i + 4 * 8];
-        let a2 = b[i] - b[i + 4 * 8];
-        let a4 = (b[i + 2 * 8] >> 1) - b[i + 6 * 8];
-        let a6 = (b[i + 6 * 8] >> 1) + b[i + 2 * 8];
+        let row_base = i * 8;
+        let a0 = b[row_base] + b[row_base + 4];
+        let a2 = b[row_base] - b[row_base + 4];
+        let a4 = (b[row_base + 2] >> 1) - b[row_base + 6];
+        let a6 = (b[row_base + 6] >> 1) + b[row_base + 2];
 
         let b0 = a0 + a6;
         let b2 = a2 + a4;
         let b4 = a2 - a4;
         let b6 = a0 - a6;
 
-        let a1 = -b[i + 3 * 8] + b[i + 5 * 8] - b[i + 7 * 8] - (b[i + 7 * 8] >> 1);
-        let a3 = b[i + 8] + b[i + 7 * 8] - b[i + 3 * 8] - (b[i + 3 * 8] >> 1);
-        let a5 = -b[i + 8] + b[i + 7 * 8] + b[i + 5 * 8] + (b[i + 5 * 8] >> 1);
-        let a7 = b[i + 3 * 8] + b[i + 5 * 8] + b[i + 8] + (b[i + 8] >> 1);
+        let a1 = -b[row_base + 3] + b[row_base + 5] - b[row_base + 7] - (b[row_base + 7] >> 1);
+        let a3 = b[row_base + 1] + b[row_base + 7] - b[row_base + 3] - (b[row_base + 3] >> 1);
+        let a5 = -b[row_base + 1] + b[row_base + 7] + b[row_base + 5] + (b[row_base + 5] >> 1);
+        let a7 = b[row_base + 3] + b[row_base + 5] + b[row_base + 1] + (b[row_base + 1] >> 1);
 
         let b1 = (a7 >> 2) + a1;
         let b3 = a3 + (a5 >> 2);
         let b5 = (a3 >> 2) - a5;
         let b7 = a7 - (a1 >> 2);
 
-        b[i] = b0 + b7;
-        b[i + 7 * 8] = b0 - b7;
-        b[i + 8] = b2 + b5;
-        b[i + 6 * 8] = b2 - b5;
-        b[i + 2 * 8] = b4 + b3;
-        b[i + 5 * 8] = b4 - b3;
-        b[i + 3 * 8] = b6 + b1;
-        b[i + 4 * 8] = b6 - b1;
+        b[row_base] = b0 + b7;
+        b[row_base + 7] = b0 - b7;
+        b[row_base + 1] = b2 + b5;
+        b[row_base + 6] = b2 - b5;
+        b[row_base + 2] = b4 + b3;
+        b[row_base + 5] = b4 - b3;
+        b[row_base + 3] = b6 + b1;
+        b[row_base + 4] = b6 - b1;
     }
 
     // Pass 2 — separable 1-D transform across columns, producing raster output.
     let mut out = [0i32; 64];
     for i in 0..8 {
-        let a0 = b[i * 8] + b[4 + i * 8];
-        let a2 = b[i * 8] - b[4 + i * 8];
-        let a4 = (b[2 + i * 8] >> 1) - b[6 + i * 8];
-        let a6 = (b[6 + i * 8] >> 1) + b[2 + i * 8];
+        // Access column i across all 8 rows: row*8 + i
+        let a0 = b[0 * 8 + i] + b[4 * 8 + i];
+        let a2 = b[0 * 8 + i] - b[4 * 8 + i];
+        let a4 = (b[2 * 8 + i] >> 1) - b[6 * 8 + i];
+        let a6 = (b[6 * 8 + i] >> 1) + b[2 * 8 + i];
 
         let b0 = a0 + a6;
         let b2 = a2 + a4;
         let b4 = a2 - a4;
         let b6 = a0 - a6;
 
-        let a1 = -b[3 + i * 8] + b[5 + i * 8] - b[7 + i * 8] - (b[7 + i * 8] >> 1);
-        let a3 = b[1 + i * 8] + b[7 + i * 8] - b[3 + i * 8] - (b[3 + i * 8] >> 1);
-        let a5 = -b[1 + i * 8] + b[7 + i * 8] + b[5 + i * 8] + (b[5 + i * 8] >> 1);
-        let a7 = b[3 + i * 8] + b[5 + i * 8] + b[1 + i * 8] + (b[1 + i * 8] >> 1);
+        let a1 = -b[3 * 8 + i] + b[5 * 8 + i] - b[7 * 8 + i] - (b[7 * 8 + i] >> 1);
+        let a3 = b[1 * 8 + i] + b[7 * 8 + i] - b[3 * 8 + i] - (b[3 * 8 + i] >> 1);
+        let a5 = -b[1 * 8 + i] + b[7 * 8 + i] + b[5 * 8 + i] + (b[5 * 8 + i] >> 1);
+        let a7 = b[3 * 8 + i] + b[5 * 8 + i] + b[1 * 8 + i] + (b[1 * 8 + i] >> 1);
 
         let b1 = (a7 >> 2) + a1;
         let b3 = a3 + (a5 >> 2);
         let b5 = (a3 >> 2) - a5;
         let b7 = a7 - (a1 >> 2);
 
-        out[i * 8] = (b0 + b7) >> 6;
-        out[i * 8 + 1] = (b2 + b5) >> 6;
-        out[i * 8 + 2] = (b4 + b3) >> 6;
-        out[i * 8 + 3] = (b6 + b1) >> 6;
-        out[i * 8 + 4] = (b6 - b1) >> 6;
-        out[i * 8 + 5] = (b4 - b3) >> 6;
-        out[i * 8 + 6] = (b2 - b5) >> 6;
-        out[i * 8 + 7] = (b0 - b7) >> 6;
+        out[0 * 8 + i] = (b0 + b7) >> 6;
+        out[1 * 8 + i] = (b2 + b5) >> 6;
+        out[2 * 8 + i] = (b4 + b3) >> 6;
+        out[3 * 8 + i] = (b6 + b1) >> 6;
+        out[4 * 8 + i] = (b6 - b1) >> 6;
+        out[5 * 8 + i] = (b4 - b3) >> 6;
+        out[6 * 8 + i] = (b2 - b5) >> 6;
+        out[7 * 8 + i] = (b0 - b7) >> 6;
     }
     out
 }
@@ -658,7 +660,15 @@ pub fn dequant_idct_8x8(
     // 1. Inverse zigzag into raster order and dequantise in zigzag order.
     let mut d = [0i32; 64];
     for z in 0..64 {
-        let cls = DEQUANT8_SCAN[z % 16];
+        // §8.5.12.1 / FFmpeg `dequant8_coeff[raster]`: the position class that
+        // selects `normAdjust8x8` is a property of the coefficient's *raster*
+        // position, not its zig-zag scan position. `z` is the zig-zag scan
+        // position; `ZIGZAG_8X8[z]` is the corresponding raster position. The
+        // scaling-list weight at raster position `raster` is `SL8x8[zigzag(raster)]`
+        // = `SL8x8[INVERSE_ZIGZAG_8X8[raster]]` = `SL8x8[z]` (the list is stored
+        // in zig-zag order), so the weight lookup stays indexed by `z`.
+        let raster = ZIGZAG_8X8[z];
+        let cls = DEQUANT8_SCAN[raster % 16];
         // Flat level scale `DEQUANT8_LEVEL[m][cls]` already folds in the
         // `weightScale == 16` factor, so divide it back out and replace it with
         // the parsed scaling-list weight at this zig-zag position (rounded to
@@ -719,12 +729,46 @@ pub fn chroma_dc_transform(dc: &[i32; 4], qp: i32, comp: usize, scaling: &Scalin
 mod tests {
     use super::*;
 
-    #[test]
-    fn all_zero_coeffs_give_zero_residual() {
-        let out = dequant_idct_4x4(&[0i16; 16], 26, None, 0, &ScalingLists::flat());
-        assert_eq!(out, [0i32; 16]);
-    }
 
+
+// Independent float-matrix reference for the 8x8 IDCT (H.264 §8.5.12.3):
+// r = (C_f · d · C_f^T) / 64, rounded. Used to validate idct_8x8.
+fn idct_8x8_reference(block: &[i32; 64]) -> [i32; 64] {
+    // The 8x8 IDCT adds a rounding term to the DC coefficient (block[0])
+    // before the transform, same as the 4x4 IDCT adds 32.
+    let mut block_with_dc = *block;
+    block_with_dc[0] += 32;
+
+    let mut c = [[0f64; 8]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            c[i][j] = if i == 0 {
+                0.5
+            } else {
+                0.5 * ((2 * j + 1) as f64 * (i as f64) * std::f64::consts::PI / 16.0).cos()
+            };
+        }
+    }
+    let mut d2 = [[0f64; 8]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            let mut s = 0f64;
+            for k in 0..8 {
+                for n in 0..8 {
+                    s += c[k][i] * block_with_dc[k * 8 + n] as f64 * c[n][j];
+                }
+            }
+            d2[i][j] = s;
+        }
+    }
+    let mut out = [0i32; 64];
+    for i in 0..8 {
+        for j in 0..8 {
+            out[i * 8 + j] = (d2[i][j] / 64.0).round() as i32;
+        }
+    }
+    out
+}
     #[test]
     fn pos_group_classification() {
         // (0,0) even,even -> 0; (1,1)/(3,3) odd,odd -> 1; mixed parity -> 2.

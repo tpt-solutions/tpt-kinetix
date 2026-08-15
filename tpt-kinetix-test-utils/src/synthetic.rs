@@ -165,6 +165,59 @@ pub fn minimal_av1_ivf() -> Option<Vec<u8>> {
     }
 }
 
+/// Generate a multi-frame AV1 bitstream in **IVF** container form using
+/// `ffmpeg`'s AV1 encoder, so inter-prediction (AV1 Phase E) can be validated
+/// against a `dav1d` reference decode. The clip is a moving `testsrc` (so
+/// non-key frames actually carry motion / inter blocks), `gop_size` apart from
+/// one another, with `frames` total frames at the given dimensions.
+///
+/// Returns `None` if `ffmpeg` is unavailable or the encode fails. The produced
+/// IVF is directly splittable by [`reference::split_ivf_frames`] into per-frame
+/// OBU payloads for feeding the Kinetix [`tpt_kinetix_av1::Av1Decoder`]
+/// frame-by-frame.
+pub fn minimal_av1_inter_ivf(frames: u32, width: u32, height: u32) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let src = format!("testsrc=size={width}x{height}:rate=15:duration={frames}");
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &src,
+            "-frames:v",
+            &frames.to_string(),
+            "-g",
+            "10",
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "ivf",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Generate a tiny AV1 bitstream in **OBU** form (section 5 low-overhead
 /// bitstream) using `ffmpeg`'s AV1 encoder, so both the Kinetix
 /// [`tpt_kinetix_av1::Av1Decoder`] (which consumes OBU bytes directly) and the
@@ -221,6 +274,147 @@ pub struct Av1CorpusEntry {
     pub width: u32,
     pub height: u32,
     pub obu: Vec<u8>,
+}
+
+/// One entry in [`av1_inter_corpus`]: a label, declared frame geometry, and the
+/// raw OBU bytes of a short synthesized AV1 **inter** clip (keyframe followed by
+/// several motion-predicted frames, so the decoder must exercise MV prediction
+/// and motion compensation, AV1 Phase E).
+pub struct Av1InterCorpusEntry {
+    pub label: &'static str,
+    pub width: u32,
+    pub height: u32,
+    /// The full low-overhead-bitstream OBU of the whole clip (sequence header +
+    /// every frame). The conformance harness splits this into per-frame packet
+    /// bytes so the decoder builds up its reference-frame buffer frame-by-frame.
+    pub obu: Vec<u8>,
+    /// Number of frames in the clip (keyframe + inter).
+    pub frames: usize,
+}
+
+/// Generate a short multi-frame AV1 OBU stream (keyframe + inter frames) with
+/// `ffmpeg`'s AV1 encoder, so MV prediction / motion compensation (AV1 Phase E)
+/// can be validated against a reference decoder. Returns `None` if `ffmpeg` is
+/// unavailable or the encode fails.
+///
+/// The clip uses a moving `lavfi` source (`testsrc`) so successive frames
+/// actually differ and the inter path is exercised. `frames` controls the clip
+/// length.
+pub fn av1_multiframe_obu(width: u32, height: u32, frames: u32) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let src = format!("testsrc=size={width}x{height}:rate=15:duration={frames}");
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &src,
+            "-frames:v",
+            &frames.to_string(),
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "obu",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Generate a small corpus of short AV1 inter clips (keyframe + motion-predicted
+/// frames) covering a few resolutions, for validating inter-prediction decode
+/// (AV1 Phase E) against a reference decoder. Entries whose encode fails (e.g.
+/// `ffmpeg` missing) are silently omitted; callers should treat an empty corpus
+/// as "skip this test".
+pub fn av1_inter_corpus() -> Vec<Av1InterCorpusEntry> {
+    const SOURCES: &[(&str, u32, u32, u32)] = &[
+        ("testsrc_128x96", 128, 96, 8),
+        ("testsrc_96x64", 96, 64, 6),
+        ("testsrc_64x64", 64, 64, 6),
+    ];
+
+    SOURCES
+        .iter()
+        .filter_map(|&(label, width, height, frames)| {
+            let obu = av1_multiframe_obu(width, height, frames)?;
+            let frames = {
+                // Count Frame OBUs in the produced stream for the harness.
+                let mut count = 0usize;
+                let mut pos = 0usize;
+                while pos < obu.len() {
+                    if obu[pos] & 0x80 != 0 {
+                        break;
+                    }
+                    let obu_type = (obu[pos] >> 3) & 0x0F;
+                    let ext = (obu[pos] >> 2) & 1 != 0;
+                    let has_size = (obu[pos] >> 1) & 1 != 0;
+                    let mut off = pos + 1;
+                    if ext {
+                        off += 1;
+                    }
+                    let mut payload_len = 0usize;
+                    let mut shift = 0u32;
+                    let mut i = 0;
+                    if has_size {
+                        loop {
+                            if off + i >= obu.len() {
+                                break;
+                            }
+                            let b = obu[off + i];
+                            payload_len |= ((b & 0x7F) as usize) << shift;
+                            shift += 7;
+                            if b & 0x80 == 0 {
+                                break;
+                            }
+                            i += 1;
+                        }
+                        off += i + 1;
+                    } else {
+                        payload_len = obu.len() - off;
+                    }
+                    let end = off + payload_len;
+                    if obu_type == 6 {
+                        count += 1;
+                    }
+                    if end <= pos {
+                        break;
+                    }
+                    pos = end;
+                }
+                count
+            };
+            if frames < 2 {
+                return None;
+            }
+            Some(Av1InterCorpusEntry {
+                label,
+                width,
+                height,
+                obu,
+                frames,
+            })
+        })
+        .collect()
 }
 
 /// Generate a small corpus of single-keyframe AV1 OBU streams covering a

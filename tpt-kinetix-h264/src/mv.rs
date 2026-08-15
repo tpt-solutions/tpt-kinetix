@@ -1343,7 +1343,7 @@ mod tests {
         // dist_scale_factor = (2*16384 + 32) >> 6 = 512, mvY' = (40*512 + 256) >> 9 = 40.
         // A same-parity field-to-field prediction with tb == td therefore maps a
         // field-line MV straight across (the field already lives at 1x spacing).
-        assert_eq!(scale_field_mv_y(40, 1, 1), (40 * ((16384 + 0) / 1) + 256) >> 9);
+        assert_eq!(scale_field_mv_y(40, 2, 1), 40);
         // tb == td == 1 -> factor 256 -> mvY' = mvY * 256 >> 9 == mvY / 2 rounded.
         assert_eq!(scale_field_mv_y(40, 1, 1), (40 * 256 + 256) >> 9);
     }

@@ -21,11 +21,13 @@ use crate::{
     cdf_tables_gen::*,
     coeff::{read_coeffs, CoeffContexts, TileCdfs, TxBlockCtx},
     coeff_tables as av1,
+    decoder::RefFrameStore,
     entropy::SymbolDecoder,
     frame::FrameHeader,
     inter::{
         build_mv_candidates, decode_ref_and_mv, motion_compensate, read_single_ref_name, InterCdfs,
-        Mv, NONE_FRAME, RefSlot, RefFrames,
+        Mv, NONE_FRAME, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME, INTERP_BILINEAR,
+        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, RefSlot, RefFrames,
     },
     loop_filter::{apply_post_filters, FrameMeta},
     obu::SequenceHeaderObu,
@@ -226,10 +228,16 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
 /// `+2 >> 2` scaling); the identity transform (`IDTX`) passes the
 /// already-dequantized coefficients through unchanged.
 fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32]) {
-    let n = 1usize << tx_size;
+    // `tx_size` is the transform-size *index* (0→4×4, 1→8×8, 2→16×16, ...);
+    // the actual matrix/block edge length is `4 << tx_size`. Using `tx_size`
+    // directly as the edge length (the previous `1usize << tx_size`) built a
+    // 1×1/2×2/4×4 basis matrix instead of 4×4/8×8/16×16, so every non-WHT,
+    // non-identity transform reconstructed the wrong number of samples from
+    // the wrong basis.
+    let n = 4usize << tx_size;
     // The lossless WHT always operates on a fixed 4×4 block regardless of
     // `tx_size` (AV1 §7.13.3), so its output is 16 coefficients even when
-    // `tx_size == TX_4X4` (`n == 1`).
+    // `tx_size == TX_4X4` (`n == 4`).
     let num_coeffs = if tx_type == TX_TYPE_WHT { 16 } else { n * n };
     if n > 16 {
         // Larger transforms are not yet produced by the reconstruction paths
@@ -260,7 +268,10 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
         }
     };
     // Fold the unnormalized 2-D `×2` into a `>> 1` (IDTX/WHT carry their own
-    // scaling and are returned unchanged).
+    // scaling and are returned unchanged). NOTE: the AV1 inverse transform scale
+    // is handled end-to-end by `decode_tx_block` / the dequant path. The
+    // two-pass rounding below matches the `round_shift1` / `round_shift_n`
+    // helpers.
     if tx_type == TX_TYPE_IDTX || tx_type == TX_TYPE_WHT {
         dst[..num_coeffs].copy_from_slice(&res);
     } else {
@@ -1371,7 +1382,7 @@ impl<'a> TileDecodeState<'a> {
         // Per-block interpolation filter (read only when switchable).
         let filter = if frame_filter == INTERP_SWITCHABLE {
             self.dec
-                .read_symbol(&mut self.interp_filter[0]) as u8
+                .read_symbol(&mut self.mode_cdfs.interp_filter[0]) as u8
         } else {
             frame_filter
         };
@@ -1395,10 +1406,19 @@ impl<'a> TileDecodeState<'a> {
         self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
 
         // Residual: read coefficients per transform block and add to the
-        // prediction already written into the planes.
-        self.add_inter_residual(mi_row, mi_col, bsize, skip)?;
+        // prediction already written into the planes. The luma tx size is read
+        // once here (it also drives the neighbour-context update below).
+        let max_tx = max_tx_size_for_bsize(bsize);
+        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
+            self.read_tx_size(bsize, max_tx, mi_row, mi_col)
+        } else {
+            max_tx
+        };
+        self.add_inter_residual(mi_row, mi_col, bsize, skip, luma_tx)?;
 
         // Update inter neighbour state.
+        let skip_byte = skip as u8;
+        let luma_tx_byte = luma_tx as u8;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
@@ -1410,6 +1430,17 @@ impl<'a> TileDecodeState<'a> {
             if let Some(slot) = self.mv_left.get_mut(r) {
                 slot[0] = mvs[0];
                 slot[1] = mvs[1];
+            }
+            // Inter-coded blocks leave no intra mode / tx / skip context for
+            // neighbours; AV1 treats their intra-mode neighbour as DC_PRED (0).
+            if let Some(s) = self.ymode_left.get_mut(r) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.skip_left.get_mut(r) {
+                *s = skip_byte;
+            }
+            if let Some(s) = self.tx_left.get_mut(r) {
+                *s = luma_tx_byte;
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
@@ -1424,6 +1455,15 @@ impl<'a> TileDecodeState<'a> {
                 slot[0] = mvs[0];
                 slot[1] = mvs[1];
             }
+            if let Some(s) = self.ymode_above.get_mut(c) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.skip_above.get_mut(c) {
+                *s = skip_byte;
+            }
+            if let Some(s) = self.tx_above.get_mut(c) {
+                *s = luma_tx_byte;
+            }
         }
         Ok(())
     }
@@ -1433,7 +1473,7 @@ impl<'a> TileDecodeState<'a> {
     /// Writes directly into the tile-local plane (the prediction values).
     #[allow(clippy::too_many_arguments)]
     fn inter_predict_plane(
-        &self,
+        &mut self,
         plane: usize,
         px_x: usize,
         px_y: usize,
@@ -1443,78 +1483,90 @@ impl<'a> TileDecodeState<'a> {
         mvs: &[Mv; 2],
         filter: u8,
     ) -> Result<(), KinetixError> {
-        let (dst, stride, w, h) = match plane {
-            1 | 2 => (
-                if plane == 1 { &self.u_plane } else { &self.v_plane },
-                self.uv_stride,
-                self.tile_cw,
-                self.tile_ch,
-            ),
-            _ => (&self.y_plane, self.y_stride, self.tile_w, self.tile_h),
+        let stride = match plane {
+            1 | 2 => self.uv_stride,
+            _ => self.y_stride,
         };
-        let mut dst = dst; // borrow splitter
-        let _ = (w, h);
-
-        let slot0 = self.ref_to_slot[ref_names[0] as usize];
-        let slot1 = self.ref_to_slot[ref_names[1] as usize];
-        let ref0 = self.ref_slots.slots[slot0 as usize];
-        let ref1 = self.ref_slots.slots[slot1 as usize];
-
-        // Reborrow mutably for writing.
-        let dst = if plane == 1 {
-            &mut *self.u_plane
-        } else if plane == 2 {
-            &mut *self.v_plane
-        } else {
-            &mut *self.y_plane
+        let w = match plane {
+            1 | 2 => self.tile_cw,
+            _ => self.tile_w,
+        };
+        let h = match plane {
+            1 | 2 => self.tile_ch,
+            _ => self.tile_h,
         };
 
-        // Single reference.
-        if ref_names[1] == NONE_FRAME || ref1.is_none() {
-            if let Some(rf) = ref0 {
-                let (rp, rw, rh) = rf.plane(plane);
-                motion_compensate(dst, stride, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+        let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
+        let slot1 = self.ref_to_slot[ref_names[1] as usize] as usize;
+        let ref1_none = self.ref_slots.slots[slot1].is_none();
+        let use_compound = ref_names[1] != NONE_FRAME && !ref1_none;
+
+        // Single reference: motion-compensate into a local temp (so we don't hold
+        // both the reference slice and the output plane borrow at once), then blit.
+        if !use_compound {
+            let tmp = {
+                let mut t = vec![0u8; bw * bh];
+                if let Some(rf) = self.ref_slots.slots[slot0] {
+                    let (rp, rw, rh) = rf.plane(plane);
+                    motion_compensate(&mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+                }
+                t
+            };
+            for dy in 0..bh {
+                let sy = px_y + dy;
+                if sy >= h {
+                    break;
+                }
+                for dx in 0..bw {
+                    let sx = px_x + dx;
+                    if sx >= w {
+                        break;
+                    }
+                    let v = tmp[dy * bw + dx];
+                    match plane {
+                        1 => self.u_plane[sy * stride + sx] = v,
+                        2 => self.v_plane[sy * stride + sx] = v,
+                        _ => self.y_plane[sy * stride + sx] = v,
+                    }
+                }
             }
             return Ok(());
         }
 
         // Compound: average the two predictions into a temp, then write.
-        if let (Some(r0), Some(r1)) = (ref0, ref1) {
-            let (rp0, rw0, rh0) = r0.plane(plane);
-            let (rp1, rw1, rh1) = r1.plane(plane);
-            let mut tmp0 = vec![0u8; bw * bh];
-            let mut tmp1 = vec![0u8; bw * bh];
-            motion_compensate(
-                &mut tmp0,
-                bw,
-                rp0,
-                rw0,
-                rw0,
-                rh0,
-                px_x,
-                px_y,
-                bw,
-                bh,
-                mvs[0],
-                filter,
-            );
-            motion_compensate(
-                &mut tmp1,
-                bw,
-                rp1,
-                rw1,
-                rw1,
-                rh1,
-                px_x,
-                px_y,
-                bw,
-                bh,
-                mvs[1],
-                filter,
-            );
+        let combined = {
+            let mut t0 = vec![0u8; bw * bh];
+            let mut t1 = vec![0u8; bw * bh];
+            if let Some(rf) = self.ref_slots.slots[slot0] {
+                let (rp, rw, rh) = rf.plane(plane);
+                motion_compensate(&mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+            }
+            if let Some(rf) = self.ref_slots.slots[slot1] {
+                let (rp, rw, rh) = rf.plane(plane);
+                motion_compensate(&mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter);
+            }
+            let mut c = vec![0u8; bw * bh];
             for i in 0..bw * bh {
-                let v = (tmp0[i] as u32 + tmp1[i] as u32 + 1) >> 1;
-                dst[px_y * stride + px_x + (i / bw) * stride + (i % bw)] = v as u8;
+                c[i] = ((t0[i] as u32 + t1[i] as u32 + 1) >> 1) as u8;
+            }
+            c
+        };
+        for dy in 0..bh {
+            let sy = px_y + dy;
+            if sy >= h {
+                break;
+            }
+            for dx in 0..bw {
+                let sx = px_x + dx;
+                if sx >= w {
+                    break;
+                }
+                let v = combined[dy * bw + dx];
+                match plane {
+                    1 => self.u_plane[sy * stride + sx] = v,
+                    2 => self.v_plane[sy * stride + sx] = v,
+                    _ => self.y_plane[sy * stride + sx] = v,
+                }
             }
         }
         Ok(())
@@ -1529,15 +1581,10 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
         skip: bool,
+        luma_tx: usize,
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
-        let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
-            self.read_tx_size(bsize, max_tx, mi_row, mi_col)
-        } else {
-            max_tx
-        };
         let luma_tx_w = TX_WIDTH[luma_tx];
         let luma_tx_h = TX_HEIGHT[luma_tx];
         let subsampling_x = self.subsampling_x as u8;
@@ -1596,8 +1643,7 @@ impl<'a> TileDecodeState<'a> {
                             break;
                         }
                         if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
-                            *slot = (slot.wrapping_add_signed(residual[dy * luma_tx_w + dx]))
-                                .clamp(0, 255) as u8;
+                            *slot = ((*slot as i32 + residual[dy * luma_tx_w + dx]).clamp(0, 255)) as u8;
                         }
                     }
                 }
@@ -1670,8 +1716,7 @@ impl<'a> TileDecodeState<'a> {
                                 break;
                             }
                             if let Some(slot) = dst.get_mut(sy * stride + sx) {
-                                *slot = (slot.wrapping_add_signed(residual[dy * cw + dx]))
-                                    .clamp(0, 255) as u8;
+                                *slot = ((*slot as i32 + residual[dy * cw + dx]).clamp(0, 255)) as u8;
                             }
                         }
                     }
@@ -2033,6 +2078,12 @@ pub fn decode_tile_group(
     segmentation_enabled: bool,
     seg_feature_skip: bool,
     seg_feature_alt_q: bool,
+    frame_is_intra: bool,
+    allow_high_precision_mv: bool,
+    reference_select: bool,
+    interpolation_filter: u8,
+    ref_to_slot: [u8; 9],
+    ref_slots: RefFrames<'_>,
     meta: &mut FrameMeta,
 ) -> Result<(), KinetixError> {
     let use_128 = _use_128x128_sb;
@@ -2089,6 +2140,12 @@ pub fn decode_tile_group(
         segmentation_enabled,
         seg_feature_skip,
         seg_feature_alt_q,
+        frame_is_intra,
+        allow_high_precision_mv,
+        reference_select,
+        interpolation_filter,
+        ref_to_slot,
+        ref_slots,
         meta,
     );
 
@@ -2114,6 +2171,27 @@ fn uv_plane_height(height: usize) -> usize {
     height / 2
 }
 
+/// Build the borrowed reference-frame view ([`RefFrames`]) the inter path draws
+/// from, mapping each populated [`RefFrameStore`] slot into a [`RefSlot`]. For
+/// keyframes / the first frame `ref_store` is `None` and every slot is empty.
+fn build_ref_frames(ref_store: Option<&RefFrameStore>) -> RefFrames<'_> {
+    let mut slots: [Option<RefSlot<'_>>; 8] = [None; 8];
+    if let Some(store) = ref_store {
+        for i in 0..8 {
+            if let Some(f) = store.get(i) {
+                slots[i] = Some(RefSlot {
+                    y: &f.y,
+                    u: &f.u,
+                    v: &f.v,
+                    width: f.width,
+                    height: f.height,
+                });
+            }
+        }
+    }
+    RefFrames { slots }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // High-level frame reconstruction
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2134,9 +2212,17 @@ pub fn reconstruct_av1_frame(
     obus: &[(u8, Vec<u8>)],
     _seq: &SequenceHeaderObu,
     frame_header: &FrameHeader,
+    ref_store: Option<&RefFrameStore>,
 ) -> Result<Option<VideoFrame>, KinetixError> {
-    if !frame_header.frame_type.is_intra() {
-        return Ok(None);
+    let frame_is_intra = frame_header.frame_type.is_intra();
+
+    // Build the reference-frame view the inter path draws from (AV1 §7.20). For
+    // keyframes this is empty; for inter frames it holds the previously
+    // reconstructed frames the `ref_frame_idx` names map onto.
+    let ref_slots = build_ref_frames(ref_store);
+    let mut ref_to_slot = [0u8; 9];
+    for name in LAST_FRAME..=ALTREF_FRAME {
+        ref_to_slot[name as usize] = frame_header.ref_frame_idx[(name - LAST_FRAME) as usize];
     }
 
     let width = frame_header.width as usize;
@@ -2252,6 +2338,12 @@ pub fn reconstruct_av1_frame(
                 frame_header.segmentation_enabled,
                 false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
                 false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
+                frame_is_intra,
+                frame_header.allow_high_precision_mv,
+                frame_header.reference_select,
+                frame_header.interpolation_filter,
+                ref_to_slot,
+                ref_slots,
                 &mut meta,
             )?;
 
@@ -2344,7 +2436,8 @@ mod tests {
         let mut meta = FrameMeta::new(width, height);
         decode_tile_group(
             data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-            true, false, false, false, false, &mut meta,
+            true, false, false, false, false, true, false, false, 0, [0u8; 9], RefFrames::empty(),
+            &mut meta,
         )?;
         Ok((y, u, v))
     }

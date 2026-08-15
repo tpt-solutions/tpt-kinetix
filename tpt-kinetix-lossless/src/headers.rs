@@ -6,7 +6,7 @@
 
 use tpt_kinetix_bitstream::bitreader::BitReader;
 
-use crate::entropy::{BitWriter, read_bits_u16, read_bits_u8};
+use crate::entropy::{read_bits_u16, read_bits_u8, BitWriter};
 
 /// Per-plane description fixed for the whole stream (bounded-memory contract:
 /// `max_width`/`max_height` let a decoder size its arena once).

@@ -35,6 +35,7 @@ pub mod deblock;
 pub mod decoder;
 pub mod entropy;
 pub mod macroblock;
+pub mod mbaff;
 pub mod motion_comp;
 pub mod mv;
 pub mod nal;

@@ -322,6 +322,179 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
     }
 }
 
+/// Reconstruct an **MBAFF** I-slice frame (Phase G.4).
+///
+/// The macroblocks are supplied in the frame-MB grid order produced by the
+/// parser (a picture of `mb_cols × mb_rows` macroblocks, pairs being the rows
+/// `(2k, 2k+1)`), each carrying its pair's `mb_field_decoding_flag`. Intra
+/// prediction runs in *progressive* frame-MB order (reusing the spec-exact
+/// [`reconstruct_intra_frame`] path) and the reconstructed progressive planes
+/// are then rearranged into the MBAFF interlaced layout via
+/// [`crate::mbaff::place_mbaff_luma_pair`] / [`crate::mbaff::place_mbaff_chroma_pair`],
+/// which select frame vs. field placement per macroblock pair.
+///
+/// Field-aware intra prediction (field scan order, field DC transform ordering)
+/// is **not** yet applied, so MBAFF output is not pixel-exact — this is part of
+/// the explicitly-unsupported interlaced subset in
+/// [`crate::H264Decoder::capabilities`]. The structural placement here is
+/// spec-correct (§6.4.10.1), so the decoded frame has the right dimensions and
+/// scanline interleaving.
+pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mb_cols: u32,
+    mb_rows: u32,
+    width: u32,
+    height: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) -> ReconstructedFrame {
+    // Reconstruct the macroblocks as if the frame were progressive; the pair
+    // structure is later remapped into the interlaced layout.
+    let progressive = reconstruct_intra_frame(
+        macroblocks,
+        mb_cols,
+        mb_rows,
+        width,
+        height,
+        chroma_qp_index_offset,
+        scaling,
+        weighted,
+        tracer,
+    );
+
+    let luma_stride = progressive.luma_stride;
+    let chroma_stride = progressive.chroma_stride;
+    let mut out_luma = vec![0u8; luma_stride * height as usize];
+    let mut out_cb = vec![0u8; chroma_stride * (height as usize / 2)];
+    let mut out_cr = vec![0u8; chroma_stride * (height as usize / 2)];
+
+    let pair_rows = mb_rows / 2;
+    for pair_row in 0..pair_rows {
+        for mb_x in 0..mb_cols {
+            let top_idx = (pair_row * 2 * mb_cols + mb_x) as usize;
+            let bot_idx = (pair_row * 2 * mb_cols + mb_cols + mb_x) as usize;
+            let field = macroblocks.get(top_idx).map(|m| m.mb_field_flag).unwrap_or(false);
+
+            // Extract the top macroblock's 16×16 luma / 8×8 chroma planes from
+            // the progressive reconstruction, then the bottom macroblock's (if
+            // the pair is complete).
+            let mut top_luma = [0u8; 256];
+            let mut bot_luma = [0u8; 256];
+            copy_block_16x16(
+                &progressive.luma,
+                luma_stride,
+                mb_x as usize * 16,
+                pair_row as usize * 2 * 16,
+                &mut top_luma,
+            );
+            if (bot_idx as u32) < mb_cols * mb_rows {
+                copy_block_16x16(
+                    &progressive.luma,
+                    luma_stride,
+                    mb_x as usize * 16,
+                    (pair_row as usize * 2 + 1) * 16,
+                    &mut bot_luma,
+                );
+            }
+
+            let mut top_cb = [0u8; 64];
+            let mut bot_cb = [0u8; 64];
+            let mut top_cr = [0u8; 64];
+            let mut bot_cr = [0u8; 64];
+            copy_block_8x8(
+                &progressive.chroma_cb,
+                chroma_stride,
+                mb_x as usize * 8,
+                pair_row as usize * 2 * 8,
+                &mut top_cb,
+            );
+            copy_block_8x8(
+                &progressive.chroma_cr,
+                chroma_stride,
+                mb_x as usize * 8,
+                pair_row as usize * 2 * 8,
+                &mut top_cr,
+            );
+            if (bot_idx as u32) < mb_cols * mb_rows {
+                copy_block_8x8(
+                    &progressive.chroma_cb,
+                    chroma_stride,
+                    mb_x as usize * 8,
+                    (pair_row as usize * 2 + 1) * 8,
+                    &mut bot_cb,
+                );
+                copy_block_8x8(
+                    &progressive.chroma_cr,
+                    chroma_stride,
+                    mb_x as usize * 8,
+                    (pair_row as usize * 2 + 1) * 8,
+                    &mut bot_cr,
+                );
+            }
+
+            crate::mbaff::place_mbaff_luma_pair(
+                &mut out_luma,
+                luma_stride,
+                pair_row as usize,
+                mb_x as usize,
+                field,
+                &top_luma,
+                &bot_luma,
+            );
+            crate::mbaff::place_mbaff_chroma_pair(
+                &mut out_cb,
+                chroma_stride,
+                pair_row as usize,
+                mb_x as usize,
+                field,
+                &top_cb,
+                &bot_cb,
+            );
+            crate::mbaff::place_mbaff_chroma_pair(
+                &mut out_cr,
+                chroma_stride,
+                pair_row as usize,
+                mb_x as usize,
+                field,
+                &top_cr,
+                &bot_cr,
+            );
+        }
+    }
+
+    ReconstructedFrame {
+        luma: out_luma,
+        chroma_cb: out_cb,
+        chroma_cr: out_cr,
+        luma_stride,
+        chroma_stride,
+    }
+}
+
+/// Copy a 16×16 block from `plane` starting at `(x, y)` into a 256-sample buffer.
+fn copy_block_16x16(plane: &[u8], stride: usize, x: usize, y: usize, out: &mut [u8; 256]) {
+    for row in 0..16usize {
+        let src = y + row;
+        if src * stride + x + 16 <= plane.len() {
+            out[row * 16..row * 16 + 16]
+                .copy_from_slice(&plane[src * stride + x..src * stride + x + 16]);
+        }
+    }
+}
+
+/// Copy an 8×8 block from `plane` starting at `(x, y)` into a 64-sample buffer.
+fn copy_block_8x8(plane: &[u8], stride: usize, x: usize, y: usize, out: &mut [u8; 64]) {
+    for row in 0..8usize {
+        let src = y + row;
+        if src * stride + x + 8 <= plane.len() {
+            out[row * 8..row * 8 + 8]
+                .copy_from_slice(&plane[src * stride + x..src * stride + x + 8]);
+        }
+    }
+}
+
 /// Sample a luma neighbour at absolute (x, y), or `None` if outside the picture
 /// or (for intra order) not yet reconstructed. For a raster decode with a fully
 /// intra frame, any position above/left of the current block is available.

@@ -41,10 +41,7 @@ pub fn crc64(data: &[u8]) -> u64 {
 
 /// Pick the checksum width by plane bit depth, per DECISION 3.
 pub fn checksum_plane(bit_depth: u8, samples: &[u16]) -> Vec<u8> {
-    let bytes: Vec<u8> = samples
-        .iter()
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     if bit_depth >= 16 {
         crc64(&bytes).to_le_bytes().to_vec()
     } else {

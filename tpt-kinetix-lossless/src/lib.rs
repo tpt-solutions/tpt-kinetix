@@ -11,10 +11,11 @@
 //!
 //! The v1 transform is **predictive + entropy** (FFV1-like): each sample is
 //! predicted from its reconstructed left/up/up-left neighbours via FFV1's median
-//! predictor, the signed residual is Rice-coded with a per-sample adaptive
-//! parameter, and every plane carries a CRC of its reconstructed samples. A
-//! `transform_id` field reserves a reversible-wavelet mode for a later phase
-//! without a format break.
+//! predictor, the signed residual is rANS-coded with a per-context static
+//! probability model (the same activity measure FFV1 uses for its `quant_table`,
+//! shared from `tpt-kinetix-bitstream`), and every plane carries a CRC of its
+//! reconstructed samples. A `transform_id` field reserves a reversible-wavelet
+//! mode for a later phase without a format break.
 //!
 //! # Honesty contract
 //!
@@ -30,14 +31,12 @@ pub mod headers;
 pub mod predict;
 
 use tpt_kinetix_bitstream::bitreader::BitReader;
-use tpt_kinetix_core::{
-    capabilities::DecoderCapabilities,
-    error::KinetixError,
-};
+use tpt_kinetix_bitstream::lossless_context_models;
+use tpt_kinetix_core::{capabilities::DecoderCapabilities, error::KinetixError};
 
 use crate::{
     crc::checksum_plane,
-    entropy::{read_rice, rice_k, write_rice, BitWriter},
+    entropy::{decode_one_residual, encode_residual_stream, rice_k, BitWriter},
     headers::{FrameHeader, PlaneSpec, SequenceHeader},
     predict::predict,
 };
@@ -79,35 +78,39 @@ impl Plane {
     }
 }
 
-/// Encode one plane's residuals into `w` (header is written separately).
-fn encode_plane(plane: &Plane, w: &mut BitWriter) -> Result<(), KinetixError> {
+/// Encode one plane's residuals into a byte buffer (header is written separately).
+fn encode_plane(plane: &Plane) -> Result<Vec<u8>, KinetixError> {
     plane.validate()?;
     let pw = plane.width as usize;
     let ph = plane.height as usize;
+    let mut residuals = Vec::with_capacity(pw * ph);
+    let mut contexts = Vec::with_capacity(pw * ph);
     let mut up_mag = vec![0u32; pw];
     let mut left_mag: u32 = 0;
     for y in 0..ph {
-        for (x, slot) in up_mag.iter_mut().enumerate() {
+        for x in 0..pw {
             let pred = u32::from(predict(&plane.data, pw, ph, x, y));
             let sample = u32::from(plane.data[y * pw + x]);
             let residual = (sample as i32) - (pred as i32);
             let k = if x == 0 && y == 0 {
                 0
             } else {
-                rice_k(left_mag, *slot)
+                rice_k(left_mag, up_mag[x])
             };
-            write_rice(w, k, residual);
+            residuals.push(residual);
+            contexts.push(k as u8);
             let mag = residual.unsigned_abs();
-            *slot = mag;
+            up_mag[x] = mag;
             left_mag = mag;
         }
     }
-    Ok(())
+    Ok(encode_residual_stream(&residuals, &contexts))
 }
 
-/// Decode one plane's residuals from `r`, verifying the per-plane checksum.
+/// Decode one plane's residuals from the rANS `data` buffer, verifying the
+/// per-plane checksum.
 fn decode_plane(
-    r: &mut BitReader<'_>,
+    data: &[u8],
     seq: &SequenceHeader,
     spec: &PlaneSpec,
     width: u16,
@@ -123,29 +126,32 @@ fn decode_plane(
     let mask = (1u32 << spec.bit_depth) - 1;
     let w = width as usize;
     let h = height as usize;
-    let mut data = vec![0u16; w * h];
+    let mut samples = vec![0u16; w * h];
     let mut up_mag = vec![0u32; w];
     let mut left_mag: u32 = 0;
+    let models = lossless_context_models();
+    let mut dec =
+        tpt_kinetix_bitstream::RansDecoder::new(data).map_err(|e| {
+            KinetixError::Parse(format!("lossless: plane residual stream: {e}"))
+        })?;
     for y in 0..h {
         for x in 0..w {
-            let pred = u32::from(predict(&data, w, h, x, y));
+            let pred = u32::from(predict(&samples, w, h, x, y));
             let k = if x == 0 && y == 0 {
                 0
             } else {
                 rice_k(left_mag, up_mag[x])
             };
-            let residual = read_rice(r, k).ok_or_else(|| {
-                KinetixError::Parse("lossless: truncated plane residual stream".to_string())
-            })?;
+            let residual = decode_one_residual(&mut dec, k as u8, &models)?;
             let sample = ((pred as i32 + residual) as u32 & mask) as u16;
-            data[y * w + x] = sample;
+            samples[y * w + x] = sample;
             let mag = residual.unsigned_abs();
             up_mag[x] = mag;
             left_mag = mag;
         }
     }
     let plane_index = seq.planes.iter().position(|p| p == spec).unwrap_or(0);
-    let actual = checksum_plane(spec.bit_depth, &data);
+    let actual = checksum_plane(spec.bit_depth, &samples);
     if actual != expected_crc {
         return Err(KinetixError::Parse(format!(
             "lossless: reversibility check failed (plane {plane_index}): decoder output did not match embedded checksum"
@@ -155,7 +161,7 @@ fn decode_plane(
         width: u32::from(width),
         height: u32::from(height),
         bit_depth: spec.bit_depth,
-        data,
+        data: samples,
     })
 }
 
@@ -197,10 +203,8 @@ impl LosslessEncoder {
                     "lossless: frame exceeds sequence max dimensions".to_string(),
                 ));
             }
-            let mut w = BitWriter::new();
-            encode_plane(plane, &mut w)?;
+            let bytes = encode_plane(plane)?;
             crcs.push(checksum_plane(spec.bit_depth, &plane.data));
-            let bytes = w.finish();
             lengths.push(bytes.len() as u32);
             plane_payloads.push(bytes);
         }
@@ -257,8 +261,9 @@ impl LosslessDecoder {
             supports_intra_prediction: true,
             supports_inter_prediction: false,
             supports_deblocking: false,
-            notes: "v1 reversible predictive + Rice entropy; bit-exact by construction; \
-                    wavelet mode reserved via transform_id (not yet implemented)",
+            notes: "v1 reversible predictive + rANS entropy (per-context static model from \
+                    tpt-kinetix-bitstream); bit-exact by construction; wavelet mode reserved via \
+                    transform_id (not yet implemented)",
         }
     }
 
@@ -277,9 +282,8 @@ impl LosslessDecoder {
         }
         let _ = self.strict;
         let mut r = BitReader::new(data);
-        let fh = FrameHeader::decode(&mut r).ok_or_else(|| {
-            KinetixError::Parse("lossless: truncated frame header".to_string())
-        })?;
+        let fh = FrameHeader::decode(&mut r)
+            .ok_or_else(|| KinetixError::Parse("lossless: truncated frame header".to_string()))?;
         if fh.plane_checksums.len() != seq.plane_count() {
             return Err(KinetixError::Parse(
                 "lossless: frame header plane count mismatch".to_string(),
@@ -306,8 +310,7 @@ impl LosslessDecoder {
             let slice = body.get(pos..pos + len).ok_or_else(|| {
                 KinetixError::Parse("lossless: truncated plane payload".to_string())
             })?;
-            let mut pr = BitReader::new(slice);
-            planes.push(decode_plane(&mut pr, seq, spec, fh.width, fh.height, crc)?);
+            planes.push(decode_plane(slice, seq, spec, fh.width, fh.height, crc)?);
             pos += len;
         }
         Ok(planes)
@@ -343,11 +346,16 @@ mod tests {
             data,
         };
         let enc = LosslessEncoder::new();
-        let bytes = enc.encode_frame(&seq, std::slice::from_ref(&plane)).unwrap();
+        let bytes = enc
+            .encode_frame(&seq, std::slice::from_ref(&plane))
+            .unwrap();
         let mut dec = LosslessDecoder::new();
         let out = dec.decode_frame(&seq, &bytes).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0], plane, "round-trip mismatch at bit_depth {bit_depth}");
+        assert_eq!(
+            out[0], plane,
+            "round-trip mismatch at bit_depth {bit_depth}"
+        );
     }
 
     #[test]
@@ -388,9 +396,24 @@ mod tests {
                 .collect()
         };
         let planes = vec![
-            Plane { width: 16, height: 16, bit_depth: 16, data: mk(1) },
-            Plane { width: 16, height: 16, bit_depth: 16, data: mk(7) },
-            Plane { width: 16, height: 16, bit_depth: 16, data: mk(13) },
+            Plane {
+                width: 16,
+                height: 16,
+                bit_depth: 16,
+                data: mk(1),
+            },
+            Plane {
+                width: 16,
+                height: 16,
+                bit_depth: 16,
+                data: mk(7),
+            },
+            Plane {
+                width: 16,
+                height: 16,
+                bit_depth: 16,
+                data: mk(13),
+            },
         ];
         let enc = LosslessEncoder::new();
         let bytes = enc.encode_frame(&seq, &planes).unwrap();
@@ -403,7 +426,12 @@ mod tests {
     fn corrupted_payload_fails_reversibility() {
         let seq = seq_for(&[16]);
         let data: Vec<u16> = (0..16 * 16).map(|i| (i % 65536) as u16).collect();
-        let plane = Plane { width: 16, height: 16, bit_depth: 16, data };
+        let plane = Plane {
+            width: 16,
+            height: 16,
+            bit_depth: 16,
+            data,
+        };
         let enc = LosslessEncoder::new();
         let mut bytes = enc.encode_frame(&seq, &[plane]).unwrap();
         // Flip a residual byte: checksum must catch the mismatch.
@@ -419,7 +447,12 @@ mod tests {
         seq.transform_id = 1;
         let mut dec = LosslessDecoder::new();
         let data: Vec<u16> = vec![0; 4];
-        let plane = Plane { width: 2, height: 2, bit_depth: 16, data };
+        let plane = Plane {
+            width: 2,
+            height: 2,
+            bit_depth: 16,
+            data,
+        };
         let enc = LosslessEncoder::new();
         let bytes = enc.encode_frame(&seq, &[plane]).unwrap();
         // encode_frame doesn't validate transform_id, but decode must reject it.

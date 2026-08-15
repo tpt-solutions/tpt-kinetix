@@ -407,6 +407,11 @@ impl H264Decoder {
         if !sps.frame_mbs_only_flag {
             return Ok(None);
         }
+        // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
+        // In strict mode, gate it so strict mode returns NotPixelExact.
+        if self.strict && transform_8x8_mode_flag {
+            return Ok(None);
+        }
 
         let ctx = SliceHeaderContext {
             log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
@@ -1787,6 +1792,8 @@ fn decode_interlaced<T: DecodeTracer>(
         },
     };
 
+    let chroma_qp_index_offset = pps.map(|p| p.chroma_qp_index_offset).unwrap_or(0);
+
     let header = match SliceHeader::parse_with_context(
         &nal.rbsp,
         nal.nal_unit_type,
@@ -1797,15 +1804,30 @@ fn decode_interlaced<T: DecodeTracer>(
         Err(_) => return Ok(InterlacedOutcome::Fallback),
     };
 
-    // Only PAFF field pictures are handled in this phase.
-    if mb_adaptive || !header.field_pic_flag {
+    // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
+    // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
+    // pictures remain unsupported and fall back.
+    if mb_adaptive {
+        return self.decode_interlaced_mbaff(
+            nal,
+            sps,
+            &header,
+            entropy_coding_mode_flag,
+            pps,
+            width,
+            height,
+            chroma_qp_index_offset,
+            tracer,
+            packet,
+        );
+    }
+    if !header.field_pic_flag {
         return Ok(InterlacedOutcome::Fallback);
     }
     if header.first_mb_in_slice != 0 {
         return Ok(InterlacedOutcome::Fallback);
     }
 
-    let chroma_qp_index_offset = pps.map(|p| p.chroma_qp_index_offset).unwrap_or(0);
     let mb_cols = width.div_ceil(16);
     let mb_rows_field = height.div_ceil(32);
     let field_height = height / 2;
@@ -1895,6 +1917,117 @@ fn decode_interlaced<T: DecodeTracer>(
     Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
     self.finalize_field(recon, nal, sps, &header, packet)
 }
+
+/// Reconstruct an **MBAFF** I-slice frame (§6.4.10.1, Phase G.4).
+///
+/// An MBAFF frame picture is a single access unit that decodes to a full
+/// interlaced frame (unlike PAFF, which splits the two fields across two
+/// access units). The parser reads `mb_field_decoding_flag` once per macroblock
+/// pair; [`crate::reconstruct::reconstruct_mbaff_intra_frame`] then places each
+/// pair into the interlaced frame using the pair's field/frame coding. The
+/// reconstructed frame is stored in the DPB as a frame reference and emitted
+/// directly as `InterlacedOutcome::Frame` (no field interleaving accumulator is
+/// needed).
+///
+/// P/B MBAFF slices are not yet supported in this phase and return
+/// `InterlacedOutcome::Fallback` so the caller applies the strict / scaffold
+/// path; per [`crate::H264Decoder::capabilities`] interlaced decode is not yet
+/// pixel-exact.
+#[allow(clippy::too_many_arguments)]
+fn decode_interlaced_mbaff<T: DecodeTracer>(
+    &mut self,
+    nal: &crate::nal::NalUnit,
+    sps: &SeqParameterSet,
+    header: &crate::slice::SliceHeader,
+    entropy_coding_mode_flag: bool,
+    pps: Option<&PicParameterSet>,
+    width: u32,
+    height: u32,
+    chroma_qp_index_offset: i32,
+    tracer: &mut T,
+    packet: &Packet,
+) -> Result<InterlacedOutcome, KinetixError> {
+    use crate::slice::{SliceType};
+
+    if header.first_mb_in_slice != 0 {
+        return Ok(InterlacedOutcome::Fallback);
+    }
+    if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+        // P/B MBAFF slices: not yet supported in this phase.
+        return Ok(InterlacedOutcome::Fallback);
+    }
+
+    let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+    let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+    let slice_qp = pic_init_qp + header.slice_qp_delta;
+    let mb_cols = width.div_ceil(16);
+    let mb_rows = height.div_ceil(16);
+
+    let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+    reader.seek_to_bit(header.data_bit_offset);
+    let parsed = if entropy_coding_mode_flag {
+        reader.byte_align();
+        crate::slice_data::parse_i_slice_cabac(
+            reader.remaining_bytes(),
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+            tracer,
+        )
+    } else {
+        crate::slice_data::parse_i_slice(
+            &mut reader,
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            chroma_qp_index_offset,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            tracer,
+        )
+    };
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(_) => return Ok(InterlacedOutcome::Fallback),
+    };
+
+    let recon = crate::reconstruct::reconstruct_mbaff_intra_frame(
+        &parsed.macroblocks,
+        mb_cols,
+        mb_rows,
+        width,
+        height,
+        chroma_qp_index_offset,
+        scaling,
+        &crate::reconstruct::WeightedPred::Default,
+        tracer,
+    );
+
+    // Assemble the full interlaced frame and store it in the DPB as a frame
+    // reference. MBAFF frames are coded as frame pictures (field_pic_flag is
+    // false), so no field interleaving accumulator is required.
+    let mut data = recon.luma;
+    data.extend(recon.chroma_cb);
+    data.extend(recon.chroma_cr);
+    let frame = VideoFrame {
+        pts: packet.pts,
+        dts: packet.dts,
+        data,
+        width,
+        height,
+        pixel_format: PixelFormat::Yuv420p,
+        is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+    };
+    self.store_reference_picture(nal, sps, header, &frame);
+
+    Ok(InterlacedOutcome::Frame(frame))
+}
+
+/// PAFF P-field picture decode: build the field reference list (§8.2.4.2.5),
 
 /// PAFF P-field picture decode: build the field reference list (§8.2.4.2.5),
 /// parse the field P-slice, motion-compensate each field macroblock at field

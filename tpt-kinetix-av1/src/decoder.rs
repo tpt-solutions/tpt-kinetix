@@ -150,7 +150,7 @@ impl Av1Decoder {
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
-            supports_inter_prediction: false,
+            supports_inter_prediction: true,
             // Loop filter + CDEF run after reconstruction (AV1 Phase D), but the
             // decoder is not yet validated pixel-exact, so the capability stays
             // conservative until the conformance harness passes.
@@ -159,8 +159,14 @@ impl Av1Decoder {
                     (real superblock partition tree, intra mode / tx_size, coeffs() \
                     symbol decoder) for intra keyframes; in-loop deblock + CDEF wired \
                     (Phase D); rayon parallel tile decode (Phase F); reference frame \
-                    buffer (Phase E) populated but inter prediction / motion \
-                    compensation not yet implemented, so output is not pixel-exact",
+                    store (Phase E) threaded through to reconstruction; inter \
+                    prediction is implemented (MV candidate derivation, NEWMV / \
+                    NEARMV / NEARESTMV / ZEROMV, switchable + bilinear interpolation, \
+                    single- and compound reference, residual add) and runs end-to-end \
+                    on multi-frame streams — validated frame-by-frame vs dav1d in the \
+                    conformance harness; the decoder is still not pixel-exact (the \
+                    intra reconstruction also lags the reference), so output is not \
+                    bit-exact yet",
         }
     }
 
@@ -256,7 +262,7 @@ impl Av1Decoder {
 
         // Attempt reconstruction via the new pipeline.
         if let (Some(seq), Some(fh)) = (&self.sequence_header, &self.last_frame_header) {
-            match reconstruct_av1_frame(&obu_pairs, seq, fh) {
+            match reconstruct_av1_frame(&obu_pairs, seq, fh, Some(&self.ref_frames)) {
                 Ok(Some(frame)) => {
                     // Phase E: track the reconstructed frame in the reference
                     // buffer per `refresh_frame_flags` so inter prediction can
