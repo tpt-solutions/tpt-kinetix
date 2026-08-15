@@ -16,7 +16,7 @@ documentation = "https://docs.rs/tpt-kinetix-volumetric"
 tpt-kinetix-core = { path = "../tpt-kinetix-core" }
 tpt-kinetix-bitstream = { path = "../tpt-kinetix-bitstream" }
 thiserror = "2"
-nom = "7"
+nom = "8"
 
 [dev-dependencies]
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
