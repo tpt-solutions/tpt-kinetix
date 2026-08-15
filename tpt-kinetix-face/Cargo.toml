@@ -16,7 +16,7 @@ documentation = "https://docs.rs/tpt-kinetix-face"
 tpt-kinetix-core = { path = "../tpt-kinetix-core" }
 tpt-kinetix-bitstream = { path = "../tpt-kinetix-bitstream" }
 thiserror = "2"
-nom = "7"
+nom = "8"
 
 [lib]
 path = "src/lib.rs"
