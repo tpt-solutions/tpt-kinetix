@@ -390,6 +390,154 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   harness reports a non-0 exact count). `cargo test -p tpt-kinetix-av1 --lib`
 >   is green (47 passed) after the dequant change — no regression.
 
+> **2026-08-16 session note (cont'd) — the inverse transform basis was wrong,
+> not just mis-scaled; replaced with the spec-exact butterfly network.**
+> Root-caused the "0/5 bit-exact, 7-22 dB PSNR" state further by tracing a
+> single top-left DC-only 64×64 block (`solid_red_64` corpus entry) through
+> `reconstruct_tx_block` with temporary instrumentation
+> (`KINETIX_AV1_DBG=1 cargo test -p tpt-kinetix-test-utils --test
+> dbg_av1_solid_red -- --nocapture`; the env-gated `eprintln!`s are left in
+> `reconstruct.rs`'s `decode_intra_block`/`reconstruct_tx_block` for reuse).
+> Found: `inverse_transform`'s `dct_iv_matrix`/`dst_vii_matrix` implemented
+> an **unnormalized DCT-IV / DST-VII matrix** (`cos/sin(pi(2r+1)(2c+1)/4n)`,
+> symmetric in both indices) — that is not AV1's transform at all. AV1 uses
+> DCT-II-family / ADST(DST-VII-derived) transforms implemented via the spec's
+> exact fixed-point `cos128`-table butterfly/Hadamard network (§7.13.2), with
+> per-size row/col shifts and intermediate clamps (§7.13.3), on top of a
+> `dqDenom`-scaled dequant step (§7.12.3, `dqDenom` = 2 for `TX_32X32`, 4 for
+> `TX_64X64`, previously not applied at all). Confirmed against the AV1 spec
+> PDF directly (fetched `https://aomediacodec.github.io/av1-spec/av1-spec.pdf`,
+> not recalled from memory) rather than assumed.
+>
+> Fixed in `tpt-kinetix-av1/src/reconstruct.rs` (all uncommitted): transcribed
+> `cos128`/`sin128`/`brev`/`round2`/`B`/`H` (§7.13.2.1), the inverse DCT
+> permutation + all 31 ordered butterfly/Hadamard steps for `2 <= n <= 6`
+> (§7.13.2.2/2.3), the ADST input/output permutations + ADST4/8/16 networks
+> (§7.13.2.4-9), and the four identity-transform scalings (§7.13.2.11-15) —
+> all verified line-by-line against the spec text, not reconstructed from
+> memory. `inverse_transform`'s signature changed to take the real AV1
+> `TxType` (0-15) and a `lossless` flag directly (the old 4-value internal
+> enum + `internal_tx_type` mapper is gone); a new `dequantize_coeffs` helper
+> applies `dqDenom` + the spec's sign/abs/clip. Row/column transform-kind
+> dispatch (`row_axis_transform`/`col_axis_transform`) intentionally omits
+> FLIPADST handling: `TX_TYPE_INTRA_INV_SET1`/`SET2` in `coeff_tables.rs`
+> confirm AV1 intra coding can never select a FLIPADST variant, so this is a
+> real (not approximated) scope boundary for the intra path — only the
+> unvalidated inter path could reach it, and does not yet.
+>
+> **Confirmed real, but not sufficient alone**: re-ran `av1_psnr_check`
+> post-fix — PSNR *changed* (mandelbrot 10.8→13.9 dB, testsrc2 10.1→12.0 dB,
+> smptebars 9.95→10.1 dB) but **worsened** on the solid-color entries
+> (solid_red_32 16.1→14.7 dB) and nothing reached bit-exact. Diagnosed why:
+> plugged the *actual* parsed values for `solid_red_64`'s top-left block
+> (`quant[0]=-2`, `qindex=128`, `tx_size=TX_64X64` ⇒ `dequantize_coeffs`
+> gives `Dequant[0][0]=-70`) through the new bit-exact transform and got a
+> flat residual of **0**, not the `-47` needed to match `dav1d`'s reference
+> pixel value (81 = 128 - 47). Since the transform math is now verified
+> spec-exact (line-by-line, plus `dc_only_inverse_dct_4x4_matches_hand_computed_value`
+> independently hand-derives the `TX_4X4` case), a `0` output from a
+> correctly-dequantized `-70` DC input means **the upstream symbol/coefficient
+> parsing is still producing the wrong `quant`/`tx_size` for this block** —
+> confirming (not just repeating) todo.md's earlier "symbol-decoder desync in
+> the intra block path" finding as a *second, independent* bug, distinct
+> from the transform-basis bug fixed this session. **Next debugging target**:
+> trace the same top-left block's `y_mode`/`skip`/`tx_size` reads against an
+> independent oracle (the `coeff.rs` Python-cross-checked oracle only covers
+> `coeffs()` in isolation, not the surrounding mode/skip/tx_size symbol reads
+> that share the same `SymbolDecoder` state) — the previous "ruled out"
+> tile-group-header fix (2026-08-16, earlier note above) stays correct and
+> should not be reverted, but did not fix this.
+>
+> Added regression tests in `reconstruct.rs`: `dc_only_inverse_dct_is_flat_at_every_square_size`,
+> `dc_only_inverse_dct_4x4_matches_hand_computed_value` (independently
+> hand-derived, not just self-consistent), `dq_denom_matches_spec_for_large_square_transforms`,
+> `cos128_sin128_match_spec_identities`, `inverse_dct_permutation_is_bit_reversal`.
+> The old `inverse_transform_basis_is_orthonormal` test (which asserted
+> orthogonality of the *wrong* DCT-IV/DST-VII basis — a self-consistency
+> check that could never have caught this bug) is removed along with
+> `dct_iv_matrix`/`dst_vii_matrix`/`apply_inverse`. `cargo test -p
+> tpt-kinetix-av1 --lib` is green (51 passed, 4 new). `pixel_exact` correctly
+> stays `false`.
+
+> **2026-08-16 session note (cont'd again) — the "next debugging target" from
+> above found a real, provable partition-decode desync; fixed.** Followed the
+> lead from the transform-basis note: traced why a correctly-dequantized
+> `-70` DC input produced a `0` residual instead of `-47`. Instrumented the
+> top-left block of the `solid_red` corpus entry (32×32 frame) and found
+> `decode_intra_block` picked `bsize=BLOCK_64X64` (`luma_tx=TX_64X64`) for a
+> **32×32 frame** — a 64×64 superblock covering a 32×32 frame can never
+> legally read a full `PARTITION_NONE`-capable `partition` symbol, because
+> AV1 spec §5.11.4's `decode_partition` only reads the full 10-way symbol
+> when `hasRows && hasCols` (`(r + halfBlock4x4) < MiRows` and same for
+> cols); when only one holds it reads a constrained binary
+> `split_or_horz`/`split_or_vert` symbol instead (a synthetic 2-symbol CDF
+> algebraically folded from the full partition CDF, spec §8.3.2), and when
+> *neither* holds, no symbol is read at all — `partition` is forced to
+> `PARTITION_SPLIT`. `reconstruct.rs`'s `decode_partition` read the full
+> unconditional `partition` symbol at every node regardless of frame size,
+> so for this 32×32-frame/64×64-superblock case (`hasRows`/`hasCols` both
+> false at the root) it consumed a symbol the real encoder never wrote —
+> desyncing the entropy decoder for **every subsequent read in the tile**,
+> which fully explains the previously "unexplained" garbage
+> mode/skip/tx_size/coefficient values (todo.md's earlier "symbol-decoder
+> desync in the intra block path" entries). This is not specific to 32×32
+> frames — any frame whose dimensions aren't an exact multiple of the
+> superblock size hits this at some partition node, which is most real
+> content.
+>
+> Fixed in `reconstruct.rs` (uncommitted): `decode_partition` now computes
+> `has_rows`/`has_cols` and branches into the full `read_partition`,
+> `ModeCdfs::read_split_or_horz`, `ModeCdfs::read_split_or_vert` (both new —
+> transcribed from spec §8.3.2's `psum`/synthetic-CDF construction, reading
+> the real `partition_w*` table read-only and never adapting it, matching
+> the spec's "rebuilt fresh every call" semantics), or the forced-split
+> no-read case. Also replaced `partition_context`'s previous placeholder
+> (`(left*4+above)>>2` derived from a coarse 4-way "partition category"
+> per neighbour) with the exact spec formula (`ctx = left*2 + above`,
+> comparing `Mi_Width_Log2`/`Mi_Height_Log2` of the most-recently-decoded
+> leaf block against the current node's `bsl`) — this was flagged as a
+> known placeholder in the code and directly affects every partition read's
+> CDF context, so it was worth fixing alongside the hasRows/hasCols bug
+> rather than leaving a second, related placeholder in place. This needed a
+> new per-column/per-row "most recent leaf size" context array
+> (`mi_width_log2_above`/`mi_height_log2_left`, replacing the old
+> `part_ctx_above`/`part_ctx_left` partition-type-based approximation),
+> updated once per leaf in `decode_block` rather than once per
+> partition-tree node (the context needs the actual resulting leaf size).
+>
+> Found and fixed a real out-of-bounds panic while validating this:
+> `read_split_or_horz`/`read_split_or_vert`'s `psum` formula references
+> extended-partition indices (`HORZ_A`..`VERT_4`) that don't exist in the
+> `W8` bucket's 4-symbol CDF (`NONE`/`HORZ`/`VERT`/`SPLIT` only) — the spec
+> asserts this bucket is never reached by a conformant stream, but indexing
+> unconditionally still panicked on `av1_psnr_check`'s `testsrc2` entry.
+> Fixed by treating any partition-type index past the bucket's real symbol
+> count as zero probability mass (mathematically correct: that partition
+> type doesn't exist in this bucket) instead of indexing past it.
+>
+> **Result**: `av1_psnr_check` no longer panics on any corpus entry (it did
+> on `testsrc2` before the psum clamp fix) and coefficient reads are
+> visibly different/non-trivial now (e.g. `solid_red`'s top-left block now
+> reads `bsize=BLOCK_32X32`/`eob` values in the tens, not always a lone
+> `DC`-only `TX_64X64` read) — but the corpus is **still not pixel-exact**,
+> and PSNR moved in both directions across entries (some up, e.g. mandelbrot
+> 10.8→15.4 dB; some down, e.g. smptebars 9.95→9.15 dB) rather than
+> uniformly improving. This is a real, spec-grounded fix (the old code
+> provably read a symbol the encoder never wrote), not a regression — but it
+> confirms there is *at least one more* desync/context bug still active
+> somewhere in the mode/skip/tx_size/coefficient read path. Root-causing
+> that further needs an independent oracle for the *sequence* of symbol
+> reads per block (mode → skip → tx_size → coeffs), not just `coeffs()` in
+> isolation (which already has one, `coeff.rs`'s differential Python-oracle
+> tests) — building that oracle is the natural next step before guessing at
+> more individual context derivations.
+>
+> Added regression tests: `mi_width_height_log2_match_block_size_table`,
+> `split_or_horz_and_vert_never_panic_at_every_partition_bucket` (regression
+> for the panic above), `partition_context_matches_spec_left_times_2_plus_above`.
+> `cargo test -p tpt-kinetix-av1 --lib` is green (54 passed, 3 new).
+> `pixel_exact` correctly stays `false`.
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap

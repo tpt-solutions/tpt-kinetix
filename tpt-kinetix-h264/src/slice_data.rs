@@ -2997,20 +2997,27 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                     mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, nc, tc, t1, 0,
                 );
             }
-            // FFmpeg (`ff_h264_decode_mb_cavlc`, 8×8 branch): the 8×8 block's
-            // TotalCoeff for nC context is the *sum* of its four 4×4 sub-blocks.
-            // It accumulates them into the top-left 4×4 position of the 8×8
-            // block (`nnz[0] += nnz[1] + nnz[8] + nnz[9]`), leaving the other
-            // three sub-blocks carrying their own individual totals. Replicate
-            // that exactly so neighbouring 8×8 / 4×4 blocks derive nC identically.
+            // §9.2.1: when transform_size_8x8_flag == 1, TotalCoeff for any
+            // 4×4 block that belongs to the 8×8 block equals the *sum* of the
+            // four sub-block TotalCoeff values. All four positions must carry
+            // this sum so that subsequent 8×8 blocks within the same MB (whose
+            // nC derivation looks left/up into already-decoded positions) and
+            // neighbouring macroblocks (querying the right-column or bottom-row
+            // positions) both get the correct nC. Setting only the top-left
+            // position (p0) leaves p1/p2/p3 with stale individual counts,
+            // propagating wrong nC across the whole frame.
             let p0 = raster_of_8x8_sub(i8x8, 0);
             let p1 = raster_of_8x8_sub(i8x8, 1);
             let p2 = raster_of_8x8_sub(i8x8, 2);
             let p3 = raster_of_8x8_sub(i8x8, 3);
-            this_nz.luma[p0] = this_nz.luma[p0]
+            let sum = this_nz.luma[p0]
                 .saturating_add(this_nz.luma[p1])
                 .saturating_add(this_nz.luma[p2])
                 .saturating_add(this_nz.luma[p3]);
+            this_nz.luma[p0] = sum;
+            this_nz.luma[p1] = sum;
+            this_nz.luma[p2] = sum;
+            this_nz.luma[p3] = sum;
             mb.luma_coeffs_8x8[i8x8] = block64;
         }
     } else {

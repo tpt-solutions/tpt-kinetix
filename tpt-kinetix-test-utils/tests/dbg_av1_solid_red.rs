@@ -42,14 +42,19 @@ fn dbg_solid_red() {
 
     if let Some(fh) = dec.last_frame_header() {
         eprintln!(
-            "FrameHeader: type={:?} w={} h={} base_q_idx={} tile_cols={} tile_rows={} lossless={}",
-            fh.frame_type, fh.width, fh.height, fh.base_q_idx, fh.tile_cols, fh.tile_rows, fh.lossless
+            "FrameHeader: type={:?} w={} h={} base_q_idx={} tile_cols={} tile_rows={} lossless={} delta_q_present={} delta_lf_present={} reduced_tx_set={} cdef_bits={}",
+            fh.frame_type, fh.width, fh.height, fh.base_q_idx, fh.tile_cols, fh.tile_rows, fh.lossless,
+            fh.delta_q_present, fh.delta_lf_present, fh.reduced_tx_set, fh.cdef_bits
         );
     }
     if let Some(seq) = dec.sequence_header() {
         eprintln!(
-            "SeqHeader: sb128={} enable_cdef={} enable_restoration={} profile={}",
-            seq.use_128x128_superblock, seq.enable_cdef, seq.enable_restoration, seq.seq_profile
+            "SeqHeader: sb128={} enable_cdef={} enable_restoration={} profile={} enable_filter_intra={} enable_intra_edge_filter={}",
+            seq.use_128x128_superblock, seq.enable_cdef, seq.enable_restoration, seq.seq_profile,
+            seq.enable_filter_intra, seq.enable_intra_edge_filter
         );
+    }
+    if let Some(fh) = dec.last_frame_header() {
+        eprintln!("allow_screen_content_tools={}", fh.allow_screen_content_tools);
     }
 }
