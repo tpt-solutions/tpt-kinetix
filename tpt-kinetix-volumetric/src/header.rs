@@ -32,7 +32,7 @@
 use nom::{
     bytes::complete::tag,
     number::complete::{be_u32, be_u8},
-    sequence::tuple,
+    sequence::Tuple,
     IResult, Parser,
 };
 use tpt_kinetix_core::error::KinetixError;
@@ -122,13 +122,13 @@ fn map_err<'a, T>(
 /// payload). Rejects unknown versions, dynamic streams (DECISION 5), unknown
 /// attribute kinds/codings, and point counts above [`MAX_POINTS`] (DECISION 8).
 pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), KinetixError> {
-    let (rest, _) = map_err("magic", tag(MAGIC).parse(input))?;
+    let (rest, _) = map_err("magic", tag(MAGIC.as_slice()).parse(input))?;
     let (
         rest,
         (version, max_points, octree_depth, attr_count, coding, lossless, dynamic, intra_leaf),
     ) = map_err(
         "sequence header",
-        tuple((be_u8, be_u32, be_u8, be_u8, be_u8, be_u8, be_u8, be_u8)).parse(rest),
+        (be_u8, be_u32, be_u8, be_u8, be_u8, be_u8, be_u8, be_u8).parse(rest),
     )?;
 
     if version != VERSION {
@@ -170,7 +170,7 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
     let mut cur = rest;
     for _ in 0..attr_count {
         let (r, (kind_byte, bit_depth)) =
-            map_err("attribute info", tuple((be_u8, be_u8)).parse(cur))?;
+            map_err("attribute info", (be_u8, be_u8).parse(cur))?;
         let kind = match kind_byte {
             0 => PointAttributeKind::ColorRgb,
             1 => PointAttributeKind::Reflectance,
@@ -202,7 +202,7 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
 pub fn parse_frame_header(input: &[u8]) -> Result<(&[u8], FrameHeader), KinetixError> {
     let (rest, (frame_type, num_points, payload_len, geometry_coding)) = map_err(
         "frame header",
-        tuple((be_u8, be_u32, be_u32, be_u8)).parse(input),
+        (be_u8, be_u32, be_u32, be_u8).parse(input),
     )?;
     if frame_type != 0 {
         return Err(KinetixError::Unsupported(format!(

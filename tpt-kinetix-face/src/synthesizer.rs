@@ -152,11 +152,7 @@ impl FaceSynthesizer for DeterministicRasterizer {
         let pose = pad_pose(&params.pose);
         let mut posed = vec![0.0f32; 3 * n];
         let mut posed_nrm = vec![0.0f32; 3 * n];
-        for (vi, (vchunk, pchunk)) in verts
-            .chunks(3)
-            .zip(posed.chunks_mut(3))
-            .enumerate()
-        {
+        for (vi, (vchunk, pchunk)) in verts.chunks(3).zip(posed.chunks_mut(3)).enumerate() {
             let bn = &basis.base_normals[3 * vi..3 * vi + 3];
             let rp = rotate([vchunk[0], vchunk[1], vchunk[2]], pose);
             let rn = rotate([bn[0], bn[1], bn[2]], pose);
@@ -181,7 +177,11 @@ impl FaceSynthesizer for DeterministicRasterizer {
 
         // 4. Lambert/SH-style per-vertex shading.
         let illum = pad_illum(&params.illumination);
-        let ldir = if dot([illum[0], illum[1], illum[2]], [illum[0], illum[1], illum[2]]) > 1e-8 {
+        let ldir = if dot(
+            [illum[0], illum[1], illum[2]],
+            [illum[0], illum[1], illum[2]],
+        ) > 1e-8
+        {
             normalize([illum[0], illum[1], illum[2]])
         } else {
             [0.0, 0.0, 1.0]
@@ -189,11 +189,7 @@ impl FaceSynthesizer for DeterministicRasterizer {
         let ambient = [clamp01(illum[3]), clamp01(illum[4]), clamp01(illum[5])];
         let diffuse = [clamp01(illum[6]), clamp01(illum[7]), clamp01(illum[8])];
         let mut colors = vec![[0.0f32; 3]; n];
-        for (vi, (nrm, alb)) in posed_nrm
-            .chunks(3)
-            .zip(basis.albedo.chunks(3))
-            .enumerate()
-        {
+        for (vi, (nrm, alb)) in posed_nrm.chunks(3).zip(basis.albedo.chunks(3)).enumerate() {
             let ndotl = (0.0f32).max(dot([nrm[0], nrm[1], nrm[2]], ldir));
             colors[vi] = [
                 alb[0] * (ambient[0] + diffuse[0] * ndotl),

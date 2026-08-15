@@ -117,7 +117,10 @@ impl MvStore {
     /// Extract the L1 fields of a committed cell as a neighbour.
     fn cell_l1(&self, mb_idx: usize, blk: usize) -> MvNeighbor {
         let c = self.mbs[mb_idx].expect("available MB")[blk];
-        MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 }
+        MvNeighbor {
+            mv: c.mv_l1,
+            ref_idx: c.ref_idx_l1,
+        }
     }
 }
 
@@ -294,7 +297,10 @@ fn neighbor_left_l1(
     if px_off > 0 {
         let blk = (py_off / 4) * 4 + (px_off - 4) / 4;
         let c = cur[blk];
-        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+        return Some(MvNeighbor {
+            mv: c.mv_l1,
+            ref_idx: c.ref_idx_l1,
+        });
     }
     if mb_idx % mb_width == 0 {
         return None;
@@ -319,7 +325,10 @@ fn neighbor_above_l1(
     if py_off > 0 {
         let blk = ((py_off - 4) / 4) * 4 + px_off / 4;
         let c = cur[blk];
-        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+        return Some(MvNeighbor {
+            mv: c.mv_l1,
+            ref_idx: c.ref_idx_l1,
+        });
     }
     if mb_idx / mb_width == 0 {
         return None;
@@ -357,7 +366,10 @@ fn neighbor_above_right_l1(
             }
             let blk = ((py_off - 4) / 4) * 4 + right_col / 4;
             let c = cur[blk];
-            return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+            return Some(MvNeighbor {
+                mv: c.mv_l1,
+                ref_idx: c.ref_idx_l1,
+            });
         }
         return None;
     }
@@ -394,7 +406,10 @@ fn neighbor_above_left_l1(
     if py_off > 0 && px_off > 0 {
         let blk = ((py_off - 4) / 4) * 4 + (px_off - 4) / 4;
         let c = cur[blk];
-        return Some(MvNeighbor { mv: c.mv_l1, ref_idx: c.ref_idx_l1 });
+        return Some(MvNeighbor {
+            mv: c.mv_l1,
+            ref_idx: c.ref_idx_l1,
+        });
     }
     if py_off == 0 && px_off == 0 {
         if mb_idx / mb_width == 0 || mb_idx % mb_width == 0 {
@@ -452,7 +467,8 @@ fn median_pred(
     let ref_a = a.map_or(-1, |n| n.ref_idx);
     let ref_b = b.map_or(-1, |n| n.ref_idx);
     let ref_c = c.map_or(-1, |n| n.ref_idx);
-    let match_count = (ref_a == ref_idx) as u8 + (ref_b == ref_idx) as u8 + (ref_c == ref_idx) as u8;
+    let match_count =
+        (ref_a == ref_idx) as u8 + (ref_b == ref_idx) as u8 + (ref_c == ref_idx) as u8;
 
     if match_count == 1 {
         if ref_a == ref_idx {
@@ -505,10 +521,10 @@ pub(crate) fn predict_mv(
 
     let a = neighbor_left(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
     let b = neighbor_above(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
-    let c = neighbor_above_right(store, cur, mb_idx, mb_width, py_off, px_off, part_w, slice_id)
-        .or_else(|| {
-            neighbor_above_left(store, cur, mb_idx, mb_width, py_off, px_off, slice_id)
-        });
+    let c = neighbor_above_right(
+        store, cur, mb_idx, mb_width, py_off, px_off, part_w, slice_id,
+    )
+    .or_else(|| neighbor_above_left(store, cur, mb_idx, mb_width, py_off, px_off, slice_id));
 
     if part_w == 16 && part_h == 8 {
         if part_idx == 0 {
@@ -598,30 +614,48 @@ pub(crate) fn predict_mv_l1(
     ref_idx: i32,
     slice_id: u32,
 ) -> [i32; 2] {
-    let py_off = if part_h == 8 && part_w == 16 { part_idx * 8 } else { 0 };
-    let px_off = if part_w == 8 && part_h == 16 { part_idx * 8 } else { 0 };
+    let py_off = if part_h == 8 && part_w == 16 {
+        part_idx * 8
+    } else {
+        0
+    };
+    let px_off = if part_w == 8 && part_h == 16 {
+        part_idx * 8
+    } else {
+        0
+    };
 
     let a = neighbor_left_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
     let b = neighbor_above_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id);
-    let c = neighbor_above_right_l1(store, cur, mb_idx, mb_width, py_off, px_off, part_w, slice_id)
-        .or_else(|| neighbor_above_left_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id));
+    let c = neighbor_above_right_l1(
+        store, cur, mb_idx, mb_width, py_off, px_off, part_w, slice_id,
+    )
+    .or_else(|| neighbor_above_left_l1(store, cur, mb_idx, mb_width, py_off, px_off, slice_id));
 
     if part_w == 16 && part_h == 8 {
         if part_idx == 0 {
             if let Some(n) = b {
-                if n.ref_idx == ref_idx { return n.mv; }
+                if n.ref_idx == ref_idx {
+                    return n.mv;
+                }
             }
         } else if let Some(n) = a {
-            if n.ref_idx == ref_idx { return n.mv; }
+            if n.ref_idx == ref_idx {
+                return n.mv;
+            }
         }
     }
     if part_w == 8 && part_h == 16 {
         if part_idx == 0 {
             if let Some(n) = a {
-                if n.ref_idx == ref_idx { return n.mv; }
+                if n.ref_idx == ref_idx {
+                    return n.mv;
+                }
             }
         } else if let Some(n) = c {
-            if n.ref_idx == ref_idx { return n.mv; }
+            if n.ref_idx == ref_idx {
+                return n.mv;
+            }
         }
     }
 
@@ -663,7 +697,12 @@ fn commit_rect(
 ) {
     for by in (py / 4)..(py / 4 + h / 4) {
         for bx in (px / 4)..(px / 4 + w / 4) {
-            cur[by * 4 + bx] = MvCell { mv, ref_idx, mv_l1, ref_idx_l1 };
+            cur[by * 4 + bx] = MvCell {
+                mv,
+                ref_idx,
+                mv_l1,
+                ref_idx_l1,
+            };
         }
     }
 }
@@ -692,10 +731,7 @@ pub(crate) fn predict_inter_macroblock(
                 .ref_idx_l0
                 .first()
                 .ok_or("P_16x16 without ref_idx_l0")?;
-            let mvd = *motion
-                .mvd_l0
-                .first()
-                .ok_or("P_16x16 without mvd_l0")?;
+            let mvd = *motion.mvd_l0.first().ok_or("P_16x16 without mvd_l0")?;
             let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
             let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
             commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, [0, 0], LIST_NOT_USED);
@@ -709,8 +745,7 @@ pub(crate) fn predict_inter_macroblock(
                     .get(part)
                     .ok_or("P_16x8 without ref_idx_l0")?;
                 let mvd = *motion.mvd_l0.get(part).ok_or("P_16x8 without mvd_l0")?;
-                let pred =
-                    predict_mv(store, cur, mb_idx, mb_width, part, 16, 8, ref_idx, slice_id);
+                let pred = predict_mv(store, cur, mb_idx, mb_width, part, 16, 8, ref_idx, slice_id);
                 let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
                 commit_rect(cur, 0, 8 * part, 16, 8, mv, ref_idx, [0, 0], LIST_NOT_USED);
             }
@@ -724,8 +759,7 @@ pub(crate) fn predict_inter_macroblock(
                     .get(part)
                     .ok_or("P_8x16 without ref_idx_l0")?;
                 let mvd = *motion.mvd_l0.get(part).ok_or("P_8x16 without mvd_l0")?;
-                let pred =
-                    predict_mv(store, cur, mb_idx, mb_width, part, 8, 16, ref_idx, slice_id);
+                let pred = predict_mv(store, cur, mb_idx, mb_width, part, 8, 16, ref_idx, slice_id);
                 let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
                 commit_rect(cur, 8 * part, 0, 8, 16, mv, ref_idx, [0, 0], LIST_NOT_USED);
             }
@@ -733,9 +767,7 @@ pub(crate) fn predict_inter_macroblock(
         }
         MbType::P8x8 | MbType::P8x8ref0 => {
             let motion = inter_motion(mb)?;
-            let sub = motion
-                .sub_mb_type
-                .ok_or("P_8x8 without sub_mb_type")?;
+            let sub = motion.sub_mb_type.ok_or("P_8x8 without sub_mb_type")?;
             let mut mvd_cursor = 0usize;
             for part in 0..4 {
                 let bx = 8 * (part % 2);
@@ -809,10 +841,19 @@ pub(crate) const B_SUB_MB_PARTS: [usize; 13] = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4,
 pub(crate) const B_SUB_MB_DIR: [crate::macroblock::BPredDir; 13] = {
     use crate::macroblock::BPredDir;
     [
-        BPredDir::Direct, BPredDir::L0,     BPredDir::L1,  BPredDir::Bi,
-        BPredDir::L0,     BPredDir::L0,     BPredDir::L1,  BPredDir::L1,
-        BPredDir::Bi,     BPredDir::Bi,
-        BPredDir::L0,     BPredDir::L1,     BPredDir::Bi,
+        BPredDir::Direct,
+        BPredDir::L0,
+        BPredDir::L1,
+        BPredDir::Bi,
+        BPredDir::L0,
+        BPredDir::L0,
+        BPredDir::L1,
+        BPredDir::L1,
+        BPredDir::Bi,
+        BPredDir::Bi,
+        BPredDir::L0,
+        BPredDir::L1,
+        BPredDir::Bi,
     ]
 };
 
@@ -853,13 +894,21 @@ pub(crate) fn predict_inter_b_macroblock(
             // Simplified direct mode: fill with (0,0) ref 0 for both L0 and L1.
             // Phase E.5 will replace this with the proper spatial/temporal derivation.
             for blk in cur.iter_mut() {
-                *blk = MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: 0 };
+                *blk = MvCell {
+                    mv: [0, 0],
+                    ref_idx: 0,
+                    mv_l1: [0, 0],
+                    ref_idx_l1: 0,
+                };
             }
             Ok(())
         }
         MbType::BL016x16 => {
             let motion = inter_motion(mb)?;
-            let ref_idx = *motion.ref_idx_l0.first().ok_or("BL0_16x16 without ref_idx_l0")?;
+            let ref_idx = *motion
+                .ref_idx_l0
+                .first()
+                .ok_or("BL0_16x16 without ref_idx_l0")?;
             let mvd = *motion.mvd_l0.first().ok_or("BL0_16x16 without mvd_l0")?;
             let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
             let mv = [pred[0] + mvd.0, pred[1] + mvd.1];
@@ -868,21 +917,34 @@ pub(crate) fn predict_inter_b_macroblock(
         }
         MbType::BL116x16 => {
             let motion = inter_motion(mb)?;
-            let ref_idx_l1 = *motion.ref_idx_l1.first().ok_or("BL1_16x16 without ref_idx_l1")?;
+            let ref_idx_l1 = *motion
+                .ref_idx_l1
+                .first()
+                .ok_or("BL1_16x16 without ref_idx_l1")?;
             let mvd_l1 = *motion.mvd_l1.first().ok_or("BL1_16x16 without mvd_l1")?;
-            let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id);
+            let pred_l1 = predict_mv_l1(
+                store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id,
+            );
             let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
             commit_rect(cur, 0, 0, 16, 16, [0, 0], LIST_NOT_USED, mv_l1, ref_idx_l1);
             Ok(())
         }
         MbType::BBi16x16 => {
             let motion = inter_motion(mb)?;
-            let ref_idx = *motion.ref_idx_l0.first().ok_or("BBi_16x16 without ref_idx_l0")?;
+            let ref_idx = *motion
+                .ref_idx_l0
+                .first()
+                .ok_or("BBi_16x16 without ref_idx_l0")?;
             let mvd_l0 = *motion.mvd_l0.first().ok_or("BBi_16x16 without mvd_l0")?;
-            let ref_idx_l1 = *motion.ref_idx_l1.first().ok_or("BBi_16x16 without ref_idx_l1")?;
+            let ref_idx_l1 = *motion
+                .ref_idx_l1
+                .first()
+                .ok_or("BBi_16x16 without ref_idx_l1")?;
             let mvd_l1 = *motion.mvd_l1.first().ok_or("BBi_16x16 without mvd_l1")?;
             let pred = predict_mv(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx, slice_id);
-            let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id);
+            let pred_l1 = predict_mv_l1(
+                store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id,
+            );
             let mv = [pred[0] + mvd_l0.0, pred[1] + mvd_l0.1];
             let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
             commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, mv_l1, ref_idx_l1);
@@ -895,21 +957,33 @@ pub(crate) fn predict_inter_b_macroblock(
             let mut l0_cur = 0usize;
             let mut l1_cur = 0usize;
             for part in 0..2usize {
-                let dir = motion.pred_dirs.get(part).copied().ok_or("B16x8/B8x16 without pred_dirs")?;
+                let dir = motion
+                    .pred_dirs
+                    .get(part)
+                    .copied()
+                    .ok_or("B16x8/B8x16 without pred_dirs")?;
                 let ref_idx = if dir == BPredDir::L0 || dir == BPredDir::Bi {
-                    *motion.ref_idx_l0.get(part).ok_or("B2part without ref_idx_l0")?
+                    *motion
+                        .ref_idx_l0
+                        .get(part)
+                        .ok_or("B2part without ref_idx_l0")?
                 } else {
                     LIST_NOT_USED
                 };
                 let ref_idx_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
-                    *motion.ref_idx_l1.get(part).ok_or("B2part without ref_idx_l1")?
+                    *motion
+                        .ref_idx_l1
+                        .get(part)
+                        .ok_or("B2part without ref_idx_l1")?
                 } else {
                     LIST_NOT_USED
                 };
                 let mv = if dir == BPredDir::L0 || dir == BPredDir::Bi {
                     let mvd = *motion.mvd_l0.get(l0_cur).ok_or("B2part without mvd_l0")?;
                     l0_cur += 1;
-                    let pred = predict_mv(store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx, slice_id);
+                    let pred = predict_mv(
+                        store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx, slice_id,
+                    );
                     [pred[0] + mvd.0, pred[1] + mvd.1]
                 } else {
                     [0, 0]
@@ -917,12 +991,18 @@ pub(crate) fn predict_inter_b_macroblock(
                 let mv_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
                     let mvd = *motion.mvd_l1.get(l1_cur).ok_or("B2part without mvd_l1")?;
                     l1_cur += 1;
-                    let pred_l1 = predict_mv_l1(store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx_l1, slice_id);
+                    let pred_l1 = predict_mv_l1(
+                        store, cur, mb_idx, mb_width, part, part_w, part_h, ref_idx_l1, slice_id,
+                    );
                     [pred_l1[0] + mvd.0, pred_l1[1] + mvd.1]
                 } else {
                     [0, 0]
                 };
-                let (px, py) = if is_16x8 { (0, 8 * part) } else { (8 * part, 0) };
+                let (px, py) = if is_16x8 {
+                    (0, 8 * part)
+                } else {
+                    (8 * part, 0)
+                };
                 commit_rect(cur, px, py, part_w, part_h, mv, ref_idx, mv_l1, ref_idx_l1);
             }
             Ok(())
@@ -936,8 +1016,16 @@ pub(crate) fn predict_inter_b_macroblock(
                 let bx = 8 * (part % 2);
                 let by = 8 * (part / 2);
                 let sub_type = sub_types[part] as usize;
-                let dir = if sub_type < 13 { B_SUB_MB_DIR[sub_type] } else { BPredDir::Direct };
-                let n_sub = if sub_type < 13 { B_SUB_MB_PARTS[sub_type] } else { 1 };
+                let dir = if sub_type < 13 {
+                    B_SUB_MB_DIR[sub_type]
+                } else {
+                    BPredDir::Direct
+                };
+                let n_sub = if sub_type < 13 {
+                    B_SUB_MB_PARTS[sub_type]
+                } else {
+                    1
+                };
 
                 if dir == BPredDir::Direct {
                     // Simplified direct mode for B_Direct_8x8 sub-partition.
@@ -946,12 +1034,18 @@ pub(crate) fn predict_inter_b_macroblock(
                 }
 
                 let ref_idx = if dir == BPredDir::L0 || dir == BPredDir::Bi {
-                    *motion.ref_idx_l0.get(part).ok_or("BB8x8 without ref_idx_l0")?
+                    *motion
+                        .ref_idx_l0
+                        .get(part)
+                        .ok_or("BB8x8 without ref_idx_l0")?
                 } else {
                     LIST_NOT_USED
                 };
                 let ref_idx_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
-                    *motion.ref_idx_l1.get(part).ok_or("BB8x8 without ref_idx_l1")?
+                    *motion
+                        .ref_idx_l1
+                        .get(part)
+                        .ok_or("BB8x8 without ref_idx_l1")?
                 } else {
                     LIST_NOT_USED
                 };
@@ -961,7 +1055,9 @@ pub(crate) fn predict_inter_b_macroblock(
                     let mv = if dir == BPredDir::L0 || dir == BPredDir::Bi {
                         let mvd = *motion.mvd_l0.get(l0_cur).ok_or("BB8x8 without mvd_l0")?;
                         l0_cur += 1;
-                        let pred = predict_mv_sub(store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx, slice_id);
+                        let pred = predict_mv_sub(
+                            store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx, slice_id,
+                        );
                         [pred[0] + mvd.0, pred[1] + mvd.1]
                     } else {
                         [0, 0]
@@ -969,7 +1065,9 @@ pub(crate) fn predict_inter_b_macroblock(
                     let mv_l1 = if dir == BPredDir::L1 || dir == BPredDir::Bi {
                         let mvd = *motion.mvd_l1.get(l1_cur).ok_or("BB8x8 without mvd_l1")?;
                         l1_cur += 1;
-                        let pred_l1 = predict_mv_sub_l1(store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx_l1, slice_id);
+                        let pred_l1 = predict_mv_sub_l1(
+                            store, cur, mb_idx, mb_width, spx, spy, spw, ref_idx_l1, slice_id,
+                        );
                         [pred_l1[0] + mvd.0, pred_l1[1] + mvd.1]
                     } else {
                         [0, 0]
@@ -1057,7 +1155,12 @@ mod tests {
     use super::*;
 
     fn cell(mv: [i32; 2], ref_idx: i32) -> MvCell {
-        MvCell { mv, ref_idx, mv_l1: [0, 0], ref_idx_l1: LIST_NOT_USED }
+        MvCell {
+            mv,
+            ref_idx,
+            mv_l1: [0, 0],
+            ref_idx_l1: LIST_NOT_USED,
+        }
     }
 
     /// A store with a single committed macroblock.
@@ -1357,6 +1460,9 @@ mod tests {
         let v = 40;
         let scaled = (v * 256 + 256) >> 9;
         assert_eq!(scale_field_mv_y(v, 1, 1), scaled);
-        assert!(scaled < v, "same-parity field scaling should shrink a frame-line MV");
+        assert!(
+            scaled < v,
+            "same-parity field scaling should shrink a frame-line MV"
+        );
     }
 }

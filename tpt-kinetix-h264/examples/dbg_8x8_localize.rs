@@ -10,7 +10,13 @@ fn run(cmd: &mut Command) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-fn generate(dir: &std::path::Path, tag: &str, w: u32, h: u32, dct8x8: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+fn generate(
+    dir: &std::path::Path,
+    tag: &str,
+    w: u32,
+    h: u32,
+    dct8x8: bool,
+) -> Option<(Vec<u8>, Vec<u8>)> {
     let h264 = dir.join(format!("loc_{tag}.h264"));
     let refyuv = dir.join(format!("loc_{tag}.yuv"));
     let x264 = if dct8x8 {
@@ -20,15 +26,48 @@ fn generate(dir: &std::path::Path, tag: &str, w: u32, h: u32, dct8x8: bool) -> O
     };
     let inp = format!("mandelbrot=size={w}x{h}:rate=1");
     let args: Vec<&str> = vec![
-        "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &inp,
-        "-frames:v", "1", "-c:v", "libx264", "-profile:v", "high", "-g", "1", "-bf", "0",
-        "-pix_fmt", "yuv420p", "-x264-params", x264, h264.to_str()?,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &inp,
+        "-frames:v",
+        "1",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "high",
+        "-g",
+        "1",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        x264,
+        h264.to_str()?,
     ];
-    if !run(Command::new("ffmpeg").args(&args)) { return None; }
+    if !run(Command::new("ffmpeg").args(&args)) {
+        return None;
+    }
     if !run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y", "-i", h264.to_str()?,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p", refyuv.to_str()?,
-    ])) { return None; }
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        h264.to_str()?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        refyuv.to_str()?,
+    ])) {
+        return None;
+    }
     Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
 
@@ -39,7 +78,10 @@ fn main() {
         let tag = if dct8x8 { "y8" } else { "y4" };
         let (annexb, refy) = match generate(&dir, tag, 64, 48, dct8x8) {
             Some(t) => t,
-            None => { eprintln!("[{tag}] generate failed"); continue; }
+            None => {
+                eprintln!("[{tag}] generate failed");
+                continue;
+            }
         };
         let mut dec = H264Decoder::new();
         let pkt = Packet {
@@ -53,7 +95,7 @@ fn main() {
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = w; // yuv420p luma stride == width for raw ffmpeg output
-        // Compare per macroblock (16x16) of the luma plane.
+                        // Compare per macroblock (16x16) of the luma plane.
         let luma_bytes = w * h;
         let ours = &frame.data[..luma_bytes];
         let refl = &refy[..luma_bytes];
@@ -72,12 +114,17 @@ fn main() {
                         let o = ours[py * stride + px] as i32;
                         let r = refl[py * stride + px] as i32;
                         let d = (o - r).abs();
-                        if d > md { md = d; }
-                        sum += d; cnt += 1;
+                        if d > md {
+                            md = d;
+                        }
+                        sum += d;
+                        cnt += 1;
                     }
                 }
                 let avg = sum / cnt;
-                if md > worst { worst = md; }
+                if md > worst {
+                    worst = md;
+                }
                 if md > 0 {
                     eprintln!("[{tag}] MB({mbx},{mby}) max={md} avg={avg}");
                 }

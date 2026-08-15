@@ -155,7 +155,13 @@ fn av1_phase_c_keyframe_psnr() {
     };
 
     // --- Kinetix decode ---
-    eprintln!("seq payload hex: {}", frame_obus.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    eprintln!(
+        "seq payload hex: {}",
+        frame_obus
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
     for o in tpt_kinetix_av1::obu::parse_obu_sequence(&frame_obus) {
         eprintln!(
             "  obu_type={:?} ext={} size={} plen={}",

@@ -74,7 +74,7 @@ impl SeqParameterSet {
                 .read_bit()
                 .context("qpprime_y_zero_transform_bypass_flag")?;
             scaling = ScalingLists::parse_sps(&mut r, chroma_format_idc)?;
-         }
+        }
 
         let log2_max_frame_num_minus4 = r.read_ue().context("log2_max_frame_num_minus4")?;
         // Per spec (§7.4.2.1.1) this is in 0..=12; downstream code widens it to a
@@ -184,7 +184,10 @@ impl SeqParameterSet {
     /// implausible dimensions afterwards (see `H264Decoder::decode_impl`), so
     /// saturating here only affects streams that are already malformed.
     pub fn pic_width_pixels(&self) -> u32 {
-        let raw = self.pic_width_in_mbs_minus1.saturating_add(1).saturating_mul(16);
+        let raw = self
+            .pic_width_in_mbs_minus1
+            .saturating_add(1)
+            .saturating_mul(16);
         let crop = self
             .frame_crop_left_offset
             .saturating_add(self.frame_crop_right_offset)
@@ -287,7 +290,11 @@ mod tests {
     }
     impl BitWriter {
         fn new() -> Self {
-            Self { buf: Vec::new(), cur: 0, nbits: 0 }
+            Self {
+                buf: Vec::new(),
+                cur: 0,
+                nbits: 0,
+            }
         }
         fn bit(&mut self, b: u8) {
             self.cur = (self.cur << 1) | (b & 1);

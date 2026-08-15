@@ -127,9 +127,8 @@ fn p_slice_cavlc_parse_succeeds() {
         },
     };
 
-    let header =
-        SliceHeader::parse_with_context(&p.rbsp, p.nal_unit_type, p.nal_ref_idc, &ctx)
-            .expect("slice header");
+    let header = SliceHeader::parse_with_context(&p.rbsp, p.nal_unit_type, p.nal_ref_idc, &ctx)
+        .expect("slice header");
 
     let mb_cols = sps.pic_width_in_mbs_minus1 + 1;
     let mb_rows = sps.pic_height_in_map_units_minus1 + 1;

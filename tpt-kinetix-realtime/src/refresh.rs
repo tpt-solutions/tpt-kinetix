@@ -73,19 +73,25 @@ mod tests {
         for i in 0..8u64 {
             let mask = sched.mask_for_frame(i);
             assert_eq!(mask.len(), 1);
-        for r in 0..8 {
-            if sched.is_intra(i, r) {
-                seen[r as usize] = true;
+            for r in 0..8 {
+                if sched.is_intra(i, r) {
+                    seen[r as usize] = true;
+                }
             }
         }
-        }
-        assert!(seen.iter().all(|&b| b), "every row must be intra at least once");
+        assert!(
+            seen.iter().all(|&b| b),
+            "every row must be intra at least once"
+        );
     }
 
     #[test]
     fn multi_row_per_frame_wraps_and_covers() {
         // 17 rows over 3 frames -> 6 rows/frame, wrapping on the last.
-        let sched = IntraRefreshScheduler { rows: 17, period: 3 };
+        let sched = IntraRefreshScheduler {
+            rows: 17,
+            period: 3,
+        };
         assert_eq!(sched.rows_per_frame(), 6);
         assert_eq!(sched.mask_len(), 3); // ceil(17/8) = 3
         let mut seen = [false; 17];
@@ -96,7 +102,10 @@ mod tests {
                 }
             }
         }
-        assert!(seen.iter().all(|&b| b), "all 17 rows covered within the period");
+        assert!(
+            seen.iter().all(|&b| b),
+            "all 17 rows covered within the period"
+        );
     }
 
     #[test]
@@ -110,6 +119,13 @@ mod tests {
     fn mask_len_matches_row_count() {
         assert_eq!(IntraRefreshScheduler { rows: 8, period: 8 }.mask_len(), 1);
         assert_eq!(IntraRefreshScheduler { rows: 9, period: 9 }.mask_len(), 2);
-        assert_eq!(IntraRefreshScheduler { rows: 17, period: 3 }.mask_len(), 3);
+        assert_eq!(
+            IntraRefreshScheduler {
+                rows: 17,
+                period: 3
+            }
+            .mask_len(),
+            3
+        );
     }
 }

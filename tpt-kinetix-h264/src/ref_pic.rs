@@ -435,8 +435,12 @@ impl Dpb {
     /// Equivalent to [`Dpb::mark_decoded_picture`] with
     /// [`DecRefPicMarking::SlidingWindow`], which cannot fail.
     pub fn push(&mut self, entry: DpbEntry, ctx: PicNumContext, max_num_ref_frames: u32) {
-        let result =
-            self.mark_decoded_picture(entry, &DecRefPicMarking::SlidingWindow, ctx, max_num_ref_frames);
+        let result = self.mark_decoded_picture(
+            entry,
+            &DecRefPicMarking::SlidingWindow,
+            ctx,
+            max_num_ref_frames,
+        );
         debug_assert!(
             result.is_ok(),
             "sliding-window marking issues no MMCO commands and cannot fail"
@@ -600,9 +604,7 @@ impl Dpb {
                         .then(|| max_long_term_frame_idx_plus1 as i32 - 1);
                     self.max_long_term_frame_idx = max;
                     for entry in &mut self.entries {
-                        if entry.is_long_term
-                            && max.is_none_or(|m| entry.long_term_pic_num > m)
-                        {
+                        if entry.is_long_term && max.is_none_or(|m| entry.long_term_pic_num > m) {
                             entry.is_long_term = false;
                         }
                     }
@@ -657,7 +659,9 @@ impl Dpb {
     /// `keep` (the picture currently being assigned that index).
     fn evict_long_term_frame_idx(&mut self, long_term_frame_idx: i32, keep: Option<usize>) {
         for (i, entry) in self.entries.iter_mut().enumerate() {
-            if Some(i) != keep && entry.is_long_term && entry.long_term_pic_num == long_term_frame_idx
+            if Some(i) != keep
+                && entry.is_long_term
+                && entry.long_term_pic_num == long_term_frame_idx
             {
                 entry.is_long_term = false;
             }
@@ -1039,8 +1043,7 @@ impl FieldRef {
             let mut cr = vec![0u8; chroma_w * cfh];
             for y in 0..fh {
                 let sy = 2 * y + self.bottom as usize;
-                luma[y * w..(y + 1) * w]
-                    .copy_from_slice(&self.frame.data[sy * w..(sy + 1) * w]);
+                luma[y * w..(y + 1) * w].copy_from_slice(&self.frame.data[sy * w..(sy + 1) * w]);
             }
             for y in 0..cfh {
                 let sy = 2 * y + self.bottom as usize;
@@ -1413,7 +1416,6 @@ mod tests {
         .expect("mmco 6 stores a long-term reference");
     }
 
-
     fn frame_nums(list: &[DpbEntry]) -> Vec<u32> {
         list.iter().map(|e| e.frame_num).collect()
     }
@@ -1422,11 +1424,35 @@ mod tests {
     fn poc_type0_idr_resets_and_increments() {
         let sps = sps(0, 4, 0, 1); // MaxPicOrderCntLsb = 256
         let mut state = PocState::default();
-        let poc = derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
+        let poc =
+            derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state)
+                .unwrap();
         assert_eq!(poc, 0);
-        let poc = derive_pic_order_cnt(&sps, false, true, 1, Some(1), false, false, None, &mut state).unwrap();
+        let poc = derive_pic_order_cnt(
+            &sps,
+            false,
+            true,
+            1,
+            Some(1),
+            false,
+            false,
+            None,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(poc, 1);
-        let poc = derive_pic_order_cnt(&sps, false, true, 2, Some(2), false, false, None, &mut state).unwrap();
+        let poc = derive_pic_order_cnt(
+            &sps,
+            false,
+            true,
+            2,
+            Some(2),
+            false,
+            false,
+            None,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(poc, 2);
     }
 
@@ -1439,15 +1465,48 @@ mod tests {
         // lsb 6 (poc 6), then lsb 13 (diff 7 <= 8, no wrap) → poc 13,
         // then lsb 2: 13 - 2 = 11 >= 8 → msb += 16 → 18.
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(6), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                1,
+                Some(6),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             6
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 2, Some(13), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                2,
+                Some(13),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             13
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 3, Some(2), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                3,
+                Some(2),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             18
         );
     }
@@ -1459,11 +1518,33 @@ mod tests {
         derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
         // lsb 2 (poc 2), then lsb 14: 14 - 2 = 12 > 8 → msb -= 16 → -2.
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(2), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                1,
+                Some(2),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             2
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 2, Some(14), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                2,
+                Some(14),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             -2
         );
     }
@@ -1474,7 +1555,18 @@ mod tests {
         let mut state = PocState::default();
         derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
         // Non-reference picture with lsb 50 must not update prev state.
-        let poc = derive_pic_order_cnt(&sps, false, false, 1, Some(50), false, false, None, &mut state).unwrap();
+        let poc = derive_pic_order_cnt(
+            &sps,
+            false,
+            false,
+            1,
+            Some(50),
+            false,
+            false,
+            None,
+            &mut state,
+        )
+        .unwrap();
         assert_eq!(poc, 50);
         assert_eq!(state.prev_top_field_order_cnt, 0);
         assert_eq!(state.prev_bottom_field_order_cnt, 0);
@@ -1485,9 +1577,21 @@ mod tests {
     fn poc_type2_doubles_frame_num() {
         let sps = sps(2, 0, 4, 1); // MaxFrameNum = 256
         let mut state = PocState::default();
-        assert_eq!(derive_pic_order_cnt(&sps, true, true, 0, None, false, false, None, &mut state).unwrap(), 0);
-        assert_eq!(derive_pic_order_cnt(&sps, false, true, 1, None, false, false, None, &mut state).unwrap(), 2);
-        assert_eq!(derive_pic_order_cnt(&sps, false, true, 2, None, false, false, None, &mut state).unwrap(), 4);
+        assert_eq!(
+            derive_pic_order_cnt(&sps, true, true, 0, None, false, false, None, &mut state)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            derive_pic_order_cnt(&sps, false, true, 1, None, false, false, None, &mut state)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            derive_pic_order_cnt(&sps, false, true, 2, None, false, false, None, &mut state)
+                .unwrap(),
+            4
+        );
     }
 
     /// §8.2.1.3 — field-coded `pic_order_cnt_type == 2`: the bottom field gets
@@ -1509,7 +1613,8 @@ mod tests {
         );
         // Next frame's top field: (1 * 2) + 0 = 2 (frame_num advances, top=+0)
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, None, true, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, false, true, 1, None, true, false, None, &mut state)
+                .unwrap(),
             2
         );
         assert_eq!(
@@ -1528,22 +1633,26 @@ mod tests {
         let mut state = PocState::default();
         // IDR top field of frame 0: lsb 0 → 0
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, &mut state)
+                .unwrap(),
             0
         );
         // IDR bottom field of frame 0: lsb 1 → 1
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, Some(1), true, true, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, true, true, 0, Some(1), true, true, None, &mut state)
+                .unwrap(),
             1
         );
         // Frame 1 top field: lsb 2 → 2
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(2), true, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, false, true, 1, Some(2), true, false, None, &mut state)
+                .unwrap(),
             2
         );
         // Frame 1 bottom field: lsb 3 → 3
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(3), true, true, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, false, true, 1, Some(3), true, true, None, &mut state)
+                .unwrap(),
             3
         );
     }
@@ -1558,7 +1667,18 @@ mod tests {
         let mut state = PocState::default();
         // Frame 0: top lsb 0, delta bottom 4 → top = 0, bottom = 4.
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, Some(4), &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                true,
+                true,
+                0,
+                Some(0),
+                false,
+                false,
+                Some(4),
+                &mut state
+            )
+            .unwrap(),
             0
         );
         assert_eq!(state.prev_top_field_order_cnt, 0);
@@ -1566,7 +1686,18 @@ mod tests {
         // Frame 1: top lsb 2 → msb 0 (0 is the larger prev field, lsb 0; 2 > 0
         // but diff 2 < half(128)) → top = 2, bottom = 2 + 6 = 8.
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(2), false, false, Some(6), &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                1,
+                Some(2),
+                false,
+                false,
+                Some(6),
+                &mut state
+            )
+            .unwrap(),
             2
         );
         assert_eq!(state.prev_top_field_order_cnt, 2);
@@ -1583,7 +1714,18 @@ mod tests {
         derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, &mut state).unwrap();
         // A top field with delta present must NOT fold the delta into its POC.
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(5), true, false, Some(99), &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                1,
+                Some(5),
+                true,
+                false,
+                Some(99),
+                &mut state
+            )
+            .unwrap(),
             5
         );
     }
@@ -1872,7 +2014,10 @@ mod tests {
         // Storing frame_num 1 must free a slot: FrameNumWrap(15) = −1 <
         // FrameNumWrap(0) = 0, so the pre-wrap picture is the victim.
         dpb.push(entry(1, 50), ctx(1), 2);
-        assert_eq!(frame_nums(&dpb.iter().cloned().collect::<Vec<_>>()), vec![0, 1]);
+        assert_eq!(
+            frame_nums(&dpb.iter().cloned().collect::<Vec<_>>()),
+            vec![0, 1]
+        );
     }
 
     // ---- §8.2.5 decoded reference picture marking ------------------------
@@ -1940,8 +2085,8 @@ mod tests {
         assert_eq!(dpb.len(), 3);
         assert_eq!(dpb.num_long_term(), 1);
 
-        let outcome = mark(&mut dpb, entry(3, 6), &adaptive(&[MmcoOp::ResetAll]), 4)
-            .expect("mmco 5");
+        let outcome =
+            mark(&mut dpb, entry(3, 6), &adaptive(&[MmcoOp::ResetAll]), 4).expect("mmco 5");
 
         assert!(outcome.mmco5);
         assert!(!outcome.current_is_long_term);
@@ -1964,11 +2109,33 @@ mod tests {
         let mut state = PocState::default();
         derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(100), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                1,
+                Some(100),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             100
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 2, Some(200), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                2,
+                Some(200),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             200
         );
 
@@ -1976,7 +2143,18 @@ mod tests {
         // picture's lsb of 2 is read as a wrap: 200 − 2 >= 128 → msb += 256.
         let mut stale = state.clone();
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 3, Some(2), false, false, None, &mut stale).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                3,
+                Some(2),
+                false,
+                false,
+                None,
+                &mut stale
+            )
+            .unwrap(),
             258
         );
 
@@ -1985,7 +2163,18 @@ mod tests {
         assert_eq!(state.prev_bottom_field_order_cnt, 0);
         assert_eq!(state.prev_frame_num, 0);
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 3, Some(2), false, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(
+                &sps,
+                false,
+                true,
+                3,
+                Some(2),
+                false,
+                false,
+                None,
+                &mut state
+            )
+            .unwrap(),
             2
         );
     }
@@ -2288,7 +2477,12 @@ mod tests {
             4,
         )
         .unwrap_err();
-        assert_eq!(err, MmcoError::MissingLongTerm { long_term_pic_num: 2 });
+        assert_eq!(
+            err,
+            MmcoError::MissingLongTerm {
+                long_term_pic_num: 2
+            }
+        );
         assert!(dpb.is_empty());
     }
 

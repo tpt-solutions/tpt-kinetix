@@ -534,7 +534,12 @@ pub fn deblock_luma_mb(
     // Interior horizontal edges; segments grouped by column, p-side row
     // `ei-1`, q-side row `ei`.
     for ei in 1..=3 {
-        let p_blocks = [(ei - 1) * 4, (ei - 1) * 4 + 1, (ei - 1) * 4 + 2, (ei - 1) * 4 + 3];
+        let p_blocks = [
+            (ei - 1) * 4,
+            (ei - 1) * 4 + 1,
+            (ei - 1) * 4 + 2,
+            (ei - 1) * 4 + 3,
+        ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, cur.qp);
@@ -689,8 +694,18 @@ mod tests {
         // quarter-samples: bS = 1 per the motion-vector rule.
         let mut a = info(MbType::PL016x16, false);
         let mut b = info(MbType::PL016x16, false);
-        a.cells = [MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
-        b.cells = [MvCell { mv: [4, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
+        a.cells = [MvCell {
+            mv: [0, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
+        b.cells = [MvCell {
+            mv: [4, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
         assert_eq!(bs_boundary(&a, &b), 1);
     }
 
@@ -698,8 +713,18 @@ mod tests {
     fn bs_different_ref_idx_without_coeffs_is_one() {
         let mut a = info(MbType::PL016x16, false);
         let mut b = info(MbType::PL016x16, false);
-        a.cells = [MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
-        b.cells = [MvCell { mv: [0, 0], ref_idx: 1, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
+        a.cells = [MvCell {
+            mv: [0, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
+        b.cells = [MvCell {
+            mv: [0, 0],
+            ref_idx: 1,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
         assert_eq!(bs_boundary(&a, &b), 1);
     }
 
@@ -707,8 +732,18 @@ mod tests {
     fn bs_small_mv_difference_without_coeffs_is_zero() {
         let mut a = info(MbType::PL016x16, false);
         let mut b = info(MbType::PL016x16, false);
-        a.cells = [MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
-        b.cells = [MvCell { mv: [3, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16];
+        a.cells = [MvCell {
+            mv: [0, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
+        b.cells = [MvCell {
+            mv: [3, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        }; 16];
         assert_eq!(bs_boundary(&a, &b), 0);
     }
 

@@ -538,6 +538,153 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > `cargo test -p tpt-kinetix-av1 --lib` is green (54 passed, 3 new).
 > `pixel_exact` correctly stays `false`.
 
+> **2026-08-16 session note (cont'd once more) — four more real desync bugs
+> found and fixed by continuing to trace the same top-left `solid_red`
+> block; still not pixel-exact, root cause still open.** With the partition
+> fix landed, the block reached was `bsize=BLOCK_32X32`/`TX_32X32`, `eob=1`,
+> `quant[0]=-1`, still giving a flat-wrong residual (`0`, not `-47`). Kept
+> tracing the exact symbol-read sequence against AV1 spec §5.11.7
+> `intra_frame_mode_info()`/§8.3.2 rather than guessing further, and found:
+>
+> 1. **Wrong read order** (the big one): spec's order is `segment_id` →
+>    `skip` → [cdef/delta_q/delta_lf] → `y_mode` → `uv_mode` → `filter_intra`
+>    → (from the caller) `tx_depth`. `decode_intra_block` read `y_mode` and
+>    `uv_mode` *first*, then `segment_id`/`skip` — since every read shares
+>    one arithmetic-coded bit position, this order mismatch desynced
+>    **every intra block in every frame** starting at the very first symbol
+>    read. Fixed by reordering to match spec exactly.
+> 2. **Missing `filter_intra_mode_info()` read** (AV1 spec §5.11.24): when
+>    `enable_filter_intra` (confirmed `true` for the `solid_red` seq header)
+>    `&& y_mode==DC_PRED && PaletteSizeY==0 && max(block_w,block_h)<=32`, a
+>    `use_filter_intra` symbol (and `filter_intra_mode` if it's 1) is
+>    mandatory — our `solid_red` block satisfies every condition (DC_PRED,
+>    32×32). The decoder never read it at all. Added
+>    `ModeCdfs::read_filter_intra_mode_info` (new `DEFAULT_FILTER_INTRA_CDF`/
+>    `DEFAULT_FILTER_INTRA_MODE_CDF` tables transcribed from the spec's
+>    "Additional tables" section) and call it between `uv_mode` and
+>    `tx_depth`. The decoded mode isn't wired into prediction yet
+>    (`predict_intra_block` has no recursive filter-intra predictor) — only
+>    the *read* was the urgent fix, to stay in sync; wiring the actual
+>    filter-intra prediction is separate future work.
+> 3. **Wrong `intra_frame_y_mode` context derivation** (spec §8.3.2): spec
+>    uses `TileIntraFrameYModeCdf[abovemode][leftmode]` — `abovemode`
+>    (`Intra_Mode_Context[...]`, 0-4) and `leftmode` used as two
+>    *independent* axes of a 2-D context. The code instead summed them
+>    (`y_ctx = above+left`) and re-split the sum
+>    (`y_ctx.min(4)`, `(y_ctx/5).min(4)`) — a completely different (wrong)
+>    derivation that only coincidentally matches when both neighbours are
+>    DC (context 0), i.e. only for the very first block in a tile. Fixed at
+>    both call sites (`decode_intra_block` and the intra-within-inter-frame
+>    path in `decode_inter_block`) to pass `INTRA_MODE_CONTEXT[above_mode]`/
+>    `INTRA_MODE_CONTEXT[left_mode]` straight through as separate arguments.
+> 4. **`read_tx_size` was a different, wrong syntax model entirely** (spec
+>    §5.11.15): the real syntax reads *one* ternary `tx_depth` symbol (CDF
+>    bucket chosen by `Max_Tx_Depth[MiSize]`, new `MAX_TX_DEPTH_TABLE`
+>    transcribed from the spec) and applies `Split_Tx_Size` `tx_depth`
+>    times. The old code instead looped, reading up to 3 *separate* binary
+>    "go bigger?" symbols and breaking on the first 0 — a different syntax
+>    tree needing a different (and different number of) bitstream reads
+>    whenever `TxMode == TX_MODE_SELECT` (the common case). Rewrote
+>    `read_tx_size` to read the single symbol and apply
+>    `max_tx.saturating_sub(tx_depth)`; added `tx_depth_context` (approximates
+>    spec's width/height neighbour comparison using the already-tracked
+>    `tx_above`/`tx_left` size-class arrays, since this crate only
+>    reconstructs square transforms). Also fixed the call-site gating: spec's
+>    `allowSelect = !skip || !is_inter` is *always true* for an intra block
+>    (`is_inter` is false), so `skip` must not gate this read on either
+>    intra call site (the keyframe path and the intra-within-inter-frame
+>    path) — only the genuine inter-block call site's existing `!skip` gate
+>    was already correct and left unchanged. The old intra-side `!skip` gate
+>    meant every skipped intra block silently ate zero bits where the real
+>    encoder wrote a `tx_depth` symbol, desyncing everything after the next
+>    skip.
+>
+> **Still not pixel-exact after all four.** Re-ran the `solid_red` trace:
+> the *very first* block's own values are unaffected by fixes 1 and 4 in
+> isolation (no prior block exists to have mis-set context, and skip=false
+> for this block so the tx_size gating fix doesn't change its own read
+> either) — its context inputs are all "no neighbour" defaults either way.
+> Fix 3 also doesn't move it (both neighbours are still DC-default at the
+> very first block, so old and new formulas coincide there). Only fix 2
+> (filter_intra) could have changed this specific block's trace, and it
+> did (`eob`/`quant[0]` changed from `1`/`-1` to `1`/`11` — sign flipped,
+> magnitude changed) but still not to the `-47`-equivalent value dav1d
+> implies. **This means there is at least one more bug in the read
+> sequence for *this exact block*** (skip → y_mode → uv_mode → filter_intra
+> → tx_depth → coeffs, all six reads now individually spec-checked and
+> fixed where wrong) — either a still-wrong default CDF *value* (not
+> selection logic) somewhere in `cdf_tables_gen.rs`, or something upstream
+> of all of this (tile-group header parsing, sequence-header bit position,
+> etc.) that hasn't been re-audited since the entropy-coded reads it feeds
+> were this thoroughly wrong. Given the density of real, independently
+> verified bugs found through direct one-by-one spec comparison this
+> session (8 total: transform basis, `dqDenom`, partition hasRows/hasCols,
+> `partition_context`, mode/skip read order, `filter_intra_mode_info`,
+> `intra_frame_y_mode` context, `read_tx_size` model+gating), continuing
+> this way has a real but shrinking hit rate per hour; the next session
+> should strongly consider building an independent (e.g. Python,
+> spec-transcribed like `coeff.rs`'s existing oracle) reference for the
+> *entire* `intra_frame_mode_info()` + `coeffs()` symbol sequence over a
+> real captured bitstream, rather than continuing to spot-check individual
+> syntax elements by re-reading spec sections.
+>
+> Added regression tests: `intra_y_mode_context_uses_above_left_as_independent_axes`,
+> `tx_depth_bucket_selection_matches_max_tx_depth_table`,
+> `read_tx_size_never_panics_and_stays_in_range`. `cargo test -p
+> tpt-kinetix-av1 --lib` is green (57 passed, 3 new). `pixel_exact`
+> correctly stays `false`.
+
+> **2026-08-16 session note (cont'd again) — narrowed the remaining desync
+> to the `coeff_base_eob`/`coeff_br` magnitude read for `TX_32X32`, an
+> untested size/bucket in the existing oracle.** Re-ran the `solid_red`
+> trace (`KINETIX_AV1_DBG=1 cargo test -p tpt-kinetix-test-utils --test
+> dbg_av1_solid_red -- --nocapture`) after the four fixes above landed:
+> `decode_intra_block` now reaches `bsize=BLOCK_32X32`, `luma_tx=TX_32X32`,
+> `skip=false`, `filter_intra=None`, `eob=1`, `quant[0]=11` (positive),
+> dequantizing to `770` and reconstructing a flat residual of `+6` — pixel
+> `134`, vs dav1d's flat `81` (residual `-47`). Used `inverse_transform`
+> directly (temporary scratch test, since removed) to confirm the
+> reconstruction math itself is fine and linear at this size: a dequantized
+> DC of `-6000..-6032` reproduces `-47` exactly. Since `dc_dequant(128) =
+> 140` and `dqDenom(TX_32X32) = 2`, that means the real `quant[0]` has to be
+> **≈ -86**, not `+11` — both the sign and the magnitude are wrong, and `-86`
+> is well past the `NUM_BASE_LEVELS + COEFF_BASE_RANGE = 14` threshold,
+> i.e. the real bitstream almost certainly drives `coeff_base_eob` + the
+> `coeff_br` loop all the way to their cap (level 15) and then reads the
+> Exp-Golomb tail — our decoder's `coeff_br` loop is instead terminating
+> early (final level 11 < 15, golomb never triggered). Traced every syntax
+> element up to this coefficient against spec §5.11.39 by hand
+> (`all_zero`/`txb_skip` ctx, `transform_type` — correctly *not* read since
+> `get_tx_set_intra` returns `TX_SET_DCTONLY` for `tx_sz_sqr_up ==
+> TX_32X32`, `read_eob` via `eob_pt_1024`, the magnitude-loop and
+> sign/golomb-loop structure, `coeff_br_ctx` for `pos == 0` at the very
+> first coefficient of the tile — `mag` context is provably `0` since no
+> neighbours are decoded yet) and found no further *logic* bug — the
+> pseudocode transcription matches the spec text exactly at every step
+> checked. That leaves the **default CDF table values themselves** as the
+> prime suspect specifically for `TX_32X32`/`TX_64X64`: the existing
+> `coeff.rs` differential-oracle tests (`coeffs_match_independent_oracle_lossy`,
+> `_reduced_and_lossless`) — built from a one-off, not-checked-in
+> independent Python transcription of the spec — only exercise
+> `TX_4X4`/`TX_8X8`/`TX_16X16` (`tx_sz_ctx` 0-2). `tx_sz_ctx`/`br_tx_ctx`
+> bucket 3 (`TX_32X32`, `DEFAULT_COEFF_BASE_EOB_CDF`/`DEFAULT_COEFF_BR_CDF`
+> outer-then-3rd-index) has **never been differentially checked** — it was
+> "mechanically extracted" (per `entropy_cdf.rs`'s module doc) rather than
+> hand-verified, so a scraping error confined to that bucket (wrong table
+> boundary, off-by-one row) would explain exactly this symptom: everything
+> before this coefficient (partition, mode, tx_depth, `all_zero`, `eob`) is
+> independently confirmed correct, and the magnitude read is the first
+> point where the trace goes wrong. **Next step, concretely scoped:**
+> rebuild (or recover) the independent Python (or Node — this machine has
+> no `python3` on `PATH`, only `node`) oracle used for the existing two
+> `coeff.rs` differential tests, extend it to a `TX_32X32` scenario, and add
+> a third `coeffs_match_independent_oracle_tx32` golden-vector test the same
+> way; that will directly confirm or rule out the CDF-table-scraping
+> hypothesis without needing a full symbol-by-symbol dav1d trace. No code
+> changes this session (investigation only); working tree is unchanged
+> beyond the prior sessions' fixes. `cargo test -p tpt-kinetix-av1 --lib`
+> still green (57 passed).
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap

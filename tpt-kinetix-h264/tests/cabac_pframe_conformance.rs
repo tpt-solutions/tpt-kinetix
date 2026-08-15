@@ -126,7 +126,11 @@ fn run_conformance_check(dir_name: &str, deblock_param: &str, label: &str) {
     let frame_len = (WIDTH as usize * HEIGHT as usize * 3) / 2;
     // Reference YUV might have fewer frames due to encoder behavior; skip if insufficient.
     if refyuv.len() < frame_len * 2 {
-        eprintln!("reference YUV has {} bytes (need {}), skipping", refyuv.len(), frame_len * 2);
+        eprintln!(
+            "reference YUV has {} bytes (need {}), skipping",
+            refyuv.len(),
+            frame_len * 2
+        );
         return;
     }
     let ref_p = &refyuv[frame_len..frame_len * 2];
@@ -169,11 +173,17 @@ fn run_conformance_check(dir_name: &str, deblock_param: &str, label: &str) {
                     let py = my * 16 + yy;
                     let o = py * WIDTH as usize + px;
                     let d = (frame.data[o] as i32 - ref_p[o] as i32).abs();
-                    if d != 0 { mn += 1; md = md.max(d); }
+                    if d != 0 {
+                        mn += 1;
+                        md = md.max(d);
+                    }
                 }
             }
-            if mn == 0 { row.push_str("  .  "); }
-            else { row.push_str(&format!("{md:3}/{mn:3} ")); }
+            if mn == 0 {
+                row.push_str("  .  ");
+            } else {
+                row.push_str(&format!("{md:3}/{mn:3} "));
+            }
         }
         eprintln!("  MB row {my}: {row}");
     }

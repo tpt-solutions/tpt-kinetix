@@ -18,7 +18,9 @@ use crate::header::FaceSequenceHeader;
 #[derive(Debug, thiserror::Error)]
 pub enum FaceBasisError {
     /// The requested `asset_basis_id` is not compiled into this build.
-    #[error("face basis: asset id {0} not available in this build (only 0 = built-in placeholder)")]
+    #[error(
+        "face basis: asset id {0} not available in this build (only 0 = built-in placeholder)"
+    )]
     Unavailable(u8),
     /// The stream's pinned hash does not match the loaded asset.
     #[error("face basis: hash mismatch (stream expects {expected:?}, build has {actual:?})")]
@@ -205,10 +207,7 @@ fn xor_bytes(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
 
 /// Load a basis by id, verifying the pinned `basis_hash` from the sequence
 /// header (DECISION 3/8 honesty contract).
-pub fn load_basis(
-    asset_basis_id: u8,
-    expected: [u8; 8],
-) -> Result<BasisAsset, FaceBasisError> {
+pub fn load_basis(asset_basis_id: u8, expected: [u8; 8]) -> Result<BasisAsset, FaceBasisError> {
     if asset_basis_id != 0 {
         return Err(FaceBasisError::Unavailable(asset_basis_id));
     }

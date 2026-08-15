@@ -73,7 +73,9 @@ impl ProfilePreset {
             0 => Ok(Self::CloudGaming),
             1 => Ok(Self::Conferencing),
             2 => Ok(Self::AR),
-            other => Err(KinetixError::Parse(format!("invalid profile_preset {other}"))),
+            other => Err(KinetixError::Parse(format!(
+                "invalid profile_preset {other}"
+            ))),
         }
     }
 }
@@ -92,7 +94,9 @@ impl ChromaFormat {
             0 => Ok(Self::Yuv420),
             1 => Ok(Self::Yuv422),
             2 => Ok(Self::Yuv444),
-            other => Err(KinetixError::Parse(format!("invalid chroma_format {other}"))),
+            other => Err(KinetixError::Parse(format!(
+                "invalid chroma_format {other}"
+            ))),
         }
     }
 }

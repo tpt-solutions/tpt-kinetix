@@ -7,7 +7,7 @@
 // Minimal bit-reader (independent of tpt-kinetix-h264; same pattern).
 // ---------------------------------------------------------------------------
 
-pub(crate) struct BitReader<'a> {
+pub struct BitReader<'a> {
     data: &'a [u8],
     /// Current byte index.
     byte_pos: usize,
@@ -502,8 +502,11 @@ impl SequenceHeaderObu {
         // --- Maximum frame size (§5.5.1) ---
         let frame_width_bits_minus_1 = f(&mut br, 4, "frame_width_bits_minus_1")? as u8;
         let frame_height_bits_minus_1 = f(&mut br, 4, "frame_height_bits_minus_1")? as u8;
-        let max_frame_width_minus_1 =
-            f(&mut br, frame_width_bits_minus_1 + 1, "max_frame_width_minus_1")?;
+        let max_frame_width_minus_1 = f(
+            &mut br,
+            frame_width_bits_minus_1 + 1,
+            "max_frame_width_minus_1",
+        )?;
         let max_frame_height_minus_1 = f(
             &mut br,
             frame_height_bits_minus_1 + 1,

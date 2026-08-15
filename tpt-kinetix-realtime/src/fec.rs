@@ -76,7 +76,9 @@ impl Fec {
         let sym_len = sources[0].len();
         for s in sources {
             if s.len() != sym_len {
-                return Err(KinetixError::Parse("fec: source symbols must be equal length".into()));
+                return Err(KinetixError::Parse(
+                    "fec: source symbols must be equal length".into(),
+                ));
             }
         }
         let mut parities = vec![vec![0u8; sym_len]; self.repair_count];
@@ -97,10 +99,12 @@ impl Fec {
         received: &[Option<Vec<u8>>],
         parities: &[Vec<u8>],
     ) -> Result<Vec<Vec<u8>>, KinetixError> {
-        let sym_len = parities
-            .first()
-            .map(|p| p.len())
-            .or_else(|| received.iter().filter_map(|o| o.as_ref().map(|v| v.len())).next());
+        let sym_len = parities.first().map(|p| p.len()).or_else(|| {
+            received
+                .iter()
+                .filter_map(|o| o.as_ref().map(|v| v.len()))
+                .next()
+        });
         let sym_len = match sym_len {
             Some(l) => l,
             None => return Ok(Vec::new()),
@@ -135,11 +139,7 @@ impl Fec {
             if missing.len() == 1 {
                 let idx = missing[0];
                 let mut rec = vec![0u8; sym_len];
-                for ((rb, pb), ab) in rec
-                    .iter_mut()
-                    .zip(parities[g].iter())
-                    .zip(acc.iter())
-                {
+                for ((rb, pb), ab) in rec.iter_mut().zip(parities[g].iter()).zip(acc.iter()) {
                     *rb = *pb ^ *ab;
                 }
                 out[idx] = Some(rec);

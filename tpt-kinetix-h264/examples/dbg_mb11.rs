@@ -31,8 +31,49 @@ fn main() {
             _ => {}
         }
     }
-    let _ = (sps, pps, SliceHeaderContext { log2_max_frame_num_minus4: 0, pic_order_cnt_type: 0, log2_max_pic_order_cnt_lsb_minus4: 0, frame_mbs_only_flag: true, bottom_field_pic_order_in_frame_present_flag: false, delta_pic_order_always_zero_flag: false, num_ref_idx_l0_default_active_minus1: 0, num_ref_idx_l1_default_active_minus1: 0, weighted_pred_flag: false, weighted_bipred_idc: 0, entropy_coding_mode_flag: false, deblocking_filter_control_present_flag: false, redundant_pic_cnt_present_flag: false, num_slice_groups_minus1: 0, chroma_array_type: 1 });
-    let _ = SliceHeader::parse_with_context(&[], NalUnitType::NonIdrSlice, 0, &SliceHeaderContext { log2_max_frame_num_minus4: 0, pic_order_cnt_type: 0, log2_max_pic_order_cnt_lsb_minus4: 0, frame_mbs_only_flag: true, bottom_field_pic_order_in_frame_present_flag: false, delta_pic_order_always_zero_flag: false, num_ref_idx_l0_default_active_minus1: 0, num_ref_idx_l1_default_active_minus1: 0, weighted_pred_flag: false, weighted_bipred_idc: 0, entropy_coding_mode_flag: false, deblocking_filter_control_present_flag: false, redundant_pic_cnt_present_flag: false, num_slice_groups_minus1: 0, chroma_array_type: 1 });
+    let _ = (
+        sps,
+        pps,
+        SliceHeaderContext {
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            frame_mbs_only_flag: true,
+            bottom_field_pic_order_in_frame_present_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            num_ref_idx_l0_default_active_minus1: 0,
+            num_ref_idx_l1_default_active_minus1: 0,
+            weighted_pred_flag: false,
+            weighted_bipred_idc: 0,
+            entropy_coding_mode_flag: false,
+            deblocking_filter_control_present_flag: false,
+            redundant_pic_cnt_present_flag: false,
+            num_slice_groups_minus1: 0,
+            chroma_array_type: 1,
+        },
+    );
+    let _ = SliceHeader::parse_with_context(
+        &[],
+        NalUnitType::NonIdrSlice,
+        0,
+        &SliceHeaderContext {
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            frame_mbs_only_flag: true,
+            bottom_field_pic_order_in_frame_present_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            num_ref_idx_l0_default_active_minus1: 0,
+            num_ref_idx_l1_default_active_minus1: 0,
+            weighted_pred_flag: false,
+            weighted_bipred_idc: 0,
+            entropy_coding_mode_flag: false,
+            deblocking_filter_control_present_flag: false,
+            redundant_pic_cnt_present_flag: false,
+            num_slice_groups_minus1: 0,
+            chroma_array_type: 1,
+        },
+    );
 
     let pred = [
         197, 198, 198, 198, 196, 197, 197, 197, 205, 206, 206, 206, 236, 236, 236, 236,
@@ -50,7 +91,11 @@ fn main() {
             let r = res[idx];
             let our_recon = (p + r).clamp(0, 255);
             let true_res = refv - p;
-            let status = if our_recon as i32 == refv { "OK" } else { "WRONG" };
+            let status = if our_recon as i32 == refv {
+                "OK"
+            } else {
+                "WRONG"
+            };
             println!(
                 "({gx},{gy}) pred={p} our_res={r} our_recon={our_recon} ref={refv} true_res={true_res} {status}"
             );

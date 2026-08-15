@@ -67,7 +67,9 @@ impl ChromaFormat {
             0 => Ok(Self::Yuv420),
             1 => Ok(Self::Yuv422),
             2 => Ok(Self::Yuv444),
-            other => Err(KinetixError::Parse(format!("invalid chroma_format {other}"))),
+            other => Err(KinetixError::Parse(format!(
+                "invalid chroma_format {other}"
+            ))),
         }
     }
 }
@@ -147,10 +149,14 @@ impl SequenceHeader {
             )));
         }
         if dict_cap == 0 {
-            return Err(KinetixError::Parse("sequence header: dict_cap must be >= 1".into()));
+            return Err(KinetixError::Parse(
+                "sequence header: dict_cap must be >= 1".into(),
+            ));
         }
         if palette_cap == 0 {
-            return Err(KinetixError::Parse("sequence header: palette_cap must be >= 1".into()));
+            return Err(KinetixError::Parse(
+                "sequence header: palette_cap must be >= 1".into(),
+            ));
         }
         if glyph_max_dim == 0 || glyph_max_dim > 64 {
             return Err(KinetixError::Parse(format!(
@@ -221,7 +227,10 @@ pub struct FrameHeader {
 impl FrameHeader {
     /// Parse a frame header, validating it against the stream's
     /// [`SequenceHeader`] ceilings.
-    pub fn parse(reader: &mut BitReader<'_>, sequence: &SequenceHeader) -> Result<Self, KinetixError> {
+    pub fn parse(
+        reader: &mut BitReader<'_>,
+        sequence: &SequenceHeader,
+    ) -> Result<Self, KinetixError> {
         let frame_type = FrameType::from_u8(read_u8(reader, "frame_type")?)?;
         let width = read_u16(reader, "width")?;
         let height = read_u16(reader, "height")?;

@@ -160,7 +160,14 @@ impl IcsInfo {
                 let predictor_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
                 (max_sfb, 0, predictor_present)
             };
-        eprintln!("DBG ics: ws={:?} shape={} max_sfb={} pred={} pos={}", window_sequence, window_shape, max_sfb, predictor_present, reader.bit_position());
+        eprintln!(
+            "DBG ics: ws={:?} shape={} max_sfb={} pred={} pos={}",
+            window_sequence,
+            window_shape,
+            max_sfb,
+            predictor_present,
+            reader.bit_position()
+        );
 
         let (predictor_data_present, predictor_reset_mode) = if predictor_present {
             let mode = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as u8;
@@ -262,7 +269,10 @@ impl SectionData {
         if dbg {
             eprintln!(
                 "DBG sec start: num_groups={} max_sfb={} sect_len_bits={} pos={}",
-                num_groups, max_sfb, sect_len_bits, reader.bit_position()
+                num_groups,
+                max_sfb,
+                sect_len_bits,
+                reader.bit_position()
             );
         }
         let mut groups = Vec::with_capacity(num_groups);
@@ -286,7 +296,13 @@ impl SectionData {
                     .read_section_length(sect_len_bits)
                     .ok_or(AacParseError::UnexpectedEof)? as usize;
                 if dbg {
-                    eprintln!("DBG sec: cb={} len={} covered={} pos={}", sect_cb, sect_len, covered, reader.bit_position());
+                    eprintln!(
+                        "DBG sec: cb={} len={} covered={} pos={}",
+                        sect_cb,
+                        sect_len,
+                        covered,
+                        reader.bit_position()
+                    );
                 }
                 // A zero-length section is legal (the ffmpeg reference decoder
                 // accepts it); it covers no scalefactor bands. More generally a
@@ -625,7 +641,10 @@ impl RawDataBlock {
                 }
                 s.push(if r.read_bit() == Some(1) { '1' } else { '0' });
             }
-            let _ = std::fs::write("D:/Programming/1PRODUCTION/Open Source/tpt-kinetix/frame0_bits.txt", &s);
+            let _ = std::fs::write(
+                "D:/Programming/1PRODUCTION/Open Source/tpt-kinetix/frame0_bits.txt",
+                &s,
+            );
         }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
@@ -702,8 +721,7 @@ impl RawDataBlock {
                     let mut fill_len =
                         reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
                     if fill_len == 15 {
-                        let esc =
-                            reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+                        let esc = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
                         fill_len += esc - 1;
                     }
                     // extension type (4 bits); AAC-LC only carries EXT_FILL here.
@@ -918,7 +936,7 @@ mod tests {
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
         bits.extend_from_slice(&[ZERO, ZERO]); // left pulse/tns = 0 (AAC-LC: no gain_control flag)
-        // right channel: global_gain=0xff (8 bits), sect_cb=0, sect_len=8, flags=00
+                                               // right channel: global_gain=0xff (8 bits), sect_cb=0, sect_len=8, flags=00
         bits.extend_from_slice(&[ONE; 8]);
         bits.push(ZERO);
         bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
@@ -1055,8 +1073,3 @@ mod tests {
         assert!(matches!(block.elements.first(), Some(Element::End)));
     }
 }
-
-
-
-
-

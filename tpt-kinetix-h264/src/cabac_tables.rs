@@ -740,10 +740,8 @@ pub const COEFF_ABS_LEVELGT1_CTX: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
 
 /// `node_ctx` state transition after decoding a level: `[level==1,
 /// level>1][node_ctx] -> next node_ctx`.
-pub const COEFF_ABS_LEVEL_TRANSITION: [[usize; 8]; 2] = [
-    [1, 2, 3, 3, 4, 5, 6, 7],
-    [4, 4, 4, 4, 5, 6, 7, 7],
-];
+pub const COEFF_ABS_LEVEL_TRANSITION: [[usize; 8]; 2] =
+    [[1, 2, 3, 3, 4, 5, 6, 7], [4, 4, 4, 4, 5, 6, 7, 7]];
 
 /// Block categories (`ctxBlockCat`, spec Table 9-42) used to index the
 /// per-category context bases above.
@@ -840,7 +838,11 @@ mod tests {
         // Table 9-12) are identical across all four tables in FFmpeg's
         // source -- spot-check a few to catch a wholesale mistranscription
         // (e.g. accidentally starting the PB extraction at the wrong offset).
-        for idc_table in [&CABAC_CTX_INIT_PB0, &CABAC_CTX_INIT_PB1, &CABAC_CTX_INIT_PB2] {
+        for idc_table in [
+            &CABAC_CTX_INIT_PB0,
+            &CABAC_CTX_INIT_PB1,
+            &CABAC_CTX_INIT_PB2,
+        ] {
             assert_eq!(idc_table[0], CABAC_CTX_INIT_I[0]);
             assert_eq!(idc_table[6], CABAC_CTX_INIT_I[6]);
             assert_eq!(idc_table[10], CABAC_CTX_INIT_I[10]);
@@ -852,7 +854,11 @@ mod tests {
         // mb_qp_delta (ctxIdx 60..=63) is shared across I/P/B slice types
         // (Table 9-20 doesn't vary its ctxIdxOffset by slice type), so all
         // four tables should agree here too.
-        for idc_table in [&CABAC_CTX_INIT_PB0, &CABAC_CTX_INIT_PB1, &CABAC_CTX_INIT_PB2] {
+        for idc_table in [
+            &CABAC_CTX_INIT_PB0,
+            &CABAC_CTX_INIT_PB1,
+            &CABAC_CTX_INIT_PB2,
+        ] {
             assert_eq!(&idc_table[60..64], &CABAC_CTX_INIT_I[60..64]);
         }
     }
@@ -916,7 +922,10 @@ mod tests {
         // cats 0..=4 unchanged (additive-only constraint).
         assert_eq!(&SIG_COEFF_CTX_BASE[0..5], &[105, 120, 134, 149, 152]);
         assert_eq!(&LAST_COEFF_CTX_BASE[0..5], &[166, 181, 195, 210, 213]);
-        assert_eq!(&COEFF_ABS_LEVEL_M1_CTX_BASE[0..5], &[227, 237, 247, 257, 266]);
+        assert_eq!(
+            &COEFF_ABS_LEVEL_M1_CTX_BASE[0..5],
+            &[227, 237, 247, 257, 266]
+        );
         // cat 5 (Luma8x8), cross-checked against FFmpeg's
         // significant_coeff_flag_offset/last_coeff_flag_offset/coeff_abs_level_m1_offset
         // frame-coding rows at index [5].

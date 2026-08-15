@@ -742,7 +742,11 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
             .map(|s| (s.1, s.2))
             .collect();
         if frame_spans.len() < 2 {
-            eprintln!("[{}] only {} frame(s) present, skipping", entry.label, frame_spans.len());
+            eprintln!(
+                "[{}] only {} frame(s) present, skipping",
+                entry.label,
+                frame_spans.len()
+            );
             continue;
         }
 

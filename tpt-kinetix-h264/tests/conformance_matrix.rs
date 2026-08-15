@@ -28,11 +28,7 @@
 
 use std::process::Command;
 
-use tpt_kinetix_core::{
-    error::KinetixError,
-    packet::Packet,
-    timestamp::Timestamp,
-};
+use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 use tpt_kinetix_h264::{
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
@@ -296,11 +292,26 @@ fn h264_conformance_matrix() {
     for c in &cases {
         let full_params = append_deblock(c.params, c.deblock);
         let stem = format!("{}_{}", c.name, c.deblock.label().replace(' ', ""));
-        let Some((annexb, refyuv)) =
-            generate(&dir, &stem, c.w, c.h, c.frames, c.profile, &full_params, c.extra)
-        else {
-            eprintln!("  [skip] {} ({}) — ffmpeg generation failed", c.name, c.deblock.label());
-            results.push((format!("{} {}", c.name, c.deblock.label()), "SKIP".into(), c.unsupported));
+        let Some((annexb, refyuv)) = generate(
+            &dir,
+            &stem,
+            c.w,
+            c.h,
+            c.frames,
+            c.profile,
+            &full_params,
+            c.extra,
+        ) else {
+            eprintln!(
+                "  [skip] {} ({}) — ffmpeg generation failed",
+                c.name,
+                c.deblock.label()
+            );
+            results.push((
+                format!("{} {}", c.name, c.deblock.label()),
+                "SKIP".into(),
+                c.unsupported,
+            ));
             continue;
         };
 
@@ -309,9 +320,16 @@ fn h264_conformance_matrix() {
         if refyuv.len() < expected_ref_len {
             eprintln!(
                 "  [skip] {} ({}) — reference YUV too short ({} < {})",
-                c.name, c.deblock.label(), refyuv.len(), expected_ref_len
+                c.name,
+                c.deblock.label(),
+                refyuv.len(),
+                expected_ref_len
             );
-            results.push((format!("{} {}", c.name, c.deblock.label()), "SKIP".into(), c.unsupported));
+            results.push((
+                format!("{} {}", c.name, c.deblock.label()),
+                "SKIP".into(),
+                c.unsupported,
+            ));
             continue;
         }
 
@@ -324,7 +342,11 @@ fn h264_conformance_matrix() {
                     "  [skip] {} — generated stream does not exercise the unsupported feature (ilme/8x8 ignored by encoder); cannot assert honesty gate",
                     c.name
                 );
-                results.push((format!("{} {}", c.name, c.deblock.label()), "SKIP".into(), true));
+                results.push((
+                    format!("{} {}", c.name, c.deblock.label()),
+                    "SKIP".into(),
+                    true,
+                ));
                 continue;
             }
             let mut dec = H264Decoder::new().with_strict(true);
@@ -341,10 +363,18 @@ fn h264_conformance_matrix() {
                         "  [HONEST] {} — strict mode returns NotPixelExact (ilme={}, 8x8={})",
                         c.name, !frame_mbs_only, transform_8x8
                     );
-                    results.push((format!("{} {}", c.name, c.deblock.label()), "HONEST".into(), true));
+                    results.push((
+                        format!("{} {}", c.name, c.deblock.label()),
+                        "HONEST".into(),
+                        true,
+                    ));
                 }
                 other => {
-                    results.push((format!("{} {}", c.name, c.deblock.label()), "DISHONEST".into(), true));
+                    results.push((
+                        format!("{} {}", c.name, c.deblock.label()),
+                        "DISHONEST".into(),
+                        true,
+                    ));
                     panic!(
                         "{} unsupported path must return NotPixelExact in strict mode, got {:?}",
                         c.name, other
@@ -366,14 +396,30 @@ fn h264_conformance_matrix() {
         let frame = match dec.decode(&pkt) {
             Ok(Some(f)) => f,
             Ok(None) => {
-                results.push((format!("{} {}", c.name, c.deblock.label()), "NO-FRAME".into(), c.unsupported));
-                eprintln!("  [FAIL] {} ({}) — decoder produced no frame", c.name, c.deblock.label());
+                results.push((
+                    format!("{} {}", c.name, c.deblock.label()),
+                    "NO-FRAME".into(),
+                    c.unsupported,
+                ));
+                eprintln!(
+                    "  [FAIL] {} ({}) — decoder produced no frame",
+                    c.name,
+                    c.deblock.label()
+                );
                 unexpected_failures += 1;
                 continue;
             }
             Err(e) => {
-                results.push((format!("{} {}", c.name, c.deblock.label()), format!("ERR:{e}"), c.unsupported));
-                eprintln!("  [FAIL] {} ({}) — decode error: {e}", c.name, c.deblock.label());
+                results.push((
+                    format!("{} {}", c.name, c.deblock.label()),
+                    format!("ERR:{e}"),
+                    c.unsupported,
+                ));
+                eprintln!(
+                    "  [FAIL] {} ({}) — decode error: {e}",
+                    c.name,
+                    c.deblock.label()
+                );
                 unexpected_failures += 1;
                 continue;
             }
@@ -389,12 +435,21 @@ fn h264_conformance_matrix() {
                 let status = if max_diff == 0 { "PASS" } else { "FAIL" };
                 eprintln!(
                     "  [{}] {} ({}) vs ffmpeg: max_abs_diff={}, differing_samples={}/{}",
-                    status, c.name, c.deblock.label(), max_diff, num_diff, total
+                    status,
+                    c.name,
+                    c.deblock.label(),
+                    max_diff,
+                    num_diff,
+                    total
                 );
                 if max_diff != 0 {
                     unexpected_failures += 1;
                 }
-                results.push((format!("{} {}", c.name, c.deblock.label()), status.into(), false));
+                results.push((
+                    format!("{} {}", c.name, c.deblock.label()),
+                    status.into(),
+                    false,
+                ));
             }
             Expect::NotConformant => {
                 // Documented gap: implemented but not yet bit-exact. Report, but
@@ -403,7 +458,11 @@ fn h264_conformance_matrix() {
                     "  [GAP ] {} ({}) NOT bit-exact vs ffmpeg: max_abs_diff={}, differing_samples={}/{}",
                     c.name, c.deblock.label(), max_diff, num_diff, total
                 );
-                results.push((format!("{} {}", c.name, c.deblock.label()), "GAP".into(), false));
+                results.push((
+                    format!("{} {}", c.name, c.deblock.label()),
+                    "GAP".into(),
+                    false,
+                ));
             }
         }
     }
@@ -418,7 +477,11 @@ fn h264_conformance_matrix() {
 
     eprintln!("\nH.264 Phase H conformance matrix:");
     for (label, status, unsupported) in &results {
-        let kind = if *unsupported { "unsupported" } else { "supported  " };
+        let kind = if *unsupported {
+            "unsupported"
+        } else {
+            "supported  "
+        };
         eprintln!("  {:<28} [{:<9}] {kind}", label, status);
     }
     let gap_count = results.iter().filter(|(_, s, _)| s == &"GAP").count();

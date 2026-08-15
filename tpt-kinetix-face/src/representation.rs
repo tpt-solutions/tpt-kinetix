@@ -124,7 +124,10 @@ mod tests {
 
     #[test]
     fn v1_primary_is_3dmm() {
-        assert_eq!(FaceRepresentation::v1_primary(), FaceRepresentation::Parametric3Dmm);
+        assert_eq!(
+            FaceRepresentation::v1_primary(),
+            FaceRepresentation::Parametric3Dmm
+        );
     }
 
     #[test]

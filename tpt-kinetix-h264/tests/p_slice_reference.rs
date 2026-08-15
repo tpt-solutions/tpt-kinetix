@@ -6,8 +6,8 @@
 
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{self, NalUnitType};
-use tpt_kinetix_h264::sps::SeqParameterSet;
 use tpt_kinetix_h264::pps::PicParameterSet;
+use tpt_kinetix_h264::sps::SeqParameterSet;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -18,11 +18,28 @@ fn gen() -> Vec<u8> {
     let h264 = dir.join("ip.h264");
     std::process::Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1:duration=2",
-            "-frames:v", "2", "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "2", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0:keyint=2:min-keyint=2",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=1:duration=2",
+            "-frames:v",
+            "2",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "2",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0:keyint=2:min-keyint=2",
             h264.to_str().unwrap(),
         ])
         .output()
@@ -35,9 +52,15 @@ fn reference_parse_p_slice() {
     let annexb = gen();
     let units = nal::parse_nal_units_from_annexb(&annexb);
 
-    let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).unwrap();
+    let sps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Sps)
+        .unwrap();
     let sps = SeqParameterSet::parse(&sps.rbsp).expect("sps");
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).unwrap();
+    let pps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Pps)
+        .unwrap();
     let pps = PicParameterSet::parse(&pps.rbsp, None).expect("pps");
 
     let p = units
@@ -219,11 +242,14 @@ fn reference_parse_p_slice() {
             }
         }
         let cbp_code = r.read_ue().unwrap();
-        eprintln!("    cbp_code_num={cbp_code} pos_after_cbp={}", r.bit_position());
+        eprintln!(
+            "    cbp_code_num={cbp_code} pos_after_cbp={}",
+            r.bit_position()
+        );
         let cbp = [
             0u32, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9, 16, 17, 18, 20, 24, 19, 21,
-            26, 28, 31, 23, 27, 29, 30, 22, 25, 32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43,
-            45, 46, 38, 41,
+            26, 28, 31, 23, 27, 29, 30, 22, 25, 32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43, 45,
+            46, 38, 41,
         ][cbp_code as usize];
         let cbp_l = cbp & 0x0F;
         let cbp_c = cbp >> 4;

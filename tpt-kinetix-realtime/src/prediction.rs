@@ -433,17 +433,7 @@ mod tests {
         }
         let mut out = vec![0i32; 16];
         // MV (1,0): each output pixel should equal ref at (x+1, y).
-        predict_inter_luma(
-            &mut out,
-            4,
-            &ref_,
-            8,
-            8,
-            8,
-            0,
-            0,
-            MotionVector::new(4, 0),
-        );
+        predict_inter_luma(&mut out, 4, &ref_, 8, 8, 8, 0, 0, MotionVector::new(4, 0));
         for r in 0..4 {
             for c in 0..4 {
                 assert_eq!(out[r * 4 + c], ref_[r * 8 + (c + 1)] as i32);

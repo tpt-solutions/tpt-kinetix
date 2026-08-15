@@ -78,7 +78,8 @@ fn generate(
     ];
     if disable_deblocking {
         let idx = args.iter().position(|a| *a == "-x264-params").unwrap();
-        args[idx + 1] = "cabac=0:8x8dct=1:ref=1:bframes=0:weightp=0:aud=0:no-deblock=1:threads=1:seed=42";
+        args[idx + 1] =
+            "cabac=0:8x8dct=1:ref=1:bframes=0:weightp=0:aud=0:no-deblock=1:threads=1:seed=42";
     }
     args.push(h264.to_str()?);
     if !run(Command::new("ffmpeg").args(&args)) {
@@ -212,6 +213,8 @@ fn high_profile_8x8_cavlc_iframe_with_deblock_is_bitexact() {
     // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
     // Skip strict assertion until the gap is closed.
     if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8x8 CAVLC (with deblock) NOT bit-exact: max_diff={max_diff}");
+        eprintln!(
+            "  [GAP] High-profile 8x8 CAVLC (with deblock) NOT bit-exact: max_diff={max_diff}"
+        );
     }
 }

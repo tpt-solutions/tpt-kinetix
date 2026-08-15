@@ -22,10 +22,7 @@
 //! 3DMM).
 
 use tpt_kinetix_core::{
-    capabilities::DecoderCapabilities,
-    error::KinetixError,
-    frame::VideoFrame,
-    packet::Packet,
+    capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
 };
 
 use crate::basis::load_from_header;
@@ -38,8 +35,9 @@ pub mod synthesizer;
 
 pub use basis::{BasisAsset, FaceBasisError};
 pub use header::{
-    read_frame_header, read_sequence_header, write_frame_header, write_sequence_header, FaceFrameHeader,
-    FaceHeaderError, FaceSequenceHeader, FrameFlags, FACE_MAGIC, FACE_VERSION, SequenceFlags,
+    read_frame_header, read_sequence_header, write_frame_header, write_sequence_header,
+    FaceFrameHeader, FaceHeaderError, FaceSequenceHeader, FrameFlags, SequenceFlags, FACE_MAGIC,
+    FACE_VERSION,
 };
 pub use params::{FaceCoefModel, FaceParamCodec, FaceParamError};
 pub use representation::{FaceRepresentation, V1DimensionSpec, V1_3DMM_DIMS};
@@ -394,7 +392,10 @@ mod tests {
 
     #[test]
     fn v1_representation_is_3dmm() {
-        assert_eq!(FaceRepresentation::v1_primary(), FaceRepresentation::Parametric3Dmm);
+        assert_eq!(
+            FaceRepresentation::v1_primary(),
+            FaceRepresentation::Parametric3Dmm
+        );
     }
 
     #[test]
@@ -419,9 +420,7 @@ mod tests {
     #[test]
     fn end_to_end_encode_decode_synthesizes_frame() {
         let p = sample_params();
-        let bytes = FaceEncoder::new()
-            .encode_call(&p, 64, 48)
-            .expect("encode");
+        let bytes = FaceEncoder::new().encode_call(&p, 64, 48).expect("encode");
         let mut dec = FaceDecoder::new();
         let frame = dec.decode(&packet(bytes)).expect("decode").expect("frame");
         assert_eq!(frame.width, 64);
@@ -437,8 +436,14 @@ mod tests {
         let mut dec = FaceDecoder::new();
         // Split the stream arbitrarily across packets.
         let mid = bytes.len() / 2;
-        assert!(dec.decode(&packet(bytes[..mid].to_vec())).expect("p1").is_none());
-        let frame = dec.decode(&packet(bytes[mid..].to_vec())).expect("p2").expect("frame");
+        assert!(dec
+            .decode(&packet(bytes[..mid].to_vec()))
+            .expect("p1")
+            .is_none());
+        let frame = dec
+            .decode(&packet(bytes[mid..].to_vec()))
+            .expect("p2")
+            .expect("frame");
         assert_eq!(frame.width, 64);
     }
 

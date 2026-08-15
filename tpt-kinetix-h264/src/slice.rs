@@ -613,7 +613,8 @@ fn parse_pred_weight_table(
         }
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            let mut entry = WeightEntry::default_for(luma_log2_weight_denom, chroma_log2_weight_denom);
+            let mut entry =
+                WeightEntry::default_for(luma_log2_weight_denom, chroma_log2_weight_denom);
             let luma_flag = r.read_bit().context("luma_weight_flag")?;
             if luma_flag == 1 {
                 entry.luma_weight = r.read_se().context("luma_weight")?;
@@ -669,10 +670,7 @@ fn parse_pred_weight_table(
 /// `max_long_term_frame_idx_plus1` by `num_ref_frames`. This mirrors FFmpeg's
 /// `ff_h264_decode_ref_pic_marking`, which rejects `long_arg >= 16` except for
 /// `MMCO_SET_MAX_LONG` with exactly 16 (i.e. `MaxLongTermFrameIdx == 15`).
-fn parse_dec_ref_pic_marking(
-    r: &mut BitReader,
-    is_idr: bool,
-) -> anyhow::Result<DecRefPicMarking> {
+fn parse_dec_ref_pic_marking(r: &mut BitReader, is_idr: bool) -> anyhow::Result<DecRefPicMarking> {
     if is_idr {
         let no_output_of_prior_pics_flag =
             r.read_bit().context("no_output_of_prior_pics_flag")? == 1;
@@ -965,7 +963,11 @@ mod tests {
     }
 
     fn mmco_of(header: &SliceHeader) -> Vec<MmcoOp> {
-        match header.dec_ref_pic_marking.as_ref().expect("marking present") {
+        match header
+            .dec_ref_pic_marking
+            .as_ref()
+            .expect("marking present")
+        {
             DecRefPicMarking::Adaptive(ops) => ops.clone(),
             other => panic!("expected adaptive marking, got {other:?}"),
         }
@@ -975,14 +977,7 @@ mod tests {
     fn slice_header_carries_every_mmco_operation() {
         // Table 7-9 operand layout: 1 → diff; 2 → long_term_pic_num;
         // 3 → diff + idx; 4 → max_plus1; 5 → none; 6 → idx.
-        let rbsp = p_slice_with_marking(&[
-            &[1, 2],
-            &[2, 4],
-            &[3, 0, 1],
-            &[4, 3],
-            &[5],
-            &[6, 7],
-        ]);
+        let rbsp = p_slice_with_marking(&[&[1, 2], &[2, 4], &[3, 0, 1], &[4, 3], &[5], &[6, 7]]);
         let header = parse_p(&rbsp).expect("parse");
         assert_eq!(
             mmco_of(&header),
@@ -1085,9 +1080,13 @@ mod tests {
         w.bit(0); // num_ref_idx_active_override_flag
         w.bit(0); // ref_pic_list_modification_flag_l0
         w.se(0); // slice_qp_delta (no dec_ref_pic_marking in between)
-        let header =
-            SliceHeader::parse_with_context(&w.finish(), NalUnitType::NonIdrSlice, 0, &p_slice_ctx())
-                .expect("parse");
+        let header = SliceHeader::parse_with_context(
+            &w.finish(),
+            NalUnitType::NonIdrSlice,
+            0,
+            &p_slice_ctx(),
+        )
+        .expect("parse");
         assert_eq!(header.dec_ref_pic_marking, None);
         assert_eq!(header.slice_qp_delta, 0);
     }
@@ -1153,8 +1152,8 @@ mod tests {
         w.bit(1); // field_pic_flag = 1 (only present when !frame_mbs_only_flag)
         w.bit(bottom_field_flag); // bottom_field_flag
         w.bits(5, 4); // pic_order_cnt_lsb
-        // frame_mbs_only_flag is false but field_pic_flag is true, so
-        // delta_pic_order_cnt_bottom is NOT present (it belongs to frame pics).
+                      // frame_mbs_only_flag is false but field_pic_flag is true, so
+                      // delta_pic_order_cnt_bottom is NOT present (it belongs to frame pics).
         w.bit(0); // num_ref_idx_active_override_flag
         w.bit(0); // ref_pic_list_modification_flag_l0
         w.bit(0); // adaptive_ref_pic_marking_mode_flag

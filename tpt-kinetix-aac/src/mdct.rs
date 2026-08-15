@@ -25,7 +25,10 @@ pub struct Imdct {
 impl Imdct {
     /// Build (and precompute) an IMDCT for block size `n` (1024 or 128).
     pub fn new(n: usize) -> Self {
-        assert!(n.is_power_of_two() && n >= 8, "IMDCT block size must be a power of two ≥ 8");
+        assert!(
+            n.is_power_of_two() && n >= 8,
+            "IMDCT block size must be a power of two ≥ 8"
+        );
         let mut table = vec![0.0f32; 2 * n * n];
         for nn in 0..2 * n {
             // AAC IMDCT (ISO 13818-7 §3.A.4): the time index is doubled in the

@@ -143,7 +143,10 @@ mod tests {
         // overshoot 24 -> step 3
         assert_eq!(adapt_to_deadline(16, 40, 20), RateControlAction::RaiseQp(3));
         // huge overshoot -> step capped at 16 (QP 20 + 16 = 36)
-        assert_eq!(adapt_to_deadline(16, 300, 20), RateControlAction::RaiseQp(16));
+        assert_eq!(
+            adapt_to_deadline(16, 300, 20),
+            RateControlAction::RaiseQp(16)
+        );
     }
 
     #[test]

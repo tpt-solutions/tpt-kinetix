@@ -19,7 +19,7 @@
 //! v2 extension).
 
 use tpt_kinetix_bitstream::{
-    PROB_SCALE, RansDecoder, RansEncoder, RansStreamSet, SymbolInfo, SymbolModel,
+    RansDecoder, RansEncoder, RansStreamSet, SymbolInfo, SymbolModel, PROB_SCALE,
 };
 use tpt_kinetix_core::error::KinetixError;
 
@@ -151,12 +151,7 @@ fn quantize(v: f32, qp: u8, precision: u8) -> i32 {
     (v / quant_step(qp, precision)).round() as i32
 }
 
-fn encode_group(
-    coeffs: &[f32],
-    qp: u8,
-    precision: u8,
-    model: &dyn SymbolModel,
-) -> Vec<u8> {
+fn encode_group(coeffs: &[f32], qp: u8, precision: u8, model: &dyn SymbolModel) -> Vec<u8> {
     let mut enc = RansEncoder::new();
     // rANS encodes back-to-front: push symbols in reverse of decode order.
     for &c in coeffs.iter().rev() {
@@ -399,7 +394,9 @@ mod tests {
         assert_eq!(decoded.identity.len(), p.identity.len());
         assert_eq!(decoded.expression.len(), p.expression.len());
         for (orig, got) in p.identity.iter().zip(decoded.identity.iter()) {
-            assert!((orig - got).abs() <= quant_step(s.group_qp[0], s.quant_precision) / 2.0 + 1e-4);
+            assert!(
+                (orig - got).abs() <= quant_step(s.group_qp[0], s.quant_precision) / 2.0 + 1e-4
+            );
         }
     }
 
@@ -411,7 +408,9 @@ mod tests {
         let inter = inter_header();
         let p = sample_params();
         let key_payload = codec.encode_frame(&s, &key, &p).expect("encode key");
-        let key_params = codec.decode_frame(&s, &key, None, &key_payload).expect("decode key");
+        let key_params = codec
+            .decode_frame(&s, &key, None, &key_payload)
+            .expect("decode key");
 
         // Re-encode the *same* params as an inter frame (deltas vs the key).
         let inter_payload = codec.encode_frame(&s, &inter, &p).expect("encode inter");
@@ -420,7 +419,9 @@ mod tests {
             .expect("decode inter");
         assert_eq!(decoded.identity, key_params.identity);
         for (orig, got) in p.expression.iter().zip(decoded.expression.iter()) {
-            assert!((orig - got).abs() <= quant_step(s.group_qp[1], s.quant_precision) / 2.0 + 1e-4);
+            assert!(
+                (orig - got).abs() <= quant_step(s.group_qp[1], s.quant_precision) / 2.0 + 1e-4
+            );
         }
     }
 

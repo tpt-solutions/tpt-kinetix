@@ -55,27 +55,31 @@ const P_SUB_MB_PARTS: [usize; 4] = [1, 2, 2, 4];
 
 /// B-slice mb_type 4..=21 table: (is_16x8, dir0, dir1).
 /// Index = mb_type_raw − 4.
-const B_2PART_TABLE: [(bool, crate::macroblock::BPredDir, crate::macroblock::BPredDir); 18] = {
+const B_2PART_TABLE: [(
+    bool,
+    crate::macroblock::BPredDir,
+    crate::macroblock::BPredDir,
+); 18] = {
     use crate::macroblock::BPredDir;
     [
-        (true,  BPredDir::L0, BPredDir::L0),  // 4
-        (false, BPredDir::L0, BPredDir::L0),  // 5
-        (true,  BPredDir::L1, BPredDir::L1),  // 6
-        (false, BPredDir::L1, BPredDir::L1),  // 7
-        (true,  BPredDir::L0, BPredDir::L1),  // 8
-        (false, BPredDir::L0, BPredDir::L1),  // 9
-        (true,  BPredDir::L1, BPredDir::L0),  // 10
-        (false, BPredDir::L1, BPredDir::L0),  // 11
-        (true,  BPredDir::L0, BPredDir::Bi),  // 12
-        (false, BPredDir::L0, BPredDir::Bi),  // 13
-        (true,  BPredDir::L1, BPredDir::Bi),  // 14
-        (false, BPredDir::L1, BPredDir::Bi),  // 15
-        (true,  BPredDir::Bi, BPredDir::L0),  // 16
-        (false, BPredDir::Bi, BPredDir::L0),  // 17
-        (true,  BPredDir::Bi, BPredDir::L1),  // 18
-        (false, BPredDir::Bi, BPredDir::L1),  // 19
-        (true,  BPredDir::Bi, BPredDir::Bi),  // 20
-        (false, BPredDir::Bi, BPredDir::Bi),  // 21
+        (true, BPredDir::L0, BPredDir::L0),  // 4
+        (false, BPredDir::L0, BPredDir::L0), // 5
+        (true, BPredDir::L1, BPredDir::L1),  // 6
+        (false, BPredDir::L1, BPredDir::L1), // 7
+        (true, BPredDir::L0, BPredDir::L1),  // 8
+        (false, BPredDir::L0, BPredDir::L1), // 9
+        (true, BPredDir::L1, BPredDir::L0),  // 10
+        (false, BPredDir::L1, BPredDir::L0), // 11
+        (true, BPredDir::L0, BPredDir::Bi),  // 12
+        (false, BPredDir::L0, BPredDir::Bi), // 13
+        (true, BPredDir::L1, BPredDir::Bi),  // 14
+        (false, BPredDir::L1, BPredDir::Bi), // 15
+        (true, BPredDir::Bi, BPredDir::L0),  // 16
+        (false, BPredDir::Bi, BPredDir::L0), // 17
+        (true, BPredDir::Bi, BPredDir::L1),  // 18
+        (false, BPredDir::Bi, BPredDir::L1), // 19
+        (true, BPredDir::Bi, BPredDir::Bi),  // 20
+        (false, BPredDir::Bi, BPredDir::Bi), // 21
     ]
 };
 
@@ -226,7 +230,9 @@ impl MbInterCabacCtx {
         let gt0 = ref_idx > 0;
         for &b in blocks {
             self.l0_mvd_abs[b] = [ax, ay];
-            if gt0 { self.l0_ref_gt0 |= 1 << b; }
+            if gt0 {
+                self.l0_ref_gt0 |= 1 << b;
+            }
         }
     }
     fn set_partition_l1(&mut self, blocks: &[usize], mvd_x: i32, mvd_y: i32, ref_idx: i32) {
@@ -235,7 +241,9 @@ impl MbInterCabacCtx {
         let gt0 = ref_idx > 0;
         for &b in blocks {
             self.l1_mvd_abs[b] = [ax, ay];
-            if gt0 { self.l1_ref_gt0 |= 1 << b; }
+            if gt0 {
+                self.l1_ref_gt0 |= 1 << b;
+            }
         }
     }
 }
@@ -254,16 +262,32 @@ fn partition_blocks(col4: usize, row4: usize, w4: usize, h4: usize) -> Vec<usize
 
 /// Return the raster blocks for P/B partition `part_idx` of a given `mb_type`.
 /// Returns `(col4, row4, w4, h4)` of the partition in 4×4-block units.
-fn partition_dims(mb_type: crate::macroblock::MbType, part_idx: usize) -> (usize, usize, usize, usize) {
+fn partition_dims(
+    mb_type: crate::macroblock::MbType,
+    part_idx: usize,
+) -> (usize, usize, usize, usize) {
     use crate::macroblock::MbType;
     match mb_type {
-        MbType::PL016x16 | MbType::BL016x16 | MbType::BL116x16 | MbType::BBi16x16
-        | MbType::BDirect16x16 | MbType::BSkip | MbType::PSkip => (0, 0, 4, 4),
+        MbType::PL016x16
+        | MbType::BL016x16
+        | MbType::BL116x16
+        | MbType::BBi16x16
+        | MbType::BDirect16x16
+        | MbType::BSkip
+        | MbType::PSkip => (0, 0, 4, 4),
         MbType::P16x8 | MbType::B16x8 => {
-            if part_idx == 0 { (0, 0, 4, 2) } else { (0, 2, 4, 2) }
+            if part_idx == 0 {
+                (0, 0, 4, 2)
+            } else {
+                (0, 2, 4, 2)
+            }
         }
         MbType::P8x16 | MbType::B8x16 => {
-            if part_idx == 0 { (0, 0, 2, 4) } else { (2, 0, 2, 4) }
+            if part_idx == 0 {
+                (0, 0, 2, 4)
+            } else {
+                (2, 0, 2, 4)
+            }
         }
         MbType::P8x8 | MbType::P8x8ref0 | MbType::BB8x8 => {
             let c = (part_idx % 2) * 2;
@@ -283,7 +307,10 @@ fn amvd_sum(
     cur_inter: &MbInterCabacCtx,
     left_mb_idx: Option<usize>,
     top_mb_idx: Option<usize>,
-    xp: u32, yp: u32, wp: u32, hp: u32,
+    xp: u32,
+    yp: u32,
+    wp: u32,
+    hp: u32,
     list: usize,
     comp: usize,
 ) -> u32 {
@@ -292,8 +319,18 @@ fn amvd_sum(
     let left_blk = left_row4 * 4 + 3; // rightmost column of left MB
     let left_val = if let Some(idx) = left_mb_idx {
         let g = &inter_grid[idx];
-        if g.present { (if list == 0 { g.l0_mvd_abs[left_blk][comp] } else { g.l1_mvd_abs[left_blk][comp] }) as u32 } else { 0 }
-    } else { 0 };
+        if g.present {
+            (if list == 0 {
+                g.l0_mvd_abs[left_blk][comp]
+            } else {
+                g.l1_mvd_abs[left_blk][comp]
+            }) as u32
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     // Top neighbor 4×4 block: row above yP, rightmost column of partition.
     let top_col4 = ((xp + wp - 1) / 4) as usize;
@@ -301,13 +338,31 @@ fn amvd_sum(
         let top_blk = 3 * 4 + top_col4; // bottom row of top MB
         if let Some(idx) = top_mb_idx {
             let g = &inter_grid[idx];
-            if g.present { (if list == 0 { g.l0_mvd_abs[top_blk][comp] } else { g.l1_mvd_abs[top_blk][comp] }) as u32 } else { 0 }
-        } else { 0 }
+            if g.present {
+                (if list == 0 {
+                    g.l0_mvd_abs[top_blk][comp]
+                } else {
+                    g.l1_mvd_abs[top_blk][comp]
+                }) as u32
+            } else {
+                0
+            }
+        } else {
+            0
+        }
     } else {
         // top neighbor is within current MB (e.g., bottom half of 16×8)
         let top_row4 = (yp / 4 - 1) as usize;
         let top_blk = top_row4 * 4 + top_col4;
-        if cur_inter.present { (if list == 0 { cur_inter.l0_mvd_abs[top_blk][comp] } else { cur_inter.l1_mvd_abs[top_blk][comp] }) as u32 } else { 0 }
+        if cur_inter.present {
+            (if list == 0 {
+                cur_inter.l0_mvd_abs[top_blk][comp]
+            } else {
+                cur_inter.l1_mvd_abs[top_blk][comp]
+            }) as u32
+        } else {
+            0
+        }
     };
 
     left_val + top_val
@@ -319,27 +374,64 @@ fn ref_idx_gt0_neighbors(
     cur_inter: &MbInterCabacCtx,
     left_mb_idx: Option<usize>,
     top_mb_idx: Option<usize>,
-    xp: u32, yp: u32, _wp: u32, hp: u32,
+    xp: u32,
+    yp: u32,
+    _wp: u32,
+    hp: u32,
     list: usize,
 ) -> (bool, bool) {
     let left_row4 = ((yp + hp - 1) / 4) as usize;
     let left_blk = left_row4 * 4 + 3;
     let left_gt0 = if let Some(idx) = left_mb_idx {
         let g = &inter_grid[idx];
-        if g.present { (if list == 0 { g.l0_ref_gt0 } else { g.l1_ref_gt0 } >> left_blk) & 1 == 1 } else { false }
-    } else { false };
+        if g.present {
+            (if list == 0 {
+                g.l0_ref_gt0
+            } else {
+                g.l1_ref_gt0
+            } >> left_blk)
+                & 1
+                == 1
+        } else {
+            false
+        }
+    } else {
+        false
+    };
 
     let top_gt0 = if yp == 0 {
         if let Some(idx) = top_mb_idx {
             let g = &inter_grid[idx];
             // top neighbor: bottom-left-most 4×4 of top MB touching this partition
             let top_blk = 3 * 4 + (xp / 4) as usize;
-            if g.present { (if list == 0 { g.l0_ref_gt0 } else { g.l1_ref_gt0 } >> top_blk) & 1 == 1 } else { false }
-        } else { false }
+            if g.present {
+                (if list == 0 {
+                    g.l0_ref_gt0
+                } else {
+                    g.l1_ref_gt0
+                } >> top_blk)
+                    & 1
+                    == 1
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     } else {
         let top_row4 = (yp / 4 - 1) as usize;
         let top_blk = top_row4 * 4 + (xp / 4) as usize;
-        if cur_inter.present { (if list == 0 { cur_inter.l0_ref_gt0 } else { cur_inter.l1_ref_gt0 } >> top_blk) & 1 == 1 } else { false }
+        if cur_inter.present {
+            (if list == 0 {
+                cur_inter.l0_ref_gt0
+            } else {
+                cur_inter.l1_ref_gt0
+            } >> top_blk)
+                & 1
+                == 1
+        } else {
+            false
+        }
     };
 
     (left_gt0, top_gt0)
@@ -378,7 +470,12 @@ impl NeighbourCtx<'static> {
 
 impl<'a> NeighbourCtx<'a> {
     fn new(mb_aff: bool, mb_rows: u32, cur_field: bool, field_flags: &'a [Option<bool>]) -> Self {
-        NeighbourCtx { mb_aff, mb_rows, cur_field, field_flags }
+        NeighbourCtx {
+            mb_aff,
+            mb_rows,
+            cur_field,
+            field_flags,
+        }
     }
 
     /// Resolve the left/top neighbour macroblock addresses for `(mb_x, mb_y)`.
@@ -389,7 +486,12 @@ impl<'a> NeighbourCtx<'a> {
             return (left, top);
         }
         let n = crate::mbaff::derive_neighbours(
-            mb_x, mb_y, mb_cols, self.mb_rows, self.cur_field, self.field_flags,
+            mb_x,
+            mb_y,
+            mb_cols,
+            self.mb_rows,
+            self.cur_field,
+            self.field_flags,
         );
         (n.left_top, n.top)
     }
@@ -405,8 +507,12 @@ fn cabac_cbp_neighbors(
     nctx: NeighbourCtx,
 ) -> (u16, u16) {
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
-    let left = left_idx.map(|i| grid[i].cbp_word).unwrap_or(CABAC_CBP_UNAVAILABLE);
-    let top = top_idx.map(|i| grid[i].cbp_word).unwrap_or(CABAC_CBP_UNAVAILABLE);
+    let left = left_idx
+        .map(|i| grid[i].cbp_word)
+        .unwrap_or(CABAC_CBP_UNAVAILABLE);
+    let top = top_idx
+        .map(|i| grid[i].cbp_word)
+        .unwrap_or(CABAC_CBP_UNAVAILABLE);
     (left, top)
 }
 
@@ -718,11 +824,22 @@ fn mpm_pred_mode_8x8(
         NeighbourSide::Unavailable
     };
 
-    let dc_predicted =
-        left == NeighbourSide::Unavailable || top == NeighbourSide::Unavailable;
-    if dc_predicted { 2u8 } else { left.value().min(top.value()) }
+    let dc_predicted = left == NeighbourSide::Unavailable || top == NeighbourSide::Unavailable;
+    if dc_predicted {
+        2u8
+    } else {
+        left.value().min(top.value())
+    }
 }
-fn luma_nc(nz: &[MbNz], mb_x: u32, mb_y: u32, mb_cols: u32, cur: &MbNz, block: usize, nctx: NeighbourCtx) -> i32 {
+fn luma_nc(
+    nz: &[MbNz],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    cur: &MbNz,
+    block: usize,
+    nctx: NeighbourCtx,
+) -> i32 {
     let bx = (block % 4) as i32;
     let by = (block / 4) as i32;
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
@@ -862,7 +979,9 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     // (function scope) so the residual stage below can see it.
     let mut is_8x8 = false;
     if !is_i16x16 && transform_8x8_mode {
-        let bit = r.read_bit().ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?;
+        let bit = r
+            .read_bit()
+            .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?;
         is_8x8 = bit == 1;
     }
 
@@ -1101,7 +1220,11 @@ impl PbCabacSliceContexts {
             mb_skip: crate::entropy::MbSkipFlagContext::new_p_slice(slice_qp_y, cabac_init_idc),
             mb_type_p: crate::entropy::MbTypePCabacContext::new(slice_qp_y, cabac_init_idc),
             mb_type_b: crate::entropy::MbTypeBCabacContext::new(slice_qp_y, cabac_init_idc),
-            intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext::new_pb(17, slice_qp_y, cabac_init_idc),
+            intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext::new_pb(
+                17,
+                slice_qp_y,
+                cabac_init_idc,
+            ),
             sub_mb_p: crate::entropy::SubMbTypePCabacContext::new(slice_qp_y, cabac_init_idc),
             sub_mb_b: crate::entropy::SubMbTypeBCabacContext::new(slice_qp_y, cabac_init_idc),
             ref_idx: crate::entropy::RefIdxCabacContext::new(slice_qp_y, cabac_init_idc),
@@ -1111,11 +1234,20 @@ impl PbCabacSliceContexts {
             mvd_l1_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
             cbp: crate::entropy::CbpCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             qp_delta: crate::entropy::MbQpDeltaCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new_pb(slice_qp_y, cabac_init_idc),
+            chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
+            intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
             cbf: crate::entropy::CodedBlockFlagContext::new_pb(slice_qp_y, cabac_init_idc),
             residual: crate::entropy::ResidualCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            transform_8x8: crate::entropy::TransformSize8x8FlagContext::new_pb(slice_qp_y, cabac_init_idc),
+            transform_8x8: crate::entropy::TransformSize8x8FlagContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
         }
     }
 
@@ -1125,7 +1257,11 @@ impl PbCabacSliceContexts {
             mb_skip: crate::entropy::MbSkipFlagContext::new_b_slice(slice_qp_y, cabac_init_idc),
             mb_type_p: crate::entropy::MbTypePCabacContext::new(slice_qp_y, cabac_init_idc),
             mb_type_b: crate::entropy::MbTypeBCabacContext::new(slice_qp_y, cabac_init_idc),
-            intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext::new_pb(32, slice_qp_y, cabac_init_idc),
+            intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext::new_pb(
+                32,
+                slice_qp_y,
+                cabac_init_idc,
+            ),
             sub_mb_p: crate::entropy::SubMbTypePCabacContext::new(slice_qp_y, cabac_init_idc),
             sub_mb_b: crate::entropy::SubMbTypeBCabacContext::new(slice_qp_y, cabac_init_idc),
             ref_idx: crate::entropy::RefIdxCabacContext::new(slice_qp_y, cabac_init_idc),
@@ -1135,11 +1271,20 @@ impl PbCabacSliceContexts {
             mvd_l1_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
             cbp: crate::entropy::CbpCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             qp_delta: crate::entropy::MbQpDeltaCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new_pb(slice_qp_y, cabac_init_idc),
+            chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
+            intra4x4: crate::entropy::Intra4x4PredModeCabacContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
             cbf: crate::entropy::CodedBlockFlagContext::new_pb(slice_qp_y, cabac_init_idc),
             residual: crate::entropy::ResidualCabacContext::new_pb(slice_qp_y, cabac_init_idc),
-            transform_8x8: crate::entropy::TransformSize8x8FlagContext::new_pb(slice_qp_y, cabac_init_idc),
+            transform_8x8: crate::entropy::TransformSize8x8FlagContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
         }
     }
 }
@@ -1152,11 +1297,25 @@ fn cabac_decode_mvd_component(
     cur_inter: &MbInterCabacCtx,
     left_mb_idx: Option<usize>,
     top_mb_idx: Option<usize>,
-    xp: u32, yp: u32, wp: u32, hp: u32,
+    xp: u32,
+    yp: u32,
+    wp: u32,
+    hp: u32,
     list: usize,
     comp: usize,
 ) -> R<i32> {
-    let asum = amvd_sum(inter_grid, cur_inter, left_mb_idx, top_mb_idx, xp, yp, wp, hp, list, comp);
+    let asum = amvd_sum(
+        inter_grid,
+        cur_inter,
+        left_mb_idx,
+        top_mb_idx,
+        xp,
+        yp,
+        wp,
+        hp,
+        list,
+        comp,
+    );
     Ok(ctx.decode(dec, asum))
 }
 
@@ -1182,8 +1341,8 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     transform_8x8_mode_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
-    let mut dec =
-        crate::entropy::CabacDecoder::new(data).map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
+    let mut dec = crate::entropy::CabacDecoder::new(data)
+        .map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
     let mut ctxs = CabacSliceContexts::new(slice_qp);
 
     let total = (mb_cols * mb_rows) as usize;
@@ -1209,8 +1368,16 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         let mb_y = (mb_idx as u32) / mb_cols;
 
         if mbaff_frame && mb_idx % 2 == 0 {
-            let left_field = if mb_x > 0 { cabac_ctx[(mb_y * mb_cols + mb_x - 1) as usize].mb_field_flag } else { false };
-            let top_field = if mb_y > 0 { cabac_ctx[((mb_y - 1) * mb_cols + mb_x) as usize].mb_field_flag } else { false };
+            let left_field = if mb_x > 0 {
+                cabac_ctx[(mb_y * mb_cols + mb_x - 1) as usize].mb_field_flag
+            } else {
+                false
+            };
+            let top_field = if mb_y > 0 {
+                cabac_ctx[((mb_y - 1) * mb_cols + mb_x) as usize].mb_field_flag
+            } else {
+                false
+            };
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
             field_flags[mb_idx] = Some(cur_pair_field);
             if mb_idx + 1 < total {
@@ -1285,7 +1452,9 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
     tracer: &mut T,
     nctx: NeighbourCtx,
 ) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, i32, bool)> {
-    use crate::cabac_tables::{CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4, CAT_LUMA_AC, CAT_LUMA_DC};
+    use crate::cabac_tables::{
+        CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4, CAT_LUMA_AC, CAT_LUMA_DC,
+    };
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -1345,8 +1514,12 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         // (§7.3.5.1), mirroring the CAVLC path's `is_8x8` gate
         // (`slice_data.rs` `parse_intra_macroblock`).
         is_8x8 = if transform_8x8_mode_flag {
-            let left_8x8 = left_idx.map(|i| cabac_ctx_grid[i].transform_8x8).unwrap_or(false);
-            let top_8x8 = top_idx.map(|i| cabac_ctx_grid[i].transform_8x8).unwrap_or(false);
+            let left_8x8 = left_idx
+                .map(|i| cabac_ctx_grid[i].transform_8x8)
+                .unwrap_or(false);
+            let top_8x8 = top_idx
+                .map(|i| cabac_ctx_grid[i].transform_8x8)
+                .unwrap_or(false);
             ctxs.transform_8x8.decode(dec, left_8x8, top_8x8)
         } else {
             false
@@ -1363,7 +1536,8 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         if is_8x8 {
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
-                let pred_mode = mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx);
+                let pred_mode =
+                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
@@ -1374,7 +1548,8 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         } else {
             for blk_idx in 0..16usize {
                 let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-                let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, nctx);
+                let pred_mode =
+                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, nctx);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes[raster] = Intra4x4Mode::from_u8(final_mode);
             }
@@ -1470,7 +1645,8 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             v
         };
         for block in blocks {
-            let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, nctx);
+            let (left_coded, top_coded) =
+                luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, nctx);
             let coded = ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded);
             if coded {
                 let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
@@ -1508,8 +1684,9 @@ fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
     if cbp_c == 2 {
         for comp in 0..2usize {
             for block in 0..4usize {
-                let (left_coded, top_coded) =
-                    chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true, nctx);
+                let (left_coded, top_coded) = chroma_cbf_neighbors(
+                    nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true, nctx,
+                );
                 let ac_coded = ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded);
                 if ac_coded {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
@@ -1604,10 +1781,23 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::PSkip;
             mb.qp = qp;
             mb.skip = true;
-            nz[mb_idx] = MbNz { present: true, ..Default::default() };
-            pred_ctx[mb_idx] = MbPredCtx { present: true, ..Default::default() };
-            cabac_ctx[mb_idx] = MbCabacCtx { present: true, cbp_word: 0, ..Default::default() };
-            inter_ctx[mb_idx] = MbInterCabacCtx { present: true, ..Default::default() };
+            nz[mb_idx] = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            pred_ctx[mb_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
+            cabac_ctx[mb_idx] = MbCabacCtx {
+                present: true,
+                cbp_word: 0,
+                ..Default::default()
+            };
+            inter_ctx[mb_idx] = MbInterCabacCtx {
+                present: true,
+                ..Default::default()
+            };
             prev_was_skip = true;
             macroblocks.push(mb);
             // end_of_slice_flag is NOT coded for skip MBs (spec §7.3.4 — only for coded MBs).
@@ -1617,11 +1807,19 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
 
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_p_macroblock_cabac(
-                &mut dec, &mut ctxs,
-                mb_x, mb_y, mb_cols,
-                &nz, &pred_ctx, &cabac_ctx, &inter_ctx,
-                qp, prev_dqp_nonzero,
-                num_ref_idx_l0_active, chroma_qp_index_offset,
+                &mut dec,
+                &mut ctxs,
+                mb_x,
+                mb_y,
+                mb_cols,
+                &nz,
+                &pred_ctx,
+                &cabac_ctx,
+                &inter_ctx,
+                qp,
+                prev_dqp_nonzero,
+                num_ref_idx_l0_active,
+                chroma_qp_index_offset,
                 transform_8x8_mode_flag,
                 tracer,
             )?;
@@ -1644,7 +1842,11 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
 
     let mut mv_store = MvStore::new(total);
     crate::mv::predict_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
-    Ok(ParsedSlice { macroblocks, nz, mv_store })
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1664,7 +1866,15 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
     tracer: &mut T,
-) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, MbInterCabacCtx, i32, bool)> {
+) -> R<(
+    Macroblock,
+    MbNz,
+    MbPredCtx,
+    MbCabacCtx,
+    MbInterCabacCtx,
+    i32,
+    bool,
+)> {
     let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
     let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
 
@@ -1675,12 +1885,30 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let intra_t = ctxs.intra_suffix.decode(dec);
             let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nz) =
                 parse_intra_mb_cabac_pb(
-                    dec, ctxs, mb_x, mb_y, mb_cols,
-                    nz_grid, pred_ctx_grid, cabac_ctx_grid,
-                    prev_qp, prev_dqp_nonzero, intra_t, transform_8x8_mode_flag, tracer,
+                    dec,
+                    ctxs,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    nz_grid,
+                    pred_ctx_grid,
+                    cabac_ctx_grid,
+                    prev_qp,
+                    prev_dqp_nonzero,
+                    intra_t,
+                    transform_8x8_mode_flag,
+                    tracer,
                 )?;
             let this_inter = MbInterCabacCtx::default();
-            Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter, new_qp, dqp_nz))
+            Ok((
+                mb,
+                this_nz,
+                this_pred_ctx,
+                this_cabac_ctx,
+                this_inter,
+                new_qp,
+                dqp_nz,
+            ))
         }
         Some(shape) => {
             // shape: 0=P_L0_16x16, 1=P_L0_L0_16x8, 2=P_L0_L0_8x16, 3=P_8x8
@@ -1693,12 +1921,27 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let mut mb = Macroblock::new_skip();
             mb.skip = false;
             mb.mb_type = mb_type;
-            let mut this_nz = MbNz { present: true, ..Default::default() };
-            let this_pred_ctx = MbPredCtx { present: true, ..Default::default() };
-            let mut this_inter = MbInterCabacCtx { present: true, ..Default::default() };
+            let mut this_nz = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            let this_pred_ctx = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
+            let mut this_inter = MbInterCabacCtx {
+                present: true,
+                ..Default::default()
+            };
             let mut motion = crate::macroblock::InterMotion::default();
 
-            let n_parts: usize = if shape == 3 { 4 } else if shape == 0 { 1 } else { 2 };
+            let n_parts: usize = if shape == 3 {
+                4
+            } else if shape == 0 {
+                1
+            } else {
+                2
+            };
 
             if shape == 3 {
                 // P_8x8: read all sub_mb_types first.
@@ -1712,15 +1955,33 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     let (col4, row4, _, _) = partition_dims(mb_type, part);
                     let ri = if num_ref_idx_l0_active > 1 {
                         let (xp, yp) = (col4 as u32 * 4, row4 as u32 * 4);
-                        let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, 8, 8, 0);
+                        let (lg, tg) = ref_idx_gt0_neighbors(
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            8,
+                            8,
+                            0,
+                        );
                         let r = ctxs.ref_idx.decode(dec, lg, tg);
-                        if r >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                        if r >= num_ref_idx_l0_active {
+                            return Err(SliceDataError::Unsupported("ref_idx overflow"));
+                        }
                         r
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l0.push(ri as i32);
                     // fill 2×2 blocks in the 8×8 quadrant with ref_idx
                     let blks = partition_blocks(col4, row4, 2, 2);
-                    if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l0_ref_gt0 |= 1 << b;
+                        }
+                    }
                 }
                 // MVDs per sub-partition.
                 for part in 0..4 {
@@ -1729,14 +1990,48 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     let (col4, row4, w4, h4) = partition_dims(mb_type, part);
                     // Each sub-partition within the 8×8 is stacked vertically (8×4) or side-by-side (4×8).
                     // For simplicity treat each sub as occupying the same 8×8 block for amvd context.
-                    let (xp, yp, wp, hp) = (col4 as u32 * 4, row4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
+                    let (xp, yp, wp, hp) = (
+                        col4 as u32 * 4,
+                        row4 as u32 * 4,
+                        w4 as u32 * 4,
+                        h4 as u32 * 4,
+                    );
                     for sub_i in 0..n_sub {
-                        let mvd_x = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
-                        let mvd_y = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
+                        let mvd_x = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l0_x,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            0,
+                            0,
+                        )?;
+                        let mvd_y = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l0_y,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            0,
+                            1,
+                        )?;
                         motion.mvd_l0.push((mvd_x, mvd_y));
                         let blk = row4 * 4 + col4; // representative block for last sub
                         let _ = sub_i;
-                        this_inter.l0_mvd_abs[blk] = [(mvd_x.unsigned_abs() as u8).min(70), (mvd_y.unsigned_abs() as u8).min(70)];
+                        this_inter.l0_mvd_abs[blk] = [
+                            (mvd_x.unsigned_abs() as u8).min(70),
+                            (mvd_y.unsigned_abs() as u8).min(70),
+                        ];
                     }
                 }
             } else {
@@ -1744,26 +2039,76 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 // ref_idx is only coded when num_ref_idx_l0_active > 1 (spec §7.3.5.2).
                 for part in 0..n_parts {
                     let (col4, row4, w4, h4) = partition_dims(mb_type, part);
-                    let (xp, yp, wp, hp) = (col4 as u32 * 4, row4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
+                    let (xp, yp, wp, hp) = (
+                        col4 as u32 * 4,
+                        row4 as u32 * 4,
+                        w4 as u32 * 4,
+                        h4 as u32 * 4,
+                    );
                     let ri = if num_ref_idx_l0_active > 1 {
-                        let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0);
+                        let (lg, tg) = ref_idx_gt0_neighbors(
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            0,
+                        );
                         let r = ctxs.ref_idx.decode(dec, lg, tg);
-                        if r >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx overflow")); }
+                        if r >= num_ref_idx_l0_active {
+                            return Err(SliceDataError::Unsupported("ref_idx overflow"));
+                        }
                         r
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l0.push(ri as i32);
                     let blks = partition_blocks(col4, row4, w4, h4);
-                    if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l0_ref_gt0 |= 1 << b;
+                        }
+                    }
 
-                    let mvd_x = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
-                    let mvd_y = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
+                    let mvd_x = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l0_x,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                        0,
+                    )?;
+                    let mvd_y = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l0_y,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                        1,
+                    )?;
                     motion.mvd_l0.push((mvd_x, mvd_y));
                     this_inter.set_partition_l0(&blks, mvd_x, mvd_y, ri as i32);
                 }
             }
 
             mb.motion = Some(motion);
-            let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+            let (cbp_l, cbp_c) =
+                decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
             let cbp = cbp_l | (cbp_c << 4);
             mb.cbp = cbp;
             let mut qp = prev_qp;
@@ -1779,13 +2124,30 @@ fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             mb.qp = qp;
 
             let this_cabac_ctx = decode_inter_residual_cabac(
-                dec, ctxs, &mut mb, &mut this_nz, nz_grid,
-                cabac_ctx_grid, mb_x, mb_y, mb_cols, cbp_l, cbp_c,
+                dec,
+                ctxs,
+                &mut mb,
+                &mut this_nz,
+                nz_grid,
+                cabac_ctx_grid,
+                mb_x,
+                mb_y,
+                mb_cols,
+                cbp_l,
+                cbp_c,
             )?;
 
             let mb_type_str = format!("{:?}", mb.mb_type);
             tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
-            Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter, qp, dqp_nz))
+            Ok((
+                mb,
+                this_nz,
+                this_pred_ctx,
+                this_cabac_ctx,
+                this_inter,
+                qp,
+                dqp_nz,
+            ))
         }
     }
 }
@@ -1835,10 +2197,23 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::BSkip;
             mb.qp = qp;
             mb.skip = true;
-            nz[mb_idx] = MbNz { present: true, ..Default::default() };
-            pred_ctx[mb_idx] = MbPredCtx { present: true, ..Default::default() };
-            cabac_ctx[mb_idx] = MbCabacCtx { present: true, cbp_word: 0, ..Default::default() };
-            inter_ctx[mb_idx] = MbInterCabacCtx { present: true, ..Default::default() };
+            nz[mb_idx] = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            pred_ctx[mb_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
+            cabac_ctx[mb_idx] = MbCabacCtx {
+                present: true,
+                cbp_word: 0,
+                ..Default::default()
+            };
+            inter_ctx[mb_idx] = MbInterCabacCtx {
+                present: true,
+                ..Default::default()
+            };
             macroblocks.push(mb);
             // end_of_slice_flag is NOT coded for skip MBs (spec §7.3.4 — only for coded MBs).
             continue;
@@ -1846,11 +2221,20 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
 
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_b_macroblock_cabac(
-                &mut dec, &mut ctxs,
-                mb_x, mb_y, mb_cols,
-                &nz, &pred_ctx, &cabac_ctx, &inter_ctx,
-                qp, prev_dqp_nonzero,
-                num_ref_idx_l0_active, num_ref_idx_l1_active, chroma_qp_index_offset,
+                &mut dec,
+                &mut ctxs,
+                mb_x,
+                mb_y,
+                mb_cols,
+                &nz,
+                &pred_ctx,
+                &cabac_ctx,
+                &inter_ctx,
+                qp,
+                prev_dqp_nonzero,
+                num_ref_idx_l0_active,
+                num_ref_idx_l1_active,
+                chroma_qp_index_offset,
                 transform_8x8_mode_flag,
                 tracer,
             )?;
@@ -1865,13 +2249,19 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
         if end_of_slice != is_last {
-            return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (B-CABAC)"));
+            return Err(SliceDataError::Unsupported(
+                "end_of_slice_flag mismatch (B-CABAC)",
+            ));
         }
     }
 
     let mut mv_store = MvStore::new(total);
     crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
-    Ok(ParsedSlice { macroblocks, nz, mv_store })
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1892,7 +2282,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
     tracer: &mut T,
-) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, MbInterCabacCtx, i32, bool)> {
+) -> R<(
+    Macroblock,
+    MbNz,
+    MbPredCtx,
+    MbCabacCtx,
+    MbInterCabacCtx,
+    i32,
+    bool,
+)> {
     use crate::macroblock::BPredDir;
 
     let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
@@ -1902,21 +2300,47 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     if b_inter_type.is_none() {
         // Intra macroblock inside B slice.
         let intra_t = ctxs.intra_suffix.decode(dec);
-        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nz) =
-            parse_intra_mb_cabac_pb(
-                dec, ctxs, mb_x, mb_y, mb_cols,
-                nz_grid, pred_ctx_grid, cabac_ctx_grid,
-                prev_qp, prev_dqp_nonzero, intra_t, transform_8x8_mode_flag, tracer,
-            )?;
-        return Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, MbInterCabacCtx::default(), new_qp, dqp_nz));
+        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nz) = parse_intra_mb_cabac_pb(
+            dec,
+            ctxs,
+            mb_x,
+            mb_y,
+            mb_cols,
+            nz_grid,
+            pred_ctx_grid,
+            cabac_ctx_grid,
+            prev_qp,
+            prev_dqp_nonzero,
+            intra_t,
+            transform_8x8_mode_flag,
+            tracer,
+        )?;
+        return Ok((
+            mb,
+            this_nz,
+            this_pred_ctx,
+            this_cabac_ctx,
+            MbInterCabacCtx::default(),
+            new_qp,
+            dqp_nz,
+        ));
     }
     let b_type_raw = b_inter_type.unwrap();
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
-    let mut this_nz = MbNz { present: true, ..Default::default() };
-    let this_pred_ctx = MbPredCtx { present: true, ..Default::default() };
-    let mut this_inter = MbInterCabacCtx { present: true, ..Default::default() };
+    let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let this_pred_ctx = MbPredCtx {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_inter = MbInterCabacCtx {
+        present: true,
+        ..Default::default()
+    };
     let mut motion = crate::macroblock::InterMotion::default();
 
     match b_type_raw {
@@ -1926,56 +2350,192 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         }
         1 => {
             mb.mb_type = MbType::BL016x16;
-            let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
+            let (lg, tg) =
+                ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
             let ri = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx L0 overflow")); }
+            if ri >= num_ref_idx_l0_active {
+                return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+            }
             motion.ref_idx_l0.push(ri as i32);
             let blks: Vec<usize> = (0..16).collect();
-            if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
-            let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0, 0)?;
-            let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0, 1)?;
+            if ri > 0 {
+                for &b in &blks {
+                    this_inter.l0_ref_gt0 |= 1 << b;
+                }
+            }
+            let mvx = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l0_x,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                0,
+                0,
+            )?;
+            let mvy = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l0_y,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                0,
+                1,
+            )?;
             motion.mvd_l0.push((mvx, mvy));
             this_inter.set_partition_l0(&blks, mvx, mvy, ri as i32);
         }
         2 => {
             mb.mb_type = MbType::BL116x16;
-            let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
+            let (lg, tg) =
+                ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
             let ri = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri >= num_ref_idx_l1_active { return Err(SliceDataError::Unsupported("ref_idx L1 overflow")); }
+            if ri >= num_ref_idx_l1_active {
+                return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+            }
             motion.ref_idx_l1.push(ri as i32);
             let blks: Vec<usize> = (0..16).collect();
-            if ri > 0 { for &b in &blks { this_inter.l1_ref_gt0 |= 1 << b; } }
-            let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_x, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1, 0)?;
-            let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_y, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1, 1)?;
+            if ri > 0 {
+                for &b in &blks {
+                    this_inter.l1_ref_gt0 |= 1 << b;
+                }
+            }
+            let mvx = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l1_x,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                1,
+                0,
+            )?;
+            let mvy = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l1_y,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                1,
+                1,
+            )?;
             motion.mvd_l1.push((mvx, mvy));
             this_inter.set_partition_l1(&blks, mvx, mvy, ri as i32);
         }
         3 => {
             mb.mb_type = MbType::BBi16x16;
             let blks: Vec<usize> = (0..16).collect();
-            let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
+            let (lg, tg) =
+                ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
             let ri0 = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri0 >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx L0 overflow")); }
+            if ri0 >= num_ref_idx_l0_active {
+                return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+            }
             motion.ref_idx_l0.push(ri0 as i32);
-            let (lg1, tg1) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
+            let (lg1, tg1) =
+                ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
             let ri1 = ctxs.ref_idx.decode(dec, lg1, tg1);
-            if ri1 >= num_ref_idx_l1_active { return Err(SliceDataError::Unsupported("ref_idx L1 overflow")); }
+            if ri1 >= num_ref_idx_l1_active {
+                return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+            }
             motion.ref_idx_l1.push(ri1 as i32);
-            if ri0 > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
-            if ri1 > 0 { for &b in &blks { this_inter.l1_ref_gt0 |= 1 << b; } }
-            let mx0 = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0, 0)?;
-            let my0 = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0, 1)?;
+            if ri0 > 0 {
+                for &b in &blks {
+                    this_inter.l0_ref_gt0 |= 1 << b;
+                }
+            }
+            if ri1 > 0 {
+                for &b in &blks {
+                    this_inter.l1_ref_gt0 |= 1 << b;
+                }
+            }
+            let mx0 = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l0_x,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                0,
+                0,
+            )?;
+            let my0 = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l0_y,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                0,
+                1,
+            )?;
             motion.mvd_l0.push((mx0, my0));
             this_inter.set_partition_l0(&blks, mx0, my0, ri0 as i32);
-            let mx1 = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_x, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1, 0)?;
-            let my1 = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_y, inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1, 1)?;
+            let mx1 = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l1_x,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                1,
+                0,
+            )?;
+            let my1 = cabac_decode_mvd_component(
+                dec,
+                &mut ctxs.mvd_l1_y,
+                inter_grid,
+                &this_inter,
+                left_idx,
+                top_idx,
+                0,
+                0,
+                16,
+                16,
+                1,
+                1,
+            )?;
             motion.mvd_l1.push((mx1, my1));
             this_inter.set_partition_l1(&blks, mx1, my1, ri1 as i32);
         }
         4..=21 => {
             let idx = (b_type_raw - 4) as usize;
             let (is_16x8, dir0, dir1) = B_2PART_TABLE[idx];
-            mb.mb_type = if is_16x8 { MbType::B16x8 } else { MbType::B8x16 };
+            mb.mb_type = if is_16x8 {
+                MbType::B16x8
+            } else {
+                MbType::B8x16
+            };
             let dirs = [dir0, dir1];
             motion.pred_dirs = vec![dir0, dir1];
             motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 2];
@@ -1986,12 +2546,28 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (c4, r4, w4, h4) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
                 if dirs[part] == BPredDir::L0 || dirs[part] == BPredDir::Bi {
-                    let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0);
+                    let (lg, tg) = ref_idx_gt0_neighbors(
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                    );
                     let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx L0 overflow")); }
+                    if ri >= num_ref_idx_l0_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                    }
                     motion.ref_idx_l0[part] = ri as i32;
                     let blks = partition_blocks(c4, r4, w4, h4);
-                    if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l0_ref_gt0 |= 1 << b;
+                        }
+                    }
                 }
             }
             // All L1 ref_idx.
@@ -1999,12 +2575,28 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (c4, r4, w4, h4) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
                 if dirs[part] == BPredDir::L1 || dirs[part] == BPredDir::Bi {
-                    let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1);
+                    let (lg, tg) = ref_idx_gt0_neighbors(
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        1,
+                    );
                     let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l1_active { return Err(SliceDataError::Unsupported("ref_idx L1 overflow")); }
+                    if ri >= num_ref_idx_l1_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                    }
                     motion.ref_idx_l1[part] = ri as i32;
                     let blks = partition_blocks(c4, r4, w4, h4);
-                    if ri > 0 { for &b in &blks { this_inter.l1_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l1_ref_gt0 |= 1 << b;
+                        }
+                    }
                 }
             }
             // All L0 MVDs.
@@ -2012,8 +2604,34 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (c4, r4, w4, h4) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
                 if dirs[part] == BPredDir::L0 || dirs[part] == BPredDir::Bi {
-                    let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
-                    let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
+                    let mvx = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l0_x,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                        0,
+                    )?;
+                    let mvy = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l0_y,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                        1,
+                    )?;
                     motion.mvd_l0.push((mvx, mvy));
                     let blks = partition_blocks(c4, r4, w4, h4);
                     this_inter.set_partition_l0(&blks, mvx, mvy, motion.ref_idx_l0[part]);
@@ -2024,8 +2642,34 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (c4, r4, w4, h4) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, w4 as u32 * 4, h4 as u32 * 4);
                 if dirs[part] == BPredDir::L1 || dirs[part] == BPredDir::Bi {
-                    let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1, 0)?;
-                    let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1, 1)?;
+                    let mvx = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l1_x,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        1,
+                        0,
+                    )?;
+                    let mvy = cabac_decode_mvd_component(
+                        dec,
+                        &mut ctxs.mvd_l1_y,
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        1,
+                        1,
+                    )?;
                     motion.mvd_l1.push((mvx, mvy));
                     let blks = partition_blocks(c4, r4, w4, h4);
                     this_inter.set_partition_l1(&blks, mvx, mvy, motion.ref_idx_l1[part]);
@@ -2043,8 +2687,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             motion.sub_mb_type_b = Some(sub_types);
             motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 4];
             motion.ref_idx_l1 = vec![crate::mv::LIST_NOT_USED; 4];
-            let sub_dirs: Vec<BPredDir> = sub_types.iter()
-                .map(|&st| if (st as usize) < 13 { crate::mv::B_SUB_MB_DIR[st as usize] } else { BPredDir::Direct })
+            let sub_dirs: Vec<BPredDir> = sub_types
+                .iter()
+                .map(|&st| {
+                    if (st as usize) < 13 {
+                        crate::mv::B_SUB_MB_DIR[st as usize]
+                    } else {
+                        BPredDir::Direct
+                    }
+                })
                 .collect();
             motion.pred_dirs = sub_dirs.clone();
 
@@ -2052,31 +2703,95 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, 8u32, 8u32);
                 let blks = partition_blocks(c4, r4, 2, 2);
-                if sub_dirs[part] != BPredDir::Direct && (sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi) {
-                    let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0);
+                if sub_dirs[part] != BPredDir::Direct
+                    && (sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi)
+                {
+                    let (lg, tg) = ref_idx_gt0_neighbors(
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        0,
+                    );
                     let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active { return Err(SliceDataError::Unsupported("ref_idx L0 overflow")); }
+                    if ri >= num_ref_idx_l0_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                    }
                     motion.ref_idx_l0[part] = ri as i32;
-                    if ri > 0 { for &b in &blks { this_inter.l0_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l0_ref_gt0 |= 1 << b;
+                        }
+                    }
                 }
-                if sub_dirs[part] != BPredDir::Direct && (sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi) {
-                    let (lg, tg) = ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1);
+                if sub_dirs[part] != BPredDir::Direct
+                    && (sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi)
+                {
+                    let (lg, tg) = ref_idx_gt0_neighbors(
+                        inter_grid,
+                        &this_inter,
+                        left_idx,
+                        top_idx,
+                        xp,
+                        yp,
+                        wp,
+                        hp,
+                        1,
+                    );
                     let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l1_active { return Err(SliceDataError::Unsupported("ref_idx L1 overflow")); }
+                    if ri >= num_ref_idx_l1_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                    }
                     motion.ref_idx_l1[part] = ri as i32;
-                    if ri > 0 { for &b in &blks { this_inter.l1_ref_gt0 |= 1 << b; } }
+                    if ri > 0 {
+                        for &b in &blks {
+                            this_inter.l1_ref_gt0 |= 1 << b;
+                        }
+                    }
                 }
             }
             for part in 0..4 {
                 let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, 8u32, 8u32);
                 let blks = partition_blocks(c4, r4, 2, 2);
-                if sub_dirs[part] == BPredDir::Direct { continue; }
+                if sub_dirs[part] == BPredDir::Direct {
+                    continue;
+                }
                 if sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi {
                     let n = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
                     for _ in 0..n {
-                        let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 0)?;
-                        let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l0_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 0, 1)?;
+                        let mvx = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l0_x,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            0,
+                            0,
+                        )?;
+                        let mvy = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l0_y,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            0,
+                            1,
+                        )?;
                         motion.mvd_l0.push((mvx, mvy));
                         this_inter.set_partition_l0(&blks, mvx, mvy, motion.ref_idx_l0[part]);
                     }
@@ -2084,8 +2799,34 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 if sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi {
                     let n = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
                     for _ in 0..n {
-                        let mvx = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_x, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1, 0)?;
-                        let mvy = cabac_decode_mvd_component(dec, &mut ctxs.mvd_l1_y, inter_grid, &this_inter, left_idx, top_idx, xp, yp, wp, hp, 1, 1)?;
+                        let mvx = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l1_x,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            1,
+                            0,
+                        )?;
+                        let mvy = cabac_decode_mvd_component(
+                            dec,
+                            &mut ctxs.mvd_l1_y,
+                            inter_grid,
+                            &this_inter,
+                            left_idx,
+                            top_idx,
+                            xp,
+                            yp,
+                            wp,
+                            hp,
+                            1,
+                            1,
+                        )?;
                         motion.mvd_l1.push((mvx, mvy));
                         this_inter.set_partition_l1(&blks, mvx, mvy, motion.ref_idx_l1[part]);
                     }
@@ -2097,7 +2838,8 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     }
 
     if b_type_raw != 0 {
-        let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+        let (cbp_l, cbp_c) =
+            decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
         let cbp = cbp_l | (cbp_c << 4);
         mb.cbp = cbp;
         let mut qp = prev_qp;
@@ -2109,19 +2851,48 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         }
         mb.qp = qp;
         let this_cabac_ctx = decode_inter_residual_cabac(
-            dec, ctxs, &mut mb, &mut this_nz, nz_grid,
-            cabac_ctx_grid, mb_x, mb_y, mb_cols, cbp_l, cbp_c,
+            dec,
+            ctxs,
+            &mut mb,
+            &mut this_nz,
+            nz_grid,
+            cabac_ctx_grid,
+            mb_x,
+            mb_y,
+            mb_cols,
+            cbp_l,
+            cbp_c,
         )?;
         let mb_type_str = format!("{:?}", mb.mb_type);
         tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
-        return Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter, qp, dqp_nz));
+        return Ok((
+            mb,
+            this_nz,
+            this_pred_ctx,
+            this_cabac_ctx,
+            this_inter,
+            qp,
+            dqp_nz,
+        ));
     }
 
     // B_Direct: no CBP/residual syntax, qp unchanged.
     mb.qp = prev_qp;
-    let this_cabac_ctx = MbCabacCtx { present: true, cbp_word: 0, ..Default::default() };
+    let this_cabac_ctx = MbCabacCtx {
+        present: true,
+        cbp_word: 0,
+        ..Default::default()
+    };
     tracer.on_mb_parsed(mb_x, mb_y, "BDirect16x16", mb.qp, 0, 0, &[0u8; 16]);
-    Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter, prev_qp, prev_dqp_nonzero))
+    Ok((
+        mb,
+        this_nz,
+        this_pred_ctx,
+        this_cabac_ctx,
+        this_inter,
+        prev_qp,
+        prev_dqp_nonzero,
+    ))
 }
 
 /// Shared intra-macroblock decode path for intra MBs embedded in P/B slices.
@@ -2144,7 +2915,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, i32, bool)> {
     if intra_t == 25 {
-        return Err(SliceDataError::Unsupported("I_PCM in P/B CABAC not supported"));
+        return Err(SliceDataError::Unsupported(
+            "I_PCM in P/B CABAC not supported",
+        ));
     }
     // Reuse the I-slice CABAC logic by building a temporary CabacSliceContexts
     // from the PB contexts (all PB contexts share the same context variables).
@@ -2155,9 +2928,18 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
-    let mut this_nz = MbNz { present: true, ..Default::default() };
-    let mut this_pred_ctx = MbPredCtx { present: true, ..Default::default() };
-    let mut this_cabac_ctx = MbCabacCtx { present: true, ..Default::default() };
+    let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_pred_ctx = MbPredCtx {
+        present: true,
+        ..Default::default()
+    };
+    let mut this_cabac_ctx = MbCabacCtx {
+        present: true,
+        ..Default::default()
+    };
 
     let (is_i16x16, i16_mode, cbp_chroma_mbtype, cbp_luma_mbtype) = if intra_t == 0 {
         (false, 0u8, 0u8, 0u8)
@@ -2165,19 +2947,29 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         let (m, cc, cl) = I16X16_TABLE[(intra_t - 1) as usize];
         (true, m, cc, cl)
     } else {
-        return Err(SliceDataError::Unsupported("mb_type out of range in P/B intra"));
+        return Err(SliceDataError::Unsupported(
+            "mb_type out of range in P/B intra",
+        ));
     };
 
     let mut is_8x8 = false;
     if is_i16x16 {
-        mb.mb_type = MbType::Intra16x16 { pred_mode: i16_mode, cbp_chroma: cbp_chroma_mbtype, cbp_luma: cbp_luma_mbtype };
+        mb.mb_type = MbType::Intra16x16 {
+            pred_mode: i16_mode,
+            cbp_chroma: cbp_chroma_mbtype,
+            cbp_luma: cbp_luma_mbtype,
+        };
         mb.cbp = cbp_luma_mbtype | (cbp_chroma_mbtype << 4);
         this_cabac_ctx.is_intra16x16_or_pcm = true;
     } else {
         mb.mb_type = MbType::Intra4x4;
         is_8x8 = if transform_8x8_mode_flag {
-            let left_8x8 = left_idx.map(|i| cabac_ctx_grid[i].transform_8x8).unwrap_or(false);
-            let top_8x8 = top_idx.map(|i| cabac_ctx_grid[i].transform_8x8).unwrap_or(false);
+            let left_8x8 = left_idx
+                .map(|i| cabac_ctx_grid[i].transform_8x8)
+                .unwrap_or(false);
+            let top_8x8 = top_idx
+                .map(|i| cabac_ctx_grid[i].transform_8x8)
+                .unwrap_or(false);
             ctxs.transform_8x8.decode(dec, left_8x8, top_8x8)
         } else {
             false
@@ -2189,18 +2981,35 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         if is_8x8 {
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
-                let pred_mode = mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, NeighbourCtx::NONE);
+                let pred_mode = mpm_pred_mode_8x8(
+                    pred_ctx_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &modes,
+                    i8,
+                    NeighbourCtx::NONE,
+                );
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
-                    modes[raster_of_8x8_sub(i8, sub)] = crate::prediction::Intra4x4Mode::from_u8(final_mode);
+                    modes[raster_of_8x8_sub(i8, sub)] =
+                        crate::prediction::Intra4x4Mode::from_u8(final_mode);
                 }
             }
             mb.pred_modes_8x8 = Box::new(modes8);
         } else {
             for blk_idx in 0..16usize {
                 let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-                let pred_mode = mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, NeighbourCtx::NONE);
+                let pred_mode = mpm_pred_mode(
+                    pred_ctx_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &modes,
+                    raster,
+                    NeighbourCtx::NONE,
+                );
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes[raster] = crate::prediction::Intra4x4Mode::from_u8(final_mode);
             }
@@ -2210,8 +3019,12 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         this_pred_ctx.modes = modes;
     }
 
-    let left_chroma_nz = left_idx.map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0).unwrap_or(false);
-    let top_chroma_nz = top_idx.map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0).unwrap_or(false);
+    let left_chroma_nz = left_idx
+        .map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0)
+        .unwrap_or(false);
+    let top_chroma_nz = top_idx
+        .map(|i| cabac_ctx_grid[i].chroma_pred_mode != 0)
+        .unwrap_or(false);
     let chroma_pred = ctxs.chroma_pred.decode(dec, left_chroma_nz, top_chroma_nz);
     mb.intra_chroma_pred_mode = chroma_pred as u8;
     this_cabac_ctx.chroma_pred_mode = chroma_pred as u8;
@@ -2219,7 +3032,8 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     let (cbp_l, cbp_c) = if is_i16x16 {
         (cbp_luma_mbtype, cbp_chroma_mbtype)
     } else {
-        let (left_cbp, top_cbp) = cabac_cbp_neighbors(cabac_ctx_grid, mb_x, mb_y, mb_cols, NeighbourCtx::NONE);
+        let (left_cbp, top_cbp) =
+            cabac_cbp_neighbors(cabac_ctx_grid, mb_x, mb_y, mb_cols, NeighbourCtx::NONE);
         let (l, c) = ctxs.cbp.decode(dec, left_cbp, top_cbp);
         mb.cbp = l | (c << 4);
         (l, c)
@@ -2235,7 +3049,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     mb.qp = qp;
 
     // Residual (reuse same CABAC decode helpers as I-slice).
-    use crate::cabac_tables::{CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4, CAT_LUMA_AC, CAT_LUMA_DC};
+    use crate::cabac_tables::{
+        CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4, CAT_LUMA_AC, CAT_LUMA_DC,
+    };
     let mut cbp_word: u16 = mb.cbp as u16;
 
     if is_i16x16 {
@@ -2249,7 +3065,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     }
     if is_8x8 {
         for blk8 in 0..4usize {
-            if (cbp_l >> blk8) & 1 == 0 { continue; }
+            if (cbp_l >> blk8) & 1 == 0 {
+                continue;
+            }
             let (coeffs, count) = ctxs.residual.decode_block_8x8(dec);
             mb.luma_coeffs_8x8[blk8] = coeffs;
             for sub in 0..4usize {
@@ -2262,18 +3080,36 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         let blocks: Vec<usize> = {
             let mut v = Vec::with_capacity(16);
             for blk8 in 0..4 {
-                if (cbp_l >> blk8) & 1 == 0 { continue; }
-                for sub in 0..4 { v.push(raster_of_8x8_sub(blk8, sub)); }
+                if (cbp_l >> blk8) & 1 == 0 {
+                    continue;
+                }
+                for sub in 0..4 {
+                    v.push(raster_of_8x8_sub(blk8, sub));
+                }
             }
             v
         };
         for block in blocks {
-            let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, NeighbourCtx::NONE);
+            let (left_coded, top_coded) = luma_cbf_neighbors(
+                nz_grid,
+                mb_x,
+                mb_y,
+                mb_cols,
+                &this_nz,
+                block,
+                true,
+                NeighbourCtx::NONE,
+            );
             if ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded) {
                 let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
                 this_nz.luma[block] = count;
-                if is_i16x16 { let mut s = [0i16;16]; s[1..16].copy_from_slice(&coeffs[0..15]); mb.luma_coeffs[block] = s; }
-                else { mb.luma_coeffs[block] = coeffs; }
+                if is_i16x16 {
+                    let mut s = [0i16; 16];
+                    s[1..16].copy_from_slice(&coeffs[0..15]);
+                    mb.luma_coeffs[block] = s;
+                } else {
+                    mb.luma_coeffs[block] = coeffs;
+                }
             }
         }
     }
@@ -2285,7 +3121,11 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
             if ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded) {
                 let (coeffs, _) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
-                if comp == 0 { mb.chroma_dc_cb = dc; } else { mb.chroma_dc_cr = dc; }
+                if comp == 0 {
+                    mb.chroma_dc_cb = dc;
+                } else {
+                    mb.chroma_dc_cr = dc;
+                }
                 cbp_word |= bit;
             }
         }
@@ -2293,19 +3133,46 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     if cbp_c == 2 {
         for comp in 0..2 {
             for block in 0..4 {
-                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true, NeighbourCtx::NONE);
+                let (left_coded, top_coded) = chroma_cbf_neighbors(
+                    nz_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &this_nz,
+                    comp,
+                    block,
+                    true,
+                    NeighbourCtx::NONE,
+                );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
                     this_nz.chroma[comp * 4 + block] = count;
-                    let mut s = [0i16;16]; s[1..16].copy_from_slice(&coeffs[0..15]);
-                    if comp == 0 { mb.chroma_cb_coeffs[block] = s; } else { mb.chroma_cr_coeffs[block] = s; }
+                    let mut s = [0i16; 16];
+                    s[1..16].copy_from_slice(&coeffs[0..15]);
+                    if comp == 0 {
+                        mb.chroma_cb_coeffs[block] = s;
+                    } else {
+                        mb.chroma_cr_coeffs[block] = s;
+                    }
                 }
             }
         }
     }
     this_cabac_ctx.cbp_word = cbp_word;
-    let mb_type_str = if is_i16x16 { "Intra16x16".to_string() } else { "Intra4x4".to_string() };
-    tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, mb.intra_chroma_pred_mode, &[0u8; 16]);
+    let mb_type_str = if is_i16x16 {
+        "Intra16x16".to_string()
+    } else {
+        "Intra4x4".to_string()
+    };
+    tracer.on_mb_parsed(
+        mb_x,
+        mb_y,
+        &mb_type_str,
+        mb.qp,
+        mb.cbp,
+        mb.intra_chroma_pred_mode,
+        &[0u8; 16],
+    );
     Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, qp, dqp_nz))
 }
 
@@ -2322,10 +3189,14 @@ fn decode_inter_cbp_cabac(
     // For inter MBs, off-picture neighbours use 0x00F (not 0x7CF) per FFmpeg.
     let left = if mb_x > 0 {
         cabac_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize].cbp_word
-    } else { 0x00F };
+    } else {
+        0x00F
+    };
     let top = if mb_y > 0 {
         cabac_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize].cbp_word
-    } else { 0x00F };
+    } else {
+        0x00F
+    };
     Ok(ctxs.cbp.decode(dec, left, top))
 }
 
@@ -2352,13 +3223,26 @@ fn decode_inter_residual_cabac(
     let blocks: Vec<usize> = {
         let mut v = Vec::with_capacity(16);
         for blk8 in 0..4 {
-            if (cbp_l >> blk8) & 1 == 0 { continue; }
-            for sub in 0..4 { v.push(raster_of_8x8_sub(blk8, sub)); }
+            if (cbp_l >> blk8) & 1 == 0 {
+                continue;
+            }
+            for sub in 0..4 {
+                v.push(raster_of_8x8_sub(blk8, sub));
+            }
         }
         v
     };
     for block in blocks {
-        let (left_coded, top_coded) = luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false, NeighbourCtx::NONE);
+        let (left_coded, top_coded) = luma_cbf_neighbors(
+            nz_grid,
+            mb_x,
+            mb_y,
+            mb_cols,
+            this_nz,
+            block,
+            false,
+            NeighbourCtx::NONE,
+        );
         let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
         if has_coeff {
             let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_LUMA_4X4, 16);
@@ -2374,7 +3258,11 @@ fn decode_inter_residual_cabac(
             if ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded) {
                 let (coeffs, _) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
-                if comp == 0 { mb.chroma_dc_cb = dc; } else { mb.chroma_dc_cr = dc; }
+                if comp == 0 {
+                    mb.chroma_dc_cb = dc;
+                } else {
+                    mb.chroma_dc_cr = dc;
+                }
                 cbp_word |= bit;
             }
         }
@@ -2382,17 +3270,36 @@ fn decode_inter_residual_cabac(
     if cbp_c == 2 {
         for comp in 0..2 {
             for block in 0..4 {
-                let (left_coded, top_coded) = chroma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block, false, NeighbourCtx::NONE);
+                let (left_coded, top_coded) = chroma_cbf_neighbors(
+                    nz_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    this_nz,
+                    comp,
+                    block,
+                    false,
+                    NeighbourCtx::NONE,
+                );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
                     this_nz.chroma[comp * 4 + block] = count;
-                    let mut s = [0i16;16]; s[1..16].copy_from_slice(&coeffs[0..15]);
-                    if comp == 0 { mb.chroma_cb_coeffs[block] = s; } else { mb.chroma_cr_coeffs[block] = s; }
+                    let mut s = [0i16; 16];
+                    s[1..16].copy_from_slice(&coeffs[0..15]);
+                    if comp == 0 {
+                        mb.chroma_cb_coeffs[block] = s;
+                    } else {
+                        mb.chroma_cr_coeffs[block] = s;
+                    }
                 }
             }
         }
     }
-    Ok(MbCabacCtx { present: true, cbp_word, ..Default::default() })
+    Ok(MbCabacCtx {
+        present: true,
+        cbp_word,
+        ..Default::default()
+    })
 }
 
 /// Parse the macroblock layer of a P slice (CAVLC, §7.3.4).
@@ -2533,7 +3440,9 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     if mb_type_raw >= 5 {
         let i_type = mb_type_raw - 5;
         if i_type > 25 {
-            return Err(SliceDataError::Unsupported("mb_type out of range in P slice"));
+            return Err(SliceDataError::Unsupported(
+                "mb_type out of range in P slice",
+            ));
         }
         return parse_intra_macroblock(
             r,
@@ -2587,7 +3496,9 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     } else {
         let n_parts = if mb_type_raw == 0 { 1 } else { 2 };
         for _ in 0..n_parts {
-            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            motion
+                .ref_idx_l0
+                .push(read_ref_idx(r, num_ref_idx_l0_active)?);
             let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
             motion.mvd_l0.push((mx, my));
@@ -2596,7 +3507,9 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     mb.motion = Some(motion);
 
     // coded_block_pattern for inter macroblocks (Table 9-4, inter ordering).
-    let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
+    let code_num = r
+        .read_ue()
+        .ok_or(SliceDataError::Eof("coded_block_pattern"))?;
     if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
         return Err(SliceDataError::Unsupported("cbp code_num out of range"));
     }
@@ -2690,8 +3603,14 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::BSkip;
             mb.qp = qp;
             mb.skip = true;
-            nz[mb_idx] = MbNz { present: true, ..Default::default() };
-            pred_ctx[mb_idx] = MbPredCtx { present: true, ..Default::default() };
+            nz[mb_idx] = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            pred_ctx[mb_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
             macroblocks.push(mb);
             continue;
         }
@@ -2720,7 +3639,11 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
     let mut mv_store = MvStore::new(total);
     crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
 
-    Ok(ParsedSlice { macroblocks, nz, mv_store })
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2742,8 +3665,14 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
-    let mut this_nz = MbNz { present: true, ..Default::default() };
-    let this_pred_ctx = MbPredCtx { present: true, ..Default::default() };
+    let mut this_nz = MbNz {
+        present: true,
+        ..Default::default()
+    };
+    let this_pred_ctx = MbPredCtx {
+        present: true,
+        ..Default::default()
+    };
 
     let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
 
@@ -2751,11 +3680,23 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     if mb_type_raw >= 23 {
         let i_type = mb_type_raw - 23;
         if i_type > 25 {
-            return Err(SliceDataError::Unsupported("mb_type out of range in B slice"));
+            return Err(SliceDataError::Unsupported(
+                "mb_type out of range in B slice",
+            ));
         }
         return parse_intra_macroblock(
-            r, mb_x, mb_y, mb_cols, nz_grid, pred_ctx_grid, prev_qp, chroma_qp_index_offset,
-            tracer, i_type, transform_8x8_mode, NeighbourCtx::NONE,
+            r,
+            mb_x,
+            mb_y,
+            mb_cols,
+            nz_grid,
+            pred_ctx_grid,
+            prev_qp,
+            chroma_qp_index_offset,
+            tracer,
+            i_type,
+            transform_8x8_mode,
+            NeighbourCtx::NONE,
         );
     }
 
@@ -2770,7 +3711,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         1 => {
             // B_L0_16x16
             mb.mb_type = MbType::BL016x16;
-            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            motion
+                .ref_idx_l0
+                .push(read_ref_idx(r, num_ref_idx_l0_active)?);
             let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
             motion.mvd_l0.push((mx, my));
@@ -2778,7 +3721,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         2 => {
             // B_L1_16x16
             mb.mb_type = MbType::BL116x16;
-            motion.ref_idx_l1.push(read_ref_idx(r, num_ref_idx_l1_active)?);
+            motion
+                .ref_idx_l1
+                .push(read_ref_idx(r, num_ref_idx_l1_active)?);
             let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
             motion.mvd_l1.push((mx, my));
@@ -2786,8 +3731,12 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         3 => {
             // B_Bi_16x16
             mb.mb_type = MbType::BBi16x16;
-            motion.ref_idx_l0.push(read_ref_idx(r, num_ref_idx_l0_active)?);
-            motion.ref_idx_l1.push(read_ref_idx(r, num_ref_idx_l1_active)?);
+            motion
+                .ref_idx_l0
+                .push(read_ref_idx(r, num_ref_idx_l0_active)?);
+            motion
+                .ref_idx_l1
+                .push(read_ref_idx(r, num_ref_idx_l1_active)?);
             let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
             motion.mvd_l0.push((mx, my));
@@ -2799,7 +3748,11 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
             // Two-partition B types (16×8 or 8×16).
             let idx = (mb_type_raw - 4) as usize;
             let (is_16x8, dir0, dir1) = B_2PART_TABLE[idx];
-            mb.mb_type = if is_16x8 { MbType::B16x8 } else { MbType::B8x16 };
+            mb.mb_type = if is_16x8 {
+                MbType::B16x8
+            } else {
+                MbType::B8x16
+            };
             motion.pred_dirs = vec![dir0, dir1];
 
             // Pre-fill ref_idx with LIST_NOT_USED, overwrite for applicable partitions.
@@ -2808,26 +3761,30 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
 
             // Read all L0 ref indices first.
             for part in 0..2usize {
-                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi {
+                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi
+                {
                     motion.ref_idx_l0[part] = read_ref_idx(r, num_ref_idx_l0_active)?;
                 }
             }
             // Then all L1 ref indices.
             for part in 0..2usize {
-                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi {
+                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi
+                {
                     motion.ref_idx_l1[part] = read_ref_idx(r, num_ref_idx_l1_active)?;
                 }
             }
             // All L0 MVDs first (§7.3.5.1), then all L1 MVDs.
             for part in 0..2usize {
-                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi {
+                if motion.pred_dirs[part] == BPredDir::L0 || motion.pred_dirs[part] == BPredDir::Bi
+                {
                     let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
                     let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
                     motion.mvd_l0.push((mx, my));
                 }
             }
             for part in 0..2usize {
-                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi {
+                if motion.pred_dirs[part] == BPredDir::L1 || motion.pred_dirs[part] == BPredDir::Bi
+                {
                     let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 x"))?;
                     let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l1 y"))?;
                     motion.mvd_l1.push((mx, my));
@@ -2850,8 +3807,15 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
             // Pre-fill ref indices with LIST_NOT_USED.
             motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 4];
             motion.ref_idx_l1 = vec![crate::mv::LIST_NOT_USED; 4];
-            motion.pred_dirs = sub_types.iter()
-                .map(|&st| if (st as usize) < 13 { crate::mv::B_SUB_MB_DIR[st as usize] } else { BPredDir::Direct })
+            motion.pred_dirs = sub_types
+                .iter()
+                .map(|&st| {
+                    if (st as usize) < 13 {
+                        crate::mv::B_SUB_MB_DIR[st as usize]
+                    } else {
+                        BPredDir::Direct
+                    }
+                })
                 .collect();
 
             // All L0 ref indices.
@@ -2871,7 +3835,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
             // All L0 mvds (all parts × sub-parts, skipping Direct).
             for part in 0..4usize {
                 let dir = motion.pred_dirs[part];
-                if dir == BPredDir::Direct { continue; }
+                if dir == BPredDir::Direct {
+                    continue;
+                }
                 if dir == BPredDir::L0 || dir == BPredDir::Bi {
                     let n_sub = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
                     for _ in 0..n_sub {
@@ -2884,7 +3850,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
             // All L1 mvds.
             for part in 0..4usize {
                 let dir = motion.pred_dirs[part];
-                if dir == BPredDir::Direct { continue; }
+                if dir == BPredDir::Direct {
+                    continue;
+                }
                 if dir == BPredDir::L1 || dir == BPredDir::Bi {
                     let n_sub = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
                     for _ in 0..n_sub {
@@ -2904,7 +3872,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     }
 
     // coded_block_pattern for inter macroblocks.
-    let code_num = r.read_ue().ok_or(SliceDataError::Eof("coded_block_pattern"))?;
+    let code_num = r
+        .read_ue()
+        .ok_or(SliceDataError::Eof("coded_block_pattern"))?;
     if code_num as usize >= GOLOMB_TO_INTER_CBP.len() {
         return Err(SliceDataError::Unsupported("cbp code_num out of range"));
     }
@@ -2921,7 +3891,18 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     mb.qp = qp;
 
     parse_intra_residuals(
-        r, &mut mb, &mut this_nz, nz_grid, mb_x, mb_y, mb_cols, false, cbp_l, cbp_c, false, tracer,
+        r,
+        &mut mb,
+        &mut this_nz,
+        nz_grid,
+        mb_x,
+        mb_y,
+        mb_cols,
+        false,
+        cbp_l,
+        cbp_c,
+        false,
+        tracer,
         NeighbourCtx::NONE,
     )?;
 
@@ -2930,7 +3911,15 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
         modes[i] = *m as u8;
     }
-    tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, mb.intra_chroma_pred_mode, &modes);
+    tracer.on_mb_parsed(
+        mb_x,
+        mb_y,
+        &mb_type_str,
+        mb.qp,
+        mb.cbp,
+        mb.intra_chroma_pred_mode,
+        &modes,
+    );
 
     Ok((mb, this_nz, this_pred_ctx, qp))
 }
@@ -2986,102 +3975,127 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
                 let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
                 for k in 0..16usize {
                     let raw = crate::transform::CAVLC_SCAN8X8[16 * sub + k] as usize;
-                    let cavlc_raster =
-                        raw;
+                    let cavlc_raster = raw;
                     let zz = crate::transform::INVERSE_ZIGZAG_8X8[cavlc_raster];
                     block64[zz] = coeffs[k];
                 }
                 this_nz.luma[raster] = tc;
-                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, &coeffs);
+                tracer.on_cavlc_coeffs(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    (i8x8 * 4 + sub) as u8,
+                    &coeffs,
+                );
                 tracer.on_cavlc_block_info(
-                    mb_x, mb_y, TracePlane::Luma, (i8x8 * 4 + sub) as u8, nc, tc, t1, 0,
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    (i8x8 * 4 + sub) as u8,
+                    nc,
+                    tc,
+                    t1,
+                    0,
                 );
             }
-            // §9.2.1: when transform_size_8x8_flag == 1, TotalCoeff for any
-            // 4×4 block that belongs to the 8×8 block equals the *sum* of the
-            // four sub-block TotalCoeff values. All four positions must carry
-            // this sum so that subsequent 8×8 blocks within the same MB (whose
-            // nC derivation looks left/up into already-decoded positions) and
-            // neighbouring macroblocks (querying the right-column or bottom-row
-            // positions) both get the correct nC. Setting only the top-left
-            // position (p0) leaves p1/p2/p3 with stale individual counts,
-            // propagating wrong nC across the whole frame.
+            // §9.2.1 / FFmpeg h264_cavlc.c: after all 4 sub-streams are
+            // decoded, accumulate the block's total non-zero count into the
+            // top-left sub-block position (p0). This matches x264/FFmpeg's
+            // nnz layout (`nnz[0] += nnz[1] + nnz[8] + nnz[9]`): p1/p2/p3
+            // keep their individual sub-stream counts so that intra-MB
+            // lookups from subsequent 8×8 blocks use the same nC the encoder
+            // used, while p0 carries the accumulated sum for the p0 position.
+            // Neighbouring MBs look at bottom-row / right-column positions
+            // which may be p1, p2, or p3 — their individual counts are what
+            // x264 encodes against, so they must be left as-is here too.
             let p0 = raster_of_8x8_sub(i8x8, 0);
             let p1 = raster_of_8x8_sub(i8x8, 1);
             let p2 = raster_of_8x8_sub(i8x8, 2);
             let p3 = raster_of_8x8_sub(i8x8, 3);
-            let sum = this_nz.luma[p0]
+            this_nz.luma[p0] = this_nz.luma[p0]
                 .saturating_add(this_nz.luma[p1])
                 .saturating_add(this_nz.luma[p2])
                 .saturating_add(this_nz.luma[p3]);
-            this_nz.luma[p0] = sum;
-            this_nz.luma[p1] = sum;
-            this_nz.luma[p2] = sum;
-            this_nz.luma[p3] = sum;
             mb.luma_coeffs_8x8[i8x8] = block64;
         }
     } else {
-    // Luma 4×4 blocks. Both intra and inter use the BlkIdx scan order defined
-    // by §7.3.5.2: iterate i8x8 (0..4), gate on CodedBlockPatternLuma bit i8x8,
-    // then iterate i4x4 (0..4). BlkIdx = i8x8*4 + i4x4. raster_of_8x8_sub maps
-    // (i8x8, i4x4) → raster position for nC neighbor lookups and coeff storage.
-    let luma_max = if is_i16x16 { 15 } else { 16 };
-    let blocks: Vec<usize> = {
-        let mut v = Vec::with_capacity(16);
-        for blk8 in 0..4usize {
-            if (cbp_luma >> blk8) & 1 == 0 {
-                continue;
+        // Luma 4×4 blocks. Both intra and inter use the BlkIdx scan order defined
+        // by §7.3.5.2: iterate i8x8 (0..4), gate on CodedBlockPatternLuma bit i8x8,
+        // then iterate i4x4 (0..4). BlkIdx = i8x8*4 + i4x4. raster_of_8x8_sub maps
+        // (i8x8, i4x4) → raster position for nC neighbor lookups and coeff storage.
+        let luma_max = if is_i16x16 { 15 } else { 16 };
+        let blocks: Vec<usize> = {
+            let mut v = Vec::with_capacity(16);
+            for blk8 in 0..4usize {
+                if (cbp_luma >> blk8) & 1 == 0 {
+                    continue;
+                }
+                for sub in 0..4usize {
+                    v.push(raster_of_8x8_sub(blk8, sub));
+                }
             }
-            for sub in 0..4usize {
-                v.push(raster_of_8x8_sub(blk8, sub));
+            v
+        };
+        for block in blocks {
+            let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, nctx);
+            let pos_before = r.bit_position() as u32;
+            let result = parse_cavlc_block(r, nc, luma_max);
+            let (coeffs, tc, t1) = result?;
+            let pos_after = r.bit_position();
+            this_nz.luma[block] = tc;
+            // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
+            if is_i16x16 {
+                let mut shifted = [0i16; 16];
+                shifted[1..16].copy_from_slice(&coeffs[0..15]);
+                mb.luma_coeffs[block] = shifted;
+                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
+                tracer.on_cavlc_block_info(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    0,
+                );
+                tracer.on_cavlc_block_info_with_pos(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    pos_before,
+                    pos_after,
+                );
+            } else {
+                mb.luma_coeffs[block] = coeffs;
+                tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
+                tracer.on_cavlc_block_info(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    0,
+                );
+                tracer.on_cavlc_block_info_with_pos(
+                    mb_x,
+                    mb_y,
+                    TracePlane::Luma,
+                    block as u8,
+                    nc,
+                    tc,
+                    t1,
+                    pos_before,
+                    pos_after,
+                );
             }
         }
-        v
-    };
-    for block in blocks {
-        let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, nctx);
-        let pos_before = r.bit_position() as u32;
-        let result = parse_cavlc_block(r, nc, luma_max);
-        let (coeffs, tc, t1) = result?;
-        let pos_after = r.bit_position();
-        this_nz.luma[block] = tc;
-        // For I_16×16 the 15 AC coeffs occupy zigzag positions 1..=15.
-        if is_i16x16 {
-            let mut shifted = [0i16; 16];
-            shifted[1..16].copy_from_slice(&coeffs[0..15]);
-            mb.luma_coeffs[block] = shifted;
-            tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &shifted);
-            tracer.on_cavlc_block_info(
-                mb_x,
-                mb_y,
-                TracePlane::Luma,
-                block as u8,
-                nc,
-                tc,
-                t1,
-                0,
-            );
-            tracer.on_cavlc_block_info_with_pos(
-                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, pos_before, pos_after,
-            );
-        } else {
-            mb.luma_coeffs[block] = coeffs;
-            tracer.on_cavlc_coeffs(mb_x, mb_y, TracePlane::Luma, block as u8, &coeffs);
-            tracer.on_cavlc_block_info(
-                mb_x,
-                mb_y,
-                TracePlane::Luma,
-                block as u8,
-                nc,
-                tc,
-                t1,
-                0,
-            );
-            tracer.on_cavlc_block_info_with_pos(
-                mb_x, mb_y, TracePlane::Luma, block as u8, nc, tc, t1, pos_before, pos_after,
-            );
-        }
-    }
     }
 
     // Chroma DC (Cb, Cr) present when cbp_chroma & 3 (i.e. == 1 or 2).

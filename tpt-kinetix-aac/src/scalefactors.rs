@@ -163,24 +163,36 @@ mod tests {
         // val = predictor(0) - dpcm.
         let ics = ics_long(1);
         let sections = SectionData {
-            groups: vec![vec![Section { sect_cb: 1, sect_len: 1 }]],
+            groups: vec![vec![Section {
+                sect_cb: 1,
+                sect_len: 1,
+            }]],
         };
         let bt = expand_band_types(&sections, &ics);
 
         // idx 60 → dpcm 0 → val 0
         let bytes = pack_bits(&encode_scalefactor_bits(60));
         let mut r = BitReader::new(&bytes);
-        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
+        assert_eq!(
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            vec![0]
+        );
 
         // idx 61 → dpcm 1 → val -1
         let bytes = pack_bits(&encode_scalefactor_bits(61));
         let mut r = BitReader::new(&bytes);
-        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![-1]);
+        assert_eq!(
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            vec![-1]
+        );
 
         // idx 59 → dpcm -1 → val 1
         let bytes = pack_bits(&encode_scalefactor_bits(59));
         let mut r = BitReader::new(&bytes);
-        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![1]);
+        assert_eq!(
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -188,11 +200,17 @@ mod tests {
         // A ZERO_HCB band contributes an implicit 0 scalefactor and consumes no bits.
         let ics = ics_long(1);
         let sections = SectionData {
-            groups: vec![vec![Section { sect_cb: 0, sect_len: 1 }]],
+            groups: vec![vec![Section {
+                sect_cb: 0,
+                sect_len: 1,
+            }]],
         };
         let bt = expand_band_types(&sections, &ics);
         let mut r = BitReader::new(&[0u8; 4]);
-        assert_eq!(decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(), vec![0]);
+        assert_eq!(
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            vec![0]
+        );
     }
 
     #[test]
@@ -201,7 +219,10 @@ mod tests {
         // → idx 58). The predictor advances by the previous value.
         let ics = ics_long(2);
         let sections = SectionData {
-            groups: vec![vec![Section { sect_cb: 1, sect_len: 2 }]],
+            groups: vec![vec![Section {
+                sect_cb: 1,
+                sect_len: 2,
+            }]],
         };
         let bt = expand_band_types(&sections, &ics);
         let mut bits = encode_scalefactor_bits(60); // band0: dpcm 0 → val 0

@@ -5,9 +5,9 @@ use std::process::Command;
 
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnit, NalUnitType};
+use tpt_kinetix_h264::pps::PicParameterSet;
 use tpt_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use tpt_kinetix_h264::sps::SeqParameterSet;
-use tpt_kinetix_h264::pps::PicParameterSet;
 
 fn run(cmd: &mut Command) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
@@ -82,7 +82,8 @@ fn main() {
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
-        bottom_field_pic_order_in_frame_present_flag: pps.bottom_field_pic_order_in_frame_present_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
         delta_pic_order_always_zero_flag: false,
         num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
@@ -99,10 +100,13 @@ fn main() {
         if n.nal_unit_type == NalUnitType::NonIdrSlice {
             let header =
                 SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx)
-                .expect("slice header parse");
+                    .expect("slice header parse");
             eprintln!(
                 "P slice: slice_type={:?} first_mb={} data_bit_offset={} qp_delta={}",
-                header.slice_type, header.first_mb_in_slice, header.data_bit_offset, header.slice_qp_delta
+                header.slice_type,
+                header.first_mb_in_slice,
+                header.data_bit_offset,
+                header.slice_qp_delta
             );
             dump_bits(&n, header.data_bit_offset);
         }

@@ -205,11 +205,17 @@ pub fn place_mbaff_luma_pair(
     let base_y = pair_row * 32;
     for j in 0..16usize {
         let row_top = if field { base_y + 2 * j } else { base_y + j };
-        let row_bottom = if field { base_y + 2 * j + 1 } else { base_y + 16 + j };
+        let row_bottom = if field {
+            base_y + 2 * j + 1
+        } else {
+            base_y + 16 + j
+        };
         if let Some(sl) = out.get_mut(row_top * stride + base_x..row_top * stride + base_x + 16) {
             sl.copy_from_slice(&top[j * 16..j * 16 + 16]);
         }
-        if let Some(sl) = out.get_mut(row_bottom * stride + base_x..row_bottom * stride + base_x + 16) {
+        if let Some(sl) =
+            out.get_mut(row_bottom * stride + base_x..row_bottom * stride + base_x + 16)
+        {
             sl.copy_from_slice(&bottom[j * 16..j * 16 + 16]);
         }
     }
@@ -235,11 +241,17 @@ pub fn place_mbaff_chroma_pair(
     let base_y = pair_row * 16;
     for j in 0..8usize {
         let row_top = if field { base_y + 2 * j } else { base_y + j };
-        let row_bottom = if field { base_y + 2 * j + 1 } else { base_y + 8 + j };
+        let row_bottom = if field {
+            base_y + 2 * j + 1
+        } else {
+            base_y + 8 + j
+        };
         if let Some(sl) = out.get_mut(row_top * stride + base_x..row_top * stride + base_x + 8) {
             sl.copy_from_slice(&top[j * 8..j * 8 + 8]);
         }
-        if let Some(sl) = out.get_mut(row_bottom * stride + base_x..row_bottom * stride + base_x + 8) {
+        if let Some(sl) =
+            out.get_mut(row_bottom * stride + base_x..row_bottom * stride + base_x + 8)
+        {
             sl.copy_from_slice(&bottom[j * 8..j * 8 + 8]);
         }
     }
@@ -267,7 +279,11 @@ mod tests {
                 let n = derive_neighbours(mb_x, mb_y, mb_cols, mb_rows, false, &field_flags);
                 let mb_xy = (mb_y * mb_cols + mb_x) as usize;
                 assert_eq!(n.left_top, Some(mb_xy - 1), "left @ ({mb_x},{mb_y})");
-                assert_eq!(n.top, Some(mb_xy - mb_cols as usize), "top @ ({mb_x},{mb_y})");
+                assert_eq!(
+                    n.top,
+                    Some(mb_xy - mb_cols as usize),
+                    "top @ ({mb_x},{mb_y})"
+                );
                 assert_eq!(
                     n.topleft,
                     Some(mb_xy - mb_cols as usize - 1),
@@ -304,8 +320,14 @@ mod tests {
         let n = derive_neighbours(mb_x, mb_y, mb_cols, mb_rows, true, &field_flags);
         // Top neighbours are off-picture (mb_y == 0), so they should be None.
         assert_eq!(n.top, None, "field top at mb_y=0 has no top neighbour");
-        assert_eq!(n.topleft, None, "field top at mb_y=0 has no topleft neighbour");
-        assert_eq!(n.topright, None, "field top at mb_y=0 has no topright neighbour");
+        assert_eq!(
+            n.topleft, None,
+            "field top at mb_y=0 has no topleft neighbour"
+        );
+        assert_eq!(
+            n.topright, None,
+            "field top at mb_y=0 has no topright neighbour"
+        );
     }
 
     /// Mixed case: a frame-coded current macroblock whose left neighbour is
@@ -371,10 +393,16 @@ mod tests {
         let bottom = [20u8; 256];
         place_mbaff_luma_pair(&mut out, stride, 0, 0, false, &top, &bottom);
         for y in 0..16 {
-            assert!(out[y * stride..y * stride + 16].iter().all(|&v| v == 10), "top half row {y}");
+            assert!(
+                out[y * stride..y * stride + 16].iter().all(|&v| v == 10),
+                "top half row {y}"
+            );
         }
         for y in 16..32 {
-            assert!(out[y * stride..y * stride + 16].iter().all(|&v| v == 20), "bottom half row {y}");
+            assert!(
+                out[y * stride..y * stride + 16].iter().all(|&v| v == 20),
+                "bottom half row {y}"
+            );
         }
     }
 
@@ -390,7 +418,9 @@ mod tests {
         for y in 0..32 {
             let expected = if y % 2 == 0 { 10 } else { 20 };
             assert!(
-                out[y * stride..y * stride + 16].iter().all(|&v| v == expected),
+                out[y * stride..y * stride + 16]
+                    .iter()
+                    .all(|&v| v == expected),
                 "field pair scanline {y} should be {expected}"
             );
         }
@@ -407,7 +437,9 @@ mod tests {
         for y in 0..16 {
             let expected = if y % 2 == 0 { 5 } else { 7 };
             assert!(
-                out[y * stride..y * stride + 8].iter().all(|&v| v == expected),
+                out[y * stride..y * stride + 8]
+                    .iter()
+                    .all(|&v| v == expected),
                 "field chroma scanline {y} should be {expected}"
             );
         }
@@ -422,10 +454,16 @@ mod tests {
         let bottom = [7u8; 64];
         place_mbaff_chroma_pair(&mut out, stride, 0, 0, false, &top, &bottom);
         for y in 0..8 {
-            assert!(out[y * stride..y * stride + 8].iter().all(|&v| v == 5), "chroma top half row {y}");
+            assert!(
+                out[y * stride..y * stride + 8].iter().all(|&v| v == 5),
+                "chroma top half row {y}"
+            );
         }
         for y in 8..16 {
-            assert!(out[y * stride..y * stride + 8].iter().all(|&v| v == 7), "chroma bottom half row {y}");
+            assert!(
+                out[y * stride..y * stride + 8].iter().all(|&v| v == 7),
+                "chroma bottom half row {y}"
+            );
         }
     }
 }

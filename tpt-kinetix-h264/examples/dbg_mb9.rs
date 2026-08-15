@@ -57,13 +57,8 @@ fn main() {
         if seen_p != 2 {
             continue;
         }
-        let header = SliceHeader::parse_with_context(
-            &n.rbsp,
-            n.nal_unit_type,
-            n.nal_ref_idc,
-            &ctx,
-        )
-        .unwrap();
+        let header =
+            SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx).unwrap();
         let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
         let num_ref_idx = header.num_ref_idx_l0_active_minus1 + 1;
         let chroma_qp_index_offset = pps.chroma_qp_index_offset;
@@ -101,7 +96,11 @@ fn main() {
                 top[(4 + i) as usize] = Some(luma[((by - 1) * (w as i32) + bx + 4 + i) as usize]);
             }
             let tl = Some(luma[((by - 1) * (w as i32) + bx - 1) as usize]);
-            let neigh = IntraNeighbours4x4 { top, left, top_left: tl };
+            let neigh = IntraNeighbours4x4 {
+                top,
+                left,
+                top_left: tl,
+            };
             let ref_blk = {
                 let mut b = [0u8; 16];
                 for row in 0..4i32 {

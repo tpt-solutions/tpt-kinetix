@@ -80,7 +80,10 @@ fn main() {
             let s = format!("{:?}", mb.mb_type);
             *type_counts.entry(s.clone()).or_insert(0) += 1;
             if (seen_p == 1 || seen_p == 2) && (i == 9) {
-                println!("  slice#{seen_p} MB{i}: type={s} qp={} cbp={}", mb.qp, mb.cbp);
+                println!(
+                    "  slice#{seen_p} MB{i}: type={s} qp={} cbp={}",
+                    mb.qp, mb.cbp
+                );
             }
         }
         println!("  slice#{seen_p} MB type histogram: {type_counts:?}");
@@ -135,13 +138,19 @@ fn main() {
         println!("MB11 qp = {}", mb.qp);
         let grid = parsed.mv_store.cells_of(idx).unwrap();
         for (i, c) in grid.iter().enumerate() {
-            println!("  MB11 blk{i}: mv=({},{}) ref={}", c.mv[0], c.mv[1], c.ref_idx);
+            println!(
+                "  MB11 blk{i}: mv=({},{}) ref={}",
+                c.mv[0], c.mv[1], c.ref_idx
+            );
         }
         println!("MB11 luma coeffs nz per block:");
         for b in 0..16usize {
             let nz: usize = mb.luma_coeffs[b].iter().map(|&x| (x != 0) as usize).sum();
             if nz > 0 {
-                println!("  luma block {b}: nz={nz} vals={:?}", &mb.luma_coeffs[b][..]);
+                println!(
+                    "  luma block {b}: nz={nz} vals={:?}",
+                    &mb.luma_coeffs[b][..]
+                );
             } else {
                 print!(" {b}:0");
             }

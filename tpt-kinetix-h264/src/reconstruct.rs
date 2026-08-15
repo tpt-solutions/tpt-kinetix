@@ -49,12 +49,23 @@ impl ReconstructedFrame {
     /// has height `field_h * 2` (one sample every other line, parity set by
     /// `bottom`).
     pub fn deinterleave_luma(&self, bottom: bool, full_stride: usize) -> Vec<u8> {
-        deinterleave(&self.luma, self.luma_stride, self.luma.len() / self.luma_stride, bottom, full_stride)
+        deinterleave(
+            &self.luma,
+            self.luma_stride,
+            self.luma.len() / self.luma_stride,
+            bottom,
+            full_stride,
+        )
     }
 
     /// De-interleave a field chroma plane into a full-height (interlaced) frame
     /// plane. `field_h` is the field chroma height in samples (`mb_rows * 8`).
-    pub fn deinterleave_chroma(field: &[u8], field_stride: usize, bottom: bool, full_stride: usize) -> Vec<u8> {
+    pub fn deinterleave_chroma(
+        field: &[u8],
+        field_stride: usize,
+        bottom: bool,
+        full_stride: usize,
+    ) -> Vec<u8> {
         let field_h = field.len() / field_stride;
         deinterleave(field, field_stride, field_h, bottom, full_stride)
     }
@@ -62,7 +73,13 @@ impl ReconstructedFrame {
 
 /// Copy every other scanline of `field` into `out`, at parity `bottom ? 1 : 0`.
 /// `field_h` is the field plane height; `out` height is `field_h * 2`.
-fn deinterleave(field: &[u8], field_stride: usize, field_h: usize, bottom: bool, out_stride: usize) -> Vec<u8> {
+fn deinterleave(
+    field: &[u8],
+    field_stride: usize,
+    field_h: usize,
+    bottom: bool,
+    out_stride: usize,
+) -> Vec<u8> {
     let out_h = field_h * 2;
     let mut out = vec![0u8; out_stride * out_h];
     for y in 0..field_h {
@@ -76,10 +93,17 @@ fn deinterleave(field: &[u8], field_stride: usize, field_h: usize, bottom: bool,
 /// Merge two complementary field planes (top already in `out`, bottom in
 /// `new` or vice versa) by copying the new field's parity scanlines into `out`.
 /// Both planes must be full interlaced frames of the same dimensions.
-pub fn merge_field_into(out: &mut [u8], new_field: &[u8], out_stride: usize, out_h: usize, bottom: bool) {
+pub fn merge_field_into(
+    out: &mut [u8],
+    new_field: &[u8],
+    out_stride: usize,
+    out_h: usize,
+    bottom: bool,
+) {
     for y in 0..out_h {
         if y % 2 == bottom as usize {
-            out[y * out_stride..(y + 1) * out_stride].copy_from_slice(&new_field[y * out_stride..(y + 1) * out_stride]);
+            out[y * out_stride..(y + 1) * out_stride]
+                .copy_from_slice(&new_field[y * out_stride..(y + 1) * out_stride]);
         }
     }
 }
@@ -187,7 +211,12 @@ fn implicit_weights(cur_poc: i64, l0_poc: i64, l1_poc: i64) -> (i32, i32) {
 
 /// Default (unweighted) sample combination (§8.4.2.3.1): plain copy for
 /// uni-prediction, `(l0 + l1 + 1) >> 1` averaging for bi-prediction.
-fn default_combine(l0_active: bool, l1_active: bool, pred_l0: &[u8; 16], pred_l1: &[u8; 16]) -> [u8; 16] {
+fn default_combine(
+    l0_active: bool,
+    l1_active: bool,
+    pred_l0: &[u8; 16],
+    pred_l1: &[u8; 16],
+) -> [u8; 16] {
     if l0_active && l1_active {
         let mut avg = [0u8; 16];
         for i in 0..16 {
@@ -375,7 +404,10 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let top_idx = (pair_row * 2 * mb_cols + mb_x) as usize;
             let bot_idx = (pair_row * 2 * mb_cols + mb_cols + mb_x) as usize;
-            let field = macroblocks.get(top_idx).map(|m| m.mb_field_flag).unwrap_or(false);
+            let field = macroblocks
+                .get(top_idx)
+                .map(|m| m.mb_field_flag)
+                .unwrap_or(false);
 
             // Extract the top macroblock's 16×16 luma / 8×8 chroma planes from
             // the progressive reconstruction, then the bottom macroblock's (if
@@ -553,7 +585,13 @@ fn reconstruct_luma<T: DecodeTracer>(
             for block in 0..16usize {
                 let bx = (block % 4) * 4;
                 let by = (block / 4) * 4;
-                let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, Some(dc_out[block]), 0, scaling);
+                let res = dequant_idct_4x4(
+                    &mb.luma_coeffs[block],
+                    mb.qp,
+                    Some(dc_out[block]),
+                    0,
+                    scaling,
+                );
                 let mut recon_blk = [0u8; 16];
                 for row in 0..4 {
                     for col in 0..4 {
@@ -578,79 +616,85 @@ fn reconstruct_luma<T: DecodeTracer>(
             if mb.transform_size_8x8 {
                 reconstruct_luma_8x8(mb, plane, stride, mb_x, mb_y, scaling, tracer);
             } else {
-            // Process 4×4 blocks in decode (block-scan) order so neighbours are
-            // reconstructed first.
-            for blk8 in 0..4usize {
-                for sub in 0..4usize {
-                    let block = raster_of_8x8_sub(blk8, sub);
-                    let bx = (block % 4) * 4;
-                    let by = (block / 4) * 4;
-                    let x0 = base_x + bx;
-                    let y0 = base_y + by;
+                // Process 4×4 blocks in decode (block-scan) order so neighbours are
+                // reconstructed first.
+                for blk8 in 0..4usize {
+                    for sub in 0..4usize {
+                        let block = raster_of_8x8_sub(blk8, sub);
+                        let bx = (block % 4) * 4;
+                        let by = (block / 4) * 4;
+                        let x0 = base_x + bx;
+                        let y0 = base_y + by;
 
-                    let mut top = [None; 8];
-                    let mut left = [None; 4];
-                    for i in 0..4 {
-                        top[i] = get_luma(plane, stride, (x0 + i) as isize, y0 as isize - 1);
-                        left[i] = get_luma(plane, stride, x0 as isize - 1, (y0 + i) as isize);
-                    }
-                    // Top-right samples (top[4..8]), §8.3.1.2.1. When `by_u == 0`
-                    // the top-right block is in the MB row above (already fully
-                    // reconstructed, or correctly out-of-frame via `get_luma`).
-                    // When `by_u > 0` the top-right block is *within this MB*
-                    // (or, when `bx_u == 3`, in the not-yet-decoded MB to the
-                    // right) — reading the frame buffer directly would pick up
-                    // stale/zeroed pixels for whichever of those blocks hasn't
-                    // been reconstructed yet in scan order, so availability must
-                    // be checked explicitly rather than just frame bounds.
-                    let bx_u = block % 4;
-                    let by_u = block / 4;
-                    let top_right_available = by_u == 0 || {
-                        if bx_u == 3 {
-                            false
-                        } else {
-                            let (tbx, tby) = (bx_u + 1, by_u - 1);
-                            let target_blk8 = (tby / 2) * 2 + (tbx / 2);
-                            let target_sub = (tby % 2) * 2 + (tbx % 2);
-                            target_blk8 * 4 + target_sub < blk8 * 4 + sub
-                        }
-                    };
-                    if top_right_available {
+                        let mut top = [None; 8];
+                        let mut left = [None; 4];
                         for i in 0..4 {
-                            top[4 + i] =
-                                get_luma(plane, stride, (x0 + 4 + i) as isize, y0 as isize - 1);
+                            top[i] = get_luma(plane, stride, (x0 + i) as isize, y0 as isize - 1);
+                            left[i] = get_luma(plane, stride, x0 as isize - 1, (y0 + i) as isize);
                         }
-                    }
-                    let tl = get_luma(plane, stride, x0 as isize - 1, y0 as isize - 1);
-                    let mut pred = [0u8; 16];
-                    predict_4x4(
-                        mb.pred_modes_4x4[block],
-                        &IntraNeighbours4x4 {
-                            top,
-                            left,
-                            top_left: tl,
-                        },
-                        &mut pred,
-                    );
-                    tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, block as u8, &pred);
-                    let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
-                    let mut recon_blk = [0u8; 16];
-                    for row in 0..4 {
-                        for col in 0..4 {
-                            let px = x0 + col;
-                            let py = y0 + row;
-                            let off = py * stride + px;
-                            let p = pred[row * 4 + col] as i32;
-                            let v = (p + res[row * 4 + col]).clamp(0, 255) as u8;
-                            recon_blk[row * 4 + col] = v;
-                            if off < plane.len() && px < stride {
-                                plane[off] = v;
+                        // Top-right samples (top[4..8]), §8.3.1.2.1. When `by_u == 0`
+                        // the top-right block is in the MB row above (already fully
+                        // reconstructed, or correctly out-of-frame via `get_luma`).
+                        // When `by_u > 0` the top-right block is *within this MB*
+                        // (or, when `bx_u == 3`, in the not-yet-decoded MB to the
+                        // right) — reading the frame buffer directly would pick up
+                        // stale/zeroed pixels for whichever of those blocks hasn't
+                        // been reconstructed yet in scan order, so availability must
+                        // be checked explicitly rather than just frame bounds.
+                        let bx_u = block % 4;
+                        let by_u = block / 4;
+                        let top_right_available = by_u == 0 || {
+                            if bx_u == 3 {
+                                false
+                            } else {
+                                let (tbx, tby) = (bx_u + 1, by_u - 1);
+                                let target_blk8 = (tby / 2) * 2 + (tbx / 2);
+                                let target_sub = (tby % 2) * 2 + (tbx % 2);
+                                target_blk8 * 4 + target_sub < blk8 * 4 + sub
+                            }
+                        };
+                        if top_right_available {
+                            for i in 0..4 {
+                                top[4 + i] =
+                                    get_luma(plane, stride, (x0 + 4 + i) as isize, y0 as isize - 1);
                             }
                         }
+                        let tl = get_luma(plane, stride, x0 as isize - 1, y0 as isize - 1);
+                        let mut pred = [0u8; 16];
+                        predict_4x4(
+                            mb.pred_modes_4x4[block],
+                            &IntraNeighbours4x4 {
+                                top,
+                                left,
+                                top_left: tl,
+                            },
+                            &mut pred,
+                        );
+                        tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, block as u8, &pred);
+                        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+                        let mut recon_blk = [0u8; 16];
+                        for row in 0..4 {
+                            for col in 0..4 {
+                                let px = x0 + col;
+                                let py = y0 + row;
+                                let off = py * stride + px;
+                                let p = pred[row * 4 + col] as i32;
+                                let v = (p + res[row * 4 + col]).clamp(0, 255) as u8;
+                                recon_blk[row * 4 + col] = v;
+                                if off < plane.len() && px < stride {
+                                    plane[off] = v;
+                                }
+                            }
+                        }
+                        tracer.on_reconstructed(
+                            mb_x,
+                            mb_y,
+                            TracePlane::Luma,
+                            block as u8,
+                            &recon_blk,
+                        );
                     }
-                    tracer.on_reconstructed(mb_x, mb_y, TracePlane::Luma, block as u8, &recon_blk);
                 }
-            }
             }
         }
         _ => {
@@ -1031,7 +1075,9 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
     let base_x = (mb_x * 16) as usize;
     let base_y = (mb_y * 16) as usize;
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
@@ -1060,7 +1106,15 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         }
         let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
 
-        tracer.on_motion_comp(mb_x, mb_y, TracePlane::Luma, block as u8, &pred, cell.mv, ref_idx);
+        tracer.on_motion_comp(
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx,
+        );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
         for row in 0..4 {
@@ -1099,7 +1153,9 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
     let base_y = (mb_y * 8) as usize;
     let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (comp, plane) in [cb as &mut [u8], cr].into_iter().enumerate() {
         let dc_src = if comp == 0 {
@@ -1152,9 +1208,25 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                     4,
                 );
             }
-            let pred =
-                combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], Some(comp));
-            tracer.on_motion_comp(mb_x, mb_y, trace_plane, block as u8, &pred, cell.mv, ref_idx);
+            let pred = combine_weighted(
+                weighted,
+                true,
+                false,
+                ref_idx,
+                0,
+                &pred,
+                &[0u8; 16],
+                Some(comp),
+            );
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                trace_plane,
+                block as u8,
+                &pred,
+                cell.mv,
+                ref_idx,
+            );
 
             let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
             for row in 0..4 {
@@ -1303,7 +1375,9 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
     let base_x = (mb_x * 16) as usize;
     let base_y = (mb_y * 16) as usize;
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
@@ -1318,23 +1392,49 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
 
         let mut pred_l0 = [0u8; 16];
         if l0_active {
-            if let Some(frame) = ref_frames_l0.get(ref_idx0).or_else(|| ref_frames_l0.first()) {
+            if let Some(frame) = ref_frames_l0
+                .get(ref_idx0)
+                .or_else(|| ref_frames_l0.first())
+            {
                 let w = frame.width as usize;
                 let h = frame.height as usize;
                 crate::motion_comp::interpolate_luma(
-                    &mut pred_l0, 4, &frame.data[..w * h], w, w, h,
-                    x0, y0, cell.mv[0], cell.mv[1], 4, 4,
+                    &mut pred_l0,
+                    4,
+                    &frame.data[..w * h],
+                    w,
+                    w,
+                    h,
+                    x0,
+                    y0,
+                    cell.mv[0],
+                    cell.mv[1],
+                    4,
+                    4,
                 );
             }
         }
         let mut pred_l1 = [0u8; 16];
         if l1_active {
-            if let Some(frame) = ref_frames_l1.get(ref_idx1).or_else(|| ref_frames_l1.first()) {
+            if let Some(frame) = ref_frames_l1
+                .get(ref_idx1)
+                .or_else(|| ref_frames_l1.first())
+            {
                 let w = frame.width as usize;
                 let h = frame.height as usize;
                 crate::motion_comp::interpolate_luma(
-                    &mut pred_l1, 4, &frame.data[..w * h], w, w, h,
-                    x0, y0, cell.mv_l1[0], cell.mv_l1[1], 4, 4,
+                    &mut pred_l1,
+                    4,
+                    &frame.data[..w * h],
+                    w,
+                    w,
+                    h,
+                    x0,
+                    y0,
+                    cell.mv_l1[0],
+                    cell.mv_l1[1],
+                    4,
+                    4,
                 );
             }
         }
@@ -1344,8 +1444,13 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
         );
 
         tracer.on_motion_comp(
-            mb_x, mb_y, TracePlane::Luma, block as u8, &pred,
-            cell.mv, ref_idx0,
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx0,
         );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
@@ -1387,14 +1492,31 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
     let base_y = (mb_y * 8) as usize;
     let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (comp, plane) in [cb as &mut [u8], cr].into_iter().enumerate() {
-        let dc_src = if comp == 0 { &mb.chroma_dc_cb } else { &mb.chroma_dc_cr };
-        let ac = if comp == 0 { &mb.chroma_cb_coeffs } else { &mb.chroma_cr_coeffs };
-        let trace_plane = if comp == 0 { TracePlane::Cb } else { TracePlane::Cr };
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
         let dc_raster = [
-            dc_src[0] as i32, dc_src[1] as i32, dc_src[2] as i32, dc_src[3] as i32,
+            dc_src[0] as i32,
+            dc_src[1] as i32,
+            dc_src[2] as i32,
+            dc_src[3] as i32,
         ];
         let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
 
@@ -1412,41 +1534,78 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
 
             let mut pred_l0 = [0u8; 16];
             if l0_active {
-                if let Some(frame) = ref_frames_l0.get(ref_idx0).or_else(|| ref_frames_l0.first()) {
+                if let Some(frame) = ref_frames_l0
+                    .get(ref_idx0)
+                    .or_else(|| ref_frames_l0.first())
+                {
                     let w = frame.width as usize;
                     let h = frame.height as usize;
                     let luma_len = w * h;
                     let chroma_len = (w / 2) * (h / 2);
                     let off = luma_len + comp * chroma_len;
                     crate::motion_comp::interpolate_chroma(
-                        &mut pred_l0, 4, &frame.data[off..off + chroma_len],
-                        w / 2, w / 2, h / 2, x0, y0, cell.mv[0], cell.mv[1], 4, 4,
+                        &mut pred_l0,
+                        4,
+                        &frame.data[off..off + chroma_len],
+                        w / 2,
+                        w / 2,
+                        h / 2,
+                        x0,
+                        y0,
+                        cell.mv[0],
+                        cell.mv[1],
+                        4,
+                        4,
                     );
                 }
             }
             let mut pred_l1 = [0u8; 16];
             if l1_active {
-                if let Some(frame) = ref_frames_l1.get(ref_idx1).or_else(|| ref_frames_l1.first()) {
+                if let Some(frame) = ref_frames_l1
+                    .get(ref_idx1)
+                    .or_else(|| ref_frames_l1.first())
+                {
                     let w = frame.width as usize;
                     let h = frame.height as usize;
                     let luma_len = w * h;
                     let chroma_len = (w / 2) * (h / 2);
                     let off = luma_len + comp * chroma_len;
                     crate::motion_comp::interpolate_chroma(
-                        &mut pred_l1, 4, &frame.data[off..off + chroma_len],
-                        w / 2, w / 2, h / 2, x0, y0, cell.mv_l1[0], cell.mv_l1[1], 4, 4,
+                        &mut pred_l1,
+                        4,
+                        &frame.data[off..off + chroma_len],
+                        w / 2,
+                        w / 2,
+                        h / 2,
+                        x0,
+                        y0,
+                        cell.mv_l1[0],
+                        cell.mv_l1[1],
+                        4,
+                        4,
                     );
                 }
             }
 
             let pred = combine_weighted(
-                weighted, l0_active, l1_active, ref_idx0, ref_idx1, &pred_l0, &pred_l1,
+                weighted,
+                l0_active,
+                l1_active,
+                ref_idx0,
+                ref_idx1,
+                &pred_l0,
+                &pred_l1,
                 Some(comp),
             );
 
             tracer.on_motion_comp(
-                mb_x, mb_y, trace_plane, block as u8, &pred,
-                cell.mv, ref_idx0,
+                mb_x,
+                mb_y,
+                trace_plane,
+                block as u8,
+                &pred,
+                cell.mv,
+                ref_idx0,
             );
 
             let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
@@ -1488,7 +1647,9 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
     let base_x = (mb_x * 16) as usize;
     let base_y = (mb_y * 16) as usize;
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
@@ -1515,9 +1676,16 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
                 4,
             );
         }
-        let pred =
-            combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
-        tracer.on_motion_comp(mb_x, mb_y, TracePlane::Luma, block as u8, &pred, cell.mv, ref_idx);
+        let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
+        tracer.on_motion_comp(
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx,
+        );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
         let mut recon_blk = [0u8; 16];
@@ -1564,7 +1732,9 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
     let base_y = (mb_y * 8) as usize;
     let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
     let idx = (mb_y * mb_cols + mb_x) as usize;
-    let grid = mv_store.cells_of(idx).unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
     for (comp, plane) in [cb, cr].into_iter().enumerate() {
         let dc_src = if comp == 0 {
@@ -1620,8 +1790,16 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                     4,
                 );
             }
-            let pred =
-                combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], Some(comp));
+            let pred = combine_weighted(
+                weighted,
+                true,
+                false,
+                ref_idx,
+                0,
+                &pred,
+                &[0u8; 16],
+                Some(comp),
+            );
             tracer.on_motion_comp(
                 mb_x,
                 mb_y,
@@ -1697,7 +1875,17 @@ mod tests {
     #[test]
     fn empty_frame_reconstructs_without_panic() {
         let mbs = vec![Macroblock::new_skip(); 1];
-        let f = reconstruct_intra_frame(&mbs, 1, 1, 16, 16, 0, &crate::transform::ScalingLists::flat(), &WeightedPred::Default, &mut crate::trace::NoopTracer);
+        let f = reconstruct_intra_frame(
+            &mbs,
+            1,
+            1,
+            16,
+            16,
+            0,
+            &crate::transform::ScalingLists::flat(),
+            &WeightedPred::Default,
+            &mut crate::trace::NoopTracer,
+        );
         assert_eq!(f.luma.len(), 16 * 16);
         assert_eq!(f.chroma_cb.len(), 8 * 8);
     }
@@ -1708,7 +1896,16 @@ mod tests {
     fn inter_skip_copies_reference() {
         let mb = Macroblock::new_skip();
         let mut store = crate::mv::MvStore::new(1);
-        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
+        store.commit(
+            0,
+            [crate::mv::MvCell {
+                mv: [0, 0],
+                ref_idx: 0,
+                mv_l1: [0, 0],
+                ref_idx_l1: -1,
+            }; 16],
+            0,
+        );
         let mut ref_frame = crate::macroblock::new_video_frame(16, 16).unwrap();
         for px in ref_frame.data.iter_mut() {
             *px = 123;
@@ -1756,9 +1953,27 @@ mod tests {
         mb.mb_type = crate::macroblock::MbType::PL016x16;
         let mut store = crate::mv::MvStore::new(2);
         // MB 0 (left): no motion.
-        store.commit(0, [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
+        store.commit(
+            0,
+            [crate::mv::MvCell {
+                mv: [0, 0],
+                ref_idx: 0,
+                mv_l1: [0, 0],
+                ref_idx_l1: -1,
+            }; 16],
+            0,
+        );
         // MB 1 (right): +1 luma px (4,0) -> +1/2 chroma px.
-        store.commit(1, [crate::mv::MvCell { mv: [4, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16], 0);
+        store.commit(
+            1,
+            [crate::mv::MvCell {
+                mv: [4, 0],
+                ref_idx: 0,
+                mv_l1: [0, 0],
+                ref_idx_l1: -1,
+            }; 16],
+            0,
+        );
 
         let f = reconstruct_inter_frame(
             &[mb.clone(), mb],
@@ -1798,7 +2013,12 @@ mod tests {
         let mut store = crate::mv::MvStore::new(1);
         store.commit(
             0,
-            [crate::mv::MvCell { mv: [0, 0], ref_idx: 0, mv_l1: [0, 0], ref_idx_l1: -1 }; 16],
+            [crate::mv::MvCell {
+                mv: [0, 0],
+                ref_idx: 0,
+                mv_l1: [0, 0],
+                ref_idx_l1: -1,
+            }; 16],
             0,
         );
         let mut ref_frame = crate::macroblock::new_video_frame(16, 16).unwrap();

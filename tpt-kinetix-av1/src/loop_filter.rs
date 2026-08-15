@@ -394,8 +394,15 @@ fn deblock_plane(
             let bh = step.min(height.saturating_sub(y0));
             for y in y0..y0 + bh {
                 let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
-                let filtered =
-                    filter_line_1d(&line, edge, lp.limit, lp.blimit, lp.thresh, filter_size, plane_index == 0);
+                let filtered = filter_line_1d(
+                    &line,
+                    edge,
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                    filter_size,
+                    plane_index == 0,
+                );
                 for x in 0..width {
                     plane[y * stride + x] = filtered[x] as u8;
                 }
@@ -420,9 +427,17 @@ fn deblock_plane(
             let x0 = bx * step;
             let bw = step.min(width.saturating_sub(x0));
             for x in x0..x0 + bw {
-                let mut line: Vec<i32> = (0..height).map(|y| plane[y * stride + x] as i32).collect();
-                let filtered =
-                    filter_line_1d(&line, edge, lp.limit, lp.blimit, lp.thresh, filter_size, plane_index == 0);
+                let mut line: Vec<i32> =
+                    (0..height).map(|y| plane[y * stride + x] as i32).collect();
+                let filtered = filter_line_1d(
+                    &line,
+                    edge,
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                    filter_size,
+                    plane_index == 0,
+                );
                 for y in 0..height {
                     plane[y * stride + x] = filtered[y] as u8;
                 }
@@ -489,7 +504,14 @@ fn cdef_constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
 /// A block at the frame edge may extend past the plane; samples outside the
 /// plane are clamped to the nearest valid (edge) sample, matching the boundary
 /// extension the reference decoder uses for `cdef_direction`.
-fn cdef_direction(src: &[u8], stride: usize, width: usize, height: usize, x0: usize, y0: usize) -> (usize, i32) {
+fn cdef_direction(
+    src: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+) -> (usize, i32) {
     let mut partial = [[0i32; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
@@ -583,9 +605,14 @@ fn cdef_filter_block(
                     let dx = CDEF_DIRECTIONS[dir][k][1] * sign;
                     let yy = (y0 + i) as isize + dy as isize;
                     let xx = (x0 + j) as isize + dx as isize;
-                    if yy >= 0 && (yy as usize) < src.len().div_ceil(src_stride) && xx >= 0 && (xx as usize) < src_stride {
+                    if yy >= 0
+                        && (yy as usize) < src.len().div_ceil(src_stride)
+                        && xx >= 0
+                        && (xx as usize) < src_stride
+                    {
                         let p = src[yy as usize * src_stride + xx as usize] as i32;
-                        sum += CDEF_PRI_TAPS[taps as usize][k] * cdef_constrain(p - x, pri_str, damping);
+                        sum += CDEF_PRI_TAPS[taps as usize][k]
+                            * cdef_constrain(p - x, pri_str, damping);
                         max = max.max(p);
                         min = min.min(p);
                     }
@@ -602,7 +629,8 @@ fn cdef_filter_block(
                             && (xx2 as usize) < src_stride
                         {
                             let s = src[yy2 as usize * src_stride + xx2 as usize] as i32;
-                            sum += CDEF_SEC_TAPS[taps as usize][k] * cdef_constrain(s - x, sec_str, damping);
+                            sum += CDEF_SEC_TAPS[taps as usize][k]
+                                * cdef_constrain(s - x, sec_str, damping);
                             max = max.max(s);
                             min = min.min(s);
                         }
@@ -654,15 +682,45 @@ pub fn apply_post_filters(
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
     deblock_plane(
-        y_plane, width, width, height, 8, 0, &meta.luma_tx, &meta.luma_skip, meta.w8, meta.h8, fh,
+        y_plane,
+        width,
+        width,
+        height,
+        8,
+        0,
+        &meta.luma_tx,
+        &meta.luma_skip,
+        meta.w8,
+        meta.h8,
+        fh,
     );
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
     deblock_plane(
-        u_plane, uv_w, uv_w, uv_h, 4, 1, &meta.u_tx, &meta.u_skip, meta.w8, meta.h8, fh,
+        u_plane,
+        uv_w,
+        uv_w,
+        uv_h,
+        4,
+        1,
+        &meta.u_tx,
+        &meta.u_skip,
+        meta.w8,
+        meta.h8,
+        fh,
     );
     deblock_plane(
-        v_plane, uv_w, uv_w, uv_h, 4, 2, &meta.v_tx, &meta.v_skip, meta.w8, meta.h8, fh,
+        v_plane,
+        uv_w,
+        uv_w,
+        uv_h,
+        4,
+        2,
+        &meta.v_tx,
+        &meta.v_skip,
+        meta.w8,
+        meta.h8,
+        fh,
     );
 
     // --- CDEF (§7.15) ---
@@ -684,8 +742,12 @@ pub fn apply_post_filters(
         let uv_pri = (uv_packed & 0x0F) as i32;
         let uv_sec = (uv_packed & 0x30) as i32;
         let uv_damping = fh.cdef_damping as i32;
-        cdef_plane_chroma(u_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping);
-        cdef_plane_chroma(v_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping);
+        cdef_plane_chroma(
+            u_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping,
+        );
+        cdef_plane_chroma(
+            v_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping,
+        );
     }
 
     // --- Loop restoration (§7.17) — passthrough ---
@@ -695,7 +757,14 @@ pub fn apply_post_filters(
 }
 
 /// CDEF for the luma plane, applying per-8×8 variance-dependent strength.
-fn cdef_plane_luma(plane: &mut [u8], width: usize, height: usize, pri_str: i32, sec_str: i32, damping: i32) {
+fn cdef_plane_luma(
+    plane: &mut [u8],
+    width: usize,
+    height: usize,
+    pri_str: i32,
+    sec_str: i32,
+    damping: i32,
+) {
     let src = plane.to_vec();
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
@@ -720,8 +789,20 @@ fn cdef_plane_luma(plane: &mut [u8], width: usize, height: usize, pri_str: i32, 
             };
             let dir = if pri_str == 0 { 0 } else { yd };
             cdef_filter_block(
-                plane, width, &src, width, x0, y0, 8.min(width - x0), 8.min(height - y0), 0, 0, p,
-                sec_str, damping, dir,
+                plane,
+                width,
+                &src,
+                width,
+                x0,
+                y0,
+                8.min(width - x0),
+                8.min(height - y0),
+                0,
+                0,
+                p,
+                sec_str,
+                damping,
+                dir,
             );
         }
     }
@@ -773,8 +854,20 @@ fn cdef_plane_chroma(
                 CDEF_UV_DIR[sub_x][sub_y][yd]
             };
             cdef_filter_block(
-                plane, width, &src, width, x0, y0, w_block.min(width - x0), h_block.min(height - y0),
-                sub_x, sub_y, p, sec_str, damping, dir,
+                plane,
+                width,
+                &src,
+                width,
+                x0,
+                y0,
+                w_block.min(width - x0),
+                h_block.min(height - y0),
+                sub_x,
+                sub_y,
+                p,
+                sec_str,
+                damping,
+                dir,
             );
         }
     }
@@ -807,8 +900,14 @@ mod tests {
         let out = filter_line_1d(&line, 16, 30, 80, 1, 8, true);
         // The two samples straddling the edge should be pulled toward each
         // other (the step should be reduced, not amplified).
-        assert!(out[15] > line[15], "left sample should move up toward the step");
-        assert!(out[16] < line[16], "right sample should move down toward the step");
+        assert!(
+            out[15] > line[15],
+            "left sample should move up toward the step"
+        );
+        assert!(
+            out[16] < line[16],
+            "right sample should move down toward the step"
+        );
         assert!(out[15] <= 200 && out[16] >= 0);
     }
 

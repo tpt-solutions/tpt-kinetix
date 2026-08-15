@@ -82,14 +82,9 @@ impl RealtimeDecoder {
             ));
         }
 
-        let seq = self
-            .sequence
-            .as_ref()
-            .ok_or_else(|| {
-                KinetixError::Parse(
-                    "realtime: decode() called before a sequence header was set".into(),
-                )
-            })?;
+        let seq = self.sequence.as_ref().ok_or_else(|| {
+            KinetixError::Parse("realtime: decode() called before a sequence header was set".into())
+        })?;
 
         let mut reader = BitReader::new(&packet.data);
         let frame = FrameHeader::parse(&mut reader, seq)?;
@@ -97,10 +92,9 @@ impl RealtimeDecoder {
         // The frame header is byte-aligned; its serialized length equals the
         // number of payload bytes that precede the slice set.
         let header_len = frame.to_bytes().len();
-        let payload = packet
-            .data
-            .get(header_len..)
-            .ok_or_else(|| KinetixError::Parse("realtime: packet truncated before slice payload".into()))?;
+        let payload = packet.data.get(header_len..).ok_or_else(|| {
+            KinetixError::Parse("realtime: packet truncated before slice payload".into())
+        })?;
 
         let grid = SliceGrid {
             cols: seq.slice_grid_cols,
@@ -110,7 +104,11 @@ impl RealtimeDecoder {
         let slice_payloads: Vec<Vec<u8>> = streams.iter().map(|s| s.to_vec()).collect();
 
         let is_key = frame.frame_type == FrameType::Key;
-        let reference = if is_key { None } else { self.reference.as_ref() };
+        let reference = if is_key {
+            None
+        } else {
+            self.reference.as_ref()
+        };
 
         let fb = decode_frame_payload(seq, &frame, reference, &slice_payloads)?;
 

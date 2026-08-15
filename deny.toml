@@ -31,11 +31,12 @@ allow = [
   "ISC",
   "BSD-2-Clause",
   "BSD-3-Clause",
-  "Unicode-DFS-2016",
   # libfuzzer-sys uses (MIT OR Apache-2.0) AND NCSA
   "NCSA",
   # unicode-ident uses (MIT OR Apache-2.0) AND Unicode-3.0
   "Unicode-3.0",
+  # webpki-roots data is distributed under the CDLA Permissive 2.0 license
+  "CDLA-Permissive-2.0",
 ]
 
 [[licenses.clarify]]
@@ -56,13 +57,14 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 deny = []
-# Crates with multiple major versions pulled in transitively by rav1e;
+# Crates with multiple major versions pulled in transitively;
 # no workspace-level upgrade path exists for these.
 skip = [
   { name = "getrandom" },
   { name = "nom" },
-  { name = "thiserror" },
-  { name = "thiserror-impl" },
+  { name = "r-efi" },
+  { name = "syn" },
+  { name = "windows-sys" },
 ]
 
 # ---------------------------------------------------------------------------

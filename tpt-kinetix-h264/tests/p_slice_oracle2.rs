@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::cavlc_tables::{
     read_coeff_token, read_run_before, read_total_zeros_4x4, read_total_zeros_chroma_dc,
@@ -22,10 +24,8 @@ use tpt_kinetix_h264::pps::PicParameterSet;
 use tpt_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use tpt_kinetix_h264::slice_data::parse_p_slice;
 use tpt_kinetix_h264::sps::SeqParameterSet;
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
-use tpt_kinetix_h264::H264Decoder;
 use tpt_kinetix_h264::trace::{DecodeTracer, TracePlane};
+use tpt_kinetix_h264::H264Decoder;
 
 // Fresh, independent level assembly. Mirrors §9.2.2 exactly but is written
 // separately from parse_cavlc_block so any bug there is not mirrored here.
@@ -268,7 +268,10 @@ impl DecodeTracer for CoeffRecorder {
             TracePlane::Cb => 1u8,
             TracePlane::Cr => 2u8,
         };
-        self.map.lock().unwrap().insert((mb_x, mb_y, p, blk), *coeffs);
+        self.map
+            .lock()
+            .unwrap()
+            .insert((mb_x, mb_y, p, blk), *coeffs);
     }
 }
 
@@ -292,16 +295,32 @@ fn gen_clip(content: &str, w: u32, h: u32, deblock: &str) -> Option<(Vec<u8>, Ve
     let h264 = dir.join(format!("ip_{content}_{w}x{h}.h264"));
     let refyuv = dir.join(format!("ip_{content}_{w}x{h}.yuv"));
     let input_spec = format!("{content}=size={w}x{h}:rate=1:duration=2");
-    let x264_params = format!(
-        "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock}:keyint=2:min-keyint=2"
-    );
+    let x264_params =
+        format!("cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock}:keyint=2:min-keyint=2");
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", &input_spec,
-            "-frames:v", "2", "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "2", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", &x264_params,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &input_spec,
+            "-frames:v",
+            "2",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "2",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            &x264_params,
             h264.to_str()?,
         ])
         .output()
@@ -312,9 +331,16 @@ fn gen_clip(content: &str, w: u32, h: u32, deblock: &str) -> Option<(Vec<u8>, Ve
     }
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264.to_str()?,
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264.to_str()?,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             refyuv.to_str()?,
         ])
         .output()
@@ -328,15 +354,27 @@ fn gen_clip(content: &str, w: u32, h: u32, deblock: &str) -> Option<(Vec<u8>, Ve
 
 fn oracle_mismatches(annexb: &[u8]) -> usize {
     let units = parse_nal_units_from_annexb(annexb);
-    let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps).and_then(|u| SeqParameterSet::parse(&u.rbsp).ok()).expect("sps");
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps).and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok()).expect("pps");
-    let p = units.iter().find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice).expect("P slice");
+    let sps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Sps)
+        .and_then(|u| SeqParameterSet::parse(&u.rbsp).ok())
+        .expect("sps");
+    let pps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Pps)
+        .and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok())
+        .expect("pps");
+    let p = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice)
+        .expect("P slice");
     let ctx = SliceHeaderContext {
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
-        bottom_field_pic_order_in_frame_present_flag: pps.bottom_field_pic_order_in_frame_present_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
         delta_pic_order_always_zero_flag: false,
         num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
@@ -346,9 +384,14 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
         deblocking_filter_control_present_flag: pps.deblocking_filter_control_present_flag,
         redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag,
         num_slice_groups_minus1: pps.num_slice_groups_minus1,
-        chroma_array_type: if sps.separate_colour_plane_flag { 0 } else { sps.chroma_format_idc },
+        chroma_array_type: if sps.separate_colour_plane_flag {
+            0
+        } else {
+            sps.chroma_format_idc
+        },
     };
-    let header = SliceHeader::parse_with_context(&p.rbsp, p.nal_unit_type, p.nal_ref_idc, &ctx).expect("slice header");
+    let header = SliceHeader::parse_with_context(&p.rbsp, p.nal_unit_type, p.nal_ref_idc, &ctx)
+        .expect("slice header");
     let mb_cols = sps.pic_width_in_mbs_minus1 + 1;
     let mb_rows = sps.pic_height_in_map_units_minus1 + 1;
     let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
@@ -359,7 +402,16 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
     let mut reader = BitReader::new(&p.rbsp);
     reader.seek_to_bit(header.data_bit_offset);
     let mut rec = CoeffRecorder::default();
-    let _ = parse_p_slice(&mut reader, mb_cols, mb_rows, slice_qp, num_ref_idx_l0_active, chroma_qp_index_offset, false, &mut rec);
+    let _ = parse_p_slice(
+        &mut reader,
+        mb_cols,
+        mb_rows,
+        slice_qp,
+        num_ref_idx_l0_active,
+        chroma_qp_index_offset,
+        false,
+        &mut rec,
+    );
     let decoder_coeffs = rec.map.into_inner().unwrap();
 
     // Reference coeffs (independent level assembly, verified tables).
@@ -379,7 +431,11 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
         let run = mb_skip_run.as_mut().expect("set");
         if *run > 0 {
             *run -= 1;
-            nz[mb_idx] = RefNz { luma_present: true, c_present: true, ..Default::default() };
+            nz[mb_idx] = RefNz {
+                luma_present: true,
+                c_present: true,
+                ..Default::default()
+            };
             continue;
         }
         mb_skip_run = None;
@@ -389,20 +445,40 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
         }
         let num_ref = num_ref_idx_l0_active;
         let read_ref = |r: &mut BitReader, rc: u32| -> i32 {
-            if rc == 1 { 0 } else if rc == 2 { (r.read_bit().expect("r") ^ 1) as i32 } else { r.read_ue().expect("r") as i32 }
+            if rc == 1 {
+                0
+            } else if rc == 2 {
+                (r.read_bit().expect("r") ^ 1) as i32
+            } else {
+                r.read_ue().expect("r") as i32
+            }
         };
         if mb_type_raw == 3 || mb_type_raw == 4 {
             let ref_count = if mb_type_raw == 4 { 1 } else { num_ref };
             let mut subs = [0u32; 4];
-            for s in &mut subs { *s = r2.read_ue().expect("sub"); }
+            for s in &mut subs {
+                *s = r2.read_ue().expect("sub");
+            }
             for &sub in &subs {
                 let _ = read_ref(&mut r2, ref_count);
-                let n = match sub { 0 => 1, 1 => 2, 2 => 2, _ => 4 };
-                for _ in 0..n { let _mx = r2.read_se().expect("mx"); let _my = r2.read_se().expect("my"); }
+                let n = match sub {
+                    0 => 1,
+                    1 => 2,
+                    2 => 2,
+                    _ => 4,
+                };
+                for _ in 0..n {
+                    let _mx = r2.read_se().expect("mx");
+                    let _my = r2.read_se().expect("my");
+                }
             }
         } else {
             let n_parts = if mb_type_raw == 0 { 1 } else { 2 };
-            for _ in 0..n_parts { let _ = read_ref(&mut r2, num_ref); let _mx = r2.read_se().expect("mx"); let _my = r2.read_se().expect("my"); }
+            for _ in 0..n_parts {
+                let _ = read_ref(&mut r2, num_ref);
+                let _mx = r2.read_se().expect("mx");
+                let _my = r2.read_se().expect("my");
+            }
         }
         let cbp_code = r2.read_ue().expect("cbp");
         let cbp = GOLOMB_TO_INTER_CBP[cbp_code as usize];
@@ -412,7 +488,16 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
             let dqp = r2.read_se().expect("dqp");
             qp = (qp + dqp + 52).rem_euclid(52);
         }
-        ref_residuals(&mut r2, mb_x, mb_y, mb_cols, &mut nz, cbp_l, cbp_c, &mut ref_map);
+        ref_residuals(
+            &mut r2,
+            mb_x,
+            mb_y,
+            mb_cols,
+            &mut nz,
+            cbp_l,
+            cbp_c,
+            &mut ref_map,
+        );
     }
 
     let mut mismatches = 0usize;
@@ -428,7 +513,10 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
                     }
                 }
             }
-            None => { eprintln!("REF {key:?} no decoder counterpart"); mismatches += 1; }
+            None => {
+                eprintln!("REF {key:?} no decoder counterpart");
+                mismatches += 1;
+            }
         }
     }
     for key in decoder_coeffs.keys() {
@@ -437,7 +525,11 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
             mismatches += 1;
         }
     }
-    eprintln!("total mismatches = {mismatches} (decoder blocks={}, ref blocks={})", decoder_coeffs.len(), ref_map.len());
+    eprintln!(
+        "total mismatches = {mismatches} (decoder blocks={}, ref blocks={})",
+        decoder_coeffs.len(),
+        ref_map.len()
+    );
     mismatches
 }
 
@@ -445,7 +537,11 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
 /// reference decode. Ground-truth check that no residual off-by-one exists.
 fn pixel_conformance(annexb: &[u8], ref_yuv: &[u8], w: u32, h: u32) -> (i32, usize, usize) {
     let frame_len = (w as usize * h as usize * 3) / 2;
-    assert_eq!(ref_yuv.len(), frame_len * 2, "ref should hold exactly two frames");
+    assert_eq!(
+        ref_yuv.len(),
+        frame_len * 2,
+        "ref should hold exactly two frames"
+    );
     let ref_p = &ref_yuv[frame_len..frame_len * 2];
     let mut dec = H264Decoder::new();
     let pkt = Packet {
@@ -516,5 +612,8 @@ fn differential_level_assembly_oracle() {
             failed += 1;
         }
     }
-    assert_eq!(failed, 0, "P-frame pixel conformance failed on some corpus clip");
+    assert_eq!(
+        failed, 0,
+        "P-frame pixel conformance failed on some corpus clip"
+    );
 }

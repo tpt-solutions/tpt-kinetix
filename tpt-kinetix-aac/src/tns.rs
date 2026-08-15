@@ -132,7 +132,8 @@ pub fn parse_tns(
                 for i in 0..order as usize {
                     let code = reader
                         .read_bits(bits as u32)
-                        .ok_or(AacParseError::UnexpectedEof)? as usize;
+                        .ok_or(AacParseError::UnexpectedEof)?
+                        as usize;
                     filt.coef[i] = if bits <= 3 {
                         TNS_COEF_3[code.min(7)]
                     } else {
@@ -142,8 +143,8 @@ pub fn parse_tns(
                 filt.reflection_to_direct();
             }
 
-                let _ = tns_max_bands;
-                group_filters.push(filt);
+            let _ = tns_max_bands;
+            group_filters.push(filt);
         }
         filters.push(group_filters);
     }
@@ -154,12 +155,7 @@ pub fn parse_tns(
 /// Apply TNS filtering to one channel's dequantized spectrum in place.
 ///
 /// `swb` is the offsets table for the current window sequence (long or short).
-pub fn apply_tns(
-    tns: &TnsData,
-    ics: &IcsInfo,
-    coeffs: &mut [f32; 1024],
-    swb: &[u16],
-) {
+pub fn apply_tns(tns: &TnsData, ics: &IcsInfo, coeffs: &mut [f32; 1024], swb: &[u16]) {
     let num_groups = ics.num_window_groups();
 
     // group base line offsets (mirrors decode_spectrum)
@@ -272,7 +268,10 @@ mod tests {
             length: 1,
             order: 1,
             direction: false,
-            coef: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            coef: [
+                0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+            ],
         };
         f.reflection_to_direct();
         assert!((f.coef[0] - 0.5).abs() < 1e-6, "order1 b1");
@@ -285,7 +284,10 @@ mod tests {
             length: 2,
             order: 2,
             direction: false,
-            coef: [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            coef: [
+                k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+            ],
         };
         f.reflection_to_direct();
         assert!((f.coef[0] - k1 * (1.0 - k2)).abs() < 1e-6, "order2 b1");
@@ -297,11 +299,20 @@ mod tests {
             length: 3,
             order: 3,
             direction: false,
-            coef: [k1, k2, k3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            coef: [
+                k1, k2, k3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+            ],
         };
         f.reflection_to_direct();
-        assert!((f.coef[0] - (k1 * (1.0 - k2) - k2 * k3)).abs() < 1e-6, "order3 b1");
-        assert!((f.coef[1] - (k2 - k3 * k1 * (1.0 - k2))).abs() < 1e-6, "order3 b2");
+        assert!(
+            (f.coef[0] - (k1 * (1.0 - k2) - k2 * k3)).abs() < 1e-6,
+            "order3 b1"
+        );
+        assert!(
+            (f.coef[1] - (k2 - k3 * k1 * (1.0 - k2))).abs() < 1e-6,
+            "order3 b2"
+        );
         assert!((f.coef[2] - k3).abs() < 1e-6, "order3 b3");
     }
 
@@ -311,7 +322,10 @@ mod tests {
     /// reference" required by the Phase 3 exit criteria.
     #[test]
     fn tns_filter_matches_independent_reference() {
-        let b = [0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [
+            0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        ];
         let order = 2;
         let input = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
 
@@ -354,7 +368,10 @@ mod tests {
             length: 2,
             order: 2,
             direction: false,
-            coef: [k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            coef: [
+                k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+            ],
         };
         filt.reflection_to_direct();
         // Capture the direct-form coefficients before `filt` is moved into TnsData.
@@ -402,7 +419,10 @@ mod tests {
     /// mirrored segment.
     #[test]
     fn tns_filter_down_direction_applies() {
-        let b = [0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [
+            0.5f32, -0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        ];
         let order = 2;
         // Use a segment where every line is non-zero so the direction is observable.
         let input = [1.0f32, 2.0, 3.0, 4.0];
@@ -411,6 +431,9 @@ mod tests {
         let mut down = input;
         tns_filter_window(&b, order, true, &mut down);
         // The first and last lines differ between directions (boundary handling).
-        assert!((up[0] - down[0]).abs() > 1e-6, "down direction should differ at start");
+        assert!(
+            (up[0] - down[0]).abs() > 1e-6,
+            "down direction should differ at start"
+        );
     }
 }

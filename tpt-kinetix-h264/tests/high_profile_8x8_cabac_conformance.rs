@@ -149,14 +149,7 @@ struct EightByEightCounter {
 }
 
 impl DecodeTracer for EightByEightCounter {
-    fn on_intra_pred(
-        &mut self,
-        _mb_x: u32,
-        _mb_y: u32,
-        _plane: TracePlane,
-        blk: u8,
-        _pred: &[u8],
-    ) {
+    fn on_intra_pred(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, blk: u8, _pred: &[u8]) {
         if blk >= 64 {
             self.count += 1;
         }
@@ -195,7 +188,10 @@ fn high_profile_cabac_clip_exercises_8x8_transform() {
     };
     dec.decode_with_tracer(&pkt, &mut tracer).ok();
 
-    eprintln!("High-profile CABAC clip reconstructed 8×8 luma blocks: {}", tracer.count);
+    eprintln!(
+        "High-profile CABAC clip reconstructed 8×8 luma blocks: {}",
+        tracer.count
+    );
     assert!(
         tracer.count > 0,
         "expected the High-profile CABAC clip to exercise the 8×8 transform, but 0 8×8 blocks were decoded"
@@ -269,6 +265,8 @@ fn high_profile_8x8_cabac_with_deblock_is_bitexact() {
     // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
     // Skip strict assertion until the gap is closed.
     if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8×8 CABAC (with deblock) NOT bit-exact: max_diff={max_diff}");
+        eprintln!(
+            "  [GAP] High-profile 8×8 CABAC (with deblock) NOT bit-exact: max_diff={max_diff}"
+        );
     }
 }

@@ -120,7 +120,11 @@ pub fn decode_spectral_data(
                 }
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
                 let active = sfb < max_sfb;
-                let scale_val = if active { scale[gi * max_sfb + sfb] } else { 0.0 };
+                let scale_val = if active {
+                    scale[gi * max_sfb + sfb]
+                } else {
+                    0.0
+                };
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     let mut bin = 0usize;
@@ -203,8 +207,14 @@ mod tests {
         let ics = ics_long(4);
         let sections = SectionData {
             groups: vec![vec![
-                Section { sect_cb: 1, sect_len: 2 },
-                Section { sect_cb: 0, sect_len: 2 },
+                Section {
+                    sect_cb: 1,
+                    sect_len: 2,
+                },
+                Section {
+                    sect_cb: 0,
+                    sect_len: 2,
+                },
             ]],
         };
         let bt = expand_band_types(&sections, &ics);

@@ -49,10 +49,11 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
         false,
         false,
         false,
-        true, // frame_is_intra — these robustness tests exercise the intra path
-        false, // allow_high_precision_mv
-        false, // reference_select
-        0,     // interpolation_filter (EIGHTTAP_REGULAR)
+        false,    // enable_filter_intra
+        true,     // frame_is_intra — these robustness tests exercise the intra path
+        false,    // allow_high_precision_mv
+        false,    // reference_select
+        0,        // interpolation_filter (EIGHTTAP_REGULAR)
         [0u8; 9], // ref_to_slot
         RefFrames::empty(),
         &mut meta,

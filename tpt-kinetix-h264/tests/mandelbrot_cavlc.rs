@@ -99,7 +99,10 @@ fn dump_cavlc_mandelbrot_4x4() {
                 blk: 16,
                 stage: Stage::CavlcCoeffs,
             };
-            if let (Some(info), Some(coeffs)) = (tracer.block_info.get(&info_key), tracer.values.get(&coeffs_key)) {
+            if let (Some(info), Some(coeffs)) = (
+                tracer.block_info.get(&info_key),
+                tracer.values.get(&coeffs_key),
+            ) {
                 eprintln!("  Luma    DC: nC={nc:>3} TC={tc:>2} T1={t1} nonzero={nz}/16  coeffs={coeffs:?}",
                     nc = info.n_c, tc = info.total_coeff, t1 = info.trailing_ones, nz = coeffs.iter().filter(|&&v| v != 0).count());
             }
@@ -121,7 +124,10 @@ fn dump_cavlc_mandelbrot_4x4() {
                     stage: Stage::CavlcCoeffs,
                 };
 
-                if let (Some(info), Some(coeffs)) = (tracer.block_info.get(&info_key), tracer.values.get(&coeffs_key)) {
+                if let (Some(info), Some(coeffs)) = (
+                    tracer.block_info.get(&info_key),
+                    tracer.values.get(&coeffs_key),
+                ) {
                     let nz_count = coeffs.iter().filter(|&&v| v != 0).count();
                     eprintln!("  Luma blk{blk:>2}: nC={nc:>3} TC={tc:>2} T1={t1} nonzero={nz_count}/16  coeffs={coeffs:?}",
                         nc = info.n_c, tc = info.total_coeff, t1 = info.trailing_ones);

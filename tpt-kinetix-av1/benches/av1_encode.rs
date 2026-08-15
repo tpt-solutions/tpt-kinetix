@@ -3,9 +3,9 @@
 //! throughput only — size/PSNR comparison lives in `bench_report` instead.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::process::Command;
 use tpt_kinetix_av1::{Av1Encoder, Av1EncoderConfig};
 use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
-use std::process::Command;
 
 fn grey_frame(width: u32, height: u32) -> VideoFrame {
     let w = width as usize;

@@ -178,7 +178,9 @@ impl<'a> CabacDecoder<'a> {
         val
     }
 
-    pub fn debug_state(&self) -> (u32, u32) { (self.range, self.offset) }
+    pub fn debug_state(&self) -> (u32, u32) {
+        (self.range, self.offset)
+    }
 
     /// Decode the `end_of_slice_flag` / `mb_field_decoding_flag`-terminate bin
     /// (spec §9.3.3.2.4).
@@ -574,15 +576,36 @@ impl ResidualCabacContext {
             std::array::from_fn(|i| init_ctx(base + i, slice_qp_y))
         });
         let sig8x8 = (0..SIG_LEN_8X8)
-            .map(|i| init_ctx(crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y))
+            .map(|i| {
+                init_ctx(
+                    crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i,
+                    slice_qp_y,
+                )
+            })
             .collect();
         let last8x8 = (0..LAST_LEN_8X8)
-            .map(|i| init_ctx(crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y))
+            .map(|i| {
+                init_ctx(
+                    crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i,
+                    slice_qp_y,
+                )
+            })
             .collect();
         let level8x8 = std::array::from_fn(|i| {
-            init_ctx(crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, slice_qp_y)
+            init_ctx(
+                crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8]
+                    + i,
+                slice_qp_y,
+            )
         });
-        Self { sig, last, level, sig8x8, last8x8, level8x8 }
+        Self {
+            sig,
+            last,
+            level,
+            sig8x8,
+            last8x8,
+            level8x8,
+        }
     }
 
     /// Decode one Luma8x8 residual block (`ctxBlockCat == 5`, §9.3.3.1.2/.3).
@@ -1351,15 +1374,39 @@ impl ResidualCabacContext {
             std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
         });
         let sig8x8 = (0..SIG_LEN_8X8)
-            .map(|i| init_pb_ctx(crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y))
+            .map(|i| {
+                init_pb_ctx(
+                    crate::cabac_tables::SIG_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i,
+                    cabac_init_idc,
+                    slice_qp_y,
+                )
+            })
             .collect();
         let last8x8 = (0..LAST_LEN_8X8)
-            .map(|i| init_pb_ctx(crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y))
+            .map(|i| {
+                init_pb_ctx(
+                    crate::cabac_tables::LAST_COEFF_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i,
+                    cabac_init_idc,
+                    slice_qp_y,
+                )
+            })
             .collect();
         let level8x8 = std::array::from_fn(|i| {
-            init_pb_ctx(crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8] + i, cabac_init_idc, slice_qp_y)
+            init_pb_ctx(
+                crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8]
+                    + i,
+                cabac_init_idc,
+                slice_qp_y,
+            )
         });
-        Self { sig, last, level, sig8x8, last8x8, level8x8 }
+        Self {
+            sig,
+            last,
+            level,
+            sig8x8,
+            last8x8,
+            level8x8,
+        }
     }
 }
 
@@ -1794,7 +1841,7 @@ mod tests {
         let mut dec = CabacDecoder::new(&data).unwrap();
         let mut ctx = MbTypePCabacContext::new(26, 0);
         match ctx.decode(&mut dec) {
-            None => {}                       // intra-in-P
+            None => {} // intra-in-P
             Some(shape) => assert!(shape <= 3, "P shape must be 0..=3, got {shape}"),
         }
     }

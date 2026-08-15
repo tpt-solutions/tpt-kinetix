@@ -23,15 +23,33 @@ fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-fn encode_av1_obu_keyframe(lavfi_filter: &str, extra: Option<&str>, w: u32, h: u32) -> Option<Vec<u8>> {
+fn encode_av1_obu_keyframe(
+    lavfi_filter: &str,
+    extra: Option<&str>,
+    w: u32,
+    h: u32,
+) -> Option<Vec<u8>> {
     let src = match extra {
         Some(e) => format!("{lavfi_filter}={e}:size={w}x{h}:rate=1"),
         None => format!("{lavfi_filter}=size={w}x{h}:rate=1"),
     };
     let mut child = Command::new("ffmpeg")
         .args([
-            "-loglevel", "error", "-f", "lavfi", "-i", &src, "-frames:v", "1", "-c:v",
-            "av1", "-pix_fmt", "yuv420p", "-f", "obu", "-",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &src,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "av1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "obu",
+            "-",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -51,8 +69,17 @@ fn encode_av1_obu_keyframe(lavfi_filter: &str, extra: Option<&str>, w: u32, h: u
 fn decode_obu_with_ffmpeg(obu: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     let mut child = Command::new("ffmpeg")
         .args([
-            "-loglevel", "error", "-f", "obu", "-i", "pipe:0", "-pix_fmt", "yuv420p",
-            "-f", "rawvideo", "pipe:1",
+            "-loglevel",
+            "error",
+            "-f",
+            "obu",
+            "-i",
+            "pipe:0",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "pipe:1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

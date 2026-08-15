@@ -160,10 +160,32 @@ pub struct FaceFrameHeader {
     pub payload_len: u32,
 }
 
-fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], FaceSequenceHeader, nom::error::Error<&[u8]>> {
+fn parse_sequence_header(
+    input: &[u8],
+) -> IResult<&[u8], FaceSequenceHeader, nom::error::Error<&[u8]>> {
     let (input, _magic) = take(4usize)(input)?;
-    let (input, (version, asset_basis_id, basis_hash, max_width, max_height, flags, quant_precision, group_qp)) =
-        tuple((be_u8, be_u8, take(8usize), be_u16, be_u16, be_u8, be_u8, take(5usize)))(input)?;
+    let (
+        input,
+        (
+            version,
+            asset_basis_id,
+            basis_hash,
+            max_width,
+            max_height,
+            flags,
+            quant_precision,
+            group_qp,
+        ),
+    ) = tuple((
+        be_u8,
+        be_u8,
+        take(8usize),
+        be_u16,
+        be_u16,
+        be_u8,
+        be_u8,
+        take(5usize),
+    ))(input)?;
 
     let mut hash = [0u8; 8];
     hash.copy_from_slice(basis_hash);
@@ -186,8 +208,7 @@ fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], FaceSequenceHeader, nom
 }
 
 fn parse_frame_header(input: &[u8]) -> IResult<&[u8], FaceFrameHeader, nom::error::Error<&[u8]>> {
-    let (input, (flags, width, height, ref_mode)) =
-        tuple((be_u8, be_u16, be_u16, be_u8))(input)?;
+    let (input, (flags, width, height, ref_mode)) = tuple((be_u8, be_u16, be_u16, be_u8))(input)?;
     let frame_flags = FrameFlags::from_u8(flags);
     let (input, group_qp_override) = if frame_flags.has_qp_override {
         let (input, qp) = take(5usize)(input)?;
@@ -221,9 +242,10 @@ pub fn read_sequence_header(buf: &[u8]) -> Result<FaceSequenceHeader, FaceHeader
     if buf.len() < 4 || &buf[..4] != FACE_MAGIC {
         return Err(FaceHeaderError::BadMagic);
     }
-    let (_, header) = parse_sequence_header(buf).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
-        FaceHeaderError::Truncated { needed: 1 }
-    })?;
+    let (_, header) =
+        parse_sequence_header(buf).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+            FaceHeaderError::Truncated { needed: 1 }
+        })?;
     if header.version > FACE_VERSION {
         return Err(FaceHeaderError::UnsupportedVersion {
             found: header.version,
@@ -239,8 +261,8 @@ pub fn read_sequence_header(buf: &[u8]) -> Result<FaceSequenceHeader, FaceHeader
 /// Returns [`FaceHeaderError::Truncated`] if the buffer ended mid-header.
 pub fn read_frame_header(buf: &[u8]) -> Result<FaceFrameHeader, FaceHeaderError> {
     let (_, header) =
-        parse_frame_header(buf).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| FaceHeaderError::Truncated {
-            needed: 1,
+        parse_frame_header(buf).map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+            FaceHeaderError::Truncated { needed: 1 }
         })?;
     Ok(header)
 }

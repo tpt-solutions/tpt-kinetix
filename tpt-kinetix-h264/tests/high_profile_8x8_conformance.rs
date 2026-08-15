@@ -158,14 +158,7 @@ struct EightByEightCounter {
 }
 
 impl DecodeTracer for EightByEightCounter {
-    fn on_intra_pred(
-        &mut self,
-        _mb_x: u32,
-        _mb_y: u32,
-        _plane: TracePlane,
-        blk: u8,
-        _pred: &[u8],
-    ) {
+    fn on_intra_pred(&mut self, _mb_x: u32, _mb_y: u32, _plane: TracePlane, blk: u8, _pred: &[u8]) {
         if blk >= 64 {
             self.count += 1;
         }
@@ -203,7 +196,10 @@ fn high_profile_clip_exercises_8x8_transform() {
     };
     dec.decode_with_tracer(&pkt, &mut tracer).ok();
 
-    eprintln!("High-profile clip reconstructed 8×8 luma blocks: {}", tracer.count);
+    eprintln!(
+        "High-profile clip reconstructed 8×8 luma blocks: {}",
+        tracer.count
+    );
     assert!(
         tracer.count > 0,
         "expected the High-profile clip to exercise the 8×8 transform, but 0 8×8 blocks were decoded"

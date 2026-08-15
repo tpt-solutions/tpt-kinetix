@@ -21,7 +21,11 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        Self { buf: Vec::new(), cur: 0, nbits: 0 }
+        Self {
+            buf: Vec::new(),
+            cur: 0,
+            nbits: 0,
+        }
     }
     fn bit(&mut self, b: u8) {
         self.cur = (self.cur << 1) | (b & 1);
@@ -374,7 +378,11 @@ fn fuzz_structured_seeds() {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 // Timed out / hung: treat as a timeout crash and stop accumulating.
                 let _ = std::fs::write("fuzz_slow_input.bin", &candidate);
-                crash = Some((0, candidate, "decode exceeded soft timeout (hang/slow)".into()));
+                crash = Some((
+                    0,
+                    candidate,
+                    "decode exceeded soft timeout (hang/slow)".into(),
+                ));
                 eprintln!("TIMEOUT after {iterations} iters: decode exceeded {timeout:?}");
                 break;
             }
@@ -393,9 +401,7 @@ fn fuzz_structured_seeds() {
         }
 
         if Instant::now() > next_report {
-            eprintln!(
-                "  [{iterations} iters] slowest so far: {slowest:?}",
-            );
+            eprintln!("  [{iterations} iters] slowest so far: {slowest:?}",);
             next_report = Instant::now() + Duration::from_secs(20);
         }
     }

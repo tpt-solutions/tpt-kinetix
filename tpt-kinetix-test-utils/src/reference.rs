@@ -272,7 +272,11 @@ pub fn decode_av1_obu_with_dav1d(
     height: u32,
 ) -> Result<Vec<VideoFrame>, RefDecodeError> {
     if binary_available("dav1d") {
-        let raw = run_piped("dav1d", &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"], obu)?;
+        let raw = run_piped(
+            "dav1d",
+            &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"],
+            obu,
+        )?;
         return split_raw_yuv420p(&raw, width, height);
     }
     if ffmpeg_libdav1d_available() {
@@ -432,7 +436,7 @@ const SAMPLE_RATE_TABLE: [u32; 16] = [
 
 /// Split an IVF container (`DKIF` magic, 32-byte file header) into its per-frame
 /// payloads. Each returned `Vec<u8>` is the raw OBU temporal unit for one coded
-/// frame — exactly what [`tpt_kinetix_av1::Av1Decoder`] consumes per
+/// frame — exactly what `tpt_kinetix_av1::Av1Decoder` consumes per
 /// [`tpt_kinetix_core::packet::Packet`]. Returns an empty `Vec` if `ivf` is not a
 /// well-formed IVF file (too short, or shorter than its declared frame table).
 ///
@@ -465,8 +469,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_rejects_misaligned_output() {
-    }
+    fn split_rejects_misaligned_output() {}
 
     #[test]
     fn split_produces_two_frames() {

@@ -13,7 +13,9 @@ fn main() {
     for u in &units {
         println!(
             "  type={:?} nal_ref_idc={} rbsp_len={}",
-            u.nal_unit_type, u.nal_ref_idc, u.rbsp.len()
+            u.nal_unit_type,
+            u.nal_ref_idc,
+            u.rbsp.len()
         );
     }
 }

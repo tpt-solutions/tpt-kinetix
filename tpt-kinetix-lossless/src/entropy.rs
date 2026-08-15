@@ -157,9 +157,7 @@ mod tests {
         let residuals: Vec<i32> = vec![
             0, 1, -1, 2, -2, 255, -255, 4096, -4096, 32767, -32768, 65535, -65535, 131070,
         ];
-        let contexts: Vec<u8> = (0..residuals.len() as u8)
-            .map(|i| (i % 16) as u8)
-            .collect();
+        let contexts: Vec<u8> = (0..residuals.len() as u8).map(|i| (i % 16) as u8).collect();
         let bytes = encode_residual_stream(&residuals, &contexts);
         let models = lossless_context_models();
         let mut dec = RansDecoder::new(&bytes).expect("decoder init");

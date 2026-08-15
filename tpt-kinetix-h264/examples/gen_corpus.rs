@@ -20,7 +20,10 @@ fn run(cmd: &mut Command) -> bool {
     match cmd.status() {
         Ok(s) => s.success(),
         Err(e) => {
-            eprintln!("failed to spawn {}: {e}", cmd.get_program().to_string_lossy());
+            eprintln!(
+                "failed to spawn {}: {e}",
+                cmd.get_program().to_string_lossy()
+            );
             false
         }
     }
@@ -73,12 +76,7 @@ fn main() {
         .unwrap_or_else(|| std::env::temp_dir().join("h264_corpus"));
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create_dir_all {dir:?}: {e}"));
 
-    for (w, h) in [
-        (48, 32),
-        (64, 48),
-        (96, 64),
-        (128, 96),
-    ] {
+    for (w, h) in [(48, 32), (64, 48), (96, 64), (128, 96)] {
         generate(&dir, w, h);
     }
 }

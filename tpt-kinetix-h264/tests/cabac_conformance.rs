@@ -208,32 +208,59 @@ fn generate_cabac_p(
     let refyuv = dir.join(format!("cabac_p_{label}.yuv"));
 
     let input_spec = format!("testsrc=size={w}x{h}:rate=1:duration=2");
-    let x264_params = format!(
-        "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock_param}"
-    );
+    let x264_params = format!("cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:{deblock_param}");
     let ok = run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", &input_spec,
-        "-frames:v", "2",
-        "-c:v", "libx264",
-        "-profile:v", "main",
-        "-g", "30",
-        "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-x264-params", &x264_params,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input_spec,
+        "-frames:v",
+        "2",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "main",
+        "-g",
+        "30",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        &x264_params,
         h264.to_str()?,
     ]));
-    if !ok { return None; }
+    if !ok {
+        return None;
+    }
 
     let ok = run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-i", h264.to_str()?,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        h264.to_str()?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
         refyuv.to_str()?,
     ]));
-    if !ok { return None; }
+    if !ok {
+        return None;
+    }
 
-    Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?, w, h))
+    Some((
+        std::fs::read(&h264).ok()?,
+        std::fs::read(&refyuv).ok()?,
+        w,
+        h,
+    ))
 }
 
 fn run_cabac_p_case(deblock_param: &str, label: &str) {
@@ -247,7 +274,10 @@ fn run_cabac_p_case(deblock_param: &str, label: &str) {
 
     let (annexb, refyuv, w, h) = match generate_cabac_p(&dir, 64, 48, deblock_param) {
         Some(t) => t,
-        None => { eprintln!("ffmpeg generation failed; skipping"); return; }
+        None => {
+            eprintln!("ffmpeg generation failed; skipping");
+            return;
+        }
     };
 
     let frame_len = (w as usize * h as usize * 3) / 2;
@@ -270,7 +300,10 @@ fn run_cabac_p_case(deblock_param: &str, label: &str) {
         is_key_frame: true,
     };
 
-    let frame = dec.decode(&pkt).expect("decode should not error").expect("a frame should be produced");
+    let frame = dec
+        .decode(&pkt)
+        .expect("decode should not error")
+        .expect("a frame should be produced");
     assert_eq!(frame.width, w);
     assert_eq!(frame.height, h);
 
@@ -315,27 +348,55 @@ fn generate_cabac_b(
         "cabac=1:ref=1:bframes=1:b-pyramid=0:b-adapt=0:8x8dct=0:weightp=0:weightb=0:aud=0:{deblock_param}:keyint=300:min-keyint=300"
     );
     let ok = run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", &input_spec,
-        "-frames:v", "3",
-        "-c:v", "libx264",
-        "-profile:v", "main",
-        "-bf", "1",
-        "-pix_fmt", "yuv420p",
-        "-x264-params", &x264_params,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input_spec,
+        "-frames:v",
+        "3",
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "main",
+        "-bf",
+        "1",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        &x264_params,
         h264.to_str()?,
     ]));
-    if !ok { return None; }
+    if !ok {
+        return None;
+    }
 
     let ok = run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-i", h264.to_str()?,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        h264.to_str()?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
         refyuv.to_str()?,
     ]));
-    if !ok { return None; }
+    if !ok {
+        return None;
+    }
 
-    Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?, w, h))
+    Some((
+        std::fs::read(&h264).ok()?,
+        std::fs::read(&refyuv).ok()?,
+        w,
+        h,
+    ))
 }
 
 fn run_cabac_b_case(deblock_param: &str, label: &str) {
@@ -349,7 +410,10 @@ fn run_cabac_b_case(deblock_param: &str, label: &str) {
 
     let (annexb, refyuv, w, h) = match generate_cabac_b(&dir, 64, 48, deblock_param) {
         Some(t) => t,
-        None => { eprintln!("ffmpeg generation failed; skipping"); return; }
+        None => {
+            eprintln!("ffmpeg generation failed; skipping");
+            return;
+        }
     };
 
     let frame_len = (w as usize * h as usize * 3) / 2;
@@ -375,7 +439,10 @@ fn run_cabac_b_case(deblock_param: &str, label: &str) {
         is_key_frame: true,
     };
 
-    let frame = dec.decode(&pkt).expect("decode should not error").expect("a frame should be produced");
+    let frame = dec
+        .decode(&pkt)
+        .expect("decode should not error")
+        .expect("a frame should be produced");
     assert_eq!(frame.width, w);
     assert_eq!(frame.height, h);
 

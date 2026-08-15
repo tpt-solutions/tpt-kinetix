@@ -22,23 +22,46 @@ fn generate(dir: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
         "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1:keyint=250:min-keyint=250"
             .to_string();
     if !run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", &input_spec,
-        "-frames:v", &FRAMES.to_string(),
-        "-c:v", "libx264",
-        "-profile:v", "baseline",
-        "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-x264-params", &x264_params,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input_spec,
+        "-frames:v",
+        &FRAMES.to_string(),
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        &x264_params,
         h264.to_str()?,
-    ])) { return None; }
+    ])) {
+        return None;
+    }
 
     if !run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-i", h264.to_str()?,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        h264.to_str()?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
         refyuv.to_str()?,
-    ])) { return None; }
+    ])) {
+        return None;
+    }
 
     Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
@@ -51,7 +74,10 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
             starts.push((i, i + 3));
             i += 3;
         } else if i + 4 <= annexb.len()
-            && annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 0 && annexb[i + 3] == 1
+            && annexb[i] == 0
+            && annexb[i + 1] == 0
+            && annexb[i + 2] == 0
+            && annexb[i + 3] == 1
         {
             starts.push((i, i + 4));
             i += 4;
@@ -61,7 +87,7 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
     }
     let mut out = Vec::new();
     for (idx, &(_, payload_start)) in starts.iter().enumerate() {
-        let end = starts.get(idx + 1).map(|&(s,_)| s).unwrap_or(annexb.len());
+        let end = starts.get(idx + 1).map(|&(s, _)| s).unwrap_or(annexb.len());
         let mut unit = vec![0, 0, 0, 1];
         unit.extend_from_slice(&annexb[payload_start..end]);
         out.push(unit);
@@ -75,7 +101,10 @@ fn main() {
 
     let (annexb, refyuv) = match generate(&dir) {
         Some(t) => t,
-        None => { eprintln!("ffmpeg generation failed"); return; }
+        None => {
+            eprintln!("ffmpeg generation failed");
+            return;
+        }
     };
 
     let frame_len = (WIDTH as usize * HEIGHT as usize * 3) / 2;
@@ -121,7 +150,10 @@ fn main() {
         }
 
         let max_diff = wrong.iter().map(|w| w.5).max().unwrap_or(0);
-        println!("frame {fi}: max_diff={max_diff}, num_wrong={}/{frame_len}", wrong.len());
+        println!(
+            "frame {fi}: max_diff={max_diff}, num_wrong={}/{frame_len}",
+            wrong.len()
+        );
         for (plane, px, py, got, want, d) in &wrong {
             println!("  {plane} ({px},{py}) got={got} want={want} diff={d}");
         }
@@ -133,7 +165,9 @@ fn main() {
                 let start = row * WIDTH as usize + 52;
                 let slice = &reference[start..start + 12];
                 print!("    y={row} x=52..63: ");
-                for &v in slice { print!("{:3} ", v); }
+                for &v in slice {
+                    print!("{:3} ", v);
+                }
                 println!();
             }
             println!("\n  Our P2 frame luma around (56, 40..43):");
@@ -141,7 +175,9 @@ fn main() {
                 let start = row * WIDTH as usize + 52;
                 let slice = &our[start..start + 12];
                 print!("    y={row} x=52..63: ");
-                for &v in slice { print!("{:3} ", v); }
+                for &v in slice {
+                    print!("{:3} ", v);
+                }
                 println!();
             }
 
@@ -154,7 +190,9 @@ fn main() {
                     let start = row * WIDTH as usize + 52;
                     let slice = &p1.data[start..start + 12];
                     print!("    y={row} x=52..63: ");
-                    for &v in slice { print!("{:3} ", v); }
+                    for &v in slice {
+                        print!("{:3} ", v);
+                    }
                     println!();
                 }
             }
@@ -165,10 +203,16 @@ fn main() {
     println!("\nNow extracting macroblock info from ffmpeg debug...");
     let mb_info = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "debug",
-            "-skip_frame", "noref",
-            "-i", dir.join("ipppp_dbg.h264").to_str().unwrap(),
-            "-f", "null", "-",
+            "-hide_banner",
+            "-loglevel",
+            "debug",
+            "-skip_frame",
+            "noref",
+            "-i",
+            dir.join("ipppp_dbg.h264").to_str().unwrap(),
+            "-f",
+            "null",
+            "-",
         ])
         .output();
     if let Ok(out) = mb_info {

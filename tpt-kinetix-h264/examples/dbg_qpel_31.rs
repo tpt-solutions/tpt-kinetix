@@ -5,8 +5,8 @@
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use tpt_kinetix_h264::H264Decoder;
 use tpt_kinetix_h264::motion_comp;
+use tpt_kinetix_h264::H264Decoder;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
@@ -24,21 +24,45 @@ fn generate(dir: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
         "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1:keyint=250:min-keyint=250"
             .to_string();
     if !run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", &input_spec,
-        "-frames:v", &FRAMES.to_string(),
-        "-c:v", "libx264",
-        "-profile:v", "baseline",
-        "-bf", "0", "-pix_fmt", "yuv420p",
-        "-x264-params", &x264_params,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &input_spec,
+        "-frames:v",
+        &FRAMES.to_string(),
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-x264-params",
+        &x264_params,
         h264.to_str()?,
-    ])) { return None; }
+    ])) {
+        return None;
+    }
     if !run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-i", h264.to_str()?,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        h264.to_str()?,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
         refyuv.to_str()?,
-    ])) { return None; }
+    ])) {
+        return None;
+    }
     Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
 
@@ -50,7 +74,10 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
             starts.push((i, i + 3));
             i += 3;
         } else if i + 4 <= annexb.len()
-            && annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 0 && annexb[i + 3] == 1
+            && annexb[i] == 0
+            && annexb[i + 1] == 0
+            && annexb[i + 2] == 0
+            && annexb[i + 3] == 1
         {
             starts.push((i, i + 4));
             i += 4;
@@ -60,7 +87,7 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
     }
     let mut out = Vec::new();
     for (idx, &(_, ps)) in starts.iter().enumerate() {
-        let end = starts.get(idx + 1).map(|&(s,_)| s).unwrap_or(annexb.len());
+        let end = starts.get(idx + 1).map(|&(s, _)| s).unwrap_or(annexb.len());
         let mut u = vec![0, 0, 0, 1];
         u.extend_from_slice(&annexb[ps..end]);
         out.push(u);
@@ -70,7 +97,14 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
 
 /// Manual single-pixel interpolation at fraction (fx,fy) from base (x0,y0)
 /// using 4 different candidate formulas for position (3,1).
-fn pred_luma_31_variants(plane: &[u8], stride: usize, pw: usize, ph: usize, x0: i32, y0: i32) -> [u8; 4] {
+fn pred_luma_31_variants(
+    plane: &[u8],
+    stride: usize,
+    pw: usize,
+    ph: usize,
+    x0: i32,
+    y0: i32,
+) -> [u8; 4] {
     // Helper closures
     let get = |x: i32, y: i32| -> u8 {
         let x = x.clamp(0, pw as i32 - 1);
@@ -80,19 +114,25 @@ fn pred_luma_31_variants(plane: &[u8], stride: usize, pw: usize, ph: usize, x0: 
     const TAP: [i32; 6] = [1, -5, 20, 20, -5, 1];
     let tap_h = |xi: i32, yi: i32| -> i32 {
         let mut s = 0i32;
-        for (k, &c) in TAP.iter().enumerate() { s += c * get(xi + k as i32 - 2, yi) as i32; }
+        for (k, &c) in TAP.iter().enumerate() {
+            s += c * get(xi + k as i32 - 2, yi) as i32;
+        }
         s
     };
     let tap_v = |xi: i32, yi: i32| -> i32 {
         let mut s = 0i32;
-        for (k, &c) in TAP.iter().enumerate() { s += c * get(xi, yi + k as i32 - 2) as i32; }
+        for (k, &c) in TAP.iter().enumerate() {
+            s += c * get(xi, yi + k as i32 - 2) as i32;
+        }
         s
     };
     let half_h = |xi: i32, yi: i32| -> u8 { ((tap_h(xi, yi) + 16) >> 5).clamp(0, 255) as u8 };
     let half_v = |xi: i32, yi: i32| -> u8 { ((tap_v(xi, yi) + 16) >> 5).clamp(0, 255) as u8 };
     let half_j = |xi: i32, yi: i32| -> u8 {
         let mut s = 0i32;
-        for (k, &c) in TAP.iter().enumerate() { s += c * tap_h(xi, yi + k as i32 - 2); }
+        for (k, &c) in TAP.iter().enumerate() {
+            s += c * tap_h(xi, yi + k as i32 - 2);
+        }
         ((s + 512) >> 10).clamp(0, 255) as u8
     };
     let avg = |a: u8, b: u8| -> u8 { ((a as u16 + b as u16 + 1) >> 1) as u8 };
@@ -114,7 +154,10 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let (annexb, refyuv) = match generate(&dir) {
         Some(t) => t,
-        None => { eprintln!("ffmpeg generation failed"); return; }
+        None => {
+            eprintln!("ffmpeg generation failed");
+            return;
+        }
     };
 
     let frame_len = (WIDTH as usize * HEIGHT as usize * 3) / 2;
@@ -136,9 +179,9 @@ fn main() {
         }
     }
 
-    let p1 = &decoded[1].data[..luma_len];  // P1 luma
-    let p2_ours = &decoded[2].data[..luma_len];  // P2 luma (ours)
-    let p2_ref = &refyuv[2 * frame_len..3 * frame_len][..luma_len];  // P2 luma (ffmpeg)
+    let p1 = &decoded[1].data[..luma_len]; // P1 luma
+    let p2_ours = &decoded[2].data[..luma_len]; // P2 luma (ours)
+    let p2_ref = &refyuv[2 * frame_len..3 * frame_len][..luma_len]; // P2 luma (ffmpeg)
 
     let w = WIDTH as usize;
     let h = HEIGHT as usize;
@@ -150,7 +193,11 @@ fn main() {
     let mvy = 1i32;
 
     println!("Block 10 of MB(3,2): global base (56,40), MV=({mvx},{mvy})");
-    println!("MV frac: fx={}, fy={}", mvx.rem_euclid(4), mvy.rem_euclid(4));
+    println!(
+        "MV frac: fx={}, fy={}",
+        mvx.rem_euclid(4),
+        mvy.rem_euclid(4)
+    );
 
     // MC prediction using current code (via interpolate_luma)
     let mut pred_current = [0u8; 16];
@@ -158,19 +205,25 @@ fn main() {
 
     println!("\nMC prediction (current code):");
     for row in 0..4 {
-        for col in 0..4 { print!("{:3} ", pred_current[row*4+col]); }
+        for col in 0..4 {
+            print!("{:3} ", pred_current[row * 4 + col]);
+        }
         println!();
     }
 
     println!("\nP2 reference (ffmpeg, block 10):");
     for row in 0..4 {
-        for col in 0..4 { print!("{:3} ", p2_ref[(40+row)*w + (56+col)]); }
+        for col in 0..4 {
+            print!("{:3} ", p2_ref[(40 + row) * w + (56 + col)]);
+        }
         println!();
     }
 
     println!("\nP2 ours (block 10):");
     for row in 0..4 {
-        for col in 0..4 { print!("{:3} ", p2_ours[(40+row)*w + (56+col)]); }
+        for col in 0..4 {
+            print!("{:3} ", p2_ours[(40 + row) * w + (56 + col)]);
+        }
         println!();
     }
 
@@ -184,18 +237,22 @@ fn main() {
         let y0_ref = py_full.div_euclid(4);
         let fy = py_full - 4 * y0_ref;
         // split(px) where px = 4*56 + mvx = 251
-        let px_full = 4 * 56 + mvx;  // col=0
+        let px_full = 4 * 56 + mvx; // col=0
         let x0_ref = px_full.div_euclid(4);
         let fx = px_full - 4 * x0_ref;
 
         let variants = pred_luma_31_variants(p1, w, w, h, x0_ref, y0_ref);
-        let p2_want = p2_ref[(40+row)*w + 56];
-        let p2_have = p2_ours[(40+row)*w + 56];
+        let p2_want = p2_ref[(40 + row) * w + 56];
+        let p2_have = p2_ours[(40 + row) * w + 56];
 
-        println!("  row={row} (global y={}): x0_ref={x0_ref}, y0_ref={y0_ref}, fx={fx}, fy={fy}",
-            40+row);
-        println!("    A=avg(b,j(+1))={} B=avg(j,b(+1))={} C=avg(b,hv(+1))={} D=avg(G',j)={}",
-            variants[0], variants[1], variants[2], variants[3]);
+        println!(
+            "  row={row} (global y={}): x0_ref={x0_ref}, y0_ref={y0_ref}, fx={fx}, fy={fy}",
+            40 + row
+        );
+        println!(
+            "    A=avg(b,j(+1))={} B=avg(j,b(+1))={} C=avg(b,hv(+1))={} D=avg(G',j)={}",
+            variants[0], variants[1], variants[2], variants[3]
+        );
         println!("    ffmpeg_pixel={p2_want} our_pixel={p2_have}");
     }
 
@@ -203,10 +260,15 @@ fn main() {
     println!("\nP1 luma around x=62, y=36..45:");
     for row in 36..46 {
         let slice = [
-            p1[row * w + 59], p1[row * w + 60], p1[row * w + 61],
-            p1[row * w + 62], p1[row * w + 63],
+            p1[row * w + 59],
+            p1[row * w + 60],
+            p1[row * w + 61],
+            p1[row * w + 62],
+            p1[row * w + 63],
         ];
-        println!("  y={row} x=59..63: {:3} {:3} {:3} {:3} {:3}",
-            slice[0], slice[1], slice[2], slice[3], slice[4]);
+        println!(
+            "  y={row} x=59..63: {:3} {:3} {:3} {:3} {:3}",
+            slice[0], slice[1], slice[2], slice[3], slice[4]
+        );
     }
 }

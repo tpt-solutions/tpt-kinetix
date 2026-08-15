@@ -24,7 +24,8 @@ fn main() {
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
-        bottom_field_pic_order_in_frame_present_flag: pps.bottom_field_pic_order_in_frame_present_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
         delta_pic_order_always_zero_flag: false,
         num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
@@ -38,9 +39,8 @@ fn main() {
     };
     for n in &nals {
         if n.nal_unit_type == NalUnitType::NonIdrSlice {
-            let h =
-                SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx)
-                    .unwrap();
+            let h = SliceHeader::parse_with_context(&n.rbsp, n.nal_unit_type, n.nal_ref_idc, &ctx)
+                .unwrap();
             let mut r = BitReader::new(&n.rbsp);
             r.seek_to_bit(h.data_bit_offset);
             let skip_run = read_ue(&mut r);
@@ -53,9 +53,9 @@ fn main() {
 
             // Decode CBP from inter Golomb code (Table 9-4)
             const GOLOMB_TO_INTER_CBP: [u8; 48] = [
-                 0,  1,  2,  4,  8,  3,  5, 10, 12, 15,  7, 11, 13, 14,  6,  9,
-                16, 17, 18, 20, 24, 19, 21, 26, 28, 31, 23, 27, 29, 30, 22, 25,
-                32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43, 45, 46, 38, 41,
+                0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9, 16, 17, 18, 20, 24, 19, 21,
+                26, 28, 31, 23, 27, 29, 30, 22, 25, 32, 33, 34, 36, 40, 35, 37, 42, 44, 47, 39, 43,
+                45, 46, 38, 41,
             ];
             let cbp_raw = GOLOMB_TO_INTER_CBP[cbp_golomb.min(47)];
             let cbp_luma = (cbp_raw & 0xf) as usize;
@@ -97,7 +97,11 @@ fn main() {
                     let p = r.bit_position();
                     let mut bits = String::new();
                     for _ in 0..16 {
-                        bits.push(if r.read_bit().unwrap_or(0) == 1 { '1' } else { '0' });
+                        bits.push(if r.read_bit().unwrap_or(0) == 1 {
+                            '1'
+                        } else {
+                            '0'
+                        });
                     }
                     r.seek_to_bit(p);
                     bits
@@ -128,13 +132,17 @@ fn main() {
                                 let sign = r.read_bit().unwrap();
                                 let lv = if sign == 0 { 1i32 } else { -1 };
                                 levels.push(lv);
-                                if trace_block { println!("  t1[{i}] sign={sign} level={lv} bits=1 pos={level_start}→{}", r.bit_position()); }
+                                if trace_block {
+                                    println!("  t1[{i}] sign={sign} level={lv} bits=1 pos={level_start}→{}", r.bit_position());
+                                }
                                 continue;
                             }
                             let mut prefix: u32 = 0;
                             loop {
                                 let b = r.read_bit().unwrap();
-                                if b == 1 { break; }
+                                if b == 1 {
+                                    break;
+                                }
                                 prefix += 1;
                             }
                             let ssize = if prefix == 14 && suffix == 0 {
@@ -150,13 +158,25 @@ fn main() {
                                 0
                             };
                             let mut lc = (prefix.min(15) << suffix) as i32 + sfx;
-                            if prefix >= 15 && suffix == 0 { lc += 15; }
-                            if prefix >= 16 { lc += (1 << (prefix - 3)) - 4096; }
-                            if i == t1 && t1 < 3 { lc += 2; }
-                            let level = if lc % 2 == 0 { (lc + 2) >> 1 } else { (-lc - 1) >> 1 };
+                            if prefix >= 15 && suffix == 0 {
+                                lc += 15;
+                            }
+                            if prefix >= 16 {
+                                lc += (1 << (prefix - 3)) - 4096;
+                            }
+                            if i == t1 && t1 < 3 {
+                                lc += 2;
+                            }
+                            let level = if lc % 2 == 0 {
+                                (lc + 2) >> 1
+                            } else {
+                                (-lc - 1) >> 1
+                            };
                             levels.push(level);
                             let old_suffix = suffix;
-                            if suffix == 0 { suffix = 1; }
+                            if suffix == 0 {
+                                suffix = 1;
+                            }
                             if level.unsigned_abs() > (3u32 << (suffix - 1)) && suffix < 6 {
                                 suffix += 1;
                             }
@@ -166,7 +186,8 @@ fn main() {
                         }
                         let pos_after_levels = r.bit_position();
                         let tz = if tc < 16 {
-                            tpt_kinetix_h264::cavlc_tables::read_total_zeros_4x4(&mut r, tc as u8).unwrap()
+                            tpt_kinetix_h264::cavlc_tables::read_total_zeros_4x4(&mut r, tc as u8)
+                                .unwrap()
                         } else {
                             0
                         };
@@ -174,8 +195,11 @@ fn main() {
                         let mut zl = tz as u32;
                         for _ in 0..tc.saturating_sub(1) {
                             let rb = if zl > 0 {
-                                tpt_kinetix_h264::cavlc_tables::read_run_before(&mut r, zl.min(255) as u8)
-                                    .unwrap() as u32
+                                tpt_kinetix_h264::cavlc_tables::read_run_before(
+                                    &mut r,
+                                    zl.min(255) as u8,
+                                )
+                                .unwrap() as u32
                             } else {
                                 0
                             };

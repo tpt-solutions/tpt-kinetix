@@ -31,11 +31,28 @@ fn gen() -> Option<(Vec<u8>, Vec<u8>)> {
     let refyuv = dir.join("cabac_p.yuv");
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1:duration=2",
-            "-frames:v", "2", "-c:v", "libx264", "-profile:v", "main",
-            "-g", "30", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=1:duration=2",
+            "-frames:v",
+            "2",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "main",
+            "-g",
+            "30",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:no-deblock=1",
             h264.to_str()?,
         ])
         .output()
@@ -46,8 +63,17 @@ fn gen() -> Option<(Vec<u8>, Vec<u8>)> {
     }
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y", "-i", h264.to_str()?,
-            "-f", "rawvideo", "-pix_fmt", "yuv420p", refyuv.to_str()?,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264.to_str()?,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            refyuv.to_str()?,
         ])
         .output()
         .map(|o| o.status.success())
@@ -91,7 +117,8 @@ fn localize_cabac_pframe_diffs() {
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
-        bottom_field_pic_order_in_frame_present_flag: pps.bottom_field_pic_order_in_frame_present_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
         delta_pic_order_always_zero_flag: false,
         num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
@@ -101,7 +128,11 @@ fn localize_cabac_pframe_diffs() {
         deblocking_filter_control_present_flag: pps.deblocking_filter_control_present_flag,
         redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag,
         num_slice_groups_minus1: pps.num_slice_groups_minus1,
-        chroma_array_type: if sps.separate_colour_plane_flag { 0 } else { sps.chroma_format_idc },
+        chroma_array_type: if sps.separate_colour_plane_flag {
+            0
+        } else {
+            sps.chroma_format_idc
+        },
     };
     let header = tpt_kinetix_h264::slice::SliceHeader::parse_with_context(
         &p.rbsp,
@@ -143,7 +174,11 @@ fn localize_cabac_pframe_diffs() {
     eprintln!(
         "parsed {} macroblocks; skip flags: {:?}",
         parsed.macroblocks.len(),
-        parsed.macroblocks.iter().map(|m| m.skip as u8).collect::<Vec<_>>()
+        parsed
+            .macroblocks
+            .iter()
+            .map(|m| m.skip as u8)
+            .collect::<Vec<_>>()
     );
 
     // Decode via the real decoder.
@@ -170,8 +205,15 @@ fn localize_cabac_pframe_diffs() {
         for mb_x in 0..mb_cols {
             let mi = (mb_y * mb_cols + mb_x) as usize;
             let mb = &parsed.macroblocks[mi];
-            let raw = mb.motion.as_ref().map(|m| format!("mvd_l0={:?} ref={:?}", m.mvd_l0, m.ref_idx_l0)).unwrap_or_default();
-            let cells = parsed.mv_store.cells_of(mi).unwrap_or([tpt_kinetix_h264::mv::MvCell::INTRA; 16]);
+            let raw = mb
+                .motion
+                .as_ref()
+                .map(|m| format!("mvd_l0={:?} ref={:?}", m.mvd_l0, m.ref_idx_l0))
+                .unwrap_or_default();
+            let cells = parsed
+                .mv_store
+                .cells_of(mi)
+                .unwrap_or([tpt_kinetix_h264::mv::MvCell::INTRA; 16]);
             let first = cells[0];
             let mut md = 0i32;
             for yy in 0..16usize {
@@ -196,12 +238,18 @@ fn localize_cabac_pframe_diffs() {
             }
         }
     }
-    eprintln!("=== CODED MBs ({}), max luma diff per MB (only nonzero) ===", coded_diffs.len());
+    eprintln!(
+        "=== CODED MBs ({}), max luma diff per MB (only nonzero) ===",
+        coded_diffs.len()
+    );
     for (md, t) in coded_diffs.iter().filter(|(md, _)| *md > 0) {
         eprintln!("  [diff={md}] {t}");
     }
     let nonzero_skip = skip_diffs.iter().filter(|(md, _)| *md > 0).count();
-    eprintln!("=== SKIP MBs with nonzero luma diff: {nonzero_skip}/{} ===", skip_diffs.len());
+    eprintln!(
+        "=== SKIP MBs with nonzero luma diff: {nonzero_skip}/{} ===",
+        skip_diffs.len()
+    );
     for (md, t) in skip_diffs.iter().filter(|(md, _)| *md > 0).take(12) {
         eprintln!("  [diff={md}] {t}");
     }

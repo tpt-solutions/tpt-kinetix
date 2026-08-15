@@ -26,8 +26,8 @@ use crate::{
     frame::FrameHeader,
     inter::{
         build_mv_candidates, decode_ref_and_mv, motion_compensate, read_single_ref_name, InterCdfs,
-        Mv, NONE_FRAME, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME, INTERP_BILINEAR,
-        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, RefSlot, RefFrames,
+        Mv, RefFrames, RefSlot, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME,
+        INTERP_BILINEAR, INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NONE_FRAME,
     },
     loop_filter::{apply_post_filters, FrameMeta},
     obu::{BitReader, SequenceHeaderObu},
@@ -72,38 +72,37 @@ const PAETH: u8 = 12;
 /// previous analytic approximation conflated them and diverged sharply from
 /// these values at every non-trivial qindex.
 const DC_QLOOKUP_8: [i32; 256] = [
-    4, 8, 8, 9, 10, 11, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 26,
-    27, 28, 29, 30, 31, 32, 32, 33, 34, 35, 36, 37, 38, 38, 39, 40, 41, 42, 43, 43, 44, 45, 46,
-    47, 48, 48, 49, 50, 51, 52, 53, 53, 54, 55, 56, 57, 57, 58, 59, 60, 61, 62, 62, 63, 64, 65,
-    66, 66, 67, 68, 69, 70, 70, 71, 72, 73, 74, 74, 75, 76, 77, 78, 78, 79, 80, 81, 81, 82, 83,
-    84, 85, 85, 87, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 108, 110, 111, 113,
-    114, 116, 117, 118, 120, 121, 123, 125, 127, 129, 131, 134, 136, 138, 140, 142, 144, 146,
-    148, 150, 152, 154, 156, 158, 161, 164, 166, 169, 172, 174, 177, 180, 182, 185, 187, 190,
-    192, 195, 199, 202, 205, 208, 211, 214, 217, 220, 223, 226, 230, 233, 237, 240, 243, 247,
-    250, 253, 257, 261, 265, 269, 272, 276, 280, 284, 288, 292, 296, 300, 304, 309, 313, 317,
-    322, 326, 330, 335, 340, 344, 349, 354, 359, 364, 369, 374, 379, 384, 389, 395, 400, 406,
-    411, 417, 423, 429, 435, 441, 447, 454, 461, 467, 475, 482, 489, 497, 505, 513, 522, 530,
-    539, 549, 559, 569, 579, 590, 602, 614, 626, 640, 654, 668, 684, 700, 717, 736, 755, 775,
-    796, 819, 843, 869, 896, 925, 955, 988, 1022, 1058, 1098, 1139, 1184, 1232, 1282, 1336,
+    4, 8, 8, 9, 10, 11, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 26, 27,
+    28, 29, 30, 31, 32, 32, 33, 34, 35, 36, 37, 38, 38, 39, 40, 41, 42, 43, 43, 44, 45, 46, 47, 48,
+    48, 49, 50, 51, 52, 53, 53, 54, 55, 56, 57, 57, 58, 59, 60, 61, 62, 62, 63, 64, 65, 66, 66, 67,
+    68, 69, 70, 70, 71, 72, 73, 74, 74, 75, 76, 77, 78, 78, 79, 80, 81, 81, 82, 83, 84, 85, 85, 87,
+    88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 108, 110, 111, 113, 114, 116, 117,
+    118, 120, 121, 123, 125, 127, 129, 131, 134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 154,
+    156, 158, 161, 164, 166, 169, 172, 174, 177, 180, 182, 185, 187, 190, 192, 195, 199, 202, 205,
+    208, 211, 214, 217, 220, 223, 226, 230, 233, 237, 240, 243, 247, 250, 253, 257, 261, 265, 269,
+    272, 276, 280, 284, 288, 292, 296, 300, 304, 309, 313, 317, 322, 326, 330, 335, 340, 344, 349,
+    354, 359, 364, 369, 374, 379, 384, 389, 395, 400, 406, 411, 417, 423, 429, 435, 441, 447, 454,
+    461, 467, 475, 482, 489, 497, 505, 513, 522, 530, 539, 549, 559, 569, 579, 590, 602, 614, 626,
+    640, 654, 668, 684, 700, 717, 736, 755, 775, 796, 819, 843, 869, 896, 925, 955, 988, 1022,
+    1058, 1098, 1139, 1184, 1232, 1282, 1336,
 ];
 
 /// AV1 8-bit AC quantizer lookup table (spec §7.12.2.2, transcribed verbatim
 /// from `libgav1`'s `kAcLookup[8-bit]` reference table).
 const AC_QLOOKUP_8: [i32; 256] = [
     4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
-    54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
-    77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
-    100, 101, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132,
-    134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 155, 158, 161, 164, 167, 170, 173, 176,
-    179, 182, 185, 188, 191, 194, 197, 200, 203, 207, 211, 215, 219, 223, 227, 231, 235, 239,
-    243, 247, 251, 255, 260, 265, 270, 275, 280, 285, 290, 295, 300, 305, 311, 317, 323, 329,
-    335, 341, 347, 353, 359, 366, 373, 380, 387, 394, 401, 408, 416, 424, 432, 440, 448, 456,
-    465, 474, 483, 492, 501, 510, 520, 530, 540, 550, 560, 571, 582, 593, 604, 615, 627, 639,
-    651, 663, 676, 689, 702, 715, 729, 743, 757, 771, 786, 801, 816, 832, 848, 864, 881, 898,
-    915, 933, 951, 969, 988, 1007, 1026, 1046, 1066, 1087, 1108, 1129, 1151, 1173, 1196, 1219,
-    1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423, 1451, 1479, 1508, 1537, 1567, 1597, 1628,
-    1660, 1692, 1725, 1759, 1793, 1828,
+    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+    55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78,
+    79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+    102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 134, 136, 138,
+    140, 142, 144, 146, 148, 150, 152, 155, 158, 161, 164, 167, 170, 173, 176, 179, 182, 185, 188,
+    191, 194, 197, 200, 203, 207, 211, 215, 219, 223, 227, 231, 235, 239, 243, 247, 251, 255, 260,
+    265, 270, 275, 280, 285, 290, 295, 300, 305, 311, 317, 323, 329, 335, 341, 347, 353, 359, 366,
+    373, 380, 387, 394, 401, 408, 416, 424, 432, 440, 448, 456, 465, 474, 483, 492, 501, 510, 520,
+    530, 540, 550, 560, 571, 582, 593, 604, 615, 627, 639, 651, 663, 676, 689, 702, 715, 729, 743,
+    757, 771, 786, 801, 816, 832, 848, 864, 881, 898, 915, 933, 951, 969, 988, 1007, 1026, 1046,
+    1066, 1087, 1108, 1129, 1151, 1173, 1196, 1219, 1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423,
+    1451, 1479, 1508, 1537, 1567, 1597, 1628, 1660, 1692, 1725, 1759, 1793, 1828,
 ];
 
 /// Dequantization step for a given qindex (AV1 §7.11.1 / §7.12.2).
@@ -188,11 +187,10 @@ fn dequantize_coeffs(quant: &[i32], tx_size: usize, qindex: u8) -> Vec<i32> {
 /// `cos128`/`sin128` lookup table (AV1 spec §7.13.2.1): `Cos128_Lookup[a] =
 /// round(4096 * cos(a * pi / 128))` for `a` in `0..=64`.
 const COS128_LOOKUP: [i32; 65] = [
-    4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857,
-    3822, 3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102,
-    3035, 2967, 2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931,
-    1842, 1751, 1660, 1567, 1474, 1380, 1285, 1189, 1092, 995, 897, 799, 700, 601, 501, 401, 301,
-    201, 101, 0,
+    4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
+    3784, 3745, 3703, 3659, 3612, 3564, 3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967,
+    2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931, 1842, 1751, 1660,
+    1567, 1474, 1380, 1285, 1189, 1092, 995, 897, 799, 700, 601, 501, 401, 301, 201, 101, 0,
 ];
 
 /// `cos128(angle)` (spec §7.13.2.1).
@@ -565,7 +563,13 @@ fn inverse_adst16(t: &mut [i64], r: u32) {
     }
     for j in 0..2 {
         for i in 0..2 {
-            butterfly(t, 4 + 8 * j + 3 * i, 5 + 8 * j + i, 48 - 32 * i as i32, true);
+            butterfly(
+                t,
+                4 + 8 * j + 3 * i,
+                5 + 8 * j + i,
+                48 - 32 * i as i32,
+                true,
+            );
         }
     }
     for j in 0..4 {
@@ -698,7 +702,13 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
 /// transform-size index, and `lossless` selects the WHT substitution.
 /// Writes the residual (already row+col shifted and clamped per spec) into
 /// `dst`, raster order, `n*n` samples where `n = 4 << tx_size`.
-fn inverse_transform(dequant: &[i32], av1_tx_type: usize, tx_size: usize, lossless: bool, dst: &mut [i32]) {
+fn inverse_transform(
+    dequant: &[i32],
+    av1_tx_type: usize,
+    tx_size: usize,
+    lossless: bool,
+    dst: &mut [i32],
+) {
     let n = 4usize << tx_size;
     if lossless && tx_size == TX_4X4 {
         let mut c = [0i32; 16];
@@ -1094,7 +1104,10 @@ fn reconstruct_tx_block(
         if coeffs.eob > 0 {
             let dequant = dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex);
             if dbg {
-                eprintln!("DBG dequant qindex={qindex} dequant[0..8]={:?}", &dequant[..dequant.len().min(8)]);
+                eprintln!(
+                    "DBG dequant qindex={qindex} dequant[0..8]={:?}",
+                    &dequant[..dequant.len().min(8)]
+                );
             }
             inverse_transform(
                 &dequant,
@@ -1104,7 +1117,10 @@ fn reconstruct_tx_block(
                 &mut residual,
             );
             if dbg {
-                eprintln!("DBG residual[0..8]={:?}", &residual[..residual.len().min(8)]);
+                eprintln!(
+                    "DBG residual[0..8]={:?}",
+                    &residual[..residual.len().min(8)]
+                );
             }
         }
     } else if dbg {
@@ -1113,7 +1129,12 @@ fn reconstruct_tx_block(
 
     let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_px, px_x, px_y);
     if dbg {
-        eprintln!("DBG top={:?} left={:?} tl={}", &top[..top.len().min(8)], &left[..left.len().min(8)], tl);
+        eprintln!(
+            "DBG top={:?} left={:?} tl={}",
+            &top[..top.len().min(8)],
+            &left[..left.len().min(8)],
+            tl
+        );
     }
     let mut pred = vec![0i32; num_coeffs];
     predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred);
@@ -1182,6 +1203,15 @@ const BLOCK_WIDTH: [usize; BLOCK_SIZES] = [
 ];
 const BLOCK_HEIGHT: [usize; BLOCK_SIZES] = [
     4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
+];
+
+/// `Max_Tx_Depth[BLOCK_SIZES]` (AV1 spec §5.11.15): how many times
+/// `read_tx_size`'s `tx_depth` symbol may split the block's largest
+/// rectangular transform size down, and which `tx_depth` CDF bucket to read
+/// from (spec §8.3.2: bucket 4→`TileTx64x64Cdf`, 3→`TileTx32x32Cdf`,
+/// 2→`TileTx16x16Cdf`, else→`TileTx8x8Cdf`).
+const MAX_TX_DEPTH_TABLE: [usize; BLOCK_SIZES] = [
+    0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4, 2, 2, 3, 3, 4, 4,
 ];
 
 // Transform-size enums (AV1 spec Table 7.9 / §5.11.17). TX_4X4/8X8/16X16
@@ -1258,11 +1288,7 @@ fn mi_height_log2(bsize: usize) -> usize {
 /// Split a `bsize` block (in mi units) according to `partition` into its
 /// sub-block (sub_bsize, mi_row_offset, mi_col_offset) list. Mirrors the AV1
 /// `Partition_Subsize` table logic.
-fn split_into_subblocks(
-    bw: usize,
-    bh: usize,
-    partition: u8,
-) -> Vec<(usize, usize, usize)> {
+fn split_into_subblocks(bw: usize, bh: usize, partition: u8) -> Vec<(usize, usize, usize)> {
     let hw = bw / 2;
     let hh = bh / 2;
     let qw = bw / 4;
@@ -1538,7 +1564,12 @@ impl ModeCdfs {
         dec.read_symbol(&mut self.intra_y_mode[above_ctx][left_ctx])
     }
 
-    fn read_uv_mode(&mut self, dec: &mut SymbolDecoder<'_>, cfl_allowed: bool, y_mode: usize) -> usize {
+    fn read_uv_mode(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        cfl_allowed: bool,
+        y_mode: usize,
+    ) -> usize {
         if cfl_allowed {
             dec.read_symbol(&mut self.uv_mode_allowed[y_mode])
         } else {
@@ -1823,13 +1854,19 @@ impl<'a> TileDecodeState<'a> {
         let partition = if has_rows && has_cols {
             self.mode_cdfs.read_partition(&mut self.dec, bucket, ctx) as u8
         } else if has_cols {
-            if self.mode_cdfs.read_split_or_horz(&mut self.dec, bucket, ctx, bsize) {
+            if self
+                .mode_cdfs
+                .read_split_or_horz(&mut self.dec, bucket, ctx, bsize)
+            {
                 PARTITION_SPLIT
             } else {
                 PARTITION_HORZ
             }
         } else if has_rows {
-            if self.mode_cdfs.read_split_or_vert(&mut self.dec, bucket, ctx, bsize) {
+            if self
+                .mode_cdfs
+                .read_split_or_vert(&mut self.dec, bucket, ctx, bsize)
+            {
                 PARTITION_SPLIT
             } else {
                 PARTITION_VERT
@@ -1875,8 +1912,8 @@ impl<'a> TileDecodeState<'a> {
         let bsl = mi_width_log2(bsize);
         let avail_u = mi_row > 0;
         let avail_l = mi_col > 0;
-        let above = avail_u
-            && (self.mi_width_log2_above[mi_col.min(self.mi_cols - 1)] as usize) < bsl;
+        let above =
+            avail_u && (self.mi_width_log2_above[mi_col.min(self.mi_cols - 1)] as usize) < bsl;
         let left =
             avail_l && (self.mi_height_log2_left[mi_row.min(self.mi_rows - 1)] as usize) < bsl;
         (left as usize) * 2 + (above as usize)
@@ -1963,7 +2000,10 @@ impl<'a> TileDecodeState<'a> {
 
         // is_inter (Y) — context from neighbour inter flags.
         let inter_ctx = (left_inter + above_inter).min(3);
-        let is_inter = self.dec.read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx]) == 1;
+        let is_inter = self
+            .dec
+            .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
+            == 1;
 
         if !is_inter {
             // Intra-coded block inside an inter frame: reconstruct via the shared
@@ -1979,8 +2019,12 @@ impl<'a> TileDecodeState<'a> {
             let uv_mode = self
                 .mode_cdfs
                 .read_uv_mode(&mut self.dec, self.cfl_allowed, y_mode);
+            // `read_tx_size`'s `allowSelect = !skip || !is_inter` is always
+            // true here (`is_inter` is false on this branch), so `skip`
+            // does not gate this read for an intra block — only for a true
+            // inter block (see the other `read_tx_size` call site below).
             let max_tx = max_tx_size_for_bsize(bsize);
-            let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
+            let luma_tx = if self.tx_mode_select && !self.lossless {
                 self.read_tx_size(bsize, max_tx, mi_row, mi_col)
             } else {
                 max_tx
@@ -2014,25 +2058,51 @@ impl<'a> TileDecodeState<'a> {
             // Compound reference-frame tree (§6.8.2). We consume the same symbols
             // the encoder wrote to stay in bit-sync; the actual forward/backward
             // names are derived from the same decisions.
-            let _ct = self.dec.read_symbol(&mut self.map_inter_cdfs.comp_ref_type[0]);
-            let fwd = if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][0]) == 0 {
-                if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][1]) == 0 {
+            let _ct = self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.comp_ref_type[0]);
+            let fwd = if self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][0])
+                == 0
+            {
+                if self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][1])
+                    == 0
+                {
                     LAST_FRAME
                 } else {
                     LAST2_FRAME
                 }
-            } else if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][2]) == 0 {
+            } else if self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][2])
+                == 0
+            {
                 LAST3_FRAME
             } else {
                 GOLDEN_FRAME
             };
-            let bwd = if self.dec.read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[1][0]) == 0 {
-                if self.dec.read_symbol(&mut self.map_inter_cdfs.comp_ref[0][0]) == 0 {
+            let bwd = if self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[1][0])
+                == 0
+            {
+                if self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.comp_ref[0][0])
+                    == 0
+                {
                     BWDREF_FRAME
                 } else {
                     ALTREF_FRAME
                 }
-            } else if self.dec.read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[0][0]) == 0 {
+            } else if self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[0][0])
+                == 0
+            {
                 ALTREF2_FRAME
             } else {
                 BWDREF_FRAME
@@ -2051,7 +2121,11 @@ impl<'a> TileDecodeState<'a> {
             (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
             (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
         ];
-        let block_refs: Vec<u8> = ref_names.iter().copied().filter(|r| *r != NONE_FRAME).collect();
+        let block_refs: Vec<u8> = ref_names
+            .iter()
+            .copied()
+            .filter(|r| *r != NONE_FRAME)
+            .collect();
         let candidates = build_mv_candidates(&above, &left, &block_refs, 2);
 
         // Per reference: read mode + MV (§5.11.23).
@@ -2078,8 +2152,7 @@ impl<'a> TileDecodeState<'a> {
 
         // Per-block interpolation filter (read only when switchable).
         let filter = if frame_filter == INTERP_SWITCHABLE {
-            self.dec
-                .read_symbol(&mut self.mode_cdfs.interp_filter[0]) as u8
+            self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[0]) as u8
         } else {
             frame_filter
         };
@@ -2205,7 +2278,9 @@ impl<'a> TileDecodeState<'a> {
                 let mut t = vec![0u8; bw * bh];
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, rh) = rf.plane(plane);
-                    motion_compensate(&mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+                    motion_compensate(
+                        &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
+                    );
                 }
                 t
             };
@@ -2236,11 +2311,15 @@ impl<'a> TileDecodeState<'a> {
             let mut t1 = vec![0u8; bw * bh];
             if let Some(rf) = self.ref_slots.slots[slot0] {
                 let (rp, rw, rh) = rf.plane(plane);
-                motion_compensate(&mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter);
+                motion_compensate(
+                    &mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
+                );
             }
             if let Some(rf) = self.ref_slots.slots[slot1] {
                 let (rp, rw, rh) = rf.plane(plane);
-                motion_compensate(&mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter);
+                motion_compensate(
+                    &mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter,
+                );
             }
             let mut c = vec![0u8; bw * bh];
             for i in 0..bw * bh {
@@ -2313,7 +2392,12 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                     };
-                    let coeffs = read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk)?;
+                    let coeffs = read_coeffs(
+                        &mut self.dec,
+                        &mut self.coeff_cdfs,
+                        &mut self.coeff_ctxs,
+                        &blk,
+                    )?;
                     if coeffs.eob > 0 {
                         let dequant = dequantize_coeffs(&coeffs.quant, luma_tx, self.qindex);
                         inverse_transform(
@@ -2336,7 +2420,8 @@ impl<'a> TileDecodeState<'a> {
                             break;
                         }
                         if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
-                            *slot = ((*slot as i32 + residual[dy * luma_tx_w + dx]).clamp(0, 255)) as u8;
+                            *slot = ((*slot as i32 + residual[dy * luma_tx_w + dx]).clamp(0, 255))
+                                as u8;
                         }
                     }
                 }
@@ -2361,8 +2446,20 @@ impl<'a> TileDecodeState<'a> {
                     continue;
                 }
                 for (plane, dst, stride, w, h) in [
-                    (1usize, &mut *self.u_plane, self.uv_stride, self.tile_cw, self.tile_ch),
-                    (2usize, &mut *self.v_plane, self.uv_stride, self.tile_cw, self.tile_ch),
+                    (
+                        1usize,
+                        &mut *self.u_plane,
+                        self.uv_stride,
+                        self.tile_cw,
+                        self.tile_ch,
+                    ),
+                    (
+                        2usize,
+                        &mut *self.v_plane,
+                        self.uv_stride,
+                        self.tile_cw,
+                        self.tile_ch,
+                    ),
                 ] {
                     let mut residual = vec![0i32; cw * ch];
                     if !skip {
@@ -2381,8 +2478,12 @@ impl<'a> TileDecodeState<'a> {
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
                         };
-                        let coeffs =
-                            read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk)?;
+                        let coeffs = read_coeffs(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk,
+                        )?;
                         if coeffs.eob > 0 {
                             let dequant = dequantize_coeffs(&coeffs.quant, c_tx, self.qindex);
                             inverse_transform(
@@ -2405,7 +2506,8 @@ impl<'a> TileDecodeState<'a> {
                                 break;
                             }
                             if let Some(slot) = dst.get_mut(sy * stride + sx) {
-                                *slot = ((*slot as i32 + residual[dy * cw + dx]).clamp(0, 255)) as u8;
+                                *slot =
+                                    ((*slot as i32 + residual[dy * cw + dx]).clamp(0, 255)) as u8;
                             }
                         }
                     }
@@ -2441,8 +2543,7 @@ impl<'a> TileDecodeState<'a> {
         // back to the frame-level values.
         let seg_ctx = self.segment_id_context(mi_row, mi_col);
         let _seg_id = if self.segmentation_enabled {
-            self.mode_cdfs
-                .read_segment_id(&mut self.dec, seg_ctx)
+            self.mode_cdfs.read_segment_id(&mut self.dec, seg_ctx)
         } else {
             0
         };
@@ -2497,10 +2598,14 @@ impl<'a> TileDecodeState<'a> {
             bsize,
         );
 
-        // Transform size (AV1 spec §5.11.17). Only signalled for non-skipped
-        // blocks; a skipped block carries no residual and no tx size symbol.
+        // Transform size (AV1 spec §5.11.15/17). `allowSelect = !skip ||
+        // !is_inter` is always true for this (pure-intra keyframe) path, so
+        // `skip` does not gate whether `tx_depth` is read — a skipped intra
+        // block still signals its transform size (it just has no residual to
+        // apply it to). Previously gating this on `!skip` silently desynced
+        // every skipped keyframe block whenever `TxMode == TX_MODE_SELECT`.
         let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
+        let luma_tx = if self.tx_mode_select && !self.lossless {
             self.read_tx_size(bsize, max_tx, mi_row, mi_col)
         } else {
             max_tx
@@ -2543,11 +2648,11 @@ impl<'a> TileDecodeState<'a> {
         // Luma transform blocks (4×4 … 64×64). The inverse-transform set now
         // supports every square transform size (AV1 Phase C).
         if luma_tx <= TX_64X64 {
-                for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                    for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                        let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
-                        let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                        let blk = TxBlockCtx {
+            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                    let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
+                    let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                    let blk = TxBlockCtx {
                         plane: 0,
                         tx_size: luma_tx,
                         x4: px_x / 4,
@@ -2616,13 +2721,13 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 TX_4X4
             };
-                for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                    for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                        let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> sub_x;
-                        let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> sub_y;
-                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
-                            continue;
-                        }
+            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                    let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> sub_x;
+                    let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> sub_y;
+                    if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                        continue;
+                    }
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -2638,10 +2743,7 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                     };
-                    let blk_v = TxBlockCtx {
-                        plane: 2,
-                        ..blk_u
-                    };
+                    let blk_v = TxBlockCtx { plane: 2, ..blk_u };
                     reconstruct_tx_block(
                         &mut self.dec,
                         &mut self.coeff_cdfs,
@@ -2734,40 +2836,43 @@ impl<'a> TileDecodeState<'a> {
 
     /// Read the transform size for an intra block (AV1 spec §5.11.17 / the
     /// `read_tx_size` → `read_selected_tx_size` descent).
+    /// `read_tx_size(allowSelect)` (AV1 spec §5.11.15), for the case that
+    /// matters here: `allowSelect` is always `true` for an intra block (spec
+    /// `allowSelect = !skip || !is_inter`, and `is_inter` is `false`), so the
+    /// only remaining gate is `MiSize > BLOCK_4X4` (checked by the caller via
+    /// `max_tx`/`bsize`) and `TxMode == TX_MODE_SELECT`. Reads a *single*
+    /// ternary `tx_depth` symbol and applies `Split_Tx_Size` that many times
+    /// — the previous implementation here read up to 3 separate binary
+    /// "go bigger?" symbols in a loop, which is a different syntax model
+    /// entirely and desynced the entropy decoder for every non-skipped
+    /// keyframe block whenever `TxMode == TX_MODE_SELECT` (i.e. essentially
+    /// always, since `TX_MODE_SELECT` is the common case real encoders use).
     fn read_tx_size(&mut self, bsize: usize, max_tx: usize, mi_row: usize, mi_col: usize) -> usize {
-        let mut tx = TX_8X8;
-        // Maximum descent depth from 8×8 up to `max_tx`.
-        let max_depth = match max_tx {
-            TX_4X4 => 0,
-            TX_8X8 => 0,
-            TX_16X16 => 1,
-            TX_32X32 => 2,
-            _ => 3,
-        };
-        let _ = bsize;
-        for depth in 0..max_depth {
-            let ctx = self.tx_size_context(mi_row, mi_col, tx);
-            let bigger = self.mode_cdfs.read_tx_level(&mut self.dec, depth, ctx);
-            if bigger == 0 {
-                break;
-            }
-            tx += 1; // 8→16→32→64
+        if bsize <= BLOCK_4X4 {
+            return max_tx;
         }
-        tx.min(max_tx)
+        let max_tx_depth = MAX_TX_DEPTH_TABLE[bsize];
+        let bucket = match max_tx_depth {
+            4 => 3, // TileTx64x64Cdf
+            3 => 2, // TileTx32x32Cdf
+            2 => 1, // TileTx16x16Cdf
+            _ => 0, // TileTx8x8Cdf
+        };
+        let ctx = self.tx_depth_context(mi_row, mi_col, max_tx);
+        let tx_depth = self.mode_cdfs.read_tx_level(&mut self.dec, bucket, ctx);
+        max_tx.saturating_sub(tx_depth).max(TX_4X4)
     }
 
+    /// `tx_depth`'s CDF-selection context (AV1 spec §8.3.2): compares the
+    /// above/left neighbour's transform size against `maxRectTxSize`
+    /// (approximated here via the tracked `tx_above`/`tx_left` size-class
+    /// arrays rather than the spec's separate width/height comparison, since
+    /// this crate only reconstructs square transforms).
     #[inline]
-    fn tx_size_context(&self, mi_row: usize, mi_col: usize, tx: usize) -> usize {
-        let mut ctx = if tx > TX_16X16 { 1 } else { 0 };
+    fn tx_depth_context(&self, mi_row: usize, mi_col: usize, max_tx: usize) -> usize {
         let above = self.tx_above[mi_col] as usize;
         let left = self.tx_left[mi_row] as usize;
-        if above > TX_16X16 {
-            ctx += 1;
-        }
-        if left > TX_16X16 {
-            ctx += 1;
-        }
-        ctx.min(2)
+        (usize::from(above >= max_tx)) + (usize::from(left >= max_tx))
     }
 }
 
@@ -2853,14 +2958,18 @@ pub fn decode_tile_group(
 
         if tile_cols > 1 || tile_rows > 1 {
             // tile_start_and_end_present_flag
-            br.read_bit().ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            br.read_bit()
+                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
             // tile_start, tile_end
-            br.read_bits(tile_size_bits).ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
-            br.read_bits(tile_size_bits).ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            br.read_bits(tile_size_bits)
+                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            br.read_bits(tile_size_bits)
+                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
         }
         if !frame_is_intra {
             // tile_cdf_update_flag
-            br.read_bit().ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            br.read_bit()
+                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
         }
         // byte_alignment()
         br.byte_align();
@@ -3145,8 +3254,7 @@ pub fn reconstruct_av1_frame(
             for (dy, sy) in (tile.y0 / 2..(tile.y1 + 1) / 2).enumerate() {
                 let drow = sy * uv_w + tile.x0 / 2;
                 let srow = dy * (tw / 2);
-                dst_plane[drow..drow + tw / 2]
-                    .copy_from_slice(&src_plane[srow..srow + tw / 2]);
+                dst_plane[drow..drow + tw / 2].copy_from_slice(&src_plane[srow..srow + tw / 2]);
             }
         }
     }
@@ -3190,8 +3298,33 @@ mod tests {
         let mut v = vec![128u8; uv_w * uv_h];
         let mut meta = FrameMeta::new(width, height);
         decode_tile_group(
-            data, width, height, 8, qindex, false, 0, 0, 1, 1, &mut y, &mut u, &mut v, width, uv_w,
-            true, false, false, false, false, false, true, false, false, 0, [0u8; 9], RefFrames::empty(),
+            data,
+            width,
+            height,
+            8,
+            qindex,
+            false,
+            0,
+            0,
+            1,
+            1,
+            &mut y,
+            &mut u,
+            &mut v,
+            width,
+            uv_w,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            0,
+            [0u8; 9],
+            RefFrames::empty(),
             &mut meta,
         )?;
         Ok((y, u, v))
@@ -3336,7 +3469,10 @@ mod tests {
                 residual.iter().all(|&v| v == first),
                 "tx_size {tx_size}: DC-only residual must be flat, got {residual:?}"
             );
-            assert_ne!(first, 0, "tx_size {tx_size}: a -1000 DC coefficient must not vanish to 0");
+            assert_ne!(
+                first, 0,
+                "tx_size {tx_size}: a -1000 DC coefficient must not vanish to 0"
+            );
         }
     }
 
@@ -3384,9 +3520,39 @@ mod tests {
         let mut v = vec![0u8; 16];
         let mut meta = FrameMeta::new(2, 2);
         let mut state = TileDecodeState::new(
-            &[0u8; 8], 0, 8, 8, 4, 4, &mut y, &mut u, &mut v, 8, 4, 128, true, false, false,
-            false, false, 0, 0, 8, 8, true, false, false, false, false, true, false, false,
-            INTERP_SWITCHABLE, [0u8; 9], RefFrames::empty(), &mut meta,
+            &[0u8; 8],
+            0,
+            8,
+            8,
+            4,
+            4,
+            &mut y,
+            &mut u,
+            &mut v,
+            8,
+            4,
+            128,
+            true,
+            false,
+            false,
+            false,
+            false,
+            0,
+            0,
+            8,
+            8,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            INTERP_SWITCHABLE,
+            [0u8; 9],
+            RefFrames::empty(),
+            &mut meta,
         );
         // No neighbours recorded yet: both AvailU/AvailL false at the origin.
         assert_eq!(state.partition_context(0, 0, BLOCK_8X8), 0);
@@ -3400,5 +3566,98 @@ mod tests {
         // Querying a *larger* node (BLOCK_16X16, bsl=2) against that same
         // BLOCK_8X8 neighbour: 1 < 2, so left=true -> ctx = 1*2+0 = 2.
         assert_eq!(state.partition_context(0, 2, BLOCK_16X16), 2);
+    }
+
+    #[test]
+    fn intra_y_mode_context_uses_above_left_as_independent_axes() {
+        // Regression test for a real bug (2026-08-16): the previous
+        // implementation summed `INTRA_MODE_CONTEXT[above]` and `[left]`
+        // then re-split the sum (`.min(4)`, `(sum/5).min(4)`) instead of
+        // using each value directly as its own axis of
+        // `TileIntraFrameYModeCdf[abovemode][leftmode]` (spec §8.3.2). The
+        // two only coincidentally agree when either mode is DC (context 0);
+        // for anything else they diverge. `read_intra_y_mode(dec, above_ctx,
+        // left_ctx)` indexes `self.intra_y_mode[above_ctx][left_ctx]`
+        // directly, so this just confirms the call sites feed the two
+        // `INTRA_MODE_CONTEXT` lookups straight through, unmodified, as
+        // separate arguments — not summed/resplit.
+        assert_eq!(INTRA_MODE_CONTEXT[V_PRED as usize], 1);
+        assert_eq!(INTRA_MODE_CONTEXT[D207_PRED as usize], 3);
+        // Old (wrong) formula: sum=1+3=4 -> above_ctx=4.min(4)=4,
+        // left_ctx=(4/5).min(4)=0 -> (4,0), not the correct (1,3).
+        let wrong_above = (1usize + 3).min(4);
+        let wrong_left = ((1usize + 3) / 5).min(4);
+        assert_ne!((wrong_above, wrong_left), (1, 3));
+    }
+
+    #[test]
+    fn tx_depth_bucket_selection_matches_max_tx_depth_table() {
+        // AV1 spec §8.3.2 `tx_depth`: bucket 4 (TileTx64x64Cdf) when
+        // Max_Tx_Depth[bSize]==4, bucket 3 (TileTx32x32Cdf) when ==3, bucket
+        // 2 (TileTx16x16Cdf) when ==2, else bucket 0/1 (TileTx8x8Cdf) — the
+        // same 4 CDF tables `read_tx_level`'s `depth` parameter already
+        // selects, just chosen by this rule instead of a loop-iteration
+        // index (the previous, wrong syntax model: see `read_tx_size`'s
+        // doc comment).
+        assert_eq!(MAX_TX_DEPTH_TABLE[BLOCK_8X8], 1);
+        assert_eq!(MAX_TX_DEPTH_TABLE[BLOCK_16X16], 2);
+        assert_eq!(MAX_TX_DEPTH_TABLE[BLOCK_32X32], 3);
+        assert_eq!(MAX_TX_DEPTH_TABLE[BLOCK_64X64], 4);
+    }
+
+    #[test]
+    fn read_tx_size_never_panics_and_stays_in_range() {
+        // `read_tx_size` must return a size in `TX_4X4..=max_tx` for every
+        // reachable `tx_depth` symbol value (0, 1, or 2), and must not panic
+        // via the `saturating_sub` — a regression guard for the rewrite from
+        // the old per-depth-loop model to the single-ternary-symbol model.
+        let data = vec![0xA5u8; 32];
+        let mut y = vec![0u8; 64 * 64];
+        let mut u = vec![0u8; 32 * 32];
+        let mut v = vec![0u8; 32 * 32];
+        let mut meta = FrameMeta::new(64, 64);
+        let mut state = TileDecodeState::new(
+            &data,
+            0,
+            64,
+            64,
+            32,
+            32,
+            &mut y,
+            &mut u,
+            &mut v,
+            64,
+            32,
+            128,
+            true,
+            false,
+            false,
+            false,
+            false,
+            0,
+            0,
+            64,
+            64,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            INTERP_SWITCHABLE,
+            [0u8; 9],
+            RefFrames::empty(),
+            &mut meta,
+        );
+        for &bsize in &[BLOCK_8X8, BLOCK_16X16, BLOCK_32X32, BLOCK_64X64] {
+            let max_tx = max_tx_size_for_bsize(bsize);
+            let tx = state.read_tx_size(bsize, max_tx, 0, 0);
+            assert!(
+                tx <= max_tx,
+                "bsize {bsize}: tx {tx} exceeds max_tx {max_tx}"
+            );
+        }
     }
 }

@@ -27,8 +27,8 @@
 
 use tpt_kinetix_core::error::KinetixError;
 
-use crate::entropy::SymbolDecoder;
 use crate::cdf_tables_gen as defaults;
+use crate::entropy::SymbolDecoder;
 
 // --- Reference frame name enumeration (§7.3 / §6.8.2) ----------------------
 /// No reference frame (INTRA / skip).
@@ -267,7 +267,10 @@ pub fn build_mv_candidates(
         if !block_refs.contains(&cand.ref_frame) {
             return;
         }
-        if stack.iter().any(|c| c.ref_frame == cand.ref_frame && c.mv == cand.mv) {
+        if stack
+            .iter()
+            .any(|c| c.ref_frame == cand.ref_frame && c.mv == cand.mv)
+        {
             return;
         }
         if stack.len() < max {
@@ -277,13 +280,25 @@ pub fn build_mv_candidates(
 
     // Above neighbours first (spec order), then left.
     for (i, (r, m)) in above.iter().enumerate() {
-        push(MvCandidate { ref_frame: *r, mv: *m }, &mut stack);
+        push(
+            MvCandidate {
+                ref_frame: *r,
+                mv: *m,
+            },
+            &mut stack,
+        );
         if i == 0 {
             break;
         }
     }
     for (r, m) in left.iter() {
-        push(MvCandidate { ref_frame: *r, mv: *m }, &mut stack);
+        push(
+            MvCandidate {
+                ref_frame: *r,
+                mv: *m,
+            },
+            &mut stack,
+        );
     }
 
     stack
@@ -356,7 +371,7 @@ impl Default for InterCdfs {
 /// `use_hp` selects 1/8-pel vs 1/4-pel precision for the fractional part.
 /// `class0_fr_ctx` is the `mv_class0_fr` context (0 or 1), here derived from
 /// the reference match; callers pass `0` for the common case.
-fn read_mv_component(
+pub fn read_mv_component(
     dec: &mut SymbolDecoder<'_>,
     cdfs: &mut InterCdfs,
     class0_fr_ctx: usize,
@@ -513,7 +528,9 @@ pub fn decode_ref_and_mv(
     let _ = allow_global;
     // `ref_name` is already known (single-ref path) or chosen by the compound
     // path before this call; we still read the mode CDFs to stay in sync.
-    let nearest_nonzero = candidates.first().map_or(false, |c| c.ref_frame == ref_name);
+    let nearest_nonzero = candidates
+        .first()
+        .map_or(false, |c| c.ref_frame == ref_name);
     let near_nonzero = candidates.get(1).map_or(false, |c| c.ref_frame == ref_name);
 
     let mode = read_single_inter_mode(dec, cdfs, mode_ctx, nearest_nonzero, near_nonzero);
@@ -545,10 +562,7 @@ pub fn decode_ref_and_mv(
         }
         NEWMV => {
             // Read the MV difference relative to the chosen candidate.
-            let cand = candidates
-                .iter()
-                .find(|c| c.ref_frame == ref_name)
-                .copied();
+            let cand = candidates.iter().find(|c| c.ref_frame == ref_name).copied();
             let diff = read_mv(dec, cdfs, use_hp_row, use_hp_col)?;
             mv = match cand {
                 Some(c) => Mv::new(c.mv.row + diff.row, c.mv.col + diff.col),

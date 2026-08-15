@@ -79,10 +79,10 @@ mod tests {
         // number_pulse = 1 (1 bit → np = 1); start_sfb = 0 (6 bits);
         // one pulse: offset = 0 (5 bits), amp = 3 (4 bits → stored = 4).
         let bits: Vec<u8> = vec![
-            0,             // number_pulse = 0 → np = 1
+            0, // number_pulse = 0 → np = 1
             0, 0, 0, 0, 0, 0, // start_sfb = 0
             0, 0, 0, 0, 0, // offset[0] = 0
-            0, 0, 1, 1,    // amp[0] = 3 → 3 + 1 = 4
+            0, 0, 1, 1, // amp[0] = 3 → 3 + 1 = 4
         ];
         let bytes = bits_to_bytes(&bits);
         let mut r = BitReader::new(&bytes);

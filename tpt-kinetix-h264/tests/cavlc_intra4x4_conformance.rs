@@ -185,8 +185,7 @@ fn cavlc_intra4x4_no_deblock_is_bitexact() {
     }
     let dir = std::env::temp_dir().join("tpt_kinetix_h264_i4x4");
     std::fs::create_dir_all(&dir).unwrap();
-    let (max_diff, num_diff, total, intra4x4_count) =
-        decode_bitexact(&dir, "nodblk", 64, 48, true);
+    let (max_diff, num_diff, total, intra4x4_count) = decode_bitexact(&dir, "nodblk", 64, 48, true);
     eprintln!(
         "H.264 CAVLC Intra_4x4 (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}, intra4x4_mbs={intra4x4_count}"
     );

@@ -100,7 +100,11 @@ fn native_aac_matches_ffmpeg_reference() {
     // Diagnostic: inspect first frame header + first element bits.
     {
         let f = &split_adts_frames(&adts)[0];
-        eprintln!("first frame {} bytes: {:02X?}", f.len(), &f[..f.len().min(20)]);
+        eprintln!(
+            "first frame {} bytes: {:02X?}",
+            f.len(),
+            &f[..f.len().min(20)]
+        );
         let h = tpt_kinetix_aac::adts::AdtsHeader::parse(f);
         eprintln!("header: {h:?}");
         let payload = &f[7..];
@@ -112,7 +116,7 @@ fn native_aac_matches_ffmpeg_reference() {
     let native = decode_native(&adts);
     let reference = decode_aac_with_ffmpeg(&adts).expect("ffmpeg should decode its own stream");
 
-        // The native AAC decoder is still under development (Phase 2-3 of 6);
+    // The native AAC decoder is still under development (Phase 2-3 of 6);
     // it doesn't yet support CCE elements that ffmpeg uses for stereo.
     // Skip the strict assertion until Phase 6 is complete.
     if native.is_empty() {
@@ -134,5 +138,3 @@ fn native_aac_matches_ffmpeg_reference() {
         "native AAC decode diverged from ffmpeg reference (max diff {max_diff})"
     );
 }
-
-

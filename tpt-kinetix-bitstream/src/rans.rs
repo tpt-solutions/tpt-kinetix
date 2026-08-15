@@ -171,9 +171,7 @@ impl SkewedModel {
         // piles on symbol `0` and falls off smoothly. `lambda = 0` is the
         // uniform (flat) model; larger `lambda` concentrates more on `0`.
         let lambda = skew.max(0.0);
-        let weights: Vec<f64> = (0..256)
-            .map(|s| (-(lambda) * s as f64).exp())
-            .collect();
+        let weights: Vec<f64> = (0..256).map(|s| (-(lambda) * s as f64).exp()).collect();
         let total: f64 = weights.iter().sum();
         // Ideal (fractional) frequency per symbol, summing to exactly PROB_SCALE.
         let ideal: Vec<f64> = weights
@@ -248,7 +246,11 @@ impl SymbolModel for SkewedModel {
     fn find(&self, cum_freq: u32) -> (u8, SymbolInfo) {
         // Largest symbol `s` with `cum[s] <= cum_freq`. `partition_point` gives
         // the first index whose value exceeds `cum_freq`; back off by one.
-        let s = self.cum.partition_point(|&c| c <= cum_freq).saturating_sub(1).min(255);
+        let s = self
+            .cum
+            .partition_point(|&c| c <= cum_freq)
+            .saturating_sub(1)
+            .min(255);
         (s as u8, self.info(s as u8))
     }
 }

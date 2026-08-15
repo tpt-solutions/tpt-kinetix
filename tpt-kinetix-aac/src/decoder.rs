@@ -14,7 +14,10 @@ use crate::mdct::Imdct;
 use crate::pns::apply_pns;
 use crate::pulse::apply_pulse;
 use crate::stereo::apply_stereo;
-use crate::syntax::{AacParseError, ChannelStream, CouplingChannelElement, Element, IcsInfo, RawDataBlock, WindowSequence};
+use crate::syntax::{
+    AacParseError, ChannelStream, CouplingChannelElement, Element, IcsInfo, RawDataBlock,
+    WindowSequence,
+};
 use crate::tables::{SWB_OFFSET_1024, SWB_OFFSET_128};
 use crate::tns::apply_tns;
 use crate::window::build_window;
@@ -30,7 +33,7 @@ struct DecodedChannel {
     global_gain: u8,
     pulse: Option<crate::pulse::PulseData>,
     tns: Option<crate::tns::TnsData>,
-    is_cce: bool,           // true if this is a coupling channel (not output directly)
+    is_cce: bool, // true if this is a coupling channel (not output directly)
     cpe_pair: Option<(usize, usize)>, // (left_idx, right_idx) if part of CPE
 }
 
@@ -64,8 +67,14 @@ struct Windows {
 impl Windows {
     fn new() -> Self {
         Windows {
-            long: [build_window(1024, false, false), build_window(1024, true, false)],
-            short: [build_window(128, false, true), build_window(128, true, true)],
+            long: [
+                build_window(1024, false, false),
+                build_window(1024, true, false),
+            ],
+            short: [
+                build_window(128, false, true),
+                build_window(128, true, true),
+            ],
         }
     }
 }
@@ -268,7 +277,11 @@ impl AacDecoder {
             if indices.len() == 2 {
                 let left_idx = indices[0];
                 let right_idx = indices[1];
-                let swb = if decoded_channels[left_idx].ics.window_sequence.is_eight_short() {
+                let swb = if decoded_channels[left_idx]
+                    .ics
+                    .window_sequence
+                    .is_eight_short()
+                {
                     SWB_OFFSET_128[self.sf_index]
                 } else {
                     SWB_OFFSET_1024[self.sf_index]
@@ -308,10 +321,7 @@ impl AacDecoder {
 
         // --- Pass 4: IMDCT + windowing + overlap-add ---
         // Collect output channels in order (non-CCE channels only).
-        let output_channels: Vec<_> = decoded_channels
-            .iter()
-            .filter(|ch| !ch.is_cce)
-            .collect();
+        let output_channels: Vec<_> = decoded_channels.iter().filter(|ch| !ch.is_cce).collect();
 
         // Ensure we have enough channel states.
         while self.channels.len() < output_channels.len() {
@@ -324,10 +334,23 @@ impl AacDecoder {
             let mut out_buf = [0.0f32; 1024];
             if ch.ics.window_sequence.is_eight_short() {
                 self.imdct_short.transform(&ch.coeffs, &mut buf);
-                short_synthesis(&buf, &mut self.channels[ch_idx], ch.ics.window_shape as usize, &self.windows, &mut out_buf);
+                short_synthesis(
+                    &buf,
+                    &mut self.channels[ch_idx],
+                    ch.ics.window_shape as usize,
+                    &self.windows,
+                    &mut out_buf,
+                );
             } else {
                 self.imdct_long.transform(&ch.coeffs, &mut buf);
-                long_synthesis(&buf, &mut self.channels[ch_idx], ch.ics.window_sequence, ch.ics.window_shape as usize, &self.windows, &mut out_buf);
+                long_synthesis(
+                    &buf,
+                    &mut self.channels[ch_idx],
+                    ch.ics.window_sequence,
+                    ch.ics.window_shape as usize,
+                    &self.windows,
+                    &mut out_buf,
+                );
             }
             pcm_planes.push(out_buf.to_vec());
         }
@@ -361,7 +384,10 @@ impl AacDecoder {
     }
 
     /// Decode a single ChannelStream to frequency-domain coefficients.
-    fn decode_channel_stream(stream: &ChannelStream, sf_index: usize) -> Result<[f32; 1024], AacParseError> {
+    fn decode_channel_stream(
+        stream: &ChannelStream,
+        sf_index: usize,
+    ) -> Result<[f32; 1024], AacParseError> {
         let ics = &stream.ics;
         let swb = if ics.window_sequence.is_eight_short() {
             SWB_OFFSET_128[sf_index]
@@ -373,7 +399,15 @@ impl AacDecoder {
             apply_pulse(p, swb, &mut coeffs);
         }
         let gindex = group_base_offsets(ics);
-        apply_pns(ics, &stream.band_type, &stream.scalefactor, swb, stream.global_gain, &gindex, &mut coeffs);
+        apply_pns(
+            ics,
+            &stream.band_type,
+            &stream.scalefactor,
+            swb,
+            stream.global_gain,
+            &gindex,
+            &mut coeffs,
+        );
         if let Some(tns) = &stream.tns {
             apply_tns(tns, ics, &mut coeffs, swb);
         }
@@ -409,7 +443,10 @@ fn synthesize(
     if ics.window_sequence.is_eight_short() {
         let mut buf = [0.0f32; 2048];
         for w in 0..8 {
-            imdct_short.transform(&coeffs[w * 128..w * 128 + 128], &mut buf[w * 256..w * 256 + 256]);
+            imdct_short.transform(
+                &coeffs[w * 128..w * 128 + 128],
+                &mut buf[w * 256..w * 256 + 256],
+            );
         }
         short_synthesis(&buf, state, ws, windows, &mut out);
     } else {
@@ -454,7 +491,8 @@ fn long_synthesis(
                 state.overlap[i] = buf[nlong + i];
             }
             for i in 0..nshort {
-                state.overlap[nflat_ls + i] = buf[nlong + nflat_ls + i] * w_cur_short[nshort - 1 - i];
+                state.overlap[nflat_ls + i] =
+                    buf[nlong + nflat_ls + i] * w_cur_short[nshort - 1 - i];
             }
             for i in 0..nflat_ls {
                 state.overlap[nflat_ls + nshort + i] = 0.0;
@@ -465,10 +503,12 @@ fn long_synthesis(
                 out[i] = state.overlap[i];
             }
             for i in 0..nshort {
-                out[nflat_ls + i] = state.overlap[nflat_ls + i] + buf[nflat_ls + i] * w_prev_short[i];
+                out[nflat_ls + i] =
+                    state.overlap[nflat_ls + i] + buf[nflat_ls + i] * w_prev_short[i];
             }
             for i in 0..nflat_ls {
-                out[nflat_ls + nshort + i] = state.overlap[nflat_ls + nshort + i] + buf[nflat_ls + nshort + i];
+                out[nflat_ls + nshort + i] =
+                    state.overlap[nflat_ls + nshort + i] + buf[nflat_ls + nshort + i];
             }
             for i in 0..nlong {
                 state.overlap[i] = buf[nlong + i] * w_cur_long[nlong - 1 - i];
@@ -524,7 +564,8 @@ fn short_synthesis(
             buf[nshort * 11 + i] * w_cur[nshort - 1 - i] + buf[nshort * 12 + i] * w_cur[i];
         state.overlap[nflat_ls + 7 * nshort + i - nlong] =
             buf[nshort * 13 + i] * w_cur[nshort - 1 - i] + buf[nshort * 14 + i] * w_cur[i];
-        state.overlap[nflat_ls + 8 * nshort + i - nlong] = buf[nshort * 15 + i] * w_cur[nshort - 1 - i];
+        state.overlap[nflat_ls + 8 * nshort + i - nlong] =
+            buf[nshort * 15 + i] * w_cur[nshort - 1 - i];
     }
     for i in 0..nflat_ls {
         state.overlap[nflat_ls + nshort + i] = 0.0;

@@ -445,10 +445,7 @@ impl FrameHeader {
         } else {
             read_flag(&mut br)?
         };
-        let showable_frame = if !reduced_still
-            && !show_frame
-            && frame_type != FrameType::KeyFrame
-        {
+        let showable_frame = if !reduced_still && !show_frame && frame_type != FrameType::KeyFrame {
             read_flag(&mut br)?
         } else {
             false
@@ -514,14 +511,12 @@ impl FrameHeader {
         let frame_context_idx = primary_ref_frame;
 
         // --- buffer_removal_time (decoder model) ---
-        let buffer_removal_time_present = if decoder_model_info_present
-            && !reduced_still
-            && !show_existing_frame
-        {
-            read_flag(&mut br)?
-        } else {
-            false
-        };
+        let buffer_removal_time_present =
+            if decoder_model_info_present && !reduced_still && !show_existing_frame {
+                read_flag(&mut br)?
+            } else {
+                false
+            };
         if buffer_removal_time_present {
             for op in 0..=seq.operating_points_cnt_minus_1 as usize {
                 if seq.decoder_model_present_for_this_op[op] {
@@ -669,8 +664,12 @@ impl FrameHeader {
 
         // --- segmentation_params ---
         let segmentation_enabled = read_flag(&mut br)?;
-        let (segmentation_update_map, segmentation_temporal_update, seg_feature_enabled, seg_feature_data) =
-            parse_segmentation(&mut br, primary_ref_frame, segmentation_enabled)?;
+        let (
+            segmentation_update_map,
+            segmentation_temporal_update,
+            seg_feature_enabled,
+            seg_feature_data,
+        ) = parse_segmentation(&mut br, primary_ref_frame, segmentation_enabled)?;
 
         // --- delta_q_params ---
         let (delta_q_present, delta_q_res) =
@@ -690,8 +689,12 @@ impl FrameHeader {
             && !using_qmatrix;
 
         // --- loop_filter_params ---
-        let (loop_filter_level, loop_filter_sharpness, loop_filter_delta_enabled, loop_filter_deltas) =
-            parse_loop_filter(&mut br, coded_lossless, allow_intrabc, num_planes)?;
+        let (
+            loop_filter_level,
+            loop_filter_sharpness,
+            loop_filter_delta_enabled,
+            loop_filter_deltas,
+        ) = parse_loop_filter(&mut br, coded_lossless, allow_intrabc, num_planes)?;
 
         // --- cdef_params ---
         let (cdef_damping, cdef_bits, cdef_y_strength, cdef_uv_strength) = parse_cdef(
@@ -1172,19 +1175,61 @@ fn parse_global_motion(
         }
         gm_type[ref_idx] = type_;
         if type_ >= GM_ROTZOOM {
-            read_global_param(br, &mut gm_params, ref_idx, 2, type_, allow_high_precision_mv)?;
-            read_global_param(br, &mut gm_params, ref_idx, 3, type_, allow_high_precision_mv)?;
+            read_global_param(
+                br,
+                &mut gm_params,
+                ref_idx,
+                2,
+                type_,
+                allow_high_precision_mv,
+            )?;
+            read_global_param(
+                br,
+                &mut gm_params,
+                ref_idx,
+                3,
+                type_,
+                allow_high_precision_mv,
+            )?;
             if type_ == GM_AFFINE {
-                read_global_param(br, &mut gm_params, ref_idx, 4, type_, allow_high_precision_mv)?;
-                read_global_param(br, &mut gm_params, ref_idx, 5, type_, allow_high_precision_mv)?;
+                read_global_param(
+                    br,
+                    &mut gm_params,
+                    ref_idx,
+                    4,
+                    type_,
+                    allow_high_precision_mv,
+                )?;
+                read_global_param(
+                    br,
+                    &mut gm_params,
+                    ref_idx,
+                    5,
+                    type_,
+                    allow_high_precision_mv,
+                )?;
             } else {
                 gm_params[ref_idx][4] = -gm_params[ref_idx][3];
                 gm_params[ref_idx][5] = gm_params[ref_idx][2];
             }
         }
         if type_ >= GM_TRANSLATION {
-            read_global_param(br, &mut gm_params, ref_idx, 0, type_, allow_high_precision_mv)?;
-            read_global_param(br, &mut gm_params, ref_idx, 1, type_, allow_high_precision_mv)?;
+            read_global_param(
+                br,
+                &mut gm_params,
+                ref_idx,
+                0,
+                type_,
+                allow_high_precision_mv,
+            )?;
+            read_global_param(
+                br,
+                &mut gm_params,
+                ref_idx,
+                1,
+                type_,
+                allow_high_precision_mv,
+            )?;
         }
     }
     Ok((gm_type, gm_params))
@@ -1220,11 +1265,7 @@ fn read_global_param(
     } else {
         0
     };
-    let sub = if (idx % 3) == 2 {
-        1 << prec_bits
-    } else {
-        0
-    };
+    let sub = if (idx % 3) == 2 { 1 << prec_bits } else { 0 };
     let mx = 1u32 << abs_bits;
     let r = (gm[ref_idx][idx] >> prec_diff) - sub as i32;
     let val = decode_signed_subexp_with_ref(br, -(mx as i32), (mx + 1) as i32, r)?;
@@ -1261,11 +1302,7 @@ fn parse_film_grain(
         let _ = read_f8(br, 8)?;
         let _ = read_f8(br, 8)?;
     }
-    let chroma_scaling_from_luma = if mono_chrome {
-        false
-    } else {
-        read_flag(br)?
-    };
+    let chroma_scaling_from_luma = if mono_chrome { false } else { read_flag(br)? };
     let (num_cb_points, num_cr_points) = if mono_chrome
         || chroma_scaling_from_luma
         || (subsampling_x && subsampling_y && num_y_points == 0)
@@ -1762,7 +1799,6 @@ mod tests {
         assert!(!fh.lossless);
     }
 
-
     #[test]
     fn parse_libaom_keyframe_matches_trace_headers() {
         // Generate a real `libaom-av1` 128×96 `testsrc` keyframe (IVF) via
@@ -1786,10 +1822,25 @@ mod tests {
         let tmp = std::env::temp_dir().join("tpt_av1_fhtest.ivf");
         let status = Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                "testsrc=size=128x96:rate=1:duration=1", "-c:v", "libaom-av1",
-                "-strict", "experimental", "-cpu-used", "8", "-pix_fmt", "yuv420p",
-                "-y", "-f", "ivf", tmp.to_str().unwrap(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=128x96:rate=1:duration=1",
+                "-c:v",
+                "libaom-av1",
+                "-strict",
+                "experimental",
+                "-cpu-used",
+                "8",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+                "-f",
+                "ivf",
+                tmp.to_str().unwrap(),
             ])
             .status()
             .expect("spawn ffmpeg");
@@ -1808,7 +1859,12 @@ mod tests {
             let obus = crate::obu::parse_obu_sequence(&frame_obus);
             eprintln!("DBG n_obus={}", obus.len());
             for (i, o) in obus.iter().enumerate() {
-                eprintln!("DBG obu[{}] type={:?} plen={}", i, o.obu_type as u8, o.payload.len());
+                eprintln!(
+                    "DBG obu[{}] type={:?} plen={}",
+                    i,
+                    o.obu_type as u8,
+                    o.payload.len()
+                );
             }
             obus.into_iter()
                 .find(|o| o.obu_type == crate::obu::ObuType::SequenceHeader)
@@ -1817,24 +1873,36 @@ mod tests {
         };
         assert_eq!(seq.frame_width(), 128);
         assert_eq!(seq.frame_height(), 96);
-        eprintln!("DBG seq.enable_cdef={} profile={} sb128={} ohb={}", seq.enable_cdef, seq.seq_profile, seq.use_128x128_superblock, seq.order_hint_bits_minus_1);
+        eprintln!(
+            "DBG seq.enable_cdef={} profile={} sb128={} ohb={}",
+            seq.enable_cdef,
+            seq.seq_profile,
+            seq.use_128x128_superblock,
+            seq.order_hint_bits_minus_1
+        );
         assert!(seq.enable_cdef);
 
         let frame_obu = {
             let obus = crate::obu::parse_obu_sequence(&frame_obus);
             for o in &obus {
-                eprintln!("debug obu type={:?} payload_len={}", o.obu_type as u8, o.payload.len());
+                eprintln!(
+                    "debug obu type={:?} payload_len={}",
+                    o.obu_type as u8,
+                    o.payload.len()
+                );
             }
             obus.into_iter()
                 .find(|o| o.obu_type == crate::obu::ObuType::Frame)
                 .expect("Frame OBU present")
         };
 
-        let (fh, bits) =
-            FrameHeader::parse(&frame_obu.payload, &seq).expect("frame header parse");
+        let (fh, bits) = FrameHeader::parse(&frame_obu.payload, &seq).expect("frame header parse");
 
         // 88 bits = 11 bytes of uncompressed header per ffmpeg trace_headers.
-        assert_eq!(bits, 88, "uncompressed header bit length must match the encoder");
+        assert_eq!(
+            bits, 88,
+            "uncompressed header bit length must match the encoder"
+        );
         assert_eq!(fh.frame_type, FrameType::KeyFrame);
         assert!(fh.show_frame);
         assert_eq!(fh.width, 128);

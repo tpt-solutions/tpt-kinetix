@@ -67,11 +67,28 @@ fn gen() -> Option<Vec<u8>> {
     let h264 = dir.join("iframe.h264");
     let ok = std::process::Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "mandelbrot=size=64x48:rate=1",
-            "-frames:v", "1", "-c:v", "libx264", "-profile:v", "high",
-            "-g", "1", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:8x8dct=1:ref=1:bframes=0:weightp=0:aud=0:deblock=0:keyint=1:min-keyint=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "mandelbrot=size=64x48:rate=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-g",
+            "1",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:8x8dct=1:ref=1:bframes=0:weightp=0:aud=0:deblock=0:keyint=1:min-keyint=1",
             h264.to_str()?,
         ])
         .output()

@@ -66,7 +66,10 @@ fn main() {
         while mb_idx < total {
             if skip_run.is_none() {
                 let run = r.read_ue().unwrap();
-                println!("mb_skip_run={run} (before mb {mb_idx}) pos={}", r.bit_position());
+                println!(
+                    "mb_skip_run={run} (before mb {mb_idx}) pos={}",
+                    r.bit_position()
+                );
                 skip_run = Some(run);
             }
             let run = skip_run.as_mut().unwrap();
@@ -79,7 +82,10 @@ fn main() {
             skip_run = None;
 
             let mb_type_raw = r.read_ue().unwrap();
-            println!("mb {mb_idx}: mb_type_raw={mb_type_raw} pos={}", r.bit_position());
+            println!(
+                "mb {mb_idx}: mb_type_raw={mb_type_raw} pos={}",
+                r.bit_position()
+            );
             if mb_type_raw >= 5 {
                 println!("  (intra mb in P slice, stopping manual walk)");
                 break;

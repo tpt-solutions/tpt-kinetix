@@ -20,7 +20,9 @@ fn dbg_solid_red() {
     eprintln!("ref frame len: {}", ref_frame.data.len());
     eprintln!("ref top-left 8x8 Y:");
     for y in 0..8 {
-        let row: Vec<u8> = (0..8).map(|x| ref_frame.data[y * entry.width as usize + x]).collect();
+        let row: Vec<u8> = (0..8)
+            .map(|x| ref_frame.data[y * entry.width as usize + x])
+            .collect();
         eprintln!("{row:?}");
     }
 
@@ -36,7 +38,9 @@ fn dbg_solid_red() {
     eprintln!("kinetix frame data len: {}", frame.data.len());
     eprintln!("kinetix top-left 8x8 Y:");
     for y in 0..8 {
-        let row: Vec<u8> = (0..8).map(|x| frame.data[y * entry.width as usize + x]).collect();
+        let row: Vec<u8> = (0..8)
+            .map(|x| frame.data[y * entry.width as usize + x])
+            .collect();
         eprintln!("{row:?}");
     }
 
@@ -55,6 +59,9 @@ fn dbg_solid_red() {
         );
     }
     if let Some(fh) = dec.last_frame_header() {
-        eprintln!("allow_screen_content_tools={}", fh.allow_screen_content_tools);
+        eprintln!(
+            "allow_screen_content_tools={}",
+            fh.allow_screen_content_tools
+        );
     }
 }

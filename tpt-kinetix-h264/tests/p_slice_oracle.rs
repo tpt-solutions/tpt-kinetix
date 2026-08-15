@@ -70,11 +70,28 @@ fn gen() -> Option<Vec<u8>> {
     let h264 = dir.join("ip.h264");
     let ok = std::process::Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1:duration=2",
-            "-frames:v", "2", "-c:v", "libx264", "-profile:v", "baseline",
-            "-g", "2", "-bf", "0", "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0:keyint=2:min-keyint=2",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=1:duration=2",
+            "-frames:v",
+            "2",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-g",
+            "2",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:deblock=0:keyint=2:min-keyint=2",
             h264.to_str()?,
         ])
         .output()

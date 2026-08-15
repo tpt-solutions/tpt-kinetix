@@ -12,10 +12,7 @@
 //! instead of silently producing wrong frames.
 
 use tpt_kinetix_core::{
-    capabilities::DecoderCapabilities,
-    error::KinetixError,
-    frame::VideoFrame,
-    packet::Packet,
+    capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
 };
 
 /// A Screen decoder.

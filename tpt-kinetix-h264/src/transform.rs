@@ -225,7 +225,14 @@ fn parse_scaling_lists(
         if present == 1 {
             mask |= 1 << i;
             if i < 6 {
-                let list = parse_one_scaling_list(r, if i < 3 { &JVT_DEFAULT_4X4_INTRA } else { &JVT_DEFAULT_4X4_INTER })?;
+                let list = parse_one_scaling_list(
+                    r,
+                    if i < 3 {
+                        &JVT_DEFAULT_4X4_INTRA
+                    } else {
+                        &JVT_DEFAULT_4X4_INTER
+                    },
+                )?;
                 out.list_4x4[i] = list;
                 if i < 3 {
                     prev_intra_4x4 = Some(list);
@@ -284,7 +291,11 @@ fn parse_one_scaling_list<const N: usize>(
             // useDefaultScalingMatrixFlag: the whole list is the preset matrix.
             return Ok(*jvt_default);
         }
-        out[j] = if next_scale == 0 { last_scale } else { next_scale } as u8;
+        out[j] = if next_scale == 0 {
+            last_scale
+        } else {
+            next_scale
+        } as u8;
         last_scale = out[j] as i32;
     }
     Ok(out)
@@ -698,7 +709,12 @@ pub fn dequant_idct_8x8(
 /// Returns 4 reconstructed DC values, one per chroma 4×4 sub-block.
 /// `comp` selects the chroma component: `0` = Cb (scaling list 4),
 /// `1` = Cr (scaling list 5).
-pub fn chroma_dc_transform(dc: &[i32; 4], qp: i32, comp: usize, scaling: &ScalingLists) -> [i32; 4] {
+pub fn chroma_dc_transform(
+    dc: &[i32; 4],
+    qp: i32,
+    comp: usize,
+    scaling: &ScalingLists,
+) -> [i32; 4] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
     let shift = qp / 6;
@@ -729,46 +745,44 @@ pub fn chroma_dc_transform(dc: &[i32; 4], qp: i32, comp: usize, scaling: &Scalin
 mod tests {
     use super::*;
 
+    // Independent float-matrix reference for the 8x8 IDCT (H.264 §8.5.12.3):
+    // r = (C_f · d · C_f^T) / 64, rounded. Used to validate idct_8x8.
+    fn idct_8x8_reference(block: &[i32; 64]) -> [i32; 64] {
+        // The 8x8 IDCT adds a rounding term to the DC coefficient (block[0])
+        // before the transform, same as the 4x4 IDCT adds 32.
+        let mut block_with_dc = *block;
+        block_with_dc[0] += 32;
 
-
-// Independent float-matrix reference for the 8x8 IDCT (H.264 §8.5.12.3):
-// r = (C_f · d · C_f^T) / 64, rounded. Used to validate idct_8x8.
-fn idct_8x8_reference(block: &[i32; 64]) -> [i32; 64] {
-    // The 8x8 IDCT adds a rounding term to the DC coefficient (block[0])
-    // before the transform, same as the 4x4 IDCT adds 32.
-    let mut block_with_dc = *block;
-    block_with_dc[0] += 32;
-
-    let mut c = [[0f64; 8]; 8];
-    for i in 0..8 {
-        for j in 0..8 {
-            c[i][j] = if i == 0 {
-                0.5
-            } else {
-                0.5 * ((2 * j + 1) as f64 * (i as f64) * std::f64::consts::PI / 16.0).cos()
-            };
-        }
-    }
-    let mut d2 = [[0f64; 8]; 8];
-    for i in 0..8 {
-        for j in 0..8 {
-            let mut s = 0f64;
-            for k in 0..8 {
-                for n in 0..8 {
-                    s += c[k][i] * block_with_dc[k * 8 + n] as f64 * c[n][j];
-                }
+        let mut c = [[0f64; 8]; 8];
+        for i in 0..8 {
+            for j in 0..8 {
+                c[i][j] = if i == 0 {
+                    0.5
+                } else {
+                    0.5 * ((2 * j + 1) as f64 * (i as f64) * std::f64::consts::PI / 16.0).cos()
+                };
             }
-            d2[i][j] = s;
         }
-    }
-    let mut out = [0i32; 64];
-    for i in 0..8 {
-        for j in 0..8 {
-            out[i * 8 + j] = (d2[i][j] / 64.0).round() as i32;
+        let mut d2 = [[0f64; 8]; 8];
+        for i in 0..8 {
+            for j in 0..8 {
+                let mut s = 0f64;
+                for k in 0..8 {
+                    for n in 0..8 {
+                        s += c[k][i] * block_with_dc[k * 8 + n] as f64 * c[n][j];
+                    }
+                }
+                d2[i][j] = s;
+            }
         }
+        let mut out = [0i32; 64];
+        for i in 0..8 {
+            for j in 0..8 {
+                out[i * 8 + j] = (d2[i][j] / 64.0).round() as i32;
+            }
+        }
+        out
     }
-    out
-}
     #[test]
     fn pos_group_classification() {
         // (0,0) even,even -> 0; (1,1)/(3,3) odd,odd -> 1; mixed parity -> 2.

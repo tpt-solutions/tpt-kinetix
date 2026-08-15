@@ -67,10 +67,7 @@ pub struct RealtimeLossResult {
 
 /// Build a [`SequenceHeader`] for the harness. Conferencing preset, an 8×8
 /// slice grid, 20% FEC overhead (DECISION 1/6), `qp == 0` lossless base.
-pub fn harness_sequence(
-    width: u16,
-    height: u16,
-) -> tpt_kinetix_realtime::headers::SequenceHeader {
+pub fn harness_sequence(width: u16, height: u16) -> tpt_kinetix_realtime::headers::SequenceHeader {
     use tpt_kinetix_realtime::headers::{ChromaFormat, ProfilePreset};
     tpt_kinetix_realtime::headers::SequenceHeader {
         version: 1,
@@ -218,7 +215,11 @@ fn transmit_clip(
 
         let is_key = t == 0;
         let mut header = FrameHeader {
-            frame_type: if is_key { FrameType::Key } else { FrameType::Inter },
+            frame_type: if is_key {
+                FrameType::Key
+            } else {
+                FrameType::Inter
+            },
             width: w,
             height: h,
             base_qp: 0, // lossless base: zero-loss run reproduces the source exactly.
@@ -231,8 +232,8 @@ fn transmit_clip(
             payload_len: 0,
         };
 
-        let slices = encode_frame_slices(seq, &header, &src, prev.as_ref())
-            .expect("encode_frame_slices");
+        let slices =
+            encode_frame_slices(seq, &header, &src, prev.as_ref()).expect("encode_frame_slices");
         let framed = grid.frame(&slices).expect("frame slices");
         header.payload_len = framed.len() as u32;
         let header_bytes = header.to_bytes();

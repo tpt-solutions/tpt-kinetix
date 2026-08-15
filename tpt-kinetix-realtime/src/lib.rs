@@ -43,11 +43,11 @@
 //!
 //! [`tpt-kinetix-lean`]: https://docs.rs/tpt-kinetix-lean
 
-pub mod decoder;
 pub mod conceal;
 pub mod deblock;
-pub mod foveation;
+pub mod decoder;
 pub mod fec;
+pub mod foveation;
 pub mod headers;
 pub mod prediction;
 pub mod rate;
@@ -56,15 +56,15 @@ pub mod refresh;
 pub mod slice;
 pub mod transform;
 
-pub use decoder::RealtimeDecoder;
+pub use conceal::conceal;
 pub use deblock::{deblock_chroma, deblock_luma, DeblockBlock};
+pub use decoder::RealtimeDecoder;
 pub use fec::{Fec, DEFAULT_SYMBOL_SIZE};
 pub use foveation::{slice_qp_by_index, GazeMap, MAX_FOVEATION_QP_DELTA};
-pub use conceal::conceal;
 pub use headers::{FrameHeader, FrameType, ProfilePreset, SequenceHeader};
-pub use prediction::{predict_intra_block, predict_inter_luma, IntraMode, MotionVector};
+pub use prediction::{predict_inter_luma, predict_intra_block, IntraMode, MotionVector};
 pub use rate::{adapt_to_deadline, max_decode_ms_estimate, EncodeDeadline, RateControlAction};
 pub use reconstruct::{decode_frame_payload, encode_frame_slices, FrameBuffer};
 pub use refresh::IntraRefreshScheduler;
 pub use slice::SliceGrid;
-pub use transform::{dequant, inverse_2d, quant, transform_2d, quant_step};
+pub use transform::{dequant, inverse_2d, quant, quant_step, transform_2d};

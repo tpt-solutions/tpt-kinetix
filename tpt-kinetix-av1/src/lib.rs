@@ -41,7 +41,6 @@
 //! crate README for details.
 
 pub mod cdf_tables_gen;
-pub mod inter;
 pub mod coeff;
 pub mod coeff_tables;
 pub mod decoder;
@@ -49,6 +48,7 @@ pub mod encoder;
 pub mod entropy;
 pub mod entropy_cdf;
 pub mod frame;
+pub mod inter;
 pub mod loop_filter;
 pub mod obu;
 pub mod reconstruct;

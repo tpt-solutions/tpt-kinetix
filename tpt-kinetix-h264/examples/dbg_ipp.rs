@@ -39,7 +39,10 @@ fn main() {
     let arg = std::env::args().nth(1);
     let (annexb, refyuv) = if let Some(ref a) = arg {
         let p = std::path::PathBuf::from(a);
-        (std::fs::read(&p).unwrap(), std::fs::read(p.with_extension("yuv")).unwrap())
+        (
+            std::fs::read(&p).unwrap(),
+            std::fs::read(p.with_extension("yuv")).unwrap(),
+        )
     } else {
         (
             std::fs::read(dir.join("ipp.h264")).unwrap(),
@@ -48,7 +51,10 @@ fn main() {
     };
     let (w, h) = if arg.as_deref().map_or(false, |a| a.contains("x16")) {
         (64u32, 16u32)
-    } else if arg.as_deref().map_or(false, |a| a.contains("x32") || a.contains("dbg_mid")) {
+    } else if arg
+        .as_deref()
+        .map_or(false, |a| a.contains("x32") || a.contains("dbg_mid"))
+    {
         (64u32, 32u32)
     } else if arg.as_deref().map_or(false, |a| a.contains("small")) {
         (32u32, 16u32)
@@ -149,7 +155,11 @@ fn main() {
                         - refd[py * (w as usize) + px] as i32)
                         .abs();
                     if d != 0 {
-                        print!("({px},{py}:{}-{} ) ", frame.data[py * (w as usize) + px], refd[py * (w as usize) + px]);
+                        print!(
+                            "({px},{py}:{}-{} ) ",
+                            frame.data[py * (w as usize) + px],
+                            refd[py * (w as usize) + px]
+                        );
                     }
                 }
             }

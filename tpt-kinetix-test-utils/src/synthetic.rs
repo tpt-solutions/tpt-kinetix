@@ -172,8 +172,8 @@ pub fn minimal_av1_ivf() -> Option<Vec<u8>> {
 /// one another, with `frames` total frames at the given dimensions.
 ///
 /// Returns `None` if `ffmpeg` is unavailable or the encode fails. The produced
-/// IVF is directly splittable by [`reference::split_ivf_frames`] into per-frame
-/// OBU payloads for feeding the Kinetix [`tpt_kinetix_av1::Av1Decoder`]
+/// IVF is directly splittable by [`crate::reference::split_ivf_frames`] into per-frame
+/// OBU payloads for feeding the Kinetix `tpt_kinetix_av1::Av1Decoder`
 /// frame-by-frame.
 pub fn minimal_av1_inter_ivf(frames: u32, width: u32, height: u32) -> Option<Vec<u8>> {
     use std::{
@@ -220,7 +220,7 @@ pub fn minimal_av1_inter_ivf(frames: u32, width: u32, height: u32) -> Option<Vec
 
 /// Generate a tiny AV1 bitstream in **OBU** form (section 5 low-overhead
 /// bitstream) using `ffmpeg`'s AV1 encoder, so both the Kinetix
-/// [`tpt_kinetix_av1::Av1Decoder`] (which consumes OBU bytes directly) and the
+/// `tpt_kinetix_av1::Av1Decoder` (which consumes OBU bytes directly) and the
 /// `ffmpeg`-backed reference decoder (`reference::decode_av1_with_ffmpeg`,
 /// which also takes OBU bytes) can decode the same input.
 ///

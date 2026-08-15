@@ -130,10 +130,8 @@ fn decode_plane(
     let mut up_mag = vec![0u32; w];
     let mut left_mag: u32 = 0;
     let models = lossless_context_models();
-    let mut dec =
-        tpt_kinetix_bitstream::RansDecoder::new(data).map_err(|e| {
-            KinetixError::Parse(format!("lossless: plane residual stream: {e}"))
-        })?;
+    let mut dec = tpt_kinetix_bitstream::RansDecoder::new(data)
+        .map_err(|e| KinetixError::Parse(format!("lossless: plane residual stream: {e}")))?;
     for y in 0..h {
         for x in 0..w {
             let pred = u32::from(predict(&samples, w, h, x, y));

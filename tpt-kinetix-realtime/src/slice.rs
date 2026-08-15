@@ -42,7 +42,9 @@ impl SliceGrid {
         if slices.len() != expected {
             return Err(KinetixError::Parse(format!(
                 "slice grid: expected {expected} slice payloads ({}x{}), got {}",
-                self.cols, self.rows, slices.len()
+                self.cols,
+                self.rows,
+                slices.len()
             )));
         }
         if expected > u8::MAX as usize {
