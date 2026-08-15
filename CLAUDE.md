@@ -71,8 +71,7 @@ breaking change in any public API bumps all of them together):
   heaviest active development — check `todo.md` and the README LIMITATIONS section for current gaps.
 - `tpt-kinetix-av1` — AV1 OBU parser + `rav1e`-backed encoder (encode works); decoder does entropy
   decoding (CDF-based symbol decoder in `entropy.rs`/`entropy_cdf.rs`) but is not yet pixel-exact.
-- `tpt-kinetix-aac` — ADTS/AudioSpecificConfig parsing + AAC-LC PCM decode via `symphonia-codec-aac`;
-  HE-AAC (SBR/PS) unsupported.
+- `tpt-kinetix-aac` — ADTS/AudioSpecificConfig parsing + native AAC-LC PCM decode (fully native Huffman/IMDCT/TNS/PNS/stereo pipeline, no third-party codec dependency); HE-AAC (SBR/PS) unsupported.
 - `tpt-kinetix-kg` — knowledge-graph tooling that ingests FFmpeg C source / codec specs and generates
   Rust scaffolding for new codecs (`ingest` → `graph` → `analyze` → `codegen`, or `run` for all four).
   Used when starting a new codec crate; see CONTRIBUTING.md's "Adding a new codec" section.

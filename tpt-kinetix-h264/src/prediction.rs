@@ -476,16 +476,20 @@ pub fn predict_8x8(
 
     match mode {
         Intra4x4Mode::Vertical => {
+            // Use the filtered top values t0..t7 per §8.3.2.2.1
+            let t = [t0, t1, t2, t3, t4, t5, t6, t7];
             for x in 0..8i32 {
-                let v = tval(x as usize);
+                let v = t[x as usize];
                 for y in 0..8i32 {
                     s(&[(x, y)], v);
                 }
             }
         }
         Intra4x4Mode::Horizontal => {
+            // Use the filtered left values l0..l7 per §8.3.2.2.2
+            let l = [l0, l1, l2, l3, l4, l5, l6, l7];
             for y in 0..8i32 {
-                let v = lval(y as usize);
+                let v = l[y as usize];
                 for x in 0..8i32 {
                     s(&[(x, y)], v);
                 }

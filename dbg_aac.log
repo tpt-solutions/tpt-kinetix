@@ -1,0 +1,168 @@
+   Compiling tpt-kinetix-aac v0.1.0 (D:\Programming\1PRODUCTION\Open Source\tpt-kinetix\tpt-kinetix-aac)
+warning: unused variable: `right_ics`
+   --> tpt-kinetix-aac\src\decoder.rs:279:21
+    |
+279 |                 let right_ics = decoded_channels[right_idx].ics;
+    |                     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_ics`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `element_count` is assigned to, but never used
+   --> tpt-kinetix-aac\src\syntax.rs:632:13
+    |
+632 |         let mut element_count = 0;
+    |             ^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_element_count` instead
+
+warning: value assigned to `element_count` is never read
+   --> tpt-kinetix-aac\src\syntax.rs:638:13
+    |
+638 |             element_count += 1;
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `global_gain`, `pulse`, `tns`, and `cpe_pair` are never read
+  --> tpt-kinetix-aac\src\decoder.rs:30:5
+   |
+24 | struct DecodedChannel {
+   |        -------------- fields in this struct
+...
+30 |     global_gain: u8,
+   |     ^^^^^^^^^^^
+31 |     pulse: Option<crate::pulse::PulseData>,
+   |     ^^^^^
+32 |     tns: Option<crate::tns::TnsData>,
+   |     ^^^
+33 |     is_cce: bool,           // true if this is a coupling channel (not output directly)
+34 |     cpe_pair: Option<(usize, usize)>, // (left_idx, right_idx) if part of CPE
+   |     ^^^^^^^^
+   |
+   = note: `DecodedChannel` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `left` and `right` are never read
+  --> tpt-kinetix-aac\src\decoder.rs:41:5
+   |
+39 | struct DecodedCpe {
+   |        ---------- fields in this struct
+40 |     instance_tag: u8,
+41 |     left: DecodedChannel,
+   |     ^^^^
+42 |     right: DecodedChannel,
+   |     ^^^^^
+   |
+   = note: `DecodedCpe` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `init` is never read
+  --> tpt-kinetix-aac\src\decoder.rs:78:5
+   |
+75 | struct ChannelState {
+   |        ------------ field in this struct
+...
+78 |     init: bool,
+   |     ^^^^
+   |
+   = note: `ChannelState` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `elem_stream` is never used
+   --> tpt-kinetix-aac\src\decoder.rs:385:4
+    |
+385 | fn elem_stream(el: &Element) -> &ChannelStream {
+    |    ^^^^^^^^^^^
+
+warning: function `synthesize` is never used
+   --> tpt-kinetix-aac\src\decoder.rs:394:4
+    |
+394 | fn synthesize(
+    |    ^^^^^^^^^^
+
+warning: `tpt-kinetix-aac` (lib) generated 8 warnings (run `cargo fix --lib -p tpt-kinetix-aac` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.20s
+     Running tests\conformance_aac.rs (target\debug\deps\conformance_aac-d4040dfcd89c6bd0.exe)
+first frame 345 bytes: [FF, F1, 50, 80, 2B, 3F, FC, DE, 02, 00, 4C, 61, 76, 63, 36, 30, 2E, 33, 36, 2E]
+header: Ok(AdtsHeader { object_type: 2, sample_rate: 44100, sampling_frequency_index: 4, channels: 2, has_crc: false, frame_length: 345, header_len: 7 })
+first id_syn_ele bits = Some(6)
+split produced 45 ADTS frames
+DBG ics: ws=OnlyLong shape=true max_sfb=22 pred=false pos=153
+DBG cs0: global_gain=255 shared=true pos_after_gg_and_ics=163
+DBG sec start: num_groups=1 max_sfb=22 sect_len_bits=4 pos=163
+frame 0: Err(Parse(BadSectionCodebook)) (frame_len=345)
+DBG ics: ws=LongStart shape=false max_sfb=24 pred=true pos=18
+DBG sec start: num_groups=1 max_sfb=24 sect_len_bits=4 pos=35
+DBG sec: cb=0 len=7 covered=0 pos=40
+DBG sec: cb=7 len=7 covered=7 pos=52
+DBG sec: cb=7 len=7 covered=14 pos=64
+DBG sec: cb=7 len=4 covered=21 pos=76
+DBG sec end: pos=76
+DBG sec start: num_groups=1 max_sfb=24 sect_len_bits=4 pos=616
+DBG sec: cb=1 len=14 covered=0 pos=622
+DBG sec: cb=0 len=5 covered=14 pos=627
+DBG sec: cb=1 len=3 covered=19 pos=633
+DBG sec: cb=0 len=3 covered=22 pos=638
+DBG sec end: pos=638
+DBG ics: ws=OnlyLong shape=false max_sfb=53 pred=true pos=892
+DBG sec start: num_groups=1 max_sfb=53 sect_len_bits=5 pos=899
+DBG sec: cb=1 len=15 covered=0 pos=906
+DBG sec: cb=1 len=9 covered=15 pos=913
+DBG sec: cb=3 len=3 covered=24 pos=922
+DBG sec: cb=0 len=3 covered=27 pos=928
+DBG sec: cb=0 len=5 covered=30 pos=934
+DBG sec: cb=1 len=14 covered=35 pos=941
+DBG sec: cb=0 len=25 covered=49 pos=947
+DBG sec end: pos=947
+DBG ics: ws=LongStart shape=true max_sfb=54 pred=false pos=18
+frame 2: Err(Parse(BadSectionCodebook)) (frame_len=340)
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+frame 3: Err(Parse(BadSectionCodebook)) (frame_len=369)
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=false max_sfb=54 pred=false pos=18
+DBG ics: ws=OnlyLong shape=true max_sfb=22 pred=false pos=18
+DBG ics: ws=LongStart shape=false max_sfb=25 pred=true pos=18
+DBG ics: ws=OnlyLong shape=true max_sfb=46 pred=true pos=1385
+DBG ics: ws=LongStart shape=false max_sfb=1 pred=true pos=18
+
+thread 'native_aac_matches_ffmpeg_reference' (25612) panicked at tpt-kinetix-aac\tests\conformance_aac.rs:124:5:
+assertion `left == right` failed
+  left: 3
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p tpt-kinetix-aac --test conformance_aac`

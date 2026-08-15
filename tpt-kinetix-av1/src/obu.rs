@@ -70,6 +70,19 @@ impl<'a> BitReader<'a> {
             self.byte_pos + 1
         }
     }
+
+    /// Align to the next byte boundary (skip remaining bits in current byte).
+    pub(crate) fn byte_align(&mut self) {
+        if self.bit_pos != 0 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+    }
+
+    /// Total bits consumed so far (byte position × 8 + residual bits).
+    pub(crate) fn bit_position(&self) -> usize {
+        self.bits_read()
+    }
 }
 
 // ---------------------------------------------------------------------------

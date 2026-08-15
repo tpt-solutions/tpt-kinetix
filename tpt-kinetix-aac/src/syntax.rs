@@ -160,6 +160,7 @@ impl IcsInfo {
                 let predictor_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
                 (max_sfb, 0, predictor_present)
             };
+        eprintln!("DBG ics: ws={:?} shape={} max_sfb={} pred={} pos={}", window_sequence, window_shape, max_sfb, predictor_present, reader.bit_position());
 
         let (predictor_data_present, predictor_reset_mode) = if predictor_present {
             let mode = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as u8;
@@ -251,9 +252,19 @@ impl SectionData {
 
     /// Parse `section_data()` for the given [`IcsInfo`].
     pub fn parse(reader: &mut BitReader, ics: &IcsInfo) -> Result<Self, AacParseError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, Ordering::SeqCst);
+        let dbg = call < 4;
         let num_groups = ics.num_window_groups();
         let max_sfb = ics.max_sfb as usize;
         let sect_len_bits = Self::section_len_bits(ics);
+        if dbg {
+            eprintln!(
+                "DBG sec start: num_groups={} max_sfb={} sect_len_bits={} pos={}",
+                num_groups, max_sfb, sect_len_bits, reader.bit_position()
+            );
+        }
         let mut groups = Vec::with_capacity(num_groups);
         for _g in 0..num_groups {
             let mut sections = Vec::new();
@@ -274,6 +285,9 @@ impl SectionData {
                 let sect_len = reader
                     .read_section_length(sect_len_bits)
                     .ok_or(AacParseError::UnexpectedEof)? as usize;
+                if dbg {
+                    eprintln!("DBG sec: cb={} len={} covered={} pos={}", sect_cb, sect_len, covered, reader.bit_position());
+                }
                 // A zero-length section is legal (the ffmpeg reference decoder
                 // accepts it); it covers no scalefactor bands. More generally a
                 // section may extend past `max_sfb` — the ffmpeg decoder reads the
@@ -288,6 +302,9 @@ impl SectionData {
                 covered += sect_len;
             }
             groups.push(sections);
+        }
+        if dbg {
+            eprintln!("DBG sec end: pos={}", reader.bit_position());
         }
         Ok(SectionData { groups })
     }
@@ -327,6 +344,17 @@ impl ChannelStream {
         sf_index: usize,
     ) -> Result<Self, AacParseError> {
         let global_gain = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as u8;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CS: AtomicUsize = AtomicUsize::new(0);
+        let cs = CS.fetch_add(1, Ordering::SeqCst);
+        if cs == 0 {
+            eprintln!(
+                "DBG cs0: global_gain={} shared={} pos_after_gg_and_ics={}",
+                global_gain,
+                shared_ics.is_some(),
+                reader.bit_position()
+            );
+        }
         let ics = match shared_ics {
             Some(shared) => *shared,
             None => IcsInfo::parse(reader)?,
@@ -433,6 +461,45 @@ pub struct FillElement {
     pub payload: Vec<u8>,
 }
 
+/// Coupling Channel Element (id 2, ISO 14496-3 §4.4.4.3).
+#[derive(Debug, Clone)]
+pub struct CouplingChannelElement {
+    /// `element_instance_tag` (4 bits).
+    pub instance_tag: u8,
+    /// `common_window` flag (1 bit).
+    pub common_window: bool,
+    /// Shared `ics_info()` when `common_window` is set.
+    pub ics: Option<IcsInfo>,
+    /// Number of gain element lists.
+    pub num_gain_element_lists: u8,
+    /// Gain element lists for each target channel.
+    pub gain_element_lists: Vec<GainElementList>,
+}
+
+/// Gain element list for CCE coupling.
+#[derive(Debug, Clone)]
+pub struct GainElementList {
+    /// `gain_element_scale` (1 bit).
+    pub gain_element_scale: bool,
+    /// Number of gain elements.
+    pub num_gain_elements: u8,
+    /// The gain elements.
+    pub gain_elements: Vec<GainElement>,
+}
+
+/// Individual gain element for CCE coupling.
+#[derive(Debug, Clone)]
+pub struct GainElement {
+    /// `cce_gain` (3 bits).
+    pub cce_gain: u8,
+    /// `cce_scale` (4 bits).
+    pub cce_scale: u8,
+    /// Target channel tag.
+    pub target_tag: u8,
+    /// `gain_element_index` (4 bits) - index into gain_element_lists.
+    pub gain_element_index: u8,
+}
+
 /// A parsed AAC syntactic element.
 #[derive(Debug, Clone)]
 pub enum Element {
@@ -440,6 +507,8 @@ pub enum Element {
     Sce(SingleChannelElement),
     /// Channel Pair Element.
     Cpe(ChannelPairElement),
+    /// Coupling Channel Element.
+    Cce(CouplingChannelElement),
     /// Low Frequency Element.
     Lfe(LfeElement),
     /// Fill Element.
@@ -461,6 +530,11 @@ pub struct RawDataBlock {
 /// the payload bytes. DSEs carry ancillary data (e.g. metadata) and carry no
 /// channels, so the decoder simply ignores them.
 fn skip_data_stream_element(reader: &mut BitReader) -> Result<(), AacParseError> {
+    // ffmpeg's `skip_data_stream_element`: byte_align_flag(1) then count(8, with
+    // a 255 escape to 16 bits), then the payload bytes, then `byte_alignment()`
+    // only when the flag was set. The 4-bit `element_instance_tag` preceding
+    // this was already consumed by the dispatch in `RawDataBlock::parse`.
+    let byte_align_flag = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
     let mut count = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
     if count == 255 {
         count += reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
@@ -468,7 +542,9 @@ fn skip_data_stream_element(reader: &mut BitReader) -> Result<(), AacParseError>
     for _ in 0..count {
         reader.read_u8().ok_or(AacParseError::UnexpectedEof)?;
     }
-    reader.byte_align();
+    if byte_align_flag {
+        reader.byte_align();
+    }
     Ok(())
 }
 
@@ -536,10 +612,30 @@ impl RawDataBlock {
     /// id until `END` or the bitstream is exhausted. `sf_index` is the 4-bit
     /// sampling-frequency index (used to select scalefactor-band tables).
     pub fn parse(data: &[u8], sf_index: usize) -> Result<Self, AacParseError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static FRAME: AtomicUsize = AtomicUsize::new(0);
+        let frame = FRAME.fetch_add(1, Ordering::SeqCst);
+        if frame == 0 {
+            let mut r = BitReader::new(data);
+            let _ = r.skip(125);
+            let mut s = String::new();
+            for i in 125..210 {
+                if i % 10 == 0 {
+                    s.push_str(&format!("\n[{:3}]", i));
+                }
+                s.push(if r.read_bit() == Some(1) { '1' } else { '0' });
+            }
+            let _ = std::fs::write("D:/Programming/1PRODUCTION/Open Source/tpt-kinetix/frame0_bits.txt", &s);
+        }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
+        let mut element_count = 0;
         loop {
-            let id = reader.read_bits(3).ok_or(AacParseError::UnexpectedEof)? as u8;
+            let id = match reader.read_bits(3) {
+                Some(id) => id as u8,
+                None => break,
+            };
+            element_count += 1;
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
@@ -591,42 +687,118 @@ impl RawDataBlock {
                     }));
                 }
                 6 => {
-                    let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                    let mut count =
+                    // Fill element (TYPE_FIL). ffmpeg's `put_bitstream_info` does
+                    // *not* follow the ISO `fill_element()` `element_instance_tag(4)`
+                    // layout: it writes `TYPE_FIL(3) + len(4) + [escape(8)] +
+                    // ext_type(4)`, where the 4-bit field is the fill payload
+                    // *byte length* (with `15` as an escape sentinel) and the
+                    // decoder skips `8*len - 4` bits of payload. A spec-literal
+                    // parse (instance_tag then count) desyncs here because the
+                    // version-string fill that ffmpeg emits in frame 1 lands a
+                    // whole fill payload early and corrupts every following
+                    // element. Mirror ffmpeg's decoder (`decode_extension_payload`
+                    // EXT_FILL → `decode_fill(gb, 8*cnt - 4)`) so the opaque fill
+                    // is skipped exactly.
+                    let mut fill_len =
                         reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
-                    if count == 15 {
-                        count += reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+                    if fill_len == 15 {
+                        let esc =
+                            reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
+                        fill_len += esc - 1;
                     }
-                    let mut payload = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        payload.push(reader.read_u8().ok_or(AacParseError::UnexpectedEof)?);
-                    }
+                    // extension type (4 bits); AAC-LC only carries EXT_FILL here.
+                    reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+                    let fill_bits = (fill_len * 8).saturating_sub(4);
+                    reader.skip(fill_bits as u32);
                     elements.push(Element::Fil(FillElement {
-                        instance_tag: tag,
-                        payload,
+                        instance_tag: 0,
+                        payload: Vec::new(),
                     }));
                 }
                 7 => {
                     elements.push(Element::End);
                     break;
                 }
-                // CCE (2), DSE (4), PCE (5): out of Phase 1 scope.
-                2 | 4 | 5 => {
-                    // CCE (2) / DSE (4) / PCE (5) are out of the AAC-LC
-                    // reconstruction scope, but real streams legitimately carry
-                    // them (e.g. ffmpeg emits a PCE in the first ADTS frame for
-                    // many channel configs). Skip them rather than failing the
-                    // whole raw-data-block parse, so the decoder can still
-                    // reconstruct the channels it does understand.
+                2 => {
+                    let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
+                    let common_window = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+                    let shared = if common_window {
+                        Some(IcsInfo::parse(&mut reader)?)
+                    } else {
+                        None
+                    };
+                    let num_gain_element_lists =
+                        reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
+                    let mut gain_element_lists =
+                        Vec::with_capacity((num_gain_element_lists + 1) as usize);
+                    let mut cce_truncated = false;
+                    for _list_idx in 0..=num_gain_element_lists {
+                        let gain_element_scale =
+                            reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+                        let num_gain_elements =
+                            reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
+                        let mut gain_elements =
+                            Vec::with_capacity((num_gain_elements + 1) as usize);
+                        for _ge_idx in 0..=num_gain_elements {
+                            let cce_gain = match reader.read_bits(3) {
+                                Some(v) => v as u8,
+                                None => {
+                                    cce_truncated = true;
+                                    break;
+                                }
+                            };
+                            let cce_scale = match reader.read_bits(4) {
+                                Some(v) => v as u8,
+                                None => {
+                                    cce_truncated = true;
+                                    break;
+                                }
+                            };
+                            let target_tag = match reader.read_bits(4) {
+                                Some(v) => v as u8,
+                                None => {
+                                    cce_truncated = true;
+                                    break;
+                                }
+                            };
+                            let gain_element_index = match reader.read_bits(4) {
+                                Some(v) => v as u8,
+                                None => {
+                                    cce_truncated = true;
+                                    break;
+                                }
+                            };
+                            gain_elements.push(GainElement {
+                                cce_gain,
+                                cce_scale,
+                                target_tag,
+                                gain_element_index,
+                            });
+                        }
+                        gain_element_lists.push(GainElementList {
+                            gain_element_scale,
+                            num_gain_elements,
+                            gain_elements,
+                        });
+                        if cce_truncated {
+                            break;
+                        }
+                    }
+                    reader.byte_align();
+                    elements.push(Element::Cce(CouplingChannelElement {
+                        instance_tag: tag,
+                        common_window,
+                        ics: shared,
+                        num_gain_element_lists,
+                        gain_element_lists,
+                    }));
+                }
+                4 | 5 => {
                     let _tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
                     if id == 4 {
                         skip_data_stream_element(&mut reader)?;
                     } else if id == 5 {
                         skip_program_config_element(&mut reader)?;
-                    } else {
-                        return Err(AacParseError::Unsupported(
-                            "CCE element parsing is not in Phase 1 scope",
-                        ));
                     }
                 }
                 _ => return Err(AacParseError::BadElementId),
@@ -883,3 +1055,8 @@ mod tests {
         assert!(matches!(block.elements.first(), Some(Element::End)));
     }
 }
+
+
+
+
+

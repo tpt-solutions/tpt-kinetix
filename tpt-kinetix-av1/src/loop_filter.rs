@@ -336,15 +336,18 @@ fn filter_line_1d(
     let log2 = if filter_size == 8 || !flat2 { 3 } else { 4 };
     let n = if log2 == 4 { 6 } else { 3 };
     let n2 = if log2 == 3 && is_luma { 0 } else { 1 };
+    let line_len = line.len();
+    let out_len = out.len();
     for i in -(n as isize)..(n as isize) {
         let mut t: i64 = 0;
         for j in -(n as isize)..=(n as isize) {
             let pidx = (i + j).clamp(-(n as isize + 1), n as isize);
             let tap = if j.abs() <= n2 as isize { 2 } else { 1 };
-            t += line[(edge as isize + pidx) as usize] as i64 * tap;
+            let ridx = (edge as isize + pidx).clamp(0, line_len as isize - 1) as usize;
+            t += line[ridx] as i64 * tap;
         }
         let f = round2(t as i32, log2);
-        let idx = (edge as isize + i) as usize;
+        let idx = (edge as isize + i).clamp(0, out_len as isize - 1) as usize;
         out[idx] = clip3(f, 0, 255);
     }
     out

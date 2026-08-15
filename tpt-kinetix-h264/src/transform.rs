@@ -660,15 +660,15 @@ pub fn dequant_idct_8x8(
     // 1. Inverse zigzag into raster order and dequantise in zigzag order.
     let mut d = [0i32; 64];
     for z in 0..64 {
-        // §8.5.12.1 / FFmpeg `dequant8_coeff[raster]`: the position class that
-        // selects `normAdjust8x8` is a property of the coefficient's *raster*
-        // position, not its zig-zag scan position. `z` is the zig-zag scan
-        // position; `ZIGZAG_8X8[z]` is the corresponding raster position. The
-        // scaling-list weight at raster position `raster` is `SL8x8[zigzag(raster)]`
-        // = `SL8x8[INVERSE_ZIGZAG_8X8[raster]]` = `SL8x8[z]` (the list is stored
-        // in zig-zag order), so the weight lookup stays indexed by `z`.
+        // §8.5.12.1: the position class for 8×8 dequant is determined by the
+        // coefficient's position *within its 4×4 sub-block* in raster order.
+        // The 8×8 block comprises four 4×4 sub-blocks arranged in raster order:
+        // sub-block 0 (top-left), 1 (top-right), 2 (bottom-left), 3 (bottom-right).
+        // For a raster position `r` (0..63), the position within its 4×4 sub-block
+        // is `((r >> 3) & 3) * 4 + (r & 3)`.
         let raster = ZIGZAG_8X8[z];
-        let cls = DEQUANT8_SCAN[raster % 16];
+        let pos_in_sub = ((raster >> 3) & 3) * 4 + (raster & 3);
+        let cls = DEQUANT8_SCAN[pos_in_sub];
         // Flat level scale `DEQUANT8_LEVEL[m][cls]` already folds in the
         // `weightScale == 16` factor, so divide it back out and replace it with
         // the parsed scaling-list weight at this zig-zag position (rounded to

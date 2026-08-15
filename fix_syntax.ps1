@@ -1,0 +1,1 @@
+$c = Get-Content tpt-kinetix-aac/src/syntax.rs -Raw; $c = $c -replace "reader\.read_bits\(4\)\.ok\.or", "reader.read_bits(4).ok_or"; $c = $c -replace "reader\.read_bits\(8\)\.ok\.or", "reader.read_bits(8).ok_or"; $c = $c -replace "reader\.read_u8\(\)\.ok\.or", "reader.read_u8().ok_or"; Set-Content tpt-kinetix-aac/src/syntax.rs -Value $c

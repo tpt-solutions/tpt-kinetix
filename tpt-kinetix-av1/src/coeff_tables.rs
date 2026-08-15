@@ -137,7 +137,7 @@ pub fn get_scan(tx_size: usize, plane_tx_type: usize) -> Option<&'static [u16]> 
         (TX_16X16, true, _) => Some(&MROW_SCAN_16X16),
         (TX_16X16, _, true) => Some(&MCOL_SCAN_16X16),
         (TX_16X16, _, _) => Some(&DEFAULT_SCAN_16X16),
-        _ => None,
+        _ => large_scan(tx_size, prefer_row, prefer_col),
     }
 }
 
@@ -475,3 +475,69 @@ pub static MROW_SCAN_16X16: [u16; 256] = [
     231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249,
     250, 251, 252, 253, 254, 255,
 ];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Large transform scans (TX_32X32 / TX_64X64)
+//
+// The 32×32 and 64×64 scan orders are not stored explicitly in the spec. Per
+// AV1 §7.11 they are built by concatenating, in turn, the 4×4 (sub-block)
+// scan of every 4×4 sub-block, where the sub-blocks themselves are visited in
+// the order of the 8×8 (for 32×32) / 16×16 (for 64×64) scan. The row/column
+// preferring variants use the corresponding directional 8×8 / 16×16 top scan
+// with the directional 4×4 bottom scan, mirroring the smaller sizes above.
+// ──────────────────────────────────────────────────────────────────────────────
+
+use std::sync::OnceLock;
+
+struct LargeScans {
+    s32: [Vec<u16>; 3],
+    s64: [Vec<u16>; 3],
+}
+
+static LARGE_SCANS: OnceLock<LargeScans> = OnceLock::new();
+
+fn build_large_scans() -> LargeScans {
+    let mk = |top: &[u16], top_dim: usize, bottom: &[u16], n: usize| -> Vec<u16> {
+        const SUB: usize = 4;
+        let mut out = Vec::with_capacity(n * n);
+        for &t in top {
+            let sr = (t as usize / top_dim) * SUB;
+            let sc = (t as usize % top_dim) * SUB;
+            for &b in bottom {
+                let by = b as usize / SUB;
+                let bx = b as usize % SUB;
+                out.push(((sr + by) * n + (sc + bx)) as u16);
+            }
+        }
+        out
+    };
+    LargeScans {
+        s32: [
+            mk(&DEFAULT_SCAN_8X8, 8, &DEFAULT_SCAN_4X4, 32),
+            mk(&MROW_SCAN_8X8, 8, &MROW_SCAN_4X4, 32),
+            mk(&MCOL_SCAN_8X8, 8, &MCOL_SCAN_4X4, 32),
+        ],
+        s64: [
+            mk(&DEFAULT_SCAN_16X16, 16, &DEFAULT_SCAN_4X4, 64),
+            mk(&MROW_SCAN_16X16, 16, &MROW_SCAN_4X4, 64),
+            mk(&MCOL_SCAN_16X16, 16, &MCOL_SCAN_4X4, 64),
+        ],
+    }
+}
+
+#[inline]
+fn large_scan(tx_size: usize, prefer_row: bool, prefer_col: bool) -> Option<&'static [u16]> {
+    let scans = LARGE_SCANS.get_or_init(build_large_scans);
+    let idx = if prefer_row {
+        1
+    } else if prefer_col {
+        2
+    } else {
+        0
+    };
+    match tx_size {
+        TX_32X32 => Some(&scans.s32[idx]),
+        TX_64X64 => Some(&scans.s64[idx]),
+        _ => None,
+    }
+}

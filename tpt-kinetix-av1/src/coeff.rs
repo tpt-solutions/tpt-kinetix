@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn scan_is_valid_permutation() {
-        for &tx in &[TX_4X4, TX_8X8, TX_16X16] {
+        for &tx in &[TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64] {
             let scan = get_scan(tx, DCT_DCT).expect("square scan exists");
             let n = TX_WIDTH[tx];
             let count = n * n;
@@ -752,7 +752,22 @@ mod tests {
         }
         // Non-square / unsupported sizes must fail loud, not return a wrong scan.
         assert!(get_scan(TX_8X4, DCT_DCT).is_none());
-        assert!(get_scan(TX_32X32, DCT_DCT).is_none());
+        // Directional (row/column-preferring) large scans are also valid
+        // permutations of the full coefficient grid.
+        for &tx in &[TX_32X32, TX_64X64] {
+            for &ty in &[V_DCT, H_DCT, DCT_DCT] {
+                let scan = get_scan(tx, ty).expect("directional large scan exists");
+                let n = TX_WIDTH[tx];
+                let count = n * n;
+                let mut seen = vec![false; count];
+                for &p in scan[..count].iter() {
+                    let p = p as usize;
+                    assert!(p < count);
+                    assert!(!seen[p]);
+                    seen[p] = true;
+                }
+            }
+        }
     }
 
     #[test]

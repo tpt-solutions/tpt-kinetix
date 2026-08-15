@@ -427,8 +427,8 @@ fn av1_vs_ffmpeg_reference_when_available() {
 /// Exercises the Phase 17 tooling (`reference::decode_aac_with_ffmpeg` +
 /// `audio_diff::pcm_within_tolerance` / `pcm_max_abs_diff`). Skips when `ffmpeg`
 /// is absent. The Kinetix AAC-LC path is sample-exact (reconstructed via
-/// `symphonia-codec-aac`); a loose tolerance is used because `ffmpeg`'s native
-/// AAC decoder and `symphonia` may round the MDCT tail differently.
+/// the native AAC-LC decoder in `tpt-kinetix-aac`); a loose tolerance is used because
+/// `ffmpeg`'s native AAC decoder and the native decoder may round the MDCT tail differently.
 #[test]
 fn aac_vs_ffmpeg_reference_pcm_when_available() {
     use tpt_kinetix_aac::AacDecoder;

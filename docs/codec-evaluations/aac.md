@@ -1,7 +1,7 @@
 # Codec Evaluation: AAC Audio Decode/Encode
 
-**Status**: ✅ Implemented (AAC-LC) — `symphonia-codec-aac` wrapped in `tpt-kinetix-aac`  
-**Last updated**: Phase 11 (AAC PCM decode landed)
+**Status**: ✅ Implemented (AAC-LC) — fully native decoder in `tpt-kinetix-aac` (no third-party dependency)  
+**Last updated**: Phase 18 (Phase 7 complete - symphonia removed)
 
 ---
 
@@ -80,54 +80,44 @@ streams.
 
 ## Rust Ecosystem
 
-The `symphonia` crate (`symphonia-codec-aac`) provides a pure-Rust AAC-LC decoder
-with coverage of the main streaming profiles. It is actively maintained, has reasonable
-test coverage, and is licensed MIT/Apache-2.0.
+Historically, the `symphonia` crate (`symphonia-codec-aac`) provided a pure-Rust AAC-LC decoder
+with coverage of the main streaming profiles. However, `tpt-kinetix-aac` now implements a **fully native**
+AAC-LC decoder (Huffman codebooks, IMDCT, TNS, PNS, M/S stereo, intensity stereo, pulse, windowing)
+transcribed from the ISO/IEC 14496-3 / 13818-7 specifications, with no third-party codec dependencies.
 
 Relevant crates:
-- `symphonia-codec-aac` — AAC-LC decode (part of the `symphonia` workspace)
-- `symphonia-bundle-mp3` — MP3 decode (for comparison)
+- `tpt-kinetix-aac` — fully native AAC-LC decode (this workspace)
 - No mature pure-Rust AAC encoder exists; `fdk-aac` (via FFI) is the most common
   production encoder but is GPL-encumbered.
 
 ---
 
-## Recommendation
+## Implementation Summary
 
-**For the initial release, wrap `symphonia::codec::aac` rather than generating a new
-implementation from the KG scaffold.**
+> **Implemented (Phase 18).** `tpt-kinetix-aac`'s `AacDecoder::decode()` returns real interleaved
+> `f32` PCM using a fully native AAC-LC reconstruction pipeline (Huffman spectral decode,
+> inverse quantization, IMDCT, TNS, PNS, pulse, M/S and intensity stereo, windowing/overlap-add).
+> See `tpt-kinetix-aac/src/decoder.rs` and the `ffmpeg`-gated conformance test in
+> `tpt-kinetix-aac/tests/conformance_aac.rs`.
 
-> **Implemented (Phase 11).** `tpt-kinetix-aac`'s `AacDecoder::decode()` now
-> returns real interleaved `f32` PCM by delegating AAC-LC reconstruction to
-> `symphonia-codec-aac`. See `tpt-kinetix-aac/src/decoder.rs` and the
-> `ffmpeg`-gated round-trip test in `tpt-kinetix-aac/tests/decode_pcm.rs`.
+Rationale for native implementation:
+1. **License compliance**: avoids the MPL-2.0 dependency of `symphonia-codec-aac`/`symphonia-core`,
+   keeping the workspace Apache-2.0/MIT clean for `cargo deny`.
+2. **Zero third-party risk**: no external codec crate to audit, update, or rely on.
+3. **KG pipeline validation**: demonstrates the knowledge-graph-assisted codec development workflow
+   for audio (phases 1–7), complementing the video codec work.
 
-Rationale:
-
-1. **Time-to-correct**: a correct AAC implementation takes 3–4 weeks; wrapping
-   `symphonia` takes 1–2 days and immediately delivers correct output.
-2. **KG tool value**: the KG pipeline adds most value for *video* codecs where spatial
-   parallelism (slice/tile/macroblock-row independence) maps directly onto `rayon`
-   work-stealing. Audio codecs are largely serial per channel and the parallelism
-   surface is smaller.
-3. **License compatibility**: `symphonia-codec-aac` is Apache-2.0/MIT, matching the
-   Kinetix workspace license.
-4. **Maintenance**: offloads codec correctness maintenance to the `symphonia` team for
-   an initial release; the KG-generated implementation can be a v2 replacement once
-   video codecs are stable.
-
-If a custom AAC implementation is required later (e.g. to support AAC-HE v2 / PS,
-which `symphonia` does not yet cover completely), revisit the KG codegen approach at
-that point.
+If HE-AAC v1/v2 (SBR/PS) support is required later, the existing native pipeline can be extended
+with the SBR/QMF toolchain (ISO/IEC 14496-3 §4.6.18).
 
 ---
 
-## Estimated Effort
+## Estimated Effort (Historical)
 
 | Approach | Effort | Risk |
 |----------|--------|------|
-| Wrap `symphonia-codec-aac` | 1–2 days | Low |
-| KG scaffold + hand-complete AAC-LC | 3–4 weeks | Medium |
+| Wrap `symphonia-codec-aac` (not chosen) | 1–2 days | Low |
+| KG scaffold + hand-complete AAC-LC (actual) | 3–4 weeks | Medium |
 | KG scaffold + hand-complete AAC-HE v1/v2 | 6–8 weeks | High |
 
 ---

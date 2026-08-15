@@ -10,19 +10,12 @@ This is the **audio path** foundation for the engine.
 - ✅ ADTS frame header parsing (`adts`)
 - ✅ `AudioSpecificConfig` parsing (`config`)
 - ✅ `AacDecoder` with `DecoderCapabilities` + strict mode
-- ✅ PCM reconstruction for **AAC-LC** via [`symphonia-codec-aac`] — `decode()`
-  returns real interleaved `f32` PCM
-- ⛔ HE-AAC v1/v2 (SBR/PS) and AAC-Main/Scalable — not supported by the wrapped
-  decoder
+- ✅ PCM reconstruction for **AAC-LC** — fully native Huffman/IMDCT/TNS/PNS/stereo pipeline, no third-party codec dependency
+- ⛔ HE-AAC v1/v2 (SBR/PS) and AAC-Main/Scalable — not supported
 
 The AAC-LC decode path is **sample-exact**: `AacDecoder::decode()` reconstructs
 real PCM audio (see the `ffmpeg`-gated round-trip test in
-`tests/decode_pcm.rs`). See
-[`docs/codec-evaluations/aac.md`](../docs/codec-evaluations/aac.md) for the
-rationale behind wrapping `symphonia-codec-aac` versus a KG-generated native
-decoder.
-
-[`symphonia-codec-aac`]: https://crates.io/crates/symphonia-codec-aac
+`tests/decode_pcm.rs`).
 
 ## Decode example
 

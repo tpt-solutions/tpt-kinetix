@@ -30,7 +30,7 @@ use crate::{
         INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, RefSlot, RefFrames,
     },
     loop_filter::{apply_post_filters, FrameMeta},
-    obu::SequenceHeaderObu,
+    obu::{BitReader, SequenceHeaderObu},
 };
 
 use rayon::prelude::*;
@@ -73,34 +73,75 @@ const TX_TYPE_WHT: u8 = 3;
 // Dequantization
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Dequantization scale step for a given qindex (AV1 §7.11.1).
-const fn av1_quant_base(qindex: u8) -> i32 {
-    let q = qindex as i32;
-    if q <= 0 {
-        4
-    } else if q <= 4 {
-        q + (q >> 1) + 2
-    } else if q <= 8 {
-        2 * q
-    } else if q <= 167 {
-        (q * 2) - ((q * 2) >> 7) * 2
-    } else if q <= 255 {
-        q + (((q - 167) * 2) >> 7) * 2
+/// AV1 8-bit DC quantizer lookup table (spec §7.12.2.1, transcribed verbatim
+/// from `libgav1`'s `kDcLookup[8-bit]` reference table — identical to libaom's
+/// `dc_qlookup_QTX`). AV1 keeps **separate** DC and AC quantizer tables; the
+/// previous analytic approximation conflated them and diverged sharply from
+/// these values at every non-trivial qindex.
+const DC_QLOOKUP_8: [i32; 256] = [
+    4, 8, 8, 9, 10, 11, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26, 26,
+    27, 28, 29, 30, 31, 32, 32, 33, 34, 35, 36, 37, 38, 38, 39, 40, 41, 42, 43, 43, 44, 45, 46,
+    47, 48, 48, 49, 50, 51, 52, 53, 53, 54, 55, 56, 57, 57, 58, 59, 60, 61, 62, 62, 63, 64, 65,
+    66, 66, 67, 68, 69, 70, 70, 71, 72, 73, 74, 74, 75, 76, 77, 78, 78, 79, 80, 81, 81, 82, 83,
+    84, 85, 85, 87, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 107, 108, 110, 111, 113,
+    114, 116, 117, 118, 120, 121, 123, 125, 127, 129, 131, 134, 136, 138, 140, 142, 144, 146,
+    148, 150, 152, 154, 156, 158, 161, 164, 166, 169, 172, 174, 177, 180, 182, 185, 187, 190,
+    192, 195, 199, 202, 205, 208, 211, 214, 217, 220, 223, 226, 230, 233, 237, 240, 243, 247,
+    250, 253, 257, 261, 265, 269, 272, 276, 280, 284, 288, 292, 296, 300, 304, 309, 313, 317,
+    322, 326, 330, 335, 340, 344, 349, 354, 359, 364, 369, 374, 379, 384, 389, 395, 400, 406,
+    411, 417, 423, 429, 435, 441, 447, 454, 461, 467, 475, 482, 489, 497, 505, 513, 522, 530,
+    539, 549, 559, 569, 579, 590, 602, 614, 626, 640, 654, 668, 684, 700, 717, 736, 755, 775,
+    796, 819, 843, 869, 896, 925, 955, 988, 1022, 1058, 1098, 1139, 1184, 1232, 1282, 1336,
+];
+
+/// AV1 8-bit AC quantizer lookup table (spec §7.12.2.2, transcribed verbatim
+/// from `libgav1`'s `kAcLookup[8-bit]` reference table).
+const AC_QLOOKUP_8: [i32; 256] = [
+    4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+    54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+    77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 101, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132,
+    134, 136, 138, 140, 142, 144, 146, 148, 150, 152, 155, 158, 161, 164, 167, 170, 173, 176,
+    179, 182, 185, 188, 191, 194, 197, 200, 203, 207, 211, 215, 219, 223, 227, 231, 235, 239,
+    243, 247, 251, 255, 260, 265, 270, 275, 280, 285, 290, 295, 300, 305, 311, 317, 323, 329,
+    335, 341, 347, 353, 359, 366, 373, 380, 387, 394, 401, 408, 416, 424, 432, 440, 448, 456,
+    465, 474, 483, 492, 501, 510, 520, 530, 540, 550, 560, 571, 582, 593, 604, 615, 627, 639,
+    651, 663, 676, 689, 702, 715, 729, 743, 757, 771, 786, 801, 816, 832, 848, 864, 881, 898,
+    915, 933, 951, 969, 988, 1007, 1026, 1046, 1066, 1087, 1108, 1129, 1151, 1173, 1196, 1219,
+    1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423, 1451, 1479, 1508, 1537, 1567, 1597, 1628,
+    1660, 1692, 1725, 1759, 1793, 1828,
+];
+
+/// Dequantization step for a given qindex (AV1 §7.11.1 / §7.12.2).
+///
+/// AV1 keeps **separate** DC and AC quantizer lookup tables; the dequantized
+/// coefficient is the table value directly (no ×2/×4 multiplier — that factor
+/// belongs to VP9, not AV1; libaom's `av1_build_quantizer` stores
+/// `dequant[q][0] = dc_qlookup[q]` and `dequant[q][1] = ac_qlookup[q]` and
+/// `decodetxb.c`'s `get_dqv` reads `dequant[!!coeff_idx]`). Only 8-bit is
+/// transcribed today; 10-/12-bit frames fall back to the 8-bit table
+/// (TODO: add `dc_qlookup_10/12` / `ac_qlookup_10/12`).
+#[inline]
+fn quant_step(qindex: u8, is_dc: bool) -> i32 {
+    let qi = qindex as usize;
+    if is_dc {
+        DC_QLOOKUP_8[qi]
     } else {
-        510
+        AC_QLOOKUP_8[qi]
     }
 }
 
-/// AC dequantization multiplier.
+/// AC dequantization step.
 #[inline]
 fn ac_dequant(qindex: u8) -> i32 {
-    av1_quant_base(qindex) * 4
+    quant_step(qindex, false)
 }
 
-/// DC dequantization multiplier.
+/// DC dequantization step.
 #[inline]
 fn dc_dequant(qindex: u8) -> i32 {
-    av1_quant_base(qindex) * 2
+    quant_step(qindex, true)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -146,22 +187,27 @@ fn dst_vii_matrix(n: usize) -> Vec<Vec<f64>> {
     m
 }
 
-/// AV1 `round_shift(x, 1)`: round half away from zero (spec §7.13 / libaom
-/// `round_shift`). Used to fold the 2-D unnormalized-transform `×2` factor into
-/// a single right shift after the 2-D inverse transform.
+/// AV1 `round_shift(x, shift)`: `round(x / 2^shift)` using the libaom
+/// convention `(x + (1 << (shift-1))) >> shift` with an arithmetic right shift
+/// (spec §7.13 / libaom `round_shift`). Used to fold the 2-D unnormalized
+/// transform's `n/2` scale factor into a single final right shift after the 2-D
+/// inverse transform.
 #[inline]
+fn round_shift(v: i32, shift: u32) -> i32 {
+    (v + (1i32 << (shift - 1))) >> shift
+}
+
+/// AV1 `round_shift(x, 1)` (see [`round_shift`]).
+#[inline]
+#[allow(dead_code)]
 fn round_shift1(v: i32) -> i32 {
-    if v >= 0 {
-        (v + 1) >> 1
-    } else {
-        (v - 1) >> 1
-    }
+    round_shift(v, 1)
 }
 
 /// Apply a 2-D inverse transform: transform the rows with `row`, then the
 /// columns with `col`, on a `n`×`n` raster-ordered coefficient buffer, and
 /// return the (still unrounded) residual buffer.
-fn apply_inverse(row: &[Vec<f64>], col: &[Vec<f64>], coeffs: &[i32], n: usize) -> Vec<i32> {
+fn apply_inverse(row: &[Vec<f64>], col: &[Vec<f64>], coeffs: &[i32], n: usize) -> Vec<f64> {
     let mut tmp = vec![0f64; n * n];
     for c in 0..n {
         for r in 0..n {
@@ -172,14 +218,14 @@ fn apply_inverse(row: &[Vec<f64>], col: &[Vec<f64>], coeffs: &[i32], n: usize) -
             tmp[r * n + c] = s;
         }
     }
-    let mut out = vec![0i32; n * n];
+    let mut out = vec![0f64; n * n];
     for r in 0..n {
         for c in 0..n {
             let mut s = 0f64;
             for l in 0..n {
                 s += tmp[r * n + l] * col[c][l];
             }
-            out[r * n + c] = s.round() as i32;
+            out[r * n + c] = s;
         }
     }
     out
@@ -239,14 +285,6 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
     // `tx_size` (AV1 §7.13.3), so its output is 16 coefficients even when
     // `tx_size == TX_4X4` (`n == 4`).
     let num_coeffs = if tx_type == TX_TYPE_WHT { 16 } else { n * n };
-    if n > 16 {
-        // Larger transforms are not yet produced by the reconstruction paths
-        // (they are skipped in `decode_block`); fall back to a straight copy so
-        // we never build a giant matrix.
-        let m = num_coeffs.min(coeffs.len());
-        dst[..m].copy_from_slice(&coeffs[..m]);
-        return;
-    }
     let res = match tx_type {
         TX_TYPE_WHT => {
             let mut c = [0i32; 16];
@@ -254,10 +292,10 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
             c[..nn].copy_from_slice(&coeffs[..nn]);
             let mut d = [0i32; 16];
             wht_4x4(&c, &mut d);
-            d.to_vec()
+            d.iter().map(|&x| x as f64).collect()
         }
         // Identity transform: dequantized coefficients already *are* the residual.
-        TX_TYPE_IDTX => coeffs[..num_coeffs].to_vec(),
+        TX_TYPE_IDTX => coeffs[..num_coeffs].iter().map(|&x| x as f64).collect(),
         TX_TYPE_DST7 => {
             let m = dst_vii_matrix(n);
             apply_inverse(&m, &m, coeffs, n)
@@ -267,16 +305,21 @@ fn inverse_transform(coeffs: &[i32], tx_type: u8, tx_size: usize, dst: &mut [i32
             apply_inverse(&m, &m, coeffs, n)
         }
     };
-    // Fold the unnormalized 2-D `×2` into a `>> 1` (IDTX/WHT carry their own
-    // scaling and are returned unchanged). NOTE: the AV1 inverse transform scale
-    // is handled end-to-end by `decode_tx_block` / the dequant path. The
-    // two-pass rounding below matches the `round_shift1` / `round_shift_n`
-    // helpers.
+    // The unnormalized DCT-IV / DST-VII basis gives `M·Mᵀ = (n/2)·I`, so the
+    // 2-D (row·then·col) unnormalized inverse transform produces `(n/2)·residual`.
+    // Fold that `n/2` factor into a single final right shift of `log2(n) - 1`
+    // (matching libaom's combined `round_shift` for the 2-D inverse transform).
+    // For `n == 4` this is exactly the previous `>> 1`; for larger sizes the
+    // shift grows with the transform (8×8 → `>> 2`, 16×16 → `>> 3`, …). IDTX
+    // and WHT carry their own scaling and are written back unchanged.
+    let shift = (n.ilog2() - 1) as u32;
     if tx_type == TX_TYPE_IDTX || tx_type == TX_TYPE_WHT {
-        dst[..num_coeffs].copy_from_slice(&res);
+        for (i, v) in res.iter().enumerate().take(num_coeffs) {
+            dst[i] = *v as i32;
+        }
     } else {
         for (i, v) in res.iter().enumerate().take(num_coeffs) {
-            dst[i] = round_shift1(*v);
+            dst[i] = round_shift(*v as i32, shift);
         }
     }
 }
@@ -606,9 +649,19 @@ fn reconstruct_tx_block(
     let pred_mode = pred_mode as u8;
     let num_coeffs = tx_px * tx_px;
 
+    let dbg = px_x == 0 && px_y == 0 && blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok();
+
     let mut residual = vec![0i32; num_coeffs];
     if !skip {
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+        if dbg {
+            eprintln!(
+                "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_px={tx_px} eob={} tx_type={} quant[0..8]={:?}",
+                coeffs.eob,
+                coeffs.tx_type,
+                &coeffs.quant[..coeffs.quant.len().min(8)]
+            );
+        }
         if coeffs.eob > 0 {
             let mut dequant = vec![0i32; num_coeffs];
             let dc = dc_dequant(qindex);
@@ -616,18 +669,32 @@ fn reconstruct_tx_block(
             for (i, slot) in dequant.iter_mut().enumerate() {
                 *slot = coeffs.quant[i] * if i == 0 { dc } else { ac };
             }
+            if dbg {
+                eprintln!("DBG dequant qindex={qindex} dc_q={dc} ac_q={ac} dequant[0..8]={:?}", &dequant[..dequant.len().min(8)]);
+            }
             inverse_transform(
                 &dequant,
                 internal_tx_type(coeffs.tx_type, internal_tx_size, blk.lossless),
                 internal_tx_size,
                 &mut residual,
             );
+            if dbg {
+                eprintln!("DBG residual[0..8]={:?}", &residual[..residual.len().min(8)]);
+            }
         }
+    } else if dbg {
+        eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_px={tx_px} SKIP");
     }
 
     let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_px, px_x, px_y);
+    if dbg {
+        eprintln!("DBG top={:?} left={:?} tl={}", &top[..top.len().min(8)], &left[..left.len().min(8)], tl);
+    }
     let mut pred = vec![0i32; num_coeffs];
     predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred);
+    if dbg {
+        eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
+    }
 
     for dy in 0..tx_px {
         let sy = px_y + dy;
@@ -1784,6 +1851,11 @@ impl<'a> TileDecodeState<'a> {
             max_tx
         };
 
+        if mi_row == 0 && mi_col == 0 && std::env::var("KINETIX_AV1_DBG").is_ok() {
+            eprintln!(
+                "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx}"
+            );
+        }
         self.reconstruct_intra_subblock(mi_row, mi_col, bsize, y_mode, uv_mode, skip, luma_tx)
     }
 
@@ -1813,11 +1885,9 @@ impl<'a> TileDecodeState<'a> {
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
 
-        // Transform sizes larger than 16×16 are not yet reconstructable by the
-        // current inverse-transform set (AV1 Phase C scope); skip those blocks
-        // for now rather than failing the whole frame. Wiring the larger tx
-        // sizes is a follow-up.
-        if luma_tx <= TX_16X16 {
+        // Luma transform blocks (4×4 … 64×64). The inverse-transform set now
+        // supports every square transform size (AV1 Phase C).
+        if luma_tx <= TX_64X64 {
                 for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
                     for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
                         let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
@@ -1877,12 +1947,14 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Reconstruct chroma transform blocks (4:2:0 / 4:2:2 / 4:4:4).
-        if !self.monochrome && luma_tx <= TX_16X16 {
+        if !self.monochrome {
             let sub_x = self.subsampling_x as u8;
             let sub_y = self.subsampling_y as u8;
             let cw = (luma_tx_w >> sub_x).max(4);
             let ch = (luma_tx_h >> sub_y).max(4);
-            let c_tx = if cw >= 16 && ch >= 16 {
+            let c_tx = if cw >= 32 && ch >= 32 {
+                TX_32X32
+            } else if cw >= 16 && ch >= 16 {
                 TX_16X16
             } else if cw >= 8 && ch >= 8 {
                 TX_8X8
@@ -2114,9 +2186,34 @@ pub fn decode_tile_group(
 
     let uv_w = width / 2;
     let uv_h = height / 2;
+
+    // Parse TileGroup header to find the start of tile_data (AV1 spec §5.4.4).
+    // The SymbolDecoder must start at tile_data, not at the TileGroup header.
+    let tile_group_header_bits = {
+        let mut br = BitReader::new(data);
+        let tile_cols_log2 = (tile_cols as f32).log2().ceil() as u32;
+        let tile_rows_log2 = (tile_rows as f32).log2().ceil() as u32;
+        let tile_size_bits = (tile_cols_log2 + tile_rows_log2) as u8;
+
+        if tile_cols > 1 || tile_rows > 1 {
+            // tile_start_and_end_present_flag
+            br.read_bit().ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            // tile_start, tile_end
+            br.read_bits(tile_size_bits).ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+            br.read_bits(tile_size_bits).ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+        }
+        if !frame_is_intra {
+            // tile_cdf_update_flag
+            br.read_bit().ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
+        }
+        // byte_alignment()
+        br.byte_align();
+        br.bit_position()
+    };
+
     let mut state = TileDecodeState::new(
         data,
-        0,
+        tile_group_header_bits,
         width,
         height,
         uv_w,

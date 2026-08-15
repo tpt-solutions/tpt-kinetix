@@ -56,6 +56,22 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > (`tests/conformance_aac.rs`) was also added, along with untracked scratch
 > files (`conformance_backup.rs`, `fix_conformance.ps1`,
 > `conformance_aac.rs.test`) that should be deleted rather than committed.
+> **Still further working-tree additions (uncommitted, 2026-08-15, later still
+> in the same session):** AAC Phase 18 Phases 2–5 (codebooks/scalefactors/
+> dequant/pns/tns/pulse/stereo/mdct/window) turned out to already be
+> substantially complete from earlier work and are now correctly marked `[x]`
+> below (todo.md checkbox drift, not new code); `decoder.rs` was rewired onto
+> them as a real 4-pass native pipeline, `syntax.rs` gained full CCE
+> (coupling-channel-element) parsing, and the `symphonia-codec-aac`/
+> `symphonia-core` dependency was deleted from root `Cargo.toml` — `cargo
+> build --workspace` and `tpt-kinetix-h264`'s 224 unit tests both pass again
+> (the "H.264 crate broken" state some earlier notes above warned about no
+> longer holds), and `cargo deny check licenses` no longer fails on MPL-2.0.
+> **But** the real ffmpeg round-trip conformance test is still vacuous — native
+> decode still fails to parse a real `ffmpeg`-encoded stream's first frames
+> (`UnexpectedEof`/`BadSectionCodebook`, not a CCE-support gap), so AAC Phase
+> 18 Phase 6 is not actually done yet. See the AAC session note further below
+> for the full account.
 
 > **2026-08-15 session note.** Working tree had leftover debug `eprintln!`s in
 > `slice_data.rs` (single-macroblock trace prints); removed, no functional
@@ -121,6 +137,52 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   count-driven structure of ISO 14496-3 Table 4.68) and the parser continues,
 >   so the decoder still reconstructs the SCE/CPE/LFE channels it understands.
 >   CCE (id 2) remains `Unsupported`.
+
+> **2026-08-15 session note (cont'd again) — AAC native decode rewired,
+> `symphonia` dependency removed from `Cargo.toml` (uncommitted).**
+> `decoder.rs::decode()` no longer delegates reconstruction to
+> `symphonia-codec-aac` at all — it now runs a real 4-pass native pipeline:
+> (1) decode every SCE/CPE/LFE/CCE element's `ChannelStream` to frequency-domain
+> coefficients via the already-existing `codebooks.rs`/`scalefactors.rs`/
+> `dequant.rs`/`pulse.rs`/`pns.rs`/`tns.rs` modules, (2) apply CCE coupling
+> (new: `syntax.rs` gained full `CouplingChannelElement`/`GainElementList`/
+> `GainElement`/`CoupledElement` parsing per §4.4.4.3, id 2 is no longer
+> `Unsupported`), (3) apply M/S/intensity stereo per CPE via the existing
+> `stereo.rs`, (4) IMDCT + windowing + overlap-add via the existing
+> `mdct.rs`/`window.rs`. The root `Cargo.toml`'s `symphonia-codec-aac`/
+> `symphonia-core` dependency lines are deleted, and `tpt-kinetix-aac`'s public
+> re-exports (`lib.rs`) now expose the new CCE types. `cargo test -p
+> tpt-kinetix-aac --lib` is green (60 tests), and — notably — `cargo build
+> --workspace` and `cargo test -p tpt-kinetix-h264 --lib` (224 tests) both now
+> pass too, so the "H.264 crate broken in the working tree" state some earlier
+> session notes above warned about is **no longer the case**.
+> \
+> **However, this is still not the Phase 18 finish line.** The `ffmpeg`-gated
+> round-trip conformance test (`tests/conformance_aac.rs`,
+> `native_aac_matches_ffmpeg_reference`) still doesn't validate anything: fed a
+> real `ffmpeg`-encoded 2-channel 44.1kHz stream, `AacDecoder::decode()` fails
+> on the very first frames with `Err(Parse(UnexpectedEof))` /
+> `Err(Parse(BadSectionCodebook))` (confirmed by running the test with
+> `--nocapture`), so `native` comes back empty and the test's own
+> early-return-on-empty guard skips the real assertion — it reports `ok`
+> without checking anything. The parse error happens before CCE-specific code
+> is reached, so despite this session's CCE work, real ffmpeg streams still
+> don't decode. Root-causing that first-frame parse desync (not a licensing or
+> CCE-support problem — the failure is earlier, in section/scalefactor/spectral
+> parsing against a real stream rather than the hand-built unit-test fixtures)
+> is the actual remaining blocker for Phase 18 Phase 6. `cargo deny check
+> licenses` no longer fails on `symphonia`'s MPL-2.0 (confirmed: the license
+> list it now rejects is `webpki-roots`'s CDLA-Permissive-2.0, pulled in via
+> `tpt-kinetix-kg → ureq`, an unrelated pre-existing gate) — but `docs/
+> codec-evaluations/aac.md`, both READMEs, and module doc comments still say
+> "delegated to symphonia-codec-aac" (Phase 7's doc-cleanup half is not done),
+> and `Cargo.lock` for `tpt-kinetix-stream/fuzz` still has a stale symphonia
+> entry that will drop out next `cargo update`. Untracked scratch files flagged
+> for deletion two sessions ago (`conformance_backup.rs`, `fix_conformance.ps1`,
+> `tpt-kinetix-aac/tests/conformance_aac.rs.test`) are still present and still
+> should be deleted, not committed. `tpt-kinetix-aac/tests/decode_pcm.rs.disabled`
+> (the old symphonia-backed round-trip test) is now correctly disabled — replace
+> it rather than re-enable once Phase 6 lands for real.
 
 > **2026-08-14 session note — working-tree corruption found and cleaned up.**
 > Before this reconciliation, ~44 files under `tpt-kinetix-h264/examples/` and
@@ -193,7 +255,140 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   `prediction::tests::predict_8x8_vertical` both fail on `master` as
 >   committed. Neither is tracked elsewhere in this file — worth a follow-up
 >   item since they contradict the "unit tests pass" assumption baked into
->   several `[x]` checkboxes above.
+>   several `[x]` checkboxes above. **RESOLVED 2026-08-16 (uncommitted):**
+>   both now pass (`cargo test -p tpt-kinetix-h264 --lib -- \
+>   field_mv_scaling_same_parity_doubles predict_8x8_vertical`) — fixed as a
+>   side effect of two real bugs found in `prediction.rs`/`transform.rs`
+>   while working the Phase F.4 8×8-transform investigation:
+>   `predict_8x8`'s `Vertical`/`Horizontal` intra-8×8 modes were reading raw
+>   `tval`/`lval` neighbour samples instead of the low-pass-filtered
+>   `t0..t7`/`l0..l7` values §8.3.2.2.1/.2 require, and
+>   `dequant_idct_8x8`'s `normAdjust8x8` position-class lookup used
+>   `raster % 16` instead of the correct within-4×4-sub-block position
+>   (`((raster >> 3) & 3) * 4 + (raster & 3)`). Full `cargo test -p
+>   tpt-kinetix-h264 --lib` is green (224/224), and the CAVLC/P/B conformance
+>   suites are still bit-exact (no regressions). **However, this did NOT move
+>   the Phase F.4 High-profile 8×8 conformance numbers at all** — re-ran
+>   `high_profile_8x8_conformance`/`high_profile_8x8_cabac_conformance` and
+>   got the exact same `max_abs_diff=160`/`161` (CAVLC/CABAC) as before these
+>   fixes, meaning whatever dominates that gap is a different, still-unfound
+>   bug; these two fixes were real but not the one Phase F.4 is waiting on.
+
+> **2026-08-15 session note (further still) — AV1 tile-group header fix,
+> H.264 CAVLC mandelbrot scratch tooling, AAC CCE/FIL/EOF parsing fixes
+> (all uncommitted, active debugging in progress).**
+>
+> - **AV1: real bug found in `decode_tile_group` (`reconstruct.rs`) — the
+>   `SymbolDecoder` was started at bit offset 0 instead of past the
+>   `tile_group_header()` syntax (§5.11.1).** For multi-tile frames this skips
+>   `tile_start_and_end_present_flag` + `tile_start`/`tile_end` bits; for
+>   inter frames it also skips `tile_cdf_update_flag`; either way the decoder
+>   never consumed the mandatory trailing `byte_alignment()`. `obu.rs`'s
+>   `BitReader` gained `byte_align()`/`bit_position()` helpers so
+>   `decode_tile_group` can now parse this header for real and hand the
+>   symbol decoder the correct `tile_data` start offset. This is a genuine
+>   spec-conformance fix (keep it) but **it is NOT the root cause of the
+>   "symbol-decoder desync in the intra block path" gap** — re-ran both
+>   `av1_psnr_check` and `tests/conformance.rs::
+>   av1_vs_ffmpeg_reference_when_available` on 2026-08-16 and PSNR is still
+>   poor across the whole corpus (testsrc_128x96 7.76 dB Y, mandelbrot_128x96
+>   10.79 dB Y, smptebars_256x144 9.95 dB Y, testsrc2_320x180 10.10 dB Y), and
+>   `solid_red_32` actually **regressed** from ~21 dB Y to 16.10 dB Y
+>   (`solid_red_64` improved from ~8 dB to 12.31 dB). The desync is still
+>   unresolved; the temporary `eprintln!("DBG decode_intra_block ...")` /
+>   `"DBG first block ..."` debug lines that were in `reconstruct.rs`'s
+>   `decode_intra_block` (gated on `mi_row == 0 && mi_col == 0`) from this
+>   investigation are gone from the working tree as of 2026-08-16 (removed,
+>   presumably during further uncommitted work — not by this note).
+> - **H.264: two new scratch diagnostic test harnesses**,
+>   `tpt-kinetix-h264/tests/mandelbrot_cavlc.rs` (dumps per-block CAVLC
+>   `nC`/`TotalCoeff`/`TrailingOnes`/coeffs for every macroblock of a real
+>   `ffmpeg`-encoded mandelbrot clip via `MapTracer`) and
+>   `tests/mandelbrot_cavlc_oracle.rs` (traces CAVLC bit-position-after-each-
+>   block for the same clip via a custom `DecodeTracer`), both untracked and
+>   both follow the established "keep debug scratch files uncommitted until
+>   the investigation concludes" convention (same as the now-deleted
+>   `dbg_mandelbrot_nogate.rs` from Phase F.4 above). Delete or fold into a
+>   real regression test once whatever they're diagnosing is root-caused;
+>   don't commit as-is.
+> - **AAC: real parsing bugs fixed in `syntax.rs`'s `RawDataBlock::parse`,
+>   found while chasing the Phase 18 Phase 6 blocker:** (1) `fill_element()`
+>   never called `byte_alignment()` at the end, per ISO 14496-3 §4.4.2.9 —
+>   fixed. (2) a missing/short final element ID at a frame boundary was a
+>   hard `UnexpectedEof` error instead of being tolerated as an implicit
+>   `END` (some encoders, including `ffmpeg`, rely on the ADTS
+>   `frame_length` to delimit the block rather than writing an explicit id-7
+>   `END` element) — fixed. (3) **CCE (id 2) is now actually parsed**
+>   (`Element::Cce`/`CouplingChannelElement`/`GainElementList`/`GainElement`
+>   per §4.4.4.3) instead of being rejected as `Unsupported`, matching the
+>   CCE-coupling work already wired into `decoder.rs`'s Pass 2 (see the
+>   "AAC native decode rewired" note above). These three fixes were applied
+>   via ad hoc PowerShell regex-patch scripts at the repo root (`fix_aac.ps1`,
+>   `fix_cce.ps1`, `fix_cce2.ps1`, `fix_syntax.ps1`, `fix_test.ps1`) — all
+>   untracked scratch tooling, delete once this investigation concludes rather
+>   than committing them.
+>   \
+>   **This investigation is not concluded and the fixes above are not
+>   sufficient.** `syntax.rs::RawDataBlock::parse` currently still has
+>   temporary `eprintln!` tracing on every element (id/bit-position) left in
+>   from this debugging — not cleaned up. Re-running
+>   `cargo test -p tpt-kinetix-aac --test conformance_aac -- --nocapture`
+>   (2026-08-15) shows the failure mode has changed since the "AAC native
+>   decode rewired" note above was written: the test no longer silently skips
+>   via the empty-native-output guard — it now reaches the strict
+>   `pcm_within_tolerance` assertion and **panics** with
+>   `max diff ≈ 3.4×10^38` (an `f32`-overflow-magnitude value — a NaN/Inf or
+>   otherwise garbage sample slipped into the synthesized PCM, not an
+>   ordinary quantization mismatch), while `frame 3: Err(Parse
+>   (BadSectionCodebook))` is still logged for at least one frame, meaning
+>   the underlying first-frames parse desync this whole investigation is
+>   chasing is **still unresolved**. Treat Phase 18 Phase 6 as still open;
+>   the CCE/FIL/EOF fixes are real progress but did not close it, and the new
+>   PCM-corruption failure mode is an additional bug (likely a bad
+>   dequant/IMDCT input on a channel whose upstream parse already desynced)
+>   that needs root-causing before the conformance test can pass.
+
+> **2026-08-16 session note — AV1 dequant + tile-group-header validation.**
+> `ffmpeg` (with `libdav1d`) is available on this machine, so the AV1
+> `dav1d` bit-exact harness in `tpt-kinetix-test-utils::conformance`
+> (`av1_intra_corpus_vs_dav1d_when_available` etc.) now actually *runs*
+> (previously it only skipped). Measured state: **0/5 AV1 entries bit-exact
+> vs dav1d**, PSNR 6–21 dB (solid_red_32 Y=16.1, testsrc Y=7.8, mandelbrot
+> Y=8.3, …). So AV1 is confirmed far from pixel-exact (Phase AV1 G), but the
+> decoder now *stays in bit-sync* with the bitstream (no desync/panic) — the
+> earlier tile-group-header fix (`decode_tile_group` now parses
+> `tile_start_and_end_present_flag` + `tile_start`/`tile_end` +
+> `tile_cdf_update_flag` + `byte_alignment()` and hands the symbol decoder the
+> correct `tile_data` offset) is confirmed as the right direction.
+>
+> Concrete AV1 work done this session (all uncommitted):
+> - **Removed the two debug `eprintln!`s** in `reconstruct.rs::decode_intra_block`
+>   (`DBG decode_intra_block …` / `DBG first block …`), gated on
+>   `mi_row==0 && mi_col==0` — they were left over from the tile-group-header
+>   investigation. Don't reintroduce.
+> - **Replaced the analytic `av1_quant_base` dequant** (which used a *single*
+>   approximate formula for both DC and AC) with the **exact AV1 8-bit
+>   `dc_qlookup_8` / `ac_qlookup_8` tables**, transcribed verbatim from
+>   `libgav1`'s reference `quantizer.cc` (identical to libaom's
+>   `dc/ac_qlookup_QTX`). AV1 keeps DC and AC quantizer tables separate, and
+>   the dequantized coefficient is the table value **directly** (no ×2/×4 —
+>   confirmed from libaom `av1_build_quantizer` storing
+>   `dequant[q][0]=dc_qlookup[q]`, `dequant[q][1]=ac_qlookup[q]`, and
+>   `decodetxb.c::get_dqv` reading `dequant[!!coeff_idx]`; the ×2/×4 belongs to
+>   VP9). This is a spec-correctness fix; it did **not** by itself make the
+>   decoder pixel-exact (still 0/5), so the dominant remaining bug is in the
+>   coefficient syntax (`coeff.rs::coeffs()`) and/or intra-prediction mode
+>   handling, not dequant. 10-/12-bit tables are TODO (corpus is 8-bit).
+> - **Inter prediction is already implemented AND wired** (`decode_block` routes
+>   non-intra frames to `decode_inter_block`; `inter.rs` provides the MV
+>   candidate list §7.10, `read_mv`/MV-component reading §8.3.1, single/compound
+>   reference-name decode, 8-tap sub-pel `motion_compensate`, and neighbour MV
+>   state update). It is *unvalidated* — no inter clip has been confirmed
+>   bit-exact — so the "inter prediction not implemented" gap is now narrower
+>   than it looked, but still open.
+> - `pixel_exact` correctly **stays `false`** (do not flip until the conformance
+>   harness reports a non-0 exact count). `cargo test -p tpt-kinetix-av1 --lib`
+>   is green (47 passed) after the dequant change — no regression.
 
 ---
 
@@ -266,12 +461,17 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ## Phase 4 — AV1 Support
 
-> Status: OBU parsing, encoder (rav1e), and encode-config plumbing are done; the
-> AV1 **decoder** now performs intra keyframe tile-group reconstruction via the
-> real symbol decoder (`coeffs()` syntax), wired in `reconstruct`/`coeff`.
-> Block structure is still a placeholder grid (Phase C), so output is not yet
-> pixel-exact against `dav1d`; real streams fail loudly rather than decode to
-> silent garbage.
+> Status: OBU parsing, encoder (rav1e), encode-config plumbing, **and the from-scratch
+> decoder** are done; the AV1 **decoder** performs intra keyframe + inter tile-group
+> reconstruction via the real symbol decoder (`coeffs()` syntax), walking a real
+> superblock partition tree (Phase C), with in-loop filters (Phase D), reference
+> frame store + motion-compensated inter prediction (Phase E), and parallel
+> rayon tile decode (Phase F) all wired. Measured against `dav1d` (via `ffmpeg`
+> `libdav1d`, harness in `tpt-kinetix-test-utils`): **0/5 entries bit-exact, PSNR
+> 6–21 dB** — the decoder stays in bit-sync with the bitstream (no desync/panic)
+> but is **not yet pixel-exact**; the residual gap is in the `coeffs()` coefficient
+> syntax and/or intra-prediction mode handling, not decode structure. `pixel_exact`
+> correctly remains `false`.
 
 - [x] Design/generate native Rust AV1 decoder scaffolding in `kinetix-av1` (KG-assisted where applicable) — OBU/sequence-header scaffold + intra tile-group reconstruction done (Phase A/B); partition/mode syntax outstanding (Phase AV1 C)
 - [x] Implement AV1 bitstream parsing (OBU parsing) via `nom`
@@ -1217,18 +1417,47 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
 > `fill_decode_neighbors`/`hl_decode_mb`. `place_mbaff_luma_pair`/
 > `place_mbaff_chroma_pair` (field/frame-adaptive pair placement) are wired
 > into `reconstruct.rs` and run for real MBAFF frames. `derive_neighbours`
-> (nC/MPM/motion-prediction neighbour addressing for mixed field/frame pairs)
-> exists and is unit-tested in isolation but is **not yet called from
-> `slice_data.rs`** — CAVLC/CABAC parsing still uses the non-MBAFF neighbour
-> derivation, so nC/MPM context for MBAFF macroblocks is not yet correct.
+> is now wired into the I-slice CAVLC/CABAC parsers (see below) via
+> `slice_data.rs::NeighbourCtx`; P/B slices remain non-MBAFF-aware since they
+> don't parse `mb_field_decoding_flag` yet (separate, larger gap, see below).
 > Not re-validated against `ffmpeg` (blocked on G.5 corpus generation below).
 
 - [x] Field/frame-adaptive reconstruction per macroblock pair — `mbaff.rs`'s
       `place_mbaff_luma_pair`/`place_mbaff_chroma_pair`, wired into
       `reconstruct.rs`
-- [ ] Adjust neighbour derivation (nC, MPM, motion prediction) for mixed
-      field/frame macroblock pairs (§6.4.10.1) — `mbaff.rs::derive_neighbours`
-      implemented but not yet wired into `slice_data.rs`'s parsing path
+- [x] Adjust neighbour derivation (nC, MPM) for mixed field/frame macroblock
+      pairs (§6.4.10.1) — **done for the I-slice CAVLC and CABAC parsers**
+      (2026-08-15). New `slice_data.rs::NeighbourCtx` bundles the MBAFF state
+      (`mb_aff`, `mb_rows`, the current pair's `mb_field_decoding_flag`, and a
+      per-frame-MB `field_flags` array populated as each pair is decoded) and
+      exposes `left_top()`, which calls `mbaff::derive_neighbours` when
+      `mb_aff` is set and otherwise degenerates to the exact plain
+      `mb_xy - 1` / `mb_xy - mb_cols` formula every call site used before this
+      change — so every already-bit-exact non-MBAFF conformance path
+      (CAVLC/CABAC I/P/B, `high_profile_8x8_*`, `p_frame_conformance`, etc.)
+      is provably unaffected. Threaded through `mpm_pred_mode`,
+      `mpm_pred_mode_8x8`, `luma_nc`, `chroma_nc`, `luma_cbf_neighbors`,
+      `chroma_cbf_neighbors`, `cabac_cbp_neighbors`, `parse_intra_macroblock`,
+      `parse_intra_macroblock_cabac`, and `parse_intra_residuals`;
+      `parse_i_slice`/`parse_i_slice_cabac` build the per-pair `field_flags`
+      array and construct a real `NeighbourCtx` per macroblock.
+      **Scope note / remaining gap:** this only covers the I-slice parsers.
+      Discovered while wiring this in: `parse_p_slice`/`parse_p_slice_cabac`/
+      `parse_b_slice`/`parse_b_slice_cabac` don't read `mb_field_decoding_flag`
+      at all yet (only the I-slice parsers do), so a real MBAFF P/B slice
+      would already desync at the bitstream level before neighbour derivation
+      even matters — P/B intra-macroblock and inter (motion-vector-
+      prediction) neighbour lookups in those four parsers now take a
+      `NeighbourCtx` parameter too (for the shared `parse_intra_macroblock`/
+      `parse_intra_residuals`/neighbour-helper functions) but are passed
+      `NeighbourCtx::NONE`, i.e. still non-MBAFF-aware — correct/honest given
+      P/B slices don't parse the pair flag, but real work for a future P/B
+      MBAFF phase: (1) add `mb_field_decoding_flag` parsing to all four P/B
+      slice parsers (mirroring the I-slice CAVLC/CABAC read), (2) thread a
+      real per-pair `NeighbourCtx` through them the same way, (3) extend
+      `derive_neighbours`-style addressing to the `ref_idx_gt0_neighbors`/
+      `amvd_sum` motion-vector-prediction helpers (currently still plain
+      `mb_xy-1`/`mb_xy-mb_cols` inline arithmetic, untouched by this pass).
 
 #### Phase G.5 — Validate interlaced decode
 - [ ] Generate a PAFF corpus clip and a separate MBAFF corpus clip with
@@ -1487,13 +1716,83 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
        commented out until Phase C/D land). Sequence Header OBU parsing is exercised
        and passes against real `ffmpeg` keyframes. With Phase D + F wired, the
        harness now exercises the full intra decode → loop-filter → diff path.
-- [ ] Root-cause and fix items 3–4 above (tx_size > 16×16 reconstruction skip;
-      remaining non-4×4 correctness gap) before re-measuring corpus PSNR
+       A standalone, h264-free validation harness was also added:
+       `tpt-kinetix-av1/examples/av1_psnr_check.rs` (generates a keyframe per
+       `lavfi` source, decodes with both decoders, prints per-plane PSNR) so AV1
+       progress is measurable without building the (currently-broken-in-working-tree)
+       H.264 crate.
+- [x] **Item 3 (TX_32X32 / TX_64X64 reconstruction) — implemented (2026-08-15):**
+       `reconstruct.rs::inverse_transform` now builds the full DCT-IV / DST-VII basis
+       for `n = 32` and `n = 64` (the previous `n > 16` copy-through guard is gone),
+       `reconstruct_intra_subblock` no longer skips `luma_tx > TX_16X16` (luma or
+       chroma), and the chroma `tx_size` selection reaches `TX_32X32`. The required
+       `get_scan` tables for 32×32 / 64×64 were added in
+       `coeff_tables.rs` (sub-block scans per AV1 §7.11: 4×4 sub-blocks ordered by
+       the 8×8 / 16×16 scan) so `read_coeffs` no longer errors on large blocks.
+- [x] **Inverse-transform scaling (the dominant non-4×4 correctness bug) — fixed
+       (2026-08-15):** the unnormalized 2-D DCT-IV / DST-VII basis gives
+       `M·Mᵀ = (n/2)·I`, so the 2-D inverse transform produces `(n/2)·residual`; the
+       final shift must therefore be `log2(n) − 1` (8×8 → `>> 2`, 16×16 → `>> 3`,
+       32×32 → `>> 4`, 64×64 → `>> 5`), **not** the previous hard-coded `>> 1` that
+       only matched the 4×4 case. `reconstruct.rs::round_shift` / `inverse_transform`
+       now apply the `n`-dependent shift. This is item 4's largest contributor
+       (every 8×8/16×16 block was reconstructed 2× / 4× too large before).
+- [x] **Loop-filter OOB panic — fixed (2026-08-15):** `loop_filter.rs`'s wide
+       deblock filter read/wrote outside the line buffer at frame/tile edges
+       (`line[(edge + pidx) as usize]` with `pidx` reaching negative), panicking the
+       whole decode on e.g. 128×96 `testsrc`. Reads/writes are now clamped to the
+       buffer; the loop filter remains non-pixel-exact (already acknowledged) but no
+       longer crashes.
+- [ ] **Remaining gap (item 4):** the corpus is still far from pixel-exact
+       (~7–22 dB PSNR after the fixes above; a solid 32×32 red keyframe reaches
+       ~21 dB Y while a 64×64 red keyframe is still ~8 dB, with most pixels left at
+       the 128 neutral fill). Diagnostics show blocks decoding as `all_zero`/skip when
+       they are not, i.e. a **symbol-decoder desync in the intra block path**
+       (the mode/skip/`tx_size`/`txb_skip`/`coeffs` reads share one `SymbolDecoder`
+       and any mis-contexted read desyncs every subsequent coefficient). The
+       `read_coeffs` unit tests (cross-checked against a Python oracle) still pass in
+       isolation, so the desync is in the *integration* context, not the coeff syntax
+       itself. Root-causing this is the next debugging target before inter prediction
+       (Phase E) is worth landing. **Updated 2026-08-15 (further session,
+       uncommitted):** a plausible root cause was fixed — `decode_tile_group`
+       started the `SymbolDecoder` at bit offset 0 instead of past the
+       mandatory `tile_group_header()` syntax (§5.11.1), which for multi-tile
+       and/or inter frames desyncs every bit read thereafter; `obu.rs`'s
+       `BitReader` gained `byte_align()`/`bit_position()` so the header can
+       now be parsed for real before handing off the `tile_data` offset.
+       **Ruled out as the root cause (2026-08-16):** re-ran both
+       `av1_psnr_check` and `av1_vs_ffmpeg_reference_when_available` — PSNR
+       is essentially unchanged/still poor across the corpus (7–13 dB Y on
+       testsrc/mandelbrot/smptebars/testsrc2/solid_red_64), and
+       `solid_red_32` actually regressed (~21 → 16.10 dB Y). The fix itself
+       is correct per spec and should stay, but the intra-block
+       symbol-decoder desync is still unexplained — next debugging target is
+       still open. The temporary `eprintln!("DBG ...")` lines from that
+       investigation are already gone from the working tree.
 - [ ] Validate decode vs `dav1d` reference output on a generated intra-only
        corpus first (Phases A–C only), then again once inter prediction
-      (Phase E) lands
+       (Phase E) lands
 - [ ] Flip `Av1Decoder::capabilities().pixel_exact` only after the conformance
-      harness passes
+       harness passes
+
+> **2026-08-15 session note (AV1 continues).** Implemented the AV1 Phase G item-3
+> blockers and the dominant inverse-transform scaling bug (above): `inverse_transform`
+> now applies the `log2(n) − 1` final shift (was a hard-coded `>> 1`), supports
+> `n = 32`/`64`, the 32×32 / 64×64 scan tables are wired in `coeff_tables.rs`, and
+> `reconstruct_intra_subblock` no longer skips large `tx_size` blocks. The loop-filter
+> wide-filter OOB read/write panic (frame/tile-edge) is clamped. A standalone
+> `av1_psnr_check` example measures per-plane PSNR vs `ffmpeg` without the H.264
+> crate. Post-fix PSNR is still ~7–22 dB (solid 32×32 red ≈21 dB Y; 64×64 red ≈8 dB
+> with most pixels at the 128 neutral fill), indicating a residual symbol-decoder
+> desync in the intra block path (mode/skip/`tx_size`/`txb_skip`/`coeffs` share one
+> `SymbolDecoder` and a mis-contexted read desyncs later coefficients). `cargo test
+> -p tpt-kinetix-av1 --lib` is green (47 tests, including an extended
+> `scan_is_valid_permutation` that now also validates the 32/64 large scans).
+> Uncommitted working-tree files: `tpt-kinetix-av1/examples/av1_psnr_check.rs`
+> (validation harness; keep — useful standalone regardless). Note: as of the
+> later-in-session AAC/symphonia work (see the AAC session note above), the
+> H.264 crate is no longer broken in the working tree, so this example is no
+> longer the *only* way to validate AV1, but it's still a faster one.
 
 ## Phase 13 — `tpt-kinetix-lean`: Original Embedded-First Codec (2026-07-20)
 
@@ -2038,45 +2337,44 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       parse-only syntax structs (`IcsInfo`, `SectionData`, SCE/CPE/LFE/FIL/END
       element dispatch). Exit: unit tests on hand-built fixtures +
       `*_never_panics` proptest.
-- [~] Phase 2 — `src/codebooks.rs`: the 11 (+1 escape) Huffman spectral
+- [x] Phase 2 — `src/codebooks.rs`: the 11 (+1 escape) Huffman spectral
       codebooks, independently transcribed from spec tables, tree-walk decode
       + escape handling. Exit: unit tests per codebook against hand-encoded
-      sequences + bounded-consumption/no-panic proptest. **Substantially done
-      (uncommitted, 2026-08-14):** `decode_codeword`/`decode_spectral_quad`/
-      `decode_scalefactor` implement all 11 spectral codebooks + the book-11
-      escape sequence + the scalefactor codebook, with 5 passing unit tests
-      (prefix-code validity, spec-formula round-trip, table-entry decode).
-      Missing: the bounded-consumption/no-panic proptest, and it is not yet
-      referenced anywhere outside its own module (Phase 6 wiring).
-- [~] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
+      sequences + bounded-consumption/no-panic proptest. **Done and wired**:
+      `decode_codeword`/`decode_spectral_quad`/`decode_scalefactor` implement
+      all 11 spectral codebooks + the book-11 escape sequence + the
+      scalefactor codebook (unit-tested), and as of the 2026-08-15 native-decode
+      rewire (see session note above) it's no longer dead code — it's the
+      real spectral-decode path `decoder.rs` runs on every channel stream.
+      Still missing: the bounded-consumption/no-panic proptest.
+- [x] Phase 3 — `src/scalefactors.rs`, `src/dequant.rs`, `src/pns.rs`,
       `src/tns.rs`, `src/pulse.rs`: DPCM scalefactor decode, dequantization
       formula, perceptual noise substitution, temporal noise shaping, pulse
       data. Exit: unit tests against hand-computed values; TNS filter
-      validated against an independently computed reference. **In progress
-      (uncommitted, 2026-08-15):** `scalefactors.rs`/`dequant.rs` now iterate
-      the real `SectionData` (not a naive `0..max_sfb` loop) so scalefactor/
-      spectral-data reads match what the bitstream actually contains,
-      including sections that extend past `max_sfb`; found and fixed two
-      real bugs in the Phase 1 section-parsing this depends on
-      (`section_len_bits` was hard-coded to 4 instead of the spec's
-      3/4/5-bit variants, and zero-length/past-`max_sfb` sections were
-      wrongly rejected as errors) — see session note above. `pns.rs`/
-      `tns.rs`/`pulse.rs` not started. The 2-test regression
-      (`syntax::tests::parse_full_sce_block`/`parse_full_cpe_block`) is now
-      fixed (stale fixtures encoding the removed AAC-LC `gain_control` bit);
-      `tpt-kinetix-aac --lib` is green (38 tests). DSE/PCE elements are now
-      skipped rather than rejected so real ffmpeg streams parse — exit criteria
-      for the parse/section/scalefactor layer are now clean.
-- [ ] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
+      validated against an independently computed reference. **Done**: all
+      five modules exist, are unit-tested, and are wired into
+      `decoder.rs::decode_channel_stream`. `scalefactors.rs`/`dequant.rs`
+      iterate the real `SectionData` (not a naive `0..max_sfb` loop). DSE/PCE
+      elements are skipped rather than rejected so real ffmpeg streams parse.
+      Still missing: an independently-computed-reference cross-check for the
+      TNS filter (current `tns.rs` tests compare against an in-crate
+      reference implementation, not an external one).
+- [x] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
       channel_pair_element. Exit: unit tests reconstructing L/R from known
-      coded spectra.
-- [ ] Phase 5 — `src/mdct.rs` (1024/128-point IMDCT, written from scratch —
+      coded spectra. **Done**: `apply_stereo` implements both M/S (per-band
+      mask) and intensity stereo, 4 unit tests pass, wired into
+      `decoder.rs`'s Pass 3.
+- [x] Phase 5 — `src/mdct.rs` (1024/128-point IMDCT, written from scratch —
       new to the whole workspace, no existing MDCT code anywhere) +
       `src/window.rs` (KBD/sine windows, window-sequence transitions,
       overlap-add state). Exit: IMDCT(MDCT(x))≈x round-trip test,
       window-value tests at known points, proptest over window-sequence
-      combinations.
-- [ ] Phase 6 — Wire phases 1-5 into `decode_raw_data_block`, swap
+      combinations. **Done**: both modules exist, unit-tested (basis
+      orthonormality/roundtrip, window symmetry/power-sum), wired into
+      `decoder.rs`'s Pass 4 (`imdct_long`/`imdct_short` + `long_synthesis`/
+      `short_synthesis`). Still missing: the proptest over window-sequence
+      combinations called for by the exit criteria.
+- [~] Phase 6 — Wire phases 1-5 into `decode_raw_data_block`, swap
       `decoder.rs`'s internals onto the native path (public
       `AacDecoder::new/with_config/set_config/set_strict/capabilities/decode/config`
       API unchanged), new `tests/conformance_aac.rs` via
@@ -2084,26 +2382,49 @@ Full plan: see the session plan this phase was scoped from (adoption polish + br
       reference harness, `tests/proptest_decode_never_panics.rs`,
       `just fuzz tpt-kinetix-aac fuzz_aac_decode 60`. Exit: conformance test
       passes at a documented tolerance, bench recorded, fuzz run clean.
-      **Started early, uncommitted 2026-08-15:** a `tests/conformance_aac.rs`
-      scaffold exists (still exercising the current symphonia-backed
-      `AacDecoder::decode()`, since Phase 6 wiring itself hasn't happened) and
-      currently no-ops — `decode_native` returns zero frames against a real
-      `ffmpeg`-encoded 2-channel stream, and the test's own comment guesses
-      this is because the parse layer's `CCE` element is still
-      `Unsupported`, but that's unconfirmed (not root-caused this session;
-      verify what element id `ffmpeg`'s stream actually uses before trusting
-      the comment). The assertion is skipped whenever `native` is empty, so
-      the test does not currently validate anything. Leftover scratch
-      artifacts from this investigation — `conformance_backup.rs` (repo
-      root), `fix_conformance.ps1` (repo root), and
-      `tpt-kinetix-aac/tests/conformance_aac.rs.test` — are untracked and
-      should be deleted once the real fix lands, not committed as-is.
-- [ ] Phase 7 — Remove `symphonia-codec-aac`/`symphonia-core` from
+      **Wiring done, conformance not yet passing (uncommitted, 2026-08-15):**
+      `decoder.rs::decode()` no longer touches `symphonia` at all — see the
+      "AAC native decode rewired" session note above for the full 4-pass
+      pipeline (spectral decode → CCE coupling → stereo → IMDCT/synthesis)
+      and the new CCE parsing in `syntax.rs`. But `tests/conformance_aac.rs`'s
+      `native_aac_matches_ffmpeg_reference` still doesn't validate anything —
+      run with `--nocapture` and the native decoder fails every one of a real
+      `ffmpeg`-encoded stream's first frames with
+      `Err(Parse(UnexpectedEof))`/`Err(Parse(BadSectionCodebook))`, so the
+      empty-native-output early-return still skips the real assertion. This is
+      NOT the previously-suspected CCE-support gap (CCE is now parsed) — the
+      failure happens earlier in raw_data_block parsing against a real stream.
+      Root-causing that first-frame desync (hand-built unit fixtures all pass;
+      only real ffmpeg-encoded bitstreams fail) is the actual remaining work.
+      `tests/proptest_decode_never_panics.rs` and the `fuzz_aac_decode` target
+      are not started. **Updated 2026-08-15 (further session, uncommitted,
+      see session note further above):** `RawDataBlock::parse` gained real
+      fixes (missing `fill_element()` `byte_alignment()`, tolerating a
+      missing/implicit `END` at frame boundary, real CCE parsing instead of
+      `Unsupported`) but `frame 3: Err(Parse(BadSectionCodebook))` still
+      occurs, and the conformance test no longer skips silently — it now
+      reaches the PCM-tolerance assertion and panics with an
+      `f32`-overflow-magnitude diff (~3.4×10^38), a second, distinct bug
+      (garbage/NaN sample synthesis) on top of the still-unresolved parse
+      desync. Debug `eprintln!` tracing is still active in `syntax.rs` from
+      this investigation. Phase 6 remains open.
+- [~] Phase 7 — Remove `symphonia-codec-aac`/`symphonia-core` from
       `tpt-kinetix-aac/Cargo.toml` and root `Cargo.toml`; update
       `docs/codec-evaluations/aac.md`, both READMEs' status tables, and
       module doc comments (drop "delegated to symphonia-codec-aac" language).
       Exit: `grep -rn symphonia` empty; `just check` and `just deny` both
-      green.
+      green. **Dependency removal done (uncommitted, 2026-08-15):** the
+      `symphonia-codec-aac`/`symphonia-core` lines are gone from root
+      `Cargo.toml`, and `cargo deny check licenses` no longer flags MPL-2.0 —
+      confirmed the license check now fails on an unrelated pre-existing issue
+      (`webpki-roots` CDLA-Permissive-2.0 via `tpt-kinetix-kg → ureq`), not
+      symphonia. Still open: `docs/codec-evaluations/aac.md`, both READMEs,
+      and module doc comments still say "delegated to symphonia-codec-aac";
+      `tpt-kinetix-stream/fuzz/Cargo.lock` still has a stale symphonia entry
+      (will drop on next `cargo update`); `grep -rn symphonia` is not yet
+      empty. Also blocked on Phase 6 actually passing before this can be
+      called done in spirit (the dependency is gone, but the decoder it was
+      replaced with doesn't yet decode real streams).
 
 ## Phase 16 — `tpt-kinetix-realtime`: Realtime Codec (scaffold + implementation) (2026-08-13)
 
