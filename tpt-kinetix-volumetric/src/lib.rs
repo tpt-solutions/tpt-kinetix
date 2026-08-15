@@ -25,7 +25,7 @@
 //! strict mode rejects output with [`KinetixError::NotPixelExact`]. Malformed
 //! streams and any stream declaring the reserved `dynamic` flag fail with
 //! [`KinetixError::Parse`] / [`KinetixError::Unsupported`] respectively. See
-//! [`VolumetricDecoder::capabilities`] for what is and isn't supported.
+//! [`VolumetricDecoderImpl::capabilities`] for what is and isn't supported.
 //!
 //! # References
 //!

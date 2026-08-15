@@ -795,13 +795,17 @@ fn mpm_pred_mode_8x8(
 ) -> u8 {
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
     let left = if i8 == 1 || i8 == 3 {
-        NeighbourSide::Real(modes[(i8 - 1) * 4] as u8)
+        // Left neighbour is the same-MB 8×8 block one column to the left:
+        // i8=1 → i8=0 (top-left), i8=3 → i8=2 (bottom-left).
+        NeighbourSide::Real(modes[raster_of_8x8_sub(i8 - 1, 0)] as u8)
     } else if let Some(li) = left_idx {
         let n = &pred_ctx_grid[li];
         if !n.present {
             NeighbourSide::Unavailable
         } else if n.is_intra4x4 {
-            NeighbourSide::Real(n.modes[if i8 == 0 { 4 } else { 8 }] as u8)
+            // Left of i8=0 → right column of left MB = i8=1 (top-right).
+            // Left of i8=2 → right column of left MB = i8=3 (bottom-right).
+            NeighbourSide::Real(n.modes[raster_of_8x8_sub(i8 + 1, 0)] as u8)
         } else {
             NeighbourSide::ForcedDc
         }
@@ -810,13 +814,17 @@ fn mpm_pred_mode_8x8(
     };
 
     let top = if i8 == 2 || i8 == 3 {
-        NeighbourSide::Real(modes[(i8 - 2) * 4] as u8)
+        // Top neighbour is the same-MB 8×8 block one row above:
+        // i8=2 → i8=0 (top-left), i8=3 → i8=1 (top-right).
+        NeighbourSide::Real(modes[raster_of_8x8_sub(i8 - 2, 0)] as u8)
     } else if let Some(ti) = top_idx {
         let n = &pred_ctx_grid[ti];
         if !n.present {
             NeighbourSide::Unavailable
         } else if n.is_intra4x4 {
-            NeighbourSide::Real(n.modes[if i8 == 0 { 8 } else { 12 }] as u8)
+            // Top of i8=0 → bottom row of top MB = i8=2 (bottom-left).
+            // Top of i8=1 → bottom row of top MB = i8=3 (bottom-right).
+            NeighbourSide::Real(n.modes[raster_of_8x8_sub(i8 + 2, 0)] as u8)
         } else {
             NeighbourSide::ForcedDc
         }

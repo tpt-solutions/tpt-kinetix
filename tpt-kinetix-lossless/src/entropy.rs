@@ -124,7 +124,7 @@ pub fn encode_residual_stream(residuals: &[i32], contexts: &[u8]) -> Vec<u8> {
     let models = lossless_context_models();
     let mut enc = RansEncoder::new();
     for i in (0..residuals.len()).rev() {
-        let m = map_residual(residuals[i]) as u32;
+        let m = map_residual(residuals[i]);
         let model = &models[contexts[i] as usize];
         enc.encode(model, (m >> 16) as u8);
         enc.encode(model, ((m >> 8) & 0xFF) as u8);
@@ -157,7 +157,7 @@ mod tests {
         let residuals: Vec<i32> = vec![
             0, 1, -1, 2, -2, 255, -255, 4096, -4096, 32767, -32768, 65535, -65535, 131070,
         ];
-        let contexts: Vec<u8> = (0..residuals.len() as u8).map(|i| (i % 16) as u8).collect();
+        let contexts: Vec<u8> = (0..residuals.len() as u8).map(|i| i % 16).collect();
         let bytes = encode_residual_stream(&residuals, &contexts);
         let models = lossless_context_models();
         let mut dec = RansDecoder::new(&bytes).expect("decoder init");

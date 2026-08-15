@@ -518,6 +518,7 @@ pub struct GainElement {
 
 /// A parsed AAC syntactic element.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Element {
     /// Single Channel Element.
     Sce(SingleChannelElement),
@@ -633,7 +634,7 @@ impl RawDataBlock {
         let frame = FRAME.fetch_add(1, Ordering::SeqCst);
         if frame == 0 {
             let mut r = BitReader::new(data);
-            let _ = r.skip(125);
+            r.skip(125);
             let mut s = String::new();
             for i in 125..210 {
                 if i % 10 == 0 {
@@ -648,13 +649,14 @@ impl RawDataBlock {
         }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
-        let mut element_count = 0;
+        let mut _element_count = 0;
+        #[allow(clippy::while_let_loop)]
         loop {
             let id = match reader.read_bits(3) {
                 Some(id) => id as u8,
                 None => break,
             };
-            element_count += 1;
+            _element_count += 1;
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;

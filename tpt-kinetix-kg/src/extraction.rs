@@ -62,7 +62,7 @@ fn function_name<'a>(func_def: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
 /// Return the text of the first named child of `node` that is an identifier.
 fn first_identifier_text<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
     for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
+        if let Some(child) = node.named_child(i as u32) {
             if child.kind() == "identifier" || child.kind() == "number_literal" {
                 return child.utf8_text(source).ok();
             }

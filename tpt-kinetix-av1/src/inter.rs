@@ -136,7 +136,7 @@ impl<'a> RefFrames<'a> {
 
 /// `true` if `r` names a real inter reference (§7.3 `is_inter_ref`).
 pub fn is_inter_ref(r: u8) -> bool {
-    r >= LAST_FRAME && r <= ALTREF_FRAME
+    (LAST_FRAME..=ALTREF_FRAME).contains(&r)
 }
 
 /// Map a reference *name* (LAST .. ALTREF) to a destination plane index.
@@ -190,13 +190,13 @@ pub fn motion_compensate(
 ) {
     let dx = mv.col & 7;
     let dy = mv.row & 7;
-    let ix = (mv.col >> 3) as i32;
-    let iy = (mv.row >> 3) as i32;
+    let ix = mv.col >> 3;
+    let iy = mv.row >> 3;
     let base_x = dst_x as i32 + ix;
     let base_y = dst_y as i32 + iy;
 
-    let kw = subpel_kernel(filter, dx as i32);
-    let kh = subpel_kernel(filter, dy as i32);
+    let kw = subpel_kernel(filter, dx);
+    let kh = subpel_kernel(filter, dy);
 
     // Horizontal pass into `tmp` (one full block, no vertical extension yet).
     let mut tmp = vec![0i32; bw * bh];
@@ -260,7 +260,7 @@ pub fn build_mv_candidates(
     max: usize,
 ) -> Vec<MvCandidate> {
     let mut stack: Vec<MvCandidate> = Vec::with_capacity(max.max(2));
-    let mut push = |cand: MvCandidate, stack: &mut Vec<MvCandidate>| {
+    let push = |cand: MvCandidate, stack: &mut Vec<MvCandidate>| {
         if cand.ref_frame == NONE_FRAME || cand.ref_frame == INTRA_FRAME {
             return;
         }
@@ -530,8 +530,8 @@ pub fn decode_ref_and_mv(
     // path before this call; we still read the mode CDFs to stay in sync.
     let nearest_nonzero = candidates
         .first()
-        .map_or(false, |c| c.ref_frame == ref_name);
-    let near_nonzero = candidates.get(1).map_or(false, |c| c.ref_frame == ref_name);
+        .is_some_and(|c| c.ref_frame == ref_name);
+    let near_nonzero = candidates.get(1).is_some_and(|c| c.ref_frame == ref_name);
 
     let mode = read_single_inter_mode(dec, cdfs, mode_ctx, nearest_nonzero, near_nonzero);
 

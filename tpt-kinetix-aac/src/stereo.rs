@@ -9,14 +9,15 @@ fn group_bases(ics: &IcsInfo) -> Vec<usize> {
     let num_groups = ics.num_window_groups();
     let mut gindex = vec![0usize; num_groups];
     let mut acc = 0usize;
-    for gi in 0..num_groups {
-        gindex[gi] = acc;
+    for (gi, g) in gindex.iter_mut().enumerate() {
+        *g = acc;
         acc += ics.group_len(gi) * 128;
     }
     gindex
 }
 
 /// Apply M/S and intensity stereo to a channel pair's spectra in place.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_stereo(
     left: &mut [f32; 1024],
     right: &mut [f32; 1024],
@@ -33,9 +34,8 @@ pub fn apply_stereo(
     let max_sfb = ics.max_sfb as usize;
     let gindex = group_bases(ics);
 
-    for g in 0..num_groups {
+    for (g, &gbase) in gindex.iter().take(num_groups).enumerate() {
         let glen = ics.group_len(g);
-        let gbase = gindex[g];
         for sfb in 0..max_sfb {
             let lidx = g * max_sfb + sfb;
             let ridx = g * max_sfb + sfb;
@@ -201,8 +201,8 @@ mod tests {
         let swb = [0u16, 64, 128];
         let mut left = [0.0f32; 1024];
         let mut right = [0.0f32; 1024];
-        for i in 0..64 {
-            right[i] = 8.0;
+        for r in right.iter_mut().take(64) {
+            *r = 8.0;
         }
 
         // pos = 0 → factor 1.0 → left becomes equal to right.
@@ -220,13 +220,11 @@ mod tests {
             &[],
             &swb,
         );
-        for i in 0..64 {
-            assert!((left[i] - 8.0).abs() < 1e-5, "L={} at {i}", left[i]);
-        }
+        assert!(left[..64].iter().all(|&l| (l - 8.0).abs() < 1e-5));
 
         // pos = 4 → factor 0.5 → left = right * 0.5 = 4.0.
-        for i in 0..64 {
-            left[i] = 0.0;
+        for l in left.iter_mut().take(64) {
+            *l = 0.0;
         }
         apply_stereo(
             &mut left,
@@ -240,13 +238,11 @@ mod tests {
             &[],
             &swb,
         );
-        for i in 0..64 {
-            assert!((left[i] - 4.0).abs() < 1e-5, "L={} at {i}", left[i]);
-        }
+        assert!(left[..64].iter().all(|&l| (l - 4.0).abs() < 1e-5));
 
         // pos = -4 → factor -2.0 → left = right * -2 = -16.0.
-        for i in 0..64 {
-            left[i] = 0.0;
+        for l in left.iter_mut().take(64) {
+            *l = 0.0;
         }
         apply_stereo(
             &mut left,
@@ -260,9 +256,7 @@ mod tests {
             &[],
             &swb,
         );
-        for i in 0..64 {
-            assert!((left[i] - (-16.0)).abs() < 1e-4, "L={} at {i}", left[i]);
-        }
+        assert!(left[..64].iter().all(|&l| (l - (-16.0)).abs() < 1e-4));
         let _ = &mut l_bt;
     }
 

@@ -530,15 +530,15 @@ fn cdef_direction(
     }
     let mut cost = [0i32; 8];
     for _ in 0..8 {
-        for j in 0..15 {
-            cost[0] += partial[0][j] * partial[0][j];
+        for x in partial[0].iter() {
+            cost[0] += x * x;
         }
     }
     // (The remaining cost accumulations follow the spec's weighted sums.)
     // Cost[2] and Cost[6] (vertical-ish directions).
-    for i in 0..8 {
-        cost[2] += partial[2][i] * partial[2][i];
-        cost[6] += partial[6][i] * partial[6][i];
+    for (x, y) in partial[2].iter().zip(partial[6].iter()) {
+        cost[2] += x * x;
+        cost[6] += y * y;
     }
     cost[2] *= DIV_TABLE[8];
     cost[6] *= DIV_TABLE[8];
@@ -562,9 +562,9 @@ fn cdef_direction(
     }
     let mut best_cost = 0i32;
     let mut y_dir = 0usize;
-    for i in 0..8 {
-        if cost[i] > best_cost {
-            best_cost = cost[i];
+    for (i, &c) in cost.iter().enumerate() {
+        if c > best_cost {
+            best_cost = c;
             y_dir = i;
         }
     }
@@ -583,8 +583,8 @@ fn cdef_filter_block(
     y0: usize,
     w: usize,
     h: usize,
-    sub_x: usize,
-    sub_y: usize,
+    _sub_x: usize,
+    _sub_y: usize,
     pri_str: i32,
     sec_str: i32,
     damping: i32,
@@ -894,8 +894,8 @@ mod tests {
     fn filter_line_smooths_a_step_edge() {
         // Strong level, sharp step edge between 0 and 255.
         let mut line = vec![128i32; 32];
-        for x in 16..32 {
-            line[x] = 200;
+        for x in line.iter_mut().take(32).skip(16) {
+            *x = 200;
         }
         let out = filter_line_1d(&line, 16, 30, 80, 1, 8, true);
         // The two samples straddling the edge should be pulled toward each
@@ -914,8 +914,8 @@ mod tests {
     #[test]
     fn filter_line_noop_when_level_zero() {
         let mut line = vec![0i32; 32];
-        for x in 16..32 {
-            line[x] = 255;
+        for x in line.iter_mut().take(32).skip(16) {
+            *x = 255;
         }
         let out = filter_line_1d(&line, 16, 0, 0, 0, 8, true);
         assert_eq!(out, line, "level 0 must leave the line untouched");

@@ -88,19 +88,19 @@ fn encode_plane(plane: &Plane) -> Result<Vec<u8>, KinetixError> {
     let mut up_mag = vec![0u32; pw];
     let mut left_mag: u32 = 0;
     for y in 0..ph {
-        for x in 0..pw {
+        for (x, up) in up_mag.iter_mut().enumerate() {
             let pred = u32::from(predict(&plane.data, pw, ph, x, y));
             let sample = u32::from(plane.data[y * pw + x]);
             let residual = (sample as i32) - (pred as i32);
             let k = if x == 0 && y == 0 {
                 0
             } else {
-                rice_k(left_mag, up_mag[x])
+                rice_k(left_mag, *up)
             };
             residuals.push(residual);
             contexts.push(k as u8);
             let mag = residual.unsigned_abs();
-            up_mag[x] = mag;
+            *up = mag;
             left_mag = mag;
         }
     }

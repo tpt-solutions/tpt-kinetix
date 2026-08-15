@@ -14,8 +14,7 @@
 use nom::{
     bytes::complete::take,
     number::complete::{be_u16, be_u32, be_u8},
-    sequence::tuple,
-    IResult,
+    Parser, IResult,
 };
 
 /// Magic bytes at the start of every face sequence: `b"FACE"`.
@@ -176,7 +175,7 @@ fn parse_sequence_header(
             quant_precision,
             group_qp,
         ),
-    ) = tuple((
+    ) = (
         be_u8,
         be_u8,
         take(8usize),
@@ -185,7 +184,8 @@ fn parse_sequence_header(
         be_u8,
         be_u8,
         take(5usize),
-    ))(input)?;
+    )
+        .parse(input)?;
 
     let mut hash = [0u8; 8];
     hash.copy_from_slice(basis_hash);
@@ -208,7 +208,7 @@ fn parse_sequence_header(
 }
 
 fn parse_frame_header(input: &[u8]) -> IResult<&[u8], FaceFrameHeader, nom::error::Error<&[u8]>> {
-    let (input, (flags, width, height, ref_mode)) = tuple((be_u8, be_u16, be_u16, be_u8))(input)?;
+    let (input, (flags, width, height, ref_mode)) = (be_u8, be_u16, be_u16, be_u8).parse(input)?;
     let frame_flags = FrameFlags::from_u8(flags);
     let (input, group_qp_override) = if frame_flags.has_qp_override {
         let (input, qp) = take(5usize)(input)?;

@@ -32,7 +32,6 @@
 use nom::{
     bytes::complete::tag,
     number::complete::{be_u32, be_u8},
-    sequence::Tuple,
     IResult, Parser,
 };
 use tpt_kinetix_core::error::KinetixError;
@@ -169,8 +168,7 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
     let mut attributes = Vec::with_capacity(attr_count as usize);
     let mut cur = rest;
     for _ in 0..attr_count {
-        let (r, (kind_byte, bit_depth)) =
-            map_err("attribute info", (be_u8, be_u8).parse(cur))?;
+        let (r, (kind_byte, bit_depth)) = map_err("attribute info", (be_u8, be_u8).parse(cur))?;
         let kind = match kind_byte {
             0 => PointAttributeKind::ColorRgb,
             1 => PointAttributeKind::Reflectance,
@@ -200,10 +198,8 @@ pub fn parse_sequence_header(input: &[u8]) -> Result<(&[u8], SequenceHeader), Ki
 
 /// Parse the frame header that immediately follows the sequence header.
 pub fn parse_frame_header(input: &[u8]) -> Result<(&[u8], FrameHeader), KinetixError> {
-    let (rest, (frame_type, num_points, payload_len, geometry_coding)) = map_err(
-        "frame header",
-        (be_u8, be_u32, be_u32, be_u8).parse(input),
-    )?;
+    let (rest, (frame_type, num_points, payload_len, geometry_coding)) =
+        map_err("frame header", (be_u8, be_u32, be_u32, be_u8).parse(input))?;
     if frame_type != 0 {
         return Err(KinetixError::Unsupported(format!(
             "volumetric: frame_type {frame_type} is reserved for v2; v1 only supports static frames"

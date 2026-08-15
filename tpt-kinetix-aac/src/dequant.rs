@@ -26,8 +26,8 @@ pub fn group_base_offsets(ics: &IcsInfo) -> Vec<usize> {
     let num_groups = ics.num_window_groups();
     let mut gindex = vec![0usize; num_groups];
     let mut acc = 0usize;
-    for gi in 0..num_groups {
-        gindex[gi] = acc;
+    for (gi, g) in gindex.iter_mut().enumerate() {
+        *g = acc;
         acc += ics.group_len(gi) * 128;
     }
     gindex
@@ -65,6 +65,7 @@ pub fn expand_band_types(sections: &SectionData, ics: &IcsInfo) -> Vec<u8> {
 
 /// Decode the Huffman `spectral_data` for one channel into a 1024-line,
 /// frequency-ordered, dequantized coefficient buffer.
+#[allow(clippy::too_many_arguments)]
 pub fn decode_spectral_data(
     reader: &mut BitReader,
     ics: &IcsInfo,
@@ -82,14 +83,14 @@ pub fn decode_spectral_data(
 
     // Per-(group, sfb) dequant scale.
     let mut scale = vec![0.0f32; num_groups * max_sfb];
-    for gi in 0..num_groups {
-        for sfb in 0..max_sfb {
+    for (gi, row) in scale.chunks_mut(max_sfb).enumerate() {
+        for (sfb, sc) in row.iter_mut().enumerate() {
             let idx = gi * max_sfb + sfb;
             let bt = band_type[idx];
             if bt == ZERO_HCB || is_noise(bt) || is_intensity(bt) {
-                scale[idx] = 0.0;
+                *sc = 0.0;
             } else {
-                scale[idx] = dequant_scale(global_gain, scalefactor[idx]);
+                *sc = dequant_scale(global_gain, scalefactor[idx]);
             }
         }
     }
@@ -98,8 +99,8 @@ pub fn decode_spectral_data(
     let mut gindex = vec![0usize; num_groups];
     {
         let mut acc = 0usize;
-        for gi in 0..num_groups {
-            gindex[gi] = acc;
+        for (gi, g) in gindex.iter_mut().enumerate() {
+            *g = acc;
             acc += ics.group_len(gi) * 128;
         }
     }

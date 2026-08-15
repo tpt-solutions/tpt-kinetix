@@ -9,35 +9,35 @@
 /// Long-window (1024-line) scalefactor band offsets, indexed by the 4-bit
 /// sampling-frequency index (0..=11). Index 12 (7350 Hz) is reserved.
 pub const SWB_OFFSET_1024: [&[u16]; 12] = [
-    &SWB_1024_96000,
-    &SWB_1024_96000,
-    &SWB_1024_64000,
-    &SWB_1024_48000,
-    &SWB_1024_48000,
-    &SWB_1024_32000,
-    &SWB_1024_24000,
-    &SWB_1024_24000,
-    &SWB_1024_16000,
-    &SWB_1024_16000,
-    &SWB_1024_16000,
-    &SWB_1024_8000,
+    SWB_1024_96000,
+    SWB_1024_96000,
+    SWB_1024_64000,
+    SWB_1024_48000,
+    SWB_1024_48000,
+    SWB_1024_32000,
+    SWB_1024_24000,
+    SWB_1024_24000,
+    SWB_1024_16000,
+    SWB_1024_16000,
+    SWB_1024_16000,
+    SWB_1024_8000,
 ];
 
 /// Short-window (128-line) scalefactor band offsets, indexed like
 /// [`SWB_OFFSET_1024`].
 pub const SWB_OFFSET_128: [&[u16]; 12] = [
-    &SWB_128_96000,
-    &SWB_128_96000,
-    &SWB_128_96000,
-    &SWB_128_48000,
-    &SWB_128_48000,
-    &SWB_128_48000,
-    &SWB_128_24000,
-    &SWB_128_24000,
-    &SWB_128_16000,
-    &SWB_128_16000,
-    &SWB_128_16000,
-    &SWB_128_8000,
+    SWB_128_96000,
+    SWB_128_96000,
+    SWB_128_96000,
+    SWB_128_48000,
+    SWB_128_48000,
+    SWB_128_48000,
+    SWB_128_24000,
+    SWB_128_24000,
+    SWB_128_16000,
+    SWB_128_16000,
+    SWB_128_16000,
+    SWB_128_8000,
 ];
 
 /// Maximum number of long-window scalefactor bands TNS may operate on, indexed

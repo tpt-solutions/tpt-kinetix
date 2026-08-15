@@ -685,6 +685,79 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > beyond the prior sessions' fixes. `cargo test -p tpt-kinetix-av1 --lib`
 > still green (57 passed).
 
+> **2026-08-16 session note (breakthrough) — `solid_red_32`/`solid_red_64`
+> are now pixel-exact; CDF-scraping hypothesis disproven with a real
+> independent source.** Python became available this session, which made
+> it possible to actually build the independent oracle the previous note
+> called for — except instead of re-transcribing the spec by hand again
+> (the error-prone step every prior session's bugs came from), the AV1
+> spec PDF itself was fetched and its text extracted directly with
+> `pypdf` (`pip install pypdf`; the PDF text layer double-renders every
+> digit character-for-character, e.g. `"1783717837"` for `17837` — trivial
+> to strip with a `s[:n//2]==s[n//2:]` dedupe). This gives a byte-for-byte
+> ground truth pulled from the spec's own array literals, not a
+> hand-retyped copy. Cross-checked **every default CDF table used in the
+> `solid_red` block's read path** — `DEFAULT_SKIP_CDF`,
+> `DEFAULT_INTRA_FRAME_Y_MODE_CDF[0][0]`, `DEFAULT_UV_MODE_CFL_ALLOWED_CDF[0]`,
+> `DEFAULT_FILTER_INTRA_CDF`/`_MODE_CDF`, `DEFAULT_TX_32X32_CDF`,
+> `DEFAULT_TXB_SKIP_CDF[3][3][0..3]`, `DEFAULT_EOB_PT_1024_CDF[3][0]`,
+> `DEFAULT_COEFF_BASE_EOB_CDF[3][3][*][*]`, `DEFAULT_COEFF_BR_CDF[3][3][0][0..2]`
+> — every single one matched the spec's own numbers exactly. **The
+> CDF-table-scraping hypothesis from the previous note is now disproven**,
+> not just for `TX_32X32` but for the whole read chain. That redirected the
+> search upstream, to the bitstream *slicing*/*offset* machinery rather
+> than any table or per-block syntax logic (all of which had already been
+> hand-verified correct in prior sessions), and found three more real bugs:
+>
+> 1. **`decode_tile_group`'s `tile_group_header_bits` computation fabricated
+>    a `tile_cdf_update_flag` read** (`if !frame_is_intra { br.read_bit() }`)
+>    that does not exist anywhere in AV1 spec §5.11.1's real
+>    `tile_group_header()` syntax (which has only
+>    `tile_start_and_end_present_flag` + `tg_start`/`tg_end`, gated on
+>    `NumTiles > 1`, then `byte_alignment()` — nothing else, and nothing
+>    gated on `frame_is_intra`). This reads one bit the real encoder never
+>    wrote for every inter-frame tile group, desyncing the tile from the
+>    very first symbol. Removed.
+> 2. **`cfl_allowed` was computed once per tile and hardcoded `true`**,
+>    passed into `TileDecodeState` as a constructor field instead of being
+>    derived per block from `Block_Width[MiSize] <= 32 && Block_Height[MiSize]
+>    <= 32` (AV1 spec §5.11.5 `is_cfl_allowed()`, non-lossless case). `true`
+>    is only coincidentally correct for blocks `<= BLOCK_32X32` (which is
+>    why `solid_red`'s `BLOCK_32X32` block wasn't itself desynced by this);
+>    for anything `>= BLOCK_64X64` it read `uv_mode` from the wrong CDF
+>    (14-symbol CFL-allowed table instead of the 13-symbol not-allowed one).
+>    Replaced with a new `cfl_allowed_for_bsize(bsize)` helper, computed at
+>    both `read_uv_mode` call sites; the field/constructor parameter were
+>    removed from `TileDecodeState`.
+> 3. **The real fix: `SymbolDecoder::new_with_bit_offset` initialized
+>    `symbol_value`/`symbol_max_bits` from bit 0, then overwrote `bit_pos`
+>    to `bit_offset` afterwards** — so for any nonzero `bit_offset` (i.e.
+>    whenever the tile-group header consumes real bits before
+>    `byte_alignment()`, which the fabricated bug #1 above was itself
+>    triggering for every inter frame, and which real multi-tile frames hit
+>    via `tile_start_and_end_present_flag`/`tg_start`/`tg_end`), `init_symbol`'s
+>    normative 15-bit window (§8.2.2) was read from the *wrong* bytes and
+>    `SymbolMaxBits` was computed too large by `bit_offset`. Rewrote
+>    `new_with_bit_offset` to compute `remaining_bits = data.len()*8 -
+>    bit_offset` and do the real `init_symbol` window read starting at
+>    `bit_offset`, with `new()` now a thin wrapper calling it with offset 0.
+>
+> **Result:** `solid_red_32`/`solid_red_64` are now **99.00 dB Y/U/V**
+> (`av1_psnr_check`'s ceiling — effectively pixel-exact; `dbg_av1_solid_red`
+> confirms an exact 8×8-sample match against `dav1d`, `quant[0]` now decodes
+> to `-86` — matching the value independently hand-derived from
+> `inverse_transform` — where it previously decoded to `+11`). The other
+> four corpus entries (`testsrc`, `mandelbrot`, `smptebars`, `testsrc2`) are
+> still far from pixel-exact (8-15 dB), so at least one more bug remains for
+> non-flat / multi-block content — but the specific `solid_red` block that
+> anchored the last several sessions' investigation is fully resolved, and
+> the methodology (spec-PDF-as-ground-truth via `pypdf`, not hand
+> transcription) is reusable for whatever's found next. `cargo test -p
+> tpt-kinetix-av1` (unit + integration + doctests) and
+> `cargo build --workspace --exclude tpt-kinetix-kg` are both green
+> (`tpt-kinetix-kg` has pre-existing, unrelated build errors from a
+> dependency bump — not touched this session).
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap

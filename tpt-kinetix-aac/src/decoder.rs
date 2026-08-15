@@ -30,10 +30,14 @@ struct DecodedChannel {
     coeffs: [f32; 1024],
     band_type: Vec<u8>,
     scalefactor: Vec<i32>,
+    #[allow(dead_code)]
     global_gain: u8,
+    #[allow(dead_code)]
     pulse: Option<crate::pulse::PulseData>,
+    #[allow(dead_code)]
     tns: Option<crate::tns::TnsData>,
     is_cce: bool, // true if this is a coupling channel (not output directly)
+    #[allow(dead_code)]
     cpe_pair: Option<(usize, usize)>, // (left_idx, right_idx) if part of CPE
 }
 
@@ -41,7 +45,9 @@ struct DecodedChannel {
 #[derive(Debug, Clone)]
 struct DecodedCpe {
     instance_tag: u8,
+    #[allow(dead_code)]
     left: DecodedChannel,
+    #[allow(dead_code)]
     right: DecodedChannel,
     ms_mask_present: u8,
     ms_mask: Vec<bool>,
@@ -84,6 +90,7 @@ impl Windows {
 struct ChannelState {
     overlap: [f32; 1024],
     prev_shape: u8,
+    #[allow(dead_code)]
     init: bool,
 }
 
@@ -289,7 +296,7 @@ impl AacDecoder {
 
                 // Extract the data we need before mutable borrows to avoid borrow checker issues.
                 let left_ics = decoded_channels[left_idx].ics;
-                let right_ics = decoded_channels[right_idx].ics;
+                let _right_ics = decoded_channels[right_idx].ics;
                 let left_band_type = decoded_channels[left_idx].band_type.clone();
                 let right_band_type = decoded_channels[right_idx].band_type.clone();
                 let left_scalefactor = decoded_channels[left_idx].scalefactor.clone();
@@ -363,8 +370,8 @@ impl AacDecoder {
         let ch_count = pcm_planes.len();
         let mut interleaved = Vec::with_capacity(1024 * ch_count);
         for i in 0..1024 {
-            for ch in 0..ch_count {
-                interleaved.push(pcm_planes[ch][i]);
+            for plane in &pcm_planes {
+                interleaved.push(plane[i]);
             }
         }
 
@@ -416,6 +423,7 @@ impl AacDecoder {
 }
 
 /// Return the decoded channel stream for an SCE or LFE element.
+#[allow(dead_code)]
 fn elem_stream(el: &Element) -> &ChannelStream {
     match el {
         Element::Sce(s) => &s.stream,
@@ -425,6 +433,7 @@ fn elem_stream(el: &Element) -> &ChannelStream {
 }
 
 /// Run the filterbank (IMDCT + window + overlap-add) for one channel.
+#[allow(dead_code)]
 fn synthesize(
     imdct_long: &Imdct,
     imdct_short: &Imdct,
@@ -487,9 +496,7 @@ fn long_synthesis(
             for i in 0..nlong {
                 out[i] = state.overlap[i] + buf[i] * w_prev_long[i];
             }
-            for i in 0..nflat_ls {
-                state.overlap[i] = buf[nlong + i];
-            }
+            state.overlap[..nflat_ls].copy_from_slice(&buf[nlong..nlong + nflat_ls]);
             for i in 0..nshort {
                 state.overlap[nflat_ls + i] =
                     buf[nlong + nflat_ls + i] * w_cur_short[nshort - 1 - i];
@@ -499,9 +506,7 @@ fn long_synthesis(
             }
         }
         WindowSequence::LongStop => {
-            for i in 0..nflat_ls {
-                out[i] = state.overlap[i];
-            }
+            out[..nflat_ls].copy_from_slice(&state.overlap[..nflat_ls]);
             for i in 0..nshort {
                 out[nflat_ls + i] =
                     state.overlap[nflat_ls + i] + buf[nflat_ls + i] * w_prev_short[i];
@@ -532,13 +537,11 @@ fn short_synthesis(
     let w_prev = &windows.short[state.prev_shape as usize];
     let w_cur = &windows.short[ws];
 
-    for i in 0..nflat_ls {
-        out[i] = state.overlap[i];
-    }
+    out[..nflat_ls].copy_from_slice(&state.overlap[..nflat_ls]);
     for i in 0..nshort {
-        out[nflat_ls + i] = state.overlap[nflat_ls + i] + buf[nshort * 0 + i] * w_prev[i];
+        out[nflat_ls + i] = state.overlap[nflat_ls + i] + buf[i] * w_prev[i];
         out[nflat_ls + nshort + i] = state.overlap[nflat_ls + nshort + i]
-            + buf[nshort * 1 + i] * w_cur[nshort - 1 - i]
+            + buf[nshort + i] * w_cur[nshort - 1 - i]
             + buf[nshort * 2 + i] * w_cur[i];
         out[nflat_ls + 2 * nshort + i] = state.overlap[nflat_ls + 2 * nshort + i]
             + buf[nshort * 3 + i] * w_cur[nshort - 1 - i]

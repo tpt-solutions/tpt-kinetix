@@ -49,13 +49,13 @@ impl Imdct {
         debug_assert_eq!(input.len(), self.n);
         debug_assert_eq!(output.len(), 2 * self.n);
         let inv_n = 1.0 / self.n as f64;
-        for nn in 0..2 * self.n {
+        for (nn, out) in output.iter_mut().enumerate() {
             let row = &self.table[nn * self.n..(nn + 1) * self.n];
             let mut sum = 0.0f64;
             for k in 0..self.n {
                 sum += input[k] as f64 * row[k] as f64;
             }
-            output[nn] = (sum * inv_n) as f32;
+            *out = (sum * inv_n) as f32;
         }
     }
 
@@ -96,37 +96,33 @@ mod tests {
         let imdct = Imdct::new(n);
 
         let mut signal = [0.0f64; 32];
-        for t in 0..32 {
-            signal[t] = (t as f64 * 0.3).sin();
+        for (t, s) in signal.iter_mut().enumerate() {
+            *s = (t as f64 * 0.3).sin();
         }
         let mut win = [0.0f64; 32];
-        for t in 0..32 {
-            win[t] = (PI * (t as f64 + 0.5) / (2.0 * n as f64)).sin();
+        for (t, w) in win.iter_mut().enumerate() {
+            *w = (PI * (t as f64 + 0.5) / (2.0 * n as f64)).sin();
         }
         let mut windowed = [0.0f64; 32];
-        for t in 0..32 {
-            windowed[t] = signal[t] * win[t];
+        for (t, w) in windowed.iter_mut().enumerate() {
+            *w = signal[t] * win[t];
         }
         let mut spec = [0.0f64; 16];
-        for k in 0..16 {
+        for (k, sp) in spec.iter_mut().enumerate() {
             let mut s = 0.0;
-            for t in 0..32 {
+            for (t, &windowed_t) in windowed.iter().enumerate() {
                 let arg = (PI / (2.0 * n as f64)) * (2 * t + 1 + n / 2) as f64 * (2 * k + 1) as f64;
-                s += windowed[t] * arg.cos();
+                s += windowed_t * arg.cos();
             }
-            spec[k] = s;
+            *sp = s;
         }
 
         let mut freq = vec![0.0f32; 16];
-        for k in 0..16 {
-            freq[k] = spec[k] as f32;
-        }
+        freq.copy_from_slice(&spec.map(|s| s as f32));
         let mut time = vec![0.0f32; 32];
         imdct.transform(&freq, &mut time);
 
-        for i in 0..32 {
-            assert!(time[i].is_finite());
-        }
+        assert!(time.iter().all(|&v| v.is_finite()));
     }
 
     #[test]
@@ -159,15 +155,15 @@ mod tests {
             freq[k] = 1.0;
             let mut time = vec![0.0f32; 2 * n];
             imdct.transform(&freq, &mut time);
-            for nn in 0..2 * n {
+            for (nn, &time_nn) in time.iter().enumerate() {
                 let a = (2 * nn + 1 + n / 2) as f64;
                 let expected = ((1.0 / n as f64)
                     * (PI / (2.0 * n as f64) * a * (2 * k + 1) as f64).cos())
                     as f32;
                 assert!(
-                    (time[nn] - expected).abs() < 1e-5,
+                    (time_nn - expected).abs() < 1e-5,
                     "basis k={k} n={nn}: got {} want {expected}",
-                    time[nn]
+                    time_nn
                 );
             }
         }

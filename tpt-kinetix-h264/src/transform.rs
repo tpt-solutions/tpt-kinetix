@@ -687,11 +687,11 @@ pub fn dequant_idct_8x8(
         let weight = scaling.scaling_8x8(scale_list)[z] as i32;
         let ls = (weight * DEQUANT8_LEVEL[m][cls] + 8) >> 4;
         let scaled = coeffs[z] as i32 * ls;
-        d[z] = if shift >= 6 {
-            scaled << (shift - 6)
-        } else {
-            (scaled + (1 << (5 - shift))) >> (6 - shift)
-        };
+        // FFmpeg formula: d = coeff * (weightScale * normAdjust / 16) * 2^(qP/6).
+        // ls already incorporates the /16 normalisation; left-shift by qP/6 gives
+        // the dequantised coefficient the IDCT receives.  The earlier (6-shift)
+        // right-shift incorrectly divided by an extra 2^6 (factor-of-64 error).
+        d[z] = ((scaled as i64) << shift) as i32;
     }
 
     // 2. Inverse zigzag scan to raster order for the 2-D transform.
@@ -856,16 +856,13 @@ mod tests {
     #[test]
     fn eight_by_eight_dc_only_is_flat() {
         // A single DC coefficient (zigzag pos 0) inverse-transforms to a flat
-        // block: every residual sample equals every other. The invariant is
-        // flatness, not a specific magnitude — a small DC of 2 at qP 0
-        // dequantises to 1 and the 8×8 IDCT normalisation (matches FFmpeg's
-        // `idct8`) round-trips it below the step to 0, which is correct H.264
-        // behaviour for a coefficient that small.
+        // block: every residual sample equals every other. DC of 2 at qP 0:
+        // ls=20, d=2*20<<0=40, IDCT=(40+32)>>6=1 (matches FFmpeg's idct8).
         let mut coeffs = [0i16; 64];
         coeffs[0] = 2;
         let out = dequant_idct_8x8(&coeffs, 0, 0, &ScalingLists::flat());
         assert!(out.iter().all(|&v| v == out[0]), "block not flat: {out:?}");
-        assert_eq!(out[0], 0);
+        assert_eq!(out[0], 1);
     }
 
     #[test]
@@ -913,12 +910,15 @@ mod tests {
     #[test]
     fn eight_by_eight_is_linear_in_dc() {
         // Doubling the DC coefficient doubles the (flat) output.
+        // Use coefficients large enough that integer rounding doesn't obscure
+        // linearity: c=64 → d=64*20<<2=5120, out=(5120+32)>>6=80;
+        //            c=128 → d=128*20<<2=10240, out=(10240+32)>>6=160 = 2*80.
         let mut c1 = [0i16; 64];
-        c1[0] = 2;
+        c1[0] = 64;
         let mut c2 = [0i16; 64];
-        c2[0] = 4;
-        let o1 = dequant_idct_8x8(&c1, 0, 0, &ScalingLists::flat());
-        let o2 = dequant_idct_8x8(&c2, 0, 0, &ScalingLists::flat());
+        c2[0] = 128;
+        let o1 = dequant_idct_8x8(&c1, 12, 0, &ScalingLists::flat());
+        let o2 = dequant_idct_8x8(&c2, 12, 0, &ScalingLists::flat());
         for i in 0..64 {
             assert_eq!(o2[i], o1[i] * 2, "mismatch at {i}");
         }
@@ -982,17 +982,14 @@ mod tests {
 
     #[test]
     fn eight_by_eight_flat_scaling_reproduces_prior_behaviour() {
-        // With a flat 8×8 list the dequant+idct pipeline is self-consistent: a
-        // small DC coefficient below the qP-0 step round-trips to 0 (the flat
-        // scaling list maps `weightScale == 16` exactly, so `weight * L / 16 ==
-        // L`; the prior (buggy) code asserted the *dequant* value here, but this
-        // function returns the full dequant+idct residual, which is 0 for a DC
-        // of 2 at qP 0 — matching FFmpeg's `idct8`).
+        // With a flat 8×8 list (all weight=16) `weight * V8 / 16 == V8`, so the
+        // flat path gives identical results to passing V8 directly. DC of 2 at
+        // qP 0: ls=20, d=40, IDCT residual=1 (matches FFmpeg `idct8`).
         let flat = ScalingLists::flat();
         let mut coeffs = [0i16; 64];
         coeffs[0] = 2;
         let out = dequant_idct_8x8(&coeffs, 0, 0, &flat)[0];
-        assert_eq!(out, 0);
+        assert_eq!(out, 1);
     }
 
     #[test]

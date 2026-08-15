@@ -579,9 +579,9 @@ impl FrameHeader {
                     ref_frame_idx = set_frame_refs(last_frame_idx, gold_frame_idx);
                 }
             }
-            for i in 0..7 {
+            for idx in ref_frame_idx.iter_mut() {
                 if !frame_refs_short_signaling {
-                    ref_frame_idx[i] = read_f8(&mut br, 3)?;
+                    *idx = read_f8(&mut br, 3)?;
                 }
             }
             let override_now = frame_size_override_flag && !error_resilient_mode;
@@ -905,11 +905,13 @@ fn read_interpolation_filter(br: &mut BitReader<'_>) -> Result<(u8, bool), Kinet
 }
 
 /// `segmentation_params()` (§5.9.14) minus the `update_data` gating wrapper.
+type SegmentationResult = Result<(bool, bool, [bool; 8], [[i16; 8]; 8]), KinetixError>;
+
 fn parse_segmentation(
     br: &mut BitReader<'_>,
     primary_ref_frame: u8,
     enabled: bool,
-) -> Result<(bool, bool, [bool; 8], [[i16; 8]; 8]), KinetixError> {
+) -> SegmentationResult {
     let mut update_map = false;
     let mut temporal_update = false;
     let mut feature_enabled = [false; 8];
@@ -941,7 +943,7 @@ fn read_segmentation_features(
 ) -> Result<(), KinetixError> {
     const BITS: [u8; 8] = [8, 6, 6, 6, 6, 3, 0, 0];
     const SIGNED: [bool; 8] = [true, true, true, true, true, false, false, false];
-    for i in 0..8 {
+    for row in data.iter_mut() {
         for j in 0..8 {
             let en = read_flag(br)?;
             if en {
@@ -954,7 +956,7 @@ fn read_segmentation_features(
                 } else {
                     read_f(br, bits)? as i16
                 };
-                data[i][j] = val;
+                row[j] = val;
             }
         }
     }
@@ -1020,11 +1022,9 @@ fn parse_loop_filter(
     let mut level = [0u8; 4];
     level[0] = read_f8(br, 6)?;
     level[1] = read_f8(br, 6)?;
-    if num_planes > 1 {
-        if level[0] != 0 || level[1] != 0 {
-            level[2] = read_f8(br, 6)?;
-            level[3] = read_f8(br, 6)?;
-        }
+    if num_planes > 1 && (level[0] != 0 || level[1] != 0) {
+        level[2] = read_f8(br, 6)?;
+        level[3] = read_f8(br, 6)?;
     }
     let sharpness = read_f8(br, 3)?;
     let delta_enabled = read_flag(br)?;
@@ -1080,6 +1080,7 @@ fn parse_cdef(
 }
 
 /// `lr_params()` (§5.9.18).
+#[allow(clippy::too_many_arguments)]
 fn parse_lr(
     br: &mut BitReader<'_>,
     coded_lossless: bool,
@@ -1105,14 +1106,13 @@ fn parse_lr(
         }
     }
     if uses_lr {
-        let mut lr_unit_shift = if use_128 {
+        let lr_unit_shift = if use_128 {
             read_flag(br)? as u8 + 1
         } else {
             read_flag(br)? as u8
         };
         if !use_128 && lr_unit_shift != 0 {
-            let extra = read_flag(br)?;
-            lr_unit_shift += extra as u8;
+            let _extra = read_flag(br)?;
         }
         if subsampling_x && subsampling_y && uses_chroma_lr {
             let _ = read_flag(br)?;
@@ -1151,8 +1151,8 @@ fn parse_global_motion(
 ) -> Result<([u8; 8], [[i32; 6]; 8]), KinetixError> {
     let mut gm_type = [GM_IDENTITY; 8];
     let mut gm_params: [[i32; 6]; 8] = [[0; 6]; 8];
-    for r in 0..8 {
-        gm_params[r][2] = 1 << WARPEDMODEL_PREC_BITS;
+    for p in gm_params.iter_mut() {
+        p[2] = 1 << WARPEDMODEL_PREC_BITS;
     }
     if frame_is_intra {
         return Ok((gm_type, gm_params));
@@ -1267,7 +1267,7 @@ fn read_global_param(
     };
     let sub = if (idx % 3) == 2 { 1 << prec_bits } else { 0 };
     let mx = 1u32 << abs_bits;
-    let r = (gm[ref_idx][idx] >> prec_diff) - sub as i32;
+    let r = (gm[ref_idx][idx] >> prec_diff) - sub;
     let val = decode_signed_subexp_with_ref(br, -(mx as i32), (mx + 1) as i32, r)?;
     gm[ref_idx][idx] = (val << prec_diff) + round;
     Ok(())
@@ -1407,7 +1407,7 @@ fn decode_unsigned_subexp_with_ref(
     if (r << 1) <= mx as i32 {
         Ok(inverse_recenter(r, v as i32) as u32)
     } else {
-        Ok((mx - 1 - inverse_recenter(mx as i32 - 1 - r, v as i32) as u32) as u32)
+        Ok(mx - 1 - inverse_recenter(mx as i32 - 1 - r, v as i32) as u32)
     }
 }
 
@@ -1425,6 +1425,7 @@ fn decode_signed_subexp_with_ref(
 }
 
 #[inline]
+#[allow(dead_code)]
 fn frame_id_none(_seq: &crate::obu::SequenceHeaderObu) -> bool {
     true
 }
@@ -1676,6 +1677,7 @@ mod tests {
             }
         }
         /// Encode an `ns(n)` non-symmetric unsigned value (mirrors [`read_ns`]).
+        #[allow(dead_code)]
         fn ns(&mut self, v: u32, n: u32) {
             let w = 32 - (n - 1).leading_zeros() - 1;
             if w == 0 {
@@ -1921,6 +1923,6 @@ mod tests {
         assert_eq!(fh.cdef_bits, 0);
         // cdef_y_pri=11, sec=2 → 11 + (2<<2) = 19; uv pri=0, sec=2 → 8.
         assert_eq!(fh.cdef_y_strength, vec![11 + (2 << 2)]);
-        assert_eq!(fh.cdef_uv_strength, vec![0 + (2 << 2)]);
+        assert_eq!(fh.cdef_uv_strength, vec![(2 << 2)]);
     }
 }

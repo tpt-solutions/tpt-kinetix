@@ -2,7 +2,7 @@
 //!
 //! Headers are encoded with the same MSB-first bit framing as the residual
 //! data, so `tpt-kinetix-bitstream`'s `BitReader` decodes them identically to
-//! the encode-side [`BitWriter`](crate::entropy::BitWriter).
+//! the encode-side [`BitWriter`].
 
 use tpt_kinetix_bitstream::bitreader::BitReader;
 

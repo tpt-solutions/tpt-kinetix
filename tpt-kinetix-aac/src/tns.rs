@@ -50,15 +50,11 @@ impl TnsFilter {
             for i in 1..m {
                 tmp[i] = d[i] - k * d[m - i];
             }
-            for i in 1..m {
-                d[i] = tmp[i];
-            }
+            d[1..m].copy_from_slice(&tmp[1..m]);
             d[m] = k;
         }
         // b_1..b_order = d[1..order+1] (step-up / Levinson-Durbin recursion, §4.6.9.2)
-        for i in 0..order {
-            self.coef[i] = d[i + 1];
-        }
+        self.coef[..order].copy_from_slice(&d[1..(order + 1)]);
     }
 }
 
@@ -162,16 +158,19 @@ pub fn apply_tns(tns: &TnsData, ics: &IcsInfo, coeffs: &mut [f32; 1024], swb: &[
     let mut gindex = vec![0usize; num_groups];
     {
         let mut acc = 0usize;
-        for gi in 0..num_groups {
-            gindex[gi] = acc;
+        for (gi, g) in gindex.iter_mut().enumerate().take(num_groups) {
+            *g = acc;
             acc += ics.group_len(gi) * 128;
         }
     }
 
-    for gi in 0..num_groups {
+    for (gi, (gbase, group_filters)) in gindex
+        .iter()
+        .enumerate()
+        .take(num_groups)
+        .map(|(gi, g)| (gi, (*g, &tns.filters[gi])))
+    {
         let glen = ics.group_len(gi);
-        let gbase = gindex[gi];
-        let group_filters = &tns.filters[gi];
         let mut band_start = 0usize;
         for filt in group_filters {
             let order = filt.order as usize;
@@ -382,8 +381,8 @@ mod tests {
         };
         let swb = [0u16, 2, 4, 6, 8]; // 2 lines per band; filter spans bands 0..2
         let mut coeffs = [0.0f32; 1024];
-        for i in 0..4 {
-            coeffs[i] = (i + 1) as f32;
+        for (i, c) in coeffs.iter_mut().enumerate().take(4) {
+            *c = (i + 1) as f32;
         }
 
         // Independent recursive reference: AR filter over lines 0..swb[2] (4
@@ -401,16 +400,16 @@ mod tests {
         }
 
         apply_tns(&tns, &ics, &mut coeffs, &swb);
-        for i in 0..4 {
+        for (i, (c, e)) in coeffs.iter().zip(expected.iter()).take(4).enumerate() {
             assert!(
-                (coeffs[i] - expected[i]).abs() < 1e-5,
+                (c - e).abs() < 1e-5,
                 "apply_tns mismatch at line {i}: got {} expected {}",
-                coeffs[i],
-                expected[i]
+                c,
+                e
             );
         }
-        for i in 4..1024 {
-            assert_eq!(coeffs[i], 0.0, "line {i} should be untouched");
+        for (i, &c) in coeffs.iter().enumerate().take(1024).skip(4) {
+            assert_eq!(c, 0.0, "line {i} should be untouched");
         }
     }
 

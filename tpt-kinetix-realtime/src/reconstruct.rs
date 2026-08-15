@@ -355,20 +355,19 @@ pub fn reconstruct_frame(
     let mut chroma_db = vec![DeblockBlock::intra(qp); chroma_total.max(1)];
 
     // Luma.
-    for bi in 0..luma_total {
+    for (bi, db) in luma_db.iter_mut().enumerate().take(luma_total) {
         let sx = bi % gw;
         let sy = bi / gw;
         let slice = slice_index_for(luma_total, n_slices, bi);
         let local = bi - chunk_range(luma_total, n_slices, slice).start;
         let block = &slices[slice][local];
         let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
-        luma_db[bi] =
-            reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
+        *db = reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
     }
 
     // Chroma (Cb, then Cr) — same grid as luma after subsampling.
     for plane_idx in 0..2usize {
-        for bi in 0..chroma_total {
+        for (bi, db) in chroma_db.iter_mut().enumerate().take(chroma_total) {
             let sx = bi % cgw;
             let sy = bi / cgw;
             let slice = slice_index_for(chroma_total, n_slices, bi);
@@ -379,7 +378,7 @@ pub fn reconstruct_frame(
                 .get(idx)
                 .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
             let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
-            chroma_db[bi] = reconstruct_chroma_block(
+            *db = reconstruct_chroma_block(
                 &mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, seq, frame,
             )?;
         }
@@ -599,18 +598,18 @@ fn neighbours_luma(fb: &FrameBuffer, x0: usize, y0: usize, b: usize) -> (Vec<i32
         R
     };
     if y0 > 0 {
-        for c in 0..b {
+        for (c, above_c) in above.iter_mut().enumerate().take(b) {
             let x = x0 + c;
             if x < fb.width {
-                above[c] = fb.luma[(y0 - 1) * stride + x] as i32;
+                *above_c = fb.luma[(y0 - 1) * stride + x] as i32;
             }
         }
     }
     if x0 > 0 {
-        for r in 0..b {
+        for (r, left_r) in left.iter_mut().enumerate().take(b) {
             let y = y0 + r;
             if y < fb.height {
-                left[r] = fb.luma[y * stride + (x0 - 1)] as i32;
+                *left_r = fb.luma[y * stride + (x0 - 1)] as i32;
             }
         }
     }
@@ -632,18 +631,18 @@ fn neighbours_chroma(
         R
     };
     if y0 > 0 {
-        for c in 0..b {
+        for (c, above_c) in above.iter_mut().enumerate().take(b) {
             let x = x0 + c;
             if x < fb.chroma_w {
-                above[c] = fb.cb[(y0 - 1) * stride + x] as i32;
+                *above_c = fb.cb[(y0 - 1) * stride + x] as i32;
             }
         }
     }
     if x0 > 0 {
-        for r in 0..b {
+        for (r, left_r) in left.iter_mut().enumerate().take(b) {
             let y = y0 + r;
             if y < fb.chroma_h {
-                left[r] = fb.cb[y * stride + (x0 - 1)] as i32;
+                *left_r = fb.cb[y * stride + (x0 - 1)] as i32;
             }
         }
     }

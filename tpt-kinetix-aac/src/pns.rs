@@ -32,9 +32,8 @@ pub fn apply_pns(
     let max_sfb = ics.max_sfb as usize;
     let short = ics.window_sequence.is_eight_short();
 
-    for g in 0..num_groups {
+    for (g, &gbase) in gindex.iter().take(num_groups).enumerate() {
         let glen = ics.group_len(g);
-        let gbase = gindex[g];
         for sfb in 0..max_sfb {
             let idx = g * max_sfb + sfb;
             if band_type[idx] != ZERO_HCB && is_noise(band_type[idx]) {

@@ -22,7 +22,8 @@ pub fn fetch_pinned_file(commit: &str, file: &str, cache_dir: &Path) -> anyhow::
     let body = ureq::get(&url)
         .call()
         .map_err(|e| anyhow::anyhow!("fetching {url}: {e}"))?
-        .into_string()
+        .into_body()
+        .read_to_string()
         .map_err(|e| anyhow::anyhow!("reading response body from {url}: {e}"))?;
 
     if let Some(parent) = out_path.parent() {

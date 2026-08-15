@@ -53,7 +53,7 @@ pub fn quant_step(lossless: bool) -> i32 {
     }
 }
 
-/// Split a decoded [`PointCloud`]'s attributes into one scalar `i32` stream per
+/// Split a decoded [`PointCloud`](tpt_kinetix_core::frame::PointCloud)'s attributes into one scalar `i32` stream per
 /// sample (used by the encoder). Returns streams in header order.
 pub fn unpack_streams(attributes: &[PointAttribute], num_points: usize) -> Vec<Vec<i32>> {
     let mut streams = Vec::new();

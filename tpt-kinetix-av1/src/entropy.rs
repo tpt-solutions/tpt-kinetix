@@ -66,30 +66,36 @@ pub struct SymbolDecoder<'a> {
 impl<'a> SymbolDecoder<'a> {
     /// `init_symbol(sz)` (§8.2.2), with `sz = data.len()`.
     pub fn new(data: &'a [u8]) -> Self {
+        Self::new_with_bit_offset(data, 0)
+    }
+
+    /// Construct a decoder over `data` that begins reading at `bit_offset`
+    /// bits into the buffer. Used when a tile group's entropy-coded payload
+    /// immediately follows a tile-group header that didn't start the buffer
+    /// at byte 0 (e.g. a multi-tile `tile_start_and_end_present_flag` +
+    /// `tg_start`/`tg_end` read before `byte_alignment()`).
+    ///
+    /// `init_symbol`'s initial 15-bit window and `SymbolMaxBits` must be
+    /// read/computed starting at `bit_offset`, not at bit 0 — a previous
+    /// version here called the bit-0 constructor first and only overwrote
+    /// `bit_pos` afterwards, which left `symbol_value` initialized from the
+    /// wrong bytes (and `symbol_max_bits` too large by `bit_offset`) for any
+    /// nonzero offset, desyncing the entire tile from the very first symbol.
+    pub fn new_with_bit_offset(data: &'a [u8], bit_offset: usize) -> Self {
         let mut dec = SymbolDecoder {
             data,
-            bit_pos: 0,
+            bit_pos: bit_offset,
             symbol_value: 0,
             symbol_range: 1 << 15,
             symbol_max_bits: 0,
         };
-        let num_bits = ((data.len() * 8).min(15)) as u32;
+        let remaining_bits = (data.len() * 8).saturating_sub(bit_offset);
+        let num_bits = remaining_bits.min(15) as u32;
         let buf = dec.f(num_bits);
         let padded_buf = buf << (15 - num_bits);
         dec.symbol_value = ((1u32 << 15) - 1) ^ padded_buf;
         dec.symbol_range = 1 << 15;
-        dec.symbol_max_bits = 8 * data.len() as i64 - 15;
-        dec
-    }
-
-    /// Construct a decoder over `data` that begins reading at `bit_offset`
-    /// bits into the buffer (0..8). Used when a tile group's entropy-coded
-    /// payload immediately follows a (not necessarily byte-aligned) frame
-    /// header: the symbol decoder state must start at the exact bit the
-    /// header ended on.
-    pub fn new_with_bit_offset(data: &'a [u8], bit_offset: usize) -> Self {
-        let mut dec = Self::new(data);
-        dec.bit_pos = bit_offset;
+        dec.symbol_max_bits = remaining_bits as i64 - 15;
         dec
     }
 

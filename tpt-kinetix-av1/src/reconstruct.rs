@@ -463,9 +463,9 @@ fn inverse_dct(t: &mut [i64], n: u32, r: u32) {
 fn adst_input_permute(t: &mut [i64], n: u32) {
     let n0 = 1usize << n;
     let copy: Vec<i64> = t[..n0].to_vec();
-    for i in 0..n0 {
+    for (i, slot) in t.iter_mut().enumerate().take(n0) {
         let idx = if i & 1 != 0 { i - 1 } else { n0 - i - 1 };
-        t[i] = copy[idx];
+        *slot = copy[idx];
     }
 }
 
@@ -473,13 +473,13 @@ fn adst_input_permute(t: &mut [i64], n: u32) {
 fn adst_output_permute(t: &mut [i64], n: u32) {
     let n0 = 1usize << n;
     let copy: Vec<i64> = t[..n0].to_vec();
-    for i in 0..n0 {
+    for (i, slot) in t.iter_mut().enumerate().take(n0) {
         let a = (i >> 3) & 1;
         let b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
         let c = ((i >> 1) & 1) ^ ((i >> 2) & 1);
         let d = (i & 1) ^ ((i >> 1) & 1);
         let idx = ((d << 3) | (c << 2) | (b << 1) | a) >> (4 - n);
-        t[i] = if i & 1 != 0 { -copy[idx] } else { copy[idx] };
+        *slot = if i & 1 != 0 { -copy[idx] } else { copy[idx] };
     }
 }
 
@@ -987,6 +987,154 @@ fn predict_intra_block(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize
     }
 }
 
+/// `Round2Signed(x, n)` (AV1 spec common definitions): `Round2` extended to
+/// negative `x` by rounding the magnitude and restoring the sign.
+#[inline]
+#[allow(dead_code)]
+fn round2_signed(x: i64, n: u32) -> i64 {
+    if x >= 0 {
+        round2(x, n)
+    } else {
+        -round2(-x, n)
+    }
+}
+
+/// Number of fractional bits in [`INTRA_FILTER_TAPS`]'s integer coefficients
+/// (AV1 spec `INTRA_FILTER_SCALE_BITS`); every tap row sums to `1 << 4`.
+#[allow(dead_code)]
+const INTRA_FILTER_SCALE_BITS: u32 = 4;
+
+/// `Intra_Filter_Taps[INTRA_FILTER_MODES][8][7]` (AV1 spec "Additional
+/// tables"), transcribed directly from the spec PDF text (values there
+/// double-render each digit, e.g. `"1010"` for `10` — mechanically deduped,
+/// not hand-retyped). Indexed `[filter_intra_mode][(i1<<2)+j1][tap]`.
+#[allow(dead_code)]
+const INTRA_FILTER_TAPS: [[[i32; 7]; 8]; 5] = [
+    [
+        [-6, 10, 0, 0, 0, 12, 0],
+        [-5, 2, 10, 0, 0, 9, 0],
+        [-3, 1, 1, 10, 0, 7, 0],
+        [-3, 1, 1, 2, 10, 5, 0],
+        [-4, 6, 0, 0, 0, 2, 12],
+        [-3, 2, 6, 0, 0, 2, 9],
+        [-3, 2, 2, 6, 0, 2, 7],
+        [-3, 1, 2, 2, 6, 3, 5],
+    ],
+    [
+        [-10, 16, 0, 0, 0, 10, 0],
+        [-6, 0, 16, 0, 0, 6, 0],
+        [-4, 0, 0, 16, 0, 4, 0],
+        [-2, 0, 0, 0, 16, 2, 0],
+        [-10, 16, 0, 0, 0, 0, 10],
+        [-6, 0, 16, 0, 0, 0, 6],
+        [-4, 0, 0, 16, 0, 0, 4],
+        [-2, 0, 0, 0, 16, 0, 2],
+    ],
+    [
+        [-8, 8, 0, 0, 0, 16, 0],
+        [-8, 0, 8, 0, 0, 16, 0],
+        [-8, 0, 0, 8, 0, 16, 0],
+        [-8, 0, 0, 0, 8, 16, 0],
+        [-4, 4, 0, 0, 0, 0, 16],
+        [-4, 0, 4, 0, 0, 0, 16],
+        [-4, 0, 0, 4, 0, 0, 16],
+        [-4, 0, 0, 0, 4, 0, 16],
+    ],
+    [
+        [-2, 8, 0, 0, 0, 10, 0],
+        [-1, 3, 8, 0, 0, 6, 0],
+        [-1, 2, 3, 8, 0, 4, 0],
+        [0, 1, 2, 3, 8, 2, 0],
+        [-1, 4, 0, 0, 0, 3, 10],
+        [-1, 3, 4, 0, 0, 4, 6],
+        [-1, 2, 3, 4, 0, 4, 4],
+        [-1, 2, 2, 3, 4, 3, 3],
+    ],
+    [
+        [-12, 14, 0, 0, 0, 14, 0],
+        [-10, 0, 14, 0, 0, 12, 0],
+        [-9, 0, 0, 14, 0, 11, 0],
+        [-8, 0, 0, 0, 14, 10, 0],
+        [-10, 12, 0, 0, 0, 0, 14],
+        [-9, 1, 12, 0, 0, 0, 12],
+        [-8, 0, 0, 12, 0, 1, 11],
+        [-7, 0, 0, 1, 12, 1, 9],
+    ],
+];
+
+/// Recursive (filter-)intra prediction process (AV1 spec §7.11.2.3),
+/// selected instead of the ordinary DC/directional/smooth/Paeth dispatch
+/// whenever `use_filter_intra` is set (luma only, `y_mode == DC_PRED`,
+/// block `<= 32` on both sides). Processes the block in 4×2 sub-blocks,
+/// each one filtered from up to 7 causal neighbour samples — the first
+/// row/column of sub-blocks read from `top`/`left`/`tl` (the real
+/// reconstructed neighbours), every other sub-block reads from `pred`
+/// values this same call already produced (hence "recursive").
+///
+/// `top`/`left` must hold at least `size` valid samples (as returned by
+/// [`block_borders`]); `tl` is `AboveRow[-1]`/`LeftCol[-1]`. Only square
+/// blocks are needed here since this crate only reconstructs square
+/// transform sizes.
+#[allow(dead_code)]
+fn predict_filter_intra(
+    filter_intra_mode: usize,
+    top: &[i32],
+    left: &[i32],
+    tl: i32,
+    size: usize,
+    out: &mut [i32],
+) {
+    let above_row = |i: isize| -> i32 {
+        if i < 0 {
+            tl
+        } else {
+            top[i as usize]
+        }
+    };
+    let left_col = |i: isize| -> i32 {
+        if i < 0 {
+            tl
+        } else {
+            left[i as usize]
+        }
+    };
+
+    let w4 = size >> 2;
+    let h2 = size >> 1;
+    for i2 in 0..h2 {
+        for j4 in 0..w4 {
+            let mut p = [0i32; 7];
+            for (i, slot) in p.iter_mut().enumerate() {
+                *slot = if i < 5 {
+                    if i2 == 0 {
+                        above_row((j4 * 4 + i) as isize - 1)
+                    } else if j4 == 0 && i == 0 {
+                        left_col((i2 * 2) as isize - 1)
+                    } else {
+                        out[(i2 * 2 - 1) * size + (j4 * 4 + i - 1)]
+                    }
+                } else if j4 == 0 {
+                    left_col((i2 * 2 + i - 5) as isize)
+                } else {
+                    out[(i2 * 2 + i - 5) * size + (j4 * 4 - 1)]
+                };
+            }
+            for i1 in 0..2 {
+                for j1 in 0..4 {
+                    let taps = &INTRA_FILTER_TAPS[filter_intra_mode][(i1 << 2) + j1];
+                    let pr: i64 = taps
+                        .iter()
+                        .zip(p.iter())
+                        .map(|(&t, &v)| t as i64 * v as i64)
+                        .sum();
+                    let val = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, 255) as i32;
+                    out[(i2 * 2 + i1) * size + (j4 * 4 + j1)] = val;
+                }
+            }
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tile group decoder
 // ──────────────────────────────────────────────────────────────────────────────
@@ -996,9 +1144,11 @@ fn predict_intra_block(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize
 /// Real AV1 chooses this per block from the partition tree and `tx_size`
 /// syntax; that is AV1 Phase C. Phase B only replaced how the *coefficients*
 /// inside each block are read.
+#[allow(dead_code)]
 const LUMA_TX_PX: usize = 8;
 
 /// Chroma transform block size, co-located with an 8×8 luma block at 4:2:0.
+#[allow(dead_code)]
 const CHROMA_TX_PX: usize = 4;
 
 /// Build the top / left / top-left neighbour arrays for the transform block
@@ -1084,6 +1234,7 @@ fn reconstruct_tx_block(
     qindex: u8,
     pred_mode: usize,
     skip: bool,
+    filter_intra_mode: Option<usize>,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
     let num_coeffs = tx_px * tx_px;
@@ -1137,7 +1288,15 @@ fn reconstruct_tx_block(
         );
     }
     let mut pred = vec![0i32; num_coeffs];
-    predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred);
+    // AV1 spec §7.11.2.1: recursive (filter-)intra prediction replaces the
+    // ordinary mode dispatch only for luma (`plane == 0`) when
+    // `use_filter_intra` was signalled for this block.
+    match filter_intra_mode {
+        Some(fi_mode) if blk.plane == 0 => {
+            predict_filter_intra(fi_mode, &top, &left, tl, tx_px, &mut pred);
+        }
+        _ => predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred),
+    }
     if dbg {
         eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
     }
@@ -1262,6 +1421,22 @@ const fn max_tx_size_for_bsize(bsize: usize) -> usize {
     }
 }
 
+/// `is_cfl_allowed()` (AV1 spec §5.11.5), non-lossless case: `CFL_PRED` is
+/// only a legal `uv_mode` choice when the current block is at most 32×32.
+/// Previously this crate passed a single `true` fixed at tile-construction
+/// time regardless of block size, which is only coincidentally correct for
+/// blocks `<= BLOCK_32X32` — for anything larger (`BLOCK_64X64` and up) it
+/// wrongly read `uv_mode` from the CFL-allowed CDF (14 symbols) instead of
+/// the CFL-not-allowed one (13 symbols), desyncing every larger intra block.
+/// The lossless-frame branch of the spec formula
+/// (`get_plane_residual_size(MiSize, 1) == BLOCK_4X4`) isn't modelled here
+/// (this crate doesn't yet reconstruct lossless AV1); this covers the
+/// common non-lossless path.
+#[inline]
+const fn cfl_allowed_for_bsize(bsize: usize) -> bool {
+    BLOCK_WIDTH[bsize] <= 32 && BLOCK_HEIGHT[bsize] <= 32
+}
+
 fn bsize_from_wh(w: usize, h: usize) -> usize {
     for i in 0..BLOCK_SIZES {
         if BLOCK_WIDTH[i] == w && BLOCK_HEIGHT[i] == h {
@@ -1358,9 +1533,11 @@ struct ModeCdfs {
     tx_16x16: [[u16; 4]; 3],
     tx_32x32: [[u16; 4]; 3],
     tx_64x64: [[u16; 4]; 3],
+    #[allow(dead_code)]
     txfm_split: [[u16; 3]; 21],
     skip: [[u16; 3]; 3],
     segment_id: [[u16; 9]; 3],
+    #[allow(dead_code)]
     angle_delta: [[u16; 8]; 8],
     interp_filter: [[u16; 4]; 16],
     filter_intra: [[u16; 3]; 22],
@@ -1607,7 +1784,6 @@ struct TileDecodeState<'a> {
     mi_cols: usize,
     mi_rows: usize,
     tx_mode_select: bool,
-    cfl_allowed: bool,
     reduced_tx_set: bool,
     lossless: bool,
     qindex: u8,
@@ -1628,6 +1804,7 @@ struct TileDecodeState<'a> {
     uv_left: Vec<u8>,
     segmentation_enabled: bool,
     seg_feature_skip: bool,
+    #[allow(dead_code)]
     seg_feature_alt_q: bool,
     /// Sequence-header `enable_filter_intra` (§5.11.24 gate).
     enable_filter_intra: bool,
@@ -1664,9 +1841,13 @@ struct TileDecodeState<'a> {
     v_plane: &'a mut [u8],
     y_stride: usize,
     uv_stride: usize,
+    #[allow(dead_code)]
     width: usize,
+    #[allow(dead_code)]
     height: usize,
+    #[allow(dead_code)]
     uv_w: usize,
+    #[allow(dead_code)]
     uv_h: usize,
     luma_max_x4: usize,
     luma_max_y4: usize,
@@ -1706,7 +1887,6 @@ impl<'a> TileDecodeState<'a> {
         uv_stride: usize,
         qindex: u8,
         tx_mode_select: bool,
-        cfl_allowed: bool,
         reduced_tx_set: bool,
         subsampling_x: bool,
         subsampling_y: bool,
@@ -1716,8 +1896,9 @@ impl<'a> TileDecodeState<'a> {
         tile_h: usize,
         monochrome: bool,
         segmentation_enabled: bool,
-        seg_feature_skip: bool,
-        seg_feature_alt_q: bool,
+    seg_feature_skip: bool,
+    #[allow(dead_code)]
+    seg_feature_alt_q: bool,
         enable_filter_intra: bool,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
@@ -1740,7 +1921,6 @@ impl<'a> TileDecodeState<'a> {
             mi_cols,
             mi_rows,
             tx_mode_select,
-            cfl_allowed,
             reduced_tx_set,
             lossless,
             qindex,
@@ -2016,9 +2196,21 @@ impl<'a> TileDecodeState<'a> {
                 INTRA_MODE_CONTEXT[above_mode],
                 INTRA_MODE_CONTEXT[left_mode],
             );
-            let uv_mode = self
-                .mode_cdfs
-                .read_uv_mode(&mut self.dec, self.cfl_allowed, y_mode);
+            let uv_mode =
+                self.mode_cdfs
+                    .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode);
+            // `filter_intra_mode_info()` (AV1 spec §5.11.24) is also read for
+            // an intra block coded inside an inter frame (spec
+            // `intra_block_mode_info()` calls it right after the mode reads,
+            // same as the keyframe path) — this call site previously omitted
+            // it entirely, which would desync every such block once inter
+            // frames are actually decoded.
+            let filter_intra_mode = self.mode_cdfs.read_filter_intra_mode_info(
+                &mut self.dec,
+                self.enable_filter_intra,
+                y_mode,
+                bsize,
+            );
             // `read_tx_size`'s `allowSelect = !skip || !is_inter` is always
             // true here (`is_inter` is false on this branch), so `skip`
             // does not gate this read for an intra block — only for a true
@@ -2029,7 +2221,16 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 max_tx
             };
-            self.reconstruct_intra_subblock(mi_row, mi_col, bsize, y_mode, uv_mode, skip, luma_tx)?;
+            self.reconstruct_intra_subblock(
+                mi_row,
+                mi_col,
+                bsize,
+                y_mode,
+                uv_mode,
+                skip,
+                luma_tx,
+                filter_intra_mode,
+            )?;
             // Update inter neighbour state (this block is not inter).
             for r in mi_row..(mi_row + bh).min(self.mi_rows) {
                 if let Some(s) = self.is_inter_left.get_mut(r) {
@@ -2523,8 +2724,8 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
     ) -> Result<(), KinetixError> {
-        let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
-        let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let _bw = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
         // AV1 spec §5.11.7 `intra_frame_mode_info()` reads, in this exact
         // order: segment_id, skip, [cdef/delta_q/delta_lf], then the intra
@@ -2579,9 +2780,9 @@ impl<'a> TileDecodeState<'a> {
         );
 
         // Chroma mode (AV1 spec §5.11.10).
-        let uv_mode = self
-            .mode_cdfs
-            .read_uv_mode(&mut self.dec, self.cfl_allowed, y_mode);
+        let uv_mode =
+            self.mode_cdfs
+                .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode);
 
         // `filter_intra_mode_info()` (AV1 spec §5.11.24). Reads a symbol only
         // when `enable_filter_intra && y_mode == DC_PRED && PaletteSizeY == 0
@@ -2634,6 +2835,7 @@ impl<'a> TileDecodeState<'a> {
         uv_mode: usize,
         skip: bool,
         luma_tx: usize,
+        filter_intra_mode: Option<usize>,
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
@@ -2683,6 +2885,7 @@ impl<'a> TileDecodeState<'a> {
                         self.qindex,
                         y_mode,
                         skip,
+                        filter_intra_mode,
                     )?;
                 }
             }
@@ -2697,8 +2900,8 @@ impl<'a> TileDecodeState<'a> {
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
         let bx0 = blk_px_x / 8;
         let by0 = blk_px_y / 8;
-        let bx1 = (blk_px_x + bw * MI_SIZE + 7) / 8;
-        let by1 = (blk_px_y + bh * MI_SIZE + 7) / 8;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
         let luma_tx_samples = luma_tx_w as u8;
         for by in by0..by1.min(self.meta.h8) {
             for bx in bx0..bx1.min(self.meta.w8) {
@@ -2760,6 +2963,7 @@ impl<'a> TileDecodeState<'a> {
                         self.qindex,
                         uv_mode,
                         skip,
+                        None,
                     )?;
                     reconstruct_tx_block(
                         &mut self.dec,
@@ -2777,6 +2981,7 @@ impl<'a> TileDecodeState<'a> {
                         self.qindex,
                         uv_mode,
                         skip,
+                        None,
                     )?;
                 }
             }
@@ -2848,9 +3053,6 @@ impl<'a> TileDecodeState<'a> {
     /// keyframe block whenever `TxMode == TX_MODE_SELECT` (i.e. essentially
     /// always, since `TX_MODE_SELECT` is the common case real encoders use).
     fn read_tx_size(&mut self, bsize: usize, max_tx: usize, mi_row: usize, mi_col: usize) -> usize {
-        if bsize <= BLOCK_4X4 {
-            return max_tx;
-        }
         let max_tx_depth = MAX_TX_DEPTH_TABLE[bsize];
         let bucket = match max_tx_depth {
             4 => 3, // TileTx64x64Cdf
@@ -2860,7 +3062,7 @@ impl<'a> TileDecodeState<'a> {
         };
         let ctx = self.tx_depth_context(mi_row, mi_col, max_tx);
         let tx_depth = self.mode_cdfs.read_tx_level(&mut self.dec, bucket, ctx);
-        max_tx.saturating_sub(tx_depth).max(TX_4X4)
+        max_tx.saturating_sub(tx_depth)
     }
 
     /// `tx_depth`'s CDF-selection context (AV1 spec §8.3.2): compares the
@@ -2966,11 +3168,11 @@ pub fn decode_tile_group(
             br.read_bits(tile_size_bits)
                 .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
         }
-        if !frame_is_intra {
-            // tile_cdf_update_flag
-            br.read_bit()
-                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
-        }
+        // AV1 spec §5.11.1 `tile_group_obu()`'s `tile_group_header()` has no
+        // `tile_cdf_update_flag` (or any other `frame_is_intra`-gated) field —
+        // a previous revision here fabricated one, which would have read one
+        // bit the real encoder never wrote for every inter-frame tile group
+        // and desynced the whole tile from that point on.
         // byte_alignment()
         br.byte_align();
         br.bit_position()
@@ -2990,7 +3192,6 @@ pub fn decode_tile_group(
         uv_stride,
         qindex,
         tx_mode_select,
-        true,
         reduced_tx_set,
         true, // subsampling_x (4:2:0)
         true, // subsampling_y (4:2:0)
@@ -3025,11 +3226,13 @@ pub fn decode_tile_group(
 }
 
 #[inline]
+#[allow(dead_code)]
 fn uv_plane_width(width: usize) -> usize {
     width / 2
 }
 
 #[inline]
+#[allow(dead_code)]
 fn uv_plane_height(height: usize) -> usize {
     height / 2
 }
@@ -3040,9 +3243,9 @@ fn uv_plane_height(height: usize) -> usize {
 fn build_ref_frames(ref_store: Option<&RefFrameStore>) -> RefFrames<'_> {
     let mut slots: [Option<RefSlot<'_>>; 8] = [None; 8];
     if let Some(store) = ref_store {
-        for i in 0..8 {
+        for (i, slot) in slots.iter_mut().enumerate() {
             if let Some(f) = store.get(i) {
-                slots[i] = Some(RefSlot {
+                *slot = Some(RefSlot {
                     y: &f.y,
                     u: &f.u,
                     v: &f.v,
@@ -3251,7 +3454,7 @@ pub fn reconstruct_av1_frame(
             dst.copy_from_slice(src);
         }
         for (src_plane, dst_plane) in [(&tile.u, &mut u_plane), (&tile.v, &mut v_plane)] {
-            for (dy, sy) in (tile.y0 / 2..(tile.y1 + 1) / 2).enumerate() {
+            for (dy, sy) in (tile.y0 / 2..tile.y1.div_ceil(2)).enumerate() {
                 let drow = sy * uv_w + tile.x0 / 2;
                 let srow = dy * (tw / 2);
                 dst_plane[drow..drow + tw / 2].copy_from_slice(&src_plane[srow..srow + tw / 2]);
@@ -3285,12 +3488,14 @@ mod tests {
         (0..len).map(|i| ((i * mul + add) & 0xFF) as u8).collect()
     }
 
+    type DecodeResult = Result<(Vec<u8>, Vec<u8>, Vec<u8>), KinetixError>;
+
     fn decode(
         data: &[u8],
         width: usize,
         height: usize,
         qindex: u8,
-    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), KinetixError> {
+    ) -> DecodeResult {
         let uv_w = width / 2;
         let uv_h = height / 2;
         let mut y = vec![128u8; width * height];
@@ -3417,8 +3622,8 @@ mod tests {
                 seen[v as usize] = true;
             }
             // t[i] == brev(n, i) since the source array was the identity.
-            for i in 0..len {
-                assert_eq!(t[i] as usize, brev(n, i));
+            for (i, x) in t.iter().enumerate().take(len) {
+                assert_eq!(*x as usize, brev(n, i));
             }
         }
     }
@@ -3536,7 +3741,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             0,
             0,
             8,
@@ -3585,8 +3789,8 @@ mod tests {
         assert_eq!(INTRA_MODE_CONTEXT[D207_PRED as usize], 3);
         // Old (wrong) formula: sum=1+3=4 -> above_ctx=4.min(4)=4,
         // left_ctx=(4/5).min(4)=0 -> (4,0), not the correct (1,3).
-        let wrong_above = (1usize + 3).min(4);
-        let wrong_left = ((1usize + 3) / 5).min(4);
+        let wrong_above = 4;
+        let wrong_left = (1usize + 3) / 5;
         assert_ne!((wrong_above, wrong_left), (1, 3));
     }
 
@@ -3630,7 +3834,6 @@ mod tests {
             32,
             128,
             true,
-            false,
             false,
             false,
             false,
