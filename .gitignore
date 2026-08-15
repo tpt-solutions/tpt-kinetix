@@ -38,3 +38,6 @@ Thumbs.db
 # Env / local config
 .env
 .env.local
+
+# Scratch / work artifacts
+scratch_*.txt
