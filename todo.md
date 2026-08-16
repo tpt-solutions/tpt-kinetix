@@ -758,6 +758,83 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > (`tpt-kinetix-kg` has pre-existing, unrelated build errors from a
 > dependency bump — not touched this session).
 
+> **2026-08-16 session note (continued past the breakthrough) — filter-intra
+> prediction wired up (real fix, kept); root cause found for the remaining
+> 4 corpus entries: this crate only supports *square* transform sizes, but
+> real partitioned content routinely needs rectangular ones.**
+>
+> Traced `smptebars`'s first block (`mi=(0,0)`, `bsize=BLOCK_32X8`) with the
+> same `KINETIX_AV1_DBG=1` harness (new scratch file
+> `tpt-kinetix-test-utils/tests/dbg_av1_smptebars.rs`, same "delete once
+> root-caused" convention as `dbg_av1_solid_red.rs`). Two things found:
+>
+> 1. **Real bug, fixed: filter-intra prediction was read but never applied.**
+>    `read_filter_intra_mode_info()` (added in an earlier session) correctly
+>    stayed in bitstream sync but the decoded mode was discarded
+>    (`let _filter_intra_mode = ...`) — `reconstruct_tx_block` always ran the
+>    ordinary DC/directional/smooth/Paeth predictor regardless. Implemented
+>    the real AV1 spec §7.11.2.3 recursive intra prediction process
+>    (`predict_filter_intra` in `reconstruct.rs`): processes each transform
+>    block in 4×2 sub-blocks, filtering up to 7 causal neighbour samples
+>    through `Intra_Filter_Taps[filter_intra_mode][8][7]` (new table,
+>    transcribed from the spec PDF via the same `pypdf`-dedupe method as the
+>    CDF tables above — every row independently verified to sum to `16`,
+>    matching `INTRA_FILTER_SCALE_BITS = 4`). Threaded `filter_intra_mode:
+>    Option<usize>` through `reconstruct_tx_block`/`reconstruct_intra_subblock`
+>    (luma only, per spec `plane == 0`; chroma call sites pass `None`). Also
+>    fixed the intra-in-inter-frame call site (`decode_inter_block`'s
+>    `!is_inter` branch), which was missing the `filter_intra_mode_info()`
+>    read entirely — spec's `intra_block_mode_info()` calls it too, so this
+>    would have desynced every intra block in an inter frame once inter
+>    decode is enabled. This fix is real, kept, and covered by the existing
+>    57-test suite staying green — but it turned out **not** to be
+>    `smptebars`'s dominant problem (its first block's neighbours are all
+>    the 128 default at `mi=(0,0)`, so filter-intra vs. plain-DC prediction
+>    coincidentally agree there; the fix matters starting from the *second*
+>    block onward, once real neighbour pixels exist).
+> 2. **Root cause, not yet fixed: rectangular transform sizes are silently
+>    collapsed to a square approximation.** `smptebars`'s first block is
+>    `BLOCK_32X8` — AV1 spec's `Max_Tx_Size_Rect[BLOCK_32X8] = TX_32X8` (a
+>    genuine 32-wide-by-8-tall rectangular transform; confirmed by fetching
+>    the spec PDF's own `Max_Tx_Size_Rect[BLOCK_SIZES]` table). This crate's
+>    `max_tx_size_for_bsize` instead returns `TX_8X8` (the largest *square*
+>    transform that fits, `min(32,8)=8`) for every non-square block size —
+>    a deliberate scope simplification from early AV1 Phase C/B (`coeff.rs`'s
+>    module doc already flags "only square transform sizes... anything else
+>    returns `Unsupported`", but `reconstruct.rs`'s `read_tx_size`/
+>    `max_tx_size_for_bsize` don't actually return `Unsupported` for
+>    non-square blocks — they silently substitute the wrong (square) `TX_*`
+>    value and keep decoding). Since `tx_depth`'s CDF-bucket selection,
+>    `Split_Tx_Size` application, `transform_type` CDF indexing (via
+>    `TX_SIZE_SQR`), the coefficient scan table, and the coefficient context
+>    arrays are all sized/selected from this `tx_size` value, using the
+>    wrong (square) one desyncs everything downstream for that block — this
+>    fully explains the non-flat garbage reconstructed for `smptebars`'s
+>    first block (`tx_type=3`/`H_DCT` instead of the flat region's real
+>    `DCT_DCT`, `eob=1` with a ramp-shaped residual instead of a flat one).
+>    `solid_red`'s only coded block (`BLOCK_32X32`, square) never exercised
+>    this path, which is why it alone reached pixel-exact.
+>
+> **This is a real feature gap, not a quick bug fix** — properly supporting
+> it needs: the real `Max_Tx_Size_Rect[BLOCK_SIZES]` table (spec "Additional
+> tables", already fetched this session — see above), the spec's
+> `Split_Tx_Size[TX_SIZES_ALL]` table (splits a rectangular size down,
+> alternating which dimension shrinks), rectangular scan tables in
+> `coeff_tables.rs` (currently only square 4/8/16/32/64 are implemented —
+> `get_scan` returns `Unsupported` for anything else), and a rectangular
+> path through `inverse_transform` (the spec's row/column transform sizes
+> differ for a rectangular block, with their own `Transform_Row_Shift`).
+> None of that is implemented this session. **Next step**: implement
+> rectangular transform support (`Max_Tx_Size_Rect` + `Split_Tx_Size` +
+> rectangular scan tables + rectangular `inverse_transform`) — this is very
+> likely the single highest-impact remaining item, since any partition tree
+> on non-flat content routinely produces non-square blocks (only a solid
+> flat region avoids it, hence the exact 2/6 corpus split observed).
+> `cargo test -p tpt-kinetix-av1` still green (57 unit + 1 proptest + 2
+> doctests); PSNR after this session's fix: `solid_red_32`/`_64` still
+> 99.00 dB, the other four essentially unchanged (8-13 dB, confirming
+> filter-intra wasn't their dominant bug either — rectangular tx is).
+
 ---
 
 ## Phase 0 — Project & Workspace Bootstrap

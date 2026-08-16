@@ -1896,9 +1896,8 @@ impl<'a> TileDecodeState<'a> {
         tile_h: usize,
         monochrome: bool,
         segmentation_enabled: bool,
-    seg_feature_skip: bool,
-    #[allow(dead_code)]
-    seg_feature_alt_q: bool,
+        seg_feature_skip: bool,
+        #[allow(dead_code)] seg_feature_alt_q: bool,
         enable_filter_intra: bool,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
@@ -2787,12 +2786,15 @@ impl<'a> TileDecodeState<'a> {
         // `filter_intra_mode_info()` (AV1 spec §5.11.24). Reads a symbol only
         // when `enable_filter_intra && y_mode == DC_PRED && PaletteSizeY == 0
         // (always true here — palette mode isn't implemented) && max(w,h) <=
-        // 32`; the mode value isn't yet wired into prediction (Phase C's
-        // `predict_intra_block` doesn't implement the recursive filter-intra
-        // predictor), but the *read* must still happen to stay in bitstream
-        // sync — omitting it silently desynced every DC-predicted <=32x32
-        // intra block whenever the sequence header enables the tool.
-        let _filter_intra_mode = self.mode_cdfs.read_filter_intra_mode_info(
+        // 32`. The decoded mode is now wired into the luma prediction via
+        // `predict_filter_intra` (AV1 spec §7.11.2.3) below — previously only
+        // the *read* was implemented (to stay in bitstream sync), leaving the
+        // block reconstructed with plain DC/directional prediction even
+        // though the residual was correctly decoded against the real
+        // filter-intra prediction, which is wrong whenever the encoder
+        // actually picked this tool (confirmed on the `smptebars` corpus
+        // entry's very first block).
+        let filter_intra_mode = self.mode_cdfs.read_filter_intra_mode_info(
             &mut self.dec,
             self.enable_filter_intra,
             y_mode,
@@ -2814,10 +2816,19 @@ impl<'a> TileDecodeState<'a> {
 
         if mi_row == 0 && mi_col == 0 && std::env::var("KINETIX_AV1_DBG").is_ok() {
             eprintln!(
-                "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx} filter_intra={_filter_intra_mode:?}"
+                "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx} filter_intra={filter_intra_mode:?}"
             );
         }
-        self.reconstruct_intra_subblock(mi_row, mi_col, bsize, y_mode, uv_mode, skip, luma_tx)
+        self.reconstruct_intra_subblock(
+            mi_row,
+            mi_col,
+            bsize,
+            y_mode,
+            uv_mode,
+            skip,
+            luma_tx,
+            filter_intra_mode,
+        )
     }
 
     /// Reconstruct an intra-coded block's luma + chroma transform blocks once the
@@ -3490,12 +3501,7 @@ mod tests {
 
     type DecodeResult = Result<(Vec<u8>, Vec<u8>, Vec<u8>), KinetixError>;
 
-    fn decode(
-        data: &[u8],
-        width: usize,
-        height: usize,
-        qindex: u8,
-    ) -> DecodeResult {
+    fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult {
         let uv_w = width / 2;
         let uv_h = height / 2;
         let mut y = vec![128u8; width * height];

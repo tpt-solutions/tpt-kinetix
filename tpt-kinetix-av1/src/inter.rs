@@ -528,9 +528,7 @@ pub fn decode_ref_and_mv(
     let _ = allow_global;
     // `ref_name` is already known (single-ref path) or chosen by the compound
     // path before this call; we still read the mode CDFs to stay in sync.
-    let nearest_nonzero = candidates
-        .first()
-        .is_some_and(|c| c.ref_frame == ref_name);
+    let nearest_nonzero = candidates.first().is_some_and(|c| c.ref_frame == ref_name);
     let near_nonzero = candidates.get(1).is_some_and(|c| c.ref_frame == ref_name);
 
     let mode = read_single_inter_mode(dec, cdfs, mode_ctx, nearest_nonzero, near_nonzero);

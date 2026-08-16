@@ -14,7 +14,7 @@
 use nom::{
     bytes::complete::take,
     number::complete::{be_u16, be_u32, be_u8},
-    Parser, IResult,
+    IResult, Parser,
 };
 
 /// Magic bytes at the start of every face sequence: `b"FACE"`.
