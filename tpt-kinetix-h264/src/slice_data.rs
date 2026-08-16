@@ -654,7 +654,11 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         }
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
 
+        let pre_mb_type_pos = reader.bit_position();
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+        if mb_x == 0 && mb_y == 0 {
+            eprintln!("  MB(0,0) mb_type={mb_type} bits_before_mbtype={pre_mb_type_pos} bits_after={}", reader.bit_position());
+        }
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
             reader,
             mb_x,
@@ -991,6 +995,9 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
             .read_bit()
             .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?;
         is_8x8 = bit == 1;
+        if mb_x == 0 && mb_y == 0 {
+            eprintln!("  MB(0,0) after t8x8_flag={} bits={}", bit, r.bit_position());
+        }
     }
 
     if is_i16x16 {
@@ -1074,6 +1081,9 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         mb.pred_modes_4x4 = Box::new(modes);
         this_pred_ctx.is_intra4x4 = true;
         this_pred_ctx.modes = modes;
+        if mb_x == 0 && mb_y == 0 {
+            eprintln!("  MB(0,0) after pred_modes bits={}", r.bit_position());
+        }
     }
 
     // intra_chroma_pred_mode (§7.3.5.1), present for 4:2:0/4:2:2.
@@ -1081,11 +1091,15 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         .read_ue()
         .ok_or(SliceDataError::Eof("intra_chroma_pred_mode"))?;
     mb.intra_chroma_pred_mode = chroma_pred as u8;
+    if mb_x == 0 && mb_y == 0 {
+        eprintln!("  MB(0,0) after chroma_pred={chroma_pred} bits={}", r.bit_position());
+    }
 
     // coded_block_pattern for Intra_4×4 (I_16×16 carries CBP in mb_type).
     let (cbp_l, cbp_c) = if is_i16x16 {
         (cbp_luma, cbp_chroma)
     } else {
+        let pre_cbp_pos = r.bit_position();
         let code_num = r
             .read_ue()
             .ok_or(SliceDataError::Eof("coded_block_pattern"))?;
@@ -1094,15 +1108,22 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         }
         let cbp = GOLOMB_TO_INTRA4X4_CBP[code_num as usize];
         mb.cbp = cbp;
+        if mb_x == 0 && mb_y == 0 {
+            eprintln!("  MB(0,0) cbp={cbp:#04x} code_num={code_num} bits_before={pre_cbp_pos} bits_after={}", r.bit_position());
+        }
         (cbp & 0x0F, cbp >> 4)
     };
 
     // mb_qp_delta present when CBP != 0 or I_16×16.
     let mut qp = prev_qp;
     if cbp_l != 0 || cbp_c != 0 || is_i16x16 {
+        let pre_dqp = r.bit_position();
         let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
         // §7.4.5, 8-bit (QpBdOffsetY = 0): QPY = (QPY_prev + dqp + 52) % 52.
         qp = (prev_qp + dqp + 52).rem_euclid(52);
+        if mb_x == 0 && mb_y == 0 {
+            eprintln!("  MB(0,0) qp_delta={dqp} qp={qp} bits_before={pre_dqp} bits_after={}", r.bit_position());
+        }
     }
     mb.qp = qp;
 
@@ -3980,7 +4001,21 @@ fn parse_intra_residuals<T: crate::trace::DecodeTracer>(
             for sub in 0..4usize {
                 let raster = raster_of_8x8_sub(i8x8, sub);
                 let nc = luma_nc(nz_grid, mb_x, mb_y, mb_cols, this_nz, raster, nctx);
+                let bit_before = r.bit_position();
                 let (coeffs, tc, t1) = parse_cavlc_block(r, nc, 16)?;
+                let bit_after = r.bit_position();
+                if mb_x == 0 && mb_y == 0 && i8x8 == 0 && sub == 0 {
+                    let nbits = bit_after - bit_before;
+                    eprintln!("  MB(0,0) 8x8 sub=0 nc={nc} bits={bit_before}..{bit_after} (consumed {nbits}) tc={tc} t1={t1}");
+                    // Dump the actual bits by rewinding temporarily
+                    r.seek_to_bit(bit_before);
+                    let bits_val = r.read_bits(nbits.min(32) as u8).unwrap_or(0);
+                    eprintln!("  sub0 raw bits (first {}): {:0width$b}", nbits.min(32), bits_val, width=nbits.min(32));
+                    r.seek_to_bit(bit_after);
+                } else if mb_x == 0 && mb_y == 0 {
+                    eprintln!("  MB(0,0) 8x8 i8x8={i8x8} sub={sub} nc={nc} bits={bit_before}..{bit_after} (consumed {}) tc={tc} t1={t1}",
+                        bit_after - bit_before);
+                }
                 for k in 0..16usize {
                     let raw = crate::transform::CAVLC_SCAN8X8[16 * sub + k] as usize;
                     let cavlc_raster = raw;

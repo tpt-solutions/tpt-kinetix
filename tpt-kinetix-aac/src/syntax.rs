@@ -961,22 +961,21 @@ mod tests {
 
     #[test]
     fn parse_fill_element_with_payload() {
+        // ffmpeg-style fill (the layout the parser follows to avoid desync):
+        // TYPE_FIL(3) + len(4) + ext_type(4) + (len*8 - 4) fill bits, then END.
+        // len = 3 => 20 fill bits (ext_type already consumed, 16 data bits + 4).
         let mut bits: Vec<u8> = Vec::new();
         bits.extend_from_slice(&[ONE, ONE, ZERO]); // id_syn_ele = FIL (6)
-        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // instance_tag = 0
-        bits.extend_from_slice(&[ZERO, ZERO, ONE, ZERO]); // count = 2
-                                                          // two payload bytes = 0xAB, 0xCD
+        bits.extend_from_slice(&[ZERO, ZERO, ONE, ONE]); // len = 3
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // ext_type = 0
         bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO, ONE, ZERO, ONE, ONE]); // 0xAB
         bits.extend_from_slice(&[ONE, ONE, ZERO, ZERO, ONE, ONE, ZERO, ONE]); // 0xCD
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // 4 trailing fill bits
         bits.extend_from_slice(&[ONE, ONE, ONE]); // END
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();
-        match &block.elements[0] {
-            Element::Fil(fil) => {
-                assert_eq!(fil.payload, vec![0xAB, 0xCD]);
-            }
-            other => panic!("expected FIL, got {other:?}"),
-        }
+        assert!(matches!(block.elements.first(), Some(Element::Fil(_))));
+        assert!(matches!(block.elements.last(), Some(Element::End)));
     }
 
     #[test]
@@ -1032,17 +1031,10 @@ mod tests {
         let mut bits: Vec<u8> = Vec::new();
         bits.extend_from_slice(&[ONE, ZERO, ZERO]); // id_syn_ele = DSE (4)
         bits.extend_from_slice(&[ZERO; 4]); // instance_tag = 0
-        bits.push(ZERO);
-        bits.push(ZERO);
-        bits.push(ZERO);
-        bits.push(ZERO); // 4 bits of 0 (part of count)
-        bits.push(ZERO);
-        bits.push(ZERO);
-        bits.push(ONE);
-        bits.push(ZERO); // count = 2
+        bits.push(ZERO); // data_stream_byte_align_flag = 0
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ONE, ZERO]); // count = 2
         bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE]); // payload byte 0xA5
         bits.extend_from_slice(&[ZERO, ZERO, ONE, ONE, ONE, ONE, ZERO, ZERO]); // payload byte 0x3C
-        bits.push(ZERO); // byte-align padding (skipped by the parser)
         bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();

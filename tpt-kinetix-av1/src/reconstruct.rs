@@ -655,11 +655,6 @@ fn col_axis_transform(tx_type: usize) -> AxisTransform {
     }
 }
 
-/// `Transform_Row_Shift[TX_SIZES_ALL]` (spec §7.13.3), indexed by square
-/// transform-size index (`TX_4X4=0 .. TX_64X64=4` here; this crate only
-/// reconstructs the square sizes).
-const TRANSFORM_ROW_SHIFT: [u32; 5] = [0, 1, 2, 2, 2];
-
 /// 4×4 Walsh-Hadamard transform (AV1 spec §6.10.3).
 ///
 /// Selected when `Lossless` is set: AV1 §7.13.3 substitutes the inverse WHT
@@ -692,16 +687,18 @@ fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
     }
 }
 
-/// 2D inverse transform process (AV1 spec §7.13.3), bit-exact for the square
-/// transform sizes this crate reconstructs (`TX_4X4 .. TX_64X64`).
+/// 2D inverse transform process (AV1 spec §7.13.3), bit-exact for every
+/// square and rectangular `TxSize` (`TX_4X4 .. TX_64X16`, spec's
+/// `TX_SIZES_ALL`).
 ///
 /// `dequant` is the already-dequantized (§7.12.3, including `dqDenom`)
-/// coefficient array in raster order, `av1_tx_type` is the real spec
-/// `TxType` (0-15, `coeff_tables::DCT_DCT` etc — *not* the old 4-value
-/// internal enum this function used to take), `tx_size` is the square
-/// transform-size index, and `lossless` selects the WHT substitution.
-/// Writes the residual (already row+col shifted and clamped per spec) into
-/// `dst`, raster order, `n*n` samples where `n = 4 << tx_size`.
+/// coefficient array in raster order at the *adjusted* transform size's
+/// stride (see the comment below), `av1_tx_type` is the real spec `TxType`
+/// (0-15, `coeff_tables::DCT_DCT` etc), `tx_size` is the (possibly
+/// rectangular) transform-size index, and `lossless` selects the WHT
+/// substitution. Writes the residual (already row+col shifted and clamped
+/// per spec) into `dst`, raster order, `w*h` samples where `w =
+/// Tx_Width[tx_size]`, `h = Tx_Height[tx_size]`.
 fn inverse_transform(
     dequant: &[i32],
     av1_tx_type: usize,
@@ -709,7 +706,6 @@ fn inverse_transform(
     lossless: bool,
     dst: &mut [i32],
 ) {
-    let n = 4usize << tx_size;
     if lossless && tx_size == TX_4X4 {
         let mut c = [0i32; 16];
         let nn = 16.min(dequant.len());
@@ -720,10 +716,13 @@ fn inverse_transform(
         return;
     }
 
-    let log2n = tx_size as u32 + 2; // TX_4X4=0 -> log2(4)=2, ... TX_64X64=4 -> log2(64)=6
+    let log2w = av1::TX_WIDTH_LOG2[tx_size] as u32;
+    let log2h = av1::TX_HEIGHT_LOG2[tx_size] as u32;
+    let w = 1usize << log2w;
+    let h = 1usize << log2h;
     let row_kind = row_axis_transform(av1_tx_type);
     let col_kind = col_axis_transform(av1_tx_type);
-    let row_shift = TRANSFORM_ROW_SHIFT[tx_size];
+    let row_shift = av1::TRANSFORM_ROW_SHIFT[tx_size];
     let col_shift = 4u32;
     // BitDepth is fixed at 8 in this crate (only 8-bit dequant tables are
     // transcribed so far); rowClampRange = BitDepth + 8, colClampRange =
@@ -731,23 +730,50 @@ fn inverse_transform(
     let row_clamp_range = 16u32;
     let col_clamp_range = 16u32;
 
-    let mut residual = vec![0i64; n * n];
-    let mut t = vec![0i64; n];
-    for i in 0..n {
-        for j in 0..n {
-            t[j] = if i < 32 && j < 32 {
-                dequant[i * n + j] as i64
+    // AV1 spec §7.13.3 / §7.12.3 "adjusted transform size": a transform with
+    // either side `> 32` only ever has its low-frequency `<= 32`-side corner
+    // coded (`ADJUSTED_TX_SIZE` in `coeff_tables.rs`, already used by the
+    // coefficient-context derivation in `coeff.rs`) — every other position is
+    // implicitly zero. `dequant` is populated by `read_coeffs`/
+    // `dequantize_coeffs` at *that* adjusted size's stride (`adj_w`, e.g. 32
+    // for a 64-wide transform), not at the full `w`-stride this function
+    // transforms over; indexing it with `w` here would silently read
+    // garbage/zero for every row beyond the first for any transform with
+    // `w > 32` (or the wrong stride entirely for a rectangular size whose
+    // adjustment only shrinks one axis, e.g. `TX_64X16 -> TX_32X16`).
+    let adj = av1::ADJUSTED_TX_SIZE[tx_size];
+    let adj_w = av1::TX_WIDTH[adj];
+    let adj_h = av1::TX_HEIGHT[adj];
+    let mut residual = vec![0i64; w * h];
+    let mut t = vec![0i64; w.max(h)];
+    // Spec §7.13.3: "If Abs(log2W - log2H) is equal to 1, T[j] is set equal
+    // to Round2(T[j] * 2896, 12)" — the sqrt(2) rescale needed only for the
+    // non-power-of-4-aspect-ratio rectangular sizes (2:1 is exact, but a
+    // width-vs-height *log2* difference of 1 means the two axes differ by a
+    // factor of 2, and the row transform itself is normalized per `log2W`
+    // only, so the row needs this extra correction before the row 1-D
+    // transform is applied).
+    let needs_rescale = log2w.abs_diff(log2h) == 1;
+    for i in 0..h {
+        for j in 0..w {
+            t[j] = if i < adj_h && j < adj_w {
+                dequant[i * adj_w + j] as i64
             } else {
                 0
             };
         }
-        match row_kind {
-            AxisTransform::Dct => inverse_dct(&mut t, log2n, row_clamp_range),
-            AxisTransform::Adst => inverse_adst(&mut t, log2n, row_clamp_range),
-            AxisTransform::Identity => inverse_identity(&mut t, log2n),
+        if needs_rescale {
+            for v in t.iter_mut().take(w) {
+                *v = round2(*v * 2896, 12);
+            }
         }
-        for j in 0..n {
-            residual[i * n + j] = round2(t[j], row_shift);
+        match row_kind {
+            AxisTransform::Dct => inverse_dct(&mut t, log2w, row_clamp_range),
+            AxisTransform::Adst => inverse_adst(&mut t, log2w, row_clamp_range),
+            AxisTransform::Identity => inverse_identity(&mut t, log2w),
+        }
+        for j in 0..w {
+            residual[i * w + j] = round2(t[j], row_shift);
         }
     }
 
@@ -757,21 +783,21 @@ fn inverse_transform(
         *v = (*v).clamp(lo, hi);
     }
 
-    for j in 0..n {
-        for i in 0..n {
-            t[i] = residual[i * n + j];
+    for j in 0..w {
+        for i in 0..h {
+            t[i] = residual[i * w + j];
         }
         match col_kind {
-            AxisTransform::Dct => inverse_dct(&mut t, log2n, col_clamp_range),
-            AxisTransform::Adst => inverse_adst(&mut t, log2n, col_clamp_range),
-            AxisTransform::Identity => inverse_identity(&mut t, log2n),
+            AxisTransform::Dct => inverse_dct(&mut t, log2h, col_clamp_range),
+            AxisTransform::Adst => inverse_adst(&mut t, log2h, col_clamp_range),
+            AxisTransform::Identity => inverse_identity(&mut t, log2h),
         }
-        for i in 0..n {
-            residual[i * n + j] = round2(t[i], col_shift);
+        for i in 0..h {
+            residual[i * w + j] = round2(t[i], col_shift);
         }
     }
 
-    for i in 0..(n * n) {
+    for i in 0..(w * h) {
         dst[i] = residual[i] as i32;
     }
 }
@@ -780,143 +806,130 @@ fn inverse_transform(
 // Intra prediction (AV1 spec §6.9)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// DC prediction for `size`×`size` block.
-fn predict_dc(top: &[i32], left: &[i32], size: usize, out: &mut [i32]) {
+/// DC prediction for a `w`×`h` block.
+fn predict_dc(top: &[i32], left: &[i32], w: usize, h: usize, out: &mut [i32]) {
     let mut sum: i32 = 0;
-    for i in 0..size {
-        sum += top[i];
-        sum += left[i];
+    for &v in &top[..w] {
+        sum += v;
     }
-    let dc = (sum + size as i32) / (2 * size as i32);
-    for y in 0..size {
-        for x in 0..size {
-            out[y * size + x] = dc;
+    for &v in &left[..h] {
+        sum += v;
+    }
+    let dc = (sum + ((w + h) as i32 >> 1)) / (w + h) as i32;
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = dc;
         }
     }
 }
 
 /// Vertical prediction.
-fn predict_vertical(top: &[i32], size: usize, out: &mut [i32]) {
-    for y in 0..size {
-        for x in 0..size {
-            out[y * size + x] = top[x];
+fn predict_vertical(top: &[i32], w: usize, h: usize, out: &mut [i32]) {
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = top[x];
         }
     }
 }
 
 /// Horizontal prediction.
-fn predict_horizontal(left: &[i32], size: usize, out: &mut [i32]) {
-    for y in 0..size {
-        for x in 0..size {
-            out[y * size + x] = left[y];
+fn predict_horizontal(left: &[i32], w: usize, h: usize, out: &mut [i32]) {
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = left[y];
         }
     }
 }
 
-/// Paeth prediction (AV1 spec §6.9.3.6).
-fn predict_paeth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
-    for y in 0..size {
-        for x in 0..size {
+/// Paeth prediction (AV1 spec §7.11.2.2, "Basic intra prediction process").
+fn predict_paeth(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    for y in 0..h {
+        for x in 0..w {
             let t = top[x];
             let l = left[y];
-            let tr = if x + 1 < size { top[x + 1] } else { t };
-            let lb = if y + 1 < size { left[y + 1] } else { l };
             let base = l + t - tl;
-            let p0 = (base - t).abs();
-            let p1 = (base - l).abs();
-            let p2 = (base - tr).abs();
-            let p3 = (base - lb).abs();
-            let pr = if p0 <= p1 && p0 <= p2 && p0 <= p3 {
+            let p_left = (base - l).abs();
+            let p_top = (base - t).abs();
+            let p_top_left = (base - tl).abs();
+            let pr = if p_left <= p_top && p_left <= p_top_left {
                 l
-            } else if p1 <= p2 && p1 <= p3 {
+            } else if p_top <= p_top_left {
                 t
-            } else if p2 <= p3 {
-                tr
             } else {
-                lb
+                tl
             };
-            out[y * size + x] = (pr + ((base - pr) >> 31)).clamp(0, 255);
+            out[y * w + x] = pr.clamp(0, 255);
         }
     }
 }
 
-/// Smooth vertical prediction (AV1 spec §6.9.3.7).
-fn predict_smooth_v(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
-    let below_avg = if size > 0 {
-        left[..size].iter().sum::<i32>() / size as i32
+/// Smooth vertical prediction (AV1 spec §6.9.3.7), generalized to `w`×`h`.
+fn predict_smooth_v(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    let below_avg = if h > 0 {
+        left[..h].iter().sum::<i32>() / h as i32
     } else {
         128
     };
-    let right_avg = if size > 0 {
-        top[..size].iter().sum::<i32>() / size as i32
+    let right_avg = if w > 0 {
+        top[..w].iter().sum::<i32>() / w as i32
     } else {
         128
     };
     let rc = tl + right_avg - below_avg;
     let bc = tl + below_avg - right_avg;
-    for y in 0..size {
-        for x in 0..size {
-            let wt = (x + 1) * (size - y);
-            let wb = (y + 1) * (size - x);
+    for y in 0..h {
+        for x in 0..w {
+            let wt = (x + 1) * (h - y);
+            let wb = (y + 1) * (w - x);
             let s = (wt as i32 * top[x]
                 + wb as i32 * left[y]
                 + rc * (x + 1) as i32 * (y + 1) as i32
-                + bc * (size - x) as i32 * (size - y) as i32)
-                / (size * size) as i32;
-            out[y * size + x] = s.clamp(0, 255);
+                + bc * (w - x) as i32 * (h - y) as i32)
+                / (w * h) as i32;
+            out[y * w + x] = s.clamp(0, 255);
         }
     }
 }
 
 /// Smooth horizontal prediction.
-fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
-    let below_avg = if size > 0 {
-        left[..size].iter().sum::<i32>() / size as i32
+fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    let below_avg = if h > 0 {
+        left[..h].iter().sum::<i32>() / h as i32
     } else {
         128
     };
-    let right_avg = if size > 0 {
-        top[..size].iter().sum::<i32>() / size as i32
+    let right_avg = if w > 0 {
+        top[..w].iter().sum::<i32>() / w as i32
     } else {
         128
     };
     let rc = tl + right_avg - below_avg;
     let bc = tl + below_avg - right_avg;
-    for y in 0..size {
-        for x in 0..size {
-            let wt = (y + 1) * (size - x);
-            let wb = (x + 1) * (size - y);
+    for y in 0..h {
+        for x in 0..w {
+            let wt = (y + 1) * (w - x);
+            let wb = (x + 1) * (h - y);
             let s = (wt as i32 * top[x]
                 + wb as i32 * left[y]
                 + rc * (x + 1) as i32 * (y + 1) as i32
-                + bc * (size - x) as i32 * (size - y) as i32)
-                / (size * size) as i32;
-            out[y * size + x] = s.clamp(0, 255);
+                + bc * (w - x) as i32 * (h - y) as i32)
+                / (w * h) as i32;
+            out[y * w + x] = s.clamp(0, 255);
         }
     }
 }
 
 /// Smooth prediction.
-fn predict_smooth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
+fn predict_smooth(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
     let rc = tl;
     let bc = tl;
-    let _avg_top = if size > 0 {
-        top[..size].iter().sum::<i32>() / size as i32
-    } else {
-        128
-    };
-    let _avg_left = if size > 0 {
-        left[..size].iter().sum::<i32>() / size as i32
-    } else {
-        128
-    };
-    for y in 0..size {
-        for x in 0..size {
-            let wt = size - x;
-            let wb = size - y;
+    for y in 0..h {
+        for x in 0..w {
+            let wt = w - x;
+            let wb = h - y;
             let s = (wt as i32 * top[x] + wb as i32 * left[y] + rc * wb as i32 + bc * wt as i32)
-                / (size * size) as i32;
-            out[y * size + x] = s.clamp(0, 255);
+                / (w * h) as i32;
+            out[y * w + x] = s.clamp(0, 255);
         }
     }
 }
@@ -928,62 +941,82 @@ fn predict_smooth(top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i3
 /// in `i32` and clamped once. Written in `usize` they underflowed instead —
 /// a latent panic that only stayed hidden because the placeholder block grid
 /// never selects a directional mode. Real mode syntax arrives in AV1 Phase C.
+///
+/// This is a simplified (non-edge-filtered, non-upsampled) approximation of
+/// AV1 spec §7.11.2.4 — real directional prediction additionally applies
+/// `enable_intra_edge_filter` corner/edge filtering and upsampling before
+/// projecting along the angle, which this crate does not implement yet; only
+/// the block-size generalization (`size` -> `w`/`h`) changed this session.
 fn predict_directional(
     mode: u8,
     top: &[i32],
     left: &[i32],
     _tl: i32,
-    size: usize,
+    w: usize,
+    h: usize,
     out: &mut [i32],
 ) {
-    let mut ext = [0i32; 128];
-    ext[..size].copy_from_slice(&top[..size]);
-    for i in size..2 * size {
+    let ext_len = w + h;
+    let mut ext = [0i32; 256];
+    ext[..w].copy_from_slice(&top[..w]);
+    for i in w..ext_len {
         ext[i] = ext[i - 1];
     }
-    let size_i = size as i32;
-    for y in 0..size {
-        for x in 0..size {
+    let w_i = w as i32;
+    let h_i = h as i32;
+    for y in 0..h {
+        for x in 0..w {
             let (xi, yi) = (x as i32, y as i32);
             let (raw, flip) = match mode {
                 D45_PRED => (4 * xi + 2 - yi, false),
-                D135_PRED => (4 * yi + 2 * xi - 2 * size_i, false),
+                D135_PRED => (4 * yi + 2 * xi - 2 * w_i, false),
                 D113_PRED => (4 * xi + 4 - 2 * yi, true),
-                D157_PRED => (4 * yi - xi + 4 * size_i, false),
-                D207_PRED => (4 * xi + 2 * yi - 3 * size_i, false),
+                D157_PRED => (4 * yi - xi + 4 * h_i, false),
+                D207_PRED => (4 * xi + 2 * yi - 3 * h_i, false),
                 D67_PRED => (4 * yi + xi, false),
                 _ => (xi, false),
             };
-            let i = raw.clamp(0, 2 * size_i - 1) as usize;
+            let i = raw.clamp(0, ext_len as i32 - 1) as usize;
             let val = if !flip {
                 ext[i]
             } else {
-                let j = 2 * size - 1 - i;
-                if j < size {
+                let j = ext_len - 1 - i;
+                if j < h {
                     left[j]
+                } else if j - h < ext_len {
+                    ext[j - h]
                 } else {
-                    ext[j - size]
+                    ext[ext_len - 1]
                 }
             };
-            out[y * size + x] = val.clamp(0, 255);
+            out[y * w + x] = val.clamp(0, 255);
         }
     }
 }
 
 /// Predict a single intra block.
-fn predict_intra_block(mode: u8, top: &[i32], left: &[i32], tl: i32, size: usize, out: &mut [i32]) {
+#[allow(clippy::too_many_arguments)]
+fn predict_intra_block(
+    mode: u8,
+    top: &[i32],
+    left: &[i32],
+    tl: i32,
+    w: usize,
+    h: usize,
+    out: &mut [i32],
+) {
     match mode {
-        DC_PRED => predict_dc(top, left, size, out),
-        V_PRED => predict_vertical(top, size, out),
-        H_PRED => predict_horizontal(left, size, out),
-        PAETH => predict_paeth(top, left, tl, size, out),
-        SMOOTH_V => predict_smooth_v(top, left, tl, size, out),
-        SMOOTH_H => predict_smooth_h(top, left, tl, size, out),
-        SMOOTH => predict_smooth(top, left, tl, size, out),
+        DC_PRED => predict_dc(top, left, w, h, out),
+        V_PRED => predict_vertical(top, w, h, out),
+        H_PRED => predict_horizontal(left, w, h, out),
+        PAETH => predict_paeth(top, left, tl, w, h, out),
+        SMOOTH_V => predict_smooth_v(top, left, tl, w, h, out),
+        SMOOTH_H => predict_smooth_h(top, left, tl, w, h, out),
+        SMOOTH => predict_smooth(top, left, tl, w, h, out),
         D45_PRED | D135_PRED | D113_PRED | D157_PRED | D207_PRED | D67_PRED => {
-            predict_directional(mode, top, left, tl, size, out)
+            predict_directional(mode, top, left, tl, w, h, out)
         }
-        _ => predict_dc(top, left, size, out),
+        _ => predict_dc(top, left, w, h, out),
     }
 }
 
@@ -1071,17 +1104,19 @@ const INTRA_FILTER_TAPS: [[[i32; 7]; 8]; 5] = [
 /// reconstructed neighbours), every other sub-block reads from `pred`
 /// values this same call already produced (hence "recursive").
 ///
-/// `top`/`left` must hold at least `size` valid samples (as returned by
-/// [`block_borders`]); `tl` is `AboveRow[-1]`/`LeftCol[-1]`. Only square
-/// blocks are needed here since this crate only reconstructs square
-/// transform sizes.
+/// `top`/`left` must hold at least `w`/`h` valid samples respectively (as
+/// returned by [`block_borders`]); `tl` is `AboveRow[-1]`/`LeftCol[-1]`.
+/// Spec §7.11.2.3 defines this directly in terms of `w4 = w >> 2` and
+/// `h2 = h >> 1`, so it generalizes to any rectangular `w`/`h` (every AV1
+/// transform width/height is a multiple of 4, so both shifts stay exact).
 #[allow(dead_code)]
 fn predict_filter_intra(
     filter_intra_mode: usize,
     top: &[i32],
     left: &[i32],
     tl: i32,
-    size: usize,
+    w: usize,
+    h: usize,
     out: &mut [i32],
 ) {
     let above_row = |i: isize| -> i32 {
@@ -1099,8 +1134,8 @@ fn predict_filter_intra(
         }
     };
 
-    let w4 = size >> 2;
-    let h2 = size >> 1;
+    let w4 = w >> 2;
+    let h2 = h >> 1;
     for i2 in 0..h2 {
         for j4 in 0..w4 {
             let mut p = [0i32; 7];
@@ -1111,12 +1146,12 @@ fn predict_filter_intra(
                     } else if j4 == 0 && i == 0 {
                         left_col((i2 * 2) as isize - 1)
                     } else {
-                        out[(i2 * 2 - 1) * size + (j4 * 4 + i - 1)]
+                        out[(i2 * 2 - 1) * w + (j4 * 4 + i - 1)]
                     }
                 } else if j4 == 0 {
                     left_col((i2 * 2 + i - 5) as isize)
                 } else {
-                    out[(i2 * 2 + i - 5) * size + (j4 * 4 - 1)]
+                    out[(i2 * 2 + i - 5) * w + (j4 * 4 - 1)]
                 };
             }
             for i1 in 0..2 {
@@ -1128,7 +1163,7 @@ fn predict_filter_intra(
                         .map(|(&t, &v)| t as i64 * v as i64)
                         .sum();
                     let val = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, 255) as i32;
-                    out[(i2 * 2 + i1) * size + (j4 * 4 + j1)] = val;
+                    out[(i2 * 2 + i1) * w + (j4 * 4 + j1)] = val;
                 }
             }
         }
@@ -1152,15 +1187,23 @@ const LUMA_TX_PX: usize = 8;
 const CHROMA_TX_PX: usize = 4;
 
 /// Build the top / left / top-left neighbour arrays for the transform block
-/// whose top-left sample sits at (`px_x`, `px_y`) within `plane`.
+/// whose top-left sample sits at (`px_x`, `px_y`) within `plane`, sized
+/// `tx_w`/`tx_h` (independent width/height so rectangular transform blocks
+/// get correctly sized neighbour arrays instead of a shared square `tx_px`).
 ///
 /// Samples above or left of the frame fall back to the neutral value 128.
+/// (`top`/`left` previously carried a second, mirrored half — `top[x +
+/// tx_px] = top[x]` — that nothing ever read; every predictor only indexes
+/// `top[..w]`/`left[..h]`, so that duplication is dropped here rather than
+/// generalized to a `w + h`-sized mirror nobody needs.)
+#[allow(clippy::too_many_arguments)]
 fn block_borders(
     plane: &[u8],
     stride: usize,
     width: usize,
     height: usize,
-    tx_px: usize,
+    tx_w: usize,
+    tx_h: usize,
     px_x: usize,
     px_y: usize,
 ) -> (Vec<i32>, Vec<i32>, i32) {
@@ -1172,24 +1215,22 @@ fn block_borders(
             .unwrap_or(128)
     };
 
-    let mut top = vec![128i32; tx_px * 2];
-    let mut left = vec![128i32; tx_px * 2];
+    let mut top = vec![128i32; tx_w];
+    let mut left = vec![128i32; tx_h];
 
     if px_y > 0 {
-        for x in 0..tx_px {
+        for (x, slot) in top.iter_mut().enumerate() {
             let sx = px_x + x;
             if sx < width {
-                top[x] = sample(sx, px_y - 1);
-                top[x + tx_px] = top[x];
+                *slot = sample(sx, px_y - 1);
             }
         }
     }
     if px_x > 0 {
-        for y in 0..tx_px {
+        for (y, slot) in left.iter_mut().enumerate() {
             let sy = px_y + y;
             if sy < height {
-                left[y] = sample(px_x - 1, sy);
-                left[y + tx_px] = left[y];
+                *slot = sample(px_x - 1, sy);
             }
         }
     }
@@ -1229,7 +1270,6 @@ fn reconstruct_tx_block(
     plane_h: usize,
     px_x: usize,
     px_y: usize,
-    tx_px: usize,
     internal_tx_size: usize,
     qindex: u8,
     pred_mode: usize,
@@ -1237,7 +1277,9 @@ fn reconstruct_tx_block(
     filter_intra_mode: Option<usize>,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
-    let num_coeffs = tx_px * tx_px;
+    let tx_w = av1::TX_WIDTH[internal_tx_size];
+    let tx_h = av1::TX_HEIGHT[internal_tx_size];
+    let num_coeffs = tx_w * tx_h;
 
     let dbg = px_x == 0 && px_y == 0 && blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok();
 
@@ -1246,7 +1288,7 @@ fn reconstruct_tx_block(
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
         if dbg {
             eprintln!(
-                "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_px={tx_px} eob={} tx_type={} quant[0..8]={:?}",
+                "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant[0..8]={:?}",
                 coeffs.eob,
                 coeffs.tx_type,
                 &coeffs.quant[..coeffs.quant.len().min(8)]
@@ -1275,10 +1317,10 @@ fn reconstruct_tx_block(
             }
         }
     } else if dbg {
-        eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_px={tx_px} SKIP");
+        eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
     }
 
-    let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_px, px_x, px_y);
+    let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_w, tx_h, px_x, px_y);
     if dbg {
         eprintln!(
             "DBG top={:?} left={:?} tl={}",
@@ -1293,26 +1335,26 @@ fn reconstruct_tx_block(
     // `use_filter_intra` was signalled for this block.
     match filter_intra_mode {
         Some(fi_mode) if blk.plane == 0 => {
-            predict_filter_intra(fi_mode, &top, &left, tl, tx_px, &mut pred);
+            predict_filter_intra(fi_mode, &top, &left, tl, tx_w, tx_h, &mut pred);
         }
-        _ => predict_intra_block(pred_mode, &top, &left, tl, tx_px, &mut pred),
+        _ => predict_intra_block(pred_mode, &top, &left, tl, tx_w, tx_h, &mut pred),
     }
     if dbg {
         eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
     }
 
-    for dy in 0..tx_px {
+    for dy in 0..tx_h {
         let sy = px_y + dy;
         if sy >= plane_h {
             break;
         }
-        for dx in 0..tx_px {
+        for dx in 0..tx_w {
             let sx = px_x + dx;
             if sx >= plane_w {
                 break;
             }
             if let Some(slot) = samples.get_mut(sy * stride + sx) {
-                *slot = (pred[dy * tx_px + dx] + residual[dy * tx_px + dx]).clamp(0, 255) as u8;
+                *slot = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, 255) as u8;
             }
         }
     }
@@ -1374,12 +1416,12 @@ const MAX_TX_DEPTH_TABLE: [usize; BLOCK_SIZES] = [
 ];
 
 // Transform-size enums (AV1 spec Table 7.9 / §5.11.17). TX_4X4/8X8/16X16
-// already exist earlier in this file; only the larger sizes are new here.
+// already exist earlier in this file; only the larger square sizes are named
+// here — every other (rectangular) `TxSize` is referenced via `av1::TX_*`.
+// `TX_WIDTH`/`TX_HEIGHT` (all 19 `TxSize` values, not just the 5 square
+// ones) live in `coeff_tables` as `av1::TX_WIDTH`/`av1::TX_HEIGHT`.
 const TX_32X32: usize = 3;
 const TX_64X64: usize = 4;
-
-const TX_WIDTH: [usize; 5] = [4, 8, 16, 32, 64];
-const TX_HEIGHT: [usize; 5] = [4, 8, 16, 32, 64];
 
 // Partition types (AV1 spec §5.11.4).
 const PARTITION_NONE: u8 = 0;
@@ -1407,17 +1449,98 @@ const PARTITION_CDF_LOOKUP: [usize; BLOCK_SIZES] = [
     0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 0, 0, 1, 1, 2, 2,
 ];
 
-/// Largest transform size usable for a given block size (AV1 spec
-/// `max_txsize_lookup`). Limits how far the tx-size split tree can descend.
-const fn max_tx_size_for_bsize(bsize: usize) -> usize {
-    match bsize {
-        BLOCK_4X4 | BLOCK_4X8 | BLOCK_8X4 | BLOCK_4X16 | BLOCK_16X4 => TX_4X4,
-        BLOCK_8X8 | BLOCK_8X16 | BLOCK_16X8 | BLOCK_8X32 | BLOCK_32X8 => TX_8X8,
-        BLOCK_16X16 | BLOCK_16X32 | BLOCK_32X16 | BLOCK_16X64 | BLOCK_64X16 => TX_16X16,
-        BLOCK_32X32 | BLOCK_32X64 | BLOCK_64X32 => TX_32X32,
-        BLOCK_64X64 | BLOCK_64X128 | BLOCK_128X64 => TX_64X64,
-        BLOCK_128X128 => TX_64X64,
-        _ => TX_4X4,
+/// Largest transform size (square *or rectangular*) usable for a given
+/// block size (AV1 spec `Max_Tx_Size_Rect[BLOCK_SIZES]`, see
+/// [`av1::MAX_TX_SIZE_RECT`]). Limits how far the tx-size split tree can
+/// descend.
+///
+/// A previous revision collapsed every non-square `bsize` to a square
+/// approximation (e.g. `BLOCK_32X8 -> TX_8X8` instead of the real
+/// `TX_32X8`) — a deliberate scope simplification from when this crate only
+/// reconstructed square transforms. That desynced `tx_depth`'s CDF-bucket
+/// selection, `Split_Tx_Size` application, `transform_type` CDF indexing,
+/// the coefficient scan table, and the coefficient context arrays for every
+/// non-square block (i.e. most real content — only flat/solid regions avoid
+/// non-square partitions). See the 2026-08-16 todo.md session notes for how
+/// this was root-caused.
+#[inline]
+fn max_tx_size_for_bsize(bsize: usize) -> usize {
+    av1::MAX_TX_SIZE_RECT[bsize]
+}
+
+/// Sentinel for a `Subsampled_Size` combination the spec never actually
+/// reaches for a real chroma plane in this crate (only `(subx, suby) ==
+/// (0, 0)` [4:4:4] and `(1, 1)` [4:2:0] are read; `chroma_tx_size` falls
+/// back to `bsize` if it is ever hit rather than panicking).
+const BLOCK_INVALID: usize = usize::MAX;
+
+/// `Subsampled_Size[BLOCK_SIZES][2][2]` (AV1 spec §5.11.38 "Get plane
+/// residual size function"), transcribed from the spec PDF text via the same
+/// `pypdf`-fetch-and-dedupe method as the other spec tables in this crate.
+/// Indexed `[bsize][subsampling_x][subsampling_y]`.
+const SUBSAMPLED_SIZE: [[[usize; 2]; 2]; BLOCK_SIZES] = [
+    [[BLOCK_4X4, BLOCK_4X4], [BLOCK_4X4, BLOCK_4X4]],
+    [[BLOCK_4X8, BLOCK_4X4], [BLOCK_INVALID, BLOCK_4X4]],
+    [[BLOCK_8X4, BLOCK_INVALID], [BLOCK_4X4, BLOCK_4X4]],
+    [[BLOCK_8X8, BLOCK_8X4], [BLOCK_4X8, BLOCK_4X4]],
+    [[BLOCK_8X16, BLOCK_8X8], [BLOCK_INVALID, BLOCK_4X8]],
+    [[BLOCK_16X8, BLOCK_INVALID], [BLOCK_8X8, BLOCK_8X4]],
+    [[BLOCK_16X16, BLOCK_16X8], [BLOCK_8X16, BLOCK_8X8]],
+    [[BLOCK_16X32, BLOCK_16X16], [BLOCK_INVALID, BLOCK_8X16]],
+    [[BLOCK_32X16, BLOCK_INVALID], [BLOCK_16X16, BLOCK_16X8]],
+    [[BLOCK_32X32, BLOCK_32X16], [BLOCK_16X32, BLOCK_16X16]],
+    [[BLOCK_32X64, BLOCK_32X32], [BLOCK_INVALID, BLOCK_16X32]],
+    [[BLOCK_64X32, BLOCK_INVALID], [BLOCK_32X32, BLOCK_32X16]],
+    [[BLOCK_64X64, BLOCK_64X32], [BLOCK_32X64, BLOCK_32X32]],
+    [[BLOCK_64X128, BLOCK_64X64], [BLOCK_INVALID, BLOCK_32X64]],
+    [[BLOCK_128X64, BLOCK_INVALID], [BLOCK_64X64, BLOCK_64X32]],
+    [[BLOCK_128X128, BLOCK_128X64], [BLOCK_64X128, BLOCK_64X64]],
+    [[BLOCK_4X16, BLOCK_4X8], [BLOCK_INVALID, BLOCK_4X8]],
+    [[BLOCK_16X4, BLOCK_INVALID], [BLOCK_8X4, BLOCK_8X4]],
+    [[BLOCK_8X32, BLOCK_8X16], [BLOCK_INVALID, BLOCK_4X16]],
+    [[BLOCK_32X8, BLOCK_INVALID], [BLOCK_16X8, BLOCK_16X4]],
+    [[BLOCK_16X64, BLOCK_16X32], [BLOCK_INVALID, BLOCK_8X32]],
+    [[BLOCK_64X16, BLOCK_INVALID], [BLOCK_32X16, BLOCK_32X8]],
+];
+
+/// `get_plane_residual_size(subsize, plane)` (AV1 spec §5.11.38).
+#[inline]
+fn get_plane_residual_size(bsize: usize, subsampling_x: usize, subsampling_y: usize) -> usize {
+    SUBSAMPLED_SIZE[bsize][subsampling_x][subsampling_y]
+}
+
+/// `get_tx_size(plane, txSz)` (AV1 spec §5.11.37), chroma-plane case: derives
+/// the *single* transform size used for every chroma transform block of a
+/// coded block, from the coded block's own size (`bsize`) — not from the
+/// luma transform size, and not recomputed per luma tx sub-block. Applies
+/// the spec's 64-sample clamp (a chroma transform never needs `TX_64X*`/
+/// `TX_*X64`; those get folded down to `TX_16X32`/`TX_32X16`/`TX_32X32`).
+///
+/// A previous revision instead bucketed a per-luma-tx-block `cw`×`ch`
+/// (derived from the luma transform size shifted by the subsampling) into
+/// the nearest *square* `c_tx` candidate — coincidentally correct only when
+/// the subsampled residual happened to be square, which most rectangular
+/// `bsize`s under 4:2:0 are not.
+fn chroma_tx_size(bsize: usize, subsampling_x: usize, subsampling_y: usize) -> usize {
+    let plane_sz = get_plane_residual_size(bsize, subsampling_x, subsampling_y);
+    let plane_sz = if plane_sz == BLOCK_INVALID {
+        bsize
+    } else {
+        plane_sz
+    };
+    let uv_tx = av1::MAX_TX_SIZE_RECT[plane_sz];
+    let tw = av1::TX_WIDTH[uv_tx];
+    let th = av1::TX_HEIGHT[uv_tx];
+    if tw == 64 || th == 64 {
+        if tw == 16 {
+            av1::TX_16X32
+        } else if th == 16 {
+            av1::TX_32X16
+        } else {
+            TX_32X32
+        }
+    } else {
+        uv_tx
     }
 }
 
@@ -1808,6 +1931,14 @@ struct TileDecodeState<'a> {
     seg_feature_alt_q: bool,
     /// Sequence-header `enable_filter_intra` (§5.11.24 gate).
     enable_filter_intra: bool,
+    /// Per-`mi_col` transform *width* (in samples) of the most recently
+    /// reconstructed block above, and per-`mi_row` transform *height* of the
+    /// most recently reconstructed block to the left — exactly the two
+    /// quantities `tx_depth_context` needs (spec `aboveW`/`leftH`). Not the
+    /// raw `TxSize` enum index: that index isn't monotonic in size across
+    /// the square/rectangular index space (e.g. `TX_4X8 = 5 > TX_16X16 =
+    /// 2`), so a `>=` comparison on the index itself would be meaningless
+    /// for a rectangular neighbour.
     tx_above: Vec<u8>,
     tx_left: Vec<u8>,
     // ── Inter-prediction (AV1 Phase E) state ───────────────────────────────
@@ -1933,8 +2064,10 @@ impl<'a> TileDecodeState<'a> {
             ymode_left: vec![DC_PRED; mi_rows],
             uv_above: vec![DC_PRED; mi_cols],
             uv_left: vec![DC_PRED; mi_rows],
-            tx_above: vec![TX_4X4 as u8; mi_cols],
-            tx_left: vec![TX_4X4 as u8; mi_rows],
+            // Initial neighbour state is "no block decoded yet" == smallest
+            // transform, i.e. `TX_4X4`'s width (4) / height (4).
+            tx_above: vec![4u8; mi_cols],
+            tx_left: vec![4u8; mi_rows],
             frame_is_intra,
             allow_high_precision_mv,
             reference_select,
@@ -2388,7 +2521,8 @@ impl<'a> TileDecodeState<'a> {
 
         // Update inter neighbour state.
         let skip_byte = skip as u8;
-        let luma_tx_byte = luma_tx as u8;
+        let luma_tx_w_byte = av1::TX_WIDTH[luma_tx] as u8;
+        let luma_tx_h_byte = av1::TX_HEIGHT[luma_tx] as u8;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
@@ -2410,7 +2544,7 @@ impl<'a> TileDecodeState<'a> {
                 *s = skip_byte;
             }
             if let Some(s) = self.tx_left.get_mut(r) {
-                *s = luma_tx_byte;
+                *s = luma_tx_h_byte;
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
@@ -2432,7 +2566,7 @@ impl<'a> TileDecodeState<'a> {
                 *s = skip_byte;
             }
             if let Some(s) = self.tx_above.get_mut(c) {
-                *s = luma_tx_byte;
+                *s = luma_tx_w_byte;
             }
         }
         Ok(())
@@ -2561,8 +2695,8 @@ impl<'a> TileDecodeState<'a> {
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
-        let luma_tx_w = TX_WIDTH[luma_tx];
-        let luma_tx_h = TX_HEIGHT[luma_tx];
+        let luma_tx_w = av1::TX_WIDTH[luma_tx];
+        let luma_tx_h = av1::TX_HEIGHT[luma_tx];
         let subsampling_x = self.subsampling_x as u8;
         let subsampling_y = self.subsampling_y as u8;
 
@@ -2851,54 +2985,51 @@ impl<'a> TileDecodeState<'a> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
         // Reconstruct luma transform blocks.
-        let luma_tx_w = TX_WIDTH[luma_tx];
-        let luma_tx_h = TX_HEIGHT[luma_tx];
+        let luma_tx_w = av1::TX_WIDTH[luma_tx];
+        let luma_tx_h = av1::TX_HEIGHT[luma_tx];
 
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
 
-        // Luma transform blocks (4×4 … 64×64). The inverse-transform set now
-        // supports every square transform size (AV1 Phase C).
-        if luma_tx <= TX_64X64 {
-            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                    let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
-                    let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                    let blk = TxBlockCtx {
-                        plane: 0,
-                        tx_size: luma_tx,
-                        x4: px_x / 4,
-                        y4: px_y / 4,
-                        max_x4: self.luma_max_x4,
-                        max_y4: self.luma_max_y4,
-                        block_w: luma_tx_w,
-                        block_h: luma_tx_h,
-                        intra_dir: y_mode,
-                        uv_mode,
-                        qindex_positive: !self.lossless,
-                        reduced_tx_set: self.reduced_tx_set,
-                        lossless: self.lossless,
-                    };
-                    reconstruct_tx_block(
-                        &mut self.dec,
-                        &mut self.coeff_cdfs,
-                        &mut self.coeff_ctxs,
-                        &blk,
-                        y_plane,
-                        self.y_stride,
-                        self.tile_w,
-                        self.tile_h,
-                        px_x,
-                        px_y,
-                        luma_tx_w,
-                        luma_tx,
-                        self.qindex,
-                        y_mode,
-                        skip,
-                        filter_intra_mode,
-                    )?;
-                }
+        // Luma transform blocks (every square and rectangular `TxSize`; the
+        // inverse-transform set covers all 19 AV1 spec `TxSize` values).
+        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
+            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
+                let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
+                let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                let blk = TxBlockCtx {
+                    plane: 0,
+                    tx_size: luma_tx,
+                    x4: px_x / 4,
+                    y4: px_y / 4,
+                    max_x4: self.luma_max_x4,
+                    max_y4: self.luma_max_y4,
+                    block_w: luma_tx_w,
+                    block_h: luma_tx_h,
+                    intra_dir: y_mode,
+                    uv_mode,
+                    qindex_positive: !self.lossless,
+                    reduced_tx_set: self.reduced_tx_set,
+                    lossless: self.lossless,
+                };
+                reconstruct_tx_block(
+                    &mut self.dec,
+                    &mut self.coeff_cdfs,
+                    &mut self.coeff_ctxs,
+                    &blk,
+                    y_plane,
+                    self.y_stride,
+                    self.tile_w,
+                    self.tile_h,
+                    px_x,
+                    px_y,
+                    luma_tx,
+                    self.qindex,
+                    y_mode,
+                    skip,
+                    filter_intra_mode,
+                )?;
             }
         }
 
@@ -2924,21 +3055,39 @@ impl<'a> TileDecodeState<'a> {
         if !self.monochrome {
             let sub_x = self.subsampling_x as u8;
             let sub_y = self.subsampling_y as u8;
-            let cw = (luma_tx_w >> sub_x).max(4);
-            let ch = (luma_tx_h >> sub_y).max(4);
-            let c_tx = if cw >= 32 && ch >= 32 {
-                TX_32X32
-            } else if cw >= 16 && ch >= 16 {
-                TX_16X16
-            } else if cw >= 8 && ch >= 8 {
-                TX_8X8
-            } else {
-                TX_4X4
-            };
-            for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-                for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                    let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> sub_x;
-                    let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> sub_y;
+            // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
+            // transform size is derived from the *whole coded block's* size
+            // (`bsize`), not from the luma transform size directly, via
+            // `Max_Tx_Size_Rect[get_plane_residual_size(MiSize, plane)]` plus
+            // the 64-sample clamp. A previous revision instead bucketed a
+            // per-luma-tx-block `cw`/`ch` (derived from `luma_tx_w`/`_h`) into
+            // the nearest *square* candidate — wrong for any bsize whose
+            // subsampled residual size is itself rectangular (e.g. every
+            // non-square bsize under 4:2:0), and recomputed uselessly once
+            // per luma tx sub-block instead of once per coded block.
+            let c_tx = chroma_tx_size(
+                bsize,
+                usize::from(self.subsampling_x),
+                usize::from(self.subsampling_y),
+            );
+            let cw = av1::TX_WIDTH[c_tx];
+            let ch = av1::TX_HEIGHT[c_tx];
+            // Chroma transform blocks tile the coded block's *chroma-space*
+            // residual extent directly (spec §5.11.34 `residual()`'s
+            // `transform_block` loop, stepping by the single chroma `txSz`
+            // it derived for the whole block) — not the per-luma-tx-block
+            // grid `luma_tx_w`/`_h` step used above, which only coincides
+            // with the chroma step when `cw`/`ch` happen to equal the
+            // subsampled luma tx step (the previous revision's bucketed
+            // square `c_tx` always did; a real rectangular `c_tx` may not).
+            let base_cpx_x = (mi_col * MI_SIZE - self.tile_px_x0) >> sub_x;
+            let base_cpx_y = (mi_row * MI_SIZE - self.tile_px_y0) >> sub_y;
+            let chroma_bw = ((bw * MI_SIZE) >> sub_x).max(cw);
+            let chroma_bh = ((bh * MI_SIZE) >> sub_y).max(ch);
+            for ty in (0..chroma_bh).step_by(ch) {
+                for tx in (0..chroma_bw).step_by(cw) {
+                    let cpx_x = base_cpx_x + tx;
+                    let cpx_y = base_cpx_y + ty;
                     if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
                     }
@@ -2969,7 +3118,6 @@ impl<'a> TileDecodeState<'a> {
                         self.tile_ch,
                         cpx_x,
                         cpx_y,
-                        cw,
                         c_tx,
                         self.qindex,
                         uv_mode,
@@ -2987,7 +3135,6 @@ impl<'a> TileDecodeState<'a> {
                         self.tile_ch,
                         cpx_x,
                         cpx_y,
-                        cw,
                         c_tx,
                         self.qindex,
                         uv_mode,
@@ -2997,7 +3144,7 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
             // Record chroma tx/skip metadata for the same 8×8-luma grid region.
-            let c_tx_samples = TX_WIDTH[c_tx] as u8;
+            let c_tx_samples = av1::TX_WIDTH[c_tx] as u8;
             for by in by0..by1.min(self.meta.h8) {
                 for bx in bx0..bx1.min(self.meta.w8) {
                     self.meta.record_chroma(bx, by, c_tx_samples, skip);
@@ -3028,12 +3175,12 @@ impl<'a> TileDecodeState<'a> {
         }
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(slot) = self.tx_left.get_mut(r) {
-                *slot = luma_tx as u8;
+                *slot = av1::TX_HEIGHT[luma_tx] as u8;
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(slot) = self.tx_above.get_mut(c) {
-                *slot = luma_tx as u8;
+                *slot = av1::TX_WIDTH[luma_tx] as u8;
             }
         }
         let skip_byte = skip as u8;
@@ -3073,19 +3220,41 @@ impl<'a> TileDecodeState<'a> {
         };
         let ctx = self.tx_depth_context(mi_row, mi_col, max_tx);
         let tx_depth = self.mode_cdfs.read_tx_level(&mut self.dec, bucket, ctx);
-        max_tx.saturating_sub(tx_depth)
+        // AV1 spec §5.11.15: `TxSize = maxRectTxSize; for (i = 0; i <
+        // tx_depth; i++) TxSize = Split_Tx_Size[TxSize]`. A previous revision
+        // computed `max_tx.saturating_sub(tx_depth)` instead — treating the
+        // `TxSize` enum as a linear scale, which only happens to match
+        // `Split_Tx_Size` for the five square indices (`TX_4X4..TX_64X64`,
+        // consecutive by construction); every rectangular `max_tx` (index
+        // >= 5) would decrement into an unrelated size instead of actually
+        // splitting per spec (e.g. `Split_Tx_Size[TX_32X8] = TX_16X8`, index
+        // 8, not `TX_32X8`'s own index (16) minus 1 = 15/`TX_8X32`).
+        let mut tx_size = max_tx;
+        for _ in 0..tx_depth {
+            tx_size = av1::SPLIT_TX_SIZE[tx_size];
+        }
+        tx_size
     }
 
     /// `tx_depth`'s CDF-selection context (AV1 spec §8.3.2): compares the
-    /// above/left neighbour's transform size against `maxRectTxSize`
-    /// (approximated here via the tracked `tx_above`/`tx_left` size-class
-    /// arrays rather than the spec's separate width/height comparison, since
-    /// this crate only reconstructs square transforms).
+    /// above/left neighbour's transform *width*/*height* in samples against
+    /// `maxRectTxSize`'s own width/height (`ctx = (aboveW >= maxTxWidth) +
+    /// (leftH >= maxTxHeight)`). `tx_above`/`tx_left` store exactly those two
+    /// quantities (width and height respectively, in samples — not the
+    /// `TxSize` enum index, which isn't monotonic in size across the
+    /// square/rectangular index space and previously made this comparison
+    /// meaningless for any rectangular neighbour). This omits the spec's
+    /// `IsInters` branch (using the neighbour's coded block width/height
+    /// instead of its transform width/height when the neighbour is
+    /// inter-coded) since the intra-frame path this crate validates against
+    /// never has an inter neighbour.
     #[inline]
     fn tx_depth_context(&self, mi_row: usize, mi_col: usize, max_tx: usize) -> usize {
-        let above = self.tx_above[mi_col] as usize;
-        let left = self.tx_left[mi_row] as usize;
-        (usize::from(above >= max_tx)) + (usize::from(left >= max_tx))
+        let above_w = self.tx_above[mi_col] as usize;
+        let left_h = self.tx_left[mi_row] as usize;
+        let max_tx_width = av1::TX_WIDTH[max_tx];
+        let max_tx_height = av1::TX_HEIGHT[max_tx];
+        usize::from(above_w >= max_tx_width) + usize::from(left_h >= max_tx_height)
     }
 }
 
@@ -3574,7 +3743,7 @@ mod tests {
                 let top: Vec<i32> = (0..2 * size).map(|i| (i * 7 % 256) as i32).collect();
                 let left: Vec<i32> = (0..2 * size).map(|i| (i * 13 % 256) as i32).collect();
                 let mut out = vec![0i32; size * size];
-                predict_intra_block(mode, &top, &left, 128, size, &mut out);
+                predict_intra_block(mode, &top, &left, 128, size, size, &mut out);
                 assert!(
                     out.iter().all(|&v| (0..=255).contains(&v)),
                     "mode {mode} size {size} produced an out-of-range sample"
@@ -3868,5 +4037,136 @@ mod tests {
                 "bsize {bsize}: tx {tx} exceeds max_tx {max_tx}"
             );
         }
+    }
+
+    #[test]
+    fn max_tx_size_for_bsize_matches_spec_rect_table() {
+        // Spot-check against AV1 spec `Max_Tx_Size_Rect[BLOCK_SIZES]`
+        // (fetched from the spec PDF, see coeff_tables.rs's
+        // `MAX_TX_SIZE_RECT` doc comment) — every non-square bsize must keep
+        // its real rectangular transform size, not collapse to the largest
+        // square that fits (the bug this session fixed: `BLOCK_32X8` used to
+        // return `TX_8X8` here).
+        assert_eq!(max_tx_size_for_bsize(BLOCK_4X4), TX_4X4);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_8X8), TX_8X8);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_32X8), av1::TX_32X8);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_8X32), av1::TX_8X32);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_4X16), av1::TX_4X16);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_16X4), av1::TX_16X4);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_16X64), av1::TX_16X64);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_64X16), av1::TX_64X16);
+        // The three biggest block sizes all clamp down to TX_64X64 (spec:
+        // "the largest transform size that can be used", and 64 is the
+        // largest transform dimension AV1 has).
+        assert_eq!(max_tx_size_for_bsize(BLOCK_64X128), TX_64X64);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_128X64), TX_64X64);
+        assert_eq!(max_tx_size_for_bsize(BLOCK_128X128), TX_64X64);
+    }
+
+    #[test]
+    fn split_tx_size_terminates_at_4x4_and_never_grows() {
+        // Repeatedly applying `Split_Tx_Size` from any starting size must
+        // strictly shrink the transform (by area) until it bottoms out at
+        // `TX_4X4`, which is its own fixed point (spec: applied `tx_depth`
+        // times, and `tx_depth` is bounded by `Max_Tx_Depth`, so a real
+        // decode never over-applies it — but the table itself should still
+        // be well-formed for every index).
+        for tx in 0..19 {
+            let mut cur = tx;
+            let mut steps = 0;
+            let start_area = av1::TX_WIDTH[cur] * av1::TX_HEIGHT[cur];
+            let mut prev_area = start_area;
+            loop {
+                let next = av1::SPLIT_TX_SIZE[cur];
+                let next_area = av1::TX_WIDTH[next] * av1::TX_HEIGHT[next];
+                assert!(
+                    next_area <= prev_area,
+                    "tx {tx}: Split_Tx_Size must never grow the transform (step {steps})"
+                );
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                prev_area = next_area;
+                steps += 1;
+                assert!(steps < 10, "tx {tx}: Split_Tx_Size did not converge");
+            }
+            assert_eq!(
+                cur, TX_4X4,
+                "tx {tx}: Split_Tx_Size must bottom out at TX_4X4"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_transform_dc_only_is_flat_at_rectangular_sizes() {
+        // Same property as `dc_only_inverse_dct_is_flat_at_every_square_size`
+        // but for genuinely rectangular transform sizes — this is the case
+        // that was entirely untested (and unreachable, since
+        // `max_tx_size_for_bsize` never produced a rectangular `tx_size`)
+        // before this session.
+        for &tx_size in &[
+            av1::TX_4X8,
+            av1::TX_8X4,
+            av1::TX_8X16,
+            av1::TX_16X8,
+            av1::TX_32X8,
+            av1::TX_8X32,
+            av1::TX_16X64,
+            av1::TX_64X16,
+        ] {
+            let w = av1::TX_WIDTH[tx_size];
+            let h = av1::TX_HEIGHT[tx_size];
+            let adj = av1::ADJUSTED_TX_SIZE[tx_size];
+            let adj_w = av1::TX_WIDTH[adj];
+            let adj_h = av1::TX_HEIGHT[adj];
+            let mut dequant = vec![0i32; adj_w * adj_h];
+            dequant[0] = -1000;
+            let mut residual = vec![0i32; w * h];
+            inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, &mut residual);
+            assert_eq!(residual.len(), w * h);
+            let first = residual[0];
+            assert!(
+                residual.iter().all(|&v| v == first),
+                "tx_size {tx_size} ({w}x{h}): DC-only residual must be flat, got {residual:?}"
+            );
+            assert_ne!(
+                first, 0,
+                "tx_size {tx_size} ({w}x{h}): a -1000 DC coefficient must not vanish to 0"
+            );
+        }
+    }
+
+    #[test]
+    fn chroma_tx_size_matches_spec_for_common_bsizes() {
+        // AV1 spec §5.11.37/§5.11.38: chroma tx size comes from
+        // `Max_Tx_Size_Rect[Subsampled_Size[bsize][subx][suby]]`, not a
+        // square bucket over the luma tx's own subsampled width/height.
+        // 4:4:4 (subx=suby=0): chroma plane is the same size as luma.
+        assert_eq!(chroma_tx_size(BLOCK_32X8, 0, 0), av1::TX_32X8);
+        assert_eq!(chroma_tx_size(BLOCK_8X8, 0, 0), TX_8X8);
+        // 4:2:0 (subx=suby=1): Subsampled_Size[BLOCK_32X8][1][1] = BLOCK_16X4.
+        assert_eq!(chroma_tx_size(BLOCK_32X8, 1, 1), av1::TX_16X4);
+        // Subsampled_Size[BLOCK_8X8][1][1] = BLOCK_4X4.
+        assert_eq!(chroma_tx_size(BLOCK_8X8, 1, 1), TX_4X4);
+        // Subsampled_Size[BLOCK_64X64][1][1] = BLOCK_32X32.
+        assert_eq!(chroma_tx_size(BLOCK_64X64, 1, 1), TX_32X32);
+        // Subsampled_Size[BLOCK_128X128][1][1] = BLOCK_64X64, whose
+        // Max_Tx_Size_Rect is TX_64X64 (64x64) — the spec's 64-sample clamp
+        // then folds that down to TX_32X32 since neither side is 16.
+        assert_eq!(chroma_tx_size(BLOCK_128X128, 1, 1), TX_32X32);
+    }
+
+    #[test]
+    fn predict_dc_matches_spec_combined_average_for_rectangular_block() {
+        // AV1 spec §7.11.2.5, both-available case: avg = (sum(LeftCol[0..h])
+        // + sum(AboveRow[0..w]) + ((w+h)>>1)) / (w+h). Hand-computed for an
+        // 8-wide/4-tall block with constant edges (top=100, left=50):
+        // sum = 8*100 + 4*50 = 1000; (w+h)>>1 = 6; avg = 1006/12 = 83.
+        let top = vec![100i32; 8];
+        let left = vec![50i32; 4];
+        let mut out = vec![0i32; 8 * 4];
+        predict_dc(&top, &left, 8, 4, &mut out);
+        assert!(out.iter().all(|&v| v == 83), "got {out:?}");
     }
 }

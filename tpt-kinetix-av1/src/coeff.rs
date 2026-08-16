@@ -733,34 +733,57 @@ mod tests {
 
     #[test]
     fn scan_is_valid_permutation() {
+        // `TX_32X32`/`TX_64X64` (and every size with `Tx_Size_Sqr_Up ==
+        // TX_64X64`) only ever code the adjusted `<= 32`-wide/tall corner
+        // (AV1 spec §5.11.41 `get_scan`), so their real coefficient count is
+        // `min(TX_WIDTH, 32) * min(TX_HEIGHT, 32)`, not `TX_WIDTH * TX_HEIGHT`.
         for &tx in &[TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64] {
             let scan = get_scan(tx, DCT_DCT).expect("square scan exists");
-            let n = TX_WIDTH[tx];
+            let n = TX_WIDTH[tx].min(32);
             let count = n * n;
+            assert_eq!(scan.len(), count, "adjusted coefficient count");
             assert_eq!(scan[0], 0, "DC is scanned first");
             let mut seen = vec![false; count];
-            for &p in scan[..count].iter() {
+            for &p in scan.iter() {
                 let p = p as usize;
                 assert!(p < count, "position in range");
                 assert!(!seen[p], "no duplicate positions");
                 seen[p] = true;
             }
-            // Trailing entries are padding and must stay zero.
-            for &p in scan[count..].iter() {
-                assert_eq!(p, 0);
+        }
+        // Rectangular sizes are now supported (real spec scan tables).
+        for &tx in &[
+            TX_4X8, TX_8X4, TX_8X16, TX_16X8, TX_16X32, TX_32X16, TX_4X16, TX_16X4, TX_8X32,
+            TX_32X8,
+        ] {
+            let scan = get_scan(tx, DCT_DCT).expect("rectangular scan exists");
+            let count = TX_WIDTH[tx] * TX_HEIGHT[tx];
+            assert_eq!(scan.len(), count);
+            let mut seen = vec![false; count];
+            for &p in scan.iter() {
+                let p = p as usize;
+                assert!(p < count, "position in range");
+                assert!(!seen[p], "no duplicate positions");
+                seen[p] = true;
             }
         }
-        // Non-square / unsupported sizes must fail loud, not return a wrong scan.
-        assert!(get_scan(TX_8X4, DCT_DCT).is_none());
-        // Directional (row/column-preferring) large scans are also valid
-        // permutations of the full coefficient grid.
-        for &tx in &[TX_32X32, TX_64X64] {
-            for &ty in &[V_DCT, H_DCT, DCT_DCT] {
-                let scan = get_scan(tx, ty).expect("directional large scan exists");
-                let n = TX_WIDTH[tx];
-                let count = n * n;
+        // `TX_16X64`/`TX_64X16` reuse the `16x32`/`32x16` scan verbatim.
+        assert_eq!(get_scan(TX_16X64, DCT_DCT), get_scan(TX_16X32, DCT_DCT));
+        assert_eq!(get_scan(TX_64X16, DCT_DCT), get_scan(TX_32X16, DCT_DCT));
+        // Directional (row/column-preferring) scans for the sizes that can
+        // actually carry a non-`DCT_DCT` `TxType` (`Tx_Size_Sqr_Up <=
+        // TX_16X16` — larger sizes never read `transform_type()` at all, so
+        // `get_mrow_scan`/`get_mcol_scan` are never reached for them in a
+        // real decode) are also valid permutations.
+        for &tx in &[
+            TX_4X4, TX_8X8, TX_16X16, TX_4X8, TX_8X4, TX_8X16, TX_16X8, TX_4X16, TX_16X4,
+        ] {
+            for &ty in &[V_DCT, H_DCT] {
+                let scan = get_scan(tx, ty).expect("directional scan exists");
+                let count = TX_WIDTH[tx] * TX_HEIGHT[tx];
+                assert_eq!(scan.len(), count);
                 let mut seen = vec![false; count];
-                for &p in scan[..count].iter() {
+                for &p in scan.iter() {
                     let p = p as usize;
                     assert!(p < count);
                     assert!(!seen[p]);
@@ -1147,23 +1170,6 @@ mod tests {
         ];
 
         assert_matches(&decode_all(&data, 200, &blocks), EXPECTED_B);
-    }
-
-    #[test]
-    fn unsupported_transform_size_fails_loudly() {
-        // A non-square size has no scan table yet: the parser must report
-        // that instead of silently reading coefficients in the wrong order.
-        // `all_zero` is read first, so use a buffer that decodes it as 0.
-        let data = ramp(64, 37, 11);
-        let mut dec = SymbolDecoder::new(&data);
-        let mut cdfs = TileCdfs::new(100);
-        let mut ctxs = CoeffContexts::new(16, 16);
-        let b = blk(0, TX_8X4, 0, 0, 8, 4);
-        let err = read_coeffs(&mut dec, &mut cdfs, &mut ctxs, &b).unwrap_err();
-        assert!(
-            matches!(err, tpt_kinetix_core::error::KinetixError::Unsupported(_)),
-            "expected Unsupported, got {err:?}"
-        );
     }
 
     #[test]
