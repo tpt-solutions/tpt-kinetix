@@ -652,12 +652,15 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
 ///
 /// Dequantisation mirrors the 4×4 path but uses the 8×8 `LevelScale8x8`
 /// ([`DEQUANT8_LEVEL`] scaled by the active picture's scaling list) and a base
-/// `qbits` of 6 (spec §8.5.12.1, "8x8"):
-/// for `qP/6 >= 6`, `d = scaled << (qP/6 - 6)`; otherwise
-/// `d = (scaled + 2^(5 - qP/6)) >> (6 - qP/6)`.
+/// `qbits` of 6 (spec §8.5.12.1):
+/// - `qP/6 >= 6`: `d = c * LevelScale8x8 << (qP/6 - 6)`
+/// - `qP/6 <  6`: `d = (c * LevelScale8x8 + 2^(5-qP/6)) >> (6-qP/6)`
 ///
-/// `scale_list` selects the 8×8 scaling matrix: `0` = luma (8×8 luma blocks),
-/// `1` = chroma. `scaling` carries the active [`ScalingLists`] (§8.5.9).
+/// where `LevelScale8x8 = ScalingList8x8[z] * normAdjust8x8[qP%6][class]`.
+/// `idct_8x8` then right-shifts the result by 6 to produce pixel residuals.
+///
+/// `scale_list` selects the 8×8 scaling matrix: `0` = luma, `1` = chroma.
+/// `scaling` carries the active [`ScalingLists`] (§8.5.9).
 pub fn dequant_idct_8x8(
     coeffs: &[i16; 64],
     qp: i32,
@@ -666,32 +669,27 @@ pub fn dequant_idct_8x8(
 ) -> [i32; 64] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
-    let shift = qp / 6;
+    let shift = (qp / 6) as usize;
 
-    // 1. Inverse zigzag into raster order and dequantise in zigzag order.
+    // 1. Dequantise in zigzag order.
     let mut d = [0i32; 64];
     for z in 0..64 {
-        // §8.5.12.1: the position class for 8×8 dequant is determined by the
-        // coefficient's position *within its 4×4 sub-block* in raster order.
-        // The 8×8 block comprises four 4×4 sub-blocks arranged in raster order:
-        // sub-block 0 (top-left), 1 (top-right), 2 (bottom-left), 3 (bottom-right).
-        // For a raster position `r` (0..63), the position within its 4×4 sub-block
-        // is `((r >> 3) & 3) * 4 + (r & 3)`.
+        // Position class for 8×8 dequant: position within the 4×4 sub-block
+        // in raster order, i.e. `(row%4)*4 + (col%4)` for raster=row*8+col.
         let raster = ZIGZAG_8X8[z];
         let pos_in_sub = ((raster >> 3) & 3) * 4 + (raster & 3);
         let cls = DEQUANT8_SCAN[pos_in_sub];
-        // Flat level scale `DEQUANT8_LEVEL[m][cls]` already folds in the
-        // `weightScale == 16` factor, so divide it back out and replace it with
-        // the parsed scaling-list weight at this zig-zag position (rounded to
-        // nearest, preserving the flat-matrix result exactly: 16 * L / 16 == L).
+        // LevelScale8x8 = ScalingList8x8[z] * normAdjust8x8[m][cls].
+        // (§8.5.12.1; for the flat default list ScalingList8x8[z]=16.)
         let weight = scaling.scaling_8x8(scale_list)[z] as i32;
-        let ls = (weight * DEQUANT8_LEVEL[m][cls] + 8) >> 4;
+        let ls = weight * DEQUANT8_LEVEL[m][cls];
         let scaled = coeffs[z] as i32 * ls;
-        // FFmpeg formula: d = coeff * (weightScale * normAdjust / 16) * 2^(qP/6).
-        // ls already incorporates the /16 normalisation; left-shift by qP/6 gives
-        // the dequantised coefficient the IDCT receives.  The earlier (6-shift)
-        // right-shift incorrectly divided by an extra 2^6 (factor-of-64 error).
-        d[z] = ((scaled as i64) << shift) as i32;
+        // Spec §8.5.12.2: qbits=6 for 8×8; rounding term 2^(5-shift) for right-shift path.
+        d[z] = if shift >= 6 {
+            scaled << (shift - 6)
+        } else {
+            (scaled + (1 << (5 - shift as i32))) >> (6 - shift as i32)
+        };
     }
 
     // 2. Inverse zigzag scan to raster order for the 2-D transform.
@@ -856,10 +854,11 @@ mod tests {
     #[test]
     fn eight_by_eight_dc_only_is_flat() {
         // A single DC coefficient (zigzag pos 0) inverse-transforms to a flat
-        // block: every residual sample equals every other. DC of 2 at qP 0:
-        // ls=20, d=2*20<<0=40, IDCT=(40+32)>>6=1 (matches FFmpeg's idct8).
+        // block: every residual sample equals every other. DC of 7 at qP 0
+        // with flat list (weight=16): LevelScale8x8=16*20=320,
+        // d=(7*320+32)>>6=35, IDCT=(35+32)>>6=1.
         let mut coeffs = [0i16; 64];
-        coeffs[0] = 2;
+        coeffs[0] = 7;
         let out = dequant_idct_8x8(&coeffs, 0, 0, &ScalingLists::flat());
         assert!(out.iter().all(|&v| v == out[0]), "block not flat: {out:?}");
         assert_eq!(out[0], 1);
@@ -982,12 +981,12 @@ mod tests {
 
     #[test]
     fn eight_by_eight_flat_scaling_reproduces_prior_behaviour() {
-        // With a flat 8×8 list (all weight=16) `weight * V8 / 16 == V8`, so the
-        // flat path gives identical results to passing V8 directly. DC of 2 at
-        // qP 0: ls=20, d=40, IDCT residual=1 (matches FFmpeg `idct8`).
+        // A flat 8×8 list (all weight=16) gives LevelScale8x8=weight*normAdjust.
+        // DC of 7 at qP=0 with flat list: LevelScale8x8=16*20=320,
+        // d=(7*320+32)>>6=35, IDCT residual=(35+32)>>6=1.
         let flat = ScalingLists::flat();
         let mut coeffs = [0i16; 64];
-        coeffs[0] = 2;
+        coeffs[0] = 7;
         let out = dequant_idct_8x8(&coeffs, 0, 0, &flat)[0];
         assert_eq!(out, 1);
     }

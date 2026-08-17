@@ -1,4 +1,4 @@
-//! Diagnostic: trace MB(0,0) reconstruction to find the root cause of residual error.
+//! Diagnostic: trace MB reconstruction to find root cause of residual error.
 //! Run with: cargo test -p tpt-kinetix-h264 --test dbg_mb0_trace -- --nocapture
 
 use std::process::Command;
@@ -27,42 +27,40 @@ fn gen(dir: &std::path::Path) -> Option<Vec<u8>> {
     std::fs::read(&h264).ok()
 }
 
-struct Mb0Tracer {
-    blk: u8,
-}
+struct MbTracer;
 
-impl DecodeTracer for Mb0Tracer {
+impl DecodeTracer for MbTracer {
     fn on_mb_parsed(&mut self, mb_x: u32, mb_y: u32, mb_type: &str, qp: i32, cbp: u8, _chroma_mode: u8, pred_modes: &[u8; 16]) {
-        if mb_x == 0 && mb_y == 0 {
-            eprintln!("MB(0,0): type={mb_type} qp={qp} cbp=0x{cbp:02x} pred_modes={pred_modes:?}");
-        }
-    }
-
-    fn on_cavlc_coeffs(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, coeffs: &[i16; 16]) {
-        if mb_x == 0 && mb_y == 0 && blk < 16 {
-            let nz: Vec<(usize, i16)> = coeffs.iter().enumerate().filter(|(_, &v)| v != 0).map(|(i,&v)| (i,v)).collect();
-            eprintln!("  [{plane:?}] blk{blk} coeffs (zigzag, non-zero): {nz:?}");
+        if mb_y == 2 && mb_x <= 1 {
+            eprintln!("MB({mb_x},{mb_y}): type={mb_type} qp={qp} cbp=0x{cbp:02x} pred_modes={pred_modes:?}");
         }
     }
 
     fn on_cavlc_block_info(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, nc: i32, total_coeff: u8, trailing_ones: u8, _dc_skip: u32) {
-        if mb_x == 0 && mb_y == 0 && blk < 16 {
-            eprintln!("  [{plane:?}] blk{blk} nc={nc} total_coeff={total_coeff} trailing_ones={trailing_ones}");
+        if mb_y == 2 && mb_x == 0 && matches!(plane, TracePlane::Luma) {
+            eprintln!("  [Luma] blk{blk} nc={nc} total_coeff={total_coeff} trailing_ones={trailing_ones}");
         }
     }
 
     fn on_intra_pred(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, pred: &[u8]) {
-        if matches!(plane, TracePlane::Luma) && mb_x == 0 && mb_y == 0 {
-            let first4: Vec<u8> = pred[0..pred.len().min(4)].to_vec();
-            eprintln!("  MB({mb_x},{mb_y}) [Luma] blk{blk} pred[0..4]={first4:?} all_same={}", pred.iter().all(|&v| v == pred[0]));
-            self.blk = blk;
+        if matches!(plane, TracePlane::Luma) && mb_y == 2 && mb_x == 0 && blk >= 64 {
+            let i8 = (blk - 64) as usize;
+            eprintln!("  MB(0,2) [Luma] 8x8blk{i8} pred row5=[{},{},{},{},{},{},{},{}] row7=[{},{},{},{},{},{},{},{}]",
+                pred[5*8+0], pred[5*8+1], pred[5*8+2], pred[5*8+3],
+                pred[5*8+4], pred[5*8+5], pred[5*8+6], pred[5*8+7],
+                pred[7*8+0], pred[7*8+1], pred[7*8+2], pred[7*8+3],
+                pred[7*8+4], pred[7*8+5], pred[7*8+6], pred[7*8+7]);
         }
     }
 
     fn on_reconstructed(&mut self, mb_x: u32, mb_y: u32, plane: TracePlane, blk: u8, samples: &[u8]) {
-        if matches!(plane, TracePlane::Luma) && mb_x == 0 && mb_y == 0 {
-            let sz = samples.len().min(8);
-            eprintln!("  MB({mb_x},{mb_y}) [Luma] blk{blk} recon[0..{sz}]={:?}", &samples[0..sz]);
+        if matches!(plane, TracePlane::Luma) && mb_y == 2 && mb_x == 0 && blk >= 64 {
+            let i8 = (blk - 64) as usize;
+            eprintln!("  MB(0,2) [Luma] 8x8blk{i8} recon row5=[{},{},{},{},{},{},{},{}] row7=[{},{},{},{},{},{},{},{}]",
+                samples[5*8+0], samples[5*8+1], samples[5*8+2], samples[5*8+3],
+                samples[5*8+4], samples[5*8+5], samples[5*8+6], samples[5*8+7],
+                samples[7*8+0], samples[7*8+1], samples[7*8+2], samples[7*8+3],
+                samples[7*8+4], samples[7*8+5], samples[7*8+6], samples[7*8+7]);
         }
     }
 }
@@ -75,7 +73,7 @@ fn dbg_mb0_trace_test() {
     let annexb = match gen(&dir) { Some(b) => b, None => { eprintln!("gen failed; skipping"); return; } };
 
     let mut dec = H264Decoder::new();
-    let mut tracer = Mb0Tracer { blk: 0 };
+    let mut tracer = MbTracer;
     let pkt = Packet {
         pts: Timestamp::new(0, (1, 30)),
         dts: Timestamp::new(0, (1, 30)),

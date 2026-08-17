@@ -54,14 +54,14 @@ fn dbg_smptebars() {
         eprintln!("{row}");
     }
 
-    eprintln!("ref top-left 8x8 Y:");
+    eprintln!("ref top-left 32x8 Y:");
     for y in 0..8 {
-        let row: Vec<u8> = (0..8).map(|x| ref_frame.data[y * w + x]).collect();
+        let row: Vec<u8> = (0..32).map(|x| ref_frame.data[y * w + x]).collect();
         eprintln!("{row:?}");
     }
-    eprintln!("kinetix top-left 8x8 Y:");
+    eprintln!("kinetix top-left 32x8 Y:");
     for y in 0..8 {
-        let row: Vec<u8> = (0..8).map(|x| frame.data[y * w + x]).collect();
+        let row: Vec<u8> = (0..32).map(|x| frame.data[y * w + x]).collect();
         eprintln!("{row:?}");
     }
 }
