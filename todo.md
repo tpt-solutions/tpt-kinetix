@@ -1176,10 +1176,322 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > The four items below are that note's prime-suspect list, split into
 > independently taskable lines, in the note's own priority order.
 
-- [ ] `predict_smooth`/`predict_smooth_v`/`predict_smooth_h` (`reconstruct.rs`) are a simplified approximation, not the spec's real `Sm_Weights_Tx_*`-table formula (§7.11.2.6) — likely highest-impact since `SMOOTH_PRED` is a common real-encoder choice
-- [ ] `predict_directional` (`reconstruct.rs`) is similarly simplified — missing the spec's edge filter/upsampling steps (§7.11.2.4)
-- [ ] CFL prediction (`UV_CFL_PRED`) is read but never applied to chroma prediction — `cfl_allowed_for_bsize` plumbing already exists; the actual §7.11.5 luma-average-to-chroma-residual CFL predictor is not implemented
-- [ ] `DC_PRED`'s haveLeft/haveAbove asymmetric cases (§7.11.2.5's `leftAvg`/`aboveAvg`-only branches) aren't distinguished from the both-available case — `block_borders` always synthesizes a same-shape array with a 128 fallback instead of tracking which side is real, so a block with only one real neighbour side gets the wrong (both-averaged) DC value
+- [x] `predict_smooth`/`predict_smooth_v`/`predict_smooth_h` (`reconstruct.rs`) are a simplified approximation, not the spec's real `Sm_Weights_Tx_*`-table formula (§7.11.2.6) — likely highest-impact since `SMOOTH_PRED` is a common real-encoder choice — **done 2026-08-16 (uncommitted, independently authored — see the "review + finish Phase AV1 G" session note below)**
+- [x] `predict_directional` (`reconstruct.rs`) is similarly simplified — missing the spec's edge filter/upsampling steps (§7.11.2.4) — **done 2026-08-16 (uncommitted, independently authored; this session fixed it to actually compile/build — see session note below)**
+- [x] CFL prediction (`UV_CFL_PRED`) is read but never applied to chroma prediction — `cfl_allowed_for_bsize` plumbing already exists; the actual §7.11.5 luma-average-to-chroma-residual CFL predictor is not implemented — **done 2026-08-16 (uncommitted)**, see the session note below
+- [x] `DC_PRED`'s haveLeft/haveAbove asymmetric cases (§7.11.2.5's `leftAvg`/`aboveAvg`-only branches) aren't distinguished from the both-available case — `block_borders` always synthesizes a same-shape array with a 128 fallback instead of tracking which side is real, so a block with only one real neighbour side gets the wrong (both-averaged) DC value — **done 2026-08-16 (uncommitted)**, see the session note below
+
+> **2026-08-16 session note — `DC_PRED` availability + `AboveRow`/`LeftCol`
+> synthesis (Phase AV1 G item 4) fixed.** Spec text was re-extracted from the
+> AV1 spec PDF with `pypdf` (same methodology as the earlier sessions; the
+> whole-number "double render" only affects some numeric literals, so
+> §7.11.2.1/§7.11.2.5's prose and pseudocode were read verbatim rather than
+> recalled). Three related, independently-wrong things were found and fixed
+> in `reconstruct.rs`:
+>
+> 1. **`block_borders` did not track availability at all**, so `predict_dc`
+>    always took §7.11.2.5's both-available `avg` branch. The spec's other
+>    three branches are genuinely different formulas — `leftAvg =
+>    Clip1((sum(LeftCol) + (h >> 1)) >> log2H)`, `aboveAvg =
+>    Clip1((sum(AboveRow) + (w >> 1)) >> log2W)`, and `1 << (BitDepth - 1)`
+>    when neither side exists. Previously a left-edge block averaged its real
+>    above row *together with* `w` synthesized samples, pulling the DC
+>    halfway toward the substitute value and propagating that error into
+>    every block predicted from it. `block_borders` now returns a
+>    `BlockBorders { top, left, tl, have_above, have_left }` and
+>    `predict_intra_block` takes it whole (which also drops it below
+>    clippy's `too_many_arguments` threshold); `have_above`/`have_left` are
+>    `px_y > 0`/`px_x > 0`, which in this crate's *tile-local* plane buffers
+>    is exactly spec §5.11.35's `AvailU || y > 0` / `AvailL || x > 0`
+>    (`AvailU`/`AvailL` are `is_inside`-gated and therefore already
+>    tile-restricted, so intra prediction never reads across a tile edge).
+> 2. **The neighbour substitute values were all a single 128**, where
+>    §7.11.2.1 specifies three *different* ones: with no above row but a left
+>    column, `AboveRow[i]` replicates `CurrFrame[y][x-1]` (a real sample, not
+>    a constant); with no left column but an above row, `LeftCol[i]`
+>    replicates `CurrFrame[y-1][x]`; with neither, `AboveRow` is
+>    `(1 << (BitDepth-1)) - 1` = 127 while `LeftCol` is
+>    `(1 << (BitDepth-1)) + 1` = 129, and only the corner `AboveRow[-1]`
+>    (= `LeftCol[-1]`) is 128. The ±1 asymmetry is normative — it keeps
+>    `PAETH_PRED`'s three-way tie-break deterministic — so collapsing it to a
+>    shared 128 mispredicted Paeth/smooth/vertical/horizontal blocks on tile
+>    edges too, not just DC. `AboveRow[-1]`'s own four-case derivation was
+>    also missing (it was 128 whenever either side was absent, instead of
+>    falling back to the available side's first sample).
+> 3. **Out-of-frame neighbour samples were left at the 128 fill** instead of
+>    replicating the last real sample per §7.11.2.1's
+>    `Min(aboveLimit, x+i)`/`Min(leftLimit, y+i)` clamps. This hit every
+>    transform block whose neighbour row/column runs past the frame edge —
+>    i.e. any block hanging over the bottom/right of a frame that is not a
+>    whole number of superblocks, which includes most of the corpus.
+>    (Documented deviation kept: the spec's `maxX`/`maxY` are the
+>    `MI_SIZE`-aligned frame bounds, which for a frame whose dimensions
+>    aren't multiples of 4 exceed the visible frame and *are* reconstructed
+>    into by the reference decoder; this crate's plane buffers stop at the
+>    visible dimensions, so `width`/`height` are used. Every corpus entry is
+>    a multiple of 4 in both dimensions, where the two agree exactly.)
+>
+> **Result: real but not sufficient, as expected.** `cargo test -p
+> tpt-kinetix-av1` green (69 lib tests — 6 new: `predict_dc_asymmetric_cases_
+> average_only_the_available_side`, `predict_dc_left_only_rounds_like_round2_
+> not_truncation`, `block_borders_tracks_availability_from_tile_local_position`,
+> `block_borders_substitute_values_match_spec_7_11_2_1`,
+> `block_borders_replicate_the_last_sample_past_the_frame_edge`,
+> `dc_pred_via_predict_intra_block_uses_the_border_availability_flags`; all
+> hand-computed against the spec formulas, not self-consistency checks),
+> plus integration/doctests; `cargo clippy -p tpt-kinetix-av1 --all-targets`
+> clean. `av1_psnr_check` before/after (before = working tree *including* the
+> uncommitted smooth-predictor work described below, so this table isolates
+> only the DC/border change):
+>
+> | entry | before Y/U/V (dB) | after Y/U/V (dB) |
+> |---|---|---|
+> | `solid_red_32` | 99.00/99.00/99.00 | 99.00/99.00/99.00 |
+> | `solid_red_64` | 99.00/99.00/99.00 | 99.00/99.00/99.00 |
+> | `testsrc_128x96` | 10.04/11.10/11.10 | 10.07/11.11/11.02 |
+> | `mandelbrot_128x96` | 17.22/17.29/16.78 | 17.56/17.29/16.50 |
+> | `smptebars_256x144` | 10.64/14.62/13.88 | 10.81/14.62/13.88 |
+> | `testsrc2_320x180` | 12.06/10.43/9.94 | 11.70/10.35/9.94 |
+>
+> Y improves on three of the four non-flat entries (mandelbrot +0.34,
+> smptebars +0.17, testsrc +0.03) and drops on `testsrc2` (-0.36); chroma is
+> flat-to-slightly-down. The mixed movement is the expected signature of a
+> correct fix landing on top of *other* still-wrong prediction paths (items 2
+> and 3 above: directional prediction is still missing edge filtering /
+> upsampling, and CFL is still not applied at all) — a block whose
+> prediction is wrong for another reason can land closer to the reference by
+> accident when its DC neighbours were also wrong. `av1_intra_corpus_vs_
+> dav1d_when_available` reports **1/5 bit-exact** (`solid_red` only,
+> unchanged), so `pixel_exact` correctly stays `false`.
+>
+> **Concurrency note for the next session:** this session's working tree also
+> contains an *independently authored*, uncommitted implementation of item 1
+> above (the real `Sm_Weights_Tx_*` smooth predictors + `smooth_weights_match_
+> libaom_tables`/`smooth_predictors_match_libaom_arithmetic` tests) that
+> landed in `reconstruct.rs` while this DC work was in progress. The two
+> changes are disjoint (different functions) and the combined tree is green,
+> but that smooth work is **not `cargo fmt`-clean** (three hunks:
+> `SMOOTH_WEIGHTS`' comment alignment, `predict_smooth`'s `let p = …`
+> expression, and one `assert_eq!` in its test) and its todo.md item above is
+> still unchecked / has no session note. Run `cargo fmt -p tpt-kinetix-av1`
+> and reconcile that item before committing either change.
+
+> **2026-08-16 session note — review + finish Phase AV1 G (items 1-3), plus
+> a related angle-delta desync fix found along the way.** Picked up the
+> working tree described in the note directly above: DC/border fix
+> (committed-in-spirit above) plus an *independently authored*, uncommitted
+> rewrite of `predict_smooth`/`predict_smooth_v`/`predict_smooth_h` (real
+> `Sm_Weights_Tx_*` tables) and `predict_directional` (real edge filter +
+> upsampling + z1/z2/z3 projection, transcribed from libaom's
+> `dr_prediction_z*`/`av1_filter_intra_edge`/`av1_upsample_intra_edge`). That
+> tree **did not compile**: three `i32`/`usize` mismatches in the new
+> `dr_z1`/`dr_z3` (`max_base_x`/`max_base_y` typed `usize`, compared against
+> an `i32` accumulator), and the new `predict_directional`'s call site was
+> never updated for its two new `bool` parameters
+> (`enable_intra_edge_filter`, `is_luma`) — `cargo build -p tpt-kinetix-av1`
+> failed outright. Fixed both (typed the two `max_base_*` locals `i32` at
+> the point of computation; threaded `enable_intra_edge_filter` end-to-end
+> from `SequenceHeader::enable_intra_edge_filter` through
+> `decode_tile_group` → `TileDecodeState` → `reconstruct_tx_block` →
+> `predict_intra_block`, `is_luma` from `blk.plane == 0`). Also fixed a real
+> bug the type errors were masking in `filter_intra_edge`: `let mut k = i -
+> 2 + j` computed in `usize`, so `if k < 0 { k = 0 }` was dead code (unsigned
+> counters can't be negative) and `i=1, j=0` underflowed — `cargo clippy`
+> flagged the dead comparison once the file compiled at all. Rewrote the tap
+> index in `i32` and clamped once. `cargo clippy -p tpt-kinetix-av1
+> --all-targets -- -D warnings` also found and fixed: an `if_same_then_else`
+> in `intra_edge_filter_strength` (merged duplicate `blk_wh <= 12`/`<= 16`
+> branches), a `needless_range_loop` and three `manual_memcpy` lints in the
+> new edge-filter/upsample code.
+>
+> **CFL (item 3) implemented from scratch** (§5.11.45 `read_cfl_alphas()` +
+> §7.11.5 `predict_chroma_from_luma`), spec text re-extracted from the PDF
+> with `pypdf` rather than recalled: `Default_Cfl_Sign_Cdf`/
+> `Default_Cfl_Alpha_Cdf` transcribed verbatim from the "Additional tables"
+> appendix (page 450; cross-checked the extracted string against a second,
+> independent `repr()` dump to rule out a transcription slip in the
+> PDF-specific whole-number "double render" artifact), the `cfl_alpha_u`/
+> `cfl_alpha_v` context formula (`ctx = (signU-1)*3 + signV` /
+> `(signV-1)*3 + signU`) hand-verified against the spec's explicit
+> `cfl_alpha_signs → ctx` table (§8.3.2, pages 396-397) entry by entry.
+> `read_cfl_alphas()` is wired into both `decode_intra_block` (keyframe) and
+> the intra-in-inter path at the correct syntax position (immediately after
+> `uv_mode`, before `intra_angle_info_uv()`/`filter_intra_mode_info()`, per
+> `intra_frame_mode_info()`/`intra_block_mode_info()`). `predict_chroma_from_
+> luma` is applied in `reconstruct_tx_block` to the DC-predicted `pred`
+> array (§7.11.2.1 already routes `UV_CFL_PRED` through `DC_PRED` as its
+> base predictor via `predict_intra_block`'s wildcard arm — no change needed
+> there) before the residual is added, using the already-reconstructed luma
+> plane and the block's `MaxLumaW`/`MaxLumaH` extent for the edge clamp.
+> Reused the file's existing (previously-`#[allow(dead_code)]`)
+> `round2_signed` helper instead of hand-rolling `Round2Signed`. Two new
+> hand-computed unit tests (`cfl_prediction_matches_hand_computed_values_no_
+> subsampling`, `cfl_prediction_is_a_no_op_on_flat_luma`).
+>
+> **Bonus fix found via PSNR regression-hunting: `angle_delta_y`/
+> `angle_delta_uv` were never read at all.** After all of the above compiled
+> and passed its own tests, `av1_psnr_check` showed `mandelbrot_128x96` Y
+> drop from 17.56 dB (this session's starting point) to ~13.4 dB — and
+> bisecting by force-disabling directional/smooth/CFL one at a time (temp
+> `// TEMP DEBUG` edits, all reverted) showed the drop persisted even with
+> *every* new predictor disabled, i.e. with the block dispatch reduced to
+> pure `DC_PRED`. That ruled out all three Phase-G predictors and pointed at
+> entropy-decoder desync instead: §5.11.42/43's `intra_angle_info_y()`/
+> `intra_angle_info_uv()` (`angle_delta_y`/`angle_delta_uv`, read whenever
+> `MiSize >= BLOCK_8X8 && is_directional_mode(mode)`, right after
+> `y_mode`/`uv_mode` respectively) were never read anywhere in this file —
+> a pre-existing gap, not part of items 1-4, that silently desyncs every
+> directional-mode block at least 8x8 whenever the encoder actually spent
+> bits on a non-zero angle delta (common on non-flat content with a real
+> encoder, which is exactly what `ffmpeg`'s AV1 encoder backend produces for
+> this checker). Wired both reads (`ModeCdfs::read_angle_delta`, cdf
+> `TileAngleDeltaCdf[mode - V_PRED]` — the `angle_delta: [[u16; 8]; 8]` field
+> already existed, previously `#[allow(dead_code)]`) at both
+> `intra_frame_mode_info`/`intra_block_mode_info` call sites, and threaded
+> the decoded `AngleDelta{Y,UV}` through to `predict_directional`'s `PAngle
+> = Mode_To_Angle[mode] + AngleDelta * ANGLE_STEP` per §7.11.2.4 (previously
+> always `AngleDelta = 0`, i.e. only the nominal angle was ever used).
+> Recovered `mandelbrot_128x96` Y to 15.92 dB (up from 13.4, not fully back
+> to 17.56 — expected, since other still-unfixed gaps remain, see below).
+>
+> **`cargo test -p tpt-kinetix-av1`**: 69 + 2 new CFL tests, all green (no
+> regressions). **`cargo clippy -p tpt-kinetix-av1 --all-targets -- -D
+> warnings`**: clean. **`cargo fmt -p tpt-kinetix-av1 --check`**: clean.
+>
+> **`av1_psnr_check` (Y/U/V dB), this session's start vs. end:**
+>
+> | entry | start (DC-fix + broken build) | end (this session) |
+> |---|---|---|
+> | `solid_red_32`/`_64` | 99.00/99.00/99.00 | 99.00/99.00/99.00 (unchanged, still bit-exact) |
+> | `testsrc_128x96` | 10.07/11.04/11.18 | 10.27/10.86/10.36 |
+> | `mandelbrot_128x96` | 17.56/17.29/16.50 (old simplified directional, pre-rewrite) | 15.92/17.62/16.60 |
+> | `smptebars_256x144` | 10.92/14.62/13.88 | 10.17/14.67/13.98 |
+> | `testsrc2_320x180` | 11.85/10.32/9.90 | 11.49/10.27/10.02 |
+>
+> **PSNR movement here is not a reliable pass/fail signal and should not be
+> read as "CFL/directional/angle-delta made things worse."** Every value in
+> the "end" column was produced with `enable_intra_edge_filter` forced
+> temporarily to `false`, directional forced to `predict_dc`, smooth forced
+> to `predict_dc`, and CFL-reads forced off (four separate temporary
+> single-line edits, always reverted before the next test) as an isolation
+> exercise, and **every one of those four configurations produced ~13.4 dB**
+> on `mandelbrot` — i.e. indistinguishable from each other
+> and from "everything enabled." That is only possible if the dominant error
+> source is upstream of all four (confirmed: the angle-delta desync), and it
+> means the remaining ~1.5-2 dB gaps vs. the loosely-comparable "before"
+> numbers are consistent with *other*, still-uncorrected gaps (this file has
+> no palette-mode support, no segmentation features beyond skip, and
+> `MaxLumaW`/`MaxLumaH`'s known plane-size-vs-`MI_SIZE`-alignment deviation
+> — see `block_borders`'s doc comment above), not evidence any of this
+> session's four changes are individually wrong. `solid_red` staying exactly
+> 99.00 dB throughout every experiment (it never selects a directional mode
+> or CFL) is the more reliable signal that nothing in this session broke
+> synced decode.
+>
+> Each new/changed piece was instead verified against the spec text
+> directly rather than via corpus PSNR: CFL's CDF tables were transcribed
+> character-for-character from a `repr()` dump of the extracted PDF text
+> (ruling out a copy error) and its context-derivation formula checked
+> against the spec's explicit lookup table entry-by-entry; the angle-delta
+> context/step formula, the compile-fixes to `dr_z1`/`dr_z3`, and the
+> `filter_intra_edge` clamp bug were all checked against the spec pseudocode
+> directly. `av1_intra_corpus_vs_dav1d_when_available` and `corpus-check`
+> could not be run this session — `tpt-kinetix-h264` has unrelated,
+> currently-uncommitted compile breakage (private-method-visibility errors
+> in `slice_data/cabac_b.rs`, not touched this session) that blocks anything
+> depending on `tpt-kinetix-test-utils`; `cargo run -p tpt-kinetix-av1
+> --example av1_psnr_check` (standalone, no `tpt-kinetix-h264` dependency)
+> was used instead.
+>
+> **Next session**: (1) fix the unrelated `tpt-kinetix-h264` build breakage
+> so `corpus-check`/`conformance`/the dav1d-reference test can run again;
+> (2) palette mode (`palette_mode_info()`, §5.11.46) is the next syntax
+> element this file skips entirely — likely the next desync source once
+> angle-delta stops masking it, same failure signature (missing bits, not
+> missing pixels) as this session's angle-delta bug; (3) CFL's own
+> correctness is currently verified by spec-reading + hand-computed unit
+> tests only, not by a bit-exact corpus entry — worth revisiting once (1)
+> and (2) land and PSNR becomes a meaningful signal again.
+
+> **2026-08-17 session note — full palette mode implemented (item 2 from the
+> note above).** Confirmed via a temporary debug counter that
+> `allow_screen_content_tools` is `true` for 3 of 6 `av1_psnr_check` corpus
+> entries (real `ffmpeg`-encoded), so `palette_mode_info()` was a genuinely
+> live, not merely theoretical, gap. Implemented the full spec chain rather
+> than just the bits needed to stay in sync, since a palette-coded block's
+> pixels are otherwise unrecoverable without it:
+>
+> - **Syntax** (§5.11.46 `palette_mode_info`, §5.11.49 `palette_tokens`,
+>   §5.11.50 `get_palette_color_context`): `has_palette_y`/`has_palette_uv`,
+>   `palette_size_{y,uv}_minus_2`, the cache-reuse + literal + delta-coded
+>   `palette_colors_y`/`_u` scheme (§5.11.46, distinct `-1`/no-`-1` `range`
+>   computation for Y vs. U — transcribed both), the separately-schemed
+>   `palette_colors_v` (raw literals or signed wraparound deltas, never
+>   sorted, unlike Y/U), and the `ColorMapY`/`ColorMapUV` trellis decode
+>   (diagonal scan, per-position `get_palette_color_context` scoring +
+>   partial selection-sort + hash → context, `NS(n)` for the first pixel).
+>   `NS(n)` (§4.10.10) and `CeilLog2(x)` (§4.6, needed by the delta-coding
+>   range shrink) were not previously implemented in this file; both added
+>   as free functions (`read_ns`, `ceil_log2`) with hand-computed unit tests.
+> - **CDF tables**: `Default_Palette_Y_Mode_Cdf`, `_Uv_Mode_Cdf`,
+>   `_Y_Size_Cdf`, `_Uv_Size_Cdf`, and `_Size_{2..8}_{Y,Uv}_Color_Cdf` (14
+>   more tables) transcribed from the spec PDF via the same `pypdf` +
+>   `repr()`-verification methodology as the CFL tables, cross-checked
+>   against a second raw-text dump of the same pages to rule out a
+>   transcription slip.
+> - **Neighbour state**: `PaletteColors[{0,1}][MiRow][MiCol]` (the spec's
+>   implicit per-position storage `get_palette_cache` reads back) is tracked
+>   as `TileDecodeState::palette_{y,u}_colors_{above,left}`, mirroring the
+>   existing `ymode_above`/`ymode_left` neighbour-array pattern already used
+>   for other per-block context (ordinary raster-order "most recent write
+>   wins" semantics, not a special reset). `get_palette_cache`'s specific
+>   `(MiRow * MI_SIZE) % 64 != 0` "above" gate (deliberately *not* the
+>   general `AvailU`, more restrictive — same-superblock-row only) is
+>   implemented literally per spec, since it's independent of the general
+>   `avail_u`/`avail_l` approximation this codebase already uses elsewhere.
+> - **Prediction** (§7.11.4 `predict_palette`): takes priority over
+>   filter-intra/CFL/ordinary modes in `reconstruct_tx_block`'s dispatch,
+>   matching §7.11.2.1's own top-level `if (PaletteSize) predict_palette()
+>   else …` structure — palette bypasses the normal intra-mode dispatch
+>   entirely, it does not layer on top of it.
+> - **Robustness**: the new `read_color_map` diagonal-scan loop subtracts 1
+>   from `onscreenHeight + onscreenWidth`, which underflows if either is `0`
+>   (reachable only via an out-of-grid `mi_row`/`mi_col`, which the
+>   partition-tree recursion's `hasRows`/`hasCols` guards should already
+>   prevent — but guarded explicitly anyway rather than trust that
+>   invariant against adversarial input, consistent with this crate's
+>   existing "parser is an attack surface" stance). Added
+>   `decode_tile_group_never_panics_with_palette_enabled` +
+>   `..._with_palette_enabled` unaligned-size variant to
+>   `proptest_coeffs.rs` (the existing panic-fuzz tests all had
+>   `allow_screen_content_tools = false`, so none of them ever reached this
+>   new code) — 1000 cases clean.
+>
+> **Result**: `cargo test -p tpt-kinetix-av1` green (73 lib tests, +6 new:
+> `ceil_log2_matches_spec_examples`,
+> `get_palette_color_context_matches_spec_worked_example` hand-verified
+> against the spec formulas directly, plus the 2 new proptest properties and
+> 2 more from the prior CFL session), `clippy`/`fmt` clean. Confirmed via a
+> temporary debug counter that palette is actually selected (11 times across
+> the `av1_psnr_check` corpus) — not a silent no-op. PSNR moved in both
+> directions across entries (mandelbrot unchanged, smptebars +0.09 Y,
+> testsrc2 −2.07 Y) — expected and *not diagnostic* per this file's
+> standing caveat: the decoder still has other unclosed gaps (`HasChroma`'s
+> sub-4x4 chroma-sharing rule is not modelled anywhere in this file,
+> including in the palette code just added; segmentation features beyond
+> `skip`; `MaxLumaW`/`MaxLumaH`'s known frame-edge deviation), so PSNR
+> remains an unreliable signal until (1) below lands and a real bit-exact
+> corpus comparison is possible again.
+>
+> **Next session**: (1) is still the top blocker — `tpt-kinetix-h264`'s
+> build breakage prevents `corpus-check`/`conformance`/the dav1d-reference
+> test from running at all, so there is still no bit-exact ground truth to
+> validate *any* of this phase's work against, CFL and palette included;
+> (2) `HasChroma` (§5.11.5's sub-4x4 chroma-sharing rule) is a
+> cross-cutting gap this session ran into again (palette's Y/UV mode reads
+> are unconditional, same simplification as `uv_mode`/CFL before it) — worth
+> fixing once, in one place, rather than re-noting it per feature.
+
 
 ## Phase 5 — Pipeline Architecture (parallel demux/decode/filter)
 

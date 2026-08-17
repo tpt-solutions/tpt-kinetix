@@ -62,6 +62,128 @@ const SMOOTH_H: u8 = 10;
 const SMOOTH: u8 = 11;
 const PAETH: u8 = 12;
 
+/// `is_directional_mode()` (AV1 spec §5.11.44).
+#[inline]
+const fn is_directional_mode(mode: u8) -> bool {
+    mode >= V_PRED && mode <= D67_PRED
+}
+
+/// `MAX_ANGLE_DELTA`/`ANGLE_STEP` (AV1 spec symbols).
+const MAX_ANGLE_DELTA: i32 = 3;
+const ANGLE_STEP: i32 = 3;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Palette mode (AV1 spec §5.11.46-§5.11.50, §7.11.4)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `PALETTE_COLORS` (AV1 spec symbols): max palette size.
+const PALETTE_COLORS: usize = 8;
+/// `PALETTE_NUM_NEIGHBORS` (AV1 spec symbols).
+const PALETTE_NUM_NEIGHBORS: usize = 3;
+/// `PALETTE_COLOR_CONTEXTS` (AV1 spec symbols): number of distinct non-`N/A`
+/// values in [`PALETTE_COLOR_CONTEXT`] — the `5` the palette color CDF
+/// tables' context axis is sized to below.
+#[allow(dead_code)]
+const PALETTE_COLOR_CONTEXTS: usize = 5;
+
+/// `Palette_Color_Hash_Multipliers` (AV1 spec "Additional tables").
+const PALETTE_COLOR_HASH_MULTIPLIERS: [i32; PALETTE_NUM_NEIGHBORS] = [1, 2, 2];
+
+/// `Palette_Color_Context[PALETTE_MAX_COLOR_CONTEXT_HASH + 1]` (AV1 spec
+/// "Additional tables"). `-1` entries are hashes `get_palette_color_context`
+/// never actually produces (per the spec's own note).
+const PALETTE_COLOR_CONTEXT: [i32; 9] = [-1, -1, 0, -1, -1, 4, 3, 2, 1];
+
+/// `NS(n)` (AV1 spec §4.10.10): a non-symmetric unsigned integer in `0..n`,
+/// coded arithmetically via `L()` (i.e. through the symbol decoder's literal
+/// bits, not the raw bitstream).
+fn read_ns(dec: &mut SymbolDecoder<'_>, n: u32) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    // `w = FloorLog2(n) + 1`.
+    let w = 32 - n.leading_zeros();
+    let m = (1u32 << w) - n;
+    let v = dec.read_literal(w - 1);
+    if v < m {
+        return v;
+    }
+    let extra_bit = dec.read_literal(1);
+    (v << 1) - m + extra_bit
+}
+
+/// `CeilLog2(x)` (AV1 spec common definitions): number of bits needed to
+/// code a value in `0..x`; `0` for `x < 2`.
+fn ceil_log2(x: u32) -> u32 {
+    if x < 2 {
+        return 0;
+    }
+    let mut i = 1;
+    let mut p: u32 = 2;
+    while p < x {
+        i += 1;
+        p <<= 1;
+    }
+    i
+}
+
+/// `get_palette_color_context()` (AV1 spec §5.11.50): scores each of the
+/// `n` palette indices by how often it appears among the left/above-left/above
+/// neighbours of `color_map[r][c]`, partially selection-sorts the top
+/// [`PALETTE_NUM_NEIGHBORS`] by score into `ColorOrder`, and hashes those
+/// scores into a context index via [`PALETTE_COLOR_CONTEXT`]. Returns
+/// `(ctx, ColorOrder)` — the caller remaps the decoded symbol through
+/// `ColorOrder` to get the actual palette index (`ColorOrder[symbol]`).
+#[allow(clippy::needless_range_loop)]
+fn get_palette_color_context(
+    color_map: &[u8],
+    stride: usize,
+    r: usize,
+    c: usize,
+    n: usize,
+) -> (usize, [u8; PALETTE_COLORS]) {
+    let mut scores = [0i32; PALETTE_COLORS];
+    let mut color_order: [u8; PALETTE_COLORS] = std::array::from_fn(|i| i as u8);
+    if c > 0 {
+        scores[color_map[r * stride + c - 1] as usize] += 2;
+    }
+    if r > 0 && c > 0 {
+        scores[color_map[(r - 1) * stride + c - 1] as usize] += 1;
+    }
+    if r > 0 {
+        scores[color_map[(r - 1) * stride + c] as usize] += 2;
+    }
+    for i in 0..PALETTE_NUM_NEIGHBORS {
+        let mut max_score = scores[i];
+        let mut max_idx = i;
+        for j in (i + 1)..n {
+            if scores[j] > max_score {
+                max_score = scores[j];
+                max_idx = j;
+            }
+        }
+        if max_idx != i {
+            let max_score = scores[max_idx];
+            let max_color_order = color_order[max_idx];
+            let mut k = max_idx;
+            while k > i {
+                scores[k] = scores[k - 1];
+                color_order[k] = color_order[k - 1];
+                k -= 1;
+            }
+            scores[i] = max_score;
+            color_order[i] = max_color_order;
+        }
+    }
+    let mut hash = 0i32;
+    for i in 0..PALETTE_NUM_NEIGHBORS {
+        hash += scores[i] * PALETTE_COLOR_HASH_MULTIPLIERS[i];
+    }
+    let ctx = PALETTE_COLOR_CONTEXT[hash as usize];
+    debug_assert!(ctx >= 0, "get_palette_color_context produced an N/A hash");
+    (ctx.max(0) as usize, color_order)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Dequantization
 // ──────────────────────────────────────────────────────────────────────────────
@@ -806,16 +928,50 @@ fn inverse_transform(
 // Intra prediction (AV1 spec §6.9)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// DC prediction for a `w`×`h` block.
-fn predict_dc(top: &[i32], left: &[i32], w: usize, h: usize, out: &mut [i32]) {
-    let mut sum: i32 = 0;
-    for &v in &top[..w] {
-        sum += v;
+/// `DC_PRED` (AV1 spec §7.11.2.5), all four availability cases.
+///
+/// The spec selects between four *different* formulas on `haveLeft`/
+/// `haveAbove`, and only the first is a combined average:
+/// - both sides: `avg = (sum(LeftCol[0..h-1]) + sum(AboveRow[0..w-1]) +
+///   ((w + h) >> 1)) / (w + h)` — a true division, not a shift, because
+///   `w + h` is not a power of two for rectangular blocks;
+/// - left only: `leftAvg = Clip1((sum(LeftCol) + (h >> 1)) >> log2H)`;
+/// - above only: `aboveAvg = Clip1((sum(AboveRow) + (w >> 1)) >> log2W)`;
+/// - neither: `1 << (BitDepth - 1)`.
+///
+/// The asymmetric cases were previously not distinguished: [`block_borders`]
+/// synthesized a full-length neighbour array for the missing side and this
+/// function always took the both-available branch, so e.g. a left-edge block
+/// averaged its real above row together with `w` synthesized samples. For a
+/// 32×32 block that pulls the DC halfway toward the substitute value, which
+/// then propagates into every block predicted from it.
+fn predict_dc(
+    top: &[i32],
+    left: &[i32],
+    w: usize,
+    h: usize,
+    have_above: bool,
+    have_left: bool,
+    out: &mut [i32],
+) {
+    if w == 0 || h == 0 {
+        return;
     }
-    for &v in &left[..h] {
-        sum += v;
-    }
-    let dc = (sum + ((w + h) as i32 >> 1)) / (w + h) as i32;
+    let dc = match (have_left, have_above) {
+        (true, true) => {
+            let sum: i32 = left[..h].iter().sum::<i32>() + top[..w].iter().sum::<i32>();
+            (sum + ((w + h) as i32 >> 1)) / (w + h) as i32
+        }
+        (true, false) => {
+            let sum: i32 = left[..h].iter().sum();
+            clip1((sum + (h as i32 >> 1)) >> h.trailing_zeros())
+        }
+        (false, true) => {
+            let sum: i32 = top[..w].iter().sum();
+            clip1((sum + (w as i32 >> 1)) >> w.trailing_zeros())
+        }
+        (false, false) => MID_SAMPLE,
+    };
     for y in 0..h {
         for x in 0..w {
             out[y * w + x] = dc;
@@ -863,140 +1019,423 @@ fn predict_paeth(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &m
     }
 }
 
-/// Smooth vertical prediction (AV1 spec §6.9.3.7), generalized to `w`×`h`.
-fn predict_smooth_v(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
-    let below_avg = if h > 0 {
-        left[..h].iter().sum::<i32>() / h as i32
-    } else {
-        128
-    };
-    let right_avg = if w > 0 {
-        top[..w].iter().sum::<i32>() / w as i32
-    } else {
-        128
-    };
-    let rc = tl + right_avg - below_avg;
-    let bc = tl + below_avg - right_avg;
+/// AV1 smooth-intra weight tables (`Sm_Weights_Tx_*` of spec §7.11.2.6), copied
+/// verbatim from libaom's `sm_weight_arrays` (the normative reference). The
+/// weights are a quadratic interpolation from `1` (at the near edge) to
+/// `1 / block_size` (at the far edge), scaled by `2^8`. Each sub-slice is the
+/// table for one block dimension; its index equals the dimension so a lookup is
+/// `TABLE[dim]`.
+const SMOOTH_WEIGHTS: &[&[i32]] = &[
+    &[255, 128],                           // 2
+    &[255, 149, 85, 64],                   // 4
+    &[255, 197, 146, 105, 73, 50, 37, 32], // 8
+    &[
+        255, 225, 196, 170, 145, 123, 102, 84, 68, 54, 43, 33, 26, 20, 17, 16,
+    ], // 16
+    &[
+        255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59, 52,
+        45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+    ], // 32
+    &[
+        255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150, 144, 138,
+        133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50, 47, 44,
+        41, 38, 35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+    ], // 64
+];
+
+/// Smooth-intra weight for position `idx` along an axis of length `dim`
+/// (AV1 spec §7.11.2.6 / libaom `sm_weight_arrays + dim`). The five transform
+/// block dimensions used by AV1 (4, 8, 16, 32, 64) are served from the table
+/// above; any other dimension (only reachable from out-of-spec test inputs)
+/// falls back to the same quadratic-Bézier generation the tables were derived
+/// from, so it can never panic or read out of bounds.
+#[inline]
+fn smooth_weight(dim: usize, idx: usize) -> i32 {
+    if let Some(table) = SMOOTH_WEIGHTS.iter().find(|t| t.len() == dim) {
+        return table[idx];
+    }
+    let bs = dim as f64;
+    let t = idx as f64 / (dim as f64 - 1.0).max(1.0);
+    let p1 = 1.0 / bs;
+    let w = (1.0 - t).powi(2) + 2.0 * (1.0 - t) * t * p1 + t.powi(2) * p1;
+    (w * 255.0).round() as i32
+}
+
+/// `Round2(x, n)` (AV1 spec common definitions), used by the smooth predictors'
+/// `(value + 1 << (n - 1)) >> n` rounding.
+#[inline]
+fn round2_shift(x: i32, n: u32) -> i32 {
+    (x + (1i32 << (n - 1))) >> n
+}
+
+/// `SMOOTH_V` prediction (AV1 spec §7.11.2.6): a quadratic interpolation along
+/// the vertical axis between the top edge (`top`) and the bottom-left corner
+/// sample (`left[h - 1]`, which estimates the block's bottom edge). Matches
+/// libaom's `smooth_v_predictor` exactly: `pred = w*top + (256-w)*below`,
+/// `dst = Round2(pred, 8)`.
+fn predict_smooth_v(top: &[i32], left: &[i32], _tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let below_pred = left[h - 1];
     for y in 0..h {
+        let wgt = smooth_weight(h, y);
         for x in 0..w {
-            let wt = (x + 1) * (h - y);
-            let wb = (y + 1) * (w - x);
-            let s = (wt as i32 * top[x]
-                + wb as i32 * left[y]
-                + rc * (x + 1) as i32 * (y + 1) as i32
-                + bc * (w - x) as i32 * (h - y) as i32)
-                / (w * h) as i32;
-            out[y * w + x] = s.clamp(0, 255);
+            let p = wgt * top[x] + (256 - wgt) * below_pred;
+            out[y * w + x] = round2_shift(p, 8).clamp(0, 255);
         }
     }
 }
 
-/// Smooth horizontal prediction.
-fn predict_smooth_h(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
-    let below_avg = if h > 0 {
-        left[..h].iter().sum::<i32>() / h as i32
-    } else {
-        128
-    };
-    let right_avg = if w > 0 {
-        top[..w].iter().sum::<i32>() / w as i32
-    } else {
-        128
-    };
-    let rc = tl + right_avg - below_avg;
-    let bc = tl + below_avg - right_avg;
+/// `SMOOTH_H` prediction (AV1 spec §7.11.2.6): a quadratic interpolation along
+/// the horizontal axis between the left edge (`left`) and the top-right corner
+/// sample (`top[w - 1]`, which estimates the block's right edge). Matches
+/// libaom's `smooth_h_predictor` exactly.
+fn predict_smooth_h(top: &[i32], left: &[i32], _tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let right_pred = top[w - 1];
     for y in 0..h {
+        let l = left[y];
         for x in 0..w {
-            let wt = (y + 1) * (w - x);
-            let wb = (x + 1) * (h - y);
-            let s = (wt as i32 * top[x]
-                + wb as i32 * left[y]
-                + rc * (x + 1) as i32 * (y + 1) as i32
-                + bc * (w - x) as i32 * (h - y) as i32)
-                / (w * h) as i32;
-            out[y * w + x] = s.clamp(0, 255);
+            let wgt = smooth_weight(w, x);
+            let p = wgt * l + (256 - wgt) * right_pred;
+            out[y * w + x] = round2_shift(p, 8).clamp(0, 255);
         }
     }
 }
 
-/// Smooth prediction.
-fn predict_smooth(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &mut [i32]) {
-    let rc = tl;
-    let bc = tl;
+/// `SMOOTH` prediction (AV1 spec §7.11.2.6): the four-corner quadratic blend —
+/// top (`top`), bottom-left (`left[h - 1]`), left (`left`), top-right
+/// (`top[w - 1]`) — with each axis weighted by its own smooth weight table and
+/// the combined sum divided by `2 * 256` (`Round2(., 9)`). Matches libaom's
+/// `smooth_predictor` exactly.
+fn predict_smooth(top: &[i32], left: &[i32], _tl: i32, w: usize, h: usize, out: &mut [i32]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let below_pred = left[h - 1];
+    let right_pred = top[w - 1];
     for y in 0..h {
+        let wgt_h = smooth_weight(h, y);
+        let wgt_h_comp = 256 - wgt_h;
+        let l = left[y];
         for x in 0..w {
-            let wt = w - x;
-            let wb = h - y;
-            let s = (wt as i32 * top[x] + wb as i32 * left[y] + rc * wb as i32 + bc * wt as i32)
-                / (w * h) as i32;
-            out[y * w + x] = s.clamp(0, 255);
+            let wgt_w = smooth_weight(w, x);
+            let p =
+                wgt_h * top[x] + wgt_h_comp * below_pred + wgt_w * l + (256 - wgt_w) * right_pred;
+            out[y * w + x] = round2_shift(p, 9).clamp(0, 255);
         }
     }
 }
 
-/// Directional prediction.
-///
-/// The sample-offset expressions below are genuinely signed (they can select
-/// a position above/left of the block before clamping), so they are evaluated
-/// in `i32` and clamped once. Written in `usize` they underflowed instead —
-/// a latent panic that only stayed hidden because the placeholder block grid
-/// never selects a directional mode. Real mode syntax arrives in AV1 Phase C.
-///
-/// This is a simplified (non-edge-filtered, non-upsampled) approximation of
-/// AV1 spec §7.11.2.4 — real directional prediction additionally applies
-/// `enable_intra_edge_filter` corner/edge filtering and upsampling before
-/// projecting along the angle, which this crate does not implement yet; only
-/// the block-size generalization (`size` -> `w`/`h`) changed this session.
-fn predict_directional(
-    mode: u8,
-    top: &[i32],
+// ──────────────────────────────────────────────────────────────────────────────
+// Directional intra prediction (AV1 spec §7.11.2.4)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// This is the full spec process: a 3-/5-tap intra-edge filter (gated by
+// `enable_intra_edge_filter`) is applied to the top/left reference samples,
+// then sub-pel angles are *upsampled* (2×) with a 4-tap filter, and finally
+// the block is projected along `pAngle` with bilinear interpolation between
+// adjacent reference samples. The projection is split into the three AV1
+// "zones" (z1: top-only, z2: top+left, z3: left-only) exactly as the spec's
+// `dr_predictor` dispatch, and the derivative table / edge-filter /
+// upsampling math is transcribed from libaom's reference `reconintra.c`
+// (bit-exact with the spec). The previous version here was a simplified
+// integer-offset approximation with no edge filter or upsampling.
+
+/// `dr_intra_derivative[angle]` (AV1 spec / libaom): index = angle in degrees
+/// over `0..89`; entries at non-`{base ± 3·delta}` indices are 0 and are never
+/// actually indexed (every directional angle reduces, via `dr_get_dx`/
+/// `dr_get_dy`, to an index `< 90`).
+const DR_INTRA_DERIVATIVE: [i32; 90] = [
+    0, 0, 0, 1023, 0, 0, 547, 0, 0, 372, 0, 0, 0, 0, 273, 0, 0, 215, 0, 0, 178, 0, 0, 151, 0, 0,
+    132, 0, 0, 116, 0, 0, 102, 0, 0, 0, 90, 0, 0, 80, 0, 0, 71, 0, 0, 64, 0, 0, 57, 0, 0, 51, 0, 0,
+    45, 0, 0, 0, 40, 0, 0, 35, 0, 0, 31, 0, 0, 27, 0, 0, 23, 0, 0, 19, 0, 0, 15, 0, 0, 0, 0, 11, 0,
+    0, 7, 0, 0, 3, 0, 0,
+];
+
+/// Per-unit-change-in-Y shift in X (×256), AV1 spec §7.11.2.4.
+#[inline]
+fn dr_get_dx(angle: i32) -> i32 {
+    if angle > 0 && angle < 90 {
+        DR_INTRA_DERIVATIVE[angle as usize]
+    } else if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(180 - angle) as usize]
+    } else {
+        1
+    }
+}
+
+/// Per-unit-change-in-X shift in Y (×256), AV1 spec §7.11.2.4.
+#[inline]
+fn dr_get_dy(angle: i32) -> i32 {
+    if angle > 90 && angle < 180 {
+        DR_INTRA_DERIVATIVE[(angle - 90) as usize]
+    } else if angle > 180 && angle < 270 {
+        DR_INTRA_DERIVATIVE[(270 - angle) as usize]
+    } else {
+        1
+    }
+}
+
+/// Storage offset for negative logical reference indices (corner at `-1`,
+/// upsampling scratch at `-2`).
+const DIR_OFF: usize = 8;
+
+/// `IntraEdgeFilterStrength` (AV1 spec / libaom `intra_edge_filter_strength`).
+/// `filter_type` is 0 for the common (no smooth neighbour) case; tracking the
+/// neighbour smooth-mode flag is not yet wired, so 0 is used.
+fn intra_edge_filter_strength(bs0: i32, bs1: i32, delta: i32, filter_type: i32) -> i32 {
+    let d = delta.abs();
+    let blk_wh = bs0 + bs1;
+    let mut strength = 0;
+    if filter_type == 0 {
+        if blk_wh <= 8 {
+            if d >= 56 {
+                strength = 1;
+            }
+        } else if blk_wh <= 16 {
+            if d >= 40 {
+                strength = 1;
+            }
+        } else if blk_wh <= 24 {
+            if d >= 8 {
+                strength = 1;
+            }
+            if d >= 16 {
+                strength = 2;
+            }
+            if d >= 32 {
+                strength = 3;
+            }
+        } else if blk_wh <= 32 {
+            if d >= 1 {
+                strength = 1;
+            }
+            if d >= 4 {
+                strength = 2;
+            }
+            if d >= 32 {
+                strength = 3;
+            }
+        } else if d >= 1 {
+            strength = 3;
+        }
+    } else if blk_wh <= 8 {
+        if d >= 40 {
+            strength = 1;
+        }
+        if d >= 64 {
+            strength = 2;
+        }
+    } else if blk_wh <= 16 {
+        if d >= 20 {
+            strength = 1;
+        }
+        if d >= 48 {
+            strength = 2;
+        }
+    } else if blk_wh <= 24 {
+        if d >= 4 {
+            strength = 3;
+        }
+    } else if d >= 1 {
+        strength = 3;
+    }
+    strength
+}
+
+/// `use_intra_edge_upsample` (AV1 spec / libaom): upsampling only kicks in for
+/// sub-pel angles (`0 < |delta| < 40`) on small-enough blocks.
+#[inline]
+fn use_intra_edge_upsample(bs0: i32, bs1: i32, delta: i32, filter_type: i32) -> bool {
+    let d = delta.abs();
+    let blk_wh = bs0 + bs1;
+    if d == 0 || d >= 40 {
+        return false;
+    }
+    if filter_type != 0 {
+        blk_wh <= 8
+    } else {
+        blk_wh <= 16
+    }
+}
+
+/// `av1_filter_intra_edge` (AV1 spec / libaom): 5-tap smoothing of the
+/// reference edge (logical indices `0..n_px-2`; the corner at `-1` is left to
+/// `filter_intra_edge_corner`). `p` points at logical `-1`.
+fn filter_intra_edge(buf: &mut [i32], off: usize, n_px: usize, strength: i32) {
+    if strength == 0 {
+        return;
+    }
+    let kernel: [i32; 5] = match strength {
+        1 => [0, 4, 8, 4, 0],
+        2 => [0, 5, 6, 5, 0],
+        _ => [2, 4, 4, 4, 2],
+    };
+    let edge: Vec<i32> = (0..n_px).map(|i| buf[off - 1 + i]).collect();
+    for i in 1..n_px {
+        let mut s = 0i32;
+        for (j, &kj) in kernel.iter().enumerate() {
+            let k = (i as i32 - 2 + j as i32).clamp(0, n_px as i32 - 1) as usize;
+            s += edge[k] * kj;
+        }
+        let s = (s + 8) >> 4;
+        buf[off - 1 + i] = s.clamp(0, 255);
+    }
+}
+
+/// `filter_intra_edge_corner` (AV1 spec / libaom): 3-tap `{5,6,5}` blend of the
+/// top-left corner with its two immediate neighbours.
+fn filter_intra_edge_corner(above: &mut [i32], left: &mut [i32], off: usize) {
+    let kernel = [5i32, 6, 5];
+    let s = left[off] * kernel[0] + above[off - 1] * kernel[1] + above[off] * kernel[2];
+    let s = (s + 8) >> 4;
+    above[off - 1] = s;
+    left[off - 1] = s;
+}
+
+/// `av1_upsample_intra_edge` (AV1 spec / libaom): 2× interpolation of the
+/// reference edge via a 4-tap `{-1, 9, 9, -1}` filter. Returns a fresh buffer
+/// with the same layout (doubled samples at the even logical positions).
+fn upsample_intra_edge(buf: &[i32], off: usize, n_px: usize, corner: i32) -> Vec<i32> {
+    let mut in_buf = vec![0i32; n_px + 3];
+    in_buf[0] = corner;
+    in_buf[1] = corner;
+    in_buf[2..(n_px + 2)].copy_from_slice(&buf[off..(off + n_px)]);
+    in_buf[n_px + 2] = buf[off + n_px - 1];
+    let mut out = buf.to_vec();
+    out[off - 2] = in_buf[0];
+    for i in 0..n_px {
+        let s = -in_buf[i] + 9 * in_buf[i + 1] + 9 * in_buf[i + 2] - in_buf[i + 3];
+        let s = ((s + 8) >> 4).clamp(0, 255);
+        out[off + 2 * i - 1] = s;
+        out[off + 2 * i] = in_buf[i + 2];
+    }
+    out
+}
+
+/// Zone 1 (0 < angle < 90): project using the top edge only (AV1 spec /
+/// libaom `dr_prediction_z1`).
+fn dr_z1(above: &[i32], off: usize, upsample: bool, dx: i32, w: usize, h: usize, out: &mut [i32]) {
+    debug_assert!(dx > 0);
+    let up = if upsample { 1 } else { 0 };
+    let max_base_x = (((w + h) - 1) << up) as i32;
+    let frac_bits = 6 - up;
+    let base_inc = 1 << up;
+    let mut x = dx;
+    for r in 0..h {
+        let mut base = x >> frac_bits;
+        let shift = ((x << up) & 0x3F) >> 1;
+        if base >= max_base_x {
+            for rr in r..h {
+                for c in 0..w {
+                    out[rr * w + c] = above[(off as i32 + max_base_x) as usize];
+                }
+            }
+            return;
+        }
+        for c in 0..w {
+            if base < max_base_x {
+                let bi = (off as i32 + base) as usize;
+                let val = above[bi] * (32 - shift) + above[bi + 1] * shift;
+                out[r * w + c] = ((val + 16) >> 5).clamp(0, 255);
+            } else {
+                out[r * w + c] = above[(off as i32 + max_base_x) as usize];
+            }
+            base += base_inc;
+        }
+        x += dx;
+    }
+}
+
+/// Zone 2 (90 < angle < 180): project using both top and left edges (AV1 spec /
+/// libaom `dr_prediction_z2`), falling back to the left edge when the ray
+/// leaves the top edge.
+#[allow(clippy::too_many_arguments)]
+fn dr_z2(
+    above: &[i32],
     left: &[i32],
-    _tl: i32,
+    off: usize,
+    up_a: bool,
+    up_l: bool,
+    dx: i32,
+    dy: i32,
     w: usize,
     h: usize,
     out: &mut [i32],
 ) {
-    let ext_len = w + h;
-    let mut ext = [0i32; 256];
-    ext[..w].copy_from_slice(&top[..w]);
-    for i in w..ext_len {
-        ext[i] = ext[i - 1];
-    }
-    let w_i = w as i32;
-    let h_i = h as i32;
-    for y in 0..h {
-        for x in 0..w {
-            let (xi, yi) = (x as i32, y as i32);
-            let (raw, flip) = match mode {
-                D45_PRED => (4 * xi + 2 - yi, false),
-                D135_PRED => (4 * yi + 2 * xi - 2 * w_i, false),
-                D113_PRED => (4 * xi + 4 - 2 * yi, true),
-                D157_PRED => (4 * yi - xi + 4 * h_i, false),
-                D207_PRED => (4 * xi + 2 * yi - 3 * h_i, false),
-                D67_PRED => (4 * yi + xi, false),
-                _ => (xi, false),
-            };
-            let i = raw.clamp(0, ext_len as i32 - 1) as usize;
-            let val = if !flip {
-                ext[i]
+    debug_assert!(dx > 0 && dy > 0);
+    let ua = if up_a { 1 } else { 0 };
+    let ul = if up_l { 1 } else { 0 };
+    let min_base_x = -(1 << ua);
+    let frac_bits_x = 6 - ua;
+    let frac_bits_y = 6 - ul;
+    for r in 0..h {
+        for c in 0..w {
+            let y = (r + 1) as i32;
+            let x = ((c as i32) << 6) - y * dx;
+            let base_x = x >> frac_bits_x;
+            let val = if base_x >= min_base_x {
+                let shift = ((x * (1 << ua)) & 0x3F) >> 1;
+                let bi = (off as i32 + base_x) as usize;
+                let v = above[bi] * (32 - shift) + above[bi + 1] * shift;
+                (v + 16) >> 5
             } else {
-                let j = ext_len - 1 - i;
-                if j < h {
-                    left[j]
-                } else if j - h < ext_len {
-                    ext[j - h]
-                } else {
-                    ext[ext_len - 1]
-                }
+                let xx = (c + 1) as i32;
+                let yy = ((r as i32) << 6) - xx * dy;
+                let base_y = yy >> frac_bits_y;
+                let shift = ((yy * (1 << ul)) & 0x3F) >> 1;
+                let bi = (off as i32 + base_y) as usize;
+                let v = left[bi] * (32 - shift) + left[bi + 1] * shift;
+                (v + 16) >> 5
             };
-            out[y * w + x] = val.clamp(0, 255);
+            out[r * w + c] = val.clamp(0, 255);
         }
     }
 }
 
-/// Predict a single intra block.
+/// Zone 3 (180 < angle < 270): project using the left edge only (AV1 spec /
+/// libaom `dr_prediction_z3`).
+fn dr_z3(left: &[i32], off: usize, upsample: bool, dy: i32, w: usize, h: usize, out: &mut [i32]) {
+    debug_assert!(dy > 0);
+    let up = if upsample { 1 } else { 0 };
+    let max_base_y = (((w + h) - 1) << up) as i32;
+    let frac_bits = 6 - up;
+    let base_inc = 1 << up;
+    let mut y = dy;
+    for c in 0..w {
+        let mut base = y >> frac_bits;
+        let shift = ((y << up) & 0x3F) >> 1;
+        for r in 0..h {
+            if base < max_base_y {
+                let bi = (off as i32 + base) as usize;
+                let val = left[bi] * (32 - shift) + left[bi + 1] * shift;
+                out[r * w + c] = ((val + 16) >> 5).clamp(0, 255);
+            } else {
+                for rr in r..h {
+                    out[rr * w + c] = left[(off as i32 + max_base_y) as usize];
+                }
+                break;
+            }
+            base += base_inc;
+        }
+        y += dy;
+    }
+}
+
+/// Directional prediction (AV1 spec §7.11.2.4).
+///
+/// `enable_intra_edge_filter` comes from the sequence header; per spec the
+/// intra-edge filter is skipped for chroma in 4:2:0 (both axes subsampled), so
+/// the caller passes `is_luma` to gate it (for 4:2:0 chroma this is always
+/// false). The nominal angles follow libaom's `mode_to_angle_map`; note the
+/// mode named `D207_PRED` uses nominal angle **203** (not 207) — the "207" is a
+/// legacy VP9-style label and the AV1 prediction math uses 203.
 #[allow(clippy::too_many_arguments)]
-fn predict_intra_block(
+fn predict_directional(
     mode: u8,
     top: &[i32],
     left: &[i32],
@@ -1004,26 +1443,164 @@ fn predict_intra_block(
     w: usize,
     h: usize,
     out: &mut [i32],
+    enable_intra_edge_filter: bool,
+    is_luma: bool,
+    angle_delta: i32,
 ) {
+    let nominal_angle = match mode {
+        D45_PRED => 45,
+        D67_PRED => 67,
+        D113_PRED => 113,
+        D135_PRED => 135,
+        D157_PRED => 157,
+        D207_PRED => 203,
+        _ => 90,
+    };
+    // `PAngle = Mode_To_Angle[mode] + AngleDelta * ANGLE_STEP` (AV1 spec
+    // §7.11.2.4).
+    let p_angle = nominal_angle + angle_delta * ANGLE_STEP;
+
+    let (need_above, need_left, need_right, need_bottom) = if p_angle < 90 {
+        (true, false, true, false)
+    } else if p_angle < 180 {
+        (true, true, false, false)
+    } else {
+        (false, true, false, true)
+    };
+
+    // Reference sample buffers with the top-left corner at logical index -1
+    // (and -2 reserved for upsampling). Sized to hold the 2× reference that
+    // upsampling produces.
+    let n = w + h;
+    let mut above = vec![tl; DIR_OFF + 2 * n + 8];
+    let mut lcol = vec![tl; DIR_OFF + 2 * n + 8];
+    above[DIR_OFF..(DIR_OFF + w)].copy_from_slice(&top[..w]);
+    if w > 0 {
+        for i in w..(2 * n) {
+            above[DIR_OFF + i] = top[w - 1];
+        }
+    }
+    lcol[DIR_OFF..(DIR_OFF + h)].copy_from_slice(&left[..h]);
+    if h > 0 {
+        for i in h..(2 * n) {
+            lcol[DIR_OFF + i] = left[h - 1];
+        }
+    }
+    above[DIR_OFF - 1] = tl;
+    above[DIR_OFF - 2] = tl;
+    lcol[DIR_OFF - 1] = tl;
+    lcol[DIR_OFF - 2] = tl;
+
+    let mut upsample_above = false;
+    let mut upsample_left = false;
+    if enable_intra_edge_filter && is_luma {
+        const AB_LE: usize = 1;
+        const FILTER_TYPE: i32 = 0; // neighbour smooth-mode detection not wired
+        if need_above && need_left && (w + h >= 24) {
+            filter_intra_edge_corner(&mut above, &mut lcol, DIR_OFF);
+        }
+        if need_above && w > 0 {
+            let strength =
+                intra_edge_filter_strength(w as i32, h as i32, p_angle - 90, FILTER_TYPE);
+            let n_px = w + AB_LE + if need_right { h } else { 0 };
+            filter_intra_edge(&mut above, DIR_OFF, n_px, strength);
+        }
+        if need_left && h > 0 {
+            let strength =
+                intra_edge_filter_strength(h as i32, w as i32, p_angle - 180, FILTER_TYPE);
+            let n_px = h + AB_LE + if need_bottom { w } else { 0 };
+            filter_intra_edge(&mut lcol, DIR_OFF, n_px, strength);
+        }
+        upsample_above =
+            need_above && use_intra_edge_upsample(w as i32, h as i32, p_angle - 90, FILTER_TYPE);
+        if upsample_above {
+            let n_px = w + if need_right { h } else { 0 };
+            above = upsample_intra_edge(&above, DIR_OFF, n_px, tl);
+        }
+        upsample_left =
+            need_left && use_intra_edge_upsample(h as i32, w as i32, p_angle - 180, FILTER_TYPE);
+        if upsample_left {
+            let n_px = h + if need_bottom { w } else { 0 };
+            lcol = upsample_intra_edge(&lcol, DIR_OFF, n_px, tl);
+        }
+    }
+
+    let dx = dr_get_dx(p_angle);
+    let dy = dr_get_dy(p_angle);
+    if p_angle < 90 {
+        dr_z1(&above, DIR_OFF, upsample_above, dx, w, h, out);
+    } else if p_angle < 180 {
+        dr_z2(
+            &above,
+            &lcol,
+            DIR_OFF,
+            upsample_above,
+            upsample_left,
+            dx,
+            dy,
+            w,
+            h,
+            out,
+        );
+    } else {
+        dr_z3(&lcol, DIR_OFF, upsample_left, dy, w, h, out);
+    }
+}
+
+/// Predict a single intra block (AV1 spec §7.11.2.1's mode dispatch).
+///
+/// `borders` carries both the `AboveRow`/`LeftCol` arrays and the
+/// `haveAbove`/`haveLeft` flags, because §7.11.2.5's `DC_PRED` takes the
+/// flags as inputs in their own right rather than inferring availability
+/// from the array contents. Every other mode reads only the arrays (the
+/// substitutions [`block_borders`] already applied are what the spec means
+/// them to see).
+#[allow(clippy::too_many_arguments)]
+fn predict_intra_block(
+    mode: u8,
+    borders: &BlockBorders,
+    w: usize,
+    h: usize,
+    out: &mut [i32],
+    enable_intra_edge_filter: bool,
+    is_luma: bool,
+    angle_delta: i32,
+) {
+    let BlockBorders {
+        top,
+        left,
+        tl,
+        have_above,
+        have_left,
+    } = borders;
+    let (top, left, tl) = (top.as_slice(), left.as_slice(), *tl);
     match mode {
-        DC_PRED => predict_dc(top, left, w, h, out),
+        DC_PRED => predict_dc(top, left, w, h, *have_above, *have_left, out),
         V_PRED => predict_vertical(top, w, h, out),
         H_PRED => predict_horizontal(left, w, h, out),
         PAETH => predict_paeth(top, left, tl, w, h, out),
         SMOOTH_V => predict_smooth_v(top, left, tl, w, h, out),
         SMOOTH_H => predict_smooth_h(top, left, tl, w, h, out),
         SMOOTH => predict_smooth(top, left, tl, w, h, out),
-        D45_PRED | D135_PRED | D113_PRED | D157_PRED | D207_PRED | D67_PRED => {
-            predict_directional(mode, top, left, tl, w, h, out)
-        }
-        _ => predict_dc(top, left, w, h, out),
+        D45_PRED | D135_PRED | D113_PRED | D157_PRED | D207_PRED | D67_PRED => predict_directional(
+            mode,
+            top,
+            left,
+            tl,
+            w,
+            h,
+            out,
+            enable_intra_edge_filter,
+            is_luma,
+            angle_delta,
+        ),
+        _ => predict_dc(top, left, w, h, *have_above, *have_left, out),
     }
 }
 
 /// `Round2Signed(x, n)` (AV1 spec common definitions): `Round2` extended to
 /// negative `x` by rounding the magnitude and restoring the sign.
 #[inline]
-#[allow(dead_code)]
 fn round2_signed(x: i64, n: u32) -> i64 {
     if x >= 0 {
         round2(x, n)
@@ -1186,16 +1763,90 @@ const LUMA_TX_PX: usize = 8;
 #[allow(dead_code)]
 const CHROMA_TX_PX: usize = 4;
 
-/// Build the top / left / top-left neighbour arrays for the transform block
-/// whose top-left sample sits at (`px_x`, `px_y`) within `plane`, sized
-/// `tx_w`/`tx_h` (independent width/height so rectangular transform blocks
-/// get correctly sized neighbour arrays instead of a shared square `tx_px`).
+/// Bit depth this crate reconstructs at. AV1's `BitDepth` also drives the
+/// neighbour-array substitute values in [`block_borders`] and the DC
+/// predictor's "no neighbours at all" case, so they are expressed in terms
+/// of it rather than the literal 8-bit constants.
+const BIT_DEPTH: u32 = 8;
+
+/// `1 << (BitDepth - 1)` — the mid-grey value AV1 uses for `AboveRow[-1]`
+/// and for `DC_PRED` when neither neighbour side exists.
+const MID_SAMPLE: i32 = 1 << (BIT_DEPTH - 1);
+
+/// `Clip1(x)` (AV1 spec common definitions): clamp to the valid sample range
+/// for the current bit depth.
+#[inline]
+fn clip1(x: i32) -> i32 {
+    x.clamp(0, (1 << BIT_DEPTH) - 1)
+}
+
+/// `AboveRow` / `LeftCol` (AV1 spec §7.11.2.1) for one transform block, plus
+/// the `haveAbove`/`haveLeft` availability flags the prediction processes
+/// take as *inputs* alongside them.
 ///
-/// Samples above or left of the frame fall back to the neutral value 128.
-/// (`top`/`left` previously carried a second, mirrored half — `top[x +
-/// tx_px] = top[x]` — that nothing ever read; every predictor only indexes
-/// `top[..w]`/`left[..h]`, so that duplication is dropped here rather than
-/// generalized to a `w + h`-sized mirror nobody needs.)
+/// The flags matter because the spec does not treat "no neighbour" as "a
+/// neighbour holding a neutral value": `DC_PRED` (§7.11.2.5) selects between
+/// four different formulas on them (`avg` / `leftAvg` / `aboveAvg` /
+/// `1 << (BitDepth - 1)`), so a block with only one real neighbour side must
+/// average *only that side* rather than blend in a synthesized one. A
+/// previous revision returned only the arrays (with a 128 fill standing in
+/// for missing neighbours), which made all four cases collapse into the
+/// both-available `avg` branch — wrong for every block on a tile's top or
+/// left edge, i.e. at minimum the whole first superblock row and column of
+/// every tile.
+struct BlockBorders {
+    /// `AboveRow[0 .. w-1]`.
+    top: Vec<i32>,
+    /// `LeftCol[0 .. h-1]`.
+    left: Vec<i32>,
+    /// `AboveRow[-1]`, which §7.11.2.1 also assigns to `LeftCol[-1]`.
+    tl: i32,
+    /// `haveAbove`: there are valid samples above this transform block.
+    have_above: bool,
+    /// `haveLeft`: there are valid samples to the left of this transform block.
+    have_left: bool,
+}
+
+/// Build the `AboveRow`/`LeftCol` neighbour arrays (AV1 spec §7.11.2.1) for
+/// the transform block whose top-left sample sits at (`px_x`, `px_y`) within
+/// `plane`, sized `tx_w`/`tx_h` (independent width/height so rectangular
+/// transform blocks get correctly sized neighbour arrays).
+///
+/// `plane` is a *tile-local* buffer, so `px_x > 0` / `px_y > 0` are exactly
+/// the spec's `haveLeft`/`haveAbove` inputs from §5.11.35's `predict_intra`
+/// call: `haveLeft = AvailL || x > 0`, where `AvailL` is `is_inside(MiRow,
+/// MiCol - 1)` and therefore already tile-restricted (intra prediction never
+/// reads across a tile boundary).
+///
+/// The three substitute values the spec specifies are all *different*, and
+/// none of them is the plain mid-grey a previous revision used for all of
+/// them:
+/// - `AboveRow` with no above but a left neighbour replicates
+///   `CurrFrame[y][x-1]` (the left column's first sample), not a constant;
+/// - `LeftCol` with no left but an above neighbour replicates
+///   `CurrFrame[y-1][x]`;
+/// - with neither side available `AboveRow` is `(1 << (BitDepth-1)) - 1`
+///   (127) while `LeftCol` is `(1 << (BitDepth-1)) + 1` (129), and only the
+///   corner `AboveRow[-1]` is `1 << (BitDepth-1)` (128). The deliberate
+///   ±1 asymmetry keeps `PAETH_PRED`'s tie-breaks deterministic.
+///
+/// Samples past the right/bottom edge replicate the last real sample
+/// (§7.11.2.1's `Min(aboveLimit, x+i)` / `Min(leftLimit, y+i)` clamps),
+/// where a previous revision left them at the 128 fill — which affected
+/// every transform block whose neighbour row/column runs past the frame
+/// edge (any block hanging over the bottom/right of a frame that is not a
+/// whole number of superblocks). `aboveLimit`/`leftLimit`'s
+/// `haveAboveRight`/`haveBelowLeft` extension is irrelevant here because
+/// only `i < w` / `i < h` are ever filled (the predictors that want the
+/// `w + h`-long arrays extend them themselves).
+///
+/// Known deviation: the spec's `maxX`/`maxY` are the *`MI_SIZE`-aligned*
+/// frame bounds (`MiCols * MI_SIZE - 1`), which for a frame whose dimensions
+/// are not a multiple of 4 exceed the visible frame; the reference decoder
+/// reconstructs into that padding and can read it back as a neighbour. This
+/// crate's plane buffers stop at the visible dimensions, so `width`/`height`
+/// are used instead. Every corpus entry is a multiple of 4 in both
+/// dimensions, where the two agree exactly.
 #[allow(clippy::too_many_arguments)]
 fn block_borders(
     plane: &[u8],
@@ -1206,40 +1857,57 @@ fn block_borders(
     tx_h: usize,
     px_x: usize,
     px_y: usize,
-) -> (Vec<i32>, Vec<i32>, i32) {
+) -> BlockBorders {
     let sample = |x: usize, y: usize| -> i32 {
         plane
             .get(y * stride + x)
             .copied()
             .map(i32::from)
-            .unwrap_or(128)
+            .unwrap_or(MID_SAMPLE)
     };
 
-    let mut top = vec![128i32; tx_w];
-    let mut left = vec![128i32; tx_h];
+    let have_above = px_y > 0;
+    let have_left = px_x > 0;
+    let max_x = width.saturating_sub(1);
+    let max_y = height.saturating_sub(1);
 
-    if px_y > 0 {
-        for (x, slot) in top.iter_mut().enumerate() {
-            let sx = px_x + x;
-            if sx < width {
-                *slot = sample(sx, px_y - 1);
-            }
-        }
-    }
-    if px_x > 0 {
-        for (y, slot) in left.iter_mut().enumerate() {
-            let sy = px_y + y;
-            if sy < height {
-                *slot = sample(px_x - 1, sy);
-            }
-        }
-    }
-    let tl = if px_x > 0 && px_y > 0 {
-        sample(px_x - 1, px_y - 1)
+    // AboveRow[i], i = 0..w-1.
+    let top: Vec<i32> = if !have_above && have_left {
+        vec![sample(px_x - 1, px_y); tx_w]
+    } else if !have_above {
+        vec![MID_SAMPLE - 1; tx_w]
     } else {
-        128
+        (0..tx_w)
+            .map(|i| sample((px_x + i).min(max_x), px_y - 1))
+            .collect()
     };
-    (top, left, tl)
+
+    // LeftCol[i], i = 0..h-1.
+    let left: Vec<i32> = if !have_left && have_above {
+        vec![sample(px_x, px_y - 1); tx_h]
+    } else if !have_left {
+        vec![MID_SAMPLE + 1; tx_h]
+    } else {
+        (0..tx_h)
+            .map(|i| sample(px_x - 1, (px_y + i).min(max_y)))
+            .collect()
+    };
+
+    // AboveRow[-1] (== LeftCol[-1]).
+    let tl = match (have_above, have_left) {
+        (true, true) => sample(px_x - 1, px_y - 1),
+        (true, false) => sample(px_x, px_y - 1),
+        (false, true) => sample(px_x - 1, px_y),
+        (false, false) => MID_SAMPLE,
+    };
+
+    BlockBorders {
+        top,
+        left,
+        tl,
+        have_above,
+        have_left,
+    }
 }
 
 /// `dqDenom` (AV1 spec §7.12.3 `reconstruct` process): the post-dequant
@@ -1252,6 +1920,131 @@ fn dq_denom(tx_size: usize) -> i32 {
         TX_32X32 => 2,
         TX_64X64 => 4,
         _ => 1,
+    }
+}
+
+/// A coded block's full palette state (AV1 spec §5.11.46/§5.11.49):
+/// `palette_colors_{y,u,v}` plus the `ColorMapY`/`ColorMapUV` built once for
+/// the whole block and sliced per transform block by
+/// [`PaletteBlockInfo::off_x`]/`off_y`. Empty `colors_y`/`colors_u` mean
+/// `PaletteSizeY`/`PaletteSizeUV == 0` (ordinary, non-palette prediction).
+#[derive(Default)]
+struct PaletteData {
+    colors_y: Vec<i32>,
+    colors_u: Vec<i32>,
+    colors_v: Vec<i32>,
+    map_y: Vec<u8>,
+    stride_y: usize,
+    map_uv: Vec<u8>,
+    stride_uv: usize,
+}
+
+/// Inputs to the `predict_palette` process (AV1 spec §7.11.4) for one
+/// transform block of a palette-coded coded block.
+struct PaletteBlockInfo<'a> {
+    /// `palette_colors_{y,u,v}` for this plane, already `Clip1`-ranged.
+    colors: &'a [i32],
+    /// The coded block's full `ColorMapY`/`ColorMapUV` (§5.11.49): one
+    /// palette index per plane-sample position, row-major, `map_stride`-wide.
+    color_map: &'a [u8],
+    map_stride: usize,
+    /// This transform block's offset from the coded block's origin, in
+    /// samples (spec's `x * 4`, `y * 4`).
+    off_x: usize,
+    off_y: usize,
+}
+
+/// `predict_palette` (AV1 spec §7.11.4): each output sample is simply the
+/// palette color named by the pre-decoded color map at that position.
+///
+/// Reads are defensive (`.get()` with a fallback to `colors[0]`/mid-grey)
+/// rather than a direct index: the chroma color map's dimensions come from
+/// `read_color_map`'s own `blockWidth`/`blockHeight` (with the spec's
+/// sub-4-sample `+= 2` padding for chroma-shared small blocks), while the
+/// transform-block loop that calls this reads its coverage from this crate's
+/// own (independently derived, `HasChroma`-unaware — see the `HasChroma`
+/// notes elsewhere in this module) chroma tile-block extent; the two are not
+/// proven to always agree at that specific small-block edge case, and an
+/// out-of-bounds index there should degrade gracefully, not panic.
+fn predict_palette(info: &PaletteBlockInfo, tx_w: usize, tx_h: usize, out: &mut [i32]) {
+    let fallback = info.colors.first().copied().unwrap_or(MID_SAMPLE);
+    for i in 0..tx_h {
+        for j in 0..tx_w {
+            let idx = info
+                .color_map
+                .get((info.off_y + i) * info.map_stride + info.off_x + j)
+                .copied()
+                .map(usize::from);
+            out[i * tx_w + j] = idx
+                .and_then(|idx| info.colors.get(idx).copied())
+                .unwrap_or(fallback);
+        }
+    }
+}
+
+/// Inputs to the `predict_chroma_from_luma` process (AV1 spec §7.11.5) for
+/// one chroma transform block.
+struct CflParams<'a> {
+    /// Already-reconstructed luma plane (tile-local), read-only here.
+    luma: &'a [u8],
+    luma_stride: usize,
+    sub_x: bool,
+    sub_y: bool,
+    /// `MaxLumaW`/`MaxLumaH` (tile-local pixel coords): the coded block's
+    /// luma extent, which clamps the luma-sample lookup at the block's own
+    /// right/bottom edge rather than the plane's.
+    max_luma_w: usize,
+    max_luma_h: usize,
+    /// `CflAlphaU` or `CflAlphaV`, already sign-applied.
+    alpha: i32,
+}
+
+/// `predict_chroma_from_luma` (AV1 spec §7.11.5): overwrite the DC-predicted
+/// `pred` (already filled in by the caller, since `UV_CFL_PRED` uses
+/// `DC_PRED` as its base predictor per §7.11.2.1) with `dc + alpha *
+/// (L[i][j] - lumaAvg)`, where `L` is the subsampled reconstructed luma
+/// block and `lumaAvg` its average.
+fn apply_cfl_prediction(
+    pred: &mut [i32],
+    tx_w: usize,
+    tx_h: usize,
+    cpx_x: usize,
+    cpx_y: usize,
+    cfl: &CflParams,
+) {
+    let sub_x = usize::from(cfl.sub_x);
+    let sub_y = usize::from(cfl.sub_y);
+    let mut l = vec![0i32; tx_w * tx_h];
+    let mut luma_avg: i64 = 0;
+    for i in 0..tx_h {
+        let luma_y = ((cpx_y + i) << sub_y).min(cfl.max_luma_h.saturating_sub(1 << sub_y));
+        for j in 0..tx_w {
+            let luma_x = ((cpx_x + j) << sub_x).min(cfl.max_luma_w.saturating_sub(1 << sub_x));
+            let mut t = 0i32;
+            for dy in 0..=sub_y {
+                for dx in 0..=sub_x {
+                    t += cfl
+                        .luma
+                        .get((luma_y + dy) * cfl.luma_stride + (luma_x + dx))
+                        .copied()
+                        .map(i32::from)
+                        .unwrap_or(0);
+                }
+            }
+            let v = t << (3 - sub_x - sub_y);
+            l[i * tx_w + j] = v;
+            luma_avg += i64::from(v);
+        }
+    }
+    let shift = tx_w.trailing_zeros() + tx_h.trailing_zeros();
+    let luma_avg = ((luma_avg + (1i64 << (shift - 1))) >> shift) as i32;
+    for i in 0..tx_h {
+        for j in 0..tx_w {
+            let dc = pred[i * tx_w + j];
+            let diff = i64::from(cfl.alpha) * i64::from(l[i * tx_w + j] - luma_avg);
+            let scaled_luma = round2_signed(diff, 6) as i32;
+            pred[i * tx_w + j] = clip1(dc + scaled_luma);
+        }
     }
 }
 
@@ -1275,6 +2068,10 @@ fn reconstruct_tx_block(
     pred_mode: usize,
     skip: bool,
     filter_intra_mode: Option<usize>,
+    enable_intra_edge_filter: bool,
+    cfl: Option<CflParams>,
+    angle_delta: i32,
+    palette: Option<PaletteBlockInfo>,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
     let tx_w = av1::TX_WIDTH[internal_tx_size];
@@ -1320,24 +2117,51 @@ fn reconstruct_tx_block(
         eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
     }
 
-    let (top, left, tl) = block_borders(samples, stride, plane_w, plane_h, tx_w, tx_h, px_x, px_y);
+    let borders = block_borders(samples, stride, plane_w, plane_h, tx_w, tx_h, px_x, px_y);
     if dbg {
         eprintln!(
-            "DBG top={:?} left={:?} tl={}",
-            &top[..top.len().min(8)],
-            &left[..left.len().min(8)],
-            tl
+            "DBG top={:?} left={:?} tl={} have_above={} have_left={}",
+            &borders.top[..borders.top.len().min(8)],
+            &borders.left[..borders.left.len().min(8)],
+            borders.tl,
+            borders.have_above,
+            borders.have_left
         );
     }
     let mut pred = vec![0i32; num_coeffs];
-    // AV1 spec §7.11.2.1: recursive (filter-)intra prediction replaces the
-    // ordinary mode dispatch only for luma (`plane == 0`) when
-    // `use_filter_intra` was signalled for this block.
-    match filter_intra_mode {
-        Some(fi_mode) if blk.plane == 0 => {
-            predict_filter_intra(fi_mode, &top, &left, tl, tx_w, tx_h, &mut pred);
-        }
-        _ => predict_intra_block(pred_mode, &top, &left, tl, tx_w, tx_h, &mut pred),
+    // AV1 spec §7.11.2.1's top-level dispatch: palette (§7.11.4) takes
+    // priority over everything else (filter-intra, CFL, ordinary modes) when
+    // `PaletteSize{Y,UV} > 0` for this plane.
+    match &palette {
+        Some(p) => predict_palette(p, tx_w, tx_h, &mut pred),
+        None => match filter_intra_mode {
+            Some(fi_mode) if blk.plane == 0 => {
+                predict_filter_intra(
+                    fi_mode,
+                    &borders.top,
+                    &borders.left,
+                    borders.tl,
+                    tx_w,
+                    tx_h,
+                    &mut pred,
+                );
+            }
+            _ => predict_intra_block(
+                pred_mode,
+                &borders,
+                tx_w,
+                tx_h,
+                &mut pred,
+                enable_intra_edge_filter,
+                blk.plane == 0,
+                angle_delta,
+            ),
+        },
+    }
+    // `predict_chroma_from_luma` (AV1 spec §7.11.5): applied to the DC
+    // prediction just computed above, before the residual is added.
+    if let Some(cfl) = &cfl {
+        apply_cfl_prediction(&mut pred, tx_w, tx_h, px_x, px_y, cfl);
     }
     if dbg {
         eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
@@ -1509,6 +2333,35 @@ fn get_plane_residual_size(bsize: usize, subsampling_x: usize, subsampling_y: us
     SUBSAMPLED_SIZE[bsize][subsampling_x][subsampling_y]
 }
 
+/// `HasChroma` (AV1 spec §5.11.5 `decode_block()`): whether the *current*
+/// leaf block carries chroma mode info / residual at all. A block that is
+/// only 4 luma samples wide (`bw4 == 1`) or tall (`bh4 == 1`) in a
+/// subsampled dimension shares its one subsampled chroma block with its
+/// horizontal/vertical partner — the encoder writes chroma syntax only once
+/// per pair, on the second (odd row/col) block; the first (even row/col)
+/// block is luma-only. Both blocks of such a pair floor-divide to the same
+/// chroma-space position (see the callers' `(mi_col >> subX) * MI_SIZE`
+/// math), so the second block's own `bsize`-derived chroma geometry already
+/// covers the shared area — no separate "group size" is needed.
+///
+/// `NumPlanes > 1` (i.e. `!monochrome`) is intentionally not folded in here;
+/// callers already gate on `!self.monochrome` separately, matching the
+/// existing call-site style.
+#[inline]
+fn has_chroma(
+    bsize: usize,
+    mi_row: usize,
+    mi_col: usize,
+    subsampling_x: bool,
+    subsampling_y: bool,
+) -> bool {
+    let bw4 = BLOCK_WIDTH[bsize] / MI_SIZE;
+    let bh4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
+    let luma_only_half = (bh4 == 1 && subsampling_y && mi_row & 1 == 0)
+        || (bw4 == 1 && subsampling_x && mi_col & 1 == 0);
+    !luma_only_half
+}
+
 /// `get_tx_size(plane, txSz)` (AV1 spec §5.11.37), chroma-plane case: derives
 /// the *single* transform size used for every chroma transform block of a
 /// coded block, from the coded block's own size (`bsize`) — not from the
@@ -1665,7 +2518,211 @@ struct ModeCdfs {
     interp_filter: [[u16; 4]; 16],
     filter_intra: [[u16; 3]; 22],
     filter_intra_mode: [u16; 6],
+    cfl_sign: [u16; 9],
+    cfl_alpha: [[u16; 17]; 6],
+    palette_y_mode: [[[u16; 3]; 3]; 7],
+    palette_uv_mode: [[u16; 3]; 2],
+    palette_y_size: [[u16; 8]; 7],
+    palette_uv_size: [[u16; 8]; 7],
+    palette_y_color_2: [[u16; 3]; 5],
+    palette_y_color_3: [[u16; 4]; 5],
+    palette_y_color_4: [[u16; 5]; 5],
+    palette_y_color_5: [[u16; 6]; 5],
+    palette_y_color_6: [[u16; 7]; 5],
+    palette_y_color_7: [[u16; 8]; 5],
+    palette_y_color_8: [[u16; 9]; 5],
+    palette_uv_color_2: [[u16; 3]; 5],
+    palette_uv_color_3: [[u16; 4]; 5],
+    palette_uv_color_4: [[u16; 5]; 5],
+    palette_uv_color_5: [[u16; 6]; 5],
+    palette_uv_color_6: [[u16; 7]; 5],
+    palette_uv_color_7: [[u16; 8]; 5],
+    palette_uv_color_8: [[u16; 9]; 5],
 }
+
+/// `UV_CFL_PRED` (AV1 spec `intra_mode` enumeration): the chroma-only
+/// "chroma from luma" mode, `uv_mode_allowed`'s 14th (index 13) symbol.
+const UV_CFL_PRED: usize = 13;
+
+/// `CFL_SIGN_ZERO`/`CFL_SIGN_NEG`/`CFL_SIGN_POS` (AV1 spec §6.10.36).
+const CFL_SIGN_ZERO: i32 = 0;
+const CFL_SIGN_NEG: i32 = 1;
+
+/// `Default_Cfl_Sign_Cdf[CFL_JOINT_SIGNS + 1]` (AV1 spec "Additional tables").
+const DEFAULT_CFL_SIGN_CDF: [u16; 9] = [1418, 2123, 13340, 18405, 26972, 28343, 32294, 32768, 0];
+
+/// `Default_Cfl_Alpha_Cdf[CFL_ALPHA_CONTEXTS][CFL_ALPHABET_SIZE + 1]` (AV1
+/// spec "Additional tables").
+const DEFAULT_CFL_ALPHA_CDF: [[u16; 17]; 6] = [
+    [
+        7637, 20719, 31401, 32481, 32657, 32688, 32692, 32696, 32700, 32704, 32708, 32712, 32716,
+        32720, 32724, 32768, 0,
+    ],
+    [
+        14365, 23603, 28135, 31168, 32167, 32395, 32487, 32573, 32620, 32647, 32668, 32672, 32676,
+        32680, 32684, 32768, 0,
+    ],
+    [
+        11532, 22380, 28445, 31360, 32349, 32523, 32584, 32649, 32673, 32677, 32681, 32685, 32689,
+        32693, 32697, 32768, 0,
+    ],
+    [
+        26990, 31402, 32282, 32571, 32692, 32696, 32700, 32704, 32708, 32712, 32716, 32720, 32724,
+        32728, 32732, 32768, 0,
+    ],
+    [
+        17248, 26058, 28904, 30608, 31305, 31877, 32126, 32321, 32394, 32464, 32516, 32560, 32576,
+        32593, 32622, 32768, 0,
+    ],
+    [
+        14738, 21678, 25779, 27901, 29024, 30302, 30980, 31843, 32144, 32413, 32520, 32594, 32622,
+        32656, 32660, 32768, 0,
+    ],
+];
+
+/// `Default_Palette_Y_Mode_Cdf[PALETTE_BLOCK_SIZE_CONTEXTS][PALETTE_Y_MODE_CONTEXTS][3]`
+/// (AV1 spec "Additional tables").
+const DEFAULT_PALETTE_Y_MODE_CDF: [[[u16; 3]; 3]; 7] = [
+    [[31676, 32768, 0], [3419, 32768, 0], [1261, 32768, 0]],
+    [[31912, 32768, 0], [2859, 32768, 0], [980, 32768, 0]],
+    [[31823, 32768, 0], [3400, 32768, 0], [781, 32768, 0]],
+    [[32030, 32768, 0], [3561, 32768, 0], [904, 32768, 0]],
+    [[32309, 32768, 0], [7337, 32768, 0], [1462, 32768, 0]],
+    [[32265, 32768, 0], [4015, 32768, 0], [1521, 32768, 0]],
+    [[32450, 32768, 0], [7946, 32768, 0], [129, 32768, 0]],
+];
+
+/// `Default_Palette_Uv_Mode_Cdf[PALETTE_UV_MODE_CONTEXTS][3]` (AV1 spec
+/// "Additional tables").
+const DEFAULT_PALETTE_UV_MODE_CDF: [[u16; 3]; 2] = [[32461, 32768, 0], [21488, 32768, 0]];
+
+/// `Default_Palette_Y_Size_Cdf[PALETTE_BLOCK_SIZE_CONTEXTS][PALETTE_SIZES + 1]`
+/// (AV1 spec "Additional tables").
+const DEFAULT_PALETTE_Y_SIZE_CDF: [[u16; 8]; 7] = [
+    [7952, 13000, 18149, 21478, 25527, 29241, 32768, 0],
+    [7139, 11421, 16195, 19544, 23666, 28073, 32768, 0],
+    [7788, 12741, 17325, 20500, 24315, 28530, 32768, 0],
+    [8271, 14064, 18246, 21564, 25071, 28533, 32768, 0],
+    [12725, 19180, 21863, 24839, 27535, 30120, 32768, 0],
+    [9711, 14888, 16923, 21052, 25661, 27875, 32768, 0],
+    [14940, 20797, 21678, 24186, 27033, 28999, 32768, 0],
+];
+
+/// `Default_Palette_Uv_Size_Cdf[PALETTE_BLOCK_SIZE_CONTEXTS][PALETTE_SIZES + 1]`
+/// (AV1 spec "Additional tables").
+const DEFAULT_PALETTE_UV_SIZE_CDF: [[u16; 8]; 7] = [
+    [8713, 19979, 27128, 29609, 31331, 32272, 32768, 0],
+    [5839, 15573, 23581, 26947, 29848, 31700, 32768, 0],
+    [4426, 11260, 17999, 21483, 25863, 29430, 32768, 0],
+    [3228, 9464, 14993, 18089, 22523, 27420, 32768, 0],
+    [3768, 8886, 13091, 17852, 22495, 27207, 32768, 0],
+    [2464, 8451, 12861, 21632, 25525, 28555, 32768, 0],
+    [1269, 5435, 10433, 18963, 21700, 25865, 32768, 0],
+];
+
+/// `Default_Palette_Size_{2..8}_Y_Color_Cdf[PALETTE_COLOR_CONTEXTS][size + 1]`
+/// (AV1 spec "Additional tables").
+const DEFAULT_PALETTE_Y_COLOR_2_CDF: [[u16; 3]; 5] = [
+    [28710, 32768, 0],
+    [16384, 32768, 0],
+    [10553, 32768, 0],
+    [27036, 32768, 0],
+    [31603, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_3_CDF: [[u16; 4]; 5] = [
+    [27877, 30490, 32768, 0],
+    [11532, 25697, 32768, 0],
+    [6544, 30234, 32768, 0],
+    [23018, 28072, 32768, 0],
+    [31915, 32385, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_4_CDF: [[u16; 5]; 5] = [
+    [25572, 28046, 30045, 32768, 0],
+    [9478, 21590, 27256, 32768, 0],
+    [7248, 26837, 29824, 32768, 0],
+    [19167, 24486, 28349, 32768, 0],
+    [31400, 31825, 32250, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_5_CDF: [[u16; 6]; 5] = [
+    [24779, 26955, 28576, 30282, 32768, 0],
+    [8669, 20364, 24073, 28093, 32768, 0],
+    [4255, 27565, 29377, 31067, 32768, 0],
+    [19864, 23674, 26716, 29530, 32768, 0],
+    [31646, 31893, 32147, 32426, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_6_CDF: [[u16; 7]; 5] = [
+    [23132, 25407, 26970, 28435, 30073, 32768, 0],
+    [7443, 17242, 20717, 24762, 27982, 32768, 0],
+    [6300, 24862, 26944, 28784, 30671, 32768, 0],
+    [18916, 22895, 25267, 27435, 29652, 32768, 0],
+    [31270, 31550, 31808, 32059, 32353, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_7_CDF: [[u16; 8]; 5] = [
+    [23105, 25199, 26464, 27684, 28931, 30318, 32768, 0],
+    [6950, 15447, 18952, 22681, 25567, 28563, 32768, 0],
+    [7560, 23474, 25490, 27203, 28921, 30708, 32768, 0],
+    [18544, 22373, 24457, 26195, 28119, 30045, 32768, 0],
+    [31198, 31451, 31670, 31882, 32123, 32391, 32768, 0],
+];
+const DEFAULT_PALETTE_Y_COLOR_8_CDF: [[u16; 9]; 5] = [
+    [21689, 23883, 25163, 26352, 27506, 28827, 30195, 32768, 0],
+    [6892, 15385, 17840, 21606, 24287, 26753, 29204, 32768, 0],
+    [5651, 23182, 25042, 26518, 27982, 29392, 30900, 32768, 0],
+    [19349, 22578, 24418, 25994, 27524, 29031, 30448, 32768, 0],
+    [31028, 31270, 31504, 31705, 31927, 32153, 32392, 32768, 0],
+];
+
+/// `Default_Palette_Size_{2..8}_Uv_Color_Cdf[PALETTE_COLOR_CONTEXTS][size + 1]`
+/// (AV1 spec "Additional tables").
+const DEFAULT_PALETTE_UV_COLOR_2_CDF: [[u16; 3]; 5] = [
+    [29089, 32768, 0],
+    [16384, 32768, 0],
+    [8713, 32768, 0],
+    [29257, 32768, 0],
+    [31610, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_3_CDF: [[u16; 4]; 5] = [
+    [25257, 29145, 32768, 0],
+    [12287, 27293, 32768, 0],
+    [7033, 27960, 32768, 0],
+    [20145, 25405, 32768, 0],
+    [30608, 31639, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_4_CDF: [[u16; 5]; 5] = [
+    [24210, 27175, 29903, 32768, 0],
+    [9888, 22386, 27214, 32768, 0],
+    [5901, 26053, 29293, 32768, 0],
+    [18318, 22152, 28333, 32768, 0],
+    [30459, 31136, 31926, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_5_CDF: [[u16; 6]; 5] = [
+    [22980, 25479, 27781, 29986, 32768, 0],
+    [8413, 21408, 24859, 28874, 32768, 0],
+    [2257, 29449, 30594, 31598, 32768, 0],
+    [19189, 21202, 25915, 28620, 32768, 0],
+    [31844, 32044, 32281, 32518, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_6_CDF: [[u16; 7]; 5] = [
+    [22217, 24567, 26637, 28683, 30548, 32768, 0],
+    [7307, 16406, 19636, 24632, 28424, 32768, 0],
+    [4441, 25064, 26879, 28942, 30919, 32768, 0],
+    [17210, 20528, 23319, 26750, 29582, 32768, 0],
+    [30674, 30953, 31396, 31735, 32207, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_7_CDF: [[u16; 8]; 5] = [
+    [21239, 23168, 25044, 26962, 28705, 30506, 32768, 0],
+    [6545, 15012, 18004, 21817, 25503, 28701, 32768, 0],
+    [3448, 26295, 27437, 28704, 30126, 31442, 32768, 0],
+    [15889, 18323, 21704, 24698, 26976, 29690, 32768, 0],
+    [30988, 31204, 31479, 31734, 31983, 32325, 32768, 0],
+];
+const DEFAULT_PALETTE_UV_COLOR_8_CDF: [[u16; 9]; 5] = [
+    [21442, 23288, 24758, 26246, 27649, 28980, 30563, 32768, 0],
+    [5863, 14933, 17552, 20668, 23683, 26411, 29273, 32768, 0],
+    [3415, 25810, 26877, 27990, 29223, 30394, 31618, 32768, 0],
+    [17965, 20084, 22232, 23974, 26274, 28402, 30390, 32768, 0],
+    [31190, 31329, 31516, 31679, 31825, 32026, 32322, 32768, 0],
+];
 
 /// `Default_Filter_Intra_Cdf[BLOCK_SIZES][3]` (AV1 spec "Additional tables").
 /// Indices 10-15 and 20-21 are never used (spec note) but are transcribed
@@ -1724,7 +2781,119 @@ impl ModeCdfs {
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
             filter_intra: DEFAULT_FILTER_INTRA_CDF,
             filter_intra_mode: DEFAULT_FILTER_INTRA_MODE_CDF,
+            cfl_sign: DEFAULT_CFL_SIGN_CDF,
+            cfl_alpha: DEFAULT_CFL_ALPHA_CDF,
+            palette_y_mode: DEFAULT_PALETTE_Y_MODE_CDF,
+            palette_uv_mode: DEFAULT_PALETTE_UV_MODE_CDF,
+            palette_y_size: DEFAULT_PALETTE_Y_SIZE_CDF,
+            palette_uv_size: DEFAULT_PALETTE_UV_SIZE_CDF,
+            palette_y_color_2: DEFAULT_PALETTE_Y_COLOR_2_CDF,
+            palette_y_color_3: DEFAULT_PALETTE_Y_COLOR_3_CDF,
+            palette_y_color_4: DEFAULT_PALETTE_Y_COLOR_4_CDF,
+            palette_y_color_5: DEFAULT_PALETTE_Y_COLOR_5_CDF,
+            palette_y_color_6: DEFAULT_PALETTE_Y_COLOR_6_CDF,
+            palette_y_color_7: DEFAULT_PALETTE_Y_COLOR_7_CDF,
+            palette_y_color_8: DEFAULT_PALETTE_Y_COLOR_8_CDF,
+            palette_uv_color_2: DEFAULT_PALETTE_UV_COLOR_2_CDF,
+            palette_uv_color_3: DEFAULT_PALETTE_UV_COLOR_3_CDF,
+            palette_uv_color_4: DEFAULT_PALETTE_UV_COLOR_4_CDF,
+            palette_uv_color_5: DEFAULT_PALETTE_UV_COLOR_5_CDF,
+            palette_uv_color_6: DEFAULT_PALETTE_UV_COLOR_6_CDF,
+            palette_uv_color_7: DEFAULT_PALETTE_UV_COLOR_7_CDF,
+            palette_uv_color_8: DEFAULT_PALETTE_UV_COLOR_8_CDF,
         }
+    }
+
+    /// `has_palette_y` (AV1 spec §8.3.2): cdf `TilePaletteYModeCdf[bsizeCtx][ctx]`.
+    fn read_has_palette_y(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        bsize_ctx: usize,
+        ctx: usize,
+    ) -> bool {
+        dec.read_symbol(&mut self.palette_y_mode[bsize_ctx][ctx]) == 1
+    }
+
+    /// `has_palette_uv` (AV1 spec §8.3.2): cdf `TilePaletteUVModeCdf[ctx]`.
+    fn read_has_palette_uv(&mut self, dec: &mut SymbolDecoder<'_>, ctx: usize) -> bool {
+        dec.read_symbol(&mut self.palette_uv_mode[ctx]) == 1
+    }
+
+    /// `palette_size_y_minus_2` (AV1 spec §8.3.2): cdf `TilePaletteYSizeCdf[bsizeCtx]`.
+    fn read_palette_size_y(&mut self, dec: &mut SymbolDecoder<'_>, bsize_ctx: usize) -> usize {
+        dec.read_symbol(&mut self.palette_y_size[bsize_ctx])
+    }
+
+    /// `palette_size_uv_minus_2` (AV1 spec §8.3.2): cdf `TilePaletteUVSizeCdf[bsizeCtx]`.
+    fn read_palette_size_uv(&mut self, dec: &mut SymbolDecoder<'_>, bsize_ctx: usize) -> usize {
+        dec.read_symbol(&mut self.palette_uv_size[bsize_ctx])
+    }
+
+    /// `palette_color_idx_y` (AV1 spec §8.3.2): cdf `TilePaletteSize{n}YColorCdf[ctx]`.
+    fn read_palette_color_idx_y(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        size: usize,
+        ctx: usize,
+    ) -> usize {
+        match size {
+            2 => dec.read_symbol(&mut self.palette_y_color_2[ctx]),
+            3 => dec.read_symbol(&mut self.palette_y_color_3[ctx]),
+            4 => dec.read_symbol(&mut self.palette_y_color_4[ctx]),
+            5 => dec.read_symbol(&mut self.palette_y_color_5[ctx]),
+            6 => dec.read_symbol(&mut self.palette_y_color_6[ctx]),
+            7 => dec.read_symbol(&mut self.palette_y_color_7[ctx]),
+            _ => dec.read_symbol(&mut self.palette_y_color_8[ctx]),
+        }
+    }
+
+    /// `palette_color_idx_uv` (AV1 spec §8.3.2): cdf `TilePaletteSize{n}UvColorCdf[ctx]`.
+    fn read_palette_color_idx_uv(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        size: usize,
+        ctx: usize,
+    ) -> usize {
+        match size {
+            2 => dec.read_symbol(&mut self.palette_uv_color_2[ctx]),
+            3 => dec.read_symbol(&mut self.palette_uv_color_3[ctx]),
+            4 => dec.read_symbol(&mut self.palette_uv_color_4[ctx]),
+            5 => dec.read_symbol(&mut self.palette_uv_color_5[ctx]),
+            6 => dec.read_symbol(&mut self.palette_uv_color_6[ctx]),
+            7 => dec.read_symbol(&mut self.palette_uv_color_7[ctx]),
+            _ => dec.read_symbol(&mut self.palette_uv_color_8[ctx]),
+        }
+    }
+
+    /// `read_cfl_alphas()` (AV1 spec §5.11.45): returns `(CflAlphaU,
+    /// CflAlphaV)`. Only called when `UVMode == UV_CFL_PRED`.
+    fn read_cfl_alphas(&mut self, dec: &mut SymbolDecoder<'_>) -> (i32, i32) {
+        let cfl_alpha_signs = dec.read_symbol(&mut self.cfl_sign) as i32;
+        let sign_u = (cfl_alpha_signs + 1) / 3;
+        let sign_v = (cfl_alpha_signs + 1) % 3;
+        let alpha_u = if sign_u != CFL_SIGN_ZERO {
+            let ctx = ((sign_u - 1) * 3 + sign_v) as usize;
+            let mag = 1 + dec.read_symbol(&mut self.cfl_alpha[ctx]) as i32;
+            if sign_u == CFL_SIGN_NEG {
+                -mag
+            } else {
+                mag
+            }
+        } else {
+            0
+        };
+        let alpha_v = if sign_v != CFL_SIGN_ZERO {
+            let ctx = ((sign_v - 1) * 3 + sign_u) as usize;
+            let mag = 1 + dec.read_symbol(&mut self.cfl_alpha[ctx]) as i32;
+            if sign_v == CFL_SIGN_NEG {
+                -mag
+            } else {
+                mag
+            }
+        } else {
+            0
+        };
+        (alpha_u, alpha_v)
     }
 
     /// `filter_intra_mode_info()` (AV1 spec §5.11.24). Returns `Some(mode)`
@@ -1864,6 +3033,17 @@ impl ModeCdfs {
         dec.read_symbol(&mut self.intra_y_mode[above_ctx][left_ctx])
     }
 
+    /// `intra_angle_info_y()`/`intra_angle_info_uv()` (AV1 spec §5.11.42/43):
+    /// reads `angle_delta_y`/`angle_delta_uv` (cdf `TileAngleDeltaCdf[mode -
+    /// V_PRED]`, §8.3.2) and returns the biased-out `AngleDeltaY`/
+    /// `AngleDeltaUV` (`-MAX_ANGLE_DELTA..=MAX_ANGLE_DELTA`). Only called
+    /// when `is_directional_mode(mode) && MiSize >= BLOCK_8X8` — this
+    /// function assumes that gate has already been checked by the caller.
+    fn read_angle_delta(&mut self, dec: &mut SymbolDecoder<'_>, mode: usize) -> i32 {
+        let ctx = mode - V_PRED as usize;
+        dec.read_symbol(&mut self.angle_delta[ctx]) as i32 - MAX_ANGLE_DELTA
+    }
+
     fn read_uv_mode(
         &mut self,
         dec: &mut SymbolDecoder<'_>,
@@ -1931,6 +3111,25 @@ struct TileDecodeState<'a> {
     seg_feature_alt_q: bool,
     /// Sequence-header `enable_filter_intra` (§5.11.24 gate).
     enable_filter_intra: bool,
+    /// Sequence-header `enable_intra_edge_filter` (§7.11.2.4 gate).
+    enable_intra_edge_filter: bool,
+    /// Frame-header `allow_screen_content_tools` — gates whether
+    /// `palette_mode_info()` (§5.11.46) is read at all for a block.
+    allow_screen_content_tools: bool,
+    /// `PaletteColors[0]` of the most recently decoded palette-Y block at
+    /// each `mi_col`/`mi_row` (empty = no palette / not yet decoded), used by
+    /// [`Self::get_palette_cache`] (§5.11.46's `get_palette_cache`) and by
+    /// `has_palette_y`'s context (§8.3.2, "`PaletteSizes[0][...] > 0`" —
+    /// tracked here as "is the vector non-empty" rather than a separate size
+    /// array, since the two are equivalent and the colors are what the cache
+    /// actually needs).
+    palette_y_colors_above: Vec<Vec<i32>>,
+    palette_y_colors_left: Vec<Vec<i32>>,
+    /// Same as the Y pair above, but for the U-plane palette (`PaletteColors[1]`
+    /// in spec terms — the only plane `get_palette_cache` is called for besides
+    /// Y; V never reuses a cache).
+    palette_u_colors_above: Vec<Vec<i32>>,
+    palette_u_colors_left: Vec<Vec<i32>>,
     /// Per-`mi_col` transform *width* (in samples) of the most recently
     /// reconstructed block above, and per-`mi_row` transform *height* of the
     /// most recently reconstructed block to the left — exactly the two
@@ -2030,6 +3229,8 @@ impl<'a> TileDecodeState<'a> {
         seg_feature_skip: bool,
         #[allow(dead_code)] seg_feature_alt_q: bool,
         enable_filter_intra: bool,
+        enable_intra_edge_filter: bool,
+        allow_screen_content_tools: bool,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
         reference_select: bool,
@@ -2106,6 +3307,12 @@ impl<'a> TileDecodeState<'a> {
             seg_feature_skip,
             seg_feature_alt_q,
             enable_filter_intra,
+            enable_intra_edge_filter,
+            allow_screen_content_tools,
+            palette_y_colors_above: vec![Vec::new(); mi_cols],
+            palette_y_colors_left: vec![Vec::new(); mi_rows],
+            palette_u_colors_above: vec![Vec::new(); mi_cols],
+            palette_u_colors_left: vec![Vec::new(); mi_rows],
         }
     }
 
@@ -2328,21 +3535,80 @@ impl<'a> TileDecodeState<'a> {
                 INTRA_MODE_CONTEXT[above_mode],
                 INTRA_MODE_CONTEXT[left_mode],
             );
-            let uv_mode =
+            // `intra_angle_info_y()` (AV1 spec §5.11.42), same as the
+            // keyframe path.
+            let angle_delta_y = if bsize >= BLOCK_8X8 && is_directional_mode(y_mode as u8) {
+                self.mode_cdfs.read_angle_delta(&mut self.dec, y_mode)
+            } else {
+                0
+            };
+            // `HasChroma` (AV1 spec §5.11.5) — see `has_chroma`'s doc comment;
+            // same gate as the keyframe path.
+            let has_chroma = !self.monochrome
+                && has_chroma(
+                    bsize,
+                    mi_row,
+                    mi_col,
+                    self.subsampling_x,
+                    self.subsampling_y,
+                );
+            let uv_mode = if has_chroma {
                 self.mode_cdfs
-                    .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode);
+                    .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode)
+            } else {
+                DC_PRED as usize
+            };
+            // `read_cfl_alphas()` (AV1 spec §5.11.45): read only when
+            // `UVMode == UV_CFL_PRED`, immediately after `uv_mode` and before
+            // `intra_angle_info_uv()`, per the `intra_block_mode_info()`
+            // syntax order.
+            let cfl_alpha = if has_chroma && uv_mode == UV_CFL_PRED {
+                Some(self.mode_cdfs.read_cfl_alphas(&mut self.dec))
+            } else {
+                None
+            };
+            // `intra_angle_info_uv()` (AV1 spec §5.11.43).
+            let angle_delta_uv =
+                if has_chroma && bsize >= BLOCK_8X8 && is_directional_mode(uv_mode as u8) {
+                    self.mode_cdfs.read_angle_delta(&mut self.dec, uv_mode)
+                } else {
+                    0
+                };
+            // `palette_mode_info()` (AV1 spec §5.11.46), same position as the
+            // keyframe path.
+            let (colors_y, colors_u, colors_v) =
+                self.read_palette_mode_info(mi_row, mi_col, bsize, y_mode, uv_mode, has_chroma);
             // `filter_intra_mode_info()` (AV1 spec §5.11.24) is also read for
             // an intra block coded inside an inter frame (spec
             // `intra_block_mode_info()` calls it right after the mode reads,
             // same as the keyframe path) — this call site previously omitted
             // it entirely, which would desync every such block once inter
             // frames are actually decoded.
-            let filter_intra_mode = self.mode_cdfs.read_filter_intra_mode_info(
-                &mut self.dec,
-                self.enable_filter_intra,
-                y_mode,
-                bsize,
-            );
+            let filter_intra_mode = if colors_y.is_empty() {
+                self.mode_cdfs.read_filter_intra_mode_info(
+                    &mut self.dec,
+                    self.enable_filter_intra,
+                    y_mode,
+                    bsize,
+                )
+            } else {
+                None
+            };
+            // `palette_tokens()` (AV1 spec §5.11.49), same position as the
+            // keyframe path.
+            let (map_y, stride_y) =
+                self.read_color_map(bsize, mi_row, mi_col, colors_y.len(), false);
+            let (map_uv, stride_uv) =
+                self.read_color_map(bsize, mi_row, mi_col, colors_u.len(), true);
+            let palette = PaletteData {
+                colors_y,
+                colors_u,
+                colors_v,
+                map_y,
+                stride_y,
+                map_uv,
+                stride_uv,
+            };
             // `read_tx_size`'s `allowSelect = !skip || !is_inter` is always
             // true here (`is_inter` is false on this branch), so `skip`
             // does not gate this read for an intra block — only for a true
@@ -2362,6 +3628,10 @@ impl<'a> TileDecodeState<'a> {
                 skip,
                 luma_tx,
                 filter_intra_mode,
+                cfl_alpha,
+                angle_delta_y,
+                angle_delta_uv,
+                &palette,
             )?;
             // Update inter neighbour state (this block is not inter).
             for r in mi_row..(mi_row + bh).min(self.mi_rows) {
@@ -2912,28 +4182,92 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[left_mode],
         );
 
-        // Chroma mode (AV1 spec §5.11.10).
-        let uv_mode =
+        // `intra_angle_info_y()` (AV1 spec §5.11.42): `angle_delta_y` is read
+        // right after `intra_frame_y_mode`, before `uv_mode`, whenever
+        // `MiSize >= BLOCK_8X8 && is_directional_mode(YMode)`. Previously
+        // missing entirely — since this shares the same bitstream position
+        // as every later symbol in the block, every directional-Y-mode block
+        // at least 8x8 desynced from this point onward whenever the encoder
+        // wrote a non-zero-cost angle delta (which real encoders do often;
+        // directional modes are a common choice on non-flat content).
+        let angle_delta_y = if bsize >= BLOCK_8X8 && is_directional_mode(y_mode as u8) {
+            self.mode_cdfs.read_angle_delta(&mut self.dec, y_mode)
+        } else {
+            0
+        };
+
+        // Chroma mode (AV1 spec §5.11.10). `HasChroma` (§5.11.5): this leaf's
+        // own chroma syntax is only present when it isn't the first (luma-only)
+        // half of a sub-4-sample chroma-sharing pair — see `has_chroma`.
+        let has_chroma = !self.monochrome
+            && has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            );
+        let uv_mode = if has_chroma {
             self.mode_cdfs
-                .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode);
+                .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode)
+        } else {
+            DC_PRED as usize
+        };
+
+        // `read_cfl_alphas()` (AV1 spec §5.11.45): read only when
+        // `UVMode == UV_CFL_PRED`, immediately after `uv_mode` and before
+        // `intra_angle_info_uv()`, per the `intra_frame_mode_info()` syntax
+        // order.
+        let cfl_alpha = if has_chroma && uv_mode == UV_CFL_PRED {
+            Some(self.mode_cdfs.read_cfl_alphas(&mut self.dec))
+        } else {
+            None
+        };
+
+        // `intra_angle_info_uv()` (AV1 spec §5.11.43): same shape as the luma
+        // angle delta above, gated on `UVMode` instead of `YMode`.
+        let angle_delta_uv =
+            if has_chroma && bsize >= BLOCK_8X8 && is_directional_mode(uv_mode as u8) {
+                self.mode_cdfs.read_angle_delta(&mut self.dec, uv_mode)
+            } else {
+                0
+            };
+
+        // `palette_mode_info()` (AV1 spec §5.11.46), read right after the
+        // angle deltas and before `filter_intra_mode_info()`, per
+        // `intra_frame_mode_info()`'s syntax order.
+        let (colors_y, colors_u, colors_v) =
+            self.read_palette_mode_info(mi_row, mi_col, bsize, y_mode, uv_mode, has_chroma);
 
         // `filter_intra_mode_info()` (AV1 spec §5.11.24). Reads a symbol only
         // when `enable_filter_intra && y_mode == DC_PRED && PaletteSizeY == 0
-        // (always true here — palette mode isn't implemented) && max(w,h) <=
-        // 32`. The decoded mode is now wired into the luma prediction via
-        // `predict_filter_intra` (AV1 spec §7.11.2.3) below — previously only
-        // the *read* was implemented (to stay in bitstream sync), leaving the
-        // block reconstructed with plain DC/directional prediction even
-        // though the residual was correctly decoded against the real
-        // filter-intra prediction, which is wrong whenever the encoder
-        // actually picked this tool (confirmed on the `smptebars` corpus
-        // entry's very first block).
-        let filter_intra_mode = self.mode_cdfs.read_filter_intra_mode_info(
-            &mut self.dec,
-            self.enable_filter_intra,
-            y_mode,
-            bsize,
-        );
+        // && max(w,h) <= 32`. The decoded mode is wired into the luma
+        // prediction via `predict_filter_intra` (AV1 spec §7.11.2.3) below.
+        let filter_intra_mode = if colors_y.is_empty() {
+            self.mode_cdfs.read_filter_intra_mode_info(
+                &mut self.dec,
+                self.enable_filter_intra,
+                y_mode,
+                bsize,
+            )
+        } else {
+            None
+        };
+
+        // `palette_tokens()` (AV1 spec §5.11.49), read right after
+        // `mode_info()` (i.e. after `filter_intra_mode_info()`) and before
+        // `read_block_tx_size()`, per `decode_block()`'s syntax order.
+        let (map_y, stride_y) = self.read_color_map(bsize, mi_row, mi_col, colors_y.len(), false);
+        let (map_uv, stride_uv) = self.read_color_map(bsize, mi_row, mi_col, colors_u.len(), true);
+        let palette = PaletteData {
+            colors_y,
+            colors_u,
+            colors_v,
+            map_y,
+            stride_y,
+            map_uv,
+            stride_uv,
+        };
 
         // Transform size (AV1 spec §5.11.15/17). `allowSelect = !skip ||
         // !is_inter` is always true for this (pure-intra keyframe) path, so
@@ -2962,6 +4296,10 @@ impl<'a> TileDecodeState<'a> {
             skip,
             luma_tx,
             filter_intra_mode,
+            cfl_alpha,
+            angle_delta_y,
+            angle_delta_uv,
+            &palette,
         )
     }
 
@@ -2981,6 +4319,10 @@ impl<'a> TileDecodeState<'a> {
         skip: bool,
         luma_tx: usize,
         filter_intra_mode: Option<usize>,
+        cfl_alpha: Option<(i32, i32)>,
+        angle_delta_y: i32,
+        angle_delta_uv: i32,
+        palette: &PaletteData,
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
@@ -3013,6 +4355,13 @@ impl<'a> TileDecodeState<'a> {
                     reduced_tx_set: self.reduced_tx_set,
                     lossless: self.lossless,
                 };
+                let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
+                    colors: &palette.colors_y,
+                    color_map: &palette.map_y,
+                    map_stride: palette.stride_y,
+                    off_x: tx,
+                    off_y: ty,
+                });
                 reconstruct_tx_block(
                     &mut self.dec,
                     &mut self.coeff_cdfs,
@@ -3029,6 +4378,10 @@ impl<'a> TileDecodeState<'a> {
                     y_mode,
                     skip,
                     filter_intra_mode,
+                    self.enable_intra_edge_filter,
+                    None,
+                    angle_delta_y,
+                    palette_y,
                 )?;
             }
         }
@@ -3052,9 +4405,32 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Reconstruct chroma transform blocks (4:2:0 / 4:2:2 / 4:4:4).
-        if !self.monochrome {
-            let sub_x = self.subsampling_x as u8;
-            let sub_y = self.subsampling_y as u8;
+        // `HasChroma` (AV1 spec §5.11.5, see [`has_chroma`]): a block that is
+        // the first (even row/col) half of a sub-4-sample chroma-sharing
+        // pair carries no chroma syntax/residual at all — that shared data
+        // was already reconstructed on (or waits for) the pair's second
+        // block. Skipping this whole section for such a block, rather than
+        // reconstructing a redundant, wrongly-positioned partial chroma
+        // block per luma sub-block, is the fix for the "not modelled"
+        // simplification noted elsewhere in this module.
+        if !self.monochrome
+            && has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            )
+        {
+            let sub_x = self.subsampling_x as usize;
+            let sub_y = self.subsampling_y as usize;
+            // `MaxLumaW`/`MaxLumaH` (AV1 spec §7.11.2.1, set when `plane ==
+            // 0`): the pixel extent of the coded block's just-reconstructed
+            // luma region, used by CFL (§7.11.5) to clamp its luma-sample
+            // lookups at the block's own right/bottom edge rather than the
+            // frame's.
+            let max_luma_w = blk_px_x + bw * MI_SIZE;
+            let max_luma_h = blk_px_y + bh * MI_SIZE;
             // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
             // transform size is derived from the *whole coded block's* size
             // (`bsize`), not from the luma transform size directly, via
@@ -3080,10 +4456,34 @@ impl<'a> TileDecodeState<'a> {
             // with the chroma step when `cw`/`ch` happen to equal the
             // subsampled luma tx step (the previous revision's bucketed
             // square `c_tx` always did; a real rectangular `c_tx` may not).
-            let base_cpx_x = (mi_col * MI_SIZE - self.tile_px_x0) >> sub_x;
-            let base_cpx_y = (mi_row * MI_SIZE - self.tile_px_y0) >> sub_y;
-            let chroma_bw = ((bw * MI_SIZE) >> sub_x).max(cw);
-            let chroma_bh = ((bh * MI_SIZE) >> sub_y).max(ch);
+            // AV1 spec §5.11.34 `residual()`: `baseXBlock = (MiCol >> subX) *
+            // MI_SIZE` — the mi position is floor-divided by the subsampling
+            // *before* multiplying back up to samples, not the other way
+            // round. For an odd `mi_col`/`mi_row` (always the case for the
+            // chroma-carrying half of a `HasChroma`-shared pair, since the
+            // *other* half sits at the preceding even position) those two
+            // orders disagree — e.g. `mi_col == 1`, `sub_x == 1`:
+            // `(1 >> 1) * 4 == 0` vs the previous `(1 * 4) >> 1 == 2` — and
+            // only the spec's order lands both halves of the pair on the
+            // same shared chroma origin.
+            let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
+            let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
+            // `num4x4W * 4` / `num4x4H * 4` (spec `residual()`): the chroma
+            // extent is this block's own `get_plane_residual_size(MiSize,
+            // plane)`, which already accounts for the sub-4x4 floor (e.g.
+            // `Subsampled_Size[BLOCK_4X4][1][1] == BLOCK_4X4`) — no separate
+            // "shared group size" is needed, since only the `HasChroma`
+            // block of a pair reaches this code at all.
+            let plane_sz = {
+                let sz = get_plane_residual_size(bsize, sub_x, sub_y);
+                if sz == BLOCK_INVALID {
+                    bsize
+                } else {
+                    sz
+                }
+            };
+            let chroma_bw = BLOCK_WIDTH[plane_sz];
+            let chroma_bh = BLOCK_HEIGHT[plane_sz];
             for ty in (0..chroma_bh).step_by(ch) {
                 for tx in (0..chroma_bw).step_by(cw) {
                     let cpx_x = base_cpx_x + tx;
@@ -3107,6 +4507,38 @@ impl<'a> TileDecodeState<'a> {
                         lossless: self.lossless,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
+                    let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
+                        luma: &*y_plane,
+                        luma_stride: self.y_stride,
+                        sub_x: self.subsampling_x,
+                        sub_y: self.subsampling_y,
+                        max_luma_w,
+                        max_luma_h,
+                        alpha: au,
+                    });
+                    let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
+                        luma: &*y_plane,
+                        luma_stride: self.y_stride,
+                        sub_x: self.subsampling_x,
+                        sub_y: self.subsampling_y,
+                        max_luma_w,
+                        max_luma_h,
+                        alpha: av,
+                    });
+                    let palette_u = (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
+                        colors: &palette.colors_u,
+                        color_map: &palette.map_uv,
+                        map_stride: palette.stride_uv,
+                        off_x: tx,
+                        off_y: ty,
+                    });
+                    let palette_v = (!palette.colors_v.is_empty()).then(|| PaletteBlockInfo {
+                        colors: &palette.colors_v,
+                        color_map: &palette.map_uv,
+                        map_stride: palette.stride_uv,
+                        off_x: tx,
+                        off_y: ty,
+                    });
                     reconstruct_tx_block(
                         &mut self.dec,
                         &mut self.coeff_cdfs,
@@ -3123,6 +4555,10 @@ impl<'a> TileDecodeState<'a> {
                         uv_mode,
                         skip,
                         None,
+                        self.enable_intra_edge_filter,
+                        cfl_u,
+                        angle_delta_uv,
+                        palette_u,
                     )?;
                     reconstruct_tx_block(
                         &mut self.dec,
@@ -3140,6 +4576,10 @@ impl<'a> TileDecodeState<'a> {
                         uv_mode,
                         skip,
                         None,
+                        self.enable_intra_edge_filter,
+                        cfl_v,
+                        angle_delta_uv,
+                        palette_v,
                     )?;
                 }
             }
@@ -3194,7 +4634,314 @@ impl<'a> TileDecodeState<'a> {
                 *slot = skip_byte;
             }
         }
+        // `PaletteColors[{0,1}][MiRow][MiCol]` (AV1 spec §5.11.46's implicit
+        // per-position storage that [`Self::get_palette_cache`] reads back):
+        // record this block's Y/U palettes (or clear them, for a non-palette
+        // block) across its whole mi extent, mirroring the neighbour-context
+        // update pattern above.
+        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            if let Some(slot) = self.palette_y_colors_left.get_mut(r) {
+                *slot = palette.colors_y.clone();
+            }
+            if let Some(slot) = self.palette_u_colors_left.get_mut(r) {
+                *slot = palette.colors_u.clone();
+            }
+        }
+        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(slot) = self.palette_y_colors_above.get_mut(c) {
+                *slot = palette.colors_y.clone();
+            }
+            if let Some(slot) = self.palette_u_colors_above.get_mut(c) {
+                *slot = palette.colors_u.clone();
+            }
+        }
         Ok(())
+    }
+
+    /// `get_palette_cache(plane)` (AV1 spec §5.11.46): merges the above and
+    /// left neighbours' palettes into a single sorted, duplicate-free cache
+    /// (both inputs are already sorted ascending, so this is a sorted merge
+    /// rather than the spec's more general `sort()`-based description).
+    /// `plane` is `0` for Y or `1` for U (V is never cached).
+    fn get_palette_cache(&self, plane: usize, mi_row: usize, mi_col: usize) -> Vec<i32> {
+        let (colors_above, colors_left) = if plane == 0 {
+            (&self.palette_y_colors_above, &self.palette_y_colors_left)
+        } else {
+            (&self.palette_u_colors_above, &self.palette_u_colors_left)
+        };
+        // Spec's literal `(MiRow * MI_SIZE) % 64` gate: the above cache is
+        // only used when this block is not at the top of its superblock row
+        // (deliberately *not* the general `AvailU`; this is palette-specific).
+        let above: &[i32] = if (mi_row * MI_SIZE) % 64 != 0 {
+            colors_above.get(mi_col).map(Vec::as_slice).unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let left: &[i32] = if mi_col > 0 {
+            colors_left.get(mi_row).map(Vec::as_slice).unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let mut cache = Vec::with_capacity(above.len() + left.len());
+        let (mut ai, mut li) = (0, 0);
+        while ai < above.len() && li < left.len() {
+            let (a, l) = (above[ai], left[li]);
+            if l < a {
+                if cache.last() != Some(&l) {
+                    cache.push(l);
+                }
+                li += 1;
+            } else {
+                if cache.last() != Some(&a) {
+                    cache.push(a);
+                }
+                ai += 1;
+                if l == a {
+                    li += 1;
+                }
+            }
+        }
+        for &v in &above[ai..] {
+            if cache.last() != Some(&v) {
+                cache.push(v);
+            }
+        }
+        for &v in &left[li..] {
+            if cache.last() != Some(&v) {
+                cache.push(v);
+            }
+        }
+        cache
+    }
+
+    /// Reads `palette_colors_y`/`palette_colors_u` (AV1 spec §5.11.46): the
+    /// shared cache + literal + delta-coded-remainder scheme both Y and U
+    /// use (V is different — see [`Self::read_palette_colors_v`]). `is_u`
+    /// only changes the `range` computation's `-1` (spec: the Y branch
+    /// subtracts it, the U branch doesn't — `Clip1` already keeps `val` in
+    /// range either way, so this only affects `paletteBits`' shrink rate,
+    /// not correctness of `val` itself, but must match to stay in sync with
+    /// the encoder's own bit-count choice for the next iteration).
+    fn read_palette_colors_yu(&mut self, size: usize, cache: &[i32], is_u: bool) -> Vec<i32> {
+        let mut colors = Vec::with_capacity(size);
+        let mut idx = 0usize;
+        let mut i = 0usize;
+        while i < cache.len() && idx < size {
+            let use_cache = self.dec.read_literal(1) == 1;
+            if use_cache {
+                colors.push(cache[i]);
+                idx += 1;
+            }
+            i += 1;
+        }
+        if idx < size {
+            colors.push(self.dec.read_literal(BIT_DEPTH) as i32);
+            idx += 1;
+        }
+        let mut palette_bits = 0u32;
+        if idx < size {
+            let min_bits = BIT_DEPTH - 3;
+            let extra = self.dec.read_literal(2);
+            palette_bits = min_bits + extra;
+        }
+        while idx < size {
+            let delta = self.dec.read_literal(palette_bits) as i32 + 1;
+            let val = clip1(colors[idx - 1] + delta);
+            colors.push(val);
+            let sub = if is_u { 0 } else { 1 };
+            let range = ((1i32 << BIT_DEPTH) - val - sub).max(0) as u32;
+            palette_bits = palette_bits.min(ceil_log2(range));
+            idx += 1;
+        }
+        colors.sort_unstable();
+        colors
+    }
+
+    /// Reads `palette_colors_v` (AV1 spec §5.11.46): a completely different
+    /// scheme from Y/U — either `PaletteSizeUV` raw `BitDepth`-bit literals,
+    /// or a first literal plus signed, wraparound-clamped deltas. Not sorted
+    /// afterward (unlike Y/U).
+    fn read_palette_colors_v(&mut self, size: usize) -> Vec<i32> {
+        let mut colors = vec![0i32; size];
+        let delta_encode = self.dec.read_literal(1) == 1;
+        if delta_encode {
+            let min_bits = BIT_DEPTH - 4;
+            let max_val = 1i32 << BIT_DEPTH;
+            let extra = self.dec.read_literal(2);
+            let palette_bits = min_bits + extra;
+            colors[0] = self.dec.read_literal(BIT_DEPTH) as i32;
+            for idx in 1..size {
+                let mut delta = self.dec.read_literal(palette_bits) as i32;
+                if delta != 0 && self.dec.read_literal(1) == 1 {
+                    delta = -delta;
+                }
+                let mut val = colors[idx - 1] + delta;
+                if val < 0 {
+                    val += max_val;
+                }
+                if val >= max_val {
+                    val -= max_val;
+                }
+                colors[idx] = clip1(val);
+            }
+        } else {
+            for slot in &mut colors {
+                *slot = self.dec.read_literal(BIT_DEPTH) as i32;
+            }
+        }
+        colors
+    }
+
+    /// `palette_mode_info()` (AV1 spec §5.11.46). Returns the (possibly
+    /// empty — empty meaning `PaletteSize{Y,UV} == 0`) `palette_colors_{y,u,v}`
+    /// arrays. The UV branch is gated on `has_chroma` (AV1 spec §5.11.5,
+    /// see [`has_chroma`]'s doc comment) in addition to `uv_mode == DC_PRED`
+    /// — callers pass `uv_mode == DC_PRED` (never a real chroma mode) for a
+    /// block whose own `has_chroma` is false, so this second gate is the one
+    /// that actually matters there.
+    fn read_palette_mode_info(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        y_mode: usize,
+        uv_mode: usize,
+        has_chroma: bool,
+    ) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+        if bsize < BLOCK_8X8
+            || BLOCK_WIDTH[bsize] > 64
+            || BLOCK_HEIGHT[bsize] > 64
+            || !self.allow_screen_content_tools
+        {
+            return (Vec::new(), Vec::new(), Vec::new());
+        }
+        let bsize_ctx = mi_width_log2(bsize) + mi_height_log2(bsize) - 2;
+
+        let mut colors_y = Vec::new();
+        if y_mode == DC_PRED as usize {
+            let above_has = mi_row > 0
+                && self
+                    .palette_y_colors_above
+                    .get(mi_col)
+                    .is_some_and(|v| !v.is_empty());
+            let left_has = mi_col > 0
+                && self
+                    .palette_y_colors_left
+                    .get(mi_row)
+                    .is_some_and(|v| !v.is_empty());
+            let ctx = above_has as usize + left_has as usize;
+            if self
+                .mode_cdfs
+                .read_has_palette_y(&mut self.dec, bsize_ctx, ctx)
+            {
+                let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
+                let cache = self.get_palette_cache(0, mi_row, mi_col);
+                colors_y = self.read_palette_colors_yu(size, &cache, false);
+            }
+        }
+
+        let mut colors_u = Vec::new();
+        let mut colors_v = Vec::new();
+        if has_chroma && uv_mode == DC_PRED as usize {
+            let ctx = usize::from(!colors_y.is_empty());
+            if self.mode_cdfs.read_has_palette_uv(&mut self.dec, ctx) {
+                let size = 2 + self
+                    .mode_cdfs
+                    .read_palette_size_uv(&mut self.dec, bsize_ctx);
+                let cache = self.get_palette_cache(1, mi_row, mi_col);
+                colors_u = self.read_palette_colors_yu(size, &cache, true);
+                colors_v = self.read_palette_colors_v(size);
+            }
+        }
+
+        (colors_y, colors_u, colors_v)
+    }
+
+    /// `palette_tokens()` (AV1 spec §5.11.49): decodes the full-coded-block
+    /// `ColorMapY`/`ColorMapUV` (flat, row-major, `blockWidth`-strided; index
+    /// `[i * stride + j]`). Returns `(map, stride)`; an empty map means the
+    /// corresponding `PaletteSize` was `0` (nothing to read).
+    fn read_color_map(
+        &mut self,
+        bsize: usize,
+        mi_row: usize,
+        mi_col: usize,
+        n: usize,
+        is_uv: bool,
+    ) -> (Vec<u8>, usize) {
+        if n == 0 {
+            return (Vec::new(), 0);
+        }
+        let sub_x = usize::from(self.subsampling_x);
+        let sub_y = usize::from(self.subsampling_y);
+        let mut block_width = BLOCK_WIDTH[bsize];
+        let mut block_height = BLOCK_HEIGHT[bsize];
+        let mut onscreen_width = block_width.min(self.mi_cols.saturating_sub(mi_col) * MI_SIZE);
+        let mut onscreen_height = block_height.min(self.mi_rows.saturating_sub(mi_row) * MI_SIZE);
+        if is_uv {
+            block_width >>= sub_x;
+            block_height >>= sub_y;
+            onscreen_width >>= sub_x;
+            onscreen_height >>= sub_y;
+            if block_width < 4 {
+                block_width += 2;
+                onscreen_width += 2;
+            }
+            if block_height < 4 {
+                block_height += 2;
+                onscreen_height += 2;
+            }
+        }
+        let stride = block_width;
+        let mut map = vec![0u8; block_width * block_height];
+
+        let color_idx_y0 = read_ns(&mut self.dec, n as u32) as u8;
+        map[0] = color_idx_y0;
+        // `onscreen_width`/`onscreen_height` are only `0` if this block's mi
+        // position is already off the (frame-wide) `mi_cols`/`mi_rows` grid,
+        // which the partition-tree recursion's `hasRows`/`hasCols` guards
+        // should make unreachable — but this loop's bound subtracts 1 from
+        // their sum, so guard it explicitly rather than trust that invariant
+        // under adversarial/fuzzed input.
+        if onscreen_width > 0 && onscreen_height > 0 {
+            for i in 1..(onscreen_height + onscreen_width - 1) {
+                let j_hi = i.min(onscreen_width - 1);
+                let j_lo = (i + 1).saturating_sub(onscreen_height);
+                let mut j = j_hi;
+                loop {
+                    let (r, c) = (i - j, j);
+                    let (ctx, color_order) = get_palette_color_context(&map, stride, r, c, n);
+                    let sym = if is_uv {
+                        self.mode_cdfs
+                            .read_palette_color_idx_uv(&mut self.dec, n, ctx)
+                    } else {
+                        self.mode_cdfs
+                            .read_palette_color_idx_y(&mut self.dec, n, ctx)
+                    };
+                    map[r * stride + c] = color_order[sym];
+                    if j == j_lo {
+                        break;
+                    }
+                    j -= 1;
+                }
+            }
+        }
+        if onscreen_width > 0 {
+            for i in 0..onscreen_height {
+                let edge = map[i * stride + onscreen_width - 1];
+                for j in onscreen_width..block_width {
+                    map[i * stride + j] = edge;
+                }
+            }
+        }
+        if onscreen_height > 0 {
+            for i in onscreen_height..block_height {
+                let (src, dst) = map.split_at_mut(i * stride);
+                let edge_row = &src[(onscreen_height - 1) * stride..onscreen_height * stride];
+                dst[..block_width].copy_from_slice(edge_row);
+            }
+        }
+        (map, stride)
     }
 
     /// Read the transform size for an intra block (AV1 spec §5.11.17 / the
@@ -3293,6 +5040,8 @@ pub fn decode_tile_group(
     seg_feature_skip: bool,
     seg_feature_alt_q: bool,
     enable_filter_intra: bool,
+    enable_intra_edge_filter: bool,
+    allow_screen_content_tools: bool,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
     reference_select: bool,
@@ -3384,6 +5133,8 @@ pub fn decode_tile_group(
         seg_feature_skip,
         seg_feature_alt_q,
         enable_filter_intra,
+        enable_intra_edge_filter,
+        allow_screen_content_tools,
         frame_is_intra,
         allow_high_precision_mv,
         reference_select,
@@ -3585,6 +5336,8 @@ pub fn reconstruct_av1_frame(
                 false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
                 false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
                 seq.enable_filter_intra,
+                seq.enable_intra_edge_filter,
+                frame_header.allow_screen_content_tools,
                 frame_is_intra,
                 frame_header.allow_high_precision_mv,
                 frame_header.reference_select,
@@ -3699,6 +5452,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
             true,
             false,
             false,
@@ -3743,13 +5498,162 @@ mod tests {
                 let top: Vec<i32> = (0..2 * size).map(|i| (i * 7 % 256) as i32).collect();
                 let left: Vec<i32> = (0..2 * size).map(|i| (i * 13 % 256) as i32).collect();
                 let mut out = vec![0i32; size * size];
-                predict_intra_block(mode, &top, &left, 128, size, size, &mut out);
+                let borders = BlockBorders {
+                    top,
+                    left,
+                    tl: 128,
+                    have_above: true,
+                    have_left: true,
+                };
+                predict_intra_block(mode, &borders, size, size, &mut out, true, true, 0);
                 assert!(
                     out.iter().all(|&v| (0..=255).contains(&v)),
                     "mode {mode} size {size} produced an out-of-range sample"
                 );
             }
         }
+    }
+
+    #[test]
+    fn smooth_weights_match_libaom_tables() {
+        // AV1 spec §7.11.2.6 `Sm_Weights_Tx_*` — these are libaom's
+        // `sm_weight_arrays` exactly, transcribed into `SMOOTH_WEIGHTS`.
+        assert_eq!(smooth_weight(4, 0), 255);
+        assert_eq!(smooth_weight(4, 1), 149);
+        assert_eq!(smooth_weight(4, 3), 64);
+        assert_eq!(smooth_weight(8, 1), 197);
+        assert_eq!(smooth_weight(8, 7), 32);
+        assert_eq!(smooth_weight(16, 15), 16);
+        assert_eq!(smooth_weight(32, 31), 8);
+        assert_eq!(smooth_weight(64, 63), 4);
+        // The near-edge weight is always ~1 (scaled by 256) and the far-edge
+        // weight is 1/block_size, scaled by 256.
+        assert_eq!(smooth_weight(4, 0), 255);
+        assert_eq!(smooth_weight(64, 0), 255);
+    }
+
+    #[test]
+    fn smooth_predictors_match_libaom_arithmetic() {
+        // Hand-evaluated against libaom's `smooth_v/h/smooth_predictor`:
+        //   pred = w*near + (256-w)*far,  dst = Round2(pred, 8)
+        //   (SMOOTH combines both axes, Round2(., 9)). The smooth weights never
+        //   reach 0 at the far edge (they settle at 1/block_size scaled), so the
+        //   far edge is only approached, never matched exactly.
+        let top = vec![10i32, 20, 30, 40];
+        let left = vec![50i32, 60, 70, 80];
+        let mut out = vec![0i32; 16];
+
+        predict_smooth_v(&top, &left, 128, 4, 4, &mut out);
+        assert_eq!(
+            out,
+            vec![10, 20, 30, 40, 39, 45, 51, 57, 57, 60, 63, 67, 63, 65, 68, 70,]
+        );
+
+        predict_smooth_h(&top, &left, 128, 4, 4, &mut out);
+        // far = top[3] = 40; rightmost column approaches (but does not equal) it.
+        assert_eq!(
+            out,
+            vec![50, 46, 43, 43, 60, 52, 47, 45, 70, 57, 50, 48, 80, 63, 53, 50,]
+        );
+
+        predict_smooth(&top, &left, 128, 4, 4, &mut out);
+        assert_eq!(
+            out,
+            vec![30, 33, 37, 41, 50, 48, 49, 51, 63, 59, 57, 57, 71, 64, 60, 60,]
+        );
+        assert!(out.iter().all(|&v| (0..=255).contains(&v)));
+    }
+
+    #[test]
+    fn cfl_prediction_matches_hand_computed_values_no_subsampling() {
+        // AV1 spec §7.11.5, sub_x = sub_y = 0 (4:4:4-style): L[i][j] =
+        // luma[i][j] << 3, lumaAvg = Round2(sum(L), log2W + log2H).
+        //
+        // Luma block:
+        //  10  20  30  40
+        //  50  60  70  80
+        //  90 100 110 120
+        // 130 140 150 160
+        // sum = 1360, L-sum = 10880, lumaAvg = (10880 + 8) >> 4 = 680.
+        let luma: Vec<u8> = vec![
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
+        let cfl = CflParams {
+            luma: &luma,
+            luma_stride: 4,
+            sub_x: false,
+            sub_y: false,
+            max_luma_w: 4,
+            max_luma_h: 4,
+            alpha: 4,
+        };
+        let mut pred = vec![50i32; 16];
+        apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+        // pixel=10 (top-left): L=80, diff=4*(80-680)=-2400, scaled=-((2400+32)>>6)=-38.
+        assert_eq!(pred[0], 50 - 38);
+        // pixel=60 (row1,col1): L=480, diff=4*(480-680)=-800, scaled=-((800+32)>>6)=-13.
+        assert_eq!(pred[4 + 1], 50 - 13);
+        // pixel=160 (bottom-right): L=1280, diff=4*(1280-680)=2400, scaled=(2400+32)>>6=38.
+        assert_eq!(pred[15], 50 + 38);
+    }
+
+    #[test]
+    fn cfl_prediction_is_a_no_op_on_flat_luma() {
+        // A constant luma plane has L[i][j] == lumaAvg everywhere, so the CFL
+        // adjustment must be exactly zero regardless of alpha.
+        let luma = vec![77u8; 64];
+        let cfl = CflParams {
+            luma: &luma,
+            luma_stride: 8,
+            sub_x: true,
+            sub_y: true,
+            max_luma_w: 8,
+            max_luma_h: 8,
+            alpha: -7,
+        };
+        let mut pred = vec![42i32; 16];
+        apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+        assert!(pred.iter().all(|&v| v == 42), "got {pred:?}");
+    }
+
+    #[test]
+    fn ceil_log2_matches_spec_examples() {
+        // AV1 spec §4.6: CeilLog2(x) is 0 for x < 2, otherwise the number of
+        // bits needed to represent 0..x-1.
+        assert_eq!(ceil_log2(0), 0);
+        assert_eq!(ceil_log2(1), 0);
+        assert_eq!(ceil_log2(2), 1);
+        assert_eq!(ceil_log2(3), 2);
+        assert_eq!(ceil_log2(4), 2);
+        assert_eq!(ceil_log2(5), 3);
+        assert_eq!(ceil_log2(8), 3);
+        assert_eq!(ceil_log2(9), 4);
+    }
+
+    #[test]
+    fn get_palette_color_context_matches_spec_worked_example() {
+        // 2x2 map (row-major, stride 2): row0 = [1, 0], row1 = [0, _],
+        // querying (r=1, c=1) so the unread `_` slot's value doesn't matter.
+        // Left = map[1][0] = 0 (score += 2), above-left = map[0][0] = 1
+        // (score += 1), above = map[0][1] = 0 (score += 2) -> scores =
+        // [4, 1, 0] for colors [0, 1, 2]. Already sorted descending, so no
+        // swap happens and ColorOrder stays [0, 1, 2]. hash = 4*1 + 1*2 +
+        // 0*2 = 6 -> ctx = Palette_Color_Context[6] = 3 (§5.11.50 /
+        // "Additional tables").
+        let map = [1u8, 0, 0, 0];
+        let (ctx, order) = get_palette_color_context(&map, 2, 1, 1, 3);
+        assert_eq!(ctx, 3, "expected Palette_Color_Context[6] == 3");
+        assert_eq!(order[..3], [0, 1, 2], "already sorted, no swap expected");
+
+        // All-distinct-neighbour case reaching the maximum possible hash
+        // (PALETTE_MAX_COLOR_CONTEXT_HASH = 8): left = map[1][0] = 0
+        // (score 2), above-left = map[0][0] = 2 (score 1), above =
+        // map[0][1] = 1 (score 2) -> scores = [2, 2, 1], already descending
+        // -> hash = 2*1 + 2*2 + 1*2 = 8 -> ctx = Palette_Color_Context[8] = 1.
+        let map2 = [2u8, 1, 0, 0];
+        let (ctx2, order2) = get_palette_color_context(&map2, 2, 1, 1, 3);
+        assert_eq!(ctx2, 1, "expected Palette_Color_Context[8] == 1");
+        assert_eq!(order2[..3], [0, 1, 2], "already sorted, no swap expected");
     }
 
     #[test]
@@ -3925,6 +5829,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
             true,
             false,
             false,
@@ -4017,6 +5923,8 @@ mod tests {
             64,
             64,
             true,
+            false,
+            false,
             false,
             false,
             false,
@@ -4166,7 +6074,185 @@ mod tests {
         let top = vec![100i32; 8];
         let left = vec![50i32; 4];
         let mut out = vec![0i32; 8 * 4];
-        predict_dc(&top, &left, 8, 4, &mut out);
+        predict_dc(&top, &left, 8, 4, true, true, &mut out);
         assert!(out.iter().all(|&v| v == 83), "got {out:?}");
+    }
+
+    #[test]
+    fn predict_dc_asymmetric_cases_average_only_the_available_side() {
+        // AV1 spec §7.11.2.5's three non-both branches, hand-computed. The
+        // `top`/`left` arrays deliberately hold *different* values on the
+        // unavailable side to prove it is not read at all: before this was
+        // fixed, every case below took the both-available `avg` branch and
+        // blended the two sides together.
+        let top: Vec<i32> = (0..8).map(|i| 100 + i).collect(); // sum 828
+        let left: Vec<i32> = (0..4).map(|i| 40 + 2 * i).collect(); // sum 172
+
+        // haveLeft = 1, haveAbove = 0:
+        //   leftAvg = Clip1((172 + (4 >> 1)) >> log2(4)) = (172 + 2) >> 2 = 43.
+        let mut out = vec![0i32; 8 * 4];
+        predict_dc(&top, &left, 8, 4, false, true, &mut out);
+        assert!(out.iter().all(|&v| v == 43), "left-only: got {out:?}");
+
+        // haveLeft = 0, haveAbove = 1:
+        //   aboveAvg = Clip1((828 + (8 >> 1)) >> log2(8)) = (828 + 4) >> 3 = 104.
+        let mut out = vec![0i32; 8 * 4];
+        predict_dc(&top, &left, 8, 4, true, false, &mut out);
+        assert!(out.iter().all(|&v| v == 104), "above-only: got {out:?}");
+
+        // Neither: 1 << (BitDepth - 1).
+        let mut out = vec![0i32; 8 * 4];
+        predict_dc(&top, &left, 8, 4, false, false, &mut out);
+        assert!(out.iter().all(|&v| v == 128), "neither: got {out:?}");
+
+        // Sanity: the both-available branch is a genuinely different value,
+        // so the assertions above cannot pass by accident.
+        let mut both = vec![0i32; 8 * 4];
+        predict_dc(&top, &left, 8, 4, true, true, &mut both);
+        assert_eq!(both[0], (828 + 172 + 6) / 12);
+        assert!(both[0] != 43 && both[0] != 104 && both[0] != 128);
+    }
+
+    #[test]
+    fn predict_dc_left_only_rounds_like_round2_not_truncation() {
+        // `leftAvg`'s `(sum + (h >> 1)) >> log2H` rounds to nearest; a plain
+        // truncating `sum / h` would give 10 here instead of 11.
+        let left = vec![10i32, 11, 11, 11]; // sum 43; (43 + 2) >> 2 = 11
+        let mut out = vec![0i32; 4 * 4];
+        predict_dc(&[], &left, 4, 4, false, true, &mut out);
+        assert!(out.iter().all(|&v| v == 11), "got {out:?}");
+    }
+
+    /// One-plane fixture: a `w`×`h` ramp so every sample is distinguishable.
+    fn borders_fixture(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn block_borders_tracks_availability_from_tile_local_position() {
+        let (w, h) = (16usize, 16usize);
+        let plane = borders_fixture(w, h);
+
+        // Tile-local origin: neither side available (spec §5.11.35's
+        // `haveLeft = AvailL || x > 0` is false at x == 0 within a tile).
+        let b = block_borders(&plane, w, w, h, 4, 4, 0, 0);
+        assert!(!b.have_above && !b.have_left);
+        // Top row / left column both away from the tile edge: both available.
+        let b = block_borders(&plane, w, w, h, 4, 4, 4, 4);
+        assert!(b.have_above && b.have_left);
+        // Left edge, second row: above only.
+        let b = block_borders(&plane, w, w, h, 4, 4, 0, 4);
+        assert!(b.have_above && !b.have_left);
+        // Top row, second column: left only.
+        let b = block_borders(&plane, w, w, h, 4, 4, 4, 0);
+        assert!(!b.have_above && b.have_left);
+    }
+
+    #[test]
+    fn block_borders_substitute_values_match_spec_7_11_2_1() {
+        let (w, h) = (16usize, 16usize);
+        let plane = borders_fixture(w, h);
+
+        // Neither side available: AboveRow = (1 << (BitDepth-1)) - 1 = 127,
+        // LeftCol = (1 << (BitDepth-1)) + 1 = 129, AboveRow[-1] = 128. The
+        // ±1 asymmetry is normative (it keeps PAETH_PRED's ties
+        // deterministic) — a single shared 128 fill is what this replaced.
+        let b = block_borders(&plane, w, w, h, 4, 4, 0, 0);
+        assert_eq!(b.top, vec![127; 4]);
+        assert_eq!(b.left, vec![129; 4]);
+        assert_eq!(b.tl, 128);
+
+        // Above unavailable, left available: AboveRow[i] = CurrFrame[y][x-1]
+        // (replicated), AboveRow[-1] = the same sample.
+        let b = block_borders(&plane, w, w, h, 4, 4, 8, 0);
+        let expected = i32::from(plane[7]); // (x-1, y) = (7, 0)
+        assert_eq!(b.top, vec![expected; 4]);
+        assert_eq!(b.tl, expected);
+        // LeftCol still comes from the real left column.
+        assert_eq!(
+            b.left,
+            (0..4)
+                .map(|i| i32::from(plane[i * w + 7]))
+                .collect::<Vec<_>>()
+        );
+
+        // Left unavailable, above available: LeftCol[i] = CurrFrame[y-1][x]
+        // (replicated), AboveRow[-1] = the same sample.
+        let b = block_borders(&plane, w, w, h, 4, 4, 0, 8);
+        let expected = i32::from(plane[7 * w]); // (x, y-1) = (0, 7)
+        assert_eq!(b.left, vec![expected; 4]);
+        assert_eq!(b.tl, expected);
+        assert_eq!(
+            b.top,
+            (0..4)
+                .map(|i| i32::from(plane[7 * w + i]))
+                .collect::<Vec<_>>()
+        );
+
+        // Both available: the corner is the real diagonal neighbour.
+        let b = block_borders(&plane, w, w, h, 4, 4, 8, 8);
+        assert_eq!(b.tl, i32::from(plane[7 * w + 7]));
+    }
+
+    #[test]
+    fn block_borders_replicate_the_last_sample_past_the_frame_edge() {
+        // §7.11.2.1 clamps the neighbour reads with `Min(aboveLimit, x+i)` /
+        // `Min(leftLimit, y+i)`, i.e. samples past the right/bottom edge
+        // repeat the last real one. A previous revision left those slots at
+        // the 128 fill, which polluted every transform block hanging over the
+        // frame edge (a 12×12 plane with an 8-wide tx block at x=8 has half
+        // its above row out of bounds).
+        let (w, h) = (12usize, 12usize);
+        let plane = borders_fixture(w, h);
+
+        let b = block_borders(&plane, w, w, h, 8, 8, 8, 8);
+        // Above row: x = 8..15 clamped to maxX = 11 -> samples 8,9,10,11 then
+        // 11 repeated.
+        let above_row = 7 * w;
+        let expected_top: Vec<i32> = (0..8)
+            .map(|i| i32::from(plane[above_row + (8 + i).min(11)]))
+            .collect();
+        assert_eq!(b.top, expected_top);
+        assert!(
+            b.top[4..].iter().all(|&v| v == expected_top[3]),
+            "out-of-frame tail must replicate, got {:?}",
+            b.top
+        );
+        // Left column: y = 8..15 clamped to maxY = 11.
+        let expected_left: Vec<i32> = (0..8)
+            .map(|i| i32::from(plane[(8 + i).min(11) * w + 7]))
+            .collect();
+        assert_eq!(b.left, expected_left);
+    }
+
+    #[test]
+    fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
+        // End-to-end through the mode dispatch: a left-edge block whose above
+        // row is a constant 200 must predict exactly 200, not the average of
+        // 200 with a synthesized left column.
+        let borders = BlockBorders {
+            top: vec![200; 8],
+            left: vec![200; 8],
+            tl: 200,
+            have_above: true,
+            have_left: false,
+        };
+        let mut out = vec![0i32; 8 * 8];
+        predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0);
+        assert!(out.iter().all(|&v| v == 200), "got {out:?}");
+
+        // And with neither side real, the mode dispatch must reach the
+        // `1 << (BitDepth - 1)` branch regardless of what the (substituted)
+        // arrays happen to contain.
+        let borders = BlockBorders {
+            top: vec![127; 8],
+            left: vec![129; 8],
+            tl: 128,
+            have_above: false,
+            have_left: false,
+        };
+        let mut out = vec![0i32; 8 * 8];
+        predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0);
+        assert!(out.iter().all(|&v| v == 128), "got {out:?}");
     }
 }

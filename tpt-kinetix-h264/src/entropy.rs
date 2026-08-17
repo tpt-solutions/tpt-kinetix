@@ -524,6 +524,8 @@ impl CodedBlockFlagContext {
         top_coded: bool,
     ) -> bool {
         let ctx_idx = left_coded as usize + 2 * top_coded as usize;
+        let ctx = &self.ctx[cat][ctx_idx];
+        eprintln!("    CBF cat={cat} ctx_idx={ctx_idx} state={} mps={}", ctx.state, ctx.mps);
         dec.decode_decision(&mut self.ctx[cat][ctx_idx]) == 1
     }
 }
@@ -890,18 +892,20 @@ impl IntraMbTypeSuffixCabacContext {
 
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
         if dec.decode_decision(&mut self.ctx[0]) == 0 {
-            return 0; // I4x4
+            return 0; // I_NxN
         }
         if dec.decode_terminate() == 1 {
             return 25; // I_PCM
         }
+        // Decode order matches FFmpeg decode_cabac_intra_mb_type(intra_slice=0):
+        //   state += 1 after initial bin, so ctx[1]=cbp_luma, ctx[2]=cbp_chroma, ctx[3]=pred_mode.
         let mut mb_type = 1u32;
-        mb_type += 12 * dec.decode_decision(&mut self.ctx[1]) as u32;
-        if dec.decode_decision(&mut self.ctx[2]) == 1 {
-            mb_type += 4 + 4 * dec.decode_decision(&mut self.ctx[2]) as u32;
+        mb_type += 12 * dec.decode_decision(&mut self.ctx[1]) as u32; // cbp_luma
+        if dec.decode_decision(&mut self.ctx[2]) == 1 {               // cbp_chroma present
+            mb_type += 4 + 4 * dec.decode_decision(&mut self.ctx[2]) as u32; // cbp_chroma value
         }
-        mb_type += 2 * dec.decode_decision(&mut self.ctx[3]) as u32;
-        mb_type += dec.decode_decision(&mut self.ctx[3]) as u32;
+        mb_type += 2 * dec.decode_decision(&mut self.ctx[3]) as u32; // pred_mode high
+        mb_type += dec.decode_decision(&mut self.ctx[3]) as u32;      // pred_mode low
         mb_type
     }
 }
@@ -950,22 +954,19 @@ impl MbTypePCabacContext {
     /// `mb_type_raw == 4` / `P8x8ref0`) -- see [`RefIdxCabacContext::decode`]
     /// for why that shortcut isn't needed here.
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
-        // FFmpeg `ff_h264_decode_mb_cabac` P-branch (AV_PICTURE_TYPE_P):
-        //   get_cabac(14)==0                       → 0  (P_L0_16x16)
-        //   get_cabac(14)==1, get_cabac(15)==0     → 3 * get_cabac(16)
-        //                                             (0 → P_8x8, 3 → P_8x8)
-        //   get_cabac(14)==1, get_cabac(15)==1     → 2 - get_cabac(17)
-        //                                             (2 → P_8x16, 1 → P_16x8)
-        //   get_cabac(14)==1, get_cabac(15)==1, get_cabac(17)==0 (after the
-        //     2 - ... branch has consumed bit 17)  → intra (None); the
-        //     intra suffix is then read from ctx 17.
-        if dec.decode_decision(&mut self.ctx[0]) == 0 {
-            return Some(0); // P_L0_16x16
+        // H.264 spec §9.3.2.5 / Table 9-36 P-slice binarization.
+        // Mirrors FFmpeg `ff_h264_decode_mb_cabac` (!get_cabac notation):
+        //   ctxIdx 14 = 0 → inter branch (3 more bins); 1 → intra-in-P (None).
+        if dec.decode_decision(&mut self.ctx[0]) == 1 {
+            return None; // intra-in-P
         }
+        // ctxIdx 14 = 0 → inter; discriminate on ctxIdx 15.
         if dec.decode_decision(&mut self.ctx[1]) == 0 {
+            // ctxIdx 15 = 0: 0 → P_L0_16x16, 1 → P_8x8
             Some(3 * dec.decode_decision(&mut self.ctx[2]) as u32)
         } else {
-            Some(2 - dec.decode_decision(&mut self.ctx[3]) as u32)
+            // ctxIdx 15 = 1: 0 → P_L0_L0_16x8 (1), 1 → P_L0_L0_8x16 (2)
+            Some(1 + dec.decode_decision(&mut self.ctx[3]) as u32)
         }
     }
 }
@@ -1161,9 +1162,6 @@ impl MvdCabacContext {
         } else {
             mvd as i32
         };
-        if mvd >= 9 {
-            eprintln!("[MVDDBG] saturated final={out} amvd={amvd_sum}");
-        }
         out
     }
 }
@@ -1347,9 +1345,13 @@ impl CodedBlockFlagContext {
     /// P/B-slice sibling of [`CodedBlockFlagContext::new`] -- see
     /// [`CbpCabacContext::new_pb`]'s doc comment.
     pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
-        let ctx = std::array::from_fn(|cat| {
+        let ctx: [[CabacContext; 4]; 5] = std::array::from_fn(|cat| {
             let base = crate::cabac_tables::CBF_CTX_BASE[cat];
-            std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
+            std::array::from_fn(|i| {
+                let c = init_pb_ctx(base + i, cabac_init_idc, slice_qp_y);
+                eprintln!("  CBF_INIT cat={cat} i={i} base+i={} qp={slice_qp_y} idc={cabac_init_idc} → state={} mps={}", base+i, c.state, c.mps);
+                c
+            })
         });
         Self { ctx }
     }

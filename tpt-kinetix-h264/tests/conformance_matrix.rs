@@ -8,20 +8,14 @@
 //!   16-px-aligned, no 8×8 transform): the Kinetix decode must be *bit-exact*
 //!   (`max_abs_diff == 0`) against `ffmpeg`. These are guarded assertions — a
 //!   regression here fails the suite.
-//! - **Known non-conformant subset** (CABAC P/B-slice decode): the decoder
-//!   implements the path but is **not yet bit-exact** (tracked as a Phase D.4
-//!   regression). The harness *measures and reports* the gap rather than
-//!   asserting equality, so the documented limitation is enforced without
-//!   masking it as a green check.
-//! - **Unsupported subset** (8×8 transform / High profile, interlaced PAFF/MBAFF):
-//!   the decoder is *honest* — under `with_strict(true)` it returns
+//! - **Unsupported subset** (interlaced PAFF/MBAFF): the decoder is *honest* —
+//!   under `with_strict(true)` it returns
 //!   [`tpt_kinetix_core::error::KinetixError::NotPixelExact`] instead of emitting
 //!   wrong pixels. This is a hard assertion.
 //!
 //! The harness also asserts the global `pixel_exact` capability remains `false`
-//! until the unsupported subset is closed out (Phases F/G) and the CABAC P/B
-//! regression is fixed — the honesty gate that prevents callers from trusting
-//! approximate output.
+//! until the interlaced subset is closed out (Phase G) — the honesty gate that
+//! prevents callers from trusting approximate output.
 //!
 //! The whole suite skips (passes trivially) when `ffmpeg` is not on `PATH`, so
 //! CI runners without the reference binary stay green.
@@ -258,28 +252,28 @@ fn h264_conformance_matrix() {
         Case { name: "cabac_i_128x96", w: 128, h: 96, frames: 1, profile: "main",
             params: "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0", extra: &[],
             deblock: Deblock::Enabled, ref_index: 0, expect: Expect::BitExact, unsupported: false },
-        // ── CABAC P (main) — KNOWN NON-CONFORMANT (Phase D.4 regression) ───
+        // ── CABAC P (main) ─────────────────────────────────────────────────
         Case { name: "cabac_p", w: WIDTH, h: HEIGHT, frames: 2, profile: "main",
             params: "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:keyint=2:min-keyint=2", extra: &[],
-            deblock: Deblock::Enabled, ref_index: 1, expect: Expect::NotConformant, unsupported: false },
+            deblock: Deblock::Enabled, ref_index: 1, expect: Expect::BitExact, unsupported: false },
         Case { name: "cabac_p", w: WIDTH, h: HEIGHT, frames: 2, profile: "main",
             params: "cabac=1:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:keyint=2:min-keyint=2", extra: &[],
-            deblock: Deblock::Disabled, ref_index: 1, expect: Expect::NotConformant, unsupported: false },
-        // ── CABAC B (main, IBP) — KNOWN NON-CONFORMANT (Phase D.4 regression)
+            deblock: Deblock::Disabled, ref_index: 1, expect: Expect::BitExact, unsupported: false },
+        // ── CABAC B (main, IBP) ────────────────────────────────────────────
         Case { name: "cabac_b", w: WIDTH, h: HEIGHT, frames: 3, profile: "main",
             params: "cabac=1:ref=1:bframes=1:b-pyramid=0:b-adapt=0:8x8dct=0:weightp=0:weightb=0:aud=0:keyint=300:min-keyint=300", extra: &[],
-            deblock: Deblock::Enabled, ref_index: 1, expect: Expect::NotConformant, unsupported: false },
+            deblock: Deblock::Enabled, ref_index: 1, expect: Expect::BitExact, unsupported: false },
         Case { name: "cabac_b", w: WIDTH, h: HEIGHT, frames: 3, profile: "main",
             params: "cabac=1:ref=1:bframes=1:b-pyramid=0:b-adapt=0:8x8dct=0:weightp=0:weightb=0:aud=0:keyint=300:min-keyint=300", extra: &[],
-            deblock: Deblock::Disabled, ref_index: 1, expect: Expect::NotConformant, unsupported: false },
+            deblock: Deblock::Disabled, ref_index: 1, expect: Expect::BitExact, unsupported: false },
         // ── Multi-P chaining (baseline CAVLC, 5 frames) — bit-exact ───────
         Case { name: "cavlc_ipppp", w: WIDTH, h: HEIGHT, frames: 5, profile: "baseline",
             params: "cabac=0:ref=1:bframes=0:8x8dct=0:weightp=0:aud=0:keyint=2:min-keyint=2", extra: &[],
             deblock: Deblock::Enabled, ref_index: 4, expect: Expect::BitExact, unsupported: false },
-        // ── Unsupported: 8×8 transform / High profile ─────────────────────
+        // ── High profile / 8×8 transform ──────────────────────────────────
         Case { name: "high8x8_i", w: WIDTH, h: HEIGHT, frames: 1, profile: "high",
             params: "cabac=1:8x8dct=1:aud=0", extra: &[],
-            deblock: Deblock::Enabled, ref_index: 0, expect: Expect::BitExact, unsupported: true },
+            deblock: Deblock::Enabled, ref_index: 0, expect: Expect::BitExact, unsupported: false },
         // ── Unsupported: interlaced (PAFF) ─────────────────────────────────
         Case { name: "interlaced_i", w: WIDTH, h: HEIGHT, frames: 1, profile: "baseline",
             params: "cabac=0:8x8dct=0:aud=0:interlaced=top", extra: &[],
@@ -468,11 +462,10 @@ fn h264_conformance_matrix() {
     }
 
     // Honesty gate: the global capability must NOT claim pixel-exact while the
-    // 8×8-transform / interlaced gaps (Phases F/G) and the CABAC P/B regression
-    // (Phase D.4) remain.
+    // interlaced (PAFF/MBAFF) gap remains (Phase G).
     assert!(
         !H264Decoder::new().capabilities().pixel_exact,
-        "pixel_exact must stay false until the unsupported subset is closed out (Phases F/G) and CABAC P/B is fixed (Phase D.4)"
+        "pixel_exact must stay false until interlaced support is closed out (Phase G)"
     );
 
     eprintln!("\nH.264 Phase H conformance matrix:");
@@ -488,7 +481,7 @@ fn h264_conformance_matrix() {
     let honest_count = results.iter().filter(|(_, s, _)| s == &"HONEST").count();
     let pass_count = results.iter().filter(|(_, s, _)| s == &"PASS").count();
     eprintln!(
-        "\nsummary: {} bit-exact, {} honest-reject (unsupported), {} known-gap (CABAC P/B), {} unexpected failures",
+        "\nsummary: {} bit-exact, {} honest-reject (unsupported), {} known-gap, {} unexpected failures",
         pass_count, honest_count, gap_count, unexpected_failures
     );
 

@@ -22,6 +22,20 @@ fn cases() -> u32 {
 /// reported success. Panics (including index-out-of-bounds and arithmetic
 /// overflow in debug builds) fail the property.
 fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
+    decode_with(data, width, height, qindex, false)
+}
+
+/// Same as [`decode`], but with `allow_screen_content_tools` selectable —
+/// `palette_mode_info()`/`palette_tokens()` are only reached when it's `true`,
+/// so the palette color-cache/color-map decode path needs its own fuzz
+/// coverage separate from the rest of this file's `decode`.
+fn decode_with(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    qindex: u8,
+    allow_screen_content_tools: bool,
+) -> bool {
     let uv_w = width / 2;
     let uv_h = height / 2;
     let mut y = vec![128u8; width * height];
@@ -49,7 +63,9 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> bool {
         false,
         false,
         false,
-        false,    // enable_filter_intra
+        false, // enable_filter_intra
+        false, // enable_intra_edge_filter
+        allow_screen_content_tools,
         true,     // frame_is_intra — these robustness tests exercise the intra path
         false,    // allow_high_precision_mv
         false,    // reference_select
@@ -82,6 +98,30 @@ proptest! {
         height in 2usize..40,
     ) {
         let _ = decode(&data, width * 2, height * 2, 100);
+    }
+
+    /// Same as `decode_tile_group_never_panics`, but with
+    /// `allow_screen_content_tools = true` so `palette_mode_info()` /
+    /// `palette_tokens()` (color cache, color-map trellis decode, `NS(n)`)
+    /// are actually reachable — those are new, not covered by the property
+    /// above, and do their own array indexing keyed off decoded values.
+    #[test]
+    fn decode_tile_group_never_panics_with_palette_enabled(
+        data in proptest::collection::vec(any::<u8>(), 0..2048),
+        qindex in any::<u8>(),
+    ) {
+        let _ = decode_with(&data, 64, 64, qindex, true);
+    }
+
+    /// The palette path's unaligned-size counterpart (onscreen clipping
+    /// interacts with the color-map's own edge-replication logic).
+    #[test]
+    fn decode_tile_group_handles_unaligned_sizes_with_palette_enabled(
+        data in proptest::collection::vec(any::<u8>(), 0..1024),
+        width in 2usize..40,
+        height in 2usize..40,
+    ) {
+        let _ = decode_with(&data, width * 2, height * 2, 100, true);
     }
 }
 
