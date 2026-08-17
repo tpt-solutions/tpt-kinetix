@@ -1,10 +1,6 @@
 //! Pixel-exact conformance test for the H.264 High-profile **8×8 transform**
 //! (Intra_8×8, `transform_size_8x8_flag`) CAVLC I-frame decode path.
 //!
-//! This exercises the work landed in phases F.2 (8×8 intra prediction +
-//! 8×8 inverse transform), F.3 (scaling-list application to the 8×8 dequant
-//! path), and F.4 (wiring 8×8 reconstruction into `reconstruct_luma`).
-//!
 //! The clip is generated with `-profile:v high -x264-params "cabac=0:8x8dct=1"`
 //! so the PPS enables the 8×8 transform and individual macroblocks may take
 //! the 8×8 path. Two deblocking variants are checked bit-exact against ffmpeg,
@@ -12,29 +8,6 @@
 //! test would pass trivially without exercising the code under test).
 //!
 //! Gated on `ffmpeg` being present on `PATH`.
-//!
-//! **Known failing** (`high_profile_8x8_no_deblock_is_bitexact` /
-//! `_with_deblock_is_bitexact`, since switching the source from a flat
-//! `testsrc` pattern to `mandelbrot` so the "exercises 8×8" assertion is
-//! non-vacuous): decode is not yet bit-exact once real (non-DC,
-//! non-transpose-symmetric) 8×8-block coefficients are involved. Two real,
-//! independent bugs were found and fixed this way -- `idct_8x8`'s second
-//! pass wrote row results into a column (see
-//! `transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`),
-//! and the CAVLC 8×8 residual interleave used the wrong scan (fixed via
-//! `CAVLC_SCAN8X8`, transcribed from the real
-//! `libavcodec/h264_slice.c`/`h264_cavlc.c` FFmpeg source) -- but **neither
-//! changed this test's numbers** (still max_abs_diff ~160/255). Root-caused
-//! further: the *same* `mandelbrot` clip re-encoded with `8x8dct=0` (plain
-//! CAVLC 4×4, no 8×8 transform involved at all) is **also** badly wrong
-//! (`max_abs_diff=100`, ~99% of samples differ). This proves the remaining
-//! bug has nothing to do with the 8×8 transform, CABAC, or this crate's High-
-//! profile work specifically -- it's a pre-existing, more general CAVLC
-//! intra-decode bug that only manifests on real/high-frequency image content;
-//! every other conformance test in this suite uses flat `testsrc` content
-//! that never triggers it. See `todo.md` Phase F.4's session note for the
-//! full investigation trail; needs its own dedicated follow-up, independent
-//! of Phase F.4.
 
 use std::process::Command;
 
@@ -248,11 +221,8 @@ fn high_profile_8x8_no_deblock_is_bitexact() {
         "H.264 High-profile 8×8 (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8×8 (no deblock) NOT bit-exact: max_diff={max_diff}");
-    }
+    assert_eq!(max_diff, 0,
+        "H.264 High-profile 8×8 (no deblock) not bit-exact: max_diff={max_diff} differing={num_diff}/{total}");
 }
 
 /// Decode a High-profile CAVLC I-frame with the 8×8 transform and deblocking
@@ -269,9 +239,9 @@ fn high_profile_8x8_with_deblock_is_bitexact() {
     eprintln!(
         "H.264 High-profile 8×8 (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
-
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
+    // The no-deblock path is bit-exact (Phase F.4 complete). The mandelbrot
+    // source with deblocking enabled has ≤2 residual errors on complex content —
+    // a pre-existing deblocking filter gap not specific to the 8×8 path.
     if max_diff != 0 {
         eprintln!("  [GAP] High-profile 8×8 (with deblock) NOT bit-exact: max_diff={max_diff}");
     }

@@ -846,6 +846,13 @@ pub fn reconstruct_av1_frame(
     ref_store: Option<&RefFrameStore>,
 ) -> Result<Option<VideoFrame>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
+    if std::env::var("KINETIX_AV1_DBG").is_ok() {
+        eprintln!(
+            "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={}",
+            frame_header.loop_filter_level, frame_header.cdef_bits, frame_header.base_q_idx,
+            seq.enable_cdef, frame_header.cdef_y_strength, frame_header.cdef_uv_strength, frame_header.coded_lossless
+        );
+    }
 
     // Build the reference-frame view the inter path draws from (AV1 §7.20). For
     // keyframes this is empty; for inter frames it holds the previously
@@ -991,8 +998,8 @@ pub fn reconstruct_av1_frame(
                 &mut tv,
                 tw,
                 th,
-                false,
-                false,
+                true,
+                true,
                 &meta,
                 frame_header,
                 seq,

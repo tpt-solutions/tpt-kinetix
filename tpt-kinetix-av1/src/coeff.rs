@@ -722,6 +722,73 @@ mod tests {
     }
 
     #[test]
+    fn all_zero_ctx_ignores_neighbour_levels_only_when_tx_covers_the_whole_coded_block() {
+        // AV1 spec §8.3.2 `all_zero`'s luma context: `ctx = 0` unconditionally
+        // when `bw == w && bh == h` (the transform block exactly covers the
+        // coded block's own plane-residual size) — but for any tx block that
+        // is only *part* of a larger coded block (`bw`/`bh` strictly bigger
+        // than the tx's own `w`/`h`), the neighbour `AboveLevelContext`/
+        // `LeftLevelContext` values must actually be consulted.
+        //
+        // This guards the real bug fixed 2026-08-17: `reconstruct/
+        // intra_block.rs` and `inter_block.rs` populated `TxBlockCtx::
+        // block_w`/`block_h` (this function's `blk.block_w`/`block_h`, i.e.
+        // the spec's `bw`/`bh`) with the transform block's own `Tx_Width`/
+        // `Tx_Height` instead of the *coded block's* plane size — making
+        // `blk.block_w == w && blk.block_h == h` true by construction for
+        // every call, so `all_zero` always read from the `ctx = 0` CDF bucket
+        // regardless of real neighbour state. That silently decoded the wrong
+        // boolean (and, downstream, wrong coefficients) for every coded block
+        // whose selected `tx_size` split it into more than one transform
+        // block — which `solid_red`'s single 64x64/one-block frame never
+        // exercised, but any multi-block real content (e.g. `smptebars`,
+        // whose 32x8 palette block splits into two 16x8 luma tx blocks) hit
+        // on literally the second transform block decoded.
+        let tx_size = TX_16X8;
+        let w4 = TX_WIDTH[tx_size] >> 2;
+        let h4 = TX_HEIGHT[tx_size] >> 2;
+
+        let mut ctxs = CoeffContexts::new(16, 16);
+        // A "hot" neighbour to the left: LeftLevelContext nonzero at every
+        // row this tx block covers.
+        for y in 0..h4 {
+            CoeffContexts::set(&mut ctxs.left_level, 0, y, 40);
+        }
+
+        // Case 1: this tx block *is* the whole coded block (`block_w == w`,
+        // `block_h == h`) — spec says ignore the neighbour state, ctx == 0.
+        let blk_whole = TxBlockCtx {
+            plane: 0,
+            tx_size,
+            x4: 0,
+            y4: 0,
+            max_x4: 16,
+            max_y4: 16,
+            block_w: TX_WIDTH[tx_size],
+            block_h: TX_HEIGHT[tx_size],
+            intra_dir: 0,
+            uv_mode: 0,
+            qindex_positive: true,
+            reduced_tx_set: false,
+            lossless: false,
+        };
+        assert_eq!(super::all_zero_ctx(&blk_whole, &ctxs, w4, h4), 0);
+
+        // Case 2: this tx block is one of several inside a larger coded
+        // block (e.g. a BLOCK_32X8 split into two TX_16X8 luma tx blocks) —
+        // `block_w` (32) != `w` (16), so the neighbour level must be
+        // consulted and the hot left-neighbour must produce a *non-zero*
+        // context (spec: `top == 0, left != 0` -> `ctx = 2 + (max(top,left)
+        // > 3)`, and `40 > 3` so `ctx = 3`).
+        let blk_split = TxBlockCtx {
+            block_w: 2 * TX_WIDTH[tx_size],
+            block_h: TX_HEIGHT[tx_size],
+            ..blk_whole
+        };
+        assert_eq!(super::all_zero_ctx(&blk_split, &ctxs, w4, h4), 3);
+    }
+
+    #[test]
     fn tx_set_intra_matches_spec() {
         assert_eq!(get_tx_set_intra(TX_4X4, false), TX_SET_INTRA_1);
         assert_eq!(get_tx_set_intra(TX_8X8, false), TX_SET_INTRA_1);
