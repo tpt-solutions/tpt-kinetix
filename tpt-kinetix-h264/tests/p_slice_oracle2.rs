@@ -1,4 +1,5 @@
 //! Oracle: re-implement the CAVLC residual *level assembly* (§9.2.2) fresh and
+#![allow(warnings)]
 //! independent of `parse_cavlc_block`, but reuse the ffmpeg-verified VLC tables
 //! in `cavlc_tables` (so we don't risk hand-typing errors). Walk the same P
 //! slice, capture the decoder's per-block coeffs via a tracer, and diff.
@@ -232,7 +233,7 @@ fn ref_residuals(
                     (None, Some(t)) => t as i32,
                     (None, None) => 0,
                 };
-                let mut coeffs = ref_block(r, nc, 15);
+                let coeffs = ref_block(r, nc, 15);
                 let mut shifted = [0i16; 16];
                 shifted[1..16].copy_from_slice(&coeffs[0..15]);
                 let plane = if comp == 0 { 1u8 } else { 2u8 };

@@ -1,4 +1,5 @@
 //! Diagnostic: trace MB reconstruction to find root cause of residual error.
+#![allow(warnings)]
 //! Run with: cargo test -p tpt-kinetix-h264 --test dbg_mb0_trace -- --nocapture
 
 use std::process::Command;

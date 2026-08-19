@@ -1,4 +1,5 @@
 //! Localize the P-frame residual off-by-one: decode with the real decoder,
+#![allow(warnings)]
 //! independently re-parse the P slice to learn each MB's skip/coded status
 //! and cbp, then report per-MB max pixel diff. This tells us whether the
 //! remaining ≤2 diffs live in coded MBs (residual coeff bug) or scatter

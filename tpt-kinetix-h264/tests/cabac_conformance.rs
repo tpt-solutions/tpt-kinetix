@@ -1,4 +1,5 @@
 //! Pixel-exact conformance tests for the H.264 CABAC decode paths
+#![allow(warnings)]
 //! (`todo.md` Phase D: I-frames; Phase D.4: P/B-frames).
 //!
 //! Mirrors `cavlc_conformance.rs`'s structure: encode with `libx264`

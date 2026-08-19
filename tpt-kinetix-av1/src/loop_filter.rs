@@ -181,7 +181,13 @@ impl FrameMeta {
                     continue;
                 }
                 let i = by * src.w8 + bx;
-                self.record_luma(dbx, dby, src.luma_tx_w[i], src.luma_tx_h[i], src.luma_skip[i]);
+                self.record_luma(
+                    dbx,
+                    dby,
+                    src.luma_tx_w[i],
+                    src.luma_tx_h[i],
+                    src.luma_skip[i],
+                );
                 self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
             }
         }
@@ -503,8 +509,7 @@ fn deblock_plane(
             let lp = level_params(lvl, fh.loop_filter_sharpness);
             let top_tx = tx_h_grid[(by - 1) * grid_w + bx];
             let bot_tx = tx_h_grid[by * grid_w + bx];
-            let filter_size =
-                filter_size_from_tx_samples(top_tx.min(bot_tx) as usize, plane_index);
+            let filter_size = filter_size_from_tx_samples(top_tx.min(bot_tx) as usize, plane_index);
             let edge = by * step;
             if edge >= height {
                 continue;

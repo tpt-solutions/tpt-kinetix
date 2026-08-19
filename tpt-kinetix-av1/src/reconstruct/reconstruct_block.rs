@@ -30,8 +30,12 @@ pub(super) fn reconstruct_tx_block(
     let tx_h = av1::TX_HEIGHT[internal_tx_size];
     let num_coeffs = tx_w * tx_h;
 
-    let dbg_uv = px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
-    let dbg = (px_y < 32 && (16..64).contains(&px_x) && blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok())
+    let dbg_uv =
+        px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
+    let dbg = (px_y < 32
+        && (16..64).contains(&px_x)
+        && blk.plane == 0
+        && std::env::var("KINETIX_AV1_DBG").is_ok())
         || dbg_uv;
     if dbg_uv {
         eprintln!("DBG UV plane={} px=({px_x},{px_y})", blk.plane);

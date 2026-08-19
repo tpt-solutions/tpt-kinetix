@@ -554,12 +554,6 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     Ok((mb, this_nz, this_pred_ctx, qp))
 }
 
-/// Bundles the CABAC context-variable state for every I-slice syntax element
-/// implemented here. Context adaptation persists across the *whole slice*
-/// (not per macroblock), so this is created once per slice and threaded
-/// through every macroblock decode.
-
-
 /// Parse the macroblock layer of a P slice (CAVLC, §7.3.4).
 ///
 /// `reader` must be positioned at `SliceHeader::data_bit_offset`. P-slice

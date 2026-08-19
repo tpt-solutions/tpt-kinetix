@@ -1,4 +1,5 @@
 //! Quick pixel-exact conformance check: mandelbrot with 4×4 CAVLC (no 8×8 DCT).
+#![allow(warnings)]
 //! cargo test -p tpt-kinetix-h264 --test mandelbrot_4x4_conformance -- --nocapture
 
 use std::process::Command;

@@ -714,7 +714,7 @@ fn av1_obu_spans(data: &[u8]) -> Vec<(u8, usize, usize)> {
 /// could be synthesized.
 #[test]
 fn av1_inter_corpus_vs_dav1d_when_available() {
-    use tpt_kinetix_av1::{obu::ObuType, Av1Decoder};
+    use tpt_kinetix_av1::Av1Decoder;
     use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
     use tpt_kinetix_test_utils::{
         pixel_diff::*,

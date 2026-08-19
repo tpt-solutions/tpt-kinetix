@@ -1,4 +1,5 @@
 //! Diagnostic: trace CAVLC bit positions for mandelbrot I-frame to pinpoint desync.
+#![allow(warnings)]
 //! Run with: cargo test -p tpt-kinetix-h264 --test mandelbrot_cavlc_oracle -- --nocapture
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
@@ -160,7 +161,7 @@ fn mandelbrot_iframe_cavlc_trace() {
     let mb_cols = sps.pic_width_in_mbs_minus1 + 1;
     let mb_rows = sps.pic_height_in_map_units_minus1 + 1;
     let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
-    let num_ref_idx_l0_active = pps.num_ref_idx_l0_default_active_minus1 + 1;
+    let _num_ref_idx_l0_active = pps.num_ref_idx_l0_default_active_minus1 + 1;
     let chroma_qp_index_offset = pps.chroma_qp_index_offset;
 
     let mut reader = BitReader::new(&idr.rbsp);

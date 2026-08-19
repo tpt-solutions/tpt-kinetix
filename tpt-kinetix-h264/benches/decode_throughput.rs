@@ -8,7 +8,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
-use tpt_kinetix_h264::{sps::SeqParameterSet, H264Decoder};
+use tpt_kinetix_h264::{sps::SeqParameterSet, transform::ScalingLists, H264Decoder};
 
 /// Build an SPS describing a `width`x`height` frame (in pixels).
 fn sps_for(width_mbs: u32, height_mbs: u32) -> SeqParameterSet {
@@ -26,6 +26,8 @@ fn sps_for(width_mbs: u32, height_mbs: u32) -> SeqParameterSet {
         pic_width_in_mbs_minus1: width_mbs - 1,
         pic_height_in_map_units_minus1: height_mbs - 1,
         frame_mbs_only_flag: true,
+        mb_adaptive_frame_field_flag: false,
+        scaling: ScalingLists::default(),
         frame_cropping_flag: false,
         frame_crop_left_offset: 0,
         frame_crop_right_offset: 0,

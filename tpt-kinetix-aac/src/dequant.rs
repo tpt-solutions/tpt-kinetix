@@ -83,8 +83,11 @@ pub fn decode_spectral_data(
 
     // Per-(group, sfb) dequant scale.
     let mut scale = vec![0.0f32; num_groups * max_sfb];
-    for (gi, row) in scale.chunks_mut(max_sfb).enumerate() {
-        for (sfb, sc) in row.iter_mut().enumerate() {
+    for gi in 0..num_groups {
+        for (sfb, sc) in scale[gi * max_sfb..(gi + 1) * max_sfb]
+            .iter_mut()
+            .enumerate()
+        {
             let idx = gi * max_sfb + sfb;
             let bt = band_type[idx];
             if bt == ZERO_HCB || is_noise(bt) || is_intensity(bt) {

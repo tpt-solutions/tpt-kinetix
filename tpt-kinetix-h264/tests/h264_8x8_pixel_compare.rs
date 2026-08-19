@@ -1,4 +1,5 @@
 //! Compare pixel-by-pixel our 8×8 CAVLC decode vs ffmpeg reference.
+#![allow(warnings)]
 //! Run: cargo test -p tpt-kinetix-h264 --test h264_8x8_pixel_compare -- --nocapture
 
 use std::process::Command;

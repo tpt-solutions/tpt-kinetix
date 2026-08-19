@@ -1,4 +1,5 @@
 //! Temporary diagnostic: dump the P-slice macroblock-layer bitstream so the
+#![allow(warnings)]
 //! inter-CAVLC desync can be analyzed bit-by-bit. Not a permanent test.
 
 use std::process::Command;

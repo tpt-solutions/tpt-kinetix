@@ -1,4 +1,5 @@
 //! Debug oracle: records every CAVLC block the decoder parses from a real
+#![allow(warnings)]
 //! ffmpeg P slice (bit position + coeff_token), so the exact point of the
 //! bit-position desync can be pinpointed. Run with:
 //!   cargo test -p tpt-kinetix-h264 --test p_slice_oracle -- --nocapture

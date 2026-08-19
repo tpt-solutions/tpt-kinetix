@@ -354,12 +354,12 @@ mod tests {
         // Left pair is field → left address becomes mb_xy - mb_cols - 1.
         assert_eq!(
             n.left_top,
-            Some((mb_xy - mb_cols as usize - 1) as usize),
+            Some(mb_xy - mb_cols as usize - 1),
             "frame bottom MB next to a field-coded left pair jumps left addr up a row"
         );
         assert_eq!(
             n.left_bottom,
-            Some((mb_xy - mb_cols as usize - 1) as usize),
+            Some(mb_xy - mb_cols as usize - 1),
             "frame bottom MB next to a field-coded left pair jumps left addr up a row"
         );
     }
@@ -374,10 +374,11 @@ mod tests {
         for mb_y in 0..mb_rows {
             for mb_x in 0..mb_cols {
                 let n = derive_neighbours(mb_x, mb_y, mb_cols, mb_rows, true, &field_flags);
-                for idx in [n.topleft, n.top, n.topright, n.left_top, n.left_bottom] {
-                    if let Some(i) = idx {
-                        assert!(i < total, "neighbour {i} out of bounds @ ({mb_x},{mb_y})");
-                    }
+                for i in [n.topleft, n.top, n.topright, n.left_top, n.left_bottom]
+                    .into_iter()
+                    .flatten()
+                {
+                    assert!(i < total, "neighbour {i} out of bounds @ ({mb_x},{mb_y})");
                 }
             }
         }

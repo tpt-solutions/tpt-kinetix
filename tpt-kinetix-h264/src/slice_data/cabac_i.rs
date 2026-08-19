@@ -12,7 +12,6 @@ use super::*;
 /// (High profile) is supported for intra macroblocks only (Phase F.4) --
 /// inter (P_8x8/B_Direct) 8x8 transform is not, matching the CAVLC path's
 /// existing scope.
-
 pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     data: &[u8],
     mb_cols: u32,

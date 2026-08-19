@@ -1,4 +1,5 @@
 //! Diagnostic: decode a single-MB 16x16 CAVLC I-frame and compare output
+#![allow(warnings)]
 //! against ffmpeg at the 4×4 block level, to pinpoint exactly which block
 //! first diverges.
 
@@ -10,11 +11,6 @@ use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 
 const W: u32 = 16;
 const H: u32 = 16;
-
-fn run(cmd: &mut Command) -> bool {
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
-}
-
 #[test]
 fn single_mb_block_level_compare() {
     if !Command::new("ffmpeg")
@@ -139,7 +135,6 @@ fn single_mb_block_level_compare() {
     for by in 0..4 {
         for bx in 0..4 {
             let mut max_d = 0i32;
-            let mut sum_d = 0i32;
             let mut diff_count = 0usize;
             let mut first_diff = None;
             for dy in 0..4 {
@@ -155,7 +150,6 @@ fn single_mb_block_level_compare() {
                         }
                     }
                     max_d = max_d.max(d);
-                    sum_d += d;
                 }
             }
             let blk_idx = by * 4 + bx;
@@ -185,7 +179,7 @@ fn single_mb_block_level_compare() {
     // Compare chroma Cb 4x4 blocks (only 2x2 blocks in 4:2:0)
     let cb_off = y_size;
     let cw = w / 2;
-    let ch = h / 2;
+    let _ch = h / 2;
     eprintln!("\n=== Cb 4x4 block comparison ===");
     for by in 0..2 {
         for bx in 0..2 {

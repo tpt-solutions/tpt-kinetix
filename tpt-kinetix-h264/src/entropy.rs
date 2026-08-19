@@ -1158,12 +1158,11 @@ impl MvdCabacContext {
                 }
             }
         }
-        let out = if dec.decode_bypass() == 1 {
+        if dec.decode_bypass() == 1 {
             -(mvd as i32)
         } else {
             mvd as i32
-        };
-        out
+        }
     }
 }
 

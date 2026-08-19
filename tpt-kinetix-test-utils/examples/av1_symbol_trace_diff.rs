@@ -114,8 +114,11 @@ fn first_divergence(
 ) -> Option<(&'static str, usize, usize, u8, u8)> {
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
-    let planes: [(&str, usize, usize, usize); 3] =
-        [("Y", w, h, 0), ("U", cw, ch, w * h), ("V", cw, ch, w * h + cw * ch)];
+    let planes: [(&str, usize, usize, usize); 3] = [
+        ("Y", w, h, 0),
+        ("U", cw, ch, w * h),
+        ("V", cw, ch, w * h + cw * ch),
+    ];
     for (name, pw, ph, off) in planes {
         for y in 0..ph {
             for x in 0..pw {
@@ -161,7 +164,10 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     };
     let trace = take_symbol_trace();
     let markers = take_block_markers();
-    debug_assert!(!symbol_trace_enabled(), "take_symbol_trace should clear the session");
+    debug_assert!(
+        !symbol_trace_enabled(),
+        "take_symbol_trace should clear the session"
+    );
 
     let w = width as usize;
     let h = height as usize;
@@ -169,7 +175,10 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let c_n = cw * ch;
-    let psnr_y = psnr(&got[..y_n.min(got.len())], &ref_data[..y_n.min(ref_data.len())]);
+    let psnr_y = psnr(
+        &got[..y_n.min(got.len())],
+        &ref_data[..y_n.min(ref_data.len())],
+    );
     let psnr_u = psnr(
         &got[y_n..(y_n + c_n).min(got.len())],
         &ref_data[y_n..(y_n + c_n).min(ref_data.len())],
@@ -184,7 +193,10 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         println!("  No pixel diverges by more than 3 (effectively pixel-exact at this threshold).");
         return;
     };
-    println!("  First divergence: plane {plane} px=({x},{y}) kinetix={got_v} dav1d={want_v} (delta={})", got_v as i32 - want_v as i32);
+    println!(
+        "  First divergence: plane {plane} px=({x},{y}) kinetix={got_v} dav1d={want_v} (delta={})",
+        got_v as i32 - want_v as i32
+    );
 
     // Bracket: does the divergence survive with post-filters disabled?
     match decode_kinetix(obu, true) {
@@ -222,7 +234,10 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
             }
         }
         if let Some(m) = best {
-            println!("  Nearest preceding block marker: [{}] \"{}\"", m.trace_seq, m.label);
+            println!(
+                "  Nearest preceding block marker: [{}] \"{}\"",
+                m.trace_seq, m.label
+            );
             let ctx_start = m.trace_seq.saturating_sub(2);
             let ctx_end = (m.trace_seq + 24).min(trace.len());
             println!("  Symbol trace around that marker (seq {ctx_start}..{ctx_end}):");

@@ -1,4 +1,5 @@
 //! Manual step-by-step parse of the single-MB IDR slice RBSP.
+#![allow(warnings)]
 //! This extracts the slice NAL, parses the header to find data_bit_offset,
 //! then parses mb_type, intra_pred modes, cbp, qp, and CAVLC blocks
 //! with bit-position logging at each step.

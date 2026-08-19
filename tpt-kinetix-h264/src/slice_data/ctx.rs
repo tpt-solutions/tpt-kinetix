@@ -546,7 +546,6 @@ pub(crate) fn chroma_cbf_neighbors(
 ///
 /// Only CAVLC I-slices are handled. `I_PCM` and inter macroblocks return an
 /// `Unsupported` error so callers can fall back rather than emit wrong pixels.
-
 pub struct CabacSliceContexts {
     pub mb_type: crate::entropy::MbTypeICabacContext,
     pub cbp: crate::entropy::CbpCabacContext,

@@ -1,4 +1,5 @@
 //! Cross-codec conformance harness for the H.264 decoder (`todo.md` Phase H).
+#![allow(warnings)]
 //!
 //! Builds a matrix of `ffmpeg`-generated clips spanning profiles, entropy modes,
 //! frame structures, resolutions, and deblocking settings, decodes each with
@@ -150,6 +151,7 @@ fn analyze_features(annexb: &[u8]) -> (bool, bool) {
 }
 
 /// How a cell of the matrix is expected to behave.
+#[allow(dead_code)]
 enum Expect {
     /// Must decode bit-exact (max_abs_diff == 0) vs ffmpeg.
     BitExact,

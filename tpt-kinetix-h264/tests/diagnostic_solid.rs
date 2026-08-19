@@ -1,4 +1,5 @@
 //! Diagnostic: decode a solid-color I-frame and compare against ffmpeg.
+#![allow(warnings)]
 
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;

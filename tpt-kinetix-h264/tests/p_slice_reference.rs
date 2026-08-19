@@ -1,4 +1,5 @@
 //! Manual, spec-faithful reference parse of a CAVLC P slice, used to locate
+#![allow(warnings)]
 //! where `parse_p_slice` desynchronises from the true bitstream. Mirrors
 //! ITU-T H.264 §7.3.4 / §7.3.5 / §9.2 exactly (not by copying the decoder's
 //! own parser) and logs the bit position at each parsing step so it can be
@@ -176,7 +177,7 @@ fn reference_parse_p_slice() {
     eprintln!("REF: data_bit_offset={data_bit_offset}");
 
     let mut mb_skip_run: Option<u32> = None;
-    let mut qp = 26 + pps.pic_init_qp_minus26 + 0; // slice_qp_delta handled above
+    let qp = 26 + pps.pic_init_qp_minus26 + 0; // slice_qp_delta handled above
     let _ = qp;
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;

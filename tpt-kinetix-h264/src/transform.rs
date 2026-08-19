@@ -745,6 +745,7 @@ mod tests {
 
     // Independent float-matrix reference for the 8x8 IDCT (H.264 §8.5.12.3):
     // r = (C_f · d · C_f^T) / 64, rounded. Used to validate idct_8x8.
+    #[allow(dead_code)]
     fn idct_8x8_reference(block: &[i32; 64]) -> [i32; 64] {
         // The 8x8 IDCT adds a rounding term to the DC coefficient (block[0])
         // before the transform, same as the 4x4 IDCT adds 32.

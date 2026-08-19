@@ -91,7 +91,9 @@ fn directional_prediction_covers_all_modes_without_panicking() {
                 have_above: true,
                 have_left: true,
             };
-            predict_intra_block(mode, &borders, size, size, &mut out, true, true, 0, size, size);
+            predict_intra_block(
+                mode, &borders, size, size, &mut out, true, true, 0, size, size,
+            );
             assert!(
                 out.iter().all(|&v| (0..=255).contains(&v)),
                 "mode {mode} size {size} produced an out-of-range sample"
@@ -546,10 +548,7 @@ fn intra_mode_context_table_matches_spec_at_the_two_previously_wrong_indices() {
     const SMOOTH_PRED: usize = 9;
     assert_eq!(INTRA_MODE_CONTEXT[D207_PRED as usize], 4);
     assert_eq!(INTRA_MODE_CONTEXT[SMOOTH_PRED], 0);
-    assert_eq!(
-        INTRA_MODE_CONTEXT,
-        [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0]
-    );
+    assert_eq!(INTRA_MODE_CONTEXT, [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0]);
 }
 
 #[test]

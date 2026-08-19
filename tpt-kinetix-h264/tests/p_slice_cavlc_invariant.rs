@@ -1,4 +1,5 @@
 //! Minimal, self-contained characterization test for the P-frame CAVLC desync
+#![allow(warnings)]
 //! (Phase 12 C.1: "add the minimal unit test feeding the failing block's raw
 //! bitstream to `parse_cavlc_block`").
 //!

@@ -11,7 +11,11 @@ impl<'a> TileDecodeState<'a> {
         let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
         crate::entropy::mark_block(|| {
-            format!("mode_info mi=({mi_col},{mi_row}) bsize={bsize} px=({},{})", mi_col * MI_SIZE, mi_row * MI_SIZE)
+            format!(
+                "mode_info mi=({mi_col},{mi_row}) bsize={bsize} px=({},{})",
+                mi_col * MI_SIZE,
+                mi_row * MI_SIZE
+            )
         });
 
         // AV1 spec §5.11.7 `intra_frame_mode_info()` reads, in this exact

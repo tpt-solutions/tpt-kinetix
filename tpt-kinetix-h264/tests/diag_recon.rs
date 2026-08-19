@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
 use tpt_kinetix_h264::trace::{DecodeTracer, TracePlane};

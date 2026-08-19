@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
 use tpt_kinetix_h264::pps::PicParameterSet;

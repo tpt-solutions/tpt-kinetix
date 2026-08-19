@@ -338,11 +338,7 @@ mod tests {
         let subs = split_into_subblocks(4, 4, PARTITION_HORZ_A);
         assert_eq!(
             subs,
-            vec![
-                (BLOCK_8X8, 0, 0),
-                (BLOCK_8X8, 0, 2),
-                (BLOCK_16X8, 2, 0),
-            ]
+            vec![(BLOCK_8X8, 0, 0), (BLOCK_8X8, 0, 2), (BLOCK_16X8, 2, 0),]
         );
     }
 
@@ -351,11 +347,7 @@ mod tests {
         let subs = split_into_subblocks(4, 4, PARTITION_HORZ_B);
         assert_eq!(
             subs,
-            vec![
-                (BLOCK_16X8, 0, 0),
-                (BLOCK_8X8, 2, 0),
-                (BLOCK_8X8, 2, 2),
-            ]
+            vec![(BLOCK_16X8, 0, 0), (BLOCK_8X8, 2, 0), (BLOCK_8X8, 2, 2),]
         );
     }
 
@@ -364,11 +356,7 @@ mod tests {
         let subs = split_into_subblocks(4, 4, PARTITION_VERT_A);
         assert_eq!(
             subs,
-            vec![
-                (BLOCK_8X8, 0, 0),
-                (BLOCK_8X8, 2, 0),
-                (BLOCK_8X16, 0, 2),
-            ]
+            vec![(BLOCK_8X8, 0, 0), (BLOCK_8X8, 2, 0), (BLOCK_8X16, 0, 2),]
         );
     }
 
@@ -377,11 +365,7 @@ mod tests {
         let subs = split_into_subblocks(4, 4, PARTITION_VERT_B);
         assert_eq!(
             subs,
-            vec![
-                (BLOCK_8X16, 0, 0),
-                (BLOCK_8X8, 0, 2),
-                (BLOCK_8X8, 2, 2),
-            ]
+            vec![(BLOCK_8X16, 0, 0), (BLOCK_8X8, 0, 2), (BLOCK_8X8, 2, 2),]
         );
     }
 

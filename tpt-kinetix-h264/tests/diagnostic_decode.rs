@@ -1,4 +1,5 @@
 //! Diagnostic test: decode an I-frame and dump per-macroblock info to identify
+#![allow(warnings)]
 //! where reconstruction diverges from ffmpeg reference.
 
 use std::process::Command;
