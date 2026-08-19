@@ -92,6 +92,14 @@ corpus-check:
     cargo run -p tpt-kinetix-h264 --example gen_corpus
     cargo run -p tpt-kinetix-h264 --example corpus_check
 
+# AV1 differential-trace harness: decode a corpus entry (default `mandelbrot`,
+# or `--all`) with both dav1d and Av1Decoder, diff pixels, and report the
+# first divergence with its nearest symbol-trace context (see
+# tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs and todo-av1.md
+# Phase G.0). Requires ffmpeg (with libdav1d) or a standalone dav1d on PATH.
+av1-trace-diff *ARGS="mandelbrot":
+    cargo run -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ARGS}}
+
 # Run every Criterion bench in the workspace.
 bench:
     cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline
