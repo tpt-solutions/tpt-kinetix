@@ -91,13 +91,82 @@ fn directional_prediction_covers_all_modes_without_panicking() {
                 have_above: true,
                 have_left: true,
             };
-            predict_intra_block(mode, &borders, size, size, &mut out, true, true, 0);
+            predict_intra_block(mode, &borders, size, size, &mut out, true, true, 0, size, size);
             assert!(
                 out.iter().all(|&v| (0..=255).contains(&v)),
                 "mode {mode} size {size} produced an out-of-range sample"
             );
         }
     }
+}
+
+#[test]
+fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
+    // AV1 spec §7.11.2.4 step 4 gates the above/left intra-edge-filter
+    // sub-steps on `haveAbove`/`haveLeft` (actual sample availability), not
+    // on whether the current angle's *zone* structurally reads that edge
+    // (`need_above`/`need_left`). `D135_PRED` (nominal angle 135) is a
+    // zone-2 mode, which always needs *both* edges structurally — so a
+    // previous revision that gated the edge-filter sub-steps on
+    // `need_above`/`need_left` instead of `haveAbove`/`haveLeft` always
+    // filtered both edges for this mode, even when one side had no real
+    // neighbour and its `top`/`left` arrays were just synthesized filler.
+    //
+    // With `haveAbove == 0` and `haveLeft == 0`, spec says the edge-filter
+    // sub-steps (and therefore any dependency on the exact `top`/`left`
+    // sample values feeding the smoothing kernel) never run at all, so the
+    // predicted output must come out bit-identical whether
+    // `enable_intra_edge_filter` is on or off. Under the previous bug the
+    // two runs differed, since the jagged `top`/`left` filler below is
+    // exactly the kind of high-frequency input the 5-tap edge filter
+    // visibly smooths.
+    // `w + h < 24` keeps `filter_intra_edge_corner` (gated on
+    // `need_above && need_left`, unconditionally on `haveAbove`/`haveLeft`
+    // per spec — a separate, already-correct piece of §7.11.2.4 step 4) out
+    // of play, isolating exactly the above/left edge-filter gate this test
+    // targets.
+    let size = 8;
+    let jagged: Vec<i32> = (0..2 * size)
+        .map(|i| if i % 2 == 0 { 0 } else { 255 })
+        .collect();
+    let borders = BlockBorders {
+        top: jagged.clone(),
+        left: jagged,
+        tl: 128,
+        have_above: false,
+        have_left: false,
+    };
+    let mut pred_filtered = vec![0i32; size * size];
+    predict_intra_block(
+        D135_PRED,
+        &borders,
+        size,
+        size,
+        &mut pred_filtered,
+        true,
+        true,
+        0,
+        size,
+        size,
+    );
+    let mut pred_unfiltered = vec![0i32; size * size];
+    predict_intra_block(
+        D135_PRED,
+        &borders,
+        size,
+        size,
+        &mut pred_unfiltered,
+        false,
+        true,
+        0,
+        size,
+        size,
+    );
+    assert_eq!(
+        pred_filtered, pred_unfiltered,
+        "haveAbove == haveLeft == false must skip edge filtering entirely, \
+         regardless of enable_intra_edge_filter"
+    );
 }
 
 #[test]
@@ -453,12 +522,34 @@ fn intra_y_mode_context_uses_above_left_as_independent_axes() {
     // `INTRA_MODE_CONTEXT` lookups straight through, unmodified, as
     // separate arguments — not summed/resplit.
     assert_eq!(INTRA_MODE_CONTEXT[V_PRED as usize], 1);
-    assert_eq!(INTRA_MODE_CONTEXT[D207_PRED as usize], 3);
-    // Old (wrong) formula: sum=1+3=4 -> above_ctx=4.min(4)=4,
-    // left_ctx=(4/5).min(4)=0 -> (4,0), not the correct (1,3).
-    let wrong_above = 4;
-    let wrong_left = (1usize + 3) / 5;
-    assert_ne!((wrong_above, wrong_left), (1, 3));
+    assert_eq!(INTRA_MODE_CONTEXT[D157_PRED as usize], 4);
+    // Old (wrong) formula: sum=1+4=5 -> above_ctx=5.min(4)=4,
+    // left_ctx=(5/5).min(4)=1 -> (4,1), not the correct (1,4).
+    let wrong_above = 4usize;
+    let wrong_left = 1usize.div_ceil(5);
+    assert_ne!((wrong_above, wrong_left), (1, 4));
+}
+
+#[test]
+fn intra_mode_context_table_matches_spec_at_the_two_previously_wrong_indices() {
+    // Regression test for a real transcription bug (this session): the
+    // table read `[0, 1, 2, 3, 4, 4, 4, 3, 3, 1, 1, 2, 0]` — matching the
+    // spec's `Intra_Mode_Context[INTRA_MODES] = {0, 1, 2, 3, 4, 4, 4, 4, 3,
+    // 0, 1, 2, 0}` (AV1 spec §8.3.2) everywhere except index 7 (`D207_PRED`,
+    // 3 instead of the correct 4) and index 9 (`SMOOTH_PRED`, 1 instead of
+    // the correct 0). Any block whose above/left neighbour used one of
+    // those two (common, especially `SMOOTH_PRED` on flat content) got the
+    // wrong 2-D CDF context for its own `intra_frame_y_mode` read, decoding
+    // a plausible-but-wrong mode without desyncing the bitstream. Found via
+    // `dbg_av1_smptebars`'s mi=(0,12) block, which sits directly to the
+    // right of a `SMOOTH_PRED`-coded (`y_mode=9`) neighbour.
+    const SMOOTH_PRED: usize = 9;
+    assert_eq!(INTRA_MODE_CONTEXT[D207_PRED as usize], 4);
+    assert_eq!(INTRA_MODE_CONTEXT[SMOOTH_PRED], 0);
+    assert_eq!(
+        INTRA_MODE_CONTEXT,
+        [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0]
+    );
 }
 
 #[test]
@@ -824,7 +915,7 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0, 8, 8);
     assert!(out.iter().all(|&v| v == 200), "got {out:?}");
 
     // And with neither side real, the mode dispatch must reach the
@@ -838,6 +929,6 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0, 8, 8);
     assert!(out.iter().all(|&v| v == 128), "got {out:?}");
 }

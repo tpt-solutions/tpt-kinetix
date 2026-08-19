@@ -340,8 +340,8 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         };
         let (r0, o0) = dec.debug_state();
         let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        let (r1, o1) = dec.debug_state();
         if is_skip {
-            let (r1, o1) = dec.debug_state();
             eprintln!("MB{mb_idx} ({mb_x},{mb_y}) SKIP  cabac={r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
             let mut mb = Macroblock::new_skip();
             mb.mb_type = MbType::PSkip;
@@ -371,6 +371,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             continue;
         }
         prev_was_skip = false;
+        eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
 
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_p_macroblock_cabac(

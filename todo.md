@@ -1,6 +1,6 @@
 # TPT Kinetix — Task Index
 
-> Last reconciled: 2026-08-17. Monolithic todo.md split into per-codec files.
+> Last reconciled: 2026-08-19. Monolithic todo.md split into per-codec files.
 > For the long session-notes preamble and infrastructure phases 0–11, scroll past this index.
 
 ## Active codec work
@@ -8,9 +8,58 @@
 | File | Codec | Status |
 |------|-------|--------|
 | [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 (8×8 High-profile), G.2/G.4/G.5 (interlaced), H (pixel_exact flip) |
-| [todo-av1.md](todo-av1.md) | AV1 decoder | Phase G symbol-decoder desync still open |
+| [todo-av1.md](todo-av1.md) | AV1 decoder | Phase G.0 (NEW, 2026-08-20): building a reusable symbol-trace oracle + diff harness to replace ad hoc per-session debugging — see below. 7 debugging sessions (2026-08-17/18/19), 6 real bugs fixed; solid-color content pixel-exact (99dB), real/textured content still noise-level (~10-17dB) — root cause not fully closed |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phase 6 parse desync (real ffmpeg streams) |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
+
+> **AV1 run 2026-08-17→19 (7 sessions, uncommitted working tree, see `todo-av1.md`
+> for full postmortems):** started from "0/5 bit-exact vs dav1d, symbol-decoder
+> desync suspected in the intra block path" and made real, spec-verified
+> progress via a repeated pre-filter/post-deblock/post-CDEF pixel-trace method
+> on small crops (`dbg_av1_smptebars.rs`/`dbg_av1_testsrc128.rs`/
+> `dbg_av1_mandelbrot128.rs`/`dbg_av1_mandelbrot_diffmap.rs`, all new debug
+> harnesses left in `tpt-kinetix-test-utils/tests/`). Six bugs fixed across
+> 7 sessions (1 session was a documented null result that still ruled out a
+> large swath of the pipeline): (1) `TxBlockCtx::block_w/block_h` wired to
+> transform-block size instead of coded-block size, corrupting `all_zero`/
+> `txb_skip` context; (2) loop-filter `blimit` misused as a value-clamp range
+> instead of a mask threshold, plus 2 CDEF formula bugs (`cdef_constrain`,
+> `var_str` cap); (3) two wrong entries in the `INTRA_MODE_CONTEXT` spec
+> table; (4) four more deblocking bugs (tx-size width-vs-height axis mixup
+> between vertical/horizontal passes, `.max()` vs spec's `.min()` when
+> straddling tx sizes, missing chroma filter-size cap, wrong `filterMask`/
+> `flat`/`flat2` formulas, wrong wide-filter chroma tap count); (5)
+> `PARTITION_HORZ_A/HORZ_B/VERT_A/VERT_B` emitted only 2 sub-blocks instead
+> of the spec-required 3 — a real entropy-decoder desync (a missing
+> `decode_block()` call desyncs everything downstream in the tile) — plus a
+> filter-intra `TxBlockCtx.intra_dir` CDF-context bug; (6) directional
+> intra-edge-filter gated on `need_above`/`need_left` (zone-shape need)
+> instead of spec's `haveAbove`/`haveLeft` (real sample availability), plus a
+> missing `numPx` clamp. `cargo test -p tpt-kinetix-av1 --lib` went 57→90
+> passing across the run, all with hand-computed/spec-cross-checked
+> regression tests. **Net effect:** `solid_red_32/_64` stayed pixel-exact
+> (99.00 dB) throughout (unaffected — single-block content never exercised
+> most of these bugs); chroma PSNR improved meaningfully on some entries
+> (e.g. `testsrc_128x96` U 9.72→11.37 dB); **luma PSNR on real/textured
+> content did not converge** — still ~10-17 dB (noise level) on
+> `testsrc_128x96`/`mandelbrot_128x96`/`smptebars_256x144`/`testsrc2_320x180`
+> after all 6 fixes, because each fix corrected a real, independently-provable
+> bug without being the *dominant* remaining error source; PSNR is not a
+> reliable session-to-session progress signal here (fixing a desync can leave
+> PSNR flat or worse even when strictly more correct, since it just changes
+> *which* wrong pixels come out). **Root cause is still open**: the last
+> session (2026-08-19) traced `mandelbrot_128x96`'s desync starting around
+> `mi=(0,8)`/`px=(32,8)` — an `eob=1` read that's categorically too sparse for
+> the real content there — but did not pin the exact wrong symbol/context.
+> Next session should continue that trace (bit-position/per-symbol diff
+> across the `mi=(0,8)` boundary) rather than starting a new crop. Do not
+> flip `pixel_exact` — corpus is genuinely not bit-exact yet. **Uncommitted**
+> working-tree files from this run (per session notes, subject to being swept
+> into the concurrent automated process's own commits, which has happened
+> every session so far — not a sign of lost work, just attribution drift):
+> `tpt-kinetix-av1/src/{loop_filter.rs, reconstruct/{mod,intra_block,
+> reconstruct_block,partition,tests}.rs, entropy.rs, reconstruct/predict.rs}`,
+> `tpt-kinetix-test-utils/tests/dbg_av1_*.rs` (4 new files), `todo-av1.md`.
 
 ---
 # TPT Kinetix — Project Todo

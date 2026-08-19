@@ -35,6 +35,122 @@ const EC_PROB_SHIFT: u32 = 6;
 /// (spec `EC_MIN_PROB`).
 const EC_MIN_PROB: u32 = 4;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Symbol-level trace (AV1 Phase G.0 tooling, 2026-08-20).
+//
+// A zero-cost-when-unused, structured (not `eprintln!`-text) record of every
+// `read_symbol` call this decoder makes, gated by the `KINETIX_AV1_SYMBOL_TRACE`
+// env var. This replaces one-off `eprintln!("DBG ...")` sprinkles with data a
+// harness can actually diff programmatically: source location (via
+// `#[track_caller]`, propagated transparently through `read_bool`/
+// `read_literal` since those are *also* `#[track_caller]`, so a
+// `dec.read_literal(4)` call in `intra_block.rs` shows *that* call site, not
+// `read_bool`'s internal one), bit position before/after, alphabet size, and
+// the decoded value. Threaded via a `thread_local` rather than a parameter on
+// every call site in `coeff.rs`/`reconstruct/*.rs`, since piping an explicit
+// sink through the whole `decode_tile_group` → `TileDecodeState` →
+// `decode_superblock` → `decode_intra_block`/`reconstruct_tx_block` call
+// chain would touch dozens of signatures for a debug-only feature.
+use std::cell::RefCell;
+use std::panic::Location;
+
+/// One symbol-decoder read, captured when tracing is enabled.
+#[derive(Debug, Clone, Copy)]
+pub struct SymbolTraceEntry {
+    /// Monotonic index of this read within the current trace session.
+    pub seq: usize,
+    /// Alphabet size (`cdf.len() - 1`) of the symbol read. `read_bool`/
+    /// `read_literal` bit-reads show `n_symbols == 2`.
+    pub n_symbols: usize,
+    /// The decoded symbol index (`0..n_symbols`).
+    pub value: usize,
+    /// Absolute bit position in the tile's data buffer before this read.
+    pub bit_pos_before: usize,
+    /// Absolute bit position after this read (renormalization included).
+    pub bit_pos_after: usize,
+    /// Source location of the *originating* call (propagated through
+    /// `read_bool`/`read_literal` when they're the direct caller).
+    pub location: &'static Location<'static>,
+}
+
+thread_local! {
+    static SYMBOL_TRACE: RefCell<Option<Vec<SymbolTraceEntry>>> = const { RefCell::new(None) };
+}
+
+/// Start (or reset) a symbol trace for the current thread. Call before
+/// decoding; drain with [`take_symbol_trace`] after.
+pub fn enable_symbol_trace() {
+    SYMBOL_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+    BLOCK_MARKERS.with(|t| *t.borrow_mut() = Some(Vec::new()));
+}
+
+/// Whether a trace session is currently active on this thread (checked once
+/// per `read_symbol` call; cheap relative to the arithmetic decode itself).
+pub fn symbol_trace_enabled() -> bool {
+    SYMBOL_TRACE.with(|t| t.borrow().is_some())
+}
+
+/// Take (and clear) the accumulated trace for the current thread.
+pub fn take_symbol_trace() -> Vec<SymbolTraceEntry> {
+    SYMBOL_TRACE.with(|t| t.borrow_mut().take().unwrap_or_default())
+}
+
+fn push_symbol_trace(entry_fn: impl FnOnce(usize) -> SymbolTraceEntry) {
+    SYMBOL_TRACE.with(|t| {
+        if let Some(v) = t.borrow_mut().as_mut() {
+            let seq = v.len();
+            v.push(entry_fn(seq));
+        }
+    });
+}
+
+/// The current length of the active trace, i.e. the `seq` the *next*
+/// `read_symbol` call will get. Used by [`mark_block`] to stamp block-level
+/// markers with the trace index they precede, without needing every
+/// `reconstruct/` call site to thread a sink through.
+pub fn symbol_trace_len() -> usize {
+    SYMBOL_TRACE.with(|t| t.borrow().as_ref().map_or(0, Vec::len))
+}
+
+/// A human-readable label for "what block/stage starts at trace index
+/// `trace_seq`", pushed from `reconstruct/` at natural block/tx boundaries
+/// (`decode_intra_block`, `reconstruct_tx_block`) when tracing is enabled.
+/// This is what turns "trace entry #47 diverged" into "that's mi=(0,8)
+/// BLOCK_16X16, plane 0, tx px=(32,8)" for a human without re-deriving it.
+#[derive(Debug, Clone)]
+pub struct BlockMarker {
+    pub trace_seq: usize,
+    pub label: String,
+}
+
+thread_local! {
+    static BLOCK_MARKERS: RefCell<Option<Vec<BlockMarker>>> = const { RefCell::new(None) };
+}
+
+/// Record a block/stage boundary marker at the current trace position, if a
+/// trace session is active (no-op and no allocation otherwise).
+pub fn mark_block(label: impl FnOnce() -> String) {
+    if !symbol_trace_enabled() {
+        return;
+    }
+    let trace_seq = symbol_trace_len();
+    BLOCK_MARKERS.with(|t| {
+        let mut slot = t.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Vec::new());
+        }
+        slot.as_mut().unwrap().push(BlockMarker {
+            trace_seq,
+            label: label(),
+        });
+    });
+}
+
+/// Take (and clear) the accumulated block markers for the current thread.
+pub fn take_block_markers() -> Vec<BlockMarker> {
+    BLOCK_MARKERS.with(|t| t.borrow_mut().take().unwrap_or_default())
+}
+
 /// `FloorLog2(x)`: floor of the base-2 logarithm of `x` (spec §4.7).
 ///
 /// `x` must be >= 1 (guaranteed by all call sites below: `SymbolRange` is
@@ -99,6 +215,15 @@ impl<'a> SymbolDecoder<'a> {
         dec
     }
 
+    /// Scratch debug accessor, session 2026-08-19: how far into `data` (in
+    /// bits) the decoder has read, and how many real (non-padding) bits
+    /// remain per `SymbolMaxBits`. Used to rule out an upstream desync that
+    /// already ran the decoder past real tile data by the time it reaches a
+    /// specific block. Not spec-normative; delete once root-caused.
+    pub fn dbg_bit_pos(&self) -> (usize, i64, usize) {
+        (self.bit_pos, self.symbol_max_bits, self.data.len() * 8)
+    }
+
     /// Raw bitstream bit read, MSB-first, byte-aligned start. Returns 0 for
     /// positions past the end of `data` (spec §8.2.2 padding behavior).
     fn read_bit(&mut self) -> u32 {
@@ -131,10 +256,13 @@ impl<'a> SymbolDecoder<'a> {
     /// copy of the table.
     ///
     /// Returns the decoded symbol index (`0..N`).
+    #[track_caller]
     pub fn read_symbol(&mut self, cdf: &mut [u16]) -> usize {
         let n = cdf.len() - 1;
         debug_assert!(n >= 2, "cdf must describe at least 2 symbols");
         debug_assert_eq!(cdf[n - 1], 1 << 15, "cdf[N-1] must be 32768");
+        let location = Location::caller();
+        let bit_pos_before = self.bit_pos;
 
         let mut cur = self.symbol_range;
         let mut prev;
@@ -181,18 +309,41 @@ impl<'a> SymbolDecoder<'a> {
             cdf[n] += 1;
         }
 
+        if symbol_trace_enabled() {
+            let bit_pos_after = self.bit_pos;
+            push_symbol_trace(|seq| SymbolTraceEntry {
+                seq,
+                n_symbols: n,
+                value: symbol,
+                bit_pos_before,
+                bit_pos_after,
+                location,
+            });
+        }
+
         symbol
     }
 
     /// `read_bool()` (§8.2.3): fixed p=1/2 boolean special case. The cdf is
     /// constructed fresh each call, so its post-decode adaptation is
     /// discarded, matching the spec note that implementations may skip it.
+    ///
+    /// `#[track_caller]` so a trace entry pushed by the inner
+    /// [`Self::read_symbol`] call attributes to *this* function's caller
+    /// (e.g. a specific `read_skip`/`read_delta_qindex` call site in
+    /// `reconstruct/`), not to this line in `entropy.rs` — `#[track_caller]`
+    /// is transparent through a chain of `#[track_caller]` functions.
+    #[track_caller]
     pub fn read_bool(&mut self) -> bool {
         let mut cdf = [1u16 << 14, 1u16 << 15, 0u16];
         self.read_symbol(&mut cdf) == 1
     }
 
     /// `read_literal(n)` (§8.2.5): build an `n`-bit value from `read_bool`.
+    /// Also `#[track_caller]` for the same reason as `read_bool` — a
+    /// `read_literal(4)` call in e.g. `read_delta_qindex` shows up in the
+    /// trace as 4 bit-reads attributed to that call site, not to this loop.
+    #[track_caller]
     pub fn read_literal(&mut self, n: u32) -> u32 {
         let mut x = 0u32;
         for _ in 0..n {

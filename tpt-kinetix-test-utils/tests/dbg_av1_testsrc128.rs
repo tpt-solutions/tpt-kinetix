@@ -1,15 +1,19 @@
 //! Scratch debugging harness for the AV1 multi-block intra-decode
-//! investigation (post-`solid_red` fix). Not part of the permanent test
-//! suite — delete once root-caused.
+//! investigation, session 2026-08-18 (cont'd again x2). The previous
+//! sessions' `dbg_av1_smptebars` 64x64 crop is now nearly clean (worst block
+//! off by 4) and is no longer representative of the remaining bugs. This
+//! harness targets `testsrc_128x96` instead (matches the `av1_psnr_check`
+//! corpus entry that is still stuck at ~11 dB luma). Not part of the
+//! permanent test suite -- delete once root-caused.
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 use tpt_kinetix_test_utils::{reference::decode_av1_obu_with_dav1d, synthetic::av1_intra_corpus};
 
 #[test]
-fn dbg_smptebars() {
+fn dbg_testsrc128() {
     let corpus = av1_intra_corpus();
-    let Some(entry) = corpus.iter().find(|e| e.label == "smptebars") else {
-        eprintln!("no smptebars entry (ffmpeg unavailable?)");
+    let Some(entry) = corpus.iter().find(|e| e.label == "testsrc") else {
+        eprintln!("no testsrc entry (ffmpeg unavailable?)");
         return;
     };
     eprintln!("obu bytes: {}", entry.obu.len());
@@ -54,36 +58,14 @@ fn dbg_smptebars() {
         eprintln!("{row}");
     }
 
-    eprintln!("ref top-left 32x8 Y:");
-    for y in 0..8 {
-        let row: Vec<u8> = (0..32).map(|x| ref_frame.data[y * w + x]).collect();
-        eprintln!("{row:?}");
-    }
-    eprintln!("kinetix top-left 32x8 Y:");
-    for y in 0..8 {
-        let row: Vec<u8> = (0..32).map(|x| frame.data[y * w + x]).collect();
-        eprintln!("{row:?}");
-    }
-
-    eprintln!("ref cols32-63 rows0-15 Y:");
+    eprintln!("ref top-left 16x16 Y:");
     for y in 0..16 {
-        let row: Vec<u8> = (32..64).map(|x| ref_frame.data[y * w + x]).collect();
+        let row: Vec<u8> = (0..16).map(|x| ref_frame.data[y * w + x]).collect();
         eprintln!("y={y}: {row:?}");
     }
-    eprintln!("kinetix cols32-63 rows0-15 Y:");
+    eprintln!("kinetix top-left 16x16 Y:");
     for y in 0..16 {
-        let row: Vec<u8> = (32..64).map(|x| frame.data[y * w + x]).collect();
-        eprintln!("y={y}: {row:?}");
-    }
-
-    eprintln!("ref cols48-63 rows32-47 Y:");
-    for y in 32..48 {
-        let row: Vec<u8> = (48..64).map(|x| ref_frame.data[y * w + x]).collect();
-        eprintln!("y={y}: {row:?}");
-    }
-    eprintln!("kinetix cols48-63 rows32-47 Y:");
-    for y in 32..48 {
-        let row: Vec<u8> = (48..64).map(|x| frame.data[y * w + x]).collect();
+        let row: Vec<u8> = (0..16).map(|x| frame.data[y * w + x]).collect();
         eprintln!("y={y}: {row:?}");
     }
 }

@@ -10,6 +10,10 @@ impl<'a> TileDecodeState<'a> {
         let _bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
+        crate::entropy::mark_block(|| {
+            format!("mode_info mi=({mi_col},{mi_row}) bsize={bsize} px=({},{})", mi_col * MI_SIZE, mi_row * MI_SIZE)
+        });
+
         // AV1 spec §5.11.7 `intra_frame_mode_info()` reads, in this exact
         // order: segment_id, skip, [cdef/delta_q/delta_lf], then the intra
         // mode/filter-intra reads, then (from the enclosing `decode_block()`,
@@ -162,7 +166,7 @@ impl<'a> TileDecodeState<'a> {
             max_tx
         };
 
-        if mi_row == 0 && mi_col == 0 && std::env::var("KINETIX_AV1_DBG").is_ok() {
+        if mi_row < 4 && std::env::var("KINETIX_AV1_DBG").is_ok() {
             eprintln!(
                 "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx} filter_intra={filter_intra_mode:?} colors_y={:?} colors_u={:?}",
                 palette.colors_y, palette.colors_u
@@ -211,6 +215,35 @@ impl<'a> TileDecodeState<'a> {
         let luma_tx_w = av1::TX_WIDTH[luma_tx];
         let luma_tx_h = av1::TX_HEIGHT[luma_tx];
 
+        // `intra_tx_type`'s CDF-selection `intraDir` (AV1 spec, "Parsing
+        // process" / intra_tx_type derivation): when `use_filter_intra` is
+        // set, `intraDir = Filter_Intra_Mode_To_Intra_Dir[filter_intra_mode]`
+        // (`{DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED}`), *not* `YMode`
+        // directly. `filter_intra_mode` and `y_mode` are mutually exclusive
+        // in practice (`filter_intra_mode_info()` is only read when
+        // `YMode == DC_PRED`), but the *CDF context* still differs — e.g.
+        // `filter_intra_mode == FILTER_H_PRED` (2) must select the
+        // `H_PRED`-indexed transform-type CDF bucket, not the `DC_PRED`
+        // bucket `y_mode` (always 0 here) would give. Using `y_mode`
+        // unconditionally picked the wrong `intra_tx_type` CDF context for
+        // every filter-intra block — a common real-encoder choice on
+        // low-detail/gradient content (this crate's whole `testsrc`/
+        // `mandelbrot` corpus decodes filter-intra for most of its
+        // top-left blocks) — the same "plausible but wrong decoded
+        // symbol, no desync" corruption signature as the
+        // `INTRA_MODE_CONTEXT` bug two sessions ago.
+        const FILTER_INTRA_MODE_TO_INTRA_DIR: [usize; 5] = [
+            DC_PRED as usize,
+            V_PRED as usize,
+            H_PRED as usize,
+            D157_PRED as usize,
+            DC_PRED as usize,
+        ];
+        let luma_intra_dir = match filter_intra_mode {
+            Some(m) => FILTER_INTRA_MODE_TO_INTRA_DIR[m],
+            None => y_mode,
+        };
+
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
@@ -248,7 +281,7 @@ impl<'a> TileDecodeState<'a> {
                     // was actually true.
                     block_w: bw * MI_SIZE,
                     block_h: bh * MI_SIZE,
-                    intra_dir: y_mode,
+                    intra_dir: luma_intra_dir,
                     uv_mode,
                     qindex_positive: !self.lossless,
                     reduced_tx_set: self.reduced_tx_set,
@@ -296,10 +329,10 @@ impl<'a> TileDecodeState<'a> {
         let by0 = blk_px_y / 8;
         let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
         let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
-        let luma_tx_samples = luma_tx_w as u8;
         for by in by0..by1.min(self.meta.h8) {
             for bx in bx0..bx1.min(self.meta.w8) {
-                self.meta.record_luma(bx, by, luma_tx_samples, skip);
+                self.meta
+                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
             }
         }
 
@@ -488,10 +521,11 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
             // Record chroma tx/skip metadata for the same 8×8-luma grid region.
-            let c_tx_samples = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
             for by in by0..by1.min(self.meta.h8) {
                 for bx in bx0..bx1.min(self.meta.w8) {
-                    self.meta.record_chroma(bx, by, c_tx_samples, skip);
+                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                 }
             }
         }

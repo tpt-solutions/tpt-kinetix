@@ -224,9 +224,23 @@ const PARTITION_VERT_4: u8 = 9;
 // Intra prediction modes (AV1 spec Table 7.10) — DC_PRED/V_PRED/H_PRED and the
 // directional + SMOOTH* + PAETH modes already exist earlier in this file.
 
-// `intra_mode_context`: maps an intra mode to a 0..4 context for the Y-mode CDF
-// (AV1 spec §5.11.9 / Table "Intra mode contexts").
-const INTRA_MODE_CONTEXT: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 3, 3, 1, 1, 2, 0];
+// `Intra_Mode_Context[ INTRA_MODES ]` (AV1 spec §8.3.2, CDF selection for
+// `intra_frame_y_mode`): maps an intra mode to a 0..4 context bucket used to
+// index `TileIntraFrameYModeCdf[abovemode][leftmode]`. Spec text: `{0, 1, 2,
+// 3, 4, 4, 4, 4, 3, 0, 1, 2, 0}`. This previously read `[0, 1, 2, 3, 4, 4, 4,
+// 3, 3, 1, 1, 2, 0]` — wrong at index 7 (`D207_PRED`, spec 4 not 3) and index
+// 9 (`SMOOTH_PRED`, spec 0 not 1). Both are real intra modes real encoders
+// pick often (SMOOTH_PRED especially, on flat/gradient content like
+// `smptebars`'s color bars), so any block whose above or left neighbour used
+// one of those two modes got the wrong 2-D CDF context for its own
+// `intra_frame_y_mode` read — decoding a plausible but wrong y_mode without
+// desyncing the bitstream (each symbol read is self-terminating regardless
+// of whether the context matched the encoder's), which is exactly the
+// "locally garbage, globally still-plausible" corruption pattern the
+// 2026-08-18(cont'd) session traced to this table via `dbg_av1_smptebars`'s
+// mi=(0,12) block (`SMOOTH_PRED`-neighbour-adjacent, decoded a bogus V_DCT
+// residual instead of the correct flat/near-flat block).
+const INTRA_MODE_CONTEXT: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
 
 // `partition_cdf_lookup[bsize]` chooses which width-bucket partition CDF to use
 // (AV1 spec §5.11.4). 0→W8 (4 parts), 1→W16 (10), 2→W32 (10), 3→W64 (10),
@@ -848,9 +862,12 @@ pub fn reconstruct_av1_frame(
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
         eprintln!(
-            "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={}",
+            "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={} delta_q_present={} delta_lf_present={} segmentation_enabled={} allow_screen_content_tools={} allow_intrabc={} enable_filter_intra={} reduced_tx_set={}",
             frame_header.loop_filter_level, frame_header.cdef_bits, frame_header.base_q_idx,
-            seq.enable_cdef, frame_header.cdef_y_strength, frame_header.cdef_uv_strength, frame_header.coded_lossless
+            seq.enable_cdef, frame_header.cdef_y_strength, frame_header.cdef_uv_strength, frame_header.coded_lossless,
+            frame_header.delta_q_present, frame_header.delta_lf_present, frame_header.segmentation_enabled,
+            frame_header.allow_screen_content_tools, frame_header.allow_intrabc, seq.enable_filter_intra,
+            frame_header.reduced_tx_set
         );
     }
 
@@ -992,18 +1009,20 @@ pub fn reconstruct_av1_frame(
             // restoration) over the tile-local buffer. Applied per-tile here;
             // the approximation of not filtering across tile boundaries is
             // acceptable while the decoder is not yet pixel-exact.
-            let _ = apply_post_filters(
-                &mut ty,
-                &mut tu,
-                &mut tv,
-                tw,
-                th,
-                true,
-                true,
-                &meta,
-                frame_header,
-                seq,
-            );
+            if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
+                let _ = apply_post_filters(
+                    &mut ty,
+                    &mut tu,
+                    &mut tv,
+                    tw,
+                    th,
+                    true,
+                    true,
+                    &meta,
+                    frame_header,
+                    seq,
+                );
+            }
 
             Ok(DecodedTile {
                 x0,

@@ -25,21 +25,38 @@ fn split_into_subblocks(bw: usize, bh: usize, partition: u8) -> Vec<(usize, usiz
             out.push((bsize_from_wh(hw * 4, hh * 4), hh, 0));
             out.push((bsize_from_wh(hw * 4, hh * 4), hh, hw));
         }
+        // AV1 spec §5.11.4 `decode_partition()`: the A/B partitions use
+        // `splitSize = Partition_Subsize[PARTITION_SPLIT][bSize]` (the
+        // quarter-area `hw x hh` shape) for their split half and
+        // `subSize = Partition_Subsize[partition][bSize]` (the `bw x hh` or
+        // `hw x bh` HORZ/VERT shape) for their whole half -- **not** a
+        // 1:3 quarter/three-quarter split. The previous implementation used
+        // `qh`/`3*qh` (`qw`/`3*qw`), producing a `(bw, 3*qh)`-shaped request
+        // that has no matching `BLOCK_SIZES` entry (AV1 has no e.g. 16x12
+        // block), so `bsize_from_wh` silently fell back to its
+        // "not found" default (`BLOCK_8X8`) for that sub-block -- decoding
+        // the wrong block shape entirely and desyncing every subsequent
+        // symbol read in the superblock whenever a real encoder chose one of
+        // these four partition types (common on any non-trivial content).
         PARTITION_HORZ_A => {
-            out.push((bsize_from_wh(bw * 4, qh * 4), 0, 0));
-            out.push((bsize_from_wh(bw * 4, 3 * qh * 4), qh, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), 0, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), 0, hw));
+            out.push((bsize_from_wh(bw * 4, hh * 4), hh, 0));
         }
         PARTITION_HORZ_B => {
-            out.push((bsize_from_wh(bw * 4, 3 * qh * 4), 0, 0));
-            out.push((bsize_from_wh(bw * 4, qh * 4), 3 * qh, 0));
+            out.push((bsize_from_wh(bw * 4, hh * 4), 0, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), hh, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), hh, hw));
         }
         PARTITION_VERT_A => {
-            out.push((bsize_from_wh(qw * 4, bh * 4), 0, 0));
-            out.push((bsize_from_wh(3 * qw * 4, bh * 4), 0, qw));
+            out.push((bsize_from_wh(hw * 4, hh * 4), 0, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), hh, 0));
+            out.push((bsize_from_wh(hw * 4, bh * 4), 0, hw));
         }
         PARTITION_VERT_B => {
-            out.push((bsize_from_wh(3 * qw * 4, bh * 4), 0, 0));
-            out.push((bsize_from_wh(qw * 4, bh * 4), 0, 3 * qw));
+            out.push((bsize_from_wh(hw * 4, bh * 4), 0, 0));
+            out.push((bsize_from_wh(hw * 4, hh * 4), 0, hw));
+            out.push((bsize_from_wh(hw * 4, hh * 4), hh, hw));
         }
         PARTITION_HORZ_4 => {
             for i in 0..4 {
@@ -135,6 +152,12 @@ impl<'a> TileDecodeState<'a> {
             PARTITION_SPLIT
         };
         let subs = split_into_subblocks(bw, bh, partition);
+
+        if mi_row < 8 && mi_col < 8 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+            eprintln!(
+                "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}"
+            );
+        }
 
         // Only `PARTITION_SPLIT` (and the 1:4 variants that recurse) descend into
         // smaller blocks; every other partition resolves into leaf blocks at the
@@ -294,5 +317,87 @@ impl<'a> TileDecodeState<'a> {
         let max_tx_width = av1::TX_WIDTH[max_tx];
         let max_tx_height = av1::TX_HEIGHT[max_tx];
         usize::from(above_w >= max_tx_width) + usize::from(left_h >= max_tx_height)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AV1 spec §5.11.4 `decode_partition()`: for a 16x16 node (bw=bh=4 mi
+    // units, hw=hh=2, qw=qh=1), `splitSize = Partition_Subsize[SPLIT][16x16]`
+    // = 8x8 and `subSize = Partition_Subsize[HORZ][16x16]` = 16x8. Hand-
+    // verified against the spec pseudocode directly (see the fix's doc
+    // comment above): HORZ_A must produce exactly 3 sub-blocks, not 2, and
+    // none of them may be the quarter/three-quarter `(bw, qh)`/`(bw, 3*qh)`
+    // shape the previous, buggy implementation used (which doesn't
+    // correspond to any real `BLOCK_SIZES` entry and silently fell back to
+    // `BLOCK_8X8` via `bsize_from_wh`'s not-found default).
+    #[test]
+    fn horz_a_produces_three_subblocks_matching_spec_split_and_horz_shapes() {
+        let subs = split_into_subblocks(4, 4, PARTITION_HORZ_A);
+        assert_eq!(
+            subs,
+            vec![
+                (BLOCK_8X8, 0, 0),
+                (BLOCK_8X8, 0, 2),
+                (BLOCK_16X8, 2, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn horz_b_produces_three_subblocks_matching_spec_split_and_horz_shapes() {
+        let subs = split_into_subblocks(4, 4, PARTITION_HORZ_B);
+        assert_eq!(
+            subs,
+            vec![
+                (BLOCK_16X8, 0, 0),
+                (BLOCK_8X8, 2, 0),
+                (BLOCK_8X8, 2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn vert_a_produces_three_subblocks_matching_spec_split_and_vert_shapes() {
+        let subs = split_into_subblocks(4, 4, PARTITION_VERT_A);
+        assert_eq!(
+            subs,
+            vec![
+                (BLOCK_8X8, 0, 0),
+                (BLOCK_8X8, 2, 0),
+                (BLOCK_8X16, 0, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn vert_b_produces_three_subblocks_matching_spec_split_and_vert_shapes() {
+        let subs = split_into_subblocks(4, 4, PARTITION_VERT_B);
+        assert_eq!(
+            subs,
+            vec![
+                (BLOCK_8X16, 0, 0),
+                (BLOCK_8X8, 0, 2),
+                (BLOCK_8X8, 2, 2),
+            ]
+        );
+    }
+
+    // A larger (32x32) node exercises a non-square-halved `splitSize`
+    // (16x16) and `subSize` (32x16), confirming the shapes scale correctly
+    // rather than only happening to work at the 16x16 size tested above.
+    #[test]
+    fn horz_a_scales_to_a_32x32_node() {
+        let subs = split_into_subblocks(8, 8, PARTITION_HORZ_A);
+        assert_eq!(
+            subs,
+            vec![
+                (BLOCK_16X16, 0, 0),
+                (BLOCK_16X16, 0, 4),
+                (BLOCK_32X16, 4, 0),
+            ]
+        );
     }
 }

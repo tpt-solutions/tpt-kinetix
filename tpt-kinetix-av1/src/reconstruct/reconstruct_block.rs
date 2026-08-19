@@ -30,10 +30,25 @@ pub(super) fn reconstruct_tx_block(
     let tx_h = av1::TX_HEIGHT[internal_tx_size];
     let num_coeffs = tx_w * tx_h;
 
-    let dbg = px_y == 0 && px_x < 32 && blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok();
+    let dbg_uv = px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
+    let dbg = (px_y < 32 && (16..64).contains(&px_x) && blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok())
+        || dbg_uv;
+    if dbg_uv {
+        eprintln!("DBG UV plane={} px=({px_x},{px_y})", blk.plane);
+    }
+
+    let mark_plane = blk.plane;
+    crate::entropy::mark_block(|| {
+        format!(
+            "coeffs plane={mark_plane} px=({px_x},{px_y}) tx={tx_w}x{tx_h} skip={skip} pred_mode={pred_mode}"
+        )
+    });
 
     let mut residual = vec![0i32; num_coeffs];
     if !skip {
+        if dbg {
+            eprintln!("DBG bit_pos before coeffs = {:?}", dec.dbg_bit_pos());
+        }
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
         if dbg {
             eprintln!(
@@ -63,6 +78,10 @@ pub(super) fn reconstruct_tx_block(
                     "DBG residual[0..8]={:?}",
                     &residual[..residual.len().min(8)]
                 );
+                if px_x == 0 && px_y == 0 && std::env::var("KINETIX_AV1_DBG_FULL").is_ok() {
+                    eprintln!("DBG full quant={:?}", coeffs.quant);
+                    eprintln!("DBG full residual={residual:?}");
+                }
             }
         }
     } else if dbg {
@@ -84,6 +103,9 @@ pub(super) fn reconstruct_tx_block(
     // AV1 spec §7.11.2.1's top-level dispatch: palette (§7.11.4) takes
     // priority over everything else (filter-intra, CFL, ordinary modes) when
     // `PaletteSize{Y,UV} > 0` for this plane.
+    if dbg {
+        eprintln!("DBG palette_present={}", palette.is_some());
+    }
     match &palette {
         Some(p) => predict_palette(p, tx_w, tx_h, &mut pred),
         None => match filter_intra_mode {
@@ -107,6 +129,8 @@ pub(super) fn reconstruct_tx_block(
                 enable_intra_edge_filter,
                 blk.plane == 0,
                 angle_delta,
+                plane_w.saturating_sub(px_x),
+                plane_h.saturating_sub(px_y),
             ),
         },
     }

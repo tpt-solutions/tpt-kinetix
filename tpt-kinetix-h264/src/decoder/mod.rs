@@ -898,11 +898,12 @@ impl H264Decoder {
                 let p_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     let cabac_data = reader.remaining_bytes();
-                    let _preview: Vec<String> = cabac_data
+                    let preview: Vec<String> = cabac_data
                         .iter()
-                        .take(16)
+                        .take(64)
                         .map(|b| format!("{b:02X}"))
                         .collect();
+                    eprintln!("P-CABAC bytes[{}]: {}", cabac_data.len(), preview.join(" "));
                     crate::slice_data::parse_p_slice_cabac(
                         cabac_data,
                         mb_cols,

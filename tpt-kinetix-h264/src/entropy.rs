@@ -965,8 +965,9 @@ impl MbTypePCabacContext {
             // ctxIdx 15 = 0: 0 → P_L0_16x16, 1 → P_8x8
             Some(3 * dec.decode_decision(&mut self.ctx[2]) as u32)
         } else {
-            // ctxIdx 15 = 1: 0 → P_L0_L0_16x8 (1), 1 → P_L0_L0_8x16 (2)
-            Some(1 + dec.decode_decision(&mut self.ctx[3]) as u32)
+            // ctxIdx 15 = 1: mirrors FFmpeg `mb_type = 2 - get_cabac(ctx[17])`:
+            //   bit=0 → P_L0_L0_8x16 (2), bit=1 → P_L0_L0_16x8 (1).
+            Some(2 - dec.decode_decision(&mut self.ctx[3]) as u32)
         }
     }
 }

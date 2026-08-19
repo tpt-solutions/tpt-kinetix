@@ -1,5 +1,50 @@
 use super::*;
 
+/// Sub-partition (col4, row4, w4, h4) for sub_i-th sub-partition within a
+/// P_8x8 8×8 partition at (col4, row4) with P sub_mb_type `sub_t` (0..=3).
+/// Used to derive correct per-sub amvd_sum neighbors (§9.3.3.1.1.7) and to
+/// fill l0_mvd_abs for only the sub-partition's 4×4 blocks.
+fn p8x8_sub_dims(sub_t: usize, col4: usize, row4: usize, sub_i: usize) -> (usize, usize, usize, usize) {
+    match (sub_t, sub_i) {
+        (0, 0) => (col4,     row4,     2, 2), // P_8x8: one 8×8
+        (1, 0) => (col4,     row4,     2, 1), // P_8x4: top 8×4
+        (1, 1) => (col4,     row4 + 1, 2, 1), // P_8x4: bottom 8×4
+        (2, 0) => (col4,     row4,     1, 2), // P_4x8: left 4×8
+        (2, 1) => (col4 + 1, row4,     1, 2), // P_4x8: right 4×8
+        (3, 0) => (col4,     row4,     1, 1), // P_4x4: top-left
+        (3, 1) => (col4 + 1, row4,     1, 1), // P_4x4: top-right
+        (3, 2) => (col4,     row4 + 1, 1, 1), // P_4x4: bottom-left
+        (3, 3) => (col4 + 1, row4 + 1, 1, 1), // P_4x4: bottom-right
+        _ => unreachable!("p8x8_sub_dims: sub_t={sub_t} sub_i={sub_i}"),
+    }
+}
+
+/// Sub-partition (col4, row4, w4, h4) for sub_i-th sub-partition within a
+/// B_8x8 8×8 partition at (col4, row4) with B sub_mb_type `sub_t` (0..=12).
+/// For n_sub=1 types (0..=3): whole 8×8. For n_sub=2 types: even sub_t (4,6,8)
+/// are 8×4 (top/bottom), odd sub_t (5,7,9) are 4×8 (left/right). For n_sub=4
+/// types (10..=12): four 4×4 in Z-scan order.
+fn b8x8_sub_dims(sub_t: usize, col4: usize, row4: usize, sub_i: usize) -> (usize, usize, usize, usize) {
+    match sub_t {
+        0..=3 => (col4, row4, 2, 2), // n_sub=1, whole 8×8
+        4 | 6 | 8 => match sub_i {  // n_sub=2, 8×4
+            0 => (col4,     row4,     2, 1),
+            _ => (col4,     row4 + 1, 2, 1),
+        },
+        5 | 7 | 9 => match sub_i {  // n_sub=2, 4×8
+            0 => (col4,     row4, 1, 2),
+            _ => (col4 + 1, row4, 1, 2),
+        },
+        10..=12 => match sub_i {    // n_sub=4, 4×4
+            0 => (col4,     row4,     1, 1),
+            1 => (col4 + 1, row4,     1, 1),
+            2 => (col4,     row4 + 1, 1, 1),
+            _ => (col4 + 1, row4 + 1, 1, 1),
+        },
+        _ => unreachable!("b8x8_sub_dims: sub_t={sub_t}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     dec: &mut crate::entropy::CabacDecoder,
@@ -29,7 +74,10 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
     let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
 
+    let (r_pre_t, o_pre_t) = dec.debug_state();
     let inter_type = ctxs.mb_type_p.decode(dec);
+    let (r_post_t, o_post_t) = dec.debug_state();
+    eprintln!("  MB({mb_x},{mb_y}) mb_type={inter_type:?} cabac: {r_pre_t:#06x}/{o_pre_t:#010x} -> {r_post_t:#06x}/{o_post_t:#010x}");
     match inter_type {
         None => {
             // Intra macroblock inside P slice.
@@ -100,6 +148,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 for st in &mut sub_types {
                     *st = ctxs.sub_mb_p.decode(dec) as u8;
                 }
+                eprintln!("  P8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?}");
                 motion.sub_mb_type = Some(sub_types);
                 // ref_idx per 8×8 partition (only coded when num_ref_idx_l0_active > 1, spec §7.3.5.2).
                 for part in 0..4 {
@@ -134,20 +183,26 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         }
                     }
                 }
-                // MVDs per sub-partition.
+                // MVDs per sub-partition. For each 8×8 partition the sub-type
+                // may split it into 8×4, 4×8, or 4×4 sub-partitions. Each
+                // sub-partition gets its own (xp,yp,wp,hp) for amvd_sum context
+                // derivation (spec §9.3.3.1.1.7), and l0_mvd_abs is stored for
+                // all 4×4 blocks in the sub-partition so later partitions see
+                // the correct intra-MB neighbor MVD magnitudes.
                 for part in 0..4 {
                     let sub_t = sub_types[part] as usize;
                     let n_sub = P_SUB_MB_PARTS[sub_t];
-                    let (col4, row4, w4, h4) = partition_dims(mb_type, part);
-                    // Each sub-partition within the 8×8 is stacked vertically (8×4) or side-by-side (4×8).
-                    // For simplicity treat each sub as occupying the same 8×8 block for amvd context.
-                    let (xp, yp, wp, hp) = (
-                        col4 as u32 * 4,
-                        row4 as u32 * 4,
-                        w4 as u32 * 4,
-                        h4 as u32 * 4,
-                    );
+                    let (col4, row4, _, _) = partition_dims(mb_type, part);
                     for sub_i in 0..n_sub {
+                        let (sc4, sr4, sw4, sh4) =
+                            p8x8_sub_dims(sub_t, col4, row4, sub_i);
+                        let (xp, yp, wp, hp) = (
+                            sc4 as u32 * 4,
+                            sr4 as u32 * 4,
+                            sw4 as u32 * 4,
+                            sh4 as u32 * 4,
+                        );
+                        let (r0, o0) = dec.debug_state();
                         let mvd_x = cabac_decode_mvd_component(
                             dec,
                             &mut ctxs.mvd_l0_x,
@@ -176,14 +231,16 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             0,
                             1,
                         )?;
-                        eprintln!("  MB({mb_x},{mb_y}) P8x8 part={part} sub={sub_i} mvd=({mvd_x},{mvd_y})");
+                        let (r1, o1) = dec.debug_state();
+                        eprintln!("    part={part} sub={sub_i} sub_t={sub_t} xp={xp} yp={yp} wp={wp} hp={hp} mvd=({mvd_x},{mvd_y}) cabac: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
                         motion.mvd_l0.push((mvd_x, mvd_y));
-                        let blk = row4 * 4 + col4; // representative block for last sub
-                        let _ = sub_i;
-                        this_inter.l0_mvd_abs[blk] = [
-                            (mvd_x.unsigned_abs() as u8).min(70),
-                            (mvd_y.unsigned_abs() as u8).min(70),
-                        ];
+                        let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
+                        this_inter.set_partition_l0(
+                            &sub_blks,
+                            mvd_x,
+                            mvd_y,
+                            motion.ref_idx_l0[part],
+                        );
                     }
                 }
             } else {
@@ -916,14 +973,16 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             }
             for part in 0..4 {
                 let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
-                let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, 8u32, 8u32);
-                let blks = partition_blocks(c4, r4, 2, 2);
+                let sub_t = sub_types[part] as usize;
                 if sub_dirs[part] == BPredDir::Direct {
                     continue;
                 }
                 if sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi {
-                    let n = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
-                    for _ in 0..n {
+                    let n = crate::mv::B_SUB_MB_PARTS[sub_t];
+                    for sub_i in 0..n {
+                        let (sc4, sr4, sw4, sh4) = b8x8_sub_dims(sub_t, c4, r4, sub_i);
+                        let (xp, yp, wp, hp) = (sc4 as u32 * 4, sr4 as u32 * 4, sw4 as u32 * 4, sh4 as u32 * 4);
+                        let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
                         let mvx = cabac_decode_mvd_component(
                             dec,
                             &mut ctxs.mvd_l0_x,
@@ -953,12 +1012,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             1,
                         )?;
                         motion.mvd_l0.push((mvx, mvy));
-                        this_inter.set_partition_l0(&blks, mvx, mvy, motion.ref_idx_l0[part]);
+                        this_inter.set_partition_l0(&sub_blks, mvx, mvy, motion.ref_idx_l0[part]);
                     }
                 }
                 if sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi {
-                    let n = crate::mv::B_SUB_MB_PARTS[sub_types[part] as usize];
-                    for _ in 0..n {
+                    let n = crate::mv::B_SUB_MB_PARTS[sub_t];
+                    for sub_i in 0..n {
+                        let (sc4, sr4, sw4, sh4) = b8x8_sub_dims(sub_t, c4, r4, sub_i);
+                        let (xp, yp, wp, hp) = (sc4 as u32 * 4, sr4 as u32 * 4, sw4 as u32 * 4, sh4 as u32 * 4);
+                        let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
                         let mvx = cabac_decode_mvd_component(
                             dec,
                             &mut ctxs.mvd_l1_x,
@@ -988,7 +1050,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             1,
                         )?;
                         motion.mvd_l1.push((mvx, mvy));
-                        this_inter.set_partition_l1(&blks, mvx, mvy, motion.ref_idx_l1[part]);
+                        this_inter.set_partition_l1(&sub_blks, mvx, mvy, motion.ref_idx_l1[part]);
                     }
                 }
             }

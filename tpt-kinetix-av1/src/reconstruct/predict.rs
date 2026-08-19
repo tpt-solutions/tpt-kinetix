@@ -539,6 +539,10 @@ fn predict_directional(
     enable_intra_edge_filter: bool,
     is_luma: bool,
     angle_delta: i32,
+    have_above: bool,
+    have_left: bool,
+    avail_w: usize,
+    avail_h: usize,
 ) {
     let nominal_angle = match mode {
         D45_PRED => 45,
@@ -592,16 +596,29 @@ fn predict_directional(
         if need_above && need_left && (w + h >= 24) {
             filter_intra_edge_corner(&mut above, &mut lcol, DIR_OFF);
         }
-        if need_above && w > 0 {
+        // AV1 spec §7.11.2.4 step 4 gates the above/left edge-filter sub-steps
+        // on `haveAbove`/`haveLeft` (actual sample availability), not on
+        // `need_above`/`need_left` (whether the current prediction zone
+        // reads that edge at all) — those are different conditions whenever
+        // a block's `haveAbove`/`haveLeft` diverge from its zone's edge
+        // requirement (e.g. a zone-2 block, which always needs both edges,
+        // sitting at the frame's top row so `haveAbove` is false). The
+        // `numPx` for each edge is also `Min(w, maxX - x + 1)` /
+        // `Min(h, maxY - y + 1)` — clamped to the samples actually left in
+        // the frame/tile past this block's origin — not the unclamped `w`/
+        // `h` used here previously, which over-read past the frame edge for
+        // any block whose transform size doesn't evenly divide the
+        // remaining plane extent.
+        if have_above && w > 0 {
             let strength =
                 intra_edge_filter_strength(w as i32, h as i32, p_angle - 90, FILTER_TYPE);
-            let n_px = w + AB_LE + if need_right { h } else { 0 };
+            let n_px = w.min(avail_w) + AB_LE + if need_right { h } else { 0 };
             filter_intra_edge(&mut above, DIR_OFF, n_px, strength);
         }
-        if need_left && h > 0 {
+        if have_left && h > 0 {
             let strength =
                 intra_edge_filter_strength(h as i32, w as i32, p_angle - 180, FILTER_TYPE);
-            let n_px = h + AB_LE + if need_bottom { w } else { 0 };
+            let n_px = h.min(avail_h) + AB_LE + if need_bottom { w } else { 0 };
             filter_intra_edge(&mut lcol, DIR_OFF, n_px, strength);
         }
         upsample_above =
@@ -658,6 +675,8 @@ pub(super) fn predict_intra_block(
     enable_intra_edge_filter: bool,
     is_luma: bool,
     angle_delta: i32,
+    avail_w: usize,
+    avail_h: usize,
 ) {
     let BlockBorders {
         top,
@@ -686,6 +705,10 @@ pub(super) fn predict_intra_block(
             enable_intra_edge_filter,
             is_luma,
             angle_delta,
+            *have_above,
+            *have_left,
+            avail_w,
+            avail_h,
         ),
         _ => predict_dc(top, left, w, h, *have_above, *have_left, out),
     }

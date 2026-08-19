@@ -230,22 +230,42 @@ fn amvd_sum(
     list: usize,
     comp: usize,
 ) -> u32 {
-    // Left neighbor 4×4 block: column to left of xP, bottom row of partition.
-    let left_row4 = ((yp + hp - 1) / 4) as usize;
-    let left_blk = left_row4 * 4 + 3; // rightmost column of left MB
-    let left_val = if let Some(idx) = left_mb_idx {
-        let g = &inter_grid[idx];
-        if g.present {
-            (if list == 0 {
-                g.l0_mvd_abs[left_blk][comp]
+    // Left neighbor 4×4 block: partition that contains sample (xP−1, yP+hP−1).
+    // When xP=0 that sample is in the left macroblock (col 3, bottom row of
+    // partition); when xP≥1 it is within the current macroblock.
+    let left_pixel_x = xp as i32 - 1;
+    let left_pixel_y = (yp + hp - 1) as usize;
+    let left_val = if left_pixel_x < 0 {
+        let left_row4 = left_pixel_y / 4;
+        let left_blk = left_row4 * 4 + 3; // rightmost column of left MB
+        if let Some(idx) = left_mb_idx {
+            let g = &inter_grid[idx];
+            if g.present {
+                (if list == 0 {
+                    g.l0_mvd_abs[left_blk][comp]
+                } else {
+                    g.l1_mvd_abs[left_blk][comp]
+                }) as u32
             } else {
-                g.l1_mvd_abs[left_blk][comp]
-            }) as u32
+                0
+            }
         } else {
             0
         }
     } else {
-        0
+        // Left neighbor is within the current macroblock (e.g. right sub-partition of P_4x8 or P_8x16).
+        let left_col4 = left_pixel_x as usize / 4;
+        let left_row4 = left_pixel_y / 4;
+        let left_blk = left_row4 * 4 + left_col4;
+        if cur_inter.present {
+            (if list == 0 {
+                cur_inter.l0_mvd_abs[left_blk][comp]
+            } else {
+                cur_inter.l1_mvd_abs[left_blk][comp]
+            }) as u32
+        } else {
+            0
+        }
     };
 
     // Top neighbor 4×4 block: row above yP, rightmost column of partition.
@@ -684,6 +704,11 @@ pub(crate) fn cabac_decode_mvd_component(
         list,
         comp,
     );
-    Ok(ctx.decode(dec, asum))
+    let ctx0 = if asum < 3 { 0 } else if asum < 33 { 1 } else { 2 };
+    let (r0, o0) = dec.debug_state();
+    let val = ctx.decode(dec, asum);
+    let (r1, o1) = dec.debug_state();
+    eprintln!("      mvd xp={xp} yp={yp} wp={wp} hp={hp} comp={comp} asum={asum} ctx0={ctx0} val={val} {r0:#06x}/{o0:#010x}->{r1:#06x}/{o1:#010x}");
+    Ok(val)
 }
 
