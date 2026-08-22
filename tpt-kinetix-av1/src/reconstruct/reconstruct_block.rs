@@ -33,7 +33,7 @@ pub(super) fn reconstruct_tx_block(
     let dbg_uv =
         px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
     let dbg = (px_y < 32
-        && (16..64).contains(&px_x)
+        && (px_x < 4 || (16..64).contains(&px_x))
         && blk.plane == 0
         && std::env::var("KINETIX_AV1_DBG").is_ok())
         || dbg_uv;
@@ -82,7 +82,7 @@ pub(super) fn reconstruct_tx_block(
                     "DBG residual[0..8]={:?}",
                     &residual[..residual.len().min(8)]
                 );
-                if px_x == 0 && px_y == 0 && std::env::var("KINETIX_AV1_DBG_FULL").is_ok() {
+                if std::env::var("KINETIX_AV1_DBG_FULL").is_ok() {
                     eprintln!("DBG full quant={:?}", coeffs.quant);
                     eprintln!("DBG full residual={residual:?}");
                 }

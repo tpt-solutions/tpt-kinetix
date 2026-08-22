@@ -95,15 +95,16 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         macroblocks.push(mb);
 
         // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*
-        // macroblock, not just as an early-exit check; for a well-formed
-        // single-slice-per-picture stream it must be 0 until the last MB and
-        // 1 exactly there. A mismatch means the decode has desynced from the
-        // bitstream (see `todo.md` Phase D: known remaining gap for streams
-        // where an early macroblock is Intra_4x4 with real residual), so
-        // bail rather than risk emitting wrong pixels.
+        // macroblock. It must be 0 for every mid-slice MB; a 1 there means the
+        // decode has desynced from the bitstream (see `todo.md` Phase D), so
+        // bail rather than risk emitting wrong pixels. On the LAST MB either
+        // value is accepted: spec-conformant encoders write a final terminate
+        // (=1), but x264 omits it (it emits exactly total-1 terminate bins,
+        // one before each MB except the first) and ffmpeg exits on the MB
+        // count in that case.
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
-        if end_of_slice != is_last {
+        if !is_last && end_of_slice {
             return Err(SliceDataError::Unsupported(
                 "end_of_slice_flag mismatch (CABAC decode desynced)",
             ));

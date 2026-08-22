@@ -66,6 +66,7 @@ fn decode_with(
         false, // enable_filter_intra
         false, // enable_intra_edge_filter
         allow_screen_content_tools,
+        false,    // allow_intrabc
         true,     // frame_is_intra — these robustness tests exercise the intra path
         false,    // allow_high_precision_mv
         false,    // reference_select

@@ -1,12 +1,45 @@
 //! Inverse Modified Discrete Cosine Transform (IMDCT) for the AAC filterbank.
 //!
-//! AAC uses the "oddly-stacked" MDCT. For a block of N spectral coefficients
-//! the IMDCT produces 2·N time-domain samples:
+//! AAC uses the "oddly-stacked" MDCT. For a block of `n` spectral coefficients
+//! the IMDCT produces `2n` time-domain samples. Writing the formula with `N`
+//! meaning the *full* transform length (`N = 2n`, matching ISO/IEC 13818-7
+//! §3.A.4 / the standard MDCT literature convention, e.g. Wikipedia's
+//! "Modified discrete cosine transform" article's oddly-stacked IMDCT):
 //!
 //! ```text
-//! x[n] = (1/N) · Σ_{k=0}^{N-1} X[k] · cos( (π/(2·N)) · (2·n + 1 + N/2) · (2·k + 1) )
-//!                                                                   n = 0 .. 2·N-1
+//! y[i] = (2/N) · Σ_{k=0}^{N/2-1} X[k] · cos( (2π/N) · (i + n0) · (k + 1/2) ),  n0 = (N/2+1)/2
+//!                                                                   i = 0 .. N-1
 //! ```
+//!
+//! Substituting `N = 2n` (so `n0 = (n+1)/2`) and clearing fractions to match
+//! this module's integer table-building loop (`i` → `nn`):
+//!
+//! ```text
+//! x[nn] = (1/n) · Σ_{k=0}^{n-1} X[k] · cos( (π/(4n)) · (2·nn + n + 1) · (2·k + 1) )
+//!                                                                   nn = 0 .. 2·n-1
+//! ```
+//!
+//! **2026-08-23 session note:** an earlier version of this module used
+//! `(π/(2n)) · (2·nn + 1 + n/2) · (2·k+1)` (coefficient `π/(2n)`, offset term
+//! `n/2` instead of `n`) — this is a *different* formula that happens to look
+//! superficially similar (same shape, same `2π/(4N)` reference cited in a
+//! stale comment) but has exactly double the per-sample phase rate: it maps
+//! spectral bin `k` to physical frequency `fs·(2k+1)/(2n)` instead of the
+//! correct `fs·(k+0.5)/(2n)`, i.e. every reconstructed frequency came out 2x
+//! too high. This was root-caused by cross-correlating a real ffmpeg-encoded
+//! 440 Hz test tone's *reconstructed* PCM against a synthetic-tone frequency
+//! probe of this transform: the decoder's own Huffman-decoded spectral energy
+//! sits at bin k≈20 (consistent with the correct `fs·(k+0.5)/(2n)` mapping,
+//! ≈441 Hz), but the old formula turned that same bin into ≈883 Hz — i.e. the
+//! *spectral decode* (Huffman, section/scalefactor-band bin placement) was
+//! already correct; only this transform's basis-function phase rate was
+//! wrong. The overall `1/n` amplitude normalization (`inv_n` below) is
+//! unaffected: `2/N_full = 2/(2n) = 1/n` already matched the correct formula,
+//! so an earlier session's attempt to "fix" the amplitude by trying `2/n`
+//! (using `n` where the spec's `N` actually means `2n`) was based on the same
+//! `N`-convention confusion and made the match worse — that revert was
+//! correct given the *old* phase formula, but is superseded now that the
+//! phase formula itself is fixed.
 //!
 //! The overlap-add stage ([`crate::window`] / decoder) then windows and sums
 //! the 2·N output with the previous block's tail. Long windows use N = 1024,
@@ -18,7 +51,7 @@ use std::f64::consts::PI;
 /// IMDCT without per-sample transcendental calls.
 pub struct Imdct {
     n: usize,
-    /// Row-major `2·N × N` table of `cos(π/(2N)·(2n+1+N/2)·(2k+1))`.
+    /// Row-major `2·N × N` table of `cos(π/(4N)·(2·nn+N+1)·(2k+1))`.
     table: Vec<f32>,
 }
 
@@ -31,13 +64,15 @@ impl Imdct {
         );
         let mut table = vec![0.0f32; 2 * n * n];
         for nn in 0..2 * n {
-            // AAC IMDCT (ISO 13818-7 §3.A.4): the time index is doubled in the
-            // basis-function argument and offset by N/2 so that the 50%
-            // overlap-add satisfies Time-Domain Aliasing Cancellation (TDAC).
-            let a = (2 * nn + 1 + n / 2) as f64;
+            // AAC IMDCT (ISO 13818-7 §3.A.4, full-length-N convention with
+            // N = 2n): the time index is doubled in the basis-function
+            // argument and offset by n+1 (not n/2 - see module doc comment)
+            // so that the 50% overlap-add satisfies Time-Domain Aliasing
+            // Cancellation (TDAC).
+            let a = (2 * nn + n + 1) as f64;
             let row_base = nn * n;
             for k in 0..n {
-                let arg = (PI / (2.0 * n as f64)) * a * (2 * k + 1) as f64;
+                let arg = (PI / (4.0 * n as f64)) * a * (2 * k + 1) as f64;
                 table[row_base + k] = arg.cos() as f32;
             }
         }
@@ -48,6 +83,7 @@ impl Imdct {
     pub fn transform(&self, input: &[f32], output: &mut [f32]) {
         debug_assert_eq!(input.len(), self.n);
         debug_assert_eq!(output.len(), 2 * self.n);
+        // 2/N_full = 2/(2n) = 1/n (see module doc comment on the N-convention).
         let inv_n = 1.0 / self.n as f64;
         for (nn, out) in output.iter_mut().enumerate() {
             let row = &self.table[nn * self.n..(nn + 1) * self.n];
@@ -140,12 +176,13 @@ mod tests {
         assert!((time[0] - time[n]).abs() > 1e-3);
     }
 
-    /// IMDCT(e_k) equals `(1/N)·cos( π/(2N)·(2n+1+N/2)·(2k+1) )` exactly: a direct
+    /// IMDCT(e_k) equals `(1/n)·cos( π/(4n)·(2·nn+n+1)·(2k+1) )` exactly: a direct
     /// check that [`Imdct::transform`] computes the correct inverse-transform basis
-    /// (matched against the ISO/IEC 13818-7 §3.A.4 formula), independent of any
-    /// windowing / TDAC. The full windowed overlap-add round-trip that reconstructs
-    /// the original signal is validated end-to-end against an ffmpeg reference by
-    /// `tests/conformance_aac.rs`.
+    /// (matched against the ISO/IEC 13818-7 §3.A.4 formula using the full-length-`N`
+    /// convention `N = 2n`; see the module doc comment for the 2026-08-23
+    /// frequency-doubling fix), independent of any windowing / TDAC. The full
+    /// windowed overlap-add round-trip that reconstructs the original signal is
+    /// validated end-to-end against an ffmpeg reference by `tests/conformance_aac.rs`.
     #[test]
     fn imdct_basis_vector_is_cosine() {
         let n = 16usize;
@@ -156,9 +193,9 @@ mod tests {
             let mut time = vec![0.0f32; 2 * n];
             imdct.transform(&freq, &mut time);
             for (nn, &time_nn) in time.iter().enumerate() {
-                let a = (2 * nn + 1 + n / 2) as f64;
+                let a = (2 * nn + n + 1) as f64;
                 let expected = ((1.0 / n as f64)
-                    * (PI / (2.0 * n as f64) * a * (2 * k + 1) as f64).cos())
+                    * (PI / (4.0 * n as f64) * a * (2 * k + 1) as f64).cos())
                     as f32;
                 assert!(
                     (time_nn - expected).abs() < 1e-5,
@@ -204,3 +241,4 @@ mod tests {
         v
     }
 }
+

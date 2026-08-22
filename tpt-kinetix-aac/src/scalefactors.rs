@@ -1,14 +1,13 @@
 //! Scalefactor decoding (ISO/IEC 14496-3 §4.6.3.4).
 //!
-//! Scalefactors are differentially coded (DPCM). The predictor is `0` at the
-//! start of the stream and at the start of each window group for intensity /
-//! noise bands; otherwise it is the previously decoded scalefactor. A band whose
-//! section codebook is `ZERO_HCB` carries no scalefactor (it is implicitly 0 and
-//! does not advance the predictor).
-//!
-//! For intensity / PNS bands the decoded value is not a linear scale factor but
-//! an *intensity position* / *noise energy*; it is still DPCM-coded the same
-//! way and simply interpreted differently by the stereo / PNS tools.
+//! Scalefactors are differentially coded (DPCM) via three independent running
+//! predictors that persist for the whole channel (not reset per window group):
+//! one for regular bands, one for intensity `is_position`, one for PNS
+//! `noise_energy` (whose first occurrence in the channel is a raw 9-bit field,
+//! not Huffman-coded — the `noise_pcm_flag` special case). A band whose
+//! section codebook is `ZERO_HCB` carries no scalefactor (it is implicitly 0
+//! and does not advance any predictor). See [`decode_scalefactors`] for the
+//! exact per-predictor sign/baseline conventions used here.
 
 use crate::bitreader::BitReader;
 use crate::codebooks::decode_scalefactor;
@@ -43,9 +42,25 @@ pub fn is_noise(cb: u8) -> bool {
 /// data; `sections` is the raw section structure and is iterated directly so
 /// that every band the bitstream covers (including any past `max_sfb`, which the
 /// reference decoder reads but ignores) consumes its scalefactor. Returns the
-/// decoded scalefactor for each `(group, sfb)` — for normal bands this is the
-/// linear scale factor; for intensity bands the intensity position; for PNS
-/// bands the noise energy.
+/// decoded scalefactor for each `(group, sfb)`.
+///
+/// Three independent DPCM predictors run for the whole channel (ISO 14496-3
+/// §4.6.3.4), **not** reset per window group:
+/// - regular (non-`ZERO_HCB`, non-intensity, non-noise) bands: a running value
+///   that starts at 0 and represents *the negative offset from `global_gain`*
+///   (chosen to match [`crate::dequant::dequant_scale`]'s
+///   `2^((global_gain - 100 - sf) / 4)`, which folds `global_gain` in
+///   separately) — each codeword `t` (`decode_scalefactor` returns `t - 60`)
+///   updates it as `predictor - (t - 60)`, since the spec's absolute
+///   `scale_factor += (t - 60)` and `global_gain - absolute` flips the sign.
+/// - intensity bands: `is_position`, a literal running total (`+= t - 60`,
+///   *no* `global_gain` baseline — [`crate::stereo::apply_stereo`] uses it
+///   directly as `2^(-0.25 * is_position)`).
+/// - noise (PNS) bands: `noise_energy`'s *first* occurrence in the whole
+///   channel is a raw 9-bit field (`value - 256`), not Huffman-coded (the
+///   `noise_pcm_flag` special case); subsequent noise bands DPCM off it the
+///   same way regular bands do, so it is stored in the same
+///   negative-offset-from-`global_gain` form.
 pub fn decode_scalefactors(
     reader: &mut BitReader,
     ics: &IcsInfo,
@@ -56,52 +71,58 @@ pub fn decode_scalefactors(
     let max_sfb = ics.max_sfb as usize;
     let mut sf = vec![0i32; num_groups * max_sfb];
 
+    let mut scale_factor = 0i32;
+    let mut is_position = 0i32;
+    let mut noise_energy = 0i32;
+    let mut noise_pcm_flag = true;
+
     for g in 0..num_groups {
-        // `chain_active` is true once we have seen an intensity/noise band in
-        // this group, so the next intensity/noise band continues the DPCM
-        // chain (predictor = previous value); the first one resets to 0.
-        let mut chain_active = false;
-        let mut prev = 0i32;
         let mut sfb = 0usize;
         for sec in &sections.groups[g] {
             let sect_cb = sec.sect_cb;
             for _ in 0..sec.sect_len as usize {
+                if sfb >= max_sfb {
+                    // A section's declared length pushed it past `max_sfb`; per
+                    // ISO 14496-3 §4.4.3.1's `section_data()` pseudocode (bounded
+                    // by `while (i < max_sfb)`) there is no scalefactor data in
+                    // the bitstream past this point, so no bits are consumed.
+                    sfb += 1;
+                    continue;
+                }
                 let idx = g * max_sfb + sfb;
-                if sect_cb == ZERO_HCB {
+                let val = if sect_cb == ZERO_HCB {
                     // Zero book: no scalefactor is transmitted.
-                    if sfb < max_sfb {
-                        sf[idx] = 0;
+                    0
+                } else if is_intensity(sect_cb) {
+                    let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
+                    is_position += hcod;
+                    is_position
+                } else if is_noise(sect_cb) {
+                    if noise_pcm_flag {
+                        noise_pcm_flag = false;
+                        let raw = reader.read_bits(9).ok_or(AacParseError::UnexpectedEof)? as i32;
+                        // Absolute noise_energy = global_gain - 90 + (raw - 256);
+                        // stored here as -(that - global_gain) = 90 - (raw - 256).
+                        noise_energy = 90 - (raw - 256);
+                    } else {
+                        let hcod =
+                            decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
+                        noise_energy -= hcod;
                     }
+                    noise_energy
                 } else {
                     let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
-
-                    let predictor = if is_intensity(sect_cb) || is_noise(sect_cb) {
-                        if !chain_active {
-                            // First intensity/noise band in the group: reset predictor.
-                            0
-                        } else {
-                            prev
-                        }
-                    } else if g == 0 && sfb == 0 {
-                        0
-                    } else {
-                        prev
-                    };
-
-                    let val = predictor - hcod;
-                    if sfb < max_sfb {
-                        sf[idx] = val;
-                    }
-                    prev = val;
-                    if is_intensity(sect_cb) || is_noise(sect_cb) {
-                        chain_active = true;
-                    }
+                    scale_factor -= hcod;
+                    scale_factor
+                };
+                if sfb < max_sfb {
+                    sf[idx] = val;
                 }
                 sfb += 1;
             }
         }
-        let _ = band_type;
     }
+    let _ = band_type;
     Ok(sf)
 }
 

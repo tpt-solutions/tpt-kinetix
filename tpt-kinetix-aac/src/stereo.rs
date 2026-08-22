@@ -37,6 +37,11 @@ pub fn apply_stereo(
     for (g, &gbase) in gindex.iter().take(num_groups).enumerate() {
         let glen = ics.group_len(g);
         for sfb in 0..max_sfb {
+            // Stop at the end of the scalefactor-band table (hostile-input
+            // safety); the reference decoder ignores any remaining bands.
+            if sfb + 1 >= swb.len() {
+                break;
+            }
             let lidx = g * max_sfb + sfb;
             let ridx = g * max_sfb + sfb;
             let width = (swb[sfb + 1] - swb[sfb]) as usize;
@@ -53,8 +58,12 @@ pub fn apply_stereo(
                     for line in 0..width {
                         let l = left[base + line];
                         let r = right[base + line];
-                        left[base + line] = (l + r) * 0.5;
-                        right[base + line] = (l - r) * 0.5;
+                        // ISO 14496-3 §4.6.8.1.3's decode pseudocode is unscaled:
+                        // `tmp = l - r; l += r; r = tmp;` (no 0.5 or sqrt(2) factor
+                        // anywhere) - verified 2026-08-23 against the actual spec
+                        // PDF text, not recollection.
+                        left[base + line] = l + r;
+                        right[base + line] = l - r;
                     }
                 }
             }

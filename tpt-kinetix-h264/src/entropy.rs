@@ -1162,6 +1162,10 @@ impl MvdCabacContext {
                 }
             }
         }
+        // Sign bypass bin polarity matches FFmpeg's
+        // `get_cabac_bypass_sign(&sl->cabac, -mvd)`: mask=0 (bin 1) returns
+        // val=-mvd, mask=-1 (bin 0) returns -val=+mvd — i.e. bin 1 is
+        // NEGATIVE, matching the usual "sign=1 → negative" convention.
         if dec.decode_bypass() == 1 {
             -(mvd as i32)
         } else {

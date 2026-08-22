@@ -733,14 +733,27 @@ pub fn chroma_dc_transform(
 
     // DC scaling (§8.5.11):
     //   if qP/6 >= 5: d = (f * LevelScale4x4[m][0]) << (qP/6 - 5)
-    //   else:          d = (f * LevelScale4x4[m][0] + 2^(4 - qP/6)) >> (5 - qP/6)
+    //   else:          d = (f * LevelScale4x4[m][0]) >> (5 - qP/6)
+    //
+    // Unlike the AC dequant (§8.5.12.1) and the Intra_16x16 luma DC scaling
+    // (§8.5.10), the chroma DC scaling truncates with **no rounding
+    // constant** in the `qP/6 < 5` branch — verified against FFmpeg's
+    // `ff_h264_chroma_dc_dequant_idct` (`h264idct_template.c`), which does a
+    // flat `(x * qmul) >> 7` with no `+` term at all (`qmul` folds in
+    // `qP/6 + 2` via a left-shift at table-build time, so expanding that
+    // back out to our qP/6, qP%6 split reproduces exactly this two-branch
+    // shift with the low branch being a plain truncating `>>`, not a
+    // round-to-nearest one). Adding a rounding term here (as an earlier
+    // version of this function did) is a real bug: it silently rounds up
+    // roughly half the time it shouldn't, producing isolated ±1 errors on
+    // real (non-flat) content — see `todo-h264.md` Phase F.4.
     let ls = scaling.chroma_dc_level_scale(comp, m);
     let mut out = [0i32; 4];
     for i in 0..4 {
         out[i] = if shift >= 5 {
             (f[i] * ls) << (shift - 5)
         } else {
-            (f[i] * ls + (1 << (4 - shift))) >> (5 - shift)
+            (f[i] * ls) >> (5 - shift)
         };
     }
     out

@@ -19,8 +19,11 @@ pub struct PulseData {
 }
 
 /// Parse `pulse_data()` (called only when `pulse_data_present` was set).
+///
+/// `number_pulse` is a **2-bit** field (ISO 14496-3 Table 4.61): the loop runs
+/// `number_pulse + 1` times, so 1..=4 pulses.
 pub fn parse_pulse(reader: &mut BitReader) -> Result<PulseData, AacParseError> {
-    let np = reader.read_bits(1).ok_or(AacParseError::UnexpectedEof)? as usize + 1;
+    let np = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as usize + 1;
     let start_sfb = reader.read_bits(6).ok_or(AacParseError::UnexpectedEof)? as u8;
     let mut offsets = Vec::with_capacity(np);
     let mut amps = Vec::with_capacity(np);
@@ -38,7 +41,12 @@ pub fn parse_pulse(reader: &mut BitReader) -> Result<PulseData, AacParseError> {
 
 /// Apply pulse data to the dequantized spectrum in place.
 pub fn apply_pulse(pulse: &PulseData, swb: &[u16], coeffs: &mut [f32; 1024]) {
-    let mut offset = swb[pulse.start_sfb as usize] as usize;
+    // `start_sfb` is untrusted (from the bitstream); a hostile or desynced
+    // stream can name a band past the scalefactor-band table.
+    let Some(&start) = swb.get(pulse.start_sfb as usize) else {
+        return;
+    };
+    let mut offset = start as usize;
     for i in 0..pulse.offsets.len() {
         offset += pulse.offsets[i] as usize;
         if offset < 1024 {
@@ -76,10 +84,10 @@ mod tests {
 
     #[test]
     fn parse_pulse_hand_computed() {
-        // number_pulse = 1 (1 bit → np = 1); start_sfb = 0 (6 bits);
+        // number_pulse = 0 (2 bits → np = 1); start_sfb = 0 (6 bits);
         // one pulse: offset = 0 (5 bits), amp = 3 (4 bits → stored = 4).
         let bits: Vec<u8> = vec![
-            0, // number_pulse = 0 → np = 1
+            0, 0, // number_pulse = 0 → np = 1
             0, 0, 0, 0, 0, 0, // start_sfb = 0
             0, 0, 0, 0, 0, // offset[0] = 0
             0, 0, 1, 1, // amp[0] = 3 → 3 + 1 = 4

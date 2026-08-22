@@ -268,6 +268,14 @@ impl AacDecoder {
         // TODO: Implement full CCE coupling logic.
 
         // --- Pass 3: Apply stereo (M/S, intensity) for CPEs ---
+        if std::env::var("AAC_DBG_MS").is_ok() {
+            for cpe in &decoded_cpes {
+                eprintln!(
+                    "DBG ms_mask_present={} ms_mask={:?}",
+                    cpe.ms_mask_present, cpe.ms_mask
+                );
+            }
+        }
         for cpe in &decoded_cpes {
             // Find the indices in decoded_channels (they're consecutive).
             // The cpe_pair field points to them.
@@ -340,7 +348,17 @@ impl AacDecoder {
             let mut buf = [0.0f32; 2048];
             let mut out_buf = [0.0f32; 1024];
             if ch.ics.window_sequence.is_eight_short() {
-                self.imdct_short.transform(&ch.coeffs, &mut buf);
+                // `ch.coeffs` holds 8 concatenated 128-line short-window spectra
+                // (de-interleaved, per `decode_spectral_data`'s `gbase + w_idx*128`
+                // layout); `short_synthesis` expects `buf` as 8 concatenated
+                // 256-sample IMDCT outputs, so each 128-line window is
+                // transformed separately, not the whole 1024-line buffer at once.
+                for w in 0..8 {
+                    self.imdct_short.transform(
+                        &ch.coeffs[w * 128..(w + 1) * 128],
+                        &mut buf[w * 256..(w + 1) * 256],
+                    );
+                }
                 short_synthesis(
                     &buf,
                     &mut self.channels[ch_idx],
@@ -358,6 +376,14 @@ impl AacDecoder {
                     &self.windows,
                     &mut out_buf,
                 );
+            }
+            // ISO 14496-3 §4.5.2.3.6 ("Output word length"): the decoder's
+            // native IMDCT/synthesis output is scaled so its integer part is
+            // directly usable as 16-bit PCM, i.e. it is *not* normalized to
+            // [-1, 1]. `AudioFrame`'s `SampleFormat::F32` is normalized float
+            // PCM (matching e.g. ffmpeg's `fltp`), so divide by 2^15 here.
+            for s in &mut out_buf {
+                *s /= 32768.0;
             }
             pcm_planes.push(out_buf.to_vec());
         }

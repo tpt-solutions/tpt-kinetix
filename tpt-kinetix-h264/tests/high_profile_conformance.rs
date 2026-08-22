@@ -162,11 +162,12 @@ fn high_profile_8x8_cavlc_iframe_no_deblock_is_bitexact() {
         "H.264 High-profile CAVLC 8x8 (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8x8 CAVLC (no deblock) NOT bit-exact: max_diff={max_diff}");
-    }
+    // Phase F.4 closed (2026-08-23): High-profile 8x8-transform CAVLC intra
+    // decode is bit-exact vs ffmpeg, both luma and chroma, no-deblock variant.
+    assert_eq!(
+        max_diff, 0,
+        "High-profile 8x8 CAVLC (no deblock) not bit-exact: max_diff={max_diff}, {num_diff}/{total} differ"
+    );
 }
 
 #[test]
@@ -210,11 +211,10 @@ fn high_profile_8x8_cavlc_iframe_with_deblock_is_bitexact() {
         "H.264 High-profile CAVLC 8x8 (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!(
-            "  [GAP] High-profile 8x8 CAVLC (with deblock) NOT bit-exact: max_diff={max_diff}"
-        );
-    }
+    // Phase F.4 closed (2026-08-23): High-profile 8x8-transform CAVLC intra
+    // decode is bit-exact vs ffmpeg, both luma and chroma, with-deblock too.
+    assert_eq!(
+        max_diff, 0,
+        "High-profile 8x8 CAVLC (with deblock) not bit-exact: max_diff={max_diff}, {num_diff}/{total} differ"
+    );
 }

@@ -446,8 +446,20 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
                 ..Default::default()
             };
             macroblocks.push(mb);
-            // Skip MBs have no end_of_slice_flag (it lives inside macroblock_layer() which
-            // is not called for skip MBs per spec §7.3.4).
+            // §7.3.4 slice_data(): end_of_slice_flag is decoded after EVERY
+            // non-I_PCM macroblock — including skipped ones (it sits outside
+            // macroblock_layer() in the slice_data() do/while loop, gated only
+            // on `mb_type != I_PCM`). Skipping it here desyncs the arithmetic
+            // engine by one terminate bin per skip MB.
+            let end_of_slice = dec.decode_terminate() == 1;
+            let is_last = mb_idx + 1 == total;
+            // See the note in cabac_p.rs: the final MB's terminate bin may be
+            // absent (x264 omits it); only a mid-slice end_of_slice is an error.
+            if !is_last && end_of_slice {
+                return Err(SliceDataError::Unsupported(
+                    "end_of_slice_flag mismatch (B-CABAC, skip MB)",
+                ));
+            }
             continue;
         }
 
@@ -480,7 +492,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
 
         let end_of_slice = dec.decode_terminate() == 1;
         let is_last = mb_idx + 1 == total;
-        if end_of_slice != is_last {
+        if !is_last && end_of_slice {
             return Err(SliceDataError::Unsupported(
                 "end_of_slice_flag mismatch (B-CABAC)",
             ));
@@ -1508,8 +1520,17 @@ fn decode_inter_residual_cabac(
     if cbp_c != 0 {
         for comp in 0..2 {
             let bit = 0x40u16 << comp;
-            let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, bit);
-            let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, bit);
+            // §9.3.3.1.1.9 / FFmpeg fill_decode_caches: for INTER macroblocks
+            // an off-picture neighbour's cbp sentinel is 0x00F, whose chroma-DC
+            // bits are clear — i.e. "not coded" (intra MBs use 0x7CF → coded).
+            let left_coded = match left_idx {
+                None => false,
+                Some(i) => cabac_ctx_grid[i].cbp_word & bit != 0,
+            };
+            let top_coded = match top_idx {
+                None => false,
+                Some(i) => cabac_ctx_grid[i].cbp_word & bit != 0,
+            };
             if ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded) {
                 let (coeffs, _) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];

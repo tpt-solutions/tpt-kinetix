@@ -324,7 +324,6 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut inter_ctx: Vec<MbInterCabacCtx> = vec![MbInterCabacCtx::default(); total];
     let mut qp = slice_qp;
     let mut prev_dqp_nonzero = false;
-    let mut prev_was_skip = false;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
@@ -365,12 +364,24 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 ..Default::default()
             };
             macroblocks.push(mb);
-            prev_was_skip = true;
-            // Skip MBs have no end_of_slice_flag (it lives inside macroblock_layer() which
-            // is not called for skip MBs per spec §7.3.4).
+            // §7.3.4 slice_data(): end_of_slice_flag is decoded after EVERY
+            // non-I_PCM macroblock — including skipped ones (it sits outside
+            // macroblock_layer() in the slice_data() do/while loop, gated only
+            // on `mb_type != I_PCM`). Skipping it here desyncs the arithmetic
+            // engine by one terminate bin per skip MB.
+            let end_of_slice = dec.decode_terminate() == 1;
+            let is_last = mb_idx + 1 == total;
+            // The final MB's terminate bin may be absent (x264 writes exactly
+            // total-1 terminate bins — one before each MB except the first —
+            // and no bin after the last MB; ffmpeg tolerates both). Only an
+            // early end_of_slice mid-slice indicates a desync.
+            if !is_last && end_of_slice {
+                return Err(SliceDataError::Unsupported(
+                    "end_of_slice_flag mismatch (P-CABAC, skip MB)",
+                ));
+            }
             continue;
         }
-        prev_was_skip = false;
         eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
 
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
@@ -405,13 +416,12 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         let is_last = mb_idx + 1 == total;
         eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED cbp={cbp:#04x} qp={qp} eos={end_of_slice} is_last={is_last}  terminate: {r_pre:#06x}/{o_pre:#010x} -> {r_post:#06x}/{o_post:#010x}",
             cbp = macroblocks.last().map(|m| m.cbp).unwrap_or(0));
-        if end_of_slice != is_last {
+        if !is_last && end_of_slice {
             return Err(SliceDataError::Unsupported(
                 "end_of_slice_flag mismatch (P-CABAC)",
             ));
         }
     }
-    let _ = prev_was_skip;
 
     let mut mv_store = MvStore::new(total);
     crate::mv::predict_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;

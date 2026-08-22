@@ -985,29 +985,93 @@
         bits 1/3 of left, and the 0x7CF-vs-0x00F unavailable sentinels being
         equivalent under those masks) verified against ffmpeg source fetched to
         repo-root scratch (`h264_cabac.c`, `h264_mvpred.h` — delete when done).
-      - **Leading anomaly (open)**: on the static clip the aligned payload
-        `FE D6 A9 0E` decodes as garbage from the spec position, while starting
-        the engine a few bits EARLIER (24..31, i.e. treating part of the
-        alignment region as codeword prefix) yields twelve clean skip=1 bins +
-        terminate=1. A brute force over all 128 (pStateIdx,valMps) init pairs
-        shows NO pair makes the aligned start decode as twelve ones, yet
-        ffmpeg splices of our own mini-encoder's all-skip payloads (any state)
-        decode fine — so ffmpeg accepts many encodings and the discriminating
-        factor is still open. Follow-up sweeps the same session: negative
-        start shifts (-12..-3) on the full testsrc clip do NOT parse either,
-        which eliminates "our header parser over-reads N bits" as a complete
-        explanation — for complex content no start position works, so there is
-        ALSO a genuine mid-slice context/derivation desync in the inter path
-        beyond any start-offset question. Next steps queued: (1) dump ffmpeg's
-        actual per-bin CABAC trace by building a self-authored C harness
-        against ffmpeg's `get_cabac_inline` (the method that already found
-        TRANS_IDX_LPS[28]); (2) on the static repro, diff our per-bin decision
-        sequence against that oracle to find the first diverging bin; (3) only
-        then extend the fix to the P_8x8/B paths.
+      - **2026-08-23 session #2 — DECISIVE BISECTION: the failure flips
+        exactly at the CABAC context-init `preCtxState` 63/64 boundary.**
+        Forced-QP static clips through the live decoder
+        (`dbg_cabac_p_matrix.rs`, cases qp18/qp21/qp22/qp25/qp30):
+        qp22, qp25, qp30 decode **bit-exact** (max_abs_diff=0); qp21, qp18,
+        qp2 hit the end-of-slice mismatch. For mb_skip_flag-P ctxIdx11
+        (m,n)=(23,33): raw=((23·qp)>>4)+33 = 64 at qp22 (>63 branch) vs 63 at
+        qp21 (≤63 branch). Every other syntax element is identical between
+        those clips (all-skip content ⇒ only mb_skip_flag bins + terminate),
+        so the misbehaving component is the context-init `preCtxState ≤ 63`
+        branch (our `CabacContext::init`: idx=63−raw, mps=0) — or something
+        tightly coupled to it.
+      - Equivalences PROVEN this session (do not re-audit): (a) engine
+        head-to-head — our `CabacDecoder::decode_decision` and a faithful
+        ffmpeg packed-engine transcription produce IDENTICAL bin sequences and
+        identical range/offset trajectories on the same payload+init;
+        (b) ffmpeg's `ff_h264_cabac_tables` mlps_state section unpacks to
+        exactly our TL/TM incl. the pStateIdx==0 mps-flip rule (MPS:
+        sec[128+s]=s+2; LPS: sec[127−s]; reached via the negative-index trick
+        `s ^= lps_mask` with `ff_h264_mlps_state = tables+1024`);
+        (c) init formula: ffmpeg's `pre = 2*(((m*qp)>>4)+n)-127;
+        pre ^= pre>>31` is **bitwise-NOT for negatives** (= −pre−1, NOT abs!),
+        giving packed = 126−2raw = 2(63−raw) for raw≤63 → unpacks to
+        (63−raw, mps=0) — textually identical to ours; (d) slice-header parse
+        verified field-by-field against an independent bit-reader replication
+        (ends at bit 19/29 resp.; alignment/payload start correct — an earlier
+        "payload might start earlier" hypothesis is DEAD: no start position
+        makes complex-content clips parse).
+      - Remaining paradox (precisely stated): with engines, tables, init,
+        bytes, and positions all provably identical, ffmpeg nonetheless
+        decodes the qp≤21 streams error-free while our parser desyncs. One
+        concrete unexplored lead: `ff_init_cabac_decoder` (cabac.c:162) is
+        **buffer-alignment dependent** — when `(uintptr_t)(buf+2)` is even it
+        adds a constant `1<<9` WITHOUT consuming byte 3, else it adds
+        `(byte3<<2)+2` and consumes it. Whether (and how) that changes
+        decisions near the tolerance boundary of a mostly-LPS run is the next
+        thing to model exactly (the probe transcription used the unconditional
+        three-byte form). Also queued: build a self-authored C harness
+        against `get_cabac_inline` for a per-bin oracle (no C toolchain on the
+        Windows dev box — needs CI/Linux or an installed gcc).
       - New reusable harnesses left in-tree:
         `examples/dbg_cabac_p_matrix.rs` (matrix-cell repro + controlled
         clip variants), `examples/dbg_cabac_skip_probe.rs` (header field /
         bit-position dump, mb_skip_flag-only probe, start-shift sweep,
         splice-into-stream differential test vs ffmpeg, mini spec-exact CABAC
         encoder oracle — round-trip validated).
+      - **2026-08-23 session #3 — RESOLVED for cabac_p (bit-exact); cabac_b
+        now parses cleanly, residual gap is B-direct/bi-pred semantics.**
+        Two real bugs fixed in the slice-data drivers (engine/tables/init were
+        never the problem — the "63/64 bisection" was a red herring: at
+        qp>=22 the desynced skip-flag reads still all returned 1, so all-skip
+        *output* was coincidentally correct):
+        1. **`end_of_slice_flag` was not decoded after skipped macroblocks**
+           (`cabac_p.rs`/`cabac_b.rs`). Per §7.3.4 `slice_data()` it sits
+           OUTSIDE `macroblock_layer()`, gated only on `mb_type != I_PCM` —
+           x264 writes exactly `total-1` terminate bins (one before each MB
+           except the first, none after the last MB; verified in
+           x264 `encoder/encoder.c`), and ffmpeg reads one after every MB but
+           exits on `eos || mb_y >= mb_height` (`h264_slice.c:2644-2678`).
+           Fix: decode terminate after skip MBs too, and accept either value
+           on the LAST MB (applied to cabac_i as well, whose final-MB check
+           was silently relying on flush-bit luck).
+        2. **Chroma-DC `coded_block_flag` context for an off-picture neighbour
+           used the intra sentinel** (`dc_cbf_neighbor` → `None => true`).
+           For INTER macroblocks FFmpeg fills unavailable-neighbour cbp with
+           **0x00F** (`fill_decode_caches`: `CABAC && !IS_INTRA(mb_type) ?
+           0 : 0x40404040`, top/left_cbp = `IS_INTRA ? 0x7CF : 0x00F`), i.e.
+           chroma DC counts as NOT coded. The wrong ctx flipped the first
+           coded inter MB's chroma-DC decision, which skipped 4 coefficient
+           reads → bin-count desync for the rest of the slice (MB9+ garbage,
+           MB8 off-by-small). Fixed in `decode_inter_residual_cabac`
+           (intra paths keep the 0x7CF/"coded" convention).
+        Also verified-identical to FFmpeg source this session (do not
+        re-audit): full 1024-entry `CABAC_CTX_INIT_PB0` table (regex diff vs
+        `cabac_context_init_PB[0]`: 0 mismatches), P mb_type bins (14..17),
+        sub_mb_type (21..23), CBP luma/chroma ctx sequences (73..76/77..84
+        incl. same-MB bit feedback), mb_qp_delta (60..63 + map), MVD prefix/
+        suffix contexts and sign polarity (`get_cabac_bypass_sign`:
+        bin 1 = NEGATIVE), amvd_sum neighbour selection.
+        New synthetic repro clips added to `dbg_cabac_p_matrix.rs`
+        (boxmove/colorswap/colorswap-with-partitions, forced-QP twins): all
+        16 variants now decode `max_abs_diff=0`. Matrix state: cabac_p both
+        deblock variants PASS bit-exact; **cabac_b still FAILs**
+        (max_abs_diff=104, ~21% samples) — parse completes cleanly; remaining
+        divergence is in B-slice bi-predicted/direct MB semantics
+        (`MbType::BSkip`/direct use a simplified (0,0)-both-lists MV fill;
+        see `mv.rs::predict_inter_b_macroblock` Phase E.5 note) and/or B
+        mb_type index mapping for types >= 3 — next step is the same twin/oracle
+        method against `tests/dbg_cabac_twin.rs`.
 

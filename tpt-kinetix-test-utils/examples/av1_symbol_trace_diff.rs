@@ -70,6 +70,7 @@ use std::collections::HashMap;
 
 use tpt_kinetix_av1::entropy::{
     enable_symbol_trace, symbol_trace_enabled, take_block_markers, take_symbol_trace,
+    BlockMarker, SymbolTraceEntry,
 };
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
@@ -211,84 +212,95 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     );
 
     // Bracket: does the divergence survive with post-filters disabled?
+    // Always capture the symbol trace on this pass so we can show block
+    // context for whichever pixel diverges pre-filter.
+    enable_symbol_trace();
     match decode_kinetix(obu, true) {
         Ok(nofilter) => {
+            let nofilter_trace = take_symbol_trace();
+            let nofilter_markers = take_block_markers();
             if let Some((p2, x2, y2, g2, w2)) = first_divergence(&nofilter, ref_data, w, h, 3) {
                 if (p2, x2, y2) == (plane, x, y) {
                     println!(
                         "  With KINETIX_AV1_NOFILTER=1: same first-divergence pixel ({p2},{x2},{y2}) kinetix={g2} dav1d={w2} -> deblock/CDEF is NOT the cause; look in reconstruct/ (prediction/transform/coeffs)."
                     );
+                    print_trace_context(plane, x, y, &trace, &markers);
                 } else {
                     println!(
-                        "  With KINETIX_AV1_NOFILTER=1: first divergence MOVED to plane {p2} px=({x2},{y2}) -> filters contribute to (or hide) the {plane}/({x},{y}) divergence; investigate loop_filter.rs/CDEF too."
+                        "  With KINETIX_AV1_NOFILTER=1: first divergence MOVED to plane {p2} px=({x2},{y2}) kinetix={g2} dav1d={w2} -> filters propagate a pre-filter bug from here to {plane}/({x},{y})."
                     );
+                    println!("  Block context for NOFILTER-diverging pixel (pre-filter reconstruction bug):");
+                    print_trace_context(p2, x2, y2, &nofilter_trace, &nofilter_markers);
+                    println!("  Block context for original filtered divergence {plane}/({x},{y}):");
+                    print_trace_context(plane, x, y, &trace, &markers);
                 }
             } else {
                 println!("  With KINETIX_AV1_NOFILTER=1: no divergence found within threshold -> the post-filter chain is implicated in the original divergence.");
             }
         }
-        Err(e) => println!("  KINETIX_AV1_NOFILTER decode failed: {e}"),
+        Err(e) => {
+            let _ = take_symbol_trace();
+            let _ = take_block_markers();
+            println!("  KINETIX_AV1_NOFILTER decode failed: {e}");
+        }
     }
     std::env::remove_var("KINETIX_AV1_NOFILTER");
+}
 
-    // Map the divergence to the nearest preceding block marker whose plane
-    // matches the diverging plane. Plain proximity ("nearest preceding
-    // marker by trace_seq") is not enough: `coeffs` markers are emitted
-    // per-transform-block in whatever plane order decode visits (commonly
-    // Y, then U, then V for the same mi block), so a chroma marker with a
-    // small px=(x,y) can sit *later* in trace order than the actual luma
-    // block that covers the divergent pixel while still satisfying a naive
-    // "px <= target" test. Filter to the target plane (falling back to
-    // `mode_info` markers, which have no plane tag and cover all planes of
-    // their mi block) and additionally require containment within the
-    // marker's own tx-block extent when a tx size is present, so the
-    // reported marker is the block that actually produced the pixel, not
-    // just some earlier block with numerically smaller coordinates.
-    {
-        let want_plane: Option<u32> = match plane {
-            "Y" => Some(0),
-            "U" => Some(1),
-            "V" => Some(2),
-            _ => None,
+/// Print the nearest preceding block marker and surrounding symbol trace entries
+/// for a diverging pixel at `(x, y)` in `plane`.
+fn print_trace_context(
+    plane: &str,
+    x: usize,
+    y: usize,
+    trace: &[SymbolTraceEntry],
+    markers: &[BlockMarker],
+) {
+    let want_plane: Option<u32> = match plane {
+        "Y" => Some(0),
+        "U" => Some(1),
+        "V" => Some(2),
+        _ => None,
+    };
+    let mut best: Option<&BlockMarker> = None;
+    for m in markers {
+        let Some(px) = parse_px(&m.label) else {
+            continue;
         };
-        let mut best: Option<&tpt_kinetix_av1::entropy::BlockMarker> = None;
-        for m in &markers {
-            let Some(px) = parse_px(&m.label) else {
+        let marker_plane = parse_plane(&m.label);
+        if let (Some(wp), Some(mp)) = (want_plane, marker_plane) {
+            if wp != mp {
                 continue;
-            };
-            let marker_plane = parse_plane(&m.label);
-            if let (Some(wp), Some(mp)) = (want_plane, marker_plane) {
-                if wp != mp {
-                    continue;
-                }
-            }
-            let (tw, th) = parse_tx_size(&m.label).unwrap_or((usize::MAX, usize::MAX));
-            let in_range = if tw != usize::MAX {
-                px.0 <= x && x < px.0 + tw && px.1 <= y && y < px.1 + th
-            } else {
-                px.0 <= x && px.1 <= y
-            };
-            if in_range {
-                best = Some(m);
             }
         }
-        if let Some(m) = best {
-            println!(
-                "  Nearest preceding block marker: [{}] \"{}\"",
-                m.trace_seq, m.label
-            );
-            let ctx_start = m.trace_seq.saturating_sub(2);
-            let ctx_end = (m.trace_seq + 24).min(trace.len());
-            println!("  Symbol trace around that marker (seq {ctx_start}..{ctx_end}):");
-            for e in &trace[ctx_start..ctx_end] {
-                println!(
-                    "    #{:>4} n_symbols={:<3} value={:<6} bits=[{},{}) at {}",
-                    e.seq, e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, e.location
-                );
-            }
+        let (tw, th) = parse_tx_size(&m.label).unwrap_or((usize::MAX, usize::MAX));
+        let in_range = if tw != usize::MAX {
+            px.0 <= x && x < px.0 + tw && px.1 <= y && y < px.1 + th
         } else {
-            println!("  No block marker found before the divergence point (unexpected — check marker wiring).");
+            px.0 <= x && px.1 <= y
+        };
+        if in_range {
+            best = Some(m);
         }
+    }
+    if let Some(m) = best {
+        println!(
+            "  Nearest preceding block marker: [{}] \"{}\"",
+            m.trace_seq, m.label
+        );
+        let ctx_start = m.trace_seq.saturating_sub(2);
+        let ctx_end = (m.trace_seq + 50).min(trace.len());
+        println!("  Symbol trace around that marker (seq {ctx_start}..{ctx_end}):");
+        for e in &trace[ctx_start..ctx_end] {
+            println!(
+                "    #{:>4} n_symbols={:<3} value={:<6} bits=[{},{}) at {}",
+                e.seq, e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, e.location
+            );
+        }
+    } else {
+        println!(
+            "  No block marker found before the divergence point (unexpected — check marker wiring)."
+        );
     }
 }
 

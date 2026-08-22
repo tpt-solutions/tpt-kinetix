@@ -89,7 +89,7 @@ pub struct IcsInfo {
     pub scale_factor_grouping: u8,
     /// `predictor_data_present` (1 bit, long windows only).
     pub predictor_data_present: bool,
-    /// `predictor_reset_mode` (2 bits) when `predictor_data_present`.
+    /// `predictor_reset` flag (1 bit) when `predictor_data_present`.
     pub predictor_reset_mode: Option<u8>,
 }
 
@@ -145,6 +145,9 @@ impl IcsInfo {
 
     /// Parse `ics_info()` from `reader`.
     pub fn parse(reader: &mut BitReader) -> Result<Self, AacParseError> {
+        // `ics_reserved_bit` (ISO 14496-3 Table 4.6): always present, always 0.
+        let _ics_reserved_bit = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+
         let window_sequence =
             WindowSequence::from_u8(reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as u8)
                 .ok_or(AacParseError::BadWindowSequence)?;
@@ -160,22 +163,23 @@ impl IcsInfo {
                 let predictor_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
                 (max_sfb, 0, predictor_present)
             };
-        eprintln!(
-            "DBG ics: ws={:?} shape={} max_sfb={} pred={} pos={}",
-            window_sequence,
-            window_shape,
-            max_sfb,
-            predictor_present,
-            reader.bit_position()
-        );
 
+        // `predictor_data_present` (AAC Main-profile prediction; never set by an
+        // AAC-LC encoder, but must still be parsed correctly for spec/hostile-input
+        // correctness): `predictor_reset` (1 bit), then `predictor_reset_group_number`
+        // (5 bits) if set, then one `prediction_used[sfb]` bit per band up to
+        // `min(max_sfb, PRED_SFB_MAX=40)`.
         let (predictor_data_present, predictor_reset_mode) = if predictor_present {
-            let mode = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as u8;
-            if mode != 0 {
-                // predictor_reset_group_number (5 bits).
-                let _grp = reader.read_bits(5).ok_or(AacParseError::UnexpectedEof)?;
+            let predictor_reset = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+            if predictor_reset {
+                let _reset_group_number =
+                    reader.read_bits(5).ok_or(AacParseError::UnexpectedEof)?;
             }
-            (true, Some(mode))
+            let pred_sfb_max = (max_sfb as usize).min(40);
+            for _ in 0..pred_sfb_max {
+                let _prediction_used = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+            }
+            (true, Some(predictor_reset as u8))
         } else {
             (false, None)
         };
@@ -211,70 +215,36 @@ pub struct SectionData {
     pub groups: Vec<Vec<Section>>,
 }
 
-/// Decode a `sect_cb` codebook index via its prefix code (all-ones-then-zero).
-///
-/// The codeword for symbol `k` is `k` ones followed by a `0`; symbols 0..=11 map
-/// to `sect_cb` 0..=11, symbol 12 maps to intensity book 13, symbol 13 to
-/// intensity book 14.
+/// Decode a `sect_cb` codebook index: a plain fixed-width 4-bit field (ISO
+/// 14496-3 §4.4.3.1's `section_data()` pseudocode reads `sect_cb; 4`, not a
+/// prefix code). Values 0..=11 are the ZERO_HCB / spectral Huffman codebooks,
+/// 12 is reserved, 13/14 are the intensity-stereo codebooks, and 15 is
+/// NOISE_HCB (perceptual noise substitution).
 fn decode_section_cb(reader: &mut BitReader) -> Result<u8, AacParseError> {
-    let mut ones = 0u32;
-    loop {
-        let bit = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        if bit == 0 {
-            break;
-        }
-        ones += 1;
-        if ones > 13 {
-            return Err(AacParseError::BadSectionCodebook);
-        }
-    }
-    Ok(match ones {
-        0..=11 => ones as u8,
-        12 => 13,
-        13 => 14,
-        _ => unreachable!("guarded by the `ones > 13` check above"),
-    })
+    reader
+        .read_bits(4)
+        .map(|v| v as u8)
+        .ok_or(AacParseError::UnexpectedEof)
 }
 
 impl SectionData {
     /// Number of bits used to code each `sect_len` increment (ISO 14496-3
-    /// §4.4.3.1). The width grows when a single window can have more than a
-    /// 4-bit value's worth of scalefactor bands, so very wide long-block
-    /// streams (e.g. 44.1/48 kHz families) need 5 bits, while eight-short
-    /// windows — which never exceed ~15 bands — drop to 3 bits when `max_sfb`
-    /// is large.
+    /// §4.4.3.1). This is a fixed width keyed only on the window sequence —
+    /// 5 bits for long windows, 3 for eight-short — never on `max_sfb` (matching
+    /// e.g. ffmpeg's `decode_band_types`: `bits = num_windows == 8 ? 3 : 5`).
     fn section_len_bits(ics: &IcsInfo) -> u32 {
         if ics.window_sequence.is_eight_short() {
-            if ics.max_sfb > 8 {
-                3
-            } else {
-                4
-            }
-        } else if ics.max_sfb > 40 {
-            5
+            3
         } else {
-            4
+            5
         }
     }
 
     /// Parse `section_data()` for the given [`IcsInfo`].
     pub fn parse(reader: &mut BitReader, ics: &IcsInfo) -> Result<Self, AacParseError> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
-        let call = CALLS.fetch_add(1, Ordering::SeqCst);
-        let dbg = call < 4;
         let num_groups = ics.num_window_groups();
         let max_sfb = ics.max_sfb as usize;
         let sect_len_bits = Self::section_len_bits(ics);
-        if dbg {
-            eprintln!(
-                "DBG sec start: num_groups={} max_sfb={} sect_len_bits={} pos={}",
-                num_groups,
-                max_sfb,
-                sect_len_bits,
-                reader.bit_position()
-            );
-        }
         let mut groups = Vec::with_capacity(num_groups);
         for _g in 0..num_groups {
             let mut sections = Vec::new();
@@ -295,15 +265,6 @@ impl SectionData {
                 let sect_len = reader
                     .read_section_length(sect_len_bits)
                     .ok_or(AacParseError::UnexpectedEof)? as usize;
-                if dbg {
-                    eprintln!(
-                        "DBG sec: cb={} len={} covered={} pos={}",
-                        sect_cb,
-                        sect_len,
-                        covered,
-                        reader.bit_position()
-                    );
-                }
                 // A zero-length section is legal (the ffmpeg reference decoder
                 // accepts it); it covers no scalefactor bands. More generally a
                 // section may extend past `max_sfb` — the ffmpeg decoder reads the
@@ -318,9 +279,6 @@ impl SectionData {
                 covered += sect_len;
             }
             groups.push(sections);
-        }
-        if dbg {
-            eprintln!("DBG sec end: pos={}", reader.bit_position());
         }
         Ok(SectionData { groups })
     }
@@ -360,17 +318,6 @@ impl ChannelStream {
         sf_index: usize,
     ) -> Result<Self, AacParseError> {
         let global_gain = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as u8;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static CS: AtomicUsize = AtomicUsize::new(0);
-        let cs = CS.fetch_add(1, Ordering::SeqCst);
-        if cs == 0 {
-            eprintln!(
-                "DBG cs0: global_gain={} shared={} pos_after_gg_and_ics={}",
-                global_gain,
-                shared_ics.is_some(),
-                reader.bit_position()
-            );
-        }
         let ics = match shared_ics {
             Some(shared) => *shared,
             None => IcsInfo::parse(reader)?,
@@ -399,11 +346,17 @@ impl ChannelStream {
             None
         };
 
-        // NOTE: `gain_control_data_present` is part of `individual_channel_stream()`
-        // only for ER AAC profiles (AAC-LD/LTP, AOT 17/23/29). AAC-LC (AOT 2) has
-        // no gain-control syntax, so — matching the ffmpeg AAC-LC decoder — the
-        // channel stream ends after `tns_data` and `spectral_data` follows
-        // immediately.
+        // `gain_control_data_present` (ISO 14496-3 Table 4.50) is read
+        // unconditionally in `individual_channel_stream()` — it is not gated on
+        // profile/object type. It is only ever set by an SSR (Scalable Sample
+        // Rate) encoder; no AAC-LC encoder sets it, but the flag bit itself is
+        // always present and must be consumed to stay in sync.
+        let gain_control_data_present = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+        if gain_control_data_present {
+            // `gain_control_data()` (SSR-only) is not implemented; real AAC-LC
+            // streams never set this flag.
+            return Err(AacParseError::Unsupported("gain_control_data (SSR)"));
+        }
 
         let swb_long = SWB_OFFSET_1024[sf_index];
         let swb_short = SWB_OFFSET_128[sf_index];
@@ -629,24 +582,6 @@ impl RawDataBlock {
     /// id until `END` or the bitstream is exhausted. `sf_index` is the 4-bit
     /// sampling-frequency index (used to select scalefactor-band tables).
     pub fn parse(data: &[u8], sf_index: usize) -> Result<Self, AacParseError> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static FRAME: AtomicUsize = AtomicUsize::new(0);
-        let frame = FRAME.fetch_add(1, Ordering::SeqCst);
-        if frame == 0 {
-            let mut r = BitReader::new(data);
-            r.skip(125);
-            let mut s = String::new();
-            for i in 125..210 {
-                if i % 10 == 0 {
-                    s.push_str(&format!("\n[{:3}]", i));
-                }
-                s.push(if r.read_bit() == Some(1) { '1' } else { '0' });
-            }
-            let _ = std::fs::write(
-                "D:/Programming/1PRODUCTION/Open Source/tpt-kinetix/frame0_bits.txt",
-                &s,
-            );
-        }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
         let mut _element_count = 0;
@@ -861,9 +796,11 @@ mod tests {
 
     #[test]
     fn parse_ics_only_long_window() {
-        // window_sequence=OnlyLong(00), window_shape=1, max_sfb=10(001010),
-        // predictor_data_present=0.
-        let bits = b(&[ZERO, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE, ZERO, ZERO]);
+        // ics_reserved_bit=0, window_sequence=OnlyLong(00), window_shape=1,
+        // max_sfb=10(001010), predictor_data_present=0.
+        let bits = b(&[
+            ZERO, ZERO, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE, ZERO, ZERO,
+        ]);
         let bytes = bits_to_bytes(&bits);
         let mut r = BitReader::new(&bytes);
         let ics = IcsInfo::parse(&mut r).unwrap();
@@ -876,11 +813,13 @@ mod tests {
 
     #[test]
     fn parse_section_data_all_zero() {
-        // ics: OnlyLong, window_shape=1, max_sfb=10, pred=0.
-        // section (one group): sect_cb=0 ("0" bit), sect_len=10 ("1010").
-        let mut bits = b(&[ZERO, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE, ZERO, ZERO]);
-        bits.push(ZERO); // sect_cb codeword "0"
-        bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len = 10
+        // ics: reserved=0, OnlyLong, window_shape=1, max_sfb=10, pred=0.
+        // section (one group): sect_cb=0 (4 bits), sect_len=10 (5 bits: "01010").
+        let mut bits = b(&[
+            ZERO, ZERO, ZERO, ONE, ZERO, ZERO, ONE, ZERO, ONE, ZERO, ZERO,
+        ]);
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // sect_cb = 0 (4 bits)
+        bits.extend_from_slice(&[ZERO, ONE, ZERO, ONE, ZERO]); // sect_len = 10 (5 bits, long window)
         let bytes = bits_to_bytes(&bits);
         let mut r = BitReader::new(&bytes);
         let ics = IcsInfo::parse(&mut r).unwrap();
@@ -898,13 +837,14 @@ mod tests {
         bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // id_syn_ele = SCE (0)
         bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // instance_tag = 0
         bits.extend_from_slice(&[ZERO; 8]); // global_gain = 0
+        bits.push(ZERO); // ics_reserved_bit = 0
         bits.extend_from_slice(&[ZERO, ZERO]); // window_sequence = OnlyLong
         bits.push(ONE); // window_shape = 1
         bits.extend_from_slice(&[ZERO, ZERO, ONE, ZERO, ONE, ZERO]); // max_sfb = 10
         bits.push(ZERO); // predictor_data_present = 0
-        bits.push(ZERO); // sect_cb = 0
-        bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len = 10
-        bits.extend_from_slice(&[ZERO, ZERO]); // pulse/tns = 0 (AAC-LC: no gain_control flag)
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // sect_cb = 0 (4 bits)
+        bits.extend_from_slice(&[ZERO, ONE, ZERO, ONE, ZERO]); // sect_len = 10 (5 bits, long window)
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain_control_data_present = 0
         bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();
@@ -928,21 +868,22 @@ mod tests {
         bits.extend_from_slice(&[ZERO, ZERO, ONE]); // id_syn_ele = CPE (1)
         bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // instance_tag = 0
         bits.push(ONE); // common_window = 1
+        bits.push(ZERO); // ics_reserved_bit = 0
         bits.extend_from_slice(&[ZERO, ZERO]); // shared window_sequence = OnlyLong
         bits.push(ONE); // shared window_shape = 1
         bits.extend_from_slice(&[ZERO, ZERO, ONE, ZERO, ZERO, ZERO]); // shared max_sfb = 8
         bits.push(ZERO); // shared predictor_data_present = 0
         bits.extend_from_slice(&[ZERO, ZERO]); // ms_mask_present = 0
-                                               // left channel: global_gain=0 (8 bits), sect_cb=0, sect_len=8 ("1000"), flags=000
+                                               // left channel: global_gain=0 (8 bits), sect_cb=0 (4 bits), sect_len=8 (5 bits: "01000"), flags=000
         bits.extend_from_slice(&[ZERO; 8]);
-        bits.push(ZERO);
-        bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
-        bits.extend_from_slice(&[ZERO, ZERO]); // left pulse/tns = 0 (AAC-LC: no gain_control flag)
-                                               // right channel: global_gain=0xff (8 bits), sect_cb=0, sect_len=8, flags=00
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]);
+        bits.extend_from_slice(&[ZERO, ONE, ZERO, ZERO, ZERO]);
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // left pulse/tns/gain_control_data_present = 0
+                                                     // right channel: global_gain=0xff (8 bits), sect_cb=0 (4 bits), sect_len=8, flags=00
         bits.extend_from_slice(&[ONE; 8]);
-        bits.push(ZERO);
-        bits.extend_from_slice(&[ONE, ZERO, ZERO, ZERO]);
-        bits.extend_from_slice(&[ZERO, ZERO]); // right pulse/tns = 0 (AAC-LC: no gain_control flag)
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]);
+        bits.extend_from_slice(&[ZERO, ONE, ZERO, ZERO, ZERO]);
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // right pulse/tns/gain_control_data_present = 0
         bits.extend_from_slice(&[ONE, ONE, ONE]); // END
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();
@@ -980,21 +921,21 @@ mod tests {
 
     #[test]
     fn nonzero_section_now_decodes_after_scalefactors() {
-        // SCE whose only section uses sect_cb=1 (codeword "10"). The structural
+        // SCE whose only section uses sect_cb=1 (4-bit field). The structural
         // parser now proceeds past sections; with no spectral data present it
         // errors out (truncated), which is the honest non-panic behaviour.
         let mut bits: Vec<u8> = Vec::new();
         bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // SCE
         bits.extend_from_slice(&[ZERO, ZERO, ZERO, ZERO]); // instance_tag
         bits.extend_from_slice(&[ZERO; 8]); // global_gain = 0
+        bits.push(ZERO); // ics_reserved_bit = 0
         bits.extend_from_slice(&[ZERO, ZERO]); // OnlyLong
         bits.push(ONE); // window_shape
         bits.extend_from_slice(&[ZERO, ZERO, ONE, ZERO, ONE, ZERO]); // max_sfb=10
         bits.push(ZERO); // pred=0
-        bits.push(ONE); // sect_cb codeword "10" -> cb 1
-        bits.push(ZERO);
-        bits.extend_from_slice(&[ONE, ZERO, ONE, ZERO]); // sect_len=10
-        bits.extend_from_slice(&[ZERO, ZERO]); // pulse/tns = 0 (AAC-LC: no gain_control flag)
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO, ONE]); // sect_cb = 1 (4 bits)
+        bits.extend_from_slice(&[ZERO, ONE, ZERO, ONE, ZERO]); // sect_len=10 (5 bits, long window)
+        bits.extend_from_slice(&[ZERO, ZERO, ZERO]); // pulse/tns/gain_control_data_present = 0
         let bytes = bits_to_bytes(&bits);
         // No spectral data present -> an error (EOF), not a panic.
         assert!(RawDataBlock::parse(&bytes, 4).is_err());

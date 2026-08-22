@@ -117,18 +117,21 @@ pub fn decode_spectral_data(
         for sec in &sections.groups[gi] {
             let sect_cb = sec.sect_cb;
             for _ in 0..sec.sect_len as usize {
+                // A section's declared length pushed it past `max_sfb`: per ISO
+                // 14496-3 §4.4.3.1's `section_data()` pseudocode (bounded by
+                // `while (i < max_sfb)`) there is no spectral data in the
+                // bitstream past this point, so no bits are consumed.
+                if sfb >= max_sfb {
+                    sfb += 1;
+                    continue;
+                }
                 // Stop at the end of the scalefactor-band table (hostile-input
                 // safety); the reference decoder ignores any remaining bands.
                 if sfb + 1 >= swb.len() {
                     break;
                 }
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
-                let active = sfb < max_sfb;
-                let scale_val = if active {
-                    scale[gi * max_sfb + sfb]
-                } else {
-                    0.0
-                };
+                let scale_val = scale[gi * max_sfb + sfb];
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     let mut bin = 0usize;
@@ -140,21 +143,17 @@ pub fn decode_spectral_data(
                         } else if (1..=4).contains(&sect_cb) {
                             let q = decode_spectral_quad(reader, sect_cb)
                                 .ok_or(AacParseError::UnexpectedEof)?;
-                            if active {
-                                for b in 0..4 {
-                                    coeffs[base + bin + b] = dequant_coeff(q[b], scale_val);
-                                }
+                            for b in 0..4 {
+                                coeffs[base + bin + b] = dequant_coeff(q[b], scale_val);
                             }
                         } else if (5..=11).contains(&sect_cb) {
                             let q1 = decode_spectral_quad(reader, sect_cb)
                                 .ok_or(AacParseError::UnexpectedEof)?;
                             let q2 = decode_spectral_quad(reader, sect_cb)
                                 .ok_or(AacParseError::UnexpectedEof)?;
-                            if active {
-                                let vals = [q1[2], q1[3], q2[2], q2[3]];
-                                for b in 0..4 {
-                                    coeffs[base + bin + b] = dequant_coeff(vals[b], scale_val);
-                                }
+                            let vals = [q1[2], q1[3], q2[2], q2[3]];
+                            for b in 0..4 {
+                                coeffs[base + bin + b] = dequant_coeff(vals[b], scale_val);
                             }
                         } else {
                             return Err(AacParseError::BadSectionCodebook);

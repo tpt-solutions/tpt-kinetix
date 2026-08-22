@@ -507,10 +507,9 @@ fn dbg_hp352_localize() {
                             // filtered-sample DC average from the dumped raw
                             // neighbours and compare with our traced prediction.
                             if om == Some(2) && y0 > 0 && x0 > 0 {
-                                let x =
-                                    |f: &[u8], xx: isize, yy: isize| -> i32 {
-                                        f[yy as usize * w + xx as usize] as i32
-                                    };
+                                let x = |f: &[u8], xx: isize, yy: isize| -> i32 {
+                                    f[yy as usize * w + xx as usize] as i32
+                                };
                                 let tl_r = x(&refyuv, x0 as isize - 1, y0 as isize - 1);
                                 let tl_o = x(&ours, x0 as isize - 1, y0 as isize - 1);
                                 let tr = |f: &[u8]| -> [i32; 8] {
@@ -544,10 +543,8 @@ fn dbg_hp352_localize() {
                                 };
                                 let t_r = tr(&refyuv);
                                 let l_r = lr(&refyuv);
-                                let dc_r = (t_r.iter().sum::<i32>()
-                                    + l_r.iter().sum::<i32>()
-                                    + 8)
-                                    >> 4;
+                                let dc_r =
+                                    (t_r.iter().sum::<i32>() + l_r.iter().sum::<i32>() + 8) >> 4;
                                 eprintln!("  topleft: ours={tl_o} ref={tl_r}");
                                 eprintln!("  filtered top (ref): {t_r:?}");
                                 eprintln!("  filtered left (ref): {l_r:?}");
@@ -583,4 +580,3 @@ fn dbg_hp352_localize() {
         }
     }
 }
-

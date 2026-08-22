@@ -1469,7 +1469,19 @@ pub fn decode_codeword(reader: &mut BitReader, book: &[(u32, u8)]) -> Option<usi
 }
 
 /// Translate a codeword index into its (w, x, y, z) spectral n-tuple per the
-/// spec subclause 4.6.3.3 formula.
+/// spec subclause 4.6.3.3 formula:
+///
+/// ```text
+/// if (dim == 4) {
+///     w = INT(idx/mod^3) - off; idx -= (w+off)*mod^3;
+///     x = INT(idx/mod^2) - off; idx -= (x+off)*mod^2;
+///     y = INT(idx/mod)   - off; idx -= (y+off)*mod;
+///     z = idx - off;
+/// } else {
+///     y = INT(idx/mod) - off; idx -= (y+off)*mod;
+///     z = idx - off;
+/// }
+/// ```
 ///
 /// For signed codebooks ("unsigned == false") the returned values are already
 /// signed. For unsigned codebooks they are non-negative magnitudes and the
@@ -1489,11 +1501,13 @@ fn idx_to_values(idx: i64, dim: u32, lav: i32, unsigned: bool) -> [i32; 4] {
         let x = idx / m2 - off;
         let idx = idx - (x + off) * m2;
         let y = idx / modv - off;
-        let z = idx - (y + off) * modv;
+        let idx = idx - (y + off) * modv;
+        let z = idx - off;
         [w as i32, x as i32, y as i32, z as i32]
     } else {
         let y = idx / modv - off;
-        let z = idx - (y + off) * modv;
+        let idx = idx - (y + off) * modv;
+        let z = idx - off;
         [0, 0, y as i32, z as i32]
     }
 }
@@ -1507,28 +1521,16 @@ fn apply_sign(reader: &mut BitReader, mag: i32) -> Option<i32> {
     Some(if negative { -mag } else { mag })
 }
 
-/// Apply a sign bit followed by the ESC-book escape sequence (book 11 only).
-///
-/// "raw" is the unsigned magnitude decoded from the index (0..=16). A "raw" of
-/// 16 is the ESC_FLAG, signalling an escape_sequence: N "1" bits, a "0"
-/// separator, then an "N+4"-bit word giving 2^(N+4) + word. The sign bit is
-/// read before the escape sequence (spec subclause 4.6.3.3).
-fn apply_sign_esc(reader: &mut BitReader, raw: i32) -> Option<i32> {
-    if raw == 0 {
-        return Some(0);
+/// Read one ESC-book escape sequence (book 11 only), given the raw magnitude
+/// already known to be the ESC_FLAG (16): N "1" bits, a "0" separator, then an
+/// "N+4"-bit word giving 2^(N+4) + word (spec subclause 4.6.3.3).
+fn read_escape_word(reader: &mut BitReader) -> Option<u32> {
+    let mut n: u32 = 0;
+    while reader.read_bit()? == 1 {
+        n += 1;
     }
-    let negative = reader.read_bit()? == 1;
-    let mag: u32 = if raw == 16 {
-        let mut n: u32 = 0;
-        while reader.read_bit()? == 1 {
-            n += 1;
-        }
-        let word = reader.read_bits(n + 4)?;
-        (1u32 << (n + 4)) + word
-    } else {
-        raw as u32
-    };
-    Some(if negative { -(mag as i32) } else { mag as i32 })
+    let word = reader.read_bits(n + 4)?;
+    Some((1u32 << (n + 4)) + word)
 }
 
 /// Decode one spectral n-tuple for "sect_cb", returning [w, x, y, z].
@@ -1542,8 +1544,43 @@ pub fn decode_spectral_quad(reader: &mut BitReader, sect_cb: u8) -> Option<[i32;
     let base = idx_to_values(idx, dim, lav, unsigned);
     if unsigned {
         if sect_cb == 11 {
-            let y = apply_sign_esc(reader, base[2])?;
-            let z = apply_sign_esc(reader, base[3])?;
+            // Spec subclause 4.6.3.3: "the ordering of data elements is Huffman
+            // codeword followed by 0 to 2 sign bits followed by 0 to 2 escape
+            // sequences" — both sign bits come before either escape sequence,
+            // not interleaved per-value (an escape sequence's length is itself
+            // variable, so reading a sign bit in the middle of one desyncs it).
+            let raw_y = base[2];
+            let raw_z = base[3];
+            let sign_y = if raw_y != 0 {
+                reader.read_bit()? == 1
+            } else {
+                false
+            };
+            let sign_z = if raw_z != 0 {
+                reader.read_bit()? == 1
+            } else {
+                false
+            };
+            let mag_y = if raw_y == 16 {
+                read_escape_word(reader)?
+            } else {
+                raw_y as u32
+            };
+            let mag_z = if raw_z == 16 {
+                read_escape_word(reader)?
+            } else {
+                raw_z as u32
+            };
+            let y = if sign_y {
+                -(mag_y as i32)
+            } else {
+                mag_y as i32
+            };
+            let z = if sign_z {
+                -(mag_z as i32)
+            } else {
+                mag_z as i32
+            };
             Some([0, 0, y, z])
         } else {
             let w = apply_sign(reader, base[0])?;
@@ -1632,9 +1669,11 @@ mod tests {
         assert_eq!(idx_to_values(0, 2, 16, true), [0, 0, 0, 0]);
         assert_eq!(idx_to_values(16, 2, 16, true), [0, 0, 0, 16]);
         assert_eq!(idx_to_values(17, 2, 16, true), [0, 0, 1, 0]);
-        // Book 1 (dim4, lav1, signed): idx 0 -> (-1,-1,-1,0) per the spec formula.
-        assert_eq!(idx_to_values(0, 4, 1, false), [-1, -1, -1, 0]);
-        assert_eq!(idx_to_values(40, 4, 1, false), [0, 0, 0, 1]);
+        // Book 1 (dim4, lav1, signed): mod=3, off=1.
+        // idx 0 -> w=x=y=z=-1 (all four INT(0/mod^k)-off terms are -1).
+        assert_eq!(idx_to_values(0, 4, 1, false), [-1, -1, -1, -1]);
+        // idx 40 -> the "middle" index (mod^4/2 rounded down) -> all zero.
+        assert_eq!(idx_to_values(40, 4, 1, false), [0, 0, 0, 0]);
     }
 
     #[test]

@@ -88,14 +88,21 @@ pub fn parse_tns(
         };
         n_filt.push(nf);
 
-        let mut group_filters = Vec::with_capacity(nf as usize);
-        // running band offset within this group's filters
-        for _f in 0..nf {
-            let coef_res = if reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0 {
+        // `coef_res` (ISO 14496-3 §4.4.2.4's `tns_data()`) is read once per
+        // window group when it has any filters, not once per filter.
+        let coef_res = if nf > 0 {
+            if reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0 {
                 4u8
             } else {
                 3u8
-            };
+            }
+        } else {
+            0u8
+        };
+
+        let mut group_filters = Vec::with_capacity(nf as usize);
+        // running band offset within this group's filters
+        for _f in 0..nf {
             let length_bits = if short { 4 } else { 6 };
             let length = reader
                 .read_bits(length_bits)
