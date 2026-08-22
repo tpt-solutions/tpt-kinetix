@@ -635,22 +635,59 @@
       early-return gate in `decoder.rs::try_decode_real_slice` (keep the gate for
       inter 8×8 / non-intra until inter 8×8 is implemented) — done for both the
       CAVLC and CABAC entropy paths.
-- [ ] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
+- [~] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
       `ffmpeg` that actually exercises the 8×8 path (done — `mandelbrot=...`,
-      see note above) and get it to bit-exact decode — currently failing,
-      `max_abs_diff` ~160/161 on both CAVLC and CABAC variants; root cause
-      still open. **Ruled out one candidate:** `idct_8x8`'s second pass had a
-      genuine axis bug — it read each row's 8 values but wrote the 8 results
-      into a *column* instead of back into the row (`out[i + k*8]` instead of
-      `out[i*8 + k]`), silently transposing any non-DC, non-transpose-
-      symmetric residual block. Confirmed via an isolated single-AC-coefficient
-      test (a pure horizontal-frequency coefficient produced a result that
-      varied along Y instead of X) and fixed, with a regression test added
-      (`transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`).
-      This was a real, independent bug worth fixing, but it did **not** change
-      the `high_profile_8x8_*_conformance.rs` bit-exactness numbers at all
-      (still 160/161, same sample counts) — so it wasn't the (or wasn't the
-      only) cause of the remaining gap.
+      see note above) and get it to bit-exact decode — **major progress
+      (2026-08-22 session), not fully closed.** Current state:
+      - 64×48 `mandelbrot` clip: **bit-exact** without deblocking (asserted,
+        `max_abs_diff=0`) and ≤2 residual error with default deblocking
+        (pre-existing deblocking gap, not 8×8-specific).
+      - 352×288 `mandelbrot` clip: improved from `max_abs_diff=84`
+        (89137/152064 differing) to `max_abs_diff=79` (72373/152064).
+      - **Fixed this session — Intra_8×8 MPM derivation.** The old
+        `mpm_pred_mode_8x8` guessed cross-MB neighbour 8×8 blocks with the
+        wrong indices. Rewritten to FFmpeg's exact semantics:
+        `pred_intra_mode(h, sl, i)` (h264dec.h:696) reads
+        `cache[scan8[i]-1]` / `cache[scan8[i]-8]` over the *physical* scan8
+        layout (h264dec.h `scan8[]` — quadrant top-left blocks are idx
+        0,4,8,12 at (row,col) (0,0),(0,2),(2,0),(2,2)), so:
+        q0: A=left MB sub(0,3), B=top MB sub(3,0); q1: A=own sub(0,1),
+        B=top MB sub(3,2); q2: A=left MB sub(2,3), B=own sub(0,2);
+        q3: A=own sub(2,1), B=own sub(1,2). The exact sub-block matters when
+        the neighbour is plain Intra_4×4 (independent per-sub modes).
+        Cross-checked against x264's cache load/save (macroblock.c:929-932,
+        1729-1732) — identical physical layout.
+      - **Method (reusable): implied-prediction oracle.** For a diverging
+        8×8 block, `residual = ours - our_traced_pred` (residuals parse
+        byte-exact), then `implied_ffmpeg_pred = ref - residual` is matched
+        against all 9 Intra_8×8 mode predictions computed from the
+        *reference frame's* neighbours (reusing the crate's own
+        `predict_8x8`). A 64/64 exact match identifies ffmpeg's mode
+        unambiguously; comparing it with the mode our prediction matches
+        separates mode-selection bugs from residual bugs. Implemented in
+        `tests/dbg_hp352_localize.rs`.
+      - **Remaining gap (root cause narrowed but open):** in runs of
+        consecutive 8×8 macroblocks, q2 blocks still decode DDLeft where
+        x264/ffmpeg used HorizontalUp (e.g. MB(8,0)/MB(9,0) blk2), with
+        byte-correct residuals — i.e. the *cross-MB A-side* entry feeding
+        the MPM for q2 still disagrees when the left MB is 8×8-coded
+        (left.q2sub3 = DDLeft=3 caps our min at 3, while x264's mpm is 8,
+        implying its A-side reads a ≥8 entry such as left.q0/q1). The exact
+        border-fill permutation used by `fill_decode_caches` (h264_cabac.c
+        shared helper) for the intra4x4 pred-mode cache has not yet been
+        transcribed; that is the precise next step. Note x264 stores DC(2)
+        (not "unavailable") for non-I_4x4 neighbours unless
+        constrained_intra is set — our ForcedDc already matches.
+      - Also ruled out this session: CAVLC 8×8 scan transposition (FFmpeg's
+        `TRANSPOSE` at init is compensated by its own transposed `sl->mb`
+        layout — the literal table is correct here, empirically verified),
+        8×8 dequant position classes (transpose-symmetric), and the
+        `predict_8x8` filtered-neighbour formulas (verbatim ffmpeg port).
+        (Earlier sessions also fixed, independently: the `idct_8x8` pass-2
+        axis/transpose bug — regression test
+        (`transform::tests::eight_by_eight_horizontal_ac_varies_along_columns_not_rows`);
+        a real bug worth fixing even though it did not change the
+        conformance numbers of the time.)
 
       **Ruled out a second candidate, found via a real bug, then discovered the
       failure isn't 8×8-specific at all.** The CAVLC 8×8 residual interleave
@@ -900,4 +937,12 @@
       `NotPixelExact` honesty design. The flip stays `false` until Phases F/G and
       the crop-edge gap land; the `conformance_matrix.rs` gate asserts
       `!capabilities().pixel_exact` so the constraint is enforced in CI.
+- [ ] **NEW (2026-08-22): `conformance_matrix` cabac_p / cabac_b cells fail**
+      (max_abs_diff≈127, full-frame scaffold → a decode *error* fallback, both
+      deblock variants). Verified pre-existing at origin/master (`96a4db9`) —
+      not caused by the 2026-08-22 MPM/CAVLC work; all standalone CABAC P/B
+      conformance suites still pass, so the matrix cell's clip parameters
+      (likely B-frame/reordering related) hit an unimplemented or erroring
+      path in the live decoder. Needs its own root-cause pass before any
+      `pixel_exact` flip discussion.
 

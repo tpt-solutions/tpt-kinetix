@@ -525,7 +525,10 @@ impl CodedBlockFlagContext {
     ) -> bool {
         let ctx_idx = left_coded as usize + 2 * top_coded as usize;
         let ctx = &self.ctx[cat][ctx_idx];
-        eprintln!("    CBF cat={cat} ctx_idx={ctx_idx} state={} mps={}", ctx.state, ctx.mps);
+        eprintln!(
+            "    CBF cat={cat} ctx_idx={ctx_idx} state={} mps={}",
+            ctx.state, ctx.mps
+        );
         dec.decode_decision(&mut self.ctx[cat][ctx_idx]) == 1
     }
 }
@@ -901,11 +904,12 @@ impl IntraMbTypeSuffixCabacContext {
         //   state += 1 after initial bin, so ctx[1]=cbp_luma, ctx[2]=cbp_chroma, ctx[3]=pred_mode.
         let mut mb_type = 1u32;
         mb_type += 12 * dec.decode_decision(&mut self.ctx[1]) as u32; // cbp_luma
-        if dec.decode_decision(&mut self.ctx[2]) == 1 {               // cbp_chroma present
+        if dec.decode_decision(&mut self.ctx[2]) == 1 {
+            // cbp_chroma present
             mb_type += 4 + 4 * dec.decode_decision(&mut self.ctx[2]) as u32; // cbp_chroma value
         }
         mb_type += 2 * dec.decode_decision(&mut self.ctx[3]) as u32; // pred_mode high
-        mb_type += dec.decode_decision(&mut self.ctx[3]) as u32;      // pred_mode low
+        mb_type += dec.decode_decision(&mut self.ctx[3]) as u32; // pred_mode low
         mb_type
     }
 }

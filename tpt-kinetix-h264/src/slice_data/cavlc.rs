@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     reader: &mut BitReader,
     mb_cols: u32,
@@ -237,14 +236,14 @@ pub(crate) fn mpm_pred_mode_8x8(
     // Exact sub-blocks matter when the neighbour is plain Intra_4×4 (whose
     // four sub-blocks carry independent modes).
     let left = match i8 {
-        0 => side_cross(pred_ctx_grid, left_idx, 0, 3),
+        0 => side_cross(pred_ctx_grid, left_idx, 1, 1),
         1 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 1)] as u8),
-        2 => side_cross(pred_ctx_grid, left_idx, 2, 3),
+        2 => side_cross(pred_ctx_grid, left_idx, 3, 1),
         _ => NeighbourSide::Real(modes[raster_of_8x8_sub(2, 1)] as u8),
     };
 
     let top = match i8 {
-        0 => side_cross(pred_ctx_grid, top_idx, 3, 0),
+        0 => side_cross(pred_ctx_grid, top_idx, 2, 2),
         1 => side_cross(pred_ctx_grid, top_idx, 3, 2),
         2 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 2)] as u8),
         _ => NeighbourSide::Real(modes[raster_of_8x8_sub(1, 2)] as u8),
@@ -450,6 +449,11 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
                         rem + 1
                     }
                 };
+                if std::env::var("H264_DBG_MPM").is_ok() && mb_y == 0 && (4..13).contains(&mb_x) {
+                    eprintln!(
+                        "MPM MB({mb_x},0) q{i8}: mpm={pred_mode} flag={prev_flag} final={final_mode}"
+                    );
+                }
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
                     modes[raster_of_8x8_sub(i8, sub)] = Intra4x4Mode::from_u8(final_mode);

@@ -4,7 +4,9 @@
 //! interlaced streams: PAFF field pictures, MBAFF frame pictures, and the
 //! field pairing logic that interleaves half-height fields into full frames.
 
-use tpt_kinetix_core::{error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat};
+use tpt_kinetix_core::{
+    error::KinetixError, frame::VideoFrame, packet::Packet, pixel_format::PixelFormat,
+};
 
 use crate::{
     nal::{NalUnit, NalUnitType},

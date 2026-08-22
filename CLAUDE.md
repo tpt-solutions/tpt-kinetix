@@ -111,8 +111,13 @@ pipeline to derive scaffolding from an existing FFmpeg C decoder — full walkth
 
 ## Known correctness state (read before claiming a fix)
 
-H.264 CABAC I-slice decode currently desyncs on some inputs; root cause is still open (see
-`tpt-kinetix-h264/src/entropy.rs`, `cabac_tables.rs`). P-frame (CAVLC path) and B-slice bi-prediction
-are bit-exact against ffmpeg as of the last conformance pass. AV1 decode has the entropy coder wired up
-in isolation but `decode_tile_group` is not yet rewired onto it. Don't assume a decoder path is correct
-without running `just conformance` — `capabilities()` is the source of truth, not README prose.
+H.264 CAVLC I/P/B and CABAC I slices are bit-exact against ffmpeg (4:2:0, progressive, 16-px-aligned,
+no 8x8 transform) as of the last conformance pass — the earlier CABAC I-slice desync was root-caused
+and fixed (a 1-entry typo in `TRANS_IDX_LPS`, `tpt-kinetix-h264/src/entropy.rs`/`cabac_tables.rs`).
+CABAC P/B slices decode but are **not** yet bit-exact: `conformance_matrix.rs`'s cabac_p/cabac_b cells
+currently fail (pre-existing, not caused by recent changes) even though the standalone CABAC P/B
+conformance suites pass — a real gap, still open. The 8x8 transform (High profile), interlaced
+(PAFF/MBAFF), and non-16-aligned dimensions are also open, so `capabilities().pixel_exact` stays
+`false` globally. AV1 decode has the entropy coder wired up in isolation but `decode_tile_group` is
+not yet rewired onto it. Don't assume a decoder path is correct without running `just conformance` —
+`capabilities()` is the source of truth, not README prose.

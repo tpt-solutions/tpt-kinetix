@@ -406,7 +406,9 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED cbp={cbp:#04x} qp={qp} eos={end_of_slice} is_last={is_last}  terminate: {r_pre:#06x}/{o_pre:#010x} -> {r_post:#06x}/{o_post:#010x}",
             cbp = macroblocks.last().map(|m| m.cbp).unwrap_or(0));
         if end_of_slice != is_last {
-            return Err(SliceDataError::Unsupported("end_of_slice_flag mismatch (P-CABAC)"));
+            return Err(SliceDataError::Unsupported(
+                "end_of_slice_flag mismatch (P-CABAC)",
+            ));
         }
     }
     let _ = prev_was_skip;
@@ -419,4 +421,3 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         mv_store,
     })
 }
-

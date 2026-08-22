@@ -83,33 +83,34 @@ const B_2PART_TABLE: [(
     ]
 };
 
-
-mod ctx;
-mod cavlc;
+mod cabac_b;
 mod cabac_i;
 mod cabac_p;
-mod cabac_b;
+mod cavlc;
+mod ctx;
 
-pub use ctx::{
-    SliceDataError, MbNz, ParsedSlice, MbPredCtx, MbCabacCtx, MbInterCabacCtx, NeighbourCtx,
-    CabacSliceContexts, PbCabacSliceContexts,
-};
-pub use cavlc::{parse_i_slice, parse_p_slice, parse_b_slice, raster_of_8x8_sub, parse_cavlc_block};
+pub use cabac_b::parse_b_slice_cabac;
 pub use cabac_i::parse_i_slice_cabac;
 pub use cabac_p::parse_p_slice_cabac;
-pub use cabac_b::parse_b_slice_cabac;
+pub use cavlc::{
+    parse_b_slice, parse_cavlc_block, parse_i_slice, parse_p_slice, raster_of_8x8_sub,
+};
+pub use ctx::{
+    CabacSliceContexts, MbCabacCtx, MbInterCabacCtx, MbNz, MbPredCtx, NeighbourCtx, ParsedSlice,
+    PbCabacSliceContexts, SliceDataError,
+};
 
 // Cross-module private helpers/types (defined in `ctx`) re-exported so sibling
 // submodules can reach them via `use super::*;`.
 pub(crate) use ctx::{
-    R, MAX_LEVEL_PREFIX, cabac_cbp_neighbors, cabac_decode_mvd_component, chroma_cbf_neighbors,
-    dc_cbf_neighbor, luma_cbf_neighbors, partition_blocks, partition_dims,
-    ref_idx_gt0_neighbors,
+    cabac_cbp_neighbors, cabac_decode_mvd_component, chroma_cbf_neighbors, dc_cbf_neighbor,
+    luma_cbf_neighbors, partition_blocks, partition_dims, ref_idx_gt0_neighbors, MAX_LEVEL_PREFIX,
+    R,
 };
 
-pub(crate) use cavlc::{mpm_pred_mode, mpm_pred_mode_8x8};
-pub(crate) use cabac_p::parse_intra_macroblock_cabac;
 pub(crate) use cabac_b::parse_p_macroblock_cabac;
+pub(crate) use cabac_p::parse_intra_macroblock_cabac;
+pub(crate) use cavlc::{mpm_pred_mode, mpm_pred_mode_8x8};
 
 #[cfg(test)]
 mod tests {

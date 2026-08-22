@@ -140,7 +140,13 @@ pub struct MbInterCabacCtx {
 }
 
 impl MbInterCabacCtx {
-pub(crate) fn set_partition_l0(&mut self, blocks: &[usize], mvd_x: i32, mvd_y: i32, ref_idx: i32) {
+    pub(crate) fn set_partition_l0(
+        &mut self,
+        blocks: &[usize],
+        mvd_x: i32,
+        mvd_y: i32,
+        ref_idx: i32,
+    ) {
         let ax = (mvd_x.unsigned_abs() as u8).min(70);
         let ay = (mvd_y.unsigned_abs() as u8).min(70);
         let gt0 = ref_idx > 0;
@@ -151,7 +157,13 @@ pub(crate) fn set_partition_l0(&mut self, blocks: &[usize], mvd_x: i32, mvd_y: i
             }
         }
     }
-pub(crate) fn set_partition_l1(&mut self, blocks: &[usize], mvd_x: i32, mvd_y: i32, ref_idx: i32) {
+    pub(crate) fn set_partition_l1(
+        &mut self,
+        blocks: &[usize],
+        mvd_x: i32,
+        mvd_y: i32,
+        ref_idx: i32,
+    ) {
         let ax = (mvd_x.unsigned_abs() as u8).min(70);
         let ay = (mvd_y.unsigned_abs() as u8).min(70);
         let gt0 = ref_idx > 0;
@@ -405,7 +417,12 @@ impl NeighbourCtx<'static> {
 }
 
 impl<'a> NeighbourCtx<'a> {
-pub(crate) fn new(mb_aff: bool, mb_rows: u32, cur_field: bool, field_flags: &'a [Option<bool>]) -> Self {
+    pub(crate) fn new(
+        mb_aff: bool,
+        mb_rows: u32,
+        cur_field: bool,
+        field_flags: &'a [Option<bool>],
+    ) -> Self {
         NeighbourCtx {
             mb_aff,
             mb_rows,
@@ -415,7 +432,12 @@ pub(crate) fn new(mb_aff: bool, mb_rows: u32, cur_field: bool, field_flags: &'a 
     }
 
     /// Resolve the left/top neighbour macroblock addresses for `(mb_x, mb_y)`.
-pub(crate) fn left_top(&self, mb_x: u32, mb_y: u32, mb_cols: u32) -> (Option<usize>, Option<usize>) {
+    pub(crate) fn left_top(
+        &self,
+        mb_x: u32,
+        mb_y: u32,
+        mb_cols: u32,
+    ) -> (Option<usize>, Option<usize>) {
         if !self.mb_aff {
             let left = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
             let top = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
@@ -579,29 +601,29 @@ impl CabacSliceContexts {
 /// the P/B structs can hold the additional inter-syntax-element contexts.
 pub struct PbCabacSliceContexts {
     // ---- inter-specific ----
-pub mb_skip: crate::entropy::MbSkipFlagContext,
-pub mb_type_p: crate::entropy::MbTypePCabacContext,
-pub mb_type_b: crate::entropy::MbTypeBCabacContext,
-pub intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext,
-pub sub_mb_p: crate::entropy::SubMbTypePCabacContext,
-pub sub_mb_b: crate::entropy::SubMbTypeBCabacContext,
-pub ref_idx: crate::entropy::RefIdxCabacContext,
-pub mvd_l0_x: crate::entropy::MvdCabacContext,
-pub mvd_l0_y: crate::entropy::MvdCabacContext,
-pub mvd_l1_x: crate::entropy::MvdCabacContext,
-pub mvd_l1_y: crate::entropy::MvdCabacContext,
+    pub mb_skip: crate::entropy::MbSkipFlagContext,
+    pub mb_type_p: crate::entropy::MbTypePCabacContext,
+    pub mb_type_b: crate::entropy::MbTypeBCabacContext,
+    pub intra_suffix: crate::entropy::IntraMbTypeSuffixCabacContext,
+    pub sub_mb_p: crate::entropy::SubMbTypePCabacContext,
+    pub sub_mb_b: crate::entropy::SubMbTypeBCabacContext,
+    pub ref_idx: crate::entropy::RefIdxCabacContext,
+    pub mvd_l0_x: crate::entropy::MvdCabacContext,
+    pub mvd_l0_y: crate::entropy::MvdCabacContext,
+    pub mvd_l1_x: crate::entropy::MvdCabacContext,
+    pub mvd_l1_y: crate::entropy::MvdCabacContext,
     // ---- shared with I-slice (PB-init variants) ----
-pub cbp: crate::entropy::CbpCabacContext,
-pub qp_delta: crate::entropy::MbQpDeltaCabacContext,
-pub chroma_pred: crate::entropy::IntraChromaPredModeCabacContext,
-pub intra4x4: crate::entropy::Intra4x4PredModeCabacContext,
-pub cbf: crate::entropy::CodedBlockFlagContext,
-pub residual: crate::entropy::ResidualCabacContext,
-pub transform_8x8: crate::entropy::TransformSize8x8FlagContext,
+    pub cbp: crate::entropy::CbpCabacContext,
+    pub qp_delta: crate::entropy::MbQpDeltaCabacContext,
+    pub chroma_pred: crate::entropy::IntraChromaPredModeCabacContext,
+    pub intra4x4: crate::entropy::Intra4x4PredModeCabacContext,
+    pub cbf: crate::entropy::CodedBlockFlagContext,
+    pub residual: crate::entropy::ResidualCabacContext,
+    pub transform_8x8: crate::entropy::TransformSize8x8FlagContext,
 }
 
 impl PbCabacSliceContexts {
-pub(crate) fn new_p(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+    pub(crate) fn new_p(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
         use crate::cabac_tables::{MVD_X_CTX, MVD_Y_CTX};
         Self {
             mb_skip: crate::entropy::MbSkipFlagContext::new_p_slice(slice_qp_y, cabac_init_idc),
@@ -638,7 +660,7 @@ pub(crate) fn new_p(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
         }
     }
 
-pub(crate) fn new_b(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+    pub(crate) fn new_b(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
         use crate::cabac_tables::{MVD_X_CTX, MVD_Y_CTX};
         Self {
             mb_skip: crate::entropy::MbSkipFlagContext::new_b_slice(slice_qp_y, cabac_init_idc),
@@ -703,11 +725,16 @@ pub(crate) fn cabac_decode_mvd_component(
         list,
         comp,
     );
-    let ctx0 = if asum < 3 { 0 } else if asum < 33 { 1 } else { 2 };
+    let ctx0 = if asum < 3 {
+        0
+    } else if asum < 33 {
+        1
+    } else {
+        2
+    };
     let (r0, o0) = dec.debug_state();
     let val = ctx.decode(dec, asum);
     let (r1, o1) = dec.debug_state();
     eprintln!("      mvd xp={xp} yp={yp} wp={wp} hp={hp} comp={comp} asum={asum} ctx0={ctx0} val={val} {r0:#06x}/{o0:#010x}->{r1:#06x}/{o1:#010x}");
     Ok(val)
 }
-

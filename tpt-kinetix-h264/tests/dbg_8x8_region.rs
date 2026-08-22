@@ -21,34 +21,65 @@ fn gen(dir: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
     let refyuv = dir.join("dbg8x8.yuv");
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "mandelbrot=size=64x48:rate=1",
-            "-frames:v", "1", "-c:v", "libx264",
-            "-profile:v", "high", "-g", "1", "-bf", "0",
-            "-pix_fmt", "yuv420p",
-            "-x264-params", "cabac=0:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0:no-deblock=1",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "mandelbrot=size=64x48:rate=1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-g",
+            "1",
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "cabac=0:ref=1:bframes=0:8x8dct=1:weightp=0:aud=0:no-deblock=1",
             h264.to_str()?,
         ])
-        .output().map(|o| o.status.success()).unwrap_or(false);
-    if !ok { return None; }
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
     let ok2 = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264.to_str()?,
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264.to_str()?,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             refyuv.to_str()?,
         ])
-        .output().map(|o| o.status.success()).unwrap_or(false);
-    if !ok2 { return None; }
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok2 {
+        return None;
+    }
     Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
 
 /// Print an 8×8 region of a luma plane (stride=64).
 fn print_region(label: &str, data: &[u8], stride: usize, px: usize, py: usize, w: usize, h: usize) {
-    eprintln!("{label} (x={px}..{}, y={py}..{}):", px+w, py+h);
-    for row in py..py+h {
+    eprintln!("{label} (x={px}..{}, y={py}..{}):", px + w, py + h);
+    for row in py..py + h {
         eprint!("  ");
-        for col in px..px+w {
+        for col in px..px + w {
             eprint!("{:3} ", data[row * stride + col]);
         }
         eprintln!();
@@ -65,7 +96,10 @@ fn dbg_8x8_region_comparison() {
     std::fs::create_dir_all(&dir).unwrap();
     let (annexb, refyuv) = match gen(&dir) {
         Some(t) => t,
-        None => { eprintln!("gen failed; skipping"); return; }
+        None => {
+            eprintln!("gen failed; skipping");
+            return;
+        }
     };
 
     let mut dec = H264Decoder::new();
@@ -87,7 +121,10 @@ fn dbg_8x8_region_comparison() {
     let (mut max_diff, mut num_diff) = (0i32, 0usize);
     for i in 0..n {
         let d = (ours[i] as i32 - refyuv[i] as i32).abs();
-        if d > 0 { num_diff += 1; max_diff = max_diff.max(d); }
+        if d > 0 {
+            num_diff += 1;
+            max_diff = max_diff.max(d);
+        }
     }
     eprintln!("Overall: max_diff={max_diff} differing={num_diff}/{n}");
 
@@ -99,11 +136,17 @@ fn dbg_8x8_region_comparison() {
         let mut row_num = 0usize;
         for y in y0..y1 {
             for x in 0..w {
-                let d = (ours[y*w+x] as i32 - refyuv[y*w+x] as i32).abs();
-                if d > 0 { row_num += 1; row_max = row_max.max(d); }
+                let d = (ours[y * w + x] as i32 - refyuv[y * w + x] as i32).abs();
+                if d > 0 {
+                    row_num += 1;
+                    row_max = row_max.max(d);
+                }
             }
         }
-        eprintln!("MB row {mb_row} (luma y={y0}..{y1}): max_diff={row_max} differing={row_num}/{}", w*16);
+        eprintln!(
+            "MB row {mb_row} (luma y={y0}..{y1}): max_diff={row_max} differing={row_num}/{}",
+            w * 16
+        );
     }
 
     // MB(0,0): top-left corner, no valid neighbours — ground truth for cascade root.

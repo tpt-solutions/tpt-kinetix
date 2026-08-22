@@ -46,9 +46,14 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   (the `conformance` job installs it on Ubuntu). Locally use `just conformance`.
   The `--strict` (pixel-exact) conformance assertion is **currently non-blocking**
   (`continue-on-error: true` in CI) because H.264/AV1 decoders are **not pixel-exact yet**.
-- **Decoders are incomplete by design.** H.264 and AV1 decode placeholder frames; calling
-  `capabilities()` / `KinetixError::NotPixelExact` signals this. CLI `probe` works end-to-end;
-  `transcode`/`stream` are still stubs. Don't treat decoder output as correct.
+- **Decoders are incomplete by design.** H.264 CAVLC I/P/B and CABAC I slices are bit-exact vs
+  `ffmpeg` for a supported subset (4:2:0, progressive, 16-px-aligned, no 8x8 transform); CABAC
+  P/B, the 8x8 transform/High profile, and interlaced (PAFF/MBAFF) are not yet, so
+  `capabilities().pixel_exact` stays `false` globally. AV1 decode has its CDF-based entropy
+  decoder implemented but not yet wired into `decode_tile_group`, so it still emits placeholder
+  frames. `KinetixError::NotPixelExact` under strict mode signals the gap either way. CLI `probe`
+  works end-to-end; `transcode`/`stream` are still stubs. Don't treat decoder output as correct
+  without checking `capabilities()`.
 - **proptest:** `proptest_*.rs` tests under `<crate>/tests/` persist shrunk reproducers in
   committed `.proptest-regressions/` files — keep them.
 - Fuzz crashes reproduce in `fuzz/artifacts/<target>/crash-*`; add them to

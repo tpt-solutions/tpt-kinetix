@@ -23,19 +23,23 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
 | MKV / WebM demux | 🟡 Basic | EBML parsing; subset of elements |
 | MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
-| H.264 decode | 🟡 Not pixel-exact | Bitstream + CAVLC scaffold; no CABAC/prediction/deblocking |
-| AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; placeholder frames |
+| H.264 decode | 🟡 Not pixel-exact | CAVLC I/P/B and CABAC I slices bit-exact vs ffmpeg (4:2:0, progressive, 16-px-aligned, no 8x8 transform); CABAC P/B slices decode but aren't yet bit-exact; 8x8 transform (High profile), interlaced (PAFF/MBAFF), and non-16-aligned dimensions remain — `capabilities()` reports `pixel_exact: false` globally until those land |
+| AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; CDF-based entropy/symbol decoder implemented (`entropy.rs`/`entropy_cdf.rs`), but `decode_tile_group` is not yet rewired onto it |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| AAC audio | ✅ AAC-LC decode | ADTS / AudioSpecificConfig parsing + real PCM decode via `symphonia-codec-aac`; HE-AAC (SBR/PS) unsupported (`tpt-kinetix-aac`) |
+| AAC audio | ✅ AAC-LC decode | ADTS / AudioSpecificConfig parsing + fully native AAC-LC PCM decode (Huffman/IMDCT/TNS/PNS/stereo, no third-party codec dependency); HE-AAC (SBR/PS) unsupported (`tpt-kinetix-aac`) |
 | CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
 
 > ⚠️ **Decode correctness:** the H.264 and AV1 decoders do **not** yet produce
-> pixel-exact output. Call `capabilities()` (or `tpt-kinetix probe`) to detect
-> this at runtime; in strict mode the decoders return `KinetixError::NotPixelExact`
-> instead of returning placeholder frames.
+> pixel-exact output for every stream. H.264 CAVLC I/P/B and CABAC I slices are
+> bit-exact vs `ffmpeg` for a supported subset (4:2:0, progressive,
+> 16-px-aligned, no 8x8 transform); CABAC P/B, the 8x8 transform, interlaced
+> content, and non-16-aligned dimensions are not. AV1 decode is not yet wired
+> up end-to-end. Call `capabilities()` (or `tpt-kinetix probe`) to detect this
+> at runtime; in strict mode the decoders return `KinetixError::NotPixelExact`
+> instead of returning placeholder or approximate frames.
 
 ---
 

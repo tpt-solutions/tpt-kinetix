@@ -1728,7 +1728,6 @@ impl Default for H264Decoder {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use tpt_kinetix_core::Timestamp;
@@ -1796,5 +1795,4 @@ mod tests {
         };
         let _ = dec.decode(&pkt);
     }
-
 }
