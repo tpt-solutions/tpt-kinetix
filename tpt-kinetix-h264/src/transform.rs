@@ -535,6 +535,13 @@ pub const INVERSE_ZIGZAG_8X8: [usize; 64] = {
 /// raster/zigzag positions once more than the DC term was nonzero,
 /// corrupting the reconstructed 8×8 block for any real (non-trivial)
 /// coefficient pattern -- see `high_profile_8x8_conformance.rs`.
+///
+/// Note: FFmpeg additionally transposes this table into
+/// `h->zigzag_scan8x8_cavlc` at init (`TRANSPOSE(x) = (x>>3)|((x&7)<<3)`),
+/// but its `sl->mb` block buffers are also transposed relative to ours for
+/// the 8×8 path; empirically the *literal* (untransposed) form is what
+/// matches raster-order reconstruction here — the 64×48 mandelbrot clip with
+/// non-trivial coefficients decodes bit-exact with this table.
 #[rustfmt::skip]
 pub const CAVLC_SCAN8X8: [u8; 64] = [
      0,  9, 17, 18, 12, 40, 27,  7, 35, 57, 29, 30, 58, 38, 53, 47,

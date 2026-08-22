@@ -48,11 +48,23 @@
 //!   line to see which context table/index was selected. Threading the
 //!   context value itself through would need touching every `read_*_cdf`
 //!   helper's signature; deferred as a possible follow-up.
-//! * No independent oracle is wired into this harness yet (see
-//!   `tpt-kinetix-av1/tools/av1_coeffs_oracle.py`, built this session, which
-//!   independently re-implements `coeffs()` and can be run by hand against
-//!   real captured bytes at a known-good bit offset + CDF state — it is not
-//!   yet called out of this Rust harness automatically).
+//! * **No independent symbol-level oracle is wired in yet** (the Phase G.0
+//!   spec's "Part 1"). `ffmpeg -v trace`/its AVOptions expose no per-symbol
+//!   AV1 decode log (checked this session: `ffmpeg -h decoder=av1` only
+//!   lists `operating_point`; no verbose/trace flag reaches per-symbol
+//!   `libdav1d` internals through the AVOption surface), and building
+//!   `dav1d` from source with a debug/trace feature flag was judged
+//!   impractical within this session's time budget. The documented fallback
+//!   — extending `coeff.rs`'s existing Python-cross-checked `coeffs()`
+//!   oracle test methodology to cover the full `intra_frame_mode_info()` +
+//!   `coeffs()` sequence driven off real captured bitstream bytes — was
+//!   *not* attempted this session either (that existing oracle still only
+//!   runs against synthetic `ramp()` buffers, not real bytes); it remains
+//!   open for a future session. Without it, this harness's divergence
+//!   reports are only as good as "kinetix disagrees with dav1d starting
+//!   here", not "here is the exact symbol read that is numerically wrong
+//!   per an independent re-derivation" — still a large time savings over
+//!   the previous fully-manual process, but not the full two-part ask.
 
 use std::collections::HashMap;
 
@@ -219,18 +231,45 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     }
     std::env::remove_var("KINETIX_AV1_NOFILTER");
 
-    // Map the divergence to the nearest preceding block marker (only
-    // meaningful for the Y plane, since markers are recorded in luma pixel
-    // space; U/V divergences still get the enclosing mode_info block).
-    if plane == "Y" || true {
+    // Map the divergence to the nearest preceding block marker whose plane
+    // matches the diverging plane. Plain proximity ("nearest preceding
+    // marker by trace_seq") is not enough: `coeffs` markers are emitted
+    // per-transform-block in whatever plane order decode visits (commonly
+    // Y, then U, then V for the same mi block), so a chroma marker with a
+    // small px=(x,y) can sit *later* in trace order than the actual luma
+    // block that covers the divergent pixel while still satisfying a naive
+    // "px <= target" test. Filter to the target plane (falling back to
+    // `mode_info` markers, which have no plane tag and cover all planes of
+    // their mi block) and additionally require containment within the
+    // marker's own tx-block extent when a tx size is present, so the
+    // reported marker is the block that actually produced the pixel, not
+    // just some earlier block with numerically smaller coordinates.
+    {
+        let want_plane: Option<u32> = match plane {
+            "Y" => Some(0),
+            "U" => Some(1),
+            "V" => Some(2),
+            _ => None,
+        };
         let mut best: Option<&tpt_kinetix_av1::entropy::BlockMarker> = None;
         for m in &markers {
-            // Markers embed "px=(X,Y)" textually; a light parse is enough
-            // for this debug tool (avoids a second structured-marker type).
-            if let Some(px) = parse_px(&m.label) {
-                if px.0 <= x && px.1 <= y {
-                    best = Some(m);
+            let Some(px) = parse_px(&m.label) else {
+                continue;
+            };
+            let marker_plane = parse_plane(&m.label);
+            if let (Some(wp), Some(mp)) = (want_plane, marker_plane) {
+                if wp != mp {
+                    continue;
                 }
+            }
+            let (tw, th) = parse_tx_size(&m.label).unwrap_or((usize::MAX, usize::MAX));
+            let in_range = if tw != usize::MAX {
+                px.0 <= x && x < px.0 + tw && px.1 <= y && y < px.1 + th
+            } else {
+                px.0 <= x && px.1 <= y
+            };
+            if in_range {
+                best = Some(m);
             }
         }
         if let Some(m) = best {
@@ -259,6 +298,24 @@ fn parse_px(label: &str) -> Option<(usize, usize)> {
     let end = rest.find(')')?;
     let (xs, ys) = rest[..end].split_once(',')?;
     Some((xs.trim().parse().ok()?, ys.trim().parse().ok()?))
+}
+
+/// Parse `plane=N` out of a `coeffs` block-marker label; `mode_info` markers
+/// have no plane tag and return `None` (treated as "covers all planes").
+fn parse_plane(label: &str) -> Option<u32> {
+    let idx = label.find("plane=")?;
+    let rest = &label[idx + 6..];
+    let end = rest.find(' ').unwrap_or(rest.len());
+    rest[..end].trim().parse().ok()
+}
+
+/// Parse `tx=WxH` out of a `coeffs` block-marker label.
+fn parse_tx_size(label: &str) -> Option<(usize, usize)> {
+    let idx = label.find("tx=")?;
+    let rest = &label[idx + 3..];
+    let end = rest.find(' ').unwrap_or(rest.len());
+    let (ws, hs) = rest[..end].split_once('x')?;
+    Some((ws.trim().parse().ok()?, hs.trim().parse().ok()?))
 }
 
 fn main() {

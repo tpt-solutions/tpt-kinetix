@@ -166,35 +166,50 @@
 > the "rebuild diagnostic infra" tax before they can even start on the next
 > bug.
 
-- [ ] Build a **symbol-level oracle**: an independent AV1 entropy-decode trace
-      (dav1d is BSD-2-Clause, same permissive tier the project already treats
-      `ffmpeg`/`libdav1d` as usable-for-reference against — check whether a
-      debug/trace build of `dav1d` or `ffmpeg`'s own AV1 decoder can log every
-      CDF symbol read with its syntax-element name + context + resulting
-      value; if no such build-flag exists, the fallback is extending the
-      existing Python `coeffs()`-only oracle in `coeff.rs`'s test module to
-      cover the *entire* `intra_frame_mode_info()` + `coeffs()` sequence, the
-      same approach several session notes proposed but never executed)
-- [ ] Build a **generic differential-trace harness** (one reusable tool, not
-      another one-off): given any corpus entry (or an arbitrary real
-      `ffmpeg`-encoded clip), decode it with both the oracle/reference and
-      `Av1Decoder`, and automatically walk the pipeline (per-symbol entropy
-      trace → pre-filter reconstructed pixels → post-deblock → post-CDEF →
-      post-restoration) reporting the *first* point of divergence (which
-      symbol/block/pixel, and the expected vs actual value) instead of a
-      human manually placing `KINETIX_AV1_DBG`-style `eprintln!`s and
-      re-reading spec sections by hand each session. Should subsume/replace
-      the four existing one-off `dbg_av1_*.rs` files once it's capable of
-      what they did ad hoc.
-- [ ] Document how to invoke it (a `just` recipe or example binary, following
-      the existing `av1_psnr_check`/`codec_status` pattern) so it's
-      discoverable, not another buried `tests/dbg_*.rs` file future sessions
-      have to know to look for.
-- [ ] Once built, re-point the still-open AV1 Phase G root-cause work (see
-      below — the `mandelbrot_128x96` desync at `mi=(0,8)`/`px=(32,8)`, not
-      yet pinned to an exact symbol) at the new oracle instead of continuing
-      manual tracing, as a first real test of whether it actually speeds
-      things up.
+- [ ] **Not completed (2026-08-20).** Build a **symbol-level oracle**: an
+      independent AV1 entropy-decode trace. Option (a) — `dav1d`/`ffmpeg`
+      trace mode — was investigated and ruled out: `ffmpeg -h decoder=av1`
+      exposes only `operating_point` as an AVOption, no verbose/trace flag
+      reaches per-symbol `libdav1d` internals, and building `dav1d` from
+      source with a debug/trace feature flag was judged impractical in this
+      session's time budget. Option (b) — extending `coeff.rs`'s existing
+      Python-cross-checked `coeffs()`-only oracle to real captured bitstream
+      bytes and the full `intra_frame_mode_info()` sequence — was *not*
+      attempted this session (deliberately: see session note below for why
+      the harness took priority). That existing oracle still only runs
+      against synthetic `ramp()` buffers today. Open for a future session.
+- [x] Build a **generic differential-trace harness** (2026-08-20): done, see
+      `tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs` (run via
+      `just av1-trace-diff [label|--all]`). Decodes a corpus entry with both
+      `dav1d` (reference) and `Av1Decoder` (with a new structured symbol
+      trace enabled), finds the first diverging pixel, brackets whether the
+      post-filter chain (deblock/CDEF) is implicated via a
+      `KINETIX_AV1_NOFILTER` re-decode, and prints the symbol-trace entries
+      (source location, alphabet size, decoded value, bit position) around
+      the nearest preceding block marker. **Not fully done**: only the
+      *final* decoded frame is diffed (plus the NOFILTER bracket) — there is
+      no public API yet to snapshot pre-filter/post-deblock/post-CDEF/
+      post-restoration buffers separately, so the "walk every pipeline
+      stage" part of the spec is partial, not complete (see the harness's
+      own doc comment for the full limitations list). Does not yet replace
+      the four `dbg_av1_*.rs` files (they still exist, uncommitted, as
+      historical reference) since it doesn't do everything they each did
+      ad hoc (e.g. `dbg_av1_mandelbrot_diffmap.rs`'s per-8×8-block heatmap).
+- [x] Document how to invoke it (2026-08-20): `just av1-trace-diff` recipe
+      added to `justfile`, following the `conformance`/`corpus-check`
+      pattern; the example binary's own module doc comment is the primary
+      reference.
+- [~] Once built, re-point the still-open AV1 Phase G root-cause work at the
+      new oracle instead of continuing manual tracing (2026-08-20): the
+      *harness* was run against the current `mandelbrot` corpus entry and
+      immediately (no manual instrumentation) found a first divergence at
+      `plane=Y px=(64,0)` — see session note below for the actual output and
+      why this isn't the same location as the previously-reported
+      `mi=(0,8)`/`px=(32,8)` (a different `mandelbrot` encode). The
+      *oracle* half (independent symbol-level verification of that
+      divergence) was not built this session, so this is validated as
+      "the harness works and finds real divergences fast" but not yet as
+      "the harness pinpoints the exact wrong symbol independently".
 
 #### AV1 Phase G — conformance
 
@@ -1471,4 +1486,129 @@
 > `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`, which now
 > passes clean). `capabilities().pixel_exact` was not touched — still
 > `false`, correctly, since none of this corpus is bit-exact yet.
+
+> **2026-08-20 session note (Phase G.0 tooling: built the differential-trace
+> harness; oracle deliberately deferred).** Scoped per the task brief:
+> 7 straight sessions each burning 30-50 min on manual spec-PDF cross-checks
+> plus 4 abandoned one-off `dbg_av1_*.rs` harnesses was the problem; this
+> session's job was to build the reusable replacement, not chase the next
+> bug. Delivered:
+>
+> **Structured symbol trace (`tpt-kinetix-av1/src/entropy.rs`).** Added a
+> `thread_local`-backed trace: `SymbolTraceEntry { seq, n_symbols, value,
+> bit_pos_before, bit_pos_after, location }`, captured automatically inside
+> `SymbolDecoder::read_symbol` (the one place all reads funnel through) via
+> `#[track_caller]`. `read_bool`/`read_literal` are *also* `#[track_caller]`,
+> so `Location::caller()` propagates transparently through the call chain —
+> a `dec.read_literal(4)` call in `reconstruct/mode_cdfs.rs` shows up in the
+> trace tagged with *that* call site, not `read_bool`'s internal line, with
+> zero edits needed at any of the dozens of call sites in `coeff.rs`/
+> `reconstruct/*.rs`. `enable_symbol_trace()`/`take_symbol_trace()` start/
+> drain a session; when no session is active the only per-call cost is one
+> thread-local check (`symbol_trace_enabled()`), so normal decode paths pay
+> nothing extra by default. A companion `BlockMarker { trace_seq, label }`
+> facility (`mark_block()`/`take_block_markers()`) is pushed from two call
+> sites — `decode_intra_block` (`reconstruct/intra_block.rs`, one marker per
+> `mi_row`/`mi_col`/`bsize`) and `reconstruct_tx_block`
+> (`reconstruct/reconstruct_block.rs`, one marker per transform block with
+> plane/px/tx-size/skip/pred_mode) — so a trace index can be mapped back to
+> "which block was this" without re-deriving it from the partition tree by
+> hand.
+>
+> **Differential harness
+> (`tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs`, wired to `just
+> av1-trace-diff [label|--all]`).** For a given corpus entry: decodes with
+> `dav1d`/`ffmpeg -c:v libdav1d` (reference) and with `Av1Decoder` (trace
+> enabled), computes per-plane PSNR, finds the first pixel (raster order,
+> Y then U then V) whose absolute diff exceeds 3, re-decodes with
+> `KINETIX_AV1_NOFILTER=1` to report whether the divergence survives with
+> deblock/CDEF disabled (pinning blame to `reconstruct/` vs
+> `loop_filter.rs`/CDEF), finds the nearest-preceding block marker for the
+> divergent pixel, and prints ~26 trace entries around it (source location,
+> alphabet size, decoded value, bit-position range). All of this without a
+> human placing a single `eprintln!` or re-deriving mi/px coordinates by
+> hand.
+>
+> **Validation run against the corpus (this is real output, not
+> illustrative):**
+> ```
+> === mandelbrot (80x64) ===
+>   PSNR Y/U/V = 16.37/20.45/18.39 dB  (symbol trace: 3405 reads, 280 block markers)
+>   First divergence: plane Y px=(64,0) kinetix=171 dav1d=161 (delta=10)
+>   With KINETIX_AV1_NOFILTER=1: same first-divergence pixel (Y,64,0) kinetix=178 dav1d=161
+>     -> deblock/CDEF is NOT the cause; look in reconstruct/ (prediction/transform/coeffs).
+>   Nearest preceding block marker: [2904] "coeffs plane=2 px=(32,0) tx=8x4 skip=false pred_mode=13"
+>   Symbol trace around that marker (seq 2902..2928): [26 lines, source:line + value per read]
+> ```
+> This **is not the same divergence** as the previously-reported
+> `mi=(0,8)`/`px=(32,8)` `mandelbrot_128x96` desync — that finding came from
+> `av1_psnr_check.rs`'s own separately-encoded 128×96 `mandelbrot` clip,
+> whereas `av1_intra_corpus()`'s `mandelbrot` entry (which this harness and
+> the existing `dbg_av1_mandelbrot128.rs`/`dbg_av1_mandelbrot_diffmap.rs`
+> both actually use) is 80×64 — different encoder output, different bits,
+> not directly comparable pixel-for-pixel despite the shared label. This
+> discrepancy in prior session notes (calling an 80×64 corpus entry
+> "`mandelbrot_128x96`") is itself worth fixing (either rename the dbg files
+> or regenerate them against the real 128×96 clip) before further root-cause
+> work on "the mandelbrot bug", so a future session doesn't keep chasing two
+> different bitstreams under one name. Ran `--all` across the full 5-entry
+> corpus too: `testsrc` first-diverges at Y (0,0) (delta 113, i.e. still
+> badly broken from the very first pixel), `testsrc2` at Y (80,0), `smptebars`
+> at Y (50,48) with PSNR 52.30/42.59/99.00 dB (a large improvement over the
+> 10.03 dB recorded in the 2026-08-15 session note — likely downstream of
+> the 2026-08-19 `predict_directional` fix landing since, not verified
+> further this session), and `solid_red` reports no divergence above the
+> threshold (99.00/99.00/99.00, matching prior runs). This confirms the
+> harness generalizes across the corpus, not just the one entry named in
+> the task brief.
+>
+> **What was deliberately *not* built this session, and why:** the Part 1
+> symbol-level oracle. Investigated option (a) first — `ffmpeg -h
+> decoder=av1` lists only `operating_point` as an AVOption; no verbose/trace
+> flag surfaces per-symbol `libdav1d` state, and this environment has no
+> `dav1d` source checkout, so a debug-build-flag investigation would mean
+> cloning+building a C project from scratch, assessed as not fitting this
+> session's remaining budget after the harness. Fallback option (b) —
+> extending `coeff.rs`'s existing Python `coeffs()` oracle test (currently
+> synthetic-`ramp()`-only) to real captured bytes and the full
+> `intra_frame_mode_info()` sequence — is real, substantial work (the
+> control-flow alone covers segment_id, skip, y_mode+angle_delta, uv_mode,
+> cfl_alphas, palette, filter_intra, tx_size, each with its own context
+> derivation) that risks either being rushed into something numerically
+> wrong (worse than not having it, since a broken "oracle" actively
+> misleads) or eating the whole session with nothing shippable. Chose to
+> ship a solid, tested, actually-useful Part 2 instead of a half-verified
+> Part 1 plus a half-built Part 2. This is honestly a partial completion of
+> the two-part spec, not a full one — flagged as the clear next step below.
+>
+> **What a future session should do next:** (1) build the Part 1 oracle for
+> real — start from `coeff.rs`'s existing synthetic-buffer Python oracle,
+> extract real tile bytes + the exact `TxBlockCtx`/CDF state at a specific
+> block via the new symbol-trace/block-marker infrastructure (bit position
+> and block index are now directly available from the trace, removing the
+> "where do I even start" cost that made this hard before), and diff against
+> Kinetix's own `coeffs()` output at that exact block — this validates the
+> coeffs()-stage independently even without a full mode_info transcription;
+> (2) reconcile the `mandelbrot`/`mandelbrot_128x96` naming split above
+> before trusting any cross-session comparison of "the mandelbrot bug";
+> (3) extend `Av1Decoder`/`TileDecodeState` with an optional per-stage
+> snapshot hook (pre-filter/post-deblock/post-CDEF), mirroring
+> `tpt-kinetix-test-utils::trace_dump::MapTracer`'s existing `DecodeTracer`
+> pattern for H.264, so the harness's NOFILTER bracket becomes a real
+> stage-by-stage walk instead of a binary before/after; (4) once (1)-(3)
+> land, retire the four `dbg_av1_*.rs` one-offs for real (they're still
+> present, uncommitted, and still occasionally useful today, so left alone
+> this session rather than deleted prematurely).
+>
+> `cargo test -p tpt-kinetix-av1 --lib` stays green (90/90, unchanged count —
+> no new unit tests added this session; the harness is validated by actually
+> running it, not a unit test, since it shells out to `ffmpeg`/`dav1d`).
+> `cargo build --workspace` is green. `cargo clippy -p tpt-kinetix-av1 --lib
+> -- -D warnings` and the same for the new example are both clean.
+> `capabilities().pixel_exact` untouched (still `false`). Uncommitted files
+> this session: `tpt-kinetix-av1/src/entropy.rs` (trace infra),
+> `tpt-kinetix-av1/src/reconstruct/intra_block.rs` +
+> `reconstruct/reconstruct_block.rs` (marker call sites),
+> `tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs` (new), `justfile`
+> (`av1-trace-diff` recipe). No `git commit` calls were made.
 
