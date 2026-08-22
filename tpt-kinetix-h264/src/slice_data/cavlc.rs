@@ -449,11 +449,6 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
                         rem + 1
                     }
                 };
-                if std::env::var("H264_DBG_MPM").is_ok() && mb_y == 0 && (4..13).contains(&mb_x) {
-                    eprintln!(
-                        "MPM MB({mb_x},0) q{i8}: mpm={pred_mode} flag={prev_flag} final={final_mode}"
-                    );
-                }
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
                     modes[raster_of_8x8_sub(i8, sub)] = Intra4x4Mode::from_u8(final_mode);

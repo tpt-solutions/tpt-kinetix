@@ -76,9 +76,41 @@ struct Counter {
     intra88: std::collections::HashSet<(u32, u32)>,
     preds: std::collections::HashMap<(u32, u32, u8), [u8; 64]>,
     mb_modes: std::collections::HashMap<(u32, u32), [u8; 16]>,
+    blocks: std::collections::HashMap<(u32, u32, u8), (i32, u8, u8, u32)>,
+    qp: std::collections::HashMap<(u32, u32), i32>,
 }
 
 impl DecodeTracer for Counter {
+    fn on_cavlc_block_info(
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        plane: TracePlane,
+        blk: u8,
+        n_c: i32,
+        total_coeff: u8,
+        trailing_ones: u8,
+        _suffix_len: u32,
+    ) {
+        if plane == TracePlane::Luma {
+            self.blocks
+                .insert((mb_x, mb_y, blk), (n_c, total_coeff, trailing_ones, 0));
+        }
+    }
+    fn on_mb_parsed(
+        &mut self,
+        mb_x: u32,
+        mb_y: u32,
+        _mb_type: &str,
+        qp: i32,
+        _cbp: u8,
+        _chroma: u8,
+        pred_modes: &[u8; 16],
+    ) {
+        self.mb_modes.insert((mb_x, mb_y), *pred_modes);
+        // record qp per MB via the blocks map sentinel
+        self.qp.insert((mb_x, mb_y), qp);
+    }
     fn on_intra_pred(&mut self, mb_x: u32, mb_y: u32, _plane: TracePlane, blk: u8, pred: &[u8]) {
         if blk >= 64 {
             self.count += 1;
@@ -87,18 +119,6 @@ impl DecodeTracer for Counter {
             p.copy_from_slice(pred);
             self.preds.insert((mb_x, mb_y, blk), p);
         }
-    }
-    fn on_mb_parsed(
-        &mut self,
-        mb_x: u32,
-        mb_y: u32,
-        _mb_type: &str,
-        _qp: i32,
-        _cbp: u8,
-        _chroma: u8,
-        pred_modes: &[u8; 16],
-    ) {
-        self.mb_modes.insert((mb_x, mb_y), *pred_modes);
     }
 }
 
@@ -327,78 +347,240 @@ fn dbg_hp352_localize() {
                 };
                 let x0 = mbx as usize * 16 + 8 * (i8 & 1);
                 let y0 = mby as usize * 16 + 8 * (i8 >> 1);
-            let mut res = [0i32; 64];
-            for yy in 0..8usize {
-                for xx in 0..8usize {
-                    res[yy * 8 + xx] =
-                        ours[(y0 + yy) * w + x0 + xx] as i32 - pred[yy * 8 + xx] as i32;
-                }
-            }
-            let preds9 = ref_preds_9(&refyuv, w, x0, y0);
-            let mut implied_mode = None;
-            let mut our_mode = None;
-            for m in 0..9usize {
-                let mut exact_imp = 0usize;
-                let mut exact_our = 0usize;
-                for k in 0..64usize {
-                    let implied = clip(refyuv[(y0 + k / 8) * w + x0 + k % 8] as i32 - res[k]);
-                    if implied == preds9[m][k] as i32 {
-                        exact_imp += 1;
-                    }
-                    if pred[k] == preds9[m][k] {
-                        exact_our += 1;
+                let mut res = [0i32; 64];
+                for yy in 0..8usize {
+                    for xx in 0..8usize {
+                        res[yy * 8 + xx] =
+                            ours[(y0 + yy) * w + x0 + xx] as i32 - pred[yy * 8 + xx] as i32;
                     }
                 }
-                if exact_imp == 64 {
-                    implied_mode = Some(m);
+                let preds9 = ref_preds_9(&refyuv, w, x0, y0);
+                let mut implied_mode = None;
+                let mut our_mode = None;
+                for m in 0..9usize {
+                    let mut exact_imp = 0usize;
+                    let mut exact_our = 0usize;
+                    for k in 0..64usize {
+                        let implied = clip(refyuv[(y0 + k / 8) * w + x0 + k % 8] as i32 - res[k]);
+                        if implied == preds9[m][k] as i32 {
+                            exact_imp += 1;
+                        }
+                        if pred[k] == preds9[m][k] {
+                            exact_our += 1;
+                        }
+                    }
+                    if exact_imp == 64 {
+                        implied_mode = Some(m);
+                    }
+                    if exact_our == 64 {
+                        our_mode = Some(m);
+                    }
                 }
-                if exact_our == 64 {
-                    our_mode = Some(m);
-                }
-            }
-            match (implied_mode, our_mode) {
-                (Some(im), Some(om)) if im != om => {
-                    eprintln!(
+                match (implied_mode, our_mode) {
+                    (Some(im), Some(om)) if im != om => {
+                        eprintln!(
                         "MISMATCH MB({mbx},{mby}) blk{i8}: ffmpeg used mode {im}, we used mode {om}"
                     );
-                    // Degeneracy check: are the two mode predictions identical?
-                    let same = preds9[im] == preds9[om];
-                    eprintln!("  preds9[{im}] == preds9[{om}]: {same}");
-                    // Residual comparison: implied residual under our mode vs ours
-                    let mut res_diff_max = 0i32;
-                    for k in 0..64usize {
-                        let implied_res =
-                            refyuv[(y0 + k / 8) * w + x0 + k % 8] as i32 - preds9[om][k] as i32;
-                        res_diff_max = res_diff_max.max((implied_res - res[k]).abs());
+                        // Degeneracy check: are the two mode predictions identical?
+                        let same = preds9[im] == preds9[om];
+                        eprintln!("  preds9[{im}] == preds9[{om}]: {same}");
+                        // Residual comparison: implied residual under our mode vs ours
+                        let mut res_diff_max = 0i32;
+                        for k in 0..64usize {
+                            let implied_res =
+                                refyuv[(y0 + k / 8) * w + x0 + k % 8] as i32 - preds9[om][k] as i32;
+                            res_diff_max = res_diff_max.max((implied_res - res[k]).abs());
+                        }
+                        eprintln!("  |implied_res(our mode) - our_res| max = {res_diff_max}");
                     }
-                    eprintln!("  |implied_res(our mode) - our_res| max = {res_diff_max}");
+                    (Some(_), None) => {
+                        eprintln!("PARTIAL MB({mbx},{mby}) blk{i8}: ffmpeg mode {:?} identifiable, our pred matches none exactly", implied_mode.unwrap());
+                    }
+                    (None, om) => {
+                        let rmin = res.iter().copied().min().unwrap();
+                        let rmax = res.iter().copied().max().unwrap();
+                        let all_same = res.iter().all(|&v| v == res[0]);
+                        eprintln!(
+                        "NOORACLE MB({mbx},{mby}) blk{i8}: our mode {om:?}, implied unidentifiable, res=[{rmin}..{rmax}] uniform={all_same}"
+                    );
+                        // Is there a mode whose prediction is uniformly ours±1?
+                        // (would explain a uniform ±1 pixel shift with equal
+                        // residuals)
+                        if let Some(base) = om {
+                            for m in 0..9usize {
+                                if m == base {
+                                    continue;
+                                }
+                                let mut plus = 0usize;
+                                let mut minus = 0usize;
+                                for k in 0..64usize {
+                                    if preds9[m][k] as i32 == preds9[base][k] as i32 + 1 {
+                                        plus += 1;
+                                    }
+                                    if preds9[m][k] as i32 == preds9[base][k] as i32 - 1 {
+                                        minus += 1;
+                                    }
+                                }
+                                if plus == 64 || minus == 64 {
+                                    eprintln!(
+                                    "  UNIFORM-SHIFT: mode {m} is {} mode {base} on all 64 samples",
+                                    if plus == 64 { "+1 vs" } else { "-1 vs" }
+                                );
+                                }
+                            }
+                        }
+                        // Detailed dump: neighbour samples from ours vs ref, our
+                        // pred first rows, and per-sample diffs.
+                        let has_diff = (0..64usize).any(|k| {
+                            ours[(y0 + k / 8) * w + x0 + k % 8]
+                                != refyuv[(y0 + k / 8) * w + x0 + k % 8]
+                        });
+                        eprintln!("  block has pixel diffs vs ref: {has_diff}");
+                        if has_diff {
+                            let gt = |f: &[u8], xx: isize, yy: isize| {
+                                let xr = x0 as isize + xx;
+                                let yr = y0 as isize + yy;
+                                if xr < 0 || yr < 0 || xr >= w as isize || yr >= h as isize {
+                                    None
+                                } else {
+                                    Some(f[yr as usize * w + xr as usize])
+                                }
+                            };
+                            let fmt_row = |label: String, vals: [Option<u8>; 16], f: &[u8]| {
+                                let mut s = format!("{label}");
+                                for (i, v) in vals.iter().enumerate() {
+                                    match v {
+                                        Some(x) => s.push_str(&format!("{x:4}")),
+                                        None => s.push_str("   ."),
+                                    }
+                                    let _ = i;
+                                }
+                                let _ = f;
+                                s
+                            };
+                            let mut top_o = [None; 16];
+                            let mut top_r = [None; 16];
+                            if y0 > 0 {
+                                for i in 0..16 {
+                                    top_o[i] = gt(&ours, x0 as isize + i as isize, -1);
+                                    top_r[i] = gt(&refyuv, x0 as isize + i as isize, -1);
+                                }
+                            }
+                            eprintln!("{}", fmt_row("  ours top :".into(), top_o, &ours));
+                            eprintln!("{}", fmt_row("  ref  top :".into(), top_r, &refyuv));
+                            let mut lef_o = [None; 8];
+                            let mut lef_r = [None; 8];
+                            if x0 > 0 {
+                                for j in 0..8 {
+                                    lef_o[j] = gt(&ours, -1, j as isize);
+                                    lef_r[j] = gt(&refyuv, -1, j as isize);
+                                }
+                            }
+                            eprintln!(
+                                "  ours left: {}",
+                                lef_o
+                                    .iter()
+                                    .map(|v| format!("{:4}", v.unwrap_or(255)))
+                                    .collect::<String>()
+                            );
+                            eprintln!(
+                                "  ref  left: {}",
+                                lef_r
+                                    .iter()
+                                    .map(|v| format!("{:4}", v.unwrap_or(255)))
+                                    .collect::<String>()
+                            );
+                            for yy in 0..8usize {
+                                let mut s = String::new();
+                                for xx in 0..8usize {
+                                    let d = ours[(y0 + yy) * w + x0 + xx] as i32
+                                        - refyuv[(y0 + yy) * w + x0 + xx] as i32;
+                                    if d == 0 {
+                                        s.push_str("   .");
+                                    } else {
+                                        s.push_str(&format!("{d:+4}"));
+                                    }
+                                }
+                                eprintln!("    y={yy}: {s}");
+                            }
+                            // DC formula cross-check (mode 2 only): compute the
+                            // filtered-sample DC average from the dumped raw
+                            // neighbours and compare with our traced prediction.
+                            if om == Some(2) && y0 > 0 && x0 > 0 {
+                                let x =
+                                    |f: &[u8], xx: isize, yy: isize| -> i32 {
+                                        f[yy as usize * w + xx as usize] as i32
+                                    };
+                                let tl_r = x(&refyuv, x0 as isize - 1, y0 as isize - 1);
+                                let tl_o = x(&ours, x0 as isize - 1, y0 as isize - 1);
+                                let tr = |f: &[u8]| -> [i32; 8] {
+                                    let raw =
+                                        |i: isize| x(f, x0 as isize + i as isize, y0 as isize - 1);
+                                    let mut t = [0i32; 8];
+                                    t[0] = (tl_r + 2 * raw(0) + raw(1) + 2) >> 2;
+                                    for i in 1..7usize {
+                                        t[i] = (raw(i as isize - 1)
+                                            + 2 * raw(i as isize)
+                                            + raw(i as isize + 1)
+                                            + 2)
+                                            >> 2;
+                                    }
+                                    t[7] = (raw(6) + 2 * raw(7) + raw(8) + 2) >> 2;
+                                    t
+                                };
+                                let lr = |f: &[u8]| -> [i32; 8] {
+                                    let raw = |j: isize| x(f, x0 as isize - 1, y0 as isize + j);
+                                    let mut l = [0i32; 8];
+                                    l[0] = (tl_r + 2 * raw(0) + raw(1) + 2) >> 2;
+                                    for j in 1..7usize {
+                                        l[j] = (raw(j as isize - 1)
+                                            + 2 * raw(j as isize)
+                                            + raw(j as isize + 1)
+                                            + 2)
+                                            >> 2;
+                                    }
+                                    l[7] = (raw(6) + 3 * raw(7) + 2) >> 2;
+                                    l
+                                };
+                                let t_r = tr(&refyuv);
+                                let l_r = lr(&refyuv);
+                                let dc_r = (t_r.iter().sum::<i32>()
+                                    + l_r.iter().sum::<i32>()
+                                    + 8)
+                                    >> 4;
+                                eprintln!("  topleft: ours={tl_o} ref={tl_r}");
+                                eprintln!("  filtered top (ref): {t_r:?}");
+                                eprintln!("  filtered left (ref): {l_r:?}");
+                                eprintln!(
+                                    "  computed DC (ref neighbours) = {dc_r}; our traced pred[0] = {}",
+                                    pred[0]
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                (Some(_), None) => {
-                    eprintln!("PARTIAL MB({mbx},{mby}) blk{i8}: ffmpeg mode {:?} identifiable, our pred matches none exactly", implied_mode.unwrap());
-                }
-                _ => {}
-            }
             }
         }
     }
     let _ = clip;
 
-    // Dump our decoded per-8x8-block modes for row-0 MBs 0..15 (from
-    // on_mb_parsed: pred_modes[16], replicated per quadrant).
+    // Dump parse info for the diverging region MB(8,11)/(9,11)
     eprintln!();
-    eprintln!("our decoded per-quadrant modes, row 0 (q0..q3):");
-    for mbx in 0u32..16u32 {
-        if let Some(m) = tracer.mb_modes.get(&(mbx, 0u32)) {
-            let is88 = tracer.intra88.contains(&(mbx, 0u32));
-            eprintln!(
-                "  MB({mbx},0) 8x8={is88} q=({}, {}, {}, {})",
-                m[0], m[4], m[8], m[12]
-            );
-            if !is88 && (4..=7).contains(&mbx) {
-                eprintln!("    full16: {:?}", m);
+    eprintln!("parse info for MB(8,11), MB(9,11):");
+    for mb in [(8u32, 11u32), (9u32, 11u32)] {
+        let qp = tracer.qp.get(&mb).copied().unwrap_or(-1);
+        for i8 in 0..4usize {
+            for sub in 0..4usize {
+                let blk = (i8 * 4 + sub) as u8;
+                if let Some((nc, tc, t1s, _)) = tracer.blocks.get(&(mb.0, mb.1, blk)) {
+                    eprintln!(
+                        "  MB({},{}) q{} k{}: nC={nc} total_coeff={tc} t1={t1s} (mb qp={qp})",
+                        mb.0, mb.1, i8, sub
+                    );
+                }
             }
-        } else {
-            eprintln!("  MB({mbx},0) <not traced / not intra>");
         }
     }
 }
+

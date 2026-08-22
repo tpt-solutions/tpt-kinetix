@@ -646,17 +646,18 @@
         (89137/152064 differing) to `max_abs_diff=79` (72373/152064).
       - **Fixed this session — Intra_8×8 MPM derivation.** The old
         `mpm_pred_mode_8x8` guessed cross-MB neighbour 8×8 blocks with the
-        wrong indices. Rewritten to FFmpeg's exact semantics:
-        `pred_intra_mode(h, sl, i)` (h264dec.h:696) reads
-        `cache[scan8[i]-1]` / `cache[scan8[i]-8]` over the *physical* scan8
-        layout (h264dec.h `scan8[]` — quadrant top-left blocks are idx
-        0,4,8,12 at (row,col) (0,0),(0,2),(2,0),(2,2)), so:
-        q0: A=left MB sub(0,3), B=top MB sub(3,0); q1: A=own sub(0,1),
-        B=top MB sub(3,2); q2: A=left MB sub(2,3), B=own sub(0,2);
-        q3: A=own sub(2,1), B=own sub(1,2). The exact sub-block matters when
-        the neighbour is plain Intra_4×4 (independent per-sub modes).
-        Cross-checked against x264's cache load/save (macroblock.c:929-932,
-        1729-1732) — identical physical layout.
+        wrong indices. Rewritten to FFmpeg's exact semantics, transcribed
+        from `fill_decode_caches` + `write_back_intra_pred_mode` +
+        `pred_intra_mode` (h264_mvpred.h / h264dec.h): each quadrant's
+        most-probable-mode reads the 4×4 cache cell immediately left of /
+        above its top-left sub-block over the *physical* scan8 layout.
+        Final mapping (neighbour MB quadrant k-sub-block):
+        q0: A=left q1.k1, B=top q2.k2; q1: A=own q0.k1, B=top q3.k2;
+        q2: A=left q3.k1, B=own q0.k2; q3: A=own q2.k1, B=own q1.k2.
+        (The stored 8-byte per-MB array is [bottom-row k2,k3 of q2/q3,
+        right-col k1/k3/k1 of q1,q3,q1] — an unintuitive permutation that
+        is easy to get wrong; verified against x264's cache load/save,
+        which uses the identical physical scan8 layout.)
       - **Method (reusable): implied-prediction oracle.** For a diverging
         8×8 block, `residual = ours - our_traced_pred` (residuals parse
         byte-exact), then `implied_ffmpeg_pred = ref - residual` is matched
@@ -666,18 +667,25 @@
         unambiguously; comparing it with the mode our prediction matches
         separates mode-selection bugs from residual bugs. Implemented in
         `tests/dbg_hp352_localize.rs`.
-      - **Remaining gap (root cause narrowed but open):** in runs of
-        consecutive 8×8 macroblocks, q2 blocks still decode DDLeft where
-        x264/ffmpeg used HorizontalUp (e.g. MB(8,0)/MB(9,0) blk2), with
-        byte-correct residuals — i.e. the *cross-MB A-side* entry feeding
-        the MPM for q2 still disagrees when the left MB is 8×8-coded
-        (left.q2sub3 = DDLeft=3 caps our min at 3, while x264's mpm is 8,
-        implying its A-side reads a ≥8 entry such as left.q0/q1). The exact
-        border-fill permutation used by `fill_decode_caches` (h264_cabac.c
-        shared helper) for the intra4x4 pred-mode cache has not yet been
-        transcribed; that is the precise next step. Note x264 stores DC(2)
-        (not "unavailable") for non-I_4x4 neighbours unless
-        constrained_intra is set — our ForcedDc already matches.
+      - **Remaining gap (narrowed to a single ±1 rounding issue):** after the
+        MPM fix, a frame-wide implied-prediction sweep reports **zero mode
+        mismatches** across all 440 8×8 blocks. The 352×288 clip is now at
+        `max_abs_diff=1` with only **423/152064 samples** differing (99.72%
+        exact), concentrated around MB(8,11)/(9,11): two DC-mode quadrants
+        decode with a uniform ±1 shift (identical neighbour samples on both
+        sides — so it is a DC-average or DC-dequant rounding divergence, not
+        a mode/parse issue). Verified-not-the-cause this session: the IDCT
+        pass order (FFmpeg runs columns-first in `ff_h264_idct8_add`; our
+        rows-first empirically matches better because FFmpeg's `sl->mb`
+        8×8 blocks are stored transposed relative to ours — the transposed
+        dequant table + transposed CAVLC scan + columns-first order all
+        compensate to the same arithmetic as our literal scan + rows-first),
+        the dequant rounding algebra (FFmpeg's folded `(l·qmul+32)>>6` is
+        algebraically identical to the spec's `(l·ls + 2^(5-s))>>(6-s)` for
+        all s), and the nC context derivation (both are physical-adjacency).
+        Next step: dump the DC coefficient level and qP for the diverging
+        MB(8,11) quadrants and compare the two rounding expressions
+        numerically.
       - Also ruled out this session: CAVLC 8×8 scan transposition (FFmpeg's
         `TRANSPOSE` at init is compensated by its own transposed `sl->mb`
         layout — the literal table is correct here, empirically verified),
@@ -937,12 +945,69 @@
       `NotPixelExact` honesty design. The flip stays `false` until Phases F/G and
       the crop-edge gap land; the `conformance_matrix.rs` gate asserts
       `!capabilities().pixel_exact` so the constraint is enforced in CI.
-- [ ] **NEW (2026-08-22): `conformance_matrix` cabac_p / cabac_b cells fail**
+- [~] **NEW (2026-08-22): `conformance_matrix` cabac_p / cabac_b cells fail**
       (max_abs_diff≈127, full-frame scaffold → a decode *error* fallback, both
       deblock variants). Verified pre-existing at origin/master (`96a4db9`) —
-      not caused by the 2026-08-22 MPM/CAVLC work; all standalone CABAC P/B
-      conformance suites still pass, so the matrix cell's clip parameters
-      (likely B-frame/reordering related) hit an unimplemented or erroring
-      path in the live decoder. Needs its own root-cause pass before any
-      `pixel_exact` flip discussion.
+      not caused by the 2026-08-22 MPM/CAVLC work. Needs its own root-cause
+      pass before any `pixel_exact` flip discussion.
+      - **2026-08-23 session — root cause narrowed substantially; the failure
+        is a real CABAC *desync* inside `parse_p_slice_cabac`, not an
+        unimplemented live-decoder path.** Reproduced minimally with
+        `tpt-kinetix-h264/examples/dbg_cabac_p_matrix.rs` (generates the exact
+        matrix-cell clip via ffmpeg, decodes, reports): the P slice fails with
+        `Unsupported("end_of_slice_flag mismatch (P-CABAC)")`, i.e. the parser
+        reaches MB11 but its terminate bin reads 0 instead of 1 → the
+        arithmetic decode desynced somewhere upstream, and the whole P frame
+        falls back to the grey scaffold (max_abs_diff=127).
+      - **The standalone `cabac_pframe_conformance.rs` suites do NOT actually
+        assert bit-exactness** — they print `[GAP]` and pass on any diff
+        (`max_diff != 0` branch only logs). The same desync fires there
+        ("P CABAC parse error" + max_abs_diff=127); "standalone passes" was
+        vacuous for this path. The matrix cell is the first hard assertion.
+      - **A static-content clip reproduces it with the minimal syntax**:
+        `color=c=gray` IP clip (all-skip P frame — confirmed: the CAVLC encode
+        of the same content is a bare `mb_skip_run`=12; ffmpeg's decoded frames
+        are identical) fails identically, so the desync is exercisable with
+        *nothing but* `mb_skip_flag` decisions + terminate bins. This rules out
+        every inter-only element (sub_mb_type, ref_idx, mvd contexts, cbp,
+        residual) as the *sole* cause for that repro and points at the
+        `mb_skip_flag` context/init/engine-state evolution itself.
+      - Verified-correct this session (do not re-audit): CABAC engine
+        `decode_decision`/`decode_terminate` match a hand-computed spec §9.3.3.2
+        trace on the failing payload byte-for-byte; PB0 init table entries
+        11..13 = [(23,33),(23,2),(21,0)] match ffmpeg's
+        `cabac_context_init_PB[0]`; mb_skip_flag ctxIdxInc (= condL+condU,
+        cond = neighbour available && !skip) matches ffmpeg's
+        `decode_cabac_mb_skip`; P mb_type ctx 14..17, sub_mb_type ctx 21..23,
+        ref_idx ctx 54..59, mvd ctx 40/47 all match ffmpeg's h264_cabac.c;
+        cbp/cbf neighbour conventions (incl. left_cbp low-nibble masking being
+        irrelevant because ffmpeg's `decode_cabac_mb_cbp_luma` only ever reads
+        bits 1/3 of left, and the 0x7CF-vs-0x00F unavailable sentinels being
+        equivalent under those masks) verified against ffmpeg source fetched to
+        repo-root scratch (`h264_cabac.c`, `h264_mvpred.h` — delete when done).
+      - **Leading anomaly (open)**: on the static clip the aligned payload
+        `FE D6 A9 0E` decodes as garbage from the spec position, while starting
+        the engine a few bits EARLIER (24..31, i.e. treating part of the
+        alignment region as codeword prefix) yields twelve clean skip=1 bins +
+        terminate=1. A brute force over all 128 (pStateIdx,valMps) init pairs
+        shows NO pair makes the aligned start decode as twelve ones, yet
+        ffmpeg splices of our own mini-encoder's all-skip payloads (any state)
+        decode fine — so ffmpeg accepts many encodings and the discriminating
+        factor is still open. Follow-up sweeps the same session: negative
+        start shifts (-12..-3) on the full testsrc clip do NOT parse either,
+        which eliminates "our header parser over-reads N bits" as a complete
+        explanation — for complex content no start position works, so there is
+        ALSO a genuine mid-slice context/derivation desync in the inter path
+        beyond any start-offset question. Next steps queued: (1) dump ffmpeg's
+        actual per-bin CABAC trace by building a self-authored C harness
+        against ffmpeg's `get_cabac_inline` (the method that already found
+        TRANS_IDX_LPS[28]); (2) on the static repro, diff our per-bin decision
+        sequence against that oracle to find the first diverging bin; (3) only
+        then extend the fix to the P_8x8/B paths.
+      - New reusable harnesses left in-tree:
+        `examples/dbg_cabac_p_matrix.rs` (matrix-cell repro + controlled
+        clip variants), `examples/dbg_cabac_skip_probe.rs` (header field /
+        bit-position dump, mb_skip_flag-only probe, start-shift sweep,
+        splice-into-stream differential test vs ffmpeg, mini spec-exact CABAC
+        encoder oracle — round-trip validated).
 

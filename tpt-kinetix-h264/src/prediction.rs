@@ -502,39 +502,22 @@ pub fn predict_8x8(
             }
         }
         Intra4x4Mode::Dc => {
-            // §8.3.2.2.3: like the 4×4/16×16 DC modes, the average is taken
-            // over whichever of top/left is actually available — averaging
-            // in the filtered `t`/`l` values unconditionally would silently
-            // blend in the phantom `R` (128) substituted for a missing side
-            // (see the 4×4 Dc arm above for the same issue), pulling the DC
-            // value toward 128 instead of the real neighbour average.
+            // §8.3.2.2.3 / FFmpeg pred8x8l_dc: the average is taken over the
+            // FILTERED neighbour samples (`t0..t7` / `l0..l7`, exactly like
+            // the vertical/horizontal arms), with the same per-side fallback
+            // as the 4×4 DC mode when one side is entirely unavailable.
+            // (FFmpeg's LOAD_TOP/LOAD_LEFT macros produce the filtered values;
+            // using the raw `tval`/`lval` samples here diverges by ±1 on real
+            // content.)
             let top_avail = top[0..8].iter().any(|s| s.is_some());
             let left_avail = left.iter().any(|s| s.is_some());
             let dc = if top_avail && left_avail {
-                (lval(0)
-                    + lval(1)
-                    + lval(2)
-                    + lval(3)
-                    + lval(4)
-                    + lval(5)
-                    + lval(6)
-                    + lval(7)
-                    + tval(0)
-                    + tval(1)
-                    + tval(2)
-                    + tval(3)
-                    + tval(4)
-                    + tval(5)
-                    + tval(6)
-                    + tval(7)
-                    + 8)
+                (t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7 + l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7 + 8)
                     >> 4
             } else if top_avail {
-                (tval(0) + tval(1) + tval(2) + tval(3) + tval(4) + tval(5) + tval(6) + tval(7) + 4)
-                    >> 3
+                (t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7 + 4) >> 3
             } else if left_avail {
-                (lval(0) + lval(1) + lval(2) + lval(3) + lval(4) + lval(5) + lval(6) + lval(7) + 4)
-                    >> 3
+                (l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7 + 4) >> 3
             } else {
                 R
             };
