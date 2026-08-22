@@ -128,7 +128,7 @@ const CABAC_CBP_UNAVAILABLE: u16 = 0x7CF;
 /// lookups (§9.3.3.1.1.6/7). Stores per-4×4-block |mvd| (capped at 70) and
 /// ref_idx>0 flags so adjacent MBs can derive `amvd_sum` / `refIdxZeroFlag`.
 ///
-/// Layout: `l0_mvd_abs[blk][0]` = |mvd_l0[x]|, `[blk][1]` = |mvd_l0[y]|.
+/// Layout: `l0_mvd_abs[blk][0]` = `|mvd_l0[x]|`, `[blk][1]` = `|mvd_l0[y]|`.
 /// For skipped MBs or intra MBs all fields are zero / false.
 #[derive(Clone, Copy, Default)]
 pub struct MbInterCabacCtx {

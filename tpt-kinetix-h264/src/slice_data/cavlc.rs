@@ -175,6 +175,30 @@ pub(crate) fn mpm_pred_mode(
 /// 0,4,8,12). The left/above 8x8 neighbours are therefore resolved explicitly.
 /// The mode of a neighbour 8x8 block is read from its top-left 4x4 sub-block,
 /// where it has been replicated.
+/// Resolve one MPM neighbour side from a cross-MB context: unavailable /
+/// forced-DC / the exact adjacent 4×4 sub-block mode `(r, c)` of the
+/// neighbour MB (see `mpm_pred_mode_8x8`).
+fn side_cross(
+    pred_ctx_grid: &[MbPredCtx],
+    idx: Option<usize>,
+    r: usize,
+    c: usize,
+) -> NeighbourSide {
+    match idx {
+        Some(li) => {
+            let n = &pred_ctx_grid[li];
+            if !n.present {
+                NeighbourSide::Unavailable
+            } else if n.is_intra4x4 {
+                NeighbourSide::Real(n.modes[raster_of_8x8_sub(r, c)] as u8)
+            } else {
+                NeighbourSide::ForcedDc
+            }
+        }
+        None => NeighbourSide::Unavailable,
+    }
+}
+
 pub(crate) fn mpm_pred_mode_8x8(
     pred_ctx_grid: &[MbPredCtx],
     mb_x: u32,
@@ -185,42 +209,45 @@ pub(crate) fn mpm_pred_mode_8x8(
     nctx: NeighbourCtx,
 ) -> u8 {
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
-    let left = if i8 == 1 || i8 == 3 {
-        // Left neighbour is the same-MB 8×8 block one column to the left:
-        // i8=1 → i8=0 (top-left), i8=3 → i8=2 (bottom-left).
-        NeighbourSide::Real(modes[raster_of_8x8_sub(i8 - 1, 0)] as u8)
-    } else if let Some(li) = left_idx {
-        let n = &pred_ctx_grid[li];
-        if !n.present {
-            NeighbourSide::Unavailable
-        } else if n.is_intra4x4 {
-            // Left of i8=0 → right column of left MB = i8=1 (top-right).
-            // Left of i8=2 → right column of left MB = i8=3 (bottom-right).
-            NeighbourSide::Real(n.modes[raster_of_8x8_sub(i8 + 1, 0)] as u8)
-        } else {
-            NeighbourSide::ForcedDc
-        }
-    } else {
-        NeighbourSide::Unavailable
+    // Cross-MB neighbour 8×8 blocks follow the 4×4-grid adjacency of the
+    // block's top-left 4×4 sub-block (spec §8.3.2.1.2; FFmpeg's
+    // `pred_intra_mode(h, sl, i8x8*4)` reads `cache[scan8[n]-1]` /
+    // `cache[scan8[n]-8]`, i.e. the left MB's right-column / top MB's
+    // bottom-row 4×4 entry adjacent to that sub-block):
+    //   i8=0 (blk 0 at row0,col0): left = left MB idx3  (their 8×8 blk 0),
+    //                              top  = top MB  idx12 (their 8×8 blk 3)
+    //   i8=2 (blk 8 at row2,col0): left = left MB idx11 (their 8×8 blk 2),
+    //                              top  = own blk 0
+    //   i8=1 (blk 4 at row0,col2): left = own blk 0,
+    //                              top  = top MB  idx14 (their 8×8 blk 3)
+    //   i8=3 (blk12 at row2,col2): left = own blk 2, top = own blk 1
+    // Cross-MB / same-MB neighbour 8×8 blocks follow FFmpeg's `pred_intra_mode`
+    // over the physical scan8 cache layout (h264dec.h `scan8[]`): each
+    // quadrant's most-probable-mode reads the 4×4 entry immediately left of /
+    // above its top-left sub-block. Quadrant top-left blocks are idx 0,4,8,12
+    // at physical (row,col) (0,0),(0,2),(2,0),(2,2):
+    //   q0 (idx0):  A = left MB row0 right-col entry = their blk3  = sub(0,3)
+    //               B = top MB bottom-row col0      = their blk12 = sub(3,0)
+    //   q1 (idx4):  A = own blk1   = sub(0,1)
+    //               B = top MB bottom-row col2     = their blk14 = sub(3,2)
+    //   q2 (idx8):  A = left MB row2 right-col     = their blk11 = sub(2,3)
+    //               B = own blk2   = sub(0,2)
+    //   q3 (idx12): A = own blk9   = sub(2,1)
+    //               B = own blk6   = sub(1,2)
+    // Exact sub-blocks matter when the neighbour is plain Intra_4×4 (whose
+    // four sub-blocks carry independent modes).
+    let left = match i8 {
+        0 => side_cross(pred_ctx_grid, left_idx, 0, 3),
+        1 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 1)] as u8),
+        2 => side_cross(pred_ctx_grid, left_idx, 2, 3),
+        _ => NeighbourSide::Real(modes[raster_of_8x8_sub(2, 1)] as u8),
     };
 
-    let top = if i8 == 2 || i8 == 3 {
-        // Top neighbour is the same-MB 8×8 block one row above:
-        // i8=2 → i8=0 (top-left), i8=3 → i8=1 (top-right).
-        NeighbourSide::Real(modes[raster_of_8x8_sub(i8 - 2, 0)] as u8)
-    } else if let Some(ti) = top_idx {
-        let n = &pred_ctx_grid[ti];
-        if !n.present {
-            NeighbourSide::Unavailable
-        } else if n.is_intra4x4 {
-            // Top of i8=0 → bottom row of top MB = i8=2 (bottom-left).
-            // Top of i8=1 → bottom row of top MB = i8=3 (bottom-right).
-            NeighbourSide::Real(n.modes[raster_of_8x8_sub(i8 + 2, 0)] as u8)
-        } else {
-            NeighbourSide::ForcedDc
-        }
-    } else {
-        NeighbourSide::Unavailable
+    let top = match i8 {
+        0 => side_cross(pred_ctx_grid, top_idx, 3, 0),
+        1 => side_cross(pred_ctx_grid, top_idx, 3, 2),
+        2 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 2)] as u8),
+        _ => NeighbourSide::Real(modes[raster_of_8x8_sub(1, 2)] as u8),
     };
 
     let dc_predicted = left == NeighbourSide::Unavailable || top == NeighbourSide::Unavailable;

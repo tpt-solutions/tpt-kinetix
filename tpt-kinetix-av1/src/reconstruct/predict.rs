@@ -545,6 +545,8 @@ fn predict_directional(
     avail_h: usize,
 ) {
     let nominal_angle = match mode {
+        V_PRED => 90,
+        H_PRED => 180,
         D45_PRED => 45,
         D67_PRED => 67,
         D113_PRED => 113,
@@ -688,28 +690,30 @@ pub(super) fn predict_intra_block(
     let (top, left, tl) = (top.as_slice(), left.as_slice(), *tl);
     match mode {
         DC_PRED => predict_dc(top, left, w, h, *have_above, *have_left, out),
-        V_PRED => predict_vertical(top, w, h, out),
-        H_PRED => predict_horizontal(left, w, h, out),
+        V_PRED if angle_delta == 0 => predict_vertical(top, w, h, out),
+        H_PRED if angle_delta == 0 => predict_horizontal(left, w, h, out),
         PAETH => predict_paeth(top, left, tl, w, h, out),
         SMOOTH_V => predict_smooth_v(top, left, tl, w, h, out),
         SMOOTH_H => predict_smooth_h(top, left, tl, w, h, out),
         SMOOTH => predict_smooth(top, left, tl, w, h, out),
-        D45_PRED | D135_PRED | D113_PRED | D157_PRED | D207_PRED | D67_PRED => predict_directional(
-            mode,
-            top,
-            left,
-            tl,
-            w,
-            h,
-            out,
-            enable_intra_edge_filter,
-            is_luma,
-            angle_delta,
-            *have_above,
-            *have_left,
-            avail_w,
-            avail_h,
-        ),
+        V_PRED | H_PRED | D45_PRED | D135_PRED | D113_PRED | D157_PRED | D207_PRED | D67_PRED => {
+            predict_directional(
+                mode,
+                top,
+                left,
+                tl,
+                w,
+                h,
+                out,
+                enable_intra_edge_filter,
+                is_luma,
+                angle_delta,
+                *have_above,
+                *have_left,
+                avail_w,
+                avail_h,
+            )
+        }
         _ => predict_dc(top, left, w, h, *have_above, *have_left, out),
     }
 }

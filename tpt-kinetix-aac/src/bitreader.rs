@@ -3,7 +3,7 @@
 //! AAC raw data blocks, ADTS payloads, and `AudioSpecificConfig` blobs are read
 //! MSB-first (the most-significant bit of each byte is consumed first), matching
 //! the AAC / ISO 14496-3 bitstream convention. The API deliberately mirrors
-//! [`tpt_kinetix_h264::bitreader`] (MSB-first, `Option`-returning fallible
+//! `tpt_kinetix_h264::bitreader` (MSB-first, `Option`-returning fallible
 //! reads, bit-position bookkeeping) so the two codecs share the same reader
 //! ergonomics, and adds the AAC-specific "escape value" helpers used by the
 //! section and spectral-data syntax.

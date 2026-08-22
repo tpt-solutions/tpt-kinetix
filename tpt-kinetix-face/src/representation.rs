@@ -5,7 +5,7 @@
 //!
 //! - **Primary:** a parametric **3D Morphable Model (3DMM)** coefficient vector
 //!   (identity / expression / pose / illumination / appearance). Carried by
-//!   [`FaceParams`]; rendered by the DECISION-2 deterministic rasterizer.
+//!   [`crate::FaceParams`]; rendered by the DECISION-2 deterministic rasterizer.
 //! - **Companion:** a **sparse-landmark** vector as a lowest-bitrate mode /
 //!   avatar-drive signal (additive framing; never the sole v1 target).
 //! - **Deferred:** a **learned latent code** to v2 — it would make the decoder
@@ -30,7 +30,7 @@ use std::fmt;
 pub enum FaceRepresentation {
     /// 3D Morphable Model coefficient vector — the v1 canonical representation.
     ///
-    /// Maps 1:1 onto [`FaceParams`] (identity / expression / pose /
+    /// Maps 1:1 onto [`crate::FaceParams`] (identity / expression / pose /
     /// illumination / appearance). Self-contained decode: the decoder renders
     /// from the vector plus a fixed, versioned 3DMM asset — no source frame
     /// needed (DECISION 1, Alternative A).

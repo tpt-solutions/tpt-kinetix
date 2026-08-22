@@ -452,6 +452,9 @@ struct TileDecodeState<'a> {
     /// Frame-header `allow_screen_content_tools` — gates whether
     /// `palette_mode_info()` (§5.11.46) is read at all for a block.
     allow_screen_content_tools: bool,
+    /// Frame-header `allow_intrabc` (§5.9.19) — when true a 1-bit
+    /// `use_intrabc = f(1)` is read before `y_mode` in every intra block.
+    allow_intrabc: bool,
     /// `PaletteColors[0]` of the most recently decoded palette-Y block at
     /// each `mi_col`/`mi_row` (empty = no palette / not yet decoded), used by
     /// [`Self::get_palette_cache`] (§5.11.46's `get_palette_cache`) and by
@@ -567,6 +570,7 @@ impl<'a> TileDecodeState<'a> {
         enable_filter_intra: bool,
         enable_intra_edge_filter: bool,
         allow_screen_content_tools: bool,
+        allow_intrabc: bool,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
         reference_select: bool,
@@ -645,6 +649,7 @@ impl<'a> TileDecodeState<'a> {
             enable_filter_intra,
             enable_intra_edge_filter,
             allow_screen_content_tools,
+            allow_intrabc,
             palette_y_colors_above: vec![Vec::new(); mi_cols],
             palette_y_colors_left: vec![Vec::new(); mi_rows],
             palette_u_colors_above: vec![Vec::new(); mi_cols],
@@ -690,6 +695,7 @@ pub fn decode_tile_group(
     enable_filter_intra: bool,
     enable_intra_edge_filter: bool,
     allow_screen_content_tools: bool,
+    allow_intrabc: bool,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
     reference_select: bool,
@@ -783,6 +789,7 @@ pub fn decode_tile_group(
         enable_filter_intra,
         enable_intra_edge_filter,
         allow_screen_content_tools,
+        allow_intrabc,
         frame_is_intra,
         allow_high_precision_mv,
         reference_select,
@@ -996,6 +1003,7 @@ pub fn reconstruct_av1_frame(
                 seq.enable_filter_intra,
                 seq.enable_intra_edge_filter,
                 frame_header.allow_screen_content_tools,
+                frame_header.allow_intrabc,
                 frame_is_intra,
                 frame_header.allow_high_precision_mv,
                 frame_header.reference_select,

@@ -1,6 +1,6 @@
 //! Parameter-vector codec (DECISION 3 implementation-order step 3).
 //!
-//! Carries the [`FaceParams`] groups (DECISION 1) to the synthesizer. The
+//! Carries the [`crate::FaceParams`] groups (DECISION 1) to the synthesizer. The
 //! load-bearing structure: **identity is sent once per call (key frame);
 //! per-frame payloads are expression/pose/illumination/appearance deltas** —
 //! that delta coding is what makes the codec compress talking heads.
@@ -184,7 +184,7 @@ fn decode_group(
     Ok(out)
 }
 
-/// Encodes / decodes a [`FaceParams`] vector as the rANS-coded frame payload.
+/// Encodes / decodes a [`crate::FaceParams`] vector as the rANS-coded frame payload.
 ///
 /// Group order on the wire is fixed: `[identity, expression, pose,
 /// illumination, appearance]`. A key frame carries all five; an inter frame
@@ -235,7 +235,7 @@ impl FaceParamCodec {
         Ok(RansStreamSet::frame(&streams)?)
     }
 
-    /// Decode a frame's rANS payload back into a [`FaceParams`].
+    /// Decode a frame's rANS payload back into a [`crate::FaceParams`].
     ///
     /// For an inter frame, `setup_identity` must supply the identity vector from
     /// the preceding key/setup frame; otherwise [`FaceParamError::MissingIdentity`]

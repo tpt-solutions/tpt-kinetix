@@ -658,7 +658,7 @@ fn idct_8x8(block: &[i32; 64]) -> [i32; 64] {
 /// samples in raster order.
 ///
 /// Dequantisation mirrors the 4×4 path but uses the 8×8 `LevelScale8x8`
-/// ([`DEQUANT8_LEVEL`] scaled by the active picture's scaling list) and a base
+/// (`DEQUANT8_LEVEL` scaled by the active picture's scaling list) and a base
 /// `qbits` of 6 (spec §8.5.12.1):
 /// - `qP/6 >= 6`: `d = c * LevelScale8x8 << (qP/6 - 6)`
 /// - `qP/6 <  6`: `d = (c * LevelScale8x8 + 2^(5-qP/6)) >> (6-qP/6)`

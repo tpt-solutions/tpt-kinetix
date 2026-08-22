@@ -94,7 +94,7 @@ impl SequenceFlags {
 pub struct FrameFlags {
     /// `false` = key (full vector incl. identity), `true` = inter (deltas only).
     pub inter: bool,
-    /// Whether [`FrameHeader::group_qp_override`] is present in this frame.
+    /// Whether `group_qp_override` is present in this frame.
     pub has_qp_override: bool,
 }
 

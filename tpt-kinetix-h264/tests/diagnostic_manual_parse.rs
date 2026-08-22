@@ -70,7 +70,13 @@ fn read_bit_log(r: &mut BitReader, name: &str) -> bool {
     val == 1
 }
 
+/// Manual diagnostic tool: shells out to a system `ffmpeg` binary to
+/// generate a fixture, so it fails wherever ffmpeg isn't installed (e.g.
+/// CI). Ignored — run manually with
+/// `cargo test --test diagnostic_manual_parse -- --ignored` on a machine
+/// with ffmpeg available.
 #[test]
+#[ignore]
 fn manual_parse_single_mb() {
     let annexb = gen_single_mb_h264();
     let units = nal::parse_nal_units_from_annexb(&annexb);

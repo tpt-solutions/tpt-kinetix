@@ -17,7 +17,7 @@ use crate::bitreader::BitReader;
 /// One CABAC context variable: probability state index and most-probable-symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CabacContext {
-    /// `pStateIdx` in the spec: index into [`RANGE_TAB_LPS`] / [`TRANS_IDX_LPS`], 0..=63.
+    /// `pStateIdx` in the spec: index into `RANGE_TAB_LPS` / `TRANS_IDX_LPS`, 0..=63.
     pub state: u8,
     /// `valMPS` in the spec: the most-probable-symbol value, 0 or 1.
     pub mps: u8,
@@ -784,7 +784,7 @@ impl MbSkipNeighbors {
 /// different values at ctxIdx 11 -- see
 /// `cabac_tables::tests::pb1_and_pb2_mb_skip_flag_p_differs_from_pb0`), so
 /// the fix reads directly from the verified, fetched `CABAC_CTX_INIT_PB*`
-/// tables via [`init_pb_ctx`] instead of duplicating numbers into a
+/// tables via `init_pb_ctx` instead of duplicating numbers into a
 /// separate local const (eliminating this whole class of transcription bug
 /// for this syntax element going forward).
 pub struct MbSkipFlagContext {
@@ -1170,12 +1170,12 @@ impl MvdCabacContext {
 /// [`crate::cabac_tables::MB_TYPE_B_CTX`]). Ported from FFmpeg's inline
 /// B-slice `mb_type` dispatch (`cabac_state[27+ctx]` for `ctx` 0..=5):
 ///
-/// - ctx[0] (ctxIdx 27): 0 → B_Direct_16x16 (type 0)
-/// - ctx[1] (ctxIdx 28): 0 → types 1/2 (L0/L1 16x16), selected by ctx[2]
-/// - ctx[2] (ctxIdx 29): used for types 1/2 and 3/4 branches
-/// - ctx[3] (ctxIdx 30): used for types 3/4 and 5/6 branches
-/// - ctx[4] (ctxIdx 31): reused for all types 7..=21 pair-wise decisions
-/// - ctx[5] (ctxIdx 32): final inter/intra gate (0 → B_8x8=type22, 1 → intra)
+/// - `ctx[0]` (ctxIdx 27): 0 → B_Direct_16x16 (type 0)
+/// - `ctx[1]` (ctxIdx 28): 0 → types 1/2 (L0/L1 16x16), selected by `ctx[2]`
+/// - `ctx[2]` (ctxIdx 29): used for types 1/2 and 3/4 branches
+/// - `ctx[3]` (ctxIdx 30): used for types 3/4 and 5/6 branches
+/// - `ctx[4]` (ctxIdx 31): reused for all types 7..=21 pair-wise decisions
+/// - `ctx[5]` (ctxIdx 32): final inter/intra gate (0 → B_8x8=type22, 1 → intra)
 ///   — ctxIdx 32 is also the base of [`IntraMbTypeSuffixCabacContext::new_pb`]
 ///   for B slices, following the same mutual-exclusion pattern as ctxIdx 17 on
 ///   the P-slice path.

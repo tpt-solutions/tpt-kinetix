@@ -52,6 +52,23 @@ impl<'a> TileDecodeState<'a> {
                 == 1
         };
 
+        // AV1 spec §5.11.7: when allow_intrabc, read use_intrabc = f(1) before
+        // y_mode. Not reading this bit desyncs y_mode and every subsequent read
+        // by 1 bit for every block in the tile — a progressive, accumulating
+        // corruption.
+        if self.allow_intrabc {
+            let use_intrabc = self.dec.read_literal(1);
+            if use_intrabc == 1 {
+                // IBC block: full decode (MV read + block-copy reconstruction)
+                // is not yet implemented. Return an error so the frame is
+                // flagged not-pixel-exact rather than producing garbage from
+                // a desynced bitstream.
+                return Err(KinetixError::Parse(
+                    "intra block copy (use_intrabc=1) not yet implemented".into(),
+                ));
+            }
+        }
+
         // Intra luma mode (keyframe path, AV1 spec §5.11.9 / §8.3.2
         // `intra_frame_y_mode`): `TileIntraFrameYModeCdf[abovemode][leftmode]`,
         // each index used *directly* as its own axis of the 2-D context — not

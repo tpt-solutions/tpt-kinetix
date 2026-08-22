@@ -46,7 +46,13 @@ impl DecodeTracer for DumpTracer {
     }
 }
 
+/// Manual diagnostic tool: reads fixture files left behind by a prior
+/// `just corpus-check` / conformance run from the OS temp dir. Not a
+/// standalone regression test — ignored so CI (which has no such temp
+/// state) doesn't fail on a missing-file error. Run manually with
+/// `cargo test --test diag_recon -- --ignored` after `just corpus-check`.
 #[test]
+#[ignore]
 fn diag() {
     let dir = std::env::temp_dir().join("tpt_kinetix_h264_conformance");
     let annexb = std::fs::read(dir.join("t_nodblk.h264")).unwrap();

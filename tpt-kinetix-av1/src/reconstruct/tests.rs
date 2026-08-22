@@ -40,6 +40,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         false,
         false,
         false,
+        false, // allow_intrabc
         true,
         false,
         false,

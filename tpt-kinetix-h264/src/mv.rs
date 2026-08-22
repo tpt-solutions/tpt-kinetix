@@ -6,7 +6,7 @@
 //! `match_count` rules of §8.4.1.3.1, including the directional shortcuts for
 //! 16×8 / 8×16 partitions (§8.4.1.3.1) and the P-skip MVP of §8.4.1.1.
 //!
-//! The semantics follow [`libavcodec/h264_mvpred.h`](ffmpeg) and the reference
+//! The semantics follow `libavcodec/h264_mvpred.h` (ffmpeg) and the reference
 //! `rust_h264` decoder. Only progressive (non-MBAFF) pictures are handled;
 //! MBAFF frame/field pair remapping is out of scope. Unavailable neighbours
 //! are `None` (ffmpeg `PART_NOT_AVAILABLE`); decoded intra macroblocks are
