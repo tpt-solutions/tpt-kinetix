@@ -135,6 +135,19 @@
        compensation lands (the reconstruction pipeline still returns `Ok(None)` for
        non-intra frames, so inter decode is not yet enabled).
 - [ ] Motion vector prediction (§7.10) and inter block reconstruction (§7.11.3)
+- [ ] **Real gap found 2026-08-23 (currently inert on the corpus):**
+      `decode_intra_block` never calls `read_cdef()`/`read_delta_qindex()`/
+      `read_delta_lf()` (spec's `intra_frame_mode_info()` calls all three
+      right after `read_skip()`) — these three functions don't exist in the
+      crate at all. Doesn't affect the current 5-entry corpus (all have
+      `cdef_bits == 0`, `delta_q_present == delta_lf_present == false`, so
+      each function's own spec gate makes it consume zero bits either way —
+      confirmed via `DBG frame_header`), but will desync any future stream
+      that turns on CDEF index signaling or per-block delta-q/delta-lf.
+      Needs new `TileDecodeState` fields (`cdef_idx` grid reset per 64×64
+      unit, `ReadDeltas`/current-qindex/current-loop-filter tracking reset
+      per superblock) plus the three read functions and their own tests —
+      scope it as its own task, not a one-line fix.
 
 #### AV1 Phase F — parallel tile decode — **DONE (2026-08-14)**
 - [x] Wire `rayon` over the tile groups now that Phase A–C produce real per-tile
@@ -1682,4 +1695,339 @@
 > `tools/av1_oracle/diff_block.py` (capture-format + `_seed_ctx`),
 > `justfile` (`av1-capture`), `.gitignore` (`av1_capture.json`). No `git commit`
 > calls were made.
+
+> **2026-08-23 session note (cont'd) — the CDF-snapshot extension mentioned as
+> "a future extension" above was actually already committed (by the concurrent
+> automated process — see [[project_concurrent_repo_activity]] in memory) in
+> `3eac457`, but it **didn't compile**: `cargo build -p tpt-kinetix-av1` failed
+> with 30 errors (two literal syntax errors — `Vec<Vec<Vec<Vec<u16>>>` missing
+> a closing `>` in both `coeff.rs`'s `TileCdfSnapshot` struct and `entropy.rs`'s
+> `json_nest4_u16`/`json_nest3_u16` — plus every `clone_eob22`/`clone4`/etc.
+> helper in `coeff.rs` hard-coded a *single* array shape and was called on
+> fields with several different real shapes (`eob_pt_32` is `[[[u16;7]-;2];2]`,
+> not `6`; `coeff_base` is `[[[[u16;5];42];2];5]`, not `[4;4]`; etc.), and the
+> `unclone_*` helpers returned `Vec<[...]>` where the field they were assigned
+> to is a fixed-size array. **Fixed**: replaced all fourteen shape-specific
+> `clone_*`/`unclone_*` functions with four const-generic ones
+> (`clone2`/`unclone2`/`clone3`/`unclone3`/`clone4`/`unclone4` in `coeff.rs`,
+> parameterized over each dimension), fixed the two syntax errors, and fixed
+> the two `json_nest3_u16`/`json_nest4_u16` call sites in `entropy.rs` that
+> passed a bare function where a `Vec`-typed closure was needed. Whole
+> workspace now builds (`cargo build --workspace` clean) and
+> `cargo test -p tpt-kinetix-av1 --lib` is 90/90 again.
+>
+> **With the build fixed, ran the CDF-snapshot bridge for real for the first
+> time and found the actual documented "not yet separated" confound was
+> itself buggy in two ways**, not just incomplete:
+> 1. `maybe_capture_block` was called **after** `read_coeffs(dec, cdfs, ctxs,
+>    blk)` returned, but took its `ctxs`/`cdfs` snapshots from the same
+>    (now-mutated) objects — so the capture recorded this exact block's own
+>    *post*-read neighbour-context and CDF-adaptation state, not the state the
+>    real decoder had when it actually made this block's reads. Fixed by
+>    snapshotting `ctxs.ctx_snapshot()`/`cdfs.cdf_snapshot()` **before** the
+>    `read_coeffs` call in `reconstruct_block.rs`, threading the pre-state
+>    snapshots into a resignatured `maybe_capture_block`/new
+>    `entropy::should_capture` (the match-target check factored out so the
+>    (now relatively expensive) snapshot clones are skipped whenever
+>    `KINETIX_AV1_CAPTURE` doesn't name this exact block).
+> 2. **The more consequential bug**: the capture recorded raw tile bytes from
+>    the block's starting *bit offset* and had the oracle reconstruct
+>    `symbol_range`/`symbol_value` by re-running `init_symbol` on those bytes
+>    (`SymbolDecoder::new`). `init_symbol` always forces `symbol_range = 1 <<
+>    15` — correct only at a genuine stream start. Mid-tile, spec
+>    §8.2.6's renormalization (`bits = 15 - floor_log2(range); range <<=
+>    bits`) only guarantees `symbol_range ∈ [1<<15, 1<<16)`, not exactly
+>    `32768` — so re-deriving it from raw bytes at an arbitrary bit offset
+>    silently assumes the wrong starting range/value whenever the true value
+>    isn't exactly `32768`, corrupting every read from that point on **even
+>    though the real decoder's CDF tables, context derivation, and read order
+>    were all correct**. This is very likely why several previous sessions'
+>    manual/capture-based tracing kept finding "divergences" in the coeff path
+>    that never led anywhere conclusive. Fixed by adding
+>    `SymbolDecoder::raw_state()` (exposes `symbol_range`/`symbol_value`/
+>    `symbol_max_bits`/`bit_pos` directly, captured pre-`read_coeffs` alongside
+>    the ctx/cdf snapshots) and a new `SymbolDecoder.from_raw_state(...)`
+>    classmethod in `tools/av1_oracle/symbol_decoder.py` that resumes from
+>    those exact values instead of re-deriving them; `diff_block.py` uses it
+>    whenever the capture has `symbol_range`/`symbol_value` fields.
+>
+> **Validated on two blocks, both now report `TRACE MATCHES REFERENCE`**
+> (previously, with the buggy bridge, both reported a divergence at the first
+> post-`all_zero` symbol):
+> - `mandelbrot`'s standing NOFILTER-divergence block (`plane=0 px=(64,0)
+>   tx=16x4`, the one `todo-av1.md` has been chasing since 2026-08-19/20):
+>   `just av1-capture 0:64:0 mandelbrot` now matches exactly.
+> - `testsrc`'s **very first block of the very first frame**
+>   (`plane=0 px=(0,0) tx=8x8`), which is also where `av1_symbol_trace_diff`
+>   reports the corpus's worst divergence (`kinetix=129 dav1d=16`, delta 113,
+>   unaffected by `KINETIX_AV1_NOFILTER`): `just av1-capture 0:0:0 testsrc`
+>   also matches exactly.
+>
+> **This redirects the root-cause hypothesis that has stood since 2026-08-15
+> ("a symbol-decoder desync in the intra block path... the `read_coeffs` unit
+> tests still pass in isolation, so the desync is in the integration
+> context").** With the bridge now correctly validating the *actual* mid-tile
+> integration context (real adapted CDFs, real neighbour contexts, real
+> arithmetic-coder state) rather than a broken approximation of it, and both a
+> previously-flagged mandelbrot block and testsrc's very first block coming
+> back bit-for-bit correct symbol-for-symbol, coeffs()'s reads — including
+> context derivation, CDF adaptation, and transform-type/tx_size selection —
+> are looking like they are NOT the dominant bug for at least these two
+> blocks. Since testsrc's very first pixel is already wrong (129 vs 16) with
+> `KINETIX_AV1_NOFILTER=1` (ruling out deblock/CDEF) and its `coeffs()` read is
+> now proven correct, **the bug for that block must be downstream of
+> `read_coeffs`**: dequantization (`dequantize_coeffs`), inverse transform
+> (`inverse_transform` — the tx_type read at that block was `11` = `V_DCT`,
+> not `DCT_DCT`, so this exercises the ADST/flip/identity transform paths, not
+> just the well-tested DC-only case), or intra prediction. **Next session
+> should**: (1) re-run `av1-capture` on a `KINETIX_AV1_DBG`-style
+> instrumented path through `dequantize_coeffs`/`inverse_transform`/
+> `predict_intra_block` for testsrc's first block specifically (mode=0=DC_PRED,
+> tx_type=11=V_DCT, eob=23, 4 nonzero coeffs) and hand-verify the dequant +
+> V_DCT inverse-transform output against a hand computation, since that's now
+> the narrowest remaining unverified stage for this exact block; (2) extend
+> `av1-capture`/`diff_block.py` to optionally also replay dequant+transform
+> (not just entropy symbols) so this doesn't require hand computation every
+> time; (3) once the bridge is trusted (it now is, for coeffs()), consider
+> retiring `mi=(0,8)`/`px=(32,8)` `mandelbrot_128x96`-era leads in this file
+> that predate the bridge fix — they were traced with the same broken
+> resume-state assumption and may have been chasing symbol values that were
+> never actually wrong.
+>
+> `cargo test -p tpt-kinetix-av1 --lib` is green (90/90, no new tests this
+> session — the fixes are to debug-only capture plumbing with no unit-test
+> coverage of their own yet; a `raw_state`-round-trip regression test would be
+> a reasonable thing to add before extending the bridge further).
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` and
+> `cargo build --workspace` are both clean. `capabilities().pixel_exact`
+> untouched (still `false`, correctly — this session narrowed the search, it
+> did not reach bit-exactness). Modified this session:
+> `tpt-kinetix-av1/src/coeff.rs` (const-generic clone helpers, build fix),
+> `tpt-kinetix-av1/src/entropy.rs` (`raw_state`, `should_capture`,
+> pre-state-based `maybe_capture_block`, `json_nest3/4_u16` call-site fix),
+> `tpt-kinetix-av1/src/reconstruct/reconstruct_block.rs` (pre-call snapshot
+> timing), `tools/av1_oracle/symbol_decoder.py` (`from_raw_state`),
+> `tools/av1_oracle/diff_block.py` (uses `from_raw_state` when available). No
+> `git commit` calls were made.
+
+> **2026-08-23 session note (cont'd again) — chased testsrc's first-block
+> desync further with the fixed bridge; found and reverted a wrong "fix";
+> hand-verified three more stages are correct for this exact block; root
+> cause still open.** Picked the narrowest lead the previous note left:
+> testsrc's very first block (`plane=0 px=(0,0)`, `tx=8x8`, `y_mode=DC_PRED`,
+> `filter_intra=Some(2)`, `tx_type=11=H_DCT`, coefficients only at raster
+> positions 26/50/56/57) has a verified-correct `coeffs()` trace, yet
+> `KINETIX_AV1_NOFILTER=1` still shows `Y(0,0) = 129` vs `dav1d`'s `16`.
+>
+> - **Suspected and tested `get_scan`'s `Mrow`/`Mcol` selection
+>   (`coeff_tables.rs`)** — for `H_DCT`/`H_ADST`/`H_FLIPADST`
+>   (`TX_CLASS_HORIZ`), the code picks `Mcol_Scan` (column-major); for
+>   `V_DCT`/etc (`TX_CLASS_VERT`), `Mrow_Scan` (row-major). This looked
+>   backwards against a remembered libaom variable-naming convention, so
+>   swapped it as an experiment. **This was wrong — swapping it made
+>   `testsrc`'s first-pixel delta measurably *worse* (113 → 180) and
+>   regressed `mandelbrot`'s U/V PSNR (20.4/18.4 → 17.6/17.6 dB)**, which is
+>   what caught the mistake; reverted immediately (re-ran
+>   `av1-oracle-regen` + `av1-oracle-validate` + `cargo test --lib` after
+>   both the change and the revert to confirm each state). **Re-derived the
+>   correct mapping from first principles this time, independent of memory
+>   of any other codebase**: `TX_CLASS_HORIZ` (`H_DCT` etc) puts its DCT/ADST
+>   along the *width* axis per row (`row_axis_transform` in
+>   `reconstruct/transform.rs`) and identity down each column, so a
+>   coefficient's *column* index (not row) predicts its importance,
+>   uniformly across every row — independently confirmed by this same file's
+>   `SIG_REF_DIFF_OFFSET[TX_CLASS_HORIZ]` context-offset table, whose entries
+>   are `(0,1)/(0,2)/(0,3)/(0,4)` (same row, varying column). The scan that
+>   groups by column first is `Mcol_Scan` (verified against the literal
+>   table values: `MCOL_SCAN_8X8 = [0,8,16,...,56, 1,9,17,...]` — all of
+>   column 0 across every row, then column 1, ...), confirming the *original*
+>   mapping (now expressed via `get_tx_class` instead of raw `matches!` calls,
+>   a harmless clarity-only refactor) was correct all along. **Net code
+>   change from this whole detour: zero functional diff, clearer comments
+>   citing the cross-check.** Left as a cautionary note for future sessions:
+>   a "this looks backwards" instinct against a hazy memory of another
+>   codebase's naming is not sufficient justification for a change to an
+>   already-passing area — verify empirically (PSNR before/after) before
+>   trusting the instinct, exactly as happened here.
+> - **Hand-verified `dequantize_coeffs` + `inverse_transform` are correct**
+>   for this exact block's real captured coefficients (added, ran, then
+>   removed a scratch unit test computing `dequantize_coeffs`/
+>   `inverse_transform` directly from the captured `quant`/`tx_type`/
+>   `tx_size`): residual is genuinely `0` at `(row 0, col 0)` and only
+>   nonzero at rows 3/6/7 — an entirely legitimate consequence of `H_DCT`'s
+>   column-only frequency compaction (row axis is identity, so a block with
+>   no coefficient energy placed at row 0 by the scan simply reconstructs
+>   flat-zero there). This is not a transform bug.
+> - **Hand-verified `predict_filter_intra`** (`reconstruct/predict.rs`) for
+>   this exact block's actual border values (`top` all `127`, `left` all
+>   `129`, `tl = 128` — the spec §7.11.2's mandated substitution when neither
+>   neighbour is available, confirmed correct) and `filter_intra_mode = 2`:
+>   manually computed the first 4×2 sub-block's `Intra_Filter_Taps[2]`
+>   dot-products by hand and got `129` for every position in that sub-block,
+>   matching the decoder's actual `pred[0..8] = [129,129,...]` exactly. The
+>   filter-intra predictor is correctly computing what its (uniform,
+>   substituted) inputs mandate — not a predictor-math bug either.
+>
+> **So for this exact block: `coeffs()`, `dequantize_coeffs`/
+> `inverse_transform`, and `predict_filter_intra` are all now individually
+> hand-verified correct given their actual inputs, and the reconstructed
+> pixel (`128 pred + 0 residual` families rounding to `129`) is a real,
+> internally-consistent consequence of those inputs — not a downstream
+> bug.** Since `dav1d` reports `16` at the same pixel (nowhere near `127`/
+> `128`/`129`, the only three border-default values the whole prediction+
+> residual chain can plausibly emit for a corner block with no neighbours
+> and near-zero low-order coefficients), **the actual encoded content must
+> require a large coefficient this decode never sees** — meaning the bug is
+> upstream of all three verified stages, in mode/coefficient *symbol
+> selection itself*: either `use_filter_intra`/`filter_intra_mode` were
+> misread (spec-legal here, but maybe the real bitstream says `false` and a
+> CDF-table transcription bug in `DEFAULT_FILTER_INTRA_CDF`/
+> `DEFAULT_FILTER_INTRA_MODE_CDF` — unverified against the spec PDF this
+> session, no internet fetch was attempted — makes the decoder read `true`
+> instead), or an even earlier read (`segment_id`/`skip`/`y_mode`/
+> `partition`) is desynced for this specific superblock (unlike the
+> single-superblock `solid_red`/single-tile-friendly blocks validated
+> earlier, `testsrc` is `128x96` — multiple superblocks per tile — so
+> `hasRows`/`hasCols` partition edge cases or `skip_above`/`ymode_above`
+> neighbour-array bookkeeping across superblock boundaries are back in play
+> and were not part of this session's coeffs()-only bridge validation).
+>
+> **Next session should**: (1) fetch the AV1 spec PDF's
+> `Default_Filter_Intra_Cdf`/`Default_Filter_Intra_Mode_Cdf` tables and
+> byte-diff against `mode_cdfs.rs`'s transcription (cheap, rules out or
+> confirms one concrete hypothesis); (2) extend the Phase G.0 capture bridge
+> to cover the *mode* symbol sequence (`segment_id`/`skip`/`y_mode`/
+> `angle_delta`/`uv_mode`/`filter_intra`), not just `coeffs()` — this is the
+> "Part 1 oracle, full `intra_frame_mode_info()`" scope explicitly deferred
+> in the 2026-08-20 note, and is now more tractable since the raw-state
+> resume bug that would have poisoned it is fixed; (3) do not re-attempt the
+> `Mrow`/`Mcol` swap — it is now confirmed wrong twice (derivation and
+> measurement) and doesn't need a third look barring new evidence.
+>
+> `cargo test -p tpt-kinetix-av1 --lib` is green (90/90, no net test-count
+> change — the scratch test used to hand-verify the transform stage was
+> added and then removed in the same session, as this file's established
+> convention for throwaway investigation tests). `cargo clippy -p
+> tpt-kinetix-av1 --all-targets -- -D warnings` and `cargo build --workspace`
+> are both clean. `capabilities().pixel_exact` untouched (still `false`).
+> Modified this session (beyond the previous note's files):
+> `tpt-kinetix-av1/src/coeff_tables.rs` (comment-only net change to
+> `get_scan`, see above). `tools/av1_oracle/cdf_tables_gen.py` was
+> regenerated twice (once for the wrong swap, once for the revert) and ends
+> byte-identical to before this note. No `git commit` calls were made.
+
+> **2026-08-23 session note (cont'd a third time) — live spec-PDF fetches
+> against `testsrc`'s first-block sequence: every single table and
+> control-flow decision checked out; root cause still not found; one real
+> (but currently inert) gap found and documented.** This environment turns
+> out to have working internet access via `WebFetch`, which no prior AV1
+> session had used (earlier notes explicitly say "no internet fetch was
+> attempted"/building `dav1d` from source was "impractical" — fetching the
+> spec's own markdown mirror is much cheaper and doesn't require that).
+> Fetched `github.com/AOMediaCodec/av1-spec`'s `10.additional.tables.md` /
+> `06.bitstream.syntax.md` / `09.parsing.process.md` directly and byte-diffed
+> them against this crate's transcriptions for every table/function touched
+> by `testsrc`'s first block's full read sequence (partition ×3, skip,
+> y_mode, uv_mode, has_palette_y, filter_intra flag + mode, `intraDir`
+> derivation, `intra_tx_type`) — **all matched exactly**:
+> `Default_Partition_W64_Cdf`, `Default_Intra_Frame_Y_Mode_Cdf[0][0..2]`,
+> `Default_Skip_Cdf`, `Default_Uv_Mode_Cfl_Allowed_Cdf[0]`,
+> `Default_Filter_Intra_Cdf`, `Default_Filter_Intra_Mode_Cdf`,
+> `Filter_Intra_Mode_To_Intra_Dir`, `Default_Intra_Tx_Type_Set1_Cdf[1][0..2]`,
+> and the full `intra_frame_mode_info()` pseudocode's read order/gating
+> (confirmed against the spec's own function body, not memory). Also
+> traced the actual symbol sequence via a temporary debug dump (`git diff`
+> reverted — see below) confirming the live decode's context/bucket
+> selection at every one of those reads (partition contexts all `0`, correct
+> `w64`→`w32`→`w16` bucket progression via `PARTITION_CDF_LOOKUP`, correct
+> `intra_dir=2`/`H_PRED` from `filter_intra_mode=2`) matches what the spec
+> mandates given the block's actual decoded state. **This is the deepest
+> verification pass this investigation has had across all ~9 sessions**, and
+> it did not find a bug in any of it.
+>
+> **One real (but not-yet-impactful) gap found and left unfixed, deliberately
+> not rushed**: `decode_intra_block` (`reconstruct/intra_block.rs`) never
+> calls `read_cdef()`/`read_delta_qindex()`/`read_delta_lf()` between `skip`
+> and `y_mode`, even though `intra_frame_mode_info()`'s spec body (fetched
+> this session) calls all three unconditionally right after `read_skip()`.
+> These three functions don't exist anywhere in this crate at all — not just
+> unwired, genuinely unimplemented (`grep` for `read_cdef` finds nothing).
+> **This does not explain the current corpus's divergences**: for all 5
+> corpus entries, `cdef_bits == 0` and `delta_q_present == delta_lf_present
+> == false` (confirmed via the existing `DBG frame_header` trace), and each
+> of these three functions' own spec-mandated internal gate makes them
+> consume exactly **zero bits** in that configuration (`read_cdef` returns
+> immediately unless `enable_cdef` is on *and* the per-64×64 `cdef_idx` slot
+> is unset, then reads `L(cdef_bits)` which is a no-op read at `cdef_bits =
+> 0`; `read_delta_qindex`/`read_delta_lf` both start with `if (!delta_q/lf
+> _present) return`). So this is a real, confirmed-inert-for-now
+> correctness gap — it will desync every intra block in any future test
+> stream that turns on CDEF index signaling or per-block delta-q/delta-lf,
+> which real encoders do use. Left unimplemented rather than rushed: it
+> needs new per-tile state (`cdef_idx` grid reset every 64×64 unit,
+> `ReadDeltas`/current-qindex/current-loop-filter tracking reset per
+> superblock) that doesn't exist on `TileDecodeState` yet, and this session
+> had no reason to believe it was the active bug to justify the risk of a
+> hasty untested addition. Tracked here as a known, scoped, real gap for a
+> future session — not a "next debugging target" for the current
+> divergence, since it provably can't be causing it on this corpus.
+>
+> **Where this leaves the actual divergence.** With coeffs() (previous
+> note), and now the *entire* mode-parsing sequence up to and including
+> `intra_tx_type`, individually spec-verified correct for this exact block,
+> I attempted one more structural argument: `H_DCT`'s column-identity axis
+> means a coefficient-domain row with all-zero energy must reconstruct to
+> an all-zero *spatial* residual for that same row (verified by hand
+> earlier this session), and `testsrc`'s decoded coefficients have rows
+> 0/1/2/4/5 entirely zero — yet `dav1d`'s reference shows rows 0-3 of this
+> region as uniformly `16` (cols 0-15) / `81` (cols 16-23), which would
+> require *every* row to carry some shift, seemingly incompatible with
+> `H_DCT`. **This argument doesn't actually settle anything**: `dav1d`'s
+> output is the fully filtered (deblock+CDEF+restoration) frame, and there
+> is no way with tooling available in this session to get `dav1d`'s
+> *pre-filter* reconstruction to compare apples-to-apples (building `dav1d`
+> from source for a debug/trace build is still assessed as impractical, per
+> every prior session) — so the "H_DCT can't produce this" reasoning is
+> confounded by not knowing how much of the observed flatness is genuine
+> pre-filter structure versus CDEF/deblock smoothing on top of a real but
+> different pre-filter pattern. Recorded as a lead, not a conclusion.
+>
+> **Next session should**: (1) if internet access is confirmed to keep
+> working in future sessions, this WebFetch-based spec cross-check is now
+> the standard, cheap way to rule out table-transcription bugs — prefer it
+> over hand-copying spec PDF text as earlier sessions did; (2) the
+> `read_cdef`/`read_delta_qindex`/`read_delta_lf` gap above is real and
+> worth implementing properly for its own sake (broader stream
+> compatibility), scoped as new `TileDecodeState` fields + the three
+> functions, with its own unit tests — but budget it as separate work, not
+> as "the fix" for the open divergence; (3) the two remaining un-independently-
+> verified pieces of this exact block's read sequence are `has_chroma`'s
+> exact gating (confirmed structurally correct by inspection this session,
+> not independently spec-fetched) and the *skip* context derivation
+> (`(above_skip + left_skip).min(2)`, trivially `0` for this first block so
+> low-risk) — low priority given how much else has checked out; (4) the
+> highest-leverage remaining lever is still building an actual
+> pre-filter-comparable reference (either a `dav1d` debug build, or adding a
+> `KINETIX_AV1_NOFILTER`-equivalent probe into `ffmpeg`'s AV1 filtergraph if
+> one exists) so pixel-level reasoning about tx_type/coefficient plausibility
+> stops being confounded by post-filtering.
+>
+> Temporary debug instrumentation added and **kept** this session (all
+> opt-in via env vars, following the established zero-cost-when-unset
+> convention): `KINETIX_AV1_DBG_TILE_BYTES` (`reconstruct/mod.rs`, dumps a
+> tile's raw bytes from its real bit offset — needed to feed an independent
+> by-hand replay), `KINETIX_AV1_DBG_FIRST_READS` and `KINETIX_AV1_DBG_ROWS`
+> (`tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs`, dump the
+> first N symbol-trace entries / a small pixel patch from both decoders).
+> **Also fixed, incidentally**: `tpt-kinetix-h264/src/decoder/mod.rs` had a
+> genuine borrow-checker error (`recon.luma` moved then borrowed again for a
+> `KINETIX_DUMP_PREDEBLOCK` debug dump) that was blocking `cargo build
+> --workspace` entirely — this was mid-edit, uncommitted work from the
+> concurrent automated process (see `[[project_concurrent_repo_activity]]`
+> in memory), not something introduced this session; fixed by moving the
+> dump before the move rather than reverting their work. `cargo test -p
+> tpt-kinetix-av1 --lib` is green (90/90, unchanged). `cargo clippy -p
+> tpt-kinetix-av1 --all-targets -- -D warnings` and `cargo build --workspace`
+> are both clean. `capabilities().pixel_exact` untouched (still `false`).
+> No `git commit` calls were made.
 

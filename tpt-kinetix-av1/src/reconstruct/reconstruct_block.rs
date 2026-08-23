@@ -56,13 +56,37 @@ pub(super) fn reconstruct_tx_block(
         // Phase G.0 bridge: capture raw bytes + TxBlockCtx + Kinetix's own
         // symbol slice for the independent Python oracle
         // (tools/av1_oracle/diff_block.py) when KINETIX_AV1_CAPTURE names this
-        // block. Recorded *after* read_coeffs so the pre/post bit positions and
-        // the per-block trace slice are both known, which lets the oracle diff
-        // its independent re-decode against Kinetix's symbols for this block.
-        let pre_bit_pos = dec.bit_position();
+        // block. The context/CDF/raw-decoder-state snapshots are taken
+        // *before* read_coeffs — read_coeffs mutates `ctxs` (writes this
+        // block's own cul_level/dc_category into above_level/left_level),
+        // `cdfs` (CDF adaptation), and `dec` (symbol_range/symbol_value), so
+        // snapshotting after the call would hand the oracle this same
+        // block's own post-read state instead of the state the real decoder
+        // used to make its reads. The raw arithmetic-coder state
+        // (`symbol_range`/`symbol_value`) specifically must be captured
+        // directly rather than re-derived from raw bytes at this bit offset:
+        // `SymbolDecoder::new`'s `init_symbol` forces `symbol_range = 1 <<
+        // 15`, which only matches the real mid-tile value when the true
+        // range happens to already be exactly `32768` at this instant (it's
+        // otherwise anywhere in `[1 << 15, 1 << 16)` post-renormalization) —
+        // see `SymbolDecoder::raw_state`'s doc comment.
+        let pre_raw_state = dec.raw_state();
         let pre_trace_len = crate::entropy::symbol_trace_len_now();
+        let capture = crate::entropy::should_capture(blk);
+        let pre_ctx_snap = capture.then(|| ctxs.ctx_snapshot(blk.plane));
+        let pre_cdf_snap = capture.then(|| cdfs.cdf_snapshot());
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
-        crate::entropy::maybe_capture_block(dec, blk, ctxs, cdfs, qindex, pre_bit_pos, pre_trace_len);
+        if let (Some(ctx_snap), Some(cdf_snap)) = (&pre_ctx_snap, &pre_cdf_snap) {
+            crate::entropy::maybe_capture_block(
+                dec,
+                blk,
+                ctx_snap,
+                cdf_snap,
+                qindex,
+                pre_raw_state,
+                pre_trace_len,
+            );
+        }
         if dbg {
             eprintln!(
                 "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant[0..8]={:?}",

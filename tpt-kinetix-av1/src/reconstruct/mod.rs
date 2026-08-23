@@ -584,6 +584,14 @@ impl<'a> TileDecodeState<'a> {
         let lossless = qindex == 0;
         let tile_cw = if subsampling_x { tile_w / 2 } else { tile_w };
         let tile_ch = if subsampling_y { tile_h / 2 } else { tile_h };
+        if std::env::var("KINETIX_AV1_DBG_TILE_BYTES").is_ok() {
+            let byte_off = bit_offset / 8;
+            let hex: String = data[byte_off..]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            eprintln!("DBG tile_bytes bit_offset={bit_offset} sub_bit={} hex={hex}", bit_offset % 8);
+        }
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),

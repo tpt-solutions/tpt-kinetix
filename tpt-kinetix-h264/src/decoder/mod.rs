@@ -1293,6 +1293,11 @@ impl H264Decoder {
                             }
                         }
 
+                        if let Ok(path) = std::env::var("KINETIX_DUMP_PREDEBLOCK") {
+                            let p = format!("{path}.{}", self.frame_count + 1);
+                            eprintln!("PREDEBLOCK dump -> {p}");
+                            let _ = std::fs::write(&p, &recon.luma);
+                        }
                         let mut data = recon.luma;
                         data.extend(recon.chroma_cb);
                         data.extend(recon.chroma_cr);
@@ -1321,7 +1326,11 @@ impl H264Decoder {
                         // Fall through to the skip scaffold.
                     }
                 }
+            } else {
+                eprintln!("B PATH: ref list build failed");
             }
+        } else {
+            eprintln!("B PATH: not entropy_coding_mode or missing refs");
         }
 
         // Attempt I_PCM path for I/SI slices.

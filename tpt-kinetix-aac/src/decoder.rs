@@ -11,7 +11,7 @@ use tpt_kinetix_core::packet::Packet;
 use crate::adts::AdtsHeader;
 use crate::dequant::group_base_offsets;
 use crate::mdct::Imdct;
-use crate::pns::apply_pns;
+use crate::pns::{apply_pns, PnsRandom};
 use crate::pulse::apply_pulse;
 use crate::stereo::apply_stereo;
 use crate::syntax::{
@@ -113,6 +113,9 @@ pub struct AacDecoder {
     sample_rate: u32,
     sf_index: usize,
     frame_no: u64,
+    /// Shared, continuously-advanced PNS pseudo-random generator (ffmpeg's
+    /// `random_state`). Seeded once at construction and never reset.
+    pns_rng: PnsRandom,
 }
 
 impl Default for AacDecoder {
@@ -132,6 +135,7 @@ impl AacDecoder {
             sample_rate: 0,
             sf_index: 4,
             frame_no: 0,
+            pns_rng: PnsRandom::new(),
         }
     }
 
@@ -200,7 +204,16 @@ impl AacDecoder {
         for el in &block.elements {
             match el {
                 Element::Sce(sce) => {
-                    let ch = Self::decode_channel_stream(&sce.stream, self.sf_index, self.frame_no)?;
+                    if std::env::var("AAC_DBG_WS").is_ok() {
+                        eprintln!(
+                            "DBG ws frame{} seq={:?} max_sfb={} bands={:?}",
+                            self.frame_no,
+                            sce.stream.ics.window_sequence,
+                            sce.stream.ics.max_sfb,
+                            &sce.stream.band_type[..sce.stream.ics.max_sfb.min(8) as usize]
+                        );
+                    }
+                    let ch = Self::decode_channel_stream(&sce.stream, self.sf_index, self.frame_no, &mut self.pns_rng)?;
                     decoded_channels.push(DecodedChannel {
                         instance_tag: sce.instance_tag,
                         ics: sce.stream.ics,
@@ -215,8 +228,8 @@ impl AacDecoder {
                     });
                 }
                 Element::Cpe(cpe) => {
-                    let left_ch = Self::decode_channel_stream(&cpe.left, self.sf_index, self.frame_no)?;
-                    let right_ch = Self::decode_channel_stream(&cpe.right, self.sf_index, self.frame_no)?;
+                    let left_ch = Self::decode_channel_stream(&cpe.left, self.sf_index, self.frame_no, &mut self.pns_rng)?;
+                    let right_ch = Self::decode_channel_stream(&cpe.right, self.sf_index, self.frame_no, &mut self.pns_rng)?;
                     let left_idx = decoded_channels.len();
                     let right_idx = left_idx + 1;
                     decoded_channels.push(DecodedChannel {
@@ -255,7 +268,7 @@ impl AacDecoder {
                     cce_elements.push(cce.clone());
                 }
                 Element::Lfe(lfe) => {
-                    let ch = Self::decode_channel_stream(&lfe.stream, self.sf_index, self.frame_no)?;
+                    let ch = Self::decode_channel_stream(&lfe.stream, self.sf_index, self.frame_no, &mut self.pns_rng)?;
                     decoded_channels.push(DecodedChannel {
                         instance_tag: lfe.instance_tag,
                         ics: lfe.stream.ics,
@@ -474,6 +487,7 @@ impl AacDecoder {
         stream: &ChannelStream,
         sf_index: usize,
         frame_no_diag: u64,
+        pns_rng: &mut PnsRandom,
     ) -> Result<[f32; 1024], AacParseError> {
         let ics = &stream.ics;
         let swb = if ics.window_sequence.is_eight_short() {
@@ -493,6 +507,7 @@ impl AacDecoder {
             swb,
             stream.global_gain,
             &gindex,
+            pns_rng,
             &mut coeffs,
         );
         if let Some(tns) = &stream.tns {

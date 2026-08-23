@@ -181,9 +181,29 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         !symbol_trace_enabled(),
         "take_symbol_trace should clear the session"
     );
+    if std::env::var("KINETIX_AV1_DBG_FIRST_READS").is_ok() {
+        println!("  First reads (mode-parsing sequence before first coeffs()):");
+        for e in trace.iter().take(20) {
+            println!(
+                "    #{:>4} n_symbols={:<3} value={:<6} bits=[{},{}) at {}",
+                e.seq, e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, e.location
+            );
+        }
+        for m in markers.iter().take(6) {
+            println!("    marker[{}] {}", m.trace_seq, m.label);
+        }
+    }
 
     let w = width as usize;
     let h = height as usize;
+    if std::env::var("KINETIX_AV1_DBG_ROWS").is_ok() {
+        for row in 0..4usize.min(h) {
+            let g: Vec<u8> = got[row * w..row * w + w.min(24)].to_vec();
+            let r: Vec<u8> = ref_data[row * w..row * w + w.min(24)].to_vec();
+            println!("  row{row} kinetix={g:?}");
+            println!("  row{row} dav1d  ={r:?}");
+        }
+    }
     let y_n = w * h;
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);

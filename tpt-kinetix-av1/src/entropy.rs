@@ -182,27 +182,37 @@ pub fn mark_block(label: impl FnOnce() -> String) {
 ///
 /// We hand-roll JSON (rather than pull in `serde`) because this is a
 /// debug-only capture path and the crate doesn't otherwise depend on `serde`.
+pub fn should_capture(blk: &crate::coeff::TxBlockCtx) -> bool {
+    match capture_target() {
+        Some((plane, px_x, px_y)) => {
+            plane == blk.plane && px_x == blk.x4 * 4 && px_y == blk.y4 * 4
+        }
+        None => false,
+    }
+}
+
+/// Capture one block's raw tile bytes + `TxBlockCtx` + Kinetix's own symbol
+/// slice + its *pre-block* neighbour-context and CDF state (`ctx_snap`/
+/// `cdf_snap`, taken by the caller **before** `read_coeffs` mutates them —
+/// snapshotting after the call would capture this same block's own
+/// adaptation, which is not the state the real decoder used to make this
+/// block's reads, and desyncs the independent oracle from symbol 0 of any
+/// context/CDF-dependent read).
 pub fn maybe_capture_block(
     dec: &SymbolDecoder,
     blk: &crate::coeff::TxBlockCtx,
-    ctxs: &crate::coeff::CoeffContexts,
-    cdfs: &crate::coeff::TileCdfs,
+    ctx_snap: &crate::coeff::CoeffCtxSnapshot,
+    cdf_snap: &crate::coeff::TileCdfSnapshot,
     base_q_idx: u8,
-    pre_bit_pos: usize,
+    pre_raw_state: (u32, u32, i64, usize),
     pre_trace_len: usize,
 ) -> bool {
-    let (plane, px_x, px_y) = match capture_target() {
-        Some(t) => t,
-        None => return false,
-    };
-    // Match on `blk.plane` plus the transform block's pixel origin derived
-    // from `x4`/`y4` (units of 4 samples).
-    let origin_x = blk.x4 * 4;
-    let origin_y = blk.y4 * 4;
-    if plane != blk.plane || px_x != origin_x || px_y != origin_y {
+    if !should_capture(blk) {
         return false;
     }
+    let (pre_symbol_range, pre_symbol_value, pre_symbol_max_bits, pre_bit_pos) = pre_raw_state;
     let byte_off = pre_bit_pos / 8;
+    let sub_bit_offset = pre_bit_pos % 8;
     let data_hex = if byte_off < dec.data.len() {
         hex_encode(&dec.data[byte_off..])
     } else {
@@ -222,21 +232,20 @@ pub fn maybe_capture_block(
     // Neighbour level/dc context (needed for the oracle to start from the
     // same state Kinetix had at this block — otherwise contexts derived from
     // above_level/left_level diverge immediately).
-    let snap = ctxs.ctx_snapshot(blk.plane);
     let fmt_vec = |v: &[u8]| {
         v.iter()
             .map(|x| x.to_string())
             .collect::<Vec<_>>()
             .join(",")
     };
-    let above_level = fmt_vec(&snap.above_level);
-    let above_dc = fmt_vec(&snap.above_dc);
-    let left_level = fmt_vec(&snap.left_level);
-    let left_dc = fmt_vec(&snap.left_dc);
+    let above_level = fmt_vec(&ctx_snap.above_level);
+    let above_dc = fmt_vec(&ctx_snap.above_dc);
+    let left_level = fmt_vec(&ctx_snap.left_level);
+    let left_dc = fmt_vec(&ctx_snap.left_dc);
     // Adapted (mid-tile) CDF tables, so the oracle replays Kinetix's exact
     // state at this block — removing the last confound (CDF adaptation) from
     // the symbol diff.
-    let cdf = cdfs.cdf_snapshot();
+    let cdf = cdf_snap;
     let cdfs_json = format!(
         "{{\n    \
          \"txb_skip\": {},\n    \"eob_pt_16\": {},\n    \"eob_pt_32\": {},\n    \
@@ -261,7 +270,9 @@ pub fn maybe_capture_block(
         json_nest3_u16(&cdf.intra_tx_type_set2),
     );
     let json = format!(
-        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": 0,\n  \
+        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {sub_bit_offset},\n  \
+         \"symbol_range\": {pre_symbol_range},\n  \"symbol_value\": {pre_symbol_value},\n  \
+         \"symbol_max_bits\": {pre_symbol_max_bits},\n  \
          \"base_q_idx\": {base_q_idx},\n  \"reference_values\": [{ref_json}],\n  \
          \"ctx\": {{\n    \"above_level\": [{above_level}],\n    \
          \"above_dc\": [{above_dc}],\n    \"left_level\": [{left_level}],\n    \
@@ -333,14 +344,14 @@ fn json_nest2_u16(v: &[Vec<u16>]) -> String {
 
 /// Serialize a 3-deep `Vec<Vec<Vec<u16>>>` to compact JSON.
 fn json_nest3_u16(v: &[Vec<Vec<u16>>]) -> String {
-    let l: Vec<String> = v.iter().map(json_nest_u16).collect();
+    let l: Vec<String> = v.iter().map(|m| json_nest_u16(m)).collect();
     format!("[{}]", l.join(","))
 }
 
 /// Serialize a 4-deep `Vec<Vec<Vec<Vec<u16>>>>` (coeff_base/coeff_br/eob_extra)
 /// to compact JSON.
-fn json_nest4_u16(v: &[Vec<Vec<Vec<u16>>]) -> String {
-    let l: Vec<String> = v.iter().map(json_nest3_u16).collect();
+fn json_nest4_u16(v: &[Vec<Vec<Vec<u16>>>]) -> String {
+    let l: Vec<String> = v.iter().map(|m| json_nest3_u16(m)).collect();
     format!("[{}]", l.join(","))
 }
 
@@ -420,6 +431,30 @@ impl<'a> SymbolDecoder<'a> {
     /// specific block. Not spec-normative; delete once root-caused.
     pub fn dbg_bit_pos(&self) -> (usize, i64, usize) {
         (self.bit_pos, self.symbol_max_bits, self.data.len() * 8)
+    }
+
+    /// The raw arithmetic-coder state (`symbol_range`, `symbol_value`,
+    /// `symbol_max_bits`, `bit_pos`). Needed by the Phase G.0 block-capture
+    /// bridge: unlike a real byte/bit position, `symbol_range`/`symbol_value`
+    /// are **not** reproducible mid-tile by re-running `init_symbol` on the
+    /// remaining raw bytes — `init_symbol` always forces `symbol_range =
+    /// 1 << 15`, but after renormalization mid-stream `symbol_range` is only
+    /// guaranteed to be in `[1 << 15, 1 << 16)`, not exactly `1 << 15` (the
+    /// renorm shift `bits = 15 - floor_log2(range)` lands wherever
+    /// `floor_log2(range)` was, not necessarily giving back exactly
+    /// `1 << 15`). A capture that re-inits a fresh decoder from raw bytes at
+    /// a mid-tile bit offset therefore starts from the *wrong* range/value
+    /// whenever the true range isn't exactly `32768` at that instant — this
+    /// was a real, previously undiagnosed bug in the oracle bridge (see
+    /// `tools/av1_oracle/diff_block.py`), not a bug in `coeffs()`/CDF
+    /// handling as earlier sessions' block captures kept appearing to show.
+    pub fn raw_state(&self) -> (u32, u32, i64, usize) {
+        (
+            self.symbol_range,
+            self.symbol_value,
+            self.symbol_max_bits,
+            self.bit_pos,
+        )
     }
 
     /// Current read position in bits into the tile data buffer. Used by the

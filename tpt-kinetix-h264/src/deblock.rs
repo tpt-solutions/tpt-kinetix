@@ -520,11 +520,15 @@ pub fn deblock_luma_mb(
     top: Option<&DeblockMbInfo>,
     p: DeblockParams,
 ) {
+    let trace = std::env::var("KINETIX_BINTRACE").is_ok();
     // Block-boundary (inter-MB) vertical edge at edge_index = 0. Segments are
     // grouped by raster ROW; p-side block is the left MB's rightmost column
     // (3,7,11,15), q-side is this MB's leftmost column (0,4,8,12).
     if let Some(l) = left {
         let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
+        if trace {
+            eprintln!("DEBLOCK L v-edge MB({mb_x},{mb_y}) idx0 bs={bs:?}");
+        }
         let qp = (cur.qp + l.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, qp);
     }
@@ -534,6 +538,9 @@ pub fn deblock_luma_mb(
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
+        if trace {
+            eprintln!("DEBLOCK L v-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
+        }
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, cur.qp);
     }
     // Block-boundary (inter-MB) horizontal edge at edge_index = 0. Segments
@@ -541,6 +548,9 @@ pub fn deblock_luma_mb(
     // (12,13,14,15), q-side is this MB's top row (0,1,2,3).
     if let Some(t) = top {
         let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
+        if trace {
+            eprintln!("DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?}");
+        }
         let qp = (cur.qp + t.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, qp);
     }
@@ -555,6 +565,9 @@ pub fn deblock_luma_mb(
         ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
+        if trace {
+            eprintln!("DEBLOCK L h-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
+        }
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, cur.qp);
     }
 }

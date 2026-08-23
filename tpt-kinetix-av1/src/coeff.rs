@@ -116,41 +116,41 @@ impl TileCdfs {
     /// last confound (CDF adaptation) from the symbol-by-symbol diff.
     pub fn cdf_snapshot(&self) -> TileCdfSnapshot {
         TileCdfSnapshot {
-            txb_skip: clone_txb(&self.txb_skip),
-            eob_pt_16: clone_eob22(&self.eob_pt_16),
-            eob_pt_32: clone_eob22(&self.eob_pt_32),
-            eob_pt_64: clone_eob22(&self.eob_pt_64),
-            eob_pt_128: clone_eob22(&self.eob_pt_128),
-            eob_pt_256: clone_eob22(&self.eob_pt_256),
-            eob_pt_512: clone_eob2(&self.eob_pt_512),
-            eob_pt_1024: clone_eob2(&self.eob_pt_1024),
+            txb_skip: clone3(&self.txb_skip),
+            eob_pt_16: clone3(&self.eob_pt_16),
+            eob_pt_32: clone3(&self.eob_pt_32),
+            eob_pt_64: clone3(&self.eob_pt_64),
+            eob_pt_128: clone3(&self.eob_pt_128),
+            eob_pt_256: clone3(&self.eob_pt_256),
+            eob_pt_512: clone2(&self.eob_pt_512),
+            eob_pt_1024: clone2(&self.eob_pt_1024),
             eob_extra: clone4(&self.eob_extra),
             coeff_base_eob: clone4(&self.coeff_base_eob),
             coeff_base: clone4(&self.coeff_base),
             coeff_br: clone4(&self.coeff_br),
-            dc_sign: clone_dc(&self.dc_sign),
-            intra_tx_type_set1: clone_it1(&self.intra_tx_type_set1),
-            intra_tx_type_set2: clone_it2(&self.intra_tx_type_set2),
+            dc_sign: clone3(&self.dc_sign),
+            intra_tx_type_set1: clone3(&self.intra_tx_type_set1),
+            intra_tx_type_set2: clone3(&self.intra_tx_type_set2),
         }
     }
 
     /// Overwrite this CDF set's tables from a prior [`TileCdfSnapshot`].
     pub fn load_snapshot(&mut self, s: &TileCdfSnapshot) {
-        self.txb_skip = unclone_txb(&s.txb_skip);
-        self.eob_pt_16 = unclone_eob22(&s.eob_pt_16);
-        self.eob_pt_32 = unclone_eob22(&s.eob_pt_32);
-        self.eob_pt_64 = unclone_eob22(&s.eob_pt_64);
-        self.eob_pt_128 = unclone_eob22(&s.eob_pt_128);
-        self.eob_pt_256 = unclone_eob22(&s.eob_pt_256);
-        self.eob_pt_512 = unclone_eob2(&s.eob_pt_512);
-        self.eob_pt_1024 = unclone_eob2(&s.eob_pt_1024);
+        self.txb_skip = unclone3(&s.txb_skip);
+        self.eob_pt_16 = unclone3(&s.eob_pt_16);
+        self.eob_pt_32 = unclone3(&s.eob_pt_32);
+        self.eob_pt_64 = unclone3(&s.eob_pt_64);
+        self.eob_pt_128 = unclone3(&s.eob_pt_128);
+        self.eob_pt_256 = unclone3(&s.eob_pt_256);
+        self.eob_pt_512 = unclone2(&s.eob_pt_512);
+        self.eob_pt_1024 = unclone2(&s.eob_pt_1024);
         self.eob_extra = unclone4(&s.eob_extra);
         self.coeff_base_eob = unclone4(&s.coeff_base_eob);
         self.coeff_base = unclone4(&s.coeff_base);
         self.coeff_br = unclone4(&s.coeff_br);
-        self.dc_sign = unclone_dc(&s.dc_sign);
-        self.intra_tx_type_set1 = unclone_it1(&s.intra_tx_type_set1);
-        self.intra_tx_type_set2 = unclone_it2(&s.intra_tx_type_set2);
+        self.dc_sign = unclone3(&s.dc_sign);
+        self.intra_tx_type_set1 = unclone3(&s.intra_tx_type_set1);
+        self.intra_tx_type_set2 = unclone3(&s.intra_tx_type_set2);
     }
 }
 
@@ -169,141 +169,87 @@ pub struct TileCdfSnapshot {
     pub eob_pt_1024: Vec<Vec<u16>>,
     pub eob_extra: Vec<Vec<Vec<Vec<u16>>>>,
     pub coeff_base_eob: Vec<Vec<Vec<Vec<u16>>>>,
-    pub coeff_base: Vec<Vec<Vec<Vec<u16>>>,
-    pub coeff_br: Vec<Vec<Vec<Vec<u16>>>,
+    pub coeff_base: Vec<Vec<Vec<Vec<u16>>>>,
+    pub coeff_br: Vec<Vec<Vec<Vec<u16>>>>,
     pub dc_sign: Vec<Vec<Vec<u16>>>,
     pub intra_tx_type_set1: Vec<Vec<Vec<u16>>>,
     pub intra_tx_type_set2: Vec<Vec<Vec<u16>>>,
 }
 
-fn clone2(a: &[[u16; 2]]) -> Vec<Vec<u16>> {
+/// Clone a 2-D fixed-size CDF table (`[[u16; B]; A]`) into nested `Vec`s for
+/// JSON serialization. Generic over both dimensions so every differently-
+/// shaped CDF field (`eob_pt_512`'s 11 vs `eob_pt_1024`'s 12, etc.) shares one
+/// implementation instead of a hand-copied clone per shape (the previous
+/// per-shape functions had several transcription bugs: wrong hard-coded
+/// dimensions that didn't match the field they were called on, and `Vec`
+/// return types where the field is a fixed-size array).
+fn clone2<const A: usize, const B: usize>(a: &[[u16; B]; A]) -> Vec<Vec<u16>> {
     a.iter().map(|r| r.to_vec()).collect()
 }
-fn unclone2(a: &[Vec<u16>]) -> Vec<[u16; 2]> {
-    a.iter().map(|r| [r[0], r[1]]).collect()
-}
-// txb_skip: [[[u16;3];13];5]
-fn clone_txb(a: &[[[u16; 3]; 13]; 5]) -> Vec<Vec<Vec<u16>>> {
-    a.iter()
-        .map(|m| m.iter().map(|r| r.to_vec()).collect())
-        .collect()
-}
-fn unclone_txb(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 3]; 13]> {
-    a.iter()
-        .map(|m| {
-            let mut out = [[0u16; 3]; 13];
-            for (i, r) in m.iter().enumerate() {
-                for j in 0..3 {
-                    out[i][j] = r[j];
-                }
+fn unclone2<const A: usize, const B: usize>(a: &[Vec<u16>]) -> [[u16; B]; A] {
+    let mut out = [[0u16; B]; A];
+    for (i, r) in a.iter().enumerate().take(A) {
+        for (j, slot) in out[i].iter_mut().enumerate().take(B) {
+            if let Some(&v) = r.get(j) {
+                *slot = v;
             }
-            out
-        })
-        .collect()
-}
-// eob_pt_16..256: [[[u16;N];2];2]
-fn clone_eob22(a: &[[[u16; 6]; 2]; 2]) -> Vec<Vec<Vec<u16>>> {
-    a.iter()
-        .map(|m| m.iter().map(|r| r.to_vec()).collect())
-        .collect()
-}
-fn unclone_eob22(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 6]; 2]> {
-    a.iter()
-        .map(|m| {
-            let mut out = [[0u16; 6]; 2];
-            for (i, r) in m.iter().enumerate() {
-                for j in 0..6 {
-                    out[i][j] = r[j];
-                }
-            }
-            out
-        })
-        .collect()
-}
-// eob_pt_512/1024: [[u16;N];2]
-fn clone_eob2(a: &[[u16; 12]; 2]) -> Vec<Vec<u16>> {
-    a.iter().map(|r| r.to_vec()).collect()
-}
-fn unclone_eob2(a: &[Vec<u16>]) -> Vec<[u16; 12]> {
-    a.iter().map(|r| {
-        let mut out = [0u16; 12];
-        for j in 0..r.len().min(12) {
-            out[j] = r[j];
         }
-        out
-    }).collect()
+    }
+    out
 }
-// eob_extra etc: [[[[u16;4];4];2];5]
-fn clone4(a: &[[[[u16; 4]; 4]; 2]; 5]) -> Vec<Vec<Vec<Vec<u16>>>> {
+
+/// Same, one dimension deeper (`[[[u16; C]; B]; A]`).
+fn clone3<const A: usize, const B: usize, const C: usize>(
+    a: &[[[u16; C]; B]; A],
+) -> Vec<Vec<Vec<u16>>> {
     a.iter()
-        .map(|l| l.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect())
+        .map(|m| m.iter().map(|r| r.to_vec()).collect())
         .collect()
 }
-fn unclone4(a: &[Vec<Vec<Vec<u16>>]) -> Vec<[[[u16; 4]; 4]; 2]> {
+fn unclone3<const A: usize, const B: usize, const C: usize>(
+    a: &[Vec<Vec<u16>>],
+) -> [[[u16; C]; B]; A] {
+    let mut out = [[[0u16; C]; B]; A];
+    for (i, m) in a.iter().enumerate().take(A) {
+        for (j, r) in m.iter().enumerate().take(B) {
+            for (k, slot) in out[i][j].iter_mut().enumerate().take(C) {
+                if let Some(&v) = r.get(k) {
+                    *slot = v;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Same, two dimensions deeper (`[[[[u16; D]; C]; B]; A]`).
+fn clone4<const A: usize, const B: usize, const C: usize, const D: usize>(
+    a: &[[[[u16; D]; C]; B]; A],
+) -> Vec<Vec<Vec<Vec<u16>>>> {
     a.iter()
         .map(|l| {
-            let mut out = [[[0u16; 4]; 4]; 2];
-            for (li, m) in l.iter().enumerate() {
-                for (mi, r) in m.iter().enumerate() {
-                    for j in 0..4 {
-                        out[li][mi][j] = r[j];
+            l.iter()
+                .map(|m| m.iter().map(|r| r.to_vec()).collect())
+                .collect()
+        })
+        .collect()
+}
+fn unclone4<const A: usize, const B: usize, const C: usize, const D: usize>(
+    a: &[Vec<Vec<Vec<u16>>>],
+) -> [[[[u16; D]; C]; B]; A] {
+    let mut out = [[[[0u16; D]; C]; B]; A];
+    for (i, l) in a.iter().enumerate().take(A) {
+        for (j, m) in l.iter().enumerate().take(B) {
+            for (k, r) in m.iter().enumerate().take(C) {
+                for (n, slot) in out[i][j][k].iter_mut().enumerate().take(D) {
+                    if let Some(&v) = r.get(n) {
+                        *slot = v;
                     }
                 }
             }
-            out
-        })
-        .collect()
-}
-// dc_sign: [[[u16;3];3];2]
-fn clone_dc(a: &[[[u16; 3]; 3]; 2]) -> Vec<Vec<Vec<u16>>> {
-    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
-}
-fn unclone_dc(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 3]; 3]> {
-    a.iter()
-        .map(|m| {
-            let mut out = [[0u16; 3]; 3];
-            for (i, r) in m.iter().enumerate() {
-                for j in 0..3 {
-                    out[i][j] = r[j];
-                }
-            }
-            out
-        })
-        .collect()
-}
-// intra_tx_type_set1: [[[u16;8];13];2]
-fn clone_it1(a: &[[[u16; 8]; 13]; 2]) -> Vec<Vec<Vec<u16>>> {
-    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
-}
-fn unclone_it1(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 8]; 13]> {
-    a.iter()
-        .map(|m| {
-            let mut out = [[0u16; 8]; 13];
-            for (i, r) in m.iter().enumerate() {
-                for j in 0..8 {
-                    out[i][j] = r[j];
-                }
-            }
-            out
-        })
-        .collect()
-}
-// intra_tx_type_set2: [[[u16;6];13];3]
-fn clone_it2(a: &[[[u16; 6]; 13]; 3]) -> Vec<Vec<Vec<u16>>> {
-    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
-}
-fn unclone_it2(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 6]; 13]> {
-    a.iter()
-        .map(|m| {
-            let mut out = [[0u16; 6]; 13];
-            for (i, r) in m.iter().enumerate() {
-                for j in 0..6 {
-                    out[i][j] = r[j];
-                }
-            }
-            out
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 /// Neighbouring-block level and DC-sign contexts for one tile.

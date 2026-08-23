@@ -200,11 +200,27 @@ pub fn get_scan(tx_size: usize, plane_tx_type: usize) -> Option<&'static [u16]> 
     if plane_tx_type == IDTX {
         return get_default_scan(tx_size);
     }
-    let prefer_row = matches!(plane_tx_type, V_DCT | V_ADST | V_FLIPADST);
-    let prefer_col = matches!(plane_tx_type, H_DCT | H_ADST | H_FLIPADST);
-    if prefer_row {
+    // Spec §5.11.41: `TX_CLASS_HORIZ` (`H_DCT`/`H_ADST`/`H_FLIPADST`) applies
+    // its DCT/ADST along the *width* axis per row (`row_axis_transform` in
+    // `reconstruct/transform.rs`) and identity down each column — so
+    // frequency/importance is ordered by **column** index, uniformly across
+    // rows (confirmed independently by `SIG_REF_DIFF_OFFSET[TX_CLASS_HORIZ]`
+    // in this same file's coefficient-context tables, whose neighbour offsets
+    // are `(0,1)/(0,2)/(0,3)/(0,4)` — i.e. same row, varying column). The scan
+    // that groups by column first (`Mcol_Scan`: all of column 0 across every
+    // row, then column 1, ...) is therefore the efficient one for this class,
+    // not the row-major `Mrow_Scan`. `TX_CLASS_VERT` is the mirror image
+    // (frequency ordered by row, `Mrow_Scan`). (An earlier revision briefly
+    // "fixed" this to the opposite mapping based on a misremembered libaom
+    // variable-naming convention; that made the corpus's PSNR measurably
+    // *worse* — see `todo-av1.md`'s 2026-08-23 session note — which is what
+    // caught the mistake. This mapping is the one that was in place before
+    // that revert, re-derived and re-verified from the context-offset table
+    // above rather than from memory of another codebase's variable names.)
+    let tx_class = get_tx_class(plane_tx_type);
+    if tx_class == TX_CLASS_VERT {
         get_mrow_scan(tx_size)
-    } else if prefer_col {
+    } else if tx_class == TX_CLASS_HORIZ {
         get_mcol_scan(tx_size)
     } else {
         get_default_scan(tx_size)

@@ -1654,3 +1654,91 @@
         NEXT STEP: locate the FIRST sample-level divergence in scan order (not
         the largest), dump that MBs parsed coefficients + nz, and compare its
         cbf/significant-map ctx selection against a hand ffmpeg-walk.
+
+      - **2026-08-23 session #22 - FIRST-DIVERGENCE MAP + instrumentation
+        consolidated.** Added a per-MB scan-order divergence report and a
+        small-diff sample dumper to dbg_cabac_b.rs; all debug prints (CBF, mvd,
+        BL1MV, BBiMV) are now gated behind KINETIX_BINTRACE=1.
+        FIRST-DIVERGENCE MAP for c_p8x8 (deterministic):
+          MB(1,1) BL116x16: n=4, max=2 -- isolated samples at mb-local
+            (x=5,y=14),(x=14,y=14),(x=5,y=15),(x=14,y=15), deltas +1/+2
+          MB(3,1) BL016x16: n=2, max=1 -- mb-local x=9, y in {1,15}, delta -1
+          MB(0,2) BL116x16: n=8, max=3 -- mb-local x in {14,15}, y 4..10
+          MB(1,2)/(2,2)/(3,2): n=206/183/220, max 60/71/75 (Bi + L1)
+        READING: the earliest errors are ISOLATED single samples with +/-1..2
+          in otherwise-correct MBs -- the signature of a tiny coefficient
+          difference (one level off by a small amount in one 4x4 block) rather
+          than an MV or mode error; the later big row-2 errors grow out of the
+          poisoned cbf-context chain these create. NOTE the row-1 MBs are all
+          L1/L0 16x16 whose own pixels are ~correct -- so the primary defect is
+          likely a single coefficient (or its dequant rounding) in MB(1,1)
+          blk13-ish region, OR a subtle nz bookkeeping difference that shifts a
+          later cbf ctx.
+        NEXT STEP (unchanged in essence): hand-walk MB(1,1)s residual with the
+          ffmpeg element order (all machinery now env-gated and fast) and check
+          each cbf/significant/level decision; the first differing decision is
+          the bug.
+
+      - **2026-08-23 session #23 - RESIDUAL-SOURCE DISCRIMINATOR results (the
+        strongest clues yet).** Added per-MB SAD comparison of (output-pred) vs
+        (ref-pred) for candidates I / P / bi-avg:
+        - MB(1,1) BL1[0,0]: OUR output == P frame EXACTLY (f-sad=0) where
+          ffmpeg differs by r-sad=6 -> x264 used a small NONZERO mvd (likely
+          fractional/+-1-2) that we decoded as 0. Same pattern for MB(3,1)
+          BL0[0,0] vs I (f-sad=0, r-sad=2).
+        - MB(0,2), MB(1,2): f-sad ~ r-sad (within 7-100) -> small residual
+          coefficient differences.
+        - MB(2,2): f-sad == r-sad EXACTLY for ALL THREE candidates (2953) while
+          n=183 samples differ -> our residual there has the right MAGNITUDES
+          but flipped signs and/or permuted placement. NOT a random decode
+          error; systematic.
+        INTERPRETATION: at least two distinct defects: (a) small mvd values
+        decoded as zero somewhere (single-bin reads), and (b) a residual
+        sign/arrangement issue in specific inter MBs. Candidate unifying cause:
+        coeff_abs_level SIGN bypass polarity or the level->block mapping for
+        inter MBs under specific significant-map shapes -- but P-slice
+        bit-exactness constrains any theory hard.
+        NEXT STEP: for MB(2,2), dump our per-4x4-block coefficient grids and
+        compare against the implied residual pattern (r - P) block by block;
+        check whether the mismatch is a sign flip, a scan-order permutation, or
+        a block-placement offset.
+
+      - **2026-08-23 session #24 - MB-level coefficient data extracted.** Parsed
+        coefficient grids for all c_p8x8 B-slice MBs captured via
+        KINETIX_BINTRACE (grouped by CODED skip_flag markers). MB(1,2)
+        Bi[0,0]: blk0 cbf=false, blk1=[0,1,3], blk2=[1,0,-2,-6,0,0,11..],
+        blk7 contains -15 at pos 11 -- real low-frequency residual, consistent
+        with a genuine Bi[0,0] coding decision on moving content. Coefficient
+        extraction pipeline is now trivially repeatable (grouped by
+        CODED skip_flag markers in BINTRACE output).
+        NEXT STEP remains: compare these parsed-coefficient reconstructions
+        block-by-block against implied residual (r - pred) to pinpoint whether
+        individual blocks or individual coefficients diverge, starting with
+        MB(2,2)s equal-SAD signature (magnitudes right, signs/arrangement
+        suspect).
+
+      - **2026-08-23 session #25 - ROOT CAUSE LOCALIZED: the remaining cabac_b
+        gap is a DEBLOCKING WEAK-FILTER difference, not CABAC.** Chain of proof:
+        1. KINETIX_FORCE_MVD sweep on MB(1,1): forcing any nonzero mvd makes the
+           whole MB wrong -> decoded mvd=(0,0) is correct; MVD path exonerated.
+        2. The 4 diverging samples of MB(1,1) sit at local (5,14),(14,14),
+           (5,15),(14,15) -- inside the modification zones of the interior
+           v-edge x=20 (idx1) / h-edge y=28 (idx3) and the MB-boundary h-edge
+           y=32 against Bi MB(1,2).
+        3. bS trace for c_p8x8s B slice: MB(1,1) edges bs=[0]*4 (correct: no nz,
+           identical mvs); boundary to Bi MB(1,2) bs=[0,2,2,2] (correct: MB(1,2)
+           blocks 1-3 have nz 2/5/6); interior Bi edges bs=[2,2,2,2] (correct).
+           bS DERIVATION IS CORRECT.
+        4. c_p8x8_nd (no-deblock=1) decodes BIT-EXACT -> pre-deblock pixels are
+           perfect.
+        CONCLUSION: our weak-filter (bS<=2) execution differs from ffmpegs by
+           +/-1-2 on certain sample patterns at qp~22-24 on B-slice inter edges
+           (possibly also present-but-masked in P streams). The strong filter
+           (bS=4) and bS derivation are fine. Suspects inside
+           filter_luma_edge: dp/dq computation ((p2-p0)&(q2-q0) vs (p2-p0)
+           variants), tC adjustment (`tc++` under specific delta conditions),
+           or the delta-threshold comparisons (|p0-q0|<alpha, |p1-p0|<beta,
+           |q1-q0|<beta).
+        NEXT STEP: dump filter_luma_edge inputs/outputs (p0..p3,q0..q3,alpha,
+           beta,tc,bs) for the failing edge and hand-compare against ffmpeg
+           h264_loop_filter_luma line by line; fix the deviating branch.

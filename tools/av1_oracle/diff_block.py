@@ -81,7 +81,17 @@ def main():
         max_y4 = blk.get("max_y4", 16)
 
     data = bytes.fromhex(data_hex)
-    dec = SymbolDecoder(data, bit_offset)
+    if "symbol_range" in spec:
+        # Resume from Kinetix's exact arithmetic-coder state rather than
+        # re-deriving symbol_range/symbol_value from raw bytes — see
+        # SymbolDecoder.from_raw_state's docstring for why a fresh
+        # init_symbol()-style reinit is wrong mid-tile.
+        dec = SymbolDecoder.from_raw_state(
+            data, bit_offset, spec["symbol_range"], spec["symbol_value"],
+            spec["symbol_max_bits"],
+        )
+    else:
+        dec = SymbolDecoder(data, bit_offset)
     cdfs = TileCdfs(base_q)
     ctxs = CoeffContexts(max(max_x4, 1), max(max_y4, 1))
     # Re-seed the neighbour level/dc context from Kinetix's exact state at

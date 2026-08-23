@@ -11,14 +11,7 @@ use tpt_kinetix_h264::H264Decoder;
 
 fn main() {
     for (name, extra, input, vf) in [
-        // Isolate B_8x8 sub-partition handling: i16x16-only should be exact,
-        // p8x8-only exercises B_8x8 sub_mb_type paths.
-        (
-            "c_i16",
-            "direct=none:partitions=i16x16",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
+        // Session #25 focused repro: deblocking is the remaining gap.
         (
             "c_p8x8",
             "direct=none:partitions=p8x8",
@@ -26,69 +19,10 @@ fn main() {
             "",
         ),
         (
-            "c_p4x4",
-            "direct=none:partitions=p4x4",
+            "c_p8x8_nd",
+            "direct=none:partitions=p8x8:no-deblock=1",
             "testsrc=size=64x48:rate=1:duration=3",
             "",
-        ),
-        // Same failing configuration as c_p8x8 but CAVLC-coded: isolates
-        // whether the remaining B gap is CABAC-specific (bins/contexts) or in
-        // the shared MV-prediction / MC code.
-        (
-            "cavlc_p8x8",
-            "cabac=0:direct=none:partitions=p8x8",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
-        (
-            "cavlc_i16",
-            "cabac=0:direct=none:partitions=i16x16",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
-        ("b_default", "", "testsrc=size=64x48:rate=1:duration=3", ""),
-        (
-            "b_nodirect",
-            "direct=none",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
-        (
-            "b_min",
-            "direct=none:partitions=none",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
-        (
-            "b_temporal",
-            "direct=temporal",
-            "testsrc=size=64x48:rate=1:duration=3",
-            "",
-        ),
-        // Solid-colour triple (green→blue→red): no MVDs at all; isolates
-        // cbp/residual/qp handling for coded B MBs.
-        (
-            "b_swap",
-            "direct=none:partitions=none",
-            "color=c=green:size=64x48:rate=1:duration=3",
-            "format=yuv420p,geq=lum='if(eq(N,2),41,if(eq(N,1),145,81))':cb='90':cr='34'",
-        ),
-        // Past=green, future/future-B=blue: the B frame content equals the
-        // FUTURE picture, so every coded B MB should use L1 → isolates the
-        // L1 reference/prediction path.
-        (
-            "b_forcel1",
-            "direct=none:partitions=none",
-            "color=c=green:size=64x48:rate=1:duration=3",
-            "format=yuv420p,geq=lum='if(eq(N,0),81,41)':cb='if(eq(N,0),170,90)':cr='if(eq(N,0),0,240)'",
-        ),
-        // Moving box (12 px/frame): forces NONZERO MVDs in coded B MBs while
-        // keeping everything else trivial (static background).
-        (
-            "b_boxmv",
-            "direct=none:partitions=none",
-            "color=c=black:size=64x48:rate=1:duration=3",
-            "nullsrc=size=16x16:rate=1,geq=r=255:g=255:b=255[box];[in][box]overlay=x='8+12*n':y=8:eof_action=endall[out]",
         ),
     ] {
         run_variant(name, extra, input, vf);
@@ -275,6 +209,26 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
                     eprintln!(
                         "  MB({mbx},{dmby}): n={n_diff} max={max_d} first@({fx},{fy}) ours={vo} ref={vr}"
                     );
+                    if n_diff <= 12 {
+                        for y in 0..16usize {
+                            for x in 0..16usize {
+                                let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                                let d = f.data[idx] as i32 - r[idx] as i32;
+                                if d != 0 {
+                                    eprintln!(
+                                        "    diff@({},{}) [mb-local x={} y={}] ours={} ref={} delta={}",
+                                        mbx * 16 + x,
+                                        dmby * 16 + y,
+                                        x,
+                                        y,
+                                        f.data[idx],
+                                        r[idx],
+                                        d
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -305,29 +259,89 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
             eprintln!("  MB({bmx},{bmby}) y={yy} ours:{ours}");
             eprintln!("  MB({bmx},{bmby}) y={yy} ref :{refr}");
         }
-        // Implied-residual discriminator for a Bi[0,0] hypothesis: pred is the
-        // average of both references at the same position. If the true mode is
-        // Bi[0,0], ref-pred must look like a small quantized residual; if it is
-        // large, the true MVs are non-zero and our parse mis-decoded them.
-        if let (Some(ri0), Some(ri2)) = (
-            all.iter().position(|(l, _)| l == "Idr"),
-            all.iter().rposition(|(l, _)| l == "NonIdr"),
-        ) {
-            let l0 = &all[ri0].1.data;
-            let l1 = &all[ri2].1.data;
-            let mut lines = String::new();
-            for yy in (bmby * 16 + 6)..=(bmby * 16 + 8) {
-                for x in (bmx * 16)..(bmx * 16 + 16) {
-                    let idx = yy * w + x;
-                    let pred = (l0[idx] as i32 + l1[idx] as i32 + 1) >> 1;
-                    let d_true = r[idx] as i32 - pred;
-                    let d_ours = f.data[idx] as i32 - pred;
-                    lines.push_str(&format!(
-                        "  y={yy} x={x} pred={pred} true_res={d_true} our_res={d_ours}\n"
-                    ));
+        // Pre-deblock comparison at diverging samples: was the sample already
+        // wrong before our deblocking pass (parse/recon issue), or did our
+        // deblocker move it away from ffmpeg's deblocked value?
+        if let Ok(pre_path) = std::env::var("KINETIX_DUMP_PREDEBLOCK")
+            .map(|p| format!("{p}.3"))
+            if let Ok(pre) = std::fs::read(&pre_path) {
+                eprintln!("  --- pre-deblock check ---");
+                for dmby in 0..3usize {
+                    for mbx in 0..4usize {
+                        let mut n_diff = 0usize;
+                        for y in 0..16usize {
+                            for x in 0..16usize {
+                                let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                                if f.data[idx] != r[idx] {
+                                    n_diff += 1;
+                                }
+                            }
+                        }
+                        if n_diff == 0 {
+                            continue;
+                        }
+                        let mut report =
+                            format!("  PRE-MB({mbx},{dmby}) n={n_diff} samples:");
+                        for y in 0..16usize {
+                            for x in 0..16usize {
+                                let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                                let po = pre[idx] as i32;
+                                if f.data[idx] != r[idx] {
+                                    report.push_str(&format!(
+                                        " ({},{})pre={po} ours={} ref={}",
+                                        mbx * 16 + x,
+                                        dmby * 16 + y,
+                                        f.data[idx],
+                                        r[idx]
+                                    ));
+                                }
+                            }
+                        }
+                        eprintln!("{report}");
+                    }
                 }
             }
-            eprintln!("{lines}");
+        }
+
+        // Residual-source discriminator: for each diverging MB, compute per-MB
+        // SAD of (output - pred) and (ref - pred) for each prediction candidate.
+        // The candidate where SAD_f == SAD_r (and small) is the true reference;
+        // a mismatch there means our parsed residual differs from x264's.
+        let i_data = all.iter().find(|(l, _)| l == "Idr").map(|(_, f)| &f.data);
+        let p_data = all.iter().find(|(l, _)| l == "NonIdr").map(|(_, f)| &f.data);
+        eprintln!("  --- residual-source discriminator ---");
+        for dmby in 0..3usize {
+            for mbx in 0..4usize {
+                let mut n_diff = 0usize;
+                for y in 0..16usize {
+                    for x in 0..16usize {
+                        let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                        if f.data[idx] != r[idx] {
+                            n_diff += 1;
+                        }
+                    }
+                }
+                if n_diff == 0 {
+                    continue;
+                }
+                let mut report = format!("  RMB({mbx},{dmby}) n={n_diff}:");
+                for (name, src, bi) in
+                    [("I", i_data.as_deref(), false), ("P", p_data.as_deref(), false), ("BI", None, true)]
+                {
+                    let mut sad_f: i64 = 0;
+                    let mut sad_r: i64 = 0;
+                    for k in 0..256usize {
+                        let idx = ((dmby * 16) + k / 16) * w + mbx * 16 + (k % 16);
+                        let a = i_data.unwrap()[idx] as i32;
+                        let b = p_data.unwrap()[idx] as i32;
+                        let pred = if bi { (a + b + 1) >> 1 } else { src.unwrap()[idx] as i32 };
+                        sad_f += (f.data[idx] as i32 - pred).abs() as i64;
+                        sad_r += (r[idx] as i32 - pred).abs() as i64;
+                    }
+                    report.push_str(&format!("  {name}: f-sad={sad_f} r-sad={sad_r};"));
+                }
+                eprintln!("{report}");
+            }
         }
     }
 }

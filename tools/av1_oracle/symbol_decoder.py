@@ -49,6 +49,33 @@ class SymbolDecoder:
         self.symbol_range = 1 << 15
         self.symbol_max_bits = remaining_bits - 15
 
+    @classmethod
+    def from_raw_state(cls, data: bytes, bit_offset: int, symbol_range: int,
+                        symbol_value: int, symbol_max_bits: int) -> "SymbolDecoder":
+        """Resume mid-tile from Kinetix's exact arithmetic-coder state.
+
+        `__init__`'s `init_symbol`-style construction always forces
+        `symbol_range = 1 << 15`, which is only correct for a genuinely fresh
+        stream (tile start). Mid-tile, `symbol_range` is only guaranteed to be
+        in `[1 << 15, 1 << 16)` after renormalization (the renorm shift lands
+        wherever `floor_log2(range)` was, not necessarily back to exactly
+        `1 << 15`) — re-deriving it from raw bytes at an arbitrary bit offset
+        silently assumes the wrong value whenever the true range isn't
+        exactly `32768` at that instant, corrupting every read from there on
+        even though the decoder algorithm and CDF tables are both correct.
+        This constructor bypasses that assumption by taking the real
+        `symbol_range`/`symbol_value`/`symbol_max_bits` triple directly (see
+        `SymbolDecoder::raw_state` in `entropy.rs`).
+        """
+        dec = cls.__new__(cls)
+        dec.data = data
+        dec.bit_pos = bit_offset
+        dec.symbol_range = symbol_range
+        dec.symbol_value = symbol_value
+        dec.symbol_max_bits = symbol_max_bits
+        dec.trace = []
+        return dec
+
     def _read_bit(self) -> int:
         byte_idx = self.bit_pos // 8
         if byte_idx < len(self.data):

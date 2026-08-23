@@ -1166,6 +1166,29 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         _ => unreachable!(),
     }
 
+    // DEBUG (session #25): force an MVD value for one macroblock via
+    // KINETIX_FORCE_MVD="mb_x,mb_y,list,dx,dy" to identify the true encoder
+    // value when a decoded MVD is suspected wrong.
+    if let Ok(s) = std::env::var("KINETIX_FORCE_MVD") {
+        let v: Vec<i32> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+        if v.len() == 5 && v[0] == mb_x as i32 && v[1] == mb_y as i32 {
+            if let Some(motion) = &mut mb.motion {
+                let (name, arr) = if v[2] == 0 {
+                    ("L0", &mut motion.mvd_l0)
+                } else {
+                    ("L1", &mut motion.mvd_l1)
+                };
+                if let Some(last) = arr.last_mut() {
+                    eprintln!(
+                        "FORCE_MVD MB({mb_x},{mb_y}) {name} {:?} -> ({},{})",
+                        last, v[3], v[4]
+                    );
+                    *last = (v[3], v[4]);
+                }
+            }
+        }
+    }
+
     // CBP / mb_qp_delta / residual are signalled for ALL inter macroblocks,
     // including B_Direct_16x16 (spec §7.3.4/§7.3.5.1: `coded_block_pattern` is
     // present whenever MbPartPredMode != Intra_16x16, and a direct MB with

@@ -2,23 +2,50 @@
 //!
 //! A PNS band carries no spectral coefficients; instead the decoder fills the
 //! band with pseudo-random noise whose energy matches the band's (noise)
-//! scalefactor. The noise is deterministic per band so decode is reproducible.
+//! scalefactor. The noise is deterministic and reproducible: ffmpeg (the de-facto
+//! reference AAC-LC decoder) advances a single linear-congruential generator
+//! continuously across every band and frame of the whole stream, seeded once at
+//! decoder init. We replicate that exact sequence so PNS-dominated content
+//! (e.g. white noise) correlates with the reference instead of being
+//! independently-realized decorrelated noise.
 
-use crate::dequant::dequant_scale;
 use crate::scalefactors::{is_noise, ZERO_HCB};
 use crate::syntax::IcsInfo;
 
-/// Small deterministic LCG, used to synthesize PNS noise.
-fn lcg(state: &mut u32) -> u32 {
-    *state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    *state
+/// The PNS pseudo-random generator state (mirrors ffmpeg's `AACContext::
+/// random_state`). Seeded once at decoder construction and advanced
+/// continuously — it is shared across all channels, bands, and frames of a
+/// stream, never reset per band. The LCG is ffmpeg's exact
+/// `lcg_random`: `state = state * 1664525 + 1013904223` in unsigned arithmetic
+/// (reinterpreted as signed, matching the union in ffmpeg's `lcg_random`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PnsRandom(u32);
+
+impl PnsRandom {
+    /// Seed value ffmpeg uses (`aac_decode_init`: `random_state = 0x1f2e3d4c`).
+    pub const SEED: u32 = 0x1f2e3d4c;
+
+    /// Create a fresh generator at ffmpeg's seed.
+    pub fn new() -> Self {
+        PnsRandom(Self::SEED)
+    }
+
+    /// Advance the generator once and return the raw `u32` value, exactly as
+    /// ffmpeg's `lcg_random` does. ffmpeg's float path uses this raw value
+    /// directly as the noise sample (`cfo[k] = ac->random_state`), so we
+    /// convert it to `f32` by value (range roughly [0, 2³²)) to match.
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.0
+    }
 }
 
 /// Fill every PNS band of `coeffs` with scaled pseudo-random noise.
 ///
 /// `band_type` / `scalefactor` are per `(group * max_sfb + sfb)`; `swb` is the
 /// offset table for the current window sequence; `gindex`/`group_len` mirror the
-/// spectral decode placement.
+/// spectral decode placement. `rng` is the shared, continuously-advanced PNS
+/// generator.
 pub fn apply_pns(
     ics: &IcsInfo,
     band_type: &[u8],
@@ -26,6 +53,7 @@ pub fn apply_pns(
     swb: &[u16],
     global_gain: u8,
     gindex: &[usize],
+    rng: &mut PnsRandom,
     coeffs: &mut [f32; 1024],
 ) {
     let num_groups = ics.num_window_groups();
@@ -48,42 +76,67 @@ pub fn apply_pns(
             let Some(bt) = band_type.get(idx).copied() else {
                 break;
             };
-            if bt != ZERO_HCB && is_noise(bt) {
-                let sf = scalefactor.get(idx).copied().unwrap_or(0);
-                let scale = dequant_scale(global_gain, sf);
-                let width = (swb[sfb + 1] - swb[sfb]) as usize;
-                for w_idx in 0..glen {
-                    let base = gbase + w_idx * 128 + swb[sfb] as usize;
-                    if base + width > coeffs.len() {
-                        continue;
+                if bt != ZERO_HCB && is_noise(bt) {
+                    let sf = scalefactor.get(idx).copied().unwrap_or(0);
+                    // PNS noise energy uses its own baseline: the stored `sf` is
+                    // `global_gain - noise_energy_abs` (see
+                    // `scalefactors::decode_scalefactors`), so the absolute noise
+                    // energy is `noise_energy_abs = global_gain - sf`. Per ISO
+                    // 14496-3 §4.6.13.3 / ffmpeg's `dequant_scalefactors` (NOISE_BT
+                    // case) the band scale is `-2^(0.25 · noise_energy_abs)` — note
+                    // the **negative sign** and the **zero baseline** (NOT the
+                    // regular-band `-100` offset baked into `dequant_scale`).
+                    let noise_energy_abs = global_gain as i32 - sf as i32;
+                    let scale = -(2.0f64).powf(0.25 * noise_energy_abs as f64)
+                        .clamp(-1.0e30, 1.0e30) as f32;
+                    if std::env::var("AAC_DBG_PNS").is_ok() {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static CALL: AtomicUsize = AtomicUsize::new(0);
+                        let call = CALL.fetch_add(1, Ordering::SeqCst);
+                        if sfb == 0 {
+                            eprintln!("DBG pns CALL={call} g={g} maxsfb={} gg={global_gain}", ics.max_sfb);
+                        }
+                        if scale.abs() > 1.5 {
+                            eprintln!(
+                                "DBG pns CALL={call} g={g} sfb={sfb} ne_abs={noise_energy_abs} scale={scale:.4}",
+                            );
+                        }
                     }
-                    // Generate the raw pseudo-random noise for this band/window,
-                    // then normalize its energy to `scale²` so the substituted
-                    // noise has the same energy as the original (dequantized)
-                    // coefficients it replaces (ISO 14496-3 §4.6.13.3). This
-                    // matches the reference decoder, which computes
-                    // `band_energy = Σ r[k]²` over the band and scales by
-                    // `scale / sqrt(band_energy)`. Without this, a band's
-                    // energy would be `scale² · width / 3` (uniform[-1,1] has
-                    // variance 1/3) instead of `scale²`, so wide high-frequency
-                    // PNS bands would come out far too quiet.
-                    let mut state = (idx as u32).wrapping_mul(40_503).wrapping_add(1);
-                    let mut energy = 0.0f32;
-                    for line in 0..width {
-                        let r = (lcg(&mut state) as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                        coeffs[base + line] = r;
-                        energy += r * r;
-                    }
-                    let norm = if energy > 0.0 {
-                        scale / energy.sqrt()
-                    } else {
-                        0.0
-                    };
-                    for line in 0..width {
-                        coeffs[base + line] *= norm;
+                    let width = (swb[sfb + 1] - swb[sfb]) as usize;
+                    for w_idx in 0..glen {
+                        let base = gbase + w_idx * 128 + swb[sfb] as usize;
+                        if base + width > coeffs.len() {
+                            continue;
+                        }
+                        // Generate the raw pseudo-random noise for this band/window
+                        // directly from the shared, continuously-advanced LCG
+                        // (`rng`), matching ffmpeg's float path (`cfo[k] =
+                        // ac->random_state`). We map the `u32` to [-1, 1] so the
+                        // band energy and thus the per-line RMS match the
+                        // reference decoder's normalization; the *relative* noise
+                        // pattern across lines comes straight from the shared LCG
+                        // sequence, so a PNS-dominated stream correlates with the
+                        // reference instead of being an independent (decorrelated)
+                        // white sequence.
+                        let mut energy = 0.0f64;
+                        for line in 0..width {
+                            // ffmpeg's float PNS path: `cfo[k] = ac->random_state`
+                            // (the raw u32 value). We keep the raw value so the
+                            // per-line *relative* magnitude matches ffmpeg's exactly.
+                            let r = rng.next() as f64;
+                            coeffs[base + line] = r as f32;
+                            energy += r * r;
+                        }
+                        let norm = if energy > 0.0 {
+                            scale as f64 / energy.sqrt()
+                        } else {
+                            0.0
+                        };
+                        for line in 0..width {
+                            coeffs[base + line] = (coeffs[base + line] as f64 * norm) as f32;
+                        }
                     }
                 }
-            }
             let _ = short;
         }
     }
@@ -115,9 +168,11 @@ mod tests {
         let gindex = [0usize];
         let mut a = [0.0f32; 1024];
         let mut b = [0.0f32; 1024];
-        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut a);
-        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut b);
-        // Deterministic: same inputs → identical output.
+        let mut rng = PnsRandom::new();
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut rng, &mut a);
+        let mut rng = PnsRandom::new();
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut rng, &mut b);
+        // Deterministic: same inputs → identical output (same RNG state).
         assert_eq!(a, b);
         // The PNS band (lines 0..4) is filled with non-zero noise.
         let energy: f32 = a[0..4].iter().map(|x| x * x).sum();
@@ -127,6 +182,8 @@ mod tests {
     #[test]
     fn pns_noise_scales_with_gain() {
         // Higher global_gain → larger noise magnitude (energy ∝ scale²).
+        // With PNS scale = -2^(0.25·noise_energy_abs) and noise_energy_abs =
+        // global_gain - sf (sf = 0 here), scale ∝ 2^(0.25·global_gain).
         let ics = ics_long();
         let bt = vec![NOISE_HCB];
         let sf = vec![0i32];
@@ -134,13 +191,14 @@ mod tests {
         let gindex = [0usize];
 
         let mut low = [0.0f32; 1024];
-        apply_pns(&ics, &bt, &sf, &swb, 90, &gindex, &mut low);
+        let mut rng_low = PnsRandom::new();
+        apply_pns(&ics, &bt, &sf, &swb, 90, &gindex, &mut rng_low, &mut low);
         let mut high = [0.0f32; 1024];
-        apply_pns(&ics, &bt, &sf, &swb, 110, &gindex, &mut high);
+        let mut rng_high = PnsRandom::new();
+        apply_pns(&ics, &bt, &sf, &swb, 110, &gindex, &mut rng_high, &mut high);
         let e_low: f32 = low[0..4].iter().map(|x| x * x).sum();
         let e_high: f32 = high[0..4].iter().map(|x| x * x).sum();
-        // 2^((110-100-0)/4) / 2^((90-100-0)/4) = 2^(10/4 - (-10/4)) = 2^5 = 32 in scale,
-        // so energy ratio ≈ 32² = 1024.
+        // 2^(0.25·110) / 2^(0.25·90) = 2^(5) = 32 in scale, energy ratio ≈ 32² = 1024.
         assert!(
             (e_high / e_low - 1024.0).abs() / 1024.0 < 0.1,
             "energy ratio {}/{}",
@@ -157,7 +215,8 @@ mod tests {
         let swb = [0u16, 4];
         let gindex = [0usize];
         let mut a = [1.0f32; 1024];
-        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut a);
+        let mut rng = PnsRandom::new();
+        apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut rng, &mut a);
         // No PNS band → no writes.
         assert_eq!(a[0], 1.0);
     }
