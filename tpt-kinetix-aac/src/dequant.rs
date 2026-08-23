@@ -15,9 +15,20 @@ use crate::scalefactors::{is_intensity, is_noise, ZERO_HCB};
 use crate::syntax::{AacParseError, IcsInfo, SectionData};
 
 /// Per-band dequantization scale `2^((global_gain - 100 - sf) / 4)`.
+///
+/// The result is clamped to a finite value. `global_gain` is 8 bits and `sf` is
+/// a DPCM-accumulated value, both bitstream-controlled, so a malformed or
+/// desynced stream can drive the exponent arbitrarily high — `2^(0.25·q)`
+/// overflows `f32` to `+inf` for `q > ~512`. An infinite scale then silently
+/// becomes **NaN** downstream (`inf * 0.0` in [`dequant_coeff`], or `l - r` in
+/// M/S stereo), which propagates through the IMDCT and poisons the whole
+/// output frame. Clamping keeps a corrupt stream's output merely wrong rather
+/// than NaN-poisoned. Found by `tests/proptest_decode_never_panics.rs`.
 pub fn dequant_scale(global_gain: u8, sf: i32) -> f32 {
     let q = global_gain as f64 - 100.0 - sf as f64;
-    (2.0f64).powf(0.25 * q) as f32
+    let v = (2.0f64).powf(0.25 * q);
+    // f32::MAX is ~3.4e38; cap well below so later multiplies stay finite too.
+    v.clamp(0.0, 1.0e30) as f32
 }
 
 /// Per-group base line offset into the 1024 buffer (short windows only; the sum
@@ -34,14 +45,29 @@ pub fn group_base_offsets(ics: &IcsInfo) -> Vec<usize> {
 }
 
 /// Inverse quantizer: `|q|^(4/3) · scale`, with the sign of `q`.
+///
+/// Computed in `f64` and clamped to a finite `f32`: `q` comes from Huffman
+/// decode plus a possibly-large escape value, so `|q|^(4/3)` can itself
+/// overflow `f32` independently of `scale`. See [`dequant_scale`] on why an
+/// infinity here would become NaN rather than merely a loud sample.
 #[inline]
 fn dequant_coeff(q: i32, scale: f32) -> f32 {
     if q == 0 {
         return 0.0;
     }
-    let sign = if q < 0 { -1.0f32 } else { 1.0f32 };
-    let mag = (q.unsigned_abs() as f64).powf(4.0 / 3.0) as f32;
-    sign * mag * scale
+    let sign = if q < 0 { -1.0f64 } else { 1.0f64 };
+    let mag = (q.unsigned_abs() as f64).powf(4.0 / 3.0);
+    let v = sign * mag * scale as f64;
+    if v.is_finite() {
+        v.clamp(-1.0e30, 1.0e30) as f32
+    } else {
+        // Preserve the sign of a saturating value rather than emitting inf/NaN.
+        if v > 0.0 {
+            1.0e30
+        } else {
+            -1.0e30
+        }
+    }
 }
 
 /// Expand the section data into a per-`(group * max_sfb + sfb)` band codebook.

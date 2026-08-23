@@ -25,10 +25,10 @@ fn p8x8_sub_dims(
 }
 
 /// Sub-partition (col4, row4, w4, h4) for sub_i-th sub-partition within a
-/// B_8x8 8×8 partition at (col4, row4) with B sub_mb_type `sub_t` (0..=12).
-/// For n_sub=1 types (0..=3): whole 8×8. For n_sub=2 types: even sub_t (4,6,8)
-/// are 8×4 (top/bottom), odd sub_t (5,7,9) are 4×8 (left/right). For n_sub=4
-/// types (10..=12): four 4×4 in Z-scan order.
+/// B_8x8 8×8 partition at (col4, row4) with B sub_mb_type `sub_t` (0..=12),
+/// per spec Table 7-17: type 0 is B_Direct_8x8 (handled by the caller); types
+/// `{1,5,9}` are one 8×8; `{2,6,10}` two 8×4 (top/bottom); `{3,7,11}` two 4×8
+/// (left/right); `{4,8,12}` four 4×4 in scan order.
 fn b8x8_sub_dims(
     sub_t: usize,
     col4: usize,
@@ -36,19 +36,19 @@ fn b8x8_sub_dims(
     sub_i: usize,
 ) -> (usize, usize, usize, usize) {
     match sub_t {
-        0..=3 => (col4, row4, 2, 2), // n_sub=1, whole 8×8
-        4 | 6 | 8 => match sub_i {
-            // n_sub=2, 8×4
+        1 | 5 | 9 => (col4, row4, 2, 2), // one 8×8 sub-part
+        2 | 6 | 10 => match sub_i {
+            // two 8×4
             0 => (col4, row4, 2, 1),
             _ => (col4, row4 + 1, 2, 1),
         },
-        5 | 7 | 9 => match sub_i {
-            // n_sub=2, 4×8
+        3 | 7 | 11 => match sub_i {
+            // two 4×8
             0 => (col4, row4, 1, 2),
             _ => (col4 + 1, row4, 1, 2),
         },
-        10..=12 => match sub_i {
-            // n_sub=4, 4×4
+        4 | 8 | 12 => match sub_i {
+            // four 4×4
             0 => (col4, row4, 1, 1),
             1 => (col4 + 1, row4, 1, 1),
             2 => (col4, row4 + 1, 1, 1),
@@ -1163,61 +1163,45 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         _ => unreachable!(),
     }
 
-    if b_type_raw != 0 {
-        let (cbp_l, cbp_c) =
-            decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
-        let cbp = cbp_l | (cbp_c << 4);
-        mb.cbp = cbp;
-        let mut qp = prev_qp;
-        let mut dqp_nz = false;
-        if cbp_l != 0 || cbp_c != 0 {
-            let dqp = ctxs.qp_delta.decode(dec, prev_dqp_nonzero);
-            dqp_nz = dqp != 0;
-            qp = (prev_qp + dqp + 52).rem_euclid(52);
-        }
-        mb.qp = qp;
-        let this_cabac_ctx = decode_inter_residual_cabac(
-            dec,
-            ctxs,
-            &mut mb,
-            &mut this_nz,
-            nz_grid,
-            cabac_ctx_grid,
-            mb_x,
-            mb_y,
-            mb_cols,
-            cbp_l,
-            cbp_c,
-        )?;
-        let mb_type_str = format!("{:?}", mb.mb_type);
-        tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
-        return Ok((
-            mb,
-            this_nz,
-            this_pred_ctx,
-            this_cabac_ctx,
-            this_inter,
-            qp,
-            dqp_nz,
-        ));
+    // CBP / mb_qp_delta / residual are signalled for ALL inter macroblocks,
+    // including B_Direct_16x16 (spec §7.3.4/§7.3.5.1: `coded_block_pattern` is
+    // present whenever MbPartPredMode != Intra_16x16, and a direct MB with
+    // cbp != 0 carries residual coefficients). Skipping those bins here
+    // desyncs the arithmetic engine for every following macroblock.
+    let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+    let cbp = cbp_l | (cbp_c << 4);
+    mb.cbp = cbp;
+    let mut qp = prev_qp;
+    let mut dqp_nz = false;
+    if cbp_l != 0 || cbp_c != 0 {
+        let dqp = ctxs.qp_delta.decode(dec, prev_dqp_nonzero);
+        dqp_nz = dqp != 0;
+        qp = (prev_qp + dqp + 52).rem_euclid(52);
     }
-
-    // B_Direct: no CBP/residual syntax, qp unchanged.
-    mb.qp = prev_qp;
-    let this_cabac_ctx = MbCabacCtx {
-        present: true,
-        cbp_word: 0,
-        ..Default::default()
-    };
-    tracer.on_mb_parsed(mb_x, mb_y, "BDirect16x16", mb.qp, 0, 0, &[0u8; 16]);
+    mb.qp = qp;
+    let this_cabac_ctx = decode_inter_residual_cabac(
+        dec,
+        ctxs,
+        &mut mb,
+        &mut this_nz,
+        nz_grid,
+        cabac_ctx_grid,
+        mb_x,
+        mb_y,
+        mb_cols,
+        cbp_l,
+        cbp_c,
+    )?;
+    let mb_type_str = format!("{:?}", mb.mb_type);
+    tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
     Ok((
         mb,
         this_nz,
         this_pred_ctx,
         this_cabac_ctx,
         this_inter,
-        prev_qp,
-        prev_dqp_nonzero,
+        qp,
+        dqp_nz,
     ))
 }
 

@@ -21,6 +21,37 @@ pub struct CabacContext {
     pub state: u8,
     /// `valMPS` in the spec: the most-probable-symbol value, 0 or 1.
     pub mps: u8,
+    /// Global spec context index (0..=1023) this variable was initialised
+    /// from; `0xFFFF` when unknown (contexts built directly via [`Self::init`]).
+    /// Used only by the `KINETIX_BINTRACE=1` debugging tracer.
+    pub ctx_id: u16,
+}
+
+thread_local! {
+    /// Per-bin sequence counter for the `KINETIX_BINTRACE=1` debug tracer.
+    static BIN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn bin_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
+}
+
+fn trace_bin(kind: char, ctx_id: u16, pre_state: u8, pre_mps: u8, bin: u32) {
+    if !bin_trace_enabled() {
+        return;
+    }
+    let n = BIN_SEQ.with(|c| {
+        let v = c.get() + 1;
+        c.set(v);
+        v
+    });
+    if kind == 'D' {
+        eprintln!("BIN {n} {kind} ctx={ctx_id} st={pre_state} mps={pre_mps} bin={bin}");
+    } else {
+        eprintln!("BIN {n} {kind} bin={bin}");
+    }
 }
 
 impl CabacContext {
@@ -33,11 +64,13 @@ impl CabacContext {
             Self {
                 state: (63 - pre_ctx_state) as u8,
                 mps: 0,
+                ctx_id: 0xFFFF,
             }
         } else {
             Self {
                 state: (pre_ctx_state - 64) as u8,
                 mps: 1,
+                ctx_id: 0xFFFF,
             }
         }
     }
@@ -154,6 +187,7 @@ impl<'a> CabacDecoder<'a> {
             bin_val
         };
 
+        trace_bin('D', ctx.ctx_id, ctx.state, ctx.mps, bin_val as u32);
         self.renormalize();
         bin_val
     }
@@ -161,12 +195,14 @@ impl<'a> CabacDecoder<'a> {
     /// Decode one bypass bin (spec §9.3.3.2.3): no context, no renormalisation.
     pub fn decode_bypass(&mut self) -> u8 {
         self.offset = (self.offset << 1) | self.next_bit();
-        if self.offset >= self.range {
+        let bin = if self.offset >= self.range {
             self.offset -= self.range;
             1
         } else {
             0
-        }
+        };
+        trace_bin('B', 0xFFFF, 0, 0, bin as u32);
+        bin
     }
 
     /// Decode `n` consecutive bypass bins as an unsigned integer, MSB first.
@@ -187,8 +223,10 @@ impl<'a> CabacDecoder<'a> {
     pub fn decode_terminate(&mut self) -> u8 {
         self.range -= 2;
         if self.offset >= self.range {
+            trace_bin('T', 0xFFFF, 0, 0, 1);
             1
         } else {
+            trace_bin('T', 0xFFFF, 0, 0, 0);
             self.renormalize();
             0
         }
@@ -272,7 +310,9 @@ impl<'a> CabacDecoder<'a> {
 /// [`crate::cabac_tables::CABAC_CTX_INIT_I`] and initialise it at `slice_qp_y`.
 fn init_ctx(ctx_idx: usize, slice_qp_y: i32) -> CabacContext {
     let (m, n) = crate::cabac_tables::CABAC_CTX_INIT_I[ctx_idx];
-    CabacContext::init(m as i32, n as i32, slice_qp_y)
+    let mut c = CabacContext::init(m as i32, n as i32, slice_qp_y);
+    c.ctx_id = ctx_idx as u16;
+    c
 }
 
 /// Left/top neighbour inputs for I-slice `mb_type`'s bin-0 `ctxIdxInc`
@@ -745,7 +785,9 @@ fn init_pb_ctx(ctx_idx: usize, cabac_init_idc: usize, slice_qp_y: i32) -> CabacC
         1 => crate::cabac_tables::CABAC_CTX_INIT_PB1[ctx_idx],
         _ => crate::cabac_tables::CABAC_CTX_INIT_PB2[ctx_idx],
     };
-    CabacContext::init(m as i32, n as i32, slice_qp_y)
+    let mut c = CabacContext::init(m as i32, n as i32, slice_qp_y);
+    c.ctx_id = ctx_idx as u16;
+    c
 }
 
 /// Left/top neighbour inputs for `mb_skip_flag`'s `ctxIdxInc` derivation
@@ -1903,6 +1945,7 @@ mod tests {
         let adapted = CabacContext {
             state: 42,
             mps: 1,
+            ctx_id: 0xFFFF,
         };
         p.set_shared_ctx(adapted);
         assert_ne!(p.shared_ctx(), suffix.shared_ctx());
@@ -1922,6 +1965,7 @@ mod tests {
         let adapted = CabacContext {
             state: 17,
             mps: 0,
+            ctx_id: 0xFFFF,
         };
         b.set_shared_ctx(adapted);
         suffix.set_shared_ctx(b.shared_ctx());

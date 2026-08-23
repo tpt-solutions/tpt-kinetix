@@ -1297,6 +1297,13 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                         | MbType::B8x16
                         | MbType::BB8x8
                 );
+            eprintln!(
+                "BRECON MB({mb_x},{mb_y}) type={:?} motion={} skip={} -> {}",
+                mb.mb_type,
+                mb.motion.is_some(),
+                mb.skip,
+                if is_inter { "INTER" } else { "INTRA" }
+            );
             if is_inter {
                 reconstruct_b_inter_luma(
                     mb,

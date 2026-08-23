@@ -598,7 +598,11 @@ fn main() {
         // aligned payload with the true init (idx=5, mps=0) for ctxIdx11@QP18.
         {
             let mut d = tpt_kinetix_h264::entropy::CabacDecoder::new(&payload).unwrap();
-            let mut c = tpt_kinetix_h264::entropy::CabacContext { state: 5, mps: 0 };
+            let mut c = tpt_kinetix_h264::entropy::CabacContext {
+                state: 5,
+                mps: 0,
+                ctx_id: 0xFFFF,
+            };
             eprintln!(
                 "--- our engine, init (5,0), payload {:02X?} ---",
                 &payload[..]
@@ -931,6 +935,7 @@ fn main() {
                     let mut c = tpt_kinetix_h264::entropy::CabacContext {
                         state: st as u8,
                         mps: mpsv,
+                        ctx_id: 0xFFFF,
                     };
                     let mut all_ones = true;
                     for _ in 0..12 {

@@ -551,6 +551,58 @@ pub fn minimal_aac_adts(sample_rate: u32, channels: u8, duration_secs: f32) -> O
     }
 }
 
+/// Generate a short raw AAC-LC elementary stream in ADTS framing from an
+/// arbitrary `ffmpeg` lavfi input spec (e.g. `sine=...`, `anoisesrc=...`,
+/// `sine=...:sample_rate=...`), at the given channel count. Returns `None` if
+/// `ffmpeg` is unavailable or the encode fails. Use this to build conformance
+/// corpora that exercise paths a single 440 Hz tone does not reach (PNS, TNS,
+/// EIGHT_SHORT transients, mono, non-44.1 kHz sample rates, etc.).
+pub fn encode_aac_adts_lavfi(
+    lavfi_input: &str,
+    channels: u8,
+    bitrate: &str,
+) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let ac = channels.to_string();
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            lavfi_input,
+            "-ac",
+            &ac,
+            "-c:a",
+            "aac",
+            "-b:a",
+            bitrate,
+            // Force ADTS framing so each output packet is self-describing.
+            "-f",
+            "adts",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Encode a short CAVLC baseline-profile H.264 clip with `ffmpeg`, returning
 /// the raw Annex B bytestream (read from stdout, so no temp file is needed).
 ///

@@ -36,13 +36,29 @@ pub fn apply_pns(
         let glen = ics.group_len(g);
         for sfb in 0..max_sfb {
             let idx = g * max_sfb + sfb;
-            if band_type[idx] != ZERO_HCB && is_noise(band_type[idx]) {
-                let scale = dequant_scale(global_gain, scalefactor[idx]);
+            // `max_sfb` and the window-group count are bitstream-controlled, so
+            // `idx` can exceed the per-band arrays and `sfb + 1` can exceed the
+            // scalefactor-band offset table for this sample rate. Same bounds
+            // guard `dequant.rs`/`stereo.rs`/`pulse.rs` already carry — this
+            // module was missed. (Regression: panic at `swb[sfb + 1]`, found by
+            // `tests/proptest_decode_never_panics.rs`.)
+            if sfb + 1 >= swb.len() {
+                break;
+            }
+            let Some(bt) = band_type.get(idx).copied() else {
+                break;
+            };
+            if bt != ZERO_HCB && is_noise(bt) {
+                let sf = scalefactor.get(idx).copied().unwrap_or(0);
+                let scale = dequant_scale(global_gain, sf);
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
                 let mut state = (idx as u32).wrapping_mul(40_503).wrapping_add(1);
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     for line in 0..width {
+                        if base + line >= coeffs.len() {
+                            break;
+                        }
                         let r = (lcg(&mut state) as f32 / u32::MAX as f32) * 2.0 - 1.0;
                         coeffs[base + line] = scale * r;
                     }

@@ -56,6 +56,12 @@ pub fn apply_stereo(
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     for line in 0..width {
+                        // `base` derives from bitstream-controlled group/band
+                        // geometry and can run past the 1024-coefficient
+                        // spectrum on a malformed stream.
+                        if base + line >= 1024 {
+                            break;
+                        }
                         let l = left[base + line];
                         let r = right[base + line];
                         // ISO 14496-3 §4.6.8.1.3's decode pseudocode is unscaled:
@@ -69,21 +75,46 @@ pub fn apply_stereo(
             }
 
             // --- intensity stereo ---
-            let l_int = left_band_type[lidx] != ZERO_HCB && is_intensity(left_band_type[lidx]);
-            let r_int = right_band_type[ridx] != ZERO_HCB && is_intensity(right_band_type[ridx]);
+            //
+            // `lidx`/`ridx` are derived from `max_sfb` and the window-group
+            // count, both of which come from the (untrusted) bitstream, so they
+            // can exceed the per-band arrays a desynced/malformed stream
+            // actually produced. Index defensively rather than panicking; a band
+            // with no recorded type simply isn't an intensity band. (Regression:
+            // `index out of bounds: the len is 14 but the index is 14`, found by
+            // `tests/proptest_decode_never_panics.rs`.)
+            let l_bt = left_band_type.get(lidx).copied();
+            let r_bt = right_band_type.get(ridx).copied();
+            let (Some(l_bt), Some(r_bt)) = (l_bt, r_bt) else {
+                continue;
+            };
+            let l_int = l_bt != ZERO_HCB && is_intensity(l_bt);
+            let r_int = r_bt != ZERO_HCB && is_intensity(r_bt);
             if l_int != r_int {
                 // Exactly one channel is the intensity (zero) channel.
-                let (int_is_left, is_pos) = if l_int {
-                    (true, left_scalefactor[lidx])
+                let is_pos = if l_int {
+                    left_scalefactor.get(lidx).copied()
                 } else {
-                    (false, right_scalefactor[ridx])
+                    right_scalefactor.get(ridx).copied()
                 };
-                let scale = (2.0f64).powf(-0.25 * is_pos as f64) as f32;
+                let Some(is_pos) = is_pos else {
+                    continue;
+                };
+                let int_is_left = l_int;
+                // `is_pos` is a DPCM-accumulated, bitstream-controlled value, so
+                // `2^(-0.25·is_pos)` overflows f32 to +inf for large negative
+                // values; an infinite factor then becomes NaN downstream. Clamp
+                // to stay finite (see `dequant::dequant_scale` for the same
+                // hazard and reasoning).
+                let scale = (2.0f64).powf(-0.25 * is_pos as f64).clamp(0.0, 1.0e30) as f32;
                 let sign = if is_pos < 0 { -1.0f32 } else { 1.0f32 };
                 let factor = scale * sign;
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     for line in 0..width {
+                        if base + line >= 1024 {
+                            break;
+                        }
                         if int_is_left {
                             left[base + line] = right[base + line] * factor;
                         } else {

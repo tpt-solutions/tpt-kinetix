@@ -112,6 +112,7 @@ pub struct AacDecoder {
     channels: Vec<ChannelState>,
     sample_rate: u32,
     sf_index: usize,
+    frame_no: u64,
 }
 
 impl Default for AacDecoder {
@@ -130,6 +131,7 @@ impl AacDecoder {
             channels: Vec::new(),
             sample_rate: 0,
             sf_index: 4,
+            frame_no: 0,
         }
     }
 
@@ -150,6 +152,8 @@ impl AacDecoder {
     /// Decode one ADTS frame, returning one 1024-sample-per-channel PCM frame.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<AudioFrame>, AacError> {
         let hdr = AdtsHeader::parse(&packet.data)?;
+        let frame_no = self.frame_no;
+        self.frame_no += 1;
 
         // Initialize decoder state from first header.
         if self.sample_rate == 0 {
@@ -159,6 +163,17 @@ impl AacDecoder {
         }
 
         // Parse the raw data block.
+        //
+        // `frame_length` and `header_len` both come from the (untrusted) ADTS
+        // header, so neither may be used to slice `packet.data` without being
+        // checked against its real length first: a frame truncated in transit
+        // (partial network read, damaged file) advertises a length longer than
+        // the bytes actually present. This previously panicked with "range end
+        // index N out of range for slice of length M" — found by
+        // `tests/proptest_decode_never_panics.rs`.
+        if hdr.frame_length > packet.data.len() || hdr.header_len > hdr.frame_length {
+            return Err(AacError::Parse(AacParseError::UnexpectedEof));
+        }
         let payload = &packet.data[hdr.header_len..hdr.frame_length];
         let block = RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize)?;
 
@@ -360,6 +375,30 @@ impl AacDecoder {
                 );
             } else {
                 self.imdct_long.transform(&ch.coeffs, &mut buf);
+                if std::env::var("AAC_DBG_WIN").is_ok() && frame_no <= 1 {
+                    let mut pns = 0;
+                    let mut first_pns_sf = 0i32;
+                    let mut first_pns_scale = 0.0f32;
+                    for (i, &bt) in ch.band_type.iter().enumerate() {
+                        if bt == 13 {
+                            pns += 1;
+                            if pns == 1 {
+                                first_pns_sf = ch.scalefactor[i];
+                                first_pns_scale =
+                                    crate::dequant::dequant_scale(ch.global_gain, ch.scalefactor[i]);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "DBG frame{frame_no} seq={:?} pns_bands={pns} gg={} first_pns_sf={} first_pns_scale={:.6} prev_shape={} cur_shape={}",
+                        ch.ics.window_sequence,
+                        ch.global_gain,
+                        first_pns_sf,
+                        first_pns_scale,
+                        self.channels[ch_idx].prev_shape,
+                        ch.ics.window_shape
+                    );
+                }
                 long_synthesis(
                     &buf,
                     &mut self.channels[ch_idx],
@@ -394,8 +433,21 @@ impl AacDecoder {
         }
 
         // Convert f32 samples to bytes.
+        //
+        // Final sanitization: a successful decode must never emit NaN or
+        // infinity. Individual stages already clamp their own overflow-prone
+        // arithmetic (see `dequant::dequant_scale`/`dequant_coeff` and
+        // `stereo`'s intensity factor), but the TNS all-pole filter and the
+        // overlap-add accumulation can still amplify an already-extreme -
+        // though finite - spectrum from a corrupt stream into a non-finite
+        // sample. Callers reasonably assume `Ok(frame)` means usable PCM, and a
+        // single NaN propagates through any downstream mixing/resampling, so
+        // this replaces non-finite samples with silence rather than exporting
+        // them. Guaranteed by `tests/proptest_decode_never_panics.rs`'s
+        // `decoded_samples_are_finite_and_bounded`.
         let mut data = Vec::with_capacity(interleaved.len() * 4);
         for &s in &interleaved {
+            let s = if s.is_finite() { s } else { 0.0 };
             data.extend_from_slice(&s.to_le_bytes());
         }
 

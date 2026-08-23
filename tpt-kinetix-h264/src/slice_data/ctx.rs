@@ -608,9 +608,11 @@ pub struct PbCabacSliceContexts {
     pub sub_mb_p: crate::entropy::SubMbTypePCabacContext,
     pub sub_mb_b: crate::entropy::SubMbTypeBCabacContext,
     pub ref_idx: crate::entropy::RefIdxCabacContext,
-    /// `mvd_l0`/`mvd_l1` share ONE pair of context variables per component:
-    /// FFmpeg's `DECODE_CABAC_MB_MVD` passes ctxbase 40 (x) / 47 (y) with no
-    /// list parameter, so both lists evolve the same context state.
+    /// `mvd` contexts. Both lists SHARE one pair per component (spec Table
+    /// 9-44 assigns mvd_l0 x 40..=45 / y 47..=52, with `mvd_l1` reusing the
+    /// same variables; FFmpeg's `DECODE_CABAC_MB_MVD` passes ctxbase 40 (x) /
+    /// 47 (y) with no list parameter). Empirically re-confirmed 2026-08-23:
+    /// giving L1 its own contexts regresses every bi-pred conformance clip.
     pub mvd_l0_x: crate::entropy::MvdCabacContext,
     pub mvd_l0_y: crate::entropy::MvdCabacContext,
     // ---- shared with I-slice (PB-init variants) ----
@@ -730,7 +732,6 @@ impl PbCabacSliceContexts {
         let v = self.intra_suffix.shared_ctx();
         self.mb_type_b.set_shared_ctx(v);
     }
-
 }
 
 /// Decode one MVD component via CABAC and record it in `inter_ctx`.

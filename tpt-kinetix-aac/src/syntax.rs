@@ -581,7 +581,17 @@ impl RawDataBlock {
     /// Parse a raw data block from `data`, dispatching on each syntactic element
     /// id until `END` or the bitstream is exhausted. `sf_index` is the 4-bit
     /// sampling-frequency index (used to select scalefactor-band tables).
+    ///
+    /// Returns [`AacParseError::Unsupported`] for a reserved `sf_index`: the
+    /// field is 4 bits (0..=15) but only 0..=11 name a real sample rate, and
+    /// every scalefactor-band / TNS table is sized 12. Validating once here
+    /// keeps all the downstream `TABLE[sf_index]` lookups infallible.
     pub fn parse(data: &[u8], sf_index: usize) -> Result<Self, AacParseError> {
+        if sf_index >= SWB_OFFSET_1024.len() {
+            return Err(AacParseError::Unsupported(
+                "reserved sampling_frequency_index",
+            ));
+        }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
         let mut _element_count = 0;

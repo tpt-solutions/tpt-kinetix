@@ -41,6 +41,26 @@
 //! correct given the *old* phase formula, but is superseded now that the
 //! phase formula itself is fixed.
 //!
+//! **2026-08-23 (amplitude normalization — settled, do not flip again).** The
+//! synthesis scale is `1/n`. Two earlier sessions went back and forth on this
+//! because both were measuring through a *separate* bug in [`crate::window`]:
+//! its half-windows violated the Princen-Bradley identity (`w[i]² + w[n-1-i]²`
+//! ranged over 0.000005..2.0 instead of being exactly 1), so windowed
+//! overlap-add could not reconstruct correctly for any choice of scale, and the
+//! end-to-end metric could not settle the question. With the window fixed, it
+//! was re-measured directly: `1/n` gives a best-aligned max-abs-diff of 0.021
+//! against the ffmpeg reference, while `2/n` gives 0.130 with every
+//! reconstructed sample exactly 2x too large.
+//!
+//! The reason the textbook `2/N_full = 2/(2n) = 1/n` "looks like" it should be
+//! doubled is that a *textbook unscaled* forward MDCT paired with this inverse
+//! needs a total of `2/n`; AAC's analysis MDCT supplies the missing factor of
+//! 1/2 itself, so the synthesis side must not. The local
+//! `windowed_overlap_add_round_trip_is_exact` test uses an unscaled forward
+//! transform and therefore applies that factor of 2 explicitly — it validates
+//! the phase rate, time offset, and TDAC, but deliberately does not constrain
+//! this constant.
+//!
 //! The overlap-add stage ([`crate::window`] / decoder) then windows and sums
 //! the 2·N output with the previous block's tail. Long windows use N = 1024,
 //! short windows N = 128.
@@ -83,15 +103,23 @@ impl Imdct {
     pub fn transform(&self, input: &[f32], output: &mut [f32]) {
         debug_assert_eq!(input.len(), self.n);
         debug_assert_eq!(output.len(), 2 * self.n);
-        // 2/N_full = 2/(2n) = 1/n (see module doc comment on the N-convention).
-        let inv_n = 1.0 / self.n as f64;
+        // Synthesis normalization is `1/n`, i.e. `2/N_full` with `N_full = 2n`.
+        //
+        // Note this is *half* the `2/n` that a textbook unscaled-forward-MDCT /
+        // inverse pair requires (see `windowed_overlap_add_round_trip_is_exact`,
+        // which uses such a pair and therefore compensates explicitly): AAC's
+        // analysis MDCT carries a 1/2 of its own, so the synthesis side must
+        // not apply it again. Verified end-to-end against the ffmpeg reference
+        // by `tests/conformance_aac.rs` — `2/n` here makes every reconstructed
+        // sample exactly 2x too large.
+        let scale = 1.0 / self.n as f64;
         for (nn, out) in output.iter_mut().enumerate() {
             let row = &self.table[nn * self.n..(nn + 1) * self.n];
             let mut sum = 0.0f64;
             for k in 0..self.n {
                 sum += input[k] as f64 * row[k] as f64;
             }
-            *out = (sum * inv_n) as f32;
+            *out = (sum * scale) as f32;
         }
     }
 
@@ -176,13 +204,92 @@ mod tests {
         assert!((time[0] - time[n]).abs() > 1e-3);
     }
 
+    /// A windowed MDCT → IMDCT → overlap-add round-trip reconstructs the
+    /// original signal in the fully-overlapped region (Time-Domain Aliasing
+    /// Cancellation). This pins down the basis-function **phase rate**, the
+    /// **`n0` time offset**, and the window's Princen-Bradley property — none
+    /// of those can be wrong without this failing. It is the local regression
+    /// test for the 2026-08-23 frequency-doubling fix.
+    ///
+    /// **On the amplitude constant:** this test pairs [`Imdct`] with a
+    /// *textbook unscaled* forward MDCT, which needs a total synthesis scale of
+    /// `2/n`. [`Imdct::transform`] deliberately applies `1/n` because AAC's
+    /// own analysis MDCT contributes the other factor of 1/2, so the `2.0`
+    /// below is applied explicitly to close the round-trip. That means this
+    /// test intentionally does **not** constrain the absolute constant — only
+    /// the conformance harness against a real reference decoder can, and it
+    /// does: `2/n` inside `transform` makes every output sample exactly 2x too
+    /// large. Recorded because an earlier session flipped this constant on
+    /// spec-text reasoning alone and had to revert it.
+    #[test]
+    fn windowed_overlap_add_round_trip_is_exact() {
+        let n = 64usize;
+        let full = 2 * n;
+        let imdct = Imdct::new(n);
+        let half = crate::window::sine_window(n);
+        // Symmetric 2n-point window: rising half then its mirror.
+        let w: Vec<f64> = (0..full)
+            .map(|i| {
+                if i < n {
+                    half[i] as f64
+                } else {
+                    half[full - 1 - i] as f64
+                }
+            })
+            .collect();
+
+        // Deterministic pseudo-random test signal.
+        let mut seed = 0x1234_5678u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            ((seed >> 8) as f64 / 8_388_608.0) - 1.0
+        };
+        let signal: Vec<f64> = (0..4 * n).map(|_| next()).collect();
+
+        // Compensates for AAC's analysis-side 1/2 (see the doc comment above).
+        const ANALYSIS_SCALE_COMPENSATION: f64 = 2.0;
+
+        let n0 = (n + 1) as f64 / 2.0;
+        let mut recon = vec![0.0f64; 4 * n];
+        for b in 0..3 {
+            let off = b * n;
+            // Forward (analysis) MDCT of the windowed block, unscaled.
+            let block: Vec<f64> = (0..full).map(|i| signal[off + i] * w[i]).collect();
+            let spec: Vec<f32> = (0..n)
+                .map(|k| {
+                    let mut s = 0.0f64;
+                    for (i, &bv) in block.iter().enumerate() {
+                        s += bv
+                            * ((2.0 * PI / full as f64) * (i as f64 + n0) * (k as f64 + 0.5)).cos();
+                    }
+                    s as f32
+                })
+                .collect();
+
+            // Inverse (synthesis) IMDCT, windowed and overlap-added.
+            let mut time = vec![0.0f32; full];
+            imdct.transform(&spec, &mut time);
+            for i in 0..full {
+                recon[off + i] += time[i] as f64 * ANALYSIS_SCALE_COMPENSATION * w[i];
+            }
+        }
+
+        // In n..3n every sample received both of its overlapping contributions.
+        for i in n..3 * n {
+            assert!(
+                (recon[i] - signal[i]).abs() < 1e-5,
+                "TDAC round-trip failed at {i}: got {} want {}",
+                recon[i],
+                signal[i]
+            );
+        }
+    }
+
     /// IMDCT(e_k) equals `(1/n)·cos( π/(4n)·(2·nn+n+1)·(2k+1) )` exactly: a direct
     /// check that [`Imdct::transform`] computes the correct inverse-transform basis
     /// (matched against the ISO/IEC 13818-7 §3.A.4 formula using the full-length-`N`
     /// convention `N = 2n`; see the module doc comment for the 2026-08-23
-    /// frequency-doubling fix), independent of any windowing / TDAC. The full
-    /// windowed overlap-add round-trip that reconstructs the original signal is
-    /// validated end-to-end against an ffmpeg reference by `tests/conformance_aac.rs`.
+    /// frequency-doubling fix), independent of any windowing / TDAC.
     #[test]
     fn imdct_basis_vector_is_cosine() {
         let n = 16usize;
@@ -206,26 +313,21 @@ mod tests {
         }
     }
 
-    /// The IMDCT basis is orthonormal: each basis column has unit energy and the
-    /// columns are mutually orthogonal. This is the precondition for the analysis
-    /// MDCT + windowed overlap-add to reconstruct the original signal (TDAC), which
-    /// `tests/conformance_aac.rs` checks against ffmpeg.
+    /// The IMDCT basis columns are mutually orthogonal, with the diagonal
+    /// reflecting the `1/n` synthesis normalization: the underlying cosine
+    /// matrix satisfies `Σ_nn C[nn][j]·C[nn][k] = n·δ_{jk}`, so after the
+    /// `(1/n)` factor is applied to both operands the inner product is
+    /// `(1/n)²·n = 1/n` on the diagonal.
     #[test]
     fn imdct_basis_is_orthonormal() {
         let n = 16usize;
         let imdct = Imdct::new(n);
-        // Probe two distinct basis vectors and confirm their inner product (over the
-        // 2N time samples, unscaled by 1/N) matches N·δ_{jk}.
         for (j, k) in [(0usize, 0), (0, 5), (3, 11)] {
             let mut fj = vec![0.0f32; 2 * n];
             let mut fk = vec![0.0f32; 2 * n];
             imdct.transform(&unit(n, j), &mut fj);
             imdct.transform(&unit(n, k), &mut fk);
             let dot: f64 = fj.iter().zip(&fk).map(|(a, b)| *a as f64 * *b as f64).sum();
-            // The IMDCT applies a (1/N) factor, so the output basis vectors have
-            // norm² 1/N and the columns of the underlying cosine matrix satisfy
-            // Σ_nn C[nn][j]·C[nn][k] = N·δ_{jk}; the (1/N)² from both sides leaves
-            // 1/N on the diagonal.
             let expected = if j == k { 1.0 / n as f64 } else { 0.0 };
             assert!(
                 (dot - expected).abs() < 1e-4,

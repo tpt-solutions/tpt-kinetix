@@ -7,9 +7,9 @@
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 CLOSED (8×8 High-profile bit-exact); remaining: cabac_b cell (coded-inter MBs with nonzero MVDs in IBP streams — see session #9 next steps), G (MBAFF P/B parsing, G.5 interlaced corpus), H (pixel_exact flip) |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 CLOSED; cabac_b matrix cell GREEN (2026-08-23: B_Direct CBP omission + B sub_mb_type tables fixed). Remaining: BBi16x16/B_8x8 gaps on other content (isolation harness), G (MBAFF P/B parsing, G.5 interlaced corpus), H (pixel_exact flip — must stay false) |
 | [todo-av1.md](todo-av1.md) | AV1 decoder | Phase G.0 (NEW, 2026-08-20): building a reusable symbol-trace oracle + diff harness to replace ad hoc per-session debugging — see below. 7 debugging sessions (2026-08-17/18/19), 6 real bugs fixed; solid-color content pixel-exact (99dB), real/textured content still noise-level (~10-17dB) — root cause not fully closed |
-| [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phase 6 parse desync (real ffmpeg streams) |
+| [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. Remaining: broaden conformance corpus beyond a single 440 Hz tone (PNS/TNS/intensity barely covered), spec-verify TNS/PNS/intensity numerics, real fuzz run on a host with the ASan runtime |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
 
 > **AV1 run 2026-08-17→19 (7 sessions, uncommitted working tree, see `todo-av1.md`

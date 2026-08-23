@@ -65,7 +65,7 @@
       `decoder.rs`'s Pass 4 (`imdct_long`/`imdct_short` + `long_synthesis`/
       `short_synthesis`). Still missing: the proptest over window-sequence
       combinations called for by the exit criteria.
-- [~] Phase 6 (structural parsing done 2026-08-23; amplitude accuracy open) — Wire phases 1-5 into `decode_raw_data_block`, swap
+- [x] Phase 6 (2026-08-23, later session — **CLOSED**) — Wire phases 1-5 into `decode_raw_data_block`, swap
       `decoder.rs`'s internals onto the native path (public
       `AacDecoder::new/with_config/set_config/set_strict/capabilities/decode/config`
       API unchanged), new `tests/conformance_aac.rs` via
@@ -441,8 +441,128 @@
       for a steady frame and compare against what the reference decoder's
       own spectrum would imply, the same instrumentation technique this
       session used for the frequency bug); (c) TNS, PNS, and intensity
-      stereo have not been re-verified against the spec PDF text since the
-      IMDCT fix — worth a pass now that the confounding phase bug is gone. — Remove `symphonia-codec-aac`/`symphonia-core` from
+            stereo have not been re-verified against the spec PDF text since the
+      IMDCT fix — worth a pass now that the confounding phase bug is gone.
+      **Updated 2026-08-23 (final session) — PHASE 6 CLOSED. The residual
+      amplitude gap was a Princen-Bradley/TDAC violation in `window.rs`, not an
+      amplitude-scale bug at all; conformance now passes a real assertion.**
+      Following step (b)/(c) above, the first thing checked was *not* another
+      spec formula but the arithmetic invariant the whole overlap-add stage
+      depends on. `window.rs` built its half-windows as
+      `sin(π·(i+0.5)/n)` where the spec's denominator is the **full** window
+      length `2n` (`sin(π/(2n)·(i+0.5))`). An AAC window spans the whole `2n`
+      IMDCT output and is symmetric about its centre, so the returned `n`
+      values are its *rising half* and must climb monotonically 0→1; the old
+      formula instead swept a complete 0→π arc inside that half, peaking at
+      1.0 at the midpoint and falling back to ~0 by its end. Consequence,
+      verified numerically before changing any code: the Princen-Bradley
+      identity `w[i]² + w[n-1-i]² == 1` — the exact precondition for 50%
+      overlap-add to reconstruct anything — evaluated to **0.000005 at the
+      window edges and 2.0 at its centre** instead of 1.0 everywhere. The KBD
+      window was wrong the same way (its `z` scale and Bessel-kernel argument
+      both used `n` for the full length); re-derived from the spec's literal
+      `sqrt(Σ_{j≤i} I₀[πα√(1-(2j/n-1)²)] / Σ_{j≤n} ...)` and cross-checked
+      `I₀` against `scipy.special.i0`.
+      This single bug explains every previously-confusing observation:
+      per-frame max-abs ran ~1.4x (≈√2) high because the overlap centre
+      doubled energy; **frame 0 always looked correct** because it has no
+      preceding block to overlap with, which is precisely what made the defect
+      masquerade as a steady-state "amplitude scale" problem for several
+      sessions; and the max-abs-vs-correlation discrepancy flagged as a loose
+      end was the same thing (extra energy from a non-reconstructing window).
+      Measured effect: best-aligned max-abs-diff **0.114 → 0.021**, Pearson
+      channel-0 cross-correlation **~0.75 → 0.9947**, least-squares amplitude
+      fit **~0.91 → 0.9937**, best sample lag **0** — so the alignment
+      methodology suspected in (a) was never the issue (and the sample-level
+      search suggested there was already implemented).
+      **Negative result, recorded to stop the ping-pong:** with the window
+      fixed, the IMDCT's `1/n` vs `2/n` normalization was re-measured rather
+      than re-argued. `1/n` is correct (max-diff 0.021); `2/n` makes every
+      sample exactly 2x too large (0.130). The textbook `2/n` applies to an
+      *unscaled* forward MDCT — AAC's analysis MDCT supplies the other factor
+      of 1/2 — so two earlier sessions flipping this constant on spec-text
+      reasoning alone were both chasing a real discrepancy caused by the
+      window, not by this constant. `mdct.rs`'s module doc now states this
+      explicitly, and its new `windowed_overlap_add_round_trip_is_exact` test
+      pins the phase rate / `n0` offset / TDAC while *deliberately* not
+      constraining the amplitude constant (it compensates for the analysis-side
+      1/2 explicitly), so it can't be misread as evidence either way. M/S
+      stereo's unscaled `l+r`/`l-r` was left as-is and re-confirmed correct.
+      **Conformance is now a real gate, not a skip.** All three
+      "skip, known incomplete" guards in `tests/conformance_aac.rs` are gone,
+      replaced by `assert!(max_diff < 0.05)` (documented tolerance; actual
+      0.021) plus a new **shape** assertion (`corr > 0.95`, actual 0.9947).
+      The shape check exists because max-abs-diff alone cannot see a
+      frequency/phase bug — the earlier frequency-doubling defect produced a
+      plausible peak amplitude at ~883 Hz for a 440 Hz tone, and correlation
+      read ~0.0000058 then.
+      **Phase 6's remaining exit criteria are now met, and the new
+      `tests/proptest_decode_never_panics.rs` found five real bugs** (all
+      previously unreachable because parsing failed earlier — exactly the
+      regime a parse-only proptest cannot reach):
+      1. `decoder.rs` sliced `packet.data[hdr.header_len..hdr.frame_length]`
+         using the untrusted, header-advertised `frame_length` without checking
+         it against the real buffer length — any truncated frame (partial
+         network read, damaged file) panicked. Now returns `UnexpectedEof`.
+      2. `stereo.rs`'s intensity path indexed `left_band_type[lidx]` /
+         `right_scalefactor[ridx]` directly, where `lidx` derives from
+         bitstream-controlled `max_sfb` × window-group count — out of bounds on
+         a desynced stream. Now uses checked accessors.
+      3. `pns.rs` was missing the `sfb + 1 >= swb.len()` bounds guard that
+         `dequant.rs`/`stereo.rs`/`pulse.rs` already carried — the same known
+         bug class, simply missed in this module.
+      4. Reserved `sampling_frequency_index` (the field is 4 bits, 0..=15, but
+         only 0..=11 name a real rate and every SWB/TNS table is sized 12)
+         indexed those tables directly, panicking on indices 12-15. Validated
+         once in `RawDataBlock::parse`, making all downstream lookups
+         infallible.
+      5. **NaN in the output while returning `Ok`** — `dequant_scale`'s
+         `2^(0.25·q)` and intensity stereo's `2^(-0.25·is_pos)` both overflow
+         `f32` to `+inf` on bitstream-controlled exponents, and an infinite
+         scale becomes NaN downstream (`inf * 0.0`, or `l - r` in M/S). Fixed
+         by clamping both to finite values, plus a final sanitization pass at
+         the PCM boundary (TNS's all-pole filter and overlap-add accumulation
+         can still amplify an extreme-but-finite spectrum), since callers
+         reasonably assume `Ok(frame)` means usable PCM and one NaN propagates
+         through any downstream mixing.
+      Verified stable over 5 independent proptest seeds and a 2000-case-per-
+      property run; additionally, 76 mutated/truncated inputs derived from four
+      real ffmpeg-encoded seeds replayed through the full decode path produced
+      473 decoded frames with zero panics and zero non-finite samples.
+      `fuzz/fuzz_targets/fuzz_aac_decode.rs` + `fuzz/Cargo.toml` are added
+      (driving the whole pipeline, not just `RawDataBlock::parse`), wired into
+      the justfile's `fuzz-build`, with a 4-file seed corpus under
+      `fuzz/corpus/fuzz_aac_decode/`. **Note:** `cargo fuzz build` cannot link
+      on this host — the nightly toolchain lacks
+      `librustc-nightly_rt.asan.a`. This is a pre-existing environment gap, not
+      a defect in the new target: the existing `tpt-kinetix-av1`
+      `fuzz_obu_parse` fails with the identical linker error, and the AAC crate
+      itself compiles and type-checks cleanly under
+      `cargo +nightly check --manifest-path tpt-kinetix-aac/fuzz/Cargo.toml`.
+      A real timed fuzz run still needs a host with the ASan runtime installed.
+      **Final state:** `cargo test -p tpt-kinetix-aac` — 74 tests pass across 5
+      targets (65 lib + 1 conformance + 2 proptest_aac + 5
+      proptest_decode_never_panics + 1 doc); `cargo clippy -p tpt-kinetix-aac
+      --all-targets` clean; `cargo build --workspace` clean; `cargo test
+      --workspace --lib` 18/18 suites green; `cargo bench -p tpt-kinetix-aac`
+      records 14.9 ms for the decode_frames batch (criterion reports a large
+      regression vs its stored baseline, which is expected and not a
+      performance defect — the baseline was recorded when the decoder errored
+      out on the first frame instead of running the full Huffman → dequant →
+      TNS/PNS → stereo → IMDCT → overlap-add pipeline).
+      **Still open / next steps (deliberately not claimed as done):** the
+      remaining 0.021 max-diff is consistent with lossy-codec float rounding
+      but has not been driven to bit-exactness, and `capabilities()` still
+      reports `pixel_exact: false` — correctly, since sample-exactness against
+      the reference is unproven. TNS, PNS, and intensity stereo still have not
+      been re-verified line-by-line against the spec PDF (the item (c) above);
+      they are now exercised for robustness but not for numerical accuracy, and
+      the test corpus is a single 440 Hz stereo tone, so PNS/TNS/intensity
+      paths are barely covered by conformance. Broadening the conformance
+      corpus (noise, transients forcing EIGHT_SHORT, mono, other sample rates)
+      is the highest-value next step, followed by a real fuzz run on a
+      host with the ASan runtime.
+ — Remove `symphonia-codec-aac`/`symphonia-core` from
       `tpt-kinetix-aac/Cargo.toml` and root `Cargo.toml`; update
       `docs/codec-evaluations/aac.md`, both READMEs' status tables, and
       module doc comments (drop "delegated to symphonia-codec-aac" language).

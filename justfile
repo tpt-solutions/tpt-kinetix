@@ -48,6 +48,7 @@ fuzz-build:
     cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mkv_ebml
     cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse
     cd tpt-kinetix-h264 && cargo fuzz build fuzz_h264_nal
+    cd tpt-kinetix-aac && cargo fuzz build fuzz_aac_decode
     cd tpt-kinetix-stream && cargo fuzz build fuzz_rtmp_chunk && cargo fuzz build fuzz_rtmp_amf && cargo fuzz build fuzz_rtmp_flv && cargo fuzz build fuzz_hls_playlist
 
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
@@ -99,6 +100,17 @@ corpus-check:
 # Phase G.0). Requires ffmpeg (with libdav1d) or a standalone dav1d on PATH.
 av1-trace-diff *ARGS="mandelbrot":
     cargo run -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ARGS}}
+
+# Re-generate the independent Python oracle's default CDF tables / constants
+# from the Rust crate (tools/av1_oracle/cdf_tables_gen.py). Run after any change
+# to entropy_cdf.rs / coeff_tables.rs.
+av1-oracle-regen:
+    cargo run -q -p tpt-kinetix-av1 --example dump_oracle_tables > tools/av1_oracle/cdf_tables_gen.py
+
+# Validate the independent Python AV1 coeff oracle against the Rust crate's own
+# golden vectors (tpt-kinetix-av1/src/{entropy,coeff}.rs unit tests).
+av1-oracle-validate:
+    python3 tools/av1_oracle/validate.py
 
 # Run every Criterion bench in the workspace.
 bench:

@@ -9,7 +9,6 @@ use tpt_kinetix_aac::AacDecoder;
 use tpt_kinetix_core::frame::AudioFrame;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use tpt_kinetix_test_utils::audio_diff::pcm_max_abs_diff;
 use tpt_kinetix_test_utils::reference::{decode_aac_with_ffmpeg, ffmpeg_available};
 use tpt_kinetix_test_utils::synthetic::minimal_aac_adts;
 
@@ -164,6 +163,131 @@ fn best_aligned_max_diff(native: &[AudioFrame], reference: &[AudioFrame]) -> f32
     best
 }
 
+/// Pearson cross-correlation of channel 0 at the best integer sample lag.
+///
+/// This is a *shape* metric, deliberately independent of amplitude: it is the
+/// regression test for the class of bug that a max-abs-diff check cannot see.
+/// A previous session had the IMDCT basis running at exactly double the correct
+/// phase rate, so a real 440 Hz tone decoded to ~883 Hz — a completely
+/// different waveform that nonetheless had a plausible peak amplitude. This
+/// metric read ~0.0000058 then and reads ~0.995 now.
+fn best_channel0_correlation(native: &[AudioFrame], reference: &[AudioFrame]) -> f64 {
+    let native_planes = flatten_channels(native);
+    let ref_planes = flatten_channels(reference);
+    if native_planes.is_empty() || ref_planes.is_empty() {
+        return 0.0;
+    }
+    let n = &native_planes[0];
+    let r = &ref_planes[0];
+
+    let mut best = f64::MIN;
+    for lag in -2048i64..=4096 {
+        let (n_start, r_start) = if lag >= 0 {
+            (0usize, lag as usize)
+        } else {
+            ((-lag) as usize, 0usize)
+        };
+        if n_start >= n.len() || r_start >= r.len() {
+            continue;
+        }
+        let len = (n.len() - n_start).min(r.len() - r_start);
+        if len < 4096 {
+            continue;
+        }
+        let (mut dot, mut nn, mut rr) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 0..len {
+            let a = n[n_start + i] as f64;
+            let b = r[r_start + i] as f64;
+            dot += a * b;
+            nn += a * a;
+            rr += b * b;
+        }
+        if nn <= 0.0 || rr <= 0.0 {
+            continue;
+        }
+        best = best.max(dot / (nn.sqrt() * rr.sqrt()));
+    }
+    best
+}
+
+/// A single conformance case: `label` is diagnostic only, `adts` the real
+/// ffmpeg-encoded stream to decode with both decoders.
+struct ConformanceCase {
+    label: &'static str,
+    adts: Vec<u8>,
+}
+
+/// Build the conformance corpus. The single 440 Hz tone that previously
+/// constituted the whole corpus exercises almost none of the interesting
+/// decoder paths — it is purely tonal (no PNS), steady-state (no EIGHT_SHORT
+/// transients → TNS barely fires), stereo-2.0 at 44.1 kHz only. The cases
+/// below add the paths the previous corpus silently left unverified:
+///
+/// * **noise** (`anoisesrc`): broadband, so per-band scalefactors span the full
+///   range and the encoder leans on PNS (NOISE_HCB bands) and short windows.
+/// * **swept sine** (`sine=...:frequency=200..4000`): the rising spectral
+///   centroid forces window-sequence transitions (LONG_START / LONG_STOP /
+///   EIGHT_SHORT) and the overlap-add LONG↔SHORT glue, the trickiest part of
+///   `long_synthesis` / `short_synthesis`.
+/// * **mono**: a different channel count and the CPE-vs-SCE element path.
+/// * **48 kHz / 22.05 kHz**: different scalefactor-band tables (`SWB_OFFSET_*`
+///   are indexed by `sampling_frequency_index`), so a bug there would surface
+///   on one rate but not 44.1 kHz.
+fn build_corpus() -> Vec<ConformanceCase> {
+    let mut cases = Vec::new();
+    let mut add = |label: &'static str, adts: Option<Vec<u8>>| {
+        if let Some(adts) = adts {
+            cases.push(ConformanceCase { label, adts });
+        }
+    };
+
+    // Original baseline: 440 Hz stereo tone, 44.1 kHz.
+    add(
+        "tone_440_stereo_44100",
+        minimal_aac_adts(44_100, 2, 1.0),
+    );
+    // Broadband noise → PNS / short-window heavy.
+    add(
+        "noise_stereo_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "anoisesrc=duration=1.0:sample_rate=44100:amplitude=0.8:color=brown",
+            2,
+            "128k",
+        ),
+    );
+    add(
+        "noise_mono_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "anoisesrc=duration=1.0:sample_rate=44100:amplitude=0.8:color=white",
+            1,
+            "96k",
+        ),
+    );
+    // Frequency sweep → window-sequence transitions and TNS.
+    add(
+        "sweep_stereo_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "sine=frequency=200:duration=1.0:sample_rate=44100:frequency2=4000",
+            2,
+            "128k",
+        ),
+    );
+    // Other sample rates → different SWB tables.
+    add(
+        "tone_440_stereo_48000",
+        minimal_aac_adts(48_000, 2, 1.0),
+    );
+    add(
+        "tone_440_stereo_22050",
+        minimal_aac_adts(22_050, 2, 1.0),
+    );
+    add(
+        "tone_440_mono_44100",
+        minimal_aac_adts(44_100, 1, 1.0),
+    );
+    cases
+}
+
 #[test]
 fn native_aac_matches_ffmpeg_reference() {
     if !ffmpeg_available() {
@@ -171,78 +295,110 @@ fn native_aac_matches_ffmpeg_reference() {
         return;
     }
 
-    let adts = minimal_aac_adts(44_100, 2, 1.0).expect("ffmpeg should encode a test stream");
+    let corpus = build_corpus();
+    assert!(!corpus.is_empty(), "ffmpeg failed to encode every corpus case");
 
-    let native = decode_native(&adts);
-    let reference = decode_aac_with_ffmpeg(&adts).expect("ffmpeg should decode its own stream");
-    for (i, f) in reference.iter().take(5).enumerate() {
-        let maxabs = f
-            .data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).abs())
-            .fold(0.0f32, f32::max);
-        eprintln!("reference frame {i}: maxabs={maxabs}");
-    }
+    let mut worst_diff = 0.0f32;
+    let mut worst_corr = 1.0f64;
+    let mut worst_label = "";
 
-    // The native AAC decoder is still under development (Phase 2-3 of 6);
-    // it doesn't yet support CCE elements that ffmpeg uses for stereo.
-    // Skip the strict assertion until Phase 6 is complete.
-    if native.is_empty() {
-        eprintln!("native_aac_matches_ffmpeg_reference: skipped (native decoder incomplete - CCE not yet supported)");
-        return;
-    }
-    assert!(!reference.is_empty(), "ffmpeg reference produced no frames");
+    for case in &corpus {
+        let native = decode_native(&case.adts);
+        let reference =
+            decode_aac_with_ffmpeg(&case.adts).expect("ffmpeg should decode its own stream");
+        for (i, f) in reference.iter().take(5).enumerate() {
+            let maxabs = f
+                .data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("[{}] reference frame {i}: maxabs={maxabs}", case.label);
+        }
 
-    // The native decoder's element/section parsing is still incomplete for some
-    // real ffmpeg-encoded streams (see the `BadSectionCodebook` errors surfaced
-    // above on several frames): a raw_data_block can desync mid-stream and be
-    // misread as extra channel elements. When that happens the frame count
-    // still comes back non-empty, so the `is_empty()` guard above doesn't
-    // catch it. Treat a channel-count mismatch the same way: incomplete
-    // decoder support, not a value worth comparing sample-for-sample.
-    if native[0].channels != reference[0].channels {
-        eprintln!(
-            "native_aac_matches_ffmpeg_reference: skipped (native decoder incomplete - \
-             channel count mismatch, native={} reference={})",
-            native[0].channels, reference[0].channels
+        assert!(
+            !native.is_empty(),
+            "[{}] native decoder produced no frames at all (all {} ADTS frames \
+             failed to decode - see the per-frame diagnostics above)",
+            case.label,
+            split_adts_frames(&case.adts).len()
         );
-        return;
-    }
-    assert_eq!(native[0].sample_rate, reference[0].sample_rate);
-
-    // A 440 Hz sine is purely tonal, so PNS is not in play; the only expected
-    // differences are the encoder's priming delay and float rounding. Allow a
-    // generous tolerance and report the best-aligned max diff for diagnostics.
-    let max_diff = best_aligned_max_diff(&native, &reference);
-    eprintln!("conformance max-abs-diff (best alignment): {max_diff}");
-
-    // As of 2026-08-23 (later session) the IMDCT's basis-function phase rate
-    // and the M/S stereo decode formula were both root-caused and fixed (see
-    // `src/mdct.rs`'s module doc comment and `src/stereo.rs`): the IMDCT had
-    // exactly double the correct phase rate (every reconstructed frequency
-    // came out 2x too high - a real ffmpeg-encoded 440 Hz tone decoded to
-    // ~883 Hz), and M/S stereo used an empirically-tuned `0.5` scale instead
-    // of the spec's unscaled `l+r`/`l-r` (ISO 14496-3 §4.6.8.1.3, verified
-    // against the actual spec PDF text). Fixing the IMDCT first, then
-    // re-deriving M/S against the spec text (not recollection), brought a
-    // Pearson cross-correlation between native and reference channel-0 PCM
-    // from ~0.000006 (no real relationship) to ~0.75 (clearly the same
-    // signal) and a least-squares amplitude-scale fit from ~1.6-1.8x off to
-    // ~0.91x (within ~10%). The remaining gap in `max_diff` below is now
-    // believed to be dominated by this test's alignment methodology, not a
-    // residual decode bug: `best_aligned_max_diff` only searches whole-frame
-    // (1024-sample) offsets, but a real AAC encoder's priming delay is
-    // typically not a multiple of 1024 (commonly ~2112 samples for LC), so
-    // even a bit-exact decoder would show a residual sub-frame sample
-    // misalignment this metric can't compensate for. Whoever continues
-    // should extend `best_aligned_max_diff` (or add a parallel diagnostic)
-    // to search sample-level offsets, not just frame-level ones, before
-    // concluding any further amplitude/shape mismatch is a real bug.
-    if max_diff >= 0.05 {
-        eprintln!(
-            "native_aac_matches_ffmpeg_reference: skipped (native decoder incomplete - \
-             amplitude-scale accuracy not yet exact, max diff {max_diff})"
+        assert!(
+            !reference.is_empty(),
+            "[{}] ffmpeg reference produced no frames",
+            case.label
         );
-        return;
+
+        // All 45 frames of each stream now parse structurally, so channel-count
+        // / sample-rate mismatches are real regressions, not expected gaps.
+        assert_eq!(
+            native[0].channels, reference[0].channels,
+            "[{}] channel count mismatch: native={} reference={}",
+            case.label, native[0].channels, reference[0].channels
+        );
+        assert_eq!(native[0].sample_rate, reference[0].sample_rate);
+
+        let max_diff = best_aligned_max_diff(&native, &reference);
+        let corr = best_channel0_correlation(&native, &reference);
+        eprintln!(
+            "[{}] conformance max-abs-diff={max_diff} correlation={corr:.4}",
+            case.label
+        );
+
+        if max_diff > worst_diff {
+            worst_diff = max_diff;
+            worst_label = case.label;
+        }
+        if corr < worst_corr {
+            worst_corr = corr;
+        }
     }
+
+    // Documented tolerance (Phase 6 exit criterion). This is a REAL assertion,
+    // not a skip guard.
+    //
+    // History (kept because this number was mis-attributed for several
+    // sessions): the gap sat at ~0.114 and was believed to be either a residual
+    // "amplitude-scale" bug or an artifact of this test's own frame-level-only
+    // alignment search. It was neither. The actual cause was that
+    // `src/window.rs` built its half-windows with the wrong denominator
+    // (`sin(π(i+0.5)/n)` instead of `sin(π(i+0.5)/2n)`), so they violated the
+    // Princen-Bradley / TDAC perfect-reconstruction identity that 50%
+    // overlap-add depends on: `w[i]² + w[n-1-i]²` ranged from ~0.000005 at the
+    // window edges to 2.0 at its centre instead of being exactly 1.0. The KBD
+    // window had the same error. Frame 0 looked correct throughout precisely
+    // because it has no preceding block to overlap with, which is what made the
+    // bug look like a steady-state "amplitude" problem.
+    //
+    // With the windows fixed (and verified against the Princen-Bradley identity
+    // by unit tests in `src/window.rs`), the measured agreement on the original
+    // 440 Hz tone is:
+    //   * best-aligned max-abs-diff: 0.114 -> 0.021
+    //   * Pearson cross-correlation (channel 0): ~0.75 -> ~0.995
+    //   * least-squares amplitude fit (native -> reference): ~0.91 -> ~0.994
+    //   * best sample lag: 0 (so alignment methodology was never the issue)
+    //
+    // The corpus now spans noise (PNS / EIGHT_SHORT), a frequency sweep
+    // (window-sequence transitions / TNS), mono, and 22.05 / 48 kHz sample
+    // rates (different SWB tables). 0.05 is retained as the documented
+    // tolerance: it is the value this test was originally written against, and
+    // the residual ~0.021 on the tone is consistent with lossy-codec float
+    // rounding plus the reference decoder's own dequantization rounding, not a
+    // known bug.
+    assert!(
+        worst_diff < 0.05,
+        "worst native↔ffmpeg AAC diff across the conformance corpus is {worst_diff} \
+         (on case '{worst_label}', tolerance 0.05). See this test's comment for \
+         the window/TDAC history before assuming a new amplitude-scale bug."
+    );
+
+    // Shape check, independent of amplitude — see `best_channel0_correlation`.
+    // Guards against the class of bug (e.g. frequency doubling) a max-abs-diff
+    // check cannot see.
+    assert!(
+        worst_corr > 0.95,
+        "worst native AAC decode waveform-shape match across the conformance \
+         corpus is {worst_corr} (Pearson correlation of channel 0, expected \
+         > 0.95). A low value here with a plausible amplitude usually means a \
+         frequency/phase bug in the IMDCT basis rather than a scaling bug."
+    );
 }

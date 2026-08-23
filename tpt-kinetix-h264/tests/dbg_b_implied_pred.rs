@@ -27,7 +27,8 @@ struct Tracer {
 
 impl DecodeTracer for Tracer {
     fn on_slice_data_start(&mut self, data_bit_offset: usize) {
-        self.mb_types.push(format!("__bit_offset:{data_bit_offset}"));
+        self.mb_types
+            .push(format!("__bit_offset:{data_bit_offset}"));
     }
     fn on_motion_comp(
         &mut self,
@@ -381,7 +382,8 @@ fn p_header_manual_walk() {
     let mut p_rbsp = None;
     let mut p_nal_ref_idc = 0;
     for &s in &starts {
-        let e = starts.get(starts.iter().position(|&x| x == s).unwrap() + 1)
+        let e = starts
+            .get(starts.iter().position(|&x| x == s).unwrap() + 1)
             .copied()
             .unwrap_or(annexb.len());
         let t = annexb[s] & 0x1F;
@@ -445,23 +447,22 @@ fn p_header_manual_walk() {
     }
     eprintln!(
         "MANUAL header ends at bit {} (alignment bits {:?}) => data starts at bit {}",
-        b.p,
-        align_bits,
-        b.p
+        b.p, align_bits, b.p
     );
 
     // Also parse the PPS to check deblocking_filter_control_present_flag.
     let mut pps_rbsp = None;
     for &s in &starts {
-        let e = starts.get(starts.iter().position(|&x| x == s).unwrap() + 1)
+        let e = starts
+            .get(starts.iter().position(|&x| x == s).unwrap() + 1)
             .copied()
             .unwrap_or(annexb.len());
         if annexb[s] & 0x1F == 8 {
             pps_rbsp = Some(unescape(&annexb[s + 1..e]));
         }
     }
-    let pps = tpt_kinetix_h264::pps::PicParameterSet::parse(pps_rbsp.as_ref().unwrap(), None)
-        .unwrap();
+    let pps =
+        tpt_kinetix_h264::pps::PicParameterSet::parse(pps_rbsp.as_ref().unwrap(), None).unwrap();
     eprintln!(
         "PPS: deblocking_filter_control_present_flag={}",
         pps.deblocking_filter_control_present_flag
@@ -1029,4 +1030,3 @@ fn b_implied_pred_oracle() {
         }
     }
 }
-

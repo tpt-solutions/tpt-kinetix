@@ -1356,3 +1356,153 @@
            element x264 did not write, most plausibly inside the intra-in-P
            branch).
 
+
+      - **2026-08-23 session #12 — FFmpeg-exact P-slice oracle built; divergence
+        narrowed to the MB(1,0) intra-in-P residual region.** One real (latent)
+        fix landed plus the queued oracle harness:
+        1. **Shared ctxIdx-17/32 context variable** (`entropy.rs`, `ctx.rs`,
+           `cabac_b.rs`): FFmpeg adapts ONE physical `cabac_state[17]` (P) /
+           `[32]` (B) for BOTH the mb_type partition/gate bit AND the
+           intra-in-P/B suffix's bin 0; our split structs held two
+           independently-adapting copies. Added `shared_ctx`/`set_shared_ctx`
+           accessors + `PbCabacSliceContexts::sync_shared_mb_type_ctx_*` and
+           call them after every decode of either. Latent bug (this clip never
+           takes the 16x8/8x16 branch before failing, so it is not THE cell
+           blocker), regression-tested in `entropy.rs`
+           (`shared_ctx17/32_is_initialised_identically_*`).
+        2. **New oracle harness** `tpt-kinetix-h264/tests/dbg_p_oracle_replay.rs`:
+           FFmpeg-convention engine (`ff_init_cabac_decoder` + decision/
+           terminate/bypass, validated bin-for-bin against the crate's own
+           `CabacDecoder`) + ffmpeg-exact P-slice element walk over the exact
+           payload bytes the crate parser read (hardcoded from the parser's
+           own "P-CABAC bytes" trace). Prints per-bin context indices and
+           engine states comparable with the parser trace.
+        3. Oracle findings on the failing `b_boxmv` IBP P slice: MB0 skip=1,
+           eos=0; MB1 skip=0 -> intra-in-P suffix -> I_16x16 variant 3,
+           chroma DC, qp delta=0 -- ALL bins match the crate parse exactly.
+           First mismatching element: the luma-DC `coded_block_flag` read
+           (cat 0, ctxIdx 87, fresh state 31 in both): oracle bin=1 (DC block
+           NONZERO), crate bin=0 (no block). Since engines/contexts are
+           identical up to that point, the engine state entering the read must
+           differ -- i.e. an uninstrumented extra/missing bin or a context-
+           state difference somewhere between the chroma_pred/qp_delta reads
+           and the DC cbf (candidates: crate reads an element the oracle walk
+           does not model, or vice versa). NOTE: an earlier oracle run that
+           started qpdelta at ctx62 produced garbage downstream -- ffmpeg's
+           first dqp bin is at `60 + (last_qscale_diff != 0)` (crate already
+           correct); keep this in mind when extending the replay past MB2.
+        NEXT STEP: add per-element engine-state prints inside the crate's
+        `parse_intra_mb_cabac_pb` (suffix/chroma/qp/dcbf boundaries) and diff
+        against the oracle's states to expose the extra/missing bin; then
+        extend the oracle past the DC-cbf read (significant-map transcription)
+        to verify the full I16x16-in-P residual.
+
+      - **2026-08-23 session #13 - PHANTOM BUG EXPOSED: the session-#12 oracle's
+        ffmpeg-convention ENGINE was mis-reading the payload; the crate parser
+        was right all along. Real remaining cabac_b gap re-localised to B_8x8 +
+        direct-mode MBs + a +/-1 residue.**
+        1. **Bin-level tracing added** (entropy.rs, env-gated KINETIX_BINTRACE=1):
+           CabacContext now carries its global spec ctx_id (set by init_ctx /
+           init_pb_ctx; 0xFFFF when built via CabacContext::init directly), and
+           decode_decision / decode_bypass / decode_terminate emit one
+           "BIN n D ctx=... st=... mps=... bin=..." line per bin under the flag.
+           Zero cost when unset.
+        2. **New harnesses**: tests/dbg_bintrace_replay.rs replays the exact
+           hardcoded P-slice payload through the crate's own parse_p_slice_cabac;
+           tests/dbg_p_oracle_replay.rs was rewritten so its ffmpeg element walk
+           runs on THE CRATE'S OWN CabacDecoder + a flat 1024-entry context table
+           (engine equivalence by construction). Result: the walk reproduces the
+           crate parse bin-for-bin, including dc.cbf bin=0, matching the crate.
+           The old hand-rolled Eng seeded low with 18 bits (bytes 0-1 plus byte
+           2's top TWO bits via &0xC0) but resumed its bit reader at pos = 24,
+           silently dropping byte 2's low 6 bits and desyncing every element
+           after ~6 renormalisation shifts. The long-pursued "intra-in-P desync"
+           (sessions #11/#12) never existed.
+        3. **P frames confirmed bit-exact even in IBP streams**: with correct
+           per-NAL pairing (x264 file order is IDR, P, B; ffprobe lists frames in
+           DISPLAY order I,B,P which misled earlier pairing), every variant's P
+           picture matches ffmpeg exactly (decoded[1] ref2:max=0 across all
+           dbg_cabac_b variants).
+        4. **dbg_cabac_b variant artefacts identified**: b_swap and b_forcel1
+           clips contain NO B frames (ffprobe: I,P,P and I,I,P) -- x264 declined
+           to place a B -- so their uniform diffs were harness pairing artefacts,
+           not decoder bugs. Do not chase them.
+        5. **Real remaining cabac_b cell gap** (B picture vs display-ref):
+           - b_min (direct=none:partitions=none): max_abs_diff=1 over 21 samples
+             -- a +/-1 rounding somewhere in bi-pred/MC; nearly closed.
+           - b_nodirect: single failing MB(3,2) of type BB8x8 (partitioned B_8x8
+             with bi-pred sub-partitions) at max=238 -- sub_mb_type /
+             per-sub-partition MV path is the prime suspect (matches the earlier
+             "audit B_8x8" note from sessions #5-#8).
+           - b_default/b_temporal (direct spatial/temporal ON): bottom MB row
+             wrong (~80-126) -- direct-mode derivation at frame edges or
+             colocated-grid handling for the last row.
+           - b_boxmv: MB(1,1) max=235 -- likely same B_8x8/bi-pred family.
+        6. Debug instrumentation left in tree (matches existing style): BRECON
+           per-MB type print in reconstruct_b_frame, "B-CABAC bytes[...]"
+           payload dump in the decoder's B path (mirrors the P-path dump), CBF
+           state prints in entropy.rs.
+        NEXT STEPS (in order): (1) root-cause b_nodirect MB(3,2) BB8x8: dump
+           sub_mb_type bins via KINETIX_BINTRACE against an extended crate-engine
+           ffmpeg walk for B_8x8 (sub_mb_type contexts, per-sub-block
+           ref_idx/mvd); (2) chase b_default/b_temporal bottom-row direct-mode
+           errors (colocated MV grid for last row / boundary availability in
+           spatial direct); (3) squeeze the b_min +/-1 residue; (4) only then
+           revisit Phase G (MBAFF P/B parsing) and H.
+
+      - **2026-08-23 session #14 - TWO MORE REAL BUGS FIXED; b_default B frame now
+        BIT-EXACT; remaining failures narrowed to BBi16x16.**
+        1. **B_Direct_16x16 dropped its CBP/qp_delta/residual bins**
+           (cabac_b.rs): the old code returned early for b_type_raw==0 with the
+           comment "B_Direct: no CBP/residual syntax" -- wrong per spec
+           7.3.4/7.3.5.1: coded_block_pattern is signalled for ALL inter MBs,
+           and a direct MB with cbp != 0 carries residuals. Every direct MB with
+           cbp != 0 desynced all following MBs (the clean-until-bottom-row error
+           pattern). Fix: route B_Direct through the generic CBP/residual tail.
+           Result: b_default (direct=spatial, default partitions) B frame is now
+           max_abs_diff=0 vs ffmpeg.
+        2. **B sub_mb_type info tables were mis-transcribed** (mv.rs):
+           B_SUB_MB_PARTS / B_SUB_MB_DIR / b8x8_sub_rect used an interleaved
+           L0/L1/Bi order. Correct spec Table 9-16 layout:
+           0=Direct, 1..4=L0(1/2/2/4 parts), 5..8=L1(1/2/2/4), 9..12=Bi(1/2/2/4).
+           Fixed all three (b8x8_sub_dims in cabac_b.rs shares the fix path).
+           Result: b_nodirect MB(3,2) error halved (238 -> 115).
+        3. New isolation variants in dbg_cabac_b.rs: c_i16 / c_p8x8 / c_p4x4.
+           Findings: i16x16-only and p4x4 clips sit at max=1/n=21 (a +/-1
+           residue); c_p8x8 fails via its two BBi16x16 MBs -- so the REMAINING
+           cabac_b gap is concentrated in the bi-pred 16x16 path (L1 predictor
+           or bi-combination), not in B_8x8 sub-partitions per se.
+        NEXT STEPS: (1) dump predicted-vs-ffmpeg MVs for a failing BBi16x16 MB
+           (ffmpeg side: export_mvs side data) to decide whether predict_mv_l1
+           availability/ref-matching or the bi-average rounding is at fault;
+           (2) chase the +/-1 residue on b_min (21 samples, likely MC rounding);
+           (3) re-run conformance_matrix; then Phase G/H as before.
+        4. **RESULT: `h264_conformance_matrix` now PASSES** -- both cabac_b
+           cells report bit-exact vs ffmpeg (the matrix clip is exactly the
+           b_default configuration fixed by item 1). Full crate suite green
+           (226 lib tests + all conformance tests, 0 failures).
+           HONESTY CAVEAT: pixel_exact must STAY false -- the isolation harness
+           still shows real gaps on other B configurations (BBi16x16-heavy
+           content via c_p8x8, the b_min +/-1 residue, b_nodirect BB8x8 at
+           max=115). The matrix clip simply does not exercise them. Next
+           session should add a matrix cell (or a new gated test) that DOES
+           exercise BBi16x16/B_8x8 before any capability flip is considered.
+
+      - **2026-08-23 session #15 - BBi16x16 hypothesis cycle: L1-separate-context
+        experiment DISPROVEN and reverted; shared mvd contexts confirmed.**
+        1. Hypothesised (from spec Table 9-44 memory) that mvd_l1 uses separate
+           contexts (L1-x 47 / L1-y 54). Added MVD_L1 contexts + rewired all B
+           L1 mvd call sites: EVERY bi-pred clip regressed badly. REVERTED.
+           Conclusion (empirical, matches the pre-existing ctx.rs comment):
+           FFmpeg/spec share ONE pair of mvd context variables per component
+           across both lists (ctxbase 40 x / 47 y, no list parameter).
+        2. During the experiment a scripted bulk edit briefly corrupted the 20
+           mvd call sites in cabac_b.rs; all were repaired deterministically
+           against ground truth (x comp=0, y comp=1; list per arm) and the file
+           re-formatted. Final state verified equal to the best-known config:
+           b_default bit-exact; b_min/c_i16/c_p4x4/b_temporal at max=1;
+           c_p8x8 bottom row 60-75; b_nodirect MB(3,2) max=115; b_boxmv
+           MB(1,1) max=235.
+        NEXT STEPS unchanged: dump ffmpeg MVs for a failing BBi16x16 MB via
+           export_mvs to decide between predict_mv_l1 availability rules vs
+           bi-average rounding; chase the +/-1 residue.

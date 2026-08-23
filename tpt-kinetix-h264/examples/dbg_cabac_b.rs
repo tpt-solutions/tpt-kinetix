@@ -11,6 +11,41 @@ use tpt_kinetix_h264::H264Decoder;
 
 fn main() {
     for (name, extra, input, vf) in [
+        // Isolate B_8x8 sub-partition handling: i16x16-only should be exact,
+        // p8x8-only exercises B_8x8 sub_mb_type paths.
+        (
+            "c_i16",
+            "direct=none:partitions=i16x16",
+            "testsrc=size=64x48:rate=1:duration=3",
+            "",
+        ),
+        (
+            "c_p8x8",
+            "direct=none:partitions=p8x8",
+            "testsrc=size=64x48:rate=1:duration=3",
+            "",
+        ),
+        (
+            "c_p4x4",
+            "direct=none:partitions=p4x4",
+            "testsrc=size=64x48:rate=1:duration=3",
+            "",
+        ),
+        // Same failing configuration as c_p8x8 but CAVLC-coded: isolates
+        // whether the remaining B gap is CABAC-specific (bins/contexts) or in
+        // the shared MV-prediction / MC code.
+        (
+            "cavlc_p8x8",
+            "cabac=0:direct=none:partitions=p8x8",
+            "testsrc=size=64x48:rate=1:duration=3",
+            "",
+        ),
+        (
+            "cavlc_i16",
+            "cabac=0:direct=none:partitions=i16x16",
+            "testsrc=size=64x48:rate=1:duration=3",
+            "",
+        ),
         ("b_default", "", "testsrc=size=64x48:rate=1:duration=3", ""),
         (
             "b_nodirect",

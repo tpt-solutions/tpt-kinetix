@@ -1,0 +1,21 @@
+[package]
+name = "tpt-kinetix-aac-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-aac = { path = ".." }
+tpt-kinetix-core = { path = "../../tpt-kinetix-core" }
+
+[[bin]]
+name = "fuzz_aac_decode"
+path = "fuzz_targets/fuzz_aac_decode.rs"
+test = false
+doc = false
