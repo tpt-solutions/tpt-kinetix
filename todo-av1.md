@@ -2031,3 +2031,164 @@
 > are both clean. `capabilities().pixel_exact` untouched (still `false`).
 > No `git commit` calls were made.
 
+> **2026-08-24 session note (cont'd yet again) — confirmed the divergence is
+> a real bug (two independent reference decoders agree), then verified the
+> ENTIRE remaining upstream chain (tile_info, frame_size/superres,
+> screen-content-tools gating) and found nothing wrong there either; root
+> cause still not found; two more real-but-inert gaps documented.**
+>
+> **First, closed off the "maybe this is a CDEF/harness confound, not a real
+> bug" doubt from the previous note.** `ffmpeg`'s build here also has
+> `libaom-av1` (a second, completely independent AV1 codebase from AOM/
+> Google, distinct from `dav1d`/VideoLAN) available as a decoder. Dumped
+> `testsrc`'s raw OBU bytes to a file (new `KINETIX_AV1_DUMP_OBU` env var on
+> `av1_symbol_trace_diff.rs`, kept) and decoded it with both
+> `-c:v libdav1d` and `-c:v libaom-av1` via plain `ffmpeg -f obu`. **Both
+> independent decoders produce byte-identical output** (`10 10 10 10 ... 10
+> 51 51 51 51 51 51 51 51` for the same 24-byte row-0 slice). Two unrelated
+> reference implementations agreeing rules out "one decoder's CDEF is doing
+> something unusual" as an explanation — the correct decode of this frame
+> really is closer to `16`/`81` than Kinetix's `129`, and this is a real,
+> confirmed Kinetix decode bug, not a harness artifact. (ffmpeg's own native
+> software `av1` decoder couldn't be used for a third cross-check — this
+> build only has the hardware-accelerated path compiled in, no software
+> fallback.)
+>
+> **Then kept pulling the thread upstream of everything verified so far**,
+> using the same live-spec-fetch method (now fetching `06.bitstream.syntax.md`
+> too, via a direct `curl` into a local file rather than `WebFetch`'s
+> summarizing model — large pages like `10.additional.tables.md` (12k
+> lines) were silently dropping requested tables from `WebFetch`'s answers,
+> e.g. it initially claimed `Max_Tx_Depth`/`Filter_Intra_Mode_To_Intra_Dir`
+> "don't exist" when they're just in a part of the file the summarizer
+> didn't surface; `curl` + local `grep`/`sed` is the reliable way to read
+> these files exhaustively, `WebFetch` is fine for small targeted lookups).
+> Verified, byte-for-byte or logic-for-logic against the spec's own
+> pseudocode:
+> - `Max_Tx_Depth[BLOCK_SIZES]` (derived indirectly — the table itself isn't
+>   named that in the spec text the way `MAX_TX_DEPTH_TABLE` implies, but
+>   `read_tx_size()`'s pseudocode confirms `maxTxDepth = Max_Tx_Depth[MiSize]`
+>   is a real per-`bsize` lookup, and `Split_Tx_Size`/`Default_Tx_8x8_Cdf`
+>   `/_16x16/_32x32/_64x64_Cdf` all matched Rust's transcription exactly,
+>   including the `Tx_8x8` bucket's 2-symbol vs the others' 3-symbol shape).
+> - `get_tx_set(txSz)` (AV1's real function, spec section "Get transform set
+>   function") — matches `get_tx_set_intra` exactly, condition-for-condition.
+> - `Tx_Type_Intra_Inv_Set1`/`Filter_Intra_Mode_To_Intra_Dir` and the
+>   `intraDir` derivation rule (`use_filter_intra ? Filter_Intra_Mode_To_
+>   Intra_Dir[filter_intra_mode] : YMode`) — matches exactly.
+> - `frame_obu()`'s top-level structure (`frame_header_obu(); byte_alignment();
+>   tile_group_obu(sz)`) and `byte_alignment()`'s own definition (pads with
+>   `zero_bit`s to the next byte boundary) — confirms `frame.rs`'s
+>   `byte_align()` function is *functionally* correct (same bit-consumption,
+>   same all-zero check) despite its doc comment mislabeling it as
+>   implementing `trailing_bits()` instead (a real but harmless
+>   documentation bug — `trailing_bits()`'s first pad bit must be `1`, not
+>   `0`, but the two only differ in what value they *assert*, not how many
+>   bits they consume, so this doesn't desync anything; worth a comment fix,
+>   not a functional one).
+> - `tile_info()`'s full `uniform_tile_spacing_flag` / `tile_log2()` /
+>   `increment_tile_cols_log2`/`_rows_log2` while-loops — matches exactly,
+>   confirmed via a new debug hook (`KINETIX_AV1_DBG_TILEINFO`, kept) showing
+>   `testsrc` genuinely has `sb_cols = sb_rows = 2` (unlike `solid_red`'s
+>   trivial `sb_cols = sb_rows = 1`, which never reads an increment bit at
+>   all) — so `testsrc` really does exercise a bit-consuming code path
+>   `solid_red`'s passing status never validated, and that path reads
+>   exactly the bits spec mandates (confirmed both `increment_tile_cols_log2`
+>   and `increment_tile_rows_log2` are real, consumed reads here, correctly
+>   producing `TileCols = TileRows = 1` after both come back `0`).
+>
+> **Two more real-but-currently-inert gaps found and documented (not
+> fixed — same reasoning as the `read_cdef`/delta gap: real, but zero
+> impact on the current 5-entry corpus, not worth a rushed fix):**
+> 1. `parse_frame_size` (`frame.rs`) never implements `superres_params()` at
+>    all — spec's `frame_size()` calls it unconditionally after computing
+>    `FrameWidth`/`FrameHeight`, and it reads a real `use_superres` bit
+>    whenever the sequence header's `enable_superres` is `true` (regardless
+>    of whether superres ends up used). Confirmed via a new debug hook
+>    (`KINETIX_AV1_DBG_SUPERRES`, kept) that `enable_superres == false` for
+>    all 5 corpus entries, so this consumes zero bits today — but any stream
+>    with `enable_superres = true` in its sequence header will desync from
+>    `frame_size()` onward, superres or not.
+> 2. `allow_intrabc`'s gate compares `w == rw` (`FrameWidth` vs
+>    `RenderWidth`) where spec requires `UpscaledWidth == FrameWidth`. Since
+>    superres isn't implemented at all (gap 1), `UpscaledWidth` is never
+>    computed/distinguished from `FrameWidth`, so this is doubly wrong: even
+>    once gap 1 is fixed, this comparison is checking the wrong pair of
+>    variables (render size, not upscaled-from-superres size). Inert for now
+>    because all 5 corpus entries happen to have `RenderWidth == FrameWidth`
+>    too. Both gaps share one root fix (implement `superres_params()` for
+>    real, then fix this comparison to use the resulting `UpscaledWidth`).
+>
+> **Where this leaves things**: literally every symbol read and every table
+> in `testsrc`'s first block's decode chain — partition (×3), skip, y_mode,
+> uv_mode, has_palette_y, filter_intra (×2), tx_depth, and the full
+> `coeffs()` sequence — plus everything upstream of it (OBU framing,
+> sequence header's `enable_superres`/`allow_screen_content_tools` gating,
+> frame size, tile info, `frame_obu()`'s byte-alignment) has now been
+> individually checked against the live spec text or hand-derived from first
+> principles, and **none of it shows an error**. Combined with the
+> two-independent-decoder confirmation that a real bug exists, this is a
+> genuinely unusual state: either the bug is in a piece of state I haven't
+> thought to check yet (candidates: `TX_SIZE_SQR`/`ADJUSTED_TX_SIZE`/
+> `DC_QLOOKUP_8`/`AC_QLOOKUP_8` table *values* at this exact qindex/index —
+> spot-checked the formulas and a few nearby tables but not these two lookup
+> tables' actual numeric contents; or the sequence header's bit-depth/
+> color-config fields, unchecked this session), or the bug is in a stage
+> that individual symbol-level correctness can't reveal (e.g. `TxTypes[]`
+> array bookkeeping across multiple transform blocks in the same
+> prediction block, or an aliasing/overwrite bug in how `samples`/plane
+> buffers get written).
+>
+> **Update, same session**: spot-checked `DC_QLOOKUP_8[128]`/
+> `AC_QLOOKUP_8[128]` (the two values `dequantize_coeffs` actually used for
+> this exact block) against `08.decoding.process.md`'s literal
+> `Dc_Qlookup`/`Ac_Qlookup[0]` (the `BitDepth==8` row) — **both match exactly**
+> (`140`/`176`). While there, found a **third real-but-inert gap**: spec's
+> `get_dc_quant(plane)` is `dc_q(get_qindex(0, segment_id) + DeltaQYDc)` for
+> luma (and `+ DeltaQUDc`/`+ DeltaQVDc` for chroma) — the DC coefficient's
+> quantizer step uses `qindex + a per-plane DC delta`, not the plain
+> per-frame `qindex`. `frame.rs` parses `delta_q_y_dc`/`delta_q_u_dc`/
+> `delta_q_u_ac`/`delta_q_v_dc`/`delta_q_v_ac` into `FrameHeader` but
+> **nothing in `reconstruct/` ever reads any of them** (`grep` for
+> `delta_q_y_dc` under `reconstruct/` finds zero matches) —
+> `dequantize_coeffs` always uses the same plain `qindex` for every plane's
+> DC term. Confirmed inert on the current corpus via a new debug hook
+> (added to the existing `KINETIX_AV1_DBG` line): all five entries have all
+> five deltas at `0`. Not fixed this session — wiring it through cleanly
+> needs `TileDecodeState`/`reconstruct_tx_block`'s ~17-parameter signature to
+> carry per-plane DC/AC qindex (or a small `DeltaQ` struct) end-to-end from
+> `FrameHeader`, and rushing a multi-call-site threading change with no
+> conformance coverage of nonzero delta-q streams felt like exactly the kind
+> of risk this file has repeatedly warned against. Tracked as gap #3
+> alongside the `read_cdef`/delta-lf gap and the superres/`allow_intrabc`
+> gap above — all three are real, all three are inert on this corpus, and a
+> future session should probably fix them together as one "frame-header
+> completeness" pass with new tests using deliberately-nonzero values for
+> each flag.
+>
+> **Next session should**: (1) build the real "Part 1 oracle" this file has deferred since
+> 2026-08-20 — an independent Python re-implementation of
+> `intra_frame_mode_info()` + `coeffs()` end-to-end (not just `coeffs()`
+> alone) fed real captured bytes, now that `curl`-based spec fetching is
+> confirmed reliable and the arithmetic decoder/CDF-snapshot bridge exists —
+> this would let a differential run cover ground this session's one-off
+> hand-checks did serially and slowly; (2) implement the three real-but-inert
+> gaps above (superres/`allow_intrabc`, `read_cdef`/delta-lf, per-plane
+> DC delta-q) together as one frame-header-completeness pass, since they're
+> all related and each needs its own deliberately-nonzero-flag test; (3) stop
+> assuming `WebFetch`'s summarized answer over a large spec file is
+> exhaustive — prefer `curl` + local `grep`/`sed` for anything beyond a
+> single small named table, per this session's `Max_Tx_Depth` false-negative.
+>
+> Debug hooks added and kept this session (all opt-in via env vars):
+> `KINETIX_AV1_DBG_SUPERRES`, `KINETIX_AV1_DBG_TILEINFO` (`frame.rs`),
+> `KINETIX_AV1_DUMP_OBU` (`av1_symbol_trace_diff.rs`, dumps a corpus entry's
+> raw OBU bytes to a directory for cross-decoder comparison outside the
+> Rust harness). `cargo test -p tpt-kinetix-av1 --lib` is green (90/90,
+> unchanged). `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`
+> and `cargo build --workspace` are both clean (re-verified after the
+> concurrent automated process's unrelated edits landed in `tpt-kinetix-aac`/
+> `tpt-kinetix-h264`/`tpt-kinetix-test-utils` mid-session — see
+> `[[project_concurrent_repo_activity]]`). `capabilities().pixel_exact`
+> untouched (still `false`). No `git commit` calls were made.
+

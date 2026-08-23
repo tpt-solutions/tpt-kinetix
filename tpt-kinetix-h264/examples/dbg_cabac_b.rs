@@ -136,11 +136,11 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
     ];
     for (fi, (_, f)) in all.iter().enumerate() {
         let mut line = String::new();
-        for ri in 0..3 {
+        for (ri, r) in refs.iter().enumerate() {
             let mut max_diff = 0i32;
             let mut n = 0usize;
-            for i in 0..frame_len {
-                let d = (f.data[i] as i32 - refs[ri][i] as i32).abs();
+            for (i, &fd) in f.data.iter().enumerate() {
+                let d = (fd as i32 - r[i] as i32).abs();
                 if d != 0 {
                     n += 1;
                 }
@@ -262,8 +262,7 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
         // Pre-deblock comparison at diverging samples: was the sample already
         // wrong before our deblocking pass (parse/recon issue), or did our
         // deblocker move it away from ffmpeg's deblocked value?
-        if let Ok(pre_path) = std::env::var("KINETIX_DUMP_PREDEBLOCK")
-            .map(|p| format!("{p}.3"))
+        if let Ok(pre_path) = std::env::var("KINETIX_DUMP_PREDEBLOCK").map(|p| format!("{p}.3")) {
             if let Ok(pre) = std::fs::read(&pre_path) {
                 eprintln!("  --- pre-deblock check ---");
                 for dmby in 0..3usize {
@@ -280,8 +279,7 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
                         if n_diff == 0 {
                             continue;
                         }
-                        let mut report =
-                            format!("  PRE-MB({mbx},{dmby}) n={n_diff} samples:");
+                        let mut report = format!("  PRE-MB({mbx},{dmby}) n={n_diff} samples:");
                         for y in 0..16usize {
                             for x in 0..16usize {
                                 let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
@@ -307,8 +305,13 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
         // SAD of (output - pred) and (ref - pred) for each prediction candidate.
         // The candidate where SAD_f == SAD_r (and small) is the true reference;
         // a mismatch there means our parsed residual differs from x264's.
+        // Session #27: also dump per-4x4-block implied-residual DC to compare
+        // against parsed coefficients (dequantised).
         let i_data = all.iter().find(|(l, _)| l == "Idr").map(|(_, f)| &f.data);
-        let p_data = all.iter().find(|(l, _)| l == "NonIdr").map(|(_, f)| &f.data);
+        let p_data = all
+            .iter()
+            .find(|(l, _)| l == "NonIdr")
+            .map(|(_, f)| &f.data);
         eprintln!("  --- residual-source discriminator ---");
         for dmby in 0..3usize {
             for mbx in 0..4usize {
@@ -325,16 +328,22 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
                     continue;
                 }
                 let mut report = format!("  RMB({mbx},{dmby}) n={n_diff}:");
-                for (name, src, bi) in
-                    [("I", i_data.as_deref(), false), ("P", p_data.as_deref(), false), ("BI", None, true)]
-                {
+                for (name, src, bi) in [
+                    ("I", i_data, false),
+                    ("P", p_data, false),
+                    ("BI", None, true),
+                ] {
                     let mut sad_f: i64 = 0;
                     let mut sad_r: i64 = 0;
                     for k in 0..256usize {
                         let idx = ((dmby * 16) + k / 16) * w + mbx * 16 + (k % 16);
                         let a = i_data.unwrap()[idx] as i32;
                         let b = p_data.unwrap()[idx] as i32;
-                        let pred = if bi { (a + b + 1) >> 1 } else { src.unwrap()[idx] as i32 };
+                        let pred = if bi {
+                            (a + b + 1) >> 1
+                        } else {
+                            src.unwrap()[idx] as i32
+                        };
                         sad_f += (f.data[idx] as i32 - pred).abs() as i64;
                         sad_r += (r[idx] as i32 - pred).abs() as i64;
                     }

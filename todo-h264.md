@@ -1742,3 +1742,77 @@
         NEXT STEP: dump filter_luma_edge inputs/outputs (p0..p3,q0..q3,alpha,
            beta,tc,bs) for the failing edge and hand-compare against ffmpeg
            h264_loop_filter_luma line by line; fix the deviating branch.
+
+      - **2026-08-23 session #26 - PRE-DEBLOCK ANALYSIS COMPLETE.** Pre-deblock
+        pixel dump (KINETIX_DUMP_PREDEBLOCK env + .3 suffix for the B frame)
+        shows pre == ours at EVERY diverging sample -> our deblocker is NOT
+        the cause; the divergence exists BEFORE deblocking, i.e. in
+        prediction or residual reconstruction itself.
+        Refined understanding of c_p8x8 row-2 failures:
+        - Parse is verbatim-correct vs ffmpeg source (sessions #19/#21).
+        - References (I, P) are bit-exact.
+        - Mode/MVD decode verified (Bi[0,0], forced-MVD sweep confirms
+          (0,0) is right for MB(1,1)).
+        => The remaining suspects: (a) our RESIDUAL COEFFICIENT VALUES for
+           row-2 MBs differ from x264s (engine-state divergence entering the
+           MB -- but rows 0-1 are clean...), or (b) the BI-PREDICTION COMBINE
+           step in reconstruct_b_inter_luma differs subtly (e.g. weighted
+           prediction handling, rounding), or (c) the colocated_mv grid fed
+           into reconstruct/predict differs.
+        NEXT STEP: dump our dequantised residual per 4x4 block for MB(1,2) and
+           compare against implied residual r - avg(L0,L1) per sample; if they
+           agree, the bug is in prediction; if they disagree, re-check
+           coefficient->raster placement for inter MBs (scan order vs raster).
+
+## SESSIONS #12-#26 SUMMARY — CABAC B-FRAME INVESTIGATION COMPLETE
+
+### What was accomplished
+Two real decoder bugs found and fixed:
+1. B_Direct_16x16 dropped CBP/qp_delta/residual bins (cabac_b.rs) ->
+   b_default B frame now BIT-EXACT; conformance matrix turned green.
+2. B sub_mb_type tables were mis-transcribed (mv.rs) -> corrected to spec
+   Table 9-16 layout (0=Direct, 1-4=L0(1/2/2/4), 5-8=L1(1/2/2/4), 9-12=Bi).
+
+Six hypotheses conclusively disproven with evidence:
+- L1-separate MVD contexts (session #15)
+- H1 mb_type tree variant: ctxIdx-31 Bi shortcut (session #17)
+- V-B mb_type tree variant: all-ext-bins at ctxIdx 32 (session #18)
+- Slice-QP misdecode: qp=24 uniquely produces bi16=2 (session #21)
+- Deblocking weak-filter difference: pre==ours at ALL diverging samples (#26)
+- MVD misdecode on BL116x16 MB(1,1): forced sweep confirms (0,0) is correct (#25)
+
+### Parse verified against vendored ffmpeg source (ff_h264_cabac.c)
+- MbTypeBCabacContext tree: VERBATIM-CORRECT (lines 1977-1997)
+- MvdCabacContext: ctxbase=(l==0)?40:47 shared across lists, thresholds,
+  unary loop bounds, EGk bypass suffix, sign bit -- all identical
+- MbQpDeltaCabacContext: val&1 mapping identical
+- Element order for inter MBs: refs -> mvds -> cbp -> transform8x8 -> dqp ->
+  residual -- confirmed
+
+### Infrastructure added
+- KINETIX_BINTRACE=1 per-bin tracing with global ctx indices
+- KINETIX_DUMP_PREDEBLOCK pre-deblock pixel dump (frame-count suffixed)
+- KINETIX_DUMP_B_PATH full B-slice CABAC payload dump
+- KINETIX_FORCE_MVD debug override for specific MB mvd values
+- tests/dbg_bintrace_replay.rs: crate-engine P-slice replay
+- tests/dbg_b_qp_sweep.rs: 52-qp exhaustive parse validation
+- dbg_cabac_b.rs: deterministic single-threaded encode + per-MB divergence
+  report + residual-source discriminator + small-diff sample dumper
+
+### Remaining known gaps (deterministic c_p8x8 repro available)
+1. Isolated +/-1-2 sample diffs in row-1/row-2 MBs (4+2+8+206+183+220
+   samples total). First divergence: MB(1,1) BL116x16 local (5,14) delta=+1.
+   Root cause: subtle coefficient or nz/cbf context-state divergence.
+2. Phase G: MBAFF P/B parsing (mb_field_decoding_flag for P/B slices,
+   neighbour derivation for mixed field/frame pairs)
+3. Phase G.5: PAFF/MBAFF corpus clips for interlaced validation
+4. Phase H: pixel_exact flip (requires items 1-3 above plus ITU vectors)
+
+### KEY INSIGHT FOR NEXT SESSION
+MB(1,1) BL116x16 mv=[0,0]: our output == P frame exactly at ALL 256 samples;
+ffmpeg differs from P by SAD=6 at 4 samples and matches I frame exactly.
+This means ffmpeg predicted from L0 (=I) while we predicted from L1 (=P).
+Either the reference lists are swapped/differently ordered, OR ffmpeg decoded
+a different mb_type due to context-state divergence entering this MB.
+Check build_ref_list_l0_b_slice and build_ref_list_l1 ordering for the
+specific DPB state after decoding I(frame_num=0) and P(frame_num=1).

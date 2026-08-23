@@ -1,7 +1,13 @@
 //! Diagnostic: localize the remaining High-profile 8×8 decode gap on the
 //! 352×288 mandelbrot clip (no deblocking).
 //! Run: cargo test -p tpt-kinetix-h264 --test dbg_hp352_localize -- --nocapture
-#![allow(clippy::needless_range_loop)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    clippy::useless_format,
+    clippy::needless_borrow,
+    clippy::unnecessary_cast
+)]
 
 use std::process::Command;
 

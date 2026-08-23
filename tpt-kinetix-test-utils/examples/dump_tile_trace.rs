@@ -12,9 +12,7 @@
 //   cargo run -q -p tpt-kinetix-test-utils --example dump_tile_trace --all
 use std::io::Write;
 
-use tpt_kinetix_av1::entropy::{
-    enable_symbol_trace, take_block_markers, take_symbol_trace,
-};
+use tpt_kinetix_av1::entropy::{enable_symbol_trace, take_block_markers, take_symbol_trace};
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 use tpt_kinetix_test_utils::synthetic::av1_intra_corpus;
@@ -88,13 +86,17 @@ fn dump_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         .map(|e| {
             format!(
                 "[{},{},{},{},{}]",
-                e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, jstr(&e.location.to_string())
+                e.n_symbols,
+                e.value,
+                e.bit_pos_before,
+                e.bit_pos_after,
+                jstr(&e.location.to_string())
             )
         })
         .collect();
     let markers_json: Vec<String> = markers
         .iter()
-        .map(|m|             format!("[{},{}]", m.trace_seq, jstr(&m.label)))
+        .map(|m| format!("[{},{}]", m.trace_seq, jstr(&m.label)))
         .collect();
 
     let seg_feature_skip = fh.seg_feature_enabled.first().copied().unwrap_or(false);

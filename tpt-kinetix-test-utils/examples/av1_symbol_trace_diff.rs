@@ -154,6 +154,12 @@ fn first_divergence(
 fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     println!("\n=== {label} ({width}x{height}) ===");
 
+    if let Ok(dir) = std::env::var("KINETIX_AV1_DUMP_OBU") {
+        let path = format!("{dir}/{label}.obu");
+        let _ = std::fs::write(&path, obu);
+        println!("  dumped raw OBU to {path}");
+    }
+
     let ref_frames = match decode_av1_obu_with_dav1d(obu, width, height) {
         Ok(f) => f,
         Err(e) => {

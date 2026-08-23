@@ -117,8 +117,8 @@ fn dbg_noise_mono() {
         let rf = &reference[5].data;
         eprintln!("frame 5 (native vs ref):");
         for i in 0..24 {
-            let nv = f32::from_le_bytes([nf[4*i], nf[4*i+1], nf[4*i+2], nf[4*i+3]]);
-            let rv = f32::from_le_bytes([rf[4*i], rf[4*i+1], rf[4*i+2], rf[4*i+3]]);
+            let nv = f32::from_le_bytes([nf[4 * i], nf[4 * i + 1], nf[4 * i + 2], nf[4 * i + 3]]);
+            let rv = f32::from_le_bytes([rf[4 * i], rf[4 * i + 1], rf[4 * i + 2], rf[4 * i + 3]]);
             eprintln!("  [{i:2}] n={nv:+.4} r={rv:+.4} d={:.4}", nv - rv);
         }
     }

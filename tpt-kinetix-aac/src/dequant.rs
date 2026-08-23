@@ -20,7 +20,7 @@ use crate::syntax::{AacParseError, IcsInfo, SectionData};
 /// a DPCM-accumulated value, both bitstream-controlled, so a malformed or
 /// desynced stream can drive the exponent arbitrarily high — `2^(0.25·q)`
 /// overflows `f32` to `+inf` for `q > ~512`. An infinite scale then silently
-/// becomes **NaN** downstream (`inf * 0.0` in [`dequant_coeff`], or `l - r` in
+/// becomes **NaN** downstream (`inf * 0.0` in `dequant_coeff`, or `l - r` in
 /// M/S stereo), which propagates through the IMDCT and poisons the whole
 /// output frame. Clamping keeps a corrupt stream's output merely wrong rather
 /// than NaN-poisoned. Found by `tests/proptest_decode_never_panics.rs`.

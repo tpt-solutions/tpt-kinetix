@@ -184,9 +184,7 @@ pub fn mark_block(label: impl FnOnce() -> String) {
 /// debug-only capture path and the crate doesn't otherwise depend on `serde`.
 pub fn should_capture(blk: &crate::coeff::TxBlockCtx) -> bool {
     match capture_target() {
-        Some((plane, px_x, px_y)) => {
-            plane == blk.plane && px_x == blk.x4 * 4 && px_y == blk.y4 * 4
-        }
+        Some((plane, px_x, px_y)) => plane == blk.plane && px_x == blk.x4 * 4 && px_y == blk.y4 * 4,
         None => false,
     }
 }
@@ -220,10 +218,7 @@ pub fn maybe_capture_block(
     };
     // Slice Kinetix's own trace to this block's coeffs() symbol range.
     let all_vals = symbol_trace_values();
-    let ref_vals: Vec<usize> = all_vals
-        .into_iter()
-        .skip(pre_trace_len)
-        .collect();
+    let ref_vals: Vec<usize> = all_vals.into_iter().skip(pre_trace_len).collect();
     let ref_json = ref_vals
         .iter()
         .map(|v| v.to_string())

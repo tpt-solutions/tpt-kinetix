@@ -557,11 +557,7 @@ pub fn minimal_aac_adts(sample_rate: u32, channels: u8, duration_secs: f32) -> O
 /// `ffmpeg` is unavailable or the encode fails. Use this to build conformance
 /// corpora that exercise paths a single 440 Hz tone does not reach (PNS, TNS,
 /// EIGHT_SHORT transients, mono, non-44.1 kHz sample rates, etc.).
-pub fn encode_aac_adts_lavfi(
-    lavfi_input: &str,
-    channels: u8,
-    bitrate: &str,
-) -> Option<Vec<u8>> {
+pub fn encode_aac_adts_lavfi(lavfi_input: &str, channels: u8, bitrate: &str) -> Option<Vec<u8>> {
     use std::{
         io::Read,
         process::{Command, Stdio},

@@ -41,6 +41,14 @@ Thumbs.db
 
 # Scratch / work artifacts
 scratch_*.txt
+*.bak
+*.ps1
+# ffmpeg reference headers/extracted source dropped in during codec bring-up
+ff_*.h
+ff_*.c
+# loose debug/extract dumps (bJ.txt, cbX.txt, r1.txt, buildlog.txt, ncs.txt, …)
+*.txt
+**/__pycache__/
 
 # AV1 Phase G.0 block-capture bridge output (written by KINETIX_AV1_CAPTURE)
 av1_capture.json

@@ -568,6 +568,12 @@ impl FrameHeader {
             } else {
                 false
             };
+            if std::env::var("KINETIX_AV1_DBG_SUPERRES").is_ok() {
+                eprintln!(
+                    "DBG superres enable_superres={} w={w} h={h} rw={rw} rh={rh}",
+                    seq.enable_superres
+                );
+            }
         } else {
             if !enable_order_hint {
                 frame_refs_short_signaling = false;
@@ -1550,6 +1556,12 @@ fn parse_tile_info(
     let tile_rows = 1u32 << tile_rows_log2;
     let tile_width_in_sb = sb_cols.div_ceil(tile_cols);
     let tile_height_in_sb = sb_rows.div_ceil(tile_rows);
+
+    if std::env::var("KINETIX_AV1_DBG_TILEINFO").is_ok() {
+        eprintln!(
+            "DBG tile_info sb_cols={sb_cols} sb_rows={sb_rows} min_log2_tile_cols={min_log2_tile_cols} max_log2_tile_cols={max_log2_tile_cols} uniform_tile_spacing={uniform_tile_spacing} tile_cols_log2={tile_cols_log2} tile_rows_log2={tile_rows_log2} tile_cols={tile_cols} tile_rows={tile_rows}"
+        );
+    }
 
     Ok((
         tile_cols_log2,

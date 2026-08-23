@@ -38,9 +38,15 @@ fn main() {
     println!("SIG_COEF_CONTEXTS = {:?}", SIG_COEF_CONTEXTS);
     println!("SIG_COEF_CONTEXTS_EOB = {:?}", SIG_COEF_CONTEXTS_EOB);
     println!("SIG_REF_DIFF_OFFSET = {:?}", SIG_REF_DIFF_OFFSET);
-    println!("MAG_REF_OFFSET_WITH_TX_CLASS = {:?}", MAG_REF_OFFSET_WITH_TX_CLASS);
+    println!(
+        "MAG_REF_OFFSET_WITH_TX_CLASS = {:?}",
+        MAG_REF_OFFSET_WITH_TX_CLASS
+    );
     println!("COEFF_BASE_CTX_OFFSET = {:?}", COEFF_BASE_CTX_OFFSET);
-    println!("COEFF_BASE_POS_CTX_OFFSET = {:?}", COEFF_BASE_POS_CTX_OFFSET);
+    println!(
+        "COEFF_BASE_POS_CTX_OFFSET = {:?}",
+        COEFF_BASE_POS_CTX_OFFSET
+    );
     println!("MODE_TO_TXFM = {:?}", MODE_TO_TXFM);
     println!("TX_TYPE_IN_SET_INTRA = {:?}", TX_TYPE_IN_SET_INTRA);
     println!("TX_TYPE_INTRA_INV_SET1 = {:?}", TX_TYPE_INTRA_INV_SET1);
@@ -56,12 +62,21 @@ fn main() {
     println!("DEFAULT_EOB_PT_512_CDF = {:?}", DEFAULT_EOB_PT_512_CDF);
     println!("DEFAULT_EOB_PT_1024_CDF = {:?}", DEFAULT_EOB_PT_1024_CDF);
     println!("DEFAULT_EOB_EXTRA_CDF = {:?}", DEFAULT_EOB_EXTRA_CDF);
-    println!("DEFAULT_COEFF_BASE_EOB_CDF = {:?}", DEFAULT_COEFF_BASE_EOB_CDF);
+    println!(
+        "DEFAULT_COEFF_BASE_EOB_CDF = {:?}",
+        DEFAULT_COEFF_BASE_EOB_CDF
+    );
     println!("DEFAULT_COEFF_BASE_CDF = {:?}", DEFAULT_COEFF_BASE_CDF);
     println!("DEFAULT_COEFF_BR_CDF = {:?}", DEFAULT_COEFF_BR_CDF);
     println!("DEFAULT_DC_SIGN_CDF = {:?}", DEFAULT_DC_SIGN_CDF);
-    println!("DEFAULT_INTRA_TX_TYPE_SET1_CDF = {:?}", DEFAULT_INTRA_TX_TYPE_SET1_CDF);
-    println!("DEFAULT_INTRA_TX_TYPE_SET2_CDF = {:?}", DEFAULT_INTRA_TX_TYPE_SET2_CDF);
+    println!(
+        "DEFAULT_INTRA_TX_TYPE_SET1_CDF = {:?}",
+        DEFAULT_INTRA_TX_TYPE_SET1_CDF
+    );
+    println!(
+        "DEFAULT_INTRA_TX_TYPE_SET2_CDF = {:?}",
+        DEFAULT_INTRA_TX_TYPE_SET2_CDF
+    );
     println!();
 
     println!("# Precomputed scan tables: SCANS[(tx_size, tx_type)] = [raster positions]");
@@ -82,5 +97,7 @@ fn main() {
     println!();
 
     println!("# Sanity: TileCdfs::q_context buckets exist for q in 0..256");
-    println!("# (q_context bucketing is reimplemented in Python; data above is the 4-q-indexed tables)")
+    println!(
+        "# (q_context bucketing is reimplemented in Python; data above is the 4-q-indexed tables)"
+    )
 }

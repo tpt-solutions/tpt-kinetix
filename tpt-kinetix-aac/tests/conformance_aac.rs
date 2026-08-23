@@ -242,10 +242,7 @@ fn build_corpus() -> Vec<ConformanceCase> {
     };
 
     // Original baseline: 440 Hz stereo tone, 44.1 kHz.
-    add(
-        "tone_440_stereo_44100",
-        minimal_aac_adts(44_100, 2, 1.0),
-    );
+    add("tone_440_stereo_44100", minimal_aac_adts(44_100, 2, 1.0));
     // Broadband noise → PNS / short-window heavy.
     add(
         "noise_stereo_44100",
@@ -273,18 +270,9 @@ fn build_corpus() -> Vec<ConformanceCase> {
         ),
     );
     // Other sample rates → different SWB tables.
-    add(
-        "tone_440_stereo_48000",
-        minimal_aac_adts(48_000, 2, 1.0),
-    );
-    add(
-        "tone_440_stereo_22050",
-        minimal_aac_adts(22_050, 2, 1.0),
-    );
-    add(
-        "tone_440_mono_44100",
-        minimal_aac_adts(44_100, 1, 1.0),
-    );
+    add("tone_440_stereo_48000", minimal_aac_adts(48_000, 2, 1.0));
+    add("tone_440_stereo_22050", minimal_aac_adts(22_050, 2, 1.0));
+    add("tone_440_mono_44100", minimal_aac_adts(44_100, 1, 1.0));
     cases
 }
 
@@ -296,7 +284,10 @@ fn native_aac_matches_ffmpeg_reference() {
     }
 
     let corpus = build_corpus();
-    assert!(!corpus.is_empty(), "ffmpeg failed to encode every corpus case");
+    assert!(
+        !corpus.is_empty(),
+        "ffmpeg failed to encode every corpus case"
+    );
 
     let mut worst_diff = 0.0f32;
     let mut worst_corr = 1.0f64;

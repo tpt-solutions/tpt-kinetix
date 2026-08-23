@@ -7,7 +7,12 @@
 //! (see `dbg_hp352_localize.rs`).
 //!
 //! Run: cargo test -p tpt-kinetix-h264 --test dbg_b_implied_pred -- --nocapture
-#![allow(clippy::needless_range_loop)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    clippy::manual_div_ceil,
+    clippy::collapsible_match
+)]
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -787,7 +792,7 @@ fn p_from_ibp_without_b() {
             is_key_frame: true,
         };
         match dec.decode(&pkt) {
-            Ok(Some(f)) => {
+            Ok(Some(_f)) => {
                 if t == 1 && seen_idr {
                     // This is the P frame (B NAL was skipped).
                     let mut tr = Tracer::default();

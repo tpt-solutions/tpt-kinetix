@@ -195,7 +195,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(60));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt, 100).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![0]
         );
 
@@ -203,7 +203,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(61));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt, 100).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![-1]
         );
 
@@ -211,7 +211,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(59));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt, 100).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![1]
         );
     }
@@ -229,7 +229,7 @@ mod tests {
         let bt = expand_band_types(&sections, &ics);
         let mut r = BitReader::new(&[0u8; 4]);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt, 100).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![0]
         );
     }
@@ -251,7 +251,7 @@ mod tests {
         let bytes = pack_bits(&bits);
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt, 100).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
             vec![0, 2]
         );
     }

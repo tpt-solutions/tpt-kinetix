@@ -195,8 +195,14 @@ impl AacDecoder {
         if std::env::var("AAC_DBG_GG").is_ok() {
             for el in &block.elements {
                 match el {
-                    Element::Sce(s) => eprintln!("DBG gg SCE inst={} gg={}", s.instance_tag, s.stream.global_gain),
-                    Element::Cpe(c) => eprintln!("DBG gg CPE inst={} ggL={} ggR={}", c.instance_tag, c.left.global_gain, c.right.global_gain),
+                    Element::Sce(s) => eprintln!(
+                        "DBG gg SCE inst={} gg={}",
+                        s.instance_tag, s.stream.global_gain
+                    ),
+                    Element::Cpe(c) => eprintln!(
+                        "DBG gg CPE inst={} ggL={} ggR={}",
+                        c.instance_tag, c.left.global_gain, c.right.global_gain
+                    ),
                     _ => {}
                 }
             }
@@ -213,7 +219,12 @@ impl AacDecoder {
                             &sce.stream.band_type[..sce.stream.ics.max_sfb.min(8) as usize]
                         );
                     }
-                    let ch = Self::decode_channel_stream(&sce.stream, self.sf_index, self.frame_no, &mut self.pns_rng)?;
+                    let ch = Self::decode_channel_stream(
+                        &sce.stream,
+                        self.sf_index,
+                        self.frame_no,
+                        &mut self.pns_rng,
+                    )?;
                     decoded_channels.push(DecodedChannel {
                         instance_tag: sce.instance_tag,
                         ics: sce.stream.ics,
@@ -228,8 +239,18 @@ impl AacDecoder {
                     });
                 }
                 Element::Cpe(cpe) => {
-                    let left_ch = Self::decode_channel_stream(&cpe.left, self.sf_index, self.frame_no, &mut self.pns_rng)?;
-                    let right_ch = Self::decode_channel_stream(&cpe.right, self.sf_index, self.frame_no, &mut self.pns_rng)?;
+                    let left_ch = Self::decode_channel_stream(
+                        &cpe.left,
+                        self.sf_index,
+                        self.frame_no,
+                        &mut self.pns_rng,
+                    )?;
+                    let right_ch = Self::decode_channel_stream(
+                        &cpe.right,
+                        self.sf_index,
+                        self.frame_no,
+                        &mut self.pns_rng,
+                    )?;
                     let left_idx = decoded_channels.len();
                     let right_idx = left_idx + 1;
                     decoded_channels.push(DecodedChannel {
@@ -268,7 +289,12 @@ impl AacDecoder {
                     cce_elements.push(cce.clone());
                 }
                 Element::Lfe(lfe) => {
-                    let ch = Self::decode_channel_stream(&lfe.stream, self.sf_index, self.frame_no, &mut self.pns_rng)?;
+                    let ch = Self::decode_channel_stream(
+                        &lfe.stream,
+                        self.sf_index,
+                        self.frame_no,
+                        &mut self.pns_rng,
+                    )?;
                     decoded_channels.push(DecodedChannel {
                         instance_tag: lfe.instance_tag,
                         ics: lfe.stream.ics,
@@ -406,8 +432,10 @@ impl AacDecoder {
                             pns += 1;
                             if pns == 1 {
                                 first_pns_sf = ch.scalefactor[i];
-                                first_pns_scale =
-                                    crate::dequant::dequant_scale(ch.global_gain, ch.scalefactor[i]);
+                                first_pns_scale = crate::dequant::dequant_scale(
+                                    ch.global_gain,
+                                    ch.scalefactor[i],
+                                );
                             }
                         }
                     }
@@ -486,7 +514,7 @@ impl AacDecoder {
     fn decode_channel_stream(
         stream: &ChannelStream,
         sf_index: usize,
-        frame_no_diag: u64,
+        _frame_no_diag: u64,
         pns_rng: &mut PnsRandom,
     ) -> Result<[f32; 1024], AacParseError> {
         let ics = &stream.ics;
@@ -517,19 +545,24 @@ impl AacDecoder {
             let max_sfb = ics.max_sfb as usize;
             let mut maxc = 0.0f32;
             let mut maxbi = 0usize;
-            for k in 0..1024 {
-                if coeffs[k].abs() > maxc {
-                    maxc = coeffs[k].abs();
+            for (k, &c) in coeffs.iter().enumerate() {
+                if c.abs() > maxc {
+                    maxc = c.abs();
                     maxbi = k;
                 }
             }
-            eprint!("DBG full msf={} maxcoeff={:e} atk={} | ",
-                max_sfb, maxc, maxbi);
+            eprint!(
+                "DBG full msf={} maxcoeff={:e} atk={} | ",
+                max_sfb, maxc, maxbi
+            );
             for sfb in 0..max_sfb {
                 let sfv = stream.scalefactor.get(sfb).copied().unwrap_or(0);
                 let scale = crate::dequant::dequant_scale(stream.global_gain, sfv);
-                eprint!("{}:{} ", stream.band_type.get(sfb).copied().unwrap_or(0),
-                    (scale.log2() * 10.0) as i32);
+                eprint!(
+                    "{}:{} ",
+                    stream.band_type.get(sfb).copied().unwrap_or(0),
+                    (scale.log2() * 10.0) as i32
+                );
             }
             eprintln!();
         }
