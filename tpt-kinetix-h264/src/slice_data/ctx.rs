@@ -768,9 +768,12 @@ pub(crate) fn cabac_decode_mvd_component(
     } else {
         2
     };
-    let (r0, o0) = dec.debug_state();
-    let val = ctx.decode(dec, asum);
-    let (r1, o1) = dec.debug_state();
-    eprintln!("      mvd xp={xp} yp={yp} wp={wp} hp={hp} comp={comp} asum={asum} ctx0={ctx0} val={val} {r0:#06x}/{o0:#010x}->{r1:#06x}/{o1:#010x}");
-    Ok(val)
+    if crate::entropy::bin_trace_enabled() {
+        let (r0, o0) = dec.debug_state();
+        let val = ctx.decode(dec, asum);
+        let (r1, o1) = dec.debug_state();
+        eprintln!("      mvd xp={xp} yp={yp} wp={wp} hp={hp} comp={comp} asum={asum} ctx0={ctx0} val={val} {r0:#06x}/{o0:#010x}->{r1:#06x}/{o1:#010x}");
+        return Ok(val);
+    }
+    Ok(ctx.decode(dec, asum))
 }

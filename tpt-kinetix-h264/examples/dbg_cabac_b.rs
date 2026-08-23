@@ -129,7 +129,7 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
     if !vf.is_empty() {
         // Re-encode with the -vf filter applied (two-pass: generate then filter).
         let ok = Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", input, "-vf", vf, "-frames:v", "3", "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-x264-params", &format!("cabac=1:ref=1:bframes=1:b-pyramid=0:b-adapt=0:8x8dct=0:weightp=0:weightb=0:aud=0:keyint=300:min-keyint=300:deblock=0:{extra}")])
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", input, "-vf", vf, "-threads:v", "1", "-frames:v", "3", "-c:v", "libx264", "-profile:v", "main", "-pix_fmt", "yuv420p", "-x264-params", &format!("threads=1:sliced-threads=0:non-deterministic=0:cabac=1:ref=1:bframes=1:b-pyramid=0:b-adapt=0:8x8dct=0:weightp=0:weightb=0:aud=0:keyint=300:min-keyint=300:deblock=0:{extra}")])
             .arg(h264.to_str().unwrap())
             .output()
             .map(|o| o.status.success())
@@ -243,6 +243,91 @@ fn run_variant(name: &str, extra: &str, input: &str, vf: &str) {
                 row.push_str(&format!("{md:4}"));
             }
             eprintln!("  B luma diff MB row {mby}:{row}");
+        }
+        // Per-MB divergence report in scan order: where does the B frame first
+        // disagree with ffmpeg, and by how much?
+        eprintln!("  --- per-MB divergence scan-order report ---");
+        for dmby in 0..3usize {
+            for mbx in 0..4usize {
+                let mut first: Option<(usize, usize, i32, i32)> = None;
+                let mut n_diff = 0usize;
+                let mut max_d = 0i32;
+                for y in 0..16usize {
+                    for x in 0..16usize {
+                        let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                        let d = (f.data[idx] as i32 - r[idx] as i32).abs();
+                        if d > 0 {
+                            n_diff += 1;
+                            max_d = max_d.max(d);
+                            if first.is_none() {
+                                first = Some((
+                                    (dmby * 16) + y,
+                                    mbx * 16 + x,
+                                    f.data[idx] as i32,
+                                    r[idx] as i32,
+                                ));
+                            }
+                        }
+                    }
+                }
+                if n_diff > 0 {
+                    let (fy, fx, vo, vr) = first.unwrap();
+                    eprintln!(
+                        "  MB({mbx},{dmby}): n={n_diff} max={max_d} first@({fx},{fy}) ours={vo} ref={vr}"
+                    );
+                }
+            }
+        }
+        let mut md_best = (0usize, 0usize, 0i32); // (mbx, mby, diff)
+        for dmby in 0..3usize {
+            for mbx in 0..4usize {
+                let mut md = 0i32;
+                for y in 0..16usize {
+                    for x in 0..16usize {
+                        let idx = ((dmby * 16) + y) * w + mbx * 16 + x;
+                        md = md.max((f.data[idx] as i32 - r[idx] as i32).abs());
+                    }
+                }
+                if md > md_best.2 {
+                    md_best = (mbx, dmby, md);
+                }
+            }
+        }
+        let (bmx, bmby, _) = md_best;
+        for yy in (bmby * 16 + 6)..=(bmby * 16 + 10) {
+            let mut ours = String::new();
+            let mut refr = String::new();
+            for x in (bmx * 16)..(bmx * 16 + 16) {
+                let idx = yy * w + x;
+                ours.push_str(&format!("{:4}", f.data[idx]));
+                refr.push_str(&format!("{:4}", r[idx]));
+            }
+            eprintln!("  MB({bmx},{bmby}) y={yy} ours:{ours}");
+            eprintln!("  MB({bmx},{bmby}) y={yy} ref :{refr}");
+        }
+        // Implied-residual discriminator for a Bi[0,0] hypothesis: pred is the
+        // average of both references at the same position. If the true mode is
+        // Bi[0,0], ref-pred must look like a small quantized residual; if it is
+        // large, the true MVs are non-zero and our parse mis-decoded them.
+        if let (Some(ri0), Some(ri2)) = (
+            all.iter().position(|(l, _)| l == "Idr"),
+            all.iter().rposition(|(l, _)| l == "NonIdr"),
+        ) {
+            let l0 = &all[ri0].1.data;
+            let l1 = &all[ri2].1.data;
+            let mut lines = String::new();
+            for yy in (bmby * 16 + 6)..=(bmby * 16 + 8) {
+                for x in (bmx * 16)..(bmx * 16 + 16) {
+                    let idx = yy * w + x;
+                    let pred = (l0[idx] as i32 + l1[idx] as i32 + 1) >> 1;
+                    let d_true = r[idx] as i32 - pred;
+                    let d_ours = f.data[idx] as i32 - pred;
+                    lines.push_str(&format!(
+                        "  y={yy} x={x} pred={pred} true_res={d_true} our_res={d_ours}\n"
+                    ));
+                }
+            }
+            eprintln!("{lines}");
         }
     }
 }

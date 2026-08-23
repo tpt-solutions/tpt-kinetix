@@ -1152,6 +1152,15 @@ impl H264Decoder {
                         .map(|b| format!("{b:02X}"))
                         .collect();
                     eprintln!("B-CABAC bytes[{}]: {}", cabac_data.len(), preview.join(" "));
+                    if let Ok(path) = std::env::var("KINETIX_DUMP_B_PATH") {
+                        let _ = std::fs::write(&path, cabac_data);
+                        let meta = format!(
+                            "qp={slice_qp} idc={} nl0={num_ref_idx_l0_active} nl1={num_ref_idx_l1_active} t8={}",
+                            header.cabac_init_idc,
+                            pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                        );
+                        let _ = std::fs::write(format!("{path}.meta"), meta);
+                    }
                     crate::slice_data::parse_b_slice_cabac(
                         reader.remaining_bytes(),
                         mb_cols,

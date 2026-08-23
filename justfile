@@ -112,6 +112,21 @@ av1-oracle-regen:
 av1-oracle-validate:
     python3 tools/av1_oracle/validate.py
 
+# Capture a single transform block's raw tile bytes + TxBlockCtx + Kinetix's
+# own symbol slice into av1_capture.json, then re-decode it independently with
+# the Python oracle and diff symbol-by-symbol (Phase G.0 item 1: the independent
+# coeff oracle bridge). BLOCK is "plane:px_x:px_y" of the target transform block.
+# The capture feeds the differential harness, which decodes the corpus entry
+# named by ENTRY (default mandelbrot).
+# NOTE: the oracle re-seeds neighbour level/dc context from the capture but uses
+# fresh (base_q-seeded) CDF tables, so the diff already isolates context- and
+# table-value bugs; a residual divergence whose only cause is mid-tile CDF
+# adaptation is not yet separated out (capturing adapted CDFs is a future step).
+av1-capture BLOCK ENTRY="mandelbrot":
+    set -e
+    KINETIX_AV1_CAPTURE={{BLOCK}} cargo run -q -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ENTRY}}
+    python3 tools/av1_oracle/diff_block.py av1_capture.json
+
 # Run every Criterion bench in the workspace.
 bench:
     cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline

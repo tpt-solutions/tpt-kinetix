@@ -41,3 +41,6 @@ Thumbs.db
 
 # Scratch / work artifacts
 scratch_*.txt
+
+# AV1 Phase G.0 block-capture bridge output (written by KINETIX_AV1_CAPTURE)
+av1_capture.json

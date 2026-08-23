@@ -109,6 +109,201 @@ impl TileCdfs {
             _ => 3,
         }
     }
+
+    /// Clone the current (mid-tile, adapted) CDF state for the independent
+    /// oracle's block capture. The oracle replays these exact tables so its
+    /// re-decode starts from Kinetix's real adapted CDF state — removing the
+    /// last confound (CDF adaptation) from the symbol-by-symbol diff.
+    pub fn cdf_snapshot(&self) -> TileCdfSnapshot {
+        TileCdfSnapshot {
+            txb_skip: clone_txb(&self.txb_skip),
+            eob_pt_16: clone_eob22(&self.eob_pt_16),
+            eob_pt_32: clone_eob22(&self.eob_pt_32),
+            eob_pt_64: clone_eob22(&self.eob_pt_64),
+            eob_pt_128: clone_eob22(&self.eob_pt_128),
+            eob_pt_256: clone_eob22(&self.eob_pt_256),
+            eob_pt_512: clone_eob2(&self.eob_pt_512),
+            eob_pt_1024: clone_eob2(&self.eob_pt_1024),
+            eob_extra: clone4(&self.eob_extra),
+            coeff_base_eob: clone4(&self.coeff_base_eob),
+            coeff_base: clone4(&self.coeff_base),
+            coeff_br: clone4(&self.coeff_br),
+            dc_sign: clone_dc(&self.dc_sign),
+            intra_tx_type_set1: clone_it1(&self.intra_tx_type_set1),
+            intra_tx_type_set2: clone_it2(&self.intra_tx_type_set2),
+        }
+    }
+
+    /// Overwrite this CDF set's tables from a prior [`TileCdfSnapshot`].
+    pub fn load_snapshot(&mut self, s: &TileCdfSnapshot) {
+        self.txb_skip = unclone_txb(&s.txb_skip);
+        self.eob_pt_16 = unclone_eob22(&s.eob_pt_16);
+        self.eob_pt_32 = unclone_eob22(&s.eob_pt_32);
+        self.eob_pt_64 = unclone_eob22(&s.eob_pt_64);
+        self.eob_pt_128 = unclone_eob22(&s.eob_pt_128);
+        self.eob_pt_256 = unclone_eob22(&s.eob_pt_256);
+        self.eob_pt_512 = unclone_eob2(&s.eob_pt_512);
+        self.eob_pt_1024 = unclone_eob2(&s.eob_pt_1024);
+        self.eob_extra = unclone4(&s.eob_extra);
+        self.coeff_base_eob = unclone4(&s.coeff_base_eob);
+        self.coeff_base = unclone4(&s.coeff_base);
+        self.coeff_br = unclone4(&s.coeff_br);
+        self.dc_sign = unclone_dc(&s.dc_sign);
+        self.intra_tx_type_set1 = unclone_it1(&s.intra_tx_type_set1);
+        self.intra_tx_type_set2 = unclone_it2(&s.intra_tx_type_set2);
+    }
+}
+
+/// A serializable clone of [`TileCdfs`]'s adapted tables, for the independent
+/// oracle's block capture (avoids pulling `serde` into the debug path by using
+/// plain `Vec` nests that `entropy.rs` hand-rolls into JSON).
+#[derive(Clone, Debug)]
+pub struct TileCdfSnapshot {
+    pub txb_skip: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_16: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_32: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_64: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_128: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_256: Vec<Vec<Vec<u16>>>,
+    pub eob_pt_512: Vec<Vec<u16>>,
+    pub eob_pt_1024: Vec<Vec<u16>>,
+    pub eob_extra: Vec<Vec<Vec<Vec<u16>>>>,
+    pub coeff_base_eob: Vec<Vec<Vec<Vec<u16>>>>,
+    pub coeff_base: Vec<Vec<Vec<Vec<u16>>>,
+    pub coeff_br: Vec<Vec<Vec<Vec<u16>>>,
+    pub dc_sign: Vec<Vec<Vec<u16>>>,
+    pub intra_tx_type_set1: Vec<Vec<Vec<u16>>>,
+    pub intra_tx_type_set2: Vec<Vec<Vec<u16>>>,
+}
+
+fn clone2(a: &[[u16; 2]]) -> Vec<Vec<u16>> {
+    a.iter().map(|r| r.to_vec()).collect()
+}
+fn unclone2(a: &[Vec<u16>]) -> Vec<[u16; 2]> {
+    a.iter().map(|r| [r[0], r[1]]).collect()
+}
+// txb_skip: [[[u16;3];13];5]
+fn clone_txb(a: &[[[u16; 3]; 13]; 5]) -> Vec<Vec<Vec<u16>>> {
+    a.iter()
+        .map(|m| m.iter().map(|r| r.to_vec()).collect())
+        .collect()
+}
+fn unclone_txb(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 3]; 13]> {
+    a.iter()
+        .map(|m| {
+            let mut out = [[0u16; 3]; 13];
+            for (i, r) in m.iter().enumerate() {
+                for j in 0..3 {
+                    out[i][j] = r[j];
+                }
+            }
+            out
+        })
+        .collect()
+}
+// eob_pt_16..256: [[[u16;N];2];2]
+fn clone_eob22(a: &[[[u16; 6]; 2]; 2]) -> Vec<Vec<Vec<u16>>> {
+    a.iter()
+        .map(|m| m.iter().map(|r| r.to_vec()).collect())
+        .collect()
+}
+fn unclone_eob22(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 6]; 2]> {
+    a.iter()
+        .map(|m| {
+            let mut out = [[0u16; 6]; 2];
+            for (i, r) in m.iter().enumerate() {
+                for j in 0..6 {
+                    out[i][j] = r[j];
+                }
+            }
+            out
+        })
+        .collect()
+}
+// eob_pt_512/1024: [[u16;N];2]
+fn clone_eob2(a: &[[u16; 12]; 2]) -> Vec<Vec<u16>> {
+    a.iter().map(|r| r.to_vec()).collect()
+}
+fn unclone_eob2(a: &[Vec<u16>]) -> Vec<[u16; 12]> {
+    a.iter().map(|r| {
+        let mut out = [0u16; 12];
+        for j in 0..r.len().min(12) {
+            out[j] = r[j];
+        }
+        out
+    }).collect()
+}
+// eob_extra etc: [[[[u16;4];4];2];5]
+fn clone4(a: &[[[[u16; 4]; 4]; 2]; 5]) -> Vec<Vec<Vec<Vec<u16>>>> {
+    a.iter()
+        .map(|l| l.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect())
+        .collect()
+}
+fn unclone4(a: &[Vec<Vec<Vec<u16>>]) -> Vec<[[[u16; 4]; 4]; 2]> {
+    a.iter()
+        .map(|l| {
+            let mut out = [[[0u16; 4]; 4]; 2];
+            for (li, m) in l.iter().enumerate() {
+                for (mi, r) in m.iter().enumerate() {
+                    for j in 0..4 {
+                        out[li][mi][j] = r[j];
+                    }
+                }
+            }
+            out
+        })
+        .collect()
+}
+// dc_sign: [[[u16;3];3];2]
+fn clone_dc(a: &[[[u16; 3]; 3]; 2]) -> Vec<Vec<Vec<u16>>> {
+    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
+}
+fn unclone_dc(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 3]; 3]> {
+    a.iter()
+        .map(|m| {
+            let mut out = [[0u16; 3]; 3];
+            for (i, r) in m.iter().enumerate() {
+                for j in 0..3 {
+                    out[i][j] = r[j];
+                }
+            }
+            out
+        })
+        .collect()
+}
+// intra_tx_type_set1: [[[u16;8];13];2]
+fn clone_it1(a: &[[[u16; 8]; 13]; 2]) -> Vec<Vec<Vec<u16>>> {
+    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
+}
+fn unclone_it1(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 8]; 13]> {
+    a.iter()
+        .map(|m| {
+            let mut out = [[0u16; 8]; 13];
+            for (i, r) in m.iter().enumerate() {
+                for j in 0..8 {
+                    out[i][j] = r[j];
+                }
+            }
+            out
+        })
+        .collect()
+}
+// intra_tx_type_set2: [[[u16;6];13];3]
+fn clone_it2(a: &[[[u16; 6]; 13]; 3]) -> Vec<Vec<Vec<u16>>> {
+    a.iter().map(|m| m.iter().map(|r| r.to_vec()).collect()).collect()
+}
+fn unclone_it2(a: &[Vec<Vec<u16>>]) -> Vec<[[u16; 6]; 13]> {
+    a.iter()
+        .map(|m| {
+            let mut out = [[0u16; 6]; 13];
+            for (i, r) in m.iter().enumerate() {
+                for j in 0..6 {
+                    out[i][j] = r[j];
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// Neighbouring-block level and DC-sign contexts for one tile.
@@ -122,6 +317,16 @@ pub struct CoeffContexts {
     above_dc: [Vec<u8>; NUM_PLANES],
     left_level: [Vec<u8>; NUM_PLANES],
     left_dc: [Vec<u8>; NUM_PLANES],
+}
+
+/// A plane's neighbour level/dc context, cloned out for the independent
+/// oracle's block capture so its re-decode starts from Kinetix's exact state.
+#[derive(Clone, Debug)]
+pub struct CoeffCtxSnapshot {
+    pub above_level: Vec<u8>,
+    pub above_dc: Vec<u8>,
+    pub left_level: Vec<u8>,
+    pub left_dc: Vec<u8>,
 }
 
 impl CoeffContexts {
@@ -153,6 +358,21 @@ impl CoeffContexts {
         for plane in 0..NUM_PLANES {
             self.above_level[plane].fill(0);
             self.above_dc[plane].fill(0);
+        }
+    }
+
+    /// Snapshot of a plane's neighbour level/dc context, for the Phase G.0
+    /// independent-oracle block capture (`tools/av1_oracle/diff_block.py`).
+    /// The oracle re-seeds its `CoeffContexts` from this so its independent
+    /// re-decode of the captured block starts from Kinetix's exact neighbour
+    /// state (otherwise the two decoders would diverge on any context that
+    /// depends on `above_level`/`left_level`, which is most of them).
+    pub fn ctx_snapshot(&self, plane: usize) -> CoeffCtxSnapshot {
+        CoeffCtxSnapshot {
+            above_level: self.above_level[plane].clone(),
+            above_dc: self.above_dc[plane].clone(),
+            left_level: self.left_level[plane].clone(),
+            left_dc: self.left_dc[plane].clone(),
         }
     }
 

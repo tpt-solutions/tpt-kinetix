@@ -32,7 +32,7 @@ thread_local! {
     static BIN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn bin_trace_enabled() -> bool {
+pub(crate) fn bin_trace_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
@@ -565,10 +565,12 @@ impl CodedBlockFlagContext {
     ) -> bool {
         let ctx_idx = left_coded as usize + 2 * top_coded as usize;
         let ctx = &self.ctx[cat][ctx_idx];
-        eprintln!(
-            "    CBF cat={cat} ctx_idx={ctx_idx} state={} mps={}",
-            ctx.state, ctx.mps
-        );
+        if bin_trace_enabled() {
+            eprintln!(
+                "    CBF cat={cat} ctx_idx={ctx_idx} state={} mps={}",
+                ctx.state, ctx.mps
+            );
+        }
         dec.decode_decision(&mut self.ctx[cat][ctx_idx]) == 1
     }
 }
@@ -1302,6 +1304,12 @@ impl MbTypeBCabacContext {
     pub fn decode(&mut self, dec: &mut CabacDecoder, non_direct_neighbours: usize) -> Option<u32> {
         let first = (non_direct_neighbours).min(2);
         // Transcribed from FFmpeg `decode_cabac_mb_type`, B branch.
+        // SESSION #17 NOTE: an H1 experiment ("single ctxIdx-31 bin selects
+        // B_Bi_16x16 after [1,1]") was tested here and DISPROVEN -- it
+        // regressed every bi-pred clip. The 4-bit extension below starting at
+        // ctx[4]/ctx[5] is the best-known reading; the remaining cabac_b
+        // failures need an authoritative re-check of this tree against the
+        // ffmpeg source (fetch strategy must reach mid-file content).
         if dec.decode_decision(&mut self.ctx[first]) == 0 {
             return Some(0); // B_Direct_16x16
         }
@@ -1309,6 +1317,10 @@ impl MbTypeBCabacContext {
             // B_L0_16x16 / B_L1_16x16
             return Some(1 + dec.decode_decision(&mut self.ctx[5]) as u32);
         }
+        // SESSION #18: V-B variant (all four extension bins at ctxIdx 32) was
+        // tested and ALSO regressed every bi-pred clip. Original reading
+        // (first ext bin at ctx[4], remaining three at ctx[5]) is confirmed
+        // best-known; see todo-h264.md sessions #17/#18.
         let mut bits = ((dec.decode_decision(&mut self.ctx[4]) as u32) << 3)
             | ((dec.decode_decision(&mut self.ctx[5]) as u32) << 2)
             | ((dec.decode_decision(&mut self.ctx[5]) as u32) << 1)

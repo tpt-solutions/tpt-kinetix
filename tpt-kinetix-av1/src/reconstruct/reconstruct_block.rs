@@ -53,7 +53,16 @@ pub(super) fn reconstruct_tx_block(
         if dbg {
             eprintln!("DBG bit_pos before coeffs = {:?}", dec.dbg_bit_pos());
         }
+        // Phase G.0 bridge: capture raw bytes + TxBlockCtx + Kinetix's own
+        // symbol slice for the independent Python oracle
+        // (tools/av1_oracle/diff_block.py) when KINETIX_AV1_CAPTURE names this
+        // block. Recorded *after* read_coeffs so the pre/post bit positions and
+        // the per-block trace slice are both known, which lets the oracle diff
+        // its independent re-decode against Kinetix's symbols for this block.
+        let pre_bit_pos = dec.bit_position();
+        let pre_trace_len = crate::entropy::symbol_trace_len_now();
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+        crate::entropy::maybe_capture_block(dec, blk, ctxs, cdfs, qindex, pre_bit_pos, pre_trace_len);
         if dbg {
             eprintln!(
                 "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant[0..8]={:?}",

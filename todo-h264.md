@@ -1506,3 +1506,151 @@
         NEXT STEPS unchanged: dump ffmpeg MVs for a failing BBi16x16 MB via
            export_mvs to decide between predict_mv_l1 availability rules vs
            bi-average rounding; chase the +/-1 residue.
+
+      - **2026-08-23 session #16 - DECISIVE LOCALISATION: the remaining B gap is
+        CABAC-specific, not in shared MV prediction or MC.** Added CAVLC control
+        variants to dbg_cabac_b.rs: cavlc_p8x8 (same config as the failing
+        c_p8x8) decodes its B frame at max=1/n=25 through our CAVLC path, and
+        cavlc_i16 likewise. Since CAVLC and CABAC share predict_b_slice_mvs /
+        reconstruct_b_frame / motion_comp, the residual BBi16x16/BB8x8 failures
+        under CABAC must originate in CABAC Bi-MB bin parsing: MbTypeBCabacContext
+        tree bins, ref_idx neighbour-ctx derivation (ref_idx_gt0_neighbors with
+        direct/L1-only neighbours), or mvd amvd sums -- NOT in mv.rs/reconstruct.rs.
+        NEXT STEP: BINTRACE the failing MB(3,2)/MB(1,2) of c_p8x8 and replay an
+        ffmpeg-element-walk (crate engine) for exactly those MBs to expose the
+        first divergent bin; then extend the walk to ref_idx/mvd as needed.
+
+      - **2026-08-23 session #17 - H1 mb_type-tree experiment DISPROVEN; b_boxmv
+        identified as NON-DETERMINISTIC (nullsrc background varies per encode);
+        original B tree restored as best-known.**
+        1. Instrumented BBi/BL1 MV derivation prints (cabac_b.rs arm 3, mv.rs
+           BL116x16 + BBi16x16). b_boxmv results vary BETWEEN RUNS because its
+           nullsrc background is random per ffmpeg invocation -- all prior
+           cross-run comparisons on that variant are unreliable. Use c_p8x8 /
+           testsrc for analysis.
+        2. c_p8x8 failing MBs parse as B_Bi_16x16 with mvd=(0,0) both lists,
+           cbp=0x2f, qp=22 -- self-consistent but pixels differ from ffmpeg by
+           ~20-30 with a smooth shift-like pattern.
+        3. H1 tree variant (ctxIdx-31 single bin selecting Bi after [1,1])
+           regressed ALL clips (c_p8x8 row2 60/71/75 -> 128/128/151). REVERTED;
+           the 4-bin extension reading (ctx[4],ctx[5],ctx[5],ctx[5] ->
+           bits<8 => type bits+3) is confirmed better.
+        4. CAUTION recorded: x264 mode decisions DIFFER between cabac=0 and
+           cabac=1 encodes of identical input (rate costs differ), so cavlc_p8x8
+           passing does NOT prove c_p8x8 has identical modes -- it only bounds
+           the shared pipeline. The remaining gap needs an authoritative
+           re-check of MbTypeBCabacContext against real ffmpeg source; the
+           fetch tooling truncates h264_cabac.c at 50k chars and the function
+           sits past that point -- use a ranged fetch or vendored copy next time.
+        State: conformance_matrix GREEN; suite green; remaining known gaps:
+           c_p8x8 row2 (60-75), b_nodirect MB(3,2) (115), b_min +/-1 (21 samples).
+
+      - **2026-08-23 session #18 - V-B tree experiment DISPROVEN; original
+        MbTypeBCabacContext reading re-confirmed as best-known.** Tested the
+        all-bins-at-ctxIdx-32 extension variant: regressed c_p8x8 row2
+        (60/71/75 -> 135/104/162) and every other bi-pred clip. Reverted with a
+        code comment. Two independent structural variants (H1, V-B) now both
+        disproven -- the mb_type TREE is very likely correct, and the remaining
+        cabac_b gap probably lies in what happens AROUND Bi MBs: either the
+        ref_idx/mvd bins for the specific neighbour states of those MBs, or an
+        interplay between cbp/residual and B-slice reconstruction ordering.
+        Also noted: pixel evidence on c_p8x8 MB(3,2) shows ours vs ffmpeg
+        differing by a smooth ~4px horizontal shift-like pattern -- consistent
+        with ONE list using an MV off by ~16 quarter-pel, i.e. possibly a wrong
+        mvd VALUE (not structure) for exactly these MBs, or a predictor
+        difference from neighbour-state divergence earlier in row 2.
+        NEXT STEP: obtain h264_cabac.c content past char 50k (vendored copy,
+        ranged fetch, or GitHub .patch of an old mb_type-touching commit) and
+        diff MbTypeBCabacContext + ref_idx/mvd call order against it line by
+        line; alternatively hand-verify against the ITU spec Table 9-34/9-35.
+
+      - **2026-08-23 session #19 - AUTHORITATIVE SOURCE OBTAINED: ff_h264_cabac.c
+        was already vendored at the repo root (ff_h264_cabac.c /
+        ff_cabac_functions.h, untracked). Line-by-line comparison DONE:**
+        1. MbTypeBCabacContext tree is VERBATIM-CORRECT vs ffmpeg lines
+           1977-1997 ([27+ctx], [27+3], [27+4]<<3|[27+5]<<2|[27+5]<<1|[27+5],
+           bits<8=>+3, 13=intra, 14=>11, 15=>22, else <<1 +bin -4).
+        2. MVD decoding CONFIRMED: ctxbase = (l==0)?40:47 -- component-based,
+           SHARED across lists (session #15 conclusion re-confirmed by source);
+           amvd threshold FFMIN(((amvd+28)*17)>>9,2) == crate <3/<33;
+           sign via get_cabac_bypass_sign(&cabac, -mvd) == crate.
+        3. Element ORDER for 16x16-type inter MBs CONFIRMED:
+           ref(list0,list1) -> mvd(list0,list1) -> cbp(luma,chroma) ->
+           [transform_size_8x8 if dct8x8_allowed && cbp&15 && !intra] ->
+           mb_qp_delta -> residual.
+        CONSEQUENCE: the CABAC parse of c_p8x8 MB(1,2)/MB(3,2) (Bi[0,0]) is
+           CORRECT per ffmpeg semantics; the remaining pixel diffs must come
+           from either (a) nz/cbf NEIGHBOUR-STATE tracking divergence inside the
+           B inter-residual path (decode_inter_residual_cabac grids), or (b)
+           reconstruction-side handling unique to Bi blocks -- despite
+           cavlc_p8x8 passing, since x264 may pick different MVs there.
+        NEXT STEP: instrument nz_grid/cbf-neighbour values for the row-2 MBs of
+           c_p8x8 and verify against a hand ffmpeg-walk of the coded_block_flag
+           reads; alternatively diff our parsed coefficients per block against
+           implied coefficients (ref_pixels - pred) using ffmpeg reference YUV.
+
+      - **2026-08-23 session #20 - DETERMINISTIC REPRO ACHIEVED; parse verified
+        end-to-end against vendored source; suspicion narrowed to neighbour-state
+        CONTEXT INPUTS.**
+        1. dbg_cabac_b.rs now encodes with -threads:v 1 /
+           threads=1:sliced-threads=0:non-deterministic=0. x264 default
+           multithreading made streams vary BETWEEN RUNS -- the root cause of
+           every earlier cross-run inconsistency. c_p8x8 now reproduces its
+           failure EXACTLY (row2: 3,60,71,75) on every run.
+        2. Verified against vendored ff_h264_cabac.c: mvd unary loop bounds,
+           ctx advance, EGk bypass suffix, sign bit -- all identical to crate.
+           dqp mapping (val&1 => +(val+1)>>1 else -((val+1)>>1)) identical.
+        3. KEY EVIDENCE: under our parsed mode Bi[0,0], the implied residual
+           (ref - avg(L0,L1)) for failing MB(3,2) is LARGE and structured
+           (-38..+77 with horizontal gradient) -- implausible as a quantized
+           residual at qp=22. Therefore x264 wrote a DIFFERENT mode/MVs than we
+           decoded, even though the tree logic is verbatim-correct.
+        CONCLUSION: the divergence is almost certainly in the CONTEXT INPUTS
+           derived from neighbouring-macroblock state that feed the tree:
+           non_direct_neighbours (IS_DIRECT of left/top incl. BSkip handling)
+           and/or ref_idx_gt0 / cbf-neighbour grids. A single off-by-one ctx
+           selection early in the slice would re-route bins into plausible-but-
+           wrong elements without tripping end_of_slice checks.
+        NEXT STEP: print per-MB non_direct_neighbours + left/top direct flags
+           for the whole B slice and audit the BSkip/Direct classification
+           against ffmpeg fill_decode_neighbors semantics; then BINTRACE the
+           exact bins of MB(0,2)/MB(1,2) under corrected contexts.
+
+      - **2026-08-23 session #21 - SLICE-QP HYPOTHESIS ELIMINATED; new debug
+        infrastructure in place.** Added KINETIX_DUMP_B_PATH full-payload dump
+        (decoder/mod.rs B path) + tests/dbg_b_qp_sweep.rs which regenerates the
+        deterministic c_p8x8 clip, dumps the exact B CABAC payload + header
+        params (qp=24 idc=0 nl0=1 nl1=1 t8=false, 274 bytes), and sweeps all
+        52 qp values through parse_b_slice_cabac. RESULT: qp=24 is the UNIQUE
+        value reproducing bi16=2 (the two B_Bi_16x16 MBs); every other qp gives
+        bi16=0 (and extreme qps trip eos). Slice QP and context init are
+        CORRECT. Also gated the leftover CBF/mvd/eprintln debug spam behind
+        bin_trace_enabled() so sweeps and traces run fast.
+        STATUS OF ELIMINATED HYPOTHESES FOR THE cabac_b ROW-2 GAP:
+        slice qp X, context init X, mb_type tree X, mvd contexts/bases/sign X,
+        element order X, dqp mapping X, neighbour ndc inputs X, shared MV
+        prediction/MC X (cavlc control). REMAINING candidates: (a) our decoded
+        RESIDUAL COEFFICIENT VALUES differ from x264s despite correct structure
+        (would require an engine-state divergence entering row 2 -- but rows
+        0-1 are clean...), or (b) something in reconstruct_b_inter_lumas
+        Bi combination for exactly these blocks. Suggested next: dump our
+        dequantised residual per 4x4 for MB(1,2)/MB(3,2) and compare against
+        implied residual (ref - avg(L0,L1)) -- if they disagree beyond clipping,
+        the coefficients are misdecoded; if they agree, reconstruction is at
+        fault.
+
+      - **2026-08-23 session #21 addendum - ERROR PROPAGATION PATTERN identified.**
+        Row 2 diffs grow monotonically along the scan (3, 60, 71, 75) and row-1
+        MBs carry small nonzero diffs (0,2,0,1). Since cbf context selection
+        reads the LEFT and TOP neighbours coefficient counts (nz_grid), a single
+        subtly-wrong coefficient or nz value early in the scan poisons the cbf
+        context of every subsequent MB to its right/below -- producing exactly
+        this growth pattern WITHOUT tripping end_of_slice (bin counts stay
+        similar because only ctx INDICES shift, not the element structure).
+        Working hypothesis for the final cabac_b gap: a +/-1-class error in an
+        early row-1/row-2 MBs coefficient decode or nz bookkeeping that then
+        propagates via cbf contexts. The +/-1 residue on b_min (21 samples) is
+        probably THE primary bug, not a separate one.
+        NEXT STEP: locate the FIRST sample-level divergence in scan order (not
+        the largest), dump that MBs parsed coefficients + nz, and compare its
+        cbf/significant-map ctx selection against a hand ffmpeg-walk.

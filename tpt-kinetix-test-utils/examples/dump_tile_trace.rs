@@ -87,14 +87,14 @@ fn dump_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         .iter()
         .map(|e| {
             format!(
-                "[{},{},{},{},\"{}\"]",
+                "[{},{},{},{},{}]",
                 e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, jstr(&e.location.to_string())
             )
         })
         .collect();
     let markers_json: Vec<String> = markers
         .iter()
-        .map(|m| format!("[{},\"{}\"]", m.trace_seq, m.label.replace('"', "'")))
+        .map(|m|             format!("[{},{}]", m.trace_seq, jstr(&m.label)))
         .collect();
 
     let seg_feature_skip = fh.seg_feature_enabled.first().copied().unwrap_or(false);

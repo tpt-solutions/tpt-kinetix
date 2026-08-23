@@ -1612,3 +1612,74 @@
 > `tpt-kinetix-test-utils/examples/av1_symbol_trace_diff.rs` (new), `justfile`
 > (`av1-trace-diff` recipe). No `git commit` calls were made.
 
+> **2026-08-23 session note (AV1 Phase G.0 item 1: the independent coeff-oracle
+> bridge is built and working).** Picked up the explicit next step from the
+> 2026-08-20 session handoff: "build the Part 1 oracle for real — extract real
+> tile bytes + the exact `TxBlockCtx`/CDF state at a specific block via the
+> symbol-trace/block-marker infrastructure, and diff against Kinetix's own
+> `coeffs()` output at that exact block." Delivered the bridge end-to-end:
+>
+> - **`entropy.rs::maybe_capture_block`** (new): when `KINETIX_AV1_CAPTURE`
+>   names a `(plane, px_x, px_y)` block, the decoder writes `av1_capture.json`
+>   *after* the block's `read_coeffs()` returns, containing (a) the raw tile
+>   bytes from that block's `coeffs()` bit offset to end of tile, (b) the full
+>   `TxBlockCtx` (flattened, field names matching the oracle's `read_coeffs`
+>   kwargs), (c) Kinetix's own symbol-trace slice for *just this block's*
+>   `coeffs()` (`reference_values`), and (d) the block's neighbour
+>   level/dc context (`ctx.above_level/above_dc/left_level/left_dc`) cloned
+>   via a new `CoeffContexts::ctx_snapshot`. Setting `KINETIX_AV1_CAPTURE`
+>   auto-enables the symbol trace so the per-block slice is populated. A new
+>   `SymbolDecoder::bit_position()` accessor supports the capture.
+> - **`tools/av1_oracle/diff_block.py`** extended to accept the capture format:
+>   it re-seeds its `CoeffContexts` neighbour state from the captured `ctx` (new
+>   `_seed_ctx` helper) and then independently re-decodes the block, diffing its
+>   symbol sequence against the embedded `reference_values` — reporting the
+>   exact `(symbol index, oracle value, Kinetix value, bit position)` of the
+>   first divergence. (The old multi-`blocks` spec form still works.)
+> - **`justfile::av1-capture BLOCK ENTRY`** recipe runs the differential harness
+>   with `KINETIX_AV1_CAPTURE` set, then feeds the resulting `av1_capture.json`
+>   to `diff_block.py`. `.gitignore` now excludes `av1_capture.json`.
+>
+> **Validated the bridge on the standing `mandelbrot` divergence:** `just
+> av1-trace-diff mandelbrot` points at block `plane=0 px=(64,0) tx=16x4
+> pred_mode=2` (NOFILTER first-div), and `av1-capture 0:64:0 mandelbrot`
+> produces a clean, machine-readable result:
+> ```
+> --- block 0 plane=0 tx=14 mi=(16,0) eob=3 tx_type=1
+>     nonzero (2): [(0, -1), (1, -1)]
+>     DIVERGENCE at symbol 1: oracle=5 reference=3 (bit 16)
+> ```
+> i.e. the very first coefficient symbol *after* `txb_skip` (symbol 0, both 0)
+> already decodes differently: the oracle reads `5`, Kinetix read `3`, at
+> bit 16. This is a precise, reproducible pin on the desync — exactly the
+> "independent re-decode of one block" the 2026-08-20 handoff asked for, and
+> far cheaper to act on than a whole-frame PSNR number.
+>
+> **Documented limitation (and the natural next step):** the oracle re-seeds
+> neighbour level/dc context from the capture but uses *fresh* (base_q-seeded)
+> CDF tables — it does **not** replay mid-tile CDF adaptation, so a divergence
+> whose *only* cause is Kinetix's adapted CDF state at this block is not yet
+> separated out. Every divergence attributable to a wrong context derivation or
+> a numerically-wrong default-CDF *table value* still surfaces here (the
+> dominant open hypothesis for the corpus's non-pixel-exactness per the
+> 2026-08-19 session), but separating "real bug" from "CDF-adaptation artifact"
+> requires capturing the adapted `TileCdfs` too — a known, scoped future
+> extension (the `TileCdfs` arrays are enumerable; serializing them into the
+> capture is mechanical). The symbol-1 divergence above is most likely in that
+> "real bug / wrong table value" class (transform-type or coeff_base context),
+> not mere adaptation, because `txb_skip` (symbol 0) matched exactly, which an
+> adapted-CDF-only divergence would not necessarily do — worth confirming by
+> extending the capture with the adapted CDF set and re-running.
+>
+> `cargo clippy -p tpt-kinetix-av1 --lib -- -D warnings` is clean; `cargo test
+> -p tpt-kinetix-av1 --lib` is green (90/90, unchanged — the new code is
+> debug-only capture plumbing gated on an env var, not on any decode path
+> exercised by the unit tests). `capabilities().pixel_exact` still `false`.
+> Uncommitted files this session: `tpt-kinetix-av1/src/entropy.rs` (capture
+> bridge + `bit_position`), `tpt-kinetix-av1/src/coeff.rs`
+> (`CoeffContexts::ctx_snapshot` + `CoeffCtxSnapshot`),
+> `tpt-kinetix-av1/src/reconstruct/reconstruct_block.rs` (capture call site),
+> `tools/av1_oracle/diff_block.py` (capture-format + `_seed_ctx`),
+> `justfile` (`av1-capture`), `.gitignore` (`av1_capture.json`). No `git commit`
+> calls were made.
+

@@ -1097,6 +1097,12 @@ pub(crate) fn predict_inter_b_macroblock(
                 store, cur, mb_idx, mb_width, 0, 16, 16, ref_idx_l1, slice_id,
             );
             let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
+            if crate::entropy::bin_trace_enabled() {
+                eprintln!(
+                    "  BL1MV(mb{mb_idx}) ri1={ref_idx_l1} pred1=({},{})+({},{}) -> mv1={mv_l1:?}",
+                    pred_l1[0], pred_l1[1], mvd_l1.0, mvd_l1.1
+                );
+            }
             commit_rect(cur, 0, 0, 16, 16, [0, 0], LIST_NOT_USED, mv_l1, ref_idx_l1);
             Ok(())
         }
@@ -1118,6 +1124,19 @@ pub(crate) fn predict_inter_b_macroblock(
             );
             let mv = [pred[0] + mvd_l0.0, pred[1] + mvd_l0.1];
             let mv_l1 = [pred_l1[0] + mvd_l1.0, pred_l1[1] + mvd_l1.1];
+            if crate::entropy::bin_trace_enabled() {
+                eprintln!(
+                    "  BBiMV({mb_idx}) pred0=({},{})+({},{}) -> mv0={mv:?}  pred1=({},{})+({},{}) -> mv1={mv_l1:?}",
+                    pred[0],
+                    pred[1],
+                    mvd_l0.0,
+                    mvd_l0.1,
+                    pred_l1[0],
+                    pred_l1[1],
+                    mvd_l1.0,
+                    mvd_l1.1
+                );
+            }
             commit_rect(cur, 0, 0, 16, 16, mv, ref_idx, mv_l1, ref_idx_l1);
             Ok(())
         }

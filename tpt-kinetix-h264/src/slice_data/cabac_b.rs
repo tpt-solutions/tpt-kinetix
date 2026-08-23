@@ -817,6 +817,9 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             motion.mvd_l1.push((mx1, my1));
             this_inter.set_partition_l1(&blks, mx1, my1, ri1 as i32);
+            eprintln!(
+                "  BBi({mb_x},{mb_y}) ri0={ri0} ri1={ri1} mvd0=({mx0},{my0}) mvd1=({mx1},{my1})"
+            );
             mb.motion = Some(motion);
         }
         4..=21 => {

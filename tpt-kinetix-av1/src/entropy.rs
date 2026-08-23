@@ -95,6 +95,22 @@ pub fn take_symbol_trace() -> Vec<SymbolTraceEntry> {
     SYMBOL_TRACE.with(|t| t.borrow_mut().take().unwrap_or_default())
 }
 
+/// Non-consuming copy of the current trace values (decoded symbol indices),
+/// for embedding into a block capture so the oracle can diff its own
+/// independent re-decode against them.
+pub fn symbol_trace_values() -> Vec<usize> {
+    SYMBOL_TRACE.with(|t| {
+        t.borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |v| v.iter().map(|e| e.value).collect())
+    })
+}
+
+/// Length of the active trace (used to slice the per-block symbol range).
+pub fn symbol_trace_len_now() -> usize {
+    symbol_trace_len()
+}
+
 fn push_symbol_trace(entry_fn: impl FnOnce(usize) -> SymbolTraceEntry) {
     SYMBOL_TRACE.with(|t| {
         if let Some(v) = t.borrow_mut().as_mut() {
@@ -144,6 +160,188 @@ pub fn mark_block(label: impl FnOnce() -> String) {
             label: label(),
         });
     });
+}
+
+/// One block's byte-level capture, for the independent Python oracle
+/// (`tools/av1_oracle/diff_block.py`). When `KINETIX_AV1_CAPTURE` names a
+/// `(plane, px_x, px_y)` block, the decoder writes a JSON file to
+/// `av1_capture.json` capturing that block's raw tile bytes (starting at the
+/// exact bit offset where its `coeffs()` begins), its `TxBlockCtx`, and — most
+/// importantly — the slice of Kinetix's own symbol-trace values for *this
+/// block's* `coeffs()` read, so the oracle can independently re-decode the same
+/// bytes and diff symbol-by-symbol.
+///
+/// Call this **after** `read_coeffs` for the block, passing `pre_bit_pos`
+/// (the decoder's `bit_pos` immediately before the call) and
+/// `pre_trace_len` (the trace length before the call); this lets the function
+/// capture both the byte range and the per-block symbol slice.
+///
+/// This is the bridge spelled out as todo-av1.md Phase G.0's next step (1):
+/// "extract real tile bytes + the exact `TxBlockCtx`/CDF state at a specific
+/// block via the new symbol-trace/block-marker infrastructure".
+///
+/// We hand-roll JSON (rather than pull in `serde`) because this is a
+/// debug-only capture path and the crate doesn't otherwise depend on `serde`.
+pub fn maybe_capture_block(
+    dec: &SymbolDecoder,
+    blk: &crate::coeff::TxBlockCtx,
+    ctxs: &crate::coeff::CoeffContexts,
+    cdfs: &crate::coeff::TileCdfs,
+    base_q_idx: u8,
+    pre_bit_pos: usize,
+    pre_trace_len: usize,
+) -> bool {
+    let (plane, px_x, px_y) = match capture_target() {
+        Some(t) => t,
+        None => return false,
+    };
+    // Match on `blk.plane` plus the transform block's pixel origin derived
+    // from `x4`/`y4` (units of 4 samples).
+    let origin_x = blk.x4 * 4;
+    let origin_y = blk.y4 * 4;
+    if plane != blk.plane || px_x != origin_x || px_y != origin_y {
+        return false;
+    }
+    let byte_off = pre_bit_pos / 8;
+    let data_hex = if byte_off < dec.data.len() {
+        hex_encode(&dec.data[byte_off..])
+    } else {
+        String::new()
+    };
+    // Slice Kinetix's own trace to this block's coeffs() symbol range.
+    let all_vals = symbol_trace_values();
+    let ref_vals: Vec<usize> = all_vals
+        .into_iter()
+        .skip(pre_trace_len)
+        .collect();
+    let ref_json = ref_vals
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    // Neighbour level/dc context (needed for the oracle to start from the
+    // same state Kinetix had at this block — otherwise contexts derived from
+    // above_level/left_level diverge immediately).
+    let snap = ctxs.ctx_snapshot(blk.plane);
+    let fmt_vec = |v: &[u8]| {
+        v.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let above_level = fmt_vec(&snap.above_level);
+    let above_dc = fmt_vec(&snap.above_dc);
+    let left_level = fmt_vec(&snap.left_level);
+    let left_dc = fmt_vec(&snap.left_dc);
+    // Adapted (mid-tile) CDF tables, so the oracle replays Kinetix's exact
+    // state at this block — removing the last confound (CDF adaptation) from
+    // the symbol diff.
+    let cdf = cdfs.cdf_snapshot();
+    let cdfs_json = format!(
+        "{{\n    \
+         \"txb_skip\": {},\n    \"eob_pt_16\": {},\n    \"eob_pt_32\": {},\n    \
+         \"eob_pt_64\": {},\n    \"eob_pt_128\": {},\n    \"eob_pt_256\": {},\n    \
+         \"eob_pt_512\": {},\n    \"eob_pt_1024\": {},\n    \"eob_extra\": {},\n    \
+         \"coeff_base_eob\": {},\n    \"coeff_base\": {},\n    \"coeff_br\": {},\n    \
+         \"dc_sign\": {},\n    \"intra_tx_type_set1\": {},\n    \"intra_tx_type_set2\": {}\n  }}",
+        json_nest3_u16(&cdf.txb_skip),
+        json_nest3_u16(&cdf.eob_pt_16),
+        json_nest3_u16(&cdf.eob_pt_32),
+        json_nest3_u16(&cdf.eob_pt_64),
+        json_nest3_u16(&cdf.eob_pt_128),
+        json_nest3_u16(&cdf.eob_pt_256),
+        json_nest2_u16(&cdf.eob_pt_512),
+        json_nest2_u16(&cdf.eob_pt_1024),
+        json_nest4_u16(&cdf.eob_extra),
+        json_nest4_u16(&cdf.coeff_base_eob),
+        json_nest4_u16(&cdf.coeff_base),
+        json_nest4_u16(&cdf.coeff_br),
+        json_nest3_u16(&cdf.dc_sign),
+        json_nest3_u16(&cdf.intra_tx_type_set1),
+        json_nest3_u16(&cdf.intra_tx_type_set2),
+    );
+    let json = format!(
+        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": 0,\n  \
+         \"base_q_idx\": {base_q_idx},\n  \"reference_values\": [{ref_json}],\n  \
+         \"ctx\": {{\n    \"above_level\": [{above_level}],\n    \
+         \"above_dc\": [{above_dc}],\n    \"left_level\": [{left_level}],\n    \
+         \"left_dc\": [{left_dc}]\n  }},\n  \
+         \"cdfs\": {cdfs_json},\n  \
+         \"blk\": {{\n    \"plane\": {},\n    \
+         \"tx_size\": {},\n    \"x4\": {},\n    \"y4\": {},\n    \"max_x4\": {},\n    \
+         \"max_y4\": {},\n    \"block_w\": {},\n    \"block_h\": {},\n    \
+         \"intra_dir\": {},\n    \"uv_mode\": {},\n    \"qindex_positive\": {},\n    \
+         \"reduced_tx_set\": {},\n    \"lossless\": {}\n  }}\n}}\n",
+        blk.plane,
+        blk.tx_size,
+        blk.x4,
+        blk.y4,
+        blk.max_x4,
+        blk.max_y4,
+        blk.block_w,
+        blk.block_h,
+        blk.intra_dir,
+        blk.uv_mode,
+        blk.qindex_positive,
+        blk.reduced_tx_set,
+        blk.lossless,
+    );
+    let _ = std::fs::write("av1_capture.json", json);
+    true
+}
+
+fn capture_target() -> Option<(usize, usize, usize)> {
+    let spec = std::env::var("KINETIX_AV1_CAPTURE").ok()?;
+    // Capturing a block implies we want a symbol trace so the per-block symbol
+    // slice can be embedded for the oracle diff.
+    if !symbol_trace_enabled() {
+        enable_symbol_trace();
+    }
+    let mut parts = spec.split(':');
+    let plane = parts.next()?.parse().ok()?;
+    let px_x = parts.next()?.parse().ok()?;
+    let px_y = parts.next()?.parse().ok()?;
+    Some((plane, px_x, px_y))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Serialize a nested `Vec<Vec<u16>>` to compact JSON for the block capture
+/// (used for the adapted-CDF snapshot so the oracle can replay Kinetix's
+/// exact mid-tile CDF tables).
+fn json_nest_u16(v: &[Vec<u16>]) -> String {
+    let rows: Vec<String> = v
+        .iter()
+        .map(|r| {
+            let inner: Vec<String> = r.iter().map(|x| x.to_string()).collect();
+            format!("[{}]", inner.join(","))
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
+/// Serialize a 2-deep `Vec<Vec<u16>>` (eob_pt_512/eob_pt_1024) to compact JSON.
+fn json_nest2_u16(v: &[Vec<u16>]) -> String {
+    json_nest_u16(v)
+}
+
+/// Serialize a 3-deep `Vec<Vec<Vec<u16>>>` to compact JSON.
+fn json_nest3_u16(v: &[Vec<Vec<u16>>]) -> String {
+    let l: Vec<String> = v.iter().map(json_nest_u16).collect();
+    format!("[{}]", l.join(","))
+}
+
+/// Serialize a 4-deep `Vec<Vec<Vec<Vec<u16>>>>` (coeff_base/coeff_br/eob_extra)
+/// to compact JSON.
+fn json_nest4_u16(v: &[Vec<Vec<Vec<u16>>]) -> String {
+    let l: Vec<String> = v.iter().map(json_nest3_u16).collect();
+    format!("[{}]", l.join(","))
 }
 
 /// Take (and clear) the accumulated block markers for the current thread.
@@ -222,6 +420,14 @@ impl<'a> SymbolDecoder<'a> {
     /// specific block. Not spec-normative; delete once root-caused.
     pub fn dbg_bit_pos(&self) -> (usize, i64, usize) {
         (self.bit_pos, self.symbol_max_bits, self.data.len() * 8)
+    }
+
+    /// Current read position in bits into the tile data buffer. Used by the
+    /// Phase G.0 block-capture bridge to record the exact byte/bit offset a
+    /// block's `coeffs()` begins at, so the independent oracle can re-seek
+    /// there. (Not spec-normative.)
+    pub fn bit_position(&self) -> usize {
+        self.bit_pos
     }
 
     /// Raw bitstream bit read, MSB-first, byte-aligned start. Returns 0 for

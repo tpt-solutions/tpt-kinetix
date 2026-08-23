@@ -684,7 +684,6 @@ pub const MVD_X_CTX: usize = 40;
 /// `decode_cabac_mb_mvd(sl, 47, ...)` in the same macro as [`MVD_X_CTX`].
 pub const MVD_Y_CTX: usize = 47;
 
-
 /// `ref_idx_l0`/`ref_idx_l1`, ctxIdx 54..=59 (Table 9-11, ctxIdxOffset 54).
 /// Confirmed directly from `decode_cabac_mb_ref`'s `cabac_state[54+ctx]`:
 /// `ctx` 0..=3 from left/top neighbour ref indices/direct-mode flags (ctxIdx

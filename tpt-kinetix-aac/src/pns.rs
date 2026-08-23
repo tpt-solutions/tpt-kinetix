@@ -52,15 +52,35 @@ pub fn apply_pns(
                 let sf = scalefactor.get(idx).copied().unwrap_or(0);
                 let scale = dequant_scale(global_gain, sf);
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
-                let mut state = (idx as u32).wrapping_mul(40_503).wrapping_add(1);
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
+                    if base + width > coeffs.len() {
+                        continue;
+                    }
+                    // Generate the raw pseudo-random noise for this band/window,
+                    // then normalize its energy to `scale²` so the substituted
+                    // noise has the same energy as the original (dequantized)
+                    // coefficients it replaces (ISO 14496-3 §4.6.13.3). This
+                    // matches the reference decoder, which computes
+                    // `band_energy = Σ r[k]²` over the band and scales by
+                    // `scale / sqrt(band_energy)`. Without this, a band's
+                    // energy would be `scale² · width / 3` (uniform[-1,1] has
+                    // variance 1/3) instead of `scale²`, so wide high-frequency
+                    // PNS bands would come out far too quiet.
+                    let mut state = (idx as u32).wrapping_mul(40_503).wrapping_add(1);
+                    let mut energy = 0.0f32;
                     for line in 0..width {
-                        if base + line >= coeffs.len() {
-                            break;
-                        }
                         let r = (lcg(&mut state) as f32 / u32::MAX as f32) * 2.0 - 1.0;
-                        coeffs[base + line] = scale * r;
+                        coeffs[base + line] = r;
+                        energy += r * r;
+                    }
+                    let norm = if energy > 0.0 {
+                        scale / energy.sqrt()
+                    } else {
+                        0.0
+                    };
+                    for line in 0..width {
+                        coeffs[base + line] *= norm;
                     }
                 }
             }
