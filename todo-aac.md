@@ -329,7 +329,120 @@
       now has a tighter, accurate skip guard (`max_diff >= 0.05`) instead of
       the earlier `> 10.0` placeholder from when the decoder produced
       astronomically wrong output.
-- [x] Phase 7 — Remove `symphonia-codec-aac`/`symphonia-core` from
+      **Updated 2026-08-23 (later session): real root cause of the amplitude
+      mismatch found — it was never a pure amplitude-scale bug, it was a
+      frequency-doubling bug in the IMDCT, confounding every amplitude-only
+      diagnostic done previously.** Per the task brief for this session, the
+      first step was to stop trusting per-frame max-abs (amplitude only) and
+      check the *shape*/frequency of the reconstructed signal independently.
+      Cross-correlating native vs `ffmpeg`-reference channel-0 PCM (a real
+      440 Hz test tone, steady-state frames only) found essentially **zero**
+      correlation at any lag (Pearson-normalized peak ~0.0000058 over a
+      ±2000-sample search) — the two signals weren't phase-shifted versions
+      of the same waveform, they were *different waveforms entirely*. A
+      naive-DFT dominant-frequency probe confirmed it: native's reconstructed
+      channel-0 output peaked at **882 Hz**, almost exactly double the real
+      440 Hz the reference decoder produced. Instrumenting
+      `decode_spectral_data`'s output (temporary `AAC_DBG_BINS` env-var
+      tracing in `decoder.rs`, since removed) showed the Huffman-decoded
+      spectral energy itself sits at bin k≈19-22 (`band_type` all regular
+      ESC-codebook bands, not intensity/noise) — i.e. **spectral decode was
+      already placing energy at the correct bin**; the bug was downstream, in
+      how `mdct.rs`'s `Imdct` turns bin `k` into a physical frequency.
+      Root cause (`tpt-kinetix-aac/src/mdct.rs`): the table-building formula
+      used `cos( (π/(2n)) · (2·nn+1+n/2) · (2k+1) )`, citing "ISO 13818-7
+      §3.A.4" in a comment. That citation is real, but the formula's `N` is
+      the standard MDCT-literature's *full transform length* (`N = 2n`, not
+      `n`, the spectral-coefficient count this module's `n` variable holds) —
+      conflating the two gave a per-sample phase rate exactly 2x too fast,
+      so every reconstructed frequency came out 2x too high (bin k → physical
+      frequency `fs·(2k+1)/(2n)` instead of the correct `fs·(k+0.5)/(2n)`).
+      Verified independently three ways before/after the fix, not just
+      "matches ffmpeg better": (1) algebraic re-derivation from the standard
+      oddly-stacked-IMDCT formula (`y[i] = (2/N)Σ X[k]cos((2π/N)(i+n0)(k+½))`,
+      `N` = full length, `n0 = (N/2+1)/2`), substituting `N=2n` and comparing
+      the `nn`-coefficient term-by-term against the old code's — confirmed
+      exactly 2x; (2) a synthetic single-bin-impulse probe test (`Imdct::new`
+      fed a unit spectrum at various `k`, dominant output frequency found by
+      the same naive-DFT search) — before the fix, `k=20` produced 883 Hz;
+      after, 441 Hz, matching the real 440 Hz test tone to within the probe's
+      2 Hz search resolution; (3) end-to-end conformance re-run: Pearson
+      cross-correlation between native and reference channel-0 PCM jumped
+      from ~0.0000058 to ~0.75 (clearly the same signal now, not noise).
+      Fix: changed the table-build coefficient from `π/(2n)` to `π/(4n)` and
+      the offset term from `(2·nn+1+n/2)` to `(2·nn+n+1)` (both required —
+      the phase-rate coefficient *and* the offset term were each off, per the
+      full re-derivation; halving the coefficient alone without correcting
+      the offset would have fixed frequency but left the phase/TDAC-relevant
+      constant wrong). `mdct.rs`'s module doc comment and the
+      `imdct_basis_vector_is_cosine` unit test (previously asserting the
+      *old*, wrong formula bit-for-bit, so it had to be updated in lockstep)
+      now both reflect the corrected formula; the `1/n` amplitude
+      normalization (`inv_n`) was untouched since `2/N_full = 2/(2n) = 1/n`
+      already matched the correct formula — this also explains why an
+      earlier session's "IMDCT `1/N`→`2/N`" experiment (using `n` where the
+      literature's `N` actually meant `2n`) made things worse: it was
+      applying the *same* `N`-convention confusion to the amplitude term that
+      this session found and fixed in the phase term.
+      **A second, independent bug was found and fixed the same session, in
+      M/S stereo** (`tpt-kinetix-aac/src/stereo.rs`): with the IMDCT fixed,
+      re-ran the amplitude comparison and it was still off (~1.6-1.8x), so
+      this session re-verified the M/S formula against the actual ISO
+      14496-3 spec PDF text (downloaded fresh via `WebFetch` +
+      `pdftotext -layout`, not recollection — same method prior sessions
+      used successfully). §4.6.8.1.3's decode pseudocode is unambiguous:
+      `tmp = l - r; l = l + r; r = tmp;` — **unscaled**, no `0.5` and no
+      `1/√2` anywhere. `stereo.rs` had been using an empirically-tuned `0.5`
+      factor (`(l+r)*0.5`/`(l-r)*0.5`) that predates this session and was
+      presumably tuned against the *old, frequency-doubled* IMDCT output —
+      a classic two-wrongs-partially-cancel situation. Removed the `0.5`;
+      the four `stereo.rs` unit tests that hard-coded 0.5-scaled expected
+      values (`ms_stereo_reconstructs_left_right`,
+      `ms_stereo_per_band_mask`) were updated to the unscaled formula's
+      values and now doc-cite §4.6.8.1.3. (Note: a `1/√2`-scaled variant was
+      tried in between and produced an even closer per-frame amplitude match
+      empirically, but was deliberately **not** kept — it has no basis in
+      the spec text, which is unambiguous and unscaled, and the improvement
+      it gave was almost certainly compensating for the same remaining
+      amplitude gap described below rather than fixing a real `1/√2` bug;
+      recorded here so nobody re-tries it as a "fix" without first finding
+      what it would actually be compensating for.)
+      **Net result:** `cargo test -p tpt-kinetix-aac --lib` — all 60 tests
+      still pass (two updated: `imdct_basis_vector_is_cosine`,
+      `ms_stereo_*`). `cargo test -p tpt-kinetix-aac --test conformance_aac
+      -- --nocapture`: native's dominant reconstructed frequency now matches
+      the reference (~436-441 Hz vs 440 Hz, small residual attributable to
+      the crude 2 Hz-step DFT probe's resolution and normal spectral
+      leakage across adjacent bins, not a known bug); Pearson cross-
+      correlation between native and reference channel-0 PCM is ~0.75 (up
+      from ~0.0000058 — this is the real signal now, not noise); a
+      least-squares amplitude-scale fit at the best-correlated lag is ~0.91
+      (native ~10% smaller than reference) — much closer than the ~1.6-1.8x
+      gap this session started with, though per-frame max-abs still shows
+      native running ~1.3-1.5x *larger* than reference's ~0.089 (this
+      discrepancy between the two amplitude metrics is itself a loose end —
+      likely extra broadband/high-frequency energy in native's output
+      inflating the raw sample peak without proportionally raising the
+      correlated-with-reference fundamental, e.g. residual TNS/PNS/
+      intensity-stereo inaccuracy — not yet root-caused). The test's own
+      `max_diff` gate (whole-frame, not sample-level, alignment search) is
+      still `0.114`, still above the `0.05` skip threshold, so the guard
+      still triggers the skip branch rather than the real assertion — Phase
+      6 remains open, but the confounding frequency-doubling bug that made
+      every prior amplitude-only diagnostic unreliable is gone. **Next steps
+      for whoever continues:** (a) `best_aligned_max_diff` in
+      `tests/conformance_aac.rs` only searches whole-1024-sample-frame
+      offsets; real AAC encoder priming delay is typically *not* a multiple
+      of 1024 (commonly ~2112 samples for LC), so even a bit-exact decoder
+      would show residual sub-frame misalignment this metric can't
+      compensate for — extend it to search sample-level offsets before
+      concluding any further gap is a real bug; (b) root-cause the
+      max-abs-vs-correlation discrepancy noted above (dump per-band energy
+      for a steady frame and compare against what the reference decoder's
+      own spectrum would imply, the same instrumentation technique this
+      session used for the frequency bug); (c) TNS, PNS, and intensity
+      stereo have not been re-verified against the spec PDF text since the
+      IMDCT fix — worth a pass now that the confounding phase bug is gone. — Remove `symphonia-codec-aac`/`symphonia-core` from
       `tpt-kinetix-aac/Cargo.toml` and root `Cargo.toml`; update
       `docs/codec-evaluations/aac.md`, both READMEs' status tables, and
       module doc comments (drop "delegated to symphonia-codec-aac" language).

@@ -148,14 +148,14 @@ mod tests {
             &swb,
         );
 
-        // Band 0: M = (L+R)/2 = 2, S = (L-R)/2 = -1.
+        // Band 0 (spec §4.6.8.1.3, unscaled): new_L = L+R = 4, new_R = L-R = -2.
         for i in 0..64 {
-            assert!((left[i] - 2.0).abs() < 1e-6, "L={} at {i}", left[i]);
-            assert!((right[i] - (-1.0)).abs() < 1e-6, "R={} at {i}", right[i]);
+            assert!((left[i] - 4.0).abs() < 1e-6, "L={} at {i}", left[i]);
+            assert!((right[i] - (-2.0)).abs() < 1e-6, "R={} at {i}", right[i]);
         }
-        // Band 1: M/S applied here too (mask present == 2), so (7+7)/2=7, (7-7)/2=0.
+        // Band 1: M/S applied here too (mask present == 2), so 7+7=14, 7-7=0.
         for i in 64..128 {
-            assert!((left[i] - 7.0).abs() < 1e-6, "L band1={} at {i}", left[i]);
+            assert!((left[i] - 14.0).abs() < 1e-6, "L band1={} at {i}", left[i]);
             assert!((right[i] - 0.0).abs() < 1e-6, "R band1={} at {i}", right[i]);
         }
     }
@@ -195,10 +195,10 @@ mod tests {
             assert!((left[i] - 2.0).abs() < 1e-6);
             assert!((right[i] - 4.0).abs() < 1e-6);
         }
-        // Band 1 M/S: (1+5)/2=3, (1-5)/2=-2.
+        // Band 1 M/S (unscaled): 1+5=6, 1-5=-4.
         for i in 64..128 {
-            assert!((left[i] - 3.0).abs() < 1e-6);
-            assert!((right[i] - (-2.0)).abs() < 1e-6);
+            assert!((left[i] - 6.0).abs() < 1e-6);
+            assert!((right[i] - (-4.0)).abs() < 1e-6);
         }
     }
 

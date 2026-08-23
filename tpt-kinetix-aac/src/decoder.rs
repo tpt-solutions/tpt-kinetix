@@ -268,14 +268,6 @@ impl AacDecoder {
         // TODO: Implement full CCE coupling logic.
 
         // --- Pass 3: Apply stereo (M/S, intensity) for CPEs ---
-        if std::env::var("AAC_DBG_MS").is_ok() {
-            for cpe in &decoded_cpes {
-                eprintln!(
-                    "DBG ms_mask_present={} ms_mask={:?}",
-                    cpe.ms_mask_present, cpe.ms_mask
-                );
-            }
-        }
         for cpe in &decoded_cpes {
             // Find the indices in decoded_channels (they're consecutive).
             // The cpe_pair field points to them.

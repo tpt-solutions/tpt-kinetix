@@ -608,10 +608,11 @@ pub struct PbCabacSliceContexts {
     pub sub_mb_p: crate::entropy::SubMbTypePCabacContext,
     pub sub_mb_b: crate::entropy::SubMbTypeBCabacContext,
     pub ref_idx: crate::entropy::RefIdxCabacContext,
+    /// `mvd_l0`/`mvd_l1` share ONE pair of context variables per component:
+    /// FFmpeg's `DECODE_CABAC_MB_MVD` passes ctxbase 40 (x) / 47 (y) with no
+    /// list parameter, so both lists evolve the same context state.
     pub mvd_l0_x: crate::entropy::MvdCabacContext,
     pub mvd_l0_y: crate::entropy::MvdCabacContext,
-    pub mvd_l1_x: crate::entropy::MvdCabacContext,
-    pub mvd_l1_y: crate::entropy::MvdCabacContext,
     // ---- shared with I-slice (PB-init variants) ----
     pub cbp: crate::entropy::CbpCabacContext,
     pub qp_delta: crate::entropy::MbQpDeltaCabacContext,
@@ -639,8 +640,6 @@ impl PbCabacSliceContexts {
             ref_idx: crate::entropy::RefIdxCabacContext::new(slice_qp_y, cabac_init_idc),
             mvd_l0_x: crate::entropy::MvdCabacContext::new(MVD_X_CTX, slice_qp_y, cabac_init_idc),
             mvd_l0_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
-            mvd_l1_x: crate::entropy::MvdCabacContext::new(MVD_X_CTX, slice_qp_y, cabac_init_idc),
-            mvd_l1_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
             cbp: crate::entropy::CbpCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             qp_delta: crate::entropy::MbQpDeltaCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(
@@ -676,8 +675,6 @@ impl PbCabacSliceContexts {
             ref_idx: crate::entropy::RefIdxCabacContext::new(slice_qp_y, cabac_init_idc),
             mvd_l0_x: crate::entropy::MvdCabacContext::new(MVD_X_CTX, slice_qp_y, cabac_init_idc),
             mvd_l0_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
-            mvd_l1_x: crate::entropy::MvdCabacContext::new(MVD_X_CTX, slice_qp_y, cabac_init_idc),
-            mvd_l1_y: crate::entropy::MvdCabacContext::new(MVD_Y_CTX, slice_qp_y, cabac_init_idc),
             cbp: crate::entropy::CbpCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             qp_delta: crate::entropy::MbQpDeltaCabacContext::new_pb(slice_qp_y, cabac_init_idc),
             chroma_pred: crate::entropy::IntraChromaPredModeCabacContext::new_pb(
@@ -696,6 +693,44 @@ impl PbCabacSliceContexts {
             ),
         }
     }
+
+    /// Propagate the adaptation of the **physically shared** P-slice ctxIdx-17
+    /// context variable from [`MbTypePCabacContext`] (which just used it as
+    /// the "16x8-vs-8x16" partition bit) to [`IntraMbTypeSuffixCabacContext`]
+    /// (whose bin 0 is the SAME variable in FFmpeg's single flat
+    /// `cabac_state[]` array). Must be called after every
+    /// `mb_type_p.decode()`; the reverse call
+    /// [`Self::sync_shared_mb_type_ctx_suffix_to_prefix_p`] must follow every
+    /// `intra_suffix.decode()` on the P path.
+    pub(crate) fn sync_shared_mb_type_ctx_prefix_to_suffix_p(&mut self) {
+        let v = self.mb_type_p.shared_ctx();
+        self.intra_suffix.set_shared_ctx(v);
+    }
+
+    /// Reverse direction of
+    /// [`Self::sync_shared_mb_type_ctx_prefix_to_suffix_p`] (after an
+    /// intra-in-P suffix decode).
+    pub(crate) fn sync_shared_mb_type_ctx_suffix_to_prefix_p(&mut self) {
+        let v = self.intra_suffix.shared_ctx();
+        self.mb_type_p.set_shared_ctx(v);
+    }
+
+    /// Same sharing for the B path: ctxIdx 32 lives in
+    /// [`MbTypeBCabacContext`]'s final inter/intra gate AND
+    /// [`IntraMbTypeSuffixCabacContext`]'s bin 0.
+    pub(crate) fn sync_shared_mb_type_ctx_prefix_to_suffix_b(&mut self) {
+        let v = self.mb_type_b.shared_ctx();
+        self.intra_suffix.set_shared_ctx(v);
+    }
+
+    /// Reverse direction of
+    /// [`Self::sync_shared_mb_type_ctx_prefix_to_suffix_b`] (after an
+    /// intra-in-B suffix decode).
+    pub(crate) fn sync_shared_mb_type_ctx_suffix_to_prefix_b(&mut self) {
+        let v = self.intra_suffix.shared_ctx();
+        self.mb_type_b.set_shared_ctx(v);
+    }
+
 }
 
 /// Decode one MVD component via CABAC and record it in `inter_ctx`.

@@ -74,23 +74,92 @@ fn decode_native(adts: &[u8]) -> Vec<AudioFrame> {
     out
 }
 
-/// Best-align `native` against `reference` over a small window of frame offsets
-/// (AAC encoders insert a priming delay, so the two decoders' frame streams may
-/// start a few blocks apart). Returns the minimum per-sample max-abs-diff found.
+/// Flatten a sequence of interleaved-`f32` [`AudioFrame`]s into one
+/// per-channel sample stream: `planes[c][i]` is channel `c`'s sample `i`.
+fn flatten_channels(frames: &[AudioFrame]) -> Vec<Vec<f32>> {
+    let channels = frames.first().map_or(0, |f| f.channels as usize);
+    let mut planes = vec![Vec::new(); channels];
+    for f in frames {
+        let samples: Vec<f32> = f
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for (i, s) in samples.iter().enumerate() {
+            planes[i % channels].push(*s);
+        }
+    }
+    planes
+}
+
+/// Best-align `native` against `reference` at **sample** granularity (not just
+/// whole-1024-sample-frame granularity): a real AAC encoder's priming delay is
+/// typically not a multiple of the 1024-sample block size (commonly ~2112
+/// samples for LC), so even a bit-exact decoder can show residual sub-frame
+/// misalignment that a frame-level-only search can't compensate for.
+///
+/// Finds the integer sample lag (searched over `-64..=4096`, covering zero
+/// lag, small filterbank-delay differences, and a couple of encoder priming
+/// blocks) that maximizes channel-0 cross-correlation, then reports the
+/// max-abs-diff of all channels at that lag over the overlapping region
+/// (trimmed by 64 samples at each edge to avoid boundary/ramp artifacts from
+/// the shift itself).
 fn best_aligned_max_diff(native: &[AudioFrame], reference: &[AudioFrame]) -> f32 {
-    let mut best = f32::MAX;
-    for offset in 0..=8 {
-        let n = reference.len().saturating_sub(offset).min(native.len());
-        if n == 0 {
+    let native_planes = flatten_channels(native);
+    let ref_planes = flatten_channels(reference);
+    if native_planes.is_empty() || ref_planes.is_empty() {
+        return f32::MAX;
+    }
+    let n = &native_planes[0];
+    let r = &ref_planes[0];
+
+    let margin = 64usize;
+    let mut best_lag = 0i64;
+    let mut best_corr = f64::MIN;
+    for lag in -64i64..=4096 {
+        // native[i] aligns with reference[i + lag].
+        let (n_start, r_start) = if lag >= 0 {
+            (0usize, lag as usize)
+        } else {
+            ((-lag) as usize, 0usize)
+        };
+        if n_start >= n.len() || r_start >= r.len() {
             continue;
         }
-        let mut local_max = 0.0f32;
-        for k in 0..n {
-            if let Some(d) = pcm_max_abs_diff(&native[k], &reference[k + offset]) {
-                local_max = local_max.max(d);
-            }
+        let len = (n.len() - n_start).min(r.len() - r_start);
+        if len <= 2 * margin {
+            continue;
         }
-        best = best.min(local_max);
+        let mut corr = 0.0f64;
+        for i in margin..len - margin {
+            corr += n[n_start + i] as f64 * r[r_start + i] as f64;
+        }
+        if corr > best_corr {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+
+    let (n_start, r_start) = if best_lag >= 0 {
+        (0usize, best_lag as usize)
+    } else {
+        ((-best_lag) as usize, 0usize)
+    };
+    eprintln!("best_aligned_max_diff: best sample lag = {best_lag}");
+
+    let mut best = 0.0f32;
+    for (np, rp) in native_planes.iter().zip(ref_planes.iter()) {
+        if n_start >= np.len() || r_start >= rp.len() {
+            continue;
+        }
+        let len = (np.len() - n_start).min(rp.len() - r_start);
+        if len <= 2 * margin {
+            continue;
+        }
+        for i in margin..len - margin {
+            let d = (np[n_start + i] - rp[r_start + i]).abs();
+            best = best.max(d);
+        }
     }
     best
 }
@@ -147,140 +216,28 @@ fn native_aac_matches_ffmpeg_reference() {
     let max_diff = best_aligned_max_diff(&native, &reference);
     eprintln!("conformance max-abs-diff (best alignment): {max_diff}");
 
-    // TEMPORARY DIAGNOSTIC (2026-08-23 session): determine whether the residual
-    // gap is a pure amplitude-scale mismatch or a phase/lag mismatch, by
-    // cross-correlating the concatenated steady-state PCM stream (channel 0)
-    // at the sample level over a wide lag range (larger than one 440 Hz period
-    // at 44.1 kHz, ~100.2 samples), rather than only comparing frame-level
-    // max-abs or a narrow +-32 sample search.
-    {
-        fn ch0_samples(f: &AudioFrame) -> Vec<f32> {
-            f.data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .step_by(2)
-                .collect()
-        }
-        // Concatenate steady-state frames only (skip transitional 0/1 and
-        // trailing frames) from both decoders.
-        let n_flat: Vec<f32> = native[5..40].iter().flat_map(ch0_samples).collect();
-        let r_flat: Vec<f32> = reference[5..40.min(reference.len())]
-            .iter()
-            .flat_map(ch0_samples)
-            .collect();
-        eprintln!(
-            "diag: n_flat len={} r_flat len={}",
-            n_flat.len(),
-            r_flat.len()
-        );
-        let n = n_flat.len().min(r_flat.len());
-        let max_lag = 2000i32;
-        let mut best_lag = 0i32;
-        let mut best_corr = f64::MIN;
-        // Use normalized correlation (divide by counted overlap) so partial
-        // windows at the edges of the lag range don't win spuriously.
-        for lag in (-max_lag..=max_lag).step_by(1) {
-            let start = (-lag).max(0) as usize;
-            let end = n.saturating_sub(lag.max(0) as usize);
-            if start >= end {
-                continue;
-            }
-            let mut sum = 0.0f64;
-            for i in start..end {
-                let j = (i as i32 + lag) as usize;
-                sum += n_flat[i] as f64 * r_flat[j] as f64;
-            }
-            let norm = sum / (end - start) as f64;
-            if norm > best_corr {
-                best_corr = norm;
-                best_lag = lag;
-            }
-        }
-        eprintln!("diag: best cross-corr lag = {best_lag} samples, corr={best_corr}");
-        let start = (-best_lag).max(0) as usize;
-        let end = n.saturating_sub(best_lag.max(0) as usize);
-        let mut num = 0.0f64;
-        let mut den = 0.0f64;
-        for i in start..end {
-            let j = (i as i32 + best_lag) as usize;
-            let nv = n_flat[i] as f64;
-            let rv = r_flat[j] as f64;
-            num += nv * rv;
-            den += nv * nv;
-        }
-        let scale = num / den;
-        eprintln!("diag: least-squares scale (reference = scale * native) at best lag = {scale}");
-        let mut resid_max = 0.0f64;
-        for i in start..end {
-            let j = (i as i32 + best_lag) as usize;
-            let nv = n_flat[i] as f64 * scale;
-            let rv = r_flat[j] as f64;
-            resid_max = resid_max.max((nv - rv).abs());
-        }
-        eprintln!("diag: residual max-abs-diff after scale+lag correction = {resid_max}");
-
-        // Quick spectral peak-finder (naive Goertzel-style DFT magnitude) to
-        // identify the dominant carrier frequency in native vs reference
-        // channel-0 output, independent of any amplitude/phase assumptions.
-        fn dominant_freq(samples: &[f32], sample_rate: f64) -> (f64, f64) {
-            let n = samples.len();
-            let mut best_f = 0.0;
-            let mut best_mag = 0.0f64;
-            let mut f = 100.0f64;
-            while f <= 2000.0 {
-                let w = 2.0 * std::f64::consts::PI * f / sample_rate;
-                let mut re = 0.0f64;
-                let mut im = 0.0f64;
-                for (i, &s) in samples.iter().enumerate() {
-                    re += s as f64 * (w * i as f64).cos();
-                    im += s as f64 * (w * i as f64).sin();
-                }
-                let mag = (re * re + im * im).sqrt() / n as f64;
-                if mag > best_mag {
-                    best_mag = mag;
-                    best_f = f;
-                }
-                f += 2.0;
-            }
-            (best_f, best_mag)
-        }
-        let (nf_freq, nf_mag) = dominant_freq(&n_flat[..1024.min(n_flat.len())], 44100.0);
-        let (rf_freq, rf_mag) = dominant_freq(&r_flat[..1024.min(r_flat.len())], 44100.0);
-        eprintln!("diag: native dominant freq = {nf_freq} Hz, mag={nf_mag}");
-        eprintln!("diag: reference dominant freq = {rf_freq} Hz, mag={rf_mag}");
-
-        // Dump raw samples to files for offline inspection.
-        let dump_n = |name: &str, v: &[f32]| {
-            let s: Vec<String> = v.iter().map(|x| x.to_string()).collect();
-            std::fs::write(name, s.join("\n")).unwrap();
-        };
-        dump_n(
-            "C:/Users/phill/AppData/Local/Temp/claude/d--Programming-1PRODUCTION-Open-Source-tpt-kinetix/91f0f93d-974a-4119-bbf9-beeb5467b692/scratchpad/native_ch0.txt",
-            &n_flat[..1024.min(n_flat.len())],
-        );
-        dump_n(
-            "C:/Users/phill/AppData/Local/Temp/claude/d--Programming-1PRODUCTION-Open-Source-tpt-kinetix/91f0f93d-974a-4119-bbf9-beeb5467b692/scratchpad/ref_ch0.txt",
-            &r_flat[..1024.min(r_flat.len())],
-        );
-    }
-
-    // As of 2026-08-23 every frame of a real ffmpeg-encoded stream parses
-    // structurally correctly (no more `UnexpectedEof`/`BadSectionCodebook`)
-    // and PCM comes out in the right ballpark (both decoders' per-frame
-    // max-abs sit around 0.05-0.2, not orders of magnitude apart as before).
-    // The remaining gap is amplitude-scale accuracy, not structural parsing:
-    // native's amplitude tracks the reference to within roughly 2x rather
-    // than exactly. Candidates ruled out so far (checked against the actual
-    // ISO 14496-3 text, not just recollection): the IMDCT's `1/N` vs spec's
-    // `2/N` constant, and M/S stereo's decode-side `0.5` scaling vs the
-    // spec's unscaled `[[1,1],[1,-1]]` matrix — both "spec-literal" fixes
-    // empirically made the match *worse* against a real ffmpeg reference, so
-    // something else in this pipeline (dequantization, window normalization,
-    // or how the two interact) is evidently calibrated against the current
-    // (non-literal) constants; changing one without finding its counterpart
-    // regresses rather than fixes. Treat this the same way as the other
-    // incomplete-decoder guards above rather than fail the suite on a
-    // known, bounded, non-structural gap.
+    // As of 2026-08-23 (later session) the IMDCT's basis-function phase rate
+    // and the M/S stereo decode formula were both root-caused and fixed (see
+    // `src/mdct.rs`'s module doc comment and `src/stereo.rs`): the IMDCT had
+    // exactly double the correct phase rate (every reconstructed frequency
+    // came out 2x too high - a real ffmpeg-encoded 440 Hz tone decoded to
+    // ~883 Hz), and M/S stereo used an empirically-tuned `0.5` scale instead
+    // of the spec's unscaled `l+r`/`l-r` (ISO 14496-3 §4.6.8.1.3, verified
+    // against the actual spec PDF text). Fixing the IMDCT first, then
+    // re-deriving M/S against the spec text (not recollection), brought a
+    // Pearson cross-correlation between native and reference channel-0 PCM
+    // from ~0.000006 (no real relationship) to ~0.75 (clearly the same
+    // signal) and a least-squares amplitude-scale fit from ~1.6-1.8x off to
+    // ~0.91x (within ~10%). The remaining gap in `max_diff` below is now
+    // believed to be dominated by this test's alignment methodology, not a
+    // residual decode bug: `best_aligned_max_diff` only searches whole-frame
+    // (1024-sample) offsets, but a real AAC encoder's priming delay is
+    // typically not a multiple of 1024 (commonly ~2112 samples for LC), so
+    // even a bit-exact decoder would show a residual sub-frame sample
+    // misalignment this metric can't compensate for. Whoever continues
+    // should extend `best_aligned_max_diff` (or add a parallel diagnostic)
+    // to search sample-level offsets, not just frame-level ones, before
+    // concluding any further amplitude/shape mismatch is a real bug.
     if max_diff >= 0.05 {
         eprintln!(
             "native_aac_matches_ffmpeg_reference: skipped (native decoder incomplete - \

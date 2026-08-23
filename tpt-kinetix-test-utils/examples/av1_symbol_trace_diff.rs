@@ -69,8 +69,8 @@
 use std::collections::HashMap;
 
 use tpt_kinetix_av1::entropy::{
-    enable_symbol_trace, symbol_trace_enabled, take_block_markers, take_symbol_trace,
-    BlockMarker, SymbolTraceEntry,
+    enable_symbol_trace, symbol_trace_enabled, take_block_markers, take_symbol_trace, BlockMarker,
+    SymbolTraceEntry,
 };
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};

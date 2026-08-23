@@ -106,6 +106,18 @@ impl MvStore {
         self.mbs[mb_idx]
     }
 
+    /// Flatten every macroblock's grid into a per-picture motion array
+    /// (undecoded / intra macroblocks become [`MvCell::INTRA`]). Used to
+    /// persist a reference picture's motion for direct-mode col_zero_flag
+    /// lookups.
+    pub(crate) fn to_grid_vec(&self) -> Vec<[MvCell; 16]> {
+        let mut out = Vec::with_capacity(self.mbs.len());
+        for i in 0..self.mbs.len() {
+            out.push(self.mbs[i].unwrap_or([crate::mv::MvCell::INTRA; 16]));
+        }
+        out
+    }
+
     fn is_available(&self, mb_idx: usize, slice_id: u32) -> bool {
         self.mbs.get(mb_idx).copied().flatten().is_some() && self.slice_ids[mb_idx] == slice_id
     }
@@ -879,6 +891,158 @@ fn b8x8_sub_rect(sub_type: usize, bx: usize, by: usize, j: usize) -> (usize, usi
 /// and `B_Direct_8x8` sub-partitions) uses a simplified fill — pixel-exact
 /// direct mode (spatial/temporal derivation per §8.4.1.2) is a Phase E.5 task.
 #[allow(clippy::too_many_arguments)]
+/// Median of three values (FFmpeg `mid_pred`).
+fn mid3(a: i32, b: i32, c: i32) -> i32 {
+    let mut v = [a, b, c];
+    v.sort_unstable();
+    v[1]
+}
+
+/// Spatial direct-mode motion derivation for one macroblock
+/// (spec §8.4.1.2.2; transcribed from FFmpeg `pred_spatial_direct_motion`).
+///
+/// For each list independently: gather the A (left), B (above) and C
+/// (above-right; D above-left fallback when C is unavailable) neighbour cells
+/// of the macroblock's top-left corner; the list's reference index is the
+/// smallest non-negative one among them and its motion vector comes from a
+/// matching neighbour (majority → median). When no neighbour uses the list,
+/// that list is *dropped* (`used == false`); when both are dropped both lists
+/// fall back to reference 0 / zero MV.
+fn derive_spatial_direct(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    slice_id: u32,
+) -> ([i32; 2], [[i32; 2]; 2], [bool; 2]) {
+    let mut refs = [0i32; 2];
+    let mut mvs = [[0i32; 2]; 2];
+    let mut used = [true; 2];
+    for list in 0..2usize {
+        let (a, b, c_raw) = match list {
+            1 => (
+                neighbor_left_l1(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+                neighbor_above_l1(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+                neighbor_above_right_l1(store, cur, mb_idx, mb_width, 0, 0, 16, slice_id),
+            ),
+            _ => (
+                neighbor_left(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+                neighbor_above(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+                neighbor_above_right(store, cur, mb_idx, mb_width, 0, 0, 16, slice_id),
+            ),
+        };
+        // D is consulted only when C is *unavailable*; a decoded neighbour
+        // whose prediction does not use this list stays as its own candidate.
+        let d = match list {
+            1 => neighbor_above_left_l1(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+            _ => neighbor_above_left(store, cur, mb_idx, mb_width, 0, 0, slice_id),
+        };
+        let c = c_raw.or(d);
+        let usable = |o: &Option<MvNeighbor>| o.as_ref().is_some_and(|n| n.ref_idx >= 0);
+        let mv_of = |o: &Option<MvNeighbor>| o.as_ref().map(|n| n.mv).unwrap_or([0, 0]);
+        if !usable(&a) && !usable(&b) && !usable(&c) {
+            mvs[list] = [0, 0];
+            used[list] = false;
+            continue;
+        }
+        let cands = [(&a, usable(&a)), (&b, usable(&b)), (&c, usable(&c))];
+        let min_ref = cands
+            .iter()
+            .filter(|(_, u)| *u)
+            .map(|(o, _)| o.as_ref().unwrap().ref_idx)
+            .min()
+            .unwrap();
+        let matches = cands
+            .iter()
+            .filter(|(o, u)| *u && o.as_ref().unwrap().ref_idx == min_ref)
+            .count();
+        mvs[list] = if matches > 1 {
+            let (av, bv, cv) = (mv_of(&a), mv_of(&b), mv_of(&c));
+            [mid3(av[0], bv[0], cv[0]), mid3(av[1], bv[1], cv[1])]
+        } else {
+            cands
+                .iter()
+                .find(|(o, u)| *u && o.as_ref().unwrap().ref_idx == min_ref)
+                .map(|(o, _)| mv_of(o))
+                .unwrap()
+        };
+        refs[list] = min_ref;
+    }
+    if !used[0] && !used[1] {
+        used = [true, true];
+        refs = [0, 0];
+        mvs = [[0, 0], [0, 0]];
+    }
+    (refs, mvs, used)
+}
+
+/// Fill the direct 8×8 quadrants `quads` with the derived spatial-direct
+/// motion and apply the colocated zero-MV rule (`col_zero_flag`), which needs
+/// the co-located picture's per-block motion grid (list-1 reference 0).
+#[allow(clippy::too_many_arguments)]
+fn apply_spatial_direct(
+    store: &MvStore,
+    cur: &mut [MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    slice_id: u32,
+    quads: &[usize],
+    colocated: Option<&[[MvCell; 16]]>,
+) {
+    let (refs, mvs, used) = derive_spatial_direct(store, cur, mb_idx, mb_width, slice_id);
+    let fill = |cur: &mut [MvCell; 16], bx: usize, by: usize| {
+        commit_rect(
+            cur,
+            bx,
+            by,
+            8,
+            8,
+            mvs[0],
+            if used[0] { refs[0] } else { LIST_NOT_USED },
+            mvs[1],
+            if used[1] { refs[1] } else { LIST_NOT_USED },
+        );
+    };
+    // Whole-macroblock fast path: both MVs zero → plain fill, no col_zero pass
+    // (FFmpeg returns before its colocated adjustment in this case).
+    if quads.len() == 4 && mvs[0] == [0, 0] && mvs[1] == [0, 0] {
+        for q in [0usize, 1, 2, 3] {
+            fill(cur, 8 * (q % 2), 8 * (q / 2));
+        }
+        return;
+    }
+    for &q in quads {
+        fill(cur, 8 * (q % 2), 8 * (q / 2));
+    }
+    // col_zero_flag: zero each list's MV where refIdx is 0 and the colocated
+    // block's corresponding MV is (near-)zero.
+    if let Some(cells) = colocated.and_then(|g| g.get(mb_idx)) {
+        let coloc_intra = cells.iter().all(|c| c.ref_idx < 0 && c.ref_idx_l1 < 0);
+        if !coloc_intra {
+            for &q in quads {
+                let cc = cells[8 * (q / 2) + (q % 2) * 2];
+                let col_zero = (cc.ref_idx == 0 && cc.mv[0].abs() <= 1 && cc.mv[1].abs() <= 1)
+                    || (cc.ref_idx < 0
+                        && cc.ref_idx_l1 == 0
+                        && cc.mv_l1[0].abs() <= 1
+                        && cc.mv_l1[1].abs() <= 1);
+                if col_zero {
+                    let blocks =
+                        crate::slice_data::partition_blocks(2 * (q % 2), 2 * (q / 2), 2, 2);
+                    for blk in blocks {
+                        if used[0] && refs[0] == 0 {
+                            cur[blk].mv = [0, 0];
+                        }
+                        if used[1] && refs[1] == 0 {
+                            cur[blk].mv_l1 = [0, 0];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn predict_inter_b_macroblock(
     store: &MvStore,
     cur: &mut [MvCell; 16],
@@ -886,21 +1050,21 @@ pub(crate) fn predict_inter_b_macroblock(
     mb_width: usize,
     slice_id: u32,
     mb: &Macroblock,
+    colocated: Option<&[[MvCell; 16]]>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::{BPredDir, MbType};
 
     match mb.mb_type {
         MbType::BSkip | MbType::BDirect16x16 => {
-            // Simplified direct mode: fill with (0,0) ref 0 for both L0 and L1.
-            // Phase E.5 will replace this with the proper spatial/temporal derivation.
-            for blk in cur.iter_mut() {
-                *blk = MvCell {
-                    mv: [0, 0],
-                    ref_idx: 0,
-                    mv_l1: [0, 0],
-                    ref_idx_l1: 0,
-                };
-            }
+            apply_spatial_direct(
+                store,
+                cur,
+                mb_idx,
+                mb_width,
+                slice_id,
+                &[0, 1, 2, 3],
+                colocated,
+            );
             Ok(())
         }
         MbType::BL016x16 => {
@@ -1012,6 +1176,7 @@ pub(crate) fn predict_inter_b_macroblock(
             let sub_types = motion.sub_mb_type_b.ok_or("BB8x8 without sub_mb_type_b")?;
             let mut l0_cur = 0usize;
             let mut l1_cur = 0usize;
+            let mut direct_quads: Vec<usize> = Vec::new();
             for part in 0..4usize {
                 let bx = 8 * (part % 2);
                 let by = 8 * (part / 2);
@@ -1028,8 +1193,7 @@ pub(crate) fn predict_inter_b_macroblock(
                 };
 
                 if dir == BPredDir::Direct {
-                    // Simplified direct mode for B_Direct_8x8 sub-partition.
-                    commit_rect(cur, bx, by, 8, 8, [0, 0], 0, [0, 0], 0);
+                    direct_quads.push(part);
                     continue;
                 }
 
@@ -1075,6 +1239,17 @@ pub(crate) fn predict_inter_b_macroblock(
                     commit_rect(cur, spx, spy, spw, sph, mv, ref_idx, mv_l1, ref_idx_l1);
                 }
             }
+            if !direct_quads.is_empty() {
+                apply_spatial_direct(
+                    store,
+                    cur,
+                    mb_idx,
+                    mb_width,
+                    slice_id,
+                    &direct_quads,
+                    colocated,
+                );
+            }
             Ok(())
         }
         _ => Err("not an inter B macroblock"),
@@ -1091,6 +1266,7 @@ pub(crate) fn predict_b_slice_mvs(
     slice_id: u32,
     first_mb: u32,
     mbs: &[Macroblock],
+    colocated: Option<&[[MvCell; 16]]>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::MbType;
     let mut cur = [MvCell::INTRA; 16];
@@ -1109,7 +1285,15 @@ pub(crate) fn predict_b_slice_mvs(
                     | MbType::BB8x8
             );
         if is_b_inter {
-            predict_inter_b_macroblock(store, &mut cur, mb_idx, mb_cols as usize, slice_id, mb)?;
+            predict_inter_b_macroblock(
+                store,
+                &mut cur,
+                mb_idx,
+                mb_cols as usize,
+                slice_id,
+                mb,
+                colocated,
+            )?;
         } else {
             cur = [MvCell::INTRA; 16];
         }

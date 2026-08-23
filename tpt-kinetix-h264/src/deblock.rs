@@ -101,10 +101,23 @@ fn derive_bs_pair(
     if p_nz != 0 || q_nz != 0 {
         return 2;
     }
-    if p_cell.ref_idx != q_cell.ref_idx
-        || (p_cell.mv[0] - q_cell.mv[0]).abs() >= 4
-        || (p_cell.mv[1] - q_cell.mv[1]).abs() >= 4
-    {
+    // §8.7.2.1 bS = 1 motion rule, evaluated per prediction list. For each
+    // list LX, the condition applies only when BOTH blocks use that list
+    // (`ref_idx_lX >= 0`). A block that does not use a list stores
+    // `LIST_NOT_USED` (-1) there; comparing across different usage patterns
+    // would incorrectly trigger bS = 1 (e.g. a direct MB with ref_idx_l1 = 0
+    // next to an L0-only MB with ref_idx_l1 = -1).
+    let l0_diff = p_cell.ref_idx >= 0
+        && q_cell.ref_idx >= 0
+        && (p_cell.ref_idx != q_cell.ref_idx
+            || (p_cell.mv[0] - q_cell.mv[0]).abs() >= 4
+            || (p_cell.mv[1] - q_cell.mv[1]).abs() >= 4);
+    let l1_diff = p_cell.ref_idx_l1 >= 0
+        && q_cell.ref_idx_l1 >= 0
+        && (p_cell.ref_idx_l1 != q_cell.ref_idx_l1
+            || (p_cell.mv_l1[0] - q_cell.mv_l1[0]).abs() >= 4
+            || (p_cell.mv_l1[1] - q_cell.mv_l1[1]).abs() >= 4);
+    if l0_diff || l1_diff {
         return 1;
     }
     0

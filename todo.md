@@ -7,7 +7,7 @@
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 (8×8 High-profile), G.2/G.4/G.5 (interlaced), H (pixel_exact flip) |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 CLOSED (8×8 High-profile bit-exact); remaining: cabac_b cell (coded-inter MBs with nonzero MVDs in IBP streams — see session #9 next steps), G (MBAFF P/B parsing, G.5 interlaced corpus), H (pixel_exact flip) |
 | [todo-av1.md](todo-av1.md) | AV1 decoder | Phase G.0 (NEW, 2026-08-20): building a reusable symbol-trace oracle + diff harness to replace ad hoc per-session debugging — see below. 7 debugging sessions (2026-08-17/18/19), 6 real bugs fixed; solid-color content pixel-exact (99dB), real/textured content still noise-level (~10-17dB) — root cause not fully closed |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phase 6 parse desync (real ffmpeg streams) |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |

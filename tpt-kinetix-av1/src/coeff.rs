@@ -318,6 +318,12 @@ pub fn read_coeffs(
                 dec.read_symbol(&mut cdfs.coeff_base_eob[tx_sz_ctx][ptype][ctx]) as u32 + 1
             } else {
                 let ctx = coeff_base_ctx(tx_size, tx_type, &quant, pos, c, false);
+                if c == 0 && std::env::var("KINETIX_AV1_DBG").is_ok() {
+                    eprintln!(
+                        "DBG DC coeff_base ctx={ctx} tx_sz_ctx={tx_sz_ctx} ptype={ptype} cdf={:?}",
+                        cdfs.coeff_base[tx_sz_ctx][ptype][ctx]
+                    );
+                }
                 dec.read_symbol(&mut cdfs.coeff_base[tx_sz_ctx][ptype][ctx]) as u32
             };
 

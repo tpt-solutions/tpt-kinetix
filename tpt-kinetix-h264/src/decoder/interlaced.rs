@@ -347,7 +347,7 @@ impl H264Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
         };
-        self.store_reference_picture(nal, sps, header, &frame);
+        self.store_reference_picture(nal, sps, header, &frame, None);
 
         Ok(InterlacedOutcome::Frame(frame))
     }
@@ -557,7 +557,7 @@ impl H264Decoder {
 
         // Store the half-height field in the DPB so later inter slices can build
         // their field reference lists from it (§8.2.4.2.5).
-        self.store_reference_picture(nal, sps, header, &field_frame);
+        self.store_reference_picture(nal, sps, header, &field_frame, None);
 
         // Buffer the field and emit the interleaved frame once the pair is complete.
         match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {

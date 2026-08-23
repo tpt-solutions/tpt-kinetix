@@ -89,12 +89,17 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
 
     let (r_pre_t, o_pre_t) = dec.debug_state();
     let inter_type = ctxs.mb_type_p.decode(dec);
+    // ctxIdx 17 is one physical context in FFmpeg (partition bit here, bin 0
+    // of the intra-in-P suffix there) -- keep both copies adapted identically.
+    ctxs.sync_shared_mb_type_ctx_prefix_to_suffix_p();
     let (r_post_t, o_post_t) = dec.debug_state();
     eprintln!("  MB({mb_x},{mb_y}) mb_type={inter_type:?} cabac: {r_pre_t:#06x}/{o_pre_t:#010x} -> {r_post_t:#06x}/{o_post_t:#010x}");
     match inter_type {
         None => {
             // Intra macroblock inside P slice.
             let intra_t = ctxs.intra_suffix.decode(dec);
+            // Reverse sync of shared ctxIdx 17 (see above).
+            ctxs.sync_shared_mb_type_ctx_suffix_to_prefix_p();
             let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nz) =
                 parse_intra_mb_cabac_pb(
                     dec,
@@ -395,6 +400,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let mut dec = crate::entropy::CabacDecoder::new(data)
@@ -463,6 +469,14 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             continue;
         }
 
+        // ctxIdxInc for B mb_type's first bin: count of available neighbours
+        // that are NOT direct/skip (spec Table 9-39).
+        let non_direct = |i: usize| {
+            !macroblocks[i].skip && !matches!(macroblocks[i].mb_type, MbType::BDirect16x16)
+        };
+        let non_direct_neighbours = (mb_x > 0 && non_direct(left_idx.unwrap())) as usize
+            + (mb_y > 0 && non_direct(top_idx.unwrap())) as usize;
+
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_b_macroblock_cabac(
                 &mut dec,
@@ -480,6 +494,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
                 num_ref_idx_l1_active,
                 chroma_qp_index_offset,
                 transform_8x8_mode_flag,
+                non_direct_neighbours,
                 tracer,
             )?;
         qp = new_qp;
@@ -500,7 +515,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     }
 
     let mut mv_store = MvStore::new(total);
-    crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
+    crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks, colocated_mv)?;
     Ok(ParsedSlice {
         macroblocks,
         nz,
@@ -525,6 +540,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    non_direct_neighbours: usize,
     tracer: &mut T,
 ) -> R<(
     Macroblock,
@@ -540,10 +556,16 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
     let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
 
-    let b_inter_type = ctxs.mb_type_b.decode(dec);
+    let b_inter_type = ctxs.mb_type_b.decode(dec, non_direct_neighbours);
+    // ctxIdx 32 is one physical context in FFmpeg (the final inter/intra gate
+    // here -- and the L0/L1 discriminator / bits-nibble bins -- and bin 0 of
+    // the intra-in-B suffix there) -- keep both copies adapted identically.
+    ctxs.sync_shared_mb_type_ctx_prefix_to_suffix_b();
     if b_inter_type.is_none() {
         // Intra macroblock inside B slice.
         let intra_t = ctxs.intra_suffix.decode(dec);
+        // Reverse sync of shared ctxIdx 32 (see above).
+        ctxs.sync_shared_mb_type_ctx_suffix_to_prefix_b();
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nz) = parse_intra_mb_cabac_pb(
             dec,
             ctxs,
@@ -596,10 +618,17 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::BL016x16;
             let (lg, tg) =
                 ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
-            let ri = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri >= num_ref_idx_l0_active {
-                return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
-            }
+            // ref_idx is only coded when num_ref_idx_lX_active_minus1 > 0
+            // (§7.3.5.2); with a single reference it is implicitly 0.
+            let ri = if num_ref_idx_l0_active > 1 {
+                let r = ctxs.ref_idx.decode(dec, lg, tg);
+                if r >= num_ref_idx_l0_active {
+                    return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                }
+                r
+            } else {
+                0
+            };
             motion.ref_idx_l0.push(ri as i32);
             let blks: Vec<usize> = (0..16).collect();
             if ri > 0 {
@@ -637,15 +666,21 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             motion.mvd_l0.push((mvx, mvy));
             this_inter.set_partition_l0(&blks, mvx, mvy, ri as i32);
+            mb.motion = Some(motion);
         }
         2 => {
             mb.mb_type = MbType::BL116x16;
             let (lg, tg) =
                 ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
-            let ri = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri >= num_ref_idx_l1_active {
-                return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
-            }
+            let ri = if num_ref_idx_l1_active > 1 {
+                let r = ctxs.ref_idx.decode(dec, lg, tg);
+                if r >= num_ref_idx_l1_active {
+                    return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                }
+                r
+            } else {
+                0
+            };
             motion.ref_idx_l1.push(ri as i32);
             let blks: Vec<usize> = (0..16).collect();
             if ri > 0 {
@@ -655,7 +690,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             }
             let mvx = cabac_decode_mvd_component(
                 dec,
-                &mut ctxs.mvd_l1_x,
+                &mut ctxs.mvd_l0_x,
                 inter_grid,
                 &this_inter,
                 left_idx,
@@ -669,7 +704,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             let mvy = cabac_decode_mvd_component(
                 dec,
-                &mut ctxs.mvd_l1_y,
+                &mut ctxs.mvd_l0_y,
                 inter_grid,
                 &this_inter,
                 left_idx,
@@ -683,23 +718,34 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             motion.mvd_l1.push((mvx, mvy));
             this_inter.set_partition_l1(&blks, mvx, mvy, ri as i32);
+            mb.motion = Some(motion);
         }
         3 => {
             mb.mb_type = MbType::BBi16x16;
             let blks: Vec<usize> = (0..16).collect();
             let (lg, tg) =
                 ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 0);
-            let ri0 = ctxs.ref_idx.decode(dec, lg, tg);
-            if ri0 >= num_ref_idx_l0_active {
-                return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
-            }
+            let ri0 = if num_ref_idx_l0_active > 1 {
+                let r = ctxs.ref_idx.decode(dec, lg, tg);
+                if r >= num_ref_idx_l0_active {
+                    return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                }
+                r
+            } else {
+                0
+            };
             motion.ref_idx_l0.push(ri0 as i32);
             let (lg1, tg1) =
                 ref_idx_gt0_neighbors(inter_grid, &this_inter, left_idx, top_idx, 0, 0, 16, 16, 1);
-            let ri1 = ctxs.ref_idx.decode(dec, lg1, tg1);
-            if ri1 >= num_ref_idx_l1_active {
-                return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
-            }
+            let ri1 = if num_ref_idx_l1_active > 1 {
+                let r = ctxs.ref_idx.decode(dec, lg1, tg1);
+                if r >= num_ref_idx_l1_active {
+                    return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                }
+                r
+            } else {
+                0
+            };
             motion.ref_idx_l1.push(ri1 as i32);
             if ri0 > 0 {
                 for &b in &blks {
@@ -743,7 +789,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             this_inter.set_partition_l0(&blks, mx0, my0, ri0 as i32);
             let mx1 = cabac_decode_mvd_component(
                 dec,
-                &mut ctxs.mvd_l1_x,
+                &mut ctxs.mvd_l0_x,
                 inter_grid,
                 &this_inter,
                 left_idx,
@@ -757,7 +803,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             let my1 = cabac_decode_mvd_component(
                 dec,
-                &mut ctxs.mvd_l1_y,
+                &mut ctxs.mvd_l0_y,
                 inter_grid,
                 &this_inter,
                 left_idx,
@@ -771,6 +817,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             motion.mvd_l1.push((mx1, my1));
             this_inter.set_partition_l1(&blks, mx1, my1, ri1 as i32);
+            mb.motion = Some(motion);
         }
         4..=21 => {
             let idx = (b_type_raw - 4) as usize;
@@ -801,10 +848,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         hp,
                         0,
                     );
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active {
-                        return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
-                    }
+                    let ri = if num_ref_idx_l0_active > 1 {
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l0_active {
+                            return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                        }
+                        r
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l0[part] = ri as i32;
                     let blks = partition_blocks(c4, r4, w4, h4);
                     if ri > 0 {
@@ -830,10 +882,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         hp,
                         1,
                     );
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l1_active {
-                        return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
-                    }
+                    let ri = if num_ref_idx_l1_active > 1 {
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l1_active {
+                            return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                        }
+                        r
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l1[part] = ri as i32;
                     let blks = partition_blocks(c4, r4, w4, h4);
                     if ri > 0 {
@@ -888,7 +945,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 if dirs[part] == BPredDir::L1 || dirs[part] == BPredDir::Bi {
                     let mvx = cabac_decode_mvd_component(
                         dec,
-                        &mut ctxs.mvd_l1_x,
+                        &mut ctxs.mvd_l0_x,
                         inter_grid,
                         &this_inter,
                         left_idx,
@@ -902,7 +959,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     )?;
                     let mvy = cabac_decode_mvd_component(
                         dec,
-                        &mut ctxs.mvd_l1_y,
+                        &mut ctxs.mvd_l0_y,
                         inter_grid,
                         &this_inter,
                         left_idx,
@@ -961,10 +1018,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         hp,
                         0,
                     );
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l0_active {
-                        return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
-                    }
+                    let ri = if num_ref_idx_l0_active > 1 {
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l0_active {
+                            return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                        }
+                        r
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l0[part] = ri as i32;
                     if ri > 0 {
                         for &b in &blks {
@@ -986,10 +1048,15 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         hp,
                         1,
                     );
-                    let ri = ctxs.ref_idx.decode(dec, lg, tg);
-                    if ri >= num_ref_idx_l1_active {
-                        return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
-                    }
+                    let ri = if num_ref_idx_l1_active > 1 {
+                        let r = ctxs.ref_idx.decode(dec, lg, tg);
+                        if r >= num_ref_idx_l1_active {
+                            return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                        }
+                        r
+                    } else {
+                        0
+                    };
                     motion.ref_idx_l1[part] = ri as i32;
                     if ri > 0 {
                         for &b in &blks {
@@ -1060,7 +1127,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
                         let mvx = cabac_decode_mvd_component(
                             dec,
-                            &mut ctxs.mvd_l1_x,
+                            &mut ctxs.mvd_l0_x,
                             inter_grid,
                             &this_inter,
                             left_idx,
@@ -1074,7 +1141,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         )?;
                         let mvy = cabac_decode_mvd_component(
                             dec,
-                            &mut ctxs.mvd_l1_y,
+                            &mut ctxs.mvd_l0_y,
                             inter_grid,
                             &this_inter,
                             left_idx,

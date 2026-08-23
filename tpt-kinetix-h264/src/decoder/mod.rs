@@ -336,7 +336,7 @@ impl H264Decoder {
                         ));
                     }
 
-                    let frame = self.decode_slice(nal, width, height, packet)?;
+                    let frame = self.decode_slice(nal, width, height, packet, tracer)?;
                     output_frame = Some(frame);
                 }
                 _ => {}
@@ -587,7 +587,7 @@ impl H264Decoder {
         // Reference-picture management: derive POC (§8.2.1), advance the POC
         // state, and store reference pictures in the DPB (§8.2.5) so later
         // P/B slices can build reference lists (§8.2.4).
-        self.store_reference_picture(nal, sps, &header, &frame);
+        self.store_reference_picture(nal, sps, &header, &frame, None);
 
         Ok(Some(frame))
     }
@@ -605,6 +605,7 @@ impl H264Decoder {
         sps: &SeqParameterSet,
         header: &crate::slice::SliceHeader,
         frame: &VideoFrame,
+        mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
     ) {
         use crate::slice::DecRefPicMarking;
 
@@ -639,7 +640,7 @@ impl H264Decoder {
             is_short_term: true,
             is_long_term: false,
             long_term_pic_num: -1,
-            mv_grid: None,
+            mv_grid,
         };
         let ctx = crate::ref_pic::PicNumContext::new(
             sps,
@@ -670,12 +671,13 @@ impl H264Decoder {
 
     /// Fallback slice decode: attempt the real CAVLC I-slice path first,
     /// then I_PCM, otherwise emit an all-skip scaffold frame.
-    fn decode_slice(
+    fn decode_slice<T: DecodeTracer>(
         &mut self,
         nal: &crate::nal::NalUnit,
         width: u32,
         height: u32,
         packet: &Packet,
+        tracer: &mut T,
     ) -> Result<VideoFrame, KinetixError> {
         let mb_cols = width.div_ceil(16);
         let mb_rows = height.div_ceil(16);
@@ -741,6 +743,15 @@ impl H264Decoder {
         let is_i_slice = header.slice_type == crate::slice::SliceType::I
             || header.slice_type == crate::slice::SliceType::Si;
 
+        eprintln!(
+            "SLICE_HDR first_mb={} type={:?} frame_num={} qp_delta={} bit_offset={}",
+            header.first_mb_in_slice,
+            header.slice_type,
+            header.frame_num,
+            header.slice_qp_delta,
+            header.data_bit_offset
+        );
+
         // Attempt the real CAVLC I-slice decode path.
         if is_i_slice && header.first_mb_in_slice == 0 {
             let slice_qp = 26
@@ -762,7 +773,7 @@ impl H264Decoder {
                     .unwrap_or(false),
                 sps.mb_adaptive_frame_field_flag,
                 header.field_pic_flag,
-                &mut crate::trace::NoopTracer,
+                tracer,
             ) {
                 Ok(parsed) => {
                     let mut recon = crate::reconstruct::reconstruct_intra_frame(
@@ -774,7 +785,7 @@ impl H264Decoder {
                         chroma_qp_index_offset,
                         scaling,
                         &crate::reconstruct::WeightedPred::Default,
-                        &mut crate::trace::NoopTracer,
+                        tracer,
                     );
 
                     let deblock_params = crate::deblock::DeblockParams {
@@ -915,7 +926,7 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
-                        &mut crate::trace::NoopTracer,
+                        tracer,
                     )
                 } else {
                     crate::slice_data::parse_p_slice(
@@ -928,7 +939,7 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
-                        &mut crate::trace::NoopTracer,
+                        tracer,
                     )
                 };
                 match p_result {
@@ -960,7 +971,7 @@ impl H264Decoder {
                             chroma_qp_index_offset,
                             scaling,
                             &weighted_pred,
-                            &mut crate::trace::NoopTracer,
+                            tracer,
                         );
 
                         let deblock_params = crate::deblock::DeblockParams {
@@ -1044,7 +1055,15 @@ impl H264Decoder {
                         // its own slice header requested (§8.2.5) — this is the
                         // path that carries MMCO commands, since only non-IDR
                         // slices have a `dec_ref_pic_marking` command list.
-                        self.store_reference_picture(nal, &sps, &header, &frame);
+                        // The picture's motion grid is persisted so later B
+                        // slices can run the direct-mode col_zero_flag check.
+                        self.store_reference_picture(
+                            nal,
+                            &sps,
+                            &header,
+                            &frame,
+                            Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                        );
                         return Ok(frame);
                     }
                     Err(e) => {
@@ -1111,6 +1130,13 @@ impl H264Decoder {
                     ref_l0.iter().map(|e| e.frame.clone()).collect();
                 let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> =
                     ref_l1.iter().map(|e| e.frame.clone()).collect();
+                // Co-located picture for direct-mode derivation: reference 0 of
+                // list 1 (§8.4.1.2.2/8.4.1.2.3). Its persisted per-block motion
+                // grid feeds the col_zero_flag check.
+                let colocated_mv: Option<Vec<[crate::mv::MvCell; 16]>> = ref_l1
+                    .first()
+                    .and_then(|e| e.mv_grid.clone())
+                    .map(|g| (*g).clone());
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag = pps
@@ -1131,7 +1157,8 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
-                        &mut crate::trace::NoopTracer,
+                        colocated_mv.as_deref(),
+                        tracer,
                     )
                 } else {
                     crate::slice_data::parse_b_slice(
@@ -1145,7 +1172,8 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
-                        &mut crate::trace::NoopTracer,
+                        colocated_mv.as_deref(),
+                        tracer,
                     )
                 };
                 match b_result {
@@ -1183,7 +1211,7 @@ impl H264Decoder {
                             chroma_qp_index_offset,
                             scaling,
                             &weighted_pred,
-                            &mut crate::trace::NoopTracer,
+                            tracer,
                         );
 
                         let deblock_params = crate::deblock::DeblockParams {
@@ -1263,11 +1291,17 @@ impl H264Decoder {
                             pixel_format: PixelFormat::Yuv420p,
                             is_key_frame: false,
                         };
-                        self.store_reference_picture(nal, &sps, &header, &frame);
+                        self.store_reference_picture(
+                            nal,
+                            &sps,
+                            &header,
+                            &frame,
+                            Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                        );
                         return Ok(frame);
                     }
                     Err(e) => {
-                        let _ = e;
+                        eprintln!("B CABAC parse error: {e:?}");
                         // Fall through to the skip scaffold.
                     }
                 }

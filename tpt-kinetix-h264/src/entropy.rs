@@ -894,6 +894,11 @@ impl IntraMbTypeSuffixCabacContext {
     }
 
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
+        // Bin 0 uses the physically-shared context variable: ctxIdx 17 on the
+        // P path (also the MbTypePCabacContext "16x8-vs-8x16" bit) or ctxIdx
+        // 32 on the B path (also MbTypeBCabacContext's final inter/intra gate)
+        // -- FFmpeg adapts a single `cabac_state[17]` / `[32]` for both uses;
+        // see `shared_ctx`/`set_shared_ctx`.
         if dec.decode_decision(&mut self.ctx[0]) == 0 {
             return 0; // I_NxN
         }
@@ -911,6 +916,21 @@ impl IntraMbTypeSuffixCabacContext {
         mb_type += 2 * dec.decode_decision(&mut self.ctx[3]) as u32; // pred_mode high
         mb_type += dec.decode_decision(&mut self.ctx[3]) as u32; // pred_mode low
         mb_type
+    }
+
+    /// The physically-shared context variable (bin 0): ctxIdx 17 on the P
+    /// path (shared with [`MbTypePCabacContext`]'s "16x8-vs-8x16" bit) or
+    /// ctxIdx 32 on the B path (shared with [`MbTypeBCabacContext`]'s final
+    /// inter/intra gate). FFmpeg keeps ONE `cabac_state` variable per ctxIdx
+    /// and adapts it across both uses; the duplicate copies held by the two
+    /// structs must be synced after every decode (see
+    /// [`crate::slice_data::ctx::PbCabacSliceContexts::sync_shared_mb_type_ctx_prefix_to_suffix`]).
+    pub(crate) fn shared_ctx(&self) -> CabacContext {
+        self.ctx[0]
+    }
+
+    pub(crate) fn set_shared_ctx(&mut self, v: CabacContext) {
+        self.ctx[0] = v;
     }
 }
 
@@ -957,6 +977,21 @@ impl MbTypePCabacContext {
     /// no separate "ref index forced to 0" code point (unlike CAVLC's
     /// `mb_type_raw == 4` / `P8x8ref0`) -- see [`RefIdxCabacContext::decode`]
     /// for why that shortcut isn't needed here.
+    ///
+    /// The ctxIdx-17 context variable (bin 3 of this tree, the "16x8-vs-8x16"
+    /// bit) is physically shared with [`IntraMbTypeSuffixCabacContext`]'s bin 0
+    /// (FFmpeg adapts a single `cabac_state[17]` for both uses); the
+    /// `shared_ctx`/`set_shared_ctx` accessors let
+    /// [`crate::slice_data::ctx::PbCabacSliceContexts`] keep both copies in
+    /// sync after each decode.
+    pub(crate) fn shared_ctx(&self) -> CabacContext {
+        self.ctx[3] // ctxIdx 17: shared with IntraMbTypeSuffixCabacContext bin 0
+    }
+
+    pub(crate) fn set_shared_ctx(&mut self, v: CabacContext) {
+        self.ctx[3] = v;
+    }
+
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
         // H.264 spec §9.3.2.5 / Table 9-36 P-slice binarization.
         // Mirrors FFmpeg `ff_h264_decode_mb_cabac` (!get_cabac notation):
@@ -1202,54 +1237,67 @@ impl MbTypeBCabacContext {
         Self { ctx }
     }
 
-    pub fn decode(&mut self, dec: &mut CabacDecoder) -> Option<u32> {
-        if dec.decode_decision(&mut self.ctx[0]) == 0 {
+    pub(crate) fn shared_ctx(&self) -> CabacContext {
+        self.ctx[5] // ctxIdx 32: shared with IntraMbTypeSuffixCabacContext bin 0
+    }
+
+    pub(crate) fn set_shared_ctx(&mut self, v: CabacContext) {
+        self.ctx[5] = v;
+    }
+
+    /// Decode a B-slice `mb_type`.
+    ///
+    /// `non_direct_neighbours` is the ctxIdxInc for the *first* bin: the count
+    /// of available left/top neighbours whose macroblock is **not**
+    /// B_Direct/B_Skip (spec Table 9-39; FFmpeg `decode_cabac_mb_type`:
+    /// `if (!IS_DIRECT(left_type)) ctx++; if (!IS_DIRECT(top_type)) ctx++;`).
+    ///
+    /// Returns `None` when the tree indicates an intra macroblock (caller
+    /// continues with `IntraMbTypeSuffixCabacContext` at ctxIdxOffset 32),
+    /// otherwise `Some(mb_type)` with the raw spec numbering 0..=22 where
+    /// 0 = B_Direct_16x16, 1/2 = L0/L1 16x16, 3 = Bi 16x16, 4..=10 =
+    /// L0/L1/Bi/L1L1 16x8 & 8x16 combos, 11 = L1_L0_8x16, 22 = B_8x8.
+    pub fn decode(&mut self, dec: &mut CabacDecoder, non_direct_neighbours: usize) -> Option<u32> {
+        let first = (non_direct_neighbours).min(2);
+        // Transcribed from FFmpeg `decode_cabac_mb_type`, B branch.
+        if dec.decode_decision(&mut self.ctx[first]) == 0 {
             return Some(0); // B_Direct_16x16
         }
-        if dec.decode_decision(&mut self.ctx[1]) == 0 {
-            // types 1 (L0) or 2 (L1)
-            return Some(1 + dec.decode_decision(&mut self.ctx[2]) as u32);
-        }
-        if dec.decode_decision(&mut self.ctx[2]) == 0 {
-            // types 3 (Bi) or 4 (L0L0_16x8)
-            return Some(3 + dec.decode_decision(&mut self.ctx[3]) as u32);
-        }
         if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            // types 5 (L0L0_8x16) or 6 (L1L1_16x8)
-            return Some(5 + dec.decode_decision(&mut self.ctx[4]) as u32);
+            // B_L0_16x16 / B_L1_16x16
+            return Some(1 + dec.decode_decision(&mut self.ctx[5]) as u32);
         }
-        // ctx[4] (ctxIdx 31) is reused for all subsequent pair-wise decisions.
-        // Each loop iteration handles one "0 → return pair" check.
-        let mut base = 7u32;
-        loop {
-            if dec.decode_decision(&mut self.ctx[4]) == 0 {
-                return Some(base + dec.decode_decision(&mut self.ctx[4]) as u32);
+        let mut bits = ((dec.decode_decision(&mut self.ctx[4]) as u32) << 3)
+            | ((dec.decode_decision(&mut self.ctx[5]) as u32) << 2)
+            | ((dec.decode_decision(&mut self.ctx[5]) as u32) << 1)
+            | (dec.decode_decision(&mut self.ctx[5]) as u32);
+        if bits < 8 {
+            // B_Bi_16x16 through B_L1_Bi_8x16 combos
+            return Some(bits + 3);
+        }
+        match bits {
+            13 => None,     // intra macroblock inside the B slice
+            14 => Some(11), // B_L1_L0_8x16
+            15 => Some(22), // B_8x8
+            _ => {
+                bits = (bits << 1) | dec.decode_decision(&mut self.ctx[5]) as u32;
+                Some(bits - 4) // B_L0_Bi_* / B_L1_Bi_* / B_Bi_Bi_*
             }
-            base += 2;
-            if base == 21 {
-                break;
-            }
         }
-        // After base reaches 21: one more ctx[4] read for type 21.
-        if dec.decode_decision(&mut self.ctx[4]) == 0 {
-            return Some(21);
-        }
-        // ctx[5] (ctxIdx 32): 0 → B_8x8 (type 22), 1 → intra.
-        if dec.decode_decision(&mut self.ctx[5]) == 0 {
-            return Some(22);
-        }
-        None // intra — caller uses IntraMbTypeSuffixCabacContext::new_pb(32, ...)
     }
 }
 
 /// `sub_mb_type` (B slices) CABAC decoder (ctxIdx 36..=39, ctxIdxOffset
-/// [`crate::cabac_tables::SUB_MB_TYPE_B_CTX`]). Ported directly from FFmpeg's
-/// `decode_cabac_b_mb_sub_type` (`cabac_state[36]`, `[37]`, `[38]`, `[39]`):
+/// [`crate::cabac_tables::SUB_MB_TYPE_B_CTX`]). Transcribed verbatim from
+/// FFmpeg's `decode_cabac_b_mb_sub_type` (`cabac_state[36]`, `[37]`, `[38]`,
+/// `[39]`). Note that `state[39]` is read **multiple times sequentially** in
+/// some paths — each call decodes a new bin and updates the same context.
 ///
 /// Returns 0..=12 matching this crate's existing CAVLC numbering for B
 /// sub_mb_type (Table 7-15). The B_Direct (0) case produces no motion data.
 /// Values 1..=12 map through `crate::mv::B_SUB_MB_PARTS` and `B_SUB_MB_DIR`.
 pub struct SubMbTypeBCabacContext {
+    /// Local layout: `[0]`=ctxIdx 36, `[1]`=37, `[2]`=38, `[3]`=39.
     ctx: [CabacContext; 4],
 }
 
@@ -1260,32 +1308,35 @@ impl SubMbTypeBCabacContext {
         Self { ctx }
     }
 
+    /// Transcribed verbatim from FFmpeg's `decode_cabac_b_mb_sub_type`.
     pub fn decode(&mut self, dec: &mut CabacDecoder) -> u32 {
+        // if(!get_cabac(state[36])) return 0; /* B_Direct_8x8 */
         if dec.decode_decision(&mut self.ctx[0]) == 0 {
-            return 0; // B_Direct
+            return 0;
         }
+        // if(!get_cabac(state[37])) return 1 + get_cabac(state[39]);
         if dec.decode_decision(&mut self.ctx[1]) == 0 {
-            return 1 + dec.decode_decision(&mut self.ctx[2]) as u32; // 1 or 2
+            // NOTE: reads state[39], NOT state[38].
+            return 1 + dec.decode_decision(&mut self.ctx[3]) as u32;
         }
-        if dec.decode_decision(&mut self.ctx[2]) == 0 {
-            return 3 + dec.decode_decision(&mut self.ctx[3]) as u32; // 3 or 4
+        // type = 3;
+        let mut type_ = 3u32;
+        // if(get_cabac(state[38])) {
+        if dec.decode_decision(&mut self.ctx[2]) == 1 {
+            // if(get_cabac(state[39]))
+            //     return 11 + get_cabac(state[39]);   ← reads 39 a second time
+            if dec.decode_decision(&mut self.ctx[3]) == 1 {
+                // return 11 + get_cabac(state[39]); ← reads 39 a third time
+                return 11 + dec.decode_decision(&mut self.ctx[3]) as u32;
+            }
+            // type += 4;                            ← type becomes 7
+            type_ += 4;
         }
-        if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            return 5 + dec.decode_decision(&mut self.ctx[3]) as u32; // 5 or 6
-        }
-        if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            return 7 + dec.decode_decision(&mut self.ctx[3]) as u32; // 7 or 8
-        }
-        if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            return 9;
-        }
-        if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            return 10;
-        }
-        if dec.decode_decision(&mut self.ctx[3]) == 0 {
-            return 11;
-        }
-        12
+        // type += 2*get_cabac(state[39]);               ← ALWAYS executed
+        type_ += 2 * dec.decode_decision(&mut self.ctx[3]) as u32;
+        // type += get_cabac(state[39]);                 ← ALWAYS executed
+        type_ += dec.decode_decision(&mut self.ctx[3]) as u32;
+        type_
     }
 }
 
@@ -1830,6 +1881,51 @@ mod tests {
         let mut ctx = IntraMbTypeSuffixCabacContext::new_pb(17, 26, 0);
         let mb_type = ctx.decode(&mut dec);
         assert!(mb_type <= 25, "must be 0..=25, got {mb_type}");
+    }
+
+    #[test]
+    fn shared_ctx17_is_initialised_identically_in_p_mb_type_and_suffix() {
+        // Regression: FFmpeg adapts ONE physical cabac_state[17] for both the
+        // P mb_type "16x8-vs-8x16" partition bit and the intra-in-P suffix's
+        // bin 0. Our split structs each hold a copy, so they must start from
+        // the same initialised state and be kept in sync via the
+        // shared_ctx/set_shared_ctx accessors (see
+        // PbCabacSliceContexts::sync_shared_mb_type_ctx_*).
+        let mut p = MbTypePCabacContext::new(26, 0);
+        let mut suffix = IntraMbTypeSuffixCabacContext::new_pb(17, 26, 0);
+        assert_eq!(
+            p.shared_ctx(),
+            suffix.shared_ctx(),
+            "both copies of ctxIdx 17 must share the same initial state"
+        );
+        // Simulate the prefix adapting the variable; the sync must carry it
+        // over to the suffix copy verbatim.
+        let adapted = CabacContext {
+            state: 42,
+            mps: 1,
+        };
+        p.set_shared_ctx(adapted);
+        assert_ne!(p.shared_ctx(), suffix.shared_ctx());
+        suffix.set_shared_ctx(p.shared_ctx());
+        assert_eq!(p.shared_ctx(), suffix.shared_ctx());
+    }
+
+    #[test]
+    fn shared_ctx32_is_initialised_identically_in_b_mb_type_and_suffix() {
+        let mut b = MbTypeBCabacContext::new(26, 0);
+        let mut suffix = IntraMbTypeSuffixCabacContext::new_pb(32, 26, 0);
+        assert_eq!(
+            b.shared_ctx(),
+            suffix.shared_ctx(),
+            "both copies of ctxIdx 32 must share the same initial state"
+        );
+        let adapted = CabacContext {
+            state: 17,
+            mps: 0,
+        };
+        b.set_shared_ctx(adapted);
+        suffix.set_shared_ctx(b.shared_ctx());
+        assert_eq!(b.shared_ctx(), suffix.shared_ctx());
     }
 
     #[test]

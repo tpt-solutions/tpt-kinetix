@@ -635,10 +635,17 @@
       early-return gate in `decoder.rs::try_decode_real_slice` (keep the gate for
       inter 8×8 / non-intra until inter 8×8 is implemented) — done for both the
       CAVLC and CABAC entropy paths.
-- [~] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
-      `ffmpeg` that actually exercises the 8×8 path (done — `mandelbrot=...`,
-      see note above) and get it to bit-exact decode — **major progress
-      (2026-08-22 session), not fully closed.** Current state:
+- [x] Generate a High-profile corpus clip (`transform_8x8_mode_flag=1`) with
+      `ffmpeg` that actually exercises the 8×8 path (done — `mandelbrot=...`)
+      **and get it to bit-exact decode — CLOSED (verified 2026-08-23).** The
+      previously-noted ±1 DC-rounding gap on the 352×288 `mandelbrot` clip is
+      gone: `dbg_hp352_localize.rs` now reports luma/cb/cr `max_diff=0`
+      (bit-exact, no deblocking), and both `high_profile_8x8_conformance.rs`
+      (CAVLC) and `high_profile_8x8_cabac_conformance.rs` matrix cells report
+      `max_abs_diff=0`. The fix had already landed as the chroma-DC dequant
+      rounding correction in `transform.rs::chroma_dc_transform` (flat
+      `(f*ls) >> (5-qP/6)`, no rounding constant — see that function's doc
+      comment, which references this exact todo item).
       - 64×48 `mandelbrot` clip: **bit-exact** without deblocking (asserted,
         `max_abs_diff=0`) and ≤2 residual error with default deblocking
         (pre-existing deblocking gap, not 8×8-specific).
@@ -1067,11 +1074,285 @@
         New synthetic repro clips added to `dbg_cabac_p_matrix.rs`
         (boxmove/colorswap/colorswap-with-partitions, forced-QP twins): all
         16 variants now decode `max_abs_diff=0`. Matrix state: cabac_p both
-        deblock variants PASS bit-exact; **cabac_b still FAILs**
-        (max_abs_diff=104, ~21% samples) — parse completes cleanly; remaining
-        divergence is in B-slice bi-predicted/direct MB semantics
-        (`MbType::BSkip`/direct use a simplified (0,0)-both-lists MV fill;
-        see `mv.rs::predict_inter_b_macroblock` Phase E.5 note) and/or B
-        mb_type index mapping for types >= 3 — next step is the same twin/oracle
+        deblock variants PASS bit-exact.
+        Next step is the same twin/oracle
         method against `tests/dbg_cabac_twin.rs`.
+      - **2026-08-23 session #4 — cabac_b progress: skip/direct MBs fixed,
+        coded-B-MB path still open.** Three real fixes landed:
+        1. **B `mb_type` CABAC tree rewritten** (`MbTypeBCabacContext::decode`):
+           the old tree was an invented structure. It is now FFmpeg's exact
+           `decode_cabac_mb_type` B branch — first bin ctxIdxInc = count of
+           available left/top neighbours that are NOT B_Direct/B_Skip
+           (`non_direct_neighbours`, threaded from `parse_b_slice_cabac`),
+           then `27+3`/`27+5` L0/L1 pair, then the `27+4`/`27+5`×3 "bits"
+           nibble (<8 → types 3..10; ==13 → intra-in-B; ==14 → type 11;
+           ==15 → B_8x8; else `bits<<1|extra − 4`).
+        2. **`ref_idx` gating in every coded-B arm**: ref_idx is only coded
+           when `num_ref_idx_lX_active_minus1 > 0`; with a single reference it
+           is implicitly 0 (§7.3.5.2). All seven sites in
+           `parse_b_macroblock_cabac` now gate (BL0/BL1/Bi 16x16, 16x8/8x16
+           per-list loops, B_8x8 per-quadrant).
+        3. **Real spatial direct mode** (`mv.rs::derive_spatial_direct` +
+           `apply_spatial_direct`, transcribed from FFmpeg
+           `pred_spatial_direct_motion`): per-list min-ref/MV-selection over
+           A/B/C(D) neighbours, list dropping when no neighbour uses a list,
+           whole-MB zero fast path, and the colocated `col_zero_flag`
+           adjustment. Colocated motion data is now persisted: `DpbEntry`
+           `.mv_grid` (previously always `None`) is populated from
+           `MvStore::to_grid_vec()` when reference P pictures are stored, and
+           threaded through `parse_b_slice_cabac`/`parse_b_slice`/
+           `predict_b_slice_mvs`.
+        Result: the b_default clip's B frame rows 0–1 (all BSkip/direct MBs)
+        are now **bit-exact vs ffmpeg** — spatial derivation + col_zero_flag
+        verified working. Remaining gap: row 2's *coded* B macroblocks
+        (bi-pred / intra-in-B / coded-direct-with-residual) still diverge
+        (~977 samples). With `direct=none` x264 clips the entire frame is
+        wrong → the bug is in the generic coded-B-MB element order or a
+        residual-context issue specific to B slices, not in direct mode.
+        Next steps: (a) dump our parsed per-element sequence for the first
+        coded B MB and diff against FFmpeg's element order for e.g.
+        B_L0_16x16 (suspects: intra-in-B suffix at ctxIdxOffset 32 semantics,
+        and B-specific nC/cbf neighbour rules); (b) verify bi-pred
+        reconstruction weighting against ffmpeg for BBi (combine_weighted
+        Default average); (c) re-check `direct_spatial_mv_pred_flag`
+        handling — temporal direct is still unimplemented (treated as
+        spatial). New harness: `examples/dbg_cabac_b.rs` (IBP clip variants
+        with direct=none/spatial/temporal + per-NAL feeding and per-MB diff).
+      - **2026-08-23 session #5 — isolation matrix narrows the cabac_b bug to
+        nonzero-MVD/intra-in-B coded MBs.** Built a variant matrix in
+        `dbg_cabac_b.rs` (each = IBP testsrc/solid-colour clip, CABAC, main,
+        deblock-offsets-0, per-NAL feeding):
+        - `b_swap` (solid green→blue→red, no MVDs): **bit-exact** ✓ — B mb_type
+          tree, cbp/qp/residual machinery, list plumbing, and B-frame output
+          ordering all proven correct.
+        - `b_forcel1` (past≠B=future solid colours, forces pure L1-coded MBs
+          with mv=0): **bit-exact** ✓ — L1 reference selection + MC correct.
+        - `b_default` (testsrc): rows of BSkip/direct MBs **bit-exact** ✓
+          (spatial derivation + col_zero_flag working); only the row containing
+          *coded* MBs diverges.
+        - `b_nodirect` / `b_min` / `b_temporal` (all-coded B slices with
+          NONZERO MVDs / intra-in-B / 16x8-B8x8 partitions): whole frame wrong.
+        Conclusion: the residual bug tracks **nonzero MVD decoding or
+        intra-in-B parsing** in the CABAC path. Fixes applied this session
+        that are correct-and-kept regardless: (1) `mvd_l0_*`/`mvd_l1_*`
+        contexts merged into one shared pair per component (FFmpeg
+        `DECODE_CABAC_MB_MVD` passes ctxbase 40/47 with NO list parameter);
+        (2) deblocking `derive_bs_pair` now applies the §8.7.2.1 bS=1 motion
+        rule per prediction list (`ref_idx_l1`/`mv_l1` differences between
+        neighbours also force bS=1 — previously only list 0 was compared, so
+        B-slice edges with differing L1 MVs were left unfiltered);
+        (3) `ref_idx` gating (num_ref_idx_lX_active == 1 → implicit 0) across
+        all seven coded-B sites.
+        Verified-unchanged (do not re-audit): `MbTypeBCabacContext::decode`
+        now transcribes FFmpeg's `decode_cabac_mb_type` B branch verbatim
+        (first-bin ctx = non-direct-neighbour count; 27+3/27+5 L0L1 pair;
+        27+4/27+5×3 bits nibble; 13→intra@32, 14→11, 15→22); B_2PART_TABLE
+        matches `ff_h264_b_mb_type_info[4..=21]`; intra-in-B suffix
+        (`IntraMbTypeSuffixCabacContext`, ctxIdxOffset 32, intra_slice=0
+        semantics incl. terminate-bin PCM check and folded ctx reuse)
+        matches `decode_cabac_intra_mb_type`.
+        NEXT STEP (queued): build the standalone C oracle harness with clang
+        (toolchain now present on the dev box) — compile FFmpeg's actual
+        `ff_init_cabac_decoder` + `get_cabac_inline` engine (cabac.c +
+        cabac_functions.h, CABAC_BITS=16) with stub headers, initialize states
+        via the verbatim `ff_h264_init_cabac_states` formula over
+        `cabac_context_init_PB[0]`, transcribe the B-slice syntax loop
+        line-by-line from `ff_h264_decode_mb_cabac`, and print per-element
+        decisions + engine state; diff against our parser's traces on the
+        failing `b_nodirect` payload to pinpoint the first divergent bin.
+      - **2026-08-23 session #6 — ROOT CAUSE FOUND AND FIXED: missing
+        `mb.motion` assignment in B_L0/B_L1/B_Bi 16x16 arms.** The B slice was
+        silently erroring with `Unsupported("inter macroblock without
+        motion")` and falling back to scaffold for every variant containing
+        coded 16x16 B MBs (b_default row 2, b_nodirect/b_min/b_temporal whole
+        frames). The error was invisible because `decoder/mod.rs`'s B-slice
+        Err arm did `let _ = e;` before falling through. Three fixes:
+        1. **`mb.motion = Some(motion)` added to arms 1 (B_L0_16x16),
+           2 (B_L1_16x16), and 3 (B_Bi_16x16)** of `parse_b_macroblock_cabac`
+           — previously only the 4..=21 and 22 arms attached motion data, so
+           every plain 16×16 inter B MB parsed successfully but carried
+           `motion: None`, crashing MV prediction at `mv.rs::inter_motion`.
+        2. **Error surfaced**: replaced `let _ = e` with an eprintln in the
+           B-slice Err arm so future parse failures aren't silent.
+        3. **MVD context sharing** (from earlier in this session): L0/L1 MVDs
+           share one context pair per component per FFmpeg
+           `DECODE_CABAC_MB_MVD` (no list param on ctxbase).
+        Results after all session #5+#6 fixes:
+        - `b_min` (16x16-only L0/L1 B MBs): **bit-exact** ✓✓
+        - `b_forcel1`: **bit-exact** ✓ (unchanged)
+        - `b_swap`: **bit-exact** ✓ (unchanged)
+        - `b_nodirect`: n=4355→393 samples wrong; only MB(3,2)=B_8x8 (diff
+          146) + tiny MB(2,2) residual noise remain
+        - `b_boxmv`: improved but nonzero-MVD sub-partition cases remain
+        - `b_default`/`b_temporal`: skip/direct rows exact ✓; remaining diffs
+          concentrated in intra-in-B / partitioned / bi-pred MBs
+        Remaining work for full cabac_b bit-exactness: audit B_8x8 direct-
+        sub-partition handling inside `apply_spatial_direct` (per-quadrant
+        col_zero_flag uses colocated quadrant block, but derivation is shared
+        from MB top-left — verify this matches FFmpeg's is_b8x8 branch);
+        verify bi-pred combine_weighted Default average matches spec §8.4.3
+        ((p0+p1+1)>>1 rounding); verify intra-in-B reconstruction paths.
+      - **2026-08-23 session #7 — SubMbTypeBCabacContext tree rewritten.**
+        The old implementation was a flat chain that didn't match FFmpeg's
+        `decode_cabac_b_mb_sub_type` at all. Three bugs fixed:
+        1. **L0/L1 discriminator read wrong context**: after ctx[1]=0, FFmpeg
+           reads `state[39]` for the L0-vs-L1 decision, ours read `state[38]`.
+        2. **Missing double state[39] read**: after the `state[38]` branch,
+           FFmpeg reads `state[39]` TWICE sequentially (`type += 2*get(39);
+           type += get(39)`) — our chain only read once per level.
+        3. **Wrong tree shape**: FFmpeg has a nested structure where
+           `state[38]=1 && state[39]=1` returns `11 + get(39)` (reading 39 a
+           third time), not a chain of pairwise decisions.
+        The new implementation is a verbatim transcription of the FFmpeg C
+        code, including the multiple sequential `state[39]` reads.
+        Isolation matrix after this fix:
+        - `b_min` (16x16-only): still **bit-exact** ✓ (sub_mb_type not used)
+        - `b_forcel1`/`b_swap`: still **bit-exact** ✓
+        - `b_nodirect`: n=393→323 (improved); max=146→238 (mixed)
+        - `b_default`/`b_temporal`/`b_boxmv`: similar or slightly changed
+        The remaining failures are in partitioned B MB types (B_16x8/B_8x16/
+        B_8x8) and/or bi-pred/intra-in-B MBs. All entropy-layer elements have
+        now been audited verbatim against FFmpeg source and corrected. The
+        next step is to investigate non-entropy semantics: MV prediction for
+        partitioned B MBs (16x8/8x16 use directional shortcuts per §8.4.1.3.1),
+        bi-pred MC averaging, and intra-in-B reconstruction.
+      - **2026-08-23 session #8 — deblocking bS list-1 rule fixed; debug
+        instrumentation added.** `derive_bs_pair` in deblock.rs now correctly
+        evaluates the §8.7.2.1 bS=1 motion condition per prediction list:
+        for each list LX, the MV/ref difference check applies only when BOTH
+        the P and Q blocks actually use that list (`ref_idx_lX >= 0`). The
+        previous naive comparison included LIST_NOT_USED sentinels, causing
+        false bS=1 triggers between direct MBs (ref_l1=0) and L0-only MBs
+        (ref_l1=-1). Also added `examples/dbg_cabac_b.rs` with 7 isolation
+        clip variants + per-NAL feeding + per-MB luma diff maps.
+      - **Current cabac_b status after sessions #5–#8:** The root cause of
+        whole-frame scaffold fallback was found and fixed (missing mb.motion).
+        B slices now parse without errors and produce real reconstruction.
+        Isolation results: solid-colour clips, forced-L1 clips, and pure
+        16x16-L0/L1 clips all decode bit-exact vs ffmpeg ✓. Remaining diffs
+        are concentrated in testsrc clips with partitioned MB types
+        (B_16x8/B_8x16/B_8x8), intra-in-B MBs, and/or nonzero-MVD bi-pred
+        combinations — these need further investigation of the MC/reconstruction
+        semantics for those specific MB types.
+      - **2026-08-23 session #9 — F.4 confirmed CLOSED; cabac_b isolation
+        sharpened; tracer instrumentation fixed; new oracle harnesses.**
+        1. **Phase F.4 is closed**: the 352×288 mandelbrot clip decodes
+           bit-exact (`dbg_hp352_localize.rs`: luma/cb/cr max_diff=0) and both
+           high-profile matrix cells report `max_abs_diff=0`. The residual ±1
+           DC issue was already fixed by the chroma-DC rounding correction in
+           `transform.rs::chroma_dc_transform`. Item flipped to `[x]`.
+        2. **Live-decoder P/B reconstruction ignored the caller's DecodeTracer**
+           — `decoder/mod.rs::decode_slice` hardcoded `NoopTracer` for the
+           parse + `reconstruct_inter_frame`/`reconstruct_b_frame` calls.
+           Fixed: `decode_slice` is now generic over `T: DecodeTracer` and
+           threads the caller's tracer through all slice parsing and B/P
+           reconstruction, so `on_motion_comp`/`on_mb_parsed`/coefficient hooks
+           now fire on real CABAC P/B streams via `decode_with_tracer`.
+        3. **New harnesses** in `tpt-kinetix-h264/tests/dbg_b_implied_pred.rs`:
+           (a) `p_boxmv_minimal` — a pure-IP CABAC clip with a moving box
+           (nonzero MVDs over a static background) asserted BIT-EXACT vs
+           ffmpeg. This is a new regression guard for the mvd path that every
+           historical all-skip forced-QP cabac_p repro never exercised.
+           (b) `b_implied_pred_oracle` — implied-prediction MV search for the
+           failing IBP isolation clips.
+        4. **Isolation findings for the remaining conformance_matrix cabac_b
+           cell failure** (`max_abs_diff=104`, ~977/4608 samples):
+           - Per-variant SAD-vs-reference pairing shows I frame bit-exact,
+             P frame wrong (sad≈36026) and B frame wrong (sad≈29237) in the
+             `b_boxmv` IBP clip — i.e. the failure already appears in *coded*
+             (non-skip) inter MBs with nonzero MVDs, not only in direct/bi-pred
+             or partitioned-B syntax.
+           - The same moving-box content as a pure-IP stream decodes
+             bit-exact, so the base CABAC P machinery (mvd contexts, cbp,
+             residuals, MC) is sound; whatever breaks appears only when the
+             stream also carries a B slice / B-slice state (e.g. DPB/ref-list
+             setup, colocated grid construction feeding back into P, or x264
+             choosing different mb modes under bframes=1).
+           - Caveat recorded for future sessions: the implied-prediction
+             oracle (residual = recon − pred; implied = ref − residual) is
+             UNRELIABLE on black/white synthetic content because sample
+             clamping at 0/255 destroys the residual estimate — run it on
+             mid-range content (e.g. `testsrc`) instead of `color=c=black`.
+           - NEXT STEPS (in order): (1) feed SPS+PPS+I+P only from the failing
+             IBP clip and check whether the P frame alone still fails (separates
+             "this particular P payload" from "B-slice state contamination");
+             (2) if it fails, dump our parsed per-MB (type, ref_idx, mvd, cbp,
+             qp_delta, total_coeff) for that slice and hand-verify against an
+             independent decode of the same NAL; (3) clamp-aware implied-pred
+             oracle on testsrc-based bframes=1 clips.
+      - **2026-08-23 session #10 — DECISIVE ISOLATION: the cabac_b cell root
+        cause is a CABAC MVD misparse in P slices carrying NONZERO MVDs, not
+        B-slice semantics at all.** New experiments in
+        `tests/dbg_b_implied_pred.rs` (all reproducible, ffmpeg-gated):
+        1. `p_from_ibp_without_b`: feeding SPS+PPS+IDR+P only (no B NAL ever)
+           still reproduces the failure (luma max=235, 1826/3072 wrong) ⇒ NOT
+           B-slice-state contamination; this specific P payload misparses.
+        2. `ibp_boxmv_cavlc`: identical content/settings with `cabac=0` decodes
+           ALL THREE FRAMES bit-exact (sad=0 each) ⇒ base syntax/reconstruction
+           (incl. intra-in-P under CAVLC) is correct.
+        3. `ibp_testsrc_cabac`: static content IBP+CABAC decodes I and P
+           bit-exact (P contains Intra16x16-in-P ⇒ CABAC intra-in-P parsing
+           works) and B at sad=7 (near-exact; separate tiny residual).
+        4. Failure signature in the failing P (`per-MB diff grid`
+           `[0,0,3,1]/[2,6,234,235]/[10×4]`): everything through MB(1,0)
+           exact; the FIRST divergence is MB(2,0), the first CODED inter MB
+           with a NONZERO MVD. Our parse reads `mvd_l0=(16,0)` where the true
+           motion (box moved 24 px from the only reference, predictor (0,0))
+           requires mvd≈±96 quarter-pel ⇒ the MVD bin consumption diverges
+           exactly there, and every later MB is garbage (phantom P8x8
+           sub_types [2,3,0,1] on flat background, final terminate bin = 0 —
+           previously masked by the lenient last-MB eos check from session #3).
+        5. Contradiction to resolve next: the pure-IP moving-box clip ALSO has
+           nonzero MVDs (val=48) and decodes bit-exact, so plain large-MVD
+           bypass decoding works. Differences to probe: mvd magnitude (48 vs
+           96 — different EG3 unary-prefix depth), the preceding-MB state
+           (intra-in-P immediately before the first coded MB), or the amvd
+           neighbour-sum inputs differing between the two streams. Suggested
+           next tool: hand-trace the raw NAL bytes through ffmpeg's
+           `decode_cabac_mb_mvd` (fetched via `tpt-kinetix-kg fetch-source`)
+           for MB(2,0) of the failing slice, starting from the printed engine
+           state `0x013e/0x000000dc` (post-mb_type), and compare bin-for-bin
+           with our `MvdCabacContext::decode`.
+      - Once this single desync is fixed, re-run `conformance_matrix`: the
+        cabac_b cell failures likely collapse, since the B frames of the
+        failing clips are otherwise near-exact (testsrc-IBP B sad=7 with
+        BBi16x16 MBs decoded).
+      - **2026-08-23 session #11 — MVD primitive PROVEN verbatim-identical to
+        FFmpeg; trigger narrowed to intra-in-P → coded-inter-MB interaction.**
+        1. Fetched `libavcodec/h264_cabac.c` + `cabac_functions.h` to repo root
+           (`ff_h264_cabac.c`, `ff_cabac_functions.h` — keep until resolved).
+           Line-by-line comparison against our `MvdCabacContext::decode` +
+           `cabac_decode_mvd_component`: first-bin context selection
+           (`(amvd-3)>>31`/`(amvd-33)>>31` trick ≡ our `<3/<33` branches),
+           continuation loop (`idx=base+3`, `if(mvd<4) idx++`, cap at 9),
+           EG3 bypass tail (unary `1<<k` with growing k, then k suffix bits),
+           the 70-cap on stored amvd, AND sign polarity
+           (`get_cabac_bypass_sign(c,-mvd)` ⇒ bit0=+val/bit1=−val) are ALL
+           identical. The mvd primitive is NOT the bug.
+        2. New experiments in `dbg_b_implied_pred.rs`:
+           - `ibp_boxmv_smallmv` (6 px/frame ⇒ mvd≈48, no intra-in-P, all
+             PL016x16): ALL THREE FRAMES BIT-EXACT including the B frame.
+           - `ibp_bigmv_nointra` (same big motion, crf=10): x264 STILL codes
+             intra-in-P (+ P8x8/P16x8) in the P slice and it still fails
+             (P sad=30623); B frame sad=256 (near-exact).
+        3. Conclusion: the failure needs the combination "INTRA-IN-P macroblock
+           followed by a CODED inter MB whose MVD is large enough to sit near a
+           decision threshold" — consistent with a CONTEXT-STATE divergence
+           (wrong context variable evolved during the intra-in-P parse) rather
+           than a bin-count error, because pixels through MB(1,0) stay exact
+           and MB(2,0)'s structure still looks coherent while its mvd decodes
+           as 16 instead of ~96. Candidate contexts to audit for the
+           intra-in-P path (compare against ffmpeg's flat cabac_state indices):
+           the IntraMbTypeSuffixCabacContext (spec ctxIdxOffset 17 for P), the
+           luma-DC cbf read (always present for Intra16x16, even at cbp=0),
+           chroma_pred_mode neighbour conditions (ffmpeg: left/top
+           chroma_pred_mode_table != 0, ctx base 64), and whether any of these
+           accidentally share context variables with the inter elements
+           (mb_type/ref_idx/mvd/cbp/qp_delta) in `PbCabacSliceContexts`.
+        4. Also useful: the failing slice ends with the engine running OUT of
+           bytes (terminate read at offset exhausted ⇒ we consumed MORE bits
+           than x264 wrote somewhere, i.e. an EXTRA bin is being consumed
+           relative to the encoder — look for a missing gate that skips an
+           element x264 did not write, most plausibly inside the intra-in-P
+           branch).
 
