@@ -412,6 +412,39 @@ fn mi_height_log2(bsize: usize) -> usize {
     (BLOCK_HEIGHT[bsize] / MI_SIZE).ilog2() as usize
 }
 
+/// Per-plane DC/AC quantizer-index deltas from `quantization_params()` (AV1
+/// spec §5.9.12 / §7.12.2's `get_dc_quant`/`get_ac_quant`): `delta_q_y_dc`
+/// (luma DC only — luma AC never has a delta), `delta_q_u_dc`/`delta_q_u_ac`,
+/// `delta_q_v_dc`/`delta_q_v_ac`. All zero for a stream with no per-plane
+/// quantizer adjustment (the common case, and the only case the current
+/// corpus exercises).
+#[derive(Clone, Copy, Default)]
+pub struct DeltaQ {
+    pub y_dc: i32,
+    pub u_dc: i32,
+    pub u_ac: i32,
+    pub v_dc: i32,
+    pub v_ac: i32,
+}
+
+/// Frame-header fields `read_cdef`/`read_delta_qindex`/`read_delta_lf`
+/// (§5.11.56/§5.11.19/§5.11.20) need, bundled to avoid growing
+/// `decode_tile_group`'s already-long positional argument list further.
+/// `sequence_header.enable_cdef` and the frame-header `delta_q`/`delta_lf`
+/// params are all zero-bit-consuming when their gate is off, so this is a
+/// true no-op on any stream that doesn't use them (§7.11.7's own internal
+/// gate, not a caller-side skip).
+#[derive(Clone, Copy, Default)]
+pub struct CdefDeltaParams {
+    pub enable_cdef: bool,
+    pub cdef_bits: u8,
+    pub delta_q_present: bool,
+    pub delta_q_res: u8,
+    pub delta_lf_present: bool,
+    pub delta_lf_res: u8,
+    pub delta_lf_multi: bool,
+}
+
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
 /// and the neighbour-context arrays (partition / luma-mode / chroma-mode /
 /// tx-size) the syntax elements read from.
@@ -425,7 +458,7 @@ struct TileDecodeState<'a> {
     tx_mode_select: bool,
     reduced_tx_set: bool,
     lossless: bool,
-    qindex: u8,
+    delta_q: DeltaQ,
     subsampling_x: bool,
     subsampling_y: bool,
     /// `Mi_Width_Log2`/`Mi_Height_Log2` of the leaf block most recently
@@ -479,6 +512,44 @@ struct TileDecodeState<'a> {
     /// for a rectangular neighbour.
     tx_above: Vec<u8>,
     tx_left: Vec<u8>,
+    // ── §5.11.7/§5.11.19 `read_cdef`/`read_delta_qindex`/`read_delta_lf`
+    // state ─────────────────────────────────────────────────────────────
+    /// `use_128x128_superblock` — needed here (not just for the superblock
+    /// loop in `decode_tile_group`) for the `MiSize == sbSize` skip-gate all
+    /// three functions share.
+    use_128x128_superblock: bool,
+    /// Frame-header `enable_cdef` (sequence-header flag) gate for `read_cdef`.
+    enable_cdef: bool,
+    /// Frame-header `cdef_bits` (§5.9.19): width in bits of each `cdef_idx`
+    /// read.
+    cdef_bits: u8,
+    /// Frame-header `delta_q_present`/`delta_q_res` (§5.9.17).
+    delta_q_present: bool,
+    delta_q_res: u8,
+    /// Frame-header `delta_lf_present`/`delta_lf_res`/`delta_lf_multi`
+    /// (§5.9.18).
+    delta_lf_present: bool,
+    delta_lf_res: u8,
+    delta_lf_multi: bool,
+    /// `NumPlanes` (1 for monochrome, 3 otherwise) — gates `delta_lf_multi`'s
+    /// `frameLfCount` (2 vs 4).
+    num_planes: u8,
+    /// `CurrentQIndex` (§5.11.19): starts at `base_q_idx` each tile, updated
+    /// in place by `read_delta_qindex` when `delta_q_present`. Feeds
+    /// `qindex_for_plane` in place of the static frame-level `qindex` once
+    /// any block actually carries a nonzero delta.
+    current_q_index: u8,
+    /// `DeltaLF[FRAME_LF_COUNT]` (§5.11.19), reset to 0 once per tile.
+    delta_lf: [i8; 4],
+    /// `ReadDeltas` (§5.11.4's `decode_tile()`): true only for the first
+    /// coded block of each superblock (when `delta_q_present`), forced back
+    /// to false immediately after `read_delta_lf` regardless of whether that
+    /// first block actually consumed a delta.
+    read_deltas: bool,
+    /// `cdef_idx[r][c]` (§5.11.56 `clear_cdef`/`read_cdef`), keyed by the
+    /// aligned 64×64-unit mi position; absent == spec's `-1` ("not yet
+    /// signalled this superblock").
+    cdef_idx: std::collections::HashMap<(usize, usize), i8>,
     // ── Inter-prediction (AV1 Phase E) state ───────────────────────────────
     /// `true` when the current frame carries no inter blocks (KEY / INTRA_ONLY).
     frame_is_intra: bool,
@@ -555,6 +626,7 @@ impl<'a> TileDecodeState<'a> {
         y_stride: usize,
         uv_stride: usize,
         qindex: u8,
+        delta_q: DeltaQ,
         tx_mode_select: bool,
         reduced_tx_set: bool,
         subsampling_x: bool,
@@ -571,6 +643,8 @@ impl<'a> TileDecodeState<'a> {
         enable_intra_edge_filter: bool,
         allow_screen_content_tools: bool,
         allow_intrabc: bool,
+        use_128x128_superblock: bool,
+        cdef_delta: CdefDeltaParams,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
         reference_select: bool,
@@ -605,7 +679,7 @@ impl<'a> TileDecodeState<'a> {
             tx_mode_select,
             reduced_tx_set,
             lossless,
-            qindex,
+            delta_q,
             subsampling_x,
             subsampling_y,
             mi_width_log2_above: vec![0u8; mi_cols],
@@ -620,6 +694,19 @@ impl<'a> TileDecodeState<'a> {
             // transform, i.e. `TX_4X4`'s width (4) / height (4).
             tx_above: vec![4u8; mi_cols],
             tx_left: vec![4u8; mi_rows],
+            use_128x128_superblock,
+            enable_cdef: cdef_delta.enable_cdef,
+            cdef_bits: cdef_delta.cdef_bits,
+            delta_q_present: cdef_delta.delta_q_present,
+            delta_q_res: cdef_delta.delta_q_res,
+            delta_lf_present: cdef_delta.delta_lf_present,
+            delta_lf_res: cdef_delta.delta_lf_res,
+            delta_lf_multi: cdef_delta.delta_lf_multi,
+            num_planes: if monochrome { 1 } else { 3 },
+            current_q_index: qindex,
+            delta_lf: [0i8; 4],
+            read_deltas: false,
+            cdef_idx: std::collections::HashMap::new(),
             frame_is_intra,
             allow_high_precision_mv,
             reference_select,
@@ -667,6 +754,148 @@ impl<'a> TileDecodeState<'a> {
             palette_u_colors_left: vec![Vec::new(); mi_rows],
         }
     }
+
+    /// `get_dc_quant(plane)`/`get_ac_quant(plane)` (AV1 spec §7.12.2), already
+    /// clamped to a valid table index: luma's AC term never has a delta,
+    /// only its DC term (`+ DeltaQYDc`) does; chroma has both a DC and an AC
+    /// delta per plane. `segmentation_enabled`'s per-segment `alt_q` feature
+    /// (`get_qindex`'s `ignoreDeltaQ` branch) isn't applied here — the
+    /// current corpus has no segmentation, so `get_qindex(0, segment_id) ==
+    /// self.current_q_index` always (and `current_q_index == qindex` unless
+    /// `read_delta_qindex` has applied a nonzero delta); wire the segment
+    /// feature override in when segmentation support lands for real.
+    fn qindex_for_plane(&self, plane: usize) -> (u8, u8) {
+        let clamp = |v: i32| v.clamp(0, 255) as u8;
+        let q = self.current_q_index as i32;
+        match plane {
+            0 => (clamp(q + self.delta_q.y_dc), clamp(q)),
+            1 => (clamp(q + self.delta_q.u_dc), clamp(q + self.delta_q.u_ac)),
+            _ => (clamp(q + self.delta_q.v_dc), clamp(q + self.delta_q.v_ac)),
+        }
+    }
+
+    /// `clear_cdef(r, c)` (§5.11.56): unset the `cdef_idx` slot(s) for a
+    /// superblock about to be decoded — called once per superblock, mirroring
+    /// `decode_tile()`'s own call site (before `decode_partition`).
+    fn clear_cdef(&mut self, mi_row: usize, mi_col: usize) {
+        const CDEF_SIZE4: usize = 16; // Num_4x4_Blocks_Wide[BLOCK_64X64]
+        self.cdef_idx.remove(&(mi_row, mi_col));
+        if self.use_128x128_superblock {
+            self.cdef_idx.remove(&(mi_row, mi_col + CDEF_SIZE4));
+            self.cdef_idx.remove(&(mi_row + CDEF_SIZE4, mi_col));
+            self.cdef_idx
+                .remove(&(mi_row + CDEF_SIZE4, mi_col + CDEF_SIZE4));
+        }
+    }
+
+    /// `read_cdef()` (§5.11.56): reads at most one `L(cdef_bits)` literal per
+    /// 64×64 unit per superblock (zero bits, hence a true no-op, whenever
+    /// `cdef_bits == 0` — the only case the current corpus exercises).
+    fn read_cdef(&mut self, mi_row: usize, mi_col: usize, bsize: usize, skip: bool) {
+        if skip || self.lossless || !self.enable_cdef || self.allow_intrabc {
+            return;
+        }
+        const CDEF_SIZE4: usize = 16; // Num_4x4_Blocks_Wide[BLOCK_64X64]
+        let mask = !(CDEF_SIZE4 - 1);
+        let r = mi_row & mask;
+        let c = mi_col & mask;
+        if self.cdef_idx.contains_key(&(r, c)) {
+            return;
+        }
+        let idx = self.dec.read_literal(self.cdef_bits as u32) as i8;
+        let w4 = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let h4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let mut i = r;
+        while i < r + h4 {
+            let mut j = c;
+            while j < c + w4 {
+                self.cdef_idx.insert((i, j), idx);
+                j += CDEF_SIZE4;
+            }
+            i += CDEF_SIZE4;
+        }
+    }
+
+    /// `read_delta_qindex()` (§5.11.19): updates `current_q_index` in place.
+    /// A true no-op (consumes zero bits) whenever `ReadDeltas` is false, i.e.
+    /// for every block after the first one in its superblock, or whenever
+    /// `delta_q_present` is off.
+    fn read_delta_qindex(&mut self, bsize: usize, skip: bool) {
+        let sb_size = if self.use_128x128_superblock {
+            BLOCK_128X128
+        } else {
+            BLOCK_64X64
+        };
+        if bsize == sb_size && skip {
+            return;
+        }
+        if !self.read_deltas {
+            return;
+        }
+        const DELTA_Q_SMALL: i32 = 3;
+        let sym = self.mode_cdfs.read_delta_q_abs(&mut self.dec) as i32;
+        let mut delta_q_abs = sym;
+        if sym == DELTA_Q_SMALL {
+            let rem_bits = self.dec.read_literal(3) + 1;
+            let abs_bits = self.dec.read_literal(rem_bits);
+            delta_q_abs = (abs_bits + (1 << rem_bits) + 1) as i32;
+        }
+        if delta_q_abs != 0 {
+            let sign = self.dec.read_literal(1);
+            let reduced = if sign == 1 { -delta_q_abs } else { delta_q_abs };
+            let new_q = self.current_q_index as i32 + (reduced << self.delta_q_res);
+            self.current_q_index = new_q.clamp(1, 255) as u8;
+        }
+    }
+
+    /// `read_delta_lf()` (§5.11.20): updates `delta_lf` in place. A true
+    /// no-op (consumes zero bits) whenever `ReadDeltas` is false or
+    /// `delta_lf_present` is off.
+    fn read_delta_lf(&mut self, bsize: usize, skip: bool) {
+        let sb_size = if self.use_128x128_superblock {
+            BLOCK_128X128
+        } else {
+            BLOCK_64X64
+        };
+        if bsize == sb_size && skip {
+            return;
+        }
+        if !self.read_deltas || !self.delta_lf_present {
+            return;
+        }
+        const DELTA_LF_SMALL: i32 = 3;
+        const MAX_LOOP_FILTER: i32 = 63;
+        let frame_lf_count = if self.delta_lf_multi {
+            if self.num_planes > 1 {
+                4
+            } else {
+                2
+            }
+        } else {
+            1
+        };
+        for i in 0..frame_lf_count {
+            let sym = if self.delta_lf_multi {
+                self.mode_cdfs.read_delta_lf_abs(&mut self.dec, Some(i)) as i32
+            } else {
+                self.mode_cdfs.read_delta_lf_abs(&mut self.dec, None) as i32
+            };
+            let mut abs_val = sym;
+            if sym == DELTA_LF_SMALL {
+                let rem_bits = self.dec.read_literal(3) + 1;
+                let abs_bits = self.dec.read_literal(rem_bits);
+                abs_val = (abs_bits + (1 << rem_bits) + 1) as i32;
+            }
+            if abs_val != 0 {
+                let sign = self.dec.read_literal(1);
+                let reduced = if sign == 1 { -abs_val } else { abs_val };
+                let cur = self.delta_lf[i] as i32;
+                let updated = (cur + (reduced << self.delta_lf_res))
+                    .clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
+                self.delta_lf[i] = updated as i8;
+            }
+        }
+    }
 }
 
 /// Decode one tile group's bitstream into the output planes.
@@ -688,6 +917,7 @@ pub fn decode_tile_group(
     height: usize,
     _bit_depth: u8,
     qindex: u8,
+    delta_q: DeltaQ,
     _use_128x128_sb: bool,
     tile_x: usize,
     tile_y: usize,
@@ -707,6 +937,7 @@ pub fn decode_tile_group(
     enable_intra_edge_filter: bool,
     allow_screen_content_tools: bool,
     allow_intrabc: bool,
+    cdef_delta: CdefDeltaParams,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
     reference_select: bool,
@@ -785,6 +1016,7 @@ pub fn decode_tile_group(
         y_stride,
         uv_stride,
         qindex,
+        delta_q,
         tx_mode_select,
         reduced_tx_set,
         true, // subsampling_x (4:2:0)
@@ -801,6 +1033,8 @@ pub fn decode_tile_group(
         enable_intra_edge_filter,
         allow_screen_content_tools,
         allow_intrabc,
+        use_128,
+        cdef_delta,
         frame_is_intra,
         allow_high_precision_mv,
         reference_select,
@@ -997,6 +1231,13 @@ pub fn reconstruct_av1_frame(
                 height,
                 frame_header.bit_depth,
                 frame_header.base_q_idx,
+                DeltaQ {
+                    y_dc: frame_header.delta_q_y_dc,
+                    u_dc: frame_header.delta_q_u_dc,
+                    u_ac: frame_header.delta_q_u_ac,
+                    v_dc: frame_header.delta_q_v_dc,
+                    v_ac: frame_header.delta_q_v_ac,
+                },
                 frame_header.use_128x128_superblock,
                 i % tile_cols,
                 i / tile_cols,
@@ -1016,6 +1257,15 @@ pub fn reconstruct_av1_frame(
                 seq.enable_intra_edge_filter,
                 frame_header.allow_screen_content_tools,
                 frame_header.allow_intrabc,
+                CdefDeltaParams {
+                    enable_cdef: seq.enable_cdef,
+                    cdef_bits: frame_header.cdef_bits,
+                    delta_q_present: frame_header.delta_q_present,
+                    delta_q_res: frame_header.delta_q_res,
+                    delta_lf_present: frame_header.delta_lf_present,
+                    delta_lf_res: frame_header.delta_lf_res,
+                    delta_lf_multi: frame_header.delta_lf_multi,
+                },
                 frame_is_intra,
                 frame_header.allow_high_precision_mv,
                 frame_header.reference_select,

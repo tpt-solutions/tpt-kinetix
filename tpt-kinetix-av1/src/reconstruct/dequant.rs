@@ -38,9 +38,21 @@ fn dc_dequant(qindex: u8) -> i32 {
 /// `TX_32X32` and 4 for `TX_64X64` — omitting it (as earlier code did)
 /// overscales every non-trivial coefficient in the two largest transform
 /// sizes by that same factor.
-pub(super) fn dequantize_coeffs(quant: &[i32], tx_size: usize, qindex: u8) -> Vec<i32> {
-    let dc = dc_dequant(qindex) as i64;
-    let ac = ac_dequant(qindex) as i64;
+///
+/// `qindex_dc`/`qindex_ac` are the caller's already-computed, already-clamped
+/// `get_dc_quant`/`get_ac_quant` indices (AV1 spec §7.12.2: `dc_q(get_qindex(
+/// 0, segment_id) + DeltaQ{Y,U,V}Dc)` / `ac_q(get_qindex(0, segment_id) [+
+/// DeltaQ{U,V}Ac])` — the DC term uses a per-plane delta-adjusted index, the
+/// luma AC term never does, only chroma AC does). Passing the same value for
+/// both reproduces the old (delta-q-blind) behavior.
+pub(super) fn dequantize_coeffs(
+    quant: &[i32],
+    tx_size: usize,
+    qindex_dc: u8,
+    qindex_ac: u8,
+) -> Vec<i32> {
+    let dc = dc_dequant(qindex_dc) as i64;
+    let ac = ac_dequant(qindex_ac) as i64;
     let denom = dq_denom(tx_size) as i64;
     const CLIP_LO: i64 = -(1i64 << 15);
     const CLIP_HI: i64 = (1i64 << 15) - 1;
@@ -87,3 +99,23 @@ pub(super) const COS128_LOOKUP: [i32; 65] = [
     2896, 2824, 2751, 2675, 2598, 2520, 2440, 2359, 2276, 2191, 2106, 2019, 1931, 1842, 1751, 1660,
     1567, 1474, 1380, 1285, 1189, 1092, 995, 897, 799, 700, 601, 501, 401, 301, 201, 101, 0,
 ];
+
+#[cfg(test)]
+mod dequant_tests {
+    use super::*;
+
+    #[test]
+    fn dequantize_coeffs_uses_separate_dc_and_ac_qindex() {
+        // Regression test for the 2026-08-24 fix: the DC coefficient (index
+        // 0) must scale by `DC_QLOOKUP_8[qindex_dc]`, and every other
+        // (AC) coefficient by `AC_QLOOKUP_8[qindex_ac]` — previously both
+        // used the same single `qindex`, silently ignoring any per-plane
+        // `delta_q_{y,u,v}_dc` adjustment.
+        let quant = vec![2, 3, 0, 0];
+        let dequant = dequantize_coeffs(&quant, TX_4X4, 100, 150);
+        assert_eq!(dequant[0], 2 * DC_QLOOKUP_8[100]);
+        assert_eq!(dequant[1], 3 * AC_QLOOKUP_8[150]);
+        assert_eq!(dequant[2], 0);
+        assert_eq!(dequant[3], 0);
+    }
+}

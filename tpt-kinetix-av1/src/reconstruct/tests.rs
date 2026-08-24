@@ -22,6 +22,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         height,
         8,
         qindex,
+        DeltaQ::default(),
         false,
         0,
         0,
@@ -41,6 +42,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         false,
         false,
         false, // allow_intrabc
+        CdefDeltaParams::default(),
         true,
         false,
         false,
@@ -474,6 +476,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         8,
         4,
         128,
+        DeltaQ::default(),
         true,
         false,
         false,
@@ -490,6 +493,8 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         false,
         false,
         true,
+        false, // use_128x128_superblock
+        CdefDeltaParams::default(),
         false,
         false,
         false,
@@ -510,6 +515,311 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
     // Querying a *larger* node (BLOCK_16X16, bsl=2) against that same
     // BLOCK_8X8 neighbour: 1 < 2, so left=true -> ctx = 1*2+0 = 2.
     assert_eq!(state.partition_context(0, 2, BLOCK_16X16), 2);
+}
+
+#[test]
+fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
+    // AV1 spec §7.12.2 `get_dc_quant`/`get_ac_quant`: the DC term for every
+    // plane uses `qindex + DeltaQ{Y,U,V}Dc`; only chroma's AC term has its
+    // own delta (`DeltaQ{U,V}Ac`) — luma AC never does. Regression test for
+    // the 2026-08-24 fix: `dequantize_coeffs` previously always used the
+    // plain frame `qindex` for every plane's DC term, silently ignoring
+    // these (parsed but unused) frame-header fields.
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    let state = TileDecodeState::new(
+        &[0u8; 8],
+        0,
+        8,
+        8,
+        4,
+        4,
+        &mut y,
+        &mut u,
+        &mut v,
+        8,
+        4,
+        100,
+        DeltaQ {
+            y_dc: 5,
+            u_dc: -10,
+            u_ac: 3,
+            v_dc: 200, // deliberately large enough to force clamping to 255
+            v_ac: -150, // deliberately large enough to force clamping to 0
+        },
+        true,
+        false,
+        false,
+        false,
+        0,
+        0,
+        8,
+        8,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false, // use_128x128_superblock
+        CdefDeltaParams::default(),
+        false,
+        false,
+        false,
+        INTERP_SWITCHABLE,
+        [0u8; 9],
+        RefFrames::empty(),
+        &mut meta,
+    );
+    assert_eq!(state.qindex_for_plane(0), (105, 100), "luma: dc+5, ac plain");
+    assert_eq!(
+        state.qindex_for_plane(1),
+        (90, 103),
+        "chroma U: dc-10, ac+3"
+    );
+    assert_eq!(
+        state.qindex_for_plane(2),
+        (255, 0),
+        "chroma V: dc/ac both clamp to the valid [0, 255] range"
+    );
+}
+
+/// Shared factory for the `read_cdef`/`read_delta_qindex`/`read_delta_lf`
+/// regression tests below: only the parameters those three functions'
+/// gates actually inspect vary between tests, everything else is a fixed
+/// 8x8-frame placeholder.
+#[allow(clippy::too_many_arguments)]
+fn make_cdef_delta_state<'a>(
+    y: &'a mut [u8],
+    u: &'a mut [u8],
+    v: &'a mut [u8],
+    meta: &'a mut FrameMeta,
+    qindex: u8,
+    cdef_delta: CdefDeltaParams,
+    use_128x128_superblock: bool,
+    allow_intrabc: bool,
+) -> TileDecodeState<'a> {
+    TileDecodeState::new(
+        &[0u8; 8],
+        0,
+        8,
+        8,
+        4,
+        4,
+        y,
+        u,
+        v,
+        8,
+        4,
+        qindex,
+        DeltaQ::default(),
+        true,
+        false,
+        false,
+        false,
+        0,
+        0,
+        8,
+        8,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        allow_intrabc,
+        use_128x128_superblock,
+        cdef_delta,
+        false,
+        false,
+        false,
+        INTERP_SWITCHABLE,
+        [0u8; 9],
+        RefFrames::empty(),
+        meta,
+    )
+}
+
+#[test]
+fn read_cdef_marks_the_64x64_slot_set_even_at_cdef_bits_zero_and_reads_only_once() {
+    // §5.11.56 `read_cdef()`: `L(cdef_bits)` is a zero-width (true no-op)
+    // read when `cdef_bits == 0` — the only value the current corpus
+    // exercises — but the spec still requires the `cdef_idx[r][c]` slot to
+    // be marked "signalled" so a second block in the same 64x64 unit of the
+    // same superblock does not read (or derive) a value again.
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams {
+            enable_cdef: true,
+            cdef_bits: 0,
+            ..Default::default()
+        },
+        false,
+        false,
+    );
+    assert!(state.cdef_idx.is_empty());
+    state.read_cdef(0, 0, BLOCK_8X8, false);
+    assert_eq!(state.cdef_idx.get(&(0, 0)), Some(&0));
+    let bit_pos_after_first = state.dec.bit_position();
+    state.read_cdef(0, 0, BLOCK_8X8, false);
+    assert_eq!(
+        state.dec.bit_position(),
+        bit_pos_after_first,
+        "second read_cdef in the same 64x64 unit must not consume more bits"
+    );
+}
+
+#[test]
+fn read_cdef_is_a_true_noop_when_any_gate_condition_holds() {
+    // §5.11.56: `skip || CodedLossless || !enable_cdef || allow_intrabc`
+    // all return immediately without touching `cdef_idx` or the bitstream.
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    // enable_cdef = false.
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams {
+            enable_cdef: false,
+            cdef_bits: 3,
+            ..Default::default()
+        },
+        false,
+        false,
+    );
+    let bit_pos_before = state.dec.bit_position();
+    state.read_cdef(0, 0, BLOCK_8X8, false);
+    assert!(state.cdef_idx.is_empty());
+    assert_eq!(state.dec.bit_position(), bit_pos_before);
+}
+
+#[test]
+fn read_delta_qindex_is_a_true_noop_when_delta_q_not_present() {
+    // §5.11.19 `read_delta_qindex()`: `ReadDeltas` is only ever set when
+    // `delta_q_present` is true (`decode_superblock`'s `ReadDeltas =
+    // delta_q_present`), so a stream with `delta_q_present == false` never
+    // reads a delta_q_abs symbol at all — confirmed here by checking the
+    // bitstream position is untouched.
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams::default(), // delta_q_present: false
+        false,
+        false,
+    );
+    let bit_pos_before = state.dec.bit_position();
+    state.read_delta_qindex(BLOCK_8X8, false);
+    assert_eq!(state.current_q_index, 100);
+    assert_eq!(state.dec.bit_position(), bit_pos_before);
+}
+
+#[test]
+fn read_delta_qindex_skips_at_superblock_size_when_skip_is_set() {
+    // §5.11.19: `if ( MiSize == sbSize && skip ) return` fires before the
+    // `ReadDeltas` check, even when `delta_q_present` is on.
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams {
+            delta_q_present: true,
+            ..Default::default()
+        },
+        false,
+        false,
+    );
+    state.read_deltas = true;
+    let bit_pos_before = state.dec.bit_position();
+    state.read_delta_qindex(BLOCK_64X64, true); // sbSize (use_128 == false) && skip
+    assert_eq!(state.current_q_index, 100);
+    assert_eq!(state.dec.bit_position(), bit_pos_before);
+}
+
+#[test]
+fn read_delta_lf_is_a_true_noop_when_delta_lf_not_present() {
+    let mut y = vec![0u8; 64];
+    let mut u = vec![0u8; 16];
+    let mut v = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams {
+            delta_q_present: true, // ReadDeltas true, but delta_lf_present false
+            ..Default::default()
+        },
+        false,
+        false,
+    );
+    state.read_deltas = true;
+    let bit_pos_before = state.dec.bit_position();
+    state.read_delta_lf(BLOCK_8X8, false);
+    assert_eq!(state.delta_lf, [0i8; 4]);
+    assert_eq!(state.dec.bit_position(), bit_pos_before);
+}
+
+#[test]
+fn decode_superblock_resets_read_deltas_from_delta_q_present_and_clears_cdef() {
+    // `decode_superblock` mirrors `decode_tile()`'s per-superblock prelude:
+    // `ReadDeltas = delta_q_present`, `clear_cdef(r, c)`.
+    let mut y = vec![128u8; 64 * 64];
+    let mut u = vec![128u8; 32 * 32];
+    let mut v = vec![128u8; 32 * 32];
+    let mut meta = FrameMeta::new(64, 64);
+    let mut state = make_cdef_delta_state(
+        &mut y,
+        &mut u,
+        &mut v,
+        &mut meta,
+        100,
+        CdefDeltaParams {
+            delta_q_present: true,
+            ..Default::default()
+        },
+        false,
+        false,
+    );
+    state.read_deltas = false;
+    state.cdef_idx.insert((0, 0), 2);
+    state.clear_cdef(0, 0);
+    assert!(
+        !state.cdef_idx.contains_key(&(0, 0)),
+        "clear_cdef must unset the slot before the superblock is decoded"
+    );
 }
 
 #[test]
@@ -592,6 +902,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         64,
         32,
         128,
+        DeltaQ::default(),
         true,
         false,
         false,
@@ -608,6 +919,8 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         false,
         false,
         true,
+        false, // use_128x128_superblock
+        CdefDeltaParams::default(),
         false,
         false,
         false,

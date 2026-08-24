@@ -538,34 +538,69 @@ pub(crate) fn predict_mv(
     )
     .or_else(|| neighbor_above_left(store, cur, mb_idx, mb_width, py_off, px_off, slice_id));
 
-    if part_w == 16 && part_h == 8 {
+    let pred = if part_w == 16 && part_h == 8 {
         if part_idx == 0 {
-            if let Some(n) = b {
+            if let Some(n) = &b {
                 if n.ref_idx == ref_idx {
-                    return n.mv;
+                    n.mv
+                } else {
+                    median_pred(a, b, c, ref_idx)
                 }
+            } else {
+                median_pred(a, b, c, ref_idx)
             }
-        } else if let Some(n) = a {
+        } else if let Some(n) = &a {
             if n.ref_idx == ref_idx {
-                return n.mv;
+                n.mv
+            } else {
+                median_pred(a, b, c, ref_idx)
             }
+        } else {
+            median_pred(a, b, c, ref_idx)
         }
-    }
-    if part_w == 8 && part_h == 16 {
+    } else if part_w == 8 && part_h == 16 {
         if part_idx == 0 {
-            if let Some(n) = a {
+            if let Some(n) = &a {
                 if n.ref_idx == ref_idx {
-                    return n.mv;
+                    n.mv
+                } else {
+                    median_pred(a, b, c, ref_idx)
                 }
+            } else {
+                median_pred(a, b, c, ref_idx)
             }
-        } else if let Some(n) = c {
+        } else if let Some(n) = &c {
             if n.ref_idx == ref_idx {
-                return n.mv;
+                n.mv
+            } else {
+                median_pred(a, b, c, ref_idx)
             }
+        } else {
+            median_pred(a, b, c, ref_idx)
         }
+    } else {
+        median_pred(a, b, c, ref_idx)
+    };
+
+    // Session #30 diagnostic (todo-h264.md): MVP input/output trace for the
+    // c_p8x8 investigation. Gated on KINETIX_BINTRACE like the other parsers.
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        let fmt = |n: &Option<MvNeighbor>| match n {
+            None => "None".to_string(),
+            Some(n) => format!("Some(mv=({},{}) ri={})", n.mv[0], n.mv[1], n.ref_idx),
+        };
+        eprintln!(
+            "MVP mb{} part({part_w}x{part_h},{part_idx}) ref{ref_idx}: A={} B={} C={} -> ({},{})",
+            mb_idx,
+            fmt(&a),
+            fmt(&b),
+            fmt(&c),
+            pred[0],
+            pred[1]
+        );
     }
 
-    median_pred(a, b, c, ref_idx)
+    pred
 }
 
 /// Predict the MV of a P_8x8 sub-macroblock partition (§8.4.1.3.2).

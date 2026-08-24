@@ -16,7 +16,8 @@ pub(super) fn reconstruct_tx_block(
     px_x: usize,
     px_y: usize,
     internal_tx_size: usize,
-    qindex: u8,
+    qindex_dc: u8,
+    qindex_ac: u8,
     pred_mode: usize,
     skip: bool,
     filter_intra_mode: Option<usize>,
@@ -82,7 +83,7 @@ pub(super) fn reconstruct_tx_block(
                 blk,
                 ctx_snap,
                 cdf_snap,
-                qindex,
+                qindex_ac,
                 pre_raw_state,
                 pre_trace_len,
             );
@@ -96,10 +97,11 @@ pub(super) fn reconstruct_tx_block(
             );
         }
         if coeffs.eob > 0 {
-            let dequant = dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex);
+            let dequant =
+                dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex_dc, qindex_ac);
             if dbg {
                 eprintln!(
-                    "DBG dequant qindex={qindex} dequant[0..8]={:?}",
+                    "DBG dequant qindex_dc={qindex_dc} qindex_ac={qindex_ac} dequant[0..8]={:?}",
                     &dequant[..dequant.len().min(8)]
                 );
             }

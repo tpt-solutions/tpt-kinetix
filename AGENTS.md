@@ -46,6 +46,15 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   (the `conformance` job installs it on Ubuntu). Locally use `just conformance`.
   The `--strict` (pixel-exact) conformance assertion is **currently non-blocking**
   (`continue-on-error: true` in CI) because H.264/AV1 decoders are **not pixel-exact yet**.
+- **ffmpeg-dependent `dbg_*`/conformance tests must skip, not panic.** `tpt-kinetix-h264/tests/dbg_*.rs`
+  and `examples/dbg_*.rs` (and the `conformance_*`/`phase_c_*` test files) shell out to `ffmpeg`
+  to synthesize reference clips/YUV. Gate them on a `ffmpeg_available()` helper (either the shared
+  `tpt_kinetix_test_utils::reference::ffmpeg_available`, or a local
+  `Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)`)
+  and `return` early (or have the generator return `Option` and use `else { eprintln!(...); return; }`)
+  so they **skip** when `ffmpeg` is absent from `PATH`. Never `.unwrap()` a
+  `Command::new("ffmpeg").output()` result — when `ffmpeg` is missing this panics with
+  `Os { kind: NotFound, … "No such file or directory" }` and fails the whole test run.
 - **Decoders are incomplete by design.** H.264 CAVLC I/P/B and CABAC I slices are bit-exact vs
   `ffmpeg` for a supported subset (4:2:0, progressive, 16-px-aligned, no 8x8 transform); CABAC
   P/B, the 8x8 transform/High profile, and interlaced (PAFF/MBAFF) are not yet, so

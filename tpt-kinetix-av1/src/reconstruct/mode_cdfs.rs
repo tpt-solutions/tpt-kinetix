@@ -21,6 +21,14 @@ pub(super) struct ModeCdfs {
     pub(super) txfm_split: [[u16; 3]; 21],
     pub(super) skip: [[u16; 3]; 3],
     pub(super) segment_id: [[u16; 9]; 3],
+    /// `TileDeltaQCdf` (§8.3.2 `delta_q_abs`'s cdf selection) — one shared
+    /// adaptive CDF for the whole tile, not indexed by context.
+    pub(super) delta_q: [u16; 5],
+    /// `TileDeltaLFCdf`, used when `delta_lf_multi == 0`.
+    pub(super) delta_lf: [u16; 5],
+    /// `TileDeltaLFMultiCdf[i]` for `i = 0..FRAME_LF_COUNT-1`, used when
+    /// `delta_lf_multi == 1`.
+    pub(super) delta_lf_multi: [[u16; 5]; 4],
     #[allow(dead_code)]
     pub(super) angle_delta: [[u16; 8]; 8],
     pub(super) interp_filter: [[u16; 4]; 16],
@@ -263,6 +271,12 @@ const DEFAULT_FILTER_INTRA_CDF: [[u16; 3]; 22] = [
 /// `Default_Filter_Intra_Mode_Cdf[6]` (AV1 spec "Additional tables").
 const DEFAULT_FILTER_INTRA_MODE_CDF: [u16; 6] = [8949, 12776, 17211, 29558, 32768, 0];
 
+/// `Default_Delta_Q_Cdf[DELTA_Q_SMALL + 2]` (AV1 spec "Additional tables").
+/// `Default_Delta_Lf_Cdf` has the identical values and is reused for both
+/// `TileDeltaLFCdf` and every `TileDeltaLFMultiCdf[i]` instance (the spec
+/// only lists one default table for both the single and multi forms).
+const DEFAULT_DELTA_Q_CDF: [u16; 5] = [28160, 32120, 32677, 32768, 0];
+
 impl ModeCdfs {
     pub(super) fn new() -> Self {
         ModeCdfs {
@@ -285,6 +299,9 @@ impl ModeCdfs {
             // segmentation-enabled frames stay bit-aligned. Replace with the
             // exact spec table before relying on pixel-exact seg decode.
             segment_id: [[4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 0]; 3],
+            delta_q: DEFAULT_DELTA_Q_CDF,
+            delta_lf: DEFAULT_DELTA_Q_CDF,
+            delta_lf_multi: [DEFAULT_DELTA_Q_CDF; 4],
             angle_delta: DEFAULT_ANGLE_DELTA_CDF,
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
             filter_intra: DEFAULT_FILTER_INTRA_CDF,
@@ -599,5 +616,20 @@ impl ModeCdfs {
 
     pub(super) fn read_segment_id(&mut self, dec: &mut SymbolDecoder<'_>, ctx: usize) -> usize {
         dec.read_symbol(&mut self.segment_id[ctx])
+    }
+
+    pub(super) fn read_delta_q_abs(&mut self, dec: &mut SymbolDecoder<'_>) -> usize {
+        dec.read_symbol(&mut self.delta_q)
+    }
+
+    pub(super) fn read_delta_lf_abs(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        multi_index: Option<usize>,
+    ) -> usize {
+        match multi_index {
+            Some(i) => dec.read_symbol(&mut self.delta_lf_multi[i]),
+            None => dec.read_symbol(&mut self.delta_lf),
+        }
     }
 }

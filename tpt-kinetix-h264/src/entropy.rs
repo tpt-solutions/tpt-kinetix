@@ -598,13 +598,31 @@ const LAST_LEN_8X8: usize = 9;
 pub struct ResidualCabacContext {
     sig: [Vec<CabacContext>; 5],
     last: [Vec<CabacContext>; 5],
-    level: [[CabacContext; 10]; 5],
+    /// Flat `coeff_abs_level_minus1` contexts indexed by ABSOLUTE ctxIdx -
+    /// [`LEVEL_FLAT_BASE`] (cats 0..=4 occupy 227..=275). These MUST live in
+    /// one shared array: per spec Table 9-42 / FFmpeg's
+    /// `coeff_abs_level_m1_offset`, ChromaDC's (cat 3) highest context,
+    /// ctxIdx 257+9 = 266, is the SAME physical variable as ChromaAC's
+    /// (cat 4) lowest, ctxIdx 266+0 -- a per-category split would adapt two
+    /// independent copies and diverge from a conformant encoder/decoder.
+    /// Found empirically by the ffmpeg lockstep differential audit.
+    level: Vec<CabacContext>,
     sig8x8: Vec<CabacContext>,
     last8x8: Vec<CabacContext>,
     level8x8: [CabacContext; 10],
 }
 
+/// Absolute ctxIdx of the first `coeff_abs_level_minus1` context (cat 0).
+const LEVEL_FLAT_BASE: usize = 227;
+
 impl ResidualCabacContext {
+    /// Mutable access to the flat level context for `(cat, ctxIdxInc)`
+    /// (absolute-ctxIdx addressing; see [`ResidualCabacContext::level`]).
+    fn lvl(&mut self, cat: usize, inc: usize) -> &mut CabacContext {
+        let idx = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat] + inc - LEVEL_FLAT_BASE;
+        &mut self.level[idx]
+    }
+
     pub fn new(slice_qp_y: i32) -> Self {
         // `base_table` covers all six `ctxBlockCat` groups including the
         // 8x8-transform category; only the five 4x4 categories are built here.
@@ -618,10 +636,11 @@ impl ResidualCabacContext {
         };
         let sig = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE);
         let last = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE);
-        let level = std::array::from_fn(|cat| {
-            let base = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat];
-            std::array::from_fn(|i| init_ctx(base + i, slice_qp_y))
-        });
+        // Flat level contexts: cats 0..=4 jointly occupy ctxIdx 227..=275
+        // (cat3/cat4 share boundary ctxIdx 266 -- see `level`'s doc comment).
+        let level = (LEVEL_FLAT_BASE..LEVEL_FLAT_BASE + 49)
+            .map(|i| init_ctx(i, slice_qp_y))
+            .collect();
         let sig8x8 = (0..SIG_LEN_8X8)
             .map(|i| {
                 init_ctx(
@@ -747,14 +766,14 @@ impl ResidualCabacContext {
         for &pos in positions.iter().rev() {
             let level_abs: i32;
             let level1_idx = crate::cabac_tables::COEFF_ABS_LEVEL1_CTX[node_ctx];
-            if dec.decode_decision(&mut self.level[cat][level1_idx]) == 0 {
+            if dec.decode_decision(self.lvl(cat, level1_idx)) == 0 {
                 level_abs = 1;
                 node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[0][node_ctx];
             } else {
                 let gt1_idx = crate::cabac_tables::COEFF_ABS_LEVELGT1_CTX[node_ctx];
                 node_ctx = crate::cabac_tables::COEFF_ABS_LEVEL_TRANSITION[1][node_ctx];
                 let mut abs_val: u32 = 2;
-                while abs_val < 15 && dec.decode_decision(&mut self.level[cat][gt1_idx]) == 1 {
+                while abs_val < 15 && dec.decode_decision(self.lvl(cat, gt1_idx)) == 1 {
                     abs_val += 1;
                 }
                 if abs_val >= 15 {
@@ -1484,10 +1503,11 @@ impl ResidualCabacContext {
         };
         let sig = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE);
         let last = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE);
-        let level = std::array::from_fn(|cat| {
-            let base = crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[cat];
-            std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
-        });
+        // Flat level contexts (see `ResidualCabacContext::level`): cats 0..=4
+        // jointly occupy ctxIdx 227..=275 with the shared cat3/cat4 variable.
+        let level = (LEVEL_FLAT_BASE..LEVEL_FLAT_BASE + 49)
+            .map(|i| init_pb_ctx(i, cabac_init_idc, slice_qp_y))
+            .collect();
         let sig8x8 = (0..SIG_LEN_8X8)
             .map(|i| {
                 init_pb_ctx(
@@ -2138,6 +2158,549 @@ mod tests {
         for (cat, max_coeff) in [(0, 16), (1, 15), (2, 16), (3, 4), (4, 15)] {
             let (_coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff);
             assert!(coeff_count as usize <= max_coeff);
+        }
+    }
+
+    // ---- P-slice CABAC mb_type tree: differential audit vs FFmpeg ----
+    //
+    // Session #28 (todo-h264.md "next: P-slice CABAC mb_type tree audit").
+    // FFmpeg's exact P-branch (`ff_h264_decode_mb_cabac`,
+    // `AV_PICTURE_TYPE_P`) and `decode_cabac_intra_mb_type(ctx_base,
+    // intra_slice)` are transcribed verbatim onto a flat 1024-entry context
+    // array indexed by absolute spec ctxIdx, then run in lockstep against the
+    // crate's [`MbTypePCabacContext`] / [`IntraMbTypeSuffixCabacContext`]
+    // pair (with the same shared-ctx17 syncs `cabac_b.rs` performs) over
+    // pseudo-random payloads. This asserts BOTH:
+    //   1. every decoded element value is identical bin-for-bin, and
+    //   2. after the whole run, every touched context variable's *adapted
+    //      state* is identical -- which catches wrong-ctxIdx and
+    //      missing/misdirected shared-context sync bugs that can still decode
+    //      equal values on short hand-picked inputs.
+    // The engine itself is shared by construction (both sides drive the same
+    // `CabacDecoder`), so any divergence here is definitively a tree/context
+    // mapping bug, not an arithmetic-decoder bug.
+
+    /// Deterministic xorshift64* byte-stream generator (no external deps,
+    /// reproducible across platforms/runs).
+    fn pseudo_random_payload(seed: u64, len: usize) -> Vec<u8> {
+        let mut s = seed | 1;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            out.push((s >> 24) as u8);
+        }
+        out
+    }
+
+    /// Flat absolute-ctxIdx context array + decoder: the FFmpeg-shaped
+    /// oracle (`sl->cabac_state[]` + `get_cabac(&sl->cabac, &state[i])`).
+    struct FlatOracle<'a> {
+        dec: CabacDecoder<'a>,
+        st: [CabacContext; 1024],
+    }
+
+    impl<'a> FlatOracle<'a> {
+        fn new(data: &'a [u8], slice_qp: i32, cabac_init_idc: usize) -> Self {
+            let st: [CabacContext; 1024] = std::array::from_fn(|i| {
+                let (m, n) = match cabac_init_idc {
+                    0 => crate::cabac_tables::CABAC_CTX_INIT_PB0[i],
+                    1 => crate::cabac_tables::CABAC_CTX_INIT_PB1[i],
+                    _ => crate::cabac_tables::CABAC_CTX_INIT_PB2[i],
+                };
+                CabacContext::init(m as i32, n as i32, slice_qp)
+            });
+            Self {
+                dec: CabacDecoder::new(data).unwrap(),
+                st,
+            }
+        }
+
+        fn get(&mut self, idx: usize) -> u32 {
+            u32::from(self.dec.decode_decision(&mut self.st[idx]))
+        }
+
+        fn term(&mut self) -> u32 {
+            u32::from(self.dec.decode_terminate())
+        }
+
+        /// Verbatim transcription of `decode_cabac_intra_mb_type(sl,
+        /// ctx_base, intra_slice)` including its pointer arithmetic
+        /// (`state += 2` only on the `intra_slice` branch, and the
+        /// `state[2+intra_slice]` / `state[3+intra_slice]` /
+        /// `state[3+2*intra_slice]` folds).
+        fn intra_mb_type(
+            &mut self,
+            ctx_base: usize,
+            intra_slice: bool,
+            l16: bool,
+            t16: bool,
+        ) -> u32 {
+            let mut state = ctx_base;
+            if intra_slice {
+                let ctx = (l16 as usize) + (t16 as usize);
+                if self.get(state + ctx) == 0 {
+                    return 0; /* I4x4 */
+                }
+                state += 2;
+            } else {
+                if self.get(state) == 0 {
+                    return 0; /* I4x4 */
+                }
+            }
+            if self.term() == 1 {
+                return 25; /* PCM */
+            }
+            let isl = intra_slice as usize;
+            let mut mb_type: u32 = 1; /* I16x16 */
+            mb_type += 12 * self.get(state + 1); /* cbp_luma != 0 */
+            if self.get(state + 2) == 1 {
+                /* cbp_chroma */
+                mb_type += 4 + 4 * self.get(state + 2 + isl);
+            }
+            mb_type += 2 * self.get(state + 3 + isl);
+            mb_type += self.get(state + 3 + 2 * isl);
+            mb_type
+        }
+
+        /// Verbatim transcription of `ff_h264_decode_mb_cabac`'s
+        /// `AV_PICTURE_TYPE_P` branch: `None` = intra-in-P (caller continues
+        /// with `intra_mb_type(17, false, ..)`), `Some(shape)` 0..=3.
+        fn p_branch(&mut self) -> Option<u32> {
+            if self.get(14) == 0 {
+                /* P-type */
+                if self.get(15) == 0 {
+                    /* P_L0_D16x16, P_8x8 */
+                    Some(3 * self.get(16))
+                } else {
+                    /* P_L0_D8x16, P_L0_D16x8 */
+                    Some(2 - self.get(17))
+                }
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The crate-side equivalent of `cabac_b.rs::parse_p_macroblock_cabac`'s
+    /// mb_type step: prefix decode, unconditional prefix->suffix ctx sync,
+    /// optional suffix decode, suffix->prefix sync on the intra path.
+    fn crate_p_mb_type(
+        dec: &mut CabacDecoder,
+        prefix: &mut MbTypePCabacContext,
+        suffix: &mut IntraMbTypeSuffixCabacContext,
+    ) -> Option<u32> {
+        let inter = prefix.decode(dec);
+        // sync_shared_mb_type_ctx_prefix_to_suffix_p()
+        suffix.ctx[0] = prefix.ctx[3];
+        match inter {
+            Some(shape) => Some(shape),
+            None => {
+                let intra_t = suffix.decode(dec);
+                // sync_shared_mb_type_ctx_suffix_to_prefix_p()
+                prefix.ctx[3] = suffix.ctx[0];
+                Some(intra_t + 4) // disambiguated tag space for comparison
+            }
+        }
+    }
+
+    // ---- Residual CABAC: differential audit vs FFmpeg ----
+    //
+    // Same lockstep technique applied to `decode_cabac_residual_internal`
+    // (frame coding, cats 0..=5). The absolute ctxIdx bases below are
+    // transcribed from FFmpeg's local tables inside that function:
+    //   significant_coeff_flag_offset[0][cat] = {105+0,105+15,105+29,105+44,105+47,402}
+    //   last_coeff_flag_offset[0][cat]        = {166+0,166+15,166+29,166+44,166+47,417}
+    //   coeff_abs_level_m1_offset[cat]        = {227+0,227+10,227+20,227+30,227+39,426}
+    // plus the node-ctx maps (coeff_abs_level1_ctx / coeff_abs_levelgt1_ctx /
+    // coeff_abs_level_transition) and STORE_BLOCK's escape reading
+    // (`while(get_cabac_bypass && j<23)` prefix, then `(1<<j)+bits+14`).
+    // For the Luma8x8 category the per-position ctxIdxInc indirection tables
+    // are reused from `cabac_tables` (they were regex-diffed against
+    // FFmpeg's `significant_coeff_flag_offset_8x8[0]` /
+    // `ff_h264_last_coeff_flag_offset_8x8` when extracted -- see their doc
+    // comments); every other decision here is independently transcribed.
+
+    const FF_RES_SIG_BASE: [usize; 5] = [105, 120, 134, 149, 152];
+    const FF_RES_SIG_BASE_8X8: usize = 402;
+    const FF_RES_LAST_BASE: [usize; 5] = [166, 181, 195, 210, 213];
+    const FF_RES_LAST_BASE_8X8: usize = 417;
+    const FF_RES_LEVEL_BASE: [usize; 6] = [227, 237, 247, 257, 266, 426];
+
+    /// Verbatim transcription of `decode_cabac_residual_internal`'s
+    /// significance-map + STORE_BLOCK walk for cats 0..=4 (is_dc form: levels
+    /// are raw magnitudes, no qmul scaling -- scaling doesn't touch any bin).
+    /// Returns (coefficients in scan-position order, significant-count),
+    /// matching [`ResidualCabacContext::decode_block`]'s contract.
+    fn ff_residual_block(o: &mut FlatOracle, cat: usize, max_coeff: usize) -> ([i16; 16], u8) {
+        const LEVEL1: [usize; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
+        const LEVELGT1: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
+        const TRANS0: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
+        const TRANS1: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
+
+        let sig_len = max_coeff - 1;
+        let lvl_base = FF_RES_LEVEL_BASE[cat];
+        let mut index: Vec<usize> = Vec::with_capacity(max_coeff);
+        // DECODE_SIGNIFICANCE(max_coeff - 1, last, last)
+        'sig: {
+            let mut last = 0usize;
+            while last < sig_len {
+                if o.get(FF_RES_SIG_BASE[cat] + last) == 1 {
+                    index.push(last);
+                    if o.get(FF_RES_LAST_BASE[cat] + last) == 1 {
+                        break 'sig; // last found; skip the implicit-tail branch
+                    }
+                }
+                last += 1;
+            }
+            // `if (last == max_coeff - 1) index[coeff_count++] = last;`
+            if last == sig_len {
+                index.push(last);
+            }
+        }
+        let coeff_count = index.len() as u8;
+
+        let mut out = [0i16; 16];
+        let mut node_ctx = 0usize;
+        // STORE_BLOCK: coefficients stored highest scan position first.
+        while let Some(pos) = index.pop() {
+            if o.get(lvl_base + LEVEL1[node_ctx]) == 0 {
+                node_ctx = TRANS0[node_ctx];
+                let sign = o.dec.decode_bypass();
+                out[pos] = if sign == 1 { -1 } else { 1 };
+            } else {
+                let gt1 = LEVELGT1[node_ctx];
+                node_ctx = TRANS1[node_ctx];
+                let mut coeff_abs: u32 = 2;
+                while coeff_abs < 15 && o.get(lvl_base + gt1) == 1 {
+                    coeff_abs += 1;
+                }
+                if coeff_abs >= 15 {
+                    // `int j = 0; while (get_cabac_bypass(CC) && j < 23) j++;`
+                    let mut j = 0u32;
+                    loop {
+                        let b = o.dec.decode_bypass();
+                        if b != 1 || j >= 23 {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    // `coeff_abs = 1; while (j--) coeff_abs += coeff_abs + bypass();`
+                    let mut v: u32 = 1;
+                    for _ in 0..j {
+                        v += v + u32::from(o.dec.decode_bypass());
+                    }
+                    coeff_abs = v + 14;
+                }
+                let sign = o.dec.decode_bypass();
+                let mag = coeff_abs as i16;
+                out[pos] = if sign == 1 { -mag } else { mag };
+            }
+        }
+        (out, coeff_count)
+    }
+
+    /// Verbatim transcription of the `max_coeff == 64` Luma8x8 branch
+    /// (`DECODE_SIGNIFICANCE(63, sig_off[last],
+    /// ff_h264_last_coeff_flag_offset_8x8[last])` + STORE_BLOCK), using the
+    /// pre-verified indirection tables from `cabac_tables`.
+    fn ff_residual_block_8x8(o: &mut FlatOracle) -> ([i16; 64], u8) {
+        const LEVEL1: [usize; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
+        const LEVELGT1: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
+        const TRANS0: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
+        const TRANS1: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
+        let sig_inc = &crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FRAME;
+        let last_inc = &crate::cabac_tables::LAST_COEFF_CTX_INC_8X8_FRAME;
+
+        let mut index: Vec<usize> = Vec::with_capacity(64);
+        'sig: {
+            let mut last = 0usize;
+            while last < 63 {
+                if o.get(FF_RES_SIG_BASE_8X8 + sig_inc[last] as usize) == 1 {
+                    index.push(last);
+                    if o.get(FF_RES_LAST_BASE_8X8 + last_inc[last] as usize) == 1 {
+                        break 'sig;
+                    }
+                }
+                last += 1;
+            }
+            // FFmpeg: `if (last == max_coeff - 1)` with max_coeff == 64 --
+            // i.e. the implicit tail is scan position 63 after normal exit.
+            if last == 63 {
+                index.push(last);
+            }
+        }
+        let coeff_count = index.len() as u8;
+
+        let mut out = [0i16; 64];
+        let mut node_ctx = 0usize;
+        let lvl_base = FF_RES_LEVEL_BASE[5];
+        while let Some(pos) = index.pop() {
+            if o.get(lvl_base + LEVEL1[node_ctx]) == 0 {
+                node_ctx = TRANS0[node_ctx];
+                let sign = o.dec.decode_bypass();
+                out[pos] = if sign == 1 { -1 } else { 1 };
+            } else {
+                let gt1 = LEVELGT1[node_ctx];
+                node_ctx = TRANS1[node_ctx];
+                let mut coeff_abs: u32 = 2;
+                while coeff_abs < 15 && o.get(lvl_base + gt1) == 1 {
+                    coeff_abs += 1;
+                }
+                if coeff_abs >= 15 {
+                    let mut j = 0u32;
+                    loop {
+                        let b = o.dec.decode_bypass();
+                        if b != 1 || j >= 23 {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    let mut v: u32 = 1;
+                    for _ in 0..j {
+                        v += v + u32::from(o.dec.decode_bypass());
+                    }
+                    coeff_abs = v + 14;
+                }
+                let sign = o.dec.decode_bypass();
+                let mag = coeff_abs as i16;
+                out[pos] = if sign == 1 { -mag } else { mag };
+            }
+        }
+        (out, coeff_count)
+    }
+
+    /// Flat oracle initialised from the **I-slice** context-init table
+    /// (matches [`ResidualCabacContext::new`]'s `init_ctx` path).
+    fn new_i<'a>(data: &'a [u8], slice_qp: i32) -> FlatOracle<'a> {
+        let st: [CabacContext; 1024] = std::array::from_fn(|i| {
+            let (m, n) = crate::cabac_tables::CABAC_CTX_INIT_I[i];
+            CabacContext::init(m as i32, n as i32, slice_qp)
+        });
+        FlatOracle {
+            dec: CabacDecoder::new(data).unwrap(),
+            st,
+        }
+    }
+
+    #[test]
+    fn p_mbtype_tree_differential_vs_ffmpeg_transcription() {
+        const MBS: usize = 200; // macroblocks simulated per (payload, config)
+        for idc in 0..=2usize {
+            for &qp in [0i32, 2, 26, 51].iter() {
+                for seed in 0..8u64 {
+                    let payload =
+                        pseudo_random_payload(0x9E37_79B9_7F4A_7C15 ^ (seed * 2654435761), 512);
+                    let mut oracle = FlatOracle::new(&payload, qp, idc);
+                    let mut dec = CabacDecoder::new(&payload).unwrap();
+                    let mut prefix = MbTypePCabacContext::new(qp, idc);
+                    let mut suffix = IntraMbTypeSuffixCabacContext::new_pb(17, qp, idc);
+
+                    for _mb in 0..MBS {
+                        let ours = crate_p_mb_type(&mut dec, &mut prefix, &mut suffix);
+                        let theirs = match oracle.p_branch() {
+                            None => Some(oracle.intra_mb_type(17, false, false, false) + 4),
+                            some => some,
+                        };
+                        assert_eq!(
+                            ours, theirs,
+                            "value divergence (idc={idc}, qp={qp}, seed={seed})"
+                        );
+                        if ours == Some(29) || theirs == Some(29) {
+                            // I_PCM (tag 4+25): the real bitstream would
+                            // continue with raw PCM samples, which neither
+                            // side models -- stop this payload here.
+                            break;
+                        }
+                    }
+
+                    // Adapted-state equality for every touched ctxIdx:
+                    // 14..=17 (prefix) and 17..=20 (suffix; 17 is shared).
+                    for i in 0..4 {
+                        assert_eq!(
+                            (prefix.ctx[i].state, prefix.ctx[i].mps),
+                            (oracle.st[14 + i].state, oracle.st[14 + i].mps),
+                            "prefix ctx{} state diverged (idc={idc}, qp={qp}, seed={seed})",
+                            14 + i
+                        );
+                    }
+                    for i in 0..4 {
+                        assert_eq!(
+                            (suffix.ctx[i].state, suffix.ctx[i].mps),
+                            (oracle.st[17 + i].state, oracle.st[17 + i].mps),
+                            "suffix ctx{} state diverged (idc={idc}, qp={qp}, seed={seed})",
+                            17 + i
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn i_slice_mbtype_differential_vs_ffmpeg_transcription() {
+        // Same method for the I-slice variant: MbTypeICabacContext vs
+        // decode_cabac_intra_mb_type(ctx_base=3, intra_slice=true) with
+        // cycling neighbour-derived ctx patterns (all four ctxIdxInc values).
+        const MBS: usize = 200;
+        for &qp in [0i32, 2, 26, 51].iter() {
+            for seed in 0..8u64 {
+                let payload = pseudo_random_payload(0xDEAD_BEEF ^ (seed * 40503), 512);
+                let mut oracle = FlatOracle::new(&payload, qp, 0);
+                let mut dec = CabacDecoder::new(&payload).unwrap();
+                let mut ictx = MbTypeICabacContext::new(qp);
+
+                for mb in 0..MBS {
+                    let (l16, t16) = match mb % 4 {
+                        0 => (false, false),
+                        1 => (true, false),
+                        2 => (false, true),
+                        _ => (true, true),
+                    };
+                    let neighbors = MbTypeNeighbors {
+                        left_is_16x16_or_pcm: l16,
+                        top_is_16x16_or_pcm: t16,
+                    };
+                    let ours = ictx.decode(&mut dec, &neighbors);
+                    let theirs = oracle.intra_mb_type(3, true, l16, t16);
+                    assert_eq!(ours, theirs, "value divergence (qp={qp}, seed={seed})");
+                    if ours == 25 {
+                        break; // I_PCM: raw-sample tail not modelled
+                    }
+                }
+
+                for i in 0..8 {
+                    assert_eq!(
+                        (ictx.ctx[i].state, ictx.ctx[i].mps),
+                        (oracle.st[3 + i].state, oracle.st[3 + i].mps),
+                        "I mb_type ctx{} state diverged (qp={qp}, seed={seed})",
+                        3 + i
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn residual_block_differential_vs_ffmpeg_transcription() {
+        // Lockstep `ResidualCabacContext::decode_block` vs the verbatim
+        // decode_cabac_residual_internal transcription, over all five 4x4
+        // categories, cycling QPs/seeds. Compares coefficient arrays AND
+        // significant-counts per block, then every adapted context state.
+        const BLOCKS: usize = 300;
+        let cats: [(usize, usize); 5] = [(0, 16), (1, 15), (2, 16), (3, 4), (4, 15)];
+        for &qp in [0i32, 2, 26, 51].iter() {
+            for seed in 0..8u64 {
+                let payload = pseudo_random_payload(0x1234_5678 ^ (seed * 97), 1024);
+                let mut oracle = new_i(&payload, qp);
+                let mut dec = CabacDecoder::new(&payload).unwrap();
+                let mut rctx = ResidualCabacContext::new(qp);
+
+                for blk in 0..BLOCKS {
+                    let (cat, max_coeff) = cats[blk % cats.len()];
+                    let ours = rctx.decode_block(&mut dec, cat, max_coeff);
+                    let theirs = ff_residual_block(&mut oracle, cat, max_coeff);
+                    assert_eq!(
+                        ours, theirs,
+                        "block divergence (cat={cat}, qp={qp}, seed={seed}, blk={blk})"
+                    );
+                }
+
+                // Adapted-state equality: significance / last / level contexts.
+                for cat in 0..5 {
+                    for (i, c) in rctx.sig[cat].iter().enumerate() {
+                        assert_eq!(
+                            (c.state, c.mps),
+                            (
+                                oracle.st[FF_RES_SIG_BASE[cat] + i].state,
+                                oracle.st[FF_RES_SIG_BASE[cat] + i].mps
+                            ),
+                            "sig cat{cat} ctx{i} diverged (qp={qp}, seed={seed})"
+                        );
+                    }
+                    for (i, c) in rctx.last[cat].iter().enumerate() {
+                        assert_eq!(
+                            (c.state, c.mps),
+                            (
+                                oracle.st[FF_RES_LAST_BASE[cat] + i].state,
+                                oracle.st[FF_RES_LAST_BASE[cat] + i].mps
+                            ),
+                            "last cat{cat} ctx{i} diverged (qp={qp}, seed={seed})"
+                        );
+                    }
+                    // Level contexts are flat on BOTH sides now: ours indexed
+                    // from LEVEL_FLAT_BASE, ffmpeg's from 227 -- identical
+                    // absolute ctxIdx layout including the shared cat3/cat4
+                    // boundary variable at ctxIdx 266.
+                    for (i, c) in rctx.level.iter().enumerate() {
+                        assert_eq!(
+                            (c.state, c.mps),
+                            (
+                                oracle.st[LEVEL_FLAT_BASE + i].state,
+                                oracle.st[LEVEL_FLAT_BASE + i].mps
+                            ),
+                            "level ctx{} diverged (qp={qp}, seed={seed})",
+                            LEVEL_FLAT_BASE + i
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn residual_block_8x8_differential_vs_ffmpeg_transcription() {
+        // Lockstep `ResidualCabacContext::decode_block_8x8` vs the verbatim
+        // `max_coeff == 64` branch of decode_cabac_residual_internal.
+        const BLOCKS: usize = 200;
+        for &qp in [0i32, 2, 26, 51].iter() {
+            for seed in 0..8u64 {
+                let payload = pseudo_random_payload(0xAAAA_5555 ^ (seed * 31), 2048);
+                let mut oracle = new_i(&payload, qp);
+                let mut dec = CabacDecoder::new(&payload).unwrap();
+                let mut rctx = ResidualCabacContext::new(qp);
+
+                for blk in 0..BLOCKS {
+                    let ours = rctx.decode_block_8x8(&mut dec);
+                    let theirs = ff_residual_block_8x8(&mut oracle);
+                    assert_eq!(
+                        ours, theirs,
+                        "8x8 divergence (qp={qp}, seed={seed}, blk={blk})"
+                    );
+                }
+
+                for (i, c) in rctx.sig8x8.iter().enumerate() {
+                    assert_eq!(
+                        (c.state, c.mps),
+                        (
+                            oracle.st[FF_RES_SIG_BASE_8X8 + i].state,
+                            oracle.st[FF_RES_SIG_BASE_8X8 + i].mps
+                        ),
+                        "sig8x8 ctx{i} diverged (qp={qp}, seed={seed})"
+                    );
+                }
+                for (i, c) in rctx.last8x8.iter().enumerate() {
+                    assert_eq!(
+                        (c.state, c.mps),
+                        (
+                            oracle.st[FF_RES_LAST_BASE_8X8 + i].state,
+                            oracle.st[FF_RES_LAST_BASE_8X8 + i].mps
+                        ),
+                        "last8x8 ctx{i} diverged (qp={qp}, seed={seed})"
+                    );
+                }
+                for (i, c) in rctx.level8x8.iter().enumerate() {
+                    assert_eq!(
+                        (c.state, c.mps),
+                        (
+                            oracle.st[FF_RES_LEVEL_BASE[5] + i].state,
+                            oracle.st[FF_RES_LEVEL_BASE[5] + i].mps
+                        ),
+                        "level8x8 ctx{i} diverged (qp={qp}, seed={seed})"
+                    );
+                }
+            }
         }
     }
 }

@@ -31,6 +31,16 @@ impl<'a> TileDecodeState<'a> {
                 == 1
         };
 
+        // AV1 spec §5.11.18 `inter_frame_mode_info()`: `read_cdef()`/
+        // `read_delta_qindex()`/`read_delta_lf()` come right after
+        // `read_skip()`, then `ReadDeltas = 0`, before `read_is_inter()` —
+        // same order and same no-op-unless-enabled behaviour as the intra
+        // path (`intra_block.rs`).
+        self.read_cdef(mi_row, mi_col, bsize, skip);
+        self.read_delta_qindex(bsize, skip);
+        self.read_delta_lf(bsize, skip);
+        self.read_deltas = false;
+
         // is_inter (Y) — context from neighbour inter flags.
         let inter_ctx = (left_inter + above_inter).min(3);
         let is_inter = self
@@ -523,7 +533,9 @@ impl<'a> TileDecodeState<'a> {
                         &blk,
                     )?;
                     if coeffs.eob > 0 {
-                        let dequant = dequantize_coeffs(&coeffs.quant, luma_tx, self.qindex);
+                        let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                        let dequant =
+                            dequantize_coeffs(&coeffs.quant, luma_tx, qindex_dc, qindex_ac);
                         inverse_transform(
                             &dequant,
                             coeffs.tx_type,
@@ -562,6 +574,11 @@ impl<'a> TileDecodeState<'a> {
         } else {
             TX_4X4
         };
+        // Computed before the `&mut self.{u,v}_plane` reborrows in the loop
+        // below — `qindex_for_plane` takes `&self`, which would conflict
+        // with those live disjoint-field mutable borrows if called any later.
+        let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
+        let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
         for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
             for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
                 let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> subsampling_x;
@@ -616,7 +633,13 @@ impl<'a> TileDecodeState<'a> {
                             &blk,
                         )?;
                         if coeffs.eob > 0 {
-                            let dequant = dequantize_coeffs(&coeffs.quant, c_tx, self.qindex);
+                            let (qindex_dc, qindex_ac) = if plane == 1 {
+                                (u_qindex_dc, u_qindex_ac)
+                            } else {
+                                (v_qindex_dc, v_qindex_ac)
+                            };
+                            let dequant =
+                                dequantize_coeffs(&coeffs.quant, c_tx, qindex_dc, qindex_ac);
                             inverse_transform(
                                 &dequant,
                                 coeffs.tx_type,

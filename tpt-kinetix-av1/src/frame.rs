@@ -238,6 +238,11 @@ pub struct FrameHeader {
     pub frame_id: Option<u32>,
     pub width: u32,
     pub height: u32,
+    /// `UpscaledWidth` (§5.9.10): equals `width` unless superres is active,
+    /// in which case `width` is the coded (pre-upscale) frame width. No
+    /// upscale filter is implemented yet, so this is currently only used for
+    /// the `allow_intrabc` gate (§5.9.2) and the `render_size()` default.
+    pub upscaled_width: u32,
     pub render_width: u32,
     pub render_height: u32,
     pub subsampling_x: bool,
@@ -406,6 +411,7 @@ impl FrameHeader {
         // Values assigned in either the intra or inter branch below.
         let width;
         let height;
+        let upscaled_width;
         let render_width;
         let render_height;
         let mut allow_intrabc = false;
@@ -552,25 +558,28 @@ impl FrameHeader {
 
         // --- frame size / render / intrabc OR inter reference signalling ---
         if frame_is_intra {
-            let (w, h, rw, rh) = parse_frame_size(
+            let (w, h, uw, rw, rh) = parse_frame_size(
                 &mut br,
                 seq,
                 frame_size_override_flag,
                 seq.frame_width(),
                 seq.frame_height(),
+                seq.enable_superres,
             )?;
             width = w;
             height = h;
+            upscaled_width = uw;
             render_width = rw;
             render_height = rh;
-            allow_intrabc = if allow_screen_content_tools && w == rw {
+            // §5.9.2: gated on `UpscaledWidth == FrameWidth`, not render size.
+            allow_intrabc = if allow_screen_content_tools && uw == w {
                 read_flag(&mut br)?
             } else {
                 false
             };
             if std::env::var("KINETIX_AV1_DBG_SUPERRES").is_ok() {
                 eprintln!(
-                    "DBG superres enable_superres={} w={w} h={h} rw={rw} rh={rh}",
+                    "DBG superres enable_superres={} w={w} h={h} uw={uw} rw={rw} rh={rh}",
                     seq.enable_superres
                 );
             }
@@ -591,15 +600,17 @@ impl FrameHeader {
                 }
             }
             let override_now = frame_size_override_flag && !error_resilient_mode;
-            let (w, h, rw, rh) = parse_frame_size(
+            let (w, h, uw, rw, rh) = parse_frame_size(
                 &mut br,
                 seq,
                 override_now,
                 seq.frame_width(),
                 seq.frame_height(),
+                seq.enable_superres,
             )?;
             width = w;
             height = h;
+            upscaled_width = uw;
             render_width = rw;
             render_height = rh;
             if force_integer_mv {
@@ -782,6 +793,7 @@ impl FrameHeader {
                 frame_id: None,
                 width,
                 height,
+                upscaled_width,
                 render_width,
                 render_height,
                 subsampling_x,
@@ -1452,19 +1464,37 @@ fn seq_bit_depth(seq: &crate::obu::SequenceHeaderObu) -> u8 {
 // --- Frame size syntax (§5.9.6) --------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+/// §3 "Superres params syntax" constants.
+const SUPERRES_NUM: u32 = 8;
+const SUPERRES_DENOM_MIN: u32 = 9;
+const SUPERRES_DENOM_BITS: u8 = 3;
+
+/// §5.9.9 `frame_size()` + `superres_params()` + `render_size()`.
+///
+/// Returns `(FrameWidth, FrameHeight, UpscaledWidth, RenderWidth, RenderHeight)`.
+/// `superres_params()` is unconditional (spec calls it right after computing
+/// the pre-superres width/height, regardless of `enable_superres` — the flag
+/// only gates whether `use_superres` itself is read or forced to 0); when
+/// `use_superres` is false `FrameWidth` is left unchanged and
+/// `UpscaledWidth == FrameWidth`, matching every corpus entry decoded so far.
+/// `render_size()` is also unconditional — it is not gated on
+/// `reduced_still_picture_header` (that flag only forces earlier fields;
+/// `frame_size()`/`render_size()` are still called and still read
+/// `render_and_frame_size_different` for a reduced-still-picture keyframe).
 fn parse_frame_size(
     br: &mut BitReader<'_>,
-    seq: &crate::obu::SequenceHeaderObu,
+    _seq: &crate::obu::SequenceHeaderObu,
     frame_size_override: bool,
     max_w: u32,
     max_h: u32,
-) -> Result<(u32, u32, u32, u32), KinetixError> {
+    enable_superres: bool,
+) -> Result<(u32, u32, u32, u32, u32), KinetixError> {
     // §5.9.9 `frame_size()`: the width/height are only read as `ns` values
     // when `frame_size_override_flag == 1`. (A keyframe forces that flag to 0,
     // so it uses the sequence-header maximums directly.) The old code also read
     // `ns` for keyframes, which consumed stray bits and drifted every field
     // after it (e.g. decoding width = 5 instead of 128).
-    let (w, h) = if frame_size_override {
+    let (mut w, h) = if frame_size_override {
         let w = read_ns(br, max_w)? + 1;
         let h = read_ns(br, max_h)? + 1;
         (w, h)
@@ -1472,20 +1502,30 @@ fn parse_frame_size(
         (max_w, max_h)
     };
 
-    let (rw, rh) = if !seq.reduced_still_picture_header
-        && br
-            .read_bit()
-            .ok_or_else(|| KinetixError::Parse("render size flag truncated".into()))?
-            != 0
-    {
-        let rw = read_ns(br, w)? + 1;
-        let rh = read_ns(br, h)? + 1;
+    // --- superres_params() ---
+    let use_superres = enable_superres && read_flag(br)?;
+    let superres_denom = if use_superres {
+        read_f8(br, SUPERRES_DENOM_BITS)? as u32 + SUPERRES_DENOM_MIN
+    } else {
+        SUPERRES_NUM
+    };
+    let upscaled_width = w;
+    w = (upscaled_width * SUPERRES_NUM + (superres_denom / 2)) / superres_denom;
+
+    // --- render_size() ---
+    let render_and_frame_size_different = br
+        .read_bit()
+        .ok_or_else(|| KinetixError::Parse("render size flag truncated".into()))?
+        != 0;
+    let (rw, rh) = if render_and_frame_size_different {
+        let rw = read_f(br, 16)? + 1;
+        let rh = read_f(br, 16)? + 1;
         (rw, rh)
     } else {
-        (w, h)
+        (upscaled_width, h)
     };
 
-    Ok((w, h, rw, rh))
+    Ok((w, h, upscaled_width, rw, rh))
 }
 
 // --- Tile info syntax (§5.9.12) --------------------------------------------
@@ -1747,7 +1787,11 @@ mod tests {
         // consuming any bits.
         bw.bit(0);
         // A keyframe uses the sequence-header max for width/height and reads no
-        // `ns` frame-size values, so no bits are emitted here.
+        // `ns` frame-size values. `superres_params()` reads no bit either since
+        // `minimal_seq()` sets `enable_superres = false`. `render_size()` is
+        // *not* gated on `reduced_still_picture_header` (only earlier fields
+        // are), so it still reads `render_and_frame_size_different`(1) = 0.
+        bw.bit(0);
         // tile info: uniform spacing(1); for this 16x16 frame sb_cols==sb_rows==1
         // so maxLog2TileCols/Rows are already 0 and no increment bits are read.
         bw.bit(1);
@@ -1811,6 +1855,56 @@ mod tests {
         assert_eq!(fh.tile_cols, 1);
         assert_eq!(fh.tile_rows, 1);
         assert!(!fh.lossless);
+    }
+
+    #[test]
+    fn parse_frame_size_applies_superres_downscale_and_keeps_upscaled_width() {
+        // §"Superres params syntax": use_superres(1)=1, coded_denom(3)=3 ->
+        // SuperresDenom = 3 + SUPERRES_DENOM_MIN(9) = 12. UpscaledWidth = 128
+        // (sequence-header max, frame_size_override=false), FrameWidth =
+        // (128*8 + 6) / 12 = 85. Then render_size(): different(1)=0, so
+        // RenderWidth defaults to UpscaledWidth, not the downscaled FrameWidth.
+        let mut bw = BitWriter::new();
+        bw.bit(1); // use_superres
+        bw.bits(3, 3); // coded_denom = 3
+        bw.bit(0); // render_and_frame_size_different = 0
+        while bw.nbits != 0 {
+            bw.bit(0);
+        }
+        let bits = bw.finish();
+        let mut br = crate::obu::BitReader::new(&bits);
+        let seq = minimal_seq();
+        let (w, h, uw, rw, rh) =
+            parse_frame_size(&mut br, &seq, false, 128, 96, true).expect("parse_frame_size");
+        assert_eq!(uw, 128);
+        assert_eq!(w, 85);
+        assert_eq!(h, 96);
+        assert_eq!(rw, uw);
+        assert_eq!(rh, h);
+    }
+
+    #[test]
+    fn parse_frame_size_skips_superres_bit_when_sequence_header_disables_it() {
+        // `enable_superres = false` -> `use_superres` is forced to 0 without
+        // reading a bit (spec's `else use_superres = 0`), so the very next
+        // bit read is `render_and_frame_size_different`.
+        let mut bw = BitWriter::new();
+        bw.bit(1); // render_and_frame_size_different = 1
+        bw.bits(31, 16); // render_width_minus_1 = 31 -> RenderWidth = 32
+        bw.bits(17, 16); // render_height_minus_1 = 17 -> RenderHeight = 18
+        while bw.nbits != 0 {
+            bw.bit(0);
+        }
+        let bits = bw.finish();
+        let mut br = crate::obu::BitReader::new(&bits);
+        let seq = minimal_seq();
+        let (w, h, uw, rw, rh) =
+            parse_frame_size(&mut br, &seq, false, 128, 96, false).expect("parse_frame_size");
+        assert_eq!(w, 128);
+        assert_eq!(uw, 128);
+        assert_eq!(h, 96);
+        assert_eq!(rw, 32);
+        assert_eq!(rh, 18);
     }
 
     #[test]

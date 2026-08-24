@@ -101,24 +101,48 @@ fn derive_bs_pair(
     if p_nz != 0 || q_nz != 0 {
         return 2;
     }
-    // §8.7.2.1 bS = 1 motion rule, evaluated per prediction list. For each
-    // list LX, the condition applies only when BOTH blocks use that list
-    // (`ref_idx_lX >= 0`). A block that does not use a list stores
-    // `LIST_NOT_USED` (-1) there; comparing across different usage patterns
-    // would incorrectly trigger bS = 1 (e.g. a direct MB with ref_idx_l1 = 0
-    // next to an L0-only MB with ref_idx_l1 = -1).
-    let l0_diff = p_cell.ref_idx >= 0
-        && q_cell.ref_idx >= 0
-        && (p_cell.ref_idx != q_cell.ref_idx
-            || (p_cell.mv[0] - q_cell.mv[0]).abs() >= 4
-            || (p_cell.mv[1] - q_cell.mv[1]).abs() >= 4);
-    let l1_diff = p_cell.ref_idx_l1 >= 0
-        && q_cell.ref_idx_l1 >= 0
-        && (p_cell.ref_idx_l1 != q_cell.ref_idx_l1
-            || (p_cell.mv_l1[0] - q_cell.mv_l1[0]).abs() >= 4
-            || (p_cell.mv_l1[1] - q_cell.mv_l1[1]).abs() >= 4);
-    if l0_diff || l1_diff {
-        return 1;
+    // §8.7.2.1 bS = 1 motion rule. This is a verbatim transcription of
+    // ffmpeg's `check_mv` (libavcodec/h264_loopfilter.c), which implements the
+    // full normative condition including the "blocks use a different number of
+    // motion vectors" clause: a `LIST_NOT_USED` (-1) reference index on one
+    // side against a valid index on the other *is* a difference. Comparing raw
+    // sentinel values (rather than requiring both blocks to use a list) also
+    // covers the B-slice case of an L0-only/L1-only block adjacent to a
+    // bi-predicted block, which must yield bS = 1 unless the two blocks'
+    // prediction lists are exact mirrors of each other.
+    //
+    // The x-component threshold uses ffmpeg's unsigned trick:
+    // `(a - b + 3) as u32 >= 7` is equivalent to `|a - b| >= 4`.
+    let mv_ge4_x = |a: i32, b: i32| (a as i64 - b as i64 + 3) as u64 >= 7;
+    let mv_ge4_y = |a: i32, b: i32| (a - b).abs() >= 4;
+
+    let mut v = p_cell.ref_idx != q_cell.ref_idx;
+    if !v && p_cell.ref_idx != crate::mv::LIST_NOT_USED {
+        v = mv_ge4_x(p_cell.mv[0], q_cell.mv[0]) || mv_ge4_y(p_cell.mv[1], q_cell.mv[1]);
+    }
+
+    // B slices carry two lists (`sl->list_count == 2` in ffmpeg): list 1 is
+    // compared without the "in use" guard (unused cells hold identical -1 / 0
+    // sentinels on both sides), and any difference found is subjected to the
+    // mirrored-list equivalence check before bS = 1 is returned. Applying this
+    // unconditionally is safe for P slices: their cells always carry
+    // `ref_idx_l1 == LIST_NOT_USED`, so list 1 never differs and the mirror
+    // check degenerates to `v` itself.
+    if !v {
+        v = p_cell.ref_idx_l1 != q_cell.ref_idx_l1
+            || mv_ge4_x(p_cell.mv_l1[0], q_cell.mv_l1[0])
+            || mv_ge4_y(p_cell.mv_l1[1], q_cell.mv_l1[1]);
+    }
+    if v {
+        // Mirrored-list equivalence: an L0-only block next to an L1-only (or
+        // bi-predicted) block whose lists/MVs are swapped is NOT a difference.
+        if p_cell.ref_idx != q_cell.ref_idx_l1 || p_cell.ref_idx_l1 != q_cell.ref_idx {
+            return 1;
+        }
+        return (mv_ge4_x(p_cell.mv[0], q_cell.mv_l1[0])
+            || mv_ge4_y(p_cell.mv[1], q_cell.mv_l1[1])
+            || mv_ge4_x(p_cell.mv_l1[0], q_cell.mv[0])
+            || mv_ge4_y(p_cell.mv_l1[1], q_cell.mv[1])) as u8;
     }
     0
 }
@@ -521,13 +545,22 @@ pub fn deblock_luma_mb(
     p: DeblockParams,
 ) {
     let trace = std::env::var("KINETIX_BINTRACE").is_ok();
+    // Debug override (session #27+): skip filtering entirely so the caller can
+    // compare pre-deblock reconstruction against `ffmpeg -skip_loop_filter all`.
+    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
+        return;
+    }
     // Block-boundary (inter-MB) vertical edge at edge_index = 0. Segments are
     // grouped by raster ROW; p-side block is the left MB's rightmost column
     // (3,7,11,15), q-side is this MB's leftmost column (0,4,8,12).
     if let Some(l) = left {
         let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
         if trace {
-            eprintln!("DEBLOCK L v-edge MB({mb_x},{mb_y}) idx0 bs={bs:?}");
+            eprintln!(
+                "DEBLOCK L v-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?}",
+                [l.nz[3], l.nz[7], l.nz[11], l.nz[15]],
+                [cur.nz[0], cur.nz[4], cur.nz[8], cur.nz[12]]
+            );
         }
         let qp = (cur.qp + l.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, qp);
@@ -549,7 +582,13 @@ pub fn deblock_luma_mb(
     if let Some(t) = top {
         let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
         if trace {
-            eprintln!("DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?}");
+            eprintln!(
+                "DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?} pty={:?} qty={:?}",
+                [t.nz[12], t.nz[13], t.nz[14], t.nz[15]],
+                [cur.nz[0], cur.nz[1], cur.nz[2], cur.nz[3]],
+                t.mb_type,
+                cur.mb_type
+            );
         }
         let qp = (cur.qp + t.qp + 1) >> 1;
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, qp);
@@ -590,6 +629,11 @@ pub fn deblock_chroma_mb(
     p: DeblockParams,
 ) {
     let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
+
+    // Debug override (see `deblock_luma_mb`).
+    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
+        return;
+    }
 
     // Chroma reuses the co-located luma blocks' bS (§8.7.2.1); see
     // `deblock_luma_mb` for the same raster-block mappings.

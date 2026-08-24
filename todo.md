@@ -7,8 +7,8 @@
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | F.4 CLOSED; cabac_b matrix cell GREEN; B_Direct CBP + sub_mb_type tables FIXED. Remaining: +/-1 residual gap in row1/2 MBs (root cause: L0/L1 ref-list or prediction-source divergence), G (MBAFF P/B), G.5 interlaced, H pixel_exact |
-| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-08-23/24: fixed a broken build + 2 real Phase G.0 bridge bugs, proving `coeffs()` correct on 2 suspect blocks. Hand-verified dequant/transform/filter-intra math correct too; caught+reverted a wrong scan "fix" via PSNR regression. Live-fetched the AV1 spec (WebFetch/curl both work here) and byte-diffed ~15 tables + syntax bodies covering the ENTIRE decode chain for testsrc's first block (partition/skip/y_mode/uv_mode/filter_intra/tx_type/tx_depth/dequant tables/tile_info/frame_size) — all matched exactly. Confirmed via libaom+dav1d agreeing that a real bug exists, but still hasn't been located. Found 3 real-but-inert gaps (missing `read_cdef`/delta-lf, missing superres_params(), missing per-plane delta_q_dc) — none explain the current divergence (all zero on this corpus). Root cause still open despite the deepest verification pass this file has seen — solid-color content still pixel-exact (99dB); real/textured content still noise-level (~10-17dB) |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-24 session #30: post-ctx266-fix re-run — gap unchanged (I exact; P+B row-2 diverge), but evidence now pinpoints MV-PREDICTOR / RefPicList mismatch as the bug class: parse stays element-lockstep with ffmpeg while decoded MV VALUES differ (mvd ctx uses neighbour mvd sums, so a wrong predictor desyncs nothing). Suspects: §8.4.1 median inputs, §8.2.4.2 ref-list order with 2 refs, B direct/L1. Next: instrument predict_slice_mvs + dump RefPicList0 vs ffmpeg. Also: G (MBAFF P/B), G.5 interlaced, H pixel_exact |
+| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-08-23/24: fixed a broken build + 2 real Phase G.0 bridge bugs, proving `coeffs()` correct on 2 suspect blocks. Hand-verified dequant/transform/filter-intra math correct too; caught+reverted a wrong scan "fix" via PSNR regression. Live-fetched the AV1 spec (WebFetch/curl both work here) and byte-diffed ~20 tables + syntax bodies covering the ENTIRE decode chain for testsrc's first block — all matched exactly. Confirmed via libaom+dav1d agreeing that a real bug exists, but still hasn't been located despite the deepest verification pass this file has seen. Found and properly fixed one real gap (per-plane DC delta-q never applied in dequant — new `DeltaQ` struct + `qindex_for_plane`, 2 new regression tests, corpus PSNR unchanged as expected since all deltas are 0 there); documented 2 more real-but-inert gaps (`read_cdef`/delta-lf, superres/`allow_intrabc`) needing new per-tile state, deferred. Solid-color content still pixel-exact (99dB); real/textured content still noise-level (~10-17dB) |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. Remaining: broaden conformance corpus beyond a single 440 Hz tone (PNS/TNS/intensity barely covered), spec-verify TNS/PNS/intensity numerics, real fuzz run on a host with the ASan runtime |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
 
@@ -1672,6 +1672,33 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Build a cross-codec conformance test suite runnable via `cargo test --workspace` — harness + reference plumbing in place; ffmpeg-gated CAVLC I/P/B assertion tests pass bit-exact, decode-vs-reference assertions for CABAC/AV1 pending their reconstruction (Phase 12 D / AV1 C)
 - [x] Add code coverage reporting (e.g. `cargo-llvm-cov`) wired into CI
 - [x] Document the full testing strategy in `CONTRIBUTING.md`
+
+### Phase 7.1 — Unified trace/diff tooling (started 2026-08-24, plan approved, not yet implemented)
+
+Consolidates 23 duplicated ad-hoc `dbg_*.rs` files in `tpt-kinetix-h264` (each hand-rolling
+print/compare boilerplate) onto the existing-but-underused `DecodeTracer`/`MapTracer` (h264) and
+`SymbolTraceEntry` (AV1) trace infra, and extends tracing to AAC (currently has none). Internal-only,
+Tier 1 scope — an ffmpeg-internal-state oracle harness was considered and explicitly deferred as a
+separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking-with-all-synchronous-pretzel.md`.
+
+- [ ] `TraceCapture`/`TraceKey`/`TraceValue` core types + serde + `From<&MapTracer>` in new
+      `tpt-kinetix-test-utils/src/trace/mod.rs`
+- [ ] `tpt-kinetix-test-utils/examples/trace_diff.rs` — shared first-divergence diff CLI operating
+      on two `TraceCapture` JSON dumps, generalizing `av1_symbol_trace_diff.rs`'s bespoke logic
+- [ ] AV1 `SymbolTraceEntry`/`BlockMarker` → `TraceCapture` conversion; rewire
+      `av1_symbol_trace_diff.rs` onto the shared diff function
+- [ ] Migrate 9 h264 localize-style `dbg_*.rs` files onto `trace_diff` (`dbg_chroma_localize.rs`,
+      `dbg_8x8_region.rs`, `dbg_hp352_localize.rs`, `dbg_skip_lf.rs`, `dbg_mb0_trace.rs`,
+      `dbg_ipppp.rs`, `dbg_8x8_localize.rs`, `dbg_cabac_b.rs`, `dbg_cabac_p_matrix.rs`); delete 8
+      stale ones already superseded by `MapTracer`/`trace_mb.rs` (`dbg_decode.rs`, `dbg_qpel_31.rs`,
+      `dbg_mb9.rs`, `dbg_mb11.rs`, `dbg_p2.rs`, `dbg_ipp.rs`, `dbg_pslice_bits.rs`,
+      `dbg_cabac_skip_probe.rs`)
+- [ ] `tpt-kinetix-aac/src/trace.rs` — new `AacTracer` trait (`on_scalefactors`/`on_pns_energy`/
+      `on_imdct_output`) + `MapAacTracer` in test-utils; replace `dbg_pns.rs`/`dbg_aac_noise.rs`
+      hand-rolled comparisons
+- [ ] Convert the 5 bespoke hand-transcribed-FFmpeg oracle-replay files
+      (`dbg_bintrace_replay.rs`, `dbg_p_oracle_replay.rs`, `dbg_b_implied_pred.rs`,
+      `dbg_b_qp_sweep.rs`, `dbg_cabac_twin.rs`) to emit `TraceCapture` JSON, logic unchanged
 
 ## Phase 8 — crates.io Publishing Optimization
 

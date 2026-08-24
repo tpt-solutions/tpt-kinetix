@@ -875,9 +875,17 @@ impl H264Decoder {
         // slice references no available picture.
         let is_p_slice = header.slice_type == crate::slice::SliceType::P;
         if is_p_slice && header.first_mb_in_slice == 0 {
-            let slice_qp = 26
+            let mut slice_qp = 26
                 + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
                 + header.slice_qp_delta;
+            // Session #28 debug: force a candidate SliceQpY to test whether the
+            // CABAC context initialisation QP is what diverges from ffmpeg.
+            if let Ok(q) = std::env::var("KINETIX_FORCE_SLICE_QP") {
+                if let Ok(q) = q.parse::<i32>() {
+                    eprintln!("FORCING slice_qp {slice_qp} -> {q}");
+                    slice_qp = q;
+                }
+            }
             let chroma_qp_index_offset =
                 pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
             // §7.4.3: the slice header's effective value (which already folds
@@ -1078,9 +1086,16 @@ impl H264Decoder {
         // RefPicList0 and RefPicList1 (§8.4/§8.5).
         let is_b_slice = header.slice_type == crate::slice::SliceType::B;
         if is_b_slice && header.first_mb_in_slice == 0 {
-            let slice_qp = 26
+            let mut slice_qp = 26
                 + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
                 + header.slice_qp_delta;
+            // Session #28 debug: see the P-slice twin of this override.
+            if let Ok(q) = std::env::var("KINETIX_FORCE_SLICE_QP_B") {
+                if let Ok(q) = q.parse::<i32>() {
+                    eprintln!("FORCING B slice_qp {slice_qp} -> {q}");
+                    slice_qp = q;
+                }
+            }
             let chroma_qp_index_offset =
                 pps.as_ref().map(|p| p.chroma_qp_index_offset).unwrap_or(0);
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;

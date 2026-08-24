@@ -1764,6 +1764,291 @@
            agree, the bug is in prediction; if they disagree, re-check
            coefficient->raster placement for inter MBs (scan order vs raster).
 
+      - **2026-08-24 session #28 — QP init and skip-flag rule EXONERATED; the
+         desync is an engine-state divergence invisible during the SKIP run.**
+         Continued from #27 with new hard evidence:
+         1. Parsed P-slice MB map (KINETIX_BINTRACE): MB0-7 SKIP, MB8=P8x8
+            coded (PIXEL-EXACT vs ffmpeg), MB9=PL016x16 mvd=(0,1) cbp=0x03
+            (FIRST pixel divergence @(20,32)=block1 which HAS residual),
+            MB10=SKIP, MB11=PL0x16 mvd=(-1,20) cbp=0x00. The cbp=0x3 residual
+            block set (blk0 cbf=false; blks 1-7 coded) IS self-consistent -
+            the earlier "7 blocks with cbp=0x03" reading was wrong.
+         2. Sharp MV oracle (dbg_skip_lf.rs): our MB(3,2)/MB(1,2) outputs are
+            self-consistent MC at the decoded MVs (SAD 0..43). ffmpeg's
+            corresponding blocks match NO MV from the I reference over
+            +/-320 x +/-64 qpel, AND a full-picture integer-pel search finds
+            nothing (min SAD 1517/64 samples). ffmpeg decodes with 0 errors.
+            => ffmpeg's row-2 MBs are spatially predicted (intra-in-P) OR our
+            engine state diverged before MB9 in a way pixels don't show.
+         3. Slice-QP sweep (new KINETIX_FORCE_SLICE_QP[_B] debug overrides in
+            decoder/mod.rs): forced qp 20..25 all still diverge (qp=24 ==
+            baseline n=210/187/228). SliceQpY misinitialisation RULED OUT.
+         4. mb_skip_flag contextIdxInc re-audited against ffmpeg's
+            decode_cabac_mb_skip (h264_cabac.c:1336): both use "same-slice
+            neighbour available AND not skipped" -> ctx 11+inc (B: +13).
+            Identical. RULED OUT.
+         KEY INSIGHT resolving the #27 engine-sync paradox: rows of SKIP MBs
+            can decode identically under slightly-diverged engine state as
+            long as the skip bins stay dominant, so the FIRST PIXEL divergence
+            (MB9) need not be the first BIN divergence. Any state drift
+            introduced earlier - e.g. during the 8 SKIP MBs or MB8 - flips the
+            first low-probability decision. Candidates still open:
+            (a) terminate-bin handling in the P path after SKIP MBs (the
+                #12-era fix was applied to cabac_i; verify cabac_p/b read a
+                terminate bin after EVERY MB incl. skips and match x264's
+                exact write count);
+            (b) the shared-ctxIdx-17 sync between MbTypePCabacContext and
+                IntraMbTypeSuffixCabacContext (sync_shared_mb_type_ctx_*_p)
+                corrupting state across the MB8 P8x8 decision;
+            (c) MvStore/cells bookkeeping affecting nothing but bS (already
+                fixed) - no longer suspect.
+         NEXT STEP: add a per-bin engine-state hash to KINETIX_BINTRACE and
+            diff OUR two decode passes? No - instead hand-walk the first 40
+            bins of the P payload with ff_h264_cabac.c open, using
+            tests/dbg_bintrace_replay.rs as the template, until the first
+            decision differs from our trace. The payload is tiny (415-byte
+            NAL, ~380 CABAC bytes); this is now a bounded mechanical task.
+         ADDITIONAL ELIMINATIONS (same session):
+         - Emulation-prevention bytes: P NAL contains ZERO 00-00-03 seqs
+           (PowerShell scan); RBSP extraction cannot corrupt it. RULED OUT.
+         - DPB store-vs-deblock ordering: ALL five decode paths in
+           decoder/mod.rs (lines 547/828/1024/1287/1515) deblock BEFORE
+           store_reference_picture (590/1068/1330); interlaced.rs likewise.
+           References are post-deblock everywhere. RULED OUT.
+         - P mb_type tree re-verified verbatim against fetched
+           h264_cabac.c:2005-2020 (ctx14 intra gate; ctx15=0 -> mb_type=
+           3*ctx16 i.e. 16x16/P8x8; else 2-ctx17 i.e. 8x16/16x8; intra ->
+           decode_cabac_intra_mb_type(17, 0)). Identical.
+         - Terminate-bin handling in cabac_p: read after EVERY MB incl.
+           skips, early-eos errors, last-MB tolerated. Correct.
+         - ffmpeg per-MB debug (-debug:v 32) prints nothing useful in release
+           builds (ff_tlog compiled out); no oracle dump available from
+           ffmpeg itself.
+         FRAME-PAIRING NOTE for dbg_skip_lf users: our decoder emits decode
+            order (nal#4=P emitted before nal#5=B, one frame per packet);
+            ffmpeg rawvideo dumps display order. Verified empirically via
+            swap-symmetric diff counts.
+         INTRA-CONTINUITY PROBE result: ffmpeg's P row-2 pixels are NEITHER
+            plain MC from I (MV oracles) NOR simple intra (flat 82 top rows
+            but strong horizontal gradients mid-block; vertical/horizontal/
+            DC candidates all fail) => most consistent with INTER MBs whose
+            bins diverged inside MB9's RESIDUAL decode (ResidualCabacContext
+            inter path - the one component never independently verified for
+            inter blocks with this coefficient pattern), poisoning MB10's
+            skip flag and MB11 wholesale. Sharpened next step: transcribe an
+            independent oracle residual walker (sig-map + levels, ctx 105+,
+            following ff_h264_cabac.c residual_coeff/coeff_token logic) into
+            tests/dbg_p_oracle_replay.rs-style form, run it on the dumped
+            c_p8x8 P payload from MB0, and diff bin-by-bin against our trace
+            through MB9. First differing ORACLE line vs CRATE line is the bug.
+
+      - **2026-08-24 session #27 — DEBLOCKING EXONERATED DEFINITIVELY; gap
+         re-localized to intra-in-P / coded-inter MB parsing on the c_p8x8
+         bitstream itself.** Method + results:
+         1. `derive_bs_pair` rewritten as a verbatim transcription of ffmpeg's
+            `check_mv` (h264_loopfilter.c): raw `LIST_NOT_USED` (-1) sentinel
+            comparison implements the spec's "different number of motion
+            vectors" clause (an L1-only block next to a Bi block now yields
+            bS = 1), plus the mirrored-list equivalence check before returning.
+            Applied unconditionally for P slices too (their cells always carry
+            ref_idx_l1 == LIST_NOT_USED so it degenerates to the old result).
+            Correct per spec and matches ffmpeg exactly (traced edge
+            bs=[1,1,1,1] between BL116x16 MB(1,1) and BBi16x16 MB(1,2)).
+         2. New `KINETIX_SKIP_DEBLOCK` env override in `deblock_luma_mb` /
+            `deblock_chroma_mb` lets our pre-deblock pixels be compared against
+            **`ffmpeg -skip_loop_filter all`** output on the SAME bitstream —
+            something sessions #12-#26 could never do (they compared against
+            ffmpeg's *deblocked* frames only). New harness:
+            `tests/dbg_skip_lf.rs`.
+
+      - **2026-08-24 session #28 — P-slice CABAC mb_type tree audit COMPLETE:
+         tree EXONERATED (empirically, not just by eyeball).** Method:
+         FFmpeg's exact `AV_PICTURE_TYPE_P` branch (`ff_h264_decode_mb_cabac`:
+         ctx14 intra gate; ctx15=0 -> 3*ctx16; else 2-ctx17) AND
+         `decode_cabac_intra_mb_type(ctx_base, intra_slice)` — including its
+         pointer arithmetic (`state += 2` only on the intra_slice branch; the
+         `state[2+intra_slice]` / `state[3+intra_slice]` /
+         `state[3+2*intra_slice]` folds that make the P/B suffix REUSE ctx
+         17+2 for the cbp_chroma *value* bin and ctx 17+3 twice for both
+         pred_mode bins) — were transcribed verbatim onto a flat 1024-entry
+         context array indexed by absolute spec ctxIdx, then run in LOCKSTEP
+         against the crate's `MbTypePCabacContext` /
+         `IntraMbTypeSuffixCabacContext` pair (with the same unconditional
+         prefix->suffix / suffix->prefix shared-ctx17 syncs that
+         `cabac_b.rs::parse_p_macroblock_cabac` performs) over pseudo-random
+         payloads: 3 cabac_init_idc values x 4 QPs x 8 seeds x up to 200 MBs
+         each. Two new tests in `entropy.rs::tests` assert BOTH per-element
+         value equality AND final adapted-state equality of every touched
+         context variable (ctxIdx 14..=20):
+         `p_mbtype_tree_differential_vs_ffmpeg_transcription` and
+         `i_slice_mbtype_differential_vs_ffmpeg_transcription` (the latter
+         covers the I-slice variant, ctx_base=3/intra_slice=1, cycling all
+         four bin-0 ctxIdxInc patterns).
+         RESULT: all pass — the P mb_type tree, the intra-in-P suffix
+         (including its context-reuse quirks), the shared ctxIdx-17 sync
+         direction, and the I-slice mb_type tree are bit-for-bit identical to
+         FFmpeg across every randomized stream tried.
+         CONSEQUENCE: the "intra-in-P (mb_type>=5) misparse" theory from
+         session #27 is now RULED OUT at the syntax-element level. The
+         remaining row-2 gap on c_p8x8 must live in one of:
+           (a) the inter residual walk (`decode_inter_residual_cabac` /
+               `ResidualCabacContext`) — still the only major component never
+               independently verified with this coefficient pattern (session
+               #25's leading theory),
+           (b) reconstruction of intra MBs inside P slices
+               (`parse_intra_mb_cabac_pb`'s downstream neighbour-context/MPM
+               handling vs ffmpeg's decode_intra_mb), or
+           (c) sub_mb_type/ref_idx/mvd context derivation for P_8x8 MBs whose
+               neighbours are intra.
+         NEXT STEP: extend the same lockstep-oracle technique past mb_type
+         into the residual path — transcribe ffmpeg's
+         residual_coeff/coeff_token walk (sig-map + levels, ctx 105+,
+         cat-specific bases incl. the 8x8 indirection tables) onto the flat
+         oracle array and diff bin-by-bin against
+         `decode_inter_residual_cabac` on the c_p8x8 P payload through MB9
+         (session #26's prescription, now unblocked by this audit). The
+         FlatOracle scaffolding in `entropy.rs::tests` is reusable for it.
+         ALSO THIS SESSION: fixed 3 pre-existing clippy `-D warnings`
+         failures in `tests/dbg_skip_lf.rs` (`map_or` -> `is_none_or`) that
+         would have failed the CI clippy job.
+
+      - **2026-08-24 session #29 — residual-path lockstep audit: REAL BUG
+         FOUND AND FIXED (shared chroma level context).** Extended the
+         FlatOracle lockstep technique into `decode_cabac_residual_internal`:
+         new verbatim transcriptions of the significance-map walk
+         (`DECODE_SIGNIFICANCE`), the STORE_BLOCK level loop, the node_ctx
+         maps, and FFmpeg's absolute ctxIdx bases (sig {105,120,134,149,152,
+         402}, last {166,181,195,210,213,417}, level {227,237,247,257,266,
+         426}) now live in `entropy.rs::tests` alongside two permanent
+         differential tests:
+         `residual_block_differential_vs_ffmpeg_transcription` (cats 0..=4,
+         4 QPs x 8 seeds x 300 blocks) and
+         `residual_block_8x8_differential_vs_ffmpeg_transcription` (cat 5).
+         **BUG**: `ResidualCabacContext` stored `coeff_abs_level_minus1`
+         contexts as five per-category `[CabacContext; 10]` arrays — but spec
+         Table 9-42 / ffmpeg's `coeff_abs_level_m1_offset` make ChromaDC's
+         highest context (cat3 base 257 + inc 9 = ctxIdx 266) the SAME
+         physical variable as ChromaAC's lowest (cat4 base 266 + inc 0). Our
+         split arrays adapted two independent copies, so any CABAC slice
+         whose chroma levels exercised both boundary contexts diverged from
+         a conformant decoder (state drift found at ctxIdx 266 on random
+         streams within one seed; bin values can stay equal for a while,
+         which is why pixel-level symptoms look like tiny coefficient
+         differences). **FIX**: `level` is now ONE flat Vec indexed by
+         absolute ctxIdx - 227 (cats 0..=4 jointly occupy 227..=275), used by
+         both `ResidualCabacContext::new` and `new_pb`; sig/last arrays have
+         no overlaps and are unchanged.
+         AUDIT NOTES: (a) the cats 0..=4 walk, node_ctx maps, level tables
+         ({5,5,5,5,6,7,8,9} etc.), escape arithmetic (`15 + EG0 ==
+         ffmpeg's `(1<<j)+bits+14`), and the 8x8 SIG indirection table are
+         all bit-identical to FFmpeg; (b) the 8x8 differential initially
+         failed due to a bug in MY oracle transcription (implicit-tail test
+         written as `last == 62` instead of ffmpeg's `last == max_coeff-1`
+         == 63), not in the crate — fixed in the oracle; (c) FFmpeg caps its
+         escape prefix at 23 ones as a DoS guard while `decode_bypass_eg`
+         caps at 32; the two differ only on non-conformant garbage (levels
+         >= 2^23+14 cannot occur in valid streams) and the tests pin the
+         crate's convention deliberately.
+         All conformance suites re-run green after the fix (cabac I/P/B,
+         high-profile 8x8 CABAC, CAVLC P/B — all bit-exact). NEXT STEPS:
+         re-run `dbg_skip_lf` / c_p8x8 pixel comparisons to measure whether
+         the shared-ctx266 fix closes part of the row-2 gap (it plausibly
+         explains the "tiny coefficient difference"-class symptoms from
+         sessions #22-#24); if the gap persists, continue with (b)/(c) from
+         session #28's list.
+         3. RESULT on c_p8x8 (deblocking enabled): I frame pre-deblock ==
+            ffmpeg pre-deblock EXACTLY (and post-deblock bit-exact). But the P
+            and B frames' PRE-deblock pixels diverge (n~1230/frame), confined
+            to MB row 2. NOTE: our decoder emits decode order (I,P,B) while
+            ffmpeg's rawvideo dump is display order (I,B,P) — pair
+            ours[1]<->ff[2] (P) and ours[2]<->ff[1] (B) or the diffs look
+            swapped. c_p8x8_nd remains fully bit-exact because x264 makes
+            different MB choices when RD accounts for the loop filter.
+         4. Brute-force MV oracle on P-frame MB(3,2) (cbp=0 => pure MC): OUR
+            quadrants are reproduced by single MVs around the decoded mvd
+            (-1,20)+predictor, but ffmpeg's quadrants match NO MV from the I
+            reference (min SAD 1219-1583 over +/-128 qpel) => ffmpeg decoded
+            that MB as something OTHER than plain L0-inter-with-cbp0 — almost
+            certainly INTRA-IN-P (mb_type >= 5 -> I_16x16/I_4x4/I_PCM inside a
+            P slice), which we misparse as inter (or as a different inter type,
+            dropping its residual). First divergence: P-frame MB(1,2)
+            @(20,32); MB(1..3,2) all diverge, MB(0,2) is fine.
+         CONCLUSION: the long-standing "row-1/row-2 +/-1-2 residual gap" was
+            TWO stacked issues: (a) a real bS=1 derivation bug (fixed this
+            session via the check_mv transcription), and (b) misparsing of
+            intra-in-P (probably also some coded-inter) MBs in streams where
+            x264 actually uses them — invisible in every previous repro clip
+            (b_swap/b_forcel1/b_default/c_p8x8_nd all avoid those mb_types).
+         NEXT STEP: instrument the P-slice CABAC mb_type tree for MB(1,2) of
+            c_p8x8 (KINETIX_BINTRACE already dumps per-MB context states);
+            hand-walk the first bins against ff_h264_cabac.c
+            `decode_cabac_mb_type`'s P branch (ctxIdx 14..17, intra suffix at
+            ctxIdxOffset 32) and check whether our tree classifies mb_type>=5
+            (intra-in-P) correctly, including the I_16x16 CBP/qp_delta handling
+            that follows. Then re-run dbg_skip_lf: target is
+            `PRE-DEBLOCK MATCH: true` on all 3 frames.
+
+      - **2026-08-24 session #30 — post-fix re-run + REFINED DIAGNOSIS:
+         evidence now points at MV-PREDICTOR / REFERENCE-LIST mismatch, not
+         mb_type or residual parsing.**
+         Re-ran `dbg_skip_lf` after the ctx266 fix: gap unchanged (I exact;
+         P and B frames each diverge in MB row 2, n~187-228 per MB).
+         NEW SYNTHESIS of all session evidence:
+           - The CABAC mb_type trees (#28) and the whole residual walk
+             (#29) are now PROVEN bit-identical to FFmpeg, and every
+             element boundary through MB8 stays in lockstep (MB8 pixel-
+             exact incl. its P8x8 sub_mb/ref_idx/mvd/cbp/dqp/residual).
+           - MB(3,2) has cbp=0 (pure MC) yet is wholesale wrong, while OUR
+             own reconstruction is perfectly consistent with OUR parsed
+             MV (-1,20)-family (best-vs-ours SAD 0..43). ffmpeg's version
+             matches NO integer MV into the deblocked I (SAD>=1219).
+         KEY INSIGHT: mvd bins are context-selected by NEIGHBOUR mvd SUMS
+           (amvd), NOT by the resulting MV. A wrong MV PREDICTOR (or wrong
+           reference-list entry the MV points into) therefore changes the
+           decoded MV VALUES while consuming IDENTICAL bins -- the parse
+           never desyncs, later MBs stay 'consistent', and only pixels
+           diverge. This fits every observation since session #11.
+         PRIME SUSPECTS (in order):
+           (a) MVP median-predictor inputs (§8.4.1.1): neighbour MV
+               availability/scaling for non-reference or field pictures,
+               especially across the row1->row2 boundary where diffs start;
+           (b) RefPicList0 CONTENT (§8.2.4.2): with ref=1, x264 uses two
+               refs; if our list ORDER differs from ffmpeg's (PicNum vs POC
+               tie-breaks), identical mvds yield different reference
+               pictures => wholesale pixel diffs with clean parsing;
+           (c) B-slice L1 list + spatial-direct colZeroFlag derivation for
+               the B frame's row 2.
+         NEXT STEP: instrument mv.rs::predict_slice_mvs to dump the
+           predictor + neighbours for each partition of MBs (1,2)/(3,2),
+           and independently hand-compute §8.4.1 medians from the parsed
+           neighbour MVs; separately print our RefPicList0 entries' buffer
+           IDs/POCs vs ffmpeg's `-debug` ref info. First mismatched input
+           is the bug. (The lockstep-oracle discipline cannot catch this
+           class: it lives BETWEEN syntax elements, in derived data.)
+         SESSION #30 ADDENDUM -- MVP TRACE INSTRUMENTATION LANDED:
+           - mv.rs::predict_mv now prints A/B/C candidates + chosen
+             predictor per partition when KINETIX_BINTRACE is set (all
+             16x8/8x16 shortcut branches preserved; lib tests + clippy OK).
+           - New harness tests/dbg_mvp_trace.rs regenerates the c_p8x8 IBP
+             clip and dumps the trace.
+           - First data point (P slice): mb9=(1,2) 16x16 ref0:
+             A=Some((0,-20) ri0) [MB(0,2) top-right 8x8, mvd=(0,-20)],
+             B=Some((0,0) ri0) [MB(1,1) SKIP], C=Some((0,0) ri0)
+             [MB(2,1) SKIP] -> median (0,0); decoded mvd (0,1) => mv (0,1).
+             match_count=3, no shortcut; derivation LOOKS spec-correct for
+             those inputs. NEXT SESSION:
+             (1) hand-verify MB(0,2)'s sub-MV chain from row-1 skips;
+             (2) dump our RefPicList0 buffer/POC ids vs ffmpeg -debug to
+                 rule out ref-list-order mismatch (suspect b);
+             (3) CHECK A LIKELY REAL BUG: in the B-slice trace neighbours
+                 appear as Some(mv=(0,0) ri=-1) -- L1-only neighbours must
+                 be treated as UNAVAILABLE for L0 prediction per spec
+                 8.4.1.1, i.e. they should NOT enter median3 at all (only
+                 the special A-with-B,C-unavailable rule may use them).
+                 Our median_pred currently feeds them into the median with
+                 zero MVs, which can silently corrupt predictors in B
+                 slices whenever a neighbour was coded L1-only or direct.
+
 ## SESSIONS #12-#26 SUMMARY — CABAC B-FRAME INVESTIGATION COMPLETE
 
 ### What was accomplished

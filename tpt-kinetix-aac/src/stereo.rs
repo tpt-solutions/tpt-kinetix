@@ -46,12 +46,38 @@ pub fn apply_stereo(
             let ridx = g * max_sfb + sfb;
             let width = (swb[sfb + 1] - swb[sfb]) as usize;
 
+            // Band types are needed by both M/S and intensity below;
+            // out-of-range indices (bitstream-controlled `max_sfb` /
+            // window-group count on a desynced stream) just mean "not a
+            // special band" rather than a panic.
+            let l_bt = left_band_type.get(lidx).copied();
+            let r_bt = right_band_type.get(ridx).copied();
+
             // --- M/S stereo ---
-            let ms_used = match ms_mask_present {
-                0 => false,
-                2 => true,
-                _ => ms_mask.get(lidx).copied().unwrap_or(false),
-            };
+            //
+            // Per ISO 14496-3 / ffmpeg's `apply_mid_side_stereo`
+            // (`aacdec_dsp_template.c`), the M/S butterfly only runs when
+            // *neither* channel's band is PNS (`NOISE_HCB`) or intensity
+            // (`INTENSITY_HCB`/`INTENSITY_HCB2`) coded — those band types are
+            // reconstructed by `apply_pns`/the intensity block below instead,
+            // using their own, different combination rules. Applying the
+            // butterfly unconditionally (the previous behavior here) mixed
+            // whatever raw placeholder values sat in the "derived" channel's
+            // slot into the "real" channel's data before that placeholder was
+            // properly reconstructed, corrupting it — a real, localized
+            // amplitude bug (not merely a value substituted later): once
+            // `left`/`right` are added/subtracted here, the intensity block
+            // below can no longer recover the original data even though it
+            // overwrites the derived side, because the *source* side was
+            // already mixed with the wrong value.
+            let ms_eligible = matches!(l_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB)
+                && matches!(r_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB);
+            let ms_used = ms_eligible
+                && match ms_mask_present {
+                    0 => false,
+                    2 => true,
+                    _ => ms_mask.get(lidx).copied().unwrap_or(false),
+                };
             if ms_used {
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
@@ -83,8 +109,6 @@ pub fn apply_stereo(
             // with no recorded type simply isn't an intensity band. (Regression:
             // `index out of bounds: the len is 14 but the index is 14`, found by
             // `tests/proptest_decode_never_panics.rs`.)
-            let l_bt = left_band_type.get(lidx).copied();
-            let r_bt = right_band_type.get(ridx).copied();
             let (Some(l_bt), Some(r_bt)) = (l_bt, r_bt) else {
                 continue;
             };
@@ -130,7 +154,7 @@ pub fn apply_stereo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scalefactors::{INTENSITY_HCB, ZERO_HCB};
+    use crate::scalefactors::{INTENSITY_HCB, INTENSITY_HCB2, NOISE_HCB, ZERO_HCB};
     use crate::syntax::{IcsInfo, WindowSequence};
 
     /// A single-long-window ICS with `max_sfb` bands (no grouping).
@@ -230,6 +254,62 @@ mod tests {
         for i in 64..128 {
             assert!((left[i] - 6.0).abs() < 1e-6);
             assert!((right[i] - (-4.0)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn ms_stereo_skips_noise_and_intensity_bands() {
+        // ms_mask_present == 2 (M/S "on" for every band per the mask), but
+        // band 0 is NOISE_HCB (PNS) and band 1 is INTENSITY_HCB2. Per ISO
+        // 14496-3 / ffmpeg's `apply_mid_side_stereo`, the M/S butterfly must
+        // be skipped for both — those band types are reconstructed by
+        // `apply_pns`/the intensity block, not by mixing raw left/right
+        // values, so applying it here would corrupt data the later stage
+        // still needs. Band 2 (a regular codebook) is included as a control
+        // to confirm M/S still fires where it should.
+        let ics = ics_long(3);
+        let swb = [0u16, 64, 128, 192];
+        let mut left = [0.0f32; 1024];
+        let mut right = [0.0f32; 1024];
+        for i in 0..64 {
+            left[i] = 1.0;
+            right[i] = 3.0;
+        }
+        for i in 64..128 {
+            left[i] = 1.0;
+            right[i] = 3.0;
+        }
+        for i in 128..192 {
+            left[i] = 1.0;
+            right[i] = 3.0;
+        }
+        let band_type = vec![NOISE_HCB, INTENSITY_HCB2, 1u8];
+        apply_stereo(
+            &mut left,
+            &mut right,
+            &ics,
+            &band_type,
+            &band_type,
+            &[0i32, 0, 0],
+            &[0i32, 0, 0],
+            2,
+            &[],
+            &swb,
+        );
+        // Band 0 (NOISE_HCB): M/S must be skipped, so left/right are
+        // untouched by this function (PNS itself runs elsewhere).
+        for i in 0..64 {
+            assert!((left[i] - 1.0).abs() < 1e-6, "L={} at {i}", left[i]);
+            assert!((right[i] - 3.0).abs() < 1e-6, "R={} at {i}", right[i]);
+        }
+        // Band 2 (regular codebook): M/S still applies normally: 1+3=4, 1-3=-2.
+        for i in 128..192 {
+            assert!((left[i] - 4.0).abs() < 1e-6, "L band2={} at {i}", left[i]);
+            assert!(
+                (right[i] - (-2.0)).abs() < 1e-6,
+                "R band2={} at {i}",
+                right[i]
+            );
         }
     }
 

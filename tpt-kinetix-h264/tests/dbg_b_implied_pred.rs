@@ -113,8 +113,20 @@ fn gen(dir: &std::path::Path, name: &str, input: &str, vf: &str) -> Option<(Vec<
     Some((std::fs::read(&h264).ok()?, std::fs::read(&refyuv).ok()?))
 }
 
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn p_boxmv_minimal() {
+    if !ffmpeg_available() {
+        eprintln!("skipping p_boxmv_minimal: ffmpeg not available on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_b_implied");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("p_boxmv.h264");
@@ -221,6 +233,10 @@ fn p_boxmv_minimal() {
 // Same IBP moving-box content encoded with CAVLC instead of CABAC.
 #[test]
 fn ibp_boxmv_cavlc() {
+    if !ffmpeg_available() {
+        eprintln!("skipping ibp_boxmv_cavlc: ffmpeg not available on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_b_implied");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("ibp_cavlc.h264");
@@ -320,6 +336,10 @@ fn ibp_boxmv_cavlc() {
 // spec §7.3.3 for this exact SPS/PPS configuration.
 #[test]
 fn p_header_manual_walk() {
+    if !ffmpeg_available() {
+        eprintln!("skipping p_header_manual_walk: ffmpeg not available on PATH");
+        return;
+    }
     use tpt_kinetix_h264::sps::SeqParameterSet;
 
     struct B<'a> {
@@ -476,6 +496,10 @@ fn p_header_manual_walk() {
 
 #[test]
 fn ibp_bigmv_nointra() {
+    if !ffmpeg_available() {
+        eprintln!("skipping ibp_bigmv_nointra: ffmpeg not available on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_b_implied");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("ibp_bigmv_q.h264");
@@ -565,6 +589,10 @@ fn ibp_bigmv_nointra() {
 
 #[test]
 fn ibp_testsrc_cabac() {
+    if !ffmpeg_available() {
+        eprintln!("skipping ibp_testsrc_cabac: ffmpeg not available on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_b_implied");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("ibp_testsrc.h264");
@@ -657,6 +685,10 @@ fn ibp_testsrc_cabac() {
 // fails, the trigger is not MVD magnitude but the preceding intra-in-P MB.
 #[test]
 fn ibp_boxmv_smallmv() {
+    if !ffmpeg_available() {
+        eprintln!("skipping ibp_boxmv_smallmv: ffmpeg not available on PATH");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_b_implied");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("ibp_smallmv.h264");

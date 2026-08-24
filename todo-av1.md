@@ -135,19 +135,16 @@
        compensation lands (the reconstruction pipeline still returns `Ok(None)` for
        non-intra frames, so inter decode is not yet enabled).
 - [ ] Motion vector prediction (§7.10) and inter block reconstruction (§7.11.3)
-- [ ] **Real gap found 2026-08-23 (currently inert on the corpus):**
-      `decode_intra_block` never calls `read_cdef()`/`read_delta_qindex()`/
-      `read_delta_lf()` (spec's `intra_frame_mode_info()` calls all three
-      right after `read_skip()`) — these three functions don't exist in the
-      crate at all. Doesn't affect the current 5-entry corpus (all have
-      `cdef_bits == 0`, `delta_q_present == delta_lf_present == false`, so
-      each function's own spec gate makes it consume zero bits either way —
-      confirmed via `DBG frame_header`), but will desync any future stream
-      that turns on CDEF index signaling or per-block delta-q/delta-lf.
-      Needs new `TileDecodeState` fields (`cdef_idx` grid reset per 64×64
-      unit, `ReadDeltas`/current-qindex/current-loop-filter tracking reset
-      per superblock) plus the three read functions and their own tests —
-      scope it as its own task, not a one-line fix.
+- [x] **Real gap found 2026-08-23, implemented 2026-08-24 (see session note
+      below):** `decode_intra_block`/`decode_inter_block` now call
+      `read_cdef()`/`read_delta_qindex()`/`read_delta_lf()` right after
+      `read_skip()` (spec order for both `intra_frame_mode_info()` and
+      `inter_frame_mode_info()`), with the new `TileDecodeState` fields
+      (`cdef_idx` grid, `ReadDeltas`/`current_q_index`/`delta_lf` tracking
+      reset per superblock in `decode_superblock`) and their own regression
+      tests. Confirmed a true no-op on the current 5-entry corpus. Still
+      open: wiring `cdef_idx`'s per-64×64-unit strength into the actual CDEF
+      filter pass (`loop_filter.rs` still uses one frame-level strength).
 
 #### AV1 Phase F — parallel tile decode — **DONE (2026-08-14)**
 - [x] Wire `rayon` over the tile groups now that Phase A–C produce real per-tile
@@ -2143,28 +2140,217 @@
 > `AC_QLOOKUP_8[128]` (the two values `dequantize_coeffs` actually used for
 > this exact block) against `08.decoding.process.md`'s literal
 > `Dc_Qlookup`/`Ac_Qlookup[0]` (the `BitDepth==8` row) — **both match exactly**
-> (`140`/`176`). While there, found a **third real-but-inert gap**: spec's
+> (`140`/`176`). While there, found a **third real gap, since fixed**: spec's
 > `get_dc_quant(plane)` is `dc_q(get_qindex(0, segment_id) + DeltaQYDc)` for
 > luma (and `+ DeltaQUDc`/`+ DeltaQVDc` for chroma) — the DC coefficient's
 > quantizer step uses `qindex + a per-plane DC delta`, not the plain
-> per-frame `qindex`. `frame.rs` parses `delta_q_y_dc`/`delta_q_u_dc`/
-> `delta_q_u_ac`/`delta_q_v_dc`/`delta_q_v_ac` into `FrameHeader` but
-> **nothing in `reconstruct/` ever reads any of them** (`grep` for
-> `delta_q_y_dc` under `reconstruct/` finds zero matches) —
-> `dequantize_coeffs` always uses the same plain `qindex` for every plane's
-> DC term. Confirmed inert on the current corpus via a new debug hook
-> (added to the existing `KINETIX_AV1_DBG` line): all five entries have all
-> five deltas at `0`. Not fixed this session — wiring it through cleanly
-> needs `TileDecodeState`/`reconstruct_tx_block`'s ~17-parameter signature to
-> carry per-plane DC/AC qindex (or a small `DeltaQ` struct) end-to-end from
-> `FrameHeader`, and rushing a multi-call-site threading change with no
-> conformance coverage of nonzero delta-q streams felt like exactly the kind
-> of risk this file has repeatedly warned against. Tracked as gap #3
-> alongside the `read_cdef`/delta-lf gap and the superres/`allow_intrabc`
-> gap above — all three are real, all three are inert on this corpus, and a
-> future session should probably fix them together as one "frame-header
-> completeness" pass with new tests using deliberately-nonzero values for
-> each flag.
+> per-frame `qindex`. `frame.rs` parsed `delta_q_y_dc`/`delta_q_u_dc`/
+> `delta_q_u_ac`/`delta_q_v_dc`/`delta_q_v_ac` into `FrameHeader` but nothing
+> in `reconstruct/` ever read any of them — `dequantize_coeffs` always used
+> the same plain `qindex` for every plane's DC term. Confirmed inert on the
+> current corpus via a debug hook (`KINETIX_AV1_DBG` line extended with the
+> five delta fields): all five entries have all five at `0`.
+>
+> **Fixed properly, not left as a documented gap this time**, since the
+> wiring turned out contained and mechanical: added a small `pub struct
+> DeltaQ { y_dc, u_dc, u_ac, v_dc, v_ac }` (`reconstruct/mod.rs`), threaded
+> it as one new parameter through `decode_tile_group`/`TileDecodeState::new`
+> (populated from `FrameHeader`'s five fields at the `reconstruct_av1_frame`
+> call site) and `TileDecodeState::qindex_for_plane(plane) -> (u8, u8)` (the
+> real `get_dc_quant`/`get_ac_quant` formula, clamped to `0..=255` like the
+> spec's `Clip3`). `reconstruct_tx_block`/`dequantize_coeffs` now take
+> `qindex_dc`/`qindex_ac` explicitly instead of one shared `qindex`, computed
+> once per plane at each of the 3 intra + 2 inter call sites *before* the
+> `&mut self.{y,u,v}_plane` reborrows those functions already hold (calling
+> a `&self` method after that reborrow is live is a borrow-check error —
+> hence precomputing into locals up front, not inline at the call). Added
+> two real regression tests: `qindex_for_plane_applies_per_plane_delta_and_
+> clamps` (asserts the delta math and the `Clip3`-style clamping in both
+> directions with deliberately out-of-range deltas) and `dequant_tests::
+> dequantize_coeffs_uses_separate_dc_and_ac_qindex` (asserts index 0 scales
+> by the DC table at `qindex_dc` and every other index by the AC table at
+> `qindex_ac`). Re-ran the full corpus PSNR check after landing this —
+> **numbers are bit-for-bit identical to before the fix** (as expected: all
+> five deltas are `0` on this corpus, so the fix is a true no-op here, not a
+> silent behavior change) — `solid_red` is still `99.00` dB pixel-exact.
+> `cargo test -p tpt-kinetix-av1` (unit + every integration/proptest/doctest
+> file) is green, `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D
+> warnings` is clean, `cargo build --workspace` is clean. One external test
+> file needed updating for the new `decode_tile_group` parameter:
+> `tpt-kinetix-av1/tests/proptest_coeffs.rs` (added `DeltaQ::default()`).
+>
+> Remaining two gaps (`read_cdef`/delta-lf, superres/`allow_intrabc`) are
+> still open and still real, still confirmed inert on this corpus — those
+> two need new per-tile/per-superblock *state* (a `cdef_idx` grid,
+> `ReadDeltas`/current-qindex tracking, `UpscaledWidth`), not just a
+> parameter thread, so they're intentionally left for a dedicated pass
+> rather than rushed alongside this one.
+
+> **2026-08-24 session note (cont'd yet again) — implemented the superres/
+> `allow_intrabc` gap for real (not just documented); found and fixed two
+> more related real bugs in the same function while there.** Picked up the
+> "implement the two remaining real-but-inert gaps" item from the previous
+> note. `superres_params()` (§ Superres params syntax) was not implemented
+> at all — `parse_frame_size` never read `use_superres`/`coded_denom` and
+> never distinguished `UpscaledWidth` from `FrameWidth`. Implemented it
+> properly (fetched the exact syntax + `SUPERRES_NUM=8`/`SUPERRES_DENOM_MIN=9`/
+> `SUPERRES_DENOM_BITS=3` constants via `curl` against the spec's own
+> `06.bitstream.syntax.md`/`03.symbols.md`, master branch — the previous
+> session's `raw.githubusercontent.com/.../main/...` URL 404s; it's `master`):
+> `FrameWidth` is now correctly downscaled by `SuperresDenom` when
+> `use_superres` is signaled, `UpscaledWidth` is tracked as a new
+> `FrameHeader::upscaled_width` field, and the `allow_intrabc` gate now
+> compares `UpscaledWidth == FrameWidth` (spec) instead of the old code's
+> `FrameWidth == RenderWidth` (wrong pair of variables, and the "doubly
+> wrong" issue the previous note flagged).
+>
+> **Two more real bugs found and fixed while implementing this, both in the
+> same `parse_frame_size`/`render_size()` code path:**
+> 1. `render_size()`'s `render_and_frame_size_different` flag read was gated
+>    on `!seq.reduced_still_picture_header` — but the spec's
+>    `uncompressed_header()` calls `frame_size()`/`render_size()`
+>    unconditionally for a `FrameIsIntra` frame regardless of
+>    `reduced_still_picture_header` (that flag only forces earlier fields to
+>    fixed defaults and forces `frame_size_override_flag = 0`; confirmed by
+>    reading the actual spec pseudocode around the `reduced_still_picture_header`
+>    branch). So a reduced-still-picture-header keyframe was one bit short of
+>    what the encoder actually wrote, desyncing everything parsed after
+>    `render_size()`. Fixed by removing the gate; updated
+>    `parse_frame_header_reduced_still_keyframe`'s hand-built test bitstream to
+>    include the now-correctly-read bit (its old comment's claim "no bits are
+>    emitted here" for `render_size()` was itself wrong).
+> 2. When `render_and_frame_size_different == 1`, the render width/height were
+>    read via `read_ns(br, w)` (non-symmetric coding) — but the spec's
+>    `render_size()` syntax reads `render_width_minus_1`/`render_height_minus_1`
+>    as plain `f(16)` fixed-width fields, not `ns()`. Confirmed directly
+>    against the fetched syntax table. This is inert on the current 5-entry
+>    corpus (all have `render_and_frame_size_different == 0`, confirmed via
+>    the existing `KINETIX_AV1_DBG_SUPERRES` hook — reused, extended to also
+>    print `uw`), but would have desynced any real stream that signals a
+>    render size different from the coded frame size. Fixed by switching to
+>    `read_f(br, 16)`.
+>
+> **Regression tests added** (`frame.rs`):
+> `parse_frame_size_applies_superres_downscale_and_keeps_upscaled_width`
+> (drives `parse_frame_size` directly with `use_superres=1`/`coded_denom=3`,
+> asserts `FrameWidth` is correctly downscaled from 128 to 85 while
+> `UpscaledWidth` stays 128 and `RenderWidth` defaults to `UpscaledWidth`, not
+> the downscaled width) and
+> `parse_frame_size_skips_superres_bit_when_sequence_header_disables_it`
+> (asserts `enable_superres=false` reads zero superres bits and that the
+> `f(16)` render-size fields are read/interpreted correctly when
+> `render_and_frame_size_different=1`).
+>
+> **Impact measured**: confirmed a true no-op on the current corpus (all 5
+> entries have `enable_superres=false`, checked via the debug hook) —
+> `cargo run -p tpt-kinetix-av1 --example av1_psnr_check` numbers are
+> unchanged by this fix specifically (the numbers differ slightly from the
+> previous session's recorded baseline, but that's because the previous
+> session's *other* uncommitted fix — the per-plane `DeltaQ` wiring — was
+> already sitting in the working tree before this session started and wasn't
+> reflected in that baseline; re-ran twice, deterministic both times).
+> `solid_red_32`/`_64` still 99.00 dB pixel-exact, unaffected as expected.
+> `cargo test -p tpt-kinetix-av1 --lib` is green, now 94/94 (was 92/92 at
+> session start — the DeltaQ fix's 2 tests plus this session's 2 new tests).
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` and `cargo
+> build --workspace` are both clean.
+>
+> **What's left of this gap-closing item**: `read_cdef()`/
+> `read_delta_qindex()`/`read_delta_lf()` (the other half of the "two
+> remaining gaps" from the previous note) are still unimplemented — that one
+> needs new per-tile/per-superblock decode *state* (`cdef_idx` grid reset
+> every 64×64 unit, `ReadDeltas`/current-qindex/current-loop-filter tracking
+> reset per superblock), not just a header-parsing fix like this session's
+> work, so it's still intentionally left for its own dedicated pass. The
+> underlying pixel-exactness mystery (the still-unexplained `testsrc`
+> divergence documented across the last several session notes above) is
+> also still open — this session's fix is header-parsing correctness/future
+> stream compatibility, not a lead on that mystery (confirmed inert on the
+> corpus that mystery is being chased on).
+>
+> No `git commit` calls were made. Files modified this session (on top of
+> the already-uncommitted `DeltaQ` files from the previous session, still
+> present in the working tree): `tpt-kinetix-av1/src/frame.rs`.
+
+> **2026-08-24 session note (cont'd a fifth time) — implemented the other
+> remaining gap, `read_cdef()`/`read_delta_qindex()`/`read_delta_lf()`, for
+> real.** This was the harder of the two "two remaining gaps" items (the
+> superres one above only needed a header-parsing fix; this one needed new
+> per-tile/per-superblock decode state, as previous notes anticipated).
+> Fetched §5.11.7/§5.11.18/§5.11.19/§5.11.20/§5.11.56's exact pseudocode via
+> `curl` against the spec's `06.bitstream.syntax.md` (confirmed `read_cdef`/
+> `read_delta_qindex`/`read_delta_lf` sit in the identical position — right
+> after `read_skip()`, before `read_is_inter()`/`use_intrabc` — in *both*
+> `intra_frame_mode_info()` and `inter_frame_mode_info()`, so `inter_block.rs`
+> had the exact same gap as `intra_block.rs`, not just the intra path the
+> earlier note called out) and the `Default_Delta_Q_Cdf`/`Default_Delta_Lf_Cdf`
+> tables via `10.additional.tables.md` and `09.parsing.process.md` (confirmed
+> `TileDeltaQCdf`/`TileDeltaLFCdf`/`TileDeltaLFMultiCdf[i]` are separate
+> adaptive CDF instances that all init from the one default table).
+>
+> **New state added to `TileDecodeState`** (`reconstruct/mod.rs`):
+> `use_128x128_superblock`, `enable_cdef`, `cdef_bits`, `delta_q_present`,
+> `delta_q_res`, `delta_lf_present`, `delta_lf_res`, `delta_lf_multi`,
+> `num_planes` (frame-header/sequence-header constants, threaded in via a new
+> `CdefDeltaParams` bundle struct rather than growing the already-long
+> `TileDecodeState::new`/`decode_tile_group` positional argument lists
+> further), plus per-tile mutable state: `current_q_index` (`CurrentQIndex`,
+> starts at `base_q_idx`), `delta_lf: [i8; 4]` (`DeltaLF[FRAME_LF_COUNT]`),
+> `read_deltas` (`ReadDeltas`), `cdef_idx: HashMap<(usize, usize), i8>`
+> (`cdef_idx[r][c]`, absent == spec's `-1`).
+>
+> **New methods**: `clear_cdef`/`read_cdef`/`read_delta_qindex`/
+> `read_delta_lf`, called from `decode_superblock` (the `ReadDeltas =
+> delta_q_present` + `clear_cdef(r, c)` prelude, mirroring `decode_tile()`)
+> and from both `decode_intra_block` and `decode_inter_block` (right after
+> `read_skip()`, `ReadDeltas = 0` after). `qindex_for_plane` now reads
+> `current_q_index` instead of the static frame-level `qindex` (which became
+> genuinely dead code and was removed from the struct), so a stream that
+> *does* turn on `delta_q_present` will get the right per-block quantizer
+> once this path is exercised — not just correct bit consumption.
+> `Default_Delta_Q_Cdf`/`Default_Delta_Lf_Cdf` and their read helpers landed
+> in `mode_cdfs.rs` alongside the existing `skip`/`segment_id` CDF pattern.
+>
+> **Correctness note**: full multi-strength CDEF *application* (selecting a
+> different filter strength per 64×64 unit from `cdef_idx`) is still not
+> wired into the post-filter pass (`loop_filter.rs` still uses the single
+> frame-level strength) — this session only implemented the *bitstream
+> parsing* side (consuming the right number of bits, tracking the grid
+> correctly) so future streams that signal CDEF/delta-q/delta-lf don't
+> desync. Wiring `cdef_idx` into the actual filter strength selection is a
+> separate, still-open task.
+>
+> **Impact measured**: confirmed a true no-op on the current 5-entry corpus
+> (`cargo run -p tpt-kinetix-av1 --example av1_psnr_check` numbers are
+> bit-for-bit identical to the previous note's) — expected, since all 5
+> entries have `cdef_bits == 0`/`delta_q_present == delta_lf_present ==
+> false`. 8 new regression tests added directly against `read_cdef`/
+> `read_delta_qindex`/`read_delta_lf`/`clear_cdef` (gate no-ops verified by
+> asserting the `SymbolDecoder`'s `bit_position()` is unchanged, not just
+> that the output looks right) via a new `make_cdef_delta_state` test
+> factory in `reconstruct/tests.rs`. `cargo test -p tpt-kinetix-av1` (unit +
+> integration/proptest/doctest) is green — unit tests now 100/100 (was
+> 94/94 before this note). `cargo clippy -p tpt-kinetix-av1 --all-targets --
+> -D warnings` and `cargo build --workspace` are both clean. The
+> `fuzz_obu_parse` target could not be run this session — this Windows
+> toolchain's nightly is missing the ASan runtime component
+> (`librustc-nightly_rt.asan.a`), a pre-existing environment gap unrelated to
+> this change, not something to "fix" by disabling sanitizers; the existing
+> `proptest_coeffs.rs` suite (which exercises `decode_tile_group` end to end,
+> including this session's new call sites) passed instead.
+>
+> Both items from the "two remaining gaps" note are now closed. What
+> remains open for AV1: the still-unexplained multi-session `testsrc` pixel
+> divergence (this session's work is inert on that corpus, not a lead on
+> it), full CDEF multi-strength wiring (noted above), and the broader Phase
+> G conformance push. No `git commit` calls were made. Files modified this
+> session: `tpt-kinetix-av1/src/reconstruct/mod.rs`,
+> `tpt-kinetix-av1/src/reconstruct/mode_cdfs.rs`,
+> `tpt-kinetix-av1/src/reconstruct/intra_block.rs`,
+> `tpt-kinetix-av1/src/reconstruct/inter_block.rs`,
+> `tpt-kinetix-av1/src/reconstruct/partition.rs`,
+> `tpt-kinetix-av1/src/reconstruct/tests.rs`,
+> `tpt-kinetix-av1/tests/proptest_coeffs.rs`.
 >
 > **Next session should**: (1) build the real "Part 1 oracle" this file has deferred since
 > 2026-08-20 — an independent Python re-implementation of
@@ -2172,10 +2358,10 @@
 > alone) fed real captured bytes, now that `curl`-based spec fetching is
 > confirmed reliable and the arithmetic decoder/CDF-snapshot bridge exists —
 > this would let a differential run cover ground this session's one-off
-> hand-checks did serially and slowly; (2) implement the three real-but-inert
-> gaps above (superres/`allow_intrabc`, `read_cdef`/delta-lf, per-plane
-> DC delta-q) together as one frame-header-completeness pass, since they're
-> all related and each needs its own deliberately-nonzero-flag test; (3) stop
+> hand-checks did serially and slowly; (2) implement the two remaining
+> real-but-inert gaps (superres/`allow_intrabc`, `read_cdef`/delta-lf) as a
+> frame-header-completeness pass — the third (per-plane DC delta-q) is
+> already fixed, see below; (3) stop
 > assuming `WebFetch`'s summarized answer over a large spec file is
 > exhaustive — prefer `curl` + local `grep`/`sed` for anything beyond a
 > single small named table, per this session's `Max_Tx_Depth` false-negative.

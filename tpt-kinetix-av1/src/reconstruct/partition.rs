@@ -82,6 +82,11 @@ impl<'a> TileDecodeState<'a> {
         sb_bsize: usize,
     ) -> Result<(), KinetixError> {
         self.coeff_ctxs.clear_left();
+        // §5.11.4 `decode_tile()`'s per-superblock prelude: `ReadDeltas =
+        // delta_q_present`, then `clear_cdef(r, c)`, before walking the
+        // partition tree.
+        self.read_deltas = self.delta_q_present;
+        self.clear_cdef(mi_row, mi_col);
         self.decode_partition(mi_row, mi_col, sb_bsize)
     }
 

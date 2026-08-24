@@ -239,6 +239,23 @@ impl AacDecoder {
                     });
                 }
                 Element::Cpe(cpe) => {
+                    if std::env::var("AAC_DBG_WS").is_ok() {
+                        eprintln!(
+                            "DBG ws(cpe) frame{} L={:?} R={:?} ms={} maxsfbL={} maxsfbR={} tnsL={} tnsR={} pulseL={} pulseR={} predL={} predR={}",
+                            self.frame_no,
+                            cpe.left.ics.window_sequence,
+                            cpe.right.ics.window_sequence,
+                            cpe.ms_mask_present,
+                            cpe.left.ics.max_sfb,
+                            cpe.right.ics.max_sfb,
+                            cpe.left.tns.is_some(),
+                            cpe.right.tns.is_some(),
+                            cpe.left.pulse.is_some(),
+                            cpe.right.pulse.is_some(),
+                            cpe.left.ics.predictor_data_present,
+                            cpe.right.ics.predictor_data_present,
+                        );
+                    }
                     let left_ch = Self::decode_channel_stream(
                         &cpe.left,
                         self.sf_index,
@@ -423,6 +440,30 @@ impl AacDecoder {
                 );
             } else {
                 self.imdct_long.transform(&ch.coeffs, &mut buf);
+                if let Ok(spec) = std::env::var("AAC_DBG_OVERLAP") {
+                    // spec = "frame:index_in_frame", e.g. "7:270" — dumps the
+                    // raw pre-window IMDCT output and the carried-over overlap
+                    // state around that sample, to check for catastrophic
+                    // cancellation in `out[i] = overlap[i] + buf[i]*window[i]`
+                    // when the underlying spectral coefficients are very large.
+                    if let Some((f, idx)) = spec.split_once(':') {
+                        if let (Ok(f), Ok(idx)) = (f.parse::<u64>(), idx.parse::<usize>()) {
+                            if f == frame_no && ch_idx == 0 {
+                                let overlap = &self.channels[ch_idx].overlap;
+                                let lo = idx.saturating_sub(3);
+                                let hi = (idx + 3).min(1024);
+                                for (i, (&b, &o)) in
+                                    buf[lo..hi].iter().zip(&overlap[lo..hi]).enumerate()
+                                {
+                                    eprintln!(
+                                        "DBG overlap frame{frame_no} i={} buf[i]={b:e} overlap_in[i]={o:e}",
+                                        lo + i
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 if std::env::var("AAC_DBG_WIN").is_ok() && frame_no <= 44 && ch_idx == 0 {
                     let mut pns = 0;
                     let mut first_pns_sf = 0i32;
@@ -514,7 +555,7 @@ impl AacDecoder {
     fn decode_channel_stream(
         stream: &ChannelStream,
         sf_index: usize,
-        _frame_no_diag: u64,
+        frame_no_diag: u64,
         pns_rng: &mut PnsRandom,
     ) -> Result<[f32; 1024], AacParseError> {
         let ics = &stream.ics;
@@ -541,7 +582,12 @@ impl AacDecoder {
         if let Some(tns) = &stream.tns {
             apply_tns(tns, ics, &mut coeffs, swb);
         }
-        if std::env::var("AAC_DBG_BANDS").is_ok() && stream.global_gain == 163 {
+        let dbg_bands_frame = std::env::var("AAC_DBG_BANDS_FRAME")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok());
+        if std::env::var("AAC_DBG_BANDS").is_ok()
+            && dbg_bands_frame.is_none_or(|f| f == frame_no_diag)
+        {
             let max_sfb = ics.max_sfb as usize;
             let mut maxc = 0.0f32;
             let mut maxbi = 0usize;
@@ -552,8 +598,8 @@ impl AacDecoder {
                 }
             }
             eprint!(
-                "DBG full msf={} maxcoeff={:e} atk={} | ",
-                max_sfb, maxc, maxbi
+                "DBG full frame{} gg={} msf={} maxcoeff={:e} atk={} | ",
+                frame_no_diag, stream.global_gain, max_sfb, maxc, maxbi
             );
             for sfb in 0..max_sfb {
                 let sfv = stream.scalefactor.get(sfb).copied().unwrap_or(0);

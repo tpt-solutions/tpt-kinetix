@@ -52,6 +52,17 @@ impl<'a> TileDecodeState<'a> {
                 == 1
         };
 
+        // AV1 spec §5.11.7: `read_cdef()`/`read_delta_qindex()`/
+        // `read_delta_lf()` come right after `read_skip()`, then
+        // `ReadDeltas = 0` (only the first coded block of each superblock
+        // can consume a delta, regardless of whether it actually did). Each
+        // of the three is a true no-op (reads zero bits) unless the
+        // corresponding frame-header feature is actually on.
+        self.read_cdef(mi_row, mi_col, bsize, skip);
+        self.read_delta_qindex(bsize, skip);
+        self.read_delta_lf(bsize, skip);
+        self.read_deltas = false;
+
         // AV1 spec §5.11.7: when allow_intrabc, read use_intrabc = f(1) before
         // y_mode. Not reading this bit desyncs y_mode and every subsequent read
         // by 1 bit for every block in the tile — a progressive, accumulating
@@ -265,6 +276,13 @@ impl<'a> TileDecodeState<'a> {
             None => y_mode,
         };
 
+        // Computed before the `&mut self.{y,u,v}_plane` reborrows below —
+        // `qindex_for_plane` takes `&self`, which conflicts with those live
+        // disjoint-field mutable borrows if called any later.
+        let (y_qindex_dc, y_qindex_ac) = self.qindex_for_plane(0);
+        let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
+        let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
+
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
@@ -327,7 +345,8 @@ impl<'a> TileDecodeState<'a> {
                     px_x,
                     px_y,
                     luma_tx,
-                    self.qindex,
+                    y_qindex_dc,
+                    y_qindex_ac,
                     y_mode,
                     skip,
                     filter_intra_mode,
@@ -509,7 +528,8 @@ impl<'a> TileDecodeState<'a> {
                         cpx_x,
                         cpx_y,
                         c_tx,
-                        self.qindex,
+                        u_qindex_dc,
+                        u_qindex_ac,
                         uv_mode,
                         skip,
                         None,
@@ -530,7 +550,8 @@ impl<'a> TileDecodeState<'a> {
                         cpx_x,
                         cpx_y,
                         c_tx,
-                        self.qindex,
+                        v_qindex_dc,
+                        v_qindex_ac,
                         uv_mode,
                         skip,
                         None,
