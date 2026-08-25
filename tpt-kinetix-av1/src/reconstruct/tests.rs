@@ -546,7 +546,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
             y_dc: 5,
             u_dc: -10,
             u_ac: 3,
-            v_dc: 200, // deliberately large enough to force clamping to 255
+            v_dc: 200,  // deliberately large enough to force clamping to 255
             v_ac: -150, // deliberately large enough to force clamping to 0
         },
         true,
@@ -575,7 +575,11 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         RefFrames::empty(),
         &mut meta,
     );
-    assert_eq!(state.qindex_for_plane(0), (105, 100), "luma: dc+5, ac plain");
+    assert_eq!(
+        state.qindex_for_plane(0),
+        (105, 100),
+        "luma: dc+5, ac plain"
+    );
     assert_eq!(
         state.qindex_for_plane(1),
         (90, 103),

@@ -74,6 +74,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    nctx: NeighbourCtx,
     tracer: &mut T,
 ) -> R<(
     Macroblock,
@@ -84,8 +85,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     i32,
     bool,
 )> {
-    let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
-    let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
 
     let (r_pre_t, o_pre_t) = dec.debug_state();
     let inter_type = ctxs.mb_type_p.decode(dec);
@@ -114,6 +114,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     prev_dqp_nonzero,
                     intra_t,
                     transform_8x8_mode_flag,
+                    nctx,
                     tracer,
                 )?;
             let this_inter = MbInterCabacCtx::default();
@@ -339,7 +340,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             mb.motion = Some(motion);
             let (s_r, s_o) = dec.debug_state();
             let (cbp_l, cbp_c) =
-                decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+                decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols, nctx)?;
             let cbp = cbp_l | (cbp_c << 4);
             mb.cbp = cbp;
             let (e_r, e_o) = dec.debug_state();
@@ -369,6 +370,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 mb_cols,
                 cbp_l,
                 cbp_c,
+                nctx,
             )?;
             let (r_post_res, o_post_res) = dec.debug_state();
             eprintln!("  MB({mb_x},{mb_y}) residual: before={r_pre_res:#06x}/{o_pre_res:#010x} after={r_post_res:#06x}/{o_post_res:#010x}");
@@ -535,6 +537,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         let non_direct_neighbours = (mb_x > 0 && non_direct(left_idx.unwrap())) as usize
             + (mb_y > 0 && non_direct(top_idx.unwrap())) as usize;
 
+        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_b_macroblock_cabac(
                 &mut dec,
@@ -553,6 +556,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
                 chroma_qp_index_offset,
                 transform_8x8_mode_flag,
                 non_direct_neighbours,
+                nctx,
                 tracer,
             )?;
         qp = new_qp;
@@ -604,6 +608,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
     non_direct_neighbours: usize,
+    nctx: NeighbourCtx,
     tracer: &mut T,
 ) -> R<(
     Macroblock,
@@ -616,8 +621,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
 )> {
     use crate::macroblock::BPredDir;
 
-    let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
-    let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
 
     let b_inter_type = ctxs.mb_type_b.decode(dec, non_direct_neighbours);
     // ctxIdx 32 is one physical context in FFmpeg (the final inter/intra gate
@@ -642,6 +646,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             prev_dqp_nonzero,
             intra_t,
             transform_8x8_mode_flag,
+            nctx,
             tracer,
         )?;
         return Ok((
@@ -1257,7 +1262,8 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     // present whenever MbPartPredMode != Intra_16x16, and a direct MB with
     // cbp != 0 carries residual coefficients). Skipping those bins here
     // desyncs the arithmetic engine for every following macroblock.
-    let (cbp_l, cbp_c) = decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols)?;
+    let (cbp_l, cbp_c) =
+        decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols, nctx)?;
     let cbp = cbp_l | (cbp_c << 4);
     mb.cbp = cbp;
     let mut qp = prev_qp;
@@ -1280,6 +1286,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         mb_cols,
         cbp_l,
         cbp_c,
+        nctx,
     )?;
     let mb_type_str = format!("{:?}", mb.mb_type);
     tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
@@ -1311,6 +1318,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     prev_dqp_nonzero: bool,
     intra_t: u32,
     transform_8x8_mode_flag: bool,
+    nctx: NeighbourCtx,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, MbCabacCtx, i32, bool)> {
     if intra_t == 25 {
@@ -1322,8 +1330,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
     // from the PB contexts (all PB contexts share the same context variables).
     // We need to call parse_intra_macroblock_cabac but it takes CabacSliceContexts.
     // Instead, replicate the intra decode inline using ctxs' PB variants.
-    let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
-    let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -1380,15 +1387,8 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         if is_8x8 {
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
-                let pred_mode = mpm_pred_mode_8x8(
-                    pred_ctx_grid,
-                    mb_x,
-                    mb_y,
-                    mb_cols,
-                    &modes,
-                    i8,
-                    NeighbourCtx::NONE,
-                );
+                let pred_mode =
+                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
@@ -1400,15 +1400,8 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         } else {
             for blk_idx in 0..16usize {
                 let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-                let pred_mode = mpm_pred_mode(
-                    pred_ctx_grid,
-                    mb_x,
-                    mb_y,
-                    mb_cols,
-                    &modes,
-                    raster,
-                    NeighbourCtx::NONE,
-                );
+                let pred_mode =
+                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, nctx);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes[raster] = crate::prediction::Intra4x4Mode::from_u8(final_mode);
             }
@@ -1489,16 +1482,8 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
             v
         };
         for block in blocks {
-            let (left_coded, top_coded) = luma_cbf_neighbors(
-                nz_grid,
-                mb_x,
-                mb_y,
-                mb_cols,
-                &this_nz,
-                block,
-                true,
-                NeighbourCtx::NONE,
-            );
+            let (left_coded, top_coded) =
+                luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, nctx);
             if ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded) {
                 let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
                 this_nz.luma[block] = count;
@@ -1533,15 +1518,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         for comp in 0..2 {
             for block in 0..4 {
                 let (left_coded, top_coded) = chroma_cbf_neighbors(
-                    nz_grid,
-                    mb_x,
-                    mb_y,
-                    mb_cols,
-                    &this_nz,
-                    comp,
-                    block,
-                    true,
-                    NeighbourCtx::NONE,
+                    nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true, nctx,
                 );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
@@ -1584,15 +1561,17 @@ fn decode_inter_cbp_cabac(
     mb_x: u32,
     mb_y: u32,
     mb_cols: u32,
+    nctx: NeighbourCtx,
 ) -> R<(u8, u8)> {
     // For inter MBs, off-picture neighbours use 0x00F (not 0x7CF) per FFmpeg.
-    let left = if mb_x > 0 {
-        cabac_ctx_grid[((mb_y * mb_cols) + mb_x - 1) as usize].cbp_word
+    let (li, ti) = nctx.left_top(mb_x, mb_y, mb_cols);
+    let left = if let Some(i) = li {
+        cabac_ctx_grid[i].cbp_word
     } else {
         0x00F
     };
-    let top = if mb_y > 0 {
-        cabac_ctx_grid[(((mb_y - 1) * mb_cols) + mb_x) as usize].cbp_word
+    let top = if let Some(i) = ti {
+        cabac_ctx_grid[i].cbp_word
     } else {
         0x00F
     };
@@ -1613,10 +1592,10 @@ fn decode_inter_residual_cabac(
     mb_cols: u32,
     cbp_l: u8,
     cbp_c: u8,
+    nctx: NeighbourCtx,
 ) -> R<MbCabacCtx> {
     use crate::cabac_tables::{CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4};
-    let left_idx = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
-    let top_idx = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
     let mut cbp_word: u16 = mb.cbp as u16;
 
     let blocks: Vec<usize> = {
@@ -1632,16 +1611,8 @@ fn decode_inter_residual_cabac(
         v
     };
     for block in blocks {
-        let (left_coded, top_coded) = luma_cbf_neighbors(
-            nz_grid,
-            mb_x,
-            mb_y,
-            mb_cols,
-            this_nz,
-            block,
-            false,
-            NeighbourCtx::NONE,
-        );
+        let (left_coded, top_coded) =
+            luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false, nctx);
         let (lr, lo) = dec.debug_state();
         let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
         let (ar, ao) = dec.debug_state();
@@ -1687,15 +1658,7 @@ fn decode_inter_residual_cabac(
         for comp in 0..2 {
             for block in 0..4 {
                 let (left_coded, top_coded) = chroma_cbf_neighbors(
-                    nz_grid,
-                    mb_x,
-                    mb_y,
-                    mb_cols,
-                    this_nz,
-                    comp,
-                    block,
-                    false,
-                    NeighbourCtx::NONE,
+                    nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block, false, nctx,
                 );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
                     let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);

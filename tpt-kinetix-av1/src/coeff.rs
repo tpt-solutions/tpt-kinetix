@@ -160,10 +160,13 @@ impl TileCdfs {
     /// CDF-adaptation artifact.
     pub fn dump_base_json(&self) -> String {
         let j2 = |v: &[Vec<u16>]| -> String {
-            let rows: Vec<String> = v.iter().map(|r| {
-                let inner: Vec<String> = r.iter().map(|x| x.to_string()).collect();
-                format!("[{}]", inner.join(","))
-            }).collect();
+            let rows: Vec<String> = v
+                .iter()
+                .map(|r| {
+                    let inner: Vec<String> = r.iter().map(|x| x.to_string()).collect();
+                    format!("[{}]", inner.join(","))
+                })
+                .collect();
             format!("[{}]", rows.join(","))
         };
         let j3 = |v: &[Vec<Vec<u16>>]| -> String {

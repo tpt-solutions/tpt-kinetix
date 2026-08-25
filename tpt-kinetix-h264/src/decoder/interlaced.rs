@@ -317,7 +317,13 @@ impl H264Decoder {
         };
         let parsed = match parsed {
             Ok(p) => p,
-            Err(_) => return Ok(InterlacedOutcome::Fallback),
+            Err(e) => {
+                // Surface WHY the MBAFF/PAFF parse failed instead of silently
+                // falling back (session #32c: the silent swallow hid a
+                // desync-class failure for days).
+                eprintln!("interlaced slice parse failed: {e}");
+                return Ok(InterlacedOutcome::Fallback);
+            }
         };
 
         let recon = crate::reconstruct::reconstruct_mbaff_intra_frame(

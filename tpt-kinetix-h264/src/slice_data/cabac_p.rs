@@ -462,6 +462,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         }
         eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
 
+        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_p_macroblock_cabac(
                 &mut dec,
@@ -478,6 +479,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 num_ref_idx_l0_active,
                 chroma_qp_index_offset,
                 transform_8x8_mode_flag,
+                nctx,
                 tracer,
             )?;
         qp = new_qp;

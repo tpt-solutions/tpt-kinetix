@@ -163,6 +163,8 @@ fn localize_cabac_pframe_diffs() {
         mb_cols,
         mb_rows,
         slice_qp,
+        false,
+        false,
         header.cabac_init_idc as usize,
         num_ref_idx_l0_active,
         chroma_qp_index_offset,

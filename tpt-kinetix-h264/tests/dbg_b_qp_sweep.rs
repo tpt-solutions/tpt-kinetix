@@ -98,6 +98,8 @@ fn b_slice_qp_sweep() {
             4,
             3,
             qp,
+            false,
+            false,
             idc,
             nl0,
             nl1,

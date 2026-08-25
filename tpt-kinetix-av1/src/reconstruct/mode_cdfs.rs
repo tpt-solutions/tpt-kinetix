@@ -8,7 +8,7 @@ fn j1<const N: usize>(v: &[u16; N]) -> String {
     format!("[{}]", inner.join(","))
 }
 fn j2<const N: usize>(v: &[[u16; N]]) -> String {
-    let rows: Vec<String> = v.iter().map(|r| j1(r)).collect();
+    let rows: Vec<String> = v.iter().map(j1).collect();
     format!("[{}]", rows.join(","))
 }
 fn j3<const N: usize, const M: usize>(v: &[[[u16; N]; M]]) -> String {

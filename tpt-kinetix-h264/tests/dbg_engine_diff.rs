@@ -68,7 +68,13 @@ struct FfEngine<'a> {
 impl<'a> FfEngine<'a> {
     /// `ff_init_cabac_decoder`, CABAC_BITS==16, even-alignment branch.
     fn new(data: &'a [u8], t: &'a FfTables) -> Self {
-        let mut e = FfEngine { low: 0, range: 0, data, idx: 0, t };
+        let mut e = FfEngine {
+            low: 0,
+            range: 0,
+            data,
+            idx: 0,
+            t,
+        };
         e.low = (e.byte() as i32) << 18;
         e.low += (e.byte() as i32) << 10;
         e.low += 1 << 9; // even-alignment branch (prefetch only)
@@ -86,7 +92,9 @@ impl<'a> FfEngine<'a> {
     fn refill(&mut self) {
         let b0 = self.data.get(self.idx).copied().unwrap_or(0);
         let b1 = self.data.get(self.idx + 1).copied().unwrap_or(0);
-        self.low = self.low.wrapping_add(((b0 as i32) << 9) + ((b1 as i32) << 1));
+        self.low = self
+            .low
+            .wrapping_add(((b0 as i32) << 9) + ((b1 as i32) << 1));
         self.low -= CABAC_MASK;
         self.idx += (CABAC_BITS / 8) as usize;
     }
@@ -182,7 +190,6 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
-
 }
 
 /// One lockstep payload: both engines decode the same random op sequence over
@@ -262,7 +269,9 @@ fn single_step_probe() {
         ("2pi", |pi, _m| 2 * pi),
         ("125-2pi", |pi, _m| (125i32 - 2 * pi as i32) as u8),
         ("126-2pi", |pi, _m| (126i32 - 2 * pi as i32) as u8),
-        ("253-2pi-mod", |pi, _m| (253u16.wrapping_sub(2 * pi as u16)) as u8),
+        ("253-2pi-mod", |pi, _m| {
+            (253u16.wrapping_sub(2 * pi as u16)) as u8
+        }),
         ("2pi+(1-mps)", |pi, m| 2 * pi + (1 - (m & 1))),
         ("2pi+mps", |pi, m| 2 * pi + (m & 1)),
     ];
@@ -279,9 +288,7 @@ fn single_step_probe() {
 
         for (ci, (_, f)) in candidates.iter().enumerate() {
             let packed = f(pi, mps);
-            if packed > 127
-                || (t.lps_range[(2 * (510 & 0xC0) + packed as i32) as usize]) <= 0
-            {
+            if packed > 127 || (t.lps_range[(2 * (510 & 0xC0) + packed as i32) as usize]) <= 0 {
                 continue; // invalid/padding state
             }
             let mut ff = FfEngine::new(&buf, &t);
@@ -289,7 +296,11 @@ fn single_step_probe() {
             let ff_bin = ff.get(&mut fs);
 
             let mut dec = CabacDecoder::new(&buf).unwrap();
-            let mut cc = CabacContext { state: pi, mps, ctx_id: 0xFFFF };
+            let mut cc = CabacContext {
+                state: pi,
+                mps,
+                ctx_id: 0xFFFF,
+            };
             let c_bin = dec.decode_decision(&mut cc);
             total += 1;
             if ff_bin == c_bin as i32 {
@@ -309,22 +320,70 @@ fn reverse_engineer_ff_state_mapping() {
 
     // Spec rangeTabLPS (Table 9-44), transcribed from src/entropy.rs.
     const SPEC: [[u32; 4]; 64] = [
-        [128, 176, 208, 240], [128, 167, 197, 227], [128, 158, 187, 216], [123, 150, 178, 205],
-        [116, 142, 169, 195], [111, 135, 160, 185], [105, 128, 152, 175], [100, 122, 144, 166],
-        [95, 116, 137, 158],  [90, 110, 130, 150],  [85, 104, 123, 142],  [81, 99, 117, 135],
-        [77, 94, 111, 128],   [73, 89, 105, 122],   [69, 85, 100, 116],   [66, 80, 95, 110],
-        [62, 76, 90, 104],    [59, 72, 86, 99],     [56, 69, 81, 94],     [53, 65, 77, 89],
-        [51, 62, 73, 85],     [48, 59, 69, 80],     [46, 56, 66, 76],     [43, 53, 63, 72],
-        [41, 50, 59, 69],     [39, 48, 56, 65],     [37, 45, 54, 62],     [35, 43, 51, 59],
-        [33, 41, 48, 56],     [32, 39, 46, 53],     [30, 37, 43, 50],     [29, 35, 41, 48],
-        [27, 33, 39, 45],     [26, 31, 37, 43],     [24, 30, 35, 41],     [23, 28, 33, 39],
-        [22, 27, 32, 37],     [21, 26, 30, 35],     [20, 24, 29, 33],     [19, 23, 27, 31],
-        [18, 22, 26, 30],     [17, 21, 25, 28],     [16, 20, 23, 27],     [15, 19, 22, 25],
-        [14, 18, 21, 24],     [14, 17, 20, 23],     [13, 16, 19, 22],     [12, 15, 18, 21],
-        [12, 14, 17, 20],     [11, 14, 16, 19],     [11, 13, 15, 18],     [10, 12, 15, 17],
-        [10, 12, 14, 16],     [9, 11, 13, 15],      [9, 11, 12, 14],      [8, 10, 12, 14],
-        [8, 9, 11, 13],       [7, 9, 11, 12],       [7, 9, 10, 12],       [7, 8, 10, 11],
-        [6, 8, 9, 11],        [6, 7, 9, 10],        [6, 7, 8, 9],         [2, 2, 2, 2],
+        [128, 176, 208, 240],
+        [128, 167, 197, 227],
+        [128, 158, 187, 216],
+        [123, 150, 178, 205],
+        [116, 142, 169, 195],
+        [111, 135, 160, 185],
+        [105, 128, 152, 175],
+        [100, 122, 144, 166],
+        [95, 116, 137, 158],
+        [90, 110, 130, 150],
+        [85, 104, 123, 142],
+        [81, 99, 117, 135],
+        [77, 94, 111, 128],
+        [73, 89, 105, 122],
+        [69, 85, 100, 116],
+        [66, 80, 95, 110],
+        [62, 76, 90, 104],
+        [59, 72, 86, 99],
+        [56, 69, 81, 94],
+        [53, 65, 77, 89],
+        [51, 62, 73, 85],
+        [48, 59, 69, 80],
+        [46, 56, 66, 76],
+        [43, 53, 63, 72],
+        [41, 50, 59, 69],
+        [39, 48, 56, 65],
+        [37, 45, 54, 62],
+        [35, 43, 51, 59],
+        [33, 41, 48, 56],
+        [32, 39, 46, 53],
+        [30, 37, 43, 50],
+        [29, 35, 41, 48],
+        [27, 33, 39, 45],
+        [26, 31, 37, 43],
+        [24, 30, 35, 41],
+        [23, 28, 33, 39],
+        [22, 27, 32, 37],
+        [21, 26, 30, 35],
+        [20, 24, 29, 33],
+        [19, 23, 27, 31],
+        [18, 22, 26, 30],
+        [17, 21, 25, 28],
+        [16, 20, 23, 27],
+        [15, 19, 22, 25],
+        [14, 18, 21, 24],
+        [14, 17, 20, 23],
+        [13, 16, 19, 22],
+        [12, 15, 18, 21],
+        [12, 14, 17, 20],
+        [11, 14, 16, 19],
+        [11, 13, 15, 18],
+        [10, 12, 15, 17],
+        [10, 12, 14, 16],
+        [9, 11, 13, 15],
+        [9, 11, 12, 14],
+        [8, 10, 12, 14],
+        [8, 9, 11, 13],
+        [7, 9, 11, 12],
+        [7, 9, 10, 12],
+        [7, 8, 10, 11],
+        [6, 8, 9, 11],
+        [6, 7, 9, 10],
+        [6, 7, 8, 9],
+        [2, 2, 2, 2],
     ];
 
     // For each ff quadrant (128 entries == one spec qCodIRangeIdx) and each
@@ -334,8 +393,9 @@ fn reverse_engineer_ff_state_mapping() {
         let mut cols: [String; 4] = std::array::from_fn(|_| "x".to_string());
         for q in 0..4usize {
             let v = t.lps_range[(128 * q) as usize + s as usize];
-            let hits: Vec<usize> =
-                (0..64).filter(|&pi| SPEC[pi][q] == v.unsigned_abs() as u32).collect();
+            let hits: Vec<usize> = (0..64)
+                .filter(|&pi| SPEC[pi][q] == v.unsigned_abs() as u32)
+                .collect();
             if hits.len() == 1 {
                 cols[q] = format!("{}{:2}", if v < 0 { "-" } else { "+" }, hits[0]);
             } else if hits.len() > 1 {
@@ -373,8 +433,7 @@ fn engine_lockstep_vs_ffmpeg() {
             // Empirically verified (single_step_probe): ffmpeg packs states as
             // 2*pStateIdx + valMPS — identical semantics to the crate's split
             // representation.
-            ff_states[i] =
-                ((crate_ctx[i].state << 1) | (crate_ctx[i].mps & 1)) as u8;
+            ff_states[i] = ((crate_ctx[i].state << 1) | (crate_ctx[i].mps & 1)) as u8;
         }
 
         match run_payload(&payload, &tables, &mut ff_states, &mut crate_ctx, &ops) {

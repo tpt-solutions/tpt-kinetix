@@ -3416,7 +3416,10 @@ mod tests {
                     _ => MB11,
                 };
                 if cmb.skip != exp_skip {
-                    mismatches.push(format!("MB{i}: skip crate={} expected={exp_skip}", cmb.skip));
+                    mismatches.push(format!(
+                        "MB{i}: skip crate={} expected={exp_skip}",
+                        cmb.skip
+                    ));
                 }
                 if cmb.cbp as u16 != exp_cbp {
                     mismatches.push(format!(
@@ -3425,8 +3428,7 @@ mod tests {
                     ));
                 }
                 if let Some(motion) = &cmb.motion {
-                    let got: Vec<(i32, i32)> =
-                        exp_mvds.iter().copied().collect();
+                    let got: Vec<(i32, i32)> = exp_mvds.iter().copied().collect();
                     if !got.is_empty() && motion.mvd_l0 != got {
                         mismatches.push(format!(
                             "MB{i}: mvds crate={:?} expected={got:?}",

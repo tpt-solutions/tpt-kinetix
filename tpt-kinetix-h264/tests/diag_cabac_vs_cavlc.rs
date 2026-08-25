@@ -150,6 +150,8 @@ fn dump(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
             mb_cols,
             mb_rows,
             slice_qp,
+            false,
+            false,
             header.cabac_init_idc as usize,
             num_ref_idx_l0_active,
             chroma_qp_index_offset,

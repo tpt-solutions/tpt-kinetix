@@ -125,10 +125,18 @@ fn qpel_brute_on_c_p8x8_row2() {
     // ffmpeg reference decode WITHOUT deblocking.
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-skip_loop_filter", "all",
-            "-i", h264.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-skip_loop_filter",
+            "all",
+            "-i",
+            h264.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             refyuv.to_str().unwrap(),
         ])
         .output()
@@ -141,7 +149,10 @@ fn qpel_brute_on_c_p8x8_row2() {
     std::env::set_var("KINETIX_SKIP_DEBLOCK", "1");
     let mut dec = H264Decoder::new();
     let mut ours: Vec<Vec<u8>> = Vec::new();
-    for (ni, data) in split_nals(&std::fs::read(&h264).unwrap()).iter().enumerate() {
+    for (ni, data) in split_nals(&std::fs::read(&h264).unwrap())
+        .iter()
+        .enumerate()
+    {
         let pkt = Packet {
             pts: Timestamp::new(ni as i64, (1, 30)),
             dts: Timestamp::new(ni as i64, (1, 30)),
@@ -188,7 +199,20 @@ fn qpel_brute_on_c_p8x8_row2() {
         let our_v = &ours[1][W * H + cw * ch..W * H + 2 * cw * ch];
         let ff_u = &ff[2 * FRAME + W * H..2 * FRAME + W * H + cw * ch];
         let ff_v = &ff[2 * FRAME + W * H + cw * ch..2 * FRAME + W * H + 2 * cw * ch];
-        for &(mb_x, mb_y) in &[(0usize, 0usize), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1), (0, 2), (1, 2), (2, 2), (3, 2)] {
+        for &(mb_x, mb_y) in &[
+            (0usize, 0usize),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+        ] {
             let mut nu = 0usize;
             let mut mu = 0i32;
             let mut nv = 0usize;
@@ -198,13 +222,17 @@ fn qpel_brute_on_c_p8x8_row2() {
                     let idx = (mb_y * 8 + y) * cw + mb_x * 8 + x;
                     let du = (our_u[idx] as i32 - ff_u[idx] as i32).abs();
                     let dv = (our_v[idx] as i32 - ff_v[idx] as i32).abs();
-                    if du != 0 { nu += 1; mu = mu.max(du); }
-                    if dv != 0 { nv += 1; mv = mv.max(dv); }
+                    if du != 0 {
+                        nu += 1;
+                        mu = mu.max(du);
+                    }
+                    if dv != 0 {
+                        nv += 1;
+                        mv = mv.max(dv);
+                    }
                 }
             }
-            println!(
-                "P-chroma MB({mb_x},{mb_y}): U n={nu} max={mu} | V n={nv} max={mv}"
-            );
+            println!("P-chroma MB({mb_x},{mb_y}): U n={nu} max={mu} | V n={nv} max={mv}");
         }
     }
 
@@ -293,7 +321,9 @@ fn qpel_brute_on_c_p8x8_row2() {
             .collect();
         println!(
             "r{ry} p{:?}\n   o{:?}\n   f{:?}\n   d{}",
-            prow, orow, frow,
+            prow,
+            orow,
+            frow,
             d.join(" ")
         );
     }
@@ -302,7 +332,11 @@ fn qpel_brute_on_c_p8x8_row2() {
     for by4 in 0..4usize {
         for bx4 in 0..4usize {
             let (mx, my, s) = brute_force(i_ref, p_ff, 1, 2, bx4 * 4, by4 * 4, 4, 4, 96);
-            println!("MB(1,2) 4x4@({},{}) ff-best mv=({mx},{my}) SAD={s}", bx4 * 4, by4 * 4);
+            println!(
+                "MB(1,2) 4x4@({},{}) ff-best mv=({mx},{my}) SAD={s}",
+                bx4 * 4,
+                by4 * 4
+            );
         }
     }
 }
@@ -334,9 +368,20 @@ fn variant_matrix() {
         let ok = Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .args([
-                "-f", "lavfi", "-i", src,
-                "-frames:v", "3", "-c:v", "libx264", "-profile:v", "main",
-                "-pix_fmt", "yuv420p", "-x264-params", params,
+                "-f",
+                "lavfi",
+                "-i",
+                src,
+                "-frames:v",
+                "3",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                params,
             ])
             .arg(h264.to_str().unwrap())
             .output()
@@ -345,10 +390,18 @@ fn variant_matrix() {
 
         let ok = Command::new("ffmpeg")
             .args([
-                "-hide_banner", "-loglevel", "error", "-y",
-                "-skip_loop_filter", "all",
-                "-i", h264.to_str().unwrap(),
-                "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-skip_loop_filter",
+                "all",
+                "-i",
+                h264.to_str().unwrap(),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
                 refyuv.to_str().unwrap(),
             ])
             .output()
@@ -359,7 +412,10 @@ fn variant_matrix() {
         std::env::set_var("KINETIX_SKIP_DEBLOCK", "1");
         let mut dec = H264Decoder::new();
         let mut ours: Vec<Vec<u8>> = Vec::new();
-        for (ni, data) in split_nals(&std::fs::read(&h264).unwrap()).iter().enumerate() {
+        for (ni, data) in split_nals(&std::fs::read(&h264).unwrap())
+            .iter()
+            .enumerate()
+        {
             let pkt = Packet {
                 pts: Timestamp::new(ni as i64, (1, 30)),
                 dts: Timestamp::new(ni as i64, (1, 30)),

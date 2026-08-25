@@ -352,12 +352,9 @@ fn cell_gt0(g: &MbInterCabacCtx, blk: usize, list: usize) -> bool {
 /// neighbour addresses correctly inside an MBAFF frame (`todo.md` Phase
 /// G.4): the neighbour of a mixed field/frame macroblock pair is not simply
 /// `mb_xy - 1` / `mb_xy - mb_cols` (see [`crate::mbaff::derive_neighbours`],
-/// §6.4.10.1). For non-MBAFF pictures (or any slice type that doesn't yet
-/// parse `mb_field_decoding_flag` itself — currently only the I-slice CAVLC/
-/// CABAC parsers do, see [`NeighbourCtx::NONE`]) `left_top` degenerates to
-/// exactly the plain raster-grid formula this file used everywhere before
-/// G.4, so wiring this in is behavior-preserving for every already-bit-exact
-/// conformance path.
+/// §6.4.10.1). All four slice parsers (I/P/B × CAVLC/CABAC) construct a real
+/// `NeighbourCtx` when the picture is an MBAFF frame, so every context
+/// derivation threaded through this type is mixed-pair aware.
 #[derive(Clone, Copy)]
 pub struct NeighbourCtx<'a> {
     mb_aff: bool,

@@ -97,8 +97,7 @@ pub(super) fn reconstruct_tx_block(
             );
         }
         if coeffs.eob > 0 {
-            let dequant =
-                dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex_dc, qindex_ac);
+            let dequant = dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex_dc, qindex_ac);
             if dbg {
                 eprintln!(
                     "DBG dequant qindex_dc={qindex_dc} qindex_ac={qindex_ac} dequant[0..8]={:?}",

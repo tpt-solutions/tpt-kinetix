@@ -27,7 +27,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut ctxs = CabacSliceContexts::new(slice_qp);
 
     let total = (mb_cols * mb_rows) as usize;
-    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut cabac_ctx: Vec<MbCabacCtx> = vec![MbCabacCtx::default(); total];
@@ -45,8 +45,28 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
 
     for mb_idx in 0..total {
-        let mb_x = (mb_idx as u32) % mb_cols;
-        let mb_y = (mb_idx as u32) / mb_cols;
+        // MBAFF addressing (§6.4.2/§7.4.4): consecutive macroblock addresses
+        // enumerate each PAIR as (top, bottom) before advancing horizontally —
+        // addr 2k/2k+1 are the two MBs of pair k (pair k sits at frame-MB
+        // column `pair % mb_cols`, MB rows `2*(pair / mb_cols)` and +1).
+        // Frame-only streams use plain raster.
+        let (mb_x, mb_y, grid_idx) = if mbaff_frame {
+            let pair = mb_idx >> 1;
+            let parity = mb_idx & 1;
+            let px = pair % mb_cols as usize;
+            let py = pair / mb_cols as usize;
+            (
+                px as u32,
+                2 * py as u32 + parity as u32,
+                py * mb_cols as usize + px,
+            )
+        } else {
+            (
+                (mb_idx as u32) % mb_cols,
+                (mb_idx as u32) / mb_cols,
+                mb_idx,
+            )
+        };
 
         if mbaff_frame && mb_idx % 2 == 0 {
             let left_field = if mb_x > 0 {
@@ -60,9 +80,15 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
                 false
             };
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
-            field_flags[mb_idx] = Some(cur_pair_field);
-            if mb_idx + 1 < total {
-                field_flags[mb_idx + 1] = Some(cur_pair_field);
+            eprintln!(
+                "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
+                2 * ((mb_idx >> 1) / mb_cols as usize)
+            );
+            field_flags[grid_idx] = Some(cur_pair_field);
+            // The pair's bottom MB sits directly below the top MB in the
+            // frame-MB grid.
+            if grid_idx + (mb_cols as usize) < total {
+                field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
             }
         }
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
@@ -85,14 +111,14 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             )?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nonzero;
-        nz[mb_idx] = this_nz;
-        pred_ctx[mb_idx] = this_pred_ctx;
+        nz[grid_idx] = this_nz;
+        pred_ctx[grid_idx] = this_pred_ctx;
         let mut this_cabac_ctx = this_cabac_ctx;
         this_cabac_ctx.mb_field_flag = cur_pair_field;
-        cabac_ctx[mb_idx] = this_cabac_ctx;
+        cabac_ctx[grid_idx] = this_cabac_ctx;
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
-        macroblocks.push(mb);
+        macroblocks[grid_idx] = mb;
 
         // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*
         // macroblock. It must be 0 for every mid-slice MB; a 1 there means the

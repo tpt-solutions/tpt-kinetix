@@ -669,7 +669,9 @@ impl<'a> TileDecodeState<'a> {
                 bit_offset % 8
             );
         }
-        eprintln!("DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}");
+        eprintln!(
+            "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
+        );
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),
@@ -891,8 +893,8 @@ impl<'a> TileDecodeState<'a> {
                 let sign = self.dec.read_literal(1);
                 let reduced = if sign == 1 { -abs_val } else { abs_val };
                 let cur = self.delta_lf[i] as i32;
-                let updated = (cur + (reduced << self.delta_lf_res))
-                    .clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
+                let updated =
+                    (cur + (reduced << self.delta_lf_res)).clamp(-MAX_LOOP_FILTER, MAX_LOOP_FILTER);
                 self.delta_lf[i] = updated as i8;
             }
         }
@@ -1119,7 +1121,13 @@ fn capture_tile_trace(
     let markers = crate::entropy::take_block_markers();
     let markers_json: Vec<String> = markers
         .iter()
-        .map(|m| format!("{{\"seq\":{},\"label\":{}}}", m.trace_seq, serde_json_str(&m.label)))
+        .map(|m| {
+            format!(
+                "{{\"seq\":{},\"label\":{}}}",
+                m.trace_seq,
+                serde_json_str(&m.label)
+            )
+        })
         .collect();
     let json = format!(
         "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {bit_offset},\n  \

@@ -119,6 +119,82 @@
    - Session #31's oracle (`p_slice_full_walk_lockstep_vs_ffmpeg_transcription_c_p8x8`)
      updated: its ob_amvd transcription carried the same wrong convention
      (now fixed to match ffmpeg); its post-MB9 residual-walk internals still
+   - **PHASE G.3 EXTENDED TO P/B CABAC SLICES (same day):** `parse_p_slice_cabac`
+     / `parse_b_slice_cabac` now take `mb_aff` + `field_pic_flag` and implement
+   - **PHASE G.4 PARTIAL (same day): `NeighbourCtx` threaded through the
+     entire P/B CABAC parse stack.** `parse_p_macroblock_cabac`,
+     `parse_b_macroblock_cabac`, `parse_intra_mb_cabac_pb`,
+     `decode_inter_residual_cabac`, and `decode_inter_cbp_cabac` now take a
+     per-MB `nctx` (built from the pair's field flag + the frame's
+     `field_flags` grid) instead of computing plain-raster left/top indices;
+     all internal cbf/chroma/cbp/MPM/amvd/ref_idx neighbour lookups resolve
+     through §6.4.10.1 for mixed field/frame pairs. Frame-only streams are
+     unaffected (`left_top` degenerates to the raster formula). Full suite
+     re-validated green (231 lib + conformance_matrix + cabac 6 + qpel 2).
+     STILL OPEN for full MBAFF decode: MVP row-doubling/halving
+     (`MAP_F2F`-equivalent field MV scaling in mv.rs), field-aware intra
+     prediction, PAFF/MBAFF corpus clips (G.5), deblocking edge flags for
+     field MBs.
+   - **MBAFF ADDRESSING BUG FIXED (session #32c):** the CABAC I-slice loop
+     interpreted macroblock addresses as plain raster, but MBAFF addresses
+     enumerate each PAIR as (top, bottom) before advancing horizontally
+     (addr 2k/2k+1 = pair k at frame-MB col `pair%cols`, MB rows
+     `2*(pair/cols)`/`+1` — spec §6.4.2/§7.4.4). `parse_i_slice_cabac` now
+     derives (mb_x, mb_y, grid_idx) pair-aware when `mbaff_frame`, stores all
+     per-MB state by grid address, and emits macroblocks in frame-grid order.
+     Progressive streams unaffected (degenerate branch). Diagnostic:
+     `tests/dbg_g5_i1_diffmap.rs`.
+   - **G.5 FINDING:** after the addressing fix, x264 --interlaced I-frames
+     STILL diverge wholesale because x264 chooses FIELD coding for pairs:
+     field MBs need (a) field-scan / field_scan8x8 zigzag tables,
+   - **G.5 I-FRAME DIAGNOSTIC NARROWING (session #32c):** for the mbaff_i1
+     clip, `parse_i_slice_cabac` SUCCEEDS on the MBAFF payload (all 16 MBs,
+     no end_of_slice desync; interlaced.rs previously swallowed parse errors
+     silently — it now logs them via eprintln). The wholesale pixel
+     divergence is therefore entirely in `reconstruct_mbaff_intra_frame` /
+     the intra prediction path under MBAFF: our MB(0,0) outputs DC-128-grey +
+     noise where ffmpeg decodes real content (testsrc black bg Y=16 + square
+     edges). Prime suspects: intra prediction neighbour availability under
+     pair addressing, and High-profile Intra_8x8 handling in
+     reconstruct_mbaff_intra_frame. Diagnostic:
+     `tests/dbg_g5_i1_diffmap.rs` (pair diff map + chroma + MB(0,0)
+     forensics).
+
+     (b) field intra prediction (half-height neighbour sampling),
+     (c) interleaved row placement for inter pairs. This is precisely the
+     remaining G.4 work; syntax layer is complete and correct.
+
+   - **PHASE G.5 BASELINE ESTABLISHED:** new corpus harness
+     `tpt-kinetix-h264/tests/dbg_g5_interlaced.rs` encodes genuinely
+     interlaced x264 streams (`interlaced=1:tff=1`, i.e. MBAFF) across
+     4 configurations (CABAC I-only / IP / IBP / CAVLC IP at 64x64) and
+     measures per-frame SAD vs ffmpeg (`-skip_loop_filter all`).
+     RESULT (post-G.3/G.4-partial): ALL configurations now PARSE end-to-end
+     with the correct number of emitted frames (MBAFF I via
+     reconstruct_mbaff_intra_frame; MBAFF P and B CABAC via the new pair-aware
+     loops; CAVLC likewise) — no slice-data desync anywhere.
+     RECONSTRUCTION is still wholesale-wrong on interlaced content
+     (~250k-300k luma SAD/frame): expected, since field-coded macroblock
+     pairs are reconstructed as progressive (no field placement for inter
+     MBs, no MVP row-doubling/halving, no field-scan tables). These numbers
+     are the G.4 completion baseline. NOTE: x264 --interlaced emits High
+     profile (profile_idc=100) with transform_8x8 allowed — the decoder
+     handles it on these clips.
+
+
+     FFmpeg's exact MBAFF pairing (`ff_h264_decode_mb_cabac` lines 1932-1964):
+     bottom-of-pair MB whose top was skipped reuses `next_mb_skipped` instead
+     of reading a bin; a skipped TOP MB pre-reads the bottom's skip flag
+     (ctx from left=(x-1,y+1), top=this-skip-MB) and decodes the pair's
+     `mb_field_decoding_flag` (ctxIdx 70+left+top) when the bottom is coded;
+     a coded TOP MB decodes the field flag directly. Flags stored on
+     `Macroblock.mb_field_flag` / `MbCabacCtx.mb_field_flag` / per-frame-MB
+     `field_flags` grid (G.4 wiring ready). Frame-only streams unchanged
+     (`mbaff_frame == false` skips every new branch — full suite re-run green,
+     231 lib tests + all conformance cells). Call sites updated: decoder
+     mod.rs P/B, interlaced.rs PAFF-P (passes mb_adaptive flag +
+     header.field_pic_flag), entropy.rs lockstep test, dbg examples/tests.
+
      diverge from the crate on this payload, so MB9-11 are pinned against
      values validated BIT-EXACT against ffmpeg's reconstructed pixels
      instead (documented in the test; oracle kept for MB0-8 differentials).
