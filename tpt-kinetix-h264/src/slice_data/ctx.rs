@@ -586,6 +586,8 @@ pub struct PbCabacSliceContexts {
     pub cbf: crate::entropy::CodedBlockFlagContext,
     pub residual: crate::entropy::ResidualCabacContext,
     pub transform_8x8: crate::entropy::TransformSize8x8FlagContext,
+    /// `mb_field_decoding_flag` (MBAFF frames only, §9.3.3.1.1.11).
+    pub mb_field: crate::entropy::MbFieldDecodingFlagContext,
 }
 
 impl PbCabacSliceContexts {
@@ -621,6 +623,7 @@ impl PbCabacSliceContexts {
                 slice_qp_y,
                 cabac_init_idc,
             ),
+            mb_field: crate::entropy::MbFieldDecodingFlagContext::new(slice_qp_y),
         }
     }
 
@@ -656,6 +659,7 @@ impl PbCabacSliceContexts {
                 slice_qp_y,
                 cabac_init_idc,
             ),
+            mb_field: crate::entropy::MbFieldDecodingFlagContext::new(slice_qp_y),
         }
     }
 

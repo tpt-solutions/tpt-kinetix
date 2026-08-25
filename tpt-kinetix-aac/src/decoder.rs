@@ -438,6 +438,7 @@ impl AacDecoder {
                     &self.windows,
                     &mut out_buf,
                 );
+                self.channels[ch_idx].prev_shape = ch.ics.window_shape as u8;
             } else {
                 self.imdct_long.transform(&ch.coeffs, &mut buf);
                 if let Ok(spec) = std::env::var("AAC_DBG_OVERLAP") {
@@ -498,6 +499,7 @@ impl AacDecoder {
                     &self.windows,
                     &mut out_buf,
                 );
+                self.channels[ch_idx].prev_shape = ch.ics.window_shape as u8;
             }
             // ISO 14496-3 §4.5.2.3.6 ("Output word length"): the decoder's
             // native IMDCT/synthesis output is scaled so its integer part is

@@ -158,6 +158,8 @@ fn cabac_cavlc_mb_table_diff() {
                 mb_cols,
                 mb_rows,
                 slice_qp,
+                false,
+                false,
                 header.cabac_init_idc as usize,
                 pps.num_ref_idx_l0_default_active_minus1 + 1,
                 pps.chroma_qp_index_offset,

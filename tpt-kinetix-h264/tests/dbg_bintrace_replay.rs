@@ -20,7 +20,7 @@ const PAYLOAD: [u8; 64] = [
 fn p_slice_crate_replay_same_payload_as_oracle() {
     // Same parameters the oracle assumes: slice QP 2, cabac_init_idc 0,
     // 64x48 clip => 4x3 macroblocks, ref list of one entry.
-    let result = parse_p_slice_cabac(&PAYLOAD, 4, 3, 2, 0, 1, 0, false, &mut NoopTracer);
+    let result = parse_p_slice_cabac(&PAYLOAD, 4, 3, 2, false, false, 0, 1, 0, false, &mut NoopTracer);
     match result {
         Ok(parsed) => {
             for (i, mb) in parsed.macroblocks.iter().enumerate() {

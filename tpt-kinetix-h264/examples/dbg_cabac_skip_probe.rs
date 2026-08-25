@@ -321,6 +321,8 @@ fn main() {
             4,
             3,
             26 + pps.pic_init_qp_minus26 + ht.slice_qp_delta,
+            false,
+            false,
             ht.cabac_init_idc as usize,
             1,
             pps.chroma_qp_index_offset,

@@ -395,6 +395,8 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     mb_cols: u32,
     mb_rows: u32,
     slice_qp: i32,
+    mb_aff: bool,
+    field_pic_flag: bool,
     cabac_init_idc: usize,
     num_ref_idx_l0_active: u32,
     num_ref_idx_l1_active: u32,
@@ -415,6 +417,13 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut inter_ctx: Vec<MbInterCabacCtx> = vec![MbInterCabacCtx::default(); total];
     let mut qp = slice_qp;
     let mut prev_dqp_nonzero = false;
+    // MBAFF pair state — same FFmpeg-mirrored pairing as the P path
+    // (see parse_p_slice_cabac in cabac_p.rs).
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut cur_pair_field = false;
+    let mut field_flags: Vec<Option<bool>> = vec![None; total];
+    let mut prev_mb_skipped = false;
+    let mut next_mb_skipped = false;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
@@ -428,12 +437,61 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             top_available: mb_y > 0,
             top_skipped: top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
-        let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        let top_of_pair = mbaff_frame && mb_idx % 2 == 0;
+        let is_skip = if mbaff_frame && !top_of_pair && prev_mb_skipped {
+            next_mb_skipped
+        } else {
+            ctxs.mb_skip.decode(&mut dec, &skip_neighbors)
+        };
+        let mut pair_field_pending = false;
+        if mbaff_frame && top_of_pair {
+            if is_skip {
+                let bot_left_skipped = if mb_x > 0 {
+                    macroblocks
+                        .get(((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1)
+                        .map(|m| m.skip)
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let bot_neighbors = crate::entropy::MbSkipNeighbors {
+                    left_available: mb_x > 0,
+                    left_skipped: bot_left_skipped,
+                    top_available: true,
+                    top_skipped: true,
+                };
+                next_mb_skipped = ctxs.mb_skip.decode(&mut dec, &bot_neighbors);
+                if !next_mb_skipped {
+                    pair_field_pending = true;
+                }
+            } else {
+                pair_field_pending = true;
+            }
+        }
+        if pair_field_pending {
+            let left_field = if mb_x > 0 {
+                cabac_ctx[(mb_y as usize) * mb_cols as usize + mb_x as usize - 1].mb_field_flag
+            } else {
+                false
+            };
+            let top_field = if mb_y > 0 {
+                cabac_ctx[((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize].mb_field_flag
+            } else {
+                false
+            };
+            cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+            field_flags[mb_idx] = Some(cur_pair_field);
+            if mb_idx + 1 < total {
+                field_flags[mb_idx + 1] = Some(cur_pair_field);
+            }
+        }
         if is_skip {
             let mut mb = Macroblock::new_skip();
             mb.mb_type = MbType::BSkip;
             mb.qp = qp;
             mb.skip = true;
+            mb.mb_field_flag = cur_pair_field;
+            prev_mb_skipped = true;
             nz[mb_idx] = MbNz {
                 present: true,
                 ..Default::default()
@@ -499,10 +557,15 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             )?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nz;
+        prev_mb_skipped = false;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
+        let mut this_cabac_ctx = this_cabac_ctx;
+        this_cabac_ctx.mb_field_flag = cur_pair_field;
         cabac_ctx[mb_idx] = this_cabac_ctx;
         inter_ctx[mb_idx] = this_inter_ctx;
+        let mut mb = mb;
+        mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
 
         let end_of_slice = dec.decode_terminate() == 1;

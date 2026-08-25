@@ -414,6 +414,8 @@ impl H264Decoder {
                 mb_cols,
                 mb_rows_field,
                 slice_qp,
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
                 header.cabac_init_idc as usize,
                 num_ref_idx_l0_active,
                 chroma_qp_index_offset,

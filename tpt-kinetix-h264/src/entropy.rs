@@ -3373,6 +3373,8 @@ mod tests {
             COLS as u32,
             ROWS as u32,
             SLICE_QP,
+            false,
+            false,
             0,
             1,
             0,

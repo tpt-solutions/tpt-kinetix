@@ -300,12 +300,21 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
 }
 
 /// Parse a CABAC-coded P-slice (§7.3.4, §9.3).
+///
+/// `mb_aff` / `field_pic_flag` enable MBAFF pair parsing (§7.4.4): when the
+/// SPS sets `mb_adaptive_frame_field_flag` and the slice is a frame picture,
+/// `mb_field_decoding_flag` is decoded once per macroblock pair and skip-flag
+/// decisions are paired per FFmpeg's `ff_h264_decode_mb_cabac` (a skipped top
+/// MB pre-reads the bottom MB's skip flag; the pair's field flag is decoded
+/// when the bottom is coded).
 #[allow(clippy::too_many_arguments)]
 pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     data: &[u8],
     mb_cols: u32,
     mb_rows: u32,
     slice_qp: i32,
+    mb_aff: bool,
+    field_pic_flag: bool,
     cabac_init_idc: usize,
     num_ref_idx_l0_active: u32,
     chroma_qp_index_offset: i32,
@@ -324,6 +333,16 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut inter_ctx: Vec<MbInterCabacCtx> = vec![MbInterCabacCtx::default(); total];
     let mut qp = slice_qp;
     let mut prev_dqp_nonzero = false;
+    // MBAFF pair state (§7.4.4). `mbaff_frame` mirrors FFmpeg's FRAME_MBAFF:
+    // SPS `mb_adaptive_frame_field_flag` set AND the slice is a frame picture.
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut cur_pair_field = false;
+    let mut field_flags: Vec<Option<bool>> = vec![None; total];
+    // FFmpeg's sl->prev_mb_skipped / sl->next_mb_skipped: when the top MB of a
+    // pair is skipped, the bottom MB's skip flag was already read (and the
+    // pair's field flag decoded if the bottom is coded).
+    let mut prev_mb_skipped = false;
+    let mut next_mb_skipped = false;
 
     for mb_idx in 0..total {
         let mb_x = (mb_idx as u32) % mb_cols;
@@ -338,7 +357,64 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             top_skipped: top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let (r0, o0) = dec.debug_state();
-        let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        // FFmpeg ff_h264_decode_mb_cabac skip handling (MBAFF pairing):
+        //   - bottom MB of a pair whose top was skipped reuses the already-
+        //     decoded next_mb_skipped instead of reading a bin;
+        //   - a skipped TOP MB pre-reads the bottom MB's skip flag, and if the
+        //     bottom is coded, the pair's mb_field_decoding_flag follows;
+        //   - a coded TOP MB reads the pair's mb_field_decoding_flag.
+        let top_of_pair = mbaff_frame && mb_idx % 2 == 0;
+        let is_skip = if mbaff_frame && !top_of_pair && prev_mb_skipped {
+            next_mb_skipped
+        } else {
+            ctxs.mb_skip.decode(&mut dec, &skip_neighbors)
+        };
+        let mut pair_field_pending = false;
+        if mbaff_frame && top_of_pair {
+            if is_skip {
+                // Read the bottom MB's skip flag for (x, y+1): its left
+                // neighbour is (x-1, y+1); its top is THIS MB (skip=true).
+                let bot_left_skipped = if mb_x > 0 {
+                    // Left MB of the BOTTOM MB (x-1, y+1): already decoded as
+                    // part of the previous pair.
+                    macroblocks
+                        .get(((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1)
+                        .map(|m| m.skip)
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let bot_neighbors = crate::entropy::MbSkipNeighbors {
+                    left_available: mb_x > 0,
+                    left_skipped: bot_left_skipped,
+                    top_available: true,
+                    top_skipped: true,
+                };
+                next_mb_skipped = ctxs.mb_skip.decode(&mut dec, &bot_neighbors);
+                if !next_mb_skipped {
+                    pair_field_pending = true;
+                }
+            } else {
+                pair_field_pending = true;
+            }
+        }
+        if pair_field_pending {
+            let left_field = if mb_x > 0 {
+                cabac_ctx[(mb_y as usize) * mb_cols as usize + mb_x as usize - 1].mb_field_flag
+            } else {
+                false
+            };
+            let top_field = if mb_y > 0 {
+                cabac_ctx[((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize].mb_field_flag
+            } else {
+                false
+            };
+            cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+            field_flags[mb_idx] = Some(cur_pair_field);
+            if mb_idx + 1 < total {
+                field_flags[mb_idx + 1] = Some(cur_pair_field);
+            }
+        }
         let (r1, o1) = dec.debug_state();
         if is_skip {
             eprintln!("MB{mb_idx} ({mb_x},{mb_y}) SKIP  cabac={r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
@@ -346,6 +422,8 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::PSkip;
             mb.qp = qp;
             mb.skip = true;
+            mb.mb_field_flag = cur_pair_field;
+            prev_mb_skipped = true;
             nz[mb_idx] = MbNz {
                 present: true,
                 ..Default::default()
@@ -404,10 +482,15 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             )?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nz;
+        prev_mb_skipped = false;
         nz[mb_idx] = this_nz;
         pred_ctx[mb_idx] = this_pred_ctx;
+        let mut this_cabac_ctx = this_cabac_ctx;
+        this_cabac_ctx.mb_field_flag = cur_pair_field;
         cabac_ctx[mb_idx] = this_cabac_ctx;
         inter_ctx[mb_idx] = this_inter_ctx;
+        let mut mb = mb;
+        mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
 
         let (r_pre, o_pre) = dec.debug_state();

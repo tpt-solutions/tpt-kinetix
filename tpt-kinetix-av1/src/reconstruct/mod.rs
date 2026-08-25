@@ -1122,7 +1122,7 @@ fn capture_tile_trace(
         .map(|m| format!("{{\"seq\":{},\"label\":{}}}", m.trace_seq, serde_json_str(&m.label)))
         .collect();
     let json = format!(
-        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {sub_bit},\n  \
+        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {bit_offset},\n  \
          \"base_q_idx\": {base_q_idx},\n  \"mode_cdfs\": {base_mode_cdfs_json},\n  \
          \"coeff_cdfs\": {base_coeff_cdfs_json},\n  \
          \"trace\": [{}],\n  \"markers\": [{}]\n}}\n",
