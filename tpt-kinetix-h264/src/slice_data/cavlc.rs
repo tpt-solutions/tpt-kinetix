@@ -45,6 +45,9 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!("CAVLC-TRC mb{mb_idx} px={mb_x} py={mb_y} field={cur_pair_field} mb_type={mb_type} bitpos={}", reader.bit_position());
+        }
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
             reader,
             mb_x,

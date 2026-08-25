@@ -485,6 +485,17 @@ impl IntraChromaPredModeCabacContext {
 
     /// Decode `intra_chroma_pred_mode` (0..=3) given whether the left/top
     /// neighbour macroblock is present with a nonzero chroma pred mode.
+    ///
+    /// Decode `intra_chroma_pred_mode` (0..=3) given whether the left/top
+    /// neighbour macroblock is present with a nonzero chroma pred mode.
+    ///
+    /// Bin 0's `ctxIdxInc` is `left_nonzero + top_nonzero`, matching
+    /// FFmpeg's `decode_cabac_mb_chroma_pre_mode` VERBATIM
+    /// (`h264_cabac_ref.c`: two independent `ctx++` branches — NOT
+    /// `left + 2*top`; a session-#32e attempt to "fix" this to `left +
+    /// 2*top`, following a mis-transcription in `dbg_mbaff_oracle.rs`,
+    /// regressed the progressive CABAC I-frame conformance tests and was
+    /// reverted after re-checking the vendored source).
     pub fn decode(&mut self, dec: &mut CabacDecoder, left_nonzero: bool, top_nonzero: bool) -> u32 {
         let ctx0 = left_nonzero as usize + top_nonzero as usize;
         if dec.decode_decision(&mut self.ctx[ctx0]) == 0 {
@@ -593,11 +604,27 @@ const LAST_LEN_8X8: usize = 9;
 /// `last_significant_coeff_flag` (§9.3.3.1.2) and `coeff_abs_level_minus1`
 /// (§9.3.3.1.3) for the five I-slice 4x4/DC block categories (Intra16x16
 /// DC/AC, Luma4x4, ChromaDC, ChromaAC) plus the Luma8x8 category (`ctxBlockCat
-/// == 5`, High-profile `transform_size_8x8_flag` intra macroblocks). No
-/// field-coding (MBAFF/PAFF) support.
+/// == 5`, High-profile `transform_size_8x8_flag` intra macroblocks).
+///
+/// **Field coding**: a field-coded macroblock (`mb_field_decoding_flag == 1`)
+/// reads its significance/last contexts from entirely separate ctxIdx ranges
+/// (spec §9.3.3.1.3.1 Table 9-17, FFmpeg's
+/// `significant_coeff_flag_offset[MB_FIELD(sl)]`) -- see
+/// [`crate::cabac_tables::SIG_COEFF_CTX_BASE_FIELD`]. Both frame and field
+/// context sets are initialised per slice; the caller selects via the
+/// `field` argument on [`ResidualCabacContext::decode_block`] /
+/// [`ResidualCabacContext::decode_block_8x8`]. The `coeff_abs_level_minus1`
+/// contexts are shared between frame and field coding (FFmpeg's
+/// `coeff_abs_level_m1_offset` has no `[2][..]` split).
 pub struct ResidualCabacContext {
     sig: [Vec<CabacContext>; 5],
     last: [Vec<CabacContext>; 5],
+    /// Field-coding variants of `sig`/`last` (see struct docs).
+    sig_field: [Vec<CabacContext>; 5],
+    last_field: [Vec<CabacContext>; 5],
+    /// Field-coding variants of the Luma8x8 significance/last contexts.
+    sig8x8_field: Vec<CabacContext>,
+    last8x8_field: Vec<CabacContext>,
     /// Flat `coeff_abs_level_minus1` contexts indexed by ABSOLUTE ctxIdx -
     /// [`LEVEL_FLAT_BASE`] (cats 0..=4 occupy 227..=275). These MUST live in
     /// one shared array: per spec Table 9-42 / FFmpeg's
@@ -636,6 +663,11 @@ impl ResidualCabacContext {
         };
         let sig = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE);
         let last = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE);
+        // Field-coding significance/last contexts (§9.3.3.1.3.1 Table 9-17
+        // field ranges; see SIG_COEFF_CTX_BASE_FIELD). coeff_abs contexts are
+        // shared between frame and field coding.
+        let sig_field = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE_FIELD);
+        let last_field = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE_FIELD);
         // Flat level contexts: cats 0..=4 jointly occupy ctxIdx 227..=275
         // (cat3/cat4 share boundary ctxIdx 266 -- see `level`'s doc comment).
         let level = (LEVEL_FLAT_BASE..LEVEL_FLAT_BASE + 49)
@@ -657,6 +689,26 @@ impl ResidualCabacContext {
                 )
             })
             .collect();
+        let sig8x8_field = (0..SIG_LEN_8X8)
+            .map(|i| {
+                init_ctx(
+                    crate::cabac_tables::SIG_COEFF_CTX_BASE_FIELD
+                        [crate::cabac_tables::CAT_LUMA_8X8]
+                        + i,
+                    slice_qp_y,
+                )
+            })
+            .collect();
+        let last8x8_field = (0..LAST_LEN_8X8)
+            .map(|i| {
+                init_ctx(
+                    crate::cabac_tables::LAST_COEFF_CTX_BASE_FIELD
+                        [crate::cabac_tables::CAT_LUMA_8X8]
+                        + i,
+                    slice_qp_y,
+                )
+            })
+            .collect();
         let level8x8 = std::array::from_fn(|i| {
             init_ctx(
                 crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8]
@@ -667,9 +719,13 @@ impl ResidualCabacContext {
         Self {
             sig,
             last,
+            sig_field,
+            last_field,
             level,
             sig8x8,
             last8x8,
+            sig8x8_field,
+            last8x8_field,
             level8x8,
         }
     }
@@ -678,19 +734,36 @@ impl ResidualCabacContext {
     /// No `coded_block_flag` is signalled for this category (non-4:4:4) --
     /// the caller gates the call on the relevant `CodedBlockPatternLuma` bit,
     /// mirroring `slice_data::parse_intra_residuals`'s CAVLC 8x8 branch.
+    /// `field` selects the field-coding significance/last context set
+    /// (spec §9.3.3.1.3.1 Table 9-17; FFmpeg's
+    /// `significant_coeff_flag_offset_8x8[MB_FIELD(sl)]`).
     /// Returns coefficients in scan-position order (64 entries) and the
     /// significant-coefficient count (for the neighbour cbf/nnz context).
-    pub fn decode_block_8x8(&mut self, dec: &mut CabacDecoder) -> ([i16; 64], u8) {
+    pub fn decode_block_8x8(&mut self, dec: &mut CabacDecoder, field: bool) -> ([i16; 64], u8) {
         let mut out = [0i16; 64];
         const SIG_LEN: usize = 63;
         let mut positions: Vec<usize> = Vec::with_capacity(64);
         let mut found_last = false;
         for pos in 0..SIG_LEN {
-            let sig_idx = crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FRAME[pos] as usize;
-            if dec.decode_decision(&mut self.sig8x8[sig_idx]) == 1 {
+            let sig_idx = if field {
+                crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FIELD[pos] as usize
+            } else {
+                crate::cabac_tables::SIG_COEFF_CTX_INC_8X8_FRAME[pos] as usize
+            };
+            let sig = if field {
+                &mut self.sig8x8_field[sig_idx]
+            } else {
+                &mut self.sig8x8[sig_idx]
+            };
+            if dec.decode_decision(sig) == 1 {
                 positions.push(pos);
                 let last_idx = crate::cabac_tables::LAST_COEFF_CTX_INC_8X8_FRAME[pos] as usize;
-                if dec.decode_decision(&mut self.last8x8[last_idx]) == 1 {
+                let last = if field {
+                    &mut self.last8x8_field[last_idx]
+                } else {
+                    &mut self.last8x8[last_idx]
+                };
+                if dec.decode_decision(last) == 1 {
                     found_last = true;
                     break;
                 }
@@ -737,20 +810,36 @@ impl ResidualCabacContext {
     /// Only called when this block's `coded_block_flag` was already decoded
     /// as 1 -- the caller is responsible for that gate (mirrors
     /// `slice_data::parse_intra_residuals`'s CBP-gated CAVLC block calls).
+    ///
+    /// `field` selects the field-coding significance/last context ranges
+    /// (§9.3.3.1.3.1 Table 9-17; FFmpeg's
+    /// `significant_coeff_flag_offset[MB_FIELD(sl)][cat]`). The
+    /// `coeff_abs_level_minus1` contexts are shared between frame and field.
     pub fn decode_block(
         &mut self,
         dec: &mut CabacDecoder,
         cat: usize,
         max_coeff: usize,
+        field: bool,
     ) -> ([i16; 16], u8) {
         let mut out = [0i16; 16];
         let sig_len = max_coeff - 1;
         let mut positions: Vec<usize> = Vec::with_capacity(max_coeff);
         let mut found_last = false;
+        let sig = if field {
+            &mut self.sig_field[cat]
+        } else {
+            &mut self.sig[cat]
+        };
+        let last = if field {
+            &mut self.last_field[cat]
+        } else {
+            &mut self.last[cat]
+        };
         for pos in 0..sig_len {
-            if dec.decode_decision(&mut self.sig[cat][pos]) == 1 {
+            if dec.decode_decision(&mut sig[pos]) == 1 {
                 positions.push(pos);
-                if dec.decode_decision(&mut self.last[cat][pos]) == 1 {
+                if dec.decode_decision(&mut last[pos]) == 1 {
                     found_last = true;
                     break;
                 }
@@ -1501,6 +1590,8 @@ impl ResidualCabacContext {
                     .collect()
             })
         };
+        let sig_field = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE_FIELD);
+        let last_field = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE_FIELD);
         let sig = make(&crate::cabac_tables::SIG_COEFF_CTX_BASE);
         let last = make(&crate::cabac_tables::LAST_COEFF_CTX_BASE);
         // Flat level contexts (see `ResidualCabacContext::level`): cats 0..=4
@@ -1526,6 +1617,28 @@ impl ResidualCabacContext {
                 )
             })
             .collect();
+        let sig8x8_field = (0..SIG_LEN_8X8)
+            .map(|i| {
+                init_pb_ctx(
+                    crate::cabac_tables::SIG_COEFF_CTX_BASE_FIELD
+                        [crate::cabac_tables::CAT_LUMA_8X8]
+                        + i,
+                    cabac_init_idc,
+                    slice_qp_y,
+                )
+            })
+            .collect();
+        let last8x8_field = (0..LAST_LEN_8X8)
+            .map(|i| {
+                init_pb_ctx(
+                    crate::cabac_tables::LAST_COEFF_CTX_BASE_FIELD
+                        [crate::cabac_tables::CAT_LUMA_8X8]
+                        + i,
+                    cabac_init_idc,
+                    slice_qp_y,
+                )
+            })
+            .collect();
         let level8x8 = std::array::from_fn(|i| {
             init_pb_ctx(
                 crate::cabac_tables::COEFF_ABS_LEVEL_M1_CTX_BASE[crate::cabac_tables::CAT_LUMA_8X8]
@@ -1537,9 +1650,13 @@ impl ResidualCabacContext {
         Self {
             sig,
             last,
+            sig_field,
+            last_field,
             level,
             sig8x8,
             last8x8,
+            sig8x8_field,
+            last8x8_field,
             level8x8,
         }
     }
@@ -1936,7 +2053,7 @@ mod tests {
         let mut dec = CabacDecoder::new(&data).unwrap();
         let mut ctx = ResidualCabacContext::new(26);
         for (cat, max_coeff) in [(0, 16), (1, 15), (2, 16), (3, 4), (4, 15)] {
-            let (coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff);
+            let (coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff, false);
             let nonzero = coeffs.iter().filter(|&&c| c != 0).count();
             assert_eq!(
                 nonzero, coeff_count as usize,
@@ -2156,7 +2273,7 @@ mod tests {
         let mut dec = CabacDecoder::new(&data).unwrap();
         let mut ctx = ResidualCabacContext::new_pb(26, 0);
         for (cat, max_coeff) in [(0, 16), (1, 15), (2, 16), (3, 4), (4, 15)] {
-            let (_coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff);
+            let (_coeffs, coeff_count) = ctx.decode_block(&mut dec, cat, max_coeff, false);
             assert!(coeff_count as usize <= max_coeff);
         }
     }
@@ -2599,7 +2716,7 @@ mod tests {
 
                 for blk in 0..BLOCKS {
                     let (cat, max_coeff) = cats[blk % cats.len()];
-                    let ours = rctx.decode_block(&mut dec, cat, max_coeff);
+                    let ours = rctx.decode_block(&mut dec, cat, max_coeff, false);
                     let theirs = ff_residual_block(&mut oracle, cat, max_coeff);
                     assert_eq!(
                         ours, theirs,
@@ -2662,7 +2779,7 @@ mod tests {
                 let mut rctx = ResidualCabacContext::new(qp);
 
                 for blk in 0..BLOCKS {
-                    let ours = rctx.decode_block_8x8(&mut dec);
+                    let ours = rctx.decode_block_8x8(&mut dec, false);
                     let theirs = ff_residual_block_8x8(&mut oracle);
                     assert_eq!(
                         ours, theirs,
@@ -3428,7 +3545,7 @@ mod tests {
                     ));
                 }
                 if let Some(motion) = &cmb.motion {
-                    let got: Vec<(i32, i32)> = exp_mvds.iter().copied().collect();
+                    let got: Vec<(i32, i32)> = exp_mvds.to_vec();
                     if !got.is_empty() && motion.mvd_l0 != got {
                         mismatches.push(format!(
                             "MB{i}: mvds crate={:?} expected={got:?}",

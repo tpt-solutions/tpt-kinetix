@@ -32,13 +32,16 @@ fn g5_interlaced_corpus() {
     let variants: &[(&str, &str, &str)] = &[
         // MBAFF I-only: single IDR frame repeated via keyint (force with
         // --forcescan? simplest: 1-frame duration encodes one I).
-        ("mbaff_i1", "testsrc=size=64x64:rate=1:duration=1", "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1"),
+        // threads=1 pins the encoder so every run produces an IDENTICAL
+        // payload (the debug harnesses dbg_g5_i1_diffmap / dbg_mbaff_oracle
+        // consume these files and must stay reproducible).
+        ("mbaff_i1", "testsrc=size=64x64:rate=1:duration=1", "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1"),
         // MBAFF IP: 2 frames (I then P).
-        ("mbaff_ip", "testsrc=size=64x64:rate=1:duration=2", "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1"),
+        ("mbaff_ip", "testsrc=size=64x64:rate=1:duration=2", "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1"),
         // MBAFF IBP: 3 frames.
-        ("mbaff_ibp", "testsrc=size=64x64:rate=1:duration=3", "cabac=1:bframes=1:b-adapt=0:b-pyramid=0:keyint=300:min-keyint=300:deblock=0:direct=none:interlaced=1:tff=1"),
+        ("mbaff_ibp", "testsrc=size=64x64:rate=1:duration=3", "cabac=1:bframes=1:b-adapt=0:b-pyramid=0:keyint=300:min-keyint=300:deblock=0:direct=none:interlaced=1:tff=1:threads=1"),
         // CAVLC MBAFF.
-        ("mbaff_cavlc_ip", "testsrc=size=64x64:rate=1:duration=2", "cabac=0:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1"),
+        ("mbaff_cavlc_ip", "testsrc=size=64x64:rate=1:duration=2", "cabac=0:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1"),
     ];
 
     for &(name, src, params) in variants {

@@ -311,6 +311,20 @@ pub const ZIGZAG_4X4: [usize; 16] = [
     7, 11, 14, 15,
 ];
 
+/// Inverse-scan constant: **field** scan -> raster order for a 4×4 block.
+///
+/// Used for macroblocks coded in field mode inside an MBAFF frame (§7.4.4 /
+/// §8.5.6: a field macroblock's coefficients use the field scan). Transcribed
+/// verbatim from FFmpeg `h264_slice.c`'s static `field_scan[16]` table
+/// (`x + y*4` raster indices, n5.1):
+#[rustfmt::skip]
+pub const FIELD_SCAN_4X4: [usize; 16] = [
+     0,  4,  1,  8,
+    12,  5,  6,  7,
+     2,  9, 10, 11,
+     3, 13, 14, 15,
+];
+
 /// Inverse-quantise a 4×4 AC block and apply the residual inverse transform.
 ///
 /// `coeffs` are the parsed levels in **zigzag** scan order. `qp` is the luma
@@ -331,13 +345,27 @@ pub fn dequant_idct_4x4(
     scale_list: usize,
     scaling: &ScalingLists,
 ) -> [i32; 16] {
+    dequant_idct_4x4_scan(coeffs, qp, dc, scale_list, scaling, &ZIGZAG_4X4)
+}
+
+/// [`dequant_idct_4x4`] with an explicit inverse-scan table — used by the
+/// MBAFF field-macroblock path, which must unscan with [`FIELD_SCAN_4X4`]
+/// instead of the frame zig-zag.
+pub fn dequant_idct_4x4_scan(
+    coeffs: &[i16; 16],
+    qp: i32,
+    dc: Option<i32>,
+    scale_list: usize,
+    scaling: &ScalingLists,
+    scan: &[usize; 16],
+) -> [i32; 16] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
     let shift = qp / 6;
 
     // 1. Inverse zigzag scan into raster order.
     let mut d = [0i32; 16];
-    for (zz, &raster) in ZIGZAG_4X4.iter().enumerate() {
+    for (zz, &raster) in scan.iter().enumerate() {
         d[raster] = coeffs[zz] as i32;
     }
 
@@ -515,6 +543,34 @@ pub const INVERSE_ZIGZAG_8X8: [usize; 64] = {
     inv
 };
 
+/// Inverse-scan constant: **field** scan -> raster order for an 8×8 block
+/// (`transform_size_8x8_flag` set on a field-coded MBAFF macroblock).
+///
+/// Transcribed verbatim from FFmpeg `h264_slice.c`'s static `field_scan8x8`
+/// table (`x + y*8` raster indices, n5.1). As with [`CAVLC_SCAN8X8`] above,
+/// FFmpeg transposes this table into `h->field_scan8x8` at init, but its
+/// internal block buffers are transposed relative to ours — the *literal*
+/// (untransposed) form matches our raster-order reconstruction convention.
+#[rustfmt::skip]
+pub const FIELD_SCAN_8X8: [usize; 64] = [
+     0,  8, 16,  1,
+     9, 24, 32, 17,
+     2, 25, 40, 48,
+    56, 33, 10,  3,
+    18, 41, 49, 57,
+    26, 11,  4, 19,
+    34, 42, 50, 58,
+    27, 12,  5, 20,
+    35, 43, 51, 59,
+    28, 13,  6, 21,
+    36, 44, 52, 60,
+    29, 14, 22, 37,
+    45, 53, 61, 30,
+     7, 15, 38, 46,
+    54, 62, 23, 31,
+    39, 47, 55, 63,
+];
+
 /// CAVLC 8×8-residual scan table (raster position `x + 8*y`), indexed by the
 /// flat position `16*i4x4 + k` where `i4x4` (0..4) is the CAVLC sub-stream
 /// ("one of the four 4×4-style bit-substreams that together code an 8×8
@@ -674,16 +730,29 @@ pub fn dequant_idct_8x8(
     scale_list: usize,
     scaling: &ScalingLists,
 ) -> [i32; 64] {
+    dequant_idct_8x8_scan(coeffs, qp, scale_list, scaling, &ZIGZAG_8X8)
+}
+
+/// [`dequant_idct_8x8`] with an explicit inverse-scan table — used by the
+/// MBAFF field-macroblock path, which must unscan with
+/// [`FIELD_SCAN_8X8`] instead of the frame zig-zag.
+pub fn dequant_idct_8x8_scan(
+    coeffs: &[i16; 64],
+    qp: i32,
+    scale_list: usize,
+    scaling: &ScalingLists,
+    scan: &[usize; 64],
+) -> [i32; 64] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
     let shift = (qp / 6) as usize;
 
-    // 1. Dequantise in zigzag order.
+    // 1. Dequantise in scan order.
     let mut d = [0i32; 64];
     for z in 0..64 {
         // Position class for 8×8 dequant: position within the 4×4 sub-block
         // in raster order, i.e. `(row%4)*4 + (col%4)` for raster=row*8+col.
-        let raster = ZIGZAG_8X8[z];
+        let raster = scan[z];
         let pos_in_sub = ((raster >> 3) & 3) * 4 + (raster & 3);
         let cls = DEQUANT8_SCAN[pos_in_sub];
         // LevelScale8x8 = ScalingList8x8[z] * normAdjust8x8[m][cls].
@@ -702,7 +771,7 @@ pub fn dequant_idct_8x8(
     // 2. Inverse zigzag scan to raster order for the 2-D transform.
     let mut block = [0i32; 64];
     for z in 0..64 {
-        block[ZIGZAG_8X8[z]] = d[z];
+        block[scan[z]] = d[z];
     }
     // 3. 8×8 inverse transform.
     idct_8x8(&block)

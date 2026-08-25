@@ -19,6 +19,47 @@ fn g4_mbaff_i1_diffmap() {
     let frame_len = W * H * 3 / 2;
     assert!(ff.len() >= frame_len);
 
+    // Scaling-matrix hypothesis check: parse the stream's SPS with our own
+    // parser and report what the dequant source looks like.
+    {
+        let annexb_all = std::fs::read(&h264).unwrap();
+        let mut sps_rbsp: Option<Vec<u8>> = None;
+        let mut j = 0usize;
+        while j + 4 < annexb_all.len() {
+            if annexb_all[j] == 0
+                && annexb_all[j + 1] == 0
+                && annexb_all[j + 2] == 1
+                && (annexb_all[j + 3] & 0x1F) == 7
+            {
+                let mut k = j + 4;
+                let mut rbsp = Vec::new();
+                while k + 3 < annexb_all.len()
+                    && !(annexb_all[k] == 0 && annexb_all[k + 1] == 0 && annexb_all[k + 2] == 1)
+                {
+                    if annexb_all[k] == 0 && annexb_all[k + 1] == 0 && annexb_all[k + 2] == 3 {
+                        rbsp.push(0);
+                        k += 3;
+                    } else {
+                        rbsp.push(annexb_all[k]);
+                        k += 1;
+                    }
+                }
+                sps_rbsp = Some(rbsp);
+                break;
+            }
+            j += 1;
+        }
+        if let Some(rbsp) = sps_rbsp {
+            match tpt_kinetix_h264::sps::SeqParameterSet::parse(&rbsp) {
+                Ok(sp) => println!(
+                    "SPS check: mbaaf={} frame_mbs_only={}",
+                    sp.mb_adaptive_frame_field_flag, sp.frame_mbs_only_flag
+                ),
+                Err(e) => println!("SPS parse failed: {e}"),
+            }
+        }
+    }
+
     let mut dec = H264Decoder::new();
     let annexb = std::fs::read(&h264).unwrap();
     let mut starts = Vec::new();
@@ -53,17 +94,28 @@ fn g4_mbaff_i1_diffmap() {
         for px in 0..(W / 16) {
             let mut n_diff = 0usize;
             let mut max_d = 0i32;
+            let mut top_diff = 0usize;
             for y in 0..32usize {
                 for x in 0..16usize {
                     let idx = (py * 32 + y) * W + px * 16 + x;
                     let d = (o[idx] as i32 - ff[idx] as i32).abs();
                     if d != 0 {
                         n_diff += 1;
+                        if y < 16 {
+                            top_diff += 1;
+                        }
                         max_d = max_d.max(d);
                     }
                 }
             }
-            println!("pair({px},{py}): {n_diff}/512 differ, max={max_d}");
+            let half = if top_diff == 0 {
+                "bottom-half"
+            } else if top_diff == n_diff {
+                "top-half"
+            } else {
+                "mixed"
+            };
+            println!("pair({px},{py}): {n_diff}/512 differ (top {top_diff}), max={max_d} [{half}]");
         }
     }
 

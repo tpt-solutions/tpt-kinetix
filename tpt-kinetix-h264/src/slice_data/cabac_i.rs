@@ -55,40 +55,49 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             let parity = mb_idx & 1;
             let px = pair % mb_cols as usize;
             let py = pair / mb_cols as usize;
+            let mb_row = 2 * py + parity;
             (
                 px as u32,
-                2 * py as u32 + parity as u32,
-                py * mb_cols as usize + px,
+                mb_row as u32,
+                // The grid index MUST be the macroblock's own frame-MB
+                // address (`mb_y * mb_cols + mb_x`) — using the *pair* row
+                // here made every bottom MB commit its neighbour-context
+                // state over its top sibling's slot while leaving its own
+                // slot zeroed, so all later MBs read a zeroed left/top CBP /
+                // chroma-mode / nnz context and the CABAC engine drifted
+                // (session #32e, found via dbg_mbaff_oracle bin diff).
+                mb_row * mb_cols as usize + px,
             )
         } else {
-            (
-                (mb_idx as u32) % mb_cols,
-                (mb_idx as u32) / mb_cols,
-                mb_idx,
-            )
+            ((mb_idx as u32) % mb_cols, (mb_idx as u32) / mb_cols, mb_idx)
         };
 
         if mbaff_frame && mb_idx % 2 == 0 {
-            let left_field = if mb_x > 0 {
-                cabac_ctx[(mb_y * mb_cols + mb_x - 1) as usize].mb_field_flag
-            } else {
-                false
-            };
-            let top_field = if mb_y > 0 {
-                cabac_ctx[((mb_y - 1) * mb_cols + mb_x) as usize].mb_field_flag
-            } else {
-                false
-            };
-            cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
-            eprintln!(
-                "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
-                2 * ((mb_idx >> 1) / mb_cols as usize)
-            );
-            field_flags[grid_idx] = Some(cur_pair_field);
-            // The pair's bottom MB sits directly below the top MB in the
-            // frame-MB grid.
-            if grid_idx + (mb_cols as usize) < total {
-                field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
+            // Session #32c experiment: KINETIX_NO_FIELD_BINS=1 skips the
+            // mb_field_decoding_flag reads entirely, to test whether x264
+            // actually emitted them for this stream.
+            if std::env::var("KINETIX_NO_FIELD_BINS").is_err() {
+                let left_field = if mb_x > 0 {
+                    cabac_ctx[(mb_y * mb_cols + mb_x - 1) as usize].mb_field_flag
+                } else {
+                    false
+                };
+                let top_field = if mb_y > 0 {
+                    cabac_ctx[((mb_y - 1) * mb_cols + mb_x) as usize].mb_field_flag
+                } else {
+                    false
+                };
+                cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+                eprintln!(
+                    "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
+                    2 * ((mb_idx >> 1) / mb_cols as usize)
+                );
+                field_flags[grid_idx] = Some(cur_pair_field);
+                // The pair's bottom MB sits directly below the top MB in the
+                // frame-MB grid.
+                if grid_idx + (mb_cols as usize) < total {
+                    field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
+                }
             }
         }
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
@@ -111,6 +120,20 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             )?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nonzero;
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            let mut modes = [0u8; 16];
+            for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
+                modes[i] = *m as u8;
+            }
+            let (rs, os) = dec.debug_state();
+            eprintln!(
+                "TRC MB{mb_idx} px={mb_x} py={mb_y} field={cur_pair_field} type={:?} cbp={:#04x} qp={qp} t8={} chroma={} modes={modes:?} state={rs:#06x}/{os:#010x}",
+                mb.mb_type,
+                mb.cbp,
+                mb.transform_size_8x8,
+                mb.intra_chroma_pred_mode,
+            );
+        }
         nz[grid_idx] = this_nz;
         pred_ctx[grid_idx] = this_pred_ctx;
         let mut this_cabac_ctx = this_cabac_ctx;

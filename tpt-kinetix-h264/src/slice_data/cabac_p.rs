@@ -162,7 +162,9 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, 0x100);
         let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, 0x100);
         if ctxs.cbf.decode(dec, CAT_LUMA_DC, left_coded, top_coded) {
-            let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_LUMA_DC, 16);
+            let (coeffs, _count) =
+                ctxs.residual
+                    .decode_block(dec, CAT_LUMA_DC, 16, nctx.is_field());
             mb.luma_dc = coeffs;
             cbp_word |= 0x100;
         }
@@ -179,7 +181,7 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             if (cbp_l >> blk8) & 1 == 0 {
                 continue;
             }
-            let (coeffs_scan, count) = ctxs.residual.decode_block_8x8(dec);
+            let (coeffs_scan, count) = ctxs.residual.decode_block_8x8(dec, nctx.is_field());
             // decode_block_8x8 returns coefficients in scan-position order,
             // but dequant_idct_8x8 expects them in zigzag order.
             // Convert using INVERSE_ZIGZAG_8X8 (scan_pos -> zigzag_pos).
@@ -212,7 +214,9 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, nctx);
             let coded = ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded);
             if coded {
-                let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
+                let (coeffs, count) =
+                    ctxs.residual
+                        .decode_block(dec, luma_cat, luma_max, nctx.is_field());
                 this_nz.luma[block] = count;
                 if is_i16x16 {
                     let mut shifted = [0i16; 16];
@@ -232,7 +236,9 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, bit);
             let dc_coded = ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded);
             if dc_coded {
-                let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
+                let (coeffs, _count) =
+                    ctxs.residual
+                        .decode_block(dec, CAT_CHROMA_DC, 4, nctx.is_field());
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
                 if comp == 0 {
                     mb.chroma_dc_cb = dc;
@@ -252,7 +258,9 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 );
                 let ac_coded = ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded);
                 if ac_coded {
-                    let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
+                    let (coeffs, count) =
+                        ctxs.residual
+                            .decode_block(dec, CAT_CHROMA_AC, 15, nctx.is_field());
                     this_nz.chroma[comp * 4 + block] = count;
                     let mut shifted = [0i16; 16];
                     shifted[1..16].copy_from_slice(&coeffs[0..15]);

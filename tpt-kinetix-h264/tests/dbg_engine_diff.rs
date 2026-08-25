@@ -204,7 +204,7 @@ fn run_payload(
 ) -> Result<usize, String> {
     // Pad so ffmpeg's 2-byte lookahead never passes the end.
     let mut buf = payload.to_vec();
-    buf.extend(std::iter::repeat(0u8).take(64));
+    buf.extend(std::iter::repeat_n(0u8, 64));
     let mut ff = FfEngine::new(&buf, t);
     let mut dec = CabacDecoder::new(&buf).map_err(|e| e.to_string())?;
 
@@ -264,7 +264,8 @@ fn single_step_probe() {
     let mut rng = Rng(0xDEADBEEFCAFEBABE);
 
     // Candidate mappings: crate (pi,mps) -> ff packed byte.
-    let candidates: &[(&str, fn(u8, u8) -> u8)] = &[
+    type PackFn = fn(u8, u8) -> u8;
+    let candidates: &[(&str, PackFn)] = &[
         ("2pi+1", |pi, _m| 2 * pi + 1),
         ("2pi", |pi, _m| 2 * pi),
         ("125-2pi", |pi, _m| (125i32 - 2 * pi as i32) as u8),
@@ -282,7 +283,7 @@ fn single_step_probe() {
     for _trial in 0..4000u32 {
         let payload: Vec<u8> = (0..64u32).map(|_| rng.next() as u8).collect();
         let mut buf = payload.clone();
-        buf.extend(std::iter::repeat(0u8).take(64));
+        buf.extend(std::iter::repeat_n(0u8, 64));
         let pi = rng.below(64) as u8;
         let mps = rng.below(2) as u8;
 
@@ -392,9 +393,9 @@ fn reverse_engineer_ff_state_mapping() {
     for s in 0..128i32 {
         let mut cols: [String; 4] = std::array::from_fn(|_| "x".to_string());
         for q in 0..4usize {
-            let v = t.lps_range[(128 * q) as usize + s as usize];
+            let v = t.lps_range[(128 * q) + s as usize];
             let hits: Vec<usize> = (0..64)
-                .filter(|&pi| SPEC[pi][q] == v.unsigned_abs() as u32)
+                .filter(|&pi| SPEC[pi][q] == v.unsigned_abs())
                 .collect();
             if hits.len() == 1 {
                 cols[q] = format!("{}{:2}", if v < 0 { "-" } else { "+" }, hits[0]);

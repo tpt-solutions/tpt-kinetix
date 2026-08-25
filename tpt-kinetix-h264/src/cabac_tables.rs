@@ -712,6 +712,25 @@ pub const CBF_CTX_BASE: [usize; 5] = [85, 89, 93, 97, 101];
 /// position -- see [`SIG_COEFF_CTX_INC_8X8_FRAME`].
 pub const SIG_COEFF_CTX_BASE: [usize; 6] = [105, 120, 134, 149, 152, 402];
 
+/// `significant_coeff_flag` ctxIdxOffset per `ctxBlockCat` 0..=5 for
+/// **FIELD-coded** macroblocks (`mb_field_decoding_flag == 1` inside an MBAFF
+/// frame, or any PAFF field picture): `[LumaDC, LumaAC, Luma4x4, ChromaDC,
+/// ChromaAC, Luma8x8]`. Spec §9.3.3.1.3.1 Table 9-17 gives field coding its
+/// own significance-map context ranges; transcribed from FFmpeg's
+/// `significant_coeff_flag_offset[MB_FIELD(sl)][cat]`
+/// (`h264_cabac.c`, n5.1: `{277+0,277+15,277+29,277+44,277+47,436}`).
+///
+/// A field-coded MB reading these bins through [`SIG_COEFF_CTX_BASE`] desyncs
+/// the engine immediately -- this was the remaining MBAFF I-slice gap
+/// (todo-h264.md session #32e).
+pub const SIG_COEFF_CTX_BASE_FIELD: [usize; 6] = [277, 292, 306, 321, 324, 436];
+
+/// `last_significant_coeff_flag` ctxIdxOffset per `ctxBlockCat` 0..=5 for
+/// **FIELD-coded** macroblocks. Transcribed from FFmpeg's
+/// `last_coeff_flag_offset[MB_FIELD(sl)][cat]`
+/// (`{338+0,338+15,338+29,338+44,338+47,451}`, n5.1).
+pub const LAST_COEFF_CTX_BASE_FIELD: [usize; 6] = [338, 353, 367, 382, 385, 451];
+
 /// `last_significant_coeff_flag` ctxIdxOffset per `ctxBlockCat` 0..=5 (frame
 /// coding only). For cats 0..=4, ctxIdxInc = raw scan position; for cat 5
 /// (Luma8x8) see [`LAST_COEFF_CTX_INC_8X8_FRAME`].
@@ -781,6 +800,18 @@ pub const SIG_COEFF_CTX_INC_8X8_FRAME: [u8; 63] = [
     4, 4, 4, 4, 3, 3, 6, 7, 7, 7, 8, 9, 10, 9, 8, 7,
     7, 6, 11, 12, 13, 11, 6, 7, 8, 9, 14, 10, 9, 8, 6, 11,
     12, 13, 11, 6, 9, 14, 10, 9, 11, 12, 13, 11, 14, 10, 12,
+];
+
+/// `significant_coeff_flag` ctxIdxInc indirection for `ctxBlockCat` 5
+/// (Luma8x8), **FIELD-coding** variant: index `[1]` of FFmpeg's
+/// `significant_coeff_flag_offset_8x8[2][63]` (`h264_cabac.c`, n5.1).
+/// Selected by `MB_FIELD(sl)` alongside [`SIG_COEFF_CTX_BASE_FIELD`].
+#[rustfmt::skip]
+pub const SIG_COEFF_CTX_INC_8X8_FIELD: [u8; 63] = [
+    0, 1, 1, 2, 2, 3, 3, 4, 5, 6, 7, 7, 7, 8, 4, 5,
+    6, 9, 10, 10, 8, 11, 12, 11, 9, 9, 10, 10, 8, 11, 12, 11,
+    9, 9, 10, 10, 8, 11, 12, 11, 9, 9, 10, 10, 8, 13, 13, 9,
+    9, 10, 10, 8, 13, 13, 9, 9, 10, 10, 14, 14, 14, 14, 14,
 ];
 
 /// `last_significant_coeff_flag` ctxIdxInc indirection for `ctxBlockCat` 5

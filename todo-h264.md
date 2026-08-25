@@ -2,6 +2,87 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32e (2026-08-25) — MBAFF I-slice: two real parse bugs fixed; field recon infrastructure landed
+
+> Harnesses: `tests/dbg_mbaff_oracle.rs` (#32d oracle, now actually RUN) +
+> a mechanical differ of its `BIN n ...` stream against the crate parser's
+> `KINETIX_BINTRACE` `BIN` stream on the real `mbaff_i1` payload
+> (`parse_i_slice_cabac` gained an env-gated per-MB `TRC` summary line).
+
+1. **FALSE ALARM resolved — `intra_chroma_pred_mode` ctx weighting is
+   `left + top` and the crate was ALREADY CORRECT.** The first BIN-stream
+   divergence (BIN 2519, MB(1,1)'s chroma-mode bin, crate ctx 65 vs oracle 66)
+   turned out to be a MIS-TRANSCRIPTION in the #32d oracle itself
+   (`64 + lc + 2*tc`); FFmpeg's `decode_cabac_mb_chroma_pre_mode`
+   (`h264_cabac_ref.c:1394-1399`) uses two plain `ctx++` branches. A "fix"
+   following the oracle (`left + 2*top`) regressed the progressive CABAC
+   I-frame conformance tests and was REVERTED; both `entropy.rs` and the
+   oracle now carry doc comments recording this so it cannot recur.
+2. **BUG FIXED — MBAFF commit addressing** (`slice_data/cabac_i.rs`): the
+   CABAC I-slice loop computed `grid_idx = pair_row*mb_cols + px`, i.e. the
+   *pair's* top slot, instead of the macroblock's own frame-MB address
+   `mb_row*mb_cols + px`. Every bottom MB therefore committed its
+   neighbour-context state (`MbCabacCtx`: cbp_word / chroma_pred_mode /
+   transform_8x8 / is_intra16x16) OVER its top sibling's slot while leaving
+   its own slot zeroed; from the second MB onward every context lookup read
+   zeros and the engine drifted. Diagnosed with an env-gated `CBPNB` dump in
+   `ctx.rs::cabac_cbp_neighbors` showing `left=Some(4)=0x0000` for MB(1,1)
+   (should be MB1's word). With the oracle's chroma mis-transcription also
+   corrected (item 1), the crate parse and the oracle are back in
+   bin-for-bin lockstep over the whole payload.
+3. **RESULT:** MB(0,0) reconstructs pixel-exact vs ffmpeg for the first time
+   on this clip (`dbg_g5_i1_diffmap` forensics: flat 16/81 pattern matches).
+4. **Phase G.4 field-reconstruction infrastructure landed** (uncommitted):
+   - `transform.rs`: `FIELD_SCAN_4X4`/`FIELD_SCAN_8X8` transcribed verbatim
+     from FFmpeg n5.1 `h264_slice.c` (`field_scan`/`field_scan8x8`, literal
+     untransposed form per the `CAVLC_SCAN8X8` precedent);
+     `dequant_idct_4x4_scan`/`dequant_idct_8x8_scan` take an explicit scan.
+   - `reconstruct.rs`: `reconstruct_luma_at`/`reconstruct_chroma_at` carry a
+     vertical geometry (`base_y_px`, `y_step`) + scan tables;
+     `reconstruct_mbaff_intra_frame` now decodes DIRECTLY into the interlaced
+     frame planes (frame-coded pairs = contiguous halves, field-coded pairs =
+     every-other-line placement with doubled intra-prediction stride and the
+     field scans), replacing the old progressive-then-rearrange pass.
+5. **FIELD RESIDUAL CONTEXTS IMPLEMENTED (this session, after the table
+   above):** FFmpeg selects its residual significance/last context *bases* by
+   `MB_FIELD(sl)` — field-coded MBs read entirely different ctxIdx ranges
+   (`significant_coeff_flag_offset[1] = {277+0,277+15,277+29,277+44,277+47,
+   436}`, `last_coeff_flag_offset[1] = {338+0,...,451}`; the 8x8 sig-inc
+   indirection also has a field row). The crate only had the frame tables.
+   Added `SIG_COEFF_CTX_BASE_FIELD` / `LAST_COEFF_CTX_BASE_FIELD` /
+   `SIG_COEFF_CTX_INC_8X8_FIELD` (`cabac_tables.rs`), dual (frame+field)
+   context sets in `ResidualCabacContext` (both `new` and `new_pb`;
+   coeff_abs contexts are shared — ffmpeg's `coeff_abs_level_m1_offset` has
+   no field split), a `field` argument on
+   `ResidualCabacContext::decode_block` / `::decode_block_8x8`, and
+   `NeighbourCtx::is_field()`; all CABAC P/B/I call sites and the oracle now
+   pass the current pair's field flag. Suite re-run green.
+6. **REMAINING GAP (decisive next step):** on the deterministic `threads=1`
+   corpus, crate parser and corrected oracle still agree bin-for-bin until
+   BOTH hit `end_of_slice_flag=1` mid-slice at MB14. Everything above the
+   residual walk is now verified against ffmpeg verbatim; the desync is
+   therefore inside the SHARED residual internals (sig/last/abs context
+   evolution or nnz-derived cbf under MBAFF), where this diff cannot see it
+   (circular calibration). ALSO FIXED en route: oracle dqp ignored negative
+   deltas (its qp column is wrong, crate's is right); x264 `threads=1`
+   pinned in dbg_g5_interlaced because default threading made payloads vary
+   run-to-run and poisoned earlier comparisons. NEXT: mechanically compile
+   ff_h264_cabac.c's decode_residual/get_cabac_cbf_ctx internals with MSVC
+   (the TRANS_IDX_LPS method) and replay the recorded engine state + payload,
+   diffing per-bin contexts — this breaks the circularity definitively.
+   Also still open: CAVLC MBAFF I-slice parse ("non-intra mb_type in
+   I-slice", mbaff_cavlc_ip), MVP row-doubling/halving for inter pairs,
+   deblocking edge flags for field MBs.
+
+    REFERENCE MATERIAL saved to repo root for that work:
+    `h264_mvpred_ref.h` (libavcodec/h264_mvpred.h @n5.1 - contains
+    `fill_decode_neighbors`/`fill_decode_caches`; key subtleties:
+    `left_block_options[0..3]` remap left/top cache rows for mixed
+    field/frame pairs; unavailable-neighbour nnz is filled with
+    `CABAC && !IS_INTRA ? 0 : 64`; `left_cbp` luma nibble is REBUILT from
+    `(cbp_table[left_xy[LTOP/LBOT]] >> (left_block[k] & ~1)) & 2` rather than
+    copied wholesale) and `h264_slice_ref.c` (field_scan tables).
+
 ## SESSION #32 (2026-08-24) — DECISIVE NARROWING of the c_p8x8 P/B gap
 
 > New harness: `tpt-kinetix-h264/tests/dbg_qpel_brute.rs` (qpel SAD brute
@@ -159,6 +240,42 @@
      reconstruct_mbaff_intra_frame. Diagnostic:
      `tests/dbg_g5_i1_diffmap.rs` (pair diff map + chroma + MB(0,0)
      forensics).
+   - **#32c MB-LEVEL PARSE DATA (mbaff_i1):** first four MBs parse to
+     plausible values — Intra4x4, cbp=0x2f, qp=24, MIXED transform flags
+     (MB0/1 t8=false, MB2/3 t8=true) — yet luma AND chroma diverge wholesale
+     (chroma-U 1016/1024 samples). Wholesale luma+chroma error with a
+     plausible-looking parse points at a DEQUANT-level cause for this stream
+     rather than prediction: prime suspect is SPS
+     `seq_scaling_matrix_present_flag` (profile_idc=100 — does x264 write
+     explicit scaling lists here, and does our SPS parse + dequant apply
+     them?). Secondary: High-profile Intra_8x8 prediction under pair
+     addressing. NEXT: dump `sps.scaling` presence for this clip; compare
+     dequant tables vs ffmpeg; then field-coding support (field scans,
+     field intra pred, field placement).
+   - **#32c SPS VERIFIED:** the interlaced clip's SPS parses correctly
+     (`mbaaf=true frame_mbs_only=false` via our own SeqParameterSet::parse),
+   - **#32c EXPERIMENT RESULT (KINETIX_NO_FIELD_BINS probe):** skipping the
+     field-flag reads changes nothing — divergence remains wholesale either
+     way. Combined with clean end_of_slice termination across all 16 MBs,
+     the parse failure mode is SELF-CONSISTENT-BUT-WRONG (same signature as
+     the amvd bug): some context-selection or interpretation detail early in
+     the slice differs from ffmpeg while staying internally aligned.
+   - **DECISIVE NEXT STEP:** extend `dbg_engine_diff.rs`'s proven
+     FfEngine into an MBAFF I-slice oracle walk — mechanically transcribe
+     ffmpeg's I-slice path (decode_cabac_field_decoding_flag @ ctx70..72 +
+     decode_cabac_intra_mb_type(ctx_base=3, intra_slice=1) + Intra_8x8/4x4
+     pred-mode bins + chroma_pre_mode + cbp + dqp + residual walk with
+     nnz-cache border rules) and diff per-element vs the crate ON THE REAL
+     mbaff_i1 PAYLOAD. This technique found TRANS_IDX_LPS[28], ctx266, AND
+     the amvd convention; it is the reliable instrument for this class.
+
+     confirming the MBAFF signalling path end-to-end. The dequant-level
+     suspicion (explicit scaling lists) and the reconstruction-stage field
+     support (field scans / field intra pred / field placement for
+     field-coded pairs) remain the two open threads for full interlaced
+     pixel-exactness.
+
+
 
      (b) field intra prediction (half-height neighbour sampling),
      (c) interleaved row placement for inter pairs. This is precisely the

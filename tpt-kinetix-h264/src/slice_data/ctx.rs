@@ -391,6 +391,13 @@ impl<'a> NeighbourCtx<'a> {
         }
     }
 
+    /// Whether the macroblock currently being decoded is field-coded
+    /// (`mb_field_decoding_flag`); selects the field-coding significance/
+    /// last context ranges during residual parsing.
+    pub(crate) fn is_field(&self) -> bool {
+        self.cur_field
+    }
+
     /// Resolve the left/top neighbour macroblock addresses for `(mb_x, mb_y)`.
     pub(crate) fn left_top(
         &self,
@@ -431,6 +438,11 @@ pub(crate) fn cabac_cbp_neighbors(
     let top = top_idx
         .map(|i| grid[i].cbp_word)
         .unwrap_or(CABAC_CBP_UNAVAILABLE);
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        eprintln!(
+            "CBPNB mb=({mb_x},{mb_y}) left={left_idx:?}={left:#06x} top={top_idx:?}={top:#06x}"
+        );
+    }
     (left, top)
 }
 

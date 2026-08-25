@@ -1450,7 +1450,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, 0x100);
         let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, 0x100);
         if ctxs.cbf.decode(dec, CAT_LUMA_DC, left_coded, top_coded) {
-            let (coeffs, _count) = ctxs.residual.decode_block(dec, CAT_LUMA_DC, 16);
+            let (coeffs, _count) =
+                ctxs.residual
+                    .decode_block(dec, CAT_LUMA_DC, 16, nctx.is_field());
             mb.luma_dc = coeffs;
             cbp_word |= 0x100;
         }
@@ -1460,7 +1462,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
             if (cbp_l >> blk8) & 1 == 0 {
                 continue;
             }
-            let (coeffs, count) = ctxs.residual.decode_block_8x8(dec);
+            let (coeffs, count) = ctxs.residual.decode_block_8x8(dec, nctx.is_field());
             mb.luma_coeffs_8x8[blk8] = coeffs;
             for sub in 0..4usize {
                 this_nz.luma[raster_of_8x8_sub(blk8, sub)] = count;
@@ -1485,7 +1487,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
             let (left_coded, top_coded) =
                 luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, &this_nz, block, true, nctx);
             if ctxs.cbf.decode(dec, luma_cat, left_coded, top_coded) {
-                let (coeffs, count) = ctxs.residual.decode_block(dec, luma_cat, luma_max);
+                let (coeffs, count) =
+                    ctxs.residual
+                        .decode_block(dec, luma_cat, luma_max, nctx.is_field());
                 this_nz.luma[block] = count;
                 if is_i16x16 {
                     let mut s = [0i16; 16];
@@ -1503,7 +1507,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
             let left_coded = dc_cbf_neighbor(cabac_ctx_grid, left_idx, bit);
             let top_coded = dc_cbf_neighbor(cabac_ctx_grid, top_idx, bit);
             if ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded) {
-                let (coeffs, _) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
+                let (coeffs, _) =
+                    ctxs.residual
+                        .decode_block(dec, CAT_CHROMA_DC, 4, nctx.is_field());
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
                 if comp == 0 {
                     mb.chroma_dc_cb = dc;
@@ -1521,7 +1527,9 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
                     nz_grid, mb_x, mb_y, mb_cols, &this_nz, comp, block, true, nctx,
                 );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
-                    let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
+                    let (coeffs, count) =
+                        ctxs.residual
+                            .decode_block(dec, CAT_CHROMA_AC, 15, nctx.is_field());
                     this_nz.chroma[comp * 4 + block] = count;
                     let mut s = [0i16; 16];
                     s[1..16].copy_from_slice(&coeffs[0..15]);
@@ -1618,7 +1626,9 @@ fn decode_inter_residual_cabac(
         let (ar, ao) = dec.debug_state();
         eprintln!("    luma blk={block} left={left_coded} top={top_coded} cbf={has_coeff} {lr:#06x}/{lo:#010x}->{ar:#06x}/{ao:#010x}");
         if has_coeff {
-            let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_LUMA_4X4, 16);
+            let (coeffs, count) =
+                ctxs.residual
+                    .decode_block(dec, CAT_LUMA_4X4, 16, nctx.is_field());
             let (cr, co) = dec.debug_state();
             eprintln!(
                 "    luma blk={block} nz={count} coeffs={:?} after={cr:#06x}/{co:#010x}",
@@ -1643,7 +1653,9 @@ fn decode_inter_residual_cabac(
                 Some(i) => cabac_ctx_grid[i].cbp_word & bit != 0,
             };
             if ctxs.cbf.decode(dec, CAT_CHROMA_DC, left_coded, top_coded) {
-                let (coeffs, _) = ctxs.residual.decode_block(dec, CAT_CHROMA_DC, 4);
+                let (coeffs, _) =
+                    ctxs.residual
+                        .decode_block(dec, CAT_CHROMA_DC, 4, nctx.is_field());
                 let dc = [coeffs[0], coeffs[1], coeffs[2], coeffs[3]];
                 if comp == 0 {
                     mb.chroma_dc_cb = dc;
@@ -1661,7 +1673,9 @@ fn decode_inter_residual_cabac(
                     nz_grid, mb_x, mb_y, mb_cols, this_nz, comp, block, false, nctx,
                 );
                 if ctxs.cbf.decode(dec, CAT_CHROMA_AC, left_coded, top_coded) {
-                    let (coeffs, count) = ctxs.residual.decode_block(dec, CAT_CHROMA_AC, 15);
+                    let (coeffs, count) =
+                        ctxs.residual
+                            .decode_block(dec, CAT_CHROMA_AC, 15, nctx.is_field());
                     this_nz.chroma[comp * 4 + block] = count;
                     let mut s = [0i16; 16];
                     s[1..16].copy_from_slice(&coeffs[0..15]);

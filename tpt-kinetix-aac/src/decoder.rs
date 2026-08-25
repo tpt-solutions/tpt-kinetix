@@ -452,14 +452,31 @@ impl AacDecoder {
                             if f == frame_no && ch_idx == 0 {
                                 let overlap = &self.channels[ch_idx].overlap;
                                 let lo = idx.saturating_sub(3);
-                                let hi = (idx + 3).min(1024);
-                                for (i, (&b, &o)) in
-                                    buf[lo..hi].iter().zip(&overlap[lo..hi]).enumerate()
-                                {
-                                    eprintln!(
-                                        "DBG overlap frame{frame_no} i={} buf[i]={b:e} overlap_in[i]={o:e}",
-                                        lo + i
-                                    );
+                                let hi = (idx + 3).min(2048);
+                                if idx < 1024 {
+                                    let hi1 = hi.min(1024);
+                                    for (i, (&b, &o)) in
+                                        buf[lo..hi1].iter().zip(&overlap[lo..hi1]).enumerate()
+                                    {
+                                        eprintln!(
+                                            "DBG overlap frame{frame_no} i={} buf[i]={b:e} overlap_in[i]={o:e}",
+                                            lo + i
+                                        );
+                                    }
+                                } else {
+                                    // Second half of buf: show what will be stored as overlap.
+                                    let ws = ch.ics.window_shape as usize;
+                                    let w = &self.windows.long[ws];
+                                    for i in lo..hi {
+                                        let rel = i - 1024; // position in overlap array
+                                        let b = buf[i];
+                                        let wv = w[1023 - rel];
+                                        eprintln!(
+                                            "DBG overlap frame{frame_no} buf[{i}]={b:e} w[{}]={wv:.6} stored={:e}",
+                                            1023 - rel,
+                                            b * wv
+                                        );
+                                    }
                                 }
                             }
                         }
