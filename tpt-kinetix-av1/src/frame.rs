@@ -579,8 +579,8 @@ impl FrameHeader {
             };
             if std::env::var("KINETIX_AV1_DBG_SUPERRES").is_ok() {
                 eprintln!(
-                    "DBG superres enable_superres={} w={w} h={h} uw={uw} rw={rw} rh={rh}",
-                    seq.enable_superres
+                    "DBG superres enable_superres={} w={w} h={h} uw={uw} rw={rw} rh={rh} allow_screen_content={} allow_intrabc={}",
+                    seq.enable_superres, allow_screen_content_tools, allow_intrabc
                 );
             }
         } else {

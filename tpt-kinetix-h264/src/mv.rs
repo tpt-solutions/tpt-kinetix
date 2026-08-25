@@ -624,7 +624,27 @@ pub(crate) fn predict_mv_sub(
     let c = neighbor_above_right(store, cur, mb_idx, mb_width, py, px, spw, slice_id)
         .or_else(|| neighbor_above_left(store, cur, mb_idx, mb_width, py, px, slice_id));
 
-    median_pred(a, b, c, ref_idx)
+    let pred = median_pred(a, b, c, ref_idx);
+
+    // Session #31 diagnostic (todo-h264.md): P_8x8 sub-partition MVP trace,
+    // same format as predict_mv's, gated on KINETIX_BINTRACE.
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        let fmt = |n: &Option<MvNeighbor>| match n {
+            None => "None".to_string(),
+            Some(n) => format!("Some(mv=({},{}) ri={})", n.mv[0], n.mv[1], n.ref_idx),
+        };
+        eprintln!(
+            "MVP-SUB mb{} sub({px},{py} {spw}w) ref{ref_idx}: A={} B={} C={} -> ({},{})",
+            mb_idx,
+            fmt(&a),
+            fmt(&b),
+            fmt(&c),
+            pred[0],
+            pred[1]
+        );
+    }
+
+    pred
 }
 
 /// P-skip MVP (§8.4.1.1): (0,0) when A or B is unavailable or a zero-MV

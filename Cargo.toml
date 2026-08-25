@@ -87,3 +87,10 @@ opt-level = 3
 
 [profile.dev.package.tree-sitter]
 opt-level = 3
+
+# TEMPORARY diagnostic override (session #31, todo-h264.md): works around a
+# reproducible lld-link "undefined symbol: anon.*" cross-CGU failure when
+# linking the tpt-kinetix-h264 lib-test binary on this machine. Remove once
+# the lld-link issue is resolved or the lockstep test lands elsewhere.
+[profile.dev.package.tpt-kinetix-h264]
+codegen-units = 1

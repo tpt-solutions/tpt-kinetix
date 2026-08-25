@@ -237,86 +237,67 @@ fn amvd_sum(
     top_mb_idx: Option<usize>,
     xp: u32,
     yp: u32,
-    wp: u32,
-    hp: u32,
+    _wp: u32,
+    _hp: u32,
     list: usize,
     comp: usize,
 ) -> u32 {
-    // Left neighbor 4×4 block: partition that contains sample (xP−1, yP+hP−1).
-    // When xP=0 that sample is in the left macroblock (col 3, bottom row of
-    // partition); when xP≥1 it is within the current macroblock.
-    let left_pixel_x = xp as i32 - 1;
-    let left_pixel_y = (yp + hp - 1) as usize;
-    let left_val = if left_pixel_x < 0 {
-        let left_row4 = left_pixel_y / 4;
-        let left_blk = left_row4 * 4 + 3; // rightmost column of left MB
-        if let Some(idx) = left_mb_idx {
-            let g = &inter_grid[idx];
-            if g.present {
-                (if list == 0 {
-                    g.l0_mvd_abs[left_blk][comp]
-                } else {
-                    g.l1_mvd_abs[left_blk][comp]
-                }) as u32
-            } else {
-                0
-            }
+    // FFmpeg's literal convention (DECODE_CABAC_MB_MVD): amvd reads
+    // mvd_cache[scan8[n]-1] and mvd_cache[scan8[n]-8] -- the cells directly
+    // LEFT of and ABOVE the partition's TOP-LEFT 4x4 block (same top row /
+    // same left column), NOT the spec 8.4.1.2 bottom-row/top-right sample
+    // rule. The two disagree whenever the neighbour MB has per-row or
+    // per-column differing mvd values (16x8/8x16/P_8x8 neighbours), which is
+    // exactly the c_p8x8 failure trigger (session #32b, todo-h264.md).
+    let bx = (xp / 4) as usize;
+    let by = (yp / 4) as usize;
+
+    let left_val = if bx > 0 {
+        let blk = by * 4 + (bx - 1);
+        cell(cur_inter, blk, list, comp)
+    } else if let Some(li) = left_mb_idx {
+        if inter_grid[li].present {
+            let blk = by * 4 + 3;
+            cell(&inter_grid[li], blk, list, comp)
         } else {
             0
         }
     } else {
-        // Left neighbor is within the current macroblock (e.g. right sub-partition of P_4x8 or P_8x16).
-        let left_col4 = left_pixel_x as usize / 4;
-        let left_row4 = left_pixel_y / 4;
-        let left_blk = left_row4 * 4 + left_col4;
-        if cur_inter.present {
-            (if list == 0 {
-                cur_inter.l0_mvd_abs[left_blk][comp]
-            } else {
-                cur_inter.l1_mvd_abs[left_blk][comp]
-            }) as u32
-        } else {
-            0
-        }
+        0
     };
 
-    // Top neighbor 4×4 block: row above yP, rightmost column of partition.
-    let top_col4 = ((xp + wp - 1) / 4) as usize;
-    let top_val = if yp == 0 {
-        let top_blk = 3 * 4 + top_col4; // bottom row of top MB
-        if let Some(idx) = top_mb_idx {
-            let g = &inter_grid[idx];
-            if g.present {
-                (if list == 0 {
-                    g.l0_mvd_abs[top_blk][comp]
-                } else {
-                    g.l1_mvd_abs[top_blk][comp]
-                }) as u32
-            } else {
-                0
-            }
+    let top_val = if by > 0 {
+        let blk = (by - 1) * 4 + bx;
+        cell(cur_inter, blk, list, comp)
+    } else if let Some(ti) = top_mb_idx {
+        if inter_grid[ti].present {
+            let blk = 3 * 4 + bx;
+            cell(&inter_grid[ti], blk, list, comp)
         } else {
             0
         }
     } else {
-        // top neighbor is within current MB (e.g., bottom half of 16×8)
-        let top_row4 = (yp / 4 - 1) as usize;
-        let top_blk = top_row4 * 4 + top_col4;
-        if cur_inter.present {
-            (if list == 0 {
-                cur_inter.l0_mvd_abs[top_blk][comp]
-            } else {
-                cur_inter.l1_mvd_abs[top_blk][comp]
-            }) as u32
-        } else {
-            0
-        }
+        0
     };
 
     left_val + top_val
 }
 
+#[inline]
+fn cell(g: &MbInterCabacCtx, blk: usize, list: usize, comp: usize) -> u32 {
+    let v = if list == 0 {
+        g.l0_mvd_abs[blk][comp]
+    } else {
+        g.l1_mvd_abs[blk][comp]
+    };
+    v as u32
+}
+
 /// Derive `refIdxZeroFlag` context bits for `ref_idx` CABAC (§9.3.3.1.1.6).
+///
+/// Uses ffmpeg's literal `decode_cabac_mb_ref` convention: the ref_cache
+/// cells at `scan8[n]-1` / `scan8[n]-8`, i.e. the neighbours of the
+/// partition's TOP-LEFT 4x4 block (same convention as [`amvd_sum`]).
 pub(crate) fn ref_idx_gt0_neighbors(
     inter_grid: &[MbInterCabacCtx],
     cur_inter: &MbInterCabacCtx,
@@ -325,21 +306,17 @@ pub(crate) fn ref_idx_gt0_neighbors(
     xp: u32,
     yp: u32,
     _wp: u32,
-    hp: u32,
+    _hp: u32,
     list: usize,
 ) -> (bool, bool) {
-    let left_row4 = ((yp + hp - 1) / 4) as usize;
-    let left_blk = left_row4 * 4 + 3;
-    let left_gt0 = if let Some(idx) = left_mb_idx {
-        let g = &inter_grid[idx];
-        if g.present {
-            (if list == 0 {
-                g.l0_ref_gt0
-            } else {
-                g.l1_ref_gt0
-            } >> left_blk)
-                & 1
-                == 1
+    let bx = (xp / 4) as usize;
+    let by = (yp / 4) as usize;
+
+    let left_gt0 = if bx > 0 {
+        cell_gt0(cur_inter, by * 4 + (bx - 1), list)
+    } else if let Some(idx) = left_mb_idx {
+        if inter_grid[idx].present {
+            cell_gt0(&inter_grid[idx], by * 4 + 3, list)
         } else {
             false
         }
@@ -347,42 +324,28 @@ pub(crate) fn ref_idx_gt0_neighbors(
         false
     };
 
-    let top_gt0 = if yp == 0 {
-        if let Some(idx) = top_mb_idx {
-            let g = &inter_grid[idx];
-            // top neighbor: bottom-left-most 4×4 of top MB touching this partition
-            let top_blk = 3 * 4 + (xp / 4) as usize;
-            if g.present {
-                (if list == 0 {
-                    g.l0_ref_gt0
-                } else {
-                    g.l1_ref_gt0
-                } >> top_blk)
-                    & 1
-                    == 1
-            } else {
-                false
-            }
+    let top_gt0 = if by > 0 {
+        cell_gt0(cur_inter, (by - 1) * 4 + bx, list)
+    } else if let Some(idx) = top_mb_idx {
+        if inter_grid[idx].present {
+            cell_gt0(&inter_grid[idx], 3 * 4 + bx, list)
         } else {
             false
         }
     } else {
-        let top_row4 = (yp / 4 - 1) as usize;
-        let top_blk = top_row4 * 4 + (xp / 4) as usize;
-        if cur_inter.present {
-            (if list == 0 {
-                cur_inter.l0_ref_gt0
-            } else {
-                cur_inter.l1_ref_gt0
-            } >> top_blk)
-                & 1
-                == 1
-        } else {
-            false
-        }
+        false
     };
-
     (left_gt0, top_gt0)
+}
+
+#[inline]
+fn cell_gt0(g: &MbInterCabacCtx, blk: usize, list: usize) -> bool {
+    let bits = if list == 0 {
+        g.l0_ref_gt0
+    } else {
+        g.l1_ref_gt0
+    };
+    (bits >> blk) & 1 == 1
 }
 
 /// Bundles the extra state needed to resolve a macroblock's left/top

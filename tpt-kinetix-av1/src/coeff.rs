@@ -152,6 +152,52 @@ impl TileCdfs {
         self.intra_tx_type_set1 = unclone3(&s.intra_tx_type_set1);
         self.intra_tx_type_set2 = unclone3(&s.intra_tx_type_set2);
     }
+
+    /// Serialize the base (un-adapted) coefficient CDF tables to JSON for the
+    /// independent Python oracle. The oracle re-seeds from these exact tables
+    /// (identical to how this decoder initializes at tile start) so any symbol
+    /// divergence it reports is a genuine read-order / context bug, not a
+    /// CDF-adaptation artifact.
+    pub fn dump_base_json(&self) -> String {
+        let j2 = |v: &[Vec<u16>]| -> String {
+            let rows: Vec<String> = v.iter().map(|r| {
+                let inner: Vec<String> = r.iter().map(|x| x.to_string()).collect();
+                format!("[{}]", inner.join(","))
+            }).collect();
+            format!("[{}]", rows.join(","))
+        };
+        let j3 = |v: &[Vec<Vec<u16>>]| -> String {
+            let rows: Vec<String> = v.iter().map(|m| j2(m)).collect();
+            format!("[{}]", rows.join(","))
+        };
+        let j4 = |v: &[Vec<Vec<Vec<u16>>>]| -> String {
+            let rows: Vec<String> = v.iter().map(|m| j3(m)).collect();
+            format!("[{}]", rows.join(","))
+        };
+        format!(
+            "{{\n  \
+             \"txb_skip\": {},\n  \"eob_pt_16\": {},\n  \"eob_pt_32\": {},\n  \
+             \"eob_pt_64\": {},\n  \"eob_pt_128\": {},\n  \"eob_pt_256\": {},\n  \
+             \"eob_pt_512\": {},\n  \"eob_pt_1024\": {},\n  \"eob_extra\": {},\n  \
+             \"coeff_base_eob\": {},\n  \"coeff_base\": {},\n  \"coeff_br\": {},\n  \
+             \"dc_sign\": {},\n  \"intra_tx_type_set1\": {},\n  \"intra_tx_type_set2\": {}\n}}",
+            j3(&clone3(&self.txb_skip)),
+            j3(&clone3(&self.eob_pt_16)),
+            j3(&clone3(&self.eob_pt_32)),
+            j3(&clone3(&self.eob_pt_64)),
+            j3(&clone3(&self.eob_pt_128)),
+            j3(&clone3(&self.eob_pt_256)),
+            j2(&clone2(&self.eob_pt_512)),
+            j2(&clone2(&self.eob_pt_1024)),
+            j4(&clone4(&self.eob_extra)),
+            j4(&clone4(&self.coeff_base_eob)),
+            j4(&clone4(&self.coeff_base)),
+            j4(&clone4(&self.coeff_br)),
+            j3(&clone3(&self.dc_sign)),
+            j3(&clone3(&self.intra_tx_type_set1)),
+            j3(&clone3(&self.intra_tx_type_set2)),
+        )
+    }
 }
 
 /// A serializable clone of [`TileCdfs`]'s adapted tables, for the independent

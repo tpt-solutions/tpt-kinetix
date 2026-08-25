@@ -919,6 +919,33 @@ pub fn modify_ref_pic_list(
     Ok(())
 }
 
+/// Debug helper (session #31, todo-h264.md): dump a resolved reference
+/// picture list — index, PicNum, frame_num, POC, long/short-term status —
+/// when `KINETIX_BINTRACE` is set. Used to diff our RefPicList0/L1 contents
+/// against ffmpeg's reference selection for the c_p8x8 row-2 investigation.
+pub(crate) fn trace_ref_list(name: &str, list: &[DpbEntry], ctx: PicNumContext) {
+    if !std::env::var("KINETIX_BINTRACE").is_ok() {
+        return;
+    }
+    eprintln!("REFLIST {name} len={}", list.len());
+    for (i, e) in list.iter().enumerate() {
+        let kind = if e.is_long_term {
+            format!("long ltpn={}", e.long_term_pic_num)
+        } else if e.is_short_term {
+            "short".to_string()
+        } else {
+            "non-ref".to_string()
+        };
+        eprintln!(
+            "REFLIST {name}[{i}]: pic_num={} frame_num={} poc={} {kind} has_mv_grid={}",
+            e.pic_num(ctx),
+            e.frame_num,
+            e.pic_order_cnt,
+            e.mv_grid.is_some(),
+        );
+    }
+}
+
 /// Build `RefPicList0` for a P (or SP) slice: initialisation (§8.2.4.2.1)
 /// followed by the modification process (§8.2.4.3).
 ///

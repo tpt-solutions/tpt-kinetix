@@ -79,6 +79,7 @@ pub fn apply_pns(
             };
             if bt != ZERO_HCB && is_noise(bt) {
                 let sf = scalefactor.get(idx).copied().unwrap_or(0);
+
                 // PNS noise energy uses its own baseline: the stored `sf` is
                 // `global_gain - noise_energy_abs` (see
                 // `scalefactors::decode_scalefactors`), so the absolute noise
@@ -227,5 +228,99 @@ mod tests {
         apply_pns(&ics, &bt, &sf, &swb, 100, &gindex, &mut rng, &mut a);
         // No PNS band → no writes.
         assert_eq!(a[0], 1.0);
+    }
+
+    /// ffmpeg's `lcg_random` produces this exact `u32` as its first output from
+    /// the canonical seed `0x1f2e3d4c` (`libavcodec/aac/aacdec_proc_template.c`:
+    /// `previous_val * 1664525u + 1013904223`, computed in `unsigned`). Pinned
+    /// against the reference so the shared PNS generator stays byte-identical.
+    #[test]
+    fn pns_lcg_first_output_matches_ffmpeg() {
+        // ffmpeg: (0x1f2e3d4c * 1664525u + 1013904223) mod 2^32 = 983_586_875,
+        // which as a signed `int` (below 2^31) is still +983_586_875, stored by
+        // ffmpeg as `float cfo[k] = (int)random_state`.
+        assert_eq!(PnsRandom::new().next(), 983_586_875);
+        assert_eq!(PnsRandom::new().next() as i32 as f32, 983_586_875.0);
+    }
+
+    /// Replicates ffmpeg's `decode_spectrum_and_dequant` NOISE_BT path exactly
+    /// and asserts `apply_pns` produces the identical coefficients. This locks
+    /// the three things that must match the reference decoder for PNS noise to
+    /// correlate sample-for-sample:
+    ///   1. the `u32` LCG value is reinterpreted as a *signed* `i32` then stored
+    ///      as `float` (ffmpeg's `cfo[k] = ac->random_state`, `random_state` is
+    ///      `int` in `AACDecContext`);
+    ///   2. the per-band scale is `-2^(noise_energy/4)` (ffmpeg's
+    ///      `dequant_scalefactors` NOISE_BT case: `-pow2sf_tab[noise_energy +
+    ///      POW_SF2_ZERO]` = `-2^(noise_energy/4)`);
+    ///   3. the energy-normalization order (`band_energy = Σ cfo²`, then
+    ///      `cfo *= sf[idx] / sqrt(band_energy)`).
+    #[test]
+    fn pns_matches_ffmpeg_reference_algorithm() {
+        let ics = IcsInfo {
+            window_sequence: WindowSequence::OnlyLong,
+            window_shape: false,
+            max_sfb: 3,
+            scale_factor_grouping: 0,
+            predictor_data_present: false,
+            predictor_reset_mode: None,
+        };
+        // Two PNS bands (NOISE_HCB = 13, matching ffmpeg's NOISE_BT) then a
+        // ZERO band that must be left untouched.
+        let bt = vec![NOISE_HCB, NOISE_HCB, ZERO_HCB];
+        let swb = [0u16, 4, 8, 12];
+        let gindex = [0usize];
+        // global_gain = 200; stored scalefactor `sf` is `global_gain -
+        // noise_energy`, so `noise_energy = global_gain - sf` = 100, 80.
+        let global_gain = 200u8;
+        let sf = vec![100i32, 120i32, 0i32];
+
+        // --- ffmpeg reference replica ---
+        let mut rng_exp = PnsRandom::new();
+        let mut expected = [0.0f32; 1024];
+        for (gi, &gbase) in gindex.iter().enumerate() {
+            let glen = ics.group_len(gi);
+            for sfb in 0..(ics.max_sfb as usize) {
+                let idx = gi * (ics.max_sfb as usize) + sfb;
+                if bt[idx] != NOISE_HCB {
+                    continue;
+                }
+                let ne = global_gain as i32 - sf[idx];
+                let scale = -(2.0f64).powf(0.25 * ne as f64) as f32;
+                let width = (swb[sfb + 1] - swb[sfb]) as usize;
+                for w_idx in 0..glen {
+                    let base = gbase + w_idx * 128 + swb[sfb] as usize;
+                    let mut energy = 0.0f64;
+                    let mut raw = Vec::with_capacity(width);
+                    for _ in 0..width {
+                        let r = rng_exp.next() as i32 as f64;
+                        raw.push(r as f32);
+                        energy += r * r;
+                    }
+                    let norm = scale as f64 / energy.sqrt();
+                    for (line, &rv) in raw.iter().enumerate() {
+                        expected[base + line] = (rv as f64 * norm) as f32;
+                    }
+                }
+            }
+        }
+
+        // --- our implementation (must consume the RNG in the same order) ---
+        let mut actual = [0.0f32; 1024];
+        let mut rng_act = PnsRandom::new();
+        apply_pns(
+            &ics,
+            &bt,
+            &sf,
+            &swb,
+            global_gain,
+            &gindex,
+            &mut rng_act,
+            &mut actual,
+        );
+
+        assert_eq!(expected, actual);
+        // The ZERO band must be untouched.
+        assert_eq!(&actual[8..12], &[0.0f32; 4]);
     }
 }

@@ -669,6 +669,7 @@ impl<'a> TileDecodeState<'a> {
                 bit_offset % 8
             );
         }
+        eprintln!("DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}");
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),
@@ -1044,6 +1045,26 @@ pub fn decode_tile_group(
         meta,
     );
 
+    // Full-tile symbol-trace capture for the independent Part 1 oracle
+    // (`tools/av1_oracle/intra_decode.py`): when `KINETIX_AV1_CAPTURE_TILE` is
+    // set, enable the structured trace and snapshot the *base* (un-adapted) CDF
+    // tables so the oracle can re-decode the whole tile from a known-good start
+    // and localize any desync. See todo-av1.md Phase G.0.
+    let capture_tile = std::env::var("KINETIX_AV1_CAPTURE_TILE").is_ok();
+    if capture_tile {
+        crate::entropy::enable_symbol_trace();
+    }
+    let base_mode_cdfs_json = if capture_tile {
+        state.mode_cdfs.dump_base_json()
+    } else {
+        String::new()
+    };
+    let base_coeff_cdfs_json = if capture_tile {
+        state.coeff_cdfs.dump_base_json()
+    } else {
+        String::new()
+    };
+
     let mut out = Ok(());
     for mi_row in (sb_row_start * sb_mi..sb_row_end * sb_mi).step_by(sb_mi) {
         for mi_col in (sb_col_start * sb_mi..sb_col_end * sb_mi).step_by(sb_mi) {
@@ -1053,6 +1074,80 @@ pub fn decode_tile_group(
             }
         }
     }
+    if capture_tile {
+        capture_tile_trace(
+            data,
+            tile_group_header_bits,
+            qindex,
+            &base_mode_cdfs_json,
+            &base_coeff_cdfs_json,
+        );
+    }
+    out
+}
+
+/// Write `av1_tile_trace.json`: the raw tile entropy payload (from the
+/// tile-group header's end), the base mode/coeff CDF tables as JSON, the full
+/// symbol trace (every `read_symbol`: alphabet size, decoded value, and the
+/// bit position before/after), and the block markers. The Python oracle
+/// replays the tile from a known-good start and compares each symbol against
+/// this trace to localize a desync.
+fn capture_tile_trace(
+    data: &[u8],
+    bit_offset: usize,
+    base_q_idx: u8,
+    base_mode_cdfs_json: &str,
+    base_coeff_cdfs_json: &str,
+) {
+    let data_hex = {
+        let mut s = String::with_capacity(data.len() * 2);
+        for b in data {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    let trace = crate::entropy::take_symbol_trace();
+    let trace_json: Vec<String> = trace
+        .iter()
+        .map(|e| {
+            format!(
+                "[{},{},{},{}]",
+                e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after
+            )
+        })
+        .collect();
+    let markers = crate::entropy::take_block_markers();
+    let markers_json: Vec<String> = markers
+        .iter()
+        .map(|m| format!("{{\"seq\":{},\"label\":{}}}", m.trace_seq, serde_json_str(&m.label)))
+        .collect();
+    let json = format!(
+        "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {sub_bit},\n  \
+         \"base_q_idx\": {base_q_idx},\n  \"mode_cdfs\": {base_mode_cdfs_json},\n  \
+         \"coeff_cdfs\": {base_coeff_cdfs_json},\n  \
+         \"trace\": [{}],\n  \"markers\": [{}]\n}}\n",
+        trace_json.join(","),
+        markers_json.join(","),
+    );
+    let _ = std::fs::write("av1_tile_trace.json", json);
+}
+
+/// Minimal JSON string escaper for the block-marker labels (avoids pulling in
+/// `serde` for this debug-only capture path).
+fn serde_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 

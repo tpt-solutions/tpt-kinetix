@@ -768,3 +768,169 @@ fn short_synthesis(
         state.overlap[nflat_ls + nshort + i] = 0.0;
     }
 }
+
+#[cfg(test)]
+mod synth_tests {
+    use super::*;
+
+    /// Replicates ffmpeg's `imdct_and_windowing` (AAC EIGHT_SHORT path) overlap-add
+    /// arithmetic exactly and asserts our `short_synthesis` matches it: the flat
+    /// 448-sample left/right guard regions are copied from the carried overlap,
+    /// each short window's 256-sample IMDCT tail is windowed with the previous
+    /// and current short windows and summed, and the overlap is advanced for the
+    /// next frame. This locks the short-block synthesis (the path the wideband
+    /// `noise_mono` fixture exercises via its EIGHT_SHORT frames, while the
+    /// passing 440 Hz tone uses OnlyLong) against the reference.
+    #[allow(clippy::needless_range_loop)]
+    #[test]
+    fn short_synthesis_matches_ffmpeg_reference() {
+        let windows = Windows::new();
+        let prev_shape = 1usize;
+        let cur_shape = 0usize;
+        let mut state = ChannelState {
+            overlap: [0.0f32; 1024],
+            prev_shape: prev_shape as u8,
+            init: true,
+        };
+        for i in 0..1024 {
+            state.overlap[i] = (i as f32 - 512.0) * 0.001;
+        }
+        let mut buf = [0.0f32; 2048];
+        for i in 0..2048 {
+            buf[i] = ((i as f32) - 1000.0) * 0.01;
+        }
+
+        let nflat_ls = 448usize;
+        let nshort = 128usize;
+        let trans = 64usize;
+        let nlong = 1024usize;
+        let w_prev = &windows.short[prev_shape];
+        let w_cur = &windows.short[cur_shape];
+
+        let mut out_ours = [0.0f32; 1024];
+        let ov = state.overlap; // snapshot BEFORE the call mutates it
+        short_synthesis(&buf, &mut state, cur_shape, &windows, &mut out_ours);
+
+        // --- ffmpeg reference replica (uses the pre-call overlap snapshot) ---
+        let mut out_exp = [0.0f32; 1024];
+        out_exp[..nflat_ls].copy_from_slice(&ov[..nflat_ls]);
+        for i in 0..nshort {
+            out_exp[nflat_ls + i] = ov[nflat_ls + i] + buf[i] * w_prev[i];
+            out_exp[nflat_ls + nshort + i] = ov[nflat_ls + nshort + i]
+                + buf[nshort + i] * w_cur[nshort - 1 - i]
+                + buf[2 * nshort + i] * w_cur[i];
+            out_exp[nflat_ls + 2 * nshort + i] = ov[nflat_ls + 2 * nshort + i]
+                + buf[3 * nshort + i] * w_cur[nshort - 1 - i]
+                + buf[4 * nshort + i] * w_cur[i];
+            out_exp[nflat_ls + 3 * nshort + i] = ov[nflat_ls + 3 * nshort + i]
+                + buf[5 * nshort + i] * w_cur[nshort - 1 - i]
+                + buf[6 * nshort + i] * w_cur[i];
+            if i < trans {
+                out_exp[nflat_ls + 4 * nshort + i] = ov[nflat_ls + 4 * nshort + i]
+                    + buf[7 * nshort + i] * w_cur[nshort - 1 - i]
+                    + buf[8 * nshort + i] * w_cur[i];
+            }
+        }
+        let mut ov_exp = [0.0f32; 1024];
+        for i in 0..nshort {
+            if i >= trans {
+                ov_exp[nflat_ls + 4 * nshort + i - nlong] =
+                    buf[7 * nshort + i] * w_cur[nshort - 1 - i] + buf[8 * nshort + i] * w_cur[i];
+            }
+            ov_exp[nflat_ls + 5 * nshort + i - nlong] =
+                buf[9 * nshort + i] * w_cur[nshort - 1 - i] + buf[10 * nshort + i] * w_cur[i];
+            ov_exp[nflat_ls + 6 * nshort + i - nlong] =
+                buf[11 * nshort + i] * w_cur[nshort - 1 - i] + buf[12 * nshort + i] * w_cur[i];
+            ov_exp[nflat_ls + 7 * nshort + i - nlong] =
+                buf[13 * nshort + i] * w_cur[nshort - 1 - i] + buf[14 * nshort + i] * w_cur[i];
+            ov_exp[nflat_ls + 8 * nshort + i - nlong] =
+                buf[15 * nshort + i] * w_cur[nshort - 1 - i];
+        }
+        for i in 0..nflat_ls {
+            ov_exp[nflat_ls + nshort + i] = 0.0;
+        }
+
+        for i in 0..1024 {
+            assert!(
+                (out_ours[i] - out_exp[i]).abs() < 1e-3,
+                "out[{}]: ours={} exp={}",
+                i,
+                out_ours[i],
+                out_exp[i]
+            );
+        }
+        for i in 0..1024 {
+            assert!(
+                (state.overlap[i] - ov_exp[i]).abs() < 1e-3,
+                "overlap[{}]: ours={} exp={}",
+                i,
+                state.overlap[i],
+                ov_exp[i]
+            );
+        }
+    }
+
+    /// Replicates ffmpeg's `imdct_and_windowing` OnlyLong overlap-add and asserts
+    /// our `long_synthesis` matches it.
+    #[allow(clippy::needless_range_loop)]
+    #[test]
+    fn long_synthesis_matches_ffmpeg_reference() {
+        let windows = Windows::new();
+        let prev_shape = 1usize;
+        let cur_shape = 0usize;
+        let mut state = ChannelState {
+            overlap: [0.0f32; 1024],
+            prev_shape: prev_shape as u8,
+            init: true,
+        };
+        for i in 0..1024 {
+            state.overlap[i] = (i as f32 - 512.0) * 0.001;
+        }
+        let mut buf = [0.0f32; 2048];
+        for i in 0..2048 {
+            buf[i] = ((i as f32) - 1000.0) * 0.01;
+        }
+        let nlong = 1024usize;
+
+        let mut out_ours = [0.0f32; 1024];
+        let ov = state.overlap; // snapshot BEFORE the call mutates it
+        long_synthesis(
+            &buf,
+            &mut state,
+            WindowSequence::OnlyLong,
+            cur_shape,
+            &windows,
+            &mut out_ours,
+        );
+
+        let w_prev_long = &windows.long[prev_shape];
+        let w_cur_long = &windows.long[cur_shape];
+        let mut out_exp = [0.0f32; 1024];
+        for i in 0..nlong {
+            out_exp[i] = ov[i] + buf[i] * w_prev_long[i];
+        }
+        let mut ov_exp = [0.0f32; 1024];
+        for i in 0..nlong {
+            ov_exp[i] = buf[nlong + i] * w_cur_long[nlong - 1 - i];
+        }
+
+        for i in 0..1024 {
+            assert!(
+                (out_ours[i] - out_exp[i]).abs() < 1e-3,
+                "out[{}]: ours={} exp={}",
+                i,
+                out_ours[i],
+                out_exp[i]
+            );
+        }
+        for i in 0..1024 {
+            assert!(
+                (state.overlap[i] - ov_exp[i]).abs() < 1e-3,
+                "overlap[{}]: ours={} exp={}",
+                i,
+                state.overlap[i],
+                ov_exp[i]
+            );
+        }
+    }
+}

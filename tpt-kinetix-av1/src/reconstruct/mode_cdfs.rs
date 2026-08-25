@@ -1,5 +1,21 @@
 use super::*;
 
+// Compact JSON helpers for the independent-oracle base-table export
+// (debug-only capture path; no `serde` dependency). Const-generic over the
+// innermost array width(s) so each fixed-size CDF field serializes directly.
+fn j1<const N: usize>(v: &[u16; N]) -> String {
+    let inner: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+    format!("[{}]", inner.join(","))
+}
+fn j2<const N: usize>(v: &[[u16; N]]) -> String {
+    let rows: Vec<String> = v.iter().map(|r| j1(r)).collect();
+    format!("[{}]", rows.join(","))
+}
+fn j3<const N: usize, const M: usize>(v: &[[[u16; N]; M]]) -> String {
+    let rows: Vec<String> = v.iter().map(|m| j2(m)).collect();
+    format!("[{}]", rows.join(","))
+}
+
 /// Default CDF state for the non-coefficient syntax elements (partition,
 /// intra modes, transform size, skip, angle delta, interpolation filter).
 /// Initialised from the exact spec default tables in `cdf_tables_gen`.
@@ -631,5 +647,77 @@ impl ModeCdfs {
             Some(i) => dec.read_symbol(&mut self.delta_lf_multi[i]),
             None => dec.read_symbol(&mut self.delta_lf),
         }
+    }
+
+    /// Serialize the base (un-adapted) mode CDF tables to JSON for the
+    /// independent Python oracle (`tools/av1_oracle/intra_decode.py`). Dumping
+    /// the tables straight from Rust (rather than re-transcribing them into
+    /// Python) guarantees the oracle starts from the exact same probabilities
+    /// as this decoder, so any divergence it reports is a real read-order /
+    /// context-derivation bug, not a table-transcription mismatch.
+    pub(super) fn dump_base_json(&self) -> String {
+        format!(
+            "{{\n  \
+             \"partition_w8\": {},\n  \"partition_w16\": {},\n  \"partition_w32\": {},\n  \
+             \"partition_w64\": {},\n  \"partition_w128\": {},\n  \
+             \"intra_y_mode\": {},\n  \"uv_mode_not_allowed\": {},\n  \"uv_mode_allowed\": {},\n  \
+             \"tx_8x8\": {},\n  \"tx_16x16\": {},\n  \"tx_32x32\": {},\n  \"tx_64x64\": {},\n  \
+             \"txfm_split\": {},\n  \"skip\": {},\n  \"segment_id\": {},\n  \
+             \"delta_q\": {},\n  \"delta_lf\": {},\n  \"delta_lf_multi\": {},\n  \
+             \"angle_delta\": {},\n  \"interp_filter\": {},\n  \
+             \"filter_intra\": {},\n  \"filter_intra_mode\": {},\n  \
+             \"cfl_sign\": {},\n  \"cfl_alpha\": {},\n  \
+             \"palette_y_mode\": {},\n  \"palette_uv_mode\": {},\n  \
+             \"palette_y_size\": {},\n  \"palette_uv_size\": {},\n  \
+             \"palette_y_color_2\": {},\n  \"palette_y_color_3\": {},\n  \
+             \"palette_y_color_4\": {},\n  \"palette_y_color_5\": {},\n  \
+             \"palette_y_color_6\": {},\n  \"palette_y_color_7\": {},\n  \
+             \"palette_y_color_8\": {},\n  \"palette_uv_color_2\": {},\n  \
+             \"palette_uv_color_3\": {},\n  \"palette_uv_color_4\": {},\n  \
+             \"palette_uv_color_5\": {},\n  \"palette_uv_color_6\": {},\n  \
+             \"palette_uv_color_7\": {},\n  \"palette_uv_color_8\": {}\n}}",
+            j2(&self.partition_w8),
+            j2(&self.partition_w16),
+            j2(&self.partition_w32),
+            j2(&self.partition_w64),
+            j2(&self.partition_w128),
+            j3(&self.intra_y_mode),
+            j2(&self.uv_mode_not_allowed),
+            j2(&self.uv_mode_allowed),
+            j2(&self.tx_8x8),
+            j2(&self.tx_16x16),
+            j2(&self.tx_32x32),
+            j2(&self.tx_64x64),
+            j2(&self.txfm_split),
+            j2(&self.skip),
+            j2(&self.segment_id),
+            j1(&self.delta_q),
+            j1(&self.delta_lf),
+            j2(&self.delta_lf_multi),
+            j2(&self.angle_delta),
+            j2(&self.interp_filter),
+            j2(&self.filter_intra),
+            j1(&self.filter_intra_mode),
+            j1(&self.cfl_sign),
+            j2(&self.cfl_alpha),
+            j3(&self.palette_y_mode),
+            j2(&self.palette_uv_mode),
+            j2(&self.palette_y_size),
+            j2(&self.palette_uv_size),
+            j2(&self.palette_y_color_2),
+            j2(&self.palette_y_color_3),
+            j2(&self.palette_y_color_4),
+            j2(&self.palette_y_color_5),
+            j2(&self.palette_y_color_6),
+            j2(&self.palette_y_color_7),
+            j2(&self.palette_y_color_8),
+            j2(&self.palette_uv_color_2),
+            j2(&self.palette_uv_color_3),
+            j2(&self.palette_uv_color_4),
+            j2(&self.palette_uv_color_5),
+            j2(&self.palette_uv_color_6),
+            j2(&self.palette_uv_color_7),
+            j2(&self.palette_uv_color_8),
+        )
     }
 }

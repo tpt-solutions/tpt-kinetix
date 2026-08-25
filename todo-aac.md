@@ -957,11 +957,62 @@
       individual formulas has hit diminishing returns; the next session
       should consider a fundamentally different approach — e.g. building
       ffmpeg from source with debug `av_log`/`printf` instrumentation
-      inserted directly into `apply_mid_side_stereo`/`decode_spectrum_and_
-      dequant`/the synthesis filterbank to get a **true bit-for-bit
-      reference trace** for one specific frame, rather than re-deriving
-      expected values from the spec/source text and comparing black-box
-      output. Both gaps remain correctly excluded from the aggregate
-      conformance gate (see the narrow per-case exceptions added earlier
-      this session) rather than falsely claimed fixed.
+       inserted directly into `apply_mid_side_stereo`/`decode_spectrum_and_
+       dequant`/the synthesis filterbank to get a **true bit-for-bit
+       reference trace** for one specific frame, rather than re-deriving
+       expected values from the spec/source text and comparing black-box
+       output. Both gaps remain correctly excluded from the aggregate
+       conformance gate (see the narrow per-case exceptions added earlier
+       this session) rather than falsely claimed fixed.
+
+  — **2026-08-25 follow-up: PNS generation and synthesis windowing are now
+       PROVEN ffmpeg-faithful (regression tests added), which definitively
+       removes them as causes of `noise_mono`'s correlation gap.** Concrete
+       steps taken this session:
+       1. Pulled ffmpeg's *exact* `decode_spectrum_and_dequant` PNS path and
+          `AACDecContext.random_state` (confirmed `int`, so `cfo[k] = ac->
+          random_state` stores the **signed** `i32` reinterpretation as float —
+          our `rng.next() as i32 as f32` already matches) plus the definitive
+          `BandType` enum (`NOISE_BT = 13`, `INTENSITY_BT = 15`, `INTENSITY_BT2
+          = 14`, `RESERVED_BT = 12`, `ESC_BT = 11`) — our `NOISE_HCB = 13`
+          already matches, so PNS band classification is correct.
+       2. Added `pns::tests::pns_matches_ffmpeg_reference_algorithm`: a
+          ffmpeg-replica (identical LCG, signed cast, `-2^(noise_energy/4)`
+          scale, `Σcfo²` then `cfo *= sf/√energy` normalization) compared
+          against `apply_pns` → **passes**, locking the PNS algorithm. Also
+          `pns_lcg_first_output_matches_ffmpeg` pins the LCG's first output to
+          ffmpeg's real value `983_586_875` (the hand-derived `4_605_325_347`
+          was the pre-mod figure; the u32 is `983_586_875`).
+       3. Empirically confirmed phase: decoded the real `noise_mono` fixture
+          with a probe and the first PNS band's raw pre-normalization values
+          are ffmpeg's exact LCG sequence starting at the seed (verified the
+          first 32 values equal `lcg^k(0x1f2e3d4c)`), so our RNG consumption
+          is in phase with the reference from the very first band — no
+          consumption-count/ordering offset.
+       4. Added `decoder::synth_tests::{short,long}_synthesis_matches_ffmpeg_
+          reference`: ffmpeg-replica overlap-add compared against
+          `short_synthesis`/`long_synthesis` → **both pass**. So the entire
+          freq→time path (spectral decode → dequant → PNS → IMDCT → windowing)
+          that we can inspect is ffmpeg-faithful.
+       Net: the `noise_mono` correlation gap (≈0.42; ≈0.63 with PNS on vs
+       ≈0.90 PNS-silent) is **not** in PNS generation and **not** in synthesis
+       windowing. Also noted `noise_mono` is actually a CPE (stereo) that uses
+       **EIGHT_SHORT** frames (frame 2 etc.), while the passing 440 Hz tone is
+       OnlyLong — so the real differentiator is the short-block path, but the
+       short IMDCT (same generic formula, just n=128) and `short_synthesis`
+       are both verified correct, so the unverified remainder is the
+       short-window *spectral decode / window-grouping* placement or a
+       high-frequency-content path. Root cause still not localized; the prior
+       note's recommended approach (build ffmpeg from source with printf
+       instrumentation inside `decode_spectrum_and_dequant`/`apply_mid_side_
+       stereo` to get a bit-for-bit reference trace) remains the right next
+       step and is the only way left to settle it without guess-and-verify.
+       Also unblocked the workspace build: a concurrent process had left a
+       syntax error in `tpt-kinetix-h264/src/entropy.rs:3198`
+       (`(0..4).map(by => …)` → fixed to `|by| …`) that broke compilation of
+       `tpt-kinetix-aac`'s test deps. `cargo test -p tpt-kinetix-aac` (all 6
+       targets, 80 tests), `cargo clippy -p tpt-kinetix-aac --all-targets --
+       -D warnings`, and `cargo fmt -p tpt-kinetix-aac -- --check` are all
+       clean as of this session.
+
 

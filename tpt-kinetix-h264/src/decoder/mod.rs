@@ -906,6 +906,7 @@ impl H264Decoder {
                 pic_num_ctx,
                 &header.ref_pic_list_modification_l0,
             ) {
+                crate::ref_pic::trace_ref_list("P L0", &ref_list, pic_num_ctx);
                 let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> =
                     ref_list.iter().map(|e| e.frame.clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
@@ -923,6 +924,17 @@ impl H264Decoder {
                         .map(|b| format!("{b:02X}"))
                         .collect();
                     eprintln!("P-CABAC bytes[{}]: {}", cabac_data.len(), preview.join(" "));
+                    if let Ok(path) = std::env::var("KINETIX_DUMP_P_PATH") {
+                        let _ = std::fs::write(&path, cabac_data);
+                        let meta = format!(
+                            "qp={slice_qp} idc={} nl0={num_ref_idx_l0_active} t8={}",
+                            header.cabac_init_idc,
+                            pps.as_ref()
+                                .map(|p| p.transform_8x8_mode_flag)
+                                .unwrap_or(false),
+                        );
+                        let _ = std::fs::write(format!("{path}.meta"), meta);
+                    }
                     crate::slice_data::parse_p_slice_cabac(
                         cabac_data,
                         mb_cols,
@@ -1139,6 +1151,9 @@ impl H264Decoder {
                 pic_num_ctx,
                 &header.ref_pic_list_modification_l1,
             );
+
+            crate::ref_pic::trace_ref_list("B L0", l0_list.as_deref().unwrap_or(&[]), pic_num_ctx);
+            crate::ref_pic::trace_ref_list("B L1", l1_list.as_deref().unwrap_or(&[]), pic_num_ctx);
 
             if let (Some(ref_l0), Some(ref_l1)) = (l0_list, l1_list) {
                 let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> =
