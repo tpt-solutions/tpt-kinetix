@@ -370,31 +370,23 @@ fn native_aac_matches_ffmpeg_reference() {
             case.label
         );
 
-        // Both PNS-exercising cases are a known, deeply-investigated open gap
-        // — see `todo-aac.md`'s 2026-08-24 session notes. Every other lead
-        // was ruled out with hard evidence (byte-exact SWB tables vs ffmpeg,
-        // TNS confirmed inactive, the LCG seed/recurrence/signed-cast/
-        // consumption-order all matching ffmpeg's source line-for-line)
-        // before landing here: disabling PNS entirely on the white-noise
-        // fixture actually *improves* correlation (0.63 -> 0.90), meaning the
-        // rest of the decode pipeline (regular Huffman spectral decode,
-        // IMDCT, windowing) is solid and the gap is narrowly confined to the
-        // exact per-line PNS pseudo-random values not landing in lockstep
-        // with ffmpeg's. `noise_mono_44100` (broadband white noise, heavy
-        // PNS use) shows this severely (correlation ~0.5); `noise_stereo_44100`
-        // (brown noise, much lighter PNS use since most of its energy sits
-        // in low bands coded by regular Huffman) shows the same underlying
-        // gap far more mildly — correlation stays high (~0.99) but one
-        // worst-case sample still exceeds the tone-calibrated 0.05 max-diff
-        // tolerance, consistent with a small amount of PNS-driven energy
-        // being present rather than a separate bug. Kept out of the
-        // aggregate gate (below) so it doesn't mask regressions in the other
-        // five (all genuinely tonal, PNS-free) cases — but still asserted
-        // against catastrophic regression, so a future desync elsewhere
-        // can't silently make either of these worse unnoticed.
+        // `noise_mono_44100` (broadband white noise, heavy PNS use, EIGHT_SHORT
+        // frames) remains an open gap despite extensive investigation — see
+        // `todo-aac.md` 2026-08-24/25 session notes. The PNS algorithm itself
+        // (LCG, signed cast, energy normalization) is verified ffmpeg-faithful
+        // by `pns::tests::pns_matches_ffmpeg_reference_algorithm`; synthesis
+        // windowing is verified by `short_synthesis_matches_ffmpeg_reference`;
+        // the LCG phase is confirmed in-sync from the very first band. Disabling
+        // PNS entirely improves correlation (~0.63 PNS-on → ~0.90 PNS-silent),
+        // meaning PNS realizations are actively decorrelating against ffmpeg's
+        // specific pseudo-random sequence while contributing the right energy.
+        // The root cause — why our PNS values don't land in lock-step with
+        // ffmpeg's despite the verified-correct algorithm — has not been
+        // isolated without a bit-for-bit ffmpeg reference trace. Kept out of
+        // the aggregate gate below; pinned to a regression floor.
         if case.label == "noise_mono_44100" {
             assert!(
-                corr > 0.35,
+                corr > 0.40,
                 "[{}] regressed well below its known baseline correlation \
                  (~0.51-0.52): {corr:.4}. This case is a documented open gap, \
                  not a hard pass/fail gate, but this is a much bigger drop \
@@ -403,20 +395,28 @@ fn native_aac_matches_ffmpeg_reference() {
             );
             continue;
         }
+        // `noise_stereo_44100` (brown noise, lighter PNS use) shows the same
+        // PNS gap far more mildly: correlation ~0.994 (well within the shape
+        // gate) but one worst-case sample at ~0.058 max-diff, just above the
+        // 0.05 main tolerance. Brown noise concentrates energy in low-frequency
+        // bands that are Huffman-coded rather than PNS-substituted, so PNS
+        // affects only a small fraction of the total energy. The assumption
+        // that the single outlier sample stems from the same PNS root cause
+        // as `noise_mono_44100` above is unverified but plausible.
         if case.label == "noise_stereo_44100" {
             assert!(
-                corr > 0.9,
+                corr > 0.97,
                 "[{}] regressed well below its known baseline correlation \
-                 (~0.989): {corr:.4}. This case is a documented open gap (see \
+                 (~0.994): {corr:.4}. This case is a documented open gap (see \
                  the `noise_mono_44100` comment above), not a hard pass/fail \
                  gate, but this is a much bigger drop than the known issue — \
                  investigate as a real regression.",
                 case.label
             );
             assert!(
-                max_diff < 0.2,
+                max_diff < 0.12,
                 "[{}] regressed well below its known baseline max-diff \
-                 (~0.089-0.098): {max_diff}. Documented open gap, not a hard \
+                 (~0.058): {max_diff}. Documented open gap, not a hard \
                  gate, but this jump is bigger than the known issue — \
                  investigate as a real regression.",
                 case.label
@@ -424,31 +424,32 @@ fn native_aac_matches_ffmpeg_reference() {
             continue;
         }
 
-        // `sweep_stereo_44100` (a 200->4000 Hz linear chirp near full scale,
-        // ~0.71 peak) is a second, separate, newly-surfaced gap: shape
-        // correlation is excellent and stable throughout the whole file
-        // (0.99+ in every 1024-sample window, no growing-error trend as
-        // frequency rises — ruling out a sub-sample/phase-alignment
-        // measurement artifact from the chirp itself), window-sequence
-        // transitions (LongStart/EightShort/LongStop, checked via
-        // `AAC_DBG_WS`) and TNS (confirmed inactive on every frame of this
-        // content) are both ruled out as the cause, yet one single worst-case
-        // sample sits at ~0.169 absolute diff on a ~0.71-peak signal. That
-        // profile — near-perfect correlation but one large point-wise
-        // outlier — is consistent with a localized issue (e.g. M/S stereo
-        // reconstruction or dequant rounding) specific to near-full-scale
-        // peaks rather than a systemic decode bug, but this has not been
-        // root-caused and deserves its own investigation later; not
-        // conflating it with the unrelated PNS gap above.
+        // `sweep_stereo_44100` (a 200→4000 Hz linear chirp, ~0.71-peak stereo)
+        // now has near-perfect shape correlation (1.0000) after the 2026-08-25
+        // `prev_shape` fix (the production decode path was not updating
+        // `ChannelState::prev_shape` after synthesis, so every frame beyond the
+        // first used the wrong synthesis window). One outlier sample at aligned
+        // index ~7438 (frame 7, OnlyLong, no TNS, no pulse, no PNS) still sits
+        // at ~0.073 absolute diff against a ~0.71-peak signal — above the main
+        // 0.05 tolerance. The prior hypothesis (M/S butterfly ran unconditionally
+        // on PNS/intensity bands — fixed 2026-08-24) was confirmed NOT to be the
+        // cause (the specific combination of mask-bit + NOISE_BT doesn't occur
+        // in this fixture). The ESC-book codeword table, `idx_to_values` formula,
+        // escape-word format, and `dequant_scale` are all exhaustively verified
+        // against ffmpeg's live source; the leading unresolved suspects are the
+        // window multiplication for large coefficients and the ms_mask ordering
+        // (both previously ruled out for the wrong reasons — see todo-aac.md
+        // 2026-08-24 fourth/fifth follow-up). Kept out of the aggregate gate;
+        // pinned to tight regression floors that match the current baseline.
         if case.label == "sweep_stereo_44100" {
             assert!(
-                corr > 0.95,
-                "[{}] shape correlation regressed: {corr:.4} (was ~0.994)",
+                corr > 0.98,
+                "[{}] shape correlation regressed: {corr:.4} (was ~1.0000)",
                 case.label
             );
             assert!(
-                max_diff < 0.3,
-                "[{}] regressed well below its known baseline max-diff (~0.169): \
+                max_diff < 0.15,
+                "[{}] regressed well below its known baseline max-diff (~0.073): \
                  {max_diff}. This case is a documented open gap (see this test's \
                  comment), not a hard pass/fail gate, but this is a much bigger \
                  jump than the known issue — investigate as a real regression.",

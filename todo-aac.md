@@ -1016,3 +1016,44 @@
        clean as of this session.
 
 
+
+  — **2026-08-25 afternoon: `prev_shape` was NEVER updated in the production
+       decode path — root cause of all remaining tonal accuracy gaps.**
+       The `synthesize()` function (marked `#[allow(dead_code)]`) correctly
+       did `state.prev_shape = ws as u8` after each synthesis call, but the
+       real production decode loop (`for (ch_idx, ch) in ...` in
+       `tpt-kinetix-aac/src/decoder.rs`) called `short_synthesis` and
+       `long_synthesis` directly without updating `self.channels[ch_idx].
+       prev_shape` afterwards. This meant every frame beyond frame 0 used
+       whatever `prev_shape` was initialized to (0 = sine window) for the
+       "tail" half of the previous frame's IMDCT output, even when the actual
+       previous frame used `window_shape=1` (KBD). Fix: added
+       `self.channels[ch_idx].prev_shape = ch.ics.window_shape as u8;`
+       after both `short_synthesis` and `long_synthesis` call sites.
+       
+       **Results after fix (2026-08-25, commit b3e8f59):**
+       - `tone_440_mono_44100`:   max_diff ~0.0003 → passes main gate (< 0.05)
+       - `tone_1k_stereo_44100`:  max_diff ~0.0002 → passes main gate
+       - `tone_multi_44100`:      max_diff ~0.0001 → passes main gate
+       - `tone_440_stereo_44100`: max_diff ~0.0002 → passes main gate
+       - `noise_stereo_44100`:    max_diff ~0.058, corr ~0.994 (improved from
+                                  ~0.089/0.989; still above 0.05 main gate)
+       - `sweep_stereo_44100`:    max_diff ~0.073, corr 1.0000 (improved from
+                                  ~0.169/0.994; still above 0.05 main gate)
+       - `noise_mono_44100`:      max_diff ~1.87, corr ~0.52 (unchanged — PNS
+                                  gap, different root cause)
+       
+       All 80+ AAC conformance tests pass. Gate comments and regression
+       floor values updated in `conformance_aac.rs` to match new baselines.
+       
+       Remaining open gaps (as of 2026-08-25):
+       1. `noise_mono_44100` (corr ~0.52): PNS realization mismatch in
+          EIGHT_SHORT frames. All independently verifiable components are
+          proven ffmpeg-faithful (LCG, normalization, IMDCT, windowing). Only
+          next step is ffmpeg printf instrumentation for a bit-for-bit trace.
+       2. `noise_stereo_44100` (max_diff ~0.058): Same suspected root cause
+          as noise_mono; much lighter PNS use so smaller impact.
+       3. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier.
+          Correlation is perfect (1.0000). All checked paths ruled out (M/S
+          butterfly, ESC dequant, escape codeword parsing). Suspects still
+          open: window multiplication for large coefficients, ms_mask ordering.
