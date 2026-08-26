@@ -84,6 +84,15 @@ impl From<MvCell> for MvNeighbor {
 pub struct MvStore {
     mbs: Vec<Option<[MvCell; 16]>>,
     slice_ids: Vec<u32>,
+    /// `mb_field_decoding_flag` of each committed macroblock (MBAFF). Used by
+    /// [`Self::fix_mv_mbaff`] to translate neighbours into the current MB's
+    /// units.
+    mb_field: Vec<bool>,
+    /// Field convention of the macroblock currently being predicted
+    /// (interior-mutability scratch so neighbour fetches can convert without
+    /// threading a parameter through every helper; the parse is
+    /// single-threaded).
+    cur_field: std::cell::Cell<bool>,
 }
 
 impl MvStore {
@@ -92,6 +101,8 @@ impl MvStore {
         Self {
             mbs: vec![None; total_mbs],
             slice_ids: vec![0; total_mbs],
+            mb_field: vec![false; total_mbs],
+            cur_field: std::cell::Cell::new(false),
         }
     }
 
@@ -99,6 +110,24 @@ impl MvStore {
     pub(crate) fn commit(&mut self, mb_idx: usize, cells: [MvCell; 16], slice_id: u32) {
         self.mbs[mb_idx] = Some(cells);
         self.slice_ids[mb_idx] = slice_id;
+    }
+
+    /// Record `mb_field_decoding_flag` of `mb_idx` (MBAFF frames only).
+    pub(crate) fn set_mb_field(&mut self, mb_idx: usize, field: bool) {
+        if let Some(f) = self.mb_field.get_mut(mb_idx) {
+            *f = field;
+        }
+    }
+
+    /// The stored flag (false for frame-coded / PAFF macroblocks).
+    fn mb_field_of(&self, mb_idx: usize) -> bool {
+        self.mb_field.get(mb_idx).copied().unwrap_or(false)
+    }
+
+    /// Declare the field convention of the macroblock about to be predicted;
+    /// subsequent neighbour fetches convert candidates into its units.
+    pub(crate) fn set_cur_field(&self, field: bool) {
+        self.cur_field.set(field);
     }
 
     /// The 16-block grid of `mb_idx`, if it has been decoded.
@@ -123,16 +152,44 @@ impl MvStore {
     }
 
     fn cell(&self, mb_idx: usize, blk: usize) -> MvNeighbor {
-        self.mbs[mb_idx].expect("available MB")[blk].into()
+        let n: MvNeighbor = self.mbs[mb_idx].expect("available MB")[blk].into();
+        Self::fix_mv_mbaff(n, self.mb_field_of(mb_idx), self.cur_field.get())
+    }
+
+    /// Apply FFmpeg's `FIX_MV_MBAFF` conversion (h264_mvpred_ref.h @n5.1 lines
+    /// 237-254): translate a neighbour's `(ref_idx, mv)` from its own coding
+    /// convention into the current macroblock's.
+    ///
+    /// * Current MB **field**-coded, neighbour **frame**-coded: reference
+    ///   indices expand to per-field entries (`refn <<= 1`) and the vertical
+    ///   MV component converts from frame-line to field-line quarters
+    ///   (`y /= 2`, C truncation).
+    /// * Current MB frame-coded, neighbour interlaced: the inverse
+    ///   (`refn >>= 1`, `y *= 2`).
+    ///
+    /// Same-convention neighbours are returned unchanged.
+    fn fix_mv_mbaff(mut n: MvNeighbor, nb_field: bool, cur_field: bool) -> MvNeighbor {
+        if nb_field == cur_field {
+            return n;
+        }
+        if cur_field && !nb_field {
+            n.ref_idx <<= 1;
+            n.mv[1] /= 2;
+        } else {
+            n.ref_idx >>= 1;
+            n.mv[1] *= 2;
+        }
+        n
     }
 
     /// Extract the L1 fields of a committed cell as a neighbour.
     fn cell_l1(&self, mb_idx: usize, blk: usize) -> MvNeighbor {
         let c = self.mbs[mb_idx].expect("available MB")[blk];
-        MvNeighbor {
+        let n = MvNeighbor {
             mv: c.mv_l1,
             ref_idx: c.ref_idx_l1,
-        }
+        };
+        Self::fix_mv_mbaff(n, self.mb_field_of(mb_idx), self.cur_field.get())
     }
 }
 
@@ -887,6 +944,11 @@ pub(crate) fn predict_slice_mvs(
     let mut cur = [MvCell::INTRA; 16];
     for (i, mb) in mbs.iter().enumerate() {
         let mb_idx = first_mb as usize + i;
+        // MBAFF: record this MB's field convention so later neighbours are
+        // FIX_MV_MBAFF-converted when their own convention differs, and
+        // declare it for THIS MB's own neighbour fetches.
+        store.set_mb_field(mb_idx, mb.mb_field_flag);
+        store.set_cur_field(mb.mb_field_flag);
         if mb.motion.is_some() || mb.skip {
             predict_inter_macroblock(store, &mut cur, mb_idx, mb_cols as usize, slice_id, mb)?;
         } else {

@@ -72,6 +72,8 @@ fn main() {
             num_ref_idx,
             chroma_qp_index_offset,
             false,
+            false,
+            false,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         )
         .unwrap();

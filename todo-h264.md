@@ -2,7 +2,213 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32g (2026-08-26) — MBAFF FIELD DEBLOCKING PRIMITIVES LANDED
+
+1. **`DeblockMbInfo` gained a `field: bool` flag** (`new_field()` constructor;
+   frame-convention callers via `new()` are unchanged). It selects the
+   §8.7.2.1 motion-rule y-threshold: field-coded MBs flag a boundary at
+   |Δmv_y| >= **2** quarter-samples instead of 4 (ffmpeg's
+   `mvy_limit = IS_INTERLACED(mb_type) ? 2 : 4`). `derive_bs_pair`/
+   `derive_bs_segments` now take an explicit `mvy_limit`; all existing call
+   sites pass `mvy_limit(cur.field)` so plain-frame behavior is bit-identical.
+2. **Mixed-interlace first VERTICAL edge** (`first_vertical_edge_bs` +
+   `deblock_first_vertical_edge_mcaff`): mechanical port of ffmpeg
+   `ff_h264_filter_mb`'s FRAME_MBAFF block (h264_loopfilter.c @master).
+   bS[8]: current intra → all 4; neighbour intra → 4; else
+   `1 + !!(cur.nz[(i>>1)*4] | left.nz[off[i]])` with ffmpeg's offset tables
+   (`MBAFF_FIRST_EDGE_OFFSET_{FRAME_TOP,FRAME_BOTTOM,FIELD}`) and j-mapping
+   (`i&1` when cur frame-coded, `i>>2` when field-coded). NO MV rule here —
+   ffmpeg derives these from coefficients only. Filtering reproduces the
+   two-call geometry (`filter_mbaff_call`: group-of-2 rows per bS, step-2 for
+   the frame-cur case; parity-band addressing derived for the field-cur case
+   from ffmpeg's band-start + doubled-stride + bottom-member `-= linesize*15`
+   convention). ffmpeg's "strong iff `bS[0] < 4` fails, decided once per
+   call" quirk is preserved deliberately.
+3. **Fieldcoded-above pair-top boundary** (`fieldcoded_above_boundary_bs` +
+   `deblock_fieldcoded_above_boundary_mcaff`): port of `filter_mb_dir`'s
+   "filter twice, once per field" special case. bS is either-side-intra →
+   **3, not 4** (ffmpeg passes `intra=0`, keeping the edge on the weak path);
+   else `1 + !!(cur.nz[i] | above.nz[12+i])`. Applied once per above-pair
+   member (ffmpeg's `j` loop); luma spans 16 every-other-row positions over
+   the full 32-row band, chroma 8 over the chroma band.
+9 new unit tests (mvy-limit halving incl. x-threshold NOT halved, both bS
+   derivation tables against hand-derived ffmpeg values, parity-isolation +
+   group-of-2 geometry of `filter_mbaff_call`). 242 lib tests green,
+   clippy `-D warnings` clean, fmt clean.
+
+REMAINING for this item (next session): build the full-frame MBAFF deblock
+orchestrator (`deblock_frame_mbaff`) that walks MB pairs in raster order,
+invokes the mixed-edge special case (marking `first_vertical_edge_done`),
+applies the field-aware boundary rules (`either-intra → 4 unless dir==1 and
+a side is field-coded → 3`; forced bS=1 without MV check when
+`dir==1 && IS_INTERLACED(cur ^ top)`), then wires it into the decoder behind
+the existing `KINETIX_MBAFF_FIELD_MC=1` gate. Reference sources saved at repo
+root during analysis: `ffmpeg_h264_loopfilter_ref.c`,
+`ffmpeg_h264dsp_ref.c`, `ffmpeg_h264_slice_ref.c` (see `loop_filter()` there
+for how ffmpeg addresses field members: dest always points at the band start).
+
+## SESSION #32f (2026-08-26) — CAVLC MBAFF I-slice: pair-addressing bug fixed; I frame now PIXEL-EXACT
+
+> Harness: existing `tests/dbg_g5_interlaced.rs` corpus (`mbaff_cavlc_ip`,
+> 64×64, cabac=0, interlaced=1, threads=1). New env-gated
+> `CAVLC-TRC` per-MB trace lines in `parse_i_slice` (same convention as the
+> CABAC `TRC`/`BIN` traces, `KINETIX_BINTRACE=1`).
+
+1. **BUG FIXED — CAVLC MBAFF pair addressing** (`slice_data/cavlc.rs`):
+   `parse_i_slice` iterated macroblocks in PLAIN RASTER order
+   (`mb_x = idx % mb_cols`, `mb_y = idx / mb_cols`) while an MBAFF frame's
+   macroblock addresses enumerate each PAIR as (top, bottom) before advancing
+   horizontally (§6.4.2 — addr 2k/2k+1 are the two MBs of pair k at frame-MB
+   rows `2p`/`2p+1`). Every bottom MB therefore derived its neighbour contexts
+   (`nC` for coeff_token, Intra_4x4 MPM left/top availability) from the WRONG
+   grid slots; the parse drifted and died at MB6 with
+   "non-intra mb_type in I-slice" (mb_type=79 garbage). This is the CAVLC twin
+   of session #32e's CABAC `grid_idx` bug — same disease, different parser.
+   Fix mirrors the CABAC loop exactly: pair-based `(mb_x, mb_y)` derivation +
+   commit to the MB's own frame-MB grid address (`grid_idx =
+   mb_row*mb_cols + px`) for `macroblocks[]`/`nz[]`/`pred_ctx[]`/
+   `field_flags[]`. Also documented that ffmpeg reads `mb_field_decoding_flag`
+   as one raw bit BEFORE mb_type for each pair-top MB (h264_cavlc.c @n5.1
+   lines 728–731) — the crate already did this, now recorded so it can't be
+   "reordered" by accident.
+2. **RESULT:** `mbaff_cavlc_ip` I frame decodes **pixel-exact vs ffmpeg
+   (SAD=0)** for the first time on a CAVLC MBAFF stream; the P frame still
+   diverges (SAD≈5.4e4) because P-slice CAVLC MBAFF is not implemented (the
+   P/B parsers don't read `mb_field_decoding_flag` yet — see the G-scope note
+   below). All 231 lib tests green.
+3. **P-SLICE CAVLC MBAFF PARSE IMPLEMENTED (same session):**
+   `parse_p_slice` gained `mb_aff`/`field_pic_flag` parameters and full MBAFF
+   awareness, ported from ffmpeg h264_cavlc.c @n5.1 `ff_h264_decode_mb_cavlc`
+   lines 709–731 exactly:
+   - `mb_skip_run` is now an i32 with ffmpeg's −1 sentinel; the coded-MB path
+     resets it to −1 (replicating the `if (sl->mb_skip_run--)` post-decrement
+     wrap-to-−1 trick), so fresh runs are re-read after every coded MB.
+   - Field-flag timing: inside a skip run, when the run hits 0 on a pair-TOP
+     skipped MB, one raw bit is read immediately (it is the pair flag of the
+     pair whose bottom MB is about to be coded); otherwise the bit is read
+     before mb_type of every coded pair-top MB.
+   - Pair-based `(mb_x, mb_y)`/grid addressing (as in the I parser);
+     `macroblocks[]`/`nz[]`/`pred_ctx[]` commit to frame-MB addresses so
+     `predict_slice_mvs` sees each MB at its raster address. Intra-in-P and
+     inter residuals now take a real MBAFF-aware `NeighbourCtx`.
+   - All 10 stale `parse_p_slice` call sites (tests/examples) updated;
+     clippy `-D warnings` clean; whole `--tests` suite green.
+   STATUS: parse completes on `mbaff_cavlc_ip`'s P slice, but pixels are NOT
+   pixel-exact yet — the residual gap is reconstruction-side: MVP lacks
+   FIX_MV_MBAFF row-doubling/halving for field pairs (h264_mvpred_ref.h) and
+   MC lacks field-parity reference sampling. That (plus B-slice MBAFF) remains
+   the next G-phase work item.
+
+6. **PARITY-AWARE RECON SCAFFOLDED (2026-08-26, later same day):**
+   `reconstruct.rs` gained `reconstruct_inter_frame_ex` (MBAFF-aware twin of
+   `reconstruct_inter_frame`, which now just forwards with `mb_aff=false`).
+   When `mb_aff` is set and a macroblock carries
+   `mb_field_decoding_flag`, new helpers `reconstruct_mbaff_inter_luma` /
+   `reconstruct_mbaff_inter_chroma` run motion compensation in FIELD
+   coordinates against the reference's contiguous half-height plane of the
+   MB's own parity (pre-extracted once per ref via `FieldRef::planes`, both
+   parities), and write predicted+residual rows back at stride-2 spacing with
+   the MB's parity offset (`2*y_field + (mb_y & 1)`) — mirroring ffmpeg's
+   doubled `mb_linesize`/`mb_uvlinesize` and the parity-shifted destination
+   (h264_slice_ref.c @n5.1 lines 2591–2598; luma/chroma src rows read through
+   the doubled stride exactly as `mc_dir_part` does). Decoder call site wired
+   (`sps.mb_adaptive_frame_field_flag && !header.field_pic_flag`). New lib
+   test `reconstruct::tests::mbaff_field_mb_samples_parity_rows` (a vertical
+   field pair over a row-ramp reference reproduces `luma[y] == y` exactly);
+   232 lib tests green, clippy `-D warnings` clean.
+   STATUS: the path is **opt-in** (`KINETIX_MBAFF_FIELD_MC=1`) because it is
+   not yet a win on real content: on `dbg_g5_interlaced`'s `mbaff_ip`
+   (CABAC P, the only clip whose P slice contains field pairs — MBs 4/5 and
+   14/15), enabling it moves that frame's best-match SAD from 257 554 to
+   296 585. Root cause of the remaining gap: intra-in-P macroblocks inside a
+   field pair are still reconstructed with contiguous frame addressing (they
+   must also be parity-interleaved, and their intra prediction must sample
+   parity-strided neighbours), and deblocking edge flags ignore
+   `mb_field_decoding_flag`. Default output is byte-identical to the previous
+   state (verified A/B via the env gate: all four corpus cells unchanged).
+   Next: parity-aware intra recon inside P pairs, then flip the gate to
+   default-on; B-slice CAVLC/CABAC MBAFF parse, CABAC MBAFF replay harness
+   (#32e item 6), field deblocking flags, G.5 interlaced recon, H pixel_exact
+   flip.
+
+7. **INTRA-IN-P PARITY RECON + DIAGNOSIS (same day, cont'd):** under the same
+   `KINETIX_MBAFF_FIELD_MC=1` gate, intra macroblocks inside a field-coded P
+   pair now reconstruct via `reconstruct_luma_at`/`reconstruct_chroma_at`
+   with base row `(pair*32|16) + parity` and `y_step = 2` — identical
+   geometry to `reconstruct_mbaff_intra_frame`. New deterministic lib test
+   `mbaff_field_intra_writes_interleaved_rows` (DC pair fills all 32 lines +
+   chroma with 128; calls the helpers directly so it does not depend on the
+   env gate). 233 lib tests green, clippy `-D warnings` clean.
+   FINDING: on `mbaff_ip` the gate-on SAD is UNCHANGED (296 585) — that clip's
+   P slice has no intra MBs, so the inter-MC-vs-ffmpeg divergence is inside
+   the field-MC convention itself. Prime suspect for the next session: the
+   reference-parity choice. ffmpeg's MBAFF ref lists are split per FIELD
+   (`FIX_MV_MBAFF` does `refn <<= 1` / `>>= 1`, i.e. list entries alternate
+   frame/field and each entry carries its own `reference-1` parity baked into
+   `pic->data`); luma MC samples THAT entry's parity (no correction term),
+   while chroma adds `my += 2*((mb_y & 1) - (reference - 1))`
+   (h264_mb_ref.c @n5.1 line 290). Our decoder keeps plain frame lists and
+   samples the CURRENT MB's parity for both planes, which matches neither
+   ffmpeg convention when the bitstream ref_idx maps through the field-split
+   list. Next step: decide the spec-correct mapping (§8.2.4.2.3 vs §8.4.2.2)
+   for our frame-list ref_idx space — likely "sample the reference at the
+   current MB's parity" is right but ref_idx→picture must go through the
+   field-split list (idx>>1 picture, idx&1 src parity) — implement, re-run
+   the A/B, and flip the gate to default-on once `mbaff_ip` improves.
+
+8. **DIAGNOSIS CORRECTION + NEW COVERAGE (same day, cont'd):** wrote
+   `tests/dbg_g5_i1_diffmap.rs::g5_mbaff_ip_pframe_diffmap` (per-MB luma diff
+   map with even/odd row-parity breakdown; the original
+   `g4_mbaff_i1_diffmap` is preserved alongside). RESULT: `mbaff_ip`
+   diverges on **every MB** of the P frame (rows 16–63 fully, max diffs up to
+   239) AND its I frame does not match ffmpeg either — the clip's problem is
+   the upstream CABAC MBAFF parse desync (#32e item 6), NOT reconstruction.
+   All parity A/B conclusions drawn from it (item 7) were therefore invalid;
+   the ref-split experiment (`ref_idx>>1` picture / `&1` parity) was reverted.
+   Also added corpus clip `mbaff_cavlc_ip2` (testsrc2, CAVLC MBAFF): I frame
+   SAD=0, P frame 242 556 — but its P slice codes all pairs as FRAME, and
+   env-traced field-MB counts confirm x264 emits field pairs under CAVLC for
+   neither testsrc nor testsrc2 at these settings. NEXT (unblocking): obtain
+   a CAVLC P slice that actually contains field-coded pairs — either hunt
+   encoder settings/content (strong vertical motion, higher QP so inter
+   loses to skip but field wins over frame), or hand-craft a synthetic CAVLC
+   MBAFF stream with a known-good oracle. Only then can the field-MC /
+   intra-parity paths be validated against ffmpeg and the gate flipped.
+   Validation state: 233 lib tests green (incl. both new deterministic
+   field-path unit tests), clippy `-D warnings` clean, fmt clean, default
+   decoder output byte-identical to session #32f (gate off).
+
+5. **FIX_MV_MBAFF IMPLEMENTED (same session)** (`mv.rs`): `MvStore` now
+   records each committed macroblock's `mb_field_decoding_flag`
+   (`set_mb_field`) plus a scoped "current field" (`set_cur_field`,
+   interior-mutability scratch so neighbour fetches convert without threading
+   a parameter through every helper). Neighbour extraction (`cell`/`cell_l1`)
+   applies ffmpeg's exact conversion (h264_mvpred_ref.h @n5.1 lines 237–254):
+   field-current + frame-neighbour → `refn <<= 1`, `mv_y /= 2` (C truncation);
+   frame-current + interlaced-neighbour → `refn >>= 1`, `mv_y *= 2`;
+   same-convention neighbours unchanged. Wired via `predict_slice_mvs`, which
+   now records flags from `Macroblock::mb_field_flag` before predicting each
+   MB. Progressive / PAFF paths are unaffected (flags all false → identity).
+   clippy `-D warnings` clean; 231/231 lib tests green; corpus unchanged.
+   NEXT (P-frame pixels): MBAFF P reconstruction — route
+   `decode_interlaced_mbaff` P slices to a new frame-mode recon that (a) for
+   FIELD-coded MBs samples reference frames at doubled row step with parity =
+   mb_y&1 (equivalently: reuse `FieldRef::planes()` parity extraction) and
+   applies the chroma parity correction `my += 2*((mb_y&1)-(reference-1))`
+   (h264_mb_ref.c @n5.1 lines 288-292), and (b) for FRAME-coded pairs keeps
+   the existing progressive MC into contiguous halves. Reference sources:
+   `h264_mvpred_ref.h`, `h264_mb_ref.c`, `h264_mc_template.c` (fetched),
+   `h264dec_ref.h`.
+
+4. NEXT: carry over this session's evidence into the CABAC MBAFF residual
+   desync (#32e item 6): the decisive real-C replay harness
+   (compile ff_h264_cabac.c's decode_residual/get_cabac_cbf_ctx internals
+   with MSVC, replay recorded engine state + payload, diff per-bin contexts).
+   Reference sources saved at repo root (`h264_cabac_ref.c`, `cabac_ref.*`,
+   `h264_mvpred_ref.h`, `h264_slice_ref.c`, `h264_cavlc_ref.c`).
+
 ## SESSION #32e (2026-08-25) — MBAFF I-slice: two real parse bugs fixed; field recon infrastructure landed
+
 
 > Harnesses: `tests/dbg_mbaff_oracle.rs` (#32d oracle, now actually RUN) +
 > a mechanical differ of its `BIN n ...` stream against the crate parser's

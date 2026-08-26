@@ -266,6 +266,8 @@ fn localize_pframe_diffs() {
         num_ref_idx_l0_active,
         chroma_qp_index_offset,
         false,
+        false,
+        false,
         &mut tpt_kinetix_h264::trace::NoopTracer,
     )
     .expect("parse");

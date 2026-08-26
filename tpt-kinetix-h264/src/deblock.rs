@@ -62,6 +62,12 @@ pub struct DeblockMbInfo {
     pub cells: [MvCell; 16],
     /// Luma quantisation parameter for this macroblock.
     pub qp: i32,
+    /// MBAFF only: whether this macroblock is field-coded
+    /// (`mb_field_decoding_flag`). Frame-convention callers leave this
+    /// `false`; it selects the field motion-vector y-threshold (§8.7.2.1:
+    /// a field-coded MB flags a boundary at |Δmv_y| >= 2 quarter-samples
+    /// instead of 4) and the MBAFF edge routines in this module.
+    pub field: bool,
 }
 
 impl DeblockMbInfo {
@@ -71,7 +77,38 @@ impl DeblockMbInfo {
             nz,
             cells,
             qp,
+            field: false,
         }
+    }
+
+    /// Same as [`Self::new`] but marks the macroblock as field-coded (MBAFF).
+    pub fn new_field(
+        mb_type: MbType,
+        nz: [u8; 16],
+        cells: [MvCell; 16],
+        qp: i32,
+        field: bool,
+    ) -> Self {
+        Self {
+            mb_type,
+            nz,
+            cells,
+            qp,
+            field,
+        }
+    }
+}
+
+/// Motion-vector y-component difference threshold for the §8.7.2.1 bS = 1
+/// rule. Field-coded macroblocks store motion vectors in field units, so the
+/// threshold halves (spec §8.7.2.1 note; ffmpeg's
+/// `mvy_limit = IS_INTERLACED(mb_type) ? 2 : 4`).
+#[inline]
+pub fn mvy_limit(field_mb: bool) -> i32 {
+    if field_mb {
+        2
+    } else {
+        4
     }
 }
 
@@ -94,6 +131,7 @@ fn derive_bs_pair(
     q_nz: u8,
     p_cell: MvCell,
     q_cell: MvCell,
+    mvy_limit: i32,
 ) -> u8 {
     if p_intra || q_intra {
         return if is_mb_edge { 4 } else { 3 };
@@ -114,11 +152,15 @@ fn derive_bs_pair(
     // The x-component threshold uses ffmpeg's unsigned trick:
     // `(a - b + 3) as u32 >= 7` is equivalent to `|a - b| >= 4`.
     let mv_ge4_x = |a: i32, b: i32| (a as i64 - b as i64 + 3) as u64 >= 7;
-    let mv_ge4_y = |a: i32, b: i32| (a - b).abs() >= 4;
+    // Same rule with the field-halved y-threshold (see `mvy_limit`; the
+    // frame-convention callers pass 4, making it identical to the spec's
+    // "|Δmv_y| >= 4" wording).
+    let mv_ge4_y_limit = |a: i32, b: i32, limit: i32| (a - b).abs() >= limit;
 
     let mut v = p_cell.ref_idx != q_cell.ref_idx;
     if !v && p_cell.ref_idx != crate::mv::LIST_NOT_USED {
-        v = mv_ge4_x(p_cell.mv[0], q_cell.mv[0]) || mv_ge4_y(p_cell.mv[1], q_cell.mv[1]);
+        v = mv_ge4_x(p_cell.mv[0], q_cell.mv[0])
+            || mv_ge4_y_limit(p_cell.mv[1], q_cell.mv[1], mvy_limit);
     }
 
     // B slices carry two lists (`sl->list_count == 2` in ffmpeg): list 1 is
@@ -131,7 +173,7 @@ fn derive_bs_pair(
     if !v {
         v = p_cell.ref_idx_l1 != q_cell.ref_idx_l1
             || mv_ge4_x(p_cell.mv_l1[0], q_cell.mv_l1[0])
-            || mv_ge4_y(p_cell.mv_l1[1], q_cell.mv_l1[1]);
+            || mv_ge4_y_limit(p_cell.mv_l1[1], q_cell.mv_l1[1], mvy_limit);
     }
     if v {
         // Mirrored-list equivalence: an L0-only block next to an L1-only (or
@@ -140,9 +182,9 @@ fn derive_bs_pair(
             return 1;
         }
         return (mv_ge4_x(p_cell.mv[0], q_cell.mv_l1[0])
-            || mv_ge4_y(p_cell.mv[1], q_cell.mv_l1[1])
+            || mv_ge4_y_limit(p_cell.mv[1], q_cell.mv_l1[1], mvy_limit)
             || mv_ge4_x(p_cell.mv_l1[0], q_cell.mv[0])
-            || mv_ge4_y(p_cell.mv_l1[1], q_cell.mv[1])) as u8;
+            || mv_ge4_y_limit(p_cell.mv_l1[1], q_cell.mv[1], mvy_limit)) as u8;
     }
     0
 }
@@ -158,6 +200,7 @@ fn derive_bs_segments(
     is_mb_edge: bool,
     p_blocks: [usize; 4],
     q_blocks: [usize; 4],
+    mvy_limit: i32,
 ) -> [u8; 4] {
     let p_intra = is_intra(p.mb_type);
     let q_intra = is_intra(q.mb_type);
@@ -171,6 +214,7 @@ fn derive_bs_segments(
             q.nz[q_blocks[seg]],
             p.cells[p_blocks[seg]],
             q.cells[q_blocks[seg]],
+            mvy_limit,
         );
     }
     out
@@ -554,7 +598,14 @@ pub fn deblock_luma_mb(
     // grouped by raster ROW; p-side block is the left MB's rightmost column
     // (3,7,11,15), q-side is this MB's leftmost column (0,4,8,12).
     if let Some(l) = left {
-        let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
+        let bs = derive_bs_segments(
+            l,
+            cur,
+            true,
+            [3, 7, 11, 15],
+            [0, 4, 8, 12],
+            crate::deblock::mvy_limit(false),
+        );
         if trace {
             eprintln!(
                 "DEBLOCK L v-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?}",
@@ -570,7 +621,14 @@ pub fn deblock_luma_mb(
     for ei in 1..=3 {
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
-        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
+        let bs = derive_bs_segments(
+            cur,
+            cur,
+            false,
+            p_blocks,
+            q_blocks,
+            crate::deblock::mvy_limit(cur.field),
+        );
         if trace {
             eprintln!("DEBLOCK L v-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
         }
@@ -580,7 +638,14 @@ pub fn deblock_luma_mb(
     // grouped by raster COLUMN; p-side block is the top MB's bottom row
     // (12,13,14,15), q-side is this MB's top row (0,1,2,3).
     if let Some(t) = top {
-        let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
+        let bs = derive_bs_segments(
+            t,
+            cur,
+            true,
+            [12, 13, 14, 15],
+            [0, 1, 2, 3],
+            crate::deblock::mvy_limit(cur.field),
+        );
         if trace {
             eprintln!(
                 "DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?} pty={:?} qty={:?}",
@@ -603,7 +668,14 @@ pub fn deblock_luma_mb(
             (ei - 1) * 4 + 3,
         ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
-        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks);
+        let bs = derive_bs_segments(
+            cur,
+            cur,
+            false,
+            p_blocks,
+            q_blocks,
+            crate::deblock::mvy_limit(cur.field),
+        );
         if trace {
             eprintln!("DEBLOCK L h-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
         }
@@ -638,7 +710,14 @@ pub fn deblock_chroma_mb(
     // Chroma reuses the co-located luma blocks' bS (§8.7.2.1); see
     // `deblock_luma_mb` for the same raster-block mappings.
     if let Some(l) = left {
-        let bs = derive_bs_segments(l, cur, true, [3, 7, 11, 15], [0, 4, 8, 12]);
+        let bs = derive_bs_segments(
+            l,
+            cur,
+            true,
+            [3, 7, 11, 15],
+            [0, 4, 8, 12],
+            crate::deblock::mvy_limit(false),
+        );
         let qpc = (cqp(cur.qp) + cqp(l.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 0, bs, p, qpc);
@@ -646,7 +725,14 @@ pub fn deblock_chroma_mb(
     // Interior chroma vertical edge (chroma offset 4) sits at the luma
     // column-1/column-2 boundary.
     {
-        let bs = derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14]);
+        let bs = derive_bs_segments(
+            cur,
+            cur,
+            false,
+            [1, 5, 9, 13],
+            [2, 6, 10, 14],
+            crate::deblock::mvy_limit(cur.field),
+        );
         if bs.iter().any(|&b| b != 0) {
             let qpc = cqp(cur.qp);
             deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 2, bs, p, qpc);
@@ -654,7 +740,14 @@ pub fn deblock_chroma_mb(
         }
     }
     if let Some(t) = top {
-        let bs = derive_bs_segments(t, cur, true, [12, 13, 14, 15], [0, 1, 2, 3]);
+        let bs = derive_bs_segments(
+            t,
+            cur,
+            true,
+            [12, 13, 14, 15],
+            [0, 1, 2, 3],
+            crate::deblock::mvy_limit(cur.field),
+        );
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
@@ -662,11 +755,563 @@ pub fn deblock_chroma_mb(
     // Interior chroma horizontal edge (chroma offset 4) sits at the luma
     // row-1/row-2 boundary.
     {
-        let bs = derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11]);
+        let bs = derive_bs_segments(
+            cur,
+            cur,
+            false,
+            [4, 5, 6, 7],
+            [8, 9, 10, 11],
+            crate::deblock::mvy_limit(cur.field),
+        );
         if bs.iter().any(|&b| b != 0) {
             let qpc = cqp(cur.qp);
             deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 2, bs, p, qpc);
             deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 2, bs, p, qpc);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MBAFF field-aware deblocking (spec §8.7 as realized by ffmpeg's
+// `libavcodec/h264_loopfilter.c`; mechanical transcription, see each item).
+//
+// Scope note: these are the building blocks for the G-phase item "field
+// deblocking flags". A full-frame orchestrator still needs to be wired into
+// the decoder; the pieces here are unit-tested standalone so that wiring can
+// be validated incrementally. Frame-convention callers are unaffected.
+// ---------------------------------------------------------------------------
+
+/// Mirror of ffmpeg's `filter_mb_mbaff_edgev` / `filter_mb_mbaff_edgecv`
+/// (one *call*: ffmpeg always issues two per half-edge).
+///
+/// Filters 8 luma (4 chroma) sample positions along a VERTICAL edge at
+/// column `x`: position k sits on row `origin_y + k * y_step`, and bS group
+/// `g = k >> 1` applies to positions `2g` and `2g + 1`, matching
+/// `h264_loop_filter_luma`'s outer-i/inner-d loop with `inner_iters = 2`
+/// (luma) / `1` (chroma).
+///
+/// `allow_strong` reproduces ffmpeg's `intra = 1` argument semantics: when
+/// set, ALL positions of this call use the strong intra filter iff
+/// `bs[0] == 4` (ffmpeg gates only on `bS[0] < 4`, not per segment — quirk
+/// preserved deliberately for bit-conformance).
+#[allow(clippy::too_many_arguments)]
+fn filter_mbaff_call(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    origin_y: usize,
+    y_step: usize,
+    chroma: bool,
+    bs: [u8; 4],
+    qp: i32,
+    p: DeblockParams,
+    allow_strong: bool,
+) {
+    if p.disable_idc == 1 || bs.iter().all(|&b| b == 0) {
+        return;
+    }
+    if x < 4 || x + 3 >= stride {
+        return;
+    }
+    let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+    let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
+    let alpha = ALPHA_TAB[qpi as usize];
+    let beta = BETA_TAB[qpb as usize];
+    if alpha == 0 || beta == 0 {
+        return;
+    }
+    let height = plane.len() / stride.max(1);
+    let n_pos = if chroma { 4 } else { 8 };
+    // ffmpeg quirk: strong-vs-weak is decided once per call from bS[0].
+    let strong = allow_strong && bs[0] == 4;
+    for k in 0..n_pos {
+        let y = origin_y + k * y_step;
+        // The edge needs its p/q neighbour rows; skip out-of-picture
+        // positions (tight unpadded buffers, same policy as `deblock_luma_edge`).
+        let min_y = if chroma { 1 } else { 2 };
+        if y < min_y || y + min_y >= height {
+            continue;
+        }
+        let g = k >> 1;
+        let bseg = bs[g];
+        if bseg == 0 {
+            continue;
+        }
+        let o = y * stride;
+        if chroma {
+            let mut pp = [plane[o + x - 1] as i32, plane[o + x - 2] as i32];
+            let mut qq = [plane[o + x] as i32, plane[o + x + 1] as i32];
+            if strong {
+                filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
+            } else {
+                let tc = TC0_TAB[bseg.min(3) as usize - 1][qpi as usize] + 1;
+                filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
+            }
+            plane[o + x - 1] = clip_pixel(pp[0]);
+            plane[o + x] = clip_pixel(qq[0]);
+            plane[o + x - 2] = clip_pixel(pp[1]);
+            plane[o + x + 1] = clip_pixel(qq[1]);
+        } else {
+            let mut pp = [
+                plane[o + x - 1] as i32,
+                plane[o + x - 2] as i32,
+                plane[o + x - 3] as i32,
+                plane[o + x - 4] as i32,
+            ];
+            let mut qq = [
+                plane[o + x] as i32,
+                plane[o + x + 1] as i32,
+                plane[o + x + 2] as i32,
+                plane[o + x + 3] as i32,
+            ];
+            if strong {
+                filter_luma_edge(&mut pp, &mut qq, alpha, beta, 0, 4);
+            } else {
+                let tc0 = TC0_TAB[bseg.min(3) as usize - 1][qpi as usize];
+                filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bseg);
+            }
+            plane[o + x - 1] = clip_pixel(pp[0]);
+            plane[o + x] = clip_pixel(qq[0]);
+            plane[o + x - 2] = clip_pixel(pp[1]);
+            plane[o + x + 1] = clip_pixel(qq[1]);
+            plane[o + x - 3] = clip_pixel(pp[2]);
+            plane[o + x + 2] = clip_pixel(qq[2]);
+            plane[o + x - 4] = clip_pixel(pp[3]);
+            plane[o + x + 3] = clip_pixel(qq[3]);
+        }
+    }
+}
+
+/// Neighbour block index tables for the mixed-interlace first VERTICAL edge
+/// (ffmpeg `ff_h264_filter_mb`, `offset[MB_FIELD(cur)][mb_y & 1][i]`):
+/// indexes into the LEFT pair member's `nz` array for segment `i`.
+///
+/// - Current frame-coded, current MB is the pair TOP: left-top blocks
+///   `{3,3,3,3}` then left-bottom blocks `{7,7,7,7}`.
+/// - Current frame-coded, pair BOTTOM: `{11,...}` / `{15,...}`.
+/// - Current field-coded: rightmost column `{3,7,11,15}` of the member
+///   selected per half (`i >> 2`), regardless of pair parity.
+pub const MBAFF_FIRST_EDGE_OFFSET_FRAME_TOP: [u8; 8] = [3, 3, 3, 3, 7, 7, 7, 7];
+pub const MBAFF_FIRST_EDGE_OFFSET_FRAME_BOTTOM: [u8; 8] = [11, 11, 11, 11, 15, 15, 15, 15];
+pub const MBAFF_FIRST_EDGE_OFFSET_FIELD: [u8; 8] = [3, 7, 11, 15, 3, 7, 11, 15];
+
+/// Pure derivation of the 8 boundary strengths for the first vertical edge of
+/// an MBAFF macroblock whose left pair has the OTHER coding type
+/// (frame vs field) — verbatim port of ffmpeg's `ff_h264_filter_mb`
+/// FRAME_MBAFF block:
+///
+/// - current intra → all eight are **4** (not 3);
+/// - otherwise neighbour intra → 4 for those segments, else
+///   `bS[i] = 1 + !!((cur nz block (i>>1)) | (left nz block off[i]))` where
+///   the current-MB block indexes are the left column `0, 4, 8, 12`
+///   (ffmpeg's scan8 cache slots `12 + 8*(i>>1)`).
+///
+/// Note there is deliberately NO motion-vector rule here — ffmpeg derives
+/// these bS from coefficients only.
+pub fn first_vertical_edge_bs(
+    cur: &DeblockMbInfo,
+    left_top: &DeblockMbInfo,
+    left_bottom: &DeblockMbInfo,
+    cur_field: bool,
+    cur_pair_bottom: bool,
+) -> [u8; 8] {
+    if is_intra(cur.mb_type) {
+        return [4; 8];
+    }
+    let off: &[u8; 8] = if cur_field {
+        &MBAFF_FIRST_EDGE_OFFSET_FIELD
+    } else if !cur_pair_bottom {
+        &MBAFF_FIRST_EDGE_OFFSET_FRAME_TOP
+    } else {
+        &MBAFF_FIRST_EDGE_OFFSET_FRAME_BOTTOM
+    };
+    let mut bs = [0u8; 8];
+    for i in 0..8usize {
+        let nb = if cur_field {
+            if i < 4 {
+                left_top
+            } else {
+                left_bottom
+            }
+        } else if i & 1 == 0 {
+            left_top
+        } else {
+            left_bottom
+        };
+        if is_intra(nb.mb_type) {
+            bs[i] = 4;
+        } else {
+            // Current-MB left-column luma blocks 0, 4, 8, 12 (each used for
+            // two consecutive segments).
+            let cur_nz = cur.nz[(i >> 1) * 4];
+            let nb_nz = nb.nz[off[i] as usize];
+            bs[i] = 1 + u8::from(cur_nz != 0 || nb_nz != 0);
+        }
+    }
+    bs
+}
+
+/// Pure derivation of the boundary strengths for the HORIZONTAL boundary
+/// between a FRAME-coded pair-top macroblock and a FIELD-coded pair above —
+/// port of ffmpeg `filter_mb_dir`'s "filtering must be done twice (once for
+/// each field)" special case (`FRAME_MBAFF && dir == 1 && (mb_y & 1) == 0 &&
+/// IS_INTERLACED(mbm_type & ~mb_type)`):
+///
+/// - either side intra → **3** (deliberately not 4 — ffmpeg keeps this edge
+///   on the weak path by passing `intra = 0`);
+/// - else `bS[i] = 1 + !!(cur.nz[i] | above.nz[12 + i])` (current top-row
+///   blocks 0..3 vs the neighbour's bottom-row blocks 12..15); again no
+///   motion-vector rule.
+///
+/// The caller applies it once per member of the field pair above, exactly
+/// like ffmpeg's `j` loop.
+pub fn fieldcoded_above_boundary_bs(cur: &DeblockMbInfo, above_member: &DeblockMbInfo) -> [u8; 4] {
+    if is_intra(cur.mb_type) || is_intra(above_member.mb_type) {
+        return [3; 4];
+    }
+    let mut bs = [0u8; 4];
+    for i in 0..4usize {
+        bs[i] = 1 + u8::from(cur.nz[i] != 0 || above_member.nz[12 + i] != 0);
+    }
+    bs
+}
+
+/// Filter the mixed-interlace first VERTICAL edge between macroblock
+/// `(mb_x, mb_y)` and the vertically-stacked left PAIR whose members'
+/// [`DeblockMbInfo`]s are `left_top` / `left_bottom`.
+///
+/// Port of ffmpeg `ff_h264_filter_mb`'s FRAME_MBAFF first-vertical-edge
+/// block, including its two-call geometry (see [`filter_mbaff_call`]):
+///
+/// - current FIELD-coded: each pair member invokes this once; together the
+///   invocations cover every band row of that member's parity. Call A
+///   filters band rows `band_top + parity + 2k` (k = 0..7) with `bs[0..3]` /
+///   QP averaged against the left-TOP member; call B filters rows `+16`
+///   with `bs[4..7]` / QP against the left-BOTTOM member. (ffmpeg achieves
+///   this from the band start with doubled strides and the bottom member's
+///   `dest -= linesize*15` adjustment — expressed here directly in frame
+///   coordinates.)
+/// - current FRAME-coded: call A covers the even rows `mb_y*16 + 2k` with
+///   `bs[0,2,4,6]`, call B the odd rows with `bs[1,3,5,7]` (ffmpeg's
+///   `stride = 2*linesize` calls at `img_y` and `img_y + linesize`).
+///
+/// Chroma mirrors this with 4-position halves (`filter_mb_mbaff_edgecv`,
+/// 4:2:0 only, like the rest of this module).
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_first_vertical_edge_mcaff(
+    luma: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+    mb_x: usize,
+    mb_y: usize,
+    cur: &DeblockMbInfo,
+    left_top: &DeblockMbInfo,
+    left_bottom: &DeblockMbInfo,
+    p: DeblockParams,
+) {
+    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+        return;
+    }
+    let cur_field = cur.field;
+    let par = mb_y & 1;
+    let bs = first_vertical_edge_bs(cur, left_top, left_bottom, cur_field, par == 1);
+    if bs.iter().all(|&b| b == 0) {
+        return;
+    }
+    let qp_top = (cur.qp + left_top.qp + 1) >> 1;
+    let qp_bot = (cur.qp + left_bottom.qp + 1) >> 1;
+    let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
+    let bq_top = (cqp(cur.qp) + cqp(left_top.qp) + 1) >> 1;
+    let bq_bot = (cqp(cur.qp) + cqp(left_bottom.qp) + 1) >> 1;
+
+    let lx = mb_x * 16;
+    let cx = mb_x * 8;
+    let bs_a = [bs[0], bs[1], bs[2], bs[3]];
+    let bs_b = [bs[4], bs[5], bs[6], bs[7]];
+    let bs_even = [bs[0], bs[2], bs[4], bs[6]];
+    let bs_odd = [bs[1], bs[3], bs[5], bs[7]];
+    if cur_field {
+        // Band addressing: the pair occupies 32 frame rows from `band_top`;
+        // this invocation covers only the member's parity rows.
+        let origin = (mb_y & !1) * 16 + par;
+        filter_mbaff_call(
+            luma,
+            luma_stride,
+            lx,
+            origin,
+            2,
+            false,
+            bs_a,
+            qp_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            luma,
+            luma_stride,
+            lx,
+            origin + 16,
+            2,
+            false,
+            bs_b,
+            qp_bot,
+            p,
+            true,
+        );
+        let c_origin = ((mb_y & !1) * 8) + par;
+        filter_mbaff_call(
+            cb,
+            chroma_stride,
+            cx,
+            c_origin,
+            2,
+            true,
+            bs_a,
+            bq_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cr,
+            chroma_stride,
+            cx,
+            c_origin,
+            2,
+            true,
+            bs_a,
+            bq_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cb,
+            chroma_stride,
+            cx,
+            c_origin + 8,
+            2,
+            true,
+            bs_b,
+            bq_bot,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cr,
+            chroma_stride,
+            cx,
+            c_origin + 8,
+            2,
+            true,
+            bs_b,
+            bq_bot,
+            p,
+            true,
+        );
+    } else {
+        let origin = mb_y * 16;
+        filter_mbaff_call(
+            luma,
+            luma_stride,
+            lx,
+            origin,
+            2,
+            false,
+            bs_even,
+            qp_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            luma,
+            luma_stride,
+            lx,
+            origin + 1,
+            2,
+            false,
+            bs_odd,
+            qp_bot,
+            p,
+            true,
+        );
+        let c_origin = mb_y * 8;
+        filter_mbaff_call(
+            cb,
+            chroma_stride,
+            cx,
+            c_origin,
+            2,
+            true,
+            bs_even,
+            bq_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cr,
+            chroma_stride,
+            cx,
+            c_origin,
+            2,
+            true,
+            bs_even,
+            bq_top,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cb,
+            chroma_stride,
+            cx,
+            c_origin + 1,
+            2,
+            true,
+            bs_odd,
+            bq_bot,
+            p,
+            true,
+        );
+        filter_mbaff_call(
+            cr,
+            chroma_stride,
+            cx,
+            c_origin + 1,
+            2,
+            true,
+            bs_odd,
+            bq_bot,
+            p,
+            true,
+        );
+    }
+}
+
+/// Apply the fieldcoded-above boundary for ONE member (`member_index` = 0/1)
+/// of the field pair above (ffmpeg's `j` loop): filters a horizontal edge
+/// whose edge line sits at frame row `band_top + member_index`, sampling
+/// every other row downward for 16 luma positions (ffmpeg's
+/// `stride = 2*linesize`), i.e. rows `band_top + j + 2k` — spanning the full
+/// 32-row band of the current pair because fields interleave across both
+/// members. Chroma spans 8 positions over the 16 chroma-band rows.
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_fieldcoded_above_boundary_mcaff(
+    luma: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+    mb_x: usize,
+    mb_y: usize,
+    cur: &DeblockMbInfo,
+    above_member: &DeblockMbInfo,
+    member_index: usize,
+    p: DeblockParams,
+) {
+    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+        return;
+    }
+    let bs = fieldcoded_above_boundary_bs(cur, above_member);
+    if bs.iter().all(|&b| b == 0) {
+        return;
+    }
+    let qpl = (cur.qp + above_member.qp + 1) >> 1;
+    let qpc = (crate::reconstruct::chroma_qp(cur.qp, p.chroma_qp_index_offset)
+        + crate::reconstruct::chroma_qp(above_member.qp, p.chroma_qp_index_offset))
+        >> 1;
+
+    let band_top = mb_y * 16; // caller guarantees pair-top (even mb_y)
+    let y0 = band_top + member_index;
+    let height = luma.len() / luma_stride.max(1);
+    let qpi = clip_qp(qpl + 2 * p.alpha_offset_div2);
+    let qpb = clip_qp(qpl + 2 * p.beta_offset_div2);
+    let alpha = ALPHA_TAB[qpi as usize];
+    let beta = BETA_TAB[qpb as usize];
+    if alpha == 0 || beta == 0 {
+        return;
+    }
+    // Luma: 16 every-other-row positions from `y0`.
+    for k in 0..16usize {
+        let y = y0 + 2 * k;
+        if y < 2 || y + 2 >= height {
+            continue;
+        }
+        let bseg = bs[k >> 2];
+        if bseg == 0 || bseg > 3 {
+            continue;
+        }
+        for dx in 0..16usize {
+            let x = mb_x * 16 + dx;
+            if x >= luma_stride {
+                continue;
+            }
+            let mut pp = [
+                luma[(y - 1) * luma_stride + x] as i32,
+                luma[(y - 2) * luma_stride + x] as i32,
+                luma[(y - 3) * luma_stride + x] as i32,
+                luma[(y - 4) * luma_stride + x] as i32,
+            ];
+            let mut qq = [
+                luma[y * luma_stride + x] as i32,
+                luma[(y + 1) * luma_stride + x] as i32,
+                luma[(y + 2) * luma_stride + x] as i32,
+                luma[(y + 3) * luma_stride + x] as i32,
+            ];
+            // ffmpeg passes intra = 0 here, so this edge always uses the
+            // weak path even when bS would otherwise warrant the strong one.
+            let tc0 = TC0_TAB[bseg as usize - 1][qpi as usize];
+            filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bseg);
+            luma[(y - 1) * luma_stride + x] = clip_pixel(pp[0]);
+            luma[y * luma_stride + x] = clip_pixel(qq[0]);
+            luma[(y - 2) * luma_stride + x] = clip_pixel(pp[1]);
+            luma[(y + 1) * luma_stride + x] = clip_pixel(qq[1]);
+            luma[(y - 3) * luma_stride + x] = clip_pixel(pp[2]);
+            luma[(y + 2) * luma_stride + x] = clip_pixel(qq[2]);
+            luma[(y - 4) * luma_stride + x] = clip_pixel(pp[3]);
+            luma[(y + 3) * luma_stride + x] = clip_pixel(qq[3]);
+        }
+    }
+
+    // Chroma (4:2:0): 8 every-other-row positions from the chroma band top.
+    let cqpi = clip_qp(qpc + 2 * p.alpha_offset_div2);
+    let cqpb = clip_qp(qpc + 2 * p.beta_offset_div2);
+    let calpha = ALPHA_TAB[cqpi as usize];
+    let cbeta = BETA_TAB[cqpb as usize];
+    if calpha == 0 || cbeta == 0 {
+        return;
+    }
+    let cy0 = mb_y * 8 + member_index;
+    let cheight = cb.len() / chroma_stride.max(1);
+    for k in 0..8usize {
+        let y = cy0 + 2 * k;
+        if y < 1 || y + 1 >= cheight {
+            continue;
+        }
+        let bseg = bs[k >> 1];
+        if bseg == 0 || bseg > 3 {
+            continue;
+        }
+        for dx in 0..8usize {
+            let x = mb_x * 8 + dx;
+            if x >= chroma_stride {
+                continue;
+            }
+            for plane in [&mut *cb, &mut *cr] {
+                let mut pp = [
+                    plane[(y - 1) * chroma_stride + x] as i32,
+                    plane[(y - 2) * chroma_stride + x] as i32,
+                ];
+                let mut qq = [
+                    plane[y * chroma_stride + x] as i32,
+                    plane[(y + 1) * chroma_stride + x] as i32,
+                ];
+                let tc = TC0_TAB[bseg as usize - 1][cqpi as usize] + 1;
+                filter_chroma_edge(&mut pp, &mut qq, calpha, cbeta, tc);
+                plane[(y - 1) * chroma_stride + x] = clip_pixel(pp[0]);
+                plane[y * chroma_stride + x] = clip_pixel(qq[0]);
+                plane[(y - 2) * chroma_stride + x] = clip_pixel(pp[1]);
+                plane[(y + 1) * chroma_stride + x] = clip_pixel(qq[1]);
+            }
         }
     }
 }
@@ -687,6 +1332,461 @@ pub fn tc0_for_qp(bs: u8, qp: i32, alpha_offset: i32) -> i32 {
     TC0_TAB[bs as usize - 1][clip_qp(qp + 2 * alpha_offset) as usize]
 }
 
+// ---------------------------------------------------------------------------
+// Full-frame MBAFF deblocking orchestrator (spec §8.7 as realized by ffmpeg's
+// `ff_h264_filter_mb` / `filter_mb_dir` for FRAME_MBAFF pictures).
+//
+// ffmpeg addresses a FIELD-coded macroblock of an MBAFF frame through a
+// "virtual" contiguous field plane: `linesize` is doubled and the destination
+// is shifted to the pair member's parity row (`dest -= linesize*15` for the
+// bottom member, h264_slice.c `loop_filter`). Every edge filter then runs
+// unchanged on that virtual plane. Expressed directly in frame coordinates:
+// a field MB occupies rows `(pair_top*16 | parity) + k*2` (k = 0..15), and all
+// of its edges filter with vertical sample spacing 2 instead of 1. The
+// stepped edge helpers below reproduce that; frame-coded MBs use step 1 and
+// degenerate to the plain addressing.
+
+/// Luma geometry of one macroblock within an MBAFF frame:
+/// `(origin_y_px, y_step)` — sample rows are `origin + k * y_step`.
+fn mbaff_luma_geom(field: bool, mb_y: usize) -> (usize, usize) {
+    if field {
+        ((mb_y & !1) * 16 + (mb_y & 1), 2)
+    } else {
+        (mb_y * 16, 1)
+    }
+}
+
+/// Chroma geometry (4:2:0): same rule at half resolution.
+fn mbaff_chroma_geom(field: bool, mb_y: usize) -> (usize, usize) {
+    if field {
+        ((mb_y & !1) * 8 + (mb_y & 1), 2)
+    } else {
+        (mb_y * 8, 1)
+    }
+}
+
+/// Filter one luma edge position given pre-computed p/q sample indices.
+#[allow(clippy::too_many_arguments)]
+fn filter_luma_at(
+    plane: &mut [u8],
+    pp_idx: [usize; 4],
+    qq_idx: [usize; 4],
+    bseg: u8,
+    qp: i32,
+    p: DeblockParams,
+) {
+    let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+    let alpha = ALPHA_TAB[qpi as usize];
+    let beta = BETA_TAB[clip_qp(qp + 2 * p.beta_offset_div2) as usize];
+    let mut pp = [
+        plane[pp_idx[0]] as i32,
+        plane[pp_idx[1]] as i32,
+        plane[pp_idx[2]] as i32,
+        plane[pp_idx[3]] as i32,
+    ];
+    let mut qq = [
+        plane[qq_idx[0]] as i32,
+        plane[qq_idx[1]] as i32,
+        plane[qq_idx[2]] as i32,
+        plane[qq_idx[3]] as i32,
+    ];
+    if bseg == 4 {
+        filter_luma_edge(&mut pp, &mut qq, alpha, beta, 0, 4);
+    } else {
+        filter_luma_edge(
+            &mut pp,
+            &mut qq,
+            alpha,
+            beta,
+            tc0_for_qp(bseg, qp, p.alpha_offset_div2),
+            bseg,
+        );
+    }
+    plane[pp_idx[0]] = clip_pixel(pp[0]);
+    plane[qq_idx[0]] = clip_pixel(qq[0]);
+    plane[pp_idx[1]] = clip_pixel(pp[1]);
+    plane[qq_idx[1]] = clip_pixel(qq[1]);
+    plane[pp_idx[2]] = clip_pixel(pp[2]);
+    plane[qq_idx[2]] = clip_pixel(qq[2]);
+    plane[pp_idx[3]] = clip_pixel(pp[3]);
+    plane[qq_idx[3]] = clip_pixel(qq[3]);
+}
+
+/// Filter one chroma edge position on both chroma planes.
+#[allow(clippy::too_many_arguments)]
+fn filter_chroma_both_at(
+    cb: &mut [u8],
+    cr: &mut [u8],
+    pp_idx: [usize; 2],
+    qq_idx: [usize; 2],
+    bseg: u8,
+    qp: i32,
+    p: DeblockParams,
+) {
+    for plane in [&mut *cb, &mut *cr] {
+        let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+        let alpha = ALPHA_TAB[qpi as usize];
+        let beta = BETA_TAB[clip_qp(qp + 2 * p.beta_offset_div2) as usize];
+        let mut pp = [plane[pp_idx[0]] as i32, plane[pp_idx[1]] as i32];
+        let mut qq = [plane[qq_idx[0]] as i32, plane[qq_idx[1]] as i32];
+        if bseg == 4 {
+            filter_chroma_intra_edge(&mut pp, &mut qq, alpha, beta);
+        } else {
+            let tc = tc0_for_qp(bseg, qp, p.alpha_offset_div2) + 1;
+            filter_chroma_edge(&mut pp, &mut qq, alpha, beta, tc);
+        }
+        plane[pp_idx[0]] = clip_pixel(pp[0]);
+        plane[qq_idx[0]] = clip_pixel(qq[0]);
+        plane[pp_idx[1]] = clip_pixel(pp[1]);
+        plane[qq_idx[1]] = clip_pixel(qq[1]);
+    }
+}
+
+/// Deblock one luma edge with an explicit vertical origin/step.
+///
+/// `x0` / `y0` are the macroblock's top-left sample; `edge_index` is the usual
+/// 0 (MB boundary) / 1..3 (interior) luma index; the edge sits 4×`edge_index`
+/// steps into the block. `vertical` selects a vertical edge line (samples
+/// vary along y) or a horizontal edge line (samples vary along x).
+#[allow(clippy::too_many_arguments)]
+fn deblock_luma_edge_stepped(
+    plane: &mut [u8],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    y_step: usize,
+    vertical: bool,
+    edge_index: usize,
+    bs: [u8; 4],
+    p: DeblockParams,
+    qp: i32,
+) {
+    if p.disable_idc == 1 || bs.iter().all(|&b| b == 0) {
+        return;
+    }
+    let height = plane.len() / stride.max(1);
+    if vertical {
+        let x = x0 + edge_index * 4;
+        if x < 4 || x + 3 >= stride {
+            return;
+        }
+        for dy in 0..16usize {
+            let bseg = bs[dy / 4];
+            if bseg == 0 {
+                continue;
+            }
+            let y = y0 + dy * y_step;
+            if y >= height {
+                continue;
+            }
+            let o = y * stride;
+            let pp_idx = [o + x - 1, o + x - 2, o + x - 3, o + x - 4];
+            let qq_idx = [o + x, o + x + 1, o + x + 2, o + x + 3];
+            filter_luma_at(plane, pp_idx, qq_idx, bseg, qp, p);
+        }
+    } else {
+        let y = y0 + edge_index * 4 * y_step;
+        if y < 4 * y_step || y + 3 * y_step >= height {
+            return;
+        }
+        for dx in 0..16usize {
+            let bseg = bs[dx / 4];
+            if bseg == 0 {
+                continue;
+            }
+            let x = x0 + dx;
+            if x >= stride {
+                continue;
+            }
+            let row = |dy: isize| (y as isize + dy * y_step as isize) as usize * stride + x;
+            let pp_idx = [row(-1), row(-2), row(-3), row(-4)];
+            let qq_idx = [row(0), row(1), row(2), row(3)];
+            filter_luma_at(plane, pp_idx, qq_idx, bseg, qp, p);
+        }
+    }
+}
+
+/// Deblock one chroma edge on both chroma planes with an explicit vertical
+/// origin/step (4:2:0): 8 positions per edge, ±2-sample reach, chroma offset
+/// `edge_index * 2` (edge_index 0 = MB boundary, 2 = interior).
+#[allow(clippy::too_many_arguments)]
+fn deblock_chroma_edge_stepped(
+    cb: &mut [u8],
+    cr: &mut [u8],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    y_step: usize,
+    vertical: bool,
+    edge_index: usize,
+    bs: [u8; 4],
+    p: DeblockParams,
+    qp: i32,
+) {
+    if p.disable_idc == 1 || bs.iter().all(|&b| b == 0) {
+        return;
+    }
+    let height = cb.len() / stride.max(1);
+    let off = edge_index * 2;
+    if vertical {
+        let x = x0 + off;
+        if x < 2 || x + 1 >= stride {
+            return;
+        }
+        for k in 0..8usize {
+            let bseg = bs[k / 2];
+            if bseg == 0 {
+                continue;
+            }
+            let y = y0 + k * y_step;
+            if y >= height {
+                continue;
+            }
+            let o = y * stride;
+            let pp_idx = [o + x - 1, o + x - 2];
+            let qq_idx = [o + x, o + x + 1];
+            filter_chroma_both_at(cb, cr, pp_idx, qq_idx, bseg, qp, p);
+        }
+    } else {
+        let y = y0 + off * y_step;
+        if y < 2 * y_step || y + y_step >= height {
+            return;
+        }
+        for k in 0..8usize {
+            let bseg = bs[k / 2];
+            if bseg == 0 {
+                continue;
+            }
+            let x = x0 + k;
+            if x >= stride {
+                continue;
+            }
+            let row = |dy: isize| (y as isize + dy * y_step as isize) as usize * stride + x;
+            let pp_idx = [row(-1), row(-2)];
+            let qq_idx = [row(0), row(1)];
+            filter_chroma_both_at(cb, cr, pp_idx, qq_idx, bseg, qp, p);
+        }
+    }
+}
+
+
+/// Per-macroblock edge filtering for [`deblock_frame_mbaff`] (split out to
+/// keep argument lists manageable): vertical direction first, then horizontal.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn filter_mbaff_mb(
+    luma: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+    mb_cols: usize,
+    infos: &[DeblockMbInfo],
+    p: DeblockParams,
+    cqp: impl Fn(i32) -> i32,
+    mb_x: usize,
+    mb_y: usize,
+    idx: usize,
+    cur: &DeblockMbInfo,
+    mvy: i32,
+    ly0: usize,
+    lstep: usize,
+    cy0: usize,
+    cstep: usize,
+) {
+    let lx = mb_x * 16;
+    let cx = mb_x * 8;
+
+    // ---- Vertical direction (dir = 0) ----
+    let mut first_v_done = false;
+    if mb_x > 0 {
+        // ffmpeg's left pair members: LTOP is the left MB on the pair-top
+        // row, LBOT the one directly below it.
+        let ltop_i = (mb_y & !1) * mb_cols + mb_x - 1;
+        let lbot_i = (ltop_i + mb_cols).min(infos.len() - 1);
+        let lt = &infos[ltop_i];
+        let lb = &infos[lbot_i];
+        if cur.field != lt.field {
+            // Mixed-interlace first vertical edge; ffmpeg marks it done so
+            // dir == 0 skips the plain boundary filter.
+            deblock_first_vertical_edge_mcaff(
+                luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, lt, lb, p,
+            );
+            first_v_done = true;
+        }
+    }
+    if mb_x > 0 && !first_v_done {
+        let left = &infos[idx - 1];
+        // dir == 0: either-side-intra always gives bS 4 (the FRAME_MBAFF
+        // clause of ffmpeg's boundary rule).
+        let bs = derive_bs_segments(left, cur, true, [3, 7, 11, 15], [0, 4, 8, 12], mvy);
+        let qp = (cur.qp + left.qp + 1) >> 1;
+        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, 0, bs, p, qp);
+        let qpc = (cqp(cur.qp) + cqp(left.qp) + 1) >> 1;
+        deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, true, 0, bs, p, qpc);
+    }
+    for ei in 1..=3usize {
+        let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
+        let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
+        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
+        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, ei, bs, p, cur.qp);
+        // Chroma derives its own bS from the co-located chroma blocks
+        // (§8.7.2.1 mapping used by `deblock_chroma_mb`).
+        let c_bs =
+            derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14], mvy);
+        deblock_chroma_edge_stepped(
+            cb,
+            cr,
+            chroma_stride,
+            cx,
+            cy0,
+            cstep,
+            true,
+            ei,
+            c_bs,
+            p,
+            cqp(cur.qp),
+        );
+    }
+
+    // ---- Horizontal direction (dir = 1) ----
+    if mb_y > 0 {
+        let top_idx = idx - mb_cols;
+        let top = &infos[top_idx];
+        if (mb_y & 1) == 0 && !cur.field && top.field {
+            // Fieldcoded-above pair-top boundary: filter once per
+            // above-pair member (rows mb_y-2 and mb_y-1).
+            if mb_y >= 2 {
+                let above_top = &infos[top_idx - mb_cols];
+                deblock_fieldcoded_above_boundary_mcaff(
+                    luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, above_top, 0, p,
+                );
+            }
+            deblock_fieldcoded_above_boundary_mcaff(
+                luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, top, 1, p,
+            );
+        } else {
+            let bs: [u8; 4] = if is_intra(cur.mb_type) || is_intra(top.mb_type) {
+                // Either side intra: 4 unless a side is field-coded —
+                // then the weak-path 3 (dir == 1).
+                if !(cur.field || top.field) {
+                    [4; 4]
+                } else {
+                    [3; 4]
+                }
+            } else if cur.field != top.field {
+                // Forced bS = 1 without any MV check.
+                [1; 4]
+            } else {
+                derive_bs_segments(top, cur, true, [12, 13, 14, 15], [0, 1, 2, 3], mvy)
+            };
+            let qp = (cur.qp + top.qp + 1) >> 1;
+            deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, 0, bs, p, qp);
+            let qpc = (cqp(cur.qp) + cqp(top.qp) + 1) >> 1;
+            deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, false, 0, bs, p, qpc);
+        }
+    }
+    for ei in 1..=3usize {
+        let p_blocks = [
+            (ei - 1) * 4,
+            (ei - 1) * 4 + 1,
+            (ei - 1) * 4 + 2,
+            (ei - 1) * 4 + 3,
+        ];
+        let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
+        let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
+        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, ei, bs, p, cur.qp);
+        // Chroma interior edge: co-located chroma blocks (see above).
+        let c_bs =
+            derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11], mvy);
+        deblock_chroma_edge_stepped(
+            cb,
+            cr,
+            chroma_stride,
+            cx,
+            cy0,
+            cstep,
+            false,
+            ei,
+            c_bs,
+            p,
+            cqp(cur.qp),
+        );
+    }
+}
+
+
+/// Full-frame MBAFF deblocking orchestrator (ffmpeg `ff_h264_filter_mb`
+/// applied over every macroblock of a FRAME_MBAFF picture in raster order).
+///
+/// `infos` holds one [`DeblockMbInfo`] per macroblock in raster order
+/// (`infos[mb_y * mb_cols + mb_x]`, `mb_rows` = number of macroblock rows =
+/// 2 × pair rows); each entry's `field` flag carries its pair's
+/// `mb_field_decoding_flag`. Implements:
+///
+/// - the mixed-interlace first VERTICAL edge special case via
+///   [`deblock_first_vertical_edge_mcaff`] (marks the edge done),
+/// - the fieldcoded-above pair-top HORIZONTAL boundary special case via
+///   [`deblock_fieldcoded_above_boundary_mcaff`],
+/// - the field-aware boundary rules: either-side-intra → 4, except the
+///   horizontal edge keeps **3** when either side is field-coded
+///   (ffmpeg's `IS_INTERLACED(mb_type|mbm_type)` guard with `dir == 1`),
+///   and a forced bS = 1 without any MV check across a horizontal
+///   field/frame coding mismatch,
+/// - plain per-segment bS derivation elsewhere using the current MB's
+///   field-aware `mvy_limit`,
+/// - interior edges filtered through the parity-doubled addressing for
+///   field-coded MBs (ffmpeg's doubled-`linesize` virtual-plane view).
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_frame_mbaff(
+    luma: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+    mb_cols: usize,
+    mb_rows: usize,
+    infos: &[DeblockMbInfo],
+    p: DeblockParams,
+) {
+    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+        return;
+    }
+    debug_assert_eq!(infos.len(), mb_cols * mb_rows);
+    let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
+
+    for mb_y in 0..mb_rows {
+        for mb_x in 0..mb_cols {
+            let idx = mb_y * mb_cols + mb_x;
+            let cur = &infos[idx];
+            let mvy = mvy_limit(cur.field);
+            let (ly0, lstep) = mbaff_luma_geom(cur.field, mb_y);
+            let (cy0, cstep) = mbaff_chroma_geom(cur.field, mb_y);
+            filter_mbaff_mb(
+                luma,
+                cb,
+                cr,
+                luma_stride,
+                chroma_stride,
+                mb_cols,
+                infos,
+                p,
+                cqp,
+                mb_x,
+                mb_y,
+                idx,
+                cur,
+                mvy,
+                ly0,
+                lstep,
+                cy0,
+                cstep,
+            );
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,12 +1804,12 @@ mod tests {
     /// the standard left-edge block mapping (uniform-info tests only care
     /// about one representative segment).
     fn bs_boundary(p: &DeblockMbInfo, q: &DeblockMbInfo) -> u8 {
-        derive_bs_segments(p, q, true, [3, 7, 11, 15], [0, 4, 8, 12])[0]
+        derive_bs_segments(p, q, true, [3, 7, 11, 15], [0, 4, 8, 12], 4)[0]
     }
 
     /// Boundary-strength for an interior edge (both sides `cur`), segment 0.
     fn bs_interior(cur: &DeblockMbInfo) -> u8 {
-        derive_bs_segments(cur, cur, false, [0, 4, 8, 12], [1, 5, 9, 13])[0]
+        derive_bs_segments(cur, cur, false, [0, 4, 8, 12], [1, 5, 9, 13], 4)[0]
     }
 
     #[test]
@@ -892,5 +1992,579 @@ mod tests {
         let before = plane.to_vec();
         deblock_luma_edge(&mut plane, stride, 0, 0, true, 1, [4; 4], params, 40);
         assert_eq!(plane, before);
+    }
+    // -- MBAFF field-aware tests ------------------------------------------
+
+    fn field_info(t: MbType, coeffs: bool, field: bool) -> DeblockMbInfo {
+        let nz = if coeffs { [1u8; 16] } else { [0u8; 16] };
+        DeblockMbInfo::new_field(t, nz, [MvCell::default(); 16], 26, field)
+    }
+
+    #[test]
+    fn mvy_limit_is_halved_for_field_mbs() {
+        assert_eq!(mvy_limit(false), 4);
+        assert_eq!(mvy_limit(true), 2);
+    }
+
+    #[test]
+    fn field_mv_y_difference_of_two_flags_boundary() {
+        // Field-coded MBs flag at |Δmv_y| >= 2; frame-coded need >= 4.
+        let cell = |mv: [i32; 2]| MvCell {
+            mv,
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        };
+        let mut a = field_info(MbType::PL016x16, false, true);
+        let mut b = field_info(MbType::PL016x16, false, true);
+        a.cells = [cell([0, 0]); 16];
+        b.cells = [cell([0, 2]); 16];
+        // Δmv_y = 2 with the field limit of 2 → bS = 1.
+        assert_eq!(
+            derive_bs_pair(
+                false,
+                false,
+                true,
+                0,
+                0,
+                a.cells[0],
+                b.cells[0],
+                mvy_limit(true)
+            ),
+            1
+        );
+        // Same MVs against the frame limit of 4 → bS = 0.
+        assert_eq!(
+            derive_bs_pair(
+                false,
+                false,
+                true,
+                0,
+                0,
+                a.cells[0],
+                b.cells[0],
+                mvy_limit(false)
+            ),
+            0
+        );
+        // The x threshold is NOT halved: Δmv_x = 2 stays bS = 0 for fields.
+        b.cells = [cell([2, 0]); 16];
+        assert_eq!(
+            derive_bs_pair(
+                false,
+                false,
+                true,
+                0,
+                0,
+                a.cells[0],
+                b.cells[0],
+                mvy_limit(true)
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn first_vertical_edge_bs_current_intra_is_all_four() {
+        let cur = field_info(MbType::Intra4x4, true, true);
+        let lt = field_info(MbType::PL016x16, false, false);
+        let lb = field_info(MbType::PL016x16, false, false);
+        assert_eq!(first_vertical_edge_bs(&cur, &lt, &lb, true, false), [4; 8]);
+    }
+
+    #[test]
+    fn first_vertical_edge_bs_frame_cur_pair_top_matches_ffmpeg_tables() {
+        // Current frame-coded pair-top, non-intra; per ffmpeg's j = i & 1
+        // mapping even segments consult left_top, odd ones left_bottom.
+        let cur = field_info(MbType::PL016x16, false, false);
+        let lt = field_info(
+            MbType::Intra16x16 {
+                pred_mode: 0,
+                cbp_chroma: 0,
+                cbp_luma: 0,
+            },
+            false,
+            false,
+        );
+        let lb = field_info(MbType::PL016x16, false, false); // no coeffs anywhere
+        let bs = first_vertical_edge_bs(&cur, &lt, &lb, false, false);
+        // i even → left_top (intra) → 4; i odd → left_bottom → 1.
+        assert_eq!(bs, [4, 1, 4, 1, 4, 1, 4, 1]);
+    }
+
+    #[test]
+    fn first_vertical_edge_bs_field_cur_uses_rightmost_column_blocks() {
+        // Current field-coded, non-intra; nz is read from the LEFT members'
+        // rightmost column (blocks 3/7/11/15 via OFF_FIELD) against the
+        // current MB's left column (blocks 0/4/8/12).
+        let mut cur = field_info(MbType::PL016x16, false, true);
+        cur.nz[0] = 5;
+        cur.nz[12] = 5;
+        let mut lt = field_info(MbType::PL016x16, false, false);
+        lt.nz[7] = 9; // OFF_FIELD[1] = 7
+        let mut lb = field_info(MbType::PL016x16, false, false);
+        lb.nz[11] = 9; // OFF_FIELD[6] = table[6 % 4 + ... ] -> 11
+        let bs = first_vertical_edge_bs(&cur, &lt, &lb, true, false);
+        // Segments 0..3 vs left_top, 4..7 vs left_bottom (j = i >> 2).
+        // i=0: blk0=5 vs LT[3]=0 → 2; i=1: blk0=5 vs LT[7]=9 → 2;
+        // i=2: blk4=0 vs LT[11]=0 → 1; i=3: blk4=0 vs LT[15]=0 → 1;
+        // i=4..5: blk8=0 vs LB → 1; i=6: blk12=5 vs LB[11]=9 → 2;
+        // i=7: blk12=5 vs LB[15]=0 → 2.
+        assert_eq!(bs, [2, 2, 1, 1, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn fieldcoded_above_boundary_intra_gives_three_not_four() {
+        let cur = field_info(MbType::PL016x16, false, false);
+        let above = field_info(MbType::Intra4x4, true, true);
+        assert_eq!(fieldcoded_above_boundary_bs(&cur, &above), [3; 4]);
+    }
+
+    #[test]
+    fn fieldcoded_above_boundary_coefficient_rule() {
+        let mut cur = field_info(MbType::PL016x16, false, false);
+        let mut above = field_info(MbType::PL016x16, false, true);
+        cur.nz[2] = 1; // top-row block of the current MB
+        above.nz[13] = 1; // bottom-row block of the above member
+                          // bS[i] = 1 + !!(cur.nz[i] | above.nz[12+i]).
+        assert_eq!(fieldcoded_above_boundary_bs(&cur, &above), [1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn mbaff_call_filters_only_targeted_parity_rows() {
+        // A vertical edge on a 32-row buffer: with y_step = 2 and origin 0,
+        // only EVEN rows may change; with origin 1, only ODD rows.
+        let stride = 32usize;
+        let rows = 32usize;
+        let params = DeblockParams::default();
+        let make = || {
+            let mut plane = vec![0u8; stride * rows];
+            for r in 0..rows {
+                for c in 0..stride {
+                    plane[r * stride + c] = if c < 8 { 112 } else { 100 };
+                }
+            }
+            plane
+        };
+
+        let before = make();
+        let mut after = before.clone();
+        filter_mbaff_call(
+            &mut after,
+            stride,
+            8,
+            2,
+            2,
+            false,
+            [3, 3, 3, 3],
+            40,
+            params,
+            false,
+        );
+        let changed: Vec<usize> = (0..rows)
+            .filter(|&r| {
+                after[r * stride..(r + 1) * stride] != before[r * stride..(r + 1) * stride]
+            })
+            .collect();
+        assert!(!changed.is_empty());
+        assert!(changed.iter().all(|r| r % 2 == 0), "{changed:?}");
+
+        let before = make();
+        let mut after = before.clone();
+        filter_mbaff_call(
+            &mut after,
+            stride,
+            8,
+            3,
+            2,
+            false,
+            [3, 3, 3, 3],
+            40,
+            params,
+            false,
+        );
+        let changed: Vec<usize> = (0..rows)
+            .filter(|&r| {
+                after[r * stride..(r + 1) * stride] != before[r * stride..(r + 1) * stride]
+            })
+            .collect();
+        assert!(!changed.is_empty());
+        assert!(changed.iter().all(|r| r % 2 == 1), "{changed:?}");
+    }
+
+    #[test]
+    fn mbaff_call_group_mapping_covers_exactly_two_rows_per_group() {
+        // With bs = [0, 3, 0, 0] only group 1 (positions k = 2 and 3) may
+        // change: rows origin + 2k = 4 and 6.
+        let stride = 32usize;
+        let rows = 32usize;
+        let params = DeblockParams::default();
+        let mut plane = vec![0u8; stride * rows];
+        for r in 0..rows {
+            for c in 0..stride {
+                plane[r * stride + c] = if c < 8 { 112 } else { 100 };
+            }
+        }
+        let before = plane.clone();
+        filter_mbaff_call(
+            &mut plane,
+            stride,
+            8,
+            0,
+            2,
+            false,
+            [0, 3, 0, 0],
+            40,
+            params,
+            false,
+        );
+        for r in 0..rows {
+            let changed =
+                plane[r * stride..(r + 1) * stride] != before[r * stride..(r + 1) * stride];
+            assert_eq!(changed, r == 4 || r == 6, "row {r} changed={changed}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // deblock_frame_mbaff orchestrator
+    // -----------------------------------------------------------------------
+
+    fn orch_params() -> DeblockParams {
+        DeblockParams {
+            disable_idc: 0,
+            alpha_offset_div2: 0,
+            beta_offset_div2: 0,
+            chroma_qp_index_offset: 0,
+        }
+    }
+
+    /// Small-amplitude non-linear texture: local sample differences stay well
+    /// inside the filter's flatness windows (β and the strong-filter α/4
+    /// bound), while the non-linearity guarantees the filters actually move
+    /// samples (a purely linear ramp is a fixed point of the strong filter).
+    fn ramp_plane(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let y = i / w;
+                (100 + ((x * 7 + y * 13) % 5)) as u8
+            })
+            .collect()
+    }
+
+    /// With every pair frame-coded the MBAFF orchestrator must reproduce the
+    /// plain frame-convention per-MB pass exactly (and both must actually
+    /// filter — asserted via a change in the first plane).
+    #[test]
+    fn mbaff_orchestrator_matches_frame_path_when_all_pairs_are_frame_coded() {
+        let (mb_cols, mb_rows) = (2usize, 4usize);
+        let w = mb_cols * 16;
+        let h = mb_rows * 16;
+        let cw = w / 2;
+        let ch = h / 2;
+
+        let infos: Vec<DeblockMbInfo> = (0..mb_cols * mb_rows)
+            .map(|i| {
+                let t = if i % 3 == 0 {
+                    MbType::Intra4x4
+                } else {
+                    MbType::PL016x16
+                };
+                let mut nz = [0u8; 16];
+                for (k, nz_k) in nz.iter_mut().enumerate() {
+                    *nz_k = ((i * 7 + k) % 3) as u8;
+                }
+                let mut cells = [crate::mv::MvCell::default(); 16];
+                for (k, c) in cells.iter_mut().enumerate() {
+                    c.mv = [((i + k) % 5) as i32 * 3 - 4, ((i * 3 + k) % 7) as i32 * 2 - 6];
+                    c.ref_idx = ((i + k) % 2) as i32;
+                }
+                DeblockMbInfo::new(t, nz, cells, 20 + (i % 9) as i32)
+            })
+            .collect();
+
+        let mut a_luma = ramp_plane(w, h);
+        let mut a_cb = ramp_plane(cw, ch);
+        let mut a_cr = ramp_plane(cw, ch);
+        deblock_frame_mbaff(
+            &mut a_luma,
+            &mut a_cb,
+            &mut a_cr,
+            w,
+            cw,
+            mb_cols,
+            mb_rows,
+            &infos,
+            orch_params(),
+        );
+        assert!(
+            a_luma != ramp_plane(w, h),
+            "the frame-coded pass should actually filter samples"
+        );
+
+        let mut b_luma = ramp_plane(w, h);
+        let mut b_cb = ramp_plane(cw, ch);
+        let mut b_cr = ramp_plane(cw, ch);
+        // Plain frame-convention pass over the same data.
+        for my in 0..mb_rows {
+            for mx in 0..mb_cols {
+                let idx = my * mb_cols + mx;
+                let cur = &infos[idx];
+                let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
+                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
+                deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
+                deblock_chroma_mb(&mut b_cb, &mut b_cr, cw, mx, my, cur, left, top, orch_params());
+            }
+        }
+        assert_eq!(a_luma, b_luma);
+        assert_eq!(a_cb, b_cb);
+        assert_eq!(a_cr, b_cr);
+    }
+
+    /// Debug harness (session #32g): pinpoints WHERE the orchestrator
+    /// diverges from the plain per-MB pass on an all-frame-coded frame.
+    #[test]
+    fn mbaff_orchestrator_debug_first_divergence() {
+        let (mb_cols, mb_rows) = (2usize, 2usize);
+        let w = mb_cols * 16;
+        let h = mb_rows * 16;
+        let cw = w / 2;
+        let ch = h / 2;
+
+        let infos: Vec<DeblockMbInfo> = (0..mb_cols * mb_rows)
+            .map(|i| {
+                let t = if i % 3 == 0 {
+                    MbType::Intra4x4
+                } else {
+                    MbType::PL016x16
+                };
+                let mut nz = [0u8; 16];
+                for (k, nz_k) in nz.iter_mut().enumerate() {
+                    *nz_k = ((i * 7 + k) % 3) as u8;
+                }
+                let cells = [crate::mv::MvCell::default(); 16];
+                DeblockMbInfo::new(t, nz, cells, 26)
+            })
+            .collect();
+
+        let mut a_luma = ramp_plane(w, h);
+        let mut b_luma = ramp_plane(w, h);
+        deblock_frame_mbaff(
+            &mut a_luma,
+            &mut ramp_plane(cw, ch),
+            &mut ramp_plane(cw, ch),
+            w,
+            cw,
+            mb_cols,
+            mb_rows,
+            &infos,
+            orch_params(),
+        );
+        for my in 0..mb_rows {
+            for mx in 0..mb_cols {
+                let idx = my * mb_cols + mx;
+                let cur = &infos[idx];
+                let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
+                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
+                deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
+            }
+        }
+        let mut first: Option<(usize, usize, u8, u8)> = None;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if a_luma[i] != b_luma[i] {
+                    first = Some((x, y, a_luma[i], b_luma[i]));
+                    break;
+                }
+            }
+            if first.is_some() {
+                break;
+            }
+        }
+        let f = format!("{first:?}");
+        assert!(first.is_none(), "orchestrator diverges at (x,y,a,b) = {f}");
+    }
+
+    /// Debug harness variant reproducing the full original test data
+    /// (varied QPs and motion cells, 2×4 grid).
+    #[test]
+    fn mbaff_orchestrator_debug_full_data() {
+        let (mb_cols, mb_rows) = (2usize, 4usize);
+        let w = mb_cols * 16;
+        let h = mb_rows * 16;
+
+        let infos: Vec<DeblockMbInfo> = (0..mb_cols * mb_rows)
+            .map(|i| {
+                let t = if i % 3 == 0 {
+                    MbType::Intra4x4
+                } else {
+                    MbType::PL016x16
+                };
+                let mut nz = [0u8; 16];
+                for (k, nz_k) in nz.iter_mut().enumerate() {
+                    *nz_k = ((i * 7 + k) % 3) as u8;
+                }
+                let mut cells = [crate::mv::MvCell::default(); 16];
+                for (k, c) in cells.iter_mut().enumerate() {
+                    c.mv = [((i + k) % 5) as i32 * 3 - 4, ((i * 3 + k) % 7) as i32 * 2 - 6];
+                    c.ref_idx = ((i + k) % 2) as i32;
+                }
+                DeblockMbInfo::new(t, nz, cells, 20 + (i % 9) as i32)
+            })
+            .collect();
+
+        let mut a_luma = ramp_plane(w, h);
+        let mut b_luma = ramp_plane(w, h);
+        deblock_frame_mbaff(
+            &mut a_luma,
+            &mut ramp_plane(w / 2, h / 2),
+            &mut ramp_plane(w / 2, h / 2),
+            w,
+            w / 2,
+            mb_cols,
+            mb_rows,
+            &infos,
+            orch_params(),
+        );
+        for my in 0..mb_rows {
+            for mx in 0..mb_cols {
+                let idx = my * mb_cols + mx;
+                let cur = &infos[idx];
+                let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
+                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
+                deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
+            }
+        }
+        let mut first: Option<(usize, usize, u8, u8)> = None;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if a_luma[i] != b_luma[i] {
+                    first = Some((x, y, a_luma[i], b_luma[i]));
+                    break;
+                }
+            }
+            if first.is_some() {
+                break;
+            }
+        }
+        let f = format!("{first:?}");
+        assert!(first.is_none(), "orchestrator diverges at (x,y,a,b) = {f}");
+    }
+
+    /// Parity isolation of the stepped addressing: with `y_step = 2` and an
+    /// even origin, only EVEN rows may change; an odd origin touches only ODD
+    /// rows (ffmpeg's doubled-`linesize` field view).
+    #[test]
+    fn stepped_luma_edge_respects_parity_isolation() {
+        let (w, h) = (32usize, 64usize);
+        // Strong path: on perfectly linear content the weak filter's central
+        // delta rounds to zero, while the strong intra filter always moves
+        // samples — ideal for observing exactly which rows are touched.
+        let bs = [4u8; 4];
+        let p = orch_params();
+        for parity in [0usize, 1] {
+            let before = ramp_plane(w, h);
+            let mut plane = before.clone();
+            // Vertical interior edge (x = 0 + 2*4 = 8), rows origin+2k.
+            deblock_luma_edge_stepped(&mut plane, w, 0, parity, 2, true, 2, bs, p, 30);
+            let mut touched_v = false;
+            for y in 0..h {
+                let changed = plane[y * w..(y + 1) * w] != before[y * w..(y + 1) * w];
+                if changed {
+                    touched_v = true;
+                    assert_eq!(y % 2, parity, "v-edge touched row {y} of wrong parity");
+                }
+            }
+            assert!(touched_v, "vertical edge should filter (parity {parity})");
+
+            let before = ramp_plane(w, h);
+            let mut plane = before.clone();
+            // Horizontal interior edge (virtual row 8 → y = parity + 16).
+            deblock_luma_edge_stepped(&mut plane, w, 0, parity, 2, false, 2, bs, p, 30);
+            let mut touched_h = false;
+            for y in 0..h {
+                let changed = plane[y * w..(y + 1) * w] != before[y * w..(y + 1) * w];
+                if changed {
+                    touched_h = true;
+                    assert_eq!(y % 2, parity, "h-edge touched row {y} of wrong parity");
+                }
+            }
+            assert!(touched_h, "horizontal edge should filter (parity {parity})");
+        }
+    }
+
+    /// A field-coded pair filters through the parity-doubled addressing and
+    /// reaches both chroma planes as well.
+    #[test]
+    fn mbaff_field_pair_filters_luma_and_chroma() {
+        let (mb_cols, mb_rows) = (1usize, 2usize); // one pair
+        let w = 16usize;
+        let h = 32usize;
+
+        let mk = |t: MbType| {
+            DeblockMbInfo::new_field(t, [1u8; 16], [crate::mv::MvCell::default(); 16], 30, true)
+        };
+        let infos = vec![mk(MbType::Intra4x4), mk(MbType::PL016x16)];
+
+        let before = ramp_plane(w, h);
+        let mut luma = before.clone();
+        let mut cb = ramp_plane(w / 2, h / 2);
+        let mut cr = ramp_plane(w / 2, h / 2);
+        deblock_frame_mbaff(
+            &mut luma,
+            &mut cb,
+            &mut cr,
+            w,
+            w / 2,
+            mb_cols,
+            mb_rows,
+            &infos,
+            orch_params(),
+        );
+
+        assert!(
+            luma != before,
+            "field-coded pair should filter luma samples"
+        );
+        // Chroma bS mirrors luma bS, so chroma must be filtered too.
+        assert_ne!(cb, ramp_plane(w / 2, h / 2), "chroma cb should be filtered");
+    }
+
+    /// Mixed interlace: current MB frame-coded, LEFT pair field-coded → the
+    /// first vertical edge goes through the mixed-edge special case, where an
+    /// intra neighbour forces bS = 4 (strong filter) regardless of the zero
+    /// coefficients that would otherwise give bS ≤ 1.
+    #[test]
+    fn mbaff_mixed_left_pair_first_vertical_edge_uses_special_case() {
+        let (mb_cols, mb_rows) = (2usize, 2usize);
+        let w = 32usize;
+        let h = 32usize;
+        let cells = [crate::mv::MvCell::default(); 16];
+
+        let lt = DeblockMbInfo::new_field(MbType::Intra4x4, [0u8; 16], cells, 26, true);
+        let lb = DeblockMbInfo::new_field(MbType::Intra4x4, [0u8; 16], cells, 26, true);
+        let cur = DeblockMbInfo::new_field(MbType::PL016x16, [0u8; 16], cells, 26, false);
+        let filler = DeblockMbInfo::new(MbType::PL016x16, [0u8; 16], cells, 26);
+        // Raster order: (0,0)=lt, (1,0)=cur, (0,1)=lb, (1,1)=filler.
+        let infos = vec![lt, cur, lb, filler];
+
+        let before = ramp_plane(w, h);
+        let mut luma = before.clone();
+        let mut cb = ramp_plane(w / 2, h / 2);
+        let mut cr = ramp_plane(w / 2, h / 2);
+        deblock_frame_mbaff(
+            &mut luma, &mut cb, &mut cr, w, w / 2, mb_cols, mb_rows, &infos, orch_params(),
+        );
+
+        // The strong filter must modify the p-side samples adjacent to the
+        // x = 16 boundary despite both sides reporting zero coefficients.
+        let col_p = 15usize;
+        let any_changed = (0..h).any(|y| luma[y * w + col_p] != before[y * w + col_p]);
+        assert!(
+            any_changed,
+            "mixed-interlace first vertical edge should apply the strong intra filter"
+        );
     }
 }

@@ -214,7 +214,7 @@ fn dbg_sweep_stereo() {
     // Dump max-diff per frame to see if the outlier is isolated to one frame.
     eprintln!("\nPer-frame max-diff (both channels):");
     let total_aligned = (np[0].len() - n_start).min(rp[0].len() - r_start);
-    for fi in 0..((total_aligned + 1023) / 1024) {
+    for fi in 0..total_aligned.div_ceil(1024) {
         let lo = fi * 1024;
         let hi = ((fi + 1) * 1024).min(total_aligned);
         let mut frame_max = 0.0f32;

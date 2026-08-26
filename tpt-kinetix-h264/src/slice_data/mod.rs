@@ -145,8 +145,19 @@ mod tests {
         //   mvd(0,0) → "1" "1", cbp=0 → "1" → 111111, then rbsp stop bit.
         let data = [0xFFu8, 0x80];
         let mut r = BitReader::new(&data);
-        let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
+        let parsed = parse_p_slice(
+            &mut r,
+            1,
+            1,
+            26,
+            1,
+            0,
+            false,
+            false,
+            false,
+            &mut crate::trace::NoopTracer,
+        )
+        .unwrap();
         assert_eq!(parsed.macroblocks.len(), 1);
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::PL016x16);
@@ -171,8 +182,19 @@ mod tests {
         // bits: 00100 11111 1(pad) → 0x27 0xE0.
         let data = [0x27u8, 0xE0];
         let mut r = BitReader::new(&data);
-        let parsed =
-            parse_p_slice(&mut r, 1, 4, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
+        let parsed = parse_p_slice(
+            &mut r,
+            1,
+            4,
+            26,
+            1,
+            0,
+            false,
+            false,
+            false,
+            &mut crate::trace::NoopTracer,
+        )
+        .unwrap();
         assert_eq!(parsed.macroblocks.len(), 4);
         for mb in &parsed.macroblocks[..3] {
             assert!(mb.skip, "MB should be skip");
@@ -199,8 +221,19 @@ mod tests {
         //   = 1 010 11111 → 0b1010_1111 = 0xAF, then rbsp stop.
         let data = [0xAFu8, 0x80];
         let mut r = BitReader::new(&data);
-        let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
+        let parsed = parse_p_slice(
+            &mut r,
+            1,
+            1,
+            26,
+            1,
+            0,
+            false,
+            false,
+            false,
+            &mut crate::trace::NoopTracer,
+        )
+        .unwrap();
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::P16x8);
         let motion = mb.motion.as_ref().unwrap();
@@ -221,8 +254,19 @@ mod tests {
         //   byte2 = 1(data)+1(stop)+pad = 11100000 = 0xE0
         let data = [0x93u8, 0xFF, 0xE0];
         let mut r = BitReader::new(&data);
-        let parsed =
-            parse_p_slice(&mut r, 1, 1, 26, 1, 0, false, &mut crate::trace::NoopTracer).unwrap();
+        let parsed = parse_p_slice(
+            &mut r,
+            1,
+            1,
+            26,
+            1,
+            0,
+            false,
+            false,
+            false,
+            &mut crate::trace::NoopTracer,
+        )
+        .unwrap();
         let mb = &parsed.macroblocks[0];
         assert_eq!(mb.mb_type, MbType::P8x8);
         let motion = mb.motion.as_ref().unwrap();

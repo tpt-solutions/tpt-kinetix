@@ -12,15 +12,17 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
-    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut qp = slice_qp;
-    // §7.4.4: `mb_field_decoding_flag` is read once per *macroblock pair* (i.e.
-    // before every even-indexed macroblock) when the picture is an MBAFF frame
-    // (the SPS enables `mb_adaptive_frame_field_flag` and the slice is not itself
-    // a field picture). The flag applies to both the top and bottom macroblock of
-    // the pair; for frame-only / PAFF streams it is simply absent.
+    // §7.4.4: `mb_field_decoding_flag` is read once per *macroblock pair* when
+    // the picture is an MBAFF frame (the SPS enables
+    // `mb_adaptive_frame_field_flag` and the slice is not itself a field
+    // picture); FFmpeg's h264_cavlc.c reads it as one raw bit BEFORE mb_type
+    // for the top MB of each pair (h264_cavlc.c @n5.1 lines 728-731). The flag
+    // applies to both the top and bottom macroblock of the pair; for
+    // frame-only / PAFF streams it is simply absent.
     let mbaff_frame = mb_aff && !field_pic_flag;
     let mut cur_pair_field = false;
     // Phase G.4: per-frame-MB `mb_field_decoding_flag`, populated as each
@@ -29,24 +31,49 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
 
     for mb_idx in 0..total {
-        let mb_x = (mb_idx as u32) % mb_cols;
-        let mb_y = (mb_idx as u32) / mb_cols;
+        // MBAFF addressing (§6.4.2/§7.4.4): consecutive macroblock addresses
+        // enumerate each PAIR as (top, bottom) before advancing horizontally —
+        // addr 2k/2k+1 are the two MBs of pair k (pair k sits at frame-MB
+        // column `pair % mb_cols`, MB rows `2*(pair / mb_cols)` and +1).
+        // Frame-only streams use plain raster. Using plain raster here made
+        // every bottom MB derive its neighbour contexts (nC / MPM left+top)
+        // from the WRONG grid slots, drifting the CAVLC parse until a
+        // non-intra mb_type error (session #32f, found via the env-gated
+        // CAVLC-TRC line; mirrors the CABAC grid_idx fix of session #32e).
+        let (mb_x, mb_y, grid_idx) = if mbaff_frame {
+            let pair = mb_idx >> 1;
+            let parity = mb_idx & 1;
+            let px = pair % mb_cols as usize;
+            let py = pair / mb_cols as usize;
+            let mb_row = 2 * py + parity;
+            (px as u32, mb_row as u32, mb_row * mb_cols as usize + px)
+        } else {
+            let gx = (mb_idx as u32) % mb_cols;
+            let gy = (mb_idx as u32) / mb_cols;
+            (gx, gy, mb_idx)
+        };
 
         if mbaff_frame && mb_idx % 2 == 0 {
             cur_pair_field = reader
                 .read_bit()
                 .ok_or(SliceDataError::Eof("mb_field_decoding_flag"))?
                 == 1;
-            field_flags[mb_idx] = Some(cur_pair_field);
-            if mb_idx + 1 < total {
-                field_flags[mb_idx + 1] = Some(cur_pair_field);
+            field_flags[grid_idx] = Some(cur_pair_field);
+            if (grid_idx + mb_cols as usize) < total {
+                field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
             }
+        }
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!(
+                "CAVLC-TRC mb{mb_idx} px={mb_x} py={mb_y} field={cur_pair_field} bitpos={}",
+                reader.bit_position()
+            );
         }
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
         if std::env::var("KINETIX_BINTRACE").is_ok() {
-            eprintln!("CAVLC-TRC mb{mb_idx} px={mb_x} py={mb_y} field={cur_pair_field} mb_type={mb_type} bitpos={}", reader.bit_position());
+            eprintln!("CAVLC-TRC mb{mb_idx} mb_type={mb_type}");
         }
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
             reader,
@@ -63,11 +90,11 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
             nctx,
         )?;
         qp = new_qp;
-        nz[mb_idx] = this_nz;
-        pred_ctx[mb_idx] = this_pred_ctx;
+        nz[grid_idx] = this_nz;
+        pred_ctx[grid_idx] = this_pred_ctx;
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
-        macroblocks.push(mb);
+        macroblocks[grid_idx] = mb;
     }
 
     Ok(ParsedSlice {
@@ -597,35 +624,72 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
+    mb_aff: bool,
+    field_pic_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
-    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    // Grid-indexed so `predict_slice_mvs` sees each MB at its frame-MB address
+    // even though the pair enumeration order differs under MBAFF.
+    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut qp = slice_qp;
     // `mb_skip_run` is signalled once per slice and again after each coded MB
-    // (§7.4.5); `None` means a fresh value must be read for the next MB.
-    let mut mb_skip_run: Option<u32> = None;
+    // (§7.4.5); `-1` (ffmpeg's sentinel) means a fresh value must be read for
+    // the next MB. FFmpeg's `if (sl->mb_skip_run--)` post-decrement wraps a 0
+    // to -1 after a coded MB, which is exactly this reset.
+    let mut mb_skip_run: i32 = -1;
+    // MBAFF frame state — see parse_i_slice for addressing; the field-flag
+    // timing here follows ffmpeg h264_cavlc.c @n5.1 lines 719-731 exactly:
+    //   * inside a skip run, when the run hits 0 on a pair-TOP skipped MB, one
+    //     raw bit is read immediately (it is the pair flag of the pair whose
+    //     BOTTOM MB is about to be coded);
+    //   * otherwise the bit is read before mb_type of every coded pair-top MB.
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut cur_pair_field = false;
+    let mut field_flags: Vec<Option<bool>> = vec![None; total];
 
     for mb_idx in 0..total {
-        let mb_x = (mb_idx as u32) % mb_cols;
-        let mb_y = (mb_idx as u32) / mb_cols;
+        let (mb_x, mb_y, grid_idx) = if mbaff_frame {
+            let pair = mb_idx >> 1;
+            let parity = mb_idx & 1;
+            let px = pair % mb_cols as usize;
+            let py = pair / mb_cols as usize;
+            let mb_row = 2 * py + parity;
+            (px as u32, mb_row as u32, mb_row * mb_cols as usize + px)
+        } else {
+            let gx = (mb_idx as u32) % mb_cols;
+            let gy = (mb_idx as u32) / mb_cols;
+            (gx, gy, mb_idx)
+        };
+        let is_pair_top = !mbaff_frame || mb_idx % 2 == 0;
 
-        if mb_skip_run.is_none() {
+        if mb_skip_run == -1 {
             let run = reader.read_ue().ok_or(SliceDataError::Eof("mb_skip_run"))?;
             if run > total as u32 {
                 return Err(SliceDataError::Unsupported("mb_skip_run out of range"));
             }
-            mb_skip_run = Some(run);
+            mb_skip_run = run as i32;
         }
-        let run = mb_skip_run.as_mut().expect("set above");
-        if *run > 0 {
-            *run -= 1;
+        if mb_skip_run > 0 {
+            // Skipped macroblock.
+            mb_skip_run -= 1;
+            if mbaff_frame && is_pair_top && mb_skip_run == 0 {
+                cur_pair_field = reader
+                    .read_bit()
+                    .ok_or(SliceDataError::Eof("mb_field_decoding_flag"))?
+                    == 1;
+                field_flags[grid_idx] = Some(cur_pair_field);
+                if (grid_idx + mb_cols as usize) < total {
+                    field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
+                }
+            }
             let mut mb = Macroblock::new_skip();
             mb.qp = qp;
             mb.skip = true;
-            nz[mb_idx] = MbNz {
+            mb.mb_field_flag = cur_pair_field;
+            nz[grid_idx] = MbNz {
                 present: true,
                 ..Default::default()
             };
@@ -636,14 +700,26 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
             // treat the skip neighbour as off-picture and force its
             // `predIntra4x4PredMode` to DC, corrupting the prediction mode (and
             // cascading to its own neighbours).
-            pred_ctx[mb_idx] = MbPredCtx {
+            pred_ctx[grid_idx] = MbPredCtx {
                 present: true,
                 ..Default::default()
             };
-            macroblocks.push(mb);
+            macroblocks[grid_idx] = mb;
             continue;
         }
-        mb_skip_run = None;
+        mb_skip_run = -1;
+
+        if mbaff_frame && is_pair_top {
+            cur_pair_field = reader
+                .read_bit()
+                .ok_or(SliceDataError::Eof("mb_field_decoding_flag"))?
+                == 1;
+            field_flags[grid_idx] = Some(cur_pair_field);
+            if (grid_idx + mb_cols as usize) < total {
+                field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
+            }
+        }
+        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
 
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_p_macroblock(
             reader,
@@ -656,12 +732,15 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
             num_ref_idx_l0_active,
             chroma_qp_index_offset,
             transform_8x8_mode,
+            nctx,
             tracer,
         )?;
         qp = new_qp;
-        nz[mb_idx] = this_nz;
-        pred_ctx[mb_idx] = this_pred_ctx;
-        macroblocks.push(mb);
+        nz[grid_idx] = this_nz;
+        pred_ctx[grid_idx] = this_pred_ctx;
+        let mut mb = mb;
+        mb.mb_field_flag = cur_pair_field;
+        macroblocks[grid_idx] = mb;
     }
 
     // Derive motion vectors for every inter macroblock (§8.4.1). The store is
@@ -704,6 +783,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
+    nctx: NeighbourCtx,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
@@ -725,6 +805,8 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
                 "mb_type out of range in P slice",
             ));
         }
+        // Intra macroblock inside a P slice: same syntax as an I-slice MB,
+        // including MBAFF-aware neighbour contexts for MPM/nC derivation.
         return parse_intra_macroblock(
             r,
             mb_x,
@@ -737,7 +819,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             tracer,
             i_type,
             transform_8x8_mode,
-            NeighbourCtx::NONE,
+            nctx,
         );
     }
 
@@ -820,7 +902,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         cbp_c,
         false,
         tracer,
-        NeighbourCtx::NONE,
+        nctx,
     )?;
 
     let mb_type_str = format!("{:?}", mb_type);

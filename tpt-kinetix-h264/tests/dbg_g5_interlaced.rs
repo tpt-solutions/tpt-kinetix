@@ -13,6 +13,14 @@ use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
 use tpt_kinetix_h264::H264Decoder;
 
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 const W: usize = 64;
 const H: usize = 64; // multiple of 32 for clean MBAFF pairs
 const FRAME: usize = W * H * 3 / 2;
@@ -26,6 +34,10 @@ fn sad(a: &[u8], b: &[u8]) -> u64 {
 
 #[test]
 fn g5_interlaced_corpus() {
+    if !ffmpeg_available() {
+        eprintln!("g5_interlaced_corpus: skipped (ffmpeg unavailable)");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_g5_interlaced");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -42,6 +54,9 @@ fn g5_interlaced_corpus() {
         ("mbaff_ibp", "testsrc=size=64x64:rate=1:duration=3", "cabac=1:bframes=1:b-adapt=0:b-pyramid=0:keyint=300:min-keyint=300:deblock=0:direct=none:interlaced=1:tff=1:threads=1"),
         // CAVLC MBAFF.
         ("mbaff_cavlc_ip", "testsrc=size=64x64:rate=1:duration=2", "cabac=0:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1"),
+        // CAVLC MBAFF, motion-heavy content: coax x264 into field-coded pairs
+        // in the P slice (the plain testsrc P frame codes all pairs as frame).
+        ("mbaff_cavlc_ip2", "testsrc2=size=64x64:rate=1:duration=2", "cabac=0:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1"),
     ];
 
     for &(name, src, params) in variants {

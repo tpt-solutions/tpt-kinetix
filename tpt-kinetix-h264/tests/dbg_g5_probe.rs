@@ -18,7 +18,19 @@ fn sad(a: &[u8], b: &[u8]) -> u64 {
         .sum()
 }
 
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn run(name: &str, w: usize, h: usize, src: &str, params: &str) {
+    if !ffmpeg_available() {
+        eprintln!("PROBE {name}: skipped (ffmpeg unavailable)");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_g5_probe");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join(format!("{name}.h264"));
@@ -27,7 +39,9 @@ fn run(name: &str, w: usize, h: usize, src: &str, params: &str) {
 
     let ok = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        .args([
+            "-f", "lavfi", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        ])
         .args(["-x264-params", params])
         .arg(h264.to_str().unwrap())
         .output()
@@ -64,7 +78,6 @@ fn run(name: &str, w: usize, h: usize, src: &str, params: &str) {
         }
     }
     let mut ours: Vec<Vec<u8>> = Vec::new();
-    let mut desync = false;
     for (n, &s) in starts.iter().enumerate() {
         let e = starts.get(n + 1).copied().unwrap_or(annexb.len());
         let mut data = vec![0u8, 0, 0, 1];
@@ -107,13 +120,23 @@ fn run(name: &str, w: usize, h: usize, src: &str, params: &str) {
             line.push_str(&format!("[ff{} sad={}] ", best.1, best.0));
         }
     }
-    println!("PROBE {name}: frames ours={} ff={ff_frames} desync_or_missing={} {line}", ours.len(), ff_frames - ours.len());
+    println!(
+        "PROBE {name}: frames ours={} ff={ff_frames} desync_or_missing={} {line}",
+        ours.len(),
+        ff_frames - ours.len()
+    );
 }
 
 #[test]
 fn g5_probe_matrix() {
     let base = "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1";
-    run("probe_base_64", 64, 64, "testsrc=size=64x64:rate=1:duration=1", base);
+    run(
+        "probe_base_64",
+        64,
+        64,
+        "testsrc=size=64x64:rate=1:duration=1",
+        base,
+    );
     run(
         "probe_no8x8_64",
         64,

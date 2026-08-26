@@ -467,12 +467,11 @@ impl AacDecoder {
                                     // Second half of buf: show what will be stored as overlap.
                                     let ws = ch.ics.window_shape as usize;
                                     let w = &self.windows.long[ws];
-                                    for i in lo..hi {
-                                        let rel = i - 1024; // position in overlap array
-                                        let b = buf[i];
+                                    for (rel, &b) in buf[1024..hi].iter().enumerate() {
                                         let wv = w[1023 - rel];
                                         eprintln!(
-                                            "DBG overlap frame{frame_no} buf[{i}]={b:e} w[{}]={wv:.6} stored={:e}",
+                                            "DBG overlap frame{frame_no} buf[{}]={b:e} w[{}]={wv:.6} stored={:e}",
+                                            rel + 1024,
                                             1023 - rel,
                                             b * wv
                                         );

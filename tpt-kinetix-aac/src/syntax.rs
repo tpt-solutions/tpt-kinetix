@@ -668,8 +668,12 @@ impl RawDataBlock {
                     let mut fill_len =
                         reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
                     if fill_len == 15 {
+                        // ffmpeg's escape arithmetic (`cnt += ret - 1`) is C
+                        // unsigned math: an escaped count of 0 wraps to a large
+                        // value rather than going negative. Mirror that with
+                        // wrapping subtraction so corrupt streams can't panic.
                         let esc = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
-                        fill_len += esc - 1;
+                        fill_len = fill_len.saturating_add(esc.wrapping_sub(1));
                     }
                     // extension type (4 bits); AAC-LC only carries EXT_FILL here.
                     reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;

@@ -51,6 +51,57 @@ pub struct H264Decoder {
 }
 
 impl H264Decoder {
+    /// Build flat (raster-order) deblock infos carrying MBAFF field flags.
+    ///
+    /// Returns `Some` only when the opt-in `KINETIX_MBAFF_FIELD_MC=1` gate is
+    /// active; callers fall back to the plain frame-convention deblocking
+    /// otherwise.
+    fn mbaff_deblock_infos(
+        parsed: &crate::slice_data::ParsedSlice,
+    ) -> Option<Vec<crate::deblock::DeblockMbInfo>> {
+        if std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("1") {
+            return None;
+        }
+        Some(
+            parsed
+                .macroblocks
+                .iter()
+                .enumerate()
+                .map(|(idx, mb)| {
+                    let nz = parsed.nz[idx].luma;
+                    let cells = parsed
+                        .mv_store
+                        .cells_of(idx)
+                        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                    crate::deblock::DeblockMbInfo::new_field(
+                        mb.mb_type, nz, cells, mb.qp, mb.mb_field_flag,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Run the full-frame MBAFF deblocking orchestrator over `recon`.
+    fn run_mbaff_deblock(
+        recon: &mut crate::reconstruct::ReconstructedFrame,
+        infos: &[crate::deblock::DeblockMbInfo],
+        mb_cols: u32,
+        mb_rows: u32,
+        params: crate::deblock::DeblockParams,
+    ) {
+        crate::deblock::deblock_frame_mbaff(
+            &mut recon.luma,
+            &mut recon.chroma_cb,
+            &mut recon.chroma_cr,
+            recon.luma_stride,
+            recon.chroma_stride,
+            mb_cols as usize,
+            mb_rows as usize,
+            infos,
+            params,
+        );
+    }
+
     pub fn new() -> Self {
         Self {
             sps_store: HashMap::new(),
@@ -961,6 +1012,8 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
+                        sps.mb_adaptive_frame_field_flag,
+                        header.field_pic_flag,
                         tracer,
                     )
                 };
@@ -982,7 +1035,7 @@ impl H264Decoder {
                             },
                             _ => crate::reconstruct::WeightedPred::Default,
                         };
-                        let mut recon = crate::reconstruct::reconstruct_inter_frame(
+                        let mut recon = crate::reconstruct::reconstruct_inter_frame_ex(
                             &parsed.macroblocks,
                             &parsed.mv_store,
                             &ref_frames,
@@ -990,6 +1043,7 @@ impl H264Decoder {
                             mb_rows,
                             width,
                             height,
+                            sps.mb_adaptive_frame_field_flag && !header.field_pic_flag,
                             chroma_qp_index_offset,
                             scaling,
                             &weighted_pred,
@@ -1002,60 +1056,75 @@ impl H264Decoder {
                             beta_offset_div2: header.slice_beta_offset_div2,
                             chroma_qp_index_offset,
                         };
-                        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
-                            .macroblocks
-                            .chunks(mb_cols as usize)
-                            .enumerate()
-                            .map(|(row_idx, row)| {
-                                row.iter()
+                        match Self::mbaff_deblock_infos(&parsed) {
+                            Some(mcaff_infos) => {
+                                // MBAFF frame picture: full-frame field-aware
+                                // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
+                                Self::run_mbaff_deblock(
+                                    &mut recon,
+                                    &mcaff_infos,
+                                    mb_cols,
+                                    mb_rows,
+                                    deblock_params,
+                                );
+                            }
+                            None => {
+                                let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+                                    .macroblocks
+                                    .chunks(mb_cols as usize)
                                     .enumerate()
-                                    .map(|(col_idx, mb)| {
-                                        let idx = row_idx * mb_cols as usize + col_idx;
-                                        let nz = parsed.nz[idx].luma;
-                                        let cells = parsed
-                                            .mv_store
-                                            .cells_of(idx)
-                                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                                        crate::deblock::DeblockMbInfo::new(
-                                            mb.mb_type, nz, cells, mb.qp,
-                                        )
+                                    .map(|(row_idx, row)| {
+                                        row.iter()
+                                            .enumerate()
+                                            .map(|(col_idx, mb)| {
+                                                let idx = row_idx * mb_cols as usize + col_idx;
+                                                let nz = parsed.nz[idx].luma;
+                                                let cells = parsed
+                                                    .mv_store
+                                                    .cells_of(idx)
+                                                    .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                                                crate::deblock::DeblockMbInfo::new(
+                                                    mb.mb_type, nz, cells, mb.qp,
+                                                )
+                                            })
+                                            .collect()
                                     })
-                                    .collect()
-                            })
-                            .collect();
-                        for (row_idx, row_info) in mb_info.iter().enumerate() {
-                            for (col_idx, cur) in row_info.iter().enumerate() {
-                                let left = if col_idx > 0 {
-                                    Some(&row_info[col_idx - 1])
-                                } else {
-                                    None
-                                };
-                                let top = if row_idx > 0 {
-                                    Some(&mb_info[row_idx - 1][col_idx])
-                                } else {
-                                    None
-                                };
-                                crate::deblock::deblock_luma_mb(
-                                    &mut recon.luma,
-                                    recon.luma_stride,
-                                    col_idx,
-                                    row_idx,
-                                    cur,
-                                    left,
-                                    top,
-                                    deblock_params,
-                                );
-                                crate::deblock::deblock_chroma_mb(
-                                    &mut recon.chroma_cb,
-                                    &mut recon.chroma_cr,
-                                    recon.chroma_stride,
-                                    col_idx,
-                                    row_idx,
-                                    cur,
-                                    left,
-                                    top,
-                                    deblock_params,
-                                );
+                                    .collect();
+                                for (row_idx, row_info) in mb_info.iter().enumerate() {
+                                    for (col_idx, cur) in row_info.iter().enumerate() {
+                                        let left = if col_idx > 0 {
+                                            Some(&row_info[col_idx - 1])
+                                        } else {
+                                            None
+                                        };
+                                        let top = if row_idx > 0 {
+                                            Some(&mb_info[row_idx - 1][col_idx])
+                                        } else {
+                                            None
+                                        };
+                                        crate::deblock::deblock_luma_mb(
+                                            &mut recon.luma,
+                                            recon.luma_stride,
+                                            col_idx,
+                                            row_idx,
+                                            cur,
+                                            left,
+                                            top,
+                                            deblock_params,
+                                        );
+                                        crate::deblock::deblock_chroma_mb(
+                                            &mut recon.chroma_cb,
+                                            &mut recon.chroma_cr,
+                                            recon.chroma_stride,
+                                            col_idx,
+                                            row_idx,
+                                            cur,
+                                            left,
+                                            top,
+                                            deblock_params,
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -1270,60 +1339,75 @@ impl H264Decoder {
                             beta_offset_div2: header.slice_beta_offset_div2,
                             chroma_qp_index_offset,
                         };
-                        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
-                            .macroblocks
-                            .chunks(mb_cols as usize)
-                            .enumerate()
-                            .map(|(row_idx, row)| {
-                                row.iter()
+                        match Self::mbaff_deblock_infos(&parsed) {
+                            Some(mcaff_infos) => {
+                                // MBAFF frame picture: full-frame field-aware
+                                // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
+                                Self::run_mbaff_deblock(
+                                    &mut recon,
+                                    &mcaff_infos,
+                                    mb_cols,
+                                    mb_rows,
+                                    deblock_params,
+                                );
+                            }
+                            None => {
+                                let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
+                                    .macroblocks
+                                    .chunks(mb_cols as usize)
                                     .enumerate()
-                                    .map(|(col_idx, mb)| {
-                                        let idx = row_idx * mb_cols as usize + col_idx;
-                                        let nz = parsed.nz[idx].luma;
-                                        let cells = parsed
-                                            .mv_store
-                                            .cells_of(idx)
-                                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                                        crate::deblock::DeblockMbInfo::new(
-                                            mb.mb_type, nz, cells, mb.qp,
-                                        )
+                                    .map(|(row_idx, row)| {
+                                        row.iter()
+                                            .enumerate()
+                                            .map(|(col_idx, mb)| {
+                                                let idx = row_idx * mb_cols as usize + col_idx;
+                                                let nz = parsed.nz[idx].luma;
+                                                let cells = parsed
+                                                    .mv_store
+                                                    .cells_of(idx)
+                                                    .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                                                crate::deblock::DeblockMbInfo::new(
+                                                    mb.mb_type, nz, cells, mb.qp,
+                                                )
+                                            })
+                                            .collect()
                                     })
-                                    .collect()
-                            })
-                            .collect();
-                        for (row_idx, row_info) in mb_info.iter().enumerate() {
-                            for (col_idx, cur) in row_info.iter().enumerate() {
-                                let left = if col_idx > 0 {
-                                    Some(&row_info[col_idx - 1])
-                                } else {
-                                    None
-                                };
-                                let top = if row_idx > 0 {
-                                    Some(&mb_info[row_idx - 1][col_idx])
-                                } else {
-                                    None
-                                };
-                                crate::deblock::deblock_luma_mb(
-                                    &mut recon.luma,
-                                    recon.luma_stride,
-                                    col_idx,
-                                    row_idx,
-                                    cur,
-                                    left,
-                                    top,
-                                    deblock_params,
-                                );
-                                crate::deblock::deblock_chroma_mb(
-                                    &mut recon.chroma_cb,
-                                    &mut recon.chroma_cr,
-                                    recon.chroma_stride,
-                                    col_idx,
-                                    row_idx,
-                                    cur,
-                                    left,
-                                    top,
-                                    deblock_params,
-                                );
+                                    .collect();
+                                for (row_idx, row_info) in mb_info.iter().enumerate() {
+                                    for (col_idx, cur) in row_info.iter().enumerate() {
+                                        let left = if col_idx > 0 {
+                                            Some(&row_info[col_idx - 1])
+                                        } else {
+                                            None
+                                        };
+                                        let top = if row_idx > 0 {
+                                            Some(&mb_info[row_idx - 1][col_idx])
+                                        } else {
+                                            None
+                                        };
+                                        crate::deblock::deblock_luma_mb(
+                                            &mut recon.luma,
+                                            recon.luma_stride,
+                                            col_idx,
+                                            row_idx,
+                                            cur,
+                                            left,
+                                            top,
+                                            deblock_params,
+                                        );
+                                        crate::deblock::deblock_chroma_mb(
+                                            &mut recon.chroma_cb,
+                                            &mut recon.chroma_cr,
+                                            recon.chroma_stride,
+                                            col_idx,
+                                            row_idx,
+                                            cur,
+                                            left,
+                                            top,
+                                            deblock_params,
+                                        );
+                                    }
+                                }
                             }
                         }
 

@@ -174,6 +174,8 @@ fn record_p_slice() {
         num_ref_idx_l0_active,
         chroma_qp_index_offset,
         false,
+        false,
+        false,
         &mut rec,
     );
     let log = rec.blocks.lock().unwrap();

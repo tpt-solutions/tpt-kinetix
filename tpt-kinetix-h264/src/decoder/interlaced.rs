@@ -326,7 +326,7 @@ impl H264Decoder {
             }
         };
 
-        let recon = crate::reconstruct::reconstruct_mbaff_intra_frame(
+        let mut recon = crate::reconstruct::reconstruct_mbaff_intra_frame(
             &parsed.macroblocks,
             mb_cols,
             mb_rows,
@@ -337,6 +337,19 @@ impl H264Decoder {
             &crate::reconstruct::WeightedPred::Default,
             tracer,
         );
+
+        // MBAFF in-loop deblocking behind the same opt-in gate as the field
+        // MC path (KINETIX_MBAFF_FIELD_MC=1); frame-convention behaviour is
+        // unchanged when the gate is absent.
+        let deblock_params = crate::deblock::DeblockParams {
+            disable_idc: header.disable_deblocking_filter_idc as u8,
+            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+            beta_offset_div2: header.slice_beta_offset_div2,
+            chroma_qp_index_offset,
+        };
+        if let Some(mcaff_infos) = Self::mbaff_deblock_infos(&parsed) {
+            Self::run_mbaff_deblock(&mut recon, &mcaff_infos, mb_cols, mb_rows, deblock_params);
+        }
 
         // Assemble the full interlaced frame and store it in the DPB as a frame
         // reference. MBAFF frames are coded as frame pictures (field_pic_flag is
@@ -437,6 +450,8 @@ impl H264Decoder {
                 num_ref_idx_l0_active,
                 chroma_qp_index_offset,
                 transform_8x8,
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
                 tracer,
             )
         };

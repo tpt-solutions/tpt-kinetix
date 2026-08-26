@@ -978,6 +978,9 @@ fn reconstruct_chroma_at<T: DecodeTracer>(
 /// Reconstruct a full P-slice frame: inter macroblocks are motion-compensated
 /// from `ref_frames` (RefPicList0) using the per-MB motion store (§8.4.2,
 /// §8.5); intra macroblocks inside the slice use the intra path (§8.3).
+///
+/// Frame-only convenience wrapper around [`reconstruct_inter_frame_ex`] with
+/// `mb_aff = false`.
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_inter_frame<T: DecodeTracer>(
     macroblocks: &[Macroblock],
@@ -992,59 +995,212 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
     weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
+    reconstruct_inter_frame_ex(
+        macroblocks,
+        mv_store,
+        ref_frames,
+        mb_cols,
+        mb_rows,
+        width,
+        height,
+        false,
+        chroma_qp_index_offset,
+        scaling,
+        weighted,
+        tracer,
+    )
+}
+
+/// [`reconstruct_inter_frame`] with MBAFF support (§6.4.2 / §8.4.2): pass
+/// `mb_aff = true` when the slice belongs to a *frame* picture of an MBAFF
+/// stream (`mb_adaptive_frame_field_flag && !field_pic_flag`). Macroblocks
+/// carrying `mb_field_decoding_flag` are then reconstructed in field
+/// coordinates: motion compensation samples the reference's contiguous
+/// half-height plane of the macroblock's parity and the result (plus residual)
+/// is written back at stride-2 spacing into the frame planes at the same
+/// parity offset — mirroring FFmpeg's doubled `mb_linesize` and parity-shifted
+/// destination (h264_slice_ref.c @n5.1 lines 2591–2598).
+///
+/// The field-macroblock path is currently **opt-in** via
+/// `KINETIX_MBAFF_FIELD_MC=1`: intra macroblocks inside a P pair are still
+/// reconstructed with contiguous (frame-convention) addressing, so mixing the
+/// two conventions is not yet pixel-exact on real content. Frame-coded pairs
+/// are unaffected by the gate.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_frames: &[VideoFrame],
+    mb_cols: u32,
+    mb_rows: u32,
+    width: u32,
+    height: u32,
+    mb_aff: bool,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) -> ReconstructedFrame {
     let luma_stride = width as usize;
     let chroma_stride = (width / 2) as usize;
     let mut luma = vec![0u8; luma_stride * height as usize];
     let mut cb = vec![0u8; chroma_stride * (height as usize / 2)];
     let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
 
+    // Pre-extract, once per reference frame, the contiguous half-height field
+    // planes for BOTH parities so field-macroblock motion compensation can
+    // sample them directly (§8.4.2.2.1). Only built for MBAFF frames; the
+    // plain frame path never touches them.
+    let mut field_planes: Vec<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = Vec::new();
+    if mb_aff {
+        for rf in ref_frames {
+            let top = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            let bottom = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            field_planes.push(vec![top, bottom]);
+        }
+    }
+
     for mb_y in 0..mb_rows {
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
             if mb.motion.is_some() || mb.skip {
-                reconstruct_inter_luma(
-                    mb,
-                    mv_store,
-                    ref_frames,
-                    &mut luma,
-                    luma_stride,
-                    mb_cols,
-                    mb_x,
-                    mb_y,
-                    scaling,
-                    weighted,
-                    tracer,
-                );
-                reconstruct_inter_chroma(
-                    mb,
-                    mv_store,
-                    ref_frames,
-                    &mut cb,
-                    &mut cr,
-                    chroma_stride,
-                    mb_cols,
-                    mb_x,
-                    mb_y,
-                    chroma_qp_index_offset,
-                    scaling,
-                    weighted,
-                    tracer,
-                );
+                if mb_aff
+                    && mb.mb_field_flag
+                    && std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1")
+                {
+                    // Field macroblock inside the MBAFF frame pair: motion
+                    // compensation runs in field coordinates against the
+                    // parity plane; output rows land at stride-2 spacing.
+                    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+                        eprintln!("MBAFF-FIELD-INTER ({mb_x},{mb_y})");
+                    }
+                    reconstruct_mbaff_inter_luma(
+                        mb,
+                        mv_store,
+                        &field_planes,
+                        &mut luma,
+                        luma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                    reconstruct_mbaff_inter_chroma(
+                        mb,
+                        mv_store,
+                        &field_planes,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                } else {
+                    reconstruct_inter_luma(
+                        mb,
+                        mv_store,
+                        ref_frames,
+                        &mut luma,
+                        luma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                    reconstruct_inter_chroma(
+                        mb,
+                        mv_store,
+                        ref_frames,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                }
             } else {
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
-                reconstruct_chroma(
-                    mb,
-                    &mut cb,
-                    &mut cr,
-                    chroma_stride,
-                    mb_x,
-                    mb_y,
-                    chroma_qp_index_offset,
-                    scaling,
-                    weighted,
-                    tracer,
-                );
+                if mb_aff
+                    && mb.mb_field_flag
+                    && std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1")
+                {
+                    // Intra macroblock inside a *field-coded* pair of a P
+                    // slice: reconstruct at the pair's parity line with
+                    // doubled vertical step and the field scan tables —
+                    // identical geometry to `reconstruct_mbaff_intra_frame`.
+                    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+                        eprintln!("MBAFF-FIELD-INTRA ({mb_x},{mb_y})");
+                    }
+                    let parity = (mb_y & 1) as usize;
+                    reconstruct_luma_at(
+                        mb,
+                        &mut luma,
+                        luma_stride,
+                        mb_x,
+                        mb_y,
+                        ((mb_y >> 1) * 32) as usize + parity,
+                        2,
+                        &crate::transform::FIELD_SCAN_4X4,
+                        &crate::transform::FIELD_SCAN_8X8,
+                        scaling,
+                        tracer,
+                    );
+                    reconstruct_chroma_at(
+                        mb,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_x,
+                        mb_y,
+                        ((mb_y >> 1) * 16) as usize + parity,
+                        2,
+                        &crate::transform::FIELD_SCAN_4X4,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                } else {
+                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                    reconstruct_chroma(
+                        mb,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                }
             }
         }
     }
@@ -1055,6 +1211,190 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
         chroma_cr: cr,
         luma_stride,
         chroma_stride,
+    }
+}
+
+/// MBAFF field-macroblock luma inter reconstruction inside a *frame* picture
+/// (§8.4.2.2.1). Motion compensation runs in field coordinates against the
+/// contiguous half-height parity plane of the reference; each predicted /
+/// residual row is written to the frame plane at stride-2 spacing with the
+/// macroblock's parity offset (`2*y_field + (mb_y & 1)`).
+///
+/// `field_planes[ref_idx]` is `(top_parity_planes, bottom_parity_planes)`,
+/// each a `(luma, cb, cr)` tuple as produced by [`FieldRef::planes`].
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    field_planes: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    // Pairs enumerate vertically first, so the pair index is `mb_y >> 1`
+    // and each pair-half covers 16 field rows.
+    let base_fy = ((mb_y >> 1) * 16) as usize;
+    let bottom = (mb_y & 1) == 1;
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (block, &cell) in grid.iter().enumerate() {
+        let bx = (block % 4) * 4;
+        let by = (block / 4) * 4;
+        let x0 = base_x + bx;
+        let fy0 = base_fy + by;
+        let ref_idx = cell.ref_idx.max(0) as usize;
+
+        let mut pred = [0u8; 16];
+        if let Some(ref_entry) = field_planes.get(ref_idx).or_else(|| field_planes.last()) {
+            let (luma_ref, _, _) = &ref_entry[bottom as usize];
+            let h = luma_ref.len() / stride.max(1);
+            crate::motion_comp::interpolate_luma(
+                &mut pred, 4, luma_ref, stride, stride, h, x0 as i32, fy0 as i32, cell.mv[0],
+                cell.mv[1], 4, 4,
+            );
+        }
+        let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
+
+        tracer.on_motion_comp(
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx,
+        );
+
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        for row in 0..4 {
+            // Field row -> frame row: stride-2 with the MB's parity offset.
+            let py = 2 * (fy0 + row) + bottom as usize;
+            for col in 0..4 {
+                let px = x0 + col;
+                let off = py * stride + px;
+                let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                if off < plane.len() && px < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+    }
+}
+
+/// MBAFF field-macroblock chroma inter reconstruction inside a *frame*
+/// picture — the chroma twin of [`reconstruct_mbaff_inter_luma`] (§8.4.2.2.1):
+/// field coordinates against the half-height chroma parity planes, output at
+/// stride-2 spacing with the MB's parity offset.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    field_planes: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    cb_plane: &mut [u8],
+    cr_plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 8) as usize;
+    let base_fy = ((mb_y >> 1) * 8) as usize;
+    let bottom = (mb_y & 1) == 1;
+    let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (comp, plane) in [cb_plane as &mut [u8], cr_plane].into_iter().enumerate() {
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
+        let dc_raster = [
+            dc_src[0] as i32,
+            dc_src[1] as i32,
+            dc_src[2] as i32,
+            dc_src[3] as i32,
+        ];
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+
+        for block in 0..4usize {
+            let bx = (block % 2) * 4;
+            let by = (block / 2) * 4;
+            let x0 = base_x + bx;
+            let fy0 = base_fy + by;
+            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+            let ref_idx = cell.ref_idx.max(0) as usize;
+
+            let mut pred = [0u8; 16];
+            if let Some(ref_entry) = field_planes.get(ref_idx).or_else(|| field_planes.last()) {
+                let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
+                let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                let h = plane_ref.len() / stride.max(1);
+                crate::motion_comp::interpolate_chroma(
+                    &mut pred, 4, plane_ref, stride, stride, h, x0 as i32, fy0 as i32, cell.mv[0],
+                    cell.mv[1], 4, 4,
+                );
+            }
+            let pred = combine_weighted(
+                weighted,
+                true,
+                false,
+                ref_idx,
+                0,
+                &pred,
+                &[0u8; 16],
+                Some(comp),
+            );
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                trace_plane,
+                block as u8,
+                &pred,
+                cell.mv,
+                ref_idx,
+            );
+
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            for row in 0..4 {
+                // Field row -> frame row: stride-2 with the MB's parity offset.
+                let py = 2 * (fy0 + row) + bottom as usize;
+                for col in 0..4 {
+                    let px = x0 + col;
+                    let off = py * stride + px;
+                    let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2119,6 +2459,145 @@ mod tests {
         // average of the ramp neighbours.
         assert_eq!(f.chroma_cb[8], 9);
         assert_eq!(f.chroma_cr[8], 17);
+    }
+
+    /// MBAFF field-macroblock inter reconstruction (`reconstruct_mbaff_inter_luma`):
+    /// a vertical field pair over a row-ramp reference reproduces
+    /// `luma[y] == y` exactly — the bottom MB samples the reference's *odd*
+    /// rows through the contiguous bottom-parity half-height plane and both MBs
+    /// write their rows at stride-2 spacing with the MB's parity offset.
+    #[test]
+    fn mbaff_field_mb_samples_parity_rows() {
+        // 16x32 frame = one MB column, one MBAFF pair (2 frame-MB rows).
+        let mut ref_frame = crate::macroblock::new_video_frame(16, 32).unwrap();
+        for y in 0..32 {
+            for x in 0..16 {
+                ref_frame.data[y * 16 + x] = y as u8;
+            }
+        }
+        let cell = crate::mv::MvCell {
+            mv: [0, 0],
+            ref_idx: 0,
+            mv_l1: [0, 0],
+            ref_idx_l1: -1,
+        };
+        let mut store = crate::mv::MvStore::new(2);
+        store.commit(0, [cell; 16], 0);
+        store.commit(1, [cell; 16], 0);
+
+        let (top_l, top_cb, top_cr) = crate::ref_pic::FieldRef {
+            frame: ref_frame.clone(),
+            is_frame: true,
+            bottom: false,
+            pic_order_cnt: 0,
+        }
+        .planes();
+        let (bot_l, bot_cb, bot_cr) = crate::ref_pic::FieldRef {
+            frame: ref_frame,
+            is_frame: true,
+            bottom: true,
+            pic_order_cnt: 0,
+        }
+        .planes();
+        let field_planes = vec![vec![(top_l, top_cb, top_cr), (bot_l, bot_cb, bot_cr)]];
+
+        let mut top = Macroblock::new_skip();
+        let mut bottom = Macroblock::new_skip();
+        top.mb_field_flag = true;
+        bottom.mb_field_flag = true;
+
+        let mut luma = vec![0u8; 16 * 32];
+        let flat = crate::transform::ScalingLists::flat();
+        for (mb, mb_y) in [(&top, 0u32), (&bottom, 1u32)] {
+            reconstruct_mbaff_inter_luma(
+                mb,
+                &store,
+                &field_planes,
+                &mut luma,
+                16,
+                1,
+                0,
+                mb_y,
+                &flat,
+                &WeightedPred::Default,
+                &mut crate::trace::NoopTracer,
+            );
+        }
+
+        // Every luma sample equals its own frame row index: the top MB wrote
+        // even rows from the even-row (top) plane, the bottom MB wrote odd
+        // rows from the odd-row (bottom) plane.
+        for y in 0..32 {
+            for x in 0..16 {
+                assert_eq!(luma[y * 16 + x], y as u8, "y={y} x={x}");
+            }
+        }
+    }
+
+    /// Intra macroblocks inside a *field-coded* pair of an interlaced frame
+    /// reconstruct at stride-2 spacing with the pair's parity offsets: DC
+    /// prediction over unavailable neighbours yields 128 everywhere, so a
+    /// fully-zero-residual vertical pair must fill ALL 32 luma lines (and the
+    /// chroma planes) of the pair region with 128.
+    #[test]
+    fn mbaff_field_intra_writes_interleaved_rows() {
+        let mut top = Macroblock::new_skip();
+        let mut bottom = Macroblock::new_skip();
+        top.mb_type = MbType::Intra16x16 {
+            pred_mode: 2, // DC
+            cbp_chroma: 0,
+            cbp_luma: 0,
+        };
+        bottom.mb_type = MbType::Intra16x16 {
+            pred_mode: 2,
+            cbp_chroma: 0,
+            cbp_luma: 0,
+        };
+        top.mb_field_flag = true;
+        bottom.mb_field_flag = true;
+        top.skip = false;
+        bottom.skip = false;
+
+        let mut luma = vec![0u8; 16 * 32];
+        let mut cb = vec![0u8; 8 * 16];
+        let mut cr = vec![0u8; 8 * 16];
+        let flat = crate::transform::ScalingLists::flat();
+        for (mb, mb_y) in [(&top, 0u32), (&bottom, 1u32)] {
+            let parity = (mb_y & 1) as usize;
+            reconstruct_luma_at(
+                mb,
+                &mut luma,
+                16,
+                0,
+                mb_y,
+                ((mb_y >> 1) * 32) as usize + parity,
+                2,
+                &crate::transform::ZIGZAG_4X4,
+                &crate::transform::ZIGZAG_8X8,
+                &flat,
+                &mut crate::trace::NoopTracer,
+            );
+            reconstruct_chroma_at(
+                mb,
+                &mut cb,
+                &mut cr,
+                8,
+                0,
+                mb_y,
+                ((mb_y >> 1) * 16) as usize + parity,
+                2,
+                &crate::transform::ZIGZAG_4X4,
+                0,
+                &flat,
+                &WeightedPred::Default,
+                &mut crate::trace::NoopTracer,
+            );
+        }
+        // All 512 luma samples of the pair region (and both chroma planes)
+        // are the DC fill value.
+        assert!(luma.iter().all(|&v| v == 128));
+        assert!(cb.iter().all(|&v| v == 128));
+        assert!(cr.iter().all(|&v| v == 128));
     }
 
     /// Explicit weighted P-slice prediction (§8.4.2.3.2) against a
