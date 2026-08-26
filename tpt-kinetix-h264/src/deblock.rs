@@ -1569,7 +1569,6 @@ fn deblock_chroma_edge_stepped(
     }
 }
 
-
 /// Per-macroblock edge filtering for [`deblock_frame_mbaff`] (split out to
 /// keep argument lists manageable): vertical direction first, then horizontal.
 #[allow(clippy::too_many_arguments)]
@@ -1610,7 +1609,17 @@ fn filter_mbaff_mb(
             // Mixed-interlace first vertical edge; ffmpeg marks it done so
             // dir == 0 skips the plain boundary filter.
             deblock_first_vertical_edge_mcaff(
-                luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, lt, lb, p,
+                luma,
+                cb,
+                cr,
+                luma_stride,
+                chroma_stride,
+                mb_x,
+                mb_y,
+                cur,
+                lt,
+                lb,
+                p,
             );
             first_v_done = true;
         }
@@ -1631,22 +1640,25 @@ fn filter_mbaff_mb(
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
         deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, ei, bs, p, cur.qp);
         // Chroma derives its own bS from the co-located chroma blocks
-        // (§8.7.2.1 mapping used by `deblock_chroma_mb`).
-        let c_bs =
-            derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14], mvy);
-        deblock_chroma_edge_stepped(
-            cb,
-            cr,
-            chroma_stride,
-            cx,
-            cy0,
-            cstep,
-            true,
-            ei,
-            c_bs,
-            p,
-            cqp(cur.qp),
-        );
+        // (§8.7.2.1 mapping used by `deblock_chroma_mb`); 4:2:0 chroma has
+        // a single interior edge (chroma offset 4, i.e. edge_index 2),
+        // so it is filtered once per direction, not per luma edge.
+        if ei == 2 {
+            let c_bs = derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14], mvy);
+            deblock_chroma_edge_stepped(
+                cb,
+                cr,
+                chroma_stride,
+                cx,
+                cy0,
+                cstep,
+                true,
+                ei,
+                c_bs,
+                p,
+                cqp(cur.qp),
+            );
+        }
     }
 
     // ---- Horizontal direction (dir = 1) ----
@@ -1659,11 +1671,31 @@ fn filter_mbaff_mb(
             if mb_y >= 2 {
                 let above_top = &infos[top_idx - mb_cols];
                 deblock_fieldcoded_above_boundary_mcaff(
-                    luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, above_top, 0, p,
+                    luma,
+                    cb,
+                    cr,
+                    luma_stride,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                    cur,
+                    above_top,
+                    0,
+                    p,
                 );
             }
             deblock_fieldcoded_above_boundary_mcaff(
-                luma, cb, cr, luma_stride, chroma_stride, mb_x, mb_y, cur, top, 1, p,
+                luma,
+                cb,
+                cr,
+                luma_stride,
+                chroma_stride,
+                mb_x,
+                mb_y,
+                cur,
+                top,
+                1,
+                p,
             );
         } else {
             let bs: [u8; 4] = if is_intra(cur.mb_type) || is_intra(top.mb_type) {
@@ -1683,7 +1715,19 @@ fn filter_mbaff_mb(
             let qp = (cur.qp + top.qp + 1) >> 1;
             deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, 0, bs, p, qp);
             let qpc = (cqp(cur.qp) + cqp(top.qp) + 1) >> 1;
-            deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, false, 0, bs, p, qpc);
+            deblock_chroma_edge_stepped(
+                cb,
+                cr,
+                chroma_stride,
+                cx,
+                cy0,
+                cstep,
+                false,
+                0,
+                bs,
+                p,
+                qpc,
+            );
         }
     }
     for ei in 1..=3usize {
@@ -1696,25 +1740,26 @@ fn filter_mbaff_mb(
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
         deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, ei, bs, p, cur.qp);
-        // Chroma interior edge: co-located chroma blocks (see above).
-        let c_bs =
-            derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11], mvy);
-        deblock_chroma_edge_stepped(
-            cb,
-            cr,
-            chroma_stride,
-            cx,
-            cy0,
-            cstep,
-            false,
-            ei,
-            c_bs,
-            p,
-            cqp(cur.qp),
-        );
+        // Chroma interior edge: co-located chroma blocks (see above); only
+        // the single 4:2:0 interior edge (chroma offset 4, edge_index 2).
+        if ei == 2 {
+            let c_bs = derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11], mvy);
+            deblock_chroma_edge_stepped(
+                cb,
+                cr,
+                chroma_stride,
+                cx,
+                cy0,
+                cstep,
+                false,
+                ei,
+                c_bs,
+                p,
+                cqp(cur.qp),
+            );
+        }
     }
 }
-
 
 /// Full-frame MBAFF deblocking orchestrator (ffmpeg `ff_h264_filter_mb`
 /// applied over every macroblock of a FRAME_MBAFF picture in raster order).
@@ -1785,7 +1830,6 @@ pub fn deblock_frame_mbaff(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2276,7 +2320,10 @@ mod tests {
                 }
                 let mut cells = [crate::mv::MvCell::default(); 16];
                 for (k, c) in cells.iter_mut().enumerate() {
-                    c.mv = [((i + k) % 5) as i32 * 3 - 4, ((i * 3 + k) % 7) as i32 * 2 - 6];
+                    c.mv = [
+                        ((i + k) % 5) as i32 * 3 - 4,
+                        ((i * 3 + k) % 7) as i32 * 2 - 6,
+                    ];
                     c.ref_idx = ((i + k) % 2) as i32;
                 }
                 DeblockMbInfo::new(t, nz, cells, 20 + (i % 9) as i32)
@@ -2311,146 +2358,28 @@ mod tests {
                 let idx = my * mb_cols + mx;
                 let cur = &infos[idx];
                 let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
-                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
+                let top = if my > 0 {
+                    Some(&infos[idx - mb_cols])
+                } else {
+                    None
+                };
                 deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
-                deblock_chroma_mb(&mut b_cb, &mut b_cr, cw, mx, my, cur, left, top, orch_params());
+                deblock_chroma_mb(
+                    &mut b_cb,
+                    &mut b_cr,
+                    cw,
+                    mx,
+                    my,
+                    cur,
+                    left,
+                    top,
+                    orch_params(),
+                );
             }
         }
         assert_eq!(a_luma, b_luma);
         assert_eq!(a_cb, b_cb);
         assert_eq!(a_cr, b_cr);
-    }
-
-    /// Debug harness (session #32g): pinpoints WHERE the orchestrator
-    /// diverges from the plain per-MB pass on an all-frame-coded frame.
-    #[test]
-    fn mbaff_orchestrator_debug_first_divergence() {
-        let (mb_cols, mb_rows) = (2usize, 2usize);
-        let w = mb_cols * 16;
-        let h = mb_rows * 16;
-        let cw = w / 2;
-        let ch = h / 2;
-
-        let infos: Vec<DeblockMbInfo> = (0..mb_cols * mb_rows)
-            .map(|i| {
-                let t = if i % 3 == 0 {
-                    MbType::Intra4x4
-                } else {
-                    MbType::PL016x16
-                };
-                let mut nz = [0u8; 16];
-                for (k, nz_k) in nz.iter_mut().enumerate() {
-                    *nz_k = ((i * 7 + k) % 3) as u8;
-                }
-                let cells = [crate::mv::MvCell::default(); 16];
-                DeblockMbInfo::new(t, nz, cells, 26)
-            })
-            .collect();
-
-        let mut a_luma = ramp_plane(w, h);
-        let mut b_luma = ramp_plane(w, h);
-        deblock_frame_mbaff(
-            &mut a_luma,
-            &mut ramp_plane(cw, ch),
-            &mut ramp_plane(cw, ch),
-            w,
-            cw,
-            mb_cols,
-            mb_rows,
-            &infos,
-            orch_params(),
-        );
-        for my in 0..mb_rows {
-            for mx in 0..mb_cols {
-                let idx = my * mb_cols + mx;
-                let cur = &infos[idx];
-                let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
-                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
-                deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
-            }
-        }
-        let mut first: Option<(usize, usize, u8, u8)> = None;
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                if a_luma[i] != b_luma[i] {
-                    first = Some((x, y, a_luma[i], b_luma[i]));
-                    break;
-                }
-            }
-            if first.is_some() {
-                break;
-            }
-        }
-        let f = format!("{first:?}");
-        assert!(first.is_none(), "orchestrator diverges at (x,y,a,b) = {f}");
-    }
-
-    /// Debug harness variant reproducing the full original test data
-    /// (varied QPs and motion cells, 2×4 grid).
-    #[test]
-    fn mbaff_orchestrator_debug_full_data() {
-        let (mb_cols, mb_rows) = (2usize, 4usize);
-        let w = mb_cols * 16;
-        let h = mb_rows * 16;
-
-        let infos: Vec<DeblockMbInfo> = (0..mb_cols * mb_rows)
-            .map(|i| {
-                let t = if i % 3 == 0 {
-                    MbType::Intra4x4
-                } else {
-                    MbType::PL016x16
-                };
-                let mut nz = [0u8; 16];
-                for (k, nz_k) in nz.iter_mut().enumerate() {
-                    *nz_k = ((i * 7 + k) % 3) as u8;
-                }
-                let mut cells = [crate::mv::MvCell::default(); 16];
-                for (k, c) in cells.iter_mut().enumerate() {
-                    c.mv = [((i + k) % 5) as i32 * 3 - 4, ((i * 3 + k) % 7) as i32 * 2 - 6];
-                    c.ref_idx = ((i + k) % 2) as i32;
-                }
-                DeblockMbInfo::new(t, nz, cells, 20 + (i % 9) as i32)
-            })
-            .collect();
-
-        let mut a_luma = ramp_plane(w, h);
-        let mut b_luma = ramp_plane(w, h);
-        deblock_frame_mbaff(
-            &mut a_luma,
-            &mut ramp_plane(w / 2, h / 2),
-            &mut ramp_plane(w / 2, h / 2),
-            w,
-            w / 2,
-            mb_cols,
-            mb_rows,
-            &infos,
-            orch_params(),
-        );
-        for my in 0..mb_rows {
-            for mx in 0..mb_cols {
-                let idx = my * mb_cols + mx;
-                let cur = &infos[idx];
-                let left = if mx > 0 { Some(&infos[idx - 1]) } else { None };
-                let top = if my > 0 { Some(&infos[idx - mb_cols]) } else { None };
-                deblock_luma_mb(&mut b_luma, w, mx, my, cur, left, top, orch_params());
-            }
-        }
-        let mut first: Option<(usize, usize, u8, u8)> = None;
-        for y in 0..h {
-            for x in 0..w {
-                let i = y * w + x;
-                if a_luma[i] != b_luma[i] {
-                    first = Some((x, y, a_luma[i], b_luma[i]));
-                    break;
-                }
-            }
-            if first.is_some() {
-                break;
-            }
-        }
-        let f = format!("{first:?}");
-        assert!(first.is_none(), "orchestrator diverges at (x,y,a,b) = {f}");
     }
 
     /// Parity isolation of the stepped addressing: with `y_step = 2` and an
@@ -2555,7 +2484,15 @@ mod tests {
         let mut cb = ramp_plane(w / 2, h / 2);
         let mut cr = ramp_plane(w / 2, h / 2);
         deblock_frame_mbaff(
-            &mut luma, &mut cb, &mut cr, w, w / 2, mb_cols, mb_rows, &infos, orch_params(),
+            &mut luma,
+            &mut cb,
+            &mut cr,
+            w,
+            w / 2,
+            mb_cols,
+            mb_rows,
+            &infos,
+            orch_params(),
         );
 
         // The strong filter must modify the p-side samples adjacent to the

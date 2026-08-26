@@ -74,7 +74,11 @@ impl H264Decoder {
                         .cells_of(idx)
                         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
                     crate::deblock::DeblockMbInfo::new_field(
-                        mb.mb_type, nz, cells, mb.qp, mb.mb_field_flag,
+                        mb.mb_type,
+                        nz,
+                        cells,
+                        mb.qp,
+                        mb.mb_field_flag,
                     )
                 })
                 .collect(),

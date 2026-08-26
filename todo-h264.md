@@ -2,6 +2,66 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32i (2026-08-26) — MBAFF DEBLOCK VALIDATED BIT-EXACT VS FFMPEG ON REAL CONTENT
+
+New ffmpeg-gated harness `tests/dbg_g6_mbaff_deblock.rs`: encodes interlaced
+clips with deblocking **ENABLED** (x264 defaults, i.e. no `deblock=0` — the G.5
+corpus never exercised the in-loop filter), decodes the reference WITHOUT
+`-skip_loop_filter`, and compares our output with the
+`KINETIX_MBAFF_FIELD_MC=1` gate on vs off.
+
+RESULT: `g6_cavlc_i` (CAVLC MBAFF I frame, 64×64) with the gate ON is
+**BIT-EXACT vs ffmpeg's fully-filtered decode — luma SAD=0 max=0, cb/cr max=0**
+(gate OFF diverges: luma sad=519 max=3, proving the gate controls the path).
+This is the first end-to-end pixel-exact validation of `deblock_frame_mbaff`
+on real x264 content; pinned as a hard assertion in the harness (regression:
+failure ⇒ deblock orchestrator, MBAFF I-frame recon, or CAVLC parse regressed).
+
+Known-divergent (pre-existing, NOT deblock-related): `g6_cabac_i` wholesale
+diffs = the CABAC MBAFF parse desync (#32e item 6); `g6_cavlc_ip` P frame
+sad≈249k = MBAFF P reconstruction gaps (#32f item 8). Also observed again on
+this clip: `P CABAC parse error: Unsupported("cbp code_num out of range")` on
+the CABAC P slice — another face of that desync.
+
+## SESSION #32h (2026-08-26) — FULL-FRAME MBAFF DEBLOCK ORCHESTRATOR LANDED + WIRED IN
+
+1. **`deblock_frame_mbaff`** (`deblock.rs`): full-frame orchestrator walking every
+   macroblock of a FRAME_MBAFF picture in raster order, port of ffmpeg
+   `ff_h264_filter_mb`/`filter_mb_dir` MBAFF semantics:
+   - mixed-interlace first VERTICAL edge via `deblock_first_vertical_edge_mcaff`
+     (left-pair LTOP/LBOTTOM indexing per ffmpeg's `left_mb_xy`), marking the
+     edge done;
+   - fieldcoded-above pair-top HORIZONTAL boundary via
+     `deblock_fieldcoded_above_boundary_mcaff`, once per above-pair member;
+   - field-aware boundary rules: dir==0 either-intra → 4 always (FRAME_MBAFF
+     clause); dir==1 either-intra → 4 unless either side field-coded → 3
+     (`IS_INTERLACED(mb|mbm)` guard); forced bS = 1 without MV check across a
+     horizontal field/frame mismatch; plain `derive_bs_segments` elsewhere with
+     the current MB's field-aware `mvy_limit`.
+2. **Parity-doubled addressing**: ffmpeg filters field MBs through a virtual
+   contiguous field plane (doubled `linesize`, parity-shifted dest). Expressed
+   in frame coords: new stepped edge helpers (`deblock_luma_edge_stepped`,
+   `deblock_chroma_edge_stepped` over `filter_luma_at`/`filter_chroma_both_at`)
+   take `(origin_y, y_step)` — a field MB occupies rows
+   `(pair_top*16 | parity) + k*2`. Frame-coded MBs use step 1 and degenerate to
+   plain addressing.
+3. **Wired into the decoder behind `KINETIX_MBAFF_FIELD_MC=1`**:
+   P-slice CABAC path and B-slice path in `decoder/mod.rs`, and the MBAFF I-frame
+   path in `decoder/interlaced.rs`, each via new helpers `mbaff_deblock_infos`
+   (flat raster infos carrying `mb_field_flag` via `DeblockMbInfo::new_field`) +
+   `run_mbaff_deblock`; gate absent ⇒ byte-identical frame-convention behaviour.
+4. **Correctness pins** (new tests): orchestrator ≡ plain per-MB pass for
+   all-frame-coded frames (luma AND both chroma planes, varied QP/motion) — this
+   caught two real bugs during development: chroma interior edges must derive
+   their own bS from co-located chroma blocks AND fire only once per direction
+   (chroma offset 4), not at every luma edge index. Plus: parity isolation of
+   the stepped filter (y_step=2 touches only the member's parity rows),
+   field-pair luma+chroma filtering smoke test, and the mixed-left-pair
+   first-vertical-edge special case applying bS = 4 strong filtering despite
+   zero coefficients. Test content note: purely linear ramps are fixed points
+   of the strong filter — use the small-amplitude non-linear texture helper.
+   248 lib tests green, workspace clippy `-D warnings` clean, fmt clean.
+
 ## SESSION #32g (2026-08-26) — MBAFF FIELD DEBLOCKING PRIMITIVES LANDED
 
 1. **`DeblockMbInfo` gained a `field: bool` flag** (`new_field()` constructor;
@@ -36,16 +96,14 @@
    group-of-2 geometry of `filter_mbaff_call`). 242 lib tests green,
    clippy `-D warnings` clean, fmt clean.
 
-REMAINING for this item (next session): build the full-frame MBAFF deblock
-orchestrator (`deblock_frame_mbaff`) that walks MB pairs in raster order,
-invokes the mixed-edge special case (marking `first_vertical_edge_done`),
-applies the field-aware boundary rules (`either-intra → 4 unless dir==1 and
-a side is field-coded → 3`; forced bS=1 without MV check when
-`dir==1 && IS_INTERLACED(cur ^ top)`), then wires it into the decoder behind
-the existing `KINETIX_MBAFF_FIELD_MC=1` gate. Reference sources saved at repo
-root during analysis: `ffmpeg_h264_loopfilter_ref.c`,
-`ffmpeg_h264dsp_ref.c`, `ffmpeg_h264_slice_ref.c` (see `loop_filter()` there
-for how ffmpeg addresses field members: dest always points at the band start).
+REMAINING for this item: **DONE in session #32h** (see above) — the full-frame
+MBAFF deblock orchestrator exists (`deblock_frame_mbaff`), implements the
+mixed-edge special case, the field-aware boundary rules, and is wired into the
+decoder behind `KINETIX_MBAFF_FIELD_MC=1`. Pixel-exactness vs ffmpeg on real
+interlaced content **validated in session #32i** (CAVLC I frame bit-exact with
+the filter enabled; see dbg_g6_mbaff_deblock.rs). Remaining for full MBAFF:
+CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
+8), field-coded-pair coverage (no x264 CAVLC clip emits them yet).
 
 ## SESSION #32f (2026-08-26) — CAVLC MBAFF I-slice: pair-addressing bug fixed; I frame now PIXEL-EXACT
 
