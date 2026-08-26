@@ -68,6 +68,14 @@ pub struct DeblockMbInfo {
     /// a field-coded MB flags a boundary at |Δmv_y| >= 2 quarter-samples
     /// instead of 4) and the MBAFF edge routines in this module.
     pub field: bool,
+    /// `transform_size_8x8_flag` of this macroblock. When set, ffmpeg does NOT
+    /// filter the ODD interior luma edges (`edge_index` 1 and 3, which cut
+    /// through the middle of each 8×8 transform block): its interior-edge loop
+    /// computes `deblock_edge = !IS_8x8DCT(mb_type & (edge<<24))` (with
+    /// `MB_TYPE_8x8DCT` = bit 24) and `continue`s the whole edge — luma AND
+    /// chroma — when clear (h264_loopfilter.c `filter_mb_dir`). Interior edge
+    /// 2 (the 8×8-block boundary) is still filtered.
+    pub transform_8x8: bool,
 }
 
 impl DeblockMbInfo {
@@ -78,6 +86,7 @@ impl DeblockMbInfo {
             cells,
             qp,
             field: false,
+            transform_8x8: false,
         }
     }
 
@@ -95,6 +104,7 @@ impl DeblockMbInfo {
             cells,
             qp,
             field,
+            transform_8x8: false,
         }
     }
 }
@@ -619,6 +629,11 @@ pub fn deblock_luma_mb(
     // Interior vertical edges (edge_index 1,2,3) — always within the same MB;
     // segments grouped by row, p-side column `ei-1`, q-side column `ei`.
     for ei in 1..=3 {
+        // ffmpeg skips the odd interior edges of 8x8-DCT macroblocks
+        // entirely (`deblock_edge = !IS_8x8DCT(mb_type & (edge<<24))`).
+        if ei != 2 && cur.transform_8x8 {
+            continue;
+        }
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
         let bs = derive_bs_segments(
@@ -661,6 +676,10 @@ pub fn deblock_luma_mb(
     // Interior horizontal edges; segments grouped by column, p-side row
     // `ei-1`, q-side row `ei`.
     for ei in 1..=3 {
+        // Odd interior edges of 8x8-DCT MBs are skipped (see above).
+        if ei != 2 && cur.transform_8x8 {
+            continue;
+        }
         let p_blocks = [
             (ei - 1) * 4,
             (ei - 1) * 4 + 1,
@@ -981,7 +1000,7 @@ pub fn fieldcoded_above_boundary_bs(cur: &DeblockMbInfo, above_member: &DeblockM
 /// [`DeblockMbInfo`]s are `left_top` / `left_bottom`.
 ///
 /// Port of ffmpeg `ff_h264_filter_mb`'s FRAME_MBAFF first-vertical-edge
-/// block, including its two-call geometry (see [`filter_mbaff_call`]):
+/// block, including its two-call geometry (see `filter_mbaff_call`):
 ///
 /// - current FIELD-coded: each pair member invokes this once; together the
 ///   invocations cover every band row of that member's parity. Call A
@@ -1233,7 +1252,7 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
     // Luma: 16 every-other-row positions from `y0`.
     for k in 0..16usize {
         let y = y0 + 2 * k;
-        if y < 2 || y + 2 >= height {
+        if y < 4 || y + 3 >= height {
             continue;
         }
         let bseg = bs[k >> 2];
@@ -1284,7 +1303,7 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
     let cheight = cb.len() / chroma_stride.max(1);
     for k in 0..8usize {
         let y = cy0 + 2 * k;
-        if y < 1 || y + 1 >= cheight {
+        if y < 2 || y + 1 >= cheight {
             continue;
         }
         let bseg = bs[k >> 1];
@@ -1595,14 +1614,52 @@ fn filter_mbaff_mb(
 ) {
     let lx = mb_x * 16;
     let cx = mb_x * 8;
+    // Session #32m bisect: skip exactly one edge identified by
+    // KINETIX_DBG_SKIP_EDGE="mb_x,mb_y,dir,ei" (dir 0=V/1=H, ei 0=boundary).
+    let skip_edge = std::env::var("KINETIX_DBG_SKIP_EDGE").ok().and_then(|s| {
+        let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        (parts.len() == 4).then_some((parts[0], parts[1], parts[2], parts[3]))
+    });
+
+    // ---- Neighbour indices (ffmpeg h264_slice.c `fill_filter_caches`,
+    // lines 2422–2437 @master) ------------------------------------------
+    // TOP: a FIELD-coded current MB looks TWO grid rows up (same parity,
+    // previous pair); a FRAME-coded one looks ONE row up. Exception: a
+    // field-coded PAIR-TOP steps back down one row when the MB directly
+    // above is frame-coded (`top_xy += stride & (INTERLACED(top)-1)`).
+    // LEFT: LTOP/LBOT split, shifting one grid row when the left MB's
+    // coding convention differs from the current MB's.
+    let has_left = mb_x > 0;
+    let mut ltop_i = idx.saturating_sub(1);
+    let mut lbot_i = idx.saturating_sub(1);
+    let left_field = has_left && infos[idx - 1].field;
+    if has_left {
+        if mb_y & 1 == 1 {
+            if left_field != cur.field && idx > mb_cols {
+                ltop_i = idx - 1 - mb_cols;
+            }
+        } else if left_field != cur.field && idx + mb_cols < infos.len() {
+            lbot_i = idx - 1 + mb_cols;
+        }
+    }
+    let mut top_i = if mb_y >= if cur.field { 2 } else { 1 } {
+        if cur.field {
+            idx - 2 * mb_cols
+        } else {
+            idx - mb_cols
+        }
+    } else {
+        usize::MAX // no valid above neighbour
+    };
+    if cur.field && (mb_y & 1) == 0 && mb_y >= 1 && !infos[idx - mb_cols].field {
+        top_i = idx - mb_cols;
+    }
+    let has_top_mb = top_i != usize::MAX;
 
     // ---- Vertical direction (dir = 0) ----
     let mut first_v_done = false;
-    if mb_x > 0 {
-        // ffmpeg's left pair members: LTOP is the left MB on the pair-top
-        // row, LBOT the one directly below it.
-        let ltop_i = (mb_y & !1) * mb_cols + mb_x - 1;
-        let lbot_i = (ltop_i + mb_cols).min(infos.len() - 1);
+    let dbg_no_mixedge = std::env::var("KINETIX_DBG_NO_MIXEDGE").is_ok();
+    if has_left && !dbg_no_mixedge {
         let lt = &infos[ltop_i];
         let lb = &infos[lbot_i];
         if cur.field != lt.field {
@@ -1624,26 +1681,77 @@ fn filter_mbaff_mb(
             first_v_done = true;
         }
     }
-    if mb_x > 0 && !first_v_done {
-        let left = &infos[idx - 1];
-        // dir == 0: either-side-intra always gives bS 4 (the FRAME_MBAFF
-        // clause of ffmpeg's boundary rule).
-        let bs = derive_bs_segments(left, cur, true, [3, 7, 11, 15], [0, 4, 8, 12], mvy);
-        let qp = (cur.qp + left.qp + 1) >> 1;
-        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, 0, bs, p, qp);
-        let qpc = (cqp(cur.qp) + cqp(left.qp) + 1) >> 1;
-        deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, true, 0, bs, p, qpc);
+    let dbg_no_vbound = std::env::var("KINETIX_DBG_NO_VBOUND").is_ok();
+    if has_left && !first_v_done && !dbg_no_vbound {
+        // Per-segment left neighbour: luma rows 0–7 take LTOP, rows 8–15
+        // take LBOT (the two differ once a mismatch shift is in effect).
+        // dir == 0: either-side-intra always gives bS 4 (FRAME_MBAFF clause).
+        let ltop = &infos[ltop_i];
+        let lbot = &infos[lbot_i];
+        let p_blocks = [3usize, 7, 11, 15];
+        let q_blocks = [0usize, 4, 8, 12];
+        let cur_intra = is_intra(cur.mb_type);
+        let mut bs = [0u8; 4];
+        for seg in 0..4usize {
+            let ln = if seg < 2 { ltop } else { lbot };
+            bs[seg] = derive_bs_pair(
+                is_intra(ln.mb_type),
+                cur_intra,
+                true,
+                ln.nz[p_blocks[seg]],
+                cur.nz[q_blocks[seg]],
+                ln.cells[p_blocks[seg]],
+                cur.cells[q_blocks[seg]],
+                mvy,
+            );
+        }
+        if std::env::var("KINETIX_DBG_BS").is_ok() {
+            eprintln!(
+                "BSV mb=({mb_x},{mb_y}) bs={bs:?} curf={} curty={:?} ltop_i={ltop_i} ltopf={} ltopnz34711={:?} lbot_i={lbot_i} lbotf={} lbotnz1115={:?}",
+                cur.field,
+                cur.mb_type,
+                ltop.field,
+                [ltop.nz[3], ltop.nz[7]],
+                lbot.field,
+                [lbot.nz[11], lbot.nz[15]],
+            );
+        }
+        let qp = (cur.qp + ltop.qp + 1) >> 1;
+        if skip_edge != Some((mb_x, mb_y, 0, 0)) {
+            deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, 0, bs, p, qp);
+            let qpc = (cqp(cur.qp) + cqp(ltop.qp) + 1) >> 1;
+            deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, true, 0, bs, p, qpc);
+        }
     }
+    let dbg_no_vint = std::env::var("KINETIX_DBG_NO_VINT").is_ok();
     for ei in 1..=3usize {
+        if dbg_no_vint {
+            break;
+        }
+        // ffmpeg skips the odd interior edges of 8x8-DCT macroblocks
+        // entirely (`deblock_edge = !IS_8x8DCT(mb_type & (edge<<24))`,
+        // h264_loopfilter.c filter_mb_dir) — the edge is not filtered in
+        // either direction, luma or chroma.
+        if ei != 2 && cur.transform_8x8 {
+            continue;
+        }
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
-        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, ei, bs, p, cur.qp);
+        if std::env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
+            eprintln!(
+                "BSV-INT mb=({mb_x},{mb_y}) ei={ei} bs={bs:?} curf={} curty={:?}",
+                cur.field, cur.mb_type,
+            );
+        }
+        if skip_edge != Some((mb_x, mb_y, 0, ei)) {
+            deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, true, ei, bs, p, cur.qp);
+        }
         // Chroma derives its own bS from the co-located chroma blocks
         // (§8.7.2.1 mapping used by `deblock_chroma_mb`); 4:2:0 chroma has
         // a single interior edge (chroma offset 4, i.e. edge_index 2),
         // so it is filtered once per direction, not per luma edge.
-        if ei == 2 {
+        if ei == 2 && skip_edge != Some((mb_x, mb_y, 0, ei)) {
             let c_bs = derive_bs_segments(cur, cur, false, [1, 5, 9, 13], [2, 6, 10, 14], mvy);
             deblock_chroma_edge_stepped(
                 cb,
@@ -1662,14 +1770,15 @@ fn filter_mbaff_mb(
     }
 
     // ---- Horizontal direction (dir = 1) ----
-    if mb_y > 0 {
-        let top_idx = idx - mb_cols;
-        let top = &infos[top_idx];
-        if (mb_y & 1) == 0 && !cur.field && top.field {
+    let dbg_no_fcabove = std::env::var("KINETIX_DBG_NO_FIELDCODED_ABOVE").is_ok();
+    let dbg_no_hbound = std::env::var("KINETIX_DBG_NO_HBOUND").is_ok();
+    if has_top_mb && !dbg_no_hbound {
+        let top = &infos[top_i];
+        if !dbg_no_fcabove && (mb_y & 1) == 0 && !cur.field && top.field {
             // Fieldcoded-above pair-top boundary: filter once per
             // above-pair member (rows mb_y-2 and mb_y-1).
             if mb_y >= 2 {
-                let above_top = &infos[top_idx - mb_cols];
+                let above_top = &infos[top_i - mb_cols];
                 deblock_fieldcoded_above_boundary_mcaff(
                     luma,
                     cb,
@@ -1712,25 +1821,44 @@ fn filter_mbaff_mb(
             } else {
                 derive_bs_segments(top, cur, true, [12, 13, 14, 15], [0, 1, 2, 3], mvy)
             };
+            if std::env::var("KINETIX_DBG_BS").is_ok() {
+                eprintln!(
+                    "BSH mb=({mb_x},{mb_y}) bs={bs:?} curf={} curty={:?} top_i={top_i} topf={} topty={:?}",
+                    cur.field,
+                    cur.mb_type,
+                    top.field,
+                    top.mb_type,
+                );
+            }
             let qp = (cur.qp + top.qp + 1) >> 1;
-            deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, 0, bs, p, qp);
-            let qpc = (cqp(cur.qp) + cqp(top.qp) + 1) >> 1;
-            deblock_chroma_edge_stepped(
-                cb,
-                cr,
-                chroma_stride,
-                cx,
-                cy0,
-                cstep,
-                false,
-                0,
-                bs,
-                p,
-                qpc,
-            );
+            if skip_edge != Some((mb_x, mb_y, 1, 0)) {
+                deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, 0, bs, p, qp);
+                let qpc = (cqp(cur.qp) + cqp(top.qp) + 1) >> 1;
+                deblock_chroma_edge_stepped(
+                    cb,
+                    cr,
+                    chroma_stride,
+                    cx,
+                    cy0,
+                    cstep,
+                    false,
+                    0,
+                    bs,
+                    p,
+                    qpc,
+                );
+            }
         }
     }
+    let dbg_no_hint = std::env::var("KINETIX_DBG_NO_HINT").is_ok();
     for ei in 1..=3usize {
+        if dbg_no_hint {
+            break;
+        }
+        // Odd interior edges of 8x8-DCT MBs are skipped (see above).
+        if ei != 2 && cur.transform_8x8 {
+            continue;
+        }
         let p_blocks = [
             (ei - 1) * 4,
             (ei - 1) * 4 + 1,
@@ -1739,10 +1867,18 @@ fn filter_mbaff_mb(
         ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
-        deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, ei, bs, p, cur.qp);
+        if std::env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
+            eprintln!(
+                "BSH-INT mb=({mb_x},{mb_y}) ei={ei} bs={bs:?} curf={}, curty={:?}",
+                cur.field, cur.mb_type,
+            );
+        }
+        if skip_edge != Some((mb_x, mb_y, 1, ei)) {
+            deblock_luma_edge_stepped(luma, luma_stride, lx, ly0, lstep, false, ei, bs, p, cur.qp);
+        }
         // Chroma interior edge: co-located chroma blocks (see above); only
         // the single 4:2:0 interior edge (chroma offset 4, edge_index 2).
-        if ei == 2 {
+        if ei == 2 && skip_edge != Some((mb_x, mb_y, 1, ei)) {
             let c_bs = derive_bs_segments(cur, cur, false, [4, 5, 6, 7], [8, 9, 10, 11], mvy);
             deblock_chroma_edge_stepped(
                 cb,

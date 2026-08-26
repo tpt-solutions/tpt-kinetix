@@ -380,7 +380,15 @@ fn p_header_manual_walk() {
         }
     }
 
-    let dir = std::env::temp_dir().join("dbg_b_implied");
+    // Own subdirectory: other tests in this binary regenerate `b_boxmv.*`
+    // concurrently in the shared dir, which used to hand this test a
+    // half-written file (missing SPS → unwrap panic).
+    let dir = std::env::temp_dir().join("dbg_b_implied_manual_walk");
+    std::fs::create_dir_all(&dir).unwrap();
+    if gen(&dir, "b_boxmv", "color=c=black:size=64x48:rate=1:duration=3", "nullsrc=size=16x16:rate=1,geq=r=255:g=255:b=255[box];[in][box]overlay=x=''8+12*n'':y=8:eof_action=endall[out]").is_none() {
+        eprintln!("skipping p_header_manual_walk: ffmpeg not available on PATH");
+        return;
+    }
     let annexb = std::fs::read(dir.join("b_boxmv.h264")).unwrap();
     // find NALs
     let mut starts: Vec<usize> = Vec::new();
@@ -897,7 +905,10 @@ fn p_from_ibp_without_b() {
 
 #[test]
 fn b_implied_pred_oracle() {
-    let dir = std::env::temp_dir().join("dbg_b_implied");
+    // Own subdirectory: isolates this test's generated files from the other
+    // tests regenerating the same names concurrently (previously produced
+    // truncated reads → empty reference YUV).
+    let dir = std::env::temp_dir().join("dbg_b_implied_oracle");
     std::fs::create_dir_all(&dir).unwrap();
     let Some((annexb, refyuv)) = gen(
         &dir,

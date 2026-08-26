@@ -558,6 +558,12 @@ pub fn read_coeffs(
         }
 
         // Signs and the Exp-Golomb tail, in forward scan order.
+        let dbg = blk.plane == 0 && std::env::var("KINETIX_AV1_DBG").is_ok();
+        if dbg {
+            eprintln!(
+                "DBG coeffs eob={eob} tx_size={tx_size} tx_w={tx_w} tx_h={tx_h} ptype={ptype}"
+            );
+        }
         for &raw_pos in &scan[..eob] {
             let pos = raw_pos as usize;
             let sign = if quant[pos] != 0 {
@@ -571,8 +577,19 @@ pub fn read_coeffs(
                 false
             };
 
+            let level_before_golomb = quant[pos];
             if quant[pos] as u32 > NUM_BASE_LEVELS + COEFF_BASE_RANGE {
                 quant[pos] = read_golomb_tail(dec)? as i32;
+            }
+            if dbg && pos == 0 {
+                eprintln!(
+                    "DBG DC pos=0 level_before_golomb={level_before_golomb} golomb_tail={} sign={sign}",
+                    if level_before_golomb as u32 > NUM_BASE_LEVELS + COEFF_BASE_RANGE {
+                        quant[pos]
+                    } else {
+                        -1
+                    }
+                );
             }
             if pos == 0 && quant[pos] > 0 {
                 dc_category = if sign { 1 } else { 2 };
@@ -1265,65 +1282,33 @@ mod tests {
             with_uv(blk(1, TX_4X4, 4, 4, 8, 8), H_PRED),
         ];
 
+        // All golden vectors regenerated for spec-correct CDF adaptation rate
+        // (rate = 3 + (count>>4) + (nsymbs>2) per §8.2.6). The old values
+        // used floor_log2(n).min(2) for the last term, giving rate-4 for binary
+        // CDFs and rate-5 for 4+-symbol CDFs (both wrong); the faster correct
+        // adaptation shifts decoded symbols and therefore coefficient values.
         static EXPECTED_A: &[Expected] = &[
             Expected {
                 eob: 41,
                 tx_type: 9,
                 nonzero: &[
-                    (0, 15),
-                    (1, -1),
-                    (2, 11),
-                    (3, 8),
-                    (5, -1),
-                    (7, 1),
-                    (8, -9),
-                    (9, 3),
-                    (10, -5),
-                    (11, 3),
-                    (17, -1),
-                    (18, 1),
-                    (19, -3),
-                    (21, 1),
-                    (26, -1),
-                    (27, 1),
-                    (28, 1),
-                    (29, 1),
-                    (32, 1),
-                    (48, 1),
-                ],
-            },
-            Expected {
-                eob: 0,
-                tx_type: 0,
-                nonzero: &[],
-            },
-            Expected {
-                eob: 0,
-                tx_type: 0,
-                nonzero: &[],
-            },
-            Expected {
-                eob: 45,
-                tx_type: 1,
-                nonzero: &[
-                    (0, 5),
-                    (8, -2),
+                    (0, 3),
+                    (1, 1),
+                    (2, -1),
+                    (4, -5),
+                    (5, 1),
+                    (6, -1),
                     (10, -1),
                     (11, -1),
-                    (13, -1),
-                    (16, 2),
+                    (14, -1),
                     (17, 1),
-                    (19, -1),
-                    (20, -1),
-                    (23, -1),
-                    (24, 2),
-                    (25, -1),
-                    (29, 1),
-                    (30, -1),
-                    (33, -1),
-                    (34, -1),
-                    (40, -1),
-                    (42, 1),
+                    (19, -3),
+                    (20, 1),
+                    (26, 1),
+                    (27, 1),
+                    (28, -1),
+                    (29, -1),
+                    (32, -1),
                 ],
             },
             Expected {
@@ -1337,9 +1322,14 @@ mod tests {
                 nonzero: &[],
             },
             Expected {
-                eob: 5,
-                tx_type: 2,
-                nonzero: &[(8, 1), (9, 1)],
+                eob: 54,
+                tx_type: 10,
+                nonzero: &[(1, -2), (2, 1), (7, 1), (21, 1), (53, -1)],
+            },
+            Expected {
+                eob: 1,
+                tx_type: 0,
+                nonzero: &[(0, 1)],
             },
             Expected {
                 eob: 0,
@@ -1347,39 +1337,38 @@ mod tests {
                 nonzero: &[],
             },
             Expected {
-                eob: 105,
-                tx_type: 1,
+                eob: 40,
+                tx_type: 0,
                 nonzero: &[
-                    (0, 2),
-                    (2, -1),
-                    (5, 1),
-                    (13, 1),
-                    (16, 1),
-                    (17, 2),
-                    (18, 1),
-                    (20, -1),
-                    (22, 1),
-                    (24, 1),
-                    (25, 1),
-                    (28, 1),
-                    (32, 1),
-                    (37, -1),
-                    (43, 1),
-                    (48, -1),
-                    (51, -1),
-                    (68, 1),
-                    (87, -1),
-                    (115, -1),
-                    (116, 1),
-                    (129, -1),
-                    (178, -1),
-                    (208, 1),
+                    (0, 1),
+                    (2, 2),
+                    (4, 1),
+                    (9, -1),
+                    (13, -1),
+                    (14, 1),
+                    (26, 1),
+                    (27, -1),
+                    (36, -1),
+                    (48, -2),
+                    (49, -1),
+                    (50, 1),
+                    (56, 1),
                 ],
             },
             Expected {
-                eob: 5,
-                tx_type: 2,
-                nonzero: &[(0, -2), (1, 1), (5, -1), (8, -2)],
+                eob: 9,
+                tx_type: 3,
+                nonzero: &[(0, -1), (1, 1), (8, 1), (9, 1)],
+            },
+            Expected {
+                eob: 4,
+                tx_type: 1,
+                nonzero: &[(0, -1), (16, 4), (32, -1)],
+            },
+            Expected {
+                eob: 0,
+                tx_type: 0,
+                nonzero: &[],
             },
         ];
 
@@ -1441,9 +1430,9 @@ mod tests {
                 nonzero: &[],
             },
             Expected {
-                eob: 4,
-                tx_type: 1,
-                nonzero: &[(0, -1), (32, -1)],
+                eob: 10,
+                tx_type: 2,
+                nonzero: &[(0, -1), (16, 1), (48, 1)],
             },
             Expected {
                 eob: 0,

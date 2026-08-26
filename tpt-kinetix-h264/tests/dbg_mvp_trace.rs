@@ -14,8 +14,20 @@ const W: usize = 64;
 const H: usize = 48;
 const FRAME: usize = W * H * 3 / 2;
 
+fn ffmpeg_available() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn mvp_trace_on_c_p8x8() {
+    if !ffmpeg_available() {
+        eprintln!("mvp_trace_on_c_p8x8: skipped (ffmpeg unavailable)");
+        return;
+    }
     let dir = std::env::temp_dir().join("dbg_mvp_trace");
     std::fs::create_dir_all(&dir).unwrap();
     let h264 = dir.join("c_p8x8.h264");

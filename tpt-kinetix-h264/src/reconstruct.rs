@@ -2111,6 +2111,101 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
+    // High-profile 8×8 transform on an INTER macroblock (`transform_size_8x8`
+    // set): motion-compensate each 8×8 luma region with the committed MV of
+    // its top-left 4×4 cell and add the 8×8 inverse-transformed residual
+    // (§8.5.12.3) — the 4×4 loop below would read the all-zero `luma_coeffs`.
+    if mb.transform_size_8x8 {
+        const TL: [usize; 4] = [0, 2, 8, 10];
+        for (i8, &tl) in TL.iter().enumerate() {
+            let cell = grid[tl];
+            let bx = (i8 % 2) * 8;
+            let by = (i8 / 2) * 8;
+            let x0 = base_x as i32 + bx as i32;
+            let y0 = base_y as i32 + by as i32;
+            let ref_idx = cell.ref_idx.max(0) as usize;
+            let mut pred = [0u8; 64];
+            if let Some(frame) = ref_frames.get(ref_idx).or_else(|| ref_frames.first()) {
+                let w = frame.width as usize;
+                let h = frame.height as usize;
+                crate::motion_comp::interpolate_luma(
+                    &mut pred,
+                    8,
+                    &frame.data[..w * h],
+                    w,
+                    w,
+                    h,
+                    x0,
+                    y0,
+                    cell.mv[0],
+                    cell.mv[1],
+                    8,
+                    8,
+                );
+            }
+            let pred = {
+                // `combine_weighted` operates on 16-sample blocks; apply it to
+                // the 8×8 prediction one 4×4 quadrant at a time (the weighted
+                // parameters are constant across the whole block).
+                let mut wpred = [0u8; 64];
+                for q in 0..4usize {
+                    let (ox, oy) = ((q % 2) * 4, (q / 2) * 4);
+                    let mut chunk = [0u8; 16];
+                    for r in 0..4 {
+                        for c in 0..4 {
+                            chunk[r * 4 + c] = pred[(oy + r) * 8 + ox + c];
+                        }
+                    }
+                    let wc = combine_weighted(
+                        weighted, true, false, ref_idx, 0, &chunk, &[0u8; 16], None,
+                    );
+                    for r in 0..4 {
+                        for c in 0..4 {
+                            wpred[(oy + r) * 8 + ox + c] = wc[r * 4 + c];
+                        }
+                    }
+                }
+                wpred
+            };
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                TracePlane::Luma,
+                (16 + i8) as u8,
+                &pred,
+                cell.mv,
+                ref_idx,
+            );
+
+            let res = dequant_idct_8x8_scan(
+                &mb.luma_coeffs_8x8[i8],
+                mb.qp,
+                // Inter macroblocks use the Inter8×8-Y scaling list
+                // (spec slot 7 → second of the two 8×8 lists); the intra
+                // path uses slot 6 (index 0).
+                1,
+                scaling,
+                &crate::transform::ZIGZAG_8X8,
+            );
+            let mut recon_blk = [0u8; 64];
+            for row in 0..8 {
+                for col in 0..8 {
+                    let px = x0 as usize + col;
+                    let py = y0 as usize + row;
+                    let off = py * stride + px;
+                    let p = pred[row * 8 + col] as i32;
+                    let v = (p + res[row * 8 + col]).clamp(0, 255) as u8;
+                    recon_blk[row * 8 + col] = v;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+            tracer.on_reconstructed(mb_x, mb_y, TracePlane::Luma, (16 + i8) as u8, &recon_blk);
+        }
+        return;
+    }
+
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
         let by = (block / 4) * 4;

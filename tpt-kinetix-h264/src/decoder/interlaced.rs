@@ -338,16 +338,16 @@ impl H264Decoder {
             tracer,
         );
 
-        // MBAFF in-loop deblocking behind the same opt-in gate as the field
-        // MC path (KINETIX_MBAFF_FIELD_MC=1); frame-convention behaviour is
-        // unchanged when the gate is absent.
+        // MBAFF in-loop deblocking (default-on for MBAFF frame pictures; the
+        // field-MC path remains separately gated). Frame-convention behaviour is
+        // unchanged for progressive / PAFF pictures.
         let deblock_params = crate::deblock::DeblockParams {
             disable_idc: header.disable_deblocking_filter_idc as u8,
             alpha_offset_div2: header.slice_alpha_c0_offset_div2,
             beta_offset_div2: header.slice_beta_offset_div2,
             chroma_qp_index_offset,
         };
-        if let Some(mcaff_infos) = Self::mbaff_deblock_infos(&parsed) {
+        if let Some(mcaff_infos) = Self::mbaff_deblock_infos(&parsed, true) {
             Self::run_mbaff_deblock(&mut recon, &mcaff_infos, mb_cols, mb_rows, deblock_params);
         }
 
@@ -509,7 +509,10 @@ impl H264Decoder {
                             .mv_store
                             .cells_of(idx)
                             .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                        crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                        crate::deblock::DeblockMbInfo {
+                            transform_8x8: mb.transform_size_8x8,
+                            ..crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                        }
                     })
                     .collect()
             })

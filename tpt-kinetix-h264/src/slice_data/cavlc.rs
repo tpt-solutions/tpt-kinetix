@@ -881,6 +881,20 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     let cbp_l = cbp & 0x0F;
     let cbp_c = cbp >> 4;
 
+    // `transform_size_8x8_flag` (§7.3.5.1): present when
+    // `transform_8x8_mode_flag && CodedBlockPatternLuma > 0` — inter MBs are
+    // never Intra_16×16, so no extra guard is needed. Read AFTER CBP and
+    // BEFORE mb_qp_delta; omitting it desyncs every subsequent MB (the flag's
+    // absence silently consumed the first bit of mb_qp_delta / the next MB).
+    let mut is_8x8 = false;
+    if transform_8x8_mode && cbp_l != 0 {
+        is_8x8 = r
+            .read_bit()
+            .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?
+            == 1;
+    }
+    mb.transform_size_8x8 = is_8x8;
+
     // mb_qp_delta present when any residual block is coded.
     let mut qp = prev_qp;
     if cbp_l != 0 || cbp_c != 0 {
@@ -900,7 +914,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         false,
         cbp_l,
         cbp_c,
-        false,
+        is_8x8,
         tracer,
         nctx,
     )?;
@@ -1247,6 +1261,17 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     let cbp_l = cbp & 0x0F;
     let cbp_c = cbp >> 4;
 
+    // `transform_size_8x8_flag` (§7.3.5.1): same placement as the P-slice
+    // inter path — after CBP, before mb_qp_delta (see parse_p_macroblock).
+    let mut is_8x8 = false;
+    if transform_8x8_mode && cbp_l != 0 {
+        is_8x8 = r
+            .read_bit()
+            .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?
+            == 1;
+    }
+    mb.transform_size_8x8 = is_8x8;
+
     let mut qp = prev_qp;
     if cbp_l != 0 || cbp_c != 0 {
         let dqp = r.read_se().ok_or(SliceDataError::Eof("mb_qp_delta"))?;
@@ -1265,7 +1290,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         false,
         cbp_l,
         cbp_c,
-        false,
+        is_8x8,
         tracer,
         NeighbourCtx::NONE,
     )?;

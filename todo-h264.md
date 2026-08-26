@@ -2,6 +2,181 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32n (2026-08-27) — sad=92 RESIDUE ROOT-CAUSED AND FIXED; MBAFF P FRAME NOW PIXEL-EXACT VS FFMPEG
+
+1. **ROOT CAUSE of #32m item 8b's residual luma diffs** (`deblock.rs`): ffmpeg
+   does NOT filter the ODD interior edges (`edge_index` 1 and 3, which cut
+   through the middle of each 8×8 transform block) of ANY macroblock carrying
+   `transform_size_8x8_flag`: its interior-edge loop computes
+   `deblock_edge = !IS_8x8DCT(mb_type & (edge<<24))` with
+   `MB_TYPE_8x8DCT = 0x01000000` (bit 24) and `continue`s the whole edge —
+   luma AND chroma, both directions, intra or inter — when the bit is set
+   (h264_loopfilter.c `filter_mb_dir`; interior edge 2, the 8×8-block
+   boundary, is still filtered). Our decoder derived bS = 2 (nz rule) on those
+   edges and filtered them, over-smoothing exactly the P16x8/P8x8ref0 MBs of
+   row 3 flagged by #32m's single-edge bisect ((3,3,V,ei=1) skip → sad 68,
+   (1,3,V,ei=1) → 87). The mv_store cell layout suspicion of #32m item 8c is
+   CLOSED: committed MV grids were correct all along (consistent with
+   dbg_qpel_brute's bit-exact MC validation); only the deblock consumed them
+   on edges ffmpeg never touches.
+2. **FIX**: new `DeblockMbInfo::transform_8x8` flag (default `false`, threaded
+   from `Macroblock::transform_size_8x8` at every info-construction site:
+   `mbaff_deblock_infos`, plain P/B + MBAFF-I sites in decoder/mod.rs,
+   interlaced.rs); all four interior-edge loops (plain luma V/H,
+   `filter_mbaff_mb` V/H) now skip `ei ∈ {1,3}` when set. Boundary edges are
+   unaffected (ffmpeg only applies the skip inside the interior loop).
+3. **RESULT (dbg_g6_mbaff_deblock)**: `g6_cavlc_ip` P frame **luma sad=0
+   max=0 vs ffmpeg fully-filtered — first pixel-exact MBAFF P frame**;
+   I frames remain bit-exact; chroma bit-exact. Determinism probes stable at
+   p-frame sad=Some(0) ×5 reps.
+4. VALIDATION: lib tests 246 passed / 0 failed; dbg_skip_lf, high_profile_8x8_conformance
+   (3), p_slice_reference all green; clippy clean on changed code; fmt applied.
+
+## SESSION #32l (2026-08-26) — MBAFF DEBLOCK DEFAULT-ON; OOB FIX; SUITE GREEN
+
+1. **DEFAULT-ON**: `mbaff_deblock_infos` now returns `Some` for every MBAFF
+   *frame* picture (P/B sites in `decoder/mod.rs`, MBAFF I path in
+   `decoder/interlaced.rs`) — the full-frame orchestrator is the default
+   deblocker there, justified by #32k's edge-set diff (orchestrator ⊇ plain,
+   no contradictions) and its measured accuracy (I frames bit-exact vs
+   ffmpeg fully-filtered; P frame sad=92 max=3 chroma-exact vs plain 472).
+   Progressive / PAFF pictures keep the plain loop (bit-exact there).
+   `KINETIX_MBAFF_DEBLOCK_PLAIN=1` restores the legacy pass for bisecting;
+   the old `KINETIX_MBAFF_FIELD_MC` deblock gate is gone (the field-MC
+   reconstruction path keeps its own separate gate in reconstruct.rs).
+2. **OOB FIX** (`deblock_fieldcoded_above_boundary_mcaff`, exposed by the
+   default-on flip on the CABAC `mbaff_ip` clip which has field pairs): the
+   luma guard checked `y<2 || y+2>=height` while the filter touches y-4..y+3;
+   chroma checked `y<1 || y+1>=cheight` while touching y-2..y+1. Both widened
+   (`y<4 || y+3>=height`, `y<2 || y+1>=cheight`). Previously latent because
+   the special case only fires under the (then opt-in) path.
+3. VALIDATION: full crate suite green across all test binaries (0 failures),
+   lib 246 tests green, workspace clippy `-D warnings` clean, fmt clean.
+   G.6 harness confirms default behaviour: cavlc_i / cavlc_ip-I bit-exact vs
+   ffmpeg fully-filtered, P frame sad=92 max=3 chroma-exact.
+4. **CABAC MBAFF DESYNC DIAGNOSTIC DATA** (for #32e item 6): rerunning
+   `g4_mbaff_i1_diffmap` shows the CABAC I-slice parse still fails at
+   `cabac_i.rs` end_of_slice ("end_of_slice_flag mismatch") → grey scaffold,
+   wholesale divergence. NEW FACTS: (a) ALL 8 pairs decode
+   `mb_field_decoding_flag=false`, so the desync is NOT field-pair related;
+   (b) it fires mid-slice (non-last MB reads terminate=1), meaning some earlier
+   bin consumption drifted; (c) the CAVLC twin clip is bit-exact, so the bug
+   is confined to the CABAC bin path (suspects: intra 8×8 bins under t8=true,
+   cbp_ctx propagation across grid slots, or I16x16 CBP bin mapping).
+   Instrumentation ready: `KINETIX_BINTRACE=1` on that test prints per-MB
+   engine state (`TRC MBn ... state=0x…/0x…`) for replay comparison.
+
+
+## SESSION #32k (2026-08-26) — FIELD PAIRS CONFIRMED IN TESTSRC P FRAME; MBAFF NEIGHBOUR RULES IMPLEMENTED
+
+1. **FIELD-CODED PAIRS EXIST in `g6_cavlc_ip`'s P frame** (contradicts the
+   earlier #32f item 8 note that x264 emits none for testsrc under CAVLC):
+   per-MB diff clustering vs ffmpeg shows the residual divergence confined to
+   MBs {(1,3):38, (3,2):2, (3,3):45} — bottom members / pair-top of
+   field-coded pairs in columns x=1 and x=3.
+2. **MBAFF deblock neighbour rules implemented** (`deblock.rs::filter_mbaff_mb`),
+   port of h264_slice.c `fill_filter_caches` lines 2422–2437:
+   - TOP: field-curr → 2 grid rows up (same parity); frame-curr → 1 row;
+     field-coded pair-top steps back DOWN one row when the directly-above MB
+     is frame-coded (`top_xy += stride & (INTERLACED(top)-1)`).
+   - LEFT: LTOP/LBOT split shifts one grid row on coding-convention mismatch
+     (bottom member: LTOP up; top member: LBOT down).
+   - Vertical boundary bS now derives per-segment from LTOP (segments 0–1) /
+     LBOT (segments 2–3) via `derive_bs_pair` directly.
+   - Debug override `KINETIX_MBAFF_DEBLOCK_PLAIN=1` forces the plain pass for
+     A/B bisecting.
+3. **Pre-deblock isolation**: new harness stage proves our PRE-deblock P-frame
+   pixels are bit-exact vs `ffmpeg -skip_loop_filter all` (sad=0 max=0) — the
+   entire remaining gap is inside the deblock special cases.
+4. **Flake fix** (`tests/dbg_mvp_trace.rs`): duplicate `use std::process::Command`
+   removed (broke workspace clippy).
+5. STATUS: full crate `--tests` green, lib 246 tests green, workspace clippy
+   `-D warnings` clean, fmt clean. Remaining known diff: `g6_cavlc_ip` P frame
+   luma sad=92 max=3 (85 samples, field-pair regions).
+6. **ABLATION RESULT (#32k cont'd)**: new env-gated ablation matrix in
+   dbg_g6_mbaff_deblock (`KINETIX_DBG_NO_MIXEDGE`, `KINETIX_DBG_NO_FIELDCODED_ABOVE`)
+   proves the residue is NOT caused by either MBAFF special case — sad stays
+   exactly 92 with either or both disabled.
+7. **CORRECTION (#32k cont'd) — there are NO field-coded pairs** in
+   `g6_cavlc_ip`: the `KINETIX_DBG_BS` per-edge trace shows every MB has
+   `field=false`. The earlier per-MB-clustering "field pairs" reading was
+   wrong. Yet orchestrator (sad=92) and plain loop (sad=472) still disagree on
+   this all-frame-coded data — contradicting the synthetic equivalence unit
+   test, so some REAL-data input (skip-MB nz/cells, I16x16, P8x8ref0 motion)
+   exercises a divergence between the two implementations that the unit data
+   does not. NOTE: forcing PLAIN also removes deblocking entirely from the
+   interlaced.rs I-frame path (it has no plain loop), which is why the
+   regression pin is skipped under that override.
+8. **EDGE-SET DIFF (#32k cont'd)**: new `tests/dbg_edge_diff.rs` compares the
+   two implementations' effective edge sets on the traced run. RESULT:
+   **only-plain = 0** — every edge the plain loop filters, the orchestrator
+   filters with the identical bS (no contradictions); the orchestrator applies
+   136 ADDITIONAL nonzero-bS edges (interior bS=3 edges of intra MBs, intra
+   bS=4 boundaries) that the plain loop derives as bS=0 or skips on this
+   stream. Since pre-deblock pixels are bit-exact and the orchestrator lands
+   at sad=92 (vs plain 472), those extra edges are the correct ones and the
+   orchestrator supersedes the plain loop for MBAFF frames.
+   TOOLING NOTE: PowerShell `Out-File` writes UTF-16LE — dbg_edge_diff decodes
+   the BOM accordingly; regenerate the trace with
+   `$env:KINETIX_DBG_BS='1'; $env:KINETIX_BINTRACE='1'; cargo test ... --test
+   dbg_g6_mbaff_deblock` before running it.
+8b. ABLATION MATRIX #2 (#32l): per-edge-class switches (`KINETIX_DBG_NO_VBOUND`,
+   `KINETIX_DBG_NO_VINT`, `KINETIX_DBG_NO_HBOUND`, `KINETIX_DBG_NO_HINT`) —
+   removing ANY edge class increases sad (vbound 121, vint 332, hbound 177,
+   hint 232 vs baseline 92): EVERY edge class the orchestrator applies moves
+   the output TOWARD ffmpeg. The residue is therefore per-edge strength /
+   rounding differences on individual edges, not a wrong decision class.
+8c. SINGLE-EDGE BISECT RESULT (#32m, decisive): fixed a slicing bug in the
+   bisect harness (used W*H instead of FRAME=6144 stride for ff references —
+   earlier ~321k readings were garbage). With correct comparisons: baseline
+   sad=92; skipping the VERTICAL INTERIOR edge ei=1 of MB(3,3) drops sad to
+   **68**, MB(1,3) ei=1 to 87; skipping MB(3,3) BOUNDARY raises to 110.
+   => The residue localizes to the MV-rule bS on INTERIOR edges of inter MBs
+   (P8x8ref0 / P16x8 partition boundaries): our committed sub-partition MV
+   grid yields slightly different within-MB bS than ffmpeg's. NEXT: verify
+   the mv_store cell layout for 8x8-partitioned inter MBs against ffmpeg's
+   b_stride motion_val grid (mv.rs `predict_slice_mvs` / commit path).
+9. NEXT: (a) root-cause WHY the plain loop under-derives on this stream (its
+   inputs come from the same `parsed.nz`/mv_store, so suspect the skip-run /
+   field-flag timing leaving some MBs' nz uncommitted in the CAVLC P path);
+   (b) chase the residual sad=92 max=3 luma diffs (85 samples near interior
+   edges of MB(3,2)/(3,3)/(1,3)) once (a) lands; (c) CABAC MBAFF desync
+   (#32e item 6) remains the blocker for CABAC interlaced clips.
+
+## SESSION #32j (2026-08-26) — CAVLC INTER-MB `transform_size_8x8_flag` BUG FIXED; MBAFF P FRAME NOW NEAR-EXACT
+
+1. **ROOT CAUSE of the CAVLC "cbp code_num out of range" desync** (`slice_data/cavlc.rs`):
+   the inter-MB paths (`parse_p_macroblock`, B-slice twin) never read
+   `transform_size_8x8_flag` (§7.3.5.1: present between `coded_block_pattern`
+   and `mb_qp_delta` when `transform_8x8_mode_flag && CodedBlockPatternLuma > 0`;
+   inter MBs are never Intra_16×16). The intra path already handled it — only
+   the inter paths were broken, so ANY High-profile stream (t8=true PPS) with a
+   CAVLC P/B slice whose first coded inter MB has luma CBP ≠ 0 desynced
+   immediately: the missing bit read silently consumed mb_qp_delta's first bit.
+   Fix reads the flag in both inter paths (P + B), stores it on
+   `Macroblock::transform_size_8x8`, and threads `is_8x8` into
+   `parse_intra_residuals` so residuals parse via the 8×8 scan when set.
+
+2. **Inter 8×8 reconstruction** (`reconstruct.rs::reconstruct_inter_luma`): new
+   branch for `transform_size_8x8` inter MBs — motion-compensates each 8×8
+   region with the committed MV of its top-left 4×4 cell and adds the 8×8
+   inverse-transformed residual (`dequant_idct_8x8_scan` + progressive zigzag);
+   explicit weighted prediction applied per-4×4 quadrant since
+   `combine_weighted` is fixed at 16 samples.
+
+3. **RESULT (dbg_g6_mbaff_deblock, gate ON vs ffmpeg fully-filtered)**:
+   `g6_cavlc_ip` P frame went from PARSE FAILURE (skip-scaffold output,
+   sad≈249k) to **luma SAD=92 max=3, chroma BIT-EXACT (max=0)**. I frames
+   remain bit-exact. Remaining luma max=3 = small MC/rounding residue, next
+   target.
+
+4. **FLAKE FIX** (`tests/dbg_b_implied_pred.rs`): `p_header_manual_walk` /
+   `b_implied_pred_oracle` raced other tests regenerating the shared
+   `dbg_b_implied/b_boxmv.*` files (truncated reads → unwrap/empty-YUV panics).
+   Both now generate into their own subdirectories. Full crate `--tests` suite
+   green (0 failures across all binaries), workspace clippy `-D warnings`
+   clean, fmt clean.
+
 ## SESSION #32i (2026-08-26) — MBAFF DEBLOCK VALIDATED BIT-EXACT VS FFMPEG ON REAL CONTENT
 
 New ffmpeg-gated harness `tests/dbg_g6_mbaff_deblock.rs`: encodes interlaced

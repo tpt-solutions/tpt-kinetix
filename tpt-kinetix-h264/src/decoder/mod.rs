@@ -53,13 +53,24 @@ pub struct H264Decoder {
 impl H264Decoder {
     /// Build flat (raster-order) deblock infos carrying MBAFF field flags.
     ///
-    /// Returns `Some` only when the opt-in `KINETIX_MBAFF_FIELD_MC=1` gate is
-    /// active; callers fall back to the plain frame-convention deblocking
-    /// otherwise.
+    /// Returns `Some` for MBAFF *frame* pictures (`mbaff_frame`): the
+    /// full-frame orchestrator is strictly closer to ffmpeg than the plain
+    /// per-MB loop there (session #32k measurements: P frame luma sad=92 vs
+    /// 472; deblocked I frames bit-exact), so it is the DEFAULT for those
+    /// pictures. `KINETIX_MBAFF_DEBLOCK_PLAIN=1` restores the legacy plain
+    /// pass. Progressive / PAFF pictures return `None` (plain loop, which is
+    /// bit-exact there).
     fn mbaff_deblock_infos(
         parsed: &crate::slice_data::ParsedSlice,
+        mbaff_frame: bool,
     ) -> Option<Vec<crate::deblock::DeblockMbInfo>> {
-        if std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("1") {
+        // Debug override (sessions #32j/#32k): force the plain frame-convention
+        // deblock pass, to bisect whether a divergence originates in the
+        // orchestrator or the shared rules.
+        if std::env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").as_deref() == Ok("1") {
+            return None;
+        }
+        if !mbaff_frame {
             return None;
         }
         Some(
@@ -73,13 +84,15 @@ impl H264Decoder {
                         .mv_store
                         .cells_of(idx)
                         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                    crate::deblock::DeblockMbInfo::new_field(
+                    let mut info = crate::deblock::DeblockMbInfo::new_field(
                         mb.mb_type,
                         nz,
                         cells,
                         mb.qp,
                         mb.mb_field_flag,
-                    )
+                    );
+                    info.transform_8x8 = mb.transform_size_8x8;
+                    info
                 })
                 .collect(),
         )
@@ -582,7 +595,10 @@ impl H264Decoder {
                             .mv_store
                             .cells_of(idx)
                             .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                        crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                        crate::deblock::DeblockMbInfo {
+                            transform_8x8: mb.transform_size_8x8,
+                            ..crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                        }
                     })
                     .collect()
             })
@@ -863,7 +879,12 @@ impl H264Decoder {
                                         .mv_store
                                         .cells_of(idx)
                                         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                                    crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
+                                    crate::deblock::DeblockMbInfo {
+                                        transform_8x8: mb.transform_size_8x8,
+                                        ..crate::deblock::DeblockMbInfo::new(
+                                            mb.mb_type, nz, cells, mb.qp,
+                                        )
+                                    }
                                 })
                                 .collect()
                         })
@@ -1060,9 +1081,11 @@ impl H264Decoder {
                             beta_offset_div2: header.slice_beta_offset_div2,
                             chroma_qp_index_offset,
                         };
-                        match Self::mbaff_deblock_infos(&parsed) {
+                        let mbaff_frame_pic =
+                            sps.mb_adaptive_frame_field_flag && !header.field_pic_flag;
+                        match Self::mbaff_deblock_infos(&parsed, mbaff_frame_pic) {
                             Some(mcaff_infos) => {
-                                // MBAFF frame picture: full-frame field-aware
+                                // MBAFF frame picture: full-frame field-aware (default)
                                 // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
                                 Self::run_mbaff_deblock(
                                     &mut recon,
@@ -1087,9 +1110,12 @@ impl H264Decoder {
                                                     .mv_store
                                                     .cells_of(idx)
                                                     .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                                                crate::deblock::DeblockMbInfo::new(
-                                                    mb.mb_type, nz, cells, mb.qp,
-                                                )
+                                                crate::deblock::DeblockMbInfo {
+                                                    transform_8x8: mb.transform_size_8x8,
+                                                    ..crate::deblock::DeblockMbInfo::new(
+                                                        mb.mb_type, nz, cells, mb.qp,
+                                                    )
+                                                }
                                             })
                                             .collect()
                                     })
@@ -1343,9 +1369,11 @@ impl H264Decoder {
                             beta_offset_div2: header.slice_beta_offset_div2,
                             chroma_qp_index_offset,
                         };
-                        match Self::mbaff_deblock_infos(&parsed) {
+                        let mbaff_frame_pic =
+                            sps.mb_adaptive_frame_field_flag && !header.field_pic_flag;
+                        match Self::mbaff_deblock_infos(&parsed, mbaff_frame_pic) {
                             Some(mcaff_infos) => {
-                                // MBAFF frame picture: full-frame field-aware
+                                // MBAFF frame picture: full-frame field-aware (default)
                                 // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
                                 Self::run_mbaff_deblock(
                                     &mut recon,
@@ -1370,9 +1398,12 @@ impl H264Decoder {
                                                     .mv_store
                                                     .cells_of(idx)
                                                     .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-                                                crate::deblock::DeblockMbInfo::new(
-                                                    mb.mb_type, nz, cells, mb.qp,
-                                                )
+                                                crate::deblock::DeblockMbInfo {
+                                                    transform_8x8: mb.transform_size_8x8,
+                                                    ..crate::deblock::DeblockMbInfo::new(
+                                                        mb.mb_type, nz, cells, mb.qp,
+                                                    )
+                                                }
                                             })
                                             .collect()
                                     })

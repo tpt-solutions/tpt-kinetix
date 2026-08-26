@@ -147,6 +147,144 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
         let annexb = std::fs::read(&h264).unwrap();
         let ours_on = decode_all(true, &annexb);
         let ours_off = decode_all(false, &annexb);
+        // Plain-path contrast (session #32j bisect): gate on but force the
+        // plain per-MB deblock loop.
+        std::env::set_var("KINETIX_MBAFF_DEBLOCK_PLAIN", "1");
+        let ours_plain = decode_all(true, &annexb);
+        std::env::remove_var("KINETIX_MBAFF_DEBLOCK_PLAIN");
+        // Special-case ablation matrix (session #32k/#32l).
+        let mut variants: Vec<(&str, Vec<Vec<u8>>)> = Vec::new();
+        // Single-edge bisect (session #32m): skip each edge around the
+        // diverging MBs one at a time and report the resulting sad. A combo
+        // reaching sad=0 identifies the mis-decided edge.
+        let mut skip_results: Vec<(String, u64)> = Vec::new();
+        if name == "g6_cavlc_ip" {
+            // Baseline + determinism probe (session #32m): decode the SAME
+            // stream five times and report each P-frame luma sad vs ff[1].
+            // Varying values prove cross-decode nondeterminism.
+            std::env::remove_var("KINETIX_DBG_SKIP_EDGE");
+            for rep in 0..5usize {
+                let base = decode_all(true, &annexb);
+                let s = base.get(1).map(|f| sad(&f[..W * H], &ff[FRAME..2 * FRAME]));
+                let s_i = base
+                    .first()
+                    .map(|f| sad(&f[..W * H], &ff[..W * H]))
+                    .unwrap_or(u64::MAX);
+                println!(
+                    "  determinism probe rep={rep}: frames={} i-frame sad={s_i} p-frame sad={s:?}",
+                    base.len(),
+                );
+            }
+            for (sx, sy) in [
+                (1usize, 3usize),
+                (2usize, 3usize),
+                (3usize, 3usize),
+                (3usize, 2usize),
+            ] {
+                for dir in 0..2usize {
+                    for ei in 0..4usize {
+                        std::env::set_var("KINETIX_DBG_SKIP_EDGE", format!("{sx},{sy},{dir},{ei}"));
+                        let out = decode_all(true, &annexb);
+                        std::env::remove_var("KINETIX_DBG_SKIP_EDGE");
+                        if let Some(f) = out.get(1) {
+                            let s = sad(&f[..W * H], &ff[FRAME..2 * FRAME]);
+                            skip_results.push((format!("skip({sx},{sy},d{dir},ei{ei})"), s));
+                        }
+                    }
+                }
+            }
+            skip_results.sort_by_key(|(_, s)| *s);
+        }
+        for (tag, envs) in [
+            ("no-mixedge", [("KINETIX_DBG_NO_MIXEDGE", "1")].as_slice()),
+            (
+                "no-fcabove",
+                [("KINETIX_DBG_NO_FIELDCODED_ABOVE", "1")].as_slice(),
+            ),
+            (
+                "no-both",
+                [
+                    ("KINETIX_DBG_NO_MIXEDGE", "1"),
+                    ("KINETIX_DBG_NO_FIELDCODED_ABOVE", "1"),
+                ]
+                .as_slice(),
+            ),
+            ("no-vbound", [("KINETIX_DBG_NO_VBOUND", "1")].as_slice()),
+            ("no-vint", [("KINETIX_DBG_NO_VINT", "1")].as_slice()),
+            ("no-hbound", [("KINETIX_DBG_NO_HBOUND", "1")].as_slice()),
+            ("no-hint", [("KINETIX_DBG_NO_HINT", "1")].as_slice()),
+        ] {
+            for (k, v) in envs {
+                std::env::set_var(k, v);
+            }
+            let out = decode_all(true, &annexb);
+            for (k, _) in envs {
+                std::env::remove_var(k);
+            }
+            variants.push((tag, out));
+        }
+
+        // Plain-path contrast moved below the ablation matrix to avoid a duplicate block.
+
+        // Pre-deblock comparison for the CAVLC IP clip: decode with
+        // KINETIX_SKIP_DEBLOCK=1 and compare against ffmpeg -skip_loop_filter
+        // all — isolates reconstruction/MC differences from deblock ones.
+        let _ff_nolf: Vec<u8> = if name == "g6_cavlc_ip" {
+            std::env::set_var("KINETIX_SKIP_DEBLOCK", "1");
+            let refyuv_nolf = dir.join(format!("{name}_nolf.yuv"));
+            let _ = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-skip_loop_filter",
+                    "all",
+                    "-i",
+                ])
+                .arg(h264.to_str().unwrap())
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(refyuv_nolf.to_str().unwrap())
+                .output()
+                .unwrap();
+            let nolf_ours = {
+                let mut dec = H264Decoder::new();
+                let starts = nal_starts(&annexb);
+                let mut out = Vec::new();
+                for (n, &s) in starts.iter().enumerate() {
+                    let e = starts.get(n + 1).copied().unwrap_or(annexb.len());
+                    let mut data = vec![0u8, 0, 0, 1];
+                    data.extend_from_slice(&annexb[s..e]);
+                    let pkt = Packet {
+                        pts: Timestamp::new(n as i64, (1, 30)),
+                        dts: Timestamp::new(n as i64, (1, 30)),
+                        data,
+                        stream_index: 0,
+                        is_key_frame: true,
+                    };
+                    if let Ok(Some(f)) = dec.decode(&pkt) {
+                        if f.data.len() == FRAME {
+                            out.push(f.data);
+                        }
+                    }
+                }
+                out
+            };
+            std::env::remove_var("KINETIX_SKIP_DEBLOCK");
+            let r = std::fs::read(&refyuv_nolf).unwrap();
+            if r.len() >= FRAME && nolf_ours.len() >= 2 {
+                let o = &nolf_ours[1];
+                let rr = &r[FRAME..2 * FRAME];
+                println!(
+                    "  frame#1 PRE-DEBLOCK vs ffmpeg-skipLF: luma sad={} max={}",
+                    sad(&o[..W * H], &rr[..W * H]),
+                    maxdiff(&o[..W * H], &rr[..W * H])
+                );
+            }
+            r
+        } else {
+            Vec::new()
+        };
 
         println!(
             "{name}: emitted(on/off)=({}/{}) ff_frames={ff_frames}",
@@ -183,6 +321,26 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
                 maxdiff(cb_o, cb_r),
                 maxdiff(cr_o, cr_r)
             );
+            // Diff map: where do the remaining differences live?
+            if md_luma > 0 {
+                let mut shown = 0;
+                let mut per_mb: std::collections::BTreeMap<(usize, usize), usize> =
+                    std::collections::BTreeMap::new();
+                for y in 0..H {
+                    for x in 0..W {
+                        let i = y * W + x;
+                        let d = (o[i] as i32 - r[i] as i32).unsigned_abs();
+                        if d > 0 {
+                            *per_mb.entry((x / 16, y / 16)).or_insert(0) += 1;
+                            if shown < 8 {
+                                println!("    diff ({x},{y}) ours={} ff={} d={d}", o[i], r[i]);
+                            }
+                            shown += 1;
+                        }
+                    }
+                }
+                println!("    total differing luma samples: {shown}; per-MB: {per_mb:?}");
+            }
             // Contrast: same frame decoded with the gate OFF.
             if let Some(ooff) = ours_off.get(idx) {
                 let md = maxdiff(&ooff[..W * H], &r[..W * H]);
@@ -192,13 +350,56 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
                     best.1
                 );
             }
+            // Plain-path contrast (session #32j bisect).
+            if let Some(opl) = ours_plain.get(idx) {
+                let md = maxdiff(&opl[..W * H], &r[..W * H]);
+                let sd = sad(&opl[..W * H], &r[..W * H]);
+                println!(
+                    "  frame#{idx} vs ff{}: PLAIN    luma sad={sd} max={md}",
+                    best.1
+                );
+            }
+            // Special-case ablation results (session #32k).
+            for (tag, frames) in &variants {
+                if let Some(vf) = frames.get(idx) {
+                    let sd = sad(&vf[..W * H], &r[..W * H]);
+                    println!("  frame#{idx} vs ff{}: {tag:<12} luma sad={sd}", best.1);
+                }
+            }
+            // Single-edge bisect results (session #32m).
+            for (tag, s) in &skip_results {
+                println!("  frame#{idx} vs ff{}: {tag:<22} luma sad={s}", best.1);
+            }
+            // Orchestrator-vs-plain divergence map: where do the two
+            // implementations disagree with EACH OTHER?
+            if let (Some(opl), Some(ooff)) = (ours_plain.get(idx), ours_off.get(idx)) {
+                let mut per_mb: std::collections::BTreeMap<(usize, usize), usize> =
+                    std::collections::BTreeMap::new();
+                let mut first: Option<(usize, usize, u8, u8, u8)> = None;
+                for y in 0..H {
+                    for x in 0..W {
+                        let i = y * W + x;
+                        if o[i] != opl[i] {
+                            *per_mb.entry((x / 16, y / 16)).or_insert(0) += 1;
+                            if first.is_none() {
+                                first = Some((x, y, o[i], opl[i], ooff[i]));
+                            }
+                        }
+                    }
+                }
+                println!(
+                    "    orch-vs-plain per-MB: {per_mb:?} first(x,y,orch,plain,predeb)={first:?}"
+                );
+            }
         }
 
         // Regression pin: the CAVLC I frame was measured BIT-EXACT against
         // ffmpeg's fully-filtered decode when this harness was introduced
         // (session #32i). If this ever fails, either the deblock orchestrator,
         // the MBAFF I-frame reconstruction, or the CAVLC parse regressed.
-        if name == "g6_cavlc_i" {
+        // (Skipped when KINETIX_MBAFF_DEBLOCK_PLAIN forces the plain pass,
+        // which intentionally bypasses the orchestrator.)
+        if name == "g6_cavlc_i" && std::env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").is_err() {
             assert_eq!(ours_on.len(), 1, "{name}: expected exactly one frame");
             let r = &ff[..FRAME];
             let o = &ours_on[0];

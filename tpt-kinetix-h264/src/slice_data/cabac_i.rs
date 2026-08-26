@@ -22,6 +22,21 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     transform_8x8_mode_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
+    if std::env::var("KINETIX_DUMP_PAYLOAD").is_ok() {
+        if let Some(path) = std::env::temp_dir().join("dbg_mbaff_i1_payload.bin").to_str() {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&mb_cols.to_le_bytes());
+            buf.extend_from_slice(&mb_rows.to_le_bytes());
+            buf.extend_from_slice(&slice_qp.to_le_bytes());
+            buf.push(mb_aff as u8);
+            buf.push(field_pic_flag as u8);
+            buf.push(transform_8x8_mode_flag as u8);
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+            let _ = std::fs::write(path, buf);
+        }
+    }
+
     let mut dec = crate::entropy::CabacDecoder::new(data)
         .map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
     let mut ctxs = CabacSliceContexts::new(slice_qp);

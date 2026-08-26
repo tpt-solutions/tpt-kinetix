@@ -1069,6 +1069,19 @@ pub fn decode_tile_group(
 
     let mut out = Ok(());
     for mi_row in (sb_row_start * sb_mi..sb_row_end * sb_mi).step_by(sb_mi) {
+        // AV1 spec §7.3 `decode_tile()`: `clear_left_context()` is called
+        // once per superblock ROW (the outer loop), not per superblock. It
+        // resets the LeftLevel/LeftDc coefficient-neighbour arrays to 0 so
+        // blocks in the first column of a new row start with no left context
+        // (the previous row's blocks are no longer neighbours). Calling it
+        // inside `decode_superblock` (i.e. for every column) incorrectly
+        // discarded valid left-context contributions when the decoder moved
+        // from one superblock column to the next within the same row —
+        // corrupting `all_zero_ctx`/`coeff_base_ctx`/`coeff_br_ctx` for
+        // every block whose left neighbour lay in a different superblock
+        // column. Frames with a single superblock column (width ≤ 64 px)
+        // were unaffected; any wider frame produced noise-level PSNR.
+        state.coeff_ctxs.clear_left();
         for mi_col in (sb_col_start * sb_mi..sb_col_end * sb_mi).step_by(sb_mi) {
             if let Err(e) = state.decode_superblock(mi_row, mi_col, sb_bsize) {
                 out = Err(e);

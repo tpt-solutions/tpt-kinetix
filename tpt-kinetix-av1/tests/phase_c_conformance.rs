@@ -269,6 +269,23 @@ fn av1_phase_c_keyframe_psnr() {
     let psnr_v = psnr(k_v, r_v);
     let diff = luma_diff_count(k_y, r_y);
 
+    // Per-row diff count to locate where errors start.
+    for row in 0..(h as usize).min(8) {
+        let r = row * w as usize;
+        let rd = k_y[r..r + w as usize]
+            .iter()
+            .zip(&r_y[r..r + w as usize])
+            .filter(|(a, b)| a != b)
+            .count();
+        eprintln!(
+            "  row {:2}: kx={:?} rf={:?} diff={}",
+            row,
+            &k_y[r..r + 16.min(w as usize)],
+            &r_y[r..r + 16.min(w as usize)],
+            rd,
+        );
+    }
+
     eprintln!(
         "AV1 Phase C keyframe (Kinetix vs ffmpeg): {}x{}, PSNR Y/U/V = {:.2}/{:.2}/{:.2} dB, \
          luma diff = {}/{}",
