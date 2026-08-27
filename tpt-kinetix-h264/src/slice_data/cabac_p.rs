@@ -334,7 +334,12 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut ctxs = PbCabacSliceContexts::new_p(slice_qp, cabac_init_idc);
 
     let total = (mb_cols * mb_rows) as usize;
-    let mut macroblocks: Vec<Macroblock> = Vec::with_capacity(total);
+    // Pre-allocated and assigned by frame-MB grid address (not decode order):
+    // in an MBAFF frame the parse visits macroblocks in pair-scan order
+    // (top, bottom of pair 0, then pair 1 …) so `mb_idx` ≠ grid address for
+    // every bottom macroblock. Committing by grid address keeps neighbour
+    // lookups and `predict_slice_mvs` correct (mirrors `cabac_i.rs`, #32e).
+    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut cabac_ctx: Vec<MbCabacCtx> = vec![MbCabacCtx::default(); total];
@@ -353,10 +358,21 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut next_mb_skipped = false;
 
     for mb_idx in 0..total {
-        let mb_x = (mb_idx as u32) % mb_cols;
-        let mb_y = (mb_idx as u32) / mb_cols;
-        let left_idx = (mb_x > 0).then(|| mb_idx - 1);
-        let top_idx = (mb_y > 0).then(|| mb_idx - mb_cols as usize);
+        // MBAFF pair-scan addressing (§6.4.2/§7.4.4): addresses 2k / 2k+1 are
+        // the top / bottom macroblock of pair k, at frame-MB column
+        // `k % mb_cols` and rows `2*(k / mb_cols)` / `+1`. Frame-only slices
+        // use plain raster.
+        let (mb_x, mb_y, grid_idx) = if mbaff_frame {
+            let pair = mb_idx >> 1;
+            let px = (pair % mb_cols as usize) as u32;
+            let py = (pair / mb_cols as usize) as u32;
+            let mb_row = 2 * py + (mb_idx & 1) as u32;
+            (px, mb_row, (mb_row * mb_cols + px) as usize)
+        } else {
+            ((mb_idx as u32) % mb_cols, (mb_idx as u32) / mb_cols, mb_idx)
+        };
+        let left_idx = (mb_x > 0).then(|| grid_idx - 1);
+        let top_idx = (mb_y > 0).then(|| grid_idx - mb_cols as usize);
 
         let skip_neighbors = crate::entropy::MbSkipNeighbors {
             left_available: mb_x > 0,
@@ -418,9 +434,11 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 false
             };
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
-            field_flags[mb_idx] = Some(cur_pair_field);
-            if mb_idx + 1 < total {
-                field_flags[mb_idx + 1] = Some(cur_pair_field);
+            field_flags[grid_idx] = Some(cur_pair_field);
+            // The pair's bottom macroblock sits one frame-MB row below.
+            let bot_grid = grid_idx + mb_cols as usize;
+            if bot_grid < total {
+                field_flags[bot_grid] = Some(cur_pair_field);
             }
         }
         let (r1, o1) = dec.debug_state();
@@ -434,24 +452,24 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.skip = true;
             mb.mb_field_flag = cur_pair_field;
             prev_mb_skipped = true;
-            nz[mb_idx] = MbNz {
+            nz[grid_idx] = MbNz {
                 present: true,
                 ..Default::default()
             };
-            pred_ctx[mb_idx] = MbPredCtx {
+            pred_ctx[grid_idx] = MbPredCtx {
                 present: true,
                 ..Default::default()
             };
-            cabac_ctx[mb_idx] = MbCabacCtx {
+            cabac_ctx[grid_idx] = MbCabacCtx {
                 present: true,
                 cbp_word: 0,
                 ..Default::default()
             };
-            inter_ctx[mb_idx] = MbInterCabacCtx {
+            inter_ctx[grid_idx] = MbInterCabacCtx {
                 present: true,
                 ..Default::default()
             };
-            macroblocks.push(mb);
+            macroblocks[grid_idx] = mb;
             // §7.3.4 slice_data(): end_of_slice_flag is decoded after EVERY
             // non-I_PCM macroblock — including skipped ones (it sits outside
             // macroblock_layer() in the slice_data() do/while loop, gated only
@@ -504,15 +522,15 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         qp = new_qp;
         prev_dqp_nonzero = dqp_nz;
         prev_mb_skipped = false;
-        nz[mb_idx] = this_nz;
-        pred_ctx[mb_idx] = this_pred_ctx;
+        nz[grid_idx] = this_nz;
+        pred_ctx[grid_idx] = this_pred_ctx;
         let mut this_cabac_ctx = this_cabac_ctx;
         this_cabac_ctx.mb_field_flag = cur_pair_field;
-        cabac_ctx[mb_idx] = this_cabac_ctx;
-        inter_ctx[mb_idx] = this_inter_ctx;
+        cabac_ctx[grid_idx] = this_cabac_ctx;
+        inter_ctx[grid_idx] = this_inter_ctx;
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
-        macroblocks.push(mb);
+        macroblocks[grid_idx] = mb;
 
         // §7.3.4: no end_of_slice_flag after the TOP macroblock of an MBAFF
         // frame pair (see the skip-MB path above for the spec reference).

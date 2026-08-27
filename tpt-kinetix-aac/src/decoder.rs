@@ -1113,6 +1113,269 @@ mod synth_tests {
         }
     }
 
+    /// TDAC projection for frame 24 (TNS frame) to identify the spectral coefficient
+    /// error that leaks into frame 25 via overlap-add. The sweep_stereo outlier is
+    /// localized to frame 25 sample 488; frame 24 has TNS, frame 25 doesn't.
+    #[test]
+    #[ignore]
+    fn dbg_sweep_frame24_tns_coeff_error() {
+        if !ffmpeg_available() {
+            eprintln!("skip (ffmpeg unavailable)");
+            return;
+        }
+        let adts = match encode_aac_adts_lavfi(
+            "aevalsrc=exprs='sin(2*PI*(200+1900*t)*t)':s=44100:d=1.0",
+            2,
+            "128k",
+        ) {
+            Some(a) => a,
+            None => {
+                eprintln!("skip (encode failed)");
+                return;
+            }
+        };
+
+        let mut frames = Vec::new();
+        let mut i = 0usize;
+        while i + 7 <= adts.len() {
+            if adts[i] == 0xFF && (adts[i + 1] & 0xF0) == 0xF0 {
+                let fl = (((adts[i + 3] & 0x03) as usize) << 11)
+                    | ((adts[i + 4] as usize) << 3)
+                    | ((adts[i + 5] as usize) >> 5);
+                if fl == 0 || i + fl > adts.len() {
+                    break;
+                }
+                frames.push(adts[i..i + fl].to_vec());
+                i += fl;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(frames.len() > 25, "need >=26 frames, got {}", frames.len());
+
+        let mut dec = AacDecoder::new();
+        let mut native_full: Vec<f32> = Vec::new();
+        for f in &frames {
+            let pkt = Packet {
+                pts: Timestamp::NONE,
+                dts: Timestamp::NONE,
+                data: f.clone(),
+                stream_index: 0,
+                is_key_frame: true,
+            };
+            if let Ok(Some(frame)) = dec.decode(&pkt) {
+                let s: Vec<f32> = frame
+                    .data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) / 32768.0)
+                    .collect();
+                let ch0: Vec<f32> = s.iter().step_by(2).copied().collect();
+                native_full.extend(ch0);
+            }
+        }
+        let reference = decode_aac_with_ffmpeg(&adts).expect("ffmpeg decode");
+        let mut ref_full: Vec<f32> = Vec::new();
+        for rf in &reference {
+            let ch0: Vec<f32> = rf
+                .data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .step_by(2)
+                .collect();
+            ref_full.extend(ch0);
+        }
+
+        // Find best integer sample lag.
+        let mut best_lag = 0i64;
+        let mut best_corr = f64::MIN;
+        for lag in -2048i64..=2048 {
+            let (n0, r0) = if lag >= 0 {
+                (0usize, lag as usize)
+            } else {
+                ((-lag) as usize, 0usize)
+            };
+            if n0 >= native_full.len() || r0 >= ref_full.len() {
+                continue;
+            }
+            let len = (native_full.len() - n0).min(ref_full.len() - r0);
+            if len < 8192 {
+                continue;
+            }
+            let (mut dot, mut nn, mut rr) = (0.0f64, 0.0, 0.0);
+            for k in 0..len {
+                let a = native_full[n0 + k] as f64;
+                let b = ref_full[r0 + k] as f64;
+                dot += a * b;
+                nn += a * a;
+                rr += b * b;
+            }
+            if nn > 0.0 && rr > 0.0 {
+                let c = dot / (nn.sqrt() * rr.sqrt());
+                if c > best_corr {
+                    best_corr = c;
+                    best_lag = lag;
+                }
+            }
+        }
+        eprintln!("best lag = {best_lag}, corr = {best_corr:.6}");
+
+        let n_off = if best_lag < 0 { (-best_lag) as usize } else { 0 };
+        let r_off = if best_lag > 0 { best_lag as usize } else { 0 };
+        let grab_n = |full: &[f32], f: usize| -> Vec<f32> {
+            let s = f * 1024 + n_off;
+            if s + 1024 > full.len() {
+                vec![0.0f32; 1024]
+            } else {
+                full[s..s + 1024].to_vec()
+            }
+        };
+        let grab_r = |full: &[f32], f: usize| -> Vec<f32> {
+            let s = f * 1024 + r_off;
+            if s + 1024 > full.len() {
+                vec![0.0f32; 1024]
+            } else {
+                full[s..s + 1024].to_vec()
+            }
+        };
+        let p24 = grab_n(&native_full, 24);
+        let r24 = grab_r(&ref_full, 24);
+        let p25 = grab_n(&native_full, 25);
+        let r25 = grab_r(&ref_full, 25);
+
+        let ics_of = |idx: usize| -> (bool, bool) {
+            let hdr = AdtsHeader::parse(&frames[idx]).unwrap();
+            let payload = &frames[idx][hdr.header_len..hdr.frame_length];
+            let block =
+                RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize).unwrap();
+            for el in &block.elements {
+                if let Element::Cpe(cpe) = el {
+                    return (
+                        cpe.left.ics.window_sequence == WindowSequence::OnlyLong,
+                        cpe.left.ics.window_shape,
+                    );
+                }
+            }
+            panic!("no CPE in frame {idx}");
+        };
+        let (only24, ws24) = ics_of(24);
+        let (only25, ws25) = ics_of(25);
+        let (_only23, ws23) = ics_of(23);
+        eprintln!(
+            "frame24: only_long={only24} shape={ws24} | frame25: only_long={only25} shape={ws25}"
+        );
+
+        let windows = Windows::new();
+        let w_prev24 = &windows.long[ws23 as usize];
+        let w_cur24 = &windows.long[ws24 as usize];
+
+        // Reconstruct the full 2048-sample IMDCT error of frame 24.
+        let mut buf24_err = [0.0f64; 2048];
+        for i in 0..1024 {
+            let wk = w_prev24[i];
+            buf24_err[i] = if wk.abs() > 1e-3 {
+                (p24[i] - r24[i]) as f64 / wk as f64
+            } else {
+                0.0
+            };
+        }
+        for j in 0..1024 {
+            let wk = w_cur24[1023 - j];
+            buf24_err[1024 + j] = if wk.abs() > 1e-3 {
+                (p25[j] - r25[j]) as f64 / wk as f64
+            } else {
+                0.0
+            };
+        }
+
+        // Project onto IMDCT basis.
+        let imdct = Imdct::new(1024);
+        let mut err = [0f64; 1024];
+        let mut best_b = 0usize;
+        let mut best_e = 0.0f64;
+        for b in 0..1024 {
+            let mut unit = [0f32; 1024];
+            unit[b] = 1.0;
+            let mut col = [0f32; 2048];
+            imdct.transform(&unit, &mut col);
+            let mut num = 0.0f64;
+            let mut den = 0.0f64;
+            for i in 0..2048 {
+                let c = col[i] as f64;
+                num += buf24_err[i] * c;
+                den += c * c;
+            }
+            let e = if den > 0.0 { num / den } else { 0.0 };
+            err[b] = e;
+            if e.abs() > best_e {
+                best_e = e.abs();
+                best_b = b;
+            }
+        }
+
+        // Get native post-TNS coeffs for frame 24.
+        let hdr = AdtsHeader::parse(&frames[24]).unwrap();
+        let payload = &frames[24][hdr.header_len..hdr.frame_length];
+        let block = RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize).unwrap();
+        let mut cpe = None;
+        for el in &block.elements {
+            if let Element::Cpe(c) = el {
+                cpe = Some(c.clone());
+            }
+        }
+        let cpe = cpe.expect("CPE in frame 24");
+        let mut rng = PnsRandom::new();
+        let mid = AacDecoder::decode_channel_stream(
+            &cpe.left,
+            hdr.sampling_frequency_index as usize,
+            24,
+            &mut rng,
+        )
+        .unwrap();
+        let side = AacDecoder::decode_channel_stream(
+            &cpe.right,
+            hdr.sampling_frequency_index as usize,
+            24,
+            &mut rng,
+        )
+        .unwrap();
+        eprintln!("frame24 has_tns={} has_tnsR={}", cpe.left.tns.is_some(), cpe.right.tns.is_some());
+
+        // Print TNS filter parameters for frame 24 left channel.
+        if let Some(tns) = &cpe.left.tns {
+            eprintln!("frame24 TNS: n_filt={:?}", tns.n_filt);
+            for (gi, gf) in tns.filters.iter().enumerate() {
+                for (fi, f) in gf.iter().enumerate() {
+                    eprintln!(
+                        "  filter[{gi}/{fi}]: order={} length={} direction={} coef={:?}",
+                        f.order,
+                        f.length,
+                        f.direction,
+                        &f.coef[..f.order as usize]
+                    );
+                }
+            }
+        }
+
+        eprintln!(
+            "FRAME24 dominant coeff error: bin {best_b} err={:e} native={:e} ref_est={:e}",
+            err[best_b],
+            mid[best_b],
+            mid[best_b] - err[best_b] as f32
+        );
+        let mut idxs: Vec<usize> = (0..1024).collect();
+        idxs.sort_by(|&a, &b| err[b].abs().partial_cmp(&err[a].abs()).unwrap());
+        for &b in idxs.iter().take(10) {
+            if err[b].abs() > 1.0 {
+                eprintln!(
+                    "   bin {b}: err={:e} native={:e} ref_est={:e}",
+                    err[b],
+                    mid[b],
+                    mid[b] - err[b] as f32
+                );
+            }
+        }
+    }
+
     /// Replicates ffmpeg's `imdct_and_windowing` (AAC EIGHT_SHORT path) overlap-add
     /// arithmetic exactly and asserts our `short_synthesis` matches it: the flat
     /// 448-sample left/right guard regions are copied from the carried overlap,

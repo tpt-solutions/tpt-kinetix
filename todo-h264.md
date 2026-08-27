@@ -46,9 +46,37 @@ disable the filter; `--no-deblock` would). ffmpeg's trace_headers confirms
 then the spec-mandated filter) is correct and the g6 harness — which uses a
 matching filtered reference — proves it.
 
-TODO next: re-check CABAC MBAFF P/B (`mbaff_ip`, `mbaff_ibp` P/B frames still
-SAD ~80k–130k) now that the terminate bug is gone; then G.5 corpus validation
-and the `pixel_exact` flip.
+### Remaining h264 gates for `pixel_exact` — scoped 2026-08-28 (#32p)
+
+1. **CABAC/CAVLC MBAFF P/B** — `decode_interlaced_mbaff` returns `Fallback` for
+   every non-I slice (`interlaced.rs:280`), and the interlaced module has **no
+   inter-decode path at all** (PAFF B-field also unimplemented; PAFF P-field
+   has `decode_interlaced_p_field`). Wiring MBAFF P/B needs ref-list
+   construction + DPB access + MC built in the interlaced module (or shared
+   from `decoder/mod.rs`). `reconstruct_mbaff_inter_luma`/`_chroma` exist but
+   are opt-in (`KINETIX_MBAFF_FIELD_MC`) with known gaps (#32f items 6–8).
+   For `mbaff_ip`/`mbaff_ibp` (all-frame-coded P/B pairs per #32f) the
+   reconstruction reduces to progressive inter into contiguous halves — the
+   tractable first target — but the slice *setup* machinery is the real work.
+   → biggest remaining chunk; a dedicated Phase G.2/G.4 effort.
+
+2. **Non-16-aligned crop-edge gap** — `decode_slice` derives
+   `mb_cols = width.div_ceil(16)` / `mb_rows = height.div_ceil(16)` from the
+   *cropped* dimensions, and `reconstruct_*_frame` allocates buffers at cropped
+   size with `stride = cropped_width`, so edge-MB writes past the visible
+   region are silently dropped (`if px < stride`). Consequences: deblock and
+   inter-pred-into-padding near non-aligned right/bottom edges are wrong.
+   **Also latent**: `width.div_ceil(16)` undercounts `mb_cols` by 1 when a
+   single-axis crop exceeds 8 px (`crop_right = 10` on a 12-MB-wide picture ⇒
+   display 172 ⇒ `172.div_ceil(16) = 11 ≠ 12`). x264's typical ≤8 px crops
+   happen to work. Proper fix: derive mb_cols/mb_rows from
+   `sps.pic_width_in_mbs_minus1 + 1` etc.; reconstruct + deblock at coded
+   (MB-aligned) dimensions; crop to the display rect at each of the ~5
+   `VideoFrame` build sites. Contained but touches every progressive emit path.
+
+3. **Phase G.5** — PAFF + MBAFF corpus bit-exact validation (blocked on 1).
+
+4. **`pixel_exact` flip** — gated on 1–3.
 
 Note on `above_right_mb_decoded`: a spec-motivated reconstruction fix was
 prototyped this session (MBAFF pair-scan — the *bottom* MB's above-right

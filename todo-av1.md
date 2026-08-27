@@ -2552,15 +2552,31 @@
 > `solid_red` still 99. Tests green (103 unit), clippy `-D warnings` clean,
 > `just av1-oracle-validate` passes.
 >
-> **Next target**: `testsrc` divergence now at `Y px=(48,64)` — the start of
-> **superblock ROW 1** (y=64), `mi=(12,16)`, `pred_mode=12` (PAETH), delta
-> only −14 (much smaller). Candidates: PAETH prediction across the SB-row
-> boundary, the coeff `above`-context / `ymode_above` / `tx_above` arrays
-> after the first SB row, or another palette-neighbour case (above cache this
-> time, since `(MiRow*4) % 64 == 0` gates the palette above-cache at the SB
-> row top — that gate may interact wrongly here). `KINETIX_AV1_CAPTURE_TILE`
-> → `av1_tile_trace.json`, `KINETIX_AV1_DBG_ROWS`+`KINETIX_AV1_DBG_COLS`,
-> `KINETIX_AV1_DBG_PAL`, `KINETIX_AV1_DBG_LR` are the tools (all opt-in).
+> **Next target — a *progressive* drift in superblock ROW 1, not a hard
+> desync.** `testsrc` first divergence is `Y px=(48,64)` but the real story is
+> a left-to-right cascade in the SB(16,0) TR-32×32 subtree:
+>   - `mi=(0,16)`/`mi=(0,18)` (px cols 0-15) — **bit-exact** vs dav1d.
+>   - `mi=(4,18)` (px cols 16-31) — off by a consistent **~2-5** (looks like a
+>     prediction-base / DC-residual offset; dav1d's gradient is ~2 higher and
+>     converges).
+>   - `mi=(8,18)` (px cols 32-47) — now clearly wrong: Kinetix decodes
+>     `y_mode=2` (V_PRED, near-flat output) where dav1d produces a horizontal
+>     gradient (so the true mode is H_PRED/SMOOTH_H/a D-mode). `mi=(8,16)`
+>     *above* it (px rows 64-71) is still exact.
+>   - `mi=(12,16)` (px 48,64) — Kinetix `y_mode=12` (PAETH) so it never reads
+>     `has_palette_y`; dav1d reconstructs a flat `106` palette block there.
+> So by `mi=(8,18)` the entropy stream is genuinely desynced (wrong y_mode
+> from the CDF, cascading), but it *starts* as a small numeric error in
+> `mi=(4,18)` while cols 0-15 stay perfect. Prime suspects, in order: (1) a
+> small coefficient-context or dequant error in `mi=(4,18)` that both shifts
+> its pixels ~2 and mis-consumes a symbol; (2) directional/`SMOOTH`
+> prediction *accuracy* in the 2nd SB row (angle_delta, or the smooth-weight
+> arithmetic near a block edge); (3) the coeff `above_level`/`above_dc`
+> arrays at the SB-row-0→1 boundary (they persist across SB rows by spec — is
+> Kinetix updating them for every mi column of each SB-row-0 block?).
+> `KINETIX_AV1_DBG_YMODE` (prints above/left mode + ctx + bit pos),
+> `KINETIX_AV1_DBG_{ROWS,RROWS,COLS,PAL,LR}`, and `KINETIX_AV1_CAPTURE_TILE`
+> are the tools (all opt-in).
 >
 > Files modified: `tpt-kinetix-av1/src/frame.rs`,
 > `tpt-kinetix-av1/src/reconstruct/mod.rs`,
