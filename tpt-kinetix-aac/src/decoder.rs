@@ -1219,7 +1219,11 @@ mod synth_tests {
         }
         eprintln!("best lag = {best_lag}, corr = {best_corr:.6}");
 
-        let n_off = if best_lag < 0 { (-best_lag) as usize } else { 0 };
+        let n_off = if best_lag < 0 {
+            (-best_lag) as usize
+        } else {
+            0
+        };
         let r_off = if best_lag > 0 { best_lag as usize } else { 0 };
         let grab_n = |full: &[f32], f: usize| -> Vec<f32> {
             let s = f * 1024 + n_off;
@@ -1338,7 +1342,88 @@ mod synth_tests {
             &mut rng,
         )
         .unwrap();
-        eprintln!("frame24 has_tns={} has_tnsR={}", cpe.left.tns.is_some(), cpe.right.tns.is_some());
+
+        // Also decode WITHOUT TNS to isolate whether the error is from TNS.
+        let swb = crate::tables::SWB_OFFSET_1024[hdr.sampling_frequency_index as usize];
+        let mut coeffs_no_tns = cpe.left.coeffs;
+        if let Some(p) = &cpe.left.pulse {
+            crate::pulse::apply_pulse(p, swb, &mut coeffs_no_tns);
+        }
+        let gindex = crate::dequant::group_base_offsets(&cpe.left.ics);
+        let mut rng2 = PnsRandom::new();
+        crate::pns::apply_pns(
+            &cpe.left.ics,
+            &cpe.left.band_type,
+            &cpe.left.scalefactor,
+            swb,
+            cpe.left.global_gain,
+            &gindex,
+            &mut rng2,
+            &mut coeffs_no_tns,
+        );
+        // (intentionally skip TNS)
+
+        // Apply M/S stereo to see if the error appears after M/S.
+        let mut mid_ms = mid;
+        let mut side_ms = side;
+        crate::stereo::apply_stereo(
+            &mut mid_ms,
+            &mut side_ms,
+            &cpe.left.ics,
+            &cpe.left.band_type,
+            &cpe.right.band_type,
+            &cpe.left.scalefactor,
+            &cpe.right.scalefactor,
+            cpe.ms_mask_present,
+            &cpe.ms_mask,
+            swb,
+        );
+
+        eprintln!("\nCoefficients at error bins (pre-M/S vs post-M/S):");
+        for b in [97, 99, 101, 103, 105, 107, 109, 111] {
+            eprintln!(
+                "  bin {b}: preMS_L={:e} preMS_R={:e} postMS_L={:e} postMS_R={:e}",
+                mid[b], side[b], mid_ms[b], side_ms[b]
+            );
+        }
+
+        // Print band types and ms_mask for the error bins.
+        let max_sfb = cpe.left.ics.max_sfb as usize;
+        let swb = crate::tables::SWB_OFFSET_1024[hdr.sampling_frequency_index as usize];
+        eprintln!("\nBand types and ms_mask for error bins:");
+        for sfb in 0..max_sfb {
+            if sfb + 1 >= swb.len() { break; }
+            let line_start = swb[sfb] as usize;
+            let line_end = swb[sfb + 1] as usize;
+            // Check if this band overlaps with the error region (97-111).
+            if line_start <= 111 && line_end >= 97 {
+                let l_bt = cpe.left.band_type.get(sfb).copied().unwrap_or(0);
+                let r_bt = cpe.right.band_type.get(sfb).copied().unwrap_or(0);
+                let ms_bit = match cpe.ms_mask_present {
+                    0 => "N/A",
+                    2 => "ALL",
+                    _ => if cpe.ms_mask.get(sfb).copied().unwrap_or(false) { "ms" } else { "lr" },
+                };
+                eprintln!(
+                    "  sfb {sfb}: lines {line_start}-{line_end} L_bt={l_bt} R_bt={r_bt} ms={ms_bit}"
+                );
+            }
+        }
+
+        eprintln!("\nCoefficients at error bins (with TNS vs without TNS):");
+        for b in [97, 99, 101, 103, 105, 107, 109, 111] {
+            eprintln!(
+                "  bin {b}: with_TNS={:e} without_TNS={:e} diff={:e}",
+                mid[b],
+                coeffs_no_tns[b],
+                mid[b] - coeffs_no_tns[b]
+            );
+        }
+        eprintln!(
+            "frame24 has_tns={} has_tnsR={}",
+            cpe.left.tns.is_some(),
+            cpe.right.tns.is_some()
+        );
 
         // Print TNS filter parameters for frame 24 left channel.
         if let Some(tns) = &cpe.left.tns {

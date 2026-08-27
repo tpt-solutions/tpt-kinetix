@@ -1172,7 +1172,11 @@ fn parse_lr(
         } else {
             0
         };
-        out.unit_size = [luma_size, luma_size >> lr_uv_shift, luma_size >> lr_uv_shift];
+        out.unit_size = [
+            luma_size,
+            luma_size >> lr_uv_shift,
+            luma_size >> lr_uv_shift,
+        ];
     }
     Ok(out)
 }

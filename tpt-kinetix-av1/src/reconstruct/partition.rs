@@ -135,8 +135,16 @@ impl<'a> TileDecodeState<'a> {
             if self.lr.frame_restoration_type[plane] == 0 {
                 continue;
             }
-            let sub_x = if plane == 0 { 0 } else { self.subsampling_x as usize };
-            let sub_y = if plane == 0 { 0 } else { self.subsampling_y as usize };
+            let sub_x = if plane == 0 {
+                0
+            } else {
+                self.subsampling_x as usize
+            };
+            let sub_y = if plane == 0 {
+                0
+            } else {
+                self.subsampling_y as usize
+            };
             let unit_size = self.lr.lr_unit_size[plane].max(1) as usize;
             let unit_rows = count_units_in_frame(unit_size, round2(self.lr.frame_height, sub_y));
             let unit_cols = count_units_in_frame(unit_size, round2(self.lr.upscaled_width, sub_x));
@@ -193,9 +201,7 @@ impl<'a> TileDecodeState<'a> {
         ];
 
         let frt = self.lr.frame_restoration_type[plane];
-        let restoration_type = self
-            .mode_cdfs
-            .read_lr_restoration_type(&mut self.dec, frt);
+        let restoration_type = self.mode_cdfs.read_lr_restoration_type(&mut self.dec, frt);
 
         match restoration_type {
             1 => {
@@ -247,13 +253,7 @@ impl<'a> TileDecodeState<'a> {
 
     /// `decode_signed_subexp_with_ref_bool` (AV1 spec §6.8.24): the
     /// arithmetic-coded variant of the sub-exponential coefficient reader.
-    fn decode_signed_subexp_with_ref_bool(
-        &mut self,
-        low: i32,
-        high: i32,
-        k: i32,
-        r: i32,
-    ) -> i32 {
+    fn decode_signed_subexp_with_ref_bool(&mut self, low: i32, high: i32, k: i32, r: i32) -> i32 {
         let x = self.decode_unsigned_subexp_with_ref_bool(high - low, k, r - low);
         x + low
     }

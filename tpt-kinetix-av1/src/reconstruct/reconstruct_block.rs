@@ -33,11 +33,20 @@ pub(super) fn reconstruct_tx_block(
 
     let dbg_uv =
         px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
+    // `KINETIX_AV1_DBG_PX=x,y` targets one exact tx block (any plane/pos).
+    let dbg_px = std::env::var("KINETIX_AV1_DBG_PX").ok().and_then(|s| {
+        let mut it = s.split(',');
+        Some((
+            it.next()?.trim().parse::<usize>().ok()?,
+            it.next()?.trim().parse::<usize>().ok()?,
+        ))
+    }) == Some((px_x, px_y));
     let dbg = (px_y < 32
         && (px_x < 4 || (16..64).contains(&px_x))
         && blk.plane == 0
         && std::env::var("KINETIX_AV1_DBG").is_ok())
-        || dbg_uv;
+        || dbg_uv
+        || dbg_px;
     if dbg_uv {
         eprintln!("DBG UV plane={} px=({px_x},{px_y})", blk.plane);
     }
@@ -179,6 +188,20 @@ pub(super) fn reconstruct_tx_block(
     }
     if dbg {
         eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
+        if dbg_px {
+            eprintln!("DBG borders.left={:?}", borders.left);
+            eprintln!("DBG borders.top ={:?}", borders.top);
+            eprintln!("DBG borders.tl  ={}", borders.tl);
+            eprintln!(
+                "DBG pred last row={:?}",
+                &pred[(tx_h - 1) * tx_w..tx_h * tx_w]
+            );
+            eprintln!(
+                "DBG pred row {}   ={:?}",
+                tx_h - 2,
+                &pred[(tx_h - 2) * tx_w..(tx_h - 1) * tx_w]
+            );
+        }
     }
 
     for dy in 0..tx_h {
