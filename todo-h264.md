@@ -35,6 +35,36 @@ NEW FACTS this session:
   `nnz = CABAC && !IS_INTRA ? 0 : 64` unavailable-fill);
   (b) the 8×8 significance-map `SIG_COEFF_CTX_INC_8X8` frame-row indices;
   (c) coeff visit order for the 8×8 groups.
+- **NEW 2026-08-27 (#32o cont'd) — the desync is a MB_TYPE misparse that
+  originates BEFORE MB3.** `ffmpeg -debug mb_type` on `mbaff_i1` prints:
+  ```
+  i  i  i  i
+  i  I  I  i
+  i  I  I  i
+  i  i  i  i
+  ```
+  i.e. ffmpeg decodes the **4 centre MBs — frame-grid (1,1),(2,1),(1,2),(2,2)
+  = crate MB3, MB5, MB10, MB12 — as I_16x16**; the 12 border MBs as I_4x4/8x8.
+  The crate (and `dbg_mbaff_oracle`) decode ALL 16 as I_NxN. Since MB3's
+  mb_type bin-0 context is 0 either way (both neighbours I_NxN) and the crate
+  is in exact engine lockstep with the oracle, ffmpeg would decode the same
+  bin-0 value from the same engine state — therefore **the arithmetic engine
+  has already drifted from ffmpeg's before MB3**, i.e. the wrong-bin-count
+  bug is inside MB0, MB1, the pair-1 `mb_field_decoding_flag` read, or MB2
+  (MB2 = first `transform_size_8x8_flag=true` / Intra_8x8 MB).
+  - MB0 bin trace is pristine and matches progressive behaviour exactly
+    (field-flag ctx70=0, mb_type ctx3=0→I_NxN, t8 ctx399=0, 16×I4x4 MPM,
+    chroma ctx64=0, cbp 0x2f, dqp 0, normal 4×4 residual).
+  - Progressive High/8×8 CABAC I is bit-exact (`conformance_matrix high8x8_i`),
+    so MB2's Intra_8x8 residual code itself is proven — suspect the MBAFF
+    wrapper around it (field-flag interaction, or an off-by-one in the
+    pair-scan commit of MB1's state that MB2 then reads).
+  - ffmpeg decodes the whole frame with **0 errors**; SPS is High, 64×64,
+    `mb_adaptive_frame_field_flag=1`, no scaling matrix.
+  NEXT (focused): bisect MB0→MB1→field1→MB2 by dumping the crate's engine
+  byte-position + a running bin count at each of those 4 boundaries and
+  checking which one first disagrees with a from-scratch hand count of the
+  spec syntax for that MB (MB0/MB1 are plain I_4x4 — fully hand-countable).
 - DECISIVE NEXT STEP (now unblocked — `clang` 22.x is on PATH): build a
   compiled-ffmpeg oracle. Vendored sources already at repo root
   (`h264_cabac_ref.c`, `cabac_ref.c`/`.h`, `ff_cabac_functions.h`). Minimum
