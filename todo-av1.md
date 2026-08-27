@@ -2578,6 +2578,31 @@
 > `KINETIX_AV1_DBG_{ROWS,RROWS,COLS,PAL,LR}`, and `KINETIX_AV1_CAPTURE_TILE`
 > are the tools (all opt-in).
 >
+> **Sharpened further (2026-08-27 cont'd):** the *origin* of the drift is a
+> **bottom-2-rows numerical error in a PAETH + residual block**. `mi=(8,8)`
+> (`BLOCK_32X32`, PAETH, `tx=16x16`, `skip=false`): its bottom-**left** 16×16
+> tx block (px cols 32-47, rows 48-63) is **bit-exact**, but its bottom-
+> **right** 16×16 tx block (px cols 48-63) is exact for rows 48-61 and off by
+> **±1-2 only on rows 62-63** — the last two output rows of that one 16-point
+> inverse column transform. `mi=(4,16)` (also PAETH) shows the same
+> last-rows-off pattern, and `mi=(4,18)` (`V_PRED`, `angle_delta` read) then
+> copies that slightly-wrong bottom row downward and the error compounds
+> left-to-right until `mi=(8,18)` fully desyncs.
+>
+> **Important:** `mi=(8,8)`'s bottom-LEFT 16×16 tx is perfect while the
+> bottom-RIGHT (same size, same transform) has the rows-62-63 error — so it
+> is **not** a generic inverse-transform tail-row bug (that would hit both).
+> It is specific to the bottom-right tx block's own coefficients or its
+> reference samples. Targets, in order: (1) one wrong **coefficient** in that
+> tx block — a `coeff_br` / Exp-Golomb-tail magnitude off by 1, or a
+> scan-position / `dc_sign` error — that a high-frequency position turns into
+> a small bottom-rows ripple; (2) its **AboveRow** (bottom row of the tx
+> block above) or **LeftCol** wrongly extended near the bottom (spec §7.11.2
+> fills `LeftCol` for `i = 0..w+h-1`); (3) V_PRED + non-zero `angle_delta` in
+> `mi=(4,18)` (`Dr_Intra_Derivative` spacing / the `shift = ((idx <<
+> upsample) >> 1) & 0x1F` interpolation) — downstream of the PAETH drift, not
+> the origin.
+>
 > Files modified: `tpt-kinetix-av1/src/frame.rs`,
 > `tpt-kinetix-av1/src/reconstruct/mod.rs`,
 > `tpt-kinetix-av1/src/reconstruct/mode_cdfs.rs`,
