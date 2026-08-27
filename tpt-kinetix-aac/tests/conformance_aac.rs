@@ -371,58 +371,26 @@ fn native_aac_matches_ffmpeg_reference() {
         );
 
         // `noise_mono_44100` (broadband white noise, heavy PNS use, EIGHT_SHORT
-        // frames) remains an open gap despite extensive investigation — see
-        // `todo-aac.md` 2026-08-24/25 session notes. The PNS algorithm itself
-        // (LCG, signed cast, energy normalization) is verified ffmpeg-faithful
-        // by `pns::tests::pns_matches_ffmpeg_reference_algorithm`; synthesis
-        // windowing is verified by `short_synthesis_matches_ffmpeg_reference`;
-        // the LCG phase is confirmed in-sync from the very first band. Disabling
-        // PNS entirely improves correlation (~0.63 PNS-on → ~0.90 PNS-silent),
-        // meaning PNS realizations are actively decorrelating against ffmpeg's
-        // specific pseudo-random sequence while contributing the right energy.
-        // The root cause — why our PNS values don't land in lock-step with
-        // ffmpeg's despite the verified-correct algorithm — has not been
-        // isolated without a bit-for-bit ffmpeg reference trace. Kept out of
-        // the aggregate gate below; pinned to a regression floor.
+        // frames) improved from corr ~0.52 to ~0.87 after the 2026-08-28 PNS
+        // scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)` matching
+        // ffmpeg's `dequant_scalefactors` NOISE_BT case, replacing the old
+        // `-(2^(noise_energy_abs/4))` formula that was off by 2^25). Remaining
+        // gap (~0.87 vs >0.95 target) is a separate, smaller issue — see
+        // `todo-aac.md`. Kept out of the aggregate gate; pinned to a regression
+        // floor.
         if case.label == "noise_mono_44100" {
             assert!(
-                corr > 0.40,
+                corr > 0.80,
                 "[{}] regressed well below its known baseline correlation \
-                 (~0.51-0.52): {corr:.4}. This case is a documented open gap, \
+                 (~0.87): {corr:.4}. This case is a documented open gap, \
                  not a hard pass/fail gate, but this is a much bigger drop \
                  than the known issue — investigate as a real regression.",
                 case.label
             );
             continue;
         }
-        // `noise_stereo_44100` (brown noise, lighter PNS use) shows the same
-        // PNS gap far more mildly: correlation ~0.994 (well within the shape
-        // gate) but one worst-case sample at ~0.058 max-diff, just above the
-        // 0.05 main tolerance. Brown noise concentrates energy in low-frequency
-        // bands that are Huffman-coded rather than PNS-substituted, so PNS
-        // affects only a small fraction of the total energy. The assumption
-        // that the single outlier sample stems from the same PNS root cause
-        // as `noise_mono_44100` above is unverified but plausible.
-        if case.label == "noise_stereo_44100" {
-            assert!(
-                corr > 0.97,
-                "[{}] regressed well below its known baseline correlation \
-                 (~0.994): {corr:.4}. This case is a documented open gap (see \
-                 the `noise_mono_44100` comment above), not a hard pass/fail \
-                 gate, but this is a much bigger drop than the known issue — \
-                 investigate as a real regression.",
-                case.label
-            );
-            assert!(
-                max_diff < 0.12,
-                "[{}] regressed well below its known baseline max-diff \
-                 (~0.058): {max_diff}. Documented open gap, not a hard \
-                 gate, but this jump is bigger than the known issue — \
-                 investigate as a real regression.",
-                case.label
-            );
-            continue;
-        }
+        // `noise_stereo_44100` (brown noise) now passes the main gate after the
+        // 2026-08-28 PNS scale fix — no special case needed.
 
         // `sweep_stereo_44100` (a 200→4000 Hz linear chirp, ~0.71-peak stereo)
         // now has near-perfect shape correlation (1.0000) after the 2026-08-25

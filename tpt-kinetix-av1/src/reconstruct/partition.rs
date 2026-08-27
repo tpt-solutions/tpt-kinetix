@@ -1,5 +1,30 @@
 use super::*;
 
+/// `count_units_in_frame` (AV1 spec §5.11.57).
+fn count_units_in_frame(unit_size: usize, frame_size: usize) -> usize {
+    ((frame_size + (unit_size >> 1)) / unit_size).max(1)
+}
+
+/// `Round2(x, n)` (AV1 spec §4.7).
+fn round2(x: usize, n: usize) -> usize {
+    if n == 0 {
+        x
+    } else {
+        (x + (1 << (n - 1))) >> n
+    }
+}
+
+/// `inverse_recenter(r, v)` (AV1 spec §6.8.24).
+fn inverse_recenter(r: i32, v: i32) -> i32 {
+    if v > 2 * r {
+        v
+    } else if v & 1 != 0 {
+        r - ((v + 1) >> 1)
+    } else {
+        r + (v >> 1)
+    }
+}
+
 /// Split a `bsize` block (in mi units) according to `partition` into its
 /// sub-block (sub_bsize, mi_row_offset, mi_col_offset) list. Mirrors the AV1
 /// `Partition_Subsize` table logic.
@@ -86,7 +111,181 @@ impl<'a> TileDecodeState<'a> {
         // partition tree.
         self.read_deltas = self.delta_q_present;
         self.clear_cdef(mi_row, mi_col);
+        // §5.11.2 `decode_tile()`: `read_lr(r, c, sbSize)` is read for every
+        // superblock *before* `decode_partition()`. When any plane uses loop
+        // restoration these are real arithmetic-coded symbols; skipping them
+        // desyncs the entropy decoder for the entire tile from its first read.
+        let sb_mi = BLOCK_WIDTH[sb_bsize] / MI_SIZE;
+        self.read_lr(mi_row, mi_col, sb_mi);
         self.decode_partition(mi_row, mi_col, sb_bsize)
+    }
+
+    /// `read_lr(r, c, bSize)` (AV1 spec §5.11.57). `sb_mi` is
+    /// `Num_4x4_Blocks_Wide[sbSize]` (= `Num_4x4_Blocks_High`, superblocks are
+    /// square). The decoded Wiener / SGR coefficients are consumed for
+    /// bitstream sync but not yet applied (loop restoration stays a
+    /// passthrough — Phase D).
+    pub(super) fn read_lr(&mut self, r: usize, c: usize, sb_mi: usize) {
+        if self.allow_intrabc || !self.lr.uses_lr {
+            return;
+        }
+        let w = sb_mi;
+        let h = sb_mi;
+        for plane in 0..self.lr.num_planes {
+            if self.lr.frame_restoration_type[plane] == 0 {
+                continue;
+            }
+            let sub_x = if plane == 0 { 0 } else { self.subsampling_x as usize };
+            let sub_y = if plane == 0 { 0 } else { self.subsampling_y as usize };
+            let unit_size = self.lr.lr_unit_size[plane].max(1) as usize;
+            let unit_rows = count_units_in_frame(unit_size, round2(self.lr.frame_height, sub_y));
+            let unit_cols = count_units_in_frame(unit_size, round2(self.lr.upscaled_width, sub_x));
+            let mi_step_y = MI_SIZE >> sub_y;
+            let mi_step_x = MI_SIZE >> sub_x;
+            let unit_row_start = (r * mi_step_y).div_ceil(unit_size);
+            let unit_row_end = unit_rows.min(((r + h) * mi_step_y).div_ceil(unit_size));
+            // No superres (this crate does not decode superres frames yet).
+            let unit_col_start = (c * mi_step_x).div_ceil(unit_size);
+            let unit_col_end = unit_cols.min(((c + w) * mi_step_x).div_ceil(unit_size));
+            if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+                eprintln!(
+                    "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} rows={unit_row_start}..{unit_row_end} cols={unit_col_start}..{unit_col_end} bit={}",
+                    self.lr.frame_restoration_type[plane],
+                    self.dec.bit_position()
+                );
+            }
+            for _unit_row in unit_row_start..unit_row_end {
+                for _unit_col in unit_col_start..unit_col_end {
+                    self.read_lr_unit(plane);
+                }
+            }
+        }
+    }
+
+    /// `read_lr_unit(plane, unitRow, unitCol)` (AV1 spec §5.11.58).
+    fn read_lr_unit(&mut self, plane: usize) {
+        const WIENER_TAPS_MIN: [i32; 3] = [-5, -23, -17];
+        const WIENER_TAPS_MAX: [i32; 3] = [10, 8, 46];
+        const WIENER_TAPS_K: [i32; 3] = [1, 2, 3];
+        const SGRPROJ_XQD_MIN: [i32; 2] = [-96, -32];
+        const SGRPROJ_XQD_MAX: [i32; 2] = [31, 95];
+        const SGRPROJ_PRJ_SUBEXP_K: i32 = 4;
+        const SGRPROJ_PARAMS_BITS: u32 = 4;
+        const SGRPROJ_PRJ_BITS: i32 = 7;
+        // `Sgr_Params[16][4]`, columns `{ r0, eps0, r1, eps1 }` (§8 decoding).
+        const SGR_PARAMS: [[i32; 4]; 16] = [
+            [2, 12, 1, 4],
+            [2, 15, 1, 6],
+            [2, 18, 1, 8],
+            [2, 21, 1, 9],
+            [2, 24, 1, 10],
+            [2, 29, 1, 11],
+            [2, 36, 1, 12],
+            [2, 45, 1, 13],
+            [2, 56, 1, 14],
+            [2, 68, 1, 15],
+            [0, 0, 1, 5],
+            [0, 0, 1, 8],
+            [0, 0, 1, 11],
+            [0, 0, 1, 14],
+            [2, 30, 0, 0],
+            [2, 75, 0, 0],
+        ];
+
+        let frt = self.lr.frame_restoration_type[plane];
+        let restoration_type = self
+            .mode_cdfs
+            .read_lr_restoration_type(&mut self.dec, frt);
+
+        match restoration_type {
+            1 => {
+                // RESTORE_WIENER
+                for pass in 0..2 {
+                    let first_coeff = if plane != 0 {
+                        self.ref_lr_wiener[plane][pass][0] = 0;
+                        1
+                    } else {
+                        0
+                    };
+                    for j in first_coeff..3 {
+                        let refv = self.ref_lr_wiener[plane][pass][j];
+                        let v = self.decode_signed_subexp_with_ref_bool(
+                            WIENER_TAPS_MIN[j],
+                            WIENER_TAPS_MAX[j] + 1,
+                            WIENER_TAPS_K[j],
+                            refv,
+                        );
+                        self.ref_lr_wiener[plane][pass][j] = v;
+                    }
+                }
+            }
+            2 => {
+                // RESTORE_SGRPROJ
+                let lr_sgr_set = self.dec.read_literal(SGRPROJ_PARAMS_BITS) as usize & 15;
+                for i in 0..2 {
+                    let radius = SGR_PARAMS[lr_sgr_set][i * 2];
+                    let (min, max) = (SGRPROJ_XQD_MIN[i], SGRPROJ_XQD_MAX[i]);
+                    let v = if radius != 0 {
+                        let refv = self.ref_sgr_xqd[plane][i];
+                        self.decode_signed_subexp_with_ref_bool(
+                            min,
+                            max + 1,
+                            SGRPROJ_PRJ_SUBEXP_K,
+                            refv,
+                        )
+                    } else if i == 1 {
+                        ((1 << SGRPROJ_PRJ_BITS) - self.ref_sgr_xqd[plane][0]).clamp(min, max)
+                    } else {
+                        0
+                    };
+                    self.ref_sgr_xqd[plane][i] = v;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `decode_signed_subexp_with_ref_bool` (AV1 spec §6.8.24): the
+    /// arithmetic-coded variant of the sub-exponential coefficient reader.
+    fn decode_signed_subexp_with_ref_bool(
+        &mut self,
+        low: i32,
+        high: i32,
+        k: i32,
+        r: i32,
+    ) -> i32 {
+        let x = self.decode_unsigned_subexp_with_ref_bool(high - low, k, r - low);
+        x + low
+    }
+
+    fn decode_unsigned_subexp_with_ref_bool(&mut self, mx: i32, k: i32, r: i32) -> i32 {
+        let v = self.decode_subexp_bool(mx, k);
+        if (r << 1) <= mx {
+            inverse_recenter(r, v)
+        } else {
+            mx - 1 - inverse_recenter(mx - 1 - r, v)
+        }
+    }
+
+    fn decode_subexp_bool(&mut self, num_syms: i32, k: i32) -> i32 {
+        let mut i = 0i32;
+        let mut mk = 0i32;
+        loop {
+            let b2 = if i != 0 { k + i - 1 } else { k };
+            let a = 1i32 << b2;
+            if num_syms <= mk + 3 * a {
+                let bits = read_ns(&mut self.dec, (num_syms - mk) as u32) as i32;
+                return bits + mk;
+            }
+            let more = self.dec.read_literal(1);
+            if more != 0 {
+                i += 1;
+                mk += a;
+            } else {
+                let bits = self.dec.read_literal(b2 as u32) as i32;
+                return bits + mk;
+            }
+        }
     }
 
     /// Recursively decode the partition tree (AV1 spec §5.11.4).

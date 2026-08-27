@@ -2,6 +2,62 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32p (2026-08-27) — CABAC MBAFF I-slice desync (#32e item 6) — ROOT-CAUSED AND FIXED
+
+**BUG**: `end_of_slice_flag` was decoded after *every* macroblock in the CABAC
+slice-data loop. Spec §7.3.4: in an MBAFF **frame**, when
+`CurrMbAddr % 2 == 0` (the TOP macroblock of a pair) the loop sets
+`moreDataFlag = 1` **unconditionally** — `end_of_slice_flag` is coded only
+after the *bottom* macroblock of each pair. The decoder therefore consumed one
+spurious `decode_terminate()` bin after each pair-top MB (8 phantom bins on the
+16-MB `mbaff_i1` clip); each mid-slice terminate that returns 0 renormalises
+the arithmetic engine, so `range`/`offset` drifted from ffmpeg's while the
+context models stayed in lockstep — exactly the #32o signature (crate/oracle
+agree bin-for-bin, both wrong; ffmpeg decodes the 4 centre MBs as I_16x16, the
+crate as I_NxN; desync surfaces as a terminate=1 at MB14).
+
+Found via `ffmpeg -bsf:v trace_headers` (confirmed FRAME_MBAFF: frame_mbs_only=0
+mb_adaptive_frame_field=1 field_pic=0, no scaling matrix) plus re-reading the
+spec slice_data() do/while, and confirmed by `KINETIX_NO_FIELD_BINS=1` letting
+the parse run to completion (it removes a compensating number of bins).
+
+**FIX** (`slice_data/cabac_i.rs`, `cabac_p.rs` ×2 sites, `cabac_b.rs` ×2 sites):
+guard every `decode_terminate()` in the slice-data loop with
+`!(mbaff_frame && mb_idx % 2 == 0)`. CAVLC is unaffected (`more_rbsp_data()`
+consumes no bits). Also gated three unconditional `eprintln!` debug lines in
+cabac_i/cabac_p behind `KINETIX_BINTRACE`.
+
+**RESULT** — CABAC MBAFF I-slice is now **BIT-EXACT vs ffmpeg**:
+- `dbg_g6_mbaff_deblock` `g6_cabac_i` (reference decoded WITH the in-loop
+  filter): **gate-ON luma sad=0 max=0, cb/cr sad=0** — first pixel-exact CABAC
+  MBAFF I frame. (Was "wholesale diffs / CABAC MBAFF parse desync" per #32i.)
+- `dbg_g5_i1_diffmap` with `KINETIX_SKIP_DEBLOCK=1`: **0/512 differ, max=0** on
+  every pair, chroma 0/1024.
+- Parsed mb_type grid matches `ffmpeg -debug mb_type` exactly (MB3/5/10/12 =
+  I_16x16, borders I_4x4, all `t8=false`).
+
+The "max=3 residue" seen in bare `dbg_g5_i1_diffmap` is a **harness artefact**,
+NOT a decoder bug: that diagnostic compares our (correctly in-loop-deblocked)
+output against an `ffmpeg -skip_loop_filter all` reference. The `mbaff_i1`
+stream has `disable_deblocking_filter_idc=0` with alpha/beta offsets 0:0 —
+i.e. deblocking IS enabled (x264 `deblock=0` sets offsets `0:0`, it does NOT
+disable the filter; `--no-deblock` would). ffmpeg's trace_headers confirms
+`disable_deblocking_filter_idc = 0`. So our decode (bit-exact pre-deblock,
+then the spec-mandated filter) is correct and the g6 harness — which uses a
+matching filtered reference — proves it.
+
+TODO next: re-check CABAC MBAFF P/B (`mbaff_ip`, `mbaff_ibp` P/B frames still
+SAD ~80k–130k) now that the terminate bug is gone; then G.5 corpus validation
+and the `pixel_exact` flip.
+
+Note on `above_right_mb_decoded`: a spec-motivated reconstruction fix was
+prototyped this session (MBAFF pair-scan — the *bottom* MB's above-right
+neighbour is decoded later per §6.4.8, so its top-right prediction samples read
+as stale zero) and **reverted** since the residue it was chasing turned out to
+be the harness/deblock artefact above. Still a plausible latent bug for content
+that uses a top-right-dependent Intra mode on a bottom MB's rightmost 4×4/8×8
+block — revisit if a real diff is ever traced there.
+
 ## SESSION #32o (2026-08-27) — cont'd: CABAC MBAFF I-slice desync (#32e item 6) re-narrowed
 
 The `mbaff_i1` clip (High profile, 4×4 MBs, x264 `--interlaced`; testsrc) still

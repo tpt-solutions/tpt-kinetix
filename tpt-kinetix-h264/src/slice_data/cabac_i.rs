@@ -23,7 +23,10 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     if std::env::var("KINETIX_DUMP_PAYLOAD").is_ok() {
-        if let Some(path) = std::env::temp_dir().join("dbg_mbaff_i1_payload.bin").to_str() {
+        if let Some(path) = std::env::temp_dir()
+            .join("dbg_mbaff_i1_payload.bin")
+            .to_str()
+        {
             let mut buf = Vec::new();
             buf.extend_from_slice(&mb_cols.to_le_bytes());
             buf.extend_from_slice(&mb_rows.to_le_bytes());
@@ -103,10 +106,12 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
                     false
                 };
                 cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
-                eprintln!(
-                    "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
-                    2 * ((mb_idx >> 1) / mb_cols as usize)
-                );
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!(
+                        "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
+                        2 * ((mb_idx >> 1) / mb_cols as usize)
+                    );
+                }
                 field_flags[grid_idx] = Some(cur_pair_field);
                 // The pair's bottom MB sits directly below the top MB in the
                 // frame-MB grid.
@@ -158,20 +163,27 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         mb.mb_field_flag = cur_pair_field;
         macroblocks[grid_idx] = mb;
 
-        // end_of_slice_flag (§7.3.4, §9.3.3.2.4) is read after *every*
-        // macroblock. It must be 0 for every mid-slice MB; a 1 there means the
+        // end_of_slice_flag (§7.3.4, §9.3.3.2.4). In an MBAFF *frame* the flag
+        // is NOT coded after the TOP macroblock of a pair
+        // (`CurrMbAddr % 2 == 0` ⇒ `moreDataFlag = 1` unconditionally, spec
+        // §7.3.4); it follows only the bottom macroblock. For non-MBAFF slices
+        // it follows every macroblock.
+        //
+        // When present it must be 0 for every mid-slice MB; a 1 there means the
         // decode has desynced from the bitstream (see `todo.md` Phase D), so
         // bail rather than risk emitting wrong pixels. On the LAST MB either
         // value is accepted: spec-conformant encoders write a final terminate
         // (=1), but x264 omits it (it emits exactly total-1 terminate bins,
         // one before each MB except the first) and ffmpeg exits on the MB
         // count in that case.
-        let end_of_slice = dec.decode_terminate() == 1;
-        let is_last = mb_idx + 1 == total;
-        if !is_last && end_of_slice {
-            return Err(SliceDataError::Unsupported(
-                "end_of_slice_flag mismatch (CABAC decode desynced)",
-            ));
+        if !(mbaff_frame && mb_idx % 2 == 0) {
+            let end_of_slice = dec.decode_terminate() == 1;
+            let is_last = mb_idx + 1 == total;
+            if !is_last && end_of_slice {
+                return Err(SliceDataError::Unsupported(
+                    "end_of_slice_flag mismatch (CABAC decode desynced)",
+                ));
+            }
         }
     }
 

@@ -110,7 +110,7 @@ av1-oracle-regen:
 # Validate the independent Python AV1 coeff oracle against the Rust crate's own
 # golden vectors (tpt-kinetix-av1/src/{entropy,coeff}.rs unit tests).
 av1-oracle-validate:
-    python3 tools/av1_oracle/validate.py
+    {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/validate.py
 
 # Capture a single transform block's raw tile bytes + TxBlockCtx + Kinetix's
 # own symbol slice into av1_capture.json, then re-decode it independently with
@@ -125,7 +125,7 @@ av1-oracle-validate:
 av1-capture BLOCK ENTRY="mandelbrot":
     set -e
     KINETIX_AV1_CAPTURE={{BLOCK}} cargo run -q -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ENTRY}}
-    python3 tools/av1_oracle/diff_block.py av1_capture.json
+    {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/diff_block.py av1_capture.json
 
 # Run every Criterion bench in the workspace.
 bench:

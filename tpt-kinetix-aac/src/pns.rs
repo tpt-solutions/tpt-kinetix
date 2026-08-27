@@ -80,18 +80,14 @@ pub fn apply_pns(
             if bt != ZERO_HCB && is_noise(bt) {
                 let sf = scalefactor.get(idx).copied().unwrap_or(0);
 
-                // PNS noise energy uses its own baseline: the stored `sf` is
-                // `global_gain - noise_energy_abs` (see
-                // `scalefactors::decode_scalefactors`), so the absolute noise
-                // energy is `noise_energy_abs = global_gain - sf`. Per ISO
-                // 14496-3 §4.6.13.3 / ffmpeg's `dequant_scalefactors` (NOISE_BT
-                // case) the band scale is `-2^(0.25 · noise_energy_abs)` — note
-                // the **negative sign** and the **zero baseline** (NOT the
-                // regular-band `-100` offset baked into `dequant_scale`).
-                let noise_energy_abs = global_gain as i32 - sf;
-                let scale = -(2.0f64)
-                    .powf(0.25 * noise_energy_abs as f64)
-                    .clamp(-1.0e30, 1.0e30) as f32;
+                // PNS band scale uses the same formula as regular bands:
+                // `2^((global_gain - 100 - sf) / 4)` (ffmpeg's
+                // `dequant_scalefactors` NOISE_BT case). The stored `sf` is
+                // `global_gain - noise_energy_abs`, so this is
+                // `2^((sf - 100) / 4)` — NOT the `-(2^(noise_energy_abs/4))`
+                // that was here before (that formula omitted the `-100` baseline
+                // and used the wrong sign, producing scales off by 2^25).
+                let scale = crate::dequant::dequant_scale(global_gain, sf) as f64;
                 if std::env::var("AAC_DBG_PNS").is_ok() {
                     use std::sync::atomic::{AtomicUsize, Ordering};
                     static CALL: AtomicUsize = AtomicUsize::new(0);
@@ -103,9 +99,7 @@ pub fn apply_pns(
                         );
                     }
                     if scale.abs() > 1.5 {
-                        eprintln!(
-                                "DBG pns CALL={call} g={g} sfb={sfb} ne_abs={noise_energy_abs} scale={scale:.4}",
-                            );
+                        eprintln!("DBG pns CALL={call} g={g} sfb={sfb} sf={sf} scale={scale:.4}",);
                     }
                 }
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
@@ -137,7 +131,7 @@ pub fn apply_pns(
                         energy += r * r;
                     }
                     let norm = if energy > 0.0 {
-                        scale as f64 / energy.sqrt()
+                        scale / energy.sqrt()
                     } else {
                         0.0
                     };
@@ -191,8 +185,9 @@ mod tests {
     #[test]
     fn pns_noise_scales_with_gain() {
         // Higher global_gain → larger noise magnitude (energy ∝ scale²).
-        // With PNS scale = -2^(0.25·noise_energy_abs) and noise_energy_abs =
-        // global_gain - sf (sf = 0 here), scale ∝ 2^(0.25·global_gain).
+        // With PNS scale = `dequant_scale(global_gain, sf)` = 2^((global_gain -
+        // 100 - sf) / 4) and sf = 0, scale ∝ 2^(0.25·global_gain); the -100
+        // baseline cancels in the ratio.
         let ics = ics_long();
         let bt = vec![NOISE_HCB];
         let sf = vec![0i32];
@@ -250,11 +245,11 @@ mod tests {
     ///   1. the `u32` LCG value is reinterpreted as a *signed* `i32` then stored
     ///      as `float` (ffmpeg's `cfo[k] = ac->random_state`, `random_state` is
     ///      `int` in `AACDecContext`);
-    ///   2. the per-band scale is `-2^(noise_energy/4)` (ffmpeg's
-    ///      `dequant_scalefactors` NOISE_BT case: `-pow2sf_tab[noise_energy +
-    ///      POW_SF2_ZERO]` = `-2^(noise_energy/4)`);
+    ///   2. the per-band scale is `2^((global_gain - 100 - sf) / 4)` (ffmpeg's
+    ///      `dequant_scalefactors` NOISE_BT case — same formula as regular
+    ///      bands, `dequant_scale(global_gain, sf)`);
     ///   3. the energy-normalization order (`band_energy = Σ cfo²`, then
-    ///      `cfo *= sf[idx] / sqrt(band_energy)`).
+    ///      `cfo *= scale / sqrt(band_energy)`).
     #[test]
     fn pns_matches_ffmpeg_reference_algorithm() {
         let ics = IcsInfo {
@@ -285,8 +280,7 @@ mod tests {
                 if bt[idx] != NOISE_HCB {
                     continue;
                 }
-                let ne = global_gain as i32 - sf[idx];
-                let scale = -(2.0f64).powf(0.25 * ne as f64) as f32;
+                let scale = crate::dequant::dequant_scale(global_gain, sf[idx]) as f64;
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
@@ -297,7 +291,7 @@ mod tests {
                         raw.push(r as f32);
                         energy += r * r;
                     }
-                    let norm = scale as f64 / energy.sqrt();
+                    let norm = scale / energy.sqrt();
                     for (line, &rv) in raw.iter().enumerate() {
                         expected[base + line] = (rv as f64 * norm) as f32;
                     }

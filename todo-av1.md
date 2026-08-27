@@ -2378,3 +2378,195 @@
 > `[[project_concurrent_repo_activity]]`). `capabilities().pixel_exact`
 > untouched (still `false`). No `git commit` calls were made.
 
+> **2026-08-27 session note — reverted a real regression the concurrent
+> process landed in commit `ba04a2c`: the CDF-adaptation rate formula.**
+> Ran `av1_psnr_check` at session start and found `solid_red_32`/`_64` had
+> dropped from the long-standing **99.00 dB pixel-exact** to **16.54 / 15.46
+> dB** — a regression in a known-good case. Bisected to `ba04a2c`
+> (`tpt-kinetix-av1/src/entropy.rs`), which changed `SymbolDecoder`'s §8.2.6
+> CDF-update rate from
+> `3 + (count>15) + (count>31) + floor_log2(n).min(2)` (correct) to
+> `3 + (count>15) + (count>31) + (n>2)`, with a commit message and code
+> comment asserting the new form is "spec-correct per §8.2.6". It is not.
+> Fetched the spec live (`curl` →
+> `raw.githubusercontent.com/AOMediaCodec/av1-spec/master/09.parsing.process.md`):
+>
+> ```
+> rate = 3 + ( cdf[ N ] > 15 ) + ( cdf[ N ] > 31 ) + Min( FloorLog2( N ), 2 )
+> ```
+>
+> The original code matched this exactly; so does the independent Python
+> oracle (`tools/av1_oracle/symbol_decoder.py:127`,
+> `min(_floor_log2(n), 2)`). The `ba04a2c` change also **regenerated the
+> `coeff.rs` `EXPECTED_A`/`EXPECTED_B` oracle golden vectors and the
+> `entropy.rs` CDF-snapshot test vectors to lock in the wrong formula.**
+>
+> **Fix**: `git checkout 9be3f11 -- tpt-kinetix-av1/src/entropy.rs
+> tpt-kinetix-av1/src/coeff.rs tpt-kinetix-av1/tests/phase_c_conformance.rs`
+> (restores the correct rate, the correct golden vectors, and drops that
+> commit's throwaway `KINETIX_AV1_DBG` prints in `coeff.rs` + the per-row
+> diff `eprintln!` loop in `phase_c_conformance.rs`). **Kept** from
+> `ba04a2c`: the `reconstruct/mod.rs` + `partition.rs` change moving
+> `coeff_ctxs.clear_left()` from per-superblock to per-superblock-**row**
+> (that one is a genuine, spec-correct fix — §7.3 `clear_left_context()` is
+> per superblock row).
+>
+> **Impact**: `solid_red_32`/`_64` back to **99.00 dB** pixel-exact.
+> Non-trivial corpus roughly back to its prior band (`testsrc` 10.77,
+> `mandelbrot` 15.64, `smptebars` 9.36, `testsrc2` 12.96 dB Y — the
+> `clear_left`-row fix is now also in effect, which is why these aren't
+> bit-identical to the oldest recorded numbers). `cargo test -p
+> tpt-kinetix-av1` green (100 unit + all integration/proptest/doctest),
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` clean.
+> `just av1-oracle-validate` not run — this Windows box has no `python3` on
+> PATH (only the Store alias stub); the embedded Rust golden vectors, which
+> match the pre-regression state, cover the same ground. No `git commit`
+> calls were made. Files modified: `tpt-kinetix-av1/src/entropy.rs`,
+> `tpt-kinetix-av1/src/coeff.rs`,
+> `tpt-kinetix-av1/tests/phase_c_conformance.rs` (all reverts).
+>
+> **Lesson for future sessions / the concurrent process**: verify the rate
+> formula against the live spec text before touching it again — it is
+> `Min(FloorLog2(N), 2)`, confirmed 2026-08-27. The still-open multi-session
+> `testsrc` divergence is unrelated to this and remains the real next target.
+>
+> **Also this session**: `just av1-oracle-validate` / `av1-capture` now work
+> on Windows (justfile switched `python3` → `python` via `os()` guard; this
+> box's `python3` is only the Store alias stub). Re-ran the coeff oracle:
+> `just av1-oracle-validate` passes against the reverted (correct) Rust code,
+> independently confirming the regression fix. Ran `just av1-capture 0:0:0
+> testsrc` — the Python coeff oracle reports **`TRACE MATCHES REFERENCE`** for
+> `testsrc`'s block 0 (`plane=0 mi=(0,0) eob=23 tx_type=11 nonzero=[(26,1),
+> (50,1),(56,1),(57,-1)]`), i.e. given fresh (base-q-seeded) CDFs and the
+> captured neighbour context, the coefficient syntax decode of that block is
+> byte-consistent between Rust and the independent oracle. Combined with the
+> divergence still being `Y(0,0) kinetix=129 vs dav1d=16` under
+> `KINETIX_AV1_NOFILTER=1`, this pushes the root cause into one of: (a) a
+> wrong CDF *table value* or *context* in the mode-symbol path
+> (`partition`/`skip`/`intra_y_mode`/`uv_mode`/`use_filter_intra`/
+> `filter_intra_mode`/`tx_depth`) that produces a valid-but-wrong symbol with
+> no bit-count desync — the captured first-block mode trace is
+> `partition SPLIT,SPLIT,HORZ_B` → `skip=0` → `y_mode=DC` → `uv_mode=12` →
+> `has_palette_y=0` → `use_filter_intra=1` → `filter_intra_mode=2` →
+> `tx_depth=1` (all internally consistent, none independently checkable
+> against dav1d without a reference symbol trace); (b) tile-level state
+> consumed before block 0 (the oracle can't see it); or (c) a
+> reconstruction-side bug the coeff oracle doesn't cover. The coeff oracle's
+> fresh-CDF limitation means it also can't catch a mid-tile CDF-adaptation
+> desync — but block 0 has no preceding blocks, only this block's own mode
+> reads, so adaptation is a weak suspect here.
+>
+> **Next session, concretely**: the coeff oracle needs to grow the
+> `intra_frame_mode_info()` mode-symbol sequence (the "Part 1 oracle" deferred
+> since 2026-08-20) so `just av1-capture` can diff the mode reads too, OR a
+> dav1d debug build is stood up for a real reference symbol trace. Everything
+> short of that has now been tried across ~11 sessions.
+
+> **2026-08-27 session note (cont'd) — FOUND THE MULTI-SESSION `testsrc`
+> DESYNC: the per-superblock `read_lr()` syntax (§5.11.57) was never
+> implemented.** After exhaustively re-verifying that block 0's *entire*
+> entropy decode is correct (independent Python re-parse of the sequence
+> header → `use_128x128_superblock=0`; every mode CDF table byte-diffed
+> against the live spec → all exact; every mode symbol hand-traced → matches
+> Kinetix; the coeff CDF tables `txb_skip`/`coeff_base`/`coeff_base_eob`/
+> `eob_pt_16`/`coeff_br`/`eob_extra` diffed against spec → all exact; DC
+> `coeff_base` ctx=26 → spec-correct `Coeff_Base_Pos_Ctx_Offset[0]`), and
+> confirming the frame-header→tile-data byte offset is correct (`ffmpeg -bsf
+> trace_headers` on the corpus OBU: frame header = 12 payload bytes, Kinetix
+> agrees), the only thing left was: **an entire syntax element skipped.**
+>
+> `ffmpeg -bsf trace_headers` on the corpus `testsrc` keyframe shows
+> `lr_type[2] = 2` → `Remap_Lr_Type[2]` = **RESTORE_WIENER** for the V plane.
+> AV1 §5.11.2 `decode_tile()` calls `read_lr(r, c, sbSize)` for **every
+> superblock, before `decode_partition()`**, and when any plane has a
+> non-`RESTORE_NONE` mode it reads a real arithmetic-coded `restoration_type`
+> / `use_wiener` / `use_sgrproj` symbol (plus Wiener/SGR coefficients via
+> `decode_subexp_bool`). `reconstruct/` had **zero** `read_lr` handling —
+> `grep read_lr` found nothing. `frame.rs::parse_lr` consumed the *header*
+> bits correctly but discarded the result. So every LR-enabled stream
+> (libaom/ffmpeg enable it by default) desynced the entropy decoder from the
+> very first symbol of the tile — exactly the "plausible-but-wrong from
+> symbol #0" signature this investigation chased for ~11 sessions.
+> `solid_red` was pixel-exact throughout because its tiny solid frames have
+> `FrameRestorationType = [NONE, NONE, NONE]` (no `read_lr` bits).
+>
+> **Implemented** (§5.11.57 / §5.11.58 / §6.8.24, all fetched from the live
+> spec):
+> - `frame.rs::parse_lr` now returns `LrParams { restoration_type[3],
+>   unit_size[3], uses_lr }` (with `Remap_Lr_Type` + the
+>   `RESTORATION_TILESIZE_MAX >> (2 - lr_unit_shift) >> lr_uv_shift` size
+>   derivation), stored on `FrameHeader` as `frame_restoration_type` /
+>   `lr_unit_size` / `uses_lr`.
+> - `mode_cdfs.rs`: `Default_Use_Wiener_Cdf` `{11570,32768,0}`,
+>   `Default_Use_Sgrproj_Cdf` `{16855,32768,0}`,
+>   `Default_Restoration_Type_Cdf` `{9413,22581,32768,0}` +
+>   `read_lr_restoration_type`.
+> - `partition.rs`: `read_lr(r, c, sb_mi)` + `read_lr_unit(plane)` +
+>   `decode_signed_subexp_with_ref_bool` / `decode_unsigned_subexp_with_ref_bool`
+>   / `decode_subexp_bool` / `inverse_recenter` / `count_units_in_frame` /
+>   `round2`, with per-tile `RefLrWiener`/`RefSgrXqd` reset to
+>   `Wiener_Taps_Mid`/`Sgrproj_Xqd_Mid` in `decode_tile_group`. Called from
+>   `decode_superblock` *before* `decode_partition`. Coefficients are consumed
+>   for sync only — the restoration *filter* is still an unapplied passthrough
+>   (Phase D), which is fine for now.
+> - `LrDecodeParams` bundle threaded through `decode_tile_group` /
+>   `TileDecodeState::new` (like the existing `CdefDeltaParams`).
+>
+> **Impact measured** (`av1_psnr_check`):
+> - `testsrc`: first divergence moved from `Y px=(0,0)` (was `129` vs `16`)
+>   to `Y px=(64,0)` — **the entire first 64×64 superblock now decodes
+>   correctly**. Whole-frame PSNR barely moved (10.77→9.88 dB Y) because a
+>   *second, independent* bug now dominates at the superblock-column
+>   boundary (px 64 = start of SB column 1).
+> - `mandelbrot_128x96`: **15.64 → 22.59 dB Y** (U 17.7→17.5, V 16.1→20.6) —
+>   large real improvement.
+> - `smptebars`/`testsrc2`: unchanged (their remaining error is elsewhere).
+> - `solid_red_32`/`_64`: still 99.00 dB (unaffected — no LR bits).
+> - `cargo test -p tpt-kinetix-av1` green (102 unit, +2 `parse_lr` regression
+>   tests), `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`
+>   clean, `just av1-oracle-validate` still passes.
+>
+> **2026-08-27 (cont'd) — SECOND bug found and fixed: the palette
+> `palette_colors_u` delta had a spurious `+1` luma bias.** Chased the
+> `Y px=(64,0)` divergence into `mi=(16,0)` (`BLOCK_32X16`, a palette block).
+> Its decoded Y palette colours `[106, 145, 210]` matched dav1d exactly, and
+> the neighbour cache `[41, 106, 145]` was correct — but the reconstructed
+> block mapped its first region to colour index 0 (`106`) where dav1d used
+> index 2 (`210`), i.e. the Y **colour-map** first symbol (`NS(3)`) read the
+> wrong bit → Kinetix was already desynced *before* the colour map, even
+> though the colours came out right by luck. Root cause in
+> `palette.rs::read_palette_colors_yu` (shared Y+U path): the delta-coded
+> remainder did `read_literal(paletteBits) + 1` unconditionally, but AV1
+> §5.11.46 only applies `palette_delta_y++` for **luma** — `palette_colors_u`
+> has **no** `++`. Every U palette with a delta-coded entry drifted, and
+> because `paletteBits` is re-derived from the running colour
+> (`Min(paletteBits, CeilLog2(range))`), the *next* `L(paletteBits)` read the
+> wrong width → desynced the whole block (the Y colour map included). Fixed:
+> `delta_bias = if is_u { 0 } else { 1 }`. Regression test
+> `palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u` in
+> `reconstruct/tests.rs`.
+>
+> **Impact** (`av1_psnr_check`): `testsrc` **9.88 → 16.98 dB Y** (U 8.85→15.21,
+> V 11.60→15.34); trace 4672→7891 reads. `mandelbrot` unchanged 22.59 (its
+> palette blocks don't hit U delta-coding). `smptebars`/`testsrc2` unchanged.
+> `solid_red` still 99. Tests green (103 unit), clippy `-D warnings` clean,
+> `just av1-oracle-validate` passes.
+>
+> **Next target**: `testsrc` divergence now at `Y px=(48,64)` — the start of
+> **superblock ROW 1** (y=64), `mi=(12,16)`, `pred_mode=12` (PAETH), delta
+> only −14 (much smaller). Candidates: PAETH prediction across the SB-row
+> boundary, the coeff `above`-context / `ymode_above` / `tx_above` arrays
+> after the first SB row, or another palette-neighbour case (above cache this
+> time, since `(MiRow*4) % 64 == 0` gates the palette above-cache at the SB
+> row top — that gate may interact wrongly here). `KINETIX_AV1_CAPTURE_TILE`
+> → `av1_tile_trace.json`, `KINETIX_AV1_DBG_ROWS`+`KINETIX_AV1_DBG_COLS`,
+> `KINETIX_AV1_DBG_PAL`, `KINETIX_AV1_DBG_LR` are the tools (all opt-in).
+>
+> Files modified: `tpt-kinetix-av1/src/frame.rs`,
+> `tpt-kinetix-av1/src/reconstruct/mod.rs`,
+> `tpt-kinetix-av1/src/reconstruct/mode_cdfs.rs`,
+> `tpt-kinetix-av1/src/reconstruct/partition.rs`,
+> `tpt-kinetix-av1/src/reconstruct/tests.rs`,
+> `tpt-kinetix-av1/tests/proptest_coeffs.rs`. No `git commit` calls.
+> `capabilities().pixel_exact` untouched (still `false`).
+

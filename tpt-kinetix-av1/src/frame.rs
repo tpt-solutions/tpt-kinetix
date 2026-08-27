@@ -354,6 +354,19 @@ pub struct FrameHeader {
     pub enable_filter_intra: bool,
     pub enable_cdef: bool,
     pub enable_restoration: bool,
+
+    /// `FrameRestorationType[plane]` (§5.9.20 `lr_params()`): per-plane loop
+    /// restoration mode — `RESTORE_NONE`(0) / `RESTORE_WIENER`(1) /
+    /// `RESTORE_SGRPROJ`(2) / `RESTORE_SWITCHABLE`(3), after `Remap_Lr_Type`.
+    /// Needed by the tile decoder's per-superblock `read_lr()` syntax
+    /// (§5.11.57), which consumes real arithmetic-coded symbols before every
+    /// `decode_partition()` whenever any plane is non-`RESTORE_NONE`.
+    pub frame_restoration_type: [u8; 3],
+    /// `LoopRestorationSize[plane]` in samples (§5.9.20). Only meaningful when
+    /// `uses_lr` is set.
+    pub lr_unit_size: [u32; 3],
+    /// `UsesLr` (§5.9.20): true when any plane has a non-`RESTORE_NONE` mode.
+    pub uses_lr: bool,
 }
 
 impl FrameHeader {
@@ -723,7 +736,7 @@ impl FrameHeader {
         )?;
 
         // --- lr_params ---
-        parse_lr(
+        let lr_params = parse_lr(
             &mut br,
             coded_lossless,
             allow_intrabc,
@@ -869,6 +882,9 @@ impl FrameHeader {
                 enable_filter_intra,
                 enable_cdef,
                 enable_restoration,
+                frame_restoration_type: lr_params.restoration_type,
+                lr_unit_size: lr_params.unit_size,
+                uses_lr: lr_params.uses_lr,
             },
             br.bits_read(),
         ))
@@ -1099,6 +1115,22 @@ fn parse_cdef(
 
 /// `lr_params()` (§5.9.18).
 #[allow(clippy::too_many_arguments)]
+/// Result of `lr_params()` (§5.9.20): the per-plane restoration mode and unit
+/// size the tile decoder's `read_lr()` needs.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LrParams {
+    pub restoration_type: [u8; 3],
+    pub unit_size: [u32; 3],
+    pub uses_lr: bool,
+}
+
+/// `Remap_Lr_Type[4]` (§5.9.20): raw `lr_type` → `RESTORE_*` enum
+/// (`NONE`=0, `WIENER`=1, `SGRPROJ`=2, `SWITCHABLE`=3).
+const REMAP_LR_TYPE: [u8; 4] = [0, 3, 1, 2];
+/// `RESTORATION_TILESIZE_MAX` (§3 symbols).
+const RESTORATION_TILESIZE_MAX: u32 = 256;
+
+#[allow(clippy::too_many_arguments)]
 fn parse_lr(
     br: &mut BitReader<'_>,
     coded_lossless: bool,
@@ -1108,35 +1140,41 @@ fn parse_lr(
     subsampling_x: bool,
     subsampling_y: bool,
     use_128: bool,
-) -> Result<(), KinetixError> {
+) -> Result<LrParams, KinetixError> {
+    let mut out = LrParams::default();
     if coded_lossless || allow_intrabc || !enable_restoration {
-        return Ok(());
+        return Ok(out);
     }
-    let mut uses_lr = false;
     let mut uses_chroma_lr = false;
     for i in 0..num_planes as usize {
-        let lr_type = read_f8(br, 2)?;
-        if lr_type != 0 {
-            uses_lr = true;
+        let lr_type = read_f8(br, 2)? as usize;
+        let rt = REMAP_LR_TYPE[lr_type & 3];
+        out.restoration_type[i] = rt;
+        if rt != 0 {
+            out.uses_lr = true;
             if i > 0 {
                 uses_chroma_lr = true;
             }
         }
     }
-    if uses_lr {
-        let lr_unit_shift = if use_128 {
-            read_flag(br)? as u8 + 1
+    if out.uses_lr {
+        let mut lr_unit_shift = if use_128 {
+            read_flag(br)? as u32 + 1
         } else {
-            read_flag(br)? as u8
+            read_flag(br)? as u32
         };
         if !use_128 && lr_unit_shift != 0 {
-            let _extra = read_flag(br)?;
+            lr_unit_shift += read_flag(br)? as u32;
         }
-        if subsampling_x && subsampling_y && uses_chroma_lr {
-            let _ = read_flag(br)?;
-        }
+        let luma_size = RESTORATION_TILESIZE_MAX >> (2 - lr_unit_shift);
+        let lr_uv_shift = if subsampling_x && subsampling_y && uses_chroma_lr {
+            read_flag(br)? as u32
+        } else {
+            0
+        };
+        out.unit_size = [luma_size, luma_size >> lr_uv_shift, luma_size >> lr_uv_shift];
     }
-    Ok(())
+    Ok(out)
 }
 
 /// `skip_mode_params()` (§6.8.2). Skip mode availability depends on the DPB
@@ -2030,5 +2068,41 @@ mod tests {
         // cdef_y_pri=11, sec=2 → 11 + (2<<2) = 19; uv pri=0, sec=2 → 8.
         assert_eq!(fh.cdef_y_strength, vec![11 + (2 << 2)]);
         assert_eq!(fh.cdef_uv_strength, vec![(2 << 2)]);
+    }
+
+    #[test]
+    fn parse_lr_remaps_lr_type_and_derives_unit_size() {
+        // §5.9.20 `lr_params()`: 3 planes, raw lr_type = {0, 0, 2}. With the
+        // spec's `Remap_Lr_Type = {NONE, SWITCHABLE, WIENER, SGRPROJ}`, raw 2
+        // → RESTORE_WIENER (1). This is exactly what `ffmpeg -bsf trace_headers`
+        // reports for the corpus `testsrc` keyframe (`lr_type[2] = 2`), which
+        // used to desync the tile decoder because `read_lr()` was never called.
+        let mut bw = BitWriter::new();
+        bw.bits(0, 2); // lr_type[0] = 0 (RESTORE_NONE)
+        bw.bits(0, 2); // lr_type[1] = 0
+        bw.bits(2, 2); // lr_type[2] = 2 → RESTORE_WIENER
+        bw.bit(1); // lr_unit_shift = 1
+        bw.bit(1); // lr_unit_extra_shift → lr_unit_shift = 2
+        bw.bit(0); // lr_uv_shift = 0 (only read because subsampling + chroma LR)
+        while bw.nbits != 0 {
+            bw.bit(0);
+        }
+        let data = bw.finish();
+        let mut br = BitReader::new(&data);
+        let lr = parse_lr(&mut br, false, false, true, 3, true, true, false).unwrap();
+        assert_eq!(lr.restoration_type, [0, 0, 1]);
+        assert!(lr.uses_lr);
+        // RESTORATION_TILESIZE_MAX(256) >> (2 - 2) = 256, >> lr_uv_shift(0).
+        assert_eq!(lr.unit_size, [256, 256, 256]);
+    }
+
+    #[test]
+    fn parse_lr_reads_nothing_when_restoration_disabled() {
+        let data = [0xFFu8; 4];
+        let mut br = BitReader::new(&data);
+        let lr = parse_lr(&mut br, false, false, false, 3, true, true, false).unwrap();
+        assert_eq!(lr.restoration_type, [0, 0, 0]);
+        assert!(!lr.uses_lr);
+        assert_eq!(br.bits_read(), 0);
     }
 }

@@ -1017,6 +1017,36 @@
 
 
 
+  — **2026-08-27: verified current baselines unchanged; localized the
+       `sweep_stereo_44100` outlier.**
+       Re-ran the full conformance suite: all 7 targets (70 lib + 1 conformance
+       + 2 proptest_aac + 5 proptest_decode_never_panics + 1 doc) pass; clippy
+       and fmt clean. Measured baselines match the 2026-08-25 notes:
+       - `tone_440_stereo_44100`: max_diff=0.00016, corr=1.0000
+       - `noise_stereo_44100`:   max_diff=0.0587, corr=0.9940
+       - `noise_mono_44100`:     max_diff=1.87, corr=0.5186
+       - `sweep_stereo_44100`:   max_diff=0.0725, corr=1.0000
+       - `tone_440_stereo_48000`: max_diff=0.00024, corr=1.0000
+       - `tone_440_stereo_22050`: max_diff=0.000076, corr=1.0000
+       - `tone_440_mono_44100`:  max_diff=0.00020, corr=1.0000
+       Localized the `sweep_stereo_44100` outlier (max_diff=0.0725) to aligned
+       frame 25, sample 488 (ch0), native=0.490 vs ref=0.418. Window-sequence
+       dump shows the error is concentrated at the frame 24→25 transition:
+       frame 24 is `OnlyLong` KBD with TNS enabled (2 filters on left channel,
+       one active `dir=false` 6-tap filter over 11 bands, one all-zero no-op),
+       frame 25 is `OnlyLong` KBD without TNS. The per-frame max-diff profile
+       is near-zero everywhere except frames 24 (0.018) and 25 (0.073), with a
+       smooth bump centered ~sample 488 — consistent with a single spectral
+       coefficient error in frame 24's TNS output leaking into frame 25's
+       overlap-add via the second-half windowing. The TNS filter application
+       in `apply_tns` (per-(group, sfb) over the band's line range, per window
+       in group) is the prime suspect; the `tns_filter_window` AR recursion is
+       verified correct in isolation, but the interaction between TNS and the
+       subsequent IMDCT/windowing for large-magnitude coefficients has not been
+       cross-checked against a reference. All three remaining gaps are correctly
+       excluded from the aggregate conformance gate (pinned regression floors).
+       No code changes made this session — investigation only.
+
   — **2026-08-25 afternoon: `prev_shape` was NEVER updated in the production
        decode path — root cause of all remaining tonal accuracy gaps.**
        The `synthesize()` function (marked `#[allow(dead_code)]`) correctly
@@ -1052,8 +1082,40 @@
           proven ffmpeg-faithful (LCG, normalization, IMDCT, windowing). Only
           next step is ffmpeg printf instrumentation for a bit-for-bit trace.
        2. `noise_stereo_44100` (max_diff ~0.058): Same suspected root cause
-          as noise_mono; much lighter PNS use so smaller impact.
-       3. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier.
-          Correlation is perfect (1.0000). All checked paths ruled out (M/S
-          butterfly, ESC dequant, escape codeword parsing). Suspects still
-          open: window multiplication for large coefficients, ms_mask ordering.
+           as noise_mono; much lighter PNS use so smaller impact.
+        3. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier.
+           Correlation is perfect (1.0000). All checked paths ruled out (M/S
+           butterfly, ESC dequant, escape codeword parsing). Suspects still
+           open: window multiplication for large coefficients, ms_mask ordering.
+
+  — **2026-08-28: FOUND AND FIXED the root cause of the PNS correlation gap —
+       wrong scale formula in `apply_pns`.**
+       The PNS band scale was computed as `-(2^(noise_energy_abs/4))` where
+       `noise_energy_abs = global_gain - sf`. This omitted the `-100` baseline
+       that `dequant_scale` (and ffmpeg's `dequant_scalefactors` NOISE_BT case)
+       includes, and used the wrong sign. The correct formula is
+       `2^((global_gain - 100 - sf) / 4)` = `dequant_scale(global_gain, sf)`.
+       For typical values this made the scale off by a factor of 2^25
+       (~33 million), so PNS noise was wildly over-scaled and decorrelated
+       against ffmpeg's reference. Fix: replaced the hand-rolled power-of-2
+       expression with a call to `dequant_scale(global_gain, sf)`, matching
+       ffmpeg exactly. Updated `pns::tests::pns_matches_ffmpeg_reference_algorithm`
+       to use the same correct formula.
+
+       **Measured results after fix:**
+       - `noise_mono_44100`: corr 0.5186 → **0.8714**, max_diff 1.87 → **0.93**
+       - `noise_stereo_44100`: corr 0.9940 → **0.9985**, max_diff 0.0587 → **0.0293**
+         (now PASSES the main <0.05 gate — special case removed from conformance test)
+       - All other cases unchanged (tonal cases still bit-exact, sweep outlier
+         unchanged at max_diff ~0.073).
+
+       Remaining open gap (as of 2026-08-28):
+       1. `noise_mono_44100` (corr ~0.87): residual PNS gap after the scale fix.
+          Still below the >0.95 target. The remaining ~0.08 correlation gap has
+          not been root-caused; candidates include residual EIGHT_SHORT spectral
+          decode / window-grouping placement issues or a remaining subtle
+          difference in the PNS energy normalization. Kept out of the aggregate
+          gate; pinned to corr > 0.80.
+       2. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier at
+          frame 25 sample 488 (TNS→non-TNS transition boundary). Unchanged by
+          the PNS fix.

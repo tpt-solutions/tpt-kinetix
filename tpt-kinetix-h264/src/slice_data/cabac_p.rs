@@ -425,7 +425,9 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         }
         let (r1, o1) = dec.debug_state();
         if is_skip {
-            eprintln!("MB{mb_idx} ({mb_x},{mb_y}) SKIP  cabac={r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!("MB{mb_idx} ({mb_x},{mb_y}) SKIP  cabac={r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+            }
             let mut mb = Macroblock::new_skip();
             mb.mb_type = MbType::PSkip;
             mb.qp = qp;
@@ -455,20 +457,29 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             // macroblock_layer() in the slice_data() do/while loop, gated only
             // on `mb_type != I_PCM`). Skipping it here desyncs the arithmetic
             // engine by one terminate bin per skip MB.
-            let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            // The final MB's terminate bin may be absent (x264 writes exactly
-            // total-1 terminate bins — one before each MB except the first —
-            // and no bin after the last MB; ffmpeg tolerates both). Only an
-            // early end_of_slice mid-slice indicates a desync.
-            if !is_last && end_of_slice {
-                return Err(SliceDataError::Unsupported(
-                    "end_of_slice_flag mismatch (P-CABAC, skip MB)",
-                ));
+            //
+            // EXCEPTION (MBAFF frame): the flag is NOT coded after the TOP
+            // macroblock of a pair (`CurrMbAddr % 2 == 0` ⇒ `moreDataFlag = 1`
+            // unconditionally); it follows only the bottom macroblock.
+            if !(mbaff_frame && mb_idx % 2 == 0) {
+                let end_of_slice = dec.decode_terminate() == 1;
+                let is_last = mb_idx + 1 == total;
+                // The final MB's terminate bin may be absent (x264 writes
+                // exactly total-1 terminate bins — one before each MB except
+                // the first — and no bin after the last MB; ffmpeg tolerates
+                // both). Only an early end_of_slice mid-slice indicates a
+                // desync.
+                if !is_last && end_of_slice {
+                    return Err(SliceDataError::Unsupported(
+                        "end_of_slice_flag mismatch (P-CABAC, skip MB)",
+                    ));
+                }
             }
             continue;
         }
-        eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+        }
 
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
@@ -503,16 +514,16 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
 
-        let (r_pre, o_pre) = dec.debug_state();
-        let end_of_slice = dec.decode_terminate() == 1;
-        let (r_post, o_post) = dec.debug_state();
-        let is_last = mb_idx + 1 == total;
-        eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED cbp={cbp:#04x} qp={qp} eos={end_of_slice} is_last={is_last}  terminate: {r_pre:#06x}/{o_pre:#010x} -> {r_post:#06x}/{o_post:#010x}",
-            cbp = macroblocks.last().map(|m| m.cbp).unwrap_or(0));
-        if !is_last && end_of_slice {
-            return Err(SliceDataError::Unsupported(
-                "end_of_slice_flag mismatch (P-CABAC)",
-            ));
+        // §7.3.4: no end_of_slice_flag after the TOP macroblock of an MBAFF
+        // frame pair (see the skip-MB path above for the spec reference).
+        if !(mbaff_frame && mb_idx % 2 == 0) {
+            let end_of_slice = dec.decode_terminate() == 1;
+            let is_last = mb_idx + 1 == total;
+            if !is_last && end_of_slice {
+                return Err(SliceDataError::Unsupported(
+                    "end_of_slice_flag mismatch (P-CABAC)",
+                ));
+            }
         }
     }
 

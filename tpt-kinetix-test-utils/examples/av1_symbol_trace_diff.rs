@@ -203,11 +203,27 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     let w = width as usize;
     let h = height as usize;
     if std::env::var("KINETIX_AV1_DBG_ROWS").is_ok() {
-        for row in 0..4usize.min(h) {
-            let g: Vec<u8> = got[row * w..row * w + w.min(24)].to_vec();
-            let r: Vec<u8> = ref_data[row * w..row * w + w.min(24)].to_vec();
-            println!("  row{row} kinetix={g:?}");
-            println!("  row{row} dav1d  ={r:?}");
+        let (c0, c1) = std::env::var("KINETIX_AV1_DBG_COLS")
+            .ok()
+            .and_then(|s| {
+                let mut it = s.split(',');
+                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+            })
+            .unwrap_or((0usize, 24usize));
+        let (r0, r1) = std::env::var("KINETIX_AV1_DBG_RROWS")
+            .ok()
+            .and_then(|s| {
+                let mut it = s.split(',');
+                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+            })
+            .unwrap_or((0usize, 4usize));
+        for row in r0..r1.min(h) {
+            let a = row * w + c0.min(w);
+            let b = row * w + c1.min(w);
+            let g: Vec<u8> = got[a..b].to_vec();
+            let r: Vec<u8> = ref_data[a..b].to_vec();
+            println!("  row{row} c{c0}..{c1} kinetix={g:?}");
+            println!("  row{row} c{c0}..{c1} dav1d  ={r:?}");
         }
     }
     let y_n = w * h;

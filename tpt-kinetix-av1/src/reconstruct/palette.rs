@@ -285,12 +285,19 @@ impl<'a> TileDecodeState<'a> {
     /// Reads `palette_colors_y`/`palette_colors_u` (AV1 spec §5.11.46): the
     /// shared cache + literal + delta-coded-remainder scheme both Y and U
     /// use (V is different — see [`Self::read_palette_colors_v`]). `is_u`
-    /// only changes the `range` computation's `-1` (spec: the Y branch
-    /// subtracts it, the U branch doesn't — `Clip1` already keeps `val` in
-    /// range either way, so this only affects `paletteBits`' shrink rate,
-    /// not correctness of `val` itself, but must match to stay in sync with
-    /// the encoder's own bit-count choice for the next iteration).
-    fn read_palette_colors_yu(&mut self, size: usize, cache: &[i32], is_u: bool) -> Vec<i32> {
+    /// changes two things between the Y and U branches:
+    ///  * the delta bias — Y does `palette_delta_y++` (so `delta = read + 1`),
+    ///    U does **not** (`delta = read`). Getting this wrong makes every U
+    ///    palette entry after the first delta-coded one drift, and — because
+    ///    `paletteBits` is re-derived from the running colour value — desyncs
+    ///    every subsequent read in the block (the Y colour map included).
+    ///  * the `range` computation's `-1` (Y subtracts it, U doesn't).
+    pub(super) fn read_palette_colors_yu(
+        &mut self,
+        size: usize,
+        cache: &[i32],
+        is_u: bool,
+    ) -> Vec<i32> {
         let mut colors = Vec::with_capacity(size);
         let mut idx = 0usize;
         let mut i = 0usize;
@@ -313,7 +320,9 @@ impl<'a> TileDecodeState<'a> {
             palette_bits = min_bits + extra;
         }
         while idx < size {
-            let delta = self.dec.read_literal(palette_bits) as i32 + 1;
+            // Y: `palette_delta_y++`; U: no bias.
+            let delta_bias = if is_u { 0 } else { 1 };
+            let delta = self.dec.read_literal(palette_bits) as i32 + delta_bias;
             let val = clip1(colors[idx - 1] + delta);
             colors.push(val);
             let sub = if is_u { 0 } else { 1 };
@@ -405,6 +414,11 @@ impl<'a> TileDecodeState<'a> {
                 let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(0, mi_row, mi_col);
                 colors_y = self.read_palette_colors_yu(size, &cache, false);
+                if std::env::var("KINETIX_AV1_DBG_PAL").is_ok() {
+                    eprintln!(
+                        "DBG palette Y mi=({mi_row},{mi_col}) size={size} cache={cache:?} colors={colors_y:?}"
+                    );
+                }
             }
         }
 

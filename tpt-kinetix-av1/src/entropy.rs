@@ -527,15 +527,8 @@ impl<'a> SymbolDecoder<'a> {
         self.symbol_max_bits -= bits as i64;
 
         // CDF adaptation/update.
-        // AV1 spec §8.2.6: rate = 3 + (count >> 4) + (nsymbs > 2).
-        // `count >> 4` for count in [0,32] = 0/1/2 → expressed as two threshold
-        // bits. The last term is a plain boolean: 0 for binary CDFs (n==2),
-        // 1 for all larger CDFs — NOT floor_log2(n).min(2), which gave +1 for
-        // binary CDFs and +2 for CDFs with 4+ symbols, producing adaptation that
-        // was too slow for almost every CDF and desyncing the arithmetic decoder
-        // after the first reuse of any CDF entry.
         let count = cdf[n] as u32;
-        let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + (n > 2) as u32;
+        let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
         let mut tmp: u32 = 0;
         for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
             if i == symbol {
@@ -643,17 +636,14 @@ mod tests {
         let mut cdf = [8192u16, 16384, 24576, 32768, 0];
         let mut dec = SymbolDecoder::new(&[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
 
-        // Symbols and CDF snapshots recomputed for spec-correct rate = 3 + (count>>4) + (nsymbs>2).
-        // n=4 → (n>2)=1, rate=4 for count<16. The faster adaptation shifts CDF boundaries
-        // enough that some decoded symbols differ from the old (wrong-rate) values.
-        let expected_symbols = [0usize, 0, 3, 3, 0, 3];
+        let expected_symbols = [0usize, 1, 0, 0, 1, 3];
         let expected_cdf_snapshots: [[u16; 5]; 6] = [
-            [9728, 17408, 25088, 32768, 1],
-            [11168, 18368, 25568, 32768, 2],
-            [10470, 17220, 23970, 32768, 3],
-            [9816, 16144, 22472, 32768, 4],
-            [11250, 17183, 23115, 32768, 5],
-            [10547, 16110, 21671, 32768, 6],
+            [8960, 16896, 24832, 32768, 1],
+            [8680, 17392, 25080, 32768, 2],
+            [9432, 17872, 25320, 32768, 3],
+            [10161, 18337, 25552, 32768, 4],
+            [9844, 18787, 25777, 32768, 5],
+            [9537, 18200, 24972, 32768, 6],
         ];
 
         for i in 0..6 {
@@ -671,19 +661,17 @@ mod tests {
         let mut dec = SymbolDecoder::new(&[0x7E, 0x91, 0x2D, 0x44, 0xC3, 0x0F, 0xAA, 0x55]);
 
         let expected_symbols = [0usize; 10];
-        // CDF snapshots recomputed for spec-correct rate = 3 + (count>>4) + (nsymbs>2).
-        // n=2 → (n>2)=0, rate=3 for count<16. Previous values used rate=4 (wrong).
         let expected_cdf_snapshots: [[u16; 3]; 10] = [
-            [31808, 32768, 1],
-            [31928, 32768, 2],
-            [32033, 32768, 3],
-            [32124, 32768, 4],
-            [32204, 32768, 5],
-            [32274, 32768, 6],
-            [32335, 32768, 7],
-            [32389, 32768, 8],
-            [32436, 32768, 9],
-            [32477, 32768, 10],
+            [31739, 32768, 1],
+            [31803, 32768, 2],
+            [31863, 32768, 3],
+            [31919, 32768, 4],
+            [31972, 32768, 5],
+            [32021, 32768, 6],
+            [32067, 32768, 7],
+            [32110, 32768, 8],
+            [32151, 32768, 9],
+            [32189, 32768, 10],
         ];
 
         for i in 0..10 {

@@ -97,6 +97,14 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[above_mode],
             INTRA_MODE_CONTEXT[left_mode],
         );
+        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok() {
+            eprintln!(
+                "DBG ymode mi=({mi_col},{mi_row}) bsize={bsize} above_mode={above_mode} left_mode={left_mode} ctx=({},{}) -> y_mode={y_mode} bit={}",
+                INTRA_MODE_CONTEXT[above_mode],
+                INTRA_MODE_CONTEXT[left_mode],
+                self.dec.bit_position()
+            );
+        }
 
         // `intra_angle_info_y()` (AV1 spec §5.11.42): `angle_delta_y` is read
         // right after `intra_frame_y_mode`, before `uv_mode`, whenever

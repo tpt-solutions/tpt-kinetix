@@ -9,7 +9,7 @@
 use proptest::prelude::*;
 
 use tpt_kinetix_av1::inter::RefFrames;
-use tpt_kinetix_av1::reconstruct::{decode_tile_group, CdefDeltaParams, DeltaQ};
+use tpt_kinetix_av1::reconstruct::{decode_tile_group, CdefDeltaParams, DeltaQ, LrDecodeParams};
 
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES")
@@ -68,6 +68,7 @@ fn decode_with(
         false, // enable_intra_edge_filter
         allow_screen_content_tools,
         false, // allow_intrabc
+        LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,     // frame_is_intra — these robustness tests exercise the intra path
         false,    // allow_high_precision_mv

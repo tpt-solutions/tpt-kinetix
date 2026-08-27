@@ -50,6 +50,11 @@ pub(super) struct ModeCdfs {
     pub(super) interp_filter: [[u16; 4]; 16],
     pub(super) filter_intra: [[u16; 3]; 22],
     pub(super) filter_intra_mode: [u16; 6],
+    /// `TileUseWienerCdf` / `TileUseSgrprojCdf` / `TileRestorationTypeCdf`
+    /// (§8.3.2): the per-restoration-unit symbols read by `read_lr_unit()`.
+    pub(super) use_wiener: [u16; 3],
+    pub(super) use_sgrproj: [u16; 3],
+    pub(super) restoration_type: [u16; 4],
     pub(super) cfl_sign: [u16; 9],
     pub(super) cfl_alpha: [[u16; 17]; 6],
     pub(super) palette_y_mode: [[[u16; 3]; 3]; 7],
@@ -286,6 +291,9 @@ const DEFAULT_FILTER_INTRA_CDF: [[u16; 3]; 22] = [
 
 /// `Default_Filter_Intra_Mode_Cdf[6]` (AV1 spec "Additional tables").
 const DEFAULT_FILTER_INTRA_MODE_CDF: [u16; 6] = [8949, 12776, 17211, 29558, 32768, 0];
+const DEFAULT_USE_WIENER_CDF: [u16; 3] = [11570, 32768, 0];
+const DEFAULT_USE_SGRPROJ_CDF: [u16; 3] = [16855, 32768, 0];
+const DEFAULT_RESTORATION_TYPE_CDF: [u16; 4] = [9413, 22581, 32768, 0];
 
 /// `Default_Delta_Q_Cdf[DELTA_Q_SMALL + 2]` (AV1 spec "Additional tables").
 /// `Default_Delta_Lf_Cdf` has the identical values and is reused for both
@@ -322,6 +330,9 @@ impl ModeCdfs {
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
             filter_intra: DEFAULT_FILTER_INTRA_CDF,
             filter_intra_mode: DEFAULT_FILTER_INTRA_MODE_CDF,
+            use_wiener: DEFAULT_USE_WIENER_CDF,
+            use_sgrproj: DEFAULT_USE_SGRPROJ_CDF,
+            restoration_type: DEFAULT_RESTORATION_TYPE_CDF,
             cfl_sign: DEFAULT_CFL_SIGN_CDF,
             cfl_alpha: DEFAULT_CFL_ALPHA_CDF,
             palette_y_mode: DEFAULT_PALETTE_Y_MODE_CDF,
@@ -469,6 +480,28 @@ impl ModeCdfs {
             return None;
         }
         Some(dec.read_symbol(&mut self.filter_intra_mode))
+    }
+
+    /// `use_wiener` / `use_sgrproj` / `restoration_type` (`read_lr_unit()`,
+    /// AV1 spec §5.11.58): the arithmetic symbol that opens every loop-
+    /// restoration unit. Returns the resolved `RESTORE_*` value
+    /// (`NONE`=0/`WIENER`=1/`SGRPROJ`=2).
+    pub(super) fn read_lr_restoration_type(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        frame_restoration_type: u8,
+    ) -> u8 {
+        match frame_restoration_type {
+            1 => (dec.read_symbol(&mut self.use_wiener) == 1) as u8, // RESTORE_WIENER
+            2 => {
+                if dec.read_symbol(&mut self.use_sgrproj) == 1 {
+                    2
+                } else {
+                    0
+                }
+            }
+            _ => dec.read_symbol(&mut self.restoration_type) as u8, // RESTORE_SWITCHABLE
+        }
     }
 
     pub(super) fn read_partition(

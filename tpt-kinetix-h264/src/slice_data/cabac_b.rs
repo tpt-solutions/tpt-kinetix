@@ -517,14 +517,19 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             // macroblock_layer() in the slice_data() do/while loop, gated only
             // on `mb_type != I_PCM`). Skipping it here desyncs the arithmetic
             // engine by one terminate bin per skip MB.
-            let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            // See the note in cabac_p.rs: the final MB's terminate bin may be
-            // absent (x264 omits it); only a mid-slice end_of_slice is an error.
-            if !is_last && end_of_slice {
-                return Err(SliceDataError::Unsupported(
-                    "end_of_slice_flag mismatch (B-CABAC, skip MB)",
-                ));
+            // EXCEPTION (MBAFF frame): not coded after the TOP macroblock of a
+            // pair (`CurrMbAddr % 2 == 0` ⇒ `moreDataFlag = 1`).
+            if !(mbaff_frame && mb_idx % 2 == 0) {
+                let end_of_slice = dec.decode_terminate() == 1;
+                let is_last = mb_idx + 1 == total;
+                // See the note in cabac_p.rs: the final MB's terminate bin may
+                // be absent (x264 omits it); only a mid-slice end_of_slice is
+                // an error.
+                if !is_last && end_of_slice {
+                    return Err(SliceDataError::Unsupported(
+                        "end_of_slice_flag mismatch (B-CABAC, skip MB)",
+                    ));
+                }
             }
             continue;
         }
@@ -572,12 +577,16 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         mb.mb_field_flag = cur_pair_field;
         macroblocks.push(mb);
 
-        let end_of_slice = dec.decode_terminate() == 1;
-        let is_last = mb_idx + 1 == total;
-        if !is_last && end_of_slice {
-            return Err(SliceDataError::Unsupported(
-                "end_of_slice_flag mismatch (B-CABAC)",
-            ));
+        // §7.3.4: no end_of_slice_flag after the TOP macroblock of an MBAFF
+        // frame pair.
+        if !(mbaff_frame && mb_idx % 2 == 0) {
+            let end_of_slice = dec.decode_terminate() == 1;
+            let is_last = mb_idx + 1 == total;
+            if !is_last && end_of_slice {
+                return Err(SliceDataError::Unsupported(
+                    "end_of_slice_flag mismatch (B-CABAC)",
+                ));
+            }
         }
     }
 

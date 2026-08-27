@@ -42,6 +42,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         false,
         false,
         false, // allow_intrabc
+        LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
         false,
@@ -494,6 +495,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         false,
         true,
         false, // use_128x128_superblock
+        LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
         false,
@@ -566,6 +568,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         false,
         true,
         false, // use_128x128_superblock
+        LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
         false,
@@ -638,6 +641,7 @@ fn make_cdef_delta_state<'a>(
         false,
         allow_intrabc,
         use_128x128_superblock,
+        LrDecodeParams::default(),
         cdef_delta,
         false,
         false,
@@ -647,6 +651,50 @@ fn make_cdef_delta_state<'a>(
         RefFrames::empty(),
         meta,
     )
+}
+
+#[test]
+fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
+    // AV1 spec §5.11.46: the delta-coded palette-colour remainder does
+    // `palette_delta_y++` for luma but has NO bias for U. A shared decoder
+    // that always added 1 drifted every U palette after the first delta entry
+    // (and, since `paletteBits` is re-derived from the running colour, then
+    // desynced the whole block). Feed identical bits to the Y and U paths and
+    // assert the second colour differs by exactly the bias.
+    //
+    // Empty cache -> first colour = L(8), then L(2) extra bits, then one
+    // L(paletteBits) delta. The arithmetic decoder's L() is not raw bits, so
+    // rather than predict absolute values, feed the SAME bytes to the Y and U
+    // paths and assert the only difference is the +1 luma bias on the delta.
+    let data = [0x40u8, 0b0000_0001, 0b0000_0000];
+    let mut yb = vec![0u8; 64];
+    let mut ub = vec![0u8; 16];
+    let mut vb = vec![0u8; 16];
+    let mut meta = FrameMeta::new(2, 2);
+
+    let mut state = TileDecodeState::new(
+        &data, 0, 8, 8, 4, 4, &mut yb, &mut ub, &mut vb, 8, 4, 32, DeltaQ::default(), true, false,
+        false, false, 0, 0, 8, 8, true, false, false, false, false, false, false, false, false,
+        LrDecodeParams::default(), CdefDeltaParams::default(), true, false, false,
+        INTERP_SWITCHABLE, [0u8; 9], RefFrames::empty(), &mut meta,
+    );
+    let y_colors = state.read_palette_colors_yu(2, &[], false);
+
+    let mut state2 = TileDecodeState::new(
+        &data, 0, 8, 8, 4, 4, &mut yb, &mut ub, &mut vb, 8, 4, 32, DeltaQ::default(), true, false,
+        false, false, 0, 0, 8, 8, true, false, false, false, false, false, false, false, false,
+        LrDecodeParams::default(), CdefDeltaParams::default(), true, false, false,
+        INTERP_SWITCHABLE, [0u8; 9], RefFrames::empty(), &mut meta,
+    );
+    let u_colors = state2.read_palette_colors_yu(2, &[], true);
+
+    // Same first colour, same raw delta bits; only the luma `++` bias differs.
+    assert_eq!(y_colors[0], u_colors[0]);
+    assert_eq!(
+        y_colors[1] - u_colors[1],
+        1,
+        "luma delta must be one more than chroma-U delta (spec `palette_delta_y++`)"
+    );
 }
 
 #[test]
@@ -924,6 +972,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         false,
         true,
         false, // use_128x128_superblock
+        LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
         false,

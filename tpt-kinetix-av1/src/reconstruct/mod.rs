@@ -445,6 +445,21 @@ pub struct CdefDeltaParams {
     pub delta_lf_multi: bool,
 }
 
+/// Loop-restoration bitstream state the tile decoder needs for the
+/// per-superblock `read_lr()` syntax (AV1 spec §5.11.57). The restoration
+/// *filter* is not applied yet (Phase D leaves LR a passthrough), but the
+/// `read_lr()` symbols are real arithmetic-coded data that precede every
+/// `decode_partition()` and MUST be consumed or the whole tile desyncs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LrDecodeParams {
+    pub frame_restoration_type: [u8; 3],
+    pub lr_unit_size: [u32; 3],
+    pub uses_lr: bool,
+    pub upscaled_width: usize,
+    pub frame_height: usize,
+    pub num_planes: usize,
+}
+
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
 /// and the neighbour-context arrays (partition / luma-mode / chroma-mode /
 /// tx-size) the syntax elements read from.
@@ -488,6 +503,12 @@ struct TileDecodeState<'a> {
     /// Frame-header `allow_intrabc` (§5.9.19) — when true a 1-bit
     /// `use_intrabc = f(1)` is read before `y_mode` in every intra block.
     allow_intrabc: bool,
+    /// Loop-restoration `read_lr()` state (§5.11.57). `ref_lr_wiener`/
+    /// `ref_sgr_xqd` are the running `RefLrWiener`/`RefSgrXqd` predictors,
+    /// reset per tile in [`decode_tile_group`].
+    lr: LrDecodeParams,
+    ref_lr_wiener: [[[i32; 3]; 2]; 3],
+    ref_sgr_xqd: [[i32; 2]; 3],
     /// `PaletteColors[0]` of the most recently decoded palette-Y block at
     /// each `mi_col`/`mi_row` (empty = no palette / not yet decoded), used by
     /// [`Self::get_palette_cache`] (§5.11.46's `get_palette_cache`) and by
@@ -644,6 +665,7 @@ impl<'a> TileDecodeState<'a> {
         allow_screen_content_tools: bool,
         allow_intrabc: bool,
         use_128x128_superblock: bool,
+        lr: LrDecodeParams,
         cdef_delta: CdefDeltaParams,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
@@ -751,6 +773,9 @@ impl<'a> TileDecodeState<'a> {
             enable_intra_edge_filter,
             allow_screen_content_tools,
             allow_intrabc,
+            lr,
+            ref_lr_wiener: [[[0i32; 3]; 2]; 3],
+            ref_sgr_xqd: [[0i32; 2]; 3],
             palette_y_colors_above: vec![Vec::new(); mi_cols],
             palette_y_colors_left: vec![Vec::new(); mi_rows],
             palette_u_colors_above: vec![Vec::new(); mi_cols],
@@ -940,6 +965,7 @@ pub fn decode_tile_group(
     enable_intra_edge_filter: bool,
     allow_screen_content_tools: bool,
     allow_intrabc: bool,
+    lr: LrDecodeParams,
     cdef_delta: CdefDeltaParams,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
@@ -1037,6 +1063,7 @@ pub fn decode_tile_group(
         allow_screen_content_tools,
         allow_intrabc,
         use_128,
+        lr,
         cdef_delta,
         frame_is_intra,
         allow_high_precision_mv,
@@ -1067,6 +1094,15 @@ pub fn decode_tile_group(
         String::new()
     };
 
+    // §5.11.2 `decode_tile()`: reset the loop-restoration coefficient
+    // predictors to their mid values at the start of every tile.
+    for plane in 0..3 {
+        for pass in 0..2 {
+            state.ref_lr_wiener[plane][pass] = [3, -7, 15];
+            state.ref_sgr_xqd[plane] = [-32, 31];
+        }
+    }
+
     let mut out = Ok(());
     for mi_row in (sb_row_start * sb_mi..sb_row_end * sb_mi).step_by(sb_mi) {
         // AV1 spec §7.3 `decode_tile()`: `clear_left_context()` is called
@@ -1090,12 +1126,24 @@ pub fn decode_tile_group(
         }
     }
     if capture_tile {
+        let params_json = format!(
+            "{{\"width\":{width},\"height\":{height},\"mi_cols\":{mi_cols},\"mi_rows\":{mi_rows},\
+             \"sb_size\":{sb_size},\"use_128\":{use_128},\"subsampling_x\":true,\"subsampling_y\":true,\
+             \"monochrome\":false,\"lossless\":false,\"tx_mode_select\":{tx_mode_select},\
+             \"reduced_tx_set\":{reduced_tx_set},\"segmentation_enabled\":{segmentation_enabled},\
+             \"enable_filter_intra\":{enable_filter_intra},\"enable_intra_edge_filter\":{enable_intra_edge_filter},\
+             \"allow_screen_content_tools\":{allow_screen_content_tools},\"allow_intrabc\":{allow_intrabc},\
+             \"sb_row_start\":{sb_row_start},\"sb_row_end\":{sb_row_end},\
+             \"sb_col_start\":{sb_col_start},\"sb_col_end\":{sb_col_end},\
+             \"tile_px_x0\":{x0},\"tile_px_y0\":{y0}}}"
+        );
         capture_tile_trace(
             data,
             tile_group_header_bits,
             qindex,
             &base_mode_cdfs_json,
             &base_coeff_cdfs_json,
+            &params_json,
         );
     }
     out
@@ -1113,6 +1161,7 @@ fn capture_tile_trace(
     base_q_idx: u8,
     base_mode_cdfs_json: &str,
     base_coeff_cdfs_json: &str,
+    params_json: &str,
 ) {
     let data_hex = {
         let mut s = String::with_capacity(data.len() * 2);
@@ -1144,7 +1193,7 @@ fn capture_tile_trace(
         .collect();
     let json = format!(
         "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {bit_offset},\n  \
-         \"base_q_idx\": {base_q_idx},\n  \"mode_cdfs\": {base_mode_cdfs_json},\n  \
+         \"base_q_idx\": {base_q_idx},\n  \"params\": {params_json},\n  \"mode_cdfs\": {base_mode_cdfs_json},\n  \
          \"coeff_cdfs\": {base_coeff_cdfs_json},\n  \
          \"trace\": [{}],\n  \"markers\": [{}]\n}}\n",
         trace_json.join(","),
@@ -1373,6 +1422,14 @@ pub fn reconstruct_av1_frame(
                 seq.enable_intra_edge_filter,
                 frame_header.allow_screen_content_tools,
                 frame_header.allow_intrabc,
+                LrDecodeParams {
+                    frame_restoration_type: frame_header.frame_restoration_type,
+                    lr_unit_size: frame_header.lr_unit_size,
+                    uses_lr: frame_header.uses_lr,
+                    upscaled_width: frame_header.upscaled_width as usize,
+                    frame_height: frame_header.height as usize,
+                    num_planes: if seq.color_config.mono_chrome { 1 } else { 3 },
+                },
                 CdefDeltaParams {
                     enable_cdef: seq.enable_cdef,
                     cdef_bits: frame_header.cdef_bits,
