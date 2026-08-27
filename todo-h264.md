@@ -2,6 +2,75 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32o (2026-08-27) — cont'd: CABAC MBAFF I-slice desync (#32e item 6) re-narrowed
+
+The `mbaff_i1` clip (High profile, 4×4 MBs, x264 `--interlaced`; testsrc) still
+desyncs: `parse_i_slice_cabac` reads MB0..MB14 then the terminate bin after
+MB14 reads **1** ("end_of_slice_flag mismatch") → grey scaffold, wholesale
+pixel divergence rows 16–63.
+
+NEW FACTS this session:
+- Every MB decodes as `Intra4x4` with `mb_field_decoding_flag=false` (all 8
+  pairs frame-coded); MB2..MB14 mostly `transform_size_8x8_flag=true`
+  (Intra_8x8, High profile). So the field-residual tables (#32e item 5) are
+  never exercised — the trigger is a frame-coded MBAFF stream.
+- `dbg_mbaff_oracle` (hand transcription of ffmpeg's I-slice path, residual
+  walk through the crate's own `ResidualCabacContext`) is in **exact lockstep**
+  with the crate parser: identical CABAC engine `state=range/offset` at EVERY
+  MB boundary through MB14 (e.g. both `0x0158/0x00000157` at MB14), identical
+  cbp / chroma_pred_mode / t8 / MPM modes. The only column that differs is the
+  oracle's `qp` display — a KNOWN oracle bug (#32e: "oracle dqp ignores
+  negative deltas", crate's qp is right; qp does not affect residual parsing).
+  Both then hit "premature end_of_slice at MB14".
+- => The hand-oracle route is **exhausted** for this bug: it shares the crate's
+  residual coefficient code (`decode_block_8x8` sig/last/abs bin loop), so any
+  bug there is invisible to it (circular calibration — same failure mode as
+  TRANS_IDX_LPS[28] / the amvd convention). Progressive High/8×8 CABAC I
+  (`conformance_matrix` `high8x8_i`) is bit-exact, so the bug is triggered by
+  an MBAFF-specific INPUT into that shared code — prime suspects, in order:
+  (a) `non_zero_count_cache` left/top nnz feeding `get_cabac_cbf_ctx` for the
+  4×4 chroma-AC / luma blocks near MB14 (MBAFF pair-neighbour nnz derivation
+  vs the plain `nz[grid-1]`/`nz[grid-mb_cols]` the crate uses in cabac_i.rs —
+  verify against ffmpeg `fill_decode_caches` `left_block_options` + the
+  `nnz = CABAC && !IS_INTRA ? 0 : 64` unavailable-fill);
+  (b) the 8×8 significance-map `SIG_COEFF_CTX_INC_8X8` frame-row indices;
+  (c) coeff visit order for the 8×8 groups.
+- DECISIVE NEXT STEP (now unblocked — `clang` 22.x is on PATH): build a
+  compiled-ffmpeg oracle. Vendored sources already at repo root
+  (`h264_cabac_ref.c`, `cabac_ref.c`/`.h`, `ff_cabac_functions.h`). Minimum
+  viable: compile `get_cabac_cbf_ctx` + `decode_cabac_residual_internal` +
+  the real cabac engine (`cabac.c` core) with hand-mocked minimal
+  `H264SliceContext` (cabac_state[1024], non_zero_count_cache, left/top_cbp,
+  intra4x4_pred_mode_cache is not needed), record the crate's engine state +
+  `cabac_state` array + nnz cache immediately before MB14's residual, replay,
+  and diff per-bin ctxIdx + coefficient outputs.
+
+## SESSION #32o (2026-08-27) — CABAC P/B CONFORMANCE-MATRIX DESYNC IS RESOLVED (verification only)
+
+Re-audit of the long-open "conformance_matrix.rs cabac_p / cabac_b cells fail
+(max_abs_diff≈127, desync in parse_p_slice_cabac)" item (Phase H,
+`todo-h264.md` "NEW (2026-08-22)"). It is **closed** — fixed by intervening
+work (the #32b amvd-neighbour-convention fix and the #32j CAVLC/CABAC inter-MB
+`transform_size_8x8_flag` fix, most likely):
+
+- `cargo test -p tpt-kinetix-h264 --test conformance_matrix` → `[PASS] cabac_p`
+  / `[PASS] cabac_b`, both deblock variants, `max_abs_diff=0
+  differing_samples=0/4608`. `high8x8_i` (High/8×8 CABAC I) also `[PASS]`.
+- `examples/dbg_cabac_p_matrix` — all 16 repro cases (incl. the qp18/qp21
+  streams that straddled the preCtxState 63/64 boundary and used to hit
+  "end_of_slice_flag mismatch (P-CABAC)") now decode bit-exact; every P slice
+  reaches MB11 with `eos=true is_last=true`.
+- Full `cargo test -p tpt-kinetix-h264` suite green (all integration binaries,
+  0 failed); lib 246/246.
+
+Toolchain note (invalidates the old "no C toolchain on the Windows dev box"
+blocker): `clang` 22.x is on PATH (scoop llvm) and `ffmpeg` is present — a
+verbatim-C CABAC oracle is now buildable here if a future desync needs one.
+
+`pixel_exact` stays `false`: the remaining gates are Phase G interlaced
+PAFF/MBAFF (CABAC MBAFF residual desync #32e item 6; PAFF/MBAFF corpus
+validation G.5) and the non-16-aligned crop-edge gap — NOT CABAC P/B any more.
+
 ## SESSION #32n (2026-08-27) — sad=92 RESIDUE ROOT-CAUSED AND FIXED; MBAFF P FRAME NOW PIXEL-EXACT VS FFMPEG
 
 1. **ROOT CAUSE of #32m item 8b's residual luma diffs** (`deblock.rs`): ffmpeg
@@ -1735,11 +1804,14 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       `NotPixelExact` honesty design. The flip stays `false` until Phases F/G and
       the crop-edge gap land; the `conformance_matrix.rs` gate asserts
       `!capabilities().pixel_exact` so the constraint is enforced in CI.
-- [~] **NEW (2026-08-22): `conformance_matrix` cabac_p / cabac_b cells fail**
+- [x] **NEW (2026-08-22): `conformance_matrix` cabac_p / cabac_b cells fail**
       (max_abs_diff≈127, full-frame scaffold → a decode *error* fallback, both
       deblock variants). Verified pre-existing at origin/master (`96a4db9`) —
-      not caused by the 2026-08-22 MPM/CAVLC work. Needs its own root-cause
-      pass before any `pixel_exact` flip discussion.
+      not caused by the 2026-08-22 MPM/CAVLC work.
+      **RESOLVED — verified 2026-08-27 (session #32o).** Both cells now decode
+      bit-exact (`max_abs_diff=0`); the desync was cleared by the #32b amvd
+      fix + #32j inter-MB transform_size_8x8_flag fix. See session #32o notes.
+      Original root-cause diary retained below for reference.
       - **2026-08-23 session — root cause narrowed substantially; the failure
         is a real CABAC *desync* inside `parse_p_slice_cabac`, not an
         unimplemented live-decoder path.** Reproduced minimally with
