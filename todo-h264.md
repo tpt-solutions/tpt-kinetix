@@ -263,17 +263,12 @@ few context-cell picks. Steps A1→A5 are strictly sequential.
       `slice_data/cabac_b.rs::parse_p_macroblock_cabac`'s `sub_mb_type` path;
       diff each bin's `ctxIdx` + value vs the oracle. Fix the four sub-block
       `sub_mb_type` reads. Verify: bin-for-bin match up to the first `ref_idx`.
-- [x] **A3. `ref_idx_gt0_neighbors` cell geometry.** Verified correct: the
-      ffmpeg `scan8[n]-1/-8` convention is properly translated to the crate's
-      per-MB storage. For the all-frame-coded case (`mbaff_ip`), `mbaff::derive_neighbours`
-      degenerates to plain raster, and the cell geometry (`by*4+3` for left,
-      `3*4+bx` for top) correctly indexes the raster 4×4 blocks within each
-      neighbor's `MbInterCabacCtx`. Added 7 unit tests in `ctx.rs::tests`
-      covering cross-MB left/top reads, within-MB reads, L0/L1 list selection,
-      and off-picture neighbors. The `mbaff_ip` desync root cause is the **CBP
-      context** (wrong cbp-context from MBAFF neighbour cbp derivation), NOT
-      ref_idx — confirmed by MB12's MVDs `(0,0)`/`(-1,0)` matching ffmpeg in
-      the #32v trace.
+- [x] **A3. `ref_idx_gt0_neighbors` cell geometry.** COMMITTED fe15891: 7 unit
+      tests in `ctx.rs::tests` (cross-MB left/top reads, within-MB reads,
+      off-picture, L1 list). Geometry verified correct.
+- [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
+      contexts for the sub-partitions. Fix + verify all `mvd` bins match through
+      end of the MB.
 - [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
       contexts for the sub-partitions. Fix + verify all `mvd` bins match through
       end of the MB.
