@@ -2,6 +2,53 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ac (2026-08-29) — ★ ROOT CAUSE FOUND & FIXED: `mb_field_decoding_flag` CABAC context init used the I-slice table for P/B slices ★
+
+**Committed d1c5c53.** The CABAC MBAFF P/B desync (#32aa: MB9 `mb_type` ctxIdx
+15 misdecodes) is `MbFieldDecodingFlagContext::new` initialising ctxIdx 70..=72
+from `CABAC_CTX_INIT_I` **regardless of slice type**. Spec §9.3.1.2 keys these
+from the `cabac_init_idc` table for P/B slices — `I[70] = (0,11)` vs
+`PB0[70] = (0,45)`, genuinely different. Only MBAFF frames ever decode
+`mb_field_decoding_flag`, so the wrong init silently drifted the arithmetic
+engine's `range` (offset stayed synced) on **every MBAFF P/B pair** — which is
+exactly why progressive CABAC P/B conformance was bit-exact while MBAFF P/B was
+broken, and why #32y/#32z's CBP/ref_idx/t8 fixes (all *downstream* of the
+`mb_field` decode) couldn't help.
+
+**Proof — `tests/dbg_mbaff_p_ffengine_oracle.rs`:** drives an independent
+from-scratch port of ffmpeg's `get_cabac`/`get_cabac_terminate` (tables parsed
+from `cabac_ref.c`, **with the u8-wrap fix** — ffmpeg stores RangeLPS ≥ 128 as
+negative `int8` literals in a `uint8_t` table; `dbg_engine_diff.rs` parses them
+as `i32` and *guards around* them, so its `FfEngine` had never validated a
+large-range low-pStateIdx decode = MB0's first skip bin here) + the crate
+`CabacDecoder`, shared context model, replaying ffmpeg's exact P-MBAFF element
+sequence (10 skip bins + 4 terminates + `mb_field_decoding_flag` + `mb_type`).
+Both engines agree bin-for-bin. With ctxIdx 70 from the **PB** table →
+`ctx15 = 1` → 16x8 (matches ffmpeg's `export_mvs`). With ctxIdx 70 from the
+**I** table (`ORACLE_FIELD_I_INIT=1`) → `ctx15 = 0` → P_8x8 (reproduces the
+pre-fix crate output). Engine offset identical in both cases; only `range`
+drifts.
+
+**FIX:** added `MbFieldDecodingFlagContext::new_pb(slice_qp, cabac_init_idc)`
+(uses `init_pb_ctx`); `PbCabacSliceContexts::new_p`/`new_b` now call it.
+`CabacSliceContexts::new` (MBAFF **I**-slice) keeps `::new` (I-init, correct —
+`g6_cabac_i` stays bit-exact). New lib test
+`mb_field_context_pb_init_differs_from_i_init`.
+
+**RESULT** (`dbg_g5_interlaced`, `-skip_loop_filter` ref):
+- `mbaff_ip` P: SAD **48461 → 9842**
+- `mbaff_ibp` B: SAD **73651 → 523** (≈ skip-loop-filter harness artefact —
+  near bit-exact)
+- `mbaff_ibp` P: 43815 (still off — more bugs remain for the P path)
+- lib 262/262, `conformance_matrix` 15/15, `cabac_conformance`,
+  `b_frame_conformance`, `dbg_g6_mbaff_deblock` all green — no progressive
+  regression.
+
+REMAINING for CABAC MBAFF P/B: `mbaff_ip` P still 9842 (not 0) and `mbaff_ibp`
+P 43815 — a second, smaller desync/recon gap past the field-flag fix. Re-run
+the ffengine oracle extended past MB9 (into MB9's residual + MB10/11) to find
+the next divergence.
+
 ## SESSION #32ab (2026-08-29) — A4: `amvd_sum` mvd-context cell geometry verified correct
 
 Verified the `amvd_sum` MVD CABAC context cell geometry is correct for the
