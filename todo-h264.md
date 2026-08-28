@@ -334,6 +334,39 @@ setup plumbing is the real work. B1/B2 can start now in parallel with Track A.
       VALIDATED: lib 256/256, full suite green, `dbg_g6_mbaff_deblock`
       bit-exact vs ffmpeg.
 
+### G.5 BASELINE (2026-08-29) — `dbg_g5_interlaced` vs ffmpeg (-skip_loop_filter)
+
+| variant | frame | luma SAD vs ffmpeg | status |
+|---------|-------|--------------------|--------|
+| mbaff_i1 | I | 499 | known deblock-vs-skipLF artefact |
+| mbaff_ip | I | 381 | known deblock artefact |
+| mbaff_ip | **P** | **48660** | **BROKEN — CABAC MBAFF P** |
+| mbaff_ibp | I | 508 | known deblock artefact |
+| mbaff_ibp | **P** | **98725** | **BROKEN** |
+| mbaff_ibp | **B** | **189898** | **BROKEN** |
+| mbaff_cavlc_ip | I | 482 | known deblock artefact |
+| mbaff_cavlc_ip | P | 551 | known deblock artefact (near-exact) |
+| mbaff_cavlc_ip2 | I | 703 | skipLF harness numbers |
+| mbaff_cavlc_ip2 | P | 1154 | skipLF harness numbers |
+
+**CAVLC MBAFF P is bit-exact** (reconstruction/MV-prediction/deblock all proven
+correct via `dbg_g6_mbaff_deblock` `g6_cavlc_ip` sad=0). **CABAC MBAFF P/B is
+the sole open inter gate.** The bug is in the CABAC entropy decode path
+(`slice_data/cabac_p.rs`/`cabac_b.rs`): the full-decoder CABAC P-frame SAD is
+30204-48660 while CAVLC P is 0 on identical params.
+
+**First decode-order divergence** (crate CABAC direct-parse vs ffmpeg
+`-debug mb_type`, same cabac bitstream): ffmpeg's P-frame raster grid is
+`S S S S / S S S S / S S > S / >- > >- >` while the crate reads
+`(2,2)P16x8 (3,2)P8x16 / (0,3)P8x8 (1,3)P8x16 (2,3)PSkip (3,3)P8x8`. First
+mismatch at decode index 13 = g14 = MB(2,3): crate reads PSkip, ffmpeg reads
+coded ⇒ engine state desync'd during an earlier coded MB (g12=P8x8, g13=P8x16,
+or g10=P16x8). Likely a wrong CABAC ctxIdx in the MBAFF coded-MB path
+(sub_mb_type / amvd_sum / cbp context), consuming the wrong number of bins.
+→ **Build a compiled-ffmpeg per-bin oracle (vendored `h264_cabac_ref.c` + clang
+22 at repo root) to pinpoint the exact divergent bin.** This is the highest-
+leverage next action. G.5 stays gated until CABAC MBAFF P/B is bit-exact.
+
 ### Then (unchanged, gated on A + B)
 
 - [ ] **G.5** — PAFF + MBAFF corpus bit-exact validation.
