@@ -54,3 +54,6 @@ ff_*.c
 av1_capture.json
 # AV1 Phase G.0 full-tile symbol-trace capture (written by KINETIX_AV1_CAPTURE_TILE)
 av1_tile_trace.json
+
+# Claude Code agent worktree scratch space (not repo content)
+/.claude/
