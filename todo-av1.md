@@ -2771,6 +2771,24 @@
 > No `git commit` calls. `capabilities().pixel_exact` untouched (still
 > `false`).
 
+> **2026-08-29 session note — verified partition context is already correct.**
+> Investigated the partition-context feedback loop described in the 2026-08-28
+> session note. Replaced the 1D `mi_width_log2_above`/`mi_height_log2_left`
+> arrays with a proper 2D `MiSizes[r][c]` array (flat `mi_rows*mi_cols` Vec<u8>
+> of bsize indices) that tracks the exact block at each position. The PSNR
+> numbers are byte-identical to the pre-change baseline (`solid_red_32`/`_64`
+> 99.00 dB, `testsrc_128x96` 16.98/15.21/15.34 dB, `mandelbrot_128x96`
+> 22.59/17.51/20.59 dB, `smptebars_256x144` 9.36/14.01/10.38 dB,
+> `testsrc2_320x180` 12.96/10.38/9.97 dB), confirming the 1D approximation was
+> already correct for the current corpus — the feedback loop described in the
+> 2026-08-28 note was resolved by the palette-delta and `read_lr` fixes landed
+> in earlier sessions. The 2D array is kept because it is the spec-correct
+> representation and avoids a latent trap for any future non-raster-order code
+> path. 116 unit tests pass. `cargo build -p tpt-kinetix-av1 --all-targets`
+> clean. Modified: `tpt-kinetix-av1/src/reconstruct/mod.rs` (struct fields),
+> `tpt-kinetix-av1/src/reconstruct/partition.rs` (`record_mi_size_context`,
+> `partition_context`, doc comments). No `git commit` calls.
+
 > **2026-08-28 session note (cont'd) — root-caused the superblock-column-1
 > divergence to a partition-context feedback loop.** Added a new
 > `av1_interior_diff.rs` diagnostic tool (and `just av1-interior-diff`) that

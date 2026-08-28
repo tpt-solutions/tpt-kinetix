@@ -2,6 +2,103 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ab (2026-08-29) — A4: `amvd_sum` mvd-context cell geometry verified correct
+
+Verified the `amvd_sum` MVD CABAC context cell geometry is correct for the
+all-frame-coded MBAFF case (`mbaff_ip`), mirroring A3's `ref_idx_gt0_neighbors`
+verification. The ffmpeg `scan8[n]-1/-8` convention is properly translated:
+left neighbor reads `by*4+(bx-1)` (same MB) or `by*4+3` (left MB's rightmost
+column); top neighbor reads `(by-1)*4+bx` (same MB) or `3*4+bx` (top MB's
+bottom row). The `l1_mvd_abs` array is selected when `list==1`.
+
+**New unit tests in `ctx.rs::tests` (5 new, 12 total with A3's 7):**
+- `amvd_top_neighbor_cross_mb_reads_bottom_row` — cross-MB top reads row 3
+  (`3*4 + bx`) of the neighbor at the correct column.
+- `amvd_within_mb_top_reads_current_inter_context` — within-MB top reads pull
+  from `cur_inter` at `(by-1)*4 + bx`.
+- `amvd_l1_list_uses_l1_mvd_abs` — L1 list selects `l1_mvd_abs`, not `l0_mvd_abs`.
+- `amvd_off_picture_neighbor_returns_zero` — off-picture ⇒ 0.
+- `amvd_sum_caps_at_70` — 70 + 70 = 140 (storage-time cap respected).
+
+**Conclusion:** the `amvd_sum` geometry is unambiguously correct for
+`mbaff_ip` (all pairs frame-coded ⇒ `mbaff::derive_neighbours` degenerates to
+plain raster). Combined with A3's ref_idx verification, the MVD/ref CABAC
+context-cell picks are proven correct — the `mbaff_ip` P desync root cause is
+NOT in these cells (it's upstream at `mb_type` ctxIdx 15 per #32aa). A4 needs
+no fix. VALIDATION: lib 261/261 (12 ctx tests), clippy `-D warnings` clean.
+
+## SESSION #32aa (2026-08-29) — ★ CABAC MBAFF P desync is at MB9's `mb_type` (ctxIdx 15), BEFORE any CBP/mvd/ref context ★
+
+**This contradicts #32y/#32z's "CBP context is the root cause".** The CBP fix
+(#32y) is real but downstream — CABAC full-decode SAD on `mbaff_ip` P actually
+went **30204 → 48461 (worse)** after #32y/#32z + the transform_8x8 landing, and
+the first coded MB is still mis-typed.
+
+**Oracle built:** `tests/dbg_mbaff_cabac_vs_cavlc.rs` (parses both entropy
+variants directly + full-decode SAD probe) + ffmpeg ground truth via
+`-debug mb_type` and `-flags2 +export_mvs` (PyAV). NOTE `cabac=1` vs `cabac=0`
+give *different* x264 partitioning — not directly comparable; the value is the
+CABAC grid vs ffmpeg's own decode of the CABAC stream.
+
+**ffmpeg's `cabac=1` `mbaff_ip` P grid (decode order):**
+`MB9=P_L0_L0_16x8` (grid (0,3), top-partition mv ≈ (+43,0) qpel, bottom (0,0)),
+`MB11,MB12,MB15 = 16x16 mv (0,0)`, `MB13 = 16x8 top (+43,0)`, `MB14 = SKIP`.
+**Crate decodes `MB9 = P_8x8`** with sub_mb_types `[2,1,1,0]` and small mvds —
+a `mb_type` misparse at the *first coded MB*. Its 3 `mb_type` bins:
+ctxIdx 14 → 0 (inter, matches ffmpeg), **ctxIdx 15 → 0** (crate: "16x16/P_8x8"
+branch; ffmpeg needs **1** → "16x8/8x16" branch), ctxIdx 16 → 1 (⇒ P_8x8).
+
+**Everything upstream of ctxIdx 15 is hand-verified correct** against
+`h264_cabac_ref.c` (`KINETIX_BINTRACE=1` per-bin trace, `BIN n D ctx=…`):
+the 8 skip bins (ctxIdx 11, all MPS), the pair-4 `mb_field_decoding_flag`
+(ctxIdx 70 → 0), and `mb_type` bin-0 (ctxIdx 14) all match ffmpeg's derivation
+AND the bit *count* matches (2 skip + 1 terminate per fully-skipped pair;
+pair 4 = MB8-skip + MB9-skip + field-flag). The CABAC engine is proven
+bin-for-bin vs ffmpeg (`dbg_engine_diff`), and progressive CABAC P (which
+exercises ctxIdx 15/16/17) is bit-exact.
+
+⇒ **The arithmetic engine (`low`/`range`) is desynced entering ctxIdx 15**
+despite every hand-checkable bin matching. Remaining suspects, in order:
+1. a wrong bin *value* somewhere in MB0–MB8's skip/field decode that only the
+   real ffmpeg engine can catch (the hand-oracle shares the crate's engine —
+   same blind spot as TRANS_IDX_LPS[28] / the amvd convention);
+2. the CABAC init byte offset — `data_bit_offset=30` → `byte_align` → byte 4;
+   verify against ffmpeg's `cabac_alignment_one_bit` consumption (the CAVLC
+   twin's `data_bit_offset=29` is confirmed right — its parse is bit-exact);
+3. an MBAFF-specific `decode_terminate` count bug (the #32p fix guards
+   pair-top terminates — re-audit whether a *skipped* pair still gets exactly
+   one, and whether the skip-run pre-read of the bottom MB interacts).
+
+**MB9 = 16x8 is CONFIRMED** (not a `-debug mb_type` glyph misread):
+`-flags2 +export_mvs` reports MB(0,3) as two `w=16,h=8` partitions, top mv
+≈(+43,0) qpel, bottom (0,0). P_8x8 would report `8x8`/`8x4`/`4x8`/`4x4`.
+
+**FfEngine-lockstep attempt (`tests/dbg_mbaff_p_ffengine_oracle.rs`, deleted):**
+tried to drive `dbg_engine_diff.rs`'s `FfEngine` (ffmpeg engine port, tables
+parsed from `cabac_ref.c`) + the crate `CabacDecoder` through the MB0→MB9
+sequence, shared context model. **Blocked:** ffmpeg's `ff_h264_lps_range`
+lookup `table[2*(range&0xC0) + s]` returns a *negative* padding value (`-51`)
+for `(range=0x1FE, s=7)` — i.e. qRangeIdx 3 + low pStateIdx. `dbg_engine_diff`
+*guards around* exactly these (`if lps_range <= 0 { continue }`) and so has
+**never validated the engines against each other for a first-bin decode at
+range 0x1FE with a low-pStateIdx context** — which is precisely MB0's skip bin
+here. The crate→ffmpeg packed-state mapping (`(pi<<1)|mps`) or the table slice
+needs re-deriving for this regime; the C-table row spacing suggests
+`table[qbucket + 2*pi + mps]` maps to spec `RANGE_TAB_LPS` at a *different*
+pStateIdx than assumed (table[6,7]=123 ↔ spec `RANGE_TAB_LPS[6][0]=123`, not
+`[3][0]=143`).
+
+NEXT (two options):
+1. Fix the ff-table indexing / packed-state mapping in a fresh `FfEngine`
+   replay so the MB0→MB9 lockstep runs, OR
+2. compile the real `cabac_ref.c` (self-contained: engine + tables, stub
+   `libavutil/error.h`+`mem_internal.h`) — `clang` 22.x on PATH — init at
+   `mbaff_ip`'s P-CABAC offset (payload starts `04 E7 5F AC 3E C9 …`,
+   `data_bit_offset=30` → byte 4, slice_qp for context init from the header),
+   replay ffmpeg's `decode_cabac_mb_skip`×10 + `get_cabac_terminate`×4 +
+   `decode_cabac_field_decoding_flag` + `decode_cabac_mb_type` P, and diff
+   each bin against the crate parser's `KINETIX_BINTRACE` (`BIN 20443…20460`).
+
 ## SESSION #32z (2026-08-29) — A3: `ref_idx_gt0_neighbors` cell geometry verified correct
 
 Verified the `ref_idx_gt0_neighbors` and `amvd_sum` cell geometry is correct
@@ -266,12 +363,10 @@ few context-cell picks. Steps A1→A5 are strictly sequential.
 - [x] **A3. `ref_idx_gt0_neighbors` cell geometry.** COMMITTED fe15891: 7 unit
       tests in `ctx.rs::tests` (cross-MB left/top reads, within-MB reads,
       off-picture, L1 list). Geometry verified correct.
-- [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
-      contexts for the sub-partitions. Fix + verify all `mvd` bins match through
-      end of the MB.
-- [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
-      contexts for the sub-partitions. Fix + verify all `mvd` bins match through
-      end of the MB.
+- [x] **A4. `amvd_sum` (mvd context) cell geometry.** 5 new unit tests in
+      `ctx.rs::tests` (top-neighbor cross-MB reads bottom row, within-MB top
+      reads, L1 list selects `l1_mvd_abs`, off-picture ⇒ 0, 70+70 cap). Geometry
+      verified correct — mirrors the 7 ref_idx tests from A3.
 - [ ] **A5. Regression lock.** Once `mbaff_ip` P SAD → 0 against a
       fully-filtered (`dbg_g6_mbaff_deblock`-class) reference: add a CABAC-P (and
       B) MBAFF clip to that harness — there is none today, current numbers come

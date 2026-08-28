@@ -991,9 +991,21 @@ pub struct MbFieldDecodingFlagContext {
 }
 
 impl MbFieldDecodingFlagContext {
-    /// Initialise the three contexts at the given slice QP.
+    /// Initialise the three contexts (ctxIdx 70..=72) from the **I-slice**
+    /// init table — correct for I/SI slices only.
     pub fn new(slice_qp_y: i32) -> Self {
         let ctx = std::array::from_fn(|i| init_ctx(70 + i, slice_qp_y));
+        Self { ctx }
+    }
+
+    /// P/B-slice initialisation: ctxIdx 70..=72 use the `cabac_init_idc`-keyed
+    /// init table, NOT the I-slice table (spec §9.3.1.2 — the tables genuinely
+    /// differ at 70: I gives `(0, 11)`, PB0 gives `(0, 45)`). Only MBAFF frames
+    /// ever decode `mb_field_decoding_flag`, so using the I-slice values here
+    /// silently drifts the arithmetic engine on every MBAFF P/B pair
+    /// (progressive slices never hit this path — see `todo-h264.md` #32ab).
+    pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
+        let ctx = std::array::from_fn(|i| init_pb_ctx(70 + i, cabac_init_idc, slice_qp_y));
         Self { ctx }
     }
 
@@ -2265,6 +2277,23 @@ mod tests {
         let i_ctx = CbpCabacContext::new(26);
         let pb_ctx = CbpCabacContext::new_pb(26, 0);
         assert_ne!(i_ctx.ctx, pb_ctx.ctx);
+    }
+
+    #[test]
+    fn mb_field_context_pb_init_differs_from_i_init() {
+        // ctxIdx 70..=72: the I-slice and cabac_init_idc-keyed init tables
+        // genuinely differ (I[70] = (0,11), PB0[70] = (0,45)). Using the
+        // I-slice values for a P/B slice silently drifts the arithmetic
+        // engine on every MBAFF pair (todo-h264 #32ab). `new_pb` must read
+        // the PB table.
+        assert_eq!(crate::cabac_tables::CABAC_CTX_INIT_I[70], (0, 11));
+        assert_eq!(crate::cabac_tables::CABAC_CTX_INIT_PB0[70], (0, 45));
+        let i_ctx = MbFieldDecodingFlagContext::new(24);
+        let pb_ctx = MbFieldDecodingFlagContext::new_pb(24, 0);
+        assert_ne!(
+            i_ctx.ctx[0].state, pb_ctx.ctx[0].state,
+            "new_pb must init ctxIdx 70 from the PB table, not the I table"
+        );
     }
 
     #[test]

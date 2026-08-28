@@ -1,16 +1,28 @@
-//! MBAFF P-slice CABAC-vs-CAVLC decoded-motion oracle.
+//! MBAFF P-slice CABAC parse diagnostic + full-decode SAD probe.
 //!
-//! CAVLC MBAFF P is bit-exact vs ffmpeg (todo-h264 #32t / `dbg_g6_mbaff_deblock`
-//! `g6_cavlc_ip` frame#1 sad=0). This encodes the SAME source twice — once
-//! `cabac=1`, once `cabac=0` — with identical x264 settings, so x264 picks the
-//! same macroblock partitioning both times. Then it parses both P slices
-//! directly (`mb_aff = true`) and prints the per-MB `mb_type` / `cbp` / raw
-//! `mvd_l0` grid.
+//! Encodes a 64×64 MBAFF source `cabac=1` and `cabac=0`, then:
+//!  1. parses each P slice directly (`parse_p_slice[_cabac]`, `mb_aff = true`)
+//!     and prints the per-MB `mb_type` / `cbp` / `mvd_l0` grid + decode-order
+//!     skip/type list;
+//!  2. runs the SAME bytes through the full `H264Decoder` and reports the
+//!     P-frame luma SAD vs ffmpeg's reference decode.
 //!
-//! If the CABAC grid diverges from the CAVLC grid, the CABAC MBAFF inter-motion
-//! parse (`parse_p_macroblock_cabac`: `sub_mb_type` / `amvd_sum` / `ref_idx`
-//! contexts) is decoding the wrong VALUES — the open Track-A bug. If they
-//! match, the bug is elsewhere (MV predictor / reconstruction).
+//! NOTE: `cabac=1` and `cabac=0` produce DIFFERENT macroblock partitioning
+//! (x264's RD cost depends on the entropy coder) — the two grids are NOT
+//! directly comparable. The CAVLC full-decode SAD is 0 (bit-exact, proven
+//! oracle for the CAVLC stream); the CABAC full-decode SAD is large (the open
+//! Track-A bug). The direct-parse grids reproduce the decoder's parse exactly.
+//!
+//! Ground truth for the `cabac=1` stream (ffmpeg `-debug mb_type` +
+//! `-flags2 +export_mvs` via PyAV, decode order): first coded MB is MB9
+//! (grid (0,3)) = **P_L0_L0_16x8** with top-partition mv ≈ (+43,0) qpel;
+//! the crate mis-decodes it as **P_8x8** — the `mb_type` CABAC bin at ctxIdx 15
+//! is the first divergent bin. Every preceding bin (skip ctxIdx 11, field
+//! ctxIdx 70, mb_type bin-0 ctxIdx 14) hand-verified against
+//! `h264_cabac_ref.c` as matching ffmpeg; the CABAC engine is proven bit-exact
+//! (`dbg_engine_diff`). So the desync is a wrong bin VALUE in the MB0–MB8
+//! skip/field path (or the CABAC init offset), pinnable only with the real
+//! ffmpeg arithmetic engine.
 //!
 //! Run: cargo test -p tpt-kinetix-h264 --test dbg_mbaff_cabac_vs_cavlc -- --nocapture
 

@@ -731,7 +731,10 @@ impl PbCabacSliceContexts {
                 slice_qp_y,
                 cabac_init_idc,
             ),
-            mb_field: crate::entropy::MbFieldDecodingFlagContext::new(slice_qp_y),
+            mb_field: crate::entropy::MbFieldDecodingFlagContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
         }
     }
 
@@ -767,7 +770,10 @@ impl PbCabacSliceContexts {
                 slice_qp_y,
                 cabac_init_idc,
             ),
-            mb_field: crate::entropy::MbFieldDecodingFlagContext::new(slice_qp_y),
+            mb_field: crate::entropy::MbFieldDecodingFlagContext::new_pb(
+                slice_qp_y,
+                cabac_init_idc,
+            ),
         }
     }
 
@@ -960,6 +966,112 @@ mod tests {
             asum, 7,
             "within-MB left neighbor |mvd_x| at block 1 should be 7"
         );
+    }
+
+    #[test]
+    fn amvd_top_neighbor_cross_mb_reads_bottom_row() {
+        // Top neighbor: |mvd_x| = 6 at block 12 (bottom row, col 0).
+        let mut mvd = [[0u8; 2]; 16];
+        mvd[12][0] = 6;
+        let top_mb = ctx_with_l0_mvd(mvd);
+        let inter_grid = vec![top_mb];
+        let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+
+        // Partition at bx=0, by=0.
+        let asum = amvd_sum(&inter_grid, &cur, None, Some(0), 0, 0, 16, 16, 0, 0);
+        assert_eq!(asum, 6, "top neighbor |mvd_x| at block 12 should be 6");
+
+        // Partition at bx=2, by=0: top neighbor is block 14.
+        let mut mvd2 = [[0u8; 2]; 16];
+        mvd2[14][0] = 9;
+        let top_mb2 = ctx_with_l0_mvd(mvd2);
+        let inter_grid2 = vec![top_mb2];
+        let asum2 = amvd_sum(&inter_grid2, &cur, None, Some(0), 8, 0, 8, 8, 0, 0);
+        assert_eq!(asum2, 9, "top neighbor |mvd_x| at block 14 should be 9");
+    }
+
+    #[test]
+    fn amvd_within_mb_top_reads_current_inter_context() {
+        // Current MB: |mvd_x| = 4 at block 4 (row 1, col 0).
+        let mut mvd = [[0u8; 2]; 16];
+        mvd[4][0] = 4;
+        let cur = ctx_with_l0_mvd(mvd);
+        let inter_grid = vec![];
+
+        // Partition at bx=0, by=2: top neighbor is block 4 (within MB).
+        let asum = amvd_sum(&inter_grid, &cur, None, None, 0, 8, 8, 8, 0, 0);
+        assert_eq!(
+            asum, 4,
+            "within-MB top neighbor |mvd_x| at block 4 should be 4"
+        );
+
+        // Partition at bx=2, by=2: top neighbor is block 6.
+        let mut mvd2 = [[0u8; 2]; 16];
+        mvd2[6][0] = 11;
+        let cur2 = ctx_with_l0_mvd(mvd2);
+        let asum2 = amvd_sum(&inter_grid, &cur2, None, None, 8, 8, 8, 8, 0, 0);
+        assert_eq!(
+            asum2, 11,
+            "within-MB top neighbor |mvd_x| at block 6 should be 11"
+        );
+    }
+
+    #[test]
+    fn amvd_l1_list_uses_l1_mvd_abs() {
+        // Neighbor with l1_mvd_abs set, l0_mvd_abs zero.
+        let mb = MbInterCabacCtx {
+            present: true,
+            l0_mvd_abs: [[0u8; 2]; 16],
+            l1_mvd_abs: {
+                let mut m = [[0u8; 2]; 16];
+                m[3][0] = 8; // block 3, comp 0
+                m
+            },
+            ..Default::default()
+        };
+        let inter_grid = vec![mb];
+        let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+
+        // L1 list, left neighbor cross-MB: should read 8.
+        let asum = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 1, 0);
+        assert_eq!(asum, 8, "L1 left neighbor |mvd_x| at block 3 should be 8");
+
+        // L0 list should see 0 (l0_mvd_abs is zero).
+        let asum0 = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0, 0);
+        assert_eq!(asum0, 0, "L0 left neighbor should be 0 when only l1 set");
+    }
+
+    #[test]
+    fn amvd_off_picture_neighbor_returns_zero() {
+        let cur = ctx_with_l0_mvd({
+            let mut m = [[0u8; 2]; 16];
+            m[0][0] = 99;
+            m
+        });
+        let inter_grid = vec![];
+
+        // No left or top neighbor (off-picture): sum should be 0.
+        let asum = amvd_sum(&inter_grid, &cur, None, None, 0, 0, 16, 16, 0, 0);
+        assert_eq!(asum, 0, "off-picture neighbors should yield amvd_sum=0");
+    }
+
+    #[test]
+    fn amvd_sum_caps_at_70() {
+        // l0_mvd_abs values are already capped at 70 at storage time.
+        // Verify the cap is respected: 70 + 70 = 140.
+        let mut m = [[0u8; 2]; 16];
+        m[3][0] = 70; // left neighbor block 3
+        let left_mb = ctx_with_l0_mvd(m);
+
+        let mut m2 = [[0u8; 2]; 16];
+        m2[12][0] = 70; // top neighbor block 12
+        let top_mb = ctx_with_l0_mvd(m2);
+        // Put top_mb at index 1 in the grid
+        let inter_grid = vec![left_mb, top_mb];
+        let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+
+        let asum = amvd_sum(&inter_grid, &cur, Some(0), Some(1), 0, 0, 16, 16, 0, 0);
+        assert_eq!(asum, 140, "70 + 70 should be 140");
     }
 
     #[test]

@@ -128,7 +128,6 @@ impl H264Decoder {
             Ok(h) => h,
             Err(_) => return Ok(InterlacedOutcome::Fallback),
         };
-
         // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
         // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
         // pictures remain unsupported and fall back.
