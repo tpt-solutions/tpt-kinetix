@@ -119,12 +119,24 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
     let cqo = pps.chroma_qp_index_offset;
     let t8 = pps.transform_8x8_mode_flag;
     eprintln!(
-        "    [params] data_bit_offset={} first_mb={} slice_qp_delta={} cabac_init_idc={} disable_deblock_idc={:?}",
+        "    [params] data_bit_offset={} first_mb={} slice_qp_delta={} cabac_init_idc={} disable_deblock_idc={:?} field_pic_flag={} frame_num={}",
         header.data_bit_offset,
         header.first_mb_in_slice,
         header.slice_qp_delta,
         header.cabac_init_idc,
         header.disable_deblocking_filter_idc,
+        header.field_pic_flag,
+        header.frame_num,
+    );
+    eprintln!(
+        "    [dims] coded={}x{} → mb {}x{}  (passed {mb_cols}x{mb_rows})  frame_mbs_only={} map_units_minus1={} mbaff={}",
+        sps.coded_width_pixels(),
+        sps.coded_height_pixels(),
+        sps.coded_width_pixels() / 16,
+        sps.coded_height_pixels() / 16,
+        sps.frame_mbs_only_flag,
+        sps.pic_height_in_map_units_minus1,
+        sps.mb_adaptive_frame_field_flag,
     );
     eprintln!(
         "--- {label}: entropy={} cabac_init_idc={} slice_qp={slice_qp} mb_aff={} transform_8x8_mode={t8} num_ref_l0={num_ref} (pps_default={}) ---",
@@ -173,6 +185,26 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
         }
     };
 
+    // decode-order (pair-scan) skip/type list
+    let cols = mb_cols as usize;
+    let mut decode_order = String::new();
+    for d in 0..(mb_cols * mb_rows) as usize {
+        let pair = d >> 1;
+        let px = pair % cols;
+        let py = pair / cols;
+        let gi = (2 * py + (d & 1)) * cols + px;
+        let mb = &parsed.macroblocks[gi];
+        decode_order.push_str(&format!(
+            "MB{d}(g{gi}){} ",
+            if mb.skip {
+                "S".to_string()
+            } else {
+                format!("{:?}", mb.mb_type)
+            }
+        ));
+    }
+    eprintln!("    decode-order: {decode_order}");
+
     for mb_y in 0..mb_rows {
         for mb_x in 0..mb_cols {
             let mi = (mb_y * mb_cols + mb_x) as usize;
@@ -192,6 +224,78 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
     }
 }
 
+fn full_decode_grid(annexb: &[u8], label: &str) {
+    use tpt_kinetix_core::packet::Packet;
+    use tpt_kinetix_core::timestamp::Timestamp;
+    use tpt_kinetix_h264::H264Decoder;
+    // ffmpeg reference P frame.
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_mbaff_cvc");
+    let h = dir.join(format!("{}.h264", label.replace(' ', "_")));
+    std::fs::write(&h, annexb).unwrap();
+    let refy = dir.join(format!("{}.yuv", label.replace(' ', "_")));
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            refy.to_str().unwrap(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("  {label}: ffmpeg ref decode failed");
+        return;
+    }
+    let ff = std::fs::read(&refy).unwrap();
+    let fsz = 64 * 64 * 3 / 2;
+    let mut dec = H264Decoder::new();
+    let mut n = 0;
+    let mut ours: Vec<Vec<u8>> = Vec::new();
+    // split annexb into NALs
+    let mut starts = vec![];
+    for i in 0..annexb.len().saturating_sub(3) {
+        if annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 1 {
+            starts.push(i + 3);
+        }
+    }
+    for (k, &s) in starts.iter().enumerate() {
+        let e = starts.get(k + 1).copied().unwrap_or(annexb.len());
+        let mut data = vec![0u8, 0, 0, 1];
+        data.extend_from_slice(&annexb[s..e]);
+        let pkt = Packet {
+            pts: Timestamp::new(n, (1, 30)),
+            dts: Timestamp::new(n, (1, 30)),
+            data,
+            stream_index: 0,
+            is_key_frame: true,
+        };
+        if let Ok(Some(f)) = dec.decode(&pkt) {
+            ours.push(f.data);
+            n += 1;
+        }
+    }
+    if ours.len() >= 2 && ff.len() >= 2 * fsz {
+        let p = &ours[1][..64 * 64];
+        let fp = &ff[fsz..fsz + 64 * 64];
+        let sad: u64 = p
+            .iter()
+            .zip(fp)
+            .map(|(a, b)| (*a as i64 - *b as i64).unsigned_abs())
+            .sum();
+        eprintln!("  {label}: full-decoder P-frame luma SAD vs ffmpeg = {sad}");
+    } else {
+        eprintln!("  {label}: got {} frames (need 2)", ours.len());
+    }
+}
+
 #[test]
 fn mbaff_p_cabac_vs_cavlc_motion_grid() {
     if !ffmpeg_available() {
@@ -205,4 +309,6 @@ fn mbaff_p_cabac_vs_cavlc_motion_grid() {
     let (mb_cols, mb_rows) = (4u32, 4u32);
     parse_p_grid(&cabac, mb_cols, mb_rows, "CABAC-MBAFF-P");
     parse_p_grid(&cavlc, mb_cols, mb_rows, "CAVLC-MBAFF-P (bit-exact oracle)");
+    full_decode_grid(&cabac, "CABAC full-decode");
+    full_decode_grid(&cavlc, "CAVLC full-decode");
 }

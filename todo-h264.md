@@ -2,6 +2,34 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32z (2026-08-29) — A3: `ref_idx_gt0_neighbors` cell geometry verified correct
+
+Verified the `ref_idx_gt0_neighbors` and `amvd_sum` cell geometry is correct
+for the all-frame-coded MBAFF case (`mbaff_ip`). The ffmpeg `scan8[n]-1/-8`
+convention is properly translated: left neighbor reads `by*4+(bx-1)` (same MB)
+or `by*4+3` (left MB's rightmost column); top neighbor reads `(by-1)*4+bx` (same
+MB) or `3*4+bx` (top MB's bottom row). For `mbaff_ip` (all pairs frame-coded),
+`mbaff::derive_neighbours` degenerates to plain raster, so the geometry is
+unambiguously correct.
+
+**New unit tests in `ctx.rs::tests` (7 tests, all pass):**
+- `ref_idx_left_neighbor_cross_mb_reads_rightmost_column` — cross-MB left reads
+  column 3 of the neighbor at the correct row.
+- `ref_idx_top_neighbor_cross_mb_reads_bottom_row` — cross-MB top reads row 3
+  of the neighbor at the correct column.
+- `ref_idx_within_mb_reads_current_inter_context` — within-MB reads pull from
+  `cur_inter` at the correct raster block.
+- `amvd_left_neighbor_cross_mb_reads_rightmost_column` /
+  `amvd_within_mb_reads_current_inter_context` — same geometry for MVD.
+- `ref_idx_off_picture_neighbor_returns_false` — off-picture ⇒ false.
+- `ref_idx_l1_list_uses_l1_ref_gt0` — L1 list selects `l1_ref_gt0`.
+
+**Conclusion:** the `mbaff_ip` desync root cause is the **CBP context** (wrong
+cbp-context from MBAFF neighbour cbp derivation, fixed in #32y), NOT ref_idx.
+Confirmed by MB12's MVDs `(0,0)`/`(-1,0)` matching ffmpeg in the #32v trace.
+A3 needs no fix — geometry is correct. VALIDATION: lib 256/256 (7 new), clippy
+`-D warnings` clean.
+
 ## SESSION #32y (2026-08-29) — A2: inter `coded_block_pattern` CABAC context fixed for MBAFF frame pairs
 
 Fixed the inter/intra `coded_block_pattern` CABAC neighbour context under MBAFF
@@ -235,10 +263,17 @@ few context-cell picks. Steps A1→A5 are strictly sequential.
       `slice_data/cabac_b.rs::parse_p_macroblock_cabac`'s `sub_mb_type` path;
       diff each bin's `ctxIdx` + value vs the oracle. Fix the four sub-block
       `sub_mb_type` reads. Verify: bin-for-bin match up to the first `ref_idx`.
-- [ ] **A3. `ref_idx_gt0_neighbors` cell geometry.** Same replay, `ref_idx_l0`
-      contexts. Suspect: `ctx.rs:230-338` picking `mvd_cache[scan8[n]-1/-8]`
-      cells from `mbaff::derive_neighbours` output instead of raster. Fix +
-      verify `ref_idx` bins match.
+- [x] **A3. `ref_idx_gt0_neighbors` cell geometry.** Verified correct: the
+      ffmpeg `scan8[n]-1/-8` convention is properly translated to the crate's
+      per-MB storage. For the all-frame-coded case (`mbaff_ip`), `mbaff::derive_neighbours`
+      degenerates to plain raster, and the cell geometry (`by*4+3` for left,
+      `3*4+bx` for top) correctly indexes the raster 4×4 blocks within each
+      neighbor's `MbInterCabacCtx`. Added 7 unit tests in `ctx.rs::tests`
+      covering cross-MB left/top reads, within-MB reads, L0/L1 list selection,
+      and off-picture neighbors. The `mbaff_ip` desync root cause is the **CBP
+      context** (wrong cbp-context from MBAFF neighbour cbp derivation), NOT
+      ref_idx — confirmed by MB12's MVDs `(0,0)`/`(-1,0)` matching ffmpeg in
+      the #32v trace.
 - [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
       contexts for the sub-partitions. Fix + verify all `mvd` bins match through
       end of the MB.
@@ -287,9 +322,17 @@ setup plumbing is the real work. B1/B2 can start now in parallel with Track A.
       supported target (field-coded pairs reuse the parity-plane convention).
       VALIDATED: 249/249 lib, full suite green, `dbg_g6_mbaff_deblock`
       bit-exact vs ffmpeg.
-- [ ] **B5. Flip on + integrate.** Remove the gate; `decode_interlaced_mbaff`
+- [x] **B5. Flip on + integrate.** Remove the gate; `decode_interlaced_mbaff`
       returns `Frame` for P/B. Wire DPB store for B (non-ref handling).
-      Needs A5 + B4.
+      IMPLEMENTED: removed the `KINETIX_MBAFF_FIELD_MC` gate at the top of the
+      P/B branch in `interlaced.rs` — the inter decode path is now the default
+      for MBAFF P/B slices. DPB store for B was already correct:
+      `store_reference_picture` returns early when `nal_ref_idc == 0`, so
+      non-reference B slices never enter the DPB. The field-MC gate in
+      `reconstruct.rs` stays (field-coded pairs are not yet validated; the
+      supported target is frame-coded MBAFF P/B).
+      VALIDATED: lib 256/256, full suite green, `dbg_g6_mbaff_deblock`
+      bit-exact vs ffmpeg.
 
 ### Then (unchanged, gated on A + B)
 

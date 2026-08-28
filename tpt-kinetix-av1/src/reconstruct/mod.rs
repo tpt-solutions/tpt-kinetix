@@ -476,13 +476,16 @@ struct TileDecodeState<'a> {
     delta_q: DeltaQ,
     subsampling_x: bool,
     subsampling_y: bool,
-    /// `Mi_Width_Log2`/`Mi_Height_Log2` of the leaf block most recently
-    /// decoded at each column/row, used to derive the `partition` symbol's
-    /// context (AV1 spec §8.3.2: `MiSizes[r-1][c]`/`MiSizes[r][c-1]`
-    /// compared against the current node's `bsl`). Updated once per leaf in
-    /// [`Self::decode_block`], not per partition-tree node.
-    mi_width_log2_above: Vec<u8>,
-    mi_height_log2_left: Vec<u8>,
+    /// `MiSizes[r][c]` (AV1 spec §8.3.2): the size of the partition block
+    /// covering the 4×4 position at row r, column c. Stored as a flat
+    /// `mi_rows * mi_cols` array of `u8` bsize indices (not width/height
+    /// log2, so both axes are available for context derivation). This is a
+    /// true 2D array — unlike the old 1D `mi_width_log2_above` /
+    /// `mi_height_log2_left` approximation, it correctly tracks the exact
+    /// block at each position, which matters when blocks of different sizes
+    /// share a column or row (e.g. a 32×16 leaf next to a 32×32 node).
+    /// Updated once per leaf in [`Self::record_mi_size_context`].
+    mi_sizes: Vec<u8>,
     skip_above: Vec<u8>,
     skip_left: Vec<u8>,
     ymode_above: Vec<u8>,
@@ -707,8 +710,9 @@ impl<'a> TileDecodeState<'a> {
             delta_q,
             subsampling_x,
             subsampling_y,
-            mi_width_log2_above: vec![0u8; mi_cols],
-            mi_height_log2_left: vec![0u8; mi_rows],
+            // 2D `MiSizes[r][c]` array, row-major, initialized to 0
+            // (BLOCK_4X4 — the smallest possible block).
+            mi_sizes: vec![0u8; mi_rows * mi_cols],
             skip_above: vec![0u8; mi_cols],
             skip_left: vec![0u8; mi_rows],
             ymode_above: vec![DC_PRED; mi_cols],

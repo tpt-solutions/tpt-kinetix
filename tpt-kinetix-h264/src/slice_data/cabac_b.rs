@@ -355,6 +355,27 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             if std::env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!("  MB({mb_x},{mb_y}) inter cbp={cbp:#04x}(l={cbp_l:#x} c={cbp_c}) after_mvd={s_r:#06x}/{s_o:#010x} after_cbp={e_r:#06x}/{e_o:#010x}");
             }
+            // `transform_size_8x8_flag` (§7.3.5.1, §9.3.3.1.1.10, ctxIdxOffset
+            // 399): present AFTER `coded_block_pattern` and BEFORE `mb_qp_delta`
+            // when `transform_8x8_mode_flag && CodedBlockPatternLuma > 0`. Inter
+            // MBs are never Intra_16×16, so no extra guard. Omitting it desyncs
+            // every subsequent MB (the flag's absence silently consumes the
+            // first bit of mb_qp_delta / the next MB) — the CABAC twin of the
+            // CAVLC bug fixed in #32j.
+            let mut is_8x8 = false;
+            if transform_8x8_mode_flag && cbp_l != 0 {
+                let left_8x8 = left_idx
+                    .map(|i| cabac_ctx_grid[i].transform_8x8)
+                    .unwrap_or(false);
+                let top_8x8 = top_idx
+                    .map(|i| cabac_ctx_grid[i].transform_8x8)
+                    .unwrap_or(false);
+                is_8x8 = ctxs.transform_8x8.decode(dec, left_8x8, top_8x8);
+            }
+            mb.transform_size_8x8 = is_8x8;
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!("  MB({mb_x},{mb_y}) inter t8={is_8x8}");
+            }
             let mut qp = prev_qp;
             let mut dqp_nz = false;
             if cbp_l != 0 || cbp_c != 0 {
@@ -370,7 +391,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             mb.qp = qp;
 
             let (r_pre_res, o_pre_res) = dec.debug_state();
-            let this_cabac_ctx = decode_inter_residual_cabac(
+            let mut this_cabac_ctx = decode_inter_residual_cabac(
                 dec,
                 ctxs,
                 &mut mb,
@@ -382,8 +403,10 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 mb_cols,
                 cbp_l,
                 cbp_c,
+                is_8x8,
                 nctx,
             )?;
+            this_cabac_ctx.transform_8x8 = is_8x8;
             let (r_post_res, o_post_res) = dec.debug_state();
             if std::env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!("  MB({mb_x},{mb_y}) residual: before={r_pre_res:#06x}/{o_pre_res:#010x} after={r_post_res:#06x}/{o_post_res:#010x}");
@@ -1304,6 +1327,22 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         decode_inter_cbp_cabac(dec, ctxs, cabac_ctx_grid, mb_x, mb_y, mb_cols, nctx)?;
     let cbp = cbp_l | (cbp_c << 4);
     mb.cbp = cbp;
+    // `transform_size_8x8_flag` (§7.3.5.1, §9.3.3.1.1.10, ctxIdxOffset 399):
+    // present AFTER `coded_block_pattern` and BEFORE `mb_qp_delta` when
+    // `transform_8x8_mode_flag && CodedBlockPatternLuma > 0` — the CABAC twin
+    // of the CAVLC bug fixed in #32j. Same placement as the P-slice inter path
+    // above.
+    let mut is_8x8 = false;
+    if transform_8x8_mode_flag && cbp_l != 0 {
+        let left_8x8 = left_idx
+            .map(|i| cabac_ctx_grid[i].transform_8x8)
+            .unwrap_or(false);
+        let top_8x8 = top_idx
+            .map(|i| cabac_ctx_grid[i].transform_8x8)
+            .unwrap_or(false);
+        is_8x8 = ctxs.transform_8x8.decode(dec, left_8x8, top_8x8);
+    }
+    mb.transform_size_8x8 = is_8x8;
     let mut qp = prev_qp;
     let mut dqp_nz = false;
     if cbp_l != 0 || cbp_c != 0 {
@@ -1312,7 +1351,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         qp = (prev_qp + dqp + 52).rem_euclid(52);
     }
     mb.qp = qp;
-    let this_cabac_ctx = decode_inter_residual_cabac(
+    let mut this_cabac_ctx = decode_inter_residual_cabac(
         dec,
         ctxs,
         &mut mb,
@@ -1324,8 +1363,10 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         mb_cols,
         cbp_l,
         cbp_c,
+        is_8x8,
         nctx,
     )?;
+    this_cabac_ctx.transform_8x8 = is_8x8;
     let mb_type_str = format!("{:?}", mb.mb_type);
     tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
     Ok((
@@ -1632,46 +1673,73 @@ fn decode_inter_residual_cabac(
     mb_cols: u32,
     cbp_l: u8,
     cbp_c: u8,
+    is_8x8: bool,
     nctx: NeighbourCtx,
 ) -> R<MbCabacCtx> {
     use crate::cabac_tables::{CAT_CHROMA_AC, CAT_CHROMA_DC, CAT_LUMA_4X4};
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
     let mut cbp_word: u16 = mb.cbp as u16;
 
-    let blocks: Vec<usize> = {
-        let mut v = Vec::with_capacity(16);
-        for blk8 in 0..4 {
+    if is_8x8 {
+        // High-profile 8×8 transform on an INTER macroblock
+        // (`transform_size_8x8_flag` set): luma residual lives in four 8×8
+        // blocks (`luma_coeffs_8x8`), decoded via `decode_block_8x8` and
+        // stored in zigzag order for `dequant_idct_8x8_scan`. No separate
+        // `coded_block_flag` is signalled (non-4:4:4, §9.3.3.1.1.9) — the
+        // CBP luma bit alone gates presence, mirroring the intra 8×8 path.
+        for blk8 in 0..4usize {
             if (cbp_l >> blk8) & 1 == 0 {
                 continue;
             }
-            for sub in 0..4 {
-                v.push(raster_of_8x8_sub(blk8, sub));
+            let (coeffs_scan, count) = ctxs.residual.decode_block_8x8(dec, nctx.is_field());
+            // `decode_block_8x8` returns coefficients in scan-position order,
+            // but `dequant_idct_8x8_scan` expects zigzag order. Convert via
+            // `INVERSE_ZIGZAG_8X8` (scan_pos -> zigzag_pos).
+            let mut coeffs_zz = [0i16; 64];
+            for (scan_pos, &level) in coeffs_scan.iter().enumerate() {
+                coeffs_zz[crate::transform::INVERSE_ZIGZAG_8X8[scan_pos]] = level;
+            }
+            mb.luma_coeffs_8x8[blk8] = coeffs_zz;
+            for sub in 0..4usize {
+                this_nz.luma[raster_of_8x8_sub(blk8, sub)] = count;
             }
         }
-        v
-    };
-    for block in blocks {
-        let (left_coded, top_coded) =
-            luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false, nctx);
-        let (lr, lo) = dec.debug_state();
-        let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
-        let (ar, ao) = dec.debug_state();
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
-            eprintln!("    luma blk={block} left={left_coded} top={top_coded} cbf={has_coeff} {lr:#06x}/{lo:#010x}->{ar:#06x}/{ao:#010x}");
-        }
-        if has_coeff {
-            let (coeffs, count) =
-                ctxs.residual
-                    .decode_block(dec, CAT_LUMA_4X4, 16, nctx.is_field());
-            let (cr, co) = dec.debug_state();
+    } else {
+        let blocks: Vec<usize> = {
+            let mut v = Vec::with_capacity(16);
+            for blk8 in 0..4 {
+                if (cbp_l >> blk8) & 1 == 0 {
+                    continue;
+                }
+                for sub in 0..4 {
+                    v.push(raster_of_8x8_sub(blk8, sub));
+                }
+            }
+            v
+        };
+        for block in blocks {
+            let (left_coded, top_coded) =
+                luma_cbf_neighbors(nz_grid, mb_x, mb_y, mb_cols, this_nz, block, false, nctx);
+            let (lr, lo) = dec.debug_state();
+            let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
+            let (ar, ao) = dec.debug_state();
             if std::env::var("KINETIX_BINTRACE").is_ok() {
-                eprintln!(
-                    "    luma blk={block} nz={count} coeffs={:?} after={cr:#06x}/{co:#010x}",
-                    &coeffs[..16]
-                );
+                eprintln!("    luma blk={block} left={left_coded} top={top_coded} cbf={has_coeff} {lr:#06x}/{lo:#010x}->{ar:#06x}/{ao:#010x}");
             }
-            this_nz.luma[block] = count;
-            mb.luma_coeffs[block] = coeffs;
+            if has_coeff {
+                let (coeffs, count) =
+                    ctxs.residual
+                        .decode_block(dec, CAT_LUMA_4X4, 16, nctx.is_field());
+                let (cr, co) = dec.debug_state();
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!(
+                        "    luma blk={block} nz={count} coeffs={:?} after={cr:#06x}/{co:#010x}",
+                        &coeffs[..16]
+                    );
+                }
+                this_nz.luma[block] = count;
+                mb.luma_coeffs[block] = coeffs;
+            }
         }
     }
     if cbp_c != 0 {

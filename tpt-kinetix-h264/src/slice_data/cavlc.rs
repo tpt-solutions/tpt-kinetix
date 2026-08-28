@@ -667,6 +667,12 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
 
         if mb_skip_run == -1 {
             let run = reader.read_ue().ok_or(SliceDataError::Eof("mb_skip_run"))?;
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "CAVLC-P mb_idx={mb_idx} read mb_skip_run={run} (bit_pos={})",
+                    reader.bit_position()
+                );
+            }
             if run > total as u32 {
                 return Err(SliceDataError::Unsupported("mb_skip_run out of range"));
             }

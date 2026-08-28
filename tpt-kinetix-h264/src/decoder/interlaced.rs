@@ -307,12 +307,9 @@ impl H264Decoder {
         let mb_rows = coded_height / 16;
 
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
-            // P/B MBAFF slices are gated behind KINETIX_MBAFF_FIELD_MC (B3).
-            // When the gate is off the slice falls through to the strict /
-            // scaffold path, preserving byte-identical default behaviour.
-            if std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("1") {
-                return Ok(InterlacedOutcome::Fallback);
-            }
+            // P/B MBAFF slices (B5): the inter decode path is the default.
+            // Field-coded pairs reuse the parity-plane convention from the
+            // frame-coded path (the field-MC gate in reconstruct.rs stays).
 
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
             let pic_num_ctx = crate::ref_pic::PicNumContext::new(

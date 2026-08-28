@@ -390,18 +390,22 @@ impl<'a> TileDecodeState<'a> {
     /// `partition`'s CDF-selection context (AV1 spec §8.3.2):
     /// `ctx = left * 2 + above`, where `above`/`left` compare the current
     /// node's `bsl` (`Mi_Width_Log2[bSize]`, square nodes only) against the
-    /// most-recently-decoded leaf block's width/height log2 immediately
-    /// above/left (`MiSizes[r-1][c]`/`MiSizes[r][c-1]`), gated on that
-    /// neighbour existing (`AvailU`/`AvailL`).
+    /// partition block's width/height log2 immediately above/left
+    /// (`MiSizes[r-1][c]`/`MiSizes[r][c-1]`), gated on that neighbour
+    /// existing (`AvailU`/`AvailL`). Uses the true 2D `MiSizes` array so
+    /// blocks of different sizes sharing a column/row are tracked exactly.
     #[inline]
     pub(super) fn partition_context(&self, mi_row: usize, mi_col: usize, bsize: usize) -> usize {
         let bsl = mi_width_log2(bsize);
         let avail_u = mi_row > 0;
         let avail_l = mi_col > 0;
-        let above =
-            avail_u && (self.mi_width_log2_above[mi_col.min(self.mi_cols - 1)] as usize) < bsl;
-        let left =
-            avail_l && (self.mi_height_log2_left[mi_row.min(self.mi_rows - 1)] as usize) < bsl;
+        let stride = self.mi_cols;
+        let above = avail_u
+            && (mi_width_log2(self.mi_sizes[(mi_row - 1) * stride + mi_col] as usize) as usize)
+                < bsl;
+        let left = avail_l
+            && (mi_height_log2(self.mi_sizes[mi_row * stride + (mi_col - 1)] as usize) as usize)
+                < bsl;
         (left as usize) * 2 + (above as usize)
     }
 
@@ -413,25 +417,17 @@ impl<'a> TileDecodeState<'a> {
         0
     }
 
-    /// Record a just-decoded leaf block's size into the `MiSizes`-derived
-    /// above/left context arrays (see [`Self::partition_context`]), covering
-    /// its full mi extent. Called once per leaf from [`Self::decode_block`]
-    /// — *not* once per partition-tree node, since the context needs the
-    /// actual resulting leaf size, not the (possibly-larger) node size that
-    /// was about to be split.
+    /// Record a just-decoded leaf block's size into the 2D `MiSizes[r][c]`
+    /// array (AV1 spec §8.3.2), covering its full mi extent. Called once per
+    /// leaf from [`Self::decode_block`]. The bsize index (not width/height
+    /// log2) is stored so both axes are available for context derivation.
     pub(super) fn record_mi_size_context(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
-        let w_log2 = mi_width_log2(bsize) as u8;
-        let h_log2 = mi_height_log2(bsize) as u8;
-        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
-            if let Some(slot) = self.mi_width_log2_above.get_mut(c) {
-                *slot = w_log2;
-            }
-        }
+        let stride = self.mi_cols;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
-            if let Some(slot) = self.mi_height_log2_left.get_mut(r) {
-                *slot = h_log2;
+            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                self.mi_sizes[r * stride + c] = bsize as u8;
             }
         }
     }

@@ -852,3 +852,144 @@ pub(crate) fn cabac_decode_mvd_component(
     }
     Ok(ctx.decode(dec, asum))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx_with_l0_ref_gt0(bits: u16) -> MbInterCabacCtx {
+        MbInterCabacCtx {
+            present: true,
+            l0_ref_gt0: bits,
+            ..Default::default()
+        }
+    }
+
+    fn ctx_with_l0_mvd(mvd: [[u8; 2]; 16]) -> MbInterCabacCtx {
+        MbInterCabacCtx {
+            present: true,
+            l0_mvd_abs: mvd,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ref_idx_left_neighbor_cross_mb_reads_rightmost_column() {
+        // Left neighbor has ref_idx>0 only in its rightmost column (blocks 3, 7, 11, 15).
+        let left_mb = ctx_with_l0_ref_gt0(1 << 3 | 1 << 7 | 1 << 11 | 1 << 15);
+        let inter_grid = vec![left_mb];
+        let cur = ctx_with_l0_ref_gt0(0);
+
+        // Partition at bx=0, by=0 (P16x8 top, or P_8x8 top-left).
+        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        assert!(lg, "left neighbor block 3 should be gt0");
+
+        // Partition at bx=0, by=2 (P16x8 bottom, or P_8x8 bottom-left).
+        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 8, 8, 8, 0);
+        assert!(lg, "left neighbor block 11 should be gt0");
+
+        // Left neighbor with no ref_idx>0.
+        let left_mb_empty = ctx_with_l0_ref_gt0(0);
+        let inter_grid_empty = vec![left_mb_empty];
+        let (lg, _tg) =
+            ref_idx_gt0_neighbors(&inter_grid_empty, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        assert!(!lg, "left neighbor with no ref_gt0 should be false");
+    }
+
+    #[test]
+    fn ref_idx_top_neighbor_cross_mb_reads_bottom_row() {
+        // Top neighbor has ref_idx>0 only in its bottom row (blocks 12, 13, 14, 15).
+        let top_mb = ctx_with_l0_ref_gt0(1 << 12 | 1 << 13 | 1 << 14 | 1 << 15);
+        let inter_grid = vec![top_mb];
+        let cur = ctx_with_l0_ref_gt0(0);
+
+        // Partition at bx=0, by=0.
+        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, Some(0), 0, 0, 8, 8, 0);
+        assert!(tg, "top neighbor block 12 should be gt0");
+
+        // Partition at bx=2, by=0.
+        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, Some(0), 8, 0, 8, 8, 0);
+        assert!(tg, "top neighbor block 14 should be gt0");
+    }
+
+    #[test]
+    fn ref_idx_within_mb_reads_current_inter_context() {
+        // Current MB has ref_idx>0 at blocks 0,1,4,5 (top-left 8x8).
+        let cur = ctx_with_l0_ref_gt0(1 << 0 | 1 << 1 | 1 << 4 | 1 << 5);
+        let inter_grid = vec![];
+
+        // Partition at bx=2, by=0 (top-right 8x8): left neighbor is block 1 (within MB).
+        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 8, 0, 8, 8, 0);
+        assert!(lg, "within-MB left neighbor block 1 should be gt0");
+
+        // Partition at bx=0, by=2 (bottom-left 8x8): top neighbor is block 4 (within MB).
+        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 0, 8, 8, 8, 0);
+        assert!(tg, "within-MB top neighbor block 4 should be gt0");
+
+        // Partition at bx=2, by=2 (bottom-right 8x8): left=block 9, top=block 6.
+        let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 8, 8, 8, 8, 0);
+        assert!(!lg, "within-MB left neighbor block 9 should NOT be gt0");
+        assert!(!tg, "within-MB top neighbor block 6 should NOT be gt0");
+    }
+
+    #[test]
+    fn amvd_left_neighbor_cross_mb_reads_rightmost_column() {
+        // Left neighbor: |mvd_x| = 5 at block 3 (rightmost col, row 0).
+        let mut mvd = [[0u8; 2]; 16];
+        mvd[3][0] = 5;
+        let left_mb = ctx_with_l0_mvd(mvd);
+        let inter_grid = vec![left_mb];
+        let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+
+        // Partition at bx=0, by=0.
+        let asum = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 16, 16, 0, 0);
+        assert_eq!(asum, 5, "left neighbor |mvd_x| at block 3 should be 5");
+    }
+
+    #[test]
+    fn amvd_within_mb_reads_current_inter_context() {
+        // Current MB: |mvd_x| = 7 at block 1.
+        let mut mvd = [[0u8; 2]; 16];
+        mvd[1][0] = 7;
+        let cur = ctx_with_l0_mvd(mvd);
+        let inter_grid = vec![];
+
+        // Partition at bx=2, by=0: left neighbor is block 1.
+        let asum = amvd_sum(&inter_grid, &cur, None, None, 8, 0, 8, 8, 0, 0);
+        assert_eq!(
+            asum, 7,
+            "within-MB left neighbor |mvd_x| at block 1 should be 7"
+        );
+    }
+
+    #[test]
+    fn ref_idx_off_picture_neighbor_returns_false() {
+        let cur = ctx_with_l0_ref_gt0(0xFFFF);
+        let inter_grid = vec![];
+
+        // No left neighbor (off-picture).
+        let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 0, 0, 8, 8, 0);
+        assert!(!lg, "off-picture left neighbor should be false");
+        assert!(!tg, "off-picture top neighbor should be false");
+    }
+
+    #[test]
+    fn ref_idx_l1_list_uses_l1_ref_gt0() {
+        let mb = MbInterCabacCtx {
+            present: true,
+            l0_ref_gt0: 0,
+            l1_ref_gt0: 1 << 3,
+            ..Default::default()
+        };
+        let inter_grid = vec![mb];
+        let cur = ctx_with_l0_ref_gt0(0);
+
+        // L1 list, left neighbor cross-MB.
+        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 1);
+        assert!(lg, "L1 left neighbor block 3 should be gt0");
+
+        // L0 list should see no ref_gt0.
+        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        assert!(!lg, "L0 left neighbor should be false when only l1 set");
+    }
+}
