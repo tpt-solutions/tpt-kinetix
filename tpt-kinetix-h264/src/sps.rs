@@ -451,7 +451,7 @@ mod tests {
             frame_cropping_flag: true,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,
-            frame_crop_top_offset: 2, // 2*4 = 8 px
+            frame_crop_top_offset: 2,    // 2*4 = 8 px
             frame_crop_bottom_offset: 2, // 2*4 = 8 px
             scaling: ScalingLists::flat(),
         };

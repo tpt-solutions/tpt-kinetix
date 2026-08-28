@@ -35,7 +35,7 @@ use tpt_kinetix_bitstream::lossless_context_models;
 use tpt_kinetix_core::{capabilities::DecoderCapabilities, error::KinetixError};
 
 use crate::{
-    crc::checksum_plane,
+    crc::{checksum_plane, sha256},
     entropy::{decode_one_residual, encode_residual_stream, rice_k, BitWriter},
     headers::{FrameHeader, PlaneSpec, SequenceHeader},
     predict::predict,
@@ -208,17 +208,18 @@ impl LosslessEncoder {
         }
 
         let mut header = BitWriter::new();
+        let plane_payloads_concat: Vec<u8> = plane_payloads.iter().flatten().copied().collect();
+        let stream_sha256 = sha256(&plane_payloads_concat);
         FrameHeader {
             width: planes[0].width as u16,
             height: planes[0].height as u16,
             plane_checksums: crcs,
             plane_lengths: lengths,
+            stream_sha256,
         }
         .encode(&mut header);
         let mut out = header.finish();
-        for p in plane_payloads {
-            out.extend(p);
-        }
+        out.extend_from_slice(&plane_payloads_concat);
         Ok(out)
     }
 }
@@ -301,6 +302,14 @@ impl LosslessDecoder {
             hw.finish().len()
         };
         let body = &data[header_len..];
+        // Verify the stream-level SHA-256 checksum before decoding any plane.
+        let expected_sha = fh.stream_sha256;
+        let actual_sha = sha256(body);
+        if actual_sha != expected_sha {
+            return Err(KinetixError::Parse(
+                "lossless: stream checksum mismatch: payload was corrupted or truncated".into(),
+            ));
+        }
         let mut pos = 0usize;
         let mut planes = Vec::with_capacity(seq.plane_count());
         for (idx, (spec, crc)) in seq.planes.iter().zip(&fh.plane_checksums).enumerate() {
@@ -437,6 +446,19 @@ mod tests {
         bytes[last] ^= 0xFF;
         let mut dec = LosslessDecoder::new();
         assert!(dec.decode_frame(&seq, &bytes).is_err());
+    }
+
+    #[test]
+    fn truncated_payload_fails_stream_checksum() {
+        let seq = seq_for(&[16]);
+        let data: Vec<u16> = (0..16 * 16).map(|i| (i % 65536) as u16).collect();
+        let plane = Plane { width: 16, height: 16, bit_depth: 16, data };
+        let enc = LosslessEncoder::new();
+        let bytes = enc.encode_frame(&seq, &[plane]).unwrap();
+        // Truncate the payload: SHA-256 must catch the mismatch.
+        let truncated = &bytes[..bytes.len() - 5];
+        let mut dec = LosslessDecoder::new();
+        assert!(dec.decode_frame(&seq, truncated).is_err());
     }
 
     #[test]

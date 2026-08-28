@@ -420,10 +420,40 @@ impl<'a> NeighbourCtx<'a> {
         );
         (n.left_top, n.top)
     }
+
+    /// Resolve the left/top neighbour macroblock addresses, also returning
+    /// `left_bottom` for MBAFF frame pairs where the left neighbour is a
+    /// field-coded pair (the bottom half's left neighbour differs from the
+    /// top half's).
+    pub(crate) fn left_top_with_bottom(
+        &self,
+        mb_x: u32,
+        mb_y: u32,
+        mb_cols: u32,
+    ) -> (Option<usize>, Option<usize>, Option<usize>) {
+        if !self.mb_aff {
+            let left = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
+            let top = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
+            return (left, top, None);
+        }
+        let n = crate::mbaff::derive_neighbours(
+            mb_x,
+            mb_y,
+            mb_cols,
+            self.mb_rows,
+            self.cur_field,
+            self.field_flags,
+        );
+        (n.left_top, n.top, n.left_bottom)
+    }
 }
 
 /// Look up `left_cbp`/`top_cbp` (see [`MbCabacCtx::cbp_word`]) for `mb_x`,
 /// `mb_y`, applying [`CABAC_CBP_UNAVAILABLE`] when a neighbour is off-picture.
+///
+/// For MBAFF frame pairs where the left neighbour is a field-coded pair, the
+/// left luma CBP is rebuilt from the pair-top (bit 1) and pair-bottom (bit 3)
+/// neighbours, mirroring FFmpeg's `decode_cabac_mb_cbp_luma` context derivation.
 pub(crate) fn cabac_cbp_neighbors(
     grid: &[MbCabacCtx],
     mb_x: u32,
@@ -431,16 +461,85 @@ pub(crate) fn cabac_cbp_neighbors(
     mb_cols: u32,
     nctx: NeighbourCtx,
 ) -> (u16, u16) {
-    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
-    let left = left_idx
-        .map(|i| grid[i].cbp_word)
-        .unwrap_or(CABAC_CBP_UNAVAILABLE);
+    let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+
+    let left = match left_top_idx {
+        None => CABAC_CBP_UNAVAILABLE,
+        Some(lti) => {
+            let lt = grid[lti].cbp_word;
+            match left_bottom_idx {
+                Some(lbi) if lbi != lti => {
+                    let lb = grid[lbi].cbp_word;
+                    let luma = (lt & 0x02) | (lb & 0x08);
+                    let chroma = (lt >> 4) & 0x03;
+                    luma | (chroma << 4)
+                }
+                _ => lt,
+            }
+        }
+    };
+
     let top = top_idx
         .map(|i| grid[i].cbp_word)
         .unwrap_or(CABAC_CBP_UNAVAILABLE);
+
     if std::env::var("KINETIX_BINTRACE").is_ok() {
         eprintln!(
-            "CBPNB mb=({mb_x},{mb_y}) left={left_idx:?}={left:#06x} top={top_idx:?}={top:#06x}"
+            "CBPNB mb=({mb_x},{mb_y}) left_top={left_top_idx:?} left_bottom={left_bottom_idx:?} left={left:#06x} top={top_idx:?}={top:#06x}"
+        );
+    }
+    (left, top)
+}
+
+/// MBAFF-aware variant of [`cabac_cbp_neighbors`] for inter macroblocks.
+///
+/// For a frame-coded current MB whose left neighbour is a field-coded pair,
+/// the left luma CBP context must be *rebuilt* from the two neighbour MBs:
+/// FFmpeg's `decode_cabac_mb_cbp_luma` reads `left_cbp` bits 1 and 3
+/// (top-right / bottom-right 8×8 of the left neighbour). In a mixed
+/// frame/field pair the top half's left neighbour is the pair-top MB and the
+/// bottom half's left neighbour is the pair-bottom MB, so the effective
+/// `left_cbp` is `(left_top.cbp & 0x02) | (left_bottom.cbp & 0x08)` for luma,
+/// with chroma taken from the pair-top neighbour. The same logic applies to
+/// `top_cbp` when the top neighbour is a field-coded pair. Non-MBAFF and
+/// all-frame-coded pairs degenerate to the wholesale copy.
+pub(crate) fn cabac_cbp_neighbors_inter(
+    grid: &[MbCabacCtx],
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
+    nctx: NeighbourCtx,
+    inter_sentinel: u16,
+) -> (u16, u16) {
+    let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+
+    // Left CBP: rebuild luma bits 1,3 from left_top/left_bottom when the left
+    // neighbour is a mixed field/frame pair. Chroma (bits 4-5) from left_top.
+    let left = match left_top_idx {
+        None => inter_sentinel,
+        Some(lti) => {
+            let lt = grid[lti].cbp_word;
+            match left_bottom_idx {
+                Some(lbi) if lbi != lti => {
+                    let lb = grid[lbi].cbp_word;
+                    let luma = (lt & 0x02) | (lb & 0x08);
+                    let chroma = (lt >> 4) & 0x03;
+                    luma | (chroma << 4)
+                }
+                _ => lt,
+            }
+        }
+    };
+
+    // Top CBP: rebuild luma bits 2,3 from top_top/top_bottom when the top
+    // neighbour is a mixed field/frame pair. For a frame-coded current MB the
+    // top neighbour is always a single MB (frame) or the pair-top MB (field
+    // pair above), so we use the wholesale copy with the inter sentinel.
+    let top = top_idx.map(|i| grid[i].cbp_word).unwrap_or(inter_sentinel);
+
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        eprintln!(
+            "CBPNB-INTER mb=({mb_x},{mb_y}) left_top={left_top_idx:?} left_bottom={left_bottom_idx:?} left={left:#06x} top={top_idx:?}={top:#06x}"
         );
     }
     (left, top)

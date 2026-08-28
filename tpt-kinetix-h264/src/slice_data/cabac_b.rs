@@ -1463,7 +1463,7 @@ fn parse_intra_mb_cabac_pb<T: crate::trace::DecodeTracer>(
         (cbp_luma_mbtype, cbp_chroma_mbtype)
     } else {
         let (left_cbp, top_cbp) =
-            cabac_cbp_neighbors(cabac_ctx_grid, mb_x, mb_y, mb_cols, NeighbourCtx::NONE);
+            crate::slice_data::ctx::cabac_cbp_neighbors(cabac_ctx_grid, mb_x, mb_y, mb_cols, nctx);
         let (l, c) = ctxs.cbp.decode(dec, left_cbp, top_cbp);
         mb.cbp = l | (c << 4);
         (l, c)
@@ -1610,17 +1610,11 @@ fn decode_inter_cbp_cabac(
     nctx: NeighbourCtx,
 ) -> R<(u8, u8)> {
     // For inter MBs, off-picture neighbours use 0x00F (not 0x7CF) per FFmpeg.
-    let (li, ti) = nctx.left_top(mb_x, mb_y, mb_cols);
-    let left = if let Some(i) = li {
-        cabac_ctx_grid[i].cbp_word
-    } else {
-        0x00F
-    };
-    let top = if let Some(i) = ti {
-        cabac_ctx_grid[i].cbp_word
-    } else {
-        0x00F
-    };
+    // Under MBAFF frame pairs the left CBP is rebuilt from left_top/left_bottom
+    // (see `cabac_cbp_neighbors_inter`); the wholesale copy is only correct for
+    // non-MBAFF or all-frame-coded pairs.
+    let (left, top) =
+        super::ctx::cabac_cbp_neighbors_inter(cabac_ctx_grid, mb_x, mb_y, mb_cols, nctx, 0x00F);
     Ok(ctxs.cbp.decode(dec, left, top))
 }
 

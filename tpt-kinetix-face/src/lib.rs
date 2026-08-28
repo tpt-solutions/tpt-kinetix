@@ -71,6 +71,9 @@ pub struct FaceParams {
     pub illumination: Vec<f32>,
     /// Appearance / albedo weights (slowly varying).
     pub appearance: Vec<f32>,
+    /// Sparse landmark companion (DECISION 1): (x, y) screen-space coordinates
+    /// for each tracked landmark. Empty when `landmark_companion` is unset.
+    pub landmarks: Vec<(i16, i16)>,
 }
 
 impl FaceParams {
@@ -86,6 +89,11 @@ impl FaceParams {
     /// Whether the parameter vector is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Number of landmark points.
+    pub fn landmark_count(&self) -> usize {
+        self.landmarks.len()
     }
 }
 
@@ -377,6 +385,7 @@ mod tests {
             pose: vec![0.0, 0.3, 0.0, 0.0, 0.0, 0.0],
             illumination: vec![0.0, 0.0, 1.0, 0.4, 0.4, 0.4, 0.7, 0.7, 0.7],
             appearance: vec![],
+            ..Default::default()
         }
     }
 
@@ -411,6 +420,7 @@ mod tests {
             pose: vec![0.0; 6],
             illumination: vec![0.0; 27],
             appearance: vec![0.0; 40],
+            ..Default::default()
         };
         assert_eq!(p.len(), 203);
         assert!(!p.is_empty());

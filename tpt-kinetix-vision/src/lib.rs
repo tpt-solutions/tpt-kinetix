@@ -15,10 +15,11 @@
 //!
 //! # Status
 //!
-//! This crate is a **scaffold**. The decoder reports `pixel_exact: false` and
-//! returns `NotPixelExact` in strict mode until the reconstruction pipeline is
-//! implemented. See the `VisionDecoder::capabilities()` docs for what is and
-//! isn't supported.
+//! The dual-path decode is **implemented**: tensor (fast path, dequantized +
+//! downsampled, no deblocking) and pixel (full reconstruction with intra
+//! prediction, integer transform, deblocking). Vision is an **original** codec
+//! with no external reference oracle, so `pixel_exact: false` accordingly —
+//! see the `VisionDecoder::capabilities()` docs for the honesty contract.
 //!
 //! # References
 //!
@@ -28,6 +29,16 @@
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
 };
+
+pub mod deblock;
+pub mod headers;
+pub mod prediction;
+pub mod quant;
+pub mod reconstruct;
+pub mod transform;
+
+pub use headers::{FrameHeader, FrameType, SequenceHeader};
+pub use reconstruct::{decode_frame_payload, decode_tensor, encode_frame, FrameBuffer};
 
 /// A feature/embedding tensor produced by the vision decoder's fast path.
 ///
@@ -50,29 +61,15 @@ pub struct Tensor {
 
 impl Tensor {
     /// Number of channels.
-    pub fn c(&self) -> usize {
-        self.shape[0]
-    }
-
+    pub fn c(&self) -> usize { self.shape[0] }
     /// Spatial height.
-    pub fn h(&self) -> usize {
-        self.shape[1]
-    }
-
+    pub fn h(&self) -> usize { self.shape[1] }
     /// Spatial width.
-    pub fn width(&self) -> usize {
-        self.shape[2]
-    }
-
+    pub fn width(&self) -> usize { self.shape[2] }
     /// Total number of elements (`C * H * W`).
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
+    pub fn len(&self) -> usize { self.data.len() }
     /// Whether the tensor is empty.
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
 }
 
 /// Dual-path decode interface for the vision codec.
@@ -88,96 +85,81 @@ impl Tensor {
 pub trait VisionDecoder {
     /// Decode to a feature tensor (the fast path — no pixel reconstruction).
     fn decode_tensor(&mut self, packet: &Packet) -> Result<Option<Tensor>, KinetixError>;
-
     /// Decode to full pixels (the slow path — for human review).
     fn decode_pixels(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError>;
 }
 
 /// Stateful vision-format decoder.
-///
-/// Feed compressed [`Packet`]s via [`VisionDecoder::decode_tensor`] or
-/// [`VisionDecoder::decode_pixels`] and receive decoded [`Tensor`] or
-/// [`VideoFrame`]s respectively.
-///
-/// # Honesty contract
-///
-/// This decoder is **not yet pixel-exact**. In non-strict mode it returns
-/// `Ok(None)` (no output) for every packet. In strict mode it returns
-/// [`KinetixError::NotPixelExact`]. Callers should check
-/// [`DecoderCapabilities::pixel_exact`] before trusting output.
 pub struct VisionDecoderImpl {
     strict: bool,
+    sequence: Option<SequenceHeader>,
+    dpb: Vec<FrameBuffer>,
 }
 
 impl VisionDecoderImpl {
     /// Create a new decoder in non-strict mode.
-    pub fn new() -> Self {
-        Self { strict: false }
-    }
+    pub fn new() -> Self { Self { strict: false, sequence: None, dpb: Vec::new() } }
 
     /// Enable strict mode.
-    ///
-    /// In strict mode, [`VisionDecoderImpl::decode_tensor`] and
-    /// [`VisionDecoderImpl::decode_pixels`] return
-    /// [`KinetixError::NotPixelExact`] instead of placeholder/empty output.
-    pub fn with_strict(mut self, strict: bool) -> Self {
-        self.strict = strict;
-        self
-    }
+    pub fn with_strict(mut self, strict: bool) -> Self { self.strict = strict; self }
+
+    /// Parse the sequence header a stream begins with.
+    pub fn set_sequence_header(&mut self, sequence: SequenceHeader) { self.sequence = Some(sequence); }
 
     /// Report what this decoder can and cannot do.
-    ///
-    /// The vision decoder is **not yet pixel-exact**: no reconstruction is
-    /// implemented. Callers should check [`DecoderCapabilities::pixel_exact`]
-    /// before trusting output.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use tpt_kinetix_vision::VisionDecoderImpl;
-    ///
-    /// let caps = VisionDecoderImpl::new().capabilities();
-    /// assert!(!caps.pixel_exact);
-    /// assert!(caps.is_incomplete());
-    /// ```
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
-            codec: "vision",
-            pixel_exact: false,
-            supports_cabac: false,
-            supports_cavlc: false,
-            supports_intra_prediction: false,
-            supports_inter_prediction: false,
-            supports_deblocking: false,
-            notes: "scaffold generated from codec-crate template; \
-                    tensor and pixel reconstruction not yet implemented",
+            codec: "vision", pixel_exact: false, supports_cabac: false, supports_cavlc: false,
+            supports_intra_prediction: true, supports_inter_prediction: true, supports_deblocking: true,
+            notes: "dual-path decode (tensor fast-path + pixel slow-path); original codec, no reference oracle",
         }
     }
 }
 
 impl Default for VisionDecoderImpl {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl VisionDecoder for VisionDecoderImpl {
-    fn decode_tensor(&mut self, _packet: &Packet) -> Result<Option<Tensor>, KinetixError> {
+    fn decode_tensor(&mut self, packet: &Packet) -> Result<Option<Tensor>, KinetixError> {
+        let sequence = self.sequence.as_ref().ok_or_else(|| {
+            KinetixError::Parse("vision: decode_tensor() called before a sequence header was set".into())
+        })?;
         if self.strict {
-            return Err(KinetixError::NotPixelExact(
-                "vision: tensor reconstruction not implemented yet; see capabilities()".to_string(),
-            ));
+            return Err(KinetixError::NotPixelExact("vision: original codec; pixel_exact is false".to_string()));
         }
-        Ok(None)
+        let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
+        let frame_header = FrameHeader::parse(&mut reader, sequence)?;
+        let header_bytes = frame_header.to_bytes();
+        if packet.data.len() < header_bytes.len() {
+            return Err(KinetixError::Parse("vision: packet too short for frame header".into()));
+        }
+        let payload = &packet.data[header_bytes.len()..];
+        Ok(Some(decode_tensor(sequence, &frame_header, payload)?))
     }
 
-    fn decode_pixels(&mut self, _packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
+    fn decode_pixels(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
+        let sequence = self.sequence.as_ref().ok_or_else(|| {
+            KinetixError::Parse("vision: decode_pixels() called before a sequence header was set".into())
+        })?;
         if self.strict {
-            return Err(KinetixError::NotPixelExact(
-                "vision: pixel reconstruction not implemented yet; see capabilities()".to_string(),
-            ));
+            return Err(KinetixError::NotPixelExact("vision: original codec; pixel_exact is false".to_string()));
         }
-        Ok(None)
+        let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
+        let frame_header = FrameHeader::parse(&mut reader, sequence)?;
+        let header_bytes = frame_header.to_bytes();
+        if packet.data.len() < header_bytes.len() {
+            return Err(KinetixError::Parse("vision: packet too short for frame header".into()));
+        }
+        let payload = &packet.data[header_bytes.len()..];
+        let reference = self.dpb.last();
+        let fb = decode_frame_payload(sequence, &frame_header, reference, payload)?;
+        let is_key = frame_header.frame_type == FrameType::Key;
+        let video_frame = fb.to_video_frame(is_key);
+        self.dpb.push(fb);
+        let max_ref = sequence.max_ref_frames as usize;
+        while self.dpb.len() > max_ref { self.dpb.remove(0); }
+        Ok(Some(video_frame))
     }
 }
 
@@ -186,38 +168,58 @@ mod tests {
     use super::*;
     use tpt_kinetix_core::timestamp::Timestamp;
 
+    fn sample_sequence() -> SequenceHeader {
+        SequenceHeader {
+            version: 1, max_width: 1920, max_height: 1080, chroma_present: false,
+            bit_depth: 8, qp_precision: 0, max_ref_frames: 2, num_rans_streams: 1,
+            min_block_size_log2: 3, max_block_size_log2: 3, quant_matrix_id: 0,
+        }
+    }
+
+    fn make_packet(frame: &FrameHeader, payload: &[u8]) -> Packet {
+        let header_bytes = frame.to_bytes();
+        let mut data = Vec::with_capacity(header_bytes.len() + payload.len());
+        data.extend_from_slice(&header_bytes);
+        data.extend_from_slice(payload);
+        Packet { pts: Timestamp::NONE, dts: Timestamp::NONE, data, stream_index: 0, is_key_frame: true }
+    }
+
     #[test]
     fn scaffold_reports_not_pixel_exact() {
         assert!(!VisionDecoderImpl::new().capabilities().pixel_exact);
     }
 
     #[test]
-    fn strict_mode_tensor_errors_until_implemented() {
-        let mut dec = VisionDecoderImpl::new().with_strict(true);
-        assert!(matches!(
-            dec.decode_tensor(&Packet {
-                pts: Timestamp::NONE,
-                dts: Timestamp::NONE,
-                data: vec![],
-                stream_index: 0,
-                is_key_frame: true,
-            }),
-            Err(KinetixError::NotPixelExact(_))
-        ));
+    fn decode_before_sequence_header_errors() {
+        let mut dec = VisionDecoderImpl::new();
+        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let packet = make_packet(&frame, &[]);
+        assert!(dec.decode_pixels(&packet).is_err());
     }
 
     #[test]
-    fn strict_mode_pixels_errors_until_implemented() {
+    fn strict_mode_errors_with_not_pixel_exact() {
         let mut dec = VisionDecoderImpl::new().with_strict(true);
-        assert!(matches!(
-            dec.decode_pixels(&Packet {
-                pts: Timestamp::NONE,
-                dts: Timestamp::NONE,
-                data: vec![],
-                stream_index: 0,
-                is_key_frame: true,
-            }),
-            Err(KinetixError::NotPixelExact(_))
-        ));
+        dec.set_sequence_header(sample_sequence());
+        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let packet = make_packet(&frame, &[]);
+        assert!(matches!(dec.decode_pixels(&packet), Err(KinetixError::NotPixelExact(_))));
+        assert!(matches!(dec.decode_tensor(&packet), Err(KinetixError::NotPixelExact(_))));
+    }
+
+    #[test]
+    fn keyframe_round_trips_through_decoder() {
+        let seq = sample_sequence();
+        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let mut luma = vec![0u8; 16 * 16];
+        for y in 0..16 { for x in 0..16 { luma[y * 16 + x] = ((x + y) * 8) as u8; } }
+        let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let payload = encode_frame(&seq, &frame, &src, None).unwrap();
+        let packet = make_packet(&frame, &payload);
+        let mut dec = VisionDecoderImpl::new();
+        dec.set_sequence_header(seq);
+        let decoded = dec.decode_pixels(&packet).unwrap().unwrap();
+        assert_eq!(decoded.width, 16);
+        assert_eq!(decoded.height, 16);
     }
 }

@@ -1473,6 +1473,486 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
     }
 }
 
+/// MBAFF-aware B-slice frame reconstruction (§8.4.2).
+///
+/// Twin of [`reconstruct_inter_frame_ex`] for B slices: dispatches each
+/// macroblock between the frame-coded path (plain [`reconstruct_b_inter_luma`]/
+/// [`reconstruct_b_inter_chroma`]) and the field-coded path ([`reconstruct_mbaff_b_inter_luma`]/
+/// [`reconstruct_mbaff_b_inter_chroma`]) based on the macroblock's
+/// `mb_field_decoding_flag`, behind the `KINETIX_MBAFF_FIELD_MC` gate.
+///
+/// For the all-frame-coded case (`mbaff_ip`/`mbaff_ibp`) every macroblock has
+/// `mb_field_flag == false`, so this collapses to the progressive B path into
+/// contiguous halves.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_frames_l0: &[VideoFrame],
+    ref_frames_l1: &[VideoFrame],
+    mb_cols: u32,
+    mb_rows: u32,
+    width: u32,
+    height: u32,
+    mb_aff: bool,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) -> ReconstructedFrame {
+    let luma_stride = width as usize;
+    let chroma_stride = (width / 2) as usize;
+    let mut luma = vec![0u8; luma_stride * height as usize];
+    let mut cb = vec![0u8; chroma_stride * (height as usize / 2)];
+    let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
+
+    let gate = std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1");
+
+    let mut field_planes_l0: Vec<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = Vec::new();
+    let mut field_planes_l1: Vec<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = Vec::new();
+    if mb_aff {
+        for rf in ref_frames_l0 {
+            let top = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            let bottom = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            field_planes_l0.push(vec![top, bottom]);
+        }
+        for rf in ref_frames_l1 {
+            let top = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            let bottom = crate::ref_pic::FieldRef {
+                frame: rf.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: 0,
+            }
+            .planes();
+            field_planes_l1.push(vec![top, bottom]);
+        }
+    }
+
+    for mb_y in 0..mb_rows {
+        for mb_x in 0..mb_cols {
+            let idx = (mb_y * mb_cols + mb_x) as usize;
+            let mb = &macroblocks[idx];
+            let is_inter = mb.motion.is_some()
+                || mb.skip
+                || matches!(
+                    mb.mb_type,
+                    MbType::BSkip
+                        | MbType::BDirect16x16
+                        | MbType::BL016x16
+                        | MbType::BL116x16
+                        | MbType::BBi16x16
+                        | MbType::B16x8
+                        | MbType::B8x16
+                        | MbType::BB8x8
+                );
+            if is_inter {
+                if mb_aff && mb.mb_field_flag && gate {
+                    reconstruct_mbaff_b_inter_luma(
+                        mb,
+                        mv_store,
+                        &field_planes_l0,
+                        &field_planes_l1,
+                        &mut luma,
+                        luma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                    reconstruct_mbaff_b_inter_chroma(
+                        mb,
+                        mv_store,
+                        &field_planes_l0,
+                        &field_planes_l1,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                } else {
+                    reconstruct_b_inter_luma(
+                        mb,
+                        mv_store,
+                        ref_frames_l0,
+                        ref_frames_l1,
+                        &mut luma,
+                        luma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                    reconstruct_b_inter_chroma(
+                        mb,
+                        mv_store,
+                        ref_frames_l0,
+                        ref_frames_l1,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_cols,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                }
+            } else {
+                if mb_aff && mb.mb_field_flag && gate {
+                    let parity = (mb_y & 1) as usize;
+                    reconstruct_luma_at(
+                        mb,
+                        &mut luma,
+                        luma_stride,
+                        mb_x,
+                        mb_y,
+                        ((mb_y >> 1) * 32) as usize + parity,
+                        2,
+                        &crate::transform::FIELD_SCAN_4X4,
+                        &crate::transform::FIELD_SCAN_8X8,
+                        scaling,
+                        tracer,
+                    );
+                    reconstruct_chroma_at(
+                        mb,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_x,
+                        mb_y,
+                        ((mb_y >> 1) * 16) as usize + parity,
+                        2,
+                        &crate::transform::FIELD_SCAN_4X4,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                } else {
+                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                    reconstruct_chroma(
+                        mb,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_x,
+                        mb_y,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                }
+            }
+        }
+    }
+
+    ReconstructedFrame {
+        luma,
+        chroma_cb: cb,
+        chroma_cr: cr,
+        luma_stride,
+        chroma_stride,
+    }
+}
+
+/// MBAFF field-macroblock luma B inter reconstruction (§8.4.2.2.1).
+///
+/// Field-coordinate motion compensation for both L0 and L1 against the
+/// half-height parity planes, bi-predictive averaging, stride-2 write-back.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_mbaff_b_inter_luma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    field_planes_l0: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    field_planes_l1: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    let base_fy = ((mb_y >> 1) * 16) as usize;
+    let bottom = (mb_y & 1) == 1;
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (block, &cell) in grid.iter().enumerate() {
+        let bx = (block % 4) * 4;
+        let by = (block / 4) * 4;
+        let x0 = base_x + bx;
+        let fy0 = base_fy + by;
+
+        let l0_active = cell.ref_idx >= 0;
+        let l1_active = cell.ref_idx_l1 >= 0;
+        let ref_idx0 = cell.ref_idx.max(0) as usize;
+        let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+        let mut pred_l0 = [0u8; 16];
+        if l0_active {
+            if let Some(ref_entry) = field_planes_l0
+                .get(ref_idx0)
+                .or_else(|| field_planes_l0.last())
+            {
+                let (luma_ref, _, _) = &ref_entry[bottom as usize];
+                let h = luma_ref.len() / stride.max(1);
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l0,
+                    4,
+                    luma_ref,
+                    stride,
+                    stride,
+                    h,
+                    x0 as i32,
+                    fy0 as i32,
+                    cell.mv[0],
+                    cell.mv[1],
+                    4,
+                    4,
+                );
+            }
+        }
+        let mut pred_l1 = [0u8; 16];
+        if l1_active {
+            if let Some(ref_entry) = field_planes_l1
+                .get(ref_idx1)
+                .or_else(|| field_planes_l1.last())
+            {
+                let (luma_ref, _, _) = &ref_entry[bottom as usize];
+                let h = luma_ref.len() / stride.max(1);
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l1,
+                    4,
+                    luma_ref,
+                    stride,
+                    stride,
+                    h,
+                    x0 as i32,
+                    fy0 as i32,
+                    cell.mv_l1[0],
+                    cell.mv_l1[1],
+                    4,
+                    4,
+                );
+            }
+        }
+
+        let pred = combine_weighted(
+            weighted, l0_active, l1_active, ref_idx0, ref_idx1, &pred_l0, &pred_l1, None,
+        );
+
+        tracer.on_motion_comp(
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx0,
+        );
+
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        for row in 0..4 {
+            let py = 2 * (fy0 + row) + bottom as usize;
+            for col in 0..4 {
+                let px = x0 + col;
+                let off = py * stride + px;
+                let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                if off < plane.len() && px < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+    }
+}
+
+/// MBAFF field-macroblock chroma B inter reconstruction (§8.4.2.2.1).
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_mbaff_b_inter_chroma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    field_planes_l0: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    field_planes_l1: &[Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>],
+    cb_plane: &mut [u8],
+    cr_plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 8) as usize;
+    let base_fy = ((mb_y >> 1) * 8) as usize;
+    let bottom = (mb_y & 1) == 1;
+    let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (comp, plane) in [cb_plane as &mut [u8], cr_plane].into_iter().enumerate() {
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
+        let dc_raster = [
+            dc_src[0] as i32,
+            dc_src[1] as i32,
+            dc_src[2] as i32,
+            dc_src[3] as i32,
+        ];
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+
+        for block in 0..4usize {
+            let bx = (block % 2) * 4;
+            let by = (block / 2) * 4;
+            let x0 = base_x + bx;
+            let fy0 = base_fy + by;
+            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+
+            let l0_active = cell.ref_idx >= 0;
+            let l1_active = cell.ref_idx_l1 >= 0;
+            let ref_idx0 = cell.ref_idx.max(0) as usize;
+            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+            let mut pred_l0 = [0u8; 16];
+            if l0_active {
+                if let Some(ref_entry) = field_planes_l0
+                    .get(ref_idx0)
+                    .or_else(|| field_planes_l0.last())
+                {
+                    let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
+                    let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                    let h = plane_ref.len() / stride.max(1);
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l0,
+                        4,
+                        plane_ref,
+                        stride,
+                        stride,
+                        h,
+                        x0 as i32,
+                        fy0 as i32,
+                        cell.mv[0],
+                        cell.mv[1],
+                        4,
+                        4,
+                    );
+                }
+            }
+            let mut pred_l1 = [0u8; 16];
+            if l1_active {
+                if let Some(ref_entry) = field_planes_l1
+                    .get(ref_idx1)
+                    .or_else(|| field_planes_l1.last())
+                {
+                    let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
+                    let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                    let h = plane_ref.len() / stride.max(1);
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l1,
+                        4,
+                        plane_ref,
+                        stride,
+                        stride,
+                        h,
+                        x0 as i32,
+                        fy0 as i32,
+                        cell.mv_l1[0],
+                        cell.mv_l1[1],
+                        4,
+                        4,
+                    );
+                }
+            }
+
+            let pred = combine_weighted(
+                weighted,
+                l0_active,
+                l1_active,
+                ref_idx0,
+                ref_idx1,
+                &pred_l0,
+                &pred_l1,
+                Some(comp),
+            );
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                trace_plane,
+                block as u8,
+                &pred,
+                cell.mv,
+                ref_idx0,
+            );
+
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            for row in 0..4 {
+                let py = 2 * (fy0 + row) + bottom as usize;
+                for col in 0..4 {
+                    let px = x0 + col;
+                    let off = py * stride + px;
+                    let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Reconstruct a PAFF *field* P-slice into a half-height `ReconstructedFrame`
 /// (§8.4.2 / §8.4.2.2.1).
 ///
@@ -1582,6 +2062,385 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
         chroma_cr: cr,
         luma_stride,
         chroma_stride,
+    }
+}
+
+/// Field-coordinate **B-field** reconstruction: bi-predictive motion compensation
+/// from two field reference lists (§8.4.2.2, §8.2.4.2.5).
+///
+/// Each 4×4 block is L0-only, L1-only, or bi-predicted per its committed
+/// `MvCell` (`ref_idx` / `ref_idx_l1`); intra macroblocks inside the B-field fall
+/// back to the intra path. Reference planes are the contiguous half-height field
+/// buffers produced by [`FieldRef::planes`], sampled at field parity.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_fields_l0: &[FieldRef],
+    ref_fields_l1: &[FieldRef],
+    mb_cols: u32,
+    mb_rows_field: u32,
+    width: u32,
+    field_height: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) -> ReconstructedFrame {
+    let luma_stride = width as usize;
+    let chroma_stride = (width / 2) as usize;
+    let luma_h = field_height as usize;
+    let chroma_h = (field_height / 2) as usize;
+    let mut luma = vec![0u8; luma_stride * luma_h];
+    let mut cb = vec![0u8; chroma_stride * chroma_h];
+    let mut cr = vec![0u8; chroma_stride * chroma_h];
+
+    // Pre-extract contiguous half-height field planes for every reference in
+    // both lists once, so per-block motion compensation samples them directly.
+    let extracts_l0: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+        ref_fields_l0.iter().map(|f| f.planes()).collect();
+    let extracts_l1: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+        ref_fields_l1.iter().map(|f| f.planes()).collect();
+    let mut ref_luma_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
+    let mut ref_cb_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
+    let mut ref_cr_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
+    let mut ref_luma_l1: Vec<&[u8]> = Vec::with_capacity(ref_fields_l1.len());
+    let mut ref_cb_l1: Vec<&[u8]> = Vec::with_capacity(ref_fields_l1.len());
+    let mut ref_cr_l1: Vec<&[u8]> = Vec::with_capacity(ref_fields_l1.len());
+    for (l, c1, c2) in &extracts_l0 {
+        ref_luma_l0.push(l);
+        ref_cb_l0.push(c1);
+        ref_cr_l0.push(c2);
+    }
+    for (l, c1, c2) in &extracts_l1 {
+        ref_luma_l1.push(l);
+        ref_cb_l1.push(c1);
+        ref_cr_l1.push(c2);
+    }
+
+    for mb_y in 0..mb_rows_field {
+        for mb_x in 0..mb_cols {
+            let idx = (mb_y * mb_cols + mb_x) as usize;
+            let mb = &macroblocks[idx];
+            let is_b_inter = mb.motion.is_some()
+                || mb.skip
+                || matches!(
+                    mb.mb_type,
+                    MbType::BSkip
+                        | MbType::BDirect16x16
+                        | MbType::BL016x16
+                        | MbType::BL116x16
+                        | MbType::BBi16x16
+                        | MbType::B16x8
+                        | MbType::B8x16
+                        | MbType::BB8x8
+                );
+            if is_b_inter {
+                reconstruct_field_b_inter_luma(
+                    mb,
+                    mv_store,
+                    &ref_luma_l0,
+                    &ref_luma_l1,
+                    &mut luma,
+                    luma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+                reconstruct_field_b_inter_chroma(
+                    mb,
+                    mv_store,
+                    &ref_cb_l0,
+                    &ref_cr_l0,
+                    &ref_cb_l1,
+                    &ref_cr_l1,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_cols,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+            } else {
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                reconstruct_chroma(
+                    mb,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                    chroma_qp_index_offset,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+            }
+        }
+    }
+
+    ReconstructedFrame {
+        luma,
+        chroma_cb: cb,
+        chroma_cr: cr,
+        luma_stride,
+        chroma_stride,
+    }
+}
+
+/// Field-coordinate luma bi-pred reconstruction for one field B-macroblock.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_luma_l0: &[&[u8]],
+    ref_luma_l1: &[&[u8]],
+    plane: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 16) as usize;
+    let base_y = (mb_y * 16) as usize;
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (block, &cell) in grid.iter().enumerate() {
+        let bx = (block % 4) * 4;
+        let by = (block / 4) * 4;
+        let x0 = (base_x + bx) as i32;
+        let y0 = (base_y + by) as i32;
+
+        let l0_active = cell.ref_idx >= 0;
+        let l1_active = cell.ref_idx_l1 >= 0;
+        let ref_idx0 = cell.ref_idx.max(0) as usize;
+        let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+        let mut pred_l0 = [0u8; 16];
+        if l0_active {
+            if let Some(plane_ref) = ref_luma_l0.get(ref_idx0).or_else(|| ref_luma_l0.last()) {
+                let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l0,
+                    4,
+                    plane_ref,
+                    plane_w,
+                    plane_w,
+                    luma_h_of(plane_ref, stride),
+                    x0,
+                    y0,
+                    cell.mv[0],
+                    cell.mv[1],
+                    4,
+                    4,
+                );
+            }
+        }
+        let mut pred_l1 = [0u8; 16];
+        if l1_active {
+            if let Some(plane_ref) = ref_luma_l1.get(ref_idx1).or_else(|| ref_luma_l1.last()) {
+                let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
+                crate::motion_comp::interpolate_luma(
+                    &mut pred_l1,
+                    4,
+                    plane_ref,
+                    plane_w,
+                    plane_w,
+                    luma_h_of(plane_ref, stride),
+                    x0,
+                    y0,
+                    cell.mv_l1[0],
+                    cell.mv_l1[1],
+                    4,
+                    4,
+                );
+            }
+        }
+
+        let pred = combine_weighted(
+            weighted, l0_active, l1_active, ref_idx0, ref_idx1, &pred_l0, &pred_l1, None,
+        );
+
+        tracer.on_motion_comp(
+            mb_x,
+            mb_y,
+            TracePlane::Luma,
+            block as u8,
+            &pred,
+            cell.mv,
+            ref_idx0,
+        );
+
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        for row in 0..4 {
+            for col in 0..4 {
+                let px = x0 as usize + col;
+                let py = y0 as usize + row;
+                let off = py * stride + px;
+                let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                if off < plane.len() && px < stride {
+                    plane[off] = v;
+                }
+            }
+        }
+    }
+}
+
+/// Field-coordinate chroma bi-pred reconstruction for one field B-macroblock.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
+    mb: &Macroblock,
+    mv_store: &crate::mv::MvStore,
+    ref_cb_l0: &[&[u8]],
+    ref_cr_l0: &[&[u8]],
+    ref_cb_l1: &[&[u8]],
+    ref_cr_l1: &[&[u8]],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    stride: usize,
+    mb_cols: u32,
+    mb_x: u32,
+    mb_y: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    let base_x = (mb_x * 8) as usize;
+    let base_y = (mb_y * 8) as usize;
+    let qpc = chroma_qp(mb.qp, chroma_qp_index_offset);
+    let idx = (mb_y * mb_cols + mb_x) as usize;
+    let grid = mv_store
+        .cells_of(idx)
+        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    for (comp, plane) in [cb as &mut [u8], cr].into_iter().enumerate() {
+        let dc_src = if comp == 0 {
+            &mb.chroma_dc_cb
+        } else {
+            &mb.chroma_dc_cr
+        };
+        let ac = if comp == 0 {
+            &mb.chroma_cb_coeffs
+        } else {
+            &mb.chroma_cr_coeffs
+        };
+        let trace_plane = if comp == 0 {
+            TracePlane::Cb
+        } else {
+            TracePlane::Cr
+        };
+        let ref_plane_l0 = if comp == 0 { ref_cb_l0 } else { ref_cr_l0 };
+        let ref_plane_l1 = if comp == 0 { ref_cb_l1 } else { ref_cr_l1 };
+        let dc_raster = [
+            dc_src[0] as i32,
+            dc_src[1] as i32,
+            dc_src[2] as i32,
+            dc_src[3] as i32,
+        ];
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+
+        for block in 0..4usize {
+            let bx = (block % 2) * 4;
+            let by = (block / 2) * 4;
+            let x0 = (base_x + bx) as i32;
+            let y0 = (base_y + by) as i32;
+            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+
+            let l0_active = cell.ref_idx >= 0;
+            let l1_active = cell.ref_idx_l1 >= 0;
+            let ref_idx0 = cell.ref_idx.max(0) as usize;
+            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+            let mut pred_l0 = [0u8; 16];
+            if l0_active {
+                if let Some(plane_ref) = ref_plane_l0.get(ref_idx0).or_else(|| ref_plane_l0.last())
+                {
+                    let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l0,
+                        4,
+                        plane_ref,
+                        plane_w,
+                        plane_w,
+                        chroma_h_of(plane_ref, stride),
+                        x0,
+                        y0,
+                        cell.mv[0],
+                        cell.mv[1],
+                        4,
+                        4,
+                    );
+                }
+            }
+            let mut pred_l1 = [0u8; 16];
+            if l1_active {
+                if let Some(plane_ref) = ref_plane_l1.get(ref_idx1).or_else(|| ref_plane_l1.last())
+                {
+                    let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
+                    crate::motion_comp::interpolate_chroma(
+                        &mut pred_l1,
+                        4,
+                        plane_ref,
+                        plane_w,
+                        plane_w,
+                        chroma_h_of(plane_ref, stride),
+                        x0,
+                        y0,
+                        cell.mv_l1[0],
+                        cell.mv_l1[1],
+                        4,
+                        4,
+                    );
+                }
+            }
+
+            let pred = combine_weighted(
+                weighted,
+                l0_active,
+                l1_active,
+                ref_idx0,
+                ref_idx1,
+                &pred_l0,
+                &pred_l1,
+                Some(comp),
+            );
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                trace_plane,
+                block as u8,
+                &pred,
+                cell.mv,
+                ref_idx0,
+            );
+
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            for row in 0..4 {
+                for col in 0..4 {
+                    let px = x0 as usize + col;
+                    let py = y0 as usize + row;
+                    let off = py * stride + px;
+                    let v = (pred[row * 4 + col] as i32 + res[row * 4 + col]).clamp(0, 255) as u8;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2970,11 +3829,7 @@ mod tests {
         // Luma: row y, column x should equal x.
         for y in 0..vh {
             for x in 0..vw {
-                assert_eq!(
-                    cropped[y * vw + x],
-                    x as u8,
-                    "luma ({x},{y}) mismatch"
-                );
+                assert_eq!(cropped[y * vw + x], x as u8, "luma ({x},{y}) mismatch");
             }
         }
         // Cb: row y, any x should equal y.

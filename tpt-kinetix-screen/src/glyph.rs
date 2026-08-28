@@ -83,9 +83,11 @@ mod tests {
     fn match_exact_glyph() {
         let mut dict = GlyphDictionary::new(4);
         // 4x4 glyph: left half fg, right half bg
+        // Byte 0 covers rows 0-1, byte 1 covers rows 2-3
+        // Each row: bits 7,6 = fg=1; bits 5,4 = bg=0
         let mut mask = vec![0u8; 2]; // 4x4 = 16 bits = 2 bytes
-        mask[0] = 0b1111_0000;
-        mask[1] = 0b1111_0000;
+        mask[0] = 0b1100_1100;
+        mask[1] = 0b1100_1100;
         dict.insert(0, GlyphEntry::new(4, 4, mask)).unwrap();
 
         let fg = PaletteColor::new(255, 0, 0);

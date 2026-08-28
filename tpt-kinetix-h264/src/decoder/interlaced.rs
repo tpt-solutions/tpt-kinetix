@@ -180,6 +180,23 @@ impl H264Decoder {
             );
         }
 
+        if matches!(header.slice_type, SliceType::B) {
+            return self.decode_interlaced_b_field(
+                nal,
+                sps,
+                &header,
+                entropy_coding_mode_flag,
+                pps,
+                mb_cols,
+                mb_rows_field,
+                field_height,
+                width,
+                chroma_qp_index_offset,
+                tracer,
+                packet,
+            );
+        }
+
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
             // Inter (B) field pictures: not yet handled (G.2). Fall back so they
             // are treated as unsupported slices by the caller.
@@ -256,10 +273,11 @@ impl H264Decoder {
     /// directly as `InterlacedOutcome::Frame` (no field interleaving accumulator is
     /// needed).
     ///
-    /// P/B MBAFF slices are not yet supported in this phase and return
-    /// `InterlacedOutcome::Fallback` so the caller applies the strict / scaffold
-    /// path; per [`crate::H264Decoder::capabilities`] interlaced decode is not yet
-    /// pixel-exact.
+    /// P/B MBAFF slices are parsed to completion (MBAFF pair-scan addressing fixed
+    /// in #32q, ref-list construction in B1) but reconstruction is deferred to B3,
+    /// so they return `InterlacedOutcome::Fallback` and the caller applies the
+    /// strict / scaffold path; per [`crate::H264Decoder::capabilities`] interlaced
+    /// decode is not yet pixel-exact.
     #[allow(clippy::too_many_arguments)]
     fn decode_interlaced_mbaff<T: DecodeTracer>(
         &mut self,
@@ -279,18 +297,303 @@ impl H264Decoder {
         if header.first_mb_in_slice != 0 {
             return Ok(InterlacedOutcome::Fallback);
         }
-        if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
-            // P/B MBAFF slices: not yet supported in this phase.
-            return Ok(InterlacedOutcome::Fallback);
-        }
 
-        let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+        // Common setup for both P/B and I paths: slice QP and coded dimensions.
         let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
         let slice_qp = pic_init_qp + header.slice_qp_delta;
         let coded_width = sps.coded_width_pixels();
         let coded_height = sps.coded_height_pixels();
         let mb_cols = coded_width / 16;
         let mb_rows = coded_height / 16;
+
+        if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+            // P/B MBAFF slices are gated behind KINETIX_MBAFF_FIELD_MC (B3).
+            // When the gate is off the slice falls through to the strict /
+            // scaffold path, preserving byte-identical default behaviour.
+            if std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("1") {
+                return Ok(InterlacedOutcome::Fallback);
+            }
+
+            let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+            let pic_num_ctx = crate::ref_pic::PicNumContext::new(
+                sps,
+                header.frame_num,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+            );
+
+            // B1: build the frame reference lists (§8.2.4). MBAFF frames are
+            // field_pic_flag=0 → ordinary frame ref lists, the same builders
+            // decoder/mod.rs uses for progressive P/B — NOT the PAFF
+            // build_field_ref_list_l0 path.
+            let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let current_poc = {
+                let mut scratch = self.poc_state.clone();
+                crate::ref_pic::derive_pic_order_cnt(
+                    sps,
+                    is_idr,
+                    nal.nal_ref_idc != 0,
+                    header.frame_num,
+                    header.pic_order_cnt_lsb,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    header.delta_pic_order_cnt_bottom,
+                    &mut scratch,
+                )
+                .unwrap_or(0)
+            };
+
+            let ref_list_l0 = if header.slice_type == SliceType::P {
+                let list = crate::ref_pic::build_ref_list_l0(
+                    &self.dpb,
+                    num_ref_idx_l0_active as usize,
+                    pic_num_ctx,
+                    &header.ref_pic_list_modification_l0,
+                );
+                if let Some(ref_list) = &list {
+                    crate::ref_pic::trace_ref_list("MBAFF P L0", ref_list, pic_num_ctx);
+                }
+                list
+            } else {
+                let list = crate::ref_pic::build_ref_list_l0_b_slice(
+                    &self.dpb,
+                    num_ref_idx_l0_active as usize,
+                    current_poc,
+                    pic_num_ctx,
+                    &header.ref_pic_list_modification_l0,
+                );
+                if let Some(ref_list) = &list {
+                    crate::ref_pic::trace_ref_list("MBAFF B L0", ref_list, pic_num_ctx);
+                }
+                list
+            };
+            let ref_list_l1 = if header.slice_type == SliceType::B {
+                let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
+                let list = crate::ref_pic::build_ref_list_l1(
+                    &self.dpb,
+                    num_ref_idx_l1_active as usize,
+                    current_poc,
+                    pic_num_ctx,
+                    &header.ref_pic_list_modification_l1,
+                );
+                if let Some(ref_list) = &list {
+                    crate::ref_pic::trace_ref_list("MBAFF B L1", ref_list, pic_num_ctx);
+                }
+                list
+            } else {
+                None
+            };
+
+            let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l0
+                .as_ref()
+                .map(|l| l.iter().map(|e| e.frame.clone()).collect())
+                .unwrap_or_default();
+            let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l1
+                .as_ref()
+                .map(|l| l.iter().map(|e| e.frame.clone()).collect())
+                .unwrap_or_default();
+
+            // Co-located MV grid for direct-mode B prediction: reference 0 of
+            // list 1 (§8.4.1.2.2/8.4.1.2.3).
+            let colocated_mv: Option<Vec<[crate::mv::MvCell; 16]>> = ref_list_l1
+                .as_ref()
+                .and_then(|l| l.first())
+                .and_then(|e| e.mv_grid.clone())
+                .map(|g| (*g).clone());
+
+            // B2: parse the P/B slice to completion. MBAFF pair-scan
+            // addressing is fixed (#32q).
+            let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+            reader.seek_to_bit(header.data_bit_offset);
+            let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+            let parsed = match header.slice_type {
+                SliceType::P | SliceType::Sp => {
+                    if entropy_coding_mode_flag {
+                        reader.byte_align();
+                        crate::slice_data::parse_p_slice_cabac(
+                            reader.remaining_bytes(),
+                            mb_cols,
+                            mb_rows,
+                            slice_qp,
+                            sps.mb_adaptive_frame_field_flag,
+                            header.field_pic_flag,
+                            header.cabac_init_idc as usize,
+                            num_ref_idx_l0_active,
+                            chroma_qp_index_offset,
+                            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                            tracer,
+                        )
+                    } else {
+                        crate::slice_data::parse_p_slice(
+                            &mut reader,
+                            mb_cols,
+                            mb_rows,
+                            slice_qp,
+                            num_ref_idx_l0_active,
+                            chroma_qp_index_offset,
+                            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                            sps.mb_adaptive_frame_field_flag,
+                            header.field_pic_flag,
+                            tracer,
+                        )
+                    }
+                }
+                SliceType::B => {
+                    let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
+                    if entropy_coding_mode_flag {
+                        reader.byte_align();
+                        crate::slice_data::parse_b_slice_cabac(
+                            reader.remaining_bytes(),
+                            mb_cols,
+                            mb_rows,
+                            slice_qp,
+                            sps.mb_adaptive_frame_field_flag,
+                            header.field_pic_flag,
+                            header.cabac_init_idc as usize,
+                            num_ref_idx_l0_active,
+                            num_ref_idx_l1_active,
+                            chroma_qp_index_offset,
+                            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                            colocated_mv.as_deref(),
+                            tracer,
+                        )
+                    } else {
+                        crate::slice_data::parse_b_slice(
+                            &mut reader,
+                            mb_cols,
+                            mb_rows,
+                            slice_qp,
+                            num_ref_idx_l0_active,
+                            num_ref_idx_l1_active,
+                            chroma_qp_index_offset,
+                            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                            colocated_mv.as_deref(),
+                            tracer,
+                        )
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let parsed = match parsed {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("interlaced P/B slice parse failed: {e}");
+                    return Ok(InterlacedOutcome::Fallback);
+                }
+            };
+
+            // B3: MC + reconstruction. For the all-frame-coded case
+            // (mbaff_ip/mbaff_ibp) every macroblock has mb_field_flag == false,
+            // so reconstruct_inter_frame_ex / reconstruct_b_frame_mbaff
+            // collapse to progressive inter into contiguous halves. Field-coded
+            // pairs exercise the parity-aware path behind the same gate.
+            let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+            let weighted_pred = if header.slice_type == SliceType::B {
+                let weighted_bipred_idc = pps.map(|p| p.weighted_bipred_idc).unwrap_or(0);
+                match (weighted_bipred_idc, &header.pred_weight_table) {
+                    (1, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                        luma_log2_wd: pwt.luma_log2_weight_denom,
+                        chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                        l0: pwt.l0.clone(),
+                        l1: pwt.l1.clone(),
+                    },
+                    (2, _) => crate::reconstruct::WeightedPred::Implicit {
+                        l0_poc: ref_list_l0
+                            .as_ref()
+                            .map(|l| l.iter().map(|e| e.pic_order_cnt).collect())
+                            .unwrap_or_default(),
+                        l1_poc: ref_list_l1
+                            .as_ref()
+                            .map(|l| l.iter().map(|e| e.pic_order_cnt).collect())
+                            .unwrap_or_default(),
+                        cur_poc: current_poc,
+                    },
+                    _ => crate::reconstruct::WeightedPred::Default,
+                }
+            } else {
+                match (
+                    pps.map(|p| p.weighted_pred_flag).unwrap_or(false),
+                    &header.pred_weight_table,
+                ) {
+                    (true, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                        luma_log2_wd: pwt.luma_log2_weight_denom,
+                        chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                        l0: pwt.l0.clone(),
+                        l1: Vec::new(),
+                    },
+                    _ => crate::reconstruct::WeightedPred::Default,
+                }
+            };
+            let mut recon = if header.slice_type == SliceType::B {
+                crate::reconstruct::reconstruct_b_frame_mbaff(
+                    &parsed.macroblocks,
+                    &parsed.mv_store,
+                    &ref_frames_l0,
+                    &ref_frames_l1,
+                    mb_cols,
+                    mb_rows,
+                    coded_width,
+                    coded_height,
+                    sps.mb_adaptive_frame_field_flag && !header.field_pic_flag,
+                    chroma_qp_index_offset,
+                    scaling,
+                    &weighted_pred,
+                    tracer,
+                )
+            } else {
+                crate::reconstruct::reconstruct_inter_frame_ex(
+                    &parsed.macroblocks,
+                    &parsed.mv_store,
+                    &ref_frames_l0,
+                    mb_cols,
+                    mb_rows,
+                    coded_width,
+                    coded_height,
+                    sps.mb_adaptive_frame_field_flag && !header.field_pic_flag,
+                    chroma_qp_index_offset,
+                    scaling,
+                    &weighted_pred,
+                    tracer,
+                )
+            };
+
+            // B4: inter deblock. The MBAFF orchestrator derives bS for inter
+            // MBs (MV/ref-difference cases); the I-path already exists.
+            let deblock_params = crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            };
+            if let Some(mcaff_infos) = Self::mbaff_deblock_infos(&parsed, true) {
+                Self::run_mbaff_deblock(&mut recon, &mcaff_infos, mb_cols, mb_rows, deblock_params);
+            }
+
+            // Assemble the full interlaced frame and store it in the DPB as a
+            // frame reference. Crop from coded (MB-aligned) dimensions to the
+            // visible rectangle.
+            let data = recon.crop_yuv420p(width, height);
+            let frame = VideoFrame {
+                pts: packet.pts,
+                dts: packet.dts,
+                data,
+                width,
+                height,
+                pixel_format: PixelFormat::Yuv420p,
+                is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+            };
+            self.store_reference_picture(
+                nal,
+                sps,
+                header,
+                &frame,
+                Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+            );
+
+            return Ok(InterlacedOutcome::Frame(frame));
+        }
+
+        let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
@@ -467,6 +770,164 @@ impl H264Decoder {
             &parsed.macroblocks,
             &parsed.mv_store,
             &ref_list,
+            mb_cols,
+            mb_rows_field,
+            width,
+            field_height,
+            chroma_qp_index_offset,
+            scaling,
+            &weighted_pred,
+            tracer,
+        );
+
+        let deblock_params = crate::deblock::DeblockParams {
+            disable_idc: header.disable_deblocking_filter_idc as u8,
+            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+            beta_offset_div2: header.slice_beta_offset_div2,
+            chroma_qp_index_offset,
+        };
+        Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+        self.finalize_field(recon, nal, sps, header, packet)
+    }
+
+    /// PAFF B-field picture decode: build both field reference lists
+    /// (§8.2.4.2.5), parse the field B-slice, motion-compensate each field
+    /// macroblock with bi-prediction into a half-height buffer, deblock, and
+    /// interleave with its complementary field for output.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_interlaced_b_field<T: DecodeTracer>(
+        &mut self,
+        nal: &NalUnit,
+        sps: &SeqParameterSet,
+        header: &crate::slice::SliceHeader,
+        entropy_coding_mode_flag: bool,
+        pps: Option<&PicParameterSet>,
+        mb_cols: u32,
+        mb_rows_field: u32,
+        field_height: u32,
+        width: u32,
+        chroma_qp_index_offset: i32,
+        tracer: &mut T,
+        packet: &Packet,
+    ) -> Result<InterlacedOutcome, KinetixError> {
+        use crate::ref_pic::{build_field_ref_list_l0, build_field_ref_list_l1, PicNumContext};
+
+        let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+        let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
+        let pic_num_ctx = PicNumContext::new(sps, header.frame_num, true, header.bottom_field_flag);
+
+        // Field pictures use the same field-ordering rule for both reference
+        // lists (§8.2.4.2.5); build L0 and L1 independently.
+        let ref_l0 = match build_field_ref_list_l0(
+            self.dpb(),
+            header.bottom_field_flag,
+            num_ref_idx_l0_active as usize,
+            pic_num_ctx,
+        ) {
+            Some(l) => l,
+            None => return Ok(InterlacedOutcome::Fallback),
+        };
+        let ref_l1 = match build_field_ref_list_l1(
+            self.dpb(),
+            header.bottom_field_flag,
+            num_ref_idx_l1_active as usize,
+            pic_num_ctx,
+        ) {
+            Some(l) => l,
+            None => return Ok(InterlacedOutcome::Fallback),
+        };
+
+        // Current field's POC (§8.2.1) — needed for implicit bi-prediction
+        // weights (weighted_bipred_idc == 2). Derived against a scratch state so
+        // we don't advance the real poc_state (store_reference_picture handles
+        // that later).
+        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let current_poc = {
+            let mut scratch = self.poc_state.clone();
+            crate::ref_pic::derive_pic_order_cnt(
+                sps,
+                is_idr,
+                nal.nal_ref_idc != 0,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+                header.delta_pic_order_cnt_bottom,
+                &mut scratch,
+            )
+            .unwrap_or(0)
+        };
+
+        // Weighted bi-prediction (§8.4.2.3.2): explicit when
+        // `weighted_bipred_idc == 1` (parsed `pred_weight_table` carries both
+        // l0 and l1), implicit when `== 2` (weights derived per-block from
+        // each reference field's POC distance to the current field), default
+        // otherwise.
+        let weighted_bipred_idc = pps.map(|p| p.weighted_bipred_idc).unwrap_or(0);
+        let weighted_pred = match (weighted_bipred_idc, &header.pred_weight_table) {
+            (1, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                luma_log2_wd: pwt.luma_log2_weight_denom,
+                chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                l0: pwt.l0.clone(),
+                l1: pwt.l1.clone(),
+            },
+            (2, _) => crate::reconstruct::WeightedPred::Implicit {
+                l0_poc: ref_l0.iter().map(|f| f.pic_order_cnt).collect(),
+                l1_poc: ref_l1.iter().map(|f| f.pic_order_cnt).collect(),
+                cur_poc: current_poc,
+            },
+            _ => crate::reconstruct::WeightedPred::Default,
+        };
+
+        let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+        let slice_qp = pic_init_qp + header.slice_qp_delta;
+        let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
+
+        let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
+        reader.seek_to_bit(header.data_bit_offset);
+
+        let transform_8x8 = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
+        let parsed = if entropy_coding_mode_flag {
+            reader.byte_align();
+            crate::slice_data::parse_b_slice_cabac(
+                reader.remaining_bytes(),
+                mb_cols,
+                mb_rows_field,
+                slice_qp,
+                sps.mb_adaptive_frame_field_flag,
+                header.field_pic_flag,
+                header.cabac_init_idc as usize,
+                num_ref_idx_l0_active,
+                num_ref_idx_l1_active,
+                chroma_qp_index_offset,
+                transform_8x8,
+                None,
+                tracer,
+            )
+        } else {
+            crate::slice_data::parse_b_slice(
+                &mut reader,
+                mb_cols,
+                mb_rows_field,
+                slice_qp,
+                num_ref_idx_l0_active,
+                num_ref_idx_l1_active,
+                chroma_qp_index_offset,
+                transform_8x8,
+                None,
+                tracer,
+            )
+        };
+        let parsed = match parsed {
+            Ok(p) => p,
+            Err(_) => return Ok(InterlacedOutcome::Fallback),
+        };
+
+        let mut recon = crate::reconstruct::reconstruct_inter_b_field_frame(
+            &parsed.macroblocks,
+            &parsed.mv_store,
+            &ref_l0,
+            &ref_l1,
             mb_cols,
             mb_rows_field,
             width,

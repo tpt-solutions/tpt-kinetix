@@ -228,9 +228,14 @@ impl FaceParamCodec {
                 (&params.appearance, 4),
             ]
         };
-        let mut streams = Vec::with_capacity(groups.len());
+        let mut streams = Vec::with_capacity(groups.len() + 1);
         for (g, gi) in groups {
             streams.push(encode_group(g, qp[gi], seq.quant_precision, &self.model));
+        }
+        // Landmark companion (DECISION 1): when enabled, append landmark deltas
+        // as an additional sub-stream (N points × 2 i16 coordinates).
+        if seq.flags.landmark_companion {
+            streams.push(encode_landmarks(&params.landmarks));
         }
         Ok(RansStreamSet::frame(&streams)?)
     }
@@ -249,7 +254,8 @@ impl FaceParamCodec {
     ) -> Result<crate::FaceParams, FaceParamError> {
         let qp = header.group_qp_override.unwrap_or(seq.group_qp);
         let streams = RansStreamSet::unframe(payload)?;
-        let expected = if header.flags.inter { 4 } else { 5 };
+        let group_count = if header.flags.inter { 4 } else { 5 };
+        let expected = group_count + usize::from(seq.flags.landmark_companion);
         if streams.len() != expected {
             return Err(FaceParamError::GroupCount {
                 expected,
@@ -274,14 +280,52 @@ impl FaceParamCodec {
         idx += 1;
         let appearance = decode_group(streams[idx], qp[4], seq.quant_precision, &self.model)?;
 
+        let landmarks = if seq.flags.landmark_companion {
+            decode_landmarks(streams[idx + 1])?
+        } else {
+            Vec::new()
+        };
+
         Ok(crate::FaceParams {
             identity,
             expression,
             pose,
             illumination,
             appearance,
+            landmarks,
         })
     }
+}
+
+/// Encode landmark companion data: count (u16 BE) + N×(x, y) as i16 BE deltas.
+fn encode_landmarks(landmarks: &[(i16, i16)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + landmarks.len() * 4);
+    out.extend_from_slice(&(landmarks.len() as u16).to_be_bytes());
+    for &(x, y) in landmarks {
+        out.extend_from_slice(&x.to_be_bytes());
+        out.extend_from_slice(&y.to_be_bytes());
+    }
+    out
+}
+
+/// Decode landmark companion data.
+fn decode_landmarks(data: &[u8]) -> Result<Vec<(i16, i16)>, FaceParamError> {
+    if data.len() < 2 {
+        return Err(FaceParamError::Truncated);
+    }
+    let count = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let expected = 2 + count * 4;
+    if data.len() < expected {
+        return Err(FaceParamError::Truncated);
+    }
+    let mut landmarks = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 2 + i * 4;
+        let x = i16::from_be_bytes([data[off], data[off + 1]]);
+        let y = i16::from_be_bytes([data[off + 2], data[off + 3]]);
+        landmarks.push((x, y));
+    }
+    Ok(landmarks)
 }
 
 impl Default for FaceParamCodec {
@@ -346,6 +390,7 @@ mod tests {
             pose: vec![0.0, 0.005, -0.01, 0.1, -0.08, 0.03],
             illumination: mk(27, 0.005),
             appearance: mk(40, 0.008),
+            ..Default::default()
         }
     }
 
@@ -466,10 +511,49 @@ mod tests {
             pose: vec![],
             illumination: vec![],
             appearance: vec![],
+            ..Default::default()
         };
         let payload = codec.encode_frame(&s, &h, &p).expect("encode");
         let decoded = codec.decode_frame(&s, &h, None, &payload).expect("decode");
         // 100.0 / 0.25 = 400 → clamped to 127 → dequantized to 127 * 0.25 = 31.75.
         assert_eq!(decoded.identity, vec![31.75]);
+    }
+
+    #[test]
+    fn landmark_companion_round_trips() {
+        let mut s = seq();
+        s.flags.landmark_companion = true;
+        let h = key_header();
+        let p = FaceParams {
+            identity: vec![0.1, 0.2],
+            expression: vec![0.0],
+            pose: vec![0.0; 6],
+            illumination: vec![0.0; 9],
+            appearance: vec![],
+            landmarks: vec![(100, 200), (-50, 300), (0, 0), (1024, 768)],
+        };
+        let codec = FaceParamCodec::new();
+        let payload = codec.encode_frame(&s, &h, &p).expect("encode");
+        let decoded = codec.decode_frame(&s, &h, None, &payload).expect("decode");
+        assert_eq!(decoded.landmarks, p.landmarks);
+        assert_eq!(decoded.landmark_count(), 4);
+    }
+
+    #[test]
+    fn landmark_absent_when_flag_unset() {
+        let s = seq(); // landmark_companion = false
+        let h = key_header();
+        let p = FaceParams {
+            identity: vec![0.1],
+            expression: vec![],
+            pose: vec![],
+            illumination: vec![],
+            appearance: vec![],
+            ..Default::default()
+        };
+        let codec = FaceParamCodec::new();
+        let payload = codec.encode_frame(&s, &h, &p).expect("encode");
+        let decoded = codec.decode_frame(&s, &h, None, &payload).expect("decode");
+        assert!(decoded.landmarks.is_empty());
     }
 }

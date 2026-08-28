@@ -46,14 +46,12 @@ pub fn decode_flat_runs(runs: &[FlatRun], modes: &[u8]) -> Vec<u8> {
     let mut cur_color = 0u8;
 
     for (bi, &mode) in modes.iter().enumerate() {
-        if mode == 0 {
-            if run_remaining == 0 {
-                if run_idx < runs.len() {
+            if mode == 0 {
+                if run_remaining == 0 && run_idx < runs.len() {
                     cur_color = runs[run_idx].color_y;
                     run_remaining = runs[run_idx].run_len;
                     run_idx += 1;
                 }
-            }
             if run_remaining > 0 {
                 colors[bi] = cur_color;
                 run_remaining -= 1;

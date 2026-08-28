@@ -32,8 +32,9 @@ pub struct SequenceHeader {
     pub planes: Vec<PlaneSpec>,
 }
 
-/// Per-frame header: dimensions, one checksum per plane, and the byte length of
-/// each plane's residual payload.
+/// Per-frame header: dimensions, one checksum per plane, the byte length of
+/// each plane's residual payload, and a SHA-256 stream checksum covering the
+/// whole frame body (DECISION 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {
     pub width: u16,
@@ -45,6 +46,9 @@ pub struct FrameHeader {
     /// decoder slice each plane's bitstream out of the concatenated frame body
     /// (each payload is byte-aligned) and decode it from its own reader.
     pub plane_lengths: Vec<u32>,
+    /// SHA-256 digest of the frame body (all plane payloads concatenated),
+    /// for end-to-end integrity verification.
+    pub stream_sha256: [u8; 32],
 }
 
 impl SequenceHeader {
@@ -98,6 +102,9 @@ impl FrameHeader {
             }
             w.write_bits(*len, 32);
         }
+        for &b in &self.stream_sha256 {
+            w.write_bits(u32::from(b), 8);
+        }
     }
 
     pub fn decode(r: &mut BitReader<'_>) -> Option<FrameHeader> {
@@ -116,11 +123,16 @@ impl FrameHeader {
             plane_checksums.push(crc);
             plane_lengths.push(plen);
         }
+        let mut stream_sha256 = [0u8; 32];
+        for b in &mut stream_sha256 {
+            *b = read_bits_u8(r, 8)?;
+        }
         Some(FrameHeader {
             width,
             height,
             plane_checksums,
             plane_lengths,
+            stream_sha256,
         })
     }
 }

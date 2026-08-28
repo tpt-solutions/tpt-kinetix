@@ -28,18 +28,16 @@ pub fn classify_block_luma(block: &[u8], size: usize, tolerance: u8) -> BlockMod
         return BlockMode::Flat;
     }
 
-    // Count samples far from the mean to distinguish structured edges (GLYPH)
-    // from complex texture (NATURAL).
-    let mean = block.iter().map(|&p| p as u32).sum::<u32>() / block.len() as u32;
-    let outliers = block
+    // GLYPH: structured — most pixels cluster near one of two values (fg/bg).
+    // NATURAL: distributed — pixels spread across many values.
+    // Count pixels near the min or max (within tolerance). If most pixels
+    // are near one of the extremes, it's a two-tone glyph.
+    let near_extremes = block
         .iter()
-        .filter(|&&p| p.abs_diff(mean as u8) > tolerance * 2)
+        .filter(|&&p| p.abs_diff(min) <= tolerance || p.abs_diff(max) <= tolerance)
         .count();
-
-    // GLYPH: structured — most pixels are near one of two values (fg/bg).
-    // NATURAL: distributed — many pixels far from the mean.
-    let outlier_frac = outliers as f64 / block.len() as f64;
-    if outlier_frac < 0.5 {
+    let extreme_frac = near_extremes as f64 / block.len() as f64;
+    if extreme_frac > 0.8 {
         BlockMode::Glyph
     } else {
         BlockMode::Natural
@@ -59,12 +57,9 @@ mod tests {
     #[test]
     fn two_tone_block_is_glyph() {
         // Half 0, half 255 — structured like a glyph.
-        let mut block = Vec::with_capacity(16);
-        for _ in 0..8 {
-            block.push(0);
-        }
-        for _ in 0..8 {
-            block.push(255);
+        let mut block = vec![0u8; 16];
+        for b in block.iter_mut().skip(8) {
+            *b = 255;
         }
         assert_eq!(classify_block_luma(&block, 4, 4), BlockMode::Glyph);
     }

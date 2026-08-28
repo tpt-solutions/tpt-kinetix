@@ -11,7 +11,7 @@ use crate::classify::{classify_block_luma, BlockMode};
 use crate::dictionary::{GlyphDictionary, PaletteColor};
 use crate::flat::{self, FlatRun};
 use crate::glyph::{self, GlyphBlock};
-use crate::headers::{FrameHeader, FrameType, SequenceHeader};
+use crate::headers::{FrameHeader, SequenceHeader};
 use crate::natural::{self, NaturalBlock};
 
 /// Submitted frame buffer (planar YUV).
@@ -197,10 +197,10 @@ fn natural_neighbors(src: &FrameBuffer, x0: usize, y0: usize, size: usize) -> (V
     let mut above = vec![128i32; size];
     let mut left = vec![128i32; size];
     if y0 > 0 {
-        for c in 0..size {
+        for (c, above_c) in above.iter_mut().enumerate().take(size) {
             let x = x0 + c;
             if x < src.width {
-                above[c] = src.luma[(y0 - 1) * src.width + x] as i32;
+                *above_c = src.luma[(y0 - 1) * src.width + x] as i32;
             }
         }
     }
@@ -260,10 +260,10 @@ fn encode_natural_stream(natural_blocks: &[Option<NaturalBlock>]) -> Vec<u8> {
     for block in natural_blocks.iter().rev() {
         if let Some(n) = block {
             for &c in n.coeffs.iter().rev() {
-                enc.encode(&model, (c & 0xFF) as u8);
-                enc.encode(&model, ((c >> 8) & 0xFF) as u8);
-                enc.encode(&model, ((c >> 16) & 0xFF) as u8);
                 enc.encode(&model, ((c >> 24) & 0xFF) as u8);
+                enc.encode(&model, ((c >> 16) & 0xFF) as u8);
+                enc.encode(&model, ((c >> 8) & 0xFF) as u8);
+                enc.encode(&model, (c & 0xFF) as u8);
             }
             enc.encode(&model, n.coeffs.len() as u8);
             enc.encode(&model, n.intra_mode);
@@ -449,6 +449,7 @@ fn blit_luma_block(fb: &mut FrameBuffer, x0: usize, y0: usize, size: usize, src:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::headers::FrameType;
 
     fn test_seq() -> SequenceHeader {
         SequenceHeader {
@@ -500,6 +501,22 @@ mod tests {
     }
 
     #[test]
+    fn natural_stream_round_trips() {
+        let blocks = vec![
+            None,
+            Some(NaturalBlock { intra_mode: 0, coeffs: vec![100, -200, 300, -400] }),
+            None,
+        ];
+        let encoded = encode_natural_stream(&blocks);
+        let decoded = decode_natural_stream(&encoded, 3).unwrap();
+        assert_eq!(decoded.len(), 3);
+        assert!(decoded[0].is_none());
+        assert_eq!(decoded[1].as_ref().unwrap().intra_mode, 0);
+        assert_eq!(decoded[1].as_ref().unwrap().coeffs, vec![100, -200, 300, -400]);
+        assert!(decoded[2].is_none());
+    }
+
+    #[test]
     fn natural_block_round_trips() {
         let seq = test_seq();
         let frame = test_frame();
@@ -512,8 +529,6 @@ mod tests {
         let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
         let payload = encode_frame(&seq, &frame, &src, None).unwrap();
         let decoded = decode_frame_payload(&seq, &frame, None, &payload).unwrap();
-        // NATURAL blocks won't be pixel-exact at qp=0 with DC-only prediction,
-        // but they should be close (DC predictor approximates the local mean).
         for y in 0..16 {
             for x in 0..16 {
                 let expected = ((x + y) * 8) as u8;

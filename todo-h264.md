@@ -2,6 +2,336 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32y (2026-08-29) — A2: inter `coded_block_pattern` CABAC context fixed for MBAFF frame pairs
+
+Fixed the inter/intra `coded_block_pattern` CABAC neighbour context under MBAFF
+frame pairs. Root cause: `NeighbourCtx::left_top()` discarded `left_bottom` from
+`mbaff::derive_neighbours`, and both `decode_inter_cbp_cabac` (inter) and
+`cabac_cbp_neighbors` (intra) copied `cbp_word` **wholesale** from `left_top`.
+For a frame-coded current MB next to a field-coded left pair, FFmpeg's
+`decode_cabac_mb_cbp_luma` reads `left_cbp` bits 1 (top-right 8×8) and 3
+(bottom-right 8×8) — which in a mixed pair come from the pair-top and
+pair-bottom MBs respectively. The wholesale copy always used the pair-top
+neighbour, so the bottom-half luma context bit was wrong.
+
+**New in `slice_data/ctx.rs`:**
+- `NeighbourCtx::left_top_with_bottom()` — like `left_top()` but also returns
+  `left_bottom` (the pair-bottom neighbour address) for MBAFF frame pairs.
+- `cabac_cbp_neighbors_inter()` — MBAFF-aware CBP lookup for inter MBs:
+  rebuilds `left_cbp` as `(left_top.cbp & 0x02) | (left_bottom.cbp & 0x08)`
+  for luma, chroma from `left_top`. Non-MBAFF and all-frame-coded pairs
+  degenerate to the wholesale copy.
+- `cabac_cbp_neighbors()` (intra path) — now also MBAFF-aware via the same
+  rebuild logic, using `CABAC_CBP_UNAVAILABLE` (0x7CF) as the off-picture
+  sentinel.
+
+**Fixed in `slice_data/cabac_b.rs`:**
+- `decode_inter_cbp_cabac` — now calls `cabac_cbp_neighbors_inter` with the
+  inter sentinel `0x00F`.
+- `parse_intra_mb_cabac_pb` — the CABAC intra-in-P/B path now passes the
+  real `nctx` to `cabac_cbp_neighbors` instead of `NeighbourCtx::NONE`, so
+  intra MBs in an MBAFF frame also get the rebuilt left_cbp.
+
+**VALIDATION:** `cargo build` clean, `cargo clippy --all-targets -- -D warnings`
+clean, `cargo fmt --check` clean, lib 249/249, full integration suite green
+(0 failures). The `mbaff_ip` P-frame SAD improvement is expected but not yet
+measured — that requires re-running `dbg_g5_interlaced` with the fix.
+
+## SESSION #32x (2026-08-29) — PAFF B-field decode path implemented
+
+Implemented the PAFF **B-field** decode path (Track G.2). Previously
+`decode_interlaced` returned `InterlacedOutcome::Fallback` for every B-field
+picture; now it decodes both fields, motion-compensates each field macroblock
+with bi-prediction into a half-height buffer, deblocks, and interleaves the
+pair for output — mirroring the existing PAFF P-field path.
+
+**New in `reconstruct.rs`:**
+- `reconstruct_inter_b_field_frame` — field-coordinate bi-predictive
+  reconstruction: pre-extracts the contiguous half-height L0/L1 field planes
+  via `FieldRef::planes()`, then per 4×4 block dispatches L0-only / L1-only /
+  bi-prediction from the committed `MvCell` (`ref_idx` / `ref_idx_l1`).
+- `reconstruct_field_b_inter_luma` / `_chroma` — field-coordinate bi-predictive
+  MC helpers (mirror `reconstruct_field_inter_luma`/`_chroma`, dual-list).
+
+**New in `decoder/interlaced.rs`:**
+- `decode_interlaced_b_field` — builds both field reference lists
+  (`build_field_ref_list_l0` / `_l1`, §8.2.4.2.5), derives the current field's
+  POC (scratch `poc_state`), parses the field B-slice (`parse_b_slice_cabac` /
+  `parse_b_slice`), reconstructs via `reconstruct_inter_b_field_frame`, deblocks
+  (`deblock_field`), and interleaves (`finalize_field`).
+- Weighted bi-prediction: explicit (`weighted_bipred_idc == 1`, both l0/l1
+  weight tables), implicit (`== 2`, POC-distance weights), default otherwise.
+- Dispatch: `decode_interlaced` now routes `SliceType::B` to the new path
+  before the I/SI intra path.
+
+**VALIDATION:** `cargo build` clean, `cargo clippy --all-targets -- -D warnings`
+clean, lib 249/249 green. (fmt violations are pre-existing in the uncommitted
+MBAFF B-frame WIP, not in this change.)
+
+## SESSION #32w (2026-08-29) — B3: MC + reconstruction wiring for MBAFF P/B
+
+Wired the inter reconstruction path for MBAFF frame P/B slices (Track B3).
+`decode_interlaced_mbaff` now returns `Frame` (not `Fallback`) for P/B slices
+when `KINETIX_CABAC_FIELD_MC=1`.
+
+**New in `reconstruct.rs`:**
+- `reconstruct_b_frame_mbaff` — MBAFF-aware twin of `reconstruct_inter_frame_ex`
+  for B slices: dispatches each macroblock between the frame-coded path
+  (`reconstruct_b_inter_luma`/`_chroma`) and the field-coded path based on
+  `mb_field_flag`, behind the `KINETIX_MBAFF_FIELD_MC` gate.
+- `reconstruct_mbaff_b_inter_luma` / `_chroma` — field-coordinate bi-predictive
+  MC for field-coded B macroblocks (L0 + L1 against the half-height parity
+  planes, stride-2 write-back).
+
+**Wired in `decoder/interlaced.rs::decode_interlaced_mbaff`:**
+- P slices: build L0 (`build_ref_list_l0`), parse, reconstruct via
+  `reconstruct_inter_frame_ex`, deblock, store reference, return `Frame`.
+- B slices: build L0 + L1 (`build_ref_list_l0_b_slice` / `build_ref_list_l1`),
+  parse with colocated MV grid for direct mode, reconstruct via
+  `reconstruct_b_frame_mbaff`, deblock, store reference, return `Frame`.
+- Weighted prediction: explicit (P via `weighted_pred_flag`; B via
+  `weighted_bipred_idc == 1`) and implicit (`weighted_bipred_idc == 2`).
+- Whole path gated behind `KINETIX_MBAFF_FIELD_MC=1`; gate off ⇒ byte-identical
+  `Fallback` to prior behaviour.
+
+For the all-frame-coded case (`mbaff_ip`/`mbaff_ibp`) every macroblock has
+`mb_field_flag == false`, so reconstruction collapses to progressive inter into
+contiguous halves — the tractable first target. The #32f items 6-8 gaps in the
+field-coded path are fixed only as far as the frame-coded path needs; the
+field-coded B path reuses the parity-plane convention from the existing
+`reconstruct_mbaff_inter_luma`/`_chroma`.
+
+**VALIDATION:** `cargo build` clean, `cargo clippy --all-targets -- -D warnings`
+clean, `cargo fmt --check` clean, lib 249/249, full integration suite green
+(0 failures).
+
+## SESSION #32v (2026-08-29) — CABAC MBAFF P desync localized to pair-6 TOP MB; inter `transform_size_8x8_flag` confirmed missing (latent)
+
+Narrowed Track A with `ffmpeg -debug mb_type` + `KINETIX_BINTRACE` on `mbaff_ip`.
+
+**The `mbaff_ip` P-frame mb_type grid (frame-MB raster):**
+```
+ffmpeg:            crate:
+S S S S            S S S S
+S S S S            S S S S
+S S >  S           S S C  C     <- (3,2): ffmpeg SKIP, crate CODED
+>- > >- >          C C S  C     <- (2,3): ffmpeg CODED, crate SKIP
+```
+**CORRECTION (later same session): the `ffmpeg -debug mb_type` legend reading
+above is unreliable — `>-` / `> ` / `S` disambiguation is guesswork. The
+decisive evidence is the per-MB diff map + the skip-MB behaviour, and it points
+to a VALUE bug in the CABAC motion syntax, NOT a bin-count desync and NOT
+reconstruction:**
+
+`dbg_g5_i1_diffmap` per-MB luma diff (mbaff_ip P frame), in **decode order**:
+```
+MB8 (0,2) SKIP     13/256 max 2   FINE
+MB9 (0,3) P8x8    227/256 max 144 CATASTROPHIC   <- first coded MB
+MB10(1,2) SKIP     13/256 max 2   FINE           <- skip right after catastrophic
+MB11(1,3) P8x16   243/256 max 114 CATASTROPHIC
+MB12(2,2) P16x8    80/256 max 42  moderate
+MB13(2,3) ...     205/256 max 126 CATASTROPHIC
+MB14(3,2) ...     111/256 max 93
+MB15(3,3) P8x8    235/256 max 122 CATASTROPHIC
+```
+- **Every coded inter MB is catastrophic; every skip MB (incl. MB10, right
+  after catastrophic MB9) stays bit-close.** A bin-COUNT desync would make all
+  MBs after the desync point garbage — skip flags included. They're not ⇒ the
+  parse stays in bit-sync; only the decoded mvd / sub_mb_type / ref_idx VALUES
+  are wrong for the inter-motion syntax.
+- Diffs are **even/odd row symmetric** (MB9 117/110, MB12 40/40) ⇒ NOT a
+  field/frame interleave mismatch, a uniform wrong-MV error across the MB.
+- **`mbaff_ip` P SAD is byte-identical with `KINETIX_MBAFF_FIELD_MC=1` +
+  `KINETIX_CABAC_FIELD_MC=1` (Track B's #32w path) ON vs OFF** ⇒ reconstruction
+  path is not the variable; the MVs fed into it are already wrong.
+- **`mbaff_cavlc_ip` P is BIT-EXACT** (#32t) and shares `mv.rs
+  predict_slice_mvs_ex` + the whole reconstruction path with the CABAC route ⇒
+  MV prediction + MC + inter reconstruction are PROVEN correct for
+  all-frame-coded MBAFF P.
+
+→ **The bug is wrong CABAC context selection in
+`parse_p_macroblock_cabac`'s inter-motion path under MBAFF** (right bin count,
+wrong value): `amvd_sum` / `cabac_decode_mvd_component` neighbour-cell geometry
+(`ctx.rs`), `ref_idx_gt0_neighbors`, and/or `sub_mb_type` (`sub_mb_p`) — i.e.
+Track A / #32q's original NEXT, for P_8x8 **and** P16x8/P8x16. My "it's the CBP
+context" hypothesis above is NOT confirmed and looks wrong (cbp/skip flags stay
+in sync per the diff map).
+
+**Oracle harness built: `tests/dbg_mbaff_cabac_vs_cavlc.rs`** — encodes the
+`mbaff_ip` source twice (`cabac=1` / `cabac=0`, else-identical x264 params),
+parses both P slices directly via `parse_p_slice[_cabac](… mb_aff=true …)`, and
+prints the per-MB `mb_type` / `cbp` / raw `mvd_l0` grid.
+
+Findings:
+- **The CABAC direct-parse reproduces the full decoder's parse exactly**
+  (MB(0,3) P8x8[2,1,1,0] mvd `(-2,3),(2,1),(2,0),(0,0),(0,0),(-1,0),(1,0)` ==
+  the `dbg_g5_interlaced` H264Decoder BINTRACE). So the harness is faithful and
+  the CABAC parse output is deterministic + `transform_8x8_mode`-independent
+  (no inter MB in this clip reads a t8 bin: every coded one is either
+  `cbp&15==0` or a split P_8x8 that `get_dct8x8_allowed` excludes — so the
+  missing-inter-t8-flag latent bug is a genuine no-op here, ruled out).
+- **`num_ref_idx_l0_active` MUST come from the slice header, not the PPS
+  default.** This clip: header override → 1, PPS default → 3. Feeding the PPS
+  default (3) desyncs BOTH parsers immediately (spurious `ref_idx` reads):
+  CAVLC hard-fails `mb_skip_run out of range`, CABAC emits absurd mvds
+  (`-72`, `16`). `diag_cabac_p_localize.rs` / `diag_cabac_vs_cavlc.rs` use the
+  PPS default — a latent harness bug there, only masked when the two happen to
+  agree.
+- **CAVLC direct-parse of this `deblock=0` clip ALSO produces garbage** (mvd
+  `(43,0)`, `(-31,-35)`; skip pattern disagrees with the CABAC grid). NOTE the
+  proven-bit-exact `g6_cavlc_ip` (#32t) uses **no `deblock=0`** and goes
+  through the full `H264Decoder`, not `parse_p_slice` directly — so it is a
+  *different stream* + path. Whether the CAVLC garbage here is a real
+  CAVLC-MBAFF bug on `deblock=0` streams or a missing bit of slice context the
+  direct call doesn't get (ref-list reordering etc.) is unresolved — the CAVLC
+  oracle isn't trustworthy yet.
+
+**Net:** the CABAC MBAFF P parse produces plausible small mvds that still drive
+catastrophic reconstruction ⇒ the wrong value is subtle (a mis-selected mvd
+context flipping a low-order bin) or it's MV-prediction (`mv.rs
+predict_mv_sub` under MBAFF pair-scan). Next: get a trusted per-MB MV reference
+(ffmpeg `-flags2 +export_mvs` side-data, or fix the CAVLC direct-parse harness)
+and diff against the CABAC grid MB-by-MB.
+
+**Latent bug found & confirmed (not the `mbaff_ip` root cause):** the CABAC P/B
+inter path (`slice_data/cabac_b.rs`) **never reads `transform_size_8x8_flag`**
+for coded inter MBs — the CABAC twin of the CAVLC bug fixed in #32j. ffmpeg
+`ff_h264_decode_mb_cabac` reads it (ctxIdx `399 + neighbor_transform_size`)
+when `dct8x8_allowed && (cbp & 15) && !IS_INTRA(mb_type)` (line ~2347), and
+`trace_headers` confirms `transform_8x8_mode_flag = 1` in this High-profile
+x264 PPS. It is genuinely latent for `mbaff_ip` (no coded inter MB there has
+`cbp_l != 0` except a split P_8x8, which `get_dct8x8_allowed` excludes) but WILL
+bite any High-profile CABAC P/B stream whose first coded inter MB has non-zero
+luma CBP. A prototype fix (read the bin after CBP, gated by ffmpeg's
+`get_dct8x8_allowed`, + an 8×8 residual branch in `decode_inter_residual_cabac`)
+was written and **reverted**: no-op on `mbaff_ip`, regressed `mbaff_ibp`
+(45764→69338 P) — the regression is inside already-broken output but signals
+either a wrong `neighbor_transform_size` context or that the B-slice
+`get_dct8x8_allowed` sub-type check needs `direct_8x8_inference_flag` threaded.
+Re-land it with an independent oracle once Track A's cbp-context bug is fixed
+(they share the CBP read path). Progressive CABAC P/B / high8x8 / b_frame
+conformance all stay bit-exact with or without it.
+
+## SESSION #32u (2026-08-29) — CABAC MBAFF P/B broken into trackable sub-tasks
+
+The remaining `pixel_exact` blocker (CABAC/CAVLC MBAFF P/B — #32t) split into two
+independent tracks. Track A (parse) and Track B (slice setup / reconstruction)
+are independent up to B5: Track B can be built and unit-tested against the
+already-bit-exact CAVLC MBAFF P parse output while Track A is still being
+debugged.
+
+### Track A — CABAC P_8x8 sub-partition parse under MBAFF frame-coded pairs
+
+Desync is narrow: skip/coded grid matches ffmpeg through pair 5, diverges at
+pair 6's first `P_8x8` MB. `terminate` never desyncs → a value error in one of a
+few context-cell picks. Steps A1→A5 are strictly sequential.
+
+- [ ] **A1. Oracle capture harness.** Extend the compiled-ffmpeg CABAC oracle
+      (`clang` + vendored `h264_cabac_ref.c` at repo root) to dump engine state
+      (`range`/`offset`) + context array + payload offset immediately before
+      pair 6's `P_8x8` MB in `mbaff_ip`. Tooling only, no decoder change.
+      Deliverable: a checked-in trace file.
+- [ ] **A2. `sub_mb_type` decode audit.** Replay A1's state through
+      `slice_data/cabac_b.rs::parse_p_macroblock_cabac`'s `sub_mb_type` path;
+      diff each bin's `ctxIdx` + value vs the oracle. Fix the four sub-block
+      `sub_mb_type` reads. Verify: bin-for-bin match up to the first `ref_idx`.
+- [ ] **A3. `ref_idx_gt0_neighbors` cell geometry.** Same replay, `ref_idx_l0`
+      contexts. Suspect: `ctx.rs:230-338` picking `mvd_cache[scan8[n]-1/-8]`
+      cells from `mbaff::derive_neighbours` output instead of raster. Fix +
+      verify `ref_idx` bins match.
+- [ ] **A4. `amvd_sum` (mvd context) cell geometry.** Same replay, `mvd_l0`
+      contexts for the sub-partitions. Fix + verify all `mvd` bins match through
+      end of the MB.
+- [ ] **A5. Regression lock.** Once `mbaff_ip` P SAD → 0 against a
+      fully-filtered (`dbg_g6_mbaff_deblock`-class) reference: add a CABAC-P (and
+      B) MBAFF clip to that harness — there is none today, current numbers come
+      from the `-skip_loop_filter` harness. Then repeat A2/A4 for `mbaff_ibp`
+      B slices (B-variant `sub_mb_type` + L1/bi `mvd`).
+
+### Track B — interlaced-module inter decode path
+
+`decode_interlaced_mbaff` (`decoder/interlaced.rs`) hard-returned `Fallback`
+for every non-I slice. `mbaff_ip`/`mbaff_ibp` pairs are all frame-coded, so
+reconstruction collapses to progressive inter into contiguous halves — the
+setup plumbing is the real work. B1/B2 can start now in parallel with Track A.
+
+- [x] **B1. Ref-list construction for MBAFF frame pairs.** MBAFF frames are
+      `field_pic_flag=0` → ordinary *frame* ref lists (§8.2.4). Reuse
+      `decoder/mod.rs`'s frame P/B list builders, NOT the PAFF
+      `build_field_ref_list_l0` path. Deliverable: `decode_interlaced_mbaff`
+      builds L0 (+ L1 for B) and logs them; still returns `Fallback` after.
+- [x] **B2. Parse dispatch for P/B.** Replace the P/B early-return with
+      `parse_p_slice_cabac` / `parse_b_slice_cabac` / CAVLC equivalents
+      (pair-scan addressing already fixed #32q). Assert the parse runs to
+      completion (terminate at last MB) on `mbaff_ip`/`mbaff_ibp`; no
+      reconstruction yet.
+- [x] **B3. MC + reconstruction wiring.** Call `reconstruct_mbaff_inter_luma`/
+      `_chroma` (exist, opt-in with gaps #32f 6-8) for the all-frame-coded case,
+      feeding B1's ref lists + DPB. Fix the #32f 6-8 gaps only as far as the
+      frame-coded path needs. Keep behind `KINETIX_CABAC_FIELD_MC` initially.
+      Implemented: `reconstruct_b_frame_mbaff` (new, MBAFF-aware twin of
+      `reconstruct_inter_frame_ex`) + field-coded B inter helpers
+      `reconstruct_mbaff_b_inter_luma`/`_chroma`; `decode_interlaced_mbaff` now
+      builds ref lists, parses, reconstructs (P via `reconstruct_inter_frame_ex`,
+      B via `reconstruct_b_frame_mbaff`), runs the MBAFF deblock orchestrator,
+      stores the reference picture, and returns `Frame` — all gated behind
+      `KINETIX_CABAC_FIELD_MC=1`.
+- [x] **B4. Inter deblock.** Extend `mbaff_deblock_infos` / `run_mbaff_deblock`
+      `bS` derivation for inter MBs (MV/ref-difference cases); I-path already
+      exists. IMPLEMENTED: `mbaff_deblock_infos` reads MV cells from
+      `mv_store.cells_of(idx)`; `filter_mbaff_mb` derives bS for inter MBs via
+      `derive_bs_segments`/`derive_bs_pair` (MV ≥ mvy_limit / ref_idx difference
+      → bS=1, nz → bS=2); MBAFF-specific edges (`first_vertical_edge_bs`,
+      `fieldcoded_above_boundary_bs`) handle the non-intra path with nz-based
+      bS; interlaced P/B path wires it in. Frame-coded MBAFF P/B is the
+      supported target (field-coded pairs reuse the parity-plane convention).
+      VALIDATED: 249/249 lib, full suite green, `dbg_g6_mbaff_deblock`
+      bit-exact vs ffmpeg.
+- [ ] **B5. Flip on + integrate.** Remove the gate; `decode_interlaced_mbaff`
+      returns `Frame` for P/B. Wire DPB store for B (non-ref handling).
+      Needs A5 + B4.
+
+### Then (unchanged, gated on A + B)
+
+- [ ] **G.5** — PAFF + MBAFF corpus bit-exact validation.
+- [ ] **non-16 crop** — final check (mostly closed in #32s).
+- [ ] **`pixel_exact` flip** — gated on G.5.
+
+## SESSION #32t (2026-08-29) — Remaining-gate audit: CAVLC MBAFF P confirmed BIT-EXACT; CABAC MBAFF P/B is the sole open inter gate
+
+Baseline re-verification pass over the `pixel_exact` gates from #32p/#32s.
+
+**CAVLC MBAFF P — DONE / BIT-EXACT.** `dbg_g6_mbaff_deblock` (fully-filtered
+ffmpeg reference, the real oracle — *not* `-skip_loop_filter`): `g6_cavlc_ip`
+**frame#1 (P) gate-ON luma sad=0 max=0, cb=0, cr=0**. The `mbaff_cavlc_ip`
+P-frame sad=551 / `mbaff_cavlc_ip2` sad=1154 seen in `dbg_g5_interlaced` are
+purely the skip-loop-filter harness artefact (same class as the mbaff_i1
+sad=499 I-frame noted in #32p), confirmed because `g5`'s own I-frames show
+identical-magnitude residue (ff0 sad 381–703) against that mismatched
+reference. #32q's decode-order + pair-scan-addressing fixes closed CAVLC MBAFF
+P for real.
+
+**Still open — CABAC MBAFF P/B only.** `dbg_g5_interlaced`: `mbaff_ip` P
+sad≈30k, `mbaff_ibp` P 45764 / B 75300. `dbg_g6_mbaff_deblock` has no CABAC-P
+or any-B clip, so those numbers are the best signal and they are genuine
+decoder divergence (not a harness artefact). Root cause per #32q's
+`ffmpeg -debug mb_type` cross-check: skip/coded grid matches ffmpeg through
+pair 5, diverges at pairs 6–7 where the first coded MB is `P_8x8` — the
+sub-partition CABAC parse (`sub_mb_type` / `mvd` amvd-sum contexts under an
+MBAFF frame-coded pair) produces wrong values without desyncing `terminate`.
+
+NEXT (unchanged from #32q, now the *only* remaining inter gate): audit
+`slice_data/cabac_b.rs::parse_p_macroblock_cabac` P_8x8 path —
+`p8x8_sub_dims` / `partition_dims` geometry, and the `amvd_sum` /
+`ref_idx_gt0_neighbors` cell picks (`ctx.rs:230-338`, the ffmpeg
+`mvd_cache[scan8[n]-1/-8]` convention) when `left_idx`/`top_idx` come from
+`mbaff::derive_neighbours` rather than plain raster. The decisive tool is the
+compiled-ffmpeg CABAC oracle (`clang` 22.x + vendored `h264_cabac_ref.c` at
+repo root) the #32o/#32f notes already scoped: record engine state + payload
+before pair 6's P_8x8 MB, replay, diff per-bin ctxIdx.
+
+Then: PAFF P/B (B-field unimplemented), G.5 corpus, `pixel_exact` flip.
+
 ## SESSION #32s (2026-08-28) — Non-16-aligned crop-edge gap fixed; reconstruct + deblock at coded dimensions
 
 **BUG**: `decode_slice` / `try_decode_real_slice` / `decode_interlaced` derived
