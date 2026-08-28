@@ -2,6 +2,55 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32q (2026-08-28) — CABAC MBAFF P/B slice: pair-scan addressing bug fixed
+
+**BUG** (`slice_data/cabac_p.rs` + `cabac_b.rs`): `parse_p_slice_cabac` /
+`parse_b_slice_cabac` iterated macroblocks in **plain raster** order
+(`mb_x = mb_idx % cols`, `mb_y = mb_idx / cols`) and committed every per-MB
+array (`macroblocks` via `push`, `nz`/`pred_ctx`/`cabac_ctx`/`inter_ctx`/
+`field_flags` by `[mb_idx]`) at the **decode-order** index — while the
+neighbour lookups used frame-MB-grid positions. In an MBAFF frame the parse
+visits pairs as (top, bottom) before advancing, so `mb_idx ≠ grid address` for
+every bottom macroblock: neighbour context / nnz / cbp / mvd-cell / field-flag
+reads all pulled from the wrong slots, and `mb_field_decoding_flag` /
+`mb_skip_flag` were decoded for the wrong macroblocks. This is the P/B twin of
+the CABAC I-slice `grid_idx` bug fixed in #32e / the CAVLC one in #32f — the P
+and B CABAC paths never got it.
+
+**FIX**: both parsers now derive `(mb_x, mb_y, grid_idx)` pair-aware when
+`mbaff_frame` (identical formula to `cabac_i.rs`), pre-allocate `macroblocks`
+and assign every array by `grid_idx`, and take `left_idx`/`top_idx` from the
+frame grid. Progressive (`mb_aff=false`) is byte-identical (degenerate branch).
+
+**FIX 2** (`mv.rs`): `predict_slice_mvs` processed macroblocks in **grid raster**
+order, so `MvStore::is_available` reported a not-yet-decoded above-right
+macroblock as an available MV predictor (spec §6.4.9 / §8.4.1.3.2 — C is
+unavailable until decoded, and in an MBAFF frame the next pair's top MB is
+decoded *after* the current pair's bottom). New `predict_slice_mvs_ex(…,
+mbaff_frame)` iterates pair-scan **decode** order (committing by grid address);
+`cabac_p.rs` / `cavlc.rs` pass `mbaff_frame`. Progressive unchanged.
+
+**RESULT** (`dbg_g5_interlaced`, ffmpeg `-skip_loop_filter` reference):
+- `mbaff_ip` P frame: SAD **83157 → ~30000**
+- `mbaff_ibp` P frame **107208 → 45764**, B frame **127746 → 75300**
+- `mbaff_cavlc_ip2` P frame **5748 → 1154** (decode-order fix)
+- `mbaff_cavlc_ip` P frame stays **551** (near-exact, unaffected)
+- `mbaff_i1` (CABAC MBAFF I) unchanged at 499 (deblock-vs-skipLF artefact, #32p)
+- progressive CABAC P/B conformance, B-frame, CAVLC, lib (246): all green;
+  clippy `-D warnings` clean.
+
+`ffmpeg -debug mb_type` cross-check on `mbaff_ip`'s P frame: our skip/coded
+grid now matches ffmpeg through pair 5; **pairs 6–7 still diverge** — the first
+coded MB there is `P_8x8` (mb_type 3) and its sub-partition CABAC parse
+(sub_mb_type / mvd contexts under MBAFF) produces wrong values without
+desyncing the terminate, then the skip flags for the bottom MBs of pairs 6/7
+flip. NEXT: audit `parse_p_macroblock_cabac`'s P_8x8 path — `amvd_sum` /
+`ref_idx_gt0_neighbors` cell geometry and `sub_mb_type` decode for MBAFF
+frame-coded pairs (the #32b amvd convention applied to the grid neighbours).
+Also: `cabac_b.rs` has ~11 unconditional `eprintln!` debug lines in the inter
+parse path (pre-existing) — gate behind `KINETIX_BINTRACE` before MBAFF P/B is
+a supported path.
+
 ## SESSION #32p (2026-08-27) — CABAC MBAFF I-slice desync (#32e item 6) — ROOT-CAUSED AND FIXED
 
 **BUG**: `end_of_slice_flag` was decoded after *every* macroblock in the CABAC

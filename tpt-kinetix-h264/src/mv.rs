@@ -941,20 +941,45 @@ pub(crate) fn predict_slice_mvs(
     first_mb: u32,
     mbs: &[Macroblock],
 ) -> Result<(), &'static str> {
-    let mut cur = [MvCell::INTRA; 16];
-    for (i, mb) in mbs.iter().enumerate() {
-        let mb_idx = first_mb as usize + i;
+    predict_slice_mvs_ex(store, mb_cols, slice_id, first_mb, mbs, false)
+}
+
+/// As [`predict_slice_mvs`], with `mbaff_frame` selecting pair-scan decode
+/// order. `mbs` must be indexed by frame-MB grid address (as the MBAFF-aware
+/// parsers now commit). Processing in decode order matters: a macroblock's
+/// above-right neighbour is only an available MV predictor once it has been
+/// decoded (spec §6.4.9 / §8.4.1.3.2), and in an MBAFF frame the next pair's
+/// top macroblock is decoded *after* the current pair's bottom.
+pub(crate) fn predict_slice_mvs_ex(
+    store: &mut MvStore,
+    mb_cols: u32,
+    slice_id: u32,
+    first_mb: u32,
+    mbs: &[Macroblock],
+    mbaff_frame: bool,
+) -> Result<(), &'static str> {
+    let total = mbs.len();
+    let cols = mb_cols as usize;
+    for d in 0..total {
+        let grid_idx = if mbaff_frame {
+            let pair = d >> 1;
+            let px = pair % cols;
+            let py = pair / cols;
+            (2 * py + (d & 1)) * cols + px
+        } else {
+            first_mb as usize + d
+        };
+        let mb = &mbs[if mbaff_frame { grid_idx } else { d }];
+        let mut cur = [MvCell::INTRA; 16];
         // MBAFF: record this MB's field convention so later neighbours are
         // FIX_MV_MBAFF-converted when their own convention differs, and
         // declare it for THIS MB's own neighbour fetches.
-        store.set_mb_field(mb_idx, mb.mb_field_flag);
+        store.set_mb_field(grid_idx, mb.mb_field_flag);
         store.set_cur_field(mb.mb_field_flag);
         if mb.motion.is_some() || mb.skip {
-            predict_inter_macroblock(store, &mut cur, mb_idx, mb_cols as usize, slice_id, mb)?;
-        } else {
-            cur = [MvCell::INTRA; 16];
+            predict_inter_macroblock(store, &mut cur, grid_idx, cols, slice_id, mb)?;
         }
-        store.commit(mb_idx, cur, slice_id);
+        store.commit(grid_idx, cur, slice_id);
     }
     Ok(())
 }

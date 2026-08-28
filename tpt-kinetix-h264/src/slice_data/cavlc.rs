@@ -746,7 +746,7 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
     // Derive motion vectors for every inter macroblock (§8.4.1). The store is
     // per-slice; single-slice pictures use slice id 0.
     let mut mv_store = MvStore::new(total);
-    crate::mv::predict_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
+    crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0, &macroblocks, mbaff_frame)?;
 
     Ok(ParsedSlice {
         macroblocks,

@@ -708,7 +708,8 @@ impl ModeCdfs {
              \"palette_y_color_8\": {},\n  \"palette_uv_color_2\": {},\n  \
              \"palette_uv_color_3\": {},\n  \"palette_uv_color_4\": {},\n  \
              \"palette_uv_color_5\": {},\n  \"palette_uv_color_6\": {},\n  \
-             \"palette_uv_color_7\": {},\n  \"palette_uv_color_8\": {}\n}}",
+             \"palette_uv_color_7\": {},\n  \"palette_uv_color_8\": {},\n  \
+             \"use_wiener\": {},\n  \"use_sgrproj\": {},\n  \"restoration_type\": {}\n}}",
             j2(&self.partition_w8),
             j2(&self.partition_w16),
             j2(&self.partition_w32),
@@ -751,6 +752,9 @@ impl ModeCdfs {
             j2(&self.palette_uv_color_6),
             j2(&self.palette_uv_color_7),
             j2(&self.palette_uv_color_8),
+            j1(&self.use_wiener),
+            j1(&self.use_sgrproj),
+            j1(&self.restoration_type),
         )
     }
 }

@@ -143,6 +143,8 @@ class SymbolDecoder:
                 "value": symbol,
                 "before": bit_pos_before,
                 "after": self.bit_pos,
+                "rng": self.symbol_range,
+                "val": self.symbol_value,
             }
         )
         return symbol

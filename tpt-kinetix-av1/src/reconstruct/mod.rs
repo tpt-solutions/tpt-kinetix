@@ -1135,7 +1135,15 @@ pub fn decode_tile_group(
              \"allow_screen_content_tools\":{allow_screen_content_tools},\"allow_intrabc\":{allow_intrabc},\
              \"sb_row_start\":{sb_row_start},\"sb_row_end\":{sb_row_end},\
              \"sb_col_start\":{sb_col_start},\"sb_col_end\":{sb_col_end},\
-             \"tile_px_x0\":{x0},\"tile_px_y0\":{y0}}}"
+             \"tile_px_x0\":{x0},\"tile_px_y0\":{y0},\
+             \"frame_restoration_type\":[{},{},{}],\"lr_unit_size\":[{},{},{}],\"uses_lr\":{}}}",
+            lr.frame_restoration_type[0],
+            lr.frame_restoration_type[1],
+            lr.frame_restoration_type[2],
+            lr.lr_unit_size[0],
+            lr.lr_unit_size[1],
+            lr.lr_unit_size[2],
+            lr.uses_lr
         );
         capture_tile_trace(
             data,
@@ -1175,8 +1183,13 @@ fn capture_tile_trace(
         .iter()
         .map(|e| {
             format!(
-                "[{},{},{},{}]",
-                e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after
+                "[{},{},{},{},{},{}]",
+                e.n_symbols,
+                e.value,
+                e.bit_pos_before,
+                e.bit_pos_after,
+                e.sym_range,
+                e.sym_value
             )
         })
         .collect();

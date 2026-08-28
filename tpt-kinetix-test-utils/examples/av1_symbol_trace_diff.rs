@@ -261,6 +261,28 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         Ok(nofilter) => {
             let nofilter_trace = take_symbol_trace();
             let nofilter_markers = take_block_markers();
+            if std::env::var("KINETIX_AV1_DBG_ROWS").is_ok() {
+                let (r0, r1) = std::env::var("KINETIX_AV1_DBG_RROWS")
+                    .ok()
+                    .and_then(|s| {
+                        let mut it = s.split(',');
+                        Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+                    })
+                    .unwrap_or((0usize, 4usize));
+                let (c0, c1) = std::env::var("KINETIX_AV1_DBG_COLS")
+                    .ok()
+                    .and_then(|s| {
+                        let mut it = s.split(',');
+                        Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+                    })
+                    .unwrap_or((0usize, 24usize));
+                for row in r0..r1.min(h) {
+                    let a = row * w + c0.min(w);
+                    let b = row * w + c1.min(w);
+                    println!("  NF row{row} c{c0}..{c1} kinetix={:?}", &nofilter[a..b]);
+                    println!("  NF row{row} c{c0}..{c1} dav1d  ={:?}", &ref_data[a..b]);
+                }
+            }
             if let Some((p2, x2, y2, g2, w2)) = first_divergence(&nofilter, ref_data, w, h, 3) {
                 if (p2, x2, y2) == (plane, x, y) {
                     println!(

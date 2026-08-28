@@ -2589,19 +2589,35 @@
 > copies that slightly-wrong bottom row downward and the error compounds
 > left-to-right until `mi=(8,18)` fully desyncs.
 >
-> **Important:** `mi=(8,8)`'s bottom-LEFT 16×16 tx is perfect while the
-> bottom-RIGHT (same size, same transform) has the rows-62-63 error — so it
-> is **not** a generic inverse-transform tail-row bug (that would hit both).
-> It is specific to the bottom-right tx block's own coefficients or its
-> reference samples. Targets, in order: (1) one wrong **coefficient** in that
-> tx block — a `coeff_br` / Exp-Golomb-tail magnitude off by 1, or a
-> scan-position / `dc_sign` error — that a high-frequency position turns into
-> a small bottom-rows ripple; (2) its **AboveRow** (bottom row of the tx
-> block above) or **LeftCol** wrongly extended near the bottom (spec §7.11.2
-> fills `LeftCol` for `i = 0..w+h-1`); (3) V_PRED + non-zero `angle_delta` in
-> `mi=(4,18)` (`Dr_Intra_Derivative` spacing / the `shift = ((idx <<
-> upsample) >> 1) & 0x1F` interpolation) — downstream of the PAETH drift, not
-> the origin.
+> **CORRECTION (2026-08-27 cont'd) — most of the "progressive drift" above
+> was a harness artifact.** `av1_symbol_trace_diff` compares
+> **NOFILTER-Kinetix vs FILTERED-dav1d** (`ref_data` is always dav1d's fully
+> deblocked+CDEF'd output; there is no dav1d NOFILTER). So every block-edge
+> pixel looks "off by 1-3" purely from dav1d's deblock, even when Kinetix's
+> pre-filter reconstruction is bit-exact. Re-checked with a proper Pass-2
+> (true NOFILTER) row dump (new `NF row…` lines in the harness): `mi=(8,8)`'s
+> bottom-right 16×16 tx (px 48,48) is `eob=0` pure PAETH and reconstructs
+> **flat 41, bit-exact** through row 63 — the rows-62-63 "ripple" was
+> entirely dav1d's deblock. Likewise `mi=(0,16)`/`mi=(0,18)`/`mi=(4,16)`/
+> `mi=(4,18)` are all pre-filter bit-exact in their interiors; only their
+> last 1-2 columns differ, and only by deblock. `inverse_adst16` (§7.13.2.8),
+> `cos128`/`Cos128_Lookup`, `round2`, `butterfly`, `hadamard`, and the ADST
+> input/output permutations were all byte-diffed against the live spec this
+> session and are **exact** — the transform is not the bug.
+>
+> **The real first pre-filter divergence is `mi=(8,18)` (px 32,72).** Both
+> decoders pick `y_mode=2` (V_PRED) and its `AboveRow` (row 71, cols 32-47) is
+> flat `106` in both. But Kinetix's residual there is a **flat DC `+76`**
+> while dav1d's is a **horizontal gradient** `[+65,+63,+60,+56,…,+41,+41]`.
+> Flat-DC vs AC-gradient ⇒ Kinetix decoded a different coefficient set ⇒
+> **Kinetix is entropy-desynced entering `mi=(8,18)`**. The desync must be in
+> the symbol consumption of `mi=(4,16)` (PAETH, flat 170, pre-filter exact —
+> so it reconstructs right but may consume the wrong number of `all_zero` /
+> coeff symbols), `mi=(4,18)` (V_PRED, residual matched dav1d for positions
+> 0-13), or the partition read between them. This is precisely what the
+> deferred **`intra_decode.py` mode+coeff oracle** would localize in one run —
+> the Rust `KINETIX_AV1_CAPTURE_TILE` side is ready (base CDFs + full trace +
+> `params`); the Python consumer still needs writing.
 >
 > Files modified: `tpt-kinetix-av1/src/frame.rs`,
 > `tpt-kinetix-av1/src/reconstruct/mod.rs`,
@@ -2610,4 +2626,67 @@
 > `tpt-kinetix-av1/src/reconstruct/tests.rs`,
 > `tpt-kinetix-av1/tests/proptest_coeffs.rs`. No `git commit` calls.
 > `capabilities().pixel_exact` untouched (still `false`).
+
+> ## 2026-08-27 (cont'd) — ★ THE PART 1 ORACLE IS BUILT AND THE ENTROPY PATH IS PROVEN CORRECT ★
+>
+> Built `tools/av1_oracle/intra_decode.py` — an independent, from-scratch
+> re-implementation of the entire keyframe-intra tile syntax
+> (`read_lr` §5.11.57 → `decode_partition` §5.11.4 → `intra_frame_mode_info`
+> §5.11.7 → `palette_tokens` §5.11.49 → `coeffs` §5.11.39), driven by its own
+> `SymbolDecoder`, that diffs its per-symbol trace against Kinetix's captured
+> trace (`KINETIX_AV1_CAPTURE_TILE` → `av1_tile_trace.json`). Run via
+> `just av1-oracle-tile [entry]`.
+>
+> The Rust capture side gained: `sym_range`/`sym_value` per trace entry (so a
+> range-state divergence is caught even when decoded values still match) and
+> `frame_restoration_type`/`lr_unit_size`/`uses_lr` + the LR CDFs in the
+> params/mode-CDF dump.
+>
+> **RESULT: the oracle matches Kinetix's decode *exactly*, symbol-for-symbol
+> and range-for-range, across the WHOLE tile, for ALL FIVE corpus entries**
+> (`testsrc` 7891, `mandelbrot` 3708, `smptebars` 2520, `testsrc2` 6534,
+> `solid_red` 64 symbols). Zero divergence.
+>
+> **This closes ~13 sessions of chasing an "entropy desync" that does not
+> exist. The entire AV1 bitstream-parsing / entropy-decode path is correct** —
+> every partition, mode symbol, palette colour map, Wiener LR coefficient, and
+> transform coefficient is confirmed by an independent implementation.
+> (Caveat: the oracle loads Kinetix's CDF *tables*, so a numerically-wrong
+> default CDF entry that both share is still invisible — but the mode + key
+> coeff CDFs were separately byte-diffed against the live spec earlier this
+> session and are exact.)
+>
+> **Therefore every remaining pixel divergence is in RECONSTRUCTION, not
+> parsing:** intra prediction (directional/PAETH/SMOOTH/DC border prep,
+> `angle_delta`, edge filter/upsample), inverse transform (the ADST/DCT
+> butterflies were spec-verified but the 2-D driver / rescale / `dq_denom` /
+> `Transform_Row_Shift` per Kinetix's *non-spec TxSize enum ordering* were
+> not), dequant, CfL (§7.11.5), filter-intra prediction (§7.11.2.3), palette
+> reconstruction (colour-map → pixels), and the in-loop filters
+> (deblock/CDEF/LR — LR is still an unapplied passthrough).
+>
+> **Bug found while building the oracle (in the oracle, not Kinetix, but
+> instructive):** Kinetix's internal `TxSize` enum (`coeff_tables.rs`) does
+> **not** match the AV1 spec's — Kinetix puts `TX_32X64`/`TX_64X32` at
+> indices 11/12 where the spec has `TX_4X16`/`TX_16X4`; `TX_8X32` is 15 in
+> Kinetix vs 13 in the spec. Kinetix is internally consistent (all its tables
+> use its ordering), so this is not a Kinetix bug — but any oracle / external
+> comparison must use Kinetix's ordering, and it's a latent trap for anyone
+> cross-referencing spec pseudocode against `reconstruct/`.
+>
+> **Next session: attack reconstruction directly.** With a NOFILTER-Kinetix
+> vs FILTERED-dav1d comparison being unreliable at block edges (documented
+> above), the cleanest approach is to add a pre-filter frame dump and compare
+> *block interiors* only, per intra mode: start with the simplest non-flat
+> failing block (a DC or PAETH block with a small known-correct residual, now
+> that coefficients are trusted), verify prediction and inverse-transform
+> output sample-by-sample. `just av1-oracle-tile` gives the exact decoded
+> coefficient array for any block to check the transform against.
+>
+> Files this pass: NEW `tools/av1_oracle/intra_decode.py`; modified
+> `tpt-kinetix-av1/src/entropy.rs` (+sym_range/value), `reconstruct/mod.rs`
+> (capture format), `reconstruct/mode_cdfs.rs` (LR CDFs in dump),
+> `tools/av1_oracle/{symbol_decoder,coeffs}.py` (trace fields; fixed a
+> pre-existing `TX_CLASS_HORIZONTAL` typo in `coeffs.py`), `justfile`
+> (`av1-oracle-tile`). No `git commit` calls.
 

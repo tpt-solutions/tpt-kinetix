@@ -546,7 +546,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     }
 
     let mut mv_store = MvStore::new(total);
-    crate::mv::predict_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks)?;
+    crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0, &macroblocks, mbaff_frame)?;
     Ok(ParsedSlice {
         macroblocks,
         nz,

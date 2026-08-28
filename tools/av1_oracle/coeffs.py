@@ -278,7 +278,7 @@ def _coeff_br_ctx(tx_size, plane_tx_type, quant, pos) -> int:
         if row < 2 and col < 2:
             return mag + 7
         return mag + 14
-    if tx_class == TX_CLASS_HORIZONTAL:
+    if tx_class == TX_CLASS_HORIZ:
         if col == 0:
             return mag + 7
         return mag + 14

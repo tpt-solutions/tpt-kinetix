@@ -127,6 +127,17 @@ av1-capture BLOCK ENTRY="mandelbrot":
     KINETIX_AV1_CAPTURE={{BLOCK}} cargo run -q -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ENTRY}}
     {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/diff_block.py av1_capture.json
 
+# The full "Part 1 oracle": capture a corpus entry's whole tile (base CDFs +
+# every symbol + block markers + frame params via KINETIX_AV1_CAPTURE_TILE),
+# then re-decode the entire tile syntax (read_lr -> partition -> mode_info ->
+# coeffs) independently in Python and diff every symbol against Kinetix's. A
+# clean "TRACE MATCHES" means the entropy path is correct and any pixel
+# divergence is in reconstruction (2026-08-27: all 5 corpus entries match).
+av1-oracle-tile ENTRY="testsrc":
+    set -e
+    KINETIX_AV1_CAPTURE_TILE=1 cargo run -q -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ENTRY}}
+    {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/intra_decode.py av1_tile_trace.json
+
 # Run every Criterion bench in the workspace.
 bench:
     cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline

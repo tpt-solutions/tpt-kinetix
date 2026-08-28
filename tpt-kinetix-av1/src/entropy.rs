@@ -68,6 +68,12 @@ pub struct SymbolTraceEntry {
     pub bit_pos_before: usize,
     /// Absolute bit position after this read (renormalization included).
     pub bit_pos_after: usize,
+    /// Arithmetic-decoder `symbol_range` / `symbol_value` right after
+    /// renormalization (before CDF adaptation). Lets an independent oracle
+    /// pinpoint the exact symbol where its internal state first diverges,
+    /// even when decoded values still match.
+    pub sym_range: u32,
+    pub sym_value: u32,
     /// Source location of the *originating* call (propagated through
     /// `read_bool`/`read_literal` when they're the direct caller).
     pub location: &'static Location<'static>,
@@ -553,6 +559,8 @@ impl<'a> SymbolDecoder<'a> {
                 value: symbol,
                 bit_pos_before,
                 bit_pos_after,
+                sym_range: self.symbol_range,
+                sym_value: self.symbol_value,
                 location,
             });
         }
