@@ -2,6 +2,16 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32r (2026-08-28) — cabac_b.rs debug lines gated behind KINETIX_BINTRACE
+
+All 11 unconditional `eprintln!` debug lines in `slice_data/cabac_b.rs` (the P/B
+CABAC inter parse path) are now gated behind
+`if std::env::var("KINETIX_BINTRACE").is_ok() { ... }`, matching the convention
+used in `cabac_i.rs`, `cabac_p.rs`, `cavlc.rs`, `mv.rs`, `deblock.rs`, and
+`ctx.rs`. This was flagged in #32q as a prerequisite before MBAFF P/B is a
+supported path. `cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings`
+clean; `cargo test -p tpt-kinetix-h264 --lib` 246/246 green.
+
 ## SESSION #32q (2026-08-28) — CABAC MBAFF P/B slice: pair-scan addressing bug fixed
 
 **BUG** (`slice_data/cabac_p.rs` + `cabac_b.rs`): `parse_p_slice_cabac` /

@@ -93,7 +93,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     // of the intra-in-P suffix there) -- keep both copies adapted identically.
     ctxs.sync_shared_mb_type_ctx_prefix_to_suffix_p();
     let (r_post_t, o_post_t) = dec.debug_state();
-    eprintln!("  MB({mb_x},{mb_y}) mb_type={inter_type:?} cabac: {r_pre_t:#06x}/{o_pre_t:#010x} -> {r_post_t:#06x}/{o_post_t:#010x}");
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        eprintln!("  MB({mb_x},{mb_y}) mb_type={inter_type:?} cabac: {r_pre_t:#06x}/{o_pre_t:#010x} -> {r_post_t:#06x}/{o_post_t:#010x}");
+    }
     match inter_type {
         None => {
             // Intra macroblock inside P slice.
@@ -167,7 +169,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 for st in &mut sub_types {
                     *st = ctxs.sub_mb_p.decode(dec) as u8;
                 }
-                eprintln!("  P8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?}");
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!("  P8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?}");
+                }
                 motion.sub_mb_type = Some(sub_types);
                 // ref_idx per 8×8 partition (only coded when num_ref_idx_l0_active > 1, spec §7.3.5.2).
                 for part in 0..4 {
@@ -250,7 +254,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             1,
                         )?;
                         let (r1, o1) = dec.debug_state();
-                        eprintln!("    part={part} sub={sub_i} sub_t={sub_t} xp={xp} yp={yp} wp={wp} hp={hp} mvd=({mvd_x},{mvd_y}) cabac: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+                        if std::env::var("KINETIX_BINTRACE").is_ok() {
+                            eprintln!("    part={part} sub={sub_i} sub_t={sub_t} xp={xp} yp={yp} wp={wp} hp={hp} mvd=({mvd_x},{mvd_y}) cabac: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
+                        }
                         motion.mvd_l0.push((mvd_x, mvd_y));
                         let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
                         this_inter.set_partition_l0(
@@ -328,10 +334,12 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         0,
                         1,
                     )?;
-                    eprintln!(
-                        "  MB({mb_x},{mb_y}) mvd_l0[{}]=({mvd_x},{mvd_y}) ri={ri}",
-                        motion.mvd_l0.len()
-                    );
+                    if std::env::var("KINETIX_BINTRACE").is_ok() {
+                        eprintln!(
+                            "  MB({mb_x},{mb_y}) mvd_l0[{}]=({mvd_x},{mvd_y}) ri={ri}",
+                            motion.mvd_l0.len()
+                        );
+                    }
                     motion.mvd_l0.push((mvd_x, mvd_y));
                     this_inter.set_partition_l0(&blks, mvd_x, mvd_y, ri as i32);
                 }
@@ -344,7 +352,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let cbp = cbp_l | (cbp_c << 4);
             mb.cbp = cbp;
             let (e_r, e_o) = dec.debug_state();
-            eprintln!("  MB({mb_x},{mb_y}) inter cbp={cbp:#04x}(l={cbp_l:#x} c={cbp_c}) after_mvd={s_r:#06x}/{s_o:#010x} after_cbp={e_r:#06x}/{e_o:#010x}");
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!("  MB({mb_x},{mb_y}) inter cbp={cbp:#04x}(l={cbp_l:#x} c={cbp_c}) after_mvd={s_r:#06x}/{s_o:#010x} after_cbp={e_r:#06x}/{e_o:#010x}");
+            }
             let mut qp = prev_qp;
             let mut dqp_nz = false;
             if cbp_l != 0 || cbp_c != 0 {
@@ -353,7 +363,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 dqp_nz = dqp != 0;
                 qp = (prev_qp + dqp + 52).rem_euclid(52);
                 let (r1, o1) = dec.debug_state();
-                eprintln!("  MB({mb_x},{mb_y}) dqp={dqp} qp={qp} after_qpdelta={r1:#06x}/{o1:#010x}  (before={r0:#06x}/{o0:#010x})");
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!("  MB({mb_x},{mb_y}) dqp={dqp} qp={qp} after_qpdelta={r1:#06x}/{o1:#010x}  (before={r0:#06x}/{o0:#010x})");
+                }
             }
             mb.qp = qp;
 
@@ -373,7 +385,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 nctx,
             )?;
             let (r_post_res, o_post_res) = dec.debug_state();
-            eprintln!("  MB({mb_x},{mb_y}) residual: before={r_pre_res:#06x}/{o_pre_res:#010x} after={r_post_res:#06x}/{o_post_res:#010x}");
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!("  MB({mb_x},{mb_y}) residual: before={r_pre_res:#06x}/{o_pre_res:#010x} after={r_post_res:#06x}/{o_post_res:#010x}");
+            }
 
             let mb_type_str = format!("{:?}", mb.mb_type);
             tracer.on_mb_parsed(mb_x, mb_y, &mb_type_str, mb.qp, mb.cbp, 0, &[0u8; 16]);
@@ -905,9 +919,11 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             )?;
             motion.mvd_l1.push((mx1, my1));
             this_inter.set_partition_l1(&blks, mx1, my1, ri1 as i32);
-            eprintln!(
-                "  BBi({mb_x},{mb_y}) ri0={ri0} ri1={ri1} mvd0=({mx0},{my0}) mvd1=({mx1},{my1})"
-            );
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "  BBi({mb_x},{mb_y}) ri0={ri0} ri1={ri1} mvd0=({mx0},{my0}) mvd1=({mx1},{my1})"
+                );
+            }
             mb.motion = Some(motion);
         }
         4..=21 => {
@@ -1267,10 +1283,12 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     ("L1", &mut motion.mvd_l1)
                 };
                 if let Some(last) = arr.last_mut() {
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!(
                         "FORCE_MVD MB({mb_x},{mb_y}) {name} {:?} -> ({},{})",
                         last, v[3], v[4]
                     );
+                }
                     *last = (v[3], v[4]);
                 }
             }
@@ -1644,16 +1662,20 @@ fn decode_inter_residual_cabac(
         let (lr, lo) = dec.debug_state();
         let has_coeff = ctxs.cbf.decode(dec, CAT_LUMA_4X4, left_coded, top_coded);
         let (ar, ao) = dec.debug_state();
-        eprintln!("    luma blk={block} left={left_coded} top={top_coded} cbf={has_coeff} {lr:#06x}/{lo:#010x}->{ar:#06x}/{ao:#010x}");
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!("    luma blk={block} left={left_coded} top={top_coded} cbf={has_coeff} {lr:#06x}/{lo:#010x}->{ar:#06x}/{ao:#010x}");
+        }
         if has_coeff {
             let (coeffs, count) =
                 ctxs.residual
                     .decode_block(dec, CAT_LUMA_4X4, 16, nctx.is_field());
             let (cr, co) = dec.debug_state();
-            eprintln!(
-                "    luma blk={block} nz={count} coeffs={:?} after={cr:#06x}/{co:#010x}",
-                &coeffs[..16]
-            );
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "    luma blk={block} nz={count} coeffs={:?} after={cr:#06x}/{co:#010x}",
+                    &coeffs[..16]
+                );
+            }
             this_nz.luma[block] = count;
             mb.luma_coeffs[block] = coeffs;
         }

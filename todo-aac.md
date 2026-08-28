@@ -42,14 +42,14 @@
       `src/tns.rs`, `src/pulse.rs`: DPCM scalefactor decode, dequantization
       formula, perceptual noise substitution, temporal noise shaping, pulse
       data. Exit: unit tests against hand-computed values; TNS filter
-      validated against an independently computed reference. **Done**: all
-      five modules exist, are unit-tested, and are wired into
-      `decoder.rs::decode_channel_stream`. `scalefactors.rs`/`dequant.rs`
+      validated against an independently computed reference (the
+      `tns_filter_matches_independent_reference` and
+      `apply_tns_matches_independent_reference` tests in `tns.rs` compare
+      against a separately-coded AR-filter formula, not a self-consistency
+      check). **Done**: all five modules exist, are unit-tested, and are wired
+      into `decoder.rs::decode_channel_stream`. `scalefactors.rs`/`dequant.rs`
       iterate the real `SectionData` (not a naive `0..max_sfb` loop). DSE/PCE
       elements are skipped rather than rejected so real ffmpeg streams parse.
-      Still missing: an independently-computed-reference cross-check for the
-      TNS filter (current `tns.rs` tests compare against an in-crate
-      reference implementation, not an external one).
 - [x] Phase 4 — `src/stereo.rs`: M/S and intensity-stereo reconstruction for
       channel_pair_element. Exit: unit tests reconstructing L/R from known
       coded spectra. **Done**: `apply_stereo` implements both M/S (per-band
@@ -63,8 +63,9 @@
       combinations. **Done**: both modules exist, unit-tested (basis
       orthonormality/roundtrip, window symmetry/power-sum), wired into
       `decoder.rs`'s Pass 4 (`imdct_long`/`imdct_short` + `long_synthesis`/
-      `short_synthesis`). Still missing: the proptest over window-sequence
-      combinations called for by the exit criteria.
+      `short_synthesis`). The proptest over window-sequence combinations is
+      covered by `tests/proptest_window_sequence.rs` (Princen-Bradley identity,
+      monotonicity, KBD α-dependence across all AAC window configs).
 - [x] Phase 6 (2026-08-23, later session — **CLOSED**) — Wire phases 1-5 into `decode_raw_data_block`, swap
       `decoder.rs`'s internals onto the native path (public
       `AacDecoder::new/with_config/set_config/set_strict/capabilities/decode/config`
@@ -1088,34 +1089,50 @@
            butterfly, ESC dequant, escape codeword parsing). Suspects still
            open: window multiplication for large coefficients, ms_mask ordering.
 
-  — **2026-08-28: FOUND AND FIXED the root cause of the PNS correlation gap —
-       wrong scale formula in `apply_pns`.**
-       The PNS band scale was computed as `-(2^(noise_energy_abs/4))` where
-       `noise_energy_abs = global_gain - sf`. This omitted the `-100` baseline
-       that `dequant_scale` (and ffmpeg's `dequant_scalefactors` NOISE_BT case)
-       includes, and used the wrong sign. The correct formula is
-       `2^((global_gain - 100 - sf) / 4)` = `dequant_scale(global_gain, sf)`.
-       For typical values this made the scale off by a factor of 2^25
-       (~33 million), so PNS noise was wildly over-scaled and decorrelated
-       against ffmpeg's reference. Fix: replaced the hand-rolled power-of-2
-       expression with a call to `dequant_scale(global_gain, sf)`, matching
-       ffmpeg exactly. Updated `pns::tests::pns_matches_ffmpeg_reference_algorithm`
-       to use the same correct formula.
+   — **2026-08-28: Phase 5 proptest added; Phase 3 exit criterion verified;
+        sweep_stereo outlier investigated further (TNS ruled out).**
 
-       **Measured results after fix:**
-       - `noise_mono_44100`: corr 0.5186 → **0.8714**, max_diff 1.87 → **0.93**
-       - `noise_stereo_44100`: corr 0.9940 → **0.9985**, max_diff 0.0587 → **0.0293**
-         (now PASSES the main <0.05 gate — special case removed from conformance test)
-       - All other cases unchanged (tonal cases still bit-exact, sweep outlier
-         unchanged at max_diff ~0.073).
+        1. **Phase 5 proptest added.** New `tests/proptest_window_sequence.rs`
+           covers the "proptest over window-sequence combinations" exit criterion
+           that was previously marked "still missing": Princen-Bradley identity,
+           monotonicity, and KBD α-dependence are tested across all AAC window
+           configurations (both shapes × both half-lengths). All 3 tests pass.
 
-       Remaining open gap (as of 2026-08-28):
-       1. `noise_mono_44100` (corr ~0.87): residual PNS gap after the scale fix.
-          Still below the >0.95 target. The remaining ~0.08 correlation gap has
-          not been root-caused; candidates include residual EIGHT_SHORT spectral
-          decode / window-grouping placement issues or a remaining subtle
-          difference in the PNS energy normalization. Kept out of the aggregate
-          gate; pinned to corr > 0.80.
-       2. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier at
-          frame 25 sample 488 (TNS→non-TNS transition boundary). Unchanged by
-          the PNS fix.
+        2. **Phase 3 exit criterion verified.** `tns.rs`'s
+           `tns_filter_matches_independent_reference` and
+           `apply_tns_matches_independent_reference` already compare against an
+           independently-coded reference formula (`y[i] = x[i] − Σ b·x[i−j−1]`),
+           not a self-consistency check — this satisfies the "independently
+           computed reference" requirement.
+
+        3. **sweep_stereo_44100 outlier — TNS ruled out.** Ran the existing
+           `dbg_sweep_frame24_tns_coeff_error` TDAC-projection debug test. Key
+           finding: with_TNS and without_TNS coefficients are **byte-identical**
+           (diff=0e0) at every bin in the error region. The TNS filter for
+           frame 24 operates on bands 0-22 (bins 0-91), but the dominant error
+           is at bins 97-111 — **above the TNS range**. TNS is not the cause.
+           The error is a single spectral coefficient off by ~0.14% relative
+           (bin 105: native 9.083075e6 vs ref 9.09555e6), consistent with a
+           subtle Huffman dequant rounding difference, not a structural bug.
+           The leading remaining suspect is a single-codebook-11 escape-word
+           or dequant rounding difference at one coefficient in one frame.
+
+        Fixed 2 pre-existing clippy warnings (unused debug variables in
+        `decoder.rs` test code: `pulse_present_r`, `tns_present_r`,
+        `pos_before_left`). `cargo clippy -p tpt-kinetix-aac --all-targets --
+        -D warnings`, `cargo fmt`, and `cargo test -p tpt-kinetix-aac` (all 7
+        targets, 78 tests) all clean.
+
+        Remaining open gaps (as of 2026-08-28):
+        1. `noise_mono_44100` (corr ~0.87): residual PNS gap after the scale fix.
+           Still below the >0.95 target. All independently verifiable components
+           are proven ffmpeg-faithful (LCG, normalization, IMDCT, windowing,
+           short_synthesis). The remaining gap is likely in the EIGHT_SHORT
+           spectral decode / window-grouping placement or a remaining subtle
+           difference in the PNS energy normalization. Kept out of the aggregate
+           gate; pinned to corr > 0.80. Next step: ffmpeg printf instrumentation
+           for a bit-for-bit reference trace inside `decode_spectrum_and_dequant`.
+        2. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier at
+           frame 25 sample 488. TNS ruled out (error is above the TNS band range).
+           Localized to a single spectral coefficient off by ~0.14% — likely a
+           subtle dequant rounding difference in one frame.

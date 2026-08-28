@@ -1422,11 +1422,17 @@ mod synth_tests {
         let r_energy: f64 = side.iter().map(|&x| (x as f64).powi(2)).sum();
         let r_max = side.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
         let r_nonzero = side.iter().filter(|&&x| x != 0.0).count();
-        eprintln!("\nRight channel: energy={:.3e} max_abs={:.3e} nonzero={}/1024", r_energy, r_max, r_nonzero);
+        eprintln!(
+            "\nRight channel: energy={:.3e} max_abs={:.3e} nonzero={}/1024",
+            r_energy, r_max, r_nonzero
+        );
         let l_energy: f64 = mid.iter().map(|&x| (x as f64).powi(2)).sum();
         let l_max = mid.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
         let l_nonzero = mid.iter().filter(|&&x| x != 0.0).count();
-        eprintln!("Left channel: energy={:.3e} max_abs={:.3e} nonzero={}/1024", l_energy, l_max, l_nonzero);
+        eprintln!(
+            "Left channel: energy={:.3e} max_abs={:.3e} nonzero={}/1024",
+            l_energy, l_max, l_nonzero
+        );
 
         // Check right channel band types across all bands.
         let max_sfb_r = cpe.right.ics.max_sfb as usize;
@@ -1438,25 +1444,41 @@ mod synth_tests {
             }
         }
         let r_bt_nonzero = cpe.right.band_type.iter().filter(|&&x| x != 0).count();
-        eprintln!("Right channel: {} non-zero band types out of {}", r_bt_nonzero, cpe.right.band_type.len());
+        eprintln!(
+            "Right channel: {} non-zero band types out of {}",
+            r_bt_nonzero,
+            cpe.right.band_type.len()
+        );
 
         // Check right channel raw coeffs (before any processing).
         let r_raw_nonzero = cpe.right.coeffs.iter().filter(|&&x| x != 0.0).count();
-        eprintln!("Right channel raw coeffs: {} non-zero out of 1024", r_raw_nonzero);
+        eprintln!(
+            "Right channel raw coeffs: {} non-zero out of 1024",
+            r_raw_nonzero
+        );
         let l_raw_nonzero = cpe.left.coeffs.iter().filter(|&&x| x != 0.0).count();
-        eprintln!("Left channel raw coeffs: {} non-zero out of 1024", l_raw_nonzero);
+        eprintln!(
+            "Left channel raw coeffs: {} non-zero out of 1024",
+            l_raw_nonzero
+        );
 
         // Print right channel sections.
         eprintln!("\nRight channel sections:");
         for (gi, grp) in cpe.right.sections.groups.iter().enumerate() {
             for (si, sec) in grp.iter().enumerate() {
-                eprintln!("  g{gi}/s{si}: sect_cb={} sect_len={}", sec.sect_cb, sec.sect_len);
+                eprintln!(
+                    "  g{gi}/s{si}: sect_cb={} sect_len={}",
+                    sec.sect_cb, sec.sect_len
+                );
             }
         }
         eprintln!("\nLeft channel sections:");
         for (gi, grp) in cpe.left.sections.groups.iter().enumerate() {
             for (si, sec) in grp.iter().enumerate() {
-                eprintln!("  g{gi}/s{si}: sect_cb={} sect_len={}", sec.sect_cb, sec.sect_len);
+                eprintln!(
+                    "  g{gi}/s{si}: sect_cb={} sect_len={}",
+                    sec.sect_cb, sec.sect_len
+                );
             }
         }
 
@@ -1475,31 +1497,68 @@ mod synth_tests {
                 reader.read_bit().unwrap();
             }
         }
-        let pos_before_left = reader.bit_position();
+        let _pos_before_left = reader.bit_position();
         // We can't easily re-parse the left channel without re-running the full parse,
         // so instead let's compare the left and right channel's first few raw coeffs.
-        eprintln!("\nLeft channel first 16 raw coeffs: {:?}", &cpe.left.coeffs[..16]);
-        eprintln!("Right channel first 16 raw coeffs: {:?}", &cpe.right.coeffs[..16]);
+        eprintln!(
+            "\nLeft channel first 16 raw coeffs: {:?}",
+            &cpe.left.coeffs[..16]
+        );
+        eprintln!(
+            "Right channel first 16 raw coeffs: {:?}",
+            &cpe.right.coeffs[..16]
+        );
 
         // Check right channel scalefactors and global_gain.
-        eprintln!("\nLeft global_gain={}, Right global_gain={}", cpe.left.global_gain, cpe.right.global_gain);
-        eprintln!("Left scalefactors (first 10): {:?}", &cpe.left.scalefactor[..10.min(cpe.left.scalefactor.len())]);
-        eprintln!("Right scalefactors (first 10): {:?}", &cpe.right.scalefactor[..10.min(cpe.right.scalefactor.len())]);
+        eprintln!(
+            "\nLeft global_gain={}, Right global_gain={}",
+            cpe.left.global_gain, cpe.right.global_gain
+        );
+        eprintln!(
+            "Left scalefactors (first 10): {:?}",
+            &cpe.left.scalefactor[..10.min(cpe.left.scalefactor.len())]
+        );
+        eprintln!(
+            "Right scalefactors (first 10): {:?}",
+            &cpe.right.scalefactor[..10.min(cpe.right.scalefactor.len())]
+        );
 
         // Check if right channel has any non-zero scalefactors.
         let r_sf_nonzero = cpe.right.scalefactor.iter().filter(|&&x| x != 0).count();
-        eprintln!("Right scalefactors: {} non-zero out of {}", r_sf_nonzero, cpe.right.scalefactor.len());
+        eprintln!(
+            "Right scalefactors: {} non-zero out of {}",
+            r_sf_nonzero,
+            cpe.right.scalefactor.len()
+        );
         let l_sf_nonzero = cpe.left.scalefactor.iter().filter(|&&x| x != 0).count();
-        eprintln!("Left scalefactors: {} non-zero out of {}", l_sf_nonzero, cpe.left.scalefactor.len());
+        eprintln!(
+            "Left scalefactors: {} non-zero out of {}",
+            l_sf_nonzero,
+            cpe.left.scalefactor.len()
+        );
 
         // Check if right channel sections match left channel sections.
         eprintln!("\nSection comparison:");
         eprintln!("Left: {} groups", cpe.left.sections.groups.len());
         eprintln!("Right: {} groups", cpe.right.sections.groups.len());
-        for (gi, (lgrp, rgrp)) in cpe.left.sections.groups.iter().zip(cpe.right.sections.groups.iter()).enumerate() {
-            eprintln!("  Group {gi}: Left {} sections, Right {} sections", lgrp.len(), rgrp.len());
+        for (gi, (lgrp, rgrp)) in cpe
+            .left
+            .sections
+            .groups
+            .iter()
+            .zip(cpe.right.sections.groups.iter())
+            .enumerate()
+        {
+            eprintln!(
+                "  Group {gi}: Left {} sections, Right {} sections",
+                lgrp.len(),
+                rgrp.len()
+            );
             for (si, (ls, rs)) in lgrp.iter().zip(rgrp.iter()).enumerate() {
-                eprintln!("    s{si}: Left(cb={},len={}) Right(cb={},len={})", ls.sect_cb, ls.sect_len, rs.sect_cb, rs.sect_len);
+                eprintln!(
+                    "    s{si}: Left(cb={},len={}) Right(cb={},len={})",
+                    ls.sect_cb, ls.sect_len, rs.sect_cb, rs.sect_len
+                );
             }
         }
 
@@ -1531,7 +1590,11 @@ mod synth_tests {
         // Skip left scalefactors, pulse, tns, gain_control, spectral_data
         // This is complex; instead let's just compare the raw coeffs positions
         eprintln!("\nBitstream position after ics+ms: {pos_after_ms}");
-        eprintln!("Payload length: {} bytes = {} bits", payload.len(), payload.len() * 8);
+        eprintln!(
+            "Payload length: {} bytes = {} bits",
+            payload.len(),
+            payload.len() * 8
+        );
 
         // Decode the right channel's first quad manually to see what bits are being read.
         // First, find the bitstream position where the right channel's spectral data starts.
@@ -1595,8 +1658,12 @@ mod synth_tests {
         let mut sfb = 0usize;
         for sec in &left_sections.groups[0] {
             for _ in 0..sec.sect_len as usize {
-                if sfb >= shared_ics2.max_sfb as usize { break; }
-                if sfb + 1 >= swb.len() { break; }
+                if sfb >= shared_ics2.max_sfb as usize {
+                    break;
+                }
+                if sfb + 1 >= swb.len() {
+                    break;
+                }
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
                 let mut bin = 0usize;
                 while bin < width {
@@ -1631,9 +1698,9 @@ mod synth_tests {
             let _sf = crate::codebooks::decode_scalefactor(&mut reader2);
         }
         // Skip right pulse
-        let pulse_present_r = reader2.read_bit().unwrap() != 0;
+        let _pulse_present_r = reader2.read_bit().unwrap() != 0;
         // Skip right tns
-        let tns_present_r = reader2.read_bit().unwrap() != 0;
+        let _tns_present_r = reader2.read_bit().unwrap() != 0;
         let _gc_r = reader2.read_bit();
         let pos_before_right_spectral = reader2.bit_position();
         eprintln!("Bitstream position before right spectral data: {pos_before_right_spectral}");
@@ -1644,8 +1711,12 @@ mod synth_tests {
         let mut first_quad = None;
         for sec in &right_sections.groups[0] {
             for _ in 0..sec.sect_len as usize {
-                if sfb_r >= shared_ics2.max_sfb as usize { break; }
-                if sfb_r + 1 >= swb.len() { break; }
+                if sfb_r >= shared_ics2.max_sfb as usize {
+                    break;
+                }
+                if sfb_r + 1 >= swb.len() {
+                    break;
+                }
                 let width = (swb[sfb_r + 1] - swb[sfb_r]) as usize;
                 let mut bin = 0usize;
                 while bin < width {
@@ -1664,20 +1735,33 @@ mod synth_tests {
             }
         }
         eprintln!("Right channel first quad (manual decode): {:?}", first_quad);
-        eprintln!("Right channel section codebook: {}", right_sections.groups[0][0].sect_cb);
+        eprintln!(
+            "Right channel section codebook: {}",
+            right_sections.groups[0][0].sect_cb
+        );
 
         // Peek at the bits at the right channel's spectral data position.
         let mut reader3 = crate::bitreader::BitReader::new(payload);
         reader3.seek_to_bit(pos_before_right_spectral);
         let peek_bits = reader3.peek(32).unwrap_or(0);
-        eprintln!("Bits at right spectral position ({pos_before_right_spectral}): {:032b}", peek_bits);
-        eprintln!("Byte at position: byte[{}] = {:02x}", pos_before_right_spectral / 8, payload[pos_before_right_spectral / 8]);
+        eprintln!(
+            "Bits at right spectral position ({pos_before_right_spectral}): {:032b}",
+            peek_bits
+        );
+        eprintln!(
+            "Byte at position: byte[{}] = {:02x}",
+            pos_before_right_spectral / 8,
+            payload[pos_before_right_spectral / 8]
+        );
 
         // Also peek at the bits at the left channel's spectral data position for comparison.
         let mut reader4 = crate::bitreader::BitReader::new(payload);
         reader4.seek_to_bit(pos_before_left_spectral);
         let peek_left = reader4.peek(32).unwrap_or(0);
-        eprintln!("Bits at left spectral position ({pos_before_left_spectral}): {:032b}", peek_left);
+        eprintln!(
+            "Bits at left spectral position ({pos_before_left_spectral}): {:032b}",
+            peek_left
+        );
 
         // Manually decode the first codeword from the right channel's position.
         let mut reader5 = crate::bitreader::BitReader::new(payload);
@@ -1697,7 +1781,9 @@ mod synth_tests {
                     break;
                 }
             }
-            if found.is_some() { break; }
+            if found.is_some() {
+                break;
+            }
         }
         eprintln!("Right channel first codeword: idx={:?}", found);
 
@@ -1719,7 +1805,9 @@ mod synth_tests {
                     break;
                 }
             }
-            if found6.is_some() { break; }
+            if found6.is_some() {
+                break;
+            }
         }
         eprintln!("Left channel first codeword (book 10): idx={:?}", found6);
 
@@ -1738,12 +1826,18 @@ mod synth_tests {
         let swb_r = crate::tables::SWB_OFFSET_1024[hdr.sampling_frequency_index as usize];
         let mut total_quads = 0usize;
         for sfb in 0..40 {
-            if sfb + 1 >= swb_r.len() { break; }
+            if sfb + 1 >= swb_r.len() {
+                break;
+            }
             let width = (swb_r[sfb + 1] - swb_r[sfb]) as usize;
             total_quads += width / 4;
         }
         eprintln!("Right channel: {total_quads} quads in 40 bands");
-        eprintln!("Available bits for right spectral: {} bits ({} bytes)", payload.len() * 8 - pos_before_right_spectral, payload.len() - pos_before_right_spectral / 8);
+        eprintln!(
+            "Available bits for right spectral: {} bits ({} bytes)",
+            payload.len() * 8 - pos_before_right_spectral,
+            payload.len() - pos_before_right_spectral / 8
+        );
 
         // Check if the right channel's spectral data might be at a different position.
         // Let's look for non-zero data in the payload after the left channel.
@@ -1774,7 +1868,10 @@ mod synth_tests {
         let pos_right_spectral_reparsed = reader7.bit_position();
         eprintln!("Right spectral position (reparsed): {pos_right_spectral_reparsed}");
         let peek_right = reader7.peek(32).unwrap_or(0);
-        eprintln!("Bits at reparsed right spectral position: {:032b}", peek_right);
+        eprintln!(
+            "Bits at reparsed right spectral position: {:032b}",
+            peek_right
+        );
 
         // Check the bitstream position before parsing the right channel's sections.
         let mut reader8 = crate::bitreader::BitReader::new(payload);
@@ -1792,16 +1889,32 @@ mod synth_tests {
             }
         }
         eprintln!("Right sections (reparsed): {:?}", right_sects);
-        eprintln!("Right sections (original): {:?}", cpe.right.sections.groups[0].iter().map(|s| (s.sect_cb, s.sect_len)).collect::<Vec<_>>());
+        eprintln!(
+            "Right sections (original): {:?}",
+            cpe.right.sections.groups[0]
+                .iter()
+                .map(|s| (s.sect_cb, s.sect_len))
+                .collect::<Vec<_>>()
+        );
 
         // Check the bitstream position after parsing the right channel's sections.
         let pos_after_right_sections = reader8.bit_position();
         eprintln!("Bitstream position after right sections: {pos_after_right_sections}");
 
         // Now let's check if the right channel's sections match between reparse and original.
-        let orig_sects: Vec<(u8, u32)> = cpe.right.sections.groups[0].iter().map(|s| (s.sect_cb, s.sect_len)).collect();
+        let orig_sects: Vec<(u8, u32)> = cpe.right.sections.groups[0]
+            .iter()
+            .map(|s| (s.sect_cb, s.sect_len))
+            .collect();
         let reparse_sects: Vec<(u8, usize)> = right_sects;
-        eprintln!("Sections match: {}", orig_sects.iter().map(|(c,l)| (*c, *l as usize)).collect::<Vec<_>>() == reparse_sects);
+        eprintln!(
+            "Sections match: {}",
+            orig_sects
+                .iter()
+                .map(|(c, l)| (*c, *l as usize))
+                .collect::<Vec<_>>()
+                == reparse_sects
+        );
 
         // The sections don't match! This means the left channel's spectral data
         // consumed the wrong number of bits, causing the right channel to be parsed
@@ -1809,7 +1922,12 @@ mod synth_tests {
         // Let's check the bitstream position after the left channel's spectral data
         // in the original parse.
         eprintln!("\nLeft spectral data bit consumption:");
-        eprintln!("  Reparse: {} -> {} ({} bits)", pos_before_left_spectral, pos_after_left_spectral, pos_after_left_spectral - pos_before_left_spectral);
+        eprintln!(
+            "  Reparse: {} -> {} ({} bits)",
+            pos_before_left_spectral,
+            pos_after_left_spectral,
+            pos_after_left_spectral - pos_before_left_spectral
+        );
 
         // Now let's decode the right channel using the REPARSED sections (which are correct).
         let mut reader9 = crate::bitreader::BitReader::new(payload);
@@ -1825,13 +1943,19 @@ mod synth_tests {
         let pos_right_spectral_correct = reader9.bit_position();
         eprintln!("Right spectral position (correct): {pos_right_spectral_correct}");
         let peek_right_correct = reader9.peek(32).unwrap_or(0);
-        eprintln!("Bits at correct right spectral position: {:032b}", peek_right_correct);
+        eprintln!(
+            "Bits at correct right spectral position: {:032b}",
+            peek_right_correct
+        );
 
         // Decode the first quad from the correct position
         let mut reader10 = crate::bitreader::BitReader::new(payload);
         reader10.seek_to_bit(pos_right_spectral_correct);
         let first_quad_correct = crate::codebooks::decode_spectral_quad(&mut reader10, 5);
-        eprintln!("First quad at correct position (book 5): {:?}", first_quad_correct);
+        eprintln!(
+            "First quad at correct position (book 5): {:?}",
+            first_quad_correct
+        );
 
         eprintln!("\nCoefficients at error bins (with TNS vs without TNS):");
         for b in [97, 99, 101, 103, 105, 107, 109, 111] {

@@ -1184,12 +1184,7 @@ fn capture_tile_trace(
         .map(|e| {
             format!(
                 "[{},{},{},{},{},{}]",
-                e.n_symbols,
-                e.value,
-                e.bit_pos_before,
-                e.bit_pos_after,
-                e.sym_range,
-                e.sym_value
+                e.n_symbols, e.value, e.bit_pos_before, e.bit_pos_after, e.sym_range, e.sym_value
             )
         })
         .collect();
