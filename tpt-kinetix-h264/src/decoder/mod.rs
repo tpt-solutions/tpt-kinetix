@@ -338,9 +338,14 @@ impl H264Decoder {
                     // Also cap total macroblock count so O(MB_count) paths (e.g.
                     // emit_skip_frame) can't be abused by a malformed SPS that
                     // encodes near-8192×8192 dimensions (≈262 k MBs → timeout).
+                    // Use the coded (MB-aligned) dimensions for the cap — they are
+                    // always ≥ the cropped display dimensions and give the true
+                    // upper bound on macroblock count.
                     const MAX_MB_COUNT: u32 = 36_864; // ≈3072×3072 (generous for 4K)
-                    let mb_cols = width.div_ceil(16);
-                    let mb_rows = height.div_ceil(16);
+                    let coded_width = sps.coded_width_pixels();
+                    let coded_height = sps.coded_height_pixels();
+                    let mb_cols = coded_width / 16;
+                    let mb_rows = coded_height / 16;
                     if mb_cols * mb_rows > MAX_MB_COUNT {
                         continue;
                     }
@@ -516,8 +521,13 @@ impl H264Decoder {
         let slice_qp = pic_init_qp + header.slice_qp_delta;
         let chroma_qp_index_offset = pps.map(|p| p.chroma_qp_index_offset).unwrap_or(0);
 
-        let mb_cols = width.div_ceil(16);
-        let mb_rows = height.div_ceil(16);
+        // Reconstruct and deblock at the coded (MB-aligned) dimensions so that
+        // edge macroblocks' padding is available to the filter; crop to the
+        // visible rectangle when emitting the output frame.
+        let coded_width = sps.coded_width_pixels();
+        let coded_height = sps.coded_height_pixels();
+        let mb_cols = coded_width / 16;
+        let mb_rows = coded_height / 16;
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
@@ -566,8 +576,8 @@ impl H264Decoder {
             &parsed.macroblocks,
             mb_cols,
             mb_rows,
-            width,
-            height,
+            coded_width,
+            coded_height,
             chroma_qp_index_offset,
             scaling,
             &crate::reconstruct::WeightedPred::Default,
@@ -639,10 +649,9 @@ impl H264Decoder {
             }
         }
 
-        // Assemble the planar YUV420p frame.
-        let mut data = recon.luma;
-        data.extend(recon.chroma_cb);
-        data.extend(recon.chroma_cr);
+        // Assemble the planar YUV420p frame, cropping from coded (MB-aligned)
+        // dimensions to the visible rectangle.
+        let data = recon.crop_yuv420p(width, height);
 
         self.frame_count += 1;
         let frame = VideoFrame {
@@ -750,13 +759,17 @@ impl H264Decoder {
         packet: &Packet,
         tracer: &mut T,
     ) -> Result<VideoFrame, KinetixError> {
-        let mb_cols = width.div_ceil(16);
-        let mb_rows = height.div_ceil(16);
-
         let sps = match self.sps_store.values().next() {
             Some(s) => s.clone(),
             None => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
         };
+        // Coded (MB-aligned) dimensions for reconstruction and deblocking; the
+        // visible (cropped) `width`/`height` are used for the output frame.
+        let coded_width = sps.coded_width_pixels();
+        let coded_height = sps.coded_height_pixels();
+        let mb_cols = coded_width / 16;
+        let mb_rows = coded_height / 16;
+
         let pps = self.pps_store.values().next().cloned();
         // Active scaling lists: PPS override merged over SPS set (§8.5.9).
         let scaling = pps.as_ref().map(|p| &p.scaling).unwrap_or(&sps.scaling);
@@ -851,8 +864,8 @@ impl H264Decoder {
                         &parsed.macroblocks,
                         mb_cols,
                         mb_rows,
-                        width,
-                        height,
+                        coded_width,
+                        coded_height,
                         chroma_qp_index_offset,
                         scaling,
                         &crate::reconstruct::WeightedPred::Default,
@@ -925,9 +938,7 @@ impl H264Decoder {
                         }
                     }
 
-                    let mut data = recon.luma;
-                    data.extend(recon.chroma_cb);
-                    data.extend(recon.chroma_cr);
+                    let data = recon.crop_yuv420p(width, height);
 
                     self.frame_count += 1;
                     return Ok(VideoFrame {
@@ -1066,8 +1077,8 @@ impl H264Decoder {
                             &ref_frames,
                             mb_cols,
                             mb_rows,
-                            width,
-                            height,
+                            coded_width,
+                            coded_height,
                             sps.mb_adaptive_frame_field_flag && !header.field_pic_flag,
                             chroma_qp_index_offset,
                             scaling,
@@ -1158,9 +1169,7 @@ impl H264Decoder {
                             }
                         }
 
-                        let mut data = recon.luma;
-                        data.extend(recon.chroma_cb);
-                        data.extend(recon.chroma_cr);
+                        let data = recon.crop_yuv420p(width, height);
 
                         self.frame_count += 1;
                         let frame = VideoFrame {
@@ -1355,8 +1364,8 @@ impl H264Decoder {
                             &ref_frames_l1,
                             mb_cols,
                             mb_rows,
-                            width,
-                            height,
+                            coded_width,
+                            coded_height,
                             chroma_qp_index_offset,
                             scaling,
                             &weighted_pred,
@@ -1451,9 +1460,7 @@ impl H264Decoder {
                             eprintln!("PREDEBLOCK dump -> {p}");
                             let _ = std::fs::write(&p, &recon.luma);
                         }
-                        let mut data = recon.luma;
-                        data.extend(recon.chroma_cb);
-                        data.extend(recon.chroma_cr);
+                        let data = recon.crop_yuv420p(width, height);
 
                         self.frame_count += 1;
                         let frame = VideoFrame {

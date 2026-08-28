@@ -1538,11 +1538,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tokio",
  "tpt-kinetix-aac",
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-h264",
+ "tpt-kinetix-mux",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tracing",

@@ -153,9 +153,11 @@ impl H264Decoder {
             return Ok(InterlacedOutcome::Fallback);
         }
 
-        let mb_cols = width.div_ceil(16);
-        let mb_rows_field = height.div_ceil(32);
-        let field_height = height / 2;
+        let coded_width = sps.coded_width_pixels();
+        let coded_height = sps.coded_height_pixels();
+        let mb_cols = coded_width / 16;
+        let mb_rows_field = coded_height / 32;
+        let field_height = coded_height / 2;
 
         // PAFF P-field picture: field-based inter prediction (§8.2.4.2.5 +
         // §8.4.2.2.1). The reference list is built from field references and each
@@ -225,7 +227,7 @@ impl H264Decoder {
             &parsed.macroblocks,
             mb_cols,
             mb_rows_field,
-            width,
+            coded_width,
             field_height,
             chroma_qp_index_offset,
             scaling,
@@ -285,8 +287,10 @@ impl H264Decoder {
         let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
         let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
         let slice_qp = pic_init_qp + header.slice_qp_delta;
-        let mb_cols = width.div_ceil(16);
-        let mb_rows = height.div_ceil(16);
+        let coded_width = sps.coded_width_pixels();
+        let coded_height = sps.coded_height_pixels();
+        let mb_cols = coded_width / 16;
+        let mb_rows = coded_height / 16;
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
@@ -330,8 +334,8 @@ impl H264Decoder {
             &parsed.macroblocks,
             mb_cols,
             mb_rows,
-            width,
-            height,
+            coded_width,
+            coded_height,
             chroma_qp_index_offset,
             scaling,
             &crate::reconstruct::WeightedPred::Default,
@@ -353,10 +357,9 @@ impl H264Decoder {
 
         // Assemble the full interlaced frame and store it in the DPB as a frame
         // reference. MBAFF frames are coded as frame pictures (field_pic_flag is
-        // false), so no field interleaving accumulator is required.
-        let mut data = recon.luma;
-        data.extend(recon.chroma_cb);
-        data.extend(recon.chroma_cr);
+        // false), so no field interleaving accumulator is required. Crop from coded
+        // (MB-aligned) dimensions to the visible rectangle.
+        let data = recon.crop_yuv420p(width, height);
         let frame = VideoFrame {
             pts: packet.pts,
             dts: packet.dts,
@@ -586,8 +589,21 @@ impl H264Decoder {
         self.store_reference_picture(nal, sps, header, &field_frame, None);
 
         // Buffer the field and emit the interleaved frame once the pair is complete.
+        let visible_width = sps.pic_width_pixels();
+        let visible_height = sps.pic_height_pixels();
         match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
-            Some(full) => Ok(InterlacedOutcome::Frame(full)),
+            Some(full) => Ok(InterlacedOutcome::Frame(VideoFrame {
+                data: crate::reconstruct::crop_yuv420p(
+                    &full.data,
+                    full.width,
+                    full.height,
+                    visible_width,
+                    visible_height,
+                ),
+                width: visible_width,
+                height: visible_height,
+                ..full
+            })),
             None => Ok(InterlacedOutcome::Handled),
         }
     }

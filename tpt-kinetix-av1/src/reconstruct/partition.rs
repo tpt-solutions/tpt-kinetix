@@ -356,9 +356,10 @@ impl<'a> TileDecodeState<'a> {
         };
         let subs = split_into_subblocks(bw, bh, partition);
 
-        if mi_row < 8 && mi_col < 8 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+        if mi_row < 32 && mi_col < 32 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
             eprintln!(
-                "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}"
+                "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition} subs={subs:?} bit={}",
+                self.dec.bit_position()
             );
         }
 
@@ -402,6 +403,14 @@ impl<'a> TileDecodeState<'a> {
             avail_u && (self.mi_width_log2_above[mi_col.min(self.mi_cols - 1)] as usize) < bsl;
         let left =
             avail_l && (self.mi_height_log2_left[mi_row.min(self.mi_rows - 1)] as usize) < bsl;
+        if mi_row < 32 && mi_col < 32 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+            eprintln!(
+                "DBG part_ctx mi=({mi_row},{mi_col}) bsize={bsize} bsl={bsl} avail_u={avail_u} avail_l={avail_l} above_val={} left_val={} above={above} left={left} ctx={}",
+                self.mi_width_log2_above[mi_col.min(self.mi_cols - 1)],
+                self.mi_height_log2_left[mi_row.min(self.mi_rows - 1)],
+                (left as usize) * 2 + (above as usize)
+            );
+        }
         (left as usize) * 2 + (above as usize)
     }
 
@@ -431,6 +440,9 @@ impl<'a> TileDecodeState<'a> {
         }
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(slot) = self.mi_height_log2_left.get_mut(r) {
+                if r < 4 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+                    eprintln!("DBG record_mi_size r={r} h_log2={h_log2} from mi=({mi_row},{mi_col}) bsize={bsize} (was {})", *slot);
+                }
                 *slot = h_log2;
             }
         }

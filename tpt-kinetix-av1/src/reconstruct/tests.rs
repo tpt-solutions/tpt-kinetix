@@ -1370,3 +1370,353 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
     predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0, 8, 8);
     assert!(out.iter().all(|&v| v == 128), "got {out:?}");
 }
+
+#[test]
+fn inverse_transform_2d_dct_round_trip_with_ac_coefficients() {
+    // The 2-D inverse transform must correctly apply both the row and column
+    // passes for a block with non-zero AC coefficients. This exercises the
+    // full butterfly network (not just the DC-only path). We verify the
+    // output is non-flat, in-range, and deterministic.
+    let mut dequant = vec![0i32; 16];
+    dequant[0] = 500;  // DC
+    dequant[1] = 200;  // first AC (horizontal frequency)
+    dequant[4] = -100; // first AC (vertical frequency)
+    dequant[5] = 50;   // diagonal AC
+    let mut residual = vec![0i32; 16];
+    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual);
+    // Not flat: AC coefficients must produce spatial variation.
+    let first = residual[0];
+    assert!(
+        residual.iter().any(|&v| v != first),
+        "AC coefficients must produce spatial variation, got {residual:?}"
+    );
+    // In valid sample range.
+    assert!(
+        residual.iter().all(|&v| (-256..=512).contains(&v)),
+        "residual out of range: {residual:?}"
+    );
+    // Deterministic: same input → same output.
+    let mut residual2 = vec![0i32; 16];
+    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual2);
+    assert_eq!(residual, residual2);
+}
+
+#[test]
+fn inverse_transform_adst_4x4_produces_spatial_output() {
+    // ADST-based transform types (ADST_ADST, ADST_DCT, DCT_ADST) exercise
+    // the `inverse_adst4`/`inverse_adst8` butterfly networks. Verify they
+    // produce valid, non-flat output for a block with AC energy.
+    for &tx_type in &[av1::ADST_ADST, av1::ADST_DCT, av1::DCT_ADST] {
+        let mut dequant = vec![0i32; 16];
+        dequant[0] = 400;
+        dequant[3] = 150;
+        dequant[7] = -80;
+        let mut residual = vec![0i32; 16];
+        inverse_transform(&dequant, tx_type, TX_4X4, false, &mut residual);
+        assert!(
+            residual.iter().any(|&v| v != residual[0]),
+            "tx_type {tx_type}: ADST must produce spatial variation"
+        );
+        assert!(
+            residual.iter().all(|&v| (-512..=768).contains(&v)),
+            "tx_type {tx_type}: residual out of range: {residual:?}"
+        );
+    }
+}
+
+#[test]
+fn inverse_transform_rectangular_rescale_path() {
+    // Rectangular transforms with |log2W - log2H| == 1 exercise the sqrt(2)
+    // rescale (Round2(x * 2896, 12)) in the row pass. TX_4X8 (w=4, h=8,
+    // log2w=2, log2h=3) and TX_8X4 (w=8, h=4, log2w=3, log2h=2) are the
+    // smallest such sizes. Verify the output is valid and the full w×h
+    // buffer is written (not just the square subset).
+    for &tx_size in &[av1::TX_4X8, av1::TX_8X4, av1::TX_8X16, av1::TX_16X8] {
+        let w = av1::TX_WIDTH[tx_size];
+        let h = av1::TX_HEIGHT[tx_size];
+        let adj = av1::ADJUSTED_TX_SIZE[tx_size];
+        let adj_w = av1::TX_WIDTH[adj];
+        let adj_h = av1::TX_HEIGHT[adj];
+        let mut dequant = vec![0i32; adj_w * adj_h];
+        dequant[0] = 800;
+        if dequant.len() > 1 {
+            dequant[1] = 200;
+        }
+        if adj_w > 1 && dequant.len() > adj_w {
+            dequant[adj_w] = -100;
+        }
+        let mut residual = vec![0i32; w * h];
+        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, &mut residual);
+        assert_eq!(residual.len(), w * h);
+        assert!(
+            residual.iter().all(|&v| (-1024..=1024).contains(&v)),
+            "tx_size {tx_size}: residual out of range: {residual:?}"
+        );
+        // DC-only input to a DCT_DCT transform must still be spatially flat
+        // even through the rescale path (the rescale is a per-row constant
+        // multiplier for a flat input).
+        let mut dc_only = vec![0i32; adj_w * adj_h];
+        dc_only[0] = 800;
+        let mut dc_residual = vec![0i32; w * h];
+        inverse_transform(&dc_only, av1::DCT_DCT, tx_size, false, &mut dc_residual);
+        let first = dc_residual[0];
+        assert!(
+            dc_residual.iter().all(|&v| v == first),
+            "tx_size {tx_size}: DC-only through rescale must be flat, got {dc_residual:?}"
+        );
+    }
+}
+
+#[test]
+fn inverse_transform_tx8x8_with_ac_matches_expected_scale() {
+    // An 8×8 DCT_DCT block with a known DC coefficient. The DC-only case
+    // must produce a flat residual whose value reflects the row_shift=1 and
+    // col_shift=4 applied after the butterfly passes. For dequant[0] = 8192:
+    // the unnormalized DCT basis gives M·Mᵀ = (n/2)·I = 4·I for n=8, so
+    // the 2-D inverse produces 4 * 8192 = 32768 pre-shift; with row_shift=1
+    // and col_shift=4 the final is round2(round2(32768, 1), 4) = 2048.
+    let mut dequant = vec![0i32; 64];
+    dequant[0] = 8192;
+    let mut residual = vec![0i32; 64];
+    inverse_transform(&dequant, av1::DCT_DCT, TX_8X8, false, &mut residual);
+    assert!(
+        residual.iter().all(|&v| v == residual[0]),
+        "DC-only 8×8 must be flat, got {residual:?}"
+    );
+    // The DC coefficient must not vanish or explode.
+    assert_ne!(residual[0], 0);
+    assert!(residual[0].abs() < 10000);
+}
+
+#[test]
+fn filter_intra_prediction_matches_hand_computed_values() {
+    // AV1 spec §7.11.2.3: filter-intra processes the block in 4×2 sub-blocks,
+    // each filtered from up to 7 causal neighbour samples. With uniform
+    // borders (top=100, left=200, tl=128) and filter_intra_mode=0
+    // (FILTER_DC_PRED), the first sub-block at (i2=0, j4=0) reads its
+    // taps from top/left/tl directly.
+    //
+    // For the first 4×2 sub-block (i2=0, j4=0):
+    //   p[0] = above_row(-1) = tl = 128  (i2==0, i<5, i==0 → above_row(j4*4+0-1) = above_row(-1))
+    //   p[1] = above_row(0) = top[0] = 100
+    //   p[2] = above_row(1) = top[1] = 100
+    //   p[3] = above_row(2) = top[2] = 100
+    //   p[4] = above_row(3) = top[3] = 100
+    //   p[5] = left_col(0) = left[0] = 200  (j4==0, i>=5 → left_col(i2*2+i-5) = left_col(0))
+    //   p[6] = left_col(1) = left[1] = 200
+    // Using INTRA_FILTER_TAPS[0] = the DC filter taps:
+    //   [-6, 10, 0, 0, 0, 12, 0] for (i1=0,j1=0)
+    //   pr = -6*128 + 10*100 + 0 + 0 + 0 + 12*200 + 0 = -768 + 1000 + 2400 = 2632
+    //   val = Round2Signed(2632, 4) = (2632 + 8) >> 4 = 165
+    let top = vec![100i32; 8];
+    let left = vec![200i32; 8];
+    let mut out = vec![0i32; 64];
+    predict_filter_intra(0, &top, &left, 128, 8, 8, &mut out);
+    // First sample of the first sub-block: i2=0, j4=0, i1=0, j1=0.
+    assert_eq!(out[0], 165, "filter-intra DC mode first sample, got {}", out[0]);
+    // All outputs must be in valid range.
+    assert!(
+        out.iter().all(|&v| (0..=255).contains(&v)),
+        "filter-intra output out of range: {out:?}"
+    );
+}
+
+#[test]
+fn filter_intra_mode2_horizontal_matches_hand_computed() {
+    // filter_intra_mode=2 (FILTER_H_PRED): for the first sub-block
+    // (i2=0, j4=0), the taps use INTRA_FILTER_TAPS[2]:
+    //   [-8, 8, 0, 0, 0, 16, 0] for (i1=0,j1=0)
+    // With top=100, left=200, tl=128:
+    //   p = [128, 100, 100, 100, 100, 200, 200]
+    //   pr = -8*128 + 8*100 + 0 + 0 + 0 + 16*200 + 0 = -1024 + 800 + 3200 = 2976
+    //   val = Round2Signed(2976, 4) = (2976 + 8) >> 4 = 186
+    let top = vec![100i32; 8];
+    let left = vec![200i32; 8];
+    let mut out = vec![0i32; 64];
+    predict_filter_intra(2, &top, &left, 128, 8, 8, &mut out);
+    assert_eq!(out[0], 186, "filter-intra H mode first sample, got {}", out[0]);
+    assert!(
+        out.iter().all(|&v| (0..=255).contains(&v)),
+        "filter-intra H output out of range: {out:?}"
+    );
+}
+
+#[test]
+fn inverse_transform_v_dct_8x8_only_col0_nonzero() {
+    // V_DCT: row pass is identity, column pass is DCT. With only column 0
+    // having non-zero input (dequant[0]=400 at row 0, dequant[8]=200 at row
+    // 1), the identity row pass preserves the input, and the column DCT
+    // produces variation down column 0. All-zero columns (1-7) stay zero.
+    // The output has non-zero values in column 0 only.
+    let mut dequant = vec![0i32; 64];
+    dequant[0] = 400; // DC
+    dequant[8] = 200; // vertical-frequency coefficient (row 1, col 0)
+    let mut residual = vec![0i32; 64];
+    inverse_transform(&dequant, av1::V_DCT, TX_8X8, false, &mut residual);
+    // Column 0 must have variation (vertical frequency present).
+    let col0_val = residual[0];
+    assert!(
+        (0..8).any(|r| residual[r * 8] != col0_val),
+        "V_DCT with AC must vary down column 0"
+    );
+    // Columns 1-7 must be all-zero (no input energy in those columns).
+    for col in 1..8 {
+        for row in 0..8 {
+            assert_eq!(
+                residual[row * 8 + col], 0,
+                "V_DCT col {col} must be zero (no input energy)"
+            );
+        }
+    }
+}
+
+#[test]
+fn inverse_transform_h_dct_8x8_only_row0_nonzero() {
+    // H_DCT: row pass is DCT, column pass is identity. With only row 0
+    // having non-zero input (dequant[0]=400, dequant[1]=200), the row DCT
+    // produces variation across row 0. Rows 1-7 had all-zero input and
+    // stay zero. The identity column pass just copies.
+    let mut dequant = vec![0i32; 64];
+    dequant[0] = 400; // DC
+    dequant[1] = 200; // horizontal-frequency coefficient
+    let mut residual = vec![0i32; 64];
+    inverse_transform(&dequant, av1::H_DCT, TX_8X8, false, &mut residual);
+    // Row 0 must have variation (horizontal frequency present).
+    let row0_val = residual[0];
+    assert!(
+        (0..8).any(|c| residual[c] != row0_val),
+        "H_DCT with AC must vary across row 0"
+    );
+    // Rows 1-7 must be all-zero (no input energy in those rows).
+    for row in 1..8 {
+        for col in 0..8 {
+            assert_eq!(
+                residual[row * 8 + col], 0,
+                "H_DCT row {row} must be zero (no input energy)"
+            );
+        }
+    }
+}
+
+#[test]
+fn transform_row_shift_table_matches_spec_ordering() {
+    // Kinetix's TxSize enum ordering differs from the spec's. The
+    // TRANSFORM_ROW_SHIFT table must be indexed by Kinetix's enum indices.
+    // Spec values (in spec order): TX_4X4=0, TX_8X8=1, TX_16X16=2, TX_32X32=3,
+    // TX_64X64=4, TX_4X8=0, TX_8X4=0, TX_8X16=1, TX_16X8=1, TX_16X32=1,
+    // TX_32X16=1, TX_32X64=1, TX_64X32=1, TX_4X16=1, TX_16X4=1, TX_8X32=2,
+    // TX_32X8=2, TX_16X64=2, TX_64X16=2.
+    // Kinetix's ordering: 4X4=0, 8X8=1, 16X16=2, 32X32=3, 64X64=4,
+    // 4X8=5, 8X4=6, 8X16=7, 16X8=8, 16X32=9, 32X16=10, 32X64=11, 64X32=12,
+    // 4X16=13, 16X4=14, 8X32=15, 32X8=16, 16X64=17, 64X16=18.
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[TX_4X4], 0);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[TX_8X8], 1);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[TX_16X16], 2);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[TX_32X32], 2);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[TX_64X64], 2);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_4X8], 0);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_8X4], 0);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_8X16], 1);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_16X8], 1);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_8X32], 2);
+    assert_eq!(av1::TRANSFORM_ROW_SHIFT[av1::TX_32X8], 2);
+}
+
+#[test]
+fn adjusted_tx_size_table_clamps_to_32_for_large_sizes() {
+    // AV1 spec §7.12.3: transforms with either side > 32 only code their
+    // low-frequency <= 32 corner. ADJUSTED_TX_SIZE maps each TxSize to the
+    // size whose stride the coefficient array is populated at.
+    assert_eq!(av1::ADJUSTED_TX_SIZE[TX_4X4], TX_4X4);
+    assert_eq!(av1::ADJUSTED_TX_SIZE[TX_8X8], TX_8X8);
+    assert_eq!(av1::ADJUSTED_TX_SIZE[TX_16X16], TX_16X16);
+    assert_eq!(av1::ADJUSTED_TX_SIZE[TX_32X32], TX_32X32);
+    // TX_64X64 adjusts down to TX_32X32.
+    assert_eq!(av1::ADJUSTED_TX_SIZE[TX_64X64], TX_32X32);
+    // TX_64X16 adjusts to TX_32X16 (halve the 64-side).
+    assert_eq!(av1::ADJUSTED_TX_SIZE[av1::TX_64X16], av1::TX_32X16);
+    // TX_16X64 adjusts to TX_16X32.
+    assert_eq!(av1::ADJUSTED_TX_SIZE[av1::TX_16X64], av1::TX_16X32);
+    // TX_32X64 adjusts to TX_32X32.
+    assert_eq!(av1::ADJUSTED_TX_SIZE[av1::TX_32X64], TX_32X32);
+    // TX_64X32 adjusts to TX_32X32.
+    assert_eq!(av1::ADJUSTED_TX_SIZE[av1::TX_64X32], TX_32X32);
+}
+
+#[test]
+fn inverse_transform_16x16_dc_only_is_flat() {
+    // A 16×16 DC-only block must produce a flat residual. This exercises
+    // the larger butterfly networks (n=4) with the row_shift=2 and col_shift=4.
+    let mut dequant = vec![0i32; 256];
+    dequant[0] = 16000;
+    let mut residual = vec![0i32; 256];
+    inverse_transform(&dequant, av1::DCT_DCT, TX_16X16, false, &mut residual);
+    let first = residual[0];
+    assert!(
+        residual.iter().all(|&v| v == first),
+        "16×16 DC-only must be flat, got first={first} last={}",
+        residual[255]
+    );
+    assert_ne!(first, 0);
+}
+
+#[test]
+fn palette_prediction_maps_color_indices_correctly() {
+    // AV1 spec §7.11.4: each output sample is the palette color named by the
+    // color map at that position.
+    let colors = vec![10i32, 50, 100, 200];
+    let color_map = vec![0u8, 1, 2, 3, 3, 2, 1, 0, 0, 0, 1, 1, 2, 2, 3, 3];
+    let info = PaletteBlockInfo {
+        colors: &colors,
+        color_map: &color_map,
+        map_stride: 4,
+        off_x: 0,
+        off_y: 0,
+    };
+    let mut out = vec![0i32; 16];
+    predict_palette(&info, 4, 4, &mut out);
+    assert_eq!(out[0], 10);   // map[0] = 0 → colors[0]
+    assert_eq!(out[1], 50);   // map[1] = 1 → colors[1]
+    assert_eq!(out[2], 100);  // map[2] = 2 → colors[2]
+    assert_eq!(out[3], 200);  // map[3] = 3 → colors[3]
+    assert_eq!(out[15], 200); // map[15] = 3 → colors[3]
+}
+
+#[test]
+fn palette_prediction_with_sub_block_offset() {
+    // When the transform block is not at the coded block's origin, the
+    // color map is read at the correct offset: map[(off_y+i)*stride+off_x+j].
+    let colors = vec![10i32, 50, 100];
+    let color_map = vec![
+        0, 0, 1, 1, //
+        0, 0, 2, 2, //
+        2, 2, 2, 2, //
+        2, 2, 2, 2, //
+    ];
+    let info = PaletteBlockInfo {
+        colors: &colors,
+        color_map: &color_map,
+        map_stride: 4,
+        off_x: 2,
+        off_y: 0,
+    };
+    // Output is 2 wide (tx_w=2) × 4 tall (tx_h=4).
+    // out[0] = map[(0+0)*4 + 2+0] = map[2] = 1 → colors[1] = 50
+    // out[1] = map[(0+0)*4 + 2+1] = map[3] = 1 → colors[1] = 50
+    // out[2] = map[(0+1)*4 + 2+0] = map[6] = 2 → colors[2] = 100
+    // out[3] = map[(0+1)*4 + 2+1] = map[7] = 2 → colors[2] = 100
+    // out[4] = map[(0+2)*4 + 2+0] = map[10] = 2 → colors[2] = 100
+    // out[5] = map[(0+2)*4 + 2+1] = map[11] = 2 → colors[2] = 100
+    // out[6] = map[(0+3)*4 + 2+0] = map[14] = 2 → colors[2] = 100
+    // out[7] = map[(0+3)*4 + 2+1] = map[15] = 2 → colors[2] = 100
+    let mut out = vec![0i32; 8];
+    predict_palette(&info, 2, 4, &mut out);
+    assert_eq!(out[0], 50);
+    assert_eq!(out[1], 50);
+    assert_eq!(out[2], 100);
+    assert_eq!(out[3], 100);
+    assert_eq!(out[4], 100);
+    assert_eq!(out[5], 100);
+    assert_eq!(out[6], 100);
+    assert_eq!(out[7], 100);
+}

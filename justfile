@@ -101,6 +101,13 @@ corpus-check:
 av1-trace-diff *ARGS="mandelbrot":
     cargo run -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ARGS}}
 
+# Block-interior-only diff: compare NOFILTER-Kinetix vs FILTERED-dav1d at only
+# pixels that deblock/CDEF cannot reach (≥4 from any 8×8 boundary on luma).
+# Isolates reconstruction bugs from the filter confound. Requires ffmpeg
+# (with libdav1d) or a standalone dav1d on PATH.
+av1-interior-diff *ARGS="testsrc":
+    cargo run -p tpt-kinetix-test-utils --example av1_interior_diff -- {{ARGS}}
+
 # Re-generate the independent Python oracle's default CDF tables / constants
 # from the Rust crate (tools/av1_oracle/cdf_tables_gen.py). Run after any change
 # to entropy_cdf.rs / coeff_tables.rs.

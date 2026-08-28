@@ -28,6 +28,48 @@ use tpt_kinetix_core::frame::VideoFrame;
 
 use crate::ref_pic::FieldRef;
 
+/// Crop a tightly-packed YUV420p buffer from coded (MB-aligned) dimensions to
+/// the visible (post-crop) rectangle.
+///
+/// Used by the PAFF field-interleave path, where the two half-height fields
+/// have already been merged into a single coded-size buffer that must be
+/// cropped to the display rectangle.
+pub fn crop_yuv420p(
+    data: &[u8],
+    coded_width: u32,
+    coded_height: u32,
+    visible_width: u32,
+    visible_height: u32,
+) -> Vec<u8> {
+    let cw = coded_width as usize;
+    let ch = coded_height as usize;
+    let vw = visible_width as usize;
+    let vh = visible_height as usize;
+    let cw_c = cw / 2;
+    let vw_c = vw / 2;
+    let ch_c = ch / 2;
+    let vh_c = vh / 2;
+    let luma_len = cw * ch;
+    let chroma_len = cw_c * ch_c;
+    assert!(data.len() >= luma_len + 2 * chroma_len);
+    let mut out = Vec::with_capacity(vw * vh + 2 * vw_c * vh_c);
+    for y in 0..vh {
+        let row_start = y * cw;
+        out.extend_from_slice(&data[row_start..row_start + vw]);
+    }
+    let cb_start = luma_len;
+    for y in 0..vh_c {
+        let row_start = cb_start + y * cw_c;
+        out.extend_from_slice(&data[row_start..row_start + vw_c]);
+    }
+    let cr_start = luma_len + chroma_len;
+    for y in 0..vh_c {
+        let row_start = cr_start + y * cw_c;
+        out.extend_from_slice(&data[row_start..row_start + vw_c]);
+    }
+    out
+}
+
 /// The reconstructed YUV420p planes for one frame.
 pub struct ReconstructedFrame {
     pub luma: Vec<u8>,
@@ -45,6 +87,39 @@ pub struct ReconstructedFrame {
 /// These helpers turn a reconstructed *field* (half-height) plane into a full
 /// (interlaced) frame plane, and merge two complementary fields into one frame.
 impl ReconstructedFrame {
+    /// Crop the reconstructed planes from their coded (MB-aligned) dimensions
+    /// to the visible (post-crop) rectangle and pack them into a YUV420p
+    /// byte buffer suitable for a [`VideoFrame`].
+    ///
+    /// The internal planes are always allocated at the coded size
+    /// (`luma_stride ≥ visible_width`) so that reconstruction and deblocking
+    /// can write into the off-visible edge-MB padding. This method discards
+    /// that padding and returns tightly-packed rows at the visible size.
+    pub fn crop_yuv420p(&self, visible_width: u32, visible_height: u32) -> Vec<u8> {
+        let vw = visible_width as usize;
+        let vh = visible_height as usize;
+        let cw = self.luma_stride;
+        let ch = self.chroma_stride;
+        let vw_c = vw / 2;
+        let vh_c = vh / 2;
+        let luma_len = vw * vh;
+        let chroma_len = vw_c * vh_c;
+        let mut data = Vec::with_capacity(luma_len + 2 * chroma_len);
+        for y in 0..vh {
+            let row_start = y * cw;
+            data.extend_from_slice(&self.luma[row_start..row_start + vw]);
+        }
+        for y in 0..vh_c {
+            let row_start = y * ch;
+            data.extend_from_slice(&self.chroma_cb[row_start..row_start + vw_c]);
+        }
+        for y in 0..vh_c {
+            let row_start = y * ch;
+            data.extend_from_slice(&self.chroma_cr[row_start..row_start + vw_c]);
+        }
+        data
+    }
+
     /// De-interleave a field luma plane into a full-height frame plane. `field_h`
     /// is the field plane height in samples (`mb_rows * 16`); the returned plane
     /// has height `field_h * 2` (one sample every other line, parity set by
@@ -2851,6 +2926,78 @@ mod tests {
         // Chroma (8x8) likewise.
         for (i, &v) in f.chroma_cb.iter().enumerate() {
             assert_eq!(v, (i % 256) as u8, "cb sample {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_crop_yuv420p_non_16_aligned() {
+        // Coded 32×24 (2×1.5 MBs), visible 28×22 — a non-16-aligned crop on
+        // both axes. The crop must discard the right/bottom padding columns and
+        // rows while preserving the visible region.
+        let coded_w = 32u32;
+        let coded_h = 24u32;
+        let vis_w = 28u32;
+        let vis_h = 22u32;
+        let cw = coded_w as usize;
+        let ch = coded_h as usize;
+        let cw_c = (coded_w / 2) as usize;
+        let ch_c = (coded_h / 2) as usize;
+        // Build a coded buffer where each luma sample == its x coordinate, each
+        // cb sample == its y coordinate, each cr sample == x+y. This makes it
+        // trivial to verify the crop picked the right region.
+        let mut data = Vec::new();
+        for _y in 0..ch {
+            for x in 0..cw {
+                data.push(x as u8);
+            }
+        }
+        for y in 0..ch_c {
+            for _x in 0..cw_c {
+                data.push(y as u8);
+            }
+        }
+        for y in 0..ch_c {
+            for x in 0..cw_c {
+                data.push((x + y) as u8);
+            }
+        }
+        let cropped = crate::reconstruct::crop_yuv420p(&data, coded_w, coded_h, vis_w, vis_h);
+        let vw = vis_w as usize;
+        let vh = vis_h as usize;
+        let vw_c = (vis_w / 2) as usize;
+        let vh_c = (vis_h / 2) as usize;
+        assert_eq!(cropped.len(), vw * vh + 2 * vw_c * vh_c);
+        // Luma: row y, column x should equal x.
+        for y in 0..vh {
+            for x in 0..vw {
+                assert_eq!(
+                    cropped[y * vw + x],
+                    x as u8,
+                    "luma ({x},{y}) mismatch"
+                );
+            }
+        }
+        // Cb: row y, any x should equal y.
+        let cb_start = vw * vh;
+        for y in 0..vh_c {
+            for x in 0..vw_c {
+                assert_eq!(
+                    cropped[cb_start + y * vw_c + x],
+                    y as u8,
+                    "cb ({x},{y}) mismatch"
+                );
+            }
+        }
+        // Cr: row y, column x should equal x+y.
+        let cr_start = cb_start + vw_c * vh_c;
+        for y in 0..vh_c {
+            for x in 0..vw_c {
+                assert_eq!(
+                    cropped[cr_start + y * vw_c + x],
+                    (x + y) as u8,
+                    "cr ({x},{y}) mismatch"
+                );
+            }
         }
     }
 }

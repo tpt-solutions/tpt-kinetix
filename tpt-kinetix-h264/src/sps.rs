@@ -170,6 +170,37 @@ impl SeqParameterSet {
         })
     }
 
+    /// Coded (MB-aligned) luma picture width in pixels — the width of the
+    /// full macroblock grid before any frame cropping is applied.
+    ///
+    /// Formula (H.264 §7.4.2.1.1):
+    ///   PicWidthInSamplesL = (pic_width_in_mbs_minus1 + 1) × 16
+    ///
+    /// This is the stride used for reconstruction and deblocking; the visible
+    /// (cropped) width is [`SeqParameterSet::pic_width_pixels`].
+    pub fn coded_width_pixels(&self) -> u32 {
+        self.pic_width_in_mbs_minus1
+            .saturating_add(1)
+            .saturating_mul(16)
+    }
+
+    /// Coded (MB-aligned) luma picture height in pixels — the height of the
+    /// full macroblock grid before any frame cropping is applied.
+    ///
+    /// Formula (H.264 §7.4.2.1.1):
+    ///   PicHeightInSamplesL = (2 − frame_mbs_only_flag)
+    ///                         × (pic_height_in_map_units_minus1 + 1) × 16
+    ///
+    /// For an interlaced (`frame_mbs_only_flag == 0`) picture the coded height
+    /// is twice the map-unit height (each map unit covers a 32-line MB pair).
+    /// Saturating for the same reason as [`SeqParameterSet::coded_width_pixels`].
+    pub fn coded_height_pixels(&self) -> u32 {
+        let mb_rows = self.pic_height_in_map_units_minus1.saturating_add(1);
+        mb_rows
+            .saturating_mul(16)
+            .saturating_mul(2 - self.frame_mbs_only_flag as u32)
+    }
+
     /// Luma picture width in pixels (after cropping).
     ///
     /// Formula (H.264 §7.4.2.1.1):
@@ -361,5 +392,72 @@ mod tests {
         assert!(sps.mb_adaptive_frame_field_flag);
         assert_eq!(sps.pic_width_pixels(), 32);
         assert_eq!(sps.pic_height_pixels(), 64); // 2 MBs * 32 / 4 sub_height
+        assert_eq!(sps.coded_width_pixels(), 32);
+        assert_eq!(sps.coded_height_pixels(), 64);
+    }
+
+    #[test]
+    fn test_coded_dimensions_with_crop() {
+        // 1920×1088 coded, crop 16 right / 8 bottom → 1904×1080 visible.
+        // Exercises the non-16-aligned crop path: coded width (1920) is what
+        // reconstruction uses; the display width (1904) is smaller.
+        let sps = SeqParameterSet {
+            profile_idc: 100,
+            level_idc: 40,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 4,
+            num_ref_frames: 2,
+            gaps_in_frame_num_value_allowed_flag: false,
+            pic_width_in_mbs_minus1: 119,       // (119+1)*16 = 1920
+            pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
+            frame_mbs_only_flag: true,
+            mb_adaptive_frame_field_flag: false,
+            frame_cropping_flag: true,
+            frame_crop_left_offset: 0,
+            frame_crop_right_offset: 8, // 8*2 = 16 px
+            frame_crop_top_offset: 0,
+            frame_crop_bottom_offset: 4, // 4*2 = 8 px
+            scaling: ScalingLists::flat(),
+        };
+        assert_eq!(sps.coded_width_pixels(), 1920);
+        assert_eq!(sps.coded_height_pixels(), 1088);
+        assert_eq!(sps.pic_width_pixels(), 1904);
+        assert_eq!(sps.pic_height_pixels(), 1080);
+    }
+
+    #[test]
+    fn test_coded_dimensions_interlaced() {
+        // Interlaced: coded height = 2 * map_units * 16; visible height subtracts
+        // the larger sub_height (4) crop factor.
+        let sps = SeqParameterSet {
+            profile_idc: 100,
+            level_idc: 40,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            separate_colour_plane_flag: false,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 4,
+            num_ref_frames: 2,
+            gaps_in_frame_num_value_allowed_flag: false,
+            pic_width_in_mbs_minus1: 9,         // (9+1)*16 = 160
+            pic_height_in_map_units_minus1: 17, // (17+1)*16*2 = 576 coded
+            frame_mbs_only_flag: false,
+            mb_adaptive_frame_field_flag: true,
+            frame_cropping_flag: true,
+            frame_crop_left_offset: 0,
+            frame_crop_right_offset: 0,
+            frame_crop_top_offset: 2, // 2*4 = 8 px
+            frame_crop_bottom_offset: 2, // 2*4 = 8 px
+            scaling: ScalingLists::flat(),
+        };
+        assert_eq!(sps.coded_width_pixels(), 160);
+        assert_eq!(sps.coded_height_pixels(), 576);
+        assert_eq!(sps.pic_width_pixels(), 160);
+        assert_eq!(sps.pic_height_pixels(), 560);
     }
 }

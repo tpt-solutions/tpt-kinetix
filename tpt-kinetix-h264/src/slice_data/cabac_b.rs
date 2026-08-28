@@ -1283,12 +1283,12 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     ("L1", &mut motion.mvd_l1)
                 };
                 if let Some(last) = arr.last_mut() {
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
-                    eprintln!(
-                        "FORCE_MVD MB({mb_x},{mb_y}) {name} {:?} -> ({},{})",
-                        last, v[3], v[4]
-                    );
-                }
+                    if std::env::var("KINETIX_BINTRACE").is_ok() {
+                        eprintln!(
+                            "FORCE_MVD MB({mb_x},{mb_y}) {name} {:?} -> ({},{})",
+                            last, v[3], v[4]
+                        );
+                    }
                     *last = (v[3], v[4]);
                 }
             }
