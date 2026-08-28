@@ -28,11 +28,15 @@
 //!
 //! # Status
 //!
-//! This crate is a **scaffold**: header types and the rANS primitive exist,
-//! but block reconstruction (prediction, transform, in-loop filter) is not
-//! implemented yet. [`LeanDecoder::capabilities`] reports `pixel_exact:
-//! false` accordingly — see the [`decoder`] module docs for the honesty
-//! contract every Kinetix decoder follows.
+//! Block reconstruction is **implemented**: intra (14 modes) +
+//! unidirectional-P inter prediction ([`prediction`]), the integer
+//! Walsh–Hadamard transform bank and dequant ([`transform`]), the
+//! single-stage in-loop deblock ([`deblock`]), and the rANS entropy stage
+//! all run end-to-end ([`reconstruct`], [`decoder`]). Lean is an
+//! **original** codec with no external reference oracle, so
+//! [`decoder::LeanDecoder::capabilities`] reports `pixel_exact: false`
+//! accordingly — see the [`decoder`] module docs for the honesty contract
+//! every Kinetix decoder follows.
 //!
 //! # v1 target envelope
 //!
@@ -141,8 +145,12 @@
 //! of post-filter quality for keeping the decode pipeline to a single
 //! filter pass that runs in-place on the reconstructed frame buffer.
 
+pub mod deblock;
 pub mod decoder;
 pub mod headers;
+pub mod prediction;
+pub mod reconstruct;
+pub mod transform;
 
 pub use decoder::LeanDecoder;
 pub use headers::{FrameHeader, FrameType, SequenceHeader};

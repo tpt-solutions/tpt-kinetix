@@ -1715,6 +1715,7 @@ version = "0.1.0"
 dependencies = [
  "nom",
  "thiserror",
+ "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
  "tpt-kinetix-test-utils",
 ]

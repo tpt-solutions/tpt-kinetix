@@ -45,16 +45,28 @@
       `DecoderCapabilities` not-pixel-exact contract) — full encode/decode
       round-trip test lands once reconstruction exists
 
+### Implementation (completed 2026-08-28)
+- [x] Port integer Walsh–Hadamard transform bank + quant/dequant
+      (`src/transform.rs`) — exactly invertible at qp=0
+- [x] Port intra (14 modes) + unidirectional-P inter prediction with
+      quarter-pel motion compensation (`src/prediction.rs`)
+- [x] Port single-stage in-loop deblocking filter (`src/deblock.rs`)
+- [x] Implement frame reconstruction + rANS entropy stage
+      (`src/reconstruct.rs`): block syntax encode/decode, frame-level
+      encode/decode entry points, planar YUV `FrameBuffer`
+- [x] Wire reconstruction into `LeanDecoder::decode` with DPB management
+      for reference frames
+- [x] 29 tests pass (qp=0 lossless round-trip, inter skip, header
+      validation, honesty contract, rANS round-trip); clippy-clean
+
 ### Open questions (resolved)
 - [x] Decide whether to factor a shared `tpt-kinetix-bitstream` utility crate
       now that this would be the second hand-rolled bit reader in the
       workspace (alongside `tpt-kinetix-h264/src/bitreader.rs`), or keep them
-      independent per-codec — **Decision: start independent, extract later.**
-      Both `tpt-kinetix-lean` and `tpt-kinetix-vision` carry their own
-      `bitreader.rs` / `rans.rs` copies. A shared `tpt-kinetix-bitstream`
-      crate will be extracted once both codecs are stable enough to freeze the
-      rANS interface (documented in `docs/vision-codec-design.md` DECISION 8
-      and `tpt-kinetix-lean/src/lib.rs`).
+      independent per-codec — **Decision: extract now.** `tpt-kinetix-bitstream`
+      was extracted (Phase 16 DECISION 7) as the single source of truth for
+      `BitReader` + rANS primitives; `tpt-kinetix-lean` depends on it
+      (its now-duplicated `bitreader.rs`/`rans.rs` were deleted).
 - [x] Decide the no_std/MCU port plan and timeline once the v1 alloc-free
       hot path is in place and proven on embedded Linux — **Decision: v1
       targets embedded Linux (prove the alloc-free hot path first); no_std/MCU
