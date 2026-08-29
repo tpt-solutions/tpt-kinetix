@@ -637,6 +637,7 @@ impl H264Decoder {
             mb_rows,
             coded_width,
             coded_height,
+            false,
             chroma_qp_index_offset,
             scaling,
             &crate::reconstruct::WeightedPred::Default,
@@ -925,6 +926,7 @@ impl H264Decoder {
                         mb_rows,
                         coded_width,
                         coded_height,
+                        false,
                         chroma_qp_index_offset,
                         scaling,
                         &crate::reconstruct::WeightedPred::Default,
@@ -1094,6 +1096,7 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
+                        sps.direct_8x8_inference_flag,
                         tracer,
                     )
                 } else {
@@ -1374,6 +1377,7 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
+                        sps.direct_8x8_inference_flag,
                         colocated_mv.as_deref(),
                         tracer,
                     )

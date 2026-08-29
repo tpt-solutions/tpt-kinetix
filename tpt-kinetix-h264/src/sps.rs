@@ -33,6 +33,10 @@ pub struct SeqParameterSet {
     /// the bitstream when `!frame_mbs_only_flag`; for progressive (`frame_mbs_only_flag
     /// == 1`) streams it is implicitly false.
     pub mb_adaptive_frame_field_flag: bool,
+    /// `direct_8x8_inference_flag` (§7.3.2.1) — governs whether 8×8-sized direct
+    /// motion inference is permitted. Gates `transform_size_8x8_flag` for
+    /// B_Direct_16×16 macroblocks (ffmpeg's `get_dct8x8_allowed`).
+    pub direct_8x8_inference_flag: bool,
     pub frame_cropping_flag: bool,
     pub frame_crop_left_offset: u32,
     pub frame_crop_right_offset: u32,
@@ -122,7 +126,7 @@ impl SeqParameterSet {
         } else {
             false
         };
-        let _direct_8x8_inference_flag = r.read_bit().context("direct_8x8_inference_flag")?;
+        let direct_8x8_inference_flag = r.read_bit().context("direct_8x8_inference_flag")? == 1;
         let frame_cropping_flag = r.read_bit().context("frame_cropping_flag")? == 1;
         let (
             frame_crop_left_offset,
@@ -161,6 +165,7 @@ impl SeqParameterSet {
             pic_height_in_map_units_minus1,
             frame_mbs_only_flag,
             mb_adaptive_frame_field_flag,
+            direct_8x8_inference_flag,
             frame_cropping_flag,
             frame_crop_left_offset,
             frame_crop_right_offset,
@@ -273,6 +278,7 @@ mod tests {
             pic_height_in_map_units_minus1: 14, // (14+1)*16 = 240 px
             frame_mbs_only_flag: true,
             mb_adaptive_frame_field_flag: false,
+            direct_8x8_inference_flag: true,
             frame_cropping_flag: false,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,
@@ -302,6 +308,7 @@ mod tests {
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
             mb_adaptive_frame_field_flag: false,
+            direct_8x8_inference_flag: true,
             frame_cropping_flag: true,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,
@@ -416,6 +423,7 @@ mod tests {
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
             mb_adaptive_frame_field_flag: false,
+            direct_8x8_inference_flag: true,
             frame_cropping_flag: true,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 8, // 8*2 = 16 px
@@ -448,6 +456,7 @@ mod tests {
             pic_height_in_map_units_minus1: 17, // (17+1)*16*2 = 576 coded
             frame_mbs_only_flag: false,
             mb_adaptive_frame_field_flag: true,
+            direct_8x8_inference_flag: true,
             frame_cropping_flag: true,
             frame_crop_left_offset: 0,
             frame_crop_right_offset: 0,

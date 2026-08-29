@@ -988,48 +988,53 @@ pub(crate) fn predict_slice_mvs_ex(
 // B-slice constants (Table 7-15)
 // ---------------------------------------------------------------------------
 
-/// Number of sub-partitions per B_8x8 `sub_mb_type` (0..=12), per spec
-/// Table 7-17 / FFmpeg `ff_h264_b_sub_mb_type_info`: `0`=B_Direct_8x8 (1
-/// implicit part), `1..=4`=L0 with 1/2/2/4 parts (8x8/8x4/4x8/4x4),
-/// `5..=8`=L1 with 1/2/2/4 parts, `9..=12`=Bi with 1/2/2/4 parts.
-pub(crate) const B_SUB_MB_PARTS: [usize; 13] = [1, 1, 2, 2, 4, 1, 2, 2, 4, 1, 2, 2, 4];
+/// Number of sub-partitions per B_8x8 `sub_mb_type` (0..=12), in the exact
+/// order of spec Table 7-18 / FFmpeg `ff_h264_b_sub_mb_type_info` (which the
+/// CABAC `decode_cabac_b_mb_sub_type` and CAVLC `ue(v)` both index directly):
+///   0 = B_Direct_8x8            (Direct)
+///   1/2/3 = B_{L0,L1,Bi}_8x8    (1 part, 8×8)
+///   4/5 = B_L0_{8x4,4x8}        (2 parts)
+///   6/7 = B_L1_{8x4,4x8}        (2 parts)
+///   8/9 = B_Bi_{8x4,4x8}        (2 parts)
+///   10/11/12 = B_{L0,L1,Bi}_4x4 (4 parts, 4×4)
+pub(crate) const B_SUB_MB_PARTS: [usize; 13] = [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4, 4, 4];
 
 /// Prediction direction per B_8x8 `sub_mb_type` (0..=12), same layout as
-/// [`B_SUB_MB_PARTS`].
+/// [`B_SUB_MB_PARTS`] (spec Table 7-18 order).
 pub(crate) const B_SUB_MB_DIR: [crate::macroblock::BPredDir; 13] = {
     use crate::macroblock::BPredDir;
     [
-        BPredDir::Direct,
-        BPredDir::L0,
-        BPredDir::L0,
-        BPredDir::L0,
-        BPredDir::L0,
-        BPredDir::L1,
-        BPredDir::L1,
-        BPredDir::L1,
-        BPredDir::L1,
-        BPredDir::Bi,
-        BPredDir::Bi,
-        BPredDir::Bi,
-        BPredDir::Bi,
+        BPredDir::Direct, // 0  B_Direct_8x8
+        BPredDir::L0,     // 1  B_L0_8x8
+        BPredDir::L1,     // 2  B_L1_8x8
+        BPredDir::Bi,     // 3  B_Bi_8x8
+        BPredDir::L0,     // 4  B_L0_8x4
+        BPredDir::L0,     // 5  B_L0_4x8
+        BPredDir::L1,     // 6  B_L1_8x4
+        BPredDir::L1,     // 7  B_L1_4x8
+        BPredDir::Bi,     // 8  B_Bi_8x4
+        BPredDir::Bi,     // 9  B_Bi_4x8
+        BPredDir::L0,     // 10 B_L0_4x4
+        BPredDir::L1,     // 11 B_L1_4x4
+        BPredDir::Bi,     // 12 B_Bi_4x4
     ]
 };
 
 /// Compute (px, py, width, height) for sub-partition `j` of a B_8x8 sub_mb_type
 /// within the 8×8 block whose top-left corner is at `(bx, by)`.
 ///
-/// Partition shapes follow the same spec table: types `{1,5,9}` are one 8×8,
-/// `{2,6,10}` two 8×4, `{3,7,11}` two 4×8, `{4,8,12}` four 4×4.
+/// Partition shapes follow spec Table 7-18 order: `{1,2,3}` are one 8×8,
+/// `{4,6,8}` two 8×4, `{5,7,9}` two 4×8, `{10,11,12}` four 4×4.
 fn b8x8_sub_rect(sub_type: usize, bx: usize, by: usize, j: usize) -> (usize, usize, usize, usize) {
     match sub_type {
         // 8×8: one sub-part
-        1 | 5 | 9 => (bx, by, 8, 8),
+        1 | 2 | 3 => (bx, by, 8, 8),
         // 8×4: two sub-parts (top / bottom)
-        2 | 6 | 10 => (bx, by + 4 * j, 8, 4),
+        4 | 6 | 8 => (bx, by + 4 * j, 8, 4),
         // 4×8: two sub-parts (left / right)
-        3 | 7 | 11 => (bx + 4 * j, by, 4, 8),
+        5 | 7 | 9 => (bx + 4 * j, by, 4, 8),
         // 4×4: four sub-parts
-        4 | 8 | 12 => (bx + 4 * (j % 2), by + 4 * (j / 2), 4, 4),
+        10 | 11 | 12 => (bx + 4 * (j % 2), by + 4 * (j / 2), 4, 4),
         _ => (bx, by, 8, 8),
     }
 }

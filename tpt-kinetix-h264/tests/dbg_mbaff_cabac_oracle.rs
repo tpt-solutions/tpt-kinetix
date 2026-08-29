@@ -233,6 +233,7 @@ fn crate_parse_grid(annexb: &[u8]) -> Option<Vec<tpt_kinetix_h264::macroblock::M
         num_ref,
         cqo,
         t8,
+        true,
         &mut tpt_kinetix_h264::trace::NoopTracer,
     )
     .ok()?;

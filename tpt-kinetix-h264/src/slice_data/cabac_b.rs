@@ -35,19 +35,20 @@ fn b8x8_sub_dims(
     row4: usize,
     sub_i: usize,
 ) -> (usize, usize, usize, usize) {
+    // spec Table 7-18 order: {1,2,3}=8×8, {4,6,8}=8×4, {5,7,9}=4×8, {10,11,12}=4×4
     match sub_t {
-        1 | 5 | 9 => (col4, row4, 2, 2), // one 8×8 sub-part
-        2 | 6 | 10 => match sub_i {
+        0 | 1 | 2 | 3 => (col4, row4, 2, 2), // one 8×8 sub-part (0 = B_Direct_8x8)
+        4 | 6 | 8 => match sub_i {
             // two 8×4
             0 => (col4, row4, 2, 1),
             _ => (col4, row4 + 1, 2, 1),
         },
-        3 | 7 | 11 => match sub_i {
+        5 | 7 | 9 => match sub_i {
             // two 4×8
             0 => (col4, row4, 1, 2),
             _ => (col4 + 1, row4, 1, 2),
         },
-        4 | 8 | 12 => match sub_i {
+        10 | 11 | 12 => match sub_i {
             // four 4×4
             0 => (col4, row4, 1, 1),
             1 => (col4 + 1, row4, 1, 1),
@@ -74,6 +75,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l0_active: u32,
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    _direct_8x8_inference_flag: bool,
     nctx: NeighbourCtx,
     tracer: &mut T,
 ) -> R<(
@@ -362,8 +364,33 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             // every subsequent MB (the flag's absence silently consumes the
             // first bit of mb_qp_delta / the next MB) — the CABAC twin of the
             // CAVLC bug fixed in #32j.
+            //
+            // FFmpeg additionally gates this on `get_dct8x8_allowed` (line
+            // 2347 of `h264_cabac_ref.c`). For P_L0_16x16 / P_16x8 / P_8x16
+            // (`shape` 0/1/2) `dct8x8_allowed` is NEVER narrowed — it stays
+            // `= transform_8x8_mode`, i.e. the flag IS read (ffmpeg only
+            // narrows it inside the `IS_8X8` branch, line 2161). For P_8x8
+            // (`shape` 3) `get_dct8x8_allowed` returns true iff no sub-
+            // partition is smaller than 8×8: with `direct_8x8_inference_flag`
+            // set, all four `sub_mb_type` raw values must be 0 (P_L0_8x8);
+            // without it, raw 3 (P_L0_4x4 → `MB_TYPE_8x8`, no 16x8/8x16 bit)
+            // is also permitted.
+            let dct8x8_allowed = if shape == 3 {
+                let subs = mb
+                    .motion
+                    .as_ref()
+                    .and_then(|m| m.sub_mb_type)
+                    .unwrap_or([0u8; 4]);
+                if _direct_8x8_inference_flag {
+                    subs.iter().all(|&s| s == 0)
+                } else {
+                    subs.iter().all(|&s| s == 0 || s == 3)
+                }
+            } else {
+                true
+            };
             let mut is_8x8 = false;
-            if transform_8x8_mode_flag && cbp_l != 0 {
+            if transform_8x8_mode_flag && cbp_l != 0 && dct8x8_allowed {
                 let left_8x8 = left_idx
                     .map(|i| cabac_ctx_grid[i].transform_8x8)
                     .unwrap_or(false);
@@ -441,6 +468,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    direct_8x8_inference_flag: bool,
     colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
@@ -625,6 +653,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
                 num_ref_idx_l1_active,
                 chroma_qp_index_offset,
                 transform_8x8_mode_flag,
+                direct_8x8_inference_flag,
                 non_direct_neighbours,
                 nctx,
                 tracer,
@@ -681,6 +710,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     _chroma_qp_index_offset: i32,
     transform_8x8_mode_flag: bool,
+    direct_8x8_inference_flag: bool,
     non_direct_neighbours: usize,
     nctx: NeighbourCtx,
     tracer: &mut T,
@@ -734,6 +764,10 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         ));
     }
     let b_type_raw = b_inter_type.unwrap();
+    if std::env::var("KINETIX_BINTRACE").is_ok() {
+        let (r, o) = dec.debug_state();
+        eprintln!("  B-MB({mb_x},{mb_y}) b_type_raw={b_type_raw} after_mbtype={r:#06x}/{o:#010x}");
+    }
 
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -1132,6 +1166,10 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             for st in &mut sub_types {
                 *st = ctxs.sub_mb_b.decode(dec) as u8;
             }
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                let (r, o) = dec.debug_state();
+                eprintln!("  B8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?} after_sub={r:#06x}/{o:#010x}");
+            }
             motion.sub_mb_type_b = Some(sub_types);
             motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 4];
             motion.ref_idx_l1 = vec![crate::mv::LIST_NOT_USED; 4];
@@ -1349,8 +1387,38 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     // `transform_8x8_mode_flag && CodedBlockPatternLuma > 0` — the CABAC twin
     // of the CAVLC bug fixed in #32j. Same placement as the P-slice inter path
     // above.
+    //
+    // FFmpeg gates this on `dct8x8_allowed` (`h264_cabac_ref.c` line 2347),
+    // which starts `= transform_8x8_mode` and is ONLY narrowed for:
+    //   - B_Direct_16x16 (b_type_raw 0):  `&= direct_8x8_inference_flag`
+    //     (line 2224);
+    //   - B_8x8 (b_type_raw 22): `= get_dct8x8_allowed()` on the four
+    //     `sub_mb_type`s (line 2161) — true iff every sub-partition is 8×8 or
+    //     larger (raw {0,1,2,3}; with `!direct_8x8_inference_flag`, the 4×4
+    //     variants raw {10,11,12} are also permitted since they carry only the
+    //     `MB_TYPE_8x8` bit).
+    // For B_L0/L1/Bi_16x16 (1..=3) AND B_16x8/B_8x16 (4..=21) it is NOT
+    // narrowed — the flag IS read. The previous `matches!(1..=3)` gate wrongly
+    // dropped the 16×8/8×16 case and desynced every stream with a coded
+    // B_16x8/B_8x16 MB (e.g. `mbaff_ibp`).
+    let dct8x8_allowed = match b_type_raw {
+        0 => direct_8x8_inference_flag,
+        22 => {
+            let subs = mb
+                .motion
+                .as_ref()
+                .and_then(|m| m.sub_mb_type_b)
+                .unwrap_or([0u8; 4]);
+            if direct_8x8_inference_flag {
+                subs.iter().all(|&s| s <= 3)
+            } else {
+                subs.iter().all(|&s| s <= 3 || (10..=12).contains(&s))
+            }
+        }
+        _ => true,
+    };
     let mut is_8x8 = false;
-    if transform_8x8_mode_flag && cbp_l != 0 {
+    if transform_8x8_mode_flag && cbp_l != 0 && dct8x8_allowed {
         let left_8x8 = left_idx
             .map(|i| cabac_ctx_grid[i].transform_8x8)
             .unwrap_or(false);

@@ -387,6 +387,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
     mb_rows: u32,
     width: u32,
     height: u32,
+    field_scan: bool,
     chroma_qp_index_offset: i32,
     scaling: &ScalingLists,
     weighted: &WeightedPred,
@@ -402,7 +403,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
-            reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+            reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, field_scan, scaling, tracer);
             reconstruct_chroma(
                 mb,
                 &mut cb,
@@ -410,6 +411,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 chroma_stride,
                 mb_x,
                 mb_y,
+                field_scan,
                 chroma_qp_index_offset,
                 scaling,
                 weighted,
@@ -582,9 +584,18 @@ fn reconstruct_luma<T: DecodeTracer>(
     stride: usize,
     mb_x: u32,
     mb_y: u32,
+    field_scan: bool,
     scaling: &ScalingLists,
     tracer: &mut T,
 ) {
+    let (scan4, scan8) = if field_scan {
+        (
+            &crate::transform::FIELD_SCAN_4X4,
+            &crate::transform::FIELD_SCAN_8X8,
+        )
+    } else {
+        (&crate::transform::ZIGZAG_4X4, &crate::transform::ZIGZAG_8X8)
+    };
     reconstruct_luma_at(
         mb,
         plane,
@@ -593,8 +604,8 @@ fn reconstruct_luma<T: DecodeTracer>(
         mb_y,
         (mb_y * 16) as usize,
         1,
-        &crate::transform::ZIGZAG_4X4,
-        &crate::transform::ZIGZAG_8X8,
+        scan4,
+        scan8,
         scaling,
         tracer,
     );
@@ -917,11 +928,17 @@ fn reconstruct_chroma<T: DecodeTracer>(
     stride: usize,
     mb_x: u32,
     mb_y: u32,
+    field_scan: bool,
     chroma_qp_index_offset: i32,
     scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
 ) {
+    let scan4 = if field_scan {
+        &crate::transform::FIELD_SCAN_4X4
+    } else {
+        &crate::transform::ZIGZAG_4X4
+    };
     reconstruct_chroma_at(
         mb,
         cb,
@@ -931,7 +948,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
         mb_y,
         (mb_y * 8) as usize,
         1,
-        &crate::transform::ZIGZAG_4X4,
+        scan4,
         chroma_qp_index_offset,
         scaling,
         weighted,
@@ -1262,7 +1279,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         tracer,
                     );
                 } else {
-                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
                     reconstruct_chroma(
                         mb,
                         &mut cb,
@@ -1270,6 +1287,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         chroma_stride,
                         mb_x,
                         mb_y,
+                        false,
                         chroma_qp_index_offset,
                         scaling,
                         weighted,
@@ -1660,7 +1678,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         tracer,
                     );
                 } else {
-                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
                     reconstruct_chroma(
                         mb,
                         &mut cb,
@@ -1668,6 +1686,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         chroma_stride,
                         mb_x,
                         mb_y,
+                        false,
                         chroma_qp_index_offset,
                         scaling,
                         weighted,
@@ -2039,7 +2058,8 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
             } else {
                 // Intra macroblock inside a field P-slice: reuse the existing
                 // intra reconstruction, addressing the half-height field plane.
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                // Field-coded MBs use the field scan (§8.5.6).
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, true, scaling, tracer);
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -2047,6 +2067,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
                     chroma_stride,
                     mb_x,
                     mb_y,
+                    true,
                     chroma_qp_index_offset,
                     scaling,
                     weighted,
@@ -2169,7 +2190,9 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     tracer,
                 );
             } else {
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
+                // Intra MB inside a field B-slice: field-coded, so use the
+                // field scan (§8.5.6).
+                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, true, scaling, tracer);
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -2177,6 +2200,7 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     chroma_stride,
                     mb_x,
                     mb_y,
+                    true,
                     chroma_qp_index_offset,
                     scaling,
                     weighted,
@@ -2722,21 +2746,22 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     weighted,
                     tracer,
                 );
-            } else {
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, scaling, tracer);
-                reconstruct_chroma(
-                    mb,
-                    &mut cb,
-                    &mut cr,
-                    chroma_stride,
-                    mb_x,
-                    mb_y,
-                    chroma_qp_index_offset,
-                    scaling,
-                    weighted,
-                    tracer,
-                );
-            }
+                } else {
+                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
+                    reconstruct_chroma(
+                        mb,
+                        &mut cb,
+                        &mut cr,
+                        chroma_stride,
+                        mb_x,
+                        mb_y,
+                        false,
+                        chroma_qp_index_offset,
+                        scaling,
+                        weighted,
+                        tracer,
+                    );
+                }
         }
     }
 
@@ -3370,6 +3395,7 @@ mod tests {
             1,
             16,
             16,
+            false,
             0,
             &crate::transform::ScalingLists::flat(),
             &WeightedPred::Default,

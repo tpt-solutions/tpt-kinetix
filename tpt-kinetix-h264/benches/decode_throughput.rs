@@ -27,6 +27,7 @@ fn sps_for(width_mbs: u32, height_mbs: u32) -> SeqParameterSet {
         pic_height_in_map_units_minus1: height_mbs - 1,
         frame_mbs_only_flag: true,
         mb_adaptive_frame_field_flag: false,
+        direct_8x8_inference_flag: true,
         scaling: ScalingLists::default(),
         frame_cropping_flag: false,
         frame_crop_left_offset: 0,

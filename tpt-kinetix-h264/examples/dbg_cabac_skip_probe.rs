@@ -327,6 +327,7 @@ fn main() {
             1,
             pps.chroma_qp_index_offset,
             false,
+            true,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         ) {
             Ok(parsed) => {

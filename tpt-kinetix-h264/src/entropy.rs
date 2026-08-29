@@ -3525,6 +3525,7 @@ mod tests {
             1,
             0,
             false,
+            true,
             &mut crate::trace::NoopTracer,
         ) {
             Ok(p) => p,

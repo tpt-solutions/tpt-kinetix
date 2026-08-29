@@ -31,6 +31,7 @@ fn p_slice_crate_replay_same_payload_as_oracle() {
         1,
         0,
         false,
+        true,
         &mut NoopTracer,
     );
     match result {

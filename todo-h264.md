@@ -2,6 +2,66 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32af (2026-08-29) — BUG 3 DONE; `mbaff_ibp` P frame BIT-EXACT; remaining divergence is the **B frame** (was mislabelled "P")
+
+**BUG 3 (`get_dct8x8_allowed`) — DONE.** `sps.direct_8x8_inference_flag` is now
+parsed (was discarded) and threaded through `parse_p_slice_cabac` /
+`parse_b_slice_cabac` → `parse_p/b_macroblock_cabac`. `transform_size_8x8_flag`
+is now gated exactly as ffmpeg's `dct8x8_allowed` (`h264_cabac_ref.c` L2347):
+- P: `shape` 0/1/2 (16×16/16×8/8×16) always read; `shape` 3 (P_8x8) read iff
+  every `sub_mb_type` is ≥8×8 (raw 0; raw 3 too when `!direct_8x8_inference`).
+- B: `b_type_raw` 1..=21 (16×16 + 16×8/8×16) always read; raw 0 (B_Direct_16x16)
+  gated on `direct_8x8_inference_flag`; raw 22 (B_8x8) gated on sub-types
+  (raw ≤3, or ≤3/10..12 when `!direct_8x8_inference`).
+- A concurrent-process WIP had gated P on `shape == 0` only and B on
+  `matches!(1..=3)` only — **both wrong** (dropped the 16×8/8×16 case), which
+  regressed `g6_cabac_ip` P (SAD 0→25335) and mis-parsed `mbaff_ibp`. Fixed here.
+- 8 diagnostic tests/examples that call `parse_[pb]_slice_cabac` with the old
+  arity were updated (added the `direct_8x8_inference_flag` arg).
+
+**`mbaff_ibp` P frame — BIT-EXACT.** `tests/dbg_ibp_p_grid.rs` full-decodes the
+clip and diffs our P output against ffmpeg's `select=pict_type,P` frame:
+per-4×4 luma SAD grid is **all zero**. The parse grid + every absolute MV
+already matched ffmpeg; BUG 3's fix closed the residual/recon gap.
+
+**★ The remaining divergence is the B FRAME, not the P frame. ★**
+Prior notes (#32ac/#32ad/#32ae "BUG 1") call it "mbaff_ibp P" — that label is
+wrong. `dbg_g5_interlaced` emits ffmpeg frames in display order (I, B, P =
+ff0, ff1, ff2); the SAD-43815 cell is `ff1` = the **B** frame, SAD-523 `ff2` =
+the P frame (near-exact). `dbg_ibp_p_grid` (unambiguous `select=pict_type`)
+confirms: our P = SAD 0.
+
+**B_SUB_MB table bug FIXED** (`mv.rs`): `B_SUB_MB_PARTS` / `B_SUB_MB_DIR` /
+`b8x8_sub_rect` / `cabac_b.rs::b8x8_sub_dims` assumed a grouped index layout
+`[Direct; L0×4; L1×4; Bi×4]` with parts `[1;1,2,2,4;…]`. The actual spec
+Table 7-18 / ffmpeg `ff_h264_b_sub_mb_type_info` order (which both the CABAC
+`decode_cabac_b_mb_sub_type` return value and CAVLC `ue(v)` index directly) is
+`[Direct; {L0,L1,Bi}_8x8; {L0,L1}×{8x4,4x8}, {Bi}×{8x4,4x8}; {L0,L1,Bi}_4x4]`
+with parts `[1;1,1,1;2,2,2,2,2,2;4,4,4]`. Latent because progressive
+`b_frame_conformance`'s fixture never uses a B_8x8 sub-type ≥2. After the fix
+`mbaff_ibp` B: **`dbg_ibp_p_grid` gB(1,3) now parses exactly like ffmpeg**
+(sub_types→dirs [L1,L1,L0,Direct], MVs L0{(0,0)} L1{(0,0),(-42,0)} match
+export_mvs); B-slice SAD **43815 → 13959** (skipLF harness).
+
+REMAINING: `mbaff_ibp` B still ~13959 SAD. `dbg_ibp_p_grid` B-slice dump shows
+`gB(2,3)` still mis-parsed as skip (ffmpeg `X-` = coded Bi_16x8) and `gB(3,3)`
+as `BL116x16` (ffmpeg `D` = B_Direct_16x16). `KINETIX_BINTRACE`: the skip bin
+for gB(2,3) (BIN ~3945, ctxIdx 25 — context correct) decodes 1 not 0 ⇒ a
+**CABAC range drift** originates in gB(1,3) or gB(0,3) even though every parsed
+value there matches ffmpeg (#32o signature: contexts in lockstep, range drifts).
+Suspects: B_8x8 mvd decode ORDER (crate: part-outer/list-inner; ffmpeg
+`h264_cabac_ref.c` L2140: list-outer/part-inner) — no-op when `amvd_sum`==0 as
+here, so unlikely; B_16x8 L1-mvd context (`cabac_b.rs:1129` uses `mvd_l0_x` for
+list 1 — correct per spec, shared ctx); or a residual-context bug in gB(0,3)'s
+B_16x8 4×4 luma residual only reachable with these neighbours. NEXT: extend the
+ffmpeg-engine oracle (`dbg_mbaff_p_ffengine_oracle`, has `bypass()`) to replay
+gB(0,3)+gB(1,3) element-by-element and diff engine `range`/`low`.
+
+**A5 status:** committed in `fd77230` (g6 clips + assertions + `cabac_p.rs`
+8×8 scan-perm fix). `dbg_g6_mbaff_deblock` `g6_cabac_ip`/`g6_cabac_ibp` I+P+B
+pins all green. Full `tpt-kinetix-h264` test suite green (incl. the 8 repaired
+diagnostic tests).
+
 ## SESSION #32ae (2026-08-29) — REMAINING WORK BROKEN DOWN: every step is one run with a binary pass/fail
 
 Current state after #32ac/#32ad: **CABAC MBAFF I/P/B bit-exact** vs fully-filtered
@@ -103,10 +163,51 @@ pair-scan order the desync starts right after the **intra `I_16x16` MB at grid
 to exercise an intra MB inside an MBAFF P slice** (`mbaff_ip` P was all-inter),
 so the bug is in `parse_p_macroblock_cabac`'s `None` branch →
 `parse_intra_mb_cabac_pb` (cabac_b.rs:1404): a bin miscount or an unpopulated
-neighbour-context field for I_16x16 under MBAFF. NEXT: extend
-`dbg_mbaff_p_ffengine_oracle` to walk MB(1,2)'s intra element sequence
-(mb_type suffix + chroma_pred + cbp-from-type + qp_delta + luma_dc + 16 AC cbf/
-residual + chroma) and diff the post-MB engine state vs the crate.
+neighbour-context field for I_16x16 under MBAFF.
+
+**Narrowed further (`tests/dbg_ibp_p_grid.rs`, new):** the crate's CABAC-parsed
+P-slice `mb_type` grid **matches ffmpeg exactly** — incl. g(3,3)=P_8x8 (ffmpeg
+`>+`), g(1,2)=Intra16x16{mode0,cbpC2,cbpL0}, row3 = 3×P16x8 + P8x8. So it is
+NOT a mb_type misparse (unlike the #32ac `mbaff_ip` case). The residual element
+sequence in `parse_intra_mb_cabac_pb` is **byte-identical** to the proven
+I-slice `parse_intra_macroblock_cabac` (diffed line-by-line: same cats, order,
+neighbour calls). ⇒ the desync is a wrong **bin VALUE / ctxIdxInc** inside the
+I_16x16 parse of g(1,2), most likely: (a) the intra-suffix `mb_type` binariz-
+ation/ctxIdxInc (ctxIdxOffset 17, shared-ctx-17 sync) — exercised by progressive
+CABAC-P so proven there, but MBAFF changes nothing in it → less likely; (b) a
+`coded_block_flag` ctxIdxInc where the `None` (unavailable) neighbour + intra-
+current ⇒ 1 rule, or a skipped-MB neighbour, is mishandled by `dc_cbf_neighbor`/
+`luma_cbf_neighbors`/`chroma_cbf_neighbors` under the MBAFF `nctx`; (c)
+`nctx.is_field()` fed to `decode_block` (should be false for this frame pair).
+NEXT: extend `dbg_mbaff_p_ffengine_oracle` past MB9 through MB10 (g(1,2)) element
+by element, diff post-MB engine `range`/`low` vs the crate; or add per-element
+engine-state BINTRACE to `parse_intra_mb_cabac_pb` and bisect.
+
+**Deeper diagnosis (this session, vs commit `fd77230`):** parse is 100% correct —
+`tests/dbg_ibp_p_grid.rs` confirms crate's P-slice `mb_type`/`cbp`/`sub_mb_type`
+grid AND **absolute MVs** all match ffmpeg exactly (ffmpeg `-flags2 +export_mvs`
+via PyAV: g(0,3)=P16x8 {(0,0),(86,0)}, g(1,3)=P16x8 {(0,2),(85,0)},
+g(2,3)=P16x8 {(0,1),(85,0)}, g(3,3)=P8x8 {(-32,52),(0,1),(0,2),(9,56)} — crate
+reproduces all). No persistent CABAC engine desync: grid MBs g(2,2)/g(3,2)
+(decode order AFTER the intra MB and after g(1,3)) are BIT-EXACT; only
+g(1,3)/g(2,3)/g(3,3) (coded-inter pair-bottom, cols 1-3) are wrong, root =
+g(1,3), cascading left via g(2,3)/g(3,3)'s broken left-neighbour. Deblock
+ablations don't move the SAD ⇒ pre-deblock reconstruction. g(0,3) [clean] top
+MV is half-pel (86); g(1,3)/g(2,3) [broken] top MVs are quarter-pel (85). ⇒
+bug is in **MC/residual for coded-inter pair-bottom MBs in the frame-coded
+MBAFF P reconstruction path** (`reconstruct_inter_frame_ex` → `reconstruct_inter_luma`,
+same progressive fns, mb_field_flag=false), NOT the parser. `parse_intra_mb_cabac_pb`
+residual structure verified byte-identical to the proven I-slice path;
+suffix `mb_type` contexts (ctxIdx 17-20) verified vs `h264_cabac_ref.c`
+`decode_cabac_intra_mb_type(_,17,0)`.
+
+**⚠️ 2026-08-29: a concurrent process's UNCOMMITTED edits to `cabac_p.rs` /
+`cabac_b.rs` / `interlaced.rs` (threading a new `direct_8x8_inference_flag` param
+into `parse_p_slice_cabac`, BUG 3c) have REGRESSED the CABAC MBAFF P path** —
+`g6_cabac_ip` P frame SAD 0 → 25335, `dbg_ibp_p_grid` now mis-decodes MB10 as
+skip instead of I_16x16, `dbg_g6_mbaff_deblock` A5 assertion fails. Progressive
+conformance stays green. The A5 regression lock is doing its job. `mbaff_ibp` P
+work is blocked until that lands / stabilises.
 
 ## SESSION #32ac (2026-08-29) — ★ ROOT CAUSE FOUND & FIXED: `mb_field_decoding_flag` CABAC context init used the I-slice table for P/B slices ★
 

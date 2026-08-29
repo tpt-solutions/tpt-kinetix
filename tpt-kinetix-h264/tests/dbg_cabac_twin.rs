@@ -164,6 +164,7 @@ fn cabac_cavlc_mb_table_diff() {
                 pps.num_ref_idx_l0_default_active_minus1 + 1,
                 pps.chroma_qp_index_offset,
                 false,
+                true,
                 &mut cap,
             ) {
                 eprintln!("cabac parse error: {e}");
