@@ -192,15 +192,12 @@ pub(super) fn reconstruct_tx_block(
             eprintln!("DBG borders.left={:?}", borders.left);
             eprintln!("DBG borders.top ={:?}", borders.top);
             eprintln!("DBG borders.tl  ={}", borders.tl);
-            eprintln!(
-                "DBG pred last row={:?}",
-                &pred[(tx_h - 1) * tx_w..tx_h * tx_w]
-            );
-            eprintln!(
-                "DBG pred row {}   ={:?}",
-                tx_h - 2,
-                &pred[(tx_h - 2) * tx_w..(tx_h - 1) * tx_w]
-            );
+            eprintln!("DBG cfl={:?} filter_intra={:?} palette={}", cfl.is_some(), filter_intra_mode, palette.is_some());
+            for r in 0..tx_h {
+                let p: Vec<i32> = (0..tx_w).map(|c| pred[r * tx_w + c]).collect();
+                let q: Vec<i32> = (0..tx_w).map(|c| residual[r * tx_w + c]).collect();
+                eprintln!("DBG row{r:>2}: pred={:?} res={:?}", p, q);
+            }
         }
     }
 

@@ -37,7 +37,7 @@ fn b8x8_sub_dims(
 ) -> (usize, usize, usize, usize) {
     // spec Table 7-18 order: {1,2,3}=8×8, {4,6,8}=8×4, {5,7,9}=4×8, {10,11,12}=4×4
     match sub_t {
-        0 | 1 | 2 | 3 => (col4, row4, 2, 2), // one 8×8 sub-part (0 = B_Direct_8x8)
+        0..=3 => (col4, row4, 2, 2), // one 8×8 sub-part (0 = B_Direct_8x8)
         4 | 6 | 8 => match sub_i {
             // two 8×4
             0 => (col4, row4, 2, 1),
@@ -48,7 +48,7 @@ fn b8x8_sub_dims(
             0 => (col4, row4, 1, 2),
             _ => (col4 + 1, row4, 1, 2),
         },
-        10 | 11 | 12 => match sub_i {
+        10..=12 => match sub_i {
             // four 4×4
             0 => (col4, row4, 1, 1),
             1 => (col4 + 1, row4, 1, 1),
@@ -1168,7 +1168,9 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
             }
             if std::env::var("KINETIX_BINTRACE").is_ok() {
                 let (r, o) = dec.debug_state();
-                eprintln!("  B8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?} after_sub={r:#06x}/{o:#010x}");
+                eprintln!(
+                    "  B8x8 MB({mb_x},{mb_y}) sub_types={sub_types:?} after_sub={r:#06x}/{o:#010x}"
+                );
             }
             motion.sub_mb_type_b = Some(sub_types);
             motion.ref_idx_l0 = vec![crate::mv::LIST_NOT_USED; 4];
@@ -1250,56 +1252,26 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                     }
                 }
             }
-            for part in 0..4 {
-                let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
-                let sub_t = sub_types[part] as usize;
-                if sub_dirs[part] == BPredDir::Direct {
-                    continue;
-                }
-                if sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi {
-                    let n = crate::mv::B_SUB_MB_PARTS[sub_t];
-                    for sub_i in 0..n {
-                        let (sc4, sr4, sw4, sh4) = b8x8_sub_dims(sub_t, c4, r4, sub_i);
-                        let (xp, yp, wp, hp) = (
-                            sc4 as u32 * 4,
-                            sr4 as u32 * 4,
-                            sw4 as u32 * 4,
-                            sh4 as u32 * 4,
-                        );
-                        let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
-                        let mvx = cabac_decode_mvd_component(
-                            dec,
-                            &mut ctxs.mvd_l0_x,
-                            inter_grid,
-                            &this_inter,
-                            left_idx,
-                            top_idx,
-                            xp,
-                            yp,
-                            wp,
-                            hp,
-                            0,
-                            0,
-                        )?;
-                        let mvy = cabac_decode_mvd_component(
-                            dec,
-                            &mut ctxs.mvd_l0_y,
-                            inter_grid,
-                            &this_inter,
-                            left_idx,
-                            top_idx,
-                            xp,
-                            yp,
-                            wp,
-                            hp,
-                            0,
-                            1,
-                        )?;
-                        motion.mvd_l0.push((mvx, mvy));
-                        this_inter.set_partition_l0(&sub_blks, mvx, mvy, motion.ref_idx_l0[part]);
+            // MVDs, in ffmpeg's `h264_cabac_ref.c` L2140 order: list-outer,
+            // part-inner, sub-partition innermost (NOT part-outer/list-inner —
+            // the order changes the within-MB `amvd_sum` neighbour state fed to
+            // `cabac_decode_mvd_component`, which desyncs the CABAC engine on
+            // any B_8x8 with two lists active).
+            for list in 0..2usize {
+                for part in 0..4 {
+                    let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
+                    let sub_t = sub_types[part] as usize;
+                    let dir = sub_dirs[part];
+                    if dir == BPredDir::Direct {
+                        continue;
                     }
-                }
-                if sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi {
+                    let uses = match list {
+                        0 => dir == BPredDir::L0 || dir == BPredDir::Bi,
+                        _ => dir == BPredDir::L1 || dir == BPredDir::Bi,
+                    };
+                    if !uses {
+                        continue;
+                    }
                     let n = crate::mv::B_SUB_MB_PARTS[sub_t];
                     for sub_i in 0..n {
                         let (sc4, sr4, sw4, sh4) = b8x8_sub_dims(sub_t, c4, r4, sub_i);
@@ -1310,6 +1282,9 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             sh4 as u32 * 4,
                         );
                         let sub_blks = partition_blocks(sc4, sr4, sw4, sh4);
+                        // mvd contexts (ctxIdxOffset 40 horiz / 47 vert) are
+                        // shared across L0/L1 per spec; only the `list` arg
+                        // (neighbour l0/l1 abs-mvd array) differs.
                         let mvx = cabac_decode_mvd_component(
                             dec,
                             &mut ctxs.mvd_l0_x,
@@ -1321,7 +1296,7 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             yp,
                             wp,
                             hp,
-                            1,
+                            list,
                             0,
                         )?;
                         let mvy = cabac_decode_mvd_component(
@@ -1335,11 +1310,26 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             yp,
                             wp,
                             hp,
-                            1,
+                            list,
                             1,
                         )?;
-                        motion.mvd_l1.push((mvx, mvy));
-                        this_inter.set_partition_l1(&sub_blks, mvx, mvy, motion.ref_idx_l1[part]);
+                        if list == 0 {
+                            motion.mvd_l0.push((mvx, mvy));
+                            this_inter.set_partition_l0(
+                                &sub_blks,
+                                mvx,
+                                mvy,
+                                motion.ref_idx_l0[part],
+                            );
+                        } else {
+                            motion.mvd_l1.push((mvx, mvy));
+                            this_inter.set_partition_l1(
+                                &sub_blks,
+                                mvx,
+                                mvy,
+                                motion.ref_idx_l1[part],
+                            );
+                        }
                     }
                 }
             }

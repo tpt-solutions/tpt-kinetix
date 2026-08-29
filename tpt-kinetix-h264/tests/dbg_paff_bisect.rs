@@ -101,7 +101,6 @@ fn paff_bisect_intra_vs_inter() {
     let w = 80usize;
     let h = 64usize;
     let frame_len = w * h * 3 / 2;
-    let luma_len = w * h;
 
     if frames.is_empty() || ref_yuv.is_empty() {
         eprintln!("no frames to compare");
@@ -142,5 +141,36 @@ fn paff_bisect_intra_vs_inter() {
         println!(
             "frame#{fi}: TOP(I) max={top_max} diff={top_diff_count}/{top_total} | BOT(P) max={bot_max} diff={bot_diff_count}/{bot_total}"
         );
+
+        if fi == 0 {
+            // Per-16x16 (field-MB) grid of max luma diff, TOP field only.
+            // Field row fy maps to frame row 2*fy.
+            let fh = h / 2;
+            println!("  TOP field per-MB max-diff grid ({}x{} field):", w, fh);
+            for mbr in 0..fh.div_ceil(16) {
+                let mut row = String::new();
+                for mbc in 0..w.div_ceil(16) {
+                    let mut m = 0i32;
+                    for yy in 0..16 {
+                        let fy = mbr * 16 + yy;
+                        if fy >= fh {
+                            break;
+                        }
+                        for xx in 0..16 {
+                            let x = mbc * 16 + xx;
+                            if x >= w {
+                                break;
+                            }
+                            let d = (frame[(2 * fy) * w + x] as i32
+                                - ref_yuv[off + (2 * fy) * w + x] as i32)
+                                .abs();
+                            m = m.max(d);
+                        }
+                    }
+                    row.push_str(&format!("{m:4}"));
+                }
+                println!("   {row}");
+            }
+        }
     }
 }

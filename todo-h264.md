@@ -43,19 +43,33 @@ with parts `[1;1,1,1;2,2,2,2,2,2;4,4,4]`. Latent because progressive
 (sub_types→dirs [L1,L1,L0,Direct], MVs L0{(0,0)} L1{(0,0),(-42,0)} match
 export_mvs); B-slice SAD **43815 → 13959** (skipLF harness).
 
-REMAINING: `mbaff_ibp` B still ~13959 SAD. `dbg_ibp_p_grid` B-slice dump shows
-`gB(2,3)` still mis-parsed as skip (ffmpeg `X-` = coded Bi_16x8) and `gB(3,3)`
-as `BL116x16` (ffmpeg `D` = B_Direct_16x16). `KINETIX_BINTRACE`: the skip bin
-for gB(2,3) (BIN ~3945, ctxIdx 25 — context correct) decodes 1 not 0 ⇒ a
-**CABAC range drift** originates in gB(1,3) or gB(0,3) even though every parsed
-value there matches ffmpeg (#32o signature: contexts in lockstep, range drifts).
-Suspects: B_8x8 mvd decode ORDER (crate: part-outer/list-inner; ffmpeg
-`h264_cabac_ref.c` L2140: list-outer/part-inner) — no-op when `amvd_sum`==0 as
-here, so unlikely; B_16x8 L1-mvd context (`cabac_b.rs:1129` uses `mvd_l0_x` for
-list 1 — correct per spec, shared ctx); or a residual-context bug in gB(0,3)'s
-B_16x8 4×4 luma residual only reachable with these neighbours. NEXT: extend the
-ffmpeg-engine oracle (`dbg_mbaff_p_ffengine_oracle`, has `bypass()`) to replay
-gB(0,3)+gB(1,3) element-by-element and diff engine `range`/`low`.
+**B_8x8 mvd decode ORDER bug FIXED** (`cabac_b.rs`): the B_8x8 sub-partition
+mvd loop was part-outer/list-inner; ffmpeg (`h264_cabac_ref.c` L2140) is
+**list-outer/part-inner**. The order changes which `l0_mvd_abs`/`l1_mvd_abs`
+within-MB cells `amvd_sum` sees while decoding later partitions → a real CABAC
+engine desync on any B_8x8 with both lists active. After the fix `mbaff_ibp` B:
+**every MB parses bit-identical to ffmpeg's `-debug mb_type` grid**
+(`d d d d / < d d d / d d d d / X- X+ X- D`) and the diff collapses to a single
+MB: **gB(3,3) = B_Direct_16x16 luma only** (chroma bit-exact). B-slice g6 SAD
+**43815 → 6272**, max 77.
+
+**gB(3,3) FIXED — `mbaff_ibp` B frame BIT-EXACT.** Not a direct-MV or
+col_zero_flag issue: the MVs were already (0,0)/(0,0). Root cause was a missing
+**8×8-transform branch in `reconstruct_b_inter_luma`** (`reconstruct.rs`). That
+MB is B_Direct_16x16 with `transform_size_8x8_flag=1` (cbp_luma=0xf); the B
+inter-luma recon only ever did the 4×4 path, reading the all-zero `luma_coeffs`
+array instead of `luma_coeffs_8x8` → whole-MB luma residual dropped (chroma has
+no 8×8 transform, so it stayed exact). Added a bi-pred 8×8 branch mirroring the
+P-slice `reconstruct_inter_luma` path (per-8×8 MC of both lists with the
+top-left cell MV, per-quadrant `combine_weighted`, `dequant_idct_8x8_scan` with
+inter scaling slot 1 / ZIGZAG_8X8). `dbg_g6_mbaff_deblock` frame#2 (B) gate-ON
+luma **SAD 6272 → 0, max 0**. Regression: b_frame / cabac / cabac_pframe /
+conformance_matrix / high_profile_8x8 (+cabac) / dbg_ibp_p_grid all green.
+
+NOTE: a concurrent process left `decoder/interlaced.rs:256` referencing
+non-existent fields `coded_block_pattern_luma` / `intra_pred_mode` (in a
+`KINETIX_PAFF_DBG` block, not under cfg(test)) — breaks the lib build; not
+touched here.
 
 **A5 status:** committed in `fd77230` (g6 clips + assertions + `cabac_p.rs`
 8×8 scan-perm fix). `dbg_g6_mbaff_deblock` `g6_cabac_ip`/`g6_cabac_ibp` I+P+B

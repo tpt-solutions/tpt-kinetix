@@ -249,6 +249,14 @@ impl H264Decoder {
             Err(_) => return Ok(InterlacedOutcome::Fallback),
         };
 
+        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+            for (i, mb) in parsed.macroblocks.iter().enumerate() {
+                eprintln!(
+                    "PAFF_IFIELD_MB[{i}] type={:?} t8x8={} cbp={} pm8={:?}",
+                    mb.mb_type, mb.transform_size_8x8, mb.cbp, mb.pred_modes_8x8
+                );
+            }
+        }
         let mut recon = crate::reconstruct::reconstruct_intra_frame(
             &parsed.macroblocks,
             mb_cols,
@@ -323,17 +331,12 @@ impl H264Decoder {
         let mb_cols = coded_width / 16;
         let mb_rows = coded_height / 16;
 
-        // Common setup for both P/B and I paths: slice QP and coded dimensions.
-        let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
-        let slice_qp = pic_init_qp + header.slice_qp_delta;
-        let coded_width = sps.coded_width_pixels();
-        let coded_height = sps.coded_height_pixels();
-        let mb_cols = coded_width / 16;
-        let mb_rows = coded_height / 16;
-
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
             if std::env::var("KINETIX_BINTRACE").is_ok() {
-                eprintln!("MBAFF_INTER_PATH frame_num={} slice_type={:?}", header.frame_num, header.slice_type);
+                eprintln!(
+                    "MBAFF_INTER_PATH frame_num={} slice_type={:?}",
+                    header.frame_num, header.slice_type
+                );
             }
             // P/B MBAFF slices (B5): the inter decode path is the default.
             // Field-coded pairs reuse the parity-plane convention from the
@@ -392,7 +395,11 @@ impl H264Decoder {
                     for (di, de) in self.dpb.iter().enumerate() {
                         eprintln!(
                             "    dpb[{}] frame_num={} poc={} short={} long={} ref={}",
-                            di, de.frame_num, de.pic_order_cnt, de.is_short_term, de.is_long_term,
+                            di,
+                            de.frame_num,
+                            de.pic_order_cnt,
+                            de.is_short_term,
+                            de.is_long_term,
                             de.is_reference(),
                         );
                     }
@@ -430,7 +437,8 @@ impl H264Decoder {
                     &header.ref_pic_list_modification_l1,
                 );
                 if std::env::var("KINETIX_BINTRACE").is_ok() {
-                    eprintln!("MBAFF_B_REFLIST frame_num={} l0_len={} l1_len={} dpb_len={}",
+                    eprintln!(
+                        "MBAFF_B_REFLIST frame_num={} l0_len={} l1_len={} dpb_len={}",
                         header.frame_num,
                         ref_list_l0.as_ref().map(|l| l.len()).unwrap_or(0),
                         list.as_ref().map(|l| l.len()).unwrap_or(0),
@@ -656,7 +664,10 @@ impl H264Decoder {
             if std::env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "MBAFF_STORE frame_num={} slice_type={:?} nal_ref_idc={} dpb_after={}",
-                    header.frame_num, header.slice_type, nal.nal_ref_idc, self.dpb.len(),
+                    header.frame_num,
+                    header.slice_type,
+                    nal.nal_ref_idc,
+                    self.dpb.len(),
                 );
             }
 

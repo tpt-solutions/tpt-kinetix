@@ -547,8 +547,11 @@ impl Dpb {
         // same field-parity for field pictures.
         let frame_num = current.frame_num;
         if current.field_pic_flag {
-            self.entries
-                .retain(|e| !(e.is_short_term && e.frame_num == frame_num && e.bottom_field_flag == current.bottom_field_flag));
+            self.entries.retain(|e| {
+                !(e.is_short_term
+                    && e.frame_num == frame_num
+                    && e.bottom_field_flag == current.bottom_field_flag)
+            });
         } else {
             self.entries
                 .retain(|e| !(e.is_short_term && e.frame_num == frame_num));

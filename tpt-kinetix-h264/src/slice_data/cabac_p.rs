@@ -523,26 +523,26 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         }
 
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
-            let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
-                parse_p_macroblock_cabac(
-                    &mut dec,
-                    &mut ctxs,
-                    mb_x,
-                    mb_y,
-                    mb_cols,
-                    &nz,
-                    &pred_ctx,
-                    &cabac_ctx,
-                    &inter_ctx,
-                    qp,
-                    prev_dqp_nonzero,
-                    num_ref_idx_l0_active,
-                    chroma_qp_index_offset,
-                    transform_8x8_mode_flag,
-                    direct_8x8_inference_flag,
-                    nctx,
-                    tracer,
-                )?;
+        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
+            parse_p_macroblock_cabac(
+                &mut dec,
+                &mut ctxs,
+                mb_x,
+                mb_y,
+                mb_cols,
+                &nz,
+                &pred_ctx,
+                &cabac_ctx,
+                &inter_ctx,
+                qp,
+                prev_dqp_nonzero,
+                num_ref_idx_l0_active,
+                chroma_qp_index_offset,
+                transform_8x8_mode_flag,
+                direct_8x8_inference_flag,
+                nctx,
+                tracer,
+            )?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nz;
         prev_mb_skipped = false;

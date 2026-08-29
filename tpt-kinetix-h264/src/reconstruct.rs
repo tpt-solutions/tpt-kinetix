@@ -403,7 +403,16 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
-            reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, field_scan, scaling, tracer);
+            reconstruct_luma(
+                mb,
+                &mut luma,
+                luma_stride,
+                mb_x,
+                mb_y,
+                field_scan,
+                scaling,
+                tracer,
+            );
             reconstruct_chroma(
                 mb,
                 &mut cb,
@@ -1279,7 +1288,16 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         tracer,
                     );
                 } else {
-                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
+                    reconstruct_luma(
+                        mb,
+                        &mut luma,
+                        luma_stride,
+                        mb_x,
+                        mb_y,
+                        false,
+                        scaling,
+                        tracer,
+                    );
                     reconstruct_chroma(
                         mb,
                         &mut cb,
@@ -1678,7 +1696,16 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         tracer,
                     );
                 } else {
-                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
+                    reconstruct_luma(
+                        mb,
+                        &mut luma,
+                        luma_stride,
+                        mb_x,
+                        mb_y,
+                        false,
+                        scaling,
+                        tracer,
+                    );
                     reconstruct_chroma(
                         mb,
                         &mut cb,
@@ -2059,7 +2086,16 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
                 // Intra macroblock inside a field P-slice: reuse the existing
                 // intra reconstruction, addressing the half-height field plane.
                 // Field-coded MBs use the field scan (§8.5.6).
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, true, scaling, tracer);
+                reconstruct_luma(
+                    mb,
+                    &mut luma,
+                    luma_stride,
+                    mb_x,
+                    mb_y,
+                    true,
+                    scaling,
+                    tracer,
+                );
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -2192,7 +2228,16 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
             } else {
                 // Intra MB inside a field B-slice: field-coded, so use the
                 // field scan (§8.5.6).
-                reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, true, scaling, tracer);
+                reconstruct_luma(
+                    mb,
+                    &mut luma,
+                    luma_stride,
+                    mb_x,
+                    mb_y,
+                    true,
+                    scaling,
+                    tracer,
+                );
                 reconstruct_chroma(
                     mb,
                     &mut cb,
@@ -2746,22 +2791,31 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     weighted,
                     tracer,
                 );
-                } else {
-                    reconstruct_luma(mb, &mut luma, luma_stride, mb_x, mb_y, false, scaling, tracer);
-                    reconstruct_chroma(
-                        mb,
-                        &mut cb,
-                        &mut cr,
-                        chroma_stride,
-                        mb_x,
-                        mb_y,
-                        false,
-                        chroma_qp_index_offset,
-                        scaling,
-                        weighted,
-                        tracer,
-                    );
-                }
+            } else {
+                reconstruct_luma(
+                    mb,
+                    &mut luma,
+                    luma_stride,
+                    mb_x,
+                    mb_y,
+                    false,
+                    scaling,
+                    tracer,
+                );
+                reconstruct_chroma(
+                    mb,
+                    &mut cb,
+                    &mut cr,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                    false,
+                    chroma_qp_index_offset,
+                    scaling,
+                    weighted,
+                    tracer,
+                );
+            }
         }
     }
 
@@ -2797,6 +2851,133 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
     let grid = mv_store
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+
+    // High-profile 8×8 transform on a B inter macroblock
+    // (`transform_size_8x8` set): the luma residual lives in four 8×8 blocks
+    // (`luma_coeffs_8x8`), not the 4×4 `luma_coeffs` array the loop below
+    // reads. Motion-compensate each 8×8 region (both lists) with the MV of its
+    // top-left 4×4 cell and add the 8×8 inverse-transformed residual
+    // (§8.5.12.3). Mirrors the P-slice `reconstruct_inter_luma` 8×8 path.
+    if mb.transform_size_8x8 {
+        const TL: [usize; 4] = [0, 2, 8, 10];
+        for (i8, &tl) in TL.iter().enumerate() {
+            let cell = grid[tl];
+            let bx = (i8 % 2) * 8;
+            let by = (i8 / 2) * 8;
+            let x0 = base_x as i32 + bx as i32;
+            let y0 = base_y as i32 + by as i32;
+            let l0_active = cell.ref_idx >= 0;
+            let l1_active = cell.ref_idx_l1 >= 0;
+            let ref_idx0 = cell.ref_idx.max(0) as usize;
+            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+            let mut pred_l0 = [0u8; 64];
+            if l0_active {
+                if let Some(frame) = ref_frames_l0
+                    .get(ref_idx0)
+                    .or_else(|| ref_frames_l0.first())
+                {
+                    let w = frame.width as usize;
+                    let h = frame.height as usize;
+                    crate::motion_comp::interpolate_luma(
+                        &mut pred_l0,
+                        8,
+                        &frame.data[..w * h],
+                        w,
+                        w,
+                        h,
+                        x0,
+                        y0,
+                        cell.mv[0],
+                        cell.mv[1],
+                        8,
+                        8,
+                    );
+                }
+            }
+            let mut pred_l1 = [0u8; 64];
+            if l1_active {
+                if let Some(frame) = ref_frames_l1
+                    .get(ref_idx1)
+                    .or_else(|| ref_frames_l1.first())
+                {
+                    let w = frame.width as usize;
+                    let h = frame.height as usize;
+                    crate::motion_comp::interpolate_luma(
+                        &mut pred_l1,
+                        8,
+                        &frame.data[..w * h],
+                        w,
+                        w,
+                        h,
+                        x0,
+                        y0,
+                        cell.mv_l1[0],
+                        cell.mv_l1[1],
+                        8,
+                        8,
+                    );
+                }
+            }
+
+            // `combine_weighted` operates on 16-sample blocks; apply it per 4×4
+            // quadrant (weighted params constant across the 8×8 block).
+            let mut pred = [0u8; 64];
+            for q in 0..4usize {
+                let (ox, oy) = ((q % 2) * 4, (q / 2) * 4);
+                let mut c0 = [0u8; 16];
+                let mut c1 = [0u8; 16];
+                for r in 0..4 {
+                    for c in 0..4 {
+                        c0[r * 4 + c] = pred_l0[(oy + r) * 8 + ox + c];
+                        c1[r * 4 + c] = pred_l1[(oy + r) * 8 + ox + c];
+                    }
+                }
+                let wc = combine_weighted(
+                    weighted, l0_active, l1_active, ref_idx0, ref_idx1, &c0, &c1, None,
+                );
+                for r in 0..4 {
+                    for c in 0..4 {
+                        pred[(oy + r) * 8 + ox + c] = wc[r * 4 + c];
+                    }
+                }
+            }
+
+            tracer.on_motion_comp(
+                mb_x,
+                mb_y,
+                TracePlane::Luma,
+                (16 + i8) as u8,
+                &pred,
+                cell.mv,
+                ref_idx0,
+            );
+
+            let res = dequant_idct_8x8_scan(
+                &mb.luma_coeffs_8x8[i8],
+                mb.qp,
+                1,
+                scaling,
+                &crate::transform::ZIGZAG_8X8,
+            );
+            let mut recon_blk = [0u8; 64];
+            for row in 0..8 {
+                for col in 0..8 {
+                    let px = x0 as usize + col;
+                    let py = y0 as usize + row;
+                    let off = py * stride + px;
+                    let p = pred[row * 8 + col] as i32;
+                    let v = (p + res[row * 8 + col]).clamp(0, 255) as u8;
+                    recon_blk[row * 8 + col] = v;
+                    if off < plane.len() && px < stride {
+                        plane[off] = v;
+                    }
+                }
+            }
+            tracer.on_reconstructed(mb_x, mb_y, TracePlane::Luma, (16 + i8) as u8, &recon_blk);
+        }
+        return;
+    }
 
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
