@@ -104,10 +104,33 @@ diagnostic tests).
         of a pair evicted the 1st. `Dpb::num_ref_frames()` (commit 19d888e). →
         `paff_b_field` frame#0 P-field max_diff 246→~20.
   - [x] `dbg_paff_i_fields` now hard-asserts bit-exact (4 frames, deblock off).
-  - [ ] **2d.** Remaining: PAFF **field deblocking** (~6–20 residual on ~800px,
-        `Self::deblock_field`); `paff_b_field` frame_num=1 P-top field still
-        Fallbacks (parse_p_slice_cabac Err — investigate ref-list / field MC).
-  - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once 2d done.
+  - [x] **2d-i.** P-top field Fallback: **STALE — no longer happens.** Verified
+        2026-08-30 (#32ag): instrumented `decode_interlaced_p_field`'s `Err(_)`
+        arm — `paff_i_fields` all 4 fields and `paff_b_field` both frames now
+        `FINALIZE -> Frame emitted`, zero `P-FIELD PARSE ERR`, zero grey
+        scaffold. The earlier CABAC field-ctx / DPB-pair-count fixes (2b'/2c')
+        closed it.
+  - [ ] **2d-ii.** Remaining PAFF error is **entirely in `Self::deblock_field`**
+        (pre-deblock recon bit-exact incl. the P bottom field — `dbg_paff_i_fields`
+        passes with deblock off). `deblock_field` is byte-identical to the
+        progressive loop in `decoder/mod.rs:666-722`, and progressive deblock is
+        bit-exact on non-flat content, so this is field-specific.
+        Symptom (`dbg_paff_bisect`, full deblock, `paff_i_fields`): TOP(I) max=49
+        / BOT(P) max=54, **concentrated in the last MB column** (col 4, x=64-79).
+        Spikes: TOP fy=13 x64=-39 x68=+14; fy=18 x64=-40 x70=-49; BOT fy=13
+        x66=+54 — i.e. 4-row segments straddling the fy=16 horizontal MB-row
+        boundary, on the col3|col4 boundary edge (x64) and col4's first interior
+        vertical edge (x68). Elsewhere small ±1-3 (the "~6-20" residual).
+        Hypothesis: a small upstream deblock discrepancy in col 3 (masked because
+        col3's *final* pixels still match ffmpeg) propagates via MB(4,0)'s left
+        vertical edge into MB(4,1)'s horizontal top-edge strong/weak (bS=4)
+        branch decision → amplified spike on the last column. Next: dump the
+        per-edge filter inputs for MB(4,1) h-edge seg0 vs an ffmpeg loopfilter
+        trace; check col-3 interior h-edge (fy=12) output mid-stream.
+        NOTE: `deblock_field` builds `DeblockMbInfo::new` (field=false) not
+        `new_field`; for a pure PAFF field picture `mvy_limit` stays 4 (only
+        MBAFF interlaced MBs halve it), so that is *not* the bug — but confirm.
+  - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once 2d-ii done.
 - [ ] **3. G.5a.** Pin every currently-bit-exact MBAFF frame in
       `dbg_g5_interlaced` / `dbg_g6_mbaff_deblock` as hard assertions.
 - [ ] **4. G.5b.** Add one real PAFF corpus clip + one real MBAFF corpus clip;
