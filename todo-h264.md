@@ -88,18 +88,26 @@ diagnostic tests).
       indexes `colocated.get(mb_idx)` on the frame grid (not pair-scan) and that
       the stored P-frame `mv_grid` is frame-grid order. Then `dbg_ibp_p_grid`
       gB → assert all-zero; pin.
-- [ ] **2. PAFF B-field** (max_diff 126, CAVLC ≡ CABAC ⇒ not entropy).
-  - [ ] **2a.** IDR-only PAFF field-pair stream (no P/B). Decode. Fail ⇒ field
-        recon/pairing bug (2b); pass ⇒ ref-list/DPB bug (2c).
-  - [ ] **2b.** `decode_interlaced` I-field path: assert both fields → `Frame`
-        not `Fallback`; `field_accum` holds exactly one field when the second
-        arrives; `finalize_field` interleaves at the right parity.
-  - [ ] **2c.** Log DPB size + entry POC/parity in `build_field_ref_list_l0` at
-        the P-field call. Empty ⇒ fix field `store_reference_picture`. Wrong
-        order ⇒ fix §8.2.4.2.5 ordering.
-  - [ ] **2d.** P-field decodes without `Fallback` → re-check max_diff; residual
-        error ⇒ per-MB diff map.
-  - [ ] **2e.** `dbg_paff_b_field` gets a hard bit-exact assertion.
+- [~] **2. PAFF B-field** — 2026-08-30, mostly done. Root cause was NOT B-frames
+      (fixtures are I/P) and NOT entropy. Three bugs, all committed:
+  - [x] **2a/2b.** `FIELD_SCAN_4X4` was mis-transcribed (scan pos 6/7/9/11/13) —
+        zero coverage since the only field fixture is all Intra_8×8. Fixed
+        (`transform.rs`, commit 4835979); lib test added. → PAFF CAVLC I-field
+        bit-exact.
+  - [x] **2b'.** CABAC PAFF path never selected the field residual contexts
+        (`cur_pair_field` hard-`false` outside MBAFF). Fixed in cabac_i/p/b
+        (`= field_pic_flag`). → CABAC I/P/B field residuals now match CAVLC.
+  - [x] **2c.** `output_frame` clobber: a completed PAFF pair emitted, then a
+        later undecodable field in the same packet overwrote it with the grey
+        scaffold. Guarded with `interlaced_frame_emitted` (`decoder/mod.rs`).
+  - [x] **2c'.** DPB sliding window counted field entries not frames → 2nd field
+        of a pair evicted the 1st. `Dpb::num_ref_frames()` (commit 19d888e). →
+        `paff_b_field` frame#0 P-field max_diff 246→~20.
+  - [x] `dbg_paff_i_fields` now hard-asserts bit-exact (4 frames, deblock off).
+  - [ ] **2d.** Remaining: PAFF **field deblocking** (~6–20 residual on ~800px,
+        `Self::deblock_field`); `paff_b_field` frame_num=1 P-top field still
+        Fallbacks (parse_p_slice_cabac Err — investigate ref-list / field MC).
+  - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once 2d done.
 - [ ] **3. G.5a.** Pin every currently-bit-exact MBAFF frame in
       `dbg_g5_interlaced` / `dbg_g6_mbaff_deblock` as hard assertions.
 - [ ] **4. G.5b.** Add one real PAFF corpus clip + one real MBAFF corpus clip;
