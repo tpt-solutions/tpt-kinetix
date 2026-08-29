@@ -489,7 +489,10 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     // MBAFF pair state — same FFmpeg-mirrored pairing as the P path
     // (see parse_p_slice_cabac in cabac_p.rs).
     let mbaff_frame = mb_aff && !field_pic_flag;
-    let mut cur_pair_field = false;
+    // PAFF field picture: field-coded throughout (field residual CABAC contexts
+    // + field inverse scans). MBAFF branch overrides per pair, never for a field
+    // picture. See parse_p_slice_cabac.
+    let mut cur_pair_field = field_pic_flag;
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
     let mut prev_mb_skipped = false;
     let mut next_mb_skipped = false;

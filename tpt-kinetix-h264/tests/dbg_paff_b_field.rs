@@ -101,18 +101,27 @@ fn paff_b_field_decode() {
     let pkt = make_packet(annexb, 0);
     let mut frames = Vec::new();
 
-    match dec.decode(&pkt) {
-        Ok(Some(f)) => {
-            println!(
-                "decode emitted: {}x{} len={}",
-                f.width,
-                f.height,
-                f.data.len()
-            );
-            frames.push(f.data);
+    let empty = make_packet(Vec::new(), 0);
+    let mut first = true;
+    loop {
+        let p = if first { &pkt } else { &empty };
+        first = false;
+        match dec.decode(p) {
+            Ok(Some(f)) => {
+                println!(
+                    "decode emitted: {}x{} len={}",
+                    f.width,
+                    f.height,
+                    f.data.len()
+                );
+                frames.push(f.data);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                println!("decode error: {e:?}");
+                break;
+            }
         }
-        Ok(None) => println!("decode: no frame emitted"),
-        Err(e) => println!("decode error: {e:?}"),
     }
 
     // Drain any remaining frames from the DPB.

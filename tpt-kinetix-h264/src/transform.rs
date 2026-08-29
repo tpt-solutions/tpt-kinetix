@@ -313,16 +313,19 @@ pub const ZIGZAG_4X4: [usize; 16] = [
 
 /// Inverse-scan constant: **field** scan -> raster order for a 4×4 block.
 ///
-/// Used for macroblocks coded in field mode inside an MBAFF frame (§7.4.4 /
-/// §8.5.6: a field macroblock's coefficients use the field scan). Transcribed
-/// verbatim from FFmpeg `h264_slice.c`'s static `field_scan[16]` table
-/// (`x + y*4` raster indices, n5.1):
+/// Used for macroblocks coded in field mode — a PAFF field picture
+/// (`field_pic_flag == 1`) or a field-coded MBAFF pair (§7.4.4 / §8.5.6: a
+/// field macroblock's coefficients use the field scan). Matches FFmpeg
+/// `ff_h264_field_scan[16]` (`col + row*4` raster indices): scan positions
+/// 6/7/9/11/13 previously carried a mis-transcribed order that only ever hit
+/// the untested 4×4 field path (the sole field conformance fixture is all
+/// Intra_8×8).
 #[rustfmt::skip]
 pub const FIELD_SCAN_4X4: [usize; 16] = [
      0,  4,  1,  8,
-    12,  5,  6,  7,
-     2,  9, 10, 11,
-     3, 13, 14, 15,
+    12,  5,  9, 13,
+     2,  6, 10, 14,
+     3,  7, 11, 15,
 ];
 
 /// Inverse-quantise a 4×4 AC block and apply the residual inverse transform.
@@ -921,6 +924,23 @@ mod tests {
         dc[0] = 4;
         let out = luma_dc_transform(&dc, 18, &ScalingLists::flat());
         assert!(out.iter().all(|&v| v == out[0]));
+    }
+
+    #[test]
+    fn field_scan_4x4_matches_spec_table_8_13() {
+        // §8.5.6 Table 8-13 / FFmpeg `ff_h264_field_scan` (`x + y*4` raster
+        // indices). A field-coded macroblock (PAFF field picture or MBAFF
+        // field pair) unscans its 4×4 coefficients through this order.
+        assert_eq!(
+            FIELD_SCAN_4X4,
+            [0, 4, 1, 8, 12, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]
+        );
+        let mut seen = [false; 16];
+        for &r in FIELD_SCAN_4X4.iter() {
+            assert!(!seen[r], "raster {r} hit twice");
+            seen[r] = true;
+        }
+        assert!(seen.iter().all(|&b| b));
     }
 
     #[test]

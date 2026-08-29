@@ -19,6 +19,15 @@ use crate::{
 
 use super::H264Decoder;
 
+/// PAFF/MBAFF decode-path trace, silent unless `KINETIX_PAFF_DBG` is set.
+macro_rules! paff_dbg {
+    ($($arg:tt)*) => {
+        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// Accumulated fields of one interlaced frame awaiting output interleaving.
 ///
 /// In PAFF / MBAFF the two fields of a coded frame are decoded as separate
@@ -128,9 +137,12 @@ impl H264Decoder {
             Ok(h) => h,
             Err(_) => return Ok(InterlacedOutcome::Fallback),
         };
-        eprintln!(
+        paff_dbg!(
             "DECODE_INTERLACED: field_pic={} mb_adaptive={} slice_type={:?} first_mb={}",
-            header.field_pic_flag, mb_adaptive, header.slice_type, header.first_mb_in_slice
+            header.field_pic_flag,
+            mb_adaptive,
+            header.slice_type,
+            header.first_mb_in_slice
         );
         // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
         // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
@@ -548,7 +560,7 @@ impl H264Decoder {
             let parsed = match parsed {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("interlaced P/B slice parse failed: {e}");
+                    paff_dbg!("interlaced P/B slice parse failed: {e}");
                     return Ok(InterlacedOutcome::Fallback);
                 }
             };
@@ -709,7 +721,7 @@ impl H264Decoder {
                 // Surface WHY the MBAFF/PAFF parse failed instead of silently
                 // falling back (session #32c: the silent swallow hid a
                 // desync-class failure for days).
-                eprintln!("interlaced slice parse failed: {e}");
+                paff_dbg!("interlaced slice parse failed: {e}");
                 return Ok(InterlacedOutcome::Fallback);
             }
         };
@@ -1214,13 +1226,16 @@ impl H264Decoder {
         // Buffer the field and emit the interleaved frame once the pair is complete.
         let visible_width = sps.pic_width_pixels();
         let visible_height = sps.pic_height_pixels();
-        eprintln!(
+        paff_dbg!(
             "FINALIZE: frame_num={} bottom={} field_height={} nal={:?}",
-            header.frame_num, header.bottom_field_flag, field_height, nal.nal_unit_type
+            header.frame_num,
+            header.bottom_field_flag,
+            field_height,
+            nal.nal_unit_type
         );
         match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
             Some(full) => {
-                eprintln!("FINALIZE: -> Frame emitted");
+                paff_dbg!("FINALIZE: -> Frame emitted");
                 Ok(InterlacedOutcome::Frame(VideoFrame {
                     data: crate::reconstruct::crop_yuv420p(
                         &full.data,
@@ -1252,7 +1267,7 @@ impl H264Decoder {
         bottom: bool,
         key: u32,
     ) -> Option<VideoFrame> {
-        eprintln!(
+        paff_dbg!(
             "ACCUM: bottom={bottom} key={key} accum={}",
             match &self.field_accum {
                 Some(a) => format!(
@@ -1274,11 +1289,11 @@ impl H264Decoder {
                 if let (Some(top), Some(bottom)) = (&accum.top, &accum.bottom) {
                     let full = Self::interleave_fields(top, bottom);
                     self.field_accum = None;
-                    eprintln!("ACCUM: -> INTERLEAVE frame {}", full.height);
+                    paff_dbg!("ACCUM: -> INTERLEAVE frame {}", full.height);
                     Some(full)
                 } else {
                     self.field_accum = Some(accum);
-                    eprintln!("ACCUM: -> buffered (waiting for pair)");
+                    paff_dbg!("ACCUM: -> buffered (waiting for pair)");
                     None
                 }
             }
@@ -1286,7 +1301,7 @@ impl H264Decoder {
             // before the previous pair completed): pair the unpaired field with
             // a grey field so it is still emitted as a full-height frame.
             Some(accum) => {
-                eprintln!("ACCUM: KEY CHANGE old={} new={}", accum.key, key);
+                paff_dbg!("ACCUM: KEY CHANGE old={} new={}", accum.key, key);
                 let mut discarded = None;
                 if let Some(top) = &accum.top {
                     let grey_bottom = Self::grey_field(top);
@@ -1310,7 +1325,7 @@ impl H264Decoder {
                 discarded
             }
             None => {
-                eprintln!("ACCUM: empty, starting new field pair key={key} bottom={bottom}");
+                paff_dbg!("ACCUM: empty, starting new field pair key={key} bottom={bottom}");
                 let mut accum = FieldAccum {
                     key,
                     top: None,

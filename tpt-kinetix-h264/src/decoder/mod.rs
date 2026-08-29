@@ -282,6 +282,11 @@ impl H264Decoder {
         }
 
         let mut output_frame: Option<VideoFrame> = None;
+        // Set once the interlaced path emits a completed frame for this packet.
+        // A subsequent field in the same packet that can only fall back to the
+        // grey scaffold must not clobber it (PAFF: a completed pair followed by
+        // an undecodable field).
+        let mut interlaced_frame_emitted = false;
 
         for nal in &nal_units {
             match nal.nal_unit_type {
@@ -384,6 +389,7 @@ impl H264Decoder {
                                 } else {
                                     self.frame_queue.push_back(frame);
                                 }
+                                interlaced_frame_emitted = true;
                                 continue;
                             }
                             Ok(InterlacedOutcome::Handled) => {
@@ -423,7 +429,13 @@ impl H264Decoder {
                     }
 
                     let frame = self.decode_slice(nal, width, height, packet, tracer)?;
-                    output_frame = Some(frame);
+                    if interlaced_frame_emitted {
+                        // A PAFF pair already produced a real frame this packet;
+                        // don't let this field's scaffold overwrite it.
+                        self.frame_queue.push_back(frame);
+                    } else {
+                        output_frame = Some(frame);
+                    }
                 }
                 _ => {}
             }

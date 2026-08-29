@@ -352,7 +352,11 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     // MBAFF pair state (§7.4.4). `mbaff_frame` mirrors FFmpeg's FRAME_MBAFF:
     // SPS `mb_adaptive_frame_field_flag` set AND the slice is a frame picture.
     let mbaff_frame = mb_aff && !field_pic_flag;
-    let mut cur_pair_field = false;
+    // A PAFF field picture is field-coded throughout: `mb_field_decoding_flag`
+    // is absent but every MB selects the field residual CABAC context ranges
+    // (§9.3.3.1.3) and field inverse scans. The MBAFF branch overrides this per
+    // pair and never runs for a field picture.
+    let mut cur_pair_field = field_pic_flag;
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
     // FFmpeg's sl->prev_mb_skipped / sl->next_mb_skipped: when the top MB of a
     // pair is skipped, the bottom MB's skip flag was already read (and the

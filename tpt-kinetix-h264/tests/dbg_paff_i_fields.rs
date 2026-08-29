@@ -54,6 +54,12 @@ fn paff_i_fields_decode() {
         eprintln!("paff_i_fields_decode: skipped (ffmpeg unavailable)");
         return;
     }
+    // Compare prediction + residual only (both sides skip the in-loop filter):
+    // the PAFF field-intra path is bit-exact once FIELD_SCAN_4X4 and the field
+    // CABAC residual contexts are correct; the remaining field-deblock delta is
+    // tracked separately.
+    // SAFETY: single-threaded test binary, env set before any decode.
+    unsafe { std::env::set_var("KINETIX_SKIP_DEBLOCK", "1") };
 
     let dir = std::env::temp_dir().join("dbg_paff_i_fields");
     std::fs::create_dir_all(&dir).unwrap();
@@ -77,6 +83,8 @@ fn paff_i_fields_decode() {
             "-loglevel",
             "error",
             "-y",
+            "-skip_loop_filter",
+            "all",
             "-i",
             h264_path.to_str().unwrap(),
             "-f",
@@ -149,21 +157,29 @@ fn paff_i_fields_decode() {
         ref_frames
     );
 
-    if !frames.is_empty() && !ref_yuv.is_empty() {
-        let n = frames.len().min(ref_frames);
-        for (i, frame) in frames.iter().enumerate().take(n) {
-            if frame.len() != frame_len {
-                println!("frame#{i}: SKIP (size {} != {frame_len})", frame.len());
-                continue;
-            }
-            let off = i * frame_len;
-            let (max_d, n_d, tot) = compare(frame, &ref_yuv[off..off + frame_len]);
-            let luma_n = (frame_len * 2) / 3;
-            let (ld, ln, _) = compare(&frame[..luma_n], &ref_yuv[off..off + luma_n]);
-            let (cd, cn, _) = compare(&frame[luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
-            println!(
-                "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
-            );
-        }
+    assert!(
+        !frames.is_empty() && !ref_yuv.is_empty(),
+        "no frames to compare"
+    );
+    let n = frames.len().min(ref_frames);
+    let mut worst = 0i32;
+    for (i, frame) in frames.iter().enumerate().take(n) {
+        assert_eq!(frame.len(), frame_len, "frame#{i} size");
+        let off = i * frame_len;
+        let (max_d, n_d, tot) = compare(frame, &ref_yuv[off..off + frame_len]);
+        let luma_n = (frame_len * 2) / 3;
+        let (ld, ln, _) = compare(&frame[..luma_n], &ref_yuv[off..off + luma_n]);
+        let (cd, cn, _) = compare(&frame[luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
+        println!(
+            "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
+        );
+        worst = worst.max(max_d);
     }
+    // PAFF field-intra (CAVLC) + field pairing/interleave is bit-exact against
+    // ffmpeg's prediction+residual output. Regression pin for the FIELD_SCAN_4X4
+    // transcription fix and the field-picture CABAC residual-context fix.
+    assert_eq!(
+        worst, 0,
+        "PAFF I-field decode should be bit-exact (deblocking disabled)"
+    );
 }

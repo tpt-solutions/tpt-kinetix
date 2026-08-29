@@ -56,7 +56,12 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     // not itself a field picture). The flag applies to both the top and bottom
     // macroblock of the pair; for frame-only / PAFF streams it is absent.
     let mbaff_frame = mb_aff && !field_pic_flag;
-    let mut cur_pair_field = false;
+    // A PAFF field picture (`field_pic_flag == 1`) is field-coded throughout:
+    // `mb_field_decoding_flag` is absent, but every macroblock still selects the
+    // field significance/last CABAC context ranges (§9.3.3.1.3, Table 9-40) and
+    // the field 4×4/8×8 inverse scans. The MBAFF branch below overrides this
+    // per pair; it never runs for a field picture (mbaff_frame is then false).
+    let mut cur_pair_field = field_pic_flag;
     // Phase G.4: per-frame-MB `mb_field_decoding_flag`, populated as each
     // pair is decoded so `NeighbourCtx` can resolve mixed field/frame
     // neighbour addresses (§6.4.10.1) for already-decoded macroblocks.
