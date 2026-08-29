@@ -2843,3 +2843,23 @@
 > No `git commit` calls. `capabilities().pixel_exact` untouched (still
 > `false`).
 
+> **2026-08-29 (cont'd) — block-interior comparison tool built; reconstruction gap isolated.**
+> Added `av1_prefilter_check.rs` example that compares Kinetix pre-filter output
+> against dav1d post-filter output at only block-interior pixels (≥4 from any
+> 8×8 luma boundary), avoiding the deblock confound. Results:
+> - `solid_red_64`: max_diff=0, avg_diff=0.000 (pixel-exact at block interiors)
+> - `testsrc_128x96`: max_diff=219, avg_diff=16.0 (Y); first divergence at
+>   pixel (52,68) Kinetix=4 vs ref=41
+> - `mandelbrot_128x96`: max_diff=120, avg_diff=8.9 (Y)
+> - `smptebars_256x144`: max_diff=180, avg_diff=68.1 (Y)
+> - `testsrc2_320x180`: max_diff=97, avg_diff=50.7 (Y)
+>
+> **Conclusion:** the reconstruction pipeline works for simple (single-partition,
+> single-color) content but has large errors for multi-partition content. The
+> error is in an interaction between reconstruction stages (prediction,
+> transform, dequant, or palette), not in the entropy decode (proven correct by
+> the Python oracle) or the partition context (proven correct by the 2D MiSizes
+> change being a no-op). Added `KINETIX_AV1_DUMP_PREFILTER` env var to dump
+> pre-filter YUV for external comparison. 116 unit tests pass. No `git commit`
+> calls.
+

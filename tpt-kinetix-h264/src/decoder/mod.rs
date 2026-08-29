@@ -419,9 +419,50 @@ impl H264Decoder {
         Ok(output_frame)
     }
 
-    /// Flush any buffered frames from the decoded picture buffer.
+    /// Flush any buffered frames from the decoded picture buffer and the field
+    /// accumulator.
+    ///
+    /// Any unpaired field still in the field accumulator is paired with a grey
+    /// field so it is emitted as a full-height frame rather than being dropped.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
-        let frames = self.dpb.take_frames();
+        let mut frames = self.dpb.take_frames();
+        if let Some(accum) = self.field_accum.take() {
+            let visible_width = self.sps_store.values().next().map(|s| s.pic_width_pixels());
+            let visible_height = self.sps_store.values().next().map(|s| s.pic_height_pixels());
+            if let (Some(vw), Some(vh)) = (visible_width, visible_height) {
+                if let Some(top) = accum.top {
+                    let grey_bottom = Self::grey_field(&top);
+                    let full = Self::interleave_fields(&top, &grey_bottom);
+                    frames.push(VideoFrame {
+                        data: crate::reconstruct::crop_yuv420p(
+                            &full.data,
+                            full.width,
+                            full.height,
+                            vw,
+                            vh,
+                        ),
+                        width: vw,
+                        height: vh,
+                        ..full
+                    });
+                } else if let Some(bottom) = accum.bottom {
+                    let grey_top = Self::grey_field(&bottom);
+                    let full = Self::interleave_fields(&grey_top, &bottom);
+                    frames.push(VideoFrame {
+                        data: crate::reconstruct::crop_yuv420p(
+                            &full.data,
+                            full.width,
+                            full.height,
+                            vw,
+                            vh,
+                        ),
+                        width: vw,
+                        height: vh,
+                        ..full
+                    });
+                }
+            }
+        }
         Ok(frames)
     }
 

@@ -673,6 +673,58 @@ impl H264Decoder {
         Ok(InterlacedOutcome::Frame(frame))
     }
 
+    /// Build a half-height grey skip field and pair it with its complementary
+    /// field in the field accumulator.
+    ///
+    /// When the field reference list cannot be built (e.g. empty DPB), the field
+    /// cannot be properly decoded. Instead of falling through to the progressive
+    /// scaffold path (which misparses field slices as frame slices and bypasses
+    /// `field_accum`), emit a grey skip field here so the field-pairing logic
+    /// stays consistent and the complementary field can still be interleaved
+    /// into a full output frame.
+    fn emit_skip_field(
+        &mut self,
+        coded_width: u32,
+        field_height: u32,
+        packet: &Packet,
+        nal: &NalUnit,
+        sps: &SeqParameterSet,
+        header: &crate::slice::SliceHeader,
+    ) -> Result<InterlacedOutcome, KinetixError> {
+        let w = coded_width as usize;
+        let h = field_height as usize;
+        let luma_size = w * h;
+        let chroma_size = (w / 2) * (h / 2);
+
+        let field_frame = VideoFrame {
+            pts: packet.pts,
+            dts: packet.dts,
+            data: vec![128u8; luma_size + 2 * chroma_size],
+            width: coded_width,
+            height: field_height,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+        };
+
+        let visible_width = sps.pic_width_pixels();
+        let visible_height = sps.pic_height_pixels();
+        match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
+            Some(full) => Ok(InterlacedOutcome::Frame(VideoFrame {
+                data: crate::reconstruct::crop_yuv420p(
+                    &full.data,
+                    full.width,
+                    full.height,
+                    visible_width,
+                    visible_height,
+                ),
+                width: visible_width,
+                height: visible_height,
+                ..full
+            })),
+            None => Ok(InterlacedOutcome::Handled),
+        }
+    }
+
     /// PAFF P-field picture decode: build the field reference list (§8.2.4.2.5),
     /// parse the field P-slice, motion-compensate each field macroblock at field
     /// parity into a half-height buffer, deblock, and interleave with its
@@ -704,7 +756,16 @@ impl H264Decoder {
             pic_num_ctx,
         ) {
             Some(l) => l,
-            None => return Ok(InterlacedOutcome::Fallback),
+            None => {
+                return self.emit_skip_field(
+                    sps.coded_width_pixels(),
+                    field_height,
+                    packet,
+                    nal,
+                    sps,
+                    header,
+                );
+            }
         };
 
         let weighted_pred = match (
@@ -821,7 +882,16 @@ impl H264Decoder {
             pic_num_ctx,
         ) {
             Some(l) => l,
-            None => return Ok(InterlacedOutcome::Fallback),
+            None => {
+                return self.emit_skip_field(
+                    sps.coded_width_pixels(),
+                    field_height,
+                    packet,
+                    nal,
+                    sps,
+                    header,
+                );
+            }
         };
         let ref_l1 = match build_field_ref_list_l1(
             self.dpb(),
@@ -830,7 +900,16 @@ impl H264Decoder {
             pic_num_ctx,
         ) {
             Some(l) => l,
-            None => return Ok(InterlacedOutcome::Fallback),
+            None => {
+                return self.emit_skip_field(
+                    sps.coded_width_pixels(),
+                    field_height,
+                    packet,
+                    nal,
+                    sps,
+                    header,
+                );
+            }
         };
 
         // Current field's POC (§8.2.1) — needed for implicit bi-prediction
@@ -1068,6 +1147,11 @@ impl H264Decoder {
     /// Buffer one reconstructed field and, when its complementary field has also
     /// been decoded, interleave the two half-height fields into a full (progressive)
     /// frame suitable for output.
+    ///
+    /// On a key change (a new frame's first field arrived before the previous
+    /// pair completed), the unpaired field from the previous frame is paired with
+    /// a grey field so it is still emitted as a full-height frame rather than
+    /// being silently dropped.
     fn accumulate_field(
         &mut self,
         field: VideoFrame,
@@ -1091,8 +1175,32 @@ impl H264Decoder {
                 }
             }
             // Either empty, or the key changed (a new frame's first field arrived
-            // before the previous pair completed): start a fresh accumulator.
-            _ => {
+            // before the previous pair completed): pair the unpaired field with
+            // a grey field so it is still emitted as a full-height frame.
+            Some(accum) => {
+                let mut discarded = None;
+                if let Some(top) = &accum.top {
+                    let grey_bottom = Self::grey_field(top);
+                    discarded = Some(Self::interleave_fields(top, &grey_bottom));
+                } else if let Some(bottom) = &accum.bottom {
+                    let grey_top = Self::grey_field(bottom);
+                    discarded = Some(Self::interleave_fields(&grey_top, bottom));
+                }
+                let mut accum = FieldAccum {
+                    key,
+                    top: None,
+                    bottom: None,
+                    last_bottom: bottom,
+                };
+                if bottom {
+                    accum.bottom = Some(field);
+                } else {
+                    accum.top = Some(field);
+                }
+                self.field_accum = Some(accum);
+                discarded
+            }
+            None => {
                 let mut accum = FieldAccum {
                     key,
                     top: None,
@@ -1110,10 +1218,29 @@ impl H264Decoder {
         }
     }
 
+    /// Create a grey (flat 128) field frame matching the dimensions of
+    /// `template`. Used to pair with an unpaired field on a key change so the
+    /// frame is still emitted at full height.
+    pub(crate) fn grey_field(template: &VideoFrame) -> VideoFrame {
+        let w = template.width as usize;
+        let h = template.height as usize;
+        let luma_size = w * h;
+        let chroma_size = (w / 2) * (h / 2);
+        VideoFrame {
+            pts: template.pts,
+            dts: template.dts,
+            data: vec![128u8; luma_size + 2 * chroma_size],
+            width: template.width,
+            height: template.height,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: template.is_key_frame,
+        }
+    }
+
     /// Interleave two complementary half-height fields into a full (progressive)
     /// frame: the top field's rows occupy the even scanlines, the bottom field's
     /// rows the odd scanlines (§6.4.10.1 / §8.4.2.2.1).
-    pub(super) fn interleave_fields(top: &VideoFrame, bottom: &VideoFrame) -> VideoFrame {
+    pub(crate) fn interleave_fields(top: &VideoFrame, bottom: &VideoFrame) -> VideoFrame {
         let w = top.width as usize;
         let field_h = top.height as usize; // half height
         let full_h = field_h * 2;

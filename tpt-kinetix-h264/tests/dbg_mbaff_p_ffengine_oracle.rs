@@ -147,6 +147,21 @@ impl<'a> FfEngine<'a> {
             true
         }
     }
+    /// Bypass bin decode (H.264 CABAC §9.3.3.2.3) — matches ffmpeg's
+    /// `get_cabac_bypass` (validated in `dbg_engine_diff.rs`).
+    fn bypass(&mut self) -> i32 {
+        self.low = self.low.wrapping_add(self.low);
+        if (self.low & CABAC_MASK) == 0 {
+            self.refill();
+        }
+        let r = self.range << (CABAC_BITS + 1);
+        if self.low < r {
+            0
+        } else {
+            self.low -= r;
+            1
+        }
+    }
 }
 
 fn ffmpeg_available() -> bool {

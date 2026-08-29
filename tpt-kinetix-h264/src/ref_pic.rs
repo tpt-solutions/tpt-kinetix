@@ -536,10 +536,18 @@ impl Dpb {
         Ok(outcome)
     }
 
-    /// Drain every stored picture's frame, clearing the buffer.
+    /// Drain every stored *frame* picture, clearing the buffer.
+    ///
+    /// Field-picture entries (`field_pic_flag == true`) are excluded: they exist
+    /// only so later inter slices can build their field reference lists and must
+    /// not be emitted as half-height output frames on flush.
     pub fn take_frames(&mut self) -> Vec<VideoFrame> {
         self.max_long_term_frame_idx = None;
-        self.entries.drain(..).map(|e| e.frame).collect()
+        self.entries
+            .drain(..)
+            .filter(|e| !e.field_pic_flag)
+            .map(|e| e.frame)
+            .collect()
     }
 
     /// §8.2.5.4 — the adaptive memory control marking commands, applied in the
@@ -1144,16 +1152,18 @@ pub fn build_field_ref_list_l0(
     let mut lt_bottom: Vec<&FieldRef> = Vec::new();
     for f in &fields {
         // Determine the underlying DPB short/long status by matching the frame.
-        let is_short = dpb
-            .iter()
-            .filter(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
-            .any(|e| e.is_short_term);
-        let is_long = !is_short;
-        let pic_num = dpb
-            .iter()
-            .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
-            .map(|e| e.pic_num(ctx))
-            .unwrap_or(0);
+        // Match on field flags (and parity for genuine fields) rather than the
+        // fragile height+POC combination, which can alias across entries.
+        // A frame-derived FieldRef (is_frame) matches a DPB frame entry; a
+        // genuine field (!is_frame) matches a DPB field entry of the same parity.
+        let matching = |e: &&DpbEntry| {
+            e.field_pic_flag == f.is_field()
+                && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+                && e.pic_order_cnt == f.pic_order_cnt
+        };
+        let is_short = dpb.iter().filter(matching).any(|e| e.is_short_term);
+        let is_long = dpb.iter().filter(matching).any(|e| e.is_long_term);
+        let pic_num = field_pic_num(f, dpb, ctx);
         if is_short {
             if f.bottom {
                 st_bottom.push(f);
@@ -1227,17 +1237,43 @@ pub fn build_field_ref_list_l1(
 }
 
 /// `PicNum` of a candidate field reference (§8.2.4.2.5), doubled for fields.
+///
+/// For a genuine field reference (`f.is_field()`) the DPB entry is a field
+/// picture and [`DpbEntry::pic_num`] already returns the doubled value
+/// (because `ctx.field_pic_flag == true`). For a frame-derived field
+/// (`f.is_frame`) the DPB entry is a frame picture whose `pic_num` is the
+/// undoubled `FrameNumWrap`; per §8.2.4.2.5 we must double it here and add
+/// the field's parity (`f.bottom`).
 fn field_pic_num(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
-    dpb.iter()
-        .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
-        .map(|e| e.pic_num(ctx))
-        .unwrap_or(0)
+    let found = dpb.iter().find(|e| {
+        e.field_pic_flag == f.is_field()
+            && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+            && e.pic_order_cnt == f.pic_order_cnt
+    });
+    match found {
+        Some(e) if f.is_frame => {
+            // §8.2.4.2.5: frame-derived field PicNum = 2*FrameNumWrap + parity.
+            let frame_num = e.frame_num as i64;
+            let frame_num_wrap = if frame_num > ctx.curr_frame_num as i64 {
+                frame_num - ctx.max_frame_num as i64
+            } else {
+                frame_num
+            };
+            2 * frame_num_wrap + f.bottom as i64
+        }
+        Some(e) => e.pic_num(ctx),
+        None => 0,
+    }
 }
 
 /// `LongTermPicNum` of a candidate long-term field reference.
 fn field_long_num(f: &FieldRef, dpb: &Dpb) -> i64 {
     dpb.iter()
-        .find(|e| e.frame.height == f.frame.height && e.pic_order_cnt == f.pic_order_cnt)
+        .find(|e| {
+            e.field_pic_flag == f.is_field()
+                && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+                && e.pic_order_cnt == f.pic_order_cnt
+        })
         .map(|e| e.long_term_pic_num as i64)
         .unwrap_or(0)
 }

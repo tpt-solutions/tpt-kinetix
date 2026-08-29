@@ -217,6 +217,24 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
     }
     eprintln!("    decode-order: {decode_order}");
 
+    // Final MV grid (predictor + mvd) for coded MBs — compare vs ffmpeg
+    // `-flags2 +export_mvs` ground truth.
+    for gi in 0..(mb_cols * mb_rows) as usize {
+        let mb = &parsed.macroblocks[gi];
+        if mb.skip || mb.motion.is_none() {
+            continue;
+        }
+        if let Some(cells) = parsed.mv_store.cells_of(gi) {
+            let mvs: Vec<[i32; 2]> = [0usize, 3, 12, 15].iter().map(|&c| cells[c].mv).collect();
+            eprintln!(
+                "    MV g{gi} ({},{}) corners(TL,TR,BL,BR)={:?}",
+                gi % mb_cols as usize,
+                gi / mb_cols as usize,
+                mvs
+            );
+        }
+    }
+
     for mb_y in 0..mb_rows {
         for mb_x in 0..mb_cols {
             let mi = (mb_y * mb_cols + mb_x) as usize;
