@@ -87,7 +87,13 @@ struct FfEngine<'a> {
 }
 impl<'a> FfEngine<'a> {
     fn new(data: &'a [u8], t: &'a FfTables) -> Self {
-        let mut e = FfEngine { low: 0, range: 0, data, idx: 0, t };
+        let mut e = FfEngine {
+            low: 0,
+            range: 0,
+            data,
+            idx: 0,
+            t,
+        };
         e.low = (e.byte() as i32) << 18;
         e.low += (e.byte() as i32) << 10;
         e.low += 1 << 9; // even-alignment branch
@@ -102,7 +108,9 @@ impl<'a> FfEngine<'a> {
     fn refill(&mut self) {
         let b0 = self.data.get(self.idx).copied().unwrap_or(0);
         let b1 = self.data.get(self.idx + 1).copied().unwrap_or(0);
-        self.low = self.low.wrapping_add(((b0 as i32) << 9) + ((b1 as i32) << 1));
+        self.low = self
+            .low
+            .wrapping_add(((b0 as i32) << 9) + ((b1 as i32) << 1));
         self.low -= CABAC_MASK;
         self.idx += (CABAC_BITS / 8) as usize;
     }
@@ -149,6 +157,7 @@ impl<'a> FfEngine<'a> {
     }
     /// Bypass bin decode (H.264 CABAC §9.3.3.2.3) — matches ffmpeg's
     /// `get_cabac_bypass` (validated in `dbg_engine_diff.rs`).
+    #[allow(dead_code)]
     fn bypass(&mut self) -> i32 {
         self.low = self.low.wrapping_add(self.low);
         if (self.low & CABAC_MASK) == 0 {
@@ -165,7 +174,11 @@ impl<'a> FfEngine<'a> {
 }
 
 fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn cabac_payload() -> Option<(Vec<u8>, i32)> {
@@ -174,8 +187,18 @@ fn cabac_payload() -> Option<(Vec<u8>, i32)> {
     let h = dir.join("mbaff_ip.h264");
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
-            "testsrc=size=64x64:rate=1:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=1:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-x264-params",
             "cabac=1:bframes=0:keyint=300:min-keyint=300:deblock=0:interlaced=1:tff=1:threads=1",
             h.to_str()?,
@@ -188,17 +211,24 @@ fn cabac_payload() -> Option<(Vec<u8>, i32)> {
     }
     let annexb = std::fs::read(&h).ok()?;
     let units = parse_nal_units_from_annexb(&annexb);
-    let sps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Sps)
+    let sps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Sps)
         .and_then(|u| SeqParameterSet::parse(&u.rbsp).ok())?;
-    let pps = units.iter().find(|u| u.nal_unit_type == NalUnitType::Pps)
+    let pps = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::Pps)
         .and_then(|u| PicParameterSet::parse(&u.rbsp, None).ok())?;
-    let p = units.iter().find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice)?;
+    let p = units
+        .iter()
+        .find(|u| u.nal_unit_type == NalUnitType::NonIdrSlice)?;
     let ctx = SliceHeaderContext {
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
-        bottom_field_pic_order_in_frame_present_flag: pps.bottom_field_pic_order_in_frame_present_flag,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag,
         delta_pic_order_always_zero_flag: false,
         num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
         num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
@@ -208,14 +238,24 @@ fn cabac_payload() -> Option<(Vec<u8>, i32)> {
         deblocking_filter_control_present_flag: pps.deblocking_filter_control_present_flag,
         redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag,
         num_slice_groups_minus1: pps.num_slice_groups_minus1,
-        chroma_array_type: if sps.separate_colour_plane_flag { 0 } else { sps.chroma_format_idc },
+        chroma_array_type: if sps.separate_colour_plane_flag {
+            0
+        } else {
+            sps.chroma_format_idc
+        },
     };
     let header = tpt_kinetix_h264::slice::SliceHeader::parse_with_context(
-        &p.rbsp, p.nal_unit_type, p.nal_ref_idc, &ctx,
+        &p.rbsp,
+        p.nal_unit_type,
+        p.nal_ref_idc,
+        &ctx,
     )
     .ok()?;
     let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
-    eprintln!("data_bit_offset={} slice_qp={slice_qp}", header.data_bit_offset);
+    eprintln!(
+        "data_bit_offset={} slice_qp={slice_qp}",
+        header.data_bit_offset
+    );
     let mut r = BitReader::new(&p.rbsp);
     r.seek_to_bit(header.data_bit_offset);
     r.byte_align();
@@ -238,7 +278,12 @@ fn mbaff_ip_p_engine_lockstep_through_mb9_mb_type() {
     eprintln!(
         "P-CABAC payload[{}]: {}",
         payload.len(),
-        payload.iter().take(16).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+        payload
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cabac_ref.c");
@@ -259,8 +304,10 @@ fn mbaff_ip_p_engine_lockstep_through_mb9_mb_type() {
             CabacContext::init(m as i32, n as i32, slice_qp)
         })
         .collect();
-    let mut ff_states: Vec<u8> =
-        crate_ctx.iter().map(|c| (c.state << 1) | (c.mps & 1)).collect();
+    let mut ff_states: Vec<u8> = crate_ctx
+        .iter()
+        .map(|c| (c.state << 1) | (c.mps & 1))
+        .collect();
 
     let mut padded = payload.clone();
     padded.extend(std::iter::repeat_n(0u8, 64));

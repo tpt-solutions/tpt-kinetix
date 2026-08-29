@@ -401,11 +401,9 @@ impl<'a> TileDecodeState<'a> {
         let avail_l = mi_col > 0;
         let stride = self.mi_cols;
         let above = avail_u
-            && (mi_width_log2(self.mi_sizes[(mi_row - 1) * stride + mi_col] as usize) as usize)
-                < bsl;
+            && (mi_width_log2(self.mi_sizes[(mi_row - 1) * stride + mi_col] as usize)) < bsl;
         let left = avail_l
-            && (mi_height_log2(self.mi_sizes[mi_row * stride + (mi_col - 1)] as usize) as usize)
-                < bsl;
+            && (mi_height_log2(self.mi_sizes[mi_row * stride + (mi_col - 1)] as usize)) < bsl;
         (left as usize) * 2 + (above as usize)
     }
 

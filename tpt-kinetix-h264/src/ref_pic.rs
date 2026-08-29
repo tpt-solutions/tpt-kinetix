@@ -488,11 +488,25 @@ impl Dpb {
         match marking {
             // §8.2.5.1 step 1: for an IDR, all reference pictures are marked
             // "unused for reference" before the current picture is stored.
+            //
+            // PAFF special case: both fields of an IDR frame are IDR slices.
+            // When the second field arrives, the first is already in the DPB
+            // with the same frame_num. We must NOT clear it — otherwise the
+            // complementary field is lost and later P/B fields can't build a
+            // complete field reference list (the P top-field needs the IDR
+            // top-field, not just the bottom).
             DecRefPicMarking::Idr {
                 long_term_reference_flag,
                 ..
             } => {
-                self.entries.clear();
+                let idr_complement_exists = current.field_pic_flag
+                    && self
+                        .entries
+                        .iter()
+                        .any(|e| e.frame_num == current.frame_num && e.field_pic_flag);
+                if !idr_complement_exists {
+                    self.entries.clear();
+                }
                 if *long_term_reference_flag {
                     self.max_long_term_frame_idx = Some(0);
                     mark_long_term(&mut current, 0);
@@ -526,10 +540,19 @@ impl Dpb {
         }
 
         // No two short-term pictures may share a frame_num (§7.4.3); a repeat
-        // replaces the older picture.
+        // replaces the older picture. For PAFF field pictures, the two fields
+        // of a frame share a frame_num but have opposite parity — both must be
+        // retained so the field reference list has both top and bottom
+        // candidates. The duplicate check therefore only applies within the
+        // same field-parity for field pictures.
         let frame_num = current.frame_num;
-        self.entries
-            .retain(|e| !(e.is_short_term && e.frame_num == frame_num));
+        if current.field_pic_flag {
+            self.entries
+                .retain(|e| !(e.is_short_term && e.frame_num == frame_num && e.bottom_field_flag == current.bottom_field_flag));
+        } else {
+            self.entries
+                .retain(|e| !(e.is_short_term && e.frame_num == frame_num));
+        }
         self.entries.push(current);
         self.entries.retain(|e| e.is_reference());
         self.enforce_capacity(ctx, max_num_ref_frames);
@@ -1117,6 +1140,24 @@ pub fn build_field_ref_list_l0(
     ctx: PicNumContext,
 ) -> Option<Vec<FieldRef>> {
     let num_active = num_ref_idx_l0_active.max(1);
+    eprintln!(
+        "BUILD_FIELD_REF_L0: current_bottom={} num_ref_idx_l0_active={} dpb_entries={}",
+        current_bottom,
+        num_ref_idx_l0_active,
+        dpb.iter().count()
+    );
+    for (i, e) in dpb.iter().enumerate() {
+        eprintln!(
+            "  DPB[{}]: frame_num={} field_pic={} bottom={} poc={} short={} long={}",
+            i,
+            e.frame_num,
+            e.field_pic_flag,
+            e.bottom_field_flag,
+            e.pic_order_cnt,
+            e.is_short_term,
+            e.is_long_term
+        );
+    }
     let mut fields: Vec<FieldRef> = Vec::new();
     for e in dpb.iter() {
         if e.field_pic_flag {

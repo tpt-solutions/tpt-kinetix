@@ -452,7 +452,12 @@ mod tests {
     fn truncated_payload_fails_stream_checksum() {
         let seq = seq_for(&[16]);
         let data: Vec<u16> = (0..16 * 16).map(|i| (i % 65536) as u16).collect();
-        let plane = Plane { width: 16, height: 16, bit_depth: 16, data };
+        let plane = Plane {
+            width: 16,
+            height: 16,
+            bit_depth: 16,
+            data,
+        };
         let enc = LosslessEncoder::new();
         let bytes = enc.encode_frame(&seq, &[plane]).unwrap();
         // Truncate the payload: SHA-256 must catch the mismatch.

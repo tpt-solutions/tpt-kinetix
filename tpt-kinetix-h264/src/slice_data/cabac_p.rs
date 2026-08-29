@@ -182,14 +182,16 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 continue;
             }
             let (coeffs_scan, count) = ctxs.residual.decode_block_8x8(dec, nctx.is_field());
-            // decode_block_8x8 returns coefficients in scan-position order,
-            // but dequant_idct_8x8 expects them in zigzag order.
-            // Convert using INVERSE_ZIGZAG_8X8 (scan_pos -> zigzag_pos).
-            let mut coeffs_zz = [0i16; 64];
-            for (scan_pos, &level) in coeffs_scan.iter().enumerate() {
-                coeffs_zz[crate::transform::INVERSE_ZIGZAG_8X8[scan_pos]] = level;
-            }
-            mb.luma_coeffs_8x8[blk8] = coeffs_zz;
+            // `decode_block_8x8` returns coefficients in **scan-position order**
+            // (`out[scan_pos] = level`) — exactly what every reconstruction path
+            // (`dequant_idct_8x8_scan(&luma_coeffs_8x8[..], .., &ZIGZAG_8X8)`)
+            // expects (`block[ZIGZAG_8X8[z]] = dequant(coeffs[z])`). Store them
+            // directly; the earlier `INVERSE_ZIGZAG_8X8[scan_pos]` remap was a
+            // double-permutation that scrambled every non-DC coefficient (only
+            // undetected by `high8x8_i` because that fixture's 8×8 blocks are
+            // DC-dominant, where the permutation is near-identity). Mirrors the
+            // inter path in `cabac_b.rs`.
+            mb.luma_coeffs_8x8[blk8] = coeffs_scan;
             for sub in 0..4usize {
                 this_nz.luma[raster_of_8x8_sub(blk8, sub)] = count;
             }
@@ -424,12 +426,27 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         }
         if pair_field_pending {
             let left_field = if mb_x > 0 {
-                cabac_ctx[(mb_y as usize) * mb_cols as usize + mb_x as usize - 1].mb_field_flag
+                let left_idx = (mb_y as usize) * mb_cols as usize + mb_x as usize - 1;
+                let left_mb = &macroblocks[left_idx];
+                // FFmpeg uses the mb_type interlaced flag (0 for skipped MBs); the
+                // mb_field_decoding_flag equals the pair's field flag even for
+                // skipped MBs, which would over-count ctxIdxInc for skipped neighbours.
+                if !left_mb.skip {
+                    cabac_ctx[left_idx].mb_field_flag
+                } else {
+                    false
+                }
             } else {
                 false
             };
             let top_field = if mb_y > 0 {
-                cabac_ctx[((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize].mb_field_flag
+                let top_idx = ((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize;
+                let top_mb = &macroblocks[top_idx];
+                if !top_mb.skip {
+                    cabac_ctx[top_idx].mb_field_flag
+                } else {
+                    false
+                }
             } else {
                 false
             };

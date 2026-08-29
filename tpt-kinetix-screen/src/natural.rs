@@ -166,7 +166,9 @@ mod tests {
 
     #[test]
     fn transform_round_trip_at_qp0() {
-        let orig = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let orig = vec![
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let size = 4;
         let above = vec![128i32; size];
         let left = vec![128i32; size];

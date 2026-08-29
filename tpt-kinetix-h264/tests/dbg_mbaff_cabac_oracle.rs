@@ -115,7 +115,11 @@ fn mbaff_p_cabac_first_divergent_mb() {
             n += 1;
         }
     }
-    assert!(ours_all.len() >= 2, "crate decoded {} frames", ours_all.len());
+    assert!(
+        ours_all.len() >= 2,
+        "crate decoded {} frames",
+        ours_all.len()
+    );
     let ours_p = &ours_all[1][..FW * FH];
 
     // Aggregate.
@@ -142,7 +146,7 @@ fn mbaff_p_cabac_first_divergent_mb() {
         }
     }
     // ---- crate direct parse: dump mb_type/mvd/cbp grid ----
-    drop(first_bad);
+    let _ = first_bad;
     if let Some(grid) = crate_parse_grid(&annexb) {
         eprintln!("CRATE PARSE GRID (raster):");
         for mby in 0..mb_rows {

@@ -519,12 +519,24 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         }
         if pair_field_pending {
             let left_field = if mb_x > 0 {
-                cabac_ctx[(mb_y as usize) * mb_cols as usize + mb_x as usize - 1].mb_field_flag
+                let left_idx = (mb_y as usize) * mb_cols as usize + mb_x as usize - 1;
+                let left_mb = &macroblocks[left_idx];
+                if !left_mb.skip {
+                    cabac_ctx[left_idx].mb_field_flag
+                } else {
+                    false
+                }
             } else {
                 false
             };
             let top_field = if mb_y > 0 {
-                cabac_ctx[((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize].mb_field_flag
+                let top_idx = ((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize;
+                let top_mb = &macroblocks[top_idx];
+                if !top_mb.skip {
+                    cabac_ctx[top_idx].mb_field_flag
+                } else {
+                    false
+                }
             } else {
                 false
             };

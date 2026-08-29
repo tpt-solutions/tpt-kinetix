@@ -61,15 +61,25 @@ pub struct Tensor {
 
 impl Tensor {
     /// Number of channels.
-    pub fn c(&self) -> usize { self.shape[0] }
+    pub fn c(&self) -> usize {
+        self.shape[0]
+    }
     /// Spatial height.
-    pub fn h(&self) -> usize { self.shape[1] }
+    pub fn h(&self) -> usize {
+        self.shape[1]
+    }
     /// Spatial width.
-    pub fn width(&self) -> usize { self.shape[2] }
+    pub fn width(&self) -> usize {
+        self.shape[2]
+    }
     /// Total number of elements (`C * H * W`).
-    pub fn len(&self) -> usize { self.data.len() }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
     /// Whether the tensor is empty.
-    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
 }
 
 /// Dual-path decode interface for the vision codec.
@@ -98,13 +108,24 @@ pub struct VisionDecoderImpl {
 
 impl VisionDecoderImpl {
     /// Create a new decoder in non-strict mode.
-    pub fn new() -> Self { Self { strict: false, sequence: None, dpb: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            strict: false,
+            sequence: None,
+            dpb: Vec::new(),
+        }
+    }
 
     /// Enable strict mode.
-    pub fn with_strict(mut self, strict: bool) -> Self { self.strict = strict; self }
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
 
     /// Parse the sequence header a stream begins with.
-    pub fn set_sequence_header(&mut self, sequence: SequenceHeader) { self.sequence = Some(sequence); }
+    pub fn set_sequence_header(&mut self, sequence: SequenceHeader) {
+        self.sequence = Some(sequence);
+    }
 
     /// Report what this decoder can and cannot do.
     pub fn capabilities(&self) -> DecoderCapabilities {
@@ -117,22 +138,30 @@ impl VisionDecoderImpl {
 }
 
 impl Default for VisionDecoderImpl {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VisionDecoder for VisionDecoderImpl {
     fn decode_tensor(&mut self, packet: &Packet) -> Result<Option<Tensor>, KinetixError> {
         let sequence = self.sequence.as_ref().ok_or_else(|| {
-            KinetixError::Parse("vision: decode_tensor() called before a sequence header was set".into())
+            KinetixError::Parse(
+                "vision: decode_tensor() called before a sequence header was set".into(),
+            )
         })?;
         if self.strict {
-            return Err(KinetixError::NotPixelExact("vision: original codec; pixel_exact is false".to_string()));
+            return Err(KinetixError::NotPixelExact(
+                "vision: original codec; pixel_exact is false".to_string(),
+            ));
         }
         let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
         let frame_header = FrameHeader::parse(&mut reader, sequence)?;
         let header_bytes = frame_header.to_bytes();
         if packet.data.len() < header_bytes.len() {
-            return Err(KinetixError::Parse("vision: packet too short for frame header".into()));
+            return Err(KinetixError::Parse(
+                "vision: packet too short for frame header".into(),
+            ));
         }
         let payload = &packet.data[header_bytes.len()..];
         Ok(Some(decode_tensor(sequence, &frame_header, payload)?))
@@ -140,16 +169,22 @@ impl VisionDecoder for VisionDecoderImpl {
 
     fn decode_pixels(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
         let sequence = self.sequence.as_ref().ok_or_else(|| {
-            KinetixError::Parse("vision: decode_pixels() called before a sequence header was set".into())
+            KinetixError::Parse(
+                "vision: decode_pixels() called before a sequence header was set".into(),
+            )
         })?;
         if self.strict {
-            return Err(KinetixError::NotPixelExact("vision: original codec; pixel_exact is false".to_string()));
+            return Err(KinetixError::NotPixelExact(
+                "vision: original codec; pixel_exact is false".to_string(),
+            ));
         }
         let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
         let frame_header = FrameHeader::parse(&mut reader, sequence)?;
         let header_bytes = frame_header.to_bytes();
         if packet.data.len() < header_bytes.len() {
-            return Err(KinetixError::Parse("vision: packet too short for frame header".into()));
+            return Err(KinetixError::Parse(
+                "vision: packet too short for frame header".into(),
+            ));
         }
         let payload = &packet.data[header_bytes.len()..];
         let reference = self.dpb.last();
@@ -158,7 +193,9 @@ impl VisionDecoder for VisionDecoderImpl {
         let video_frame = fb.to_video_frame(is_key);
         self.dpb.push(fb);
         let max_ref = sequence.max_ref_frames as usize;
-        while self.dpb.len() > max_ref { self.dpb.remove(0); }
+        while self.dpb.len() > max_ref {
+            self.dpb.remove(0);
+        }
         Ok(Some(video_frame))
     }
 }
@@ -170,9 +207,17 @@ mod tests {
 
     fn sample_sequence() -> SequenceHeader {
         SequenceHeader {
-            version: 1, max_width: 1920, max_height: 1080, chroma_present: false,
-            bit_depth: 8, qp_precision: 0, max_ref_frames: 2, num_rans_streams: 1,
-            min_block_size_log2: 3, max_block_size_log2: 3, quant_matrix_id: 0,
+            version: 1,
+            max_width: 1920,
+            max_height: 1080,
+            chroma_present: false,
+            bit_depth: 8,
+            qp_precision: 0,
+            max_ref_frames: 2,
+            num_rans_streams: 1,
+            min_block_size_log2: 3,
+            max_block_size_log2: 3,
+            quant_matrix_id: 0,
         }
     }
 
@@ -181,7 +226,13 @@ mod tests {
         let mut data = Vec::with_capacity(header_bytes.len() + payload.len());
         data.extend_from_slice(&header_bytes);
         data.extend_from_slice(payload);
-        Packet { pts: Timestamp::NONE, dts: Timestamp::NONE, data, stream_index: 0, is_key_frame: true }
+        Packet {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data,
+            stream_index: 0,
+            is_key_frame: true,
+        }
     }
 
     #[test]
@@ -192,7 +243,15 @@ mod tests {
     #[test]
     fn decode_before_sequence_header_errors() {
         let mut dec = VisionDecoderImpl::new();
-        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
         let packet = make_packet(&frame, &[]);
         assert!(dec.decode_pixels(&packet).is_err());
     }
@@ -201,19 +260,46 @@ mod tests {
     fn strict_mode_errors_with_not_pixel_exact() {
         let mut dec = VisionDecoderImpl::new().with_strict(true);
         dec.set_sequence_header(sample_sequence());
-        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
         let packet = make_packet(&frame, &[]);
-        assert!(matches!(dec.decode_pixels(&packet), Err(KinetixError::NotPixelExact(_))));
-        assert!(matches!(dec.decode_tensor(&packet), Err(KinetixError::NotPixelExact(_))));
+        assert!(matches!(
+            dec.decode_pixels(&packet),
+            Err(KinetixError::NotPixelExact(_))
+        ));
+        assert!(matches!(
+            dec.decode_tensor(&packet),
+            Err(KinetixError::NotPixelExact(_))
+        ));
     }
 
     #[test]
     fn keyframe_round_trips_through_decoder() {
         let seq = sample_sequence();
-        let frame = FrameHeader { frame_type: FrameType::Key, width: 16, height: 16, base_qp: 0, ref_frame_count: 0, output_mode: 2, payload_len: 0 };
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
         let mut luma = vec![0u8; 16 * 16];
-        for y in 0..16 { for x in 0..16 { luma[y * 16 + x] = ((x + y) * 8) as u8; } }
-        let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        for y in 0..16 {
+            for x in 0..16 {
+                luma[y * 16 + x] = ((x + y) * 8) as u8;
+            }
+        }
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
         let payload = encode_frame(&seq, &frame, &src, None).unwrap();
         let packet = make_packet(&frame, &payload);
         let mut dec = VisionDecoderImpl::new();

@@ -2,6 +2,112 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ae (2026-08-29) — REMAINING WORK BROKEN DOWN: every step is one run with a binary pass/fail
+
+Current state after #32ac/#32ad: **CABAC MBAFF I/P/B bit-exact** vs fully-filtered
+ffmpeg (`dbg_g6_mbaff_deblock` `g6_cabac_ip` P, `g6_cabac_ibp` I+B all maxdiff 0,
+pinned). Three things left before `pixel_exact`: (1) `mbaff_ibp` P frame CABAC
+(SAD ≈18300 g6 / 43815 skipLF), (2) PAFF B-field (max_diff 126, CAVLC≡CABAC),
+(3) latent inter `transform_size_8x8_flag`. Then G.5 + flip.
+
+Method that worked for #32ac (do not deviate): ffmpeg-engine oracle
+(`tests/dbg_mbaff_p_ffengine_oracle.rs`, has `bypass()`, agrees bin-for-bin
+through MB9) → first divergent bin → one context/table fix. No open-ended audits.
+
+### BUG 1 — CABAC `mbaff_ibp` P frame (SAD ≈18300)
+
+- [ ] **1a. Diff map.** Run `dbg_g5_i1_diffmap` on `mbaff_ibp` P frame. Deliverable:
+      list of MBs with maxdiff > 4.
+- [ ] **1b. Type vs recon split.** For the first bad MB: `KINETIX_BINTRACE` crate
+      parse + `ffmpeg -debug mb_type` same grid pos. Compare mb_type only.
+      → misparse (branch 1c-type) or residual/recon error (branch 1c-recon).
+- [ ] **1c-type.** Extend `dbg_mbaff_p_ffengine_oracle` to replay to that MB's
+      `mb_type` bins; diff ctxIdx + value bin-for-bin. First mismatch = the bug.
+- [ ] **1c-recon.** Check `transform_size_8x8_flag` for that MB vs ffmpeg. crate
+      `true` + `cbp&15 != 0` ⇒ this is BUG 3, go there. `t8` matches ⇒ dump parsed
+      residual coeffs vs ffmpeg residual trace for that one MB.
+- [ ] **1d. Fix + pin.** Apply the one-line fix. `dbg_g6_mbaff_deblock`
+      `g6_cabac_ibp` P frame → assert SAD 0, add hard assertion.
+- [ ] **1e. Regression.** `conformance_matrix`, `cabac_conformance`,
+      `b_frame_conformance`, lib all green.
+
+### BUG 2 — PAFF B-field (max_diff 126, CAVLC ≡ CABAC ⇒ not entropy)
+
+- [ ] **2a. Bisect: intra-only PAFF vector.** Build an IDR-only PAFF field-pair
+      stream (no P/B). Decode. Fails ⇒ field reconstruction/pairing bug (2b).
+      Passes ⇒ ref-list / DPB bug (2c).
+- [ ] **2b-recon.** In `decode_interlaced` I-field path: assert both fields decode
+      to `Frame` not `Fallback`; assert `field_accum` holds exactly one field when
+      the second arrives; assert `finalize_field` interleaves at the right parity.
+      One assertion trips = the bug.
+- [ ] **2c-reflist.** Log DPB size + entry POC/parity inside `build_field_ref_list_l0`
+      at the P-field call. Empty ⇒ fix field `store_reference_picture`. Non-empty
+      wrong order ⇒ fix §8.2.4.2.5 ordering.
+- [ ] **2d. Re-measure.** P-field decodes without `Fallback` → re-check max_diff.
+      Still off ⇒ normal field-MC bug, per-MB diff map (as 1a).
+- [ ] **2e. Pin.** `dbg_paff_b_field` gets a hard bit-exact assertion (currently
+      only captures the failing state).
+
+### BUG 3 — latent inter `transform_size_8x8_flag` (CABAC P/B path never reads it)
+
+- [ ] **3a. Oracle clip.** One High-profile CABAC P clip whose first coded inter
+      MB has `cbp&15 != 0`. Get ffmpeg's `t8` value for that MB via trace.
+- [ ] **3b. Re-land prototype.** Read bin after CBP gated by `get_dct8x8_allowed`
+      + 8×8 residual branch in `decode_inter_residual_cabac`. 3a's oracle → assert
+      `t8` bin matches.
+- [ ] **3c. B-slice thread.** Thread `direct_8x8_inference_flag` into the B-slice
+      `get_dct8x8_allowed` sub-type check (hypothesised cause of the earlier
+      `mbaff_ibp` regression). Re-test.
+- [ ] **3d. Regression.** Progressive `cabac_conformance` / `high8x8` / `b_frame`
+      stay bit-exact.
+
+### THEN — G.5 + `pixel_exact` flip (each is one clip + one assertion)
+
+- [ ] **G.5a.** Pin every currently-bit-exact MBAFF frame in `dbg_g5_interlaced` /
+      `dbg_g6_mbaff_deblock` as a hard assertion (lock in #32ac/#32ad).
+- [ ] **G.5b.** Add one real PAFF corpus clip + one MBAFF corpus clip; assert
+      bit-exact vs ffmpeg.
+- [ ] **G.5c.** non-16 crop: one `crop_right=10` clip through `dbg_g6`; assert
+      bit-exact (finishes #32s).
+- [ ] **H.** Flip `capabilities().pixel_exact` for the covered subset; update
+      README status table; `just conformance` second run (`--strict`) passes.
+
+## SESSION #32ad (2026-08-29) — A5: fully-filtered CABAC MBAFF P/B regression lock + intra-8×8 scan-perm fix
+
+**A5 regression lock landed.** `dbg_g6_mbaff_deblock` gained two CABAC MBAFF
+clips (`g6_cabac_ip`, `g6_cabac_ibp`) decoded against ffmpeg's FULLY-FILTERED
+reference (previously the only CABAC MBAFF P/B signal was the `-skip_loop_filter`
+`dbg_g5_interlaced` harness). Result: **`g6_cabac_ip` P frame and `g6_cabac_ibp`
+I+B frames are BIT-EXACT** (luma+chroma maxdiff 0) — the SAD ≈493/523 seen on
+the skipLF harness was a harness artefact, confirmed. New hard assertions pin
+those frames. `g6_cabac_ibp` P frame (emitted last) still diverges (best luma
+SAD ≈18300, = the `mbaff_ibp` P 43815 bug) — left un-pinned, tracked separately.
+
+**Fix:** `cabac_p.rs` intra-8×8 residual store dropped the stray
+`INVERSE_ZIGZAG_8X8[scan_pos]` remap (double-permutation), mirroring the inter
+path in `cabac_b.rs`. `decode_block_8x8` already returns scan-position order,
+which every `dequant_idct_8x8_scan(&luma_coeffs_8x8[..], .., &ZIGZAG_8X8)` recon
+path expects. `high_profile_8x8_cabac_conformance` never caught it (fixture 8×8
+blocks are DC-dominant → permutation ≈ identity there). 262 lib tests,
+`conformance_matrix`, `cabac_conformance`, `b_frame_conformance`,
+`high_profile_8x8_cabac_conformance`, `dbg_paff_b_field`, `dbg_g6_mbaff_deblock`
+all green. No commit (concurrent process active on the same files).
+
+REMAINING: `mbaff_ibp` P (SAD 43815 / g6 ≈18300) — still open, separate bug.
+**Localized this session (read-only):** `g6_cabac_ibp` P frame diff lives in the
+bottom MB-row — grid MBs (1,3),(2,3),(3,3) catastrophic (~220/256 samples, max
+113), (0,3)/(3,2) near-clean. ffmpeg `-debug mb_type` P grid:
+`row0 S S S S / row1 > S S S / row2 > I > > / row3 >- >- >- >+`. In MBAFF
+pair-scan order the desync starts right after the **intra `I_16x16` MB at grid
+(1,2)** — its pair-bottom (1,3) is the first broken MB. This is the **first clip
+to exercise an intra MB inside an MBAFF P slice** (`mbaff_ip` P was all-inter),
+so the bug is in `parse_p_macroblock_cabac`'s `None` branch →
+`parse_intra_mb_cabac_pb` (cabac_b.rs:1404): a bin miscount or an unpopulated
+neighbour-context field for I_16x16 under MBAFF. NEXT: extend
+`dbg_mbaff_p_ffengine_oracle` to walk MB(1,2)'s intra element sequence
+(mb_type suffix + chroma_pred + cbp-from-type + qp_delta + luma_dc + 16 AC cbf/
+residual + chroma) and diff the post-MB engine state vs the crate.
+
 ## SESSION #32ac (2026-08-29) — ★ ROOT CAUSE FOUND & FIXED: `mb_field_decoding_flag` CABAC context init used the I-slice table for P/B slices ★
 
 **Committed d1c5c53.** The CABAC MBAFF P/B desync (#32aa: MB9 `mb_type` ctxIdx

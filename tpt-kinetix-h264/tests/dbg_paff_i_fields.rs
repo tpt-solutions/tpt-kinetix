@@ -95,23 +95,45 @@ fn paff_i_fields_decode() {
 
     let annexb = std::fs::read(&h264_path).unwrap();
 
+    // Feed the whole Annex B stream as a single packet. PAFF field pairs can
+    // complete in one packet, producing multiple frames; `decode()` returns
+    // one frame per call, so loop until it returns None before flushing.
     let mut dec = H264Decoder::new();
     let pkt = make_packet(annexb, 0);
+    let empty = make_packet(Vec::new(), 0);
     let mut frames = Vec::new();
 
-    match dec.decode(&pkt) {
-        Ok(Some(f)) => {
-            println!("decode emitted: {}x{} len={}", f.width, f.height, f.data.len());
-            frames.push(f.data);
+    let mut first = true;
+    loop {
+        let p = if first { &pkt } else { &empty };
+        first = false;
+        match dec.decode(p) {
+            Ok(Some(f)) => {
+                println!(
+                    "decode emitted: {}x{} len={}",
+                    f.width,
+                    f.height,
+                    f.data.len()
+                );
+                frames.push(f.data);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                println!("decode error: {e:?}");
+                break;
+            }
         }
-        Ok(None) => println!("decode: no frame emitted"),
-        Err(e) => println!("decode error: {e:?}"),
     }
 
     match dec.flush() {
         Ok(flushed) => {
             for f in &flushed {
-                println!("flush emitted: {}x{} len={}", f.width, f.height, f.data.len());
+                println!(
+                    "flush emitted: {}x{} len={}",
+                    f.width,
+                    f.height,
+                    f.data.len()
+                );
                 frames.push(f.data.clone());
             }
         }
@@ -129,16 +151,16 @@ fn paff_i_fields_decode() {
 
     if !frames.is_empty() && !ref_yuv.is_empty() {
         let n = frames.len().min(ref_frames);
-        for i in 0..n {
-            if frames[i].len() != frame_len {
-                println!("frame#{i}: SKIP (size {} != {frame_len})", frames[i].len());
+        for (i, frame) in frames.iter().enumerate().take(n) {
+            if frame.len() != frame_len {
+                println!("frame#{i}: SKIP (size {} != {frame_len})", frame.len());
                 continue;
             }
             let off = i * frame_len;
-            let (max_d, n_d, tot) = compare(&frames[i], &ref_yuv[off..off + frame_len]);
+            let (max_d, n_d, tot) = compare(frame, &ref_yuv[off..off + frame_len]);
             let luma_n = (frame_len * 2) / 3;
-            let (ld, ln, _) = compare(&frames[i][..luma_n], &ref_yuv[off..off + luma_n]);
-            let (cd, cn, _) = compare(&frames[i][luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
+            let (ld, ln, _) = compare(&frame[..luma_n], &ref_yuv[off..off + luma_n]);
+            let (cd, cn, _) = compare(&frame[luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
             println!(
                 "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
             );

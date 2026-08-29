@@ -88,7 +88,16 @@ async fn main() -> Result<()> {
             http_addr,
             segment_duration,
             window_size,
-        } => stream(&rtmp_addr, &hls_dir, &http_addr, segment_duration, window_size).await,
+        } => {
+            stream(
+                &rtmp_addr,
+                &hls_dir,
+                &http_addr,
+                segment_duration,
+                window_size,
+            )
+            .await
+        }
     }
 }
 
@@ -183,9 +192,7 @@ fn transcode(
     match vcodec {
         "av1" => transcode_to_av1(&data, output, rate_control, speed),
         "h264" => transcode_to_h264(&data, output, rate_control, speed),
-        _ => anyhow::bail!(
-            "unsupported output codec '{vcodec}'. Supported: av1, h264"
-        ),
+        _ => anyhow::bail!("unsupported output codec '{vcodec}'. Supported: av1, h264"),
     }
 }
 
@@ -195,12 +202,7 @@ fn transcode_to_av1(
     rate_control: tpt_kinetix_core::encode::RateControl,
     speed: u8,
 ) -> Result<()> {
-    tracing::info!(
-        output,
-        ?rate_control,
-        speed,
-        "starting transcode to AV1"
-    );
+    tracing::info!(output, ?rate_control, speed, "starting transcode to AV1");
 
     let config = tpt_kinetix_core::encode::EncodeConfig {
         width: 0,
@@ -255,12 +257,7 @@ fn transcode_to_h264(
     rate_control: tpt_kinetix_core::encode::RateControl,
     speed: u8,
 ) -> Result<()> {
-    tracing::info!(
-        output,
-        ?rate_control,
-        speed,
-        "starting transcode to H.264"
-    );
+    tracing::info!(output, ?rate_control, speed, "starting transcode to H.264");
 
     let config = tpt_kinetix_core::encode::EncodeConfig {
         width: 0,
@@ -334,8 +331,7 @@ fn write_ivf(path: &str, packets: &[tpt_kinetix_core::packet::Packet]) -> Result
         out.extend_from_slice(&pkt.data);
     }
 
-    std::fs::write(path, &out)
-        .with_context(|| format!("failed to write output file: {path}"))?;
+    std::fs::write(path, &out).with_context(|| format!("failed to write output file: {path}"))?;
 
     Ok(())
 }
@@ -358,8 +354,7 @@ fn write_h264_mp4(path: &str, packets: &[tpt_kinetix_core::packet::Packet]) -> R
     }
 
     let mp4 = muxer.finish();
-    std::fs::write(path, &mp4)
-        .with_context(|| format!("failed to write output file: {path}"))?;
+    std::fs::write(path, &mp4).with_context(|| format!("failed to write output file: {path}"))?;
 
     Ok(())
 }

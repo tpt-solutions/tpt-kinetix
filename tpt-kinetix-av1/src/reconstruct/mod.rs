@@ -1465,16 +1465,7 @@ pub fn reconstruct_av1_frame(
             // the approximation of not filtering across tile boundaries is
             // acceptable while the decoder is not yet pixel-exact.
             if std::env::var("KINETIX_AV1_DUMP_PREFILTER").is_ok() {
-                dump_prefilter_yuv(
-                    &ty,
-                    &tu,
-                    &tv,
-                    tw,
-                    th,
-                    x0,
-                    y0,
-                    width,
-                );
+                dump_prefilter_yuv(&ty, &tu, &tv, tw, th, x0, y0, width);
             }
             if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
                 let _ = apply_post_filters(
@@ -1542,6 +1533,7 @@ pub fn reconstruct_av1_frame(
 /// Writes `<label>_prefilter.yuv` in the current directory (YUV420P, luma
 /// then chroma). The dump happens *before* the in-loop filters run, so the
 /// file contains the raw reconstruction output.
+#[allow(clippy::too_many_arguments)]
 fn dump_prefilter_yuv(
     ty: &[u8],
     tu: &[u8],
@@ -1562,26 +1554,25 @@ fn dump_prefilter_yuv(
         out.extend_from_slice(&ty[row * tw..(row + 1) * tw]);
         // Pad to full width if tile is narrower than the frame.
         if tw < full_w {
-            out.extend(std::iter::repeat(128u8).take(full_w - tw));
+            out.extend(std::iter::repeat_n(128u8, full_w - tw));
         }
     }
     // Pad remaining rows to full height.
     if th < full_w {
-        out.extend(std::iter::repeat(128u8).take((full_w - th) * full_w));
+        out.extend(std::iter::repeat_n(128u8, (full_w - th) * full_w));
     }
     // Chroma U and V.
     for plane in [tu, tv] {
         for row in 0..uv_h {
             out.extend_from_slice(&plane[row * uv_w..(row + 1) * uv_w]);
             if uv_w < full_uv_w {
-                out.extend(std::iter::repeat(128u8).take(full_uv_w - uv_w));
+                out.extend(std::iter::repeat_n(128u8, full_uv_w - uv_w));
             }
         }
         if uv_h < full_w / 2 {
-            out.extend(std::iter::repeat(128u8).take((full_w / 2 - uv_h) * full_uv_w));
+            out.extend(std::iter::repeat_n(128u8, (full_w / 2 - uv_h) * full_uv_w));
         }
     }
     let _ = std::fs::write(format!("{label}_prefilter.yuv"), &out);
-    eprintln!(
-        "DBG prefilter dump: {label}_prefilter.yuv (tile at ({x0},{y0}) {tw}×{th})");
+    eprintln!("DBG prefilter dump: {label}_prefilter.yuv (tile at ({x0},{y0}) {tw}×{th})");
 }

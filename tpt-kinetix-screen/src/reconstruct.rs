@@ -137,7 +137,8 @@ pub fn encode_frame(
 
             match mode {
                 BlockMode::Flat => {
-                    let mean_y = (block.iter().map(|&p| p as u32).sum::<u32>() / block.len() as u32) as u8;
+                    let mean_y =
+                        (block.iter().map(|&p| p as u32).sum::<u32>() / block.len() as u32) as u8;
                     modes.push(0u8);
                     flat_colors.push(mean_y);
                 }
@@ -156,15 +157,28 @@ pub fn encode_frame(
                         // Dict miss: emit as NATURAL for v1.
                         modes.push(2u8);
                         flat_colors.push(0);
-                        let (above, left) = natural_neighbors(src, bx * cb_size, by * cb_size, cb_size);
-                        natural_blocks[bi] = Some(natural::encode_natural_block(&block, cb_size, &above, &left, frame.base_qp));
+                        let (above, left) =
+                            natural_neighbors(src, bx * cb_size, by * cb_size, cb_size);
+                        natural_blocks[bi] = Some(natural::encode_natural_block(
+                            &block,
+                            cb_size,
+                            &above,
+                            &left,
+                            frame.base_qp,
+                        ));
                     }
                 }
                 BlockMode::Natural => {
                     modes.push(2u8);
                     flat_colors.push(0);
                     let (above, left) = natural_neighbors(src, bx * cb_size, by * cb_size, cb_size);
-                    natural_blocks[bi] = Some(natural::encode_natural_block(&block, cb_size, &above, &left, frame.base_qp));
+                    natural_blocks[bi] = Some(natural::encode_natural_block(
+                        &block,
+                        cb_size,
+                        &above,
+                        &left,
+                        frame.base_qp,
+                    ));
                 }
             }
         }
@@ -333,7 +347,13 @@ pub fn decode_frame_payload(
                     // NATURAL
                     if let Some(n) = natural_blocks.get(bi).and_then(|b| b.clone()) {
                         let (above, left) = natural_neighbors(&fb, x0, y0, cb_size);
-                        let decoded = natural::decode_natural_block(&n, cb_size, &above, &left, frame.base_qp)?;
+                        let decoded = natural::decode_natural_block(
+                            &n,
+                            cb_size,
+                            &above,
+                            &left,
+                            frame.base_qp,
+                        )?;
                         blit_luma_block(&mut fb, x0, y0, cb_size, &decoded);
                     }
                 }
@@ -381,7 +401,11 @@ fn decode_glyph_stream(data: &[u8], total: usize) -> Result<Vec<Option<GlyphBloc
             let dict_slot = dec.decode(&model)?;
             let fg_idx = dec.decode(&model)?;
             let bg_idx = dec.decode(&model)?;
-            blocks.push(Some(GlyphBlock { dict_slot, fg_idx, bg_idx }));
+            blocks.push(Some(GlyphBlock {
+                dict_slot,
+                fg_idx,
+                bg_idx,
+            }));
         } else {
             blocks.push(None);
         }
@@ -392,7 +416,10 @@ fn decode_glyph_stream(data: &[u8], total: usize) -> Result<Vec<Option<GlyphBloc
     Ok(blocks)
 }
 
-fn decode_natural_stream(data: &[u8], total: usize) -> Result<Vec<Option<NaturalBlock>>, KinetixError> {
+fn decode_natural_stream(
+    data: &[u8],
+    total: usize,
+) -> Result<Vec<Option<NaturalBlock>>, KinetixError> {
     let model = StaticModel;
     let mut dec = RansDecoder::new(data)?;
     let count = dec.decode(&model)? as usize;
@@ -490,7 +517,8 @@ mod tests {
                 luma[y * 16 + x] = 100; // uniform
             }
         }
-        let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
         let payload = encode_frame(&seq, &frame, &src, None).unwrap();
         let decoded = decode_frame_payload(&seq, &frame, None, &payload).unwrap();
         for y in 0..16 {
@@ -504,7 +532,10 @@ mod tests {
     fn natural_stream_round_trips() {
         let blocks = vec![
             None,
-            Some(NaturalBlock { intra_mode: 0, coeffs: vec![100, -200, 300, -400] }),
+            Some(NaturalBlock {
+                intra_mode: 0,
+                coeffs: vec![100, -200, 300, -400],
+            }),
             None,
         ];
         let encoded = encode_natural_stream(&blocks);
@@ -512,7 +543,10 @@ mod tests {
         assert_eq!(decoded.len(), 3);
         assert!(decoded[0].is_none());
         assert_eq!(decoded[1].as_ref().unwrap().intra_mode, 0);
-        assert_eq!(decoded[1].as_ref().unwrap().coeffs, vec![100, -200, 300, -400]);
+        assert_eq!(
+            decoded[1].as_ref().unwrap().coeffs,
+            vec![100, -200, 300, -400]
+        );
         assert!(decoded[2].is_none());
     }
 
@@ -526,7 +560,8 @@ mod tests {
                 luma[y * 16 + x] = ((x + y) * 8) as u8;
             }
         }
-        let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
         let payload = encode_frame(&seq, &frame, &src, None).unwrap();
         let decoded = decode_frame_payload(&seq, &frame, None, &payload).unwrap();
         for y in 0..16 {
@@ -534,7 +569,10 @@ mod tests {
                 let expected = ((x + y) * 8) as u8;
                 let actual = decoded.luma[y * 16 + x];
                 let diff = expected.abs_diff(actual);
-                assert!(diff <= 128, "natural mismatch at ({x},{y}): expected {expected}, got {actual}");
+                assert!(
+                    diff <= 128,
+                    "natural mismatch at ({x},{y}): expected {expected}, got {actual}"
+                );
             }
         }
     }

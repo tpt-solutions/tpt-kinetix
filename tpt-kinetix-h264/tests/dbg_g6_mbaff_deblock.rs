@@ -115,6 +115,20 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
             "testsrc=size=64x64:rate=1:duration=2",
             "cabac=0:bframes=0:keyint=300:min-keyint=300:interlaced=1:tff=1:threads=1",
         ),
+        // CABAC MBAFF P and I/B/P clips (session #32ac A5): the only
+        // fully-filtered reference signal for the CABAC MBAFF inter path.
+        // Previously the CABAC MBAFF P/B numbers came exclusively from the
+        // `-skip_loop_filter` `dbg_g5_interlaced` harness.
+        (
+            "g6_cabac_ip",
+            "testsrc=size=64x64:rate=1:duration=2",
+            "cabac=1:bframes=0:keyint=300:min-keyint=300:interlaced=1:tff=1:threads=1",
+        ),
+        (
+            "g6_cabac_ibp",
+            "testsrc=size=64x64:rate=1:duration=3",
+            "cabac=1:bframes=1:keyint=300:min-keyint=300:interlaced=1:tff=1:threads=1",
+        ),
     ];
 
     for &(name, src, params) in variants {
@@ -301,7 +315,7 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
                     best = (s, fi);
                 }
             }
-            if best.1 == usize::MAX || best.0 > 4 * (W * H) as u64 {
+            if best.1 == usize::MAX || best.0 > 8 * (W * H) as u64 {
                 println!(
                     "  frame#{idx}: no plausible ffmpeg match (best luma sad={:?})",
                     best.0
@@ -413,6 +427,44 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
                 0,
                 "{name}: deblocked chroma no longer bit-exact vs ffmpeg"
             );
+        }
+
+        // Regression pin (session #32ac A5): the CABAC MBAFF P path is now
+        // BIT-EXACT against ffmpeg's FULLY-FILTERED decode for the all-frame-
+        // coded case. `g6_cabac_ip` emits an I then a P frame, both must match;
+        // `g6_cabac_ibp` emits I, B, then P — the I and B frames match today
+        // (the P frame, emitted last, is still broken: mbaff_ibp P, tracked
+        // separately). Greedy-match each emitted frame to its best ffmpeg frame
+        // by luma SAD, since field-pairing delays can reorder emission.
+        if std::env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").is_err() {
+            let pinned: &[usize] = match name {
+                "g6_cabac_ip" => &[0, 1],
+                "g6_cabac_ibp" => &[0, 1],
+                _ => &[],
+            };
+            for &idx in pinned {
+                let o = &ours_on[idx];
+                let mut best = (u64::MAX, 0usize);
+                for fi in 0..ff_frames {
+                    let s = sad(&o[..W * H], &ff[fi * FRAME..fi * FRAME + W * H]);
+                    if s < best.0 {
+                        best = (s, fi);
+                    }
+                }
+                let r = &ff[best.1 * FRAME..(best.1 + 1) * FRAME];
+                assert_eq!(
+                    maxdiff(&o[..W * H], &r[..W * H]),
+                    0,
+                    "{name}: frame#{idx} deblocked luma no longer bit-exact vs ffmpeg (ff{})",
+                    best.1
+                );
+                assert_eq!(
+                    maxdiff(&o[W * H..], &r[W * H..]),
+                    0,
+                    "{name}: frame#{idx} deblocked chroma no longer bit-exact vs ffmpeg (ff{})",
+                    best.1
+                );
+            }
         }
     }
 }

@@ -80,7 +80,7 @@ impl LeanDecoder {
     /// [`Self::set_sequence_header`] to have been called first), then
     /// decodes the rANS payload and reconstructs the frame. The
     /// reconstructed frame is stored in the DPB as a reference for
-    /// subsequent inter frames. Returns the decoded [`VideoFrame`].
+    /// subsequent inter frames. Returns the decoded [`tpt_kinetix_core::frame::VideoFrame`].
     pub fn decode(
         &mut self,
         packet: &Packet,

@@ -1,7 +1,7 @@
 //! Byte-aligned sequence and frame header layout.
 
-use tpt_kinetix_core::error::KinetixError;
 use tpt_kinetix_bitstream::BitReader;
+use tpt_kinetix_core::error::KinetixError;
 
 const MAGIC: [u8; 4] = *b"VISN";
 const SEQUENCE_HEADER_LEN: usize = 16;
@@ -20,7 +20,9 @@ impl ChromaFormat {
             0 => Ok(Self::Yuv420),
             1 => Ok(Self::Yuv422),
             2 => Ok(Self::Yuv444),
-            other => Err(KinetixError::Parse(format!("invalid chroma_format {other}"))),
+            other => Err(KinetixError::Parse(format!(
+                "invalid chroma_format {other}"
+            ))),
         }
     }
 }
@@ -62,10 +64,14 @@ impl SequenceHeader {
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, KinetixError> {
         let mut magic = [0u8; 4];
         for byte in &mut magic {
-            *byte = reader.read_u8().ok_or_else(|| KinetixError::Parse("sequence header: truncated magic".into()))?;
+            *byte = reader
+                .read_u8()
+                .ok_or_else(|| KinetixError::Parse("sequence header: truncated magic".into()))?;
         }
         if magic != MAGIC {
-            return Err(KinetixError::Parse(format!("sequence header: bad magic {magic:?}, expected {MAGIC:?}")));
+            return Err(KinetixError::Parse(format!(
+                "sequence header: bad magic {magic:?}, expected {MAGIC:?}"
+            )));
         }
 
         let version = read_u8(reader, "version")?;
@@ -87,16 +93,28 @@ impl SequenceHeader {
             )));
         }
         if bit_depth != 8 && bit_depth != 10 {
-            return Err(KinetixError::Parse(format!("sequence header: unsupported bit_depth {bit_depth}")));
+            return Err(KinetixError::Parse(format!(
+                "sequence header: unsupported bit_depth {bit_depth}"
+            )));
         }
         if quant_matrix_id > 3 {
-            return Err(KinetixError::Parse(format!("sequence header: quant_matrix_id {quant_matrix_id} > 3")));
+            return Err(KinetixError::Parse(format!(
+                "sequence header: quant_matrix_id {quant_matrix_id} > 3"
+            )));
         }
 
         Ok(Self {
-            version, max_width, max_height, chroma_present, bit_depth,
-            qp_precision, max_ref_frames, num_rans_streams,
-            min_block_size_log2, max_block_size_log2, quant_matrix_id,
+            version,
+            max_width,
+            max_height,
+            chroma_present,
+            bit_depth,
+            qp_precision,
+            max_ref_frames,
+            num_rans_streams,
+            min_block_size_log2,
+            max_block_size_log2,
+            quant_matrix_id,
         })
     }
 
@@ -130,14 +148,19 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    pub fn parse(reader: &mut BitReader<'_>, sequence: &SequenceHeader) -> Result<Self, KinetixError> {
+    pub fn parse(
+        reader: &mut BitReader<'_>,
+        sequence: &SequenceHeader,
+    ) -> Result<Self, KinetixError> {
         let frame_type = FrameType::from_u8(read_u8(reader, "frame_type")?)?;
         let width = read_u16(reader, "width")?;
         let height = read_u16(reader, "height")?;
         let base_qp = read_u8(reader, "base_qp")?;
         let ref_frame_count = read_u8(reader, "ref_frame_count")?;
         let output_mode = read_u8(reader, "output_mode")?;
-        let payload_len = reader.read_u32_be().ok_or_else(|| KinetixError::Parse("frame header: truncated payload_len".into()))?;
+        let payload_len = reader
+            .read_u32_be()
+            .ok_or_else(|| KinetixError::Parse("frame header: truncated payload_len".into()))?;
 
         if width > sequence.max_width || height > sequence.max_height {
             return Err(KinetixError::Parse(format!(
@@ -152,13 +175,25 @@ impl FrameHeader {
             )));
         }
         if frame_type == FrameType::Key && ref_frame_count != 0 {
-            return Err(KinetixError::Parse("frame header: key frame must have ref_frame_count == 0".into()));
+            return Err(KinetixError::Parse(
+                "frame header: key frame must have ref_frame_count == 0".into(),
+            ));
         }
         if frame_type == FrameType::Inter && ref_frame_count == 0 {
-            return Err(KinetixError::Parse("frame header: inter frame must have a reference".into()));
+            return Err(KinetixError::Parse(
+                "frame header: inter frame must have a reference".into(),
+            ));
         }
 
-        Ok(Self { frame_type, width, height, base_qp, ref_frame_count, output_mode, payload_len })
+        Ok(Self {
+            frame_type,
+            width,
+            height,
+            base_qp,
+            ref_frame_count,
+            output_mode,
+            payload_len,
+        })
     }
 
     pub fn to_bytes(&self) -> [u8; 15] {
@@ -166,20 +201,24 @@ impl FrameHeader {
         out[0] = self.frame_type as u8;
         out[1..3].copy_from_slice(&self.width.to_be_bytes());
         out[3..5].copy_from_slice(&self.height.to_be_bytes());
-        out[4+1] = self.base_qp;
-        out[5+1] = self.ref_frame_count;
-        out[6+1] = self.output_mode;
-        out[7+1..11+1].copy_from_slice(&self.payload_len.to_be_bytes());
+        out[4 + 1] = self.base_qp;
+        out[5 + 1] = self.ref_frame_count;
+        out[6 + 1] = self.output_mode;
+        out[7 + 1..11 + 1].copy_from_slice(&self.payload_len.to_be_bytes());
         out
     }
 }
 
 fn read_u8(reader: &mut BitReader<'_>, field: &str) -> Result<u8, KinetixError> {
-    reader.read_u8().ok_or_else(|| KinetixError::Parse(format!("truncated field: {field}")))
+    reader
+        .read_u8()
+        .ok_or_else(|| KinetixError::Parse(format!("truncated field: {field}")))
 }
 
 fn read_u16(reader: &mut BitReader<'_>, field: &str) -> Result<u16, KinetixError> {
-    reader.read_u16_be().ok_or_else(|| KinetixError::Parse(format!("truncated field: {field}")))
+    reader
+        .read_u16_be()
+        .ok_or_else(|| KinetixError::Parse(format!("truncated field: {field}")))
 }
 
 #[cfg(test)]
@@ -188,9 +227,17 @@ mod tests {
 
     fn sample_sequence() -> SequenceHeader {
         SequenceHeader {
-            version: 1, max_width: 1920, max_height: 1080, chroma_present: false,
-            bit_depth: 8, qp_precision: 0, max_ref_frames: 2, num_rans_streams: 1,
-            min_block_size_log2: 3, max_block_size_log2: 3, quant_matrix_id: 0,
+            version: 1,
+            max_width: 1920,
+            max_height: 1080,
+            chroma_present: false,
+            bit_depth: 8,
+            qp_precision: 0,
+            max_ref_frames: 2,
+            num_rans_streams: 1,
+            min_block_size_log2: 3,
+            max_block_size_log2: 3,
+            quant_matrix_id: 0,
         }
     }
 
@@ -215,8 +262,13 @@ mod tests {
     fn frame_header_round_trips() {
         let seq = sample_sequence();
         let frame = FrameHeader {
-            frame_type: FrameType::Key, width: 1280, height: 720,
-            base_qp: 24, ref_frame_count: 0, output_mode: 2, payload_len: 4096,
+            frame_type: FrameType::Key,
+            width: 1280,
+            height: 720,
+            base_qp: 24,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 4096,
         };
         let bytes = frame.to_bytes();
         let mut reader = BitReader::new(&bytes);
@@ -228,8 +280,13 @@ mod tests {
     fn frame_header_rejects_key_with_refs() {
         let seq = sample_sequence();
         let frame = FrameHeader {
-            frame_type: FrameType::Key, width: 640, height: 480,
-            base_qp: 20, ref_frame_count: 1, output_mode: 0, payload_len: 0,
+            frame_type: FrameType::Key,
+            width: 640,
+            height: 480,
+            base_qp: 20,
+            ref_frame_count: 1,
+            output_mode: 0,
+            payload_len: 0,
         };
         let bytes = frame.to_bytes();
         let mut reader = BitReader::new(&bytes);

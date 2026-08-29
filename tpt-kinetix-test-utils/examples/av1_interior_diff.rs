@@ -105,12 +105,7 @@ fn first_interior_divergence(
 }
 
 /// Count interior-pixel diffs at each magnitude.
-fn interior_diff_histogram(
-    got: &[u8],
-    want: &[u8],
-    w: usize,
-    h: usize,
-) -> (usize, [usize; 6]) {
+fn interior_diff_histogram(got: &[u8], want: &[u8], w: usize, h: usize) -> (usize, [usize; 6]) {
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let planes: [(&str, usize, usize, usize, usize, usize); 3] = [
@@ -171,7 +166,10 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     // Full-plane PSNR for context.
     let py = psnr(&got[..y_n], &ref_data[..y_n]);
     let pu = psnr(&got[y_n..y_n + c_n], &ref_data[y_n..y_n + c_n]);
-    let pv = psnr(&got[y_n + c_n..y_n + 2 * c_n], &ref_data[y_n + c_n..y_n + 2 * c_n]);
+    let pv = psnr(
+        &got[y_n + c_n..y_n + 2 * c_n],
+        &ref_data[y_n + c_n..y_n + 2 * c_n],
+    );
     println!("  Full-plane PSNR Y/U/V = {py:.2}/{pu:.2}/{pv:.2} dB");
 
     // Interior-only diff histogram.
@@ -218,18 +216,14 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
                     k_row.push(got[idx]);
                     d_row.push(ref_data[idx]);
                 }
-                println!(
-                    "    y={yy:>2}  kinetix={k_row:?}  dav1d={d_row:?}"
-                );
+                println!("    y={yy:>2}  kinetix={k_row:?}  dav1d={d_row:?}");
             }
             // Report the containing 8×8 block coordinates.
             let block_x = (x / 8) * 8;
             let block_y = (y / 8) * 8;
             let mi_col = block_x / 4;
             let mi_row = block_y / 4;
-            println!(
-                "    -> luma 8×8 block at px=({block_x},{block_y}) = mi=({mi_col},{mi_row})"
-            );
+            println!("    -> luma 8×8 block at px=({block_x},{block_y}) = mi=({mi_col},{mi_row})");
         }
     }
 }

@@ -57,7 +57,9 @@ mod tests {
 
     #[test]
     fn round_trip_4() {
-        let src = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
+        let src = vec![
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
         let mut coeffs = vec![0i32; 16];
         transform_2d(&src, 4, &mut coeffs);
         let mut out = vec![0i32; 16];

@@ -102,16 +102,20 @@ fn lift_round_trip_is_lossless() {
         stream_index: 0,
         is_key_frame: true,
     };
-    let mut decoded = dec
-        .decode(&packet)
-        .expect("decode")
-        .expect("frame");
+    let mut decoded = dec.decode(&packet).expect("decode").expect("frame");
     sort_cloud(&mut decoded);
     assert_eq!(decoded.num_points, cloud.num_points);
     assert_eq!(decoded.positions, sorted_cloud.positions);
     assert_eq!(decoded.attributes.len(), cloud.attributes.len());
-    for (a, b) in decoded.attributes.iter().zip(sorted_cloud.attributes.iter()) {
-        assert_eq!(a.data, b.data, "lift attribute data must round-trip losslessly");
+    for (a, b) in decoded
+        .attributes
+        .iter()
+        .zip(sorted_cloud.attributes.iter())
+    {
+        assert_eq!(
+            a.data, b.data,
+            "lift attribute data must round-trip losslessly"
+        );
     }
 }
 
@@ -129,15 +133,19 @@ fn raht_round_trip_is_lossless() {
         stream_index: 0,
         is_key_frame: true,
     };
-    let mut decoded = dec
-        .decode(&packet)
-        .expect("decode")
-        .expect("frame");
+    let mut decoded = dec.decode(&packet).expect("decode").expect("frame");
     sort_cloud(&mut decoded);
     assert_eq!(decoded.num_points, cloud.num_points);
     assert_eq!(decoded.positions, sorted_cloud.positions);
-    for (a, b) in decoded.attributes.iter().zip(sorted_cloud.attributes.iter()) {
-        assert_eq!(a.data, b.data, "RAHT attribute data must round-trip losslessly");
+    for (a, b) in decoded
+        .attributes
+        .iter()
+        .zip(sorted_cloud.attributes.iter())
+    {
+        assert_eq!(
+            a.data, b.data,
+            "RAHT attribute data must round-trip losslessly"
+        );
     }
 }
 

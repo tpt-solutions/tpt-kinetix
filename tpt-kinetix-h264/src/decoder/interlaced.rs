@@ -128,9 +128,19 @@ impl H264Decoder {
             Ok(h) => h,
             Err(_) => return Ok(InterlacedOutcome::Fallback),
         };
+        eprintln!(
+            "DECODE_INTERLACED: field_pic={} mb_adaptive={} slice_type={:?} first_mb={}",
+            header.field_pic_flag, mb_adaptive, header.slice_type, header.first_mb_in_slice
+        );
         // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
         // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
         // pictures remain unsupported and fall back.
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!(
+                "MBAFF_DISPATCH mb_adaptive={} field_pic={} slice_type={:?}",
+                mb_adaptive, header.field_pic_flag, header.slice_type,
+            );
+        }
         if mb_adaptive {
             return self.decode_interlaced_mbaff(
                 nal,
@@ -293,6 +303,13 @@ impl H264Decoder {
     ) -> Result<InterlacedOutcome, KinetixError> {
         use crate::slice::SliceType;
 
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!(
+                "MBAFF_MBAFF_ENTRY frame_num={} slice_type={:?} first_mb={}",
+                header.frame_num, header.slice_type, header.first_mb_in_slice,
+            );
+        }
+
         if header.first_mb_in_slice != 0 {
             return Ok(InterlacedOutcome::Fallback);
         }
@@ -305,12 +322,29 @@ impl H264Decoder {
         let mb_cols = coded_width / 16;
         let mb_rows = coded_height / 16;
 
+        // Common setup for both P/B and I paths: slice QP and coded dimensions.
+        let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
+        let slice_qp = pic_init_qp + header.slice_qp_delta;
+        let coded_width = sps.coded_width_pixels();
+        let coded_height = sps.coded_height_pixels();
+        let mb_cols = coded_width / 16;
+        let mb_rows = coded_height / 16;
+
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!("MBAFF_INTER_PATH frame_num={} slice_type={:?}", header.frame_num, header.slice_type);
+            }
             // P/B MBAFF slices (B5): the inter decode path is the default.
             // Field-coded pairs reuse the parity-plane convention from the
             // frame-coded path (the field-MC gate in reconstruct.rs stays).
 
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "MBAFF inter frame_num={} slice_type={:?} nal_ref_idc={} num_ref_idx_l0_active={} dpb_len={}",
+                    header.frame_num, header.slice_type, nal.nal_ref_idc, num_ref_idx_l0_active, self.dpb.len(),
+                );
+            }
             let pic_num_ctx = crate::ref_pic::PicNumContext::new(
                 sps,
                 header.frame_num,
@@ -325,7 +359,7 @@ impl H264Decoder {
             let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
             let current_poc = {
                 let mut scratch = self.poc_state.clone();
-                crate::ref_pic::derive_pic_order_cnt(
+                let poc = crate::ref_pic::derive_pic_order_cnt(
                     sps,
                     is_idr,
                     nal.nal_ref_idc != 0,
@@ -336,10 +370,32 @@ impl H264Decoder {
                     header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
-                .unwrap_or(0)
+                .unwrap_or(0);
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!(
+                        "POC_DERIVE frame_num={} slice_type={:?} nal_ref_idc={} is_idr={} poc={} poc_state_before=(prev_top={},prev_bottom={},prev_fn={})",
+                        header.frame_num, header.slice_type, nal.nal_ref_idc, is_idr, poc,
+                        self.poc_state.prev_top_field_order_cnt, self.poc_state.prev_bottom_field_order_cnt, self.poc_state.prev_frame_num,
+                    );
+                }
+                poc
             };
 
             let ref_list_l0 = if header.slice_type == SliceType::P {
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!(
+                        "MBAFF P frame_num={} nal_ref_idc={} current_poc={} num_ref_idx_l0_active={}",
+                        header.frame_num, nal.nal_ref_idc, current_poc, num_ref_idx_l0_active,
+                    );
+                    eprintln!("  DPB entries={}:", self.dpb.len());
+                    for (di, de) in self.dpb.iter().enumerate() {
+                        eprintln!(
+                            "    dpb[{}] frame_num={} poc={} short={} long={} ref={}",
+                            di, de.frame_num, de.pic_order_cnt, de.is_short_term, de.is_long_term,
+                            de.is_reference(),
+                        );
+                    }
+                }
                 let list = crate::ref_pic::build_ref_list_l0(
                     &self.dpb,
                     num_ref_idx_l0_active as usize,
@@ -372,6 +428,14 @@ impl H264Decoder {
                     pic_num_ctx,
                     &header.ref_pic_list_modification_l1,
                 );
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!("MBAFF_B_REFLIST frame_num={} l0_len={} l1_len={} dpb_len={}",
+                        header.frame_num,
+                        ref_list_l0.as_ref().map(|l| l.len()).unwrap_or(0),
+                        list.as_ref().map(|l| l.len()).unwrap_or(0),
+                        self.dpb.len(),
+                    );
+                }
                 if let Some(ref_list) = &list {
                     crate::ref_pic::trace_ref_list("MBAFF B L1", ref_list, pic_num_ctx);
                 }
@@ -585,6 +649,13 @@ impl H264Decoder {
                 &frame,
                 Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
             );
+
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "MBAFF_STORE frame_num={} slice_type={:?} nal_ref_idc={} dpb_after={}",
+                    header.frame_num, header.slice_type, nal.nal_ref_idc, self.dpb.len(),
+                );
+            }
 
             return Ok(InterlacedOutcome::Frame(frame));
         }
@@ -1127,19 +1198,26 @@ impl H264Decoder {
         // Buffer the field and emit the interleaved frame once the pair is complete.
         let visible_width = sps.pic_width_pixels();
         let visible_height = sps.pic_height_pixels();
+        eprintln!(
+            "FINALIZE: frame_num={} bottom={} field_height={} nal={:?}",
+            header.frame_num, header.bottom_field_flag, field_height, nal.nal_unit_type
+        );
         match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
-            Some(full) => Ok(InterlacedOutcome::Frame(VideoFrame {
-                data: crate::reconstruct::crop_yuv420p(
-                    &full.data,
-                    full.width,
-                    full.height,
-                    visible_width,
-                    visible_height,
-                ),
-                width: visible_width,
-                height: visible_height,
-                ..full
-            })),
+            Some(full) => {
+                eprintln!("FINALIZE: -> Frame emitted");
+                Ok(InterlacedOutcome::Frame(VideoFrame {
+                    data: crate::reconstruct::crop_yuv420p(
+                        &full.data,
+                        full.width,
+                        full.height,
+                        visible_width,
+                        visible_height,
+                    ),
+                    width: visible_width,
+                    height: visible_height,
+                    ..full
+                }))
+            }
             None => Ok(InterlacedOutcome::Handled),
         }
     }
@@ -1158,6 +1236,18 @@ impl H264Decoder {
         bottom: bool,
         key: u32,
     ) -> Option<VideoFrame> {
+        eprintln!(
+            "ACCUM: bottom={bottom} key={key} accum={}",
+            match &self.field_accum {
+                Some(a) => format!(
+                    "Some(key={},top={},bottom={})",
+                    a.key,
+                    a.top.is_some(),
+                    a.bottom.is_some()
+                ),
+                None => "None".to_string(),
+            }
+        );
         match self.field_accum.take() {
             Some(mut accum) if accum.key == key => {
                 if bottom {
@@ -1168,9 +1258,11 @@ impl H264Decoder {
                 if let (Some(top), Some(bottom)) = (&accum.top, &accum.bottom) {
                     let full = Self::interleave_fields(top, bottom);
                     self.field_accum = None;
+                    eprintln!("ACCUM: -> INTERLEAVE frame {}", full.height);
                     Some(full)
                 } else {
                     self.field_accum = Some(accum);
+                    eprintln!("ACCUM: -> buffered (waiting for pair)");
                     None
                 }
             }
@@ -1178,6 +1270,7 @@ impl H264Decoder {
             // before the previous pair completed): pair the unpaired field with
             // a grey field so it is still emitted as a full-height frame.
             Some(accum) => {
+                eprintln!("ACCUM: KEY CHANGE old={} new={}", accum.key, key);
                 let mut discarded = None;
                 if let Some(top) = &accum.top {
                     let grey_bottom = Self::grey_field(top);
@@ -1201,6 +1294,7 @@ impl H264Decoder {
                 discarded
             }
             None => {
+                eprintln!("ACCUM: empty, starting new field pair key={key} bottom={bottom}");
                 let mut accum = FieldAccum {
                     key,
                     top: None,

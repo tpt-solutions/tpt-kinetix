@@ -191,7 +191,8 @@ mod tests {
             payload_len: 0,
         };
         let luma = vec![100u8; 16 * 16];
-        let src = FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
         let payload = encode_frame(&seq, &frame, &src, None).unwrap();
         let packet = make_packet(&frame, &payload);
 

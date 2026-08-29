@@ -103,7 +103,12 @@ fn paff_b_field_decode() {
 
     match dec.decode(&pkt) {
         Ok(Some(f)) => {
-            println!("decode emitted: {}x{} len={}", f.width, f.height, f.data.len());
+            println!(
+                "decode emitted: {}x{} len={}",
+                f.width,
+                f.height,
+                f.data.len()
+            );
             frames.push(f.data);
         }
         Ok(None) => println!("decode: no frame emitted"),
@@ -114,7 +119,12 @@ fn paff_b_field_decode() {
     match dec.flush() {
         Ok(flushed) => {
             for f in &flushed {
-                println!("flush emitted: {}x{} len={}", f.width, f.height, f.data.len());
+                println!(
+                    "flush emitted: {}x{} len={}",
+                    f.width,
+                    f.height,
+                    f.data.len()
+                );
                 frames.push(f.data.clone());
             }
         }
@@ -126,18 +136,18 @@ fn paff_b_field_decode() {
     // Compare against ffmpeg reference on a per-frame basis.
     if !frames.is_empty() && !ref_yuv.is_empty() {
         let n = frames.len().min(ref_frames);
-        for i in 0..n {
+        for (i, frame) in frames.iter().enumerate().take(n) {
             // PAFF flush can emit a field-sized frame; skip mismatched sizes
             // rather than panicking on the slice below.
-            if frames[i].len() != frame_len {
-                println!("frame#{i}: SKIP (size {} != {frame_len})", frames[i].len());
+            if frame.len() != frame_len {
+                println!("frame#{i}: SKIP (size {} != {frame_len})", frame.len());
                 continue;
             }
             let off = i * frame_len;
-            let (max_d, n_d, tot) = compare(&frames[i], &ref_yuv[off..off + frame_len]);
+            let (max_d, n_d, tot) = compare(frame, &ref_yuv[off..off + frame_len]);
             let luma_n = (frame_len * 2) / 3;
-            let (ld, ln, _) = compare(&frames[i][..luma_n], &ref_yuv[off..off + luma_n]);
-            let (cd, cn, _) = compare(&frames[i][luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
+            let (ld, ln, _) = compare(&frame[..luma_n], &ref_yuv[off..off + luma_n]);
+            let (cd, cn, _) = compare(&frame[luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
             println!(
                 "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
             );

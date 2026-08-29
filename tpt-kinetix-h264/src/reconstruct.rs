@@ -1476,9 +1476,9 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
 /// MBAFF-aware B-slice frame reconstruction (§8.4.2).
 ///
 /// Twin of [`reconstruct_inter_frame_ex`] for B slices: dispatches each
-/// macroblock between the frame-coded path (plain [`reconstruct_b_inter_luma`]/
-/// [`reconstruct_b_inter_chroma`]) and the field-coded path ([`reconstruct_mbaff_b_inter_luma`]/
-/// [`reconstruct_mbaff_b_inter_chroma`]) based on the macroblock's
+/// macroblock between the frame-coded path (plain `reconstruct_b_inter_luma`/
+/// `reconstruct_b_inter_chroma`) and the field-coded path (`reconstruct_mbaff_b_inter_luma`/
+/// `reconstruct_mbaff_b_inter_chroma`) based on the macroblock's
 /// `mb_field_decoding_flag`, behind the `KINETIX_MBAFF_FIELD_MC` gate.
 ///
 /// For the all-frame-coded case (`mbaff_ip`/`mbaff_ibp`) every macroblock has

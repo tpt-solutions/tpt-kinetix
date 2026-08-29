@@ -82,7 +82,10 @@ mod tests {
                 if matrix[r][c] == 1 {
                     assert_eq!(dq, 100, "qp=0 lossless mismatch at ({r},{c})");
                 } else {
-                    assert!(diff <= matrix[r][c] as i32, "qp=0 rounding too large at ({r},{c})");
+                    assert!(
+                        diff <= matrix[r][c] as i32,
+                        "qp=0 rounding too large at ({r},{c})"
+                    );
                 }
             }
         }

@@ -103,7 +103,12 @@ fn decode_obu_with_ffmpeg(obu: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 
 /// Compare only block-interior pixels (≥4 from any 8×8 luma boundary).
 /// Returns (interior_pixel_count, max_abs_diff, sum_abs_diff, first_divergence).
-fn compare_interiors(kinctix: &[u8], reference: &[u8], w: usize, h: usize) -> (usize, u32, u64, Option<(usize, u8, u8)>) {
+fn compare_interiors(
+    kinctix: &[u8],
+    reference: &[u8],
+    w: usize,
+    h: usize,
+) -> (usize, u32, u64, Option<(usize, u8, u8)>) {
     let mut count = 0usize;
     let mut max_diff = 0u32;
     let mut sum_diff = 0u64;
@@ -130,7 +135,7 @@ fn compare_interiors(kinctix: &[u8], reference: &[u8], w: usize, h: usize) -> (u
                 continue;
             }
             count += 1;
-            let diff = (kinctix[idx] as i16 - reference[idx] as i16).abs() as u32;
+            let diff = (kinctix[idx] as i16 - reference[idx] as i16).unsigned_abs() as u32;
             sum_diff += diff as u64;
             if diff > max_diff {
                 max_diff = diff;
@@ -201,15 +206,24 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
             );
             eprintln!(
                 "  Y: {} pixels, max_diff={}, avg_diff={:.3}, first_div={:?}",
-                count_y, max_y, sum_y as f64 / count_y.max(1) as f64, first_y
+                count_y,
+                max_y,
+                sum_y as f64 / count_y.max(1) as f64,
+                first_y
             );
             eprintln!(
                 "  U: {} pixels, max_diff={}, avg_diff={:.3}, first_div={:?}",
-                count_u, max_u, sum_u as f64 / count_u.max(1) as f64, first_u
+                count_u,
+                max_u,
+                sum_u as f64 / count_u.max(1) as f64,
+                first_u
             );
             eprintln!(
                 "  V: {} pixels, max_diff={}, avg_diff={:.3}, first_div={:?}",
-                count_v, max_v, sum_v as f64 / count_v.max(1) as f64, first_v
+                count_v,
+                max_v,
+                sum_v as f64 / count_v.max(1) as f64,
+                first_v
             );
             eprintln!("  Overall: max_diff={}, avg_diff={:.3}", max_all, avg_diff);
         }

@@ -1378,10 +1378,10 @@ fn inverse_transform_2d_dct_round_trip_with_ac_coefficients() {
     // full butterfly network (not just the DC-only path). We verify the
     // output is non-flat, in-range, and deterministic.
     let mut dequant = vec![0i32; 16];
-    dequant[0] = 500;  // DC
-    dequant[1] = 200;  // first AC (horizontal frequency)
+    dequant[0] = 500; // DC
+    dequant[1] = 200; // first AC (horizontal frequency)
     dequant[4] = -100; // first AC (vertical frequency)
-    dequant[5] = 50;   // diagonal AC
+    dequant[5] = 50; // diagonal AC
     let mut residual = vec![0i32; 16];
     inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual);
     // Not flat: AC coefficients must produce spatial variation.
@@ -1513,7 +1513,11 @@ fn filter_intra_prediction_matches_hand_computed_values() {
     let mut out = vec![0i32; 64];
     predict_filter_intra(0, &top, &left, 128, 8, 8, &mut out);
     // First sample of the first sub-block: i2=0, j4=0, i1=0, j1=0.
-    assert_eq!(out[0], 165, "filter-intra DC mode first sample, got {}", out[0]);
+    assert_eq!(
+        out[0], 165,
+        "filter-intra DC mode first sample, got {}",
+        out[0]
+    );
     // All outputs must be in valid range.
     assert!(
         out.iter().all(|&v| (0..=255).contains(&v)),
@@ -1534,7 +1538,11 @@ fn filter_intra_mode2_horizontal_matches_hand_computed() {
     let left = vec![200i32; 8];
     let mut out = vec![0i32; 64];
     predict_filter_intra(2, &top, &left, 128, 8, 8, &mut out);
-    assert_eq!(out[0], 186, "filter-intra H mode first sample, got {}", out[0]);
+    assert_eq!(
+        out[0], 186,
+        "filter-intra H mode first sample, got {}",
+        out[0]
+    );
     assert!(
         out.iter().all(|&v| (0..=255).contains(&v)),
         "filter-intra H output out of range: {out:?}"
@@ -1563,7 +1571,8 @@ fn inverse_transform_v_dct_8x8_only_col0_nonzero() {
     for col in 1..8 {
         for row in 0..8 {
             assert_eq!(
-                residual[row * 8 + col], 0,
+                residual[row * 8 + col],
+                0,
                 "V_DCT col {col} must be zero (no input energy)"
             );
         }
@@ -1591,7 +1600,8 @@ fn inverse_transform_h_dct_8x8_only_row0_nonzero() {
     for row in 1..8 {
         for col in 0..8 {
             assert_eq!(
-                residual[row * 8 + col], 0,
+                residual[row * 8 + col],
+                0,
                 "H_DCT row {row} must be zero (no input energy)"
             );
         }
@@ -1675,10 +1685,10 @@ fn palette_prediction_maps_color_indices_correctly() {
     };
     let mut out = vec![0i32; 16];
     predict_palette(&info, 4, 4, &mut out);
-    assert_eq!(out[0], 10);   // map[0] = 0 → colors[0]
-    assert_eq!(out[1], 50);   // map[1] = 1 → colors[1]
-    assert_eq!(out[2], 100);  // map[2] = 2 → colors[2]
-    assert_eq!(out[3], 200);  // map[3] = 3 → colors[3]
+    assert_eq!(out[0], 10); // map[0] = 0 → colors[0]
+    assert_eq!(out[1], 50); // map[1] = 1 → colors[1]
+    assert_eq!(out[2], 100); // map[2] = 2 → colors[2]
+    assert_eq!(out[3], 200); // map[3] = 3 → colors[3]
     assert_eq!(out[15], 200); // map[15] = 3 → colors[3]
 }
 

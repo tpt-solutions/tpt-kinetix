@@ -6,7 +6,7 @@
 mod interlaced;
 use self::interlaced::{FieldAccum, InterlacedOutcome};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use rayon::prelude::*;
 use tpt_kinetix_core::{
@@ -48,6 +48,11 @@ pub struct H264Decoder {
     /// Off by default so existing pipelines keep working; opt in when callers
     /// need correctness guarantees.
     strict: bool,
+    /// Queue of decoded frames awaiting consumption via `decode()`. PAFF field
+    /// pairs can complete in a single packet, producing multiple frames; the
+    /// queue lets us return one per `decode()` call instead of dropping all
+    /// but the last.
+    frame_queue: VecDeque<VideoFrame>,
 }
 
 impl H264Decoder {
@@ -129,6 +134,7 @@ impl H264Decoder {
             parallel: true,
             strict: false,
             field_accum: None,
+            frame_queue: VecDeque::new(),
         }
     }
 
@@ -267,6 +273,9 @@ impl H264Decoder {
         packet: &Packet,
         tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
+        if let Some(frame) = self.frame_queue.pop_front() {
+            return Ok(Some(frame));
+        }
         let nal_units = parse_nal_units_from_annexb(&packet.data);
         if nal_units.is_empty() {
             return Ok(None);
@@ -370,7 +379,11 @@ impl H264Decoder {
                             tracer,
                         ) {
                             Ok(InterlacedOutcome::Frame(frame)) => {
-                                output_frame = Some(frame);
+                                if output_frame.is_none() {
+                                    output_frame = Some(frame);
+                                } else {
+                                    self.frame_queue.push_back(frame);
+                                }
                                 continue;
                             }
                             Ok(InterlacedOutcome::Handled) => {
@@ -425,10 +438,15 @@ impl H264Decoder {
     /// Any unpaired field still in the field accumulator is paired with a grey
     /// field so it is emitted as a full-height frame rather than being dropped.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
-        let mut frames = self.dpb.take_frames();
+        let mut frames: Vec<VideoFrame> = self.frame_queue.drain(..).collect();
+        frames.extend(self.dpb.take_frames());
         if let Some(accum) = self.field_accum.take() {
             let visible_width = self.sps_store.values().next().map(|s| s.pic_width_pixels());
-            let visible_height = self.sps_store.values().next().map(|s| s.pic_height_pixels());
+            let visible_height = self
+                .sps_store
+                .values()
+                .next()
+                .map(|s| s.pic_height_pixels());
             if let (Some(vw), Some(vh)) = (visible_width, visible_height) {
                 if let Some(top) = accum.top {
                     let grey_bottom = Self::grey_field(&top);

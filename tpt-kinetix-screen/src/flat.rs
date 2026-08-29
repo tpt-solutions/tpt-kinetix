@@ -46,12 +46,12 @@ pub fn decode_flat_runs(runs: &[FlatRun], modes: &[u8]) -> Vec<u8> {
     let mut cur_color = 0u8;
 
     for (bi, &mode) in modes.iter().enumerate() {
-            if mode == 0 {
-                if run_remaining == 0 && run_idx < runs.len() {
-                    cur_color = runs[run_idx].color_y;
-                    run_remaining = runs[run_idx].run_len;
-                    run_idx += 1;
-                }
+        if mode == 0 {
+            if run_remaining == 0 && run_idx < runs.len() {
+                cur_color = runs[run_idx].color_y;
+                run_remaining = runs[run_idx].run_len;
+                run_idx += 1;
+            }
             if run_remaining > 0 {
                 colors[bi] = cur_color;
                 run_remaining -= 1;
@@ -63,7 +63,8 @@ pub fn decode_flat_runs(runs: &[FlatRun], modes: &[u8]) -> Vec<u8> {
 
 /// Look up the palette color for a flat block.
 pub fn flat_color(idx: u8, palette: &[Option<PaletteColor>]) -> PaletteColor {
-    palette.get(idx as usize)
+    palette
+        .get(idx as usize)
         .copied()
         .flatten()
         .unwrap_or(PaletteColor::new(0, 128, 128))
@@ -80,15 +81,33 @@ mod tests {
         let runs = encode_flat_runs(&modes, &colors);
         // 3 flats of color 100, then non-flat skipped, then 2 flats of color 50
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0], FlatRun { color_y: 100, run_len: 3 });
-        assert_eq!(runs[1], FlatRun { color_y: 50, run_len: 2 });
+        assert_eq!(
+            runs[0],
+            FlatRun {
+                color_y: 100,
+                run_len: 3
+            }
+        );
+        assert_eq!(
+            runs[1],
+            FlatRun {
+                color_y: 50,
+                run_len: 2
+            }
+        );
     }
 
     #[test]
     fn decode_runs_expands_correctly() {
         let runs = vec![
-            FlatRun { color_y: 100, run_len: 3 },
-            FlatRun { color_y: 50, run_len: 1 },
+            FlatRun {
+                color_y: 100,
+                run_len: 3,
+            },
+            FlatRun {
+                color_y: 50,
+                run_len: 1,
+            },
         ];
         // Modes: 3 flats, then 1 non-flat, then 1 flat → colors [100,100,100,0,50]
         let modes = vec![0, 0, 0, 1, 0];

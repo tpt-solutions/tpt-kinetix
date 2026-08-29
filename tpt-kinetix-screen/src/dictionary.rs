@@ -13,7 +13,11 @@ pub struct GlyphEntry {
 
 impl GlyphEntry {
     pub fn new(width: u8, height: u8, mask: Vec<u8>) -> Self {
-        Self { width, height, mask }
+        Self {
+            width,
+            height,
+            mask,
+        }
     }
 
     /// Get the bit at pixel (x, y).
@@ -152,7 +156,8 @@ mod tests {
     #[test]
     fn dictionary_reset_clears_entries() {
         let mut dict = GlyphDictionary::new(4);
-        dict.insert(0, GlyphEntry::new(8, 8, vec![0xFF; 8])).unwrap();
+        dict.insert(0, GlyphEntry::new(8, 8, vec![0xFF; 8]))
+            .unwrap();
         dict.reset();
         assert!(dict.get(0).is_none());
     }

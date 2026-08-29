@@ -646,15 +646,41 @@ pub fn encode_frame(
     for bi in 0..luma_total {
         let sx = bi % gw;
         let sy = bi / gw;
-        luma_syntax.push(encode_luma_block(src, reference, sx, sy, luma_b, frame.base_qp, is_inter)?);
+        luma_syntax.push(encode_luma_block(
+            src,
+            reference,
+            sx,
+            sy,
+            luma_b,
+            frame.base_qp,
+            is_inter,
+        )?);
     }
     let mut cb_syntax = Vec::with_capacity(chroma_total);
     let mut cr_syntax = Vec::with_capacity(chroma_total);
     for bi in 0..chroma_total {
         let sx = bi % cgw;
         let sy = bi / cgw;
-        cb_syntax.push(encode_chroma_block(src, reference, 0, sx, sy, chroma_b, frame.base_qp, is_inter)?);
-        cr_syntax.push(encode_chroma_block(src, reference, 1, sx, sy, chroma_b, frame.base_qp, is_inter)?);
+        cb_syntax.push(encode_chroma_block(
+            src,
+            reference,
+            0,
+            sx,
+            sy,
+            chroma_b,
+            frame.base_qp,
+            is_inter,
+        )?);
+        cr_syntax.push(encode_chroma_block(
+            src,
+            reference,
+            1,
+            sx,
+            sy,
+            chroma_b,
+            frame.base_qp,
+            is_inter,
+        )?);
     }
 
     let mut raw = Vec::new();
