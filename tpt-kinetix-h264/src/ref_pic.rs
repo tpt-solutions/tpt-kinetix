@@ -429,6 +429,26 @@ impl Dpb {
         self.entries.iter().filter(|e| e.is_long_term).count()
     }
 
+    /// Number of reference **frames** currently held — the quantity the
+    /// sliding-window / capacity limits (`max_num_ref_frames`) are expressed
+    /// in. The two complementary fields of a PAFF frame occupy one frame buffer
+    /// and count once (§8.2.5.3: a complementary reference field pair is a
+    /// single entry in `numShortTerm`/`numLongTerm`).
+    fn num_ref_frames(&self) -> usize {
+        let mut seen_field_frame_nums: Vec<u32> = Vec::new();
+        let mut count = 0usize;
+        for e in self.entries.iter().filter(|e| e.is_reference()) {
+            if e.field_pic_flag {
+                if seen_field_frame_nums.contains(&e.frame_num) {
+                    continue; // complementary field already counted
+                }
+                seen_field_frame_nums.push(e.frame_num);
+            }
+            count += 1;
+        }
+        count
+    }
+
     /// Insert a decoded reference picture using sliding-window marking
     /// (§8.2.5.3) — i.e. the `adaptive_ref_pic_marking_mode_flag == 0` case.
     ///
@@ -710,7 +730,7 @@ impl Dpb {
     /// malformed stream already overfilled.
     fn apply_sliding_window(&mut self, ctx: PicNumContext, max_num_ref_frames: u32) {
         let max = (max_num_ref_frames as usize).max(1);
-        while self.entries.iter().filter(|e| e.is_reference()).count() >= max {
+        while self.num_ref_frames() >= max {
             if !self.evict_oldest_short_term(ctx) {
                 break;
             }
@@ -727,7 +747,7 @@ impl Dpb {
     /// frames exceeds max (probably corrupt input), discarding one" clamp.
     fn enforce_capacity(&mut self, ctx: PicNumContext, max_num_ref_frames: u32) {
         let max = (max_num_ref_frames as usize).max(1);
-        while self.entries.iter().filter(|e| e.is_reference()).count() > max {
+        while self.num_ref_frames() > max {
             if !self.evict_oldest_short_term(ctx) {
                 break;
             }

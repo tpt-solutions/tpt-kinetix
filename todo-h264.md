@@ -76,6 +76,40 @@ touched here.
 pins all green. Full `tpt-kinetix-h264` test suite green (incl. the 8 repaired
 diagnostic tests).
 
+### REMAINING WORK (supersedes #32ae's BUG 1/BUG 3 lists)
+
+**BUG 3 — DONE** (`get_dct8x8_allowed` / inter `transform_size_8x8_flag`).
+**`mbaff_ibp` P frame — DONE** (bit-exact, `dbg_ibp_p_grid` all-zero SAD).
+
+- [ ] **1. `mbaff_ibp` B frame — one MB left.** SAD 43815→6272; diff is now a
+      single MB `gB(3,3)` = `B_Direct_16x16` spatial-direct, luma only (chroma
+      bit-exact). Dump gB(3,3)'s final `mv_store` + `colocated` cells in the full
+      decoder vs ffmpeg export_mvs (0,0)/(0,0). Check `apply_spatial_direct`
+      indexes `colocated.get(mb_idx)` on the frame grid (not pair-scan) and that
+      the stored P-frame `mv_grid` is frame-grid order. Then `dbg_ibp_p_grid`
+      gB → assert all-zero; pin.
+- [ ] **2. PAFF B-field** (max_diff 126, CAVLC ≡ CABAC ⇒ not entropy).
+  - [ ] **2a.** IDR-only PAFF field-pair stream (no P/B). Decode. Fail ⇒ field
+        recon/pairing bug (2b); pass ⇒ ref-list/DPB bug (2c).
+  - [ ] **2b.** `decode_interlaced` I-field path: assert both fields → `Frame`
+        not `Fallback`; `field_accum` holds exactly one field when the second
+        arrives; `finalize_field` interleaves at the right parity.
+  - [ ] **2c.** Log DPB size + entry POC/parity in `build_field_ref_list_l0` at
+        the P-field call. Empty ⇒ fix field `store_reference_picture`. Wrong
+        order ⇒ fix §8.2.4.2.5 ordering.
+  - [ ] **2d.** P-field decodes without `Fallback` → re-check max_diff; residual
+        error ⇒ per-MB diff map.
+  - [ ] **2e.** `dbg_paff_b_field` gets a hard bit-exact assertion.
+- [ ] **3. G.5a.** Pin every currently-bit-exact MBAFF frame in
+      `dbg_g5_interlaced` / `dbg_g6_mbaff_deblock` as hard assertions.
+- [ ] **4. G.5b.** Add one real PAFF corpus clip + one real MBAFF corpus clip;
+      assert bit-exact vs ffmpeg.
+- [ ] **5. G.5c.** non-16 crop: one `crop_right=10` clip through `dbg_g6`;
+      assert bit-exact (finishes #32s).
+- [ ] **6. H — `pixel_exact` flip.** Flip `capabilities().pixel_exact` for the
+      covered subset; update README status table; `just conformance` second run
+      (`--strict`) passes.
+
 ## SESSION #32ae (2026-08-29) — REMAINING WORK BROKEN DOWN: every step is one run with a binary pass/fail
 
 Current state after #32ac/#32ad: **CABAC MBAFF I/P/B bit-exact** vs fully-filtered
