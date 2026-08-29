@@ -45,9 +45,78 @@ drifts.
   regression.
 
 REMAINING for CABAC MBAFF P/B: `mbaff_ip` P still 9842 (not 0) and `mbaff_ibp`
-P 43815 — a second, smaller desync/recon gap past the field-flag fix. Re-run
-the ffengine oracle extended past MB9 (into MB9's residual + MB10/11) to find
-the next divergence.
+P 43815 — a second gap past the field-flag fix. The remaining error is in
+MB11/MB15 (both PL016x16, cbp=0x2f, t8=true) — MVs are correct, so the issue
+is in the inter 8×8 residual parse or dequant/idct path.
+
+**2026-08-29 (this session):** Added `bypass()` method to the `FfEngine` in
+`dbg_mbaff_p_ffengine_oracle.rs` (matching the validated implementation in
+`dbg_engine_diff.rs`) to enable extending the oracle past `mb_type` into the
+MVD/residual. The oracle confirms the engine agrees with ffmpeg bin-for-bin
+through MB9's `mb_type` (ctx15=1, P_L0_L0_16x8). Next step: extend the oracle
+to decode MB9's MVD + CBP + residual + MB10 skip + MB11 `mb_type`/MVD/CBP to
+its `transform_size_8x8` bin, diff vs the crate parser. 262 lib tests pass.
+No `git commit` calls.
+
+**Localized (same session):** `dbg_g5_i1_diffmap` after the fix — every MB is
+now small-diff (max ≤4, ≈ skip-loop-filter harness artefact) EXCEPT
+**MB(1,3)=MB11 and MB(3,3)=MB15** (both ~240/256 differ, max ~113). Both are
+`PL016x16`, `cbp=0x2f` (full), and **`transform_size_8x8_flag` (inter) decodes
+`true`** → the 8×8 residual path. The other coded MBs (MB9/MB13 = P16x8,
+`t8=false`) are now fine.
+- **MVs are CORRECT** (`dbg_mbaff_cabac_vs_cavlc` MV-grid dump vs ffmpeg
+  `export_mvs`): MB11 = (0,0), MB15 = (0,0), MB9/MB13 = 16x8 top (+43,0) —
+  all match. So the remaining error is NOT motion.
+- Disabling the inter-8×8 residual recon (`KINETIX_DBG_NO_INTER8X8_RECON`,
+  temp) barely changes MB11/MB15 — expected either way (a wrong heavy residual
+  and a zero residual both differ from ffmpeg's correct heavy residual by
+  similar magnitude), so it doesn't discriminate.
+- Removing the inter t8 bin entirely (`KINETIX_NO_INTER_T8`, temp) makes SAD
+  **worse** (9842→32632) ⇒ ffmpeg DOES read the bin; the concurrent #32y
+  read is right to be present.
+
+⇒ Open question: does ffmpeg decode `t8 = true` for MB11/MB15 (then the inter
+8×8 residual **parse or dequant/idct** is wrong), or `false` (then the crate's
+t8 bin *value* is wrong — context or a preceding desync in MB9's residual)?
+The intra 8×8 path shares `decode_block_8x8` + `dequant_idct_8x8_scan(...,
+ZIGZAG_8X8)` and is bit-exact (`high8x8_i`), so if it's a value bug it's
+upstream. NEXT: extend `dbg_mbaff_p_ffengine_oracle` past MB9's `mb_type`
+through MB9's MVD + CBP + **residual** + MB10 skip + MB11 `mb_type`/MVD/CBP to
+its `transform_size_8x8` bin, diff vs the crate parser.
+
+**RESOLVED for MB11 (2026-08-29, later): CABAC 8×8 residual was stored with a
+double-permutation.** `decode_block_8x8` returns coefficients in
+**scan-position order** (`out[scan_pos] = level`) — exactly what
+`dequant_idct_8x8_scan(coeffs, …, ZIGZAG_8X8)` expects
+(`block[ZIGZAG_8X8[z]] = dequant(coeffs[z])`). But both the intra
+(`cabac_p.rs`) and inter (`cabac_b.rs`) parse paths ran
+`coeffs_zz[INVERSE_ZIGZAG_8X8[scan_pos]] = level` first — treating a scan index
+as a raster index, scrambling every non-DC coefficient. (CAVLC is fine — its
+`INVERSE_ZIGZAG_8X8[cavlc_raster]` input genuinely *is* raster-order.)
+FIX (`cabac_b.rs` only so far): `mb.luma_coeffs_8x8[blk8] = coeffs_scan`
+directly. `mbaff_ip` MB(1,3): **236/256 differ → 60/256** (max 113 → 2);
+`mbaff_ip` P SAD **9842 → 7269**. `conformance_matrix` (incl. `high8x8_i`),
+`high_profile_8x8_cabac_conformance`, `cabac_conformance`,
+`b_frame_conformance` all still bit-exact; 262 lib tests pass.
+- The **intra** path (`cabac_p.rs:190`) has the identical bug. Applying the
+  same fix there kept all conformance green BUT broke the concurrent
+  `dbg_paff_b_field` harness (a size-assumption OOB, since fixed with a guard)
+  — reverted the intra change pending a closer look at why no intra 8×8
+  conformance clip catches it (likely the mandelbrot fixture's 8×8 blocks are
+  near-diagonal so the permutation is close to identity for the significant
+  low-frequency coeffs).
+- **MB15 RESOLVED (2026-08-29): skip MBs didn't clear `prev_dqp_nonzero`.**
+  §9.3.3.1.1.5 — ctxIdxInc for the next MB's `mb_qp_delta` is 0 when the
+  previous MB is skipped. The P/B CABAC loops threaded `dqp_nz` from the last
+  *coded* MB across intervening skips, so MB15 (preceded by MB14 skip) decoded
+  `mb_qp_delta` with ctxIdxInc=1 → wrong value → qp wrong + residual desync.
+  FIX: `prev_dqp_nonzero = false;` in both skip branches (`cabac_p.rs`,
+  `cabac_b.rs`). `mbaff_ip` P SAD **7269 → 493** (≈ skip-loop-filter artefact,
+  matches CAVLC 551); MB(3,3) 250/256 max 118 → 77/256 max 4. 262 lib tests,
+  `conformance_matrix`, `cabac_conformance`, `b_frame_conformance`,
+  `high_profile_8x8_cabac_conformance`, `dbg_g6_mbaff_deblock` all green.
+  REMAINING: `mbaff_ibp` P still SAD 43815 — separate bug; MB11 intra-8×8
+  scan permutation still un-fixed (cabac_p.rs:190).
 
 ## SESSION #32ab (2026-08-29) — A4: `amvd_sum` mvd-context cell geometry verified correct
 
@@ -209,7 +278,7 @@ clean, `cargo fmt --check` clean, lib 249/249, full integration suite green
 (0 failures). The `mbaff_ip` P-frame SAD improvement is expected but not yet
 measured — that requires re-running `dbg_g5_interlaced` with the fix.
 
-## SESSION #32x (2026-08-29) — PAFF B-field decode path implemented
+## SESSION #32x (2026-08-29) — PAFF B-field decode path implemented, corpus validation SURFACES BUGS
 
 Implemented the PAFF **B-field** decode path (Track G.2). Previously
 `decode_interlaced` returned `InterlacedOutcome::Fallback` for every B-field
@@ -236,9 +305,47 @@ pair for output — mirroring the existing PAFF P-field path.
 - Dispatch: `decode_interlaced` now routes `SliceType::B` to the new path
   before the I/SI intra path.
 
-**VALIDATION:** `cargo build` clean, `cargo clippy --all-targets -- -D warnings`
-clean, lib 249/249 green. (fmt violations are pre-existing in the uncommitted
-MBAFF B-frame WIP, not in this change.)
+**VALIDATION (2026-08-29):** `cargo build` clean, `cargo clippy --all-targets
+-- -D warnings` clean, lib 249/249 green.
+
+**CORPUS VALIDATION — BUGS FOUND:** Attempted validation against ffmpeg's
+reference decode using a PAFF stream generated by the JM reference encoder
+(`PicInterlace=1`, 80×64, IP sequence). Two issues had to be resolved to get a
+compliant test vector:
+
+1. **JM produces non-compliant Annex B** — zero emulation prevention bytes,
+   causing false `00000001` start codes within slice payloads that split NALs.
+   Patched `WriteAnnexbNALU` (`lencod/src/annexb.c`) to insert EPBs via an
+   `insert_epb` helper. After the patch, the stream parses to the correct 6
+   NALs (SPS/PPS/IDR + 3 field slices). Fixture committed at
+   `tests/fixtures/paff_b_field.264` (CABAC variant).
+
+2. **PAFF field decode produces catastrophic output** — the Rust decoder emits
+   1 full frame (80×64) + 1 unpaired half-height field (80×32) instead of 2
+   full frames, and the full frame has **max_diff=126** (7437/7680 samples
+   differ) vs ffmpeg. The bug is **NOT entropy-coding-specific**: both CAVLC
+   and CABAC streams fail identically with max_diff=126, pointing at the field
+   reconstruction / reference-list / field-pairing path rather than the
+   entropy decoder.
+
+**Diagnosis:**
+- PPS correctly parsed as `entropy_coding_mode_flag=false` (CAVLC). The PAFF
+  path returns `Fallback` for most fields, causing the main loop to fall
+  through to the progressive `try_decode_real_slice` path, which then fails
+  because it expects progressive (non-field) input.
+- The decoder emits a half-height frame on `flush`, confirming the
+  `field_accum` pairing logic is not completing for all fields.
+
+**Root cause (suspected):** The field reference list construction
+(`build_field_ref_list_l0`) or the DPB storage of the IDR reference field is
+broken — the P-field can't find its reference, returns `Fallback`, and the
+progressive fallback path misparses the field-coded slice. Unit test
+`dbg_paff_b_field.rs` captures the current (failing) state.
+
+**NEXT:** Debug why `build_field_ref_list_l0` returns `None` (empty DPB) or
+why the PAFF P-field reconstruction fails. Isolate with an intra-only PAFF
+stream (no references needed) to separate field-reconstruction bugs from
+reference-list bugs.
 
 ## SESSION #32w (2026-08-29) — B3: MC + reconstruction wiring for MBAFF P/B
 
@@ -3830,3 +3937,4 @@ Either the reference lists are swapped/differently ordered, OR ffmpeg decoded
 a different mb_type due to context-state divergence entering this MB.
 Check build_ref_list_l0_b_slice and build_ref_list_l1 ordering for the
 specific DPB state after decoding I(frame_num=0) and P(frame_num=1).
+- PPS correctly parsed as ntropy_coding_mode_flag=false (CAVLC). The PAFF path returns Fallback for most fields, causing the main loop to fall through to the progressive try_decode_real_slice path, which then fails because it expects progressive (non-field) input.

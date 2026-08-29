@@ -452,6 +452,11 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.skip = true;
             mb.mb_field_flag = cur_pair_field;
             prev_mb_skipped = true;
+            // §9.3.3.1.1.5: ctxIdxInc for the next MB's mb_qp_delta is 0 when
+            // the previous MB is skipped (it carries no mb_qp_delta). Failing
+            // to clear this desyncs the arithmetic engine on the first coded
+            // MB after any run of skips.
+            prev_dqp_nonzero = false;
             nz[grid_idx] = MbNz {
                 present: true,
                 ..Default::default()

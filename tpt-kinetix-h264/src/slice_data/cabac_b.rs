@@ -542,6 +542,11 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.skip = true;
             mb.mb_field_flag = cur_pair_field;
             prev_mb_skipped = true;
+            // §9.3.3.1.1.5: ctxIdxInc for the next MB's mb_qp_delta is 0 when
+            // the previous MB is skipped (it carries no mb_qp_delta). Failing
+            // to clear this desyncs the arithmetic engine on the first coded
+            // MB after any run of skips.
+            prev_dqp_nonzero = false;
             nz[grid_idx] = MbNz {
                 present: true,
                 ..Default::default()
@@ -1691,15 +1696,15 @@ fn decode_inter_residual_cabac(
             if (cbp_l >> blk8) & 1 == 0 {
                 continue;
             }
+            // `decode_block_8x8` returns coefficients in **scan-position order**
+            // (`out[scan_pos] = level`), which is exactly what
+            // `dequant_idct_8x8_scan(..., ZIGZAG_8X8)` in `reconstruct_inter_luma`
+            // expects (`block[ZIGZAG_8X8[z]] = dequant(coeffs[z])`). Store them
+            // directly — the earlier `INVERSE_ZIGZAG_8X8[scan_pos]` remap was a
+            // double-permutation that scrambled every non-DC coefficient
+            // (`mbaff_ip` MB(1,3): 236/256 differ → 60/256 after this fix).
             let (coeffs_scan, count) = ctxs.residual.decode_block_8x8(dec, nctx.is_field());
-            // `decode_block_8x8` returns coefficients in scan-position order,
-            // but `dequant_idct_8x8_scan` expects zigzag order. Convert via
-            // `INVERSE_ZIGZAG_8X8` (scan_pos -> zigzag_pos).
-            let mut coeffs_zz = [0i16; 64];
-            for (scan_pos, &level) in coeffs_scan.iter().enumerate() {
-                coeffs_zz[crate::transform::INVERSE_ZIGZAG_8X8[scan_pos]] = level;
-            }
-            mb.luma_coeffs_8x8[blk8] = coeffs_zz;
+            mb.luma_coeffs_8x8[blk8] = coeffs_scan;
             for sub in 0..4usize {
                 this_nz.luma[raster_of_8x8_sub(blk8, sub)] = count;
             }
