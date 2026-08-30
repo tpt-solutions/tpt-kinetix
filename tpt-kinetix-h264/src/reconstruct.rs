@@ -2353,7 +2353,15 @@ fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
             ref_idx0,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        // Field-coded: un-scan the residual with the field scan (§8.5.6).
+        let res = dequant_idct_4x4_scan(
+            &mb.luma_coeffs[block],
+            mb.qp,
+            None,
+            0,
+            scaling,
+            &crate::transform::FIELD_SCAN_4X4,
+        );
         for row in 0..4 {
             for col in 0..4 {
                 let px = x0 as usize + col;
@@ -2427,66 +2435,85 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = (base_x + bx) as i32;
             let y0 = (base_y + by) as i32;
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
 
-            let l0_active = cell.ref_idx >= 0;
-            let l1_active = cell.ref_idx_l1 >= 0;
-            let ref_idx0 = cell.ref_idx.max(0) as usize;
-            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+            // Per-2×2 chroma MC so a B_8x8 sub-partition finer than 8×8 (and its
+            // per-sub-block L0/L1/Bi direction) is handled per §8.4.1.4. The
+            // quadrant's four luma cells sit at `qbase + {0,1,4,5}`.
+            let mut pred = [0u8; 16];
+            for (sub, cell) in [
+                grid[qbase],
+                grid[qbase + 1],
+                grid[qbase + 4],
+                grid[qbase + 5],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (sr, sc) = (sub / 2, sub % 2);
+                let (sx, sy) = (x0 + sc as i32 * 2, y0 + sr as i32 * 2);
+                let l0_active = cell.ref_idx >= 0;
+                let l1_active = cell.ref_idx_l1 >= 0;
+                let ref_idx0 = cell.ref_idx.max(0) as usize;
+                let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
 
-            let mut pred_l0 = [0u8; 16];
-            if l0_active {
-                if let Some(plane_ref) = ref_plane_l0.get(ref_idx0).or_else(|| ref_plane_l0.last())
-                {
-                    let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l0,
-                        4,
-                        plane_ref,
-                        plane_w,
-                        plane_w,
-                        chroma_h_of(plane_ref, stride),
-                        x0,
-                        y0,
-                        cell.mv[0],
-                        cell.mv[1],
-                        4,
-                        4,
-                    );
+                let mut pl0 = [0u8; 16];
+                if l0_active {
+                    if let Some(pr) = ref_plane_l0.get(ref_idx0).or_else(|| ref_plane_l0.last()) {
+                        let pw = pr.len() / chroma_h_of(pr, stride);
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pl0,
+                            2,
+                            pr,
+                            pw,
+                            pw,
+                            chroma_h_of(pr, stride),
+                            sx,
+                            sy,
+                            cell.mv[0],
+                            cell.mv[1],
+                            2,
+                            2,
+                        );
+                    }
+                }
+                let mut pl1 = [0u8; 16];
+                if l1_active {
+                    if let Some(pr) = ref_plane_l1.get(ref_idx1).or_else(|| ref_plane_l1.last()) {
+                        let pw = pr.len() / chroma_h_of(pr, stride);
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pl1,
+                            2,
+                            pr,
+                            pw,
+                            pw,
+                            chroma_h_of(pr, stride),
+                            sx,
+                            sy,
+                            cell.mv_l1[0],
+                            cell.mv_l1[1],
+                            2,
+                            2,
+                        );
+                    }
+                }
+                let sp = combine_weighted(
+                    weighted,
+                    l0_active,
+                    l1_active,
+                    ref_idx0,
+                    ref_idx1,
+                    &pl0,
+                    &pl1,
+                    Some(comp),
+                );
+                for r in 0..2 {
+                    for c in 0..2 {
+                        pred[(sr * 2 + r) * 4 + sc * 2 + c] = sp[r * 2 + c];
+                    }
                 }
             }
-            let mut pred_l1 = [0u8; 16];
-            if l1_active {
-                if let Some(plane_ref) = ref_plane_l1.get(ref_idx1).or_else(|| ref_plane_l1.last())
-                {
-                    let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l1,
-                        4,
-                        plane_ref,
-                        plane_w,
-                        plane_w,
-                        chroma_h_of(plane_ref, stride),
-                        x0,
-                        y0,
-                        cell.mv_l1[0],
-                        cell.mv_l1[1],
-                        4,
-                        4,
-                    );
-                }
-            }
-
-            let pred = combine_weighted(
-                weighted,
-                l0_active,
-                l1_active,
-                ref_idx0,
-                ref_idx1,
-                &pred_l0,
-                &pred_l1,
-                Some(comp),
-            );
+            let cell = grid[qbase];
             tracer.on_motion_comp(
                 mb_x,
                 mb_y,
@@ -2494,10 +2521,18 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
                 block as u8,
                 &pred,
                 cell.mv,
-                ref_idx0,
+                cell.ref_idx.max(0) as usize,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            // Field-coded chroma AC: un-scan with the field scan.
+            let res = dequant_idct_4x4_scan(
+                &ac[block],
+                qpc,
+                Some(dc_out[block]),
+                comp + 1,
+                scaling,
+                &crate::transform::FIELD_SCAN_4X4,
+            );
             for row in 0..4 {
                 for col in 0..4 {
                     let px = x0 as usize + col;
@@ -3168,78 +3203,99 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = (base_x + bx) as i32;
             let y0 = (base_y + by) as i32;
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
 
-            let l0_active = cell.ref_idx >= 0;
-            let l1_active = cell.ref_idx_l1 >= 0;
+            // Chroma of the 8×8 luma partition, split per 2×2 sub-block so a
+            // B_8x8 sub-partition finer than 8×8 (8×4 / 4×8 / 4×4, each of which
+            // may also carry its own L0/L1/Bi direction) is motion-compensated
+            // per §8.4.1.4. The quadrant's four cells sit at `qbase + {0,1,4,5}`.
+            let mut pred = [0u8; 16];
+            for (sub, cell) in [
+                grid[qbase],
+                grid[qbase + 1],
+                grid[qbase + 4],
+                grid[qbase + 5],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (sr, sc) = (sub / 2, sub % 2);
+                let (sx, sy) = (x0 + sc as i32 * 2, y0 + sr as i32 * 2);
+                let l0_active = cell.ref_idx >= 0;
+                let l1_active = cell.ref_idx_l1 >= 0;
+                let ref_idx0 = cell.ref_idx.max(0) as usize;
+                let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+
+                let mut pl0 = [0u8; 16];
+                if l0_active {
+                    if let Some(frame) = ref_frames_l0
+                        .get(ref_idx0)
+                        .or_else(|| ref_frames_l0.first())
+                    {
+                        let w = frame.width as usize;
+                        let h = frame.height as usize;
+                        let clen = (w / 2) * (h / 2);
+                        let o = w * h + comp * clen;
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pl0,
+                            2,
+                            &frame.data[o..o + clen],
+                            w / 2,
+                            w / 2,
+                            h / 2,
+                            sx,
+                            sy,
+                            cell.mv[0],
+                            cell.mv[1],
+                            2,
+                            2,
+                        );
+                    }
+                }
+                let mut pl1 = [0u8; 16];
+                if l1_active {
+                    if let Some(frame) = ref_frames_l1
+                        .get(ref_idx1)
+                        .or_else(|| ref_frames_l1.first())
+                    {
+                        let w = frame.width as usize;
+                        let h = frame.height as usize;
+                        let clen = (w / 2) * (h / 2);
+                        let o = w * h + comp * clen;
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pl1,
+                            2,
+                            &frame.data[o..o + clen],
+                            w / 2,
+                            w / 2,
+                            h / 2,
+                            sx,
+                            sy,
+                            cell.mv_l1[0],
+                            cell.mv_l1[1],
+                            2,
+                            2,
+                        );
+                    }
+                }
+                let sp = combine_weighted(
+                    weighted,
+                    l0_active,
+                    l1_active,
+                    ref_idx0,
+                    ref_idx1,
+                    &pl0,
+                    &pl1,
+                    Some(comp),
+                );
+                for r in 0..2 {
+                    for c in 0..2 {
+                        pred[(sr * 2 + r) * 4 + sc * 2 + c] = sp[r * 2 + c];
+                    }
+                }
+            }
+            let cell = grid[qbase];
             let ref_idx0 = cell.ref_idx.max(0) as usize;
-            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
-
-            let mut pred_l0 = [0u8; 16];
-            if l0_active {
-                if let Some(frame) = ref_frames_l0
-                    .get(ref_idx0)
-                    .or_else(|| ref_frames_l0.first())
-                {
-                    let w = frame.width as usize;
-                    let h = frame.height as usize;
-                    let luma_len = w * h;
-                    let chroma_len = (w / 2) * (h / 2);
-                    let off = luma_len + comp * chroma_len;
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l0,
-                        4,
-                        &frame.data[off..off + chroma_len],
-                        w / 2,
-                        w / 2,
-                        h / 2,
-                        x0,
-                        y0,
-                        cell.mv[0],
-                        cell.mv[1],
-                        4,
-                        4,
-                    );
-                }
-            }
-            let mut pred_l1 = [0u8; 16];
-            if l1_active {
-                if let Some(frame) = ref_frames_l1
-                    .get(ref_idx1)
-                    .or_else(|| ref_frames_l1.first())
-                {
-                    let w = frame.width as usize;
-                    let h = frame.height as usize;
-                    let luma_len = w * h;
-                    let chroma_len = (w / 2) * (h / 2);
-                    let off = luma_len + comp * chroma_len;
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l1,
-                        4,
-                        &frame.data[off..off + chroma_len],
-                        w / 2,
-                        w / 2,
-                        h / 2,
-                        x0,
-                        y0,
-                        cell.mv_l1[0],
-                        cell.mv_l1[1],
-                        4,
-                        4,
-                    );
-                }
-            }
-
-            let pred = combine_weighted(
-                weighted,
-                l0_active,
-                l1_active,
-                ref_idx0,
-                ref_idx1,
-                &pred_l0,
-                &pred_l1,
-                Some(comp),
-            );
 
             tracer.on_motion_comp(
                 mb_x,
@@ -3503,9 +3559,13 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = (base_x + bx) as i32;
             let y0 = (base_y + by) as i32;
-            // Luma cell of the top-left 4×4 of the corresponding 8×8 partition.
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
-            let ref_idx = cell.ref_idx.max(0) as usize;
+            // Chroma of an 8×8 luma partition is a 4×4 block. When the luma
+            // partition is split finer than 8×8 (P_8x8 sub-types 8×4 / 4×8 /
+            // 4×4), chroma is motion-compensated per 2×2 sub-block, each taking
+            // its own luma 4×4 cell's MV (§8.4.1.4 / ffmpeg `mc_dir_part`). The
+            // quadrant's four cells sit at `qbase + {0,1,4,5}`.
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
+            let ref_idx = grid[qbase].ref_idx.max(0) as usize;
             let mut pred = [0u8; 16];
             if let Some(frame) = ref_frames.get(ref_idx).or_else(|| ref_frames.first()) {
                 let w = frame.width as usize;
@@ -3513,20 +3573,38 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                 let luma_len = w * h;
                 let chroma_len = (w / 2) * (h / 2);
                 let chroma_off = luma_len + comp * chroma_len;
-                crate::motion_comp::interpolate_chroma(
-                    &mut pred,
-                    4,
-                    &frame.data[chroma_off..chroma_off + chroma_len],
-                    w / 2,
-                    w / 2,
-                    h / 2,
-                    x0,
-                    y0,
-                    cell.mv[0],
-                    cell.mv[1],
-                    4,
-                    4,
-                );
+                let cplane = &frame.data[chroma_off..chroma_off + chroma_len];
+                for (sub, cell) in [
+                    grid[qbase],
+                    grid[qbase + 1],
+                    grid[qbase + 4],
+                    grid[qbase + 5],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let (sr, sc) = (sub / 2, sub % 2);
+                    let mut sp = [0u8; 4];
+                    crate::motion_comp::interpolate_chroma(
+                        &mut sp,
+                        2,
+                        cplane,
+                        w / 2,
+                        w / 2,
+                        h / 2,
+                        x0 + sc as i32 * 2,
+                        y0 + sr as i32 * 2,
+                        cell.mv[0],
+                        cell.mv[1],
+                        2,
+                        2,
+                    );
+                    for r in 0..2 {
+                        for c in 0..2 {
+                            pred[(sr * 2 + r) * 4 + sc * 2 + c] = sp[r * 2 + c];
+                        }
+                    }
+                }
             }
             let pred = combine_weighted(
                 weighted,
@@ -3544,7 +3622,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                 trace_plane,
                 block as u8,
                 &pred,
-                cell.mv,
+                grid[qbase].mv,
                 ref_idx,
             );
 
