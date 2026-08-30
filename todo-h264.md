@@ -124,9 +124,25 @@ diagnostic tests).
         **bit-exact all 4 frames** (TOP I + BOT P, was max 49/54) — hard-pinned.
         Full h264 suite (263 lib + integration) + clippy + fmt green; no MBAFF
         (g5/g6) regression.
-  - [ ] **2d-iii.** `paff_b_field.264` (CABAC clip) still frame#0 max 245 /
-        frame#1 246 — NOT deblock (that clip has a separate CABAC PAFF P-field
-        residual / frame_num=1 ref-list bug, see #32af notes). Track separately.
+  - [~] **2d-iii.** `paff_b_field.264` (CABAC PAFF, IDR + 3 P-fields, all inter
+        MBs are `P_8x8`). Progress #32ag:
+        - [x] **frame_num=1 ref-list.** DPB slid its window on the *second* field
+              of a complementary pair (§8.2.5.3 says it must not) → with
+              `max_num_ref_frames=1` the bottom field of frame 0 evicted its own
+              top field. Fixed (`ref_pic.rs`, commit `c73c85a`); frame#1 luma
+              ~220 everywhere → top MB-row bit-exact, worst ~42.
+        - [ ] **P_8x8 field inter MC.** Remaining error is **edge-concentrated**
+              (MB col 0 & col 4 bad ~65-245, middle cols near-0; present with
+              deblock off). P_Skip MBs reconstruct bit-exact, so ref plane + MC
+              infra + skip-MV-pred are OK. Suspect `reconstruct_field_inter_luma`
+              P_8x8 sub-partition MV (it does per-4×4 MC from `mv_store` cells
+              with no partition/8×8-transform awareness) OR field MV prediction
+              at the picture edge. Some decoded MVs look like garbage
+              (`(-66,-30)`, `(0,-36)`). Dump the P-field sub_mb_type + per-cell
+              MV grid vs an ffmpeg reference (PyAV `C:\Python313` has `av`
+              18.1.0, but `export_mvs` via options failed — try `-vf codecview`
+              PNG or a JM trace).
+        - [ ] **2d-iv.** then flip `dbg_paff_b_field` to a hard assert (2e).
   - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once
         2d-iii done. (`dbg_paff_bisect` is already hard-pinned for the CAVLC
         `paff_i_fields.264` clip.)
