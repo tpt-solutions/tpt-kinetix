@@ -145,15 +145,28 @@ diagnostic tests).
               h264_slice.c L1912), so chroma vertical MV shifts by
               `2*(curr_parity - ref_parity)` (1/8-chroma units). **`paff_b_field`
               chroma is now BIT-EXACT** (was 49 / 190).
-        - [ ] **remaining: luma max 68 / 21-48 px**, one P_8x8 quadrant.
-              MB(4,0) TL 8×8 quadrant: **we parse `sub_mb_type[0]=3` (P_L0_4x4)
-              with per-cell MVs (4,4)/(0,3)/(0,16)/(1,3); ffmpeg export_mvs shows
-              that quadrant is uniform (0,0)** → P_8x8 `sub_mb_type` / sub-MVD /
-              sub-MV-prediction misparse in the field P path (`parse_p_slice*`).
-              Only ~21 px affected because the ref region there is near-flat.
-              (PyAV `C:\Python313` `av` 18.1.0: `s.codec_context.options=
-              {'flags2':'+export_mvs'}` then iterate `fr.side_data` → to_ndarray;
-              reports 8×8-granular MVs in field coords.)
+        - [ ] **remaining: luma max 68 on ~21-67 px**, confined to MB(4,0)
+              (both frames) + MB(3,3) frame#1 — P_8x8 MBs with a **coded 8×8
+              group whose `sub_mb_type` is finer than 8×8** (4×4 / 8×4).
+              Established this session:
+              * parse is IN SYNC (every MB after MB(4,0), incl. residual-heavy
+                P_8x8 MBs, is bit-exact — no CABAC desync)
+              * MVs are correct (per-2×2 chroma using the same cells is bit-exact)
+              * `mb.qp`=28, FIELD_SCAN_4X4 verified vs ffmpeg `ff_h264_field_scan`
+                (swapping to ZIGZAG makes it *much* worse: 245, spreads to all MBs)
+              * zeroing MB(4,0)'s residual makes it *worse* (198) — the residual
+                is ~65% right, i.e. a **partial** error
+              ⇒ the 4×4 luma residual for a sub-8×8-partitioned coded group is
+              slightly off — coeffs close-but-wrong (a few positions), or a scan
+              nuance. Suspect the field `significant_coeff_flag` /
+              `coded_block_flag` context for the first block of such a group, or
+              `raster_of_8x8_sub` decode-order vs ffmpeg for a 4×4 sub-type.
+              (`paff_i_fields.264`'s "P" field is all-Intra4x4 so field-intra
+              residual coverage never hits a P_8x8 sub-4×4 block.) Next: build a
+              CABAC oracle or hand-trace MB(4,0)'s residual bins vs
+              `h264_cabac_ref.c`. PyAV export_mvs: `s.codec_context.options=
+              {'flags2':'+export_mvs'}`, iterate `fr.side_data` → `.to_ndarray()`
+              (8×8-granular, field coords).
         - [ ] **2d-iv.** then flip `dbg_paff_b_field` to a hard assert (2e).
   - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once
         2d-iii done. (`dbg_paff_bisect` is already hard-pinned for the CAVLC
