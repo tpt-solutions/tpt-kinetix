@@ -537,7 +537,23 @@ impl Dpb {
                 }
             }
             DecRefPicMarking::SlidingWindow => {
-                self.apply_sliding_window(ctx, max_num_ref_frames);
+                // §8.2.5.3: when the current picture is the second field (in
+                // decoding order) of a complementary reference field pair whose
+                // first field is already marked "used for short-term
+                // reference", sliding-window marking is NOT invoked — the second
+                // field shares the first field's frame buffer/slot. Running it
+                // here would evict the first field to "make room" for a slot the
+                // pair already occupies, orphaning the complementary field.
+                let is_second_field = current.field_pic_flag
+                    && self.entries.iter().any(|e| {
+                        e.is_short_term
+                            && e.field_pic_flag
+                            && e.frame_num == current.frame_num
+                            && e.bottom_field_flag != current.bottom_field_flag
+                    });
+                if !is_second_field {
+                    self.apply_sliding_window(ctx, max_num_ref_frames);
+                }
                 mark_short_term(&mut current);
             }
             DecRefPicMarking::Adaptive(ops) => {
@@ -2163,6 +2179,54 @@ mod tests {
 
     fn adaptive(ops: &[MmcoOp]) -> DecRefPicMarking {
         DecRefPicMarking::Adaptive(ops.to_vec())
+    }
+
+    fn field_entry(frame_num: u32, poc: i64, bottom: bool) -> DpbEntry {
+        DpbEntry {
+            field_pic_flag: true,
+            bottom_field_flag: bottom,
+            ..entry(frame_num, poc)
+        }
+    }
+
+    /// §8.2.5.3: the second field of a complementary reference field pair does
+    /// NOT invoke sliding-window marking — it shares the first field's slot.
+    /// Regression for a PAFF bug where storing the bottom field of frame N
+    /// (with `max_num_ref_frames == 1`) evicted its own complementary top
+    /// field, orphaning it so a later P field could not build a 2-entry field
+    /// reference list.
+    #[test]
+    fn paff_second_field_does_not_evict_its_complement() {
+        let mut dpb = Dpb::default();
+        mark(
+            &mut dpb,
+            field_entry(0, 0, false),
+            &DecRefPicMarking::SlidingWindow,
+            1,
+        )
+        .unwrap();
+        mark(
+            &mut dpb,
+            field_entry(0, 1, true),
+            &DecRefPicMarking::SlidingWindow,
+            1,
+        )
+        .unwrap();
+        // Both fields of frame 0 must still be present (they count as one
+        // frame against `max_num_ref_frames == 1`).
+        assert_eq!(dpb.len(), 2, "complementary field pair must be retained");
+        assert!(dpb.iter().any(|e| !e.bottom_field_flag));
+        assert!(dpb.iter().any(|e| e.bottom_field_flag));
+
+        // A NEW frame's first field DOES slide the window (frees frame 0).
+        mark(
+            &mut dpb,
+            field_entry(1, 2, false),
+            &DecRefPicMarking::SlidingWindow,
+            1,
+        )
+        .unwrap();
+        assert_eq!(dpb_frame_nums(&dpb), vec![1]);
     }
 
     fn dpb_frame_nums(dpb: &Dpb) -> Vec<u32> {

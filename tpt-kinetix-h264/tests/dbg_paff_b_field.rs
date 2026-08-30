@@ -54,6 +54,10 @@ fn paff_b_field_decode() {
         return;
     }
 
+    let skip_db = std::env::var("BFIELD_SKIP_DEBLOCK").is_ok();
+    if skip_db {
+        unsafe { std::env::set_var("KINETIX_SKIP_DEBLOCK", "1") };
+    }
     let dir = std::env::temp_dir().join("dbg_paff_b_field");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -72,22 +76,21 @@ fn paff_b_field_decode() {
     std::fs::copy(&src, &h264_path).unwrap();
 
     // Reference decode with ffmpeg (full decode including deblocking).
-    let ok = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            h264_path.to_str().unwrap(),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
-            ref_path.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+    let mut args: Vec<&str> = vec!["-hide_banner", "-loglevel", "error", "-y"];
+    if skip_db {
+        args.push("-skip_loop_filter");
+        args.push("all");
+    }
+    args.extend([
+        "-i",
+        h264_path.to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        ref_path.to_str().unwrap(),
+    ]);
+    let ok = Command::new("ffmpeg").args(&args).output().unwrap();
     assert!(ok.status.success(), "ffmpeg ref decode failed");
     let ref_yuv = std::fs::read(&ref_path).unwrap();
     let frame_len = 80 * 64 * 3 / 2;
@@ -160,6 +163,42 @@ fn paff_b_field_decode() {
             println!(
                 "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
             );
+
+            // Per-field (even rows = top, odd = bottom) luma max + per-field-MB grid.
+            let (w, hh) = (80usize, 64usize);
+            let mut fmax = [0i32; 2];
+            for y in 0..hh {
+                for x in 0..w {
+                    let d = (frame[y * w + x] as i32 - ref_yuv[off + y * w + x] as i32).abs();
+                    fmax[y & 1] = fmax[y & 1].max(d);
+                }
+            }
+            println!(
+                "  TOP(field0) luma max={} | BOT(field1) luma max={}",
+                fmax[0], fmax[1]
+            );
+            for (par, name) in [(0usize, "TOP"), (1, "BOT")] {
+                print!("  {name} MB grid:");
+                for mbr in 0..2 {
+                    let mut s = String::new();
+                    for mbc in 0..5 {
+                        let mut m = 0i32;
+                        for yy in 0..16 {
+                            let fy = mbr * 16 + yy;
+                            let y = 2 * fy + par;
+                            for xx in 0..16 {
+                                let x = mbc * 16 + xx;
+                                let d = (frame[y * w + x] as i32 - ref_yuv[off + y * w + x] as i32)
+                                    .abs();
+                                m = m.max(d);
+                            }
+                        }
+                        s.push_str(&format!("{m:4}"));
+                    }
+                    print!("  [{s} ]");
+                }
+                println!();
+            }
         }
     }
 }
