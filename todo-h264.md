@@ -131,17 +131,26 @@ diagnostic tests).
               `max_num_ref_frames=1` the bottom field of frame 0 evicted its own
               top field. Fixed (`ref_pic.rs`, commit `c73c85a`); frame#1 luma
               ~220 everywhere → top MB-row bit-exact, worst ~42.
-        - [ ] **P_8x8 field inter MC.** Remaining error is **edge-concentrated**
-              (MB col 0 & col 4 bad ~65-245, middle cols near-0; present with
-              deblock off). P_Skip MBs reconstruct bit-exact, so ref plane + MC
-              infra + skip-MV-pred are OK. Suspect `reconstruct_field_inter_luma`
-              P_8x8 sub-partition MV (it does per-4×4 MC from `mv_store` cells
-              with no partition/8×8-transform awareness) OR field MV prediction
-              at the picture edge. Some decoded MVs look like garbage
-              (`(-66,-30)`, `(0,-36)`). Dump the P-field sub_mb_type + per-cell
-              MV grid vs an ffmpeg reference (PyAV `C:\Python313` has `av`
-              18.1.0, but `export_mvs` via options failed — try `-vf codecview`
-              PNG or a JM trace).
+        - [x] **field inter residual scan.** `reconstruct_field_inter_luma/_chroma`
+              used `dequant_idct_4x4` (fixed zigzag). A PAFF field is field-coded
+              throughout → residual must un-scan with `FIELD_SCAN_4X4` (like the
+              field intra path). Commit `451cadd`. Luma 245→68.
+        - [x] **sub-8×8 chroma MC.** `reconstruct_field_inter_chroma` MC'd each
+              chroma 4×4 with one MV (the 8×8 quadrant's TL cell). P_8x8 sub-types
+              8×4/4×8/4×4 need per-2×2 chroma MC with each luma 4×4 cell's MV
+              (§8.4.1.4). Commit `55b2eb8`. Chroma 238→49, overall 238→68.
+              ⚠️ **The progressive `reconstruct_inter_chroma` (line ~3507) has
+              the identical coarse pattern — latent bug, not fixed (conformance-
+              pinned, left alone). Fix + re-run full conformance next.**
+        - [ ] **remaining ~68 luma / ~49 chroma**, unified, in P_8x8 MBs
+              (MB(4,0) both frames; MB(3,3)=23 frame#1). Deblock-independent.
+              P_Skip MBs are bit-exact. Likely the P_8x8 sub-partition MV
+              (sub_mb_type / mvd / MV-prediction) for 4×4/8×4 sub-types in the
+              field P path — `reconstruct_field_inter_luma` already does finest
+              per-4×4 MC so the cells themselves must be slightly off. Dump
+              sub_mb_type + per-cell MV vs ffmpeg (PyAV `C:\Python313` `av`
+              18.1.0; `export_mvs` via `av.open(options=)` failed — use
+              `-vf codecview` or a JM trace).
         - [ ] **2d-iv.** then flip `dbg_paff_b_field` to a hard assert (2e).
   - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once
         2d-iii done. (`dbg_paff_bisect` is already hard-pinned for the CAVLC

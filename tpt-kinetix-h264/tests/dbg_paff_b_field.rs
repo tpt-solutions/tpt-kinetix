@@ -177,6 +177,41 @@ fn paff_b_field_decode() {
                 "  TOP(field0) luma max={} | BOT(field1) luma max={}",
                 fmax[0], fmax[1]
             );
+            if i == 0 {
+                for fy in 0..16usize {
+                    let y = 2 * fy + 1; // bottom field
+                    let d: Vec<i32> = (48..80)
+                        .map(|x| frame[y * w + x] as i32 - ref_yuv[off + y * w + x] as i32)
+                        .collect();
+                    if d.iter().any(|v| *v != 0) {
+                        println!("  BOT fy={fy:2} x48..79 diff={d:?}");
+                    }
+                }
+            }
+            // Chroma (Cb) per-field-MB grid.
+            let luma_all = w * hh;
+            for (par, name) in [(0usize, "TOP"), (1, "BOT")] {
+                print!("  {name} Cb grid:");
+                for mbr in 0..2 {
+                    print!(" [");
+                    for mbc in 0..5 {
+                        let mut m = 0i32;
+                        for yy in 0..8usize {
+                            let fy = mbr * 8 + yy;
+                            let y = 2 * fy + par;
+                            for xx in 0..8 {
+                                let x = mbc * 8 + xx;
+                                let o = luma_all + y * (w / 2) + x;
+                                let d = (frame[o] as i32 - ref_yuv[off + o] as i32).abs();
+                                m = m.max(d);
+                            }
+                        }
+                        print!("{m:4}");
+                    }
+                    print!(" ]");
+                }
+                println!();
+            }
             for (par, name) in [(0usize, "TOP"), (1, "BOT")] {
                 print!("  {name} MB grid:");
                 for mbr in 0..2 {
