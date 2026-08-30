@@ -2654,26 +2654,49 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = (base_x + bx) as i32;
             let y0 = (base_y + by) as i32;
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
-            let ref_idx = cell.ref_idx.max(0) as usize;
+            // Chroma of an 8×8 luma partition is a 4×4 block. When the luma
+            // partition is split finer than 8×8 (P_8x8 sub-types 8×4 / 4×8 /
+            // 4×4) chroma is motion-compensated per 2×2 sub-block, each using
+            // its own luma 4×4 cell's MV (§8.4.1.4). `qbase` is this quadrant's
+            // top-left luma cell; its four cells sit at `qbase + {0,1,4,5}`.
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
+            let ref_idx = grid[qbase].ref_idx.max(0) as usize;
 
             let mut pred = [0u8; 16];
             if let Some(plane_ref) = ref_plane.get(ref_idx).or_else(|| ref_plane.last()) {
                 let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);
-                crate::motion_comp::interpolate_chroma(
-                    &mut pred,
-                    4,
-                    plane_ref,
-                    plane_w,
-                    plane_w,
-                    chroma_h_of(plane_ref, stride),
-                    x0,
-                    y0,
-                    cell.mv[0],
-                    cell.mv[1],
-                    4,
-                    4,
-                );
+                let ph = chroma_h_of(plane_ref, stride);
+                for (sub, cell) in [
+                    grid[qbase],
+                    grid[qbase + 1],
+                    grid[qbase + 4],
+                    grid[qbase + 5],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let (sr, sc) = (sub / 2, sub % 2);
+                    let mut sp = [0u8; 4];
+                    crate::motion_comp::interpolate_chroma(
+                        &mut sp,
+                        2,
+                        plane_ref,
+                        plane_w,
+                        plane_w,
+                        ph,
+                        x0 + sc as i32 * 2,
+                        y0 + sr as i32 * 2,
+                        cell.mv[0],
+                        cell.mv[1],
+                        2,
+                        2,
+                    );
+                    for r in 0..2 {
+                        for c in 0..2 {
+                            pred[(sr * 2 + r) * 4 + sc * 2 + c] = sp[r * 2 + c];
+                        }
+                    }
+                }
             }
             let pred = combine_weighted(
                 weighted,
@@ -2691,7 +2714,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                 trace_plane,
                 block as u8,
                 &pred,
-                cell.mv,
+                grid[qbase].mv,
                 ref_idx,
             );
 
