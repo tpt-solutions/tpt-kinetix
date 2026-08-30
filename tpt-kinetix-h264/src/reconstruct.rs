@@ -2572,7 +2572,18 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
             ref_idx,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        // PAFF field pictures are field-coded throughout: the inter residual
+        // coefficients were parsed against the field scan (§8.5.6 / Table 8-13),
+        // so they must be un-scanned with `FIELD_SCAN_4X4`, not the default
+        // zigzag `dequant_idct_4x4` uses (which garbled every coded 8×8 group).
+        let res = dequant_idct_4x4_scan(
+            &mb.luma_coeffs[block],
+            mb.qp,
+            None,
+            0,
+            scaling,
+            &crate::transform::FIELD_SCAN_4X4,
+        );
         for row in 0..4 {
             for col in 0..4 {
                 let px = x0 as usize + col;
@@ -2684,7 +2695,16 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                 ref_idx,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            // Field-coded chroma AC: un-scan with the field scan (see the luma
+            // note in `reconstruct_field_inter_luma`).
+            let res = dequant_idct_4x4_scan(
+                &ac[block],
+                qpc,
+                Some(dc_out[block]),
+                comp + 1,
+                scaling,
+                &crate::transform::FIELD_SCAN_4X4,
+            );
             for row in 0..4 {
                 for col in 0..4 {
                     let px = x0 as usize + col;
