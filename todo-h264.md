@@ -135,22 +135,25 @@ diagnostic tests).
               used `dequant_idct_4x4` (fixed zigzag). A PAFF field is field-coded
               throughout → residual must un-scan with `FIELD_SCAN_4X4` (like the
               field intra path). Commit `451cadd`. Luma 245→68.
-        - [x] **sub-8×8 chroma MC.** `reconstruct_field_inter_chroma` MC'd each
-              chroma 4×4 with one MV (the 8×8 quadrant's TL cell). P_8x8 sub-types
-              8×4/4×8/4×4 need per-2×2 chroma MC with each luma 4×4 cell's MV
-              (§8.4.1.4). Commit `55b2eb8`. Chroma 238→49, overall 238→68.
-              ⚠️ **The progressive `reconstruct_inter_chroma` (line ~3507) has
-              the identical coarse pattern — latent bug, not fixed (conformance-
-              pinned, left alone). Fix + re-run full conformance next.**
-        - [ ] **remaining ~68 luma / ~49 chroma**, unified, in P_8x8 MBs
-              (MB(4,0) both frames; MB(3,3)=23 frame#1). Deblock-independent.
-              P_Skip MBs are bit-exact. Likely the P_8x8 sub-partition MV
-              (sub_mb_type / mvd / MV-prediction) for 4×4/8×4 sub-types in the
-              field P path — `reconstruct_field_inter_luma` already does finest
-              per-4×4 MC so the cells themselves must be slightly off. Dump
-              sub_mb_type + per-cell MV vs ffmpeg (PyAV `C:\Python313` `av`
-              18.1.0; `export_mvs` via `av.open(options=)` failed — use
-              `-vf codecview` or a JM trace).
+        - [x] **sub-8×8 chroma MC** (`55b2eb8` field, `1cb5868` progressive P/B +
+              field-B): each chroma 4×4 quadrant now MC'd per-2×2 with the
+              matching luma 4×4 cell's MV (+ per-sub-block L0/L1/Bi for B),
+              §8.4.1.4 / ffmpeg `mc_dir_part`. Degenerates for partitions ≥8×8.
+              Full conformance + g5/g6 green.
+        - [x] **field chroma opposite-parity MV offset** (`488f995`):
+              `mb_field_decoding_flag` IS set for a PAFF field pic (ffmpeg
+              h264_slice.c L1912), so chroma vertical MV shifts by
+              `2*(curr_parity - ref_parity)` (1/8-chroma units). **`paff_b_field`
+              chroma is now BIT-EXACT** (was 49 / 190).
+        - [ ] **remaining: luma max 68 / 21-48 px**, one P_8x8 quadrant.
+              MB(4,0) TL 8×8 quadrant: **we parse `sub_mb_type[0]=3` (P_L0_4x4)
+              with per-cell MVs (4,4)/(0,3)/(0,16)/(1,3); ffmpeg export_mvs shows
+              that quadrant is uniform (0,0)** → P_8x8 `sub_mb_type` / sub-MVD /
+              sub-MV-prediction misparse in the field P path (`parse_p_slice*`).
+              Only ~21 px affected because the ref region there is near-flat.
+              (PyAV `C:\Python313` `av` 18.1.0: `s.codec_context.options=
+              {'flags2':'+export_mvs'}` then iterate `fr.side_data` → to_ndarray;
+              reports 8×8-granular MVs in field coords.)
         - [ ] **2d-iv.** then flip `dbg_paff_b_field` to a hard assert (2e).
   - [ ] **2e.** flip `dbg_paff_b_field` to a hard bit-exact assertion once
         2d-iii done. (`dbg_paff_bisect` is already hard-pinned for the CAVLC
