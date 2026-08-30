@@ -925,6 +925,7 @@ impl H264Decoder {
             &parsed.macroblocks,
             &parsed.mv_store,
             &ref_list,
+            header.bottom_field_flag,
             mb_cols,
             mb_rows_field,
             width,

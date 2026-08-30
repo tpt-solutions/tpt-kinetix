@@ -2018,6 +2018,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
     macroblocks: &[Macroblock],
     mv_store: &crate::mv::MvStore,
     ref_fields: &[FieldRef],
+    current_bottom: bool,
     mb_cols: u32,
     mb_rows_field: u32,
     width: u32,
@@ -2047,6 +2048,15 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
         ref_cb.push(c1);
         ref_cr.push(c2);
     }
+    // §8.4.1.4 / ffmpeg `mc_dir_part`: `mb_field_decoding_flag` is set for a
+    // PAFF field picture (h264_slice.c L1912), so when a field MB predicts
+    // chroma from a reference field of the opposite parity, the vertical chroma
+    // MV is shifted by `2 * (curr_parity - ref_parity)` in 1/8-chroma units
+    // (the two fields' chroma sample grids are a quarter chroma line apart).
+    let chroma_mv_y_off: Vec<i32> = ref_fields
+        .iter()
+        .map(|f| 2 * (current_bottom as i32 - f.bottom as i32))
+        .collect();
 
     for mb_y in 0..mb_rows_field {
         for mb_x in 0..mb_cols {
@@ -2077,6 +2087,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
                     mb_cols,
                     mb_x,
                     mb_y,
+                    &chroma_mv_y_off,
                     chroma_qp_index_offset,
                     scaling,
                     weighted,
@@ -2646,6 +2657,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
     mb_cols: u32,
     mb_x: u32,
     mb_y: u32,
+    chroma_mv_y_off: &[i32],
     chroma_qp_index_offset: i32,
     scaling: &ScalingLists,
     weighted: &WeightedPred,
@@ -2696,6 +2708,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
             // top-left luma cell; its four cells sit at `qbase + {0,1,4,5}`.
             let qbase = (block / 2) * 8 + (block % 2) * 2;
             let ref_idx = grid[qbase].ref_idx.max(0) as usize;
+            let cmv_y_off = chroma_mv_y_off.get(ref_idx).copied().unwrap_or(0);
 
             let mut pred = [0u8; 16];
             if let Some(plane_ref) = ref_plane.get(ref_idx).or_else(|| ref_plane.last()) {
@@ -2722,7 +2735,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                         x0 + sc as i32 * 2,
                         y0 + sr as i32 * 2,
                         cell.mv[0],
-                        cell.mv[1],
+                        cell.mv[1] + cmv_y_off,
                         2,
                         2,
                     );
@@ -4095,6 +4108,7 @@ mod tests {
             &[mb],
             &store,
             &[field_ref],
+            false,
             1,
             1,
             16,
