@@ -172,5 +172,15 @@ fn paff_bisect_intra_vs_inter() {
                 println!("   {row}");
             }
         }
+
+        // Regression pin (#32ag): `paff_i_fields.264` (PAFF I-top + P-bottom,
+        // CAVLC) is bit-exact vs ffmpeg's FULLY-FILTERED decode — the field
+        // deblocking `bS` rules (§8.7.2.1: horizontal MB-boundary intra edge
+        // stays bS=3, halved mvy_limit) are now applied in `deblock_field`.
+        assert_eq!(
+            (top_max, bot_max),
+            (0, 0),
+            "frame#{fi}: PAFF field decode+deblock must be bit-exact vs ffmpeg"
+        );
     }
 }

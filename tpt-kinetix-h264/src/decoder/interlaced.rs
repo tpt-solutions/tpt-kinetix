@@ -1147,8 +1147,13 @@ impl H264Decoder {
                             .mv_store
                             .cells_of(idx)
                             .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                        // PAFF field picture: every MB is field-coded, so the
+                        // §8.7.2.1 field rules apply — horizontal MB-boundary
+                        // edge stays bS=3 in the intra case, and the bS=1 motion
+                        // rule uses the halved vertical MV threshold.
                         crate::deblock::DeblockMbInfo {
                             transform_8x8: mb.transform_size_8x8,
+                            field: true,
                             ..crate::deblock::DeblockMbInfo::new(mb.mb_type, nz, cells, mb.qp)
                         }
                     })

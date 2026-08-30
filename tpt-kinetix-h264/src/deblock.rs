@@ -127,6 +127,23 @@ fn is_intra(t: MbType) -> bool {
     matches!(t, MbType::Intra4x4 | MbType::Intra16x16 { .. })
 }
 
+/// §8.7.2.1 / ffmpeg `filter_mb_dir` (L547-552) + `_fast_internal` (L271,377):
+/// in a **field picture** (or a field-coded MBAFF MB), the *horizontal*
+/// macroblock-boundary edge does **not** get the strong `bS = 4` in the
+/// intra-boundary case — it stays on the weak path with `bS = 3`. Only the
+/// vertical MB-boundary edge keeps `bS = 4`. Non-intra edges never derive 4 on
+/// a horizontal edge, so clamping `4 → 3` is exactly this rule.
+#[inline]
+fn field_horiz_boundary_clamp(bs: &mut [u8; 4], field: bool) {
+    if field {
+        for b in bs.iter_mut() {
+            if *b == 4 {
+                *b = 3;
+            }
+        }
+    }
+}
+
 /// Boundary-strength for one pair of 4×4 luma blocks straddling an edge
 /// (§8.7.2.1). `is_mb_edge` distinguishes the strong (bS = 4, macroblock
 /// boundary) from weak (bS = 3, interior) intra case; both sides are always
@@ -614,7 +631,7 @@ pub fn deblock_luma_mb(
             true,
             [3, 7, 11, 15],
             [0, 4, 8, 12],
-            crate::deblock::mvy_limit(false),
+            crate::deblock::mvy_limit(cur.field),
         );
         if trace {
             eprintln!(
@@ -653,7 +670,7 @@ pub fn deblock_luma_mb(
     // grouped by raster COLUMN; p-side block is the top MB's bottom row
     // (12,13,14,15), q-side is this MB's top row (0,1,2,3).
     if let Some(t) = top {
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             t,
             cur,
             true,
@@ -661,6 +678,7 @@ pub fn deblock_luma_mb(
             [0, 1, 2, 3],
             crate::deblock::mvy_limit(cur.field),
         );
+        field_horiz_boundary_clamp(&mut bs, cur.field);
         if trace {
             eprintln!(
                 "DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?} pty={:?} qty={:?}",
@@ -735,7 +753,7 @@ pub fn deblock_chroma_mb(
             true,
             [3, 7, 11, 15],
             [0, 4, 8, 12],
-            crate::deblock::mvy_limit(false),
+            crate::deblock::mvy_limit(cur.field),
         );
         let qpc = (cqp(cur.qp) + cqp(l.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, qpc);
@@ -759,7 +777,7 @@ pub fn deblock_chroma_mb(
         }
     }
     if let Some(t) = top {
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             t,
             cur,
             true,
@@ -767,6 +785,7 @@ pub fn deblock_chroma_mb(
             [0, 1, 2, 3],
             crate::deblock::mvy_limit(cur.field),
         );
+        field_horiz_boundary_clamp(&mut bs, cur.field);
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
         deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
