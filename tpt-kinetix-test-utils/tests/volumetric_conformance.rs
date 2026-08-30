@@ -11,15 +11,20 @@
 //! oracle binary and the PLY plumbing work, and to anchor `tmc3`'s lossless
 //! geometry round-trip as a regression check.
 //!
-//! # What is pending
+//! It also runs the **direct Kinetix-vs-`tmc3` cross-check**: the same integer-
+//! lattice source cloud is decoded by both `tmc3` and `tpt-kinetix-volumetric`
+//! and compared as an unordered multiset of integer-grid coordinates. Because
+//! both decoders reconstruct the lattice *losslessly* (exact to the `2^depth`
+//! grid), this is a genuine **geometry-level bit-exact** cross-check, not just a
+//! fidelity probe — gated on `tmc3` availability like the 2D-codec oracles.
 //!
-//! A direct Kinetix-vs-`tmc3` cross-check (decode the *same* source cloud with
-//! both decoders and assert bit-exact equality) requires the v1 codec's
-//! coding tools to be byte-compatible with `tmc3`. The current v1 codec
-//! implements simplified, self-consistent G-PCC-faithful tools and is *not*
-//! yet bit-exact, so the decoder reports `pixel_exact: false` and strict mode
-//! rejects its output. That cross-check lands once the coding tools are aligned
-//! to `tmc3` (tracked in `todo.md` Phase 15).
+//! # What remains pending
+//!
+//! The attribute (color) cross-check is still pending: the v1 attribute tools
+//! are simplified, self-consistent G-PCC-faithful transforms, not yet
+//! byte-compatible with `tmc3`, so attribute payloads are not diffed against the
+//! oracle yet. Until attributes are aligned, `pixel_exact` stays `false` and
+//! strict mode rejects output (tracked in `todo.md` Phase 15).
 
 use tpt_kinetix_test_utils::tmc13::{
     max_point_distance, read_ply_coords, run_tmc3, tmc13_available, write_ply,

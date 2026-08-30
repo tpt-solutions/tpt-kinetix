@@ -12,12 +12,19 @@
 //! # Status
 //!
 //! The harness plumbing (write PLY → run `tmc3` → read reconstructed PLY → diff)
-//! is in place and gated. A full *cross-check* — decode a G-PCC stream with
-//! `tmc3`, decode the same source with `tpt-kinetix-volumetric`, and assert
-//! bit-exact equality — is pending the bit-exact coding-tool alignment
-//! (DECISION 6 (C): the v1 codec implements simplified, self-consistent G-PCC-
-//! faithful tools, not yet byte-compatible with `tmc3`). Until then the
-//! decoder reports `pixel_exact: false` and strict mode rejects its output.
+//! is in place and gated. The **geometry** cross-check — decode the same source
+//! cloud with both `tmc3` and `tpt-kinetix-volumetric` and compare the
+//! reconstructed point sets as unordered multisets of integer-grid coordinates
+//! ([`point_clouds_equal_as_multiset`] / [`max_distance_as_multiset`]) — is now
+//! implemented and is genuinely bit-exact, because both decoders reconstruct the
+//! lattice losslessly (the `tpt-kinetix-volumetric` conformance test
+//! `volumetric_geometry_cross_checks_tmc3_bit_exact` drives it).
+//!
+//! A **full** cross-check — including attribute (color) payloads — still
+//! requires the v1 codec's coding tools to be byte-compatible with `tmc3`. The
+//! current v1 codec implements simplified, self-consistent G-PCC-faithful tools,
+//! not yet byte-compatible with `tmc3`, so the decoder reports `pixel_exact:
+//! false` and strict mode rejects its output (tracked in `todo.md` Phase 15).
 
 use std::{
     io::Write,
@@ -113,6 +120,49 @@ pub fn max_point_distance(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
             (dx * dx + dy * dy + dz * dz).sqrt()
         })
         .fold(0.0f32, f32::max)
+}
+
+/// Compare two point clouds as **unordered multisets** of integer-grid
+/// coordinates (e.g. geometry quantized to a common `2^depth` lattice).
+///
+/// Both clouds are sorted into a canonical order and compared element-wise, so
+/// the comparison is independent of the emission order each decoder uses (our
+/// decoder emits Morton order; `tmc3` emits its own). Returns `false` when the
+/// point counts differ.
+pub fn point_clouds_equal_as_multiset(a: &[[i32; 3]], b: &[[i32; 3]]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut x = a.to_vec();
+    x.sort();
+    let mut y = b.to_vec();
+    y.sort();
+    x == y
+}
+
+/// Maximum Euclidean distance between two point clouds compared **as multisets**
+/// (sorted into canonical order first). Returns `None` if the point counts
+/// differ — a structural mismatch that `point_clouds_equal_as_multiset` reports
+/// as `false` but that a single distance number cannot express.
+pub fn max_distance_as_multiset(a: &[[i32; 3]], b: &[[i32; 3]]) -> Option<f32> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut x = a.to_vec();
+    x.sort();
+    let mut y = b.to_vec();
+    y.sort();
+    let mut max = 0.0f32;
+    for (p, q) in x.iter().zip(y.iter()) {
+        let dx = (p[0] - q[0]) as f32;
+        let dy = (p[1] - q[1]) as f32;
+        let dz = (p[2] - q[2]) as f32;
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        if d > max {
+            max = d;
+        }
+    }
+    Some(max)
 }
 
 #[cfg(test)]

@@ -66,6 +66,7 @@ pub fn decode_scalefactors(
     ics: &IcsInfo,
     sections: &SectionData,
     band_type: &[u8],
+    global_gain: i32,
 ) -> Result<Vec<i32>, AacParseError> {
     let num_groups = ics.num_window_groups();
     let max_sfb = ics.max_sfb as usize;
@@ -73,7 +74,16 @@ pub fn decode_scalefactors(
 
     let mut scale_factor = 0i32;
     let mut is_position = 0i32;
-    let mut noise_energy = 0i32;
+    // Noise bands use a *separate* DPCM predictor (`noise_sfo`) initialised to
+    // `global_gain - NOISE_OFFSET` (ffmpeg's `offset[1]`), advanced by
+    // `raw - NOISE_PRE` for the first noise band in the channel and
+    // `idx - SCALE_DIFF_ZERO` (60) for subsequent bands, clipped to [-100, 155].
+    // ffmpeg's dequantized noise scalefactor is `sf = -2^(noise_sfo/4)`; to make
+    // `dequant_scale(global_gain, *)` (which computes `2^((global_gain - 100 -
+    // sf)/4)`) reproduce that magnitude exactly we store `global_gain - 100 -
+    // noise_sfo` (note noise bands do *not* subtract 100 from the running offset
+    // the way regular bands do, so this correction is required).
+    let mut noise_sfo = global_gain - 90;
     let mut noise_pcm_flag = true;
 
     for g in 0..num_groups {
@@ -101,15 +111,12 @@ pub fn decode_scalefactors(
                     if noise_pcm_flag {
                         noise_pcm_flag = false;
                         let raw = reader.read_bits(9).ok_or(AacParseError::UnexpectedEof)? as i32;
-                        // Absolute noise_energy = global_gain - 90 + (raw - 256);
-                        // stored here as -(that - global_gain) = 90 - (raw - 256).
-                        noise_energy = 90 - (raw - 256);
+                        noise_sfo = (noise_sfo + raw - 256).clamp(-100, 155);
                     } else {
-                        let hcod =
-                            decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
-                        noise_energy -= hcod;
+                        let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
+                        noise_sfo = (noise_sfo + hcod).clamp(-100, 155);
                     }
-                    noise_energy
+                    global_gain - 100 - noise_sfo
                 } else {
                     let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
                     scale_factor -= hcod;
@@ -195,7 +202,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(60));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt, 0).unwrap(),
             vec![0]
         );
 
@@ -203,7 +210,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(61));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt, 0).unwrap(),
             vec![-1]
         );
 
@@ -211,7 +218,7 @@ mod tests {
         let bytes = pack_bits(&encode_scalefactor_bits(59));
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt, 0).unwrap(),
             vec![1]
         );
     }
@@ -229,7 +236,7 @@ mod tests {
         let bt = expand_band_types(&sections, &ics);
         let mut r = BitReader::new(&[0u8; 4]);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt, 0).unwrap(),
             vec![0]
         );
     }
@@ -251,7 +258,7 @@ mod tests {
         let bytes = pack_bits(&bits);
         let mut r = BitReader::new(&bytes);
         assert_eq!(
-            decode_scalefactors(&mut r, &ics, &sections, &bt).unwrap(),
+            decode_scalefactors(&mut r, &ics, &sections, &bt, 0).unwrap(),
             vec![0, 2]
         );
     }

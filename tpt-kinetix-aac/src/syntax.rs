@@ -325,7 +325,7 @@ impl ChannelStream {
         let sections = SectionData::parse(reader, &ics)?;
 
         let band_type = expand_band_types(&sections, &ics);
-        let scalefactor = decode_scalefactors(reader, &ics, &sections, &band_type)?;
+        let scalefactor = decode_scalefactors(reader, &ics, &sections, &band_type, global_gain as i32)?;
 
         let pulse = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
         let pulse = if pulse {

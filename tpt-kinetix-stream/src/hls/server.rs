@@ -39,6 +39,10 @@ pub struct HlsPackager {
     config: HlsConfig,
     playlist: HlsPlaylist,
     next_index: u64,
+    /// Access units buffered for the segment currently being assembled.
+    pending: Vec<(Vec<u8>, u64, bool)>,
+    /// 90 kHz PTS of the first access unit in the pending segment.
+    segment_start_pts: Option<u64>,
 }
 
 impl HlsPackager {
@@ -49,6 +53,8 @@ impl HlsPackager {
             config,
             playlist,
             next_index: 0,
+            pending: Vec::new(),
+            segment_start_pts: None,
         }
     }
 
@@ -86,6 +92,64 @@ impl HlsPackager {
     /// Return a reference to the current playlist state.
     pub fn playlist(&self) -> &HlsPlaylist {
         &self.playlist
+    }
+
+    /// Append one H.264 access unit (AVCC form) to the in-progress segment.
+    ///
+    /// Each element is `(avcc_bytes, pts_90khz, is_keyframe)`. The buffered
+    /// access units are muxed into a `.ts` segment and written via
+    /// [`HlsPackager::write_ts_segment`] when either:
+    /// - a new keyframe arrives after a non-empty segment (a natural GOP
+    ///   boundary), or
+    /// - the accumulated duration (in 90 kHz ticks) reaches
+    ///   `segment_duration_secs`.
+    ///
+    /// This honours `segment_duration_secs` instead of emitting one tiny segment
+    /// per access unit. Call [`HlsPackager::flush`] at end-of-stream to write out
+    /// any remaining buffered access units.
+    pub fn push_access_unit(
+        &mut self,
+        avcc: Vec<u8>,
+        pts_90khz: u64,
+        is_key: bool,
+    ) -> anyhow::Result<()> {
+        // Roll over at a keyframe boundary once we have pending data, so each
+        // segment begins with a random-access point.
+        if is_key && !self.pending.is_empty() {
+            self.flush_pending()?;
+        }
+        if self.pending.is_empty() {
+            self.segment_start_pts = Some(pts_90khz);
+        }
+        self.pending.push((avcc, pts_90khz, is_key));
+
+        if let Some(start) = self.segment_start_pts {
+            let elapsed = pts_90khz.saturating_sub(start);
+            if elapsed >= (self.config.segment_duration_secs as u64) * 90_000 {
+                self.flush_pending()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush any buffered access units into a new segment, if any remain.
+    pub fn flush(&mut self) -> anyhow::Result<()> {
+        self.flush_pending()
+    }
+
+    fn flush_pending(&mut self) -> anyhow::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending);
+        self.segment_start_pts = None;
+        let bytes = self.write_ts_segment(&pending)?;
+        tracing::debug!(
+            bytes,
+            segments = self.playlist.segments.len(),
+            "wrote HLS segment"
+        );
+        Ok(())
     }
 
     /// Mux a batch of H.264 access units (AVCC form) into an MPEG-TS segment
@@ -222,4 +286,64 @@ async fn send_404(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
     let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
     stream.write_all(response).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_avcc() -> Vec<u8> {
+        // A tiny fake IDR NAL in AVCC (4-byte length prefix) form.
+        vec![0, 0, 0, 2, 0x65, 0x88]
+    }
+
+    #[test]
+    fn rolls_segment_on_keyframe_boundary() {
+        let dir = std::env::temp_dir().join(format!("kinetix_hls_test_{}", std::process::id()));
+        let cfg = HlsConfig {
+            segment_duration_secs: 100, // large: only keyframe roll should trigger
+            output_dir: dir.to_string_lossy().to_string(),
+            window_size: 10,
+            http_bind_addr: "0.0.0.0:0".into(),
+        };
+        let mut p = HlsPackager::new(cfg);
+
+        // First keyframe starts segment 0.
+        p.push_access_unit(fake_avcc(), 0, true).unwrap();
+        // A non-keyframe AU stays in the same segment.
+        p.push_access_unit(fake_avcc(), 90_000, false).unwrap();
+        assert_eq!(p.playlist().segments.len(), 0);
+        // A second keyframe forces a roll.
+        p.push_access_unit(fake_avcc(), 180_000, true).unwrap();
+        assert_eq!(p.playlist().segments.len(), 1);
+        // Flush the trailing segment.
+        p.flush().unwrap();
+        assert_eq!(p.playlist().segments.len(), 2);
+    }
+
+    #[test]
+    fn rolls_segment_on_duration_threshold() {
+        let dir = std::env::temp_dir().join(format!("kinetix_hls_test2_{}", std::process::id()));
+        let cfg = HlsConfig {
+            segment_duration_secs: 2, // 2s => 180_000 ticks
+            output_dir: dir.to_string_lossy().to_string(),
+            window_size: 10,
+            http_bind_addr: "0.0.0.0:0".into(),
+        };
+        let mut p = HlsPackager::new(cfg);
+
+        // All non-keyframes, spaced past the duration threshold.
+        p.push_access_unit(fake_avcc(), 0, false).unwrap();
+        p.push_access_unit(fake_avcc(), 180_000, false).unwrap();
+        assert_eq!(p.playlist().segments.len(), 1);
+        // Another 2s later — second roll.
+        p.push_access_unit(fake_avcc(), 360_000, false).unwrap();
+        p.push_access_unit(fake_avcc(), 540_000, false).unwrap();
+        assert_eq!(p.playlist().segments.len(), 2);
+        // Another 2s later — third segment, then flush the final partial.
+        p.push_access_unit(fake_avcc(), 720_000, false).unwrap();
+        assert_eq!(p.playlist().segments.len(), 2);
+        p.flush().unwrap();
+        assert_eq!(p.playlist().segments.len(), 3);
+    }
 }

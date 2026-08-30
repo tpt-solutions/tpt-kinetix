@@ -1,7 +1,35 @@
 # TPT Kinetix — Task Index
 
-> Last reconciled: 2026-08-28. Monolithic todo.md split into per-codec files.
+> Last reconciled: 2026-08-30. Monolithic todo.md split into per-codec files.
 > For the long session-notes preamble and infrastructure phases 0–11, scroll past this index.
+
+### Non-H.264 open work (2026-08-30 reconciliation)
+
+Everything below is independent of the H.264 decoder effort:
+
+- **AV1 decoder — the largest remaining item.** Entropy/parsing path proven
+  correct (2026-08-27 oracle); still **0/5 pixel-exact vs dav1d**. All error is
+  in reconstruction: intra prediction (directional/PAETH/SMOOTH/DC border prep,
+  CfL §7.11.5, filter-intra §7.11.2.3), the 2-D inverse-transform driver /
+  rescale / `dq_denom` / `Transform_Row_Shift` under Kinetix's non-spec `TxSize`
+  ordering, dequant, palette pixel reconstruction, in-loop filters (LR still an
+  unapplied passthrough). `pixel_exact` stays `false`. See todo-av1.md.
+- **AAC decoder — two small accuracy gaps.** `noise_mono_44100` corr ~0.87 (PNS
+  gap, needs ffmpeg printf instrumentation); `sweep_stereo_44100` max_diff
+  ~0.073 (one coefficient off ~0.14%, likely dequant rounding). Otherwise
+  Phases 1–7 complete, conformance passes a real assertion. See todo-aac.md.
+- **`tpt-kinetix-vision` — reconstruction not implemented.** Design + scaffold
+  done (Phase 15); crate is a decode shell only, `[~]` in todo-codecs.md.
+- **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
+  Kinetix-vs-TMC13 comparison blocked on coding-tool alignment; decoder still
+  reports `pixel_exact: false`.
+- **CLI `transcode` / `stream` subcommands are stubs.** Only `probe` works.
+- **crates.io real publish (Phases 8/10) not done.** Packaging gate is cleared;
+  needs a maintainer with a token + network — not automatable here.
+
+Effectively complete (non-H.264): lean, realtime, lossless, screen, face codecs
+(design + scaffold, plus implementation for lean/realtime); Phase 17
+conformance/bench reporting; AV1 rav1e-backed encoder.
 
 ## Active codec work
 
