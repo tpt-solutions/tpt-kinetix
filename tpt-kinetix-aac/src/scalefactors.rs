@@ -113,7 +113,8 @@ pub fn decode_scalefactors(
                         let raw = reader.read_bits(9).ok_or(AacParseError::UnexpectedEof)? as i32;
                         noise_sfo = (noise_sfo + raw - 256).clamp(-100, 155);
                     } else {
-                        let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
+                        let hcod =
+                            decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
                         noise_sfo = (noise_sfo + hcod).clamp(-100, 155);
                     }
                     global_gain - 100 - noise_sfo

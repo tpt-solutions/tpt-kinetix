@@ -114,6 +114,11 @@ pub struct FrameMeta {
     pub v_tx_w: Vec<u8>,
     pub v_tx_h: Vec<u8>,
     pub v_skip: Vec<bool>,
+    /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
+    /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
+    /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
+    /// strength entry. Empty (every unit defaults to `0`) when `cdef_bits == 0`.
+    pub cdef_idx: std::collections::HashMap<(usize, usize), i8>,
 }
 
 impl FrameMeta {
@@ -133,6 +138,7 @@ impl FrameMeta {
             v_tx_w: vec![0u8; len],
             v_tx_h: vec![0u8; len],
             v_skip: vec![true; len],
+            cdef_idx: std::collections::HashMap::new(),
         }
     }
 
@@ -768,6 +774,9 @@ pub fn apply_post_filters(
     meta: &FrameMeta,
     fh: &FrameHeader,
     seq: &SequenceHeaderObu,
+    cdef_idx: &std::collections::HashMap<(usize, usize), i8>,
+    tile_x0: usize,
+    tile_y0: usize,
 ) -> Result<(), KinetixError> {
     let dbg = std::env::var("KINETIX_AV1_DBG").is_ok() && width == 64 && height == 64;
     let dump_row = |label: &str, plane: &[u8], y: usize| {
@@ -841,24 +850,77 @@ pub fn apply_post_filters(
     // is bits 4..=5 (i.e. `& 0x30`).
     let cdef_enabled = fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
     if cdef_enabled {
-        let idx = 0usize; // cdef_idx per 64×64 block — not yet signalled in this
-                          // decoder; default to entry 0 (documented simplification).
-        let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
-        let pri = (y_packed & 0x0F) as i32;
-        let sec = (y_packed & 0x30) as i32;
-        let damping = fh.cdef_damping as i32; // coeff_shift == 0 for 8-bit
-        cdef_plane_luma(y_plane, width, height, pri, sec, damping);
+        // CDEF strength is selected per 64×64 unit via `cdef_idx` (§5.11.56),
+        // which `read_cdef()` already populated during tile decode. Each unit's
+        // filter runs over a snapshot of the pre-CDEF plane so units stay
+        // independent. For the current corpus (`cdef_bits == 0`) every unit maps
+        // to `cdef_idx == 0`, so this is byte-identical to the previous
+        // whole-plane single-strength path.
+        let src_y = y_plane.to_vec();
+        let mut uy = 0;
+        while uy < height {
+            let mut ux = 0;
+            while ux < width {
+                let mi_r = (tile_y0 + uy) >> 2;
+                let mi_c = (tile_x0 + ux) >> 2;
+                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
+                let pri = (y_packed & 0x0F) as i32;
+                let sec = (y_packed & 0x30) as i32;
+                let damping = fh.cdef_damping as i32;
+                let uh = 64.min(height - uy);
+                let uw = 64.min(width - ux);
+                cdef_plane_luma(y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw);
+                ux += 64;
+            }
+            uy += 64;
+        }
 
-        let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
-        let uv_pri = (uv_packed & 0x0F) as i32;
-        let uv_sec = (uv_packed & 0x30) as i32;
-        let uv_damping = fh.cdef_damping as i32;
-        cdef_plane_chroma(
-            u_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping,
-        );
-        cdef_plane_chroma(
-            v_plane, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping,
-        );
+        let src_u = u_plane.to_vec();
+        let uv_step_x = 64 >> sub_x;
+        let uv_step_y = 64 >> sub_y;
+        let mut uy = 0;
+        while uy < uv_h {
+            let mut ux = 0;
+            while ux < uv_w {
+                let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
+                let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
+                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
+                let uv_pri = (uv_packed & 0x0F) as i32;
+                let uv_sec = (uv_packed & 0x30) as i32;
+                let uv_damping = fh.cdef_damping as i32;
+                let uh = uv_step_y.min(uv_h - uy);
+                let uw = uv_step_x.min(uv_w - ux);
+                cdef_plane_chroma(
+                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                );
+                ux += uv_step_x;
+            }
+            uy += uv_step_y;
+        }
+
+        let src_v = v_plane.to_vec();
+        let mut uy = 0;
+        while uy < uv_h {
+            let mut ux = 0;
+            while ux < uv_w {
+                let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
+                let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
+                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
+                let uv_pri = (uv_packed & 0x0F) as i32;
+                let uv_sec = (uv_packed & 0x30) as i32;
+                let uv_damping = fh.cdef_damping as i32;
+                let uh = uv_step_y.min(uv_h - uy);
+                let uw = uv_step_x.min(uv_w - ux);
+                cdef_plane_chroma(
+                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                );
+                ux += uv_step_x;
+            }
+            uy += uv_step_y;
+        }
     }
 
     if dbg {
@@ -874,25 +936,39 @@ pub fn apply_post_filters(
 }
 
 /// CDEF for the luma plane, applying per-8×8 variance-dependent strength.
+///
+/// `src` is a snapshot of the plane taken *before* any CDEF filtering (so every
+/// 64×64 CDEF unit is filtered from the pre-CDEF pixels, independent of the
+/// others — matching the spec, which filters each unit from the original
+/// frame). `y0_unit`/`x0_unit`/`unit_h`/`unit_w` restrict this call to a single
+/// 64×64 CDEF unit (the caller selects the unit's `cdef_idx` strength entry).
+#[allow(clippy::too_many_arguments)]
 fn cdef_plane_luma(
     plane: &mut [u8],
+    src: &[u8],
     width: usize,
     height: usize,
     pri_str: i32,
     sec_str: i32,
     damping: i32,
+    y0_unit: usize,
+    x0_unit: usize,
+    unit_h: usize,
+    unit_w: usize,
 ) {
-    let src = plane.to_vec();
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
     for r in 0..block_rows {
+        let y0 = r * 8;
+        if y0 < y0_unit || y0 >= y0_unit + unit_h {
+            continue;
+        }
         for c in 0..block_cols {
-            let y0 = r * 8;
             let x0 = c * 8;
-            if y0 >= height || x0 >= width {
+            if x0 < x0_unit || x0 >= x0_unit + unit_w {
                 continue;
             }
-            let (yd, var) = cdef_direction(&src, width, width, height, x0, y0);
+            let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
             // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
             // (§7.15.2's `cdef_block` variance-adjustment step) — this was
             // previously clamped to 31 (a leftover from `floor_log2`'s
@@ -914,7 +990,7 @@ fn cdef_plane_luma(
             cdef_filter_block(
                 plane,
                 width,
-                &src,
+                src,
                 width,
                 x0,
                 y0,
@@ -932,10 +1008,13 @@ fn cdef_plane_luma(
 }
 
 /// CDEF for a chroma plane, applying per-8×8 variance-dependent strength with
-/// the UV direction remap.
+/// the UV direction remap. Like [`cdef_plane_luma`], `src` is the pre-CDEF
+/// snapshot and the caller restricts `y0_unit`/`x0_unit`/`unit_h`/`unit_w` to a
+/// single CDEF unit (keyed into the luma `cdef_idx` grid by the caller).
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_chroma(
     plane: &mut [u8],
+    src: &[u8],
     width: usize,
     height: usize,
     sub_x: usize,
@@ -943,23 +1022,29 @@ fn cdef_plane_chroma(
     pri_str: i32,
     sec_str: i32,
     damping: i32,
+    y0_unit: usize,
+    x0_unit: usize,
+    unit_h: usize,
+    unit_w: usize,
 ) {
-    let src = plane.to_vec();
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
     let block_cols = width.div_ceil(w_block);
     let block_rows = height.div_ceil(h_block);
     for r in 0..block_rows {
+        let y0 = r * h_block;
+        if y0 < y0_unit || y0 >= y0_unit + unit_h {
+            continue;
+        }
         for c in 0..block_cols {
-            let y0 = r * h_block;
             let x0 = c * w_block;
-            if y0 >= height || x0 >= width {
+            if x0 < x0_unit || x0 >= x0_unit + unit_w {
                 continue;
             }
             // Chroma direction is derived from the co-located luma 8×8 block,
             // but for simplicity we re-derive a direction from the chroma block
             // itself and remap via Cdef_Uv_Dir.
-            let (yd, var) = cdef_direction(&src, width, width, height, x0, y0);
+            let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
             // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
             // (§7.15.2's `cdef_block` variance-adjustment step) — this was
             // previously clamped to 31 (a leftover from `floor_log2`'s
@@ -985,7 +1070,7 @@ fn cdef_plane_chroma(
             cdef_filter_block(
                 plane,
                 width,
-                &src,
+                src,
                 width,
                 x0,
                 y0,
@@ -1257,7 +1342,8 @@ mod tests {
             *v = ((i * 37) % 256) as u8;
         }
         let orig = plane.clone();
-        cdef_plane_luma(&mut plane, 8, 8, 0, 0, 7);
+        let src = plane.clone();
+        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8);
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
     }
 
@@ -1309,7 +1395,8 @@ mod tests {
             }
         }
         let orig = plane.clone();
-        cdef_plane_luma(&mut plane, 8, 8, 12, 0, 5);
+        let src = plane.clone();
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8);
         // With a correctly-capped `var_str`, CDEF must not blend the two
         // halves into a single intermediate value that erases the edge —
         // the two sides should stay clearly separated at every row.
@@ -1324,6 +1411,24 @@ mod tests {
                 (right - orig[y * 8 + 4] as i32).abs() < 40,
                 "right side of a hard edge should not move drastically"
             );
+        }
+    }
+
+    #[test]
+    fn cdef_plane_luma_respects_unit_region_bounds() {
+        // A 16×16 plane holds four 8×8 blocks. Filter only the top-left 8×8 unit
+        // with a non-zero strength; the other three must stay untouched (the
+        // per-64×64-unit loop passes a region, not the whole plane).
+        let mut plane = vec![0u8; 16 * 16];
+        for (i, v) in plane.iter_mut().enumerate() {
+            *v = ((i * 53) % 256) as u8;
+        }
+        let src = plane.clone();
+        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8);
+        for y in 8..16 {
+            for x in 0..16 {
+                assert_eq!(plane[y * 16 + x], src[y * 16 + x], "block outside the filtered unit must be unchanged");
+            }
         }
     }
 }

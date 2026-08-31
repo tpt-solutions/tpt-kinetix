@@ -864,7 +864,7 @@ mod synth_tests {
                 let s: Vec<f32> = frame
                     .data
                     .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) / 32768.0)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
                 let ch0: Vec<f32> = s.iter().step_by(2).copied().collect();
                 native_full.extend(ch0);
@@ -1167,7 +1167,7 @@ mod synth_tests {
                 let s: Vec<f32> = frame
                     .data
                     .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) / 32768.0)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
                 let ch0: Vec<f32> = s.iter().step_by(2).copied().collect();
                 native_full.extend(ch0);
@@ -1362,6 +1362,24 @@ mod synth_tests {
             &mut coeffs_no_tns,
         );
         // (intentionally skip TNS)
+
+        // TNS isolation: `err[b]` is the coeff error projected from the reference
+        // (ref = mid[b] + err[b]). If `coeffs_no_tns[b]` (decoded WITHOUT TNS)
+        // already matches the reference, TNS is the sole source of the error.
+        eprintln!("\nTNS isolation (bins 38-47): no_tns vs ref_est(with-tns corrected):");
+        for b in 38..=47 {
+            let ref_est = mid[b] + err[b] as f32;
+            let d = (coeffs_no_tns[b] - ref_est).abs();
+            let rel = if ref_est.abs() > 1.0 {
+                d / ref_est.abs()
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  bin {b}: no_tns={:e} ref_est={:e} absdiff={:e} reldiff={:.5}",
+                coeffs_no_tns[b], ref_est, d, rel
+            );
+        }
 
         // Apply M/S stereo to see if the error appears after M/S.
         let mut mid_ms = mid;
@@ -2166,6 +2184,294 @@ mod synth_tests {
                 state.overlap[i],
                 ov_exp[i]
             );
+        }
+    }
+
+    /// TDAC projection for frame 25 (the actual worst-sample frame: aligned index
+    /// 26088 → frame 25, sample ~488). Unlike the frame-24 probe, this
+    /// reconstructs frame 25's *own* coefficients from frame 26's output for the
+    /// second half (clean, since frame 26 depends only on frame 25's second half)
+    /// and from frame 25's own first-half output for the first half (assuming
+    /// frame 24 is clean). This disambiguates "frame 25 coeff error" from
+    /// "frame 24 overlap contamination".
+    #[test]
+    #[ignore]
+    fn dbg_sweep_frame25_coeff_error() {
+        if !ffmpeg_available() {
+            eprintln!("skip (ffmpeg unavailable)");
+            return;
+        }
+        let adts = match encode_aac_adts_lavfi(
+            "aevalsrc=exprs='sin(2*PI*(200+1900*t)*t)':s=44100:d=1.0",
+            2,
+            "128k",
+        ) {
+            Some(a) => a,
+            None => {
+                eprintln!("skip (encode failed)");
+                return;
+            }
+        };
+
+        let mut frames = Vec::new();
+        let mut i = 0usize;
+        while i + 7 <= adts.len() {
+            if adts[i] == 0xFF && (adts[i + 1] & 0xF0) == 0xF0 {
+                let fl = (((adts[i + 3] & 0x03) as usize) << 11)
+                    | ((adts[i + 4] as usize) << 3)
+                    | ((adts[i + 5] as usize) >> 5);
+                if fl == 0 || i + fl > adts.len() {
+                    break;
+                }
+                frames.push(adts[i..i + fl].to_vec());
+                i += fl;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(frames.len() > 26, "need >=27 frames, got {}", frames.len());
+
+        let mut dec = AacDecoder::new();
+        let mut native_full: Vec<f32> = Vec::new();
+        for f in &frames {
+            let pkt = Packet {
+                pts: Timestamp::NONE,
+                dts: Timestamp::NONE,
+                data: f.clone(),
+                stream_index: 0,
+                is_key_frame: true,
+            };
+            if let Ok(Some(frame)) = dec.decode(&pkt) {
+                let s: Vec<f32> = frame
+                    .data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let ch0: Vec<f32> = s.iter().step_by(2).copied().collect();
+                native_full.extend(ch0);
+            }
+        }
+        let reference = decode_aac_with_ffmpeg(&adts).expect("ffmpeg decode");
+        let mut ref_full: Vec<f32> = Vec::new();
+        for rf in &reference {
+            let ch0: Vec<f32> = rf
+                .data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .step_by(2)
+                .collect();
+            ref_full.extend(ch0);
+        }
+
+        let mut best_lag = 0i64;
+        let mut best_corr = f64::MIN;
+        for lag in -2048i64..=2048 {
+            let (n0, r0) = if lag >= 0 {
+                (0usize, lag as usize)
+            } else {
+                ((-lag) as usize, 0usize)
+            };
+            if n0 >= native_full.len() || r0 >= ref_full.len() {
+                continue;
+            }
+            let len = (native_full.len() - n0).min(ref_full.len() - r0);
+            if len < 8192 {
+                continue;
+            }
+            let (mut dot, mut nn, mut rr) = (0.0f64, 0.0, 0.0);
+            for k in 0..len {
+                let a = native_full[n0 + k] as f64;
+                let b = ref_full[r0 + k] as f64;
+                dot += a * b;
+                nn += a * a;
+                rr += b * b;
+            }
+            if nn > 0.0 && rr > 0.0 {
+                let c = dot / (nn.sqrt() * rr.sqrt());
+                if c > best_corr {
+                    best_corr = c;
+                    best_lag = lag;
+                }
+            }
+        }
+        eprintln!("best lag = {best_lag}, corr = {best_corr:.6}");
+
+        let n_off = if best_lag < 0 { (-best_lag) as usize } else { 0 };
+        let r_off = if best_lag > 0 { best_lag as usize } else { 0 };
+
+        // Per-frame / per-half native-vs-reference residual, to localize the error
+        // to a specific frame's first or second half (and thus a specific frame's
+        // own coefficients vs the neighbour's overlap leak).
+        for f in 22..=28 {
+            let n0 = f * 1024 + n_off;
+            let r0 = f * 1024 + r_off;
+            if n0 + 1024 <= native_full.len() && r0 + 1024 <= ref_full.len() {
+                let (mut h1, mut h2) = (0.0f32, 0.0f32);
+                for i in 0..512 {
+                    h1 = h1.max((native_full[n0 + i] - ref_full[r0 + i]).abs());
+                    h2 = h2.max((native_full[n0 + 512 + i] - ref_full[r0 + 512 + i]).abs());
+                }
+                eprintln!(
+                    "  frame {f}: 1st-half maxdiff={h1:.5}  2nd-half maxdiff={h2:.5}"
+                );
+            }
+        }
+
+        let grab_n = |full: &[f32], f: usize| -> Vec<f32> {
+            let s = f * 1024 + n_off;
+            if s + 1024 > full.len() {
+                vec![0.0f32; 1024]
+            } else {
+                full[s..s + 1024].to_vec()
+            }
+        };
+        let grab_r = |full: &[f32], f: usize| -> Vec<f32> {
+            let s = f * 1024 + r_off;
+            if s + 1024 > full.len() {
+                vec![0.0f32; 1024]
+            } else {
+                full[s..s + 1024].to_vec()
+            }
+        };
+        let p25 = grab_n(&native_full, 25);
+        let r25 = grab_r(&ref_full, 25);
+        let p26 = grab_n(&native_full, 26);
+        let r26 = grab_r(&ref_full, 26);
+
+        let ics_of = |idx: usize| -> (bool, bool) {
+            let hdr = AdtsHeader::parse(&frames[idx]).unwrap();
+            let payload = &frames[idx][hdr.header_len..hdr.frame_length];
+            let block =
+                RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize).unwrap();
+            for el in &block.elements {
+                if let Element::Cpe(cpe) = el {
+                    return (
+                        cpe.left.ics.window_sequence == WindowSequence::OnlyLong,
+                        cpe.left.ics.window_shape,
+                    );
+                }
+            }
+            panic!("no CPE in frame {idx}");
+        };
+        let (_only24, ws24) = ics_of(24);
+        let (only25, ws25) = ics_of(25);
+        let (_only26, ws26) = ics_of(26);
+        eprintln!(
+            "frame24 shape={ws24} | frame25: only_long={only25} shape={ws25} | frame26 shape={ws26}"
+        );
+
+        let windows = Windows::new();
+        let w_prev25 = &windows.long[ws24 as usize];
+        let w_cur25 = &windows.long[ws25 as usize];
+        let w_prev26 = &windows.long[ws25 as usize];
+
+        // buf25_err first half: from frame 25's own first-half output
+        // (overlap25 = frame24 2nd half; assume frame24 clean here).
+        let mut buf25_err = [0.0f64; 2048];
+        for j in 0..1024 {
+            let wk = w_prev25[j];
+            buf25_err[j] = if wk.abs() > 1e-3 {
+                (p25[j] - r25[j]) as f64 / wk as f64
+            } else {
+                0.0
+            };
+        }
+        // buf25_err second half: from frame 26's first-half output, which depends
+        // only on frame 25's second half (overlap26). Clean if frame 26 is clean.
+        for j in 0..1024 {
+            let wk = w_cur25[1023 - j];
+            buf25_err[1024 + j] = if wk.abs() > 1e-3 {
+                (p26[j] - r26[j]) as f64 / wk as f64
+            } else {
+                0.0
+            };
+        }
+
+        let imdct = Imdct::new(1024);
+        let mut err = [0f64; 1024];
+        let mut best_b = 0usize;
+        let mut best_e = 0.0f64;
+        for b in 0..1024 {
+            let mut unit = [0f32; 1024];
+            unit[b] = 1.0;
+            let mut col = [0f32; 2048];
+            imdct.transform(&unit, &mut col);
+            let mut num = 0.0f64;
+            let mut den = 0.0f64;
+            for k in 0..2048 {
+                let c = col[k] as f64;
+                num += buf25_err[k] * c;
+                den += c * c;
+            }
+            let e = if den > 0.0 { num / den } else { 0.0 };
+            err[b] = e;
+            if e.abs() > best_e {
+                best_e = e.abs();
+                best_b = b;
+            }
+        }
+
+        // Native post-M/S L-channel coeffs for frame 25.
+        let hdr = AdtsHeader::parse(&frames[25]).unwrap();
+        let payload = &frames[25][hdr.header_len..hdr.frame_length];
+        let block = RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize).unwrap();
+        let mut cpe = None;
+        for el in &block.elements {
+            if let Element::Cpe(c) = el {
+                cpe = Some(c.clone());
+            }
+        }
+        let cpe = cpe.expect("CPE in frame 25");
+        let mut rng = PnsRandom::new();
+        let mut mid = AacDecoder::decode_channel_stream(
+            &cpe.left,
+            hdr.sampling_frequency_index as usize,
+            25,
+            &mut rng,
+        )
+        .unwrap();
+        let mut side = AacDecoder::decode_channel_stream(
+            &cpe.right,
+            hdr.sampling_frequency_index as usize,
+            25,
+            &mut rng,
+        )
+        .unwrap();
+        let swb = crate::tables::SWB_OFFSET_1024[hdr.sampling_frequency_index as usize];
+        let mut mid_ms = mid;
+        let mut side_ms = side;
+        crate::stereo::apply_stereo(
+            &mut mid_ms,
+            &mut side_ms,
+            &cpe.left.ics,
+            &cpe.left.band_type,
+            &cpe.right.band_type,
+            &cpe.left.scalefactor,
+            &cpe.right.scalefactor,
+            cpe.ms_mask_present,
+            &cpe.ms_mask,
+            swb,
+        );
+        let _ = w_prev26;
+
+        eprintln!(
+            "\nFRAME25 dominant coeff error: bin {best_b} err={:e} postMS_L_native={:e} ref_est={:e}",
+            err[best_b],
+            mid_ms[best_b],
+            mid_ms[best_b] + err[best_b] as f32
+        );
+        let mut idxs: Vec<usize> = (0..1024).collect();
+        idxs.sort_by(|&a, &b| err[b].abs().partial_cmp(&err[a].abs()).unwrap());
+        for &b in idxs.iter().take(20) {
+            if err[b].abs() > 1.0 {
+                eprintln!(
+                    "   bin {b}: err={:e} postMS_L_native={:e} ref_est={:e} (half {})",
+                    err[b],
+                    mid_ms[b],
+                    mid_ms[b] + err[b] as f32,
+                    if b < 512 { "1st" } else { "2nd" }
+                );
+            }
         }
     }
 }

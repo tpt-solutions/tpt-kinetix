@@ -2863,3 +2863,83 @@
 > pre-filter YUV for external comparison. 116 unit tests pass. No `git commit`
 > calls.
 
+> ## 2026-08-31 session note — localized the intra reconstruction desync to a
+> structural bit-offset, and wired CDEF multi-strength.
+>
+> **Method used** (reproducible): the corpus OBU is dumped with
+> `KINETIX_AV1_DUMP_OBU=<dir>` (writes `testsrc.obu`), decoded to raw YUV with
+> `ffmpeg -c:v libdav1d -i testsrc.obu -f rawvideo testsrc.yuv`, then Kinetix's
+> pre-filter Y is dumped with `KINETIX_AV1_DUMP_PREFILTER=testsrc` and the two Y
+> planes are diffed pixel-by-pixel (Y has `RESTORE_NONE`, confirmed via the
+> oracle capture `frame_restoration_type=[0,0,1]`, so luma interior comparison is
+> filter-free and clean). The first raster divergence is `testsrc` px=(48,64):
+> Kinetix=26 vs dav1d=41. The block there is `tx=16x4, pred_mode=12 (PAETH)`;
+> its `top=[41×N]`/`left=[106,106,106,106]` give a **correct** flat-41
+> prediction, so the error is purely in the coefficient residual — Kinetix
+> decoded `eob=18` (nonzero residual → 26) where dav1d is flat (`eob=0` → 41).
+>
+> **Ruled out, with evidence** (this was a 14-session hunt; here is the closure
+> matrix):
+> - Entropy decode self-consistency: the independent Python `intra_decode.py`
+>   oracle matches Kinetix symbol-for-symbol across the whole tile (per
+>   2026-08-27) — but it re-uses Kinetix's CDF tables + neighbour-context
+>   snapshot, so it cannot catch a bug shared by both.
+> - **CDF adaptation** (`entropy.rs` `read_symbol`): fetched the live spec
+>   §8.2.6 update loop — `tmp=0; for i: tmp=(i==symbol)?(1<<15):tmp; if tmp<cdf[i]
+>   cdf[i]-=(cdf[i]-tmp)>>rate else cdf[i]+=(tmp-cdf[i])>>rate; cdf[N]+=(cdf[N]<32)`
+>   — and it matches Rust exactly (incl. `tmp` persisting at 32768 for `i>=symbol`).
+>   **Not the bug.**
+> - **`partition_context`** (`partition.rs`): `above = Mi_Width_Log2[MiSizes[r-1][c]]
+>   < bsl`, `left = Mi_Height_Log2[MiSizes[r][c-1]] < bsl`, `ctx = 2*left+above`
+>   — matches spec §8.3.2. **Not the bug.**
+> - **`all_zero_ctx`** (`coeff.rs`): the luma `if block_w==w&&block_h==h →0 else
+>   top/left-level branches` matches spec §8.3.2. **Not the bug.**
+> - **`skip` context** (`intra_block.rs`): `(above_skip+left_skip).min(2)` matches
+>   spec §5.11.11. **Not the bug.**
+> - **Prediction** for the divergent block: PAETH of top=41/left=106 → flat 41,
+>   exactly dav1d's. **Not the bug** (per-block, but confirms the desync is
+>   upstream of it).
+>
+> **Conclusion**: Kinetix's pixels match dav1d *exactly* up to (48,64), then
+> diverge, yet the block there has correct neighbours/mode/prediction and a wrong
+> (nonzero) residual. That is only possible if Kinetix is at a **bit offset** from
+> dav1d at (48,64) — i.e. an earlier block consumed a different number of bits
+> (most likely a `skip`/structure mismatch where Kinetix reads extra all-zero
+> coeffs that reconstruct identically but shift the bitstream). Because the
+> self-consistent oracle re-uses Kinetix's context/CDF, it reproduces the same
+> offset and cannot localize it. **Resolving this requires a dav1d *symbol*
+> reference** (per-block mode/skip/tx/coeff trace) — which is **not available in
+> this environment** (`ffmpeg -bsf:v trace_headers` cannot attach to the libdav1d
+> decode path; no dav1d debug build). The 2026-08-27 note's own open item
+> ("a dav1d debug build for a real reference symbol trace") is still the blocker
+> for the headline pixel-exact goal.
+>
+> **Separately, completed a genuine remaining task: CDEF multi-strength wiring.**
+> `loop_filter.rs` previously hardcoded `idx = 0` for the whole plane, ignoring
+> the already-parsed per-64×64-unit `cdef_idx` (§5.11.56, populated by
+> `read_cdef`). Now: `cdef_plane_luma`/`cdef_plane_chroma` take an explicit
+> pre-CDEF `src` snapshot + a unit `(y0,x0,unit_h,unit_w)` region, and the CDEF
+> pass in `apply_post_filters` iterates 64×64 (luma) / subsampled (chroma)
+> units, looks up `cdef_idx` per unit, and filters each from the single snapshot
+> (units stay independent, per spec). `cdef_idx` is threaded through
+> `FrameMeta.cdef_idx` (populated in `decode_tile_group` from
+> `TileDecodeState.cdef_idx`) so `apply_post_filters` doesn't need `self`.
+> **Verified a true no-op on the current corpus** (`cdef_bits==0` → every unit
+> maps to `cdef_idx==0`, byte-identical output): `cargo run av1_psnr_check`
+> still reports testsrc 16.98/15.21/15.34, mandelbrot 22.59/17.51/20.59,
+> etc.; `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` clean;
+> `cargo test -p tpt-kinetix-av1 --lib` = 117/117 pass (added
+> `cdef_plane_luma_respects_unit_region_bounds`). This is correct for real
+> streams (where `cdef_bits>0`) but does **not** move pixel_exact closer on its
+> own — Y reconstruction must be fixed first, and that is gated on the dav1d
+> symbol reference above.
+>
+> **Next session**: stand up a dav1d debug build (or `aomdec`) to extract a
+> per-block symbol trace for the divergent region, then diff Kinetix's
+> `skip`/`tx`/`partition` decisions around mi (8..20, 0..15) (the rows just
+> above px=(48,64)) to find the first block whose bit consumption diverges from
+> dav1d. The desync is almost certainly a structural/context mismatch in the
+> `skip` or partition tree that the self-consistent oracle masks. No `git commit`
+> calls. Files modified: `tpt-kinetix-av1/src/loop_filter.rs`,
+> `tpt-kinetix-av1/src/reconstruct/mod.rs`.
+

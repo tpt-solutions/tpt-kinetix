@@ -1158,6 +1158,9 @@ pub fn decode_tile_group(
             &params_json,
         );
     }
+    // Hand the per-64×64 CDEF unit indices (§5.11.56) to the post-filter pass so
+    // it can select each unit's strength entry (the CDEF pass reads `meta.cdef_idx`).
+    meta.cdef_idx = state.cdef_idx.clone();
     out
 }
 
@@ -1479,6 +1482,9 @@ pub fn reconstruct_av1_frame(
                     &meta,
                     frame_header,
                     seq,
+                    &meta.cdef_idx,
+                    x0,
+                    y0,
                 );
             }
 

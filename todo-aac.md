@@ -1132,7 +1132,67 @@
            difference in the PNS energy normalization. Kept out of the aggregate
            gate; pinned to corr > 0.80. Next step: ffmpeg printf instrumentation
            for a bit-for-bit reference trace inside `decode_spectrum_and_dequant`.
-        2. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier at
-           frame 25 sample 488. TNS ruled out (error is above the TNS band range).
-           Localized to a single spectral coefficient off by ~0.14% — likely a
-           subtle dequant rounding difference in one frame.
+         2. `sweep_stereo_44100` (max_diff ~0.073): Single peak-sample outlier at
+            frame 25 sample 488. TNS ruled out (error is above the TNS band range).
+            Localized to a single spectral coefficient off by ~0.14% — likely a
+            subtle dequant rounding difference in one frame.
+
+   — **2026-08-30: the PNS / `noise_mono` gap is CLOSED.** The uncommitted
+        `scalefactors.rs` noise-predictor rework (3rd same-day session,
+        2026-08-23) plus the matching `pns.rs` `dequant_scale` change together
+        resolved the whole PNS realization gap. Concretely, `decode_scalefactors`
+        now carries a *separate* `noise_sfo` DPCM predictor initialised to
+        `global_gain - 90`, advanced by `raw - 256` (first band, the
+        `noise_pcm_flag` 9-bit raw) / by `hcod` (subsequent bands), clamped to
+        `[-100, 155]`, and stored as `global_gain - 100 - noise_sfo` so that
+        `dequant_scale(global_gain, *)` reproduces ffmpeg's
+        `2^((global_gain - 100 - sf)/4)` exactly for noise bands. With this in
+        place the conformance suite reads (all 7 cases, ffmpeg 7.x, deterministic
+        seeds):
+
+        - `tone_440_stereo_44100`:   max_diff=3.7e-8,  corr=1.0000
+        - `noise_stereo_44100`:      max_diff=8.9e-8,  corr=1.0000
+        - `noise_mono_44100`:        max_diff=3.6e-7,  corr=1.0000
+        - `sweep_stereo_44100`:      max_diff=0.0725,  corr=1.0000
+        - `tone_440_stereo_48000`:   max_diff=4.5e-8,  corr=1.0000
+        - `tone_440_stereo_22050`:   max_diff=3.0e-8,  corr=1.0000
+        - `tone_440_mono_44100`:     max_diff=6.0e-8,  corr=1.0000
+
+        i.e. the white-noise-mono case that was corr ~0.52 (then ~0.87) is now
+        **bit-exact** against the ffmpeg reference (the residual max-diff ~3e-7
+        is float-epsilon, not a real gain error). The journal's long-standing
+        open item (i) — "residual PNS gap, maybe EIGHT_SHORT spectral
+        placement" — is therefore resolved; the separate LCG/normalization/
+        IMDCT/windowing components were already proven faithful, and the missing
+        piece was purely the noise-scalefactor DPCM predictor's baseline/clamp.
+
+        **Conformance-gate cleanup:** `tests/conformance_aac.rs` tightened to
+        match the new reality. `noise_mono_44100` no longer has a special case —
+        it now flows into the real aggregate gate (`worst_diff < 0.05`,
+        `worst_corr > 0.95`) and passes there, so the PNS fix is a genuine
+        assertion rather than a pinned floor. `sweep_stereo_44100` keeps its
+        documented exception but its pin was tightened from `corr > 0.98` /
+        `max_diff < 0.15` to `corr > 0.99` / `max_diff < 0.09` (current baseline
+        ~0.0725) so a real regression is still caught. Scratch localization
+        debug files (`tests/dbg_localize_noise_mono.rs`,
+        `tests/dbg_localize_sweep.rs`) removed.
+
+        `cargo test -p tpt-kinetix-aac` (70 lib + 1 conformance + 2
+        proptest_aac + 5 proptest_decode_never_panics + 1 doc), `cargo clippy -p
+        tpt-kinetix-aac --all-targets` and `cargo fmt -p tpt-kinetix-aac`
+        all clean as of this session.
+
+        **Remaining open gap (as of 2026-08-30):** `sweep_stereo_44100` only —
+        a single peak-sample outlier (max_diff 0.0725, corr 1.0000). Everything
+        the journal flagged as a suspect for it has been ruled out (M/S butterfly
+        on PNS/intensity bands, ESC codebook-11 table + `idx_to_values` +
+        escape-word format + `dequant_scale` all verified byte-for-bit against
+        ffmpeg's live source; TNS absent at the offending frame; overlap-add
+        cancellation measured and refuted). Its localization (an isolated
+        spectral coefficient ~0.14% off at magnitude ~9e6 — i.e. a ~1-unit ESC
+        magnitude error amplified by the super-linear `|q|^(4/3)`) could never be
+        definitively assigned without a bit-for-bit ffmpeg reference trace
+        (the `dbg_sweep_frame7_coeff_error_projection` ignored test sketches the
+        TDAC-projection alternative to ffmpeg instrumentation). This is the sole
+        remaining accuracy issue and is correctly excluded from the aggregate
+        gate; `capabilities().pixel_exact` stays `false` until it is closed.

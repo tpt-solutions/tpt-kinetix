@@ -178,6 +178,19 @@ fn paff_b_field_decode() {
                 fmax[0], fmax[1]
             );
             if i == 0 {
+                println!("  MB(4,0) bottom-field  ours / ref / diff  (x64..79):");
+                for fy in 0..16usize {
+                    let y = 2 * fy + 1;
+                    let ours: Vec<i32> = (64..80).map(|x| frame[y * w + x] as i32).collect();
+                    let refs: Vec<i32> =
+                        (64..80).map(|x| ref_yuv[off + y * w + x] as i32).collect();
+                    let dif: Vec<i32> = ours.iter().zip(&refs).map(|(a, b)| a - b).collect();
+                    if dif.iter().any(|v| *v != 0) {
+                        println!("   fy{fy:2} ours={ours:?}");
+                        println!("        ref ={refs:?}");
+                        println!("        dif ={dif:?}");
+                    }
+                }
                 for fy in 0..16usize {
                     let y = 2 * fy + 1; // bottom field
                     let d: Vec<i32> = (48..80)

@@ -371,53 +371,37 @@ fn native_aac_matches_ffmpeg_reference() {
         );
 
         // `noise_mono_44100` (broadband white noise, heavy PNS use, EIGHT_SHORT
-        // frames) improved from corr ~0.52 to ~0.87 after the 2026-08-28 PNS
-        // scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)` matching
-        // ffmpeg's `dequant_scalefactors` NOISE_BT case, replacing the old
-        // `-(2^(noise_energy_abs/4))` formula that was off by 2^25). Remaining
-        // gap (~0.87 vs >0.95 target) is a separate, smaller issue — see
-        // `todo-aac.md`. Kept out of the aggregate gate; pinned to a regression
-        // floor.
-        if case.label == "noise_mono_44100" {
-            assert!(
-                corr > 0.80,
-                "[{}] regressed well below its known baseline correlation \
-                 (~0.87): {corr:.4}. This case is a documented open gap, \
-                 not a hard pass/fail gate, but this is a much bigger drop \
-                 than the known issue — investigate as a real regression.",
-                case.label
-            );
-            continue;
-        }
-        // `noise_stereo_44100` (brown noise) now passes the main gate after the
-        // 2026-08-28 PNS scale fix — no special case needed.
+        // frames) was the journal's long-standing PNS open gap (corr ~0.52 →
+        // ~0.87 across the 2026-08-24..28 sessions). The 2026-08-30
+        // `scalefactors.rs` noise-predictor fix (`noise_sfo` DPCM initialised to
+        // `global_gain - 90`, advanced by `raw - 256` then clamped to
+        // `[-100, 155]`, stored as `global_gain - 100 - noise_sfo`) closed it:
+        // it now decodes bit-exactly like the other cases (measured
+        // max-abs-diff ~3.5e-7, correlation 1.0000). No special case needed —
+        // it flows into the aggregate gate below and is now a real assertion.
 
         // `sweep_stereo_44100` (a 200→4000 Hz linear chirp, ~0.71-peak stereo)
-        // now has near-perfect shape correlation (1.0000) after the 2026-08-25
-        // `prev_shape` fix (the production decode path was not updating
-        // `ChannelState::prev_shape` after synthesis, so every frame beyond the
-        // first used the wrong synthesis window). One outlier sample at aligned
-        // index ~7438 (frame 7, OnlyLong, no TNS, no pulse, no PNS) still sits
-        // at ~0.073 absolute diff against a ~0.71-peak signal — above the main
-        // 0.05 tolerance. The prior hypothesis (M/S butterfly ran unconditionally
-        // on PNS/intensity bands — fixed 2026-08-24) was confirmed NOT to be the
-        // cause (the specific combination of mask-bit + NOISE_BT doesn't occur
-        // in this fixture). The ESC-book codeword table, `idx_to_values` formula,
-        // escape-word format, and `dequant_scale` are all exhaustively verified
-        // against ffmpeg's live source; the leading unresolved suspects are the
-        // window multiplication for large coefficients and the ms_mask ordering
-        // (both previously ruled out for the wrong reasons — see todo-aac.md
-        // 2026-08-24 fourth/fifth follow-up). Kept out of the aggregate gate;
-        // pinned to tight regression floors that match the current baseline.
+        // has near-perfect shape correlation (1.0000) after the 2026-08-25
+        // `prev_shape` fix, but one outlier sample (aligned index ~7438, frame 7,
+        // OnlyLong, no TNS/pulse/PNS) still sits at ~0.0725 absolute diff against
+        // a ~0.71-peak signal — above the main 0.05 tolerance. The ESC-book
+        // codeword table, `idx_to_values` formula, escape-word format, and
+        // `dequant_scale` are all exhaustively verified against ffmpeg's live
+        // source; the localization (an isolated spectral coefficient off by ~0.14%
+        // at magnitude ~9e6 — i.e. a ~1-unit ESC-magnitude error after the
+        // super-linear `|q|^(4/3)`) could never be definitively assigned without
+        // a bit-for-bit ffmpeg reference trace (see todo-aac.md). Kept out of the
+        // aggregate gate; pinned to tight regression floors matching the current
+        // baseline so a real regression is still caught.
         if case.label == "sweep_stereo_44100" {
             assert!(
-                corr > 0.98,
+                corr > 0.99,
                 "[{}] shape correlation regressed: {corr:.4} (was ~1.0000)",
                 case.label
             );
             assert!(
-                max_diff < 0.15,
-                "[{}] regressed well below its known baseline max-diff (~0.073): \
+                max_diff < 0.09,
+                "[{}] regressed well below its known baseline max-diff (~0.0725): \
                  {max_diff}. This case is a documented open gap (see this test's \
                  comment), not a hard pass/fail gate, but this is a much bigger \
                  jump than the known issue — investigate as a real regression.",

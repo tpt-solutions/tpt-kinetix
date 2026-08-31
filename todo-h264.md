@@ -81,13 +81,12 @@ diagnostic tests).
 **BUG 3 — DONE** (`get_dct8x8_allowed` / inter `transform_size_8x8_flag`).
 **`mbaff_ibp` P frame — DONE** (bit-exact, `dbg_ibp_p_grid` all-zero SAD).
 
-- [ ] **1. `mbaff_ibp` B frame — one MB left.** SAD 43815→6272; diff is now a
-      single MB `gB(3,3)` = `B_Direct_16x16` spatial-direct, luma only (chroma
-      bit-exact). Dump gB(3,3)'s final `mv_store` + `colocated` cells in the full
-      decoder vs ffmpeg export_mvs (0,0)/(0,0). Check `apply_spatial_direct`
-      indexes `colocated.get(mb_idx)` on the frame grid (not pair-scan) and that
-      the stored P-frame `mv_grid` is frame-grid order. Then `dbg_ibp_p_grid`
-      gB → assert all-zero; pin.
+- [x] **1. `mbaff_ibp` B frame — DONE (bit-exact).** SAD 43815→6272→0. Final fix
+      was a missing 8×8-transform branch in `reconstruct_b_inter_luma` (gB(3,3) is
+      `B_Direct_16x16` with `transform_size_8x8_flag=1`, cbp_luma=0xf; B inter-luma
+      recon only did the 4×4 path). `dbg_g6_mbaff_deblock` frame#2 (B) gate-ON luma
+      SAD 6272→0, max 0. b_frame / cabac / cabac_pframe / conformance_matrix /
+      high_profile_8x8(+cabac) / dbg_ibp_p_grid all green.
 - [~] **2. PAFF B-field** — 2026-08-30, mostly done. Root cause was NOT B-frames
       (fixtures are I/P) and NOT entropy. Three bugs, all committed:
   - [x] **2a/2b.** `FIELD_SCAN_4X4` was mis-transcribed (scan pos 6/7/9/11/13) —

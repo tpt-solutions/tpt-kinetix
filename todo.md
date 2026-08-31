@@ -1,6 +1,6 @@
 # TPT Kinetix — Task Index
 
-> Last reconciled: 2026-08-30. Monolithic todo.md split into per-codec files.
+> Last reconciled: 2026-08-31. Monolithic todo.md split into per-codec files.
 > For the long session-notes preamble and infrastructure phases 0–11, scroll past this index.
 
 ### Non-H.264 open work (2026-08-30 reconciliation)
@@ -8,16 +8,33 @@
 Everything below is independent of the H.264 decoder effort:
 
 - **AV1 decoder — the largest remaining item.** Entropy/parsing path proven
-  correct (2026-08-27 oracle); still **0/5 pixel-exact vs dav1d**. All error is
-  in reconstruction: intra prediction (directional/PAETH/SMOOTH/DC border prep,
-  CfL §7.11.5, filter-intra §7.11.2.3), the 2-D inverse-transform driver /
-  rescale / `dq_denom` / `Transform_Row_Shift` under Kinetix's non-spec `TxSize`
-  ordering, dequant, palette pixel reconstruction, in-loop filters (LR still an
-  unapplied passthrough). `pixel_exact` stays `false`. See todo-av1.md.
-- **AAC decoder — two small accuracy gaps.** `noise_mono_44100` corr ~0.87 (PNS
-  gap, needs ffmpeg printf instrumentation); `sweep_stereo_44100` max_diff
-  ~0.073 (one coefficient off ~0.14%, likely dequant rounding). Otherwise
-  Phases 1–7 complete, conformance passes a real assertion. See todo-aac.md.
+  self-consistent (2026-08-27 oracle); still **0/5 pixel-exact vs dav1d**.
+  2026-08-31: first raster divergence localized to `testsrc` px=(48,64) —
+  neighbours/mode/PAETH prediction there are all correct, but Kinetix decodes a
+  nonzero residual (`eob=18`) where dav1d is flat (`eob=0`), i.e. Kinetix is at
+  a **structural bit offset** from dav1d by that point (an earlier block
+  consumed a different number of bits — likely a `skip`/partition-context
+  mismatch). CDF adaptation, `partition_context`, `all_zero_ctx`, `skip` ctx all
+  re-verified against the live spec and ruled out. The self-consistent oracle
+  re-uses Kinetix's own CDF/context so it masks the offset — **resolving this is
+  now blocked on a dav1d debug build for a per-block symbol reference trace**,
+  which is not available in this environment. Separately, CDEF multi-strength
+  wiring was completed (per-64×64-unit `cdef_idx`, verified a true no-op on the
+  8-bit `cdef_bits==0` corpus). Remaining reconstruction scope unchanged: intra
+  prediction, inverse-transform driver / rescale / `dq_denom`, dequant, palette,
+  in-loop filters (LR still an unapplied passthrough). `pixel_exact` stays
+  `false`. **Working tree: `loop_filter.rs`/`reconstruct/mod.rs` uncommitted.**
+  See todo-av1.md.
+- **AAC decoder — one small accuracy gap left.** 2026-08-30 the PNS /
+  `noise_mono_44100` gap is CLOSED (separate `noise_sfo` DPCM predictor in
+  `scalefactors.rs` + matching `pns.rs` `dequant_scale`) — 6 of 7 conformance
+  cases are now bit-exact (max_diff ≤ 4e-7, corr 1.0000) and `noise_mono` flows
+  through the real aggregate gate. Only `sweep_stereo_44100` remains: a single
+  peak-sample outlier (max_diff 0.0725, corr 1.0000), one ESC-magnitude
+  coefficient ~0.14% off; every suspect ruled out, needs a bit-for-bit ffmpeg
+  reference trace. Kept as a documented gate exception. `pixel_exact` stays
+  `false` until it closes. **Working tree: `decoder.rs`/`scalefactors.rs`/
+  `syntax.rs`/`conformance_aac.rs` changes uncommitted.** See todo-aac.md.
 - **`tpt-kinetix-vision` — reconstruction not implemented.** Design + scaffold
   done (Phase 15); crate is a decode shell only, `[~]` in todo-codecs.md.
 - **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
@@ -35,9 +52,9 @@ conformance/bench reporting; AV1 rav1e-backed encoder.
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-28 sessions #32p-#32r (see todo-h264.md): **CABAC MBAFF I-slice FIXED & BIT-EXACT** (#32p — a spurious `end_of_slice_flag` was decoded after every MBAFF pair-top MB, §7.3.4; `g6_cabac_i` now SAD=0 vs `-skip_loop_filter` ffmpeg ref). Progressive CABAC P/B conformance RESOLVED earlier (#32o). #32q fixed the CABAC P/B **pair-scan addressing bug** (parsers iterated plain raster while neighbour lookups used the frame-MB grid — the P/B twin of #32e/#32f) plus an MV-predictor decode-order bug in `mv.rs` (`predict_slice_mvs_ex`): `mbaff_ip` P SAD 83k→~30k, `mbaff_ibp` P 107k→46k / B 128k→75k, `mbaff_cavlc_ip2` P 5748→1154; progressive byte-identical. #32r gated `cabac_b.rs` debug prints behind `KINETIX_BINTRACE`. 246 lib tests green, clippy `-D warnings` clean. Remaining: CABAC MBAFF P/B still diverges from pair 6 (P_8x8 sub-partition `amvd_sum` / `ref_idx_gt0_neighbors` / `sub_mb_type` cell geometry under MBAFF frame-coded pairs), G.5 interlaced corpus, non-16 crop, then Phase H `pixel_exact` flip (needs ITU vectors + broader corpus) |
-| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-08-27 (see todo-av1.md): **★ ENTROPY / PARSING PATH PROVEN CORRECT ★** — built `tools/av1_oracle/intra_decode.py`, an independent from-scratch re-implementation of the whole keyframe-intra tile syntax (`read_lr` §5.11.57 → `decode_partition` → `intra_frame_mode_info` → `palette_tokens` → `coeffs`); it matches Kinetix **symbol-for-symbol AND range-for-range** across the entire tile for all 5 corpus entries, zero divergence. Closes ~13 sessions chasing a non-existent entropy desync. Same run also: implemented the missing per-superblock `read_lr()` + fixed a spurious +1 luma bias in the `palette_colors_u` delta (committed f8fa706), and reverted commit ba04a2c's wrong §8.2.6 rate formula (correct: `Min(FloorLog2(N),2)`). testsrc 10.8→17.0dB, mandelbrot 15.6→22.6dB, solid_red 99dB. **All remaining pixel error is RECONSTRUCTION**: intra prediction (directional/PAETH/SMOOTH/DC border prep, CfL §7.11.5, filter-intra §7.11.2.3), the 2-D inverse-transform driver / rescale / `dq_denom` / `Transform_Row_Shift` under Kinetix's non-spec `TxSize` enum ordering, dequant, palette pixel reconstruction, and the in-loop filters (LR still an unapplied passthrough). Next: pre-filter block-interior dumps compared per intra mode, simplest failing block first. |
-| [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. 2026-08-25: `prev_shape` fix landed (production decode path wasn't updating window shape after synthesis). 2026-08-28: PNS scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)`, correcting noise_mono corr from 0.52 → 0.87 and noise_stereo max_diff from 0.059 → 0.029). Phase 3 (TNS independent reference) and Phase 5 (window-sequence proptest) exit criteria now verified/fulfilled. sweep_stereo outlier investigated: TNS ruled out (error is above the TNS band range; with_TNS==without_TNS at all bins). Remaining: `noise_mono_44100` corr ~0.87 (PNS gap, all components proven ffmpeg-faithful, needs ffmpeg printf instrumentation), `sweep_stereo_44100` max_diff ~0.073 (single coefficient off ~0.14%, likely dequant rounding). All 78 AAC tests + clippy + fmt clean. |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-28 sessions #32p-#32r (see todo-h264.md): **CABAC MBAFF I-slice FIXED & BIT-EXACT** (#32p — a spurious `end_of_slice_flag` was decoded after every MBAFF pair-top MB, §7.3.4; `g6_cabac_i` now SAD=0 vs `-skip_loop_filter` ffmpeg ref). Progressive CABAC P/B conformance RESOLVED earlier (#32o). #32q fixed the CABAC P/B **pair-scan addressing bug** (parsers iterated plain raster while neighbour lookups used the frame-MB grid — the P/B twin of #32e/#32f) plus an MV-predictor decode-order bug in `mv.rs` (`predict_slice_mvs_ex`): `mbaff_ip` P SAD 83k→~30k, `mbaff_ibp` P 107k→46k / B 128k→75k, `mbaff_cavlc_ip2` P 5748→1154; progressive byte-identical. #32r gated `cabac_b.rs` debug prints behind `KINETIX_BINTRACE`. 246 lib tests green, clippy `-D warnings` clean. **2026-08-29→31 (#32af + PAFF field-P): `mbaff_ibp` P AND B frames now BIT-EXACT** (BUG 3 `get_dct8x8_allowed`; B_SUB_MB table order; B_8x8 mvd list-order; missing 8×8-transform branch in `reconstruct_b_inter_luma`). **PAFF field chroma BIT-EXACT** (`paff_b_field.264` chroma 190→0). Remaining H.264 gaps: (1) PAFF field **luma max_diff 68** confined to `P_8x8` MBs with a coded 8×8 group whose `sub_mb_type` is finer than 8×8 (4×4/8×4) — parse in sync, MVs+qp+scan verified, a partial CABAC 4×4-residual-coeff error; needs a bin-level CABAC oracle; (2) G.5a pin every bit-exact MBAFF frame as a hard assert; (3) G.5b add real PAFF + MBAFF corpus clips; (4) G.5c non-16 crop clip assert; (5) Phase H `pixel_exact` flip + README (needs ITU vectors + broader corpus) |
+| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-08-27 (see todo-av1.md): **★ ENTROPY / PARSING PATH PROVEN CORRECT ★** — built `tools/av1_oracle/intra_decode.py`, an independent from-scratch re-implementation of the whole keyframe-intra tile syntax (`read_lr` §5.11.57 → `decode_partition` → `intra_frame_mode_info` → `palette_tokens` → `coeffs`); it matches Kinetix **symbol-for-symbol AND range-for-range** across the entire tile for all 5 corpus entries, zero divergence. Closes ~13 sessions chasing a non-existent entropy desync. Same run also: implemented the missing per-superblock `read_lr()` + fixed a spurious +1 luma bias in the `palette_colors_u` delta (committed f8fa706), and reverted commit ba04a2c's wrong §8.2.6 rate formula (correct: `Min(FloorLog2(N),2)`). testsrc 10.8→17.0dB, mandelbrot 15.6→22.6dB, solid_red 99dB. **All remaining pixel error is RECONSTRUCTION**: intra prediction (directional/PAETH/SMOOTH/DC border prep, CfL §7.11.5, filter-intra §7.11.2.3), the 2-D inverse-transform driver / rescale / `dq_denom` / `Transform_Row_Shift` under Kinetix's non-spec `TxSize` enum ordering, dequant, palette pixel reconstruction, and the in-loop filters (LR still an unapplied passthrough). Next: pre-filter block-interior dumps compared per intra mode, simplest failing block first. **2026-08-31 update:** first raster divergence pinned to `testsrc` px=(48,64) — correct neighbours/mode/PAETH prediction but a nonzero residual (`eob=18`) where dav1d is flat (`eob=0`) ⇒ Kinetix is at a **structural bit offset** from dav1d by that point. CDF adaptation / `partition_context` / `all_zero_ctx` / `skip` ctx re-verified vs live spec and ruled out; the self-consistent oracle masks the offset. **Blocked on a dav1d debug build for a per-block symbol reference trace** (unavailable here). CDEF multi-strength wiring completed on the side (per-64×64-unit `cdef_idx`, verified no-op on the `cdef_bits==0` corpus). `loop_filter.rs`/`reconstruct/mod.rs` uncommitted. |
+| [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. 2026-08-25: `prev_shape` fix landed (production decode path wasn't updating window shape after synthesis). 2026-08-28: PNS scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)`, correcting noise_mono corr from 0.52 → 0.87 and noise_stereo max_diff from 0.059 → 0.029). Phase 3 (TNS independent reference) and Phase 5 (window-sequence proptest) exit criteria now verified/fulfilled. sweep_stereo outlier investigated: TNS ruled out (error is above the TNS band range; with_TNS==without_TNS at all bins). **2026-08-30: PNS / `noise_mono` gap CLOSED** — separate `noise_sfo` DPCM predictor (`scalefactors.rs`) + `pns.rs` `dequant_scale`; 6/7 conformance cases now bit-exact (max_diff ≤4e-7, corr 1.0000) and `noise_mono` passes the real aggregate gate (no special case). **Only `sweep_stereo_44100` remains**: single peak-sample outlier max_diff 0.0725 / corr 1.0000, one ESC-magnitude coeff ~0.14% off, every suspect ruled out, needs a bit-for-bit ffmpeg trace; kept as a documented gate exception. `pixel_exact` stays `false` until closed. Changes uncommitted. |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
 
 > **AV1 run 2026-08-17→19 (7 sessions, uncommitted working tree, see `todo-av1.md`
