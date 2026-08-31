@@ -2939,7 +2939,74 @@
 > `skip`/`tx`/`partition` decisions around mi (8..20, 0..15) (the rows just
 > above px=(48,64)) to find the first block whose bit consumption diverges from
 > dav1d. The desync is almost certainly a structural/context mismatch in the
-> `skip` or partition tree that the self-consistent oracle masks. No `git commit`
-> calls. Files modified: `tpt-kinetix-av1/src/loop_filter.rs`,
-> `tpt-kinetix-av1/src/reconstruct/mod.rs`.
+> `skip` or partition tree that the self-consistent oracle masks.
+> **Note (2026-08-31):** `loop_filter.rs`/`reconstruct/mod.rs` were committed
+> as `2888aac` by the concurrent automated process (CDEF multi-strength wiring +
+> AAC cleanup) — they are no longer uncommitted. Remaining uncommitted AV1
+> files: `tpt-kinetix-av1/examples/av1_psnr_check.rs`
+> (`KINETIX_AV1_ONLY_TESTSRC` env-var gate) and
+> `tpt-kinetix-av1/src/reconstruct/reconstruct_block.rs` (debug-print
+> formatting fix). The H.264 crate also has an unrelated uncommitted change
+> in `src/reconstruct.rs` (PAFF field-parity luma MC offset hook).
+
+> ## 2026-09-01 session note — ★ THE STRUCTURAL BIT-OFFSET DESYNC IS FIXED ★
+> (`tx_depth` context sentinel bug; testsrc Y 16.98 → 57.65 dB, smptebars Y
+> 9.36 → 54.23 dB; full luma entropy trace now bit-exact vs dav1d).
+>
+> **Unblocked the 14-session blocker by building a patched dav1d.** MSVC 2022
+> + meson + ninja + scoop clang are all present on this machine (no cmake/gcc,
+> but dav1d builds fine with meson). Built dav1d `52b9d3d` with
+> `-Denable_asm=false` (no nasm) via
+> `scratchpad/av1ref/build_dav1d.bat` (calls `vcvars64.bat` then meson). dav1d
+> already ships a `DEBUG_BLOCK_INFO`-gated per-block/per-symbol trace
+> (`Post-skip`/`Post-ymode`/`Post-tx`/`Post-*-cf-blk[eob]` + `poc=…bp=…`
+> partition lines, all with the `msac.rng` range state); patched `src/recon.h`
+> to gate it on `getenv("DAV1D_TRACE")` and added a `BLOCK bx by bw4 bh4` line
+> at the top of `decode_b`. Run:
+> `DAV1D_TRACE=1 dav1d.exe -i testsrc.obu -o out.yuv --threads 1`.
+>
+> **Kinetix side**: new `tpt-kinetix-av1/examples/av1_trace_obu.rs` decodes a
+> raw `.obu` file, and `KINETIX_AV1_TRACE=1` now emits matching
+> `KTRACE BLOCK` / `KTRACE CF` / `KTRACE PART` lines (in `intra_block.rs`,
+> `reconstruct_block.rs`, `partition.rs`). dav1d's `msac.rng` == the spec's
+> `SymbolRange` == Kinetix's `symbol_range` and matches **exactly** at every
+> block boundary when in sync — so `r=` is a direct divergence detector.
+> Generate the corpus OBU with the same libaom CRF-32 encode
+> `av1_psnr_check` uses:
+> `ffmpeg -f lavfi -i testsrc=size=128x96:rate=1 -frames:v 1 -c:v av1 -pix_fmt yuv420p -f obu testsrc.obu`.
+>
+> **Root cause** (found in one diff pass): the traces matched **exactly** for
+> ~105 symbols, then diverged at the block at mi=(0,20) — a
+> `PARTITION_HORZ_4` 16×4 leaf on the frame's left column. Same partition,
+> same `skip`, same `ymode=12` (PAETH), but `Post-tx` `r=` diverged (dav1d
+> 63764 vs Kinetix 48518): the `tx_depth` symbol was read from the **wrong
+> CDF context**, and every subsequent symbol in the tile desynced.
+> `tx_depth_context` is `ctx = (aboveW >= maxTxW) + (leftH >= maxTxH)` (spec
+> §8.3.2 / dav1d `get_tx_ctx`). Kinetix initialised `tx_above`/`tx_left` to
+> **`4`** ("smallest transform = TX_4X4's 4 samples"), but dav1d fills the
+> unavailable-neighbour sentinel with **`-1`**, which fails `>=` for every
+> real size. For this 16×4 block on the left edge (`leftH` = the init
+> sentinel, `maxTxHeight` = 4), `4 >= 4` was **true** → `ctx` off by one.
+> An unavailable (tile-edge) neighbour must contribute 0.
+>
+> **Fix** (`reconstruct/mod.rs`): init `tx_above`/`tx_left` to `0` not `4`.
+> `tx_depth_context`'s arithmetic extracted to a free `tx_depth_ctx_from()`
+> with a regression test
+> (`tx_depth_ctx_unavailable_neighbour_contributes_zero_for_a_4px_max_tx`).
+>
+> **Result**: the full **luma + partition + block** symbol trace (191 entries:
+> every partition bp, skip, ymode, tx, luma-coeff eob + range state) is now
+> **bit-exact vs dav1d** across the whole testsrc frame. PSNR:
+> `testsrc` Y 16.98→**57.65**, `smptebars` Y 9.36→**54.23**, `solid_red`
+> still 99. `mandelbrot` (22.59) and `testsrc2` (12.96) unchanged — they have
+> a *separate* remaining bug, and **chroma** is still off on testsrc
+> (U/V 29/37) — the chroma-plane `CF` lines still diverge. That's the next
+> target: same method (`KINETIX_AV1_TRACE` vs `DAV1D_TRACE`), now looking at
+> `Post-uv-cf-blk` / `Post-uvmode` / `Post-uvalphas` / palette-UV lines.
+> 118 unit tests pass, `clippy --all-targets -D warnings` clean. No `git
+> commit` calls. `capabilities().pixel_exact` still `false` (chroma + other
+> corpus entries + inter). Uncommitted: `reconstruct/{mod,partition,
+> intra_block,reconstruct_block}.rs`, `examples/av1_trace_obu.rs`,
+> `examples/av1_psnr_check.rs`. Patched dav1d lives in
+> `scratchpad/av1ref/` (not in-repo).
 

@@ -154,6 +154,10 @@ fn main() {
         eprintln!("ffmpeg not available; nothing to do");
         return;
     }
+    if std::env::var("KINETIX_AV1_ONLY_TESTSRC").is_ok() {
+        check("testsrc_128x96", "testsrc", None, 128, 96);
+        return;
+    }
     // Content likely to pick large transforms (flat / low detail) and varied
     // resolutions that exercise TX_32X32 / TX_64X64.
     check("solid_red_32", "color", Some("c=red"), 32, 32);

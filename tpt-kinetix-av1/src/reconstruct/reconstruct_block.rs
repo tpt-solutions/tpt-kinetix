@@ -86,6 +86,14 @@ pub(super) fn reconstruct_tx_block(
         let pre_ctx_snap = capture.then(|| ctxs.ctx_snapshot(blk.plane));
         let pre_cdf_snap = capture.then(|| cdfs.cdf_snapshot());
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            eprintln!(
+                "KTRACE CF plane={mark_plane} px=({px_x},{px_y}) tx={tx_w}x{tx_h} txtp={} eob={} r={}",
+                coeffs.tx_type,
+                coeffs.eob,
+                dec.raw_state().0,
+            );
+        }
         if let (Some(ctx_snap), Some(cdf_snap)) = (&pre_ctx_snap, &pre_cdf_snap) {
             crate::entropy::maybe_capture_block(
                 dec,
@@ -99,18 +107,18 @@ pub(super) fn reconstruct_tx_block(
         }
         if dbg {
             eprintln!(
-                "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant[0..8]={:?}",
-                coeffs.eob,
-                coeffs.tx_type,
-                &coeffs.quant[..coeffs.quant.len().min(8)]
-            );
+                    "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant={:?}",
+                    coeffs.eob,
+                    coeffs.tx_type,
+                    &coeffs.quant[..]
+                );
         }
         if coeffs.eob > 0 {
             let dequant = dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex_dc, qindex_ac);
             if dbg {
                 eprintln!(
-                    "DBG dequant qindex_dc={qindex_dc} qindex_ac={qindex_ac} dequant[0..8]={:?}",
-                    &dequant[..dequant.len().min(8)]
+                    "DBG dequant qindex_dc={qindex_dc} qindex_ac={qindex_ac} dequant={:?}",
+                    &dequant[..]
                 );
             }
             inverse_transform(

@@ -206,6 +206,22 @@ impl<'a> TileDecodeState<'a> {
             max_tx
         };
 
+        // Opt-in per-block symbol trace, in the same shape as a `DAV1D_TRACE`
+        // dav1d debug build (`BLOCK` line + per-coeff `KTRACE CF` lines in
+        // `reconstruct_block.rs`), for diffing the entropy decode against the
+        // reference decoder block-by-block.
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            let hc = has_chroma;
+            eprintln!(
+                "KTRACE BLOCK bx={mi_col} by={mi_row} bw4={} bh4={} skip={} ymode={y_mode}{} tx={luma_tx} r={}",
+                BLOCK_WIDTH[bsize] / MI_SIZE,
+                BLOCK_HEIGHT[bsize] / MI_SIZE,
+                skip as u8,
+                if hc { format!(" uvmode={uv_mode}") } else { String::new() },
+                self.dec.raw_state().0,
+            );
+        }
+
         if mi_row < 4 && std::env::var("KINETIX_AV1_DBG").is_ok() {
             eprintln!(
                 "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx} filter_intra={filter_intra_mode:?} colors_y={:?} colors_u={:?}",

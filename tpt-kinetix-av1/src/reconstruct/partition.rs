@@ -356,6 +356,13 @@ impl<'a> TileDecodeState<'a> {
         };
         let subs = split_into_subblocks(bw, bh, partition);
 
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            eprintln!(
+                "KTRACE PART y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} bp={partition} r={}",
+                self.dec.raw_state().0
+            );
+        }
+
         if mi_row < 8 && mi_col < 8 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
             eprintln!(
                 "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}"
@@ -511,15 +518,43 @@ impl<'a> TileDecodeState<'a> {
     fn tx_depth_context(&self, mi_row: usize, mi_col: usize, max_tx: usize) -> usize {
         let above_w = self.tx_above[mi_col] as usize;
         let left_h = self.tx_left[mi_row] as usize;
-        let max_tx_width = av1::TX_WIDTH[max_tx];
-        let max_tx_height = av1::TX_HEIGHT[max_tx];
-        usize::from(above_w >= max_tx_width) + usize::from(left_h >= max_tx_height)
+        tx_depth_ctx_from(
+            above_w,
+            left_h,
+            av1::TX_WIDTH[max_tx],
+            av1::TX_HEIGHT[max_tx],
+        )
     }
+}
+
+/// `tx_depth`'s CDF-selection context (AV1 spec §8.3.2 / dav1d `get_tx_ctx`):
+/// `ctx = (aboveW >= maxTxWidth) + (leftH >= maxTxHeight)`, with widths/heights
+/// in samples. An unavailable (tile-edge) neighbour is represented by `0`,
+/// which is `< ` every real transform dimension and so contributes nothing —
+/// mirroring dav1d's `-1` sentinel fill of `tx_intra`.
+#[inline]
+fn tx_depth_ctx_from(above_w: usize, left_h: usize, max_tx_w: usize, max_tx_h: usize) -> usize {
+    usize::from(above_w >= max_tx_w) + usize::from(left_h >= max_tx_h)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: an initial / tile-edge-unavailable neighbour (sentinel 0)
+    // must contribute 0 to the tx_depth context even when the current block's
+    // max rectangular transform is only 4 samples wide/tall (e.g. a
+    // PARTITION_HORZ_4 16x4 leaf on the frame's left column). A previous
+    // sentinel of `4` made `4 >= 4` true here, reading `tx_depth` from the
+    // wrong CDF and desyncing the tile from that block onward (first visible
+    // as a dav1d bitstream-offset divergence at testsrc px=(48,64)).
+    #[test]
+    fn tx_depth_ctx_unavailable_neighbour_contributes_zero_for_a_4px_max_tx() {
+        assert_eq!(tx_depth_ctx_from(0, 0, 4, 4), 0);
+        // A real neighbour genuinely at 4 samples still counts.
+        assert_eq!(tx_depth_ctx_from(4, 4, 4, 4), 2);
+        assert_eq!(tx_depth_ctx_from(16, 0, 16, 4), 1);
+    }
 
     // AV1 spec §5.11.4 `decode_partition()`: for a 16x16 node (bw=bh=4 mi
     // units, hw=hh=2, qw=qh=1), `splitSize = Partition_Subsize[SPLIT][16x16]`

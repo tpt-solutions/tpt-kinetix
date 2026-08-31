@@ -719,10 +719,17 @@ impl<'a> TileDecodeState<'a> {
             ymode_left: vec![DC_PRED; mi_rows],
             uv_above: vec![DC_PRED; mi_cols],
             uv_left: vec![DC_PRED; mi_rows],
-            // Initial neighbour state is "no block decoded yet" == smallest
-            // transform, i.e. `TX_4X4`'s width (4) / height (4).
-            tx_above: vec![4u8; mi_cols],
-            tx_left: vec![4u8; mi_rows],
+            // Initial neighbour state is "no block decoded yet" — a sentinel
+            // that must compare `< maxTxWidth`/`< maxTxHeight` for *every*
+            // real transform size, so an unavailable (tile-edge) neighbour
+            // contributes 0 to `tx_depth_context` (matching dav1d's `-1` fill
+            // of `tx_intra`). `4` was wrong: a left/top-edge block whose own
+            // max rectangular transform is only 4 samples tall/wide (e.g. a
+            // `PARTITION_HORZ_4` 16x4 leaf) then saw `4 >= 4` == true and read
+            // `tx_depth` from the wrong CDF context, desyncing the tile from
+            // that block onward.
+            tx_above: vec![0u8; mi_cols],
+            tx_left: vec![0u8; mi_rows],
             use_128x128_superblock,
             enable_cdef: cdef_delta.enable_cdef,
             cdef_bits: cdef_delta.cdef_bits,
