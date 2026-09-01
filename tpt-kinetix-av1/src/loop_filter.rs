@@ -626,11 +626,6 @@ fn cdef_direction(
         }
     }
     let mut cost = [0i32; 8];
-    for _ in 0..8 {
-        for x in partial[0].iter() {
-            cost[0] += x * x;
-        }
-    }
     // (The remaining cost accumulations follow the spec's weighted sums.)
     // Cost[2] and Cost[6] (vertical-ish directions).
     for (x, y) in partial[2].iter().zip(partial[6].iter()) {
@@ -779,6 +774,8 @@ pub fn apply_post_filters(
     tile_y0: usize,
 ) -> Result<(), KinetixError> {
     let dbg = std::env::var("KINETIX_AV1_DBG").is_ok() && width == 64 && height == 64;
+    let skip_deblock = std::env::var("KINETIX_AV1_NODEBLOCK").is_ok();
+    let skip_cdef = std::env::var("KINETIX_AV1_NOCDEF").is_ok();
     let dump_row = |label: &str, plane: &[u8], y: usize| {
         let row: Vec<u8> = (32..64).map(|x| plane[y * width + x]).collect();
         eprintln!("{label} y={y}: {row:?}");
@@ -792,7 +789,7 @@ pub fn apply_post_filters(
     // --- Deblocking loop filter (§7.14) ---
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
-    deblock_plane(
+    if !skip_deblock { deblock_plane(
         y_plane,
         width,
         width,
@@ -805,10 +802,10 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
-    );
+    ); }
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
-    deblock_plane(
+    if !skip_deblock { deblock_plane(
         u_plane,
         uv_w,
         uv_w,
@@ -821,8 +818,8 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
-    );
-    deblock_plane(
+    ); }
+    if !skip_deblock { deblock_plane(
         v_plane,
         uv_w,
         uv_w,
@@ -835,7 +832,7 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
-    );
+    ); }
 
     if dbg {
         for y in 32..48 {
@@ -844,11 +841,11 @@ pub fn apply_post_filters(
     }
 
     // --- CDEF (§7.15) ---
-    // AV1 packs `cdef_*_strength[idx] = cdef_pri_strength (4 bits, 0..15)
-    // + CDEF_SEC_STRENGTH[cdef_sec_idx]` where `CDEF_SEC_STRENGTH = [0,4,8,16]`.
-    // The primary strength is therefore the low 4 bits; the secondary strength
-    // is bits 4..=5 (i.e. `& 0x30`).
-    let cdef_enabled = fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
+    // Packing: `cdef_*_strength[idx] = pri_strength | (sec_idx << 4)`.
+    // pri_strength occupies bits 0..=3 (0–15); sec_idx occupies bits 4..=5 (0–3).
+    // The actual secondary strength is CDEF_SEC_STRENGTH[sec_idx] = [0,1,2,4].
+    // Extract pri with `& 0x0F`, sec with `[0,1,2,4][((packed>>4)&3)]`.
+    let cdef_enabled = !skip_cdef && fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
     if cdef_enabled {
         // CDEF strength is selected per 64×64 unit via `cdef_idx` (§5.11.56),
         // which `read_cdef()` already populated during tile decode. Each unit's
@@ -866,7 +863,7 @@ pub fn apply_post_filters(
                 let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
                 let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
                 let pri = (y_packed & 0x0F) as i32;
-                let sec = (y_packed & 0x30) as i32;
+                let sec = [0i32, 1, 2, 4][((y_packed >> 4) & 3) as usize];
                 let damping = fh.cdef_damping as i32;
                 let uh = 64.min(height - uy);
                 let uw = 64.min(width - ux);
@@ -888,7 +885,7 @@ pub fn apply_post_filters(
                 let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
-                let uv_sec = (uv_packed & 0x30) as i32;
+                let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
@@ -910,7 +907,7 @@ pub fn apply_post_filters(
                 let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
-                let uv_sec = (uv_packed & 0x30) as i32;
+                let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);

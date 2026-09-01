@@ -1088,7 +1088,8 @@ fn parse_loop_filter(
 }
 
 /// `cdef_params()` (§5.9.17). Strength fields are packed as
-/// `pri + (sec << 2)` (the decoder's `CdefYStrength` representation).
+/// `pri | (sec_idx << 4)`: pri (0..15) in bits 0-3, sec index (0..3) in bits 4-5.
+/// The actual secondary strength is `CDEF_SEC_STRENGTH[sec_idx] = [0,1,2,4][sec_idx]`.
 fn parse_cdef(
     br: &mut BitReader<'_>,
     coded_lossless: bool,
@@ -1107,13 +1108,13 @@ fn parse_cdef(
     for _ in 0..n {
         let pri = read_f8(br, 4)?;
         let sec = read_f8(br, 2)?;
-        y.push(pri + (sec << 2));
+        y.push(pri | (sec << 4));
     }
     if num_planes > 1 {
         for _ in 0..n {
             let pri = read_f8(br, 4)?;
             let sec = read_f8(br, 2)?;
-            uv.push(pri + (sec << 2));
+            uv.push(pri | (sec << 4));
         }
     }
     Ok((damping, bits, y, uv))
@@ -2075,9 +2076,9 @@ mod tests {
         // cdef_damping_minus_3 = 2 → damping 5; cdef_bits = 0 → one entry.
         assert_eq!(fh.cdef_damping, 5);
         assert_eq!(fh.cdef_bits, 0);
-        // cdef_y_pri=11, sec=2 → 11 + (2<<2) = 19; uv pri=0, sec=2 → 8.
-        assert_eq!(fh.cdef_y_strength, vec![11 + (2 << 2)]);
-        assert_eq!(fh.cdef_uv_strength, vec![(2 << 2)]);
+        // cdef_y_pri=11, sec_idx=2 → 11 | (2<<4) = 43; uv pri=0, sec_idx=2 → 32.
+        assert_eq!(fh.cdef_y_strength, vec![11 | (2 << 4)]);
+        assert_eq!(fh.cdef_uv_strength, vec![(2 << 4)]);
     }
 
     #[test]
