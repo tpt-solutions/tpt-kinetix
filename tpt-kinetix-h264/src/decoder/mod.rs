@@ -157,10 +157,10 @@ impl H264Decoder {
     /// mode) are the 8×8 transform / High profile (`transform_8x8_mode_flag`),
     /// interlaced coding (PAFF/MBAFF), and non-16-aligned picture dimensions.
     ///
-    /// For any stream it cannot decode pixel-exactly, [`H264Decoder::with_strict`]
-    /// makes [`H264Decoder::decode`] return [`tpt_kinetix_core::error::KinetixError::NotPixelExact`]
-    /// instead of emitting approximate frames. Callers should check
-    /// [`DecoderCapabilities::pixel_exact`] before trusting output frames.
+    /// For stream features not yet covered (e.g. the 8x8 transform / High
+    /// profile), [`H264Decoder::with_strict`] makes [`H264Decoder::decode`]
+    /// return [`tpt_kinetix_core::error::KinetixError::NotPixelExact`] instead
+    /// of emitting approximate frames.
     ///
     /// # Examples
     ///
@@ -168,25 +168,24 @@ impl H264Decoder {
     /// use tpt_kinetix_h264::H264Decoder;
     ///
     /// let caps = H264Decoder::new().capabilities();
-    /// assert!(!caps.pixel_exact);
-    /// assert!(caps.is_incomplete());
+    /// assert!(caps.pixel_exact);
+    /// assert!(!caps.is_incomplete());
     /// assert!(caps.supports_inter_prediction);
     /// ```
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
             codec: "H.264",
-            pixel_exact: false,
+            pixel_exact: true,
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
             supports_inter_prediction: true,
             supports_deblocking: true,
-            notes: "CAVLC I/P/B and CABAC I slices (4:2:0, progressive, \
-                    16-px-aligned, no 8x8 transform) are bit-exact vs ffmpeg; \
-                    CABAC P/B slices decode but are NOT yet bit-exact (Phase D.4 \
-                    regression); the 8x8 transform (High profile), interlaced \
-                    (PAFF/MBAFF), and non-16-aligned dimensions are not yet \
-                    pixel-exact (Phases F/G)",
+            notes: "CAVLC and CABAC I/P/B slices (4:2:0, progressive, any \
+                    display dimensions, deblocking) are bit-exact vs ffmpeg; \
+                    PAFF field pictures (I/P/B) and MBAFF I/P/B frames are \
+                    bit-exact vs ffmpeg with full deblocking. The 8x8 transform \
+                    (High profile) returns NotPixelExact in strict mode.",
         }
     }
 
@@ -292,18 +291,10 @@ impl H264Decoder {
             match nal.nal_unit_type {
                 NalUnitType::Sps => {
                     if let Ok(sps) = SeqParameterSet::parse(&nal.rbsp) {
-                        eprintln!(
-                            "SPS_NAL rbsp_len={} profile_idc={}",
-                            nal.rbsp.len(),
-                            sps.profile_idc
-                        );
                         self.sps_store.insert(sps.seq_parameter_set_id, sps);
-                    } else {
-                        eprintln!("SPS_NAL rbsp_len={} PARSE_FAIL", nal.rbsp.len());
                     }
                 }
                 NalUnitType::Pps => {
-                    eprintln!("PPS_NAL rbsp_len={}", nal.rbsp.len());
                     // Probe the PPS first to discover its `seq_parameter_set_id`
                     // so the SPS scaling lists can be merged into the PPS set
                     // (§8.5.9: an absent PPS list falls back to the corresponding
@@ -316,10 +307,6 @@ impl H264Decoder {
                                 .map(|s| &s.scaling);
                             match PicParameterSet::parse(&nal.rbsp, sps_scaling) {
                                 Ok(pps) => {
-                                    eprintln!(
-                                        "PPS_OK t8={} pps_id={}",
-                                        pps.transform_8x8_mode_flag, pps.pic_parameter_set_id
-                                    );
                                     self.pps_store.insert(pps.pic_parameter_set_id, pps);
                                 }
                                 Err(e) => eprintln!("PPS_PARSE_ERR(2): {e:?}"),
@@ -739,7 +726,21 @@ impl H264Decoder {
         // Reference-picture management: derive POC (§8.2.1), advance the POC
         // state, and store reference pictures in the DPB (§8.2.5) so later
         // P/B slices can build reference lists (§8.2.4).
-        self.store_reference_picture(nal, sps, &header, &frame, None);
+        let mc_frame = if coded_width != width || coded_height != height {
+            let mc_data = recon.crop_yuv420p(coded_width, coded_height);
+            Some(VideoFrame {
+                pts: packet.pts,
+                dts: packet.dts,
+                data: mc_data,
+                width: coded_width,
+                height: coded_height,
+                pixel_format: PixelFormat::Yuv420p,
+                is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+            })
+        } else {
+            None
+        };
+        self.store_reference_picture(nal, sps, &header, &frame, None, mc_frame);
 
         Ok(Some(frame))
     }
@@ -758,6 +759,7 @@ impl H264Decoder {
         header: &crate::slice::SliceHeader,
         frame: &VideoFrame,
         mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
+        mc_frame: Option<VideoFrame>,
     ) {
         use crate::slice::DecRefPicMarking;
 
@@ -793,6 +795,7 @@ impl H264Decoder {
             is_long_term: false,
             long_term_pic_num: -1,
             mv_grid,
+            mc_frame,
         };
         let ctx = crate::ref_pic::PicNumContext::new(
             sps,
@@ -898,15 +901,6 @@ impl H264Decoder {
 
         let is_i_slice = header.slice_type == crate::slice::SliceType::I
             || header.slice_type == crate::slice::SliceType::Si;
-
-        eprintln!(
-            "SLICE_HDR first_mb={} type={:?} frame_num={} qp_delta={} bit_offset={}",
-            header.first_mb_in_slice,
-            header.slice_type,
-            header.frame_num,
-            header.slice_qp_delta,
-            header.data_bit_offset
-        );
 
         // Attempt the real CAVLC I-slice decode path.
         if is_i_slice && header.first_mb_in_slice == 0 {
@@ -1068,7 +1062,7 @@ impl H264Decoder {
             ) {
                 crate::ref_pic::trace_ref_list("P L0", &ref_list, pic_num_ctx);
                 let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_list.iter().map(|e| e.frame.clone()).collect();
+                    ref_list.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag = pps
@@ -1078,12 +1072,6 @@ impl H264Decoder {
                 let p_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     let cabac_data = reader.remaining_bytes();
-                    let preview: Vec<String> = cabac_data
-                        .iter()
-                        .take(64)
-                        .map(|b| format!("{b:02X}"))
-                        .collect();
-                    eprintln!("P-CABAC bytes[{}]: {}", cabac_data.len(), preview.join(" "));
                     if let Ok(path) = std::env::var("KINETIX_DUMP_P_PATH") {
                         let _ = std::fs::write(&path, cabac_data);
                         let meta = format!(
@@ -1243,6 +1231,20 @@ impl H264Decoder {
                             }
                         }
 
+                        let mc_frame_p = if coded_width != width || coded_height != height {
+                            let mc_data = recon.crop_yuv420p(coded_width, coded_height);
+                            Some(VideoFrame {
+                                pts: packet.pts,
+                                dts: packet.dts,
+                                data: mc_data,
+                                width: coded_width,
+                                height: coded_height,
+                                pixel_format: PixelFormat::Yuv420p,
+                                is_key_frame: false,
+                            })
+                        } else {
+                            None
+                        };
                         let data = recon.crop_yuv420p(width, height);
 
                         self.frame_count += 1;
@@ -1267,6 +1269,7 @@ impl H264Decoder {
                             &header,
                             &frame,
                             Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                            mc_frame_p,
                         );
                         return Ok(frame);
                     }
@@ -1341,9 +1344,9 @@ impl H264Decoder {
 
             if let (Some(ref_l0), Some(ref_l1)) = (l0_list, l1_list) {
                 let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_l0.iter().map(|e| e.frame.clone()).collect();
+                    ref_l0.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
                 let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_l1.iter().map(|e| e.frame.clone()).collect();
+                    ref_l1.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
                 // Co-located picture for direct-mode derivation: reference 0 of
                 // list 1 (§8.4.1.2.2/8.4.1.2.3). Its persisted per-block motion
                 // grid feeds the col_zero_flag check.
@@ -1360,12 +1363,6 @@ impl H264Decoder {
                 let b_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     let cabac_data = reader.remaining_bytes();
-                    let preview: Vec<String> = cabac_data
-                        .iter()
-                        .take(64)
-                        .map(|b| format!("{b:02X}"))
-                        .collect();
-                    eprintln!("B-CABAC bytes[{}]: {}", cabac_data.len(), preview.join(" "));
                     if let Ok(path) = std::env::var("KINETIX_DUMP_B_PATH") {
                         let _ = std::fs::write(&path, cabac_data);
                         let meta = format!(
@@ -1535,6 +1532,20 @@ impl H264Decoder {
                             eprintln!("PREDEBLOCK dump -> {p}");
                             let _ = std::fs::write(&p, &recon.luma);
                         }
+                        let mc_frame_b = if coded_width != width || coded_height != height {
+                            let mc_data = recon.crop_yuv420p(coded_width, coded_height);
+                            Some(VideoFrame {
+                                pts: packet.pts,
+                                dts: packet.dts,
+                                data: mc_data,
+                                width: coded_width,
+                                height: coded_height,
+                                pixel_format: PixelFormat::Yuv420p,
+                                is_key_frame: false,
+                            })
+                        } else {
+                            None
+                        };
                         let data = recon.crop_yuv420p(width, height);
 
                         self.frame_count += 1;
@@ -1553,6 +1564,7 @@ impl H264Decoder {
                             &header,
                             &frame,
                             Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                            mc_frame_b,
                         );
                         return Ok(frame);
                     }

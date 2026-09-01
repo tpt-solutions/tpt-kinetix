@@ -5,10 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 TPT Kinetix is a memory-safe, hyper-concurrent media processing engine in Rust — a long-term successor
-to FFmpeg for transcoding/streaming pipelines. It is **early-stage and pre-1.0**; the H.264 and AV1
-decoders are the active, unfinished work: they parse bitstreams correctly but are **not yet pixel-exact**
-against reference decoders. `DecoderCapabilities` (`capabilities()`) reports this at runtime, and strict
-mode returns `KinetixError::NotPixelExact` instead of a placeholder frame. See README.md's status table
+to FFmpeg for transcoding/streaming pipelines. It is **early-stage and pre-1.0**. The H.264 decoder
+now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, and MBAFF frames are all
+bit-exact vs ffmpeg with full deblocking; the 8×8 transform (High profile) returns
+`KinetixError::NotPixelExact` in strict mode. The AV1 and AAC decoders are still not pixel-exact.
+`DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
 for the current state of every crate before assuming something works.
 
 ## Commands
@@ -111,13 +112,10 @@ pipeline to derive scaffolding from an existing FFmpeg C decoder — full walkth
 
 ## Known correctness state (read before claiming a fix)
 
-H.264 CAVLC I/P/B and CABAC I slices are bit-exact against ffmpeg (4:2:0, progressive, 16-px-aligned,
-no 8x8 transform) as of the last conformance pass — the earlier CABAC I-slice desync was root-caused
-and fixed (a 1-entry typo in `TRANS_IDX_LPS`, `tpt-kinetix-h264/src/entropy.rs`/`cabac_tables.rs`).
-CABAC P/B slices decode but are **not** yet bit-exact: `conformance_matrix.rs`'s cabac_p/cabac_b cells
-currently fail (pre-existing, not caused by recent changes) even though the standalone CABAC P/B
-conformance suites pass — a real gap, still open. The 8x8 transform (High profile), interlaced
-(PAFF/MBAFF), and non-16-aligned dimensions are also open, so `capabilities().pixel_exact` stays
-`false` globally. AV1 decode has the entropy coder wired up in isolation but `decode_tile_group` is
-not yet rewired onto it. Don't assume a decoder path is correct without running `just conformance` —
-`capabilities()` is the source of truth, not README prose.
+H.264 `capabilities().pixel_exact` is now `true`. CAVLC and CABAC I/P/B slices (progressive 4:2:0,
+any display dimensions, full deblocking) are bit-exact vs ffmpeg. PAFF field pictures (I/P/B) and
+MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The 8×8 transform (High profile)
+returns `KinetixError::NotPixelExact` in strict mode and degrades to scaffold in non-strict mode —
+not yet verified bit-exact for progressive streams. AV1 and AAC decoders are not yet pixel-exact.
+Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
+source of truth, not README prose.

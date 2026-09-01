@@ -1580,11 +1580,7 @@ impl CodedBlockFlagContext {
     pub fn new_pb(slice_qp_y: i32, cabac_init_idc: usize) -> Self {
         let ctx: [[CabacContext; 4]; 5] = std::array::from_fn(|cat| {
             let base = crate::cabac_tables::CBF_CTX_BASE[cat];
-            std::array::from_fn(|i| {
-                let c = init_pb_ctx(base + i, cabac_init_idc, slice_qp_y);
-                eprintln!("  CBF_INIT cat={cat} i={i} base+i={} qp={slice_qp_y} idc={cabac_init_idc} → state={} mps={}", base+i, c.state, c.mps);
-                c
-            })
+            std::array::from_fn(|i| init_pb_ctx(base + i, cabac_init_idc, slice_qp_y))
         });
         Self { ctx }
     }

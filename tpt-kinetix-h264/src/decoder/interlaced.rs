@@ -467,11 +467,11 @@ impl H264Decoder {
 
             let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l0
                 .as_ref()
-                .map(|l| l.iter().map(|e| e.frame.clone()).collect())
+                .map(|l| l.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect())
                 .unwrap_or_default();
             let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l1
                 .as_ref()
-                .map(|l| l.iter().map(|e| e.frame.clone()).collect())
+                .map(|l| l.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect())
                 .unwrap_or_default();
 
             // Co-located MV grid for direct-mode B prediction: reference 0 of
@@ -671,6 +671,7 @@ impl H264Decoder {
                 header,
                 &frame,
                 Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                None,
             );
 
             if std::env::var("KINETIX_BINTRACE").is_ok() {
@@ -765,7 +766,7 @@ impl H264Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
         };
-        self.store_reference_picture(nal, sps, header, &frame, None);
+        self.store_reference_picture(nal, sps, header, &frame, None, None);
 
         Ok(InterlacedOutcome::Frame(frame))
     }
@@ -1227,7 +1228,7 @@ impl H264Decoder {
 
         // Store the half-height field in the DPB so later inter slices can build
         // their field reference lists from it (§8.2.4.2.5).
-        self.store_reference_picture(nal, sps, header, &field_frame, None);
+        self.store_reference_picture(nal, sps, header, &field_frame, None, None);
 
         // Buffer the field and emit the interleaved frame once the pair is complete.
         let visible_width = sps.pic_width_pixels();

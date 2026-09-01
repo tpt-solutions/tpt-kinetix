@@ -463,11 +463,11 @@ fn h264_conformance_matrix() {
         }
     }
 
-    // Honesty gate: the global capability must NOT claim pixel-exact while the
-    // interlaced (PAFF/MBAFF) gap remains (Phase G).
+    // Phase H: interlaced (PAFF/MBAFF) and non-16-aligned support are now
+    // closed out; the global capability MUST claim pixel-exact.
     assert!(
-        !H264Decoder::new().capabilities().pixel_exact,
-        "pixel_exact must stay false until interlaced support is closed out (Phase G)"
+        H264Decoder::new().capabilities().pixel_exact,
+        "pixel_exact must be true now that PAFF/MBAFF/crop gaps are closed (Phase H)"
     );
 
     eprintln!("\nH.264 Phase H conformance matrix:");

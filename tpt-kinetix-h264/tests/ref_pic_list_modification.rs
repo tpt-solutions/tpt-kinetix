@@ -146,6 +146,7 @@ fn dpb_with_four_refs() -> Dpb {
                 is_long_term: false,
                 long_term_pic_num: -1,
                 mv_grid: None,
+                mc_frame: None,
             },
             PicNumContext {
                 curr_frame_num: frame_num,

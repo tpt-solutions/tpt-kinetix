@@ -46,6 +46,12 @@ pub struct DpbEntry {
     /// picture for B-slice temporal direct mode (§8.4.1.2.3). `None` until this
     /// picture's B/P slice MV store is recorded (e.g. by `predict_b_slice_mvs`).
     pub mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
+    /// Coded-dimension frame for motion compensation when the stream has a
+    /// non-16-aligned crop (display dimensions < coded dimensions). The encoder
+    /// predicts from coded-size reference planes, so MC must use this frame
+    /// instead of `frame` (which is cropped to display size). `None` when coded
+    /// and display dimensions are equal.
+    pub mc_frame: Option<VideoFrame>,
 }
 
 impl DpbEntry {
@@ -1517,6 +1523,7 @@ mod tests {
             is_long_term: false,
             long_term_pic_num: -1,
             mv_grid: None,
+            mc_frame: None,
         }
     }
 
