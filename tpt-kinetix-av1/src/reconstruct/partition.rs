@@ -166,16 +166,16 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.bit_position()
                 );
             }
-            for _unit_row in unit_row_start..unit_row_end {
-                for _unit_col in unit_col_start..unit_col_end {
-                    self.read_lr_unit(plane);
+            for unit_row in unit_row_start..unit_row_end {
+                for unit_col in unit_col_start..unit_col_end {
+                    self.read_lr_unit(plane, unit_row, unit_col);
                 }
             }
         }
     }
 
     /// `read_lr_unit(plane, unitRow, unitCol)` (AV1 spec §5.11.58).
-    fn read_lr_unit(&mut self, plane: usize) {
+    fn read_lr_unit(&mut self, plane: usize, unit_row: usize, unit_col: usize) {
         const WIENER_TAPS_MIN: [i32; 3] = [-5, -23, -17];
         const WIENER_TAPS_MAX: [i32; 3] = [10, 8, 46];
         const WIENER_TAPS_K: [i32; 3] = [1, 2, 3];
@@ -207,7 +207,7 @@ impl<'a> TileDecodeState<'a> {
         let frt = self.lr.frame_restoration_type[plane];
         let restoration_type = self.mode_cdfs.read_lr_restoration_type(&mut self.dec, frt);
 
-        match restoration_type {
+        let lr_data = match restoration_type {
             1 => {
                 // RESTORE_WIENER
                 for pass in 0..2 {
@@ -227,6 +227,10 @@ impl<'a> TileDecodeState<'a> {
                         );
                         self.ref_lr_wiener[plane][pass][j] = v;
                     }
+                }
+                LrUnitData::Wiener {
+                    h: self.ref_lr_wiener[plane][0],
+                    v: self.ref_lr_wiener[plane][1],
                 }
             }
             2 => {
@@ -250,9 +254,14 @@ impl<'a> TileDecodeState<'a> {
                     };
                     self.ref_sgr_xqd[plane][i] = v;
                 }
+                LrUnitData::Sgrproj {
+                    set: lr_sgr_set,
+                    xqd: self.ref_sgr_xqd[plane],
+                }
             }
-            _ => {}
-        }
+            _ => return,
+        };
+        self.meta.lr_units.insert((plane, unit_row, unit_col), lr_data);
     }
 
     /// `decode_signed_subexp_with_ref_bool` (AV1 spec §6.8.24): the

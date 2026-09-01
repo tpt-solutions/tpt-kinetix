@@ -4,10 +4,9 @@
 //! These run after tile reconstruction in the order mandated by the AV1
 //! decoding process (`decode_frame_wrapup`): deblock → CDEF → restoration.
 //!
-//! The deblocking loop filter and CDEF are implemented from the normative
-//! algorithms in the AV1 specification. Loop restoration is a no-op passthrough
-//! here (the spec explicitly permits skipping it for a v1 decoder when
-//! `enable_restoration` is false; see `apply_loop_restoration`).
+//! All three filters are implemented from the normative AV1 specification.
+//! Loop restoration supports RESTORE_WIENER (7-tap separable Wiener filter)
+//! and RESTORE_SGRPROJ (self-guided projection filter).
 //!
 //! # Honesty note
 //!
@@ -119,6 +118,25 @@ pub struct FrameMeta {
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
     /// strength entry. Empty (every unit defaults to `0`) when `cdef_bits == 0`.
     pub cdef_idx: std::collections::HashMap<(usize, usize), i8>,
+    /// Per-plane per-unit loop-restoration parameters (§7.17), keyed by
+    /// `(plane, unit_row, unit_col)`. Populated during tile decode
+    /// (`read_lr_unit`) and applied in `apply_post_filters`.
+    pub lr_units: std::collections::HashMap<(usize, usize, usize), LrUnitData>,
+}
+
+/// Parsed loop-restoration parameters for one restoration unit (§7.17).
+/// Stored by `read_lr_unit` per (plane, unit_row, unit_col).
+#[derive(Debug, Clone)]
+pub enum LrUnitData {
+    /// RESTORE_WIENER: symmetric 7-tap separable filter.
+    /// `h` / `v` are the 3 lower-triangle half-taps (k=0..2) for the
+    /// horizontal and vertical pass respectively. Full 7-tap kernel:
+    /// `[k0, k1, k2, 128-2*(k0+k1+k2), k2, k1, k0]`.
+    Wiener { h: [i32; 3], v: [i32; 3] },
+    /// RESTORE_SGRPROJ: self-guided projection filter.
+    /// `set` indexes Sgr_Params[16][4]; `xqd` are the decoded projection
+    /// weights (w0, w1) for the two filter passes.
+    Sgrproj { set: usize, xqd: [i32; 2] },
 }
 
 impl FrameMeta {
@@ -139,6 +157,7 @@ impl FrameMeta {
             v_tx_h: vec![0u8; len],
             v_skip: vec![true; len],
             cdef_idx: std::collections::HashMap::new(),
+            lr_units: std::collections::HashMap::new(),
         }
     }
 
@@ -736,19 +755,281 @@ fn cdef_filter_block(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Loop restoration (§7.17) — passthrough
+// Loop restoration (§7.17)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Loop restoration.
+/// `dav1d_sgr_x_by_x[256]`: lookup table used by the self-guided restoration
+/// filter to convert the normalised variance index `z` into the mixing weight
+/// α (§7.17.5). Source: dav1d `src/tables.c`, `BITDEPTH == 8`.
+const SGR_X_BY_X: [u8; 256] = [
+    255, 128,  85,  64,  51,  43,  37,  32,  28,  26,  23,  21,  20,  18,  17,
+     16,  15,  14,  13,  13,  12,  12,  11,  11,  10,  10,   9,   9,   9,   9,
+      8,   8,   8,   8,   7,   7,   7,   7,   7,   6,   6,   6,   6,   6,   6,
+      6,   5,   5,   5,   5,   5,   5,   5,   5,   5,   5,   4,   4,   4,   4,
+      4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   3,   3,
+      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,
+      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   2,   2,   2,
+      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
+      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
+      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
+      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
+      2,   2,   2,   2,   2,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      0
+];
+
+/// Precomputed `s = (1 << 20) / (eps * n * n)` and `one_by_n = (4096 + n/2) / n`
+/// for the 16 SgrProj parameter sets (§7.17.5). `sgr_s[set] = [s0, s1]`
+/// where s0/s1 correspond to the 5×5 (r=2, n=25) and 3×3 (r=1, n=9) passes
+/// respectively.  Entries with r==0 use s==0 (pass skipped when r==0).
+/// Source: dav1d `src/tables.c` `dav1d_sgr_params`.
+const SGR_S: [[u32; 2]; 16] = [
+    [140, 3236], [112, 2158], [ 93, 1618], [ 80, 1438],
+    [ 70, 1295], [ 58, 1177], [ 47, 1079], [ 37,  996],
+    [ 30,  925], [ 25,  863], [  0, 2589], [  0, 1618],
+    [  0, 1177], [  0,  925], [ 56,    0], [ 22,    0],
+];
+
+/// Spec Sgr_Params[16][4] = { r0, eps0, r1, eps1 }.
+const SGR_PARAMS: [[i32; 4]; 16] = [
+    [2, 12, 1,  4], [2, 15, 1,  6], [2, 18, 1,  8], [2, 21, 1,  9],
+    [2, 24, 1, 10], [2, 29, 1, 11], [2, 36, 1, 12], [2, 45, 1, 13],
+    [2, 56, 1, 14], [2, 68, 1, 15], [0,  0, 1,  5], [0,  0, 1,  8],
+    [0,  0, 1, 11], [0,  0, 1, 14], [2, 30, 0,  0], [2, 75, 0,  0],
+];
+
+/// Wiener filter for one plane (§7.17.3): 7-tap separable horizontal → vertical.
 ///
-/// When `enable_restoration` is false in the sequence header (the common
-/// keyframe case) no restoration filtering is applied and the frame is passed
-/// through unchanged, which is exactly what the spec mandates. This decoder
-/// does not yet implement the Wiener / self-guided filters, so even when
-/// restoration is signalled the frame is passed through; that is an explicit
-/// v1 simplification permitted by the AV1 Phase D checklist.
-fn apply_loop_restoration(_seq: &SequenceHeaderObu) {
-    // Intentionally a no-op passthrough (see module docs).
+/// Matches dav1d's 8-bit integer pipeline:
+/// - Horizontal: bias = (1<<14), each tap uses fh[3]=128-2*(h0+h1+h2);
+///   inter = clip((bias + sum + 4) >> 3, 0, 8191)
+/// - Vertical: start_sum = -(1<<18), fv[3]=128-2*(v0+v1+v2);
+///   out = clip((start + sum + 1024) >> 11, 0, 255)
+fn wiener_filter_plane(plane: &mut [u8], w: usize, h: usize, half_h: [i32; 3], half_v: [i32; 3]) {
+    let src = plane.to_vec();
+    let build_filter = |half: [i32; 3]| -> [i32; 7] {
+        let c = 128 - 2 * (half[0] + half[1] + half[2]);
+        [half[0], half[1], half[2], c, half[2], half[1], half[0]]
+    };
+    let fh = build_filter(half_h);
+    let fv = build_filter(half_v);
+
+    // Horizontal pass — bias keeps intermediate values non-negative.
+    // inter ∈ [0, 8191] (13-bit).
+    let mut inter = vec![0i32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 1i32 << 14; // horizontal bias
+            for (i, &fi) in fh.iter().enumerate() {
+                let xi = (x as i32 + i as i32 - 3).clamp(0, w as i32 - 1) as usize;
+                sum += fi * src[y * w + xi] as i32;
+            }
+            inter[y * w + x] = ((sum + 4) >> 3).clamp(0, 8191);
+        }
+    }
+
+    // Vertical pass — matching negative bias; out ∈ [0, 255].
+    let round_offset_v = -(1i32 << 18);
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = round_offset_v;
+            for (i, &fi) in fv.iter().enumerate() {
+                let yi = (y as i32 + i as i32 - 3).clamp(0, h as i32 - 1) as usize;
+                sum += fi * inter[yi * w + x];
+            }
+            plane[y * w + x] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
+        }
+    }
+}
+
+/// Self-guided projection (SgrProj) filter for one plane (§7.17.4/§7.17.5).
+///
+/// Implements both the 5×5 (pass 0, radius r0) and 3×3 (pass 1, radius r1)
+/// guided-filter passes and combines them with the decoded `xqd` weights.
+/// The algorithm and constants follow the dav1d C reference (8-bit path).
+#[allow(clippy::too_many_arguments)]
+fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [i32; 2]) {
+    let src = plane.to_vec();
+
+    let compute_pass =
+        |r: i32,
+         s: u32,
+         n: i32,
+         one_by_n: i32,
+         pair_rows: bool,
+         t: &mut Vec<i32>| {
+            // Build A (alpha*mean) and B (alpha) tables per pixel.
+            let mut a_tab = vec![0i32; w * h];
+            let mut b_tab = vec![0i32; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let (mut sum, mut sum_sq) = (0i32, 0i64);
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            let px = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                            let py = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                            let v = src[py * w + px] as i32;
+                            sum += v;
+                            sum_sq += (v * v) as i64;
+                        }
+                    }
+                    let p_val = ((n as i64 * sum_sq - (sum as i64) * (sum as i64)).max(0)) as u64;
+                    let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
+                    let alpha = SGR_X_BY_X[z] as i32;
+                    a_tab[y * w + x] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
+                    b_tab[y * w + x] = alpha;
+                }
+            }
+
+            if pair_rows {
+                // 5×5 pass: pairs of output rows use SIX_NEIGHBORS / single-row patterns.
+                let mut y = 0usize;
+                while y < h {
+                    let yn = (y + 1).min(h - 1);
+                    for x in 0..w {
+                        let xl = x.saturating_sub(1);
+                        let xr = (x + 1).min(w - 1);
+                        let a_sum = (a_tab[y * w + x] + a_tab[yn * w + x]) * 6
+                            + (a_tab[y * w + xl]
+                                + a_tab[yn * w + xl]
+                                + a_tab[y * w + xr]
+                                + a_tab[yn * w + xr])
+                                * 5;
+                        let b_sum = (b_tab[y * w + x] + b_tab[yn * w + x]) * 6
+                            + (b_tab[y * w + xl]
+                                + b_tab[yn * w + xl]
+                                + b_tab[y * w + xr]
+                                + b_tab[yn * w + xr])
+                                * 5;
+                        t[y * w + x] =
+                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                    }
+                    if y + 1 < h {
+                        let y1 = y + 1;
+                        for x in 0..w {
+                            let xl = x.saturating_sub(1);
+                            let xr = (x + 1).min(w - 1);
+                            let a_sum = a_tab[y1 * w + x] * 6
+                                + (a_tab[y1 * w + xl] + a_tab[y1 * w + xr]) * 5;
+                            let b_sum = b_tab[y1 * w + x] * 6
+                                + (b_tab[y1 * w + xl] + b_tab[y1 * w + xr]) * 5;
+                            t[y1 * w + x] =
+                                (a_sum - b_sum * src[y1 * w + x] as i32 + (1 << 7)) >> 8;
+                        }
+                    }
+                    y += 2;
+                }
+            } else {
+                // 3×3 pass: EIGHT_NEIGHBORS pattern per row.
+                for y in 0..h {
+                    let ya = y.saturating_sub(1);
+                    let yb = (y + 1).min(h - 1);
+                    for x in 0..w {
+                        let xl = x.saturating_sub(1);
+                        let xr = (x + 1).min(w - 1);
+                        let a_sum = (a_tab[y * w + x]
+                            + a_tab[y * w + xl]
+                            + a_tab[y * w + xr]
+                            + a_tab[ya * w + x]
+                            + a_tab[yb * w + x])
+                            * 4
+                            + (a_tab[ya * w + xl]
+                                + a_tab[ya * w + xr]
+                                + a_tab[yb * w + xl]
+                                + a_tab[yb * w + xr])
+                                * 3;
+                        let b_sum = (b_tab[y * w + x]
+                            + b_tab[y * w + xl]
+                            + b_tab[y * w + xr]
+                            + b_tab[ya * w + x]
+                            + b_tab[yb * w + x])
+                            * 4
+                            + (b_tab[ya * w + xl]
+                                + b_tab[ya * w + xr]
+                                + b_tab[yb * w + xl]
+                                + b_tab[yb * w + xr])
+                                * 3;
+                        t[y * w + x] =
+                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                    }
+                }
+            }
+        };
+
+    let r0 = SGR_PARAMS[set][0];
+    let r1 = SGR_PARAMS[set][2];
+    let mut t0 = vec![0i32; w * h];
+    let mut t1 = vec![0i32; w * h];
+
+    if r0 > 0 {
+        let n0 = (2 * r0 + 1) * (2 * r0 + 1);
+        let one_by_n0 = (4096 + n0 / 2) / n0;
+        compute_pass(r0, SGR_S[set][0], n0, one_by_n0, true, &mut t0);
+    }
+    if r1 > 0 {
+        let n1 = (2 * r1 + 1) * (2 * r1 + 1);
+        let one_by_n1 = (4096 + n1 / 2) / n1;
+        compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
+    }
+
+    for y in 0..h {
+        for x in 0..w {
+            let sv = src[y * w + x] as i32;
+            let correction = (xqd[0] * t0[y * w + x] + xqd[1] * t1[y * w + x] + (1 << 10)) >> 11;
+            plane[y * w + x] = (sv + correction).clamp(0, 255) as u8;
+        }
+    }
+}
+
+/// Apply the per-unit loop-restoration filter over one plane (§7.17).
+fn apply_loop_restoration_plane(
+    plane: &mut [u8],
+    w: usize,
+    h: usize,
+    plane_idx: usize,
+    fh: &crate::frame::FrameHeader,
+    lr_units: &std::collections::HashMap<(usize, usize, usize), LrUnitData>,
+) {
+    if fh.frame_restoration_type[plane_idx] == 0 {
+        return;
+    }
+    let unit_size = fh.lr_unit_size[plane_idx] as usize;
+    let unit_cols = w.div_ceil(unit_size);
+    let unit_rows = h.div_ceil(unit_size);
+    for ur in 0..unit_rows {
+        for uc in 0..unit_cols {
+            let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
+                continue;
+            };
+            let ux0 = uc * unit_size;
+            let uy0 = ur * unit_size;
+            let uw = unit_size.min(w - ux0);
+            let uh = unit_size.min(h - uy0);
+            // Extract the unit's sub-plane into a contiguous buffer.
+            let mut buf = vec![0u8; uw * uh];
+            for row in 0..uh {
+                buf[row * uw..row * uw + uw]
+                    .copy_from_slice(&plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]);
+            }
+            match unit {
+                LrUnitData::Wiener { h: hf, v: vf } => {
+                    wiener_filter_plane(&mut buf, uw, uh, *hf, *vf);
+                }
+                LrUnitData::Sgrproj { set, xqd } => {
+                    sgrproj_filter_plane(&mut buf, uw, uh, *set, *xqd);
+                }
+            }
+            // Write filtered unit back.
+            for row in 0..uh {
+                plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]
+                    .copy_from_slice(&buf[row * uw..row * uw + uw]);
+            }
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -768,7 +1049,7 @@ pub fn apply_post_filters(
     subsampling_y: bool,
     meta: &FrameMeta,
     fh: &FrameHeader,
-    seq: &SequenceHeaderObu,
+    _seq: &SequenceHeaderObu,
     cdef_idx: &std::collections::HashMap<(usize, usize), i8>,
     tile_x0: usize,
     tile_y0: usize,
@@ -926,8 +1207,12 @@ pub fn apply_post_filters(
         }
     }
 
-    // --- Loop restoration (§7.17) — passthrough ---
-    apply_loop_restoration(seq);
+    // --- Loop restoration (§7.17) ---
+    if fh.uses_lr && !std::env::var("KINETIX_AV1_NOFILTER").is_ok() {
+        apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
+        apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
+        apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units);
+    }
 
     Ok(())
 }
