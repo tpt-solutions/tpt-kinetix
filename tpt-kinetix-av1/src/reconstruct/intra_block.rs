@@ -68,8 +68,8 @@ impl<'a> TileDecodeState<'a> {
         // by 1 bit for every block in the tile — a progressive, accumulating
         // corruption.
         if self.allow_intrabc {
-            let use_intrabc = self.dec.read_literal(1);
-            if use_intrabc == 1 {
+            let use_intrabc = self.mode_cdfs.read_use_intrabc(&mut self.dec);
+            if use_intrabc {
                 // IBC block: full decode (MV read + block-copy reconstruction)
                 // is not yet implemented. Return an error so the frame is
                 // flagged not-pixel-exact rather than producing garbage from
@@ -143,7 +143,14 @@ impl<'a> TileDecodeState<'a> {
         // `intra_angle_info_uv()`, per the `intra_frame_mode_info()` syntax
         // order.
         let cfl_alpha = if has_chroma && uv_mode == UV_CFL_PRED {
-            Some(self.mode_cdfs.read_cfl_alphas(&mut self.dec))
+            let a = self.mode_cdfs.read_cfl_alphas(&mut self.dec);
+            if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                eprintln!(
+                    "KTRACE CFLALPHA mi=({mi_col},{mi_row}) a={a:?} r={}",
+                    self.dec.raw_state().0
+                );
+            }
+            Some(a)
         } else {
             None
         };
@@ -199,8 +206,14 @@ impl<'a> TileDecodeState<'a> {
         // block still signals its transform size (it just has no residual to
         // apply it to). Previously gating this on `!skip` silently desynced
         // every skipped keyframe block whenever `TxMode == TX_MODE_SELECT`.
+        // AV1 §5.11.15 `read_tx_size`: the `tx_depth` symbol is read only when
+        // `MiSize > BLOCK_4X4` — a 4×4 block always uses `TX_4X4` with no
+        // signalled depth. Omitting the `bsize > BLOCK_4X4` gate made every
+        // 4×4 intra block consume a spurious `tx_depth` symbol under
+        // `TX_MODE_SELECT`, desyncing the tile (first caught on mandelbrot at
+        // mi (16,18)).
         let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if self.tx_mode_select && !self.lossless {
+        let luma_tx = if bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
             self.read_tx_size(bsize, max_tx, mi_row, mi_col)
         } else {
             max_tx
@@ -267,6 +280,38 @@ impl<'a> TileDecodeState<'a> {
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+
+        // `get_filter_type(plane)` (AV1 spec §7.11.2.9): the directional-
+        // prediction edge filter uses the stronger strength/upsample
+        // thresholds when the block's above or left neighbour uses a SMOOTH*
+        // mode. `haveAbove`/`haveLeft` here are block-origin availability
+        // relative to the tile (matching the neighbour-mode grids, which are
+        // only written for reconstructed blocks in this tile).
+        let have_above_blk = mi_row > self.tile_px_y0 / MI_SIZE;
+        let have_left_blk = mi_col > self.tile_px_x0 / MI_SIZE;
+        let smooth_above_y = have_above_blk
+            && self
+                .ymode_above
+                .get(mi_col)
+                .is_some_and(|m| is_smooth_intra_mode(*m));
+        let smooth_left_y = have_left_blk
+            && self
+                .ymode_left
+                .get(mi_row)
+                .is_some_and(|m| is_smooth_intra_mode(*m));
+        let filter_type_y = i32::from(smooth_above_y || smooth_left_y);
+        let smooth_above_uv = have_above_blk
+            && self
+                .uv_above
+                .get(mi_col)
+                .is_some_and(|m| is_smooth_intra_mode(*m));
+        let smooth_left_uv = have_left_blk
+            && self
+                .uv_left
+                .get(mi_row)
+                .is_some_and(|m| is_smooth_intra_mode(*m));
+        let filter_type_uv = i32::from(smooth_above_uv || smooth_left_uv);
+
         // Reconstruct luma transform blocks.
         let luma_tx_w = av1::TX_WIDTH[luma_tx];
         let luma_tx_h = av1::TX_HEIGHT[luma_tx];
@@ -307,9 +352,24 @@ impl<'a> TileDecodeState<'a> {
         let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
         let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
 
+        // §7.11.2 `BlockDecoded` addressing (computed before the plane / grid
+        // reborrows below): `sb_mask` and the per-plane subsampling shifts
+        // for `bd_sub_index`, inlined here since `&self` methods can't be
+        // called while `self.{y,u,v}_plane` / `self.block_decoded` are
+        // mutably reborrowed.
+        let bd_sb_mask = self.sb_size4() - 1;
+        let (ssx, ssy) = (self.subsampling_x as usize, self.subsampling_y as usize);
+        let bd_index = |plane: usize, px_x: usize, px_y: usize| -> (usize, usize) {
+            let (sx, sy) = if plane > 0 { (ssx, ssy) } else { (0, 0) };
+            let row = (px_y << sy) >> 2;
+            let col = (px_x << sx) >> 2;
+            ((row & bd_sb_mask) >> sy, (col & bd_sb_mask) >> sx)
+        };
+
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
+        let [bd_y, bd_u, bd_v] = &mut self.block_decoded;
 
         // Luma transform blocks (every square and rectangular `TxSize`; the
         // inverse-transform set covers all 19 AV1 spec `TxSize` values).
@@ -375,9 +435,20 @@ impl<'a> TileDecodeState<'a> {
                     skip,
                     filter_intra_mode,
                     self.enable_intra_edge_filter,
+                    filter_type_y,
                     None,
                     angle_delta_y,
                     palette_y,
+                    {
+                        let (sr, sc) = bd_index(0, px_x, px_y);
+                        BlockDecodedCtx {
+                            grid: &mut bd_y[..],
+                            sub_r: sr,
+                            sub_c: sc,
+                            step_x: luma_tx_w >> 2,
+                            step_y: luma_tx_h >> 2,
+                        }
+                    },
                 )?;
             }
         }
@@ -558,9 +629,20 @@ impl<'a> TileDecodeState<'a> {
                         skip,
                         None,
                         self.enable_intra_edge_filter,
+                        filter_type_uv,
                         cfl_u,
                         angle_delta_uv,
                         palette_u,
+                        {
+                            let (sr, sc) = bd_index(1, cpx_x, cpx_y);
+                            BlockDecodedCtx {
+                                grid: &mut bd_u[..],
+                                sub_r: sr,
+                                sub_c: sc,
+                                step_x: cw >> 2,
+                                step_y: ch >> 2,
+                            }
+                        },
                     )?;
                     reconstruct_tx_block(
                         &mut self.dec,
@@ -580,9 +662,20 @@ impl<'a> TileDecodeState<'a> {
                         skip,
                         None,
                         self.enable_intra_edge_filter,
+                        filter_type_uv,
                         cfl_v,
                         angle_delta_uv,
                         palette_v,
+                        {
+                            let (sr, sc) = bd_index(2, cpx_x, cpx_y);
+                            BlockDecodedCtx {
+                                grid: &mut bd_v[..],
+                                sub_r: sr,
+                                sub_c: sc,
+                                step_x: cw >> 2,
+                                step_y: ch >> 2,
+                            }
+                        },
                     )?;
                 }
             }

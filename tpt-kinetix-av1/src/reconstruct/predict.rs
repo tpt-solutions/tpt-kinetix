@@ -278,8 +278,8 @@ fn dr_get_dy(angle: i32) -> i32 {
 const DIR_OFF: usize = 8;
 
 /// `IntraEdgeFilterStrength` (AV1 spec / libaom `intra_edge_filter_strength`).
-/// `filter_type` is 0 for the common (no smooth neighbour) case; tracking the
-/// neighbour smooth-mode flag is not yet wired, so 0 is used.
+/// `filter_type` is 0 for the common (no smooth neighbour) case and 1 when the
+/// block's above/left neighbour uses a SMOOTH* mode (AV1 §7.11.2.9).
 fn intra_edge_filter_strength(bs0: i32, bs1: i32, delta: i32, filter_type: i32) -> i32 {
     let d = delta.abs();
     let blk_wh = bs0 + bs1;
@@ -521,10 +521,13 @@ fn dr_z3(left: &[i32], off: usize, upsample: bool, dy: i32, w: usize, h: usize, 
 
 /// Directional prediction (AV1 spec §7.11.2.4).
 ///
-/// `enable_intra_edge_filter` comes from the sequence header; per spec the
-/// intra-edge filter is skipped for chroma in 4:2:0 (both axes subsampled), so
-/// the caller passes `is_luma` to gate it (for 4:2:0 chroma this is always
-/// false). The nominal angles follow libaom's `mode_to_angle_map`; note the
+/// `enable_intra_edge_filter` comes from the sequence header and gates the
+/// edge filter / upsampling for **both** luma and chroma (AV1 §7.11.2.4 has no
+/// plane restriction; dav1d applies it identically in its chroma directional
+/// path). `filter_type` is the smooth-neighbour `filterType` (AV1 §7.11.2.9),
+/// derived by the caller from the above/left neighbour prediction modes; it
+/// selects the stronger edge-filter strength / upsample thresholds. The
+/// nominal angles follow libaom's `mode_to_angle_map`; note the
 /// mode named `D207_PRED` uses nominal angle **203** (not 207) — the "207" is a
 /// legacy VP9-style label and the AV1 prediction math uses 203.
 #[allow(clippy::too_many_arguments)]
@@ -537,7 +540,10 @@ fn predict_directional(
     h: usize,
     out: &mut [i32],
     enable_intra_edge_filter: bool,
-    is_luma: bool,
+    // Smooth-neighbour `filterType` (AV1 §7.11.2.9 `get_filter_type`): 1 when
+    // the block's above or left neighbour uses a SMOOTH* intra mode, else 0.
+    // Selects the stronger edge-filter strength / upsample thresholds.
+    filter_type: i32,
     angle_delta: i32,
     have_above: bool,
     have_left: bool,
@@ -573,16 +579,22 @@ fn predict_directional(
     let n = w + h;
     let mut above = vec![tl; DIR_OFF + 2 * n + 8];
     let mut lcol = vec![tl; DIR_OFF + 2 * n + 8];
-    above[DIR_OFF..(DIR_OFF + w)].copy_from_slice(&top[..w]);
-    if w > 0 {
-        for i in w..(2 * n) {
-            above[DIR_OFF + i] = top[w - 1];
+    // `top`/`left` are filled to length `w + h == n` by `block_borders`
+    // (including the real above-right / below-left extension when those
+    // neighbours are reconstructed); copy that in, then replicate the last
+    // entry to fill the upsampling headroom.
+    let top_n = top.len().min(2 * n);
+    above[DIR_OFF..(DIR_OFF + top_n)].copy_from_slice(&top[..top_n]);
+    if top_n > 0 {
+        for i in top_n..(2 * n) {
+            above[DIR_OFF + i] = top[top_n - 1];
         }
     }
-    lcol[DIR_OFF..(DIR_OFF + h)].copy_from_slice(&left[..h]);
-    if h > 0 {
-        for i in h..(2 * n) {
-            lcol[DIR_OFF + i] = left[h - 1];
+    let left_n = left.len().min(2 * n);
+    lcol[DIR_OFF..(DIR_OFF + left_n)].copy_from_slice(&left[..left_n]);
+    if left_n > 0 {
+        for i in left_n..(2 * n) {
+            lcol[DIR_OFF + i] = left[left_n - 1];
         }
     }
     above[DIR_OFF - 1] = tl;
@@ -592,9 +604,9 @@ fn predict_directional(
 
     let mut upsample_above = false;
     let mut upsample_left = false;
-    if enable_intra_edge_filter && is_luma {
+    if enable_intra_edge_filter {
         const AB_LE: usize = 1;
-        const FILTER_TYPE: i32 = 0; // neighbour smooth-mode detection not wired
+        let filter_type = filter_type.clamp(0, 1);
         if need_above && need_left && (w + h >= 24) {
             filter_intra_edge_corner(&mut above, &mut lcol, DIR_OFF);
         }
@@ -613,24 +625,24 @@ fn predict_directional(
         // remaining plane extent.
         if have_above && w > 0 {
             let strength =
-                intra_edge_filter_strength(w as i32, h as i32, p_angle - 90, FILTER_TYPE);
+                intra_edge_filter_strength(w as i32, h as i32, p_angle - 90, filter_type);
             let n_px = w.min(avail_w) + AB_LE + if need_right { h } else { 0 };
             filter_intra_edge(&mut above, DIR_OFF, n_px, strength);
         }
         if have_left && h > 0 {
             let strength =
-                intra_edge_filter_strength(h as i32, w as i32, p_angle - 180, FILTER_TYPE);
+                intra_edge_filter_strength(h as i32, w as i32, p_angle - 180, filter_type);
             let n_px = h.min(avail_h) + AB_LE + if need_bottom { w } else { 0 };
             filter_intra_edge(&mut lcol, DIR_OFF, n_px, strength);
         }
         upsample_above =
-            need_above && use_intra_edge_upsample(w as i32, h as i32, p_angle - 90, FILTER_TYPE);
+            need_above && use_intra_edge_upsample(w as i32, h as i32, p_angle - 90, filter_type);
         if upsample_above {
             let n_px = w + if need_right { h } else { 0 };
             above = upsample_intra_edge(&above, DIR_OFF, n_px, tl);
         }
         upsample_left =
-            need_left && use_intra_edge_upsample(h as i32, w as i32, p_angle - 180, FILTER_TYPE);
+            need_left && use_intra_edge_upsample(h as i32, w as i32, p_angle - 180, filter_type);
         if upsample_left {
             let n_px = h + if need_bottom { w } else { 0 };
             lcol = upsample_intra_edge(&lcol, DIR_OFF, n_px, tl);
@@ -675,7 +687,7 @@ pub(super) fn predict_intra_block(
     h: usize,
     out: &mut [i32],
     enable_intra_edge_filter: bool,
-    is_luma: bool,
+    filter_type: i32,
     angle_delta: i32,
     avail_w: usize,
     avail_h: usize,
@@ -706,7 +718,7 @@ pub(super) fn predict_intra_block(
                 h,
                 out,
                 enable_intra_edge_filter,
-                is_luma,
+                filter_type,
                 angle_delta,
                 *have_above,
                 *have_left,
@@ -977,6 +989,8 @@ pub(super) fn block_borders(
     tx_h: usize,
     px_x: usize,
     px_y: usize,
+    have_above_right: bool,
+    have_below_left: bool,
 ) -> BlockBorders {
     let sample = |x: usize, y: usize| -> i32 {
         plane
@@ -990,26 +1004,35 @@ pub(super) fn block_borders(
     let have_left = px_x > 0;
     let max_x = width.saturating_sub(1);
     let max_y = height.saturating_sub(1);
+    // AV1 §7.11.2: `AboveRow`/`LeftCol` are filled for `i = 0 ..= w + h - 1`
+    // (the directional predictors read that far past the block). The
+    // `aboveLimit`/`leftLimit` clamp uses `2*w`/`2*h` when the above-right /
+    // below-left neighbour transform blocks are already reconstructed, else
+    // `w`/`h` (which makes samples past the block edge replicate the last
+    // real one).
+    let ext = tx_w + tx_h;
+    let above_limit = max_x.min(px_x + if have_above_right { 2 * tx_w } else { tx_w } - 1);
+    let left_limit = max_y.min(px_y + if have_below_left { 2 * tx_h } else { tx_h } - 1);
 
-    // AboveRow[i], i = 0..w-1.
+    // AboveRow[i], i = 0..w+h-1.
     let top: Vec<i32> = if !have_above && have_left {
-        vec![sample(px_x - 1, px_y); tx_w]
+        vec![sample(px_x - 1, px_y); ext]
     } else if !have_above {
-        vec![MID_SAMPLE - 1; tx_w]
+        vec![MID_SAMPLE - 1; ext]
     } else {
-        (0..tx_w)
-            .map(|i| sample((px_x + i).min(max_x), px_y - 1))
+        (0..ext)
+            .map(|i| sample(above_limit.min(px_x + i), px_y - 1))
             .collect()
     };
 
-    // LeftCol[i], i = 0..h-1.
+    // LeftCol[i], i = 0..w+h-1.
     let left: Vec<i32> = if !have_left && have_above {
-        vec![sample(px_x, px_y - 1); tx_h]
+        vec![sample(px_x, px_y - 1); ext]
     } else if !have_left {
-        vec![MID_SAMPLE + 1; tx_h]
+        vec![MID_SAMPLE + 1; ext]
     } else {
-        (0..tx_h)
-            .map(|i| sample(px_x - 1, (px_y + i).min(max_y)))
+        (0..ext)
+            .map(|i| sample(px_x - 1, left_limit.min(px_y + i)))
             .collect()
     };
 

@@ -317,6 +317,11 @@ pub struct FrameHeader {
     // Inter-prediction gating (§5.9.2 / §7.10 / §7.11.3 — Phase E)
     /// `allow_high_precision_mv` (§5.9.2): MV precision (1/8 vs 1/4 pel).
     pub allow_high_precision_mv: bool,
+    /// `force_integer_mv` (§5.9.11): when set, all MV fractional components
+    /// are forced (the `mv_fr` / `mv_class0_fr` reads are skipped and treated
+    /// as 3). Always true for intra frames; otherwise per the screen-content
+    /// tools path.
+    pub force_integer_mv: bool,
     /// `interpolation_filter` (§6.8.2 / §7.11.3): `EIGHTTAP_REGULAR`=0,
     /// `EIGHTTAP_SMOOTH`=1, `EIGHTTAP_SHARP`=2, `BILINEAR`=3, `SWITCHABLE`=4.
     pub interpolation_filter: u8,
@@ -862,6 +867,7 @@ impl FrameHeader {
                 last_frame_idx,
                 gold_frame_idx,
                 allow_high_precision_mv,
+                force_integer_mv,
                 interpolation_filter,
                 is_motion_mode_switchable,
                 use_ref_frame_mvs,

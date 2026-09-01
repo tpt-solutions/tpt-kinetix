@@ -1,5 +1,44 @@
 use super::*;
 
+/// `BlockDecoded` state for one transform block (AV1 §7.11.2): the current
+/// superblock's per-4×4 "already reconstructed" grid for this plane, plus the
+/// transform block's SB-relative 4×4 origin and size. `reconstruct_tx_block`
+/// derives `haveAboveRight`/`haveBelowLeft` from `grid` before prediction and
+/// marks the covered cells `1` afterwards.
+pub(super) struct BlockDecodedCtx<'a> {
+    pub(super) grid: &'a mut [u8],
+    pub(super) sub_r: usize,
+    pub(super) sub_c: usize,
+    pub(super) step_x: usize,
+    pub(super) step_y: usize,
+}
+
+impl BlockDecodedCtx<'_> {
+    fn get(&self, sr: isize, sc: isize) -> bool {
+        if sr < -1 || sc < -1 {
+            return false;
+        }
+        let idx = ((sr + 1) as usize) * BD_STRIDE + ((sc + 1) as usize);
+        self.grid.get(idx).copied().unwrap_or(0) != 0
+    }
+    fn have_above_right(&self) -> bool {
+        self.get(self.sub_r as isize - 1, (self.sub_c + self.step_x) as isize)
+    }
+    fn have_below_left(&self) -> bool {
+        self.get((self.sub_r + self.step_y) as isize, self.sub_c as isize - 1)
+    }
+    fn mark(&mut self) {
+        for i in 0..self.step_y {
+            for j in 0..self.step_x {
+                let idx = (self.sub_r + i + 1) * BD_STRIDE + (self.sub_c + j + 1);
+                if idx < self.grid.len() {
+                    self.grid[idx] = 1;
+                }
+            }
+        }
+    }
+}
+
 /// Decode one intra transform block: read its coefficients with the symbol
 /// decoder, dequantize, inverse transform, predict, and write the result back
 /// into `samples`.
@@ -22,9 +61,14 @@ pub(super) fn reconstruct_tx_block(
     skip: bool,
     filter_intra_mode: Option<usize>,
     enable_intra_edge_filter: bool,
+    // Smooth-neighbour `filterType` (AV1 §7.11.2.9) for this block's plane —
+    // 1 if the above/left neighbour uses a SMOOTH* mode, else 0. Only consumed
+    // by directional prediction's edge filter / upsample thresholds.
+    filter_type: i32,
     cfl: Option<CflParams>,
     angle_delta: i32,
     palette: Option<PaletteBlockInfo>,
+    mut bd: BlockDecodedCtx<'_>,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
     let tx_w = av1::TX_WIDTH[internal_tx_size];
@@ -143,7 +187,18 @@ pub(super) fn reconstruct_tx_block(
         eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
     }
 
-    let borders = block_borders(samples, stride, plane_w, plane_h, tx_w, tx_h, px_x, px_y);
+    let borders = block_borders(
+        samples,
+        stride,
+        plane_w,
+        plane_h,
+        tx_w,
+        tx_h,
+        px_x,
+        px_y,
+        bd.have_above_right(),
+        bd.have_below_left(),
+    );
     if dbg {
         eprintln!(
             "DBG top={:?} left={:?} tl={} have_above={} have_left={}",
@@ -182,7 +237,7 @@ pub(super) fn reconstruct_tx_block(
                 tx_h,
                 &mut pred,
                 enable_intra_edge_filter,
-                blk.plane == 0,
+                filter_type,
                 angle_delta,
                 plane_w.saturating_sub(px_x),
                 plane_h.saturating_sub(px_y),
@@ -229,6 +284,9 @@ pub(super) fn reconstruct_tx_block(
             }
         }
     }
+
+    // §7.11.2: this transform block's 4×4 cells are now reconstructed.
+    bd.mark();
 
     Ok(())
 }

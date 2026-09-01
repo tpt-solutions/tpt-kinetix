@@ -111,6 +111,10 @@ impl<'a> TileDecodeState<'a> {
         // partition tree.
         self.read_deltas = self.delta_q_present;
         self.clear_cdef(mi_row, mi_col);
+        // §7.11.2 `BlockDecoded` reset — the per-4×4 "already reconstructed"
+        // grid consulted for `haveAboveRight`/`haveBelowLeft` in directional
+        // intra prediction.
+        self.clear_block_decoded_flags(mi_row, mi_col);
         // §5.11.2 `decode_tile()`: `read_lr(r, c, sbSize)` is read for every
         // superblock *before* `decode_partition()`. When any plane uses loop
         // restoration these are real arithmetic-coded symbols; skipping them

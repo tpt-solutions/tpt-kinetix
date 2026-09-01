@@ -72,6 +72,7 @@ fn decode_with(
         CdefDeltaParams::default(),
         true,     // frame_is_intra — these robustness tests exercise the intra path
         false,    // allow_high_precision_mv
+        false,    // force_integer_mv
         false,    // reference_select
         0,        // interpolation_filter (EIGHTTAP_REGULAR)
         [0u8; 9], // ref_to_slot

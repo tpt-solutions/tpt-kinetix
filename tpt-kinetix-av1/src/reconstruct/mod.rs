@@ -48,7 +48,7 @@ use crate::{
     inter::{
         build_mv_candidates, decode_ref_and_mv, motion_compensate, read_single_ref_name, InterCdfs,
         Mv, RefFrames, RefSlot, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME,
-        INTERP_BILINEAR, INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NONE_FRAME,
+        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NONE_FRAME,
     },
     loop_filter::{apply_post_filters, FrameMeta},
     obu::{BitReader, SequenceHeaderObu},
@@ -78,10 +78,24 @@ const D113_PRED: u8 = 5;
 const D157_PRED: u8 = 6;
 const D207_PRED: u8 = 7;
 const D67_PRED: u8 = 8;
-const SMOOTH_V: u8 = 9;
-const SMOOTH_H: u8 = 10;
-const SMOOTH: u8 = 11;
+// AV1 spec Table (intra mode enum): SMOOTH_PRED=9, SMOOTH_V_PRED=10,
+// SMOOTH_H_PRED=11. These were previously rotated (SMOOTH_V=9, SMOOTH_H=10,
+// SMOOTH=11), so a decoded `SMOOTH_V_PRED` (10) ran `predict_smooth_h` and a
+// `SMOOTH_PRED` (9) ran `predict_smooth_v` — benign on flat content (all three
+// collapse to a near-constant) but a visible axis-swapped gradient on real
+// content (first caught on a testsrc chroma `SMOOTH_V` block vs dav1d).
+const SMOOTH: u8 = 9;
+const SMOOTH_V: u8 = 10;
+const SMOOTH_H: u8 = 11;
 const PAETH: u8 = 12;
+
+/// `is_smooth()` (AV1 spec §7.11.2.9): the SMOOTH / SMOOTH_V / SMOOTH_H intra
+/// modes, used to derive the directional-prediction edge-filter `filterType`
+/// from a neighbouring block's prediction mode.
+#[inline]
+pub(super) const fn is_smooth_intra_mode(mode: u8) -> bool {
+    mode == SMOOTH || mode == SMOOTH_V || mode == SMOOTH_H
+}
 
 /// `is_directional_mode()` (AV1 spec §5.11.44).
 #[inline]
@@ -579,6 +593,8 @@ struct TileDecodeState<'a> {
     frame_is_intra: bool,
     /// `allow_high_precision_mv` (§5.9.2): 1/8-pel vs 1/4-pel MV precision.
     allow_high_precision_mv: bool,
+    /// `force_integer_mv` (§5.9.11): MV fractional reads forced to 3.
+    force_integer_mv: bool,
     /// `reference_select` (§6.8.2): compound prediction allowed.
     reference_select: bool,
     /// Frame-level `interpolation_filter` (0..4, §6.8.2); `SWITCHABLE`=4 means a
@@ -633,7 +649,21 @@ struct TileDecodeState<'a> {
     /// Tile-local chroma buffer dimensions (stride = `tile_cw`).
     tile_cw: usize,
     tile_ch: usize,
+    /// `BlockDecoded[plane]` (AV1 §7.11.2 / §5.11.34): one flag per 4×4 sample
+    /// block of the *current superblock*, reset per SB by
+    /// `clear_block_decoded_flags` and set as each transform block is
+    /// reconstructed. Consulted for the `haveAboveRight` / `haveBelowLeft`
+    /// inputs to directional intra prediction (which control whether
+    /// `AboveRow`/`LeftCol` extend into real reconstructed neighbour samples
+    /// or replicate the last one). Indexed `[(sr + 1) * BD_STRIDE + (sc + 1)]`
+    /// where `sr`/`sc` are SB-relative 4×4 indices in `-1 ..= sbSize4>>sub`.
+    block_decoded: [Vec<u8>; 3],
 }
+
+/// Row stride of `block_decoded`: `-1 ..= 32` plus slack (128×128 SB = 32 luma
+/// 4×4 units per side; `+2` for the `-1` guard row/col and the trailing
+/// `sbSize4` index).
+const BD_STRIDE: usize = 35;
 
 impl<'a> TileDecodeState<'a> {
     #[allow(clippy::too_many_arguments)]
@@ -672,6 +702,7 @@ impl<'a> TileDecodeState<'a> {
         cdef_delta: CdefDeltaParams,
         frame_is_intra: bool,
         allow_high_precision_mv: bool,
+        force_integer_mv: bool,
         reference_select: bool,
         interpolation_filter: u8,
         ref_to_slot: [u8; 9],
@@ -745,6 +776,7 @@ impl<'a> TileDecodeState<'a> {
             cdef_idx: std::collections::HashMap::new(),
             frame_is_intra,
             allow_high_precision_mv,
+            force_integer_mv,
             reference_select,
             interpolation_filter,
             ref_to_slot,
@@ -791,6 +823,56 @@ impl<'a> TileDecodeState<'a> {
             palette_y_colors_left: vec![Vec::new(); mi_rows],
             palette_u_colors_above: vec![Vec::new(); mi_cols],
             palette_u_colors_left: vec![Vec::new(); mi_rows],
+            block_decoded: [
+                vec![0u8; BD_STRIDE * BD_STRIDE],
+                vec![0u8; BD_STRIDE * BD_STRIDE],
+                vec![0u8; BD_STRIDE * BD_STRIDE],
+            ],
+        }
+    }
+
+    /// SB-relative 4×4 grid size (`Num_4x4_Blocks_Wide[sbSize]`).
+    #[inline]
+    fn sb_size4(&self) -> usize {
+        if self.use_128x128_superblock {
+            32
+        } else {
+            16
+        }
+    }
+
+    /// `clear_block_decoded_flags(r, c, sbSize4)` (AV1 §5.11.34). Marks the row
+    /// above and column left of the superblock as decoded (they hold the
+    /// already-reconstructed neighbour samples), everything else as not.
+    fn clear_block_decoded_flags(&mut self, mi_row: usize, mi_col: usize) {
+        let sb4 = self.sb_size4() as isize;
+        for plane in 0..(self.num_planes as usize).min(3) {
+            let (subx, suby) = if plane > 0 {
+                (self.subsampling_x as usize, self.subsampling_y as usize)
+            } else {
+                (0, 0)
+            };
+            let sb_w4 = ((self.mi_cols - mi_col) >> subx) as isize;
+            let sb_h4 = ((self.mi_rows - mi_row) >> suby) as isize;
+            let s4y = sb4 >> suby;
+            let s4x = sb4 >> subx;
+            let grid = &mut self.block_decoded[plane];
+            for cell in grid.iter_mut() {
+                *cell = 0;
+            }
+            for y in -1..=s4y {
+                for x in -1..=s4x {
+                    let v = u8::from((y < 0 && x < sb_w4) || (x < 0 && y < sb_h4));
+                    let idx = ((y + 1) as usize) * BD_STRIDE + ((x + 1) as usize);
+                    if idx < grid.len() {
+                        grid[idx] = v;
+                    }
+                }
+            }
+            let idx = ((s4y + 1) as usize) * BD_STRIDE; // [s4y][-1]
+            if idx < grid.len() {
+                grid[idx] = 0;
+            }
         }
     }
 
@@ -980,6 +1062,7 @@ pub fn decode_tile_group(
     cdef_delta: CdefDeltaParams,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
+    force_integer_mv: bool,
     reference_select: bool,
     interpolation_filter: u8,
     ref_to_slot: [u8; 9],
@@ -1078,6 +1161,7 @@ pub fn decode_tile_group(
         cdef_delta,
         frame_is_intra,
         allow_high_precision_mv,
+        force_integer_mv,
         reference_select,
         interpolation_filter,
         ref_to_slot,
@@ -1463,6 +1547,7 @@ pub fn reconstruct_av1_frame(
                 },
                 frame_is_intra,
                 frame_header.allow_high_precision_mv,
+                frame_header.force_integer_mv,
                 frame_header.reference_select,
                 frame_header.interpolation_filter,
                 ref_to_slot,

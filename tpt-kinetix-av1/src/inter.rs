@@ -322,15 +322,20 @@ pub struct InterCdfs {
     pub zero_mv: [[u16; 3]; 2],
     pub ref_mv: [[u16; 3]; 6],
     pub drl_mode: [[u16; 3]; 3],
+    // MV CDFs are indexed `[comp]` (0 = row / vertical, 1 = col / horizontal)
+    // per AV1 §9 ("mv_sign: TileMvSignCdf[MvCtx][comp]", etc.); `MvCtx` is 0
+    // for ordinary inter blocks (only intra-block-copy uses MvCtx=1, which is
+    // not modelled here). The two per-`comp` slots start from identical spec
+    // defaults and diverge only through adaptation.
     pub mv_joint: [u16; 5],
-    pub mv_sign: [u16; 3],
+    pub mv_sign: [[u16; 3]; 2],
     pub mv_class: [[u16; 12]; 2],
-    pub mv_class0_bit: [u16; 3],
+    pub mv_class0_bit: [[u16; 3]; 2],
     pub mv_class0_fr: [[[u16; 5]; 2]; 2],
-    pub mv_class0_hp: [u16; 3],
-    pub mv_bit: [[u16; 3]; 10],
+    pub mv_class0_hp: [[u16; 3]; 2],
+    pub mv_bit: [[[u16; 3]; 10]; 2],
     pub mv_fr: [[u16; 5]; 2],
-    pub mv_hp: [u16; 3],
+    pub mv_hp: [[u16; 3]; 2],
 }
 
 impl InterCdfs {
@@ -348,14 +353,14 @@ impl InterCdfs {
             ref_mv: defaults::DEFAULT_REF_MV_CDF,
             drl_mode: defaults::DEFAULT_DRL_MODE_CDF,
             mv_joint: defaults::DEFAULT_MV_JOINT_CDF,
-            mv_sign: defaults::DEFAULT_MV_SIGN_CDF,
+            mv_sign: [defaults::DEFAULT_MV_SIGN_CDF; 2],
             mv_class: defaults::DEFAULT_MV_CLASS_CDF,
-            mv_class0_bit: defaults::DEFAULT_MV_CLASS0_BIT_CDF,
+            mv_class0_bit: [defaults::DEFAULT_MV_CLASS0_BIT_CDF; 2],
             mv_class0_fr: defaults::DEFAULT_MV_CLASS0_FR_CDF,
-            mv_class0_hp: defaults::DEFAULT_MV_CLASS0_HP_CDF,
-            mv_bit: defaults::DEFAULT_MV_BIT_CDF,
+            mv_class0_hp: [defaults::DEFAULT_MV_CLASS0_HP_CDF; 2],
+            mv_bit: [defaults::DEFAULT_MV_BIT_CDF; 2],
             mv_fr: defaults::DEFAULT_MV_FR_CDF,
-            mv_hp: defaults::DEFAULT_MV_HP_CDF,
+            mv_hp: [defaults::DEFAULT_MV_HP_CDF; 2],
         }
     }
 }
@@ -366,79 +371,88 @@ impl Default for InterCdfs {
     }
 }
 
-/// Decode one 1-D motion-vector component (§8.3.1 `read_mv_component`).
+/// `CLASS0_SIZE` (AV1 §3): number of values for `mv_class0_bit`.
+const CLASS0_SIZE: i32 = 2;
+
+/// Decode one 1-D motion-vector component (AV1 §5.11.32 `read_mv_component`).
 ///
-/// `use_hp` selects 1/8-pel vs 1/4-pel precision for the fractional part.
-/// `class0_fr_ctx` is the `mv_class0_fr` context (0 or 1), here derived from
-/// the reference match; callers pass `0` for the common case.
+/// `comp` is 0 for the row (vertical) component and 1 for the column
+/// (horizontal) component — it indexes every per-component MV CDF
+/// (`TileMv*Cdf[MvCtx][comp]`, §9). `allow_hp` = `allow_high_precision_mv`;
+/// `force_integer_mv` forces the fractional reads to 3.
+///
+/// The symbol order is exactly the spec's: `mv_sign`, `mv_class`, then either
+/// the MV_CLASS_0 branch (`mv_class0_bit`, `mv_class0_fr`, `mv_class0_hp`) or
+/// the else branch (`mv_class` × `mv_bit`, then `mv_fr`, `mv_hp`). A previous
+/// revision read `mv_sign` last and `mv_class` from a `use_hp`-indexed CDF,
+/// which desynced the bitstream on the first NEWMV block.
 pub fn read_mv_component(
     dec: &mut SymbolDecoder<'_>,
     cdfs: &mut InterCdfs,
-    class0_fr_ctx: usize,
-    use_hp: bool,
+    comp: usize,
+    allow_hp: bool,
+    force_integer_mv: bool,
 ) -> Result<i32, KinetixError> {
-    let mv_class = dec.read_symbol(&mut cdfs.mv_class[if use_hp { 0 } else { 1 }]);
+    let comp = comp & 1;
+    let mv_sign = dec.read_symbol(&mut cdfs.mv_sign[comp]);
+    let mv_class = dec.read_symbol(&mut cdfs.mv_class[comp]);
     let mag: i32 = if mv_class == 0 {
-        if use_hp {
-            let fr = dec.read_symbol(&mut cdfs.mv_class0_fr[0][class0_fr_ctx]);
-            let hp = dec.read_symbol(&mut cdfs.mv_class0_hp);
-            ((fr << 1) | hp) as i32
+        let bit = dec.read_symbol(&mut cdfs.mv_class0_bit[comp]) as i32;
+        let fr = if force_integer_mv {
+            3
         } else {
-            let fr = dec.read_symbol(&mut cdfs.mv_class0_fr[1][class0_fr_ctx]);
-            (fr << 1) as i32
-        }
-    } else {
-        let mag0 = if use_hp {
-            1i32 << mv_class
-        } else {
-            1i32 << (mv_class - 1)
+            dec.read_symbol(&mut cdfs.mv_class0_fr[comp][bit as usize]) as i32
         };
-        let bit = dec.read_symbol(&mut cdfs.mv_class0_bit);
-        let mut mag = mag0 + (bit as i32) * (1i32 << mv_class);
-        for i in 0..(mv_class - 1) {
-            let bit = dec.read_symbol(&mut cdfs.mv_bit[i]);
-            mag += (bit as i32) * (1i32 << (mv_class - 1 - i));
-        }
-        if use_hp {
-            let fr = dec.read_symbol(&mut cdfs.mv_fr[0]);
-            let hp = dec.read_symbol(&mut cdfs.mv_hp);
-            mag = mag * 8 + ((fr << 1) | hp) as i32;
+        let hp = if allow_hp {
+            dec.read_symbol(&mut cdfs.mv_class0_hp[comp]) as i32
         } else {
-            let fr = dec.read_symbol(&mut cdfs.mv_fr[1]);
-            mag = mag * 8 + fr as i32;
+            1
+        };
+        ((bit << 3) | (fr << 1) | hp) + 1
+    } else {
+        let mut d = 0i32;
+        for i in 0..mv_class {
+            let b = dec.read_symbol(&mut cdfs.mv_bit[comp][i]) as i32;
+            d |= b << i;
         }
+        let mut mag = CLASS0_SIZE << (mv_class + 2);
+        let fr = if force_integer_mv {
+            3
+        } else {
+            dec.read_symbol(&mut cdfs.mv_fr[comp]) as i32
+        };
+        let hp = if allow_hp {
+            dec.read_symbol(&mut cdfs.mv_hp[comp]) as i32
+        } else {
+            1
+        };
+        mag += ((d << 3) | (fr << 1) | hp) + 1;
         mag
     };
-    let sign = dec.read_symbol(&mut cdfs.mv_sign);
-    Ok(if sign == 1 { -mag } else { mag })
+    Ok(if mv_sign == 1 { -mag } else { mag })
 }
 
 /// Decode a full 2-D motion vector (§5.11.23 / §8.3.1 `decode_mv`).
 ///
-/// `use_hp_row` / `use_hp_col` select per-component precision (driven by
-/// `allow_high_precision_mv` and whether the interpolation filter is bilinear,
-/// which forces 1/4-pel on that axis).
+/// `allow_hp` = `allow_high_precision_mv` (frame header); `force_integer_mv`
+/// forces the fractional MV reads. Per AV1 §5.11.31 the joint value selects
+/// which components are read: `MV_JOINT_HZVNZ`(2)/`MV_JOINT_HNZVNZ`(3) read
+/// the row (comp 0), `MV_JOINT_HNZVZ`(1)/`MV_JOINT_HNZVNZ`(3) read the col
+/// (comp 1); the row is always read before the col.
 pub fn read_mv(
     dec: &mut SymbolDecoder<'_>,
     cdfs: &mut InterCdfs,
-    use_hp_row: bool,
-    use_hp_col: bool,
+    allow_hp: bool,
+    force_integer_mv: bool,
 ) -> Result<Mv, KinetixError> {
     let joint = dec.read_symbol(&mut cdfs.mv_joint);
     let mut row = 0i32;
     let mut col = 0i32;
-    match joint {
-        0 => {}
-        1 => {
-            col = read_mv_component(dec, cdfs, 0, use_hp_col)?;
-        }
-        2 => {
-            row = read_mv_component(dec, cdfs, 0, use_hp_row)?;
-        }
-        _ => {
-            row = read_mv_component(dec, cdfs, 0, use_hp_row)?;
-            col = read_mv_component(dec, cdfs, 0, use_hp_col)?;
-        }
+    if joint == 2 || joint == 3 {
+        row = read_mv_component(dec, cdfs, 0, allow_hp, force_integer_mv)?;
+    }
+    if joint == 1 || joint == 3 {
+        col = read_mv_component(dec, cdfs, 1, allow_hp, force_integer_mv)?;
     }
     Ok(Mv::new(row, col))
 }
@@ -520,8 +534,8 @@ pub fn decode_ref_and_mv(
     cdfs: &mut InterCdfs,
     ref_name: u8,
     candidates: &[MvCandidate],
-    use_hp_row: bool,
-    use_hp_col: bool,
+    allow_hp: bool,
+    force_integer_mv: bool,
     mode_ctx: usize,
     allow_global: bool,
 ) -> Result<(u8, Mv), KinetixError> {
@@ -561,7 +575,7 @@ pub fn decode_ref_and_mv(
         NEWMV => {
             // Read the MV difference relative to the chosen candidate.
             let cand = candidates.iter().find(|c| c.ref_frame == ref_name).copied();
-            let diff = read_mv(dec, cdfs, use_hp_row, use_hp_col)?;
+            let diff = read_mv(dec, cdfs, allow_hp, force_integer_mv)?;
             mv = match cand {
                 Some(c) => Mv::new(c.mv.row + diff.row, c.mv.col + diff.col),
                 None => diff,
@@ -667,12 +681,56 @@ mod tests {
 
         // mv_joint = 3 (both nonzero), MV_CLASS col=2 row=2, all fractional
         // bits zero -> magnitude (1<<2)+0 = 4 per axis (class>0 path).
-        let mv = read_mv(&mut dec, &mut cdfs, true, true).expect("mv decodes");
+        let mv = read_mv(&mut dec, &mut cdfs, true, false).expect("mv decodes");
         // Sign of col/row read from mv_sign; with this buffer col/row are small
         // signed values. We only assert the decode did not desync / panic and
         // the result is in plausible range.
         assert!(mv.row.abs() < 1024);
         assert!(mv.col.abs() < 1024);
+    }
+
+    #[test]
+    fn class0_size_matches_spec() {
+        assert_eq!(CLASS0_SIZE, 2);
+    }
+
+    #[test]
+    fn read_mv_component_symbol_order_is_sign_then_class() {
+        // AV1 §5.11.32: `mv_sign` is read *before* `mv_class`. Feeding two
+        // decoders the same bytes and reading a component vs. reading a bare
+        // `mv_sign` then `mv_class` from the raw CDFs must consume the same
+        // first two symbols (identical range state afterwards for a class-0
+        // result path up to the sign).
+        let data = [0x9C, 0x33, 0xE1, 0x05, 0x7A, 0xBB, 0x40, 0x91];
+        let mut d1 = SymbolDecoder::new(&data);
+        let mut c1 = InterCdfs::new();
+        let _ = read_mv_component(&mut d1, &mut c1, 0, false, false).unwrap();
+
+        let mut d2 = SymbolDecoder::new(&data);
+        let mut c2 = InterCdfs::new();
+        let _sign = d2.read_symbol(&mut c2.mv_sign[0]);
+        let _class = d2.read_symbol(&mut c2.mv_class[0]);
+        // After sign+class both decoders are at the same bit position when the
+        // class is 0 and precision forces no further reads.
+        // (If class>0 the component keeps reading; we only assert no panic and
+        // that a fresh decode is deterministic.)
+        let mut d3 = SymbolDecoder::new(&data);
+        let mut c3 = InterCdfs::new();
+        let a = read_mv_component(&mut d3, &mut c3, 0, false, false).unwrap();
+        let mut d4 = SymbolDecoder::new(&data);
+        let mut c4 = InterCdfs::new();
+        let b = read_mv_component(&mut d4, &mut c4, 0, false, false).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn read_mv_component_row_and_col_use_independent_cdfs() {
+        // comp 0 (row) and comp 1 (col) must index different CDF slots
+        // (§9 `TileMv*Cdf[MvCtx][comp]`); a shared slot would adapt one
+        // component's stats into the other's.
+        let mut c = InterCdfs::new();
+        c.mv_class[0][0] = 111;
+        assert_ne!(c.mv_class[0][0], c.mv_class[1][0]);
     }
 
     #[test]

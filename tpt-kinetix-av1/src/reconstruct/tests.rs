@@ -1,5 +1,55 @@
 use super::*;
 
+/// Pin the SMOOTH intra-mode enum constants to the AV1 spec ordering
+/// (`SMOOTH_PRED=9, SMOOTH_V_PRED=10, SMOOTH_H_PRED=11`). They were briefly
+/// rotated (`SMOOTH_V=9, SMOOTH_H=10, SMOOTH=11`), which silently ran
+/// `SMOOTH_V_PRED` blocks through `predict_smooth_h` and vice-versa —
+/// invisible on flat content, an axis-swapped gradient on real content.
+#[test]
+fn smooth_intra_mode_constants_match_spec_ordering() {
+    assert_eq!(SMOOTH, 9);
+    assert_eq!(SMOOTH_V, 10);
+    assert_eq!(SMOOTH_H, 11);
+    assert_eq!(PAETH, 12);
+}
+
+/// `is_smooth()` (AV1 §7.11.2.9) recognises exactly the three SMOOTH* intra
+/// modes — the predicate feeding directional prediction's `filterType`.
+#[test]
+fn is_smooth_intra_mode_matches_spec_set() {
+    for m in 0u8..=13 {
+        let expect = m == SMOOTH || m == SMOOTH_V || m == SMOOTH_H;
+        assert_eq!(is_smooth_intra_mode(m), expect, "mode {m}");
+    }
+    assert!(!is_smooth_intra_mode(DC_PRED));
+    assert!(!is_smooth_intra_mode(PAETH));
+}
+
+/// A non-zero `filterType` lowers the edge-filter strength / upsample gate
+/// thresholds (AV1 §7.11.2.9), so a sub-pel directional block next to a
+/// SMOOTH neighbour can predict differently than the same block in isolation.
+#[test]
+fn directional_prediction_filter_type_changes_sub_pel_output() {
+    let size = 8;
+    let jagged: Vec<i32> = (0..2 * size)
+        .map(|i| if i % 2 == 0 { 20 } else { 230 })
+        .collect();
+    let borders = BlockBorders {
+        top: jagged.clone(),
+        left: jagged,
+        tl: 128,
+        have_above: true,
+        have_left: true,
+    };
+    // D67_PRED: nominal 67, a zone-1 sub-pel angle where upsampling is gated
+    // by `filterType` (blk_wh 16 -> allowed only when filterType == 0).
+    let mut a = vec![0i32; size * size];
+    let mut b = vec![0i32; size * size];
+    predict_intra_block(D67_PRED, &borders, size, size, &mut a, true, 0, 0, size, size);
+    predict_intra_block(D67_PRED, &borders, size, size, &mut b, true, 1, 0, size, size);
+    assert_ne!(a, b, "filterType should affect the sub-pel edge/upsample path");
+}
+
 /// The same generated buffer the `coeff` module's oracle tests use, so
 /// this exercises a payload that is known to decode to real coefficients
 /// rather than immediately hitting `all_zero` everywhere.
@@ -46,6 +96,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         CdefDeltaParams::default(),
         true,
         false,
+        false, // force_integer_mv
         false,
         0,
         [0u8; 9],
@@ -96,7 +147,7 @@ fn directional_prediction_covers_all_modes_without_panicking() {
                 have_left: true,
             };
             predict_intra_block(
-                mode, &borders, size, size, &mut out, true, true, 0, size, size,
+                mode, &borders, size, size, &mut out, true, 0, 0, size, size,
             );
             assert!(
                 out.iter().all(|&v| (0..=255).contains(&v)),
@@ -150,7 +201,7 @@ fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
         size,
         &mut pred_filtered,
         true,
-        true,
+        0,
         0,
         size,
         size,
@@ -163,7 +214,7 @@ fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
         size,
         &mut pred_unfiltered,
         false,
-        true,
+        0,
         0,
         size,
         size,
@@ -500,6 +551,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         false,
         false,
         false,
+        false,
         INTERP_SWITCHABLE,
         [0u8; 9],
         RefFrames::empty(),
@@ -570,6 +622,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         false, // use_128x128_superblock
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
+        false,
         false,
         false,
         false,
@@ -646,6 +699,7 @@ fn make_cdef_delta_state<'a>(
         false,
         false,
         false,
+        false,
         INTERP_SWITCHABLE,
         [0u8; 9],
         RefFrames::empty(),
@@ -708,6 +762,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         true,
         false,
         false,
+        false,
         INTERP_SWITCHABLE,
         [0u8; 9],
         RefFrames::empty(),
@@ -749,6 +804,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
+        false,
         false,
         false,
         INTERP_SWITCHABLE,
@@ -1047,6 +1103,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         false,
         false,
         false,
+        false,
         INTERP_SWITCHABLE,
         [0u8; 9],
         RefFrames::empty(),
@@ -1244,22 +1301,49 @@ fn borders_fixture(w: usize, h: usize) -> Vec<u8> {
 }
 
 #[test]
+fn block_borders_extends_left_col_into_real_below_left_samples_when_available() {
+    // §7.11.2: `LeftCol[i]` for i up to `w+h-1` reads real reconstructed
+    // samples down to `y + 2*h - 1` when `haveBelowLeft` is set (the
+    // below-left transform block is reconstructed), rather than replicating
+    // the last one at `y + h - 1`. This is the fix for directional (zone-3)
+    // prediction on non-flat content — mandelbrot Y went 24.4 → 46 dB.
+    let (w, h) = (16usize, 16usize);
+    let plane = borders_fixture(w, h);
+    // 4×4 tx block at (4, 4): left column is x=3, rows 4..; ext = 8.
+    let with_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, true);
+    let without_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false);
+    // First `h` (4) entries identical (real left column of the block).
+    assert_eq!(with_bl.left[..4], without_bl.left[..4]);
+    // Beyond that: `with_bl` keeps reading down column 3 (rows 8..11);
+    // `without_bl` replicates row 7.
+    assert_eq!(
+        with_bl.left[4..8].to_vec(),
+        (8..12)
+            .map(|y| i32::from(plane[y * w + 3]))
+            .collect::<Vec<_>>()
+    );
+    assert!(without_bl.left[4..8]
+        .iter()
+        .all(|&v| v == without_bl.left[3]));
+}
+
+#[test]
 fn block_borders_tracks_availability_from_tile_local_position() {
     let (w, h) = (16usize, 16usize);
     let plane = borders_fixture(w, h);
 
     // Tile-local origin: neither side available (spec §5.11.35's
     // `haveLeft = AvailL || x > 0` is false at x == 0 within a tile).
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false);
     assert!(!b.have_above && !b.have_left);
     // Top row / left column both away from the tile edge: both available.
-    let b = block_borders(&plane, w, w, h, 4, 4, 4, 4);
+    let b = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false);
     assert!(b.have_above && b.have_left);
     // Left edge, second row: above only.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 4);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 4, false, false);
     assert!(b.have_above && !b.have_left);
     // Top row, second column: left only.
-    let b = block_borders(&plane, w, w, h, 4, 4, 4, 0);
+    let b = block_borders(&plane, w, w, h, 4, 4, 4, 0, false, false);
     assert!(!b.have_above && b.have_left);
 }
 
@@ -1272,40 +1356,40 @@ fn block_borders_substitute_values_match_spec_7_11_2_1() {
     // LeftCol = (1 << (BitDepth-1)) + 1 = 129, AboveRow[-1] = 128. The
     // ±1 asymmetry is normative (it keeps PAETH_PRED's ties
     // deterministic) — a single shared 128 fill is what this replaced.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0);
-    assert_eq!(b.top, vec![127; 4]);
-    assert_eq!(b.left, vec![129; 4]);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false);
+    assert_eq!(b.top, vec![127; 8]);
+    assert_eq!(b.left, vec![129; 8]);
     assert_eq!(b.tl, 128);
 
     // Above unavailable, left available: AboveRow[i] = CurrFrame[y][x-1]
     // (replicated), AboveRow[-1] = the same sample.
-    let b = block_borders(&plane, w, w, h, 4, 4, 8, 0);
+    let b = block_borders(&plane, w, w, h, 4, 4, 8, 0, false, false);
     let expected = i32::from(plane[7]); // (x-1, y) = (7, 0)
-    assert_eq!(b.top, vec![expected; 4]);
+    assert_eq!(b.top, vec![expected; 8]);
     assert_eq!(b.tl, expected);
     // LeftCol still comes from the real left column.
     assert_eq!(
         b.left,
-        (0..4)
-            .map(|i| i32::from(plane[i * w + 7]))
+        (0..8)
+            .map(|i| i32::from(plane[i.min(3) * w + 7]))
             .collect::<Vec<_>>()
     );
 
     // Left unavailable, above available: LeftCol[i] = CurrFrame[y-1][x]
     // (replicated), AboveRow[-1] = the same sample.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 8);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 8, false, false);
     let expected = i32::from(plane[7 * w]); // (x, y-1) = (0, 7)
-    assert_eq!(b.left, vec![expected; 4]);
+    assert_eq!(b.left, vec![expected; 8]);
     assert_eq!(b.tl, expected);
     assert_eq!(
         b.top,
-        (0..4)
-            .map(|i| i32::from(plane[7 * w + i]))
+        (0..8)
+            .map(|i| i32::from(plane[7 * w + i.min(3)]))
             .collect::<Vec<_>>()
     );
 
     // Both available: the corner is the real diagonal neighbour.
-    let b = block_borders(&plane, w, w, h, 4, 4, 8, 8);
+    let b = block_borders(&plane, w, w, h, 4, 4, 8, 8, false, false);
     assert_eq!(b.tl, i32::from(plane[7 * w + 7]));
 }
 
@@ -1320,11 +1404,11 @@ fn block_borders_replicate_the_last_sample_past_the_frame_edge() {
     let (w, h) = (12usize, 12usize);
     let plane = borders_fixture(w, h);
 
-    let b = block_borders(&plane, w, w, h, 8, 8, 8, 8);
+    let b = block_borders(&plane, w, w, h, 8, 8, 8, 8, false, false);
     // Above row: x = 8..15 clamped to maxX = 11 -> samples 8,9,10,11 then
     // 11 repeated.
     let above_row = 7 * w;
-    let expected_top: Vec<i32> = (0..8)
+    let expected_top: Vec<i32> = (0..16)
         .map(|i| i32::from(plane[above_row + (8 + i).min(11)]))
         .collect();
     assert_eq!(b.top, expected_top);
@@ -1334,7 +1418,7 @@ fn block_borders_replicate_the_last_sample_past_the_frame_edge() {
         b.top
     );
     // Left column: y = 8..15 clamped to maxY = 11.
-    let expected_left: Vec<i32> = (0..8)
+    let expected_left: Vec<i32> = (0..16)
         .map(|i| i32::from(plane[(8 + i).min(11) * w + 7]))
         .collect();
     assert_eq!(b.left, expected_left);
@@ -1353,7 +1437,7 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0, 8, 8);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8);
     assert!(out.iter().all(|&v| v == 200), "got {out:?}");
 
     // And with neither side real, the mode dispatch must reach the
@@ -1367,7 +1451,7 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, true, 0, 8, 8);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8);
     assert!(out.iter().all(|&v| v == 128), "got {out:?}");
 }
 

@@ -36,6 +36,9 @@ pub(super) struct ModeCdfs {
     #[allow(dead_code)]
     pub(super) txfm_split: [[u16; 3]; 21],
     pub(super) skip: [[u16; 3]; 3],
+    /// `TileIntrabcCdf` (§8.3.2) — one adaptive 2-symbol CDF, used for the
+    /// `use_intrabc` flag on intra frames with `allow_intrabc`.
+    pub(super) intrabc: [u16; 3],
     pub(super) segment_id: [[u16; 9]; 3],
     /// `TileDeltaQCdf` (§8.3.2 `delta_q_abs`'s cdf selection) — one shared
     /// adaptive CDF for the whole tile, not indexed by context.
@@ -318,6 +321,8 @@ impl ModeCdfs {
             tx_64x64: DEFAULT_TX_64X64_CDF,
             txfm_split: DEFAULT_TXFM_SPLIT_CDF,
             skip: DEFAULT_SKIP_CDF,
+            // `Default_Intrabc_Cdf` (§ "Default CDF tables"): `{ 30531 }`.
+            intrabc: [30531, 32768, 0],
             // AV1 default `segment_id_cdf` is not yet transcribed into
             // `cdf_tables_gen`; a uniform 8-way CDF is used as a placeholder so
             // segmentation-enabled frames stay bit-aligned. Replace with the
@@ -657,6 +662,12 @@ impl ModeCdfs {
             _ => &mut self.tx_64x64[ctx],
         };
         dec.read_symbol(cdf)
+    }
+
+    /// `use_intrabc` (§5.11.7): an `S()` symbol read with the adaptive
+    /// `TileIntrabcCdf`, **not** a literal bit.
+    pub(super) fn read_use_intrabc(&mut self, dec: &mut SymbolDecoder<'_>) -> bool {
+        dec.read_symbol(&mut self.intrabc) == 1
     }
 
     pub(super) fn read_skip(&mut self, dec: &mut SymbolDecoder<'_>, ctx: usize) -> usize {

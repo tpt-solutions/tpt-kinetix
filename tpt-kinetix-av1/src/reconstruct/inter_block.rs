@@ -255,10 +255,11 @@ impl<'a> TileDecodeState<'a> {
             .collect();
         let candidates = build_mv_candidates(&above, &left, &block_refs, 2);
 
-        // Per reference: read mode + MV (§5.11.23).
+        // Per reference: read mode + MV (§5.11.23). MV precision is
+        // `allow_high_precision_mv` (1/8 vs 1/4 pel); `force_integer_mv`
+        // skips the fractional reads entirely.
         let mut mvs = [Mv::default(); 2];
-        let use_hp_row = allow_hp && frame_filter != INTERP_BILINEAR;
-        let use_hp_col = allow_hp && frame_filter != INTERP_BILINEAR;
+        let force_integer_mv = self.force_integer_mv;
         for i in 0..2 {
             let r = ref_names[i];
             if r == NONE_FRAME {
@@ -269,8 +270,8 @@ impl<'a> TileDecodeState<'a> {
                 &mut self.map_inter_cdfs,
                 r,
                 &candidates,
-                use_hp_row,
-                use_hp_col,
+                allow_hp,
+                force_integer_mv,
                 0,
                 false,
             )?;

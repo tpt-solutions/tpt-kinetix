@@ -25,7 +25,13 @@ fn main() {
         is_key_frame: true,
     };
     match dec.decode(&packet) {
-        Ok(Some(f)) => eprintln!("decoded {}x{} ({} bytes)", f.width, f.height, f.data.len()),
+        Ok(Some(f)) => {
+            eprintln!("decoded {}x{} ({} bytes)", f.width, f.height, f.data.len());
+            if let Ok(out) = std::env::var("KINETIX_AV1_DUMP_FINAL") {
+                std::fs::write(&out, &f.data).expect("write final yuv");
+                eprintln!("wrote final YUV to {out}");
+            }
+        }
         Ok(None) => eprintln!("no frame"),
         Err(e) => eprintln!("error: {e}"),
     }
