@@ -34,6 +34,10 @@ pub struct AdtsHeader {
     pub sampling_frequency_index: u8,
     /// Channel count derived from the channel configuration.
     pub channels: u8,
+    /// The raw 3-bit `channel_configuration` field (0 = "defined in the PCE",
+    /// 1..=7 the standard default layouts). Drives the decoder's element →
+    /// output-slot channel reordering.
+    pub channel_configuration: u8,
     /// Whether a 2-byte CRC follows the fixed header (header is 9 bytes if so).
     pub has_crc: bool,
     /// Total frame length in bytes, *including* this header.
@@ -88,6 +92,7 @@ impl AdtsHeader {
             sample_rate,
             sampling_frequency_index: sf_index,
             channels,
+            channel_configuration: channel_config,
             has_crc,
             frame_length,
             header_len,

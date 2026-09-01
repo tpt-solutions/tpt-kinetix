@@ -73,6 +73,7 @@ pub fn apply_stereo(
             let ms_eligible = matches!(l_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB)
                 && matches!(r_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB);
             let ms_used = ms_eligible
+                && std::env::var_os("AAC_DBG_NO_MS").is_none()
                 && match ms_mask_present {
                     0 => false,
                     2 => true,
@@ -114,25 +115,45 @@ pub fn apply_stereo(
             };
             let l_int = l_bt != ZERO_HCB && is_intensity(l_bt);
             let r_int = r_bt != ZERO_HCB && is_intensity(r_bt);
-            if l_int != r_int {
-                // Exactly one channel is the intensity (zero) channel.
-                let is_pos = if l_int {
-                    left_scalefactor.get(lidx).copied()
+            if l_int != r_int && std::env::var_os("AAC_DBG_NO_IS").is_none() {
+                // Exactly one channel is the intensity (zero) channel — always
+                // the right channel (ch1) in a conformant CPE; the left branch
+                // is defensive only.
+                let (is_pos, int_bt) = if l_int {
+                    (left_scalefactor.get(lidx).copied(), l_bt)
                 } else {
-                    right_scalefactor.get(ridx).copied()
+                    (right_scalefactor.get(ridx).copied(), r_bt)
                 };
                 let Some(is_pos) = is_pos else {
                     continue;
                 };
                 let int_is_left = l_int;
-                // `is_pos` is a DPCM-accumulated, bitstream-controlled value, so
-                // `2^(-0.25·is_pos)` overflows f32 to +inf for large negative
-                // values; an infinite factor then becomes NaN downstream. Clamp
-                // to stay finite (see `dequant::dequant_scale` for the same
-                // hazard and reasoning).
+                // ISO 14496-3 §4.6.8.2.3 / ffmpeg `apply_intensity_stereo`: the
+                // sign is `c = -1 + 2·(band_type - 14)` — `INTENSITY_HCB` (15) →
+                // +1, `INTENSITY_HCB2` (14) → -1 — and is flipped by the M/S
+                // mask bit for the band when `ms_mask_present != 0`. It is
+                // **not** derived from the sign of `is_position` (the earlier
+                // `is_pos < 0` here was wrong).
+                let ms_flip = match ms_mask_present {
+                    0 => false,
+                    2 => true,
+                    _ => ms_mask.get(lidx).copied().unwrap_or(false),
+                };
+                let mut c = if int_bt == crate::scalefactors::INTENSITY_HCB {
+                    1.0f32
+                } else {
+                    -1.0f32
+                };
+                if ms_flip {
+                    c = -c;
+                }
+                // `is_pos` is a DPCM-accumulated, bitstream-controlled value;
+                // ffmpeg clips it to [-155, 100] before the table lookup, and
+                // `2^(-0.25·is_pos)` would otherwise overflow f32 to +inf (then
+                // NaN downstream) for large negatives — see `dequant_scale`.
+                let is_pos = is_pos.clamp(-155, 100);
                 let scale = (2.0f64).powf(-0.25 * is_pos as f64).clamp(0.0, 1.0e30) as f32;
-                let sign = if is_pos < 0 { -1.0f32 } else { 1.0f32 };
-                let factor = scale * sign;
+                let factor = scale * c;
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     for line in 0..width {
@@ -316,7 +337,8 @@ mod tests {
     #[test]
     fn intensity_stereo_scales_from_other_channel() {
         // Left is the intensity (zero) channel for band 0; right carries signal.
-        // A positive intensity position yields factor = 2^(-0.25*pos).
+        // `INTENSITY_HCB` (15) → sign +1; factor = +2^(-0.25*pos). The sign does
+        // not depend on the sign of `pos`.
         let ics = ics_long(2);
         let swb = [0u16, 64, 128];
         let mut left = [0.0f32; 1024];
@@ -360,7 +382,7 @@ mod tests {
         );
         assert!(left[..64].iter().all(|&l| (l - 4.0).abs() < 1e-5));
 
-        // pos = -4 → factor -2.0 → left = right * -2 = -16.0.
+        // pos = -4 → magnitude 2.0, sign still +1 (INTENSITY_HCB) → left = 16.0.
         for l in left.iter_mut().take(64) {
             *l = 0.0;
         }
@@ -376,8 +398,44 @@ mod tests {
             &[],
             &swb,
         );
-        assert!(left[..64].iter().all(|&l| (l - (-16.0)).abs() < 1e-4));
-        let _ = &mut l_bt;
+        assert!(left[..64].iter().all(|&l| (l - 16.0).abs() < 1e-4));
+
+        // INTENSITY_HCB2 (14) → sign -1: pos = 0 → factor -1 → left = -8.0.
+        l_bt[0] = INTENSITY_HCB2;
+        for l in left.iter_mut().take(64) {
+            *l = 0.0;
+        }
+        apply_stereo(
+            &mut left,
+            &mut right,
+            &ics,
+            &l_bt,
+            &r_bt,
+            &[0i32, 0],
+            &[0i32, 0],
+            0,
+            &[],
+            &swb,
+        );
+        assert!(left[..64].iter().all(|&l| (l - (-8.0)).abs() < 1e-5));
+
+        // M/S mask bit set (ms_mask_present = 1) flips the sign back to +1.
+        for l in left.iter_mut().take(64) {
+            *l = 0.0;
+        }
+        apply_stereo(
+            &mut left,
+            &mut right,
+            &ics,
+            &l_bt,
+            &r_bt,
+            &[0i32, 0],
+            &[0i32, 0],
+            1,
+            &[true, false],
+            &swb,
+        );
+        assert!(left[..64].iter().all(|&l| (l - 8.0).abs() < 1e-5));
     }
 
     #[test]

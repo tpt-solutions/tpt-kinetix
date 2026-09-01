@@ -255,6 +255,12 @@ impl AacDecoder {
                             cpe.left.ics.predictor_data_present,
                             cpe.right.ics.predictor_data_present,
                         );
+                        if cpe.right.ics.window_sequence.is_eight_short() {
+                            eprintln!(
+                                "  R band_type={:?}\n  ms_mask={:?}",
+                                cpe.right.band_type, cpe.ms_mask
+                            );
+                        }
                     }
                     let left_ch = Self::decode_channel_stream(
                         &cpe.left,
@@ -532,8 +538,15 @@ impl AacDecoder {
             return Ok(None);
         }
 
-        // Interleave channels.
+        // Reorder the element-order planes into the standard decoder output
+        // channel order (WAV/SMPTE, matching ffmpeg) for the default channel
+        // configurations. `output_slot_to_element[k]` is the element-order plane
+        // index that belongs in output slot `k`.
         let ch_count = pcm_planes.len();
+        let order = output_channel_order(hdr.channel_configuration, ch_count);
+        let pcm_planes: Vec<&Vec<f32>> = order.iter().map(|&e| &pcm_planes[e]).collect();
+
+        // Interleave channels.
         let mut interleaved = Vec::with_capacity(1024 * ch_count);
         for i in 0..1024 {
             for plane in &pcm_planes {
@@ -587,18 +600,24 @@ impl AacDecoder {
             apply_pulse(p, swb, &mut coeffs);
         }
         let gindex = group_base_offsets(ics);
-        apply_pns(
-            ics,
-            &stream.band_type,
-            &stream.scalefactor,
-            swb,
-            stream.global_gain,
-            &gindex,
-            pns_rng,
-            &mut coeffs,
-        );
+        if std::env::var_os("AAC_DBG_NO_PNS").is_none() {
+            apply_pns(
+                ics,
+                &stream.band_type,
+                &stream.scalefactor,
+                swb,
+                stream.global_gain,
+                &gindex,
+                pns_rng,
+                &mut coeffs,
+            );
+        }
         if let Some(tns) = &stream.tns {
-            apply_tns(tns, ics, &mut coeffs, swb);
+            // `AAC_DBG_NO_TNS` skips the TNS filter stage — a bisection hook for
+            // isolating TNS-vs-other reconstruction error against the reference.
+            if std::env::var_os("AAC_DBG_NO_TNS").is_none() {
+                apply_tns(tns, ics, &mut coeffs, swb);
+            }
         }
         let dbg_bands_frame = std::env::var("AAC_DBG_BANDS_FRAME")
             .ok()
@@ -632,6 +651,36 @@ impl AacDecoder {
         }
         Ok(coeffs)
     }
+}
+
+/// Map the raw AAC `channel_configuration` to the element-order → output-slot
+/// permutation. `order[k]` is the index (in element/parse order) of the decoded
+/// plane that belongs in output slot `k`.
+///
+/// Elements arrive in bitstream order — for the default configs that is
+/// `SCE(front-centre), CPE(front L/R), [CPE(surround L/R)], [LFE], …` — but the
+/// decoder must emit channels in the standard WAV/SMPTE order (front L, front R,
+/// front centre, LFE, surround L, surround R, …), matching ffmpeg's native
+/// channel layout. Config 0 (layout defined by a `program_config_element`, which
+/// this decoder does not yet parse) and any element count that does not match
+/// the configuration fall back to identity order.
+fn output_channel_order(channel_configuration: u8, n_channels: usize) -> Vec<usize> {
+    let perm: &[usize] = match (channel_configuration, n_channels) {
+        (1, 1) => &[0],
+        (2, 2) => &[0, 1],
+        // SCE C, CPE L/R → L, R, C
+        (3, 3) => &[1, 2, 0],
+        // SCE C, CPE L/R, SCE Cs → L, R, C, Cs
+        (4, 4) => &[1, 2, 0, 3],
+        // SCE C, CPE L/R, CPE Ls/Rs → L, R, C, Ls, Rs
+        (5, 5) => &[1, 2, 0, 3, 4],
+        // SCE C, CPE L/R, CPE Ls/Rs, LFE → L, R, C, LFE, Ls, Rs
+        (6, 6) => &[1, 2, 0, 5, 3, 4],
+        // SCE C, CPE Lc/Rc, CPE L/R, CPE Ls/Rs, LFE → L, R, C, LFE, Ls, Rs, Lc, Rc
+        (7, 8) => &[3, 4, 0, 7, 5, 6, 1, 2],
+        _ => return (0..n_channels).collect(),
+    };
+    perm.to_vec()
 }
 
 /// Return the decoded channel stream for an SCE or LFE element.
@@ -784,6 +833,27 @@ fn short_synthesis(
     }
     for i in 0..nflat_ls {
         state.overlap[nflat_ls + nshort + i] = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::output_channel_order;
+
+    #[test]
+    fn default_layouts_reorder_to_wav_order() {
+        // mono / stereo: identity.
+        assert_eq!(output_channel_order(1, 1), vec![0]);
+        assert_eq!(output_channel_order(2, 2), vec![0, 1]);
+        // SCE(C) + CPE(L,R) → L, R, C.
+        assert_eq!(output_channel_order(3, 3), vec![1, 2, 0]);
+        // 5.1: SCE(C), CPE(L,R), CPE(Ls,Rs), LFE → L, R, C, LFE, Ls, Rs.
+        assert_eq!(output_channel_order(6, 6), vec![1, 2, 0, 5, 3, 4]);
+        // 7.1.
+        assert_eq!(output_channel_order(7, 8), vec![3, 4, 0, 7, 5, 6, 1, 2]);
+        // config 0 (PCE-defined) and count mismatches fall back to identity.
+        assert_eq!(output_channel_order(0, 6), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(output_channel_order(6, 5), vec![0, 1, 2, 3, 4]);
     }
 }
 
@@ -2296,7 +2366,11 @@ mod synth_tests {
         }
         eprintln!("best lag = {best_lag}, corr = {best_corr:.6}");
 
-        let n_off = if best_lag < 0 { (-best_lag) as usize } else { 0 };
+        let n_off = if best_lag < 0 {
+            (-best_lag) as usize
+        } else {
+            0
+        };
         let r_off = if best_lag > 0 { best_lag as usize } else { 0 };
 
         // Per-frame / per-half native-vs-reference residual, to localize the error
@@ -2311,9 +2385,7 @@ mod synth_tests {
                     h1 = h1.max((native_full[n0 + i] - ref_full[r0 + i]).abs());
                     h2 = h2.max((native_full[n0 + 512 + i] - ref_full[r0 + 512 + i]).abs());
                 }
-                eprintln!(
-                    "  frame {f}: 1st-half maxdiff={h1:.5}  2nd-half maxdiff={h2:.5}"
-                );
+                eprintln!("  frame {f}: 1st-half maxdiff={h1:.5}  2nd-half maxdiff={h2:.5}");
             }
         }
 
@@ -2423,14 +2495,14 @@ mod synth_tests {
         }
         let cpe = cpe.expect("CPE in frame 25");
         let mut rng = PnsRandom::new();
-        let mut mid = AacDecoder::decode_channel_stream(
+        let mid = AacDecoder::decode_channel_stream(
             &cpe.left,
             hdr.sampling_frequency_index as usize,
             25,
             &mut rng,
         )
         .unwrap();
-        let mut side = AacDecoder::decode_channel_stream(
+        let side = AacDecoder::decode_channel_stream(
             &cpe.right,
             hdr.sampling_frequency_index as usize,
             25,

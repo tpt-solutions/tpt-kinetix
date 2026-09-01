@@ -1196,3 +1196,121 @@
         TDAC-projection alternative to ffmpeg instrumentation). This is the sole
         remaining accuracy issue and is correctly excluded from the aggregate
         gate; `capabilities().pixel_exact` stays `false` until it is closed.
+
+   — **2026-09-02: `sweep_stereo_44100` CLOSED — it was TNS, not the ESC
+        codebook.** The prior sessions' "single ESC coefficient ~1 unit off"
+        localization was an artifact of the unreliable single-bin TDAC
+        projection; re-running `dbg_sweep_frame25_coeff_error` showed the error
+        spanning frames 24 (has TNS) and 25 (frame 25's output is fully
+        explained by frame 24's 2nd-half overlap — frame 26 output is
+        bit-exact, so frame 25's own coeffs are clean). `tns.rs` had three
+        real bugs, all found by diffing against ffmpeg's `apply_tns` /
+        `ff_tns_tmp2_map` / `compute_lpc_coefs`:
+        1. **Reflection-coefficient tables were wrong.** The code used a
+           symmetric sine table (`[0,-0.43,-0.78,-0.97,-0.97,-0.78,-0.43,0]`)
+           indexed by resolution only. ISO §4.6.9.3 uses two different
+           quantizer steps (`iqfac` for non-negative codes, `iqfac_m` for
+           negative) so the upper-half codes come out *positive*
+           (`…,-0.97, +0.98,+0.87,+0.64,+0.34`), and the table is also
+           selected by `coef_compress` (4 tables: `_0_3`,`_0_4`,`_1_3`,`_1_4`).
+           Replaced with ffmpeg's `ff_tns_tmp2_map` values, indexed by the raw
+           `coef_res+3-coef_compress`-bit codeword.
+        2. **Step-up recursion sign.** `reflection_to_direct` used
+           `b_i = a_i - k·a_{m-i}`; spec/ffmpeg use `+`. Filter still subtracts.
+        3. **Filter band ordering.** Filters were applied bottom-up from band 0
+           (`band_start += length`). Spec/ffmpeg number them from the top:
+           `bottom = num_swb; top = bottom; bottom = max(0, top-length)` per
+           filter, with line indices clamped to `min(tns_max_bands, max_sfb)`.
+           Added `tns_max_bands` to `TnsData` for the clamp.
+        Result: `sweep_stereo_44100` max-abs-diff **0.0725 → 2.8e-6** (float
+        epsilon), correlation 1.0000. All 7 conformance cases now bit-exact;
+        the `sweep_stereo_44100` special-case exclusion is removed from
+        `conformance_aac.rs` — it flows into the aggregate `worst_diff < 0.05`
+        / `worst_corr > 0.95` gate as a real assertion. `cargo test -p
+        tpt-kinetix-aac` (70 lib + conformance + 4 proptest/doc targets),
+        `cargo clippy -p tpt-kinetix-aac --all-targets -D warnings`, and
+        `cargo fmt -p tpt-kinetix-aac --check` all clean.
+        **Follow-up same session — per-window TNS + short-block corpus:**
+        `parse_tns`/`apply_tns` were rewritten to loop `ics.num_windows()`
+        (8 for EIGHT_SHORT, 1 otherwise) instead of `num_window_groups()` —
+        ISO §4.4.2.4 `tns_data()` and ffmpeg's `decode_tns`/`apply_tns` are
+        both per individual window, not per group; the old code applied one
+        group's filter set to every window in the group (latent bug for grouped
+        EIGHT_SHORT). Added `IcsInfo::num_windows()`. `apply_tns` now indexes
+        `tns.filters[w]` and filters `coeffs[w*128 + line_start .. w*128 + line_end]`.
+        Added two conformance cases (`transient_stereo_44100` /
+        `transient_mono_44100` — percussive click trains) that force ~100
+        EIGHT_SHORT frames with LONG↔SHORT transitions; both decode bit-exact
+        (~4e-7). Note: this ffmpeg build's encoder does not turn TNS on for
+        short blocks on these signals, so the per-window short-block TNS path
+        is correct-by-construction vs ffmpeg but still lacks a bit-exact
+        conformance case — a source that provokes short-block TNS is the
+        remaining coverage gap.
+
+        **Follow-up same session — intensity-stereo sign bug fixed.** Added a
+        24 kbit/s stereo conformance case (`intensity_stereo_24k`, shared low
+        tone + partly-decorrelated 6 kHz tone) that forces the encoder to use
+        intensity stereo; it decoded ~0.004 off. `stereo.rs`'s intensity path
+        derived the combination sign from `is_position < 0`, which is wrong:
+        ISO §4.6.8.2.3 / ffmpeg `apply_intensity_stereo` use
+        `c = -1 + 2·(band_type - 14)` (INTENSITY_HCB 15 → +1, INTENSITY_HCB2
+        14 → -1), flipped by the band's M/S mask bit when `ms_mask_present != 0`;
+        the magnitude is `2^(-0.25·is_position)` (is_position clipped to
+        [-155, 100], which we also weren't doing). Fixed; `intensity_stereo_24k`
+        now bit-exact. Corpus is 10 cases, all bit-exact — tones (4 rates),
+        noise (2 colors), chirp, transients/short-block (2), intensity stereo.
+
+        **Follow-up same session — probe streams: bug 2 FIXED, bugs 1/3 are one
+        bug (mechanically verified, residual unexplained).**
+        Probed with ad-hoc encodes (`aevalsrc` graphs) + `decode_aac_with_ffmpeg`.
+
+        - **5.1 / multichannel output channel order — FIXED.** A 5.1 probe
+          decoded ~0.68 off; per-channel cross-correlation showed **every**
+          native channel matches a reference channel at corr 1.0000 — the
+          decode was bit-exact, just emitted in element/parse order
+          (`SCE(C), CPE(FL,FR), CPE(BL,BR), LFE`) instead of ffmpeg's
+          WAV/SMPTE order (`FL, FR, C, LFE, BL, BR`). Added
+          `AdtsHeader::channel_configuration` and
+          `decoder::output_channel_order(channel_configuration, n)` — a per-config
+          element→output-slot permutation for the default layouts 1..=7 (config 0
+          / mismatch → identity). Applied just before interleave. `surround_51_44100`
+          added to the corpus (max-diff 0.68 → 0.0023, passes the 0.05 gate).
+          The residual 0.0023 is the short-block-TNS issue below, not the remap.
+          NOTE config 7 (7.1) permutation is by spec, untested (no 8-ch probe).
+          CCE coupling is still a stub (`decode()` Pass 2 TODO; the `syntax.rs`
+          CCE parse doesn't match the spec and never reads the coupling channel's
+          own `individual_channel_stream`).
+
+        - **Short-block TNS residual (~0.05) — NOT fixed; every mechanical part
+          verified against ffmpeg n6.1 source.** A 96 kbit/s stereo probe
+          (`0.5·sin(2π·500t) | 0.5·sin(2π·3000t)·exp(-2·mod(t,0.2))`) hits an
+          EIGHT_SHORT + `ms=1` frame whose right channel has `tns_data`
+          (`n_filt` on windows 0 & 7, `len=9 order=7 dir=up`, grouped `[1,3,3,1]`).
+          `AAC_DBG_NO_TNS=1` → 0.014 diff; with our short TNS → 0.064 (TNS moves
+          us *away* from ffmpeg — so the pre-TNS spectrum is ~right and the TNS
+          op is wrong, OR the pre-TNS spectrum is 0.014-off and TNS amplifies).
+          Verified bit-for-bit against ffmpeg n6.1: `decode_tns` field bit-widths
+          & order (parse consumes exactly the ffmpeg-predicted **70 bits**),
+          the 4 `ff_tns_tmp2_map` tables + `(2·cc+cr)` index, the
+          `compute_lpc_coefs` `+k` step-up (hand-traced order-7, identical
+          output `[0, 0.657, 0, 0.298, 0, 0.184, 0]`), the AR-filter loop (a
+          verbatim flat-index port gave the *same* 0.064), `bottom = num_swb`
+          (14), `mmm = min(tns_max_bands=14, max_sfb=12) = 12`, band range
+          `swb128[5]=20 .. swb128[12]=96`, and the `w*128` de-grouped buffer
+          layout. Corpus grouped-short frames (same `sfg=54`, `max_sfb=12`) are
+          bit-exact — but **none of them carry `tns_data` before their
+          spectral_data**, so short+TNS has zero bit-exact coverage. Genuinely
+          needs the `ffmpeg_aacdec_proc_template.c` C harness (or ffmpeg
+          `av_log` instrumentation) for a `sce->coeffs` trace of this one short
+          frame pre/post TNS. `AAC_DBG_NO_TNS` bisection hook kept in `decoder.rs`.
+          (The earlier "bug 3 — grouped-short M/S residual ~0.014" was a
+          misdiagnosis: it's this same TNS issue seen with TNS disabled, i.e.
+          the size of ffmpeg's TNS contribution to that frame. Disabling M/S
+          makes the frame *worse* — 0.116 — so M/S itself is fine.)
+
+        **Not done:** `capabilities().pixel_exact` left `false` — corpus is all
+        self-generated synthetic (no real-world / ISO spec conformance vectors),
+        HE-AAC (SBR/PS) unsupported, short-block TNS residual open (above), CCE /
+        config-0 PCE layouts / 960-sample frames unimplemented, config-7 remap
+        untested. Flipping `pixel_exact` should wait for those + real-bitstream /
+        ISO-vector validation.

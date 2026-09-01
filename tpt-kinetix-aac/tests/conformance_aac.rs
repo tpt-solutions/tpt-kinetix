@@ -304,6 +304,56 @@ fn build_corpus() -> Vec<ConformanceCase> {
             "128k",
         ),
     );
+    // Percussive click train (~8 bursts/s of 1 kHz, ~50 ms each): the sharp
+    // onsets force the encoder into LONG_START → EIGHT_SHORT → LONG_STOP
+    // transitions (~100 EIGHT_SHORT frames across the corpus), exercising the
+    // short IMDCT, window grouping, and the LONG↔SHORT overlap-add glue. (This
+    // ffmpeg build's encoder does not enable TNS on short blocks for these
+    // signals, so the per-window short-block TNS path in `apply_tns` is
+    // structurally correct-by-construction against ffmpeg but not yet covered
+    // by a bit-exact conformance case — see todo-aac.md.)
+    add(
+        "transient_stereo_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='sin(2*PI*1000*t)*gt(0.05\\,mod(t\\,0.12))':s=44100:d=1.5:c=stereo",
+            2,
+            "128k",
+        ),
+    );
+    add(
+        "transient_mono_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='sin(2*PI*1400*t)*gt(0.04\\,mod(t\\,0.1))':s=44100:d=1.5",
+            1,
+            "96k",
+        ),
+    );
+    // Very low bitrate (24 kbit/s) stereo with a shared low tone + a partly
+    // decorrelated 6 kHz tone: forces the encoder to code the high band with
+    // *intensity stereo* (INTENSITY_HCB / INTENSITY_HCB2 sections in the right
+    // channel), exercising `stereo.rs`'s intensity path — its sign
+    // (`-1 + 2·(band_type-14)`, flipped by the M/S mask), scale
+    // (`2^(-0.25·is_position)`), and interaction with M/S on the same frame.
+    add(
+        "intensity_stereo_24k",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='0.5*sin(2*PI*300*t)+0.2*sin(2*PI*6000*t+sin(t*50))|0.5*sin(2*PI*300*t)+0.2*sin(2*PI*6000*t)':s=44100:d=1.0",
+            2,
+            "24k",
+        ),
+    );
+    // 5.1 surround (channel_configuration 6: SCE + CPE + CPE + LFE): exercises
+    // multi-element raw_data_block parsing, the LFE element, a second CPE with
+    // its own M/S, and the element-order → WAV-order output channel remap
+    // (`output_channel_order`).
+    add(
+        "surround_51_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='0.3*sin(2*PI*200*t)|0.3*sin(2*PI*400*t)|0.2*sin(2*PI*600*t)|0.1*sin(2*PI*80*t)|0.25*sin(2*PI*900*t)|0.25*sin(2*PI*1100*t)':channel_layout=5.1:s=44100:d=1.0",
+            6,
+            "256k",
+        ),
+    );
     // Other sample rates → different SWB tables.
     add("tone_440_stereo_48000", minimal_aac_adts(48_000, 2, 1.0));
     add("tone_440_stereo_22050", minimal_aac_adts(22_050, 2, 1.0));
@@ -380,35 +430,18 @@ fn native_aac_matches_ffmpeg_reference() {
         // max-abs-diff ~3.5e-7, correlation 1.0000). No special case needed —
         // it flows into the aggregate gate below and is now a real assertion.
 
-        // `sweep_stereo_44100` (a 200→4000 Hz linear chirp, ~0.71-peak stereo)
-        // has near-perfect shape correlation (1.0000) after the 2026-08-25
-        // `prev_shape` fix, but one outlier sample (aligned index ~7438, frame 7,
-        // OnlyLong, no TNS/pulse/PNS) still sits at ~0.0725 absolute diff against
-        // a ~0.71-peak signal — above the main 0.05 tolerance. The ESC-book
-        // codeword table, `idx_to_values` formula, escape-word format, and
-        // `dequant_scale` are all exhaustively verified against ffmpeg's live
-        // source; the localization (an isolated spectral coefficient off by ~0.14%
-        // at magnitude ~9e6 — i.e. a ~1-unit ESC-magnitude error after the
-        // super-linear `|q|^(4/3)`) could never be definitively assigned without
-        // a bit-for-bit ffmpeg reference trace (see todo-aac.md). Kept out of the
-        // aggregate gate; pinned to tight regression floors matching the current
-        // baseline so a real regression is still caught.
-        if case.label == "sweep_stereo_44100" {
-            assert!(
-                corr > 0.99,
-                "[{}] shape correlation regressed: {corr:.4} (was ~1.0000)",
-                case.label
-            );
-            assert!(
-                max_diff < 0.09,
-                "[{}] regressed well below its known baseline max-diff (~0.0725): \
-                 {max_diff}. This case is a documented open gap (see this test's \
-                 comment), not a hard pass/fail gate, but this is a much bigger \
-                 jump than the known issue — investigate as a real regression.",
-                case.label
-            );
-            continue;
-        }
+        // `sweep_stereo_44100` (a 200→4000 Hz linear chirp, ~0.71-peak stereo,
+        // window-sequence transitions + TNS) was the journal's last open gap:
+        // a single ~0.0725 outlier sample that survived ~5 sessions of
+        // ESC-codebook / dequant investigation. Root cause (2026-09-02): the
+        // TNS decode was wrong three ways — (1) the reflection-coefficient
+        // tables were the symmetric sine table instead of ISO §4.6.9.3's
+        // asymmetric `iqfac`/`iqfac_m` quantizer (ffmpeg's `ff_tns_tmp2_map`),
+        // and ignored `coef_compress` for table selection; (2) the step-up
+        // recursion used `-k` instead of `+k`; (3) filters were applied bottom-up
+        // from band 0 instead of top-down from `num_swb` with the
+        // `min(tns_max_bands, max_sfb)` clamp. All fixed — this case now decodes
+        // bit-exactly (measured ~3e-6) and flows into the aggregate gate.
 
         if max_diff > worst_diff {
             worst_diff = max_diff;
