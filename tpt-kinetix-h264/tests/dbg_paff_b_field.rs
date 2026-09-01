@@ -54,10 +54,6 @@ fn paff_b_field_decode() {
         return;
     }
 
-    let skip_db = std::env::var("BFIELD_SKIP_DEBLOCK").is_ok();
-    if skip_db {
-        unsafe { std::env::set_var("KINETIX_SKIP_DEBLOCK", "1") };
-    }
     let dir = std::env::temp_dir().join("dbg_paff_b_field");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -77,10 +73,6 @@ fn paff_b_field_decode() {
 
     // Reference decode with ffmpeg (full decode including deblocking).
     let mut args: Vec<&str> = vec!["-hide_banner", "-loglevel", "error", "-y"];
-    if skip_db {
-        args.push("-skip_loop_filter");
-        args.push("all");
-    }
     args.extend([
         "-i",
         h264_path.to_str().unwrap(),
@@ -162,6 +154,10 @@ fn paff_b_field_decode() {
             let (cd, cn, _) = compare(&frame[luma_n..], &ref_yuv[off + luma_n..off + frame_len]);
             println!(
                 "frame#{i}: max_diff={max_d} diff={n_d}/{tot} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
+            );
+            assert_eq!(
+                max_d, 0,
+                "frame#{i} is not pixel-exact vs ffmpeg (max_diff={max_d})"
             );
 
             // Per-field (even rows = top, odd = bottom) luma max + per-field-MB grid.

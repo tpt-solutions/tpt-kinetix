@@ -90,8 +90,10 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
     let (y0, fy) = split(y);
     let g = |dx: i32, dy: i32| get(plane, stride, pw, ph, x0 + dx, y0 + dy);
     let b = |dx: i32| half_h(plane, stride, pw, ph, x0 + dx, y0);
+    // half_h at (x0+dx, y0+dy) — needed for the q(1,3) and r(2,3) positions.
+    let bh = |dx: i32, dy: i32| half_h(plane, stride, pw, ph, x0 + dx, y0 + dy);
     let hv = |dy: i32| half_v(plane, stride, pw, ph, x0, y0 + dy);
-    // half_v at (x0+dx, y0+dy) — needed for the (3,1) and (3,3) positions.
+    // half_v at (x0+dx, y0+dy) — needed for the g(3,1) and k(3,2) positions.
     let hv_x = |dx: i32, dy: i32| half_v(plane, stride, pw, ph, x0 + dx, y0 + dy);
     let j = |dx: i32, dy: i32| half_j(plane, stride, pw, ph, x0 + dx, y0 + dy);
 
@@ -103,18 +105,19 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
         (0, 1) => avg(g(0, 0), hv(0)),
         (1, 1) => avg(b(0), hv(0)),
         (2, 1) => avg(b(0), j(0, 0)),
-        // i = avg(b(x0,y0), h(x0+1,y0)) — §8.4.2.2.1: nearest half-pars to (3/4,1/4)
-        // are the horizontal half-pel at (x0,y0) and the vertical half-pel at (x0+1,y0).
+        // g = avg(b(x0,y0), h(x0+1,y0)) — midpoint of h-half (2,0) and v-half (4,2) = (3,1).
         (3, 1) => avg(b(0), hv_x(1, 0)),
         (0, 2) => hv(0),
         (1, 2) => avg(hv(0), j(0, 0)),
         (2, 2) => j(0, 0),
-        (3, 2) => avg(j(0, 0), g(1, 0)),
+        // k = avg(j(x0,y0), h(x0+1,y0)) — midpoint of hv-half (2,2) and v-half (4,2) = (3,2).
+        (3, 2) => avg(j(0, 0), hv_x(1, 0)),
         (0, 3) => avg(hv(0), g(0, 1)),
-        (1, 3) => avg(hv(0), j(0, 1)),
-        (2, 3) => avg(j(0, 0), g(1, 1)),
-        // r = avg(j(x0,y0), G(x0+1,y0+1)) — §8.4.2.2.1: midpoint of diagonal half-pel
-        // and the integer to the lower-right lands at (3/4,3/4).
+        // q = avg(h(x0,y0), b(x0,y0+1)) — midpoint of v-half (0,2) and h-half (2,4) = (1,3).
+        (1, 3) => avg(hv(0), bh(0, 1)),
+        // r = avg(j(x0,y0), b(x0,y0+1)) — midpoint of hv-half (2,2) and h-half (2,4) = (2,3).
+        (2, 3) => avg(j(0, 0), bh(0, 1)),
+        // s = avg(j(x0,y0), G(x0+1,y0+1)) — midpoint of hv-half (2,2) and integer (4,4) = (3,3).
         (3, 3) => avg(j(0, 0), g(1, 1)),
         _ => unreachable!(),
     }
@@ -382,39 +385,58 @@ mod tests {
         );
     }
 
-    /// Spec quarter-sample positions (§8.4.2.2.1): the three diagonal quarter
-    /// samples (1,3)/(2,3)/(3,2) average against an *integer* reference sample,
-    /// not another interpolated sample. With a ramp plane the interpolated and
-    /// integer samples are distinct, so recombining the documented brackets
-    /// must reproduce the decoder output exactly.
+    /// Spec quarter-sample positions (§8.4.2.2.1): the three lower-right quarter
+    /// samples (1,3)/(2,3)/(3,2) each average a v-half-pel or hv-half-pel at
+    /// the current row with a h-half-pel or v-half-pel at the adjacent row/col.
+    ///
+    /// (3,2) = k = avg(j(x,y), h_v(x+1,y)):  midpoint of qpel(2,2) and qpel(4,2) = qpel(3,2)
+    /// (2,3) = r = avg(j(x,y), b(x,y+1)):     midpoint of qpel(2,2) and qpel(2,4) = qpel(2,3)
+    /// (1,3) = q = avg(h(x,y), b(x,y+1)):     midpoint of qpel(0,2) and qpel(2,4) = qpel(1,3)
     #[test]
     fn quarter_pel_positions_match_spec_table() {
         let (l, _) = ramp_luma();
 
-        // (3,2): avg(J(x,y), G(x+1,y)).
+        // j(0,0): mv (2,2) → fx=2, fy=2 → hv-half at (x0=0, y0=0)
         let mut j00 = [0u8; 1];
-        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // mv (2,2) -> j(0,0)
-        let mut g10 = [0u8; 1];
-        interpolate_luma(&mut g10, 1, &l, 8, 8, 8, 0, 0, 4, 0, 1, 1); // mv (4,0) -> G(1,0)
-        let mut got = [0u8; 1];
-        interpolate_luma(&mut got, 1, &l, 8, 8, 8, 0, 0, 3, 2, 1, 1); // mv (3,2) -> (3,2)
-        assert_eq!(got[0], ((j00[0] as i32 + g10[0] as i32 + 1) >> 1) as u8);
+        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1);
 
-        // (2,3): avg(J(x,y), G(x+1,y+1)).
-        let mut g11 = [0u8; 1];
-        interpolate_luma(&mut g11, 1, &l, 8, 8, 8, 0, 0, 4, 4, 1, 1); // mv (4,4) -> G(1,1)
+        // (3,2) = k = avg(j(x0,y0), half_v(x0+1,y0)):
+        // half_v at (x0+1=1, y0=0): mv (4,2) → x=4 → x0=1,fx=0; y=2 → y0=0,fy=2
+        let mut hv10 = [0u8; 1];
+        interpolate_luma(&mut hv10, 1, &l, 8, 8, 8, 0, 0, 4, 2, 1, 1);
+        let mut got32 = [0u8; 1];
+        interpolate_luma(&mut got32, 1, &l, 8, 8, 8, 0, 0, 3, 2, 1, 1);
+        assert_eq!(
+            got32[0],
+            ((j00[0] as u16 + hv10[0] as u16 + 1) >> 1) as u8,
+            "(3,2) must be avg(j(x0,y0), half_v(x0+1,y0))"
+        );
+
+        // half_h at (x0=0, y0+1=1): mv (2,4) → x=2 → x0=0,fx=2; y=4 → y0=1,fy=0
+        let mut bh01 = [0u8; 1];
+        interpolate_luma(&mut bh01, 1, &l, 8, 8, 8, 0, 0, 2, 4, 1, 1);
+
+        // (2,3) = r = avg(j(x0,y0), half_h(x0,y0+1)):
         let mut got23 = [0u8; 1];
-        interpolate_luma(&mut got23, 1, &l, 8, 8, 8, 0, 0, 2, 3, 1, 1); // mv (2,3) -> (2,3)
-        assert_eq!(got23[0], ((j00[0] as i32 + g11[0] as i32 + 1) >> 1) as u8);
+        interpolate_luma(&mut got23, 1, &l, 8, 8, 8, 0, 0, 2, 3, 1, 1);
+        assert_eq!(
+            got23[0],
+            ((j00[0] as u16 + bh01[0] as u16 + 1) >> 1) as u8,
+            "(2,3) must be avg(j(x0,y0), half_h(x0,y0+1))"
+        );
 
-        // (1,3): avg(H(x,y), J(x,y+1)).
-        let mut h00 = [0u8; 1];
-        interpolate_luma(&mut h00, 1, &l, 8, 8, 8, 0, 0, 0, 2, 1, 1); // mv (0,2) -> H(0,0)
-        let mut j01 = [0u8; 1];
-        interpolate_luma(&mut j01, 1, &l, 8, 8, 8, 0, 0, 2, 6, 1, 1); // mv (2,6) -> J(0,1)
+        // half_v at (x0=0, y0=0): mv (0,2) → h-vertical-half
+        let mut hv0 = [0u8; 1];
+        interpolate_luma(&mut hv0, 1, &l, 8, 8, 8, 0, 0, 0, 2, 1, 1);
+
+        // (1,3) = q = avg(half_v(x0,y0), half_h(x0,y0+1)):
         let mut got13 = [0u8; 1];
-        interpolate_luma(&mut got13, 1, &l, 8, 8, 8, 0, 0, 1, 3, 1, 1); // mv (1,3) -> (1,3)
-        assert_eq!(got13[0], ((h00[0] as i32 + j01[0] as i32 + 1) >> 1) as u8);
+        interpolate_luma(&mut got13, 1, &l, 8, 8, 8, 0, 0, 1, 3, 1, 1);
+        assert_eq!(
+            got13[0],
+            ((hv0[0] as u16 + bh01[0] as u16 + 1) >> 1) as u8,
+            "(1,3) must be avg(half_v(x0,y0), half_h(x0,y0+1))"
+        );
     }
 
     #[test]

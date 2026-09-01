@@ -2588,14 +2588,6 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         let y0 = (base_y + by) as i32;
         let ref_idx = cell.ref_idx.max(0) as usize;
 
-        // Sweep hook for the field-parity luma MC offset (PAFF bottom-field
-        // predicting from the opposite-parity top IDR). Mirrors the chroma
-        // `chroma_mv_y_off` fix; magnitude TBD empirically.
-        let lmv_y_off: i32 = std::env::var("KINETIX_LUMA_PARITY_OFF")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0);
-
         let mut pred = [0u8; 16];
         if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
             let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
@@ -2609,7 +2601,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
                 x0,
                 y0,
                 cell.mv[0],
-                cell.mv[1] + lmv_y_off,
+                cell.mv[1],
                 4,
                 4,
             );
@@ -2638,26 +2630,6 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
             scaling,
             &crate::transform::FIELD_SCAN_4X4,
         );
-        if std::env::var("KINETIX_PAFF_RESIDUAL_DUMP").is_ok() && mb_x == 4 && mb_y == 0 {
-            let plane_w = if let Some(pr) = ref_luma.get(ref_idx) {
-                pr.len() / luma_h_of(pr, stride)
-            } else {
-                0
-            };
-            let ph = if let Some(pr) = ref_luma.get(ref_idx) {
-                luma_h_of(pr, stride)
-            } else {
-                0
-            };
-            eprintln!(
-                "PAFF_RESID mb=({mb_x},{mb_y}) block={block} qp={} x0={x0} y0={y0} ref={ref_idx} mv={:?} pw={plane_w} ph={ph} pred={:?} res={:?} coeffs={:?}",
-                mb.qp,
-                cell.mv,
-                &pred[..],
-                &res[..],
-                &mb.luma_coeffs[block]
-            );
-        }
         for row in 0..4 {
             for col in 0..4 {
                 let px = x0 as usize + col;
