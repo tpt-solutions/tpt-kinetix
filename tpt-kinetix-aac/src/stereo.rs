@@ -33,6 +33,11 @@ pub fn apply_stereo(
     let num_groups = ics.num_window_groups();
     let max_sfb = ics.max_sfb as usize;
     let gindex = group_bases(ics);
+    // Bisection hooks (consistent with `decoder.rs`'s `AAC_DBG_NO_TNS`/`_PNS`):
+    // skip the M/S butterfly or the intensity-stereo fill to isolate a
+    // reconstruction discrepancy against the reference decoder.
+    let no_ms = std::env::var_os("AAC_DBG_NO_MS").is_some();
+    let no_is = std::env::var_os("AAC_DBG_NO_IS").is_some();
 
     for (g, &gbase) in gindex.iter().take(num_groups).enumerate() {
         let glen = ics.group_len(g);
@@ -73,7 +78,7 @@ pub fn apply_stereo(
             let ms_eligible = matches!(l_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB)
                 && matches!(r_bt, Some(bt) if bt < crate::scalefactors::NOISE_HCB);
             let ms_used = ms_eligible
-                && std::env::var_os("AAC_DBG_NO_MS").is_none()
+                && !no_ms
                 && match ms_mask_present {
                     0 => false,
                     2 => true,
@@ -115,7 +120,7 @@ pub fn apply_stereo(
             };
             let l_int = l_bt != ZERO_HCB && is_intensity(l_bt);
             let r_int = r_bt != ZERO_HCB && is_intensity(r_bt);
-            if l_int != r_int && std::env::var_os("AAC_DBG_NO_IS").is_none() {
+            if l_int != r_int && !no_is {
                 // Exactly one channel is the intensity (zero) channel — always
                 // the right channel (ch1) in a conformant CPE; the left branch
                 // is defensive only.

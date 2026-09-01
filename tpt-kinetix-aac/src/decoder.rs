@@ -255,12 +255,6 @@ impl AacDecoder {
                             cpe.left.ics.predictor_data_present,
                             cpe.right.ics.predictor_data_present,
                         );
-                        if cpe.right.ics.window_sequence.is_eight_short() {
-                            eprintln!(
-                                "  R band_type={:?}\n  ms_mask={:?}",
-                                cpe.right.band_type, cpe.ms_mask
-                            );
-                        }
                     }
                     let left_ch = Self::decode_channel_stream(
                         &cpe.left,

@@ -786,17 +786,6 @@ impl RawDataBlock {
                 _ => return Err(AacParseError::BadElementId),
             }
         }
-        if std::env::var_os("AAC_DBG_TNS_FILT").is_some() {
-            let pos = reader.bit_position();
-            eprintln!(
-                "raw_data_block end: bit_pos={pos} (byte {}.{}), payload={} bytes = {} bits, leftover={}",
-                pos / 8,
-                pos % 8,
-                data.len(),
-                data.len() * 8,
-                data.len() * 8 - pos.min(data.len() * 8),
-            );
-        }
         Ok(RawDataBlock { elements })
     }
 }

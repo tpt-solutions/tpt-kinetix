@@ -108,16 +108,22 @@ pub fn decode_scalefactors(
                     is_position += hcod;
                     is_position
                 } else if is_noise(sect_cb) {
+                    // ffmpeg's `offset[1]` accumulates the raw DPCM total
+                    // *unclipped* — only the value used for the current band's
+                    // gain is clipped to `[-100, 155]` (`clipped_offset`), so a
+                    // later noise band DPCMs off the unclipped running total.
+                    // Clamping `noise_sfo` in place (the earlier behaviour) made
+                    // every noise band after one that saturated diverge.
                     if noise_pcm_flag {
                         noise_pcm_flag = false;
                         let raw = reader.read_bits(9).ok_or(AacParseError::UnexpectedEof)? as i32;
-                        noise_sfo = (noise_sfo + raw - 256).clamp(-100, 155);
+                        noise_sfo += raw - 256;
                     } else {
                         let hcod =
                             decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
-                        noise_sfo = (noise_sfo + hcod).clamp(-100, 155);
+                        noise_sfo += hcod;
                     }
-                    global_gain - 100 - noise_sfo
+                    global_gain - 100 - noise_sfo.clamp(-100, 155)
                 } else {
                     let hcod = decode_scalefactor(reader).ok_or(AacParseError::UnexpectedEof)?;
                     scale_factor -= hcod;
