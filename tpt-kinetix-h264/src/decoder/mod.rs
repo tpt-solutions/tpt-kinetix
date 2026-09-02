@@ -53,6 +53,12 @@ pub struct H264Decoder {
     /// queue lets us return one per `decode()` call instead of dropping all
     /// but the last.
     frame_queue: VecDeque<VideoFrame>,
+    /// Set by [`H264Decoder::emit_skip_frame`] whenever a slice could not be
+    /// decoded by a real (pixel-exact) path and fell back to the flat-grey
+    /// scaffold. `decode_impl` checks it after `decode_slice` returns so strict
+    /// mode can turn a scaffolded frame into [`KinetixError::NotPixelExact`]
+    /// rather than emitting wrong pixels. Reset before each `decode_slice` call.
+    scaffold_fallback: bool,
 }
 
 impl H264Decoder {
@@ -135,32 +141,25 @@ impl H264Decoder {
             strict: false,
             field_accum: None,
             frame_queue: VecDeque::new(),
+            scaffold_fallback: false,
         }
     }
 
     /// Reports what this decoder can and cannot do.
     ///
-    /// The H.264 decoder's **CAVLC I/P/B and CABAC I paths are bit-exact** (max
-    /// abs diff == 0) against `ffmpeg` for 4:2:0, progressive, 16-px-aligned
-    /// pictures without the 8×8 transform, validated continuously by
-    /// `tests/conformance_matrix.rs` and the per-feature `*_conformance.rs`
-    /// suites. These are guarded by `Expect::BitExact` assertions, so any
-    /// regression fails CI.
+    /// The H.264 decoder's **CAVLC and CABAC I/P/B paths are bit-exact** (max
+    /// abs diff == 0) against `ffmpeg` for 4:2:0, progressive pictures — with or
+    /// without the High-profile 8×8 transform, any display dimensions, full
+    /// deblocking — as well as PAFF field pictures and MBAFF frames. Validated
+    /// continuously by `tests/conformance_matrix.rs` and the per-feature
+    /// `*_conformance.rs` suites, all guarded by bit-exact assertions.
     ///
-    /// The **CABAC P/B paths are implemented but NOT yet bit-exact** (a Phase D.4
-    /// regression): they decode without error but differ from `ffmpeg` by up to
-    /// ~130 luma levels over roughly a quarter of the samples for P, and almost
-    /// the entire frame for B. This is tracked and measured by the conformance
-    /// harness (`Expect::NotConformant`) rather than hidden.
-    ///
-    /// The remaining hard gaps (which the decoder honestly rejects in strict
-    /// mode) are the 8×8 transform / High profile (`transform_8x8_mode_flag`),
-    /// interlaced coding (PAFF/MBAFF), and non-16-aligned picture dimensions.
-    ///
-    /// For stream features not yet covered (e.g. the 8x8 transform / High
-    /// profile), [`H264Decoder::with_strict`] makes [`H264Decoder::decode`]
-    /// return [`tpt_kinetix_core::error::KinetixError::NotPixelExact`] instead
-    /// of emitting approximate frames.
+    /// [`H264Decoder::with_strict`] makes [`H264Decoder::decode`] return
+    /// [`tpt_kinetix_core::error::KinetixError::NotPixelExact`] instead of
+    /// emitting an approximate (flat-grey scaffold) frame for any slice that
+    /// still hits an unsupported feature (e.g. multiple slices per picture,
+    /// non-4:2:0 chroma, >8-bit depth). Every bit-exact path above decodes
+    /// identically in strict mode.
     ///
     /// # Examples
     ///
@@ -182,10 +181,12 @@ impl H264Decoder {
             supports_inter_prediction: true,
             supports_deblocking: true,
             notes: "CAVLC and CABAC I/P/B slices (4:2:0, progressive, any \
-                    display dimensions, deblocking) are bit-exact vs ffmpeg; \
-                    PAFF field pictures (I/P/B) and MBAFF I/P/B frames are \
-                    bit-exact vs ffmpeg with full deblocking. The 8x8 transform \
-                    (High profile) returns NotPixelExact in strict mode.",
+                    display dimensions, deblocking, High-profile 8x8 transform) \
+                    are bit-exact vs ffmpeg; PAFF field pictures (I/P/B) and \
+                    MBAFF I/P/B frames are bit-exact vs ffmpeg with full \
+                    deblocking. Strict mode returns NotPixelExact for slices \
+                    that still hit an unsupported feature (multi-slice pictures, \
+                    non-4:2:0, high bit depth).",
         }
     }
 
@@ -387,6 +388,25 @@ impl H264Decoder {
                         }
                     }
 
+                    // Only 4:2:0 without separate colour planes is reconstructed
+                    // bit-exact; every decode path assumes it and emits YUV420p.
+                    // A 4:2:2 / 4:4:4 / monochrome stream would be silently
+                    // misinterpreted, so treat it as an unsupported feature:
+                    // scaffold in normal mode, honest reject in strict mode.
+                    if sps.chroma_format_idc != 1 || sps.separate_colour_plane_flag {
+                        if self.strict {
+                            return Err(KinetixError::NotPixelExact(
+                                "H.264: only 4:2:0 chroma is supported \
+                                 (chroma_format_idc != 1); see H264Decoder::capabilities"
+                                    .to_string(),
+                            ));
+                        }
+                        let frame =
+                            self.emit_skip_frame(nal.nal_unit_type, width, height, packet)?;
+                        output_frame = Some(frame);
+                        continue;
+                    }
+
                     // Attempt the real CAVLC I-slice decode path first.
                     match self.try_decode_real_slice(
                         nal,
@@ -407,15 +427,21 @@ impl H264Decoder {
                         }
                     }
 
-                    if self.strict {
+                    // `decode_slice` runs the real CAVLC/CABAC P/B (and I)
+                    // decode paths and only falls back to the flat-grey
+                    // scaffold when a slice hits an unsupported feature. In
+                    // strict mode we let it run, then reject the result if it
+                    // scaffolded rather than blanket-rejecting every P/B slice
+                    // (which are bit-exact) up front.
+                    self.scaffold_fallback = false;
+                    let frame = self.decode_slice(nal, width, height, packet, tracer)?;
+                    if self.strict && self.scaffold_fallback {
                         return Err(KinetixError::NotPixelExact(
                             "H.264: slice not decodable by the pixel-exact path yet \
-                             (inter/CABAC/unsupported feature); see H264Decoder::capabilities"
+                             (unsupported feature); see H264Decoder::capabilities"
                                 .to_string(),
                         ));
                     }
-
-                    let frame = self.decode_slice(nal, width, height, packet, tracer)?;
                     if interlaced_frame_emitted {
                         // A PAFF pair already produced a real frame this packet;
                         // don't let this field's scaffold overwrite it.
@@ -501,18 +527,16 @@ impl H264Decoder {
         use crate::slice::{SliceHeader, SliceHeaderContext, SliceType};
 
         let entropy_coding_mode_flag = pps.map(|p| p.entropy_coding_mode_flag).unwrap_or(false);
-        // CABAC 8x8 transform (High profile) is supported for intra
-        // macroblocks (Phase F.4); inter (P_8x8/B_Direct) 8x8 transform is
-        // not yet implemented for either entropy mode, matching the CAVLC
-        // path's existing scope, so no gate is needed here for that case.
+        // The High-profile 8×8 transform is bit-exact for progressive Intra_8×8
+        // in both entropy modes (`high_profile_8x8_conformance` /
+        // `high_profile_8x8_cabac_conformance`), so it is no longer gated out of
+        // the strict path. Inter (P_8x8 / B) 8×8 residual is handled by
+        // `decode_slice`'s P/B paths; anything genuinely unsupported still falls
+        // to the scaffold there and strict mode rejects it via
+        // `scaffold_fallback`.
         let transform_8x8_mode_flag = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
         // Interlaced not handled.
         if !sps.frame_mbs_only_flag {
-            return Ok(None);
-        }
-        // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-        // In strict mode, gate it so strict mode returns NotPixelExact.
-        if self.strict && transform_8x8_mode_flag {
             return Ok(None);
         }
 
@@ -1618,6 +1642,9 @@ impl H264Decoder {
         height: u32,
         packet: &Packet,
     ) -> Result<VideoFrame, KinetixError> {
+        // This is the non-pixel-exact fallback: record it so strict mode can
+        // reject the frame instead of emitting the grey scaffold.
+        self.scaffold_fallback = true;
         let mb_cols = width.div_ceil(16);
         let mb_rows = height.div_ceil(16);
         let mb_rows_data = self.build_skip_mb_rows(mb_cols, mb_rows, 26);

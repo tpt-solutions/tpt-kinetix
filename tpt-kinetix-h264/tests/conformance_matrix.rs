@@ -381,6 +381,7 @@ fn h264_conformance_matrix() {
         }
 
         // Supported / known-non-conformant: decode and compare.
+        let spkt_data = annexb.clone();
         let mut dec = H264Decoder::new();
         let pkt = Packet {
             pts: Timestamp::new(0, (1, 30)),
@@ -441,6 +442,39 @@ fn h264_conformance_matrix() {
                 if max_diff != 0 {
                     unexpected_failures += 1;
                 }
+
+                // A `BitExact` supported case must decode identically under
+                // `with_strict(true)` — strict mode must not reject a slice it
+                // can decode pixel-exact, nor emit a different (scaffolded)
+                // frame.
+                let mut sdec = H264Decoder::new().with_strict(true);
+                let spkt = Packet {
+                    pts: Timestamp::new(0, (1, 30)),
+                    dts: Timestamp::new(0, (1, 30)),
+                    data: spkt_data.clone(),
+                    stream_index: 0,
+                    is_key_frame: true,
+                };
+                match sdec.decode(&spkt) {
+                    Ok(Some(sf)) => {
+                        let (sdiff, _, _) = compare(&sf.data, &refyuv[start..end]);
+                        if sdiff != max_diff {
+                            eprintln!(
+                                "  [FAIL] {} ({}) strict-mode decode differs from non-strict (strict max_diff={sdiff}, non-strict={max_diff})",
+                                c.name, c.deblock.label()
+                            );
+                            unexpected_failures += 1;
+                        }
+                    }
+                    other => {
+                        eprintln!(
+                            "  [FAIL] {} ({}) strict mode did not produce a frame for a bit-exact case: {other:?}",
+                            c.name, c.deblock.label()
+                        );
+                        unexpected_failures += 1;
+                    }
+                }
+
                 results.push((
                     format!("{} {}", c.name, c.deblock.label()),
                     status.into(),

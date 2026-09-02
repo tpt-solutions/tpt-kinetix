@@ -545,17 +545,17 @@ fn aac_vs_ffmpeg_reference_pcm_when_available() {
 
 /// Pixel-exact harness run across a real, multi-frame H.264 sample.
 ///
-/// Synthesizes a short baseline-profile H.264 file with `ffmpeg`, then walks
-/// the same stream through the Kinetix decoder and the `ffmpeg` reference.
-/// Because the Kinetix H.264 decoder is still a scaffold (no CABAC/prediction/
-/// deblocking), this test asserts the *harness contract*: the Kinetix decoder
-/// must either emit a frame that reports `pixel_exact == false` capability, or
-/// fail with [`KinetixError::NotPixelExact`] under strict mode — never silently
-/// claiming pixel-exactness. Skips when `ffmpeg` is absent.
+/// Synthesizes a short baseline-profile (CAVLC, no B-frames) H.264 clip with
+/// `ffmpeg`, then decodes it NAL-by-NAL through the Kinetix decoder and compares
+/// every emitted frame against the `ffmpeg` reference decode. The Kinetix H.264
+/// decoder reports `capabilities().pixel_exact == true` for CAVLC/CABAC I/P/B
+/// progressive 4:2:0, so this asserts real bit-exactness — in both the default
+/// and `with_strict(true)` modes. Skips when `ffmpeg` is absent.
 #[test]
 fn h264_real_sample_harness_across_profiles() {
-    use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
     use tpt_kinetix_h264::H264Decoder;
+    use tpt_kinetix_test_utils::pixel_diff::within_tolerance;
     use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
 
     if !ffmpeg_available() {
@@ -572,7 +572,6 @@ fn h264_real_sample_harness_across_profiles() {
         }
     };
 
-    // Reference decode to learn geometry.
     let ref_frames = match decode_h264_with_ffmpeg(&annexb, 16, 16) {
         Ok(f) => f,
         Err(e) => {
@@ -580,32 +579,60 @@ fn h264_real_sample_harness_across_profiles() {
             return;
         }
     };
+    assert!(!ref_frames.is_empty(), "reference produced no frames");
 
-    // Kinetix decode (non-strict) must report non-pixel-exact capability and,
-    // in strict mode, refuse with NotPixelExact rather than returning wrong data.
+    // The CAVLC/CABAC I/P/B progressive path is bit-exact — the decoder says so.
     let caps = H264Decoder::new().capabilities();
     assert!(
-        !caps.pixel_exact,
-        "scaffold decoder must not claim pixel_exact"
+        caps.pixel_exact,
+        "H.264 decoder should report pixel_exact for progressive 4:2:0"
     );
-    assert!(caps.is_incomplete());
 
-    let mut dec = H264Decoder::new().with_strict(true);
-    let pkt = Packet {
-        pts: Timestamp::NONE,
-        dts: Timestamp::NONE,
-        data: annexb,
-        stream_index: 0,
-        is_key_frame: false,
-    };
-    match dec.decode(&pkt) {
-        Ok(_) => panic!("strict H.264 decode must not return placeholder frames"),
-        Err(KinetixError::NotPixelExact(_)) => {}
-        Err(e) => panic!("unexpected error from strict decode: {e}"),
+    // Split the Annex B stream into NAL units and feed one per packet, then
+    // flush — the standard streaming-decode pattern (see `dbg_g5c_crop`).
+    let mut starts = Vec::new();
+    for i in 0..annexb.len().saturating_sub(3) {
+        if annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 1 {
+            starts.push(i + 3);
+        }
     }
 
-    // The reference must actually have produced frames for this sample.
-    assert!(!ref_frames.is_empty(), "reference produced no frames");
+    for strict in [false, true] {
+        let mut dec = H264Decoder::new().with_strict(strict);
+        let mut frames = Vec::new();
+        for (n, &s) in starts.iter().enumerate() {
+            let e = starts.get(n + 1).copied().unwrap_or(annexb.len());
+            let mut data = vec![0u8, 0, 0, 1];
+            data.extend_from_slice(&annexb[s..e]);
+            let pkt = Packet {
+                pts: Timestamp::new(n as i64, (1, 15)),
+                dts: Timestamp::new(n as i64, (1, 15)),
+                data,
+                stream_index: 0,
+                is_key_frame: n == 0,
+            };
+            match dec.decode(&pkt) {
+                Ok(Some(f)) => frames.push(f),
+                Ok(None) => {}
+                Err(err) => panic!("strict={strict}: Kinetix decode errored: {err}"),
+            }
+        }
+        frames.extend(dec.flush().expect("flush"));
+
+        let n = frames.len().min(ref_frames.len());
+        assert!(
+            n >= ref_frames.len().saturating_sub(1),
+            "strict={strict}: Kinetix emitted {} frames, ffmpeg {}",
+            frames.len(),
+            ref_frames.len()
+        );
+        for i in 0..n {
+            assert!(
+                within_tolerance(&frames[i], &ref_frames[i], 0),
+                "strict={strict}: frame {i} not bit-exact vs ffmpeg"
+            );
+        }
+    }
 }
 
 /// Use `ffmpeg` to encode a short raw `testsrc` clip into an Annex B H.264

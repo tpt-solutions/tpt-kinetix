@@ -6,10 +6,10 @@
 //! reconstructed with the 8×8 inverse transform + Intra_8×8 prediction.
 //!
 //! CAVLC High-profile is validated here bit-exact (deblocking on/off). The
-//! CABAC High-profile path reuses the same reconstruction; it currently returns
-//! `KinetixError::NotPixelExact` because the 8×8 residual CABAC decode (cat 5)
-//! is not yet implemented, so its test is gated behind the same honesty
-//! contract (see `with_strict(false)` / the conformance matrix).
+//! CABAC High-profile 8×8 path is validated in
+//! `high_profile_8x8_cabac_conformance.rs`. Both are now bit-exact in strict
+//! mode as well (`with_strict(true)`), so the 8×8 transform is no longer part
+//! of the "honest reject" contract.
 
 use std::process::Command;
 

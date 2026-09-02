@@ -311,11 +311,10 @@ fn run_cabac_p_case(deblock_param: &str, label: &str) {
     let (max_diff, num_diff, total) = compare(&frame.data, ref_p);
     eprintln!("H.264 CABAC P-frame ({label}) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}");
 
-    // CABAC P-frame is not yet bit-exact (Phase D.4 regression / incomplete).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] CABAC P-frame ({label}) NOT bit-exact: max_diff={max_diff}");
-    }
+    assert_eq!(
+        max_diff, 0,
+        "CABAC P-frame ({label}) not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
 }
 
 /// Main-profile CABAC P-frame with deblocking enabled. Bit-exact (Phase D.4).
@@ -455,11 +454,11 @@ fn run_cabac_b_case(deblock_param: &str, label: &str) {
         "H.264 CABAC B-frame ({label}) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total} | LUMA d={ld} n={ln} | CHROMA d={cd} n={cn}"
     );
 
-    // CABAC B-frame is not yet bit-exact (Phase D.4 regression / incomplete).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] CABAC B-frame ({label}) NOT bit-exact: max_diff={max_diff}");
-    }
+    assert_eq!(
+        max_diff, 0,
+        "CABAC B-frame ({label}) not bit-exact: max_diff={max_diff} differing={num_diff}/{total} \
+         (luma d={ld}/{ln}, chroma d={cd}/{cn})"
+    );
 }
 
 /// Main-profile CABAC B-frame with deblocking enabled. Bit-exact (Phase D.4).

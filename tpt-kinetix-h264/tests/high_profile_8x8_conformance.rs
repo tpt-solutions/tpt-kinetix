@@ -239,10 +239,42 @@ fn high_profile_8x8_with_deblock_is_bitexact() {
     eprintln!(
         "H.264 High-profile 8×8 (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
-    // The no-deblock path is bit-exact (Phase F.4 complete). The mandelbrot
-    // source with deblocking enabled has ≤2 residual errors on complex content —
-    // a pre-existing deblocking filter gap not specific to the 8×8 path.
-    if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8×8 (with deblock) NOT bit-exact: max_diff={max_diff}");
+    assert_eq!(
+        max_diff, 0,
+        "H.264 High-profile 8×8 (with deblock) not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
+}
+
+/// The 8×8-transform (High profile) path is now honoured in **strict** mode:
+/// `with_strict(true)` must decode a real, bit-exact frame rather than
+/// returning `NotPixelExact`.
+#[test]
+fn high_profile_8x8_is_bitexact_in_strict_mode() {
+    if !ffmpeg_available() {
+        eprintln!("ffmpeg not available; skipping");
+        return;
     }
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (annexb, refyuv, w, h) = generate(&dir, "strict", 64, 48, false).expect("generate");
+
+    let mut dec = tpt_kinetix_h264::H264Decoder::new().with_strict(true);
+    let pkt = Packet {
+        pts: Timestamp::new(0, (1, 30)),
+        dts: Timestamp::new(0, (1, 30)),
+        data: annexb,
+        stream_index: 0,
+        is_key_frame: true,
+    };
+    let frame = dec
+        .decode(&pkt)
+        .expect("strict decode of High-profile 8×8 must not return NotPixelExact")
+        .expect("a frame should be produced");
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
+    let (max_diff, num_diff, total) = compare(&frame.data, &refyuv);
+    assert_eq!(
+        max_diff, 0,
+        "strict-mode High-profile 8×8 not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
 }

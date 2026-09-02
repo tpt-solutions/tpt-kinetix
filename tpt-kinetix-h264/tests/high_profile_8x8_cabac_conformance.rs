@@ -240,11 +240,10 @@ fn high_profile_8x8_cabac_no_deblock_is_bitexact() {
         "H.264 High-profile 8×8 CABAC (no deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] High-profile 8×8 CABAC (no deblock) NOT bit-exact: max_diff={max_diff}");
-    }
+    assert_eq!(
+        max_diff, 0,
+        "High-profile 8×8 CABAC (no deblock) not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
 }
 
 /// Decode a High-profile CABAC I-frame with the 8×8 transform and deblocking
@@ -262,11 +261,39 @@ fn high_profile_8x8_cabac_with_deblock_is_bitexact() {
         "H.264 High-profile 8×8 CABAC (with deblock) vs ffmpeg: max_abs_diff={max_diff}, differing_samples={num_diff}/{total}"
     );
 
-    // High-profile 8x8 transform is not yet bit-exact (Phase F.4 open).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!(
-            "  [GAP] High-profile 8×8 CABAC (with deblock) NOT bit-exact: max_diff={max_diff}"
-        );
+    assert_eq!(
+        max_diff, 0,
+        "High-profile 8×8 CABAC (with deblock) not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
+}
+
+/// The 8×8-transform CABAC path is now honoured in **strict** mode.
+#[test]
+fn high_profile_8x8_cabac_is_bitexact_in_strict_mode() {
+    if !ffmpeg_available() {
+        eprintln!("ffmpeg not available; skipping");
+        return;
     }
+    let dir = std::env::temp_dir().join("tpt_kinetix_h264_8x8_cabac");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (annexb, refyuv, w, h) = generate(&dir, "strict", 64, 48, false).expect("generate");
+    let mut dec = tpt_kinetix_h264::H264Decoder::new().with_strict(true);
+    let pkt = Packet {
+        pts: Timestamp::new(0, (1, 30)),
+        dts: Timestamp::new(0, (1, 30)),
+        data: annexb,
+        stream_index: 0,
+        is_key_frame: true,
+    };
+    let frame = dec
+        .decode(&pkt)
+        .expect("strict decode of High-profile 8×8 CABAC must not return NotPixelExact")
+        .expect("a frame should be produced");
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
+    let (max_diff, num_diff, total) = compare(&frame.data, &refyuv);
+    assert_eq!(
+        max_diff, 0,
+        "strict-mode High-profile 8×8 CABAC not bit-exact: max_diff={max_diff} differing={num_diff}/{total}"
+    );
 }

@@ -188,11 +188,10 @@ fn run_conformance_check(dir_name: &str, deblock_param: &str, label: &str) {
         eprintln!("  MB row {my}: {row}");
     }
 
-    // CABAC P-frame is not yet bit-exact (Phase D.4 regression / incomplete).
-    // Skip strict assertion until the gap is closed.
-    if max_diff != 0 {
-        eprintln!("  [GAP] CABAC P-frame ({label}) NOT bit-exact: max_diff={max_diff}");
-    }
+    assert_eq!(
+        max_diff, 0,
+        "CABAC P-frame ({label}) not bit-exact: max_diff={max_diff}"
+    );
 }
 
 #[test]

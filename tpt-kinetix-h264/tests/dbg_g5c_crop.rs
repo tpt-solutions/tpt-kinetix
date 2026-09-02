@@ -125,8 +125,7 @@ fn non16_crop_right_is_bitexact() {
     assert!(!frames.is_empty(), "decoder emitted no frames");
 
     let n = frames.len().min(ff_frames);
-    for i in 0..n {
-        let (w, h, ref data) = frames[i];
+    for (i, &(w, h, ref data)) in frames.iter().take(n).enumerate() {
         assert_eq!(
             w, DW as u32,
             "frame#{i}: expected display width {DW}, got {w}"
