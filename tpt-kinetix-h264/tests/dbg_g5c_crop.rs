@@ -46,9 +46,18 @@ fn non16_crop_right_is_bitexact() {
     // so the crop test doesn't conflate deblock precision with crop geometry.
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=54x64:rate=1:duration=2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=54x64:rate=1:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-x264-params",
             "cabac=1:bframes=0:keyint=300:min-keyint=300:no-deblock:threads=1:profile=main",
             h264.to_str().unwrap(),
@@ -59,9 +68,16 @@ fn non16_crop_right_is_bitexact() {
 
     let ok = Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error", "-y",
-            "-i", h264.to_str().unwrap(),
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            h264.to_str().unwrap(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
             refyuv.to_str().unwrap(),
         ])
         .output()
@@ -136,7 +152,10 @@ fn non16_crop_right_is_bitexact() {
                 if a != b && shown < 8 {
                     let px = p % DW;
                     let py = p / DW;
-                    println!("  diff y={py} x={px}: ours={a} ref={b} d={}", (a as i32 - b as i32).abs());
+                    println!(
+                        "  diff y={py} x={px}: ours={a} ref={b} d={}",
+                        (a as i32 - b as i32).abs()
+                    );
                     shown += 1;
                 }
             }

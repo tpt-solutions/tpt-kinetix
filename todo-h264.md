@@ -2,6 +2,39 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ah (2026-09-02) — REMAINING WORK CLOSED OUT; `pixel_exact` is live
+
+All items from #32af's "REMAINING WORK" list are now done:
+
+- **PAFF B-field (2d-iii / 2d-iv / 2e)** — DONE in commit `3831475`. Root cause
+  was 3 geometrically-wrong quarter-pel luma MC formulas (positions (3,2),
+  (1,3), (2,3) computed the wrong midpoint anchor), not a CABAC residual bug.
+  `paff_b_field.264` max_diff 68→0; `dbg_paff_b_field` now hard-asserts
+  `max_diff == 0` on both PAFF frames.
+- **G.5c non-16 crop** — DONE in commit `820fd24` (DPB stride bug: MC used the
+  display-cropped width as the reference-plane width instead of edge-extending
+  into the coded columns; fixed with `mc_frame` on `DpbEntry`). New test
+  `dbg_g5c_crop` asserts bit-exact.
+- **Phase H — `pixel_exact` flip** — DONE in commit `820fd24`.
+  `capabilities().pixel_exact` returns `true` for CAVLC/CABAC I/P/B progressive
+  + PAFF field I/P/B + MBAFF I/P/B + non-16 display crop. README + CLAUDE.md
+  updated.
+- **G.5a — pin bit-exact MBAFF frames** — DONE (#32ah). `dbg_g6_mbaff_deblock`
+  (fully-filtered reference) now hard-asserts `maxdiff == 0` on every emitted
+  frame of `g6_cavlc_i`, `g6_cabac_i`, `g6_cavlc_ip` (0,1), `g6_cabac_ip`
+  (0,1) and `g6_cabac_ibp` (0,1,2 — I, B *and* P). `dbg_g5_interlaced` is left
+  unpinned by design: it is a `-skip_loop_filter` diagnostic harness whose
+  baseline SADs are non-zero (skip-loop-filter semantics differ between the two
+  decoders); g6 is the real gate.
+- **G.5b — real corpus clips** — `dbg_paff_b_field` (JM-encoded PAFF fixture)
+  and the x264-encoded MBAFF clips in `dbg_g6_mbaff_deblock` both hard-assert
+  bit-exact vs ffmpeg. Considered satisfied.
+
+Nothing H.264-specific remains open for `pixel_exact`. Known non-exact paths
+that are out of scope and correctly reported by `capabilities()`: the 8×8
+transform for **progressive High** streams still returns
+`KinetixError::NotPixelExact` in strict mode (MBAFF/PAFF 8×8 is exact).
+
 ## SESSION #32af (2026-08-29) — BUG 3 DONE; `mbaff_ibp` P frame BIT-EXACT; remaining divergence is the **B frame** (was mislabelled "P")
 
 **BUG 3 (`get_dct8x8_allowed`) — DONE.** `sps.direct_8x8_inference_flag` is now

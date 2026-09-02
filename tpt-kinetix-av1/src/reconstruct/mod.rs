@@ -1251,6 +1251,16 @@ pub fn decode_tile_group(
     }
     // Hand the per-64×64 CDEF unit indices (§5.11.56) to the post-filter pass so
     // it can select each unit's strength entry (the CDEF pass reads `meta.cdef_idx`).
+    if std::env::var("KINETIX_AV1_DBG_BITS").is_ok() {
+        let final_bit = state.dec.bit_position();
+        let total_data_bits = data.len() * 8;
+        eprintln!(
+            "DBG BITS consumed={final_bit} data_bytes={} data_bits={total_data_bits} header_bits={tile_group_header_bits} \
+             remaining_after_header={}",
+            data.len(),
+            (total_data_bits as isize) - (tile_group_header_bits as isize)
+        );
+    }
     meta.cdef_idx = state.cdef_idx.clone();
     out
 }

@@ -429,17 +429,19 @@ fn g6_mbaff_deblock_vs_ffmpeg() {
             );
         }
 
-        // Regression pin (session #32ac A5): the CABAC MBAFF P path is now
-        // BIT-EXACT against ffmpeg's FULLY-FILTERED decode for the all-frame-
-        // coded case. `g6_cabac_ip` emits an I then a P frame, both must match;
-        // `g6_cabac_ibp` emits I, B, then P — the I and B frames match today
-        // (the P frame, emitted last, is still broken: mbaff_ibp P, tracked
-        // separately). Greedy-match each emitted frame to its best ffmpeg frame
-        // by luma SAD, since field-pairing delays can reorder emission.
+        // Regression pin (session #32ac A5, extended G.5a): every MBAFF
+        // deblocked frame is now BIT-EXACT against ffmpeg's FULLY-FILTERED
+        // decode for the all-frame-coded case — CAVLC and CABAC, I/P/B.
+        // `g6_cabac_ibp` emits I, B, then P; all three match as of the
+        // mbaff_ibp P/B fixes. Greedy-match each emitted frame to its best
+        // ffmpeg frame by luma SAD, since field-pairing delays can reorder
+        // emission.
         if std::env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").is_err() {
             let pinned: &[usize] = match name {
+                "g6_cabac_i" => &[0],
+                "g6_cavlc_ip" => &[0, 1],
                 "g6_cabac_ip" => &[0, 1],
-                "g6_cabac_ibp" => &[0, 1],
+                "g6_cabac_ibp" => &[0, 1, 2],
                 _ => &[],
             };
             for &idx in pinned {

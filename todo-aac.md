@@ -1308,6 +1308,28 @@
           the size of ffmpeg's TNS contribution to that frame. Disabling M/S
           makes the frame *worse* — 0.116 — so M/S itself is fine.)
 
+          **2026-09-02 deeper dig — bug is isolated to the right channel's
+          spectrum but its cause is still not found.** For the offending frame:
+          the LEFT channel (no `tns_data`) is **bit-exact**; only the RIGHT
+          channel (has `tns_data`) is off (0.014 pre-TNS via `AAC_DBG_NO_TNS`,
+          0.064 post-TNS). Ruled out this round: `AAC_DBG_NO_PNS` and
+          `AAC_DBG_NO_IS` both leave the 0.014 unchanged (so not the PNS fill or
+          the intensity fill); the raw_data_block parse ends byte-consistent
+          (leftover ∈ [0,7]); **all 11 `SPECTRAL_BOOKS` and the
+          `SCALEFACTOR_BOOK` are byte-for-byte identical to ffmpeg's
+          `codes*`/`bits*`/`ff_aac_scalefactor_*`** (diffed programmatically);
+          all three scalefactor categories (regular / noise / intensity) match
+          ffmpeg's `decode_scalefactors` formulas incl. `NOISE_OFFSET=90` and
+          the `[-100,155]`/`[-155,100]` clips. Fixed alongside: `noise_sfo` was
+          clamped **in place** — ffmpeg keeps `offset[1]` unclipped and clips
+          only the per-band value, so a noise band after one that saturated
+          diverged (`scalefactors.rs`, committed `e5016f4`; no conformance
+          change but real for pathological streams). What's left unverified is
+          purely a value-level check of the right channel's dequantised
+          coefficients vs a reference — needs the C harness. Bisection hooks
+          `AAC_DBG_NO_{TNS,PNS,MS,IS}` are all in the tree for whoever picks
+          this up.
+
         **Not done:** `capabilities().pixel_exact` left `false` — corpus is all
         self-generated synthetic (no real-world / ISO spec conformance vectors),
         HE-AAC (SBR/PS) unsupported, short-block TNS residual open (above), CCE /

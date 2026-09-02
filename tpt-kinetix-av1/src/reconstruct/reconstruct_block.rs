@@ -27,7 +27,7 @@ impl BlockDecodedCtx<'_> {
     fn have_below_left(&self) -> bool {
         self.get((self.sub_r + self.step_y) as isize, self.sub_c as isize - 1)
     }
-    fn mark(&mut self) {
+    pub(super) fn mark(&mut self) {
         for i in 0..self.step_y {
             for j in 0..self.step_x {
                 let idx = (self.sub_r + i + 1) * BD_STRIDE + (self.sub_c + j + 1);

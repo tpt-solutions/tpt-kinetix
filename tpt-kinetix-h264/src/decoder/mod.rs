@@ -1061,8 +1061,10 @@ impl H264Decoder {
                 &header.ref_pic_list_modification_l0,
             ) {
                 crate::ref_pic::trace_ref_list("P L0", &ref_list, pic_num_ctx);
-                let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_list.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
+                let ref_frames: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list
+                    .iter()
+                    .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+                    .collect();
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag = pps
@@ -1343,10 +1345,14 @@ impl H264Decoder {
             crate::ref_pic::trace_ref_list("B L1", l1_list.as_deref().unwrap_or(&[]), pic_num_ctx);
 
             if let (Some(ref_l0), Some(ref_l1)) = (l0_list, l1_list) {
-                let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_l0.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
-                let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> =
-                    ref_l1.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect();
+                let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_l0
+                    .iter()
+                    .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+                    .collect();
+                let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_l1
+                    .iter()
+                    .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+                    .collect();
                 // Co-located picture for direct-mode derivation: reference 0 of
                 // list 1 (§8.4.1.2.2/8.4.1.2.3). Its persisted per-block motion
                 // grid feeds the col_zero_flag check.

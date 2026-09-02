@@ -467,11 +467,19 @@ impl H264Decoder {
 
             let ref_frames_l0: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l0
                 .as_ref()
-                .map(|l| l.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect())
+                .map(|l| {
+                    l.iter()
+                        .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+                        .collect()
+                })
                 .unwrap_or_default();
             let ref_frames_l1: Vec<tpt_kinetix_core::frame::VideoFrame> = ref_list_l1
                 .as_ref()
-                .map(|l| l.iter().map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone()).collect())
+                .map(|l| {
+                    l.iter()
+                        .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // Co-located MV grid for direct-mode B prediction: reference 0 of

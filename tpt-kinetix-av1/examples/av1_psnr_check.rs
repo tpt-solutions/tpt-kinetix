@@ -143,6 +143,14 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
                 "[{label}] {}x{} PSNR Y/U/V = {:.2}/{:.2}/{:.2} dB",
                 w, h, psnr_y, psnr_u, psnr_v
             );
+            if std::env::var("KINETIX_AV1_DBG_ROWS").is_ok() {
+                let stride = w as usize;
+                for row in 0..h as usize {
+                    let rp = psnr(&frame.data[row * stride..(row + 1) * stride],
+                                  &ref_raw[row * stride..(row + 1) * stride]);
+                    eprintln!("  row {:>3} Y_PSNR={:.2}", row, rp);
+                }
+            }
         }
         Ok(None) => eprintln!("[{label}] Kinetix produced no frame"),
         Err(e) => eprintln!("[{label}] Kinetix errored: {e}"),
