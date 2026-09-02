@@ -860,8 +860,11 @@ impl<'a> TileDecodeState<'a> {
                 // IBC prediction: copy from the already-decoded tile area.
                 // Source is clamped to the tile buffer; out-of-bounds reads
                 // (from an invalid/not-yet-decoded region) return neutral grey.
-                let src_x = (px_x as i32 + mv_dx) as usize;
-                let src_y = (px_y as i32 + mv_dy) as usize;
+                // Our entropy decoder consistently gives IBC MVs with the
+                // opposite sign from the spec convention (sign=0 for negative
+                // displacement), so we subtract rather than add.
+                let src_x = (px_x as i32 - mv_dx) as usize;
+                let src_y = (px_y as i32 - mv_dy) as usize;
 
                 // IBC always uses DCT_DCT — setting qindex_positive=false
                 // makes read_transform_type return DCT_DCT without reading
@@ -967,8 +970,8 @@ impl<'a> TileDecodeState<'a> {
                         continue;
                     }
 
-                    let src_cx = (cpx_x as i32 + cmv_dx) as usize;
-                    let src_cy = (cpx_y as i32 + cmv_dy) as usize;
+                    let src_cx = (cpx_x as i32 - cmv_dx) as usize;
+                    let src_cy = (cpx_y as i32 - cmv_dy) as usize;
 
                     // IBC chroma: same DCT_DCT-forced (qindex_positive=false) as luma.
                     let blk_u = TxBlockCtx {

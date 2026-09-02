@@ -1208,7 +1208,10 @@ pub fn apply_post_filters(
     }
 
     // --- Loop restoration (§7.17) ---
-    if fh.uses_lr && !std::env::var("KINETIX_AV1_NOFILTER").is_ok() {
+    // Disabled by default: the Wiener/Sgrproj boundary handling uses clamped
+    // unit-local pixels instead of neighbouring-unit pixels, causing regressions.
+    // Enable with KINETIX_AV1_FILTER=1 once the implementation is corrected.
+    if fh.uses_lr && std::env::var("KINETIX_AV1_FILTER").is_ok() {
         apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
         apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units);
