@@ -1330,9 +1330,90 @@
           `AAC_DBG_NO_{TNS,PNS,MS,IS}` are all in the tree for whoever picks
           this up.
 
+   — **2026-09-02 (later session): short-block TNS residual CLOSED — two bugs,
+        both in the direction the C harness would have shown.**
+        1. **`reflection_to_direct` had the wrong sign convention.** The step-up
+           recursion used `b_i = a_i + k·a_{m-i}` with `b_m = +k` ("spec §4.6.9.2
+           as recalled"). ffmpeg's `compute_lpc_coefs` (which the decoder's AR
+           filter `y[n] = x[n] - Σ coef[i-1]·y[n-i]` is actually paired with)
+           uses `r = -autoc[i]` and a symmetric in-place update — a different
+           filter, not just an overall sign flip (`-k1(1-k2)` vs `+k1(1+k2)` at
+           order 2). The old convention was close enough to slip under the
+           `sweep_stereo_44100` tolerance (0.0000028, ~10× the noise floor) but
+           was visibly wrong for the order-7 "up" filter on the short-block
+           probe. Rewrote `reflection_to_direct` as a verbatim port of
+           `compute_lpc_coefs(autoc, order, lpc, 0, 0, 0)` (float path). New
+           `reflection_to_direct_matches_ffmpeg_compute_lpc_coefs` test pins it
+           against an independent port; `reflection_to_direct_hand_computed`
+           updated to the correct hand-expansion; `sweep` residual dropped
+           0.0000028 → 0.0000003 as a side effect.
+        2. **TNS was applied before joint-stereo, not after.** `decode_channel_stream`
+           ran `apply_tns` right after PNS, i.e. before `apply_stereo` (Pass 3).
+           ISO/IEC 14496-3 and ffmpeg (`spectral_to_sample`'s `apply_tns`, after
+           `decode_cpe`'s `apply_mid_side_stereo` / `apply_intensity_stereo`)
+           filter the *post-butterfly* spectrum. Moved TNS to a dedicated
+           Pass 3.5 over every non-CCE channel, after stereo, before IMDCT.
+           (Not the trigger for the probe on its own, but spec-correct and a
+           latent bug for any M/S-or-intensity + TNS overlap.)
+        New conformance case `short_tns_stereo_44100` (steady 500 Hz L + decaying
+        3 kHz burst R, 96 kbit/s → EIGHT_SHORT + ms=1 + right-channel short TNS):
+        max-abs-diff 0.064 → 2.4e-7, correlation 1.0000. All 12 conformance
+        cases now bit-exact; it flows into the real aggregate gate (no
+        exclusion). `cargo test -p tpt-kinetix-aac` (72 lib + conformance +
+        proptest/doc), clippy `-D warnings`, and `fmt --check` all clean;
+        `cargo build --workspace` clean.
+        Short-block TNS now has real bit-exact coverage — the last item under
+        "TNS/PNS/intensity not verified for numerical accuracy" that lacked it.
+
+   — **2026-09-02 (later session): conformance corpus broadened + coverage
+        self-check added.** `tests/conformance_aac.rs` now re-parses every ADTS
+        frame's `raw_data_block()` (`analyze_stream` → `StreamStats`) and each
+        case declares the decoder paths it is *for* (`&[Coverage]` —
+        `EightShort`, `WindowTransition`, `Tns`, `ShortTns`, `Pns`,
+        `IntensityStereo`, `MsStereo`, `MultiElement`); `check_coverage` asserts
+        they are actually present, so a case can no longer silently stop
+        exercising its target when ffmpeg's encoder changes its mind (the exact
+        failure mode behind `sweep`'s dead `frequency2=` and `transient`'s
+        missing short-TNS coverage in this file's history). This immediately
+        revealed the "pure tone" baseline already exercises PNS + intensity +
+        M/S on ~every stereo frame — those paths were never actually
+        under-covered; the real gaps were sample-rate coverage and short-block
+        TNS. New cases: `noise_stereo_22050` + `transient_stereo_22050` (the
+        `SWB_*_24000` long/short band tables, sf_index 7 — untouched by any
+        other case), `short_tns_mono_44100` (SCE branch of the post-stereo TNS
+        pass). Corpus is now 15 cases, all bit-exact (`surround_51` 0.0023 as
+        before, the known CCE-stub gap). `cargo test -p tpt-kinetix-aac`,
+        clippy `-D warnings`, `fmt --check`, `cargo build --workspace` clean.
+
+   — **2026-09-03: config-7 (7.1) remap FIXED + config-0 (PCE) support FIXED.**
+        - **config-7:** `output_channel_order(7, 8)` was `[3,4,0,7,5,6,1,2]` (a
+          guess). Measured against a real ffmpeg 7.1 encode→decode round-trip
+          (native-plane × reference-plane correlation matrix, new `AAC_DBG_CHMAP`
+          hook) — the decode is bit-exact up to permutation; correct perm is
+          `[1,2,0,7,5,6,3,4]` (FL FR C LFE, then the last two CPE pairs in
+          reverse element order — ffmpeg's own non-spec 7.1 layout, encoder and
+          decoder share it). New `surround_71_44100` case, max-diff 0.0036 (same
+          multi-CPE profile as 5.1's 0.0023).
+        - **config-0:** `skip_program_config_element` put `byte_alignment()`
+          *after* the comment field; ISO Table 4.2 has it *before* the 8-bit
+          `comment_field_bytes`. This desynced the entire first raw_data_block of
+          any `channel_configuration == 0` stream (`Unsupported("gain_control_data
+          (SSR)")` from misreading a later bit). Fixed. The `element_instance_tag`
+          is read by the dispatch (`4 | 5 =>` arm), not the skip fn — confirmed,
+          not a second bug. New `config0_pce_stereo_44100` case (ffmpeg
+          `-aac_pce 1`), bit-exact 2.1e-7. Added `encode_aac_adts_lavfi_args`
+          and `decode_aac_with_ffmpeg_channels` test-utils helpers (config-0 ADTS
+          headers carry no channel count — the reference harness needs it from
+          the native decode). New `Coverage::ConfigZero`.
+        Corpus is now 17 cases, all bit-exact (`surround_51`/`surround_71` the
+        two ~0.002-0.004 multi-CPE outliers, the known CCE-stub gap).
+
         **Not done:** `capabilities().pixel_exact` left `false` — corpus is all
         self-generated synthetic (no real-world / ISO spec conformance vectors),
-        HE-AAC (SBR/PS) unsupported, short-block TNS residual open (above), CCE /
-        config-0 PCE layouts / 960-sample frames unimplemented, config-7 remap
-        untested. Flipping `pixel_exact` should wait for those + real-bitstream /
-        ISO-vector validation.
+        HE-AAC (SBR/PS) unsupported, CCE coupling still a stub (ffmpeg's encoder
+        can't emit CCE, so it's unverifiable against a reference here),
+        960-sample frames unimplemented. config-0 PCE layout beyond channel
+        *count* (i.e. the front/side/back element→speaker map) is still skipped,
+        not parsed — fine for the mono/stereo config-0 that ffmpeg emits.
+        Flipping `pixel_exact` should wait for real-bitstream / ISO-vector
+        validation.

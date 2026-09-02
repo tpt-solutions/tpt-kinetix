@@ -344,7 +344,26 @@ pub fn decode_av1_with_ffmpeg(
 /// output. Returns [`RefDecodeError::BinaryUnavailable`] when `ffmpeg` is
 /// missing.
 pub fn decode_aac_with_ffmpeg(adts: &[u8]) -> Result<Vec<AudioFrame>, RefDecodeError> {
-    let (sample_rate, channels) = adts_geometry(adts)?;
+    decode_aac_with_ffmpeg_inner(adts, None)
+}
+
+/// Like [`decode_aac_with_ffmpeg`] but with the interleaved-channel count given
+/// explicitly. Needed for `channel_configuration == 0` streams, whose ADTS
+/// header does not carry the channel count (it lives in a
+/// `program_config_element` this helper does not parse).
+pub fn decode_aac_with_ffmpeg_channels(
+    adts: &[u8],
+    channels: u8,
+) -> Result<Vec<AudioFrame>, RefDecodeError> {
+    decode_aac_with_ffmpeg_inner(adts, Some(channels))
+}
+
+fn decode_aac_with_ffmpeg_inner(
+    adts: &[u8],
+    channels_override: Option<u8>,
+) -> Result<Vec<AudioFrame>, RefDecodeError> {
+    let (sample_rate, hdr_channels) = adts_geometry(adts)?;
+    let channels = channels_override.unwrap_or(hdr_channels);
 
     let raw_f32 = run_piped(
         "ffmpeg",

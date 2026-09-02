@@ -54,32 +54,35 @@ pub struct TnsFilter {
 
 impl TnsFilter {
     /// Convert the `order` reflection (lattice) coefficients currently in
-    /// `coef[0..order)` into direct-form prediction coefficients
-    /// `b_1..b_order` (also stored in `coef[0..order)`), per the step-up
-    /// recursion of §4.6.9.2. The filter then uses `y[n] = x[n] - Σ b_i·x[n-i]`.
+    /// `coef[0..order)` into direct-form coefficients (also stored in
+    /// `coef[0..order)`) using ffmpeg's `compute_lpc_coefs` step-up recursion
+    /// (`r = -k`, symmetric in-place update). The decoder's all-pole filter is
+    /// then `y[n] = x[n] - Σ coef[i-1]·y[n-i]`.
     fn reflection_to_direct(&mut self) {
         let order = self.order as usize;
         if order == 0 {
             return;
         }
-        let rc = self.coef; // snapshot reflection coefficients
-        let mut d = [0.0f32; 21];
-        d[0] = 1.0;
-        // Step-up (Levinson-Durbin) recursion, ISO/IEC 14496-3 §4.6.9.3:
-        // `b_i = a_i + k_m·a_{m-i}` (addition — matches ffmpeg's
-        // `compute_lpc_coefs`), so the whitening filter `y[n] = x[n] - Σ b_i·x[n-i]`
-        // subtracts.
-        for m in 1..=order {
-            let k = rc[m - 1];
-            let mut tmp = [0.0f32; 21];
-            for i in 1..m {
-                tmp[i] = d[i] + k * d[m - i];
+        // Snapshot the reflection coefficients, then run a verbatim port of
+        // ffmpeg's `compute_lpc_coefs(autoc, order, lpc, 0, 0, 0)`
+        // (`libavcodec/lpc.h`, float path where AAC_SRA_R / AAC_MUL26 are
+        // identity / multiply). `r = -autoc[i]` and the symmetric in-place
+        // update produce direct-form coefficients such that the decoder's
+        // all-pole ("AR") filter is `y[n] = x[n] - Σ lpc[i-1]·y[n-i]`
+        // (ffmpeg `apply_tns`, `decode == 1`).
+        let autoc = self.coef;
+        let mut lpc = [0.0f32; 20];
+        for i in 0..order {
+            let r = -autoc[i];
+            lpc[i] = r;
+            for j in 0..((i + 1) >> 1) {
+                let f = lpc[j];
+                let b = lpc[i - 1 - j];
+                lpc[j] = f + r * b;
+                lpc[i - 1 - j] = b + r * f;
             }
-            d[1..m].copy_from_slice(&tmp[1..m]);
-            d[m] = k;
         }
-        // b_1..b_order = d[1..order+1] (step-up / Levinson-Durbin recursion, §4.6.9.2)
-        self.coef[..order].copy_from_slice(&d[1..(order + 1)]);
+        self.coef[..order].copy_from_slice(&lpc[..order]);
     }
 }
 
@@ -273,61 +276,47 @@ mod tests {
     }
 
     /// Reflection→direct conversion for a hand-picked set of reflection
-    /// coefficients, checked against the closed-form lattice recursion of
-    /// §4.6.9.2 (b_1 = k_1, b_2 = k_1·(1−k_2), b_3 = k_1·(1−k_2) − k_2·k_3, ...).
+    /// coefficients, checked against a hand-expansion of ffmpeg's
+    /// `compute_lpc_coefs` (`r = -k`, symmetric step-up). The decoder's AR
+    /// filter is `y[n] = x[n] - Σ coef[i-1]·y[n-i]`.
     #[test]
     fn reflection_to_direct_hand_computed() {
-        // order 1: b_1 = k_1
-        let mut f = TnsFilter {
-            length: 1,
-            order: 1,
-            direction: false,
-            coef: [
-                0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0,
-            ],
+        let mk = |rc: &[f32]| {
+            let mut c = [0.0f32; 20];
+            c[..rc.len()].copy_from_slice(rc);
+            let mut f = TnsFilter {
+                length: 1,
+                order: rc.len() as u8,
+                direction: false,
+                coef: c,
+            };
+            f.reflection_to_direct();
+            f.coef
         };
-        f.reflection_to_direct();
-        assert!((f.coef[0] - 0.5).abs() < 1e-6, "order1 b1");
-        assert!((f.coef[1]).abs() < 1e-6, "order1 b2 must be zero");
 
-        // order 2: b_1 = k_1·(1+k_2), b_2 = k_2  (step-up uses `+`, §4.6.9.3)
-        let k1 = 0.5f32;
-        let k2 = -0.3f32;
-        let mut f = TnsFilter {
-            length: 2,
-            order: 2,
-            direction: false,
-            coef: [
-                k1, k2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0,
-            ],
-        };
-        f.reflection_to_direct();
-        assert!((f.coef[0] - k1 * (1.0 + k2)).abs() < 1e-6, "order2 b1");
-        assert!((f.coef[1] - k2).abs() < 1e-6, "order2 b2");
+        // order 1: lpc_1 = -k_1
+        let c = mk(&[0.5]);
+        assert!((c[0] - (-0.5)).abs() < 1e-6, "order1");
+        assert!(c[1].abs() < 1e-6, "order1 tail zero");
 
-        // order 3: b_1 = k_1·(1+k_2) + k_2·k_3, b_2 = k_2 + k_3·k_1·(1+k_2), b_3 = k_3
+        // order 2: lpc = [-k1·(1-k2), -k2]
+        let (k1, k2) = (0.5f32, -0.3f32);
+        let c = mk(&[k1, k2]);
+        assert!((c[0] - (-k1 * (1.0 - k2))).abs() < 1e-6, "order2 b1");
+        assert!((c[1] - (-k2)).abs() < 1e-6, "order2 b2");
+
+        // order 3: lpc = [-k1·(1-k2) + k2·k3, -k2 + k1·k3·(1-k2), -k3]
         let k3 = 0.1f32;
-        let mut f = TnsFilter {
-            length: 3,
-            order: 3,
-            direction: false,
-            coef: [
-                k1, k2, k3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0,
-            ],
-        };
-        f.reflection_to_direct();
+        let c = mk(&[k1, k2, k3]);
         assert!(
-            (f.coef[0] - (k1 * (1.0 + k2) + k2 * k3)).abs() < 1e-6,
+            (c[0] - (-k1 * (1.0 - k2) + k2 * k3)).abs() < 1e-6,
             "order3 b1"
         );
         assert!(
-            (f.coef[1] - (k2 + k3 * k1 * (1.0 + k2))).abs() < 1e-6,
+            (c[1] - (-k2 + k1 * k3 * (1.0 - k2))).abs() < 1e-6,
             "order3 b2"
         );
-        assert!((f.coef[2] - k3).abs() < 1e-6, "order3 b3");
+        assert!((c[2] - (-k3)).abs() < 1e-6, "order3 b3");
     }
 
     /// Simulate the TNS AR filter ("up" direction) with an independent,
@@ -435,6 +424,59 @@ mod tests {
         for (i, &c) in coeffs.iter().enumerate().take(1024) {
             if !(4..8).contains(&i) {
                 assert_eq!(c, 0.0, "line {i} should be untouched");
+            }
+        }
+    }
+
+    /// Independent, verbatim port of ffmpeg n6.1
+    /// `compute_lpc_coefs(autoc, order, lpc, 0, 0, 0)` (`libavcodec/lpc.h`,
+    /// float path where `AAC_SRA_R` / `AAC_MUL26` are identity / multiply) —
+    /// the reference `reflection_to_direct` is checked against.
+    fn ff_compute_lpc_coefs(autoc: &[f32], order: usize) -> Vec<f32> {
+        let mut lpc = vec![0.0f32; order];
+        for i in 0..order {
+            let r = -autoc[i];
+            lpc[i] = r;
+            let mut j = 0;
+            while j < (i + 1) >> 1 {
+                let f = lpc[j];
+                let b = lpc[i - 1 - j];
+                lpc[j] = f + r * b;
+                lpc[i - 1 - j] = b + r * f;
+                j += 1;
+            }
+        }
+        lpc
+    }
+
+    #[test]
+    fn reflection_to_direct_matches_ffmpeg_compute_lpc_coefs() {
+        let cases: &[&[f32]] = &[
+            &[0.5],
+            &[0.5, -0.3],
+            &[0.9848077, -0.4338837, 0.6427876],
+            &[0.34, -0.78, 0.86, -0.20, 0.5, -0.1, 0.42],
+        ];
+        for rc in cases {
+            let order = rc.len();
+            let mut filt = TnsFilter {
+                length: 1,
+                order: order as u8,
+                direction: false,
+                coef: {
+                    let mut c = [0.0f32; 20];
+                    c[..order].copy_from_slice(rc);
+                    c
+                },
+            };
+            filt.reflection_to_direct();
+            let ff = ff_compute_lpc_coefs(rc, order);
+            for (i, &want) in ff.iter().enumerate() {
+                assert!(
+                    (filt.coef[i] - want).abs() < 1e-5,
+                    "rc={rc:?} i={i}: ours={} ffmpeg={want}",
+                    filt.coef[i],
+                );
             }
         }
     }

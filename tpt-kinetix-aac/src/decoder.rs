@@ -406,6 +406,29 @@ impl AacDecoder {
             }
         }
 
+        // --- Pass 3.5: Apply TNS (per channel, after joint-stereo) ---
+        // ISO/IEC 14496-3 §4.6.9 / ffmpeg `spectral_to_sample`: the TNS all-pole
+        // filter runs on the *post-butterfly* spectrum, i.e. after M/S and
+        // intensity stereo, and before the IMDCT. Doing it earlier (e.g. inside
+        // the per-channel dequant pass) gives the wrong result on any frame
+        // where a TNS-carrying channel also has M/S or intensity active on the
+        // filtered bands. `AAC_DBG_NO_TNS` skips this stage — a bisection hook
+        // for isolating TNS-vs-other reconstruction error against the reference.
+        if std::env::var_os("AAC_DBG_NO_TNS").is_none() {
+            for ch in decoded_channels.iter_mut() {
+                if ch.is_cce {
+                    continue;
+                }
+                let Some(tns) = ch.tns.clone() else { continue };
+                let swb = if ch.ics.window_sequence.is_eight_short() {
+                    SWB_OFFSET_128[self.sf_index]
+                } else {
+                    SWB_OFFSET_1024[self.sf_index]
+                };
+                apply_tns(&tns, &ch.ics, &mut ch.coeffs, swb);
+            }
+        }
+
         // --- Pass 4: IMDCT + windowing + overlap-add ---
         // Collect output channels in order (non-CCE channels only).
         let output_channels: Vec<_> = decoded_channels.iter().filter(|ch| !ch.is_cce).collect();
@@ -606,13 +629,13 @@ impl AacDecoder {
                 &mut coeffs,
             );
         }
-        if let Some(tns) = &stream.tns {
-            // `AAC_DBG_NO_TNS` skips the TNS filter stage — a bisection hook for
-            // isolating TNS-vs-other reconstruction error against the reference.
-            if std::env::var_os("AAC_DBG_NO_TNS").is_none() {
-                apply_tns(tns, ics, &mut coeffs, swb);
-            }
-        }
+        // NOTE: TNS is deliberately *not* applied here. ISO/IEC 14496-3 and
+        // ffmpeg both apply the TNS all-pole filter *after* joint-stereo
+        // reconstruction (M/S butterfly + intensity stereo), not before — see
+        // `spectral_to_sample`'s `apply_tns` call, which runs after
+        // `decode_cpe`'s `apply_mid_side_stereo` / `apply_intensity_stereo`.
+        // The decoder applies it in a dedicated pass once stereo is done
+        // (see Pass 3.5 in `decode`).
         let dbg_bands_frame = std::env::var("AAC_DBG_BANDS_FRAME")
             .ok()
             .and_then(|s| s.parse::<u64>().ok());
@@ -670,8 +693,15 @@ fn output_channel_order(channel_configuration: u8, n_channels: usize) -> Vec<usi
         (5, 5) => &[1, 2, 0, 3, 4],
         // SCE C, CPE L/R, CPE Ls/Rs, LFE → L, R, C, LFE, Ls, Rs
         (6, 6) => &[1, 2, 0, 5, 3, 4],
-        // SCE C, CPE Lc/Rc, CPE L/R, CPE Ls/Rs, LFE → L, R, C, LFE, Ls, Rs, Lc, Rc
-        (7, 8) => &[3, 4, 0, 7, 5, 6, 1, 2],
+        // channel_configuration 7. ffmpeg's AAC encoder writes an 8-channel
+        // "7.1" layout as elements SCE(C), CPE(FL/FR), CPE(a), CPE(b), LFE and
+        // its decoder emits them as FL, FR, C, LFE, <CPE b>, <CPE a> — i.e. the
+        // last two channel pairs come out in reverse element order (verified
+        // against a real ffmpeg 7.1 encode/decode round-trip; ffmpeg itself
+        // logs that this layout is not the spec's 7.1-wide, but encoder and
+        // decoder share the assumption so the round-trip is consistent).
+        // element planes: 0=SCE 1,2=CPE0 3,4=CPE1 5,6=CPE2 7=LFE.
+        (7, 8) => &[1, 2, 0, 7, 5, 6, 3, 4],
         _ => return (0..n_channels).collect(),
     };
     perm.to_vec()
@@ -843,8 +873,10 @@ mod order_tests {
         assert_eq!(output_channel_order(3, 3), vec![1, 2, 0]);
         // 5.1: SCE(C), CPE(L,R), CPE(Ls,Rs), LFE → L, R, C, LFE, Ls, Rs.
         assert_eq!(output_channel_order(6, 6), vec![1, 2, 0, 5, 3, 4]);
-        // 7.1.
-        assert_eq!(output_channel_order(7, 8), vec![3, 4, 0, 7, 5, 6, 1, 2]);
+        // 7.1: SCE(C), CPE(L,R), CPE(a), CPE(b), LFE → L, R, C, LFE, then the
+        // last two pairs in reverse element order (ffmpeg's non-spec 7.1
+        // round-trip — see `output_channel_order`).
+        assert_eq!(output_channel_order(7, 8), vec![1, 2, 0, 7, 5, 6, 3, 4]);
         // config 0 (PCE-defined) and count mismatches fall back to identity.
         assert_eq!(output_channel_order(0, 6), vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(output_channel_order(6, 5), vec![0, 1, 2, 3, 4]);

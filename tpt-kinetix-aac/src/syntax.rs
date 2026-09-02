@@ -537,6 +537,10 @@ fn skip_data_stream_element(reader: &mut BitReader) -> Result<(), AacParseError>
 /// are redundant with the ADTS header's `channel_config` for AAC-LC, so the
 /// decoder ignores them.
 fn skip_program_config_element(reader: &mut BitReader) -> Result<(), AacParseError> {
+    // ISO/IEC 14496-3 Table 4.2 `program_config_element()`. Both the 3-bit
+    // `id_syn_ele` and the 4-bit `element_instance_tag` are already consumed by
+    // the dispatch in `RawDataBlock::parse` (`4 | 5 =>` arm), so the body here
+    // starts at `object_type`.
     let _object_type = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)?;
     let _sf = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
     let num_front = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as usize;
@@ -581,11 +585,12 @@ fn skip_program_config_element(reader: &mut BitReader) -> Result<(), AacParseErr
         let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
         let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
     }
+    // `byte_alignment()` comes *before* `comment_field_bytes`, per Table 4.2.
+    reader.byte_align();
     let comment_bytes = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
     for _ in 0..comment_bytes {
         let _ = reader.read_u8().ok_or(AacParseError::UnexpectedEof)?;
     }
-    reader.byte_align();
     Ok(())
 }
 
@@ -1011,11 +1016,13 @@ mod tests {
 
     #[test]
     fn skips_program_config_element_before_end() {
-        // id=5 (PCE) with every channel count zero and an empty comment field:
-        // 46 bits of fixed structure, byte-aligned to 48, then END.
+        // id=5 (PCE) with every channel count zero and an empty comment field.
+        // Per ISO Table 4.2 the `byte_alignment()` is *before* the 8-bit
+        // `comment_field_bytes` (not after the comment). id(3) + 34 structure
+        // bits = 37 → 3 pad bits → aligned → comment_field_bytes(8) = 0 → END.
         let mut bits: Vec<u8> = Vec::new();
         bits.extend_from_slice(&[ONE, ZERO, ONE]); // id_syn_ele = PCE (5)
-        bits.extend_from_slice(&[ZERO; 4]); // instance_tag = 0
+        bits.extend_from_slice(&[ZERO; 4]); // element_instance_tag = 0
         bits.extend_from_slice(&[ZERO; 2]); // object_type
         bits.extend_from_slice(&[ZERO; 4]); // sampling_frequency_index
         bits.extend_from_slice(&[ZERO; 4]); // num_front
@@ -1027,8 +1034,8 @@ mod tests {
         bits.push(ZERO); // mono_mixdown_present
         bits.push(ZERO); // stereo_mixdown_present
         bits.push(ZERO); // matrix_mixdown_idx_present
+        bits.extend_from_slice(&[ZERO; 3]); // byte-align padding (to bit 40)
         bits.extend_from_slice(&[ZERO; 8]); // comment_field_bytes = 0
-        bits.extend_from_slice(&[ZERO; 3]); // byte-align padding (skipped)
         bits.extend_from_slice(&[ONE, ONE, ONE]); // id_syn_ele = END (7)
         let bytes = bits_to_bytes(&bits);
         let block = RawDataBlock::parse(&bytes, 4).unwrap();

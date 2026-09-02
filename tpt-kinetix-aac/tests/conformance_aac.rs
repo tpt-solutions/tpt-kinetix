@@ -5,7 +5,8 @@
 //! `ffmpeg` is not installed (so it is safe to run everywhere, including CI
 //! images without `ffmpeg`).
 
-use tpt_kinetix_aac::AacDecoder;
+use tpt_kinetix_aac::syntax::{Element, WindowSequence};
+use tpt_kinetix_aac::{AacDecoder, AdtsHeader, RawDataBlock};
 use tpt_kinetix_core::frame::AudioFrame;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
@@ -221,11 +222,164 @@ fn best_channel0_correlation(native: &[AudioFrame], reference: &[AudioFrame]) ->
     best
 }
 
+/// Which decoder paths a corpus stream actually exercises, tallied by
+/// re-parsing every ADTS frame's `raw_data_block()`. This is the guard against
+/// this file's recurring failure mode: a case whose *intent* (say "hit
+/// EIGHT_SHORT + TNS") silently stops being met because ffmpeg's encoder
+/// changed its mind about the source, so the case keeps passing while covering
+/// nothing. Each case declares the features it is *for*; the test asserts they
+/// are present.
+#[derive(Default, Debug)]
+struct StreamStats {
+    frames: usize,
+    eight_short_frames: usize,
+    long_start_frames: usize,
+    long_stop_frames: usize,
+    tns_channel_frames: usize,
+    /// Channel-frames that are `EIGHT_SHORT` *and* carry `tns_data` — the
+    /// per-window short-block TNS path specifically.
+    short_tns_channel_frames: usize,
+    pns_channel_frames: usize,
+    intensity_channel_frames: usize,
+    ms_stereo_frames: usize,
+    pulse_channel_frames: usize,
+    max_audio_elements: usize,
+    /// Frames whose ADTS header carries `channel_configuration == 0` (layout in
+    /// a `program_config_element`).
+    config_zero_frames: usize,
+}
+
+/// A path a corpus case is expected to exercise (asserted post-hoc from
+/// [`StreamStats`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Coverage {
+    /// At least one `EIGHT_SHORT_SEQUENCE` frame.
+    EightShort,
+    /// At least one `LONG_START` *and* one `LONG_STOP` frame (the transition
+    /// glue in `long_synthesis` / `short_synthesis`).
+    WindowTransition,
+    /// At least one channel-frame carrying `tns_data`.
+    Tns,
+    /// At least one `EIGHT_SHORT` channel-frame carrying `tns_data` (the
+    /// per-window short-block TNS filter path).
+    ShortTns,
+    /// At least one channel-frame with a `NOISE_HCB` (PNS) section.
+    Pns,
+    /// At least one channel-frame with an `INTENSITY_HCB` / `INTENSITY_HCB2`
+    /// section.
+    IntensityStereo,
+    /// At least one CPE frame with `ms_mask_present != 0`.
+    MsStereo,
+    /// At least one frame with two or more audio elements (SCE/CPE/LFE).
+    MultiElement,
+    /// At least one frame with `channel_configuration == 0` (a
+    /// `program_config_element` must be parsed/skipped correctly).
+    ConfigZero,
+}
+
+fn analyze_stream(adts: &[u8]) -> StreamStats {
+    let mut s = StreamStats::default();
+    for frame in split_adts_frames(adts) {
+        let Ok(hdr) = AdtsHeader::parse(&frame) else {
+            continue;
+        };
+        if hdr.header_len >= frame.len() {
+            continue;
+        }
+        let payload = &frame[hdr.header_len..];
+        let Ok(block) = RawDataBlock::parse(payload, hdr.sampling_frequency_index as usize) else {
+            continue;
+        };
+        s.frames += 1;
+        if hdr.channel_configuration == 0 {
+            s.config_zero_frames += 1;
+        }
+        let mut audio_elements = 0usize;
+        let mut frame_has_ms = false;
+        for el in &block.elements {
+            let streams: Vec<&tpt_kinetix_aac::syntax::ChannelStream> = match el {
+                Element::Sce(e) => {
+                    audio_elements += 1;
+                    vec![&e.stream]
+                }
+                Element::Lfe(e) => {
+                    audio_elements += 1;
+                    vec![&e.stream]
+                }
+                Element::Cpe(e) => {
+                    audio_elements += 1;
+                    if e.ms_mask_present != 0 {
+                        frame_has_ms = true;
+                    }
+                    vec![&e.left, &e.right]
+                }
+                _ => continue,
+            };
+            for cs in streams {
+                match cs.ics.window_sequence {
+                    WindowSequence::EightShort => s.eight_short_frames += 1,
+                    WindowSequence::LongStart => s.long_start_frames += 1,
+                    WindowSequence::LongStop => s.long_stop_frames += 1,
+                    WindowSequence::OnlyLong => {}
+                }
+                if cs.tns.is_some() {
+                    s.tns_channel_frames += 1;
+                    if cs.ics.window_sequence == WindowSequence::EightShort {
+                        s.short_tns_channel_frames += 1;
+                    }
+                }
+                if cs.pulse.is_some() {
+                    s.pulse_channel_frames += 1;
+                }
+                // NOISE_HCB = 13, INTENSITY_HCB2 = 14, INTENSITY_HCB = 15.
+                if cs.band_type.contains(&13) {
+                    s.pns_channel_frames += 1;
+                }
+                if cs.band_type.iter().any(|&b| b == 14 || b == 15) {
+                    s.intensity_channel_frames += 1;
+                }
+            }
+        }
+        if frame_has_ms {
+            s.ms_stereo_frames += 1;
+        }
+        s.max_audio_elements = s.max_audio_elements.max(audio_elements);
+    }
+    s
+}
+
+fn check_coverage(label: &str, want: &[Coverage], s: &StreamStats) {
+    assert!(
+        s.frames > 0,
+        "[{label}] coverage: no raw_data_block parsed at all — the case is empty"
+    );
+    for c in want {
+        let ok = match c {
+            Coverage::EightShort => s.eight_short_frames > 0,
+            Coverage::WindowTransition => s.long_start_frames > 0 && s.long_stop_frames > 0,
+            Coverage::Tns => s.tns_channel_frames > 0,
+            Coverage::ShortTns => s.short_tns_channel_frames > 0,
+            Coverage::Pns => s.pns_channel_frames > 0,
+            Coverage::IntensityStereo => s.intensity_channel_frames > 0,
+            Coverage::MsStereo => s.ms_stereo_frames > 0,
+            Coverage::MultiElement => s.max_audio_elements >= 2,
+            Coverage::ConfigZero => s.config_zero_frames > 0,
+        };
+        assert!(
+            ok,
+            "[{label}] coverage: expected to exercise {c:?} but the ffmpeg-encoded \
+             stream does not — this case no longer tests what it is for. Stats: {s:?}"
+        );
+    }
+}
+
 /// A single conformance case: `label` is diagnostic only, `adts` the real
-/// ffmpeg-encoded stream to decode with both decoders.
+/// ffmpeg-encoded stream to decode with both decoders, `coverage` the decoder
+/// paths the case is meant to exercise (asserted from [`analyze_stream`]).
 struct ConformanceCase {
     label: &'static str,
     adts: Vec<u8>,
+    coverage: &'static [Coverage],
 }
 
 /// Build the conformance corpus. The single 440 Hz tone that previously
@@ -244,11 +398,20 @@ struct ConformanceCase {
 /// * **48 kHz / 22.05 kHz**: different scalefactor-band tables (`SWB_OFFSET_*`
 ///   are indexed by `sampling_frequency_index`), so a bug there would surface
 ///   on one rate but not 44.1 kHz.
+///
+/// Each case declares the decoder paths it is *for* (`&[Coverage]`); the test
+/// re-parses every ADTS frame ([`analyze_stream`]) and asserts they are
+/// actually present, so a case cannot silently stop covering its target when
+/// ffmpeg's encoder changes its mind about the source.
 fn build_corpus() -> Vec<ConformanceCase> {
     let mut cases = Vec::new();
-    let mut add = |label: &'static str, adts: Option<Vec<u8>>| {
+    let mut add = |label: &'static str, adts: Option<Vec<u8>>, coverage: &'static [Coverage]| {
         match adts {
-            Some(adts) => cases.push(ConformanceCase { label, adts }),
+            Some(adts) => cases.push(ConformanceCase {
+                label,
+                adts,
+                coverage,
+            }),
             // `encode_aac_adts_lavfi`/`minimal_aac_adts` return `None` on any
             // ffmpeg encode failure (including a bad filter option), and a
             // silently-empty case used to just vanish from the corpus with no
@@ -266,7 +429,11 @@ fn build_corpus() -> Vec<ConformanceCase> {
     };
 
     // Original baseline: 440 Hz stereo tone, 44.1 kHz.
-    add("tone_440_stereo_44100", minimal_aac_adts(44_100, 2, 1.0));
+    add(
+        "tone_440_stereo_44100",
+        minimal_aac_adts(44_100, 2, 1.0),
+        &[],
+    );
     // Broadband noise → PNS / short-window heavy. `anoisesrc`'s default seed
     // is -1 (random), which made this case's exact content — and therefore
     // its max-diff/correlation numbers — different on every single test run,
@@ -280,6 +447,7 @@ fn build_corpus() -> Vec<ConformanceCase> {
             2,
             "128k",
         ),
+        &[Coverage::Pns],
     );
     add(
         "noise_mono_44100",
@@ -288,6 +456,19 @@ fn build_corpus() -> Vec<ConformanceCase> {
             1,
             "96k",
         ),
+        &[Coverage::Pns],
+    );
+    // Broadband noise at 22.05 kHz: `sampling_frequency_index` 7 selects the
+    // `SWB_*_24000` scalefactor-band tables (long and short), which no other
+    // corpus case touches — a transcription error there would only surface here.
+    add(
+        "noise_stereo_22050",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "anoisesrc=duration=1.0:sample_rate=22050:amplitude=0.8:color=white:seed=3",
+            2,
+            "64k",
+        ),
+        &[Coverage::Pns],
     );
     // Frequency sweep → window-sequence transitions and TNS. ffmpeg's `sine`
     // source has no chirp/sweep parameter (an earlier `frequency2=...` here
@@ -303,15 +484,13 @@ fn build_corpus() -> Vec<ConformanceCase> {
             2,
             "128k",
         ),
+        &[Coverage::Tns],
     );
     // Percussive click train (~8 bursts/s of 1 kHz, ~50 ms each): the sharp
     // onsets force the encoder into LONG_START → EIGHT_SHORT → LONG_STOP
-    // transitions (~100 EIGHT_SHORT frames across the corpus), exercising the
-    // short IMDCT, window grouping, and the LONG↔SHORT overlap-add glue. (This
-    // ffmpeg build's encoder does not enable TNS on short blocks for these
-    // signals, so the per-window short-block TNS path in `apply_tns` is
-    // structurally correct-by-construction against ffmpeg but not yet covered
-    // by a bit-exact conformance case — see todo-aac.md.)
+    // transitions, exercising the short IMDCT, window grouping, and the
+    // LONG↔SHORT overlap-add glue. (Short-block TNS itself is covered by the
+    // `short_tns_*` cases below.)
     add(
         "transient_stereo_44100",
         tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
@@ -319,6 +498,7 @@ fn build_corpus() -> Vec<ConformanceCase> {
             2,
             "128k",
         ),
+        &[Coverage::EightShort, Coverage::WindowTransition],
     );
     add(
         "transient_mono_44100",
@@ -327,6 +507,47 @@ fn build_corpus() -> Vec<ConformanceCase> {
             1,
             "96k",
         ),
+        &[Coverage::EightShort, Coverage::WindowTransition],
+    );
+    // Percussive click train at 22.05 kHz: EIGHT_SHORT frames through the
+    // `SWB_128_24000` short-window band table (sf_index 7). (This ffmpeg build
+    // rarely emits a clean LONG_STOP at 22 kHz for this signal, so only
+    // EIGHT_SHORT is asserted — the transition glue is covered at 44.1 kHz.)
+    add(
+        "transient_stereo_22050",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='sin(2*PI*900*t)*gt(0.05\\,mod(t\\,0.13))':s=22050:d=1.5:c=stereo",
+            2,
+            "96k",
+        ),
+        &[Coverage::EightShort],
+    );
+    // Short-block TNS: a steady 500 Hz tone in the left channel and a decaying
+    // 3 kHz burst (envelope re-triggered every 200 ms) in the right. The sharp
+    // re-onsets push the encoder into EIGHT_SHORT, and at 96 kbit/s it turns on
+    // `tns_data` for the right channel's short windows while M/S is also active —
+    // the exact combination that was mis-decoded when TNS was applied before the
+    // joint-stereo butterfly instead of after it (todo-aac.md).
+    add(
+        "short_tns_stereo_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='0.5*sin(2*PI*500*t)|0.5*sin(2*PI*3000*t)*exp(-2*mod(t\\,0.2))':s=44100:d=1.5",
+            2,
+            "96k",
+        ),
+        &[Coverage::ShortTns, Coverage::MsStereo],
+    );
+    // Mono variant of the short-block TNS probe: exercises the SCE branch of the
+    // post-stereo TNS pass (Pass 3.5) and short-block TNS with no butterfly in
+    // front of it.
+    add(
+        "short_tns_mono_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='0.6*sin(2*PI*2500*t)*exp(-3*mod(t\\,0.18))+0.2*sin(2*PI*500*t)':s=44100:d=1.5",
+            1,
+            "80k",
+        ),
+        &[Coverage::ShortTns],
     );
     // Very low bitrate (24 kbit/s) stereo with a shared low tone + a partly
     // decorrelated 6 kHz tone: forces the encoder to code the high band with
@@ -341,6 +562,7 @@ fn build_corpus() -> Vec<ConformanceCase> {
             2,
             "24k",
         ),
+        &[Coverage::IntensityStereo],
     );
     // 5.1 surround (channel_configuration 6: SCE + CPE + CPE + LFE): exercises
     // multi-element raw_data_block parsing, the LFE element, a second CPE with
@@ -353,11 +575,53 @@ fn build_corpus() -> Vec<ConformanceCase> {
             6,
             "256k",
         ),
+        &[Coverage::MultiElement],
+    );
+    // 7.1 (channel_configuration 7): SCE + CPE + CPE + CPE + LFE. ffmpeg's AAC
+    // encoder writes config 7 for an 8-channel "7.1" layout (FL FR FC LFE BL BR
+    // SL SR) as elements SCE(FC), CPE(FL/FR), CPE(BL/BR), CPE(SL/SR), LFE — the
+    // `output_channel_order` (7, 8) permutation must map that element order back
+    // to ffmpeg's decode output order. (ffmpeg logs a "non-spec-compliant 7.1"
+    // note about this layout vs the spec's 7.1-wide; both encode and reference
+    // decode go through the same assumption, so the round-trip is still a valid
+    // conformance check for our remap.)
+    add(
+        "surround_71_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi(
+            "aevalsrc=exprs='0.25*sin(2*PI*210*t)|0.25*sin(2*PI*300*t)|0.2*sin(2*PI*500*t)|0.1*sin(2*PI*70*t)|0.22*sin(2*PI*700*t)|0.22*sin(2*PI*900*t)|0.2*sin(2*PI*1100*t)|0.2*sin(2*PI*1300*t)':channel_layout=7.1:s=44100:d=1.0",
+            8,
+            "320k",
+        ),
+        &[Coverage::MultiElement],
+    );
+    // `channel_configuration = 0`: the channel layout lives in a
+    // `program_config_element` in the first raw_data_block instead of the ADTS
+    // header. `-aac_pce 1` makes ffmpeg emit it. Exercises
+    // `skip_program_config_element` — a wrong PCE bit length desyncs the whole
+    // first frame (it was missing `element_instance_tag` and had
+    // `byte_alignment()` on the wrong side of `comment_field_bytes`).
+    add(
+        "config0_pce_stereo_44100",
+        tpt_kinetix_test_utils::synthetic::encode_aac_adts_lavfi_args(
+            "aevalsrc=exprs='0.4*sin(2*PI*330*t)|0.4*sin(2*PI*440*t)':s=44100:d=1.0",
+            2,
+            "128k",
+            &["-aac_pce", "1"],
+        ),
+        &[Coverage::ConfigZero],
     );
     // Other sample rates → different SWB tables.
-    add("tone_440_stereo_48000", minimal_aac_adts(48_000, 2, 1.0));
-    add("tone_440_stereo_22050", minimal_aac_adts(22_050, 2, 1.0));
-    add("tone_440_mono_44100", minimal_aac_adts(44_100, 1, 1.0));
+    add(
+        "tone_440_stereo_48000",
+        minimal_aac_adts(48_000, 2, 1.0),
+        &[],
+    );
+    add(
+        "tone_440_stereo_22050",
+        minimal_aac_adts(22_050, 2, 1.0),
+        &[],
+    );
+    add("tone_440_mono_44100", minimal_aac_adts(44_100, 1, 1.0), &[]);
     cases
 }
 
@@ -379,9 +643,23 @@ fn native_aac_matches_ffmpeg_reference() {
     let mut worst_label = "";
 
     for case in &corpus {
+        // Guard against the case silently no longer exercising what it is for.
+        let stats = analyze_stream(&case.adts);
+        eprintln!("[{}] stream stats: {stats:?}", case.label);
+        check_coverage(case.label, case.coverage, &stats);
+
         let native = decode_native(&case.adts);
-        let reference =
-            decode_aac_with_ffmpeg(&case.adts).expect("ffmpeg should decode its own stream");
+        // `channel_configuration == 0` streams don't carry the channel count in
+        // the ADTS header, so the reference harness can't frame ffmpeg's raw
+        // f32 output on its own — take the count from the native decode (which
+        // gets it from the PCE-less element list).
+        let reference = if stats.config_zero_frames > 0 {
+            let ch = native.first().map_or(2, |f| f.channels);
+            tpt_kinetix_test_utils::reference::decode_aac_with_ffmpeg_channels(&case.adts, ch)
+        } else {
+            decode_aac_with_ffmpeg(&case.adts)
+        }
+        .expect("ffmpeg should decode its own stream");
         for (i, f) in reference.iter().take(5).enumerate() {
             let maxabs = f
                 .data
@@ -404,14 +682,44 @@ fn native_aac_matches_ffmpeg_reference() {
             case.label
         );
 
-        // All 45 frames of each stream now parse structurally, so channel-count
-        // / sample-rate mismatches are real regressions, not expected gaps.
+        // Every stream now parses structurally, so channel-count /
+        // sample-rate mismatches are real regressions, not expected gaps.
         assert_eq!(
             native[0].channels, reference[0].channels,
             "[{}] channel count mismatch: native={} reference={}",
             case.label, native[0].channels, reference[0].channels
         );
         assert_eq!(native[0].sample_rate, reference[0].sample_rate);
+
+        if std::env::var("AAC_DBG_CHMAP").is_ok() {
+            let np = flatten_channels(&native);
+            let rp = flatten_channels(&reference);
+            eprintln!(
+                "[{}] native-plane × reference-plane correlation:",
+                case.label
+            );
+            for (ni, n) in np.iter().enumerate() {
+                let row: Vec<String> = rp
+                    .iter()
+                    .map(|r| {
+                        let len = n.len().min(r.len());
+                        let (mut dot, mut nn, mut rr) = (0.0f64, 0.0f64, 0.0f64);
+                        for i in 0..len {
+                            dot += n[i] as f64 * r[i] as f64;
+                            nn += (n[i] as f64).powi(2);
+                            rr += (r[i] as f64).powi(2);
+                        }
+                        let c = if nn > 0.0 && rr > 0.0 {
+                            dot / (nn.sqrt() * rr.sqrt())
+                        } else {
+                            0.0
+                        };
+                        format!("{c:+.2}")
+                    })
+                    .collect();
+                eprintln!("  native[{ni}]: {}", row.join(" "));
+            }
+        }
 
         let max_diff = best_aligned_max_diff(&native, &reference);
         let corr = best_channel0_correlation(&native, &reference);

@@ -599,6 +599,56 @@ pub fn encode_aac_adts_lavfi(lavfi_input: &str, channels: u8, bitrate: &str) -> 
     }
 }
 
+/// Like [`encode_aac_adts_lavfi`] but with extra `ffmpeg` args inserted before
+/// `-f adts` (e.g. `["-aac_pce", "1"]` to force a `program_config_element` and
+/// `channel_configuration = 0`). Returns `None` on any encode failure.
+pub fn encode_aac_adts_lavfi_args(
+    lavfi_input: &str,
+    channels: u8,
+    bitrate: &str,
+    extra: &[&str],
+) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let ac = channels.to_string();
+    let mut args: Vec<&str> = vec![
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        lavfi_input,
+        "-ac",
+        &ac,
+        "-c:a",
+        "aac",
+        "-b:a",
+        bitrate,
+    ];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["-f", "adts", "-"]);
+
+    let mut child = Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Encode a short CAVLC baseline-profile H.264 clip with `ffmpeg`, returning
 /// the raw Annex B bytestream (read from stdout, so no temp file is needed).
 ///
