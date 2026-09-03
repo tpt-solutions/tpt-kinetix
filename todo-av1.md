@@ -3279,3 +3279,150 @@
 > commit` calls. Remaining open items unchanged: mandelbrot still has a
 > smaller directional detail residual (pre-filter maxdiff ~21, likely
 > upsample interpolation or `dr_z3` `max_base_y`); (2)–(6) as above.
+
+> ## 2026-09-03 session note — catch-up on undocumented concurrent work, dav1d
+> reference rebuilt on Linux, and a real testsrc2/IBC bug fixed (skip blocks
+> never reset their coefficient neighbour context).
+>
+> **Catch-up (not this session's work, but undocumented in this file until
+> now)**: between the 2026-09-01 (cont'd #8) note above and this session, six
+> commits landed on `master` outside this file's narrative:
+> `73776fd` (tx_depth sentinel, already covered above), `b89ac1c` ("seven
+> reconstruction fixes + spec-correct MV component parsing" — SMOOTH enum,
+> chroma edge filter, 4×4 tx_depth, `use_intrabc`, `BlockDecoded`,
+> `filterType`, all *already* described above as uncommitted 2026-09-01 work,
+> now actually committed, plus a rewritten `read_mv_component`/`read_mv` to
+> the real §5.11.32 symbol order), `f7fae93` (three real CDEF bugs: a
+> spurious `for _ in 0..8` loop biasing `cdef_direction` toward direction 0,
+> wrong pri/sec packing, wrong sec-strength table lookup — `KINETIX_AV1_NOCDEF`
+> / `NODEBLOCK` bypass flags added), `ca52335` (loop restoration §7.17
+> implemented — Wiener + SgrProj), `f253255` (IBC reconstruction implemented:
+> integer-pel predictor copy + residual, via `reconstruct_ibc_block`), `b509fc3`
+> (IBC source-position sign was inverted — fixed by subtracting the decoded MV
+> instead of adding; loop restoration's *apply* step gated off behind
+> `KINETIX_AV1_FILTER=1` because it uses clamped unit-local pixels instead of
+> real neighbouring-unit pixels at restoration-unit boundaries, causing ~25 dB
+> regressions), `f93c99c` (palette reconstruction debug traces + psnr_check
+> row-diff tooling). **Net effect on `av1_psnr_check` vs the 2026-09-01
+> baseline**: `testsrc` Y 61.95→**73.01** (loop filter now on and correct),
+> `mandelbrot` Y 47.37→**47.59**, `smptebars` Y 54.23→**57.49**, `testsrc2`
+> 12.96→**14.36/17.17/13.92** (IBC blocks now reconstruct something instead of
+> erroring out). `solid_red` unchanged at 99/99/99.
+>
+> **This session started by fixing a broken build**: a prior commit added a
+> `dbg: bool` parameter to `read_palette_colors_yu` but didn't update its two
+> test call sites (`cargo test` failed to compile), and three
+> `KINETIX_AV1_DBG_*` env-var gates used manual range checks that trip
+> `clippy::manual_range_contains` under `-D warnings` (`cargo clippy` failed).
+> Fixed both (commit `f3dbd24`) — confirmed byte-identical `av1_psnr_check`
+> output before/after, 125 tests pass. **Branch note**: work was moved from a
+> feature branch to `master` directly partway through this session per
+> updated instructions; `git log` on `master` is the authoritative history
+> from here on.
+>
+> **Built a fresh dav1d reference on this (Linux) session's machine** —
+> `scratchpad/av1ref/` did not exist here (previous sessions built it on a
+> different Windows machine per the 2026-09-01 note). `apt-get install meson
+> nasm`, `git clone https://github.com/videolan/dav1d.git` (the
+> `code.videolan.org` origin is blocked by this environment's proxy; the
+> GitHub mirror works), same two-line patch as before
+> (`src/recon.h`'s `DEBUG_BLOCK_INFO` gated on `getenv("DAV1D_TRACE")` via a
+> `dav1d_trace_enabled()` helper, a `BLOCK bx by bw4 bh4 bl bp r=` print at
+> the top of `decode_b` in `src/decode.c`), `meson setup build
+> --buildtype=release && ninja -C build` (asm enabled this time — nasm is
+> available on Linux, unlike the previous session's `-Denable_asm=false`
+> workaround for a missing MSVC nasm). Run as
+> `LD_LIBRARY_PATH=.../build/src DAV1D_TRACE=1 build/tools/dav1d -i x.obu -o
+> out.yuv --threads 1`. This is a local build only (not committed — dav1d is
+> LGPL/BSD-dual and not vendored into this repo either way); rebuild from
+> this note's commands if `scratchpad/` is ever lost.
+>
+> **Bug found and fixed: skipped transform blocks never reset their
+> coefficient neighbour context.** Traced `testsrc2` (the IBC corpus clip)
+> block-by-block against the fresh dav1d trace (`KINETIX_AV1_TRACE=1
+> cargo run -p tpt-kinetix-av1 --example av1_trace_obu -- x.obu` vs
+> `DAV1D_TRACE=1 dav1d -i x.obu`), comparing the `Post-tx`/`Post-*-cf-blk`
+> `r=` (msac range) checkpoints in decode order. First divergence: the chroma
+> `all_zero`/`dc_sign` symbol read for the block at mi (56,16) used context
+> bucket 0 in Kinetix vs dav1d's bucket 1 (same decoded bit both times, so
+> the mismatch was invisible until the *next* read, which consumed a
+> different number of bits and cascaded). Added matching temporary
+> instrumentation to both sides (`SKIPCTX_POST`/`SKIPCTX_EOB`/
+> `SKIPCTX_BASEEOB`/`SKIPCTX_DCSIGN`/`DCSIGN_RAW`/`DCSIGN_STORE` — all
+> removed before commit) to walk the exact `above_dc`/`left_dc` context-array
+> contents feeding `dc_sign_ctx`. Root cause: block bx=48,by=16 (a real,
+> non-skipped block) correctly writes a positive DC sign across chroma rows
+> y4=8..11. The very next block, bx=52,by=20 (a **skipped** IBC block,
+> `Post-skip[1]` in the dav1d trace), covers only rows y4=8..9 — dav1d's
+> `read_coef_blocks` explicitly `memset`s *its own* footprint's above/left
+> coefficient-context bytes to the "unset" sentinel even though it never
+> calls `decode_coefs` (AV1 §5.11.34: `coeffs()` is simply never invoked for
+> a skipped block, but the context still needs resetting). Kinetix's
+> `reconstruct_tx_block` (`reconstruct_block.rs`) and `reconstruct_ibc_block`
+> (`intra_block.rs`, both the luma and chroma call sites) had `if !skip {
+> read_coeffs(...) }` with **no `else` branch** — so a skipped block's
+> rows/columns simply kept whatever a completely unrelated earlier block had
+> last written, here leaving rows 10/11 wrongly "positive" after row 20's
+> skip should have cleared them. The very next real block (bx=56,by=16) then
+> read a wrong `dc_sign` context for its left neighbour.
+>
+> **Fix**: `coeff::clear_coeff_context(ctxs, blk, w4, h4)` — the same
+> zero-context store `read_coeffs` does at its own tail (for `all_zero` or a
+> real decode), factored out so it can run standalone — called from the
+> `else` branch of all three `if !skip { read_coeffs(...) }` call sites
+> (`reconstruct_block.rs`'s intra/inter tx-block path, `intra_block.rs`'s IBC
+> luma loop, `intra_block.rs`'s IBC chroma U/V loop).
+>
+> **Result** (`av1_psnr_check`): `testsrc2` Y/U/V **14.36/17.17/13.92 →
+> 23.11/25.08/16.95 dB**; `solid_red`/`testsrc`/`mandelbrot`/`smptebars`
+> byte-identical (this bug only bites when a skip block's footprint doesn't
+> exactly match a later block's, which the intra-only corpus entries don't
+> hit). 126 unit tests pass (new:
+> `coeff::tests::skipped_block_clears_stale_dc_sign_context_for_later_neighbours`,
+> which reproduces the exact row-overlap scenario above without needing the
+> real corpus file), `cargo clippy -p tpt-kinetix-av1 --all-targets -D
+> warnings` clean, `cargo fmt --all` applied. Committed as `d70e12e` on
+> `master`.
+>
+> **testsrc2 is still far from pixel-exact** — re-ran the same trace diff
+> after the fix and found the next divergence almost immediately (dav1d
+> trace index ~547 of ~690 `Post-tx`/`Post-*-cf-blk` checkpoints): block
+> bx=54,by=32 is a genuinely different kind of IBC block — dav1d's trace
+> shows `Post-vartxtree[0/0]` (the recursive `read_var_tx_size` split flag,
+> §5.11.16) and `Post-y-cf-blk[tx=7,txtp=13,eob=64]` (`txtp=13` is an
+> **inter** transform type — `V_DCT`/similar from the inter tx-type set, not
+> any value the intra tx-type tables produce). `reconstruct_ibc_block`
+> always reads a single fixed-size transform (`max_tx_size_for_bsize(bsize)`,
+> no split) and decodes its coefficients through the ordinary *intra*
+> `read_coeffs` path (`qindex_positive: false` forces `DCT_DCT` with zero
+> bits read for tx_type, never the real inter tx_type symbol). This
+> **confirms** the 2026-09-01 (cont'd #6) scoping note's conclusion in a
+> second, independent way (empirically this time, not just by reading the
+> dav1d/spec source): IBC needs the var-tx tree + inter `tx_type` + inter
+> coefficient context (Phase E work), not a small fix. Did not attempt this
+> — it is a genuinely large, separate task; the `read_mv_component` classN
+> concern flagged back in 2026-09-01 (cont'd #6) is still unverified and
+> should be checked first whenever Phase E starts.
+>
+> **AV1 corpus after 2026-09-03**: `solid_red` 99/99/99, `testsrc`
+> 73.01/53.76/49.23, `mandelbrot` 47.59/52.44/52.62, `smptebars` 57.49/99/99,
+> `testsrc2` 23.11/25.08/16.95 (IBC-blocked, see above). Open items, in
+> priority order: (1) `mandelbrot`'s small residual directional-prediction
+> error (edge-filter upsample interpolation or `dr_z3`'s non-edge-filter
+> `max_base_y` — still not root-caused, see the 2026-09-01 note); (2) loop
+> filter is now wired correctly (CDEF bugs fixed, `testsrc` Y jumped
+> 61.95→73.01) but still not *verified* bit-exact block-by-block against
+> dav1d — worth a dedicated trace pass; (3) loop restoration is implemented
+> but its apply step is gated off (`KINETIX_AV1_FILTER=1`) due to an unfixed
+> restoration-unit-boundary pixel bug (see `b509fc3`'s message above) —
+> fixing that boundary handling is a concrete, scoped next target; (4) IBC
+> var-tx tree + inter tx_type + inter coeff context (Phase E) — blocks
+> `testsrc2`, now empirically confirmed as the next divergence point; (5)
+> inter prediction generally (Phase E) — decoder returns `Ok(None)` for
+> non-keyframes; (6) then `capabilities().pixel_exact`.
+>
+> Modified: `tpt-kinetix-av1/src/coeff.rs` (+`clear_coeff_context`, +1
+> regression test), `tpt-kinetix-av1/src/reconstruct/{intra_block,mod,
+> reconstruct_block}.rs`. Committed as `d70e12e` on `master` (pushed to
+> `origin master`). `capabilities().pixel_exact` untouched (still `false` —
+> correctly so, the corpus is nowhere near bit-exact yet).
