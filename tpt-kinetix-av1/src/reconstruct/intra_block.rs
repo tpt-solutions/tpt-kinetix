@@ -589,12 +589,27 @@ impl<'a> TileDecodeState<'a> {
             };
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
+            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
             for ty in (0..chroma_bh).step_by(ch) {
                 for tx in (0..chroma_bw).step_by(cw) {
                     let cpx_x = base_cpx_x + tx;
                     let cpx_y = base_cpx_y + ty;
                     if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
+                    }
+                    // Record chroma tx metadata at 4-chroma-pixel (w8) granularity,
+                    // inside the TX loop so each TX block marks its own boundary.
+                    let bx0_c = cpx_x / 4;
+                    let by0_c = cpx_y / 4;
+                    let bx1_c = (cpx_x + cw).div_ceil(4);
+                    let by1_c = (cpx_y + ch).div_ceil(4);
+                    for cy in by0_c..by1_c.min(self.meta.h8) {
+                        for cx in bx0_c..bx1_c.min(self.meta.w8) {
+                            self.meta.record_chroma(cx, cy, c_tx_w, c_tx_h, skip);
+                            if cx == bx0_c { self.meta.mark_chroma_left(cx, cy); }
+                            if cy == by0_c { self.meta.mark_chroma_top(cx, cy); }
+                        }
                     }
                     let blk_u = TxBlockCtx {
                         plane: 1,
@@ -715,16 +730,6 @@ impl<'a> TileDecodeState<'a> {
                             }
                         },
                     )?;
-                }
-            }
-            // Record chroma tx/skip metadata for the same 8×8-luma grid region.
-            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
-            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-            for by in by0..by1.min(self.meta.h8) {
-                for bx in bx0..bx1.min(self.meta.w8) {
-                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
-                    if bx == bx0 { self.meta.mark_chroma_left(bx, by); }
-                    if by == by0 { self.meta.mark_chroma_top(bx, by); }
                 }
             }
         }
@@ -960,6 +965,8 @@ impl<'a> TileDecodeState<'a> {
             };
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
+            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
 
             // Chroma displacement: divide the luma MV by the subsampling factor.
             let cmv_dx = mv_dx >> sub_x;
@@ -971,6 +978,18 @@ impl<'a> TileDecodeState<'a> {
                     let cpx_y = base_cpx_y + ty;
                     if cpx_x >= tile_cw || cpx_y >= tile_ch {
                         continue;
+                    }
+                    // Record per-TX chroma metadata at 4-chroma-pixel (w8) coordinates.
+                    let bx0_c = cpx_x / 4;
+                    let by0_c = cpx_y / 4;
+                    let bx1_c = (cpx_x + cw).div_ceil(4);
+                    let by1_c = (cpx_y + ch).div_ceil(4);
+                    for cy in by0_c..by1_c.min(self.meta.h8) {
+                        for cx in bx0_c..bx1_c.min(self.meta.w8) {
+                            self.meta.record_chroma(cx, cy, c_tx_w, c_tx_h, skip);
+                            if cx == bx0_c { self.meta.mark_chroma_left(cx, cy); }
+                            if cy == by0_c { self.meta.mark_chroma_top(cx, cy); }
+                        }
                     }
 
                     let src_cx = (cpx_x as i32 - cmv_dx) as usize;
@@ -1040,15 +1059,6 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
 
-            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
-            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-            for by in by0..by1.min(self.meta.h8) {
-                for bx in bx0..bx1.min(self.meta.w8) {
-                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
-                    if bx == bx0 { self.meta.mark_chroma_left(bx, by); }
-                    if by == by0 { self.meta.mark_chroma_top(bx, by); }
-                }
-            }
         }
 
         // ── Neighbour context update ──────────────────────────────────────────
