@@ -43,32 +43,34 @@ only)" when every ref frame matches a decoded frame out of order).
 `tests/dbg_itu_pframe.rs` (`#[ignore]`, `ITU_CLIP=<name>`) — per-plane/MB diffmap
 + best-match frame-order analysis.
 
-> **2026-09-04:** a first-cut POC-keyed reorder buffer was committed in `e22fe10`
-> then **reverted** (`decoder/mod.rs` + `b_frame_conformance.rs`) — it changed the
-> `decode()` streaming contract (frames now buffered until `flush()`) and broke
-> ~45 tests across ~20 files that assume "`decode()` returns the just-decoded
-> frame", including the `dec_ref_pic_marking` DPB-inspection suite which reads
-> `flush()` output to assert marking state. Doing it right means one coherent
-> change: reorder buffer + every test's collect/flush update + the pipeline
-> crate. Deferred to its own session. `b_frame_conformance` again hand-picks the
-> B frame (decoder emits in decode order).
+> **2026-09-04 (later):** the reorder buffer is back, done as an **opt-in**:
+> `H264Decoder::with_display_order()` routes progressive pictures through a
+> POC-keyed reorder buffer; default stays decode-order so the ~40 tests relying
+> on "`decode()` returns the just-reconstructed picture" are untouched. The
+> pipeline `DecodeStage` and `itu_conformance.rs` opt in. Result: **`NL3_SVA_E`
+> now fully byte-exact** (promoted to `BitExact`, 12 total); `BA3_SVA_C` frame
+> count fixed and residual dropped 587455 → ~1900 diff bytes across 33 frames;
+> `CABA3`/`CANL3`/`CVBS3`/`CACQP3` diff bytes ~halved with correct counts.
+> (commit: "h264: opt-in display-order (POC) reorder buffer")
 
 REMAINING GAPS (manifest `KnownGap`; each `itu_conformance` run prints status):
-- [ ] **1. Display-order output + B-frame recon.** The decoder emits in **decode
-      order, not display/POC order** — `dbg_itu_pframe` on `BA3_SVA_C` (CAVLC IPB,
-      5 refs, spatial direct) shows 21/33 ref frames decode byte-exact but out of
-      order, ~12 with real errors; `CABA3` / `CANL3` / `CVBS3` (CABAC IPB) ~101/300
-      exact. Two tangled things: (a) no output reordering (see the reverted-buffer
-      note above — needs the full coherent change); (b) real recon errors in B
-      spatial-direct and/or hierarchical multi-ref P. The ITU harness's
-      "DECODE-EXACT (display-order gap only)" line separates the two.
-- [ ] **2. `CAMA1_Sony_C` + all real MBAFF clips (`CAMA*`, `CAPAMA3`) → grey
-      scaffold.** Synthetic `g6_cabac_i` is bit-exact ⇒ a real-stream trigger
-      (SPS/PPS shape). Instrument the fallback for *why*.
-- [ ] **3. Multi-slice → N frames.** `CABAST3` / `CABACI3` / `CI1_FT_B` /
-      `MPS_MW_A`: decoder emits one (scaffold) frame per non-first slice NAL
-      rather than accumulating slices into one picture. Fix the frame accounting
-      even while multi-slice recon stays unsupported.
+- [ ] **1(b). Real B-frame / multi-ref-P recon error.** Display order is now
+      correct (1a done). Residual: `BA3_SVA_C` ~1900 diff bytes / 33 frames
+      (max ~112) in B spatial-direct and/or multi-ref P; `CABA3`/`CANL3`/`CVBS3`
+      similar under CABAC. Needs a bin-level oracle on the first diverging B MB.
+- [x] **2 (triaged 2026-09-04).** `CAMA1_Sony_C` MBAFF-CABAC-I fallback has TWO
+      real causes (via `KINETIX_PAFF_DBG=1`): (a) `end_of_slice_flag mismatch
+      (CABAC decode desynced)` on 4/5 frames — a CABAC MBAFF-I desync specific to
+      this real stream (synthetic `g6_cabac_i` is exact); (b) 1 frame hits
+      `I_PCM under CABAC not supported` in `parse_i_slice_cabac`. Both are their
+      own tasks: (a) bin-level MBAFF-I oracle vs ffmpeg; (b) implement
+      I_PCM-under-CABAC (byte-align + `pcm_alignment_zero_bit` + terminate-bin
+      handling in the CABAC I parser, mirror of the CAVLC fix in #32aj).
+- [x] **3. Multi-slice frame accounting — DONE (2026-09-04).** `decode_slice`
+      sets `suppress_frame` for any slice with `first_mb_in_slice != 0` and
+      `decode_impl` drops that NAL's frame. `CABAST3`/`CABASTBR3` 100→25,
+      `CABACI3` 1200→300, `CI1_FT_B` 549→291. Multi-slice *reconstruction* still
+      unsupported (only the first slice of each picture is reconstructed).
 - [ ] **4. PAFF real streams** (`CVPA1`, `FM1_*`, `CVFI1`) → scaffold / wrong
       count. `FM1_BT_B` 1687/400 frames.
 - [ ] **5. FRExt High real streams** (`HCHP*`, `FRExt*_Panasonic`, `freh*`) →
