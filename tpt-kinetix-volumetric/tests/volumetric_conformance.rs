@@ -258,7 +258,10 @@ fn our_geometry_reconstruction_is_lossless() {
     let bytes = encode_volumetric(&cloud, &params);
 
     let mut dec = VolumetricDecoderImpl::new();
-    let decoded = dec.decode(&packet_with(bytes)).expect("decode").expect("frame");
+    let decoded = dec
+        .decode(&packet_with(bytes))
+        .expect("decode")
+        .expect("frame");
     assert_eq!(decoded.num_points, cloud.num_points);
 
     let ours = to_int_grid(&decoded.positions, depth);
@@ -299,7 +302,13 @@ fn volumetric_geometry_cross_checks_tmc3_bit_exact() {
     let ref_coords = read_ply_coords(&recon).expect("read reconstructed ply");
     let ref_int: Vec<[i32; 3]> = ref_coords
         .iter()
-        .map(|p| [p[0].round() as i32, p[1].round() as i32, p[2].round() as i32])
+        .map(|p| {
+            [
+                p[0].round() as i32,
+                p[1].round() as i32,
+                p[2].round() as i32,
+            ]
+        })
         .collect();
 
     let params = EncodeParams {
@@ -309,7 +318,10 @@ fn volumetric_geometry_cross_checks_tmc3_bit_exact() {
     };
     let bytes = encode_volumetric(&cloud, &params);
     let mut dec = VolumetricDecoderImpl::new();
-    let decoded = dec.decode(&packet_with(bytes)).expect("decode").expect("frame");
+    let decoded = dec
+        .decode(&packet_with(bytes))
+        .expect("decode")
+        .expect("frame");
     let ours = to_int_grid(&decoded.positions, depth);
 
     let max_d = max_distance_as_multiset(&ours, &ref_int).unwrap_or(f32::INFINITY);
@@ -317,7 +329,10 @@ fn volumetric_geometry_cross_checks_tmc3_bit_exact() {
         point_clouds_equal_as_multiset(&ours, &ref_int),
         "volumetric geometry must match the TMC13 oracle bit-exact (max dist {max_d})"
     );
-    assert_eq!(max_d, 0.0, "geometry cross-check must be exact, got {max_d}");
+    assert_eq!(
+        max_d, 0.0,
+        "geometry cross-check must be exact, got {max_d}"
+    );
     eprintln!(
         "volumetric TMC13 geometry cross-check: {}-point lattice bit-exact (max dist {max_d})",
         grid.len()
