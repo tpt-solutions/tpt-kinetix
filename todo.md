@@ -59,7 +59,11 @@ Everything below is independent of the H.264 decoder effort:
   **MPEG-TS demuxer**, all after the H.264 8×8 transform + AV1 decode reach
   pixel-exact. HEVC/H.265 is **dropped**. Full task list in Phase 9 RF below;
   see `docs/codec-backlog.md`.
-- **CLI `transcode` / `stream` subcommands are stubs.** Only `probe` works.
+- ~~**CLI `transcode` / `stream` subcommands are stubs.**~~ Stale as of
+  2026-09-03 reconciliation: `transcode` (MP4→IVF/AV1 via the real pipeline)
+  and `stream` (RTMP ingest → HLS output) are both implemented in
+  `tpt-kinetix-cli/src/main.rs` and build clean on master (`e1ffbf4`). H.264
+  target transcode still correctly errors (no H.264 encoder exists yet).
 - **crates.io real publish (Phases 8/10) not done.** Packaging gate is cleared;
   needs a maintainer with a token + network — not automatable here.
 
