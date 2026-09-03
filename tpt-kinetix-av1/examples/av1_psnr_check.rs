@@ -151,6 +151,19 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
                     eprintln!("  row {:>3} Y_PSNR={:.2}", row, rp);
                 }
             }
+            if let Ok(row_s) = std::env::var("KINETIX_AV1_DBG_ROW") {
+                let row: usize = row_s.trim().parse().unwrap_or(32);
+                let stride = w as usize;
+                let base = row * stride;
+                eprintln!("[{label}] row {row} pixel diff (got vs ref):");
+                for col in 0..w as usize {
+                    let got = frame.data[base + col];
+                    let exp = ref_raw[base + col];
+                    if got != exp {
+                        eprintln!("  col {:>4}: got={:>3} ref={:>3} diff={:>4}", col, got, exp, got as i32 - exp as i32);
+                    }
+                }
+            }
         }
         Ok(None) => eprintln!("[{label}] Kinetix produced no frame"),
         Err(e) => eprintln!("[{label}] Kinetix errored: {e}"),
@@ -164,6 +177,10 @@ fn main() {
     }
     if std::env::var("KINETIX_AV1_ONLY_TESTSRC").is_ok() {
         check("testsrc_128x96", "testsrc", None, 128, 96);
+        return;
+    }
+    if std::env::var("KINETIX_AV1_ONLY_TESTSRC2").is_ok() {
+        check("testsrc2_320x180", "testsrc2", None, 320, 180);
         return;
     }
     // Content likely to pick large transforms (flat / low detail) and varied

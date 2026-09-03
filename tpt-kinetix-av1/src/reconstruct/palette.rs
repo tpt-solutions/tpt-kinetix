@@ -297,12 +297,14 @@ impl<'a> TileDecodeState<'a> {
         size: usize,
         cache: &[i32],
         is_u: bool,
+        dbg: bool,
     ) -> Vec<i32> {
         let mut colors = Vec::with_capacity(size);
         let mut idx = 0usize;
         let mut i = 0usize;
         while i < cache.len() && idx < size {
             let use_cache = self.dec.read_literal(1) == 1;
+            if dbg { eprintln!("  PAL_TRACE cache[{i}]={} use={} bit_pos={}", cache[i], use_cache as u8, self.dec.bit_position()); }
             if use_cache {
                 colors.push(cache[i]);
                 idx += 1;
@@ -310,7 +312,9 @@ impl<'a> TileDecodeState<'a> {
             i += 1;
         }
         if idx < size {
-            colors.push(self.dec.read_literal(BIT_DEPTH) as i32);
+            let lit = self.dec.read_literal(BIT_DEPTH) as i32;
+            if dbg { eprintln!("  PAL_TRACE literal={lit} bit_pos={}", self.dec.bit_position()); }
+            colors.push(lit);
             idx += 1;
         }
         let mut palette_bits = 0u32;
@@ -318,12 +322,15 @@ impl<'a> TileDecodeState<'a> {
             let min_bits = BIT_DEPTH - 3;
             let extra = self.dec.read_literal(2);
             palette_bits = min_bits + extra;
+            if dbg { eprintln!("  PAL_TRACE palette_bits={palette_bits} (extra={extra}) bit_pos={}", self.dec.bit_position()); }
         }
         while idx < size {
             // Y: `palette_delta_y++`; U: no bias.
             let delta_bias = if is_u { 0 } else { 1 };
-            let delta = self.dec.read_literal(palette_bits) as i32 + delta_bias;
+            let raw = self.dec.read_literal(palette_bits) as i32;
+            let delta = raw + delta_bias;
             let val = clip1(colors[idx - 1] + delta);
+            if dbg { eprintln!("  PAL_TRACE delta raw={raw} bias={delta_bias} delta={delta} val={val} bit_pos={}", self.dec.bit_position()); }
             colors.push(val);
             let sub = if is_u { 0 } else { 1 };
             let range = ((1i32 << BIT_DEPTH) - val - sub).max(0) as u32;
@@ -413,7 +420,8 @@ impl<'a> TileDecodeState<'a> {
             {
                 let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(0, mi_row, mi_col);
-                colors_y = self.read_palette_colors_yu(size, &cache, false);
+                let pal_dbg = std::env::var("KINETIX_AV1_DBG_PAL").is_ok() && mi_row == 8 && (mi_col == 20 || mi_col == 24);
+                colors_y = self.read_palette_colors_yu(size, &cache, false, pal_dbg);
                 if std::env::var("KINETIX_AV1_DBG_PAL").is_ok() {
                     eprintln!(
                         "DBG palette Y mi=({mi_row},{mi_col}) size={size} cache={cache:?} colors={colors_y:?}"
@@ -431,7 +439,7 @@ impl<'a> TileDecodeState<'a> {
                     .mode_cdfs
                     .read_palette_size_uv(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(1, mi_row, mi_col);
-                colors_u = self.read_palette_colors_yu(size, &cache, true);
+                colors_u = self.read_palette_colors_yu(size, &cache, true, false);
                 colors_v = self.read_palette_colors_v(size);
             }
         }
