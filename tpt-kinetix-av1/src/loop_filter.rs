@@ -126,6 +126,13 @@ pub struct FrameMeta {
     pub v_tx_w: Vec<u8>,
     pub v_tx_h: Vec<u8>,
     pub v_skip: Vec<bool>,
+    /// `uv_tx_left[by * w8 + bx]` — true when a chroma tx block starts at the
+    /// left edge of 4-chroma-pixel cell (bx, by). Used to skip non-boundary
+    /// positions for large chroma transforms (same logic as `luma_tx_left`).
+    pub uv_tx_left: Vec<bool>,
+    /// `uv_tx_top[by * w8 + bx]` — true when a chroma tx block starts at the
+    /// top edge of 4-chroma-pixel cell (bx, by).
+    pub uv_tx_top: Vec<bool>,
     /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
     /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
@@ -176,6 +183,8 @@ impl FrameMeta {
             v_tx_w: vec![0u8; len8],
             v_tx_h: vec![0u8; len8],
             v_skip: vec![true; len8],
+            uv_tx_left: vec![false; len8],
+            uv_tx_top: vec![false; len8],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -216,6 +225,22 @@ impl FrameMeta {
         if bx4 < self.w4 && by4 < self.h4 {
             let i = self.idx4(bx4, by4);
             self.luma_tx_top[i] = true;
+        }
+    }
+
+    /// Mark `bx` as the left (vertical-boundary) edge of a chroma tx block.
+    pub fn mark_chroma_left(&mut self, bx: usize, by: usize) {
+        if bx < self.w8 && by < self.h8 {
+            let i = self.idx8(bx, by);
+            self.uv_tx_left[i] = true;
+        }
+    }
+
+    /// Mark `by` as the top (horizontal-boundary) edge of a chroma tx block.
+    pub fn mark_chroma_top(&mut self, bx: usize, by: usize) {
+        if bx < self.w8 && by < self.h8 {
+            let i = self.idx8(bx, by);
+            self.uv_tx_top[i] = true;
         }
     }
 
@@ -266,6 +291,9 @@ impl FrameMeta {
                 }
                 let si = by * src.w8 + bx;
                 self.record_chroma(dbx, dby, src.u_tx_w[si], src.u_tx_h[si], src.u_skip[si]);
+                let di = self.idx8(dbx, dby);
+                self.uv_tx_left[di] |= src.uv_tx_left[si];
+                self.uv_tx_top[di] |= src.uv_tx_top[si];
             }
         }
     }
@@ -1084,6 +1112,9 @@ fn apply_loop_restoration_plane(
                 buf[row * uw..row * uw + uw]
                     .copy_from_slice(&plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]);
             }
+            if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+                eprintln!("DBG LR apply plane={plane_idx} unit=({ur},{uc}) @({ux0},{uy0}) {uw}x{uh} unit={unit:?}");
+            }
             match unit {
                 LrUnitData::Wiener { h: hf, v: vf } => {
                     wiener_filter_plane(&mut buf, uw, uh, *hf, *vf);
@@ -1170,8 +1201,8 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
-        None,
-        None,
+        Some(&meta.uv_tx_left),
+        Some(&meta.uv_tx_top),
     ); }
     if !skip_deblock { deblock_plane(
         v_plane,
@@ -1186,8 +1217,8 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
-        None,
-        None,
+        Some(&meta.uv_tx_left),
+        Some(&meta.uv_tx_top),
     ); }
 
     if dbg {

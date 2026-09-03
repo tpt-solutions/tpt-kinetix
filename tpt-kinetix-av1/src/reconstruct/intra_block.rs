@@ -723,6 +723,8 @@ impl<'a> TileDecodeState<'a> {
             for by in by0..by1.min(self.meta.h8) {
                 for bx in bx0..bx1.min(self.meta.w8) {
                     self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+                    if bx == bx0 { self.meta.mark_chroma_left(bx, by); }
+                    if by == by0 { self.meta.mark_chroma_top(bx, by); }
                 }
             }
         }
@@ -1043,6 +1045,8 @@ impl<'a> TileDecodeState<'a> {
             for by in by0..by1.min(self.meta.h8) {
                 for bx in bx0..bx1.min(self.meta.w8) {
                     self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+                    if bx == bx0 { self.meta.mark_chroma_left(bx, by); }
+                    if by == by0 { self.meta.mark_chroma_top(bx, by); }
                 }
             }
         }
