@@ -437,6 +437,31 @@ pub struct CoeffBlock {
     pub tx_type: usize,
 }
 
+/// Reset a transform block's neighbour-context footprint to "no coefficients
+/// coded" without reading any symbols.
+///
+/// AV1 §5.11.34 `residual()` only calls `coeffs()` (and therefore only
+/// updates `AboveLevelContext`/`AboveDcContext`/`LeftLevelContext`/
+/// `LeftDcContext`) when the block is not skipped. A skipped block's
+/// transform-sized footprint still needs its context reset to zero, though —
+/// dav1d does this explicitly (`read_coef_blocks`'s `b->skip` branch
+/// `memset`s the above/left coefficient-context bytes to the "unset"
+/// sentinel) rather than leaving whatever a previous, unrelated block at
+/// those same rows/columns last wrote there. Skipping this reset leaves
+/// **stale** neighbour data behind: a later block's `all_zero`/`coeff_base`/
+/// `dc_sign` context walks the same `above_*`/`left_*` arrays and would see
+/// a residual from a block that, per the bitstream, was never coded at all.
+pub fn clear_coeff_context(ctxs: &mut CoeffContexts, blk: &TxBlockCtx, w4: usize, h4: usize) {
+    for i in 0..w4 {
+        CoeffContexts::set(&mut ctxs.above_level, blk.plane, blk.x4 + i, 0);
+        CoeffContexts::set(&mut ctxs.above_dc, blk.plane, blk.x4 + i, 0);
+    }
+    for i in 0..h4 {
+        CoeffContexts::set(&mut ctxs.left_level, blk.plane, blk.y4 + i, 0);
+        CoeffContexts::set(&mut ctxs.left_dc, blk.plane, blk.y4 + i, 0);
+    }
+}
+
 /// Read one transform block's coefficients: the spec's
 /// `coeffs( plane, startX, startY, txSz )`.
 ///
@@ -924,7 +949,10 @@ fn coeff_br_ctx(tx_size: usize, plane_tx_type: usize, quant: &[i32], pos: usize)
 
 #[cfg(test)]
 mod tests {
-    use crate::coeff::{read_coeffs, CoeffBlock, CoeffContexts, TileCdfs, TxBlockCtx};
+    use crate::coeff::{
+        clear_coeff_context, dc_sign_ctx, read_coeffs, CoeffBlock, CoeffContexts, TileCdfs,
+        TxBlockCtx,
+    };
     use crate::coeff_tables::*;
     use crate::entropy::SymbolDecoder;
 
@@ -1208,6 +1236,57 @@ mod tests {
     fn with_uv(mut b: TxBlockCtx, uv_mode: usize) -> TxBlockCtx {
         b.uv_mode = uv_mode;
         b
+    }
+
+    /// Regression for the 2026-09-03 testsrc2/IBC skip-context bug: a
+    /// skipped transform block must reset its neighbour-context footprint to
+    /// "unset", exactly like a real `all_zero` `coeffs()` call would, even
+    /// though `read_coeffs` itself is never called for it.
+    ///
+    /// Without `clear_coeff_context`, a later block sharing those
+    /// rows/columns (its own footprint only partially overlapping the first
+    /// block's) reads a stale positive/negative `dc_sign` context left behind
+    /// by a completely different, non-adjacent block instead of "no DC coded
+    /// here" — this was root-caused with a symbol-by-symbol dav1d trace diff
+    /// (`SKIPCTX_DCSIGN`/`DCSIGN_RAW`) on the real testsrc2 corpus clip,
+    /// where it desynced the first genuinely-skipped IBC block's left
+    /// neighbour and every symbol after it.
+    #[test]
+    fn skipped_block_clears_stale_dc_sign_context_for_later_neighbours() {
+        let mut ctxs = CoeffContexts::new(16, 16);
+
+        // A block spanning chroma rows y4=8..11 at x4=24..27 writes a
+        // positive DC sign into all four left-context rows (mirrors the real
+        // bx=48,by=16 block from the corpus trace).
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 8, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 9, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 10, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 11, 2);
+
+        // A narrower, skipped block at x4=26..27 only covers rows y4=8..9
+        // (mirrors the real bx=52,by=20 skipped IBC block) — it must clear
+        // *its own* footprint, leaving rows 10/11 alone.
+        let skipped = blk(1, TX_8X8, 26, 8, 8, 8);
+        clear_coeff_context(&mut ctxs, &skipped, 2, 2);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 8), 0);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 9), 0);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 10), 2);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 11), 2);
+
+        // A block reading rows y4=8..11 next (mirrors the real bx=56,by=16
+        // block) must see "unset" for the cleared rows and the stale
+        // positive value only for the rows the skipped block never touched.
+        let next = blk(1, TX_16X16, 28, 8, 16, 16);
+        assert_eq!(
+            dc_sign_ctx(&next, &ctxs, 4, 4),
+            2 /* net positive, from rows 10/11 only */
+        );
+
+        // Without the fix (i.e. skipping the `clear_coeff_context` call
+        // above), all four rows would still read positive and this same
+        // assertion would also pass by coincidence — the real bug is that
+        // rows 8/9 are wrongly nonzero, which the two explicit `assert_eq!`s
+        // on `left_dc[8]`/`left_dc[9]` above catch directly.
     }
 
     /// The byte buffers are generated rather than pasted so the Rust and

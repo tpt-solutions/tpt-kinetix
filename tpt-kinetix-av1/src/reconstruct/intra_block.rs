@@ -924,6 +924,13 @@ impl<'a> TileDecodeState<'a> {
                             &mut residual,
                         );
                     }
+                } else {
+                    // See `clear_coeff_context`'s doc comment: a skipped
+                    // block never calls `read_coeffs`, so its neighbour
+                    // context must be reset by hand or a later block reads a
+                    // stale residual left behind by whatever unrelated block
+                    // last wrote this footprint's rows/columns.
+                    clear_coeff_context(&mut self.coeff_ctxs, &blk, luma_tx_w / 4, luma_tx_h / 4);
                 }
 
                 for dy in 0..luma_tx_h {
@@ -1059,6 +1066,11 @@ impl<'a> TileDecodeState<'a> {
                             let dq = dequantize_coeffs(&cv.quant, c_tx, v_qindex_dc, v_qindex_ac);
                             inverse_transform(&dq, cv.tx_type, c_tx, self.lossless, &mut res_v);
                         }
+                    } else {
+                        // See the luma branch above / `clear_coeff_context`'s
+                        // doc comment.
+                        clear_coeff_context(&mut self.coeff_ctxs, &blk_u, cw / 4, ch / 4);
+                        clear_coeff_context(&mut self.coeff_ctxs, &blk_v, cw / 4, ch / 4);
                     }
 
                     for dy in 0..ch {
