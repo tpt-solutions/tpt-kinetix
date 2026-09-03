@@ -768,7 +768,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         &mut meta,
     );
-    let y_colors = state.read_palette_colors_yu(2, &[], false);
+    let y_colors = state.read_palette_colors_yu(2, &[], false, false);
 
     let mut state2 = TileDecodeState::new(
         &data,
@@ -812,7 +812,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         &mut meta,
     );
-    let u_colors = state2.read_palette_colors_yu(2, &[], true);
+    let u_colors = state2.read_palette_colors_yu(2, &[], true, false);
 
     // Same first colour, same raw delta bits; only the luma `++` bias differs.
     assert_eq!(y_colors[0], u_colors[0]);

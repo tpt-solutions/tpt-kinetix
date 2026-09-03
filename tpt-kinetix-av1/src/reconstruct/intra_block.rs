@@ -10,7 +10,7 @@ impl<'a> TileDecodeState<'a> {
         let _bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
-        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && (mi_row == 8 || (mi_row >= 16 && mi_row <= 18)) && mi_col <= 2 {
+        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && (mi_row == 8 || (16..=18).contains(&mi_row)) && mi_col <= 2 {
             eprintln!("DBG SB1 intra mi=({mi_col},{mi_row}) bsize={bsize} bit_pos={}", self.dec.bit_position());
         }
 
@@ -133,7 +133,7 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[above_mode],
             INTRA_MODE_CONTEXT[left_mode],
         );
-        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok() && (mi_row <= 20 || (mi_row >= 8 && mi_row <= 10 && mi_col <= 2)) {
+        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok() && (mi_row <= 20 || ((8..=10).contains(&mi_row) && mi_col <= 2)) {
             eprintln!(
                 "DBG ymode mi=({mi_col},{mi_row}) bsize={bsize} above_mode={above_mode} left_mode={left_mode} ctx=({},{}) -> y_mode={y_mode} bit={}",
                 INTRA_MODE_CONTEXT[above_mode],
@@ -492,21 +492,20 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        // Record per-8×8-luma-block metadata for the in-loop filters (AV1 Phase
-        // D). Coordinates are tile-local, matching the tile-local plane buffers
-        // this tile reconstructs into; `reconstruct_av1_frame` merges the
-        // per-tile metas into a full-frame `FrameMeta` and runs
-        // `apply_post_filters` over the assembled frame.
+        // Record per-4×4-luma-cell metadata for the in-loop filters. The
+        // 4-sample (MI) granularity is required so the deblock pass can step
+        // at 4 samples and skip internal positions of large tx blocks.
         let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 8;
-        let by0 = blk_px_y / 8;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
-        for by in by0..by1.min(self.meta.h8) {
-            for bx in bx0..bx1.min(self.meta.w8) {
-                self.meta
-                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
+        let bx0 = blk_px_x / 4;
+        let by0 = blk_px_y / 4;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(4);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(4);
+        for by4 in by0..by1.min(self.meta.h4) {
+            for bx4 in bx0..bx1.min(self.meta.w4) {
+                self.meta.record_luma(bx4, by4, luma_tx_w as u8, luma_tx_h as u8, skip);
+                if bx4 == bx0 { self.meta.mark_luma_left(bx4, by4); }
+                if by4 == by0 { self.meta.mark_luma_top(bx4, by4); }
             }
         }
 
@@ -924,16 +923,18 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        // Record loop-filter luma metadata.
+        // Record loop-filter luma metadata at 4-sample granularity.
         let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 8;
-        let by0 = blk_px_y / 8;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
-        for by in by0..by1.min(self.meta.h8) {
-            for bx in bx0..bx1.min(self.meta.w8) {
-                self.meta.record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
+        let bx0 = blk_px_x / 4;
+        let by0 = blk_px_y / 4;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(4);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(4);
+        for by4 in by0..by1.min(self.meta.h4) {
+            for bx4 in bx0..bx1.min(self.meta.w4) {
+                self.meta.record_luma(bx4, by4, luma_tx_w as u8, luma_tx_h as u8, skip);
+                if bx4 == bx0 { self.meta.mark_luma_left(bx4, by4); }
+                if by4 == by0 { self.meta.mark_luma_top(bx4, by4); }
             }
         }
 

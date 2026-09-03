@@ -13,7 +13,7 @@ impl<'a> TileDecodeState<'a> {
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
-        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && mi_row >= 16 && mi_row <= 18 && mi_col <= 2 {
+        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && (16..=18).contains(&mi_row) && mi_col <= 2 {
             eprintln!("DBG SB1 INTER mi=({mi_col},{mi_row}) bsize={bsize} bit_pos={}", self.dec.bit_position());
         }
         let allow_hp = self.allow_high_precision_mv;

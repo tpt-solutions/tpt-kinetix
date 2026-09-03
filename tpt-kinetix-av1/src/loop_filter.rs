@@ -83,28 +83,41 @@ fn floor_log2(x: u32) -> u32 {
 // Per-block metadata gathered during tile reconstruction
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Per-8×8-luma-block reconstruction metadata needed by the in-loop filters.
+/// Reconstruction metadata gathered during tile decode, consumed by the
+/// in-loop filters.
 ///
-/// Chroma is stored at the same 8×8-luma grid resolution (each entry covers a
-/// 4×4 chroma block in 4:2:0), which is exactly the granularity the deblock
-/// filter needs for the chroma planes.
+/// Luma is tracked at 4-sample (MI) granularity — the smallest AV1 transform
+/// unit — so the deblock filter can step at 4 samples and skip non-boundary
+/// positions for large transforms (§7.14, "only at actual tx block edges").
+/// Chroma is stored at the 8-luma-sample (= 4-chroma-sample in 4:2:0) grid,
+/// which equals the minimum chroma tx size and therefore the correct chroma
+/// deblock step.
 #[derive(Debug, Clone)]
 pub struct FrameMeta {
-    /// Number of 8×8-luma blocks horizontally.
+    /// Number of 8×8-luma blocks horizontally (chroma grid width).
     pub w8: usize,
-    /// Number of 8×8-luma blocks vertically.
+    /// Number of 8×8-luma blocks vertically (chroma grid height).
     pub h8: usize,
-    /// Largest luma transform *width* (in samples) used inside each 8×8
-    /// block. Tracked separately from height because §7.14.3's `filterSize`
-    /// derivation uses `Tx_Width` for vertical edges (pass 0) and
-    /// `Tx_Height` for horizontal edges (pass 1) — a non-square transform
-    /// (e.g. `TX_16X4`) needs a different `baseSize` per pass.
+    /// Number of 4×4-luma blocks horizontally (luma grid width).
+    pub w4: usize,
+    /// Number of 4×4-luma blocks vertically (luma grid height).
+    pub h4: usize,
+    /// Luma transform width (samples) for each 4×4-luma cell. §7.14.3
+    /// `filterSize` uses `Tx_Width` for the vertical-edge (pass 0) derivation.
     pub luma_tx_w: Vec<u8>,
-    /// Largest luma transform *height* (in samples) used inside each 8×8
-    /// block. See `luma_tx_w`.
+    /// Luma transform height (samples) for each 4×4-luma cell. §7.14.3
+    /// `filterSize` uses `Tx_Height` for the horizontal-edge (pass 1) derivation.
     pub luma_tx_h: Vec<u8>,
-    /// Whether every transform block inside the 8×8 luma block was skipped.
+    /// Whether the luma tx block covering each 4×4 cell was a skip block.
     pub luma_skip: Vec<bool>,
+    /// `luma_tx_left[by4 * w4 + bx4]` — true when a new luma tx block starts
+    /// at the *left* edge of cell (bx4, by4), i.e. the column is a vertical
+    /// transform boundary the deblock filter may cross.
+    pub luma_tx_left: Vec<bool>,
+    /// `luma_tx_top[by4 * w4 + bx4]` — true when a new luma tx block starts
+    /// at the *top* edge of cell (bx4, by4), i.e. the row is a horizontal
+    /// transform boundary.
+    pub luma_tx_top: Vec<bool>,
     /// Largest chroma transform width/height (in samples) for the co-located
     /// 4×4 block. See `luma_tx_w`/`luma_tx_h`.
     pub u_tx_w: Vec<u8>,
@@ -134,7 +147,7 @@ pub enum LrUnitData {
     /// `[k0, k1, k2, 128-2*(k0+k1+k2), k2, k1, k0]`.
     Wiener { h: [i32; 3], v: [i32; 3] },
     /// RESTORE_SGRPROJ: self-guided projection filter.
-    /// `set` indexes Sgr_Params[16][4]; `xqd` are the decoded projection
+    /// `set` indexes `Sgr_Params[16][4]`; `xqd` are the decoded projection
     /// weights (w0, w1) for the two filter passes.
     Sgrproj { set: usize, xqd: [i32; 2] },
 }
@@ -143,39 +156,67 @@ impl FrameMeta {
     pub fn new(width: usize, height: usize) -> Self {
         let w8 = width.div_ceil(8);
         let h8 = height.div_ceil(8);
-        let len = w8 * h8;
+        let len8 = w8 * h8;
+        let w4 = width.div_ceil(4);
+        let h4 = height.div_ceil(4);
+        let len4 = w4 * h4;
         FrameMeta {
             w8,
             h8,
-            luma_tx_w: vec![0u8; len],
-            luma_tx_h: vec![0u8; len],
-            luma_skip: vec![true; len],
-            u_tx_w: vec![0u8; len],
-            u_tx_h: vec![0u8; len],
-            u_skip: vec![true; len],
-            v_tx_w: vec![0u8; len],
-            v_tx_h: vec![0u8; len],
-            v_skip: vec![true; len],
+            w4,
+            h4,
+            luma_tx_w: vec![0u8; len4],
+            luma_tx_h: vec![0u8; len4],
+            luma_skip: vec![true; len4],
+            luma_tx_left: vec![false; len4],
+            luma_tx_top: vec![false; len4],
+            u_tx_w: vec![0u8; len8],
+            u_tx_h: vec![0u8; len8],
+            u_skip: vec![true; len8],
+            v_tx_w: vec![0u8; len8],
+            v_tx_h: vec![0u8; len8],
+            v_skip: vec![true; len8],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
     }
 
     #[inline]
-    fn idx(&self, bx: usize, by: usize) -> usize {
+    fn idx8(&self, bx: usize, by: usize) -> usize {
         by * self.w8 + bx
     }
 
-    /// Record that the 8×8-luma region covering block `(by, bx)` used a luma
-    /// transform of size `tx_w`×`tx_h` (samples) and was skipped iff `skip`.
-    pub fn record_luma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
-        if bx >= self.w8 || by >= self.h8 {
+    #[inline]
+    fn idx4(&self, bx4: usize, by4: usize) -> usize {
+        by4 * self.w4 + bx4
+    }
+
+    /// Record that the 4×4-luma cell at `(bx4, by4)` (tile-local 4-sample
+    /// coordinates) belongs to a luma tx block of size `tx_w`×`tx_h` (samples).
+    pub fn record_luma(&mut self, bx4: usize, by4: usize, tx_w: u8, tx_h: u8, skip: bool) {
+        if bx4 >= self.w4 || by4 >= self.h4 {
             return;
         }
-        let i = self.idx(bx, by);
+        let i = self.idx4(bx4, by4);
         self.luma_tx_w[i] = self.luma_tx_w[i].max(tx_w);
         self.luma_tx_h[i] = self.luma_tx_h[i].max(tx_h);
         self.luma_skip[i] = self.luma_skip[i] && skip;
+    }
+
+    /// Mark `bx4` as the left (vertical-boundary) edge of a luma tx block.
+    pub fn mark_luma_left(&mut self, bx4: usize, by4: usize) {
+        if bx4 < self.w4 && by4 < self.h4 {
+            let i = self.idx4(bx4, by4);
+            self.luma_tx_left[i] = true;
+        }
+    }
+
+    /// Mark `by4` as the top (horizontal-boundary) edge of a luma tx block.
+    pub fn mark_luma_top(&mut self, bx4: usize, by4: usize) {
+        if bx4 < self.w4 && by4 < self.h4 {
+            let i = self.idx4(bx4, by4);
+            self.luma_tx_top[i] = true;
+        }
     }
 
     /// Record chroma transform metadata for the 8×8-luma region `(by, bx)`.
@@ -183,7 +224,7 @@ impl FrameMeta {
         if bx >= self.w8 || by >= self.h8 {
             return;
         }
-        let i = self.idx(bx, by);
+        let i = self.idx8(bx, by);
         self.u_tx_w[i] = self.u_tx_w[i].max(tx_w);
         self.u_tx_h[i] = self.u_tx_h[i].max(tx_h);
         self.v_tx_w[i] = self.v_tx_w[i].max(tx_w);
@@ -192,28 +233,39 @@ impl FrameMeta {
         self.v_skip[i] = self.v_skip[i] && skip;
     }
 
-    /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
-    /// into this full-frame meta, offsetting by `(ox, oy)` 8×8-luma-block
-    /// positions. AV1 tiles cover disjoint block rectangles, so the `max` /
-    /// `&&` combine rules in `record_luma`/`record_chroma` are correct for
-    /// merging.
-    pub fn merge_tile(&mut self, src: &FrameMeta, ox: usize, oy: usize) {
+    /// Merge a tile-local `FrameMeta` into the full-frame meta. `ox4`/`oy4`
+    /// are the tile's 4-sample luma-grid offsets. (Unused until parallel tile
+    /// decoding is wired; kept here for forward compatibility.)
+    pub fn merge_tile(&mut self, src: &FrameMeta, ox4: usize, oy4: usize) {
+        // Luma at 4-sample granularity.
+        for by4 in 0..src.h4 {
+            for bx4 in 0..src.w4 {
+                let dbx = ox4 + bx4;
+                let dby = oy4 + by4;
+                if dbx >= self.w4 || dby >= self.h4 {
+                    continue;
+                }
+                let si = by4 * src.w4 + bx4;
+                let di = self.idx4(dbx, dby);
+                self.luma_tx_w[di] = self.luma_tx_w[di].max(src.luma_tx_w[si]);
+                self.luma_tx_h[di] = self.luma_tx_h[di].max(src.luma_tx_h[si]);
+                self.luma_skip[di] = self.luma_skip[di] && src.luma_skip[si];
+                self.luma_tx_left[di] |= src.luma_tx_left[si];
+                self.luma_tx_top[di] |= src.luma_tx_top[si];
+            }
+        }
+        // Chroma at 8-luma-sample granularity.
+        let ox8 = ox4 / 2;
+        let oy8 = oy4 / 2;
         for by in 0..src.h8 {
             for bx in 0..src.w8 {
-                let dbx = ox + bx;
-                let dby = oy + by;
+                let dbx = ox8 + bx;
+                let dby = oy8 + by;
                 if dbx >= self.w8 || dby >= self.h8 {
                     continue;
                 }
-                let i = by * src.w8 + bx;
-                self.record_luma(
-                    dbx,
-                    dby,
-                    src.luma_tx_w[i],
-                    src.luma_tx_h[i],
-                    src.luma_skip[i],
-                );
-                self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
+                let si = by * src.w8 + bx;
+                self.record_chroma(dbx, dby, src.u_tx_w[si], src.u_tx_h[si], src.u_skip[si]);
             }
         }
     }
@@ -457,8 +509,11 @@ fn filter_line_1d(
 
 /// Apply the deblocking loop filter to one plane.
 ///
-/// `step` is the block size in samples (8 for luma, 4 for chroma in 4:2:0).
-/// `tx_grid` / `skip_grid` are the `FrameMeta` sub-grids for this plane.
+/// `step` is the grid-cell size in samples (4 for luma, 4 for chroma in 4:2:0
+/// chroma coordinates). For luma, `tx_left`/`tx_top` are boundary grids: a
+/// position is only filtered when the corresponding entry is `true` (i.e. it
+/// is the start of a new tx block). Pass `None` for chroma where every
+/// 4-sample step is a real boundary.
 #[allow(clippy::too_many_arguments)]
 fn deblock_plane(
     plane: &mut [u8],
@@ -473,6 +528,8 @@ fn deblock_plane(
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
+    tx_left: Option<&[bool]>,
+    tx_top: Option<&[bool]>,
 ) {
     // Vertical edges (pass 0): boundary between block bx-1 and bx. §7.14.3:
     // baseSize = Min(Tx_Width[prevTxSz], Tx_Width[txSz]) for pass 0 — the
@@ -487,6 +544,12 @@ fn deblock_plane(
             let lvl = compute_level(fh, plane_index, 0, 0);
             if lvl == 0 {
                 continue;
+            }
+            // Skip if this column is not a real tx block left-boundary.
+            if let Some(tl) = tx_left {
+                if !tl[by * grid_w + bx] {
+                    continue;
+                }
             }
             let lp = level_params(lvl, fh.loop_filter_sharpness);
             let left_tx = tx_w_grid[by * grid_w + (bx - 1)];
@@ -530,6 +593,12 @@ fn deblock_plane(
             let lvl = compute_level(fh, plane_index, 1, 0);
             if lvl == 0 {
                 continue;
+            }
+            // Skip if this row is not a real tx block top-boundary.
+            if let Some(tt) = tx_top {
+                if !tt[by * grid_w + bx] {
+                    continue;
+                }
             }
             let lp = level_params(lvl, fh.loop_filter_sharpness);
             let top_tx = tx_h_grid[(by - 1) * grid_w + bx];
@@ -1075,14 +1144,16 @@ pub fn apply_post_filters(
         width,
         width,
         height,
-        8,
+        4,
         0,
         &meta.luma_tx_w,
         &meta.luma_tx_h,
         &meta.luma_skip,
-        meta.w8,
-        meta.h8,
+        meta.w4,
+        meta.h4,
         fh,
+        Some(&meta.luma_tx_left),
+        Some(&meta.luma_tx_top),
     ); }
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
@@ -1099,6 +1170,8 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
+        None,
+        None,
     ); }
     if !skip_deblock { deblock_plane(
         v_plane,
@@ -1113,6 +1186,8 @@ pub fn apply_post_filters(
         meta.w8,
         meta.h8,
         fh,
+        None,
+        None,
     ); }
 
     if dbg {
@@ -1134,6 +1209,9 @@ pub fn apply_post_filters(
         // independent. For the current corpus (`cdef_bits == 0`) every unit maps
         // to `cdef_idx == 0`, so this is byte-identical to the previous
         // whole-plane single-strength path.
+        let luma_grid_cols = width.div_ceil(8);
+        let luma_grid_rows = height.div_ceil(8);
+        let mut luma_dir_grid = vec![0usize; luma_grid_cols * luma_grid_rows];
         let src_y = y_plane.to_vec();
         let mut uy = 0;
         while uy < height {
@@ -1148,7 +1226,8 @@ pub fn apply_post_filters(
                 let damping = fh.cdef_damping as i32;
                 let uh = 64.min(height - uy);
                 let uw = 64.min(width - ux);
-                cdef_plane_luma(y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw);
+                cdef_plane_luma(y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
+                    &mut luma_dir_grid, luma_grid_cols);
                 ux += 64;
             }
             uy += 64;
@@ -1172,6 +1251,7 @@ pub fn apply_post_filters(
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
                     u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                    &luma_dir_grid, luma_grid_cols,
                 );
                 ux += uv_step_x;
             }
@@ -1194,6 +1274,7 @@ pub fn apply_post_filters(
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
                     v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                    &luma_dir_grid, luma_grid_cols,
                 );
                 ux += uv_step_x;
             }
@@ -1227,6 +1308,11 @@ pub fn apply_post_filters(
 /// others — matching the spec, which filters each unit from the original
 /// frame). `y0_unit`/`x0_unit`/`unit_h`/`unit_w` restrict this call to a single
 /// 64×64 CDEF unit (the caller selects the unit's `cdef_idx` strength entry).
+///
+/// `luma_dir_grid` is a frame-level flat buffer of size `grid_cols * grid_rows`
+/// that records the per-8×8-block direction chosen by `cdef_direction` for luma.
+/// The chroma CDEF pass reads this to derive chroma directions via §7.15.1
+/// `Cdef_Uv_Dir` instead of re-deriving directions from chroma pixels.
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_luma(
     plane: &mut [u8],
@@ -1240,6 +1326,8 @@ fn cdef_plane_luma(
     x0_unit: usize,
     unit_h: usize,
     unit_w: usize,
+    luma_dir_grid: &mut [usize],
+    grid_cols: usize,
 ) {
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
@@ -1254,6 +1342,10 @@ fn cdef_plane_luma(
                 continue;
             }
             let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
+            // Store direction for co-located chroma blocks (§7.15.1 Cdef_Uv_Dir).
+            if r < block_rows && c < grid_cols {
+                luma_dir_grid[r * grid_cols + c] = yd;
+            }
             // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
             // (§7.15.2's `cdef_block` variance-adjustment step) — this was
             // previously clamped to 31 (a leftover from `floor_log2`'s
@@ -1296,6 +1388,11 @@ fn cdef_plane_luma(
 /// the UV direction remap. Like [`cdef_plane_luma`], `src` is the pre-CDEF
 /// snapshot and the caller restricts `y0_unit`/`x0_unit`/`unit_h`/`unit_w` to a
 /// single CDEF unit (keyed into the luma `cdef_idx` grid by the caller).
+///
+/// `luma_dir_grid` / `luma_grid_cols` are the direction grid filled by the
+/// preceding [`cdef_plane_luma`] call. Per spec §7.15.1, the chroma direction
+/// is `Cdef_Uv_Dir[subX][subY][luma_dir]` — the direction of the co-located
+/// luma 8×8 block, not of the chroma block itself.
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_chroma(
     plane: &mut [u8],
@@ -1311,6 +1408,8 @@ fn cdef_plane_chroma(
     x0_unit: usize,
     unit_h: usize,
     unit_w: usize,
+    luma_dir_grid: &[usize],
+    luma_grid_cols: usize,
 ) {
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
@@ -1326,10 +1425,18 @@ fn cdef_plane_chroma(
             if x0 < x0_unit || x0 >= x0_unit + unit_w {
                 continue;
             }
-            // Chroma direction is derived from the co-located luma 8×8 block,
-            // but for simplicity we re-derive a direction from the chroma block
-            // itself and remap via Cdef_Uv_Dir.
-            let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
+            // Variance from chroma (for strength scaling); direction from luma
+            // (§7.15.1 Cdef_Uv_Dir). Re-deriving direction from chroma pixels
+            // was wrong: luma edges and chroma edges point the same way in
+            // well-encoded content, but the spec is explicit that chroma
+            // direction comes from the co-located luma block, not the chroma.
+            let (_yd, var) = cdef_direction(src, width, width, height, x0, y0);
+            let luma_r = (y0 << sub_y) / 8;
+            let luma_c = (x0 << sub_x) / 8;
+            let luma_dir = luma_dir_grid
+                .get(luma_r * luma_grid_cols + luma_c)
+                .copied()
+                .unwrap_or(0);
             // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
             // (§7.15.2's `cdef_block` variance-adjustment step) — this was
             // previously clamped to 31 (a leftover from `floor_log2`'s
@@ -1350,7 +1457,7 @@ fn cdef_plane_chroma(
             let dir = if pri_str == 0 {
                 0
             } else {
-                CDEF_UV_DIR[sub_x][sub_y][yd]
+                CDEF_UV_DIR[sub_x][sub_y][luma_dir]
             };
             cdef_filter_block(
                 plane,
@@ -1628,7 +1735,8 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8);
+        let mut dirs = vec![0usize; 1];
+        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &mut dirs, 1);
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
     }
 
@@ -1681,7 +1789,8 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8);
+        let mut dirs = vec![0usize; 1];
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &mut dirs, 1);
         // With a correctly-capped `var_str`, CDEF must not blend the two
         // halves into a single intermediate value that erases the edge —
         // the two sides should stay clearly separated at every row.
@@ -1709,7 +1818,8 @@ mod tests {
             *v = ((i * 53) % 256) as u8;
         }
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8);
+        let mut dirs = vec![0usize; 4];
+        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8, &mut dirs, 2);
         for y in 8..16 {
             for x in 0..16 {
                 assert_eq!(plane[y * 16 + x], src[y * 16 + x], "block outside the filtered unit must be unchanged");
