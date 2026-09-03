@@ -93,11 +93,17 @@ const MANIFEST: &[(&str, Expect)] = &[
     ),
     (
         "CABAST3_Sony_E",
-        Expect::KnownGap("CABAC I/P — 4x frame count (multi-slice?); needs triage"),
+        Expect::KnownGap(
+            "multi-slice (4 slices/picture) — frame count now correct; \
+             only the first slice of each picture is reconstructed",
+        ),
     ),
     (
         "CABASTBR3_Sony_B",
-        Expect::KnownGap("CABAC — 4x frame count; needs triage"),
+        Expect::KnownGap(
+            "multi-slice — frame count now correct; only the first slice \
+             of each picture is reconstructed",
+        ),
     ),
     (
         "CACQP3_Sony_D",

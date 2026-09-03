@@ -76,6 +76,12 @@ pub struct H264Decoder {
     /// to place the frame into `reorder_buf`.
     pending_poc: i64,
     pending_is_idr: bool,
+    /// Set by [`H264Decoder::decode_slice`] when the slice is a continuation
+    /// slice of the current picture (`first_mb_in_slice != 0`). `decode_impl`
+    /// reads it to drop the frame that slice would otherwise contribute, so a
+    /// multi-slice picture emits one frame, not one per slice. Reset before
+    /// each `decode_slice` call.
+    suppress_frame: bool,
 }
 
 impl H264Decoder {
@@ -163,6 +169,7 @@ impl H264Decoder {
             reorder_buf: Vec::new(),
             pending_poc: 0,
             pending_is_idr: false,
+            suppress_frame: false,
         }
     }
 
@@ -536,7 +543,14 @@ impl H264Decoder {
                     // scaffolded rather than blanket-rejecting every P/B slice
                     // (which are bit-exact) up front.
                     self.scaffold_fallback = false;
+                    self.suppress_frame = false;
                     let frame = self.decode_slice(nal, width, height, packet, tracer)?;
+                    if self.suppress_frame {
+                        // Continuation slice of a multi-slice picture — the
+                        // picture's frame was already produced by its first
+                        // slice's NAL. Emit nothing for this one.
+                        continue;
+                    }
                     if self.strict && self.scaffold_fallback {
                         return Err(KinetixError::NotPixelExact(
                             "H.264: slice not decodable by the pixel-exact path yet \
@@ -1047,6 +1061,17 @@ impl H264Decoder {
         // Record this picture's display order for `decode_impl`'s reorder buffer.
         self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
         self.pending_poc = self.display_poc(&sps, &header, nal);
+
+        // A slice whose first macroblock isn't 0 is a continuation slice of the
+        // picture the previous NAL started. Multi-slice reconstruction is not
+        // supported (the first slice already emitted a scaffold frame for the
+        // whole picture), but we must not emit an *extra* frame per continuation
+        // slice — that inflated the frame count 4x on the multi-slice ITU clips.
+        // Signal `decode_impl` to drop this NAL's frame.
+        if header.first_mb_in_slice != 0 {
+            self.suppress_frame = true;
+            return self.emit_skip_frame(nal.nal_unit_type, width, height, packet);
+        }
 
         let is_i_slice = header.slice_type == crate::slice::SliceType::I
             || header.slice_type == crate::slice::SliceType::Si;
