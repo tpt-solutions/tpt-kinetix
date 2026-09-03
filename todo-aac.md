@@ -1408,6 +1408,99 @@
         Corpus is now 17 cases, all bit-exact (`surround_51`/`surround_71` the
         two ~0.002-0.004 multi-CPE outliers, the known CCE-stub gap).
 
+   — **2026-09-03 (later): `surround_51`/`surround_71` residual localized —
+        NOT the CCE stub (no CCE in these streams).** These two are the ONLY
+        non-bit-exact corpus entries (`surround_51` max-abs-diff 0.00226,
+        `surround_71` 0.00356; every other case ~3e-7). Established this session:
+        - **Channel map is correct.** `AAC_DBG_CHMAP` correlation matrix is a
+          clean identity — every native plane matches its reference plane at
+          +1.00, corr 1.0000 overall. Not a remap / interleave bug.
+        - **Localized to `surround_51` frame 1**, aligned sample index 1855
+          (`AAC_DBG_LOCALIZE`). Frame 1 is a **LONG_START** window (frame 0
+          OnlyLong-ish, 2 EIGHT_SHORT, 3 LONG_STOP, then OnlyLong). Best lag 0.
+        - **Bisection, measured on the FR channel / frame 1 directly
+          (`AAC_DBG_NO_{MS,TNS,PNS,IS}` via `dbg_surround_localize`):** NONE of
+          them change FR frame 1's 0.00226 — not M/S, not TNS, not PNS, **not
+          intensity stereo** (earlier "NO_IS makes it worse" was the *aggregate*
+          moving to a different channel; FR frame 1 itself is byte-identical
+          with IS on or off). Correction to the first pass of this note:
+          intensity stereo is **not** the cause.
+        ⇒ residual is in the **core spectral→time path** (dequant / short IMDCT /
+          windowing / overlap-add) for the FR channel across the
+          LONG_START→EIGHT_SHORT→LONG_STOP transition (frame 0 LONG_START,
+          frame 1 EIGHT_SHORT, frame 2 LONG_STOP; self-heals at frame 3 OnlyLong).
+          Not covered bit-exactly elsewhere despite `transient_*` exercising the
+          same window transitions — the distinguishing factor is unknown
+          (multi-element frame? a `window_shape` change across the transition
+          that `transient_*` doesn't hit? FR's specific coeff magnitudes?).
+        **Sharpened (`tests/dbg_surround_localize.rs`, `#[ignore]`):**
+        per-output-channel / per-frame diff of `surround_51` → **only the FR
+        channel is wrong**, and **only on frames 1-2** (0.00226 / 0.00172; the
+        frame-3 0.00006 is just the frame-2 IMDCT overlap tail). FL/FC/LFE/BL/BR
+        are bit-exact on every frame. The FR error coincides exactly with
+        **CPE tag0 (FL/FR) carrying intensity bands in the right channel**
+        (`Rint=true`): frame 1 EIGHT_SHORT, frame 2 LONG_STOP; frame 0
+        (LONG_START, `Rint=false`) and frames ≥3 (`Rint=false`) are bit-exact.
+        - **Not an `is_position` off-by-one:** ~0.75% *continuous* scale error on
+          FR's 400 Hz tone ⇒ Δ_is_position ≈ 0.043, not an integer.
+        - **Content-dependent, not window-dependent:** CPE tag1 (BL/BR) also has
+          `Rint=true`+EIGHT_SHORT on frame 1 and BR is bit-exact — the bug only
+          bites when a real tone sits in an intensity band (FL/FR = 200/400 Hz
+          octave pair; BL/BR = 900/1100 Hz fall in empty IS bands).
+        - **2-channel probes don't reproduce it.** Two throwaway 2-channel CPE
+          streams (250 Hz + scaled-9 kHz burst; 300 Hz + scaled-noise burst)
+          forcing `is+short` channel-frames both decode **bit-exact** — so a
+          plain CPE with intensity + EIGHT_SHORT is fine.
+        - **Within-frame 128-sample-bucket diff (`dbg_surround_localize`):** FR
+          frame 1 buckets 0-3 (samples 0..512) are **exactly 0**; the error is a
+          *bump* over buckets 4-6 (~512..896) peaking 0.00226 @ ~830, then near-0
+          again in bucket 7 (896..1024). Mapping `short_synthesis`'s output
+          layout (`out[448 + w*128 ..]` overlaps half-segment w with w+1), that
+          region is the **windows 1↔2↔3 overlap zone**. Frame 2's error (buckets
+          1 & 3, from the carried-over overlap buffer = windows 4-7) confirms
+          windows 4-7 are also off. ⇒ **FR's EIGHT_SHORT decode goes wrong
+          starting at short window ~2** and stays ~0.75% off through window 7;
+          windows 0-1 are bit-exact.
+        - `AAC_DBG_NO_PNS` leaves that bump **byte-identical** (only adds ~0.001
+          in 0..512 from the removed noise); `NO_IS` / `NO_TNS` identical too.
+          Independent of every joint-stereo / noise / TNS tool.
+        - FL uses the identical `decode_spectral_data` / `short_synthesis` /
+          grouping and is bit-exact ⇒ shared placement/window/overlap code is
+          fine; the wrong data is **FR's own decoded scalefactors/coefficients**
+          from window 2 on. The one structural difference in FR's scalefactor +
+          spectral stream vs FL's: **FR frame 1 carries intensity bands**
+          (`Rint=true`, FL `Lint=false`). Even with stereo.rs's IS reconstruction
+          disabled, an intensity band still *consumes an `is_position`
+          scalefactor codeword* in `decode_scalefactors` — so a subtle bug there
+          (wrong codeword length / predictor interaction) would desync everything
+          after it in FR only. `decode_scalefactors`' intensity branch (`hcod =
+          decode_scalefactor(); is_position += hcod`) and ffmpeg's `offset[2]`
+          match by inspection; `SPECTRAL_BOOKS` + `SCALEFACTOR_BOOK` were already
+          diffed byte-for-byte vs ffmpeg (2026-09-02). A small self-recovering
+          Huffman desync from window 2 on fits the 0.75% magnitude.
+        - **FR frame 1 structure (dumped):** EIGHT_SHORT, 4 window groups,
+          `max_sfb=12`. Per-group band types (sfb 0..11):
+          * group 0: `11,2,2,2,2,2,13,13,13,13,13,13`  → ESC, cb2×5, **NOISE×6**
+          * groups 1-3: `11,2,2,2,2,2,15,15,15,15,15,15` → ESC, cb2×5, **INTENSITY_HCB×6**
+          The bit-exact windows (0-1) are group 0; the drift starts exactly at
+          the **group-0→group-1 boundary**, which is also where sfb 6-11 flips
+          from NOISE (cb13) to INTENSITY (cb15). Group 0 has the channel's only
+          9-bit `noise_pcm` scalefactor (first noise band). Suspects, in order:
+          (a) the group-0 noise-band scalefactor run consuming the wrong bit
+          count (first band 9-bit PCM `noise_sfo += raw-256`, rest Huffman DPCM —
+          matches ffmpeg `noise_flag--` by inspection), (b) something in how the
+          ESC (cb11) scalefactor/spectral read at each group's sfb 0 interacts
+          across the boundary. All three intensity groups are ~equally off, so
+          it's one repeated per-group error or one desync at the boundary that
+          never re-aligns within the frame.
+        **Next:** per-coefficient trace of FR frame 1 (scalefactors then
+        quantized coeffs, group by group) vs a reference — patched ffmpeg
+        `av_log` in `decode_scale_factors` / `decode_spectrum_and_dequant`, or an
+        independent AAC-LC decoder. `capabilities().pixel_exact` stays `false`
+        (also still gated on real/ISO vectors regardless). Diagnostic left in
+        tree: `tests/dbg_surround_localize.rs` (`#[ignore]`: per-output-channel /
+        per-frame + 128-sample-bucket diff + element-structure/grouping dump).
+
         **Not done:** `capabilities().pixel_exact` left `false` — corpus is all
         self-generated synthetic (no real-world / ISO spec conformance vectors),
         HE-AAC (SBR/PS) unsupported, CCE coupling still a stub (ffmpeg's encoder
