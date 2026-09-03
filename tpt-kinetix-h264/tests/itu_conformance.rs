@@ -62,6 +62,7 @@ const MANIFEST: &[(&str, Expect)] = &[
     ("NL1_Sony_D", Expect::BitExact),     // CAVLC I/P no loop filter
     ("NL2_Sony_H", Expect::BitExact),     // CAVLC I/P no loop filter, 300 frames
     ("SVA_NL2_E", Expect::BitExact),      // CAVLC no loop filter
+    ("NL3_SVA_E", Expect::BitExact), // CAVLC I/P/B, spatial direct — exact once display-order reordering is on
     (
         "BA1_FT_C",
         Expect::KnownGap(
@@ -70,7 +71,10 @@ const MANIFEST: &[(&str, Expect)] = &[
     ),
     (
         "BA3_SVA_C",
-        Expect::KnownGap("CAVLC I/P — frame 0 exact, P frames diverge from frame 1 (max ~137)"),
+        Expect::KnownGap(
+            "CAVLC I/P/B spatial-direct, 5 refs — display order now correct; \
+             residual ~1900 diff bytes across 33 frames (max ~112), B/multi-ref-P recon",
+        ),
     ),
     // --- progressive CABAC, I & I/P/B ---
     ("CABA1_Sony_D", Expect::BitExact), // I-only CABAC
@@ -180,7 +184,7 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
 
 /// Decode a whole Annex B stream to a flat list of display-order YUV420p frames.
 fn decode_all(annexb: &[u8]) -> Vec<tpt_kinetix_core::frame::VideoFrame> {
-    let mut dec = H264Decoder::new();
+    let mut dec = H264Decoder::new().with_display_order();
     let mut frames = Vec::new();
     for (n, unit) in split_nals(annexb).into_iter().enumerate() {
         let pkt = Packet {

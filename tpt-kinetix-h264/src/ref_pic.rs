@@ -1185,23 +1185,27 @@ pub fn build_field_ref_list_l0(
     ctx: PicNumContext,
 ) -> Option<Vec<FieldRef>> {
     let num_active = num_ref_idx_l0_active.max(1);
-    eprintln!(
-        "BUILD_FIELD_REF_L0: current_bottom={} num_ref_idx_l0_active={} dpb_entries={}",
-        current_bottom,
-        num_ref_idx_l0_active,
-        dpb.iter().count()
-    );
-    for (i, e) in dpb.iter().enumerate() {
+    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
         eprintln!(
-            "  DPB[{}]: frame_num={} field_pic={} bottom={} poc={} short={} long={}",
-            i,
-            e.frame_num,
-            e.field_pic_flag,
-            e.bottom_field_flag,
-            e.pic_order_cnt,
-            e.is_short_term,
-            e.is_long_term
+            "BUILD_FIELD_REF_L0: current_bottom={} num_ref_idx_l0_active={} dpb_entries={}",
+            current_bottom,
+            num_ref_idx_l0_active,
+            dpb.iter().count()
         );
+    }
+    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
+        for (i, e) in dpb.iter().enumerate() {
+            eprintln!(
+                "  DPB[{}]: frame_num={} field_pic={} bottom={} poc={} short={} long={}",
+                i,
+                e.frame_num,
+                e.field_pic_flag,
+                e.bottom_field_flag,
+                e.pic_order_cnt,
+                e.is_short_term,
+                e.is_long_term
+            );
+        }
     }
     let mut fields: Vec<FieldRef> = Vec::new();
     for e in dpb.iter() {

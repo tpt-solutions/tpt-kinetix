@@ -101,7 +101,9 @@ impl Stage for DecodeStage {
         output: Sender<PipelineMessage>,
     ) -> JoinHandle<Result<(), KinetixError>> {
         std::thread::spawn(move || {
-            let mut decoder = tpt_kinetix_h264::H264Decoder::new();
+            // Emit frames in presentation order so downstream filter/encode
+            // stages see a monotonic timeline for B-frame streams.
+            let mut decoder = tpt_kinetix_h264::H264Decoder::new().with_display_order();
             for msg in input {
                 match msg {
                     PipelineMessage::Packet(pkt) => match decoder.decode(&pkt) {

@@ -59,6 +59,23 @@ pub struct H264Decoder {
     /// mode can turn a scaffolded frame into [`KinetixError::NotPixelExact`]
     /// rather than emitting wrong pixels. Reset before each `decode_slice` call.
     scaffold_fallback: bool,
+    /// When `true`, `decode()` emits progressive pictures in display (POC)
+    /// order via `reorder_buf` instead of decode order. Off by default so the
+    /// historical "decode() returns the picture it just reconstructed"
+    /// contract (and the tests relying on it) is unchanged; opt in with
+    /// [`H264Decoder::with_display_order`] for presentation-ordered output of
+    /// B-frame streams.
+    reorder_enabled: bool,
+    /// Display-order reorder buffer: `(PicOrderCnt, frame)` for decoded
+    /// pictures not yet safe to emit. Only populated when `reorder_enabled`.
+    /// Held until `reorder_buf.len()` exceeds the reorder depth, then the
+    /// lowest-POC entry is emitted; a new IDR flushes it first (POC restarts).
+    reorder_buf: Vec<(i64, VideoFrame)>,
+    /// Display POC and IDR-ness of the picture `decode_slice` is currently
+    /// producing — set once its slice header is parsed, read by `decode_impl`
+    /// to place the frame into `reorder_buf`.
+    pending_poc: i64,
+    pending_is_idr: bool,
 }
 
 impl H264Decoder {
@@ -142,7 +159,23 @@ impl H264Decoder {
             field_accum: None,
             frame_queue: VecDeque::new(),
             scaffold_fallback: false,
+            reorder_enabled: false,
+            reorder_buf: Vec::new(),
+            pending_poc: 0,
+            pending_is_idr: false,
         }
+    }
+
+    /// Enable display-order (presentation / POC) output.
+    ///
+    /// By default `decode()` returns progressive pictures in *decode* order.
+    /// With this enabled, reconstructed pictures pass through a POC-keyed
+    /// reorder buffer so `decode()` / [`H264Decoder::flush`] emit them in
+    /// display order — required for correct playback of streams containing
+    /// B pictures. `flush()` drains the buffer in POC order.
+    pub fn with_display_order(mut self) -> Self {
+        self.reorder_enabled = true;
+        self
     }
 
     /// Reports what this decoder can and cannot do.
@@ -266,6 +299,72 @@ impl H264Decoder {
         tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
         self.decode_impl(packet, tracer)
+    }
+
+    /// Reorder depth: how many decoded pictures may be held before the
+    /// lowest-POC one must be emitted. A generous fixed cap is always correct
+    /// (it never emits out of order) — it only affects latency.
+    const REORDER_DEPTH: usize = 16;
+
+    /// Derive this picture's `PicOrderCnt` for display ordering without
+    /// disturbing the running POC state (the real advance for reference
+    /// pictures happens in `store_reference_picture`).
+    fn display_poc(
+        &self,
+        sps: &SeqParameterSet,
+        header: &crate::slice::SliceHeader,
+        nal: &crate::nal::NalUnit,
+    ) -> i64 {
+        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let mut scratch = self.poc_state.clone();
+        crate::ref_pic::derive_pic_order_cnt(
+            sps,
+            is_idr,
+            nal.nal_ref_idc != 0,
+            header.frame_num,
+            header.pic_order_cnt_lsb,
+            header.field_pic_flag,
+            header.bottom_field_flag,
+            header.delta_pic_order_cnt_bottom,
+            &mut scratch,
+        )
+        .unwrap_or(0)
+    }
+
+    /// Route a reconstructed progressive picture through the display-order
+    /// reorder buffer. When reordering is disabled this is a passthrough
+    /// (returns the frame immediately, decode order preserved). When enabled,
+    /// the picture is held until the buffer exceeds [`Self::REORDER_DEPTH`],
+    /// then the lowest-POC entry is returned; an IDR flushes the buffer first.
+    fn reorder_push(&mut self, poc: i64, frame: VideoFrame, is_idr: bool) -> Option<VideoFrame> {
+        if !self.reorder_enabled {
+            return Some(frame);
+        }
+        if is_idr && !self.reorder_buf.is_empty() {
+            self.reorder_buf.sort_by_key(|(p, _)| *p);
+            for (_, f) in self.reorder_buf.drain(..) {
+                self.frame_queue.push_back(f);
+            }
+        }
+        self.reorder_buf.push((poc, frame));
+        if self.reorder_buf.len() > Self::REORDER_DEPTH {
+            if let Some((idx, _)) = self
+                .reorder_buf
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (p, _))| *p)
+            {
+                let f = self.reorder_buf.remove(idx).1;
+                self.frame_queue.push_back(f);
+            }
+        }
+        self.frame_queue.pop_front()
+    }
+
+    /// Drain the reorder buffer in display (POC) order — called by [`flush`].
+    fn reorder_drain(&mut self) -> Vec<VideoFrame> {
+        self.reorder_buf.sort_by_key(|(p, _)| *p);
+        self.reorder_buf.drain(..).map(|(_, f)| f).collect()
     }
 
     fn decode_impl<T: DecodeTracer>(
@@ -418,7 +517,10 @@ impl H264Decoder {
                         tracer,
                     ) {
                         Ok(Some(frame)) => {
-                            output_frame = Some(frame);
+                            let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                            if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
+                                output_frame = Some(ready);
+                            }
                             continue;
                         }
                         Ok(None) => {}
@@ -447,7 +549,13 @@ impl H264Decoder {
                         // don't let this field's scaffold overwrite it.
                         self.frame_queue.push_back(frame);
                     } else {
-                        output_frame = Some(frame);
+                        // Coded order ≠ display order when B pictures are
+                        // present: route through the reorder buffer, which is a
+                        // passthrough unless `with_display_order` was set.
+                        let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                        if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
+                            output_frame = Some(ready);
+                        }
                     }
                 }
                 _ => {}
@@ -464,7 +572,16 @@ impl H264Decoder {
     /// field so it is emitted as a full-height frame rather than being dropped.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
         let mut frames: Vec<VideoFrame> = self.frame_queue.drain(..).collect();
-        frames.extend(self.dpb.take_frames());
+        if self.reorder_enabled {
+            // Every reference picture was already emitted through the streaming
+            // / reorder path; the DPB is a reference store only, so draining it
+            // here would double-emit. Just flush what is still held for
+            // reordering, in display (POC) order.
+            frames.extend(self.reorder_drain());
+            self.dpb.take_frames();
+        } else {
+            frames.extend(self.dpb.take_frames());
+        }
         if let Some(accum) = self.field_accum.take() {
             let visible_width = self.sps_store.values().next().map(|s| s.pic_width_pixels());
             let visible_height = self
@@ -598,6 +715,10 @@ impl H264Decoder {
         if header.first_mb_in_slice != 0 {
             return Ok(None);
         }
+
+        // Record this picture's display order for `decode_impl`'s reorder buffer.
+        self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        self.pending_poc = self.display_poc(sps, &header, nal);
 
         let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
         let slice_qp = pic_init_qp + header.slice_qp_delta;
@@ -922,6 +1043,10 @@ impl H264Decoder {
             Ok(h) => h,
             Err(_) => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
         };
+
+        // Record this picture's display order for `decode_impl`'s reorder buffer.
+        self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        self.pending_poc = self.display_poc(&sps, &header, nal);
 
         let is_i_slice = header.slice_type == crate::slice::SliceType::I
             || header.slice_type == crate::slice::SliceType::Si;
