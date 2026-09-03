@@ -45,9 +45,16 @@ fn directional_prediction_filter_type_changes_sub_pel_output() {
     // by `filterType` (blk_wh 16 -> allowed only when filterType == 0).
     let mut a = vec![0i32; size * size];
     let mut b = vec![0i32; size * size];
-    predict_intra_block(D67_PRED, &borders, size, size, &mut a, true, 0, 0, size, size);
-    predict_intra_block(D67_PRED, &borders, size, size, &mut b, true, 1, 0, size, size);
-    assert_ne!(a, b, "filterType should affect the sub-pel edge/upsample path");
+    predict_intra_block(
+        D67_PRED, &borders, size, size, &mut a, true, 0, 0, size, size,
+    );
+    predict_intra_block(
+        D67_PRED, &borders, size, size, &mut b, true, 1, 0, size, size,
+    );
+    assert_ne!(
+        a, b,
+        "filterType should affect the sub-pel edge/upsample path"
+    );
 }
 
 /// The same generated buffer the `coeff` module's oracle tests use, so
@@ -146,9 +153,7 @@ fn directional_prediction_covers_all_modes_without_panicking() {
                 have_above: true,
                 have_left: true,
             };
-            predict_intra_block(
-                mode, &borders, size, size, &mut out, true, 0, 0, size, size,
-            );
+            predict_intra_block(mode, &borders, size, size, &mut out, true, 0, 0, size, size);
             assert!(
                 out.iter().all(|&v| (0..=255).contains(&v)),
                 "mode {mode} size {size} produced an out-of-range sample"
@@ -768,7 +773,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         &mut meta,
     );
-    let y_colors = state.read_palette_colors_yu(2, &[], false);
+    let y_colors = state.read_palette_colors_yu(2, &[], false, false);
 
     let mut state2 = TileDecodeState::new(
         &data,
@@ -812,7 +817,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         &mut meta,
     );
-    let u_colors = state2.read_palette_colors_yu(2, &[], true);
+    let u_colors = state2.read_palette_colors_yu(2, &[], true, false);
 
     // Same first colour, same raw delta bits; only the luma `++` bias differs.
     assert_eq!(y_colors[0], u_colors[0]);
