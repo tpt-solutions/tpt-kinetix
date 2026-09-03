@@ -27,6 +27,12 @@
 *.h264
 *.h265
 *.av1
+*.264
+*.jsv
+
+# ITU-T H.264.1 conformance fixtures (fetched with `just fetch-h264-conformance`,
+# ~hundreds of MB of bitstreams + reference YUV — never committed)
+/tpt-kinetix-h264/tests/fixtures/itu/
 
 # Editor / OS
 .vscode/

@@ -396,6 +396,10 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     };
 
     if mb_type == 25 {
+        // §7.3.5: `pcm_alignment_zero_bit`s bring the bitstream to a byte
+        // boundary before the raw `pcm_sample_*` bytes. Without this every
+        // sample (and the rest of the slice) is read misaligned.
+        r.byte_align();
         let total_bytes = 384usize;
         if r.remaining_bits() < total_bytes * 8 {
             return Err(SliceDataError::Eof("I_PCM insufficient bytes"));
@@ -405,6 +409,11 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
         mb.pcm_samples = (0..total_bytes)
             .map(|_| r.read_u8().expect("I_PCM byte"))
             .collect();
+        // §9.2.1: a neighbouring I_PCM macroblock contributes nN = 16 to the
+        // CAVLC `coeff_token` context of the blocks that border it, so mark
+        // every luma/chroma 4×4 block of this MB as "16 coefficients".
+        this_nz.luma = [16u8; 16];
+        this_nz.chroma = [16u8; 8];
         let mb_type_str = "IPcm".to_string();
         tracer.on_mb_parsed(
             mb_x,
@@ -853,9 +862,15 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
         }
         motion.sub_mb_type = Some(sub_types);
         let ref_count = if ref0 { 1 } else { num_ref_idx_l0_active };
-        for part in 0..4 {
+        // §7.3.5.2 `sub_mb_pred`: all four `ref_idx_l0` are signalled *first*,
+        // then all four partitions' `mvd_l0` — not interleaved per partition.
+        // (Interleaving desyncs the bitstream for any P_8x8 MB in a multi-ref
+        // slice, where `ref_idx_l0` actually consumes bits.)
+        for _ in 0..4 {
             motion.ref_idx_l0.push(read_ref_idx(r, ref_count)?);
-            let n_sub = P_SUB_MB_PARTS[sub_types[part] as usize];
+        }
+        for &sub in sub_types.iter() {
+            let n_sub = P_SUB_MB_PARTS[sub as usize];
             for _ in 0..n_sub {
                 let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
                 let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
@@ -863,11 +878,16 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             }
         }
     } else {
+        // §7.3.5.1 `mb_pred`: for P_16x16/P_16x8/P_8x16 all `ref_idx_l0` come
+        // first, then all `mvd_l0` — not interleaved (matters once
+        // `num_ref_idx_l0_active > 1`).
         let n_parts = if mb_type_raw == 0 { 1 } else { 2 };
         for _ in 0..n_parts {
             motion
                 .ref_idx_l0
                 .push(read_ref_idx(r, num_ref_idx_l0_active)?);
+        }
+        for _ in 0..n_parts {
             let mx = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 x"))?;
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
             motion.mvd_l0.push((mx, my));

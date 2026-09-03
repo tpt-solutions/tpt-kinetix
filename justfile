@@ -145,6 +145,13 @@ av1-oracle-tile ENTRY="testsrc":
     KINETIX_AV1_CAPTURE_TILE=1 cargo run -q -p tpt-kinetix-test-utils --example av1_symbol_trace_diff -- {{ENTRY}}
     {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/intra_decode.py av1_tile_trace.json
 
+# Fetch the curated ITU-T H.264.1 conformance bitstream subset (~1 GB, git-ignored)
+# into tpt-kinetix-h264/tests/fixtures/itu/. The `itu_conformance` test then
+# decodes each clip and compares byte-exact against the standard's reference YUV.
+# Re-running skips clips already present. CLIPS="A B" or GROUP=frext narrows it.
+fetch-h264-conformance:
+    bash tools/fetch-h264-conformance.sh
+
 # Run every Criterion bench in the workspace.
 bench:
     cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline

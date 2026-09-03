@@ -271,7 +271,12 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 }
             } else {
                 // 16×16, 16×8, or 8×16.
-                // ref_idx is only coded when num_ref_idx_l0_active > 1 (spec §7.3.5.2).
+                // §7.3.5.1 `mb_pred`: all `ref_idx_l0` are signalled first, then
+                // all `mvd_l0` — not interleaved per partition (matters once
+                // `num_ref_idx_l0_active > 1`, where `ref_idx_l0` consumes bins;
+                // interleaving desyncs the CABAC engine).
+                let mut part_geom = [(0u32, 0u32, 0u32, 0u32); 2];
+                let mut part_blks: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
                 for part in 0..n_parts {
                     let (col4, row4, w4, h4) = partition_dims(mb_type, part);
                     let (xp, yp, wp, hp) = (
@@ -280,6 +285,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         w4 as u32 * 4,
                         h4 as u32 * 4,
                     );
+                    part_geom[part] = (xp, yp, wp, hp);
                     let ri = if num_ref_idx_l0_active > 1 {
                         let (lg, tg) = ref_idx_gt0_neighbors(
                             inter_grid,
@@ -307,7 +313,11 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                             this_inter.l0_ref_gt0 |= 1 << b;
                         }
                     }
-
+                    part_blks[part] = blks;
+                }
+                for part in 0..n_parts {
+                    let (xp, yp, wp, hp) = part_geom[part];
+                    let ri = motion.ref_idx_l0[part];
                     let mvd_x = cabac_decode_mvd_component(
                         dec,
                         &mut ctxs.mvd_l0_x,
@@ -343,7 +353,7 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         );
                     }
                     motion.mvd_l0.push((mvd_x, mvd_y));
-                    this_inter.set_partition_l0(&blks, mvd_x, mvd_y, ri as i32);
+                    this_inter.set_partition_l0(&part_blks[part], mvd_x, mvd_y, ri);
                 }
             }
 

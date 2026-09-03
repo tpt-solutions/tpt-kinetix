@@ -117,8 +117,13 @@ pub fn pred_luma(plane: &[u8], stride: usize, pw: usize, ph: usize, x: i32, y: i
         (1, 3) => avg(hv(0), bh(0, 1)),
         // r = avg(j(x0,y0), b(x0,y0+1)) — midpoint of hv-half (2,2) and h-half (2,4) = (2,3).
         (2, 3) => avg(j(0, 0), bh(0, 1)),
-        // s = avg(j(x0,y0), G(x0+1,y0+1)) — midpoint of hv-half (2,2) and integer (4,4) = (3,3).
-        (3, 3) => avg(j(0, 0), g(1, 1)),
+        // r = avg(m, s) — the two nearest *diagonal half-pel* samples
+        // (§8.4.2.2.1: `r = (m + s + 1) >> 1`), where m = half-v at the next
+        // column and s = half-h at the next row. (The earlier
+        // `avg(j, G(x0+1,y0+1))` — center-half averaged with the diagonal
+        // integer — is geometrically the same midpoint but *not* the spec
+        // formula, and is off by a rounding unit or two.)
+        (3, 3) => avg(hv_x(1, 0), bh(0, 1)),
         _ => unreachable!(),
     }
 }
@@ -350,38 +355,45 @@ mod tests {
         assert_eq!(dst[0], 1);
     }
 
-    /// (3,1) = i = avg(b(x,y), h(x+1,y))  [empirically confirmed vs ffmpeg]
-    /// (3,3) = r = avg(j(x,y), G(x+1,y+1))  [midpoint rule, same as (2,3)]
+    /// §8.4.2.2.1: (3,1) = g = avg(b, m); (3,3) = r = avg(m, s), where
+    /// b = half-h at the current row, m = half-v at the next column, and
+    /// s = half-h at the next row. A *non-linear* reference is used because a
+    /// linear ramp cannot distinguish these from other plausible midpoint
+    /// formulas (the reason the old `(3,3) = avg(j, G(x+1,y+1))` slipped through).
     #[test]
     fn quarter_pel_positions_3_1_and_3_3() {
-        let (l, _) = ramp_luma();
+        // Non-linear content: a quadratic bump so different averaging orders
+        // give genuinely different results.
+        let mut l = [0u8; 64];
+        for (i, p) in l.iter_mut().enumerate() {
+            let (x, y) = ((i % 8) as i32, (i / 8) as i32);
+            *p = (80 + (x - 4) * (x - 4) * 3 + (y - 3) * (y - 3) * 2).clamp(0, 255) as u8;
+        }
 
-        // (3,1): i = avg(b(x0,y0), h(x0+1,y0))
-        // b(x0,y0) = half_h at (0,0) → mv=(2,0): fx=2, fy=0
+        // b(x0,y0) = half_h at (0,0) → mv=(2,0)
         let mut b00 = [0u8; 1];
         interpolate_luma(&mut b00, 1, &l, 8, 8, 8, 0, 0, 2, 0, 1, 1);
-        // h(x0+1,y0) = half_v at (1,0) → mv=(4,2): px=4 → x0=1,fx=0; py=2 → y0=0,fy=2
-        let mut hv10 = [0u8; 1];
-        interpolate_luma(&mut hv10, 1, &l, 8, 8, 8, 0, 0, 4, 2, 1, 1);
+        // m = half_v at (x0+1,y0) → mv=(4,2)
+        let mut m = [0u8; 1];
+        interpolate_luma(&mut m, 1, &l, 8, 8, 8, 0, 0, 4, 2, 1, 1);
+        // s = half_h at (x0,y0+1) → mv=(2,4)
+        let mut s = [0u8; 1];
+        interpolate_luma(&mut s, 1, &l, 8, 8, 8, 0, 0, 2, 4, 1, 1);
+
         let mut got31 = [0u8; 1];
         interpolate_luma(&mut got31, 1, &l, 8, 8, 8, 0, 0, 3, 1, 1, 1);
         assert_eq!(
             got31[0],
-            ((b00[0] as u16 + hv10[0] as u16 + 1) >> 1) as u8,
-            "(3,1) must be avg(b(x0,y0), h(x0+1,y0))"
+            ((b00[0] as u16 + m[0] as u16 + 1) >> 1) as u8,
+            "(3,1) = g must be avg(b, m)"
         );
 
-        // (3,3): r = avg(j(x0,y0), G(x0+1,y0+1))
-        let mut j00 = [0u8; 1];
-        interpolate_luma(&mut j00, 1, &l, 8, 8, 8, 0, 0, 2, 2, 1, 1); // j(0,0): fx=2,fy=2
-        let mut g11 = [0u8; 1];
-        interpolate_luma(&mut g11, 1, &l, 8, 8, 8, 0, 0, 4, 4, 1, 1); // G(1,1): fx=0,fy=0 at (1,1)
         let mut got33 = [0u8; 1];
         interpolate_luma(&mut got33, 1, &l, 8, 8, 8, 0, 0, 3, 3, 1, 1);
         assert_eq!(
             got33[0],
-            ((j00[0] as u16 + g11[0] as u16 + 1) >> 1) as u8,
-            "(3,3) must be avg(j(x0,y0), G(x0+1,y0+1))"
+            ((m[0] as u16 + s[0] as u16 + 1) >> 1) as u8,
+            "(3,3) = r must be avg(m, s) per §8.4.2.2.1, not avg(j, G(x+1,y+1))"
         );
     }
 

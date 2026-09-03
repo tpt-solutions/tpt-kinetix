@@ -381,6 +381,43 @@ fn combine_weighted(
 }
 
 /// Reconstruct a full frame of intra macroblocks.
+/// Copy one I_PCM macroblock's raw samples into the frame planes (4:2:0, 8-bit):
+/// 256 luma bytes in raster order, then 64 Cb, then 64 Cr (§7.3.5 / §8.3.5).
+#[allow(clippy::too_many_arguments)]
+fn place_ipcm_mb(
+    samples: &[u8],
+    luma: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    luma_stride: usize,
+    chroma_stride: usize,
+    mb_x: u32,
+    mb_y: u32,
+) {
+    if samples.len() < 384 {
+        return;
+    }
+    let (lx, ly) = ((mb_x * 16) as usize, (mb_y * 16) as usize);
+    for row in 0..16 {
+        let dst = (ly + row) * luma_stride + lx;
+        let src = row * 16;
+        if dst + 16 <= luma.len() {
+            luma[dst..dst + 16].copy_from_slice(&samples[src..src + 16]);
+        }
+    }
+    let (cx, cy) = ((mb_x * 8) as usize, (mb_y * 8) as usize);
+    for (comp, plane) in [cb, cr].into_iter().enumerate() {
+        let base = 256 + comp * 64;
+        for row in 0..8 {
+            let dst = (cy + row) * chroma_stride + cx;
+            let src = base + row * 8;
+            if dst + 8 <= plane.len() {
+                plane[dst..dst + 8].copy_from_slice(&samples[src..src + 8]);
+            }
+        }
+    }
+}
+
 pub fn reconstruct_intra_frame<T: DecodeTracer>(
     macroblocks: &[Macroblock],
     mb_cols: u32,
@@ -403,6 +440,22 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
+            if mb.mb_type == MbType::IPcm {
+                // §8.3.5: I_PCM "reconstruction" is a verbatim copy of the raw
+                // samples (256 luma raster, then 64 Cb, then 64 Cr). No
+                // prediction, transform, or deblocking of internal edges.
+                place_ipcm_mb(
+                    &mb.pcm_samples,
+                    &mut luma,
+                    &mut cb,
+                    &mut cr,
+                    luma_stride,
+                    chroma_stride,
+                    mb_x,
+                    mb_y,
+                );
+                continue;
+            }
             reconstruct_luma(
                 mb,
                 &mut luma,
@@ -2844,13 +2897,15 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                         | MbType::B8x16
                         | MbType::BB8x8
                 );
-            eprintln!(
-                "BRECON MB({mb_x},{mb_y}) type={:?} motion={} skip={} -> {}",
-                mb.mb_type,
-                mb.motion.is_some(),
-                mb.skip,
-                if is_inter { "INTER" } else { "INTRA" }
-            );
+            if std::env::var_os("KINETIX_BINTRACE").is_some() {
+                eprintln!(
+                    "BRECON MB({mb_x},{mb_y}) type={:?} motion={} skip={} -> {}",
+                    mb.mb_type,
+                    mb.motion.is_some(),
+                    mb.skip,
+                    if is_inter { "INTER" } else { "INTRA" }
+                );
+            }
             if is_inter {
                 reconstruct_b_inter_luma(
                     mb,

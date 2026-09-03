@@ -2,6 +2,146 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32aj (2026-09-03) — ITU-T H.264.1 conformance suite wired; 4 real decoder bugs FIXED; 11 ITU clips byte-exact
+
+**4 bugs fixed this session, all found by the ITU suite, all with full-suite
+regression green:**
+1. **I_PCM** — (a) `slice_data/cavlc.rs` read the 384 raw `pcm_sample_*` bytes
+   without `r.byte_align()` (§7.3.5 `pcm_alignment_zero_bit`) → desynced the
+   slice; also didn't mark `nz`=16 (§9.2.1, I_PCM neighbour ⇒ nN=16).
+   (b) `reconstruct.rs::reconstruct_intra_frame` had **no `MbType::IPcm` arm** —
+   I_PCM MBs ran through the Intra_4×4 path. New `place_ipcm_mb` (verbatim
+   256-luma / 64-Cb / 64-Cr copy). → `CVPCMNL1_SVA_C` + `CVPCMNL2_SVA_C` (720p)
+   byte-exact.
+2. **Quarter-pel (3,3) luma MC** — `motion_comp.rs::pred_luma` position (3,3)
+   computed `avg(j, G(x+1,y+1))` (centre-half averaged with the diagonal
+   integer) instead of §8.4.2.2.1's `r = (m + s + 1) >> 1` (average of the two
+   *diagonal half-pels*: m = half-v at next column, s = half-h at next row).
+   Off by 1-3 units at exactly the MBs whose MV frac is (3,3). The old unit test
+   asserted the wrong formula on a *linear ramp* where every midpoint rule gives
+   the same answer — rewrote it with quadratic content.
+3. **P `ref_idx_l0` / `mvd_l0` bitstream order** — 3 sites (`cavlc.rs` P_8x8;
+   `cavlc.rs` P_16x8/P_8x16; `cabac_b.rs` P_16x8/P_8x16) interleaved
+   `ref_idx; mvd` per partition. §7.3.5.1/.2 signals **all `ref_idx_l0` first,
+   then all `mvd_l0`**. Desynced every multi-reference P slice (only visible
+   once `num_ref_idx_l0_active > 1`, which the synthetic 1-ref clips never hit).
+   → `BA2_Sony_F`, `CABA2_Sony_E`, `CANL1/2`, `NL1/2`, `SVA_NL2` byte-exact
+   (300-frame "Foreman" clips with up to 5 refs).
+4. Gated 3 unconditional debug `eprintln!`s (`BRECON` → `KINETIX_BINTRACE`;
+   `B PATH:` / `B CABAC parse error` → `KINETIX_DUMP_B_PATH`).
+
+**11 ITU clips now byte-exact** vs the normative reference YUV (was 0 — nothing
+was ITU-validated before): `BA1`, `BA2`, `CABA1`, `CABA2`, `CANL1`, `CANL2`,
+`NL1`, `NL2`, `SVA_NL2`, `CVPCMNL1`, `CVPCMNL2`.
+
+**Infrastructure:** `tools/fetch-h264-conformance.sh` + `just
+fetch-h264-conformance` (curated ~70-clip manifest, git-ignored fixtures, ~3.3GB
+for the FRExt-heavy set); `tests/itu_conformance.rs` (byte-exact vs `_rec.yuv`,
+`MANIFEST` = `BitExact`/`Limitation`/`KnownGap`, absent fixtures → skip;
+`ITU_PER_FRAME=1` per-frame diff; auto-detects "DECODE-EXACT (display-order gap
+only)" when every ref frame matches a decoded frame out of order).
+`tests/dbg_itu_pframe.rs` (`#[ignore]`, `ITU_CLIP=<name>`) — per-plane/MB diffmap
++ best-match frame-order analysis.
+
+REMAINING GAPS (manifest `KnownGap`; each `itu_conformance` run prints status):
+- [ ] **1. B-frame + spatial-direct + multi-ref P** — `BA3_SVA_C` (CAVLC IPB,
+      5 refs, spatial direct): 21/33 ref frames decode byte-exact but out of
+      order, ~12 have real errors. `CABA3_Sony_C` / `CANL3_Sony_C` /
+      `CVBS3_Sony_C` (CABAC IPB): ~101/300 exact. Two things tangled here:
+      (a) **the decoder emits in decode order, not display/POC order** — no
+      output reordering / DPB bumping (`b_frame_conformance` works around this by
+      hand-picking the frame). (b) real recon errors in B spatial-direct and/or
+      hierarchical P referencing. Fix (a) first (reorder buffer keyed by POC,
+      drained at IDR + on flush), then re-measure (b).
+- [ ] **2. `CAMA1_Sony_C` + all real MBAFF clips (`CAMA*`, `CAPAMA3`) → grey
+      scaffold.** Synthetic `g6_cabac_i` is bit-exact ⇒ a real-stream trigger
+      (SPS/PPS shape). Instrument the fallback for *why*.
+- [ ] **3. Multi-slice → N frames.** `CABAST3` / `CABACI3` / `CI1_FT_B` /
+      `MPS_MW_A`: decoder emits one (scaffold) frame per non-first slice NAL
+      rather than accumulating slices into one picture. Fix the frame accounting
+      even while multi-slice recon stays unsupported.
+- [ ] **4. PAFF real streams** (`CVPA1`, `FM1_*`, `CVFI1`) → scaffold / wrong
+      count. `FM1_BT_B` 1687/400 frames.
+- [ ] **5. FRExt High real streams** (`HCHP*`, `FRExt*_Panasonic`, `freh*`) →
+      mostly scaffold. `HCHP1` hierarchical B.
+- [ ] **6. `BA1_FT_C`** — frame 0 wrong + 2× count; `MIDR_MW_D` / `Hi422*` don't
+      decode. Triage.
+- [ ] **7.** Some clips need non-4:2:0 rejection asserts (`Hi422*` = 4:2:2).
+
+--- (superseded first-pass notes from earlier in this session:) ---
+
+Until now "pixel_exact" rested entirely on `ffmpeg`/`x264`-encoded **synthetic**
+clips + a handful of hand clips. The **official ITU-T H.264.1 conformance
+bitstream suite** (135 AVCv1 + 69 FRExt archives, each with a normative reference
+YUV) is freely downloadable from `www.itu.int/wftp3/av-arch/jvt-site/draft_conformance/`
+— now wired in:
+
+- **`tools/fetch-h264-conformance.sh`** + `just fetch-h264-conformance` — fetches
+  a curated ~70-clip subset (covering exactly what `pixel_exact` claims + a few
+  negatives) into `tpt-kinetix-h264/tests/fixtures/itu/<CLIP>/`, discards the
+  multi-MB `trace.txt`. Git-ignored (`*.264`, `*.jsv`, the `itu/` dir).
+- **`tests/itu_conformance.rs`** — decodes each clip NAL-by-NAL + `flush()`,
+  compares **byte-exact** against the clip's own `_rec.yuv` (no third-party
+  decoder in the loop). `MANIFEST` classifies each: `BitExact` (hard assert),
+  `Limitation` (must NOT accidentally be exact), `KnownGap` (real gap, tracked,
+  not yet asserted). Absent fixtures → skip+pass (CI stays green).
+- Gated 3 unconditional debug `eprintln!`s that fired on every B-frame decode
+  (`reconstruct.rs` `BRECON …` behind `KINETIX_BINTRACE`; `decoder/mod.rs`
+  `B PATH: …` / `B CABAC parse error` behind `KINETIX_DUMP_B_PATH`).
+
+**Results (42-clip curated set fetched; `MANIFEST` in the test tracks each):**
+
+BIT-EXACT vs ITU reference YUV (hard-asserted):
+- `BA1_Sony_D` (CAVLC I, QCIF, 17 frames)
+- `CABA1_Sony_D` (CABAC I, QCIF, 50 frames)
+- `CVPCMNL1_SVA_C` (CAVLC I + **I_PCM macroblocks**, CIF, 30 frames) — **FIXED this session**
+
+**★ I_PCM GAP FIXED (was gap #1).** Two bugs: (a) `slice_data/cavlc.rs` read the
+384 raw `pcm_sample_*` bytes **without `r.byte_align()`** first (§7.3.5
+`pcm_alignment_zero_bit`) — misaligned every sample and desynced the rest of the
+slice → scaffold fallback; also didn't set the MB's CAVLC `nz` grid to 16
+(§9.2.1: an I_PCM neighbour contributes nN=16). (b) `reconstruct.rs::
+reconstruct_intra_frame` had **no `MbType::IPcm` arm at all** — I_PCM MBs were
+run through the Intra_4×4 path. Added `place_ipcm_mb` (verbatim 256-luma /
+64-Cb / 64-Cr copy, correct chroma offset). `CVPCMNL1` (loop filter off) now
+byte-exact all 30 frames. NOTE: I_PCM + deblocking-on is still untested (no such
+clip in the set yet) — §8.7 filters I_PCM MB *boundary* edges but not internal.
+
+REMAINING GAPS (manifest `KnownGap`, tracked not asserted):
+- [ ] **1. Small P-frame reconstruction error — HIGHEST VALUE.** `BA2_Sony_F`
+      (CAVLC I/P) **and** `CABA2_Sony_E` (CABAC I/P) show the *identical* profile:
+      frame 0 byte-exact, **frame 1 max_diff = 3**, then cascades to ~116 by
+      frame 2 as the error compounds through the prediction loop. CAVLC ≡ CABAC
+      ⇒ the bug is in **shared P reconstruction** (MC sub-pel rounding / residual
+      / deblock), NOT entropy. `BA3_SVA_C` frame 1 max_diff ~98 (worse, maybe
+      compounded). This is the same *class* as the 2026-08-08 P-frame bug
+      (deblock bS). Content is "Foreman"-type — real motion the synthetic
+      `testsrc`/`p_frame_conformance` clips don't exercise. Localize frame 1's
+      diff-3 by plane/region (extend `dbg_*` or the ITU harness's
+      `ITU_PER_FRAME` hook).
+- [ ] **2. `CAMA1_Sony_C` — real MBAFF CABAC-I 720×480 → grey-scaffold fallback**
+      (max_diff 128). Synthetic `g6_cabac_i` is bit-exact, so a stream-shape
+      trigger. Instrument the fallback branch for *why* it bails.
+- [ ] **3. `HCHP1_HHI_B` — hierarchical GOP-16 B** — frame 0 exact, frames 1+
+      diverge; `B PATH: ref list build failed` (now behind `KINETIX_DUMP_B_PATH`).
+      B ref-list build for a real GOP hierarchy + RPLR + MMCO. `b_frame_conformance`
+      only covers flat IbBbP.
+- [ ] **4. `CABAST3_Sony_E` / `CABACI3_Sony_B` — 4× frame count.** Multi-slice
+      pictures: the decoder emits one (scaffold) frame per non-first slice NAL
+      instead of accumulating slices into one picture. Multi-slice is a declared
+      limitation, but the emit-N-frames behaviour breaks any frame-indexed
+      comparison — worth fixing the frame accounting even while multi-slice recon
+      stays unsupported.
+- [ ] **5. `BA1_FT_C` — frame 0 already wrong (max_diff 127) + 2× frame count.**
+      Structural; triage (field clip? `FT` = field/frame test?).
+- [ ] **6.** Promote each fixed `KnownGap` → `BitExact`; expand the curated set
+      (PAFF `CVPA1_TOSHIBA_B`, MBAFF `cama*_vtc`, FRExt `freh*` / `HCHP2`).
+
+The `itu_conformance` test stays green throughout (fixtures absent → skip;
+present → only `BitExact` manifest entries hard-assert). `KINETIX_DUMP_B_PATH`
+now also gates the `B PATH:` / `B CABAC parse error` prints; `KINETIX_BINTRACE`
+gates the per-B-MB `BRECON` line (both were unconditional).
+
 ## SESSION #32ai (2026-09-03) — progressive High 8×8 honoured in strict mode; conformance asserts hardened
 
 Branch `h264/progressive-8x8-strict-mode`, commit `824b144`.
