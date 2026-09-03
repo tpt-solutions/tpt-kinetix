@@ -7,38 +7,39 @@
 
 Everything below is independent of the H.264 decoder effort:
 
-- **AV1 decoder — the largest remaining item.** 2026-09-01: a patched dav1d
-  trace build (in `scratchpad/av1ref/`) unblocked per-block reference traces
-  and **intra keyframe reconstruction is now essentially solved for the
-  intra corpus.** Bugs fixed this session (all uncommitted except the
-  `73776fd` tx_depth-ctx sentinel, committed by the concurrent process):
-  (1) SMOOTH intra-mode enum constants were rotated (`SMOOTH/SMOOTH_V/
-  SMOOTH_H` must be 9/10/11) — dispatched every gradient SMOOTH block to the
-  axis-swapped predictor; (2) chroma directional-intra edge filter was gated
-  `&& is_luma` (§7.11.2.4 has no plane restriction); (3) 4×4 intra blocks read
-  a spurious `tx_depth` symbol (§5.11.15 also needs `MiSize > BLOCK_4X4`) —
-  desynced every 4×4 block under `TX_MODE_SELECT`; (4) `use_intrabc` was read
-  as a literal bit, not the adaptive `TileIntrabcCdf` symbol; (5) `BlockDecoded`
-  grid + `haveAboveRight`/`haveBelowLeft` never implemented — directional intra
-  replicated the last edge sample instead of extending `AboveRow`/`LeftCol`
-  into real neighbours; (6) directional `filterType` (§7.11.2.9) hardcoded 0,
-  now derived from SMOOTH* above/left neighbours.
+- **AV1 decoder — the largest remaining item.** 2026-09-03: intra keyframe
+  reconstruction is essentially solved (see the 2026-09-01 notes in
+  todo-av1.md); loop filter (deblock + CDEF) bugs are fixed and now improve
+  PSNR instead of being a no-op; loop restoration (§7.17, Wiener + SgrProj)
+  is implemented but its *apply* step is gated off
+  (`KINETIX_AV1_FILTER=1`) pending a restoration-unit-boundary pixel fix;
+  Intra Block Copy reconstruction exists (`reconstruct_ibc_block`) but only
+  covers the simple case (single-size transform, intra-style coefficient
+  context) — a 2026-09-03 dav1d-trace-diff session fixed a real bug (skipped
+  transform blocks weren't resetting their coefficient neighbour context,
+  desyncing the very next block that shared their rows/columns) and then
+  hit, and confirmed, the next real gap: IBC blocks that need the var-tx
+  tree + an **inter** `tx_type` + inter coefficient context, which
+  `reconstruct_ibc_block` doesn't implement — genuine Phase-E-shaped work,
+  not a small fix.
   **Corpus (`av1_psnr_check`, Y/U/V dB): solid_red 99/99/99; testsrc
-  61.95/51.05/48.57 (luma pre-filter PIXEL-EXACT, maxdiff 0); mandelbrot
-  47.37/51.62/51.61 (was 22/16/21); smptebars 54.23/99/99; testsrc2 12.96 —
-  blocked on Intra Block Copy.** IBC was scoped and is really Phase-E-shaped
-  work (var-tx tree + inter `tx_type` + inter coeff context + DV prediction +
-  integer block copy); `read_mv_component`'s classN path in `inter_block.rs`
-  looks wrong and should be fixed when Phase E is picked up.
-  **Remaining AV1 open items:** (1) small residual directional-prediction error
-  (edge-filter upsample interpolation / `dr_z3` `max_base_y = h+min(w,h)-1`);
-  (2) loop filter (deblock + CDEF) not verified bit-exact (testsrc full-frame
-  Y 61.95 vs pre-filter 99); (3) loop restoration §7.17 still a no-op
-  passthrough; (4) Intra Block Copy ≈ Phase E — blocks testsrc2; (5) inter
-  prediction (Phase E) — MV pred §7.10 + inter recon §7.11.3 unimplemented,
-  decoder returns `Ok(None)` for non-keyframes; (6) then flip
-  `capabilities().pixel_exact`. All 122 unit tests pass, clippy clean. See
-  todo-av1.md for the full per-bug postmortems.
+  73.01/53.76/49.23; mandelbrot 47.59/52.44/52.62; smptebars 57.49/99/99;
+  testsrc2 23.11/25.08/16.95 — blocked on Intra Block Copy's inter-coded
+  coefficient path.**
+  **Remaining AV1 open items, in priority order:** (1) small residual
+  directional-prediction error on mandelbrot (edge-filter upsample
+  interpolation / `dr_z3` `max_base_y = h+min(w,h)-1`, not yet root-caused);
+  (2) loop filter improved but not yet *verified* bit-exact block-by-block
+  against dav1d; (3) loop restoration apply step needs its restoration-unit
+  boundary handling fixed before it can be un-gated; (4) Intra Block Copy's
+  var-tx tree + inter `tx_type` + inter coeff context (Phase E-shaped) —
+  blocks testsrc2; `read_mv_component`'s classN path in `inter_block.rs`
+  still looks wrong and should be checked first when this is picked up; (5)
+  inter prediction generally (Phase E) — MV pred §7.10 + inter recon
+  §7.11.3 unimplemented, decoder returns `Ok(None)` for non-keyframes; (6)
+  then flip `capabilities().pixel_exact`. 126 unit tests pass, clippy
+  clean. See todo-av1.md for the full per-bug postmortems (2026-09-03
+  session note has the latest).
 - **AAC decoder — one small accuracy gap left.** 2026-08-30 the PNS /
   `noise_mono_44100` gap is CLOSED (separate `noise_sfo` DPCM predictor in
   `scalefactors.rs` + matching `pns.rs` `dequant_scale`) — 6 of 7 conformance
@@ -76,7 +77,7 @@ conformance/bench reporting; AV1 rav1e-backed encoder.
 | File | Codec | Status |
 |------|-------|--------|
 | [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-28 sessions #32p-#32r (see todo-h264.md): **CABAC MBAFF I-slice FIXED & BIT-EXACT** (#32p — a spurious `end_of_slice_flag` was decoded after every MBAFF pair-top MB, §7.3.4; `g6_cabac_i` now SAD=0 vs `-skip_loop_filter` ffmpeg ref). Progressive CABAC P/B conformance RESOLVED earlier (#32o). #32q fixed the CABAC P/B **pair-scan addressing bug** (parsers iterated plain raster while neighbour lookups used the frame-MB grid — the P/B twin of #32e/#32f) plus an MV-predictor decode-order bug in `mv.rs` (`predict_slice_mvs_ex`): `mbaff_ip` P SAD 83k→~30k, `mbaff_ibp` P 107k→46k / B 128k→75k, `mbaff_cavlc_ip2` P 5748→1154; progressive byte-identical. #32r gated `cabac_b.rs` debug prints behind `KINETIX_BINTRACE`. 246 lib tests green, clippy `-D warnings` clean. **2026-08-29→31 (#32af + PAFF field-P): `mbaff_ibp` P AND B frames now BIT-EXACT** (BUG 3 `get_dct8x8_allowed`; B_SUB_MB table order; B_8x8 mvd list-order; missing 8×8-transform branch in `reconstruct_b_inter_luma`). **PAFF field chroma BIT-EXACT** (`paff_b_field.264` chroma 190→0). Remaining H.264 gaps: (1) PAFF field **luma max_diff 68** confined to `P_8x8` MBs with a coded 8×8 group whose `sub_mb_type` is finer than 8×8 (4×4/8×4) — parse in sync, MVs+qp+scan verified, a partial CABAC 4×4-residual-coeff error; needs a bin-level CABAC oracle. 2026-09-01: investigating via env-gated sweep hooks in `reconstruct.rs` (`KINETIX_LUMA_PARITY_OFF` opposite-parity luma-MC offset hypothesis mirroring the chroma fix, + `KINETIX_PAFF_RESIDUAL_DUMP` MB(4,0) residual dump) — uncommitted, not yet a fix; (2) G.5a pin every bit-exact MBAFF frame as a hard assert; (3) G.5b add real PAFF + MBAFF corpus clips; (4) G.5c non-16 crop clip assert; (5) Phase H `pixel_exact` flip + README (needs ITU vectors + broader corpus). **2026-09-03 (#32ai, branch `h264/progressive-8x8-strict-mode`, commit `824b144`): progressive High-profile 8×8 transform now honoured in strict mode** — the blanket `transform_8x8_mode_flag` reject is gone; strict mode runs the real path and rejects only genuine scaffold fallbacks (`scaffold_fallback` flag) — multi-slice / non-4:2:0 / >8-bit. Conformance eprintln "[GAP]" checks hardened to `assert_eq!(max_diff, 0)` across `high_profile_8x8[_cabac]` / `cabac[_pframe]` P/B / `high_profile`. Stale `h264_real_sample_harness_across_profiles` (asserted pre-flip scaffold state, was failing on master) rewritten to assert bit-exact. 373 h264 tests + h264 clippy + test-utils conformance green. |
-| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-09-01 (see todo-av1.md): **★ INTRA KEYFRAME RECONSTRUCTION ESSENTIALLY SOLVED FOR THE INTRA CORPUS ★** — a patched dav1d trace build (`scratchpad/av1ref/`) unblocked per-block reference traces. Six bugs fixed (uncommitted except `73776fd` tx_depth-ctx sentinel): (1) SMOOTH intra-mode enum constants rotated (`SMOOTH/SMOOTH_V/SMOOTH_H` = 9/10/11) — every gradient SMOOTH block hit the axis-swapped predictor; (2) chroma directional-intra edge filter wrongly gated `&& is_luma` (§7.11.2.4 has no plane restriction); (3) 4×4 intra blocks read a spurious `tx_depth` symbol (§5.11.15 needs `MiSize > BLOCK_4X4`) — desynced every 4×4 block under `TX_MODE_SELECT`; (4) `use_intrabc` read as a literal bit not the adaptive `TileIntrabcCdf` symbol; (5) `BlockDecoded` grid + `haveAboveRight`/`haveBelowLeft` never implemented — directional intra replicated the last edge sample instead of extending `AboveRow`/`LeftCol`; (6) directional `filterType` (§7.11.2.9) hardcoded 0, now derived from SMOOTH* above/left neighbours. **Corpus (`av1_psnr_check` Y/U/V dB): solid_red 99/99/99; testsrc 61.95/51.05/48.57 (luma pre-filter PIXEL-EXACT, maxdiff 0); mandelbrot 47.37/51.62/51.61 (was ~22/16/21); smptebars 54.23/99/99; testsrc2 12.96 — blocked on Intra Block Copy.** IBC scoped as Phase-E-shaped (var-tx tree + inter `tx_type` + inter coeff context + DV pred + integer block copy); `read_mv_component` classN path in `inter_block.rs` looks wrong, fix when Phase E starts. Remaining: (1) small residual directional-prediction error (upsample interpolation / `dr_z3` `max_base_y`); (2) loop filter (deblock+CDEF) not verified bit-exact; (3) loop restoration §7.17 no-op; (4) IBC ≈ Phase E — blocks testsrc2; (5) inter Phase E — `Ok(None)` for non-keyframes; (6) then flip `capabilities().pixel_exact`. 122 unit tests pass, clippy clean. |
+| [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-09-03 (see todo-av1.md): intra keyframe reconstruction essentially solved; loop filter (deblock+CDEF) bugs fixed and now genuinely improve PSNR (`testsrc` Y 61.95→73.01); loop restoration (§7.17) implemented but apply gated off pending a restoration-unit-boundary fix; IBC reconstruction exists but only for the simple case — a dav1d-trace-diff session fixed a real bug (skipped transform blocks weren't resetting their coefficient neighbour context, via new `coeff::clear_coeff_context`) taking testsrc2 Y/U/V 14.36/17.17/13.92→**23.11/25.08/16.95**, then hit and confirmed the next real IBC gap: blocks needing the var-tx tree + an inter `tx_type` + inter coefficient context, which `reconstruct_ibc_block` doesn't implement (genuine Phase-E-shaped work). **Corpus (`av1_psnr_check` Y/U/V dB): solid_red 99/99/99; testsrc 73.01/53.76/49.23; mandelbrot 47.59/52.44/52.62; smptebars 57.49/99/99; testsrc2 23.11/25.08/16.95.** Remaining, in priority order: (1) mandelbrot's small residual directional-prediction error (not yet root-caused); (2) loop filter not yet verified bit-exact block-by-block; (3) loop restoration boundary-pixel fix to un-gate apply; (4) IBC var-tx tree + inter tx_type + inter coeff context — blocks testsrc2; (5) inter Phase E — `Ok(None)` for non-keyframes; (6) then flip `capabilities().pixel_exact`. 126 unit tests pass, clippy clean. |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. 2026-08-25: `prev_shape` fix landed (production decode path wasn't updating window shape after synthesis). 2026-08-28: PNS scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)`, correcting noise_mono corr from 0.52 → 0.87 and noise_stereo max_diff from 0.059 → 0.029). Phase 3 (TNS independent reference) and Phase 5 (window-sequence proptest) exit criteria now verified/fulfilled. sweep_stereo outlier investigated: TNS ruled out (error is above the TNS band range; with_TNS==without_TNS at all bins). **2026-08-30: PNS / `noise_mono` gap CLOSED** — separate `noise_sfo` DPCM predictor (`scalefactors.rs`) + `pns.rs` `dequant_scale`; 6/7 conformance cases now bit-exact (max_diff ≤4e-7, corr 1.0000) and `noise_mono` passes the real aggregate gate (no special case). **Only `sweep_stereo_44100` remains**: single peak-sample outlier max_diff 0.0725 / corr 1.0000, one ESC-magnitude coeff ~0.14% off, every suspect ruled out, needs a bit-for-bit ffmpeg trace; kept as a documented gate exception. `pixel_exact` stays `false` until closed. All AAC changes committed (`e1ffbf4`, `2888aac`). |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
 
