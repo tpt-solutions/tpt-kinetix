@@ -40,7 +40,7 @@ use transform::*;
 
 use crate::{
     cdf_tables_gen::*,
-    coeff::{read_coeffs, CoeffContexts, TileCdfs, TxBlockCtx},
+    coeff::{clear_coeff_context, read_coeffs, CoeffContexts, TileCdfs, TxBlockCtx},
     coeff_tables as av1,
     decoder::RefFrameStore,
     entropy::SymbolDecoder,
