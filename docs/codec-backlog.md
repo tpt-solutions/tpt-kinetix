@@ -1,16 +1,32 @@
 # Codec Backlog
 
 The full ~400-codec FFmpeg surface is explicitly out of scope for the current phases.
+
+**Direction (2026-09-03):** new multi-month codec work targets **royalty-free**
+formats only. H.264 decode is already done and stays (ingest coverage for existing
+content, not an endorsement of new AVC work). **HEVC/H.265 is dropped** — patent-pool
+fragmentation stalled its adoption and a pure-Rust decoder is a 12–16 week effort;
+any 4K HEVC ingest need should use platform hardware decode via FFI, not a native
+decoder.
+
+**Precondition:** close the H.264 High-profile 8×8 transform and get AV1 decode to
+`pixel_exact` (or explicitly park it) before starting the next codec.
+
 Tracked candidates in priority order:
 
-| Codec | Phase | Notes |
-|-------|-------|-------|
-| AAC (decode) | Post-MVP | See codec-evaluations/aac.md |
-| HEVC/H.265 | Post-MVP | See codec-evaluations/hevc.md |
-| VP9 | Future | Similar to AV1; share KG tooling |
-| Opus | Future | Audio; consider wrapping `opus` crate |
+| Codec | Priority | Notes |
+|-------|----------|-------|
+| VP9 (decode) | Next | Royalty-free; structurally a simpler AV1 (superblocks/tiles/transforms) — de-risks the AV1 reconstruction pipeline. Shares KG tooling. |
+| Opus (decode) | After VP9 | Royalty-free audio; ubiquitous (WebRTC/streaming). Native impl to keep the no-third-party-codec stance (do **not** wrap `opus`). Companion to a real MKV/WebM path. |
+| MP3 (decode) | Filler | Patents expired 2017; small, well-documented breadth win for `probe`/`transcode`. |
 | MPEG-2 Video | Low | Legacy; low priority |
-| MPEG-2 Audio / MP3 | Low | Legacy; low priority |
+| MPEG-2 Audio | Low | Legacy; low priority |
+
+Not a codec but adjacent and high-leverage: an **MPEG-TS demuxer** in
+`tpt-kinetix-demux` unlocks broadcast and HLS *input* (HLS is output-only today).
+
+Done: AAC-LC decode (see `codec-evaluations/aac.md`). Dropped: HEVC/H.265
+(see `codec-evaluations/hevc.md` for the technical evaluation, retained for reference).
 
 Add new candidates here as they are prioritized.
 

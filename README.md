@@ -23,7 +23,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
 | MKV / WebM demux | 🟡 Basic | EBML parsing; subset of elements |
 | MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
-| H.264 decode | ✅ Pixel-exact | CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; High-profile 8×8 transform returns `NotPixelExact` in strict mode |
+| H.264 decode | ✅ Pixel-exact | CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit) |
 | AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; CDF-based entropy/symbol decoder implemented (`entropy.rs`/`entropy_cdf.rs`), but `decode_tile_group` is not yet rewired onto it |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
@@ -33,12 +33,13 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
 
 > ⚠️ **Decode correctness:** The H.264 decoder reports `pixel_exact: true`
-> for CAVLC/CABAC I/P/B progressive and interlaced (PAFF/MBAFF) streams; the
-> High-profile 8×8 transform is not yet verified and returns
-> `KinetixError::NotPixelExact` in strict mode. The AV1 and AAC decoders are
-> not yet pixel-exact. Call `capabilities()` (or `tpt-kinetix probe`) to check
-> at runtime; in strict mode decoders return `KinetixError::NotPixelExact`
-> instead of emitting approximate frames.
+> for CAVLC/CABAC I/P/B progressive and interlaced (PAFF/MBAFF) streams,
+> including the High-profile 8×8 transform. Strict mode still returns
+> `KinetixError::NotPixelExact` for slices that hit an unsupported feature
+> (multi-slice pictures, non-4:2:0 chroma, >8-bit depth). The AV1 and AAC
+> decoders are not yet pixel-exact. Call `capabilities()` (or `tpt-kinetix
+> probe`) to check at runtime; in strict mode decoders return
+> `KinetixError::NotPixelExact` instead of emitting approximate frames.
 
 ---
 

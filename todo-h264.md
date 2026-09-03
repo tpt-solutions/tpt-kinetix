@@ -2,6 +2,38 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ai (2026-09-03) — progressive High 8×8 honoured in strict mode; conformance asserts hardened
+
+Branch `h264/progressive-8x8-strict-mode`, commit `824b144`.
+
+- **Strict-mode gate on `transform_8x8_mode_flag` removed.** Progressive
+  High-profile 8×8 (CAVLC + CABAC Intra_8×8) is bit-exact vs ffmpeg
+  (`high_profile_8x8_conformance` / `high_profile_8x8_cabac_conformance`,
+  max_abs_diff == 0), so `decode_slice` no longer returns `Ok(None)` for it in
+  strict mode. Strict mode now runs the real path and rejects only genuine
+  scaffold fallbacks via a new `H264Decoder::scaffold_fallback` flag (set in
+  `emit_skip_frame`, checked after `decode_slice`). Added an explicit 4:2:0-only
+  guard (`chroma_format_idc != 1` / `separate_colour_plane_flag`).
+- **Conformance asserts hardened.** `high_profile_8x8[_cabac]`, `cabac[_pframe]`
+  P/B, and `high_profile` now `assert_eq!(max_diff, 0)` instead of eprintln.
+  New strict-mode regression tests + a strict-vs-non-strict equivalence check in
+  `conformance_matrix`.
+- **Fixed stale `h264_real_sample_harness_across_profiles`** (in
+  `tpt-kinetix-test-utils`): it still asserted the decoder was a non-pixel-exact
+  scaffold (untrue since `pixel_exact` flipped in `820fd24`) — was failing on
+  master. Now decodes a baseline clip NAL-by-NAL and asserts bit-exact vs ffmpeg
+  in both modes.
+- **Regression:** full `tpt-kinetix-h264` suite (373 tests) + `tpt-kinetix-h264`
+  clippy `--all-targets -D warnings` + `tpt-kinetix-test-utils` conformance (11)
+  all green.
+- **NOT touched (concurrent AV1 process's area):** `cargo clippy --workspace` is
+  red on `tpt-kinetix-av1` `manual_range_contains` in committed debug hooks
+  (`inter_block.rs:16`, `intra_block.rs:13`/`136`), and `av1/src/reconstruct/
+  palette.rs` + `examples/av1_psnr_check.rs` have uncommitted debug tracing.
+- **H.264 `pixel_exact` scope now genuinely complete.** Only remaining
+  non-exact H.264 path: none. (Progressive High 8×8 was the last one; MBAFF/PAFF
+  8×8 was already exact.)
+
 ## SESSION #32ah (2026-09-02) — REMAINING WORK CLOSED OUT; `pixel_exact` is live
 
 All items from #32af's "REMAINING WORK" list are now done:

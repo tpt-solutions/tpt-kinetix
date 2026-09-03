@@ -54,6 +54,11 @@ Everything below is independent of the H.264 decoder effort:
 - **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
   Kinetix-vs-TMC13 comparison blocked on coding-tool alignment; decoder still
   reports `pixel_exact: false`.
+- **Royalty-free codec expansion (planned, not started).** Direction set
+  2026-09-03: next codecs are **VP9 decode → Opus decode → MP3 decode**, plus an
+  **MPEG-TS demuxer**, all after the H.264 8×8 transform + AV1 decode reach
+  pixel-exact. HEVC/H.265 is **dropped**. Full task list in Phase 9 RF below;
+  see `docs/codec-backlog.md`.
 - **CLI `transcode` / `stream` subcommands are stubs.** Only `probe` works.
 - **crates.io real publish (Phases 8/10) not done.** Packaging gate is cleared;
   needs a maintainer with a token + network — not automatable here.
@@ -66,7 +71,7 @@ conformance/bench reporting; AV1 rav1e-backed encoder.
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-28 sessions #32p-#32r (see todo-h264.md): **CABAC MBAFF I-slice FIXED & BIT-EXACT** (#32p — a spurious `end_of_slice_flag` was decoded after every MBAFF pair-top MB, §7.3.4; `g6_cabac_i` now SAD=0 vs `-skip_loop_filter` ffmpeg ref). Progressive CABAC P/B conformance RESOLVED earlier (#32o). #32q fixed the CABAC P/B **pair-scan addressing bug** (parsers iterated plain raster while neighbour lookups used the frame-MB grid — the P/B twin of #32e/#32f) plus an MV-predictor decode-order bug in `mv.rs` (`predict_slice_mvs_ex`): `mbaff_ip` P SAD 83k→~30k, `mbaff_ibp` P 107k→46k / B 128k→75k, `mbaff_cavlc_ip2` P 5748→1154; progressive byte-identical. #32r gated `cabac_b.rs` debug prints behind `KINETIX_BINTRACE`. 246 lib tests green, clippy `-D warnings` clean. **2026-08-29→31 (#32af + PAFF field-P): `mbaff_ibp` P AND B frames now BIT-EXACT** (BUG 3 `get_dct8x8_allowed`; B_SUB_MB table order; B_8x8 mvd list-order; missing 8×8-transform branch in `reconstruct_b_inter_luma`). **PAFF field chroma BIT-EXACT** (`paff_b_field.264` chroma 190→0). Remaining H.264 gaps: (1) PAFF field **luma max_diff 68** confined to `P_8x8` MBs with a coded 8×8 group whose `sub_mb_type` is finer than 8×8 (4×4/8×4) — parse in sync, MVs+qp+scan verified, a partial CABAC 4×4-residual-coeff error; needs a bin-level CABAC oracle. 2026-09-01: investigating via env-gated sweep hooks in `reconstruct.rs` (`KINETIX_LUMA_PARITY_OFF` opposite-parity luma-MC offset hypothesis mirroring the chroma fix, + `KINETIX_PAFF_RESIDUAL_DUMP` MB(4,0) residual dump) — uncommitted, not yet a fix; (2) G.5a pin every bit-exact MBAFF frame as a hard assert; (3) G.5b add real PAFF + MBAFF corpus clips; (4) G.5c non-16 crop clip assert; (5) Phase H `pixel_exact` flip + README (needs ITU vectors + broader corpus) |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | 2026-08-28 sessions #32p-#32r (see todo-h264.md): **CABAC MBAFF I-slice FIXED & BIT-EXACT** (#32p — a spurious `end_of_slice_flag` was decoded after every MBAFF pair-top MB, §7.3.4; `g6_cabac_i` now SAD=0 vs `-skip_loop_filter` ffmpeg ref). Progressive CABAC P/B conformance RESOLVED earlier (#32o). #32q fixed the CABAC P/B **pair-scan addressing bug** (parsers iterated plain raster while neighbour lookups used the frame-MB grid — the P/B twin of #32e/#32f) plus an MV-predictor decode-order bug in `mv.rs` (`predict_slice_mvs_ex`): `mbaff_ip` P SAD 83k→~30k, `mbaff_ibp` P 107k→46k / B 128k→75k, `mbaff_cavlc_ip2` P 5748→1154; progressive byte-identical. #32r gated `cabac_b.rs` debug prints behind `KINETIX_BINTRACE`. 246 lib tests green, clippy `-D warnings` clean. **2026-08-29→31 (#32af + PAFF field-P): `mbaff_ibp` P AND B frames now BIT-EXACT** (BUG 3 `get_dct8x8_allowed`; B_SUB_MB table order; B_8x8 mvd list-order; missing 8×8-transform branch in `reconstruct_b_inter_luma`). **PAFF field chroma BIT-EXACT** (`paff_b_field.264` chroma 190→0). Remaining H.264 gaps: (1) PAFF field **luma max_diff 68** confined to `P_8x8` MBs with a coded 8×8 group whose `sub_mb_type` is finer than 8×8 (4×4/8×4) — parse in sync, MVs+qp+scan verified, a partial CABAC 4×4-residual-coeff error; needs a bin-level CABAC oracle. 2026-09-01: investigating via env-gated sweep hooks in `reconstruct.rs` (`KINETIX_LUMA_PARITY_OFF` opposite-parity luma-MC offset hypothesis mirroring the chroma fix, + `KINETIX_PAFF_RESIDUAL_DUMP` MB(4,0) residual dump) — uncommitted, not yet a fix; (2) G.5a pin every bit-exact MBAFF frame as a hard assert; (3) G.5b add real PAFF + MBAFF corpus clips; (4) G.5c non-16 crop clip assert; (5) Phase H `pixel_exact` flip + README (needs ITU vectors + broader corpus). **2026-09-03 (#32ai, branch `h264/progressive-8x8-strict-mode`, commit `824b144`): progressive High-profile 8×8 transform now honoured in strict mode** — the blanket `transform_8x8_mode_flag` reject is gone; strict mode runs the real path and rejects only genuine scaffold fallbacks (`scaffold_fallback` flag) — multi-slice / non-4:2:0 / >8-bit. Conformance eprintln "[GAP]" checks hardened to `assert_eq!(max_diff, 0)` across `high_profile_8x8[_cabac]` / `cabac[_pframe]` P/B / `high_profile`. Stale `h264_real_sample_harness_across_profiles` (asserted pre-flip scaffold state, was failing on master) rewritten to assert bit-exact. 373 h264 tests + h264 clippy + test-utils conformance green. |
 | [todo-av1.md](todo-av1.md) | AV1 decoder | 2026-09-01 (see todo-av1.md): **★ INTRA KEYFRAME RECONSTRUCTION ESSENTIALLY SOLVED FOR THE INTRA CORPUS ★** — a patched dav1d trace build (`scratchpad/av1ref/`) unblocked per-block reference traces. Six bugs fixed (uncommitted except `73776fd` tx_depth-ctx sentinel): (1) SMOOTH intra-mode enum constants rotated (`SMOOTH/SMOOTH_V/SMOOTH_H` = 9/10/11) — every gradient SMOOTH block hit the axis-swapped predictor; (2) chroma directional-intra edge filter wrongly gated `&& is_luma` (§7.11.2.4 has no plane restriction); (3) 4×4 intra blocks read a spurious `tx_depth` symbol (§5.11.15 needs `MiSize > BLOCK_4X4`) — desynced every 4×4 block under `TX_MODE_SELECT`; (4) `use_intrabc` read as a literal bit not the adaptive `TileIntrabcCdf` symbol; (5) `BlockDecoded` grid + `haveAboveRight`/`haveBelowLeft` never implemented — directional intra replicated the last edge sample instead of extending `AboveRow`/`LeftCol`; (6) directional `filterType` (§7.11.2.9) hardcoded 0, now derived from SMOOTH* above/left neighbours. **Corpus (`av1_psnr_check` Y/U/V dB): solid_red 99/99/99; testsrc 61.95/51.05/48.57 (luma pre-filter PIXEL-EXACT, maxdiff 0); mandelbrot 47.37/51.62/51.61 (was ~22/16/21); smptebars 54.23/99/99; testsrc2 12.96 — blocked on Intra Block Copy.** IBC scoped as Phase-E-shaped (var-tx tree + inter `tx_type` + inter coeff context + DV pred + integer block copy); `read_mv_component` classN path in `inter_block.rs` looks wrong, fix when Phase E starts. Remaining: (1) small residual directional-prediction error (upsample interpolation / `dr_z3` `max_base_y`); (2) loop filter (deblock+CDEF) not verified bit-exact; (3) loop restoration §7.17 no-op; (4) IBC ≈ Phase E — blocks testsrc2; (5) inter Phase E — `Ok(None)` for non-keyframes; (6) then flip `capabilities().pixel_exact`. 122 unit tests pass, clippy clean. |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. 2026-08-25: `prev_shape` fix landed (production decode path wasn't updating window shape after synthesis). 2026-08-28: PNS scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)`, correcting noise_mono corr from 0.52 → 0.87 and noise_stereo max_diff from 0.059 → 0.029). Phase 3 (TNS independent reference) and Phase 5 (window-sequence proptest) exit criteria now verified/fulfilled. sweep_stereo outlier investigated: TNS ruled out (error is above the TNS band range; with_TNS==without_TNS at all bins). **2026-08-30: PNS / `noise_mono` gap CLOSED** — separate `noise_sfo` DPCM predictor (`scalefactors.rs`) + `pns.rs` `dequant_scale`; 6/7 conformance cases now bit-exact (max_diff ≤4e-7, corr 1.0000) and `noise_mono` passes the real aggregate gate (no special case). **Only `sweep_stereo_44100` remains**: single peak-sample outlier max_diff 0.0725 / corr 1.0000, one ESC-magnitude coeff ~0.14% off, every suspect ruled out, needs a bit-for-bit ffmpeg trace; kept as a documented gate exception. `pixel_exact` stays `false` until closed. All AAC changes committed (`e1ffbf4`, `2888aac`). |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog |
@@ -1779,6 +1784,39 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
 - [x] Evaluate adding AAC audio decode/encode support using the KG process
 - [x] Evaluate adding HEVC/H.265 decode support using the KG process
 - [x] Maintain a backlog note: the full ~400-codec FFmpeg surface is explicitly out of scope for the phases above; track candidate codecs here as they're prioritized
+
+### Phase 9 RF — Royalty-free codec expansion (direction set 2026-09-03)
+
+> New multi-month codec work targets **royalty-free** formats only. HEVC/H.265 is
+> **dropped** (patent-pool fragmentation stalled adoption; 12–16 wk pure-Rust cost;
+> use platform HW decode via FFI for any 4K HEVC ingest need). H.264 decode stays
+> (already done — ingest coverage, not new AVC investment). See
+> `docs/codec-backlog.md` and `docs/codec-evaluations/hevc.md` (retained for the
+> technical eval, banner marks it dropped). Plan file:
+> `~/.claude/plans/what-do-you-think-majestic-reddy.md`.
+
+- [ ] **Precondition** — close the H.264 High-profile 8×8 transform (`NotPixelExact`
+      → bit-exact) and get AV1 decode to `capabilities().pixel_exact` (or explicitly
+      park AV1) before starting a new codec. Don't add a 4th half-finished decoder.
+- [ ] **VP9 decode (next)** — new `tpt-kinetix-vp9` crate via the cargo-generate
+      template + `tpt-kinetix-kg` ingest of `libvpx`/FFmpeg `vp9*.c`. Royalty-free;
+      structurally a simpler AV1 (superblocks, tiles, similar transforms, bool-coder
+      vs AV1's symbol decoder) so it de-risks the AV1 reconstruction pipeline family.
+      Register in root `Cargo.toml` `[workspace] members`. Bit-exact vs
+      `ffmpeg -c:v vp9` / `libvpx` in `tpt-kinetix-test-utils::conformance`; add a
+      `*_never_panics` proptest for the frame/superblock parser; fuzz target ≥60s.
+- [ ] **Opus decode (after VP9)** — new `tpt-kinetix-opus` crate. Native impl
+      (SILK + CELT + hybrid), **do not wrap `opus`/`audiopus`** — keep the
+      no-third-party-codec stance the native AAC decoder set. Royalty-free; the
+      real audio companion to the MKV/WebM path. RFC 6716 + the reference decoder
+      as the spec oracle. Conformance vs the IETF Opus test vectors.
+- [ ] **MP3 decode (filler)** — patents expired 2017. Small, exhaustively
+      documented (ISO 11172-3 / 13818-3). Good breadth win for `probe`/`transcode`;
+      slot between the larger items. Conformance vs the ISO compliance vectors.
+- [ ] **MPEG-TS demuxer (adjacent, high-leverage)** — not a codec: add TS
+      demux to `tpt-kinetix-demux` (PAT/PMT, PES depacketization, PCR). Unlocks
+      broadcast + HLS *input* (HLS is output-only today). Smaller than any codec
+      above; multiplies the usefulness of the decoders already done.
 
 ## Phase 10 — Platform Review Follow-ups (2026-07-18)
 

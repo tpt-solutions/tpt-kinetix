@@ -1,6 +1,12 @@
 # Codec Evaluation: HEVC / H.265 Video Decode
 
-**Status**: Under evaluation — High-priority long-term candidate  
+> **Decision (2026-09-03): DROPPED.** Patent-pool fragmentation stalled HEVC
+> adoption and a pure-Rust decoder is a 12–16 week effort. New codec work targets
+> royalty-free formats only (VP9, Opus, MP3 — see `docs/codec-backlog.md`). Any
+> 4K HEVC ingest need should use platform hardware decode via FFI. This document
+> is retained for its technical evaluation only.
+
+**Status**: Dropped (was: under evaluation — high-priority long-term candidate)  
 **Last updated**: Phase 9 evaluation
 
 ---

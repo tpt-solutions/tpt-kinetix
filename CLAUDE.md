@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TPT Kinetix is a memory-safe, hyper-concurrent media processing engine in Rust — a long-term successor
 to FFmpeg for transcoding/streaming pipelines. It is **early-stage and pre-1.0**. The H.264 decoder
-now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, and MBAFF frames are all
-bit-exact vs ffmpeg with full deblocking; the 8×8 transform (High profile) returns
-`KinetixError::NotPixelExact` in strict mode. The AV1 and AAC decoders are still not pixel-exact.
+now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, MBAFF frames, and the
+High-profile 8×8 transform (progressive) are all bit-exact vs ffmpeg with full deblocking. Strict
+mode returns `KinetixError::NotPixelExact` only for slices that still hit an unsupported feature
+(multi-slice pictures, non-4:2:0 chroma, >8-bit). The AV1 and AAC decoders are still not pixel-exact.
 `DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
 for the current state of every crate before assuming something works.
 
@@ -114,8 +115,9 @@ pipeline to derive scaffolding from an existing FFmpeg C decoder — full walkth
 
 H.264 `capabilities().pixel_exact` is now `true`. CAVLC and CABAC I/P/B slices (progressive 4:2:0,
 any display dimensions, full deblocking) are bit-exact vs ffmpeg. PAFF field pictures (I/P/B) and
-MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The 8×8 transform (High profile)
-returns `KinetixError::NotPixelExact` in strict mode and degrades to scaffold in non-strict mode —
-not yet verified bit-exact for progressive streams. AV1 and AAC decoders are not yet pixel-exact.
+MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The High-profile 8×8 transform
+(progressive Intra_8×8, CAVLC + CABAC) is bit-exact vs ffmpeg. Strict mode returns
+`KinetixError::NotPixelExact` only when a slice actually falls back to the flat-grey scaffold
+(multi-slice pictures, non-4:2:0 chroma, >8-bit depth). AV1 and AAC decoders are not yet pixel-exact.
 Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
 source of truth, not README prose.
