@@ -762,24 +762,15 @@ fn cdef_filter_block(
 /// filter to convert the normalised variance index `z` into the mixing weight
 /// α (§7.17.5). Source: dav1d `src/tables.c`, `BITDEPTH == 8`.
 const SGR_X_BY_X: [u8; 256] = [
-    255, 128,  85,  64,  51,  43,  37,  32,  28,  26,  23,  21,  20,  18,  17,
-     16,  15,  14,  13,  13,  12,  12,  11,  11,  10,  10,   9,   9,   9,   9,
-      8,   8,   8,   8,   7,   7,   7,   7,   7,   6,   6,   6,   6,   6,   6,
-      6,   5,   5,   5,   5,   5,   5,   5,   5,   5,   5,   4,   4,   4,   4,
-      4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   3,   3,
-      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,
-      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      0
+    255, 128, 85, 64, 51, 43, 37, 32, 28, 26, 23, 21, 20, 18, 17, 16, 15, 14, 13, 13, 12, 12, 11,
+    11, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
 ];
 
 /// Precomputed `s = (1 << 20) / (eps * n * n)` and `one_by_n = (4096 + n/2) / n`
@@ -788,18 +779,42 @@ const SGR_X_BY_X: [u8; 256] = [
 /// respectively.  Entries with r==0 use s==0 (pass skipped when r==0).
 /// Source: dav1d `src/tables.c` `dav1d_sgr_params`.
 const SGR_S: [[u32; 2]; 16] = [
-    [140, 3236], [112, 2158], [ 93, 1618], [ 80, 1438],
-    [ 70, 1295], [ 58, 1177], [ 47, 1079], [ 37,  996],
-    [ 30,  925], [ 25,  863], [  0, 2589], [  0, 1618],
-    [  0, 1177], [  0,  925], [ 56,    0], [ 22,    0],
+    [140, 3236],
+    [112, 2158],
+    [93, 1618],
+    [80, 1438],
+    [70, 1295],
+    [58, 1177],
+    [47, 1079],
+    [37, 996],
+    [30, 925],
+    [25, 863],
+    [0, 2589],
+    [0, 1618],
+    [0, 1177],
+    [0, 925],
+    [56, 0],
+    [22, 0],
 ];
 
 /// Spec Sgr_Params[16][4] = { r0, eps0, r1, eps1 }.
 const SGR_PARAMS: [[i32; 4]; 16] = [
-    [2, 12, 1,  4], [2, 15, 1,  6], [2, 18, 1,  8], [2, 21, 1,  9],
-    [2, 24, 1, 10], [2, 29, 1, 11], [2, 36, 1, 12], [2, 45, 1, 13],
-    [2, 56, 1, 14], [2, 68, 1, 15], [0,  0, 1,  5], [0,  0, 1,  8],
-    [0,  0, 1, 11], [0,  0, 1, 14], [2, 30, 0,  0], [2, 75, 0,  0],
+    [2, 12, 1, 4],
+    [2, 15, 1, 6],
+    [2, 18, 1, 8],
+    [2, 21, 1, 9],
+    [2, 24, 1, 10],
+    [2, 29, 1, 11],
+    [2, 36, 1, 12],
+    [2, 45, 1, 13],
+    [2, 56, 1, 14],
+    [2, 68, 1, 15],
+    [0, 0, 1, 5],
+    [0, 0, 1, 8],
+    [0, 0, 1, 11],
+    [0, 0, 1, 14],
+    [2, 30, 0, 0],
+    [2, 75, 0, 0],
 ];
 
 /// Wiener filter for one plane (§7.17.3): 7-tap separable horizontal → vertical.
@@ -856,12 +871,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
     let src = plane.to_vec();
 
     let compute_pass =
-        |r: i32,
-         s: u32,
-         n: i32,
-         one_by_n: i32,
-         pair_rows: bool,
-         t: &mut Vec<i32>| {
+        |r: i32, s: u32, n: i32, one_by_n: i32, pair_rows: bool, t: &mut Vec<i32>| {
             // Build A (alpha*mean) and B (alpha) tables per pixel.
             let mut a_tab = vec![0i32; w * h];
             let mut b_tab = vec![0i32; w * h];
@@ -905,8 +915,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                                 + b_tab[y * w + xr]
                                 + b_tab[yn * w + xr])
                                 * 5;
-                        t[y * w + x] =
-                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
                     }
                     if y + 1 < h {
                         let y1 = y + 1;
@@ -953,8 +962,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                                 + b_tab[yb * w + xl]
                                 + b_tab[yb * w + xr])
                                 * 3;
-                        t[y * w + x] =
-                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
                     }
                 }
             }
@@ -1070,50 +1078,56 @@ pub fn apply_post_filters(
     // --- Deblocking loop filter (§7.14) ---
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
-    if !skip_deblock { deblock_plane(
-        y_plane,
-        width,
-        width,
-        height,
-        8,
-        0,
-        &meta.luma_tx_w,
-        &meta.luma_tx_h,
-        &meta.luma_skip,
-        meta.w8,
-        meta.h8,
-        fh,
-    ); }
+    if !skip_deblock {
+        deblock_plane(
+            y_plane,
+            width,
+            width,
+            height,
+            8,
+            0,
+            &meta.luma_tx_w,
+            &meta.luma_tx_h,
+            &meta.luma_skip,
+            meta.w8,
+            meta.h8,
+            fh,
+        );
+    }
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
-    if !skip_deblock { deblock_plane(
-        u_plane,
-        uv_w,
-        uv_w,
-        uv_h,
-        4,
-        1,
-        &meta.u_tx_w,
-        &meta.u_tx_h,
-        &meta.u_skip,
-        meta.w8,
-        meta.h8,
-        fh,
-    ); }
-    if !skip_deblock { deblock_plane(
-        v_plane,
-        uv_w,
-        uv_w,
-        uv_h,
-        4,
-        2,
-        &meta.v_tx_w,
-        &meta.v_tx_h,
-        &meta.v_skip,
-        meta.w8,
-        meta.h8,
-        fh,
-    ); }
+    if !skip_deblock {
+        deblock_plane(
+            u_plane,
+            uv_w,
+            uv_w,
+            uv_h,
+            4,
+            1,
+            &meta.u_tx_w,
+            &meta.u_tx_h,
+            &meta.u_skip,
+            meta.w8,
+            meta.h8,
+            fh,
+        );
+    }
+    if !skip_deblock {
+        deblock_plane(
+            v_plane,
+            uv_w,
+            uv_w,
+            uv_h,
+            4,
+            2,
+            &meta.v_tx_w,
+            &meta.v_tx_h,
+            &meta.v_skip,
+            meta.w8,
+            meta.h8,
+            fh,
+        );
+    }
 
     if dbg {
         for y in 32..48 {
@@ -1126,7 +1140,8 @@ pub fn apply_post_filters(
     // pri_strength occupies bits 0..=3 (0–15); sec_idx occupies bits 4..=5 (0–3).
     // The actual secondary strength is CDEF_SEC_STRENGTH[sec_idx] = [0,1,2,4].
     // Extract pri with `& 0x0F`, sec with `[0,1,2,4][((packed>>4)&3)]`.
-    let cdef_enabled = !skip_cdef && fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
+    let cdef_enabled =
+        !skip_cdef && fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
     if cdef_enabled {
         // CDEF strength is selected per 64×64 unit via `cdef_idx` (§5.11.56),
         // which `read_cdef()` already populated during tile decode. Each unit's
@@ -1148,7 +1163,9 @@ pub fn apply_post_filters(
                 let damping = fh.cdef_damping as i32;
                 let uh = 64.min(height - uy);
                 let uw = 64.min(width - ux);
-                cdef_plane_luma(y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw);
+                cdef_plane_luma(
+                    y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
+                );
                 ux += 64;
             }
             uy += 64;
@@ -1171,7 +1188,8 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
+                    uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1193,7 +1211,8 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
+                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
+                    uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1712,7 +1731,11 @@ mod tests {
         cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8);
         for y in 8..16 {
             for x in 0..16 {
-                assert_eq!(plane[y * 16 + x], src[y * 16 + x], "block outside the filtered unit must be unchanged");
+                assert_eq!(
+                    plane[y * 16 + x],
+                    src[y * 16 + x],
+                    "block outside the filtered unit must be unchanged"
+                );
             }
         }
     }

@@ -10,8 +10,14 @@ impl<'a> TileDecodeState<'a> {
         let _bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
-        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && (mi_row == 8 || (mi_row >= 16 && mi_row <= 18)) && mi_col <= 2 {
-            eprintln!("DBG SB1 intra mi=({mi_col},{mi_row}) bsize={bsize} bit_pos={}", self.dec.bit_position());
+        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+            && (mi_row == 8 || (16..=18).contains(&mi_row))
+            && mi_col <= 2
+        {
+            eprintln!(
+                "DBG SB1 intra mi=({mi_col},{mi_row}) bsize={bsize} bit_pos={}",
+                self.dec.bit_position()
+            );
         }
 
         crate::entropy::mark_block(|| {
@@ -75,7 +81,10 @@ impl<'a> TileDecodeState<'a> {
             let use_intrabc = self.mode_cdfs.read_use_intrabc(&mut self.dec);
             if use_intrabc {
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                    eprintln!("DBG IBC mi=({mi_col},{mi_row}) bsize={bsize} skip={skip} bit_pos={}", self.dec.bit_position());
+                    eprintln!(
+                        "DBG IBC mi=({mi_col},{mi_row}) bsize={bsize} skip={skip} bit_pos={}",
+                        self.dec.bit_position()
+                    );
                 }
                 // IBC block (§5.11.7 / §7.11.3): read the delta MV relative to
                 // the nearest IBC-neighbour predictor (spec find_mv_stack with
@@ -103,14 +112,18 @@ impl<'a> TileDecodeState<'a> {
                     false, // allow_hp
                     true,  // force_integer_mv
                 )?;
-                let mv = crate::inter::Mv::new(
-                    ibc_pred.row + delta.row,
-                    ibc_pred.col + delta.col,
-                );
+                let mv = crate::inter::Mv::new(ibc_pred.row + delta.row, ibc_pred.col + delta.col);
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                    eprintln!("DBG IBC after_mv: pred=({},{}) delta=({},{}) final=({},{}) bit_pos={}",
-                        ibc_pred.row, ibc_pred.col, delta.row, delta.col,
-                        mv.row, mv.col, self.dec.bit_position());
+                    eprintln!(
+                        "DBG IBC after_mv: pred=({},{}) delta=({},{}) final=({},{}) bit_pos={}",
+                        ibc_pred.row,
+                        ibc_pred.col,
+                        delta.row,
+                        delta.col,
+                        mv.row,
+                        mv.col,
+                        self.dec.bit_position()
+                    );
                 }
                 return self.reconstruct_ibc_block(mi_row, mi_col, bsize, skip, mv);
             }
@@ -133,7 +146,9 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[above_mode],
             INTRA_MODE_CONTEXT[left_mode],
         );
-        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok() && (mi_row <= 20 || (mi_row >= 8 && mi_row <= 10 && mi_col <= 2)) {
+        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok()
+            && (mi_row <= 20 || ((8..=10).contains(&mi_row) && mi_col <= 2))
+        {
             eprintln!(
                 "DBG ymode mi=({mi_col},{mi_row}) bsize={bsize} above_mode={above_mode} left_mode={left_mode} ctx=({},{}) -> y_mode={y_mode} bit={}",
                 INTRA_MODE_CONTEXT[above_mode],
@@ -413,7 +428,12 @@ impl<'a> TileDecodeState<'a> {
             for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
                 let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
                 let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                if std::env::var("KINETIX_AV1_DBG_SB1").is_ok() && (mi_row == 8 || mi_row == 16) && mi_col == 0 && ty == 0 && tx == 0 {
+                if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+                    && (mi_row == 8 || mi_row == 16)
+                    && mi_col == 0
+                    && ty == 0
+                    && tx == 0
+                {
                     eprintln!("DBG SB1 recon_intra_sub mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tile_px=({},{}) luma_tx={luma_tx} bsize={bsize}", self.tile_px_x0, self.tile_px_y0);
                 }
                 let blk = TxBlockCtx {
@@ -887,21 +907,35 @@ impl<'a> TileDecodeState<'a> {
 
                 let mut residual = vec![0i32; luma_tx_w * luma_tx_h];
                 if !skip {
-                    let coeffs =
-                        read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk)?;
+                    let coeffs = read_coeffs(
+                        &mut self.dec,
+                        &mut self.coeff_cdfs,
+                        &mut self.coeff_ctxs,
+                        &blk,
+                    )?;
                     if coeffs.eob > 0 {
                         let dequant =
                             dequantize_coeffs(&coeffs.quant, luma_tx, y_qindex_dc, y_qindex_ac);
-                        inverse_transform(&dequant, coeffs.tx_type, luma_tx, self.lossless, &mut residual);
+                        inverse_transform(
+                            &dequant,
+                            coeffs.tx_type,
+                            luma_tx,
+                            self.lossless,
+                            &mut residual,
+                        );
                     }
                 }
 
                 for dy in 0..luma_tx_h {
                     let wy = px_y + dy;
-                    if wy >= tile_h { break; }
+                    if wy >= tile_h {
+                        break;
+                    }
                     for dx in 0..luma_tx_w {
                         let wx = px_x + dx;
-                        if wx >= tile_w { break; }
+                        if wx >= tile_w {
+                            break;
+                        }
                         let src_val = y_plane
                             .get((src_y + dy) * y_stride + (src_x + dx))
                             .copied()
@@ -933,13 +967,20 @@ impl<'a> TileDecodeState<'a> {
         let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
         for by in by0..by1.min(self.meta.h8) {
             for bx in bx0..bx1.min(self.meta.w8) {
-                self.meta.record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
+                self.meta
+                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
             }
         }
 
         // ── Chroma transform blocks ───────────────────────────────────────────
         if !self.monochrome
-            && has_chroma(bsize, mi_row, mi_col, self.subsampling_x, self.subsampling_y)
+            && has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            )
         {
             let sub_x = self.subsampling_x as usize;
             let sub_y = self.subsampling_y as usize;
@@ -953,7 +994,11 @@ impl<'a> TileDecodeState<'a> {
 
             let plane_sz = {
                 let sz = get_plane_residual_size(bsize, sub_x, sub_y);
-                if sz == BLOCK_INVALID { bsize } else { sz }
+                if sz == BLOCK_INVALID {
+                    bsize
+                } else {
+                    sz
+                }
             };
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
@@ -994,12 +1039,22 @@ impl<'a> TileDecodeState<'a> {
                     let mut res_u = vec![0i32; cw * ch];
                     let mut res_v = vec![0i32; cw * ch];
                     if !skip {
-                        let cu = read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk_u)?;
+                        let cu = read_coeffs(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk_u,
+                        )?;
                         if cu.eob > 0 {
                             let dq = dequantize_coeffs(&cu.quant, c_tx, u_qindex_dc, u_qindex_ac);
                             inverse_transform(&dq, cu.tx_type, c_tx, self.lossless, &mut res_u);
                         }
-                        let cv = read_coeffs(&mut self.dec, &mut self.coeff_cdfs, &mut self.coeff_ctxs, &blk_v)?;
+                        let cv = read_coeffs(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk_v,
+                        )?;
                         if cv.eob > 0 {
                             let dq = dequantize_coeffs(&cv.quant, c_tx, v_qindex_dc, v_qindex_ac);
                             inverse_transform(&dq, cv.tx_type, c_tx, self.lossless, &mut res_v);
@@ -1008,10 +1063,14 @@ impl<'a> TileDecodeState<'a> {
 
                     for dy in 0..ch {
                         let wy = cpx_y + dy;
-                        if wy >= tile_ch { break; }
+                        if wy >= tile_ch {
+                            break;
+                        }
                         for dx in 0..cw {
                             let wx = cpx_x + dx;
-                            if wx >= tile_cw { break; }
+                            if wx >= tile_cw {
+                                break;
+                            }
                             let u_src = u_plane
                                 .get((src_cy + dy) * uv_stride + (src_cx + dx))
                                 .copied()
@@ -1032,8 +1091,22 @@ impl<'a> TileDecodeState<'a> {
                     let (sr, sc) = bd_index(1, cpx_x, cpx_y);
                     let step_c = (cw >> 2).max(1);
                     let step_r = (ch >> 2).max(1);
-                    BlockDecodedCtx { grid: &mut bd_u[..], sub_r: sr, sub_c: sc, step_x: step_c, step_y: step_r }.mark();
-                    BlockDecodedCtx { grid: &mut bd_v[..], sub_r: sr, sub_c: sc, step_x: step_c, step_y: step_r }.mark();
+                    BlockDecodedCtx {
+                        grid: &mut bd_u[..],
+                        sub_r: sr,
+                        sub_c: sc,
+                        step_x: step_c,
+                        step_y: step_r,
+                    }
+                    .mark();
+                    BlockDecodedCtx {
+                        grid: &mut bd_v[..],
+                        sub_r: sr,
+                        sub_c: sc,
+                        step_x: step_c,
+                        step_y: step_r,
+                    }
+                    .mark();
                 }
             }
 
@@ -1051,20 +1124,44 @@ impl<'a> TileDecodeState<'a> {
         // direction for context purposes. Store the decoded MV so subsequent
         // IBC blocks can use it as their NEARESTMV predictor.
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
-            if let Some(s) = self.ymode_left.get_mut(r) { *s = DC_PRED; }
-            if let Some(s) = self.uv_left.get_mut(r) { *s = DC_PRED; }
-            if let Some(s) = self.tx_left.get_mut(r) { *s = luma_tx_h as u8; }
-            if let Some(s) = self.skip_left.get_mut(r) { *s = skip as u8; }
-            if let Some(s) = self.is_inter_left.get_mut(r) { *s = 1; }
-            if let Some(s) = self.mv_left.get_mut(r) { s[0] = mv; }
+            if let Some(s) = self.ymode_left.get_mut(r) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.uv_left.get_mut(r) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.tx_left.get_mut(r) {
+                *s = luma_tx_h as u8;
+            }
+            if let Some(s) = self.skip_left.get_mut(r) {
+                *s = skip as u8;
+            }
+            if let Some(s) = self.is_inter_left.get_mut(r) {
+                *s = 1;
+            }
+            if let Some(s) = self.mv_left.get_mut(r) {
+                s[0] = mv;
+            }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
-            if let Some(s) = self.ymode_above.get_mut(c) { *s = DC_PRED; }
-            if let Some(s) = self.uv_above.get_mut(c) { *s = DC_PRED; }
-            if let Some(s) = self.tx_above.get_mut(c) { *s = luma_tx_w as u8; }
-            if let Some(s) = self.skip_above.get_mut(c) { *s = skip as u8; }
-            if let Some(s) = self.is_inter_above.get_mut(c) { *s = 1; }
-            if let Some(s) = self.mv_above.get_mut(c) { s[0] = mv; }
+            if let Some(s) = self.ymode_above.get_mut(c) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.uv_above.get_mut(c) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.tx_above.get_mut(c) {
+                *s = luma_tx_w as u8;
+            }
+            if let Some(s) = self.skip_above.get_mut(c) {
+                *s = skip as u8;
+            }
+            if let Some(s) = self.is_inter_above.get_mut(c) {
+                *s = 1;
+            }
+            if let Some(s) = self.mv_above.get_mut(c) {
+                s[0] = mv;
+            }
         }
 
         Ok(())

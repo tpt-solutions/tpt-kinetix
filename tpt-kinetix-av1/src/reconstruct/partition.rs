@@ -261,7 +261,9 @@ impl<'a> TileDecodeState<'a> {
             }
             _ => return,
         };
-        self.meta.lr_units.insert((plane, unit_row, unit_col), lr_data);
+        self.meta
+            .lr_units
+            .insert((plane, unit_row, unit_col), lr_data);
     }
 
     /// `decode_signed_subexp_with_ref_bool` (AV1 spec §6.8.24): the
