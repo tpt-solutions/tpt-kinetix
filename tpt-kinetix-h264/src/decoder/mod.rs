@@ -53,18 +53,6 @@ pub struct H264Decoder {
     /// queue lets us return one per `decode()` call instead of dropping all
     /// but the last.
     frame_queue: VecDeque<VideoFrame>,
-    /// Display-order reorder buffer: `(PicOrderCnt, frame)` for decoded
-    /// pictures not yet safe to emit. Coded order ≠ display order whenever
-    /// B pictures are present, so `decode()` cannot just return each picture as
-    /// it is reconstructed. A picture is held until `reorder_buf.len()` exceeds
-    /// the reorder depth (`§C.4.2` bumping), then the lowest-POC entry is
-    /// emitted; a new IDR flushes the whole buffer first (POC restarts).
-    reorder_buf: Vec<(i64, VideoFrame)>,
-    /// Display POC and IDR-ness of the picture `decode_slice` is currently
-    /// producing — set once its slice header is parsed, read by `decode_impl`
-    /// to place the frame into `reorder_buf`.
-    pending_poc: i64,
-    pending_is_idr: bool,
     /// Set by [`H264Decoder::emit_skip_frame`] whenever a slice could not be
     /// decoded by a real (pixel-exact) path and fell back to the flat-grey
     /// scaffold. `decode_impl` checks it after `decode_slice` returns so strict
@@ -153,9 +141,6 @@ impl H264Decoder {
             strict: false,
             field_accum: None,
             frame_queue: VecDeque::new(),
-            reorder_buf: Vec::new(),
-            pending_poc: 0,
-            pending_is_idr: false,
             scaffold_fallback: false,
         }
     }
@@ -281,71 +266,6 @@ impl H264Decoder {
         tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
         self.decode_impl(packet, tracer)
-    }
-
-    /// Reorder depth (§C.4.2): how many decoded pictures may be held before the
-    /// lowest-POC one must be emitted. A generous fixed cap is always correct
-    /// (it never emits out of order) — it only affects latency, and every real
-    /// H.264 stream reorders far fewer pictures than this.
-    const REORDER_DEPTH: usize = 16;
-
-    /// Derive this picture's `PicOrderCnt` for display ordering without
-    /// disturbing the running POC state (the real advance for reference
-    /// pictures happens in [`store_reference_picture`]).
-    fn display_poc(
-        &self,
-        sps: &SeqParameterSet,
-        header: &crate::slice::SliceHeader,
-        nal: &crate::nal::NalUnit,
-    ) -> i64 {
-        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
-        let mut scratch = self.poc_state.clone();
-        crate::ref_pic::derive_pic_order_cnt(
-            sps,
-            is_idr,
-            nal.nal_ref_idc != 0,
-            header.frame_num,
-            header.pic_order_cnt_lsb,
-            header.field_pic_flag,
-            header.bottom_field_flag,
-            header.delta_pic_order_cnt_bottom,
-            &mut scratch,
-        )
-        .unwrap_or(0)
-    }
-
-    /// Push a reconstructed **progressive** picture into the display-order
-    /// reorder buffer and return the frame (if any) now safe to emit. Extra
-    /// ready frames go to `frame_queue` for subsequent `decode()` calls.
-    ///
-    /// An IDR restarts POC, so any buffered pictures precede it in display
-    /// order and are flushed first.
-    fn reorder_push(&mut self, poc: i64, frame: VideoFrame, is_idr: bool) -> Option<VideoFrame> {
-        if is_idr && !self.reorder_buf.is_empty() {
-            self.reorder_buf.sort_by_key(|(p, _)| *p);
-            for (_, f) in self.reorder_buf.drain(..) {
-                self.frame_queue.push_back(f);
-            }
-        }
-        self.reorder_buf.push((poc, frame));
-        if self.reorder_buf.len() > Self::REORDER_DEPTH {
-            if let Some((idx, _)) = self
-                .reorder_buf
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (p, _))| *p)
-            {
-                let f = self.reorder_buf.remove(idx).1;
-                self.frame_queue.push_back(f);
-            }
-        }
-        self.frame_queue.pop_front()
-    }
-
-    /// Drain the reorder buffer in display (POC) order — called by [`flush`].
-    fn reorder_drain(&mut self) -> Vec<VideoFrame> {
-        self.reorder_buf.sort_by_key(|(p, _)| *p);
-        self.reorder_buf.drain(..).map(|(_, f)| f).collect()
     }
 
     fn decode_impl<T: DecodeTracer>(
@@ -514,7 +434,6 @@ impl H264Decoder {
                     // scaffolded rather than blanket-rejecting every P/B slice
                     // (which are bit-exact) up front.
                     self.scaffold_fallback = false;
-                    self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
                     let frame = self.decode_slice(nal, width, height, packet, tracer)?;
                     if self.strict && self.scaffold_fallback {
                         return Err(KinetixError::NotPixelExact(
@@ -528,13 +447,7 @@ impl H264Decoder {
                         // don't let this field's scaffold overwrite it.
                         self.frame_queue.push_back(frame);
                     } else {
-                        // Coded order ≠ display order when B pictures are present:
-                        // hand the picture to the reorder buffer, which returns
-                        // whichever frame (if any) is now safe to emit.
-                        let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
-                        if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
-                            output_frame = Some(ready);
-                        }
+                        output_frame = Some(frame);
                     }
                 }
                 _ => {}
@@ -551,12 +464,7 @@ impl H264Decoder {
     /// field so it is emitted as a full-height frame rather than being dropped.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
         let mut frames: Vec<VideoFrame> = self.frame_queue.drain(..).collect();
-        // Emit everything still held for reordering, in display (POC) order.
-        // (The DPB is a *reference* store only — its pictures were already
-        // emitted through the streaming/reorder path, so draining it here would
-        // double-emit every reference frame.)
-        frames.extend(self.reorder_drain());
-        self.dpb.take_frames();
+        frames.extend(self.dpb.take_frames());
         if let Some(accum) = self.field_accum.take() {
             let visible_width = self.sps_store.values().next().map(|s| s.pic_width_pixels());
             let visible_height = self
@@ -1015,10 +923,6 @@ impl H264Decoder {
             Err(_) => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
         };
 
-        // Record this picture's display order for `decode_impl`'s reorder buffer.
-        self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
-        self.pending_poc = self.display_poc(&sps, &header, nal);
-
         let is_i_slice = header.slice_type == crate::slice::SliceType::I
             || header.slice_type == crate::slice::SliceType::Si;
 
@@ -1167,17 +1071,6 @@ impl H264Decoder {
             // ref_idx binarisation and the RefPicList0 length, not the raw PPS
             // default.
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
-            if std::env::var_os("KINETIX_DUMP_P_PATH").is_some() {
-                eprintln!(
-                    "P#{} nl0={num_ref_idx_l0_active} fn={} qpd={} dbo={} rbsp={} ppsid={}",
-                    self.frame_count,
-                    header.frame_num,
-                    header.slice_qp_delta,
-                    header.data_bit_offset,
-                    nal.rbsp.len(),
-                    header.pic_parameter_set_id,
-                );
-            }
             let pic_num_ctx = crate::ref_pic::PicNumContext::new(
                 &sps,
                 header.frame_num,

@@ -43,16 +43,25 @@ only)" when every ref frame matches a decoded frame out of order).
 `tests/dbg_itu_pframe.rs` (`#[ignore]`, `ITU_CLIP=<name>`) — per-plane/MB diffmap
 + best-match frame-order analysis.
 
+> **2026-09-04:** a first-cut POC-keyed reorder buffer was committed in `e22fe10`
+> then **reverted** (`decoder/mod.rs` + `b_frame_conformance.rs`) — it changed the
+> `decode()` streaming contract (frames now buffered until `flush()`) and broke
+> ~45 tests across ~20 files that assume "`decode()` returns the just-decoded
+> frame", including the `dec_ref_pic_marking` DPB-inspection suite which reads
+> `flush()` output to assert marking state. Doing it right means one coherent
+> change: reorder buffer + every test's collect/flush update + the pipeline
+> crate. Deferred to its own session. `b_frame_conformance` again hand-picks the
+> B frame (decoder emits in decode order).
+
 REMAINING GAPS (manifest `KnownGap`; each `itu_conformance` run prints status):
-- [ ] **1. B-frame + spatial-direct + multi-ref P** — `BA3_SVA_C` (CAVLC IPB,
-      5 refs, spatial direct): 21/33 ref frames decode byte-exact but out of
-      order, ~12 have real errors. `CABA3_Sony_C` / `CANL3_Sony_C` /
-      `CVBS3_Sony_C` (CABAC IPB): ~101/300 exact. Two things tangled here:
-      (a) **the decoder emits in decode order, not display/POC order** — no
-      output reordering / DPB bumping (`b_frame_conformance` works around this by
-      hand-picking the frame). (b) real recon errors in B spatial-direct and/or
-      hierarchical P referencing. Fix (a) first (reorder buffer keyed by POC,
-      drained at IDR + on flush), then re-measure (b).
+- [ ] **1. Display-order output + B-frame recon.** The decoder emits in **decode
+      order, not display/POC order** — `dbg_itu_pframe` on `BA3_SVA_C` (CAVLC IPB,
+      5 refs, spatial direct) shows 21/33 ref frames decode byte-exact but out of
+      order, ~12 with real errors; `CABA3` / `CANL3` / `CVBS3` (CABAC IPB) ~101/300
+      exact. Two tangled things: (a) no output reordering (see the reverted-buffer
+      note above — needs the full coherent change); (b) real recon errors in B
+      spatial-direct and/or hierarchical multi-ref P. The ITU harness's
+      "DECODE-EXACT (display-order gap only)" line separates the two.
 - [ ] **2. `CAMA1_Sony_C` + all real MBAFF clips (`CAMA*`, `CAPAMA3`) → grey
       scaffold.** Synthetic `g6_cabac_i` is bit-exact ⇒ a real-stream trigger
       (SPS/PPS shape). Instrument the fallback for *why*.

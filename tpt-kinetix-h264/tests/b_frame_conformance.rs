@@ -157,19 +157,12 @@ fn run_conformance_check(dir_name: &str, deblock_param: &str, label: &str) {
         is_key_frame: true,
     };
 
-    // The decoder now emits in display order (IDR, B, P) via its reorder
-    // buffer; the B frame is the second frame out.
-    let mut out = Vec::new();
-    if let Some(f) = dec.decode(&pkt).expect("decode should not error") {
-        out.push(f);
-    }
-    out.extend(dec.flush().expect("flush should not error"));
-    assert!(
-        out.len() >= 2,
-        "expected at least 2 frames in display order, got {}",
-        out.len()
-    );
-    let frame = &out[1];
+    // The decoder processes all NALs (IDR, P, B in decode order) and returns
+    // the last decoded frame — the B frame.
+    let frame = dec
+        .decode(&pkt)
+        .expect("decode should not error")
+        .expect("a frame should be produced");
 
     assert_eq!(frame.width, WIDTH);
     assert_eq!(frame.height, HEIGHT);
