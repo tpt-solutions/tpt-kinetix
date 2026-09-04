@@ -15,28 +15,30 @@ Everything below is independent of the H.264 decoder effort:
   (`KINETIX_AV1_FILTER=1`) pending a restoration-unit-boundary pixel fix;
   Intra Block Copy reconstruction (`reconstruct_ibc_block`) now implements
   the var-tx tree + inter `tx_type` + inter coefficient context for both
-  luma and chroma. A 2026-09-04 dav1d-trace-diff session fixed the last of
-  the concretely-localized inter-coefficient-context bugs: chroma's
+  luma and chroma, and its neighbour-context handoff to the next block is
+  now correct. Two dav1d-trace-diff fixes this session: (1) chroma's
   `tx_type` derivation was feeding `compute_tx_type` a `DCT_DCT` placeholder
   for the coincident luma leaf's type instead of the real decoded value,
-  desyncing `read_eob`'s `is_1d` context bit for every affected block.
-  Fixed via `TxBlockCtx::coincident_luma_tx_type` + a per-mi-cell lookup
-  grid; verified with full arithmetic-coder state (range + `dif`) matching
-  dav1d exactly across 79 consecutive block checkpoints. IBC/inter-coeff
-  work is not fully bit-exact yet — see the newly localized next divergence
-  below.
+  desyncing `read_eob`'s `is_1d` context bit; (2) `reconstruct_ibc_block`
+  never cleared its palette neighbour-context arrays (`palette_y_colors_
+  left`/`above`, `_u_...`), so a stale palette from an earlier real-intra
+  block leaked through an intervening IBC block into the next real-intra
+  block's `has_palette_y` context read, misdecoding a real palette out of
+  thin air. **Both fixes verified with full arithmetic-coder state (range)
+  matching dav1d exactly — the second one across all 218 partition-tree +
+  block-level checkpoints spanning the *entire* testsrc2 frame**, i.e.
+  full-frame entropy-decode sync is now confirmed for this test case. The
+  remaining PSNR gap (not yet 99 dB) is therefore a pixel-reconstruction
+  bug (prediction/transform/dequant/loop-filter), not further entropy
+  desync — a distinct next-stage bug class, not yet root-caused.
   **Corpus (`av1_psnr_check`, Y/U/V dB): solid_red_32/64 99/99/99;
   testsrc_128x96 74.88/54.07/55.18; mandelbrot_128x96 70.45/53.15/52.76;
-  smptebars_256x144 99/99/99; testsrc2_320x180 21.98/22.49/16.90 — still
-  short of bit-exact, next divergence localized to a real-intra block
-  immediately following an IBC block (likely a neighbour-context handoff
-  bug, not another coefficient-context instance).**
-  **Remaining AV1 open items, in priority order:** (1) the newly localized
-  divergence — a real-intra block right after an IBC block desyncs its own
-  `skip`/`ymode` context reads (dav1d `r=53934` vs Kinetix `r=47548` at
-  `Post-tx[7]`, block `bx=54,by=36`); likely IBC's end-of-block neighbour-
-  context update leaves stale/wrong state for the next block — see
-  todo-av1.md's 2026-09-04 note for the exact trace evidence and next step;
+  smptebars_256x144 99/99/99; testsrc2_320x180 24.70/24.00/16.86.**
+  **Remaining AV1 open items, in priority order:** (1) find the pixel-
+  reconstruction bug behind testsrc2's remaining PSNR gap now that entropy
+  sync is confirmed full-frame — use dav1d's `ITXDUMP`/`EDGEDUMP` trace
+  hooks (already patched into the scratch dav1d clone) for a per-block
+  prediction/residual pixel diff, not more range/dif state comparisons;
   (2) small residual directional-prediction error on mandelbrot (edge-filter
   upsample interpolation / `dr_z3` `max_base_y = h+min(w,h)-1`, not yet
   root-caused); (3) loop filter improved but not yet *verified* bit-exact

@@ -4445,3 +4445,89 @@
 > context-update code (end of `reconstruct_ibc_block`) and compare
 > against dav1d's equivalent state, using the same full-state (`range` +
 > `dif>>48`) comparison technique established this session.
+
+> **2026-09-04 (cont'd again) -- fixed: found the root cause was NOT a
+> desync inside the IBC block, and NOT the intra block's own ymode/
+> uvmode reads either.** Instrumented per-field `range` checkpoints
+> (skip, intrabcflag, dmv, vartxtree, y-cf-blk, uv-cf-blk×2) inside
+> `reconstruct_ibc_block` and compared against dav1d's equivalent
+> `Post-*` trace lines for the exact IBC block at `bx=52,by=36`
+> preceding the divergent real-intra block: **every single checkpoint
+> matched dav1d's `range` exactly**, through to the very last
+> chroma-V coefficient read (`r=51976` both sides) -- the "context
+> handoff" theory from the previous note was wrong; the IBC block
+> itself is fully in sync.
+>
+> Continued the same per-field trace into the *next* block
+> (`bx=54,by=36`, real intra): `skip` (r=50754), `intrabcflag`
+> (r=47384), `ymode` (r=58598), and `uvmode` (r=40256) **all matched
+> dav1d exactly, in order** -- narrowing the divergence to the very
+> next read, `palette_mode_info()`'s `use_y_pal`. dav1d's trace showed
+> `Post-y_pal[0]: r=35228` (no palette); Kinetix decoded
+> `colors_y.len() == 2` (a real 2-color palette), landing at a wildly
+> different `r=44296`. Since the arithmetic-coder state going into
+> this read was byte-identical on both sides, a different *decoded
+> symbol* here means Kinetix was reading from the wrong CDF context
+> bucket, not a raw bitstream-position slip.
+>
+> **Root cause, confirmed against dav1d's own source** (`decode.c`):
+> `has_palette_y`'s context is `ctx = above_has + left_has`, read from
+> a per-mi-cell "did the neighbour block have a Y palette"
+> array (`palette_y_colors_above`/`_left` in Kinetix,
+> `t->a->pal_sz`/`t->l.pal_sz` in dav1d). `reconstruct_ibc_block`'s own
+> end-of-block neighbour-context update (added when the var-tx-tree +
+> inter-tx_type work was first built) touches `ymode_left`/`above`,
+> `uv_left`/`above`, `skip_left`/`above`, `is_inter_left`/`above`,
+> `mv_left`/`above` -- but never `palette_y_colors_left`/`above` or
+> `palette_u_colors_left`/`above`. Since IBC blocks always have
+> `PaletteSizeY == PaletteSizeUV == 0`, dav1d's own inter/IBC
+> context-update path (`decode.c`'s non-intra `case_set` block)
+> explicitly zeroes `edge->pal_sz` / `t->pal_sz_uv[i]` for every such
+> block -- Kinetix's IBC path just never mirrored that. A stale
+> non-empty palette left behind by an *earlier* real-intra block at
+> this same mi position (from a prior superblock/row) leaked straight
+> through the intervening IBC block into this read.
+>
+> **Fix**: clear `palette_y_colors_left`/`above` and
+> `palette_u_colors_left`/`above` across the IBC block's own mi extent
+> in `reconstruct_ibc_block`'s neighbour-context update, mirroring the
+> real-intra end-of-block pattern (which already does this correctly).
+> Committed as `6c5e06d`.
+>
+> **Verified far beyond the single block**: extracted every
+> partition-tree-read checkpoint (`KTRACE PART` / dav1d's `poc=...`
+> lines -- 95 of them) and every real-intra block's post-`tx`-read
+> checkpoint (`KTRACE BLOCK` / dav1d's `Post-tx[N]` -- 123 of them,
+> correctly paired by walking each `BLOCK`'s own subsequent `Post-tx`
+> line rather than naively grepping by label, learning from this
+> session's earlier label-matching mistake) from both decoders across
+> the **entire testsrc2 frame** and diffed them in decode order: **all
+> 218 checkpoints match dav1d's `range` exactly**. This is full-frame
+> entropy-decode sync, not a local patch -- strong evidence the
+> bitstream-level (symbol-read) side of AV1 decode is now correct for
+> this test case's IBC + intra mix.
+>
+> Corpus PSNR: `testsrc2_320x180` 21.98/22.49/16.90 dB -> **24.70/
+> 24.00/16.86 dB** (Y and U both up meaningfully; V flat). Still not
+> bit-exact (99 dB), despite full entropy sync -- meaning **the
+> remaining gap is a pixel-reconstruction bug** (prediction, inverse
+> transform, dequant, or loop filter/CDEF), not further entropy
+> desync. This is a genuinely different bug class from everything
+> fixed so far this session and needs its own trace methodology: since
+> the symbol stream is now confirmed correct, the next step is a
+> *pixel*-level diff (`ITXDUMP`/`EDGEDUMP` dav1d trace hooks already
+> exist in the patched local dav1d build -- see `recon_tmpl.c`'s diff
+> in the scratch dav1d clone -- for exactly this kind of per-block
+> prediction/residual dump) against Kinetix's own per-block pixel
+> output, rather than more `range`/`dif` state comparisons.
+>
+> No change to any other corpus case (`solid_red_32/64`,
+> `testsrc_128x96`, `mandelbrot_128x96`, `smptebars_256x144`),
+> consistent with this being an IBC-neighbour-of-real-intra-specific
+> bug. 139 unit tests pass, clippy clean, `cargo build --workspace`
+> clean. No new unit test was added for this specific fix (it lives
+> entirely inside `reconstruct_ibc_block`'s neighbour-context update,
+> which requires a full `TileDecodeState` over real bitstream data to
+> exercise meaningfully -- the `av1_psnr_check` corpus run is the
+> practical regression signal here, matching this session's earlier
+> methodology for reconstruction-level fixes).
