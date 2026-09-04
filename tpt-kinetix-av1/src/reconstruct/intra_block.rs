@@ -449,6 +449,25 @@ impl<'a> TileDecodeState<'a> {
                     (px_x + luma_tx_w).div_ceil(8),
                     (px_y + luma_tx_h).div_ceil(8),
                 );
+                // 4×4-luma-cell-resolution counterparts (see `FrameMeta::w4`'s
+                // doc comment) — deblock's luma pass runs at 4-sample
+                // granularity since transforms as small as TX_4X4/TX_4X8/
+                // TX_8X4 can meet at boundaries the coarser 8×8 grid can't
+                // represent.
+                self.meta.mark_luma_edges4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                );
+                self.meta.record_luma4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                    luma_tx_w as u8,
+                    luma_tx_h as u8,
+                );
                 let blk = TxBlockCtx {
                     plane: 0,
                     tx_size: luma_tx,
@@ -910,6 +929,20 @@ impl<'a> TileDecodeState<'a> {
                     px_y / 8,
                     (px_x + luma_tx_w).div_ceil(8),
                     (px_y + luma_tx_h).div_ceil(8),
+                );
+                self.meta.mark_luma_edges4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                );
+                self.meta.record_luma4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                    luma_tx_w as u8,
+                    luma_tx_h as u8,
                 );
 
                 // IBC prediction: copy from the already-decoded tile area.
