@@ -5001,3 +5001,73 @@
 > round — only the `av1_interior_diff.rs` threshold fix (same shape as
 > `av1_symbol_trace_diff.rs`'s earlier this session) and the scratch Python
 > verification scripts (not committed, throwaway).
+
+> **2026-09-05 session note (cont'd, final for this session) — traced
+> `px=(62,1)`'s divergence to deblock as the prime suspect, verified the
+> wide-filter math and mask/flat/hev formulas line-for-line against dav1d's
+> real source (all correct), but found the `KINETIX_AV1_NODEBLOCK`
+> isolation test itself has the same "pipeline order" confound as the
+> CDEF-not-edge-limited finding above — so "deblock is the bug" is a strong
+> lead, not yet a proven conclusion. Read this note before trusting the
+> "deblock vs CDEF" split below.**
+>
+> Used `KINETIX_AV1_NODEBLOCK=1`/`KINETIX_AV1_NOCDEF=1` (both already
+> existed in `apply_post_filters`) plus the existing `KINETIX_AV1_DBG_ROWS`/
+> `_RROWS`/`_COLS` pixel-dump hooks to check the real first filtered-vs-
+> filtered divergence (`px=(62,1)`, an edge at `x=64` between a `BLOCK_16X8`
+> `HORZ_B`-split leaf at `mi=(12,0)` and a `BLOCK_16X16` leaf at `mi=(16,0)`
+> — a genuine coded-block boundary, both sides `TX_16X8`/`TX_16X16` i.e.
+> `filter_size=16`, the wide 13-tap filter path): with `NODEBLOCK` set,
+> Kinetix's output matches dav1d's *final filtered* output **exactly**
+> across a wide window (`cols 50-75`, rows 1-3) — suggesting dav1d's own
+> deblock is a no-op here while Kinetix's fires (on rows 1 and 3
+> specifically, at different tap offsets each time — not rows 0/2/4/5/6/7).
+>
+> Hand-verified the wide-filter tap formula (`filter_line_1d`'s generic
+> `tap = 2 if |j|<=n2 else 1` loop) against dav1d's real `loop_filter()`
+> 16-tap output formulas (fetched from `raw.githubusercontent.com/
+> videolan/dav1d/master/src/loopfilter_tmpl.c`) at three output positions
+> (`i=-2, 0, +1`), including the exact clamped-duplicate-tap behaviour at
+> the p6/q6 array ends — **exact match every time**. Also fetched and
+> compared dav1d's `fm`/`flat8in`/`flat8out`/`hev` mask formulas against
+> Kinetix's `filter_mask`/`flat`/`flat2`/`hev` — structurally identical,
+> term for term (this was previously only justified by the code's own
+> comments, not independently re-verified against source until now).
+>
+> **The confound**: `apply_post_filters` runs deblock, *then* CDEF, on the
+> *same* plane buffer in place — matching the real AV1 pipeline order. But
+> `KINETIX_AV1_NODEBLOCK=1` only skips the deblock call; CDEF still runs
+> immediately after on whatever's in the buffer, which with deblock
+> skipped is the **raw, un-deblocked reconstruction** — a genuinely
+> different input than CDEF would see in a real decode (where it always
+> processes post-deblock data). So "NODEBLOCK-Kinetix" isn't "Kinetix's
+> reconstruction with deblock cleanly removed" — it's "Kinetix's
+> reconstruction with CDEF fed the wrong (un-deblocked) input," which
+> could by itself produce a different-but-often-coincidentally-similar
+> result without deblock actually being buggy. This is the same shape of
+> mistake as the CDEF-not-edge-limited finding earlier in this session:
+> another test-harness assumption ("disabling one filter isolates its
+> effect") that doesn't hold once you account for how AV1's filters
+> actually chain. **`NOCDEF` alone doesn't have this problem** (deblock
+> still runs in its correct pipeline position) — that test still shows
+> `px=(62,1)` diverging (`kinetix=163` either way), which is real evidence
+> pointing at deblock, just not the clean proof the `NODEBLOCK` test looked
+> like it was.
+>
+> **Genuinely solid takeaways from this**: (1) the wide-filter formula and
+> mask/flat/hev decision logic are now independently verified correct
+> against dav1d source, not just self-consistent with in-repo comments —
+> ruling those out as the bug; (2) the divergence is real and reproducible
+> at `px=(62,1)` with the *properly ordered* full pipeline; (3) deblock
+> remains the prime suspect (via the `NOCDEF`-only evidence) but isn't
+> conclusively implicated. **What's needed to actually close this**: a way
+> to observe dav1d's *own* post-deblock-pre-CDEF intermediate state (the
+> `ITXDUMP`/`EDGEDUMP`-style patched-dav1d approach earlier todo-av1.md
+> notes describe, or dav1d's `--verify`/frame-threading-disabled debug
+> dump if one exists) — without that, Kinetix-side experiments alone can't
+> cleanly separate "deblock is wrong" from "CDEF reacts differently to
+> deblock's (correct) output than expected." Worth checking first, since
+> it's cheaper than building new tooling: whether `dav1d`'s CLI itself
+> exposes a `--skip-deblock`/`--filter=none`-style flag that would give a
+> real, correctly-ordered partial-pipeline reference to compare against
+> instead of guessing from Kinetix's side alone.
