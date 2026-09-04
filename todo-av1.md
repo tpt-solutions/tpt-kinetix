@@ -3629,10 +3629,59 @@
 >    should not filter at `x=8`, contrasted with two adjacent independent
 >    8-wide transforms (both `is_left_edge: true`) which should.
 >
-> Nothing committed this sub-session (temporary `KINETIX_AV1_DBG_CDEF`
-> instrumentation used to find this was added and then fully removed again;
-> `git diff` is clean). 126 unit tests still pass, `av1_psnr_check` numbers
-> unchanged from the top of this session's note (this was pure
-> investigation, no code changes landed). **This is the single most
-> concrete, well-evidenced next AV1 fix** — more so than the CDEF-strength
-> framing item (2) used to have; CDEF itself is not implicated.
+> Nothing committed from the investigation itself (temporary
+> `KINETIX_AV1_DBG_CDEF` instrumentation used to find this was added and
+> then fully removed again; `git diff` was clean at that point).
+>
+> **Update — implemented and verified the same session** (commit
+> `60ddfc3`): the fix above, exactly as scoped. `FrameMeta` gained
+> `luma_edge_left`/`luma_edge_top`/`chroma_edge_left`/`chroma_edge_top`
+> (`w8*h8`-sized `bool` grids) plus `mark_luma_edges`/`mark_chroma_edges`
+> (OR-combining, so `merge_tile` propagates a real edge from any tile that
+> established one). Called once per **real transform sub-block** — inside
+> the `for ty { for tx { ... } }` loops in `reconstruct/intra_block.rs`
+> (both the keyframe path and the IBC path, luma and chroma each), using
+> that sub-block's own tile-local pixel origin — not the once-per-coded-block
+> call site `record_luma`/`record_chroma` already had (which is still
+> needed, unchanged, for size tracking; a coded block can contain several
+> same-size transform sub-blocks and each one's own origin needs its own
+> edge mark, not just the coded block's). `deblock_plane` gained
+> `edge_left_grid`/`edge_top_grid` parameters and now `continue`s past any
+> `bx`/`by` grid line neither grid marks as real, before ever computing
+> `filter_size`/running the filter. `inter_block.rs`'s `decode_inter_block`
+> (true inter frames, not IBC) was **not** touched — it's unreached by the
+> current keyframe-only corpus (`decode()` returns `Ok(None)` for
+> non-keyframes) — flag this for whoever picks up inter Phase E.
+>
+> **Result** (`av1_psnr_check`): `mandelbrot` Y/U/V
+> 47.59/52.44/52.62→**47.62/52.53/52.68**, `testsrc` U 53.76→**53.93**;
+> `solid_red`/`smptebars`/`testsrc2` byte-identical. **Smaller than the
+> "likely blast radius" estimate above** — most of this corpus's content
+> already uses ≤8-sample transforms, where every 8px grid line genuinely is
+> a real edge and the bug was a no-op; only blocks using a wider/taller
+> transform (the mandelbrot 16×32 `SMOOTH_V` block this was traced from,
+> and similar ones elsewhere) were actually affected. Still a real,
+> verified, spec-correctness fix (AV1 §7.14.1's edge presence gate was
+> simply absent before this), not a regression risk either way. 128 unit
+> tests pass (was 126; added
+> `mark_luma_edges_only_flags_a_transform_blocks_own_origin` +
+> `mark_luma_edges_flags_both_of_two_independent_adjacent_transforms`),
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -D warnings` clean, `cargo
+> fmt --all` applied, full `cargo build --workspace` clean.
+>
+> **This closes item (1)/(2) from this session's earlier framing** (the
+> "verify loop filter bit-exact" item) as *done for this specific bug
+> class*, though deblock/CDEF are still not proven bit-exact overall — the
+> corpus's remaining loop-filter-adjacent gap (mandelbrot still only 47.62
+> dB, well short of the 60+ dB the fully-bit-exact luma reconstruction
+> alone would suggest) means there is more to find here, just not via this
+> particular bug any more. **Next AV1 priorities, updated**: (1) whatever
+> remains in the loop filter after this fix — re-run the same
+> patched-dav1d-trace method (`DAV1D_ITXDUMP_BX/BY` for pre-filter,
+> post-deblock pixel dumps) on a fresh worst-row search now that this bug
+> is gone, since the row-71-88 band's exact shape will have changed; (2)
+> loop restoration boundary-pixel fix to un-gate apply; (3) IBC var-tx tree
+> + inter tx_type + inter coeff context — blocks testsrc2; (4) inter Phase
+> E (which will also need `inter_block.rs` to call
+> `mark_luma_edges`/`mark_chroma_edges`, per the note above); (5) then flip
+> `capabilities().pixel_exact`.
