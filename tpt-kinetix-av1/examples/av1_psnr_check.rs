@@ -157,6 +157,10 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
                 let row: usize = row_s.trim().parse().unwrap_or(32);
                 let stride = w as usize;
                 let base = row * stride;
+                if row >= h as usize {
+                    eprintln!("[{label}] row {row} out of range for {h}-tall clip, skipping");
+                    return;
+                }
                 eprintln!("[{label}] row {row} pixel diff (got vs ref):");
                 for col in 0..w as usize {
                     let got = frame.data[base + col];
