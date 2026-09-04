@@ -1051,39 +1051,77 @@ const SGR_PARAMS: [[i32; 4]; 16] = [
 ///   inter = clip((bias + sum + 4) >> 3, 0, 8191)
 /// - Vertical: start_sum = -(1<<18), fv[3]=128-2*(v0+v1+v2);
 ///   out = clip((start + sum + 1024) >> 11, 0, 255)
-fn wiener_filter_plane(plane: &mut [u8], w: usize, h: usize, half_h: [i32; 3], half_v: [i32; 3]) {
-    let src = plane.to_vec();
+///
+/// `full_src`/`pw`/`ph` are the *whole plane*'s pre-restoration snapshot and
+/// dimensions — taps are drawn from real neighbouring pixels (clamped only
+/// at the true plane edge), not from a copy of just this restoration unit
+/// clamped at the unit's own boundary. `(ux0,uy0)`/`(uw,uh)` is the output
+/// unit's region within `plane`; only that region is written.
+///
+/// A previous version of this function operated on an isolated per-unit
+/// buffer (extracted from the plane, filtered, written back), so every tap
+/// that reached past the unit's own edge — inescapable for a 7-tap filter on
+/// a unit as small as 32px, i.e. every row/column within 3px of a unit
+/// boundary — clamped to *that unit's own* edge sample instead of reading
+/// the real pixel just across the boundary in the neighbouring unit. AV1's
+/// actual boundary handling (§7.17.1's stripe line buffers, captured
+/// pre-deblock at 64-row intervals) is more involved than plain full-plane
+/// clamping, so this is still an approximation, not a full spec match — but
+/// it is a strict improvement over unit-local clamping for the common case
+/// of two adjacent, already-deblocked/CDEF'd units away from a 64-row
+/// stripe seam.
+#[allow(clippy::too_many_arguments)]
+fn wiener_filter_plane(
+    plane: &mut [u8],
+    full_src: &[u8],
+    pw: usize,
+    ph: usize,
+    ux0: usize,
+    uy0: usize,
+    uw: usize,
+    uh: usize,
+    half_h: [i32; 3],
+    half_v: [i32; 3],
+) {
     let build_filter = |half: [i32; 3]| -> [i32; 7] {
         let c = 128 - 2 * (half[0] + half[1] + half[2]);
         [half[0], half[1], half[2], c, half[2], half[1], half[0]]
     };
     let fh = build_filter(half_h);
     let fv = build_filter(half_v);
+    let src_at = |x: isize, y: isize| -> i32 {
+        let xi = x.clamp(0, pw as isize - 1) as usize;
+        let yi = y.clamp(0, ph as isize - 1) as usize;
+        full_src[yi * pw + xi] as i32
+    };
 
     // Horizontal pass — bias keeps intermediate values non-negative.
-    // inter ∈ [0, 8191] (13-bit).
-    let mut inter = vec![0i32; w * h];
-    for y in 0..h {
-        for x in 0..w {
+    // inter ∈ [0, 8191] (13-bit). Computed over the unit's rows padded by
+    // ±3 for the vertical pass's own tap reach.
+    let inter_h = uh + 6;
+    let mut inter = vec![0i32; uw * inter_h];
+    for iy in 0..inter_h {
+        let y = uy0 as isize + iy as isize - 3;
+        for x in 0..uw {
             let mut sum = 1i32 << 14; // horizontal bias
             for (i, &fi) in fh.iter().enumerate() {
-                let xi = (x as i32 + i as i32 - 3).clamp(0, w as i32 - 1) as usize;
-                sum += fi * src[y * w + xi] as i32;
+                let xi = ux0 as isize + x as isize + i as isize - 3;
+                sum += fi * src_at(xi, y);
             }
-            inter[y * w + x] = ((sum + 4) >> 3).clamp(0, 8191);
+            inter[iy * uw + x] = ((sum + 4) >> 3).clamp(0, 8191);
         }
     }
 
     // Vertical pass — matching negative bias; out ∈ [0, 255].
     let round_offset_v = -(1i32 << 18);
-    for y in 0..h {
-        for x in 0..w {
+    for y in 0..uh {
+        for x in 0..uw {
             let mut sum = round_offset_v;
             for (i, &fi) in fv.iter().enumerate() {
-                let yi = (y as i32 + i as i32 - 3).clamp(0, h as i32 - 1) as usize;
-                sum += fi * inter[yi * w + x];
+                let iy = y + i; // (y + i - 3) offset by the +3 padding above
+                sum += fi * inter[iy * uw + x];
             }
-            plane[y * w + x] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
+            plane[(uy0 + y) * pw + (ux0 + x)] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
         }
     }
 }
@@ -1093,23 +1131,53 @@ fn wiener_filter_plane(plane: &mut [u8], w: usize, h: usize, half_h: [i32; 3], h
 /// Implements both the 5×5 (pass 0, radius r0) and 3×3 (pass 1, radius r1)
 /// guided-filter passes and combines them with the decoded `xqd` weights.
 /// The algorithm and constants follow the dav1d C reference (8-bit path).
+///
+/// `full_src`/`pw`/`ph`/`(ux0,uy0)`/`(uw,uh)`: see `wiener_filter_plane`'s
+/// doc comment — same full-plane-clamped-taps approach, for the same
+/// unit-local-clamping bug.
 #[allow(clippy::too_many_arguments)]
-fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [i32; 2]) {
-    let src = plane.to_vec();
+fn sgrproj_filter_plane(
+    plane: &mut [u8],
+    full_src: &[u8],
+    pw: usize,
+    ph: usize,
+    ux0: usize,
+    uy0: usize,
+    uw: usize,
+    uh: usize,
+    set: usize,
+    xqd: [i32; 2],
+) {
+    let src_at = |x: isize, y: isize| -> i32 {
+        let xi = x.clamp(0, pw as isize - 1) as usize;
+        let yi = y.clamp(0, ph as isize - 1) as usize;
+        full_src[yi * pw + xi] as i32
+    };
+    // a_tab/b_tab need a 1-cell (3×3 pass) / 1-cell (5×5 pass, `yn = y+1`
+    // only looks forward) halo around the unit; padding by 1 on every side
+    // covers both passes uniformly.
+    let pad = 1isize;
+    let aw = uw + 2 * pad as usize;
+    let ah = uh + 2 * pad as usize;
+    let a_idx = |x: isize, y: isize| -> usize { ((y + pad) as usize) * aw + (x + pad) as usize };
 
     let compute_pass =
         |r: i32, s: u32, n: i32, one_by_n: i32, pair_rows: bool, t: &mut Vec<i32>| {
-            // Build A (alpha*mean) and B (alpha) tables per pixel.
-            let mut a_tab = vec![0i32; w * h];
-            let mut b_tab = vec![0i32; w * h];
-            for y in 0..h {
-                for x in 0..w {
+            // Build A (alpha*mean) and B (alpha) tables over the unit plus a
+            // 1-cell halo, reading real neighbouring-unit pixels (clamped
+            // only at the true plane edge) for the guided-filter's own
+            // radius-r window.
+            let mut a_tab = vec![0i32; aw * ah];
+            let mut b_tab = vec![0i32; aw * ah];
+            for ly in -pad..(uh as isize + pad) {
+                for lx in -pad..(uw as isize + pad) {
                     let (mut sum, mut sum_sq) = (0i32, 0i64);
                     for dy in -r..=r {
                         for dx in -r..=r {
-                            let px = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                            let py = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                            let v = src[py * w + px] as i32;
+                            let v = src_at(
+                                ux0 as isize + lx + dx as isize,
+                                uy0 as isize + ly + dy as isize,
+                            );
                             sum += v;
                             sum_sq += (v * v) as i64;
                         }
@@ -1117,79 +1185,57 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                     let p_val = ((n as i64 * sum_sq - (sum as i64) * (sum as i64)).max(0)) as u64;
                     let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
                     let alpha = SGR_X_BY_X[z] as i32;
-                    a_tab[y * w + x] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
-                    b_tab[y * w + x] = alpha;
+                    let ai = a_idx(lx, ly);
+                    a_tab[ai] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
+                    b_tab[ai] = alpha;
                 }
             }
+            let a = |x: isize, y: isize| a_tab[a_idx(x, y)];
+            let b = |x: isize, y: isize| b_tab[a_idx(x, y)];
+            let s_at = |x: isize, y: isize| src_at(ux0 as isize + x, uy0 as isize + y);
 
             if pair_rows {
                 // 5×5 pass: pairs of output rows use SIX_NEIGHBORS / single-row patterns.
-                let mut y = 0usize;
-                while y < h {
-                    let yn = (y + 1).min(h - 1);
-                    for x in 0..w {
-                        let xl = x.saturating_sub(1);
-                        let xr = (x + 1).min(w - 1);
-                        let a_sum = (a_tab[y * w + x] + a_tab[yn * w + x]) * 6
-                            + (a_tab[y * w + xl]
-                                + a_tab[yn * w + xl]
-                                + a_tab[y * w + xr]
-                                + a_tab[yn * w + xr])
-                                * 5;
-                        let b_sum = (b_tab[y * w + x] + b_tab[yn * w + x]) * 6
-                            + (b_tab[y * w + xl]
-                                + b_tab[yn * w + xl]
-                                + b_tab[y * w + xr]
-                                + b_tab[yn * w + xr])
-                                * 5;
-                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                let mut y = 0isize;
+                while y < uh as isize {
+                    let yn = (y + 1).min(uh as isize - 1);
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, y) + a(x, yn)) * 6
+                            + (a(xl, y) + a(xl, yn) + a(xr, y) + a(xr, yn)) * 5;
+                        let b_sum = (b(x, y) + b(x, yn)) * 6
+                            + (b(xl, y) + b(xl, yn) + b(xr, y) + b(xr, yn)) * 5;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
                     }
-                    if y + 1 < h {
+                    if y + 1 < uh as isize {
                         let y1 = y + 1;
-                        for x in 0..w {
-                            let xl = x.saturating_sub(1);
-                            let xr = (x + 1).min(w - 1);
-                            let a_sum = a_tab[y1 * w + x] * 6
-                                + (a_tab[y1 * w + xl] + a_tab[y1 * w + xr]) * 5;
-                            let b_sum = b_tab[y1 * w + x] * 6
-                                + (b_tab[y1 * w + xl] + b_tab[y1 * w + xr]) * 5;
-                            t[y1 * w + x] =
-                                (a_sum - b_sum * src[y1 * w + x] as i32 + (1 << 7)) >> 8;
+                        for x in 0..uw as isize {
+                            let xl = x - 1;
+                            let xr = x + 1;
+                            let a_sum = a(x, y1) * 6 + (a(xl, y1) + a(xr, y1)) * 5;
+                            let b_sum = b(x, y1) * 6 + (b(xl, y1) + b(xr, y1)) * 5;
+                            t[y1 as usize * uw + x as usize] =
+                                (a_sum - b_sum * s_at(x, y1) + (1 << 7)) >> 8;
                         }
                     }
                     y += 2;
                 }
             } else {
                 // 3×3 pass: EIGHT_NEIGHBORS pattern per row.
-                for y in 0..h {
-                    let ya = y.saturating_sub(1);
-                    let yb = (y + 1).min(h - 1);
-                    for x in 0..w {
-                        let xl = x.saturating_sub(1);
-                        let xr = (x + 1).min(w - 1);
-                        let a_sum = (a_tab[y * w + x]
-                            + a_tab[y * w + xl]
-                            + a_tab[y * w + xr]
-                            + a_tab[ya * w + x]
-                            + a_tab[yb * w + x])
-                            * 4
-                            + (a_tab[ya * w + xl]
-                                + a_tab[ya * w + xr]
-                                + a_tab[yb * w + xl]
-                                + a_tab[yb * w + xr])
-                                * 3;
-                        let b_sum = (b_tab[y * w + x]
-                            + b_tab[y * w + xl]
-                            + b_tab[y * w + xr]
-                            + b_tab[ya * w + x]
-                            + b_tab[yb * w + x])
-                            * 4
-                            + (b_tab[ya * w + xl]
-                                + b_tab[ya * w + xr]
-                                + b_tab[yb * w + xl]
-                                + b_tab[yb * w + xr])
-                                * 3;
-                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                for y in 0..uh as isize {
+                    let ya = y - 1;
+                    let yb = y + 1;
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, y) + a(xl, y) + a(xr, y) + a(x, ya) + a(x, yb)) * 4
+                            + (a(xl, ya) + a(xr, ya) + a(xl, yb) + a(xr, yb)) * 3;
+                        let b_sum = (b(x, y) + b(xl, y) + b(xr, y) + b(x, ya) + b(x, yb)) * 4
+                            + (b(xl, ya) + b(xr, ya) + b(xl, yb) + b(xr, yb)) * 3;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
                     }
                 }
             }
@@ -1197,8 +1243,8 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
 
     let r0 = SGR_PARAMS[set][0];
     let r1 = SGR_PARAMS[set][2];
-    let mut t0 = vec![0i32; w * h];
-    let mut t1 = vec![0i32; w * h];
+    let mut t0 = vec![0i32; uw * uh];
+    let mut t1 = vec![0i32; uw * uh];
 
     if r0 > 0 {
         let n0 = (2 * r0 + 1) * (2 * r0 + 1);
@@ -1211,11 +1257,11 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
         compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
     }
 
-    for y in 0..h {
-        for x in 0..w {
-            let sv = src[y * w + x] as i32;
-            let correction = (xqd[0] * t0[y * w + x] + xqd[1] * t1[y * w + x] + (1 << 10)) >> 11;
-            plane[y * w + x] = (sv + correction).clamp(0, 255) as u8;
+    for y in 0..uh {
+        for x in 0..uw {
+            let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
+            let correction = (xqd[0] * t0[y * uw + x] + xqd[1] * t1[y * uw + x] + (1 << 10)) >> 11;
+            plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, 255) as u8;
         }
     }
 }
@@ -1235,6 +1281,14 @@ fn apply_loop_restoration_plane(
     let unit_size = fh.lr_unit_size[plane_idx] as usize;
     let unit_cols = w.div_ceil(unit_size);
     let unit_rows = h.div_ceil(unit_size);
+    // Every unit filters from one shared pre-restoration snapshot of the
+    // *whole* plane (not just its own unit), so its own 7-tap (Wiener) /
+    // radius-r (SgrProj) window can read real neighbouring-unit pixels —
+    // see `wiener_filter_plane`'s doc comment. Taking the snapshot once
+    // here (rather than per-unit) also keeps units mutually independent:
+    // an already-filtered neighbour never leaks into a later unit's input,
+    // matching the spec's per-unit-independent filtering.
+    let full_src = plane.to_vec();
     for ur in 0..unit_rows {
         for uc in 0..unit_cols {
             let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
@@ -1244,24 +1298,13 @@ fn apply_loop_restoration_plane(
             let uy0 = ur * unit_size;
             let uw = unit_size.min(w - ux0);
             let uh = unit_size.min(h - uy0);
-            // Extract the unit's sub-plane into a contiguous buffer.
-            let mut buf = vec![0u8; uw * uh];
-            for row in 0..uh {
-                buf[row * uw..row * uw + uw]
-                    .copy_from_slice(&plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]);
-            }
             match unit {
                 LrUnitData::Wiener { h: hf, v: vf } => {
-                    wiener_filter_plane(&mut buf, uw, uh, *hf, *vf);
+                    wiener_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *hf, *vf);
                 }
                 LrUnitData::Sgrproj { set, xqd } => {
-                    sgrproj_filter_plane(&mut buf, uw, uh, *set, *xqd);
+                    sgrproj_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *set, *xqd);
                 }
-            }
-            // Write filtered unit back.
-            for row in 0..uh {
-                plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]
-                    .copy_from_slice(&buf[row * uw..row * uw + uw]);
             }
         }
     }
@@ -1760,6 +1803,44 @@ mod tests {
         assert_eq!(meta.luma_tx_h4[meta.idx4(12, 0)], 8);
         assert_eq!(meta.luma_tx_w4[meta.idx4(13, 0)], 4);
         assert_eq!(meta.luma_tx_h4[meta.idx4(13, 0)], 4);
+    }
+
+    #[test]
+    fn wiener_filter_reads_real_pixels_across_a_unit_boundary() {
+        // Regression for the 2026-09-04 restoration-boundary fix: a previous
+        // version of this filter operated on an isolated per-unit buffer, so
+        // every tap within 3px of a unit's own edge clamped to *that unit's*
+        // edge sample — it could never see a different value on the other
+        // side of the boundary, however different the real neighbouring
+        // unit's content was. This test builds two full-plane snapshots that
+        // are identical *inside* the unit being filtered but differ only in
+        // the pixel just past its right edge, with a non-identity kernel,
+        // and asserts the filtered output actually differs — proving the
+        // function is sensitive to real cross-boundary pixels, something an
+        // isolated-buffer implementation structurally cannot be (its input
+        // for both cases would be byte-identical).
+        let pw = 8usize;
+        let ph = 4usize;
+        let mut plane_a = vec![100u8; pw * ph];
+        let mut plane_b = plane_a.clone();
+        let src_a = vec![100u8; pw * ph];
+        let mut src_b = src_a.clone();
+        // Column 4 is just past the unit's [0,4) right edge; make it a
+        // sharp step in `b` only.
+        for y in 0..ph {
+            src_b[y * pw + 4] = 255;
+        }
+        // A non-identity (real smoothing) horizontal kernel.
+        let half = [1, 2, 3];
+        let identity_v = [0, 0, 0];
+        wiener_filter_plane(&mut plane_a, &src_a, pw, ph, 0, 0, 4, ph, half, identity_v);
+        wiener_filter_plane(&mut plane_b, &src_b, pw, ph, 0, 0, 4, ph, half, identity_v);
+        assert_ne!(
+            plane_a[3], plane_b[3],
+            "the rightmost column of the unit must be affected by the real \
+             neighbouring pixel just past its boundary, not clamped to its \
+             own edge sample"
+        );
     }
 
     #[test]
