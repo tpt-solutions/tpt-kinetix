@@ -3685,3 +3685,107 @@
 > E (which will also need `inter_block.rs` to call
 > `mark_luma_edges`/`mark_chroma_edges`, per the note above); (5) then flip
 > `capabilities().pixel_exact`.
+
+> ## 2026-09-04 session note — ★ `dqDenom` fix: smptebars luma now
+> pixel-exact (57.49→99 dB), mandelbrot 47.62→53.10 dB ★. Continued the
+> deblock re-verification requested at the top of this session and found a
+> second, much bigger bug on the way.
+>
+> **Correction to the previous session's row-band claim**: the "mandelbrot
+> rows 71-88" band described in the earlier 2026-09-03 note was actually
+> **`testsrc`'s** data — `KINETIX_AV1_ONLY_TESTSRC=mandelbrot` is a boolean
+> gate (any value enables it) that always runs *only* `testsrc`, not
+> `testsrc` filtered to a clip named "mandelbrot"; the row dump that
+> session captured was mislabeled. The deep block-level tracing in that
+> session (`bx=0,by=16`, the `SMOOTH_V` `TX_16X32` block, the deblock
+> edge-presence bug and its fix) used real `mandelbrot.obu` traces
+> throughout and is unaffected — only the "18-row band" *framing* was
+> about the wrong clip. Mandelbrot's real per-row PSNR (no `ONLY_TESTSRC`
+> gate) is scattered errors across the *whole* frame (rows 0-95 all in the
+> 40-66 dB range), not a localized band.
+>
+> **Re-traced the same `SMOOTH_V` `TX_16X32` block from scratch** (fresh
+> `DAV1D_ITXDUMP_BX=0 DAV1D_ITXDUMP_BY=16` capture) to find the next
+> divergence per the coordinator's request. Row 16 (the row this block's
+> own analysis previously — incorrectly — claimed matched) actually
+> **did not** match: dav1d residual row 16 = `[-5,-5,-4,-4,-4,-3,-3,-2,…]`,
+> Kinetix's own captured dump = `[-9,-9,-9,-8,-7,-6,-5,-4,…]` — roughly
+> **2× too large**. Checked every row 16-31: the *ratio* is consistently
+> ~1.8-2.1×, not a fixed additive offset, i.e. a pure scale bug, not a
+> rounding bug. Prediction matched exactly throughout (only residual was
+> wrong) — this pointed straight at dequantization.
+>
+> **Root cause**: `dq_denom(tx_size)` (§7.12.3's `dqDenom` — the post-dequant
+> integer division for oversized transforms) matched `tx_size ==
+> TX_32X32`/`TX_64X64` **literally**. AV1's actual rule (confirmed against
+> dav1d's `dq_shift = Max(0, t_dim->ctx - 2)`, `t_dim->ctx` being exactly
+> Kinetix's own `tx_sz_ctx = (TX_SIZE_SQR[tx] + TX_SIZE_SQR_UP[tx] + 1) >>
+> 1` already used elsewhere for coefficient contexts) is driven by that
+> **square-up-averaged context**, not the transform's own literal size —
+> so every non-square size whose `tx_sz_ctx` reaches 3 or 4
+> (`TX_16X32`/`TX_32X16`/`TX_16X64`/`TX_64X16` at `ctx=3` → `dqDenom=2`;
+> `TX_32X64`/`TX_64X32` at `ctx=4` → `dqDenom=4`) silently got `dqDenom=1`
+> (a no-op) under the old literal check, overscaling every dequantized
+> coefficient in those six sizes by 2× or 4×. (Cross-checked the very
+> non-intuitive edge case directly against dav1d's own
+> `dav1d_txfm_dimensions` table in `src/tables.c`: `TX_8X32`/`TX_32X8`,
+> despite *also* having square-up 32×32, land at `ctx=2` → `dqDenom=1` —
+> the skew relative to the square-up matters, this is genuinely not just
+> "square-up == 32×32 ⇒ dqDenom=2".)
+>
+> **Fix** (commit `c0419de`): rewrote `dq_denom` to compute the shift from
+> `tx_sz_ctx` directly instead of matching two literal enum values.
+> **Result**: `smptebars_256x144` luma **57.49 → 99.00 dB (pixel-exact
+> across the whole frame — every one of its 144 rows now reads 99 dB)**;
+> `mandelbrot_128x96` Y/U/V **47.62/52.53/52.68 → 53.10/52.53/52.68**;
+> `testsrc`/`testsrc2`/`solid_red` unchanged (this corpus's content doesn't
+> happen to use the six affected sizes there). 129 unit tests pass (new:
+> `dq_denom_follows_the_square_up_size_not_the_transforms_own_shape`,
+> cross-checked value-for-value against dav1d's authoritative per-size
+> `ctx` table), clippy clean, full workspace build clean.
+>
+> **Mandelbrot re-traced after the `dqDenom` fix**: re-ran the same
+> `SMOOTH_V` block — prediction and residual now bit-exact vs dav1d at
+> every row checked (16-31). Picked two fresh worst-row targets from the
+> post-fix per-row PSNR (`KINETIX_AV1_DBG_ROWS=1`, no `ONLY_TESTSRC` gate
+> this time): row 84 (block `bx=0,by=16` again, a different row) and row
+> 56 (block `bx=13,by=14`, a `4×8` `DC_PRED` two-`TX_4X4`-sub-block
+> region). Both traced fully bit-exact pre-filter (pred + residual match
+> dav1d exactly via fresh `DAV1D_ITXDUMP` captures) — the remaining
+> per-pixel diffs (`±1` to `±9`, e.g. row 56 cols 51-62) only appear in
+> the **filtered** output, confirmed by direct `KINETIX_AV1_DBG_ROW`
+> comparison against the real `ffmpeg` reference. So the *next* remaining
+> gap genuinely is the loop filter (deblock and/or CDEF), not
+> reconstruction — same conclusion as before the `dqDenom` fix, but now
+> confirmed on freshly-verified-correct reconstruction rather than
+> reconstruction that turned out to still have a 2× bug hiding in it.
+>
+> **What wasn't found this session**: a systematic deblock/CDEF formula
+> bug of the `dqDenom` bug's scale. Skimmed `filter_line_1d`'s filter/flat
+> masks and `cdef_direction`/`cdef_constrain`'s taps and constants —
+> heavily spec-cross-checked already by prior sessions' comments, nothing
+> jumped out on inspection alone. The remaining errors are small (±1-9)
+> and scattered across many different small blocks (mostly `TX_4X4`
+> `DCT_ADST`/`ADST_DCT` in busy/high-detail regions) rather than
+> concentrated in one obviously-wrong code path — this needs the same
+> patient per-edge trace-to-first-divergence method as the `dqDenom` hunt,
+> just applied to deblock's edge-filter formula (`filter_mask`/`flat`/the
+> actual 4/8/16-tap blend) or CDEF's `cdef_filter_block` pixel modification
+> directly (not just `cdef_direction`, which was verified correct back in
+> the previous session), for one specific edge at a time.
+>
+> **AV1 corpus after 2026-09-04**: `solid_red` 99/99/99, `testsrc`
+> 73.01/53.93/49.23, `mandelbrot` 53.10/52.53/52.68, `smptebars`
+> **99.00/99.00/99.00 (pixel-exact)**, `testsrc2` 23.11/25.08/16.95.
+> **Next AV1 priorities**: (1) deblock/CDEF's remaining small-magnitude
+> systematic error — pick one specific small block (e.g. mandelbrot's
+> `bx=13,by=14` `TX_4X4` region from this session, or its right/bottom
+> neighbour edges) and trace the *filter itself* (not just its inputs,
+> already proven correct) against dav1d step by step; (2) loop restoration
+> boundary-pixel fix to un-gate `apply`; (3) IBC var-tx tree + inter
+> `tx_type` + inter coefficient context — blocks `testsrc2`; (4) inter
+> Phase E; (5) then flip `capabilities().pixel_exact`. `smptebars` being
+> genuinely pixel-exact now is a good sign that solving the same
+> loop-filter-precision issue for the other clips (mostly a matter of that
+> remaining ±1-9 gap) could close a meaningful chunk of the remaining
+> corpus at once.
