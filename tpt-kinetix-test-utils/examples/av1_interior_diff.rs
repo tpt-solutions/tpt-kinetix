@@ -179,11 +179,16 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]
     );
 
-    // First interior divergence.
-    match first_interior_divergence(&got, ref_data, w, h, 3) {
+    // First interior divergence. KINETIX_AV1_DIV_THRESHOLD overrides the
+    // default 3 (which hides real small errors — try 0 first).
+    let div_threshold: i32 = std::env::var("KINETIX_AV1_DIV_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    match first_interior_divergence(&got, ref_data, w, h, div_threshold) {
         None => {
             println!(
-                "  No interior pixel diverges by >3 vs FILTERED-dav1d. Interior reconstruction looks clean (remaining full-plane error is deblock/CDEF reach)."
+                "  No interior pixel diverges by more than {div_threshold} vs FILTERED-dav1d. Interior reconstruction looks clean (remaining full-plane error is deblock/CDEF reach)."
             );
         }
         Some((plane, x, y, g, dval)) => {
