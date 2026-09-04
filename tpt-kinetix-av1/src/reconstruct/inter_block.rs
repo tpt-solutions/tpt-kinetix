@@ -535,6 +535,7 @@ impl<'a> TileDecodeState<'a> {
                         qindex_positive: !self.lossless,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
+                        is_inter: true,
                     };
                     let coeffs = read_coeffs(
                         &mut self.dec,
@@ -635,6 +636,7 @@ impl<'a> TileDecodeState<'a> {
                             qindex_positive: !self.lossless,
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
+                            is_inter: true,
                         };
                         let coeffs = read_coeffs(
                             &mut self.dec,
