@@ -200,10 +200,32 @@ impl FrameType {
 }
 
 /// Per-reference-frame loop filter / quantizer delta parameters.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoopFilterDeltas {
     pub loop_filter_ref_deltas: [i8; 8],
     pub loop_filter_mode_deltas: [i8; 2],
+}
+
+impl Default for LoopFilterDeltas {
+    /// `setup_past_independence()` (§7.20)'s reset values — *not* an
+    /// all-zero array. A previous version of this type derived `Default`
+    /// (giving an all-zero array), which is wrong for `loop_filter_ref_deltas
+    /// [INTRA_FRAME] `: the spec resets it to `1`, not `0`, and every
+    /// keyframe block is `INTRA_FRAME`. Any `loop_filter_params()` parse that
+    /// enables `loop_filter_delta_enabled` but never updates a given index
+    /// (`delta_update == 0`, or an unset per-index flag) keeps this reset
+    /// value for the rest of the frame, so silently substituting `0` here
+    /// desynced `compute_level`'s (`loop_filter.rs`) ref-delta term for every
+    /// such frame — found by comparing dav1d's actual loop-filter `E`/`I`
+    /// values against Kinetix's for one concrete edge (mandelbrot's
+    /// `x=96,y=64`: dav1d computed `I=19`, Kinetix `I=18`, entirely from this
+    /// missing `+1`).
+    fn default() -> Self {
+        LoopFilterDeltas {
+            loop_filter_ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+            loop_filter_mode_deltas: [0, 0],
+        }
+    }
 }
 
 // --- Interpolation filter enumeration (§6.8.2 / §7.11.3) -------------------
@@ -1049,15 +1071,7 @@ fn parse_loop_filter(
     num_planes: u32,
 ) -> Result<([u8; 4], u8, bool, LoopFilterDeltas), KinetixError> {
     if coded_lossless || allow_intrabc {
-        return Ok((
-            [0; 4],
-            0,
-            false,
-            LoopFilterDeltas {
-                loop_filter_ref_deltas: [1, 0, 0, 0, 0, -1, -1, -1],
-                loop_filter_mode_deltas: [0, 0],
-            },
-        ));
+        return Ok(([0; 4], 0, false, LoopFilterDeltas::default()));
     }
     let mut level = [0u8; 4];
     level[0] = read_f8(br, 6)?;
@@ -1689,6 +1703,23 @@ fn compute_log2_from_increments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loop_filter_deltas_default_matches_setup_past_independence() {
+        // Regression for the 2026-09-04 loop-filter-level bug: a derived
+        // `Default` gives an all-zero array, but §7.20
+        // `setup_past_independence()`'s real reset values are
+        // `{1, 0, 0, 0, -1, 0, -1, -1}` for `loop_filter_ref_deltas` — in
+        // particular `[INTRA_FRAME] == 1`, not `0`. Any frame that enables
+        // `loop_filter_delta_enabled` without updating every ref index keeps
+        // this reset value, so the wrong default desynced `compute_level`'s
+        // (`loop_filter.rs`) ref-delta term for every intra block on such a
+        // frame — found by comparing dav1d's actual loop-filter `E`/`I`
+        // values against Kinetix's for one concrete edge.
+        let d = LoopFilterDeltas::default();
+        assert_eq!(d.loop_filter_ref_deltas, [1, 0, 0, 0, -1, 0, -1, -1]);
+        assert_eq!(d.loop_filter_mode_deltas, [0, 0]);
+    }
 
     fn minimal_seq() -> crate::obu::SequenceHeaderObu {
         crate::obu::SequenceHeaderObu {
