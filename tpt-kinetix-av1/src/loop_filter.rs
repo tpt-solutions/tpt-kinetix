@@ -120,6 +120,29 @@ pub struct FrameMeta {
     /// Same as `luma_edge_left`, for the horizontal pass (top edge of a real
     /// transform block).
     pub luma_edge_top: Vec<bool>,
+    /// Number of 4×4-luma cells horizontally — AV1 §7.14.1's actual deblock
+    /// edge-candidate grid. A luma transform can be as narrow/short as 4
+    /// samples (`TX_4X4`/`TX_4X8`/`TX_8X4`), so two independent transforms
+    /// can meet at a boundary that is a multiple of 4 but *not* of 8 (e.g.
+    /// `x=52`) — a grid resolved only to 8×8 cells (`w8`/`h8` above) can
+    /// never even *represent* such a boundary, let alone filter it, since
+    /// its edge loop only visits `bx*8` positions. `luma_edge_left4`/
+    /// `luma_edge_top4` below are the finer-grained counterpart used by
+    /// `deblock_plane`'s luma pass; chroma's minimum transform width in
+    /// chroma samples is 4 (`TX_4X4`), i.e. 8 *luma* samples, so chroma's
+    /// existing 8×8-luma-resolution grid already matches its true minimum
+    /// edge granularity and needs no separate 4×4 version.
+    pub w4: usize,
+    /// Number of 4×4-luma cells vertically. See `w4`.
+    pub h4: usize,
+    /// Same role as `luma_tx_w`, at 4×4-luma-cell resolution.
+    pub luma_tx_w4: Vec<u8>,
+    /// Same role as `luma_tx_h`, at 4×4-luma-cell resolution.
+    pub luma_tx_h4: Vec<u8>,
+    /// Same role as `luma_edge_left`, at 4×4-luma-cell resolution. See `w4`.
+    pub luma_edge_left4: Vec<bool>,
+    /// Same role as `luma_edge_top`, at 4×4-luma-cell resolution. See `w4`.
+    pub luma_edge_top4: Vec<bool>,
     /// Largest chroma transform width/height (in samples) for the co-located
     /// 4×4 block. See `luma_tx_w`/`luma_tx_h`.
     pub u_tx_w: Vec<u8>,
@@ -166,6 +189,9 @@ impl FrameMeta {
         let w8 = width.div_ceil(8);
         let h8 = height.div_ceil(8);
         let len = w8 * h8;
+        let w4 = width.div_ceil(4);
+        let h4 = height.div_ceil(4);
+        let len4 = w4 * h4;
         FrameMeta {
             w8,
             h8,
@@ -182,6 +208,12 @@ impl FrameMeta {
             luma_edge_top: vec![false; len],
             chroma_edge_left: vec![false; len],
             chroma_edge_top: vec![false; len],
+            w4,
+            h4,
+            luma_tx_w4: vec![0u8; len4],
+            luma_tx_h4: vec![0u8; len4],
+            luma_edge_left4: vec![false; len4],
+            luma_edge_top4: vec![false; len4],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -190,6 +222,54 @@ impl FrameMeta {
     #[inline]
     fn idx(&self, bx: usize, by: usize) -> usize {
         by * self.w8 + bx
+    }
+
+    #[inline]
+    fn idx4(&self, bx: usize, by: usize) -> usize {
+        by * self.w4 + bx
+    }
+
+    /// 4×4-luma-cell counterpart of [`record_luma`](Self::record_luma) — see
+    /// `w4`'s doc comment for why luma needs this finer grid for deblocking.
+    /// Records the transform size over the cell span `[bx0,bx1) x [by0,by1)`
+    /// (4×4-grid coordinates, half-open); callers pass the *same* span used
+    /// for the matching [`mark_luma_edges4`](Self::mark_luma_edges4) call.
+    pub fn record_luma4(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        tx_w: u8,
+        tx_h: u8,
+    ) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by);
+                self.luma_tx_w4[i] = self.luma_tx_w4[i].max(tx_w);
+                self.luma_tx_h4[i] = self.luma_tx_h4[i].max(tx_h);
+            }
+        }
+    }
+
+    /// 4×4-luma-cell counterpart of [`mark_luma_edges`](Self::mark_luma_edges).
+    pub fn mark_luma_edges4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        if bx0 < self.w4 {
+            for by in by0..by1c {
+                let i = self.idx4(bx0, by);
+                self.luma_edge_left4[i] = true;
+            }
+        }
+        if by0 < self.h4 {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by0);
+                self.luma_edge_top4[i] = true;
+            }
+        }
     }
 
     /// Record that the 8×8-luma region covering block `(by, bx)` used a luma
@@ -303,6 +383,21 @@ impl FrameMeta {
                 self.luma_edge_top[di] |= src.luma_edge_top[i];
                 self.chroma_edge_left[di] |= src.chroma_edge_left[i];
                 self.chroma_edge_top[di] |= src.chroma_edge_top[i];
+            }
+        }
+        for by in 0..src.h4 {
+            for bx in 0..src.w4 {
+                let dbx = ox * 2 + bx;
+                let dby = oy * 2 + by;
+                if dbx >= self.w4 || dby >= self.h4 {
+                    continue;
+                }
+                let i = by * src.w4 + bx;
+                let di = self.idx4(dbx, dby);
+                self.luma_tx_w4[di] = self.luma_tx_w4[di].max(src.luma_tx_w4[i]);
+                self.luma_tx_h4[di] = self.luma_tx_h4[di].max(src.luma_tx_h4[i]);
+                self.luma_edge_left4[di] |= src.luma_edge_left4[i];
+                self.luma_edge_top4[di] |= src.luma_edge_top4[i];
             }
         }
     }
@@ -1191,15 +1286,15 @@ pub fn apply_post_filters(
             width,
             width,
             height,
-            8,
+            4,
             0,
-            &meta.luma_tx_w,
-            &meta.luma_tx_h,
+            &meta.luma_tx_w4,
+            &meta.luma_tx_h4,
             &meta.luma_skip,
-            &meta.luma_edge_left,
-            &meta.luma_edge_top,
-            meta.w8,
-            meta.h8,
+            &meta.luma_edge_left4,
+            &meta.luma_edge_top4,
+            meta.w4,
+            meta.h4,
             fh,
         );
     }
@@ -1600,6 +1695,46 @@ mod tests {
             "two independent adjacent transforms must both register a real edge, \
              even though the sizes on either side are identical to the wide-transform case above"
         );
+    }
+
+    #[test]
+    fn mark_luma_edges4_represents_a_boundary_the_8x8_grid_cannot() {
+        // Regression for the 2026-09-04 deblock luma-granularity bug: a
+        // TX_4X8 block at x=48..52 followed by an independent TX_4X4 block
+        // at x=52..56 meet at x=52, which is a multiple of 4 but *not* of 8
+        // — `mark_luma_edges`'s 8×8 grid can only ever represent edges at
+        // multiples of 8 (its loop only visits `bx*8`), so this boundary is
+        // structurally invisible to it even though it's a genuine AV1
+        // §7.14.1 transform edge. The 4×4-resolution counterpart must be
+        // able to mark it.
+        let mut meta = FrameMeta::new(64, 8);
+        meta.mark_luma_edges4(12, 0, 13, 1); // left edge of the block starting at px x=48
+        meta.mark_luma_edges4(13, 0, 14, 1); // left edge of the block starting at px x=52
+        assert!(
+            meta.luma_edge_left4[meta.idx4(13, 0)],
+            "x=52 (grid col 13) must be marked as a real edge at 4×4 resolution"
+        );
+        // Confirm the coarser 8×8 grid genuinely cannot represent this: grid
+        // col 13 in 4×4 units is x=52, which is not a multiple of 8, so no
+        // `bx` in the 8×8 grid's own `bx*8` addressing ever lands there.
+        assert_ne!(52 % 8, 0, "sanity: 52 is not 8-aligned");
+    }
+
+    #[test]
+    fn record_luma4_tracks_independent_small_transforms_separately() {
+        // Companion to `mark_luma_edges4` above: `record_luma4` must record
+        // each small transform's own size at 4×4 resolution so
+        // `deblock_plane`'s `filter_size_from_tx_samples(left.min(right))`
+        // sees the true (small) sizes on both sides of the x=52 boundary,
+        // not a coarser 8×8-grid value that conflates them with a
+        // neighbouring 8-sample-wide transform.
+        let mut meta = FrameMeta::new(64, 8);
+        meta.record_luma4(12, 0, 13, 1, 4, 8); // TX_4X8 at x=48..52
+        meta.record_luma4(13, 0, 14, 1, 4, 4); // TX_4X4 at x=52..56
+        assert_eq!(meta.luma_tx_w4[meta.idx4(12, 0)], 4);
+        assert_eq!(meta.luma_tx_h4[meta.idx4(12, 0)], 8);
+        assert_eq!(meta.luma_tx_w4[meta.idx4(13, 0)], 4);
+        assert_eq!(meta.luma_tx_h4[meta.idx4(13, 0)], 4);
     }
 
     #[test]

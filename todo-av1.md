@@ -3841,3 +3841,54 @@
 > same method that found the `dqDenom` bug, is the way in) or actually
 > still further upstream in deblock for a column this session didn't
 > check directly against dav1d.
+
+> **2026-09-04 (cont'd) — fixed: deblock's luma pass ran at 8-sample grid
+> granularity, which cannot even *represent* (let alone filter) a real
+> transform edge at a position that's a multiple of 4 but not 8.** This is
+> the root cause the previous note's x=52 mandelbrot edge was actually
+> hitting — re-reading that note in light of this fix, "deblock correctly
+> declines to filter this edge" was wrong: `deblock_plane`'s vertical loop
+> is `for bx in 1..grid_w { edge = bx * step }` with `step = 8` for luma,
+> so `edge` can only ever be 0, 8, 16, … — `x=52` (`52/8 = 6.5`) is
+> mathematically unreachable, not "evaluated and rejected by
+> filter_mask". `FrameMeta` only tracked one grid resolution (8×8-luma
+> cells) for luma, sized for `TX_8X8` and up; AV1 also has `TX_4X4`,
+> `TX_4X8`, `TX_8X4`, whose independent-transform boundaries can land on
+> any 4-sample line.
+>
+> Fix: added a second, finer (4×4-luma-cell) grid to `FrameMeta` — `w4`/
+> `h4`/`luma_tx_w4`/`luma_tx_h4`/`luma_edge_left4`/`luma_edge_top4`, with
+> `record_luma4`/`mark_luma_edges4` populated from the same per-
+> transform-sub-block call sites in `intra_block.rs` (keyframe and IBC
+> paths) that already call `record_luma`/`mark_luma_edges`, just using
+> `px/4` instead of `px/8` coordinates and the transform's own (possibly
+> sub-8) span. `apply_post_filters`'s luma `deblock_plane` call now uses
+> `step=4`, `grid_w=meta.w4`, `grid_h=meta.h4`, and the new `*4` grids
+> instead of the 8×8 ones; chroma's call sites are untouched (chroma's
+> minimum transform size in chroma samples is `TX_4X4` = 8 luma samples,
+> so its existing 8×8-luma grid already matches its true minimum
+> granularity — confirmed, not just assumed, since chroma output didn't
+> move on any corpus clip below). `merge_tile` now also OR/max-merges the
+> `*4` grids across tiles (offset `ox*2`/`oy*2` since the 4×4 grid is 2×
+> denser than the 8×8 one).
+>
+> Verified via `av1_psnr_check`: `mandelbrot` Y 53.10 → **57.62 dB**
+> (largest single-fix jump since `dqDenom`), `testsrc` Y 73.01 → **73.46
+> dB**; `smptebars`/`solid_red_32`/`solid_red_64` unchanged at 99.00 dB
+> (already pixel-exact, correctly unaffected); `testsrc2` unchanged at
+> 23.11 dB (dominated by the separate, already-documented IBC var-tx-tree
+> gap, not deblock). All 3 U/V PSNRs also unchanged, confirming the
+> chroma-granularity assumption above. Added `mark_luma_edges4_...` and
+> `record_luma4_...` regression tests. `cargo test -p tpt-kinetix-av1
+> --lib` (131 passed), `cargo clippy -p tpt-kinetix-av1 --all-targets --
+> -D warnings` (clean), `cargo build --workspace` all green.
+>
+> **Not fully resolved** — mandelbrot is still 57.62 dB, far from
+> pixel-exact, so more loop-filter (or reconstruction) gap remains
+> somewhere; CDEF's own tap-application math (the previous note's
+> `cdef_filter_block` suspicion) is still unverified line-by-line and
+> should be re-checked fresh now that the deblock input feeding it is
+> more correct at this exact edge. **Next step**: re-run a fresh
+> worst-edge search on mandelbrot (row/col PSNR scan) now that this class
+> of bug is gone, since the specific x=52 edge this session traced may no
+> longer be the worst offender.
