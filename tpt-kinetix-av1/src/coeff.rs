@@ -443,6 +443,19 @@ pub struct TxBlockCtx {
     /// over the `uv_mode`-based `MODE_TO_TXFM` lookup for chroma. `true`
     /// for IBC and real inter blocks, `false` for real intra blocks.
     pub is_inter: bool,
+    /// For an inter/IBC *chroma* block (`plane > 0 && is_inter`): the
+    /// already-decoded `TxType` of the coincident luma transform (spec
+    /// `TxTypes[y][x]`, sampled at this chroma block's top-left position
+    /// subsampled back to luma coordinates) — `compute_tx_type` feeds this
+    /// into `get_uv_inter_txtp` to derive chroma's own type. Ignored for
+    /// luma (`plane == 0`, where the type is read/derived directly) and for
+    /// intra blocks. A previous version always passed `DCT_DCT` here
+    /// instead of the real coincident type — harmless for entropy sync
+    /// (chroma never reads `tx_type` bits regardless) but wrong for
+    /// `compute_tx_type`'s own output, including the `TX_CLASS` it implies
+    /// for the *next* symbol's context (`read_eob`'s `is_1d` bit) —
+    /// desyncing every subsequent chroma symbol read for such a block.
+    pub coincident_luma_tx_type: usize,
 }
 
 /// The result of one `coeffs()` call.
@@ -545,6 +558,8 @@ pub fn read_coeffs(
             } else {
                 read_transform_type(dec, cdfs, blk, tx_size)?
             }
+        } else if blk.is_inter {
+            blk.coincident_luma_tx_type
         } else {
             DCT_DCT
         };
@@ -1016,8 +1031,8 @@ fn coeff_br_ctx(tx_size: usize, plane_tx_type: usize, quant: &[i32], pos: usize)
 #[cfg(test)]
 mod tests {
     use crate::coeff::{
-        clear_coeff_context, dc_sign_ctx, read_coeffs, CoeffBlock, CoeffContexts, TileCdfs,
-        TxBlockCtx,
+        clear_coeff_context, compute_tx_type, dc_sign_ctx, read_coeffs, CoeffBlock, CoeffContexts,
+        TileCdfs, TxBlockCtx,
     };
     use crate::coeff_tables::*;
     use crate::entropy::SymbolDecoder;
@@ -1087,6 +1102,7 @@ mod tests {
             reduced_tx_set: false,
             lossless: false,
             is_inter: false,
+            coincident_luma_tx_type: DCT_DCT,
         };
         assert_eq!(super::all_zero_ctx(&blk_whole, &ctxs, w4, h4), 0);
 
@@ -1143,12 +1159,20 @@ mod tests {
 
     #[test]
     fn tx_type_inter_inv_set1_index_13_is_flipadst_flipadst() {
-        // The real testsrc2 IBC block this session's inter-tx-type fix was
-        // verified against decoded `txtp=13` for a `TX_8X16` (set 1)
-        // transform, matching dav1d's own trace exactly (including the
-        // post-read decoder `rng`, proving bit-exact sync through this
-        // read) -- pin the concrete inverse-set lookup this depends on.
+        // Pin the concrete inverse-set lookup values this session's
+        // inter-tx-type fix depends on. Note: dav1d's own `TxfmType` C enum
+        // happens to number its constants in the exact same order as this
+        // crate's (`DCT_DCT=0 .. H_FLIPADST=15`), so a dav1d trace printing
+        // `txtp=N` names the *decoded TxType's own enum value* (`N=13`
+        // means `H_ADST`, `dav1d_tx_type_class[13]==TX_CLASS_HORIZ`) --
+        // *not* index `N` of this inverse-set table, which is a different
+        // (symbol-index-keyed) mapping entirely. The real testsrc2 IBC
+        // block this session traced decoded symbol index 4 from set 1
+        // (`TX_TYPE_INTER_INV_SET1[4] == H_ADST == 13`), matching dav1d's
+        // own `txtp=13` trace and post-read decoder state exactly.
         assert_eq!(TX_TYPE_INTER_INV_SET1[13], FLIPADST_FLIPADST);
+        assert_eq!(TX_TYPE_INTER_INV_SET1[4], H_ADST);
+        assert_eq!(H_ADST, 13);
     }
 
     #[test]
@@ -1166,6 +1190,57 @@ mod tests {
         // Smaller chroma: luma's type passes through unchanged.
         assert_eq!(get_uv_inter_txtp(TX_8X8, ADST_DCT), ADST_DCT);
         assert_eq!(get_uv_inter_txtp(TX_4X4, IDTX), IDTX);
+    }
+
+    #[test]
+    fn compute_tx_type_routes_inter_chroma_through_the_coincident_luma_type() {
+        // Regression for the 2026-09-04 chroma-tx-type fix: a previous
+        // version of the IBC/inter chroma call sites always fed
+        // `compute_tx_type` a `DCT_DCT` placeholder for "luma's tx type"
+        // instead of the real coincident luma leaf's decoded type
+        // (`TxBlockCtx::coincident_luma_tx_type`, added by this fix).
+        // `get_uv_inter_txtp(_, DCT_DCT)` always resolves to `DCT_DCT`
+        // regardless of chroma tx size, which made this bug invisible from
+        // `compute_tx_type`'s output alone in the one case anyone had
+        // checked -- but wrong whenever the real luma type wasn't
+        // `DCT_DCT`, and (via `get_tx_class`'s `TX_CLASS`) wrong for
+        // `read_eob`'s very next context bit too, silently desyncing every
+        // subsequent chroma symbol read for such a block. This test uses
+        // the exact real-world case this session traced against dav1d: a
+        // `TX_4X8` chroma block whose coincident luma leaf decoded
+        // `H_ADST` (`txtp=13`). `read_coeffs` is the site that actually
+        // reads `blk.coincident_luma_tx_type` and feeds it into
+        // `compute_tx_type` as the `luma_tx_type` parameter (see the
+        // `blk.plane != 0 && blk.is_inter` arm just above `read_coeffs`'s
+        // `compute_tx_type` call) -- `compute_tx_type` itself never looks
+        // at the field directly, so this test exercises that same call
+        // shape: the real coincident type passed in as `luma_tx_type`.
+        let mut b = blk(1, TX_4X8, 0, 0, TX_WIDTH[TX_4X8], TX_HEIGHT[TX_4X8]);
+        b.is_inter = true;
+        b.coincident_luma_tx_type = H_ADST;
+        assert_eq!(
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            get_uv_inter_txtp(TX_4X8, H_ADST),
+            "inter chroma must derive its type from the real coincident \
+             luma type fed in as `luma_tx_type`, not collapse to DCT_DCT"
+        );
+        assert_ne!(
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            DCT_DCT,
+            "H_ADST survives get_uv_inter_txtp unchanged for a TX_4X8 \
+             chroma block (not TX_16X16-square or TX_32X32-or-bigger), so \
+             the correct output here must not silently collapse to DCT_DCT"
+        );
+        // And the bug being regressed against: feeding the old DCT_DCT
+        // placeholder instead of the real coincident type silently
+        // collapses to DCT_DCT for this block, which is a different
+        // (wrong) TxType/TxClass than the real H_ADST-derived one.
+        assert_ne!(
+            compute_tx_type(&b, TX_4X8, DCT_DCT),
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            "the DCT_DCT placeholder and the real coincident luma type \
+             must not silently produce the same TxType for this block"
+        );
     }
 
     #[test]
@@ -1347,6 +1422,7 @@ mod tests {
             reduced_tx_set: false,
             lossless: false,
             is_inter: false,
+            coincident_luma_tx_type: DCT_DCT,
         }
     }
 
