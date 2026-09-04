@@ -4029,3 +4029,55 @@
 > `read_restoration` /  `src/lf_apply_tmpl.c`'s restoration-apply path) --
 > the same trace-to-first-divergence method used for `dqDenom` and the
 > loop-filter-level bugs above, just not yet applied to this filter.
+
+> **2026-09-04 (cont'd) -- found and fixed the real restoration bug:
+> `read_lr_unit`'s decoded Wiener filter had its horizontal and vertical
+> taps swapped.** Followed the exact plan from the note above -- dav1d's
+> `decode.c` already has a `DEBUG_BLOCK_INFO`-gated `Post-lr_wiener`
+> printf (`DAV1D_TRACE=1` reaches it, no new patch needed), and Kinetix
+> got a matching temporary print added to `read_lr_unit`. For testsrc's
+> one restored unit (V plane, `RESTORE_WIENER`): dav1d decoded
+> `v=[0,-2,5], h=[0,0,0]`; Kinetix decoded the identical three-coefficient
+> bitstream sequence (confirming the entropy read itself, subexp decode
+> included, is correct) but filed it the other way around --
+> `h=[0,-2,5], v=[0,0,0]`. `read_lr_unit`'s `for pass in 0..2` loop reads
+> the *vertical* filter's three coefficients first (`pass==0`) per
+> §5.11.58 / dav1d's `filter_v`-then-`filter_h` read order, but the final
+> `LrUnitData::Wiener { h: pass[0], v: pass[1] }` construction had them
+> backwards. One-line fix (swap which pass index feeds `h` vs `v`).
+>
+> Verified via `av1_psnr_check` with `KINETIX_AV1_FILTER=1` (default
+> corpus, restoration still gated off, is provably unaffected): testsrc's
+> V PSNR with restoration applied went from **42.24 dB (worse than the
+> 49.26 dB unfiltered baseline -- restoration was actively harmful) to
+> 55.18 dB (now a real improvement)**. Confirmed the remaining gap isn't
+> restoration's own math: dumped full YUV via `KINETIX_AV1_DUMP_FINAL`
+> and diffed against dav1d's `--inloopfilters norestoration` output --
+> **420 of 3072 V-plane pixels already differ (mostly +/-1/-2) before
+> restoration even runs**, inherited from testsrc's own pre-existing,
+> separately-tracked deblock/CDEF imprecision, and restoration's own
+> 366-pixel post-filter diff count is in the same range/magnitude, not
+> worse. So restoration is now "as correct as its input allows" for the
+> one path this corpus exercises (Wiener); SgrProj remains completely
+> untested (no corpus clip uses it). Updated the gating comment in
+> `apply_post_filters` to record this accurately rather than the stale
+> "boundary clamping causes regressions" note. Skipped a dedicated unit
+> test (the bug lives inside a real-bitstream entropy-decode path needing
+> a full `TileDecodeState`, same practical constraint as the
+> `compute_level` fix earlier this session) -- the corpus PSNR swing is
+> unambiguous evidence for both bug and fix. 133 unit tests pass, clippy
+> clean, `cargo build --workspace` green.
+>
+> **Not un-gated by default** -- still not bit-exact (dependent on
+> upstream deblock/CDEF precision improving first) and SgrProj is
+> unverified, so `KINETIX_AV1_FILTER` stays opt-in. **Next steps, in
+> priority order**: (1) fresh worst-row/worst-edge scan on
+> mandelbrot/testsrc for more loop-filter-level-class bugs (this vein has
+> now found three real bugs in a row: dqDenom, the ref-delta
+> default/shift, and this h/v swap -- worth one more pass before moving
+> on); (2) IBC var-tx tree + inter tx_type + inter coefficient context;
+> (3) once deblock/CDEF precision improves, re-check whether restoration
+> reaches bit-exact and consider un-gating; (4) SgrProj path is
+> completely unverified -- needs a corpus clip that actually selects it
+> (`allow_screen_content_tools`-style content or an explicit encoder
+> flag) before it can be trusted at all.
