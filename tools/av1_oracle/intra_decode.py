@@ -24,6 +24,7 @@ Run: `python tools/av1_oracle/intra_decode.py av1_tile_trace.json`
 
 import copy
 import json
+import os
 import re
 import sys
 
@@ -268,8 +269,15 @@ class Tile:
         self.uv_left = [DC_PRED] * m
         self.skip_above = [0] * n
         self.skip_left = [0] * m
-        self.tx_above = [4] * n
-        self.tx_left = [4] * m
+        # An initial / tile-edge-unavailable tx neighbour must contribute 0 to
+        # the tx_depth context (AV1 spec section 8.3.2's Get_Tx_Skip_Ctx-
+        # style availability rule): a sentinel of 4 wrongly satisfies
+        # `>= TX_WIDTH[max_tx]`/`>= TX_HEIGHT[max_tx]` for max_tx==TX_4X4 and
+        # reads tx_depth from the wrong CDF bucket for every block on the
+        # frame's first row/column (Kinetix hit and fixed this same bug --
+        # see partition.rs's `tx_depth_ctx_from` regression test).
+        self.tx_above = [0] * n
+        self.tx_left = [0] * m
         self.pal_y_above = [[] for _ in range(n)]
         self.pal_y_left = [[] for _ in range(m)]
         self.pal_u_above = [[] for _ in range(n)]
@@ -425,6 +433,12 @@ class Tile:
             partition = PART_SPLIT if self._split_or(bucket, ctx, bsize, False) else PART_VERT
         else:
             partition = PART_SPLIT
+        if os.environ.get("KINETIX_AV1_DBG_PARTALL"):
+            print(
+                f"DBG partition mi=({mi_col},{mi_row}) bsize={bsize} "
+                f"has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition}",
+                file=sys.stderr,
+            )
         subs = split_into_subblocks(bw4, bh4, partition)
         if partition == PART_SPLIT and bsize > BLOCK_8X8:
             for sub_bs, ro, co in subs:
@@ -671,7 +685,13 @@ class Tile:
 
         max_tx = MAX_TX_SIZE_RECT[bsize]
         luma_tx = max_tx
-        if self.tx_mode_select and not self.lossless:
+        # AV1 §5.11.15 read_tx_size: the tx_depth symbol is only read when
+        # MiSize > BLOCK_4X4 (bsize 0) -- a 4x4 block always uses TX_4X4 with
+        # no signalled depth. Missing this gate reads a spurious tx_depth
+        # symbol for every BLOCK_4X4 leaf under TX_MODE_SELECT, desyncing
+        # everything after it (Kinetix hit and fixed this same bug -- see
+        # intra_block.rs's `bsize > BLOCK_4X4` comment).
+        if bsize > 0 and self.tx_mode_select and not self.lossless:
             luma_tx = self.read_tx_size(bsize, max_tx, mi_row, mi_col)
 
         # reconstruct-order coeffs (mirrors reconstruct_intra_subblock)
@@ -717,6 +737,12 @@ class Tile:
         ctx = (1 if aw >= TX_WIDTH[max_tx] else 0) + (1 if lh >= TX_HEIGHT[max_tx] else 0)
         table = [self.mc.tx_8x8, self.mc.tx_16x16, self.mc.tx_32x32, self.mc.tx_64x64][bucket]
         tx_depth = self.dec.read_symbol(table[ctx])
+        if os.environ.get("KINETIX_AV1_DBG_TXSIZE"):
+            print(
+                f"DBG txsize mi=({mi_col},{mi_row}) bsize={bsize} max_tx={max_tx} "
+                f"ctx={ctx} above_w={aw} left_h={lh} tx_depth={tx_depth}",
+                file=sys.stderr,
+            )
         tx = max_tx
         for _ in range(tx_depth):
             tx = SPLIT_TX_SIZE[tx]
