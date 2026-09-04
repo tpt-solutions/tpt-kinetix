@@ -4266,3 +4266,40 @@
 > against dav1d's `sctx=9` -- if they already match, the bug is
 > downstream of context selection (in the CDF table itself or the read
 > call), not in context derivation.
+
+> **2026-09-04 (cont'd) -- narrowed the inter-coefficient-context gap:
+> context derivation is provably correct; the bug is upstream, in the
+> entropy state itself or the CDF adaptation, not in all_zero_ctx.**
+> Added a temporary debug print (added, used, fully removed) dumping
+> all_zero_ctx's actual computed tx_sz_ctx/skip_ctx for the exact chroma
+> call this session's trace flagged. Result: Kinetix computed
+> tx_sz_ctx=1 skip_ctx=9 for this call -- matches dav1d's own tsz_ctx=1
+> sctx=9 exactly. So the context-selection formula itself (all_zero_ctx's
+> plane>0 branch) is not the bug; something else produces a different
+> decoded symbol despite an identical context bucket being consulted.
+>
+> Important methodology caveat surfaced while investigating this: the
+> "matching r=/rng" evidence cited for the var-tx-tree and inter-tx_type
+> fixes above compares only the arithmetic coder's range component, not
+> its value/dif component -- dav1d's own DEBUG_BLOCK_INFO prints only
+> rng too. range is renormalized into a narrow fixed window after every
+> symbol read, so two genuinely different decode paths landing on the
+> same range by coincidence is more plausible than it first appears,
+> especially over a single read. This doesn't retroactively invalidate
+> the two fixes already committed -- both also reproduced dav1d's actual
+> decoded symbol values exactly (txtp=13, tx=7, matching eob magnitude),
+> a much lower-probability coincidence than range alone -- but it does
+> mean this specific new finding (context matches, outcome doesn't) needs
+> a value/dif-inclusive comparison to fully pin down, not another
+> range-only check. Concrete next step: patch dav1d's msac debug hook (or
+> add a new one) to print ts->msac.dif alongside rng at a matching point,
+> and add the equivalent full-state dump (self.dec.raw_state(), which
+> already returns (range, value, max_bits, bit_pos) -- only .0 was used
+> so far) on the Kinetix side, for a true apples-to-apples state
+> comparison right before this chroma skip read. If the full state
+> already matches there, the remaining bug is CDF adaptation drift
+> (something upstream adapted this exact txb_skip[1][9] bucket
+> differently between the two decoders); if it doesn't, sync was already
+> lost earlier than currently believed and the luma
+> eob-off-by-one-only evidence needs re-examining with the same
+> full-state rigor.
