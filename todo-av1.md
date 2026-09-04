@@ -4350,3 +4350,39 @@
 > into the coefficient level/sign reads and then into the *next* coded
 > block's header, watching for the first point the two diverge -- rather
 > than re-deriving the technique from scratch.
+
+> **2026-09-04 (cont'd) -- localized the real divergence: it's within the
+> U-plane coefficient level/eob reads themselves, immediately after the
+> (matching) skip symbol.** Continued the full-state trace one step
+> further with the same technique. Found the exact dav1d print carrying
+> `dif` for this block's U coefficient block by grepping the full trace
+> for its known `r=64566` (necessary since dav1d's source has the
+> `Post-uv-cf-blk` label at three separate call sites and matching by
+> label alone risks comparing the wrong one, per the previous note's
+> lesson) -- `Post-uv-cf-blk[pl=0,tx=5,txtp=13,eob=0]: r=64566
+> dif=6071959426822045696` → `dif>>48 = 21571`. Kinetix's own state at
+> the equivalent point (`self.dec.raw_state()` after the U `read_coeffs`
+> call returns): `range=45638 value=32611`. **Neither matches** (`45638
+> != 64566`, `32611 != 21571`) -- confirming the skip-context read (which
+> does match, per the note above) is the last point of agreement; the
+> divergence is somewhere in the subsequent `eob_pt`/`coeff_base`/
+> `coeff_br`/`dc_sign` reads for this exact chroma block.
+>
+> dav1d's own intervening trace lines for this block hint at where to
+> look first: `SKIPCTX_EOB ... eob_bin_size=32 chroma=1 is_1d=1
+> eob_raw=0` then `SKIPCTX_DCONLY ... tok_br=1 dc_tok=2` -- the `is_1d=1`
+> flag suggests dav1d takes a distinct "DC-only" code path for this
+> block's `eob` class (`eob_raw=0`, the smallest bucket) that reads
+> `dc_tok` directly via a different mechanism than the general
+> `coeff_base`/`coeff_br` loop this session hasn't specifically checked
+> for a `plane > 0` / `is_inter` special case. **Concrete next step**:
+> read `read_eob`'s and the base-level-reading loop's actual code
+> (`coeff.rs`) side by side with dav1d's `decode_coefs`
+> (`recon_tmpl.c`) for the specific `eob_bin_size` bucket this block
+> hits, focusing on whether Kinetix has (or dav1d has, that Kinetix
+> lacks) a distinct low-eob/"DC-only" shortcut path, and whether any of
+> `read_eob`'s context derivations differ for chroma vs luma or for
+> `is_inter` blocks specifically -- this is genuinely the "inter
+> coefficient context" work the coordinator originally scoped as the
+> third increment, now narrowed to a single, concretely reproducible
+> real block rather than a vague "context gap."
