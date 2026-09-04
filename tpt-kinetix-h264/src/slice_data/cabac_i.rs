@@ -6,9 +6,8 @@ use super::*;
 /// CABAC payload (i.e. after consuming any `cabac_alignment_one_bit`s via
 /// `BitReader::byte_align` + `BitReader::remaining_bytes`).
 ///
-/// Scope: 4:2:0, frame-only (no MBAFF/field), no I_PCM (returns
-/// `Unsupported` so callers fall back like any other unhandled slice — see
-/// `todo.md` Phase D for the rationale). `transform_size_8x8_flag`/Intra_8x8
+/// Scope: 4:2:0. I_PCM macroblocks are handled (CABAC engine is flushed and
+/// restarted from the post-PCM byte boundary). `transform_size_8x8_flag`/Intra_8x8
 /// (High profile) is supported for intra macroblocks only (Phase F.4) --
 /// inter (P_8x8/B_Direct) 8x8 transform is not, matching the CAVLC path's
 /// existing scope.
@@ -139,22 +138,66 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         }
         let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
 
+        let parse_result = parse_intra_macroblock_cabac(
+            &mut dec,
+            &mut ctxs,
+            mb_x,
+            mb_y,
+            mb_cols,
+            &nz,
+            &pred_ctx,
+            &cabac_ctx,
+            qp,
+            prev_dqp_nonzero,
+            transform_8x8_mode_flag,
+            tracer,
+            nctx,
+        );
+
+        // I_PCM under CABAC (§9.3.2.6, §9.3.4.6): after the mb_type CABAC decode
+        // returns 25 the engine has called decode_terminate() internally.  Flush
+        // to a byte boundary, read 384 raw PCM bytes, then reinitialise the CABAC
+        // engine from the bytes that follow the PCM payload.
+        if matches!(parse_result, Err(SliceDataError::IPcm)) {
+            let remaining = dec.flush_to_pcm();
+            let pcm_byte_count = 384usize; // 256 luma + 64 Cb + 64 Cr (4:2:0, 8-bit)
+            if remaining.len() < pcm_byte_count {
+                return Err(SliceDataError::Eof("I_PCM insufficient bytes (CABAC)"));
+            }
+            let pcm_samples: Vec<u8> = remaining[..pcm_byte_count].to_vec();
+            let after_pcm = &remaining[pcm_byte_count..];
+            dec = crate::entropy::CabacDecoder::new(after_pcm)
+                .map_err(|_| SliceDataError::Eof("CABAC reinit after I_PCM"))?;
+
+            let mut mb = Macroblock::new_skip();
+            mb.skip = false;
+            mb.mb_type = MbType::IPcm;
+            mb.pcm_samples = pcm_samples;
+            mb.mb_field_flag = cur_pair_field;
+
+            let mut this_nz = MbNz { present: true, ..Default::default() };
+            // §9.2.1: an I_PCM neighbour contributes nN=16 to CAVLC coeff_token
+            // context; the same value is used for the CABAC CBF context.
+            this_nz.luma = [16u8; 16];
+            this_nz.chroma = [16u8; 8];
+
+            let mut this_cabac_ctx = MbCabacCtx { present: true, ..Default::default() };
+            this_cabac_ctx.is_intra16x16_or_pcm = true;
+            this_cabac_ctx.mb_field_flag = cur_pair_field;
+
+            nz[grid_idx] = this_nz;
+            pred_ctx[grid_idx] = MbPredCtx { present: true, ..Default::default() };
+            cabac_ctx[grid_idx] = this_cabac_ctx;
+            macroblocks[grid_idx] = mb;
+
+            // After I_PCM the CABAC engine was restarted; there is no
+            // end_of_slice_flag to decode from the old engine state.
+            // The next MB will be parsed by the freshly initialised decoder.
+            continue;
+        }
+
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) =
-            parse_intra_macroblock_cabac(
-                &mut dec,
-                &mut ctxs,
-                mb_x,
-                mb_y,
-                mb_cols,
-                &nz,
-                &pred_ctx,
-                &cabac_ctx,
-                qp,
-                prev_dqp_nonzero,
-                transform_8x8_mode_flag,
-                tracer,
-                nctx,
-            )?;
+            parse_result?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nonzero;
         if std::env::var("KINETIX_BINTRACE").is_ok() {

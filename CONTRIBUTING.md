@@ -55,6 +55,16 @@ In short: the cargo-generate template gives you the crate shell; the KG pipeline
 fills in the decoder internals from existing C source. Skip step 2 if you're implementing a
 codec from a written spec rather than porting an existing C decoder.
 
+#### Patents
+
+The roadmap targets **royalty-free formats only** (VP9, Opus, MP3, MPEG-TS). Any PR that
+adds or changes a codec crate must update the encumbrance table in
+[`PATENTS.md`](PATENTS.md), and — if the codec is patent-encumbered — wire it behind a
+default-on `codec-*` Cargo feature on `tpt-kinetix-pipeline` / `tpt-kinetix-cli` (as
+`tpt-kinetix-h264` and `tpt-kinetix-aac` are) so `cargo build --no-default-features`
+still produces a royalty-free-only engine. See `PATENTS.md` for the project's full
+patent posture.
+
 ---
 
 ## Running the test suite

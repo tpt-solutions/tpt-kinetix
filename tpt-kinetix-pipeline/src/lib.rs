@@ -11,4 +11,6 @@ pub mod pipeline;
 pub mod stage;
 
 pub use pipeline::Pipeline;
-pub use stage::{DecodeStage, DemuxStage, EncodeStage, FilterStage, PacketSinkStage, SinkStage};
+#[cfg(feature = "codec-h264")]
+pub use stage::DecodeStage;
+pub use stage::{DemuxStage, EncodeStage, FilterStage, PacketSinkStage, SinkStage};

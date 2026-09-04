@@ -88,8 +88,13 @@ impl Stage for DemuxStage {
 
 /// Decode stage: receives [`PipelineMessage::Packet`]s and emits decoded
 /// [`PipelineMessage::Frame`]s via the H.264 decoder.
+///
+/// Only built when the `codec-h264` feature is enabled (on by default). H.264 is
+/// patent-encumbered — see `PATENTS.md`.
+#[cfg(feature = "codec-h264")]
 pub struct DecodeStage;
 
+#[cfg(feature = "codec-h264")]
 impl Stage for DecodeStage {
     fn name(&self) -> &'static str {
         "decode"

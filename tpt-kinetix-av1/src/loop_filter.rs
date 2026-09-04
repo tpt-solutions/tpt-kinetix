@@ -500,33 +500,59 @@ fn filter_line_1d(
         return out;
     }
 
-    // Wide filter (§7.14.6.4). `n` (taps per side): 6 when `log2Size == 4`;
-    // otherwise 3 for luma but only 2 for chroma (`log2Size == 3, plane >
-    // 0`) — an earlier version of this function used `3` unconditionally
-    // for `log2 != 4`, reaching one tap too far (`p3`/`q3`) on chroma's
-    // 8-tap wide filter.
-    let log2 = if filter_size == 8 || !flat2 { 3 } else { 4 };
-    let n = if log2 == 4 {
-        6
+    // Wide filter (§7.14.6.4).
+    //
+    // Three variants depending on filter size and plane:
+    //   log2=4: 13-tap (filter_size==16 && flat && flat2) — luma only
+    //     n_out=3, n_near=3 doubled, n_far=5 single per side → weight=16
+    //     guard: p6 (offset -7) .. q6 (offset +6)
+    //   log2=3 luma: 6-tap (filter_size==8 luma flat, or flat but not flat2)
+    //     n_out=3, n_near=3 doubled, n_far=1 single per side → weight=8
+    //     guard: p3 (offset -4) .. q3 (offset +3)
+    //   log2=3 chroma: 4-tap (filter_size==8 chroma flat)
+    //     n_out=2, n_near=2 doubled, n_far=2 single per side → weight=8
+    //     guard: p2 (offset -3) .. q2 (offset +2)
+    //
+    // For each output position k (in -n_out..n_out):
+    //   The n_near doubled taps sit at indices k..k+n_near-1 (shift with k).
+    //   The n_far single taps sit at k-n_far..k-1 and k+n_near..k+n_near+n_far-1,
+    //   all clamped to [guard_p, guard_q].
+    let log2: u32 = if filter_size == 8 || !flat2 { 3 } else { 4 };
+    let n_out: isize = if is_luma { 3 } else { 2 };
+    let (n_near, n_far): (isize, isize) = if log2 == 4 {
+        (3, 5)
     } else if is_luma {
-        3
+        (3, 1)
     } else {
-        2
+        (2, 2)
     };
-    let n2 = if log2 == 3 && is_luma { 0 } else { 1 };
+    let guard_p: isize = -(n_out + n_far);
+    let guard_q: isize = n_out + n_far - 1;
     let line_len = line.len();
     let out_len = out.len();
-    for i in -(n as isize)..(n as isize) {
+    for k in -n_out..n_out {
         let mut t: i64 = 0;
-        for j in -(n as isize)..=(n as isize) {
-            let pidx = (i + j).clamp(-(n as isize + 1), n as isize);
-            let tap = if j.abs() <= n2 as isize { 2 } else { 1 };
-            let ridx = (edge as isize + pidx).clamp(0, line_len as isize - 1) as usize;
-            t += line[ridx] as i64 * tap;
+        // Doubled (near) taps: positions k .. k+n_near-1
+        for j in 0..n_near {
+            let idx = k + j;
+            let ridx = (edge as isize + idx.clamp(guard_p, guard_q)).clamp(0, line_len as isize - 1) as usize;
+            t += line[ridx] as i64 * 2;
+        }
+        // Single (far) taps: p-side k-n_far .. k-1
+        for j in -n_far..0 {
+            let idx = k + j;
+            let ridx = (edge as isize + idx.clamp(guard_p, guard_q)).clamp(0, line_len as isize - 1) as usize;
+            t += line[ridx] as i64;
+        }
+        // Single (far) taps: q-side k+n_near .. k+n_near+n_far-1
+        for j in n_near..(n_near + n_far) {
+            let idx = k + j;
+            let ridx = (edge as isize + idx.clamp(guard_p, guard_q)).clamp(0, line_len as isize - 1) as usize;
+            t += line[ridx] as i64;
         }
         let f = round2(t as i32, log2);
-        let idx = (edge as isize + i).clamp(0, out_len as isize - 1) as usize;
-        out[idx] = clip3(f, 0, 255);
+        let kout = (edge as isize + k).clamp(0, out_len as isize - 1) as usize;
+        out[kout] = clip3(f, 0, 255);
     }
     out
 }
@@ -859,24 +885,15 @@ fn cdef_filter_block(
 /// filter to convert the normalised variance index `z` into the mixing weight
 /// α (§7.17.5). Source: dav1d `src/tables.c`, `BITDEPTH == 8`.
 const SGR_X_BY_X: [u8; 256] = [
-    255, 128,  85,  64,  51,  43,  37,  32,  28,  26,  23,  21,  20,  18,  17,
-     16,  15,  14,  13,  13,  12,  12,  11,  11,  10,  10,   9,   9,   9,   9,
-      8,   8,   8,   8,   7,   7,   7,   7,   7,   6,   6,   6,   6,   6,   6,
-      6,   5,   5,   5,   5,   5,   5,   5,   5,   5,   5,   4,   4,   4,   4,
-      4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,   3,   3,
-      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,
-      3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,
-      2,   2,   2,   2,   2,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      0
+    255, 128, 85, 64, 51, 43, 37, 32, 28, 26, 23, 21, 20, 18, 17, 16, 15, 14, 13, 13, 12, 12, 11,
+    11, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
 ];
 
 /// Precomputed `s = (1 << 20) / (eps * n * n)` and `one_by_n = (4096 + n/2) / n`
@@ -885,18 +902,42 @@ const SGR_X_BY_X: [u8; 256] = [
 /// respectively.  Entries with r==0 use s==0 (pass skipped when r==0).
 /// Source: dav1d `src/tables.c` `dav1d_sgr_params`.
 const SGR_S: [[u32; 2]; 16] = [
-    [140, 3236], [112, 2158], [ 93, 1618], [ 80, 1438],
-    [ 70, 1295], [ 58, 1177], [ 47, 1079], [ 37,  996],
-    [ 30,  925], [ 25,  863], [  0, 2589], [  0, 1618],
-    [  0, 1177], [  0,  925], [ 56,    0], [ 22,    0],
+    [140, 3236],
+    [112, 2158],
+    [93, 1618],
+    [80, 1438],
+    [70, 1295],
+    [58, 1177],
+    [47, 1079],
+    [37, 996],
+    [30, 925],
+    [25, 863],
+    [0, 2589],
+    [0, 1618],
+    [0, 1177],
+    [0, 925],
+    [56, 0],
+    [22, 0],
 ];
 
-/// Spec Sgr_Params[16][4] = { r0, eps0, r1, eps1 }.
+/// Spec `Sgr_Params[16][4]` = { r0, eps0, r1, eps1 }.
 const SGR_PARAMS: [[i32; 4]; 16] = [
-    [2, 12, 1,  4], [2, 15, 1,  6], [2, 18, 1,  8], [2, 21, 1,  9],
-    [2, 24, 1, 10], [2, 29, 1, 11], [2, 36, 1, 12], [2, 45, 1, 13],
-    [2, 56, 1, 14], [2, 68, 1, 15], [0,  0, 1,  5], [0,  0, 1,  8],
-    [0,  0, 1, 11], [0,  0, 1, 14], [2, 30, 0,  0], [2, 75, 0,  0],
+    [2, 12, 1, 4],
+    [2, 15, 1, 6],
+    [2, 18, 1, 8],
+    [2, 21, 1, 9],
+    [2, 24, 1, 10],
+    [2, 29, 1, 11],
+    [2, 36, 1, 12],
+    [2, 45, 1, 13],
+    [2, 56, 1, 14],
+    [2, 68, 1, 15],
+    [0, 0, 1, 5],
+    [0, 0, 1, 8],
+    [0, 0, 1, 11],
+    [0, 0, 1, 14],
+    [2, 30, 0, 0],
+    [2, 75, 0, 0],
 ];
 
 /// Wiener filter for one plane (§7.17.3): 7-tap separable horizontal → vertical.
@@ -953,12 +994,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
     let src = plane.to_vec();
 
     let compute_pass =
-        |r: i32,
-         s: u32,
-         n: i32,
-         one_by_n: i32,
-         pair_rows: bool,
-         t: &mut Vec<i32>| {
+        |r: i32, s: u32, n: i32, one_by_n: i32, pair_rows: bool, t: &mut Vec<i32>| {
             // Build A (alpha*mean) and B (alpha) tables per pixel.
             let mut a_tab = vec![0i32; w * h];
             let mut b_tab = vec![0i32; w * h];
@@ -1002,8 +1038,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                                 + b_tab[y * w + xr]
                                 + b_tab[yn * w + xr])
                                 * 5;
-                        t[y * w + x] =
-                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
                     }
                     if y + 1 < h {
                         let y1 = y + 1;
@@ -1050,8 +1085,7 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                                 + b_tab[yb * w + xl]
                                 + b_tab[yb * w + xr])
                                 * 3;
-                        t[y * w + x] =
-                            (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
                     }
                 }
             }
@@ -1170,56 +1204,62 @@ pub fn apply_post_filters(
     // --- Deblocking loop filter (§7.14) ---
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
-    if !skip_deblock { deblock_plane(
-        y_plane,
-        width,
-        width,
-        height,
-        4,
-        0,
-        &meta.luma_tx_w,
-        &meta.luma_tx_h,
-        &meta.luma_skip,
-        meta.w4,
-        meta.h4,
-        fh,
-        Some(&meta.luma_tx_left),
-        Some(&meta.luma_tx_top),
-    ); }
+    if !skip_deblock {
+        deblock_plane(
+            y_plane,
+            width,
+            width,
+            height,
+            4,
+            0,
+            &meta.luma_tx_w,
+            &meta.luma_tx_h,
+            &meta.luma_skip,
+            meta.w4,
+            meta.h4,
+            fh,
+            Some(&meta.luma_tx_left),
+            Some(&meta.luma_tx_top),
+        );
+    }
     let sub_x = subsampling_x as usize;
     let sub_y = subsampling_y as usize;
-    if !skip_deblock { deblock_plane(
-        u_plane,
-        uv_w,
-        uv_w,
-        uv_h,
-        4,
-        1,
-        &meta.u_tx_w,
-        &meta.u_tx_h,
-        &meta.u_skip,
-        meta.w8,
-        meta.h8,
-        fh,
-        Some(&meta.uv_tx_left),
-        Some(&meta.uv_tx_top),
-    ); }
-    if !skip_deblock { deblock_plane(
-        v_plane,
-        uv_w,
-        uv_w,
-        uv_h,
-        4,
-        2,
-        &meta.v_tx_w,
-        &meta.v_tx_h,
-        &meta.v_skip,
-        meta.w8,
-        meta.h8,
-        fh,
-        Some(&meta.uv_tx_left),
-        Some(&meta.uv_tx_top),
-    ); }
+    if !skip_deblock {
+        deblock_plane(
+            u_plane,
+            uv_w,
+            uv_w,
+            uv_h,
+            4,
+            1,
+            &meta.u_tx_w,
+            &meta.u_tx_h,
+            &meta.u_skip,
+            meta.w8,
+            meta.h8,
+            fh,
+            Some(&meta.uv_tx_left),
+            Some(&meta.uv_tx_top),
+        );
+    }
+    if !skip_deblock {
+        deblock_plane(
+            v_plane,
+            uv_w,
+            uv_w,
+            uv_h,
+            4,
+            2,
+            &meta.v_tx_w,
+            &meta.v_tx_h,
+            &meta.v_skip,
+            meta.w8,
+            meta.h8,
+            fh,
+            Some(&meta.uv_tx_left),
+            Some(&meta.uv_tx_top),
+        );
+    }
 
     if dbg {
         for y in 32..48 {
@@ -1232,7 +1272,8 @@ pub fn apply_post_filters(
     // pri_strength occupies bits 0..=3 (0–15); sec_idx occupies bits 4..=5 (0–3).
     // The actual secondary strength is CDEF_SEC_STRENGTH[sec_idx] = [0,1,2,4].
     // Extract pri with `& 0x0F`, sec with `[0,1,2,4][((packed>>4)&3)]`.
-    let cdef_enabled = !skip_cdef && fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
+    let cdef_enabled =
+        !skip_cdef && fh.enable_cdef && !fh.coded_lossless && !fh.cdef_y_strength.is_empty();
     if cdef_enabled {
         // CDEF strength is selected per 64×64 unit via `cdef_idx` (§5.11.56),
         // which `read_cdef()` already populated during tile decode. Each unit's
@@ -1250,15 +1291,34 @@ pub fn apply_post_filters(
             while ux < width {
                 let mi_r = (tile_y0 + uy) >> 2;
                 let mi_c = (tile_x0 + ux) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let raw_idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(-1);
+                let uh = 64.min(height - uy);
+                let uw = 64.min(width - ux);
+                if raw_idx < 0 {
+                    // All blocks in this unit had skip=1: no CDEF filtering.
+                    ux += 64;
+                    continue;
+                }
+                let idx = raw_idx as usize;
                 let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
                 let pri = (y_packed & 0x0F) as i32;
                 let sec = [0i32, 1, 2, 4][((y_packed >> 4) & 3) as usize];
                 let damping = fh.cdef_damping as i32;
-                let uh = 64.min(height - uy);
-                let uw = 64.min(width - ux);
-                cdef_plane_luma(y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
-                    &mut luma_dir_grid, luma_grid_cols);
+                cdef_plane_luma(
+                    y_plane,
+                    &src_y,
+                    width,
+                    height,
+                    pri,
+                    sec,
+                    damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &mut luma_dir_grid,
+                    luma_grid_cols,
+                );
                 ux += 64;
             }
             uy += 64;
@@ -1273,16 +1333,34 @@ pub fn apply_post_filters(
             while ux < uv_w {
                 let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
                 let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let raw_idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(-1);
+                let uh = uv_step_y.min(uv_h - uy);
+                let uw = uv_step_x.min(uv_w - ux);
+                if raw_idx < 0 {
+                    ux += uv_step_x;
+                    continue;
+                }
+                let idx = raw_idx as usize;
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
-                let uh = uv_step_y.min(uv_h - uy);
-                let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
-                    &luma_dir_grid, luma_grid_cols,
+                    u_plane,
+                    &src_u,
+                    uv_w,
+                    uv_h,
+                    sub_x,
+                    sub_y,
+                    uv_pri,
+                    uv_sec,
+                    uv_damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &luma_dir_grid,
+                    luma_grid_cols,
                 );
                 ux += uv_step_x;
             }
@@ -1296,16 +1374,34 @@ pub fn apply_post_filters(
             while ux < uv_w {
                 let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
                 let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                let raw_idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(-1);
+                let uh = uv_step_y.min(uv_h - uy);
+                let uw = uv_step_x.min(uv_w - ux);
+                if raw_idx < 0 {
+                    ux += uv_step_x;
+                    continue;
+                }
+                let idx = raw_idx as usize;
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
-                let uh = uv_step_y.min(uv_h - uy);
-                let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux, uh, uw,
-                    &luma_dir_grid, luma_grid_cols,
+                    v_plane,
+                    &src_v,
+                    uv_w,
+                    uv_h,
+                    sub_x,
+                    sub_y,
+                    uv_pri,
+                    uv_sec,
+                    uv_damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &luma_dir_grid,
+                    luma_grid_cols,
                 );
                 ux += uv_step_x;
             }
@@ -1730,30 +1826,32 @@ mod tests {
 
     #[test]
     fn chroma_wide_filter_uses_two_taps_not_three() {
-        // Regression test for §7.14.6.4's `n` derivation: `n = 6` when
-        // `log2Size == 4`; otherwise `n = 3` for luma but only `n = 2` for
-        // chroma (`log2Size == 3, plane > 0`). An earlier version of this
-        // function used `n = 3` for every `log2 != 4` case regardless of
-        // plane, letting the chroma 8-tap wide filter read and write one
-        // tap too far (`p2`/`q2`) that the spec never allows it to touch.
+        // Regression test for §7.14.6.4's n_out derivation: n_out=3 for luma
+        // but only n_out=2 for chroma (log2Size==3, plane>0). An earlier version
+        // used n=6 for log2=4 and n=3 unconditionally for log2=3, incorrectly
+        // writing p5..p2 on the 13-tap path and p2 on chroma's 4-tap path.
         //
-        // Data (edge = 4): `[100, 101, 100, 101 | 100, 101, 100, 101]` — each
-        // side is within `bd_flat = 1` of its own boundary sample (flat
-        // passes) and `filterMask` passes with a generous `limit`/`blimit`,
-        // so both luma and chroma dispatch to the `log2 = 3` wide filter.
-        // Luma's `n = 3` writes to `p2` (index 1); chroma's `n = 2` must
-        // never write there, regardless of the numeric result the (buggy,
-        // wider) tap window would have produced.
-        let line = vec![100i32, 101, 100, 101, 100, 101, 100, 101];
+        // Input (edge=4): [101, 99, 100, 100 | 100, 100, 99, 101]
+        //   p-side: p3=101, p2=99, p1=100, p0=100 — within bd_flat=1 of p0 ✓
+        //   q-side: q0=100, q1=100, q2=99, q3=101 — within bd_flat=1 of q0 ✓
+        //   filterMask: |p0-q0|=0, all diffs ≤ 1 — passes with limit=10 ✓
+        //
+        // With the correct 6-tap luma wide filter (n_out=3, near={p2,p1,p0}×2,
+        // far={p3,q0}×1): p2_new = round2(p3+2p2+2p1+2p0+q0,3)
+        //   = round2(101+198+200+200+100,3) = round2(799,3) = 100 ≠ 99 = p2
+        //
+        // Chroma's 4-tap filter (n_out=2) only writes p1,p0,q0,q1 — p2 (index 1)
+        // must never be touched.
+        let line = vec![101i32, 99, 100, 100, 100, 100, 99, 101];
         let out_luma = filter_line_1d(&line, 4, 10, 50, 1, 8, true);
         let out_chroma = filter_line_1d(&line, 4, 10, 50, 1, 8, false);
         assert_ne!(
             out_luma[1], line[1],
-            "luma's n=3 wide filter must reach and modify p2"
+            "luma's n_out=3 wide filter must reach and modify p2"
         );
         assert_eq!(
             out_chroma[1], line[1],
-            "chroma's n=2 wide filter must never reach p2"
+            "chroma's n_out=2 wide filter must never reach p2"
         );
     }
 
@@ -1853,7 +1951,11 @@ mod tests {
         cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8, &mut dirs, 2);
         for y in 8..16 {
             for x in 0..16 {
-                assert_eq!(plane[y * 16 + x], src[y * 16 + x], "block outside the filtered unit must be unchanged");
+                assert_eq!(
+                    plane[y * 16 + x],
+                    src[y * 16 + x],
+                    "block outside the filtered unit must be unchanged"
+                );
             }
         }
     }

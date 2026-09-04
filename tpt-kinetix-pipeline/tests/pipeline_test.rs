@@ -2,9 +2,11 @@
 
 use crossbeam_channel::bounded;
 use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
+#[cfg(feature = "codec-h264")]
+use tpt_kinetix_pipeline::stage::DecodeStage;
 use tpt_kinetix_pipeline::{
     channel::PipelineMessage,
-    stage::{DecodeStage, FilterStage, SinkStage, Stage},
+    stage::{FilterStage, SinkStage, Stage},
 };
 
 /// Helper that constructs a minimal valid [`VideoFrame`] for testing.
@@ -64,6 +66,7 @@ fn test_passthrough_pipeline() {
 
 /// Verify that a [`PipelineMessage::Flush`] sent into a [`DecodeStage`]
 /// propagates to the output channel, allowing downstream stages to terminate.
+#[cfg(feature = "codec-h264")]
 #[test]
 fn test_pipeline_flush_propagates() {
     let (input_tx, input_rx) = bounded::<PipelineMessage>(16);
@@ -184,6 +187,7 @@ fn test_scale_filter_resizes_frames() {
 /// path (Phase 4.8). The H.264 decoder currently emits placeholder frames, so
 /// this validates plumbing and that the AV1 encoder produces compressed packets;
 /// it is not a pixel-conformance test.
+#[cfg(feature = "codec-h264")]
 #[test]
 fn test_decode_scale_encode_pipeline() {
     use tpt_kinetix_core::{

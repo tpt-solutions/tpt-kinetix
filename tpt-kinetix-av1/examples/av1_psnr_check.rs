@@ -146,8 +146,10 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
             if std::env::var("KINETIX_AV1_DBG_ROWS").is_ok() {
                 let stride = w as usize;
                 for row in 0..h as usize {
-                    let rp = psnr(&frame.data[row * stride..(row + 1) * stride],
-                                  &ref_raw[row * stride..(row + 1) * stride]);
+                    let rp = psnr(
+                        &frame.data[row * stride..(row + 1) * stride],
+                        &ref_raw[row * stride..(row + 1) * stride],
+                    );
                     eprintln!("  row {:>3} Y_PSNR={:.2}", row, rp);
                 }
             }
@@ -160,7 +162,13 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
                     let got = frame.data[base + col];
                     let exp = ref_raw[base + col];
                     if got != exp {
-                        eprintln!("  col {:>4}: got={:>3} ref={:>3} diff={:>4}", col, got, exp, got as i32 - exp as i32);
+                        eprintln!(
+                            "  col {:>4}: got={:>3} ref={:>3} diff={:>4}",
+                            col,
+                            got,
+                            exp,
+                            got as i32 - exp as i32
+                        );
                     }
                 }
             }
@@ -180,6 +188,14 @@ fn main() {
         return;
     }
     if std::env::var("KINETIX_AV1_ONLY_TESTSRC2").is_ok() {
+        check("testsrc2_320x180", "testsrc2", None, 320, 180);
+        return;
+    }
+    if std::env::var("KINETIX_AV1_ONLY_TESTSRC2_SMALL").is_ok() {
+        check("testsrc2_64x180", "testsrc2", None, 64, 180);
+        check("testsrc2_128x180", "testsrc2", None, 128, 180);
+        check("testsrc2_192x180", "testsrc2", None, 192, 180);
+        check("testsrc2_256x180", "testsrc2", None, 256, 180);
         check("testsrc2_320x180", "testsrc2", None, 320, 180);
         return;
     }

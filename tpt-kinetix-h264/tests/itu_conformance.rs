@@ -113,8 +113,9 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "CAMA1_Sony_C",
         Expect::KnownGap(
-            "real MBAFF CABAC I stream — grey-scaffold fallback (max_diff 128); \
-             synthetic MBAFF clips are bit-exact, this real 720x480 clip is not",
+            "real MBAFF CABAC I stream — CABAC MBAFF-I desync on most frames \
+             (end_of_slice_flag mismatch, bin-level oracle needed); \
+             I_PCM-under-CABAC is now handled but the main desync remains",
         ),
     ),
     // --- FRExt High 4:2:0 (8x8 transform) ---
@@ -124,6 +125,22 @@ const MANIFEST: &[(&str, Expect)] = &[
             "hierarchical GOP-16 B-frames + ref-pic-list reorder + MMCO — frame 0 \
              bit-exact, frames 1+ diverge ('B PATH: ref list build failed')",
         ),
+    ),
+    // --- multiple IDR / multiple parameter sets ---
+    (
+        "MIDR_MW_D",
+        Expect::KnownGap(
+            "multiple-IDR QCIF — 62/100 frames byte-exact, diverges from frame 61; \
+             15 frames short of the reference count",
+        ),
+    ),
+    (
+        "MPS_MW_A",
+        Expect::KnownGap("multiple parameter sets — 92/150 frames, none exact; structural"),
+    ),
+    (
+        "Sharp_MP_PAFF_1r2",
+        Expect::KnownGap("real PAFF 720x480 — correct frame count, grey-scaffold pixels"),
     ),
     // --- known limitations (must NOT claim exactness) ---
     ("CABACI3_Sony_B", Expect::Limitation("4 slices per picture")),
@@ -141,10 +158,12 @@ fn clip_files(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let p = entry.path();
         match p.extension().and_then(|e| e.to_str()) {
-            Some("264") | Some("jsv") | Some("h264") | Some("avc") | Some("26l") => {
-                bitstream = Some(p)
-            }
-            Some("yuv") => refyuv = Some(p),
+            Some("264") | Some("jsv") | Some("h264") | Some("avc") | Some("26l") | Some("jvt")
+            | Some("bits") => bitstream = Some(p),
+            // The suite ships the normative reference under several extensions:
+            // `.yuv`, and container hints like `.qcif` / `.cif` / `.4cif` that
+            // are still just raw planar YUV420p.
+            Some("yuv") | Some("qcif") | Some("cif") | Some("4cif") => refyuv = Some(p),
             _ => {}
         }
     }

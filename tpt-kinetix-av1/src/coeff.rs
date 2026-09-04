@@ -31,11 +31,13 @@
 use tpt_kinetix_core::error::KinetixError;
 
 use crate::coeff_tables::{
-    get_scan, get_tx_class, get_tx_set_intra, ADJUSTED_TX_SIZE, BR_CDF_SIZE, COEFF_BASE_CTX_OFFSET,
-    COEFF_BASE_POS_CTX_OFFSET, COEFF_BASE_RANGE, DCT_DCT, MAG_REF_OFFSET_WITH_TX_CLASS,
-    MODE_TO_TXFM, NUM_BASE_LEVELS, SIG_COEF_CONTEXTS, SIG_COEF_CONTEXTS_EOB, SIG_REF_DIFF_OFFSET,
-    TX_16X64, TX_32X32, TX_64X16, TX_CLASS_2D, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_HEIGHT,
-    TX_HEIGHT_LOG2, TX_SET_INTRA_1, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_TYPE_INTRA_INV_SET1,
+    get_scan, get_tx_class, get_tx_set_inter, get_tx_set_intra, tx_type_in_set_inter,
+    ADJUSTED_TX_SIZE, BR_CDF_SIZE, COEFF_BASE_CTX_OFFSET, COEFF_BASE_POS_CTX_OFFSET,
+    COEFF_BASE_RANGE, DCT_DCT, MAG_REF_OFFSET_WITH_TX_CLASS, MODE_TO_TXFM, NUM_BASE_LEVELS,
+    SIG_COEF_CONTEXTS, SIG_COEF_CONTEXTS_EOB, SIG_REF_DIFF_OFFSET, TX_16X64, TX_32X32, TX_64X16,
+    TX_CLASS_2D, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_HEIGHT, TX_HEIGHT_LOG2, TX_SET_DCTONLY,
+    TX_SET_INTER_1, TX_SET_INTER_2, TX_SET_INTER_3, TX_SET_INTRA_1, TX_SIZE_SQR, TX_SIZE_SQR_UP,
+    TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1,
     TX_TYPE_INTRA_INV_SET2, TX_TYPE_IN_SET_INTRA, TX_WIDTH, TX_WIDTH_LOG2,
 };
 use crate::entropy::SymbolDecoder;
@@ -75,6 +77,9 @@ pub struct TileCdfs {
     dc_sign: [[[u16; 3]; 3]; 2],
     intra_tx_type_set1: [[[u16; 8]; 13]; 2],
     intra_tx_type_set2: [[[u16; 6]; 13]; 3],
+    inter_tx_type_set1: [[u16; 17]; 2],
+    inter_tx_type_set2: [u16; 13],
+    inter_tx_type_set3: [[u16; 3]; 4],
 }
 
 impl TileCdfs {
@@ -97,6 +102,9 @@ impl TileCdfs {
             dc_sign: defaults::DEFAULT_DC_SIGN_CDF[idx],
             intra_tx_type_set1: defaults::DEFAULT_INTRA_TX_TYPE_SET1_CDF,
             intra_tx_type_set2: defaults::DEFAULT_INTRA_TX_TYPE_SET2_CDF,
+            inter_tx_type_set1: defaults::DEFAULT_INTER_TX_TYPE_SET1_CDF,
+            inter_tx_type_set2: defaults::DEFAULT_INTER_TX_TYPE_SET2_CDF,
+            inter_tx_type_set3: defaults::DEFAULT_INTER_TX_TYPE_SET3_CDF,
         }
     }
 
@@ -131,6 +139,9 @@ impl TileCdfs {
             dc_sign: clone3(&self.dc_sign),
             intra_tx_type_set1: clone3(&self.intra_tx_type_set1),
             intra_tx_type_set2: clone3(&self.intra_tx_type_set2),
+            inter_tx_type_set1: clone2(&self.inter_tx_type_set1),
+            inter_tx_type_set2: self.inter_tx_type_set2.to_vec(),
+            inter_tx_type_set3: clone2(&self.inter_tx_type_set3),
         }
     }
 
@@ -151,6 +162,15 @@ impl TileCdfs {
         self.dc_sign = unclone3(&s.dc_sign);
         self.intra_tx_type_set1 = unclone3(&s.intra_tx_type_set1);
         self.intra_tx_type_set2 = unclone3(&s.intra_tx_type_set2);
+        self.inter_tx_type_set1 = unclone2(&s.inter_tx_type_set1);
+        self.inter_tx_type_set2 = {
+            let mut a = [0u16; 13];
+            for (i, &v) in s.inter_tx_type_set2.iter().enumerate().take(13) {
+                a[i] = v;
+            }
+            a
+        };
+        self.inter_tx_type_set3 = unclone2(&s.inter_tx_type_set3);
     }
 
     /// Serialize the base (un-adapted) coefficient CDF tables to JSON for the
@@ -177,13 +197,19 @@ impl TileCdfs {
             let rows: Vec<String> = v.iter().map(|m| j3(m)).collect();
             format!("[{}]", rows.join(","))
         };
+        let j1 = |v: &[u16]| -> String {
+            let inner: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+            format!("[{}]", inner.join(","))
+        };
         format!(
             "{{\n  \
              \"txb_skip\": {},\n  \"eob_pt_16\": {},\n  \"eob_pt_32\": {},\n  \
              \"eob_pt_64\": {},\n  \"eob_pt_128\": {},\n  \"eob_pt_256\": {},\n  \
              \"eob_pt_512\": {},\n  \"eob_pt_1024\": {},\n  \"eob_extra\": {},\n  \
              \"coeff_base_eob\": {},\n  \"coeff_base\": {},\n  \"coeff_br\": {},\n  \
-             \"dc_sign\": {},\n  \"intra_tx_type_set1\": {},\n  \"intra_tx_type_set2\": {}\n}}",
+             \"dc_sign\": {},\n  \"intra_tx_type_set1\": {},\n  \"intra_tx_type_set2\": {},\n  \
+             \"inter_tx_type_set1\": {},\n  \"inter_tx_type_set2\": {},\n  \
+             \"inter_tx_type_set3\": {}\n}}",
             j3(&clone3(&self.txb_skip)),
             j3(&clone3(&self.eob_pt_16)),
             j3(&clone3(&self.eob_pt_32)),
@@ -199,6 +225,9 @@ impl TileCdfs {
             j3(&clone3(&self.dc_sign)),
             j3(&clone3(&self.intra_tx_type_set1)),
             j3(&clone3(&self.intra_tx_type_set2)),
+            j2(&clone2(&self.inter_tx_type_set1)),
+            j1(&self.inter_tx_type_set2),
+            j2(&clone2(&self.inter_tx_type_set3)),
         )
     }
 }
@@ -223,6 +252,9 @@ pub struct TileCdfSnapshot {
     pub dc_sign: Vec<Vec<Vec<u16>>>,
     pub intra_tx_type_set1: Vec<Vec<Vec<u16>>>,
     pub intra_tx_type_set2: Vec<Vec<Vec<u16>>>,
+    pub inter_tx_type_set1: Vec<Vec<u16>>,
+    pub inter_tx_type_set2: Vec<u16>,
+    pub inter_tx_type_set3: Vec<Vec<u16>>,
 }
 
 /// Clone a 2-D fixed-size CDF table (`[[u16; B]; A]`) into nested `Vec`s for
@@ -422,6 +454,11 @@ pub struct TxBlockCtx {
     pub reduced_tx_set: bool,
     /// Frame-level `Lossless`.
     pub lossless: bool,
+    /// `true` for inter / IBC blocks (selects the inter TX-set and TX-type CDFs).
+    pub is_inter: bool,
+    /// For inter/IBC chroma blocks: the luma TX type read from the luma pass
+    /// (spec: chroma inherits luma TX type, no separate read).
+    pub luma_tx_type: usize,
 }
 
 /// The result of one `coeffs()` call.
@@ -493,12 +530,22 @@ pub fn read_coeffs(
     let all_zero = dec.read_symbol(&mut cdfs.txb_skip[tx_sz_ctx][skip_ctx]) == 1;
 
     if !all_zero {
-        let luma_tx_type = if blk.plane == 0 {
+        let luma_tx_type = if blk.is_inter {
+            if blk.plane == 0 {
+                read_transform_type_inter(dec, cdfs, blk, tx_size)?
+            } else {
+                blk.luma_tx_type
+            }
+        } else if blk.plane == 0 {
             read_transform_type(dec, cdfs, blk, tx_size)?
         } else {
             DCT_DCT
         };
-        tx_type = compute_tx_type(blk, tx_size, luma_tx_type);
+        tx_type = if blk.is_inter {
+            compute_tx_type_inter(blk, tx_size, luma_tx_type)
+        } else {
+            compute_tx_type(blk, tx_size, luma_tx_type)
+        };
 
         let scan = get_scan(tx_size, tx_type).ok_or_else(|| {
             KinetixError::Unsupported(format!(
@@ -601,6 +648,61 @@ pub fn read_coeffs(
         eob,
         tx_type,
     })
+}
+
+/// `transform_type()` (spec §5.11.45) for inter / IBC blocks: reads the TX type
+/// from the bitstream using inter-TX-set CDFs.
+fn read_transform_type_inter(
+    dec: &mut SymbolDecoder,
+    cdfs: &mut TileCdfs,
+    blk: &TxBlockCtx,
+    tx_size: usize,
+) -> Result<usize, KinetixError> {
+    let set = get_tx_set_inter(tx_size, blk.reduced_tx_set);
+    if set == TX_SET_DCTONLY || !blk.qindex_positive {
+        return Ok(DCT_DCT);
+    }
+    match set {
+        TX_SET_INTER_1 => {
+            let sqr = TX_SIZE_SQR[tx_size];
+            let cdf = cdfs.inter_tx_type_set1.get_mut(sqr).ok_or_else(|| {
+                KinetixError::Parse(format!(
+                    "AV1 transform_type: inter set 1 sqr index {sqr} out of range"
+                ))
+            })?;
+            Ok(TX_TYPE_INTER_INV_SET1[dec.read_symbol(cdf)])
+        }
+        TX_SET_INTER_2 => Ok(TX_TYPE_INTER_INV_SET2[dec.read_symbol(&mut cdfs.inter_tx_type_set2)]),
+        TX_SET_INTER_3 => {
+            let sqr_up = TX_SIZE_SQR_UP[tx_size].min(3);
+            let cdf = cdfs.inter_tx_type_set3.get_mut(sqr_up).ok_or_else(|| {
+                KinetixError::Parse(format!(
+                    "AV1 transform_type: inter set 3 sqr_up index {sqr_up} out of range"
+                ))
+            })?;
+            Ok(TX_TYPE_INTER_INV_SET3[dec.read_symbol(cdf)])
+        }
+        _ => Ok(DCT_DCT),
+    }
+}
+
+/// `compute_tx_type()` (spec §7.12.3) for inter / IBC blocks.
+///
+/// Chroma inherits the luma TX type (no separate read); `blk.luma_tx_type`
+/// carries the value read by the luma pass.
+fn compute_tx_type_inter(blk: &TxBlockCtx, tx_size: usize, luma_tx_type: usize) -> usize {
+    if blk.lossless || TX_SIZE_SQR_UP[tx_size] > TX_32X32 {
+        return DCT_DCT;
+    }
+    if blk.plane == 0 {
+        return luma_tx_type;
+    }
+    let tx_set = get_tx_set_inter(tx_size, blk.reduced_tx_set);
+    if tx_type_in_set_inter(tx_set, luma_tx_type) {
+        luma_tx_type
+    } else {
+        DCT_DCT
+    }
 }
 
 /// `transform_type( x4, y4, txSz )` (spec "Transform type syntax"), intra path.
@@ -992,6 +1094,8 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            is_inter: false,
+            luma_tx_type: 0,
         };
         assert_eq!(super::all_zero_ctx(&blk_whole, &ctxs, w4, h4), 0);
 
@@ -1197,6 +1301,8 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            is_inter: false,
+            luma_tx_type: 0,
         }
     }
 

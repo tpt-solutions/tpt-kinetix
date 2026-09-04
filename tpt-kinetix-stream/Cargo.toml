@@ -21,7 +21,13 @@ tracing = { workspace = true }
 tokio = { version = "1.38", features = ["full"] }
 bytes = "1.5"
 nom = { workspace = true }
-tpt-kinetix-aac = { workspace = true }
+tpt-kinetix-aac = { workspace = true, optional = true }
+
+[features]
+default = ["codec-aac"]
+# AAC is patent-encumbered (see PATENTS.md). Without this feature the FLV/RTMP
+# path drops `AudioSpecificConfig` parsing of AAC sequence headers.
+codec-aac = ["dep:tpt-kinetix-aac"]
 
 [dev-dependencies]
 tokio-test = "0.4"

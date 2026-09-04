@@ -23,6 +23,11 @@ clippy:
 build:
     cargo build --workspace
 
+# Build without the patent-encumbered codecs (drops tpt-kinetix-h264 and
+# tpt-kinetix-aac from the pipeline/CLI dependency graphs). See PATENTS.md.
+build-royalty-free:
+    cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli --no-default-features
+
 # Run the whole test suite. Prefers cargo-nextest when installed.
 test:
     cargo nextest run --workspace --lib --bins --tests || cargo test --workspace

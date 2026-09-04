@@ -5,6 +5,10 @@ pub enum SliceDataError {
     Eof(&'static str),
     Unsupported(&'static str),
     Cavlc,
+    /// Sentinel: `mb_type == I_PCM` detected by the inner parse function.
+    /// The outer loop must flush the CABAC engine, read 384 raw PCM bytes,
+    /// and reinitialise the decoder before continuing.
+    IPcm,
 }
 
 impl std::fmt::Display for SliceDataError {
@@ -13,6 +17,7 @@ impl std::fmt::Display for SliceDataError {
             SliceDataError::Eof(s) => write!(f, "unexpected EOF: {s}"),
             SliceDataError::Unsupported(s) => write!(f, "unsupported syntax: {s}"),
             SliceDataError::Cavlc => write!(f, "CAVLC decode error"),
+            SliceDataError::IPcm => write!(f, "I_PCM macroblock (CABAC)"),
         }
     }
 }

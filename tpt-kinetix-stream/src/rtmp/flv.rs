@@ -207,6 +207,10 @@ impl FlvAudioTag {
 
     /// Parse the payload as an `AudioSpecificConfig` when this is an AAC
     /// sequence header. Returns `None` otherwise or on parse failure.
+    ///
+    /// Only available with the `codec-aac` feature (on by default); AAC is
+    /// patent-encumbered — see `PATENTS.md`.
+    #[cfg(feature = "codec-aac")]
     pub fn audio_specific_config(&self) -> Option<tpt_kinetix_aac::AudioSpecificConfig> {
         if self.codec != FlvAudioCodec::Aac || !self.is_sequence_header() {
             return None;
@@ -248,6 +252,7 @@ pub fn parse_audio_tag(payload: &[u8]) -> Result<FlvAudioTag, FlvError> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "codec-aac")]
     #[test]
     fn aac_seq_header_yields_asc() {
         // FLV audio byte: codec=10 (AAC) -> 0xAF; packet_type=0 (seq header).

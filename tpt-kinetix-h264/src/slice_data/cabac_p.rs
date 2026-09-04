@@ -47,9 +47,9 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
     };
     let mb_type = ctxs.mb_type.decode(dec, &mb_type_neighbors);
     if mb_type == 25 {
-        return Err(SliceDataError::Unsupported(
-            "I_PCM under CABAC not supported",
-        ));
+        // I_PCM: signal the outer loop to flush the CABAC engine, read 384 raw
+        // PCM bytes, and reinitialise the decoder (§9.3.2.6, §9.3.4.6).
+        return Err(SliceDataError::IPcm);
     }
 
     let (is_i16x16, i16_mode, cbp_chroma_mbtype, cbp_luma_mbtype) = if mb_type == 0 {

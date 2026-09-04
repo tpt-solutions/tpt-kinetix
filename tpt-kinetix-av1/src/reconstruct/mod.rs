@@ -725,9 +725,6 @@ impl<'a> TileDecodeState<'a> {
                 bit_offset % 8
             );
         }
-        eprintln!(
-            "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
-        );
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),
@@ -911,16 +908,28 @@ impl<'a> TileDecodeState<'a> {
 
     /// `read_cdef()` (§5.11.56): reads at most one `L(cdef_bits)` literal per
     /// 64×64 unit per superblock (zero bits, hence a true no-op, whenever
-    /// `cdef_bits == 0` — the only case the current corpus exercises).
+    /// `cdef_bits == 0`). Skip blocks store -1 as a sentinel so the CDEF
+    /// filter can distinguish "all-skip unit (no filter)" from "non-skip unit
+    /// with strength index 0". A later non-skip block in the same unit
+    /// overwrites -1 with the real index read from the bitstream.
     fn read_cdef(&mut self, mi_row: usize, mi_col: usize, bsize: usize, skip: bool) {
-        if skip || self.lossless || !self.enable_cdef || self.allow_intrabc {
+        if self.lossless || !self.enable_cdef || self.allow_intrabc {
             return;
         }
         const CDEF_SIZE4: usize = 16; // Num_4x4_Blocks_Wide[BLOCK_64X64]
         let mask = !(CDEF_SIZE4 - 1);
         let r = mi_row & mask;
         let c = mi_col & mask;
-        if self.cdef_idx.contains_key(&(r, c)) {
+        if skip {
+            // §5.11.56: skip blocks mark the unit -1 (no CDEF) unless a
+            // prior non-skip block in this superblock already claimed it.
+            self.cdef_idx.entry((r, c)).or_insert(-1);
+            return;
+        }
+        // Non-skip: read from bitstream only if the unit is unclaimed or was
+        // previously marked -1 by a skip block. A value >= 0 means a prior
+        // non-skip block already set the unit; don't read again.
+        if self.cdef_idx.get(&(r, c)).map_or(false, |&v| v >= 0) {
             return;
         }
         let idx = self.dec.read_literal(self.cdef_bits as u32) as i8;

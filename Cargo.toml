@@ -70,8 +70,8 @@ tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.1.0" }
 tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.1.0" }
 tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.1.0" }
 tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.0" }
-tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0" }
-tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0" }
+tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0", default-features = false }
+tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0", default-features = false }
 
 [profile.dev]
 opt-level = 1

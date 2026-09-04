@@ -13,6 +13,11 @@ mode returns `KinetixError::NotPixelExact` only for slices that still hit an uns
 `DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
 for the current state of every crate before assuming something works.
 
+Patents: this project ships source only and obtains no patent licenses. H.264 and AAC are
+patent-encumbered; `tpt-kinetix-pipeline` / `tpt-kinetix-cli` gate them behind default-on
+`codec-h264` / `codec-aac` features (`cargo build --no-default-features` → royalty-free-only).
+See PATENTS.md; keep its encumbrance table current when touching a codec crate.
+
 ## Commands
 
 Prefer `just <recipe>` (see `justfile`) — it mirrors CI exactly. Direct cargo equivalents also work.

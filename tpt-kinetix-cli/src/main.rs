@@ -192,8 +192,10 @@ fn decoder_capabilities_for(
 ) -> Option<tpt_kinetix_core::capabilities::DecoderCapabilities> {
     use tpt_kinetix_core::codec::CodecId;
     match codec {
+        #[cfg(feature = "codec-h264")]
         Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
         Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
+        #[cfg(feature = "codec-aac")]
         Some(CodecId::Aac) => Some(tpt_kinetix_aac::AacDecoder::new().capabilities()),
         _ => None,
     }
@@ -272,6 +274,8 @@ fn input_video_geometry(data: &[u8]) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Geometry and timing of the input video track, used to size the output.
+// Fields are only read on the H.264-decode transcode path (`codec-h264`).
+#[cfg_attr(not(feature = "codec-h264"), allow(dead_code))]
 struct VideoGeometry {
     width: u32,
     height: u32,
@@ -279,6 +283,23 @@ struct VideoGeometry {
     fps_den: u32,
 }
 
+// AV1 output requires decoding the H.264 input first, so this path depends on
+// the patent-encumbered `codec-h264` feature (see PATENTS.md).
+#[cfg(not(feature = "codec-h264"))]
+fn transcode_to_av1(
+    _data: &[u8],
+    _output: &str,
+    _rate_control: tpt_kinetix_core::encode::RateControl,
+    _speed: u8,
+    _geometry: VideoGeometry,
+) -> Result<()> {
+    anyhow::bail!(
+        "transcode requires the `codec-h264` feature (H.264 input decoding is \
+         patent-encumbered and disabled in this build; see PATENTS.md)"
+    )
+}
+
+#[cfg(feature = "codec-h264")]
 fn transcode_to_av1(
     data: &[u8],
     output: &str,
@@ -363,6 +384,8 @@ fn transcode_to_h264(
     );
 }
 
+// Only used by the H.264-decode → AV1 transcode path (`codec-h264`).
+#[cfg_attr(not(feature = "codec-h264"), allow(dead_code))]
 fn write_ivf(
     path: &str,
     packets: &[tpt_kinetix_core::packet::Packet],

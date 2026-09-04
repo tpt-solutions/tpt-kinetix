@@ -20,8 +20,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
-tpt-kinetix-h264 = { workspace = true }
+tpt-kinetix-h264 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
+
+[features]
+default = ["codec-h264"]
+# H.264 is patent-encumbered (see PATENTS.md). Building with
+# `--no-default-features` drops the decoder from the pipeline entirely.
+codec-h264 = ["dep:tpt-kinetix-h264"]
 
 [dev-dependencies]
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }

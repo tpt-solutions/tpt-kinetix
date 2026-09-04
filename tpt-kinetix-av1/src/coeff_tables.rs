@@ -65,6 +65,9 @@ pub const TX_CLASS_VERT: usize = 2;
 pub const TX_SET_DCTONLY: usize = 0;
 pub const TX_SET_INTRA_1: usize = 1;
 pub const TX_SET_INTRA_2: usize = 2;
+pub const TX_SET_INTER_1: usize = 3;
+pub const TX_SET_INTER_2: usize = 4;
+pub const TX_SET_INTER_3: usize = 5;
 
 /// Number of quantizer base levels (spec `NUM_BASE_LEVELS`).
 pub const NUM_BASE_LEVELS: u32 = 2;
@@ -89,11 +92,7 @@ pub fn get_tx_class(tx_type: usize) -> usize {
     }
 }
 
-/// `get_tx_set( txSz )` (spec "Get transform set function") for intra blocks.
-///
-/// The inter branch is deliberately absent: AV1 Phase B decodes intra
-/// keyframes only, and an untested inter path would be exactly the kind of
-/// silently-wrong output this crate is trying to remove.
+/// `get_tx_set( txSz )` (spec §5.11.45) for intra blocks.
 pub fn get_tx_set_intra(tx_size: usize, reduced_tx_set: bool) -> usize {
     let tx_sz_sqr = TX_SIZE_SQR[tx_size];
     let tx_sz_sqr_up = TX_SIZE_SQR_UP[tx_size];
@@ -110,12 +109,76 @@ pub fn get_tx_set_intra(tx_size: usize, reduced_tx_set: bool) -> usize {
     }
 }
 
+/// `get_tx_set( txSz )` (spec §5.11.45) for inter / IBC blocks.
+pub fn get_tx_set_inter(tx_size: usize, reduced_tx_set: bool) -> usize {
+    let tx_sz_sqr_up = TX_SIZE_SQR_UP[tx_size];
+    if tx_sz_sqr_up > TX_32X32 {
+        TX_SET_DCTONLY
+    } else if reduced_tx_set || tx_sz_sqr_up == TX_32X32 {
+        TX_SET_INTER_3
+    } else if tx_sz_sqr_up == TX_16X16 {
+        TX_SET_INTER_2
+    } else {
+        TX_SET_INTER_1
+    }
+}
+
+/// Returns `true` when `tx_type` belongs to the inter transform set `tx_set`.
+pub fn tx_type_in_set_inter(tx_set: usize, tx_type: usize) -> bool {
+    match tx_set {
+        TX_SET_DCTONLY => tx_type == DCT_DCT,
+        TX_SET_INTER_3 => TX_TYPE_INTER_INV_SET3.contains(&tx_type),
+        TX_SET_INTER_2 => TX_TYPE_INTER_INV_SET2.contains(&tx_type),
+        TX_SET_INTER_1 => TX_TYPE_INTER_INV_SET1.contains(&tx_type),
+        _ => false,
+    }
+}
+
 /// `Tx_Type_Intra_Inv_Set1` (spec "Transform type syntax").
 pub static TX_TYPE_INTRA_INV_SET1: [usize; 7] =
     [IDTX, DCT_DCT, V_DCT, H_DCT, ADST_ADST, ADST_DCT, DCT_ADST];
 
 /// `Tx_Type_Intra_Inv_Set2` (spec "Transform type syntax").
 pub static TX_TYPE_INTRA_INV_SET2: [usize; 5] = [IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST];
+
+/// `Tx_Type_Inter_Inv_Set1` — spec Table 5.21.
+pub static TX_TYPE_INTER_INV_SET1: [usize; 16] = [
+    DCT_DCT,
+    IDTX,
+    V_DCT,
+    H_DCT,
+    ADST_DCT,
+    DCT_ADST,
+    FLIPADST_DCT,
+    DCT_FLIPADST,
+    V_ADST,
+    H_ADST,
+    V_FLIPADST,
+    H_FLIPADST,
+    ADST_ADST,
+    FLIPADST_ADST,
+    ADST_FLIPADST,
+    FLIPADST_FLIPADST,
+];
+
+/// `Tx_Type_Inter_Inv_Set2` — spec Table 5.22.
+pub static TX_TYPE_INTER_INV_SET2: [usize; 12] = [
+    DCT_DCT,
+    IDTX,
+    V_DCT,
+    H_DCT,
+    ADST_DCT,
+    DCT_ADST,
+    FLIPADST_DCT,
+    DCT_FLIPADST,
+    V_ADST,
+    H_ADST,
+    V_FLIPADST,
+    H_FLIPADST,
+];
+
+/// `Tx_Type_Inter_Inv_Set3` — DCT_DCT and IDTX only.
+pub static TX_TYPE_INTER_INV_SET3: [usize; 2] = [DCT_DCT, IDTX];
 
 /// `get_default_scan( txSz )` (spec §5.11.41 "Get scan function").
 fn get_default_scan(tx_size: usize) -> Option<&'static [u16]> {
