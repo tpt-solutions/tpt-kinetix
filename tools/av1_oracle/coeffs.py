@@ -9,6 +9,8 @@ the latter).
 """
 
 import copy
+import os
+import sys
 
 from cdf_tables_gen import (
     TX_WIDTH, TX_HEIGHT, TX_WIDTH_LOG2, TX_HEIGHT_LOG2, TX_SIZE_SQR,
@@ -380,6 +382,15 @@ def read_coeffs(dec, cdfs, ctxs, blk):
     tx_type = DCT_DCT
 
     skip_ctx = _all_zero_ctx(blk, ctxs, w4, h4)
+    if os.environ.get("KINETIX_AV1_DBG_ALLZERO"):
+        print(
+            f"DBG allzero plane={plane} x4={blk['x4']} y4={blk['y4']} "
+            f"tx_sz_ctx={tx_sz_ctx} skip_ctx={skip_ctx} "
+            f"cdf={cdfs.txb_skip[tx_sz_ctx][skip_ctx]} "
+            f"rng={dec.symbol_range} val={dec.symbol_value} "
+            f"trace_idx={len(dec.trace)} bit_pos={dec.bit_pos}",
+            file=sys.stderr,
+        )
     all_zero = dec.read_symbol(cdfs.txb_skip[tx_sz_ctx][skip_ctx]) == 1
 
     if not all_zero:

@@ -549,6 +549,12 @@ pub fn read_coeffs(
     let mut tx_type = DCT_DCT;
 
     let skip_ctx = all_zero_ctx(blk, ctxs, w4, h4);
+    if std::env::var("KINETIX_AV1_DBG_ALLZERO").is_ok() {
+        eprintln!(
+            "DBG allzero plane={} x4={} y4={} tx_sz_ctx={tx_sz_ctx} skip_ctx={skip_ctx} cdf={:?} rng={} val={}",
+            blk.plane, blk.x4, blk.y4, cdfs.txb_skip[tx_sz_ctx][skip_ctx], dec.raw_state().0, dec.raw_state().1
+        );
+    }
     let all_zero = dec.read_symbol(&mut cdfs.txb_skip[tx_sz_ctx][skip_ctx]) == 1;
 
     if !all_zero {

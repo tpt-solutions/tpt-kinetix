@@ -396,6 +396,11 @@ impl<'a> TileDecodeState<'a> {
                 "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}"
             );
         }
+        if std::env::var("KINETIX_AV1_DBG_PARTALL").is_ok() {
+            eprintln!(
+                "DBG partition mi=({mi_col},{mi_row}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition}"
+            );
+        }
 
         // Only `PARTITION_SPLIT` (and the 1:4 variants that recurse) descend into
         // smaller blocks; every other partition resolves into leaf blocks at the
@@ -514,6 +519,12 @@ impl<'a> TileDecodeState<'a> {
         };
         let ctx = self.tx_depth_context(mi_row, mi_col, max_tx);
         let tx_depth = self.mode_cdfs.read_tx_level(&mut self.dec, bucket, ctx);
+        if std::env::var("KINETIX_AV1_DBG_TXSIZE").is_ok() {
+            eprintln!(
+                "DBG txsize mi=({mi_col},{mi_row}) bsize={bsize} max_tx={max_tx} ctx={ctx} above_w={} left_h={} tx_depth={tx_depth}",
+                self.tx_above[mi_col], self.tx_left[mi_row]
+            );
+        }
         // AV1 spec §5.11.15: `TxSize = maxRectTxSize; for (i = 0; i <
         // tx_depth; i++) TxSize = Split_Tx_Size[TxSize]`. A previous revision
         // computed `max_tx.saturating_sub(tx_depth)` instead — treating the
