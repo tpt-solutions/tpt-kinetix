@@ -3892,3 +3892,81 @@
 > worst-edge search on mandelbrot (row/col PSNR scan) now that this class
 > of bug is gone, since the specific x=52 edge this session traced may no
 > longer be the worst offender.
+
+> **2026-09-04 (cont'd) -- fixed: two compounding bugs in the loop-filter
+> level derivation (LoopFilterDeltas::default(), and a missing ref-delta
+> shift/mode-delta condition in compute_level).** Fresh worst-row scan on
+> mandelbrot post-4x4-grid-fix found row 64 as the new worst row (46.51
+> dB), with the largest single-pixel divergence at col 96 (got=192
+> ref=182, diff=10). Traced with a patched dav1d: av1_trace_obu's KTRACE
+> BLOCK located the coded block at mi bx=24,by=16 (px 96,64, TX_4X8,
+> DC_PRED); DAV1D_ITXDUMP_BX/BY confirmed dav1d's own raw reconstruction
+> there is bit-exact with Kinetix's (pred=167, residual=27, recon=194
+> both sides -- double-checked directly against dav1d's own
+> --inloopfilters none output). --inloopfilters nodeblock vs default
+> showed dav1d's deblock dropping this pixel from 194 to 183 (an
+> 11-unit change), while Kinetix's deblock left it completely unchanged.
+>
+> Kinetix's own edge/level tracing (KINETIX_AV1_DBG_EDGE, added/used/
+> removed) showed the vertical edge at this exact position was being
+> attempted (edge_left_grid true, lvl=18, filter_size=4) but filter_mask
+> legitimately declined (|q1-q0|=19 > limit=18) -- so the edge-presence/
+> granularity machinery fixed earlier this session was working correctly;
+> the bug had to be in the filter level itself. Patched dav1d's
+> loopfilter_tmpl.c with a DAV1D_LFDUMP env var printing wd/E/I/H/p0/p1/
+> q0/q1/fm whenever p0/q0 matched the known raw value, and -- critically
+> -- added --cpumask 0 to force dav1d's generic C path (its default SIMD/
+> asm path silently bypasses source-level instrumentation entirely; the
+> first attempt without --cpumask 0 found zero matches across the whole
+> frame, which in hindsight was the tell). With the C path forced:
+> dav1d's own I=19 where Kinetix computed limit=18 -- a real 1-level
+> strength desync, not a false decline.
+>
+> Root-caused via dav1d's lf_mask.c calc_lf_value: (1) a `sh = base >=
+> 32` doubling of the ref-delta term (spec's nShift = lvlSeg >> 5) that
+> compute_level never applied (harmless here since base=18 < 32, but a
+> real bug for any segment/frame at level >=32); (2) more directly,
+> dav1d's r=0 (INTRA_FRAME) case adds only ref_delta[0], never a mode
+> delta -- while Kinetix's LoopFilterDeltas derived Default to an
+> all-zero array instead of the spec's real setup_past_independence()
+> reset values (ref_deltas = {1,0,0,0,-1,0,-1,-1}), so ref_delta[0] was
+> silently 0 instead of 1 whenever a frame enables
+> loop_filter_delta_enabled without an explicit per-index update
+> (mandelbrot's case exactly). 18+0(wrong default)=18 vs
+> 18+1(correct)*1(shift=0)=19 -- matches dav1d exactly. Also removed
+> compute_level's unconditional +mode_deltas[0] term (wrong for intra per
+> spec/dav1d, harmless only because it happened to be 0 in every clip
+> tested so far).
+>
+> Verified via av1_psnr_check: mandelbrot Y 57.62 -> 58.79 dB (U/V also
+> up slightly), testsrc Y 73.46 -> 74.88 dB; smptebars/solid_red
+> unchanged at 99.00 dB (no regression); testsrc2 unchanged (separate,
+> already-documented IBC gap). The row-64/col-96 edge traced is now
+> bit-exact. Added a regression test on LoopFilterDeltas::default()'s
+> actual values (the direct root cause); a compute_level-level test was
+> skipped as impractical -- FrameHeader has no Default impl and 140+
+> fields. cargo test -p tpt-kinetix-av1 --lib (132 passed), clippy clean,
+> cargo build --workspace green.
+>
+> Also added a permanent debug utility to av1_psnr_check.rs:
+> KINETIX_AV1_DBG_ROW_RANGE=c0,c1 (paired with KINETIX_AV1_DBG_ROW) dumps
+> the raw got/exp byte arrays for a column range instead of only a diff
+> list. And: the dav1d CLI's built-in --inloopfilters none|nodeblock|
+> nocdef|norestoration flag is far more reliable for isolating filter
+> stages than patching DEBUG_BLOCK_INFO-gated dumps -- prefer it before
+> reaching for a source patch. --cpumask 0 is required for any future
+> loopfilter_tmpl.c-style source patch to actually run, since dav1d's
+> optimized asm paths silently skip C-source instrumentation.
+>
+> **Not fully resolved** -- mandelbrot is still only 58.79 dB. Next
+> targets, in priority order: (1) another fresh worst-row/worst-edge scan
+> (this fix likely shifted many other edges' exact filtered values
+> slightly, so the ranking has probably changed again); (2) apply the
+> same scrutiny to delta_lf (the per-superblock adaptive delta) --
+> deblock_plane's two call sites in apply_post_filters still pass a
+> hardcoded literal 0 for delta_lf, so read_delta_lf's parsed
+> per-superblock deltas (if any test clip uses them) are silently
+> discarded; delta_lf_present=false for the whole current corpus so this
+> hasn't mattered yet, but is a real gap for future content; (3) loop
+> restoration boundary-pixel fix to un-gate apply; (4) IBC var-tx tree +
+> inter tx_type + inter coefficient context.
