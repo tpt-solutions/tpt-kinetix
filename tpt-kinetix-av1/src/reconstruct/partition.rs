@@ -553,6 +553,197 @@ impl<'a> TileDecodeState<'a> {
             av1::TX_HEIGHT[max_tx],
         )
     }
+
+    /// Write `w_samples`/`h_samples` into every `tx_above`/`tx_left` slot
+    /// this block's mi span covers (tile-local, clamped) — shared helper
+    /// for [`read_block_tx_size_ibc`](Self::read_block_tx_size_ibc)'s
+    /// non-tree branches, which each fill the whole block's context range
+    /// with one size in one shot (mirroring dav1d's `dav1d_memset_pow2`
+    /// calls in `read_vartx_tree`'s first two branches).
+    fn set_tx_ctx_range(
+        &mut self,
+        mi_col: usize,
+        mi_row: usize,
+        bw4: usize,
+        bh4: usize,
+        w_samples: usize,
+        h_samples: usize,
+    ) {
+        for c in mi_col..(mi_col + bw4).min(self.mi_cols) {
+            self.tx_above[c] = w_samples as u8;
+        }
+        for r in mi_row..(mi_row + bh4).min(self.mi_rows) {
+            self.tx_left[r] = h_samples as u8;
+        }
+    }
+
+    /// `read_block_tx_size()`'s inter/IBC branch (AV1 spec §5.11.16), for a
+    /// block with `IsInter = 1` (true for IBC as well as real inter
+    /// blocks). Unlike [`read_tx_size`](Self::read_tx_size) (a single
+    /// ternary `tx_depth` symbol, intra blocks only), this reads a
+    /// recursive quad-tree of binary `txfm_split` symbols — one
+    /// [`read_tx_tree`](Self::read_tx_tree) call per `Max_Tx_Size_Rect`-
+    /// sized top-level cell tiling the block, each descending up to
+    /// `MAX_VARTX_DEPTH == 2` further levels — when `TxMode ==
+    /// TX_MODE_SELECT`, the block isn't skipped, and it isn't already
+    /// forced to `TX_4X4` (lossless, or `Max_Tx_Size_Rect` itself is
+    /// `TX_4X4`). Cross-checked against dav1d's `read_vartx_tree`
+    /// (`decode.c`) branch-for-branch, including its two no-entropy-read
+    /// shortcuts (`b->skip` or `TxMode != TX_MODE_SELECT`; `lossless` or
+    /// `max_ytx == TX_4X4`), each of which still updates the shared
+    /// `tx_above`/`tx_left` neighbour-context arrays even though no bits
+    /// are read, since a later sibling block's own `txfm_split` context
+    /// still depends on them.
+    ///
+    /// Returns the resulting leaves as `(mi_col, mi_row, tx_size)` triples
+    /// in absolute tile-local mi coordinates — the caller iterates these to
+    /// reconstruct each actual transform block, in place of the uniform
+    /// fixed-size grid a single `TxSize` would give.
+    pub(super) fn read_block_tx_size_ibc(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        skip: bool,
+    ) -> Vec<(usize, usize, usize)> {
+        let bw4 = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let max_ytx = max_tx_size_for_bsize(bsize);
+        let mut leaves = Vec::new();
+
+        if !skip && (self.lossless || max_ytx == av1::TX_4X4) {
+            if self.tx_mode_select {
+                self.set_tx_ctx_range(
+                    mi_col,
+                    mi_row,
+                    bw4,
+                    bh4,
+                    av1::TX_WIDTH[av1::TX_4X4],
+                    av1::TX_HEIGHT[av1::TX_4X4],
+                );
+            }
+            for r in 0..bh4 {
+                for c in 0..bw4 {
+                    leaves.push((mi_col + c, mi_row + r, av1::TX_4X4));
+                }
+            }
+            return leaves;
+        }
+
+        if !self.tx_mode_select || skip {
+            // Whole block tiled with one Max_Tx_Size_Rect-sized transform,
+            // no entropy read. Context update uses the *block's* own
+            // width/height (matching dav1d's `b_dim`-based memset in this
+            // branch) rather than the transform's — these coincide for any
+            // block <= 64x64 (`Max_Tx_Size_Rect` is capped at 64x64, equal
+            // to the block itself in that common case); a 128x128-superblock
+            // block would need the true block dims here, which is what this
+            // computes regardless.
+            if self.tx_mode_select {
+                self.set_tx_ctx_range(mi_col, mi_row, bw4, bh4, bw4 * MI_SIZE, bh4 * MI_SIZE);
+            }
+            let tw4 = av1::TX_WIDTH[max_ytx] / MI_SIZE;
+            let th4 = av1::TX_HEIGHT[max_ytx] / MI_SIZE;
+            let mut r = 0;
+            while r < bh4 {
+                let mut c = 0;
+                while c < bw4 {
+                    leaves.push((mi_col + c, mi_row + r, max_ytx));
+                    c += tw4;
+                }
+                r += th4;
+            }
+            return leaves;
+        }
+
+        // The real var-tx tree.
+        let tw4 = av1::TX_WIDTH[max_ytx] / MI_SIZE;
+        let th4 = av1::TX_HEIGHT[max_ytx] / MI_SIZE;
+        let mut r = 0;
+        while r < bh4 {
+            let mut c = 0;
+            while c < bw4 {
+                self.read_tx_tree(max_ytx, 0, mi_col + c, mi_row + r, &mut leaves);
+                c += tw4;
+            }
+            r += th4;
+        }
+        leaves
+    }
+
+    /// `read_tx_tree(row, col, txSz, depth)` (AV1 spec §5.11.18
+    /// `read_var_tx_size`, recursive descent). Cross-checked against
+    /// dav1d's `read_tx_tree` (`decode.c`) line-by-line: the `cat`
+    /// category index (`2 * (TX_64X64 - Tx_Size_Sqr_Up[txSz]) - depth`),
+    /// the `a + l` context (`aboveTxWidth < txW`, `leftTxHeight < txH`,
+    /// using the *candidate* node's own width/height, not the eventual
+    /// leaf's), the `depth < MAX_VARTX_DEPTH(2) && txSz != TX_4X4` read
+    /// gate, and the `is_split && Tx_Size_Sqr_Up[txSz] > TX_8X8` recursion
+    /// gate (an 8x8-or-smaller-square-class node that reads `txfm_split ==
+    /// 1` splits straight to `TX_4X4` in one step with no further entropy
+    /// read, since there is nothing left to decide below that size).
+    fn read_tx_tree(
+        &mut self,
+        from: usize,
+        depth: usize,
+        mi_col: usize,
+        mi_row: usize,
+        out: &mut Vec<(usize, usize, usize)>,
+    ) {
+        let txw = av1::TX_WIDTH[from];
+        let txh = av1::TX_HEIGHT[from];
+        let is_split = if depth < 2 && from != av1::TX_4X4 {
+            let cat = (2 * (av1::TX_64X64 as i32 - av1::TX_SIZE_SQR_UP[from] as i32) - depth as i32)
+                as usize;
+            let a = (self.tx_above[mi_col] as usize) < txw;
+            let l = (self.tx_left[mi_row] as usize) < txh;
+            self.mode_cdfs
+                .read_txfm_split(&mut self.dec, cat, a as usize + l as usize)
+        } else {
+            false
+        };
+
+        if is_split && av1::TX_SIZE_SQR_UP[from] > av1::TX_8X8 {
+            let sub = av1::SPLIT_TX_SIZE[from];
+            let subw4 = av1::TX_WIDTH[sub] / MI_SIZE;
+            let subh4 = av1::TX_HEIGHT[sub] / MI_SIZE;
+            let fromw4 = txw / MI_SIZE;
+            let fromh4 = txh / MI_SIZE;
+            self.read_tx_tree(sub, depth + 1, mi_col, mi_row, out);
+            if fromw4 >= fromh4 && mi_col + subw4 < self.mi_cols {
+                self.read_tx_tree(sub, depth + 1, mi_col + subw4, mi_row, out);
+            }
+            if fromh4 >= fromw4 && mi_row + subh4 < self.mi_rows {
+                self.read_tx_tree(sub, depth + 1, mi_col, mi_row + subh4, out);
+                if fromw4 >= fromh4 && mi_col + subw4 < self.mi_cols {
+                    self.read_tx_tree(sub, depth + 1, mi_col + subw4, mi_row + subh4, out);
+                }
+            }
+        } else {
+            let leaf_tx = if is_split { av1::TX_4X4 } else { from };
+            let leaf_w4 = av1::TX_WIDTH[leaf_tx] / MI_SIZE;
+            let leaf_h4 = av1::TX_HEIGHT[leaf_tx] / MI_SIZE;
+            let fromw4 = txw / MI_SIZE;
+            let fromh4 = txh / MI_SIZE;
+            self.set_tx_ctx_range(
+                mi_col,
+                mi_row,
+                fromw4,
+                fromh4,
+                av1::TX_WIDTH[leaf_tx],
+                av1::TX_HEIGHT[leaf_tx],
+            );
+            let mut y = 0;
+            while y < fromh4 {
+                let mut x = 0;
+                while x < fromw4 {
+                    out.push((mi_col + x, mi_row + y, leaf_tx));
+                    x += leaf_w4;
+                }
+                y += leaf_h4;
+            }
+        }
+    }
 }
 
 /// `tx_depth`'s CDF-selection context (AV1 spec §8.3.2 / dav1d `get_tx_ctx`):
