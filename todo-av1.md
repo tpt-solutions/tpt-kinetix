@@ -4030,6 +4030,87 @@
 > the same trace-to-first-divergence method used for `dqDenom` and the
 > loop-filter-level bugs above, just not yet applied to this filter.
 
+> **2026-09-04 (cont'd) -- found and fixed the last restoration bug:
+> `sgrproj_filter_plane` used the wrong second projection weight, making
+> SgrProj a complete silent no-op. Loop restoration is now un-gated by
+> default.** After the Wiener h/v swap fix above, checked SgrProj too
+> (mandelbrot uses it: `frame_restoration_type=[2,0,0]`, plane 0 only,
+> `set=10` -> `SGR_PARAMS[10]=[0,0,1,5]` i.e. `r0=0` (5x5 pass disabled),
+> `r1=1` (3x3 pass active)). Enabling `KINETIX_AV1_FILTER=1` for
+> mandelbrot changed **zero bytes** -- confirmed via `KINETIX_AV1_DUMP_
+> FINAL` byte-for-byte `cmp`, not just PSNR rounding. dav1d's own
+> `--inloopfilters none` vs default A/B showed a real effect (1031/12288
+> Y pixels change by ±1), so this was a genuine bug, not "nothing to
+> filter here."
+>
+> Traced with temporary instrumentation (added, used, fully removed):
+> printed `read_lr_unit`'s decoded `xqd=[0, 2]` (matches dav1d's own
+> `sgr_weights[0,2]` exactly -- entropy decode is correct) and
+> `sgrproj_filter_plane`'s internal `a_tab`/`b_tab`/`p_val`/`z`/`alpha`
+> for one exact pixel, which matched a patched dav1d
+> (`DAV1D_SGRDUMP`, forced through `--cpumask 0` so the C source path
+> actually runs -- see the earlier note on why this flag is required)
+> byte-for-byte: `sum=1244 sum_sq=171954 p_val=50 z=0 alpha=255
+> a_tab=35238` both sides. So the guided-filter statistics themselves
+> (box sums, `alpha`, the `AA`/`a_tab` combine table) were provably
+> correct -- the bug had to be in how the two decoded `xqd` values get
+> turned into the two projection weights actually multiplied against the
+> filtered-vs-original difference terms.
+>
+> Found it in dav1d's `lr_apply_tmpl.c`: `params.sgr.w0 =
+> lr->sgr_weights[0]` (raw, direct) but `params.sgr.w1 = 128 -
+> (lr->sgr_weights[0] + lr->sgr_weights[1])` -- the **second** weight is
+> the complement of both decoded values summed, not `sgr_weights[1]`
+> itself, applied unconditionally regardless of which pass(es) are
+> active (a previously-decoded-at-parse-time complement only happens for
+> the *opposite* case, `r1 == 0`, where `read_lr_unit` already
+> pre-computes `xqd[1] = (1<<7) - xqd[0]` for exactly this reason -- so
+> the two complement computations don't stack, they're mutually
+> exclusive by construction). Kinetix's `sgrproj_filter_plane` used
+> `xqd[1]` directly as the weight for the 3×3-pass term. For `xqd=[0,2]`:
+> raw weight `2` makes `(2*t + 1024) >> 11` round to `0` for every
+> `t` in the guided filter's typical range (single/low-double digits) --
+> a complete no-op; the correct complement weight `128 - 0 - 2 = 126`
+> produces real corrections matching dav1d's magnitude (verified: applying
+> weight 126 to the actual observed `t1` range `[-27, 21]` yields
+> `correction ∈ {-2,-1,0,1}`, matching dav1d's own observed `±1` spread
+> exactly).
+>
+> Fixed with a one-line change (`let w1 = (1 << SGRPROJ_PRJ_BITS) -
+> xqd[0] - xqd[1];` used in place of `xqd[1]`). Verified via
+> `av1_psnr_check`: **mandelbrot Y 58.79 -> 70.45 dB** (U/V unaffected --
+> only plane 0 uses restoration for this clip), testsrc unaffected
+> (Wiener path doesn't touch this weight). Diffed the restored mandelbrot
+> Y plane directly against dav1d byte-for-byte: only **72/12288 pixels**
+> (all `±1`) still differ -- essentially identical to the **71/12288**
+> gap already present *before* restoration even runs (re-confirmed via
+> `--inloopfilters norestoration`), meaning restoration's own math is now
+> correct to the precision of its (separately tracked, imperfect) input.
+>
+> **Given all three restoration bugs found this session (unit-boundary
+> clamping, Wiener h/v swap, SgrProj weight complement) are fixed and
+> verified as unconditional net improvements with zero corpus
+> regressions, un-gated `apply_post_filters` to run restoration
+> unconditionally (`if fh.uses_lr`) instead of behind
+> `KINETIX_AV1_FILTER=1`.** Added a regression test reproducing the exact
+> `xqd=[0,2]` real-world case (`sgrproj_uses_the_complement_weight_not_
+> the_raw_second_xqd`). 134 unit tests pass, clippy clean, `cargo build
+> --workspace` green, all `tpt-kinetix-av1` integration/proptest/doctests
+> pass.
+>
+> **Remaining known restoration gaps** (not blocking, since current
+> behavior is a strict improvement either way): the "mix" configuration
+> (both `r0` and `r1` nonzero, i.e. both 5×5 and 3×3 passes active
+> simultaneously) has zero corpus coverage -- the weight-complement fix
+> should apply identically there per dav1d's code (same `w0`/`w1`
+> computation regardless of which passes are active), but hasn't been
+> observed on real content; the real §7.17.1 stripe-line-buffer boundary
+> handling (vs this session's plane-edge-clamped approximation) also
+> remains unverified since every corpus clip's restoration units so far
+> happen to be single-unit-per-plane (`unit_size` ≥ the whole plane), so
+> cross-unit-boundary behavior has never actually been exercised on real
+> content despite the earlier fix.
+
 > **2026-09-04 (cont'd) -- found and fixed the real restoration bug:
 > `read_lr_unit`'s decoded Wiener filter had its horizontal and vertical
 > taps swapped.** Followed the exact plan from the note above -- dav1d's
