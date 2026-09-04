@@ -7,38 +7,45 @@
 
 Everything below is independent of the H.264 decoder effort:
 
-- **AV1 decoder — the largest remaining item.** 2026-09-03: intra keyframe
+- **AV1 decoder — the largest remaining item.** 2026-09-04: intra keyframe
   reconstruction is essentially solved (see the 2026-09-01 notes in
   todo-av1.md); loop filter (deblock + CDEF) bugs are fixed and now improve
   PSNR instead of being a no-op; loop restoration (§7.17, Wiener + SgrProj)
   is implemented but its *apply* step is gated off
   (`KINETIX_AV1_FILTER=1`) pending a restoration-unit-boundary pixel fix;
-  Intra Block Copy reconstruction exists (`reconstruct_ibc_block`) but only
-  covers the simple case (single-size transform, intra-style coefficient
-  context) — a 2026-09-03 dav1d-trace-diff session fixed a real bug (skipped
-  transform blocks weren't resetting their coefficient neighbour context,
-  desyncing the very next block that shared their rows/columns) and then
-  hit, and confirmed, the next real gap: IBC blocks that need the var-tx
-  tree + an **inter** `tx_type` + inter coefficient context, which
-  `reconstruct_ibc_block` doesn't implement — genuine Phase-E-shaped work,
-  not a small fix.
-  **Corpus (`av1_psnr_check`, Y/U/V dB): solid_red 99/99/99; testsrc
-  73.01/53.76/49.23; mandelbrot 47.59/52.44/52.62; smptebars 57.49/99/99;
-  testsrc2 23.11/25.08/16.95 — blocked on Intra Block Copy's inter-coded
-  coefficient path.**
-  **Remaining AV1 open items, in priority order:** (1) small residual
-  directional-prediction error on mandelbrot (edge-filter upsample
-  interpolation / `dr_z3` `max_base_y = h+min(w,h)-1`, not yet root-caused);
-  (2) loop filter improved but not yet *verified* bit-exact block-by-block
-  against dav1d; (3) loop restoration apply step needs its restoration-unit
-  boundary handling fixed before it can be un-gated; (4) Intra Block Copy's
-  var-tx tree + inter `tx_type` + inter coeff context (Phase E-shaped) —
-  blocks testsrc2; `read_mv_component`'s classN path in `inter_block.rs`
-  still looks wrong and should be checked first when this is picked up; (5)
+  Intra Block Copy reconstruction (`reconstruct_ibc_block`) now implements
+  the var-tx tree + inter `tx_type` + inter coefficient context for both
+  luma and chroma. A 2026-09-04 dav1d-trace-diff session fixed the last of
+  the concretely-localized inter-coefficient-context bugs: chroma's
+  `tx_type` derivation was feeding `compute_tx_type` a `DCT_DCT` placeholder
+  for the coincident luma leaf's type instead of the real decoded value,
+  desyncing `read_eob`'s `is_1d` context bit for every affected block.
+  Fixed via `TxBlockCtx::coincident_luma_tx_type` + a per-mi-cell lookup
+  grid; verified with full arithmetic-coder state (range + `dif`) matching
+  dav1d exactly across 79 consecutive block checkpoints. IBC/inter-coeff
+  work is not fully bit-exact yet — see the newly localized next divergence
+  below.
+  **Corpus (`av1_psnr_check`, Y/U/V dB): solid_red_32/64 99/99/99;
+  testsrc_128x96 74.88/54.07/55.18; mandelbrot_128x96 70.45/53.15/52.76;
+  smptebars_256x144 99/99/99; testsrc2_320x180 21.98/22.49/16.90 — still
+  short of bit-exact, next divergence localized to a real-intra block
+  immediately following an IBC block (likely a neighbour-context handoff
+  bug, not another coefficient-context instance).**
+  **Remaining AV1 open items, in priority order:** (1) the newly localized
+  divergence — a real-intra block right after an IBC block desyncs its own
+  `skip`/`ymode` context reads (dav1d `r=53934` vs Kinetix `r=47548` at
+  `Post-tx[7]`, block `bx=54,by=36`); likely IBC's end-of-block neighbour-
+  context update leaves stale/wrong state for the next block — see
+  todo-av1.md's 2026-09-04 note for the exact trace evidence and next step;
+  (2) small residual directional-prediction error on mandelbrot (edge-filter
+  upsample interpolation / `dr_z3` `max_base_y = h+min(w,h)-1`, not yet
+  root-caused); (3) loop filter improved but not yet *verified* bit-exact
+  block-by-block against dav1d; (4) loop restoration apply step needs its
+  restoration-unit boundary handling fixed before it can be un-gated; (5)
   inter prediction generally (Phase E) — MV pred §7.10 + inter recon
   §7.11.3 unimplemented, decoder returns `Ok(None)` for non-keyframes; (6)
-  then flip `capabilities().pixel_exact`. 126 unit tests pass, clippy
-  clean. See todo-av1.md for the full per-bug postmortems (2026-09-03
+  then flip `capabilities().pixel_exact`. 139 unit tests pass, clippy
+  clean. See todo-av1.md for the full per-bug postmortems (2026-09-04
   session note has the latest).
 - **AAC decoder — one small accuracy gap left.** 2026-08-30 the PNS /
   `noise_mono_44100` gap is CLOSED (separate `noise_sfo` DPCM predictor in
