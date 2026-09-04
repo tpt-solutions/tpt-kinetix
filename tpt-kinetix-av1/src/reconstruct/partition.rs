@@ -228,9 +228,22 @@ impl<'a> TileDecodeState<'a> {
                         self.ref_lr_wiener[plane][pass][j] = v;
                     }
                 }
+                // §5.11.58's read order decodes the *vertical* pass's three
+                // coefficients first (`pass == 0`), then the *horizontal*
+                // pass's (`pass == 1`) -- cross-checked against dav1d's
+                // `read_restoration_info` (`decode.c`), which reads
+                // `filter_v` before `filter_h` in that same order. A
+                // previous version of this function labelled them the other
+                // way around (`h: pass[0], v: pass[1]`), silently swapping
+                // every decoded Wiener filter's horizontal and vertical taps
+                // -- confirmed against dav1d's own `Post-lr_wiener` trace
+                // line for testsrc's one restored unit: dav1d decoded
+                // `v=[0,-2,5], h=[0,0,0]`, Kinetix's unswapped read produced
+                // the same three-coefficient sequence but filed it as
+                // `h=[0,-2,5], v=[0,0,0]` -- exactly transposed.
                 LrUnitData::Wiener {
-                    h: self.ref_lr_wiener[plane][0],
-                    v: self.ref_lr_wiener[plane][1],
+                    h: self.ref_lr_wiener[plane][1],
+                    v: self.ref_lr_wiener[plane][0],
                 }
             }
             2 => {
