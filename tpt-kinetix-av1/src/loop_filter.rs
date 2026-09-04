@@ -110,14 +110,44 @@ pub struct FrameMeta {
     pub luma_tx_h: Vec<u8>,
     /// Whether the luma tx block covering each 4×4 cell was a skip block.
     pub luma_skip: Vec<bool>,
-    /// `luma_tx_left[by4 * w4 + bx4]` — true when a new luma tx block starts
-    /// at the *left* edge of cell (bx4, by4), i.e. the column is a vertical
-    /// transform boundary the deblock filter may cross.
-    pub luma_tx_left: Vec<bool>,
-    /// `luma_tx_top[by4 * w4 + bx4]` — true when a new luma tx block starts
-    /// at the *top* edge of cell (bx4, by4), i.e. the row is a horizontal
-    /// transform boundary.
-    pub luma_tx_top: Vec<bool>,
+    /// Whether this 8×8-luma grid cell is the *left* edge of a real luma
+    /// transform block (AV1 §7.14.1's `isTxEdge`/`isBlockEdge`, restricted to
+    /// the vertical-pass axis) — i.e. whether `record_luma` was called for
+    /// this cell as the leftmost column of the block's own span, not as an
+    /// interior column a wider transform also happens to cover. `false` for
+    /// an interior cell means `deblock_plane`'s vertical pass must *not*
+    /// filter the boundary immediately to this cell's left: no real edge
+    /// exists there, even though the (purely size-based) `filter_size`
+    /// computation alone can't tell the difference between "two adjacent
+    /// same-size transforms" and "one wide transform spanning both grid
+    /// cells". See `record_luma`'s doc comment.
+    pub luma_edge_left: Vec<bool>,
+    /// Same as `luma_edge_left`, for the horizontal pass (top edge of a real
+    /// transform block).
+    pub luma_edge_top: Vec<bool>,
+    /// Number of 4×4-luma cells horizontally — AV1 §7.14.1's actual deblock
+    /// edge-candidate grid. A luma transform can be as narrow/short as 4
+    /// samples (`TX_4X4`/`TX_4X8`/`TX_8X4`), so two independent transforms
+    /// can meet at a boundary that is a multiple of 4 but *not* of 8 (e.g.
+    /// `x=52`) — a grid resolved only to 8×8 cells (`w8`/`h8` above) can
+    /// never even *represent* such a boundary, let alone filter it, since
+    /// its edge loop only visits `bx*8` positions. `luma_edge_left4`/
+    /// `luma_edge_top4` below are the finer-grained counterpart used by
+    /// `deblock_plane`'s luma pass; chroma's minimum transform width in
+    /// chroma samples is 4 (`TX_4X4`), i.e. 8 *luma* samples, so chroma's
+    /// existing 8×8-luma-resolution grid already matches its true minimum
+    /// edge granularity and needs no separate 4×4 version.
+    pub w4: usize,
+    /// Number of 4×4-luma cells vertically. See `w4`.
+    pub h4: usize,
+    /// Same role as `luma_tx_w`, at 4×4-luma-cell resolution.
+    pub luma_tx_w4: Vec<u8>,
+    /// Same role as `luma_tx_h`, at 4×4-luma-cell resolution.
+    pub luma_tx_h4: Vec<u8>,
+    /// Same role as `luma_edge_left`, at 4×4-luma-cell resolution. See `w4`.
+    pub luma_edge_left4: Vec<bool>,
+    /// Same role as `luma_edge_top`, at 4×4-luma-cell resolution. See `w4`.
+    pub luma_edge_top4: Vec<bool>,
     /// Largest chroma transform width/height (in samples) for the co-located
     /// 4×4 block. See `luma_tx_w`/`luma_tx_h`.
     pub u_tx_w: Vec<u8>,
@@ -126,13 +156,13 @@ pub struct FrameMeta {
     pub v_tx_w: Vec<u8>,
     pub v_tx_h: Vec<u8>,
     pub v_skip: Vec<bool>,
-    /// `uv_tx_left[by * w8 + bx]` — true when a chroma tx block starts at the
-    /// left edge of 4-chroma-pixel cell (bx, by). Used to skip non-boundary
-    /// positions for large chroma transforms (same logic as `luma_tx_left`).
-    pub uv_tx_left: Vec<bool>,
-    /// `uv_tx_top[by * w8 + bx]` — true when a chroma tx block starts at the
-    /// top edge of 4-chroma-pixel cell (bx, by).
-    pub uv_tx_top: Vec<bool>,
+    /// Chroma edge-presence grids — see `luma_edge_left`/`luma_edge_top`.
+    /// Shared between U and V: `record_chroma` always writes both planes'
+    /// size/skip from the same call with the same block span, so a single
+    /// pair of grids is sufficient (mirrors `record_chroma` itself, which
+    /// has no separate `u`-vs-`v` block-span notion).
+    pub chroma_edge_left: Vec<bool>,
+    pub chroma_edge_top: Vec<bool>,
     /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
     /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
@@ -163,28 +193,32 @@ impl FrameMeta {
     pub fn new(width: usize, height: usize) -> Self {
         let w8 = width.div_ceil(8);
         let h8 = height.div_ceil(8);
-        let len8 = w8 * h8;
+        let len = w8 * h8;
         let w4 = width.div_ceil(4);
         let h4 = height.div_ceil(4);
         let len4 = w4 * h4;
         FrameMeta {
             w8,
             h8,
+            luma_tx_w: vec![0u8; len],
+            luma_tx_h: vec![0u8; len],
+            luma_skip: vec![true; len],
+            u_tx_w: vec![0u8; len],
+            u_tx_h: vec![0u8; len],
+            u_skip: vec![true; len],
+            v_tx_w: vec![0u8; len],
+            v_tx_h: vec![0u8; len],
+            v_skip: vec![true; len],
+            luma_edge_left: vec![false; len],
+            luma_edge_top: vec![false; len],
+            chroma_edge_left: vec![false; len],
+            chroma_edge_top: vec![false; len],
             w4,
             h4,
-            luma_tx_w: vec![0u8; len4],
-            luma_tx_h: vec![0u8; len4],
-            luma_skip: vec![true; len4],
-            luma_tx_left: vec![false; len4],
-            luma_tx_top: vec![false; len4],
-            u_tx_w: vec![0u8; len8],
-            u_tx_h: vec![0u8; len8],
-            u_skip: vec![true; len8],
-            v_tx_w: vec![0u8; len8],
-            v_tx_h: vec![0u8; len8],
-            v_skip: vec![true; len8],
-            uv_tx_left: vec![false; len8],
-            uv_tx_top: vec![false; len8],
+            luma_tx_w4: vec![0u8; len4],
+            luma_tx_h4: vec![0u8; len4],
+            luma_edge_left4: vec![false; len4],
+            luma_edge_top4: vec![false; len4],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -196,14 +230,68 @@ impl FrameMeta {
     }
 
     #[inline]
-    fn idx4(&self, bx4: usize, by4: usize) -> usize {
-        by4 * self.w4 + bx4
+    fn idx4(&self, bx: usize, by: usize) -> usize {
+        by * self.w4 + bx
     }
 
-    /// Record that the 4×4-luma cell at `(bx4, by4)` (tile-local 4-sample
-    /// coordinates) belongs to a luma tx block of size `tx_w`×`tx_h` (samples).
-    pub fn record_luma(&mut self, bx4: usize, by4: usize, tx_w: u8, tx_h: u8, skip: bool) {
-        if bx4 >= self.w4 || by4 >= self.h4 {
+    /// 4×4-luma-cell counterpart of [`record_luma`](Self::record_luma) — see
+    /// `w4`'s doc comment for why luma needs this finer grid for deblocking.
+    /// Records the transform size over the cell span `[bx0,bx1) x [by0,by1)`
+    /// (4×4-grid coordinates, half-open); callers pass the *same* span used
+    /// for the matching [`mark_luma_edges4`](Self::mark_luma_edges4) call.
+    pub fn record_luma4(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        tx_w: u8,
+        tx_h: u8,
+    ) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by);
+                self.luma_tx_w4[i] = self.luma_tx_w4[i].max(tx_w);
+                self.luma_tx_h4[i] = self.luma_tx_h4[i].max(tx_h);
+            }
+        }
+    }
+
+    /// 4×4-luma-cell counterpart of [`mark_luma_edges`](Self::mark_luma_edges).
+    pub fn mark_luma_edges4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        if bx0 < self.w4 {
+            for by in by0..by1c {
+                let i = self.idx4(bx0, by);
+                self.luma_edge_left4[i] = true;
+            }
+        }
+        if by0 < self.h4 {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by0);
+                self.luma_edge_top4[i] = true;
+            }
+        }
+    }
+
+    /// Record that the 8×8-luma region covering block `(by, bx)` used a luma
+    /// transform of size `tx_w`×`tx_h` (samples) and was skipped iff `skip`.
+    ///
+    /// This alone does **not** establish where real transform edges are: a
+    /// transform wider/taller than 8 samples spans *multiple* 8×8 grid
+    /// cells, and callers call this once per cell with the block's own
+    /// (identical) size for every one of them — so `luma_tx_w`/`_h` alone
+    /// can't distinguish "this cell is the interior of one wide transform"
+    /// from "this cell starts its own same-size transform". Callers must
+    /// also call [`mark_luma_edges`](Self::mark_luma_edges) once per real
+    /// transform block (not once per cell) with that block's own span, so
+    /// `deblock_plane` knows which grid lines are real AV1 §7.14.1
+    /// `isTxEdge`/`isBlockEdge` boundaries and which are purely interior.
+    pub fn record_luma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
+        if bx >= self.w8 || by >= self.h8 {
             return;
         }
         let i = self.idx4(bx4, by4);
@@ -245,6 +333,8 @@ impl FrameMeta {
     }
 
     /// Record chroma transform metadata for the 8×8-luma region `(by, bx)`.
+    /// See `record_luma`'s doc comment — pair with
+    /// [`mark_chroma_edges`](Self::mark_chroma_edges).
     pub fn record_chroma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
         if bx >= self.w8 || by >= self.h8 {
             return;
@@ -258,30 +348,57 @@ impl FrameMeta {
         self.v_skip[i] = self.v_skip[i] && skip;
     }
 
-    /// Merge a tile-local `FrameMeta` into the full-frame meta. `ox4`/`oy4`
-    /// are the tile's 4-sample luma-grid offsets. (Unused until parallel tile
-    /// decoding is wired; kept here for forward compatibility.)
-    pub fn merge_tile(&mut self, src: &FrameMeta, ox4: usize, oy4: usize) {
-        // Luma at 4-sample granularity.
-        for by4 in 0..src.h4 {
-            for bx4 in 0..src.w4 {
-                let dbx = ox4 + bx4;
-                let dby = oy4 + by4;
-                if dbx >= self.w4 || dby >= self.h4 {
-                    continue;
-                }
-                let si = by4 * src.w4 + bx4;
-                let di = self.idx4(dbx, dby);
-                self.luma_tx_w[di] = self.luma_tx_w[di].max(src.luma_tx_w[si]);
-                self.luma_tx_h[di] = self.luma_tx_h[di].max(src.luma_tx_h[si]);
-                self.luma_skip[di] = self.luma_skip[di] && src.luma_skip[si];
-                self.luma_tx_left[di] |= src.luma_tx_left[si];
-                self.luma_tx_top[di] |= src.luma_tx_top[si];
+    /// Mark the real transform-edge boundaries of one luma coded block's own
+    /// span `[bx0, bx1) x [by0, by1)` (8×8-grid coordinates, half-open) —
+    /// only its own leftmost column and topmost row are genuine AV1 §7.14.1
+    /// edges; everything strictly inside is not. Call once per real
+    /// transform block, in addition to (not instead of) the per-cell
+    /// `record_luma` calls. OR-combines so a real edge established by any
+    /// tile/call sticks (matches `record_luma`'s own merge-safe `max`/`&&`).
+    pub fn mark_luma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h8);
+        let bx1c = bx1.min(self.w8);
+        if bx0 < self.w8 {
+            for by in by0..by1c {
+                let i = self.idx(bx0, by);
+                self.luma_edge_left[i] = true;
             }
         }
-        // Chroma at 8-luma-sample granularity.
-        let ox8 = ox4 / 2;
-        let oy8 = oy4 / 2;
+        if by0 < self.h8 {
+            for bx in bx0..bx1c {
+                let i = self.idx(bx, by0);
+                self.luma_edge_top[i] = true;
+            }
+        }
+    }
+
+    /// Chroma counterpart of [`mark_luma_edges`](Self::mark_luma_edges) — see
+    /// its doc comment. Takes the same 8×8-luma-grid span a chroma
+    /// transform's `record_chroma` calls cover (chroma is stored at the
+    /// luma-grid resolution, per `FrameMeta`'s own doc comment).
+    pub fn mark_chroma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h8);
+        let bx1c = bx1.min(self.w8);
+        if bx0 < self.w8 {
+            for by in by0..by1c {
+                let i = self.idx(bx0, by);
+                self.chroma_edge_left[i] = true;
+            }
+        }
+        if by0 < self.h8 {
+            for bx in bx0..bx1c {
+                let i = self.idx(bx, by0);
+                self.chroma_edge_top[i] = true;
+            }
+        }
+    }
+
+    /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
+    /// into this full-frame meta, offsetting by `(ox, oy)` 8×8-luma-block
+    /// positions. AV1 tiles cover disjoint block rectangles, so the `max` /
+    /// `&&` combine rules in `record_luma`/`record_chroma` are correct for
+    /// merging.
+    pub fn merge_tile(&mut self, src: &FrameMeta, ox: usize, oy: usize) {
         for by in 0..src.h8 {
             for bx in 0..src.w8 {
                 let dbx = ox8 + bx;
@@ -289,11 +406,35 @@ impl FrameMeta {
                 if dbx >= self.w8 || dby >= self.h8 {
                     continue;
                 }
-                let si = by * src.w8 + bx;
-                self.record_chroma(dbx, dby, src.u_tx_w[si], src.u_tx_h[si], src.u_skip[si]);
-                let di = self.idx8(dbx, dby);
-                self.uv_tx_left[di] |= src.uv_tx_left[si];
-                self.uv_tx_top[di] |= src.uv_tx_top[si];
+                let i = by * src.w8 + bx;
+                self.record_luma(
+                    dbx,
+                    dby,
+                    src.luma_tx_w[i],
+                    src.luma_tx_h[i],
+                    src.luma_skip[i],
+                );
+                self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
+                let di = self.idx(dbx, dby);
+                self.luma_edge_left[di] |= src.luma_edge_left[i];
+                self.luma_edge_top[di] |= src.luma_edge_top[i];
+                self.chroma_edge_left[di] |= src.chroma_edge_left[i];
+                self.chroma_edge_top[di] |= src.chroma_edge_top[i];
+            }
+        }
+        for by in 0..src.h4 {
+            for bx in 0..src.w4 {
+                let dbx = ox * 2 + bx;
+                let dby = oy * 2 + by;
+                if dbx >= self.w4 || dby >= self.h4 {
+                    continue;
+                }
+                let i = by * src.w4 + bx;
+                let di = self.idx4(dbx, dby);
+                self.luma_tx_w4[di] = self.luma_tx_w4[di].max(src.luma_tx_w4[i]);
+                self.luma_tx_h4[di] = self.luma_tx_h4[di].max(src.luma_tx_h4[i]);
+                self.luma_edge_left4[di] |= src.luma_edge_left4[i];
+                self.luma_edge_top4[di] |= src.luma_edge_top4[i];
             }
         }
     }
@@ -314,11 +455,36 @@ fn compute_level(fh: &FrameHeader, plane: usize, pass: usize, delta_lf: i32) -> 
     } else {
         0
     };
-    let mut lvl = base + delta_lf;
+    // §7.14.4: `base` (pre-ref-delta) is clamped to [0,63] *before* the ref
+    // delta is added — cross-checked against dav1d's `calc_lf_value`
+    // (`lf_mask.c`), which computes `base = iclip(base_lvl + lf_delta, 0,
+    // 63)` first, then a separate final `iclip` after adding the delta.
+    let base = (base + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    let mut lvl = base;
     if fh.loop_filter_delta_enabled {
-        // All keyframe blocks are intra: ref = INTRA_FRAME (0), modeType = 0.
-        lvl += fh.loop_filter_deltas.loop_filter_ref_deltas[0] as i32;
-        lvl += fh.loop_filter_deltas.loop_filter_mode_deltas[0] as i32;
+        // §7.14.4's ref-delta term is `loop_filter_ref_deltas[ref] <<
+        // nShift`, where `nShift = lvlSeg >> 5` (i.e. the delta is *doubled*
+        // once `base >= 32`) — cross-checked against dav1d's `calc_lf_value`
+        // (`const int sh = base >= 32;` ... `ref_delta[0] * (1 << sh)`). A
+        // previous version of this function added the raw, unshifted delta
+        // unconditionally, silently under-strengthening every edge at a
+        // frame/segment loop-filter level of 32 or higher.
+        let shift = if base >= 32 { 1 } else { 0 };
+        // §7.14.4: for `RefFrame[0] == INTRA_FRAME` (true for every block in
+        // a keyframe-only decoder), only the *ref* delta applies — the mode
+        // delta is added only for inter blocks (`ref_deltas[ref] +
+        // mode_deltas[mode]`, `ref != INTRA_FRAME`). A previous version of
+        // this function added `loop_filter_mode_deltas[0]` unconditionally,
+        // which is wrong for every intra block whenever the bitstream sets a
+        // nonzero mode delta (dav1d's `calc_lf_value`, r=0 case, uses
+        // `ref_delta[0]` alone with no mode-delta term at all) — this
+        // desynced the filter *level itself* (not just which edges get
+        // marked), independently of the deblock-edge-presence and
+        // 4-vs-8-granularity bugs fixed earlier this session, and was found
+        // by comparing dav1d's own `loop_filter()` E/I/H values against
+        // Kinetix's for the exact same edge (mandelbrot's `x=96,y=64`
+        // vertical edge: dav1d `I=19`, Kinetix `I=18` before this fix).
+        lvl += fh.loop_filter_deltas.loop_filter_ref_deltas[0] as i32 * (1 << shift);
     }
     lvl.clamp(0, MAX_LOOP_FILTER)
 }
@@ -579,6 +745,8 @@ fn deblock_plane(
     tx_w_grid: &[u8],
     tx_h_grid: &[u8],
     _skip_grid: &[bool],
+    edge_left_grid: &[bool],
+    edge_top_grid: &[bool],
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
@@ -593,8 +761,21 @@ fn deblock_plane(
     // through a much smaller transform on the other side of the edge, e.g.
     // treating a `TX_16X4`/`TX_8X4` edge as filterSize 16 instead of the
     // spec-correct 4.
+    //
+    // `edge_left_grid[by*grid_w+bx]` gates this on whether `bx` is actually
+    // the left edge of a real transform block (AV1 §7.14.1's
+    // `isTxEdge`/`isBlockEdge`) — a transform wider than 8 samples spans
+    // multiple grid cells with the *same* recorded size, which
+    // `left_tx.min(right_tx)` alone can't distinguish from two independent
+    // same-size transforms meeting at a real edge. Skipping this check used
+    // to filter every 8-px grid line unconditionally, including ones
+    // strictly inside a single wide transform where AV1 has no edge to
+    // filter at all.
     for by in 0..grid_h {
         for bx in 1..grid_w {
+            if !edge_left_grid[by * grid_w + bx] {
+                continue;
+            }
             let lvl = compute_level(fh, plane_index, 0, 0);
             if lvl == 0 {
                 continue;
@@ -644,6 +825,9 @@ fn deblock_plane(
     // content transition into the flat region next to it.
     for bx in 0..grid_w {
         for by in 1..grid_h {
+            if !edge_top_grid[by * grid_w + bx] {
+                continue;
+            }
             let lvl = compute_level(fh, plane_index, 1, 0);
             if lvl == 0 {
                 continue;
@@ -884,6 +1068,10 @@ fn cdef_filter_block(
 /// `dav1d_sgr_x_by_x[256]`: lookup table used by the self-guided restoration
 /// filter to convert the normalised variance index `z` into the mixing weight
 /// α (§7.17.5). Source: dav1d `src/tables.c`, `BITDEPTH == 8`.
+/// §7.17.4's SGRPROJ projection weight scale (`w0 + w1 + w2 == 1 <<
+/// SGRPROJ_PRJ_BITS`, matching `read_lr_unit`'s own copy of this constant).
+const SGRPROJ_PRJ_BITS: i32 = 7;
+
 const SGR_X_BY_X: [u8; 256] = [
     255, 128, 85, 64, 51, 43, 37, 32, 28, 26, 23, 21, 20, 18, 17, 16, 15, 14, 13, 13, 12, 12, 11,
     11, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5,
@@ -947,39 +1135,77 @@ const SGR_PARAMS: [[i32; 4]; 16] = [
 ///   inter = clip((bias + sum + 4) >> 3, 0, 8191)
 /// - Vertical: start_sum = -(1<<18), fv[3]=128-2*(v0+v1+v2);
 ///   out = clip((start + sum + 1024) >> 11, 0, 255)
-fn wiener_filter_plane(plane: &mut [u8], w: usize, h: usize, half_h: [i32; 3], half_v: [i32; 3]) {
-    let src = plane.to_vec();
+///
+/// `full_src`/`pw`/`ph` are the *whole plane*'s pre-restoration snapshot and
+/// dimensions — taps are drawn from real neighbouring pixels (clamped only
+/// at the true plane edge), not from a copy of just this restoration unit
+/// clamped at the unit's own boundary. `(ux0,uy0)`/`(uw,uh)` is the output
+/// unit's region within `plane`; only that region is written.
+///
+/// A previous version of this function operated on an isolated per-unit
+/// buffer (extracted from the plane, filtered, written back), so every tap
+/// that reached past the unit's own edge — inescapable for a 7-tap filter on
+/// a unit as small as 32px, i.e. every row/column within 3px of a unit
+/// boundary — clamped to *that unit's own* edge sample instead of reading
+/// the real pixel just across the boundary in the neighbouring unit. AV1's
+/// actual boundary handling (§7.17.1's stripe line buffers, captured
+/// pre-deblock at 64-row intervals) is more involved than plain full-plane
+/// clamping, so this is still an approximation, not a full spec match — but
+/// it is a strict improvement over unit-local clamping for the common case
+/// of two adjacent, already-deblocked/CDEF'd units away from a 64-row
+/// stripe seam.
+#[allow(clippy::too_many_arguments)]
+fn wiener_filter_plane(
+    plane: &mut [u8],
+    full_src: &[u8],
+    pw: usize,
+    ph: usize,
+    ux0: usize,
+    uy0: usize,
+    uw: usize,
+    uh: usize,
+    half_h: [i32; 3],
+    half_v: [i32; 3],
+) {
     let build_filter = |half: [i32; 3]| -> [i32; 7] {
         let c = 128 - 2 * (half[0] + half[1] + half[2]);
         [half[0], half[1], half[2], c, half[2], half[1], half[0]]
     };
     let fh = build_filter(half_h);
     let fv = build_filter(half_v);
+    let src_at = |x: isize, y: isize| -> i32 {
+        let xi = x.clamp(0, pw as isize - 1) as usize;
+        let yi = y.clamp(0, ph as isize - 1) as usize;
+        full_src[yi * pw + xi] as i32
+    };
 
     // Horizontal pass — bias keeps intermediate values non-negative.
-    // inter ∈ [0, 8191] (13-bit).
-    let mut inter = vec![0i32; w * h];
-    for y in 0..h {
-        for x in 0..w {
+    // inter ∈ [0, 8191] (13-bit). Computed over the unit's rows padded by
+    // ±3 for the vertical pass's own tap reach.
+    let inter_h = uh + 6;
+    let mut inter = vec![0i32; uw * inter_h];
+    for iy in 0..inter_h {
+        let y = uy0 as isize + iy as isize - 3;
+        for x in 0..uw {
             let mut sum = 1i32 << 14; // horizontal bias
             for (i, &fi) in fh.iter().enumerate() {
-                let xi = (x as i32 + i as i32 - 3).clamp(0, w as i32 - 1) as usize;
-                sum += fi * src[y * w + xi] as i32;
+                let xi = ux0 as isize + x as isize + i as isize - 3;
+                sum += fi * src_at(xi, y);
             }
-            inter[y * w + x] = ((sum + 4) >> 3).clamp(0, 8191);
+            inter[iy * uw + x] = ((sum + 4) >> 3).clamp(0, 8191);
         }
     }
 
     // Vertical pass — matching negative bias; out ∈ [0, 255].
     let round_offset_v = -(1i32 << 18);
-    for y in 0..h {
-        for x in 0..w {
+    for y in 0..uh {
+        for x in 0..uw {
             let mut sum = round_offset_v;
             for (i, &fi) in fv.iter().enumerate() {
-                let yi = (y as i32 + i as i32 - 3).clamp(0, h as i32 - 1) as usize;
-                sum += fi * inter[yi * w + x];
+                let iy = y + i; // (y + i - 3) offset by the +3 padding above
+                sum += fi * inter[iy * uw + x];
             }
-            plane[y * w + x] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
+            plane[(uy0 + y) * pw + (ux0 + x)] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
         }
     }
 }
@@ -989,23 +1215,53 @@ fn wiener_filter_plane(plane: &mut [u8], w: usize, h: usize, half_h: [i32; 3], h
 /// Implements both the 5×5 (pass 0, radius r0) and 3×3 (pass 1, radius r1)
 /// guided-filter passes and combines them with the decoded `xqd` weights.
 /// The algorithm and constants follow the dav1d C reference (8-bit path).
+///
+/// `full_src`/`pw`/`ph`/`(ux0,uy0)`/`(uw,uh)`: see `wiener_filter_plane`'s
+/// doc comment — same full-plane-clamped-taps approach, for the same
+/// unit-local-clamping bug.
 #[allow(clippy::too_many_arguments)]
-fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [i32; 2]) {
-    let src = plane.to_vec();
+fn sgrproj_filter_plane(
+    plane: &mut [u8],
+    full_src: &[u8],
+    pw: usize,
+    ph: usize,
+    ux0: usize,
+    uy0: usize,
+    uw: usize,
+    uh: usize,
+    set: usize,
+    xqd: [i32; 2],
+) {
+    let src_at = |x: isize, y: isize| -> i32 {
+        let xi = x.clamp(0, pw as isize - 1) as usize;
+        let yi = y.clamp(0, ph as isize - 1) as usize;
+        full_src[yi * pw + xi] as i32
+    };
+    // a_tab/b_tab need a 1-cell (3×3 pass) / 1-cell (5×5 pass, `yn = y+1`
+    // only looks forward) halo around the unit; padding by 1 on every side
+    // covers both passes uniformly.
+    let pad = 1isize;
+    let aw = uw + 2 * pad as usize;
+    let ah = uh + 2 * pad as usize;
+    let a_idx = |x: isize, y: isize| -> usize { ((y + pad) as usize) * aw + (x + pad) as usize };
 
     let compute_pass =
         |r: i32, s: u32, n: i32, one_by_n: i32, pair_rows: bool, t: &mut Vec<i32>| {
-            // Build A (alpha*mean) and B (alpha) tables per pixel.
-            let mut a_tab = vec![0i32; w * h];
-            let mut b_tab = vec![0i32; w * h];
-            for y in 0..h {
-                for x in 0..w {
+            // Build A (alpha*mean) and B (alpha) tables over the unit plus a
+            // 1-cell halo, reading real neighbouring-unit pixels (clamped
+            // only at the true plane edge) for the guided-filter's own
+            // radius-r window.
+            let mut a_tab = vec![0i32; aw * ah];
+            let mut b_tab = vec![0i32; aw * ah];
+            for ly in -pad..(uh as isize + pad) {
+                for lx in -pad..(uw as isize + pad) {
                     let (mut sum, mut sum_sq) = (0i32, 0i64);
                     for dy in -r..=r {
                         for dx in -r..=r {
-                            let px = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                            let py = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                            let v = src[py * w + px] as i32;
+                            let v = src_at(
+                                ux0 as isize + lx + dx as isize,
+                                uy0 as isize + ly + dy as isize,
+                            );
                             sum += v;
                             sum_sq += (v * v) as i64;
                         }
@@ -1013,79 +1269,57 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
                     let p_val = ((n as i64 * sum_sq - (sum as i64) * (sum as i64)).max(0)) as u64;
                     let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
                     let alpha = SGR_X_BY_X[z] as i32;
-                    a_tab[y * w + x] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
-                    b_tab[y * w + x] = alpha;
+                    let ai = a_idx(lx, ly);
+                    a_tab[ai] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
+                    b_tab[ai] = alpha;
                 }
             }
+            let a = |x: isize, y: isize| a_tab[a_idx(x, y)];
+            let b = |x: isize, y: isize| b_tab[a_idx(x, y)];
+            let s_at = |x: isize, y: isize| src_at(ux0 as isize + x, uy0 as isize + y);
 
             if pair_rows {
                 // 5×5 pass: pairs of output rows use SIX_NEIGHBORS / single-row patterns.
-                let mut y = 0usize;
-                while y < h {
-                    let yn = (y + 1).min(h - 1);
-                    for x in 0..w {
-                        let xl = x.saturating_sub(1);
-                        let xr = (x + 1).min(w - 1);
-                        let a_sum = (a_tab[y * w + x] + a_tab[yn * w + x]) * 6
-                            + (a_tab[y * w + xl]
-                                + a_tab[yn * w + xl]
-                                + a_tab[y * w + xr]
-                                + a_tab[yn * w + xr])
-                                * 5;
-                        let b_sum = (b_tab[y * w + x] + b_tab[yn * w + x]) * 6
-                            + (b_tab[y * w + xl]
-                                + b_tab[yn * w + xl]
-                                + b_tab[y * w + xr]
-                                + b_tab[yn * w + xr])
-                                * 5;
-                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                let mut y = 0isize;
+                while y < uh as isize {
+                    let yn = (y + 1).min(uh as isize - 1);
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, y) + a(x, yn)) * 6
+                            + (a(xl, y) + a(xl, yn) + a(xr, y) + a(xr, yn)) * 5;
+                        let b_sum = (b(x, y) + b(x, yn)) * 6
+                            + (b(xl, y) + b(xl, yn) + b(xr, y) + b(xr, yn)) * 5;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
                     }
-                    if y + 1 < h {
+                    if y + 1 < uh as isize {
                         let y1 = y + 1;
-                        for x in 0..w {
-                            let xl = x.saturating_sub(1);
-                            let xr = (x + 1).min(w - 1);
-                            let a_sum = a_tab[y1 * w + x] * 6
-                                + (a_tab[y1 * w + xl] + a_tab[y1 * w + xr]) * 5;
-                            let b_sum = b_tab[y1 * w + x] * 6
-                                + (b_tab[y1 * w + xl] + b_tab[y1 * w + xr]) * 5;
-                            t[y1 * w + x] =
-                                (a_sum - b_sum * src[y1 * w + x] as i32 + (1 << 7)) >> 8;
+                        for x in 0..uw as isize {
+                            let xl = x - 1;
+                            let xr = x + 1;
+                            let a_sum = a(x, y1) * 6 + (a(xl, y1) + a(xr, y1)) * 5;
+                            let b_sum = b(x, y1) * 6 + (b(xl, y1) + b(xr, y1)) * 5;
+                            t[y1 as usize * uw + x as usize] =
+                                (a_sum - b_sum * s_at(x, y1) + (1 << 7)) >> 8;
                         }
                     }
                     y += 2;
                 }
             } else {
                 // 3×3 pass: EIGHT_NEIGHBORS pattern per row.
-                for y in 0..h {
-                    let ya = y.saturating_sub(1);
-                    let yb = (y + 1).min(h - 1);
-                    for x in 0..w {
-                        let xl = x.saturating_sub(1);
-                        let xr = (x + 1).min(w - 1);
-                        let a_sum = (a_tab[y * w + x]
-                            + a_tab[y * w + xl]
-                            + a_tab[y * w + xr]
-                            + a_tab[ya * w + x]
-                            + a_tab[yb * w + x])
-                            * 4
-                            + (a_tab[ya * w + xl]
-                                + a_tab[ya * w + xr]
-                                + a_tab[yb * w + xl]
-                                + a_tab[yb * w + xr])
-                                * 3;
-                        let b_sum = (b_tab[y * w + x]
-                            + b_tab[y * w + xl]
-                            + b_tab[y * w + xr]
-                            + b_tab[ya * w + x]
-                            + b_tab[yb * w + x])
-                            * 4
-                            + (b_tab[ya * w + xl]
-                                + b_tab[ya * w + xr]
-                                + b_tab[yb * w + xl]
-                                + b_tab[yb * w + xr])
-                                * 3;
-                        t[y * w + x] = (a_sum - b_sum * src[y * w + x] as i32 + (1 << 8)) >> 9;
+                for y in 0..uh as isize {
+                    let ya = y - 1;
+                    let yb = y + 1;
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, y) + a(xl, y) + a(xr, y) + a(x, ya) + a(x, yb)) * 4
+                            + (a(xl, ya) + a(xr, ya) + a(xl, yb) + a(xr, yb)) * 3;
+                        let b_sum = (b(x, y) + b(xl, y) + b(xr, y) + b(x, ya) + b(x, yb)) * 4
+                            + (b(xl, ya) + b(xr, ya) + b(xl, yb) + b(xr, yb)) * 3;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
                     }
                 }
             }
@@ -1093,8 +1327,8 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
 
     let r0 = SGR_PARAMS[set][0];
     let r1 = SGR_PARAMS[set][2];
-    let mut t0 = vec![0i32; w * h];
-    let mut t1 = vec![0i32; w * h];
+    let mut t0 = vec![0i32; uw * uh];
+    let mut t1 = vec![0i32; uw * uh];
 
     if r0 > 0 {
         let n0 = (2 * r0 + 1) * (2 * r0 + 1);
@@ -1107,11 +1341,29 @@ fn sgrproj_filter_plane(plane: &mut [u8], w: usize, h: usize, set: usize, xqd: [
         compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
     }
 
-    for y in 0..h {
-        for x in 0..w {
-            let sv = src[y * w + x] as i32;
-            let correction = (xqd[0] * t0[y * w + x] + xqd[1] * t1[y * w + x] + (1 << 10)) >> 11;
-            plane[y * w + x] = (sv + correction).clamp(0, 255) as u8;
+    // §7.17.4's projection weights: `w0` is `xqd[0]` used directly, but `w1`
+    // is *not* `xqd[1]` directly — it's `(1 << SGRPROJ_PRJ_BITS) - xqd[0] -
+    // xqd[1]`, cross-checked against dav1d's `lr_apply_tmpl.c`
+    // (`params.sgr.w0 = weights[0]; params.sgr.w1 = 128 - (weights[0] +
+    // weights[1]);`, applied unconditionally for every SgrProj unit
+    // regardless of which pass(es) are active). A previous version of this
+    // function used `xqd[1]` unweighted, which is only coincidentally
+    // correct when the 3×3 pass itself is disabled (`r1 == 0`, where
+    // `read_lr_unit` already pre-computes `xqd[1] = (1<<7) - xqd[0]` at
+    // parse time specifically so it doesn't need this transform) — for
+    // every unit that actually *uses* the 3×3 pass (`r1 != 0`, the common
+    // case), the raw decoded `xqd[1]` is roughly `SGRPROJ_PRJ_BITS`-scale
+    // too small on its own (found via a `mandelbrot` unit with `xqd=[0,2]`:
+    // applying `2` as the weight rounds every single pixel's correction to
+    // 0 after the `>> 11` — restoration became a complete no-op — while the
+    // correct weight `128 - 0 - 2 = 126` produces the small ±1 corrections
+    // dav1d's own output actually has).
+    let w1 = (1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1];
+    for y in 0..uh {
+        for x in 0..uw {
+            let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
+            let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
+            plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, 255) as u8;
         }
     }
 }
@@ -1131,6 +1383,14 @@ fn apply_loop_restoration_plane(
     let unit_size = fh.lr_unit_size[plane_idx] as usize;
     let unit_cols = w.div_ceil(unit_size);
     let unit_rows = h.div_ceil(unit_size);
+    // Every unit filters from one shared pre-restoration snapshot of the
+    // *whole* plane (not just its own unit), so its own 7-tap (Wiener) /
+    // radius-r (SgrProj) window can read real neighbouring-unit pixels —
+    // see `wiener_filter_plane`'s doc comment. Taking the snapshot once
+    // here (rather than per-unit) also keeps units mutually independent:
+    // an already-filtered neighbour never leaks into a later unit's input,
+    // matching the spec's per-unit-independent filtering.
+    let full_src = plane.to_vec();
     for ur in 0..unit_rows {
         for uc in 0..unit_cols {
             let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
@@ -1140,27 +1400,13 @@ fn apply_loop_restoration_plane(
             let uy0 = ur * unit_size;
             let uw = unit_size.min(w - ux0);
             let uh = unit_size.min(h - uy0);
-            // Extract the unit's sub-plane into a contiguous buffer.
-            let mut buf = vec![0u8; uw * uh];
-            for row in 0..uh {
-                buf[row * uw..row * uw + uw]
-                    .copy_from_slice(&plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]);
-            }
-            if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
-                eprintln!("DBG LR apply plane={plane_idx} unit=({ur},{uc}) @({ux0},{uy0}) {uw}x{uh} unit={unit:?}");
-            }
             match unit {
                 LrUnitData::Wiener { h: hf, v: vf } => {
-                    wiener_filter_plane(&mut buf, uw, uh, *hf, *vf);
+                    wiener_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *hf, *vf);
                 }
                 LrUnitData::Sgrproj { set, xqd } => {
-                    sgrproj_filter_plane(&mut buf, uw, uh, *set, *xqd);
+                    sgrproj_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *set, *xqd);
                 }
-            }
-            // Write filtered unit back.
-            for row in 0..uh {
-                plane[(uy0 + row) * w + ux0..(uy0 + row) * w + ux0 + uw]
-                    .copy_from_slice(&buf[row * uw..row * uw + uw]);
             }
         }
     }
@@ -1212,14 +1458,14 @@ pub fn apply_post_filters(
             height,
             4,
             0,
-            &meta.luma_tx_w,
-            &meta.luma_tx_h,
+            &meta.luma_tx_w4,
+            &meta.luma_tx_h4,
             &meta.luma_skip,
+            &meta.luma_edge_left4,
+            &meta.luma_edge_top4,
             meta.w4,
             meta.h4,
             fh,
-            Some(&meta.luma_tx_left),
-            Some(&meta.luma_tx_top),
         );
     }
     let sub_x = subsampling_x as usize;
@@ -1235,11 +1481,11 @@ pub fn apply_post_filters(
             &meta.u_tx_w,
             &meta.u_tx_h,
             &meta.u_skip,
+            &meta.chroma_edge_left,
+            &meta.chroma_edge_top,
             meta.w8,
             meta.h8,
             fh,
-            Some(&meta.uv_tx_left),
-            Some(&meta.uv_tx_top),
         );
     }
     if !skip_deblock {
@@ -1253,11 +1499,11 @@ pub fn apply_post_filters(
             &meta.v_tx_w,
             &meta.v_tx_h,
             &meta.v_skip,
+            &meta.chroma_edge_left,
+            &meta.chroma_edge_top,
             meta.w8,
             meta.h8,
             fh,
-            Some(&meta.uv_tx_left),
-            Some(&meta.uv_tx_top),
         );
     }
 
@@ -1304,20 +1550,10 @@ pub fn apply_post_filters(
                 let pri = (y_packed & 0x0F) as i32;
                 let sec = [0i32, 1, 2, 4][((y_packed >> 4) & 3) as usize];
                 let damping = fh.cdef_damping as i32;
+                let uh = 64.min(height - uy);
+                let uw = 64.min(width - ux);
                 cdef_plane_luma(
-                    y_plane,
-                    &src_y,
-                    width,
-                    height,
-                    pri,
-                    sec,
-                    damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &mut luma_dir_grid,
-                    luma_grid_cols,
+                    y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
                 );
                 ux += 64;
             }
@@ -1346,21 +1582,8 @@ pub fn apply_post_filters(
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
                 cdef_plane_chroma(
-                    u_plane,
-                    &src_u,
-                    uv_w,
-                    uv_h,
-                    sub_x,
-                    sub_y,
-                    uv_pri,
-                    uv_sec,
-                    uv_damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &luma_dir_grid,
-                    luma_grid_cols,
+                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
+                    uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1387,21 +1610,8 @@ pub fn apply_post_filters(
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
                 let uv_damping = fh.cdef_damping as i32;
                 cdef_plane_chroma(
-                    v_plane,
-                    &src_v,
-                    uv_w,
-                    uv_h,
-                    sub_x,
-                    sub_y,
-                    uv_pri,
-                    uv_sec,
-                    uv_damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &luma_dir_grid,
-                    luma_grid_cols,
+                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
+                    uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1416,10 +1626,26 @@ pub fn apply_post_filters(
     }
 
     // --- Loop restoration (§7.17) ---
-    // Disabled by default: the Wiener/Sgrproj boundary handling uses clamped
-    // unit-local pixels instead of neighbouring-unit pixels, causing regressions.
-    // Enable with KINETIX_AV1_FILTER=1 once the implementation is corrected.
-    if fh.uses_lr && std::env::var("KINETIX_AV1_FILTER").is_ok() {
+    // Enabled by default as of 2026-09-04, after three real bugs were found
+    // and fixed this session: (1) unit-local pixel clamping at
+    // restoration-unit boundaries instead of real neighbouring pixels; (2)
+    // `read_lr_unit`'s Wiener `filter_h`/`filter_v` taps swapped; (3)
+    // `sgrproj_filter_plane`'s second projection weight used raw decoded
+    // `xqd[1]` directly instead of the spec's `(1<<SGRPROJ_PRJ_BITS) -
+    // xqd[0] - xqd[1]` complement (found on a `mandelbrot` unit with
+    // `xqd=[0,2]`: the raw-`xqd[1]`-weighted correction rounded to exactly
+    // 0 for every single pixel in the plane — a complete silent no-op —
+    // while the correct complement weight, 126, reproduces dav1d's actual
+    // small per-pixel corrections). Verified via `av1_psnr_check`:
+    // `testsrc` V (Wiener) 49.26 dB unfiltered -> 55.18 dB restored;
+    // `mandelbrot` Y (SgrProj) 58.79 dB unfiltered -> 70.45 dB restored,
+    // with only 72/12288 luma pixels (all ±1) still differing from dav1d —
+    // essentially the same 71-pixel gap present *before* restoration even
+    // runs (inherited from mandelbrot's own separately-tracked deblock/CDEF
+    // imprecision, confirmed via an `--inloopfilters norestoration` A/B
+    // check), i.e. restoration itself is now correct to the precision its
+    // input allows. No corpus clip regressed.
+    if fh.uses_lr {
         apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
         apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units);
@@ -1660,6 +1886,162 @@ mod tests {
         meta.record_luma(0, 0, 16, 4, false);
         assert_eq!(meta.luma_tx_w[0], 16);
         assert_eq!(meta.luma_tx_h[0], 4);
+    }
+
+    #[test]
+    fn mark_luma_edges_only_flags_a_transform_blocks_own_origin() {
+        // Regression for the 2026-09-03 deblock-edge-presence bug: a 16-wide
+        // transform spans grid columns 0 and 1 (8px each); only column 0 is
+        // a real AV1 §7.14.1 edge (the transform's own left boundary) — the
+        // boundary between columns 0 and 1 (grid `bx=1`) is strictly
+        // *inside* that one transform and must not be filtered, even though
+        // `record_luma` (size tracking only) writes the same tx_w=16 into
+        // both columns and can't by itself distinguish the two cases.
+        let mut meta = FrameMeta::new(16, 8);
+        meta.record_luma(0, 0, 16, 8, false);
+        meta.record_luma(1, 0, 16, 8, false);
+        meta.mark_luma_edges(0, 0, 2, 1);
+        assert!(
+            meta.luma_edge_left[meta.idx(0, 0)],
+            "a real transform's own left column must be a real edge"
+        );
+        assert!(
+            !meta.luma_edge_left[meta.idx(1, 0)],
+            "the interior grid line inside one wide transform must not be treated as an edge"
+        );
+    }
+
+    #[test]
+    fn mark_luma_edges_flags_both_of_two_independent_adjacent_transforms() {
+        // Contrast case: two genuinely separate same-size transforms side by
+        // side (e.g. two adjacent TX_8X8 blocks) each get their own real
+        // edge at their own origin — this is the case the missing check
+        // must *not* regress.
+        let mut meta = FrameMeta::new(16, 8);
+        meta.record_luma(0, 0, 8, 8, false);
+        meta.record_luma(1, 0, 8, 8, false);
+        meta.mark_luma_edges(0, 0, 1, 1);
+        meta.mark_luma_edges(1, 0, 2, 1);
+        assert!(meta.luma_edge_left[meta.idx(0, 0)]);
+        assert!(
+            meta.luma_edge_left[meta.idx(1, 0)],
+            "two independent adjacent transforms must both register a real edge, \
+             even though the sizes on either side are identical to the wide-transform case above"
+        );
+    }
+
+    #[test]
+    fn mark_luma_edges4_represents_a_boundary_the_8x8_grid_cannot() {
+        // Regression for the 2026-09-04 deblock luma-granularity bug: a
+        // TX_4X8 block at x=48..52 followed by an independent TX_4X4 block
+        // at x=52..56 meet at x=52, which is a multiple of 4 but *not* of 8
+        // — `mark_luma_edges`'s 8×8 grid can only ever represent edges at
+        // multiples of 8 (its loop only visits `bx*8`), so this boundary is
+        // structurally invisible to it even though it's a genuine AV1
+        // §7.14.1 transform edge. The 4×4-resolution counterpart must be
+        // able to mark it.
+        let mut meta = FrameMeta::new(64, 8);
+        meta.mark_luma_edges4(12, 0, 13, 1); // left edge of the block starting at px x=48
+        meta.mark_luma_edges4(13, 0, 14, 1); // left edge of the block starting at px x=52
+        assert!(
+            meta.luma_edge_left4[meta.idx4(13, 0)],
+            "x=52 (grid col 13) must be marked as a real edge at 4×4 resolution"
+        );
+        // Confirm the coarser 8×8 grid genuinely cannot represent this: grid
+        // col 13 in 4×4 units is x=52, which is not a multiple of 8, so no
+        // `bx` in the 8×8 grid's own `bx*8` addressing ever lands there.
+        assert_ne!(52 % 8, 0, "sanity: 52 is not 8-aligned");
+    }
+
+    #[test]
+    fn record_luma4_tracks_independent_small_transforms_separately() {
+        // Companion to `mark_luma_edges4` above: `record_luma4` must record
+        // each small transform's own size at 4×4 resolution so
+        // `deblock_plane`'s `filter_size_from_tx_samples(left.min(right))`
+        // sees the true (small) sizes on both sides of the x=52 boundary,
+        // not a coarser 8×8-grid value that conflates them with a
+        // neighbouring 8-sample-wide transform.
+        let mut meta = FrameMeta::new(64, 8);
+        meta.record_luma4(12, 0, 13, 1, 4, 8); // TX_4X8 at x=48..52
+        meta.record_luma4(13, 0, 14, 1, 4, 4); // TX_4X4 at x=52..56
+        assert_eq!(meta.luma_tx_w4[meta.idx4(12, 0)], 4);
+        assert_eq!(meta.luma_tx_h4[meta.idx4(12, 0)], 8);
+        assert_eq!(meta.luma_tx_w4[meta.idx4(13, 0)], 4);
+        assert_eq!(meta.luma_tx_h4[meta.idx4(13, 0)], 4);
+    }
+
+    #[test]
+    fn wiener_filter_reads_real_pixels_across_a_unit_boundary() {
+        // Regression for the 2026-09-04 restoration-boundary fix: a previous
+        // version of this filter operated on an isolated per-unit buffer, so
+        // every tap within 3px of a unit's own edge clamped to *that unit's*
+        // edge sample — it could never see a different value on the other
+        // side of the boundary, however different the real neighbouring
+        // unit's content was. This test builds two full-plane snapshots that
+        // are identical *inside* the unit being filtered but differ only in
+        // the pixel just past its right edge, with a non-identity kernel,
+        // and asserts the filtered output actually differs — proving the
+        // function is sensitive to real cross-boundary pixels, something an
+        // isolated-buffer implementation structurally cannot be (its input
+        // for both cases would be byte-identical).
+        let pw = 8usize;
+        let ph = 4usize;
+        let mut plane_a = vec![100u8; pw * ph];
+        let mut plane_b = plane_a.clone();
+        let src_a = vec![100u8; pw * ph];
+        let mut src_b = src_a.clone();
+        // Column 4 is just past the unit's [0,4) right edge; make it a
+        // sharp step in `b` only.
+        for y in 0..ph {
+            src_b[y * pw + 4] = 255;
+        }
+        // A non-identity (real smoothing) horizontal kernel.
+        let half = [1, 2, 3];
+        let identity_v = [0, 0, 0];
+        wiener_filter_plane(&mut plane_a, &src_a, pw, ph, 0, 0, 4, ph, half, identity_v);
+        wiener_filter_plane(&mut plane_b, &src_b, pw, ph, 0, 0, 4, ph, half, identity_v);
+        assert_ne!(
+            plane_a[3], plane_b[3],
+            "the rightmost column of the unit must be affected by the real \
+             neighbouring pixel just past its boundary, not clamped to its \
+             own edge sample"
+        );
+    }
+
+    #[test]
+    fn sgrproj_uses_the_complement_weight_not_the_raw_second_xqd() {
+        // Regression for the 2026-09-04 SgrProj weight bug: §7.17.4's second
+        // projection weight is `(1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1]`,
+        // not `xqd[1]` directly (cross-checked against dav1d's
+        // `lr_apply_tmpl.c`: `params.sgr.w1 = 128 - (weights[0] +
+        // weights[1])`). A previous version of this function used `xqd[1]`
+        // unweighted — for the exact real-world case this test reproduces
+        // (`set=10` -> `r0=0, r1=1`, decoded `xqd=[0, 2]`, found on a real
+        // `mandelbrot` restoration unit), that made every single pixel's
+        // correction `(2*t + 1024) >> 11`, which rounds to exactly 0 for
+        // every plausible guided-filter residual `t` — restoration became a
+        // complete silent no-op on the entire plane, while the
+        // spec-correct weight (`128 - 0 - 2 = 126`) produces real,
+        // correctly-scaled corrections.
+        let pw = 8usize;
+        let ph = 8usize;
+        // A block with real local variance (not perfectly flat), so the
+        // guided filter's `t` term is genuinely nonzero somewhere.
+        let src: Vec<u8> = (0..pw * ph)
+            .map(|i| {
+                let (x, y) = (i % pw, i / pw);
+                (100 + (x * 7 + y * 13) % 40) as u8
+            })
+            .collect();
+        let mut plane = src.clone();
+        sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2]);
+        assert_ne!(
+            plane, src,
+            "a real xqd=[0,2] SgrProj unit (set 10) must actually change \
+             some pixels — using the raw xqd[1]=2 as the weight instead of \
+             the spec's complement (126) silently makes every correction \
+             round to 0"
+        );
     }
 
     #[test]

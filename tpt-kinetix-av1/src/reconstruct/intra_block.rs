@@ -143,9 +143,16 @@ impl<'a> TileDecodeState<'a> {
                 )?;
                 let mv = crate::inter::Mv::new(ibc_pred.row + delta.row, ibc_pred.col + delta.col);
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                    eprintln!("DBG IBC after_mv: pred=({},{}) delta=({},{}) final=({},{}) bit_pos={} r={}",
-                        ibc_pred.row, ibc_pred.col, delta.row, delta.col,
-                        mv.row, mv.col, self.dec.bit_position(), self.dec.raw_state().0);
+                    eprintln!(
+                        "DBG IBC after_mv: pred=({},{}) delta=({},{}) final=({},{}) bit_pos={}",
+                        ibc_pred.row,
+                        ibc_pred.col,
+                        delta.row,
+                        delta.col,
+                        mv.row,
+                        mv.col,
+                        self.dec.bit_position()
+                    );
                 }
                 let result = self.reconstruct_ibc_block(mi_row, mi_col, bsize, skip, mv);
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
@@ -465,6 +472,38 @@ impl<'a> TileDecodeState<'a> {
                 {
                     eprintln!("DBG SB1 recon_intra_sub mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tile_px=({},{}) luma_tx={luma_tx} bsize={bsize}", self.tile_px_x0, self.tile_px_y0);
                 }
+                // Mark this *individual* transform sub-block's own left/top
+                // grid cells as real AV1 §7.14.1 deblock edges (see
+                // `FrameMeta::mark_luma_edges`'s doc comment) — a coded block
+                // whose `luma_tx_w`/`_h` is smaller than its own size (e.g. a
+                // 32×32 block using `TX_16X16`) reconstructs multiple
+                // separate transform blocks here, each with a *real* edge at
+                // its own origin, not just at the whole coded block's origin.
+                self.meta.mark_luma_edges(
+                    px_x / 8,
+                    px_y / 8,
+                    (px_x + luma_tx_w).div_ceil(8),
+                    (px_y + luma_tx_h).div_ceil(8),
+                );
+                // 4×4-luma-cell-resolution counterparts (see `FrameMeta::w4`'s
+                // doc comment) — deblock's luma pass runs at 4-sample
+                // granularity since transforms as small as TX_4X4/TX_4X8/
+                // TX_8X4 can meet at boundaries the coarser 8×8 grid can't
+                // represent.
+                self.meta.mark_luma_edges4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                );
+                self.meta.record_luma4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                    luma_tx_w as u8,
+                    luma_tx_h as u8,
+                );
                 let blk = TxBlockCtx {
                     plane: 0,
                     tx_size: luma_tx,
@@ -498,7 +537,7 @@ impl<'a> TileDecodeState<'a> {
                     reduced_tx_set: self.reduced_tx_set,
                     lossless: self.lossless,
                     is_inter: false,
-                    luma_tx_type: 0,
+                    coincident_luma_tx_type: av1::DCT_DCT,
                 };
                 let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
                     colors: &palette.colors_y,
@@ -654,23 +693,20 @@ impl<'a> TileDecodeState<'a> {
                     if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
                     }
-                    // Record chroma tx metadata at 4-chroma-pixel (w8) granularity,
-                    // inside the TX loop so each TX block marks its own boundary.
-                    let bx0_c = cpx_x / 4;
-                    let by0_c = cpx_y / 4;
-                    let bx1_c = (cpx_x + cw).div_ceil(4);
-                    let by1_c = (cpx_y + ch).div_ceil(4);
-                    for cy in by0_c..by1_c.min(self.meta.h8) {
-                        for cx in bx0_c..bx1_c.min(self.meta.w8) {
-                            self.meta.record_chroma(cx, cy, c_tx_w, c_tx_h, skip);
-                            if cx == bx0_c {
-                                self.meta.mark_chroma_left(cx, cy);
-                            }
-                            if cy == by0_c {
-                                self.meta.mark_chroma_top(cx, cy);
-                            }
-                        }
-                    }
+                    // Mark this individual chroma transform sub-block's own
+                    // left/top grid cells as real deblock edges — same
+                    // reasoning as the luma `mark_luma_edges` call above.
+                    // Chroma is stored at the shared luma-grid resolution
+                    // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
+                    // samples == 8 luma samples), matching the `/8`-of-luma
+                    // == `/4`-of-chroma scale the existing `bx0`/`by0`
+                    // computation below already relies on.
+                    self.meta.mark_chroma_edges(
+                        cpx_x / 4,
+                        cpx_y / 4,
+                        (cpx_x + cw).div_ceil(4),
+                        (cpx_y + ch).div_ceil(4),
+                    );
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -691,7 +727,7 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: false,
-                        luma_tx_type: 0,
+                        coincident_luma_tx_type: av1::DCT_DCT,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
                     let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
@@ -879,30 +915,19 @@ impl<'a> TileDecodeState<'a> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
-        // For IBC `IsInter = 1`, so `allowSelect = !skip || !is_inter = !skip`.
-        // When skip is true, no tx_depth is read and the max tx size is used.
-        let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if !skip && bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
-            if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                let above_w = self.tx_above.get(mi_col).copied().unwrap_or(0) as usize;
-                let left_h = self.tx_left.get(mi_row).copied().unwrap_or(0) as usize;
-                let max_tx_w = av1::TX_WIDTH[max_tx];
-                let max_tx_h = av1::TX_HEIGHT[max_tx];
-                let ctx = usize::from(above_w >= max_tx_w) + usize::from(left_h >= max_tx_h);
-                eprintln!("DBG IBC pre_vartxtree: mi=({mi_col},{mi_row}) above_w={above_w} left_h={left_h} max_tx_w={max_tx_w} max_tx_h={max_tx_h} ctx={ctx} r={}", self.dec.raw_state().0);
-            }
-            self.read_tx_size(bsize, max_tx, mi_row, mi_col)
-        } else {
-            max_tx
-        };
-        if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-            eprintln!(
-                "DBG IBC after_vartxtree: mi=({mi_col},{mi_row}) luma_tx={luma_tx} r={}",
-                self.dec.raw_state().0
-            );
-        }
-        let luma_tx_w = av1::TX_WIDTH[luma_tx];
-        let luma_tx_h = av1::TX_HEIGHT[luma_tx];
+        // For IBC `IsInter = 1`, so `read_block_tx_size()` takes its
+        // inter/IBC branch: a recursive var-tx-tree parse
+        // (`read_block_tx_size_ibc`/`read_tx_tree`, AV1 spec §5.11.16/18),
+        // not the single-ternary-symbol `read_tx_size` used for real intra
+        // blocks. A previous version of this function called
+        // `read_tx_size` here — the wrong syntax model entirely (it reads
+        // one symbol and applies `Split_Tx_Size` uniformly to the whole
+        // block, when real IBC blocks split independent sub-regions to
+        // different sizes via a tree of binary `txfm_split` reads) — which
+        // desynced the entropy decoder from this point onward for every
+        // IBC block that wasn't skipped, corrupting everything the tile
+        // decodes afterward.
+        let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
 
         // Integer-pel luma displacement: mv components are multiples of 8 in
         // 1/8-pel units because force_integer_mv = true was used when reading.
@@ -933,124 +958,179 @@ impl<'a> TileDecodeState<'a> {
         let v_plane = &mut *self.v_plane;
         let [bd_y, bd_u, bd_v] = &mut self.block_decoded;
 
+        // Per-mi-cell luma `TxType` (spec `TxTypes[y][x]`), filled below as
+        // each luma leaf is decoded and consulted by the chroma loop's
+        // `get_uv_inter_txtp` derivation (a chroma transform can be wider
+        // than any one luma leaf in 4:2:0, so it needs to look up whichever
+        // leaf's type is coincident with its own top-left corner). Indexed
+        // `(row - mi_row) * bw + (col - mi_col)`; defaults to `DCT_DCT`
+        // (matching a skipped leaf's implicit type).
+        let mut luma_tx_types = vec![av1::DCT_DCT; bw * bh];
+
         // ── Luma transform blocks ─────────────────────────────────────────────
-        // Track the luma TX type so chroma can inherit it (spec §7.12.3 inter path).
-        let mut ibc_luma_tx_type = 0usize;
-        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
-                let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+        // One iteration per var-tx-tree leaf (`leaves`, absolute tile-local
+        // mi coordinates) instead of a uniform fixed-size grid — real IBC
+        // blocks can split independent sub-regions to different transform
+        // sizes (see `read_block_tx_size_ibc`'s doc comment).
+        for &(leaf_mi_col, leaf_mi_row, leaf_tx) in &leaves {
+            let leaf_tx_w = av1::TX_WIDTH[leaf_tx];
+            let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
+            let px_x = leaf_mi_col * MI_SIZE - self.tile_px_x0;
+            let px_y = leaf_mi_row * MI_SIZE - self.tile_px_y0;
+            // See the keyframe path's identical call for why this must be
+            // per-transform-sub-block, not per-coded-block.
+            self.meta.mark_luma_edges(
+                px_x / 8,
+                px_y / 8,
+                (px_x + leaf_tx_w).div_ceil(8),
+                (px_y + leaf_tx_h).div_ceil(8),
+            );
+            self.meta.mark_luma_edges4(
+                px_x / 4,
+                px_y / 4,
+                (px_x + leaf_tx_w).div_ceil(4),
+                (px_y + leaf_tx_h).div_ceil(4),
+            );
+            self.meta.record_luma4(
+                px_x / 4,
+                px_y / 4,
+                (px_x + leaf_tx_w).div_ceil(4),
+                (px_y + leaf_tx_h).div_ceil(4),
+                leaf_tx_w as u8,
+                leaf_tx_h as u8,
+            );
+            // 8×8-luma-grid loop-filter metadata (see `record_luma`'s doc
+            // comment) — per leaf, using the leaf's own span, since leaves
+            // can differ in size within one coded block.
+            let lbx0 = px_x / 8;
+            let lby0 = px_y / 8;
+            let lbx1 = (px_x + leaf_tx_w).div_ceil(8);
+            let lby1 = (px_y + leaf_tx_h).div_ceil(8);
+            for by in lby0..lby1.min(self.meta.h8) {
+                for bx in lbx0..lbx1.min(self.meta.w8) {
+                    self.meta
+                        .record_luma(bx, by, leaf_tx_w as u8, leaf_tx_h as u8, skip);
+                }
+            }
 
-                // IBC prediction: copy from the already-decoded tile area.
-                // Source is clamped to the tile buffer; out-of-bounds reads
-                // (from an invalid/not-yet-decoded region) return neutral grey.
-                // Our entropy decoder consistently gives IBC MVs with the
-                // opposite sign from the spec convention (sign=0 for negative
-                // displacement), so we subtract rather than add.
-                let src_x = (px_x as i32 - mv_dx) as usize;
-                let src_y = (px_y as i32 - mv_dy) as usize;
+            // IBC prediction: copy from the already-decoded tile area.
+            // Source is clamped to the tile buffer; out-of-bounds reads
+            // (from an invalid/not-yet-decoded region) return neutral grey.
+            // Our entropy decoder consistently gives IBC MVs with the
+            // opposite sign from the spec convention (sign=0 for negative
+            // displacement), so we subtract rather than add.
+            let src_x = (px_x as i32 - mv_dx) as usize;
+            let src_y = (px_y as i32 - mv_dy) as usize;
 
-                // IBC blocks have IsInter=1 and read inter-TX-type bits from the
-                // bitstream (encoder uses the same inter TX set as P/B frames).
-                let blk = TxBlockCtx {
-                    plane: 0,
-                    tx_size: luma_tx,
-                    x4: px_x / 4,
-                    y4: px_y / 4,
-                    max_x4: self.luma_max_x4,
-                    max_y4: self.luma_max_y4,
-                    block_w: bw * MI_SIZE,
-                    block_h: bh * MI_SIZE,
-                    intra_dir: DC_PRED as usize,
-                    uv_mode: DC_PRED as usize,
-                    qindex_positive: !self.lossless,
-                    reduced_tx_set: self.reduced_tx_set,
-                    lossless: self.lossless,
-                    is_inter: true,
-                    luma_tx_type: 0,
-                };
+            // IBC has `IsInter = 1`: `transform_type()` takes the real
+            // inter branch (`read_inter_transform_type`, `coeff.rs`) — a
+            // dav1d trace on a real `testsrc2` IBC block shows `txtp=13`
+            // (an inter transform type, not `DCT_DCT`) for its luma
+            // residual, confirming IBC blocks really do read
+            // `inter_tx_type` bits. A previous version forced
+            // `qindex_positive: false` here specifically to make
+            // `read_transform_type` (the *intra* path, also wrong for
+            // `IsInter = 1`) return `DCT_DCT` without reading anything —
+            // masking the missing read entirely rather than producing a
+            // real transform type.
+            let blk = TxBlockCtx {
+                plane: 0,
+                tx_size: leaf_tx,
+                x4: px_x / 4,
+                y4: px_y / 4,
+                max_x4: self.luma_max_x4,
+                max_y4: self.luma_max_y4,
+                block_w: bw * MI_SIZE,
+                block_h: bh * MI_SIZE,
+                intra_dir: DC_PRED as usize,
+                uv_mode: DC_PRED as usize,
+                qindex_positive: !self.lossless,
+                reduced_tx_set: self.reduced_tx_set,
+                lossless: self.lossless,
+                is_inter: true,
+                // Irrelevant for plane 0 (`read_coeffs` only consults this
+                // field for `plane > 0`).
+                coincident_luma_tx_type: av1::DCT_DCT,
+            };
 
-                let mut residual = vec![0i32; luma_tx_w * luma_tx_h];
-                if !skip {
-                    let coeffs = read_coeffs(
-                        &mut self.dec,
-                        &mut self.coeff_cdfs,
-                        &mut self.coeff_ctxs,
-                        &blk,
-                    )?;
-                    ibc_luma_tx_type = coeffs.tx_type;
-                    if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                        eprintln!(
-                            "DBG IBC after_y_cf: mi=({mi_col},{mi_row}) txtp={} eob={} r={}",
-                            coeffs.tx_type,
-                            coeffs.eob,
-                            self.dec.raw_state().0
-                        );
-                    }
-                    if coeffs.eob > 0 {
-                        let dequant =
-                            dequantize_coeffs(&coeffs.quant, luma_tx, y_qindex_dc, y_qindex_ac);
-                        inverse_transform(
-                            &dequant,
-                            coeffs.tx_type,
-                            luma_tx,
-                            self.lossless,
-                            &mut residual,
-                        );
+            let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
+            if !skip {
+                let coeffs = read_coeffs(
+                    &mut self.dec,
+                    &mut self.coeff_cdfs,
+                    &mut self.coeff_ctxs,
+                    &blk,
+                )?;
+                let leaf_w4 = (leaf_tx_w / MI_SIZE).max(1);
+                let leaf_h4 = (leaf_tx_h / MI_SIZE).max(1);
+                for r in 0..leaf_h4 {
+                    for c in 0..leaf_w4 {
+                        let (row, col) = (leaf_mi_row + r, leaf_mi_col + c);
+                        if row >= mi_row && row < mi_row + bh && col >= mi_col && col < mi_col + bw
+                        {
+                            luma_tx_types[(row - mi_row) * bw + (col - mi_col)] = coeffs.tx_type;
+                        }
                     }
                 }
+                if coeffs.eob > 0 {
+                    let dequant =
+                        dequantize_coeffs(&coeffs.quant, leaf_tx, y_qindex_dc, y_qindex_ac);
+                    inverse_transform(
+                        &dequant,
+                        coeffs.tx_type,
+                        leaf_tx,
+                        self.lossless,
+                        &mut residual,
+                    );
+                }
+            } else {
+                // See `clear_coeff_context`'s doc comment: a skipped
+                // block never calls `read_coeffs`, so its neighbour
+                // context must be reset by hand or a later block reads a
+                // stale residual left behind by whatever unrelated block
+                // last wrote this footprint's rows/columns.
+                clear_coeff_context(&mut self.coeff_ctxs, &blk, leaf_tx_w / 4, leaf_tx_h / 4);
+            }
 
-                for dy in 0..luma_tx_h {
-                    let wy = px_y + dy;
-                    if wy >= tile_h {
+            for dy in 0..leaf_tx_h {
+                let wy = px_y + dy;
+                if wy >= tile_h {
+                    break;
+                }
+                for dx in 0..leaf_tx_w {
+                    let wx = px_x + dx;
+                    if wx >= tile_w {
                         break;
                     }
-                    for dx in 0..luma_tx_w {
-                        let wx = px_x + dx;
-                        if wx >= tile_w {
-                            break;
-                        }
-                        let src_val = y_plane
-                            .get((src_y + dy) * y_stride + (src_x + dx))
-                            .copied()
-                            .unwrap_or(128) as i32;
-                        if let Some(slot) = y_plane.get_mut(wy * y_stride + wx) {
-                            *slot = (src_val + residual[dy * luma_tx_w + dx]).clamp(0, 255) as u8;
-                        }
+                    let src_val = y_plane
+                        .get((src_y + dy) * y_stride + (src_x + dx))
+                        .copied()
+                        .unwrap_or(128) as i32;
+                    if let Some(slot) = y_plane.get_mut(wy * y_stride + wx) {
+                        *slot = (src_val + residual[dy * leaf_tx_w + dx]).clamp(0, 255) as u8;
                     }
                 }
-
-                let (sr, sc) = bd_index(0, px_x, px_y);
-                BlockDecodedCtx {
-                    grid: &mut bd_y[..],
-                    sub_r: sr,
-                    sub_c: sc,
-                    step_x: luma_tx_w >> 2,
-                    step_y: luma_tx_h >> 2,
-                }
-                .mark();
             }
+
+            let (sr, sc) = bd_index(0, px_x, px_y);
+            BlockDecodedCtx {
+                grid: &mut bd_y[..],
+                sub_r: sr,
+                sub_c: sc,
+                step_x: leaf_tx_w >> 2,
+                step_y: leaf_tx_h >> 2,
+            }
+            .mark();
         }
 
-        // Record loop-filter luma metadata at 4-sample granularity.
+        // Whole-block 8×8-luma-grid span, for chroma's (single-size)
+        // loop-filter metadata below.
         let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 4;
-        let by0 = blk_px_y / 4;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(4);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(4);
-        for by4 in by0..by1.min(self.meta.h4) {
-            for bx4 in bx0..bx1.min(self.meta.w4) {
-                self.meta
-                    .record_luma(bx4, by4, luma_tx_w as u8, luma_tx_h as u8, skip);
-                if bx4 == bx0 {
-                    self.meta.mark_luma_left(bx4, by4);
-                }
-                if by4 == by0 {
-                    self.meta.mark_luma_top(bx4, by4);
-                }
-            }
-        }
+        let bx0 = blk_px_x / 8;
+        let by0 = blk_px_y / 8;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
 
         // ── Chroma transform blocks ───────────────────────────────────────────
         if !self.monochrome
@@ -1096,27 +1176,44 @@ impl<'a> TileDecodeState<'a> {
                     if cpx_x >= tile_cw || cpx_y >= tile_ch {
                         continue;
                     }
-                    // Record per-TX chroma metadata at 4-chroma-pixel (w8) coordinates.
-                    let bx0_c = cpx_x / 4;
-                    let by0_c = cpx_y / 4;
-                    let bx1_c = (cpx_x + cw).div_ceil(4);
-                    let by1_c = (cpx_y + ch).div_ceil(4);
-                    for cy in by0_c..by1_c.min(self.meta.h8) {
-                        for cx in bx0_c..bx1_c.min(self.meta.w8) {
-                            self.meta.record_chroma(cx, cy, c_tx_w, c_tx_h, skip);
-                            if cx == bx0_c {
-                                self.meta.mark_chroma_left(cx, cy);
-                            }
-                            if cy == by0_c {
-                                self.meta.mark_chroma_top(cx, cy);
-                            }
-                        }
-                    }
+                    // See the keyframe path's identical call for why this
+                    // must be per-transform-sub-block.
+                    self.meta.mark_chroma_edges(
+                        cpx_x / 4,
+                        cpx_y / 4,
+                        (cpx_x + cw).div_ceil(4),
+                        (cpx_y + ch).div_ceil(4),
+                    );
 
                     let src_cx = (cpx_x as i32 - cmv_dx) as usize;
                     let src_cy = (cpx_y as i32 - cmv_dy) as usize;
 
-                    // IBC chroma: IsInter=1, inherits luma TX type (no separate read).
+                    // Chroma's tx_type is always *derived*, never separately
+                    // read (`read_coeffs` only calls `read_.*transform_
+                    // type` for `plane == 0`), so `qindex_positive` here
+                    // only affects `compute_tx_type`'s output, not entropy
+                    // sync. `is_inter: true` routes chroma through
+                    // `get_uv_inter_txtp` (§7.11.3.1) instead of the intra
+                    // `uv_mode`-based `MODE_TO_TXFM` lookup, fed the real
+                    // coincident luma leaf's decoded type (`luma_tx_types`,
+                    // filled above as each luma leaf was read) — looked up
+                    // at this chroma block's own top-left corner subsampled
+                    // back to luma mi coordinates, matching spec `TxTypes[
+                    // y][x]`'s sampling point. A previous version always
+                    // fed a `DCT_DCT` placeholder here: harmless for
+                    // entropy sync (chroma never reads `tx_type` bits) but
+                    // wrong for `compute_tx_type`'s own output and, through
+                    // it, the `TX_CLASS`-derived `is_1d` context bit
+                    // `read_eob` uses for its *very next* symbol read —
+                    // desyncing chroma's coefficient decode for any block
+                    // whose real luma type wasn't `DCT_DCT` (confirmed via
+                    // a dav1d trace on a real `testsrc2` IBC block: dav1d's
+                    // `SKIPCTX_EOB` showed `is_1d=1`, the placeholder
+                    // produced `is_1d=0`).
+                    let luma_col = mi_col + ((tx << sub_x) / MI_SIZE).min(bw - 1);
+                    let luma_row = mi_row + ((ty << sub_y) / MI_SIZE).min(bh - 1);
+                    let coincident_luma_tx_type =
+                        luma_tx_types[(luma_row - mi_row) * bw + (luma_col - mi_col)];
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -1132,7 +1229,7 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: true,
-                        luma_tx_type: ibc_luma_tx_type,
+                        coincident_luma_tx_type,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
 
@@ -1145,14 +1242,6 @@ impl<'a> TileDecodeState<'a> {
                             &mut self.coeff_ctxs,
                             &blk_u,
                         )?;
-                        if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                            eprintln!(
-                                "DBG IBC after_u_cf: mi=({mi_col},{mi_row}) txtp={} eob={} r={}",
-                                cu.tx_type,
-                                cu.eob,
-                                self.dec.raw_state().0
-                            );
-                        }
                         if cu.eob > 0 {
                             let dq = dequantize_coeffs(&cu.quant, c_tx, u_qindex_dc, u_qindex_ac);
                             inverse_transform(&dq, cu.tx_type, c_tx, self.lossless, &mut res_u);
@@ -1163,18 +1252,15 @@ impl<'a> TileDecodeState<'a> {
                             &mut self.coeff_ctxs,
                             &blk_v,
                         )?;
-                        if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                            eprintln!(
-                                "DBG IBC after_v_cf: mi=({mi_col},{mi_row}) txtp={} eob={} r={}",
-                                cv.tx_type,
-                                cv.eob,
-                                self.dec.raw_state().0
-                            );
-                        }
                         if cv.eob > 0 {
                             let dq = dequantize_coeffs(&cv.quant, c_tx, v_qindex_dc, v_qindex_ac);
                             inverse_transform(&dq, cv.tx_type, c_tx, self.lossless, &mut res_v);
                         }
+                    } else {
+                        // See the luma branch above / `clear_coeff_context`'s
+                        // doc comment.
+                        clear_coeff_context(&mut self.coeff_ctxs, &blk_u, cw / 4, ch / 4);
+                        clear_coeff_context(&mut self.coeff_ctxs, &blk_v, cw / 4, ch / 4);
                     }
 
                     for dy in 0..ch {
@@ -1225,6 +1311,14 @@ impl<'a> TileDecodeState<'a> {
                     .mark();
                 }
             }
+
+            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
+            for by in by0..by1.min(self.meta.h8) {
+                for bx in bx0..bx1.min(self.meta.w8) {
+                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+                }
+            }
         }
 
         // ── Neighbour context update ──────────────────────────────────────────
@@ -1238,9 +1332,15 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.uv_left.get_mut(r) {
                 *s = DC_PRED;
             }
-            if let Some(s) = self.tx_left.get_mut(r) {
-                *s = luma_tx_h as u8;
-            }
+            // `tx_left`/`tx_above` (below) are *not* touched here: unlike
+            // the single-transform-size intra path, `read_block_tx_size_
+            // ibc`/`read_tx_tree` already wrote the correct per-leaf values
+            // into these arrays while parsing the var-tx tree above —
+            // overwriting them with one block-wide size here (the previous
+            // behaviour, from when this block always used a single `TxSize`)
+            // would stamp over that real per-leaf context with a single
+            // wrong value, desyncing the very next block's own `txfm_split`
+            // context read.
             if let Some(s) = self.skip_left.get_mut(r) {
                 *s = skip as u8;
             }
@@ -1250,6 +1350,29 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.mv_left.get_mut(r) {
                 s[0] = mv;
             }
+            // `PaletteColors[{0,1}][MiRow][MiCol]` (§5.11.46): IBC blocks
+            // never have a palette (`PaletteSizeY == PaletteSizeUV == 0`
+            // always), but the array must still be *cleared* across this
+            // block's own mi extent — otherwise a stale non-empty entry
+            // left behind by an earlier real-intra block at this same
+            // position leaks into the next block's `has_palette_y`/`_uv`
+            // context read (`ctx = above_has + left_has`, `palette.rs`),
+            // corrupting its CDF selection despite the arithmetic-coder
+            // state itself being perfectly in sync going in. Confirmed via
+            // dav1d trace: dav1d's own inter/IBC context-update path
+            // (`decode.c`'s non-intra `case_set` block) explicitly sets
+            // `edge->pal_sz = 0` / `t->pal_sz_uv[i] = 0` for every IBC/
+            // inter block, which this mirrors. Root-caused 2026-09-04 by
+            // tracing a real `testsrc2` block (dav1d `Post-y_pal[0]`,
+            // i.e. no palette, vs Kinetix's stale-context-driven
+            // `colors_y.len() == 2`) back through a fully-matching
+            // preceding IBC block to this exact gap.
+            if let Some(s) = self.palette_y_colors_left.get_mut(r) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_left.get_mut(r) {
+                s.clear();
+            }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(s) = self.ymode_above.get_mut(c) {
@@ -1258,9 +1381,7 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.uv_above.get_mut(c) {
                 *s = DC_PRED;
             }
-            if let Some(s) = self.tx_above.get_mut(c) {
-                *s = luma_tx_w as u8;
-            }
+            // See the `tx_left` comment above.
             if let Some(s) = self.skip_above.get_mut(c) {
                 *s = skip as u8;
             }
@@ -1269,6 +1390,13 @@ impl<'a> TileDecodeState<'a> {
             }
             if let Some(s) = self.mv_above.get_mut(c) {
                 s[0] = mv;
+            }
+            // See the `palette_y_colors_left` comment above.
+            if let Some(s) = self.palette_y_colors_above.get_mut(c) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_above.get_mut(c) {
+                s.clear();
             }
         }
 

@@ -33,7 +33,6 @@ pub(super) struct ModeCdfs {
     pub(super) tx_16x16: [[u16; 4]; 3],
     pub(super) tx_32x32: [[u16; 4]; 3],
     pub(super) tx_64x64: [[u16; 4]; 3],
-    #[allow(dead_code)]
     pub(super) txfm_split: [[u16; 3]; 21],
     pub(super) skip: [[u16; 3]; 3],
     /// `TileIntrabcCdf` (§8.3.2) — one adaptive 2-symbol CDF, used for the
@@ -662,6 +661,24 @@ impl ModeCdfs {
             _ => &mut self.tx_64x64[ctx],
         };
         dec.read_symbol(cdf)
+    }
+
+    /// `txfm_split` (AV1 spec §5.11.18 `read_var_tx_size`, `@@txfm_split
+    /// S()`): the binary "split this node further" symbol read at each
+    /// var-tx-tree node. `TXFM_PARTITION_CONTEXTS == 21` flat contexts,
+    /// indexed `cat * 3 + ctx` (`cat` the tx-size/depth category from
+    /// §8.3.2, `ctx` the 0..=2 above/left comparison) — cross-checked
+    /// against dav1d's `ts->cdf.m.txpart[cat][ctx]` (a `[7][3]` array,
+    /// the same 21 values in nested-vs-flat form) and its default table
+    /// (`cdf.c`'s `.txpart = {{CDF1(28581)},...}`), which the already-
+    /// present `DEFAULT_TXFM_SPLIT_CDF` matches digit-for-digit.
+    pub(super) fn read_txfm_split(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        cat: usize,
+        ctx: usize,
+    ) -> bool {
+        dec.read_symbol(&mut self.txfm_split[cat * 3 + ctx]) == 1
     }
 
     /// `use_intrabc` (§5.11.7): an `S()` symbol read with the adaptive

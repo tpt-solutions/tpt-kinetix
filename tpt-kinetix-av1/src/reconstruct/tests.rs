@@ -452,6 +452,42 @@ fn dq_denom_matches_spec_for_large_square_transforms() {
 }
 
 #[test]
+fn dq_denom_follows_the_square_up_size_not_the_transforms_own_shape() {
+    // AV1 spec §7.12.3 / dav1d's `dq_shift = Max(0, t_dim->ctx - 2)`, where
+    // `t_dim->ctx == tx_sz_ctx == (TX_SIZE_SQR[tx] + TX_SIZE_SQR_UP[tx] + 1)
+    // >> 1` (dav1d's own `dav1d_txfm_dimensions` table, `src/tables.c`,
+    // pins the exact `ctx` value per rectangular size and was used as the
+    // ground truth for the expectations below). This is *not* simply "the
+    // transform's square-up size": `TX_16X32`/`TX_32X16` (sqr=16x16,
+    // sqr_up=32x32) average to ctx=3 (dqDenom=2), but the more skewed
+    // `TX_8X32`/`TX_32X8` (sqr=8x8, sqr_up=32x32) average to ctx=2
+    // (dqDenom=1, *not* 2) — same square-up, different dqDenom, because the
+    // averaging also accounts for the transform's own (smaller) shape.
+    // Likewise `TX_16X64`/`TX_64X16` (sqr=16x16, sqr_up=64x64) average to
+    // ctx=3 (dqDenom=2, not 4) while only the genuinely-close-to-square
+    // `TX_32X64`/`TX_64X32` (sqr=32x32, sqr_up=64x64) reach ctx=4
+    // (dqDenom=4). A version of `dq_denom` that only matched the two
+    // literal square enum values (`TX_32X32`/`TX_64X64`) silently returned
+    // 1 (a no-op) for every one of these eight rectangular sizes — found
+    // via a `DAV1D_ITXDUMP`-patched dav1d trace on `mandelbrot_128x96`'s
+    // `TX_16X32` block, where it overscaled the residual ~2x and, once
+    // fixed, took `smptebars_256x144`'s luma PSNR from 57.49 dB to 99 dB
+    // (pixel-exact) in one `av1_psnr_check` run.
+    for &tx_size in &[av1::TX_16X32, av1::TX_32X16] {
+        assert_eq!(dq_denom(tx_size), 2, "tx_size index {tx_size}: ctx=3");
+    }
+    for &tx_size in &[av1::TX_8X32, av1::TX_32X8] {
+        assert_eq!(dq_denom(tx_size), 1, "tx_size index {tx_size}: ctx=2");
+    }
+    for &tx_size in &[av1::TX_16X64, av1::TX_64X16] {
+        assert_eq!(dq_denom(tx_size), 2, "tx_size index {tx_size}: ctx=3");
+    }
+    for &tx_size in &[av1::TX_32X64, av1::TX_64X32] {
+        assert_eq!(dq_denom(tx_size), 4, "tx_size index {tx_size}: ctx=4");
+    }
+}
+
+#[test]
 fn dc_only_inverse_dct_is_flat_at_every_square_size() {
     // A DC-only coefficient block must inverse-transform to a spatially
     // flat residual at every square transform size (both DCT and ADST
@@ -1167,6 +1203,121 @@ fn read_tx_size_never_panics_and_stays_in_range() {
             tx <= max_tx,
             "bsize {bsize}: tx {tx} exceeds max_tx {max_tx}"
         );
+    }
+}
+
+#[test]
+fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps() {
+    // `read_block_tx_size_ibc` (the var-tx-tree parse for IBC/inter blocks)
+    // must always return leaves whose mi-cell footprints exactly partition
+    // the coded block: every one of its `bw4*bh4` mi cells covered by
+    // exactly one leaf, none left uncovered and none double-covered,
+    // regardless of which entropy path the synthetic bitstream happens to
+    // take (the no-read shortcuts, the lossless/TX_4X4-forced shortcut, or
+    // the real recursive tree). A self-consistency invariant that doesn't
+    // depend on knowing the "right" answer for this specific (synthetic,
+    // not real-encoder) bitstream — real-bitstream entropy-sync is checked
+    // separately against a patched dav1d trace.
+    for &bsize in &[
+        BLOCK_8X8,
+        BLOCK_16X16,
+        BLOCK_32X32,
+        BLOCK_64X64,
+        BLOCK_16X8,
+        BLOCK_8X16,
+        BLOCK_32X16,
+        BLOCK_16X32,
+    ] {
+        for &tx_mode_select in &[true, false] {
+            for &skip in &[true, false] {
+                for &qindex in &[0u8, 128] {
+                    let data = vec![0xA5u8; 64];
+                    let mut y = vec![0u8; 64 * 64];
+                    let mut u = vec![0u8; 32 * 32];
+                    let mut v = vec![0u8; 32 * 32];
+                    let mut meta = FrameMeta::new(64, 64);
+                    let mut state = TileDecodeState::new(
+                        &data,
+                        0,
+                        64,
+                        64,
+                        32,
+                        32,
+                        &mut y,
+                        &mut u,
+                        &mut v,
+                        64,
+                        32,
+                        qindex,
+                        DeltaQ::default(),
+                        tx_mode_select,
+                        false,
+                        false,
+                        false,
+                        0,
+                        0,
+                        64,
+                        64,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                        LrDecodeParams::default(),
+                        CdefDeltaParams::default(),
+                        false,
+                        false,
+                        false,
+                        false,
+                        INTERP_SWITCHABLE,
+                        [0u8; 9],
+                        RefFrames::empty(),
+                        &mut meta,
+                    );
+                    let bw4 = BLOCK_WIDTH[bsize] / 4;
+                    let bh4 = BLOCK_HEIGHT[bsize] / 4;
+                    let leaves = state.read_block_tx_size_ibc(0, 0, bsize, skip);
+
+                    let mut covered = vec![false; bw4 * bh4];
+                    for (c, r, tx) in &leaves {
+                        assert!(
+                            *tx <= max_tx_size_for_bsize(bsize),
+                            "bsize {bsize} tx_mode_select={tx_mode_select} skip={skip} \
+                             qindex={qindex}: leaf tx {tx} exceeds max_tx"
+                        );
+                        let (w4, h4) = (av1::TX_WIDTH[*tx] / 4, av1::TX_HEIGHT[*tx] / 4);
+                        for dy in 0..h4 {
+                            for dx in 0..w4 {
+                                let (cc, rr) = (c + dx, r + dy);
+                                assert!(
+                                    cc < bw4 && rr < bh4,
+                                    "bsize {bsize} tx_mode_select={tx_mode_select} \
+                                     skip={skip} qindex={qindex}: leaf at ({c},{r}) \
+                                     tx {tx} spills outside the block ({bw4}x{bh4} mi)"
+                                );
+                                let idx = rr * bw4 + cc;
+                                assert!(
+                                    !covered[idx],
+                                    "bsize {bsize} tx_mode_select={tx_mode_select} \
+                                     skip={skip} qindex={qindex}: mi cell ({cc},{rr}) \
+                                     covered by more than one leaf"
+                                );
+                                covered[idx] = true;
+                            }
+                        }
+                    }
+                    assert!(
+                        covered.iter().all(|&c| c),
+                        "bsize {bsize} tx_mode_select={tx_mode_select} skip={skip} \
+                         qindex={qindex}: some mi cells left uncovered by any leaf"
+                    );
+                }
+            }
+        }
     }
 }
 
