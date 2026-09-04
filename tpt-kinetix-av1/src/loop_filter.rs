@@ -418,11 +418,36 @@ fn compute_level(fh: &FrameHeader, plane: usize, pass: usize, delta_lf: i32) -> 
     } else {
         0
     };
-    let mut lvl = base + delta_lf;
+    // §7.14.4: `base` (pre-ref-delta) is clamped to [0,63] *before* the ref
+    // delta is added — cross-checked against dav1d's `calc_lf_value`
+    // (`lf_mask.c`), which computes `base = iclip(base_lvl + lf_delta, 0,
+    // 63)` first, then a separate final `iclip` after adding the delta.
+    let base = (base + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    let mut lvl = base;
     if fh.loop_filter_delta_enabled {
-        // All keyframe blocks are intra: ref = INTRA_FRAME (0), modeType = 0.
-        lvl += fh.loop_filter_deltas.loop_filter_ref_deltas[0] as i32;
-        lvl += fh.loop_filter_deltas.loop_filter_mode_deltas[0] as i32;
+        // §7.14.4's ref-delta term is `loop_filter_ref_deltas[ref] <<
+        // nShift`, where `nShift = lvlSeg >> 5` (i.e. the delta is *doubled*
+        // once `base >= 32`) — cross-checked against dav1d's `calc_lf_value`
+        // (`const int sh = base >= 32;` ... `ref_delta[0] * (1 << sh)`). A
+        // previous version of this function added the raw, unshifted delta
+        // unconditionally, silently under-strengthening every edge at a
+        // frame/segment loop-filter level of 32 or higher.
+        let shift = if base >= 32 { 1 } else { 0 };
+        // §7.14.4: for `RefFrame[0] == INTRA_FRAME` (true for every block in
+        // a keyframe-only decoder), only the *ref* delta applies — the mode
+        // delta is added only for inter blocks (`ref_deltas[ref] +
+        // mode_deltas[mode]`, `ref != INTRA_FRAME`). A previous version of
+        // this function added `loop_filter_mode_deltas[0]` unconditionally,
+        // which is wrong for every intra block whenever the bitstream sets a
+        // nonzero mode delta (dav1d's `calc_lf_value`, r=0 case, uses
+        // `ref_delta[0]` alone with no mode-delta term at all) — this
+        // desynced the filter *level itself* (not just which edges get
+        // marked), independently of the deblock-edge-presence and
+        // 4-vs-8-granularity bugs fixed earlier this session, and was found
+        // by comparing dav1d's own `loop_filter()` E/I/H values against
+        // Kinetix's for the exact same edge (mandelbrot's `x=96,y=64`
+        // vertical edge: dav1d `I=19`, Kinetix `I=18` before this fix).
+        lvl += fh.loop_filter_deltas.loop_filter_ref_deltas[0] as i32 * (1 << shift);
     }
     lvl.clamp(0, MAX_LOOP_FILTER)
 }
