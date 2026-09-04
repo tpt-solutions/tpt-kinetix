@@ -501,6 +501,7 @@ impl<'a> TileDecodeState<'a> {
                     reduced_tx_set: self.reduced_tx_set,
                     lossless: self.lossless,
                     is_inter: false,
+                    coincident_luma_tx_type: av1::DCT_DCT,
                 };
                 let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
                     colors: &palette.colors_y,
@@ -684,6 +685,7 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: false,
+                        coincident_luma_tx_type: av1::DCT_DCT,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
                     let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
@@ -922,6 +924,15 @@ impl<'a> TileDecodeState<'a> {
         let v_plane = &mut *self.v_plane;
         let [bd_y, bd_u, bd_v] = &mut self.block_decoded;
 
+        // Per-mi-cell luma `TxType` (spec `TxTypes[y][x]`), filled below as
+        // each luma leaf is decoded and consulted by the chroma loop's
+        // `get_uv_inter_txtp` derivation (a chroma transform can be wider
+        // than any one luma leaf in 4:2:0, so it needs to look up whichever
+        // leaf's type is coincident with its own top-left corner). Indexed
+        // `(row - mi_row) * bw + (col - mi_col)`; defaults to `DCT_DCT`
+        // (matching a skipped leaf's implicit type).
+        let mut luma_tx_types = vec![av1::DCT_DCT; bw * bh];
+
         // ── Luma transform blocks ─────────────────────────────────────────────
         // One iteration per var-tx-tree leaf (`leaves`, absolute tile-local
         // mi coordinates) instead of a uniform fixed-size grid — real IBC
@@ -1003,6 +1014,9 @@ impl<'a> TileDecodeState<'a> {
                 reduced_tx_set: self.reduced_tx_set,
                 lossless: self.lossless,
                 is_inter: true,
+                // Irrelevant for plane 0 (`read_coeffs` only consults this
+                // field for `plane > 0`).
+                coincident_luma_tx_type: av1::DCT_DCT,
             };
 
             let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
@@ -1013,6 +1027,17 @@ impl<'a> TileDecodeState<'a> {
                     &mut self.coeff_ctxs,
                     &blk,
                 )?;
+                let leaf_w4 = (leaf_tx_w / MI_SIZE).max(1);
+                let leaf_h4 = (leaf_tx_h / MI_SIZE).max(1);
+                for r in 0..leaf_h4 {
+                    for c in 0..leaf_w4 {
+                        let (row, col) = (leaf_mi_row + r, leaf_mi_col + c);
+                        if row >= mi_row && row < mi_row + bh && col >= mi_col && col < mi_col + bw
+                        {
+                            luma_tx_types[(row - mi_row) * bw + (col - mi_col)] = coeffs.tx_type;
+                        }
+                    }
+                }
                 if coeffs.eob > 0 {
                     let dequant =
                         dequantize_coeffs(&coeffs.quant, leaf_tx, y_qindex_dc, y_qindex_ac);
@@ -1133,16 +1158,26 @@ impl<'a> TileDecodeState<'a> {
                     // only affects `compute_tx_type`'s output, not entropy
                     // sync. `is_inter: true` routes chroma through
                     // `get_uv_inter_txtp` (§7.11.3.1) instead of the intra
-                    // `uv_mode`-based `MODE_TO_TXFM` lookup — correct in
-                    // spirit, though it's fed a `DCT_DCT` placeholder for
-                    // "luma's tx type" here rather than the real collocated
-                    // luma leaf's decoded type (this call site has no easy
-                    // access to a per-mi-position luma-tx-type lookup yet);
-                    // `get_uv_inter_txtp(_, DCT_DCT)` always resolves to
-                    // `DCT_DCT` regardless, so this is a no-op vs. the
-                    // previous hardcoded-DCT_DCT behaviour for now, not a
-                    // regression — wiring the real per-position lookup is
-                    // future work alongside full inter coefficient context.
+                    // `uv_mode`-based `MODE_TO_TXFM` lookup, fed the real
+                    // coincident luma leaf's decoded type (`luma_tx_types`,
+                    // filled above as each luma leaf was read) — looked up
+                    // at this chroma block's own top-left corner subsampled
+                    // back to luma mi coordinates, matching spec `TxTypes[
+                    // y][x]`'s sampling point. A previous version always
+                    // fed a `DCT_DCT` placeholder here: harmless for
+                    // entropy sync (chroma never reads `tx_type` bits) but
+                    // wrong for `compute_tx_type`'s own output and, through
+                    // it, the `TX_CLASS`-derived `is_1d` context bit
+                    // `read_eob` uses for its *very next* symbol read —
+                    // desyncing chroma's coefficient decode for any block
+                    // whose real luma type wasn't `DCT_DCT` (confirmed via
+                    // a dav1d trace on a real `testsrc2` IBC block: dav1d's
+                    // `SKIPCTX_EOB` showed `is_1d=1`, the placeholder
+                    // produced `is_1d=0`).
+                    let luma_col = mi_col + ((tx << sub_x) / MI_SIZE).min(bw - 1);
+                    let luma_row = mi_row + ((ty << sub_y) / MI_SIZE).min(bh - 1);
+                    let coincident_luma_tx_type =
+                        luma_tx_types[(luma_row - mi_row) * bw + (luma_col - mi_col)];
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -1158,6 +1193,7 @@ impl<'a> TileDecodeState<'a> {
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: true,
+                        coincident_luma_tx_type,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
 
