@@ -1314,6 +1314,29 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.mv_left.get_mut(r) {
                 s[0] = mv;
             }
+            // `PaletteColors[{0,1}][MiRow][MiCol]` (§5.11.46): IBC blocks
+            // never have a palette (`PaletteSizeY == PaletteSizeUV == 0`
+            // always), but the array must still be *cleared* across this
+            // block's own mi extent — otherwise a stale non-empty entry
+            // left behind by an earlier real-intra block at this same
+            // position leaks into the next block's `has_palette_y`/`_uv`
+            // context read (`ctx = above_has + left_has`, `palette.rs`),
+            // corrupting its CDF selection despite the arithmetic-coder
+            // state itself being perfectly in sync going in. Confirmed via
+            // dav1d trace: dav1d's own inter/IBC context-update path
+            // (`decode.c`'s non-intra `case_set` block) explicitly sets
+            // `edge->pal_sz = 0` / `t->pal_sz_uv[i] = 0` for every IBC/
+            // inter block, which this mirrors. Root-caused 2026-09-04 by
+            // tracing a real `testsrc2` block (dav1d `Post-y_pal[0]`,
+            // i.e. no palette, vs Kinetix's stale-context-driven
+            // `colors_y.len() == 2`) back through a fully-matching
+            // preceding IBC block to this exact gap.
+            if let Some(s) = self.palette_y_colors_left.get_mut(r) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_left.get_mut(r) {
+                s.clear();
+            }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(s) = self.ymode_above.get_mut(c) {
@@ -1331,6 +1354,13 @@ impl<'a> TileDecodeState<'a> {
             }
             if let Some(s) = self.mv_above.get_mut(c) {
                 s[0] = mv;
+            }
+            // See the `palette_y_colors_left` comment above.
+            if let Some(s) = self.palette_y_colors_above.get_mut(c) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_above.get_mut(c) {
+                s.clear();
             }
         }
 
