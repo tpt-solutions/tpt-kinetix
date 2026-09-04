@@ -43,14 +43,6 @@ impl<'a> TileDecodeState<'a> {
         // feature override of qindex / skip is not yet applied here (the test
         // corpus uses no segmentation), so qindex and the skip flag below fall
         // back to the frame-level values.
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() && mi_row < 4 && mi_col < 16 {
-            eprintln!(
-                "KTRACE BLOCK_ENTER mi=({mi_col},{mi_row}) bsize={bsize} seg_en={} ibc={} r={}",
-                self.segmentation_enabled,
-                self.allow_intrabc,
-                self.dec.raw_state().0
-            );
-        }
         let seg_ctx = self.segment_id_context(mi_row, mi_col);
         let _seg_id = if self.segmentation_enabled {
             self.mode_cdfs.read_segment_id(&mut self.dec, seg_ctx)
@@ -76,13 +68,6 @@ impl<'a> TileDecodeState<'a> {
         // can consume a delta, regardless of whether it actually did). Each
         // of the three is a true no-op (reads zero bits) unless the
         // corresponding frame-header feature is actually on.
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() && mi_row < 4 && mi_col < 16 {
-            let s = self.dec.raw_state();
-            eprintln!(
-                "KTRACE SKIP_POST mi=({mi_col},{mi_row}) skip={} r={} val={}",
-                skip as u8, s.0, s.1
-            );
-        }
         self.read_cdef(mi_row, mi_col, bsize, skip);
         self.read_delta_qindex(bsize, skip);
         self.read_delta_lf(bsize, skip);
@@ -93,21 +78,7 @@ impl<'a> TileDecodeState<'a> {
         // by 1 bit for every block in the tile — a progressive, accumulating
         // corruption.
         if self.allow_intrabc {
-            if std::env::var("KINETIX_AV1_TRACE").is_ok() && mi_row < 4 && mi_col < 16 {
-                let s = self.dec.raw_state();
-                eprintln!(
-                    "KTRACE IBC_BEFORE mi=({mi_col},{mi_row}) r={} val={} maxbits={}",
-                    s.0, s.1, s.2
-                );
-            }
             let use_intrabc = self.mode_cdfs.read_use_intrabc(&mut self.dec);
-            if std::env::var("KINETIX_AV1_TRACE").is_ok() && mi_row < 4 && mi_col < 16 {
-                let s = self.dec.raw_state();
-                eprintln!(
-                    "KTRACE IBC_AFTER mi=({mi_col},{mi_row}) use_intrabc={} r={} val={}",
-                    use_intrabc as u8, s.0, s.1
-                );
-            }
             if use_intrabc {
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
                     eprintln!(
@@ -154,14 +125,7 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.bit_position()
                     );
                 }
-                let result = self.reconstruct_ibc_block(mi_row, mi_col, bsize, skip, mv);
-                if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
-                    eprintln!(
-                        "DBG IBC post_block: mi=({mi_col},{mi_row}) r={}",
-                        self.dec.raw_state().0
-                    );
-                }
-                return result;
+                return self.reconstruct_ibc_block(mi_row, mi_col, bsize, skip, mv);
             }
         }
 
@@ -582,25 +546,21 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        // Record per-4×4-luma-cell metadata for the in-loop filters. The
-        // 4-sample (MI) granularity is required so the deblock pass can step
-        // at 4 samples and skip internal positions of large tx blocks.
+        // Record per-8×8-luma-block metadata for the in-loop filters (AV1 Phase
+        // D). Coordinates are tile-local, matching the tile-local plane buffers
+        // this tile reconstructs into; `reconstruct_av1_frame` merges the
+        // per-tile metas into a full-frame `FrameMeta` and runs
+        // `apply_post_filters` over the assembled frame.
         let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 4;
-        let by0 = blk_px_y / 4;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(4);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(4);
-        for by4 in by0..by1.min(self.meta.h4) {
-            for bx4 in bx0..bx1.min(self.meta.w4) {
+        let bx0 = blk_px_x / 8;
+        let by0 = blk_px_y / 8;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
+        for by in by0..by1.min(self.meta.h8) {
+            for bx in bx0..bx1.min(self.meta.w8) {
                 self.meta
-                    .record_luma(bx4, by4, luma_tx_w as u8, luma_tx_h as u8, skip);
-                if bx4 == bx0 {
-                    self.meta.mark_luma_left(bx4, by4);
-                }
-                if by4 == by0 {
-                    self.meta.mark_luma_top(bx4, by4);
-                }
+                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
             }
         }
 
@@ -684,8 +644,6 @@ impl<'a> TileDecodeState<'a> {
             };
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
-            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
-            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
             for ty in (0..chroma_bh).step_by(ch) {
                 for tx in (0..chroma_bw).step_by(cw) {
                     let cpx_x = base_cpx_x + tx;
@@ -828,6 +786,14 @@ impl<'a> TileDecodeState<'a> {
                             }
                         },
                     )?;
+                }
+            }
+            // Record chroma tx/skip metadata for the same 8×8-luma grid region.
+            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
+            for by in by0..by1.min(self.meta.h8) {
+                for bx in bx0..bx1.min(self.meta.w8) {
+                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                 }
             }
         }
@@ -1162,8 +1128,6 @@ impl<'a> TileDecodeState<'a> {
             };
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
-            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
-            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
 
             // Chroma displacement: divide the luma MV by the subsampling factor.
             let cmv_dx = mv_dx >> sub_x;

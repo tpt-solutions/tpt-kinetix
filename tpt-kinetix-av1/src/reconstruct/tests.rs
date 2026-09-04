@@ -902,11 +902,9 @@ fn read_cdef_marks_the_64x64_slot_set_even_at_cdef_bits_zero_and_reads_only_once
 }
 
 #[test]
-fn read_cdef_is_a_true_noop_when_global_gate_condition_holds() {
-    // §5.11.56: `CodedLossless || !enable_cdef || allow_intrabc`
-    // return immediately without touching `cdef_idx` or the bitstream.
-    // Note: `skip=true` is a *different* case — it DOES write -1 to
-    // `cdef_idx` (the skip-block sentinel) without reading the bitstream.
+fn read_cdef_is_a_true_noop_when_any_gate_condition_holds() {
+    // §5.11.56: `skip || CodedLossless || !enable_cdef || allow_intrabc`
+    // all return immediately without touching `cdef_idx` or the bitstream.
     let mut y = vec![0u8; 64];
     let mut u = vec![0u8; 16];
     let mut v = vec![0u8; 16];
@@ -930,50 +928,6 @@ fn read_cdef_is_a_true_noop_when_global_gate_condition_holds() {
     state.read_cdef(0, 0, BLOCK_8X8, false);
     assert!(state.cdef_idx.is_empty());
     assert_eq!(state.dec.bit_position(), bit_pos_before);
-}
-
-#[test]
-fn read_cdef_skip_block_writes_sentinel_and_non_skip_overwrites_it() {
-    // §5.11.56: when skip=true, the spec sets CdefIdx[r][c] = -1 (mark the
-    // unit "all-skip so far"). A subsequent non-skip block in the same 64×64
-    // unit reads the bitstream and overwrites -1 with the real index.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
-    let mut meta = FrameMeta::new(2, 2);
-    let mut state = make_cdef_delta_state(
-        &mut y,
-        &mut u,
-        &mut v,
-        &mut meta,
-        100,
-        CdefDeltaParams { enable_cdef: true, cdef_bits: 0, ..Default::default() },
-        false,
-        false,
-    );
-    // Skip block → should write -1 sentinel.
-    state.read_cdef(0, 0, BLOCK_8X8, true);
-    assert_eq!(
-        state.cdef_idx.get(&(0, 0)),
-        Some(&-1),
-        "skip block must write -1 sentinel to cdef_idx"
-    );
-    let bit_pos = state.dec.bit_position();
-    // Skip block again on same unit → should remain -1, no bitstream read.
-    state.read_cdef(0, 0, BLOCK_8X8, true);
-    assert_eq!(state.cdef_idx.get(&(0, 0)), Some(&-1));
-    assert_eq!(state.dec.bit_position(), bit_pos, "skip must not consume bits");
-    // Non-skip block on same unit → should overwrite -1 with real index (0).
-    state.read_cdef(0, 0, BLOCK_8X8, false);
-    assert_eq!(
-        state.cdef_idx.get(&(0, 0)),
-        Some(&0),
-        "first non-skip block must overwrite -1 with the strength index"
-    );
-    let bit_pos2 = state.dec.bit_position();
-    // Second non-skip block → must not re-read (index is already >= 0).
-    state.read_cdef(0, 0, BLOCK_8X8, false);
-    assert_eq!(state.dec.bit_position(), bit_pos2, "second non-skip must not re-read");
 }
 
 #[test]

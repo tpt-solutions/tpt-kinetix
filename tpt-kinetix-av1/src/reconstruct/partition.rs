@@ -106,12 +106,6 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         sb_bsize: usize,
     ) -> Result<(), KinetixError> {
-        if std::env::var("KINETIX_AV1_DBG_SB_BITS").is_ok() {
-            eprintln!(
-                "DBG SB_START mi=({mi_col},{mi_row}) bit={}",
-                self.dec.bit_position()
-            );
-        }
         // §5.11.4 `decode_tile()`'s per-superblock prelude: `ReadDeltas =
         // delta_q_present`, then `clear_cdef(r, c)`, before walking the
         // partition tree.
@@ -127,14 +121,7 @@ impl<'a> TileDecodeState<'a> {
         // desyncs the entropy decoder for the entire tile from its first read.
         let sb_mi = BLOCK_WIDTH[sb_bsize] / MI_SIZE;
         self.read_lr(mi_row, mi_col, sb_mi);
-        let result = self.decode_partition(mi_row, mi_col, sb_bsize);
-        if std::env::var("KINETIX_AV1_DBG_SB_BITS").is_ok() {
-            eprintln!(
-                "DBG SB_END   mi=({mi_col},{mi_row}) bit={}",
-                self.dec.bit_position()
-            );
-        }
-        result
+        self.decode_partition(mi_row, mi_col, sb_bsize)
     }
 
     /// `read_lr(r, c, bSize)` (AV1 spec §5.11.57). `sb_mi` is
@@ -398,10 +385,9 @@ impl<'a> TileDecodeState<'a> {
         let subs = split_into_subblocks(bw, bh, partition);
 
         if std::env::var("KINETIX_AV1_TRACE").is_ok() {
-            let s = self.dec.raw_state();
             eprintln!(
-                "KTRACE PART y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} bp={partition} r={} val={}",
-                s.0, s.1
+                "KTRACE PART y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} bp={partition} r={}",
+                self.dec.raw_state().0
             );
         }
 

@@ -253,9 +253,7 @@ pub fn maybe_capture_block(
          \"eob_pt_64\": {},\n    \"eob_pt_128\": {},\n    \"eob_pt_256\": {},\n    \
          \"eob_pt_512\": {},\n    \"eob_pt_1024\": {},\n    \"eob_extra\": {},\n    \
          \"coeff_base_eob\": {},\n    \"coeff_base\": {},\n    \"coeff_br\": {},\n    \
-         \"dc_sign\": {},\n    \"intra_tx_type_set1\": {},\n    \"intra_tx_type_set2\": {},\n    \
-         \"inter_tx_type_set1\": {},\n    \"inter_tx_type_set2\": {},\n    \
-         \"inter_tx_type_set3\": {}\n  }}",
+         \"dc_sign\": {},\n    \"intra_tx_type_set1\": {},\n    \"intra_tx_type_set2\": {}\n  }}",
         json_nest3_u16(&cdf.txb_skip),
         json_nest3_u16(&cdf.eob_pt_16),
         json_nest3_u16(&cdf.eob_pt_32),
@@ -271,9 +269,6 @@ pub fn maybe_capture_block(
         json_nest3_u16(&cdf.dc_sign),
         json_nest3_u16(&cdf.intra_tx_type_set1),
         json_nest3_u16(&cdf.intra_tx_type_set2),
-        json_nest2_u16(&cdf.inter_tx_type_set1),
-        json_nest1_u16(&cdf.inter_tx_type_set2),
-        json_nest2_u16(&cdf.inter_tx_type_set3),
     );
     let json = format!(
         "{{\n  \"data_hex\": \"{data_hex}\",\n  \"bit_offset\": {sub_bit_offset},\n  \
@@ -332,11 +327,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Serialize a nested `Vec<Vec<u16>>` to compact JSON for the block capture
 /// (used for the adapted-CDF snapshot so the oracle can replay Kinetix's
 /// exact mid-tile CDF tables).
-fn json_nest1_u16(v: &[u16]) -> String {
-    let inner: Vec<String> = v.iter().map(|x| x.to_string()).collect();
-    format!("[{}]", inner.join(","))
-}
-
 fn json_nest_u16(v: &[Vec<u16>]) -> String {
     let rows: Vec<String> = v
         .iter()
