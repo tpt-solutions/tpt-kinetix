@@ -221,6 +221,11 @@ const MAX_TX_DEPTH_TABLE: [usize; BLOCK_SIZES] = [
 // `TX_WIDTH`/`TX_HEIGHT` (all 19 `TxSize` values, not just the 5 square
 // ones) live in `coeff_tables` as `av1::TX_WIDTH`/`av1::TX_HEIGHT`.
 const TX_32X32: usize = 3;
+// Only referenced from `tests.rs` now (`dq_denom`'s square-up-driven
+// rewrite no longer needs it directly) — kept for the spec table's full
+// square-size enumeration and pinned by `dq_denom_matches_spec_for_
+// large_square_transforms`.
+#[allow(dead_code)]
 const TX_64X64: usize = 4;
 
 // Partition types (AV1 spec §5.11.4).
