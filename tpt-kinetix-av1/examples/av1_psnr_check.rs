@@ -207,14 +207,6 @@ fn main() {
         check("testsrc2_320x180", "testsrc2", None, 320, 180);
         return;
     }
-    if std::env::var("KINETIX_AV1_ONLY_TESTSRC2_SMALL").is_ok() {
-        check("testsrc2_64x180", "testsrc2", None, 64, 180);
-        check("testsrc2_128x180", "testsrc2", None, 128, 180);
-        check("testsrc2_192x180", "testsrc2", None, 192, 180);
-        check("testsrc2_256x180", "testsrc2", None, 256, 180);
-        check("testsrc2_320x180", "testsrc2", None, 320, 180);
-        return;
-    }
     // Content likely to pick large transforms (flat / low detail) and varied
     // resolutions that exercise TX_32X32 / TX_64X64.
     check("solid_red_32", "color", Some("c=red"), 32, 32);
