@@ -3526,3 +3526,113 @@
 > build lives only in `scratchpad/av1ref/` (rebuilt this session from
 > `github.com/videolan/dav1d` — see the earlier 2026-09-03 note for the
 > build recipe); it is not committed to this repo.
+
+> ## 2026-09-03 (cont'd #2) — ★ found the likely root cause: `deblock_plane`
+> has no transform/prediction-edge presence check, so it filters at *every*
+> 8-px grid line, including ones strictly inside a single wide transform. ★
+> Root-caused following the trail from the note above (row 71-88's CDEF
+> variance for the unit at (0,80) computed 744 vs dav1d's 230 despite
+> identical formulas — traced to different *input pixels*, i.e. deblock, not
+> CDEF, was the actual divergence point). **Not fixed this session** — found
+> late, and a correct fix touches several call sites; verifying it safely
+> needs a fresh session with full budget for a `just conformance`/full-corpus
+> re-check. This note has everything needed to implement and verify it.
+>
+> **The bug**: `FrameMeta::record_luma`/`record_chroma` (`loop_filter.rs`)
+> are called once per real transform block, but the *callers*
+> (`reconstruct/intra_block.rs` twice, `inter_block.rs`, the IBC path) loop
+> over **every** 8×8-luma grid cell the transform spans and call
+> `record_luma` identically for each — e.g. a 16×32 transform (two 8×8
+> columns wide) writes `tx_w=16` into *both* grid columns it covers. Given
+> that, `deblock_plane`'s vertical-edge loop (`for bx in 1..grid_w`) filters
+> at **every** `bx*step` position whenever `compute_level(...) != 0`, using
+> `left_tx.min(right_tx)` purely to size the filter tap — there is no check
+> for whether `bx*step` is actually a transform (or prediction-block)
+> boundary at all. For our 16-wide transform, position `x=8` (`bx=1`) sits
+> **inside** the single transform (real edges only at `x=0` and `x=16`), but
+> the loop filters it anyway because `left_tx == right_tx == 16` looks like
+> "a valid size", not "no edge here". AV1 §7.14.1's edge mask is supposed to
+> gate this (`isTxEdge`/`isBlockEdge`), and that gate is simply missing here.
+> This has nothing to do with CDEF, and nothing to do with prediction —
+> **deblock is the first thing in the post-filter chain to touch the wrong
+> pixels**, and CDEF (correctly implemented) then just propagates that error
+> forward, which is why the CDEF-side investigation initially looked like a
+> "variance formula" bug.
+>
+> **Evidence trail** (`mandelbrot_128x96`, mi block bx=0,by=16, a single
+> `SMOOTH_V` 16×32 `DCT_DCT` transform spanning luma rows 64-95): pre-filter
+> reconstruction (pred+residual, verified bit-exact vs dav1d in the note
+> above) for column 0 of the 8×8 unit at (0,80)-(7,87) exactly equals
+> Kinetix's own post-deblock snapshot at every row (80→141, 81→140, …,
+> 87→132 — deblock made *no* change there, correctly, since column 0 is at
+> the block's real left edge and the edge filter evidently chose a zero
+> delta this time). But **columns 6-7** of that same 8×8 unit *do* differ
+> between pre-filter and post-deblock (e.g. row 82 col 6: pre-filter 144,
+> post-deblock 145; row 86 col 6: pre-filter 139, post-deblock wrongly
+> stayed 139 vs a dav1d-implied correct value elsewhere in the row) — a
+> small ±1 perturbation centered on `x=8`, exactly where the missing
+> edge-presence check would spuriously apply the deblock kernel's tap reach
+> from a nonexistent internal boundary. This 1-2px perturbation then feeds
+> `cdef_direction`'s variance computation (whose formulas were verified
+> line-for-line identical to dav1d's `cdef_find_dir_c` — cost accumulation,
+> `DIV_TABLE`/`div_table` indexing, and the final `(best_cost -
+> cost[dir^4]) >> 10` all match), producing a different variance (744 vs
+> 230) even though the direction argmax happened to coincide (dir=4 both
+> sides) for this particular unit — the CDEF math itself is correct, its
+> *input* wasn't.
+>
+> **Likely blast radius**: any coded block using a transform wider or taller
+> than 8 samples (16×16, 16×32, 32×32, the `TX_16X4`/`TX_8X16` family, etc.)
+> gets spurious internal-grid-line deblocking at every 8-px step inside it.
+> This corpus has plenty of those (the 32×32 `DC_PRED` block at mi (0,0) in
+> this same mandelbrot frame, most of `smptebars`'s and `testsrc2`'s larger
+> flat regions, …) — likely explains a meaningful share of the whole
+> post-filter PSNR gap across the corpus, not just this one row band.
+>
+> **The fix** (scoped, not yet implemented): add edge-presence tracking
+> alongside the existing size tracking.
+> 1. `FrameMeta`: add `luma_edge_left: Vec<bool>` / `luma_edge_top: Vec<bool>`
+>    (and the chroma equivalents, `u_edge_left`/`u_edge_top` — `v` shares the
+>    same subsampled grid as `u` per `record_chroma`'s existing `u`/`v`
+>    symmetry) alongside `luma_tx_w` etc., all `w8*h8`-sized, default `false`.
+> 2. `record_luma`/`record_chroma`: accept `is_left_edge: bool, is_top_edge:
+>    bool` and OR them into the new grids (OR, not overwrite — `merge_tile`
+>    calls these again per tile and a real edge from one tile-local call must
+>    stick).
+> 3. At every call site (`intra_block.rs` ×2 — the keyframe path around line
+>    ~522-529 and the IBC path around ~971-978 — `inter_block.rs`, and any
+>    inter-IBC chroma loop), when looping `for by in by0..by1 { for bx in
+>    bx0..bx1 { record_luma(bx, by, ...) } }`, pass `is_left_edge: bx == bx0,
+>    is_top_edge: by == by0` — i.e. only the block's own origin column/row is
+>    a real edge; the rest of its span is interior. Chroma's `record_chroma`
+>    call sites already iterate per actual chroma-tx-block (not per coded
+>    block), so check whether they need the same treatment or are already
+>    tx-block-granular — worth confirming with a quick trace before assuming
+>    chroma needs the identical fix.
+> 4. `deblock_plane`: thread the appropriate edge grid in (a new parameter,
+>    or reuse `_skip_grid`'s currently-unused slot pattern) and gate — vertical
+>    pass: `if !luma_edge_left[by*grid_w+bx] { continue; }` before computing
+>    `filter_size`/running the filter (mirror for the horizontal pass with
+>    `edge_top`).
+> 5. Verify: `cargo test -p tpt-kinetix-av1 --lib` (expect the existing
+>    `filter_size_from_tx_samples_caps_by_plane_not_by_bucket`-style tests to
+>    still pass unmodified — they test the size formula directly, not the
+>    plane-level loop), `av1_psnr_check` across the whole corpus (expect
+>    `solid_red` unchanged at 99/99/99 — every block there is a single
+>    32×32/64×64 transform covering the whole frame, so no internal edges
+>    exist to wrongly filter either way; expect `mandelbrot`/`smptebars`/
+>    `testsrc2` Y (and likely U/V) to improve, `testsrc` to improve less since
+>    its content mostly uses `TX_8X8`-or-smaller transforms where every grid
+>    line already is a real edge). Add a regression test in
+>    `loop_filter.rs`'s existing test module: a synthetic 16-wide two-tx-cell
+>    `FrameMeta` where cell 1 is *not* a real edge (from a wide transform)
+>    should not filter at `x=8`, contrasted with two adjacent independent
+>    8-wide transforms (both `is_left_edge: true`) which should.
+>
+> Nothing committed this sub-session (temporary `KINETIX_AV1_DBG_CDEF`
+> instrumentation used to find this was added and then fully removed again;
+> `git diff` is clean). 126 unit tests still pass, `av1_psnr_check` numbers
+> unchanged from the top of this session's note (this was pure
+> investigation, no code changes landed). **This is the single most
+> concrete, well-evidenced next AV1 fix** — more so than the CDEF-strength
+> framing item (2) used to have; CDEF itself is not implicated.
