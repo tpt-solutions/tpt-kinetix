@@ -3970,3 +3970,62 @@
 > hasn't mattered yet, but is a real gap for future content; (3) loop
 > restoration boundary-pixel fix to un-gate apply; (4) IBC var-tx tree +
 > inter tx_type + inter coefficient context.
+
+> **2026-09-04 (cont'd) -- loop restoration: fixed real cross-unit-
+> boundary pixel reads (a genuine spec-fidelity improvement), but it did
+> NOT resolve the underlying "not yet correct" gap -- still gated behind
+> KINETIX_AV1_FILTER=1, null result on the one exercised test case.**
+> Continued the worst-row scan (row64/col96 fix above resolved the
+> largest single-pixel outlier); the next-worst rows showed a smaller,
+> broader +/-1 divergence spread across many flat interior pixels far
+> from any transform/deblock/CDEF edge (e.g. mandelbrot row4 cols79-93,
+> all exactly -1 vs ref). Isolated via dav1d's `--inloopfilters
+> none|nodeblock|nocdef|norestoration` flags (see the earlier note on why
+> this beats source patching): raw reconstruction and CDEF-only output
+> both matched Kinetix exactly at these pixels; only `--inloopfilters`
+> with restoration *enabled* reproduced the -1 shift, and disabling just
+> restoration removed it. So this whole class of remaining small,
+> widespread diffs is loop restoration -- currently gated off in Kinetix
+> entirely (`apply_loop_restoration_plane` only runs under
+> `KINETIX_AV1_FILTER=1`), which explains why Kinetix simply doesn't
+> reproduce it.
+>
+> Fixed the specific bug this session's methodology could point to
+> directly: `wiener_filter_plane`/`sgrproj_filter_plane` extracted each
+> restoration unit into an *isolated* buffer before filtering, so every
+> tap within reach of the unit's own edge (inescapable for a 7-tap Wiener
+> kernel, or an SgrProj radius-r window, on units as small as 32px)
+> clamped to that unit's own edge sample rather than reading the real
+> pixel just across the boundary. Rewrote both to take a shared
+> whole-plane pre-restoration snapshot plus the target unit's offset, so
+> only the true plane edge clamps -- still an approximation of the real
+> §7.17.1 stripe-line-buffer boundary handling (pre-deblock lines saved
+> every 64 rows), not a full spec match, but strictly closer than
+> unit-local clamping. Added a regression test proving the function
+> actually reads real cross-boundary pixels (structurally impossible for
+> the old isolated-buffer version).
+>
+> **Null result, honestly reported**: enabling `KINETIX_AV1_FILTER=1` on
+> the corpus's only clip that exercises restoration (testsrc's V plane,
+> 49.26 dB unfiltered) gives *byte-identical* output before and after
+> this fix (42.24 dB both times -- restoration currently makes that plane
+> worse, not better). So the boundary-clamping bug, while real and now
+> fixed, was not the (or not the only) reason restoration is gated off;
+> the deeper issue is still unlocated -- likely in the Wiener/SgrProj
+> math itself, or in how `lr_units` gets populated (`read_lr_unit`),
+> neither of which this session traced against dav1d. Confirmed via
+> `git stash` A/B testing (same command, only the fix reverted) that the
+> old code produces the exact same wrong 42.24 dB, ruling out the
+> boundary fix as either helping or hurting this specific case --
+> genuinely inconclusive, not a regression. Default corpus (`av1_psnr_
+> check` with `KINETIX_AV1_FILTER` unset) is provably unaffected since
+> restoration stays gated off either way. 133 unit tests pass, clippy
+> clean, `cargo build --workspace` green.
+>
+> **Next step for restoration** (not attempted this session): trace
+> `read_lr_unit`'s parsed Wiener/SgrProj coefficients for testsrc's one
+> restored unit against dav1d's actual decoded values (dav1d likely has
+> an existing debug hook or one can be patched into `src/recon_tmpl.c`'s
+> `read_restoration` /  `src/lf_apply_tmpl.c`'s restoration-apply path) --
+> the same trace-to-first-divergence method used for `dqDenom` and the
+> loop-filter-level bugs above, just not yet applied to this filter.
