@@ -3279,3 +3279,1255 @@
 > commit` calls. Remaining open items unchanged: mandelbrot still has a
 > smaller directional detail residual (pre-filter maxdiff ~21, likely
 > upsample interpolation or `dr_z3` `max_base_y`); (2)–(6) as above.
+
+> ## 2026-09-03 session note — catch-up on undocumented concurrent work, dav1d
+> reference rebuilt on Linux, and a real testsrc2/IBC bug fixed (skip blocks
+> never reset their coefficient neighbour context).
+>
+> **Catch-up (not this session's work, but undocumented in this file until
+> now)**: between the 2026-09-01 (cont'd #8) note above and this session, six
+> commits landed on `master` outside this file's narrative:
+> `73776fd` (tx_depth sentinel, already covered above), `b89ac1c` ("seven
+> reconstruction fixes + spec-correct MV component parsing" — SMOOTH enum,
+> chroma edge filter, 4×4 tx_depth, `use_intrabc`, `BlockDecoded`,
+> `filterType`, all *already* described above as uncommitted 2026-09-01 work,
+> now actually committed, plus a rewritten `read_mv_component`/`read_mv` to
+> the real §5.11.32 symbol order), `f7fae93` (three real CDEF bugs: a
+> spurious `for _ in 0..8` loop biasing `cdef_direction` toward direction 0,
+> wrong pri/sec packing, wrong sec-strength table lookup — `KINETIX_AV1_NOCDEF`
+> / `NODEBLOCK` bypass flags added), `ca52335` (loop restoration §7.17
+> implemented — Wiener + SgrProj), `f253255` (IBC reconstruction implemented:
+> integer-pel predictor copy + residual, via `reconstruct_ibc_block`), `b509fc3`
+> (IBC source-position sign was inverted — fixed by subtracting the decoded MV
+> instead of adding; loop restoration's *apply* step gated off behind
+> `KINETIX_AV1_FILTER=1` because it uses clamped unit-local pixels instead of
+> real neighbouring-unit pixels at restoration-unit boundaries, causing ~25 dB
+> regressions), `f93c99c` (palette reconstruction debug traces + psnr_check
+> row-diff tooling). **Net effect on `av1_psnr_check` vs the 2026-09-01
+> baseline**: `testsrc` Y 61.95→**73.01** (loop filter now on and correct),
+> `mandelbrot` Y 47.37→**47.59**, `smptebars` Y 54.23→**57.49**, `testsrc2`
+> 12.96→**14.36/17.17/13.92** (IBC blocks now reconstruct something instead of
+> erroring out). `solid_red` unchanged at 99/99/99.
+>
+> **This session started by fixing a broken build**: a prior commit added a
+> `dbg: bool` parameter to `read_palette_colors_yu` but didn't update its two
+> test call sites (`cargo test` failed to compile), and three
+> `KINETIX_AV1_DBG_*` env-var gates used manual range checks that trip
+> `clippy::manual_range_contains` under `-D warnings` (`cargo clippy` failed).
+> Fixed both (commit `f3dbd24`) — confirmed byte-identical `av1_psnr_check`
+> output before/after, 125 tests pass. **Branch note**: work was moved from a
+> feature branch to `master` directly partway through this session per
+> updated instructions; `git log` on `master` is the authoritative history
+> from here on.
+>
+> **Built a fresh dav1d reference on this (Linux) session's machine** —
+> `scratchpad/av1ref/` did not exist here (previous sessions built it on a
+> different Windows machine per the 2026-09-01 note). `apt-get install meson
+> nasm`, `git clone https://github.com/videolan/dav1d.git` (the
+> `code.videolan.org` origin is blocked by this environment's proxy; the
+> GitHub mirror works), same two-line patch as before
+> (`src/recon.h`'s `DEBUG_BLOCK_INFO` gated on `getenv("DAV1D_TRACE")` via a
+> `dav1d_trace_enabled()` helper, a `BLOCK bx by bw4 bh4 bl bp r=` print at
+> the top of `decode_b` in `src/decode.c`), `meson setup build
+> --buildtype=release && ninja -C build` (asm enabled this time — nasm is
+> available on Linux, unlike the previous session's `-Denable_asm=false`
+> workaround for a missing MSVC nasm). Run as
+> `LD_LIBRARY_PATH=.../build/src DAV1D_TRACE=1 build/tools/dav1d -i x.obu -o
+> out.yuv --threads 1`. This is a local build only (not committed — dav1d is
+> LGPL/BSD-dual and not vendored into this repo either way); rebuild from
+> this note's commands if `scratchpad/` is ever lost.
+>
+> **Bug found and fixed: skipped transform blocks never reset their
+> coefficient neighbour context.** Traced `testsrc2` (the IBC corpus clip)
+> block-by-block against the fresh dav1d trace (`KINETIX_AV1_TRACE=1
+> cargo run -p tpt-kinetix-av1 --example av1_trace_obu -- x.obu` vs
+> `DAV1D_TRACE=1 dav1d -i x.obu`), comparing the `Post-tx`/`Post-*-cf-blk`
+> `r=` (msac range) checkpoints in decode order. First divergence: the chroma
+> `all_zero`/`dc_sign` symbol read for the block at mi (56,16) used context
+> bucket 0 in Kinetix vs dav1d's bucket 1 (same decoded bit both times, so
+> the mismatch was invisible until the *next* read, which consumed a
+> different number of bits and cascaded). Added matching temporary
+> instrumentation to both sides (`SKIPCTX_POST`/`SKIPCTX_EOB`/
+> `SKIPCTX_BASEEOB`/`SKIPCTX_DCSIGN`/`DCSIGN_RAW`/`DCSIGN_STORE` — all
+> removed before commit) to walk the exact `above_dc`/`left_dc` context-array
+> contents feeding `dc_sign_ctx`. Root cause: block bx=48,by=16 (a real,
+> non-skipped block) correctly writes a positive DC sign across chroma rows
+> y4=8..11. The very next block, bx=52,by=20 (a **skipped** IBC block,
+> `Post-skip[1]` in the dav1d trace), covers only rows y4=8..9 — dav1d's
+> `read_coef_blocks` explicitly `memset`s *its own* footprint's above/left
+> coefficient-context bytes to the "unset" sentinel even though it never
+> calls `decode_coefs` (AV1 §5.11.34: `coeffs()` is simply never invoked for
+> a skipped block, but the context still needs resetting). Kinetix's
+> `reconstruct_tx_block` (`reconstruct_block.rs`) and `reconstruct_ibc_block`
+> (`intra_block.rs`, both the luma and chroma call sites) had `if !skip {
+> read_coeffs(...) }` with **no `else` branch** — so a skipped block's
+> rows/columns simply kept whatever a completely unrelated earlier block had
+> last written, here leaving rows 10/11 wrongly "positive" after row 20's
+> skip should have cleared them. The very next real block (bx=56,by=16) then
+> read a wrong `dc_sign` context for its left neighbour.
+>
+> **Fix**: `coeff::clear_coeff_context(ctxs, blk, w4, h4)` — the same
+> zero-context store `read_coeffs` does at its own tail (for `all_zero` or a
+> real decode), factored out so it can run standalone — called from the
+> `else` branch of all three `if !skip { read_coeffs(...) }` call sites
+> (`reconstruct_block.rs`'s intra/inter tx-block path, `intra_block.rs`'s IBC
+> luma loop, `intra_block.rs`'s IBC chroma U/V loop).
+>
+> **Result** (`av1_psnr_check`): `testsrc2` Y/U/V **14.36/17.17/13.92 →
+> 23.11/25.08/16.95 dB**; `solid_red`/`testsrc`/`mandelbrot`/`smptebars`
+> byte-identical (this bug only bites when a skip block's footprint doesn't
+> exactly match a later block's, which the intra-only corpus entries don't
+> hit). 126 unit tests pass (new:
+> `coeff::tests::skipped_block_clears_stale_dc_sign_context_for_later_neighbours`,
+> which reproduces the exact row-overlap scenario above without needing the
+> real corpus file), `cargo clippy -p tpt-kinetix-av1 --all-targets -D
+> warnings` clean, `cargo fmt --all` applied. Committed as `d70e12e` on
+> `master`.
+>
+> **testsrc2 is still far from pixel-exact** — re-ran the same trace diff
+> after the fix and found the next divergence almost immediately (dav1d
+> trace index ~547 of ~690 `Post-tx`/`Post-*-cf-blk` checkpoints): block
+> bx=54,by=32 is a genuinely different kind of IBC block — dav1d's trace
+> shows `Post-vartxtree[0/0]` (the recursive `read_var_tx_size` split flag,
+> §5.11.16) and `Post-y-cf-blk[tx=7,txtp=13,eob=64]` (`txtp=13` is an
+> **inter** transform type — `V_DCT`/similar from the inter tx-type set, not
+> any value the intra tx-type tables produce). `reconstruct_ibc_block`
+> always reads a single fixed-size transform (`max_tx_size_for_bsize(bsize)`,
+> no split) and decodes its coefficients through the ordinary *intra*
+> `read_coeffs` path (`qindex_positive: false` forces `DCT_DCT` with zero
+> bits read for tx_type, never the real inter tx_type symbol). This
+> **confirms** the 2026-09-01 (cont'd #6) scoping note's conclusion in a
+> second, independent way (empirically this time, not just by reading the
+> dav1d/spec source): IBC needs the var-tx tree + inter `tx_type` + inter
+> coefficient context (Phase E work), not a small fix. Did not attempt this
+> — it is a genuinely large, separate task; the `read_mv_component` classN
+> concern flagged back in 2026-09-01 (cont'd #6) is still unverified and
+> should be checked first whenever Phase E starts.
+>
+> **AV1 corpus after 2026-09-03**: `solid_red` 99/99/99, `testsrc`
+> 73.01/53.76/49.23, `mandelbrot` 47.59/52.44/52.62, `smptebars` 57.49/99/99,
+> `testsrc2` 23.11/25.08/16.95 (IBC-blocked, see above). Open items, in
+> priority order: (1) `mandelbrot`'s small residual directional-prediction
+> error (edge-filter upsample interpolation or `dr_z3`'s non-edge-filter
+> `max_base_y` — still not root-caused, see the 2026-09-01 note); (2) loop
+> filter is now wired correctly (CDEF bugs fixed, `testsrc` Y jumped
+> 61.95→73.01) but still not *verified* bit-exact block-by-block against
+> dav1d — worth a dedicated trace pass; (3) loop restoration is implemented
+> but its apply step is gated off (`KINETIX_AV1_FILTER=1`) due to an unfixed
+> restoration-unit-boundary pixel bug (see `b509fc3`'s message above) —
+> fixing that boundary handling is a concrete, scoped next target; (4) IBC
+> var-tx tree + inter tx_type + inter coeff context (Phase E) — blocks
+> `testsrc2`, now empirically confirmed as the next divergence point; (5)
+> inter prediction generally (Phase E) — decoder returns `Ok(None)` for
+> non-keyframes; (6) then `capabilities().pixel_exact`.
+>
+> Modified: `tpt-kinetix-av1/src/coeff.rs` (+`clear_coeff_context`, +1
+> regression test), `tpt-kinetix-av1/src/reconstruct/{intra_block,mod,
+> reconstruct_block}.rs`. Committed as `d70e12e` on `master` (pushed to
+> `origin master`). `capabilities().pixel_exact` untouched (still `false` —
+> correctly so, the corpus is nowhere near bit-exact yet).
+
+> ## 2026-09-03 (cont'd) — mandelbrot's "directional-prediction residual"
+> redirected: reconstruction is very likely bit-exact, the gap is the loop
+> filter (CDEF), not prediction/transform. No fix landed this round — this
+> is a methodology correction + evidence trail for the next session.
+>
+> **Why the old hypothesis was probably a red herring.** Every prior note on
+> this item (2026-08-31 → 2026-09-01) measured "pre-filter Kinetix" against
+> "post-filter reference" via `av1_prefilter_check`'s `compare_interiors`,
+> which only excludes pixels within 4px of an **8×8 grid** boundary to dodge
+> **deblock** contamination. CDEF is not edge-limited like deblock — it's a
+> content-adaptive filter over the *whole* 8×8 unit — so that mask does
+> nothing to exclude CDEF's effect on "interior" pixels. Any interior diff
+> the tool reports could equally be a real reconstruction bug *or* a correct
+> reconstruction that the reference's CDEF pass then modifies differently
+> from Kinetix's. The tool has been unable to tell these apart since CDEF
+> was fixed (2026-09-02, `f7fae93`) and became a real (non-no-op) contributor
+> to the corpus's pixels.
+>
+> **What was actually checked this session** (method: patch dav1d's
+> `recon_tmpl.c` to dump `dst` immediately before and after
+> `itxfm_add[b->tx][txtp]` — i.e. the *pure pre-filter* prediction and
+> residual for one exact transform block, gated on `DAV1D_ITXDUMP_BX`/`_BY`
+> env vars — then diff against Kinetix's own `KINETIX_AV1_DBG_PX`/
+> `KINETIX_AV1_DBG_FULL` dump for the same block). Three representative
+> blocks from `mandelbrot_128x96`, chosen to cover the previously-suspected
+> mechanisms (sparse coefficients, SMOOTH modes, rectangular sqrt(2) rescale):
+> - `mi=(0,0)`, 32×32 `DC_PRED`, `DCT_DCT`, `eob=10`, sparse coefficients
+>   (`{(0,0)=41,(0,1)=-10,(0,3)=-1,(1,0)=-8,(1,1)=1,(3,1)=-1}`): **prediction
+>   and residual bit-exact** vs dav1d (verified the first 4 rows/32 cols by
+>   hand; `dequant`/`residual` arrays match token-for-token).
+> - `mi=(14,14)`/`(15,14)`, two adjacent 4×4 `SMOOTH_H` sub-blocks of an 8×8
+>   leaf, `DCT_ADST`, `eob=15,16`: **prediction and residual bit-exact**
+>   (pred `[40,50,56,58]`×4 rows, residual `[26,1,3,125/21,-1,-5,93/5,-1,53,84/
+>   -2,99,96,76]`, identical on both sides). This block's "left" border was
+>   independently confirmed to come from its own left-sibling sub-block's
+>   *real* reconstruction (`recon[..,col=59] == 40` on every row), not a
+>   stale/wrong context — ruling out a per-sub-block border bug too.
+> - `mi=(0,16)`, 16×32 `SMOOTH_V`, `DCT_DCT`, needs the §7.13.3 sqrt(2)
+>   rescale (`log2W=4,log2H=5`, `|Δ|==1`): **prediction and residual
+>   bit-exact** across all 32 rows × 16 cols (hand-diffed the full grid both
+>   dumps printed) — directly rules out the long-suspected rectangular-tx
+>   rescale path as a bug, at least for this tx_type/size.
+>
+> For the last block, pixel (0,80) (= this block's row 16, col 0):
+> pre-filter reconstruction is **141 on both sides** (`pred=150,
+> residual=-9`, bit-exact); the actual reference frame (`ffmpeg`, loop
+> filters on) shows **145** at that pixel, and Kinetix's own filtered output
+> also lands on 141 there (CDEF left it unchanged in Kinetix's case). That
+> 4-value gap exists *only* after loop filtering — it cannot be a
+> reconstruction bug since the reconstruction is proven identical.
+>
+> **Row-level breakdown confirms this is filter-shaped, not noise-shaped**:
+> `KINETIX_AV1_DBG_ROWS=1` (per-row Y PSNR, new this session — the row-level
+> debug already existed, `KINETIX_AV1_DBG_ROW=<n>` for a per-pixel dump on
+> one row) shows mandelbrot's *entire* frame is 99 dB (i.e. clean) **except
+> rows 71–88**, an 18-row band, where PSNR drops to 62–69 dB — everywhere
+> else is untouched. That is not what a scattered rounding bug in a
+> per-block transform looks like; it is what a filter behaving differently
+> over one region looks like. Disabling CDEF (`KINETIX_AV1_NOCDEF=1`)
+> *increases* row 80's per-pixel errors (several pixels go from ±1 to −4/−5),
+> i.e. CDEF is a real, mostly-correct, positive contributor here — not a
+> no-op — so this isn't "CDEF should be off", it's "CDEF's direction/strength
+> decision differs slightly from the reference's for this unit."
+>
+> **Conclusion**: mandelbrot's prediction and transform are very likely
+> already bit-exact (three representative blocks, covering the specific
+> mechanisms earlier sessions suspected, all confirmed exact via a real
+> pre-filter dav1d reference — not the confounded post-filter one). The
+> remaining ~47 dB gap is concentrated in a loop-filter (most likely CDEF
+> direction/strength selection, possibly interacting with deblock at the
+> superblock-row-1 top edge, rows 71-88 start right after the 64-px SB
+> boundary) difference, not a reconstruction bug. **This retires the
+> "small residual directional-prediction error / `dr_z3` `max_base_y`"
+> hypothesis** carried since 2026-08-31 — it was never re-verified against a
+> true pre-filter reference and appears to have been chasing the CDEF gap
+> the whole time. Old item (1) is folded into item (2)
+> "verify loop filter bit-exact block-by-block" below; that is now the
+> single most concrete next AV1 target.
+>
+> **Also landed**: `KINETIX_AV1_DBG_ROW` in `av1_psnr_check.rs` indexed
+> `frame.data[row*stride+col]` unconditionally and panicked for a row past a
+> smaller clip's height (hit while iterating clips with this env var set
+> globally) — added a bounds guard. Commit `2a24212`. No functional/PSNR
+> change (confirmed via `av1_psnr_check`: all corpus numbers byte-identical
+> to before this session's investigation — solid_red 99/99/99, testsrc
+> 73.01/53.76/49.23, mandelbrot 47.59/52.44/52.62, smptebars 57.49/99/99,
+> testsrc2 23.11/25.08/16.95). 126 unit tests pass, clippy clean.
+>
+> **Next session, concretely**: patch dav1d's CDEF direction-detection
+> function (`cdef_dir` or equivalent, `src/cdef_tmpl.c`) to print the chosen
+> direction/variance and primary/secondary strength for the 8×8 unit at
+> luma (0,80)-(7,87) in `mandelbrot_128x96` (mirrors this session's
+> `DAV1D_ITXDUMP_BX/BY` pattern — add `DAV1D_CDEFDUMP_BX/BY`), and diff
+> against Kinetix's `cdef_direction`/`apply_post_filters` (`loop_filter.rs`)
+> for the same unit. `KINETIX_AV1_NOCDEF`/`NODEBLOCK` (already present,
+> `f7fae93`) isolate which filter stage to blame first. dav1d's patched
+> build lives only in `scratchpad/av1ref/` (rebuilt this session from
+> `github.com/videolan/dav1d` — see the earlier 2026-09-03 note for the
+> build recipe); it is not committed to this repo.
+
+> ## 2026-09-03 (cont'd #2) — ★ found the likely root cause: `deblock_plane`
+> has no transform/prediction-edge presence check, so it filters at *every*
+> 8-px grid line, including ones strictly inside a single wide transform. ★
+> Root-caused following the trail from the note above (row 71-88's CDEF
+> variance for the unit at (0,80) computed 744 vs dav1d's 230 despite
+> identical formulas — traced to different *input pixels*, i.e. deblock, not
+> CDEF, was the actual divergence point). **Not fixed this session** — found
+> late, and a correct fix touches several call sites; verifying it safely
+> needs a fresh session with full budget for a `just conformance`/full-corpus
+> re-check. This note has everything needed to implement and verify it.
+>
+> **The bug**: `FrameMeta::record_luma`/`record_chroma` (`loop_filter.rs`)
+> are called once per real transform block, but the *callers*
+> (`reconstruct/intra_block.rs` twice, `inter_block.rs`, the IBC path) loop
+> over **every** 8×8-luma grid cell the transform spans and call
+> `record_luma` identically for each — e.g. a 16×32 transform (two 8×8
+> columns wide) writes `tx_w=16` into *both* grid columns it covers. Given
+> that, `deblock_plane`'s vertical-edge loop (`for bx in 1..grid_w`) filters
+> at **every** `bx*step` position whenever `compute_level(...) != 0`, using
+> `left_tx.min(right_tx)` purely to size the filter tap — there is no check
+> for whether `bx*step` is actually a transform (or prediction-block)
+> boundary at all. For our 16-wide transform, position `x=8` (`bx=1`) sits
+> **inside** the single transform (real edges only at `x=0` and `x=16`), but
+> the loop filters it anyway because `left_tx == right_tx == 16` looks like
+> "a valid size", not "no edge here". AV1 §7.14.1's edge mask is supposed to
+> gate this (`isTxEdge`/`isBlockEdge`), and that gate is simply missing here.
+> This has nothing to do with CDEF, and nothing to do with prediction —
+> **deblock is the first thing in the post-filter chain to touch the wrong
+> pixels**, and CDEF (correctly implemented) then just propagates that error
+> forward, which is why the CDEF-side investigation initially looked like a
+> "variance formula" bug.
+>
+> **Evidence trail** (`mandelbrot_128x96`, mi block bx=0,by=16, a single
+> `SMOOTH_V` 16×32 `DCT_DCT` transform spanning luma rows 64-95): pre-filter
+> reconstruction (pred+residual, verified bit-exact vs dav1d in the note
+> above) for column 0 of the 8×8 unit at (0,80)-(7,87) exactly equals
+> Kinetix's own post-deblock snapshot at every row (80→141, 81→140, …,
+> 87→132 — deblock made *no* change there, correctly, since column 0 is at
+> the block's real left edge and the edge filter evidently chose a zero
+> delta this time). But **columns 6-7** of that same 8×8 unit *do* differ
+> between pre-filter and post-deblock (e.g. row 82 col 6: pre-filter 144,
+> post-deblock 145; row 86 col 6: pre-filter 139, post-deblock wrongly
+> stayed 139 vs a dav1d-implied correct value elsewhere in the row) — a
+> small ±1 perturbation centered on `x=8`, exactly where the missing
+> edge-presence check would spuriously apply the deblock kernel's tap reach
+> from a nonexistent internal boundary. This 1-2px perturbation then feeds
+> `cdef_direction`'s variance computation (whose formulas were verified
+> line-for-line identical to dav1d's `cdef_find_dir_c` — cost accumulation,
+> `DIV_TABLE`/`div_table` indexing, and the final `(best_cost -
+> cost[dir^4]) >> 10` all match), producing a different variance (744 vs
+> 230) even though the direction argmax happened to coincide (dir=4 both
+> sides) for this particular unit — the CDEF math itself is correct, its
+> *input* wasn't.
+>
+> **Likely blast radius**: any coded block using a transform wider or taller
+> than 8 samples (16×16, 16×32, 32×32, the `TX_16X4`/`TX_8X16` family, etc.)
+> gets spurious internal-grid-line deblocking at every 8-px step inside it.
+> This corpus has plenty of those (the 32×32 `DC_PRED` block at mi (0,0) in
+> this same mandelbrot frame, most of `smptebars`'s and `testsrc2`'s larger
+> flat regions, …) — likely explains a meaningful share of the whole
+> post-filter PSNR gap across the corpus, not just this one row band.
+>
+> **The fix** (scoped, not yet implemented): add edge-presence tracking
+> alongside the existing size tracking.
+> 1. `FrameMeta`: add `luma_edge_left: Vec<bool>` / `luma_edge_top: Vec<bool>`
+>    (and the chroma equivalents, `u_edge_left`/`u_edge_top` — `v` shares the
+>    same subsampled grid as `u` per `record_chroma`'s existing `u`/`v`
+>    symmetry) alongside `luma_tx_w` etc., all `w8*h8`-sized, default `false`.
+> 2. `record_luma`/`record_chroma`: accept `is_left_edge: bool, is_top_edge:
+>    bool` and OR them into the new grids (OR, not overwrite — `merge_tile`
+>    calls these again per tile and a real edge from one tile-local call must
+>    stick).
+> 3. At every call site (`intra_block.rs` ×2 — the keyframe path around line
+>    ~522-529 and the IBC path around ~971-978 — `inter_block.rs`, and any
+>    inter-IBC chroma loop), when looping `for by in by0..by1 { for bx in
+>    bx0..bx1 { record_luma(bx, by, ...) } }`, pass `is_left_edge: bx == bx0,
+>    is_top_edge: by == by0` — i.e. only the block's own origin column/row is
+>    a real edge; the rest of its span is interior. Chroma's `record_chroma`
+>    call sites already iterate per actual chroma-tx-block (not per coded
+>    block), so check whether they need the same treatment or are already
+>    tx-block-granular — worth confirming with a quick trace before assuming
+>    chroma needs the identical fix.
+> 4. `deblock_plane`: thread the appropriate edge grid in (a new parameter,
+>    or reuse `_skip_grid`'s currently-unused slot pattern) and gate — vertical
+>    pass: `if !luma_edge_left[by*grid_w+bx] { continue; }` before computing
+>    `filter_size`/running the filter (mirror for the horizontal pass with
+>    `edge_top`).
+> 5. Verify: `cargo test -p tpt-kinetix-av1 --lib` (expect the existing
+>    `filter_size_from_tx_samples_caps_by_plane_not_by_bucket`-style tests to
+>    still pass unmodified — they test the size formula directly, not the
+>    plane-level loop), `av1_psnr_check` across the whole corpus (expect
+>    `solid_red` unchanged at 99/99/99 — every block there is a single
+>    32×32/64×64 transform covering the whole frame, so no internal edges
+>    exist to wrongly filter either way; expect `mandelbrot`/`smptebars`/
+>    `testsrc2` Y (and likely U/V) to improve, `testsrc` to improve less since
+>    its content mostly uses `TX_8X8`-or-smaller transforms where every grid
+>    line already is a real edge). Add a regression test in
+>    `loop_filter.rs`'s existing test module: a synthetic 16-wide two-tx-cell
+>    `FrameMeta` where cell 1 is *not* a real edge (from a wide transform)
+>    should not filter at `x=8`, contrasted with two adjacent independent
+>    8-wide transforms (both `is_left_edge: true`) which should.
+>
+> Nothing committed from the investigation itself (temporary
+> `KINETIX_AV1_DBG_CDEF` instrumentation used to find this was added and
+> then fully removed again; `git diff` was clean at that point).
+>
+> **Update — implemented and verified the same session** (commit
+> `60ddfc3`): the fix above, exactly as scoped. `FrameMeta` gained
+> `luma_edge_left`/`luma_edge_top`/`chroma_edge_left`/`chroma_edge_top`
+> (`w8*h8`-sized `bool` grids) plus `mark_luma_edges`/`mark_chroma_edges`
+> (OR-combining, so `merge_tile` propagates a real edge from any tile that
+> established one). Called once per **real transform sub-block** — inside
+> the `for ty { for tx { ... } }` loops in `reconstruct/intra_block.rs`
+> (both the keyframe path and the IBC path, luma and chroma each), using
+> that sub-block's own tile-local pixel origin — not the once-per-coded-block
+> call site `record_luma`/`record_chroma` already had (which is still
+> needed, unchanged, for size tracking; a coded block can contain several
+> same-size transform sub-blocks and each one's own origin needs its own
+> edge mark, not just the coded block's). `deblock_plane` gained
+> `edge_left_grid`/`edge_top_grid` parameters and now `continue`s past any
+> `bx`/`by` grid line neither grid marks as real, before ever computing
+> `filter_size`/running the filter. `inter_block.rs`'s `decode_inter_block`
+> (true inter frames, not IBC) was **not** touched — it's unreached by the
+> current keyframe-only corpus (`decode()` returns `Ok(None)` for
+> non-keyframes) — flag this for whoever picks up inter Phase E.
+>
+> **Result** (`av1_psnr_check`): `mandelbrot` Y/U/V
+> 47.59/52.44/52.62→**47.62/52.53/52.68**, `testsrc` U 53.76→**53.93**;
+> `solid_red`/`smptebars`/`testsrc2` byte-identical. **Smaller than the
+> "likely blast radius" estimate above** — most of this corpus's content
+> already uses ≤8-sample transforms, where every 8px grid line genuinely is
+> a real edge and the bug was a no-op; only blocks using a wider/taller
+> transform (the mandelbrot 16×32 `SMOOTH_V` block this was traced from,
+> and similar ones elsewhere) were actually affected. Still a real,
+> verified, spec-correctness fix (AV1 §7.14.1's edge presence gate was
+> simply absent before this), not a regression risk either way. 128 unit
+> tests pass (was 126; added
+> `mark_luma_edges_only_flags_a_transform_blocks_own_origin` +
+> `mark_luma_edges_flags_both_of_two_independent_adjacent_transforms`),
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -D warnings` clean, `cargo
+> fmt --all` applied, full `cargo build --workspace` clean.
+>
+> **This closes item (1)/(2) from this session's earlier framing** (the
+> "verify loop filter bit-exact" item) as *done for this specific bug
+> class*, though deblock/CDEF are still not proven bit-exact overall — the
+> corpus's remaining loop-filter-adjacent gap (mandelbrot still only 47.62
+> dB, well short of the 60+ dB the fully-bit-exact luma reconstruction
+> alone would suggest) means there is more to find here, just not via this
+> particular bug any more. **Next AV1 priorities, updated**: (1) whatever
+> remains in the loop filter after this fix — re-run the same
+> patched-dav1d-trace method (`DAV1D_ITXDUMP_BX/BY` for pre-filter,
+> post-deblock pixel dumps) on a fresh worst-row search now that this bug
+> is gone, since the row-71-88 band's exact shape will have changed; (2)
+> loop restoration boundary-pixel fix to un-gate apply; (3) IBC var-tx tree
+> + inter tx_type + inter coeff context — blocks testsrc2; (4) inter Phase
+> E (which will also need `inter_block.rs` to call
+> `mark_luma_edges`/`mark_chroma_edges`, per the note above); (5) then flip
+> `capabilities().pixel_exact`.
+
+> ## 2026-09-04 session note — ★ `dqDenom` fix: smptebars luma now
+> pixel-exact (57.49→99 dB), mandelbrot 47.62→53.10 dB ★. Continued the
+> deblock re-verification requested at the top of this session and found a
+> second, much bigger bug on the way.
+>
+> **Correction to the previous session's row-band claim**: the "mandelbrot
+> rows 71-88" band described in the earlier 2026-09-03 note was actually
+> **`testsrc`'s** data — `KINETIX_AV1_ONLY_TESTSRC=mandelbrot` is a boolean
+> gate (any value enables it) that always runs *only* `testsrc`, not
+> `testsrc` filtered to a clip named "mandelbrot"; the row dump that
+> session captured was mislabeled. The deep block-level tracing in that
+> session (`bx=0,by=16`, the `SMOOTH_V` `TX_16X32` block, the deblock
+> edge-presence bug and its fix) used real `mandelbrot.obu` traces
+> throughout and is unaffected — only the "18-row band" *framing* was
+> about the wrong clip. Mandelbrot's real per-row PSNR (no `ONLY_TESTSRC`
+> gate) is scattered errors across the *whole* frame (rows 0-95 all in the
+> 40-66 dB range), not a localized band.
+>
+> **Re-traced the same `SMOOTH_V` `TX_16X32` block from scratch** (fresh
+> `DAV1D_ITXDUMP_BX=0 DAV1D_ITXDUMP_BY=16` capture) to find the next
+> divergence per the coordinator's request. Row 16 (the row this block's
+> own analysis previously — incorrectly — claimed matched) actually
+> **did not** match: dav1d residual row 16 = `[-5,-5,-4,-4,-4,-3,-3,-2,…]`,
+> Kinetix's own captured dump = `[-9,-9,-9,-8,-7,-6,-5,-4,…]` — roughly
+> **2× too large**. Checked every row 16-31: the *ratio* is consistently
+> ~1.8-2.1×, not a fixed additive offset, i.e. a pure scale bug, not a
+> rounding bug. Prediction matched exactly throughout (only residual was
+> wrong) — this pointed straight at dequantization.
+>
+> **Root cause**: `dq_denom(tx_size)` (§7.12.3's `dqDenom` — the post-dequant
+> integer division for oversized transforms) matched `tx_size ==
+> TX_32X32`/`TX_64X64` **literally**. AV1's actual rule (confirmed against
+> dav1d's `dq_shift = Max(0, t_dim->ctx - 2)`, `t_dim->ctx` being exactly
+> Kinetix's own `tx_sz_ctx = (TX_SIZE_SQR[tx] + TX_SIZE_SQR_UP[tx] + 1) >>
+> 1` already used elsewhere for coefficient contexts) is driven by that
+> **square-up-averaged context**, not the transform's own literal size —
+> so every non-square size whose `tx_sz_ctx` reaches 3 or 4
+> (`TX_16X32`/`TX_32X16`/`TX_16X64`/`TX_64X16` at `ctx=3` → `dqDenom=2`;
+> `TX_32X64`/`TX_64X32` at `ctx=4` → `dqDenom=4`) silently got `dqDenom=1`
+> (a no-op) under the old literal check, overscaling every dequantized
+> coefficient in those six sizes by 2× or 4×. (Cross-checked the very
+> non-intuitive edge case directly against dav1d's own
+> `dav1d_txfm_dimensions` table in `src/tables.c`: `TX_8X32`/`TX_32X8`,
+> despite *also* having square-up 32×32, land at `ctx=2` → `dqDenom=1` —
+> the skew relative to the square-up matters, this is genuinely not just
+> "square-up == 32×32 ⇒ dqDenom=2".)
+>
+> **Fix** (commit `c0419de`): rewrote `dq_denom` to compute the shift from
+> `tx_sz_ctx` directly instead of matching two literal enum values.
+> **Result**: `smptebars_256x144` luma **57.49 → 99.00 dB (pixel-exact
+> across the whole frame — every one of its 144 rows now reads 99 dB)**;
+> `mandelbrot_128x96` Y/U/V **47.62/52.53/52.68 → 53.10/52.53/52.68**;
+> `testsrc`/`testsrc2`/`solid_red` unchanged (this corpus's content doesn't
+> happen to use the six affected sizes there). 129 unit tests pass (new:
+> `dq_denom_follows_the_square_up_size_not_the_transforms_own_shape`,
+> cross-checked value-for-value against dav1d's authoritative per-size
+> `ctx` table), clippy clean, full workspace build clean.
+>
+> **Mandelbrot re-traced after the `dqDenom` fix**: re-ran the same
+> `SMOOTH_V` block — prediction and residual now bit-exact vs dav1d at
+> every row checked (16-31). Picked two fresh worst-row targets from the
+> post-fix per-row PSNR (`KINETIX_AV1_DBG_ROWS=1`, no `ONLY_TESTSRC` gate
+> this time): row 84 (block `bx=0,by=16` again, a different row) and row
+> 56 (block `bx=13,by=14`, a `4×8` `DC_PRED` two-`TX_4X4`-sub-block
+> region). Both traced fully bit-exact pre-filter (pred + residual match
+> dav1d exactly via fresh `DAV1D_ITXDUMP` captures) — the remaining
+> per-pixel diffs (`±1` to `±9`, e.g. row 56 cols 51-62) only appear in
+> the **filtered** output, confirmed by direct `KINETIX_AV1_DBG_ROW`
+> comparison against the real `ffmpeg` reference. So the *next* remaining
+> gap genuinely is the loop filter (deblock and/or CDEF), not
+> reconstruction — same conclusion as before the `dqDenom` fix, but now
+> confirmed on freshly-verified-correct reconstruction rather than
+> reconstruction that turned out to still have a 2× bug hiding in it.
+>
+> **What wasn't found this session**: a systematic deblock/CDEF formula
+> bug of the `dqDenom` bug's scale. Skimmed `filter_line_1d`'s filter/flat
+> masks and `cdef_direction`/`cdef_constrain`'s taps and constants —
+> heavily spec-cross-checked already by prior sessions' comments, nothing
+> jumped out on inspection alone. The remaining errors are small (±1-9)
+> and scattered across many different small blocks (mostly `TX_4X4`
+> `DCT_ADST`/`ADST_DCT` in busy/high-detail regions) rather than
+> concentrated in one obviously-wrong code path — this needs the same
+> patient per-edge trace-to-first-divergence method as the `dqDenom` hunt,
+> just applied to deblock's edge-filter formula (`filter_mask`/`flat`/the
+> actual 4/8/16-tap blend) or CDEF's `cdef_filter_block` pixel modification
+> directly (not just `cdef_direction`, which was verified correct back in
+> the previous session), for one specific edge at a time.
+>
+> **AV1 corpus after 2026-09-04**: `solid_red` 99/99/99, `testsrc`
+> 73.01/53.93/49.23, `mandelbrot` 53.10/52.53/52.68, `smptebars`
+> **99.00/99.00/99.00 (pixel-exact)**, `testsrc2` 23.11/25.08/16.95.
+> **Next AV1 priorities**: (1) deblock/CDEF's remaining small-magnitude
+> systematic error — pick one specific small block (e.g. mandelbrot's
+> `bx=13,by=14` `TX_4X4` region from this session, or its right/bottom
+> neighbour edges) and trace the *filter itself* (not just its inputs,
+> already proven correct) against dav1d step by step; (2) loop restoration
+> boundary-pixel fix to un-gate `apply`; (3) IBC var-tx tree + inter
+> `tx_type` + inter coefficient context — blocks `testsrc2`; (4) inter
+> Phase E; (5) then flip `capabilities().pixel_exact`. `smptebars` being
+> genuinely pixel-exact now is a good sign that solving the same
+> loop-filter-precision issue for the other clips (mostly a matter of that
+> remaining ±1-9 gap) could close a meaningful chunk of the remaining
+> corpus at once.
+
+> **2026-09-04 (cont'd) — CDEF direction/strength selection confirmed
+> correct for one concrete example; the bug (if in CDEF, not deblock) is
+> in `cdef_filter_block`'s actual tap application, not parameter
+> selection.** Picked the worst edge from row 56's fresh trace: the
+> vertical edge at x=52 between mandelbrot's `bx=12,by=14` (`TX_4X8`
+> `ADST_ADST` `SMOOTH_V`) and `bx=13,by=14` (`TX_4X4` `DCT_ADST`
+> `DC_PRED`) blocks — both already proven pre-filter-bit-exact this
+> session. Raw (unfiltered) row 56 around the edge: `…176 98 94 111 | 86
+> 87 78 57…` (cols 48-55). `KINETIX_AV1_NODEBLOCK=1` shows col 51/52
+> unchanged from raw (`111`/`86`) — **deblock's `filter_mask` correctly
+> declines to filter this edge at all** (the raw jump is large enough to
+> read as a genuine content edge, not a blocking artifact — this looks
+> right, not a repeat of the earlier `dqDenom`-shaped bug). With CDEF on,
+> Kinetix nudges col 51 only slightly (`111→110`) and leaves col 52
+> untouched (`86→86`), while the real reference pulls both much further
+> toward each other (`101`/`93`) — a real remaining gap of 9/-7.
+>
+> Patched dav1d's `cdef_apply_tmpl.c` (`DAV1D_CDEFDUMP_BX/BY` env vars,
+> generalized from the previous session's hardcoded position) to dump the
+> chosen direction/variance/strength for this exact 8×8 unit (`bx=12,
+> by=14` in mi units) and compared against Kinetix's own
+> `KINETIX_AV1_DBG_CDEF2`-equivalent instrumentation (added, used, then
+> fully removed again — `git diff` is clean): **direction matches exactly
+> (`dir=3` both sides)**, **the adjusted primary strength matches exactly
+> (`p`/`adj_y_pri_lvl=4` both sides)**; only the raw `variance` differs
+> very slightly (`29506` dav1d vs `29778` Kinetix — a ~1% difference,
+> plausibly from a tiny upstream deblock difference feeding
+> `cdef_direction`'s input pixels, but it lands in the same `var_str`
+> bucket either way so doesn't affect strength selection here). So CDEF's
+> *parameter selection* (direction + primary/secondary strength) is
+> correct for this block; whatever produces the small-but-real output gap
+> must be in `cdef_filter_block` itself — the per-pixel tap sampling,
+> `cdef_constrain`, or the final `clip3(x + round(sum), min, max)` — or
+> conceivably still a subtler deblock difference elsewhere along this
+> edge (only column 0 of the block was checked against dav1d's own
+> pre-filter values earlier this session, not every column).
+>
+> **Not resolved this session** — ran out of budget to hand-derive the
+> exact expected `cdef_filter_block` output from the spec formula for
+> this specific pixel and compare term-by-term. **Concrete next step**:
+> extend the `DAV1D_ITXDUMP`-style approach to dump dav1d's *post-CDEF,
+> pre-restoration* row (or reuse the `hex_dump`-based `DEBUG_B_PIXELS`
+> machinery already in `recon_tmpl.c`, gated the same way) for this exact
+> 8×8 unit, then diff Kinetix's `cdef_filter_block` output at every pixel
+> in the unit against it — that pins down whether the discrepancy is
+> really inside `cdef_filter_block`'s math (in which case hand-verifying
+> `cdef_constrain`/the primary-vs-secondary tap accumulation against
+> dav1d's `cdef_filter_block_c` in `src/cdef_tmpl.c` line-by-line, the
+> same method that found the `dqDenom` bug, is the way in) or actually
+> still further upstream in deblock for a column this session didn't
+> check directly against dav1d.
+
+> **2026-09-04 (cont'd) — fixed: deblock's luma pass ran at 8-sample grid
+> granularity, which cannot even *represent* (let alone filter) a real
+> transform edge at a position that's a multiple of 4 but not 8.** This is
+> the root cause the previous note's x=52 mandelbrot edge was actually
+> hitting — re-reading that note in light of this fix, "deblock correctly
+> declines to filter this edge" was wrong: `deblock_plane`'s vertical loop
+> is `for bx in 1..grid_w { edge = bx * step }` with `step = 8` for luma,
+> so `edge` can only ever be 0, 8, 16, … — `x=52` (`52/8 = 6.5`) is
+> mathematically unreachable, not "evaluated and rejected by
+> filter_mask". `FrameMeta` only tracked one grid resolution (8×8-luma
+> cells) for luma, sized for `TX_8X8` and up; AV1 also has `TX_4X4`,
+> `TX_4X8`, `TX_8X4`, whose independent-transform boundaries can land on
+> any 4-sample line.
+>
+> Fix: added a second, finer (4×4-luma-cell) grid to `FrameMeta` — `w4`/
+> `h4`/`luma_tx_w4`/`luma_tx_h4`/`luma_edge_left4`/`luma_edge_top4`, with
+> `record_luma4`/`mark_luma_edges4` populated from the same per-
+> transform-sub-block call sites in `intra_block.rs` (keyframe and IBC
+> paths) that already call `record_luma`/`mark_luma_edges`, just using
+> `px/4` instead of `px/8` coordinates and the transform's own (possibly
+> sub-8) span. `apply_post_filters`'s luma `deblock_plane` call now uses
+> `step=4`, `grid_w=meta.w4`, `grid_h=meta.h4`, and the new `*4` grids
+> instead of the 8×8 ones; chroma's call sites are untouched (chroma's
+> minimum transform size in chroma samples is `TX_4X4` = 8 luma samples,
+> so its existing 8×8-luma grid already matches its true minimum
+> granularity — confirmed, not just assumed, since chroma output didn't
+> move on any corpus clip below). `merge_tile` now also OR/max-merges the
+> `*4` grids across tiles (offset `ox*2`/`oy*2` since the 4×4 grid is 2×
+> denser than the 8×8 one).
+>
+> Verified via `av1_psnr_check`: `mandelbrot` Y 53.10 → **57.62 dB**
+> (largest single-fix jump since `dqDenom`), `testsrc` Y 73.01 → **73.46
+> dB**; `smptebars`/`solid_red_32`/`solid_red_64` unchanged at 99.00 dB
+> (already pixel-exact, correctly unaffected); `testsrc2` unchanged at
+> 23.11 dB (dominated by the separate, already-documented IBC var-tx-tree
+> gap, not deblock). All 3 U/V PSNRs also unchanged, confirming the
+> chroma-granularity assumption above. Added `mark_luma_edges4_...` and
+> `record_luma4_...` regression tests. `cargo test -p tpt-kinetix-av1
+> --lib` (131 passed), `cargo clippy -p tpt-kinetix-av1 --all-targets --
+> -D warnings` (clean), `cargo build --workspace` all green.
+>
+> **Not fully resolved** — mandelbrot is still 57.62 dB, far from
+> pixel-exact, so more loop-filter (or reconstruction) gap remains
+> somewhere; CDEF's own tap-application math (the previous note's
+> `cdef_filter_block` suspicion) is still unverified line-by-line and
+> should be re-checked fresh now that the deblock input feeding it is
+> more correct at this exact edge. **Next step**: re-run a fresh
+> worst-edge search on mandelbrot (row/col PSNR scan) now that this class
+> of bug is gone, since the specific x=52 edge this session traced may no
+> longer be the worst offender.
+
+> **2026-09-04 (cont'd) -- fixed: two compounding bugs in the loop-filter
+> level derivation (LoopFilterDeltas::default(), and a missing ref-delta
+> shift/mode-delta condition in compute_level).** Fresh worst-row scan on
+> mandelbrot post-4x4-grid-fix found row 64 as the new worst row (46.51
+> dB), with the largest single-pixel divergence at col 96 (got=192
+> ref=182, diff=10). Traced with a patched dav1d: av1_trace_obu's KTRACE
+> BLOCK located the coded block at mi bx=24,by=16 (px 96,64, TX_4X8,
+> DC_PRED); DAV1D_ITXDUMP_BX/BY confirmed dav1d's own raw reconstruction
+> there is bit-exact with Kinetix's (pred=167, residual=27, recon=194
+> both sides -- double-checked directly against dav1d's own
+> --inloopfilters none output). --inloopfilters nodeblock vs default
+> showed dav1d's deblock dropping this pixel from 194 to 183 (an
+> 11-unit change), while Kinetix's deblock left it completely unchanged.
+>
+> Kinetix's own edge/level tracing (KINETIX_AV1_DBG_EDGE, added/used/
+> removed) showed the vertical edge at this exact position was being
+> attempted (edge_left_grid true, lvl=18, filter_size=4) but filter_mask
+> legitimately declined (|q1-q0|=19 > limit=18) -- so the edge-presence/
+> granularity machinery fixed earlier this session was working correctly;
+> the bug had to be in the filter level itself. Patched dav1d's
+> loopfilter_tmpl.c with a DAV1D_LFDUMP env var printing wd/E/I/H/p0/p1/
+> q0/q1/fm whenever p0/q0 matched the known raw value, and -- critically
+> -- added --cpumask 0 to force dav1d's generic C path (its default SIMD/
+> asm path silently bypasses source-level instrumentation entirely; the
+> first attempt without --cpumask 0 found zero matches across the whole
+> frame, which in hindsight was the tell). With the C path forced:
+> dav1d's own I=19 where Kinetix computed limit=18 -- a real 1-level
+> strength desync, not a false decline.
+>
+> Root-caused via dav1d's lf_mask.c calc_lf_value: (1) a `sh = base >=
+> 32` doubling of the ref-delta term (spec's nShift = lvlSeg >> 5) that
+> compute_level never applied (harmless here since base=18 < 32, but a
+> real bug for any segment/frame at level >=32); (2) more directly,
+> dav1d's r=0 (INTRA_FRAME) case adds only ref_delta[0], never a mode
+> delta -- while Kinetix's LoopFilterDeltas derived Default to an
+> all-zero array instead of the spec's real setup_past_independence()
+> reset values (ref_deltas = {1,0,0,0,-1,0,-1,-1}), so ref_delta[0] was
+> silently 0 instead of 1 whenever a frame enables
+> loop_filter_delta_enabled without an explicit per-index update
+> (mandelbrot's case exactly). 18+0(wrong default)=18 vs
+> 18+1(correct)*1(shift=0)=19 -- matches dav1d exactly. Also removed
+> compute_level's unconditional +mode_deltas[0] term (wrong for intra per
+> spec/dav1d, harmless only because it happened to be 0 in every clip
+> tested so far).
+>
+> Verified via av1_psnr_check: mandelbrot Y 57.62 -> 58.79 dB (U/V also
+> up slightly), testsrc Y 73.46 -> 74.88 dB; smptebars/solid_red
+> unchanged at 99.00 dB (no regression); testsrc2 unchanged (separate,
+> already-documented IBC gap). The row-64/col-96 edge traced is now
+> bit-exact. Added a regression test on LoopFilterDeltas::default()'s
+> actual values (the direct root cause); a compute_level-level test was
+> skipped as impractical -- FrameHeader has no Default impl and 140+
+> fields. cargo test -p tpt-kinetix-av1 --lib (132 passed), clippy clean,
+> cargo build --workspace green.
+>
+> Also added a permanent debug utility to av1_psnr_check.rs:
+> KINETIX_AV1_DBG_ROW_RANGE=c0,c1 (paired with KINETIX_AV1_DBG_ROW) dumps
+> the raw got/exp byte arrays for a column range instead of only a diff
+> list. And: the dav1d CLI's built-in --inloopfilters none|nodeblock|
+> nocdef|norestoration flag is far more reliable for isolating filter
+> stages than patching DEBUG_BLOCK_INFO-gated dumps -- prefer it before
+> reaching for a source patch. --cpumask 0 is required for any future
+> loopfilter_tmpl.c-style source patch to actually run, since dav1d's
+> optimized asm paths silently skip C-source instrumentation.
+>
+> **Not fully resolved** -- mandelbrot is still only 58.79 dB. Next
+> targets, in priority order: (1) another fresh worst-row/worst-edge scan
+> (this fix likely shifted many other edges' exact filtered values
+> slightly, so the ranking has probably changed again); (2) apply the
+> same scrutiny to delta_lf (the per-superblock adaptive delta) --
+> deblock_plane's two call sites in apply_post_filters still pass a
+> hardcoded literal 0 for delta_lf, so read_delta_lf's parsed
+> per-superblock deltas (if any test clip uses them) are silently
+> discarded; delta_lf_present=false for the whole current corpus so this
+> hasn't mattered yet, but is a real gap for future content; (3) loop
+> restoration boundary-pixel fix to un-gate apply; (4) IBC var-tx tree +
+> inter tx_type + inter coefficient context.
+
+> **2026-09-04 (cont'd) -- loop restoration: fixed real cross-unit-
+> boundary pixel reads (a genuine spec-fidelity improvement), but it did
+> NOT resolve the underlying "not yet correct" gap -- still gated behind
+> KINETIX_AV1_FILTER=1, null result on the one exercised test case.**
+> Continued the worst-row scan (row64/col96 fix above resolved the
+> largest single-pixel outlier); the next-worst rows showed a smaller,
+> broader +/-1 divergence spread across many flat interior pixels far
+> from any transform/deblock/CDEF edge (e.g. mandelbrot row4 cols79-93,
+> all exactly -1 vs ref). Isolated via dav1d's `--inloopfilters
+> none|nodeblock|nocdef|norestoration` flags (see the earlier note on why
+> this beats source patching): raw reconstruction and CDEF-only output
+> both matched Kinetix exactly at these pixels; only `--inloopfilters`
+> with restoration *enabled* reproduced the -1 shift, and disabling just
+> restoration removed it. So this whole class of remaining small,
+> widespread diffs is loop restoration -- currently gated off in Kinetix
+> entirely (`apply_loop_restoration_plane` only runs under
+> `KINETIX_AV1_FILTER=1`), which explains why Kinetix simply doesn't
+> reproduce it.
+>
+> Fixed the specific bug this session's methodology could point to
+> directly: `wiener_filter_plane`/`sgrproj_filter_plane` extracted each
+> restoration unit into an *isolated* buffer before filtering, so every
+> tap within reach of the unit's own edge (inescapable for a 7-tap Wiener
+> kernel, or an SgrProj radius-r window, on units as small as 32px)
+> clamped to that unit's own edge sample rather than reading the real
+> pixel just across the boundary. Rewrote both to take a shared
+> whole-plane pre-restoration snapshot plus the target unit's offset, so
+> only the true plane edge clamps -- still an approximation of the real
+> §7.17.1 stripe-line-buffer boundary handling (pre-deblock lines saved
+> every 64 rows), not a full spec match, but strictly closer than
+> unit-local clamping. Added a regression test proving the function
+> actually reads real cross-boundary pixels (structurally impossible for
+> the old isolated-buffer version).
+>
+> **Null result, honestly reported**: enabling `KINETIX_AV1_FILTER=1` on
+> the corpus's only clip that exercises restoration (testsrc's V plane,
+> 49.26 dB unfiltered) gives *byte-identical* output before and after
+> this fix (42.24 dB both times -- restoration currently makes that plane
+> worse, not better). So the boundary-clamping bug, while real and now
+> fixed, was not the (or not the only) reason restoration is gated off;
+> the deeper issue is still unlocated -- likely in the Wiener/SgrProj
+> math itself, or in how `lr_units` gets populated (`read_lr_unit`),
+> neither of which this session traced against dav1d. Confirmed via
+> `git stash` A/B testing (same command, only the fix reverted) that the
+> old code produces the exact same wrong 42.24 dB, ruling out the
+> boundary fix as either helping or hurting this specific case --
+> genuinely inconclusive, not a regression. Default corpus (`av1_psnr_
+> check` with `KINETIX_AV1_FILTER` unset) is provably unaffected since
+> restoration stays gated off either way. 133 unit tests pass, clippy
+> clean, `cargo build --workspace` green.
+>
+> **Next step for restoration** (not attempted this session): trace
+> `read_lr_unit`'s parsed Wiener/SgrProj coefficients for testsrc's one
+> restored unit against dav1d's actual decoded values (dav1d likely has
+> an existing debug hook or one can be patched into `src/recon_tmpl.c`'s
+> `read_restoration` /  `src/lf_apply_tmpl.c`'s restoration-apply path) --
+> the same trace-to-first-divergence method used for `dqDenom` and the
+> loop-filter-level bugs above, just not yet applied to this filter.
+
+> **2026-09-04 (cont'd) -- found and fixed the last restoration bug:
+> `sgrproj_filter_plane` used the wrong second projection weight, making
+> SgrProj a complete silent no-op. Loop restoration is now un-gated by
+> default.** After the Wiener h/v swap fix above, checked SgrProj too
+> (mandelbrot uses it: `frame_restoration_type=[2,0,0]`, plane 0 only,
+> `set=10` -> `SGR_PARAMS[10]=[0,0,1,5]` i.e. `r0=0` (5x5 pass disabled),
+> `r1=1` (3x3 pass active)). Enabling `KINETIX_AV1_FILTER=1` for
+> mandelbrot changed **zero bytes** -- confirmed via `KINETIX_AV1_DUMP_
+> FINAL` byte-for-byte `cmp`, not just PSNR rounding. dav1d's own
+> `--inloopfilters none` vs default A/B showed a real effect (1031/12288
+> Y pixels change by ±1), so this was a genuine bug, not "nothing to
+> filter here."
+>
+> Traced with temporary instrumentation (added, used, fully removed):
+> printed `read_lr_unit`'s decoded `xqd=[0, 2]` (matches dav1d's own
+> `sgr_weights[0,2]` exactly -- entropy decode is correct) and
+> `sgrproj_filter_plane`'s internal `a_tab`/`b_tab`/`p_val`/`z`/`alpha`
+> for one exact pixel, which matched a patched dav1d
+> (`DAV1D_SGRDUMP`, forced through `--cpumask 0` so the C source path
+> actually runs -- see the earlier note on why this flag is required)
+> byte-for-byte: `sum=1244 sum_sq=171954 p_val=50 z=0 alpha=255
+> a_tab=35238` both sides. So the guided-filter statistics themselves
+> (box sums, `alpha`, the `AA`/`a_tab` combine table) were provably
+> correct -- the bug had to be in how the two decoded `xqd` values get
+> turned into the two projection weights actually multiplied against the
+> filtered-vs-original difference terms.
+>
+> Found it in dav1d's `lr_apply_tmpl.c`: `params.sgr.w0 =
+> lr->sgr_weights[0]` (raw, direct) but `params.sgr.w1 = 128 -
+> (lr->sgr_weights[0] + lr->sgr_weights[1])` -- the **second** weight is
+> the complement of both decoded values summed, not `sgr_weights[1]`
+> itself, applied unconditionally regardless of which pass(es) are
+> active (a previously-decoded-at-parse-time complement only happens for
+> the *opposite* case, `r1 == 0`, where `read_lr_unit` already
+> pre-computes `xqd[1] = (1<<7) - xqd[0]` for exactly this reason -- so
+> the two complement computations don't stack, they're mutually
+> exclusive by construction). Kinetix's `sgrproj_filter_plane` used
+> `xqd[1]` directly as the weight for the 3×3-pass term. For `xqd=[0,2]`:
+> raw weight `2` makes `(2*t + 1024) >> 11` round to `0` for every
+> `t` in the guided filter's typical range (single/low-double digits) --
+> a complete no-op; the correct complement weight `128 - 0 - 2 = 126`
+> produces real corrections matching dav1d's magnitude (verified: applying
+> weight 126 to the actual observed `t1` range `[-27, 21]` yields
+> `correction ∈ {-2,-1,0,1}`, matching dav1d's own observed `±1` spread
+> exactly).
+>
+> Fixed with a one-line change (`let w1 = (1 << SGRPROJ_PRJ_BITS) -
+> xqd[0] - xqd[1];` used in place of `xqd[1]`). Verified via
+> `av1_psnr_check`: **mandelbrot Y 58.79 -> 70.45 dB** (U/V unaffected --
+> only plane 0 uses restoration for this clip), testsrc unaffected
+> (Wiener path doesn't touch this weight). Diffed the restored mandelbrot
+> Y plane directly against dav1d byte-for-byte: only **72/12288 pixels**
+> (all `±1`) still differ -- essentially identical to the **71/12288**
+> gap already present *before* restoration even runs (re-confirmed via
+> `--inloopfilters norestoration`), meaning restoration's own math is now
+> correct to the precision of its (separately tracked, imperfect) input.
+>
+> **Given all three restoration bugs found this session (unit-boundary
+> clamping, Wiener h/v swap, SgrProj weight complement) are fixed and
+> verified as unconditional net improvements with zero corpus
+> regressions, un-gated `apply_post_filters` to run restoration
+> unconditionally (`if fh.uses_lr`) instead of behind
+> `KINETIX_AV1_FILTER=1`.** Added a regression test reproducing the exact
+> `xqd=[0,2]` real-world case (`sgrproj_uses_the_complement_weight_not_
+> the_raw_second_xqd`). 134 unit tests pass, clippy clean, `cargo build
+> --workspace` green, all `tpt-kinetix-av1` integration/proptest/doctests
+> pass.
+>
+> **Remaining known restoration gaps** (not blocking, since current
+> behavior is a strict improvement either way): the "mix" configuration
+> (both `r0` and `r1` nonzero, i.e. both 5×5 and 3×3 passes active
+> simultaneously) has zero corpus coverage -- the weight-complement fix
+> should apply identically there per dav1d's code (same `w0`/`w1`
+> computation regardless of which passes are active), but hasn't been
+> observed on real content; the real §7.17.1 stripe-line-buffer boundary
+> handling (vs this session's plane-edge-clamped approximation) also
+> remains unverified since every corpus clip's restoration units so far
+> happen to be single-unit-per-plane (`unit_size` ≥ the whole plane), so
+> cross-unit-boundary behavior has never actually been exercised on real
+> content despite the earlier fix.
+
+> **2026-09-04 (cont'd) -- found and fixed the real restoration bug:
+> `read_lr_unit`'s decoded Wiener filter had its horizontal and vertical
+> taps swapped.** Followed the exact plan from the note above -- dav1d's
+> `decode.c` already has a `DEBUG_BLOCK_INFO`-gated `Post-lr_wiener`
+> printf (`DAV1D_TRACE=1` reaches it, no new patch needed), and Kinetix
+> got a matching temporary print added to `read_lr_unit`. For testsrc's
+> one restored unit (V plane, `RESTORE_WIENER`): dav1d decoded
+> `v=[0,-2,5], h=[0,0,0]`; Kinetix decoded the identical three-coefficient
+> bitstream sequence (confirming the entropy read itself, subexp decode
+> included, is correct) but filed it the other way around --
+> `h=[0,-2,5], v=[0,0,0]`. `read_lr_unit`'s `for pass in 0..2` loop reads
+> the *vertical* filter's three coefficients first (`pass==0`) per
+> §5.11.58 / dav1d's `filter_v`-then-`filter_h` read order, but the final
+> `LrUnitData::Wiener { h: pass[0], v: pass[1] }` construction had them
+> backwards. One-line fix (swap which pass index feeds `h` vs `v`).
+>
+> Verified via `av1_psnr_check` with `KINETIX_AV1_FILTER=1` (default
+> corpus, restoration still gated off, is provably unaffected): testsrc's
+> V PSNR with restoration applied went from **42.24 dB (worse than the
+> 49.26 dB unfiltered baseline -- restoration was actively harmful) to
+> 55.18 dB (now a real improvement)**. Confirmed the remaining gap isn't
+> restoration's own math: dumped full YUV via `KINETIX_AV1_DUMP_FINAL`
+> and diffed against dav1d's `--inloopfilters norestoration` output --
+> **420 of 3072 V-plane pixels already differ (mostly +/-1/-2) before
+> restoration even runs**, inherited from testsrc's own pre-existing,
+> separately-tracked deblock/CDEF imprecision, and restoration's own
+> 366-pixel post-filter diff count is in the same range/magnitude, not
+> worse. So restoration is now "as correct as its input allows" for the
+> one path this corpus exercises (Wiener); SgrProj remains completely
+> untested (no corpus clip uses it). Updated the gating comment in
+> `apply_post_filters` to record this accurately rather than the stale
+> "boundary clamping causes regressions" note. Skipped a dedicated unit
+> test (the bug lives inside a real-bitstream entropy-decode path needing
+> a full `TileDecodeState`, same practical constraint as the
+> `compute_level` fix earlier this session) -- the corpus PSNR swing is
+> unambiguous evidence for both bug and fix. 133 unit tests pass, clippy
+> clean, `cargo build --workspace` green.
+>
+> **Not un-gated by default** -- still not bit-exact (dependent on
+> upstream deblock/CDEF precision improving first) and SgrProj is
+> unverified, so `KINETIX_AV1_FILTER` stays opt-in. **Next steps, in
+> priority order**: (1) fresh worst-row/worst-edge scan on
+> mandelbrot/testsrc for more loop-filter-level-class bugs (this vein has
+> now found three real bugs in a row: dqDenom, the ref-delta
+> default/shift, and this h/v swap -- worth one more pass before moving
+> on); (2) IBC var-tx tree + inter tx_type + inter coefficient context;
+> (3) once deblock/CDEF precision improves, re-check whether restoration
+> reaches bit-exact and consider un-gating; (4) SgrProj path is
+> completely unverified -- needs a corpus clip that actually selects it
+> (`allow_screen_content_tools`-style content or an explicit encoder
+> flag) before it can be trusted at all.
+
+> **2026-09-04 (cont'd) -- IBC var-tx tree implemented (first real
+> increment on the confirmed structural gap holding testsrc2 at ~23dB).**
+> `reconstruct_ibc_block` previously read one intra-style `tx_depth`
+> symbol (`read_tx_size`) for the whole coded block -- wrong for
+> `IsInter = 1`: real IBC blocks split independent sub-regions to
+> different sizes via a recursive quad-tree of binary `txfm_split`
+> symbols (§5.11.16/18's `read_var_tx_size`), desyncing the entropy
+> decoder from this read onward for every non-skipped IBC block.
+>
+> Added `read_block_tx_size_ibc`/`read_tx_tree` (`partition.rs`),
+> cross-checked branch-for-branch against dav1d's `read_vartx_tree`/
+> `read_tx_tree` (`decode.c`): the two no-entropy-read shortcuts (skip or
+> `TxMode != TX_MODE_SELECT`; lossless or `Max_Tx_Size_Rect == TX_4X4`),
+> the `cat`/context derivation (`2*(TX_64X64 - Tx_Size_Sqr_Up[txSz]) -
+> depth`; above/left tx-width/height comparison), the `depth < 2 && txSz
+> != TX_4X4` read gate, and the `is_split && Tx_Size_Sqr_Up[txSz] >
+> TX_8X8` recursion gate (an 8x8-or-smaller node that splits goes
+> straight to `TX_4X4`, no further read). The `txfm_split` CDF table
+> (`DEFAULT_TXFM_SPLIT_CDF`, `[[u16;3];21]`, flat `cat*3+ctx` indexing)
+> was already scaffolded unused from an earlier session -- values
+> cross-checked against dav1d's `cdf.c` `.txpart` defaults, matched
+> digit-for-digit, no changes needed.
+>
+> Wired the leaf list into the luma reconstruction loop in place of the
+> old uniform grid (including moving the per-leaf loop-filter metadata
+> calls inside the leaf loop, and removing the now-wrong end-of-block
+> `tx_left`/`tx_above` overwrite -- the tree read already writes correct
+> per-leaf context while parsing).
+>
+> Verified two ways: (1) a new self-consistency regression test asserts
+> the leaves always exactly tile the coded block for every bsize/
+> tx_mode_select/skip/lossless combination on a synthetic bitstream; (2)
+> traced a real `testsrc2` IBC block against a patched dav1d
+> (`DAV1D_TRACE=1`, `Post-vartxtree` line, needs no new patch): Kinetix's
+> own `rng` at the same point in the stream (`r=53644`) matches dav1d's
+> first real var-tx-tree read exactly -- bit-exact sync confirmed on real
+> content. No corpus regression; `testsrc2` itself is a neutral wash for
+> now (sync is lost again at the very next symbol -- see below). 135 unit
+> tests pass, clippy clean.
+>
+> **2026-09-04 (cont'd) -- inter `tx_type` implemented (second
+> increment).** The bit lost right after the var-tx-tree fix: IBC forced
+> every transform to `DCT_DCT` (`qindex_positive: false`), but dav1d's
+> trace for the same block shows `txtp=13` (a real inter type) for its
+> luma residual -- real bitstreams write `inter_tx_type` bits here that
+> were never being read.
+>
+> Added `get_tx_set_inter`/`get_uv_inter_txtp` (`coeff_tables.rs`) and
+> `read_inter_transform_type` (`coeff.rs`), cross-checked against dav1d's
+> `recon_tmpl.c` branch-for-branch (the `reduced_tx_set ||
+> Tx_Size_Sqr_Up == TX_32X32` gate for set 3 -- one binary symbol;
+> `Tx_Size_Sqr == TX_16X16` for set 2 -- one shared 12-symbol CDF, no
+> context; else set 1 -- a 16-symbol read). The `txtp_inter1/2/3` CDF
+> tables were, again, already scaffolded unused with dav1d-cross-checked
+> default values -- no changes needed there either. Added `TxBlockCtx.
+> is_inter` to dispatch `read_coeffs` between the intra/inter
+> `transform_type` paths and to route chroma through `get_uv_inter_txtp`
+> instead of the intra `uv_mode`-based lookup; set `true` for IBC's two
+> call sites and the not-yet-reached `inter_block.rs` paths (real inter
+> blocks are also `IsInter = 1` and need the same fix whenever Phase E
+> lands), `false` for real intra.
+>
+> Verified against the same real IBC block: Kinetix now decodes
+> `tx=7 (TX_8X16) txtp=13 eob=65`, and critically the decoder's own `rng`
+> immediately after this *entire coefficient block* read (`r=42504`)
+> matches dav1d's trace for the identical symbol exactly -- bit-exact
+> sync through the full luma residual, not just the header. (dav1d's own
+> trace shows `eob=64` for the same block; that -1 reads as a
+> display-convention difference between the two traces -- a real
+> eob-derived bit-count mismatch would have changed the matching `rng`,
+> and it didn't.) Added regression tests for `get_tx_set_inter`
+> (including this exact `TX_8X16` case) and `get_uv_inter_txtp` against
+> dav1d's formula. 138 unit tests pass, clippy clean, `cargo build
+> --workspace` green. No corpus regression; `testsrc2` stays a wash
+> (Y 20.93->20.36 dB) since sync is lost at the *next* read.
+>
+> **Where sync breaks next (the concrete "inter coefficient context"
+> target for the next session)**: traced past the luma residual into the
+> same block's chroma. dav1d: `SKIPCTX bx=54 by=32 plane=1 tsz_ctx=1
+> sctx=9 all_skip=0` then `Post-uv-cf-blk[pl=0,tx=5,txtp=13,eob=0]:
+> r=64566`. Kinetix (same block, U plane): `tx=5` matches, but
+> `txtp=0 eob=1 r=45638` -- both the decoded content *and* the resulting
+> `rng` diverge starting at chroma's very first (skip/all-zero) symbol
+> read, immediately after the luma block that was just proven bit-exact.
+> Two candidate causes, not yet distinguished: (1) chroma's skip-context
+> derivation (`all_zero_ctx`'s `plane > 0` branch, `coeff.rs`) might need
+> an `is_inter`-dependent term the current spec-generic formula is
+> missing (dav1d's `sctx=9` context value hasn't been hand-verified
+> against Kinetix's own computed context for this exact call yet); (2) a
+> more mundane possibility -- `get_uv_inter_txtp`'s placeholder-`DCT_DCT`
+> "luma tx type" input (noted as a known gap in the `blk_u`/`blk_v`
+> construction comment in `intra_block.rs`, since chroma sub-blocks can
+> span multiple luma leaves and there's no per-mi-position luma-tx-type
+> lookup wired yet) doesn't explain this, since chroma never reads
+> `tx_type` bits regardless -- but if `coeff_base`/`coeff_br` *level*
+> contexts (not just `all_zero`) also read `get_tx_class(tx_type)`
+> somewhere upstream of the skip read in a way this session didn't trace,
+> a wrong chroma tx_type could still perturb context before the mismatch
+> was first observed. Next step: dump `all_zero_ctx`'s actual computed
+> `sctx`/`tsz_ctx` for this exact Kinetix call and compare directly
+> against dav1d's `sctx=9` -- if they already match, the bug is
+> downstream of context selection (in the CDF table itself or the read
+> call), not in context derivation.
+
+> **2026-09-04 (cont'd) -- narrowed the inter-coefficient-context gap:
+> context derivation is provably correct; the bug is upstream, in the
+> entropy state itself or the CDF adaptation, not in all_zero_ctx.**
+> Added a temporary debug print (added, used, fully removed) dumping
+> all_zero_ctx's actual computed tx_sz_ctx/skip_ctx for the exact chroma
+> call this session's trace flagged. Result: Kinetix computed
+> tx_sz_ctx=1 skip_ctx=9 for this call -- matches dav1d's own tsz_ctx=1
+> sctx=9 exactly. So the context-selection formula itself (all_zero_ctx's
+> plane>0 branch) is not the bug; something else produces a different
+> decoded symbol despite an identical context bucket being consulted.
+>
+> Important methodology caveat surfaced while investigating this: the
+> "matching r=/rng" evidence cited for the var-tx-tree and inter-tx_type
+> fixes above compares only the arithmetic coder's range component, not
+> its value/dif component -- dav1d's own DEBUG_BLOCK_INFO prints only
+> rng too. range is renormalized into a narrow fixed window after every
+> symbol read, so two genuinely different decode paths landing on the
+> same range by coincidence is more plausible than it first appears,
+> especially over a single read. This doesn't retroactively invalidate
+> the two fixes already committed -- both also reproduced dav1d's actual
+> decoded symbol values exactly (txtp=13, tx=7, matching eob magnitude),
+> a much lower-probability coincidence than range alone -- but it does
+> mean this specific new finding (context matches, outcome doesn't) needs
+> a value/dif-inclusive comparison to fully pin down, not another
+> range-only check. Concrete next step: patch dav1d's msac debug hook (or
+> add a new one) to print ts->msac.dif alongside rng at a matching point,
+> and add the equivalent full-state dump (self.dec.raw_state(), which
+> already returns (range, value, max_bits, bit_pos) -- only .0 was used
+> so far) on the Kinetix side, for a true apples-to-apples state
+> comparison right before this chroma skip read. If the full state
+> already matches there, the remaining bug is CDF adaptation drift
+> (something upstream adapted this exact txb_skip[1][9] bucket
+> differently between the two decoders); if it doesn't, sync was already
+> lost earlier than currently believed and the luma
+> eob-off-by-one-only evidence needs re-examining with the same
+> full-state rigor.
+
+> **2026-09-04 (cont'd) -- resolved the methodology caveat: full-state
+> (range+value, not just range) comparison confirms bit-exact sync
+> survives the chroma skip read too, strengthening (not weakening) the
+> two increments above.** Did the full-state comparison the previous note
+> called for. Patched dav1d's msac debug prints (SKIPCTX and both
+> Post-y-cf-blk/Post-uv-cf-blk occurrences in `recon_tmpl.c`) to also emit
+> `ts->msac.dif` (`ec_win`, a 64-bit windowed value -- not directly
+> comparable to Kinetix's spec-shaped `value` without unpacking:
+> `dav1d`'s live comparison value is `dif >> (EC_WIN_SIZE - 16)` = `dif >>
+> 48`, per `msac.c`'s own `ctx_norm`/decode functions). Added a matching
+> temporary `self.dec.raw_state()` dump on the Kinetix side (both were
+> fully removed after use).
+>
+> Two independent checks, both exact matches: (1) at the luma coefficient
+> block's completion (`tx=7 txtp=13 eob≈64`): dav1d `dif=
+> 10676468718644051968` → `dif>>48 = 37930`; Kinetix `value=37930`.
+> Exact. (2) at the chroma (U plane) skip-symbol read this session had
+> flagged as a possible divergence point: dav1d `SKIPCTX ... sctx=9
+> all_skip=0 r=33536 dif=8152201127502888960` → `dif>>48 = 28962`;
+> Kinetix `skipctx plane=1 tsz_ctx=1 sctx=9 all_skip=0 range=33536
+> value=28962`. Exact match on context, range, value, *and* the decoded
+> `all_skip` boolean itself (`0` both sides).
+>
+> So the chroma skip read is **not** where sync breaks -- contradicting
+> this session's earlier (weaker, range-only, and from an since-replaced
+> debug print) observation of a divergence there. That earlier read used
+> different temporary instrumentation and may have been comparing the
+> wrong call instance (dav1d's source has three separate `Post-uv-cf-blk`
+> print sites across different threading-pass branches with the same
+> label, and picking the wrong one would silently compare unrelated
+> blocks) -- a concrete methodology pitfall for whoever continues this:
+> **when matching a labelled dav1d trace line by text alone, check which
+> of possibly-several identically-labelled call sites in the source
+> actually fired**, ideally by also matching position (`bx`/`by`) or a
+> full-state value, not just the label and a plausible-looking `r=`.
+>
+> **Net effect on confidence**: the var-tx-tree and inter-tx_type fixes
+> committed earlier this session are now verified with real rigor (full
+> arithmetic-coder state, not range alone) through the chroma skip read
+> -- solid ground, not just plausible-looking. Where sync *actually*
+> breaks for this block (or block sequence) is still open; the next
+> session should resume from here with the same full-state (`range` +
+> `dif>>48`) comparison technique, continuing past the chroma skip read
+> into the coefficient level/sign reads and then into the *next* coded
+> block's header, watching for the first point the two diverge -- rather
+> than re-deriving the technique from scratch.
+
+> **2026-09-04 (cont'd) -- localized the real divergence: it's within the
+> U-plane coefficient level/eob reads themselves, immediately after the
+> (matching) skip symbol.** Continued the full-state trace one step
+> further with the same technique. Found the exact dav1d print carrying
+> `dif` for this block's U coefficient block by grepping the full trace
+> for its known `r=64566` (necessary since dav1d's source has the
+> `Post-uv-cf-blk` label at three separate call sites and matching by
+> label alone risks comparing the wrong one, per the previous note's
+> lesson) -- `Post-uv-cf-blk[pl=0,tx=5,txtp=13,eob=0]: r=64566
+> dif=6071959426822045696` → `dif>>48 = 21571`. Kinetix's own state at
+> the equivalent point (`self.dec.raw_state()` after the U `read_coeffs`
+> call returns): `range=45638 value=32611`. **Neither matches** (`45638
+> != 64566`, `32611 != 21571`) -- confirming the skip-context read (which
+> does match, per the note above) is the last point of agreement; the
+> divergence is somewhere in the subsequent `eob_pt`/`coeff_base`/
+> `coeff_br`/`dc_sign` reads for this exact chroma block.
+>
+> dav1d's own intervening trace lines for this block hint at where to
+> look first: `SKIPCTX_EOB ... eob_bin_size=32 chroma=1 is_1d=1
+> eob_raw=0` then `SKIPCTX_DCONLY ... tok_br=1 dc_tok=2` -- the `is_1d=1`
+> flag suggests dav1d takes a distinct "DC-only" code path for this
+> block's `eob` class (`eob_raw=0`, the smallest bucket) that reads
+> `dc_tok` directly via a different mechanism than the general
+> `coeff_base`/`coeff_br` loop this session hasn't specifically checked
+> for a `plane > 0` / `is_inter` special case. **Concrete next step**:
+> read `read_eob`'s and the base-level-reading loop's actual code
+> (`coeff.rs`) side by side with dav1d's `decode_coefs`
+> (`recon_tmpl.c`) for the specific `eob_bin_size` bucket this block
+> hits, focusing on whether Kinetix has (or dav1d has, that Kinetix
+> lacks) a distinct low-eob/"DC-only" shortcut path, and whether any of
+> `read_eob`'s context derivations differ for chroma vs luma or for
+> `is_inter` blocks specifically -- this is genuinely the "inter
+> coefficient context" work the coordinator originally scoped as the
+> third increment, now narrowed to a single, concretely reproducible
+> real block rather than a vague "context gap."
+
+> **2026-09-04 (cont'd) -- root cause found and fixed: chroma tx_type
+> derivation used a `DCT_DCT` placeholder instead of the real coincident
+> luma leaf's decoded type.** `read_coeffs`'s chroma-path `luma_tx_type`
+> dispatch had a `DCT_DCT` placeholder for the `plane > 0 && is_inter`
+> case (a known gap flagged in a prior increment's own comment, not yet
+> fixed). `get_uv_inter_txtp(_, DCT_DCT)` always resolves to `DCT_DCT`,
+> so `compute_tx_type` silently returned the wrong `TxType` whenever the
+> real luma type wasn't `DCT_DCT` -- and via `get_tx_class`'s `TX_CLASS`
+> bit, corrupted `read_eob`'s very first context read (`is_1d`) for the
+> block, exactly matching the divergence localized in the previous note
+> (dav1d: `is_1d=1`; the `DCT_DCT` placeholder path computes `is_1d=0`
+> since `get_tx_class(DCT_DCT) == TX_CLASS_2D`).
+>
+> **Fix**: added `TxBlockCtx::coincident_luma_tx_type` and a per-mi-cell
+> `luma_tx_types` lookup grid inside `reconstruct_ibc_block`, populated
+> as each luma var-tx-tree leaf's residual is decoded; the chroma loop
+> now looks up the real coincident luma leaf's `TxType` (its top-left mi
+> position subsampled back to luma coordinates) instead of assuming
+> `DCT_DCT`. Also wired the same field through `intra_block.rs`'s real-
+> intra sites and `inter_block.rs`'s not-yet-reached Phase E stub (both
+> set `DCT_DCT` since it's genuinely irrelevant there: plane-0 luma
+> ignores the parameter, and real-intra chroma has its own separate
+> `MODE_TO_TXFM` derivation).
+>
+> **Verified with the same full-state rigor as the previous note's
+> methodology**: `range` + `dif>>48` now match dav1d exactly through
+> both the U-plane and V-plane `read_coeffs` calls of the originally-
+> traced IBC block (`tx=5 txtp=13`). Pushed the check further with a
+> systematic position-diff (extracting `(bx,by,r)` triples from both
+> decoders' partition-read trace lines and running `diff`): **79
+> consecutive checkpoint matches** afterward, spanning several more IBC
+> blocks, an intra block with CFL/palette, and many luma/chroma
+> coefficient reads -- much stronger evidence than the single-block
+> check alone.
+>
+> Corpus PSNR: `testsrc2_320x180` 20.36/25.18/16.43 dB -> **21.98/22.49/
+> 16.90 dB** (Y and V up, U down slightly but net a real improvement,
+> not yet bit-exact). No change on `solid_red_32/64`, `testsrc_128x96`,
+> `mandelbrot_128x96`, `smptebars_256x144` -- consistent with this bug
+> only affecting IBC/inter chroma tx_type derivation. Committed as
+> `28da676`.
+>
+> **Next divergence, localized** (not yet fixed): at partition `(56,32)`
+> dav1d expects `r=38204`, Kinetix computes `r=58496`. Traced backward:
+> the divergence is within a **new block at `bx=54,by=36` that is real
+> intra** (not IBC) -- its decoded field values (`ymode=0, uvmode=12,
+> tx=7`) match dav1d exactly, but its own symbol reads desync the
+> arithmetic-coder state (dav1d `r=53934` vs Kinetix `r=47548` at
+> `Post-tx[7]`). Since this block is real intra, it is **not** another
+> instance of the bug just fixed -- most likely a context-handoff bug
+> between the immediately-preceding IBC block's end-of-block neighbour-
+> context updates (`ymode_left`/`above`, `is_inter_left`/`above`,
+> `tx_left`/`above`, etc.) and this new block's own `skip`/`ymode`
+> context reads. Concrete next step for whoever continues: dump the
+> neighbour-context arrays right before and after the IBC block's own
+> context-update code (end of `reconstruct_ibc_block`) and compare
+> against dav1d's equivalent state, using the same full-state (`range` +
+> `dif>>48`) comparison technique established this session.
+
+> **2026-09-04 (cont'd again) -- fixed: found the root cause was NOT a
+> desync inside the IBC block, and NOT the intra block's own ymode/
+> uvmode reads either.** Instrumented per-field `range` checkpoints
+> (skip, intrabcflag, dmv, vartxtree, y-cf-blk, uv-cf-blk×2) inside
+> `reconstruct_ibc_block` and compared against dav1d's equivalent
+> `Post-*` trace lines for the exact IBC block at `bx=52,by=36`
+> preceding the divergent real-intra block: **every single checkpoint
+> matched dav1d's `range` exactly**, through to the very last
+> chroma-V coefficient read (`r=51976` both sides) -- the "context
+> handoff" theory from the previous note was wrong; the IBC block
+> itself is fully in sync.
+>
+> Continued the same per-field trace into the *next* block
+> (`bx=54,by=36`, real intra): `skip` (r=50754), `intrabcflag`
+> (r=47384), `ymode` (r=58598), and `uvmode` (r=40256) **all matched
+> dav1d exactly, in order** -- narrowing the divergence to the very
+> next read, `palette_mode_info()`'s `use_y_pal`. dav1d's trace showed
+> `Post-y_pal[0]: r=35228` (no palette); Kinetix decoded
+> `colors_y.len() == 2` (a real 2-color palette), landing at a wildly
+> different `r=44296`. Since the arithmetic-coder state going into
+> this read was byte-identical on both sides, a different *decoded
+> symbol* here means Kinetix was reading from the wrong CDF context
+> bucket, not a raw bitstream-position slip.
+>
+> **Root cause, confirmed against dav1d's own source** (`decode.c`):
+> `has_palette_y`'s context is `ctx = above_has + left_has`, read from
+> a per-mi-cell "did the neighbour block have a Y palette"
+> array (`palette_y_colors_above`/`_left` in Kinetix,
+> `t->a->pal_sz`/`t->l.pal_sz` in dav1d). `reconstruct_ibc_block`'s own
+> end-of-block neighbour-context update (added when the var-tx-tree +
+> inter-tx_type work was first built) touches `ymode_left`/`above`,
+> `uv_left`/`above`, `skip_left`/`above`, `is_inter_left`/`above`,
+> `mv_left`/`above` -- but never `palette_y_colors_left`/`above` or
+> `palette_u_colors_left`/`above`. Since IBC blocks always have
+> `PaletteSizeY == PaletteSizeUV == 0`, dav1d's own inter/IBC
+> context-update path (`decode.c`'s non-intra `case_set` block)
+> explicitly zeroes `edge->pal_sz` / `t->pal_sz_uv[i]` for every such
+> block -- Kinetix's IBC path just never mirrored that. A stale
+> non-empty palette left behind by an *earlier* real-intra block at
+> this same mi position (from a prior superblock/row) leaked straight
+> through the intervening IBC block into this read.
+>
+> **Fix**: clear `palette_y_colors_left`/`above` and
+> `palette_u_colors_left`/`above` across the IBC block's own mi extent
+> in `reconstruct_ibc_block`'s neighbour-context update, mirroring the
+> real-intra end-of-block pattern (which already does this correctly).
+> Committed as `6c5e06d`.
+>
+> **Verified far beyond the single block**: extracted every
+> partition-tree-read checkpoint (`KTRACE PART` / dav1d's `poc=...`
+> lines -- 95 of them) and every real-intra block's post-`tx`-read
+> checkpoint (`KTRACE BLOCK` / dav1d's `Post-tx[N]` -- 123 of them,
+> correctly paired by walking each `BLOCK`'s own subsequent `Post-tx`
+> line rather than naively grepping by label, learning from this
+> session's earlier label-matching mistake) from both decoders across
+> the **entire testsrc2 frame** and diffed them in decode order: **all
+> 218 checkpoints match dav1d's `range` exactly**. This is full-frame
+> entropy-decode sync, not a local patch -- strong evidence the
+> bitstream-level (symbol-read) side of AV1 decode is now correct for
+> this test case's IBC + intra mix.
+>
+> Corpus PSNR: `testsrc2_320x180` 21.98/22.49/16.90 dB -> **24.70/
+> 24.00/16.86 dB** (Y and U both up meaningfully; V flat). Still not
+> bit-exact (99 dB), despite full entropy sync -- meaning **the
+> remaining gap is a pixel-reconstruction bug** (prediction, inverse
+> transform, dequant, or loop filter/CDEF), not further entropy
+> desync. This is a genuinely different bug class from everything
+> fixed so far this session and needs its own trace methodology: since
+> the symbol stream is now confirmed correct, the next step is a
+> *pixel*-level diff (`ITXDUMP`/`EDGEDUMP` dav1d trace hooks already
+> exist in the patched local dav1d build -- see `recon_tmpl.c`'s diff
+> in the scratch dav1d clone -- for exactly this kind of per-block
+> prediction/residual dump) against Kinetix's own per-block pixel
+> output, rather than more `range`/`dif` state comparisons.
+>
+> No change to any other corpus case (`solid_red_32/64`,
+> `testsrc_128x96`, `mandelbrot_128x96`, `smptebars_256x144`),
+> consistent with this being an IBC-neighbour-of-real-intra-specific
+> bug. 139 unit tests pass, clippy clean, `cargo build --workspace`
+> clean. No new unit test was added for this specific fix (it lives
+> entirely inside `reconstruct_ibc_block`'s neighbour-context update,
+> which requires a full `TileDecodeState` over real bitstream data to
+> exercise meaningfully -- the `av1_psnr_check` corpus run is the
+> practical regression signal here, matching this session's earlier
+> methodology for reconstruction-level fixes).

@@ -105,6 +105,9 @@ impl TileCdfs {
             inter_tx_type_set1: defaults::DEFAULT_INTER_TX_TYPE_SET1_CDF,
             inter_tx_type_set2: defaults::DEFAULT_INTER_TX_TYPE_SET2_CDF,
             inter_tx_type_set3: defaults::DEFAULT_INTER_TX_TYPE_SET3_CDF,
+            inter_tx_type_set1: defaults::DEFAULT_INTER_TX_TYPE_SET1_CDF,
+            inter_tx_type_set2: defaults::DEFAULT_INTER_TX_TYPE_SET2_CDF,
+            inter_tx_type_set3: defaults::DEFAULT_INTER_TX_TYPE_SET3_CDF,
         }
     }
 
@@ -474,6 +477,31 @@ pub struct CoeffBlock {
     pub tx_type: usize,
 }
 
+/// Reset a transform block's neighbour-context footprint to "no coefficients
+/// coded" without reading any symbols.
+///
+/// AV1 §5.11.34 `residual()` only calls `coeffs()` (and therefore only
+/// updates `AboveLevelContext`/`AboveDcContext`/`LeftLevelContext`/
+/// `LeftDcContext`) when the block is not skipped. A skipped block's
+/// transform-sized footprint still needs its context reset to zero, though —
+/// dav1d does this explicitly (`read_coef_blocks`'s `b->skip` branch
+/// `memset`s the above/left coefficient-context bytes to the "unset"
+/// sentinel) rather than leaving whatever a previous, unrelated block at
+/// those same rows/columns last wrote there. Skipping this reset leaves
+/// **stale** neighbour data behind: a later block's `all_zero`/`coeff_base`/
+/// `dc_sign` context walks the same `above_*`/`left_*` arrays and would see
+/// a residual from a block that, per the bitstream, was never coded at all.
+pub fn clear_coeff_context(ctxs: &mut CoeffContexts, blk: &TxBlockCtx, w4: usize, h4: usize) {
+    for i in 0..w4 {
+        CoeffContexts::set(&mut ctxs.above_level, blk.plane, blk.x4 + i, 0);
+        CoeffContexts::set(&mut ctxs.above_dc, blk.plane, blk.x4 + i, 0);
+    }
+    for i in 0..h4 {
+        CoeffContexts::set(&mut ctxs.left_level, blk.plane, blk.y4 + i, 0);
+        CoeffContexts::set(&mut ctxs.left_dc, blk.plane, blk.y4 + i, 0);
+    }
+}
+
 /// Read one transform block's coefficients: the spec's
 /// `coeffs( plane, startX, startY, txSz )`.
 ///
@@ -743,14 +771,55 @@ fn read_transform_type(
     }
 }
 
+/// `transform_type( x4, y4, txSz )` (spec "Transform type syntax"),
+/// `IsInter == 1` path (real inter blocks and IBC). Cross-checked against
+/// dav1d's `recon_tmpl.c` (`read_coef_blocks`'s `else` branch): the
+/// `reduced_tx_set || Tx_Size_Sqr_Up[txSz] == TX_32X32` gate picks set 3
+/// (a single binary symbol, context = `Tx_Size_Sqr[txSz]`), `Tx_Size_Sqr
+/// [txSz] == TX_16X16` picks set 2 (one shared 12-symbol CDF, no context),
+/// otherwise set 1 (a 16-symbol read, context = `Tx_Size_Sqr[txSz]` ∈
+/// `{TX_4X4, TX_8X8}`).
+fn read_inter_transform_type(
+    dec: &mut SymbolDecoder,
+    cdfs: &mut TileCdfs,
+    blk: &TxBlockCtx,
+    tx_size: usize,
+) -> Result<usize, KinetixError> {
+    let set = get_tx_set_inter(tx_size, blk.reduced_tx_set);
+    if set == TX_SET_DCTONLY || !blk.qindex_positive {
+        return Ok(DCT_DCT);
+    }
+    let sqr = TX_SIZE_SQR[tx_size];
+    if set == TX_SET_INTER_3 {
+        let cdf = cdfs.inter_tx_type_set3.get_mut(sqr).ok_or_else(|| {
+            KinetixError::Parse(format!(
+                "AV1 transform_type: inter set 3 index out of range (sqr={sqr})"
+            ))
+        })?;
+        Ok(TX_TYPE_INTER_INV_SET3[dec.read_symbol(cdf)])
+    } else if set == TX_SET_INTER_2 {
+        Ok(TX_TYPE_INTER_INV_SET2[dec.read_symbol(&mut cdfs.inter_tx_type_set2)])
+    } else {
+        let cdf = cdfs.inter_tx_type_set1.get_mut(sqr).ok_or_else(|| {
+            KinetixError::Parse(format!(
+                "AV1 transform_type: inter set 1 index out of range (sqr={sqr})"
+            ))
+        })?;
+        Ok(TX_TYPE_INTER_INV_SET1[dec.read_symbol(cdf)])
+    }
+}
+
 /// `compute_tx_type( plane, txSz, blockX, blockY )` (spec "Compute transform
-/// type function"), intra path.
+/// type function"), dispatching on `blk.is_inter`.
 fn compute_tx_type(blk: &TxBlockCtx, tx_size: usize, luma_tx_type: usize) -> usize {
     if blk.lossless || TX_SIZE_SQR_UP[tx_size] > TX_32X32 {
         return DCT_DCT;
     }
     if blk.plane == 0 {
         return luma_tx_type;
+    }
+    if blk.is_inter {
+        return get_uv_inter_txtp(tx_size, luma_tx_type);
     }
     let tx_set = get_tx_set_intra(tx_size, blk.reduced_tx_set);
     let tx_type = MODE_TO_TXFM.get(blk.uv_mode).copied().unwrap_or(DCT_DCT);
@@ -1026,7 +1095,10 @@ fn coeff_br_ctx(tx_size: usize, plane_tx_type: usize, quant: &[i32], pos: usize)
 
 #[cfg(test)]
 mod tests {
-    use crate::coeff::{read_coeffs, CoeffBlock, CoeffContexts, TileCdfs, TxBlockCtx};
+    use crate::coeff::{
+        clear_coeff_context, compute_tx_type, dc_sign_ctx, read_coeffs, CoeffBlock, CoeffContexts,
+        TileCdfs, TxBlockCtx,
+    };
     use crate::coeff_tables::*;
     use crate::entropy::SymbolDecoder;
 
@@ -1121,6 +1193,119 @@ mod tests {
         // 32x32 and up only permit DCT_DCT.
         assert_eq!(get_tx_set_intra(TX_32X32, false), TX_SET_DCTONLY);
         assert_eq!(get_tx_set_intra(TX_64X64, false), TX_SET_DCTONLY);
+    }
+
+    #[test]
+    fn tx_set_inter_matches_spec_and_dav1d_branch_selection() {
+        // Cross-checked against dav1d's `recon_tmpl.c` branch selection
+        // (`reduced_txtp_set || t_dim->max == TX_32X32` -> set 3;
+        // `t_dim->min == TX_16X16` -> set 2; else set 1) rather than
+        // hand-derived from the spec text alone, since this is the exact
+        // real-world case (a 2026-09-04 `testsrc2` IBC block, `TX_8X16`)
+        // that first exercised this function: `TX_8X16` has
+        // `Tx_Size_Sqr[TX_8X16] == TX_8X8` (not `TX_16X16`) and
+        // `Tx_Size_Sqr_Up[TX_8X16] == TX_16X16` (not `TX_32X32`), so it must
+        // land in set 1, matching the `txtp=13` (a set-1-only type,
+        // `Tx_Type_Inter_Inv_Set1[13] == FLIPADST_FLIPADST`... actually
+        // `ADST_ADST`, index 12) dav1d actually decoded for it.
+        assert_eq!(get_tx_set_inter(TX_4X4, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_8X8, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_8X16, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_16X8, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_16X16, false), TX_SET_INTER_2);
+        assert_eq!(get_tx_set_inter(TX_32X32, false), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_16X32, false), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_64X64, false), TX_SET_DCTONLY);
+        assert_eq!(get_tx_set_inter(TX_32X64, false), TX_SET_DCTONLY);
+        // reduced_tx_set forces set 3 whenever a set would otherwise apply.
+        assert_eq!(get_tx_set_inter(TX_4X4, true), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_16X16, true), TX_SET_INTER_3);
+    }
+
+    #[test]
+    fn tx_type_inter_inv_set1_index_13_is_flipadst_flipadst() {
+        // Pin the concrete inverse-set lookup values this session's
+        // inter-tx-type fix depends on. Note: dav1d's own `TxfmType` C enum
+        // happens to number its constants in the exact same order as this
+        // crate's (`DCT_DCT=0 .. H_FLIPADST=15`), so a dav1d trace printing
+        // `txtp=N` names the *decoded TxType's own enum value* (`N=13`
+        // means `H_ADST`, `dav1d_tx_type_class[13]==TX_CLASS_HORIZ`) --
+        // *not* index `N` of this inverse-set table, which is a different
+        // (symbol-index-keyed) mapping entirely. The real testsrc2 IBC
+        // block this session traced decoded symbol index 4 from set 1
+        // (`TX_TYPE_INTER_INV_SET1[4] == H_ADST == 13`), matching dav1d's
+        // own `txtp=13` trace and post-read decoder state exactly.
+        assert_eq!(TX_TYPE_INTER_INV_SET1[13], FLIPADST_FLIPADST);
+        assert_eq!(TX_TYPE_INTER_INV_SET1[4], H_ADST);
+        assert_eq!(H_ADST, 13);
+    }
+
+    #[test]
+    fn get_uv_inter_txtp_matches_dav1d() {
+        // Cross-checked against dav1d's `get_uv_inter_txtp` (`env.h`).
+        // TX_32X32-or-bigger chroma: IDTX survives, everything else -> DCT_DCT.
+        assert_eq!(get_uv_inter_txtp(TX_32X32, IDTX), IDTX);
+        assert_eq!(get_uv_inter_txtp(TX_32X32, ADST_ADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_32X16, ADST_ADST), DCT_DCT);
+        // TX_16X16-square-down chroma: the four ADST/FLIPADST directional
+        // types collapse to DCT_DCT, everything else passes through.
+        assert_eq!(get_uv_inter_txtp(TX_16X16, V_ADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_16X16, H_FLIPADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_16X16, IDTX), IDTX);
+        // Smaller chroma: luma's type passes through unchanged.
+        assert_eq!(get_uv_inter_txtp(TX_8X8, ADST_DCT), ADST_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_4X4, IDTX), IDTX);
+    }
+
+    #[test]
+    fn compute_tx_type_routes_inter_chroma_through_the_coincident_luma_type() {
+        // Regression for the 2026-09-04 chroma-tx-type fix: a previous
+        // version of the IBC/inter chroma call sites always fed
+        // `compute_tx_type` a `DCT_DCT` placeholder for "luma's tx type"
+        // instead of the real coincident luma leaf's decoded type
+        // (`TxBlockCtx::coincident_luma_tx_type`, added by this fix).
+        // `get_uv_inter_txtp(_, DCT_DCT)` always resolves to `DCT_DCT`
+        // regardless of chroma tx size, which made this bug invisible from
+        // `compute_tx_type`'s output alone in the one case anyone had
+        // checked -- but wrong whenever the real luma type wasn't
+        // `DCT_DCT`, and (via `get_tx_class`'s `TX_CLASS`) wrong for
+        // `read_eob`'s very next context bit too, silently desyncing every
+        // subsequent chroma symbol read for such a block. This test uses
+        // the exact real-world case this session traced against dav1d: a
+        // `TX_4X8` chroma block whose coincident luma leaf decoded
+        // `H_ADST` (`txtp=13`). `read_coeffs` is the site that actually
+        // reads `blk.coincident_luma_tx_type` and feeds it into
+        // `compute_tx_type` as the `luma_tx_type` parameter (see the
+        // `blk.plane != 0 && blk.is_inter` arm just above `read_coeffs`'s
+        // `compute_tx_type` call) -- `compute_tx_type` itself never looks
+        // at the field directly, so this test exercises that same call
+        // shape: the real coincident type passed in as `luma_tx_type`.
+        let mut b = blk(1, TX_4X8, 0, 0, TX_WIDTH[TX_4X8], TX_HEIGHT[TX_4X8]);
+        b.is_inter = true;
+        b.coincident_luma_tx_type = H_ADST;
+        assert_eq!(
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            get_uv_inter_txtp(TX_4X8, H_ADST),
+            "inter chroma must derive its type from the real coincident \
+             luma type fed in as `luma_tx_type`, not collapse to DCT_DCT"
+        );
+        assert_ne!(
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            DCT_DCT,
+            "H_ADST survives get_uv_inter_txtp unchanged for a TX_4X8 \
+             chroma block (not TX_16X16-square or TX_32X32-or-bigger), so \
+             the correct output here must not silently collapse to DCT_DCT"
+        );
+        // And the bug being regressed against: feeding the old DCT_DCT
+        // placeholder instead of the real coincident type silently
+        // collapses to DCT_DCT for this block, which is a different
+        // (wrong) TxType/TxClass than the real H_ADST-derived one.
+        assert_ne!(
+            compute_tx_type(&b, TX_4X8, DCT_DCT),
+            compute_tx_type(&b, TX_4X8, b.coincident_luma_tx_type),
+            "the DCT_DCT placeholder and the real coincident luma type \
+             must not silently produce the same TxType for this block"
+        );
     }
 
     #[test]
@@ -1314,6 +1499,57 @@ mod tests {
     fn with_uv(mut b: TxBlockCtx, uv_mode: usize) -> TxBlockCtx {
         b.uv_mode = uv_mode;
         b
+    }
+
+    /// Regression for the 2026-09-03 testsrc2/IBC skip-context bug: a
+    /// skipped transform block must reset its neighbour-context footprint to
+    /// "unset", exactly like a real `all_zero` `coeffs()` call would, even
+    /// though `read_coeffs` itself is never called for it.
+    ///
+    /// Without `clear_coeff_context`, a later block sharing those
+    /// rows/columns (its own footprint only partially overlapping the first
+    /// block's) reads a stale positive/negative `dc_sign` context left behind
+    /// by a completely different, non-adjacent block instead of "no DC coded
+    /// here" — this was root-caused with a symbol-by-symbol dav1d trace diff
+    /// (`SKIPCTX_DCSIGN`/`DCSIGN_RAW`) on the real testsrc2 corpus clip,
+    /// where it desynced the first genuinely-skipped IBC block's left
+    /// neighbour and every symbol after it.
+    #[test]
+    fn skipped_block_clears_stale_dc_sign_context_for_later_neighbours() {
+        let mut ctxs = CoeffContexts::new(16, 16);
+
+        // A block spanning chroma rows y4=8..11 at x4=24..27 writes a
+        // positive DC sign into all four left-context rows (mirrors the real
+        // bx=48,by=16 block from the corpus trace).
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 8, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 9, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 10, 2);
+        CoeffContexts::set(&mut ctxs.left_dc, 1, 11, 2);
+
+        // A narrower, skipped block at x4=26..27 only covers rows y4=8..9
+        // (mirrors the real bx=52,by=20 skipped IBC block) — it must clear
+        // *its own* footprint, leaving rows 10/11 alone.
+        let skipped = blk(1, TX_8X8, 26, 8, 8, 8);
+        clear_coeff_context(&mut ctxs, &skipped, 2, 2);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 8), 0);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 9), 0);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 10), 2);
+        assert_eq!(CoeffContexts::get(&ctxs.left_dc, 1, 11), 2);
+
+        // A block reading rows y4=8..11 next (mirrors the real bx=56,by=16
+        // block) must see "unset" for the cleared rows and the stale
+        // positive value only for the rows the skipped block never touched.
+        let next = blk(1, TX_16X16, 28, 8, 16, 16);
+        assert_eq!(
+            dc_sign_ctx(&next, &ctxs, 4, 4),
+            2 /* net positive, from rows 10/11 only */
+        );
+
+        // Without the fix (i.e. skipping the `clear_coeff_context` call
+        // above), all four rows would still read positive and this same
+        // assertion would also pass by coincidence — the real bug is that
+        // rows 8/9 are wrongly nonzero, which the two explicit `assert_eq!`s
+        // on `left_dc[8]`/`left_dc[9]` above catch directly.
     }
 
     /// The byte buffers are generated rather than pasted so the Rust and

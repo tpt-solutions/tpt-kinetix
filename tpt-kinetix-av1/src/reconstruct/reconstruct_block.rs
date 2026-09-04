@@ -183,8 +183,17 @@ pub(super) fn reconstruct_tx_block(
                 }
             }
         }
-    } else if dbg {
-        eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
+    } else {
+        // AV1 §5.11.34 `residual()`: a skipped block never calls `coeffs()`,
+        // so `read_coeffs`'s trailing context-array update never runs either.
+        // Reset this transform block's own footprint to "unset" so a later
+        // block's `all_zero`/`dc_sign` context walk doesn't see a stale
+        // residual left over from whatever unrelated block last wrote these
+        // rows/columns (see `clear_coeff_context`'s doc comment).
+        clear_coeff_context(ctxs, blk, tx_w / 4, tx_h / 4);
+        if dbg {
+            eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
+        }
     }
 
     let borders = block_borders(

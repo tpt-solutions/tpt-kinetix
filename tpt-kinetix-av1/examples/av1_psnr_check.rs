@@ -157,6 +157,22 @@ fn check(label: &str, filter: &str, extra: Option<&str>, w: u32, h: u32) {
                 let row: usize = row_s.trim().parse().unwrap_or(32);
                 let stride = w as usize;
                 let base = row * stride;
+                if row >= h as usize {
+                    eprintln!("[{label}] row {row} out of range for {h}-tall clip, skipping");
+                    return;
+                }
+                if let Ok(range_s) = std::env::var("KINETIX_AV1_DBG_ROW_RANGE") {
+                    let parts: Vec<usize> = range_s
+                        .split(',')
+                        .map(|s| s.trim().parse().unwrap())
+                        .collect();
+                    let (c0, c1) = (parts[0], parts[1]);
+                    eprintln!("[{label}] row {row} raw cols {c0}..{c1}:");
+                    let got: Vec<u8> = (c0..c1).map(|c| frame.data[base + c]).collect();
+                    let exp: Vec<u8> = (c0..c1).map(|c| ref_raw[base + c]).collect();
+                    eprintln!("  got={got:?}");
+                    eprintln!("  exp={exp:?}");
+                }
                 eprintln!("[{label}] row {row} pixel diff (got vs ref):");
                 for col in 0..w as usize {
                     let got = frame.data[base + col];

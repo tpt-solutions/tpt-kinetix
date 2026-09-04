@@ -535,8 +535,9 @@ impl<'a> TileDecodeState<'a> {
                         qindex_positive: !self.lossless,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
-                        is_inter: false,
-                        luma_tx_type: 0,
+                        is_inter: true,
+                        // Irrelevant for plane 0.
+                        coincident_luma_tx_type: av1::DCT_DCT,
                     };
                     let coeffs = read_coeffs(
                         &mut self.dec,
@@ -637,8 +638,16 @@ impl<'a> TileDecodeState<'a> {
                             qindex_positive: !self.lossless,
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
-                            is_inter: false,
-                            luma_tx_type: 0,
+                            is_inter: true,
+                            // TODO(inter Phase E): like IBC's chroma path
+                            // before its own fix, this needs the real
+                            // coincident luma leaf's decoded `TxType`
+                            // (`intra_block.rs`'s `luma_tx_types` lookup),
+                            // not a `DCT_DCT` placeholder — not fixed here
+                            // since this path isn't reached yet (`decode_
+                            // inter_block` returns `Ok(None)` for
+                            // non-keyframes).
+                            coincident_luma_tx_type: av1::DCT_DCT,
                         };
                         let coeffs = read_coeffs(
                             &mut self.dec,

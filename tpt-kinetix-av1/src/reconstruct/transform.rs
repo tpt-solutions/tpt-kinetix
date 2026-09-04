@@ -614,14 +614,27 @@ pub(super) fn inverse_transform(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// `dqDenom` (AV1 spec §7.12.3 `reconstruct` process): the post-dequant
-/// integer division applied for the two largest square transform sizes.
-/// Every other size (including all the ones this crate reconstructs below
-/// `TX_32X32`) uses 1, i.e. no-op.
+/// integer division. dav1d computes this as a shift, `dq_shift =
+/// Max(0, t_dim->ctx - 2)` where `t_dim->ctx` is exactly Kinetix's
+/// `tx_sz_ctx` (`(TX_SIZE_SQR[tx] + TX_SIZE_SQR_UP[tx] + 1) >> 1`, the same
+/// value `coeff.rs`'s coefficient-context derivation already uses) — so
+/// `dqDenom` is driven by the transform's **square-up** size (the smallest
+/// square that contains it), not its own literal size. A previous version
+/// of this function checked `tx_size == TX_32X32`/`TX_64X64` directly,
+/// which is correct for the *square* sizes but silently applies `dqDenom =
+/// 1` (a no-op) to every *rectangular* size whose square-up is 32×32 or
+/// 64×64 — `TX_16X32`/`TX_32X16`/`TX_8X32`/`TX_32X8` (square-up 32×32,
+/// `dqDenom` should be 2) and `TX_16X64`/`TX_64X16`/`TX_32X64`/`TX_64X32`
+/// (square-up 64×64, `dqDenom` should be 4) — roughly doubling or
+/// quadrupling every dequantized coefficient for those eight sizes. Found
+/// via a `DAV1D_ITXDUMP`-patched dav1d trace on `mandelbrot_128x96`'s
+/// `TX_16X32` `SMOOTH_V` block at mi (0,16): Kinetix's residual was ~2×
+/// dav1d's row-for-row (e.g. row 20 col 0: `-14` vs dav1d's `-7`).
 #[inline]
 pub(super) fn dq_denom(tx_size: usize) -> i32 {
-    match tx_size {
-        TX_32X32 => 2,
-        TX_64X64 => 4,
-        _ => 1,
+    if tx_size >= av1::TX_SIZE_SQR.len() || tx_size >= av1::TX_SIZE_SQR_UP.len() {
+        return 1;
     }
+    let tx_sz_ctx = (av1::TX_SIZE_SQR[tx_size] + av1::TX_SIZE_SQR_UP[tx_size] + 1) >> 1;
+    1 << tx_sz_ctx.saturating_sub(2).min(2)
 }
