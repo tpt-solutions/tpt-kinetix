@@ -3426,3 +3426,103 @@
 > reconstruct_block}.rs`. Committed as `d70e12e` on `master` (pushed to
 > `origin master`). `capabilities().pixel_exact` untouched (still `false` —
 > correctly so, the corpus is nowhere near bit-exact yet).
+
+> ## 2026-09-03 (cont'd) — mandelbrot's "directional-prediction residual"
+> redirected: reconstruction is very likely bit-exact, the gap is the loop
+> filter (CDEF), not prediction/transform. No fix landed this round — this
+> is a methodology correction + evidence trail for the next session.
+>
+> **Why the old hypothesis was probably a red herring.** Every prior note on
+> this item (2026-08-31 → 2026-09-01) measured "pre-filter Kinetix" against
+> "post-filter reference" via `av1_prefilter_check`'s `compare_interiors`,
+> which only excludes pixels within 4px of an **8×8 grid** boundary to dodge
+> **deblock** contamination. CDEF is not edge-limited like deblock — it's a
+> content-adaptive filter over the *whole* 8×8 unit — so that mask does
+> nothing to exclude CDEF's effect on "interior" pixels. Any interior diff
+> the tool reports could equally be a real reconstruction bug *or* a correct
+> reconstruction that the reference's CDEF pass then modifies differently
+> from Kinetix's. The tool has been unable to tell these apart since CDEF
+> was fixed (2026-09-02, `f7fae93`) and became a real (non-no-op) contributor
+> to the corpus's pixels.
+>
+> **What was actually checked this session** (method: patch dav1d's
+> `recon_tmpl.c` to dump `dst` immediately before and after
+> `itxfm_add[b->tx][txtp]` — i.e. the *pure pre-filter* prediction and
+> residual for one exact transform block, gated on `DAV1D_ITXDUMP_BX`/`_BY`
+> env vars — then diff against Kinetix's own `KINETIX_AV1_DBG_PX`/
+> `KINETIX_AV1_DBG_FULL` dump for the same block). Three representative
+> blocks from `mandelbrot_128x96`, chosen to cover the previously-suspected
+> mechanisms (sparse coefficients, SMOOTH modes, rectangular sqrt(2) rescale):
+> - `mi=(0,0)`, 32×32 `DC_PRED`, `DCT_DCT`, `eob=10`, sparse coefficients
+>   (`{(0,0)=41,(0,1)=-10,(0,3)=-1,(1,0)=-8,(1,1)=1,(3,1)=-1}`): **prediction
+>   and residual bit-exact** vs dav1d (verified the first 4 rows/32 cols by
+>   hand; `dequant`/`residual` arrays match token-for-token).
+> - `mi=(14,14)`/`(15,14)`, two adjacent 4×4 `SMOOTH_H` sub-blocks of an 8×8
+>   leaf, `DCT_ADST`, `eob=15,16`: **prediction and residual bit-exact**
+>   (pred `[40,50,56,58]`×4 rows, residual `[26,1,3,125/21,-1,-5,93/5,-1,53,84/
+>   -2,99,96,76]`, identical on both sides). This block's "left" border was
+>   independently confirmed to come from its own left-sibling sub-block's
+>   *real* reconstruction (`recon[..,col=59] == 40` on every row), not a
+>   stale/wrong context — ruling out a per-sub-block border bug too.
+> - `mi=(0,16)`, 16×32 `SMOOTH_V`, `DCT_DCT`, needs the §7.13.3 sqrt(2)
+>   rescale (`log2W=4,log2H=5`, `|Δ|==1`): **prediction and residual
+>   bit-exact** across all 32 rows × 16 cols (hand-diffed the full grid both
+>   dumps printed) — directly rules out the long-suspected rectangular-tx
+>   rescale path as a bug, at least for this tx_type/size.
+>
+> For the last block, pixel (0,80) (= this block's row 16, col 0):
+> pre-filter reconstruction is **141 on both sides** (`pred=150,
+> residual=-9`, bit-exact); the actual reference frame (`ffmpeg`, loop
+> filters on) shows **145** at that pixel, and Kinetix's own filtered output
+> also lands on 141 there (CDEF left it unchanged in Kinetix's case). That
+> 4-value gap exists *only* after loop filtering — it cannot be a
+> reconstruction bug since the reconstruction is proven identical.
+>
+> **Row-level breakdown confirms this is filter-shaped, not noise-shaped**:
+> `KINETIX_AV1_DBG_ROWS=1` (per-row Y PSNR, new this session — the row-level
+> debug already existed, `KINETIX_AV1_DBG_ROW=<n>` for a per-pixel dump on
+> one row) shows mandelbrot's *entire* frame is 99 dB (i.e. clean) **except
+> rows 71–88**, an 18-row band, where PSNR drops to 62–69 dB — everywhere
+> else is untouched. That is not what a scattered rounding bug in a
+> per-block transform looks like; it is what a filter behaving differently
+> over one region looks like. Disabling CDEF (`KINETIX_AV1_NOCDEF=1`)
+> *increases* row 80's per-pixel errors (several pixels go from ±1 to −4/−5),
+> i.e. CDEF is a real, mostly-correct, positive contributor here — not a
+> no-op — so this isn't "CDEF should be off", it's "CDEF's direction/strength
+> decision differs slightly from the reference's for this unit."
+>
+> **Conclusion**: mandelbrot's prediction and transform are very likely
+> already bit-exact (three representative blocks, covering the specific
+> mechanisms earlier sessions suspected, all confirmed exact via a real
+> pre-filter dav1d reference — not the confounded post-filter one). The
+> remaining ~47 dB gap is concentrated in a loop-filter (most likely CDEF
+> direction/strength selection, possibly interacting with deblock at the
+> superblock-row-1 top edge, rows 71-88 start right after the 64-px SB
+> boundary) difference, not a reconstruction bug. **This retires the
+> "small residual directional-prediction error / `dr_z3` `max_base_y`"
+> hypothesis** carried since 2026-08-31 — it was never re-verified against a
+> true pre-filter reference and appears to have been chasing the CDEF gap
+> the whole time. Old item (1) is folded into item (2)
+> "verify loop filter bit-exact block-by-block" below; that is now the
+> single most concrete next AV1 target.
+>
+> **Also landed**: `KINETIX_AV1_DBG_ROW` in `av1_psnr_check.rs` indexed
+> `frame.data[row*stride+col]` unconditionally and panicked for a row past a
+> smaller clip's height (hit while iterating clips with this env var set
+> globally) — added a bounds guard. Commit `2a24212`. No functional/PSNR
+> change (confirmed via `av1_psnr_check`: all corpus numbers byte-identical
+> to before this session's investigation — solid_red 99/99/99, testsrc
+> 73.01/53.76/49.23, mandelbrot 47.59/52.44/52.62, smptebars 57.49/99/99,
+> testsrc2 23.11/25.08/16.95). 126 unit tests pass, clippy clean.
+>
+> **Next session, concretely**: patch dav1d's CDEF direction-detection
+> function (`cdef_dir` or equivalent, `src/cdef_tmpl.c`) to print the chosen
+> direction/variance and primary/secondary strength for the 8×8 unit at
+> luma (0,80)-(7,87) in `mandelbrot_128x96` (mirrors this session's
+> `DAV1D_ITXDUMP_BX/BY` pattern — add `DAV1D_CDEFDUMP_BX/BY`), and diff
+> against Kinetix's `cdef_direction`/`apply_post_filters` (`loop_filter.rs`)
+> for the same unit. `KINETIX_AV1_NOCDEF`/`NODEBLOCK` (already present,
+> `f7fae93`) isolate which filter stage to blame first. dav1d's patched
+> build lives only in `scratchpad/av1ref/` (rebuilt this session from
+> `github.com/videolan/dav1d` — see the earlier 2026-09-03 note for the
+> build recipe); it is not committed to this repo.
