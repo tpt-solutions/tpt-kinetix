@@ -4910,3 +4910,94 @@
 > was spot-checked against spec-recollection and looks right, but should be
 > re-verified against a primary source (this session's dav1d-source-fetch
 > method, not memory) before ruling it out.
+
+> **2026-09-05 session note (cont'd yet again) — the DCT16 lead was ALSO a
+> dead end (transform math proven correct again), which exposed the real
+> methodological bug: CDEF is not edge-limited, so "interior-pixel"
+> NOFILTER-vs-FILTERED comparisons are unsound. The actual remaining gap
+> looks like a loop-filter bug, not reconstruction.**
+>
+> Followed the previous note's own prescription: fetched dav1d's real
+> `inv_dct16_1d_internal_c` (and its `inv_dct8`/`inv_dct4` recursive base
+> cases) from `raw.githubusercontent.com/videolan/dav1d/master/src/
+> itx_1d.c`, ported it verbatim to a scratch Python script implementing the
+> *exact* 2-D driver (`row pass → round2(row_shift) → clamp → col pass →
+> round2(4)`), and ran it against the real `px=(0,0)` `TX_16X16 DCT_DCT`
+> block's actual dequantized coefficients (`dc=2520, ac[0][1]=-528,
+> ac[1][0]=-528`, rest zero). **Result: the Python port's row-0 residual
+> `[8, 8, 9, 9, 10, 11, 12, 13, 15, 16, 17, 18, 18, 19, 19, 20]` matches
+> Kinetix's own reported residual EXACTLY, element for element** — so, like
+> `inverse_adst4` before it, `inverse_dct`'s 16-point path is independently
+> proven bit-correct for this real input. Repeated for the `px=(16,0)`
+> block (the actual origin of the `px=(28,4)` "interior" divergence found
+> below) with its own coefficients (`dc=980, ac=-352/-176`) — again an
+> exact match, row for row.
+>
+> **So: two different real blocks, two different transform sizes (`TX_4X4`
+> ADST_ADST and `TX_16X16` DCT_DCT), both independently verified bit-exact
+> against a from-scratch port of dav1d's real reference algorithm.** At
+> this point the working hypothesis that this session's "worst-edge search"
+> would find a reconstruction-math bug is looking weak — every concrete
+> lead it has produced has turned out correct under real verification.
+>
+> **Root cause of the false leads, finally identified**: `av1_interior_
+> diff.rs`'s whole premise (a pixel `>=4` samples from any 8×8 boundary is
+> immune to both deblock *and* CDEF, so a NOFILTER-Kinetix vs FILTERED-
+> dav1d mismatch there must be a reconstruction bug) is **wrong for CDEF**.
+> Deblock is genuinely edge-limited (spec: only filters real coded-block/
+> transform edges), but **CDEF is a directional enhancement filter applied
+> per-pixel across the whole frame based on local gradients, not an
+> edge-only operation** — it can and does adjust pixels far from any block
+> boundary. `mandelbrot`'s frame header has CDEF enabled
+> (`enable_cdef=true`, `cdef_y_strength=[7]`) confirmed via this session's
+> earlier `using_qmatrix` debug-print addition. So a "interior, filter-
+> immune" pixel differing between NOFILTER-Kinetix and FILTERED-dav1d is
+> expected and NORMAL whenever CDEF made a legitimate adjustment there —
+> not evidence of a reconstruction bug. This invalidates the interior-diff
+> tool's core assumption (its own doc comment: "pixels that neither the
+> deblocking filter nor CDEF can reach" — the CDEF half of that claim is
+> false) and likely explains a good fraction of this project's earlier
+> "worst-edge search" sessions chasing phantom reconstruction bugs. Fixed
+> the tool's hard-coded `first_interior_divergence(..., 3)` threshold too
+> (same hidden-threshold bug as `av1_symbol_trace_diff.rs`'s fix earlier
+> this session) — `KINETIX_AV1_DIV_THRESHOLD` now works on both tools.
+>
+> **The methodologically sound comparison, and what it actually shows**:
+> compare Kinetix's own **fully filtered** output (normal `decode()`, no
+> `NOFILTER`) against dav1d's filtered reference — apples to apples, no
+> CDEF-reach assumption needed. At `threshold=0` this gives `mandelbrot`'s
+> real first divergence: `px=(62,1)`, `kinetix=163 dav1d=164` (`delta=-1`).
+> Checked whether Kinetix's own *pre-filter* value at that exact pixel
+> already differed (would mean a reconstruction bug) or matched (would mean
+> the bug is in Kinetix's own filter stage): **Kinetix's NOFILTER value
+> there is `164` — matching dav1d's filtered value exactly.** Kinetix's own
+> deblock/CDEF then moves it `164 -> 163`, *introducing* a divergence that
+> did not exist pre-filter. **This is real, load-bearing evidence that (at
+> least at this pixel) Kinetix's loop filter is over-correcting relative to
+> dav1d — a loop-filter bug, not a reconstruction bug**, matching what an
+> earlier (2026-09-04, before this session's "worst-edge search" priority
+> item existed) todo.md note already concluded and this session had been
+> implicitly second-guessing.
+>
+> **Recommendation for the next session**: stop chasing "reconstruction"
+> leads via NOFILTER-vs-FILTERED-dav1d comparisons at all — they cannot
+> distinguish a real bug from a correct CDEF adjustment. Instead: (1) build
+> the equivalent of this session's `px=(62,1)` check into a reusable tool —
+> for each divergent pixel, decode filtered-Kinetix, dav1d-filtered, AND
+> Kinetix-NOFILTER, and classify pre-existing (nofilter already diverges
+> from dav1d-filtered in the SAME direction/magnitude as filtered-Kinetix)
+> vs filter-introduced (nofilter matches dav1d-filtered, filtered-Kinetix
+> doesn't); (2) once a genuine sample of filter-introduced divergences is
+> collected, dig into `loop_filter.rs`'s CDEF strength/direction/damping
+> computation and deblock filter-length selection against dav1d's real
+> source the same way this session verified the transforms; (3) the
+> already-open "wire the currently-hardcoded-to-0 per-superblock `delta_lf`
+> into `deblock_plane`'s level computation" item is a concrete,
+> already-identified real gap worth checking first, since it's a known
+> incompleteness rather than a hypothesis.
+>
+> 139 unit tests pass, clippy `-D warnings` clean, `cargo fmt` clean on
+> touched files. No functional code changes to the decoder itself this
+> round — only the `av1_interior_diff.rs` threshold fix (same shape as
+> `av1_symbol_trace_diff.rs`'s earlier this session) and the scratch Python
+> verification scripts (not committed, throwaway).
