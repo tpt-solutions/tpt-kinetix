@@ -4303,3 +4303,50 @@
 > lost earlier than currently believed and the luma
 > eob-off-by-one-only evidence needs re-examining with the same
 > full-state rigor.
+
+> **2026-09-04 (cont'd) -- resolved the methodology caveat: full-state
+> (range+value, not just range) comparison confirms bit-exact sync
+> survives the chroma skip read too, strengthening (not weakening) the
+> two increments above.** Did the full-state comparison the previous note
+> called for. Patched dav1d's msac debug prints (SKIPCTX and both
+> Post-y-cf-blk/Post-uv-cf-blk occurrences in `recon_tmpl.c`) to also emit
+> `ts->msac.dif` (`ec_win`, a 64-bit windowed value -- not directly
+> comparable to Kinetix's spec-shaped `value` without unpacking:
+> `dav1d`'s live comparison value is `dif >> (EC_WIN_SIZE - 16)` = `dif >>
+> 48`, per `msac.c`'s own `ctx_norm`/decode functions). Added a matching
+> temporary `self.dec.raw_state()` dump on the Kinetix side (both were
+> fully removed after use).
+>
+> Two independent checks, both exact matches: (1) at the luma coefficient
+> block's completion (`tx=7 txtp=13 eob≈64`): dav1d `dif=
+> 10676468718644051968` → `dif>>48 = 37930`; Kinetix `value=37930`.
+> Exact. (2) at the chroma (U plane) skip-symbol read this session had
+> flagged as a possible divergence point: dav1d `SKIPCTX ... sctx=9
+> all_skip=0 r=33536 dif=8152201127502888960` → `dif>>48 = 28962`;
+> Kinetix `skipctx plane=1 tsz_ctx=1 sctx=9 all_skip=0 range=33536
+> value=28962`. Exact match on context, range, value, *and* the decoded
+> `all_skip` boolean itself (`0` both sides).
+>
+> So the chroma skip read is **not** where sync breaks -- contradicting
+> this session's earlier (weaker, range-only, and from an since-replaced
+> debug print) observation of a divergence there. That earlier read used
+> different temporary instrumentation and may have been comparing the
+> wrong call instance (dav1d's source has three separate `Post-uv-cf-blk`
+> print sites across different threading-pass branches with the same
+> label, and picking the wrong one would silently compare unrelated
+> blocks) -- a concrete methodology pitfall for whoever continues this:
+> **when matching a labelled dav1d trace line by text alone, check which
+> of possibly-several identically-labelled call sites in the source
+> actually fired**, ideally by also matching position (`bx`/`by`) or a
+> full-state value, not just the label and a plausible-looking `r=`.
+>
+> **Net effect on confidence**: the var-tx-tree and inter-tx_type fixes
+> committed earlier this session are now verified with real rigor (full
+> arithmetic-coder state, not range alone) through the chroma skip read
+> -- solid ground, not just plausible-looking. Where sync *actually*
+> breaks for this block (or block sequence) is still open; the next
+> session should resume from here with the same full-state (`range` +
+> `dif>>48`) comparison technique, continuing past the chroma skip read
+> into the coefficient level/sign reads and then into the *next* coded
+> block's header, watching for the first point the two diverge -- rather
+> than re-deriving the technique from scratch.
