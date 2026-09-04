@@ -105,6 +105,21 @@ pub struct FrameMeta {
     pub luma_tx_h: Vec<u8>,
     /// Whether every transform block inside the 8×8 luma block was skipped.
     pub luma_skip: Vec<bool>,
+    /// Whether this 8×8-luma grid cell is the *left* edge of a real luma
+    /// transform block (AV1 §7.14.1's `isTxEdge`/`isBlockEdge`, restricted to
+    /// the vertical-pass axis) — i.e. whether `record_luma` was called for
+    /// this cell as the leftmost column of the block's own span, not as an
+    /// interior column a wider transform also happens to cover. `false` for
+    /// an interior cell means `deblock_plane`'s vertical pass must *not*
+    /// filter the boundary immediately to this cell's left: no real edge
+    /// exists there, even though the (purely size-based) `filter_size`
+    /// computation alone can't tell the difference between "two adjacent
+    /// same-size transforms" and "one wide transform spanning both grid
+    /// cells". See `record_luma`'s doc comment.
+    pub luma_edge_left: Vec<bool>,
+    /// Same as `luma_edge_left`, for the horizontal pass (top edge of a real
+    /// transform block).
+    pub luma_edge_top: Vec<bool>,
     /// Largest chroma transform width/height (in samples) for the co-located
     /// 4×4 block. See `luma_tx_w`/`luma_tx_h`.
     pub u_tx_w: Vec<u8>,
@@ -113,6 +128,13 @@ pub struct FrameMeta {
     pub v_tx_w: Vec<u8>,
     pub v_tx_h: Vec<u8>,
     pub v_skip: Vec<bool>,
+    /// Chroma edge-presence grids — see `luma_edge_left`/`luma_edge_top`.
+    /// Shared between U and V: `record_chroma` always writes both planes'
+    /// size/skip from the same call with the same block span, so a single
+    /// pair of grids is sufficient (mirrors `record_chroma` itself, which
+    /// has no separate `u`-vs-`v` block-span notion).
+    pub chroma_edge_left: Vec<bool>,
+    pub chroma_edge_top: Vec<bool>,
     /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
     /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
@@ -156,6 +178,10 @@ impl FrameMeta {
             v_tx_w: vec![0u8; len],
             v_tx_h: vec![0u8; len],
             v_skip: vec![true; len],
+            luma_edge_left: vec![false; len],
+            luma_edge_top: vec![false; len],
+            chroma_edge_left: vec![false; len],
+            chroma_edge_top: vec![false; len],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -168,6 +194,17 @@ impl FrameMeta {
 
     /// Record that the 8×8-luma region covering block `(by, bx)` used a luma
     /// transform of size `tx_w`×`tx_h` (samples) and was skipped iff `skip`.
+    ///
+    /// This alone does **not** establish where real transform edges are: a
+    /// transform wider/taller than 8 samples spans *multiple* 8×8 grid
+    /// cells, and callers call this once per cell with the block's own
+    /// (identical) size for every one of them — so `luma_tx_w`/`_h` alone
+    /// can't distinguish "this cell is the interior of one wide transform"
+    /// from "this cell starts its own same-size transform". Callers must
+    /// also call [`mark_luma_edges`](Self::mark_luma_edges) once per real
+    /// transform block (not once per cell) with that block's own span, so
+    /// `deblock_plane` knows which grid lines are real AV1 §7.14.1
+    /// `isTxEdge`/`isBlockEdge` boundaries and which are purely interior.
     pub fn record_luma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
         if bx >= self.w8 || by >= self.h8 {
             return;
@@ -179,6 +216,8 @@ impl FrameMeta {
     }
 
     /// Record chroma transform metadata for the 8×8-luma region `(by, bx)`.
+    /// See `record_luma`'s doc comment — pair with
+    /// [`mark_chroma_edges`](Self::mark_chroma_edges).
     pub fn record_chroma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
         if bx >= self.w8 || by >= self.h8 {
             return;
@@ -190,6 +229,51 @@ impl FrameMeta {
         self.v_tx_h[i] = self.v_tx_h[i].max(tx_h);
         self.u_skip[i] = self.u_skip[i] && skip;
         self.v_skip[i] = self.v_skip[i] && skip;
+    }
+
+    /// Mark the real transform-edge boundaries of one luma coded block's own
+    /// span `[bx0, bx1) x [by0, by1)` (8×8-grid coordinates, half-open) —
+    /// only its own leftmost column and topmost row are genuine AV1 §7.14.1
+    /// edges; everything strictly inside is not. Call once per real
+    /// transform block, in addition to (not instead of) the per-cell
+    /// `record_luma` calls. OR-combines so a real edge established by any
+    /// tile/call sticks (matches `record_luma`'s own merge-safe `max`/`&&`).
+    pub fn mark_luma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h8);
+        let bx1c = bx1.min(self.w8);
+        if bx0 < self.w8 {
+            for by in by0..by1c {
+                let i = self.idx(bx0, by);
+                self.luma_edge_left[i] = true;
+            }
+        }
+        if by0 < self.h8 {
+            for bx in bx0..bx1c {
+                let i = self.idx(bx, by0);
+                self.luma_edge_top[i] = true;
+            }
+        }
+    }
+
+    /// Chroma counterpart of [`mark_luma_edges`](Self::mark_luma_edges) — see
+    /// its doc comment. Takes the same 8×8-luma-grid span a chroma
+    /// transform's `record_chroma` calls cover (chroma is stored at the
+    /// luma-grid resolution, per `FrameMeta`'s own doc comment).
+    pub fn mark_chroma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        let by1c = by1.min(self.h8);
+        let bx1c = bx1.min(self.w8);
+        if bx0 < self.w8 {
+            for by in by0..by1c {
+                let i = self.idx(bx0, by);
+                self.chroma_edge_left[i] = true;
+            }
+        }
+        if by0 < self.h8 {
+            for bx in bx0..bx1c {
+                let i = self.idx(bx, by0);
+                self.chroma_edge_top[i] = true;
+            }
+        }
     }
 
     /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
@@ -214,6 +298,11 @@ impl FrameMeta {
                     src.luma_skip[i],
                 );
                 self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
+                let di = self.idx(dbx, dby);
+                self.luma_edge_left[di] |= src.luma_edge_left[i];
+                self.luma_edge_top[di] |= src.luma_edge_top[i];
+                self.chroma_edge_left[di] |= src.chroma_edge_left[i];
+                self.chroma_edge_top[di] |= src.chroma_edge_top[i];
             }
         }
     }
@@ -470,6 +559,8 @@ fn deblock_plane(
     tx_w_grid: &[u8],
     tx_h_grid: &[u8],
     _skip_grid: &[bool],
+    edge_left_grid: &[bool],
+    edge_top_grid: &[bool],
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
@@ -482,8 +573,21 @@ fn deblock_plane(
     // through a much smaller transform on the other side of the edge, e.g.
     // treating a `TX_16X4`/`TX_8X4` edge as filterSize 16 instead of the
     // spec-correct 4.
+    //
+    // `edge_left_grid[by*grid_w+bx]` gates this on whether `bx` is actually
+    // the left edge of a real transform block (AV1 §7.14.1's
+    // `isTxEdge`/`isBlockEdge`) — a transform wider than 8 samples spans
+    // multiple grid cells with the *same* recorded size, which
+    // `left_tx.min(right_tx)` alone can't distinguish from two independent
+    // same-size transforms meeting at a real edge. Skipping this check used
+    // to filter every 8-px grid line unconditionally, including ones
+    // strictly inside a single wide transform where AV1 has no edge to
+    // filter at all.
     for by in 0..grid_h {
         for bx in 1..grid_w {
+            if !edge_left_grid[by * grid_w + bx] {
+                continue;
+            }
             let lvl = compute_level(fh, plane_index, 0, 0);
             if lvl == 0 {
                 continue;
@@ -527,6 +631,9 @@ fn deblock_plane(
     // content transition into the flat region next to it.
     for bx in 0..grid_w {
         for by in 1..grid_h {
+            if !edge_top_grid[by * grid_w + bx] {
+                continue;
+            }
             let lvl = compute_level(fh, plane_index, 1, 0);
             if lvl == 0 {
                 continue;
@@ -1089,6 +1196,8 @@ pub fn apply_post_filters(
             &meta.luma_tx_w,
             &meta.luma_tx_h,
             &meta.luma_skip,
+            &meta.luma_edge_left,
+            &meta.luma_edge_top,
             meta.w8,
             meta.h8,
             fh,
@@ -1107,6 +1216,8 @@ pub fn apply_post_filters(
             &meta.u_tx_w,
             &meta.u_tx_h,
             &meta.u_skip,
+            &meta.chroma_edge_left,
+            &meta.chroma_edge_top,
             meta.w8,
             meta.h8,
             fh,
@@ -1123,6 +1234,8 @@ pub fn apply_post_filters(
             &meta.v_tx_w,
             &meta.v_tx_h,
             &meta.v_skip,
+            &meta.chroma_edge_left,
+            &meta.chroma_edge_top,
             meta.w8,
             meta.h8,
             fh,
@@ -1445,6 +1558,48 @@ mod tests {
         meta.record_luma(0, 0, 16, 4, false);
         assert_eq!(meta.luma_tx_w[0], 16);
         assert_eq!(meta.luma_tx_h[0], 4);
+    }
+
+    #[test]
+    fn mark_luma_edges_only_flags_a_transform_blocks_own_origin() {
+        // Regression for the 2026-09-03 deblock-edge-presence bug: a 16-wide
+        // transform spans grid columns 0 and 1 (8px each); only column 0 is
+        // a real AV1 §7.14.1 edge (the transform's own left boundary) — the
+        // boundary between columns 0 and 1 (grid `bx=1`) is strictly
+        // *inside* that one transform and must not be filtered, even though
+        // `record_luma` (size tracking only) writes the same tx_w=16 into
+        // both columns and can't by itself distinguish the two cases.
+        let mut meta = FrameMeta::new(16, 8);
+        meta.record_luma(0, 0, 16, 8, false);
+        meta.record_luma(1, 0, 16, 8, false);
+        meta.mark_luma_edges(0, 0, 2, 1);
+        assert!(
+            meta.luma_edge_left[meta.idx(0, 0)],
+            "a real transform's own left column must be a real edge"
+        );
+        assert!(
+            !meta.luma_edge_left[meta.idx(1, 0)],
+            "the interior grid line inside one wide transform must not be treated as an edge"
+        );
+    }
+
+    #[test]
+    fn mark_luma_edges_flags_both_of_two_independent_adjacent_transforms() {
+        // Contrast case: two genuinely separate same-size transforms side by
+        // side (e.g. two adjacent TX_8X8 blocks) each get their own real
+        // edge at their own origin — this is the case the missing check
+        // must *not* regress.
+        let mut meta = FrameMeta::new(16, 8);
+        meta.record_luma(0, 0, 8, 8, false);
+        meta.record_luma(1, 0, 8, 8, false);
+        meta.mark_luma_edges(0, 0, 1, 1);
+        meta.mark_luma_edges(1, 0, 2, 1);
+        assert!(meta.luma_edge_left[meta.idx(0, 0)]);
+        assert!(
+            meta.luma_edge_left[meta.idx(1, 0)],
+            "two independent adjacent transforms must both register a real edge, \
+             even though the sizes on either side are identical to the wide-transform case above"
+        );
     }
 
     #[test]
