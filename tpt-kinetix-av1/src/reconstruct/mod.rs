@@ -1400,13 +1400,14 @@ pub fn reconstruct_av1_frame(
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
         eprintln!(
-            "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={} delta_q_present={} delta_lf_present={} segmentation_enabled={} allow_screen_content_tools={} allow_intrabc={} enable_filter_intra={} reduced_tx_set={} delta_q_y_dc={} delta_q_u_dc={} delta_q_u_ac={} delta_q_v_dc={} delta_q_v_ac={}",
+            "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={} delta_q_present={} delta_lf_present={} segmentation_enabled={} allow_screen_content_tools={} allow_intrabc={} enable_filter_intra={} reduced_tx_set={} delta_q_y_dc={} delta_q_u_dc={} delta_q_u_ac={} delta_q_v_dc={} delta_q_v_ac={} using_qmatrix={} qm_y={} qm_u={} qm_v={}",
             frame_header.loop_filter_level, frame_header.cdef_bits, frame_header.base_q_idx,
             seq.enable_cdef, frame_header.cdef_y_strength, frame_header.cdef_uv_strength, frame_header.coded_lossless,
             frame_header.delta_q_present, frame_header.delta_lf_present, frame_header.segmentation_enabled,
             frame_header.allow_screen_content_tools, frame_header.allow_intrabc, seq.enable_filter_intra,
             frame_header.reduced_tx_set, frame_header.delta_q_y_dc, frame_header.delta_q_u_dc,
-            frame_header.delta_q_u_ac, frame_header.delta_q_v_dc, frame_header.delta_q_v_ac
+            frame_header.delta_q_u_ac, frame_header.delta_q_v_dc, frame_header.delta_q_v_ac,
+            frame_header.using_qmatrix, frame_header.qm_y, frame_header.qm_u, frame_header.qm_v
         );
     }
 

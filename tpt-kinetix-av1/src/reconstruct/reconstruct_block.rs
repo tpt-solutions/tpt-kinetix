@@ -151,7 +151,8 @@ pub(super) fn reconstruct_tx_block(
         }
         if dbg {
             eprintln!(
-                    "DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant={:?}",
+                    "DBG reconstruct_tx_block plane={} px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} eob={} tx_type={} quant={:?}",
+                    blk.plane,
                     coeffs.eob,
                     coeffs.tx_type,
                     &coeffs.quant[..]
@@ -192,7 +193,10 @@ pub(super) fn reconstruct_tx_block(
         // rows/columns (see `clear_coeff_context`'s doc comment).
         clear_coeff_context(ctxs, blk, tx_w / 4, tx_h / 4);
         if dbg {
-            eprintln!("DBG reconstruct_tx_block px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP");
+            eprintln!(
+                "DBG reconstruct_tx_block plane={} px=({px_x},{px_y}) tx_w={tx_w} tx_h={tx_h} SKIP",
+                blk.plane
+            );
         }
     }
 

@@ -4794,3 +4794,119 @@
 > found both bugs and are cheap to reuse for the next divergence.
 > 139 unit tests pass, clippy `-D warnings` clean, `cargo build
 > --workspace` clean, `python tools/av1_oracle/validate.py` clean.
+
+> **2026-09-05 session note (cont'd again, again) — the reconstruction "worst
+> edge" tool was silently hiding the true first divergence; found it, ruled
+> out several strong hypotheses, root cause still open.** Continued to
+> `mandelbrot`'s remaining pixel gap now that entropy is confirmed clean.
+> `av1_symbol_trace_diff.rs`'s `first_divergence()` takes a `threshold`
+> (pixels differing by `<= threshold` are skipped) and both call sites were
+> hard-coded to `3` — so "first divergence" was really "first divergence
+> bigger than 3", silently passing over any earlier ±1..3 pixel error. Added
+> `KINETIX_AV1_DIV_THRESHOLD` (env var, default 3, kept) to make this
+> tunable. At `threshold=0` on `mandelbrot`, the *real* first pre-filter
+> (`KINETIX_AV1_NOFILTER=1`) divergence is `px=(8,0)` (delta +1), not the
+> `px=(55,8)` (delta -4) the old hard-coded-3 scan reported — a completely
+> different, much earlier block. This invalidates this session's earlier
+> deep-dive into the `px=(55,8)` `SMOOTH_PRED`/`ADST_ADST` `TX_4X4` block
+> *as the root cause* (that block's own math was independently verified
+> correct — see below — its small residual error is very likely just
+> inherited from this earlier, still-unlocated divergence via the
+> reference-sample chain, not a bug of its own).
+>
+> **Hypotheses ruled out, with independent verification (not just code
+> reading), while chasing the (now known to be downstream) `px=(55,8)`
+> lead** — kept because they're still true and worth not re-checking:
+> - **Quantizer matrices**: `using_qmatrix=false` for this frame (confirmed
+>   via a new debug print — `reconstruct_av1_frame`'s existing
+>   `KINETIX_AV1_DBG` frame-header dump now also shows
+>   `using_qmatrix`/`qm_y`/`qm_u`/`qm_v`), so the fact `dequantize_coeffs`
+>   never implements QM scaling at all is a real gap for *other* content but
+>   not the cause here.
+> - **1-D inverse ADST4 math** (`transform.rs::inverse_adst4`): hand-computed
+>   against dav1d's real closed-form reference (fetched
+>   `src/itx_1d.c`'s `inv_adst4_1d_internal_c` from
+>   `raw.githubusercontent.com/videolan/dav1d`) for two independent test
+>   vectors — exact match to the integer, including the negative-number
+>   `Round2`/arithmetic-shift edge cases. Also hand-computed the *full* 2-D
+>   ADST_ADST transform (row pass → `round2`(row_shift=0) → clamp → col
+>   pass → `round2`(4)) for the `px=(52,8)` block's real dequantized
+>   coefficients end to end by hand and got exactly Kinetix's own reported
+>   residual (`-10` at local (3,0)) — the transform math is provably correct
+>   for this exact input, full stop.
+> - **`TX_TYPE_INTRA_INV_SET1` table** (`coeff_tables.rs`): fetched dav1d's
+>   real `dav1d_tx_types_per_set` array (`src/tables.c`) — Kinetix's 7-entry
+>   `[IDTX, DCT_DCT, V_DCT, H_DCT, ADST_ADST, ADST_DCT, DCT_ADST]` matches
+>   dav1d's "Intra1" slice exactly, index-for-index.
+> - **`get_tx_set` (SET1 vs SET2) selection**: confirmed via the entropy
+>   trace's own `n_symbols=7` that `TX_SET_INTRA_1` (7-symbol alphabet) was
+>   used, which is the spec-correct choice for a `TX_4X4` block with
+>   `reduced_tx_set=false` (also confirmed via the frame-header dump).
+> - **`block_borders()`'s reference-sample indexing**: traced through by
+>   hand for this exact block — `top[3]` genuinely reads `sample(55, 7)`,
+>   the literal pixel directly above the target, no off-by-one.
+>
+> **New, unexplained finding** (harness artifact, not yet resolved): running
+> the *same* `KINETIX_AV1_DBG_PX=8,0` capture prints **two different**
+> `reconstruct_tx_block` dumps for the same `px=(8,0)` filter within one
+> process run — one with `eob=3 quant=[3,0,0,0,0,0,0,0,-1,...]`, the other
+> `eob=1 quant=[3,0,...]` (no second coefficient at all). `av1_symbol_trace_
+> diff.rs`'s `decode_kinetix()` runs the whole OBU decode twice per corpus
+> entry (once filtered, once with `KINETIX_AV1_NOFILTER=1`) and until now
+> this session assumed both runs produce byte-identical entropy/reconstruction
+> (verified true for the `mandelbrot`/`px=(52,8)` all_zero debug prints
+> earlier this session) — but two *different* decoded coefficient sets for
+> the same block position across the two calls means either (a) this
+> filter also matches a *second*, different block sharing the same origin
+> in a different plane (the print doesn't log `blk.plane`, worth adding),
+> or (b) there is a real state-leak between the two `Av1Decoder::decode()`
+> calls in the test harness (a global/static not reset between runs) that
+> would invalidate some of this session's cross-run comparisons. **Next
+> session should resolve this ambiguity first** — add `plane=` to the
+> `reconstruct_tx_block` debug line, and/or capture both runs to separate
+> files and diff them directly — before trusting any further `px=(8,0)`-style
+> single-block dumps, and before continuing to chase the real root cause
+> at `px=(8,0)`.
+>
+> Kept, low-risk, reusable changes: `KINETIX_AV1_DIV_THRESHOLD` (defaults to
+> the prior hard-coded `3`, so no behavior change unless set) and the
+> `using_qmatrix`/`qm_*` fields on the existing frame-header debug dump.
+> 139 unit tests pass, clippy `-D warnings` clean on both
+> `tpt-kinetix-av1` and `tpt-kinetix-test-utils`.
+>
+> **The `px=(8,0)` double-print mystery is resolved, harmlessly**: added
+> `plane=` to `reconstruct_tx_block`'s two debug `eprintln!`s (cheap, kept).
+> The "two different blocks at the same px" turned out to be a `U`-plane and
+> a `V`-plane chroma block that both happen to sit at chroma-space `(8,0)`
+> — `KINETIX_AV1_DBG_PX` matches by position only, not plane, so it was
+> printing three unrelated blocks (Y/U/V) that all touch `(8,0)` in their
+> own plane's coordinate space. **No state leak between the harness's two
+> `decode()` calls; that concern is fully retired.**
+>
+> **Located the real `px=(8,0)` (Y-plane) block**: it isn't its own 1×1
+> origin — `(8,0)` is `local (8,0)` *inside* a `16×16` `DCT_DCT` (not ADST)
+> transform block whose real origin is `(0,0)`, the frame's very top-left
+> corner (`have_above=false have_left=false`, DC-only-neighbourhood
+> `pred=128` uniform). `quant = [18, -3, 0×14, -3, 0×239]` (`DC=18` at
+> index 0, one AC coefficient at index 1, one more AC at index 16 — i.e.
+> `(row=1, col=0)` in this 16-wide raster layout), `eob=3`. Kinetix's own
+> reported `residual[8] = 15` (row 0, local col 8), giving
+> `128 + 15 = 143` — matching the reported `kinetix=143`; `dav1d=142`, a
+> **±1** error. This is a `TX_16X16` **`DCT_DCT`** case — a different,
+> simpler code path than the `ADST_ADST TX_4X4` block chased earlier this
+> session (whose math was independently proven correct and is now known to
+> be a downstream symptom, not the source). **Not yet independently
+> verified**: unlike `TX_4X4` ADST (a small closed-form formula, hand-
+> computable in a few minutes), a 16-point DCT butterfly network has ~9
+> stages and wasn't hand-verified this session — that's the concrete next
+> step: hand-compute (or write a small fixed-point Python port of)
+> `inverse_dct` for `log2w=log2h=4` against this exact `[18,-3,...,-3,...]`
+> input and see whether `143` or `142` is the spec-correct answer, the same
+> method that cracked `inverse_adst4` this session. A `±1` error on a
+> `DC=2520`-dominated block with tiny AC terms has the flavour of a single
+> rounding-direction mismatch (a `Round2`/clamp applied at the wrong point,
+> or an off-by-one in `TRANSFORM_ROW_SHIFT`/`col_clamp_range` for this exact
+> size) rather than a structural bug — `TRANSFORM_ROW_SHIFT[TX_16X16] = 2`
+> was spot-checked against spec-recollection and looks right, but should be
+> re-verified against a primary source (this session's dav1d-source-fetch
+> method, not memory) before ruling it out.
