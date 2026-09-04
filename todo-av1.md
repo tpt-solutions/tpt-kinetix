@@ -4386,3 +4386,62 @@
 > coefficient context" work the coordinator originally scoped as the
 > third increment, now narrowed to a single, concretely reproducible
 > real block rather than a vague "context gap."
+
+> **2026-09-04 (cont'd) -- root cause found and fixed: chroma tx_type
+> derivation used a `DCT_DCT` placeholder instead of the real coincident
+> luma leaf's decoded type.** `read_coeffs`'s chroma-path `luma_tx_type`
+> dispatch had a `DCT_DCT` placeholder for the `plane > 0 && is_inter`
+> case (a known gap flagged in a prior increment's own comment, not yet
+> fixed). `get_uv_inter_txtp(_, DCT_DCT)` always resolves to `DCT_DCT`,
+> so `compute_tx_type` silently returned the wrong `TxType` whenever the
+> real luma type wasn't `DCT_DCT` -- and via `get_tx_class`'s `TX_CLASS`
+> bit, corrupted `read_eob`'s very first context read (`is_1d`) for the
+> block, exactly matching the divergence localized in the previous note
+> (dav1d: `is_1d=1`; the `DCT_DCT` placeholder path computes `is_1d=0`
+> since `get_tx_class(DCT_DCT) == TX_CLASS_2D`).
+>
+> **Fix**: added `TxBlockCtx::coincident_luma_tx_type` and a per-mi-cell
+> `luma_tx_types` lookup grid inside `reconstruct_ibc_block`, populated
+> as each luma var-tx-tree leaf's residual is decoded; the chroma loop
+> now looks up the real coincident luma leaf's `TxType` (its top-left mi
+> position subsampled back to luma coordinates) instead of assuming
+> `DCT_DCT`. Also wired the same field through `intra_block.rs`'s real-
+> intra sites and `inter_block.rs`'s not-yet-reached Phase E stub (both
+> set `DCT_DCT` since it's genuinely irrelevant there: plane-0 luma
+> ignores the parameter, and real-intra chroma has its own separate
+> `MODE_TO_TXFM` derivation).
+>
+> **Verified with the same full-state rigor as the previous note's
+> methodology**: `range` + `dif>>48` now match dav1d exactly through
+> both the U-plane and V-plane `read_coeffs` calls of the originally-
+> traced IBC block (`tx=5 txtp=13`). Pushed the check further with a
+> systematic position-diff (extracting `(bx,by,r)` triples from both
+> decoders' partition-read trace lines and running `diff`): **79
+> consecutive checkpoint matches** afterward, spanning several more IBC
+> blocks, an intra block with CFL/palette, and many luma/chroma
+> coefficient reads -- much stronger evidence than the single-block
+> check alone.
+>
+> Corpus PSNR: `testsrc2_320x180` 20.36/25.18/16.43 dB -> **21.98/22.49/
+> 16.90 dB** (Y and V up, U down slightly but net a real improvement,
+> not yet bit-exact). No change on `solid_red_32/64`, `testsrc_128x96`,
+> `mandelbrot_128x96`, `smptebars_256x144` -- consistent with this bug
+> only affecting IBC/inter chroma tx_type derivation. Committed as
+> `28da676`.
+>
+> **Next divergence, localized** (not yet fixed): at partition `(56,32)`
+> dav1d expects `r=38204`, Kinetix computes `r=58496`. Traced backward:
+> the divergence is within a **new block at `bx=54,by=36` that is real
+> intra** (not IBC) -- its decoded field values (`ymode=0, uvmode=12,
+> tx=7`) match dav1d exactly, but its own symbol reads desync the
+> arithmetic-coder state (dav1d `r=53934` vs Kinetix `r=47548` at
+> `Post-tx[7]`). Since this block is real intra, it is **not** another
+> instance of the bug just fixed -- most likely a context-handoff bug
+> between the immediately-preceding IBC block's end-of-block neighbour-
+> context updates (`ymode_left`/`above`, `is_inter_left`/`above`,
+> `tx_left`/`above`, etc.) and this new block's own `skip`/`ymode`
+> context reads. Concrete next step for whoever continues: dump the
+> neighbour-context arrays right before and after the IBC block's own
+> context-update code (end of `reconstruct_ibc_block`) and compare
+> against dav1d's equivalent state, using the same full-state (`range` +
+> `dif>>48`) comparison technique established this session.
