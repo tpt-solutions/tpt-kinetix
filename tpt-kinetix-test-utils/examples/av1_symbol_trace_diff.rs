@@ -244,7 +244,12 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
     );
     println!("  PSNR Y/U/V = {psnr_y:.2}/{psnr_u:.2}/{psnr_v:.2} dB  (symbol trace: {} reads, {} block markers)", trace.len(), markers.len());
 
-    let Some((plane, x, y, got_v, want_v)) = first_divergence(&got, ref_data, w, h, 3) else {
+    let div_threshold: i32 = std::env::var("KINETIX_AV1_DIV_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    let Some((plane, x, y, got_v, want_v)) = first_divergence(&got, ref_data, w, h, div_threshold)
+    else {
         println!("  No pixel diverges by more than 3 (effectively pixel-exact at this threshold).");
         return;
     };
@@ -283,7 +288,9 @@ fn run_one(label: &str, width: u32, height: u32, obu: &[u8]) {
                     println!("  NF row{row} c{c0}..{c1} dav1d  ={:?}", &ref_data[a..b]);
                 }
             }
-            if let Some((p2, x2, y2, g2, w2)) = first_divergence(&nofilter, ref_data, w, h, 3) {
+            if let Some((p2, x2, y2, g2, w2)) =
+                first_divergence(&nofilter, ref_data, w, h, div_threshold)
+            {
                 if (p2, x2, y2) == (plane, x, y) {
                     println!(
                         "  With KINETIX_AV1_NOFILTER=1: same first-divergence pixel ({p2},{x2},{y2}) kinetix={g2} dav1d={w2} -> deblock/CDEF is NOT the cause; look in reconstruct/ (prediction/transform/coeffs)."
