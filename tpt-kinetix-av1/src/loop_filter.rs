@@ -1503,9 +1503,18 @@ pub fn apply_post_filters(
     }
 
     // --- Loop restoration (§7.17) ---
-    // Disabled by default: the Wiener/Sgrproj boundary handling uses clamped
-    // unit-local pixels instead of neighbouring-unit pixels, causing regressions.
-    // Enable with KINETIX_AV1_FILTER=1 once the implementation is corrected.
+    // Disabled by default. Two real bugs fixed 2026-09-04 (unit-local pixel
+    // clamping at restoration-unit boundaries instead of real neighbouring
+    // pixels; read_lr_unit's Wiener filter_h/filter_v taps swapped) turned
+    // this from actively harmful (worse than not filtering at all) into a
+    // real improvement on the one corpus clip that exercises it (testsrc's
+    // V plane, Wiener path: 42.24 dB -> 55.18 dB with restoration applied,
+    // vs 49.26 dB unfiltered) — but it is not yet bit-exact (the remaining
+    // gap there is inherited from testsrc's pre-existing, separately
+    // tracked deblock/CDEF imprecision, not from restoration's own math,
+    // per a 2026-09-04 `--inloopfilters norestoration` A/B check) and the
+    // SgrProj path has no corpus coverage at all yet. Enable with
+    // KINETIX_AV1_FILTER=1 to opt in ahead of full corpus verification.
     if fh.uses_lr && std::env::var("KINETIX_AV1_FILTER").is_ok() {
         apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
