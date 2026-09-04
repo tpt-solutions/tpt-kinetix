@@ -988,6 +988,10 @@ fn cdef_filter_block(
 /// `dav1d_sgr_x_by_x[256]`: lookup table used by the self-guided restoration
 /// filter to convert the normalised variance index `z` into the mixing weight
 /// α (§7.17.5). Source: dav1d `src/tables.c`, `BITDEPTH == 8`.
+/// §7.17.4's SGRPROJ projection weight scale (`w0 + w1 + w2 == 1 <<
+/// SGRPROJ_PRJ_BITS`, matching `read_lr_unit`'s own copy of this constant).
+const SGRPROJ_PRJ_BITS: i32 = 7;
+
 const SGR_X_BY_X: [u8; 256] = [
     255, 128, 85, 64, 51, 43, 37, 32, 28, 26, 23, 21, 20, 18, 17, 16, 15, 14, 13, 13, 12, 12, 11,
     11, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5,
@@ -1257,10 +1261,28 @@ fn sgrproj_filter_plane(
         compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
     }
 
+    // §7.17.4's projection weights: `w0` is `xqd[0]` used directly, but `w1`
+    // is *not* `xqd[1]` directly — it's `(1 << SGRPROJ_PRJ_BITS) - xqd[0] -
+    // xqd[1]`, cross-checked against dav1d's `lr_apply_tmpl.c`
+    // (`params.sgr.w0 = weights[0]; params.sgr.w1 = 128 - (weights[0] +
+    // weights[1]);`, applied unconditionally for every SgrProj unit
+    // regardless of which pass(es) are active). A previous version of this
+    // function used `xqd[1]` unweighted, which is only coincidentally
+    // correct when the 3×3 pass itself is disabled (`r1 == 0`, where
+    // `read_lr_unit` already pre-computes `xqd[1] = (1<<7) - xqd[0]` at
+    // parse time specifically so it doesn't need this transform) — for
+    // every unit that actually *uses* the 3×3 pass (`r1 != 0`, the common
+    // case), the raw decoded `xqd[1]` is roughly `SGRPROJ_PRJ_BITS`-scale
+    // too small on its own (found via a `mandelbrot` unit with `xqd=[0,2]`:
+    // applying `2` as the weight rounds every single pixel's correction to
+    // 0 after the `>> 11` — restoration became a complete no-op — while the
+    // correct weight `128 - 0 - 2 = 126` produces the small ±1 corrections
+    // dav1d's own output actually has).
+    let w1 = (1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1];
     for y in 0..uh {
         for x in 0..uw {
             let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
-            let correction = (xqd[0] * t0[y * uw + x] + xqd[1] * t1[y * uw + x] + (1 << 10)) >> 11;
+            let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
             plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, 255) as u8;
         }
     }
@@ -1503,19 +1525,26 @@ pub fn apply_post_filters(
     }
 
     // --- Loop restoration (§7.17) ---
-    // Disabled by default. Two real bugs fixed 2026-09-04 (unit-local pixel
-    // clamping at restoration-unit boundaries instead of real neighbouring
-    // pixels; read_lr_unit's Wiener filter_h/filter_v taps swapped) turned
-    // this from actively harmful (worse than not filtering at all) into a
-    // real improvement on the one corpus clip that exercises it (testsrc's
-    // V plane, Wiener path: 42.24 dB -> 55.18 dB with restoration applied,
-    // vs 49.26 dB unfiltered) — but it is not yet bit-exact (the remaining
-    // gap there is inherited from testsrc's pre-existing, separately
-    // tracked deblock/CDEF imprecision, not from restoration's own math,
-    // per a 2026-09-04 `--inloopfilters norestoration` A/B check) and the
-    // SgrProj path has no corpus coverage at all yet. Enable with
-    // KINETIX_AV1_FILTER=1 to opt in ahead of full corpus verification.
-    if fh.uses_lr && std::env::var("KINETIX_AV1_FILTER").is_ok() {
+    // Enabled by default as of 2026-09-04, after three real bugs were found
+    // and fixed this session: (1) unit-local pixel clamping at
+    // restoration-unit boundaries instead of real neighbouring pixels; (2)
+    // `read_lr_unit`'s Wiener `filter_h`/`filter_v` taps swapped; (3)
+    // `sgrproj_filter_plane`'s second projection weight used raw decoded
+    // `xqd[1]` directly instead of the spec's `(1<<SGRPROJ_PRJ_BITS) -
+    // xqd[0] - xqd[1]` complement (found on a `mandelbrot` unit with
+    // `xqd=[0,2]`: the raw-`xqd[1]`-weighted correction rounded to exactly
+    // 0 for every single pixel in the plane — a complete silent no-op —
+    // while the correct complement weight, 126, reproduces dav1d's actual
+    // small per-pixel corrections). Verified via `av1_psnr_check`:
+    // `testsrc` V (Wiener) 49.26 dB unfiltered -> 55.18 dB restored;
+    // `mandelbrot` Y (SgrProj) 58.79 dB unfiltered -> 70.45 dB restored,
+    // with only 72/12288 luma pixels (all ±1) still differing from dav1d —
+    // essentially the same 71-pixel gap present *before* restoration even
+    // runs (inherited from mandelbrot's own separately-tracked deblock/CDEF
+    // imprecision, confirmed via an `--inloopfilters norestoration` A/B
+    // check), i.e. restoration itself is now correct to the precision its
+    // input allows. No corpus clip regressed.
+    if fh.uses_lr {
         apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
         apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units);
@@ -1849,6 +1878,42 @@ mod tests {
             "the rightmost column of the unit must be affected by the real \
              neighbouring pixel just past its boundary, not clamped to its \
              own edge sample"
+        );
+    }
+
+    #[test]
+    fn sgrproj_uses_the_complement_weight_not_the_raw_second_xqd() {
+        // Regression for the 2026-09-04 SgrProj weight bug: §7.17.4's second
+        // projection weight is `(1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1]`,
+        // not `xqd[1]` directly (cross-checked against dav1d's
+        // `lr_apply_tmpl.c`: `params.sgr.w1 = 128 - (weights[0] +
+        // weights[1])`). A previous version of this function used `xqd[1]`
+        // unweighted — for the exact real-world case this test reproduces
+        // (`set=10` -> `r0=0, r1=1`, decoded `xqd=[0, 2]`, found on a real
+        // `mandelbrot` restoration unit), that made every single pixel's
+        // correction `(2*t + 1024) >> 11`, which rounds to exactly 0 for
+        // every plausible guided-filter residual `t` — restoration became a
+        // complete silent no-op on the entire plane, while the
+        // spec-correct weight (`128 - 0 - 2 = 126`) produces real,
+        // correctly-scaled corrections.
+        let pw = 8usize;
+        let ph = 8usize;
+        // A block with real local variance (not perfectly flat), so the
+        // guided filter's `t` term is genuinely nonzero somewhere.
+        let src: Vec<u8> = (0..pw * ph)
+            .map(|i| {
+                let (x, y) = (i % pw, i / pw);
+                (100 + (x * 7 + y * 13) % 40) as u8
+            })
+            .collect();
+        let mut plane = src.clone();
+        sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2]);
+        assert_ne!(
+            plane, src,
+            "a real xqd=[0,2] SgrProj unit (set 10) must actually change \
+             some pixels — using the raw xqd[1]=2 as the weight instead of \
+             the spec's complement (126) silently makes every correction \
+             round to 0"
         );
     }
 
