@@ -436,6 +436,19 @@ impl<'a> TileDecodeState<'a> {
                 {
                     eprintln!("DBG SB1 recon_intra_sub mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tile_px=({},{}) luma_tx={luma_tx} bsize={bsize}", self.tile_px_x0, self.tile_px_y0);
                 }
+                // Mark this *individual* transform sub-block's own left/top
+                // grid cells as real AV1 §7.14.1 deblock edges (see
+                // `FrameMeta::mark_luma_edges`'s doc comment) — a coded block
+                // whose `luma_tx_w`/`_h` is smaller than its own size (e.g. a
+                // 32×32 block using `TX_16X16`) reconstructs multiple
+                // separate transform blocks here, each with a *real* edge at
+                // its own origin, not just at the whole coded block's origin.
+                self.meta.mark_luma_edges(
+                    px_x / 8,
+                    px_y / 8,
+                    (px_x + luma_tx_w).div_ceil(8),
+                    (px_y + luma_tx_h).div_ceil(8),
+                );
                 let blk = TxBlockCtx {
                     plane: 0,
                     tx_size: luma_tx,
@@ -617,6 +630,20 @@ impl<'a> TileDecodeState<'a> {
                     if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
                     }
+                    // Mark this individual chroma transform sub-block's own
+                    // left/top grid cells as real deblock edges — same
+                    // reasoning as the luma `mark_luma_edges` call above.
+                    // Chroma is stored at the shared luma-grid resolution
+                    // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
+                    // samples == 8 luma samples), matching the `/8`-of-luma
+                    // == `/4`-of-chroma scale the existing `bx0`/`by0`
+                    // computation below already relies on.
+                    self.meta.mark_chroma_edges(
+                        cpx_x / 4,
+                        cpx_y / 4,
+                        (cpx_x + cw).div_ceil(4),
+                        (cpx_y + ch).div_ceil(4),
+                    );
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -876,6 +903,14 @@ impl<'a> TileDecodeState<'a> {
             for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
                 let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
                 let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                // See the keyframe path's identical call for why this must
+                // be per-transform-sub-block, not per-coded-block.
+                self.meta.mark_luma_edges(
+                    px_x / 8,
+                    px_y / 8,
+                    (px_x + luma_tx_w).div_ceil(8),
+                    (px_y + luma_tx_h).div_ceil(8),
+                );
 
                 // IBC prediction: copy from the already-decoded tile area.
                 // Source is clamped to the tile buffer; out-of-bounds reads
@@ -1021,6 +1056,14 @@ impl<'a> TileDecodeState<'a> {
                     if cpx_x >= tile_cw || cpx_y >= tile_ch {
                         continue;
                     }
+                    // See the keyframe path's identical call for why this
+                    // must be per-transform-sub-block.
+                    self.meta.mark_chroma_edges(
+                        cpx_x / 4,
+                        cpx_y / 4,
+                        (cpx_x + cw).div_ceil(4),
+                        (cpx_y + ch).div_ceil(4),
+                    );
 
                     let src_cx = (cpx_x as i32 - cmv_dx) as usize;
                     let src_cy = (cpx_y as i32 - cmv_dy) as usize;
