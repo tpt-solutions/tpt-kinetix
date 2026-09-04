@@ -500,6 +500,7 @@ impl<'a> TileDecodeState<'a> {
                     qindex_positive: !self.lossless,
                     reduced_tx_set: self.reduced_tx_set,
                     lossless: self.lossless,
+                    is_inter: false,
                 };
                 let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
                     colors: &palette.colors_y,
@@ -682,6 +683,7 @@ impl<'a> TileDecodeState<'a> {
                         qindex_positive: !self.lossless,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
+                        is_inter: false,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
                     let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
@@ -975,19 +977,17 @@ impl<'a> TileDecodeState<'a> {
             let src_x = (px_x as i32 - mv_dx) as usize;
             let src_y = (px_y as i32 - mv_dy) as usize;
 
-            // IBC always uses DCT_DCT — setting qindex_positive=false
-            // makes read_transform_type return DCT_DCT without reading
-            // any bits from the bitstream (the encoder never writes them).
-            //
-            // TODO(inter tx_type): this is known wrong for at least some
-            // real IBC blocks — a dav1d trace on a real `testsrc2` IBC
-            // block shows `txtp=13` (an *inter* transform type, not
-            // DCT_DCT) for its luma residual, meaning some IBC blocks read
-            // real `inter_tx_type` bits this crate currently never reads.
-            // Left as `DCT_DCT`-forced for this increment (the var-tx-tree
-            // parse fix), matching the pre-existing behaviour exactly so
-            // this change is isolable and verifiable on its own; wiring the
-            // real inter tx_type read is the next queued increment.
+            // IBC has `IsInter = 1`: `transform_type()` takes the real
+            // inter branch (`read_inter_transform_type`, `coeff.rs`) — a
+            // dav1d trace on a real `testsrc2` IBC block shows `txtp=13`
+            // (an inter transform type, not `DCT_DCT`) for its luma
+            // residual, confirming IBC blocks really do read
+            // `inter_tx_type` bits. A previous version forced
+            // `qindex_positive: false` here specifically to make
+            // `read_transform_type` (the *intra* path, also wrong for
+            // `IsInter = 1`) return `DCT_DCT` without reading anything —
+            // masking the missing read entirely rather than producing a
+            // real transform type.
             let blk = TxBlockCtx {
                 plane: 0,
                 tx_size: leaf_tx,
@@ -999,9 +999,10 @@ impl<'a> TileDecodeState<'a> {
                 block_h: bh * MI_SIZE,
                 intra_dir: DC_PRED as usize,
                 uv_mode: DC_PRED as usize,
-                qindex_positive: false,
+                qindex_positive: !self.lossless,
                 reduced_tx_set: self.reduced_tx_set,
                 lossless: self.lossless,
+                is_inter: true,
             };
 
             let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
@@ -1126,7 +1127,22 @@ impl<'a> TileDecodeState<'a> {
                     let src_cx = (cpx_x as i32 - cmv_dx) as usize;
                     let src_cy = (cpx_y as i32 - cmv_dy) as usize;
 
-                    // IBC chroma: same DCT_DCT-forced (qindex_positive=false) as luma.
+                    // Chroma's tx_type is always *derived*, never separately
+                    // read (`read_coeffs` only calls `read_.*transform_
+                    // type` for `plane == 0`), so `qindex_positive` here
+                    // only affects `compute_tx_type`'s output, not entropy
+                    // sync. `is_inter: true` routes chroma through
+                    // `get_uv_inter_txtp` (§7.11.3.1) instead of the intra
+                    // `uv_mode`-based `MODE_TO_TXFM` lookup — correct in
+                    // spirit, though it's fed a `DCT_DCT` placeholder for
+                    // "luma's tx type" here rather than the real collocated
+                    // luma leaf's decoded type (this call site has no easy
+                    // access to a per-mi-position luma-tx-type lookup yet);
+                    // `get_uv_inter_txtp(_, DCT_DCT)` always resolves to
+                    // `DCT_DCT` regardless, so this is a no-op vs. the
+                    // previous hardcoded-DCT_DCT behaviour for now, not a
+                    // regression — wiring the real per-position lookup is
+                    // future work alongside full inter coefficient context.
                     let blk_u = TxBlockCtx {
                         plane: 1,
                         tx_size: c_tx,
@@ -1138,9 +1154,10 @@ impl<'a> TileDecodeState<'a> {
                         block_h: chroma_bh,
                         intra_dir: DC_PRED as usize,
                         uv_mode: DC_PRED as usize,
-                        qindex_positive: false,
+                        qindex_positive: !self.lossless,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
+                        is_inter: true,
                     };
                     let blk_v = TxBlockCtx { plane: 2, ..blk_u };
 

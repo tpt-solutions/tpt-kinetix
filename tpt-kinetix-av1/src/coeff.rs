@@ -31,11 +31,13 @@
 use tpt_kinetix_core::error::KinetixError;
 
 use crate::coeff_tables::{
-    get_scan, get_tx_class, get_tx_set_intra, ADJUSTED_TX_SIZE, BR_CDF_SIZE, COEFF_BASE_CTX_OFFSET,
-    COEFF_BASE_POS_CTX_OFFSET, COEFF_BASE_RANGE, DCT_DCT, MAG_REF_OFFSET_WITH_TX_CLASS,
-    MODE_TO_TXFM, NUM_BASE_LEVELS, SIG_COEF_CONTEXTS, SIG_COEF_CONTEXTS_EOB, SIG_REF_DIFF_OFFSET,
-    TX_16X64, TX_32X32, TX_64X16, TX_CLASS_2D, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_HEIGHT,
-    TX_HEIGHT_LOG2, TX_SET_INTRA_1, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_TYPE_INTRA_INV_SET1,
+    get_scan, get_tx_class, get_tx_set_inter, get_tx_set_intra, get_uv_inter_txtp,
+    ADJUSTED_TX_SIZE, BR_CDF_SIZE, COEFF_BASE_CTX_OFFSET, COEFF_BASE_POS_CTX_OFFSET,
+    COEFF_BASE_RANGE, DCT_DCT, MAG_REF_OFFSET_WITH_TX_CLASS, MODE_TO_TXFM, NUM_BASE_LEVELS,
+    SIG_COEF_CONTEXTS, SIG_COEF_CONTEXTS_EOB, SIG_REF_DIFF_OFFSET, TX_16X64, TX_32X32, TX_64X16,
+    TX_CLASS_2D, TX_CLASS_HORIZ, TX_CLASS_VERT, TX_HEIGHT, TX_HEIGHT_LOG2, TX_SET_DCTONLY,
+    TX_SET_INTER_2, TX_SET_INTER_3, TX_SET_INTRA_1, TX_SIZE_SQR, TX_SIZE_SQR_UP,
+    TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1,
     TX_TYPE_INTRA_INV_SET2, TX_TYPE_IN_SET_INTRA, TX_WIDTH, TX_WIDTH_LOG2,
 };
 use crate::entropy::SymbolDecoder;
@@ -75,6 +77,15 @@ pub struct TileCdfs {
     dc_sign: [[[u16; 3]; 3]; 2],
     intra_tx_type_set1: [[[u16; 8]; 13]; 2],
     intra_tx_type_set2: [[[u16; 6]; 13]; 3],
+    /// `TileInterTxTypeSet1Cdf` (§8.3.2), context = `Tx_Size_Sqr[txSz]` ∈
+    /// `{TX_4X4, TX_8X8}` (2 contexts) — a 16-symbol read.
+    inter_tx_type_set1: [[u16; 17]; 2],
+    /// `TileInterTxTypeSet2Cdf` (§8.3.2): one shared 12-symbol read, no
+    /// context (used only when `Tx_Size_Sqr[txSz] == TX_16X16`).
+    inter_tx_type_set2: [u16; 13],
+    /// `TileInterTxTypeSet3Cdf` (§8.3.2), context = `Tx_Size_Sqr[txSz]` ∈
+    /// `{TX_4X4..TX_32X32}` (4 contexts) — a binary read.
+    inter_tx_type_set3: [[u16; 3]; 4],
 }
 
 impl TileCdfs {
@@ -97,6 +108,9 @@ impl TileCdfs {
             dc_sign: defaults::DEFAULT_DC_SIGN_CDF[idx],
             intra_tx_type_set1: defaults::DEFAULT_INTRA_TX_TYPE_SET1_CDF,
             intra_tx_type_set2: defaults::DEFAULT_INTRA_TX_TYPE_SET2_CDF,
+            inter_tx_type_set1: defaults::DEFAULT_INTER_TX_TYPE_SET1_CDF,
+            inter_tx_type_set2: defaults::DEFAULT_INTER_TX_TYPE_SET2_CDF,
+            inter_tx_type_set3: defaults::DEFAULT_INTER_TX_TYPE_SET3_CDF,
         }
     }
 
@@ -422,6 +436,13 @@ pub struct TxBlockCtx {
     pub reduced_tx_set: bool,
     /// Frame-level `Lossless`.
     pub lossless: bool,
+    /// Spec `IsInter`: selects `transform_type()`'s inter branch (a real
+    /// `inter_tx_type` symbol read, using `get_tx_set`'s inter sets) over
+    /// the intra branch (`intra_dir`-contextualized, using the intra sets)
+    /// for luma, and `get_uv_inter_txtp` (derived from luma's decoded type)
+    /// over the `uv_mode`-based `MODE_TO_TXFM` lookup for chroma. `true`
+    /// for IBC and real inter blocks, `false` for real intra blocks.
+    pub is_inter: bool,
 }
 
 /// The result of one `coeffs()` call.
@@ -519,7 +540,11 @@ pub fn read_coeffs(
 
     if !all_zero {
         let luma_tx_type = if blk.plane == 0 {
-            read_transform_type(dec, cdfs, blk, tx_size)?
+            if blk.is_inter {
+                read_inter_transform_type(dec, cdfs, blk, tx_size)?
+            } else {
+                read_transform_type(dec, cdfs, blk, tx_size)?
+            }
         } else {
             DCT_DCT
         };
@@ -666,14 +691,55 @@ fn read_transform_type(
     }
 }
 
+/// `transform_type( x4, y4, txSz )` (spec "Transform type syntax"),
+/// `IsInter == 1` path (real inter blocks and IBC). Cross-checked against
+/// dav1d's `recon_tmpl.c` (`read_coef_blocks`'s `else` branch): the
+/// `reduced_tx_set || Tx_Size_Sqr_Up[txSz] == TX_32X32` gate picks set 3
+/// (a single binary symbol, context = `Tx_Size_Sqr[txSz]`), `Tx_Size_Sqr
+/// [txSz] == TX_16X16` picks set 2 (one shared 12-symbol CDF, no context),
+/// otherwise set 1 (a 16-symbol read, context = `Tx_Size_Sqr[txSz]` ∈
+/// `{TX_4X4, TX_8X8}`).
+fn read_inter_transform_type(
+    dec: &mut SymbolDecoder,
+    cdfs: &mut TileCdfs,
+    blk: &TxBlockCtx,
+    tx_size: usize,
+) -> Result<usize, KinetixError> {
+    let set = get_tx_set_inter(tx_size, blk.reduced_tx_set);
+    if set == TX_SET_DCTONLY || !blk.qindex_positive {
+        return Ok(DCT_DCT);
+    }
+    let sqr = TX_SIZE_SQR[tx_size];
+    if set == TX_SET_INTER_3 {
+        let cdf = cdfs.inter_tx_type_set3.get_mut(sqr).ok_or_else(|| {
+            KinetixError::Parse(format!(
+                "AV1 transform_type: inter set 3 index out of range (sqr={sqr})"
+            ))
+        })?;
+        Ok(TX_TYPE_INTER_INV_SET3[dec.read_symbol(cdf)])
+    } else if set == TX_SET_INTER_2 {
+        Ok(TX_TYPE_INTER_INV_SET2[dec.read_symbol(&mut cdfs.inter_tx_type_set2)])
+    } else {
+        let cdf = cdfs.inter_tx_type_set1.get_mut(sqr).ok_or_else(|| {
+            KinetixError::Parse(format!(
+                "AV1 transform_type: inter set 1 index out of range (sqr={sqr})"
+            ))
+        })?;
+        Ok(TX_TYPE_INTER_INV_SET1[dec.read_symbol(cdf)])
+    }
+}
+
 /// `compute_tx_type( plane, txSz, blockX, blockY )` (spec "Compute transform
-/// type function"), intra path.
+/// type function"), dispatching on `blk.is_inter`.
 fn compute_tx_type(blk: &TxBlockCtx, tx_size: usize, luma_tx_type: usize) -> usize {
     if blk.lossless || TX_SIZE_SQR_UP[tx_size] > TX_32X32 {
         return DCT_DCT;
     }
     if blk.plane == 0 {
         return luma_tx_type;
+    }
+    if blk.is_inter {
+        return get_uv_inter_txtp(tx_size, luma_tx_type);
     }
     let tx_set = get_tx_set_intra(tx_size, blk.reduced_tx_set);
     let tx_type = MODE_TO_TXFM.get(blk.uv_mode).copied().unwrap_or(DCT_DCT);
@@ -1020,6 +1086,7 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            is_inter: false,
         };
         assert_eq!(super::all_zero_ctx(&blk_whole, &ctxs, w4, h4), 0);
 
@@ -1045,6 +1112,60 @@ mod tests {
         // 32x32 and up only permit DCT_DCT.
         assert_eq!(get_tx_set_intra(TX_32X32, false), TX_SET_DCTONLY);
         assert_eq!(get_tx_set_intra(TX_64X64, false), TX_SET_DCTONLY);
+    }
+
+    #[test]
+    fn tx_set_inter_matches_spec_and_dav1d_branch_selection() {
+        // Cross-checked against dav1d's `recon_tmpl.c` branch selection
+        // (`reduced_txtp_set || t_dim->max == TX_32X32` -> set 3;
+        // `t_dim->min == TX_16X16` -> set 2; else set 1) rather than
+        // hand-derived from the spec text alone, since this is the exact
+        // real-world case (a 2026-09-04 `testsrc2` IBC block, `TX_8X16`)
+        // that first exercised this function: `TX_8X16` has
+        // `Tx_Size_Sqr[TX_8X16] == TX_8X8` (not `TX_16X16`) and
+        // `Tx_Size_Sqr_Up[TX_8X16] == TX_16X16` (not `TX_32X32`), so it must
+        // land in set 1, matching the `txtp=13` (a set-1-only type,
+        // `Tx_Type_Inter_Inv_Set1[13] == FLIPADST_FLIPADST`... actually
+        // `ADST_ADST`, index 12) dav1d actually decoded for it.
+        assert_eq!(get_tx_set_inter(TX_4X4, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_8X8, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_8X16, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_16X8, false), TX_SET_INTER_1);
+        assert_eq!(get_tx_set_inter(TX_16X16, false), TX_SET_INTER_2);
+        assert_eq!(get_tx_set_inter(TX_32X32, false), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_16X32, false), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_64X64, false), TX_SET_DCTONLY);
+        assert_eq!(get_tx_set_inter(TX_32X64, false), TX_SET_DCTONLY);
+        // reduced_tx_set forces set 3 whenever a set would otherwise apply.
+        assert_eq!(get_tx_set_inter(TX_4X4, true), TX_SET_INTER_3);
+        assert_eq!(get_tx_set_inter(TX_16X16, true), TX_SET_INTER_3);
+    }
+
+    #[test]
+    fn tx_type_inter_inv_set1_index_13_is_flipadst_flipadst() {
+        // The real testsrc2 IBC block this session's inter-tx-type fix was
+        // verified against decoded `txtp=13` for a `TX_8X16` (set 1)
+        // transform, matching dav1d's own trace exactly (including the
+        // post-read decoder `rng`, proving bit-exact sync through this
+        // read) -- pin the concrete inverse-set lookup this depends on.
+        assert_eq!(TX_TYPE_INTER_INV_SET1[13], FLIPADST_FLIPADST);
+    }
+
+    #[test]
+    fn get_uv_inter_txtp_matches_dav1d() {
+        // Cross-checked against dav1d's `get_uv_inter_txtp` (`env.h`).
+        // TX_32X32-or-bigger chroma: IDTX survives, everything else -> DCT_DCT.
+        assert_eq!(get_uv_inter_txtp(TX_32X32, IDTX), IDTX);
+        assert_eq!(get_uv_inter_txtp(TX_32X32, ADST_ADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_32X16, ADST_ADST), DCT_DCT);
+        // TX_16X16-square-down chroma: the four ADST/FLIPADST directional
+        // types collapse to DCT_DCT, everything else passes through.
+        assert_eq!(get_uv_inter_txtp(TX_16X16, V_ADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_16X16, H_FLIPADST), DCT_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_16X16, IDTX), IDTX);
+        // Smaller chroma: luma's type passes through unchanged.
+        assert_eq!(get_uv_inter_txtp(TX_8X8, ADST_DCT), ADST_DCT);
+        assert_eq!(get_uv_inter_txtp(TX_4X4, IDTX), IDTX);
     }
 
     #[test]
@@ -1225,6 +1346,7 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            is_inter: false,
         }
     }
 

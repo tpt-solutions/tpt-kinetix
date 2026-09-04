@@ -117,6 +117,89 @@ pub static TX_TYPE_INTRA_INV_SET1: [usize; 7] =
 /// `Tx_Type_Intra_Inv_Set2` (spec "Transform type syntax").
 pub static TX_TYPE_INTRA_INV_SET2: [usize; 5] = [IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST];
 
+/// Transform set types for inter (`IsInter == 1`) blocks (spec `TX_SET_*`).
+pub const TX_SET_INTER_1: usize = 1;
+pub const TX_SET_INTER_2: usize = 2;
+pub const TX_SET_INTER_3: usize = 3;
+
+/// `get_tx_set( txSz )` (spec "Get transform set function") for inter
+/// blocks — the `IsInter == 1` branch `get_tx_set_intra` deliberately
+/// omits. Cross-checked against dav1d's `recon_tmpl.c` `read_coef_blocks`
+/// branch selection (`t_dim->max + intra >= TX_64X64` for DCTONLY;
+/// `reduced_txtp_set || t_dim->max == TX_32X32` for set 3; `t_dim->min ==
+/// TX_16X16` for set 2; otherwise set 1).
+pub fn get_tx_set_inter(tx_size: usize, reduced_tx_set: bool) -> usize {
+    let tx_sz_sqr = TX_SIZE_SQR[tx_size];
+    let tx_sz_sqr_up = TX_SIZE_SQR_UP[tx_size];
+    if tx_sz_sqr_up > TX_32X32 {
+        TX_SET_DCTONLY
+    } else if reduced_tx_set || tx_sz_sqr_up == TX_32X32 {
+        TX_SET_INTER_3
+    } else if tx_sz_sqr == TX_16X16 {
+        TX_SET_INTER_2
+    } else {
+        TX_SET_INTER_1
+    }
+}
+
+/// `Tx_Type_Inter_Inv_Set1` (spec "Transform type syntax"), 16 entries.
+pub static TX_TYPE_INTER_INV_SET1: [usize; 16] = [
+    IDTX,
+    V_DCT,
+    H_DCT,
+    V_ADST,
+    H_ADST,
+    V_FLIPADST,
+    H_FLIPADST,
+    DCT_DCT,
+    ADST_DCT,
+    DCT_ADST,
+    FLIPADST_DCT,
+    DCT_FLIPADST,
+    ADST_ADST,
+    FLIPADST_FLIPADST,
+    ADST_FLIPADST,
+    FLIPADST_ADST,
+];
+
+/// `Tx_Type_Inter_Inv_Set2` (spec "Transform type syntax"), 12 entries.
+pub static TX_TYPE_INTER_INV_SET2: [usize; 12] = [
+    IDTX,
+    V_DCT,
+    H_DCT,
+    DCT_DCT,
+    ADST_DCT,
+    DCT_ADST,
+    FLIPADST_DCT,
+    DCT_FLIPADST,
+    ADST_ADST,
+    FLIPADST_FLIPADST,
+    ADST_FLIPADST,
+    FLIPADST_ADST,
+];
+
+/// `Tx_Type_Inter_Inv_Set3` (spec "Transform type syntax"): `{DCT_DCT,
+/// IDTX}`, selected by a single binary `inter_tx_type` symbol (`idx == 1`
+/// picks `DCT_DCT`, matching dav1d's `(idx - 1) & IDTX` -- cross-checked:
+/// `idx=0` -> `(-1) & IDTX == IDTX`; `idx=1` -> `0 & IDTX == DCT_DCT`).
+pub static TX_TYPE_INTER_INV_SET3: [usize; 2] = [IDTX, DCT_DCT];
+
+/// `get_uv_inter_txtp( txSzUV, txTp )` (spec "Compute transform type
+/// function", `IsInter == 1` chroma branch): chroma's transform type for an
+/// inter/IBC block is *derived* from luma's decoded type, never separately
+/// coded. Cross-checked against dav1d's `get_uv_inter_txtp` (`env.h`).
+pub fn get_uv_inter_txtp(uv_tx_size: usize, y_tx_type: usize) -> usize {
+    let uv_sqr_up = TX_SIZE_SQR_UP[uv_tx_size];
+    let uv_sqr = TX_SIZE_SQR[uv_tx_size];
+    if uv_sqr_up == TX_32X32 {
+        return if y_tx_type == IDTX { IDTX } else { DCT_DCT };
+    }
+    if uv_sqr == TX_16X16 && matches!(y_tx_type, H_FLIPADST | V_FLIPADST | H_ADST | V_ADST) {
+        return DCT_DCT;
+    }
+    y_tx_type
+}
+
 /// `get_default_scan( txSz )` (spec §5.11.41 "Get scan function").
 fn get_default_scan(tx_size: usize) -> Option<&'static [u16]> {
     match tx_size {
