@@ -4162,3 +4162,107 @@
 > completely unverified -- needs a corpus clip that actually selects it
 > (`allow_screen_content_tools`-style content or an explicit encoder
 > flag) before it can be trusted at all.
+
+> **2026-09-04 (cont'd) -- IBC var-tx tree implemented (first real
+> increment on the confirmed structural gap holding testsrc2 at ~23dB).**
+> `reconstruct_ibc_block` previously read one intra-style `tx_depth`
+> symbol (`read_tx_size`) for the whole coded block -- wrong for
+> `IsInter = 1`: real IBC blocks split independent sub-regions to
+> different sizes via a recursive quad-tree of binary `txfm_split`
+> symbols (§5.11.16/18's `read_var_tx_size`), desyncing the entropy
+> decoder from this read onward for every non-skipped IBC block.
+>
+> Added `read_block_tx_size_ibc`/`read_tx_tree` (`partition.rs`),
+> cross-checked branch-for-branch against dav1d's `read_vartx_tree`/
+> `read_tx_tree` (`decode.c`): the two no-entropy-read shortcuts (skip or
+> `TxMode != TX_MODE_SELECT`; lossless or `Max_Tx_Size_Rect == TX_4X4`),
+> the `cat`/context derivation (`2*(TX_64X64 - Tx_Size_Sqr_Up[txSz]) -
+> depth`; above/left tx-width/height comparison), the `depth < 2 && txSz
+> != TX_4X4` read gate, and the `is_split && Tx_Size_Sqr_Up[txSz] >
+> TX_8X8` recursion gate (an 8x8-or-smaller node that splits goes
+> straight to `TX_4X4`, no further read). The `txfm_split` CDF table
+> (`DEFAULT_TXFM_SPLIT_CDF`, `[[u16;3];21]`, flat `cat*3+ctx` indexing)
+> was already scaffolded unused from an earlier session -- values
+> cross-checked against dav1d's `cdf.c` `.txpart` defaults, matched
+> digit-for-digit, no changes needed.
+>
+> Wired the leaf list into the luma reconstruction loop in place of the
+> old uniform grid (including moving the per-leaf loop-filter metadata
+> calls inside the leaf loop, and removing the now-wrong end-of-block
+> `tx_left`/`tx_above` overwrite -- the tree read already writes correct
+> per-leaf context while parsing).
+>
+> Verified two ways: (1) a new self-consistency regression test asserts
+> the leaves always exactly tile the coded block for every bsize/
+> tx_mode_select/skip/lossless combination on a synthetic bitstream; (2)
+> traced a real `testsrc2` IBC block against a patched dav1d
+> (`DAV1D_TRACE=1`, `Post-vartxtree` line, needs no new patch): Kinetix's
+> own `rng` at the same point in the stream (`r=53644`) matches dav1d's
+> first real var-tx-tree read exactly -- bit-exact sync confirmed on real
+> content. No corpus regression; `testsrc2` itself is a neutral wash for
+> now (sync is lost again at the very next symbol -- see below). 135 unit
+> tests pass, clippy clean.
+>
+> **2026-09-04 (cont'd) -- inter `tx_type` implemented (second
+> increment).** The bit lost right after the var-tx-tree fix: IBC forced
+> every transform to `DCT_DCT` (`qindex_positive: false`), but dav1d's
+> trace for the same block shows `txtp=13` (a real inter type) for its
+> luma residual -- real bitstreams write `inter_tx_type` bits here that
+> were never being read.
+>
+> Added `get_tx_set_inter`/`get_uv_inter_txtp` (`coeff_tables.rs`) and
+> `read_inter_transform_type` (`coeff.rs`), cross-checked against dav1d's
+> `recon_tmpl.c` branch-for-branch (the `reduced_tx_set ||
+> Tx_Size_Sqr_Up == TX_32X32` gate for set 3 -- one binary symbol;
+> `Tx_Size_Sqr == TX_16X16` for set 2 -- one shared 12-symbol CDF, no
+> context; else set 1 -- a 16-symbol read). The `txtp_inter1/2/3` CDF
+> tables were, again, already scaffolded unused with dav1d-cross-checked
+> default values -- no changes needed there either. Added `TxBlockCtx.
+> is_inter` to dispatch `read_coeffs` between the intra/inter
+> `transform_type` paths and to route chroma through `get_uv_inter_txtp`
+> instead of the intra `uv_mode`-based lookup; set `true` for IBC's two
+> call sites and the not-yet-reached `inter_block.rs` paths (real inter
+> blocks are also `IsInter = 1` and need the same fix whenever Phase E
+> lands), `false` for real intra.
+>
+> Verified against the same real IBC block: Kinetix now decodes
+> `tx=7 (TX_8X16) txtp=13 eob=65`, and critically the decoder's own `rng`
+> immediately after this *entire coefficient block* read (`r=42504`)
+> matches dav1d's trace for the identical symbol exactly -- bit-exact
+> sync through the full luma residual, not just the header. (dav1d's own
+> trace shows `eob=64` for the same block; that -1 reads as a
+> display-convention difference between the two traces -- a real
+> eob-derived bit-count mismatch would have changed the matching `rng`,
+> and it didn't.) Added regression tests for `get_tx_set_inter`
+> (including this exact `TX_8X16` case) and `get_uv_inter_txtp` against
+> dav1d's formula. 138 unit tests pass, clippy clean, `cargo build
+> --workspace` green. No corpus regression; `testsrc2` stays a wash
+> (Y 20.93->20.36 dB) since sync is lost at the *next* read.
+>
+> **Where sync breaks next (the concrete "inter coefficient context"
+> target for the next session)**: traced past the luma residual into the
+> same block's chroma. dav1d: `SKIPCTX bx=54 by=32 plane=1 tsz_ctx=1
+> sctx=9 all_skip=0` then `Post-uv-cf-blk[pl=0,tx=5,txtp=13,eob=0]:
+> r=64566`. Kinetix (same block, U plane): `tx=5` matches, but
+> `txtp=0 eob=1 r=45638` -- both the decoded content *and* the resulting
+> `rng` diverge starting at chroma's very first (skip/all-zero) symbol
+> read, immediately after the luma block that was just proven bit-exact.
+> Two candidate causes, not yet distinguished: (1) chroma's skip-context
+> derivation (`all_zero_ctx`'s `plane > 0` branch, `coeff.rs`) might need
+> an `is_inter`-dependent term the current spec-generic formula is
+> missing (dav1d's `sctx=9` context value hasn't been hand-verified
+> against Kinetix's own computed context for this exact call yet); (2) a
+> more mundane possibility -- `get_uv_inter_txtp`'s placeholder-`DCT_DCT`
+> "luma tx type" input (noted as a known gap in the `blk_u`/`blk_v`
+> construction comment in `intra_block.rs`, since chroma sub-blocks can
+> span multiple luma leaves and there's no per-mi-position luma-tx-type
+> lookup wired yet) doesn't explain this, since chroma never reads
+> `tx_type` bits regardless -- but if `coeff_base`/`coeff_br` *level*
+> contexts (not just `all_zero`) also read `get_tx_class(tx_type)`
+> somewhere upstream of the skip read in a way this session didn't trace,
+> a wrong chroma tx_type could still perturb context before the mismatch
+> was first observed. Next step: dump `all_zero_ctx`'s actual computed
+> `sctx`/`tsz_ctx` for this exact Kinetix call and compare directly
+> against dav1d's `sctx=9` -- if they already match, the bug is
+> downstream of context selection (in the CDF table itself or the read
+> call), not in context derivation.
