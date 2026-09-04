@@ -3789,3 +3789,55 @@
 > loop-filter-precision issue for the other clips (mostly a matter of that
 > remaining ±1-9 gap) could close a meaningful chunk of the remaining
 > corpus at once.
+
+> **2026-09-04 (cont'd) — CDEF direction/strength selection confirmed
+> correct for one concrete example; the bug (if in CDEF, not deblock) is
+> in `cdef_filter_block`'s actual tap application, not parameter
+> selection.** Picked the worst edge from row 56's fresh trace: the
+> vertical edge at x=52 between mandelbrot's `bx=12,by=14` (`TX_4X8`
+> `ADST_ADST` `SMOOTH_V`) and `bx=13,by=14` (`TX_4X4` `DCT_ADST`
+> `DC_PRED`) blocks — both already proven pre-filter-bit-exact this
+> session. Raw (unfiltered) row 56 around the edge: `…176 98 94 111 | 86
+> 87 78 57…` (cols 48-55). `KINETIX_AV1_NODEBLOCK=1` shows col 51/52
+> unchanged from raw (`111`/`86`) — **deblock's `filter_mask` correctly
+> declines to filter this edge at all** (the raw jump is large enough to
+> read as a genuine content edge, not a blocking artifact — this looks
+> right, not a repeat of the earlier `dqDenom`-shaped bug). With CDEF on,
+> Kinetix nudges col 51 only slightly (`111→110`) and leaves col 52
+> untouched (`86→86`), while the real reference pulls both much further
+> toward each other (`101`/`93`) — a real remaining gap of 9/-7.
+>
+> Patched dav1d's `cdef_apply_tmpl.c` (`DAV1D_CDEFDUMP_BX/BY` env vars,
+> generalized from the previous session's hardcoded position) to dump the
+> chosen direction/variance/strength for this exact 8×8 unit (`bx=12,
+> by=14` in mi units) and compared against Kinetix's own
+> `KINETIX_AV1_DBG_CDEF2`-equivalent instrumentation (added, used, then
+> fully removed again — `git diff` is clean): **direction matches exactly
+> (`dir=3` both sides)**, **the adjusted primary strength matches exactly
+> (`p`/`adj_y_pri_lvl=4` both sides)**; only the raw `variance` differs
+> very slightly (`29506` dav1d vs `29778` Kinetix — a ~1% difference,
+> plausibly from a tiny upstream deblock difference feeding
+> `cdef_direction`'s input pixels, but it lands in the same `var_str`
+> bucket either way so doesn't affect strength selection here). So CDEF's
+> *parameter selection* (direction + primary/secondary strength) is
+> correct for this block; whatever produces the small-but-real output gap
+> must be in `cdef_filter_block` itself — the per-pixel tap sampling,
+> `cdef_constrain`, or the final `clip3(x + round(sum), min, max)` — or
+> conceivably still a subtler deblock difference elsewhere along this
+> edge (only column 0 of the block was checked against dav1d's own
+> pre-filter values earlier this session, not every column).
+>
+> **Not resolved this session** — ran out of budget to hand-derive the
+> exact expected `cdef_filter_block` output from the spec formula for
+> this specific pixel and compare term-by-term. **Concrete next step**:
+> extend the `DAV1D_ITXDUMP`-style approach to dump dav1d's *post-CDEF,
+> pre-restoration* row (or reuse the `hex_dump`-based `DEBUG_B_PIXELS`
+> machinery already in `recon_tmpl.c`, gated the same way) for this exact
+> 8×8 unit, then diff Kinetix's `cdef_filter_block` output at every pixel
+> in the unit against it — that pins down whether the discrepancy is
+> really inside `cdef_filter_block`'s math (in which case hand-verifying
+> `cdef_constrain`/the primary-vs-secondary tap accumulation against
+> dav1d's `cdef_filter_block_c` in `src/cdef_tmpl.c` line-by-line, the
+> same method that found the `dqDenom` bug, is the way in) or actually
+> still further upstream in deblock for a column this session didn't
+> check directly against dav1d.
