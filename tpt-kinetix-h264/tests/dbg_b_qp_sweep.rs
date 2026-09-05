@@ -108,6 +108,7 @@ fn b_slice_qp_sweep() {
             true,
             None,
             true,
+            None,
             &mut NoopTracer,
         ) {
             Ok(parsed) => {

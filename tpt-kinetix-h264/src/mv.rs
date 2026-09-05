@@ -1211,6 +1211,94 @@ fn apply_spatial_direct(
     }
 }
 
+/// POC bookkeeping temporal direct mode (§8.4.1.2.3) needs beyond the
+/// co-located motion grid: the current picture's own `RefPicList0` POCs (for
+/// the `tb`/`td` distance calculation and as the `MapColToList0` search
+/// space), and the co-located picture's (`RefPicList1[0]`'s) own POC and its
+/// own `RefPicList0`/`RefPicList1` POCs (for identifying which physical
+/// picture `refIdxCol` names, via that picture's own reference lists at the
+/// time *it* was decoded).
+#[derive(Clone, Copy)]
+pub struct TemporalDirectCtx<'a> {
+    pub current_poc: i64,
+    pub current_list0_poc: &'a [i64],
+    pub col_poc: i64,
+    pub col_list0_poc: &'a [i64],
+    pub col_list1_poc: &'a [i64],
+}
+
+/// Temporal direct-mode motion derivation for one co-located 4×4 block
+/// (§8.4.1.2.3; cross-checked against FFmpeg's `pred_temp_direct_motion`,
+/// `libavcodec/h264_direct.c`). Returns `(mvL0, refIdxL0, mvL1)`; `refIdxL1`
+/// is always 0 — the co-located picture is always `RefPicList1[0]` itself.
+///
+/// Unlike spatial direct, list usage is unconditional here: even a
+/// co-located intra block yields a valid (zero-motion, ref 0) bi-predictive
+/// result rather than "list dropped".
+fn derive_temporal_direct(col: &MvCell, ctx: &TemporalDirectCtx) -> ([i32; 2], i32, [i32; 2]) {
+    if col.ref_idx < 0 && col.ref_idx_l1 < 0 {
+        // Co-located block is intra: no motion to scale.
+        return ([0, 0], 0, [0, 0]);
+    }
+    // Prefer the co-located block's own List0 over its List1 (§8.4.1.2.3).
+    let (target_poc, mv_col) = if col.ref_idx >= 0 {
+        (ctx.col_list0_poc.get(col.ref_idx as usize).copied(), col.mv)
+    } else {
+        (
+            ctx.col_list1_poc.get(col.ref_idx_l1 as usize).copied(),
+            col.mv_l1,
+        )
+    };
+    let Some(target_poc) = target_poc else {
+        return ([0, 0], 0, [0, 0]);
+    };
+    // MapColToList0: find the same physical reference picture (by POC) in
+    // the current picture's own RefPicList0; falls back to 0 (spec-permitted
+    // default) when no match exists.
+    let ref_idx_l0 = ctx
+        .current_list0_poc
+        .iter()
+        .position(|&p| p == target_poc)
+        .unwrap_or(0);
+    let Some(&pic_a_poc) = ctx.current_list0_poc.get(ref_idx_l0) else {
+        return (mv_col, ref_idx_l0 as i32, [0, 0]);
+    };
+    let tb = (ctx.current_poc - pic_a_poc).clamp(-128, 127) as i32;
+    let td = (ctx.col_poc - pic_a_poc).clamp(-128, 127) as i32;
+    if td == 0 {
+        return (mv_col, ref_idx_l0 as i32, [0, 0]);
+    }
+    let tx = (16384 + td.unsigned_abs() as i32 / 2) / td;
+    let dist_scale_factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let mv_l0 = [
+        (dist_scale_factor * mv_col[0] + 128) >> 8,
+        (dist_scale_factor * mv_col[1] + 128) >> 8,
+    ];
+    let mv_l1 = [mv_l0[0] - mv_col[0], mv_l0[1] - mv_col[1]];
+    (mv_l0, ref_idx_l0 as i32, mv_l1)
+}
+
+/// Fill the direct 8×8 quadrants `quads` with temporal-direct motion
+/// (§8.4.1.2.3). Each quadrant derives independently from its own
+/// co-located corner sample — the same `direct_8x8_inference_flag == 1`
+/// corner rule documented on `apply_spatial_direct`'s `col_zero_flag` pass
+/// (indices 0/3/12/15 in this 4×4-per-side raster cell numbering).
+fn apply_temporal_direct(
+    cur: &mut [MvCell; 16],
+    mb_idx: usize,
+    quads: &[usize],
+    colocated: Option<&[[MvCell; 16]]>,
+    ctx: &TemporalDirectCtx,
+) {
+    let cells = colocated.and_then(|g| g.get(mb_idx));
+    for &q in quads {
+        let corner = 12 * (q / 2) + 3 * (q % 2);
+        let col = cells.map(|c| c[corner]).unwrap_or(MvCell::INTRA);
+        let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
+        commit_rect(cur, 8 * (q % 2), 8 * (q / 2), 8, 8, mv0, ref0, mv1, 0);
+    }
+}
+
 pub(crate) fn predict_inter_b_macroblock(
     store: &MvStore,
     cur: &mut [MvCell; 16],
@@ -1220,27 +1308,18 @@ pub(crate) fn predict_inter_b_macroblock(
     mb: &Macroblock,
     colocated: Option<&[[MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    temporal: Option<&TemporalDirectCtx>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::{BPredDir, MbType};
 
     match mb.mb_type {
         MbType::BSkip | MbType::BDirect16x16 => {
-            // Temporal direct mode (§8.4.1.2.3, `direct_spatial_mv_pred_flag
-            // == 0`) has no derivation implemented — `apply_spatial_direct`
-            // is spatial-only (§8.4.1.2.2) and would silently compute the
-            // wrong motion for this macroblock if called unconditionally.
-            // Bail so the caller falls back to the scaffold for this slice
-            // instead of reconstructing wrong pixels — but only once a
-            // macroblock *actually is* B_Skip/B_Direct_16x16, not for every
-            // B slice whose header merely carries the flag (many real
-            // streams, e.g. x264 `direct=none`, set B slices' `direct_
-            // spatial_mv_pred_flag` to some value while never actually
-            // coding a Direct-type macroblock, since the flag has no effect
-            // when direct mode is never used).
             if !direct_spatial_mv_pred_flag {
-                return Err(
-                    "B slice: temporal direct mode (direct_spatial_mv_pred_flag=0) not implemented",
-                );
+                let Some(ctx) = temporal else {
+                    return Err("B slice: temporal direct mode needs RefPicList0/1 POC context");
+                };
+                apply_temporal_direct(cur, mb_idx, &[0, 1, 2, 3], colocated, ctx);
+                return Ok(());
             }
             apply_spatial_direct(
                 store,
@@ -1412,13 +1491,14 @@ pub(crate) fn predict_inter_b_macroblock(
                     // zero-initialized `MvCell::INTRA` placeholder for any
                     // later quad's prediction, corrupting that quad's MVD
                     // predictor base.
-                    //
-                    // Same temporal-direct bail as the whole-MB `BSkip`/
-                    // `BDirect16x16` arm above — see its comment.
                     if !direct_spatial_mv_pred_flag {
-                        return Err(
-                            "B slice: temporal direct mode (direct_spatial_mv_pred_flag=0) not implemented",
-                        );
+                        let Some(ctx) = temporal else {
+                            return Err(
+                                "B slice: temporal direct mode needs RefPicList0/1 POC context",
+                            );
+                        };
+                        apply_temporal_direct(cur, mb_idx, &[part], colocated, ctx);
+                        continue;
                     }
                     apply_spatial_direct(
                         store,
@@ -1492,6 +1572,7 @@ pub(crate) fn predict_b_slice_mvs(
     mbs: &[Macroblock],
     colocated: Option<&[[MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    temporal: Option<&TemporalDirectCtx>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::MbType;
     let mut cur = [MvCell::INTRA; 16];
@@ -1519,6 +1600,7 @@ pub(crate) fn predict_b_slice_mvs(
                 mb,
                 colocated,
                 direct_spatial_mv_pred_flag,
+                temporal,
             )?;
         } else {
             cur = [MvCell::INTRA; 16];
@@ -1874,5 +1956,84 @@ mod tests {
             scaled < v,
             "same-parity field scaling should shrink a frame-line MV"
         );
+    }
+
+    /// Textbook temporal-direct case: the current B picture sits exactly
+    /// halfway (POC-wise) between the co-located P picture and the P picture
+    /// it itself referenced, so the scaled MV should be exactly half of the
+    /// co-located block's MV — hand-derived independently of the
+    /// implementation, not just self-consistency.
+    #[test]
+    fn temporal_direct_halfway_b_picture_halves_the_colocated_mv() {
+        let current_list0_poc = [0i64, -4];
+        let ctx = TemporalDirectCtx {
+            current_poc: 4,
+            current_list0_poc: &current_list0_poc,
+            col_poc: 8,
+            col_list0_poc: &[0],
+            col_list1_poc: &[],
+        };
+        let col = cell([40, 0], 0); // co-located block: List0, ref 0, mv (40,0)
+        let (mv0, ref0, mv1) = derive_temporal_direct(&col, &ctx);
+        // tb = 4-0 = 4, td = 8-0 = 8 -> half distance -> mv scaled by ~1/2.
+        assert_eq!(ref0, 0);
+        assert_eq!(mv0, [20, 0]);
+        assert_eq!(mv1, [-20, 0]);
+    }
+
+    /// A co-located block that used List1 (not List0) is still handled,
+    /// preferring List0 only when it is actually present (§8.4.1.2.3).
+    #[test]
+    fn temporal_direct_prefers_available_list0_falls_back_to_list1() {
+        let current_list0_poc = [0i64];
+        let ctx = TemporalDirectCtx {
+            current_poc: 2,
+            current_list0_poc: &current_list0_poc,
+            col_poc: 4,
+            col_list0_poc: &[],
+            col_list1_poc: &[0],
+        };
+        let mut col = cell([0, 0], LIST_NOT_USED);
+        col.ref_idx_l1 = 0;
+        col.mv_l1 = [20, -8];
+        let (mv0, ref0, mv1) = derive_temporal_direct(&col, &ctx);
+        // tb = 2-0 = 2, td = 4-0 = 4 -> half distance again.
+        assert_eq!(ref0, 0);
+        assert_eq!(mv0, [10, -4]);
+        assert_eq!(mv1, [mv0[0] - col.mv_l1[0], mv0[1] - col.mv_l1[1]]);
+    }
+
+    /// An intra co-located block (no motion in either list) must yield
+    /// exactly zero motion at reference 0, not garbage from an unset MV.
+    #[test]
+    fn temporal_direct_intra_colocated_block_is_zero_motion() {
+        let current_list0_poc = [0i64];
+        let ctx = TemporalDirectCtx {
+            current_poc: 4,
+            current_list0_poc: &current_list0_poc,
+            col_poc: 8,
+            col_list0_poc: &[0],
+            col_list1_poc: &[],
+        };
+        let (mv0, ref0, mv1) = derive_temporal_direct(&MvCell::INTRA, &ctx);
+        assert_eq!((mv0, ref0, mv1), ([0, 0], 0, [0, 0]));
+    }
+
+    /// `MapColToList0` falls back to reference 0 (spec-permitted default)
+    /// when the co-located block's own reference picture has no matching POC
+    /// anywhere in the current picture's RefPicList0.
+    #[test]
+    fn temporal_direct_unmatched_poc_falls_back_to_ref_zero() {
+        let current_list0_poc = [10i64, 20];
+        let ctx = TemporalDirectCtx {
+            current_poc: 4,
+            current_list0_poc: &current_list0_poc,
+            col_poc: 8,
+            col_list0_poc: &[999], // no picture in current_list0_poc has POC 999
+            col_list1_poc: &[],
+        };
+        let col = cell([40, 0], 0);
+        let (_, ref0, _) = derive_temporal_direct(&col, &ctx);
+        assert_eq!(ref0, 0);
     }
 }

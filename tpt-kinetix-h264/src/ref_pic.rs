@@ -46,6 +46,16 @@ pub struct DpbEntry {
     /// picture for B-slice temporal direct mode (§8.4.1.2.3). `None` until this
     /// picture's B/P slice MV store is recorded (e.g. by `predict_b_slice_mvs`).
     pub mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
+    /// This picture's own `RefPicList0` POCs, as they were at the time *this*
+    /// picture was itself decoded. Empty for I/SI slices (no reference list).
+    /// Needed only when this picture later serves as the co-located picture
+    /// for a future B slice's temporal direct mode: `MapColToList0`
+    /// (§8.4.1.2.3) identifies which physical picture a co-located block's
+    /// `refIdxCol` names by looking it up here.
+    pub list0_poc: Vec<i64>,
+    /// Same as `list0_poc` but for `RefPicList1` — only non-empty when this
+    /// picture was itself decoded as a B slice.
+    pub list1_poc: Vec<i64>,
     /// Coded-dimension frame for motion compensation when the stream has a
     /// non-16-aligned crop (display dimensions < coded dimensions). The encoder
     /// predicts from coded-size reference planes, so MC must use this frame
@@ -1528,6 +1538,8 @@ mod tests {
             long_term_pic_num: -1,
             mv_grid: None,
             mc_frame: None,
+            list0_poc: Vec::new(),
+            list1_poc: Vec::new(),
         }
     }
 

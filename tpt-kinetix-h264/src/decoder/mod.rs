@@ -946,7 +946,16 @@ impl H264Decoder {
         } else {
             None
         };
-        self.store_reference_picture(nal, sps, &header, &frame, None, mc_frame);
+        self.store_reference_picture(
+            nal,
+            sps,
+            &header,
+            &frame,
+            None,
+            mc_frame,
+            Vec::new(),
+            Vec::new(),
+        );
 
         Ok(Some(frame))
     }
@@ -966,6 +975,8 @@ impl H264Decoder {
         frame: &VideoFrame,
         mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
         mc_frame: Option<VideoFrame>,
+        list0_poc: Vec<i64>,
+        list1_poc: Vec<i64>,
     ) {
         use crate::slice::DecRefPicMarking;
 
@@ -1002,6 +1013,8 @@ impl H264Decoder {
             long_term_pic_num: -1,
             mv_grid,
             mc_frame,
+            list0_poc,
+            list1_poc,
         };
         let ctx = crate::ref_pic::PicNumContext::new(
             sps,
@@ -1534,6 +1547,8 @@ impl H264Decoder {
                             &frame,
                             Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
                             mc_frame_p,
+                            ref_list.iter().map(|e| e.pic_order_cnt).collect(),
+                            Vec::new(),
                         );
                         return Ok(frame);
                     }
@@ -1648,6 +1663,18 @@ impl H264Decoder {
                     .first()
                     .and_then(|e| e.mv_grid.clone())
                     .map(|g| (*g).clone());
+                // Temporal direct mode (§8.4.1.2.3) needs the current
+                // picture's own RefPicList0 POCs plus the co-located
+                // picture's (RefPicList1[0]'s) own POC and its own ref-list
+                // POCs, snapshotted when that picture was itself decoded.
+                let current_list0_poc: Vec<i64> = ref_l0.iter().map(|e| e.pic_order_cnt).collect();
+                let temporal_ctx = ref_l1.first().map(|col| crate::mv::TemporalDirectCtx {
+                    current_poc,
+                    current_list0_poc: &current_list0_poc,
+                    col_poc: col.pic_order_cnt,
+                    col_list0_poc: &col.list0_poc,
+                    col_list1_poc: &col.list1_poc,
+                });
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag = pps
@@ -1683,6 +1710,7 @@ impl H264Decoder {
                         sps.direct_8x8_inference_flag,
                         colocated_mv.as_deref(),
                         header.direct_spatial_mv_pred_flag,
+                        temporal_ctx.as_ref(),
                         tracer,
                     )
                 } else {
@@ -1699,6 +1727,7 @@ impl H264Decoder {
                             .unwrap_or(false),
                         colocated_mv.as_deref(),
                         header.direct_spatial_mv_pred_flag,
+                        temporal_ctx.as_ref(),
                         tracer,
                     )
                 };
@@ -1867,6 +1896,8 @@ impl H264Decoder {
                             &frame,
                             Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
                             mc_frame_b,
+                            ref_l0.iter().map(|e| e.pic_order_cnt).collect(),
+                            ref_l1.iter().map(|e| e.pic_order_cnt).collect(),
                         );
                         return Ok(frame);
                     }

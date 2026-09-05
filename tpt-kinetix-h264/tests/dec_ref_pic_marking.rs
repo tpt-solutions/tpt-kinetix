@@ -183,6 +183,8 @@ fn decoded_picture(frame_num: u32) -> DpbEntry {
         long_term_pic_num: -1,
         mv_grid: None,
         mc_frame: None,
+        list0_poc: Vec::new(),
+        list1_poc: Vec::new(),
     }
 }
 

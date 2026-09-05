@@ -158,6 +158,7 @@ fn ibp_p_slice_cabac_grid() {
             sps.direct_8x8_inference_flag,
             None,
             bh.direct_spatial_mv_pred_flag,
+            None,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         ) {
             Ok(bp) => {
