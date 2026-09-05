@@ -185,7 +185,21 @@ const MANIFEST: &[(&str, Expect)] = &[
         Expect::KnownGap("real PAFF 720x480 — correct frame count, grey-scaffold pixels"),
     ),
     // --- known limitations (must NOT claim exactness) ---
-    ("CABACI3_Sony_B", Expect::Limitation("4 slices per picture")),
+    // NOT an I-only clip (earlier sessions' assumption was wrong): readme says
+    // "Slice Types: IPB", I Period 15, Direct Prediction: Temporal. Frame 0
+    // (IDR, 4 CABAC I-slices) is bit-exact via the multi-slice I accumulator
+    // (07b0471/4a83773). Every other picture is P or B, also 4 slices; only
+    // the first slice (first_mb_in_slice==0) is really CABAC-decoded by
+    // `decode_slice`'s single-slice P/B path — continuation slices hit the
+    // `first_mb_in_slice != 0` early-return and are dropped, so ~75% of every
+    // P/B picture's macroblocks (mb 25..98 of 99 for this QCIF clip) are never
+    // decoded at all. This is the same "multi-slice CABAC P/B not
+    // implemented" gap already tracked for CABAST3_Sony_E/CABASTBR3_Sony_B,
+    // not a distinct bug — see todo-h264.md SESSION #32as.
+    (
+        "CABACI3_Sony_B",
+        Expect::Limitation("IPB stream — multi-slice CABAC P/B not implemented (see #32as)"),
+    ),
 ];
 
 fn fixtures_root() -> PathBuf {

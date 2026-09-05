@@ -2,6 +2,93 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32as — CABACI3_Sony_B's "second, separate gap" root-caused: it isn't I-only, and the gap is the already-known missing multi-slice CABAC P/B decode, not a new bug
+
+Followed up on SESSION #32ar's open item ("frame 0 exact, frame 1 onward
+~82% wrong — far more error than a subtle prediction bug would explain").
+**Root cause found, no code bug fix needed or attempted — this is a
+mislabeled instance of an already-documented, already-scoped-out limitation,
+not an undiscovered bug.**
+
+**Finding**: `CABACI3_Sony_B` was assumed "the one *I-only* multi-slice
+target" by SESSION #32aq/#32ar. That assumption was wrong. Its own
+`CABACI3_Sony_B-readme.txt` says `Slice Types: IPB`, `I Period: 15`,
+`Direct Prediction: Temporal` — it is a full 300-frame hierarchical-B stream
+(`ffprobe -show_entries frame=pict_type` on `CABACI3_Sony_B.jsv`: display
+order is `I,B,B,P,B,B,P,...` repeating, `I` only every 15th frame), with 4
+CABAC slices per picture on *every* frame, not just the IDR.
+
+Confirmed the actual decode behaviour with a throwaway `KINETIX_BINTRACE=1`
+probe (built, run, then deleted — not part of the permanent test suite):
+- NAL 2-5 (the IDR picture's 4 I-slices, `first_mb=0,25,50,75`) all go
+  through `try_decode_real_slice`'s multi-slice accumulator
+  (`TRY_REAL_SLICE ... slice_type=I`) and finalize together as frame #1 —
+  this is the `07b0471`/`4a83773` path working exactly as intended, and is
+  why frame 0 is bit-exact.
+- NAL 7 (`first_mb=0, frame_num=1, slice_type=P`) does NOT go through
+  `try_decode_real_slice` (that path only handles `SliceType::I | Si`, see
+  `try_decode_real_slice`'s early `Ok(None)` for non-I slice types). It falls
+  through to `decode_slice`, whose real single-slice CABAC P path decodes
+  macroblocks 0..24 (this slice's own range) and **immediately returns a
+  finished frame right there** — `--> produced frame #2` fires on NAL 7
+  alone, before NAL 8/9/10 (the picture's other 3 slices) are even read.
+- NAL 8, 9, 10 (`first_mb=25,50,75`, same picture) each hit
+  `decode_slice`'s `if header.first_mb_in_slice != 0 { self.suppress_frame =
+  true; return self.emit_skip_frame(...); }` guard (comment: "Multi-slice
+  reconstruction is not supported ... we must not emit an extra frame per
+  continuation slice") — they are read, parsed as far as the header, and then
+  **completely dropped**. Macroblocks 25..98 (75 of 99 QCIF macroblocks,
+  ~76% of the picture) are never decoded for this frame at all; whatever
+  `decode_slice`'s picture buffer defaults them to (skip macroblocks) is what
+  ships.
+- This repeats for literally every P and B picture in the stream (all
+  4-sliced per the readme) — only ~24% of most frames' area is ever really
+  CABAC-decoded, the remaining ~76% is default/skip. That is precisely
+  "far more than a subtle prediction bug" — it is 3 of 4 slices per picture
+  being silently discarded, on ~299 of the stream's 300 pictures.
+
+**Why no fix was attempted this session**: this is not a new, isolated bug —
+it is the exact same gap already identified and deliberately deferred for
+`CABAST3_Sony_E`/`CABASTBR3_Sony_B` in SESSION #32aq's "why P/B were not
+attempted" note: `parse_p_slice_cabac`/`parse_b_slice_cabac`'s call sites are
+"deeply entangled with ref-list building (`self.dpb`)," MV-grid/POC
+bookkeeping, weighted prediction, etc., making a P/B
+`PictureAccumulator` a materially larger, riskier project than the I-slice
+one `07b0471` implemented — explicitly flagged as needing its own dedicated,
+carefully-verified session rather than being folded into a bug-hunt. Doing
+that work now, under the banner of "fixing CABACI3_Sony_B," would just be
+that same large project with extra steps; better tracked as what it is.
+
+**What changed**: no `src/` changes. Corrected
+`tpt-kinetix-h264/tests/itu_conformance.rs`'s `CABACI3_Sony_B` manifest entry
+reason string (was the misleading bare `"4 slices per picture"`, now
+documents that it's an IPB stream and points at this entry) and added a
+comment above it recording the true numbers (mb 25..98 of 99 undecoded per
+P/B picture). `Expect::Limitation` is unchanged (correctly still not
+`BitExact` — nothing here made it more or less exact, this session is a
+diagnosis correction only).
+
+**Verification**: `cargo build --workspace` / `cargo clippy --workspace
+--all-targets -- -D warnings` / `cargo fmt --all -- --check`: clean.
+`cargo test -p tpt-kinetix-h264 --lib --tests`: same as baseline, 0
+failures (this session touched no decode logic, only a test manifest string
+and this doc). `cargo test -p tpt-kinetix-h264 --test itu_conformance --
+--nocapture`: all 12 `Expect::BitExact` fixtures remain bit-exact; the
+diagnostic-corrected `CABACI3_Sony_B` line is unchanged numerically
+(`max_diff=186 diff_bytes=9315027/11404800`, `first_bad=Some(1)`) since no
+decode-path code changed — only its manifest reason string did.
+
+**Next step for a future session** (separately scoped, sizeable, matches the
+already-deferred P/B multi-slice work for `CABAST3_Sony_E`/
+`CABASTBR3_Sony_B`): implement a `PictureAccumulator`-equivalent for
+`parse_p_slice_cabac`/`parse_b_slice_cabac`, threading ref-list state,
+weighted prediction, and per-slice MV-grid contributions into one shared
+per-picture buffer the same way `07b0471` did for I-slices, before
+`decode_slice` finalizes a picture. Until that lands, `CABACI3_Sony_B`,
+`CABAST3_Sony_E`, and `CABASTBR3_Sony_B` all share the identical root cause
+and should be fixed together — there is no clip-specific bug left to chase
+on `CABACI3_Sony_B` in isolation.
+
 ## SESSION #32ar — `reconstruct_intra_frame` made slice-boundary aware (§6.4.9); CABACI3_Sony_B improved but NOT yet bit-exact — a second, separate gap remains
 
 Implemented the fix `todo-h264.md` SESSION #32aq root-caused: `reconstruct.rs`'s
