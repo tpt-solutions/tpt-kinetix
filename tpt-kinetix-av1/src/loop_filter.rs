@@ -1085,7 +1085,7 @@ const SGR_S: [[u32; 2]; 16] = [
     [22, 0],
 ];
 
-/// Spec Sgr_Params[16][4] = { r0, eps0, r1, eps1 }.
+/// Spec Sgr_Params\[16\]\[4\] = { r0, eps0, r1, eps1 }.
 const SGR_PARAMS: [[i32; 4]; 16] = [
     [2, 12, 1, 4],
     [2, 15, 1, 6],

@@ -395,6 +395,14 @@ impl H264Decoder {
         let mut interlaced_frame_emitted = false;
 
         for nal in &nal_units {
+            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                eprintln!(
+                    "NAL_LOOP type={:?} ref_idc={} rbsp_len={}",
+                    nal.nal_unit_type,
+                    nal.nal_ref_idc,
+                    nal.rbsp.len()
+                );
+            }
             match nal.nal_unit_type {
                 NalUnitType::Sps => {
                     if let Ok(sps) = SeqParameterSet::parse(&nal.rbsp) {
@@ -423,12 +431,29 @@ impl H264Decoder {
                     }
                 }
                 NalUnitType::IdrSlice | NalUnitType::NonIdrSlice => {
-                    // Look up the active SPS/PPS (use the first available as a fallback).
-                    let sps = match self.sps_store.values().next() {
+                    // Look up the PPS this slice actually references (via its
+                    // own `pic_parameter_set_id`, peeked before we know which
+                    // PPS/SPS apply), then the SPS that PPS references — not
+                    // "whichever the store returns first", which decodes
+                    // every slice with the wrong SPS/PPS the moment a stream
+                    // has more than one active parameter set (e.g. a second
+                    // IDR re-signalling a new SPS/PPS pair). Falls back to
+                    // the first-available pair only when the id can't be
+                    // peeked or isn't in the store, matching the previous
+                    // behaviour for malformed input.
+                    let peeked_pps_id = crate::slice::peek_pic_parameter_set_id(&nal.rbsp);
+                    let pps = peeked_pps_id
+                        .and_then(|id| self.pps_store.get(&id))
+                        .or_else(|| self.pps_store.values().next())
+                        .cloned();
+                    let sps = match pps
+                        .as_ref()
+                        .and_then(|p| self.sps_store.get(&p.seq_parameter_set_id))
+                        .or_else(|| self.sps_store.values().next())
+                    {
                         Some(s) => s.clone(),
                         None => continue,
                     };
-                    let pps = self.pps_store.values().next().cloned();
 
                     let width = sps.pic_width_pixels();
                     let height = sps.pic_height_pixels();
@@ -514,6 +539,7 @@ impl H264Decoder {
                     }
 
                     // Attempt the real CAVLC I-slice decode path first.
+                    self.scaffold_fallback = false;
                     match self.try_decode_real_slice(
                         nal,
                         &sps,
@@ -524,6 +550,13 @@ impl H264Decoder {
                         tracer,
                     ) {
                         Ok(Some(frame)) => {
+                            if self.strict && self.scaffold_fallback {
+                                return Err(KinetixError::NotPixelExact(
+                                    "H.264: slice not decodable by the pixel-exact path yet \
+                                     (unsupported feature); see H264Decoder::capabilities"
+                                        .to_string(),
+                                ));
+                            }
                             let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
                             if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
                                 output_frame = Some(ready);
@@ -721,6 +754,12 @@ impl H264Decoder {
         // SPS set, so this is always the correct merged set.
         let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
 
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!(
+                "TRY_REAL_SLICE first_mb={} frame_num={} slice_type={:?}",
+                header.first_mb_in_slice, header.frame_num, header.slice_type
+            );
+        }
         // Only fully-intra slices are handled by this path.
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
             return Ok(None);
@@ -788,6 +827,14 @@ impl H264Decoder {
                 }
             }
         };
+        // A CABAC slice whose `end_of_slice_flag` legitimately fired before
+        // covering the whole picture is one slice of a multi-slice picture
+        // (unsupported for pixel-exact strict mode — see
+        // `KnownGap`/capabilities); the partial reconstruction below is still
+        // the best available output in non-strict mode.
+        if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
+            self.scaffold_fallback = true;
+        }
 
         let mut recon = crate::reconstruct::reconstruct_intra_frame(
             &parsed.macroblocks,
@@ -993,7 +1040,21 @@ impl H264Decoder {
         packet: &Packet,
         tracer: &mut T,
     ) -> Result<VideoFrame, KinetixError> {
-        let sps = match self.sps_store.values().next() {
+        // Same PPS-id-first lookup as the caller's own SPS/PPS resolution
+        // (see its comment) — this function re-derives independently rather
+        // than taking the already-resolved pair as parameters, so it must
+        // apply the same fix or it silently reverts to "first in the store"
+        // for every stream with more than one active parameter set.
+        let peeked_pps_id = crate::slice::peek_pic_parameter_set_id(&nal.rbsp);
+        let pps = peeked_pps_id
+            .and_then(|id| self.pps_store.get(&id))
+            .or_else(|| self.pps_store.values().next())
+            .cloned();
+        let sps = match pps
+            .as_ref()
+            .and_then(|p| self.sps_store.get(&p.seq_parameter_set_id))
+            .or_else(|| self.sps_store.values().next())
+        {
             Some(s) => s.clone(),
             None => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
         };
@@ -1003,8 +1064,6 @@ impl H264Decoder {
         let coded_height = sps.coded_height_pixels();
         let mb_cols = coded_width / 16;
         let mb_rows = coded_height / 16;
-
-        let pps = self.pps_store.values().next().cloned();
         // Active scaling lists: PPS override merged over SPS set (§8.5.9).
         let scaling = pps.as_ref().map(|p| &p.scaling).unwrap_or(&sps.scaling);
 
@@ -1055,12 +1114,35 @@ impl H264Decoder {
             &ctx,
         ) {
             Ok(h) => h,
-            Err(_) => return self.emit_skip_frame(nal.nal_unit_type, width, height, packet),
+            Err(e) => {
+                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                    eprintln!("DECODE_SLICE header parse failed: {e:?}");
+                }
+                return self.emit_skip_frame(nal.nal_unit_type, width, height, packet);
+            }
         };
 
         // Record this picture's display order for `decode_impl`'s reorder buffer.
         self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
         self.pending_poc = self.display_poc(&sps, &header, nal);
+
+        if std::env::var("KINETIX_BINTRACE").is_ok() {
+            eprintln!(
+                "SLICE_START first_mb={} frame_num={} idr={} slice_type={:?} poc={}",
+                header.first_mb_in_slice,
+                header.frame_num,
+                self.pending_is_idr,
+                header.slice_type,
+                self.pending_poc
+            );
+            eprintln!(
+                "  slice_qp_delta={} num_ref_idx_l0_active_minus1={} data_bit_offset={} rbsp_len={}",
+                header.slice_qp_delta,
+                header.num_ref_idx_l0_active_minus1,
+                header.data_bit_offset,
+                nal.rbsp.len()
+            );
+        }
 
         // A slice whose first macroblock isn't 0 is a continuation slice of the
         // picture the previous NAL started. Multi-slice reconstruction is not
@@ -1293,6 +1375,12 @@ impl H264Decoder {
                 };
                 match p_result {
                     Ok(parsed) => {
+                        // See the identical note in `try_decode_real_slice`:
+                        // a CABAC slice whose `end_of_slice_flag` legitimately
+                        // fired early is one slice of a multi-slice picture.
+                        if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
+                            self.scaffold_fallback = true;
+                        }
                         // Explicit weighted prediction (§8.4.2.3.2): only P/SP
                         // slices with `weighted_pred_flag` carry a
                         // `pred_weight_table`; P-slices never use implicit
@@ -1616,6 +1704,12 @@ impl H264Decoder {
                 };
                 match b_result {
                     Ok(parsed) => {
+                        // See the identical note in `try_decode_real_slice`:
+                        // a CABAC slice whose `end_of_slice_flag` legitimately
+                        // fired early is one slice of a multi-slice picture.
+                        if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
+                            self.scaffold_fallback = true;
+                        }
                         // Weighted bi-prediction (§8.4.2.3.2): explicit when
                         // `weighted_bipred_idc == 1` (uses the parsed
                         // `pred_weight_table`), implicit when `== 2` (weights

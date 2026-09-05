@@ -261,6 +261,24 @@ pub struct SliceHeaderContext {
     pub chroma_array_type: u32,
 }
 
+/// Peek `pic_parameter_set_id` (§7.3.3) from a slice RBSP without needing any
+/// SPS/PPS context — it's the third `ue(v)` field, right after
+/// `first_mb_in_slice` and `slice_type`, both fixed-format regardless of
+/// active parameter sets. Callers need this *before* they can look up the
+/// right PPS (and, through it, the right SPS) for the rest of the header:
+/// a stream with more than one active parameter set (e.g. a second IDR that
+/// re-signals a new SPS/PPS pair, as ITU's "multiple parameter sets"
+/// conformance clips do) has more than one entry in the decoder's PPS/SPS
+/// stores, and picking "whichever the store returns first" instead of the
+/// one this slice actually references decodes every following slice with
+/// the wrong QP/scaling/entropy-mode/dimensions.
+pub fn peek_pic_parameter_set_id(rbsp: &[u8]) -> Option<u32> {
+    let mut r = BitReader::new(rbsp);
+    let _first_mb_in_slice = r.read_ue()?;
+    let _slice_type_raw = r.read_ue()?;
+    r.read_ue()
+}
+
 impl SliceHeader {
     /// Parse the slice header from the slice RBSP using default (baseline)
     /// assumptions. Prefer [`SliceHeader::parse_with_context`] with real SPS/PPS

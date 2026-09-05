@@ -363,8 +363,9 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     // pair's field flag decoded if the bottom is coded).
     let mut prev_mb_skipped = false;
     let mut next_mb_skipped = false;
+    let mut decoded_mb_count = total;
 
-    for mb_idx in 0..total {
+    'mb_loop: for mb_idx in 0..total {
         // MBAFF pair-scan addressing (§6.4.2/§7.4.4): addresses 2k / 2k+1 are
         // the top / bottom macroblock of pair k, at frame-MB column
         // `k % mb_cols` and rows `2*(k / mb_cols)` / `+1`. Frame-only slices
@@ -508,16 +509,12 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             // unconditionally); it follows only the bottom macroblock.
             if !(mbaff_frame && mb_idx % 2 == 0) {
                 let end_of_slice = dec.decode_terminate() == 1;
-                let is_last = mb_idx + 1 == total;
-                // The final MB's terminate bin may be absent (x264 writes
-                // exactly total-1 terminate bins — one before each MB except
-                // the first — and no bin after the last MB; ffmpeg tolerates
-                // both). Only an early end_of_slice mid-slice indicates a
-                // desync.
-                if !is_last && end_of_slice {
-                    return Err(SliceDataError::Unsupported(
-                        "end_of_slice_flag mismatch (P-CABAC, skip MB)",
-                    ));
+                if end_of_slice {
+                    let is_last = mb_idx + 1 == total;
+                    if !is_last {
+                        decoded_mb_count = mb_idx + 1;
+                    }
+                    break 'mb_loop;
                 }
             }
             continue;
@@ -564,11 +561,12 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         // frame pair (see the skip-MB path above for the spec reference).
         if !(mbaff_frame && mb_idx % 2 == 0) {
             let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            if !is_last && end_of_slice {
-                return Err(SliceDataError::Unsupported(
-                    "end_of_slice_flag mismatch (P-CABAC)",
-                ));
+            if end_of_slice {
+                let is_last = mb_idx + 1 == total;
+                if !is_last {
+                    decoded_mb_count = mb_idx + 1;
+                }
+                break 'mb_loop;
             }
         }
     }
@@ -579,5 +577,6 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store,
+        decoded_mb_count,
     })
 }
