@@ -1174,7 +1174,21 @@ fn apply_spatial_direct(
         let coloc_intra = cells.iter().all(|c| c.ref_idx < 0 && c.ref_idx_l1 < 0);
         if !coloc_intra {
             for &q in quads {
-                let cc = cells[8 * (q / 2) + (q % 2) * 2];
+                // §8.4.1.2.1's `direct_8x8_inference_flag == 1` corner rule
+                // (luma4x4BlkIdx 0/5/10/15 in spec Z-scan numbering) samples
+                // the co-located 8×8 quadrant's *outer* corner — the 4×4
+                // sub-block diagonally farthest from the macroblock centre
+                // (e.g. quadrant 1's top-*right* 4×4, not its top-left) —
+                // not the quadrant's top-left 4×4 (which for quadrants 1-3
+                // is actually the sub-block *nearest* the MB centre). In
+                // this raster `by*4+bx` cell numbering the four outer
+                // corners are indices 0, 3, 12, 15. The previous formula
+                // `8*(q/2) + (q%2)*2` gave 0, 2, 8, 10 — correct only for
+                // quadrant 0 by coincidence, wrong for 1/2/3 — so
+                // `col_zero_flag` was derived from the wrong co-located
+                // motion for any Direct 8×8 quadrant other than the
+                // top-left one.
+                let cc = cells[12 * (q / 2) + 3 * (q % 2)];
                 let col_zero = (cc.ref_idx == 0 && cc.mv[0].abs() <= 1 && cc.mv[1].abs() <= 1)
                     || (cc.ref_idx < 0
                         && cc.ref_idx_l1 == 0
@@ -1205,11 +1219,29 @@ pub(crate) fn predict_inter_b_macroblock(
     slice_id: u32,
     mb: &Macroblock,
     colocated: Option<&[[MvCell; 16]]>,
+    direct_spatial_mv_pred_flag: bool,
 ) -> Result<(), &'static str> {
     use crate::macroblock::{BPredDir, MbType};
 
     match mb.mb_type {
         MbType::BSkip | MbType::BDirect16x16 => {
+            // Temporal direct mode (§8.4.1.2.3, `direct_spatial_mv_pred_flag
+            // == 0`) has no derivation implemented — `apply_spatial_direct`
+            // is spatial-only (§8.4.1.2.2) and would silently compute the
+            // wrong motion for this macroblock if called unconditionally.
+            // Bail so the caller falls back to the scaffold for this slice
+            // instead of reconstructing wrong pixels — but only once a
+            // macroblock *actually is* B_Skip/B_Direct_16x16, not for every
+            // B slice whose header merely carries the flag (many real
+            // streams, e.g. x264 `direct=none`, set B slices' `direct_
+            // spatial_mv_pred_flag` to some value while never actually
+            // coding a Direct-type macroblock, since the flag has no effect
+            // when direct mode is never used).
+            if !direct_spatial_mv_pred_flag {
+                return Err(
+                    "B slice: temporal direct mode (direct_spatial_mv_pred_flag=0) not implemented",
+                );
+            }
             apply_spatial_direct(
                 store,
                 cur,
@@ -1349,7 +1381,6 @@ pub(crate) fn predict_inter_b_macroblock(
             let sub_types = motion.sub_mb_type_b.ok_or("BB8x8 without sub_mb_type_b")?;
             let mut l0_cur = 0usize;
             let mut l1_cur = 0usize;
-            let mut direct_quads: Vec<usize> = Vec::new();
             for part in 0..4usize {
                 let bx = 8 * (part % 2);
                 let by = 8 * (part / 2);
@@ -1366,7 +1397,38 @@ pub(crate) fn predict_inter_b_macroblock(
                 };
 
                 if dir == BPredDir::Direct {
-                    direct_quads.push(part);
+                    // Apply this quad's spatial-direct motion (and its
+                    // col_zero adjustment) immediately, in decode order —
+                    // not batched into one call after the whole loop, as a
+                    // previous version of this function did. A B_8x8
+                    // macroblock can mix a Direct sub-partition with an
+                    // explicit L0/L1/Bi one in the *same* macroblock (e.g.
+                    // quad 0 = Direct, quad 1 = L0); quad 1's own
+                    // neighbour-based MV predictor (§8.4.1.3) can read quad
+                    // 0 as its left neighbour, and needs quad 0's *real*
+                    // derived motion already committed into `cur` at that
+                    // point — deferring every direct quad to a single
+                    // post-loop call left `cur[quad 0]` at its
+                    // zero-initialized `MvCell::INTRA` placeholder for any
+                    // later quad's prediction, corrupting that quad's MVD
+                    // predictor base.
+                    //
+                    // Same temporal-direct bail as the whole-MB `BSkip`/
+                    // `BDirect16x16` arm above — see its comment.
+                    if !direct_spatial_mv_pred_flag {
+                        return Err(
+                            "B slice: temporal direct mode (direct_spatial_mv_pred_flag=0) not implemented",
+                        );
+                    }
+                    apply_spatial_direct(
+                        store,
+                        cur,
+                        mb_idx,
+                        mb_width,
+                        slice_id,
+                        &[part],
+                        colocated,
+                    );
                     continue;
                 }
 
@@ -1412,17 +1474,6 @@ pub(crate) fn predict_inter_b_macroblock(
                     commit_rect(cur, spx, spy, spw, sph, mv, ref_idx, mv_l1, ref_idx_l1);
                 }
             }
-            if !direct_quads.is_empty() {
-                apply_spatial_direct(
-                    store,
-                    cur,
-                    mb_idx,
-                    mb_width,
-                    slice_id,
-                    &direct_quads,
-                    colocated,
-                );
-            }
             Ok(())
         }
         _ => Err("not an inter B macroblock"),
@@ -1440,6 +1491,7 @@ pub(crate) fn predict_b_slice_mvs(
     first_mb: u32,
     mbs: &[Macroblock],
     colocated: Option<&[[MvCell; 16]]>,
+    direct_spatial_mv_pred_flag: bool,
 ) -> Result<(), &'static str> {
     use crate::macroblock::MbType;
     let mut cur = [MvCell::INTRA; 16];
@@ -1466,6 +1518,7 @@ pub(crate) fn predict_b_slice_mvs(
                 slice_id,
                 mb,
                 colocated,
+                direct_spatial_mv_pred_flag,
             )?;
         } else {
             cur = [MvCell::INTRA; 16];

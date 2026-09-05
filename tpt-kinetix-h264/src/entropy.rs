@@ -435,7 +435,7 @@ impl CbpCabacContext {
 ///
 /// Bin 0's `ctxIdxInc` depends on whether the *previous* macroblock's
 /// `mb_qp_delta` was nonzero (external state, not a neighbour lookup); bin 1
-/// uses ctxIdx 62 (= ctx[2]); bins 2+ use ctxIdx 63 (= ctx[3]).
+/// uses ctxIdx 62 (= ctx\[2\]); bins 2+ use ctxIdx 63 (= ctx\[3\]).
 ///
 /// Sign convention: the bin string with k total leading 1-bits (k > 0,
 /// before the terminating 0) encodes:

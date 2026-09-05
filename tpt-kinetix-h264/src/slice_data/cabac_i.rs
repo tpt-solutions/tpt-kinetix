@@ -175,18 +175,27 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             mb.pcm_samples = pcm_samples;
             mb.mb_field_flag = cur_pair_field;
 
-            let mut this_nz = MbNz { present: true, ..Default::default() };
+            let mut this_nz = MbNz {
+                present: true,
+                ..Default::default()
+            };
             // §9.2.1: an I_PCM neighbour contributes nN=16 to CAVLC coeff_token
             // context; the same value is used for the CABAC CBF context.
             this_nz.luma = [16u8; 16];
             this_nz.chroma = [16u8; 8];
 
-            let mut this_cabac_ctx = MbCabacCtx { present: true, ..Default::default() };
+            let mut this_cabac_ctx = MbCabacCtx {
+                present: true,
+                ..Default::default()
+            };
             this_cabac_ctx.is_intra16x16_or_pcm = true;
             this_cabac_ctx.mb_field_flag = cur_pair_field;
 
             nz[grid_idx] = this_nz;
-            pred_ctx[grid_idx] = MbPredCtx { present: true, ..Default::default() };
+            pred_ctx[grid_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
             cabac_ctx[grid_idx] = this_cabac_ctx;
             macroblocks[grid_idx] = mb;
 
@@ -196,8 +205,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             continue;
         }
 
-        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) =
-            parse_result?;
+        let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) = parse_result?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nonzero;
         if std::env::var("KINETIX_BINTRACE").is_ok() {

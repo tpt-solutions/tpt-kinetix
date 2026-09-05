@@ -2,6 +2,248 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ak (2026-09-05) — TWO real spatial-direct bugs FIXED; BA3_SVA_C residual 1899→520 diff bytes, max_diff 112→4
+
+Picked up REMAINING GAPS item 1(b) below ("real B-frame / multi-ref-P recon
+error", `BA3_SVA_C`). Localizing first: `tests/dbg_itu_pframe.rs`'s
+`ITU_CLIP`/`ITU_FRAME`/`ITU_MAXFRAME` env vars were added (it previously
+hardcoded `BA2_Sony_F`, `fi in 0..3`, and the MB diffmap to `fi == 1`) and
+its decoder was switched to `H264Decoder::new().with_display_order()` — it
+was still using plain decode order, which for a clip with B-frames compares
+totally unrelated frames (confirmed: without display order, "our frame 1
+best-matches ref frame 2" — an artifact, not a bug). With display order on,
+`BA3_SVA_C`'s real first divergent frame is display-index 3 (a B-frame; all
+P-frames before and between are exact) with a wide diff cluster covering
+~9 MBs.
+
+**Root cause found and FIXED**: `predict_inter_b_macroblock`'s `MbType::
+BB8x8` (B_8x8) branch collected every Direct-type 8×8 sub-partition into a
+`direct_quads` list during its `part in 0..4` loop and applied all of them
+in **one batched call to `apply_spatial_direct` *after* the whole loop
+finished** — including after every Explicit (L0/L1/Bi) sub-partition had
+already been processed. But an Explicit sub-partition's own MV predictor
+(§8.4.1.3, via `predict_mv_sub`/`predict_mv_sub_l1`) can read an *earlier*
+same-macroblock sub-partition as its neighbour — and if that earlier
+sub-partition was Direct, the predictor read `cur`'s zero-initialized
+`MvCell::INTRA` placeholder instead of the real spatial-direct-derived
+motion, since the Direct fill hadn't happened yet. Fixed by applying each
+Direct quad's `apply_spatial_direct(..., &[part], ...)` call immediately
+when encountered in the `part in 0..4` loop, in decode order, so a later
+Explicit sub-partition in the same macroblock always sees correct
+neighbour motion (`mv.rs`, `MbType::BB8x8` arm).
+
+**Verified**: `BA3_SVA_C` display-frame-3's diff cluster shrank from ~9 MBs
+(max_diff 14, luma+chroma) down to a single MB (`MB(4,8)`, max_diff 8, luma
+only, chroma now fully exact) — confirmed via the exact same first-divergent
+macroblock's `BRECON` trace (`KINETIX_BINTRACE=1`): that MB was
+`type=BB8x8` before the fix. Whole-clip: `diff_bytes` 1899→888,
+`max_diff` 112→54 across all 33 frames. 264 lib tests pass, clippy `-D
+warnings` and `cargo fmt` clean, full ITU suite still green (12 hard-checked
+`BitExact` clips unaffected). CABAC-B clips (`CABA3`/`CANL3`/`CVBS3`/
+`CACQP3`) moved by only a few bytes each (noise, not this fix — they use
+CABAC's own B_8x8 sub_mb_type path in `cabac_b.rs`, not `mv.rs`'s shared
+motion-grid builder... actually they DO share `predict_inter_b_macroblock`;
+the near-zero movement there just means their dominant bug is elsewhere,
+e.g. the already-documented frame-1 CABAC B/P divergence).
+
+**Second bug found and FIXED (same session, `apply_spatial_direct`'s
+`col_zero_flag` corner lookup):** display-frame-5 had a distinct diff
+pattern from the BB8x8 bug above — scattered ±1/±2-magnitude diffs across
+several plain `BL116x16`/`BL016x16`/`B16x8`/`BSkip` macroblocks (no `BB8x8`
+at any diverging location), plus one much larger `MB(5,8) type=BSkip` diff
+(max 54, the frame's worst). `KINETIX_SKIP_DEBLOCK=1` reproduced the exact
+same worst sample value at the exact same location as the deblock-on run,
+ruling out deblocking and confirming a pre-filter reconstruction bug — in a
+whole-MB `BSkip`, i.e. spatial direct mode again, but through the
+`MbType::BSkip | MbType::BDirect16x16` call site this time, not `BB8x8`.
+
+Root cause: `apply_spatial_direct`'s `col_zero_flag` pass indexes the
+co-located macroblock's per-8×8-quadrant motion via `cells[8 * (q / 2) + (q
+% 2) * 2]` to find the §8.4.1.2.1 `direct_8x8_inference_flag == 1` "corner
+sample" (spec: luma4x4BlkIdx 0/5/10/15 in Z-scan numbering — the 4×4
+sub-block diagonally **farthest from the macroblock centre** for each
+quadrant, e.g. quadrant 1's top-*right* 4×4, not its top-left). In this
+crate's raster `by*4+bx` 4×4-cell numbering the four correct corner indices
+are 0, 3, 12, 15. The old formula gave 0, 2, 8, 10 — correct only for
+quadrant 0 (top-left) by coincidence; for quadrants 1-3 it picked the 4×4
+sub-block *nearest* the MB centre instead, i.e. the wrong co-located motion
+entirely, corrupting the `col_zero_flag` decision (and therefore whether
+that quadrant's spatial-direct MV gets zeroed) for any B_Skip/B_Direct_16×16
+macroblock whose colocated-picture motion actually differed between its
+own quadrants. Fixed: `cells[12 * (q / 2) + 3 * (q % 2)]` (0, 3, 12, 15).
+
+**Verified**: whole-clip `BA3_SVA_C` `diff_bytes` 888→**520**, `max_diff`
+54→**4** (down from the original, pre-session 1899/112). Display-frame-3 is
+now **fully byte-exact** (was max_diff 8 after the first fix); the
+`MB(5,8)` cluster is completely gone. Remaining diffs are tiny (max 2-3,
+~70-190 samples per frame) on plain explicit-MV macroblocks — the
+`(2,1)`/"f" luma quarter-pel formula and the `predict_mv`/`median_pred`
+neighbour-substitution rules were re-checked line-for-line against spec
+§8.4.2.2.1/§8.4.1.3.1 this session and are correct, so the remaining gap is
+somewhere else not yet identified (possibly the missing "`RefPicList1[0]`
+must be short-term" global gate on `col_zero_flag` — `mv.rs` has no
+long-term-reference check anywhere; untested since this corpus may not
+exercise long-term refs). 264 lib tests pass, clippy `-D warnings` and
+`cargo fmt` clean, full ITU suite still green (12 `BitExact` clips
+unaffected); CABAC-B clips (`CABA3`/`CANL3`/`CVBS3`/`CACQP3`) moved by only
+a few bytes each from both fixes (their dominant bug is the separately-
+documented frame-1 CABAC divergence, unrelated). The localization technique
+(display-order dbg diffmap → `KINETIX_BINTRACE`/`KINETIX_SKIP_DEBLOCK` on
+the matching decode-order B-frame block → cross-reference MB coords) is
+reusable for whatever's left. `dbg_itu_pframe.rs` also gained `ITU_PX`/
+`ITU_PY` (dump a small got/ref sample window at a given pixel, used to
+compare deblock-on vs `KINETIX_SKIP_DEBLOCK=1` at the *same* coordinates
+sample-by-sample — confirmed the remaining tiny diffs are a genuine mix:
+some samples are identical pre/post-deblock and already wrong before
+filtering (a small residual reconstruction error), others are *introduced*
+by deblock on an otherwise-correct sample — two compounding small issues,
+not one, which is why this residual gap resisted a single clean fix).
+
+**Third bug found and FIXED (same session): B_8x8 CABAC `ref_idx_l0`/
+`ref_idx_l1` interleaving order — this was `CABA3_Sony_C`'s real desync.**
+`CABA3_Sony_C`'s display-frame-1 wasn't a subtle pixel error like
+`BA3_SVA_C` — every single macroblock diverged, by up to ~190/255, from
+the very first real B-slice. `KINETIX_DUMP_B_PATH=1` showed why: the CABAC
+B-slice parser hit constant `"ref_idx L0/L1 overflow"` and `"end_of_
+slice_flag mismatch (B-CABAC)"` errors almost immediately — a genuine
+arithmetic-decoder desync, not a reconstruction bug. Root cause: the
+`b_type_raw == 22` (`B_8x8`) CABAC branch in `cabac_b.rs` read `ref_idx_l0[
+part]` then immediately `ref_idx_l1[part]` for the *same* partition inside
+one `for part in 0..4` loop. §7.3.5.2's `sub_mb_pred()` syntax instead
+signals **all four** `ref_idx_l0[mbPartIdx]` first, in their own loop,
+**then** all four `ref_idx_l1[mbPartIdx]` in a second, separate loop — not
+interleaved per-partition. Any real `B_8x8` macroblock with at least one
+L0/Bi partition *and* at least one L1/Bi partition (very common in real
+multi-reference B content; essentially never hit by the smaller/simpler
+synthetic clips the `SESSIONS #12-#26` investigation below used) read the
+bins in the wrong order and desynced the CABAC engine — the exact same
+*class* of bug as the already-fixed CAVLC/CABAC P_16x8/P_8x16 `ref_idx`-
+before-`mvd` interleaving bug (session #32aj above), just in
+`ref_idx_l0`-vs-`ref_idx_l1` grouping instead of `ref_idx`-vs-`mvd`. Split
+into two separate `for part in 0..4` loops (all L0, then all L1), matching
+the `B_16x8`/`B8x16` branch's existing (already-correct) "All L0 ref_idx
+first." / "All L1 ref_idx." structure a few hundred lines above it in the
+same file.
+
+Verified: **zero** CABAC B-slice parse errors across the *entire*
+`CABA3_Sony_C` clip after the fix (was constant `ref_idx overflow`/`end_of_
+slice_flag mismatch` from the first B-slice on) — the parser now runs
+clean end to end. `diff_bytes` dropped ~47% (`CABA3` 5686057→3045405,
+`CANL3_Sony_C` 5773682→3094695, `CACQP3_Sony_D` 498385→390278; `CVBS3_
+Sony_C` unchanged, plausibly because its B_8x8 macroblocks don't mix L0/Bi
+with L1/Bi partitions). 264 lib tests pass, clippy/fmt clean.
+
+**Fourth finding: the *remaining* CABA3/CANL3/CVBS3/CACQP3 divergence is
+not a bug at all — it's an entirely unimplemented spec feature (temporal
+direct mode, §8.4.1.2.3), now correctly gated.** Once the interleaving fix
+above stopped the parser from erroring, these frames *still* came out
+wholesale-wrong (max_diff ~124-190) with zero parse errors — meaning the
+parse is fine but the reconstruction is provably wrong. Instrumenting
+`header.direct_spatial_mv_pred_flag` (slice-header debug print) showed all
+four of these clips' B slices use `direct_spatial_mv_pred_flag == false`
+(**temporal** direct) exclusively, while `BA3_SVA_C` (fixed above, now
+nearly bit-exact) uses `true` (**spatial** direct). `mv.rs` has exactly one
+direct-mode derivation, `derive_spatial_direct`/`apply_spatial_direct`
+(§8.4.1.2.2, spatial only), called **unconditionally** regardless of this
+flag — so every B_Skip/B_Direct_16x16/B_8x8-direct-quadrant macroblock in a
+temporal-direct slice silently got the wrong motion, with no parse error
+and (before this session) no `scaffold_fallback` signal for strict mode to
+catch either — `capabilities().pixel_exact` was lying for these streams.
+
+Fixed the *honesty* gap (not the feature — implementing real temporal
+direct, described below, is a separate, larger task): threaded `header.
+direct_spatial_mv_pred_flag` down through `parse_b_slice`/`parse_b_slice_
+cabac` → `predict_b_slice_mvs` → `predict_inter_b_macroblock` (new `bool`
+parameter throughout, plus both `decoder/mod.rs` and `decoder/interlaced.rs`
+call sites). At `predict_inter_b_macroblock`'s two direct-mode call sites
+(the whole-MB `BSkip`/`BDirect16x16` arm and `BB8x8`'s per-quadrant Direct
+handling), a `false` flag now returns `Err(...)` instead of calling
+`apply_spatial_direct` with data it can't correctly interpret — propagating
+through the existing `?`/`Err(e) => { "Fall through to the skip scaffold" }`
+machinery already used for every other slice-level parse failure, which
+already sets `scaffold_fallback` (via `emit_skip_frame`) for strict mode.
+**Deliberately gated per-macroblock, not per-slice-header**: an earlier
+version of this fix rejected the whole slice the moment `direct_spatial_
+mv_pred_flag == false` was seen in the header, which **regressed
+`ibp_boxmv_smallmv`** (a `dbg_b_implied_pred.rs` test using x264
+`direct=none`, which sets the header flag but never actually codes a
+Direct-type macroblock — the flag's value is irrelevant when direct mode
+is never exercised). The per-macroblock gate only fires when direct-mode
+derivation is *actually* invoked, so streams that carry the flag without
+using it are unaffected — confirmed by the full test suite passing again
+(264 lib tests, all `tests/*.rs`, including `ibp_boxmv_smallmv`) after
+narrowing the gate this way. `CLAUDE.md`'s known-gaps list updated to
+mention this alongside the existing multi-slice/non-4:2:0/>8-bit gates.
+
+**What implementing real temporal direct mode would need** (§8.4.1.2.3,
+not attempted this session — this is a genuine new feature, not a bug fix,
+and materially larger than anything else in this session): for each
+Direct 8×8 quadrant, `mvCol`/`refIdxCol` come from the co-located picture
+(`RefPicList1[0]`, already available via the existing `colocated_mv`
+mechanism) same as today's `col_zero_flag` lookup, but then need: (1)
+`MapColToList0`: colPic's own `refIdxCol` (an index into *colPic's own*
+reference list, whichever list `PredFlagL0Col`/`PredFlagL1Col` selects) has
+to be mapped to an index in the *current* slice's `RefPicList0`, by finding
+which physical reference picture that colPic-relative index pointed to and
+searching for the same picture in the current L0 list; (2) `DistScaleFactor`
+per current-L0-ref-index, computed once per slice from `tb` (current POC −
+that L0 ref's POC, easy) and `td` (colPic's POC − the POC of whichever
+picture colPic's mapped ref index pointed to, `Clip3(-128,127,·)` both);
+(3) the final `mvL0 = (DistScaleFactor·mvCol + 128) >> 8`, `mvL1 = mvL0 −
+mvCol`, unless the mapped L0 ref is long-term or `td == 0`, in which case
+`mvL0 = mvCol`, `mvL1 = 0`. The blocking piece: (1) and (2) both need to
+know, for the co-located picture, **which POC each of *its own* reference-
+list entries pointed to at the time it was decoded** — state nothing
+currently persists. `ref_pic.rs`'s `DpbEntry` would need a new field (e.g.
+`ref_poc_l0: Vec<i64>`, populated alongside `mv_grid` whenever a P or B
+picture joins the DPB) before `derive_temporal_direct` could be written at
+all. Once that exists, `derive_temporal_direct` slots into `mv.rs` next to
+`derive_spatial_direct`, selected at the same two call sites this session's
+fix gated (`predict_inter_b_macroblock`'s `BSkip|BDirect16x16` arm and
+`BB8x8`'s per-quadrant Direct handling in `mv.rs`), and the `Err(...)` bail
+this session added there gets replaced with a real call.
+
+**Briefly investigated `HCHP1_HHI_B` (hierarchical GOP-16 B), inconclusive
+but corrects an assumption**: `direct_spatial_mv_pred_flag=true` (spatial,
+`nl0=nl1=1`) on every B slice — not the temporal-direct gap above. More
+importantly, the manifest's "frame 0 bit-exact, frames 1+ diverge" framing
+is stale: display-frame 1 is **not** scaffolded — it reconstructs real
+content with only a small, localized diff cluster (max 17, ~300 luma
+samples, concentrated around one clump of MBs), the same *shape* of
+residual gap as `BA3_SVA_C`'s leftover, not a "ref list build failed"
+wipeout. Those failures are real but apparently intermittent across the
+250-frame decode (`KINETIX_DUMP_B_PATH=1` shows ~5-7 occurrences in just
+the first ~20 B-slices), and later frames get much worse (`frame 6` best-
+matches ref frame 215 — a garbage match, not just a wrong-but-plausible
+one). Not root-caused: correlating a specific wrong pixel back to its
+decode-order macroblock via `KINETIX_BINTRACE` didn't finish in reasonable
+time for this clip (250 frames × 396 MBs of per-MB `eprintln!` is ~4.5M
+lines even for one full decode) — the `BA3`/`CABA3` localization technique
+needs a frame-count cap on the *decode* side (not just the diagnostic's own
+comparison loop) before it's practical on a clip this size. Next session:
+add an env var to `decode_all`/`dbg_itu_pframe.rs` that stops decoding
+after N NALs, then re-run `KINETIX_BINTRACE` bounded to just the NALs
+around display-frame-1's decode-order position.
+
+**Reusable infra added**: `tests/dbg_itu_pframe.rs` now takes `ITU_CLIP`
+(was hardcoded), `ITU_FRAME` (which frame's MB diffmap to print, was
+hardcoded to `1`), `ITU_MAXFRAME` (how many frames' plane-level diffs to
+print, was hardcoded to `3`), `ITU_PX`/`ITU_PY` (small got/ref pixel-value
+window dump), and decodes in display order. `decoder/mod.rs` regained a
+permanent `KINETIX_DBG_DIRECT_MODE=1` hook (prints each B slice's
+`direct_spatial_mv_pred_flag`/`num_ref_idx_l0/l1_active` — the tool that
+found the temporal-direct gap above; removed once, restored as permanent
+since it's cheap and this exact question ("is this clip spatial or
+temporal direct, how many refs") keeps coming up per-clip). `tests/
+dbg_sps_probe.rs` (new, `#[ignore]`, `ITU_CLIP=<name>`) prints a clip's
+parsed SPS — used this session to rule out `direct_8x8_inference_flag ==
+false` as BA3_SVA_C's cause (it's `true`, so the MB-level-corner spatial-
+direct derivation `derive_spatial_direct` already uses is the spec-correct
+mode for this clip; a `false`-flag clip would need the per-8×8-partition
+neighbour variant, which `derive_spatial_direct` does not implement —
+untested gap, noted for whenever a `direct_8x8_inference_flag=0` clip shows
+up in the corpus).
+
 ## SESSION #32aj (2026-09-03) — ITU-T H.264.1 conformance suite wired; 4 real decoder bugs FIXED; 11 ITU clips byte-exact
 
 **4 bugs fixed this session, all found by the ITU suite, all with full-suite
@@ -54,10 +296,17 @@ only)" when every ref frame matches a decoded frame out of order).
 > (commit: "h264: opt-in display-order (POC) reorder buffer")
 
 REMAINING GAPS (manifest `KnownGap`; each `itu_conformance` run prints status):
-- [ ] **1(b). Real B-frame / multi-ref-P recon error.** Display order is now
-      correct (1a done). Residual: `BA3_SVA_C` ~1900 diff bytes / 33 frames
-      (max ~112) in B spatial-direct and/or multi-ref P; `CABA3`/`CANL3`/`CVBS3`
-      similar under CABAC. Needs a bin-level oracle on the first diverging B MB.
+- [~] **1(b). Real B-frame / multi-ref-P recon error — PARTIALLY FIXED
+      2026-09-05 (#32ak).** The B_8x8 direct/explicit sub-partition
+      interleaving bug is fixed (see #32ak above); `BA3_SVA_C` residual
+      1899→888 diff bytes / 33 frames (max 112→54). A second, distinct
+      small-diff bug remains in plain (non-`BB8x8`) B partitions — see
+      #32ak's "second, distinct bug" note for the exact localization
+      (display-frame 5, first-divergent `MB(7,0) type=BL116x16`). `CABA3`/
+      `CANL3`/`CVBS3` (CABAC) moved only marginally — their dominant bug is
+      still the separately-documented frame-1 divergence, unrelated to this
+      fix. Needs a bin-level oracle on the next diverging B MB (now a
+      simple explicit-MV type, not B_8x8 — should be more tractable).
 - [x] **2 (triaged 2026-09-04).** `CAMA1_Sony_C` MBAFF-CABAC-I fallback has TWO
       real causes (via `KINETIX_PAFF_DBG=1`): (a) `end_of_slice_flag mismatch
       (CABAC decode desynced)` on 4/5 frames — a CABAC MBAFF-I desync specific to

@@ -504,17 +504,50 @@ impl<'a> TileDecodeState<'a> {
         let subsampling_x = self.subsampling_x as u8;
         let subsampling_y = self.subsampling_y as u8;
 
-        if skip || luma_tx > TX_16X16 {
-            return Ok(());
-        }
+        // Whether to actually read residual coefficients — the previous
+        // version of this function returned early here for either
+        // condition, which also skipped every `FrameMeta` recording call
+        // below (`mark_luma_edges`/`record_luma`/etc. never ran for *any*
+        // inter block, skipped or not: `inter_block.rs` had no `self.meta`
+        // references at all). That left the deblock filter blind to every
+        // inter-coded block's transform geometry on every P/B frame — see
+        // todo-av1.md's "inter FrameMeta gap" note. `TxSize` (and therefore
+        // the real transform-edge geometry) is well-defined regardless of
+        // `skip`/`luma_tx`, so the geometry recording below always runs;
+        // only the actual coefficient read is gated on `has_residual`.
+        let has_residual = !skip && luma_tx <= TX_16X16;
 
-        // Y residual.
+        // Y residual + per-transform-sub-block deblock-edge geometry
+        // (mirrors the intra keyframe path in `intra_block.rs` — see its
+        // identical `mark_luma_edges`/`mark_luma_edges4`/`record_luma4`
+        // calls for why this must run per transform sub-block, not just
+        // once per coded block).
         for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
             for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
                 let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
                 let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                self.meta.mark_luma_edges(
+                    px_x / 8,
+                    px_y / 8,
+                    (px_x + luma_tx_w).div_ceil(8),
+                    (px_y + luma_tx_h).div_ceil(8),
+                );
+                self.meta.mark_luma_edges4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                );
+                self.meta.record_luma4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                    luma_tx_w as u8,
+                    luma_tx_h as u8,
+                );
                 let mut residual = vec![0i32; luma_tx_w * luma_tx_h];
-                if !skip {
+                if has_residual {
                     let blk = TxBlockCtx {
                         plane: 0,
                         tx_size: luma_tx,
@@ -577,6 +610,29 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        // Fixed 8×8-luma-grid loop-filter metadata (mirrors the intra
+        // keyframe path's identical call in `intra_block.rs`).
+        let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
+        let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
+        let bx0 = blk_px_x / 8;
+        let by0 = blk_px_y / 8;
+        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
+        for by in by0..by1.min(self.meta.h8) {
+            for bx in bx0..bx1.min(self.meta.w8) {
+                self.meta
+                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
+            }
+        }
+        self.meta.record_delta_lf(bx0, by0, bx1, by1, self.delta_lf);
+        self.meta.record_delta_lf4(
+            blk_px_x / 4,
+            blk_px_y / 4,
+            (blk_px_x + bw * MI_SIZE).div_ceil(4),
+            (blk_px_y + bh * MI_SIZE).div_ceil(4),
+            self.delta_lf,
+        );
+
         // Chroma residual.
         let cw = (luma_tx_w >> subsampling_x).max(4);
         let ch = (luma_tx_h >> subsampling_y).max(4);
@@ -599,6 +655,15 @@ impl<'a> TileDecodeState<'a> {
                 if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                     continue;
                 }
+                // Real per-transform-sub-block chroma deblock-edge geometry
+                // — mirrors the intra keyframe path's identical
+                // `mark_chroma_edges` call in `intra_block.rs`.
+                self.meta.mark_chroma_edges(
+                    cpx_x / 4,
+                    cpx_y / 4,
+                    (cpx_x + cw).div_ceil(4),
+                    (cpx_y + ch).div_ceil(4),
+                );
                 for (plane, dst, stride, w, h) in [
                     (
                         1usize,
@@ -616,7 +681,7 @@ impl<'a> TileDecodeState<'a> {
                     ),
                 ] {
                     let mut residual = vec![0i32; cw * ch];
-                    if !skip {
+                    if has_residual {
                         let blk = TxBlockCtx {
                             plane,
                             tx_size: c_tx,
@@ -689,6 +754,15 @@ impl<'a> TileDecodeState<'a> {
                         }
                     }
                 }
+            }
+        }
+        // Record chroma tx/skip metadata for the same 8×8-luma grid region
+        // (mirrors the intra keyframe path's identical call).
+        let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+        let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
+        for by in by0..by1.min(self.meta.h8) {
+            for bx in bx0..bx1.min(self.meta.w8) {
+                self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
             }
         }
         Ok(())

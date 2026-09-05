@@ -72,8 +72,11 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "BA3_SVA_C",
         Expect::KnownGap(
-            "CAVLC I/P/B spatial-direct, 5 refs — display order now correct; \
-             residual ~1900 diff bytes across 33 frames (max ~112), B/multi-ref-P recon",
+            "CAVLC I/P/B spatial-direct, 5 refs — two spatial-direct bugs fixed \
+             2026-09-05 (B_8x8 direct/explicit interleaving order + col_zero_flag \
+             corner-index formula): 1899->520 diff bytes, max 112->4. Tiny \
+             (max 2-3) diffs remain on plain explicit-MV B macroblocks, not yet \
+             root-caused",
         ),
     ),
     // --- progressive CABAC, I & I/P/B ---
@@ -81,15 +84,22 @@ const MANIFEST: &[(&str, Expect)] = &[
     ("CABA2_Sony_E", Expect::BitExact), // CABAC I/P multi-ref (300 frames)
     (
         "CABA3_Sony_C",
-        Expect::KnownGap("CABAC I/P/B — frame 0 exact, B/P frames diverge from frame 1 (max ~190)"),
+        Expect::KnownGap(
+            "CABAC I/P/B, 5 refs, temporal direct mode — B_8x8 ref_idx_l0/l1 CABAC \
+             interleaving-order bug fixed 2026-09-05 (was desyncing the parser \
+             from the first B slice on; now zero parse errors). Remaining gap: \
+             every B slice uses direct_spatial_mv_pred_flag=0 (temporal direct, \
+             §8.4.1.2.3), which is unimplemented (only spatial direct is) — \
+             correctly scaffolded now (was silently wrong before)",
+        ),
     ),
     (
         "CANL3_Sony_C",
-        Expect::KnownGap("CABAC I/P/B — diverges from frame 1 (max ~208); same class as CABA3"),
+        Expect::KnownGap("CABAC I/P/B — same class as CABA3 (temporal direct mode, unimplemented)"),
     ),
     (
         "CVBS3_Sony_C",
-        Expect::KnownGap("CABAC — diverges from frame 1 (max ~191)"),
+        Expect::KnownGap("CABAC — same class as CABA3 (temporal direct mode, unimplemented)"),
     ),
     (
         "CABAST3_Sony_E",
@@ -107,7 +117,9 @@ const MANIFEST: &[(&str, Expect)] = &[
     ),
     (
         "CACQP3_Sony_D",
-        Expect::KnownGap("CABAC I/P, per-MB QP — diverges from frame 1 (max ~188)"),
+        Expect::KnownGap(
+            "CABAC I/P/B, per-MB QP — same class as CABA3 (temporal direct mode, unimplemented)",
+        ),
     ),
     // --- MBAFF ---
     (

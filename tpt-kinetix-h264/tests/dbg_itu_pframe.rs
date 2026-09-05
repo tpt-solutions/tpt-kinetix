@@ -60,7 +60,7 @@ fn ba2_pframe_diffmap() {
     let annexb = std::fs::read(&bs).unwrap();
     let reference = std::fs::read(&yuv_path).unwrap();
 
-    let mut dec = H264Decoder::new();
+    let mut dec = H264Decoder::new().with_display_order();
     let mut frames = Vec::new();
     for (n, u) in split_nals(&annexb).into_iter().enumerate() {
         let pkt = Packet {
@@ -108,7 +108,15 @@ fn ba2_pframe_diffmap() {
     let y_sz = w * h;
     let c_sz = (w / 2) * (h / 2);
 
-    for fi in 0..3.min(frames.len()) {
+    let target_frame: usize = std::env::var("ITU_FRAME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let max_frame: usize = std::env::var("ITU_MAXFRAME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    for fi in 0..max_frame.min(frames.len()) {
         let got = &frames[fi].data;
         let refslice = &reference[fi * fl..(fi + 1) * fl];
         let plane = |name: &str, a: &[u8], b: &[u8], pw: usize| {
@@ -127,6 +135,25 @@ fn ba2_pframe_diffmap() {
             }
             eprintln!("  f{fi} {name}: max={maxd} ndiff={nd} worst@{sample:?}");
         };
+        if fi == target_frame {
+            if let (Ok(px), Ok(py)) = (
+                std::env::var("ITU_PX").unwrap_or_default().parse::<usize>(),
+                std::env::var("ITU_PY").unwrap_or_default().parse::<usize>(),
+            ) {
+                for dy in 0..3usize {
+                    for dx in 0..8usize {
+                        let (x, y) = (px + dx, py + dy);
+                        if x < w && y < h {
+                            eprintln!(
+                                "  f{fi} Y({x},{y}) got={} ref={}",
+                                got[y * w + x],
+                                refslice[y * w + x]
+                            );
+                        }
+                    }
+                }
+            }
+        }
         plane("Y", &got[..y_sz], &refslice[..y_sz], w);
         plane(
             "U",
@@ -142,7 +169,7 @@ fn ba2_pframe_diffmap() {
         );
 
         // Coarse 16x16 MB grid: mark MBs with any luma diff.
-        if fi == 1 {
+        if fi == target_frame {
             let mbw = w.div_ceil(16);
             let mbh = h.div_ceil(16);
             eprintln!("  f1 luma MB diffmap ({mbw}x{mbh}), '.'=exact digit=log2(maxdiff)+1:");

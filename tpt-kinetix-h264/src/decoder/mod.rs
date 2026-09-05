@@ -1459,7 +1459,33 @@ impl H264Decoder {
 
         // Real CAVLC B-slice decode: bi-predictive motion compensation against
         // RefPicList0 and RefPicList1 (§8.4/§8.5).
+        //
+        // Temporal direct mode (§8.4.1.2.3, `direct_spatial_mv_pred_flag ==
+        // 0`) has no derivation implemented — only spatial direct (§8.4.1.2.2)
+        // does. `header.direct_spatial_mv_pred_flag` is threaded down through
+        // `parse_b_slice[_cabac]` -> `predict_b_slice_mvs` ->
+        // `predict_inter_b_macroblock`, which bails with an `Err` (falling
+        // through to the scaffold below, same as any other parse error) the
+        // moment it actually needs to derive Direct-mode motion under a
+        // temporal-direct slice — not unconditionally for every B slice whose
+        // header carries the flag, since plenty of real streams (e.g. x264
+        // `direct=none`) never actually code a Direct-type macroblock at all,
+        // in which case the flag's value doesn't matter. Confirmed via ITU's
+        // `CABA3_Sony_C`/`CANL3_Sony_C`/`CVBS3_Sony_C`/`CACQP3_Sony_D`, which
+        // use temporal direct on every B slice and previously produced
+        // silently-wrong wholesale pixels with no error and no
+        // `scaffold_fallback` signal for strict mode to catch. See
+        // todo-h264.md's #32ak session note for what implementing the real
+        // thing needs.
         let is_b_slice = header.slice_type == crate::slice::SliceType::B;
+        if is_b_slice && std::env::var("KINETIX_DBG_DIRECT_MODE").is_ok() {
+            eprintln!(
+                "DBG B slice direct_spatial_mv_pred_flag={} nl0={} nl1={}",
+                header.direct_spatial_mv_pred_flag,
+                header.num_ref_idx_l0_active_minus1 + 1,
+                header.num_ref_idx_l1_active_minus1 + 1
+            );
+        }
         if is_b_slice && header.first_mb_in_slice == 0 {
             let mut slice_qp = 26
                 + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
@@ -1568,6 +1594,7 @@ impl H264Decoder {
                             .unwrap_or(false),
                         sps.direct_8x8_inference_flag,
                         colocated_mv.as_deref(),
+                        header.direct_spatial_mv_pred_flag,
                         tracer,
                     )
                 } else {
@@ -1583,6 +1610,7 @@ impl H264Decoder {
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
                         colocated_mv.as_deref(),
+                        header.direct_spatial_mv_pred_flag,
                         tracer,
                     )
                 };
