@@ -65,6 +65,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     // pair is decoded so `NeighbourCtx` can resolve mixed field/frame
     // neighbour addresses (§6.4.10.1) for already-decoded macroblocks.
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
+    let mut decoded_mb_count = total;
 
     for mb_idx in 0..total {
         // MBAFF addressing (§6.4.2/§7.4.4): consecutive macroblock addresses
@@ -237,20 +238,24 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         // §7.3.4); it follows only the bottom macroblock. For non-MBAFF slices
         // it follows every macroblock.
         //
-        // When present it must be 0 for every mid-slice MB; a 1 there means the
-        // decode has desynced from the bitstream (see `todo.md` Phase D), so
-        // bail rather than risk emitting wrong pixels. On the LAST MB either
-        // value is accepted: spec-conformant encoders write a final terminate
-        // (=1), but x264 omits it (it emits exactly total-1 terminate bins,
-        // one before each MB except the first) and ffmpeg exits on the MB
-        // count in that case.
+        // A `1` here is `moreDataFlag = 0` (§7.3.4): this slice's
+        // `macroblock_layer()` data is over. For a single-slice picture that
+        // only ever happens on the true last MB; for a multi-slice picture
+        // (`first_mb_in_slice` of the NEXT slice > 0) it legitimately fires
+        // mid-picture, at the boundary of this slice's own MB range — that
+        // is not a desync, it's the picture's remaining macroblocks
+        // belonging to a different slice's bitstream that this call was
+        // never going to see. Stop decoding and return what's been parsed so
+        // far (the rest of `macroblocks` stays at its `Macroblock::new_skip`
+        // default, same as before any multi-slice picture support existed).
         if !(mbaff_frame && mb_idx % 2 == 0) {
             let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            if !is_last && end_of_slice {
-                return Err(SliceDataError::Unsupported(
-                    "end_of_slice_flag mismatch (CABAC decode desynced)",
-                ));
+            if end_of_slice {
+                let is_last = mb_idx + 1 == total;
+                if !is_last {
+                    decoded_mb_count = mb_idx + 1;
+                }
+                break;
             }
         }
     }
@@ -259,5 +264,6 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store: MvStore::new(total),
+        decoded_mb_count,
     })
 }

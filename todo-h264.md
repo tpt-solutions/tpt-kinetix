@@ -2,6 +2,289 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ao (2026-09-05, next) — real fix: CABAC end_of_slice_flag mid-picture is now a legitimate stop, not a desync error; multi-slice pictures' first slice genuinely reconstructs
+
+Picked a more tractable item than the `MIDR_MW_D` bit-oracle rabbit hole:
+`CABAST3_Sony_E` / `CABASTBR3_Sony_B` (4 slices/picture) and `CABACI3_Sony_B`
+(`Limitation`, 4 slices/picture) were all claimed in the manifest to have
+"only the first slice of each picture reconstructed" — but empirically
+(`dbg_itu_pframe.rs` diffmap on `CABAST3_Sony_E`) the ENTIRE frame was a
+flat grey/128 scaffold, every macroblock wrong. The manifest text was
+aspirational, not actual (per `CLAUDE.md`: "check code before trusting
+todo.md checkboxes").
+
+**Root cause**: every CABAC slice-data parser (`cabac_i.rs`, `cabac_p.rs`
+×2 sites, `cabac_b.rs` ×2 sites) treated `end_of_slice_flag == 1`
+(`decode_terminate()`) as valid *only* on the picture's true last
+macroblock (`mb_idx + 1 == total`, where `total` = the WHOLE picture's MB
+count) — anywhere else it was `return Err("end_of_slice_flag mismatch")`,
+on the theory that early termination only ever means a desync. That's
+wrong: per §7.3.4, `end_of_slice_flag` (`moreDataFlag`) legitimately fires
+at the end of *this slice's* macroblock range, which for a multi-slice
+picture is not the same as the picture's last MB — slice 1 of a 4-slice
+CIF picture legitimately terminates after roughly a quarter of the
+macroblocks. Since every slice parser is only ever fed the FIRST slice
+(continuation slices with `first_mb_in_slice != 0` are already dropped
+entirely by `decoder/mod.rs`'s `suppress_frame` guard, unchanged this
+session), that early return meant a genuine, spec-legal terminate always
+looked identical to a desync, and the CABAC parse always errored out,
+cascading through B-slice/I_PCM fallback to `scaffold_fallback = true` —
+the whole picture, whole slice 1 included, went flat scaffold.
+
+**Fix**: changed all 5 sites to `break` the macroblock loop on
+`end_of_slice_flag == 1` regardless of whether it's the picture's last MB
+(the remaining macroblocks stay at their pre-existing
+`Macroblock::new_skip()` default, same as today). Added
+`ParsedSlice::decoded_mb_count` (defaults to the full picture's MB count
+for every CAVLC parser and the unaffected paths; set to the actual
+decoded count when a CABAC parser stops early) so `decoder/mod.rs` can
+still correctly set `self.scaffold_fallback = true` whenever
+`decoded_mb_count < total` — this preserves strict mode's existing
+contract (`KinetixError::NotPixelExact` for multi-slice pictures, per
+`CLAUDE.md`'s "unsupported feature" list) while letting non-strict mode
+actually use the real, correctly-decoded first-slice macroblocks instead
+of discarding them. Wired into both `try_decode_real_slice` (the CABAC
+I-slice fast path) and `decode_slice`'s P/B branches.
+
+**Verified real, not just "doesn't error now"**: `dbg_itu_pframe.rs`
+diffmap on `CABAST3_Sony_E` frame 1 shows the picture's first ~4 of 18 MB
+rows now bit-exact ('.' in the diffmap) where before the *entire* frame
+was wrong. `itu_conformance`'s aggregate `diff_bytes` also dropped
+(previously ~100% of luma bytes differed uniformly at a flat value; now
+partially exact, partially still-scaffold in the un-decoded 3 slices).
+Manifest text for `CABAST3_Sony_E`/`CABASTBR3_Sony_B` updated to describe
+the actual, verified state instead of the stale aspirational claim;
+`CABACI3_Sony_B` (`Limitation`, not `KnownGap` — never asserted exact) gets
+the same underlying improvement without a manifest change since its
+category doesn't check exactness.
+
+**Not fixed — this is real progress, not full multi-slice support.**
+Slices 2-4 of each picture are still never decoded at all (continuation
+NALs are dropped outright, unchanged). Full multi-slice support needs: (1)
+each slice-data parser starting its MB loop at `first_mb_in_slice` instead
+of `0` (currently hard-coded to start at 0 — feeding slice 2's real
+bitstream through today would immediately desync, since it isn't even
+attempted); (2) accumulating multiple slices' `macroblocks`/`nz`/etc into
+one shared per-picture buffer across NAL calls (needs `decoder/mod.rs` to
+know when a picture is "done" — next NAL's `first_mb_in_slice == 0`, or
+end of stream); (3) reconstruct/deblock only once the whole picture's
+macroblocks are collected. CAVLC's equivalent (`parse_i_slice`/`parse_p_
+slice`/`parse_b_slice` in `cavlc.rs`) was deliberately NOT touched this
+session — CAVLC's slice end is an implicit "ran out of bits" (`Eof`)
+rather than CABAC's explicit terminate bin, and blindly treating `Eof` as
+"legitimate multi-slice end" would mask real CAVLC desync bugs elsewhere
+(no equivalently cheap, unambiguous signal exists there). 264 lib tests
+pass, full ITU conformance suite passes (12/12 `BitExact` unaffected, 0
+failures), clippy/fmt clean.
+
+## SESSION #32an (2026-09-05, cont'd yet again) — MIDR_MW_D: ffmpeg IS bit-exact vs the ITU reference (ruling out "ambiguous edge case"); our error is NOT ref_idx-correlated
+
+Followed #32am's own recommended next step: fetched ffmpeg's real
+`h264_slice.c` frame_num-gap algorithm (`raw.githubusercontent.com/FFmpeg/
+FFmpeg/master/libavcodec/h264_slice.c`, lines ~1450-1589) instead of
+guessing. It does NOT gate on `gaps_in_frame_num_allowed_flag` for whether
+to synthesize placeholder pictures — that flag only controls whether
+`last_pocs` gets reset and an `invalid_gap` bookkeeping bit. Unconditionally,
+for every skipped `frame_num`, it: shortens the gap to at most
+`sps->ref_frame_count` synthetic pictures (no point allocating ones that
+sliding-window would immediately evict), and for each one calls
+`h264_frame_start` + `ff_h264_execute_ref_pic_marking` (a REAL sliding-window
+DPB insertion, evicting old entries same as any decoded picture) with pixel
+data **shared via `ff_thread_ref_frame`** (a ref-counted pointer, not a copy)
+from whatever `short_ref[0]` was at the top of that loop iteration — i.e.
+every synthesized entry ends up pointing at the exact same underlying pixel
+buffer as the last real picture before the gap. For `MIDR_MW_D`
+(`num_ref_frames=4`, gap size 16), this produces exactly 4 synthetic
+`frame_num=12,13,14,15` DPB entries, all aliasing the frame-60 IDR's pixels,
+and — critically — **the real IDR entry itself gets evicted** by the 4th
+synthetic insertion's sliding window (5 entries momentarily exist before
+sliding-window drops the oldest).
+
+**Ran ffmpeg itself on this exact clip and compared to the ITU reference:**
+`ffmpeg -i MIDR_MW_D.264 -f rawvideo ... | ffmpeg -lavfi psnr` against
+`MIDR_MW_D_rec.qcif` → `mse=0.00 psnr=inf` for **every one of the 100
+frames**, gap included. This is decisive: there is nothing ambiguous or
+stream-conformance-violation-shaped about this test vector's expected
+output — a real decoder (ffmpeg) produces the exact reference bytes through
+the gap, so our divergence is a genuine, fixable Kinetix bug, not a
+"different reference decoders would legitimately disagree here" situation.
+
+**But the gap-fill *mechanism* itself is very unlikely to be the bug.**
+Since every synthetic ffmpeg entry is a pixel-alias of the same one real
+picture (the frame-60 IDR), and our current 1-entry-repeated-4x fallback in
+`build_ref_list_l0` is *also* 4 slots of that same one real picture's pixel
+data — MC sampling from either representation should be byte-identical
+regardless of which of the 4 (pixel-identical) slots a given partition's
+`ref_idx` names, and there is no `ref_pic_list_modification` (readme:
+"Ref Pic List Reorder: NO") or weighted prediction (readme: "Weighted Pred
+(P): OFF") in this stream to make the *metadata* differences (distinct
+frame_num/poc vs. our single repeated frame_num=0) reachable. Confirmed this
+empirically two ways:
+1. Dumped our own decoded frame 61 (`ITU_DUMP_FRAMES_DIR` env var added to
+   `dbg_itu_pframe.rs`) and diffed against ffmpeg's frame 61: **`mse_y=440,
+   mse_uv≈3`** — chroma is nearly untouched (barely differs even from our own
+   frame 60!) while luma is badly wrong almost everywhere. A pixel-content
+   mismatch in the reference itself would hit all planes roughly
+   proportionally; this pattern doesn't.
+2. Cross-referenced the `REFIDX_GT0` trace against the luma diffmap for
+   frame 61: **top-row macroblocks that use ONLY `ref_idx=0`
+   (`mb=(0,0),(1,0),(2,0),(3,0),(5,0),(6,0)` — no `REFIDX_GT0` line at all)
+   are just as wrong (diffmap digit `7`, i.e. maxdiff ≥64) as neighboring
+   macroblocks that use `ref_idx∈{1,2,3}`.** If the bug were "wrong pixel
+   content behind ref_idx > 0", `ref_idx=0`-only macroblocks would be
+   correct. They aren't — this rules out the ref-list-padding hypothesis
+   `#32am` left open.
+
+**Not fixed — needs a bit-level oracle to go further.** The failure mode
+(near-uniform, large, luma-only divergence across almost the whole frame,
+chroma nearly untouched) doesn't point cleanly at QP/dequant (would be
+bounded/proportional, not up to 140), nor at the ref-list mechanism (ruled
+out above), which leaves MV *prediction* (§8.4.1.3, wrong predictor median
+value spreading a wrong MV to every dependent neighbor — consistent with
+"looks like real prediction, not garbage" from the original diffmap notes)
+or something in the residual/CAVLC decode path specific to this slice's
+content as the remaining candidates, neither narrowed further this session.
+Continuing requires either compiling ffmpeg with a debug ref_idx/MV dump
+patched into `h264_slice.c`/`h264_mvpred.c` for this exact clip (no such
+harness exists in-repo currently — an earlier CABAC I-slice bug was fixed
+this way per an older session, but the harness itself wasn't committed), or
+a from-spec re-derivation of §8.4.1.3's median predictor against this
+slice's specific neighbor availability pattern by hand.
+
+Added `ITU_DUMP_FRAMES_DIR` (writes `our_fN.yuv` per decoded frame) to
+`dbg_itu_pframe.rs` and a `slice_qp_delta`/`num_ref_idx_l0_active_minus1`/
+`data_bit_offset` line to the `SLICE_START` trace — both useful for the next
+session picking this back up. 264 lib tests pass, full ITU suite passes,
+clippy/fmt clean.
+
+## SESSION #32am (2026-09-05, cont'd again) — MIDR_MW_D root-caused: a real `frame_num` gap the decoder has no handling for (§8.2.5.2 unimplemented)
+
+Continued the #32al thread's "next step" (confirm via `KINETIX_BINTRACE`
+whether frame 61 reads `ref_idx > 0`). Added throwaway-turned-permanent
+`KINETIX_BINTRACE`-gated traces (`NAL_LOOP`, `TRY_REAL_SLICE`,
+`SLICE_START` in `decoder/mod.rs`; `REFIDX_GT0` in `cavlc.rs`/`cabac_b.rs`)
+and used them to walk the exact NAL sequence around the second IDR.
+
+**Finding: the bitstream itself has a `frame_num` gap, and nothing in the
+decoder handles it.** `MIDR_MW_D`'s SPS has
+`gaps_in_frame_num_value_allowed_flag: false` (confirmed via
+`dbg_sps_probe.rs`), yet immediately after the second IDR (`frame_num=0`,
+display-frame 60), the very next P slice's own header genuinely decodes
+`frame_num=16` — not `1`. This isn't a parser desync: frame_num increments
+perfectly normally on both sides (`...,57,58,59` before the IDR; `0`
+(IDR); `16,17,18,19,...,39` after, strictly +1 each slice, matches the ITU
+suite's own `frame_num` field width of 8 bits from
+`log2_max_frame_num_minus4=4`, no wraparound in range). `TRY_REAL_SLICE`'s
+per-slice log confirms there is exactly one NAL between the IDR and the
+`frame_num=16` slice — i.e. frame_nums 1..15 were simply never
+transmitted; this is a genuine (if technically flag-forbidden) gap, and
+the earlier session's "15 frames short of the reference count" was this
+gap, not a decode failure (`grep`-ing the trace for "parse error" /
+`Unsupported` /`Eof` across the whole run: zero hits — every slice that
+*is* present parses and reconstructs without error).
+
+§8.2.5.2 ("Decoding process for gaps in frame_num") specifies that a
+conformant decoder must synthesize a "non-existing" short-term reference
+picture for every skipped `frame_num` value and run them through the same
+sliding-window process — `grep -rn "gaps_in_frame_num\|non.existing\|NonExisting\|fill_gap"
+tpt-kinetix-h264/src` turns up only the SPS flag's own parse, no such
+synthesis anywhere. Confirmed via `REFLIST P L0` trace: at `frame_num=16`,
+the DPB holds exactly one real entry (the frame-60 IDR: `pic_num=0
+frame_num=0 poc=0`), and `build_ref_list_l0`'s documented "pad by
+repeating the last entry" fallback (`ref_pic.rs:1064-1067`) fills all 4
+slots with that same IDR entry — which is a no-op for MC (all 4 "distinct"
+`ref_idx` values point at pixel-identical data, so `ref_idx_l0=[0,0,1,1]`
+on mb=(4,0) reconstructs identically to `[0,0,0,0]`). So the padding
+heuristic is very unlikely to be *why* pixels differ; the residual
+divergence (`~4-26` in the localized top-left region, up to `140`
+elsewhere per the #32al session's diffmap) is more likely in the MV
+*prediction* context (§8.4.1.3 neighbor `ref_idx` equality checks) or POC/
+`PicNumContext` wraparound math reacting to a same-frame-repeated DPB in a
+way real ffmpeg's own (probably equally ad-hoc, since the flag forbids
+this stream from having a gap at all) handling doesn't — **not
+root-caused to that level of detail this session**; the gap itself is the
+confirmed root cause of the divergence's *onset*, not yet of its exact
+pixel values.
+
+**Not fixed.** Implementing real §8.2.5.2 gap-filling is a nontrivial,
+somewhat spec-ambiguous feature (the spec's synthesis procedure is defined
+for the *legal* case, `gaps_in_frame_num_value_allowed_flag == 1`; here
+the flag is 0, so this stream's gap is arguably a stream-conformance
+violation, and "what ffmpeg actually does" needs checking against ffmpeg's
+own `h264_slice.c` gap handling before matching its output blindly).
+Recommend as the next concrete step: read ffmpeg's `h264_slice.c`
+frame_num-gap handling (search for `h->poc.frame_num` vs
+`h->cur_pic_ptr` gap logic / `h264_field_start`) to see whether it
+synthesizes placeholder pictures unconditionally regardless of the SPS
+flag, or just proceeds with whatever's in the DPB (matching our current
+behaviour) — that determines whether this needs new code at all or
+whether the remaining diff is a separate, smaller bug once the gap itself
+is accounted for. Manifest (`itu_conformance.rs`) and this file updated
+with the precise finding so the next session doesn't have to re-derive
+it. 264 lib tests pass, clippy/fmt clean.
+
+## SESSION #32al (2026-09-05, cont'd) — real SPS/PPS-by-id selection bug FIXED (MPS_MW_A improved); MIDR_MW_D's real cause is NOT this, ruled out with data
+
+Picked up `MPS_MW_A`/`MIDR_MW_D` (both flagged "structural" with no further
+detail). `decoder/mod.rs` had **two** call sites (the main slice-decode
+loop and the `decode_slice` scaffold-fallback path) that resolved the
+active SPS/PPS with `self.sps_store.values().next()` / `self.pps_store.
+values().next()` — literally "whichever entry the `HashMap` iterates to
+first", not the SPS/PPS the current slice's own `pic_parameter_set_id`
+actually specifies. Any stream with more than one active parameter set
+(exactly what `MPS_MW_A`, "multiple parameter sets", tests) could silently
+decode a slice against the *wrong* PPS/SPS — wrong QP init, scaling lists,
+entropy mode, dimensions, whatever the other parameter set specified — with
+no parse error, since structural PPS/SPS validity doesn't depend on being
+the *right* one.
+
+**Fixed**: added `slice::peek_pic_parameter_set_id(rbsp) -> Option<u32>` (a
+tiny standalone `ue(v)` peek — `first_mb_in_slice`, `slice_type`,
+`pic_parameter_set_id` are the first three fields, fixed-format regardless
+of which parameter sets are active, so this needs no SPS/PPS context
+itself). Both call sites in `decoder/mod.rs` now peek the real PPS id, look
+it up in `pps_store`, then look up *that* PPS's own `seq_parameter_set_id`
+in `sps_store` — falling back to "first in the store" only when the peek
+fails or the id isn't present (matching prior behaviour for malformed
+input, not a new failure mode).
+
+**Verified real improvement, but not a full fix**: `MPS_MW_A` `diff_bytes`
+3107519→2168633 (~30% down), `max_diff` 222→218. Still not exact — a
+remaining gap exists, not yet root-caused (next step: the same `KINETIX_
+BINTRACE` + `ITU_PX`/`ITU_PY` localization technique from the B-slice work
+above, applied to `MPS_MW_A`'s first divergent frame). 264 lib tests pass,
+clippy/fmt clean, full ITU suite still green (12 `BitExact` unaffected).
+
+**`MIDR_MW_D` ruled out — this fix does not touch it, confirmed with data,
+not just inference.** Added a temporary probe (`dbg_sps_probe.rs` now also
+lists every SPS id and every slice's `pic_parameter_set_id`) and confirmed
+`MIDR_MW_D` uses exactly one SPS id and one PPS id for its entire 100
+frames, including both of its IDRs — so the bug this session just fixed
+was never in play for this clip, and its unchanged `itu_conformance`
+numbers after the fix are expected, not a sign the fix regressed.
+
+Localized `MIDR_MW_D`'s real divergence instead: display-frame 60 (the
+*second* IDR itself) is fully byte-exact; display-frame 61 (the first P
+slice after it) diverges on every macroblock, but **not** uniformly —
+`ITU_PX`/`ITU_PY` sampling shows the top-left 8×8 window differing by only
+~4-26 per sample (consistent with a real, if wrong, residual/prediction —
+not garbage), while the diffmap's reported worst sample elsewhere in the
+frame is off by up to 140. This does *not* look like "wrong reference
+picture" or "corrupted parameter set" (both would produce either uniform
+garbage or a content-shaped-but-globally-shifted image) — it looks like
+the same *class* of real, localized-but-widespread residual bug already
+chased in `BA3_SVA_C`/`HCHP1_HHI_B`, specific to whatever's different about
+the first inter picture immediately following an IDR reset (frame_num=0,
+a single-entry — repeated-to-fill `RefPicList0` — see `ref_pic.rs`'s
+`ref_list_l0_repeats_last_when_dpb_short` test, which may or may not be
+exercised here; not yet confirmed whether the repeated placeholder entries
+are actually read via a `ref_idx > 0` or are harmless dead weight). Not
+root-caused this session. Next step: `KINETIX_BINTRACE`'s `REFLIST P
+L0[i]` dump already shows the (repeated) list content — confirm via the
+same trace whether any macroblock in frame 61 actually reads `ref_idx >
+0` (if none do, the repeat-padding is a red herring and the bug is a plain
+residual/CAVLC decode issue in this specific frame, not a ref-list one).
+
 ## SESSION #32ak (2026-09-05) — TWO real spatial-direct bugs FIXED; BA3_SVA_C residual 1899→520 diff bytes, max_diff 112→4
 
 Picked up REMAINING GAPS item 1(b) below ("real B-frame / multi-ref-P recon

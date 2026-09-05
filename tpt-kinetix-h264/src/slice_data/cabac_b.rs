@@ -200,6 +200,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         0
                     };
                     motion.ref_idx_l0.push(ri as i32);
+                    if ri > 0 && std::env::var("KINETIX_BINTRACE").is_ok() {
+                        eprintln!("REFIDX_GT0 mb=({mb_x},{mb_y}) P_8x8 part={part} ri={ri}");
+                    }
                     // fill 2×2 blocks in the 8×8 quadrant with ref_idx
                     let blks = partition_blocks(col4, row4, 2, 2);
                     if ri > 0 {
@@ -307,6 +310,9 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
                         0
                     };
                     motion.ref_idx_l0.push(ri as i32);
+                    if ri > 0 && std::env::var("KINETIX_BINTRACE").is_ok() {
+                        eprintln!("REFIDX_GT0 mb=({mb_x},{mb_y}) part={part} ri={ri}");
+                    }
                     let blks = partition_blocks(col4, row4, w4, h4);
                     if ri > 0 {
                         for &b in &blks {
@@ -507,8 +513,9 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
     let mut prev_mb_skipped = false;
     let mut next_mb_skipped = false;
+    let mut decoded_mb_count = total;
 
-    for mb_idx in 0..total {
+    'mb_loop: for mb_idx in 0..total {
         // MBAFF pair-scan addressing (§6.4.2/§7.4.4) — see `cabac_p.rs`.
         let (mb_x, mb_y, grid_idx) = if mbaff_frame {
             let pair = mb_idx >> 1;
@@ -628,14 +635,12 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
             // pair (`CurrMbAddr % 2 == 0` ⇒ `moreDataFlag = 1`).
             if !(mbaff_frame && mb_idx % 2 == 0) {
                 let end_of_slice = dec.decode_terminate() == 1;
-                let is_last = mb_idx + 1 == total;
-                // See the note in cabac_p.rs: the final MB's terminate bin may
-                // be absent (x264 omits it); only a mid-slice end_of_slice is
-                // an error.
-                if !is_last && end_of_slice {
-                    return Err(SliceDataError::Unsupported(
-                        "end_of_slice_flag mismatch (B-CABAC, skip MB)",
-                    ));
+                if end_of_slice {
+                    let is_last = mb_idx + 1 == total;
+                    if !is_last {
+                        decoded_mb_count = mb_idx + 1;
+                    }
+                    break 'mb_loop;
                 }
             }
             continue;
@@ -689,11 +694,12 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         // frame pair.
         if !(mbaff_frame && mb_idx % 2 == 0) {
             let end_of_slice = dec.decode_terminate() == 1;
-            let is_last = mb_idx + 1 == total;
-            if !is_last && end_of_slice {
-                return Err(SliceDataError::Unsupported(
-                    "end_of_slice_flag mismatch (B-CABAC)",
-                ));
+            if end_of_slice {
+                let is_last = mb_idx + 1 == total;
+                if !is_last {
+                    decoded_mb_count = mb_idx + 1;
+                }
+                break 'mb_loop;
             }
         }
     }
@@ -712,6 +718,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store,
+        decoded_mb_count,
     })
 }
 

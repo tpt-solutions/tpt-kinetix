@@ -49,9 +49,10 @@ fn ba2_pframe_diffmap() {
             })
         }),
         std::fs::read_dir(&dir).ok().and_then(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .find(|p| p.extension().is_some_and(|x| x == "yuv"))
+            rd.flatten().map(|e| e.path()).find(|p| {
+                p.extension()
+                    .is_some_and(|x| matches!(x.to_str(), Some("yuv" | "qcif" | "cif" | "4cif")))
+            })
         }),
     ) else {
         eprintln!("{clip} fixture absent; run `just fetch-h264-conformance`");
@@ -79,10 +80,23 @@ fn ba2_pframe_diffmap() {
     let (w, h) = (frames[0].width as usize, frames[0].height as usize);
     let fl = w * h * 3 / 2;
 
+    if let Ok(dump_dir) = std::env::var("ITU_DUMP_FRAMES_DIR") {
+        for (fi, f) in frames.iter().enumerate() {
+            let _ = std::fs::write(format!("{dump_dir}/our_f{fi}.yuv"), &f.data);
+        }
+    }
+
     // Is it just a display-order (reordering) problem? For each of our first 8
     // frames, find which reference frame it best matches.
     let nref = reference.len() / fl;
     eprintln!("  decoded {} frames, ref has {nref}", frames.len());
+    let key_frames: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.is_key_frame)
+        .map(|(i, _)| i)
+        .collect();
+    eprintln!("  key (IDR) frame indices: {key_frames:?}");
     for (gi, g) in frames.iter().take(8).enumerate() {
         if g.data.len() != fl {
             continue;

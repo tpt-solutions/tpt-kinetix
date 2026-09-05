@@ -70,6 +70,13 @@ pub struct ParsedSlice {
     pub macroblocks: Vec<Macroblock>,
     pub nz: Vec<MbNz>,
     pub mv_store: MvStore,
+    /// How many of `macroblocks` were actually decoded from this slice's own
+    /// bitstream, vs. left at their `Macroblock::new_skip` default because
+    /// `end_of_slice_flag` (CABAC) legitimately fired before covering the
+    /// whole picture — i.e. this is one slice of a multi-slice picture, and
+    /// the remaining macroblocks belong to a different slice this call never
+    /// saw. Equal to `macroblocks.len()` for a single-slice picture.
+    pub decoded_mb_count: usize,
 }
 
 /// Per-macroblock Intra_4×4 prediction-mode context, kept so neighbouring

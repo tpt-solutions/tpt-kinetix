@@ -104,15 +104,29 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "CABAST3_Sony_E",
         Expect::KnownGap(
-            "multi-slice (4 slices/picture) — frame count now correct; \
-             only the first slice of each picture is reconstructed",
+            "multi-slice (4 slices/picture) — frame count correct; 2026-09-05: \
+             CABAC's end_of_slice_flag mid-picture was being treated as a \
+             desync error (Err) instead of the legitimate multi-slice \
+             boundary it is (§7.3.4 moreDataFlag), so this used to be a \
+             full-frame grey scaffold despite the description below already \
+             claiming partial reconstruction. Fixed (cabac_i/p/b.rs treat an \
+             early end_of_slice_flag as a clean stop, `ParsedSlice::\
+             decoded_mb_count` tracks it, decoder/mod.rs still flags \
+             `scaffold_fallback` for strict mode) — the first slice's real \
+             MB range is now genuinely bit-exact (confirmed via diffmap: the \
+             picture's first ~4 of 18 MB rows are exact), the remaining 3 \
+             slices' macroblocks are still un-decoded (left at the skip \
+             default). Full multi-slice support (decode every slice's own MB \
+             range, starting at its own `first_mb_in_slice`, and merge into \
+             one picture) is not implemented",
         ),
     ),
     (
         "CABASTBR3_Sony_B",
         Expect::KnownGap(
-            "multi-slice — frame count now correct; only the first slice \
-             of each picture is reconstructed",
+            "multi-slice — same class and same 2026-09-05 fix as \
+             CABAST3_Sony_E: first slice's real MB range now genuinely \
+             reconstructs bit-exact, remaining slices still un-decoded",
         ),
     ),
     (
@@ -142,13 +156,29 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "MIDR_MW_D",
         Expect::KnownGap(
-            "multiple-IDR QCIF — 62/100 frames byte-exact, diverges from frame 61; \
-             15 frames short of the reference count",
+            "multiple-IDR QCIF — real frame_num gap right after the 2nd IDR \
+             (frame_num jumps 0->16; no §8.2.5.2 handling exists in-crate). \
+             Confirmed 2026-09-05 via ffmpeg itself (mse=0/psnr=inf vs the ITU \
+             reference on ALL 100 frames, gap included) that this is a real, \
+             fixable bug, not an ambiguous edge case. Ruled OUT: SPS/PPS-id \
+             selection, parse/CAVLC errors (zero across the run), and the \
+             ref-list-padding mechanism itself (ref_idx=0-only macroblocks are \
+             just as wrong as ref_idx>0 ones, and ffmpeg's own gap-fill also \
+             just aliases the same one real picture's pixels, same as our \
+             padding). Divergence is near-uniform, luma-only (chroma barely \
+             moves), consistent with a bad MV-prediction median rather than a \
+             residual/QP issue. Not root-caused further without a bit-level \
+             oracle; see todo-h264.md SESSION #32an",
         ),
     ),
     (
         "MPS_MW_A",
-        Expect::KnownGap("multiple parameter sets — 92/150 frames, none exact; structural"),
+        Expect::KnownGap(
+            "multiple parameter sets — decoder/mod.rs used \"whichever SPS/PPS the \
+             HashMap returns first\" instead of looking up by this slice's own \
+             pic_parameter_set_id; fixed 2026-09-05 (diff_bytes 3107519->2168633), \
+             still not exact — remaining gap not yet root-caused",
+        ),
     ),
     (
         "Sharp_MP_PAFF_1r2",

@@ -101,6 +101,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store: MvStore::new(total),
+        decoded_mb_count: total,
     })
 }
 
@@ -767,6 +768,7 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store,
+        decoded_mb_count: total,
     })
 }
 
@@ -892,6 +894,12 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             let my = r.read_se().ok_or(SliceDataError::Eof("mvd_l0 y"))?;
             motion.mvd_l0.push((mx, my));
         }
+    }
+    if std::env::var("KINETIX_BINTRACE").is_ok() && motion.ref_idx_l0.iter().any(|&r| r > 0) {
+        eprintln!(
+            "REFIDX_GT0 mb=({mb_x},{mb_y}) ref_idx_l0={:?}",
+            motion.ref_idx_l0
+        );
     }
     mb.motion = Some(motion);
 
@@ -1056,6 +1064,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
         macroblocks,
         nz,
         mv_store,
+        decoded_mb_count: total,
     })
 }
 
