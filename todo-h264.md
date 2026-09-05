@@ -2,6 +2,150 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32at — multi-slice CABAC P/B scoping session: baseline re-confirmed, concrete blockers mapped, no code changed (deliberately deferred, not attempted half-done)
+
+Read `07b0471`/`4a83773`/`ed9ff77` in full plus SESSION #32aq/#32ar/#32as, then read
+`decoder/mod.rs`'s CABAC-P call site (`decode_slice`, the `is_p_slice` branch,
+currently lines ~1791-2060-ish) and `slice_data/cabac_p.rs` end-to-end (P is
+the simpler of the two — no direct mode, single ref list — so it's the
+natural next step per the task brief). **Decision: did not attempt the
+implementation this session.** The design is clear (below), but doing it
+safely — without regressing any of the several currently-bit-exact P/B
+fixtures — needs its own dedicated session with a full `just check` +
+`itu_conformance` verification loop budget, which this session did not have
+room for after the investigation below plus a from-scratch baseline
+re-confirmation. Per this line of work's own stated discipline ("partial,
+well-documented, zero-regression progress... is a good outcome"), stopping
+here with an accurate map is better than a rushed, unverified attempt at an
+11,000+ line, deeply stateful change.
+
+**Baseline reconfirmed clean** (exact numbers, `master` at `ed9ff77`):
+- `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test binaries
+  `test result: ok`, 0 failures anywhere in the run (`grep -c "test result: ok"`
+  = 66, no `FAILED`/`panicked` lines). Lib unit tests: 269 passed.
+- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`:
+  `ITU conformance: 64 clip(s) present, 12 hard-checked bit-exact, 0
+  failure(s)` — identical to SESSION #32as's own reported baseline, confirms
+  nothing regressed between sessions.
+- No `just check` run this session (no code changed, so fmt/clippy/build are
+  unaffected — the last confirmed-clean run is `ed9ff77`'s own).
+
+**Concrete findings on what a real P-slice `PictureAccumulator` needs**
+(mirroring `07b0471`'s I-slice shape, from actually reading
+`slice_data/cabac_p.rs` in full and the `decode_slice` P call site):
+
+1. **The gating bug is earlier than the P/B branch itself.** `decode_slice`
+   (not `try_decode_real_slice` — CABAC P/B never goes through that function;
+   it only handles `SliceType::I | Si`) has its own blanket guard near the
+   top: `if header.first_mb_in_slice != 0 { self.suppress_frame = true;
+   return self.emit_skip_frame(...); }` (still present, unmoved since
+   `ed9ff77`'s trace). This fires for EVERY continuation slice of EVERY
+   slice type before the function ever reaches the CAVLC/CABAC or I/P/B
+   branching below it. Any P/B accumulator needs its own
+   `try_decode_real_slice`-style early exit inserted *before* this guard
+   (exactly how the CABAC-I path already routes around it via
+   `try_decode_real_slice` being tried first in `decode_impl`), not a change
+   to the guard itself (CAVLC P/B and non-multi-slice continuation-drop
+   behaviour must stay exactly as-is).
+2. **`inter_ctx: Vec<MbInterCabacCtx>`** (`cabac_p.rs:349`) is local scratch,
+   allocated fresh every call, exactly like `pred_ctx`/`cabac_ctx` were
+   before `07b0471` — needs to become an accumulator-owned `&mut
+   [MbInterCabacCtx]` parameter, same treatment.
+3. **Three more grid-position-only neighbour derivations exist in the P path
+   that `07b0471`'s `NeighbourCtx::new_with_slices` does NOT cover**, all
+   inline in `cabac_p.rs`'s macroblock loop rather than routed through
+   `NeighbourCtx`:
+   - `skip_neighbors` (`cabac_p.rs:385-390`): `left_available: mb_x > 0`,
+     `top_available: mb_y > 0` — pure grid position, no slice check.
+   - The MBAFF pair-field-flag neighbour read (`cabac_p.rs:433-458`,
+     `left_field`/`top_field` sourced from `cabac_ctx[left_idx]`/
+     `[top_idx]`) — also grid-position only. (MBAFF multi-slice is
+     out-of-scope per the task brief, but this code path is shared with the
+     non-MBAFF case's variable declarations, so it needs auditing even if
+     never exercised by an in-scope test.)
+   - The `bot_left_skipped` lookup inside the top-of-pair skip branch
+     (`cabac_p.rs:409-415`) — same pattern.
+   Each of these would need the same "resolved index real but
+   `slice_id_grid[idx] != cur_slice_id` ⇒ treat as unavailable" check
+   `NeighbourCtx::new_with_slices` already implements, either by routing them
+   through `NeighbourCtx` too or by open-coding the same check locally.
+   `parse_p_macroblock_cabac`'s own internal neighbour reads (ref_idx
+   context, mvd context, cbp context — the `amvd_sum`/`ref_idx_gt0_neighbors`
+   functions in `ctx.rs` that already take `inter_grid: &[MbInterCabacCtx]`)
+   already route through `NeighbourCtx`, so those inherit slice-awareness
+   "for free" once `inter_ctx` is accumulator-owned and `NeighbourCtx::new` is
+   swapped for `new_with_slices` at the one call site (`cabac_p.rs:526`) —
+   only the three loop-local checks above need their own explicit fix.
+4. **MV prediction is a good-news case, not a blocker**: `parse_p_slice_cabac`
+   does NOT compute final motion vectors inline per macroblock — it decodes
+   `mvd` and leaves full MV resolution to a single whole-array post-pass,
+   `crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0,
+   &macroblocks, mbaff_frame)` (`cabac_p.rs:575`), run once after the
+   macroblock loop over the ENTIRE `macroblocks` array (indices `0..total`,
+   not `first_mb..total`). This is structurally identical to how
+   `07b0471` deferred `reconstruct_intra_frame` to `finalize_picture` — for
+   P/B, `predict_slice_mvs_ex` (and building `MvStore`) should likewise move
+   into `finalize_picture`-equivalent, called ONCE on the complete
+   accumulated `macroblocks` array after the picture's last slice, not once
+   per slice. (Verify `predict_slice_mvs_ex`'s own neighbour derivation for
+   the same slice-boundary-unavailability requirement before trusting it
+   across a slice seam — not checked this session.)
+5. **`decode_slice`'s P/B branch is not a separate function** the way
+   `try_decode_real_slice` is for I — it is ~270+ inline lines inside the
+   single giant `decode_slice`, and it already contains, entangled together:
+   CAVLC and CABAC P dispatch (`if entropy_coding_mode_flag {...} else
+   {...}`), explicit-weighted-prediction construction from
+   `header.pred_weight_table`, ref-list building via
+   `crate::ref_pic::build_ref_list_l0`, and a THIRD branch point on MBAFF
+   (`Self::mbaff_deblock_infos` / `Self::run_mbaff_deblock` vs. the plain
+   per-MB `deblock_luma_mb`/`deblock_chroma_mb` loop). A `finalize_picture`
+   for P must reproduce all of this once-per-picture instead of
+   once-per-slice: ref list + weighted-pred config captured per slice
+   (indexed by `slice_id`, mirroring `deblock_params_per_slice`) since
+   `reconstruct_inter_frame_ex` currently takes ONE `ref_frames`/
+   `weighted_pred` for the whole picture — either it needs to become
+   per-macroblock-range-aware (pass a slice_id grid + a
+   `Vec<(ref_frames, weighted_pred)>` and look up per MB), or reconstruction
+   needs to happen per-slice-range immediately as each slice arrives (the
+   "incremental" option the task brief flags as possibly lower-risk) writing
+   into one shared frame buffer, deferring only deblock+store-reference to
+   the picture's end. The incremental option avoids ever needing
+   `reconstruct_inter_frame_ex` to understand multiple ref-lists/weightings
+   in one call, at the cost of needing deblock to run against a frame buffer
+   that mixes MC-reconstructed (available immediately) and not-yet-decoded
+   (later slices) regions — likely the better trade for P, **not yet
+   prototyped or verified**.
+6. **CABAC-B (`cabac_b.rs`) was read at a high level only** (not to the same
+   depth as P this session): confirmed it has its own separate `inter_ctx:
+   Vec<MbInterCabacCtx>` local allocation (`cabac_b.rs:504`) and its own
+   `NeighbourCtx`/skip/field-neighbour inline reads mirroring P's shape, plus
+   B-specific state (direct-mode neighbour MV derivation, L0+L1 ref lists,
+   implicit/explicit bi-pred weighting) the task brief already flagged as
+   needing current-picture MV state across slice boundaries — this needs its
+   own dedicated read-through once P is done and verified, not before.
+
+**Why not attempted despite the design being this clear**: items 3 and 5
+above are exactly the kind of "many small call sites, one missed = a silent,
+hard-to-detect pixel-level regression on an existing bit-exact fixture"
+change the task brief's discipline warns about, and verifying each requires
+a full `cargo test --lib --tests` + `itu_conformance` cycle (the baseline
+alone took several minutes this session). Attempting items 1-5 in the
+remaining budget without room for that verification loop would violate the
+"zero regression, evidence over assumption" rule this whole line of work has
+held to since `07b0471`. Deferring whole, not half-doing it, and leaving this
+map for the next session.
+
+**Next step for a future session**: implement points 1-4 above for
+`parse_p_slice_cabac` first (P only, matching the task's own recommended
+ordering), decide between the "per-slice ref-list/weighting lookup table" vs.
+"incremental per-slice-range reconstruction" designs in point 5 by
+prototyping the smaller of the two against `CABAST3_Sony_E` specifically
+(single target, P-only-relevant portions), verify zero regression on
+`p_frame_conformance.rs`/`CABA2_Sony_E`/`multi_frame_dpb`-named tests plus
+full `itu_conformance`, commit, THEN read `cabac_b.rs` to the same depth
+before touching B. Do not attempt P and B together.
+
+
 ## SESSION #32as — CABACI3_Sony_B's "second, separate gap" root-caused: it isn't I-only, and the gap is the already-known missing multi-slice CABAC P/B decode, not a new bug
 
 Followed up on SESSION #32ar's open item ("frame 0 exact, frame 1 onward
