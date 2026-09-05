@@ -2,7 +2,79 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
-## SESSION #32ao (2026-09-05, next) — real fix: CABAC end_of_slice_flag mid-picture is now a legitimate stop, not a desync error; multi-slice pictures' first slice genuinely reconstructs
+## SESSION #32ap (2026-09-05, later same day) — temporal direct mode (§8.4.1.2.3) implemented; unvalidated against real bitstreams (no network access to the ITU archive in this container)
+
+Every B slice with `direct_spatial_mv_pred_flag == 0` that actually coded a
+`B_Skip`/`B_Direct_16x16`/direct-`B_8x8`-partition macroblock previously
+returned `Err` from `predict_inter_b_macroblock`, falling through to the
+flat-grey scaffold for the whole slice — the documented blocker for
+`CABA3_Sony_C`/`CANL3_Sony_C`/`CVBS3_Sony_C`/`CACQP3_Sony_D` (all four code
+every B slice with temporal, not spatial, direct mode).
+
+**Implementation** (`mv.rs`): `derive_temporal_direct` (per co-located 4×4
+block) and `apply_temporal_direct` (per direct-mode quadrant, reusing the
+same `direct_8x8_inference_flag == 1` corner-sample convention
+`apply_spatial_direct`'s `col_zero_flag` pass already uses), replacing both
+`Err(...)` bail-out sites. Cross-checked against FFmpeg's real
+`pred_temp_direct_motion` (`libavcodec/h264_direct.c`, fetched verbatim via
+WebFetch — not recalled from memory) for the reference/MV-scaling algorithm:
+prefer the co-located block's own List0 over List1, `MapColToList0` (find
+the same physical reference picture, by POC, in the current picture's own
+`RefPicList0`), then `tb`/`td`/`dist_scale_factor`/`mvL0`/`mvL1` exactly per
+§8.4.1.2.3. Unlike spatial direct, an intra co-located block still yields a
+valid (zero-motion, ref 0) bi-predictive result rather than "list dropped".
+
+**New POC bookkeeping needed** (`ref_pic.rs`): `DpbEntry` gained
+`list0_poc`/`list1_poc` — that picture's own `RefPicList0`/`RefPicList1` POCs,
+snapshotted in `store_reference_picture` at the time *that* picture was
+itself decoded (empty for I slices, L1 empty for P slices). This is the data
+`MapColToList0` needs later: given a co-located block's `refIdxCol` (an index
+into *that* picture's own reference list, meaningless out of context), find
+which physical picture it named by POC, then find that same POC in the
+*current* picture's own `RefPicList0`. `tb`/`td` themselves need no new
+data — they reduce to POC arithmetic entirely over already-available
+`current_poc`/`ref_l0[i].pic_order_cnt`/`ref_l1[0].pic_order_cnt`.
+
+**Plumbing**: a new `TemporalDirectCtx<'a>` struct threads
+`current_poc`/`current_list0_poc`/`col_poc`/`col_list0_poc`/`col_list1_poc`
+through `predict_b_slice_mvs` → `predict_inter_b_macroblock`, and through
+both `parse_b_slice` (CAVLC) and `parse_b_slice_cabac` (CABAC) as a new
+`Option<&TemporalDirectCtx>` parameter. Wired from `decoder/mod.rs`'s
+progressive B-slice path, where `current_poc`/`ref_l0`/`ref_l1` were already
+in scope for other reasons (weighted bi-prediction, ref-list construction).
+**MBAFF's B-slice path (`decoder/interlaced.rs`) still passes `None`** —
+temporal direct there needs field/frame-pair-aware POC bookkeeping this
+session didn't add, so MBAFF B slices with temporal direct keep the same
+pre-existing scaffold fallback as before, unchanged.
+
+**Verification — what could and couldn't be checked in this container**:
+hand-derived unit tests in `mv.rs` (a halfway-B-picture case where
+`tb/td = 4/8 = 0.5` should exactly halve the co-located MV — matches the
+textbook temporal-B-frame-interpolation result independently, not just
+internal self-consistency; a List1-preferred case; an intra-co-located-block
+zero-motion case; a `MapColToList0`-falls-back-to-0 case) all pass. Full
+workspace `cargo build`, `cargo test --lib` (every crate green; h264
+268/268, up from 264), `cargo clippy --workspace --all-targets -- -D
+warnings`, and `cargo fmt --all --check` are all clean. **Could not run the
+real ITU conformance suite against this change**: this container has no
+fixtures under `tests/fixtures/itu` and no working path to fetch them —
+`tools/fetch-h264-conformance.sh` downloads from `itu.int`, which returns
+HTTP 403 through this environment's outbound proxy. (Discovered while
+investigating this: the *previous* session's "full ITU conformance suite
+passes, 12/12 BitExact" claims for this same container were themselves
+based on a `cargo test` run without `--nocapture`, which hides a passing
+test's stdout — the run was actually silently skipping the whole time. See
+the correction note atop `todo.md`.) **So whether `CABA3_Sony_C` et al. now
+actually decode correctly (or just decode differently) is unconfirmed.**
+Next session with real network/fixture access: run
+`CLIPS="CABA3_Sony_C CANL3_Sony_C CVBS3_Sony_C CACQP3_Sony_D" just
+fetch-h264-conformance` then the conformance suite with `--nocapture`, and
+either promote these four past their current `KnownGap` manifest entries or
+root-cause whatever bug the real bitstreams turn up (algorithm bugs in a
+from-scratch spec implementation like this one are the norm, not the
+exception, per this file's own history with spatial direct).
+
+## SESSION #32ao (2026-09-05) — real fix: CABAC end_of_slice_flag mid-picture is now a legitimate stop, not a desync error; multi-slice pictures' first slice genuinely reconstructs
 
 Picked a more tractable item than the `MIDR_MW_D` bit-oracle rabbit hole:
 `CABAST3_Sony_E` / `CABASTBR3_Sony_B` (4 slices/picture) and `CABACI3_Sony_B`

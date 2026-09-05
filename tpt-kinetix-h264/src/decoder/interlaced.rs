@@ -547,6 +547,11 @@ impl H264Decoder {
                             sps.direct_8x8_inference_flag,
                             colocated_mv.as_deref(),
                             header.direct_spatial_mv_pred_flag,
+                            // MBAFF temporal direct mode isn't threaded through
+                            // here yet (needs the field/frame-pair-aware POC
+                            // bookkeeping this path doesn't have) — falls back
+                            // to the same pre-existing error as before.
+                            None,
                             tracer,
                         )
                     } else {
@@ -561,6 +566,7 @@ impl H264Decoder {
                             pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                             colocated_mv.as_deref(),
                             header.direct_spatial_mv_pred_flag,
+                            None,
                             tracer,
                         )
                     }
@@ -682,6 +688,8 @@ impl H264Decoder {
                 &frame,
                 Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
                 None,
+                Vec::new(),
+                Vec::new(),
             );
 
             if std::env::var("KINETIX_BINTRACE").is_ok() {
@@ -776,7 +784,7 @@ impl H264Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
         };
-        self.store_reference_picture(nal, sps, header, &frame, None, None);
+        self.store_reference_picture(nal, sps, header, &frame, None, None, Vec::new(), Vec::new());
 
         Ok(InterlacedOutcome::Frame(frame))
     }
@@ -1089,6 +1097,7 @@ impl H264Decoder {
                 sps.direct_8x8_inference_flag,
                 None,
                 header.direct_spatial_mv_pred_flag,
+                None,
                 tracer,
             )
         } else {
@@ -1103,6 +1112,7 @@ impl H264Decoder {
                 transform_8x8,
                 None,
                 header.direct_spatial_mv_pred_flag,
+                None,
                 tracer,
             )
         };
@@ -1240,7 +1250,16 @@ impl H264Decoder {
 
         // Store the half-height field in the DPB so later inter slices can build
         // their field reference lists from it (§8.2.4.2.5).
-        self.store_reference_picture(nal, sps, header, &field_frame, None, None);
+        self.store_reference_picture(
+            nal,
+            sps,
+            header,
+            &field_frame,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
 
         // Buffer the field and emit the interleaved frame once the pair is complete.
         let visible_width = sps.pic_width_pixels();

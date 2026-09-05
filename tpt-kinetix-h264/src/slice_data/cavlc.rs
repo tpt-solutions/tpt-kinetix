@@ -989,6 +989,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
     transform_8x8_mode: bool,
     colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    temporal: Option<&crate::mv::TemporalDirectCtx>,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
@@ -1058,6 +1059,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
         &macroblocks,
         colocated_mv,
         direct_spatial_mv_pred_flag,
+        temporal,
     )?;
 
     Ok(ParsedSlice {

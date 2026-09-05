@@ -487,6 +487,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     direct_8x8_inference_flag: bool,
     colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    temporal: Option<&crate::mv::TemporalDirectCtx>,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let mut dec = crate::entropy::CabacDecoder::new(data)
@@ -713,6 +714,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
         &macroblocks,
         colocated_mv,
         direct_spatial_mv_pred_flag,
+        temporal,
     )?;
     Ok(ParsedSlice {
         macroblocks,

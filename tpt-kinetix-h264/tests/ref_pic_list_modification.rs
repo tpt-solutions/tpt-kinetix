@@ -147,6 +147,8 @@ fn dpb_with_four_refs() -> Dpb {
                 long_term_pic_num: -1,
                 mv_grid: None,
                 mc_frame: None,
+                list0_poc: Vec::new(),
+                list1_poc: Vec::new(),
             },
             PicNumContext {
                 curr_frame_num: frame_num,
