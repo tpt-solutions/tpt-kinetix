@@ -158,6 +158,19 @@ pub struct FrameMeta {
     /// has no separate `u`-vs-`v` block-span notion).
     pub chroma_edge_left: Vec<bool>,
     pub chroma_edge_top: Vec<bool>,
+    /// Per-coded-block `DeltaLF` state (§7.12.1's `DeltaLFs[row][col]`,
+    /// AV1 spec array of 4: `[y_vertical, y_horizontal, u, v]`), at 8×8-luma
+    /// grid resolution — used by `compute_level` for the chroma deblock
+    /// passes (which run on the `w8`/`h8` grid). Set once per coded block
+    /// (`read_delta_lf`'s running per-tile state at the time the block is
+    /// reconstructed), not accumulated/merged like the size grids — the last
+    /// writer for a cell wins, matching the spec's per-block (not per-tx)
+    /// granularity.
+    pub delta_lf: Vec<[i8; 4]>,
+    /// Same role as `delta_lf`, at 4×4-luma-cell resolution — used for the
+    /// luma deblock pass, which runs on the finer `w4`/`h4` grid (see `w4`'s
+    /// doc comment for why luma needs the finer grid).
+    pub delta_lf4: Vec<[i8; 4]>,
     /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
     /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
@@ -179,7 +192,7 @@ pub enum LrUnitData {
     /// `[k0, k1, k2, 128-2*(k0+k1+k2), k2, k1, k0]`.
     Wiener { h: [i32; 3], v: [i32; 3] },
     /// RESTORE_SGRPROJ: self-guided projection filter.
-    /// `set` indexes Sgr_Params[16][4]; `xqd` are the decoded projection
+    /// `set` indexes Sgr_Params\[16\]\[4\]; `xqd` are the decoded projection
     /// weights (w0, w1) for the two filter passes.
     Sgrproj { set: usize, xqd: [i32; 2] },
 }
@@ -208,12 +221,14 @@ impl FrameMeta {
             luma_edge_top: vec![false; len],
             chroma_edge_left: vec![false; len],
             chroma_edge_top: vec![false; len],
+            delta_lf: vec![[0i8; 4]; len],
             w4,
             h4,
             luma_tx_w4: vec![0u8; len4],
             luma_tx_h4: vec![0u8; len4],
             luma_edge_left4: vec![false; len4],
             luma_edge_top4: vec![false; len4],
+            delta_lf4: vec![[0i8; 4]; len4],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -356,6 +371,37 @@ impl FrameMeta {
         }
     }
 
+    /// Record the coded block's own `DeltaLF` state (§7.12.1) over its 8×8-
+    /// grid span `[bx0, bx1) x [by0, by1)` — the chroma-resolution
+    /// counterpart of [`record_delta_lf4`](Self::record_delta_lf4). Unlike
+    /// `record_luma`'s `max`-based accumulation, this simply overwrites: a
+    /// coded block's `DeltaLF` is a single value, not something multiple
+    /// calls need to combine.
+    pub fn record_delta_lf(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize, v: [i8; 4]) {
+        let by1c = by1.min(self.h8);
+        let bx1c = bx1.min(self.w8);
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = self.idx(bx, by);
+                self.delta_lf[i] = v;
+            }
+        }
+    }
+
+    /// 4×4-luma-cell counterpart of [`record_delta_lf`](Self::record_delta_lf)
+    /// — see `w4`'s doc comment for why luma's deblock pass needs the finer
+    /// grid.
+    pub fn record_delta_lf4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize, v: [i8; 4]) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by);
+                self.delta_lf4[i] = v;
+            }
+        }
+    }
+
     /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
     /// into this full-frame meta, offsetting by `(ox, oy)` 8×8-luma-block
     /// positions. AV1 tiles cover disjoint block rectangles, so the `max` /
@@ -378,6 +424,7 @@ impl FrameMeta {
                     src.luma_skip[i],
                 );
                 self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
+                self.record_delta_lf(dbx, dby, dbx + 1, dby + 1, src.delta_lf[i]);
                 let di = self.idx(dbx, dby);
                 self.luma_edge_left[di] |= src.luma_edge_left[i];
                 self.luma_edge_top[di] |= src.luma_edge_top[i];
@@ -398,6 +445,7 @@ impl FrameMeta {
                 self.luma_tx_h4[di] = self.luma_tx_h4[di].max(src.luma_tx_h4[i]);
                 self.luma_edge_left4[di] |= src.luma_edge_left4[i];
                 self.luma_edge_top4[di] |= src.luma_edge_top4[i];
+                self.delta_lf4[di] = src.delta_lf4[i];
             }
         }
     }
@@ -681,6 +729,7 @@ fn deblock_plane(
     _skip_grid: &[bool],
     edge_left_grid: &[bool],
     edge_top_grid: &[bool],
+    delta_lf_grid: &[[i8; 4]],
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
@@ -708,7 +757,13 @@ fn deblock_plane(
             if !edge_left_grid[by * grid_w + bx] {
                 continue;
             }
-            let lvl = compute_level(fh, plane_index, 0, 0);
+            // §7.14.4's DeltaLF lookup uses the block on the q-side of the
+            // edge (the one the outer loop is currently positioned at) — the
+            // spec addresses `DeltaLFs` by the current block's own MI
+            // position, not a min/max of both sides the way `filterSize` is.
+            let dlf_i = if plane_index == 0 { 0 } else { plane_index + 1 };
+            let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
+            let lvl = compute_level(fh, plane_index, 0, delta_lf);
             if lvl == 0 {
                 continue;
             }
@@ -754,7 +809,9 @@ fn deblock_plane(
             if !edge_top_grid[by * grid_w + bx] {
                 continue;
             }
-            let lvl = compute_level(fh, plane_index, 1, 0);
+            let dlf_i = if plane_index == 0 { 1 } else { plane_index + 1 };
+            let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
+            let lvl = compute_level(fh, plane_index, 1, delta_lf);
             if lvl == 0 {
                 continue;
             }
@@ -1383,6 +1440,7 @@ pub fn apply_post_filters(
             &meta.luma_skip,
             &meta.luma_edge_left4,
             &meta.luma_edge_top4,
+            &meta.delta_lf4,
             meta.w4,
             meta.h4,
             fh,
@@ -1403,6 +1461,7 @@ pub fn apply_post_filters(
             &meta.u_skip,
             &meta.chroma_edge_left,
             &meta.chroma_edge_top,
+            &meta.delta_lf,
             meta.w8,
             meta.h8,
             fh,
@@ -1421,6 +1480,7 @@ pub fn apply_post_filters(
             &meta.v_skip,
             &meta.chroma_edge_left,
             &meta.chroma_edge_top,
+            &meta.delta_lf,
             meta.w8,
             meta.h8,
             fh,

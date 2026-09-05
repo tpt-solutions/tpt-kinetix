@@ -480,6 +480,7 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     transform_8x8_mode_flag: bool,
     direct_8x8_inference_flag: bool,
     colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
+    direct_spatial_mv_pred_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let mut dec = crate::entropy::CabacDecoder::new(data)
@@ -698,7 +699,15 @@ pub fn parse_b_slice_cabac<T: crate::trace::DecodeTracer>(
     }
 
     let mut mv_store = MvStore::new(total);
-    crate::mv::predict_b_slice_mvs(&mut mv_store, mb_cols, 0, 0, &macroblocks, colocated_mv)?;
+    crate::mv::predict_b_slice_mvs(
+        &mut mv_store,
+        mb_cols,
+        0,
+        0,
+        &macroblocks,
+        colocated_mv,
+        direct_spatial_mv_pred_flag,
+    )?;
     Ok(ParsedSlice {
         macroblocks,
         nz,
@@ -1200,68 +1209,87 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 .collect();
             motion.pred_dirs = sub_dirs.clone();
 
+            // §7.3.5.2 `sub_mb_pred()`: **all** `ref_idx_l0[mbPartIdx]` across
+            // the 4 8×8 partitions are signalled first, in one `mbPartIdx`
+            // loop, *then* all `ref_idx_l1[mbPartIdx]` in a second, separate
+            // loop — not interleaved per-partition (`ref_idx_l0[0];
+            // ref_idx_l1[0]; ref_idx_l0[1]; ...`), which is what an earlier
+            // version of this function did. Any real B_8x8 macroblock with
+            // at least one L0/Bi partition *and* at least one L1/Bi partition
+            // (very common in real multi-reference B content) desynced the
+            // CABAC engine here — the same interleaving-order mistake already
+            // found and fixed for CAVLC/CABAC P_16x8/P_8x16 elsewhere in this
+            // file, just in `ref_idx_l0`-vs-`ref_idx_l1` grouping instead of
+            // `ref_idx`-vs-`mvd`.
             for part in 0..4 {
+                if sub_dirs[part] == BPredDir::Direct
+                    || !(sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi)
+                {
+                    continue;
+                }
                 let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
                 let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, 8u32, 8u32);
                 let blks = partition_blocks(c4, r4, 2, 2);
-                if sub_dirs[part] != BPredDir::Direct
-                    && (sub_dirs[part] == BPredDir::L0 || sub_dirs[part] == BPredDir::Bi)
-                {
-                    let (lg, tg) = ref_idx_gt0_neighbors(
-                        inter_grid,
-                        &this_inter,
-                        left_idx,
-                        top_idx,
-                        xp,
-                        yp,
-                        wp,
-                        hp,
-                        0,
-                    );
-                    let ri = if num_ref_idx_l0_active > 1 {
-                        let r = ctxs.ref_idx.decode(dec, lg, tg);
-                        if r >= num_ref_idx_l0_active {
-                            return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
-                        }
-                        r
-                    } else {
-                        0
-                    };
-                    motion.ref_idx_l0[part] = ri as i32;
-                    if ri > 0 {
-                        for &b in &blks {
-                            this_inter.l0_ref_gt0 |= 1 << b;
-                        }
+                let (lg, tg) = ref_idx_gt0_neighbors(
+                    inter_grid,
+                    &this_inter,
+                    left_idx,
+                    top_idx,
+                    xp,
+                    yp,
+                    wp,
+                    hp,
+                    0,
+                );
+                let ri = if num_ref_idx_l0_active > 1 {
+                    let r = ctxs.ref_idx.decode(dec, lg, tg);
+                    if r >= num_ref_idx_l0_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L0 overflow"));
+                    }
+                    r
+                } else {
+                    0
+                };
+                motion.ref_idx_l0[part] = ri as i32;
+                if ri > 0 {
+                    for &b in &blks {
+                        this_inter.l0_ref_gt0 |= 1 << b;
                     }
                 }
-                if sub_dirs[part] != BPredDir::Direct
-                    && (sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi)
+            }
+            for part in 0..4 {
+                if sub_dirs[part] == BPredDir::Direct
+                    || !(sub_dirs[part] == BPredDir::L1 || sub_dirs[part] == BPredDir::Bi)
                 {
-                    let (lg, tg) = ref_idx_gt0_neighbors(
-                        inter_grid,
-                        &this_inter,
-                        left_idx,
-                        top_idx,
-                        xp,
-                        yp,
-                        wp,
-                        hp,
-                        1,
-                    );
-                    let ri = if num_ref_idx_l1_active > 1 {
-                        let r = ctxs.ref_idx.decode(dec, lg, tg);
-                        if r >= num_ref_idx_l1_active {
-                            return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
-                        }
-                        r
-                    } else {
-                        0
-                    };
-                    motion.ref_idx_l1[part] = ri as i32;
-                    if ri > 0 {
-                        for &b in &blks {
-                            this_inter.l1_ref_gt0 |= 1 << b;
-                        }
+                    continue;
+                }
+                let (c4, r4, _, _) = partition_dims(mb.mb_type, part);
+                let (xp, yp, wp, hp) = (c4 as u32 * 4, r4 as u32 * 4, 8u32, 8u32);
+                let blks = partition_blocks(c4, r4, 2, 2);
+                let (lg, tg) = ref_idx_gt0_neighbors(
+                    inter_grid,
+                    &this_inter,
+                    left_idx,
+                    top_idx,
+                    xp,
+                    yp,
+                    wp,
+                    hp,
+                    1,
+                );
+                let ri = if num_ref_idx_l1_active > 1 {
+                    let r = ctxs.ref_idx.decode(dec, lg, tg);
+                    if r >= num_ref_idx_l1_active {
+                        return Err(SliceDataError::Unsupported("ref_idx L1 overflow"));
+                    }
+                    r
+                } else {
+                    0
+                };
+                motion.ref_idx_l1[part] = ri as i32;
+                if ri > 0 {
+                    for &b in &blks {
+                        this_inter.l1_ref_gt0 |= 1 << b;
                     }
                 }
             }

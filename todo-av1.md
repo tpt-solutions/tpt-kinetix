@@ -5071,3 +5071,73 @@
 > exposes a `--skip-deblock`/`--filter=none`-style flag that would give a
 > real, correctly-ordered partial-pipeline reference to compare against
 > instead of guessing from Kinetix's side alone.
+
+> **2026-09-05 session note (new session) — wired the previously-hardcoded-
+> to-0 per-block `delta_lf` (§7.12.1 `DeltaLFs`) into `compute_level`'s
+> level computation**, per the prior session's recommendation (item 3
+> above). `FrameMeta` gained two new grids, `delta_lf` (8×8-luma-grid
+> resolution, used by the chroma deblock passes) and `delta_lf4` (4×4-luma-
+> cell resolution, used by luma's finer-grained pass) — both `[i8; 4]`
+> (`[y_vert, y_horiz, u, v]`, matching `FRAME_LF_COUNT`/`TileDecodeState::
+> delta_lf`'s own layout). Populated once per coded block (both the
+> keyframe-intra path in `intra_block.rs` and the var-tx-leaf IBC path in
+> the same file — using the block's own span, not per-leaf, since `DeltaLF`
+> is a per-block not per-transform value) right after the existing
+> `record_luma`/`record_chroma` calls, using `self.delta_lf` (the running
+> per-tile state `read_delta_lf` maintains). `merge_tile` carries both
+> grids across tile boundaries (overwrite semantics, not the `max`/`&&`
+> combine `record_luma` uses, since `DeltaLF` is a single per-block value,
+> not something to accumulate). `deblock_plane` now takes a `delta_lf_grid`
+> parameter and looks up the q-side cell's value (the block the outer loop
+> is currently positioned at) for each edge, passing it into
+> `compute_level` in place of the old hardcoded `0`.
+>
+> **Verified via `av1_psnr_check` (ffmpeg on PATH): no change to any
+> corpus entry's PSNR** (`solid_red`/`smptebars` still 99 dB, `testsrc`
+> 74.88/54.07/55.18, `mandelbrot` 70.45/53.15/52.76, `testsrc2` 24.70/
+> 24.00/16.86 — all unchanged from before this session) — expected, since
+> none of ffmpeg's `aom` encodes for this corpus actually turn on
+> `delta_lf_present`, so this was filling in a real spec gap without a
+> regression-test signal available in the current corpus. 139 unit tests
+> pass, clippy `-D warnings` and `cargo fmt` clean.
+>
+> **A separate, larger gap found while doing this — FIXED same session**:
+> `inter_block.rs` never called `record_luma`/`record_chroma`/
+> `mark_luma_edges`/`mark_chroma_edges`/`record_delta_lf` at all — grep
+> confirmed `self.meta` didn't appear anywhere in that file. Every
+> inter-coded block left its `FrameMeta` cells at their default (`tx_w/h =
+> 0`, `skip = true`, `edge_left/top = false`), so `deblock_plane` never
+> filtered *any* edge belonging to an inter block — the deblock filter was
+> effectively luma/chroma-edge-blind on every P/B frame, independent of the
+> `delta_lf`/CDEF-vs-deblock investigation above.
+>
+> Fix: `add_inter_residual` (the function that reconstructs an inter
+> block's residual) previously `return`ed immediately when `skip ||
+> luma_tx > TX_16X16`, which is *also* where the (missing) `FrameMeta`
+> calls would have needed to run — `TxSize`/transform-edge geometry is
+> well-defined regardless of `skip`, so that early return was conflating
+> "don't read residual coefficients" with "don't record geometry".
+> Replaced it with a `has_residual = !skip && luma_tx <= TX_16X16` flag
+> that gates only the `read_coeffs`/`dequantize_coeffs`/`inverse_transform`
+> calls (both luma and chroma, the latter previously gated on a redundant
+> `!skip` that is now `has_residual` for the same reason); the geometry
+> loops (`mark_luma_edges`/`mark_luma_edges4`/`record_luma4` per luma
+> transform sub-block, `mark_chroma_edges` per chroma transform sub-block,
+> then the fixed 8×8-grid `record_luma`/`record_chroma`/`record_delta_lf`/
+> `record_delta_lf4` calls after each loop) now always run, mirroring
+> `intra_block.rs`'s keyframe path call-for-call. Residual-add loops are
+> unconditional too (adding an all-zero `residual` vec when
+> `!has_residual` is a harmless no-op, same as the prior behavour of never
+> touching the plane).
+>
+> Verified: 139 unit tests pass, clippy `-D warnings` and `cargo fmt`
+> clean, workspace builds, `av1_psnr_check` unchanged (all-intra corpus,
+> so `add_inter_residual` isn't exercised by it — expected, no signal
+> either way from this check). **Still unvalidated end-to-end**: no inter
+> corpus/patched-dav1d reference exists to confirm the geometry recorded
+> here is bit-exact against real inter content (per earlier notes,
+> `decode_inter_block` isn't reached by the current pipeline on real
+> non-keyframe streams yet — Phase E is still WIP). This fix makes the
+> loop-filter *metadata pipeline* structurally complete for inter blocks,
+> but doesn't by itself prove inter-frame deblock correctness — that still
+> needs real inter-frame conformance data once Phase E lands.

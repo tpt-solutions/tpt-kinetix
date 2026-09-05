@@ -563,6 +563,14 @@ impl<'a> TileDecodeState<'a> {
                     .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
             }
         }
+        self.meta.record_delta_lf(bx0, by0, bx1, by1, self.delta_lf);
+        self.meta.record_delta_lf4(
+            blk_px_x / 4,
+            blk_px_y / 4,
+            (blk_px_x + bw * MI_SIZE).div_ceil(4),
+            (blk_px_y + bh * MI_SIZE).div_ceil(4),
+            self.delta_lf,
+        );
 
         // Reconstruct chroma transform blocks (4:2:0 / 4:2:2 / 4:4:4).
         // `HasChroma` (AV1 spec §5.11.5, see [`has_chroma`]): a block that is
@@ -894,6 +902,29 @@ impl<'a> TileDecodeState<'a> {
         // IBC block that wasn't skipped, corrupting everything the tile
         // decodes afterward.
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
+
+        // `DeltaLF` (§7.12.1) is per coded block, not per var-tx leaf — record
+        // it once here over the whole IBC block's span (see the keyframe
+        // intra path's identical call for why chroma needs the coarser 8×8
+        // grid too).
+        {
+            let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
+            let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
+            self.meta.record_delta_lf(
+                blk_px_x / 8,
+                blk_px_y / 8,
+                (blk_px_x + bw * MI_SIZE).div_ceil(8),
+                (blk_px_y + bh * MI_SIZE).div_ceil(8),
+                self.delta_lf,
+            );
+            self.meta.record_delta_lf4(
+                blk_px_x / 4,
+                blk_px_y / 4,
+                (blk_px_x + bw * MI_SIZE).div_ceil(4),
+                (blk_px_y + bh * MI_SIZE).div_ceil(4),
+                self.delta_lf,
+            );
+        }
 
         // Integer-pel luma displacement: mv components are multiples of 8 in
         // 1/8-pel units because force_integer_mv = true was used when reading.

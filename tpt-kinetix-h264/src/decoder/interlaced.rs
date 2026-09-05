@@ -546,6 +546,7 @@ impl H264Decoder {
                             pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                             sps.direct_8x8_inference_flag,
                             colocated_mv.as_deref(),
+                            header.direct_spatial_mv_pred_flag,
                             tracer,
                         )
                     } else {
@@ -559,6 +560,7 @@ impl H264Decoder {
                             chroma_qp_index_offset,
                             pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                             colocated_mv.as_deref(),
+                            header.direct_spatial_mv_pred_flag,
                             tracer,
                         )
                     }
@@ -1086,6 +1088,7 @@ impl H264Decoder {
                 transform_8x8,
                 sps.direct_8x8_inference_flag,
                 None,
+                header.direct_spatial_mv_pred_flag,
                 tracer,
             )
         } else {
@@ -1099,6 +1102,7 @@ impl H264Decoder {
                 chroma_qp_index_offset,
                 transform_8x8,
                 None,
+                header.direct_spatial_mv_pred_flag,
                 tracer,
             )
         };
