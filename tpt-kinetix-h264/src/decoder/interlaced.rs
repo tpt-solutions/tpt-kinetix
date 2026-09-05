@@ -19,6 +19,59 @@ use crate::{
 
 use super::H264Decoder;
 
+/// Adapts [`crate::slice_data::parse_i_slice_cabac`]'s multi-slice-capable
+/// signature (added for progressive multi-slice pictures, see
+/// `decoder::mod::try_decode_real_slice`) back to the single-slice,
+/// fresh-buffers-every-call shape this module's PAFF/MBAFF paths still use.
+/// Interlaced multi-slice is explicitly out of scope for that plumbing (no
+/// known ITU fixture needs it — see `todo-h264.md`), so every call here
+/// always starts at MB 0 with slice id 0 into freshly allocated buffers,
+/// exactly matching this function's pre-multi-slice behaviour.
+fn parse_i_slice_cabac_single<T: DecodeTracer>(
+    data: &[u8],
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    mb_aff: bool,
+    field_pic_flag: bool,
+    transform_8x8_mode_flag: bool,
+    tracer: &mut T,
+) -> Result<ParsedSlice, crate::slice_data::SliceDataError> {
+    let total = (mb_cols * mb_rows) as usize;
+    let mut macroblocks: Vec<crate::macroblock::Macroblock> = (0..total)
+        .map(|_| crate::macroblock::Macroblock::new_skip())
+        .collect();
+    let mut nz: Vec<crate::slice_data::MbNz> = vec![crate::slice_data::MbNz::default(); total];
+    let mut pred_ctx: Vec<crate::slice_data::MbPredCtx> =
+        vec![crate::slice_data::MbPredCtx::default(); total];
+    let mut cabac_ctx: Vec<crate::slice_data::MbCabacCtx> =
+        vec![crate::slice_data::MbCabacCtx::default(); total];
+    let mut slice_id_grid: Vec<u16> = vec![0u16; total];
+    crate::slice_data::parse_i_slice_cabac(
+        data,
+        mb_cols,
+        mb_rows,
+        slice_qp,
+        mb_aff,
+        field_pic_flag,
+        transform_8x8_mode_flag,
+        tracer,
+        0,
+        0,
+        &mut macroblocks,
+        &mut nz,
+        &mut pred_ctx,
+        &mut cabac_ctx,
+        &mut slice_id_grid,
+    )
+    .map(|decoded_mb_count| ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store: crate::mv::MvStore::new(total),
+        decoded_mb_count,
+    })
+}
+
 /// PAFF/MBAFF decode-path trace, silent unless `KINETIX_PAFF_DBG` is set.
 macro_rules! paff_dbg {
     ($($arg:tt)*) => {
@@ -233,7 +286,7 @@ impl H264Decoder {
 
         let parsed = if entropy_coding_mode_flag {
             reader.byte_align();
-            crate::slice_data::parse_i_slice_cabac(
+            parse_i_slice_cabac_single(
                 reader.remaining_bytes(),
                 mb_cols,
                 mb_rows_field,
@@ -711,7 +764,7 @@ impl H264Decoder {
         reader.seek_to_bit(header.data_bit_offset);
         let parsed = if entropy_coding_mode_flag {
             reader.byte_align();
-            crate::slice_data::parse_i_slice_cabac(
+            parse_i_slice_cabac_single(
                 reader.remaining_bytes(),
                 mb_cols,
                 mb_rows,

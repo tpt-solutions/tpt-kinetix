@@ -76,6 +76,19 @@ pub struct DeblockMbInfo {
     /// chroma — when clear (h264_loopfilter.c `filter_mb_dir`). Interior edge
     /// 2 (the 8×8-block boundary) is still filtered.
     pub transform_8x8: bool,
+    /// Owning-slice index within the picture (0 for every macroblock of a
+    /// single-slice picture — the common case, unaffected). Used together
+    /// with [`Self::params`] to implement `disable_deblocking_filter_idc ==
+    /// 2` (disable filtering across slice boundaries only) for multi-slice
+    /// CABAC pictures; see `deblock_luma_mb`/`deblock_chroma_mb`.
+    pub slice_id: u16,
+    /// The [`DeblockParams`] of the slice that coded this macroblock. For a
+    /// single-slice picture this is identical to whatever uniform
+    /// `DeblockParams` the caller also passes to `deblock_luma_mb`/
+    /// `deblock_chroma_mb` — a harmless duplication kept so a boundary edge
+    /// between two different slices can consult *both* sides' `disable_idc`
+    /// without changing those functions' signatures.
+    pub params: DeblockParams,
 }
 
 impl DeblockMbInfo {
@@ -87,6 +100,8 @@ impl DeblockMbInfo {
             qp,
             field: false,
             transform_8x8: false,
+            slice_id: 0,
+            params: DeblockParams::default(),
         }
     }
 
@@ -105,6 +120,8 @@ impl DeblockMbInfo {
             qp,
             field,
             transform_8x8: false,
+            slice_id: 0,
+            params: DeblockParams::default(),
         }
     }
 }
@@ -621,10 +638,18 @@ pub fn deblock_luma_mb(
     if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
         return;
     }
+    // §8.7.2 `disable_deblocking_filter_idc == 2`: disable filtering across
+    // slice boundaries only (interior edges within one slice still filter
+    // normally). A single-slice picture has `cur.slice_id == left.slice_id
+    // == top.slice_id` for every macroblock, so this is a no-op there.
+    let cross_slice_disabled = |other: &DeblockMbInfo| -> bool {
+        other.slice_id != cur.slice_id
+            && (cur.params.disable_idc == 2 || other.params.disable_idc == 2)
+    };
     // Block-boundary (inter-MB) vertical edge at edge_index = 0. Segments are
     // grouped by raster ROW; p-side block is the left MB's rightmost column
     // (3,7,11,15), q-side is this MB's leftmost column (0,4,8,12).
-    if let Some(l) = left {
+    if let Some(l) = left.filter(|l| !cross_slice_disabled(l)) {
         let bs = derive_bs_segments(
             l,
             cur,
@@ -669,7 +694,7 @@ pub fn deblock_luma_mb(
     // Block-boundary (inter-MB) horizontal edge at edge_index = 0. Segments
     // grouped by raster COLUMN; p-side block is the top MB's bottom row
     // (12,13,14,15), q-side is this MB's top row (0,1,2,3).
-    if let Some(t) = top {
+    if let Some(t) = top.filter(|t| !cross_slice_disabled(t)) {
         let mut bs = derive_bs_segments(
             t,
             cur,
@@ -744,9 +769,15 @@ pub fn deblock_chroma_mb(
         return;
     }
 
+    // See the identical `disable_deblocking_filter_idc == 2` note in
+    // `deblock_luma_mb`.
+    let cross_slice_disabled = |other: &DeblockMbInfo| -> bool {
+        other.slice_id != cur.slice_id
+            && (cur.params.disable_idc == 2 || other.params.disable_idc == 2)
+    };
     // Chroma reuses the co-located luma blocks' bS (§8.7.2.1); see
     // `deblock_luma_mb` for the same raster-block mappings.
-    if let Some(l) = left {
+    if let Some(l) = left.filter(|l| !cross_slice_disabled(l)) {
         let bs = derive_bs_segments(
             l,
             cur,
@@ -776,7 +807,7 @@ pub fn deblock_chroma_mb(
             deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 2, bs, p, qpc);
         }
     }
-    if let Some(t) = top {
+    if let Some(t) = top.filter(|t| !cross_slice_disabled(t)) {
         let mut bs = derive_bs_segments(
             t,
             cur,

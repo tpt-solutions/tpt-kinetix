@@ -81,7 +81,144 @@ pub struct H264Decoder {
     /// reads it to drop the frame that slice would otherwise contribute, so a
     /// multi-slice picture emits one frame, not one per slice. Reset before
     /// each `decode_slice` call.
+    ///
+    /// Also set by [`H264Decoder::try_decode_real_slice`]'s CABAC I-slice
+    /// path when a slice was accumulated into [`Self::pending_picture`]
+    /// without completing the picture — `decode_impl` reads it the same way
+    /// (an `Ok(None)` return from `try_decode_real_slice` normally falls
+    /// through to `decode_slice`; this flag tells it the NAL was already
+    /// fully handled and must not be reprocessed).
     suppress_frame: bool,
+    /// Real multi-slice CABAC I-slice accumulation (`todo-h264.md`'s
+    /// full-adaptive-blum plan, Phase 1+2): macroblocks decoded from a
+    /// picture's slices so far, held until the picture is known to be
+    /// complete (either this slice's own decode reached the last macroblock,
+    /// or a later NAL starts a new picture / the stream ends — see
+    /// `finalize_picture`). `None` between pictures. CAVLC and
+    /// interlaced/MBAFF continuation slices never populate this — they keep
+    /// the pre-existing `suppress_frame`/scaffold behaviour untouched.
+    pending_picture: Option<PictureAccumulator>,
+}
+
+/// Per-picture accumulator for real (non-scaffolded) CABAC I-slice multi-slice
+/// decoding. Slices of the same picture write into the shared
+/// `macroblocks`/`nz`/`pred_ctx`/`cabac_ctx`/`slice_id_grid` buffers (via
+/// `crate::slice_data::parse_i_slice_cabac`'s `first_mb`/`slice_id`
+/// parameters) instead of each allocating and reconstructing its own
+/// full-picture scaffold. See the module doc on
+/// [`H264Decoder::pending_picture`].
+struct PictureAccumulator {
+    macroblocks: Vec<Macroblock>,
+    nz: Vec<crate::slice_data::MbNz>,
+    pred_ctx: Vec<crate::slice_data::MbPredCtx>,
+    cabac_ctx: Vec<crate::slice_data::MbCabacCtx>,
+    /// Owning-slice index per macroblock; `u16::MAX` sentinel for "not yet
+    /// decoded this picture" (see `NeighbourCtx::new_with_slices`).
+    slice_id_grid: Vec<u16>,
+    /// `DeblockParams` for each slice, indexed by slice id (slice ids are
+    /// assigned sequentially starting at 0 as slices arrive).
+    deblock_params_per_slice: Vec<crate::deblock::DeblockParams>,
+    next_slice_id: u16,
+    mb_cols: u32,
+    mb_rows: u32,
+    coded_width: u32,
+    coded_height: u32,
+    width: u32,
+    height: u32,
+    chroma_qp_index_offset: i32,
+    scaling: crate::transform::ScalingLists,
+    // AU-identity, captured from the first slice, used both to detect a
+    // continuation slice actually belongs to this picture (safety net,
+    // §7.4.1.2.4 subset) and to reproduce this picture's own reference/output
+    // metadata (`store_reference_picture`) at finalize time.
+    sps: SeqParameterSet,
+    frame_num: u32,
+    pps_id: u32,
+    field_pic_flag: bool,
+    bottom_field_flag: bool,
+    pic_order_cnt_lsb: Option<u32>,
+    delta_pic_order_cnt_bottom: Option<i64>,
+    dec_ref_pic_marking: Option<crate::slice::DecRefPicMarking>,
+    nal_ref_idc: u8,
+    nal_unit_type: NalUnitType,
+    is_idr: bool,
+    poc: i64,
+    pts: tpt_kinetix_core::timestamp::Timestamp,
+    dts: tpt_kinetix_core::timestamp::Timestamp,
+}
+
+impl PictureAccumulator {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        mb_cols: u32,
+        mb_rows: u32,
+        coded_width: u32,
+        coded_height: u32,
+        width: u32,
+        height: u32,
+        chroma_qp_index_offset: i32,
+        scaling: crate::transform::ScalingLists,
+        sps: SeqParameterSet,
+        pps_id: u32,
+        nal: &crate::nal::NalUnit,
+        header: &crate::slice::SliceHeader,
+        is_idr: bool,
+        poc: i64,
+        pts: tpt_kinetix_core::timestamp::Timestamp,
+        dts: tpt_kinetix_core::timestamp::Timestamp,
+    ) -> Self {
+        let total = (mb_cols * mb_rows) as usize;
+        PictureAccumulator {
+            macroblocks: (0..total).map(|_| Macroblock::new_skip()).collect(),
+            nz: vec![crate::slice_data::MbNz::default(); total],
+            pred_ctx: vec![crate::slice_data::MbPredCtx::default(); total],
+            cabac_ctx: vec![crate::slice_data::MbCabacCtx::default(); total],
+            slice_id_grid: vec![u16::MAX; total],
+            deblock_params_per_slice: Vec::new(),
+            next_slice_id: 0,
+            mb_cols,
+            mb_rows,
+            coded_width,
+            coded_height,
+            width,
+            height,
+            chroma_qp_index_offset,
+            scaling,
+            sps,
+            frame_num: header.frame_num,
+            pps_id,
+            field_pic_flag: header.field_pic_flag,
+            bottom_field_flag: header.bottom_field_flag,
+            pic_order_cnt_lsb: header.pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom: header.delta_pic_order_cnt_bottom,
+            dec_ref_pic_marking: header.dec_ref_pic_marking.clone(),
+            nal_ref_idc: nal.nal_ref_idc,
+            nal_unit_type: nal.nal_unit_type,
+            is_idr,
+            poc,
+            pts,
+            dts,
+        }
+    }
+
+    /// Whether a continuation slice (`first_mb_in_slice != 0`) with this
+    /// AU-identity plausibly belongs to this accumulator's picture (the
+    /// pragmatic safety-net subset of §7.4.1.2.4 the plan calls for — not the
+    /// full 7-condition comparison).
+    fn matches(
+        &self,
+        frame_num: u32,
+        pps_id: u32,
+        field_pic_flag: bool,
+        bottom_field_flag: bool,
+        nal_ref_idc: u8,
+    ) -> bool {
+        self.frame_num == frame_num
+            && self.pps_id == pps_id
+            && self.field_pic_flag == field_pic_flag
+            && self.bottom_field_flag == bottom_field_flag
+            && self.nal_ref_idc == nal_ref_idc
+    }
 }
 
 impl H264Decoder {
@@ -170,6 +307,7 @@ impl H264Decoder {
             pending_poc: 0,
             pending_is_idr: false,
             suppress_frame: false,
+            pending_picture: None,
         }
     }
 
@@ -538,8 +676,9 @@ impl H264Decoder {
                         continue;
                     }
 
-                    // Attempt the real CAVLC I-slice decode path first.
+                    // Attempt the real CAVLC/CABAC I-slice decode path first.
                     self.scaffold_fallback = false;
+                    self.suppress_frame = false;
                     match self.try_decode_real_slice(
                         nal,
                         &sps,
@@ -563,7 +702,19 @@ impl H264Decoder {
                             }
                             continue;
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            if self.suppress_frame {
+                                // A CABAC I-slice was accumulated into
+                                // `pending_picture` without completing the
+                                // picture (real multi-slice continuation) —
+                                // fully handled, no frame yet; must NOT fall
+                                // through to `decode_slice` (which would
+                                // otherwise reprocess this same NAL via an
+                                // unrelated path and emit a spurious extra
+                                // frame).
+                                continue;
+                            }
+                        }
                         Err(_e) => {
                             let _ = _e;
                         }
@@ -618,6 +769,17 @@ impl H264Decoder {
     /// Any unpaired field still in the field accumulator is paired with a grey
     /// field so it is emitted as a full-height frame rather than being dropped.
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, KinetixError> {
+        // A multi-slice CABAC I-slice picture whose last slice's own decode
+        // never happened to reach the picture's final macroblock (e.g. the
+        // stream simply ends there, with no following picture's first slice
+        // to trigger the normal finalize-on-next-picture path in
+        // `try_decode_real_slice`) must still be emitted rather than
+        // silently dropped.
+        if let Some(acc) = self.pending_picture.take() {
+            let mut tracer = crate::trace::NoopTracer;
+            let frame = self.finalize_picture(acc, &mut tracer)?;
+            self.frame_queue.push_back(frame);
+        }
         let mut frames: Vec<VideoFrame> = self.frame_queue.drain(..).collect();
         if self.reorder_enabled {
             // Every reference picture was already emitted through the streaming
@@ -671,6 +833,208 @@ impl H264Decoder {
             }
         }
         Ok(frames)
+    }
+
+    /// Finish a picture accumulated across one or more CABAC I-slices:
+    /// reconstruct the whole picture's intra prediction/residual, deblock it
+    /// (with each macroblock's OWN slice's `DeblockParams`, honouring
+    /// `disable_deblocking_filter_idc == 2` at slice boundaries — see
+    /// `deblock::DeblockMbInfo::{slice_id,params}`), and store it as a
+    /// reference picture exactly as `try_decode_real_slice` did inline for
+    /// the single-slice case (this is that same logic, moved so it can run
+    /// once per picture instead of once per slice).
+    fn finalize_picture<T: DecodeTracer>(
+        &mut self,
+        acc: PictureAccumulator,
+        tracer: &mut T,
+    ) -> Result<VideoFrame, KinetixError> {
+        let PictureAccumulator {
+            macroblocks,
+            nz,
+            slice_id_grid,
+            deblock_params_per_slice,
+            mb_cols,
+            mb_rows,
+            coded_width,
+            coded_height,
+            width,
+            height,
+            chroma_qp_index_offset,
+            scaling,
+            sps,
+            frame_num,
+            pps_id,
+            field_pic_flag,
+            bottom_field_flag,
+            pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom,
+            dec_ref_pic_marking,
+            nal_ref_idc,
+            nal_unit_type,
+            is_idr: _is_idr,
+            poc: _poc,
+            pts,
+            dts,
+            ..
+        } = acc;
+
+        let mut recon = crate::reconstruct::reconstruct_intra_frame(
+            &macroblocks,
+            mb_cols,
+            mb_rows,
+            coded_width,
+            coded_height,
+            false,
+            chroma_qp_index_offset,
+            &scaling,
+            &crate::reconstruct::WeightedPred::Default,
+            tracer,
+        );
+
+        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = macroblocks
+            .chunks(mb_cols as usize)
+            .enumerate()
+            .map(|(row_idx, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(col_idx, mb)| {
+                        let idx = row_idx * mb_cols as usize + col_idx;
+                        let mb_nz = nz[idx].luma;
+                        let sid = slice_id_grid[idx];
+                        // Every macroblock is written by exactly one slice by
+                        // the time `finalize_picture` runs (the picture was
+                        // only finalized once fully decoded), so `sid` is
+                        // always a real slice id here, never the `u16::MAX`
+                        // not-yet-decoded sentinel.
+                        let params = deblock_params_per_slice
+                            .get(sid as usize)
+                            .copied()
+                            .unwrap_or_default();
+                        crate::deblock::DeblockMbInfo {
+                            transform_8x8: mb.transform_size_8x8,
+                            slice_id: sid,
+                            params,
+                            ..crate::deblock::DeblockMbInfo::new(
+                                mb.mb_type,
+                                mb_nz,
+                                [crate::mv::MvCell::INTRA; 16],
+                                mb.qp,
+                            )
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        for (row_idx, row_info) in mb_info.iter().enumerate() {
+            for (col_idx, cur) in row_info.iter().enumerate() {
+                let left = if col_idx > 0 {
+                    Some(&row_info[col_idx - 1])
+                } else {
+                    None
+                };
+                let top = if row_idx > 0 {
+                    Some(&mb_info[row_idx - 1][col_idx])
+                } else {
+                    None
+                };
+                crate::deblock::deblock_luma_mb(
+                    &mut recon.luma,
+                    recon.luma_stride,
+                    col_idx,
+                    row_idx,
+                    cur,
+                    left,
+                    top,
+                    cur.params,
+                );
+                crate::deblock::deblock_chroma_mb(
+                    &mut recon.chroma_cb,
+                    &mut recon.chroma_cr,
+                    recon.chroma_stride,
+                    col_idx,
+                    row_idx,
+                    cur,
+                    left,
+                    top,
+                    cur.params,
+                );
+            }
+        }
+
+        let data = recon.crop_yuv420p(width, height);
+        self.frame_count += 1;
+        let frame = VideoFrame {
+            pts,
+            dts,
+            data,
+            width,
+            height,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: matches!(nal_unit_type, NalUnitType::IdrSlice),
+        };
+
+        let mc_frame = if coded_width != width || coded_height != height {
+            let mc_data = recon.crop_yuv420p(coded_width, coded_height);
+            Some(VideoFrame {
+                pts,
+                dts,
+                data: mc_data,
+                width: coded_width,
+                height: coded_height,
+                pixel_format: PixelFormat::Yuv420p,
+                is_key_frame: matches!(nal_unit_type, NalUnitType::IdrSlice),
+            })
+        } else {
+            None
+        };
+
+        // Synthetic nal/header carrying only the fields
+        // `store_reference_picture` actually reads, reconstructed from what
+        // the accumulator captured off the picture's first slice (the real
+        // `nal`/`header` values aren't available here — this may run on a
+        // LATER NAL's call stack, e.g. when the picture is finalized because
+        // the next picture's first slice arrived, or at `flush()`).
+        let synth_nal = crate::nal::NalUnit {
+            nal_unit_type,
+            nal_ref_idc,
+            rbsp: Vec::new(),
+        };
+        let synth_header = crate::slice::SliceHeader {
+            first_mb_in_slice: 0,
+            slice_type: crate::slice::SliceType::I,
+            pic_parameter_set_id: pps_id,
+            frame_num,
+            field_pic_flag,
+            bottom_field_flag,
+            idr_pic_id: None,
+            pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom,
+            slice_qp_delta: 0,
+            num_ref_idx_l0_active_minus1: 0,
+            num_ref_idx_l1_active_minus1: 0,
+            disable_deblocking_filter_idc: 0,
+            slice_alpha_c0_offset_div2: 0,
+            slice_beta_offset_div2: 0,
+            ref_pic_list_modification_l0: Vec::new(),
+            ref_pic_list_modification_l1: Vec::new(),
+            dec_ref_pic_marking,
+            cabac_init_idc: 0,
+            direct_spatial_mv_pred_flag: false,
+            data_bit_offset: 0,
+            pred_weight_table: None,
+        };
+        self.store_reference_picture(
+            &synth_nal,
+            &sps,
+            &synth_header,
+            &frame,
+            None,
+            mc_frame,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        Ok(frame)
     }
 
     /// Attempt the real, spec-exact CAVLC I-slice decode path.
@@ -764,14 +1128,6 @@ impl H264Decoder {
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
             return Ok(None);
         }
-        // Only single-slice pictures starting at MB 0.
-        if header.first_mb_in_slice != 0 {
-            return Ok(None);
-        }
-
-        // Record this picture's display order for `decode_impl`'s reorder buffer.
-        self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
-        self.pending_poc = self.display_poc(sps, &header, nal);
 
         let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
         let slice_qp = pic_init_qp + header.slice_qp_delta;
@@ -784,16 +1140,103 @@ impl H264Decoder {
         let coded_height = sps.coded_height_pixels();
         let mb_cols = coded_width / 16;
         let mb_rows = coded_height / 16;
+        let total_mbs = (mb_cols * mb_rows) as usize;
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
 
-        let parsed = if entropy_coding_mode_flag {
-            // §7.3.4: consume cabac_alignment_one_bit padding, then hand the
-            // byte-aligned remainder to the CABAC arithmetic engine.
+        if entropy_coding_mode_flag {
+            // ---- Multi-slice-capable CABAC I-slice path ----
+            //
+            // Unlike the CAVLC branch below (single-slice only, unchanged),
+            // this path decodes every slice of a picture into a shared
+            // `PictureAccumulator` (see its doc and `H264Decoder::
+            // pending_picture`) and only reconstructs+deblocks+emits once the
+            // picture is known complete. For today's overwhelmingly common
+            // single-slice-per-picture streams this slice's own decode
+            // reaches `total_mbs` in the SAME call, so the picture finalizes
+            // synchronously and a frame is returned immediately — i.e. zero
+            // behaviour change from before. Only a genuine multi-slice
+            // picture (a slice's `end_of_slice_flag` firing before
+            // `total_mbs`) defers.
             reader.byte_align();
-            match crate::slice_data::parse_i_slice_cabac(
-                reader.remaining_bytes(),
+            let cabac_data = reader.remaining_bytes();
+            let is_continuation = header.first_mb_in_slice != 0;
+            let pps_id_val = header.pic_parameter_set_id;
+            // A previous picture finalized here (the safety-net paths below)
+            // rather than by its own last slice reaching `total_mbs` — queued
+            // so it isn't lost, since this call can return only one frame.
+            let mut extra_frame: Option<VideoFrame> = None;
+
+            if !is_continuation {
+                if let Some(prev) = self.pending_picture.take() {
+                    // The previous picture's own slices never reached its
+                    // last macroblock (truncated/corrupt multi-slice stream)
+                    // — §7.4.1.2.4 safety net: a new picture starting means
+                    // the old one is over regardless. Finalize it as-is.
+                    extra_frame = Some(self.finalize_picture(prev, tracer)?);
+                }
+                let is_idr_new = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+                let poc_new = self.display_poc(sps, &header, nal);
+                self.pending_picture = Some(PictureAccumulator::new(
+                    mb_cols,
+                    mb_rows,
+                    coded_width,
+                    coded_height,
+                    width,
+                    height,
+                    chroma_qp_index_offset,
+                    scaling.clone(),
+                    sps.clone(),
+                    pps_id_val,
+                    nal,
+                    &header,
+                    is_idr_new,
+                    poc_new,
+                    packet.pts,
+                    packet.dts,
+                ));
+            } else {
+                let matches_pending = self.pending_picture.as_ref().is_some_and(|acc| {
+                    acc.matches(
+                        header.frame_num,
+                        pps_id_val,
+                        header.field_pic_flag,
+                        header.bottom_field_flag,
+                        nal.nal_ref_idc,
+                    )
+                });
+                if !matches_pending {
+                    // Corruption safety net (§7.4.1.2.4): this continuation
+                    // doesn't belong to any picture we're tracking. Nothing
+                    // safe to decode it into — finalize whatever WAS pending
+                    // (if anything) and drop this stray slice, mirroring how
+                    // a CAVLC continuation slice is dropped one level up.
+                    if let Some(prev) = self.pending_picture.take() {
+                        let f = self.finalize_picture(prev, tracer)?;
+                        self.frame_queue.push_back(f);
+                    }
+                    self.suppress_frame = true;
+                    return Ok(None);
+                }
+            }
+
+            let acc = self
+                .pending_picture
+                .as_mut()
+                .expect("just created or matched above");
+            let slice_id = acc.next_slice_id;
+            acc.next_slice_id += 1;
+            acc.deblock_params_per_slice
+                .push(crate::deblock::DeblockParams {
+                    disable_idc: header.disable_deblocking_filter_idc as u8,
+                    alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                    beta_offset_div2: header.slice_beta_offset_div2,
+                    chroma_qp_index_offset,
+                });
+
+            let end_mb = match crate::slice_data::parse_i_slice_cabac(
+                cabac_data,
                 mb_cols,
                 mb_rows,
                 slice_qp,
@@ -801,38 +1244,84 @@ impl H264Decoder {
                 header.field_pic_flag,
                 transform_8x8_mode_flag,
                 tracer,
+                header.first_mb_in_slice,
+                slice_id,
+                &mut acc.macroblocks,
+                &mut acc.nz,
+                &mut acc.pred_ctx,
+                &mut acc.cabac_ctx,
+                &mut acc.slice_id_grid,
             ) {
-                Ok(p) => p,
+                Ok(v) => v,
                 Err(e) => {
                     let _ = e;
+                    // A parse failure mid-picture leaves the accumulator in
+                    // an unusable state; drop the whole in-progress picture
+                    // rather than risk emitting a garbage frame later.
+                    self.pending_picture = None;
+                    if let Some(ef) = extra_frame {
+                        return Ok(Some(ef));
+                    }
                     return Ok(None);
                 }
+            };
+
+            let complete = end_mb >= total_mbs;
+            if complete {
+                let acc = self.pending_picture.take().unwrap();
+                let (poc, is_idr) = (acc.poc, acc.is_idr);
+                let frame = self.finalize_picture(acc, tracer)?;
+                // Override whatever this NAL's own header set at the top of
+                // this function: the frame being returned belongs to the
+                // picture that just finalized, which may not be the picture
+                // described by `header` (e.g. the safety-net path above,
+                // where `header` is already the FIRST slice of the NEXT
+                // picture but the returned frame is the PREVIOUS one).
+                self.pending_poc = poc;
+                self.pending_is_idr = is_idr;
+                if let Some(ef) = extra_frame {
+                    self.frame_queue.push_back(frame);
+                    return Ok(Some(ef));
+                }
+                return Ok(Some(frame));
             }
-        } else {
-            match crate::slice_data::parse_i_slice(
-                &mut reader,
-                mb_cols,
-                mb_rows,
-                slice_qp,
-                chroma_qp_index_offset,
-                pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
-                sps.mb_adaptive_frame_field_flag,
-                header.field_pic_flag,
-                tracer,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = e;
-                    return Ok(None);
-                }
+            self.suppress_frame = true;
+            if let Some(ef) = extra_frame {
+                self.frame_queue.push_back(ef);
+            }
+            return Ok(None);
+        }
+
+        // ---- CAVLC I-slice path (unchanged: single-slice pictures only) ----
+        if header.first_mb_in_slice != 0 {
+            return Ok(None);
+        }
+
+        // Record this picture's display order for `decode_impl`'s reorder buffer.
+        self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        self.pending_poc = self.display_poc(sps, &header, nal);
+
+        let parsed = match crate::slice_data::parse_i_slice(
+            &mut reader,
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            chroma_qp_index_offset,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            tracer,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = e;
+                return Ok(None);
             }
         };
-        // A CABAC slice whose `end_of_slice_flag` legitimately fired before
-        // covering the whole picture is one slice of a multi-slice picture
-        // (unsupported for pixel-exact strict mode — see
-        // `KnownGap`/capabilities); the partial reconstruction below is still
-        // the best available output in non-strict mode.
-        if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
+        // A CAVLC slice whose parse ended before covering the whole picture
+        // is one slice of a multi-slice picture; CAVLC multi-slice is out of
+        // scope (see `todo-h264.md`), so this remains a scaffold trigger.
+        if parsed.decoded_mb_count < total_mbs {
             self.scaffold_fallback = true;
         }
 
