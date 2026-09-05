@@ -2,6 +2,135 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32aq — CABAC I-slice multi-slice accumulator implemented (Phase 1+2 for I only); root-caused the remaining gap to `reconstruct.rs`'s slice-blind intra-prediction neighbour availability
+
+Implemented the "full adaptive" multi-slice plan's Phase 1 (accumulator
+scaffolding) + Phase 2 (real progressive-CABAC multi-slice decode +
+§6.4.9 slice-boundary neighbour-availability) **scoped to the CABAC I-slice
+path only** (`try_decode_real_slice`) — P/B (`parse_p_slice_cabac`/
+`parse_b_slice_cabac`) are deliberately NOT touched this session; see "why
+P/B were not attempted" below.
+
+**What changed**:
+- `decoder::mod::PictureAccumulator` (new): owns `macroblocks`/`nz`/
+  `pred_ctx`/`cabac_ctx`/`slice_id_grid` (the last two are new — `slice_id_grid`
+  uses a `u16::MAX` sentinel for "not yet decoded this picture") plus
+  per-slice `DeblockParams` and the AU-identity/output metadata needed to
+  reproduce `store_reference_picture`'s inputs at finalize time (a synthetic
+  `NalUnit`/`SliceHeader` is reconstructed from what the accumulator captured
+  off the picture's first slice, since finalize can run on a LATER NAL's call
+  stack). `H264Decoder::pending_picture: Option<PictureAccumulator>`.
+- `H264Decoder::finalize_picture`: the reconstruct+deblock+crop+
+  store-reference-picture logic that used to run inline once per (single)
+  slice now runs once per COMPLETE picture, with per-MB `DeblockParams`
+  sourced from `deblock_params_per_slice[slice_id_grid[idx]]` so
+  `disable_deblocking_filter_idc == 2` (disable filtering across slice
+  boundaries only) can be honoured — implemented in `deblock.rs` via new
+  `DeblockMbInfo::{slice_id, params}` fields and a `cross_slice_disabled`
+  closure gating the boundary-edge calls in `deblock_luma_mb`/
+  `deblock_chroma_mb`. Zero signature change to either function.
+- `crate::slice_data::parse_i_slice_cabac` signature changed: takes
+  `first_mb: u32`, `slice_id: u16`, and the four grids
+  (`macroblocks`/`nz`/`pred_ctx`/`cabac_ctx`) plus `slice_id_grid` as `&mut
+  [T]` (write-through into the accumulator) instead of allocating and
+  returning fresh `Vec`s in a `ParsedSlice`; returns `R<usize>` (the
+  exclusive end-mb this call actually decoded) instead of `R<ParsedSlice>`.
+  The two other call sites (`decoder::interlaced.rs`, PAFF/MBAFF field I-slice
+  — explicitly out of scope for multi-slice) go through a new
+  `parse_i_slice_cabac_single` adapter that allocates fresh buffers and calls
+  with `first_mb=0, slice_id=0`, preserving their exact pre-existing behaviour.
+- `slice_data::ctx::NeighbourCtx` gained `NeighbourCtx::new_with_slices`
+  (an opt-in sibling of `::new`, which keeps `slice_id_grid: None` and is
+  therefore a complete no-op for P/B and every non-multi-slice caller): when
+  set, `left_top`/`left_top_with_bottom` additionally require
+  `slice_id_grid[idx] == cur_slice_id` for a resolved neighbour index to
+  count as available (§6.4.9). Every downstream neighbour-derivation
+  function (`cabac_cbp_neighbors`, `luma_cbf_neighbors`,
+  `chroma_cbf_neighbors`, `mpm_pred_mode`/`mpm_pred_mode_8x8`, the
+  `mb_type`/`transform_8x8`/`chroma_pred` neighbour reads in
+  `parse_intra_macroblock_cabac`) already routes through `NeighbourCtx`, so
+  this one change propagates everywhere needed for CABAC bit-level parsing —
+  **but see the intra-prediction gap below, which is a SEPARATE code path**.
+- `try_decode_real_slice`'s CABAC-I branch: get-or-create
+  `pending_picture`, decode each slice into it, finalize (a) synchronously
+  the moment a slice's own decode reaches the picture's last macroblock —
+  the overwhelmingly common single-slice-per-picture case, giving **zero
+  added latency and zero behaviour change**, confirmed by re-running
+  `BA1_Sony_D`/`CABA1_Sony_D`/`CABA2_Sony_E`/`CANL1_Sony_E` (all still
+  bit-exact, 0 diff bytes, after this change) — or (b) when a later NAL
+  starts a new picture / the stream ends, as the §7.4.1.2.4-subset safety net
+  for a truncated/corrupt multi-slice picture. `decode_impl` gained a
+  `suppress_frame` check after `try_decode_real_slice`'s `Ok(None)` so an
+  accumulated-but-incomplete continuation slice doesn't fall through to
+  `decode_slice` and get double-processed into a spurious extra frame.
+  `flush()` finalizes any still-pending accumulator.
+
+**Verification**: `cargo check`/`clippy -D warnings`/`fmt` clean;
+`cargo test -p tpt-kinetix-h264 --lib --tests` — all 66 test binaries pass,
+zero failures/regressions. Fetched `CABA1_Sony_D`/`CABA2_Sony_E`/
+`BA1_Sony_D`/`CANL1_Sony_E` (closest related, previously-`BitExact` fixtures
+touching this exact code) plus the three multi-slice targets and ran
+`itu_conformance`: the four single-slice fixtures remain exactly bit-exact
+(confirms Phase 1 is a true zero-behaviour-change refactor); the three
+multi-slice fixtures now genuinely decode every slice (frame counts correct,
+no parse errors, no panics) with bounded per-pixel error (max_diff 69-255,
+not saturated/garbage) instead of the old scaffold's huge all-skip diff —
+real progress, but **not yet bit-exact**, so none of their `Expect` entries
+in `itu_conformance.rs` were flipped (per the plan: never flip speculatively).
+
+**Root cause of the remaining gap, found via a throwaway debug harness this
+session then removed**: `crate::reconstruct::reconstruct_intra_frame` derives
+intra-prediction reference-sample availability (DC/horizontal/vertical/
+plane/diagonal modes, top-right availability, etc.) **purely from grid
+position** (`mb_x > 0` / `mb_y > 0`) with no concept of slice membership at
+all. Per §6.4.9 / §8.3.1.2/§8.3.2, a macroblock in a different slice must be
+treated as UNAVAILABLE for intra-prediction reference samples too, not just
+for CABAC context derivation (which this session's `NeighbourCtx` change
+already handles correctly). Since the accumulator now genuinely decodes
+every slice's real macroblocks (rather than leaving them at the old
+all-skip scaffold default), `reconstruct_intra_frame` sees real neighbour
+pixel data across a slice boundary and uses it as a prediction reference —
+extra information the ENCODER did not have (real multi-slice encoders treat
+each slice as independently decodable), producing systematic, bounded,
+cascading prediction errors for macroblocks near and after each slice
+boundary. This is consistent with the observed data: CABAC entropy decode
+itself does not desync (correct frame counts, no parse errors, errors are
+bounded rather than exploding to noise) and the errors are proportional to
+how much of the picture sits "downstream" of a slice boundary in intra
+prediction's dependency order.
+
+**Next step for a future session**: thread a `slice_id`-aware (or simply
+`Option<&[u16]>`) neighbour-availability check into
+`reconstruct_intra_frame`'s per-mode prediction-sample derivation — the same
+"resolved index is real but treat as absent if `slice_id[idx] !=
+cur_slice_id`" pattern already used in `slice_data::ctx::NeighbourCtx`, just
+applied to `reconstruct.rs`'s own (separate, currently slice-unaware)
+neighbour lookups. This is a materially larger and riskier change than the
+CABAC-parsing plumbing done this session — `reconstruct_intra_frame` is one
+large function with many prediction-mode branches, shared unmodified by
+EVERY existing bit-exact single-slice/PAFF/MBAFF/8x8-transform fixture — so
+it needs its own careful zero-regression verification pass (the same
+"single-slice picture must be byte-identical before and after" discipline
+used for this session's CABAC-side change) before being attempted.
+
+**Why P/B (`CABAST3_Sony_E`, `CABASTBR3_Sony_B`) were not attempted this
+session**: unlike the I-slice path (self-contained: no reference lists, no
+DPB interaction, no weighted prediction, no MBAFF full-frame deblock
+orchestrator), `parse_p_slice_cabac`/`parse_b_slice_cabac`'s call sites in
+`decoder/mod.rs` are deeply entangled with ref-list building (`self.dpb`),
+`store_reference_picture`'s MV-grid/POC bookkeeping for LATER B-slice direct
+mode, explicit/implicit weighted prediction, and the MBAFF
+`run_mbaff_deblock` orchestrator — correctly deferring all of that from
+"once per slice" to "once per complete picture" without regressing any of
+the several currently-bit-exact P/B fixtures (`CABA2_Sony_E`,
+`multi_frame_dpb`, `p_frame_conformance`, etc.) needs materially more
+design and verification budget than a single session responsibly allows on
+top of the I-slice work above. The `PictureAccumulator`/`NeighbourCtx`
+machinery added this session is written to be reusable for P/B (the
+`MbInterCabacCtx` grid mentioned in the original plan review would need the
+same treatment as `pred_ctx`/`cabac_ctx` got here), but the P/B call-site
+restructuring itself is unstarted.
+
 ## SESSION #32ap (2026-09-05, later same day) — temporal direct mode (§8.4.1.2.3) implemented; unvalidated against real bitstreams (no network access to the ITU archive in this container)
 
 Every B slice with `direct_spatial_mv_pred_flag == 0` that actually coded a

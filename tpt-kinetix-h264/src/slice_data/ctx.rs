@@ -70,12 +70,17 @@ pub struct ParsedSlice {
     pub macroblocks: Vec<Macroblock>,
     pub nz: Vec<MbNz>,
     pub mv_store: MvStore,
-    /// How many of `macroblocks` were actually decoded from this slice's own
-    /// bitstream, vs. left at their `Macroblock::new_skip` default because
-    /// `end_of_slice_flag` (CABAC) legitimately fired before covering the
-    /// whole picture — i.e. this is one slice of a multi-slice picture, and
-    /// the remaining macroblocks belong to a different slice this call never
-    /// saw. Equal to `macroblocks.len()` for a single-slice picture.
+    /// How many of `macroblocks` were actually decoded from THIS slice's own
+    /// bitstream (per-call, not per-picture), vs. left at their
+    /// `Macroblock::new_skip` default because `end_of_slice_flag` (CABAC)
+    /// legitimately fired before covering the whole picture — i.e. this is
+    /// one slice of a multi-slice picture, and the remaining macroblocks
+    /// belong to a different slice this call never saw. Equal to
+    /// `macroblocks.len()` for a single-slice picture (still the only case
+    /// `parse_p_slice_cabac`/`parse_b_slice_cabac` support — see
+    /// `parse_i_slice_cabac`, in the same crate module, for the CABAC I-slice
+    /// parser that DOES support real multi-slice accumulation and no longer
+    /// returns this type).
     pub decoded_mb_count: usize,
 }
 
@@ -373,6 +378,18 @@ pub struct NeighbourCtx<'a> {
     mb_rows: u32,
     cur_field: bool,
     field_flags: &'a [Option<bool>],
+    /// §6.4.9: when `Some`, a resolved left/top/left-bottom neighbour index
+    /// is additionally treated as unavailable unless it belongs to the SAME
+    /// slice as the macroblock currently being decoded (`cur_slice_id`) —
+    /// i.e. it was actually decoded by an earlier call into this picture's
+    /// shared accumulator, not left at its `Macroblock::new_skip` /
+    /// `MbCabacCtx::default()` placeholder by a not-yet-decoded or
+    /// different-slice macroblock. `None` (the default via [`Self::new`])
+    /// disables this check entirely, preserving single-slice / P / B
+    /// behaviour exactly (only the multi-slice CABAC I-slice path opts in
+    /// via [`Self::new_with_slices`]).
+    slice_id_grid: Option<&'a [u16]>,
+    cur_slice_id: u16,
 }
 
 impl NeighbourCtx<'static> {
@@ -385,6 +402,8 @@ impl NeighbourCtx<'static> {
         mb_rows: 0,
         cur_field: false,
         field_flags: &[],
+        slice_id_grid: None,
+        cur_slice_id: 0,
     };
 }
 
@@ -400,6 +419,42 @@ impl<'a> NeighbourCtx<'a> {
             mb_rows,
             cur_field,
             field_flags,
+            slice_id_grid: None,
+            cur_slice_id: 0,
+        }
+    }
+
+    /// Same as [`Self::new`] but additionally enforces the §6.4.9
+    /// slice-boundary neighbour-availability rule: a resolved neighbour is
+    /// discarded (treated as off-picture) unless `slice_id_grid[idx] ==
+    /// cur_slice_id`. Used by the multi-slice-capable CABAC I-slice parser;
+    /// `slice_id_grid` must be pre-seeded with a sentinel not equal to any
+    /// real slice id (e.g. `u16::MAX`) for macroblocks not yet decoded this
+    /// picture, so an in-range-but-undecoded index is also correctly treated
+    /// as unavailable.
+    pub(crate) fn new_with_slices(
+        mb_aff: bool,
+        mb_rows: u32,
+        cur_field: bool,
+        field_flags: &'a [Option<bool>],
+        slice_id_grid: &'a [u16],
+        cur_slice_id: u16,
+    ) -> Self {
+        NeighbourCtx {
+            mb_aff,
+            mb_rows,
+            cur_field,
+            field_flags,
+            slice_id_grid: Some(slice_id_grid),
+            cur_slice_id,
+        }
+    }
+
+    #[inline]
+    fn filter_slice(&self, idx: Option<usize>) -> Option<usize> {
+        match (idx, self.slice_id_grid) {
+            (Some(i), Some(grid)) => (grid[i] == self.cur_slice_id).then_some(i),
+            _ => idx,
         }
     }
 
@@ -420,7 +475,7 @@ impl<'a> NeighbourCtx<'a> {
         if !self.mb_aff {
             let left = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
             let top = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
-            return (left, top);
+            return (self.filter_slice(left), self.filter_slice(top));
         }
         let n = crate::mbaff::derive_neighbours(
             mb_x,
@@ -430,7 +485,7 @@ impl<'a> NeighbourCtx<'a> {
             self.cur_field,
             self.field_flags,
         );
-        (n.left_top, n.top)
+        (self.filter_slice(n.left_top), self.filter_slice(n.top))
     }
 
     /// Resolve the left/top neighbour macroblock addresses, also returning
@@ -446,7 +501,7 @@ impl<'a> NeighbourCtx<'a> {
         if !self.mb_aff {
             let left = (mb_x > 0).then(|| (mb_y * mb_cols + mb_x - 1) as usize);
             let top = (mb_y > 0).then(|| ((mb_y - 1) * mb_cols + mb_x) as usize);
-            return (left, top, None);
+            return (self.filter_slice(left), self.filter_slice(top), None);
         }
         let n = crate::mbaff::derive_neighbours(
             mb_x,
@@ -456,7 +511,11 @@ impl<'a> NeighbourCtx<'a> {
             self.cur_field,
             self.field_flags,
         );
-        (n.left_top, n.top, n.left_bottom)
+        (
+            self.filter_slice(n.left_top),
+            self.filter_slice(n.top),
+            self.filter_slice(n.left_bottom),
+        )
     }
 }
 
