@@ -889,6 +889,7 @@ impl H264Decoder {
             &scaling,
             &crate::reconstruct::WeightedPred::Default,
             tracer,
+            Some(&slice_id_grid),
         );
 
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = macroblocks
@@ -1336,6 +1337,7 @@ impl H264Decoder {
             scaling,
             &crate::reconstruct::WeightedPred::Default,
             tracer,
+            None,
         );
 
         // Apply the in-loop deblocking filter (spec §8.7).
@@ -1695,6 +1697,7 @@ impl H264Decoder {
                         scaling,
                         &crate::reconstruct::WeightedPred::Default,
                         tracer,
+                        None,
                     );
 
                     let deblock_params = crate::deblock::DeblockParams {

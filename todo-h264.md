@@ -2,6 +2,125 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ar — `reconstruct_intra_frame` made slice-boundary aware (§6.4.9); CABACI3_Sony_B improved but NOT yet bit-exact — a second, separate gap remains
+
+Implemented the fix `todo-h264.md` SESSION #32aq root-caused: `reconstruct.rs`'s
+intra-prediction neighbour-availability logic (`get_luma` and everything that
+calls it) previously derived availability purely from grid position, so once
+`07b0471`'s accumulator started decoding every slice's real macroblocks into
+one shared buffer, a macroblock's neighbour across a slice boundary was read
+as a real (available) prediction reference even though §6.4.9 requires it be
+treated as unavailable, exactly like an off-picture neighbour.
+
+**What changed** (`tpt-kinetix-h264/src/reconstruct.rs`): a new `SliceAvail`
+struct (`slice_id_grid: &[u16]`, `mb_cols`, `cur_slice_id`, `mb_size` — 16 for
+luma, 8 for chroma) plus `SliceAvail::same_slice(x, y)`, converting an
+absolute pixel position to a macroblock index and comparing its slice id
+against the macroblock currently being reconstructed. `get_luma` gained an
+`Option<&SliceAvail>` parameter: `None` reproduces the exact old
+grid-position-only behaviour; `Some` additionally returns `None` (treated as
+unavailable) for a same-picture position whose macroblock decoded in a
+different slice. This one change automatically covers every existing
+`get_luma` call site (16×16 top/left/top-left, 4×4 top/left/top-right/
+top-left including the by-row-0 top-right-crosses-into-MB-above case, and the
+8×8-transform block's 16-sample top row) with no per-call-site special
+casing needed.
+
+`reconstruct_luma`/`reconstruct_luma_at`/`reconstruct_luma_8x8`/
+`reconstruct_chroma`/`reconstruct_chroma_at` each gained an
+`Option<SliceAvail>` parameter threaded down to their `get_luma` calls.
+`reconstruct_intra_frame` gained `slice_id_grid: Option<&[u16]>`; when `Some`
+it builds a `SliceAvail` fresh per macroblock (reading that macroblock's own
+slice id out of the grid) and passes it to `reconstruct_luma`/
+`reconstruct_chroma`. Every call site that is **not** the multi-slice
+accumulator passes `None`/plain `None` down the chain and is therefore
+byte-for-byte unaffected: `decoder/mod.rs`'s two single-slice CAVLC call
+sites, `decoder/interlaced.rs`'s PAFF field-I call site, `reconstruct.rs`'s
+own MBAFF (`reconstruct_mbaff_intra_frame`) and every P/B-slice intra-MB call
+site (field P/B, MBAFF field-gated P/B, plain P/B) — all pass `None`, mirroring
+the `NeighbourCtx::new` vs `new_with_slices` opt-in pattern from `07b0471`.
+Only `decoder/mod.rs::finalize_picture` (the real multi-slice CABAC I-slice
+accumulator path) passes `Some(&slice_id_grid)`.
+
+**Verification** (zero-regression discipline, actual output pasted, not
+summarized):
+- `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D
+  warnings`: clean.
+- `cargo fmt --all -- --check`: clean.
+- `cargo test -p tpt-kinetix-h264 --lib --tests`: all 66 test binaries, 0
+  failures — `grep -c "test result: ok"` → 66, `grep -i "FAILED\|panicked"` →
+  no matches. Lib unit tests went 268 → 269 (the one new test added below).
+- `just corpus-check` (regenerate + diff the synthetic testsrc corpus):
+  `testsrc_{48x32,64x48,96x64,128x96}.h264` all `OK max_abs_diff=0`.
+- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`: all
+  12 `Expect::BitExact` fixtures remain exactly bit-exact (0 failures,
+  "12 hard-checked bit-exact, 0 failure(s)"), specifically confirming zero
+  regression on `BA1_Sony_D`, `CANL1_Sony_E`, `CABA1_Sony_D`, `CABA2_Sony_E`
+  (the four fixtures `07b0471` specifically re-verified), plus
+  `CVPCMNL1_SVA_C`/`CVPCMNL2_SVA_C` (I_PCM), `BA2_Sony_F`/`CANL2_Sony_E`
+  (multi-ref), `NL1_Sony_D`/`NL2_Sony_H`/`SVA_NL2_E`/`NL3_SVA_E`. High-profile
+  8×8 conformance (`high_profile_8x8_conformance.rs`,
+  `high_profile_8x8_cabac_conformance.rs`) and PAFF field-I tests are inside
+  the same `--tests` run above and also stayed green.
+- New regression test added directly in `reconstruct.rs`'s own `#[cfg(test)]`
+  module (no synthetic-bitstream infra existed for multi-slice — see below):
+  `cross_slice_neighbour_is_unavailable_for_intra_prediction`. Builds a 2-MB
+  row: mb0 is `I_PCM` with every sample set to 200 (a real, decoded,
+  non-flat left neighbour); mb1 is `Intra4x4`, every 4×4 block
+  `Intra4x4Mode::Horizontal` (predicts purely from the left column) with zero
+  residual, so its reconstructed value directly reveals what the predictor
+  saw: with `slice_id_grid = [0, 1]` (different slices) every mb1 luma
+  sample must be 128 (§8.3.1.2's unavailable-neighbour substitute); with
+  `[0, 0]` (same slice) or `None` (pre-existing single-slice callers) every
+  mb1 sample must be 200 (mb0's real value). Passes after the fix; would have
+  failed to compile against the old `get_luma` (no slice-awareness existed at
+  all) and — if `SliceAvail`'s check were a no-op bug — would fail the
+  `[0, 1]` assertion (getting 200 instead of 128).
+
+**Result — improved but still NOT bit-exact**: re-running
+`CABACI3_Sony_B` (the one *I-only* multi-slice target in scope for this fix)
+before vs. after (via `git stash`/`git stash pop` around this change, same
+build):
+- Before (07b0471 alone): `max_diff=220 diff_bytes=10351563/11404800`
+  (first_bad_frame=Some(0), 0/300 ref frames exact anywhere).
+- After (this session's fix): `max_diff=186 diff_bytes=9315027/11404800`
+  (first_bad_frame=Some(1) — frame 0 is now fully exact — 20/300 ref frames
+  exact somewhere).
+
+So the fix is real (frame 0 flipped from wrong to exact; ~11% fewer diff
+bytes overall; max_diff dropped) but the picture is still ~82% wrong from
+frame 1 onward — far more than "cascading prediction error downstream of a
+slice boundary" alone would explain for a 4-slices-per-picture I-only stream.
+**This means SESSION #32aq's root-cause diagnosis was correct but
+incomplete: there is at least one more, separate, not-yet-identified bug**
+specific to `CABACI3_Sony_B` (300 frames, 4 slices/picture, CABAC I-only)
+that dominates the remaining error from frame 1 on. Candidates not yet
+investigated (do NOT assume without evidence): (a) something involving the
+per-slice `DeblockParams`/deblocking at slice boundaries interacting badly
+with an all-I stream's own filtering, since deblocking runs *after*
+`reconstruct_intra_frame` in `finalize_picture` and was not touched this
+session; (b) each of the 4 slices per picture also being independently
+CABAC-*initialized* (its own `slice_qp`-derived context init at
+`slice_data::cabac_i.rs`'s per-slice entry point) in a way that might not be
+correctly reset per slice in the accumulator path; (c) a per-slice deblock
+boundary-strength or QP-averaging bug distinct from the intra-neighbour bug
+fixed here. **`CABACI3_Sony_B`'s `itu_conformance.rs` manifest entry was
+correctly left as `Expect::Limitation("4 slices per picture")` — do not flip
+it; the fix here is real progress, not the whole story.**
+
+`CABAST3_Sony_E`/`CABASTBR3_Sony_B` (P/B multi-slice) were, as expected,
+untouched by this session's I-slice-only fix (their `Expect::KnownGap` entries
+are unchanged) — P/B CABAC multi-slice decode itself is still not implemented
+at the `decoder/mod.rs` call-site level (see SESSION #32aq's "why P/B were not
+attempted").
+
+**Next step for a future session**: bin-level oracle `CABACI3_Sony_B` frame 1
+specifically (frame 0 is now exact, so the bug is either inter-picture state
+carried across the picture boundary, or a per-slice CABAC/deblock detail that
+happens not to matter on frame 0's specific slice layout). Do not re-attempt
+the intra-neighbour fix — it is done and verified; the remaining gap is
+something else.
+
 ## SESSION #32aq — CABAC I-slice multi-slice accumulator implemented (Phase 1+2 for I only); root-caused the remaining gap to `reconstruct.rs`'s slice-blind intra-prediction neighbour availability
 
 Implemented the "full adaptive" multi-slice plan's Phase 1 (accumulator

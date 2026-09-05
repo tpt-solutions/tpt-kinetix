@@ -333,6 +333,7 @@ impl H264Decoder {
             scaling,
             &crate::reconstruct::WeightedPred::Default,
             tracer,
+            None,
         );
 
         let deblock_params = crate::deblock::DeblockParams {

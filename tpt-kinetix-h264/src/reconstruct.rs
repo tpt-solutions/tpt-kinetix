@@ -418,6 +418,7 @@ fn place_ipcm_mb(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn reconstruct_intra_frame<T: DecodeTracer>(
     macroblocks: &[Macroblock],
     mb_cols: u32,
@@ -429,6 +430,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
     scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
+    slice_id_grid: Option<&[u16]>,
 ) -> ReconstructedFrame {
     let luma_stride = width as usize;
     let chroma_stride = (width / 2) as usize;
@@ -440,6 +442,26 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
+            // §6.4.9: a neighbour macroblock decoded by a different slice
+            // than the current one is unavailable for intra-prediction
+            // reference samples, exactly like an off-picture neighbour.
+            // `slice_id_grid` is only `Some` for the multi-slice accumulator
+            // path (`finalize_picture`); every single-slice caller passes
+            // `None`, which keeps `luma_avail`/`chroma_avail` as `None` and
+            // reproduces the pre-existing grid-position-only behaviour
+            // exactly (see `SliceAvail`'s doc comment).
+            let luma_avail = slice_id_grid.map(|grid| SliceAvail {
+                slice_id_grid: grid,
+                mb_cols,
+                cur_slice_id: grid[idx],
+                mb_size: 16,
+            });
+            let chroma_avail = slice_id_grid.map(|grid| SliceAvail {
+                slice_id_grid: grid,
+                mb_cols,
+                cur_slice_id: grid[idx],
+                mb_size: 8,
+            });
             if mb.mb_type == MbType::IPcm {
                 // §8.3.5: I_PCM "reconstruction" is a verbatim copy of the raw
                 // samples (256 luma raster, then 64 Cb, then 64 Cr). No
@@ -465,6 +487,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 field_scan,
                 scaling,
                 tracer,
+                luma_avail,
             );
             reconstruct_chroma(
                 mb,
@@ -478,6 +501,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 scaling,
                 weighted,
                 tracer,
+                chroma_avail,
             );
         }
     }
@@ -565,6 +589,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         &crate::transform::FIELD_SCAN_8X8,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -580,6 +605,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 } else {
                     reconstruct_luma_at(
@@ -594,6 +620,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         &crate::transform::ZIGZAG_8X8,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -609,6 +636,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 }
             }
@@ -624,11 +652,61 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
     }
 }
 
-/// Sample a luma neighbour at absolute (x, y), or `None` if outside the picture
-/// or (for intra order) not yet reconstructed. For a raster decode with a fully
-/// intra frame, any position above/left of the current block is available.
+/// Opt-in slice-boundary awareness for intra-prediction neighbour lookups
+/// (§6.4.9 / §8.3.1.2 / §8.3.2: a macroblock in a different slice than the
+/// current one must be treated as unavailable, exactly like an off-picture
+/// neighbour). Only the progressive I-slice path (`reconstruct_luma`/
+/// `reconstruct_chroma`, called from [`reconstruct_intra_frame`]) ever
+/// constructs one; every other caller passes `None` through
+/// `reconstruct_luma_at`/`reconstruct_chroma_at`/`get_luma` and gets exactly
+/// the old grid-position-only behaviour (byte-identical to before this was
+/// added) — mirroring `slice_data::ctx::NeighbourCtx::new` vs
+/// `new_with_slices`.
+#[derive(Clone, Copy)]
+struct SliceAvail<'a> {
+    /// One entry per macroblock (`mb_cols * mb_rows`, same indexing as the
+    /// `macroblocks` slice), the slice id that decoded that macroblock.
+    slice_id_grid: &'a [u16],
+    mb_cols: u32,
+    /// The slice id of the macroblock currently being reconstructed.
+    cur_slice_id: u16,
+    /// Pixels per macroblock edge for the plane being sampled: 16 for luma,
+    /// 8 for chroma (both planes share the same `mb_cols`/`slice_id_grid`
+    /// macroblock grid).
+    mb_size: u32,
+}
+
+impl SliceAvail<'_> {
+    /// Whether the on-picture position `(x, y)` belongs to the same slice as
+    /// the macroblock currently being reconstructed. Only called after the
+    /// caller has already confirmed `x >= 0 && y >= 0`.
+    #[inline]
+    fn same_slice(&self, x: usize, y: usize) -> bool {
+        let mb_x = x as u32 / self.mb_size;
+        let mb_y = y as u32 / self.mb_size;
+        let idx = (mb_y * self.mb_cols + mb_x) as usize;
+        match self.slice_id_grid.get(idx) {
+            Some(&sid) => sid == self.cur_slice_id,
+            // Out of the grid entirely (shouldn't happen for an in-picture
+            // position) -- fail open to the pre-existing behaviour.
+            None => true,
+        }
+    }
+}
+
+/// Sample a luma neighbour at absolute (x, y), or `None` if outside the picture,
+/// not yet reconstructed, or (when `slice_avail` is set) in a different slice
+/// than the macroblock currently being reconstructed. For a raster decode with
+/// a fully intra frame, any position above/left of the current block within
+/// the same slice is available.
 #[inline]
-fn get_luma(plane: &[u8], stride: usize, x: isize, y: isize) -> Option<u8> {
+fn get_luma(
+    plane: &[u8],
+    stride: usize,
+    x: isize,
+    y: isize,
+    slice_avail: Option<&SliceAvail>,
+) -> Option<u8> {
     if x < 0 || y < 0 {
         return None;
     }
@@ -636,9 +714,15 @@ fn get_luma(plane: &[u8], stride: usize, x: isize, y: isize) -> Option<u8> {
     if x >= stride {
         return None;
     }
+    if let Some(avail) = slice_avail {
+        if !avail.same_slice(x, y) {
+            return None;
+        }
+    }
     plane.get(y * stride + x).copied()
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn reconstruct_luma<T: DecodeTracer>(
     mb: &Macroblock,
@@ -649,6 +733,7 @@ fn reconstruct_luma<T: DecodeTracer>(
     field_scan: bool,
     scaling: &ScalingLists,
     tracer: &mut T,
+    slice_avail: Option<SliceAvail>,
 ) {
     let (scan4, scan8) = if field_scan {
         (
@@ -670,6 +755,7 @@ fn reconstruct_luma<T: DecodeTracer>(
         scan8,
         scaling,
         tracer,
+        slice_avail,
     );
 }
 
@@ -695,6 +781,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
     scan8: &[usize; 64],
     scaling: &ScalingLists,
     tracer: &mut T,
+    slice_avail: Option<SliceAvail>,
 ) {
     let base_x = (mb_x * 16) as usize;
     let base_y = base_y_px;
@@ -710,12 +797,14 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                     stride,
                     (base_x + i) as isize,
                     base_y as isize - y_step as isize,
+                    slice_avail.as_ref(),
                 );
                 left[i] = get_luma(
                     plane,
                     stride,
                     base_x as isize - 1,
                     (base_y + i * y_step) as isize,
+                    slice_avail.as_ref(),
                 );
             }
             let tl = get_luma(
@@ -723,6 +812,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                 stride,
                 base_x as isize - 1,
                 base_y as isize - y_step as isize,
+                slice_avail.as_ref(),
             );
             let mut pred = [0u8; 256];
             predict_16x16(
@@ -776,7 +866,17 @@ fn reconstruct_luma_at<T: DecodeTracer>(
             // Intra_8×8 mode and reconstructed via the 8×8 inverse transform.
             if mb.transform_size_8x8 {
                 reconstruct_luma_8x8(
-                    mb, plane, stride, mb_x, mb_y, base_y, y_step, scan8, scaling, tracer,
+                    mb,
+                    plane,
+                    stride,
+                    mb_x,
+                    mb_y,
+                    base_y,
+                    y_step,
+                    scan8,
+                    scaling,
+                    tracer,
+                    slice_avail,
                 );
             } else {
                 // Process 4×4 blocks in decode (block-scan) order so neighbours are
@@ -797,12 +897,14 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                                 stride,
                                 (x0 + i) as isize,
                                 y0 as isize - y_step as isize,
+                                slice_avail.as_ref(),
                             );
                             left[i] = get_luma(
                                 plane,
                                 stride,
                                 x0 as isize - 1,
                                 (y0 + i * y_step) as isize,
+                                slice_avail.as_ref(),
                             );
                         }
                         // Top-right samples (top[4..8]), §8.3.1.2.1. When `by_u == 0`
@@ -833,6 +935,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                                     stride,
                                     (x0 + 4 + i) as isize,
                                     y0 as isize - y_step as isize,
+                                    slice_avail.as_ref(),
                                 );
                             }
                         }
@@ -841,6 +944,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                             stride,
                             x0 as isize - 1,
                             y0 as isize - y_step as isize,
+                            slice_avail.as_ref(),
                         );
                         let mut pred = [0u8; 16];
                         predict_4x4(
@@ -909,6 +1013,7 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
     scan8: &[usize; 64],
     scaling: &ScalingLists,
     tracer: &mut T,
+    slice_avail: Option<SliceAvail>,
 ) {
     let base_x = (mb_x * 16) as usize;
     let base_y = base_y_px;
@@ -933,6 +1038,7 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
                 stride,
                 (px0 + i) as isize,
                 py0 as isize - y_step as isize,
+                slice_avail.as_ref(),
             );
         }
         // For the bottom-right 8×8 block (bx=8, by=8), the right half of the top
@@ -945,13 +1051,20 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
         }
         let mut left = [None; 8];
         for i in 0..8 {
-            left[i] = get_luma(plane, stride, px0 as isize - 1, (py0 + i * y_step) as isize);
+            left[i] = get_luma(
+                plane,
+                stride,
+                px0 as isize - 1,
+                (py0 + i * y_step) as isize,
+                slice_avail.as_ref(),
+            );
         }
         let tl = get_luma(
             plane,
             stride,
             px0 as isize - 1,
             py0 as isize - y_step as isize,
+            slice_avail.as_ref(),
         );
 
         let mut pred = [0u8; 64];
@@ -995,6 +1108,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
     scaling: &ScalingLists,
     weighted: &WeightedPred,
     tracer: &mut T,
+    slice_avail: Option<SliceAvail>,
 ) {
     let scan4 = if field_scan {
         &crate::transform::FIELD_SCAN_4X4
@@ -1015,6 +1129,7 @@ fn reconstruct_chroma<T: DecodeTracer>(
         scaling,
         weighted,
         tracer,
+        slice_avail,
     );
 }
 
@@ -1036,6 +1151,7 @@ fn reconstruct_chroma_at<T: DecodeTracer>(
     scaling: &ScalingLists,
     _weighted: &WeightedPred,
     tracer: &mut T,
+    slice_avail: Option<SliceAvail>,
 ) {
     let base_x = (mb_x * 8) as usize;
     let base_y = base_y_px;
@@ -1056,12 +1172,14 @@ fn reconstruct_chroma_at<T: DecodeTracer>(
                 stride,
                 (base_x + i) as isize,
                 base_y as isize - y_step as isize,
+                slice_avail.as_ref(),
             );
             left[i] = get_luma(
                 plane,
                 stride,
                 base_x as isize - 1,
                 (base_y + i * y_step) as isize,
+                slice_avail.as_ref(),
             );
         }
         let tl = get_luma(
@@ -1069,6 +1187,7 @@ fn reconstruct_chroma_at<T: DecodeTracer>(
             stride,
             base_x as isize - 1,
             base_y as isize - y_step as isize,
+            slice_avail.as_ref(),
         );
         let mut pred = [0u8; 64];
         predict_chroma(
@@ -1324,6 +1443,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         &crate::transform::FIELD_SCAN_8X8,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -1339,6 +1459,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 } else {
                     reconstruct_luma(
@@ -1350,6 +1471,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         false,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma(
                         mb,
@@ -1363,6 +1485,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 }
             }
@@ -1732,6 +1855,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         &crate::transform::FIELD_SCAN_8X8,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -1747,6 +1871,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 } else {
                     reconstruct_luma(
@@ -1758,6 +1883,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         false,
                         scaling,
                         tracer,
+                        None,
                     );
                     reconstruct_chroma(
                         mb,
@@ -1771,6 +1897,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         scaling,
                         weighted,
                         tracer,
+                        None,
                     );
                 }
             }
@@ -2159,6 +2286,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
                     true,
                     scaling,
                     tracer,
+                    None,
                 );
                 reconstruct_chroma(
                     mb,
@@ -2172,6 +2300,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
                     scaling,
                     weighted,
                     tracer,
+                    None,
                 );
             }
         }
@@ -2301,6 +2430,7 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     true,
                     scaling,
                     tracer,
+                    None,
                 );
                 reconstruct_chroma(
                     mb,
@@ -2314,6 +2444,7 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     scaling,
                     weighted,
                     tracer,
+                    None,
                 );
             }
         }
@@ -2947,6 +3078,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     false,
                     scaling,
                     tracer,
+                    None,
                 );
                 reconstruct_chroma(
                     mb,
@@ -2960,6 +3092,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                     scaling,
                     weighted,
                     tracer,
+                    None,
                 );
             }
         }
@@ -3770,9 +3903,120 @@ mod tests {
             &crate::transform::ScalingLists::flat(),
             &WeightedPred::Default,
             &mut crate::trace::NoopTracer,
+            None,
         );
         assert_eq!(f.luma.len(), 16 * 16);
         assert_eq!(f.chroma_cb.len(), 8 * 8);
+    }
+
+    /// §6.4.9 regression: a macroblock's left neighbour that sits in a
+    /// *different slice* must be treated as unavailable for intra-prediction
+    /// reference samples, even though (in the multi-slice accumulator's
+    /// shared frame buffer) its real, already-reconstructed pixel data is
+    /// physically sitting right there. Before this fix, `reconstruct_luma_at`
+    /// derived availability purely from grid position and would happily read
+    /// across the slice boundary.
+    ///
+    /// Two 16x16 macroblocks side by side: mb0 is I_PCM with every luma
+    /// sample set to 200 (so its rightmost column, mb1's literal left
+    /// neighbour, is a real, non-flat, decoded value). mb1 is Intra_4x4,
+    /// every 4x4 block predicted `Horizontal` (copies the left column) with
+    /// zero residual, so its reconstructed value *is* the predictor's view of
+    /// the left neighbour: 128 (§8.3.1.2's unavailable-neighbour DC
+    /// substitute, `prediction::R`) if unavailable, or 200 if it can see
+    /// mb0's real samples.
+    fn two_mb_row_with_ipcm_left() -> Vec<Macroblock> {
+        let mut mb0 = Macroblock::new_skip();
+        mb0.mb_type = MbType::IPcm;
+        mb0.pcm_samples = vec![200u8; 256 + 64 + 64];
+
+        let mut mb1 = Macroblock::new_skip();
+        mb1.mb_type = MbType::Intra4x4;
+        mb1.transform_size_8x8 = false;
+        mb1.pred_modes_4x4 = Box::new([Intra4x4Mode::Horizontal; 16]);
+        mb1.intra_chroma_pred_mode = 1; // Horizontal, same reasoning for chroma.
+        mb1.qp = 26;
+
+        vec![mb0, mb1]
+    }
+
+    #[test]
+    fn cross_slice_neighbour_is_unavailable_for_intra_prediction() {
+        let mbs = two_mb_row_with_ipcm_left();
+        let scaling = crate::transform::ScalingLists::flat();
+
+        // mb0 and mb1 in different slices: mb1's Horizontal prediction must
+        // NOT see mb0's real pixels across the slice boundary.
+        let diff_slices: [u16; 2] = [0, 1];
+        let f_diff = reconstruct_intra_frame(
+            &mbs,
+            2,
+            1,
+            32,
+            16,
+            false,
+            0,
+            &scaling,
+            &WeightedPred::Default,
+            &mut crate::trace::NoopTracer,
+            Some(&diff_slices),
+        );
+        // mb1 occupies luma columns 16..32 of the single MB row.
+        for row in 0..16 {
+            for col in 16..32 {
+                assert_eq!(
+                    f_diff.luma[row * 32 + col],
+                    128,
+                    "cross-slice neighbour must fall back to the unavailable-DC \
+                     substitute (128) at ({col},{row})"
+                );
+            }
+        }
+
+        // Same test data, but both macroblocks in the same slice: mb1's
+        // Horizontal prediction SHOULD see mb0's real samples (200).
+        let same_slice: [u16; 2] = [0, 0];
+        let f_same = reconstruct_intra_frame(
+            &mbs,
+            2,
+            1,
+            32,
+            16,
+            false,
+            0,
+            &scaling,
+            &WeightedPred::Default,
+            &mut crate::trace::NoopTracer,
+            Some(&same_slice),
+        );
+        for row in 0..16 {
+            for col in 16..32 {
+                assert_eq!(
+                    f_same.luma[row * 32 + col],
+                    200,
+                    "same-slice neighbour must be a real, available reference \
+                     sample (200) at ({col},{row})"
+                );
+            }
+        }
+
+        // And a single-slice caller (`slice_id_grid: None`, the pre-existing
+        // behaviour every non-multi-slice call site still uses) must match
+        // the same-slice result exactly.
+        let f_none = reconstruct_intra_frame(
+            &mbs,
+            2,
+            1,
+            32,
+            16,
+            false,
+            0,
+            &scaling,
+            &WeightedPred::Default,
+            &mut crate::trace::NoopTracer,
+            None,
+        );
+        assert_eq!(f_none.luma, f_same.luma);
     }
 
     /// A skip macroblock with a committed (0,0) MV against ref 0 copies the
@@ -4001,6 +4245,7 @@ mod tests {
                 &crate::transform::ZIGZAG_8X8,
                 &flat,
                 &mut crate::trace::NoopTracer,
+                None,
             );
             reconstruct_chroma_at(
                 mb,
@@ -4016,6 +4261,7 @@ mod tests {
                 &flat,
                 &WeightedPred::Default,
                 &mut crate::trace::NoopTracer,
+                None,
             );
         }
         // All 512 luma samples of the pair region (and both chroma planes)
