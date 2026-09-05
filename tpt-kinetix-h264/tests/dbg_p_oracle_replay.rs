@@ -157,7 +157,7 @@ fn p_slice_ffmpeg_element_walk_on_crate_engine() {
             (0x04, 0x02, 8),
         ];
         for (i, (ma, mb, shift)) in specs.iter().enumerate() {
-            let ctx = (!(cbp_a & ma != 0)) as usize + 2 * (!(cbp_b & mb != 0)) as usize;
+            let ctx = (cbp_a & ma == 0) as usize + 2 * (cbp_b & mb == 0) as usize;
             let b = eng.get(73 + ctx);
             log(&format!("MB1 cbpluma[{i}]"), 73 + ctx, b);
             cur += b << shift.trailing_zeros();

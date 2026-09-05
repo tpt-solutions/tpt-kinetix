@@ -375,13 +375,13 @@ fn mbaff_i1_oracle_walk() {
                 // Verbatim FFmpeg: bin0 uses neighbour words; bins 1-3 mix
                 // neighbour words with the RUNNING cbp bits.
                 let mut cur = 0u8;
-                let ctx = (!(lcbp & 0x02 != 0)) as usize + 2 * (!(tcbp & 0x04 != 0)) as usize;
+                let ctx = (lcbp & 0x02 == 0) as usize + 2 * (tcbp & 0x04 == 0) as usize;
                 cur += dec.decode_decision(&mut st[73 + ctx]) as u8;
-                let ctx = (!(cur & 0x01 != 0)) as usize + 2 * (!(tcbp & 0x08 != 0)) as usize;
+                let ctx = (cur & 0x01 == 0) as usize + 2 * (tcbp & 0x08 == 0) as usize;
                 cur += (dec.decode_decision(&mut st[73 + ctx]) as u8) << 1;
-                let ctx = (!(lcbp & 0x08 != 0)) as usize + 2 * (!(cur & 0x01 != 0)) as usize;
+                let ctx = (lcbp & 0x08 == 0) as usize + 2 * (cur & 0x01 == 0) as usize;
                 cur += (dec.decode_decision(&mut st[73 + ctx]) as u8) << 2;
-                let ctx = (!(cur & 0x04 != 0)) as usize + 2 * (!(cur & 0x02 != 0)) as usize;
+                let ctx = (cur & 0x04 == 0) as usize + 2 * (cur & 0x02 == 0) as usize;
                 cur += (dec.decode_decision(&mut st[73 + ctx]) as u8) << 3;
                 cbp_l = cur;
                 // decode_cabac_mb_cbp_chroma.

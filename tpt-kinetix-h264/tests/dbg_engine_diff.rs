@@ -434,7 +434,7 @@ fn engine_lockstep_vs_ffmpeg() {
             // Empirically verified (single_step_probe): ffmpeg packs states as
             // 2*pStateIdx + valMPS — identical semantics to the crate's split
             // representation.
-            ff_states[i] = ((crate_ctx[i].state << 1) | (crate_ctx[i].mps & 1)) as u8;
+            ff_states[i] = (crate_ctx[i].state << 1) | (crate_ctx[i].mps & 1);
         }
 
         match run_payload(&payload, &tables, &mut ff_states, &mut crate_ctx, &ops) {
