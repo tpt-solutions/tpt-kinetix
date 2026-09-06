@@ -39,7 +39,10 @@ enum Expect {
     /// The clip exercises an unsupported-pixel-exact feature; we only require
     /// that the decoder does not produce a full-length byte-identical result by
     /// accident (i.e. the limitation is real and reported). `reason` is
-    /// informational.
+    /// informational. Currently unused (the one fixture that used it,
+    /// CABACI3_Sony_B, was promoted to `BitExact` 2026-09-06) but kept as
+    /// part of the harness's vocabulary for the next real limitation found.
+    #[allow(dead_code)]
     Limitation(&'static str),
     /// A real gap found by this suite that isn't fixed yet: the decoder should
     /// support this clip pixel-exactly but currently does not. Reported and
@@ -82,24 +85,38 @@ const MANIFEST: &[(&str, Expect)] = &[
     // --- progressive CABAC, I & I/P/B ---
     ("CABA1_Sony_D", Expect::BitExact), // I-only CABAC
     ("CABA2_Sony_E", Expect::BitExact), // CABAC I/P multi-ref (300 frames)
-    (
-        "CABA3_Sony_C",
-        Expect::KnownGap(
-            "CABAC I/P/B, 5 refs, temporal direct mode — B_8x8 ref_idx_l0/l1 CABAC \
-             interleaving-order bug fixed 2026-09-05 (was desyncing the parser \
-             from the first B slice on; now zero parse errors). Remaining gap: \
-             every B slice uses direct_spatial_mv_pred_flag=0 (temporal direct, \
-             §8.4.1.2.3), which is unimplemented (only spatial direct is) — \
-             correctly scaffolded now (was silently wrong before)",
-        ),
-    ),
-    (
-        "CANL3_Sony_C",
-        Expect::KnownGap("CABAC I/P/B — same class as CABA3 (temporal direct mode, unimplemented)"),
-    ),
+    // CABAC I/P/B, 5 refs, temporal direct mode (§8.4.1.2.3, every B slice
+    // has direct_spatial_mv_pred_flag=0). The derivation math in
+    // derive_temporal_direct/apply_temporal_direct was already correct and
+    // wired up; the remaining bug was that apply_temporal_direct always
+    // sampled a single "outer corner" 4x4 co-located block per 8x8 direct
+    // quadrant (the direct_8x8_inference_flag==1 rule) regardless of this
+    // clip's actual SPS direct_8x8_inference_flag=0, silently dropping
+    // real sub-8x8 co-located motion whenever the colocated macroblock was
+    // itself split below 8x8 (FFmpeg `pred_temp_direct_motion`'s per-`i4`
+    // loop vs. its `IS_SUB_8X8` corner-sample shortcut). Fixed 2026-09-06 by
+    // threading sps.direct_8x8_inference_flag through TemporalDirectCtx and
+    // branching apply_temporal_direct to sample each of the 4 sub-blocks
+    // independently when the flag is false. diff_bytes 114,652 -> 0.
+    ("CABA3_Sony_C", Expect::BitExact),
+    // Same fix as CABA3_Sony_C (SPS direct_8x8_inference_flag=0, 2026-09-06).
+    // diff_bytes 92,117 -> 0.
+    ("CANL3_Sony_C", Expect::BitExact),
+    // NOT the same bug class as CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D/
+    // CABACI3_Sony_B: this clip's SPS has direct_8x8_inference_flag=TRUE, so
+    // the 2026-09-06 per-4x4 temporal-direct fix does not apply here and
+    // correctly left it unchanged (verified before/after — still
+    // diff_bytes=10166/11404800, max_diff=4). Whatever tiny residual gap
+    // remains is a separate, not-yet-root-caused bug (small enough it could
+    // be an unrelated rounding/edge case rather than temporal direct at all).
     (
         "CVBS3_Sony_C",
-        Expect::KnownGap("CABAC — same class as CABA3 (temporal direct mode, unimplemented)"),
+        Expect::KnownGap(
+            "CABAC, direct_8x8_inference_flag=1 (not the corner-sampling bug that \
+             hit CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D/CABACI3_Sony_B, all of \
+             which have direct_8x8_inference_flag=0) — tiny residual diff \
+             (max_diff=4, diff_bytes=10166/11404800), not yet root-caused",
+        ),
     ),
     // multi-slice, IPB with a P/B slice-type mix per picture. Real
     // multi-slice CABAC B decode landed 2026-09-06 (SESSION #32av); the
@@ -118,12 +135,9 @@ const MANIFEST: &[(&str, Expect)] = &[
     // Same class and same 2026-09-06 fix as CABAST3_Sony_E (SESSION #32aw).
     // diff_bytes 1,917 -> 0.
     ("CABASTBR3_Sony_B", Expect::BitExact),
-    (
-        "CACQP3_Sony_D",
-        Expect::KnownGap(
-            "CABAC I/P/B, per-MB QP — same class as CABA3 (temporal direct mode, unimplemented)",
-        ),
-    ),
+    // Same fix as CABA3_Sony_C (SPS direct_8x8_inference_flag=0, 2026-09-06).
+    // diff_bytes 10,595 -> 0.
+    ("CACQP3_Sony_D", Expect::BitExact),
     // --- MBAFF ---
     (
         "CAMA1_Sony_C",
@@ -173,43 +187,11 @@ const MANIFEST: &[(&str, Expect)] = &[
         "Sharp_MP_PAFF_1r2",
         Expect::KnownGap("real PAFF 720x480 — correct frame count, grey-scaffold pixels"),
     ),
-    // --- known limitations (must NOT claim exactness) ---
-    // NOT an I-only clip (earlier sessions' assumption was wrong): readme says
-    // "Slice Types: IPB", I Period 15, Direct Prediction: Temporal. Frame 0
-    // (IDR, 4 CABAC I-slices) is bit-exact via the multi-slice I accumulator
-    // (07b0471/4a83773). SESSION #32au (2026-09-06) landed real multi-slice
-    // CABAC P decode (every I-type AND P-type slice of a picture now
-    // reconstructs its own macroblock range), which should have fixed every
-    // P picture in this clip — B pictures (this stream's `direct_spatial_
-    // mv_pred_flag == 0`, temporal direct mode) remain the blocker, same
-    // unimplemented gap as CABA3_Sony_C/CANL3_Sony_C/CVBS3_Sony_C/
-    // CACQP3_Sony_D. Not re-measured against a fresh clip-specific diffmap
-    // this session (P work was verified against CABAST3_Sony_E instead); a
-    // future B-slice session should re-check whether this now only fails on
-    // its B pictures, or whether it changes classification once temporal
-    // direct mode lands.
-    (
-        "CABACI3_Sony_B",
-        Expect::Limitation(
-            "IPB stream — multi-slice CABAC P now implemented (#32au). The \
-             P/B-slice-boundary ref_idx-vs-POC deblocking fix (SESSION #32aw, \
-             see CABAST3_Sony_E/CABASTBR3_Sony_B) also applies here (this \
-             clip mixes P/B slices per picture too) and shaved diff_bytes \
-             104,532 -> 93,983, but the dominant remaining gap is a distinct, \
-             already-tracked bug class: this clip's B slices use \
-             direct_spatial_mv_pred_flag=0 (temporal direct, §8.4.1.2.3, \
-             unimplemented — same as CABA3_Sony_C/CANL3_Sony_C/CVBS3_Sony_C/ \
-             CACQP3_Sony_D). Evidence this is temporal-direct, not another \
-             ref_idx/deblock edge case: a fresh diffmap (SESSION #32aw) shows \
-             large cascading per-frame diffs (max_diff up to 121, up to ~1,500 \
-             differing luma samples in a single 176x144 frame) starting only \
-             once B pictures with real motion appear, unlike CABAST3_Sony_E/ \
-             CABASTBR3_Sony_B's pre-fix diffs (magnitude 1-13, a handful of \
-             MBs per frame, exactly at P/B slice-boundary rows) — the \
-             signature of an unimplemented prediction mode cascading through \
-             a picture, not a few-LSB boundary-strength edge case.",
-        ),
-    ),
+    // IPB stream, multi-slice, mixes P/B slices per picture. Was blocked on
+    // the same direct_8x8_inference_flag=0 temporal-direct corner-sampling
+    // bug as CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D (fixed 2026-09-06).
+    // diff_bytes 93,983 -> 0.
+    ("CABACI3_Sony_B", Expect::BitExact),
 ];
 
 fn fixtures_root() -> PathBuf {

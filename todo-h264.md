@@ -2,6 +2,105 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ax — temporal direct mode (§8.4.1.2.3) root-caused and fixed: 4 of 5 blocked ITU clips now BIT-EXACT
+
+#32ap (2026-09-05) implemented `derive_temporal_direct`/`apply_temporal_direct`
+in `mv.rs` and wired it into `predict_inter_b_macroblock`/`decoder/mod.rs`,
+but flagged it as unvalidated against any real bitstream (no network access
+that session). Five ITU fixtures were blocked on "temporal direct mode,
+unimplemented": `CABA3_Sony_C`, `CANL3_Sony_C`, `CVBS3_Sony_C`,
+`CACQP3_Sony_D` (`Expect::KnownGap`), and `CABACI3_Sony_B`
+(`Expect::Limitation`, diff_bytes=93,983/11,404,800).
+
+**Ground truth established first, per instructions:** confirmed the
+implementation IS wired up and DOES run for every one of these 5 clips —
+`TemporalDirectCtx` is constructed at both call sites in `decoder/mod.rs`
+(single-slice and multi-slice B-slice paths) and passed through to
+`predict_inter_b_macroblock`, which correctly routes
+`direct_spatial_mv_pred_flag == 0` to `apply_temporal_direct`. No bailout
+was silently falling back to scaffold. So the gap was a real bug in the
+derivation/application code, not a wiring gap — contrary to the
+"maybe it's just not invoked" hypothesis in the task brief.
+
+**Root cause (confirmed with evidence):** wrote a throwaway
+`examples/dbg_sps_flags.rs` (deleted before commit) to print each fixture's
+parsed `sps.direct_8x8_inference_flag`:
+
+| clip | direct_8x8_inference_flag | pre-fix diff_bytes |
+|---|---|---|
+| CABA3_Sony_C | **false** | 114,652 |
+| CANL3_Sony_C | **false** | 92,117 |
+| CACQP3_Sony_D | **false** | 10,595 |
+| CABACI3_Sony_B | **false** | 93,983 |
+| CVBS3_Sony_C | **true** | 10,166 |
+
+The one clip with `direct_8x8_inference_flag == true` had a tiny diff; the
+four with it `false` had large, cascading diffs — a strong correlation.
+Re-fetched FFmpeg's actual `pred_temp_direct_motion`
+(`libavcodec/h264_direct.c`, live from `raw.githubusercontent.com`) and
+found the mechanism: `sub_mb_type` is set to `MB_TYPE_8x8` (not
+`MB_TYPE_16x16`) whenever `!sps->direct_8x8_inference_flag`, and later,
+`IS_SUB_8X8(sub_mb_type)` being false routes to a per-`i4` loop that samples
+**each of the 4×4 sub-blocks' own colocated motion independently**
+(`l1mv[x8*2+(i4&1) + (y8*2+(i4>>1))*b4_stride]`), instead of the single
+"outer corner" 4×4 sample FFmpeg's `IS_SUB_8X8` branch uses when the
+inference flag is 1. Our `apply_temporal_direct` always used the
+corner-sample path (`12*(q/2)+3*(q%2)` cell index) — correct only when
+`direct_8x8_inference_flag == 1`; for `== 0` streams it was silently
+collapsing a colocated macroblock's real sub-8×8 motion (whenever that
+colocated MB itself split below 8×8) down to one 4×4's value applied to the
+whole 8×8 quadrant. The colocated `ref_idx` (and therefore the
+`dist_scale_factor`) is unaffected — H.264 never stores `ref_idx` below 8×8
+granularity — so only the *motion vector* sampling needed to branch, not the
+scaling math itself.
+
+**Fix**: added `direct_8x8_inference_flag: bool` to `TemporalDirectCtx`
+(threaded from `sps.direct_8x8_inference_flag` at both `decoder/mod.rs`
+construction sites). `apply_temporal_direct` now branches per quadrant: when
+`true`, unchanged corner-sample path; when `false`, loops the 4 sub-cells of
+the quadrant and calls `derive_temporal_direct` once per sub-cell with that
+cell's own colocated `MvCell`, committing each via a 4×4 (not 8×8)
+`commit_rect`.
+
+**Result — before/after (`cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`):**
+
+| clip | before | after |
+|---|---|---|
+| CABA3_Sony_C | diff_bytes=114,652 max_diff=206 | **diff_bytes=0 (BIT-EXACT)** |
+| CANL3_Sony_C | diff_bytes=92,117 max_diff=104 | **diff_bytes=0 (BIT-EXACT)** |
+| CACQP3_Sony_D | diff_bytes=10,595 max_diff=102 | **diff_bytes=0 (BIT-EXACT)** |
+| CABACI3_Sony_B | diff_bytes=93,983 max_diff=121 | **diff_bytes=0 (BIT-EXACT)** |
+| CVBS3_Sony_C | diff_bytes=10,166 max_diff=4 | unchanged (10,166/4) — has `direct_8x8_inference_flag=true`, so this fix correctly does not touch it; its tiny residual gap is a separate, not-yet-root-caused bug |
+
+All 4 `Expect::KnownGap`/`Expect::Limitation` manifest entries for the fixed
+clips were flipped to `Expect::BitExact` in `tests/itu_conformance.rs`
+(verified per-fixture against the actual 0-diff_bytes run, not
+speculatively). `ITU conformance: 64 clip(s) present, 18 hard-checked
+bit-exact, 0 failure(s)` (was 14 hard-checked, 0 failures before this
+session). `Expect::Limitation` is now unconstructed (its one user,
+`CABACI3_Sony_B`, was promoted) — kept in the enum with `#[allow(dead_code)]`
+for the next real limitation found, rather than deleted, since it's part of
+the harness's general vocabulary (see the enum's doc comment).
+
+Zero regressions: every previously-bit-exact fixture (`BA1_Sony_D`,
+`BA2_Sony_F`, `CANL1_Sony_E`, `CANL2_Sony_E`, `NL1/2/3`, `SVA_NL2_E`,
+`CABA1/2`, `CABAST3_Sony_E`, `CABASTBR3_Sony_B`, `CVPCMNL1/2_SVA_C`) stayed
+at `diff_bytes=0`. Full `cargo test -p tpt-kinetix-h264 --lib --tests`
+(66 test binaries) still all pass. `just check` (fmt, clippy -D warnings,
+build, full workspace test) is clean.
+
+**Not touched / still open**: `CVBS3_Sony_C`'s small residual diff
+(direct_8x8_inference_flag=true, so unrelated to this bug); `BA3_SVA_C`'s
+tiny residual (also `direct_8x8_inference_flag=true` — confirmed via the
+same probe — so it's the same still-open class noted in SESSION #32ak, not
+temporal direct); the corresponding `col_zero_flag` corner-sample rule in
+`apply_spatial_direct` (§8.4.1.2.2) has the *identical* structural shape
+(always samples the outer corner, never gated on
+`direct_8x8_inference_flag`) but per spec that only affects the
+`col_zero_flag` MV-zeroing check, not the predicted MV itself, and no
+currently-known-gap fixture was traced to it — worth a dedicated look if a
+future spatial-direct-with-`inference_flag==0` fixture turns up wrong.
+
 ## SESSION #32aw — root-caused and fixed #32av's residual multi-slice CABAC B diff: P-slice-vs-B-slice ref-list-index mismatch at deblocking; CABAST3_Sony_E and CABASTBR3_Sony_B now BIT-EXACT
 
 Root-caused the tiny residual diff #32av left open (595/1,917 diff bytes on

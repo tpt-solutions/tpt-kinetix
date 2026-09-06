@@ -2092,6 +2092,7 @@ impl H264Decoder {
             col_poc: col.pic_order_cnt,
             col_list0_poc: &col.list0_poc,
             col_list1_poc: &col.list1_poc,
+            direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
         });
 
         let acc = self
@@ -2968,6 +2969,7 @@ impl H264Decoder {
                     col_poc: col.pic_order_cnt,
                     col_list0_poc: &col.list0_poc,
                     col_list1_poc: &col.list1_poc,
+                    direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
                 });
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);

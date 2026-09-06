@@ -1225,6 +1225,16 @@ pub struct TemporalDirectCtx<'a> {
     pub col_poc: i64,
     pub col_list0_poc: &'a [i64],
     pub col_list1_poc: &'a [i64],
+    /// `sps.direct_8x8_inference_flag` (§7.3.2.1). When `true`, each Direct
+    /// 8×8 quadrant derives its motion from a single "outer corner" 4×4
+    /// co-located sample (FFmpeg's `IS_SUB_8X8(sub_mb_type)` path). When
+    /// `false`, each of the quadrant's four 4×4 sub-blocks independently
+    /// samples its *own* co-located 4×4 block's motion (same `ref_idx`/
+    /// `dist_scale_factor` across the quadrant, since colocated ref_idx is
+    /// never stored below 8×8 granularity, but a distinct `mv_col` per
+    /// 4×4 — FFmpeg `pred_temp_direct_motion`'s `else` branch, the
+    /// per-`i4` loop indexing `l1mv[x8*2+(i4&1) + (y8*2+(i4>>1))*b4_stride]`).
+    pub direct_8x8_inference_flag: bool,
 }
 
 /// Temporal direct-mode motion derivation for one co-located 4×4 block
@@ -1279,10 +1289,14 @@ fn derive_temporal_direct(col: &MvCell, ctx: &TemporalDirectCtx) -> ([i32; 2], i
 }
 
 /// Fill the direct 8×8 quadrants `quads` with temporal-direct motion
-/// (§8.4.1.2.3). Each quadrant derives independently from its own
-/// co-located corner sample — the same `direct_8x8_inference_flag == 1`
-/// corner rule documented on `apply_spatial_direct`'s `col_zero_flag` pass
-/// (indices 0/3/12/15 in this 4×4-per-side raster cell numbering).
+/// (§8.4.1.2.3). When `ctx.direct_8x8_inference_flag` is `true`, each
+/// quadrant derives independently from its own co-located outer-corner
+/// sample (indices 0/3/12/15 in this 4×4-per-side raster cell numbering —
+/// same rule as `apply_spatial_direct`'s `col_zero_flag` pass). When it is
+/// `false`, each of the quadrant's four 4×4 sub-blocks samples its own
+/// co-located 4×4 cell independently (FFmpeg `pred_temp_direct_motion`'s
+/// per-`i4` loop) — the corner-only shortcut silently drops real
+/// sub-8×8 motion whenever the co-located macroblock split below 8×8.
 fn apply_temporal_direct(
     cur: &mut [MvCell; 16],
     mb_idx: usize,
@@ -1292,10 +1306,21 @@ fn apply_temporal_direct(
 ) {
     let cells = colocated.and_then(|g| g.get(mb_idx));
     for &q in quads {
-        let corner = 12 * (q / 2) + 3 * (q % 2);
-        let col = cells.map(|c| c[corner]).unwrap_or(MvCell::INTRA);
-        let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
-        commit_rect(cur, 8 * (q % 2), 8 * (q / 2), 8, 8, mv0, ref0, mv1, 0);
+        if ctx.direct_8x8_inference_flag {
+            let corner = 12 * (q / 2) + 3 * (q % 2);
+            let col = cells.map(|c| c[corner]).unwrap_or(MvCell::INTRA);
+            let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
+            commit_rect(cur, 8 * (q % 2), 8 * (q / 2), 8, 8, mv0, ref0, mv1, 0);
+        } else {
+            for sub in 0..4 {
+                let by = 2 * (q / 2) + sub / 2;
+                let bx = 2 * (q % 2) + sub % 2;
+                let idx = by * 4 + bx;
+                let col = cells.map(|c| c[idx]).unwrap_or(MvCell::INTRA);
+                let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
+                commit_rect(cur, 4 * bx, 4 * by, 4, 4, mv0, ref0, mv1, 0);
+            }
+        }
     }
 }
 
@@ -1972,6 +1997,7 @@ mod tests {
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            direct_8x8_inference_flag: true,
         };
         let col = cell([40, 0], 0); // co-located block: List0, ref 0, mv (40,0)
         let (mv0, ref0, mv1) = derive_temporal_direct(&col, &ctx);
@@ -1992,6 +2018,7 @@ mod tests {
             col_poc: 4,
             col_list0_poc: &[],
             col_list1_poc: &[0],
+            direct_8x8_inference_flag: true,
         };
         let mut col = cell([0, 0], LIST_NOT_USED);
         col.ref_idx_l1 = 0;
@@ -2014,6 +2041,7 @@ mod tests {
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            direct_8x8_inference_flag: true,
         };
         let (mv0, ref0, mv1) = derive_temporal_direct(&MvCell::INTRA, &ctx);
         assert_eq!((mv0, ref0, mv1), ([0, 0], 0, [0, 0]));
@@ -2031,6 +2059,7 @@ mod tests {
             col_poc: 8,
             col_list0_poc: &[999], // no picture in current_list0_poc has POC 999
             col_list1_poc: &[],
+            direct_8x8_inference_flag: true,
         };
         let col = cell([40, 0], 0);
         let (_, ref0, _) = derive_temporal_direct(&col, &ctx);
