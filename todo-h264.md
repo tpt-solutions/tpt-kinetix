@@ -72,6 +72,34 @@ motion) or a MapColToList0 fallback. Needs a per-MB motion oracle vs ffmpeg
 on that frame; check `mv.rs::derive_temporal_direct` / `apply_temporal_direct`
 and `store_reference_picture`'s mv_grid retention.
 
+**Deeper dig (#32az, `KINETIX_DBG_TDIR` trace of the multi-slice CABAC B
+path `try_decode_real_b_slice_cabac`, since removed):**
+- This clip's `max_num_ref_frames == 1`, so by B-frame decode time the DPB
+  holds only the *following* P. Every B frame here has
+  `RefPicList0 == RefPicList1 == [that one future P]` (`l0poc == l1poc ==
+  col_poc` for all of them). Valid but degenerate — B frames are effectively
+  backward-predicted-only. 299/300 frames handle it fine.
+- Foreman has a hard camera pan around frames ~180-195: the P frames there
+  (`poc` 186/189/192) are legitimately ~96% intra-coded (`col_nonintra_mbs`
+  drops from ~130 to 9-16 of 396). `P189` itself decodes **byte-exact**
+  (frame 189 is in the "exact somewhere" set).
+- For a co-located block that is intra, temporal direct correctly yields
+  zero motion. For the ~16 non-intra co-located MBs, `pic0 == pic1 == P189`
+  ⇒ `td == 0` ⇒ spec §8.4.1.2.3 says `mvL0 = mvCol, mvL1 = 0` — which our
+  `derive_temporal_direct` does. So the direct path looks spec-correct and
+  matches ffmpeg.
+- ⇒ Frame 188's bad bottom row is most likely **explicitly-coded** inter MBs
+  (not direct): an MV-prediction / MC-edge / residual bug that only bites
+  under this degenerate `L0==L1==single-future-ref` config on the picture's
+  bottom row. (Ruled out: `predict_p_slice_mvs` commits *every* MB to
+  `MvStore.mbs` unconditionally — P_Skip included — via `store.commit` after
+  the `mb.motion.is_some() || mb.skip` predict, so the co-located grid is not
+  silently dropping skip motion.)
+- Next step needs a per-MB `mb_type` + resolved-MV dump of frame 188's bottom
+  row from ffmpeg (`-debug mb_type`/`mv`, or a `mv_ref` trace) vs ours, to
+  see whether those MBs are direct or explicit and where the MV first
+  diverges.
+
 
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
 
