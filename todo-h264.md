@@ -56,6 +56,22 @@ start's leading `00`. **Results: `HPCA_BRCM_C` diff_bytes 44,973,131 → 4,469
 `freh1_b` 15.0M → 13.1M.** 22/0 maintained. `HPCA*` are now a realistic
 BitExact target — one late frame each.
 
+**HPCA_BRCM_C / HPCANL_BRCM_C localized (#32az):** clip is High CABAC, GOP
+`I B B P B B P`, 1 ref, **temporal direct**, direct_8x8_inference ON, loop
+filter on, no PCM/MMCO/reorder. Exactly ONE frame wrong in each: `HPCA`
+display frame 188, `HPCANL` frame 196 — both **B frames** (188 % 3 == 2),
+damage is the **entire bottom macroblock row** (mb_y 17 of 0..17), luma cols
+~9-21, magnitude 130-214 (near-full-scale ⇒ motion points to the wrong
+place, not residual rounding); mb_y 16 shows 1-5 diffs = deblock bleed up
+from row 17. NOT an early `end_of_slice` (temporary `KINETIX_DBG_EARLY_EOS`
+trace never fired), NOT a B-path ref-list/parse error (none logged), NOT
+scaffold. Genuine temporal-direct MV derivation bug specific to the bottom
+row of one B frame — likely the co-located P picture's bottom-row `mv_grid`
+being `None`/stale (⇒ `apply_temporal_direct` sees `MvCell::INTRA` ⇒ zero
+motion) or a MapColToList0 fallback. Needs a per-MB motion oracle vs ffmpeg
+on that frame; check `mv.rs::derive_temporal_direct` / `apply_temporal_direct`
+and `store_reference_picture`'s mv_grid retention.
+
 
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
 
