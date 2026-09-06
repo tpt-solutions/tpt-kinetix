@@ -2,6 +2,127 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
+
+Three prior sessions (#32al/#32am/#32an) chased `MIDR_MW_D` as a genuine
+`frame_num` gap (§8.2.5.2, unimplemented) and got stuck distinguishing
+"bad MV prediction" from "bad residual" for the first post-gap frame. That
+whole framing was wrong: **there is no gap in this bitstream at all.** The
+"gap" was a decoder-side artifact of a real bug in `decode_impl`
+(`decoder/mod.rs`), unrelated to reference-picture handling, MV prediction,
+or CAVLC — and it explains `MPS_MW_A`'s residual failure too (same fix
+closed both).
+
+**Re-verification (before touching anything):** fresh baseline was
+20 hard-checked bit-exact / 0 failures (matching the prior sessions' count),
+`MIDR_MW_D` first_bad=61, diff_bytes=744274/3231360, max_diff=228, luma-heavy
+divergence — consistent with what #32an reported, so nothing had drifted.
+
+**Root cause, found via `DecodeTracer` (`on_mb_parsed`/`on_motion_comp`/
+`on_reconstructed`), not by chasing MV median math:**
+1. Traced MB(0,0) of display-frame 61 via a throwaway `decode_with_tracer`
+   test. `PL016x16`, `mv=[0,4]` (a plain 1-pixel vertical pan), `ref_idx=0`.
+   The traced *pre-deblock reconstructed* pixels for this MB matched the ITU
+   reference file byte-for-byte. But the frame actually returned by
+   `H264Decoder::decode()`/`decode_with_tracer()` for "frame 61" held
+   completely different pixels. Same decoder, same bitstream position, two
+   different observed outputs for "the same frame" — the smoking gun that
+   this was never a reconstruction bug.
+2. Bisected by env var: decoding frames 0..60 with plain `decode()` then
+   frame 61 with `decode_with_tracer()` (no `.with_display_order()`)
+   produced the *correct* frame 61 pixels. Turning `.with_display_order()`
+   back on reproduced the wrong pixels with the *identical* decode calls —
+   isolating the bug to the reorder-buffer / display-order path, not to
+   slice decode at all.
+3. Read `decode_impl`'s top-of-function short-circuit:
+   ```rust
+   if let Some(frame) = self.frame_queue.pop_front() {
+       return Ok(Some(frame));
+   }
+   ```
+   This ran **before** `packet` was even parsed. `reorder_push` (called at
+   the bottom of the same function) bulk-flushes the *entire* reorder buffer
+   into `frame_queue` whenever an IDR arrives while the buffer is non-empty
+   (§doc comment: "an IDR flushes the buffer first"). With
+   `REORDER_DEPTH=16` and steady-state buffering, the buffer holds exactly
+   16 not-yet-emitted pictures by the time any second IDR arrives. That
+   flush enqueues all 16 at once — so the *next 15 calls* to
+   `decode()`/`decode_with_tracer()`, each carrying a **new, distinct, real
+   NAL from the bitstream**, hit the top-of-function check first and
+   returned a backlogged frame **without ever parsing their own packet**.
+   Those 15 NALs were silently discarded, never decoded at all.
+4. This exactly explains the earlier sessions' "`frame_num` jumps from 0 to
+   16" observation: the `KINETIX_BINTRACE` `SLICE_START`/`NAL_LOOP` traces
+   live *inside* `decode_impl`'s NAL-processing loop, so the 15 silently
+   short-circuited calls never reached that loop and never emitted a trace
+   line either — making it look exactly like the encoder itself had skipped
+   frame_nums 1–15, when in fact the decoder just never looked at them.
+   Re-verified after the fix: full decode-order `frame_num`/POC trace for
+   this clip is perfectly contiguous (`0,1,2,...,59` / `0,2,4,...,118`, no
+   duplicates, no skips) — confirms this clip's own readme ("Slice type
+   IPPIPP...", "Intra period 30", "POC Type 0") — a completely ordinary
+   IPPP stream with a plain periodic I-refresh at frame_num 30, nothing gap
+   related whatsoever. `MPS_MW_A` ("multiple parameter sets" — also
+   multi-IDR) hits the identical mechanism, which is why the same fix
+   closed both.
+
+**First fix attempt was wrong — documented so the next session doesn't
+repeat it.** The obvious-looking fix ("always parse `packet` first; push
+this call's result to the back of `frame_queue` and always return
+`frame_queue.pop_front()`") does NOT work: `reorder_push` *already* pops
+`frame_queue`'s front internally as its own return value once it has
+folded the new frame into the reorder buffer. Also popping/re-pushing at
+the outer `decode_impl` level double-dequeues per call and re-enqueues the
+wrong item at the tail, which *reintroduced* a scrambled output order (an
+our-index→ref-index mapping showing ascending-odd-POCs-then-scrambled-evens
+across exactly one `REORDER_DEPTH` window) — a subtler bug than the
+original, caught by re-running the our-frame→ref-frame exact-match mapping
+diagnostic (`exact_via_reorder` was 100/100 with this "fix" too, which is
+what made the scrambling non-obvious from `itu_conformance`'s summary line
+alone; had to dump the actual index mapping to see it).
+
+**Actual (correct, minimal) fix:** delete the top-of-function
+`frame_queue.pop_front()` short-circuit entirely for the case where
+`packet` has real NAL units — `reorder_push` already drains `frame_queue`
+in FIFO order as an integral part of every real decode call, so no
+separate top-of-function drain is correct or necessary. The only case that
+still needs the old draining behaviour is a packet with **no** NAL units at
+all (e.g. an SPS/PPS-only or empty packet, which can never reach
+`reorder_push`); that path still pops `frame_queue` directly. `decode_impl`
+otherwise ends exactly as before (`Ok(output_frame)`), unchanged.
+
+**Result:** `MIDR_MW_D` diff_bytes 744274→**0** (100/100 frames, max_diff 0).
+`MPS_MW_A` diff_bytes 2168633→**0** (150/150 frames, max_diff 0). Both
+promoted from `Expect::KnownGap` to `Expect::BitExact` in
+`itu_conformance.rs`. Full suite: **22 hard-checked bit-exact, 0
+failures** (was 20/0). No regression on any of the previously-exact 20 —
+re-ran the full `itu_conformance` suite and `cargo test -p
+tpt-kinetix-h264 --lib --tests` after the fix, both clean.
+`cargo fmt -p tpt-kinetix-h264 --check` and `cargo clippy -p
+tpt-kinetix-h264 --all-targets -- -D warnings` both clean; `cargo build
+--workspace` clean. (Workspace-wide `just fmt-check` fails on a pre-existing,
+untouched `tpt-kinetix-test-utils/tests/dbg_av1_testsrc2.rs` formatting
+issue belonging to the concurrent AV1 session's in-progress work — unrelated
+to this fix, not introduced or touched here.)
+
+Kept as reusable debug infra (matches the existing `KINETIX_BINTRACE`
+convention): two new `eprintln!` lines gated on `KINETIX_BINTRACE`,
+`REORDER_PUSH[i-slice]`/`REORDER_PUSH[p/b-slice]` in `decoder/mod.rs`,
+printing `poc`/`is_idr` at both of `decode_impl`'s `reorder_push` call
+sites (the existing `SLICE_START` trace only fires from the P/B slice path,
+so it alone can't show the full decode-order POC sequence including
+I-slices — these two lines can). All other diagnostic test files written
+this session were throwaway and deleted before this commit.
+
+**Lesson for future reorder/DPB work:** `decode_impl`'s top-of-function
+`frame_queue` check is exactly the kind of "looks like a harmless drain"
+pattern that silently drops input whenever there's a multi-frame backlog.
+Any future change to `reorder_push`/`frame_queue` should re-run this
+session's index-mapping diagnostic (dump `our[i] -> exact-matching ref
+index`, not just `exact_via_reorder`'s hit-count) rather than trusting the
+hit-count alone — a fully-scrambled-but-still-100%-hit-rate permutation is
+possible and indistinguishable from real fix in the summary line.
+
 ## SESSION #32ay — CVBS3_Sony_C (and BA3_SVA_C) root-caused and fixed: a deblocking L0/L1 "mirror" false-equivalence bug, not temporal direct
 
 `CVBS3_Sony_C` was the one clip #32ax's temporal-direct fix correctly left

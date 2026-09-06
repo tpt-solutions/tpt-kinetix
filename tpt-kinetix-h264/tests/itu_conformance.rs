@@ -164,33 +164,19 @@ const MANIFEST: &[(&str, Expect)] = &[
         ),
     ),
     // --- multiple IDR / multiple parameter sets ---
-    (
-        "MIDR_MW_D",
-        Expect::KnownGap(
-            "multiple-IDR QCIF — real frame_num gap right after the 2nd IDR \
-             (frame_num jumps 0->16; no §8.2.5.2 handling exists in-crate). \
-             Confirmed 2026-09-05 via ffmpeg itself (mse=0/psnr=inf vs the ITU \
-             reference on ALL 100 frames, gap included) that this is a real, \
-             fixable bug, not an ambiguous edge case. Ruled OUT: SPS/PPS-id \
-             selection, parse/CAVLC errors (zero across the run), and the \
-             ref-list-padding mechanism itself (ref_idx=0-only macroblocks are \
-             just as wrong as ref_idx>0 ones, and ffmpeg's own gap-fill also \
-             just aliases the same one real picture's pixels, same as our \
-             padding). Divergence is near-uniform, luma-only (chroma barely \
-             moves), consistent with a bad MV-prediction median rather than a \
-             residual/QP issue. Not root-caused further without a bit-level \
-             oracle; see todo-h264.md SESSION #32an",
-        ),
-    ),
-    (
-        "MPS_MW_A",
-        Expect::KnownGap(
-            "multiple parameter sets — decoder/mod.rs used \"whichever SPS/PPS the \
-             HashMap returns first\" instead of looking up by this slice's own \
-             pic_parameter_set_id; fixed 2026-09-05 (diff_bytes 3107519->2168633), \
-             still not exact — remaining gap not yet root-caused",
-        ),
-    ),
+    // Both promoted to BitExact 2026-09-07 (SESSION #32aq): there was never a
+    // real frame_num gap in either clip — that "gap" was entirely an artifact
+    // of a `decode_impl` bug where the top-of-function `frame_queue.pop_front()`
+    // short-circuit returned a backlogged frame *without ever parsing the
+    // current call's own packet* whenever `with_display_order`'s reorder
+    // buffer had queued more than one frame (which a second IDR's bulk
+    // flush of the whole reorder buffer always triggers). That silently
+    // dropped ~15 real NALs per clip, which is what earlier sessions
+    // (#32al/#32am/#32an) observed as a "frame_num jumps 0->16" gap and
+    // chased as an MV-prediction/residual bug. See todo-h264.md SESSION
+    // #32aq for the full root-cause trail.
+    ("MIDR_MW_D", Expect::BitExact),
+    ("MPS_MW_A", Expect::BitExact),
     (
         "Sharp_MP_PAFF_1r2",
         Expect::KnownGap("real PAFF 720x480 — correct frame count, grey-scaffold pixels"),

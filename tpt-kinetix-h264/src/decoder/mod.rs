@@ -578,12 +578,25 @@ impl H264Decoder {
         packet: &Packet,
         tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
-        if let Some(frame) = self.frame_queue.pop_front() {
-            return Ok(Some(frame));
-        }
+        // NOTE: `frame_queue` can already hold a backlog from a previous call
+        // (e.g. the reorder buffer bulk-flushing many frames at once when an
+        // IDR arrives while it's non-empty — see `reorder_push`, which pops
+        // and returns the queue's front itself once the newly decoded frame
+        // has been folded in). This function used to pop that backlog here,
+        // *before* even looking at `packet` — which silently discarded this
+        // call's own NAL data (never parsed at all) whenever a backlog
+        // existed, permanently losing that picture. `reorder_push` already
+        // drains `frame_queue` in FIFO order as part of every real decode
+        // call, so no separate top-of-function drain is needed (or correct):
+        // doing it here as well would pop the queue twice in one call and
+        // requeue the wrong frame, corrupting output order (see
+        // todo-h264.md SESSION #32aq for the empirically observed
+        // interleave that produced). The only remaining case is a packet
+        // with no VCL NAL at all (e.g. SPS/PPS-only) — such a call cannot
+        // reach `reorder_push`, so still surface any backlog then.
         let nal_units = parse_nal_units_from_annexb(&packet.data);
         if nal_units.is_empty() {
-            return Ok(None);
+            return Ok(self.frame_queue.pop_front());
         }
 
         let mut output_frame: Option<VideoFrame> = None;
@@ -758,6 +771,9 @@ impl H264Decoder {
                                 ));
                             }
                             let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                                eprintln!("REORDER_PUSH[i-slice] poc={poc} is_idr={is_idr}");
+                            }
                             if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
                                 output_frame = Some(ready);
                             }
@@ -812,6 +828,9 @@ impl H264Decoder {
                         // present: route through the reorder buffer, which is a
                         // passthrough unless `with_display_order` was set.
                         let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                        if std::env::var("KINETIX_BINTRACE").is_ok() {
+                            eprintln!("REORDER_PUSH[p/b-slice] poc={poc} is_idr={is_idr}");
+                        }
                         if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
                             output_frame = Some(ready);
                         }
