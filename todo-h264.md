@@ -42,9 +42,19 @@ informational FRExt/High clips (`HCHP1_HHI_B`, `HCHP2/3`, `FRExt2/3/4`,
    dropped, or a `modify_ref_pic_list` `MissingShortTerm`. Hierarchical
    GOP-16 needs correct adaptive `dec_ref_pic_marking` retention.
 
-`PPS_PARSE_ERR(1)` on several clips (`chroma_qp_index_offset`,
-`scaling_list delta`, `constrained_intra_pred_flag`, `pic_init_qp_minus26`)
-— PPS extension / scaling-list parsing also incomplete for FRExt PPS.
+~~`PPS_PARSE_ERR(1)` on several clips~~ **FIXED this session — it was a bug in
+`itu_conformance.rs`'s own `split_nals`, not the PPS parser** (confirmed the
+parser handles all three failing PPS NALs correctly when fed via
+`parse_nal_units_from_annexb`). `split_nals` backed the NAL-end pointer off
+by 4 bytes for *every* following start code; a 3-byte start code (`00 00 01`)
+is only 3, so the last real RBSP byte of the preceding NAL was silently
+eaten — truncating dense PPS NALs mid-scaling-list on the FRExt clips. Fixed
+to back off by 3 and let the existing trailing-zero trim handle a 4-byte
+start's leading `00`. **Results: `HPCA_BRCM_C` diff_bytes 44,973,131 → 4,469
+(299/300 frames now byte-exact, first_bad=188); `HPCANL_BRCM_C` → 3,638
+(299/300, first_bad=196); `HCHP2_HHI_A` 60/250 frames now exact (was 0);
+`freh1_b` 15.0M → 13.1M.** 22/0 maintained. `HPCA*` are now a realistic
+BitExact target — one late frame each.
 
 
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip

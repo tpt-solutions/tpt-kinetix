@@ -235,10 +235,14 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(starts.len());
     for (idx, &payload_start) in starts.iter().enumerate() {
-        let end = starts.get(idx + 1).map(|&s| s - 4).unwrap_or(annexb.len());
-        // The next start code may have been 3 bytes; trim any trailing zeros
-        // that actually belong to it.
-        let mut end = end;
+        // Back off by the *minimum* start-code length (3). If the next start
+        // code was actually 4 bytes, its leading `00` is now the last byte of
+        // this range and the trailing-zero trim below drops it; a 3-byte start
+        // needs no trim. (Backing off by 4 unconditionally, as this did before,
+        // silently ate the final real RBSP byte of every NAL that a 3-byte
+        // start code followed — which truncated dense PPS NALs mid-scaling-list
+        // on several FRExt clips.)
+        let mut end = starts.get(idx + 1).map(|&s| s - 3).unwrap_or(annexb.len());
         while end > payload_start && annexb[end - 1] == 0 {
             end -= 1;
         }
