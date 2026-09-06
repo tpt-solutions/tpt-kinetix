@@ -2,6 +2,116 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ay — CVBS3_Sony_C (and BA3_SVA_C) root-caused and fixed: a deblocking L0/L1 "mirror" false-equivalence bug, not temporal direct
+
+`CVBS3_Sony_C` was the one clip #32ax's temporal-direct fix correctly left
+untouched (`direct_8x8_inference_flag=1`, and CAVLC not CABAC despite the
+prior manifest comment's typo) — diff_bytes=10,166/11,404,800, max_diff=4,
+first_bad=Some(7). Per-frame diffmap showed ~130 of 300 frames affected by a
+few 1-4-magnitude bytes each, never cascading/growing, scattered across both
+P and B pictures — ruled out temporal direct immediately once instrumented
+(see below): none of the affected macroblocks in the first bad frame were
+Direct-mode at all.
+
+**Methodology** (no ffmpeg-ground-truth tooling worked cleanly here — see
+"dead ends" below — so root-caused entirely from first principles against the
+ITU reference file itself):
+1. Built a throwaway per-MB/per-pixel diffmap test decoding the real
+   `CVBS3_Sony_C` fixture, confirming display frame 7 is a B picture and
+   localizing the diff to a handful of macroblocks.
+2. Used `KINETIX_DUMP_PREDEBLOCK` for a pre/post-deblock byte compare —
+   initially seemed to show deblock made zero difference, but that dump site
+   (`decoder/mod.rs`, the single-slice B path) turned out to fire **after**
+   the deblock loop despite its name (a real, pre-existing mislabeling — not
+   fixed, out of scope). Added a second, genuinely-pre-deblock dump right
+   after `reconstruct_b_frame` returns to get a trustworthy pre/post compare.
+3. Used `DecodeTracer::on_motion_comp`/`on_cavlc_coeffs` (existing hooks) via
+   a custom tracer to confirm, for the exact macroblock+picture in question:
+   residual was genuinely all-zero (no missed CAVLC coefficients), and the
+   pure MC prediction already reproduced 12 of 16 samples of one 4×4 block
+   bit-exact against the ITU reference — with the remaining 4 (a clean
+   bottom-right 2×2 sub-corner, sitting exactly on the boundary with the
+   macroblock below) off by a uniform +1. Brute-force MV search against the
+   single referenced picture found no alternative motion vector reproducing
+   the corner too, ruling out an MV-value bug.
+4. That 2×2 corner sits on the shared edge between this macroblock (an
+   `BL116x16`, i.e. List-1-only, `ref_idx_l1=0`) and the macroblock below (an
+   `L0`-only partition with `ref_idx=0`) — a real deblocking boundary. Traced
+   `derive_bs_pair` (`deblock.rs`) by hand for these two `MvCell`s: the
+   "mirrored-list equivalence" branch (an L0-only block next to an L1-only
+   block whose lists/MVs are swapped is not a bS-triggering difference)
+   compares `p.ref_idx` against `q.ref_idx_l1` and `p.ref_idx_l1` against
+   `q.ref_idx` **as raw integers**. Here `p.ref_idx=-1` matched `q.ref_idx_l1
+   =-1` (both simply "unused") and `p.ref_idx_l1=0` matched `q.ref_idx=0` —
+   but RefPicList0 index 0 and RefPicList1 index 0 are two **different
+   physical pictures** (POC 6 vs POC 9 in this slice). The false "mirror"
+   match suppressed a real bS, producing bS=0 where the correct decoder
+   filters this edge.
+
+**Root cause**: this is the *same bug class* SESSION #32aw already fixed for
+P/B slice-boundary edges (`CABAST3_Sony_E`/`CABASTBR3_Sony_B`) via
+`finalize_picture`'s `ref_poc_per_slice` POC-resolution — but that fix only
+covers the **multi-slice** picture-accumulator path. The original
+single-slice progressive B path (`decode_slice`, used by ordinary
+one-slice-per-picture B pictures like `CVBS3_Sony_C`/`BA3_SVA_C`) builds its
+`DeblockMbInfo` grid directly from `MvStore::cells_of` with no such
+resolution, so `derive_bs_pair`'s L0-vs-L1 cross-list comparisons (both the
+"mirror" branch and, implicitly, any future extension) operate on raw
+per-list indices that only accidentally line up.
+
+**Fix**: mirrored `finalize_picture`'s POC-resolution into the single-slice
+B path's non-MBAFF deblock-info construction (`decoder/mod.rs`, the `None =>`
+arm right after `reconstruct_b_frame`): before building each `DeblockMbInfo`,
+walk its `MvCell`s and rewrite `ref_idx`/`ref_idx_l1` to
+`RefPicList0[ref_idx].pic_order_cnt + POC_BIAS` /
+`RefPicList1[ref_idx_l1].pic_order_cnt + POC_BIAS` (same large fixed bias
+trick as #32aw, so the "unused" `-1` sentinel can never collide with a
+legitimately negative POC). The P-slice sibling arm doesn't need this (P
+cells never set `ref_idx_l1`, so the mirror branch never engages), and was
+left untouched.
+
+**Result**: `CVBS3_Sony_C` diff_bytes 10,166 → **0**. `BA3_SVA_C` — a
+different `KnownGap` entry also flagged in #32ax's notes as having the
+"same still-open class" of tiny residual (also `direct_8x8_inference_flag=
+true`) — turned out to be hitting the exact same deblocking bug and also
+went diff_bytes 520 → **0**, confirmed by the conformance harness itself
+(it hard-fails when a `KnownGap` clip becomes byte-exact, catching both
+fixes in one run). Both manifest entries flipped to `Expect::BitExact` in
+`tests/itu_conformance.rs`. `ITU conformance: 64 clip(s) present, 20
+hard-checked bit-exact, 0 failure(s)` (was 18). Full
+`cargo test -p tpt-kinetix-h264 --lib --tests` and
+`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` both clean;
+`cargo fmt` clean.
+
+**Dead ends / notes for next time**: (1) `ffmpeg -debug mb_type` prints
+macroblock-type grids in true bitstream decode order, but a plain CLI
+`ffmpeg -i ... -f null -` run's *first* several pictures are a duplicate
+probing-phase decode (a separate `AVCodecContext`, discoverable by comparing
+context pointers in the log) — skip past those before counting. Even then,
+correlating a specific decode-order print to a specific *display*-order
+frame from `ffprobe`'s `coded_picture_number` field proved unreliable for
+this stream (two early P pictures share suspiciously adjacent coded numbers);
+the robust way to identify "which of our own decode-order pictures produced
+display frame N" is a **byte-content match** — decode once with
+`.with_display_order()` and once without, then find which un-reordered
+frame's bytes equal `frames[N].data` — used throughout this session's
+instrumentation. (2) A brute-force verbatim reimplementation of
+`pred_luma`/6-tap filtering in a standalone script (matching
+`motion_comp.rs`'s formulas exactly) was useful for testing "is this a wrong
+MV" hypotheses against the raw ITU reference YUV directly, without needing
+any external decoder. (3) SESSION #32ax's manifest comment mislabeled
+`CVBS3_Sony_C` as CABAC; its own `-readme.txt` says CAVLC — always check the
+fixture's own readme, not an inherited comment.
+
+Also worth noting: a concurrent session/process independently landed a real,
+complementary fix in the same window — `build_ref_list_l1` now implements
+the §8.2.4.2.3 Note 2 "swap RefPicList1[0]/[1] when list1 is entrytwise
+identical to list0" rule (commit `af28ad9`). That swap never actually fires
+for `CVBS3_Sony_C` (verified: its L0/L1 never coincide, this clip has enough
+distinct reference frames), so it did not resolve this session's bug, but
+it's a real spec-compliance fix worth keeping for streams where the two
+lists genuinely do collide.
+
 ## SESSION #32ax — temporal direct mode (§8.4.1.2.3) root-caused and fixed: 4 of 5 blocked ITU clips now BIT-EXACT
 
 #32ap (2026-09-05) implemented `derive_temporal_direct`/`apply_temporal_direct`
