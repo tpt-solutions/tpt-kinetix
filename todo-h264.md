@@ -95,10 +95,29 @@ path `try_decode_real_b_slice_cabac`, since removed):**
   `MvStore.mbs` unconditionally — P_Skip included — via `store.commit` after
   the `mb.motion.is_some() || mb.skip` predict, so the co-located grid is not
   silently dropping skip motion.)
-- Next step needs a per-MB `mb_type` + resolved-MV dump of frame 188's bottom
-  row from ffmpeg (`-debug mb_type`/`mv`, or a `mv_ref` trace) vs ours, to
-  see whether those MBs are direct or explicit and where the MV first
-  diverges.
+- **ffmpeg `-threads 1 -debug mb_type` grid + Kinetix `on_mb_parsed` grid
+  compared (#32az).** Confirmed: the bad frame (0-indexed 188) is a **B
+  frame** immediately after a periodic **non-IDR I frame** (0-indexed 187 is
+  one — they recur every 15 display pictures), and it sits in the middle of
+  Foreman's hard camera pan where the P frames are ~96% intra-coded.
+  - ffmpeg's grid for frame 188 has mostly **inter** MBs; Kinetix's
+    `on_mb_parsed` grid for the candidate decode-order frames reads
+    **intra-heavy** in the bottom rows.
+  - BUT the grid comparison never aligned cleanly — the decode→display
+    frame mapping in that GOP is ambiguous (periodic non-IDR I frame breaks
+    the plain IPBB stride, and ffmpeg's `-debug mb_type` row wrapping is
+    unreliable at 22 MB width). And the hard diff signature argues *against*
+    a whole-frame desync: only **4,469 diff bytes** in the single bad frame,
+    confined to the bottom ~1.5 MB rows — a wholesale mb_type desync would
+    corrupt the entire frame.
+  - Working theory now: a **localized** error in the bottom MB rows of this
+    one B frame — a handful of MBs whose mb_type / motion / residual is
+    slightly wrong (misdecoded as intra, or right type but wrong MV/coeffs),
+    plausibly triggered by neighbour-context state left by the preceding
+    periodic non-IDR I frame. Next: a bin-level trace of just the bottom two
+    MB rows of frame 188 vs an `ff_h264_cabac.c` harness, and firmly pin
+    the decode#↔display# mapping first (decode with `.with_display_order()`
+    and diff each *output* frame against the ref inside the same run).
 
 
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
