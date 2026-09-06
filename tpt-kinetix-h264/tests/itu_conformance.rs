@@ -72,16 +72,19 @@ const MANIFEST: &[(&str, Expect)] = &[
             "CIF I/P — frame 0 already wrong (max_diff 127) + 2x frame count; structural",
         ),
     ),
-    (
-        "BA3_SVA_C",
-        Expect::KnownGap(
-            "CAVLC I/P/B spatial-direct, 5 refs — two spatial-direct bugs fixed \
-             2026-09-05 (B_8x8 direct/explicit interleaving order + col_zero_flag \
-             corner-index formula): 1899->520 diff bytes, max 112->4. Tiny \
-             (max 2-3) diffs remain on plain explicit-MV B macroblocks, not yet \
-             root-caused",
-        ),
-    ),
+    // CAVLC I/P/B spatial-direct, 5 refs. Two spatial-direct bugs fixed
+    // 2026-09-05 (B_8x8 direct/explicit interleaving order + col_zero_flag
+    // corner-index formula) got diff_bytes to 1899->520 (max 112->4); the
+    // remaining tiny diff on plain explicit-MV B macroblocks was the same
+    // deblocking bug fixed for CVBS3_Sony_C below (SESSION #32ay) — the
+    // `derive_bs_pair` "mirrored L0/L1" boundary-strength check compared raw
+    // `ref_idx` (list0) against `ref_idx_l1` (list1) integers directly; index
+    // 0 in RefPicList0 and index 0 in RefPicList1 are different physical
+    // pictures, so the mirror-equivalence branch was falsely satisfied
+    // whenever the two raw indices happened to be numerically equal,
+    // yielding bS=0 for a real reference/motion discontinuity. diff_bytes
+    // 520 -> 0.
+    ("BA3_SVA_C", Expect::BitExact),
     // --- progressive CABAC, I & I/P/B ---
     ("CABA1_Sony_D", Expect::BitExact), // I-only CABAC
     ("CABA2_Sony_E", Expect::BitExact), // CABAC I/P multi-ref (300 frames)
@@ -103,21 +106,26 @@ const MANIFEST: &[(&str, Expect)] = &[
     // diff_bytes 92,117 -> 0.
     ("CANL3_Sony_C", Expect::BitExact),
     // NOT the same bug class as CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D/
-    // CABACI3_Sony_B: this clip's SPS has direct_8x8_inference_flag=TRUE, so
-    // the 2026-09-06 per-4x4 temporal-direct fix does not apply here and
-    // correctly left it unchanged (verified before/after — still
-    // diff_bytes=10166/11404800, max_diff=4). Whatever tiny residual gap
-    // remains is a separate, not-yet-root-caused bug (small enough it could
-    // be an unrelated rounding/edge case rather than temporal direct at all).
-    (
-        "CVBS3_Sony_C",
-        Expect::KnownGap(
-            "CABAC, direct_8x8_inference_flag=1 (not the corner-sampling bug that \
-             hit CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D/CABACI3_Sony_B, all of \
-             which have direct_8x8_inference_flag=0) — tiny residual diff \
-             (max_diff=4, diff_bytes=10166/11404800), not yet root-caused",
-        ),
-    ),
+    // CABACI3_Sony_B: this clip's SPS has direct_8x8_inference_flag=TRUE (and
+    // it's CAVLC, not CABAC — the manifest comment above this entry from
+    // 2026-09-06 mislabeled it CABAC), so the temporal-direct corner-sample
+    // fix doesn't touch it. Root-caused 2026-09-06 SESSION #32ay: a
+    // deblocking bug (see BA3_SVA_C's comment above for the mechanism —
+    // `derive_bs_pair`'s L0/L1 "mirror" check compared raw same-valued
+    // `ref_idx`/`ref_idx_l1` integers across DIFFERENT reference-picture
+    // lists as if that made them the same physical picture). Confirmed via a
+    // pure-prediction trace (`DecodeTracer::on_motion_comp`, zero residual
+    // per `on_cavlc_coeffs`) showing macroblock (6,2) of picture POC=7
+    // predicting bit-exact luma for 12 of 16 samples in one 4×4 block from
+    // RefPicList1[0] (POC 9) with mv=(0,4), while the bottom-right 2×2
+    // corner — sitting on the boundary with macroblock (6,3), an L0-only
+    // block whose `ref_idx==0` coincided numerically with this block's
+    // `ref_idx_l1==0` — was off by exactly the deblocking correction the
+    // false bS=0 skipped. Fixed by resolving `ref_idx`/`ref_idx_l1` to POC
+    // before deblocking in the single-slice progressive B path (mirroring
+    // `finalize_picture`'s existing multi-slice fix from SESSION #32aw,
+    // which never covered this path). diff_bytes 10,166 -> 0.
+    ("CVBS3_Sony_C", Expect::BitExact),
     // multi-slice, IPB with a P/B slice-type mix per picture. Real
     // multi-slice CABAC B decode landed 2026-09-06 (SESSION #32av); the
     // residual sub-1% diff that session left open was root-caused and fixed

@@ -3113,6 +3113,29 @@ impl H264Decoder {
                                 );
                             }
                             None => {
+                                // Resolve each block's `ref_idx`/`ref_idx_l1` (only
+                                // meaningful as indices into THIS slice's own
+                                // RefPicList0/1) to the referenced picture's actual
+                                // POC before deblocking, exactly like
+                                // `finalize_picture`'s multi-slice path does (see
+                                // its comment on `ref_poc_per_slice`). Without this,
+                                // `derive_bs_pair`'s "mirrored L0/L1" boundary-
+                                // strength check compares raw list-relative
+                                // integers across DIFFERENT lists (an L0-only
+                                // block's `ref_idx` against an L1-only neighbour's
+                                // `ref_idx_l1`): index 0 in RefPicList0 and index 0
+                                // in RefPicList1 are almost always two different
+                                // physical pictures, so a same-picture "swap"
+                                // equivalence is falsely detected whenever the raw
+                                // indices happen to coincide, silently producing
+                                // bS=0 for a real motion/reference discontinuity
+                                // (root cause of `CVBS3_Sony_C`'s residual diff,
+                                // SESSION #32ay).
+                                const POC_BIAS: i64 = 1_000_000_000;
+                                let l0_poc: Vec<i64> =
+                                    ref_l0.iter().map(|e| e.pic_order_cnt).collect();
+                                let l1_poc: Vec<i64> =
+                                    ref_l1.iter().map(|e| e.pic_order_cnt).collect();
                                 let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
                                     .macroblocks
                                     .chunks(mb_cols as usize)
@@ -3123,10 +3146,30 @@ impl H264Decoder {
                                             .map(|(col_idx, mb)| {
                                                 let idx = row_idx * mb_cols as usize + col_idx;
                                                 let nz = parsed.nz[idx].luma;
-                                                let cells = parsed
+                                                let mut cells = parsed
                                                     .mv_store
                                                     .cells_of(idx)
                                                     .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                                                for cell in &mut cells {
+                                                    if cell.ref_idx != crate::mv::LIST_NOT_USED {
+                                                        if let Some(&poc) =
+                                                            l0_poc.get(cell.ref_idx as usize)
+                                                        {
+                                                            cell.ref_idx =
+                                                                (poc + POC_BIAS) as i32;
+                                                        }
+                                                    }
+                                                    if cell.ref_idx_l1
+                                                        != crate::mv::LIST_NOT_USED
+                                                    {
+                                                        if let Some(&poc) =
+                                                            l1_poc.get(cell.ref_idx_l1 as usize)
+                                                        {
+                                                            cell.ref_idx_l1 =
+                                                                (poc + POC_BIAS) as i32;
+                                                        }
+                                                    }
+                                                }
                                                 crate::deblock::DeblockMbInfo {
                                                     transform_8x8: mb.transform_size_8x8,
                                                     ..crate::deblock::DeblockMbInfo::new(
