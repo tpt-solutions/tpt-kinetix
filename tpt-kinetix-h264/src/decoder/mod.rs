@@ -2051,6 +2051,7 @@ impl H264Decoder {
         let l1_list = crate::ref_pic::build_ref_list_l1(
             &self.dpb,
             num_ref_idx_l1_active as usize,
+            num_ref_idx_l0_active as usize,
             current_poc,
             pic_num_ctx,
             &header.ref_pic_list_modification_l1,
@@ -2934,6 +2935,7 @@ impl H264Decoder {
             let l1_list = crate::ref_pic::build_ref_list_l1(
                 &self.dpb,
                 num_ref_idx_l1_active as usize,
+                num_ref_idx_l0_active as usize,
                 current_poc,
                 pic_num_ctx,
                 &header.ref_pic_list_modification_l1,
@@ -2951,6 +2953,20 @@ impl H264Decoder {
                     .iter()
                     .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
                     .collect();
+                if std::env::var("KINETIX_DBG_REFPIX").is_ok() {
+                    for (i, e) in ref_l1.iter().enumerate() {
+                        let f = e.mc_frame.as_ref().unwrap_or(&e.frame);
+                        let w = f.width as usize;
+                        let px = 102usize;
+                        let py = 47usize;
+                        if w > px && f.data.len() > py * w + px {
+                            eprintln!(
+                                "REFPIX current_poc={current_poc} L1[{i}] frame_num={} poc={} px(102,47)={}",
+                                e.frame_num, e.pic_order_cnt, f.data[py * w + px]
+                            );
+                        }
+                    }
+                }
                 // Co-located picture for direct-mode derivation: reference 0 of
                 // list 1 (§8.4.1.2.2/8.4.1.2.3). Its persisted per-block motion
                 // grid feeds the col_zero_flag check.
@@ -3070,6 +3086,11 @@ impl H264Decoder {
                             &weighted_pred,
                             tracer,
                         );
+
+                        if let Ok(path) = std::env::var("KINETIX_DBG_TRUE_PREDEBLOCK") {
+                            let p = format!("{path}.{}", self.frame_count + 1);
+                            let _ = std::fs::write(&p, &recon.luma);
+                        }
 
                         let deblock_params = crate::deblock::DeblockParams {
                             disable_idc: header.disable_deblocking_filter_idc as u8,

@@ -3614,6 +3614,21 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
         let x0 = (base_x + bx) as i32;
         let y0 = (base_y + by) as i32;
 
+        if std::env::var("KINETIX_DBG_RAWCOEFF").is_ok()
+            && mb.luma_coeffs[block].iter().any(|&c| c != 0)
+        {
+            eprintln!(
+                "RAWCOEFF mb({mb_x},{mb_y}) blk{block} qp={} coeffs={:?}",
+                mb.qp, mb.luma_coeffs[block]
+            );
+        }
+        if std::env::var("KINETIX_DBG_CELL").is_ok() {
+            eprintln!(
+                "CELL mb({mb_x},{mb_y}) blk{block} transform8x8={} cell={:?}",
+                mb.transform_size_8x8, cell
+            );
+        }
+
         let l0_active = cell.ref_idx >= 0;
         let l1_active = cell.ref_idx_l1 >= 0;
         let ref_idx0 = cell.ref_idx.max(0) as usize;

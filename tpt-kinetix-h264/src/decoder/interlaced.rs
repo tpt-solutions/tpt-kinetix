@@ -498,6 +498,7 @@ impl H264Decoder {
                 let list = crate::ref_pic::build_ref_list_l1(
                     &self.dpb,
                     num_ref_idx_l1_active as usize,
+                    num_ref_idx_l0_active as usize,
                     current_poc,
                     pic_num_ctx,
                     &header.ref_pic_list_modification_l1,

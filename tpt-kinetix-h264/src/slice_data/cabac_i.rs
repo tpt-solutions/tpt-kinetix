@@ -24,7 +24,7 @@ use super::*;
 /// same picture); this call writes only into the `first_mb..` range it
 /// actually decodes and leaves the rest alone. `slice_id_grid` MUST use a
 /// sentinel not equal to any real `slice_id` (the caller uses `u16::MAX`) for
-/// not-yet-decoded macroblocks, since [`NeighbourCtx::new_with_slices`] relies
+/// not-yet-decoded macroblocks, since `NeighbourCtx::new_with_slices` relies
 /// on it to treat those as unavailable neighbours (§6.4.9).
 ///
 /// Returns the exclusive upper bound of macroblocks actually decoded by THIS

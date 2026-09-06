@@ -1395,7 +1395,37 @@ pub fn build_ref_list_l0_b_slice(
     modifications: &[RefPicListModification],
 ) -> Option<Vec<DpbEntry>> {
     let num_active = num_ref_idx_l0_active.max(1);
+    let raw = initial_ref_list_l0_b(dpb, current_poc)?;
+    let mut list = raw;
+    list.truncate(num_active);
+    modify_ref_pic_list(&mut list, dpb, ctx, num_active, modifications).ok()?;
+    while list.len() < num_ref_idx_l0_active {
+        let last = list.last()?.clone();
+        list.push(last);
+    }
+    Some(list)
+}
 
+/// Identity key for reference-picture-list-equality comparisons (§8.2.4.2.3's
+/// "RefPicList1 is identical to RefPicList0" note): distinct decoded pictures
+/// always differ in at least one of these fields, and comparing them is far
+/// cheaper than a deep `VideoFrame` (pixel data) comparison.
+fn dpb_entry_identity(e: &DpbEntry) -> (u32, bool, bool, i64, bool, i32) {
+    (
+        e.frame_num,
+        e.field_pic_flag,
+        e.bottom_field_flag,
+        e.pic_order_cnt,
+        e.is_long_term,
+        e.long_term_pic_num,
+    )
+}
+
+/// `RefPicList0`'s initial (pre-truncation, pre-modification) ordering for a
+/// B slice (§8.2.4.2.3): short-term `POC < current_poc` descending, then
+/// short-term `POC >= current_poc` ascending, then long-term ascending
+/// `LongTermPicNum`. Returns `None` when the DPB holds no reference pictures.
+fn initial_ref_list_l0_b(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
     let mut before: Vec<&DpbEntry> = dpb
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt < current_poc)
@@ -1415,38 +1445,21 @@ pub fn build_ref_list_l0_b_slice(
         return None;
     }
 
-    let mut list: Vec<DpbEntry> = before
-        .into_iter()
-        .chain(at_or_after)
-        .chain(longs)
-        .cloned()
-        .collect();
-    list.truncate(num_active);
-    modify_ref_pic_list(&mut list, dpb, ctx, num_active, modifications).ok()?;
-    while list.len() < num_ref_idx_l0_active {
-        let last = list.last()?.clone();
-        list.push(last);
-    }
-    Some(list)
+    Some(
+        before
+            .into_iter()
+            .chain(at_or_after)
+            .chain(longs)
+            .cloned()
+            .collect(),
+    )
 }
 
-/// Build `RefPicList1` for a B-slice (§8.2.4.2.3).
-///
-/// The initial list ordering is:
-/// 1. Short-term references with `PicOrderCnt > current_poc`, ascending POC.
-/// 2. Short-term references with `PicOrderCnt <= current_poc`, descending POC.
-/// 3. Long-term references, ascending `LongTermPicNum`.
-///
-/// Returns `None` when the DPB holds no reference pictures.
-pub fn build_ref_list_l1(
-    dpb: &Dpb,
-    num_ref_idx_l1_active: usize,
-    current_poc: i64,
-    ctx: PicNumContext,
-    modifications: &[RefPicListModification],
-) -> Option<Vec<DpbEntry>> {
-    let num_active = num_ref_idx_l1_active.max(1);
-
+/// `RefPicList1`'s initial (pre-truncation, pre-modification) ordering for a
+/// B slice (§8.2.4.2.3): short-term `POC > current_poc` ascending, then
+/// short-term `POC <= current_poc` descending, then long-term ascending
+/// `LongTermPicNum`. Returns `None` when the DPB holds no reference pictures.
+fn initial_ref_list_l1(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
     let mut after: Vec<&DpbEntry> = dpb
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt > current_poc)
@@ -1466,13 +1479,67 @@ pub fn build_ref_list_l1(
         return None;
     }
 
-    let mut list: Vec<DpbEntry> = after
-        .into_iter()
-        .chain(at_or_before)
-        .chain(longs)
-        .cloned()
-        .collect();
+    Some(
+        after
+            .into_iter()
+            .chain(at_or_before)
+            .chain(longs)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Build `RefPicList1` for a B-slice (§8.2.4.2.3).
+///
+/// The initial list ordering is:
+/// 1. Short-term references with `PicOrderCnt > current_poc`, ascending POC.
+/// 2. Short-term references with `PicOrderCnt <= current_poc`, descending POC.
+/// 3. Long-term references, ascending `LongTermPicNum`.
+///
+/// Returns `None` when the DPB holds no reference pictures.
+///
+/// `num_ref_idx_l0_active` is needed purely to reconstruct `RefPicList0`'s
+/// own truncated-but-unmodified form, for the §8.2.4.2.3 Note 2 special case:
+/// "When the reference picture list RefPicList1 has more than one entry and
+/// RefPicList1 is identical to the reference picture list RefPicList0, the
+/// first two entries RefPicList1[0] and RefPicList1[1] are switched." Without
+/// this, an L1 prediction using `ref_idx_l1 == 0` (or `1`) on a B slice whose
+/// two lists happen to coincide silently names the wrong physical reference
+/// picture whenever the two entries are not the same picture.
+pub fn build_ref_list_l1(
+    dpb: &Dpb,
+    num_ref_idx_l1_active: usize,
+    num_ref_idx_l0_active: usize,
+    current_poc: i64,
+    ctx: PicNumContext,
+    modifications: &[RefPicListModification],
+) -> Option<Vec<DpbEntry>> {
+    let num_active = num_ref_idx_l1_active.max(1);
+    let raw = initial_ref_list_l1(dpb, current_poc)?;
+    let mut list = raw;
     list.truncate(num_active);
+
+    if list.len() > 1 {
+        if let Some(mut list0) = initial_ref_list_l0_b(dpb, current_poc) {
+            list0.truncate(num_ref_idx_l0_active.max(1));
+            let identical = list0.len() == list.len()
+                && list0
+                    .iter()
+                    .zip(list.iter())
+                    .all(|(a, b)| dpb_entry_identity(a) == dpb_entry_identity(b));
+            if std::env::var("KINETIX_DBG_L1SWAP").is_ok() {
+                eprintln!(
+                    "L1SWAP check: l0={:?} l1={:?} identical={identical}",
+                    list0.iter().map(dpb_entry_identity).collect::<Vec<_>>(),
+                    list.iter().map(dpb_entry_identity).collect::<Vec<_>>(),
+                );
+            }
+            if identical {
+                list.swap(0, 1);
+            }
+        }
+    }
+
     modify_ref_pic_list(&mut list, dpb, ctx, num_active, modifications).ok()?;
     while list.len() < num_ref_idx_l1_active {
         let last = list.last()?.clone();

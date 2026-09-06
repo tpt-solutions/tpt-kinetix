@@ -191,6 +191,12 @@ pub(super) fn apply_cfl_prediction(
 ) {
     let sub_x = usize::from(cfl.sub_x);
     let sub_y = usize::from(cfl.sub_y);
+    let dbg = std::env::var("KINETIX_AV1_DBG_CFL").is_ok();
+    let no_cfl = std::env::var("KINETIX_AV1_NO_CFL").is_ok();
+    if no_cfl {
+        return;
+    }
+    let dbg1 = dbg && cpx_x == 8 && cpx_y == 0;
     let mut l = vec![0i32; tx_w * tx_h];
     let mut luma_avg: i64 = 0;
     for i in 0..tx_h {
@@ -200,12 +206,16 @@ pub(super) fn apply_cfl_prediction(
             let mut t = 0i32;
             for dy in 0..=sub_y {
                 for dx in 0..=sub_x {
-                    t += cfl
+                    let px = cfl
                         .luma
                         .get((luma_y + dy) * cfl.luma_stride + (luma_x + dx))
                         .copied()
                         .map(i32::from)
                         .unwrap_or(0);
+                    if dbg1 {
+                        eprintln!("  CFL1 luma[{},{}]={px}", luma_y + dy, luma_x + dx);
+                    }
+                    t += px;
                 }
             }
             let v = t << (3 - sub_x - sub_y);
@@ -215,11 +225,17 @@ pub(super) fn apply_cfl_prediction(
     }
     let shift = tx_w.trailing_zeros() + tx_h.trailing_zeros();
     let luma_avg = ((luma_avg + (1i64 << (shift - 1))) >> shift) as i32;
+    if dbg {
+        eprintln!("CFL cpx=({cpx_x},{cpx_y}) tx={tx_w}x{tx_h} alpha={} luma_avg={luma_avg} sub=({sub_x},{sub_y})", cfl.alpha);
+    }
     for i in 0..tx_h {
         for j in 0..tx_w {
             let dc = pred[i * tx_w + j];
             let diff = i64::from(cfl.alpha) * i64::from(l[i * tx_w + j] - luma_avg);
             let scaled_luma = round2_signed(diff, 6) as i32;
+            if dbg {
+                eprintln!("  [{i},{j}] L={} L-avg={} diff={diff} scaled={scaled_luma} dc={dc} -> {}", l[i*tx_w+j], l[i*tx_w+j]-luma_avg, clip1(dc + scaled_luma));
+            }
             pred[i * tx_w + j] = clip1(dc + scaled_luma);
         }
     }

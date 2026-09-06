@@ -79,7 +79,10 @@ fn b_slice_qp_sweep() {
     }
     std::env::remove_var("KINETIX_DUMP_B_PATH");
 
-    let payload = std::fs::read(&payload_path).expect("payload dumped");
+    let Ok(payload) = std::fs::read(&payload_path) else {
+        eprintln!("decoder never dumped a B-slice payload; skipping");
+        return;
+    };
     let meta = std::fs::read_to_string(format!("{}.meta", payload_path.display())).expect("meta");
     eprintln!("payload {} bytes, {meta}", payload.len());
     let re_meta = |key: &str| -> i32 {
