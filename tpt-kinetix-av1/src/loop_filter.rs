@@ -58,16 +58,15 @@ fn clip3(x: i32, lo: i32, hi: i32) -> i32 {
     }
 }
 
-/// `Round2(x, n)` from the AV1 spec: round `x / 2^n` to nearest, half away
-/// from zero.
+/// `Round2(x, n)` from the AV1 spec: `(x + 2^(n-1)) >> n` (arithmetic
+/// right shift — rounds toward minus infinity for negative half-values).
+/// This is the spec's definition verbatim (§2, table 2): floor division,
+/// not symmetric rounding. Using symmetric rounding gave -2 where the spec
+/// gives -1 for odd negative values (e.g. Round2(-3,1)), which caused ±1
+/// errors at the p1/q1 taps of the narrow loop filter.
 #[inline]
 fn round2(x: i32, n: u32) -> i32 {
-    let add = 1i32 << (n - 1);
-    if x >= 0 {
-        (x + add) >> n
-    } else {
-        (x + add - 1) >> n
-    }
+    (x + (1i32 << (n - 1))) >> n
 }
 
 #[inline]
@@ -968,6 +967,10 @@ fn cdef_direction(
 }
 
 /// Apply the CDEF filter to a single 8×8 (luma) or 4×4 (chroma) block.
+///
+/// `pri_str_orig` is the original bitstream primary strength (for tap selection
+/// per spec §7.15.3 `Cdef_Pri_Taps[1 & (priStrength >> coeff_shift)]`).
+/// `pri_str` is the variance-adjusted strength used for the actual filter.
 #[allow(clippy::too_many_arguments)]
 fn cdef_filter_block(
     dst: &mut [u8],
@@ -980,13 +983,14 @@ fn cdef_filter_block(
     h: usize,
     _sub_x: usize,
     _sub_y: usize,
+    pri_str_orig: i32,
     pri_str: i32,
     sec_str: i32,
     damping: i32,
     dir: usize,
 ) {
     let coeff_shift = 0; // 8-bit
-    let taps = (pri_str >> coeff_shift) & 1;
+    let taps = (pri_str_orig >> coeff_shift) & 1;
     for i in 0..h {
         for j in 0..w {
             let x = src[(y0 + i) * src_stride + (x0 + j)] as i32;
@@ -1546,8 +1550,8 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    u_plane, &src_u, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
-                    uh, uw,
+                    u_plane, &src_u, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
+                    uv_sec, uv_damping, uy, ux, uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1569,8 +1573,8 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    v_plane, &src_v, uv_w, uv_h, sub_x, sub_y, uv_pri, uv_sec, uv_damping, uy, ux,
-                    uh, uw,
+                    v_plane, &src_v, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
+                    uv_sec, uv_damping, uy, ux, uh, uw,
                 );
                 ux += uv_step_x;
             }
@@ -1647,18 +1651,16 @@ fn cdef_plane_luma(
                 continue;
             }
             let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
-            // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
-            // (§7.15.2's `cdef_block` variance-adjustment step) — this was
-            // previously clamped to 31 (a leftover from `floor_log2`'s
-            // natural u32 range), which let high-variance blocks (real hard
-            // edges, not quantization noise) receive a wildly over-strength
-            // primary filter instead of the spec's capped adjustment.
-            let var_str = if (var >> 6) != 0 {
-                floor_log2((var >> 6) as u32) as i32
+            // §7.15.2 `cdef_block` variance-adjustment step:
+            // `i = Min(FloorLog2(Clip3(1, 256, variance >> 6)), 12)`.
+            // Clip3(1,256) caps the argument to 256, so floor_log2 is at
+            // most 8; the min(12) is redundant but kept for spec fidelity.
+            let var_str = if var != 0 {
+                let clamped = ((var >> 6).max(1).min(256)) as u32;
+                floor_log2(clamped) as i32
             } else {
                 0
-            }
-            .min(12);
+            };
             let p = if var != 0 {
                 (pri_str * (4 + var_str) + 8) >> 4
             } else {
@@ -1676,6 +1678,7 @@ fn cdef_plane_luma(
                 8.min(height - y0),
                 0,
                 0,
+                pri_str,
                 p,
                 sec_str,
                 damping,
@@ -1686,15 +1689,20 @@ fn cdef_plane_luma(
 }
 
 /// CDEF for a chroma plane, applying per-8×8 variance-dependent strength with
-/// the UV direction remap. Like [`cdef_plane_luma`], `src` is the pre-CDEF
-/// snapshot and the caller restricts `y0_unit`/`x0_unit`/`unit_h`/`unit_w` to a
-/// single CDEF unit (keyed into the luma `cdef_idx` grid by the caller).
+/// the UV direction remap. `src` is the pre-CDEF chroma snapshot; `luma_src`
+/// is the pre-CDEF luma snapshot used to derive the per-block direction and
+/// variance per spec §7.15.2 (direction/variance come from the co-located luma
+/// 8×8 block, not from the chroma block itself). The caller restricts
+/// `y0_unit`/`x0_unit`/`unit_h`/`unit_w` to a single CDEF unit.
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_chroma(
     plane: &mut [u8],
     src: &[u8],
     width: usize,
     height: usize,
+    luma_src: &[u8],
+    luma_w: usize,
+    luma_h: usize,
     sub_x: usize,
     sub_y: usize,
     pri_str: i32,
@@ -1719,22 +1727,21 @@ fn cdef_plane_chroma(
             if x0 < x0_unit || x0 >= x0_unit + unit_w {
                 continue;
             }
-            // Chroma direction is derived from the co-located luma 8×8 block,
-            // but for simplicity we re-derive a direction from the chroma block
-            // itself and remap via Cdef_Uv_Dir.
-            let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
-            // dav1d's `adjust_strength`: `i = Min(FloorLog2(var >> 6), 12)`
-            // (§7.15.2's `cdef_block` variance-adjustment step) — this was
-            // previously clamped to 31 (a leftover from `floor_log2`'s
-            // natural u32 range), which let high-variance blocks (real hard
-            // edges, not quantization noise) receive a wildly over-strength
-            // primary filter instead of the spec's capped adjustment.
-            let var_str = if (var >> 6) != 0 {
-                floor_log2((var >> 6) as u32) as i32
+            // §7.15.2: direction and variance are derived from the co-located
+            // luma 8×8 block. Chroma direction is then remapped via Cdef_Uv_Dir.
+            let luma_x0 = x0 << sub_x;
+            let luma_y0 = y0 << sub_y;
+            let (yd, var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
+            // §7.15.2 `cdef_block` variance-adjustment step:
+            // `i = Min(FloorLog2(Clip3(1, 256, variance >> 6)), 12)`.
+            // Clip3(1,256) caps the argument to 256, so floor_log2 is at
+            // most 8; the min(12) is redundant but kept for spec fidelity.
+            let var_str = if var != 0 {
+                let clamped = ((var >> 6).max(1).min(256)) as u32;
+                floor_log2(clamped) as i32
             } else {
                 0
-            }
-            .min(12);
+            };
             let p = if var != 0 {
                 (pri_str * (4 + var_str) + 8) >> 4
             } else {
@@ -1756,6 +1763,7 @@ fn cdef_plane_chroma(
                 h_block.min(height - y0),
                 sub_x,
                 sub_y,
+                pri_str,
                 p,
                 sec_str,
                 damping,
