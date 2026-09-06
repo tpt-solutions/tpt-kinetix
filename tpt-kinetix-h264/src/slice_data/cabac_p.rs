@@ -309,14 +309,18 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
     Ok((mb, this_nz, this_pred_ctx, this_cabac_ctx, qp, dqp_nonzero))
 }
 
-/// Parse a CABAC-coded P-slice (§7.3.4, §9.3).
-///
-/// `mb_aff` / `field_pic_flag` enable MBAFF pair parsing (§7.4.4): when the
-/// SPS sets `mb_adaptive_frame_field_flag` and the slice is a frame picture,
-/// `mb_field_decoding_flag` is decoded once per macroblock pair and skip-flag
-/// decisions are paired per FFmpeg's `ff_h264_decode_mb_cabac` (a skipped top
-/// MB pre-reads the bottom MB's skip flag; the pair's field flag is decoded
-/// when the bottom is coded).
+/// Parse a CABAC-coded P-slice (§7.3.4, §9.3): single-call, fresh-buffers
+/// convenience wrapper over [`parse_p_slice_cabac_range`] for every caller
+/// that doesn't (yet) accumulate across multiple slices of the same picture
+/// -- PAFF/MBAFF (`decoder::interlaced`) and the progressive single-slice
+/// case. Starts at macroblock 0 with slice id 0 into freshly allocated
+/// buffers, runs `predict_slice_mvs_ex` once over the whole picture (correct
+/// here because this call always covers the entire picture -- either it
+/// decodes to `total_mbs` or the picture is genuinely multi-slice and the
+/// caller falls back to the scaffold, exactly the pre-existing behaviour),
+/// and returns a `ParsedSlice`. See [`parse_p_slice_cabac_range`] for the
+/// real multi-slice-capable accumulator entry point (progressive only, used
+/// by `decoder::mod::try_decode_real_slice`).
 #[allow(clippy::too_many_arguments)]
 pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     data: &[u8],
@@ -332,21 +336,107 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     direct_8x8_inference_flag: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
-    let mut dec = crate::entropy::CabacDecoder::new(data)
-        .map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
-    let mut ctxs = PbCabacSliceContexts::new_p(slice_qp, cabac_init_idc);
-
     let total = (mb_cols * mb_rows) as usize;
-    // Pre-allocated and assigned by frame-MB grid address (not decode order):
-    // in an MBAFF frame the parse visits macroblocks in pair-scan order
-    // (top, bottom of pair 0, then pair 1 …) so `mb_idx` ≠ grid address for
-    // every bottom macroblock. Committing by grid address keeps neighbour
-    // lookups and `predict_slice_mvs` correct (mirrors `cabac_i.rs`, #32e).
     let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
     let mut cabac_ctx: Vec<MbCabacCtx> = vec![MbCabacCtx::default(); total];
     let mut inter_ctx: Vec<MbInterCabacCtx> = vec![MbInterCabacCtx::default(); total];
+    let mut slice_id_grid: Vec<u16> = vec![0u16; total];
+    let decoded_mb_count = parse_p_slice_cabac_range(
+        data,
+        mb_cols,
+        mb_rows,
+        slice_qp,
+        mb_aff,
+        field_pic_flag,
+        cabac_init_idc,
+        num_ref_idx_l0_active,
+        chroma_qp_index_offset,
+        transform_8x8_mode_flag,
+        direct_8x8_inference_flag,
+        tracer,
+        0,
+        0,
+        &mut macroblocks,
+        &mut nz,
+        &mut pred_ctx,
+        &mut cabac_ctx,
+        &mut inter_ctx,
+        &mut slice_id_grid,
+    )?;
+    let mbaff_frame = mb_aff && !field_pic_flag;
+    let mut mv_store = MvStore::new(total);
+    crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0, &macroblocks, mbaff_frame)?;
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+        decoded_mb_count,
+    })
+}
+
+/// Multi-slice-capable core of the CABAC P-slice macroblock-layer parser
+/// (§7.3.4, §9.3), mirroring [`crate::slice_data::parse_i_slice_cabac`]'s
+/// shape exactly (see its doc comment for the accumulator-buffer contract).
+///
+/// `mb_aff` / `field_pic_flag` enable MBAFF pair parsing (§7.4.4): when the
+/// SPS sets `mb_adaptive_frame_field_flag` and the slice is a frame picture,
+/// `mb_field_decoding_flag` is decoded once per macroblock pair and skip-flag
+/// decisions are paired per FFmpeg's `ff_h264_decode_mb_cabac` (a skipped top
+/// MB pre-reads the bottom MB's skip flag; the pair's field flag is decoded
+/// when the bottom is coded). MBAFF multi-slice is out of scope (no known
+/// fixture combines the two), but the shared pair-neighbour derivations below
+/// are still made slice-aware for consistency/safety.
+///
+/// `first_mb`/`slice_id`/`macroblocks`/`nz`/`pred_ctx`/`cabac_ctx`/
+/// `inter_ctx`/`slice_id_grid` are the picture-wide accumulator buffers (see
+/// `parse_i_slice_cabac`'s doc comment for the exact contract: pre-seeded by
+/// the caller, `slice_id_grid` using `u16::MAX` for "not yet decoded this
+/// picture"). This function does NOT run `predict_slice_mvs_ex` -- unlike a
+/// single-slice call, motion-vector prediction must run exactly once, after
+/// the picture's LAST slice, over the complete accumulated `macroblocks`
+/// array (a per-slice call could read not-yet-decoded macroblocks from later
+/// slices as if they were real `Macroblock::new_skip` placeholders). The
+/// caller (`decoder::mod::try_decode_real_slice`'s P branch) runs it once at
+/// `finalize_picture` time instead.
+///
+/// Returns the exclusive upper bound of macroblocks actually decoded by THIS
+/// call, exactly like `parse_i_slice_cabac`.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
+    data: &[u8],
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    mb_aff: bool,
+    field_pic_flag: bool,
+    cabac_init_idc: usize,
+    num_ref_idx_l0_active: u32,
+    chroma_qp_index_offset: i32,
+    transform_8x8_mode_flag: bool,
+    direct_8x8_inference_flag: bool,
+    tracer: &mut T,
+    first_mb: u32,
+    slice_id: u16,
+    macroblocks: &mut [Macroblock],
+    nz: &mut [MbNz],
+    pred_ctx: &mut [MbPredCtx],
+    cabac_ctx: &mut [MbCabacCtx],
+    inter_ctx: &mut [MbInterCabacCtx],
+    slice_id_grid: &mut [u16],
+) -> R<usize> {
+    let mut dec = crate::entropy::CabacDecoder::new(data)
+        .map_err(|_| SliceDataError::Eof("CABAC engine init"))?;
+    let mut ctxs = PbCabacSliceContexts::new_p(slice_qp, cabac_init_idc);
+
+    let total = (mb_cols * mb_rows) as usize;
+    debug_assert_eq!(macroblocks.len(), total);
+    debug_assert_eq!(nz.len(), total);
+    debug_assert_eq!(pred_ctx.len(), total);
+    debug_assert_eq!(cabac_ctx.len(), total);
+    debug_assert_eq!(inter_ctx.len(), total);
+    debug_assert_eq!(slice_id_grid.len(), total);
     let mut qp = slice_qp;
     let mut prev_dqp_nonzero = false;
     // MBAFF pair state (§7.4.4). `mbaff_frame` mirrors FFmpeg's FRAME_MBAFF:
@@ -364,8 +454,9 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
     let mut prev_mb_skipped = false;
     let mut next_mb_skipped = false;
     let mut decoded_mb_count = total;
+    let first_mb = first_mb as usize;
 
-    'mb_loop: for mb_idx in 0..total {
+    'mb_loop: for mb_idx in first_mb..total {
         // MBAFF pair-scan addressing (§6.4.2/§7.4.4): addresses 2k / 2k+1 are
         // the top / bottom macroblock of pair k, at frame-MB column
         // `k % mb_cols` and rows `2*(k / mb_cols)` / `+1`. Frame-only slices
@@ -381,12 +472,21 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         };
         let left_idx = (mb_x > 0).then(|| grid_idx - 1);
         let top_idx = (mb_y > 0).then(|| grid_idx - mb_cols as usize);
+        // §6.4.9: a resolved neighbour index that belongs to a different (or
+        // not-yet-decoded, via the `u16::MAX` sentinel) slice than the
+        // current one is treated as unavailable, exactly like an off-picture
+        // neighbour -- mirrors `NeighbourCtx::new_with_slices`'s
+        // `filter_slice`, open-coded here because `skip_neighbors` is derived
+        // directly from grid position rather than routed through
+        // `NeighbourCtx`.
+        let left_same_slice = left_idx.is_some_and(|i| slice_id_grid[i] == slice_id);
+        let top_same_slice = top_idx.is_some_and(|i| slice_id_grid[i] == slice_id);
 
         let skip_neighbors = crate::entropy::MbSkipNeighbors {
-            left_available: mb_x > 0,
-            left_skipped: left_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
-            top_available: mb_y > 0,
-            top_skipped: top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
+            left_available: left_same_slice,
+            left_skipped: left_same_slice && left_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
+            top_available: top_same_slice,
+            top_skipped: top_same_slice && top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let (r0, o0) = dec.debug_state();
         // FFmpeg ff_h264_decode_mb_cabac skip handling (MBAFF pairing):
@@ -409,10 +509,12 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 let bot_left_skipped = if mb_x > 0 {
                     // Left MB of the BOTTOM MB (x-1, y+1): already decoded as
                     // part of the previous pair.
-                    macroblocks
-                        .get(((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1)
-                        .map(|m| m.skip)
-                        .unwrap_or(false)
+                    let bl_idx = ((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1;
+                    if slice_id_grid.get(bl_idx).copied() == Some(slice_id) {
+                        macroblocks.get(bl_idx).map(|m| m.skip).unwrap_or(false)
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };
@@ -433,12 +535,17 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         if pair_field_pending {
             let left_field = if mb_x > 0 {
                 let left_idx = (mb_y as usize) * mb_cols as usize + mb_x as usize - 1;
-                let left_mb = &macroblocks[left_idx];
-                // FFmpeg uses the mb_type interlaced flag (0 for skipped MBs); the
-                // mb_field_decoding_flag equals the pair's field flag even for
-                // skipped MBs, which would over-count ctxIdxInc for skipped neighbours.
-                if !left_mb.skip {
-                    cabac_ctx[left_idx].mb_field_flag
+                // §6.4.9: a different-slice neighbour is unavailable here too.
+                if slice_id_grid.get(left_idx).copied() == Some(slice_id) {
+                    let left_mb = &macroblocks[left_idx];
+                    // FFmpeg uses the mb_type interlaced flag (0 for skipped MBs); the
+                    // mb_field_decoding_flag equals the pair's field flag even for
+                    // skipped MBs, which would over-count ctxIdxInc for skipped neighbours.
+                    if !left_mb.skip {
+                        cabac_ctx[left_idx].mb_field_flag
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -447,9 +554,13 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             };
             let top_field = if mb_y > 0 {
                 let top_idx = ((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize;
-                let top_mb = &macroblocks[top_idx];
-                if !top_mb.skip {
-                    cabac_ctx[top_idx].mb_field_flag
+                if slice_id_grid.get(top_idx).copied() == Some(slice_id) {
+                    let top_mb = &macroblocks[top_idx];
+                    if !top_mb.skip {
+                        cabac_ctx[top_idx].mb_field_flag
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -498,6 +609,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 ..Default::default()
             };
             macroblocks[grid_idx] = mb;
+            slice_id_grid[grid_idx] = slice_id;
             // §7.3.4 slice_data(): end_of_slice_flag is decoded after EVERY
             // non-I_PCM macroblock — including skipped ones (it sits outside
             // macroblock_layer() in the slice_data() do/while loop, gated only
@@ -523,7 +635,14 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
             eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
         }
 
-        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
+        let nctx = NeighbourCtx::new_with_slices(
+            mbaff_frame,
+            mb_rows,
+            cur_pair_field,
+            &field_flags,
+            slice_id_grid,
+            slice_id,
+        );
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
             parse_p_macroblock_cabac(
                 &mut dec,
@@ -531,10 +650,10 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
                 mb_x,
                 mb_y,
                 mb_cols,
-                &nz,
-                &pred_ctx,
-                &cabac_ctx,
-                &inter_ctx,
+                nz,
+                pred_ctx,
+                cabac_ctx,
+                inter_ctx,
                 qp,
                 prev_dqp_nonzero,
                 num_ref_idx_l0_active,
@@ -556,6 +675,7 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
         macroblocks[grid_idx] = mb;
+        slice_id_grid[grid_idx] = slice_id;
 
         // §7.3.4: no end_of_slice_flag after the TOP macroblock of an MBAFF
         // frame pair (see the skip-MB path above for the spec reference).
@@ -571,12 +691,9 @@ pub fn parse_p_slice_cabac<T: crate::trace::DecodeTracer>(
         }
     }
 
-    let mut mv_store = MvStore::new(total);
-    crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0, &macroblocks, mbaff_frame)?;
-    Ok(ParsedSlice {
-        macroblocks,
-        nz,
-        mv_store,
-        decoded_mb_count,
-    })
+    // MV prediction deferred to the caller (see this function's doc comment):
+    // it must run exactly once, over the whole picture, after the LAST slice
+    // -- not once per slice, which for a genuinely multi-slice picture would
+    // read later slices' not-yet-decoded macroblocks as if they were real.
+    Ok(decoded_mb_count)
 }

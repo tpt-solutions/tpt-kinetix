@@ -104,29 +104,27 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "CABAST3_Sony_E",
         Expect::KnownGap(
-            "multi-slice (4 slices/picture) — frame count correct; 2026-09-05: \
-             CABAC's end_of_slice_flag mid-picture was being treated as a \
-             desync error (Err) instead of the legitimate multi-slice \
-             boundary it is (§7.3.4 moreDataFlag), so this used to be a \
-             full-frame grey scaffold despite the description below already \
-             claiming partial reconstruction. Fixed (cabac_i/p/b.rs treat an \
-             early end_of_slice_flag as a clean stop, `ParsedSlice::\
-             decoded_mb_count` tracks it, decoder/mod.rs still flags \
-             `scaffold_fallback` for strict mode) — the first slice's real \
-             MB range is now genuinely bit-exact (confirmed via diffmap: the \
-             picture's first ~4 of 18 MB rows are exact), the remaining 3 \
-             slices' macroblocks are still un-decoded (left at the skip \
-             default). Full multi-slice support (decode every slice's own MB \
-             range, starting at its own `first_mb_in_slice`, and merge into \
-             one picture) is not implemented",
+            "multi-slice (4 slices/picture), IPB — real per-slice-range \
+             CABAC P multi-slice decode landed 2026-09-06 (SESSION #32au): \
+             every I-type AND P-type slice of a picture now reconstructs its \
+             own macroblock range (verified via a targeted diffmap: display \
+             frame index 3, POC 3, the first non-B picture in this stream, \
+             is now genuinely bit-exact end to end). The readme's own \
+             'Direct Prediction: None' is misleading -- this stream DOES use \
+             B-type slices (POC 1, 2, 4, 5, ... interleave between the P \
+             pictures), which multi-slice CABAC B decode (out of scope this \
+             session, see #32au) leaves un-decoded, so the overall clip \
+             still fails hard byte-exact comparison. Once CABAC B multi-\
+             slice lands this should flip to bit-exact.",
         ),
     ),
     (
         "CABASTBR3_Sony_B",
         Expect::KnownGap(
-            "multi-slice — same class and same 2026-09-05 fix as \
-             CABAST3_Sony_E: first slice's real MB range now genuinely \
-             reconstructs bit-exact, remaining slices still un-decoded",
+            "multi-slice, IPB — same class and same 2026-09-06 fix as \
+             CABAST3_Sony_E: every I/P-type slice's own macroblock range now \
+             reconstructs correctly; B-type slices/pictures are the sole \
+             remaining gap (out of scope, see #32au).",
         ),
     ),
     (
@@ -188,17 +186,23 @@ const MANIFEST: &[(&str, Expect)] = &[
     // NOT an I-only clip (earlier sessions' assumption was wrong): readme says
     // "Slice Types: IPB", I Period 15, Direct Prediction: Temporal. Frame 0
     // (IDR, 4 CABAC I-slices) is bit-exact via the multi-slice I accumulator
-    // (07b0471/4a83773). Every other picture is P or B, also 4 slices; only
-    // the first slice (first_mb_in_slice==0) is really CABAC-decoded by
-    // `decode_slice`'s single-slice P/B path — continuation slices hit the
-    // `first_mb_in_slice != 0` early-return and are dropped, so ~75% of every
-    // P/B picture's macroblocks (mb 25..98 of 99 for this QCIF clip) are never
-    // decoded at all. This is the same "multi-slice CABAC P/B not
-    // implemented" gap already tracked for CABAST3_Sony_E/CABASTBR3_Sony_B,
-    // not a distinct bug — see todo-h264.md SESSION #32as.
+    // (07b0471/4a83773). SESSION #32au (2026-09-06) landed real multi-slice
+    // CABAC P decode (every I-type AND P-type slice of a picture now
+    // reconstructs its own macroblock range), which should have fixed every
+    // P picture in this clip — B pictures (this stream's `direct_spatial_
+    // mv_pred_flag == 0`, temporal direct mode) remain the blocker, same
+    // unimplemented gap as CABA3_Sony_C/CANL3_Sony_C/CVBS3_Sony_C/
+    // CACQP3_Sony_D. Not re-measured against a fresh clip-specific diffmap
+    // this session (P work was verified against CABAST3_Sony_E instead); a
+    // future B-slice session should re-check whether this now only fails on
+    // its B pictures, or whether it changes classification once temporal
+    // direct mode lands.
     (
         "CABACI3_Sony_B",
-        Expect::Limitation("IPB stream — multi-slice CABAC P/B not implemented (see #32as)"),
+        Expect::Limitation(
+            "IPB stream — multi-slice CABAC P now implemented (#32au); B \
+             (temporal direct mode) is the remaining gap",
+        ),
     ),
 ];
 

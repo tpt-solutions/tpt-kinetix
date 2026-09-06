@@ -1501,6 +1501,222 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
     }
 }
 
+/// Reconstruct every macroblock NOT already marked done in `already_done`,
+/// via the same slice-boundary-aware intra path [`reconstruct_intra_frame`]
+/// uses, directly into an already-allocated [`ReconstructedFrame`].
+///
+/// A picture may legally mix I-type and P-type slices (§7.4.3 places no
+/// requirement that every slice of a picture share one `slice_type`; ITU's
+/// `CABAST3_Sony_E`/`CABASTBR3_Sony_B` conformance streams do exactly this).
+/// The multi-slice CABAC P-slice accumulator (`decoder::mod::
+/// try_decode_real_p_slice_cabac`) reconstructs each P-type slice's own
+/// macroblock range incrementally as it arrives; this function is
+/// `finalize_picture`'s follow-up pass filling in whatever an I-type slice
+/// (handled by the existing multi-slice CABAC I-slice parser, which writes
+/// macroblock data but does not reconstruct pixels) left untouched. For a
+/// picture with no P slices at all, every entry of `already_done` is `false`
+/// and this reconstructs the whole picture -- identical in effect to calling
+/// [`reconstruct_intra_frame`], which `finalize_picture` still calls directly
+/// for that all-intra case rather than allocating a zero buffer just to hand
+/// it here, to keep that already-verified path byte-for-byte unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconstruct_intra_mbs_remaining<T: DecodeTracer>(
+    recon: &mut ReconstructedFrame,
+    macroblocks: &[Macroblock],
+    mb_cols: u32,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+    slice_id_grid: &[u16],
+    already_done: &[bool],
+) {
+    for (idx, mb) in macroblocks.iter().enumerate() {
+        if already_done[idx] {
+            continue;
+        }
+        let mb_x = idx as u32 % mb_cols;
+        let mb_y = idx as u32 / mb_cols;
+        let cur_slice_id = slice_id_grid[idx];
+        if mb.mb_type == MbType::IPcm {
+            place_ipcm_mb(
+                &mb.pcm_samples,
+                &mut recon.luma,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.luma_stride,
+                recon.chroma_stride,
+                mb_x,
+                mb_y,
+            );
+            continue;
+        }
+        let luma_avail = Some(SliceAvail {
+            slice_id_grid,
+            mb_cols,
+            cur_slice_id,
+            mb_size: 16,
+        });
+        let chroma_avail = Some(SliceAvail {
+            slice_id_grid,
+            mb_cols,
+            cur_slice_id,
+            mb_size: 8,
+        });
+        reconstruct_luma(
+            mb,
+            &mut recon.luma,
+            recon.luma_stride,
+            mb_x,
+            mb_y,
+            false,
+            scaling,
+            tracer,
+            luma_avail,
+        );
+        reconstruct_chroma(
+            mb,
+            &mut recon.chroma_cb,
+            &mut recon.chroma_cr,
+            recon.chroma_stride,
+            mb_x,
+            mb_y,
+            false,
+            chroma_qp_index_offset,
+            scaling,
+            weighted,
+            tracer,
+            chroma_avail,
+        );
+    }
+}
+
+/// Reconstruct a **contiguous raster-order range** of a P-slice's
+/// macroblocks (`first_mb..end_mb`) directly into an already-allocated
+/// [`ReconstructedFrame`], instead of allocating a fresh full-picture buffer
+/// and covering every macroblock the way [`reconstruct_inter_frame_ex`]
+/// does.
+///
+/// Used by the multi-slice CABAC P-slice accumulator
+/// (`decoder::mod::PictureAccumulator`): each slice's own reference-picture
+/// list and weighted-prediction configuration only apply to that slice's own
+/// macroblock range, so -- unlike intra prediction, which needs the whole
+/// picture's neighbour graph resolved and is deferred whole to
+/// `finalize_picture` -- inter reconstruction can run immediately as each
+/// slice's macroblocks become available: motion compensation only ever reads
+/// from DPB reference pictures, never from sibling macroblocks of the
+/// current picture, so it never needs to wait for later slices.
+///
+/// Progressive (non-MBAFF) only -- MBAFF P multi-slice is out of scope (see
+/// `todo-h264.md`) and continues to go through
+/// [`reconstruct_inter_frame_ex`]'s single-call, full-picture path
+/// unmodified.
+///
+/// `slice_id_grid` gives every already-decoded macroblock's owning slice id
+/// (§6.4.9): an intra macroblock coded inside this P slice still needs
+/// slice-boundary-aware reference-sample availability for its own intra
+/// prediction, exactly like `reconstruct_intra_frame`'s slice-aware
+/// `SliceAvail` handling -- a neighbour macroblock belonging to a different
+/// (or not-yet-decoded) slice must be treated as unavailable rather than
+/// sampling in-progress/foreign-slice content.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconstruct_inter_frame_range<T: DecodeTracer>(
+    recon: &mut ReconstructedFrame,
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_frames: &[VideoFrame],
+    mb_cols: u32,
+    first_mb: usize,
+    end_mb: usize,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+    slice_id_grid: &[u16],
+) {
+    for idx in first_mb..end_mb {
+        let mb_x = (idx as u32) % mb_cols;
+        let mb_y = (idx as u32) / mb_cols;
+        let mb = &macroblocks[idx];
+        if mb.motion.is_some() || mb.skip {
+            reconstruct_inter_luma(
+                mb,
+                mv_store,
+                ref_frames,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                scaling,
+                weighted,
+                tracer,
+            );
+            reconstruct_inter_chroma(
+                mb,
+                mv_store,
+                ref_frames,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+            );
+        } else {
+            // Intra macroblock coded inside this P slice (§7.4.5 allows any
+            // intra `mb_type` in a P slice): route through the same
+            // slice-aware `reconstruct_luma`/`reconstruct_chroma` the
+            // progressive I-slice path uses, exactly mirroring
+            // `reconstruct_intra_frame`'s `SliceAvail` construction (unlike
+            // `reconstruct_inter_frame_ex`'s equivalent branch, which always
+            // passes `None` since it has no multi-slice caller).
+            let cur_slice_id = slice_id_grid[idx];
+            let luma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id,
+                mb_size: 16,
+            });
+            let chroma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id,
+                mb_size: 8,
+            });
+            reconstruct_luma(
+                mb,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_x,
+                mb_y,
+                false,
+                scaling,
+                tracer,
+                luma_avail,
+            );
+            reconstruct_chroma(
+                mb,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_x,
+                mb_y,
+                false,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+                chroma_avail,
+            );
+        }
+    }
+}
+
 /// MBAFF field-macroblock luma inter reconstruction inside a *frame* picture
 /// (§8.4.2.2.1). Motion compensation runs in field coordinates against the
 /// contiguous half-height parity plane of the reference; each predicted /

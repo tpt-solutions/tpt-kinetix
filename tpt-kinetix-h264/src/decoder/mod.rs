@@ -115,6 +115,40 @@ struct PictureAccumulator {
     /// Owning-slice index per macroblock; `u16::MAX` sentinel for "not yet
     /// decoded this picture" (see `NeighbourCtx::new_with_slices`).
     slice_id_grid: Vec<u16>,
+    /// CABAC inter-prediction context grid (ref_idx/mvd/cbp neighbour state),
+    /// only meaningfully populated for a P-slice accumulator; unused (stays
+    /// at its default) for an intra-only (I/Si) one.
+    inter_ctx: Vec<crate::slice_data::MbInterCabacCtx>,
+    /// Incrementally-built reconstruction buffer for a P-slice accumulator:
+    /// each slice's own macroblock range is motion-compensated and written in
+    /// directly as that slice is decoded (see
+    /// `H264Decoder::try_decode_real_p_slice_cabac`), since inter
+    /// reconstruction only reads DPB reference pictures, never sibling
+    /// macroblocks of the current picture, so it never needs to wait for
+    /// later slices. `None` for an intra-only (I/Si) accumulator, which
+    /// `finalize_picture` reconstructs whole via `reconstruct_intra_frame`
+    /// exactly as before.
+    recon: Option<crate::reconstruct::ReconstructedFrame>,
+    /// Per-macroblock: whether `recon` already holds this macroblock's real
+    /// pixel data (set for every index a P-type slice's own range covered).
+    /// A picture may legally mix I-type and P-type slices (§7.4.3; e.g. ITU's
+    /// `CABAST3_Sony_E`) -- `finalize_picture` uses this to run the intra
+    /// reconstruction follow-up pass only over macroblocks an I-type slice
+    /// wrote but no P-type slice's incremental reconstruction ever touched.
+    reconstructed: Vec<bool>,
+    /// Motion-vector grid accumulated across a P-slice accumulator's slices,
+    /// one [`crate::mv::predict_slice_mvs_ex`] call per slice scoped to that
+    /// slice's own macroblock range (with that slice's own numeric id) --
+    /// correct per §6.4.9/§8.4.1.3.2 because [`crate::mv::MvStore`]'s
+    /// neighbour-availability check already gates on `slice_id` equality, so
+    /// a neighbour committed by an earlier, different-numbered slice is
+    /// correctly treated as unavailable. `None` for an intra-only picture.
+    mv_store: Option<crate::mv::MvStore>,
+    /// RefPicList0 POCs used to decode this picture's P slices, captured so
+    /// `finalize_picture` can pass them on to `store_reference_picture` for
+    /// later B slices' temporal direct-mode `col_zero_flag` lookups (§8.4.1.2.3).
+    /// Empty for an intra-only picture.
+    list0_poc: Vec<i64>,
     /// `DeblockParams` for each slice, indexed by slice id (slice ids are
     /// assigned sequentially starting at 0 as slices arrive).
     deblock_params_per_slice: Vec<crate::deblock::DeblockParams>,
@@ -174,6 +208,11 @@ impl PictureAccumulator {
             pred_ctx: vec![crate::slice_data::MbPredCtx::default(); total],
             cabac_ctx: vec![crate::slice_data::MbCabacCtx::default(); total],
             slice_id_grid: vec![u16::MAX; total],
+            inter_ctx: vec![crate::slice_data::MbInterCabacCtx::default(); total],
+            recon: None,
+            reconstructed: vec![false; total],
+            mv_store: None,
+            list0_poc: Vec::new(),
             deblock_params_per_slice: Vec::new(),
             next_slice_id: 0,
             mb_cols,
@@ -852,6 +891,10 @@ impl H264Decoder {
             macroblocks,
             nz,
             slice_id_grid,
+            recon: prebuilt_recon,
+            reconstructed,
+            mv_store,
+            list0_poc,
             deblock_params_per_slice,
             mb_cols,
             mb_rows,
@@ -878,19 +921,47 @@ impl H264Decoder {
             ..
         } = acc;
 
-        let mut recon = crate::reconstruct::reconstruct_intra_frame(
-            &macroblocks,
-            mb_cols,
-            mb_rows,
-            coded_width,
-            coded_height,
-            false,
-            chroma_qp_index_offset,
-            &scaling,
-            &crate::reconstruct::WeightedPred::Default,
-            tracer,
-            Some(&slice_id_grid),
-        );
+        // A P-slice accumulator already built `recon` incrementally, slice by
+        // slice, as each slice's own macroblock range was motion-compensated
+        // (`try_decode_real_p_slice_cabac`); an intra-only (I/Si) accumulator
+        // still needs the whole-picture intra reconstruction pass here
+        // (kept as its own unchanged call so that already-verified path stays
+        // byte-for-byte identical). A picture may legally mix I-type and
+        // P-type slices (§7.4.3; e.g. ITU's `CABAST3_Sony_E`/
+        // `CABASTBR3_Sony_B`), so even when a P slice DID build `recon`,
+        // `reconstructed` may still have `false` entries for macroblocks an
+        // I-type slice wrote but no P-type slice's range ever covered --
+        // `reconstruct_intra_mbs_remaining` fills exactly those in.
+        let had_p_recon = prebuilt_recon.is_some();
+        let mut recon = match prebuilt_recon {
+            Some(r) => r,
+            None => crate::reconstruct::reconstruct_intra_frame(
+                &macroblocks,
+                mb_cols,
+                mb_rows,
+                coded_width,
+                coded_height,
+                false,
+                chroma_qp_index_offset,
+                &scaling,
+                &crate::reconstruct::WeightedPred::Default,
+                tracer,
+                Some(&slice_id_grid),
+            ),
+        };
+        if had_p_recon && reconstructed.iter().any(|&done| !done) {
+            crate::reconstruct::reconstruct_intra_mbs_remaining(
+                &mut recon,
+                &macroblocks,
+                mb_cols,
+                chroma_qp_index_offset,
+                &scaling,
+                &crate::reconstruct::WeightedPred::Default,
+                tracer,
+                &slice_id_grid,
+                &reconstructed,
+            );
+        }
 
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = macroblocks
             .chunks(mb_cols as usize)
@@ -911,16 +982,19 @@ impl H264Decoder {
                             .get(sid as usize)
                             .copied()
                             .unwrap_or_default();
+                        // A P-slice accumulator's `mv_store` carries real
+                        // motion for deblocking's MV-based boundary-strength
+                        // derivation (§8.7.2.1); an intra-only picture has no
+                        // motion at all.
+                        let cells = mv_store
+                            .as_ref()
+                            .and_then(|s| s.cells_of(idx))
+                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
                         crate::deblock::DeblockMbInfo {
                             transform_8x8: mb.transform_size_8x8,
                             slice_id: sid,
                             params,
-                            ..crate::deblock::DeblockMbInfo::new(
-                                mb.mb_type,
-                                mb_nz,
-                                [crate::mv::MvCell::INTRA; 16],
-                                mb.qp,
-                            )
+                            ..crate::deblock::DeblockMbInfo::new(mb.mb_type, mb_nz, cells, mb.qp)
                         }
                     })
                     .collect()
@@ -1024,14 +1098,19 @@ impl H264Decoder {
             data_bit_offset: 0,
             pred_weight_table: None,
         };
+        // A P-slice accumulator carries real motion (`mv_store`) that later B
+        // slices' direct mode needs; an intra-only picture has none.
+        let mv_grid = mv_store
+            .as_ref()
+            .map(|s| std::sync::Arc::new(s.to_grid_vec()));
         self.store_reference_picture(
             &synth_nal,
             &sps,
             &synth_header,
             &frame,
-            None,
+            mv_grid,
             mc_frame,
-            Vec::new(),
+            list0_poc,
             Vec::new(),
         );
 
@@ -1125,8 +1204,14 @@ impl H264Decoder {
                 header.first_mb_in_slice, header.frame_num, header.slice_type
             );
         }
-        // Only fully-intra slices are handled by this path.
-        if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
+        // Fully-intra slices are always handled by this path; a P slice is
+        // handled too, but only when CABAC-coded (`is_p_slice &&
+        // entropy_coding_mode_flag` below) -- CAVLC P and every B slice still
+        // fall through to `decode_slice`'s existing (single-slice) paths.
+        let is_p_slice = header.slice_type == SliceType::P;
+        if !matches!(header.slice_type, SliceType::I | SliceType::Si)
+            && !(is_p_slice && entropy_coding_mode_flag)
+        {
             return Ok(None);
         }
 
@@ -1162,6 +1247,30 @@ impl H264Decoder {
             // `total_mbs`) defers.
             reader.byte_align();
             let cabac_data = reader.remaining_bytes();
+
+            if is_p_slice {
+                return self.try_decode_real_p_slice_cabac(
+                    nal,
+                    sps,
+                    pps,
+                    &header,
+                    cabac_data,
+                    mb_cols,
+                    mb_rows,
+                    coded_width,
+                    coded_height,
+                    width,
+                    height,
+                    total_mbs,
+                    slice_qp,
+                    chroma_qp_index_offset,
+                    transform_8x8_mode_flag,
+                    scaling.clone(),
+                    packet,
+                    tracer,
+                );
+            }
+
             let is_continuation = header.first_mb_in_slice != 0;
             let pps_id_val = header.pic_parameter_set_id;
             // A previous picture finalized here (the safety-net paths below)
@@ -1449,6 +1558,283 @@ impl H264Decoder {
         );
 
         Ok(Some(frame))
+    }
+
+    /// Multi-slice-capable CABAC P-slice path, mirroring
+    /// `try_decode_real_slice`'s I-slice accumulator handling but with
+    /// *incremental* reconstruction: each slice's own RefPicList0 and
+    /// weighted-prediction configuration are built from the DPB immediately
+    /// (§8.2.4/§8.4.2.3) and that slice's own macroblock range is
+    /// motion-compensated straight into the picture's shared reconstruction
+    /// buffer as soon as it is parsed -- unlike intra prediction, motion
+    /// compensation only ever reads DPB reference pictures, never sibling
+    /// macroblocks of the current picture, so it never needs to wait for
+    /// later slices to arrive. Only deblocking, cropping, emission, and
+    /// `store_reference_picture` are deferred to `finalize_picture`, exactly
+    /// as for the I-slice accumulator.
+    ///
+    /// Progressive (non-MBAFF) only: `try_decode_real_slice`'s caller already
+    /// excludes interlaced streams (`!sps.frame_mbs_only_flag`) before this is
+    /// reached.
+    #[allow(clippy::too_many_arguments)]
+    fn try_decode_real_p_slice_cabac<T: DecodeTracer>(
+        &mut self,
+        nal: &crate::nal::NalUnit,
+        sps: &SeqParameterSet,
+        pps: Option<&PicParameterSet>,
+        header: &crate::slice::SliceHeader,
+        cabac_data: &[u8],
+        mb_cols: u32,
+        mb_rows: u32,
+        coded_width: u32,
+        coded_height: u32,
+        width: u32,
+        height: u32,
+        total_mbs: usize,
+        slice_qp: i32,
+        chroma_qp_index_offset: i32,
+        transform_8x8_mode_flag: bool,
+        scaling: crate::transform::ScalingLists,
+        packet: &Packet,
+        tracer: &mut T,
+    ) -> Result<Option<VideoFrame>, KinetixError> {
+        let is_continuation = header.first_mb_in_slice != 0;
+        let pps_id_val = header.pic_parameter_set_id;
+        // A previous picture finalized here (the safety-net paths below)
+        // rather than by its own last slice reaching `total_mbs` — queued so
+        // it isn't lost, since this call can return only one frame. Mirrors
+        // the identical pattern in `try_decode_real_slice`'s I-slice path.
+        let mut extra_frame: Option<VideoFrame> = None;
+
+        if !is_continuation {
+            if let Some(prev) = self.pending_picture.take() {
+                extra_frame = Some(self.finalize_picture(prev, tracer)?);
+            }
+            let is_idr_new = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let poc_new = self.display_poc(sps, header, nal);
+            self.pending_picture = Some(PictureAccumulator::new(
+                mb_cols,
+                mb_rows,
+                coded_width,
+                coded_height,
+                width,
+                height,
+                chroma_qp_index_offset,
+                scaling,
+                sps.clone(),
+                pps_id_val,
+                nal,
+                header,
+                is_idr_new,
+                poc_new,
+                packet.pts,
+                packet.dts,
+            ));
+        } else {
+            let matches_pending = self.pending_picture.as_ref().is_some_and(|acc| {
+                acc.matches(
+                    header.frame_num,
+                    pps_id_val,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    nal.nal_ref_idc,
+                )
+            });
+            if !matches_pending {
+                // Corruption safety net (§7.4.1.2.4), identical to the
+                // I-slice path: this continuation doesn't belong to any
+                // picture we're tracking. Finalize whatever WAS pending and
+                // drop this stray slice.
+                if let Some(prev) = self.pending_picture.take() {
+                    let f = self.finalize_picture(prev, tracer)?;
+                    self.frame_queue.push_back(f);
+                }
+                self.suppress_frame = true;
+                return Ok(None);
+            }
+        }
+
+        // Build this slice's own RefPicList0 + weighted-pred config from the
+        // DPB (§8.2.4/§8.4.2.3) -- identical to `decode_slice`'s single-slice
+        // CABAC P path, just scoped to THIS slice rather than assumed to
+        // cover the whole picture.
+        let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+        let pic_num_ctx = crate::ref_pic::PicNumContext::new(
+            sps,
+            header.frame_num,
+            header.field_pic_flag,
+            header.bottom_field_flag,
+        );
+        let Some(ref_list) = crate::ref_pic::build_ref_list_l0(
+            &self.dpb,
+            num_ref_idx_l0_active as usize,
+            pic_num_ctx,
+            &header.ref_pic_list_modification_l0,
+        ) else {
+            // No usable reference: this slice can't be safely decoded by
+            // this path. Drop the in-progress picture rather than risk an
+            // inconsistent accumulator, and let this NAL fall through to
+            // `decode_slice`'s pre-existing fallback (same outcome as before
+            // this multi-slice path existed).
+            self.pending_picture = None;
+            if let Some(ef) = extra_frame {
+                return Ok(Some(ef));
+            }
+            return Ok(None);
+        };
+        crate::ref_pic::trace_ref_list("P L0 (multi-slice)", &ref_list, pic_num_ctx);
+        let ref_frames: Vec<VideoFrame> = ref_list
+            .iter()
+            .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+            .collect();
+        let list0_poc: Vec<i64> = ref_list.iter().map(|e| e.pic_order_cnt).collect();
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("just created or matched above");
+        let slice_id = acc.next_slice_id;
+        acc.next_slice_id += 1;
+        acc.deblock_params_per_slice
+            .push(crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            });
+
+        let end_mb = match crate::slice_data::parse_p_slice_cabac_range(
+            cabac_data,
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            header.cabac_init_idc as usize,
+            num_ref_idx_l0_active,
+            chroma_qp_index_offset,
+            transform_8x8_mode_flag,
+            sps.direct_8x8_inference_flag,
+            tracer,
+            header.first_mb_in_slice,
+            slice_id,
+            &mut acc.macroblocks,
+            &mut acc.nz,
+            &mut acc.pred_ctx,
+            &mut acc.cabac_ctx,
+            &mut acc.inter_ctx,
+            &mut acc.slice_id_grid,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = e;
+                // A parse failure mid-picture leaves the accumulator in an
+                // unusable state; drop the whole in-progress picture rather
+                // than risk emitting a garbage frame later.
+                self.pending_picture = None;
+                if let Some(ef) = extra_frame {
+                    return Ok(Some(ef));
+                }
+                return Ok(None);
+            }
+        };
+
+        // MV prediction (§8.4.1.3), scoped to THIS slice's own macroblock
+        // range: `MvStore::is_available` gates neighbour availability on
+        // `slice_id` equality, so a neighbour committed by an earlier,
+        // different-numbered slice is correctly treated as unavailable
+        // (§6.4.9) even though it was already decoded -- this makes it safe
+        // to run once per slice (immediately, so this slice's motion is
+        // ready for reconstruction below) rather than deferring to
+        // `finalize_picture`.
+        let first_mb_usize = header.first_mb_in_slice as usize;
+        let mv_store = acc
+            .mv_store
+            .get_or_insert_with(|| crate::mv::MvStore::new(total_mbs));
+        if let Err(e) = crate::mv::predict_slice_mvs_ex(
+            mv_store,
+            mb_cols,
+            slice_id as u32,
+            header.first_mb_in_slice,
+            &acc.macroblocks[first_mb_usize..end_mb],
+            false,
+        ) {
+            let _ = e;
+            self.pending_picture = None;
+            if let Some(ef) = extra_frame {
+                return Ok(Some(ef));
+            }
+            return Ok(None);
+        }
+
+        // Explicit weighted prediction (§8.4.2.3.2): only P/SP slices with
+        // `weighted_pred_flag` carry a `pred_weight_table`; P-slices never
+        // use implicit weighting (that's a B-slice-only, bi-pred concept).
+        let weighted_pred = match (
+            pps.map(|p| p.weighted_pred_flag).unwrap_or(false),
+            &header.pred_weight_table,
+        ) {
+            (true, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                luma_log2_wd: pwt.luma_log2_weight_denom,
+                chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                l0: pwt.l0.clone(),
+                l1: Vec::new(),
+            },
+            _ => crate::reconstruct::WeightedPred::Default,
+        };
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("still pending: just decoded into it");
+        let luma_stride = coded_width as usize;
+        let chroma_stride = (coded_width / 2) as usize;
+        let recon_buf = acc
+            .recon
+            .get_or_insert_with(|| crate::reconstruct::ReconstructedFrame {
+                luma: vec![0u8; luma_stride * coded_height as usize],
+                chroma_cb: vec![0u8; chroma_stride * (coded_height as usize / 2)],
+                chroma_cr: vec![0u8; chroma_stride * (coded_height as usize / 2)],
+                luma_stride,
+                chroma_stride,
+            });
+        crate::reconstruct::reconstruct_inter_frame_range(
+            recon_buf,
+            &acc.macroblocks,
+            acc.mv_store.as_ref().expect("just populated above"),
+            &ref_frames,
+            mb_cols,
+            first_mb_usize,
+            end_mb,
+            chroma_qp_index_offset,
+            &acc.scaling,
+            &weighted_pred,
+            tracer,
+            &acc.slice_id_grid,
+        );
+        for done in &mut acc.reconstructed[first_mb_usize..end_mb] {
+            *done = true;
+        }
+        acc.list0_poc = list0_poc;
+
+        let complete = end_mb >= total_mbs;
+        if complete {
+            let acc = self.pending_picture.take().unwrap();
+            let (poc, is_idr) = (acc.poc, acc.is_idr);
+            let frame = self.finalize_picture(acc, tracer)?;
+            self.pending_poc = poc;
+            self.pending_is_idr = is_idr;
+            if let Some(ef) = extra_frame {
+                self.frame_queue.push_back(frame);
+                return Ok(Some(ef));
+            }
+            return Ok(Some(frame));
+        }
+        self.suppress_frame = true;
+        if let Some(ef) = extra_frame {
+            self.frame_queue.push_back(ef);
+        }
+        Ok(None)
     }
 
     /// Run the decoded reference picture marking process (§8.2.5) for a

@@ -91,7 +91,7 @@ mod ctx;
 
 pub use cabac_b::parse_b_slice_cabac;
 pub use cabac_i::parse_i_slice_cabac;
-pub use cabac_p::parse_p_slice_cabac;
+pub use cabac_p::{parse_p_slice_cabac, parse_p_slice_cabac_range};
 pub use cavlc::{
     parse_b_slice, parse_cavlc_block, parse_i_slice, parse_p_slice, raster_of_8x8_sub,
 };

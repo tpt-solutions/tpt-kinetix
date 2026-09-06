@@ -2,6 +2,184 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32au — real multi-slice CABAC P-slice decode implemented (progressive only); CABAST3_Sony_E/CABASTBR3_Sony_B's non-B pictures now genuinely bit-exact, B-slice pictures remain the sole gap
+
+Executed SESSION #32at's own concrete plan (points 1-5) for CABAC P-slice
+multi-slice decode, mirroring `07b0471`'s I-slice accumulator shape. B-slices
+(`cabac_b.rs`) were explicitly NOT touched, per the task's own scope and
+#32at's own recommended ordering.
+
+**What was implemented:**
+
+1. **Gating fix**: `try_decode_real_slice` now routes CABAC P-slices (first
+   AND continuation) through a new `H264Decoder::try_decode_real_p_slice_cabac`
+   method, inserted before `decode_slice`'s blanket
+   `first_mb_in_slice != 0 → suppress_frame` guard — mirroring how CABAC-I
+   already routes around it. CAVLC P/B and every other continuation-slice
+   path is completely untouched (the new gate is
+   `is_p_slice && entropy_coding_mode_flag`, evaluated before the existing
+   `SliceType::I | Si` check, which stays as-is).
+2. **`inter_ctx: Vec<MbInterCabacCtx>`** in `cabac_p.rs` is now an
+   accumulator-owned `&mut [MbInterCabacCtx]` parameter. The old
+   `parse_p_slice_cabac(..)` public signature is preserved unchanged as a
+   thin wrapper (fresh buffers, `first_mb=0`, `slice_id=0`) over a new
+   `parse_p_slice_cabac_range(..)` that takes `first_mb`/`slice_id` plus all
+   five accumulator buffers (`macroblocks`/`nz`/`pred_ctx`/`cabac_ctx`/
+   `inter_ctx`/`slice_id_grid`), returning the exclusive upper bound of
+   macroblocks decoded — exactly `parse_i_slice_cabac`'s contract. This keeps
+   every existing caller (PAFF/MBAFF in `interlaced.rs`, the CAVLC-adjacent
+   oracle test in `entropy.rs`) byte-for-byte unchanged.
+3. **Slice-boundary neighbour availability** (§6.4.9) fixed at all 3 sites
+   #32at flagged in `cabac_p.rs`'s macroblock loop: `skip_neighbors`
+   (open-coded `slice_id_grid[idx] == cur_slice_id` checks, since
+   `MbSkipNeighbors` isn't `NeighbourCtx`-shaped), the MBAFF pair-field-flag
+   read, and `bot_left_skipped` — all audited even though MBAFF P multi-slice
+   has no known fixture (shared variable declarations). The one
+   `NeighbourCtx::new(...)` call site (feeding `parse_p_macroblock_cabac`,
+   which already routes ref_idx/mvd/cbp context through `NeighbourCtx`) was
+   swapped for `NeighbourCtx::new_with_slices(...)`, giving those internal
+   reads slice-awareness for free, per #32at's own analysis (confirmed
+   correct by reading `cabac_b.rs`'s `parse_p_macroblock_cabac` /
+   `parse_intra_mb_cabac_pb` end to end — neither has any raw grid-position
+   read outside `NeighbourCtx`).
+4. **MV prediction**: resolved #32at's open question ("verify
+   `predict_slice_mvs_ex`'s neighbour derivation for slice-boundary safety
+   before trusting it across a slice seam") by reading `mv.rs`'s `MvStore`:
+   `is_available(mb_idx, slice_id)` already gates on
+   `self.slice_ids[mb_idx] == slice_id`, so calling the EXISTING
+   `predict_slice_mvs_ex` once per slice — scoped to that slice's own
+   macroblock range (`&acc.macroblocks[first_mb..end_mb]`, `first_mb` as the
+   grid offset, that slice's own numeric id) — is already spec-correct: a
+   same-slice neighbour committed earlier is available, a different-slice
+   (or not-yet-decoded) one is not, regardless of decode order. No changes to
+   `mv.rs` were needed (an earlier attempt at a whole-picture
+   `predict_slice_mvs_multi` variant was written, then deleted once this was
+   confirmed — the existing function already generalizes correctly to a
+   slice-scoped call with a real per-slice id).
+5. **Reconstruction**: implemented the incremental per-slice-range strategy
+   #32at recommended. `reconstruct.rs` gained
+   `reconstruct_inter_frame_range` (motion-compensates one slice's own
+   `first_mb..end_mb` range into a caller-owned `ReconstructedFrame`, reusing
+   the existing `reconstruct_inter_luma`/`_chroma` and, for any intra
+   macroblock coded inside the P slice, the same slice-aware
+   `reconstruct_luma`/`_chroma` the I-slice path uses — confirming #32at's
+   audit question: `reconstruct_inter_frame_ex`'s intra-in-P branch already
+   routes through those slice-aware functions, just with `None` hardcoded,
+   so no separate intra-handling code existed to worry about).
+   `PictureAccumulator` gained `inter_ctx`, `recon: Option<ReconstructedFrame>`
+   (built lazily on first P slice, persisted across the picture's slices),
+   `mv_store: Option<MvStore>` (ditto), and `list0_poc` (for
+   `store_reference_picture`'s later B-slice direct-mode support).
+   `finalize_picture` now only reconstructs whole-picture-via-
+   `reconstruct_intra_frame` when NO P slice ever touched the picture
+   (`recon.is_none()`); deblock/crop/emit/`store_reference_picture` are
+   otherwise unchanged, using `mv_store.cells_of(idx)` (falling back to
+   `MvCell::INTRA`) for deblock's per-MB motion instead of the
+   hardcoded-INTRA array the I-only path used.
+
+**A real bug found and fixed that #32at's plan did not anticipate: mixed
+I-type/P-type slices within one picture.** §7.4.3 does not require every
+slice of a picture to share one `slice_type`, and ITU's `CABAST3_Sony_E`
+readme says exactly this ("Slice Types: IPB (multiple slice types per
+picture)") — confirmed by tracing actual per-slice types: the picture at
+POC 3 has slices `[I, P, I, P]`, not `[P, P, P, P]`. The first version of
+`finalize_picture`'s `recon.is_none()` branch assumed a picture is either
+*entirely* intra (reconstructed whole via `reconstruct_intra_frame`) or has
+*some* P content (in which case `recon` is `Some`, built incrementally) —
+but for a mixed picture, the I-type slices' macroblocks were parsed
+correctly into `acc.macroblocks` yet **never reconstructed at all**, since
+`recon.is_some()` skipped the whole-picture intra pass entirely, leaving
+those macroblocks' pixels at zero. Root-caused via a throwaway diffmap test
+(`dbg_cabast3_diffmap.rs`, deleted before commit) showing exact rows for
+P-slice territory and pure-black rows for I-slice territory within the same
+picture. Fixed by adding a `reconstructed: Vec<bool>` accumulator field
+(marked `true` for every index a P slice's incremental reconstruction
+range covered) and a new `reconstruct::reconstruct_intra_mbs_remaining`
+follow-up pass in `finalize_picture` that fills in exactly the indices still
+`false` — a no-op (skipped entirely) for a picture with no P slices at all,
+so the already-verified pure-I multi-slice path (`07b0471`) is untouched.
+
+**A second false lead worth recording for the next session**: the first
+diffmap attempt appeared to show total corruption for TWO of a picture's
+four slices and near-perfect reconstruction for the other two, which looked
+like a slice-range-boundary bug. It was actually display-order confusion —
+`.with_display_order()` reorders by POC, and the specific frame being
+diffed (display index 1) turned out to be a **B picture** (POC 1, frame_num
+3), completely unrelated to the P/I-mixed picture at POC 3 the fix was
+meant to verify. Correlating `VideoFrame::pts` (which threads the
+triggering NAL's original decode-order index all the way through
+`PictureAccumulator`) back to decode order was what unstuck this — worth
+remembering before trusting any per-frame diffmap on a stream with B
+pictures.
+
+**Verification** (master, this session, before → after):
+- Baseline (session start): `cargo test -p tpt-kinetix-h264 --lib --tests`:
+  66/66 binaries `test result: ok`, 269 lib unit tests, 0 failures.
+  `itu_conformance`: "64 clip(s) present, 12 hard-checked bit-exact, 0
+  failure(s)".
+- After implementation: identical — 66/66 binaries pass (269 lib unit
+  tests), `itu_conformance`: "64 clip(s) present, 12 hard-checked bit-exact,
+  0 failure(s)". Every one of the 12 hard-checked `Expect::BitExact`
+  fixtures (`BA1_Sony_D`, `BA2_Sony_F`, `CABA1_Sony_D`, `CABA2_Sony_E`,
+  `CANL1_Sony_E`, `CANL2_Sony_E`, `NL1_Sony_D`, `NL2_Sony_H`, `NL3_SVA_E`,
+  `SVA_NL2_E`, `CVPCMNL1_SVA_C`, `CVPCMNL2_SVA_C` — none of which are
+  multi-slice or P-heavy enough to exercise this session's new code path
+  much, but all confirmed byte-identical, zero regression) remain exact.
+  `cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` and
+  `cargo fmt --all --check` both clean.
+- Direct evidence the new P multi-slice path is genuinely correct: a
+  throwaway diffmap test decoding `CABAST3_Sony_E` (4 slices/picture, mixed
+  I/P/B slice types) in display order and comparing display index 3 (POC 3,
+  frame_num 1, slice types `[I, P, I, P]` — the first non-B picture after the
+  IDR) against the ITU reference YUV showed **zero differing bytes across
+  the whole frame** after the mixed-slice-type fix, versus near-total
+  corruption before it.
+- `itu_conformance.rs`'s own aggregate numbers for the three IPB targets
+  (informational, not hard-checked) improved measurably without any Expect
+  changes: `CABAST3_Sony_E` diff_bytes 2,432,934 → 606,800 (out of
+  3,801,600), exact-somewhere ref frames 2/25 → 9/25;
+  `CABASTBR3_Sony_B` diff_bytes 2,614,843 → 663,574, exact-somewhere 2/25 →
+  4/25. `CABACI3_Sony_B` was not independently re-measured this session
+  (verified via `CABAST3_Sony_E` instead, per the task's own guidance not to
+  expect it to flip since it needs B too) — a future session should re-check
+  it specifically.
+
+**None of the three target `Expect` entries were flipped to `BitExact`**:
+`CABACI3_Sony_B` and `CABAST3_Sony_E`/`CABASTBR3_Sony_B` are all confirmed
+IPB streams whose B pictures are still undecoded (temporal direct mode,
+unimplemented, same gap as `CABA3_Sony_C`) — exactly as the task brief
+anticipated ("CABACI3_Sony_B also needs B-slice support... don't expect it
+to flip this session"). Their `Expect::KnownGap`/`Expect::Limitation`
+description strings were updated to reflect the real current state (P now
+implemented; B is the sole remaining blocker) without changing the `Expect`
+variant itself, since the clips still fail hard byte-exact comparison
+overall.
+
+**No regression test added for the new P multi-slice path specifically**
+beyond the existing `itu_conformance.rs` machinery (which now genuinely
+exercises it end-to-end via `CABAST3_Sony_E`/`CABASTBR3_Sony_B`'s informational
+diff numbers, and would visibly regress if this broke) — the throwaway
+diffmap test that provided the strongest direct evidence was deleted before
+committing per the "don't leave debug scaffolding" norm; a future session
+wanting a permanent multi-slice-P regression test should look at how
+`07b0471`'s session built its CABAC-I multi-slice bitstream fixtures/oracle
+(check `tests/` for reusable generation helpers) and adapt for P.
+
+**Next step for a future session**: implement CABAC B-slice multi-slice
+decode (`cabac_b.rs`'s `parse_b_slice_cabac`), following the identical
+shape now proven out for P — `parse_b_slice_cabac_range` accumulator
+variant, slice-aware skip/field-flag neighbour fixes (per #32at's note,
+`cabac_b.rs` already has its own separate `inter_ctx` allocation and
+NeighbourCtx/skip/field-neighbour inline reads mirroring P's shape), and a
+`reconstruct_bi_frame_range`-equivalent incremental reconstruction (B needs
+both L0 and L1 reference lists plus implicit/explicit bi-pred weighting
+threaded per-slice, and B's own MV-store scoping needs the same
+`predict_b_slice_mvs`-per-slice-range treatment this session used for P).
+Once that lands, re-run `CABACI3_Sony_B`/`CABAST3_Sony_E`/`CABASTBR3_Sony_B`
+end to end — with both P and B multi-slice real, all three should have a
+real shot at flipping to `Expect::BitExact` (mixed-slice-type pictures using
+I/P/B in any combination are now uniformly handled by the accumulator).
+
 ## SESSION #32at — multi-slice CABAC P/B scoping session: baseline re-confirmed, concrete blockers mapped, no code changed (deliberately deferred, not attempted half-done)
 
 Read `07b0471`/`4a83773`/`ed9ff77` in full plus SESSION #32aq/#32ar/#32as, then read
