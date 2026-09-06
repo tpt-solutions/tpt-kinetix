@@ -967,10 +967,6 @@ fn cdef_direction(
 }
 
 /// Apply the CDEF filter to a single 8×8 (luma) or 4×4 (chroma) block.
-///
-/// `pri_str_orig` is the original bitstream primary strength (for tap selection
-/// per spec §7.15.3 `Cdef_Pri_Taps[1 & (priStrength >> coeff_shift)]`).
-/// `pri_str` is the variance-adjusted strength used for the actual filter.
 #[allow(clippy::too_many_arguments)]
 fn cdef_filter_block(
     dst: &mut [u8],
@@ -983,14 +979,13 @@ fn cdef_filter_block(
     h: usize,
     _sub_x: usize,
     _sub_y: usize,
-    pri_str_orig: i32,
     pri_str: i32,
     sec_str: i32,
     damping: i32,
     dir: usize,
 ) {
     let coeff_shift = 0; // 8-bit
-    let taps = (pri_str_orig >> coeff_shift) & 1;
+    let taps = (pri_str >> coeff_shift) & 1;
     for i in 0..h {
         for j in 0..w {
             let x = src[(y0 + i) * src_stride + (x0 + j)] as i32;
@@ -1678,7 +1673,6 @@ fn cdef_plane_luma(
                 8.min(height - y0),
                 0,
                 0,
-                pri_str,
                 p,
                 sec_str,
                 damping,
@@ -1763,7 +1757,6 @@ fn cdef_plane_chroma(
                 h_block.min(height - y0),
                 sub_x,
                 sub_y,
-                pri_str,
                 p,
                 sec_str,
                 damping,
