@@ -89,7 +89,7 @@ mod cabac_p;
 mod cavlc;
 mod ctx;
 
-pub use cabac_b::parse_b_slice_cabac;
+pub use cabac_b::{parse_b_slice_cabac, parse_b_slice_cabac_range};
 pub use cabac_i::parse_i_slice_cabac;
 pub use cabac_p::{parse_p_slice_cabac, parse_p_slice_cabac_range};
 pub use cavlc::{

@@ -1717,6 +1717,140 @@ pub(crate) fn reconstruct_inter_frame_range<T: DecodeTracer>(
     }
 }
 
+/// Reconstruct a **contiguous raster-order range** of a B-slice's
+/// macroblocks (`first_mb..end_mb`) directly into an already-allocated
+/// [`ReconstructedFrame`], mirroring [`reconstruct_inter_frame_range`]'s
+/// per-slice-range strategy but for bi-predictive (L0+L1) motion
+/// compensation.
+///
+/// Used by the multi-slice CABAC B-slice accumulator
+/// (`decoder::mod::PictureAccumulator`): each slice's own RefPicList0/
+/// RefPicList1 and weighted-prediction configuration only apply to that
+/// slice's own macroblock range, so -- exactly as for P -- inter
+/// reconstruction can run immediately as each slice's macroblocks become
+/// available, since motion compensation only ever reads from DPB reference
+/// pictures, never from sibling macroblocks of the current picture.
+///
+/// Progressive (non-MBAFF) only -- MBAFF B multi-slice is out of scope and
+/// continues to go through [`reconstruct_b_frame`]'s single-call,
+/// full-picture path unmodified.
+///
+/// The inter/intra classification mirrors `reconstruct_b_frame`'s exactly
+/// (`mb.motion.is_some() || mb.skip || <any B inter mb_type>`), since
+/// `B_Direct_16x16`/`B_Skip` carry real (derived) motion despite having no
+/// parsed `motion` field.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconstruct_bi_frame_range<T: DecodeTracer>(
+    recon: &mut ReconstructedFrame,
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_frames_l0: &[VideoFrame],
+    ref_frames_l1: &[VideoFrame],
+    mb_cols: u32,
+    first_mb: usize,
+    end_mb: usize,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+    slice_id_grid: &[u16],
+) {
+    for idx in first_mb..end_mb {
+        let mb_x = (idx as u32) % mb_cols;
+        let mb_y = (idx as u32) / mb_cols;
+        let mb = &macroblocks[idx];
+        let is_inter = mb.motion.is_some()
+            || mb.skip
+            || matches!(
+                mb.mb_type,
+                MbType::BSkip
+                    | MbType::BDirect16x16
+                    | MbType::BL016x16
+                    | MbType::BL116x16
+                    | MbType::BBi16x16
+                    | MbType::B16x8
+                    | MbType::B8x16
+                    | MbType::BB8x8
+            );
+        if is_inter {
+            reconstruct_b_inter_luma(
+                mb,
+                mv_store,
+                ref_frames_l0,
+                ref_frames_l1,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                scaling,
+                weighted,
+                tracer,
+            );
+            reconstruct_b_inter_chroma(
+                mb,
+                mv_store,
+                ref_frames_l0,
+                ref_frames_l1,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+            );
+        } else {
+            // Intra macroblock coded inside this B slice: same slice-aware
+            // `SliceAvail` treatment as `reconstruct_inter_frame_range`'s
+            // equivalent branch (unlike `reconstruct_b_frame`'s equivalent
+            // branch, which always passes `None` since it has no
+            // multi-slice caller).
+            let cur_slice_id = slice_id_grid[idx];
+            let luma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id,
+                mb_size: 16,
+            });
+            let chroma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id,
+                mb_size: 8,
+            });
+            reconstruct_luma(
+                mb,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_x,
+                mb_y,
+                false,
+                scaling,
+                tracer,
+                luma_avail,
+            );
+            reconstruct_chroma(
+                mb,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_x,
+                mb_y,
+                false,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+                chroma_avail,
+            );
+        }
+    }
+}
+
 /// MBAFF field-macroblock luma inter reconstruction inside a *frame* picture
 /// (§8.4.2.2.1). Motion compensation runs in field coordinates against the
 /// contiguous half-height parity plane of the reference; each predicted /

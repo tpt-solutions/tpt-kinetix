@@ -2,6 +2,145 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32av — real multi-slice CABAC B-slice decode implemented (progressive only); CABAST3_Sony_E/CABASTBR3_Sony_B/CABACI3_Sony_B diff_bytes drop by 99%+ but a small residual (~0.02-1%) diff remains, not yet root-caused
+
+Executed SESSION #32au's own concrete plan for CABAC B-slice multi-slice
+decode, mirroring `b299291`'s P-slice accumulator shape exactly.
+
+**What was implemented:**
+
+1. **Gating**: `try_decode_real_slice` now routes CABAC B-slices (first AND
+   continuation) through a new `H264Decoder::try_decode_real_b_slice_cabac`,
+   inserted the same way `try_decode_real_p_slice_cabac` was — the gate is
+   `(is_p_slice || is_b_slice) && entropy_coding_mode_flag`. CAVLC B and every
+   other continuation-slice path is untouched. Note this means EVERY CABAC B
+   slice (including previously-working single-slice streams) now goes through
+   the new accumulator path, not just genuinely multi-slice ones — verified
+   safe (see Verification below): `conformance_matrix`'s `cabac_b` case and
+   `cabac_conformance`/`b_frame_conformance`'s CABAC B tests are still
+   bit-exact through the new path.
+2. **`cabac_b.rs`**: `parse_b_slice_cabac_range` is the new multi-slice entry
+   point (first_mb/slice_id + accumulator buffers: macroblocks/nz/pred_ctx/
+   cabac_ctx/inter_ctx/slice_id_grid), mirroring `parse_p_slice_cabac_range`'s
+   contract exactly. The old `parse_b_slice_cabac` becomes a thin
+   single-call wrapper (fresh buffers, `first_mb=0`, `slice_id=0`, runs
+   `predict_b_slice_mvs` once over the whole picture) so every existing
+   caller (PAFF/MBAFF in `interlaced.rs`) is unaffected. Fixed the same three
+   slice-boundary neighbour derivations P needed (`skip_neighbors`, MBAFF
+   pair-field-flag read, `bot_left_skipped`) plus a fourth B-specific one:
+   `non_direct_neighbours` (ctxIdxInc for the B `mb_type` first bin, Table
+   9-39) now also gates on `slice_id_grid[i] == slice_id` — a different-slice
+   neighbour must count as absent, exactly like an off-picture one. Swapped
+   `NeighbourCtx::new` for `new_with_slices` for the same reason P did.
+3. **MV prediction, including direct mode**: audited `mv.rs` before changing
+   anything, per the task's own instruction not to assume. `predict_b_slice_mvs`
+   already takes `first_mb`/`slice_id`/a macroblock slice — it was ALREADY
+   shaped for per-slice-range scoping (unlike P, no new function was needed).
+   `apply_spatial_direct`/`derive_spatial_direct` (spatial direct's neighbour
+   derivation, §8.4.1.2.2) route through the same `neighbor_left`/
+   `neighbor_above`/`neighbor_above_right`/`neighbor_above_left` (and `_l1`)
+   helpers as ordinary MV prediction, all gated on `MvStore::is_available`'s
+   existing `slice_ids[mb_idx] == slice_id` check — confirmed by reading, not
+   assumed, that no separate/unguarded neighbour read exists for direct mode.
+   No changes to `mv.rs` were needed.
+4. **Reconstruction**: `reconstruct.rs` gained `reconstruct_bi_frame_range`,
+   mirroring `reconstruct_inter_frame_range` but calling
+   `reconstruct_b_inter_luma`/`_chroma` for inter MBs (classified identically
+   to `reconstruct_b_frame`'s existing `is_inter` check — `mb.motion.is_some()
+   || mb.skip || <any B inter mb_type>`, since `B_Direct_16x16`/`B_Skip` carry
+   real motion despite no parsed `motion` field) and the same slice-aware
+   `SliceAvail`-gated intra path P's range function uses for any intra MB
+   coded inside a B slice.
+5. **`PictureAccumulator`**: gained `list1_poc: Vec<i64>` (list0_poc is
+   reused as-is, already generic across P/B). `finalize_picture` now threads
+   `list1_poc` through to `store_reference_picture` instead of the old
+   hardcoded `Vec::new()` — needed so a LATER B picture's temporal-direct
+   `col_zero_flag` lookup against a multi-slice B reference picture has real
+   data (P pictures still produce an empty `list1_poc`, correctly). Weighted
+   bi-prediction (Explicit/Implicit per `weighted_bipred_idc`) and ref-list
+   building (`build_ref_list_l0_b_slice`/`build_ref_list_l1`,
+   colocated-picture lookup, `TemporalDirectCtx`) are built per-slice from
+   that slice's own header, mirroring `decode_slice`'s existing single-slice
+   B path line for line, just scoped to the current slice's macroblock range
+   for MV prediction/reconstruction rather than the whole picture.
+6. Confirmed the **mixed I/P/B slice-type bug class** from #32au needs no
+   further changes: B's incremental reconstruction marks the same
+   `reconstructed: Vec<bool>` bitmap P uses, so `reconstruct_intra_mbs_remaining`
+   still correctly fills in whatever no slice of any type covered, for a
+   picture mixing any combination of I/P/B slice types.
+
+**Verification** (master, this session, before → after):
+- Baseline: `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test
+  binaries `test result: ok`. `itu_conformance`: "64 clip(s) present, 12
+  hard-checked bit-exact, 0 failure(s)".
+- After implementation: identical — 66/66 binaries pass, `itu_conformance`
+  still "12 hard-checked bit-exact, 0 failure(s)" (no regression on any
+  currently-`BitExact` fixture). `just fmt-check`/`just clippy`/`just build`
+  all clean; `just test` (full workspace) run at session end (see report).
+- Every existing B-slice-specific conformance test remains bit-exact through
+  the NEW code path (important since the gating change routes ALL CABAC B
+  slices through it now, not just multi-slice ones):
+  `cabac_conformance::cabac_bframe_{no_,with_}deblock_is_bitexact`,
+  `b_frame_conformance` (CAVLC, unaffected — different gate), and
+  `conformance_matrix`'s `cabac_b` (deblock on/off) cases.
+- The three target fixtures' `itu_conformance` informational numbers, before
+  (#32au's session end) → after this session:
+  - `CABACI3_Sony_B`: diff_bytes 7,425,535 → 104,532 (out of 11,404,800;
+    max_diff 125 → 121)
+  - `CABAST3_Sony_E`: diff_bytes 606,800 → 595 (out of 3,801,600; max_diff
+    255 → 3)
+  - `CABASTBR3_Sony_B`: diff_bytes 663,574 → 1,917 (out of 3,801,600;
+    max_diff 255 → 13)
+
+  None of the three reach full byte-exact, so **no `Expect` entry was
+  flipped** — all three stay `KnownGap`/`Limitation` as before, per the
+  task's own explicit instruction to only promote on a genuine, individually
+  confirmed clean result.
+
+**Residual gap, investigated but not root-caused**: a throwaway per-pixel
+diffmap test (`dbg_bslice_diffmap.rs`, deleted before commit, not part of
+this diff) against `CABAST3_Sony_E` display frames 1/2/4/5 (all B pictures;
+frames 0/3, the I/P pictures, are fully exact) shows all diffs of magnitude
+1-3, in small scattered clusters, concentrated at luma rows y=142-145 (the
+MB-row-8/9 boundary — coincidentally exactly a slice boundary here, since
+396 total MBs / 4 slices / 22 MB per row places one slice cut exactly at MB
+address 198 = row 9 start) plus a few other isolated MB columns. Two
+candidate theories were considered and both look unlikely on the evidence
+gathered so far:
+- **Direct-mode slice-boundary gating**: ruled out — the clip's own readme
+  says `Direct Prediction: None` (the encoder never emits `B_Skip`/
+  `B_Direct_16x16` at all), so `apply_spatial_direct`'s neighbour derivation
+  (the one B-specific code path P never exercised) is never invoked by this
+  stream.
+- **A generic pre-existing CABAC-B bug, not multi-slice-specific**: also
+  looks unlikely, since **no CABAC B fixture in the manifest was ever
+  previously marked `BitExact`** (the only prior CABAC-B-adjacent entries,
+  `CANL3_Sony_C`/`CVBS3_Sony_C`, use temporal direct mode, which is a
+  separate known-unimplemented gap) — so this session cannot cite a clean
+  single-slice CABAC-B precedent to compare against from the ITU corpus.
+  However every SYNTHETIC single-slice CABAC B conformance test
+  (`cabac_conformance`, `conformance_matrix`'s `cabac_b`) IS bit-exact
+  through the same new code path, for both deblock on/off — which argues
+  against a generic (non-slice-boundary) bug, since those tests exercise real
+  bi-pred + deblock, just on trivially small (4608-sample) synthetic content.
+
+  The diff's clustering near a slice-boundary row is suggestive but
+  inconclusive (only ONE of the stream's three slice-boundary rows shows a
+  clean full-row artifact; the other two fall mid-row per the uneven
+  99-MB-per-slice split and were not individually inspected this session).
+  `CABASTBR3_Sony_B`'s own readme should be checked for `Number Reference
+  Frames: 1` conditions coinciding with the diff pattern; not done this
+  session. **Next step for a future session**: bisect with a per-slice
+  KINETIX_BINTRACE-style dump comparing MB(1,8)/(1,9)/(11,8) motion+residual
+  between this decoder and a real ffmpeg trace, the same bin-level-oracle
+  method used to close prior CABAC B_8x8/mvd-ordering bugs — the tiny (1-3)
+  magnitude and the fact it reproduces identically across many different B
+  pictures at the same MB coordinates suggests a single deterministic cause
+  (e.g. a boundary-strength/reference-identity edge case in deblocking
+  specific to `NumberReferenceFrames: 1` bi-directional blocks, or a residual
+  dequant rounding difference) rather than an entropy desync (which would
+  cascade far more than 1-3 LSBs).
+
 ## SESSION #32au — real multi-slice CABAC P-slice decode implemented (progressive only); CABAST3_Sony_E/CABASTBR3_Sony_B's non-B pictures now genuinely bit-exact, B-slice pictures remain the sole gap
 
 Executed SESSION #32at's own concrete plan (points 1-5) for CABAC P-slice

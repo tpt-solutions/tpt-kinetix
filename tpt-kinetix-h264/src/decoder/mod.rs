@@ -144,11 +144,14 @@ struct PictureAccumulator {
     /// a neighbour committed by an earlier, different-numbered slice is
     /// correctly treated as unavailable. `None` for an intra-only picture.
     mv_store: Option<crate::mv::MvStore>,
-    /// RefPicList0 POCs used to decode this picture's P slices, captured so
+    /// RefPicList0 POCs used to decode this picture's P/B slices, captured so
     /// `finalize_picture` can pass them on to `store_reference_picture` for
     /// later B slices' temporal direct-mode `col_zero_flag` lookups (§8.4.1.2.3).
     /// Empty for an intra-only picture.
     list0_poc: Vec<i64>,
+    /// RefPicList1 POCs used to decode this picture's B slices (§8.4.1.2.3);
+    /// empty for a picture with no B slices.
+    list1_poc: Vec<i64>,
     /// `DeblockParams` for each slice, indexed by slice id (slice ids are
     /// assigned sequentially starting at 0 as slices arrive).
     deblock_params_per_slice: Vec<crate::deblock::DeblockParams>,
@@ -213,6 +216,7 @@ impl PictureAccumulator {
             reconstructed: vec![false; total],
             mv_store: None,
             list0_poc: Vec::new(),
+            list1_poc: Vec::new(),
             deblock_params_per_slice: Vec::new(),
             next_slice_id: 0,
             mb_cols,
@@ -895,6 +899,7 @@ impl H264Decoder {
             reconstructed,
             mv_store,
             list0_poc,
+            list1_poc,
             deblock_params_per_slice,
             mb_cols,
             mb_rows,
@@ -1111,7 +1116,7 @@ impl H264Decoder {
             mv_grid,
             mc_frame,
             list0_poc,
-            Vec::new(),
+            list1_poc,
         );
 
         Ok(frame)
@@ -1204,13 +1209,14 @@ impl H264Decoder {
                 header.first_mb_in_slice, header.frame_num, header.slice_type
             );
         }
-        // Fully-intra slices are always handled by this path; a P slice is
-        // handled too, but only when CABAC-coded (`is_p_slice &&
-        // entropy_coding_mode_flag` below) -- CAVLC P and every B slice still
+        // Fully-intra slices are always handled by this path; P and B slices
+        // are handled too, but only when CABAC-coded (`(is_p_slice ||
+        // is_b_slice) && entropy_coding_mode_flag` below) -- CAVLC P/B still
         // fall through to `decode_slice`'s existing (single-slice) paths.
         let is_p_slice = header.slice_type == SliceType::P;
+        let is_b_slice = header.slice_type == SliceType::B;
         if !matches!(header.slice_type, SliceType::I | SliceType::Si)
-            && !(is_p_slice && entropy_coding_mode_flag)
+            && !((is_p_slice || is_b_slice) && entropy_coding_mode_flag)
         {
             return Ok(None);
         }
@@ -1250,6 +1256,29 @@ impl H264Decoder {
 
             if is_p_slice {
                 return self.try_decode_real_p_slice_cabac(
+                    nal,
+                    sps,
+                    pps,
+                    &header,
+                    cabac_data,
+                    mb_cols,
+                    mb_rows,
+                    coded_width,
+                    coded_height,
+                    width,
+                    height,
+                    total_mbs,
+                    slice_qp,
+                    chroma_qp_index_offset,
+                    transform_8x8_mode_flag,
+                    scaling.clone(),
+                    packet,
+                    tracer,
+                );
+            }
+
+            if is_b_slice {
+                return self.try_decode_real_b_slice_cabac(
                     nal,
                     sps,
                     pps,
@@ -1816,6 +1845,329 @@ impl H264Decoder {
             *done = true;
         }
         acc.list0_poc = list0_poc;
+
+        let complete = end_mb >= total_mbs;
+        if complete {
+            let acc = self.pending_picture.take().unwrap();
+            let (poc, is_idr) = (acc.poc, acc.is_idr);
+            let frame = self.finalize_picture(acc, tracer)?;
+            self.pending_poc = poc;
+            self.pending_is_idr = is_idr;
+            if let Some(ef) = extra_frame {
+                self.frame_queue.push_back(frame);
+                return Ok(Some(ef));
+            }
+            return Ok(Some(frame));
+        }
+        self.suppress_frame = true;
+        if let Some(ef) = extra_frame {
+            self.frame_queue.push_back(ef);
+        }
+        Ok(None)
+    }
+
+    /// Multi-slice-capable CABAC B-slice path, mirroring
+    /// `try_decode_real_p_slice_cabac`'s per-slice-range incremental
+    /// reconstruction but for bi-predictive (L0+L1) motion, weighting, and
+    /// direct-mode prediction.
+    ///
+    /// Progressive (non-MBAFF) only: `try_decode_real_slice`'s caller already
+    /// excludes interlaced streams (`!sps.frame_mbs_only_flag`) before this is
+    /// reached.
+    #[allow(clippy::too_many_arguments)]
+    fn try_decode_real_b_slice_cabac<T: DecodeTracer>(
+        &mut self,
+        nal: &crate::nal::NalUnit,
+        sps: &SeqParameterSet,
+        pps: Option<&PicParameterSet>,
+        header: &crate::slice::SliceHeader,
+        cabac_data: &[u8],
+        mb_cols: u32,
+        mb_rows: u32,
+        coded_width: u32,
+        coded_height: u32,
+        width: u32,
+        height: u32,
+        total_mbs: usize,
+        slice_qp: i32,
+        chroma_qp_index_offset: i32,
+        transform_8x8_mode_flag: bool,
+        scaling: crate::transform::ScalingLists,
+        packet: &Packet,
+        tracer: &mut T,
+    ) -> Result<Option<VideoFrame>, KinetixError> {
+        let is_continuation = header.first_mb_in_slice != 0;
+        let pps_id_val = header.pic_parameter_set_id;
+        // A previous picture finalized here (the safety-net paths below)
+        // rather than by its own last slice reaching `total_mbs` — queued so
+        // it isn't lost, since this call can return only one frame. Mirrors
+        // the identical pattern in the P-slice multi-slice path.
+        let mut extra_frame: Option<VideoFrame> = None;
+
+        if !is_continuation {
+            if let Some(prev) = self.pending_picture.take() {
+                extra_frame = Some(self.finalize_picture(prev, tracer)?);
+            }
+            let is_idr_new = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let poc_new = self.display_poc(sps, header, nal);
+            self.pending_picture = Some(PictureAccumulator::new(
+                mb_cols,
+                mb_rows,
+                coded_width,
+                coded_height,
+                width,
+                height,
+                chroma_qp_index_offset,
+                scaling,
+                sps.clone(),
+                pps_id_val,
+                nal,
+                header,
+                is_idr_new,
+                poc_new,
+                packet.pts,
+                packet.dts,
+            ));
+        } else {
+            let matches_pending = self.pending_picture.as_ref().is_some_and(|acc| {
+                acc.matches(
+                    header.frame_num,
+                    pps_id_val,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    nal.nal_ref_idc,
+                )
+            });
+            if !matches_pending {
+                // Corruption safety net (§7.4.1.2.4), identical to the
+                // I/P-slice paths: this continuation doesn't belong to any
+                // picture we're tracking. Finalize whatever WAS pending and
+                // drop this stray slice.
+                if let Some(prev) = self.pending_picture.take() {
+                    let f = self.finalize_picture(prev, tracer)?;
+                    self.frame_queue.push_back(f);
+                }
+                self.suppress_frame = true;
+                return Ok(None);
+            }
+        }
+
+        // Build this slice's own RefPicList0/RefPicList1 + weighted-pred
+        // config from the DPB (§8.2.4.2.3/§8.4.2.3), scoped to THIS slice --
+        // identical to `decode_slice`'s single-slice CABAC B path.
+        let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
+        let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
+        let pic_num_ctx = crate::ref_pic::PicNumContext::new(
+            sps,
+            header.frame_num,
+            header.field_pic_flag,
+            header.bottom_field_flag,
+        );
+        let is_idr_b = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let current_poc = {
+            let mut scratch = self.poc_state.clone();
+            crate::ref_pic::derive_pic_order_cnt(
+                sps,
+                is_idr_b,
+                nal.nal_ref_idc != 0,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+                header.delta_pic_order_cnt_bottom,
+                &mut scratch,
+            )
+            .unwrap_or(0)
+        };
+
+        let l0_list = crate::ref_pic::build_ref_list_l0_b_slice(
+            &self.dpb,
+            num_ref_idx_l0_active as usize,
+            current_poc,
+            pic_num_ctx,
+            &header.ref_pic_list_modification_l0,
+        );
+        let l1_list = crate::ref_pic::build_ref_list_l1(
+            &self.dpb,
+            num_ref_idx_l1_active as usize,
+            current_poc,
+            pic_num_ctx,
+            &header.ref_pic_list_modification_l1,
+        );
+        let (Some(ref_l0), Some(ref_l1)) = (l0_list, l1_list) else {
+            // No usable reference: this slice can't be safely decoded by
+            // this path. Drop the in-progress picture rather than risk an
+            // inconsistent accumulator, and let this NAL fall through to
+            // `decode_slice`'s pre-existing fallback (same outcome as before
+            // this multi-slice path existed).
+            self.pending_picture = None;
+            if let Some(ef) = extra_frame {
+                return Ok(Some(ef));
+            }
+            return Ok(None);
+        };
+        crate::ref_pic::trace_ref_list("B L0 (multi-slice)", &ref_l0, pic_num_ctx);
+        crate::ref_pic::trace_ref_list("B L1 (multi-slice)", &ref_l1, pic_num_ctx);
+        let ref_frames_l0: Vec<VideoFrame> = ref_l0
+            .iter()
+            .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+            .collect();
+        let ref_frames_l1: Vec<VideoFrame> = ref_l1
+            .iter()
+            .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
+            .collect();
+        // Co-located picture for direct-mode derivation: reference 0 of list
+        // 1 (§8.4.1.2.2/§8.4.1.2.3). Its persisted per-block motion grid
+        // feeds the col_zero_flag check.
+        let colocated_mv: Option<Vec<[crate::mv::MvCell; 16]>> = ref_l1
+            .first()
+            .and_then(|e| e.mv_grid.clone())
+            .map(|g| (*g).clone());
+        let current_list0_poc: Vec<i64> = ref_l0.iter().map(|e| e.pic_order_cnt).collect();
+        let temporal_ctx = ref_l1.first().map(|col| crate::mv::TemporalDirectCtx {
+            current_poc,
+            current_list0_poc: &current_list0_poc,
+            col_poc: col.pic_order_cnt,
+            col_list0_poc: &col.list0_poc,
+            col_list1_poc: &col.list1_poc,
+        });
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("just created or matched above");
+        let slice_id = acc.next_slice_id;
+        acc.next_slice_id += 1;
+        acc.deblock_params_per_slice
+            .push(crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            });
+
+        let end_mb = match crate::slice_data::parse_b_slice_cabac_range(
+            cabac_data,
+            mb_cols,
+            mb_rows,
+            slice_qp,
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            header.cabac_init_idc as usize,
+            num_ref_idx_l0_active,
+            num_ref_idx_l1_active,
+            chroma_qp_index_offset,
+            transform_8x8_mode_flag,
+            sps.direct_8x8_inference_flag,
+            tracer,
+            header.first_mb_in_slice,
+            slice_id,
+            &mut acc.macroblocks,
+            &mut acc.nz,
+            &mut acc.pred_ctx,
+            &mut acc.cabac_ctx,
+            &mut acc.inter_ctx,
+            &mut acc.slice_id_grid,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = e;
+                // A parse failure mid-picture leaves the accumulator in an
+                // unusable state; drop the whole in-progress picture rather
+                // than risk emitting a garbage frame later.
+                self.pending_picture = None;
+                if let Some(ef) = extra_frame {
+                    return Ok(Some(ef));
+                }
+                return Ok(None);
+            }
+        };
+
+        // MV prediction (§8.4.1.3, direct mode §8.4.1.2), scoped to THIS
+        // slice's own macroblock range: `MvStore::is_available` (and every
+        // spatial-direct neighbour helper built on it) gates neighbour
+        // availability on `slice_id` equality, so a neighbour committed by an
+        // earlier, different-numbered slice is correctly treated as
+        // unavailable (§6.4.9) -- this makes it safe to run once per slice
+        // rather than deferring to `finalize_picture`, exactly like the
+        // P-slice path.
+        let first_mb_usize = header.first_mb_in_slice as usize;
+        let mv_store = acc
+            .mv_store
+            .get_or_insert_with(|| crate::mv::MvStore::new(total_mbs));
+        if let Err(e) = crate::mv::predict_b_slice_mvs(
+            mv_store,
+            mb_cols,
+            slice_id as u32,
+            header.first_mb_in_slice,
+            &acc.macroblocks[first_mb_usize..end_mb],
+            colocated_mv.as_deref(),
+            header.direct_spatial_mv_pred_flag,
+            temporal_ctx.as_ref(),
+        ) {
+            let _ = e;
+            self.pending_picture = None;
+            if let Some(ef) = extra_frame {
+                return Ok(Some(ef));
+            }
+            return Ok(None);
+        }
+
+        // Weighted bi-prediction (§8.4.2.3.2): explicit when
+        // `weighted_bipred_idc == 1` (uses the parsed `pred_weight_table`),
+        // implicit when `== 2` (weights derived per-block from each
+        // reference's POC distance to the current picture).
+        let weighted_bipred_idc = pps.map(|p| p.weighted_bipred_idc).unwrap_or(0);
+        let weighted_pred = match (weighted_bipred_idc, &header.pred_weight_table) {
+            (1, Some(pwt)) => crate::reconstruct::WeightedPred::Explicit {
+                luma_log2_wd: pwt.luma_log2_weight_denom,
+                chroma_log2_wd: pwt.chroma_log2_weight_denom,
+                l0: pwt.l0.clone(),
+                l1: pwt.l1.clone(),
+            },
+            (2, _) => crate::reconstruct::WeightedPred::Implicit {
+                l0_poc: ref_l0.iter().map(|e| e.pic_order_cnt).collect(),
+                l1_poc: ref_l1.iter().map(|e| e.pic_order_cnt).collect(),
+                cur_poc: current_poc,
+            },
+            _ => crate::reconstruct::WeightedPred::Default,
+        };
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("still pending: just decoded into it");
+        let luma_stride = coded_width as usize;
+        let chroma_stride = (coded_width / 2) as usize;
+        let recon_buf = acc
+            .recon
+            .get_or_insert_with(|| crate::reconstruct::ReconstructedFrame {
+                luma: vec![0u8; luma_stride * coded_height as usize],
+                chroma_cb: vec![0u8; chroma_stride * (coded_height as usize / 2)],
+                chroma_cr: vec![0u8; chroma_stride * (coded_height as usize / 2)],
+                luma_stride,
+                chroma_stride,
+            });
+        crate::reconstruct::reconstruct_bi_frame_range(
+            recon_buf,
+            &acc.macroblocks,
+            acc.mv_store.as_ref().expect("just populated above"),
+            &ref_frames_l0,
+            &ref_frames_l1,
+            mb_cols,
+            first_mb_usize,
+            end_mb,
+            chroma_qp_index_offset,
+            &acc.scaling,
+            &weighted_pred,
+            tracer,
+            &acc.slice_id_grid,
+        );
+        for done in &mut acc.reconstructed[first_mb_usize..end_mb] {
+            *done = true;
+        }
+        acc.list0_poc = current_list0_poc;
+        acc.list1_poc = ref_l1.iter().map(|e| e.pic_order_cnt).collect();
 
         let complete = end_mb >= total_mbs;
         if complete {
