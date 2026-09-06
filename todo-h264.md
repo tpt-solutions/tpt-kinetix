@@ -2,6 +2,51 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32az — ITU suite re-verified on this machine; remaining KnownGaps mapped
+
+Ran `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`
+against the real ITU fixtures already present under `tests/fixtures/itu/`
+(64 clips). **22 hard-checked bit-exact, 0 failures, ~31s.** All of #32ax's
+temporal-direct movers (`CABA3_Sony_C`, `CANL3_Sony_C`, `CVBS3_Sony_C`,
+`CACQP3_Sony_D`, `CABAST3_Sony_E`, `CABASTBR3_Sony_B`, `CABACI3_Sony_B`) plus
+`MIDR_MW_D`/`MPS_MW_A` are now *proven* byte-exact vs the normative reference
+YUV, not prose.
+
+**Remaining gaps, triaged via a temporary `KINETIX_DUMP_B_PATH` reflist dump
+in `decoder/mod.rs` (reverted):** the recurring blockers across the
+informational FRExt/High clips (`HCHP1_HHI_B`, `HCHP2/3`, `FRExt2/3/4`,
+`freh*`, `HPCA*`, MBAFF `cama*`) are, in rough frequency order:
+1. ~~`I_PCM in P/B CABAC not supported`~~ **DONE this session.**
+   `parse_intra_mb_cabac_pb` (`cabac_b.rs`) now returns the
+   `SliceDataError::IPcm` sentinel instead of `Unsupported`; both the B mb
+   loop (`parse_b_slice_cabac_range`) and the P mb loop
+   (`parse_p_slice_cabac_range`) now catch it and do the I-path dance:
+   `dec.flush_to_pcm()` → byte-align, lift 384 PCM bytes,
+   `CabacDecoder::new(&remaining[384..])`, `MbType::IPcm` + nz/chroma = 16 +
+   `is_intra16x16_or_pcm`, `prev_dqp_nonzero = false`. Then — matching
+   FFmpeg's `h264_slice.c` decode loop (`get_cabac_terminate` runs after
+   *every* MB, I_PCM included) — decode an `end_of_slice_flag` from the
+   fresh engine. Also fixed `cabac_i.rs`'s I-path to do the same terminate
+   after I_PCM (it was `continue`-ing past it; no BitExact clip exercises
+   CABAC I_PCM so this was latent). Result: no regressions (22/0 unchanged),
+   `HCHP2_HHI_A` frame count 246→250 (I_PCM was dropping 4 frames),
+   `CAMA1_Sony_C` unchanged, small diff_bytes drops on `FRExt3`/`HCHP1`.
+   Not bit-exact-verifiable without a CABAC-I_PCM BitExact clip, but the
+   `Unsupported` error class is gone and it's a faithful port.
+2. **`ref_idx L0/L1 overflow`** and **`not an inter B macroblock`** CABAC
+   parse errors — B mb_type / sub-mb_type binarization or ref_idx ceiling
+   gaps in `cabac_b.rs` on real High-profile B streams.
+3. **`build_ref_list_l1` returns `None`** for `HCHP1` on a late frame
+   (poc=304, `nmod_l1=1`, dpb has 15 short-term) — an explicit L1 reorder
+   command against a picture our MMCO/sliding-window eviction already
+   dropped, or a `modify_ref_pic_list` `MissingShortTerm`. Hierarchical
+   GOP-16 needs correct adaptive `dec_ref_pic_marking` retention.
+
+`PPS_PARSE_ERR(1)` on several clips (`chroma_qp_index_offset`,
+`scaling_list delta`, `constrained_intra_pred_flag`, `pic_init_qp_minus26`)
+— PPS extension / scaling-list parsing also incomplete for FRExt PPS.
+
+
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
 
 Three prior sessions (#32al/#32am/#32an) chased `MIDR_MW_D` as a genuine

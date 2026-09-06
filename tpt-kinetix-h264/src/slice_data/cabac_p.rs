@@ -643,26 +643,90 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             slice_id_grid,
             slice_id,
         );
+        let mb_result = parse_p_macroblock_cabac(
+            &mut dec,
+            &mut ctxs,
+            mb_x,
+            mb_y,
+            mb_cols,
+            nz,
+            pred_ctx,
+            cabac_ctx,
+            inter_ctx,
+            qp,
+            prev_dqp_nonzero,
+            num_ref_idx_l0_active,
+            chroma_qp_index_offset,
+            transform_8x8_mode_flag,
+            direct_8x8_inference_flag,
+            nctx,
+            tracer,
+        );
+
+        // I_PCM inside a P slice: same handling as the B path in `cabac_b.rs`
+        // and the I path in `cabac_i.rs` — byte-align, lift 384 raw PCM bytes,
+        // reinitialise the CABAC engine, then (per FFmpeg's decode loop) decode
+        // an `end_of_slice_flag` from the fresh engine.
+        if matches!(mb_result, Err(SliceDataError::IPcm)) {
+            let remaining = dec.flush_to_pcm();
+            const PCM_BYTES: usize = 384;
+            if remaining.len() < PCM_BYTES {
+                return Err(SliceDataError::Eof("I_PCM insufficient bytes (P CABAC)"));
+            }
+            let pcm_samples: Vec<u8> = remaining[..PCM_BYTES].to_vec();
+            dec = crate::entropy::CabacDecoder::new(&remaining[PCM_BYTES..])
+                .map_err(|_| SliceDataError::Eof("CABAC reinit after I_PCM (P)"))?;
+
+            let mut mb = Macroblock::new_skip();
+            mb.skip = false;
+            mb.mb_type = MbType::IPcm;
+            mb.pcm_samples = pcm_samples;
+            mb.qp = qp;
+            mb.mb_field_flag = cur_pair_field;
+
+            let mut this_nz = MbNz {
+                present: true,
+                ..Default::default()
+            };
+            this_nz.luma = [16u8; 16];
+            this_nz.chroma = [16u8; 8];
+
+            let mut this_cabac_ctx = MbCabacCtx {
+                present: true,
+                ..Default::default()
+            };
+            this_cabac_ctx.is_intra16x16_or_pcm = true;
+            this_cabac_ctx.mb_field_flag = cur_pair_field;
+
+            nz[grid_idx] = this_nz;
+            pred_ctx[grid_idx] = MbPredCtx {
+                present: true,
+                ..Default::default()
+            };
+            cabac_ctx[grid_idx] = this_cabac_ctx;
+            inter_ctx[grid_idx] = MbInterCabacCtx {
+                present: true,
+                ..Default::default()
+            };
+            macroblocks[grid_idx] = mb;
+            slice_id_grid[grid_idx] = slice_id;
+            prev_mb_skipped = false;
+            prev_dqp_nonzero = false;
+
+            if !(mbaff_frame && mb_idx % 2 == 0) {
+                let end_of_slice = dec.decode_terminate() == 1;
+                if end_of_slice {
+                    if mb_idx + 1 != total {
+                        decoded_mb_count = mb_idx + 1;
+                    }
+                    break 'mb_loop;
+                }
+            }
+            continue;
+        }
+
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, this_inter_ctx, new_qp, dqp_nz) =
-            parse_p_macroblock_cabac(
-                &mut dec,
-                &mut ctxs,
-                mb_x,
-                mb_y,
-                mb_cols,
-                nz,
-                pred_ctx,
-                cabac_ctx,
-                inter_ctx,
-                qp,
-                prev_dqp_nonzero,
-                num_ref_idx_l0_active,
-                chroma_qp_index_offset,
-                transform_8x8_mode_flag,
-                direct_8x8_inference_flag,
-                nctx,
-                tracer,
-            )?;
+            mb_result?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nz;
         prev_mb_skipped = false;

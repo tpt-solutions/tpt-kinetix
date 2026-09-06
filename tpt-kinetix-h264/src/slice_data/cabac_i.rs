@@ -246,9 +246,18 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             macroblocks[grid_idx] = mb;
             slice_id_grid[grid_idx] = slice_id;
 
-            // After I_PCM the CABAC engine was restarted; there is no
-            // end_of_slice_flag to decode from the old engine state.
-            // The next MB will be parsed by the freshly initialised decoder.
+            // FFmpeg's decode loop (`h264_slice.c` → `get_cabac_terminate`)
+            // decodes an `end_of_slice_flag` after *every* macroblock, I_PCM
+            // included — here from the freshly reinitialised engine.
+            if !(mbaff_frame && mb_idx % 2 == 0) {
+                let end_of_slice = dec.decode_terminate() == 1;
+                if end_of_slice {
+                    if mb_idx + 1 != total {
+                        decoded_mb_count = mb_idx + 1;
+                    }
+                    break;
+                }
+            }
             continue;
         }
 
