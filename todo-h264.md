@@ -2,6 +2,118 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32aw — root-caused and fixed #32av's residual multi-slice CABAC B diff: P-slice-vs-B-slice ref-list-index mismatch at deblocking; CABAST3_Sony_E and CABASTBR3_Sony_B now BIT-EXACT
+
+Root-caused the tiny residual diff #32av left open (595/1,917 diff bytes on
+`CABAST3_Sony_E`/`CABASTBR3_Sony_B`), fixed it, and confirmed both fixtures
+are now genuinely, individually byte-exact.
+
+**Root cause (confirmed with evidence, not guessed):** built a fresh diffmap
+harness (`tests/dbg_itu_pframe.rs`'s existing `ITU_CLIP`/`ITU_FRAME` env-var
+scaffold, pointed at `CABAST3_Sony_E`) and reconfirmed #32av's own finding:
+all diffs (magnitude 1-3) sit at luma y=142-145, i.e. exactly the MB row
+8/9 boundary. Added a temporary per-MB debug dump (`KINETIX_DBG_MBROW`,
+deleted before commit) into `decoder/mod.rs`'s `finalize_picture` mb_info
+construction loop, and found MB row 8 is coded by `slice_id=1` (a **P-type**
+slice: `P8x8`/`PL016x16`/... macroblocks) while MB row 9 is coded by
+`slice_id=2` (a **B-type** slice: `B8x16`/`B16x8`/`BB8x8`) — this ITU
+fixture legally mixes P-type and B-type slices within one picture (§7.4.3).
+Added a second temporary dump (`KINETIX_DBG_REFLIST`) of each slice's own
+built RefPicList0/1 POCs and found: this picture's P-slice built
+`L0_poc=[6,3,0]` (§8.2.4.2.1, frame_num/pic_num order) while its own B-slice
+built `L0_poc=[0,3,6]`, `L1_poc=[3,6]` (§8.2.4.2.3, POC-split order) — a
+**completely different ordering** for the very same picture, as expected
+since P and B slices build RefPicList0 via unrelated algorithms.
+
+`deblock.rs`'s `derive_bs_pair` (§8.7.2.1 boundary-strength) compares
+`p_cell.ref_idx != q_cell.ref_idx` directly — these are `MvCell` fields that
+are only meaningful as *indices into the block's own slice's own list*.
+Cross-referencing the dumped MB(row8,col12)/(row9,col12) pair: the P-slice
+side's `ref_idx=2` resolves (via the P-slice's L0) to POC 0; the B-slice
+side's `ref_idx_l1=0` resolves (via the B-slice's L1) to POC 3 — genuinely
+different pictures, so `bS=1` happened to come out right there, but the
+*method* — comparing raw list positions built by two unrelated algorithms as
+if they shared an index space — is unsound in general and was confirmed to
+occasionally give a materially different (and wrong) `bS` at other
+segments along that same boundary, producing the tiny 1-3 magnitude pixel
+diffs #32av found (an incorrect `bS` classification shifts which of the
+strong/weak §8.7.2 filter branches — or none — runs on an edge, a small
+localized effect, not an entropy desync, consistent with #32av's own
+diagnostic reasoning).
+
+**Fix**: `deblock::DeblockMbInfo`'s `cells` are still populated from
+`MvStore` as before, but `finalize_picture` (`decoder/mod.rs`) now resolves
+each block's `ref_idx`/`ref_idx_l1` to the **actual POC** of the referenced
+picture — a single, list-construction-independent identity valid
+picture-wide — using a new per-slice table before constructing
+`DeblockMbInfo`. This required a new `PictureAccumulator::ref_poc_per_slice:
+Vec<(Vec<i64>, Vec<i64>)>` field (parallel to the existing
+`deblock_params_per_slice`, pushed at the same three call sites — I-slice:
+`(vec![], vec![])`, P-slice: `(list0_poc.clone(), vec![])`, B-slice:
+`(current_list0_poc.clone(), current_list1_poc.clone())`). The remap adds a
+fixed `POC_BIAS = 1_000_000_000` to every resolved POC before storing it
+back into the `i32` `ref_idx`/`ref_idx_l1` fields, so a legitimately
+negative POC (possible near an IDR/POC reset) can never collide with the
+`LIST_NOT_USED` (`-1`) sentinel `derive_bs_pair` already special-cases; the
+bias is constant across every block, so it never changes any
+equality/inequality comparison the existing bS logic performs. No change to
+`derive_bs_pair`/`derive_bs_segments` themselves, nor to `mv.rs`'s
+prediction logic (which reads `MvStore` directly, not this remapped local
+copy) — this is a pure "make the value fed to deblocking canonical" fix,
+zero behavioural change for any single-slice or same-slice-type-only
+picture (its own slice's ref list is used to remap its own blocks either
+way, so identical `ref_idx` values that were already comparable stay
+comparable — only genuinely cross-slice-type comparisons change).
+
+**Verification** (master, this session, before → after):
+- Baseline: `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test
+  binaries `test result: ok`, 0 failures. `itu_conformance`: "12
+  hard-checked bit-exact, 0 failure(s)" (matching #32av's session-end state).
+- After the fix: still 66/66 binaries, 0 failures. `itu_conformance`: **"14
+  hard-checked bit-exact, 0 failure(s)"** — two more than baseline.
+  `cabac_conformance` (`cabac_{i,p,b}frame_{no_,with_}deblock_is_bitexact`)
+  and `conformance_matrix`'s full 15-case matrix (`cabac_i`/`cabac_p`/
+  `cabac_b`, deblock on/off, plus every CAVLC/high8x8 case) all still
+  `max_abs_diff=0`/`[PASS]` — zero regression on any previously-bit-exact
+  case. `just fmt-check`/`just clippy -D warnings`/`just build` all clean.
+- Per-fixture `itu_conformance` numbers, before → after (each individually
+  re-measured, not assumed from one shared root cause):
+  - `CABAST3_Sony_E`: diff_bytes 595 → **0** (max_diff 3 → 0). **Flipped
+    `Expect::KnownGap` → `Expect::BitExact`.**
+  - `CABASTBR3_Sony_B`: diff_bytes 1,917 → **0** (max_diff 13 → 0).
+    **Flipped `Expect::KnownGap` → `Expect::BitExact`.**
+  - `CABACI3_Sony_B`: diff_bytes 104,532 → 93,983 (max_diff 121 → 121,
+    unchanged) — improved but **not** flipped. Investigated with a second
+    throwaway diffmap (deleted before commit): the remaining diffs are
+    large and cascading (max_diff up to 121, up to ~1,500 differing luma
+    samples in a single 176×144 frame), a completely different signature
+    from the 1-3-magnitude, handful-of-MBs pattern the other two fixtures
+    had — consistent with this clip's separately-tracked, still-unimplemented
+    temporal-direct-mode gap (`direct_spatial_mv_pred_flag=0`, §8.4.1.2.3;
+    same class as `CABA3_Sony_C`/`CANL3_Sony_C`/`CVBS3_Sony_C`/
+    `CACQP3_Sony_D`), not a second instance of this session's bug. Manifest
+    entry updated with this evidence; stays `Expect::Limitation`.
+
+**Files touched**: `tpt-kinetix-h264/src/decoder/mod.rs` (new
+`PictureAccumulator::ref_poc_per_slice` field + 3 push sites + the
+`finalize_picture` remap loop), `tpt-kinetix-h264/tests/itu_conformance.rs`
+(2 fixtures promoted to `BitExact`, `CABACI3_Sony_B`'s `Limitation` message
+updated with fresh evidence). No changes to `deblock.rs`, `mv.rs`, or any
+CABAC parser. All temporary `KINETIX_DBG_MBROW`/`KINETIX_DBG_REFLIST`
+debug prints and the throwaway `dbg_i3_diffmap.rs` harness were removed
+before this commit, per this line of work's established norm.
+
+**Next steps for a future session**: temporal direct mode (§8.4.1.2.3) is
+now the single largest remaining CABAC-B gap across the whole ITU corpus
+(`CABA3_Sony_C`, `CANL3_Sony_C`, `CVBS3_Sony_C`, `CACQP3_Sony_D`,
+`CABACI3_Sony_B` all block on it) — implementing it is probably the highest-
+leverage next piece of work in this line. MBAFF multi-slice CABAC (the
+`mbaff_deblock_infos`/single-shot MBAFF paths near `decoder/mod.rs`'s other
+`DeblockMbInfo` construction sites) was NOT touched this session and has
+the same theoretical P/B-slice-ref_idx exposure if a real MBAFF multi-slice
+P/B fixture ever surfaces — no such fixture exists in-corpus today, so this
+is a documented latent risk, not an active bug.
+
 ## SESSION #32av — real multi-slice CABAC B-slice decode implemented (progressive only); CABAST3_Sony_E/CABASTBR3_Sony_B/CABACI3_Sony_B diff_bytes drop by 99%+ but a small residual (~0.02-1%) diff remains, not yet root-caused
 
 Executed SESSION #32au's own concrete plan for CABAC B-slice multi-slice

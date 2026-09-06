@@ -155,6 +155,23 @@ struct PictureAccumulator {
     /// `DeblockParams` for each slice, indexed by slice id (slice ids are
     /// assigned sequentially starting at 0 as slices arrive).
     deblock_params_per_slice: Vec<crate::deblock::DeblockParams>,
+    /// `(RefPicList0 POCs, RefPicList1 POCs)` for each slice, indexed by
+    /// slice id in lockstep with `deblock_params_per_slice`. A macroblock's
+    /// `ref_idx`/`ref_idx_l1` (as stored in `MvStore`) is only meaningful as
+    /// an index into the list its OWN slice built (§8.2.4.2.1 for P,
+    /// §8.2.4.2.3 for B) -- when a picture mixes P-type and B-type slices
+    /// (§7.4.3; e.g. ITU's `CABAST3_Sony_E`), a P slice's L0 and a B slice's
+    /// L0/L1 are built by entirely different algorithms, so the same integer
+    /// `ref_idx` on either side of a slice-boundary macroblock edge can (and,
+    /// on real streams, demonstrably does) denote different physical
+    /// reference pictures. `finalize_picture` uses this table to resolve
+    /// each macroblock's `ref_idx`/`ref_idx_l1` to the referenced picture's
+    /// actual POC (a picture-wide, list-construction-independent identity)
+    /// before handing motion state to the deblocking filter's
+    /// boundary-strength derivation (§8.7.2.1), which must compare "the
+    /// reference pictures used", not raw list positions. Empty per-list
+    /// `Vec` for an I-type slice (no motion).
+    ref_poc_per_slice: Vec<(Vec<i64>, Vec<i64>)>,
     next_slice_id: u16,
     mb_cols: u32,
     mb_rows: u32,
@@ -218,6 +235,7 @@ impl PictureAccumulator {
             list0_poc: Vec::new(),
             list1_poc: Vec::new(),
             deblock_params_per_slice: Vec::new(),
+            ref_poc_per_slice: Vec::new(),
             next_slice_id: 0,
             mb_cols,
             mb_rows,
@@ -901,6 +919,7 @@ impl H264Decoder {
             list0_poc,
             list1_poc,
             deblock_params_per_slice,
+            ref_poc_per_slice,
             mb_cols,
             mb_rows,
             coded_width,
@@ -991,10 +1010,50 @@ impl H264Decoder {
                         // motion for deblocking's MV-based boundary-strength
                         // derivation (§8.7.2.1); an intra-only picture has no
                         // motion at all.
-                        let cells = mv_store
+                        let mut cells = mv_store
                             .as_ref()
                             .and_then(|s| s.cells_of(idx))
                             .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                        // Resolve each block's `ref_idx`/`ref_idx_l1` (which
+                        // are only meaningful as indices into THIS
+                        // macroblock's OWN slice's RefPicList0/1) to the
+                        // referenced picture's actual POC, using that
+                        // slice's own lists from `ref_poc_per_slice`. A
+                        // picture's POC is a single, list-construction-
+                        // independent identity, so this makes the value
+                        // `derive_bs_pair` compares directly meaningful
+                        // across a boundary between a P-type and a B-type
+                        // slice of the same picture (§7.4.3), whose L0/L1
+                        // lists are built by different algorithms
+                        // (§8.2.4.2.1 vs §8.2.4.2.3) and can freely disagree
+                        // on what index N denotes. Left as `LIST_NOT_USED`
+                        // when the block doesn't use that list, or when the
+                        // index is out of range for some reason (never
+                        // expected, but keeps this infallible). A large
+                        // fixed bias is added to every resolved POC so it
+                        // can never collide with the `LIST_NOT_USED` (-1)
+                        // sentinel even for a legitimately negative POC
+                        // (which can occur near an IDR/POC reset); the bias
+                        // is a constant shared by every block, so it never
+                        // changes any equality/inequality comparison
+                        // `derive_bs_pair` performs on these values.
+                        const POC_BIAS: i64 = 1_000_000_000;
+                        let (l0_poc, l1_poc) = ref_poc_per_slice
+                            .get(sid as usize)
+                            .map(|(a, b)| (a.as_slice(), b.as_slice()))
+                            .unwrap_or((&[], &[]));
+                        for cell in &mut cells {
+                            if cell.ref_idx != crate::mv::LIST_NOT_USED {
+                                if let Some(&poc) = l0_poc.get(cell.ref_idx as usize) {
+                                    cell.ref_idx = (poc + POC_BIAS) as i32;
+                                }
+                            }
+                            if cell.ref_idx_l1 != crate::mv::LIST_NOT_USED {
+                                if let Some(&poc) = l1_poc.get(cell.ref_idx_l1 as usize) {
+                                    cell.ref_idx_l1 = (poc + POC_BIAS) as i32;
+                                }
+                            }
+                        }
                         crate::deblock::DeblockMbInfo {
                             transform_8x8: mb.transform_size_8x8,
                             slice_id: sid,
@@ -1373,6 +1432,7 @@ impl H264Decoder {
                     beta_offset_div2: header.slice_beta_offset_div2,
                     chroma_qp_index_offset,
                 });
+            acc.ref_poc_per_slice.push((Vec::new(), Vec::new()));
 
             let end_mb = match crate::slice_data::parse_i_slice_cabac(
                 cabac_data,
@@ -1731,6 +1791,7 @@ impl H264Decoder {
                 beta_offset_div2: header.slice_beta_offset_div2,
                 chroma_qp_index_offset,
             });
+        acc.ref_poc_per_slice.push((list0_poc.clone(), Vec::new()));
 
         let end_mb = match crate::slice_data::parse_p_slice_cabac_range(
             cabac_data,
@@ -2024,6 +2085,7 @@ impl H264Decoder {
             .and_then(|e| e.mv_grid.clone())
             .map(|g| (*g).clone());
         let current_list0_poc: Vec<i64> = ref_l0.iter().map(|e| e.pic_order_cnt).collect();
+        let current_list1_poc: Vec<i64> = ref_l1.iter().map(|e| e.pic_order_cnt).collect();
         let temporal_ctx = ref_l1.first().map(|col| crate::mv::TemporalDirectCtx {
             current_poc,
             current_list0_poc: &current_list0_poc,
@@ -2045,6 +2107,8 @@ impl H264Decoder {
                 beta_offset_div2: header.slice_beta_offset_div2,
                 chroma_qp_index_offset,
             });
+        acc.ref_poc_per_slice
+            .push((current_list0_poc.clone(), current_list1_poc.clone()));
 
         let end_mb = match crate::slice_data::parse_b_slice_cabac_range(
             cabac_data,

@@ -101,32 +101,23 @@ const MANIFEST: &[(&str, Expect)] = &[
         "CVBS3_Sony_C",
         Expect::KnownGap("CABAC — same class as CABA3 (temporal direct mode, unimplemented)"),
     ),
-    (
-        "CABAST3_Sony_E",
-        Expect::KnownGap(
-            "multi-slice (4 slices/picture), IPB — real per-slice-range \
-             CABAC P multi-slice decode landed 2026-09-06 (SESSION #32au): \
-             every I-type AND P-type slice of a picture now reconstructs its \
-             own macroblock range (verified via a targeted diffmap: display \
-             frame index 3, POC 3, the first non-B picture in this stream, \
-             is now genuinely bit-exact end to end). The readme's own \
-             'Direct Prediction: None' is misleading -- this stream DOES use \
-             B-type slices (POC 1, 2, 4, 5, ... interleave between the P \
-             pictures), which multi-slice CABAC B decode (out of scope this \
-             session, see #32au) leaves un-decoded, so the overall clip \
-             still fails hard byte-exact comparison. Once CABAC B multi-\
-             slice lands this should flip to bit-exact.",
-        ),
-    ),
-    (
-        "CABASTBR3_Sony_B",
-        Expect::KnownGap(
-            "multi-slice, IPB — same class and same 2026-09-06 fix as \
-             CABAST3_Sony_E: every I/P-type slice's own macroblock range now \
-             reconstructs correctly; B-type slices/pictures are the sole \
-             remaining gap (out of scope, see #32au).",
-        ),
-    ),
+    // multi-slice, IPB with a P/B slice-type mix per picture. Real
+    // multi-slice CABAC B decode landed 2026-09-06 (SESSION #32av); the
+    // residual sub-1% diff that session left open was root-caused and fixed
+    // the same day (SESSION #32aw): a P-type slice's RefPicList0
+    // (§8.2.4.2.1, frame_num-based) and a B-type slice's RefPicList0/1
+    // (§8.2.4.2.3, POC-based) are built by different algorithms, so at a
+    // P/B slice-boundary macroblock edge within the SAME picture, the raw
+    // `ref_idx` deblocking's boundary-strength derivation (§8.7.2.1)
+    // compared could (and did) denote different physical reference pictures
+    // on each side. Fixed by resolving each macroblock's
+    // `ref_idx`/`ref_idx_l1` to its referenced picture's actual POC (a
+    // list-construction-independent identity) before deblocking, using a
+    // new per-slice `ref_poc_per_slice` table. diff_bytes 595 -> 0.
+    ("CABAST3_Sony_E", Expect::BitExact),
+    // Same class and same 2026-09-06 fix as CABAST3_Sony_E (SESSION #32aw).
+    // diff_bytes 1,917 -> 0.
+    ("CABASTBR3_Sony_B", Expect::BitExact),
     (
         "CACQP3_Sony_D",
         Expect::KnownGap(
@@ -200,8 +191,23 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "CABACI3_Sony_B",
         Expect::Limitation(
-            "IPB stream — multi-slice CABAC P now implemented (#32au); B \
-             (temporal direct mode) is the remaining gap",
+            "IPB stream — multi-slice CABAC P now implemented (#32au). The \
+             P/B-slice-boundary ref_idx-vs-POC deblocking fix (SESSION #32aw, \
+             see CABAST3_Sony_E/CABASTBR3_Sony_B) also applies here (this \
+             clip mixes P/B slices per picture too) and shaved diff_bytes \
+             104,532 -> 93,983, but the dominant remaining gap is a distinct, \
+             already-tracked bug class: this clip's B slices use \
+             direct_spatial_mv_pred_flag=0 (temporal direct, §8.4.1.2.3, \
+             unimplemented — same as CABA3_Sony_C/CANL3_Sony_C/CVBS3_Sony_C/ \
+             CACQP3_Sony_D). Evidence this is temporal-direct, not another \
+             ref_idx/deblock edge case: a fresh diffmap (SESSION #32aw) shows \
+             large cascading per-frame diffs (max_diff up to 121, up to ~1,500 \
+             differing luma samples in a single 176x144 frame) starting only \
+             once B pictures with real motion appear, unlike CABAST3_Sony_E/ \
+             CABASTBR3_Sony_B's pre-fix diffs (magnitude 1-13, a handful of \
+             MBs per frame, exactly at P/B slice-boundary rows) — the \
+             signature of an unimplemented prediction mode cascading through \
+             a picture, not a few-LSB boundary-strength edge case.",
         ),
     ),
 ];
