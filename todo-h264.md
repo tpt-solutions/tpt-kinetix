@@ -119,6 +119,37 @@ path `try_decode_real_b_slice_cabac`, since removed):**
     the decode#↔display# mapping first (decode with `.with_display_order()`
     and diff each *output* frame against the ref inside the same run).
 
+- **#32az FINAL PASS — frame mapping nailed, everything upstream of the
+  CABAC MB decode ruled out.** Decoding HPCA in decode order and matching
+  each output frame to its nearest reference frame by SAD:
+  **Kinetix decode-order frame #189 → display 188, SAD 95121 — the *only*
+  nonzero-SAD frame in the whole clip.** Its `on_mb_parsed` grid is
+  **100 % intra** (every one of the 22×18 MBs `Intra4x4`/`Intra16x16`), so
+  Kinetix decodes this B frame entirely as intra. ffmpeg + the reference
+  YUV both say it has real inter content. The divergence is at **MB 0** —
+  the very first macroblock.
+  Ruled out this pass:
+  - **NAL extraction** — `split_nals` (the itu test's) and
+    `parse_nal_units_from_annexb` produce byte-identical RBSPs for all 303
+    HPCA NALs.
+  - **Slice header** — frame 188's B header parses identically to every
+    other B slice in the clip: `data_bit_offset = 41`, `slice_qp_delta = 2`,
+    `cabac_init_idc = 0`, `direct_spatial_mv_pred_flag = false`,
+    `num_ref_idx_l0/l1 = 0`, no ref-pic-list-mod, no weight table, no
+    dec_ref_pic_marking (`nal_ref_idc = 0`). Nothing special.
+  - **SliceQPY** — PPS `pic_init_qp_minus26 = -2` ⇒ P slice_qp 24, B
+    slice_qp 26; Kinetix's per-frame QP trace matches (P=24, B=26), so the
+    CABAC context init tables are seeded correctly.
+  - **Ref lists / accumulator** — `!is_continuation` path takes+finalizes
+    the previous pending picture and builds a fresh `PictureAccumulator`, so
+    MB 0 has no stale neighbour context.
+  ⇒ The bug is a **data-dependent CABAC desync inside
+  `parse_b_slice_cabac_range`**, hit at or before MB 0's `mb_skip_flag` /
+  `mb_type` decode, that cascades the whole slice to intra. It needs a
+  bin-level replay of frame 188's slice from bit 0 against a faithful
+  `get_cabac` port (the `dbg_mbaff_p_ffengine_oracle.rs` scaffold is the
+  starting point) — a genuine oracle-harness build, not an inline fix.
+
 
 ## SESSION #32aq — MIDR_MW_D and MPS_MW_A CLOSED: there was never a real frame_num gap — a `decode_impl` frame_queue bug silently dropped ~15 real NALs per clip
 
