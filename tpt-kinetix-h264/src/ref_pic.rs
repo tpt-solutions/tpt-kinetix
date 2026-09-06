@@ -1527,13 +1527,6 @@ pub fn build_ref_list_l1(
                     .iter()
                     .zip(list.iter())
                     .all(|(a, b)| dpb_entry_identity(a) == dpb_entry_identity(b));
-            if std::env::var("KINETIX_DBG_L1SWAP").is_ok() {
-                eprintln!(
-                    "L1SWAP check: l0={:?} l1={:?} identical={identical}",
-                    list0.iter().map(dpb_entry_identity).collect::<Vec<_>>(),
-                    list.iter().map(dpb_entry_identity).collect::<Vec<_>>(),
-                );
-            }
             if identical {
                 list.swap(0, 1);
             }

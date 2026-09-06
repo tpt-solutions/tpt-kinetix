@@ -1321,21 +1321,11 @@ fn apply_temporal_direct(
     ctx: &TemporalDirectCtx,
 ) {
     let cells = colocated.and_then(|g| g.get(mb_idx));
-    let dbg = std::env::var("KINETIX_DBG_TDIRECT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok());
     for &q in quads {
         if ctx.direct_8x8_inference_flag {
             let corner = 12 * (q / 2) + 3 * (q % 2);
             let col = cells.map(|c| c[corner]).unwrap_or(MvCell::INTRA);
             let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
-            if dbg == Some(mb_idx) {
-                eprintln!(
-                    "TDIRECT mb{mb_idx} q{q} corner{corner} col={{ref0={},mv0={:?},ref1={},mv1={:?}}} ctx.col_poc={} ctx.cur_poc={} col_l0={:?} col_l1={:?} cur_l0={:?} -> mv0={mv0:?} ref0={ref0} mv1={mv1:?}",
-                    col.ref_idx, col.mv, col.ref_idx_l1, col.mv_l1,
-                    ctx.col_poc, ctx.current_poc, ctx.col_list0_poc, ctx.col_list1_poc, ctx.current_list0_poc
-                );
-            }
             commit_rect(cur, 8 * (q % 2), 8 * (q / 2), 8, 8, mv0, ref0, mv1, 0);
         } else {
             for sub in 0..4 {
@@ -1627,14 +1617,8 @@ pub(crate) fn predict_b_slice_mvs(
 ) -> Result<(), &'static str> {
     use crate::macroblock::MbType;
     let mut cur = [MvCell::INTRA; 16];
-    let dbg_type = std::env::var("KINETIX_DBG_MBTYPE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok());
     for (i, mb) in mbs.iter().enumerate() {
         let mb_idx = first_mb as usize + i;
-        if dbg_type == Some(mb_idx) {
-            eprintln!("MBTYPE mb{mb_idx} type={:?} skip={}", mb.mb_type, mb.skip);
-        }
         let is_b_inter = mb.skip
             || matches!(
                 mb.mb_type,
