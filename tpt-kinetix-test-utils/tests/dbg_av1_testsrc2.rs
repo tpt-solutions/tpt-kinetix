@@ -100,6 +100,19 @@ fn dbg_testsrc2_diffmap() {
     eprintln!("\nFirst wrong luma pixel: {first_bad:?}");
     eprintln!("Total luma |diff| sum: {total_diff}");
 
+    // --- first few chroma U pixels (raw values) ---
+    eprintln!("=== U raw values (first 12 pixels of first 4 rows) ===");
+    for y in 0..4 {
+        let mut row_k = String::new();
+        let mut row_r = String::new();
+        for x in 0..12 {
+            row_k.push_str(&format!("{:4}", frame.data[u_off + y * uv_stride + x]));
+            row_r.push_str(&format!("{:4}", ref_frame.data[u_off + y * uv_stride + x]));
+        }
+        eprintln!("y={y} kit: {row_k}");
+        eprintln!("y={y} ref: {row_r}");
+    }
+
     // --- chroma heatmaps ---
     for (plane, off, label) in [("U", u_off, "U"), ("V", v_off, "V")] {
         eprintln!("\n=== {label} 4x4-block mean-abs-diff heatmap ({uv_w}x{uv_h}) ===");

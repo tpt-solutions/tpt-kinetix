@@ -282,6 +282,14 @@ pub(super) fn reconstruct_tx_block(
         }
     }
 
+    let px_trace = std::env::var("KINETIX_AV1_TRACE_PX").ok().and_then(|s| {
+        let mut it = s.split(',');
+        Some((
+            it.next()?.trim().parse::<usize>().ok()?,
+            it.next()?.trim().parse::<usize>().ok()?,
+            it.next()?.trim().parse::<usize>().ok()?,
+        ))
+    });
     for dy in 0..tx_h {
         let sy = px_y + dy;
         if sy >= plane_h {
@@ -293,7 +301,18 @@ pub(super) fn reconstruct_tx_block(
                 break;
             }
             if let Some(slot) = samples.get_mut(sy * stride + sx) {
-                *slot = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, 255) as u8;
+                let p = pred[dy * tx_w + dx];
+                let r = residual[dy * tx_w + dx];
+                let out = (p + r).clamp(0, 255) as u8;
+                if let Some((trace_plane, trace_x, trace_y)) = px_trace {
+                    if blk.plane == trace_plane && sx == trace_x && sy == trace_y {
+                        eprintln!(
+                            "TRACE_PX plane={} px=({sx},{sy}) pred={p} res={r} out={out}",
+                            blk.plane
+                        );
+                    }
+                }
+                *slot = out;
             }
         }
     }
