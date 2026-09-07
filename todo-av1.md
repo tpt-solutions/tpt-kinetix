@@ -5164,10 +5164,22 @@
 > on/off sweep on testsrc: full pipeline U/V 57.26/58.63; `NOCDEF` 53.30/54.46;
 > `NODEBLOCK` 53.56/56.37; both off 51.14/52.67. So pre-filter chroma recon is
 > already ~52 dB and the in-loop filters are *improving* it (net +5 dB), i.e.
-> the residual chroma error is a reconstruction bug present before filtering —
-> and since luma is bit-exact, CfL (chroma-from-luma) prediction or chroma
-> dequant/inverse-transform is the prime suspect. Next: per-chroma-block
-> prediction/residual trace vs libdav1d (`av1-trace-diff` / `av1-interior-diff`
-> now work here — ffmpeg ships `libdav1d`), focusing on CfL blocks.
+> the residual chroma error is a reconstruction bug present before filtering.
+> `av1_symbol_trace_diff testsrc` (FILTERED-kinetix vs FILTERED-dav1d):
+> filtered **Y is bit-exact (SSE=0)**; first divergence is **plane U
+> px=(16,1), delta -1**, nearest block marker `coeffs plane=1 px=(16,0)
+> tx=16x8 skip=false pred_mode=0` — a **DC-pred (not CfL) 16x8 rectangular
+> chroma transform** block, off by 1. So the suspect is the **rectangular
+> chroma inverse transform** (the `Abs(log2W-log2H)==1` √2 rescale at
+> `transform.rs:563-576`, or `inverse_dct`/`inverse_adst` rounding for a
+> non-square size), or chroma dequant — NOT CfL. Errors are ±1 scattered
+> (U/V ≈ 57 dB ≈ RMSE 0.36). `dq_denom(TX_16X8)` correctly = 1 (tx_sz_ctx=2),
+> so the 2026-09-04 dqDenom bug shape is already excluded for this block.
+> **Blocker:** pinning a ±1 needs a per-block residual reference = a *patched*
+> dav1d (ITXDUMP/EDGEDUMP). This env has only ffmpeg-bundled libdav1d, no
+> standalone/patched dav1d — build one before going deeper.
+> Note: `av1_symbol_trace_diff`'s "NOFILTER first divergence" line is unsound
+> (compares nofilter-kinetix vs FILTERED-dav1d, same confound as the
+> CDEF-not-edge-limited finding) — ignore it.
 > 139 unit tests + full av1 test suite + workspace clippy `-D warnings` +
 > `cargo fmt --all --check` all green.
