@@ -215,27 +215,12 @@ pub(super) fn apply_cfl_prediction(
     }
     let shift = tx_w.trailing_zeros() + tx_h.trailing_zeros();
     let luma_avg = ((luma_avg + (1i64 << (shift - 1))) >> shift) as i32;
-    let cfl_dbg = std::env::var("KINETIX_AV1_CFL_DBG").is_ok();
-    if cfl_dbg {
-        eprintln!(
-            "CFL_DBG cpx=({cpx_x},{cpx_y}) tw={tx_w} th={tx_h} alpha={} luma_avg={luma_avg}",
-            cfl.alpha
-        );
-        eprintln!("  l values: {:?}", &l);
-    }
     for i in 0..tx_h {
         for j in 0..tx_w {
             let dc = pred[i * tx_w + j];
-            let ac = l[i * tx_w + j] - luma_avg;
-            let diff = i64::from(cfl.alpha) * i64::from(ac);
-            let scaled_luma_r2s = round2_signed(diff, 6) as i32;
-            let scaled_luma_floor = ((diff + 32) >> 6) as i32;
-            if cfl_dbg {
-                eprintln!(
-                    "  [{i},{j}] dc={dc} ac={ac} diff={diff} r2s={scaled_luma_r2s} floor={scaled_luma_floor}"
-                );
-            }
-            pred[i * tx_w + j] = clip1(dc + scaled_luma_r2s);
+            let diff = i64::from(cfl.alpha) * i64::from(l[i * tx_w + j] - luma_avg);
+            let scaled_luma = round2_signed(diff, 6) as i32;
+            pred[i * tx_w + j] = clip1(dc + scaled_luma);
         }
     }
 }

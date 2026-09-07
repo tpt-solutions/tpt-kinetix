@@ -1651,7 +1651,7 @@ fn cdef_plane_luma(
             // Clip3(1,256) caps the argument to 256, so floor_log2 is at
             // most 8; the min(12) is redundant but kept for spec fidelity.
             let var_str = if var != 0 {
-                let clamped = ((var >> 6).max(1).min(256)) as u32;
+                let clamped = (var >> 6).clamp(1, 256) as u32;
                 floor_log2(clamped) as i32
             } else {
                 0
@@ -1731,7 +1731,7 @@ fn cdef_plane_chroma(
             // Clip3(1,256) caps the argument to 256, so floor_log2 is at
             // most 8; the min(12) is redundant but kept for spec fidelity.
             let var_str = if var != 0 {
-                let clamped = ((var >> 6).max(1).min(256)) as u32;
+                let clamped = (var >> 6).clamp(1, 256) as u32;
                 floor_log2(clamped) as i32
             } else {
                 0
