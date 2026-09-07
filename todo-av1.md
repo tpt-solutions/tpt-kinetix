@@ -5141,3 +5141,33 @@
 > loop-filter *metadata pipeline* structurally complete for inter blocks,
 > but doesn't by itself prove inter-frame deblock correctness — that still
 > needs real inter-frame conformance data once Phase E lands.
+
+> **2026-09-08 session note — CI hygiene + refreshed corpus baseline.**
+> `just check` / CI `fmt-check` was **red on master**: commit `1c46edc`
+> (narrow deblock one-clip fix) left `tpt-kinetix-av1/src/loop_filter.rs:659`
+> unformatted, and `tpt-kinetix-test-utils/tests/dbg_av1_testsrc2.rs:77,145`
+> had two more pre-existing rustfmt violations. All three reformatted (no
+> behaviour change). Also gated the unconditional `eprintln!("DBG tile_init
+> …")` in `reconstruct/mod.rs` (fired on every single decode) behind a new
+> `KINETIX_AV1_DBG_TILE_INIT` env var, matching the `KINETIX_AV1_DBG_TILE_BYTES`
+> guard right above it.
+>
+> **Refreshed `av1_psnr_check` baseline (ffmpeg+libdav1d on PATH), Y/U/V dB —
+> notably better than the numbers carried in todo.md's index and the
+> `project_av1_*` memories, thanks to the concurrent process's recent
+> reconstruction/deblock commits:** solid_red_32/64 99/99/99;
+> **testsrc_128x96 99.00/57.26/58.63 (luma now pixel-exact)**;
+> mandelbrot_128x96 89.03/55.86/55.71; smptebars_256x144 99/99/99;
+> testsrc2_320x180 24.70/24.00/16.86 (still IBC/Phase-E gated).
+>
+> **testsrc chroma gap localised to reconstruction, not loop filter.** Filter
+> on/off sweep on testsrc: full pipeline U/V 57.26/58.63; `NOCDEF` 53.30/54.46;
+> `NODEBLOCK` 53.56/56.37; both off 51.14/52.67. So pre-filter chroma recon is
+> already ~52 dB and the in-loop filters are *improving* it (net +5 dB), i.e.
+> the residual chroma error is a reconstruction bug present before filtering —
+> and since luma is bit-exact, CfL (chroma-from-luma) prediction or chroma
+> dequant/inverse-transform is the prime suspect. Next: per-chroma-block
+> prediction/residual trace vs libdav1d (`av1-trace-diff` / `av1-interior-diff`
+> now work here — ffmpeg ships `libdav1d`), focusing on CfL blocks.
+> 139 unit tests + full av1 test suite + workspace clippy `-D warnings` +
+> `cargo fmt --all --check` all green.

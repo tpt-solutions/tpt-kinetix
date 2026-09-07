@@ -730,9 +730,11 @@ impl<'a> TileDecodeState<'a> {
                 bit_offset % 8
             );
         }
-        eprintln!(
-            "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
-        );
+        if std::env::var("KINETIX_AV1_DBG_TILE_INIT").is_ok() {
+            eprintln!(
+                "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
+            );
+        }
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
             coeff_cdfs: TileCdfs::new(qindex),

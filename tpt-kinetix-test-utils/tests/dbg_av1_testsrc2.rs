@@ -77,7 +77,7 @@ fn dbg_testsrc2_diffmap() {
                 }
             }
             if block_sum > 0 {
-                let mb_col = bx / 4;  // 4x4 MI units
+                let mb_col = bx / 4; // 4x4 MI units
                 let mb_row = by / 4;
                 eprintln!("block bx={bx} by={by} (mi_col={mb_col} mi_row={mb_row}):");
                 for y in by..(by + 8).min(h) {
@@ -145,7 +145,11 @@ fn dbg_testsrc2_diffmap() {
                             let a = frame.data[off + y * uv_stride + x] as i32;
                             let b = ref_frame.data[off + y * uv_stride + x] as i32;
                             let d = a - b;
-                            if d == 0 { row.push_str("    . "); } else { row.push_str(&format!("{d:+5} ")); }
+                            if d == 0 {
+                                row.push_str("    . ");
+                            } else {
+                                row.push_str(&format!("{d:+5} "));
+                            }
                         }
                         eprintln!("    y={y}: {row}");
                     }
