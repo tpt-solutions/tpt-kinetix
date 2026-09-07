@@ -658,8 +658,8 @@ fn filter_line_1d(
         let ps0 = p0 - 128;
         let qs0 = q0 - 128;
         let qs1 = q1 - 128;
-        let mut filter = if hev { clip3(ps1 - qs1, -128, 127) } else { 0 };
-        filter = clip3(filter + 3 * (qs0 - ps0), -128, 127);
+        // §7.14.6.3: one clip over the complete sum, not two separate clips
+        let filter = clip3((if hev { ps1 - qs1 } else { 0 }) + 3 * (qs0 - ps0), -128, 127);
         let f1 = clip3(filter + 4, -128, 127) >> 3;
         let f2 = clip3(filter + 3, -128, 127) >> 3;
         let oq0 = clip3(qs0 - f1 + 128, 0, 255);
