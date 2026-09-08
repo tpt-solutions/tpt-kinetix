@@ -156,6 +156,14 @@ const MANIFEST: &[(&str, Expect)] = &[
         ),
     ),
     // --- FRExt High 4:2:0 (8x8 transform) ---
+    // High CABAC, GOP I B B P, 1 ref, temporal direct, loop filter on.
+    // Promoted to BitExact 2026-09-09: the last non-exact B frame (poc 188 /
+    // 196) was a §9.3.3.1.1.7 ctxIdxInc desync — `set_partition_l0` narrowed
+    // |mvd| to u8 *before* capping at 70, so a large component (264) wrapped
+    // to 8 and fed ctxIdxInc 1 instead of 2 to the next sub-partition's
+    // mvd bin-0. Fixed in slice_data/ctx.rs.
+    ("HPCA_BRCM_C", Expect::BitExact),
+    ("HPCANL_BRCM_C", Expect::BitExact),
     (
         "HCHP1_HHI_B",
         Expect::KnownGap(

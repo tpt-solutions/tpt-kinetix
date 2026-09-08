@@ -164,8 +164,13 @@ impl MbInterCabacCtx {
         mvd_y: i32,
         ref_idx: i32,
     ) {
-        let ax = (mvd_x.unsigned_abs() as u8).min(70);
-        let ay = (mvd_y.unsigned_abs() as u8).min(70);
+        // Cap BEFORE narrowing to u8: a raw `as u8` on a large |mvd| (e.g. 264)
+        // wraps mod 256 (→ 8) and silently changes the §9.3.3.1.1.7 ctxIdxInc
+        // for the next partition's mvd bin-0 (8 → inc 1 vs the correct inc 2).
+        // The ITU reference (JM, 16-bit mvd) and FFmpeg (caps to 66/70 in `int`
+        // first) both keep it ≥ 33 here. Hit by HPCA_BRCM_C B-frame poc 188.
+        let ax = mvd_x.unsigned_abs().min(70) as u8;
+        let ay = mvd_y.unsigned_abs().min(70) as u8;
         let gt0 = ref_idx > 0;
         for &b in blocks {
             self.l0_mvd_abs[b] = [ax, ay];
@@ -181,8 +186,8 @@ impl MbInterCabacCtx {
         mvd_y: i32,
         ref_idx: i32,
     ) {
-        let ax = (mvd_x.unsigned_abs() as u8).min(70);
-        let ay = (mvd_y.unsigned_abs() as u8).min(70);
+        let ax = mvd_x.unsigned_abs().min(70) as u8;
+        let ay = mvd_y.unsigned_abs().min(70) as u8;
         let gt0 = ref_idx > 0;
         for &b in blocks {
             self.l1_mvd_abs[b] = [ax, ay];
