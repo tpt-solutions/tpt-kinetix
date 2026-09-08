@@ -61,7 +61,11 @@ fn ba2_pframe_diffmap() {
     let annexb = std::fs::read(&bs).unwrap();
     let reference = std::fs::read(&yuv_path).unwrap();
 
-    let mut dec = H264Decoder::new().with_display_order();
+    let decode_order = std::env::var("ITU_DECODE_ORDER").is_ok();
+    let mut dec = H264Decoder::new();
+    if !decode_order {
+        dec = dec.with_display_order();
+    }
     let mut frames = Vec::new();
     for (n, u) in split_nals(&annexb).into_iter().enumerate() {
         let pkt = Packet {
@@ -130,9 +134,11 @@ fn ba2_pframe_diffmap() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
+    let ref_override: Option<usize> = std::env::var("ITU_REF").ok().and_then(|s| s.parse().ok());
     for fi in 0..max_frame.min(frames.len()) {
         let got = &frames[fi].data;
-        let refslice = &reference[fi * fl..(fi + 1) * fl];
+        let ri = ref_override.unwrap_or(fi);
+        let refslice = &reference[ri * fl..(ri + 1) * fl];
         let plane = |name: &str, a: &[u8], b: &[u8], pw: usize| {
             let mut maxd = 0i32;
             let mut nd = 0usize;
