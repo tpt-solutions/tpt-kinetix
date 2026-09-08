@@ -2,6 +2,32 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ba — HPCA_BRCM_C / HPCANL_BRCM_C byte-exact (mvd ctxIdxInc desync)
+
+ITU suite now **24 hard-checked bit-exact, 0 failures**. Both HPCA clips
+promoted from informational to `BitExact`.
+
+Root cause of the one bad B frame each (poc 188 / 196, entire bottom MB
+row, near-full-scale luma): `set_partition_l0`/`set_partition_l1`
+(`slice_data/ctx.rs`) built the per-4×4 |mvd| neighbour cache with
+`(mvd.unsigned_abs() as u8).min(70)` — the `as u8` narrows *first*, so a
+large component (this clip codes an `mvd_l0` x of **264** in MB384) wraps
+mod 256 to 8, then `min(8,70)` = 8. That hands §9.3.3.1.1.7 `ctxIdxInc`
+**1** (8 ∈ [3,32]) instead of **2** (> 32) to the next B_8x8
+sub-partition's mvd bin-0, desyncing CABAC for the rest of the slice
+(terminated 2 MBs early; MBs 385–393 mis-typed inter-vs-intra). The ITU
+reference (JM, 16-bit `short` mvd) and FFmpeg (caps in `int` before the
+u8 cache write) both keep it ≥ 33. Fix: `mvd.unsigned_abs().min(70) as u8`.
+Commits: `53b8712` (stale `split_nals` `n-4`→`n-3` in `dbg_itu_pframe.rs`),
+`e195016` (the fix + manifest promotion).
+
+**Method (reusable):** every ITU fixture dir has a JM `.trc` file — full
+per-MB syntax-element trace. Diff it against an `on_mb_parsed` grid dump
+(scratch tracer over `decode_with_tracer`, per-packet slice delimiting).
+Map decode-order slice index → poc via the `.trc` `pic_order_cnt_lsb`
+sequence. First class-mismatch MB = desync point; walk back one MB and
+compare mvd/sub_mb_type/cbp element-by-element.
+
 ## SESSION #32az — ITU suite re-verified on this machine; remaining KnownGaps mapped
 
 Ran `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`
