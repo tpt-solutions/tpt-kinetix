@@ -1545,7 +1545,9 @@ pub fn apply_post_filters(
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
-                let uv_damping = fh.cdef_damping as i32;
+                // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
+                // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
+                let uv_damping = fh.cdef_damping as i32 - 1;
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
@@ -1568,7 +1570,9 @@ pub fn apply_post_filters(
                 let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
                 let uv_pri = (uv_packed & 0x0F) as i32;
                 let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
-                let uv_damping = fh.cdef_damping as i32;
+                // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
+                // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
+                let uv_damping = fh.cdef_damping as i32 - 1;
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
@@ -1729,22 +1733,13 @@ fn cdef_plane_chroma(
             // luma 8×8 block. Chroma direction is then remapped via Cdef_Uv_Dir.
             let luma_x0 = x0 << sub_x;
             let luma_y0 = y0 << sub_y;
-            let (yd, var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
-            // §7.15.2 `cdef_block` variance-adjustment step:
-            // `i = Min(FloorLog2(Clip3(1, 256, variance >> 6)), 12)`.
-            // Clip3(1,256) caps the argument to 256, so floor_log2 is at
-            // most 8; the min(12) is redundant but kept for spec fidelity.
-            let var_str = if var != 0 {
-                let clamped = (var >> 6).clamp(1, 256) as u32;
-                floor_log2(clamped) as i32
-            } else {
-                0
-            };
-            let p = if var != 0 {
-                (pri_str * (4 + var_str) + 8) >> 4
-            } else {
-                0
-            };
+            let (yd, _var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
+            // §7.15.3 / dav1d `adjust_strength`: the variance-based primary
+            // strength adjustment is applied to the *luma* plane only. Chroma
+            // uses `cdef_uv_pri_strength` directly (dav1d `cdef_apply_tmpl.c`
+            // passes `uv_pri_lvl` unadjusted; only `y_pri_lvl` goes through
+            // `adjust_strength`).
+            let p = pri_str;
             let dir = if pri_str == 0 {
                 0
             } else {

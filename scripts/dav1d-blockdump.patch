@@ -1,0 +1,20 @@
+diff --git a/src/recon.h b/src/recon.h
+index 7219249..2d3f857 100644
+--- a/src/recon.h
++++ b/src/recon.h
+@@ -31,10 +31,11 @@
+ #include "src/internal.h"
+ #include "src/levels.h"
+ 
+-#define DEBUG_BLOCK_INFO 0 && \
+-        f->frame_hdr->frame_offset == 2 && t->by >= 0 && t->by < 4 && \
+-        t->bx >= 8 && t->bx < 12
+-#define DEBUG_B_PIXELS 0
++/* tpt-kinetix: full per-block prediction / dequant-coeff / reconstruction
++ * trace to stdout, for diffing against Kinetix's AV1 decoder. Narrow the
++ * `t->bx`/`t->by` window (4-px luma units) when a clip is large. */
++#define DEBUG_BLOCK_INFO 1
++#define DEBUG_B_PIXELS 1
+ 
+ #define decl_recon_b_intra_fn(name) \
+ void (name)(Dav1dTaskContext *t, enum BlockSize bs, \

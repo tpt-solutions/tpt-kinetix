@@ -5183,3 +5183,65 @@
 > CDEF-not-edge-limited finding) — ignore it.
 > 139 unit tests + full av1 test suite + workspace clippy `-D warnings` +
 > `cargo fmt --all --check` all green.
+
+> **2026-09-09 session note — patched dav1d BUILT; testsrc chroma gap is the
+> LOOP FILTER, not reconstruction (previous note above is WRONG).**
+>
+> Built a block-trace dav1d on this Windows box (the blocker every prior
+> session hit): `scripts/build-patched-dav1d.ps1` + `scripts/dav1d-blockdump.patch`
+> (flips dav1d's own `DEBUG_BLOCK_INFO`/`DEBUG_B_PIXELS` in `src/recon.h`).
+> Needs only VS 2022 + meson/ninja, no MSYS2/nasm (`-Denable_asm=false`,
+> C paths are bit-exact — verified SSE=0 vs ffmpeg-libdav1d on testsrc).
+> Run: `dav1d.exe --threads 1 --framedelay 1 -i f.obu -o o.y4m 1>trace.txt`.
+> New scratch harness: `tpt-kinetix-test-utils/tests/dbg_av1_testsrc_chroma.rs`
+> (first diverging U/V chroma px + window vs dav1d).
+>
+> **The "rectangular chroma inverse transform" / dqDenom hypothesis is dead.**
+> dav1d's trace shows every chroma block around the first U divergence
+> (chroma px (16,1)) has `eob=-1` — *no coded residual, no inverse transform
+> at all*. They are palette- / DC- / directional-predicted skip blocks.
+> The block Kinetix's marker called "DC-pred 16x8 tx skip=false" is, in
+> dav1d, a **palette** block (`Post-pal[pl=1,sz=6] pal=[37 80 a0 ca f0 f0]`).
+>
+> **Proof it's the filter:** ran Kinetix with `KINETIX_AV1_NODEBLOCK=1
+> KINETIX_AV1_NOCDEF=1` and compared its *pre-filter* chroma against dav1d's
+> *pre-filter* `u-pal-pred` hex dump for the same block:
+>   - dav1d pre-filter U (16,0..1) = `55, 160`;  Kinetix pre-filter = `55, 160`
+>   — **bit-exact, every sample.**
+>   - dav1d *post*-filter (16,1) = 162;  Kinetix post-filter = 161.
+> So reconstruction (palette colour decode + colour map + prediction) is
+> correct; the entire U/V ≈57 dB gap is Kinetix's in-loop **deblock and/or
+> CDEF** producing a slightly different (usually over-corrected) result on
+> edges. Error signature: per-pixel ±1..±3 gradients hugging diagonal colour
+> edges, zero in flat regions — a filter-strength delta, not a constant
+> offset (wrong palette colour) or a large jump (wrong colour-map index).
+> This **converges with `project_av1_mandelbrot_dct16_pm1_gap`** ("Kinetix's
+> own loop filter over-correcting, not reconstruction") — testsrc-chroma and
+> mandelbrot-luma 89 dB now look like the *same* loop-filter bug.
+>
+> **RESOLVED same session — it was CDEF, two chroma-only bugs.** dav1d's CLI
+> `--inloopfilters {nocdef,nodeblock,nocdef,none,norestoration}` gives a
+> clean per-filter reference (no patched-plane dump needed). Split:
+>   - Kinetix `NOFILTER` vs dav1d `none`  → **0 diff** (recon bit-exact, U+V).
+>   - Kinetix `NOCDEF` (deblock+LR) vs dav1d `nocdef`  → **0 diff** (deblock
+>     and loop-restoration both bit-exact).
+>   - any config *with* CDEF  → U 307 / V 224 px off by ±1..3. **CDEF.**
+>
+> Both bugs were in the chroma CDEF path (`loop_filter.rs` `cdef_plane_chroma`
+> + the per-unit chroma driver), luma was already correct:
+>   1. **Chroma damping** must be `CdefDamping - 1`, not `CdefDamping`
+>      (dav1d `cdef_apply_tmpl.c:285` passes `damping - 1` for `pl > 0`).
+>   2. **Chroma primary strength must NOT be variance-adjusted.** Kinetix ran
+>      the luma `adjust_strength` step (`(pri*(4+i)+8)>>4`, §7.15.3) on chroma
+>      too; dav1d applies it only to `y_pri_lvl`, `uv_pri_lvl` is passed raw.
+>
+> Result (`av1_psnr_check`, ffmpeg+libdav1d): **testsrc_128x96 now
+> 99/99/99 — fully pixel-exact** (was 99/57.3/58.6). **mandelbrot chroma
+> 55.9/55.7 → 69.6/70.7.** solid_red / smptebars still 99/99/99. 139 av1
+> unit tests + fmt + clippy green.
+>
+> **Still open:** mandelbrot **luma** 89.03 dB — unchanged by this fix, so it
+> is a *separate* bug (not chroma CDEF). testsrc2 still IBC/Phase-E gated.
+> The patched-dav1d block trace + `dbg_av1_testsrc_chroma.rs` harness (with
+> its `KINETIX_DUMP_OBU` / `KINETIX_REF_YUV` escape hatches) are the tools to
+> chase the mandelbrot luma gap next.
