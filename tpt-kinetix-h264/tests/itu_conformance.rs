@@ -167,8 +167,11 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "HCHP1_HHI_B",
         Expect::KnownGap(
-            "hierarchical GOP-16 B-frames + ref-pic-list reorder + MMCO — frame 0 \
-             bit-exact, frames 1+ diverge ('B PATH: ref list build failed')",
+            "hierarchical GOP-16, spatial direct, ref-pic-list reorder + MMCO. \
+             2026-09-09: the ref-list-build failure is gone — now a small \
+             localised recon drift: frame 0 exact, frame 1 (poc 8) max_diff 17 \
+             over ~10 MBs around MB(9,10), growing via reference propagation. \
+             ffmpeg matches the ITU ref, so usable as an MV/mb_type oracle.",
         ),
     ),
     // --- multiple IDR / multiple parameter sets ---
