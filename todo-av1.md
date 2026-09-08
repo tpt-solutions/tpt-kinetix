@@ -5245,3 +5245,33 @@
 > The patched-dav1d block trace + `dbg_av1_testsrc_chroma.rs` harness (with
 > its `KINETIX_DUMP_OBU` / `KINETIX_REF_YUV` escape hatches) are the tools to
 > chase the mandelbrot luma gap next.
+
+> **2026-09-09 (cont'd) — mandelbrot luma CDEF fix + what's left.**
+> Second CDEF bug, this one in the **luma** path: dav1d `adjust_strength()`
+> caps the variance term at `Min(FloorLog2(var>>6), 12)`; Kinetix clamped the
+> input `Clip3(1, 256, var>>6)` which caps it at **8**, under-strengthening
+> CDEF on detailed blocks. Fixed (commit — "av1: fix luma CDEF variance
+> strength cap"). Corpus `mandelbrot_80x64` luma **121 px → 0** (bit-exact vs
+> dav1d full pipeline via `--inloopfilters`).
+>
+> **What's still off (all tiny now, measured against a per-`--inloopfilters`
+> dav1d reference — the clean method):**
+>   - `mandelbrot_128x96` **luma: ONE pixel** at (75,54) off by 1
+>     (k=87/r=86). That's literally what "89.03 dB" is — MSE = 1.0/12288 →
+>     89 dB. A CDEF edge/clamp corner case (`nodeblock` = 10 px, `all` = 1).
+>     Not worth much — but if chased: `cdef_filter_block`'s border-tap
+>     min/max handling (Kinetix skips out-of-buffer taps; dav1d pads with
+>     `CDEF_VERY_LARGE` and lets `constrain` zero them while still folding
+>     the sentinel into `max` via `imax`).
+>   - `mandelbrot` **chroma: ~20-60 px off by ±1-4, present pre-filter**
+>     (`NOFILTER` vs dav1d `none` diverges) → a **chroma reconstruction**
+>     bug, separate from CDEF. Localised to `poc=0,y=12,x=8` (luma 32,48),
+>     `uvmode[6]` = **D157 directional chroma prediction** (`tx=TX_4X8`,
+>     `eob=-1` so no residual — it's the predictor). Kinetix's directional
+>     intra predictor (chroma, non-90/180 angle, with `angle_delta` +
+>     §7.11.2.4 edge upsample / §7.11.2.9 filter-type) is ±1-2 vs dav1d on
+>     the interpolated samples. This is the next real bug to fix; use the
+>     `u-intra-pred` hex in the patched-dav1d trace as the oracle.
+>
+> testsrc / solid_red / smptebars all fully pixel-exact. 139 av1 unit tests
+> + fmt + clippy green.
