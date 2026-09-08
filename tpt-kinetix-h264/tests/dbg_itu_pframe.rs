@@ -23,7 +23,7 @@ fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
     }
     let mut out = Vec::new();
     for (idx, &s) in starts.iter().enumerate() {
-        let mut end = starts.get(idx + 1).map(|&n| n - 4).unwrap_or(annexb.len());
+        let mut end = starts.get(idx + 1).map(|&n| n - 3).unwrap_or(annexb.len());
         while end > s && annexb[end - 1] == 0 {
             end -= 1;
         }
