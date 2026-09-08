@@ -8,8 +8,9 @@ use tpt_kinetix_test_utils::{reference::decode_av1_obu_with_dav1d, synthetic::av
 #[test]
 fn dbg_testsrc_chroma() {
     let corpus = av1_intra_corpus();
-    let Some(entry) = corpus.iter().find(|e| e.label == "testsrc") else {
-        eprintln!("no testsrc entry (ffmpeg unavailable?)");
+    let label = std::env::var("KINETIX_CORPUS_LABEL").unwrap_or_else(|_| "testsrc".into());
+    let Some(entry) = corpus.iter().find(|e| e.label == label) else {
+        eprintln!("no {label} entry (ffmpeg unavailable?)");
         return;
     };
     // Escape hatch: dump the exact OBU the corpus feeds, so a standalone
@@ -60,15 +61,20 @@ fn dbg_testsrc_chroma() {
     let y_size = w * h;
     let c_size = cw * ch;
 
-    for (pname, poff) in [("U", y_size), ("V", y_size + c_size)] {
-        let k = &frame.data[poff..poff + c_size];
-        let r = &ref_frame.data[poff..poff + c_size];
+    for (pname, poff, pw, ph) in [
+        ("Y", 0usize, w, h),
+        ("U", y_size, cw, ch),
+        ("V", y_size + c_size, cw, ch),
+    ] {
+        let psize = pw * ph;
+        let k = &frame.data[poff..poff + psize];
+        let r = &ref_frame.data[poff..poff + psize];
         let mut first: Option<(usize, usize)> = None;
         let mut ndiff = 0;
         let mut maxd = 0i32;
-        for cy in 0..ch {
-            for cx in 0..cw {
-                let d = (k[cy * cw + cx] as i32 - r[cy * cw + cx] as i32).abs();
+        for cy in 0..ph {
+            for cx in 0..pw {
+                let d = (k[cy * pw + cx] as i32 - r[cy * pw + cx] as i32).abs();
                 if d != 0 {
                     ndiff += 1;
                     maxd = maxd.max(d);
@@ -78,17 +84,17 @@ fn dbg_testsrc_chroma() {
                 }
             }
         }
-        eprintln!("plane {pname}: {ndiff}/{c_size} px differ, max |diff|={maxd}, first={first:?}");
+        eprintln!("plane {pname}: {ndiff}/{psize} px differ, max |diff|={maxd}, first={first:?}");
         if let Some((fx, fy)) = first {
             let x0 = fx.saturating_sub(4);
             let y0 = fy.saturating_sub(2);
             eprintln!("  window x={x0}..{} y={y0}..{}", x0 + 12, y0 + 8);
-            for cy in y0..(y0 + 8).min(ch) {
-                let kr: Vec<i32> = (x0..(x0 + 12).min(cw))
-                    .map(|cx| k[cy * cw + cx] as i32)
+            for cy in y0..(y0 + 8).min(ph) {
+                let kr: Vec<i32> = (x0..(x0 + 12).min(pw))
+                    .map(|cx| k[cy * pw + cx] as i32)
                     .collect();
-                let rr: Vec<i32> = (x0..(x0 + 12).min(cw))
-                    .map(|cx| r[cy * cw + cx] as i32)
+                let rr: Vec<i32> = (x0..(x0 + 12).min(pw))
+                    .map(|cx| r[cy * pw + cx] as i32)
                     .collect();
                 let dr: Vec<i32> = kr.iter().zip(&rr).map(|(a, b)| a - b).collect();
                 eprintln!("  cy={cy:3} k={kr:?}");

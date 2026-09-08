@@ -1654,18 +1654,17 @@ fn cdef_plane_luma(
                 continue;
             }
             let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
-            // §7.15.2 `cdef_block` variance-adjustment step:
-            // `i = Min(FloorLog2(Clip3(1, 256, variance >> 6)), 12)`.
-            // Clip3(1,256) caps the argument to 256, so floor_log2 is at
-            // most 8; the min(12) is redundant but kept for spec fidelity.
-            let var_str = if var != 0 {
-                let clamped = (var >> 6).clamp(1, 256) as u32;
-                floor_log2(clamped) as i32
-            } else {
-                0
-            };
+            // dav1d `adjust_strength`: `i = (var >> 6) ? Min(FloorLog2(var >> 6), 12) : 0`
+            // — there is NO Clip3(_, 256) on the input; a high-variance block
+            // can push `i` up to 12 (an earlier clamp-to-256 here capped it at 8,
+            // under-strengthening CDEF on detailed content, e.g. mandelbrot).
             let p = if var != 0 {
-                (pri_str * (4 + var_str) + 8) >> 4
+                let i = if (var >> 6) != 0 {
+                    (floor_log2((var >> 6) as u32) as i32).min(12)
+                } else {
+                    0
+                };
+                (pri_str * (4 + i) + 8) >> 4
             } else {
                 0
             };
