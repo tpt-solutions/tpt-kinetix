@@ -5597,3 +5597,22 @@
 >  5. Dual-axis MC kernels (dual filter reads land; MC still uses one).
 >  6. Keyframe LR/CDEF ±1 (94 px, deblock-on path).
 >  7. Official AOM/ITU vectors → flip `capabilities().pixel_exact`.
+
+> **2026-09-10 (cont'd) — deblock level-zero guard (commit 78402c9): first
+> AV1 inter-sequence frame bit-exact.** `compute_level` adds
+> `loop_filter_ref_deltas[INTRA_FRAME]` (defaults to 1) to the base level, so
+> `loop_filter_level = [0,0,0,0]` still produced `lvl=1` and ran deblock,
+> smearing ±1 along every edge. §7.14 returns immediately when both luma
+> levels are 0 — added that guard. The `minimal_av1_inter_ivf` **keyframe is
+> now bit-exact vs dav1d** (`av1_inter_sequence` 1/8). Intra corpus 6/6.
+>
+> **Frame-1 diffmap after that fix:** SB row 0 (y<64) mostly correct (±5
+> scattered — MV/prediction imperfections), SB row 1 (y≥64) catastrophic
+> (~100 diff) — an **entropy desync at the SB(0,1) boundary**, plus a −23
+> prediction error already at px (31,3) in SB row 0 (wrong MV or wrong ref).
+> Both point at the same next item: **compound `find_mv_stack`** — the real
+> §7.10.2 weighted scan / sort / compound extended candidates. Everything
+> inter downstream (NEWMV, drl, compound-mode selection, and the skip_mode
+> NEAREST MVs) feeds off it; the current `build_mv_candidates` is a
+> spatial-only stub. Port it from dav1d `dav1d_refmvs_find` (the intrabc
+> `ibc_mv_pred` scan is the skeleton) — that is THE remaining inter blocker.
