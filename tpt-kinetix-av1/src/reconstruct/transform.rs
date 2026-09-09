@@ -426,13 +426,10 @@ fn inverse_identity(t: &mut [i64], n: u32) {
 }
 
 /// Which 1-D transform kind applies along one axis, per spec §7.13.3's
-/// `PlaneTxType`-based dispatch. AV1 intra coding never selects a FLIPADST
-/// variant (`TX_TYPE_INTRA_INV_SET1`/`SET2` in `coeff_tables.rs` only cover
-/// `IDTX`/`DCT_DCT`/`V_DCT`/`H_DCT`/`ADST_ADST`/`ADST_DCT`/`DCT_ADST`), so
-/// flip handling is intentionally not implemented here — only the inter path
-/// (not yet validated, AV1 Phase E) can reach a FLIPADST type, and it will
-/// currently fall through to identity for both axes there rather than being
-/// silently wrong in a hard-to-notice way for the intra path this covers.
+/// `PlaneTxType`-based dispatch. Covers all 16 `TxType`s including the
+/// FLIPADST variants: a flip is a plain ADST whose 1-D output is reversed
+/// along that axis (dav1d's `inv_flipadst*` — ADST then reverse), so the
+/// axis kind carries a `flip` flag rather than a distinct enum arm.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AxisTransform {
     Dct,
@@ -440,26 +437,36 @@ enum AxisTransform {
     Identity,
 }
 
-fn row_axis_transform(tx_type: usize) -> AxisTransform {
-    use av1::{ADST_DCT, DCT_DCT, H_DCT};
-    if matches!(tx_type, DCT_DCT | ADST_DCT | H_DCT) {
-        AxisTransform::Dct
-    } else if matches!(tx_type, av1::DCT_ADST | av1::ADST_ADST | av1::H_ADST) {
-        AxisTransform::Adst
-    } else {
-        AxisTransform::Identity
-    }
+/// `(kind, flip)` for the horizontal (row) 1-D transform.
+fn row_axis_transform(tx_type: usize) -> (AxisTransform, bool) {
+    use av1::*;
+    let kind = match tx_type {
+        DCT_DCT | ADST_DCT | FLIPADST_DCT | H_DCT => AxisTransform::Dct,
+        DCT_ADST | ADST_ADST | DCT_FLIPADST | FLIPADST_FLIPADST | ADST_FLIPADST | FLIPADST_ADST
+        | H_ADST | H_FLIPADST => AxisTransform::Adst,
+        _ => AxisTransform::Identity,
+    };
+    let flip = matches!(
+        tx_type,
+        DCT_FLIPADST | FLIPADST_FLIPADST | ADST_FLIPADST | H_FLIPADST
+    );
+    (kind, flip)
 }
 
-fn col_axis_transform(tx_type: usize) -> AxisTransform {
-    use av1::{DCT_ADST, DCT_DCT, V_DCT};
-    if matches!(tx_type, DCT_DCT | DCT_ADST | V_DCT) {
-        AxisTransform::Dct
-    } else if matches!(tx_type, av1::ADST_DCT | av1::ADST_ADST | av1::V_ADST) {
-        AxisTransform::Adst
-    } else {
-        AxisTransform::Identity
-    }
+/// `(kind, flip)` for the vertical (column) 1-D transform.
+fn col_axis_transform(tx_type: usize) -> (AxisTransform, bool) {
+    use av1::*;
+    let kind = match tx_type {
+        DCT_DCT | DCT_ADST | DCT_FLIPADST | V_DCT => AxisTransform::Dct,
+        ADST_DCT | ADST_ADST | FLIPADST_DCT | FLIPADST_FLIPADST | ADST_FLIPADST | FLIPADST_ADST
+        | V_ADST | V_FLIPADST => AxisTransform::Adst,
+        _ => AxisTransform::Identity,
+    };
+    let flip = matches!(
+        tx_type,
+        FLIPADST_DCT | FLIPADST_FLIPADST | FLIPADST_ADST | V_FLIPADST
+    );
+    (kind, flip)
 }
 
 /// 4×4 Walsh-Hadamard transform (AV1 spec §6.10.3).
@@ -527,8 +534,8 @@ pub(super) fn inverse_transform(
     let log2h = av1::TX_HEIGHT_LOG2[tx_size] as u32;
     let w = 1usize << log2w;
     let h = 1usize << log2h;
-    let row_kind = row_axis_transform(av1_tx_type);
-    let col_kind = col_axis_transform(av1_tx_type);
+    let (row_kind, row_flip) = row_axis_transform(av1_tx_type);
+    let (col_kind, col_flip) = col_axis_transform(av1_tx_type);
     let row_shift = av1::TRANSFORM_ROW_SHIFT[tx_size];
     let col_shift = 4u32;
     // BitDepth is fixed at 8 in this crate (only 8-bit dequant tables are
@@ -579,6 +586,9 @@ pub(super) fn inverse_transform(
             AxisTransform::Adst => inverse_adst(&mut t, log2w, row_clamp_range),
             AxisTransform::Identity => inverse_identity(&mut t, log2w),
         }
+        if row_flip {
+            t[..w].reverse();
+        }
         for j in 0..w {
             residual[i * w + j] = round2(t[j], row_shift);
         }
@@ -598,6 +608,9 @@ pub(super) fn inverse_transform(
             AxisTransform::Dct => inverse_dct(&mut t, log2h, col_clamp_range),
             AxisTransform::Adst => inverse_adst(&mut t, log2h, col_clamp_range),
             AxisTransform::Identity => inverse_identity(&mut t, log2h),
+        }
+        if col_flip {
+            t[..h].reverse();
         }
         for i in 0..h {
             residual[i * w + j] = round2(t[i], col_shift);
