@@ -1494,6 +1494,11 @@ pub fn apply_post_filters(
     }
 
     // --- Deblocking loop filter (§7.14) ---
+    // §7.14 loop filter process: when both luma filter levels are zero the
+    // entire deblocking pass is skipped — the per-block ref/mode-delta terms
+    // (`loop_filter_ref_deltas[INTRA_FRAME]` defaults to 1) must NOT revive it.
+    let deblock_disabled = fh.loop_filter_level[0] == 0 && fh.loop_filter_level[1] == 0;
+    let skip_deblock = skip_deblock || deblock_disabled;
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
     if !skip_deblock {
