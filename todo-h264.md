@@ -2,6 +2,30 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bb — chroma DC / inter residual scaling-list index by prediction mode
+
+High-profile streams that load **distinct intra vs inter** scaling
+matrices (e.g. `freh1_b`, `HCHP1_HHI_B`) were mis-scaling residuals:
+- `chroma_dc_transform` hard-coded scaling list `4 + comp` (Inter Cb/Cr)
+  for *every* chroma DC coefficient — wrong for intra MBs (should be
+  `1 + comp`). Now takes an explicit `intra` flag.
+- the six `*_inter_chroma` reconstruct paths passed `comp + 1` (Intra
+  Cb/Cr) for chroma **AC**, and the three `*_inter_luma` paths passed
+  list `0` (Intra Y) — both should be the Inter lists (`comp + 4` / `3`).
+
+No effect on flat-matrix streams (the whole BitExact corpus — intra and
+inter lists identical there), so ITU stays **24 hard bit-exact, 0
+failures**. Wins: `freh1_b` frame 0 (I) now **fully bit-exact** vs the
+ITU ref (was chroma max_diff 20); B frames referencing it improve a lot
+(frame 3 SAD 282015→131). `HCHP1_HHI_B` **0 → 46/250 frames bit-exact**.
+Commit on master (after the `dbg_itu_pframe` clippy fix).
+
+Still open on `freh1_b`: P/B frames 1/4/5/7… still fall to grey scaffold
+(a P/B decode error, first_bad=frame 1) — next target, it has a full JM
+`.trc`. Latent (unvalidated, left alone): `luma_dc_level_scale` uses
+`list_4x4[3]` (Inter Y) for Intra_16×16 luma DC — looks wrong for intra
+but no BitExact clip exercises a non-flat matrix + I16 DC to prove it.
+
 ## SESSION #32ba — HPCA_BRCM_C / HPCANL_BRCM_C byte-exact (mvd ctxIdxInc desync)
 
 ITU suite now **24 hard-checked bit-exact, 0 failures**. Both HPCA clips
