@@ -1433,9 +1433,20 @@ impl<'a> TileDecodeState<'a> {
             let chroma_bw = BLOCK_WIDTH[plane_sz];
             let chroma_bh = BLOCK_HEIGHT[plane_sz];
 
-            // Chroma displacement: divide the luma MV by the subsampling factor.
+            // Chroma displacement. The luma DV is integer-pel (IBC forces it),
+            // but halving it for a subsampled plane can land on a half-pel
+            // chroma position — dav1d then runs the **bilinear** sub-pel
+            // interpolation (`FILTER_2D_BILINEAR` for intrabc), not a plain
+            // copy. `c_mv` is the luma DV rescaled to 1/8 chroma-pel units
+            // (`>> ss`); `motion_compensate` splits its own integer/fractional
+            // parts. `cmv_d*` below stay as the integer-pel offsets for the
+            // debug hook / bookkeeping only.
             let cmv_dx = mv_dx >> sub_x;
             let cmv_dy = mv_dy >> sub_y;
+            let c_mv = crate::inter::Mv {
+                row: mv.row >> sub_y,
+                col: mv.col >> sub_x,
+            };
 
             for ty in (0..chroma_bh).step_by(ch) {
                 for tx in (0..chroma_bw).step_by(cw) {
@@ -1514,6 +1525,17 @@ impl<'a> TileDecodeState<'a> {
                             let dq = dequantize_coeffs(&cu.quant, c_tx, u_qindex_dc, u_qindex_ac);
                             inverse_transform(&dq, cu.tx_type, c_tx, self.lossless, &mut res_u);
                         }
+                        if std::env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
+                            eprintln!(
+                                "DBG IBC_UV mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) \
+                                 src_c=({src_cx},{src_cy}) c_tx={c_tx} cu.txtp={} cu.eob={} \
+                                 cu.q0={} res_u0={} coincident_luma={coincident_luma_tx_type}",
+                                cu.tx_type,
+                                cu.eob,
+                                cu.quant.first().copied().unwrap_or(0),
+                                res_u[0]
+                            );
+                        }
                         let cv = read_coeffs(
                             &mut self.dec,
                             &mut self.coeff_cdfs,
@@ -1531,6 +1553,38 @@ impl<'a> TileDecodeState<'a> {
                         clear_coeff_context(&mut self.coeff_ctxs, &blk_v, cw / 4, ch / 4);
                     }
 
+                    // Bilinear sub-pel IBC prediction (dav1d intrabc chroma
+                    // path) into per-plane block buffers, then add residual.
+                    let mut pred_u = vec![0u8; cw * ch];
+                    let mut pred_v = vec![0u8; cw * ch];
+                    crate::inter::motion_compensate(
+                        &mut pred_u,
+                        cw,
+                        u_plane,
+                        uv_stride,
+                        tile_cw,
+                        tile_ch,
+                        cpx_x,
+                        cpx_y,
+                        cw,
+                        ch,
+                        c_mv,
+                        crate::inter::INTERP_BILINEAR,
+                    );
+                    crate::inter::motion_compensate(
+                        &mut pred_v,
+                        cw,
+                        v_plane,
+                        uv_stride,
+                        tile_cw,
+                        tile_ch,
+                        cpx_x,
+                        cpx_y,
+                        cw,
+                        ch,
+                        c_mv,
+                        crate::inter::INTERP_BILINEAR,
+                    );
                     for dy in 0..ch {
                         let wy = cpx_y + dy;
                         if wy >= tile_ch {
@@ -1541,19 +1595,13 @@ impl<'a> TileDecodeState<'a> {
                             if wx >= tile_cw {
                                 break;
                             }
-                            let u_src = u_plane
-                                .get((src_cy + dy) * uv_stride + (src_cx + dx))
-                                .copied()
-                                .unwrap_or(128) as i32;
                             if let Some(slot) = u_plane.get_mut(wy * uv_stride + wx) {
-                                *slot = (u_src + res_u[dy * cw + dx]).clamp(0, 255) as u8;
+                                *slot = (pred_u[dy * cw + dx] as i32 + res_u[dy * cw + dx])
+                                    .clamp(0, 255) as u8;
                             }
-                            let v_src = v_plane
-                                .get((src_cy + dy) * uv_stride + (src_cx + dx))
-                                .copied()
-                                .unwrap_or(128) as i32;
                             if let Some(slot) = v_plane.get_mut(wy * uv_stride + wx) {
-                                *slot = (v_src + res_v[dy * cw + dx]).clamp(0, 255) as u8;
+                                *slot = (pred_v[dy * cw + dx] as i32 + res_v[dy * cw + dx])
+                                    .clamp(0, 255) as u8;
                             }
                         }
                     }
