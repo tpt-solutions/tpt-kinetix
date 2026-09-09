@@ -5568,3 +5568,32 @@
 > 29→29.3; `av1_inter_sequence` frame 3 (show_existing) 11.1→33.7. Still
 > 0/N bit-exact — the inter *reconstruction* (skip_mode, real find_mv_stack,
 > MC, compound) is the multi-session core effort.
+
+> **2026-09-10 (cont'd) — inter path unblocked at the entropy level (3 commits
+> 49198ec/f46d8f6 + the earlier fd20d40).** Root cause of the "~12 dB from
+> block 0" was two things: (1) `Av1Decoder::decode()` reconstructed only one
+> frame per packet — hierarchical GOPs pack an ALTREF + B-frames + a
+> show-frame into one temporal unit; now every frame OBU in the TU is
+> reconstructed and pushed to the DPB, and only the shown one is returned;
+> (2) `skip_mode_params` (§6.8.2) always returned "disabled" and read no bit —
+> now computes `skipModeAllowed`/`SkipModeFrame` from the DPB order hints
+> (threaded `RefOrderHint[0..8]` through, `parse_with_dpb`) and reads the
+> `skip_mode_present` bit; and per-block `read_skip_mode` (§5.11.11) now
+> short-circuits skip_mode blocks to compound NEAREST-MV prediction. Also:
+> `av1_inter_corpus_vs_dav1d` splits the OBU stream by temporal-delimiter OBUs
+> so Kinetix outputs align with dav1d's display order.
+> Result (`av1_inter_corpus`): testsrc_64x64 f2 10.6→23.1, f3 30.9→33.9;
+> testsrc_128x96 f2 9.2→16.9. Still 0/N bit-exact.
+>
+> **Remaining inter work, in order:**
+>  1. **Compound `find_mv_stack`** (§7.10.2 `isCompound=1`) — the skip_mode
+>     NEAREST MVs and every NEARMV/NEARESTMV use the simplified spatial-only
+>     `build_mv_candidates`. Port the real weighted scan + sort + compound
+>     extended candidates (the intrabc `ibc_mv_pred` scan is the skeleton).
+>  2. NEWMV / drl / global-motion MV decode + `read_mv` precision paths.
+>  3. Real compound prediction (§7.11.3.1): wedge / diffwtd / distance-weighted
+>     masks — currently a plain average.
+>  4. OBMC, warped motion, interintra.
+>  5. Dual-axis MC kernels (dual filter reads land; MC still uses one).
+>  6. Keyframe LR/CDEF ±1 (94 px, deblock-on path).
+>  7. Official AOM/ITU vectors → flip `capabilities().pixel_exact`.
