@@ -181,10 +181,16 @@ impl ScalingLists {
         self.list_4x4[3][0] as i32 * NORM_ADJUST_4X4[m][0]
     }
 
-    /// `LevelScale4x4` for a chroma DC coefficient: `comp == 0` -> Cb (list 4),
-    /// `comp == 1` -> Cr (list 5), position 0.
-    pub fn chroma_dc_level_scale(&self, comp: usize, m: usize) -> i32 {
-        self.list_4x4[4 + comp][0] as i32 * NORM_ADJUST_4X4[m][0]
+    /// `LevelScale4x4` for a chroma DC coefficient at position 0. §8.5.9 selects
+    /// the scaling list by the macroblock's prediction mode, exactly like the
+    /// chroma AC path: intra uses list `1 + comp` (Intra Cb/Cr), inter uses
+    /// list `4 + comp` (Inter Cb/Cr). Using the inter list for an intra
+    /// macroblock (or vice versa) mis-scales every chroma DC when the two
+    /// lists differ (a real case for High streams that load distinct
+    /// intra/inter chroma matrices).
+    pub fn chroma_dc_level_scale(&self, comp: usize, m: usize, intra: bool) -> i32 {
+        let list = if intra { 1 } else { 4 } + comp;
+        self.list_4x4[list][0] as i32 * NORM_ADJUST_4X4[m][0]
     }
 
     /// Overwrite the 4×4 scaling list at `idx` (0..6) with `v`.
@@ -791,6 +797,7 @@ pub fn chroma_dc_transform(
     qp: i32,
     comp: usize,
     scaling: &ScalingLists,
+    intra: bool,
 ) -> [i32; 4] {
     let qp = qp.clamp(0, 51);
     let m = (qp % 6) as usize;
@@ -819,7 +826,7 @@ pub fn chroma_dc_transform(
     // version of this function did) is a real bug: it silently rounds up
     // roughly half the time it shouldn't, producing isolated ±1 errors on
     // real (non-flat) content — see `todo-h264.md` Phase F.4.
-    let ls = scaling.chroma_dc_level_scale(comp, m);
+    let ls = scaling.chroma_dc_level_scale(comp, m, intra);
     let mut out = [0i32; 4];
     for i in 0..4 {
         out[i] = if shift >= 5 {
@@ -912,7 +919,7 @@ mod tests {
     fn chroma_dc_transform_dc_only() {
         // A single non-zero DC (c00) spreads equally across all four 2×2 outputs
         // in magnitude for the Hadamard, then scales. c00 alone => all equal.
-        let out = chroma_dc_transform(&[8, 0, 0, 0], 20, 0, &ScalingLists::flat());
+        let out = chroma_dc_transform(&[8, 0, 0, 0], 20, 0, &ScalingLists::flat(), true);
         assert_eq!(out[0], out[1]);
         assert_eq!(out[1], out[2]);
         assert_eq!(out[2], out[3]);
@@ -1062,8 +1069,18 @@ mod tests {
         }
         // Luma/chroma DC use position 0 of their lists (value 16).
         assert_eq!(flat.luma_dc_level_scale(0), 16 * NORM_ADJUST_4X4[0][0]);
-        assert_eq!(flat.chroma_dc_level_scale(0, 0), 16 * NORM_ADJUST_4X4[0][0]);
-        assert_eq!(flat.chroma_dc_level_scale(1, 0), 16 * NORM_ADJUST_4X4[0][0]);
+        assert_eq!(
+            flat.chroma_dc_level_scale(0, 0, true),
+            16 * NORM_ADJUST_4X4[0][0]
+        );
+        assert_eq!(
+            flat.chroma_dc_level_scale(1, 0, true),
+            16 * NORM_ADJUST_4X4[0][0]
+        );
+        assert_eq!(
+            flat.chroma_dc_level_scale(0, 0, false),
+            16 * NORM_ADJUST_4X4[0][0]
+        );
     }
 
     #[test]

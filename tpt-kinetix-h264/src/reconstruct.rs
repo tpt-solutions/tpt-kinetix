@@ -1211,7 +1211,7 @@ fn reconstruct_chroma_at<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, true);
 
         let ac = if comp == 0 {
             &mb.chroma_cb_coeffs
@@ -1978,7 +1978,7 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -2018,7 +2018,7 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
                 ref_idx,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
             for row in 0..4 {
                 // Field row -> frame row: stride-2 with the MB's parity offset.
                 let py = 2 * (fy0 + row) + bottom as usize;
@@ -2364,7 +2364,7 @@ fn reconstruct_mbaff_b_inter_luma<T: DecodeTracer>(
             ref_idx0,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
         for row in 0..4 {
             let py = 2 * (fy0 + row) + bottom as usize;
             for col in 0..4 {
@@ -2428,7 +2428,7 @@ fn reconstruct_mbaff_b_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -2513,7 +2513,7 @@ fn reconstruct_mbaff_b_inter_chroma<T: DecodeTracer>(
                 ref_idx0,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
             for row in 0..4 {
                 let py = 2 * (fy0 + row) + bottom as usize;
                 for col in 0..4 {
@@ -2973,7 +2973,7 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -3074,7 +3074,7 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
                 &ac[block],
                 qpc,
                 Some(dc_out[block]),
-                comp + 1,
+                comp + 4,
                 scaling,
                 &crate::transform::FIELD_SCAN_4X4,
             );
@@ -3228,7 +3228,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -3306,7 +3306,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                 &ac[block],
                 qpc,
                 Some(dc_out[block]),
-                comp + 1,
+                comp + 4,
                 scaling,
                 &crate::transform::FIELD_SCAN_4X4,
             );
@@ -3682,7 +3682,7 @@ fn reconstruct_b_inter_luma<T: DecodeTracer>(
             ref_idx0,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
         for row in 0..4 {
             for col in 0..4 {
                 let px = x0 as usize + col;
@@ -3747,7 +3747,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -3858,7 +3858,7 @@ fn reconstruct_b_inter_chroma<T: DecodeTracer>(
                 ref_idx0,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
             for row in 0..4 {
                 for col in 0..4 {
                     let px = x0 as usize + col;
@@ -4032,7 +4032,7 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
             ref_idx,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
         let mut recon_blk = [0u8; 16];
         for row in 0..4 {
             for col in 0..4 {
@@ -4103,7 +4103,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
             dc_src[2] as i32,
             dc_src[3] as i32,
         ];
-        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling);
+        let dc_out = chroma_dc_transform(&dc_raster, qpc, comp, scaling, false);
 
         for block in 0..4usize {
             let bx = (block % 2) * 4;
@@ -4177,7 +4177,7 @@ fn reconstruct_inter_chroma<T: DecodeTracer>(
                 ref_idx,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 1, scaling);
+            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
             let mut recon_blk = [0u8; 16];
             for row in 0..4 {
                 for col in 0..4 {
