@@ -48,8 +48,8 @@ use crate::{
     inter::{
         build_mv_candidates, decode_ref_and_mv, motion_compensate, read_mv, read_single_ref_name,
         InterCdfs, Mv, RefFrames, RefSlot, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME,
-        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
-        NONE_FRAME, ZEROMV,
+        INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME,
+        NEARESTMV, NEARMV, NEWMV, NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
@@ -627,6 +627,15 @@ struct TileDecodeState<'a> {
     force_integer_mv: bool,
     /// `reference_select` (§6.8.2): compound prediction allowed.
     reference_select: bool,
+    /// `is_motion_mode_switchable` (§5.9.24): OBMC / warped motion allowed —
+    /// gates `read_motion_mode` (§5.11.23).
+    is_motion_mode_switchable: bool,
+    /// `allow_warped_motion` (§5.9.24): warped-motion `motion_mode` symbol
+    /// permitted (else only the `use_obmc` bool is read). Currently always the
+    /// `use_obmc` branch is taken (`NumSamples == 0`); kept for the real
+    /// warp-sample derivation.
+    #[allow(dead_code)]
+    allow_warped_motion: bool,
     /// `skip_mode_present` / `SkipModeFrame[0..2]` (§6.8.2 / §7.4.13): a
     /// skip-mode block reads one `skip_mode` symbol, then predicts (compound,
     /// no residual) from this fixed forward/backward reference pair.
@@ -762,6 +771,8 @@ impl<'a> TileDecodeState<'a> {
         skip_mode_frame: [u8; 2],
         interpolation_filter: u8,
         enable_dual_filter: bool,
+        is_motion_mode_switchable: bool,
+        allow_warped_motion: bool,
         ref_to_slot: [u8; 9],
         ref_slots: RefFrames<'a>,
         meta: &'a mut FrameMeta,
@@ -838,6 +849,8 @@ impl<'a> TileDecodeState<'a> {
             allow_high_precision_mv,
             force_integer_mv,
             reference_select,
+            is_motion_mode_switchable,
+            allow_warped_motion,
             skip_mode_present,
             skip_mode_frame,
             skip_mode_above: vec![0u8; mi_cols],
@@ -1138,6 +1151,8 @@ pub fn decode_tile_group(
     skip_mode_frame: [u8; 2],
     interpolation_filter: u8,
     enable_dual_filter: bool,
+    is_motion_mode_switchable: bool,
+    allow_warped_motion: bool,
     ref_to_slot: [u8; 9],
     ref_slots: RefFrames<'_>,
     meta: &mut FrameMeta,
@@ -1241,6 +1256,8 @@ pub fn decode_tile_group(
         skip_mode_frame,
         interpolation_filter,
         enable_dual_filter,
+        is_motion_mode_switchable,
+        allow_warped_motion,
         ref_to_slot,
         ref_slots,
         meta,
@@ -1642,6 +1659,8 @@ pub fn reconstruct_av1_frame(
                 frame_header.skip_mode_frame,
                 frame_header.interpolation_filter,
                 seq.enable_dual_filter,
+                frame_header.is_motion_mode_switchable,
+                frame_header.allow_warp,
                 ref_to_slot,
                 ref_slots,
                 &mut meta,

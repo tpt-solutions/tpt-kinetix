@@ -1,6 +1,67 @@
 use super::*;
 
 impl<'a> TileDecodeState<'a> {
+    /// `has_overlappable_candidates()` (§5.11.23): true when the block has an
+    /// inter-coded neighbour directly above or to the left (within the tile),
+    /// which is the gate for the `motion_mode` / `use_obmc` read.
+    fn has_overlappable_candidates(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+        bw: usize,
+        bh: usize,
+    ) -> bool {
+        let row_start = self.tile_px_y0 / MI_SIZE;
+        let col_start = self.tile_px_x0 / MI_SIZE;
+        if mi_row > row_start {
+            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                if self.is_inter_above[c] != 0 {
+                    return true;
+                }
+            }
+        }
+        if mi_col > col_start {
+            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+                if self.is_inter_left[r] != 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Approximation of dav1d `find_matching_ref` / §5.11.23 `find_warp_samples`
+    /// reaching `NumSamples > 0`: an inter-coded above/left neighbour whose
+    /// primary reference frame matches this block's. Enough to decide whether
+    /// `read_motion_mode` reads the 3-way `motion_mode` symbol (warp allowed)
+    /// or the `use_obmc` bool.
+    fn has_matching_ref_candidates(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+        bw: usize,
+        bh: usize,
+        ref0: u8,
+    ) -> bool {
+        let row_start = self.tile_px_y0 / MI_SIZE;
+        let col_start = self.tile_px_x0 / MI_SIZE;
+        if mi_row > row_start {
+            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                if self.is_inter_above[c] != 0 && self.ref_above[c][0] == ref0 {
+                    return true;
+                }
+            }
+        }
+        if mi_col > col_start {
+            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+                if self.is_inter_left[r] != 0 && self.ref_left[r][0] == ref0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Inter-coded leaf block (AV1 Phase E): MV prediction (§7.10) + motion
     /// compensation (§7.11.3). Reconstructs a single/compound-reference block and
     /// adds the residual.
@@ -308,6 +369,7 @@ impl<'a> TileDecodeState<'a> {
         let mut mvs = [Mv::default(); 2];
         let force_integer_mv = self.force_integer_mv;
         let mut new_mf = 0u8;
+        let mut single_mode = NEARESTMV;
 
         if !compound {
             // AV1 §7.10.2 `find_mv_stack` + §5.11.24 single-ref mode cascade.
@@ -396,6 +458,7 @@ impl<'a> TileDecodeState<'a> {
                     ref_names[0], base_mv.row, base_mv.col, self.dec.raw_state().0
                 );
             }
+            single_mode = mode;
             mvs[0] = match mode {
                 ZEROMV => Mv::default(),
                 NEWMV => {
@@ -443,6 +506,55 @@ impl<'a> TileDecodeState<'a> {
                 mvs[i] = mv;
             }
         }
+
+        // `read_motion_mode()` (§5.11.23) — read after the MV/mode cascade and
+        // before the interpolation filter. dav1d (`Post-motionmode`) reads a
+        // symbol here whenever the block is single-ref, not skip_mode, at least
+        // 8x8, `is_motion_mode_switchable`, ref[1] != INTRA_FRAME, and has an
+        // overlappable (inter-coded) above/left neighbour. When a *matching-ref*
+        // neighbour also exists (dav1d `find_matching_ref` mask nonzero) and
+        // warped motion is enabled the 3-way `motion_mode` symbol is read,
+        // otherwise the `use_obmc` bool. Full warp-sample derivation isn't
+        // implemented, so a matching-ref neighbour is treated as `NumSamples>0`.
+        let mut motion_mode = 0u8; // SIMPLE
+        {
+            let min_dim = BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]);
+            let _ = single_mode; // GLOBALMV modelled translation-only: GmType never > TRANSLATION
+            let eligible = !compound
+                && self.is_motion_mode_switchable
+                && min_dim >= 8
+                && ref_names[1] == NONE_FRAME
+                && self.has_overlappable_candidates(mi_row, mi_col, bw, bh);
+            if eligible {
+                let matching_ref =
+                    self.has_matching_ref_candidates(mi_row, mi_col, bw, bh, ref_names[0]);
+                let allow_warp = self.allow_warped_motion && !force_integer_mv && matching_ref;
+                if allow_warp {
+                    motion_mode = self
+                        .dec
+                        .read_symbol(&mut self.mode_cdfs.motion_mode[bsize.min(21)])
+                        as u8;
+                } else {
+                    motion_mode = self
+                        .dec
+                        .read_symbol(&mut self.mode_cdfs.use_obmc[bsize.min(21)])
+                        as u8;
+                }
+                if dbg_b0 {
+                    eprintln!(
+                        "DBG b0 motion_mode={motion_mode} warp_allowed={allow_warp} rng={}",
+                        self.dec.raw_state().0
+                    );
+                }
+            }
+        }
+        // A WARP block reads no interpolation-filter symbol (dav1d sets
+        // `has_subpel_filter = 0`).
+        let frame_filter = if motion_mode == 2 {
+            INTERP_EIGHTTAP_REGULAR
+        } else {
+            frame_filter
+        };
 
         // Per-block interpolation filter (§5.11.27). When switchable, one
         // symbol per axis is read (`dir` 0 = vertical, 1 = horizontal) if

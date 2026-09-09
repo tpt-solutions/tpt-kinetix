@@ -5706,3 +5706,26 @@
 > global-motion MVs. Also verify: block 0's `filter` ctx=11 vs dav1d ctx=3
 > (rng matched — likely a `dir*8` vs `dir`-table-index labelling difference,
 > but confirm `interp_filter[16]` layout == dav1d `filter[2][8]`).
+
+> **2026-09-10 (cont'd) — `read_motion_mode` (§5.11.23) was entirely missing.**
+> Traced `KINETIX_AV1_DBG_B0` against patched dav1d on the `testsrc_128x96` obu
+> first inter frame (poc=6): block (0,0) matched bit-exact through the filter
+> reads, but block (0,16) desynced right after `Post-intermode` — dav1d emits a
+> `Post-motionmode[0] [mask: 0x0/0x1]` symbol Kinetix never read. Implemented
+> `read_motion_mode` in `reconstruct/inter_block.rs`: gated on `!compound &&
+> is_motion_mode_switchable && min(bw,bh)>=8 && ref[1]==NONE &&
+> has_overlappable_candidates()`; reads the 3-way `motion_mode` CDF when a
+> *matching-ref* neighbour exists + `allow_warped_motion` + `!force_integer_mv`
+> (dav1d `find_matching_ref` mask nonzero → warp allowed), else the `use_obmc`
+> bool. A `WARP` result forces `INTERP_EIGHTTAP_REGULAR` (no subpel-filter
+> read), matching dav1d `has_subpel_filter=0`. New CDF fields
+> `mode_cdfs.motion_mode` / `.use_obmc` (spec defaults, `[[u16;4];22]` /
+> `[[u16;3];22]`, indexed by BlockSize); threaded `is_motion_mode_switchable` +
+> `allow_warp` from `FrameHeader` through `decode_tile_group`/`TileDecodeState`.
+> Block (0,16) now bit-exact through the filter reads (`motion_mode=0
+> rng=48973`, matches dav1d). **`av1_inter_corpus` f1: testsrc_128x96
+> 24.7→45.0 dB, testsrc_96x64 21.7→25.8, testsrc_64x64 25.5→30.6.** Still
+> 0/N bit-exact — warp-sample derivation (`find_warp_samples`/`NumSamples`) is
+> approximated (matching-ref neighbour ⇒ NumSamples>0), OBMC/warp prediction
+> itself is not applied, and later blocks still desync. Next: continue the
+> `KINETIX_AV1_DBG_B0` trace past block (0,16) on poc=6.

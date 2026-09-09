@@ -52,6 +52,10 @@ pub(super) struct ModeCdfs {
     #[allow(dead_code)]
     pub(super) angle_delta: [[u16; 8]; 8],
     pub(super) interp_filter: [[u16; 4]; 16],
+    /// `TileMotionModeCdf` / `TileUseObmcCdf` (§8.3.2), indexed by `BlockSize`
+    /// (0..21). `read_motion_mode` (§5.11.23).
+    pub(super) motion_mode: [[u16; 4]; 22],
+    pub(super) use_obmc: [[u16; 3]; 22],
     pub(super) filter_intra: [[u16; 3]; 22],
     pub(super) filter_intra_mode: [u16; 6],
     /// `TileUseWienerCdf` / `TileUseSgrprojCdf` / `TileRestorationTypeCdf`
@@ -335,6 +339,8 @@ impl ModeCdfs {
             delta_lf_multi: [DEFAULT_DELTA_Q_CDF; 4],
             angle_delta: DEFAULT_ANGLE_DELTA_CDF,
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
+            motion_mode: DEFAULT_MOTION_MODE_CDF,
+            use_obmc: DEFAULT_USE_OBMC_CDF,
             filter_intra: DEFAULT_FILTER_INTRA_CDF,
             filter_intra_mode: DEFAULT_FILTER_INTRA_MODE_CDF,
             use_wiener: DEFAULT_USE_WIENER_CDF,
