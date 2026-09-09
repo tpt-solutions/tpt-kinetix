@@ -5297,3 +5297,27 @@
 >     *separate* recon bug from the D157 one (that was max ±4; this is ±1).
 >   - luma: 1 px at (75,54) ±1 — the CDEF border-tap corner case above.
 >   `av1_psnr_check` 128×96 mandelbrot stays 89.03/69.58/70.70 (these gaps).
+
+> **2026-09-09 (cont'd) — 128×96 mandelbrot chroma FIXED (commit 93ce919).**
+> Follow-up to the `has_chroma` gate. dav1d indexes the chroma-mode
+> neighbour array (`t->a->uvmode`) in **chroma-4×4 units** (`cbx4 = bx4 >> ss`,
+> `cbw4 = (bw4 + ss) >> ss`); the chroma-carrying block of a sub-8×8 group is
+> at an *odd* mi position but its shared chroma covers the even sibling.
+> Kinetix wrote `uv_above`/`uv_left` only at `mi_col..mi_col+bw` (odd col
+> only), so a later even-position chroma D45 block read a stale D113 mode
+> instead of the real SMOOTH — and `get_filter_type` picked edge-filter
+> strength 1 instead of 2 ({0,4,8,4} vs {0,5,6,5}), shifting the prediction
+> ±1. Fix: align both write (`mi_col & ~ss`, widened to shared extent) and
+> read (`mi_col & ~ss`) to the chroma grid.
+>
+> **`av1_psnr_check`: mandelbrot_128x96 now 89.03 / 99 / 99** (chroma
+> pixel-exact, was .../69.6/70.7). All 4 intra corpus entries bit-exact
+> Y/U/V through the full pipeline **except** mandelbrot luma's one pixel:
+>   - `mandelbrot_128x96` luma (75,54) k=87/r=86, **1 px, ±1, CDEF only**
+>     (pre-filter Y = 0; deblock-only Y = 0; any CDEF config → 1-10 px).
+>     Interior pixel (block (72,48), offset (3,6)) so not a frame edge —
+>     a CDEF constrain / min-max / direction-tap corner case. Needs a
+>     CDEF-output dump added to the dav1d blockdump patch to pin. Cosmetic
+>     (89 dB = exactly this 1 px), lowest priority.
+>
+> 139 av1 unit tests + fmt + clippy green.
