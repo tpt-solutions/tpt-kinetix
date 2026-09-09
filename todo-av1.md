@@ -5616,3 +5616,17 @@
 > NEAREST MVs) feeds off it; the current `build_mv_candidates` is a
 > spatial-only stub. Port it from dav1d `dav1d_refmvs_find` (the intrabc
 > `ibc_mv_pred` scan is the skeleton) — that is THE remaining inter blocker.
+
+> **2026-09-10 (cont'd) — inter mode-read path also needs work (found while
+> scoping find_mv_stack, NOT yet fixed):** `inter.rs::read_single_inter_mode`
+> reads `new_mv` and treats symbol `== 1` as NEWMV, but AV1 §5.11.24 is
+> `new_mv == 0 → NEWMV` (verify against Kinetix's `DEFAULT_NEW_MV_CDF`
+> orientation — it may be complemented). `zero_mv == 0 → GLOBALMV` and
+> `ref_mv == 0 → NEARESTMV` likewise. And `decode_ref_and_mv` is always
+> called with `mode_ctx = 0` — the real `NewMvContext` / `ZeroMvContext` /
+> `RefMvContext` come out of `find_mv_stack` (the composite `newmv_ctx`,
+> `refmv_ctx`, `zeromv_ctx`). So the compound `find_mv_stack` port must also
+> produce those three contexts and the mode-read must be rewritten to the
+> spec's `new_mv`/`zero_mv`/`ref_mv` cascade + compound-mode 8-way read. This
+> is one connected work item — do it together, validate the `Post-intermode`
+> value block-by-block against a patched-dav1d trace.
