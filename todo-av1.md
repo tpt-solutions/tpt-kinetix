@@ -5275,3 +5275,25 @@
 >
 > testsrc / solid_red / smptebars all fully pixel-exact. 139 av1 unit tests
 > + fmt + clippy green.
+
+> **2026-09-09 (cont'd) — D157 chroma bug ROOT-CAUSED & FIXED (commit 0c9dc4e).**
+> It was NOT the directional predictor / `dr_z2` / upsample (those are all
+> bit-exact — tried `+ua`/`+ul` index fixes, they broke testsrc). The real
+> cause: `reconstruct_intra_subblock` wrote `uv_above`/`uv_left` (the chroma
+> neighbour-mode grid feeding §7.11.2.9 `get_filter_type`) for **every**
+> block, including sub-8×8 luma blocks that carry no chroma — clobbering the
+> real SMOOTH_H mode of the chroma-carrying neighbour with a placeholder DC.
+> dav1d (`decode.c:733`) only writes `t->a->uvmode`/`t->l.uvmode` under
+> `if (has_chroma)`. Fix = same gate. The stale DC made the D157 block's
+> `filter_type_uv` read 0 instead of 1, flipping it onto the non-smooth
+> edge-filter/upsample branch → the whole prediction shifted ±1-4.
+>
+> Result: **all 4 intra corpus entries (incl. mandelbrot_80x64) now
+> bit-exact Y/U/V vs `dav1d --inloopfilters none`.** 139 av1 unit tests +
+> fmt + clippy green.
+>
+> **Left (both tiny, 128×96 mandelbrot only):**
+>   - chroma: ~20 px ±1 pre-filter, first (48,40) = luma (96,80). A
+>     *separate* recon bug from the D157 one (that was max ±4; this is ±1).
+>   - luma: 1 px at (75,54) ±1 — the CDEF border-tap corner case above.
+>   `av1_psnr_check` 128×96 mandelbrot stays 89.03/69.58/70.70 (these gaps).
