@@ -5547,3 +5547,24 @@
 >     desync, dual-filter MC (infra landed 597aa93), OBMC, warped, compound.
 >  4. Keyframe LR/CDEF ±1 (94 px, deblock-on path).
 >  5. Official AOM/ITU vectors → flip `pixel_exact`.
+
+> **2026-09-10 (cont'd) — show_existing_frame landed (commit fd20d40); dual
+> interp-filter confirmed active + context correct.** `KINETIX_AV1_DBG_SEQ`
+> (new) shows the inter clip's sequence header parses correctly:
+> `dual_filter=true interintra=true masked=true warped=true jnt=true
+> ref_mvs=true`. dav1d's narrowed trace for the first inter frame's block
+> (0,0): `Post-skip[1]` (skip), `Post-intra[0]` (inter), `Post-ref[0]`,
+> `Post-intermode[0,…,mv=0,0,n_mvs=0]`, `Post-subpel_filter1/2[0,ctx=3]`
+> (dual!) — Kinetix's dual-filter context now computes `ctx=3` too (matches).
+> **Decode-order is poc 6,3,1,2,4,5,6,7.** poc 1/2/4/5 first blocks are
+> `Post-skipmode[1]` + `Post-skipmodeblock[refs=0+4/0+6]` — **compound
+> skip-mode** (bidirectional, no residual). Kinetix's inter path almost
+> certainly doesn't implement skip_mode → those frames (which are display
+> frames 1,2,4,5) desync immediately. That's the single biggest inter gap
+> after the harness/show_existing work.
+>
+> Corpus effect of this session's inter infra (dual filter + show_existing):
+> `av1_inter_corpus` testsrc_128x96 f1 14.3→18.9 dB, testsrc_64x64 f4
+> 29→29.3; `av1_inter_sequence` frame 3 (show_existing) 11.1→33.7. Still
+> 0/N bit-exact — the inter *reconstruction* (skip_mode, real find_mv_stack,
+> MC, compound) is the multi-session core effort.

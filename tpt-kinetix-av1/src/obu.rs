@@ -582,6 +582,15 @@ impl SequenceHeaderObu {
                 order_hint_bits_minus_1 = f(&mut br, 3, "order_hint_bits_minus_1")? as u8;
             }
         }
+        if std::env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
+            eprintln!(
+                "DBG SEQ interintra={enable_interintra_compound} masked={enable_masked_compound} \
+                 warped={enable_warped_motion} dual_filter={enable_dual_filter} \
+                 order_hint={enable_order_hint} jnt={enable_jnt_comp} ref_mvs={enable_ref_frame_mvs} \
+                 force_sct={seq_force_screen_content_tools} force_imv={seq_force_integer_mv} \
+                 ohb-1={order_hint_bits_minus_1}"
+            );
+        }
 
         let enable_superres = flag(&mut br, "enable_superres")?;
         let enable_cdef = flag(&mut br, "enable_cdef")?;
