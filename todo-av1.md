@@ -5321,3 +5321,23 @@
 >     (89 dB = exactly this 1 px), lowest priority.
 >
 > 139 av1 unit tests + fmt + clippy green.
+
+> **2026-09-09 (cont'd) — the mandelbrot_128x96 luma (75,54) ±1 pixel is
+> LOOP RESTORATION, not CDEF.** Added a per-8×8 CDEF pre/post dump to the
+> dav1d patch (`cdef_apply_tmpl.c`, gate on `bx`/`by`) and a matching one in
+> Kinetix `cdef_plane_luma`. **Kinetix's post-CDEF output is bit-exact vs
+> dav1d for every 8×8 block around (75,54)** — same params (pri 5, sec 0,
+> dir, var, damping 5, adj), same pre, same post. And `dav1d --inloopfilters
+> norestoration` vs `all`: LR alone moves (75,54) 87→86 (LR touches ~1031
+> luma px this frame). Kinetix's LR on non-CDEF'd input already matches dav1d
+> (`NOCDEF` Y=0). So: LR is fed a bit-identical post-CDEF plane here yet
+> produces 87 (Kinetix) vs 86 (dav1d). **Row 54 is 2 rows above the LR
+> stripe boundary at y=56** (AV1 stripe 0 = rows 0..55). The Wiener 7-tap
+> vertical window at row 54 reads rows 51..57, i.e. 2 rows into the next
+> stripe, which per §7.17.1 must come from the *saved pre-deblock/CDEF
+> stripe line buffer* (dav1d `lr_lpf_line`), not the live pixels. Kinetix's
+> stripe-boundary line handling in the Wiener path is the suspect — compare
+> `tpt-kinetix-av1/src/loop_filter.rs` Wiener against dav1d's
+> `lr_apply`/`lpf_line` for rows within 2 of a stripe edge. 1 px, ±1, 89 dB
+> — cosmetic, lowest priority, and the concurrent process is also in
+> AV1-LR-adjacent code.
