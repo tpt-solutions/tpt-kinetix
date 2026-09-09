@@ -32,15 +32,28 @@ scaffolded. Threaded `direct_8x8_inference_flag` into `parse_b_slice` /
 **freh1_b max_diff 219 → 26, diff_bytes 13.1M → 1.39M**; B frames decode
 (SAD ~5.4M → ~2000). ITU still 24/0.
 
-Still open on `freh1_b`: B frames carry a **widespread ±1–3 luma error**
-(diffmap is scattered, not localised) — a bi-pred rounding / spatial-
-direct MV / deblock precision bug, needs a pel-level oracle vs the JM
-`.trc`. Latent (unvalidated, left alone): `luma_dc_level_scale` uses
+Then applied the same `noSubMbPartSizeLessThan8x8Flag` gate to the CAVLC
+**P** path (`parse_p_macroblock`) — latent, no conformance clip hits it.
+And made spatial-direct `col_zero_flag` per-4×4 when
+`direct_8x8_inference_flag == 0` (§8.4.1.2.2) — spec-correct, but zero
+measurable effect on freh1_b/HCHP1 (their co-located motion is
+near-uniform within the affected quadrants).
+
+**Current `freh1_b` state (in display order):** frame 0 (I) bit-exact;
+B/P frames carry a **±3–5 luma error on ~1 % of pixels** that accumulates
+down the GOP-16 hierarchy (frame 1 max 3 / frame 40 max 10 / whole-clip
+max 26). NOT a desync (MB parse is in sync — CBP/coeff/mb_type all track
+the `.trc`). A small MC-interpolation / bi-pred-rounding / 8×8-inverse-
+transform / deblock precision bug on the B path — the `.trc` gives syntax
+elements but not reconstructed pixels, so pinning it needs a
+pre-deblock-pixel oracle (patched `ldecod`). First B MB of poc-1 is
+`B_8x8` sub `[2,2,3,2]` (all 8×8) with `transform_size_8x8_flag == 1` and
+ref_idx 1 — i.e. it exercises the 8×8 inter transform + inter-8×8 scaling
+list (PPS list 7) + second reference all at once.
+
+Latent (unvalidated, left alone): `luma_dc_level_scale` uses
 `list_4x4[3]` (Inter Y) for Intra_16×16 luma DC — looks wrong for intra
 but no BitExact clip exercises a non-flat matrix + I16 DC to prove it.
-The same missing-clause bug likely exists in the CAVLC **P** path
-(`parse_p_macroblock`, cavlc.rs:924) for P_8x8 with sub-8×8 partitions —
-not yet checked/fixed.
 
 ## SESSION #32ba — HPCA_BRCM_C / HPCANL_BRCM_C byte-exact (mvd ctxIdxInc desync)
 
