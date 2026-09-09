@@ -135,8 +135,8 @@ fn ba2_pframe_diffmap() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
     let ref_override: Option<usize> = std::env::var("ITU_REF").ok().and_then(|s| s.parse().ok());
-    for fi in 0..max_frame.min(frames.len()) {
-        let got = &frames[fi].data;
+    for (fi, frame) in frames.iter().take(max_frame).enumerate() {
+        let got = &frame.data;
         let ri = ref_override.unwrap_or(fi);
         let refslice = &reference[ri * fl..(ri + 1) * fl];
         let plane = |name: &str, a: &[u8], b: &[u8], pw: usize| {
