@@ -26,6 +26,9 @@ pub struct TileData {
     pub payload: Vec<u8>,
 }
 
+/// `(obu_type, payload)` pairs — the shape [`reconstruct_av1_frame`] consumes.
+type ObuPairs = Vec<(u8, Vec<u8>)>;
+
 /// A decoded reference frame retained in the decoder's picture buffer.
 ///
 /// AV1 keeps up to eight reference pictures (the `LAST`/`GOLDEN`/`ALTREF`
@@ -134,6 +137,9 @@ pub struct Av1Decoder {
     /// Reference frame buffer (AV1 §7.20), populated after each reconstructed
     /// frame (Phase E).
     ref_frames: RefFrameStore,
+    /// `RefOrderHint[0..8]` — the `order_hint` of the frame stored in each DPB
+    /// slot, updated by `refresh_frame_flags`. Needed by `skip_mode_params()`.
+    ref_order_hints: [u8; 8],
 }
 
 impl Av1Decoder {
@@ -145,6 +151,7 @@ impl Av1Decoder {
             last_frame_header: None,
             tile_data: Vec::new(),
             ref_frames: RefFrameStore::new(),
+            ref_order_hints: [0u8; 8],
         }
     }
 
@@ -214,122 +221,82 @@ impl Av1Decoder {
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
         let obus = parse_obu_sequence(&packet.data);
 
-        let mut produced_frame = false;
         self.tile_data.clear();
         self.last_frame_header = None;
-        let mut tile_index = 0usize;
-        let mut obu_pairs: Vec<(u8, Vec<u8>)> = Vec::new();
+
+        // A temporal unit may carry several coded frames (hierarchical GOPs:
+        // an ALTREF is decoded and stored before the B-frames that reference
+        // it, then shown later via `show_existing_frame`). Each frame is
+        // reconstructed and pushed to the DPB in turn; the frame this call
+        // returns is the last one flagged `show_frame` (or the
+        // `show_existing_frame` target).
+        let mut produced_any = false;
+        let mut shown: Option<VideoFrame> = None;
+        // Accumulator for the separate `FrameHeader` + `TileGroup` OBU form.
+        let mut pending: Option<(FrameHeader, ObuPairs)> = None;
 
         for obu in &obus {
-            obu_pairs.push((obu.obu_type as u8, obu.payload.clone()));
             match obu.obu_type {
                 ObuType::SequenceHeader => match SequenceHeaderObu::parse(&obu.payload) {
-                    Ok(sh) => {
-                        self.sequence_header = Some(sh);
-                    }
+                    Ok(sh) => self.sequence_header = Some(sh),
                     Err(e) => {
                         return Err(KinetixError::Parse(format!(
                             "SequenceHeaderObu parse error: {e}"
-                        )));
+                        )))
                     }
                 },
-                ObuType::Frame | ObuType::FrameHeader => {
-                    if let Some(ref seq) = self.sequence_header {
-                        match FrameHeader::parse(&obu.payload, seq) {
-                            Ok((fh, _)) if fh.show_existing_frame => {
-                                self.last_frame_header = Some(fh);
-                                // No tile data / reconstruction — the frame is
-                                // pulled straight from the DPB below.
+                ObuType::Frame => {
+                    let Some(seq) = self.sequence_header.clone() else {
+                        continue;
+                    };
+                    produced_any = true;
+                    let Ok((fh, header_bits)) =
+                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints)
+                    else {
+                        continue;
+                    };
+                    if let Some(f) = self.finish_frame(&seq, &fh, &obu.payload, header_bits) {
+                        shown = Some(f);
+                    }
+                }
+                ObuType::FrameHeader => {
+                    let Some(seq) = self.sequence_header.clone() else {
+                        continue;
+                    };
+                    produced_any = true;
+                    if let Ok((fh, _)) =
+                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints)
+                    {
+                        if fh.show_existing_frame {
+                            if let Some(f) = self.finish_frame(&seq, &fh, &obu.payload, 0) {
+                                shown = Some(f);
                             }
-                            Ok((fh, header_bits)) => {
-                                self.last_frame_header = Some(fh);
-                                // A combined `Frame` OBU (type 6) carries the
-                                // uncompressed header *followed by* the tile
-                                // group data. Slice that remainder off and feed
-                                // it to reconstruction as if it were a standalone
-                                // TileGroup OBU (type 13) — this is what
-                                // `reconstruct_av1_frame` collects. For a single
-                                // tile the tile group begins immediately after
-                                // the (byte-aligned) uncompressed header.
-                                let consumed = header_bits.div_ceil(8);
-                                if consumed < obu.payload.len() {
-                                    let tg = obu.payload[consumed..].to_vec();
-                                    obu_pairs.push((13, tg.clone()));
-                                    self.tile_data.push(TileData {
-                                        tile_index,
-                                        payload: tg,
-                                    });
-                                    tile_index += 1;
-                                }
-                            }
-                            Err(KinetixError::Unsupported(ref msg))
-                                if msg.contains("show_existing_frame") => {}
-                            Err(_) => {}
+                        } else {
+                            pending = Some((fh, Vec::new()));
                         }
                     }
-                    produced_frame = true;
                 }
                 ObuType::TileGroup => {
-                    self.tile_data.push(TileData {
-                        tile_index,
-                        payload: obu.payload.clone(),
-                    });
-                    tile_index += 1;
-                    produced_frame = true;
+                    if let Some((_, pairs)) = pending.as_mut() {
+                        pairs.push((13, obu.payload.clone()));
+                    }
                 }
                 _ => {}
             }
         }
 
-        if !produced_frame {
+        // Flush a `FrameHeader` + `TileGroup(s)` frame.
+        if let (Some((fh, pairs)), Some(seq)) = (pending, self.sequence_header.clone()) {
+            if let Some(f) = self.finish_frame_from_pairs(&seq, &fh, &pairs) {
+                shown = Some(f);
+            }
+        }
+
+        if let Some(f) = shown {
+            return Ok(Some(f));
+        }
+        if !produced_any {
             return Ok(None);
-        }
-
-        // `show_existing_frame` (§7.4): no reconstruction — display the frame
-        // already stored in DPB slot `show_existing_idx`. If that slot held a
-        // key frame, `refresh_frame_flags` becomes all-ones (§5.9.2), which
-        // matters for later inter frames' reference resolution.
-        if let Some(fh) = &self.last_frame_header {
-            if let Some(idx) = fh.show_existing_idx {
-                // NOTE: §5.9.2 also sets `refresh_frame_flags = allFrames` when
-                // the shown slot held a key frame; per-slot frame type isn't
-                // tracked yet, so that (rare) case is not handled.
-                let frame = self
-                    .ref_frames
-                    .get(idx as usize)
-                    .map(|s| s.to_video_frame());
-                if frame.is_some() {
-                    self.frame_count += 1;
-                }
-                return Ok(frame);
-            }
-        }
-
-        // Attempt reconstruction via the new pipeline.
-        if let (Some(seq), Some(fh)) = (&self.sequence_header, &self.last_frame_header) {
-            match reconstruct_av1_frame(&obu_pairs, seq, fh, Some(&self.ref_frames)) {
-                Ok(Some(frame)) => {
-                    // Phase E: track the reconstructed frame in the reference
-                    // buffer per `refresh_frame_flags` so inter prediction can
-                    // later draw from it.
-                    let refresh = self
-                        .last_frame_header
-                        .as_ref()
-                        .map(|fh| fh.refresh_frame_flags)
-                        .unwrap_or(0);
-                    self.ref_frames.refresh(refresh, &frame);
-                    self.frame_count += 1;
-                    return Ok(Some(frame));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    if self.strict {
-                        return Err(KinetixError::NotPixelExact(format!(
-                            "AV1 reconstruction failed: {e}"
-                        )));
-                    }
-                }
-            }
         }
 
         if self.strict {
@@ -367,6 +334,72 @@ impl Av1Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: packet.is_key_frame,
         }))
+    }
+
+    /// Reconstruct one frame from a combined `Frame` OBU payload (or resolve a
+    /// `show_existing_frame`), store it in the DPB, and return it iff it is
+    /// shown. `header_bits` is the uncompressed-header length so the tile data
+    /// can be sliced off.
+    fn finish_frame(
+        &mut self,
+        seq: &SequenceHeaderObu,
+        fh: &FrameHeader,
+        payload: &[u8],
+        header_bits: usize,
+    ) -> Option<VideoFrame> {
+        self.last_frame_header = Some(fh.clone());
+        if let Some(idx) = fh.show_existing_idx {
+            let f = self
+                .ref_frames
+                .get(idx as usize)
+                .map(|s| s.to_video_frame());
+            if f.is_some() {
+                self.frame_count += 1;
+            }
+            return f;
+        }
+        let consumed = header_bits.div_ceil(8);
+        if consumed >= payload.len() {
+            return None;
+        }
+        let pairs = vec![(13u8, payload[consumed..].to_vec())];
+        self.finish_frame_from_pairs(seq, fh, &pairs)
+    }
+
+    /// As [`Self::finish_frame`] but the tile data is already split into
+    /// `(obu_type, payload)` pairs (the separate `FrameHeader` + `TileGroup`
+    /// OBU form).
+    fn finish_frame_from_pairs(
+        &mut self,
+        seq: &SequenceHeaderObu,
+        fh: &FrameHeader,
+        pairs: &[(u8, Vec<u8>)],
+    ) -> Option<VideoFrame> {
+        self.last_frame_header = Some(fh.clone());
+        let frame = match reconstruct_av1_frame(pairs, seq, fh, Some(&self.ref_frames)) {
+            Ok(Some(f)) => f,
+            _ => return None,
+        };
+        let refresh = fh.refresh_frame_flags;
+        let order_hint = fh.order_hint as u8;
+        self.ref_frames.refresh(refresh, &frame);
+        for i in 0..8 {
+            if refresh & (1u8 << i) != 0 {
+                self.ref_order_hints[i] = order_hint;
+            }
+        }
+        if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+            eprintln!(
+                "DBG refresh oh={order_hint} show={} flags={refresh:#010b} -> hints={:?}",
+                fh.show_frame, self.ref_order_hints
+            );
+        }
+        self.frame_count += 1;
+        if fh.show_frame {
+            Some(frame)
+        } else {
+            None
+        }
     }
 
     /// Flush any buffered frames.

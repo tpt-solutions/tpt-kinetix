@@ -770,16 +770,38 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
     for entry in &corpus {
         let spans = av1_obu_spans(&entry.obu);
         let seq_span: Option<(usize, usize)> = spans.iter().find(|s| s.0 == 1).map(|s| (s.1, s.2));
-        let frame_spans: Vec<(usize, usize)> = spans
-            .iter()
-            .filter(|s| s.0 == 6)
-            .map(|s| (s.1, s.2))
-            .collect();
-        if frame_spans.len() < 2 {
+
+        // Group the OBU stream into temporal units — a temporal-delimiter OBU
+        // (type 2) opens a new TU. Each TU displays exactly one frame (in
+        // display order), so feeding one packet per TU keeps Kinetix's outputs
+        // aligned with dav1d's display-ordered decode even for hierarchical
+        // GOPs (ALTREF decoded early, shown later via show_existing_frame).
+        let mut tu_spans: Vec<(usize, usize)> = Vec::new();
+        let mut cur: Option<usize> = None;
+        for (t, s, _e) in &spans {
+            if *t == 2 {
+                if let Some(cs) = cur.take() {
+                    tu_spans.push((cs, *s));
+                }
+                cur = Some(*s);
+            }
+        }
+        if let Some(cs) = cur {
+            tu_spans.push((cs, entry.obu.len()));
+        }
+        // Fall back to per-frame-OBU packets if the stream has no delimiters.
+        if tu_spans.is_empty() {
+            tu_spans = spans
+                .iter()
+                .filter(|s| s.0 == 6)
+                .map(|s| (s.1, s.2))
+                .collect();
+        }
+        if tu_spans.len() < 2 {
             eprintln!(
-                "[{}] only {} frame(s) present, skipping",
+                "[{}] only {} TU(s) present, skipping",
                 entry.label,
-                frame_spans.len()
+                tu_spans.len()
             );
             continue;
         }
@@ -794,10 +816,12 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
 
         let mut dec = Av1Decoder::new();
         let mut kframes = Vec::new();
-        for (i, (start, end)) in frame_spans.iter().enumerate() {
+        for (i, (start, end)) in tu_spans.iter().enumerate() {
             let mut data = Vec::new();
             if let Some((ss, se)) = seq_span {
-                data.extend_from_slice(&entry.obu[ss..se]);
+                if !(*start <= ss && ss < *end) {
+                    data.extend_from_slice(&entry.obu[ss..se]);
+                }
             }
             data.extend_from_slice(&entry.obu[*start..*end]);
             let packet = Packet {
@@ -810,11 +834,11 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
             match dec.decode(&packet) {
                 Ok(Some(f)) => kframes.push(f),
                 Ok(None) => {
-                    eprintln!("[{}] frame {i}: Kinetix produced no frame", entry.label);
+                    eprintln!("[{}] TU {i}: Kinetix produced no frame", entry.label);
                     break;
                 }
                 Err(e) => {
-                    eprintln!("[{}] frame {i}: Kinetix errored: {e}", entry.label);
+                    eprintln!("[{}] TU {i}: Kinetix errored: {e}", entry.label);
                     break;
                 }
             }

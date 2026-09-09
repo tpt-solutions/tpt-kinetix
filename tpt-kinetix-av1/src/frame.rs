@@ -359,6 +359,10 @@ pub struct FrameHeader {
     pub reference_select: bool,
     /// `skip_mode_present` (§6.8.2): skip mode is available for this frame.
     pub skip_mode_present: bool,
+    /// `SkipModeFrame[0..2]` (§7.4.13): the reference-frame names a skip-mode
+    /// block predicts from (a forward/backward pair). Meaningful only when
+    /// `skip_mode_present`.
+    pub skip_mode_frame: [u8; 2],
     /// `disable_frame_end_update_cdf` (§6.8.2).
     pub disable_frame_end_update_cdf: bool,
     /// Global motion: `GmType[ref]` (IDENTITY=0, TRANSLATION=1, ROTZOOM=2,
@@ -422,6 +426,18 @@ impl FrameHeader {
     pub fn parse(
         data: &[u8],
         seq: &crate::obu::SequenceHeaderObu,
+    ) -> Result<(Self, usize), KinetixError> {
+        Self::parse_with_dpb(data, seq, &[0u8; 8])
+    }
+
+    /// Like [`FrameHeader::parse`] but with the reference slots' stored
+    /// `OrderHint` values (`RefOrderHint[0..8]`) — needed to compute
+    /// `skip_mode_params()` (§6.8.2), which reads a bit only when skip mode is
+    /// actually allowed by the DPB order hints.
+    pub fn parse_with_dpb(
+        data: &[u8],
+        seq: &crate::obu::SequenceHeaderObu,
+        ref_order_hint_dpb: &[u8; 8],
     ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
@@ -830,9 +846,17 @@ impl FrameHeader {
             read_flag(&mut br)?
         };
 
-        // --- skip_mode_params ---
-        let skip_mode_present =
-            parse_skip_mode(&mut br, frame_is_intra, reference_select, enable_order_hint)?;
+        // --- skip_mode_params (§6.8.2) ---
+        let (skip_mode_present, skip_mode_frame) = parse_skip_mode(
+            &mut br,
+            frame_is_intra,
+            reference_select,
+            enable_order_hint,
+            order_hint,
+            order_hint_bits,
+            &ref_frame_idx,
+            ref_order_hint_dpb,
+        )?;
 
         // --- allow_warped_motion ---
         let allow_warp = if frame_is_intra || error_resilient_mode || !enable_warped_motion {
@@ -938,6 +962,7 @@ impl FrameHeader {
                 use_ref_frame_mvs,
                 reference_select,
                 skip_mode_present,
+                skip_mode_frame,
                 disable_frame_end_update_cdf,
                 gm_type,
                 gm_params,
@@ -1245,26 +1270,99 @@ fn parse_lr(
     Ok(out)
 }
 
-/// `skip_mode_params()` (§6.8.2). Skip mode availability depends on the DPB
-/// order hints, which are not available during header parse; for the common
-/// single-reference case (`reference_select == 0`) it is always disabled, and
-/// no bit is consumed.
+/// `get_relative_dist( a, b )` (§6.8.2): signed order-hint difference.
+fn get_relative_dist(a: i32, b: i32, order_hint_bits: u8) -> i32 {
+    if order_hint_bits == 0 {
+        return 0;
+    }
+    let diff = a - b;
+    let m = 1i32 << (order_hint_bits as i32 - 1);
+    (diff & (m - 1)) - (diff & m)
+}
+
+/// `skip_mode_params()` (§6.8.2): derive `skipModeAllowed` / `SkipModeFrame`
+/// from the DPB reference order hints, then read `skip_mode_present` f(1) iff
+/// allowed. `ref_order_hint_dpb[i]` is `RefOrderHint[i]` — the stored order
+/// hint of DPB slot `i`.
+#[allow(clippy::too_many_arguments)]
 fn parse_skip_mode(
     br: &mut BitReader<'_>,
     frame_is_intra: bool,
     reference_select: bool,
     enable_order_hint: bool,
-) -> Result<bool, KinetixError> {
+    order_hint: u32,
+    order_hint_bits: u8,
+    ref_frame_idx: &[u8; 7],
+    ref_order_hint_dpb: &[u8; 8],
+) -> Result<(bool, [u8; 2]), KinetixError> {
+    // `LAST_FRAME` = 2 in this crate's reference-name numbering.
+    const LAST_FRAME: u8 = 2;
     if frame_is_intra || !reference_select || !enable_order_hint {
-        Ok(false)
-    } else {
-        // Skip-mode availability is derived from reference-frame order hints
-        // (see §6.8.2); without the DPB we cannot compute it here. Reading the
-        // conditional `skip_mode_present` bit would require that state, so we
-        // conservatively disable skip mode for multi-reference frames.
-        let _ = br;
-        Ok(false)
+        return Ok((false, [LAST_FRAME, LAST_FRAME]));
     }
+    let oh = order_hint as i32;
+    let hint_of = |i: usize| ref_order_hint_dpb[ref_frame_idx[i] as usize] as i32;
+
+    let (mut forward_idx, mut forward_hint) = (-1i32, 0i32);
+    let (mut backward_idx, mut backward_hint) = (-1i32, 0i32);
+    for i in 0..7usize {
+        let rh = hint_of(i);
+        if get_relative_dist(rh, oh, order_hint_bits) < 0 {
+            if forward_idx < 0 || get_relative_dist(rh, forward_hint, order_hint_bits) > 0 {
+                forward_idx = i as i32;
+                forward_hint = rh;
+            }
+        } else if get_relative_dist(rh, oh, order_hint_bits) > 0
+            && (backward_idx < 0 || get_relative_dist(rh, backward_hint, order_hint_bits) < 0)
+        {
+            backward_idx = i as i32;
+            backward_hint = rh;
+        }
+    }
+
+    let (allowed, sm0, sm1) = if forward_idx < 0 {
+        (false, 0, 0)
+    } else if backward_idx >= 0 {
+        (
+            true,
+            forward_idx.min(backward_idx),
+            forward_idx.max(backward_idx),
+        )
+    } else {
+        let mut second_idx = -1i32;
+        let mut second_hint = 0i32;
+        for i in 0..7usize {
+            let rh = hint_of(i);
+            if get_relative_dist(rh, forward_hint, order_hint_bits) < 0
+                && (second_idx < 0 || get_relative_dist(rh, second_hint, order_hint_bits) > 0)
+            {
+                second_idx = i as i32;
+                second_hint = rh;
+            }
+        }
+        if second_idx < 0 {
+            (false, 0, 0)
+        } else {
+            (
+                true,
+                forward_idx.min(second_idx),
+                forward_idx.max(second_idx),
+            )
+        }
+    };
+
+    if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+        eprintln!(
+            "DBG skip_mode oh={order_hint} fwd={forward_idx} bwd={backward_idx} allowed={allowed} \
+             sm=[{},{}] dpb_hints={ref_order_hint_dpb:?} ref_idx={ref_frame_idx:?}",
+            sm0, sm1
+        );
+    }
+    if !allowed {
+        return Ok((false, [LAST_FRAME, LAST_FRAME]));
+    }
+    let present = read_flag(br)?;
+    Ok((present, [LAST_FRAME + sm0 as u8, LAST_FRAME + sm1 as u8]))
 }
 
 /// `global_motion_params()` (§5.9.25).
