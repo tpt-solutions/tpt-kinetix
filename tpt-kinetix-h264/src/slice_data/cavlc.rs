@@ -987,6 +987,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
+    direct_8x8_inference_flag: bool,
     colocated_mv: Option<&[[crate::mv::MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
     temporal: Option<&crate::mv::TemporalDirectCtx>,
@@ -1042,6 +1043,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
             num_ref_idx_l1_active,
             chroma_qp_index_offset,
             transform_8x8_mode,
+            direct_8x8_inference_flag,
             tracer,
         )?;
         qp = new_qp;
@@ -1083,6 +1085,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     num_ref_idx_l1_active: u32,
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
+    direct_8x8_inference_flag: bool,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     use crate::macroblock::BPredDir;
@@ -1290,6 +1293,20 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
         _ => unreachable!("B mb_type_raw bounded to 0..=22 above"),
     }
 
+    // `noSubMbPartSizeLessThan8x8Flag` (§7.3.5) — computed here, before
+    // `motion` is moved into `mb.motion` below. Used to gate the
+    // `transform_size_8x8_flag` read further down.
+    let no_sub_part_lt_8x8 = match (mb_type_raw, &motion.sub_mb_type_b) {
+        // B_8x8: 0 = B_Direct_8x8 (only <8×8 when inference is off);
+        // 1/2/3 = B_{L0,L1,Bi}_8x8 (NumSubMbPart 1); 4..=12 => NumSubMbPart > 1.
+        (22, Some(sub_types)) => sub_types.iter().all(|&st| match st {
+            0 => direct_8x8_inference_flag,
+            1..=3 => true,
+            _ => false,
+        }),
+        _ => true,
+    };
+
     // Attach motion data for inter MBs (Direct has no motion struct).
     if mb_type_raw != 0 {
         mb.motion = Some(motion);
@@ -1307,10 +1324,17 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     let cbp_l = cbp & 0x0F;
     let cbp_c = cbp >> 4;
 
-    // `transform_size_8x8_flag` (§7.3.5.1): same placement as the P-slice
-    // inter path — after CBP, before mb_qp_delta (see parse_p_macroblock).
+    // `transform_size_8x8_flag` (§7.3.5.1): present when
+    // `CodedBlockPatternLuma > 0 && transform_8x8_mode_flag && mb_type != I_NxN
+    //  && noSubMbPartSizeLessThan8x8Flag
+    //  && (mb_type != B_Direct_16x16 || direct_8x8_inference_flag)`.
+    // The last two clauses were previously omitted, so a `B_Direct_16x16` MB
+    // (or a `B_8x8` with any sub-8×8 sub-partition / a `B_Direct_8x8`
+    // sub-partition when `direct_8x8_inference_flag == 0`) consumed a spurious
+    // bit and desynced the rest of the slice — the exact freh1_b failure.
+    let dct8x8_allowed = no_sub_part_lt_8x8 && (mb_type_raw != 0 || direct_8x8_inference_flag);
     let mut is_8x8 = false;
-    if transform_8x8_mode && cbp_l != 0 {
+    if transform_8x8_mode && cbp_l != 0 && dct8x8_allowed {
         is_8x8 = r
             .read_bit()
             .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?

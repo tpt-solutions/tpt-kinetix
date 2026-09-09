@@ -75,8 +75,10 @@ fn ba2_pframe_diffmap() {
             stream_index: 0,
             is_key_frame: n == 0,
         };
-        if let Ok(Some(f)) = dec.decode(&pkt) {
-            frames.push(f);
+        match dec.decode(&pkt) {
+            Ok(Some(f)) => frames.push(f),
+            Ok(None) => {}
+            Err(e) => eprintln!("  nal {n} decode error: {e:?}"),
         }
     }
     frames.extend(dec.flush().unwrap_or_default());

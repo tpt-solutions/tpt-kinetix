@@ -3042,6 +3042,7 @@ impl H264Decoder {
                         pps.as_ref()
                             .map(|p| p.transform_8x8_mode_flag)
                             .unwrap_or(false),
+                        sps.direct_8x8_inference_flag,
                         colocated_mv.as_deref(),
                         header.direct_spatial_mv_pred_flag,
                         temporal_ctx.as_ref(),
