@@ -44,7 +44,13 @@ struct DecodedChannel {
 /// A decoded CPE pair ready for stereo processing and synthesis.
 #[derive(Debug, Clone)]
 struct DecodedCpe {
+    #[allow(dead_code)]
     instance_tag: u8,
+    /// Indices of this pair's two channels in `decoded_channels`. Recorded at
+    /// decode time — `instance_tag` is **not** unique across element types
+    /// (a 5.1 stream is `SCE(0) CPE(0) CPE(1) LFE(0)`), so the stereo pass must
+    /// not re-find the pair by tag.
+    pair: (usize, usize),
     #[allow(dead_code)]
     left: DecodedChannel,
     #[allow(dead_code)]
@@ -296,6 +302,7 @@ impl AacDecoder {
                     });
                     decoded_cpes.push(DecodedCpe {
                         instance_tag: cpe.instance_tag,
+                        pair: (left_idx, right_idx),
                         left: decoded_channels[left_idx].clone(),
                         right: decoded_channels[right_idx].clone(),
                         ms_mask_present: cpe.ms_mask_present,
@@ -349,21 +356,14 @@ impl AacDecoder {
 
         // --- Pass 3: Apply stereo (M/S, intensity) for CPEs ---
         for cpe in &decoded_cpes {
-            // Find the indices in decoded_channels (they're consecutive).
-            // The cpe_pair field points to them.
-            // We need to find the actual mutable references.
-            // Since we cloned into decoded_cpes, we need to find them again.
-            // For simplicity, we'll re-find by instance_tag and position.
-            // In practice, CPE channels are stored consecutively with same instance_tag.
-            let indices: Vec<usize> = decoded_channels
-                .iter()
-                .enumerate()
-                .filter(|(_, ch)| ch.instance_tag == cpe.instance_tag && !ch.is_cce)
-                .map(|(idx, _)| idx)
-                .collect();
-            if indices.len() == 2 {
-                let left_idx = indices[0];
-                let right_idx = indices[1];
+            // Use the pair indices recorded at decode time. Re-finding the pair
+            // by `instance_tag` is wrong: tags are not unique across element
+            // types, so in a 5.1 stream (`SCE(0) CPE(0) CPE(1) LFE(0)`) the
+            // filter for tag 0 also matches the SCE and LFE, the `len() == 2`
+            // check fails, and CPE(0)'s M/S + intensity stereo are silently
+            // skipped — audible only when a real tone sits in an intensity band.
+            {
+                let (left_idx, right_idx) = cpe.pair;
                 let swb = if decoded_channels[left_idx]
                     .ics
                     .window_sequence
@@ -614,7 +614,14 @@ impl AacDecoder {
         };
         let mut coeffs = stream.coeffs;
         if let Some(p) = &stream.pulse {
-            apply_pulse(p, swb, &mut coeffs);
+            apply_pulse(
+                p,
+                swb,
+                &mut coeffs,
+                stream.global_gain,
+                &stream.scalefactor,
+                &stream.band_type,
+            );
         }
         let gindex = group_base_offsets(ics);
         if std::env::var_os("AAC_DBG_NO_PNS").is_none() {
@@ -1443,7 +1450,14 @@ mod synth_tests {
         let swb = crate::tables::SWB_OFFSET_1024[hdr.sampling_frequency_index as usize];
         let mut coeffs_no_tns = cpe.left.coeffs;
         if let Some(p) = &cpe.left.pulse {
-            crate::pulse::apply_pulse(p, swb, &mut coeffs_no_tns);
+            crate::pulse::apply_pulse(
+                p,
+                swb,
+                &mut coeffs_no_tns,
+                cpe.left.global_gain,
+                &cpe.left.scalefactor,
+                &cpe.left.band_type,
+            );
         }
         let gindex = crate::dequant::group_base_offsets(&cpe.left.ics);
         let mut rng2 = PnsRandom::new();

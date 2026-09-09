@@ -1510,3 +1510,131 @@
         not parsed — fine for the mono/stereo config-0 that ffmpeg emits.
         Flipping `pixel_exact` should wait for real-bitstream / ISO-vector
         validation.
+
+   — **2026-09-10: review-only session, no code change.** Full `tpt-kinetix-aac`
+        suite green (72 lib + conformance + proptest/doc, 3 `#[ignore]` debug
+        tests), `cargo clippy --all-targets -D warnings` clean, `conformance_aac`
+        aggregate gate (`worst_diff < 0.05`, `worst_corr > 0.95`) passes — all 17
+        cases including `surround_51`/`surround_71` (0.0023 / 0.0036, under the
+        0.05 tolerance but not bit-exact). Re-audited the two suspects the
+        2026-09-03 note named for the `surround` FR-channel residual against
+        ffmpeg semantics from memory:
+        - `scalefactors.rs::decode_scalefactors` — the three-predictor structure
+          (regular `scale_factor -= hcod`, intensity `is_position += hcod` from 0,
+          noise `noise_sfo` from `global_gain-90`, 9-bit PCM first band) matches
+          ffmpeg's `decode_scale_factors` `offset[0/1/2]` accumulation and the
+          `NOISE_OFFSET=90` / `NOISE_PRE=256` / `SCALE_DIFF_ZERO=60` constants.
+          No discrepancy found.
+        - `stereo.rs::apply_stereo` — M/S eligibility (`bt < NOISE_HCB` both
+          channels), intensity sign `c = -1 + 2·(bt-14)` with M/S-mask flip and
+          `is_pos` clamp `[-155,100]`, overwrite direction all match
+          `apply_mid_side_stereo` / `apply_intensity_stereo`. No discrepancy.
+        **Sharpened the localization (`tests/dbg_surround_localize.rs`, extended
+        this session to dump CPE-tag0 per-group sfb-0/1 coeffs for frame 1):**
+        - The offending CPE (tag0, FL/FR) has **`ms_mask_present == 0`** — M/S is
+          ruled out *structurally*, not just by the `AAC_DBG_NO_MS` probe.
+        - **FL is bit-exact on every frame.** FL and FR share `ics_info`
+          (`common_window`), the window sequence/shape, and the entire
+          dequant → short-IMDCT → window → overlap-add path — so all of those are
+          ruled out (the 2026-09-03 note still listed them as suspects). The wrong
+          data is **FR's own `decode_scalefactors` / `decode_spectral_data`
+          output** for window-groups 1-3.
+        - Grouping `sfg=54` → groups `[1,3,3,1]` (g0=w0, g1=w1-3, g2=w4-6, g3=w7).
+          g0 (w0) is bit-exact; g1-g3 carry a ~0.75% *continuous* gain error
+          (corr stays 1.0000). g0 sfb 6-11 = NOISE (cb13); g1-g3 sfb 6-11 =
+          INTENSITY (cb15); every group's sfb 0 = ESC (cb11), sfb 1-5 = cb2.
+        - Magnitude/character (pure gain, corr 1.0, only groups after the first)
+          fits a **systematic ±1 error on one ESC (cb11) coefficient repeated in
+          each of g1-g3** — `|q|^(4/3)` at q≈100-200 gives ~0.7-1% per unit. Not a
+          scalefactor/`global_gain` error (those quantise to 2^(k/4) ≈ 19% steps,
+          can't yield 0.75%).
+        Re-reviewed `dequant.rs::decode_spectral_data` (pair-codebook 2-quads-per-4
+        loop, noise/intensity skip), `codebooks.rs` ESC path (`idx_to_values`
+        mod/off, sign-before-escape ordering, `read_escape_word` = `2^(n+4)+word`
+        with n = count of leading 1s) — all match ffmpeg/spec, no defect found,
+        same wall as 3 prior sessions.
+   — **2026-09-10 (later): `surround_51`/`surround_71` CLOSED — root cause found
+        via an instrumented ffmpeg-from-source coefficient trace, and it was NOT
+        in the spectral/scalefactor decode at all.** Built a minimal
+        ffmpeg n6.1.1 (`scoop install mingw make nasm`; `./configure --cc=gcc
+        --disable-x86asm --disable-everything --enable-decoder/parser/demuxer=aac
+        --enable-muxer=pcm_f32le`; patched `libavcodec/aacdec_template.c` to dump
+        `sce->coeffs` after `decode_spectrum_and_dequant` and `cpe->ch[n].coeffs`
+        after `apply_intensity_stereo`). Its decode of `surround.aac` matches the
+        prebuilt reference to 1.2e-7. Trace vs a matching Kinetix per-channel
+        coeff dump showed **FR frame 1's spectral decode was already bit-exact**
+        (modulo a global IMDCT sign convention that cancels) — every regular and
+        ESC coefficient matched. The divergence: for CPE tag0's FR, the
+        **intensity-stereo fill (sfb 6-11 of groups 1-3) was producing 0** where
+        ffmpeg had `left * 2^(-is_pos/4)`.
+        Bug: `decoder.rs` Pass 3 re-found each CPE's channel pair by filtering
+        `decoded_channels` for `ch.instance_tag == cpe.instance_tag`. Element
+        instance-tags are **not unique across element types** — a 5.1 stream is
+        `SCE(tag0) CPE(tag0) CPE(tag1) LFE(tag0)`, so the tag-0 filter also
+        matched the SCE and the LFE, `indices.len()` came out 4, the
+        `if indices.len() == 2` guard failed, and **CPE tag0's entire
+        `apply_stereo` call (M/S + intensity) was silently skipped**. Only ever
+        bit when a real tone sat in an intensity band of the first CPE of a
+        multi-element stream — which is exactly `surround_51`/`71` and nothing in
+        the plain-stereo corpus. FL looked bit-exact throughout because it has no
+        intensity bands and these CPEs have `ms=0`, so skipping stereo was a
+        no-op for it.
+        Fix: `DecodedCpe` now carries `pair: (usize, usize)` recorded at decode
+        time; Pass 3 uses it directly instead of the tag filter. All 17
+        conformance cases now bit-exact: `surround_51` 0.00226 → 1.5e-7,
+        `surround_71` 0.00356 → 1.5e-7, everything else unchanged (~3e-7). `cargo
+        test -p tpt-kinetix-aac`, `clippy --all-targets -D warnings`, `fmt
+        --check`, `--doc`, and `cargo build -p tpt-kinetix-pipeline
+        --no-default-features` all clean.
+        **This closes the last known AAC-LC accuracy gap on the synthetic
+        corpus.**
+
+   — **2026-09-10 (later still): real ISO/IEC 14496-26 conformance vectors ARE
+        freely available — the FFmpeg FATE suite hosts them.** Contrary to every
+        prior note in this file, `https://fate-suite.ffmpeg.org/aac/` carries the
+        MPEG-4 `al*` / `am*` audio conformance bitstreams plus their `.s16`
+        reference PCM (no auth). Wired in:
+        - `tools/fetch-aac-conformance.sh` + `just fetch-aac-conformance` —
+          downloads the streams, remuxes `.mp4 → .adts` (stream copy) and writes
+          `<name>.ref.f32` = ffmpeg's f32le decode of that *same* elementary
+          stream (a decoder-vs-decoder check — no container edit-list / encoder-
+          delay trimming on either side). Fixtures git-ignored under
+          `tpt-kinetix-aac/tests/fixtures/iso/`.
+        - `tpt-kinetix-aac/tests/iso_conformance.rs` — self-skips when fixtures
+          absent (CI stays green); asserts the LC-clean streams bit-exact and
+          pins a regression ceiling on the known gaps.
+        Results on first run:
+        - **`al04_44` (LC mono, pulse), `al05_44` (LC stereo), `al18_44` (LC mono
+          long) — BIT-EXACT.** al04 needed two real `pulse.rs` fixes (below).
+        - `al15_44` — SSR profile, correctly **rejected** (`gain_control_data`).
+        - Known gaps, pinned: `al06_44` (LC 5.1, ~22k LSB), `al07_96` (LC 5.1 @
+          96 kHz, parse errors), `am00_88` / `am05_44` (LC multi-element, parse
+          errors), `al22_chCfg0PCE_44` (7.1 config-0 PCE, parse errors),
+          `al17_44` (2× SCE with a PCE that names a CPE that isn't there — ffmpeg
+          also logs "ChannelElement 1.0 missing"). These are multi-element /
+          PCE-layout / 96 kHz parse bugs, distinct from the LC-clean path.
+
+        **`al04_44` pulse bugs — FIXED (`src/pulse.rs`), al04 now bit-exact.**
+        Found by tracing al04 frame 12 (pulse positions [21,22]) against the
+        instrumented ffmpeg's post-dequant `sce->coeffs`:
+        1. `parse_pulse` did `pulse_amp = read_bits(4) + 1`. ISO §4.6.3.5 /
+           ffmpeg `decode_pulses` use the 4-bit `pulse_amp` **verbatim** (no
+           `+1`). Removed.
+        2. `apply_pulse` added the raw amplitude to the *dequantized* coefficient
+           with an invented "sign = parity of the line index" rule. The spec
+           applies the pulse in the **quantized** domain: recover `q` from the
+           dequantized line (`q = (co/scale) / |co/scale|^¼`), grow its magnitude
+           by `amp` (`q → q + sign(q)·amp`; a zero line → `-amp`), re-dequantize
+           `sign·|q_new|^(4/3)·scale`. Rewrote as a port of ffmpeg's
+           `decode_spectrum_and_dequant` pulse block; `apply_pulse` now also
+           takes `global_gain` / `scalefactor` / `band_type` and skips
+           ZERO/NOISE/intensity bands (ffmpeg's `band_type != NOISE_BT && sf`
+           guard). New unit tests replace the two that pinned the old wrong
+           behaviour. The synthetic corpus never exercised pulse (ffmpeg's
+           encoder doesn't emit it), so al04 is the only pulse coverage.
+
+        `capabilities().pixel_exact` still `false` — corpus is ffmpeg-generated
+        + the ISO LC-clean subset passes, but multi-element / PCE / 96 kHz / SSR
+        paths have open gaps, and HE-AAC (SBR/PS), CCE coupling, 960-sample
+        frames are unimplemented. Scratch ffmpeg build + patch under the session
+        scratchpad, not committed.

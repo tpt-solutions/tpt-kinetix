@@ -157,6 +157,14 @@ av1-oracle-tile ENTRY="testsrc":
 fetch-h264-conformance:
     bash tools/fetch-h264-conformance.sh
 
+# Fetch the MPEG-4 / ISO-IEC 14496-26 AAC audio conformance bitstreams (the
+# "al*"/"am*" streams) from the FFmpeg FATE sample suite into
+# tpt-kinetix-aac/tests/fixtures/iso/ (git-ignored). The `iso_conformance` test
+# decodes each and compares against ffmpeg's decode of the same elementary
+# stream. Requires `ffmpeg` on PATH. NAMES="al05_44 al18_44" narrows it.
+fetch-aac-conformance:
+    bash tools/fetch-aac-conformance.sh
+
 # Run every Criterion bench in the workspace.
 bench:
     cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline

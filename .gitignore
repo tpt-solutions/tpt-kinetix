@@ -34,6 +34,10 @@
 # ~hundreds of MB of bitstreams + reference YUV — never committed)
 /tpt-kinetix-h264/tests/fixtures/itu/
 
+# MPEG-4 / ISO-IEC 14496-26 AAC audio conformance fixtures
+# (fetched with `just fetch-aac-conformance` — bitstreams + reference PCM)
+/tpt-kinetix-aac/tests/fixtures/iso/
+
 # Editor / OS
 .vscode/
 .idea/

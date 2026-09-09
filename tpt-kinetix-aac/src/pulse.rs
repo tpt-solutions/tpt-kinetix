@@ -5,6 +5,8 @@
 //! dequantized spectrum before the IMDCT.
 
 use crate::bitreader::BitReader;
+use crate::dequant::dequant_scale;
+use crate::scalefactors::{is_intensity, is_noise, ZERO_HCB};
 use crate::syntax::AacParseError;
 
 /// Parsed pulse-data for one channel.
@@ -14,7 +16,8 @@ pub struct PulseData {
     pub start_sfb: u8,
     /// Relative offsets (cumulative) to the affected spectral lines.
     pub offsets: Vec<u8>,
-    /// Amplitudes (already incremented by 1 at parse time).
+    /// Pulse amplitudes (`pulse_amp`, 4 bits, unsigned magnitude — used as-is,
+    /// **not** incremented; ISO/IEC 14496-3 §4.6.3.5 / ffmpeg `decode_pulses`).
     pub amps: Vec<f32>,
 }
 
@@ -29,7 +32,7 @@ pub fn parse_pulse(reader: &mut BitReader) -> Result<PulseData, AacParseError> {
     let mut amps = Vec::with_capacity(np);
     for _ in 0..np {
         offsets.push(reader.read_bits(5).ok_or(AacParseError::UnexpectedEof)? as u8);
-        let amp = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8 + 1;
+        let amp = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
         amps.push(amp as f32);
     }
     Ok(PulseData {
@@ -40,22 +43,65 @@ pub fn parse_pulse(reader: &mut BitReader) -> Result<PulseData, AacParseError> {
 }
 
 /// Apply pulse data to the dequantized spectrum in place.
-pub fn apply_pulse(pulse: &PulseData, swb: &[u16], coeffs: &mut [f32; 1024]) {
+///
+/// ISO/IEC 14496-3 §4.6.3.5 applies each pulse in the **quantized** domain, not
+/// by adding a raw value to the dequantized line: the affected coefficient is
+/// converted back to its signed quantized value `q`, its magnitude is increased
+/// by `pulse_amp` (`q -> q + sign(q)·amp`; a zero line becomes `-amp`), and
+/// the result is re-dequantized with that band's scalefactor gain. This mirrors
+/// ffmpeg's `decode_spectrum_and_dequant` pulse block
+/// (`co /= sf; ico = q ± amp; coef = cbrt(|ico|)·ico·sf`). Pulses are only legal
+/// in long windows, so `swb`/`scalefactor`/`band_type` are the long-window,
+/// single-group tables. A pulse landing in a `ZERO`/`NOISE`/intensity band, or a
+/// band with a zero gain, is skipped (matching ffmpeg's `band_type != NOISE_BT
+/// && sf[idx]` guard).
+pub fn apply_pulse(
+    pulse: &PulseData,
+    swb: &[u16],
+    coeffs: &mut [f32; 1024],
+    global_gain: u8,
+    scalefactor: &[i32],
+    band_type: &[u8],
+) {
     // `start_sfb` is untrusted (from the bitstream); a hostile or desynced
     // stream can name a band past the scalefactor-band table.
     let Some(&start) = swb.get(pulse.start_sfb as usize) else {
         return;
     };
-    let mut offset = start as usize;
+    let mut pos = start as usize;
     for i in 0..pulse.offsets.len() {
-        offset += pulse.offsets[i] as usize;
-        if offset < 1024 {
-            // §4.6.3.5: add the pulse amplitude (already incremented by 1 at
-            // parse time) to the spectral line at the cumulative offset, with the
-            // sign set by the parity of that offset (even → +, odd → −).
-            let sign = if offset & 1 == 0 { 1.0f32 } else { -1.0f32 };
-            coeffs[offset] += sign * pulse.amps[i];
+        pos += pulse.offsets[i] as usize;
+        if pos >= 1024 {
+            break;
         }
+        // Scalefactor band containing `pos` (last `swb[k] <= pos`).
+        let Some(sfb) = swb.iter().rposition(|&o| o as usize <= pos) else {
+            continue;
+        };
+        if sfb + 1 >= swb.len() {
+            continue;
+        }
+        let bt = band_type.get(sfb).copied().unwrap_or(0);
+        if bt == ZERO_HCB || is_noise(bt) || is_intensity(bt) {
+            continue;
+        }
+        let sf = scalefactor.get(sfb).copied().unwrap_or(0);
+        let scale = dequant_scale(global_gain, sf) as f64;
+        if scale == 0.0 {
+            continue;
+        }
+        let amp = pulse.amps[i] as f64;
+        let co = coeffs[pos] as f64;
+        let q_new = if co != 0.0 {
+            // `co / scale` == sign(q)·|q|^(4/3); dividing by `|·|^(1/4)` recovers
+            // the signed quantized value `q`.
+            let t = co / scale;
+            let q = t / t.abs().powf(0.25);
+            q + if q > 0.0 { amp } else { -amp }
+        } else {
+            -amp
+        };
+        coeffs[pos] = (q_new.signum() * q_new.abs().powf(4.0 / 3.0) * scale) as f32;
     }
 }
 
@@ -85,46 +131,69 @@ mod tests {
     #[test]
     fn parse_pulse_hand_computed() {
         // number_pulse = 0 (2 bits → np = 1); start_sfb = 0 (6 bits);
-        // one pulse: offset = 0 (5 bits), amp = 3 (4 bits → stored = 4).
+        // one pulse: offset = 0 (5 bits), amp = 3 (4 bits, used verbatim).
         let bits: Vec<u8> = vec![
             0, 0, // number_pulse = 0 → np = 1
             0, 0, 0, 0, 0, 0, // start_sfb = 0
             0, 0, 0, 0, 0, // offset[0] = 0
-            0, 0, 1, 1, // amp[0] = 3 → 3 + 1 = 4
+            0, 0, 1, 1, // amp[0] = 3
         ];
         let bytes = bits_to_bytes(&bits);
         let mut r = BitReader::new(&bytes);
         let p = parse_pulse(&mut r).unwrap();
         assert_eq!(p.start_sfb, 0);
         assert_eq!(p.offsets, vec![0]);
-        assert_eq!(p.amps, vec![4.0]);
+        assert_eq!(p.amps, vec![3.0]);
     }
 
     #[test]
-    fn apply_pulse_adds_unsigned_amplitude() {
-        // start_sfb line 0; offsets 0,2 → lines 0 and 2 (both even → +).
+    fn apply_pulse_zero_line_becomes_neg_amp_redequantized() {
+        // A zero coefficient at the pulse line becomes `-amp` in the quantized
+        // domain, re-dequantized: `-(amp^(4/3))·scale`. With global_gain 100 and
+        // scalefactor 0, scale = 2^0 = 1, so line 0 → -(4^(4/3)) ≈ -6.3496.
         let pulse = PulseData {
             start_sfb: 0,
-            offsets: vec![0, 2],
-            amps: vec![3.0, 5.0],
+            offsets: vec![0],
+            amps: vec![4.0],
         };
         let mut coeffs = [0.0f32; 1024];
-        apply_pulse(&pulse, &[0u16, 4, 8], &mut coeffs);
-        assert!((coeffs[0] - 3.0).abs() < 1e-6, "line 0 += 3");
-        assert!((coeffs[2] - 5.0).abs() < 1e-6, "line 2 += 5");
+        apply_pulse(&pulse, &[0u16, 4, 8], &mut coeffs, 100, &[0, 0], &[2, 2]);
+        let want = -(4.0f64.powf(4.0 / 3.0)) as f32;
+        assert!((coeffs[0] - want).abs() < 1e-3, "got {}", coeffs[0]);
     }
 
     #[test]
-    fn apply_pulse_sign_alternates_with_offset_parity() {
-        // cumulative offsets 1 (odd → −) then 2 (even → +).
+    fn apply_pulse_grows_quantized_magnitude() {
+        // A non-zero line: q recovered, |q| += amp, re-dequantized. scale = 1
+        // (gg 100, sf 0). Start from a dequantized 8.0 = q^(4/3) with q = 8^(3/4)
+        // ≈ 4.757; after +2 → 6.757; re-dequant 6.757^(4/3) ≈ 12.42.
         let pulse = PulseData {
             start_sfb: 0,
-            offsets: vec![1, 1],
-            amps: vec![2.0, 2.0],
+            offsets: vec![1],
+            amps: vec![2.0],
         };
         let mut coeffs = [0.0f32; 1024];
-        apply_pulse(&pulse, &[0u16, 4], &mut coeffs);
-        assert!((coeffs[1] + 2.0).abs() < 1e-6, "line 1 -= 2 (odd)");
-        assert!((coeffs[2] - 2.0).abs() < 1e-6, "line 2 += 2 (even)");
+        coeffs[1] = 8.0;
+        apply_pulse(&pulse, &[0u16, 4, 8], &mut coeffs, 100, &[0, 0], &[2, 2]);
+        let q = 8.0f64.powf(0.75) + 2.0;
+        let want = (q.powf(4.0 / 3.0)) as f32;
+        assert!((coeffs[1] - want).abs() < 1e-2, "got {}", coeffs[1]);
+    }
+
+    #[test]
+    fn apply_pulse_skips_zero_and_noise_bands() {
+        let pulse = PulseData {
+            start_sfb: 0,
+            offsets: vec![0],
+            amps: vec![4.0],
+        };
+        // band 0 = ZERO_HCB → skipped
+        let mut coeffs = [0.0f32; 1024];
+        apply_pulse(&pulse, &[0u16, 4], &mut coeffs, 100, &[0], &[0]);
+        assert_eq!(coeffs[0], 0.0);
+        // band 0 = NOISE_HCB (13) → skipped
+        let mut coeffs = [0.0f32; 1024];
+        apply_pulse(&pulse, &[0u16, 4], &mut coeffs, 100, &[0], &[13]);
+        assert_eq!(coeffs[0], 0.0);
     }
 }

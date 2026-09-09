@@ -128,16 +128,23 @@ Everything below is independent of the H.264 decoder effort:
   needs a real post-deblock-pre-CDEF dav1d trace, not more Kinetix-side
   on/off experiments. 139 unit tests pass, clippy clean (workspace-wide,
   confirmed this session). See todo-av1.md for the full per-bug postmortems.
-- **AAC decoder — one small accuracy gap left.** 2026-08-30 the PNS /
-  `noise_mono_44100` gap is CLOSED (separate `noise_sfo` DPCM predictor in
-  `scalefactors.rs` + matching `pns.rs` `dequant_scale`) — 6 of 7 conformance
-  cases are now bit-exact (max_diff ≤ 4e-7, corr 1.0000) and `noise_mono` flows
-  through the real aggregate gate. Only `sweep_stereo_44100` remains: a single
-  peak-sample outlier (max_diff 0.0725, corr 1.0000), one ESC-magnitude
-  coefficient ~0.14% off; every suspect ruled out, needs a bit-for-bit ffmpeg
-  reference trace. Kept as a documented gate exception. `pixel_exact` stays
-  `false` until it closes. All AAC changes are now committed (`e1ffbf4` PNS fix,
-  `2888aac` conformance/debug cleanup). See todo-aac.md.
+- **AAC decoder — all 17 synthetic conformance cases + 3 ISO vectors bit-exact
+  (2026-09-10).** Fixed this session (all uncommitted, see todo-aac.md):
+  1. `surround_51`/`71` residual — `decoder.rs` Pass 3 re-found CPE channel pairs
+     by `instance_tag`, not unique across element types (5.1 = `SCE(0) CPE(0)
+     CPE(1) LFE(0)`), so CPE(0)'s M/S + intensity was silently skipped. Now uses
+     `DecodedCpe.pair`. Root-caused with an instrumented ffmpeg-from-source trace.
+  2. Real ISO/IEC 14496-26 vectors wired in (`just fetch-aac-conformance` +
+     `tests/iso_conformance.rs`) — they ARE free on fate-suite.ffmpeg.org. LC
+     mono/stereo (`al04`/`al05`/`al18`) decode **bit-exact**; SSR (`al15`)
+     correctly rejected.
+  3. Two `pulse.rs` bugs (found via ISO `al04`): `pulse_amp` was `+1`'d (spec
+     uses it verbatim); `apply_pulse` added raw amplitude to the dequantized
+     line with a fictional parity sign instead of growing the quantized value.
+  Remaining ISO gaps: multi-element / PCE-layout / 96 kHz parse bugs
+  (`al06`/`al07`/`al22`/`am00`/`am05`). `capabilities().pixel_exact` still
+  `false` — a policy call now (LC-clean subset passes ISO; multichannel/PCE/96k
+  + HE-AAC/SBR + CCE + 960-frame open).
 - **`tpt-kinetix-vision` — reconstruction not implemented.** Design + scaffold
   done (Phase 15); crate is a decode shell only, `[~]` in todo-codecs.md.
 - **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
