@@ -1614,19 +1614,18 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
     // of the CAVLC bug fixed in #32j. Same placement as the P-slice inter path
     // above.
     //
-    // FFmpeg gates this on `dct8x8_allowed` (`h264_cabac_ref.c` line 2347),
-    // which starts `= transform_8x8_mode` and is ONLY narrowed for:
-    //   - B_Direct_16x16 (b_type_raw 0):  `&= direct_8x8_inference_flag`
-    //     (line 2224);
-    //   - B_8x8 (b_type_raw 22): `= get_dct8x8_allowed()` on the four
-    //     `sub_mb_type`s (line 2161) — true iff every sub-partition is 8×8 or
-    //     larger (raw {0,1,2,3}; with `!direct_8x8_inference_flag`, the 4×4
-    //     variants raw {10,11,12} are also permitted since they carry only the
-    //     `MB_TYPE_8x8` bit).
-    // For B_L0/L1/Bi_16x16 (1..=3) AND B_16x8/B_8x16 (4..=21) it is NOT
-    // narrowed — the flag IS read. The previous `matches!(1..=3)` gate wrongly
-    // dropped the 16×8/8×16 case and desynced every stream with a coded
-    // B_16x8/B_8x16 MB (e.g. `mbaff_ibp`).
+    // Gated on §7.3.5's `noSubMbPartSizeLessThan8x8Flag`, narrowed only for:
+    //   - B_Direct_16x16 (b_type_raw 0): `= direct_8x8_inference_flag`;
+    //   - B_8x8 (b_type_raw 22): 0 as soon as any sub-partition has
+    //     `NumSubMbPart > 1`, i.e. raw `sub_mb_type` 4..=12 (the 8×4/4×8/4×4
+    //     variants). Raw 1/2/3 (B_L0/L1/Bi_8x8) keep the flag; raw 0
+    //     (B_Direct_8x8) keeps it only when `direct_8x8_inference_flag` is set
+    //     (spec's `else if !direct_8x8_inference_flag` clause).
+    // For B_L0/L1/Bi_16x16 (1..=3) and B_16x8/B_8x16 (4..=21) it is NOT
+    // narrowed — the flag IS read. (The previous version allowed raw
+    // {0 without inference, 10, 11, 12}, reading a `transform_size_8x8_flag`
+    // the JM/ITU reference never emits and desyncing CABAC on `freh2_b`'s
+    // B slices — the twin of the P_8x8 bug fixed the same session.)
     let dct8x8_allowed = match b_type_raw {
         0 => direct_8x8_inference_flag,
         22 => {
@@ -1635,11 +1634,11 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 .as_ref()
                 .and_then(|m| m.sub_mb_type_b)
                 .unwrap_or([0u8; 4]);
-            if direct_8x8_inference_flag {
-                subs.iter().all(|&s| s <= 3)
-            } else {
-                subs.iter().all(|&s| s <= 3 || (10..=12).contains(&s))
-            }
+            subs.iter().all(|&s| match s {
+                0 => direct_8x8_inference_flag,
+                1..=3 => true,
+                _ => false,
+            })
         }
         _ => true,
     };

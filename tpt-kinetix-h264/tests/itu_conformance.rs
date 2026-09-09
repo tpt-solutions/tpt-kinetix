@@ -204,6 +204,13 @@ const MANIFEST: &[(&str, Expect)] = &[
     // bug as CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D (fixed 2026-09-06).
     // diff_bytes 93,983 -> 0.
     ("CABACI3_Sony_B", Expect::BitExact),
+    // Promoted to BitExact 2026-09-10 (SESSION #32bc): High CABAC, non-flat
+    // quant matrices, GOP `I B B P B B P`, temporal direct,
+    // direct_8x8_inference_flag == 0. Was scaffolding most P and B frames on a
+    // `transform_size_8x8_flag` over-read — the P_8x8 / B_8x8 CABAC
+    // `noSubMbPartSizeLessThan8x8Flag` gate wrongly permitted 4×4 sub-partitions
+    // (and B_Direct_8x8 without inference). Now 100/100 frames bit-exact.
+    ("freh2_b", Expect::BitExact),
 ];
 
 fn fixtures_root() -> PathBuf {
