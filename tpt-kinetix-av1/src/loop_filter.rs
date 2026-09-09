@@ -1349,6 +1349,15 @@ fn sgrproj_filter_plane(
 }
 
 /// Apply the per-unit loop-restoration filter over one plane (§7.17).
+///
+/// `boundary_src` is a snapshot of this plane taken *before* CDEF (deblock
+/// output only); `ssv` is the plane's vertical subsampling (0 for luma, 1 for
+/// 4:2:0 chroma). Per §7.17.1 the plane is processed in 64-row (`>> ssv`)
+/// stripes offset so the first stripe is 8 (`>> ssv`) rows shorter; a filter
+/// tap that leaves the current stripe must read the pre-CDEF `boundary_src`
+/// (two rows are available on each side, a third replicates the outer one),
+/// except at the true frame edge where the post-CDEF edge row is replicated.
+#[allow(clippy::too_many_arguments)]
 fn apply_loop_restoration_plane(
     plane: &mut [u8],
     w: usize,
@@ -1356,6 +1365,8 @@ fn apply_loop_restoration_plane(
     plane_idx: usize,
     fh: &crate::frame::FrameHeader,
     lr_units: &std::collections::HashMap<(usize, usize, usize), LrUnitData>,
+    boundary_src: &[u8],
+    ssv: usize,
 ) {
     if fh.frame_restoration_type[plane_idx] == 0 {
         return;
@@ -1371,6 +1382,19 @@ fn apply_loop_restoration_plane(
     // an already-filtered neighbour never leaks into a later unit's input,
     // matching the spec's per-unit-independent filtering.
     let full_src = plane.to_vec();
+
+    let first_h = (64 - 8) >> ssv;
+    let full_h = 64 >> ssv;
+    let stripe_bounds = |row: usize| -> (usize, usize) {
+        if row < first_h {
+            (0, (first_h - 1).min(h - 1))
+        } else {
+            let k = (row - first_h) / full_h;
+            let top = first_h + k * full_h;
+            (top, (top + full_h - 1).min(h - 1))
+        }
+    };
+
     for ur in 0..unit_rows {
         for uc in 0..unit_cols {
             let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
@@ -1380,13 +1404,55 @@ fn apply_loop_restoration_plane(
             let uy0 = ur * unit_size;
             let uw = unit_size.min(w - ux0);
             let uh = unit_size.min(h - uy0);
-            match unit {
-                LrUnitData::Wiener { h: hf, v: vf } => {
-                    wiener_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *hf, *vf);
+
+            // Split the unit's rows into stripe segments; filter each against a
+            // copy of the source whose out-of-stripe rows have been replaced
+            // with the pre-CDEF boundary rows the spec mandates.
+            let mut seg_y = uy0;
+            while seg_y < uy0 + uh {
+                let (stop, sbot) = stripe_bounds(seg_y);
+                let seg_end = (sbot + 1).min(uy0 + uh);
+                let seg_h = seg_end - seg_y;
+
+                let mut seg_src = full_src.clone();
+                if stop > 0 {
+                    // Rows above the stripe: stop-1, stop-2 verbatim from the
+                    // pre-CDEF plane; stop-3 replicates stop-2.
+                    for d in 1..=3usize {
+                        if stop < d {
+                            break;
+                        }
+                        let dst = stop - d;
+                        let srcr = stop - d.min(2);
+                        seg_src[dst * w..dst * w + w]
+                            .copy_from_slice(&boundary_src[srcr * w..srcr * w + w]);
+                    }
                 }
-                LrUnitData::Sgrproj { set, xqd } => {
-                    sgrproj_filter_plane(plane, &full_src, w, h, ux0, uy0, uw, uh, *set, *xqd);
+                if sbot + 1 < h {
+                    // Rows below the stripe: sbot+1, sbot+2 verbatim; sbot+3
+                    // replicates sbot+2.
+                    for d in 1..=3usize {
+                        let dst = sbot + d;
+                        let srcr = sbot + d.min(2);
+                        if dst >= h || srcr >= h {
+                            break;
+                        }
+                        seg_src[dst * w..dst * w + w]
+                            .copy_from_slice(&boundary_src[srcr * w..srcr * w + w]);
+                    }
                 }
+
+                match unit {
+                    LrUnitData::Wiener { h: hf, v: vf } => {
+                        wiener_filter_plane(plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *hf, *vf);
+                    }
+                    LrUnitData::Sgrproj { set, xqd } => {
+                        sgrproj_filter_plane(
+                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *set, *xqd,
+                        );
+                    }
+                }
+                seg_y = seg_end;
             }
         }
     }
@@ -1495,6 +1561,17 @@ pub fn apply_post_filters(
             dump_row("post-deblock", y_plane, y);
         }
     }
+
+    // Loop restoration's stripe-boundary rows (§7.17.1) are sourced from the
+    // *pre-CDEF* (deblock-only) plane, not the post-CDEF pixels the in-stripe
+    // filter reads — dav1d fills its `lr_lpf_line` boundary buffer from the
+    // deblocked frame before CDEF runs (`dav1d_copy_lpf`, `src` == deblock
+    // output). Snapshot the planes now, before CDEF alters them.
+    let (lr_pre_y, lr_pre_u, lr_pre_v) = if fh.uses_lr {
+        (y_plane.to_vec(), u_plane.to_vec(), v_plane.to_vec())
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
 
     // --- CDEF (§7.15) ---
     // Packing: `cdef_*_strength[idx] = pri_strength | (sec_idx << 4)`.
@@ -1612,9 +1689,9 @@ pub fn apply_post_filters(
     // check), i.e. restoration itself is now correct to the precision its
     // input allows. No corpus clip regressed.
     if fh.uses_lr {
-        apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units);
-        apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units);
-        apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units);
+        apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units, &lr_pre_y, 0);
+        apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units, &lr_pre_u, sub_y);
+        apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units, &lr_pre_v, sub_y);
     }
 
     Ok(())
