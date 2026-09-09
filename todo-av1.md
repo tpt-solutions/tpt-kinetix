@@ -5387,3 +5387,29 @@
 > sorting, extended candidates) — ~150–200 lines, the concrete next step to
 > close testsrc2. After that: pin `testsrc2_big` (or a real ITU/AOM vector)
 > and flip `capabilities().pixel_exact` for the intra path.
+
+> **2026-09-10 (cont'd) — full `find_mv_stack` port for intrabc: all 9 IBC DVs
+> now bit-exact vs dav1d, testsrc2_320x180 36.2→61.2 dB Y (8199→8 luma diff
+> samples).** Added a 2-D `refmv_grid` (`RefMvCell { mv, w4, h4, valid }`,
+> `mi_rows*mi_cols`) to `TileDecodeState`, splatted by every block
+> (`splat_refmv` — `valid=false` for plain intra = dav1d's `INVALID_MV`
+> sentinel, `Some(dv)` for IBC). `ibc_mv_pred` ports `dav1d_refmvs_find` /
+> `scan_row` / `scan_col` specialised to the single-ref `{INTRA_FRAME, NONE}`
+> intrabc case (no gmv, no temporal, no extended candidates — the spec's
+> `ref[0] > 0` gate excludes them): primary top/left scans at −1 with the
+> length/height weight formula, top-right + top-left points, +640 to the
+> nearest set, secondary scans at −3/−5, weight sort, then §6.10.24 pick
+> (`RefStackMv[0]` else `[1]` else default DV). Verified against a patched
+> dav1d `Post-dmv[bx,by,dv,ref,s0,s1,n]` trace (added `t->bx/t->by` +
+> mvstack[0]/[1] + n_mvs to the print — worth folding into
+> `scripts/dav1d-blockdump.patch`): all 9 IBC blocks match dav1d's `ref`
+> (predictor) and final DV exactly. No corpus regression (5 pinned entries
+> stay bit-exact); 139 av1 unit tests + clippy + fmt green.
+> **Remaining testsrc2_big gap (61 dB, 8 luma px):** IBC block 6 (bx=62,by=32,
+> 8×16, DV −592/0, skip=false) — cols 248–255 row 128 come out flat ≈copy
+> (106) where dav1d has a real gradient residual (132→109). Looks like the IBC
+> var-tx / coeff read producing eob=0 (or a wrong inverse transform) where
+> dav1d decodes coefficients — a residual bug in the IBC path, separate and
+> much smaller than the DV-predictor class just closed. Next: trace that one
+> block's `Post-y-cf-blk` against dav1d. Then pin `testsrc2_big` + flip
+> `capabilities().pixel_exact`.

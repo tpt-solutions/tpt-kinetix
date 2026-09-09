@@ -479,6 +479,20 @@ pub struct LrDecodeParams {
     pub num_planes: usize,
 }
 
+/// One cell of the 2-D reference-MV grid ([`TileDecodeState::refmv_grid`]),
+/// the Kinetix analogue of dav1d's `refmvs_block` ring buffer. Every decoded
+/// block splats its own cell(s): a plain intra block leaves `valid = false`
+/// (dav1d's `INVALID_MV` sentinel — contributes nothing to a later MV stack),
+/// an IBC block stores its final displacement vector. `w4`/`h4` are the
+/// block's width/height in 4×4 units, needed to step the neighbour scan.
+#[derive(Clone, Copy, Default)]
+struct RefMvCell {
+    mv: Mv,
+    w4: u8,
+    h4: u8,
+    valid: bool,
+}
+
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
 /// and the neighbour-context arrays (partition / luma-mode / chroma-mode /
 /// tx-size) the syntax elements read from.
@@ -620,6 +634,12 @@ struct TileDecodeState<'a> {
     /// Per-mi-row/col neighbour motion vectors (slot 0 used for single ref).
     mv_above: Vec<[Mv; 2]>,
     mv_left: Vec<[Mv; 2]>,
+    /// 2-D reference-MV grid (`mi_rows * mi_cols`, row-major, stride
+    /// `refmv_stride`), used only by the IBC displacement-vector predictor
+    /// ([`TileDecodeState::ibc_mv_pred`], a port of AV1 §7.10.2 `find_mv_stack`
+    /// for the single-ref `{INTRA_FRAME, NONE}` intrabc case).
+    refmv_grid: Vec<RefMvCell>,
+    refmv_stride: usize,
     // Output plane buffers (borrowed for the lifetime of the tile decode).
     y_plane: &'a mut [u8],
     u_plane: &'a mut [u8],
@@ -795,6 +815,8 @@ impl<'a> TileDecodeState<'a> {
             ref_left: vec![[NONE_FRAME; 2]; mi_rows],
             mv_above: vec![[Mv::default(); 2]; mi_cols],
             mv_left: vec![[Mv::default(); 2]; mi_rows],
+            refmv_grid: vec![RefMvCell::default(); mi_cols * mi_rows],
+            refmv_stride: mi_cols,
             y_plane,
             u_plane,
             v_plane,

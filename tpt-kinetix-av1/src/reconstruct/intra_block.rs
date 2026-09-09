@@ -96,60 +96,12 @@ impl<'a> TileDecodeState<'a> {
                 //
                 // Predictor: scan left then above for the first IBC-flagged
                 // block (is_inter == 1 on an intra-only / allow_intrabc frame
-                // means IBC). First valid candidate is NEARESTMV.
-                // AV1 §6.10.24 `assign_mv` (intrabc branch): the DV predictor is
-                // `RefStackMv[0][0]`, falling back to `RefStackMv[1][0]` if that is
-                // (0,0), and finally to a fixed default DV if both spatial
-                // candidates are (0,0). The spatial candidates here are approximated
-                // by the nearest left/above IBC neighbour's DV (a fuller
-                // `find_mv_stack` is not yet wired). Crucially, a *zero* neighbour DV
-                // must NOT suppress the default — matching the spec's
-                // `PredMv[0] == (0,0)` re-checks.
-                let ibc_pred = {
-                    let bw_mi = BLOCK_WIDTH[bsize] / MI_SIZE;
-                    let bh_mi = BLOCK_HEIGHT[bsize] / MI_SIZE;
-                    let mut pred = crate::inter::Mv::new(0, 0);
-                    // Approximate `find_mv_stack`'s primary spatial scan
-                    // (scan_row deltaRow=-1 across the top edge, scan_col
-                    // deltaCol=-1 down the left edge): take the first non-zero
-                    // DV from an IBC neighbour. dav1d weights/sorts these and
-                    // also does secondary (-3/-5) and extended scans — a fuller
-                    // port is still pending, so a handful of IBC blocks whose
-                    // predictor comes from a non-adjacent candidate are not yet
-                    // bit-exact.
-                    for r in mi_row..(mi_row + bh_mi).min(self.mi_rows) {
-                        if self.is_inter_left.get(r).copied().unwrap_or(0) != 0 {
-                            let m = self.mv_left.get(r).map(|m| m[0]).unwrap_or(pred);
-                            if m.row != 0 || m.col != 0 {
-                                pred = m;
-                                break;
-                            }
-                        }
-                    }
-                    if pred.row == 0 && pred.col == 0 {
-                        for c in mi_col..(mi_col + bw_mi).min(self.mi_cols) {
-                            if self.is_inter_above.get(c).copied().unwrap_or(0) != 0 {
-                                let m = self.mv_above.get(c).map(|m| m[0]).unwrap_or(pred);
-                                if m.row != 0 || m.col != 0 {
-                                    pred = m;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if pred.row == 0 && pred.col == 0 {
-                        // Default DV (§6.10.24). `sbSize4` is the superblock height in
-                        // 4x4 units; `INTRABC_DELAY_PIXELS` = 256; `MI_SIZE` = 4.
-                        let sb_size4 = self.sb_size4() as i32;
-                        let mi_row_start = (self.tile_px_y0 / MI_SIZE) as i32;
-                        if (mi_row as i32) - sb_size4 < mi_row_start {
-                            pred = crate::inter::Mv::new(0, -((sb_size4 * 4 + 256) * 8));
-                        } else {
-                            pred = crate::inter::Mv::new(-(sb_size4 * 4 * 8), 0);
-                        }
-                    }
-                    pred
-                };
+                // means IBC). AV1 §6.10.24 `assign_mv` (intrabc branch): the DV
+                // predictor is `RefStackMv[0][0]`, falling back to
+                // `RefStackMv[1][0]` if that is (0,0), and finally to a fixed
+                // default DV if both are (0,0). The stack itself comes from
+                // §7.10.2 `find_mv_stack` — see `ibc_mv_pred`.
+                let ibc_pred = self.ibc_mv_pred(mi_row, mi_col, bsize);
                 let delta = crate::inter::read_mv(
                     &mut self.dec,
                     &mut self.map_inter_cdfs,
@@ -169,6 +121,7 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.bit_position()
                     );
                 }
+                self.splat_refmv(mi_row, mi_col, bsize, Some(mv));
                 return self.reconstruct_ibc_block(mi_row, mi_col, bsize, skip, mv);
             }
         }
@@ -952,6 +905,9 @@ impl<'a> TileDecodeState<'a> {
                 *s = [crate::inter::Mv::new(0, 0); 2];
             }
         }
+        // 2-D ref-MV grid: a plain intra block carries no usable DV (dav1d's
+        // `splat_intraref` → `INVALID_MV`).
+        self.splat_refmv(mi_row, mi_col, bsize, None);
         // `PaletteColors[{0,1}][MiRow][MiCol]` (AV1 spec §5.11.46's implicit
         // per-position storage that [`Self::get_palette_cache`] reads back):
         // record this block's Y/U palettes (or clear them, for a non-palette
@@ -974,6 +930,219 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Splat this block's ref-MV grid cell(s) across its mi extent — the
+    /// Kinetix analogue of dav1d's `splat_intraref` (`mv = None`, a plain
+    /// intra block that contributes nothing to a later MV stack) and
+    /// `splat_intrabc_mv` (`mv = Some(dv)`, the block's final displacement
+    /// vector). Every decoded block must call this so the neighbour scan in
+    /// [`Self::ibc_mv_pred`] can step correctly over block sizes.
+    fn splat_refmv(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        mv: Option<crate::inter::Mv>,
+    ) {
+        let w4 = (BLOCK_WIDTH[bsize] / MI_SIZE) as u8;
+        let h4 = (BLOCK_HEIGHT[bsize] / MI_SIZE) as u8;
+        let cell = RefMvCell {
+            mv: mv.unwrap_or_default(),
+            w4,
+            h4,
+            valid: mv.is_some(),
+        };
+        for r in mi_row..(mi_row + h4 as usize).min(self.mi_rows) {
+            let base = r * self.refmv_stride;
+            for c in mi_col..(mi_col + w4 as usize).min(self.mi_cols) {
+                self.refmv_grid[base + c] = cell;
+            }
+        }
+    }
+
+    /// AV1 §7.10.2 `find_mv_stack` + §6.10.24 `assign_mv`, specialised to the
+    /// single-reference `{INTRA_FRAME, NONE}` intra-block-copy case (no global
+    /// motion, no temporal candidates, no extended candidates — the spec's
+    /// `ref[0] > 0` gate for those is false for intrabc). Ported from dav1d's
+    /// `dav1d_refmvs_find` / `scan_row` / `scan_col`: scan the top edge and
+    /// left edge (primary at −1, secondary at −3/−5) accumulating weighted DV
+    /// candidates from neighbouring IBC blocks, sort by weight, then take
+    /// `RefStackMv[0]` (else `RefStackMv[1]`, else the fixed default DV).
+    fn ibc_mv_pred(&self, mi_row: usize, mi_col: usize, bsize: usize) -> crate::inter::Mv {
+        use crate::inter::Mv;
+        let grid = &self.refmv_grid;
+        let stride = self.refmv_stride;
+        let mi_cols = self.mi_cols as i32;
+        let mi_rows = self.mi_rows as i32;
+        let row_start = (self.tile_px_y0 / MI_SIZE) as i32;
+        let col_start = (self.tile_px_x0 / MI_SIZE) as i32;
+        // Single tile per row/col in practice; use the frame bounds as the
+        // tile end (matches `decode_tile_group` for the untiled case).
+        let row_end = mi_rows;
+        let col_end = mi_cols;
+
+        let bw4 = (BLOCK_WIDTH[bsize] / MI_SIZE) as i32;
+        let bh4 = (BLOCK_HEIGHT[bsize] / MI_SIZE) as i32;
+        let by4 = mi_row as i32;
+        let bx4 = mi_col as i32;
+        let w4 = bw4.min(16).min(col_end - bx4);
+        let h4 = bh4.min(16).min(row_end - by4);
+
+        let cell = |r: i32, c: i32| -> RefMvCell {
+            if r < 0 || c < 0 || r >= mi_rows || c >= mi_cols {
+                RefMvCell::default()
+            } else {
+                grid[r as usize * stride + c as usize]
+            }
+        };
+        // dav1d `add_spatial_candidate` for `ref = {0, -1}`: an invalid
+        // (plain-intra / undecoded) cell contributes nothing; otherwise fold
+        // the DV into the stack, merging weight on a duplicate.
+        fn add(stack: &mut Vec<(Mv, i64)>, cand: RefMvCell, weight: i64) {
+            if !cand.valid {
+                return;
+            }
+            for e in stack.iter_mut() {
+                if e.0 == cand.mv {
+                    e.1 += weight;
+                    return;
+                }
+            }
+            if stack.len() < 8 {
+                stack.push((cand.mv, weight));
+            }
+        }
+        // --- primary scans -------------------------------------------------
+        let mut stack: Vec<(Mv, i64)> = Vec::with_capacity(8);
+        let mut n_rows: i32 = -1;
+        let mut n_cols: i32 = -1;
+        let mut max_rows: i32 = 0;
+        let mut max_cols: i32 = 0;
+
+        // scan_row helper: edge is grid row `rr`, walking columns from `bx4`.
+        let scan_row = |stack: &mut Vec<(Mv, i64)>, rr: i32, max_n: i32, step: i32| -> i32 {
+            let first = cell(rr, bx4);
+            let cand_bw4 = (first.w4 as i32).max(1);
+            let mut len = step.max(bw4.min(cand_bw4));
+            if bw4 <= cand_bw4 {
+                let weight = if bw4 == 1 {
+                    2
+                } else {
+                    2.max((2 * max_n).min(first.h4 as i32))
+                };
+                add(stack, first, (len * weight) as i64);
+                return weight >> 1;
+            }
+            let mut x = 0i32;
+            loop {
+                let cb = cell(rr, bx4 + x);
+                add(stack, cb, (len * 2) as i64);
+                x += len;
+                if x >= w4 {
+                    return 1;
+                }
+                let nb = cell(rr, bx4 + x);
+                len = step.max((nb.w4 as i32).max(1));
+            }
+        };
+        // scan_col helper: edge is grid column `cc`, walking rows from `by4`.
+        let scan_col = |stack: &mut Vec<(Mv, i64)>, cc: i32, max_n: i32, step: i32| -> i32 {
+            let first = cell(by4, cc);
+            let cand_bh4 = (first.h4 as i32).max(1);
+            let mut len = step.max(bh4.min(cand_bh4));
+            if bh4 <= cand_bh4 {
+                let weight = if bh4 == 1 {
+                    2
+                } else {
+                    2.max((2 * max_n).min(first.w4 as i32))
+                };
+                add(stack, first, (len * weight) as i64);
+                return weight >> 1;
+            }
+            let mut y = 0i32;
+            loop {
+                let cb = cell(by4 + y, cc);
+                add(stack, cb, (len * 2) as i64);
+                y += len;
+                if y >= h4 {
+                    return 1;
+                }
+                let nb = cell(by4 + y, cc);
+                len = step.max((nb.h4 as i32).max(1));
+            }
+        };
+
+        if by4 > row_start {
+            max_rows = ((by4 - row_start + 1) >> 1).min(2 + (bh4 > 1) as i32);
+            n_rows = scan_row(&mut stack, by4 - 1, max_rows, if bw4 >= 16 { 4 } else { 1 });
+        }
+        if bx4 > col_start {
+            max_cols = ((bx4 - col_start + 1) >> 1).min(2 + (bw4 > 1) as i32);
+            n_cols = scan_col(&mut stack, bx4 - 1, max_cols, if bh4 >= 16 { 4 } else { 1 });
+        }
+        // top-right point (dav1d gates this on `EDGE_I444_TOP_HAS_RIGHT`; we
+        // approximate with "the cell is inside the frame and decoded").
+        if n_rows != -1 && bw4.max(bh4) <= 16 && bw4 + bx4 < col_end {
+            add(&mut stack, cell(by4 - 1, bx4 + bw4), 4);
+        }
+
+        let nearest_cnt = stack.len();
+        for e in stack.iter_mut().take(nearest_cnt) {
+            e.1 += 640;
+        }
+
+        // top-left point.
+        if n_rows != -1 || n_cols != -1 {
+            add(&mut stack, cell(by4 - 1, bx4 - 1), 4);
+        }
+
+        // secondary scans at row/col offsets −3 and −5.
+        let mut n_rows_run = n_rows.max(0);
+        let mut n_cols_run = n_cols.max(0);
+        for n in 2..=3i32 {
+            if n > n_rows_run && n <= max_rows {
+                let rr = (by4 - 2 * n + 1) | 1;
+                n_rows_run += scan_row(
+                    &mut stack,
+                    rr,
+                    1 + max_rows - n,
+                    if bw4 >= 16 { 4 } else { 2 },
+                );
+            }
+            if n > n_cols_run && n <= max_cols {
+                let cc = (bx4 - 2 * n + 1) | 1;
+                n_cols_run += scan_col(
+                    &mut stack,
+                    cc,
+                    1 + max_cols - n,
+                    if bh4 >= 16 { 4 } else { 2 },
+                );
+            }
+        }
+
+        // Weight sort: nearest set, then the secondary set (stable, matching
+        // dav1d's bubble sort which preserves insertion order among equals).
+        let mut tail = stack.split_off(nearest_cnt.min(stack.len()));
+        stack.sort_by_key(|e| std::cmp::Reverse(e.1));
+        tail.sort_by_key(|e| std::cmp::Reverse(e.1));
+        stack.extend(tail);
+
+        // §6.10.24 intrabc predictor selection.
+        let s0 = stack.first().map(|e| e.0).unwrap_or_default();
+        let s1 = stack.get(1).map(|e| e.0).unwrap_or_default();
+        if s0.row != 0 || s0.col != 0 {
+            return s0;
+        }
+        if s1.row != 0 || s1.col != 0 {
+            return s1;
+        }
+        let sb_size4 = self.sb_size4() as i32;
+        if by4 - sb_size4 < row_start {
+            Mv::new(0, -((sb_size4 * 4 + 256) * 8))
+        } else {
+            Mv::new(-(sb_size4 * 4 * 8), 0)
+        }
     }
 
     /// Reconstruct one intra-block-copy (IBC) coded block (AV1 §7.11.3 / §5.11.7).
