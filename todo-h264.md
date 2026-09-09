@@ -20,11 +20,27 @@ ITU ref (was chroma max_diff 20); B frames referencing it improve a lot
 (frame 3 SAD 282015→131). `HCHP1_HHI_B` **0 → 46/250 frames bit-exact**.
 Commit on master (after the `dbg_itu_pframe` clippy fix).
 
-Still open on `freh1_b`: P/B frames 1/4/5/7… still fall to grey scaffold
-(a P/B decode error, first_bad=frame 1) — next target, it has a full JM
+**Follow-up (same session): freh1_b B-slice CAVLC desync FIXED.**
+`parse_b_macroblock` (cavlc.rs) read `transform_size_8x8_flag` on just
+`transform_8x8_mode && cbp_l != 0`, dropping §7.3.5's
+`noSubMbPartSizeLessThan8x8Flag` and `(mb_type != B_Direct_16x16 ||
+direct_8x8_inference_flag)` clauses. freh1_b has
+`direct_8x8_inference_flag == 0`, so every `B_Direct_16x16` with a coded
+luma CBP ate a spurious bit → whole-slice CAVLC desync → all B frames
+scaffolded. Threaded `direct_8x8_inference_flag` into `parse_b_slice` /
+`parse_b_macroblock` and derived the flag from the B_8x8 sub_mb_types.
+**freh1_b max_diff 219 → 26, diff_bytes 13.1M → 1.39M**; B frames decode
+(SAD ~5.4M → ~2000). ITU still 24/0.
+
+Still open on `freh1_b`: B frames carry a **widespread ±1–3 luma error**
+(diffmap is scattered, not localised) — a bi-pred rounding / spatial-
+direct MV / deblock precision bug, needs a pel-level oracle vs the JM
 `.trc`. Latent (unvalidated, left alone): `luma_dc_level_scale` uses
 `list_4x4[3]` (Inter Y) for Intra_16×16 luma DC — looks wrong for intra
 but no BitExact clip exercises a non-flat matrix + I16 DC to prove it.
+The same missing-clause bug likely exists in the CAVLC **P** path
+(`parse_p_macroblock`, cavlc.rs:924) for P_8x8 with sub-8×8 partitions —
+not yet checked/fixed.
 
 ## SESSION #32ba — HPCA_BRCM_C / HPCANL_BRCM_C byte-exact (mvd ctxIdxInc desync)
 
