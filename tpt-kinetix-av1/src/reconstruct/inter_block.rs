@@ -59,7 +59,7 @@ impl<'a> TileDecodeState<'a> {
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
-        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col <= 16;
+        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col <= 32;
         if dbg_b0 {
             eprintln!("DBG b0 skip={skip} rng={}", self.dec.raw_state().0);
         }

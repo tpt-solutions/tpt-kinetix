@@ -5684,3 +5684,25 @@
 > Still stubs: compound mode/ref decode + drl, temporal MV candidates
 > (`use_ref_frame_mvs`), single/compound extended candidates, global-motion
 > MVs, real compound prediction.
+
+> **2026-09-10 (cont'd) — inter mode/context reads now BIT-EXACT for the
+> first two blocks (commits 90fa8dd/72f2685).** Traced block-by-block against
+> patched dav1d (`KXnewmv`/`KXglobalmv`/`KXrefmv` prints added; Kinetix
+> `raw_state().0` = dav1d `msac.rng`). Two context bugs found & fixed:
+>  1. **`ZeroMvContext`** (the `zero_mv`/globalmv_mode read's context) was
+>     hardcoded 0 — §7.10.2's temporal-sample process inits it to
+>     `use_ref_frame_mvs` (1 here) and it stays 1 while no motion field
+>     exists. Threaded `use_ref_frame_mvs` through `decode_tile_group`.
+>  2. **`intra_inter` (is_inter) context** was `(left_inter+above_inter).min(3)`
+>     — §8.3.2 builds it from whether the *available* neighbours are
+>     INTRA-coded (3/1/0 both-avail, `2*intra` one-avail, 0 none).
+> Both blocks 0 & 1: skip/is_inter/ref/new_mv/zero_mv/ref_mv/filter0/filter1
+> rng all match dav1d. **`av1_inter_corpus`: testsrc_128x96 f1 16.5→24.7 dB,
+> f2 11.8→20.2, f3 20.3→27.3; testsrc_96x64 f1 18.5→21.7.**
+>
+> **Next desync** (block 2 or later / block 1's residual): continue the same
+> `KINETIX_AV1_DBG_B0` rng trace. Then: compound mode/ref decode + drl,
+> temporal MV candidates, real compound prediction, MV `read_mv` precision,
+> global-motion MVs. Also verify: block 0's `filter` ctx=11 vs dav1d ctx=3
+> (rng matched — likely a `dir*8` vs `dir`-table-index labelling difference,
+> but confirm `interp_filter[16]` layout == dav1d `filter[2][8]`).
