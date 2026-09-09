@@ -75,6 +75,7 @@ fn decode_with(
         false,    // force_integer_mv
         false,    // reference_select
         0,        // interpolation_filter (EIGHTTAP_REGULAR)
+        false,    // enable_dual_filter
         [0u8; 9], // ref_to_slot
         RefFrames::empty(),
         &mut meta,

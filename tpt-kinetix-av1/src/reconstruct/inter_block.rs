@@ -287,12 +287,53 @@ impl<'a> TileDecodeState<'a> {
             mvs[i] = mv;
         }
 
-        // Per-block interpolation filter (read only when switchable).
-        let filter = if frame_filter == INTERP_SWITCHABLE {
-            self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[0]) as u8
-        } else {
-            frame_filter
-        };
+        // Per-block interpolation filter (§5.11.27). When switchable, one
+        // symbol per axis is read (`dir` 0 = vertical, 1 = horizontal) if
+        // `enable_dual_filter`, otherwise a single shared symbol. dav1d
+        // (`Post-subpel_filter1`/`filter2`) reads two whenever the sequence
+        // header enables dual filters — reading only one desynced the entropy
+        // decoder from the first inter block onward.
+        let comp = usize::from(ref_names[1] != NONE_FRAME);
+        let mut filters = [frame_filter; 2];
+        if frame_filter == INTERP_SWITCHABLE {
+            let dirs = if self.enable_dual_filter { 2 } else { 1 };
+            for (dir, fout) in filters.iter_mut().enumerate().take(dirs) {
+                let base = ((dir & 1) * 2 + comp) * 4;
+                let left_t = if left_inter != 0
+                    && (self.ref_left[mi_row][0] == ref_names[0]
+                        || self.ref_left[mi_row][1] == ref_names[0])
+                {
+                    self.filter_left[dir][mi_row] as usize
+                } else {
+                    3
+                };
+                let above_t = if above_inter != 0
+                    && (self.ref_above[mi_col][0] == ref_names[0]
+                        || self.ref_above[mi_col][1] == ref_names[0])
+                {
+                    self.filter_above[dir][mi_col] as usize
+                } else {
+                    3
+                };
+                let add = if left_t == above_t {
+                    left_t
+                } else if left_t == 3 {
+                    above_t
+                } else if above_t == 3 {
+                    left_t
+                } else {
+                    3
+                };
+                let ctx = (base + add).min(15);
+                *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
+            }
+            if dirs == 1 {
+                filters[1] = filters[0];
+            }
+        }
+        // MC currently applies a single kernel to both axes; use the vertical
+        // filter (a full dual-axis kernel split is a follow-up).
+        let filter = filters[0];
 
         // Motion-compensated prediction into the output planes (Y then chroma),
         // using the reference slots mapped from the reference names.
@@ -350,6 +391,11 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.tx_left.get_mut(r) {
                 *s = luma_tx_h_byte;
             }
+            for (fv, arr) in filters.iter().zip(self.filter_left.iter_mut()) {
+                if let Some(s) = arr.get_mut(r) {
+                    *s = *fv;
+                }
+            }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(s) = self.is_inter_above.get_mut(c) {
@@ -371,6 +417,11 @@ impl<'a> TileDecodeState<'a> {
             }
             if let Some(s) = self.tx_above.get_mut(c) {
                 *s = luma_tx_w_byte;
+            }
+            for (fv, arr) in filters.iter().zip(self.filter_above.iter_mut()) {
+                if let Some(s) = arr.get_mut(c) {
+                    *s = *fv;
+                }
             }
         }
         Ok(())

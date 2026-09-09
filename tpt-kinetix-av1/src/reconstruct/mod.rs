@@ -616,6 +616,15 @@ struct TileDecodeState<'a> {
     force_integer_mv: bool,
     /// `reference_select` (§6.8.2): compound prediction allowed.
     reference_select: bool,
+    /// Sequence-header `enable_dual_filter` (§5.5.1): when set, a switchable
+    /// inter block reads two `interp_filter` symbols (vertical then
+    /// horizontal) instead of one shared value.
+    enable_dual_filter: bool,
+    /// Per-mi neighbour interpolation-filter type, `[dir][mi]` (`dir` 0 =
+    /// vertical, 1 = horizontal), `SWITCHABLE_FILTERS` (3) = "not an inter
+    /// block / unavailable". Feeds `interp_filter`'s §5.11.27 context.
+    filter_above: [Vec<u8>; 2],
+    filter_left: [Vec<u8>; 2],
     /// Frame-level `interpolation_filter` (0..4, §6.8.2); `SWITCHABLE`=4 means a
     /// per-block filter is read.
     interpolation_filter: u8,
@@ -730,6 +739,7 @@ impl<'a> TileDecodeState<'a> {
         force_integer_mv: bool,
         reference_select: bool,
         interpolation_filter: u8,
+        enable_dual_filter: bool,
         ref_to_slot: [u8; 9],
         ref_slots: RefFrames<'a>,
         meta: &'a mut FrameMeta,
@@ -806,6 +816,9 @@ impl<'a> TileDecodeState<'a> {
             force_integer_mv,
             reference_select,
             interpolation_filter,
+            enable_dual_filter,
+            filter_above: [vec![3u8; mi_cols], vec![3u8; mi_cols]],
+            filter_left: [vec![3u8; mi_rows], vec![3u8; mi_rows]],
             ref_to_slot,
             ref_slots,
             map_inter_cdfs: InterCdfs::new(),
@@ -1094,6 +1107,7 @@ pub fn decode_tile_group(
     force_integer_mv: bool,
     reference_select: bool,
     interpolation_filter: u8,
+    enable_dual_filter: bool,
     ref_to_slot: [u8; 9],
     ref_slots: RefFrames<'_>,
     meta: &mut FrameMeta,
@@ -1193,6 +1207,7 @@ pub fn decode_tile_group(
         force_integer_mv,
         reference_select,
         interpolation_filter,
+        enable_dual_filter,
         ref_to_slot,
         ref_slots,
         meta,
@@ -1590,6 +1605,7 @@ pub fn reconstruct_av1_frame(
                 frame_header.force_integer_mv,
                 frame_header.reference_select,
                 frame_header.interpolation_filter,
+                seq.enable_dual_filter,
                 ref_to_slot,
                 ref_slots,
                 &mut meta,

@@ -5497,3 +5497,27 @@
 >     motion, compound (wedge / diffwtd / masked), interintra.
 >  4. Inter loop-filter deltas + the keyframe LR/CDEF ±1 edge gap.
 >  5. Official AOM/ITU vectors, then flip `capabilities().pixel_exact`.
+
+> **2026-09-10 (cont'd) — inter root cause narrowed: the INTER FRAME HEADER
+> parse is where sync breaks.** Kinetix decodes a `residual[0..8]=[-65,…]`
+> for inter frame 1's first block, but dav1d's trace shows that block is
+> `Post-skip[1]` (SKIPPED — no residual). A wrong `skip` bit that early, on
+> ctx 0 (no neighbours), means the tile-data bit offset itself is wrong →
+> the whole inter frame is desynced from the first block. So the inter frame
+> header parser (`frame.rs::FrameHeader::parse` non-keyframe path:
+> `frame_type` / `ref_frame_idx[7]` / `frame_refs_short_signaling` /
+> `delta_frame_id` / `is_motion_mode_switchable` / `use_ref_frame_mvs` /
+> global-motion params / `interpolation_filter` read) is the **first** thing
+> to fix — everything downstream (MV pred, MC, OBMC, compound) can't be
+> validated until the tile offset is right. Trace method: compare Kinetix's
+> computed tile-group bit offset for frame 1 against where dav1d's first
+> `Post-skip` consumes bits.
+>
+> **Landed this session (infrastructure, no metric change — inter still 0/8
+> because of the header desync above):** dual switchable interp-filter read
+> (`inter_block.rs`) — reads two `interp_filter` symbols per §5.11.27 when
+> `seq.enable_dual_filter`, with the real 16-way context (`filter_above` /
+> `filter_left` per-dir neighbour tracking added to `TileDecodeState`), was
+> previously one symbol at hardcoded ctx 0. `enable_dual_filter` threaded
+> through `decode_tile_group`. 5/6… wait 6/6 intra corpus still bit-exact,
+> 139 unit tests + clippy + fmt green.
