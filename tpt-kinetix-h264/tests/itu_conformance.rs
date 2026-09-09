@@ -168,17 +168,17 @@ const MANIFEST: &[(&str, Expect)] = &[
         "HCHP1_HHI_B",
         Expect::KnownGap(
             "hierarchical GOP-16, spatial direct, ref-pic-list reorder + MMCO. \
-             2026-09-09: not a feature gap — a localised Intra_4x4 recon bug. \
-             Origin is poc 4 (decode frame 2), MB(9,9)+MB(9,10), both \
-             Intra_4x4 in a B slice: per-4x4-block near-constant DC error \
-             (~-14 left cols, ~+18 right cols, max 72), no CABAC desync. \
-             It propagates down the GOP-16 hierarchy (poc 2/6 inherit ~half, \
-             poc 1/3/5/7 ~quarter). ffmpeg matches the ITU ref for all 250 \
-             frames. constrained_intra_pred_flag is parsed but never consumed \
-             in reconstruct.rs — suspect intra ref-sample availability / \
-             pre-deblock neighbour sampling for intra MBs adjacent to inter \
-             MBs. Needs a decoder that exposes pre-deblock samples (no .trc \
-             for this clip).",
+             2026-09-09: localised Intra_4x4 DC-prediction bug, no CABAC \
+             desync. Origin = poc 4 (decode #3), MB(9,9)+MB(9,10) blk0..: \
+             our DC pred = (avg of available inter neighbours) e.g. 114; the \
+             correct value is 128 (ref_pixels - 128 == our_recon - our_pred \
+             exactly), i.e. the JM reference treats blk0's neighbours as \
+             UNAVAILABLE for Intra_4x4 pred even though the whole MB is \
+             Intra_4x4 and constrained_intra_pred_flag == 0 (verified in both \
+             PPS). Our residual/mode/mv are all correct. Error propagates \
+             down the GOP-16 hierarchy. Fix: match JM's §6.4.11.4/§8.3.2.2 \
+             availability for intra-4x4 blocks whose neighbour MB is \
+             inter-coded (this clip is spatial-direct B). No .trc for HCHP1.",
         ),
     ),
     // --- multiple IDR / multiple parameter sets ---
