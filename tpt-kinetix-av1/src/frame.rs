@@ -173,8 +173,9 @@ fn read_f8(br: &mut BitReader<'_>, n: u8) -> Result<u8, KinetixError> {
 // ---------------------------------------------------------------------------
 
 /// AV1 frame types (§7.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrameType {
+    #[default]
     KeyFrame,
     InterFrame,
     IntraOnlyFrame,
@@ -251,11 +252,14 @@ const GM_ABS_TRANS_ONLY_BITS: u32 = 9;
 const GM_TRANS_ONLY_PREC_BITS: i32 = 6;
 
 /// Parsed AV1 uncompressed frame header (§5.9).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FrameHeader {
     pub frame_type: FrameType,
     pub show_frame: bool,
     pub show_existing_frame: bool,
+    /// `frame_to_show_map_idx` (§5.9.2): set only when `show_existing_frame` —
+    /// the DPB slot whose stored frame is displayed with no new reconstruction.
+    pub show_existing_idx: Option<u8>,
     pub showable_frame: bool,
     pub frame_id: Option<u32>,
     pub width: u32,
@@ -471,8 +475,39 @@ impl FrameHeader {
             read_flag(&mut br)?
         };
         if show_existing_frame {
-            return Err(KinetixError::Unsupported(
-                "AV1 show_existing_frame (frame display from DPB) not yet implemented".into(),
+            // §5.9.2: `frame_to_show_map_idx` f(3); then (for this decoder's
+            // supported subset) `temporal_point_info()` only when the decoder
+            // model is present with a non-equal picture interval, and
+            // `display_frame_id` only when frame-id numbers are present —
+            // neither applies to the streams handled here.
+            let idx = read_f8(&mut br, 3)?;
+            if decoder_model_info_present && !seq.equal_picture_interval {
+                return Err(KinetixError::Unsupported(
+                    "AV1 show_existing_frame with decoder-model temporal_point_info".into(),
+                ));
+            }
+            if seq.frame_id_numbers_present_flag {
+                return Err(KinetixError::Unsupported(
+                    "AV1 show_existing_frame with frame_id_numbers_present".into(),
+                ));
+            }
+            let bits = br.bits_read();
+            return Ok((
+                FrameHeader {
+                    show_existing_frame: true,
+                    show_existing_idx: Some(idx),
+                    show_frame: true,
+                    width: seq.frame_width(),
+                    height: seq.frame_height(),
+                    upscaled_width: seq.frame_width(),
+                    render_width: seq.frame_width(),
+                    render_height: seq.frame_height(),
+                    bit_depth: seq_bit_depth(seq),
+                    subsampling_x,
+                    subsampling_y,
+                    ..FrameHeader::default()
+                },
+                bits,
             ));
         }
 
@@ -836,6 +871,7 @@ impl FrameHeader {
                 frame_type,
                 show_frame,
                 show_existing_frame,
+                show_existing_idx: None,
                 showable_frame,
                 frame_id: None,
                 width,

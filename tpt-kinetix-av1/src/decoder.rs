@@ -39,6 +39,26 @@ pub struct StoredFrame {
     pub height: usize,
 }
 
+impl StoredFrame {
+    /// Rebuild a planar [`VideoFrame`] (Y then U then V) from this stored
+    /// reference — used to satisfy `show_existing_frame` (§7.4).
+    fn to_video_frame(&self) -> VideoFrame {
+        let mut data = Vec::with_capacity(self.y.len() + self.u.len() + self.v.len());
+        data.extend_from_slice(&self.y);
+        data.extend_from_slice(&self.u);
+        data.extend_from_slice(&self.v);
+        VideoFrame {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data,
+            width: self.width as u32,
+            height: self.height as u32,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: false,
+        }
+    }
+}
+
 /// Reference frame buffer (AV1 §7.20): eight slots indexed by
 /// `refresh_frame_flags`.
 ///
@@ -216,6 +236,11 @@ impl Av1Decoder {
                 ObuType::Frame | ObuType::FrameHeader => {
                     if let Some(ref seq) = self.sequence_header {
                         match FrameHeader::parse(&obu.payload, seq) {
+                            Ok((fh, _)) if fh.show_existing_frame => {
+                                self.last_frame_header = Some(fh);
+                                // No tile data / reconstruction — the frame is
+                                // pulled straight from the DPB below.
+                            }
                             Ok((fh, header_bits)) => {
                                 self.last_frame_header = Some(fh);
                                 // A combined `Frame` OBU (type 6) carries the
@@ -258,6 +283,26 @@ impl Av1Decoder {
 
         if !produced_frame {
             return Ok(None);
+        }
+
+        // `show_existing_frame` (§7.4): no reconstruction — display the frame
+        // already stored in DPB slot `show_existing_idx`. If that slot held a
+        // key frame, `refresh_frame_flags` becomes all-ones (§5.9.2), which
+        // matters for later inter frames' reference resolution.
+        if let Some(fh) = &self.last_frame_header {
+            if let Some(idx) = fh.show_existing_idx {
+                // NOTE: §5.9.2 also sets `refresh_frame_flags = allFrames` when
+                // the shown slot held a key frame; per-slot frame type isn't
+                // tracked yet, so that (rare) case is not handled.
+                let frame = self
+                    .ref_frames
+                    .get(idx as usize)
+                    .map(|s| s.to_video_frame());
+                if frame.is_some() {
+                    self.frame_count += 1;
+                }
+                return Ok(frame);
+            }
         }
 
         // Attempt reconstruction via the new pipeline.
