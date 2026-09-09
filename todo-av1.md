@@ -5435,3 +5435,27 @@
 > Next: dump Kinetix's chroma DC coeff + dequant for that block vs the dav1d
 > trace's chroma pixel hex. Then pin `testsrc2_big` + flip
 > `capabilities().pixel_exact` for the intra path.
+
+> **2026-09-10 (cont'd) — AV1 intra keyframe decode is now BIT-EXACT vs dav1d
+> across the whole synthesized corpus (6/6). Phase G gate armed.** Final fix:
+> **bilinear sub-pel for IBC chroma** (commit fee2d04). The luma IBC DV is
+> integer-pel, but halving it for a 4:2:0 chroma plane can hit a half-pel
+> position — dav1d then runs bilinear interpolation (`FILTER_2D_BILINEAR` for
+> intrabc); Kinetix was doing a plain integer copy. Routed chroma IBC
+> prediction through `motion_compensate(INTERP_BILINEAR, mv >> ss)`.
+> `av1_intra_corpus_vs_dav1d_when_available`'s Phase-G assertion
+> (`assert_eq!(exact_count, compared_count)`) is now uncommented — a hard
+> regression guard covering solid_red / testsrc / smptebars / mandelbrot /
+> testsrc2 96×64 / **testsrc2 320×180 (9 IBC blocks, screen content)**.
+> `capabilities().notes` rewritten (the "inter validated frame-by-frame vs
+> dav1d" claim was stale — inter is 0/8 bit-exact, ~12 dB).
+>
+> **`capabilities().pixel_exact` stays `false`.** Remaining before it can flip:
+>   1. **Inter prediction** — `av1_inter_sequence_vs_dav1d` / `av1_inter_corpus`
+>      are 0/N bit-exact (~12 dB on non-keyframes). This is the big one; the
+>      MV-pred / OBMC / compound / interp-filter paths need the same
+>      dav1d-trace treatment the intra path just got.
+>   2. Official AOM/ITU AV1 conformance vectors wired in (only synthesized
+>      ffmpeg-encoded clips so far).
+>   3. `KINETIX_AV1_DBG_IBC_UV` debug hook left in `reconstruct_ibc_block`
+>      (env-gated, matches the file's convention).

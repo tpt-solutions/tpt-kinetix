@@ -155,18 +155,18 @@ impl Av1Decoder {
             // decoder is not yet validated pixel-exact, so the capability stays
             // conservative until the conformance harness passes.
             supports_deblocking: true,
-            notes: "OBU + sequence header + frame header + per-tile reconstruction \
-                    (real superblock partition tree, intra mode / tx_size, coeffs() \
-                    symbol decoder) for intra keyframes; in-loop deblock + CDEF wired \
-                    (Phase D); rayon parallel tile decode (Phase F); reference frame \
-                    store (Phase E) threaded through to reconstruction; inter \
-                    prediction is implemented (MV candidate derivation, NEWMV / \
-                    NEARMV / NEARESTMV / ZEROMV, switchable + bilinear interpolation, \
-                    single- and compound reference, residual add) and runs end-to-end \
-                    on multi-frame streams — validated frame-by-frame vs dav1d in the \
-                    conformance harness; the decoder is still not pixel-exact (the \
-                    intra reconstruction also lags the reference), so output is not \
-                    bit-exact yet",
+            notes: "intra keyframe decode (OBU + sequence/frame header, real \
+                    superblock partition tree, intra mode / tx_size, coeffs() symbol \
+                    decoder, full inverse-transform set incl. FLIPADST, intra block \
+                    copy with find_mv_stack DV prediction + bilinear chroma sub-pel, \
+                    in-loop deblock + CDEF + loop restoration, rayon parallel tiles) \
+                    is bit-exact vs dav1d across the synthesized intra conformance \
+                    corpus (Phase G gate). Inter prediction is wired end-to-end (MV \
+                    candidate derivation, NEWMV / NEARMV / NEARESTMV / ZEROMV, \
+                    switchable + bilinear interpolation, single- and compound \
+                    reference, residual add) but is NOT yet bit-exact — non-keyframes \
+                    diverge from the reference. `pixel_exact` stays false until the \
+                    inter path is validated and official AOM/ITU vectors are wired in",
         }
     }
 

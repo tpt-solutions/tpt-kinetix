@@ -201,8 +201,15 @@ fn av1_intra_corpus_vs_dav1d_when_available() {
     );
     eprintln!("AV1 intra corpus: {exact_count}/{compared_count} entries bit-exact vs dav1d");
 
-    // Phase G gate (uncomment once every corpus entry is bit-exact):
-    // assert_eq!(exact_count, compared_count);
+    // Phase G gate: every synthesized intra keyframe (including the 320x180
+    // testsrc2 screen-content clip with 9 IBC blocks) decodes bit-exact vs
+    // dav1d. This is a hard regression guard — the decoder's `pixel_exact`
+    // capability still stays `false` (asserted above) until the *inter*
+    // path is validated too and official AOM/ITU vectors are wired in.
+    assert_eq!(
+        exact_count, compared_count,
+        "an AV1 intra keyframe regressed from bit-exact vs dav1d"
+    );
 }
 
 /// AV1 Phase E inter-prediction conformance harness: decode a multi-frame
