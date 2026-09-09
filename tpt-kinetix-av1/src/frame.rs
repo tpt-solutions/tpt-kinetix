@@ -555,6 +555,13 @@ impl FrameHeader {
             read_f8(&mut br, 3)?
         };
         let frame_context_idx = primary_ref_frame;
+        if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+            eprintln!(
+                "DBG FH frame_type={frame_type:?} intra={frame_is_intra} err_res={error_resilient_mode} \
+                 order_hint={order_hint} primary_ref={primary_ref_frame} \
+                 disable_cdf_update={disable_cdf_update}"
+            );
+        }
 
         // --- buffer_removal_time (decoder model) ---
         let buffer_removal_time_present =

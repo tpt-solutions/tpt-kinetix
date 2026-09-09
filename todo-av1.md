@@ -5521,3 +5521,29 @@
 > previously one symbol at hardcoded ctx 0. `enable_dual_filter` threaded
 > through `decode_tile_group`. 5/6… wait 6/6 intra corpus still bit-exact,
 > 139 unit tests + clippy + fmt green.
+
+> **2026-09-10 (cont'd) — the AV1 inter conformance number (0/8, ~12 dB) is
+> NOT a reliable decoder-quality signal: the harness has a decode-order vs
+> display-order mismatch.** `KINETIX_AV1_DBG_FH` (new, `frame.rs`) +
+> `KINETIX_AV1_DBG_TILE_BYTES` dump on `minimal_av1_inter_ivf(8,128,96)`:
+>  - 9 frame headers for 8 IVF payloads → **one payload carries multiple
+>    coded frames** (hierarchical GOP: decode order `oh` = 0,6,3,1,2,4,5,6,7;
+>    `order_hint` 6 appears twice). Kinetix parses every FH in a payload but
+>    reconstructs only the last, and `av1_inter_sequence_vs_dav1d` naively
+>    pairs `payload[i]` with dav1d's *display*-ordered `ref_frames[i]`.
+>  - `show_existing_frame` returns `Err(Unsupported)` (`frame.rs:473`).
+>  - Frame 1's first block: Kinetix decodes `residual=[-65,…]` where dav1d's
+>    trace shows `Post-skip[1]` (skipped) — a genuine early desync on top of
+>    the harness issue.
+>
+> **Revised inter work order:**
+>  1. **Fix the inter conformance harness first** — decode the whole IVF in
+>     decode order through one `Av1Decoder`, track `order_hint`, compare each
+>     reconstruction to the dav1d display frame with the matching hint. Until
+>     this lands, per-frame inter PSNR is meaningless.
+>  2. Implement `show_existing_frame` (display a DPB slot; §7.4 / §5.9.2).
+>  3. THEN the real decoder gaps: inter frame-header completeness, real
+>     `find_mv_stack` (compound/temporal), the first-block skip/residual
+>     desync, dual-filter MC (infra landed 597aa93), OBMC, warped, compound.
+>  4. Keyframe LR/CDEF ±1 (94 px, deblock-on path).
+>  5. Official AOM/ITU vectors → flip `pixel_exact`.
