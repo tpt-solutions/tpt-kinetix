@@ -5459,3 +5459,41 @@
 >      ffmpeg-encoded clips so far).
 >   3. `KINETIX_AV1_DBG_IBC_UV` debug hook left in `reconstruct_ibc_block`
 >      (env-gated, matches the file's convention).
+
+> **2026-09-10 (cont'd) — AV1 INTER path characterised (the remaining
+> pixel_exact blocker). `dbg_av1_inter.rs` added (per-frame diffmap,
+> `KINETIX_AV1_DBG_INTER_FRAME=N`).** Traced `minimal_av1_inter_ivf(8,128,96)`
+> (testsrc, hierarchical GOP — 2nd frame in *decode* order is POC 6, a forward
+> reference) against patched dav1d:
+>  - **Frame 0 (keyframe): 94 luma px off, all ±1**, clustered in the bottom
+>    rows (y≥64), some full-row / full-column stripes. This keyframe has
+>    loop-filter + CDEF + loop-restoration ENABLED (the intra corpus clips
+>    force them off via `allow_intrabc`), so this is a residual LR/CDEF
+>    edge-rounding gap — same class as the mandelbrot stripe-boundary work,
+>    not yet fully closed for the deblock-on path.
+>  - **Frame 1+ (inter): catastrophic (~12 dB, ~460k |diff|).** Distinct
+>    left-half/right-half split: with `TileCols` likely 2 (each 64px), tile 1
+>    (right, x≥64) is **bit-exact** for the top 8 SB rows while tile 0 (left)
+>    is wrong by large *flat per-8×8* DC offsets (+109/+47/+22/+89). Blocks are
+>    mostly `Post-intermode[0,…,mv=y:0,x:0]` (zero-MV, ≈ straight copy of the
+>    reference) — so a right copy of a right reference would be exact. The flat
+>    DC offsets on zero-MV blocks point at **the stored reference frame being
+>    wrong on the left** (wrong slot, or stored pre-loop-filter, or a
+>    tile-local buffer), OR left-tile blocks intra-falling-back (DC≈128 vs the
+>    real ~16). dav1d also shows `Post-subpel_filter1/2` (dual switchable
+>    interp filter), `Post-interintra`, `Post-intermode[3]` (NEWMV) — all
+>    exercised.
+>
+> **Inter work plan (fresh, multi-session — mirrors the intra effort):**
+>  1. Fix the reference-frame store: confirm Kinetix stores the *post-filter*
+>     frame into the `refresh_frame_flags` slots and that `ref_frame_idx`
+>     resolves correctly for a hierarchical GOP (POC-6-first). The left/right
+>     split is the first clue — check per-tile decode doesn't clobber the
+>     shared reference or leave tile 0's output in a tile-local buffer.
+>  2. `find_mv_stack` for real inter (compound refs, temporal MV projection,
+>     the `ref[0] > 0` extended-candidate branch skipped for intrabc) — the
+>     intra `ibc_mv_pred` port is the scan_row/scan_col skeleton to build on.
+>  3. Dual switchable interp filter (`Post-subpel_filter1/2`), OBMC, warped
+>     motion, compound (wedge / diffwtd / masked), interintra.
+>  4. Inter loop-filter deltas + the keyframe LR/CDEF ±1 edge gap.
+>  5. Official AOM/ITU vectors, then flip `capabilities().pixel_exact`.
