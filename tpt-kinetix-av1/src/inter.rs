@@ -463,26 +463,72 @@ pub fn read_mv(
 ///
 /// Walks the six `single_ref_cdf` decisions in order; `ctx` is the frame-level
 /// single-ref context (0..3). Returns one of LAST..ALTREF.
-pub fn read_single_ref_name(dec: &mut SymbolDecoder<'_>, cdfs: &mut InterCdfs, ctx: usize) -> u8 {
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][0]) == 0 {
-        return LAST_FRAME;
+/// `read_ref_frames()` single-reference path (AV1 §5.11.25) with the real
+/// nested-binary `single_ref_p1..p6` tree and per-symbol contexts (§8.3.2,
+/// `ref_count_ctx` over the immediate above/left neighbours' reference names).
+/// `above_refs`/`left_refs` are `Some([RefFrame0, RefFrame1])` when that
+/// neighbour is available, `None` otherwise.
+pub fn read_single_ref_name(
+    dec: &mut SymbolDecoder<'_>,
+    cdfs: &mut InterCdfs,
+    above_refs: Option<[u8; 2]>,
+    left_refs: Option<[u8; 2]>,
+) -> u8 {
+    let count = |ft: u8| -> i32 {
+        let mut c = 0;
+        if let Some(a) = above_refs {
+            c += (a[0] == ft) as i32 + (a[1] == ft) as i32;
+        }
+        if let Some(l) = left_refs {
+            c += (l[0] == ft) as i32 + (l[1] == ft) as i32;
+        }
+        c
+    };
+    let rcc = |c0: i32, c1: i32| -> usize {
+        match c0.cmp(&c1) {
+            std::cmp::Ordering::Less => 0,
+            std::cmp::Ordering::Equal => 1,
+            std::cmp::Ordering::Greater => 2,
+        }
+    };
+
+    let fwd = count(LAST_FRAME) + count(LAST2_FRAME) + count(LAST3_FRAME) + count(GOLDEN_FRAME);
+    let bwd = count(BWDREF_FRAME) + count(ALTREF2_FRAME) + count(ALTREF_FRAME);
+    if dec.read_symbol(&mut cdfs.single_ref[rcc(fwd, bwd)][0]) == 1 {
+        // backward group: p2 then p6
+        let p2 = rcc(
+            count(BWDREF_FRAME) + count(ALTREF2_FRAME),
+            count(ALTREF_FRAME),
+        );
+        if dec.read_symbol(&mut cdfs.single_ref[p2][1]) == 1 {
+            return ALTREF_FRAME;
+        }
+        let p6 = rcc(count(BWDREF_FRAME), count(ALTREF2_FRAME));
+        return if dec.read_symbol(&mut cdfs.single_ref[p6][5]) == 1 {
+            ALTREF2_FRAME
+        } else {
+            BWDREF_FRAME
+        };
     }
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][1]) == 0 {
-        return LAST2_FRAME;
+    // forward group: p3 then p4/p5
+    let p3 = rcc(
+        count(LAST_FRAME) + count(LAST2_FRAME),
+        count(LAST3_FRAME) + count(GOLDEN_FRAME),
+    );
+    if dec.read_symbol(&mut cdfs.single_ref[p3][2]) == 1 {
+        let p5 = rcc(count(LAST3_FRAME), count(GOLDEN_FRAME));
+        return if dec.read_symbol(&mut cdfs.single_ref[p5][4]) == 1 {
+            GOLDEN_FRAME
+        } else {
+            LAST3_FRAME
+        };
     }
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][2]) == 0 {
-        return LAST3_FRAME;
+    let p4 = rcc(count(LAST_FRAME), count(LAST2_FRAME));
+    if dec.read_symbol(&mut cdfs.single_ref[p4][3]) == 1 {
+        LAST2_FRAME
+    } else {
+        LAST_FRAME
     }
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][3]) == 0 {
-        return GOLDEN_FRAME;
-    }
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][4]) == 0 {
-        return BWDREF_FRAME;
-    }
-    if dec.read_symbol(&mut cdfs.single_ref[ctx][5]) == 0 {
-        return ALTREF_FRAME;
-    }
-    ALTREF2_FRAME
 }
 
 /// Inter-block mode (§6.8.2 `read_inter_mode` for the single-reference case).
@@ -743,7 +789,7 @@ mod tests {
         let mut cdfs = InterCdfs::new();
         let mut seen = Vec::new();
         for _ in 0..7 {
-            seen.push(read_single_ref_name(&mut dec, &mut cdfs, 0));
+            seen.push(read_single_ref_name(&mut dec, &mut cdfs, None, None));
         }
         // Determinism: the same input must yield the same name sequence.
         let again = {
@@ -751,7 +797,7 @@ mod tests {
             let mut c2 = InterCdfs::new();
             let mut v = Vec::new();
             for _ in 0..7 {
-                v.push(read_single_ref_name(&mut d2, &mut c2, 0));
+                v.push(read_single_ref_name(&mut d2, &mut c2, None, None));
             }
             v
         };

@@ -265,7 +265,14 @@ impl<'a> TileDecodeState<'a> {
             };
             ref_names = [fwd, bwd];
         } else {
-            ref_names[0] = read_single_ref_name(&mut self.dec, &mut self.map_inter_cdfs, 0);
+            let above_refs = (above_inter != 0).then(|| self.ref_above[mi_col]);
+            let left_refs = (left_inter != 0).then(|| self.ref_left[mi_row]);
+            ref_names[0] = read_single_ref_name(
+                &mut self.dec,
+                &mut self.map_inter_cdfs,
+                above_refs,
+                left_refs,
+            );
         }
 
         let mut mvs = [Mv::default(); 2];
