@@ -2,6 +2,38 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bc — freh2_b: CABAC P_8x8 transform_8x8 gate + Intra16x16 luma DC list (commit 97a3d2f)
+
+Worked the recurring `P CABAC parse error: Unsupported("ref_idx overflow")`
+on `freh2_b` (High CABAC, non-flat quant matrices, GOP `I B B P B B P`,
+`direct_8x8_inference_flag == 0`). Method: JM `.trc` (`Freh2_B.trc`) vs
+`KINETIX_BINTRACE` per-MB dump, decode-order slice→poc mapping.
+
+**Root cause found & fixed:** `parse_p_macroblock_cabac` (`cabac_b.rs`)
+computed `dct8x8_allowed` for P_8x8 as `all subs ∈ {0,3}` when
+`direct_8x8_inference_flag` was clear. Per §7.3.5,
+`noSubMbPartSizeLessThan8x8Flag` goes to 0 as soon as any partition has
+`NumSubMbPart > 1` (raw `sub_mb_type` 1/2/3) — `direct_8x8_inference_flag`
+only gates B_Direct_8x8. The stray `s == 3` allowance made us read a
+`transform_size_8x8_flag` JM never emits (first hit: P fn3 MB0
+`sub_mb_type=[0,0,3,0]`, residual is 4×4 "Luma AC" in the `.trc`),
+desyncing the rest of the slice. Now requires all four subs == 0.
+
+Also fixed (latent, flagged in #32bb): `luma_dc_level_scale` used
+`list_4x4[3]` (Inter Y) for Intra_16×16 luma DC — always intra, so list 0.
+
+**Result:** ITU still 24 hard bit-exact / 0 failures. `freh2_b`
+reference-frames-bit-exact 8/100 → 37/100, diff_bytes 13.3M → 12.0M,
+decoded frames 94 → 96.
+
+**Still open on `freh2_b`:** a *separate* P-slice CABAC desync remains —
+several display frames still come out grey-scaffold (SAD ~5.4M, "matches
+ref 91") and 4 frames are dropped. `first_bad` in the conformance harness
+is a frame-ordering artifact; the real signal is the `dbg_itu_pframe`
+"best-matches ref N (sad ...)" line. Next: re-run the `.trc`/`BINTRACE`
+diff on the first still-broken P slice (frames 2/4/5/7/8 in display order
+map to grey output) to find the next divergence MB.
+
 ## SESSION #32bb — chroma DC / inter residual scaling-list index by prediction mode
 
 High-profile streams that load **distinct intra vs inter** scaling
