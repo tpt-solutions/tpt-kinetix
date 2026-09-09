@@ -5658,3 +5658,29 @@
 > (INVERTED), `zero_mv==1 -> ZEROMV` (INVERTED), and `mode_ctx` hardcoded 0.
 > Compound path: `compound_mode = decode_symbol_adapt8(comp_inter_mode[ctx&7]);
 > inter_mode = NEARESTMV_NEARESTMV + compound_mode` then per-ref drl.
+
+> **2026-09-10 (cont'd) — inter find_mv_stack + mode cascade + single_ref tree
+> landed (commits c971677/1ebf3c1). VERIFIED: first inter block of
+> minimal_av1_inter_ivf now decodes ref=LAST + NEARESTMV, matching dav1d
+> exactly (was LAST2 + NEWMV — a wrong linear single_ref cascade).**
+> `inter_mv_stack` (reconstruct/intra_block.rs) ports dav1d `dav1d_refmvs_find`
+> spatial scans + §7.10.2.14 contexts → packed `(RefMvContext<<4 |
+> ZeroMvContext<<3 | NewMvContext)` + DrlCtxStack. Single-ref mode read is now
+> the spec `new_mv`/`zero_mv`/`ref_mv` cascade with the packed ctx + drl bits.
+> `read_single_ref_name` is the real `single_ref_p1..p6` nested-binary tree
+> with `ref_count_ctx` from the immediate above/left neighbour ref names.
+> RefMvCell generalised to `{mv[2], refs[2], w4, h4, mf}`; splat_refmv_full.
+>
+> **Next desync: block 1 of the first inter frame.** Block 0 (skip=1,
+> NEARESTMV, mv 0/0) decodes bit-identically to dav1d through `Post-intermode`,
+> but block 1's `new_mv` symbol reads 0 (→NEWMV) where dav1d reads 1
+> (→NEARESTMV) — **same context (nm=3), same fresh CDF slot**, so a *bit
+> position* desync in block 0's tail: the `Post-subpel_filter1/2` reads
+> (count/context — Kinetix reads 2 for dual-filter; verify the ctx & the
+> `needs_interp_filter` gate for a zero-MV NEARESTMV block), or the skipped
+> block's (missing) residual/tx reads, or `read_cdef`. Trace `dec.bit_position()`
+> after each of block 0's reads vs dav1d's `r=` renorm state.
+>
+> Still stubs: compound mode/ref decode + drl, temporal MV candidates
+> (`use_ref_frame_mvs`), single/compound extended candidates, global-motion
+> MVs, real compound prediction.
