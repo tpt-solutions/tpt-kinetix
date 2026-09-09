@@ -945,13 +945,40 @@ impl<'a> TileDecodeState<'a> {
         bsize: usize,
         mv: Option<crate::inter::Mv>,
     ) {
+        // `None` = plain intra (no MV); `Some(dv)` = intra block copy.
+        let (refs, mvs) = match mv {
+            Some(dv) => (
+                [crate::inter::INTRA_FRAME, crate::inter::NONE_FRAME],
+                [dv, crate::inter::Mv::default()],
+            ),
+            None => (
+                [crate::inter::NONE_FRAME; 2],
+                [crate::inter::Mv::default(); 2],
+            ),
+        };
+        self.splat_refmv_full(mi_row, mi_col, bsize, refs, mvs, 0);
+    }
+
+    /// General `refmvs_block` splat: store a block's reference names + MVs (and
+    /// motion flags) across its whole mi extent, so the neighbour scans in
+    /// [`Self::ibc_mv_pred`] / the inter MV-stack build can read them back.
+    fn splat_refmv_full(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        refs: [u8; 2],
+        mvs: [crate::inter::Mv; 2],
+        mf: u8,
+    ) {
         let w4 = (BLOCK_WIDTH[bsize] / MI_SIZE) as u8;
         let h4 = (BLOCK_HEIGHT[bsize] / MI_SIZE) as u8;
         let cell = RefMvCell {
-            mv: mv.unwrap_or_default(),
+            mv: mvs,
+            refs,
             w4,
             h4,
-            valid: mv.is_some(),
+            mf,
         };
         for r in mi_row..(mi_row + h4 as usize).min(self.mi_rows) {
             let base = r * self.refmv_stride;
@@ -1000,17 +1027,17 @@ impl<'a> TileDecodeState<'a> {
         // (plain-intra / undecoded) cell contributes nothing; otherwise fold
         // the DV into the stack, merging weight on a duplicate.
         fn add(stack: &mut Vec<(Mv, i64)>, cand: RefMvCell, weight: i64) {
-            if !cand.valid {
+            if cand.refs[0] != crate::inter::INTRA_FRAME {
                 return;
             }
             for e in stack.iter_mut() {
-                if e.0 == cand.mv {
+                if e.0 == cand.mv[0] {
                     e.1 += weight;
                     return;
                 }
             }
             if stack.len() < 8 {
-                stack.push((cand.mv, weight));
+                stack.push((cand.mv[0], weight));
             }
         }
         // --- primary scans -------------------------------------------------

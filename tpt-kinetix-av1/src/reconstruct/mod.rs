@@ -480,17 +480,25 @@ pub struct LrDecodeParams {
 }
 
 /// One cell of the 2-D reference-MV grid ([`TileDecodeState::refmv_grid`]),
-/// the Kinetix analogue of dav1d's `refmvs_block` ring buffer. Every decoded
-/// block splats its own cell(s): a plain intra block leaves `valid = false`
-/// (dav1d's `INVALID_MV` sentinel — contributes nothing to a later MV stack),
-/// an IBC block stores its final displacement vector. `w4`/`h4` are the
-/// block's width/height in 4×4 units, needed to step the neighbour scan.
+/// the Kinetix analogue of dav1d's `refmvs_block`. Every decoded block splats
+/// its own cell(s):
+/// * plain intra — `refs = [NONE_FRAME, NONE_FRAME]` (contributes no MV, like
+///   dav1d's `INVALID_MV` sentinel),
+/// * intra block copy — `refs = [INTRA_FRAME, NONE_FRAME]`, `mv[0]` = the DV,
+/// * inter — `refs` = the block's `RefFrame[0..2]` (Kinetix names), `mv[0..2]`.
+///
+/// `w4`/`h4` are the block's width/height in 4×4 units (to step the neighbour
+/// scan); `mf` mirrors dav1d's motion flags (bit 0 = GLOBALMV, bit 1 = NEWMV).
 #[derive(Clone, Copy, Default)]
 struct RefMvCell {
-    mv: Mv,
+    mv: [Mv; 2],
+    refs: [u8; 2],
     w4: u8,
     h4: u8,
-    valid: bool,
+    // Read once the inter MV-stack build lands (dav1d `mf`: bit0 GLOBALMV,
+    // bit1 NEWMV) — used by `add_spatial_candidate`'s `have_newmv` tracking.
+    #[allow(dead_code)]
+    mf: u8,
 }
 
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
