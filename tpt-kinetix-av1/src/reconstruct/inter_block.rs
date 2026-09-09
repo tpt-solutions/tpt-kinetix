@@ -59,7 +59,7 @@ impl<'a> TileDecodeState<'a> {
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
-        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col == 0;
+        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col <= 16;
         if dbg_b0 {
             eprintln!("DBG b0 skip={skip} rng={}", self.dec.raw_state().0);
         }
@@ -74,8 +74,25 @@ impl<'a> TileDecodeState<'a> {
         self.read_delta_lf(bsize, skip);
         self.read_deltas = false;
 
-        // is_inter (Y) — context from neighbour inter flags.
-        let inter_ctx = (left_inter + above_inter).min(3);
+        // `intra_inter` context (§8.3.2): based on whether the *available*
+        // above/left neighbours are INTRA-coded, not a plain is-inter sum.
+        let row_start = self.tile_px_y0 / MI_SIZE;
+        let col_start = self.tile_px_x0 / MI_SIZE;
+        let avail_u = mi_row > row_start;
+        let avail_l = mi_col > col_start;
+        let above_intra = avail_u && above_inter == 0;
+        let left_intra = avail_l && left_inter == 0;
+        let inter_ctx = if avail_u && avail_l {
+            if above_intra && left_intra {
+                3
+            } else {
+                usize::from(above_intra || left_intra)
+            }
+        } else if avail_u || avail_l {
+            2 * usize::from(if avail_u { above_intra } else { left_intra })
+        } else {
+            0
+        };
         let is_inter = self
             .dec
             .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
@@ -466,6 +483,13 @@ impl<'a> TileDecodeState<'a> {
                 };
                 let ctx = (base + add).min(15);
                 *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
+                if dbg_b0 {
+                    eprintln!(
+                        "DBG b0 filter{dir}={} ctx={ctx} rng={}",
+                        *fout,
+                        self.dec.raw_state().0
+                    );
+                }
             }
             if dirs == 1 {
                 filters[1] = filters[0];
