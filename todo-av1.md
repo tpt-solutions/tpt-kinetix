@@ -5630,3 +5630,31 @@
 > spec's `new_mv`/`zero_mv`/`ref_mv` cascade + compound-mode 8-way read. This
 > is one connected work item — do it together, validate the `Post-intermode`
 > value block-by-block against a patched-dav1d trace.
+
+> **2026-09-10 — exact dav1d single-ref inter mode cascade (decode.c:1662+,
+> for the next session's `read_inter_mode` rewrite):**
+> ```
+> refmvs_find -> mvstack[8], n_mvs, ctx   (ctx is PACKED)
+> if ( seg.skip/globalmv || decode_bool(newmv_mode[ctx & 7]) ) {   // bool==1 => NOT newmv
+>     if ( seg... || !decode_bool(globalmv_mode[(ctx>>3)&1]) ) {   // bool==0 => GLOBALMV
+>         inter_mode = GLOBALMV;  mv = gmv_2d(...)
+>     } else {
+>         if ( decode_bool(refmv_mode[(ctx>>4)&15]) ) {            // bool==1 => NEARMV
+>             inter_mode = NEARMV; drl_idx = 1;
+>             if (n_mvs>2) drl_idx += bool(drl_bit[get_drl_context(mvstack,1)]);
+>             if (drl_idx==2 && n_mvs>3) drl_idx += bool(drl_bit[get_drl_context(mvstack,2)]);
+>         } else { inter_mode = NEARESTMV; drl_idx = 0; }
+>         mv = mvstack[drl_idx].mv[0];  if (drl_idx<2) fix_mv_precision(mv)
+>     }
+> } else {   // bool==0 => NEWMV
+>     inter_mode = NEWMV; drl_idx = 0;
+>     if (n_mvs>1) { drl_idx += bool(drl_bit[get_drl_context(mvstack,0)]);
+>                    if (drl_idx==1 && n_mvs>2) drl_idx += bool(drl_bit[get_drl_context(mvstack,1)]); }
+>     mv = (n_mvs>1) ? mvstack[drl_idx].mv[0] : { fix_mv_precision(mvstack[0].mv[0]) };
+>     read_mv_residual(mv, mv_prec=hp-force_integer_mv);
+> }
+> ```
+> `Kinetix inter.rs::read_single_inter_mode` currently: `new_mv==1 -> NEWMV`
+> (INVERTED), `zero_mv==1 -> ZEROMV` (INVERTED), and `mode_ctx` hardcoded 0.
+> Compound path: `compound_mode = decode_symbol_adapt8(comp_inter_mode[ctx&7]);
+> inter_mode = NEARESTMV_NEARESTMV + compound_mode` then per-ref drl.
