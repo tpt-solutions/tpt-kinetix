@@ -618,6 +618,9 @@ struct TileDecodeState<'a> {
     // ── Inter-prediction (AV1 Phase E) state ───────────────────────────────
     /// `true` when the current frame carries no inter blocks (KEY / INTRA_ONLY).
     frame_is_intra: bool,
+    /// `use_ref_frame_mvs` (§5.9.2): temporal MV projection enabled — also the
+    /// `ZeroMvContext` init value (§7.10.2) when there is no motion field yet.
+    use_ref_frame_mvs: bool,
     /// `allow_high_precision_mv` (§5.9.2): 1/8-pel vs 1/4-pel MV precision.
     allow_high_precision_mv: bool,
     /// `force_integer_mv` (§5.9.11): MV fractional reads forced to 3.
@@ -751,6 +754,7 @@ impl<'a> TileDecodeState<'a> {
         lr: LrDecodeParams,
         cdef_delta: CdefDeltaParams,
         frame_is_intra: bool,
+        use_ref_frame_mvs: bool,
         allow_high_precision_mv: bool,
         force_integer_mv: bool,
         reference_select: bool,
@@ -830,6 +834,7 @@ impl<'a> TileDecodeState<'a> {
             read_deltas: false,
             cdef_idx: std::collections::HashMap::new(),
             frame_is_intra,
+            use_ref_frame_mvs,
             allow_high_precision_mv,
             force_integer_mv,
             reference_select,
@@ -1125,6 +1130,7 @@ pub fn decode_tile_group(
     lr: LrDecodeParams,
     cdef_delta: CdefDeltaParams,
     frame_is_intra: bool,
+    use_ref_frame_mvs: bool,
     allow_high_precision_mv: bool,
     force_integer_mv: bool,
     reference_select: bool,
@@ -1227,6 +1233,7 @@ pub fn decode_tile_group(
         lr,
         cdef_delta,
         frame_is_intra,
+        use_ref_frame_mvs,
         allow_high_precision_mv,
         force_integer_mv,
         reference_select,
@@ -1627,6 +1634,7 @@ pub fn reconstruct_av1_frame(
                     delta_lf_multi: frame_header.delta_lf_multi,
                 },
                 frame_is_intra,
+                frame_header.use_ref_frame_mvs,
                 frame_header.allow_high_precision_mv,
                 frame_header.force_integer_mv,
                 frame_header.reference_select,

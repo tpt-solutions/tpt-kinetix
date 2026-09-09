@@ -59,6 +59,10 @@ impl<'a> TileDecodeState<'a> {
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
+        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col == 0;
+        if dbg_b0 {
+            eprintln!("DBG b0 skip={skip} rng={}", self.dec.raw_state().0);
+        }
 
         // AV1 spec §5.11.18 `inter_frame_mode_info()`: `read_cdef()`/
         // `read_delta_qindex()`/`read_delta_lf()` come right after
@@ -76,6 +80,12 @@ impl<'a> TileDecodeState<'a> {
             .dec
             .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
             == 1;
+        if dbg_b0 {
+            eprintln!(
+                "DBG b0 is_inter={is_inter} ctx={inter_ctx} rng={}",
+                self.dec.raw_state().0
+            );
+        }
 
         if !is_inter {
             // Intra-coded block inside an inter frame: reconstruct via the shared
@@ -273,6 +283,9 @@ impl<'a> TileDecodeState<'a> {
                 above_refs,
                 left_refs,
             );
+            if dbg_b0 {
+                eprintln!("DBG b0 ref={} rng={}", ref_names[0], self.dec.raw_state().0);
+            }
         }
 
         let mut mvs = [Mv::default(); 2];
@@ -292,6 +305,12 @@ impl<'a> TileDecodeState<'a> {
                 .dec
                 .read_symbol(&mut self.map_inter_cdfs.new_mv[newmv_ctx.min(5)])
                 == 1;
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 new_mv not={not_newmv} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             let mut drl_idx = 0usize;
             let mode: u8;
             if not_newmv {
@@ -300,16 +319,27 @@ impl<'a> TileDecodeState<'a> {
                     .dec
                     .read_symbol(&mut self.map_inter_cdfs.zero_mv[globalmv_ctx.min(1)])
                     == 1;
+                if dbg_b0 {
+                    eprintln!(
+                        "DBG b0 zero_mv near={near_path} rng={}",
+                        self.dec.raw_state().0
+                    );
+                }
                 if !near_path {
                     mode = ZEROMV;
                     new_mf = 1;
                 } else {
                     // `ref_mv` S(): 1 => NEARMV (+drl), 0 => NEARESTMV.
-                    if self
+                    let rm = self
                         .dec
-                        .read_symbol(&mut self.map_inter_cdfs.ref_mv[refmv_ctx.min(5)])
-                        == 1
-                    {
+                        .read_symbol(&mut self.map_inter_cdfs.ref_mv[refmv_ctx.min(5)]);
+                    if dbg_b0 {
+                        eprintln!(
+                            "DBG b0 ref_mv={rm} ctx={refmv_ctx} rng={}",
+                            self.dec.raw_state().0
+                        );
+                    }
+                    if rm == 1 {
                         mode = NEARMV;
                         drl_idx = 1;
                         if n_mvs > 2 {
@@ -345,8 +375,8 @@ impl<'a> TileDecodeState<'a> {
             if std::env::var("KINETIX_AV1_DBG_IMODE").is_ok() {
                 eprintln!(
                     "DBG imode mi=({mi_col},{mi_row}) ref={} ctx={ctx:#x}(nm={newmv_ctx},gm={globalmv_ctx},rm={refmv_ctx}) \
-                     mode={mode} drl={drl_idx} n_mvs={n_mvs} base=({},{})",
-                    ref_names[0], base_mv.row, base_mv.col
+                     mode={mode} drl={drl_idx} n_mvs={n_mvs} base=({},{}) rng={}",
+                    ref_names[0], base_mv.row, base_mv.col, self.dec.raw_state().0
                 );
             }
             mvs[0] = match mode {

@@ -71,6 +71,7 @@ fn decode_with(
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,     // frame_is_intra — these robustness tests exercise the intra path
+        false,    // use_ref_frame_mvs
         false,    // allow_high_precision_mv
         false,    // force_integer_mv
         false,    // reference_select

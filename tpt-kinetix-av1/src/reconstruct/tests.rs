@@ -102,6 +102,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
+        false, // use_ref_frame_mvs
         false,
         false, // force_integer_mv
         false,
@@ -593,6 +594,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -670,6 +672,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -747,6 +750,7 @@ fn make_cdef_delta_state<'a>(
         LrDecodeParams::default(),
         cdef_delta,
         false,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -813,6 +817,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -860,6 +865,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -1160,6 +1166,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
+        false, // use_ref_frame_mvs
         false,
         false,
         false,
@@ -1245,6 +1252,7 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         LrDecodeParams::default(),
                         CdefDeltaParams::default(),
                         false,
+                        false, // use_ref_frame_mvs
                         false,
                         false,
                         false,

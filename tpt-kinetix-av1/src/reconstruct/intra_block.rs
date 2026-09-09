@@ -1417,8 +1417,12 @@ impl<'a> TileDecodeState<'a> {
             1 => (3 - num_new.min(1), 2 + total_matches),
             _ => (5 - num_new.min(1), 5),
         };
-        // ZeroMvContext / globalmv_ctx — 0 without the temporal scan.
-        let zeromv_ctx = 0u32;
+        // ZeroMvContext / globalmv_ctx (§7.10.2 temporal-sample process): when
+        // `use_ref_frame_mvs` is set the co-located temporal block is examined,
+        // and with no motion field yet (the common early-frame case) it stays
+        // at its init value of 1; otherwise 0. A full motion-field projection
+        // would refine this once a reference frame carries usable MVs.
+        let zeromv_ctx = u32::from(self.use_ref_frame_mvs);
         let packed = ((refmv_ctx as u32) << 4) | (zeromv_ctx << 3) | (newmv_ctx as u32);
 
         // DrlCtxStack.
