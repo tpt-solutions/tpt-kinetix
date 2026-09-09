@@ -351,15 +351,21 @@ impl<'a> TileDecodeState<'a> {
                 .get(mi_row)
                 .is_some_and(|m| is_smooth_intra_mode(*m));
         let filter_type_y = i32::from(smooth_above_y || smooth_left_y);
+        // Chroma neighbour-mode lookup is on the chroma grid (dav1d
+        // `cbx4 = bx4 >> ss`): align the read down to the shared-chroma
+        // origin so a sub-8×8 chroma carrier at an odd mi position reads the
+        // same neighbour cell dav1d does.
+        let uv_c = mi_col & !(self.subsampling_x as usize);
+        let uv_r = mi_row & !(self.subsampling_y as usize);
         let smooth_above_uv = have_above_blk
             && self
                 .uv_above
-                .get(mi_col)
+                .get(uv_c)
                 .is_some_and(|m| is_smooth_intra_mode(*m));
         let smooth_left_uv = have_left_blk
             && self
                 .uv_left
-                .get(mi_row)
+                .get(uv_r)
                 .is_some_and(|m| is_smooth_intra_mode(*m));
         let filter_type_uv = i32::from(smooth_above_uv || smooth_left_uv);
 
@@ -834,12 +840,24 @@ impl<'a> TileDecodeState<'a> {
                 self.subsampling_y,
             );
         if block_has_chroma {
-            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            // The chroma-carrying block of a sub-8×8 group sits at an *odd*
+            // mi position, but the shared chroma (and hence `get_filter_type`'s
+            // `UVModes` lookup, which dav1d indexes in chroma-4×4 units:
+            // `cbx4 = bx4 >> ss`) covers the even sibling too. Align the write
+            // down to the chroma grid and widen it to the shared extent so a
+            // later even-position block's `uv_above`/`uv_left` read hits it.
+            let sx = self.subsampling_x as usize;
+            let sy = self.subsampling_y as usize;
+            let c0 = mi_col & !sx;
+            let r0 = mi_row & !sy;
+            let cw = bw.max(1 << sx);
+            let ch = bh.max(1 << sy);
+            for r in r0..(r0 + ch).min(self.mi_rows) {
                 if let Some(slot) = self.uv_left.get_mut(r) {
                     *slot = uv_mode as u8;
                 }
             }
-            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            for c in c0..(c0 + cw).min(self.mi_cols) {
                 if let Some(slot) = self.uv_above.get_mut(c) {
                     *slot = uv_mode as u8;
                 }
