@@ -5341,3 +5341,49 @@
 > `lr_apply`/`lpf_line` for rows within 2 of a stripe edge. 1 px, ±1, 89 dB
 > — cosmetic, lowest priority, and the concurrent process is also in
 > AV1-LR-adjacent code.
+
+> **2026-09-10 session note — testsrc2 IBC gap: 3 real bugs fixed, 24.7→36.2 dB Y
+> / 16.9→28.5 dB V.** The pinned intra corpus (max 128×96) is 5/5 bit-exact vs
+> dav1d and the Phase G gate (`assert_eq!(exact_count, compared_count)` in
+> `conformance.rs`, still commented) would pass — but a **320×180 `testsrc2`**
+> (added to `av1_intra_corpus` as `testsrc2_big`, an aom screen-content encode
+> with `allow_intrabc=true`, deblock/CDEF/restoration all force-disabled) was
+> pixel-exact only for rows 0–79, then broke at the first IBC block. Built the
+> patched dav1d (GitHub mirror `github.com/videolan/dav1d` clones in seconds vs
+> code.videolan.org taking ~1h — the pinned commit
+> `aa09a630ef57ee7d9482ffb7ef355a903dbb5302` still fetches by sha; scripts/
+> build-patched-dav1d.ps1 should switch origin). dav1d's `Post-dmv[y/x,ref=..|
+> mvstack0..]` trace gave ground-truth DVs for all 9 IBC blocks. Fixes, in
+> `reconstruct/intra_block.rs`:
+>  1. **IBC DV predictor was missing the spec default DV entirely** (§6.10.24
+>     `assign_mv` intrabc branch). Kinetix used only "nearest is_inter
+>     neighbour's DV, else (0,0)". Added the fallback: when both spatial
+>     candidates are (0,0), `PredMv = (0, -(sbSize4·4+256)·8)` if
+>     `MiRow - sbSize4 < MiRowStart` (tile top), else `(-(sbSize4·4·8), 0)`
+>     — matches dav1d's `-(512<<sb128)-2048` / `-(512<<sb128)` exactly.
+>  2. **Plain-intra blocks never reset `is_inter_{above,left}` / `mv_{above,
+>     left}`** — dav1d's `splat_intraref` stamps `mv.n = INVALID_MV` across
+>     every non-IBC intra block, so stale DVs from an IBC block earlier in the
+>     column leaked downward and the predictor picked a spurious non-zero
+>     candidate instead of the default. Added the reset in the intra
+>     end-of-block context update.
+>  3. **IBC pixel copy used the wrong sign.** An old comment claimed "our
+>     entropy decoder gives IBC MVs with opposite sign … so we subtract" and
+>     did `src = px - mv/8`. With the predictor fixed, the DV now follows the
+>     spec convention (negative = up/left) and dav1d does `src_top = by·4 +
+>     (mv.y>>3)` — i.e. *add*. Flipped both luma and chroma copies to `+`.
+>     This was the dominant error (25.1→36.2 dB Y once flipped).
+> With all three: `av1_psnr_check` testsrc2_320x180 24.70/24.00/16.86 →
+> **36.20/36.70/28.53**; testsrc2_big luma diff samples 8199 → 1835. No
+> regression — the 5 pinned corpus entries stay bit-exact, 139 av1 unit tests +
+> workspace clippy + fmt green.
+> **Still open:** 3 of the 9 IBC blocks (indices 5/7/8 in decode order) still
+> have a wrong DV predictor — dav1d's `mvstack[0]` for them is a non-zero DV
+> from a *non-adjacent* IBC candidate (secondary -3/-5 scan_row/scan_col, the
+> top-right point, or `add_single_extended_candidate`). Kinetix's approximated
+> primary-edge-only scan misses these. The real fix is a faithful port of
+> `dav1d_refmvs_find` / spec §7.10.2 `find_mv_stack` for the single-ref
+> `{0,-1}` intrabc case (scan_row/scan_col with weights, secondary edges,
+> sorting, extended candidates) — ~150–200 lines, the concrete next step to
+> close testsrc2. After that: pin `testsrc2_big` (or a real ITU/AOM vector)
+> and flip `capabilities().pixel_exact` for the intra path.

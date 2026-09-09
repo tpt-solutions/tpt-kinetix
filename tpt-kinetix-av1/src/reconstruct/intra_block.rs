@@ -97,12 +97,56 @@ impl<'a> TileDecodeState<'a> {
                 // Predictor: scan left then above for the first IBC-flagged
                 // block (is_inter == 1 on an intra-only / allow_intrabc frame
                 // means IBC). First valid candidate is NEARESTMV.
+                // AV1 §6.10.24 `assign_mv` (intrabc branch): the DV predictor is
+                // `RefStackMv[0][0]`, falling back to `RefStackMv[1][0]` if that is
+                // (0,0), and finally to a fixed default DV if both spatial
+                // candidates are (0,0). The spatial candidates here are approximated
+                // by the nearest left/above IBC neighbour's DV (a fuller
+                // `find_mv_stack` is not yet wired). Crucially, a *zero* neighbour DV
+                // must NOT suppress the default — matching the spec's
+                // `PredMv[0] == (0,0)` re-checks.
                 let ibc_pred = {
+                    let bw_mi = BLOCK_WIDTH[bsize] / MI_SIZE;
+                    let bh_mi = BLOCK_HEIGHT[bsize] / MI_SIZE;
                     let mut pred = crate::inter::Mv::new(0, 0);
-                    if self.is_inter_left.get(mi_row).copied().unwrap_or(0) != 0 {
-                        pred = self.mv_left.get(mi_row).map(|m| m[0]).unwrap_or(pred);
-                    } else if self.is_inter_above.get(mi_col).copied().unwrap_or(0) != 0 {
-                        pred = self.mv_above.get(mi_col).map(|m| m[0]).unwrap_or(pred);
+                    // Approximate `find_mv_stack`'s primary spatial scan
+                    // (scan_row deltaRow=-1 across the top edge, scan_col
+                    // deltaCol=-1 down the left edge): take the first non-zero
+                    // DV from an IBC neighbour. dav1d weights/sorts these and
+                    // also does secondary (-3/-5) and extended scans — a fuller
+                    // port is still pending, so a handful of IBC blocks whose
+                    // predictor comes from a non-adjacent candidate are not yet
+                    // bit-exact.
+                    for r in mi_row..(mi_row + bh_mi).min(self.mi_rows) {
+                        if self.is_inter_left.get(r).copied().unwrap_or(0) != 0 {
+                            let m = self.mv_left.get(r).map(|m| m[0]).unwrap_or(pred);
+                            if m.row != 0 || m.col != 0 {
+                                pred = m;
+                                break;
+                            }
+                        }
+                    }
+                    if pred.row == 0 && pred.col == 0 {
+                        for c in mi_col..(mi_col + bw_mi).min(self.mi_cols) {
+                            if self.is_inter_above.get(c).copied().unwrap_or(0) != 0 {
+                                let m = self.mv_above.get(c).map(|m| m[0]).unwrap_or(pred);
+                                if m.row != 0 || m.col != 0 {
+                                    pred = m;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if pred.row == 0 && pred.col == 0 {
+                        // Default DV (§6.10.24). `sbSize4` is the superblock height in
+                        // 4x4 units; `INTRABC_DELAY_PIXELS` = 256; `MI_SIZE` = 4.
+                        let sb_size4 = self.sb_size4() as i32;
+                        let mi_row_start = (self.tile_px_y0 / MI_SIZE) as i32;
+                        if (mi_row as i32) - sb_size4 < mi_row_start {
+                            pred = crate::inter::Mv::new(0, -((sb_size4 * 4 + 256) * 8));
+                        } else {
+                            pred = crate::inter::Mv::new(-(sb_size4 * 4 * 8), 0);
+                        }
                     }
                     pred
                 };
@@ -884,6 +928,30 @@ impl<'a> TileDecodeState<'a> {
                 *slot = skip_byte;
             }
         }
+        // A plain (non-IBC) intra block carries no usable displacement vector.
+        // dav1d's `splat_intraref` stamps `mv.mv[0].n = INVALID_MV` across the
+        // block's mi extent for exactly this case, so a later IBC block's
+        // `find_mv_stack` scan sees "no candidate here" rather than a stale DV
+        // left behind by an IBC block that occupied this column/row earlier in
+        // the tile. Without this reset, stale DVs leak downward and the IBC DV
+        // predictor picks a spurious non-zero candidate instead of falling
+        // through to the spec default DV.
+        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            if let Some(s) = self.is_inter_left.get_mut(r) {
+                *s = 0;
+            }
+            if let Some(s) = self.mv_left.get_mut(r) {
+                *s = [crate::inter::Mv::new(0, 0); 2];
+            }
+        }
+        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(s) = self.is_inter_above.get_mut(c) {
+                *s = 0;
+            }
+            if let Some(s) = self.mv_above.get_mut(c) {
+                *s = [crate::inter::Mv::new(0, 0); 2];
+            }
+        }
         // `PaletteColors[{0,1}][MiRow][MiCol]` (AV1 spec §5.11.46's implicit
         // per-position storage that [`Self::get_palette_cache`] reads back):
         // record this block's Y/U palettes (or clear them, for a non-palette
@@ -1047,13 +1115,13 @@ impl<'a> TileDecodeState<'a> {
             }
 
             // IBC prediction: copy from the already-decoded tile area.
-            // Source is clamped to the tile buffer; out-of-bounds reads
-            // (from an invalid/not-yet-decoded region) return neutral grey.
-            // Our entropy decoder consistently gives IBC MVs with the
-            // opposite sign from the spec convention (sign=0 for negative
-            // displacement), so we subtract rather than add.
-            let src_x = (px_x as i32 - mv_dx) as usize;
-            let src_y = (px_y as i32 - mv_dy) as usize;
+            // `mv` follows the spec convention (negative row/col = up/left
+            // displacement into already-decoded pixels), matching dav1d's
+            // `src_top = by*4 + (mv.y >> 3)` — so the displacement is *added*.
+            // Source is clamped to the tile buffer; out-of-bounds reads (from
+            // an invalid/not-yet-decoded region) return neutral grey.
+            let src_x = (px_x as i32 + mv_dx) as usize;
+            let src_y = (px_y as i32 + mv_dy) as usize;
 
             // IBC has `IsInter = 1`: `transform_type()` takes the real
             // inter branch (`read_inter_transform_type`, `coeff.rs`) — a
@@ -1216,8 +1284,8 @@ impl<'a> TileDecodeState<'a> {
                         (cpx_y + ch).div_ceil(4),
                     );
 
-                    let src_cx = (cpx_x as i32 - cmv_dx) as usize;
-                    let src_cy = (cpx_y as i32 - cmv_dy) as usize;
+                    let src_cx = (cpx_x as i32 + cmv_dx) as usize;
+                    let src_cy = (cpx_y as i32 + cmv_dy) as usize;
 
                     // Chroma's tx_type is always *derived*, never separately
                     // read (`read_coeffs` only calls `read_.*transform_

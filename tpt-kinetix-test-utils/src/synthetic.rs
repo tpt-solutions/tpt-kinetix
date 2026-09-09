@@ -432,6 +432,7 @@ pub fn av1_intra_corpus() -> Vec<Av1CorpusEntry> {
     const SOURCES: &[(&str, &str, Option<&str>, u32, u32)] = &[
         ("testsrc", "testsrc", None, 128, 96),
         ("testsrc2", "testsrc2", None, 96, 64),
+        ("testsrc2_big", "testsrc2", None, 320, 180),
         ("smptebars", "smptebars", None, 64, 64),
         ("mandelbrot", "mandelbrot", None, 80, 64),
         ("solid_red", "color", Some("c=red"), 32, 32),
