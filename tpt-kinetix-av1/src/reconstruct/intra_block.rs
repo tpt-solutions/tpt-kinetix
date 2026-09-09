@@ -817,14 +817,32 @@ impl<'a> TileDecodeState<'a> {
                 *slot = y_mode as u8;
             }
         }
-        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
-            if let Some(slot) = self.uv_left.get_mut(r) {
-                *slot = uv_mode as u8;
+        // AV1 / dav1d `decode.c`: the chroma-mode neighbour context
+        // (`t->a->uvmode` / `t->l.uvmode`, consumed by §7.11.2.9
+        // `get_filter_type`) is written *only* when `HasChroma`. A sub-8×8
+        // luma block with no chroma of its own must leave the real chroma
+        // mode of the block that carries the shared chroma intact — writing
+        // a placeholder `DC` here clobbered a SMOOTH* neighbour and flipped
+        // the directional edge-filter / upsample decision for the next
+        // chroma directional block.
+        let block_has_chroma = !self.monochrome
+            && has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            );
+        if block_has_chroma {
+            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+                if let Some(slot) = self.uv_left.get_mut(r) {
+                    *slot = uv_mode as u8;
+                }
             }
-        }
-        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
-            if let Some(slot) = self.uv_above.get_mut(c) {
-                *slot = uv_mode as u8;
+            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                if let Some(slot) = self.uv_above.get_mut(c) {
+                    *slot = uv_mode as u8;
+                }
             }
         }
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
