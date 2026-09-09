@@ -2,6 +2,39 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bd — pre-deblock oracle; freh1_b gap is 100% in the P/B deblock filter
+
+New scratch test `tests/dbg_predeblock_oracle.rs`: diff our decode vs
+`ffmpeg -skip_loop_filter all` with `KINETIX_SKIP_DEBLOCK=1` on our side
+(no libav* headers here for a linked harness — ffmpeg CLI is the ref).
+
+**Finding for `freh1_b`:** deblock-disabled, our first 8 frames are
+byte-identical to ffmpeg → intra recon, MC (every sub-pel position),
+residual, inverse transform, non-flat 4×4/8×8 scaling lists and MV
+derivation are **all bit-exact**. The deblocked I frame is also
+byte-identical to ffmpeg (so P/B reference pictures are correct).
+Therefore the residual ±2..5 luma error is **entirely the P/B in-loop
+deblocking filter**. Example: display frame 3 (P), MB(6,3) `P8x16`
+`t8=true`, internal 8×8-transform horizontal edge at y=56 — real
+pre-deblock value 219, ffmpeg post 217, ours post 218; the y=54 edge
+sample goes the other way (ours 217 vs ffmpeg 218). Both decoders filter
+the edge but with a different strength/rounding.
+
+Caveat baked into the test doc: the `-skip_loop_filter all` compare is
+only clean on the I frame (P/B then predict from un-deblocked refs);
+isolate P/B deblock by comparing the *final* frames, which is sound here
+because pre-deblock exactness + identical deblocked refs are both already
+established.
+
+**Next:** trace our P/B `derive_bs_pair` + `filter_luma_edge` for that
+edge against the spec — candidates are (a) a wrong `bS` for an internal
+inter edge that coincides with the 8×8-transform boundary, (b) the
+weak-filter `tc`/`tc0` increment, (c) edge-processing order when the
+8×8-transform edge-skip (`ei != 2 && transform_8x8`) interacts with bS
+derivation. `dbg_predeblock_oracle.rs` + `KINETIX_DBLK_XY`/`_PROBE`/
+`KINETIX_FLT_XY` hooks (added then reverted this session — re-add from
+git history) are the toolkit.
+
 ## SESSION #32bc — freh2_b BIT-EXACT: CABAC P_8x8 + B_8x8 transform_8x8 gate + Intra16x16 luma DC list (commits 97a3d2f, 5b95aaa)
 
 **Outcome: `freh2_b` is 100/100 frames bit-exact vs the ITU reference and
