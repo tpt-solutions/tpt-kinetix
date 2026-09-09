@@ -901,6 +901,13 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             motion.ref_idx_l0
         );
     }
+    // `noSubMbPartSizeLessThan8x8Flag` (§7.3.5): for P_8x8 / P_8x8ref0, 0 unless
+    // every sub_mb_type is P_L0_8x8 (`P_SUB_MB_PARTS == 1`). Gates the
+    // `transform_size_8x8_flag` read below (computed before `motion` moves).
+    let no_sub_part_lt_8x8 = match &motion.sub_mb_type {
+        Some(sub_types) => sub_types.iter().all(|&st| P_SUB_MB_PARTS[st as usize] == 1),
+        None => true,
+    };
     mb.motion = Some(motion);
 
     // coded_block_pattern for inter macroblocks (Table 9-4, inter ordering).
@@ -916,12 +923,13 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     let cbp_c = cbp >> 4;
 
     // `transform_size_8x8_flag` (§7.3.5.1): present when
-    // `transform_8x8_mode_flag && CodedBlockPatternLuma > 0` — inter MBs are
-    // never Intra_16×16, so no extra guard is needed. Read AFTER CBP and
-    // BEFORE mb_qp_delta; omitting it desyncs every subsequent MB (the flag's
-    // absence silently consumed the first bit of mb_qp_delta / the next MB).
+    // `transform_8x8_mode_flag && CodedBlockPatternLuma > 0 &&
+    //  noSubMbPartSizeLessThan8x8Flag` — inter MBs are never Intra_16×16 and P
+    // has no B_Direct_16x16, so those two clauses don't apply. Read AFTER CBP
+    // and BEFORE mb_qp_delta; getting its presence wrong desyncs every
+    // subsequent MB.
     let mut is_8x8 = false;
-    if transform_8x8_mode && cbp_l != 0 {
+    if transform_8x8_mode && cbp_l != 0 && no_sub_part_lt_8x8 {
         is_8x8 = r
             .read_bit()
             .ok_or(SliceDataError::Eof("transform_size_8x8_flag"))?
