@@ -2188,6 +2188,7 @@ impl H264Decoder {
             &acc.macroblocks[first_mb_usize..end_mb],
             colocated_mv.as_deref(),
             header.direct_spatial_mv_pred_flag,
+            sps.direct_8x8_inference_flag,
             temporal_ctx.as_ref(),
         ) {
             let _ = e;

@@ -1069,6 +1069,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
         &macroblocks,
         colocated_mv,
         direct_spatial_mv_pred_flag,
+        direct_8x8_inference_flag,
         temporal,
     )?;
 

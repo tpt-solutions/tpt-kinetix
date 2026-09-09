@@ -1158,6 +1158,7 @@ fn apply_spatial_direct(
     slice_id: u32,
     quads: &[usize],
     colocated: Option<&[[MvCell; 16]]>,
+    direct_8x8_inference_flag: bool,
 ) {
     let (refs, mvs, used) = derive_spatial_direct(store, cur, mb_idx, mb_width, slice_id);
     let fill = |cur: &mut [MvCell; 16], bx: usize, by: usize| {
@@ -1189,36 +1190,46 @@ fn apply_spatial_direct(
     if let Some(cells) = colocated.and_then(|g| g.get(mb_idx)) {
         let coloc_intra = cells.iter().all(|c| c.ref_idx < 0 && c.ref_idx_l1 < 0);
         if !coloc_intra {
-            for &q in quads {
-                // §8.4.1.2.1's `direct_8x8_inference_flag == 1` corner rule
-                // (luma4x4BlkIdx 0/5/10/15 in spec Z-scan numbering) samples
-                // the co-located 8×8 quadrant's *outer* corner — the 4×4
-                // sub-block diagonally farthest from the macroblock centre
-                // (e.g. quadrant 1's top-*right* 4×4, not its top-left) —
-                // not the quadrant's top-left 4×4 (which for quadrants 1-3
-                // is actually the sub-block *nearest* the MB centre). In
-                // this raster `by*4+bx` cell numbering the four outer
-                // corners are indices 0, 3, 12, 15. The previous formula
-                // `8*(q/2) + (q%2)*2` gave 0, 2, 8, 10 — correct only for
-                // quadrant 0 by coincidence, wrong for 1/2/3 — so
-                // `col_zero_flag` was derived from the wrong co-located
-                // motion for any Direct 8×8 quadrant other than the
-                // top-left one.
-                let cc = cells[12 * (q / 2) + 3 * (q % 2)];
-                let col_zero = (cc.ref_idx == 0 && cc.mv[0].abs() <= 1 && cc.mv[1].abs() <= 1)
+            let is_col_zero = |cc: &MvCell| {
+                (cc.ref_idx == 0 && cc.mv[0].abs() <= 1 && cc.mv[1].abs() <= 1)
                     || (cc.ref_idx < 0
                         && cc.ref_idx_l1 == 0
                         && cc.mv_l1[0].abs() <= 1
-                        && cc.mv_l1[1].abs() <= 1);
-                if col_zero {
-                    let blocks =
-                        crate::slice_data::partition_blocks(2 * (q % 2), 2 * (q / 2), 2, 2);
-                    for blk in blocks {
-                        if used[0] && refs[0] == 0 {
-                            cur[blk].mv = [0, 0];
+                        && cc.mv_l1[1].abs() <= 1)
+            };
+            let mut zero_block = |blk: usize| {
+                if used[0] && refs[0] == 0 {
+                    cur[blk].mv = [0, 0];
+                }
+                if used[1] && refs[1] == 0 {
+                    cur[blk].mv_l1 = [0, 0];
+                }
+            };
+            for &q in quads {
+                if direct_8x8_inference_flag {
+                    // §8.4.1.2.1's corner rule: sample the co-located 8×8
+                    // quadrant's *outer* corner 4×4 (raster cell indices 0,
+                    // 3, 12, 15 — diagonally farthest from the MB centre) and
+                    // apply its `col_zero_flag` to the whole quadrant. The
+                    // formula `8*(q/2)+(q%2)*2` gave 0,2,8,10 — correct for
+                    // quadrant 0 only.
+                    let cc = cells[12 * (q / 2) + 3 * (q % 2)];
+                    if is_col_zero(&cc) {
+                        for blk in
+                            crate::slice_data::partition_blocks(2 * (q % 2), 2 * (q / 2), 2, 2)
+                        {
+                            zero_block(blk);
                         }
-                        if used[1] && refs[1] == 0 {
-                            cur[blk].mv_l1 = [0, 0];
+                    }
+                } else {
+                    // `direct_8x8_inference_flag == 0`: each of the
+                    // quadrant's four 4×4 sub-blocks derives `col_zero_flag`
+                    // from *its own* co-located 4×4 block (spec §8.4.1.2.2).
+                    for sub in 0..4usize {
+                        let bx = 2 * (q % 2) + sub % 2;
+                        let by = 2 * (q / 2) + sub / 2;
+                        if is_col_zero(&cells[by * 4 + bx]) {
+                            zero_block(by * 4 + bx);
                         }
                     }
                 }
@@ -1349,6 +1360,7 @@ pub(crate) fn predict_inter_b_macroblock(
     mb: &Macroblock,
     colocated: Option<&[[MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    direct_8x8_inference_flag: bool,
     temporal: Option<&TemporalDirectCtx>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::{BPredDir, MbType};
@@ -1370,6 +1382,7 @@ pub(crate) fn predict_inter_b_macroblock(
                 slice_id,
                 &[0, 1, 2, 3],
                 colocated,
+                direct_8x8_inference_flag,
             );
             Ok(())
         }
@@ -1549,6 +1562,7 @@ pub(crate) fn predict_inter_b_macroblock(
                         slice_id,
                         &[part],
                         colocated,
+                        direct_8x8_inference_flag,
                     );
                     continue;
                 }
@@ -1613,6 +1627,7 @@ pub(crate) fn predict_b_slice_mvs(
     mbs: &[Macroblock],
     colocated: Option<&[[MvCell; 16]]>,
     direct_spatial_mv_pred_flag: bool,
+    direct_8x8_inference_flag: bool,
     temporal: Option<&TemporalDirectCtx>,
 ) -> Result<(), &'static str> {
     use crate::macroblock::MbType;
@@ -1641,6 +1656,7 @@ pub(crate) fn predict_b_slice_mvs(
                 mb,
                 colocated,
                 direct_spatial_mv_pred_flag,
+                direct_8x8_inference_flag,
                 temporal,
             )?;
         } else {
