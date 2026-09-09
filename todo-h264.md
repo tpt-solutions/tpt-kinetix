@@ -2,7 +2,25 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
-## SESSION #32bc — freh2_b: CABAC P_8x8 transform_8x8 gate + Intra16x16 luma DC list (commit 97a3d2f)
+## SESSION #32bc — freh2_b BIT-EXACT: CABAC P_8x8 + B_8x8 transform_8x8 gate + Intra16x16 luma DC list (commits 97a3d2f, 5b95aaa)
+
+**Outcome: `freh2_b` is 100/100 frames bit-exact vs the ITU reference and
+is now a hard-asserted `BitExact` clip. ITU suite: 25 bit-exact / 0
+failures.** Both the P_8x8 (`parse_p_macroblock_cabac`) and B_8x8
+(b_type_raw 22) branches of the CABAC `transform_size_8x8_flag` gate
+wrongly permitted 4×4 sub-partitions (P raw 3; B raw 10..=12) and, for B,
+raw 0 (B_Direct_8x8) without `direct_8x8_inference_flag`. Per §7.3.5
+`noSubMbPartSizeLessThan8x8Flag` is 0 the moment any partition has
+`NumSubMbPart > 1`; only raw 1..=3 keep the flag (B raw 0 keeps it only
+with inference). The over-read consumed a flag the JM/ITU ref never emits
+→ P `ref_idx overflow` / B `ref_idx L0/L1 overflow` → scaffolded frames.
+Also fixed `luma_dc_level_scale` (was Inter-Y list 3 for Intra_16×16 luma
+DC; always intra ⇒ list 0). Remaining `freh*`: `freh1_b` max_diff 26
+(B-path MC/bipred precision, not a desync); `freh7_b` still fully
+scaffolded (166/100 frame count ⇒ separate desync, not yet traced).
+
+<details><summary>original investigation notes</summary>
+
 
 Worked the recurring `P CABAC parse error: Unsupported("ref_idx overflow")`
 on `freh2_b` (High CABAC, non-flat quant matrices, GOP `I B B P B B P`,
@@ -33,6 +51,7 @@ is a frame-ordering artifact; the real signal is the `dbg_itu_pframe`
 "best-matches ref N (sad ...)" line. Next: re-run the `.trc`/`BINTRACE`
 diff on the first still-broken P slice (frames 2/4/5/7/8 in display order
 map to grey output) to find the next divergence MB.
+</details>
 
 ## SESSION #32bb — chroma DC / inter residual scaling-list index by prediction mode
 
