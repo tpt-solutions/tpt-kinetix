@@ -46,9 +46,10 @@ use crate::{
     entropy::SymbolDecoder,
     frame::FrameHeader,
     inter::{
-        build_mv_candidates, decode_ref_and_mv, motion_compensate, read_single_ref_name, InterCdfs,
-        Mv, RefFrames, RefSlot, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME,
-        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NONE_FRAME,
+        build_mv_candidates, decode_ref_and_mv, motion_compensate, read_mv, read_single_ref_name,
+        InterCdfs, Mv, RefFrames, RefSlot, ALTREF2_FRAME, ALTREF_FRAME, BWDREF_FRAME, GOLDEN_FRAME,
+        INTERP_SWITCHABLE, LAST2_FRAME, LAST3_FRAME, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
+        NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
@@ -495,9 +496,8 @@ struct RefMvCell {
     refs: [u8; 2],
     w4: u8,
     h4: u8,
-    // Read once the inter MV-stack build lands (dav1d `mf`: bit0 GLOBALMV,
-    // bit1 NEWMV) — used by `add_spatial_candidate`'s `have_newmv` tracking.
-    #[allow(dead_code)]
+    /// dav1d `mf`: bit 0 = GLOBALMV, bit 1 = NEWMV — used by the MV stack's
+    /// `have_newmv` tracking.
     mf: u8,
 }
 

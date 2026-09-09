@@ -268,43 +268,126 @@ impl<'a> TileDecodeState<'a> {
             ref_names[0] = read_single_ref_name(&mut self.dec, &mut self.map_inter_cdfs, 0);
         }
 
-        // Build the spatial MV candidate list (§7.10) from neighbours.
-        let above = [
-            (self.ref_above[mi_col][0], self.mv_above[mi_col][0]),
-            (self.ref_above[mi_col][1], self.mv_above[mi_col][1]),
-        ];
-        let left = [
-            (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
-            (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
-        ];
-        let block_refs: Vec<u8> = ref_names
-            .iter()
-            .copied()
-            .filter(|r| *r != NONE_FRAME)
-            .collect();
-        let candidates = build_mv_candidates(&above, &left, &block_refs, 2);
-
-        // Per reference: read mode + MV (§5.11.23). MV precision is
-        // `allow_high_precision_mv` (1/8 vs 1/4 pel); `force_integer_mv`
-        // skips the fractional reads entirely.
         let mut mvs = [Mv::default(); 2];
         let force_integer_mv = self.force_integer_mv;
-        for i in 0..2 {
-            let r = ref_names[i];
-            if r == NONE_FRAME {
-                continue;
+        let mut new_mf = 0u8;
+
+        if !compound {
+            // AV1 §7.10.2 `find_mv_stack` + §5.11.24 single-ref mode cascade.
+            let (stack, ctx, n_mvs, drl_ctx) =
+                self.inter_mv_stack(mi_row, mi_col, bsize, ref_names);
+            let newmv_ctx = (ctx & 7) as usize;
+            let globalmv_ctx = ((ctx >> 3) & 1) as usize;
+            let refmv_ctx = ((ctx >> 4) & 15) as usize;
+
+            // `new_mv` S(): 1 => NOT newmv, 0 => NEWMV.
+            let not_newmv = self
+                .dec
+                .read_symbol(&mut self.map_inter_cdfs.new_mv[newmv_ctx.min(5)])
+                == 1;
+            let mut drl_idx = 0usize;
+            let mode: u8;
+            if not_newmv {
+                // `zero_mv` S(): 0 => GLOBALMV, 1 => near path.
+                let near_path = self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.zero_mv[globalmv_ctx.min(1)])
+                    == 1;
+                if !near_path {
+                    mode = ZEROMV;
+                    new_mf = 1;
+                } else {
+                    // `ref_mv` S(): 1 => NEARMV (+drl), 0 => NEARESTMV.
+                    if self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.ref_mv[refmv_ctx.min(5)])
+                        == 1
+                    {
+                        mode = NEARMV;
+                        drl_idx = 1;
+                        if n_mvs > 2 {
+                            drl_idx += self
+                                .dec
+                                .read_symbol(&mut self.map_inter_cdfs.drl_mode[drl_ctx[1].min(2)]);
+                            if drl_idx == 2 && n_mvs > 3 {
+                                drl_idx += self.dec.read_symbol(
+                                    &mut self.map_inter_cdfs.drl_mode[drl_ctx[2].min(2)],
+                                );
+                            }
+                        }
+                    } else {
+                        mode = NEARESTMV;
+                    }
+                }
+            } else {
+                mode = NEWMV;
+                new_mf = 2;
+                if n_mvs > 1 {
+                    drl_idx += self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.drl_mode[drl_ctx[0].min(2)]);
+                    if drl_idx == 1 && n_mvs > 2 {
+                        drl_idx += self
+                            .dec
+                            .read_symbol(&mut self.map_inter_cdfs.drl_mode[drl_ctx[1].min(2)]);
+                    }
+                }
             }
-            let (_rn, mv) = decode_ref_and_mv(
-                &mut self.dec,
-                &mut self.map_inter_cdfs,
-                r,
-                &candidates,
-                allow_hp,
-                force_integer_mv,
-                0,
-                false,
-            )?;
-            mvs[i] = mv;
+
+            let base_mv = stack.get(drl_idx).map(|m| m[0]).unwrap_or_default();
+            if std::env::var("KINETIX_AV1_DBG_IMODE").is_ok() {
+                eprintln!(
+                    "DBG imode mi=({mi_col},{mi_row}) ref={} ctx={ctx:#x}(nm={newmv_ctx},gm={globalmv_ctx},rm={refmv_ctx}) \
+                     mode={mode} drl={drl_idx} n_mvs={n_mvs} base=({},{})",
+                    ref_names[0], base_mv.row, base_mv.col
+                );
+            }
+            mvs[0] = match mode {
+                ZEROMV => Mv::default(),
+                NEWMV => {
+                    let diff = read_mv(
+                        &mut self.dec,
+                        &mut self.map_inter_cdfs,
+                        allow_hp,
+                        force_integer_mv,
+                    )?;
+                    Mv::new(base_mv.row + diff.row, base_mv.col + diff.col)
+                }
+                _ => base_mv,
+            };
+        } else {
+            // Compound path — still the simplified spatial-candidate build.
+            let above = [
+                (self.ref_above[mi_col][0], self.mv_above[mi_col][0]),
+                (self.ref_above[mi_col][1], self.mv_above[mi_col][1]),
+            ];
+            let left = [
+                (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
+                (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
+            ];
+            let block_refs: Vec<u8> = ref_names
+                .iter()
+                .copied()
+                .filter(|r| *r != NONE_FRAME)
+                .collect();
+            let candidates = build_mv_candidates(&above, &left, &block_refs, 2);
+            for i in 0..2 {
+                let r = ref_names[i];
+                if r == NONE_FRAME {
+                    continue;
+                }
+                let (_rn, mv) = decode_ref_and_mv(
+                    &mut self.dec,
+                    &mut self.map_inter_cdfs,
+                    r,
+                    &candidates,
+                    allow_hp,
+                    force_integer_mv,
+                    0,
+                    false,
+                )?;
+                mvs[i] = mv;
+            }
         }
 
         // Per-block interpolation filter (§5.11.27). When switchable, one
@@ -450,6 +533,8 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
         }
+        // 2-D ref-MV grid: record this block's refs + MVs for later stacks.
+        self.splat_refmv_full(mi_row, mi_col, bsize, ref_names, mvs, new_mf);
         Ok(())
     }
 

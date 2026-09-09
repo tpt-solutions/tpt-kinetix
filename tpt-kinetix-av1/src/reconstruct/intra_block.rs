@@ -938,7 +938,7 @@ impl<'a> TileDecodeState<'a> {
     /// `splat_intrabc_mv` (`mv = Some(dv)`, the block's final displacement
     /// vector). Every decoded block must call this so the neighbour scan in
     /// [`Self::ibc_mv_pred`] can step correctly over block sizes.
-    fn splat_refmv(
+    pub(super) fn splat_refmv(
         &mut self,
         mi_row: usize,
         mi_col: usize,
@@ -962,7 +962,7 @@ impl<'a> TileDecodeState<'a> {
     /// General `refmvs_block` splat: store a block's reference names + MVs (and
     /// motion flags) across its whole mi extent, so the neighbour scans in
     /// [`Self::ibc_mv_pred`] / the inter MV-stack build can read them back.
-    fn splat_refmv_full(
+    pub(super) fn splat_refmv_full(
         &mut self,
         mi_row: usize,
         mi_col: usize,
@@ -1170,6 +1170,274 @@ impl<'a> TileDecodeState<'a> {
         } else {
             Mv::new(-(sb_size4 * 4 * 8), 0)
         }
+    }
+
+    /// AV1 §7.10.2 `find_mv_stack` for real inter blocks — a port of dav1d's
+    /// `dav1d_refmvs_find` covering the spatial scans (primary −1, top-right,
+    /// top-left, secondary −3/−5), weight sort, and the §7.10.2.14 context
+    /// derivation. Temporal (`use_ref_frame_mvs`) and single/compound extended
+    /// candidates are not yet folded in.
+    ///
+    /// Returns `(stack, packed_ctx, num_found, drl_ctx)`:
+    /// * `stack[i]` — the `i`-th candidate `[mv0, mv1]` pair (mv1 unused for
+    ///   single reference),
+    /// * `packed_ctx` — `(RefMvContext << 4) | (ZeroMvContext << 3) | NewMvContext`,
+    /// * `drl_ctx[i]` — `DrlCtxStack[i]` for `i = 0..3`.
+    pub(super) fn inter_mv_stack(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        want_refs: [u8; 2],
+    ) -> (Vec<[crate::inter::Mv; 2]>, u32, usize, [usize; 3]) {
+        use crate::inter::Mv;
+        const REF_CAT_LEVEL: i64 = 640;
+        let grid = &self.refmv_grid;
+        let stride = self.refmv_stride;
+        let mi_rows = self.mi_rows as i32;
+        let mi_cols = self.mi_cols as i32;
+        let row_start = (self.tile_px_y0 / MI_SIZE) as i32;
+        let col_start = (self.tile_px_x0 / MI_SIZE) as i32;
+        let (row_end, col_end) = (mi_rows, mi_cols);
+        let is_compound = want_refs[1] != crate::inter::NONE_FRAME;
+
+        let bw4 = (BLOCK_WIDTH[bsize] / MI_SIZE) as i32;
+        let bh4 = (BLOCK_HEIGHT[bsize] / MI_SIZE) as i32;
+        let by4 = mi_row as i32;
+        let bx4 = mi_col as i32;
+        let w4 = bw4.min(16).min(col_end - bx4);
+        let h4 = bh4.min(16).min(row_end - by4);
+
+        let cell = |r: i32, c: i32| -> RefMvCell {
+            if r < 0 || c < 0 || r >= mi_rows || c >= mi_cols {
+                RefMvCell::default()
+            } else {
+                grid[r as usize * stride + c as usize]
+            }
+        };
+
+        // Candidate stack entries: ([mv0, mv1], weight).
+        let mut stack: Vec<([Mv; 2], i64)> = Vec::with_capacity(8);
+        let mut have_newmv = 0i32;
+
+        // dav1d `add_spatial_candidate`.
+        let add = |stack: &mut Vec<([Mv; 2], i64)>,
+                   have_newmv: &mut i32,
+                   have_match: &mut i32,
+                   cand: RefMvCell,
+                   weight: i64| {
+            if cand.refs[0] == crate::inter::NONE_FRAME || cand.refs[0] == crate::inter::INTRA_FRAME
+            {
+                return;
+            }
+            if !is_compound {
+                for n in 0..2 {
+                    if cand.refs[n] == want_refs[0] {
+                        let mv = [cand.mv[n], Mv::default()];
+                        *have_match = 1;
+                        *have_newmv |= (cand.mf >> 1) as i32;
+                        for e in stack.iter_mut() {
+                            if e.0[0] == mv[0] {
+                                e.1 += weight;
+                                return;
+                            }
+                        }
+                        if stack.len() < 8 {
+                            stack.push((mv, weight));
+                        }
+                        return;
+                    }
+                }
+            } else if cand.refs == want_refs {
+                let mv = [cand.mv[0], cand.mv[1]];
+                *have_match = 1;
+                *have_newmv |= (cand.mf >> 1) as i32;
+                for e in stack.iter_mut() {
+                    if e.0 == mv {
+                        e.1 += weight;
+                        return;
+                    }
+                }
+                if stack.len() < 8 {
+                    stack.push((mv, weight));
+                }
+            }
+        };
+
+        let scan_row = |stack: &mut Vec<([Mv; 2], i64)>,
+                        have_newmv: &mut i32,
+                        have_match: &mut i32,
+                        rr: i32,
+                        max_n: i32,
+                        step: i32|
+         -> i32 {
+            let first = cell(rr, bx4);
+            let cand_bw4 = (first.w4 as i32).max(1);
+            let mut len = step.max(bw4.min(cand_bw4));
+            if bw4 <= cand_bw4 {
+                let weight = if bw4 == 1 {
+                    2
+                } else {
+                    2.max((2 * max_n).min(first.h4 as i32))
+                };
+                add(stack, have_newmv, have_match, first, (len * weight) as i64);
+                return weight >> 1;
+            }
+            let mut x = 0i32;
+            loop {
+                let cb = cell(rr, bx4 + x);
+                add(stack, have_newmv, have_match, cb, (len * 2) as i64);
+                x += len;
+                if x >= w4 {
+                    return 1;
+                }
+                len = step.max((cell(rr, bx4 + x).w4 as i32).max(1));
+            }
+        };
+        let scan_col = |stack: &mut Vec<([Mv; 2], i64)>,
+                        have_newmv: &mut i32,
+                        have_match: &mut i32,
+                        cc: i32,
+                        max_n: i32,
+                        step: i32|
+         -> i32 {
+            let first = cell(by4, cc);
+            let cand_bh4 = (first.h4 as i32).max(1);
+            let mut len = step.max(bh4.min(cand_bh4));
+            if bh4 <= cand_bh4 {
+                let weight = if bh4 == 1 {
+                    2
+                } else {
+                    2.max((2 * max_n).min(first.w4 as i32))
+                };
+                add(stack, have_newmv, have_match, first, (len * weight) as i64);
+                return weight >> 1;
+            }
+            let mut y = 0i32;
+            loop {
+                let cb = cell(by4 + y, cc);
+                add(stack, have_newmv, have_match, cb, (len * 2) as i64);
+                y += len;
+                if y >= h4 {
+                    return 1;
+                }
+                len = step.max((cell(by4 + y, cc).h4 as i32).max(1));
+            }
+        };
+
+        let (mut have_row, mut have_col) = (0i32, 0i32);
+        let mut n_rows = -1i32;
+        let mut n_cols = -1i32;
+        let mut max_rows = 0i32;
+        let mut max_cols = 0i32;
+        if by4 > row_start {
+            max_rows = ((by4 - row_start + 1) >> 1).min(2 + (bh4 > 1) as i32);
+            n_rows = scan_row(
+                &mut stack,
+                &mut have_newmv,
+                &mut have_row,
+                by4 - 1,
+                max_rows,
+                if bw4 >= 16 { 4 } else { 1 },
+            );
+        }
+        if bx4 > col_start {
+            max_cols = ((bx4 - col_start + 1) >> 1).min(2 + (bw4 > 1) as i32);
+            n_cols = scan_col(
+                &mut stack,
+                &mut have_newmv,
+                &mut have_col,
+                bx4 - 1,
+                max_cols,
+                if bh4 >= 16 { 4 } else { 1 },
+            );
+        }
+        if n_rows != -1 && bw4.max(bh4) <= 16 && bw4 + bx4 < col_end {
+            add(
+                &mut stack,
+                &mut have_newmv,
+                &mut have_row,
+                cell(by4 - 1, bx4 + bw4),
+                4,
+            );
+        }
+
+        let close_matches = have_row + have_col;
+        let nearest_cnt = stack.len();
+        let num_new = have_newmv;
+        for e in stack.iter_mut().take(nearest_cnt) {
+            e.1 += REF_CAT_LEVEL;
+        }
+
+        if n_rows != -1 || n_cols != -1 {
+            add(
+                &mut stack,
+                &mut have_newmv,
+                &mut have_row,
+                cell(by4 - 1, bx4 - 1),
+                4,
+            );
+        }
+        let mut dummy = 0i32;
+        let mut n_rows_run = n_rows.max(0);
+        let mut n_cols_run = n_cols.max(0);
+        for n in 2..=3i32 {
+            if n > n_rows_run && n <= max_rows {
+                n_rows_run += scan_row(
+                    &mut stack,
+                    &mut dummy,
+                    &mut have_row,
+                    (by4 - 2 * n + 1) | 1,
+                    1 + max_rows - n,
+                    if bw4 >= 16 { 4 } else { 2 },
+                );
+            }
+            if n > n_cols_run && n <= max_cols {
+                n_cols_run += scan_col(
+                    &mut stack,
+                    &mut dummy,
+                    &mut have_col,
+                    (bx4 - 2 * n + 1) | 1,
+                    1 + max_cols - n,
+                    if bh4 >= 16 { 4 } else { 2 },
+                );
+            }
+        }
+        let total_matches = have_row + have_col;
+
+        // Weight sort: nearest set, then secondary set (stable).
+        let mut tail = stack.split_off(nearest_cnt.min(stack.len()));
+        stack.sort_by_key(|e| std::cmp::Reverse(e.1));
+        tail.sort_by_key(|e| std::cmp::Reverse(e.1));
+        stack.extend(tail);
+
+        // §7.10.2.14 context derivation.
+        let (newmv_ctx, refmv_ctx) = match close_matches {
+            0 => (total_matches.min(1), total_matches),
+            1 => (3 - num_new.min(1), 2 + total_matches),
+            _ => (5 - num_new.min(1), 5),
+        };
+        // ZeroMvContext / globalmv_ctx — 0 without the temporal scan.
+        let zeromv_ctx = 0u32;
+        let packed = ((refmv_ctx as u32) << 4) | (zeromv_ctx << 3) | (newmv_ctx as u32);
+
+        // DrlCtxStack.
+        let mut drl_ctx = [0usize; 3];
+        for (idx, dc) in drl_ctx.iter_mut().enumerate() {
+            if idx + 1 < stack.len() {
+                let w0 = stack[idx].1;
+                let w1 = stack[idx + 1].1;
+                *dc = if w0 >= REF_CAT_LEVEL {
+                    usize::from(w1 < REF_CAT_LEVEL)
+                } else {
+                    2
+                };
+            }
+        }
+
+        let out: Vec<[Mv; 2]> = stack.iter().map(|e| e.0).collect();
+        let n_found = out.len();
+        (out, packed, n_found, drl_ctx)
     }
 
     /// Reconstruct one intra-block-copy (IBC) coded block (AV1 §7.11.3 / §5.11.7).
