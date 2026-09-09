@@ -381,27 +381,24 @@ pub(crate) fn parse_p_macroblock_cabac<T: crate::trace::DecodeTracer>(
             // first bit of mb_qp_delta / the next MB) — the CABAC twin of the
             // CAVLC bug fixed in #32j.
             //
-            // FFmpeg additionally gates this on `get_dct8x8_allowed` (line
-            // 2347 of `h264_cabac_ref.c`). For P_L0_16x16 / P_16x8 / P_8x16
-            // (`shape` 0/1/2) `dct8x8_allowed` is NEVER narrowed — it stays
-            // `= transform_8x8_mode`, i.e. the flag IS read (ffmpeg only
-            // narrows it inside the `IS_8X8` branch, line 2161). For P_8x8
-            // (`shape` 3) `get_dct8x8_allowed` returns true iff no sub-
-            // partition is smaller than 8×8: with `direct_8x8_inference_flag`
-            // set, all four `sub_mb_type` raw values must be 0 (P_L0_8x8);
-            // without it, raw 3 (P_L0_4x4 → `MB_TYPE_8x8`, no 16x8/8x16 bit)
-            // is also permitted.
+            // This is gated on §7.3.5's `noSubMbPartSizeLessThan8x8Flag`. For
+            // P_L0_16x16 / P_16x8 / P_8x16 (`shape` 0/1/2) it is always 1 — the
+            // flag IS read. For P_8x8 (`shape` 3) the spec sets it to 0 as soon
+            // as any partition has `NumSubMbPart(sub_mb_type) > 1`, i.e. the raw
+            // `sub_mb_type` is 1 (8×4), 2 (4×8) or 3 (4×4) — only all-zero
+            // (P_L0_8x8) keeps the flag present. `direct_8x8_inference_flag`
+            // only affects B_Direct_8x8 sub-partitions, never a P slice, so it
+            // is not consulted here. (This matches the JM/ITU reference, which
+            // does not emit `transform_size_8x8_flag` for e.g. a P_8x8 MB with
+            // `sub_mb_type == [0,0,3,0]` — the previous `s == 3` allowance
+            // desynced CABAC on `freh2_b`.)
             let dct8x8_allowed = if shape == 3 {
                 let subs = mb
                     .motion
                     .as_ref()
                     .and_then(|m| m.sub_mb_type)
                     .unwrap_or([0u8; 4]);
-                if _direct_8x8_inference_flag {
-                    subs.iter().all(|&s| s == 0)
-                } else {
-                    subs.iter().all(|&s| s == 0 || s == 3)
-                }
+                subs.iter().all(|&s| s == 0)
             } else {
                 true
             };

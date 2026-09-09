@@ -174,11 +174,14 @@ impl ScalingLists {
         self.weight_scale_4x4(list_idx, raster) * NORM_ADJUST_4X4[m][pos_group(raster)]
     }
 
-    /// `LevelScale4x4` for the luma Intra_16×16 DC coefficients (list 3,
-    /// position 0 — all 16 DC levels share the position-0 weight, per ffmpeg
-    /// `ff_h264_luma_dc_dequant_idct`).
+    /// `LevelScale4x4` for the luma Intra_16×16 DC coefficients (list 0,
+    /// `Sl_4x4_Intra_Y`, position 0 — all 16 DC levels share the position-0
+    /// weight, per ffmpeg `ff_h264_luma_dc_dequant_idct`). Luma DC only exists
+    /// for Intra_16×16 macroblocks, so the intra 4×4 luma list is always the
+    /// correct one; the previous `list_4x4[3]` (Inter Y) mis-scaled every
+    /// Intra_16×16 DC on High streams that load distinct intra/inter matrices.
     pub fn luma_dc_level_scale(&self, m: usize) -> i32 {
-        self.list_4x4[3][0] as i32 * NORM_ADJUST_4X4[m][0]
+        self.list_4x4[0][0] as i32 * NORM_ADJUST_4X4[m][0]
     }
 
     /// `LevelScale4x4` for a chroma DC coefficient at position 0. §8.5.9 selects
