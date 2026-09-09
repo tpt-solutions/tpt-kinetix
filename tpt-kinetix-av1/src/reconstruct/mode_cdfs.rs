@@ -35,6 +35,8 @@ pub(super) struct ModeCdfs {
     pub(super) tx_64x64: [[u16; 4]; 3],
     pub(super) txfm_split: [[u16; 3]; 21],
     pub(super) skip: [[u16; 3]; 3],
+    /// `TileSkipModeCdf` (§8.3.2) — the per-block `skip_mode` flag.
+    pub(super) skip_mode: [[u16; 3]; 3],
     /// `TileIntrabcCdf` (§8.3.2) — one adaptive 2-symbol CDF, used for the
     /// `use_intrabc` flag on intra frames with `allow_intrabc`.
     pub(super) intrabc: [u16; 3],
@@ -320,6 +322,7 @@ impl ModeCdfs {
             tx_64x64: DEFAULT_TX_64X64_CDF,
             txfm_split: DEFAULT_TXFM_SPLIT_CDF,
             skip: DEFAULT_SKIP_CDF,
+            skip_mode: DEFAULT_SKIP_MODE_CDF,
             // `Default_Intrabc_Cdf` (§ "Default CDF tables"): `{ 30531 }`.
             intrabc: [30531, 32768, 0],
             // AV1 default `segment_id_cdf` is not yet transcribed into

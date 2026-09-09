@@ -74,6 +74,8 @@ fn decode_with(
         false,    // allow_high_precision_mv
         false,    // force_integer_mv
         false,    // reference_select
+        false,    // skip_mode_present
+        [2, 2],   // skip_mode_frame
         0,        // interpolation_filter (EIGHTTAP_REGULAR)
         false,    // enable_dual_filter
         [0u8; 9], // ref_to_slot

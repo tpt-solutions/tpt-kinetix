@@ -616,6 +616,14 @@ struct TileDecodeState<'a> {
     force_integer_mv: bool,
     /// `reference_select` (§6.8.2): compound prediction allowed.
     reference_select: bool,
+    /// `skip_mode_present` / `SkipModeFrame[0..2]` (§6.8.2 / §7.4.13): a
+    /// skip-mode block reads one `skip_mode` symbol, then predicts (compound,
+    /// no residual) from this fixed forward/backward reference pair.
+    skip_mode_present: bool,
+    skip_mode_frame: [u8; 2],
+    /// Per-mi neighbour `skip_mode` flags, feeding its §5.11.11 context.
+    skip_mode_above: Vec<u8>,
+    skip_mode_left: Vec<u8>,
     /// Sequence-header `enable_dual_filter` (§5.5.1): when set, a switchable
     /// inter block reads two `interp_filter` symbols (vertical then
     /// horizontal) instead of one shared value.
@@ -738,6 +746,8 @@ impl<'a> TileDecodeState<'a> {
         allow_high_precision_mv: bool,
         force_integer_mv: bool,
         reference_select: bool,
+        skip_mode_present: bool,
+        skip_mode_frame: [u8; 2],
         interpolation_filter: u8,
         enable_dual_filter: bool,
         ref_to_slot: [u8; 9],
@@ -815,6 +825,10 @@ impl<'a> TileDecodeState<'a> {
             allow_high_precision_mv,
             force_integer_mv,
             reference_select,
+            skip_mode_present,
+            skip_mode_frame,
+            skip_mode_above: vec![0u8; mi_cols],
+            skip_mode_left: vec![0u8; mi_rows],
             interpolation_filter,
             enable_dual_filter,
             filter_above: [vec![3u8; mi_cols], vec![3u8; mi_cols]],
@@ -1106,6 +1120,8 @@ pub fn decode_tile_group(
     allow_high_precision_mv: bool,
     force_integer_mv: bool,
     reference_select: bool,
+    skip_mode_present: bool,
+    skip_mode_frame: [u8; 2],
     interpolation_filter: u8,
     enable_dual_filter: bool,
     ref_to_slot: [u8; 9],
@@ -1206,6 +1222,8 @@ pub fn decode_tile_group(
         allow_high_precision_mv,
         force_integer_mv,
         reference_select,
+        skip_mode_present,
+        skip_mode_frame,
         interpolation_filter,
         enable_dual_filter,
         ref_to_slot,
@@ -1604,6 +1622,8 @@ pub fn reconstruct_av1_frame(
                 frame_header.allow_high_precision_mv,
                 frame_header.force_integer_mv,
                 frame_header.reference_select,
+                frame_header.skip_mode_present,
+                frame_header.skip_mode_frame,
                 frame_header.interpolation_filter,
                 seq.enable_dual_filter,
                 ref_to_slot,

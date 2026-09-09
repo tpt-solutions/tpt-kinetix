@@ -26,12 +26,32 @@ impl<'a> TileDecodeState<'a> {
         let frame_filter = self.interpolation_filter;
         let reference_select = self.reference_select;
 
-        // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
-        // syntax order.
+        // `read_skip_mode()` (§5.11.11) — read *before* `read_skip()` in the
+        // inter syntax order. A skip-mode block skips every other mode symbol:
+        // it is compound, non-residual, and predicts from the fixed
+        // `SkipModeFrame` pair with the NEAREST MVs.
         let above_skip = self.skip_above[mi_col] as usize;
         let left_skip = self.skip_left[mi_row] as usize;
         let above_inter = self.is_inter_above[mi_col] as usize;
         let left_inter = self.is_inter_left[mi_row] as usize;
+        let skip_mode = if self.seg_feature_skip
+            || !self.skip_mode_present
+            || BLOCK_WIDTH[bsize] < 8
+            || BLOCK_HEIGHT[bsize] < 8
+        {
+            false
+        } else {
+            let ctx = self.skip_mode_above[mi_col] as usize + self.skip_mode_left[mi_row] as usize;
+            self.dec
+                .read_symbol(&mut self.mode_cdfs.skip_mode[ctx.min(2)])
+                == 1
+        };
+        if skip_mode {
+            return self.decode_skip_mode_block(mi_row, mi_col, bsize);
+        }
+
+        // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
+        // syntax order.
         let skip = if self.seg_feature_skip {
             true
         } else {
@@ -388,6 +408,9 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.skip_left.get_mut(r) {
                 *s = skip_byte;
             }
+            if let Some(s) = self.skip_mode_left.get_mut(r) {
+                *s = 0;
+            }
             if let Some(s) = self.tx_left.get_mut(r) {
                 *s = luma_tx_h_byte;
             }
@@ -415,12 +438,130 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.skip_above.get_mut(c) {
                 *s = skip_byte;
             }
+            if let Some(s) = self.skip_mode_above.get_mut(c) {
+                *s = 0;
+            }
             if let Some(s) = self.tx_above.get_mut(c) {
                 *s = luma_tx_w_byte;
             }
             for (fv, arr) in filters.iter().zip(self.filter_above.iter_mut()) {
                 if let Some(s) = arr.get_mut(c) {
                     *s = *fv;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A `skip_mode` block (§7.11.3 / §5.11.11): compound prediction from the
+    /// fixed `SkipModeFrame` pair with the NEAREST spatial MVs, no residual, no
+    /// further entropy reads. The NEAREST MV derivation is the simplified
+    /// spatial-only `build_mv_candidates` (a full compound `find_mv_stack` is
+    /// still pending), so the prediction is close but not yet bit-exact.
+    fn decode_skip_mode_block(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+    ) -> Result<(), KinetixError> {
+        let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+
+        // §5.11.18: cdef / delta_q / delta_lf still follow, with skip = 1.
+        self.read_cdef(mi_row, mi_col, bsize, true);
+        self.read_delta_qindex(bsize, true);
+        self.read_delta_lf(bsize, true);
+        self.read_deltas = false;
+
+        let ref_names = self.skip_mode_frame;
+        let above = [
+            (self.ref_above[mi_col][0], self.mv_above[mi_col][0]),
+            (self.ref_above[mi_col][1], self.mv_above[mi_col][1]),
+        ];
+        let left = [
+            (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
+            (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
+        ];
+        let mut mvs = [Mv::default(); 2];
+        for (i, mv) in mvs.iter_mut().enumerate() {
+            let cands = build_mv_candidates(&above, &left, &[ref_names[i]], 2);
+            *mv = cands.first().map(|c| c.mv).unwrap_or_default();
+        }
+
+        let px_x0 = mi_col * MI_SIZE - self.tile_px_x0;
+        let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
+        let bw_px = bw * MI_SIZE;
+        let bh_px = bh * MI_SIZE;
+        let f = if self.interpolation_filter == INTERP_SWITCHABLE {
+            0
+        } else {
+            self.interpolation_filter
+        };
+        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f)?;
+        let cmv: [Mv; 2] = [mvs[0].scaled_chroma(), mvs[1].scaled_chroma()];
+        let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
+        let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
+
+        let luma_tx = max_tx_size_for_bsize(bsize);
+        self.add_inter_residual(mi_row, mi_col, bsize, true, luma_tx)?;
+
+        let luma_tx_w = av1::TX_WIDTH[luma_tx] as u8;
+        let luma_tx_h = av1::TX_HEIGHT[luma_tx] as u8;
+        for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            if let Some(s) = self.is_inter_left.get_mut(r) {
+                *s = 1;
+            }
+            if let Some(slot) = self.ref_left.get_mut(r) {
+                *slot = ref_names;
+            }
+            if let Some(slot) = self.mv_left.get_mut(r) {
+                *slot = mvs;
+            }
+            if let Some(s) = self.ymode_left.get_mut(r) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.skip_left.get_mut(r) {
+                *s = 1;
+            }
+            if let Some(s) = self.skip_mode_left.get_mut(r) {
+                *s = 1;
+            }
+            if let Some(s) = self.tx_left.get_mut(r) {
+                *s = luma_tx_h;
+            }
+            for arr in self.filter_left.iter_mut() {
+                if let Some(s) = arr.get_mut(r) {
+                    *s = f;
+                }
+            }
+        }
+        for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(s) = self.is_inter_above.get_mut(c) {
+                *s = 1;
+            }
+            if let Some(slot) = self.ref_above.get_mut(c) {
+                *slot = ref_names;
+            }
+            if let Some(slot) = self.mv_above.get_mut(c) {
+                *slot = mvs;
+            }
+            if let Some(s) = self.ymode_above.get_mut(c) {
+                *s = DC_PRED;
+            }
+            if let Some(s) = self.skip_above.get_mut(c) {
+                *s = 1;
+            }
+            if let Some(s) = self.skip_mode_above.get_mut(c) {
+                *s = 1;
+            }
+            if let Some(s) = self.tx_above.get_mut(c) {
+                *s = luma_tx_w;
+            }
+            for arr in self.filter_above.iter_mut() {
+                if let Some(s) = arr.get_mut(c) {
+                    *s = f;
                 }
             }
         }
