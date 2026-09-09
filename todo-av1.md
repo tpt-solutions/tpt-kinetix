@@ -5413,3 +5413,25 @@
 > much smaller than the DV-predictor class just closed. Next: trace that one
 > block's `Post-y-cf-blk` against dav1d. Then pin `testsrc2_big` + flip
 > `capabilities().pixel_exact`.
+
+> **2026-09-10 (cont'd) — FLIPADST inverse transforms: testsrc2_320x180 LUMA
+> now bit-exact vs dav1d (commit b7315eb).** `inverse_transform`'s
+> `row_axis_transform`/`col_axis_transform` fell through to `Identity` for
+> every FLIPADST `TxType` — the code comment claimed only the "unvalidated
+> inter path" could reach them, but IBC blocks (`IsInter == 1`) select inter
+> tx types including H_FLIPADST/V_FLIPADST/FLIPADST_*. A DC coeff through the
+> missing transform landed on a single pixel (the `159, 106, 106…` vs dav1d's
+> smooth gradient signature). Now all 16 `TxType`s dispatch, with a `flip`
+> flag = "reverse the 1-D output along this axis" (dav1d `inv_flipadst*` =
+> ADST then reverse). testsrc2_big Y: ~61 dB / 8 px → **bit-exact**. 5 pinned
+> corpus entries unaffected; 139 unit tests + clippy + fmt green.
+> **Still open — testsrc2_big chroma (U 50.6 / V 40.9 dB):** small flat
+> per-4×4-block DC-ish offsets (−8 … −91) clustered at chroma y=64 and
+> y=72–75 (= the bottom-row IBC blocks, luma by=32/36). Looks like a chroma
+> IBC residual/dequant error (the block's single DC coeff dequantized or
+> transformed slightly off), not a DV or entropy problem — luma of the same
+> blocks is exact. First divergence: U px=(128,64), IBC block 8 (bx=64,by=32),
+> dav1d `Post-uv-cf-blk[pl=0,tx=0,txtp=11,eob=0]` (TX_4X4 H_DCT, 1 DC coeff).
+> Next: dump Kinetix's chroma DC coeff + dequant for that block vs the dav1d
+> trace's chroma pixel hex. Then pin `testsrc2_big` + flip
+> `capabilities().pixel_exact` for the intra path.
