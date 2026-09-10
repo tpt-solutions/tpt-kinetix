@@ -158,6 +158,13 @@ pub fn decode_spectral_data(
                 }
                 let width = (swb[sfb + 1] - swb[sfb]) as usize;
                 let scale_val = scale[gi * max_sfb + sfb];
+                if std::env::var_os("AAC_DBG_SPEC").is_some() {
+                    eprintln!(
+                        "  spec sfb {sfb} cb {sect_cb} width {width} @bit {} rem {}",
+                        reader.bit_position(),
+                        reader.remaining_bits()
+                    );
+                }
                 for w_idx in 0..glen {
                     let base = gbase + w_idx * 128 + swb[sfb] as usize;
                     let mut bin = 0usize;
@@ -190,6 +197,13 @@ pub fn decode_spectral_data(
                 sfb += 1;
             }
         }
+    }
+    if std::env::var_os("AAC_DBG_SPEC").is_some() {
+        eprintln!(
+            "  spectral DONE @bit {} rem {}",
+            reader.bit_position(),
+            reader.remaining_bits()
+        );
     }
 
     Ok(coeffs)

@@ -7,10 +7,11 @@
 //! `just fetch-aac-conformance`. When the directory is absent the whole test
 //! is skipped so CI without the fixtures stays green.
 //!
-//! `al04_44` (LC mono, pulse), `al05_44` (LC stereo), `al18_44` (LC mono)
-//! decode **bit-exact**. The multichannel / channel_config-0-PCE / mismatched-PCE
-//! / SSR streams are recorded as known gaps with a pinned regression ceiling —
-//! see `EXPECT` below.
+//! `al04_44` (LC mono, pulse), `al05_44` (LC stereo), `al18_44` (LC mono),
+//! `al06_44` (LC 5.1, channel_config 0 / PCE) decode **bit-exact**. The
+//! remaining channel_config-0 multi-element / 96 kHz / mismatched-PCE / SSR
+//! streams are recorded as known gaps with a pinned regression ceiling — see
+//! `EXPECT` below.
 
 use std::path::{Path, PathBuf};
 use tpt_kinetix_aac::AacDecoder;
@@ -60,38 +61,43 @@ const EXPECT: &[(&str, Expect, &str)] = &[
     ("al18_44", Expect::Exact, "LC mono, long clip"),
     (
         "am00_88",
-        Expect::KnownGap { max_lsb: 30_000.0 },
-        "LC — multichannel/parse gap, TODO characterise",
+        Expect::Rejected,
+        "AAC Main profile (backward prediction) — unsupported, rejected",
     ),
     (
         "al06_44",
-        Expect::KnownGap { max_lsb: 25_000.0 },
-        "LC 5.1 — multichannel gap",
+        Expect::Exact,
+        "LC 5.1, channel_config 0 / PCE (layout inferred from element order)",
     ),
     (
         "al07_96",
-        Expect::KnownGap { max_lsb: 60_000.0 },
-        "LC 5.1 @ 96 kHz — parse errors",
+        Expect::KnownGap { max_lsb: 150.0 },
+        "LC 5.1 @ 96 kHz w/ CCE (dependent coupling applied) — parses fully, \
+         max ~80 LSB / rms ~1 LSB; last sliver is lossy-float rounding",
     ),
     (
         "am05_44",
-        Expect::KnownGap { max_lsb: 30_000.0 },
-        "LC multichannel — parse errors, TODO",
+        Expect::Rejected,
+        "AAC Main profile (5.1) — unsupported, rejected",
     ),
     (
         "al22_chCfg0PCE_44",
-        Expect::KnownGap { max_lsb: 20_000.0 },
-        "LC 7.1, channel_config 0 / PCE — parse errors",
+        Expect::Exact,
+        "LC 7.1-wide, channel_config 0 / PCE (config0_output_order)",
     ),
     (
         "al17_44",
         Expect::KnownGap { max_lsb: 15_000.0 },
-        "LC 2x SCE w/ mismatched PCE (ffmpeg also warns)",
+        "LC 2x SCE w/ mismatched PCE — ffmpeg warns 'ChannelElement 1.0 missing'; \
+         parses fully now, residual is the broken-PCE downmix ffmpeg applies",
     ),
     (
         "al15_44",
-        Expect::Rejected,
-        "SSR profile — gain_control_data unsupported",
+        Expect::KnownGap { max_lsb: 31_000.0 },
+        "LC 6-ch (FL FR FC LFE FLC FRC) + CCE — parses fully, independent \
+         coupling applied (per-channel corr ~1.0); residual is only the \
+         config-0 channel permutation (needs real PCE parsing — its element \
+         shape collides with standard-5.1 al06/al07)",
     ),
 ];
 

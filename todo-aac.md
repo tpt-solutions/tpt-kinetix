@@ -1638,3 +1638,190 @@
         paths have open gaps, and HE-AAC (SBR/PS), CCE coupling, 960-sample
         frames are unimplemented. Scratch ffmpeg build + patch under the session
         scratchpad, not committed.
+
+   — **2026-09-10 (continued): `al06_44` CLOSED — it was a channel-order bug,
+        not a reconstruction gap.** A per-channel cross-correlation of native vs
+        the ffmpeg reference (throwaway diagnostic, since removed) showed **every
+        one of the 3 output channels was already bit-exact** (corr 1.0000,
+        scale 1.0000) — just permuted: native emitted elements in stream order
+        (`SCE`=C, `CPE.L`, `CPE.R`) while ffmpeg emits `L, R, C`. `al06_44` is a
+        `channel_configuration == 0` stream (layout in a PCE the decoder skips),
+        so `output_channel_order` fell through to identity order. Fix
+        (`decoder.rs`): new `infer_channel_config` / `config_from_element_seq` —
+        when `channel_configuration == 0`, derive the effective config (1..=7)
+        from the decoded `SCE/CPE/LFE` element sequence against the ISO Table 4.5
+        default orders, then reuse the existing permutation table. `al06_44`
+        now **bit-exact** (22 494 → 0.0 LSB); `iso_conformance.rs` moves it to
+        `Expect::Exact`. `al07_96`'s pinned ceiling was bumped 60k→65k: it's a
+        partial decode (167 parse errors) and the now-correct channel
+        permutation just re-aligns which missing-frame gaps land where in the
+        interleave — cosmetic, still a real parse-error gap. Unit test added
+        (`config_from_element_seq`). Full `tpt-kinetix-aac` suite + clippy
+        `-D warnings` + fmt + `conformance_aac` (17 synthetic cases) all green.
+        `dbg_iso_probe.rs` per-frame error breakdown (`#[ignore]`) kept for the
+        rest.
+        - **`am00_88` (88.2 kHz, mono SCE): frames 0-16 (all `max_sfb==0`
+          silence) decode; frame 17 (first real content) + all after fail
+          `UnexpectedEof` in `decode_spectral_data`.** Traced frame 17
+          (`AAC_DBG_ICS` hook now in `syntax.rs::ChannelStream::parse` +
+          `dbg_al22_parse.rs::probe_frame`, `AAC_DBG_TARGET=am00_88:17`): `ics`
+          (OnlyLong, msf 31), `section_data`
+          (`[(11,2),(6,14),(4,5),(6,5),(4,2),(6,2),(1,1)]`, sum 31, ends bit 89,
+          no escapes) and the 31-entry scalefactor DPCM chain (ends bit 148) all
+          parse and match ffmpeg semantics; `pulse`/`tns`/`gain_control` bits 0
+          (bit 151). Then the spectral Huffman decode overruns the remaining 857
+          bits. Books 6/4/11-heavy; the 44.1/48 kHz synthetic corpus exercises
+          the same books bit-exact, so it's either a book-6 table entry those
+          streams never hit or genuinely 88.2 kHz-specific (`SWB_1024_96000`
+          re-verified byte-exact; `max_sfb 31` in range, `num_swb_1024(1)==41`).
+          Needs a patched-ffmpeg per-band spectral-coeff trace of this frame.
+          **Ruled out this pass:** `SPECTRAL_BOOKS[4]` and `[6]` (the two heavy
+          books here) diffed element-for-element (codes + lengths, all 81 each)
+          against ffmpeg `aactab.c` `codes4/bits4/codes6/bits6` — byte-identical.
+          Per-band spectral trace (`AAC_DBG_SPEC` hook in `dequant.rs`): the
+          decode walks all 31 bands with no single catastrophic jump — the bit
+          budget just gradually overruns (enters sfb 30, a 64-wide book-1 band,
+          with only 30 bits left). So it's a slow desync (a few bits per band
+          accumulating), or ffmpeg is genuinely tighter somewhere upstream —
+          either way the next step is a bit-position diff vs a patched ffmpeg,
+          band by band, starting from sfb 0.
+        - **`al17_44` (2× SCE + mismatched PCE): frames 0-6 OK, ~50% after fail
+          `UnexpectedEof`** in `ChannelStream::parse` (payloads a near-constant
+          371/372 B). ffmpeg also logs "ChannelElement 1.0 missing".
+        - **`am05_44` / `al07_96`: `Unsupported("gain_control_data (SSR)")`
+          false-positives** (94 / 45) plus `UnexpectedEof` — the SSR bit at
+          `syntax.rs:370` is misread, i.e. an upstream desync inside
+          `ChannelStream::parse`, same bug class as `am00`. `SWB_1024_96000` /
+          `SWB_128_96000` re-checked against ffmpeg `aactab.c` — byte-exact, not
+          the SWB table.
+        - **`al22_chCfg0PCE_44` (7.1): frames 0-3 OK, ~10% fail `UnexpectedEof`**
+          in `ChannelStream::parse` (same class as `am00`). Element order is
+          `SCE CPE CPE LFE CPE` (`[0,1,1,3,1]`) — not an ISO Table 4.5 default,
+          so even with parsing fixed `infer_channel_config` won't map it; needs a
+          bespoke permutation or real PCE parsing for bit-exactness.
+
+   — **2026-09-10 (continued): profiled the ISO gaps with the prebuilt
+        `ffmpeg` at `/e/FFMPEG/...` and split them into two categories.**
+        `ffmpeg -i` on each fixture reports the real object type:
+        - **`am00_88` and `am05_44` are AAC *Main* profile** (`aac (Main)`), not
+          LC — backward-adaptive prediction, unimplemented here. My earlier
+          "`am00` frame 17 spectral desync" trace was on a Main-profile stream
+          (the predictor bits etc.), so it was chasing a phantom. **Fix
+          (`decoder.rs`): reject `object_type != 2` (Main/SSR/LTP) up front**
+          with `AacParseError::Unsupported`, instead of mis-parsing `ics_info`'s
+          predictor data and surfacing a bogus `gain_control_data (SSR)` error
+          deep in the stream. `am00_88`/`am05_44` move to `Expect::Rejected` in
+          `iso_conformance.rs` and now reject cleanly (0 frames, all err) —
+          honest behaviour, same as SSR.
+        - **`al07_96`, `al15_44`, `al17_44`, `al22_chCfg0PCE_44` are genuine
+          AAC-LC that ffmpeg decodes with 0 errors** — real desync bugs in our
+          `ChannelStream::parse` on this content. `al15_44` is currently
+          mis-classified as `Expect::Rejected` "SSR" in the test — it's actually
+          LC (`FL FR FC LFE FLC FRC`, a non-standard 6-ch layout) that we
+          desync on; the test passes only because our wrong-path happens to
+          error. **All Huffman tables now ruled out**: `SPECTRAL_BOOKS[1,2,4,6,
+          10]` **and** `SCALEFACTOR_BOOK` diffed element-for-element (codes +
+          lengths) against ffmpeg `aactab.c` — every one byte-identical. ESC
+          (book 11) decode, sign ordering, and the pair/quad `bin += 4` loop all
+          re-checked against ffmpeg — correct. So the remaining LC desync is in
+          decode *logic* on a path the ffmpeg-*encoded* synthetic corpus never
+          exercises (large scalefactor deltas / deep ESC sequences / a
+          multi-element bit-accounting slip). Needs a patched-ffmpeg per-band
+          bit-position trace — `al17_44` frame 7 (2× mono SCE, no
+          stereo/CCE/PNS) is the cleanest repro; the 2nd SCE overruns.
+          Diagnostics: `dbg_al22_parse.rs` (`probe_frame`,
+          `AAC_DBG_TARGET=<name>:<frame>` + `AAC_DBG_ICS`/`AAC_DBG_SPEC`).
+
+   — **2026-09-10 (continued): built the patched ffmpeg, root-caused all three
+        remaining LC desyncs. `al22` + `al07` now decode; `al17` parses.**
+        Built ffmpeg n6.1.1 from source (mingw gcc, AAC-only config) with
+        per-element / per-band / per-`ics` `KTRACE` hooks (patch under the
+        session scratchpad). Diffing its bit positions against ours on `al17`
+        frame 7 (== ffmpeg trace group 8 — ffmpeg re-decodes the first frame
+        once during `find_stream_info`, so its groups are +1) showed **the
+        entire spectral decode of both SCEs is already bit-exact vs ffmpeg** —
+        every band's bit offset matched to the bit. The desync was *after*
+        spectral decode:
+        1. **Zero-count `FIL` element (`syntax.rs`).** ffmpeg's
+           `while (elem_id > 0)` loop body never runs when the 4-bit fill count
+           is 0, so it does **not** read the 4-bit extension type. Our parser
+           read it (+ a `saturating_sub`-clamped skip) unconditionally,
+           consuming 4 phantom bits and pushing the terminating `END` out of
+           phase. Real multi-`FIL` trailers (`FIL(len) FIL(0)`) then desynced at
+           end-of-frame. Fixed: skip the extension-type read entirely when
+           `fill_len == 0`. → **`al17_44` and `al22_chCfg0PCE_44` now parse
+           every frame (0 errors)**, `al07_96` 617→? frames.
+        2. **CCE parser was pure fiction (`syntax.rs` `2 =>` arm).** The old
+           code bore no relation to §4.4.4.3 `coupling_channel_element()` syntax
+           and desynced on every real CCE. Replaced with a faithful bit-for-bit
+           port of ffmpeg's `decode_cce` reads — including the coupling
+           channel's own `individual_channel_stream()` (`ChannelStream::parse`)
+           and the per-`num_gain` / per-band `cge`-gated scalefactor-Huffman
+           gain reads. Coupling is still **not applied** (Pass 2 stub), only
+           consumed. → **`al07_96` (LC 5.1 @ 96 kHz + CCE) now decodes all
+           780 frames, max 192 LSB / rms 4.6 LSB** — near-exact; the residual is
+           exactly the un-applied CCE coupling gain.
+        3. **`al22` 7.1-wide channel order.** Element seq `SCE CPE CPE LFE CPE`
+           (`[0,1,1,3,1]`) isn't an ISO Table 4.5 default. Added
+           `config0_output_order` (a small `elements → permutation` table for
+           config-0 PCE layouts we know); the `[0,1,1,3,1]` entry
+           `[6,7,0,5,3,4,1,2]` was verified channel-by-channel bit-exact vs
+           ffmpeg. → **`al22_chCfg0PCE_44` bit-exact** (`Expect::Exact`).
+        4. **CCE `AFTER_IMDCT` constant was 2, must be 3.** ffmpeg's
+           `enum CouplingPoint` is `BEFORE_TNS=0, BETWEEN_TNS_AND_IMDCT=1,
+           AFTER_IMDCT=3` — and `coupling_point` *always* lands on 3 when
+           `ind_sw_cce_flag` is set (`2 + (x || 1)`). With the wrong `== 2`
+           check my CCE port read a spurious `cge` bit + ran the per-band gain
+           loop for every independently-switched CCE, over-consuming ~10 bits →
+           the next element misread as another CCE. Fixed → **`al15_44` (LC
+           6-ch + CCE) now parses all 130 frames** (was rejected; it is LC, not
+           SSR — the old test label was wrong).
+        **ISO suite now:** al04/05/06/18/**22** bit-exact; **al07_96 / al17_44 /
+        al15_44 all parse every frame with 0 errors** (were 617/780, 179/323,
+        0/130). Remaining residuals, all non-desync:
+        - `al07_96` max 192 LSB, `al15_44` max ~33k LSB, scale 1.0 / corr ~0.8
+          per channel — both are the **un-applied CCE coupling gain**
+          (`decoder.rs` Pass 2 is still a stub). Applying it (port ffmpeg's
+          `apply_dependent_coupling` / `apply_independent_coupling`) is the one
+          remaining real feature and would make both bit-exact.
+        - `al17_44` rms 1683 LSB, corr ~0.55 — the broken-PCE downmix ffmpeg
+          applies for a stream it itself warns about ("ChannelElement 1.0
+          missing"). Genuine edge case, low priority.
+        am00/am05 (Main profile) cleanly rejected. `dbg_al17_localize.rs`
+        confirms `al22` was pure permutation (all channels corr 1.0).
+        Full `tpt-kinetix-aac` suite (13 bins) + clippy `-D warnings` + fmt +
+        `conformance_aac` (17 synthetic) + `pipeline --no-default-features` all
+        green.
+
+   — **2026-09-11: CCE coupling is now *applied*, not just parsed.** Traced the
+        `al07`/`al15` CCE `coup` structs with a `decode_cce` `KTRACE` (gains,
+        targets, `coupling_point`): `al07` uses **dependent** coupling
+        (`coupling_point 0`, spectral domain), `al15` uses **independent**
+        (`3` = AFTER_IMDCT, time domain). Implemented both (`decoder.rs`):
+        - `CouplingChannelElement` rewritten to carry the resolved data:
+          `coupling_point`, `coupled: [CoupledTarget]`, `gains[gain_index]`
+          (single value for independent, per-`(group,sfb)` for dependent) and
+          the coupling channel's own `ChannelStream`. Gains computed in the
+          parser as `cce_scale[scale_bits].powi(-gain)` with the dependent-path
+          sign/`t>>=1` handling — verbatim ffmpeg `decode_cce`.
+        - `resolve_coupled_planes` walks the same `index++` accounting as
+          ffmpeg's `apply_channel_coupling` (SCE `ch_select` 2, CPE 0/1/3) to
+          map `coupled[]` → `(gain_index, output_plane)`.
+        - Dependent: `apply_dependent_coupling` adds
+          `gain[band] * cc_coeff` into each target's spectrum, once before TNS
+          (point 0) and once after (point 1), matching `spectral_to_sample`.
+        - Independent: a new per-CCE overlap-add state (`cce_channels`); the
+          coupling channel is run through the filterbank and
+          `target_pcm[i] += gain * cc_pcm[i]`.
+        **Results:** `al07_96` **192 → 80 LSB / rms 1** (dependent coupling —
+        now just lossy-float rounding). `al15_44` independent coupling makes
+        **5/6 channels corr ~1.0** (was ~0.8) — its *only* remaining error is
+        the config-0 channel permutation, which can't be fixed heuristically:
+        `al15`'s `SCE CPE CPE LFE` element shape is identical to the
+        standard-5.1 `al06`/`al07`, and only the PCE (which places `al15`'s 2nd
+        CPE at FLC/FRC, not the surrounds) distinguishes them. **Real fix =
+        parse `program_config_element`** and derive the output order from its
+        front/side/back/lfe channel maps (then `infer_channel_config` +
+        `config0_output_order` both retire). That also nails `al15`.
+        Suite/clippy/fmt/pipeline all still green; synthetic `conformance_aac`
+        (surround_51/71, no CCE) unaffected.

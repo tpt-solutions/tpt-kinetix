@@ -37,6 +37,7 @@ struct DecodedChannel {
     #[allow(dead_code)]
     tns: Option<crate::tns::TnsData>,
     is_cce: bool, // true if this is a coupling channel (not output directly)
+    is_lfe: bool, // true for an LFE element (distinguishes it from a plain SCE)
     #[allow(dead_code)]
     cpe_pair: Option<(usize, usize)>, // (left_idx, right_idx) if part of CPE
 }
@@ -116,6 +117,9 @@ pub struct AacDecoder {
     imdct_short: Imdct,
     windows: Windows,
     channels: Vec<ChannelState>,
+    /// Per-CCE overlap-add state, for the independent (after-IMDCT) coupling
+    /// point where the coupling channel is itself run through the filterbank.
+    cce_channels: Vec<ChannelState>,
     sample_rate: u32,
     sf_index: usize,
     frame_no: u64,
@@ -138,6 +142,7 @@ impl AacDecoder {
             imdct_short: Imdct::new(128),
             windows: Windows::new(),
             channels: Vec::new(),
+            cce_channels: Vec::new(),
             sample_rate: 0,
             sf_index: 4,
             frame_no: 0,
@@ -162,6 +167,39 @@ impl AacDecoder {
     /// Decode one ADTS frame, returning one 1024-sample-per-channel PCM frame.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<AudioFrame>, AacError> {
         let hdr = AdtsHeader::parse(&packet.data)?;
+
+        // This is an AAC-**LC** decoder. Reject other MPEG-4 audio object types
+        // up front rather than desyncing on their extra syntax: AAC Main
+        // (`object_type == 1`) adds backward-adaptive prediction, SSR
+        // (`object_type == 3`) adds gain control, LTP (`4`) adds long-term
+        // prediction — none are implemented. Without this check a Main-profile
+        // stream mis-parses `ics_info()`'s predictor data and surfaces as a
+        // spurious `gain_control_data (SSR)` error or silent garbage further in.
+        // (The ISO conformance `am00`/`am05` vectors are Main profile.)
+        match hdr.object_type {
+            2 => {}
+            1 => {
+                return Err(AacError::Parse(AacParseError::Unsupported(
+                    "AAC Main profile",
+                )))
+            }
+            3 => {
+                return Err(AacError::Parse(AacParseError::Unsupported(
+                    "AAC SSR profile",
+                )))
+            }
+            4 => {
+                return Err(AacError::Parse(AacParseError::Unsupported(
+                    "AAC LTP profile",
+                )))
+            }
+            _ => {
+                return Err(AacError::Parse(AacParseError::Unsupported(
+                    "non-AAC-LC audio object type",
+                )))
+            }
+        }
+
         let frame_no = self.frame_no;
         self.frame_no += 1;
 
@@ -196,7 +234,7 @@ impl AacDecoder {
         // --- Pass 1: Collect all decoded channels ---
         let mut decoded_channels: Vec<DecodedChannel> = Vec::new();
         let mut decoded_cpes: Vec<DecodedCpe> = Vec::new();
-        let mut cce_elements: Vec<CouplingChannelElement> = Vec::new();
+        let mut cce_elements: Vec<(CouplingChannelElement, [f32; 1024])> = Vec::new();
 
         if std::env::var("AAC_DBG_GG").is_ok() {
             for el in &block.elements {
@@ -241,6 +279,7 @@ impl AacDecoder {
                         pulse: sce.stream.pulse.clone(),
                         tns: sce.stream.tns.clone(),
                         is_cce: false,
+                        is_lfe: false,
                         cpe_pair: None,
                     });
                 }
@@ -286,6 +325,7 @@ impl AacDecoder {
                         pulse: cpe.left.pulse.clone(),
                         tns: cpe.left.tns.clone(),
                         is_cce: false,
+                        is_lfe: false,
                         cpe_pair: Some((left_idx, right_idx)),
                     });
                     decoded_channels.push(DecodedChannel {
@@ -298,6 +338,7 @@ impl AacDecoder {
                         pulse: cpe.right.pulse.clone(),
                         tns: cpe.right.tns.clone(),
                         is_cce: false,
+                        is_lfe: false,
                         cpe_pair: Some((left_idx, right_idx)),
                     });
                     decoded_cpes.push(DecodedCpe {
@@ -310,7 +351,15 @@ impl AacDecoder {
                     });
                 }
                 Element::Cce(cce) => {
-                    cce_elements.push(cce.clone());
+                    // Decode the coupling channel's own spectrum now (Pass 1);
+                    // it is mixed into the target channels in Pass 2 / Pass 5.
+                    let cc_coeffs = Self::decode_channel_stream(
+                        &cce.cc_stream,
+                        self.sf_index,
+                        self.frame_no,
+                        &mut self.pns_rng,
+                    )?;
+                    cce_elements.push((cce.clone(), cc_coeffs));
                 }
                 Element::Lfe(lfe) => {
                     let ch = Self::decode_channel_stream(
@@ -329,30 +378,13 @@ impl AacDecoder {
                         pulse: lfe.stream.pulse.clone(),
                         tns: lfe.stream.tns.clone(),
                         is_cce: false,
+                        is_lfe: true,
                         cpe_pair: None,
                     });
                 }
                 Element::Fil(_) | Element::End => {}
             }
         }
-
-        // --- Pass 2: Apply CCE coupling ---
-        // Build a map from instance_tag to decoded_channels index.
-        let mut tag_to_idx: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
-        for (idx, ch) in decoded_channels.iter().enumerate() {
-            if !ch.is_cce {
-                tag_to_idx.insert(ch.instance_tag, idx);
-            }
-        }
-
-        // Pass 2: Apply CCE coupling (placeholder - full implementation TODO).
-        // The CCE element contains gain elements that describe how to mix a coupling
-        // channel into target channels, but the coupling channel's own spectral data
-        // is carried in a separate SCE/CPE that shares the same instance_tag.
-        // For now, we just acknowledge the CCE exists; full coupling requires:
-        // 1. Finding the coupling channel by instance_tag in decoded_channels
-        // 2. Applying gain_element_lists to mix into target channels
-        // TODO: Implement full CCE coupling logic.
 
         // --- Pass 3: Apply stereo (M/S, intensity) for CPEs ---
         for cpe in &decoded_cpes {
@@ -406,6 +438,9 @@ impl AacDecoder {
             }
         }
 
+        // --- dependent CCE coupling, spectral domain, BEFORE_TNS ---
+        self.apply_dependent_coupling_point(0, &cce_elements, &mut decoded_channels);
+
         // --- Pass 3.5: Apply TNS (per channel, after joint-stereo) ---
         // ISO/IEC 14496-3 §4.6.9 / ffmpeg `spectral_to_sample`: the TNS all-pole
         // filter runs on the *post-butterfly* spectrum, i.e. after M/S and
@@ -428,6 +463,9 @@ impl AacDecoder {
                 apply_tns(&tns, &ch.ics, &mut ch.coeffs, swb);
             }
         }
+
+        // --- dependent CCE coupling, spectral domain, BETWEEN_TNS_AND_IMDCT ---
+        self.apply_dependent_coupling_point(1, &cce_elements, &mut decoded_channels);
 
         // --- Pass 4: IMDCT + windowing + overlap-add ---
         // Collect output channels in order (non-CCE channels only).
@@ -551,6 +589,56 @@ impl AacDecoder {
             pcm_planes.push(out_buf.to_vec());
         }
 
+        // --- Pass 5: independent CCE coupling (coupling_point 3, time domain) ---
+        // ffmpeg `apply_independent_coupling`: the coupling channel is run
+        // through its own filterbank (with its own overlap state), then
+        // `target_pcm[i] += gain * cc_pcm[i]` for each coupled target channel.
+        if cce_elements.iter().any(|(c, _)| c.coupling_point == 3) {
+            while self.cce_channels.len() < cce_elements.len() {
+                self.cce_channels.push(ChannelState::default());
+            }
+            for (cce_i, (cce, cc_coeffs)) in cce_elements.iter().enumerate() {
+                if cce.coupling_point != 3 {
+                    continue;
+                }
+                let mut cc_pcm = synthesize(
+                    &self.imdct_long,
+                    &self.imdct_short,
+                    &self.windows,
+                    &mut self.cce_channels[cce_i],
+                    &cce.cc_stream.ics,
+                    cc_coeffs,
+                );
+                for s in &mut cc_pcm {
+                    *s /= 32768.0;
+                }
+                let targets = resolve_coupled_planes(&cce.coupled, &decoded_channels);
+                if std::env::var_os("AAC_DBG_CCE").is_some() && frame_no < 6 {
+                    let ccmax = cc_pcm.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+                    eprintln!(
+                        "DBG cce f{frame_no} point3 seq={:?} cc_pcm_max={ccmax:.5} targets={targets:?} gains={:?}",
+                        cce.cc_stream.ics.window_sequence,
+                        cce.gains
+                    );
+                }
+                for (gain_index, plane_idx) in targets {
+                    let gain = cce
+                        .gains
+                        .get(gain_index)
+                        .and_then(|v| v.first())
+                        .copied()
+                        .unwrap_or(0.0);
+                    if gain == 0.0 {
+                        continue;
+                    }
+                    let plane = &mut pcm_planes[plane_idx];
+                    for (p, &c) in plane.iter_mut().zip(cc_pcm.iter()) {
+                        *p += gain * c;
+                    }
+                }
+            }
+        }
+
         if pcm_planes.is_empty() {
             return Ok(None);
         }
@@ -560,7 +648,19 @@ impl AacDecoder {
         // configurations. `output_slot_to_element[k]` is the element-order plane
         // index that belongs in output slot `k`.
         let ch_count = pcm_planes.len();
-        let order = output_channel_order(hdr.channel_configuration, ch_count);
+        // `channel_configuration == 0` means the layout is carried by a
+        // `program_config_element` this decoder skips rather than parses. For the
+        // streams ffmpeg's own encoder and the ISO conformance `al*` set produce,
+        // the PCE just restates one of the standard default layouts, so infer the
+        // effective configuration from the decoded element sequence
+        // (SCE/CPE/LFE pattern) and reuse the same permutation table.
+        let order = if hdr.channel_configuration == 0 {
+            config0_output_order(&block.elements, ch_count).unwrap_or_else(|| {
+                output_channel_order(infer_channel_config(&block.elements), ch_count)
+            })
+        } else {
+            output_channel_order(hdr.channel_configuration, ch_count)
+        };
         let pcm_planes: Vec<&Vec<f32>> = order.iter().map(|&e| &pcm_planes[e]).collect();
 
         // Interleave channels.
@@ -597,6 +697,44 @@ impl AacDecoder {
             channels: ch_count as u8,
             sample_format: SampleFormat::F32,
         }))
+    }
+
+    /// Apply every CCE whose `coupling_point` matches `point` (0 = before TNS,
+    /// 1 = between TNS and IMDCT) into the target channels' spectra.
+    fn apply_dependent_coupling_point(
+        &self,
+        point: u8,
+        cces: &[(CouplingChannelElement, [f32; 1024])],
+        decoded_channels: &mut [DecodedChannel],
+    ) {
+        for (cce, cc_coeffs) in cces {
+            if cce.coupling_point != point {
+                continue;
+            }
+            let swb = if cce.cc_stream.ics.window_sequence.is_eight_short() {
+                SWB_OFFSET_128[self.sf_index]
+            } else {
+                SWB_OFFSET_1024[self.sf_index]
+            };
+            let bt = crate::dequant::expand_band_types(&cce.cc_stream.sections, &cce.cc_stream.ics);
+            for (gain_index, ch_idx) in resolve_coupled_planes(&cce.coupled, decoded_channels) {
+                // A CCE always follows its targets in the bitstream, so the
+                // non-CCE plane index `resolve_coupled_planes` returns equals the
+                // `decoded_channels` index here.
+                let Some(gains) = cce.gains.get(gain_index) else {
+                    continue;
+                };
+                let src = *cc_coeffs;
+                apply_dependent_coupling(
+                    &mut decoded_channels[ch_idx].coeffs,
+                    &src,
+                    &cce.cc_stream.ics,
+                    &bt,
+                    swb,
+                    gains,
+                );
+            }
+        }
     }
 
     /// Decode a single ChannelStream to frequency-domain coefficients.
@@ -688,6 +826,79 @@ impl AacDecoder {
 /// channel layout. Config 0 (layout defined by a `program_config_element`, which
 /// this decoder does not yet parse) and any element count that does not match
 /// the configuration fall back to identity order.
+/// Infer the effective `channel_configuration` (1..=7) from the decoded element
+/// sequence, for `channel_configuration == 0` (PCE-defined) streams. Returns the
+/// standard default-layout config whose element order matches, or `0` when the
+/// sequence is not one of the defaults (leaving the caller on identity order).
+///
+/// The default element orders (ISO/IEC 14496-3 Table 4.5) are:
+/// `1: SCE`, `2: CPE`, `3: SCE CPE`, `4: SCE CPE SCE`, `5: SCE CPE CPE`,
+/// `6: SCE CPE CPE LFE`, `7: SCE CPE CPE CPE LFE`.
+fn infer_channel_config(elements: &[Element]) -> u8 {
+    // 0 = SCE, 1 = CPE, 3 = LFE (matching `id_syn_ele`); CCE/FIL/DSE/PCE/END
+    // carry no output channel and don't affect channel order.
+    let seq: Vec<u8> = elements
+        .iter()
+        .filter_map(|el| match el {
+            Element::Sce(_) => Some(0),
+            Element::Cpe(_) => Some(1),
+            Element::Lfe(_) => Some(3),
+            _ => None,
+        })
+        .collect();
+    config_from_element_seq(&seq)
+}
+
+/// `channel_configuration == 0` output permutation for element sequences that
+/// aren't a standard default order but whose PCE-defined layout is known.
+/// Returns `order` such that `order[k]` is the element-order plane for output
+/// slot `k` (WAV/SMPTE order, matching ffmpeg's decode of the same stream).
+///
+/// Element markers: `0` SCE, `1` CPE (two planes), `3` LFE.
+///
+/// This is a small table of PCE layouts seen in the ISO conformance set; the
+/// principled fix is to parse the `program_config_element` and derive the order
+/// from its front/side/back/lfe channel maps (then `infer_channel_config` and
+/// this function both go away — and `al15`, whose `SCE CPE CPE LFE` shape is
+/// shared with the standard-5.1 `al06`/`al07` but whose PCE places the second
+/// CPE at FLC/FRC rather than the surrounds, would then decode bit-exact too).
+fn config0_output_order(elements: &[Element], n_channels: usize) -> Option<Vec<usize>> {
+    let seq: Vec<u8> = elements
+        .iter()
+        .filter_map(|el| match el {
+            Element::Sce(_) => Some(0),
+            Element::Cpe(_) => Some(1),
+            Element::Lfe(_) => Some(3),
+            _ => None,
+        })
+        .collect();
+    let perm: &[usize] = match seq.as_slice() {
+        // ISO `al22` 7.1-wide vector: SCE(C) CPE(a) CPE(b) LFE CPE(c). Decoded
+        // planes: 0=C, 1,2=a, 3,4=b, 5=LFE, 6,7=c. ffmpeg emits
+        // c_L, c_R, C, LFE, b_L, b_R, a_L, a_R (front pair is the *last* CPE;
+        // verified channel-by-channel bit-exact vs ffmpeg's own decode).
+        [0, 1, 1, 3, 1] => &[6, 7, 0, 5, 3, 4, 1, 2],
+        _ => return None,
+    };
+    (perm.len() == n_channels).then(|| perm.to_vec())
+}
+
+/// The `channel_configuration` whose default element order (ISO/IEC 14496-3
+/// Table 4.5) is `seq` (`0` SCE, `1` CPE, `3` LFE), or `0` if `seq` is not a
+/// standard default order.
+fn config_from_element_seq(seq: &[u8]) -> u8 {
+    match seq {
+        [0] => 1,
+        [1] => 2,
+        [0, 1] => 3,
+        [0, 1, 0] => 4,
+        [0, 1, 1] => 5,
+        [0, 1, 1, 3] => 6,
+        [0, 1, 1, 1, 3] => 7,
+        _ => 0,
+    }
+}
+
 fn output_channel_order(channel_configuration: u8, n_channels: usize) -> Vec<usize> {
     let perm: &[usize] = match (channel_configuration, n_channels) {
         (1, 1) => &[0],
@@ -726,6 +937,104 @@ fn elem_stream(el: &Element) -> &ChannelStream {
 
 /// Run the filterbank (IMDCT + window + overlap-add) for one channel.
 #[allow(dead_code)]
+/// Resolve a CCE's `coupled_elements` list to `(gain_index, output_plane_index)`
+/// pairs, walking the same `index` accounting as ffmpeg's `apply_channel_coupling`.
+/// `output_plane_index` counts only the non-CCE channels, in element order —
+/// matching `pcm_planes` / `output_channels`.
+fn resolve_coupled_planes(
+    coupled: &[crate::syntax::CoupledTarget],
+    decoded_channels: &[DecodedChannel],
+) -> Vec<(usize, usize)> {
+    // Map (is_cpe, instance_tag) -> the plane index/indices in non-CCE order.
+    let plane_of = |is_cpe: bool, tag: u8| -> Option<(usize, Option<usize>)> {
+        let mut k = 0usize;
+        let mut first: Option<usize> = None;
+        for ch in decoded_channels {
+            if ch.is_cce {
+                continue;
+            }
+            let is_this_cpe = ch.cpe_pair.is_some();
+            let matches = ch.instance_tag == tag && is_this_cpe == is_cpe && (is_cpe || !ch.is_lfe);
+            if matches {
+                match first {
+                    None if is_cpe => first = Some(k),
+                    None => return Some((k, None)),
+                    Some(f) => return Some((f, Some(k))),
+                }
+            }
+            k += 1;
+        }
+        first.map(|f| (f, None))
+    };
+
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    for ct in coupled {
+        let planes = plane_of(ct.is_cpe, ct.id_select);
+        let (l, r) = match planes {
+            Some((l, r)) => (Some(l), r),
+            None => (None, None),
+        };
+        // ffmpeg: if ch_select != 1 -> ch[0] @ index (index++ if ch_select != 0);
+        //         if ch_select != 2 -> ch[1] @ index++.
+        if ct.ch_select != 1 {
+            if let Some(l) = l {
+                out.push((index, l));
+            }
+            if ct.ch_select != 0 {
+                index += 1;
+            }
+        }
+        if ct.ch_select != 2 {
+            if let Some(r) = r {
+                out.push((index, r));
+            }
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Add `gain[band] * cc_coeff` into `dest` for every non-zero band of the
+/// coupling channel (ffmpeg `apply_dependent_coupling`, §4.6.18.4).
+fn apply_dependent_coupling(
+    dest: &mut [f32; 1024],
+    src: &[f32; 1024],
+    ics: &IcsInfo,
+    band_type: &[u8],
+    swb: &[u16],
+    gains: &[f32],
+) {
+    let ngroups = ics.num_window_groups();
+    let msfb = ics.max_sfb as usize;
+    let mut base = 0usize;
+    let mut idx = 0usize;
+    for g in 0..ngroups {
+        let glen = ics.group_len(g);
+        for sfb in 0..msfb {
+            if sfb + 1 >= swb.len() {
+                idx += 1;
+                continue;
+            }
+            if band_type.get(idx).copied().unwrap_or(0) != 0 {
+                let gain = gains.get(idx).copied().unwrap_or(0.0);
+                if gain != 0.0 {
+                    for group in 0..glen {
+                        for k in swb[sfb] as usize..swb[sfb + 1] as usize {
+                            let o = base + group * 128 + k;
+                            if o < 1024 {
+                                dest[o] += gain * src[o];
+                            }
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+        base += glen * 128;
+    }
+}
+
 fn synthesize(
     imdct_long: &Imdct,
     imdct_short: &Imdct,
@@ -869,7 +1178,22 @@ fn short_synthesis(
 
 #[cfg(test)]
 mod order_tests {
-    use super::output_channel_order;
+    use super::{config_from_element_seq, output_channel_order};
+
+    #[test]
+    fn infers_default_config_from_element_order() {
+        // 0 = SCE, 1 = CPE, 3 = LFE.
+        assert_eq!(config_from_element_seq(&[0]), 1);
+        assert_eq!(config_from_element_seq(&[1]), 2);
+        assert_eq!(config_from_element_seq(&[0, 1]), 3);
+        assert_eq!(config_from_element_seq(&[0, 1, 0]), 4);
+        assert_eq!(config_from_element_seq(&[0, 1, 1]), 5);
+        assert_eq!(config_from_element_seq(&[0, 1, 1, 3]), 6);
+        assert_eq!(config_from_element_seq(&[0, 1, 1, 1, 3]), 7);
+        // Not a standard default order → 0 (caller stays on identity).
+        assert_eq!(config_from_element_seq(&[0, 0]), 0);
+        assert_eq!(config_from_element_seq(&[1, 1]), 0);
+    }
 
     #[test]
     fn default_layouts_reorder_to_wav_order() {

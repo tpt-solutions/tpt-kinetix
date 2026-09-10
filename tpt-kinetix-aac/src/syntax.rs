@@ -14,6 +14,7 @@
 //! This keeps the surface honest and panic-free on untrusted input.
 
 use crate::bitreader::BitReader;
+use crate::codebooks::decode_scalefactor;
 use crate::dequant::{decode_spectral_data, expand_band_types};
 use crate::pulse::{parse_pulse, PulseData};
 use crate::scalefactors::decode_scalefactors;
@@ -328,16 +329,47 @@ impl ChannelStream {
         shared_ics: Option<&IcsInfo>,
         sf_index: usize,
     ) -> Result<Self, AacParseError> {
+        let dbg = std::env::var_os("AAC_DBG_ICS").is_some();
         let global_gain = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as u8;
         let ics = match shared_ics {
             Some(shared) => *shared,
             None => IcsInfo::parse(reader)?,
         };
+        if dbg {
+            eprintln!(
+                "  ICS gg={global_gain} seq={:?} msf={} grouping={} pred={} @bit {} rem {}",
+                ics.window_sequence,
+                ics.max_sfb,
+                ics.scale_factor_grouping,
+                ics.predictor_data_present,
+                reader.bit_position(),
+                reader.remaining_bits()
+            );
+        }
         let sections = SectionData::parse(reader, &ics)?;
+        if dbg {
+            let sects: Vec<(u8, u32)> = sections
+                .groups
+                .iter()
+                .flat_map(|g| g.iter().map(|s| (s.sect_cb, s.sect_len)))
+                .collect();
+            eprintln!(
+                "  sections {sects:?} @bit {} rem {}",
+                reader.bit_position(),
+                reader.remaining_bits()
+            );
+        }
 
         let band_type = expand_band_types(&sections, &ics);
         let scalefactor =
             decode_scalefactors(reader, &ics, &sections, &band_type, global_gain as i32)?;
+        if dbg {
+            eprintln!(
+                "  scalefactors {scalefactor:?} @bit {} rem {}",
+                reader.bit_position(),
+                reader.remaining_bits()
+            );
+        }
 
         let pulse = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
         let pulse = if pulse {
@@ -370,6 +402,15 @@ impl ChannelStream {
             return Err(AacParseError::Unsupported("gain_control_data (SSR)"));
         }
 
+        if dbg {
+            eprintln!(
+                "  pre-spectral pulse={} tns={} @bit {} rem {}",
+                pulse.is_some(),
+                tns.is_some(),
+                reader.bit_position(),
+                reader.remaining_bits()
+            );
+        }
         let swb_long = SWB_OFFSET_1024[sf_index];
         let swb_short = SWB_OFFSET_128[sf_index];
         let coeffs = decode_spectral_data(
@@ -442,44 +483,49 @@ pub struct FillElement {
     pub payload: Vec<u8>,
 }
 
-/// Coupling Channel Element (id 2, ISO 14496-3 §4.4.4.3).
+/// One channel/element a CCE couples into (`coupled_elements` loop, §4.4.4.3).
+#[derive(Debug, Clone, Copy)]
+pub struct CoupledTarget {
+    /// `cc_target_is_cpe` — target is a CPE (`true`) or SCE (`false`).
+    pub is_cpe: bool,
+    /// `cc_target_tag_select` — the target element's `element_instance_tag`.
+    pub id_select: u8,
+    /// `cc_lr` for a CPE target: 0 = left only, 1 = right only, 3 = both.
+    /// SCE targets are always recorded as 2 (mono → "ch[0] only").
+    pub ch_select: u8,
+}
+
+/// Coupling Channel Element (id 2, ISO 14496-3 §4.4.4.3), fully decoded.
+///
+/// Carries everything needed to *apply* the coupling: the coupling channel's own
+/// decoded spectrum ([`cc_stream`](Self::cc_stream)), the resolved per-gain-index
+/// gain values, and which target channels each gain index maps onto. Gains for
+/// the "after IMDCT" (independent) coupling point are a single value per index;
+/// for the spectral-domain (dependent) points they are one value per
+/// `(window_group, sfb)` of the coupling channel.
 #[derive(Debug, Clone)]
 pub struct CouplingChannelElement {
     /// `element_instance_tag` (4 bits).
     pub instance_tag: u8,
-    /// `common_window` flag (1 bit).
-    pub common_window: bool,
-    /// Shared `ics_info()` when `common_window` is set.
-    pub ics: Option<IcsInfo>,
-    /// Number of gain element lists.
-    pub num_gain_element_lists: u8,
-    /// Gain element lists for each target channel.
-    pub gain_element_lists: Vec<GainElementList>,
+    /// ffmpeg `CouplingPoint`: 0 = before TNS, 1 = between TNS and IMDCT,
+    /// 3 = after IMDCT (independent, time domain).
+    pub coupling_point: u8,
+    /// Targets in `coupled_elements` order.
+    pub coupled: Vec<CoupledTarget>,
+    /// `gains[gain_index]`: `[single]` when `coupling_point == 3`, otherwise one
+    /// entry per `(group * max_sfb + sfb)` of `cc_stream`.
+    pub gains: Vec<Vec<f32>>,
+    /// The coupling channel's own `individual_channel_stream()`.
+    pub cc_stream: Box<ChannelStream>,
 }
 
-/// Gain element list for CCE coupling.
-#[derive(Debug, Clone)]
-pub struct GainElementList {
-    /// `gain_element_scale` (1 bit).
-    pub gain_element_scale: bool,
-    /// Number of gain elements.
-    pub num_gain_elements: u8,
-    /// The gain elements.
-    pub gain_elements: Vec<GainElement>,
-}
-
-/// Individual gain element for CCE coupling.
-#[derive(Debug, Clone)]
-pub struct GainElement {
-    /// `cce_gain` (3 bits).
-    pub cce_gain: u8,
-    /// `cce_scale` (4 bits).
-    pub cce_scale: u8,
-    /// Target channel tag.
-    pub target_tag: u8,
-    /// `gain_element_index` (4 bits) - index into gain_element_lists.
-    pub gain_element_index: u8,
-}
+/// The four `cce_scale` bases (ISO 14496-3 §4.6.18.2 / ffmpeg `cce_scale`).
+const CCE_SCALE: [f32; 4] = [
+    1.090_507_7, // 2^(1/8)
+    1.189_207_1, // 2^(1/4)
+    std::f32::consts::SQRT_2,
+    2.0,
+];
 
 /// A parsed AAC syntactic element.
 #[derive(Debug, Clone)]
@@ -619,6 +665,13 @@ impl RawDataBlock {
                 None => break,
             };
             _element_count += 1;
+            if std::env::var_os("AAC_DBG_ICS").is_some() {
+                eprintln!(
+                    "  [rdb] element id={id} @bit {} rem {}",
+                    reader.bit_position(),
+                    reader.remaining_bits()
+                );
+            }
             match id {
                 0 => {
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
@@ -693,10 +746,21 @@ impl RawDataBlock {
                         let esc = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
                         fill_len = 14usize.saturating_add(esc);
                     }
-                    // extension type (4 bits); AAC-LC only carries EXT_FILL here.
-                    reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-                    let fill_bits = fill_len.saturating_mul(8).saturating_sub(4);
-                    reader.skip(fill_bits as u32);
+                    // A zero-count fill element is just its `TYPE_FIL(3) +
+                    // count(4)` header — no extension payload at all. ffmpeg's
+                    // `while (elem_id > 0)` loop body never runs, so the 4-bit
+                    // `extension type` is *not* read. Reading it unconditionally
+                    // (the earlier behaviour) consumed 4 phantom bits and pushed
+                    // every following element — including the terminating `END` —
+                    // 4 bits out of phase, which is why real multi-`FIL` frames
+                    // (e.g. the ISO `al17` vector's trailing `FIL(len) FIL(0)`)
+                    // desynced right at end-of-frame.
+                    if fill_len > 0 {
+                        // extension type (4 bits); AAC-LC only carries EXT_FILL.
+                        reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
+                        let fill_bits = fill_len.saturating_mul(8).saturating_sub(4);
+                        reader.skip(fill_bits as u32);
+                    }
                     elements.push(Element::Fil(FillElement {
                         instance_tag: 0,
                         payload: Vec::new(),
@@ -707,77 +771,105 @@ impl RawDataBlock {
                     break;
                 }
                 2 => {
+                    // Coupling Channel Element (§4.4.4.3). Faithful bit-for-bit
+                    // port of ffmpeg's `decode_cce`, including the resolved gain
+                    // values so `decoder.rs` can actually apply the coupling.
+                    // (The earlier ad-hoc parser here bore no relation to the
+                    // spec syntax and desynced on every real CCE.)
+                    // ffmpeg's `enum CouplingPoint`: BEFORE_TNS=0,
+                    // BETWEEN_TNS_AND_IMDCT=1, AFTER_IMDCT=3 (note: *3*, not 2 —
+                    // `coupling_point` becomes 3 whenever `ind_sw_cce_flag` is
+                    // set, since `2 + (x || 1) == 3`).
+                    const AFTER_IMDCT: i32 = 3;
                     let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                    let common_window = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
-                    let shared = if common_window {
-                        Some(IcsInfo::parse(&mut reader)?)
-                    } else {
-                        None
-                    };
-                    let num_gain_element_lists =
-                        reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                    let mut gain_element_lists =
-                        Vec::with_capacity((num_gain_element_lists + 1) as usize);
-                    let mut cce_truncated = false;
-                    for _list_idx in 0..=num_gain_element_lists {
-                        let gain_element_scale =
-                            reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
-                        let num_gain_elements =
+                    let ind_sw = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+                    let mut coupling_point = 2i32 * ind_sw as i32;
+                    let num_coupled = reader.read_bits(3).ok_or(AacParseError::UnexpectedEof)?;
+                    let mut num_gain = 0i32;
+                    let mut coupled: Vec<CoupledTarget> = Vec::new();
+                    for _ in 0..=num_coupled {
+                        num_gain += 1;
+                        let is_cpe = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+                        let id_select =
                             reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
-                        let mut gain_elements =
-                            Vec::with_capacity((num_gain_elements + 1) as usize);
-                        for _ge_idx in 0..=num_gain_elements {
-                            let cce_gain = match reader.read_bits(3) {
-                                Some(v) => v as u8,
-                                None => {
-                                    cce_truncated = true;
-                                    break;
-                                }
-                            };
-                            let cce_scale = match reader.read_bits(4) {
-                                Some(v) => v as u8,
-                                None => {
-                                    cce_truncated = true;
-                                    break;
-                                }
-                            };
-                            let target_tag = match reader.read_bits(4) {
-                                Some(v) => v as u8,
-                                None => {
-                                    cce_truncated = true;
-                                    break;
-                                }
-                            };
-                            let gain_element_index = match reader.read_bits(4) {
-                                Some(v) => v as u8,
-                                None => {
-                                    cce_truncated = true;
-                                    break;
-                                }
-                            };
-                            gain_elements.push(GainElement {
-                                cce_gain,
-                                cce_scale,
-                                target_tag,
-                                gain_element_index,
-                            });
-                        }
-                        gain_element_lists.push(GainElementList {
-                            gain_element_scale,
-                            num_gain_elements,
-                            gain_elements,
+                        let ch_select = if is_cpe {
+                            let cs = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as u8;
+                            if cs == 3 {
+                                num_gain += 1;
+                            }
+                            cs
+                        } else {
+                            2
+                        };
+                        coupled.push(CoupledTarget {
+                            is_cpe,
+                            id_select,
+                            ch_select,
                         });
-                        if cce_truncated {
-                            break;
+                    }
+                    let cc_domain = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+                    coupling_point += (cc_domain != 0 || (coupling_point >> 1) != 0) as i32;
+                    let sign = reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0;
+                    let scale_base = CCE_SCALE
+                        [reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)? as usize];
+                    // The coupling channel's own `individual_channel_stream()`.
+                    let cc_stream = ChannelStream::parse(&mut reader, None, sf_index)?;
+                    let ngroups = cc_stream.ics.num_window_groups();
+                    let msfb = cc_stream.ics.max_sfb as usize;
+                    let bt = expand_band_types(&cc_stream.sections, &cc_stream.ics);
+                    let mut gains: Vec<Vec<f32>> = Vec::with_capacity(num_gain as usize);
+                    for c in 0..num_gain {
+                        let mut cge = 1u8;
+                        let mut gain_int = 0i32;
+                        let mut gain_cache = 1.0f32;
+                        if c != 0 {
+                            cge = if coupling_point == AFTER_IMDCT {
+                                1
+                            } else {
+                                reader.read_bit().ok_or(AacParseError::UnexpectedEof)?
+                            };
+                            if cge != 0 {
+                                gain_int = decode_scalefactor(&mut reader)
+                                    .ok_or(AacParseError::UnexpectedEof)?;
+                            }
+                            gain_cache = scale_base.powi(-gain_int);
+                        }
+                        if coupling_point == AFTER_IMDCT {
+                            gains.push(vec![gain_cache]);
+                        } else {
+                            let mut per_band = vec![0.0f32; ngroups * msfb];
+                            for g in 0..ngroups {
+                                for sfb in 0..msfb {
+                                    let idx = g * msfb + sfb;
+                                    if bt.get(idx).copied().unwrap_or(0) == 0 {
+                                        continue;
+                                    }
+                                    if cge == 0 {
+                                        let t0 = decode_scalefactor(&mut reader)
+                                            .ok_or(AacParseError::UnexpectedEof)?;
+                                        if t0 != 0 {
+                                            gain_int += t0;
+                                            let mut t = gain_int;
+                                            let mut s = 1.0f32;
+                                            if sign {
+                                                s = 1.0 - 2.0 * (t & 1) as f32;
+                                                t >>= 1;
+                                            }
+                                            gain_cache = scale_base.powi(-t) * s;
+                                        }
+                                    }
+                                    per_band[idx] = gain_cache;
+                                }
+                            }
+                            gains.push(per_band);
                         }
                     }
-                    reader.byte_align();
                     elements.push(Element::Cce(CouplingChannelElement {
                         instance_tag: tag,
-                        common_window,
-                        ics: shared,
-                        num_gain_element_lists,
-                        gain_element_lists,
+                        coupling_point: coupling_point as u8,
+                        coupled,
+                        gains,
+                        cc_stream: Box::new(cc_stream),
                     }));
                 }
                 4 | 5 => {
