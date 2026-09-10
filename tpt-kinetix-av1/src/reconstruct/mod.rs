@@ -48,9 +48,9 @@ use crate::{
     entropy::SymbolDecoder,
     frame::FrameHeader,
     inter::{
-        build_mv_candidates, decode_ref_and_mv, motion_compensate, read_mv, read_single_ref_name,
-        InterCdfs, Mv, RefFrames, RefSlot, ALTREF_FRAME, INTERP_EIGHTTAP_REGULAR,
-        INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, ZEROMV,
+        build_mv_candidates, motion_compensate, read_mv, read_single_ref_name, InterCdfs, Mv,
+        RefFrames, RefSlot, ALTREF_FRAME, INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME,
+        NEARESTMV, NEARMV, NEWMV, NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},

@@ -322,6 +322,9 @@ pub struct InterCdfs {
     pub zero_mv: [[u16; 3]; 2],
     pub ref_mv: [[u16; 3]; 6],
     pub drl_mode: [[u16; 3]; 3],
+    /// `TileCompoundModeCdf[COMP_INTER_MODE_CONTEXTS][8]` (§8.3.2): the 8-way
+    /// compound `compound_mode` symbol (`NEAREST_NEARESTMV … NEW_NEWMV`).
+    pub comp_inter_mode: [[u16; 9]; 8],
     // MV CDFs are indexed `[comp]` (0 = row / vertical, 1 = col / horizontal)
     // per AV1 §9 ("mv_sign: TileMvSignCdf[MvCtx][comp]", etc.); `MvCtx` is 0
     // for ordinary inter blocks (only intra-block-copy uses MvCtx=1, which is
@@ -352,6 +355,16 @@ impl InterCdfs {
             zero_mv: defaults::DEFAULT_ZERO_MV_CDF,
             ref_mv: defaults::DEFAULT_REF_MV_CDF,
             drl_mode: defaults::DEFAULT_DRL_MODE_CDF,
+            comp_inter_mode: [
+                [7760, 13823, 15808, 17641, 19156, 20666, 26891, 32768, 0],
+                [10730, 19452, 21145, 22749, 24039, 25131, 28724, 32768, 0],
+                [10664, 20221, 21588, 22906, 24295, 25387, 28436, 32768, 0],
+                [13298, 16984, 20471, 24182, 25067, 25736, 26422, 32768, 0],
+                [18904, 23325, 25242, 27432, 27898, 28258, 30758, 32768, 0],
+                [10725, 17454, 20124, 22820, 24195, 25168, 26046, 32768, 0],
+                [17125, 24273, 25814, 27492, 28214, 28704, 30592, 32768, 0],
+                [13046, 23214, 24505, 25942, 27435, 28442, 29330, 32768, 0],
+            ],
             mv_joint: defaults::DEFAULT_MV_JOINT_CDF,
             mv_sign: [defaults::DEFAULT_MV_SIGN_CDF; 2],
             mv_class: defaults::DEFAULT_MV_CLASS_CDF,

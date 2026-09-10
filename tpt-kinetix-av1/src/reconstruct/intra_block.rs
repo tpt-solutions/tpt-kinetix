@@ -1189,7 +1189,7 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
         want_refs: [u8; 2],
-    ) -> (Vec<[crate::inter::Mv; 2]>, u32, usize, [usize; 3]) {
+    ) -> (Vec<[crate::inter::Mv; 2]>, u32, usize, [usize; 3], usize) {
         use crate::inter::Mv;
         const REF_CAT_LEVEL: i64 = 640;
         let grid = &self.refmv_grid;
@@ -1417,6 +1417,20 @@ impl<'a> TileDecodeState<'a> {
             1 => (3 - num_new.min(1), 2 + total_matches),
             _ => (5 - num_new.min(1), 5),
         };
+        // Compound `comp_inter_mode` context (dav1d `refmvs.c`, isCompound
+        // branch): built from the dav1d compound `refmv_ctx`/`newmv_ctx`
+        // (which differ from the single-ref formulas above) then folded via
+        // `refmv_ctx >> 1`.
+        let (c_refmv, c_newmv) = match close_matches {
+            0 => (total_matches.min(2), i32::from(total_matches > 0)),
+            1 => ((total_matches * 3).min(4), 3 - num_new.min(1)),
+            _ => (5, 5 - num_new.min(1)),
+        };
+        let comp_ctx = match c_refmv >> 1 {
+            0 => c_newmv.min(1),
+            1 => 1 + c_newmv.min(3),
+            _ => (3 + c_newmv).clamp(4, 7),
+        } as usize;
         // ZeroMvContext / globalmv_ctx (§7.10.2 temporal-sample process): when
         // `use_ref_frame_mvs` is set the co-located temporal block is examined,
         // and with no motion field yet (the common early-frame case) it stays
@@ -1425,7 +1439,7 @@ impl<'a> TileDecodeState<'a> {
         let zeromv_ctx = u32::from(self.use_ref_frame_mvs);
         let packed = ((refmv_ctx as u32) << 4) | (zeromv_ctx << 3) | (newmv_ctx as u32);
 
-        // DrlCtxStack.
+        // DrlCtxStack — dav1d `get_drl_context(stack, idx)`.
         let mut drl_ctx = [0usize; 3];
         for (idx, dc) in drl_ctx.iter_mut().enumerate() {
             if idx + 1 < stack.len() {
@@ -1433,15 +1447,17 @@ impl<'a> TileDecodeState<'a> {
                 let w1 = stack[idx + 1].1;
                 *dc = if w0 >= REF_CAT_LEVEL {
                     usize::from(w1 < REF_CAT_LEVEL)
-                } else {
+                } else if w1 < REF_CAT_LEVEL {
                     2
+                } else {
+                    0
                 };
             }
         }
 
         let out: Vec<[Mv; 2]> = stack.iter().map(|e| e.0).collect();
         let n_found = out.len();
-        (out, packed, n_found, drl_ctx)
+        (out, packed, n_found, drl_ctx, comp_ctx)
     }
 
     /// Reconstruct one intra-block-copy (IBC) coded block (AV1 §7.11.3 / §5.11.7).

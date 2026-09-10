@@ -5795,3 +5795,25 @@
 > the `decode_ref_and_mv` stub — Stage 2). Next: `comp_inter_mode` 8-way +
 > per-ref drl + compound `find_mv_stack` (§7.10.2 isCompound) + MV residuals,
 > then `read_compound_type` (§5.11.26), then compound prediction.
+
+> **2026-09-10 (cont'd) — compound Stage 2: `comp_inter_mode` (8-way) + drl +
+> per-ref MV.** Added `InterCdfs::comp_inter_mode` CDF (8 ctx × 8 sym, spec
+> defaults). `inter_mv_stack` now also returns the compound `comp_inter_mode`
+> context (dav1d `refmvs.c` isCompound branch: `refmv_ctx`/`newmv_ctx` folded
+> via `refmv_ctx >> 1`) and its `get_drl_context` else-branch was fixed
+> (returned 2 where dav1d returns 0). `decode_inter_block`'s compound branch
+> replaced the `decode_ref_and_mv` stub with the real cascade: 8-way
+> `comp_inter_mode` symbol → `dav1d_comp_inter_pred_modes` per-ref sub-mode →
+> drl (NEWMV_NEWMV vs NEARMV paths) → per-ref MV (NEAREST/NEAR from stack,
+> NEW = stack + `read_mv` residual, GLOBAL = zero). `decode_skip_mode_block`
+> now calls `splat_refmv_full` so a later block's compound `find_mv_stack`
+> can see skip-mode ref pairs (this was why compound `n_mvs` came out 0).
+> **VERIFIED bit-exact vs patched dav1d** on 128x96 poc=1 first compound
+> block: `Post-compintermode[0,ctx=4] r=36834` and `Post-residual_mv[0,0/0,0]
+> r=36834` both match. `av1_inter_sequence` frame 1 27→30.7 dB, frame 2
+> ~19→27.0. 139 tests + intra corpus (6/6) pass. Remaining compound gaps:
+> `n_mvs` still undercounts (compound `find_mv_stack` misses temporal +
+> extended candidates — matters for drl on NEW/NEAR compound blocks) and
+> `read_compound_type` (§5.11.26: `mask_comp`/`wedge`/`jnt_comp`/
+> `compound_idx`) + real compound prediction (dist-weighted / wedge / diffwtd)
+> are still stubbed (plain average). Next: `read_compound_type`.
