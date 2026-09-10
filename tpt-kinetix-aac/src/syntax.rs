@@ -888,7 +888,8 @@ impl RawDataBlock {
                                 gain_int = decode_scalefactor(&mut reader)
                                     .ok_or(AacParseError::UnexpectedEof)?;
                             }
-                            gain_cache = scale_base.powi(-gain_int);
+                            // ffmpeg `GET_GAIN(scale, gain) == powf(scale, -gain)`.
+                            gain_cache = scale_base.powf(-gain_int as f32);
                         }
                         if coupling_point == AFTER_IMDCT {
                             gains.push(vec![gain_cache]);
@@ -911,7 +912,7 @@ impl RawDataBlock {
                                                 s = 1.0 - 2.0 * (t & 1) as f32;
                                                 t >>= 1;
                                             }
-                                            gain_cache = scale_base.powi(-t) * s;
+                                            gain_cache = scale_base.powf(-t as f32) * s;
                                         }
                                     }
                                     per_band[idx] = gain_cache;

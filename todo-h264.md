@@ -69,9 +69,19 @@ Loop filter is OFF for CANLMA2 (readme) — the remaining frame-0 error is
   `reconstruct_mbaff_intra_frame`'s `field` branch samples `x0-1` / `y0-2`
   with no remap).
 
-Next: extend the same `left_block` / §6.4.12 remap to the intra-prediction
-**sample fetch** in `reconstruct_mbaff_intra_frame` (and `reconstruct_luma_at`
-for field MBs). Frames 1+ (P) need the separate MBAFF-inter path.
+**Field top-right samples FIXED** (commit): the field branch passed
+`up_right_mb_avail = (which == 0)` (copied from the frame-pair rule) — but a
+field MB's top-edge blocks read above-right at `base_y - 2`, in the pair
+*above*, always decoded, for both top and bottom field MBs. Pass `true`.
+**CANLMA2 frame 0: 62 735 → 22 015 → max_diff 12** (from 255 at session
+start). Remaining frame-0 error: a small triangular ~10-fading region
+around 16px cols 3-15 rows 18-26 (one more field-MB recon detail — likely
+the §6.4.12 LEFT-neighbour sample remap when a field MB abuts a frame pair,
+or a residual scan/dequant edge). Everything else in frame 0 is byte-exact.
+
+**Frames 1+ (P slices)** still need the separate **MBAFF-inter** path
+(`reconstruct_inter_frame_ex`, `KINETIX_MBAFF_FIELD_MC` gate) — untouched
+this session. That's the next major chunk after frame-0 closes.
 
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
