@@ -2,6 +2,39 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bf — scaling-list fall-back rules; FRExt1_Panasonic_D BIT-EXACT
+
+**Outcome: `FRExt1_Panasonic_D` 8/8 frames bit-exact, promoted to `BitExact`
+(ITU suite 27 hard-checked / 0 failures). `FRExt3_Panasonic_E`: max_diff
+202 → 1 (diff_bytes 305 931 → ~45, only the two "PPS all – default" B
+frames, ±1 on one MB column — residual 8×8-dequant rounding, left open).**
+
+FRExt1/FRExt3 are dedicated **scaling-matrix conformance clips**: each frame
+switches PPS to exercise a different scaling-list encoding (fall-back rule /
+default / max-min / delta_scale). Three bugs in `transform.rs`:
+
+1. **PPS fall-back rule set B not implemented.** §Table 7-2: when a PPS
+   scaling matrix is parsed against an SPS that itself carried a scaling
+   matrix, an absent *first-in-group* list (4×4 idx 0/3, 8×8 idx 0/1) falls
+   back to the corresponding **SPS list**, not the JVT default. The old code
+   always used rule set A (JVT default). Threaded a `matrix_present` flag on
+   `ScalingLists` and a `rule_b` arg through `parse_scaling_lists`, matching
+   ffmpeg `decode_scaling_matrices`' `fallback[]` construction.
+2. **No distinct 8×8 inter default.** The luma-inter 8×8 list reused
+   `ff_h264_default_scaling8[0]` (intra). Added `JVT_DEFAULT_8X8_INTER`
+   (= `ff_h264_default_scaling8[1]`).
+3. **4×4 JVT defaults were in raster order, not zig-zag.** `JVT_DEFAULT_4X4_
+   INTRA/INTER` held the symmetric matrix row-major; every other consumer
+   (and `parse_one_scaling_list`'s `useDefaultScalingMatrixFlag` return)
+   treats the lists as scan order. Corrected to the spec Table 7-3 / ffmpeg
+   `ff_h264_default_scaling4` zig-zag sequences. This was the big FRExt3
+   mover (32 → 1).
+
+Tooling: `tools/build-jm-oracle.sh` built here (mingw-w64 gcc 16.2 via
+scoop; JM clone from vcgit.hhi.fraunhofer.de). New scratch test
+`tests/dbg_frext_diffmap.rs` (per-frame + per-MB diff vs the ITU `_rec.yuv`,
+`FREXT_CLIP` / `FREXT_FRAME` env).
+
 ## SESSION #32be — JM oracle built; freh1_b BIT-EXACT (deblock bS=2 vs 8×8 transform)
 
 **Outcome: `freh1_b` is 100/100 frames bit-exact and promoted to `BitExact`.

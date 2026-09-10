@@ -23,7 +23,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
 | MKV / WebM demux | 🟡 Basic | EBML parsing; subset of elements |
 | MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
-| H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 11 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, hierarchical-B GOPs, multiple parameter sets) are tracked, not yet fixed |
+| H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 26 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, real PAFF pixels, 4:2:2/4:4:4) are tracked, not yet fixed |
 | AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; CDF-based entropy/symbol decoder implemented (`entropy.rs`/`entropy_cdf.rs`), but `decode_tile_group` is not yet rewired onto it |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
@@ -43,11 +43,11 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 >
 > The decoder is also run against the **official ITU-T H.264.1 conformance
 > bitstreams** (`just fetch-h264-conformance`, compared byte-exact to the
-> standard's own reference YUV — no third-party decoder in the loop). 11
+> standard's own reference YUV — no third-party decoder in the loop). 26
 > curated clips pass byte-exact today; a handful of real-world features
-> (multi-slice picture reconstruction, real MBAFF-CABAC-I, hierarchical-B
-> GOPs, multiple parameter sets) are decoded but not yet bit-exact and are
-> tracked as known gaps.
+> (multi-slice picture reconstruction, real MBAFF-CABAC-I, some
+> hierarchical-B GOPs, real PAFF field pixels, 4:2:2/4:4:4) are decoded
+> but not yet bit-exact and are tracked as known gaps.
 
 > ⚖️ **Patents:** H.264 (`tpt-kinetix-h264`) and AAC (`tpt-kinetix-aac`) are
 > patent-encumbered. This project ships source only and obtains no patent

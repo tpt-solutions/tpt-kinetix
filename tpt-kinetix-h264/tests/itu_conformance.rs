@@ -211,6 +211,17 @@ const MANIFEST: &[(&str, Expect)] = &[
     // `noSubMbPartSizeLessThan8x8Flag` gate wrongly permitted 4×4 sub-partitions
     // (and B_Direct_8x8 without inference). Now 100/100 frames bit-exact.
     ("freh2_b", Expect::BitExact),
+    // Promoted to BitExact 2026-09-10 (SESSION #32bf): CAVLC High, 8×8
+    // transform-only, spatial direct, direct_8x8_inference_flag == 0, per-frame
+    // PPS switching that exercises every scaling-list encoding (fall-back rule,
+    // default, max/min, delta_scale). Two scaling-matrix bugs: (1) the PPS
+    // scaling-list fall-back for an absent first-in-group list always used the
+    // JVT default matrix (§Table 7-2 fall-back rule set A) even when the SPS
+    // carried its own matrix, where rule set B (fall back to the SPS list)
+    // applies; (2) the luma-inter 8×8 list had no distinct default — it reused
+    // `ff_h264_default_scaling8[0]` (intra) instead of `[1]` (inter). Fixed in
+    // transform.rs `parse_scaling_lists`. diff_bytes 12,109 -> 0.
+    ("FRExt1_Panasonic_D", Expect::BitExact),
     // Promoted to BitExact 2026-09-10 (SESSION #32be): CAVLC High, 8×8
     // transform, hierarchical GOP, temporal direct. The whole non-deblock
     // pipeline was already bit-exact (verified against a locally-built JM

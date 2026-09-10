@@ -69,17 +69,28 @@ pub const NUM_SCALING_8X8: usize = 2;
 /// group when a matrix is signalled but the individual list is omitted
 /// (`useDefaultScalingMatrixFlag` or an absent list).
 pub const JVT_DEFAULT_4X4_INTRA: [u8; 16] = [
-    6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42,
+    6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42,
 ];
 pub const JVT_DEFAULT_4X4_INTER: [u8; 16] = [
-    10, 14, 20, 24, 14, 20, 24, 27, 20, 24, 27, 30, 24, 27, 30, 34,
+    10, 14, 14, 20, 20, 20, 24, 24, 24, 24, 27, 27, 27, 30, 30, 34,
 ];
 
-/// JVT default 8×8 scaling matrix (ffmpeg `default_scaling8[0]`, zig-zag order).
+/// JVT default 8×8 **intra** scaling matrix (ffmpeg `ff_h264_default_scaling8[0]`,
+/// zig-zag order). Backs the first (luma-intra) 8×8 list.
 pub const JVT_DEFAULT_8X8: [u8; 64] = [
     6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23, 23, 23, 23, 23, 23, 25, 25, 25,
     25, 25, 25, 25, 27, 27, 27, 27, 27, 27, 27, 27, 29, 29, 29, 29, 29, 29, 29, 31, 31, 31, 31, 31,
     31, 31, 33, 33, 33, 33, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38,
+];
+
+/// JVT default 8×8 **inter** scaling matrix (ffmpeg `ff_h264_default_scaling8[1]`,
+/// zig-zag order). Backs the luma-inter 8×8 list — distinct from the intra
+/// default; using the intra table for the inter list mis-scales every
+/// 8×8-transform inter block whenever the inter list falls back to its default.
+pub const JVT_DEFAULT_8X8_INTER: [u8; 64] = [
+    9, 13, 13, 15, 13, 15, 17, 17, 17, 17, 19, 19, 19, 19, 19, 21, 21, 21, 21, 21, 21, 21, 22, 22,
+    22, 22, 22, 22, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27,
+    27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 30, 30, 30, 30, 33,
 ];
 
 /// The scaling matrices active for a picture (§8.5.9), derived from the SPS
@@ -97,6 +108,13 @@ pub struct ScalingLists {
     /// Which lists were actually signalled present in the bitstream that
     /// produced this struct (used to merge PPS overrides over SPS defaults).
     present_mask: u16,
+    /// `true` when the top-level `seq_scaling_matrix_present_flag` (SPS) or
+    /// `pic_scaling_matrix_present_flag` (PPS) that produced this struct was
+    /// set. Selects the PPS scaling-list fall-back rule (§ Table 7-2): a PPS
+    /// parsed against an SPS whose `matrix_present` is `true` uses fall-back
+    /// rule set B (absent first-in-group list ⇒ the SPS list), otherwise set A
+    /// (⇒ the JVT default matrix).
+    matrix_present: bool,
 }
 
 impl Default for ScalingLists {
@@ -113,6 +131,7 @@ impl ScalingLists {
             list_4x4: [[16u8; 16]; NUM_SCALING_4X4],
             list_8x8: [[16u8; 64]; NUM_SCALING_8X8],
             present_mask: 0,
+            matrix_present: false,
         }
     }
 
@@ -125,7 +144,8 @@ impl ScalingLists {
             return Ok(ScalingLists::flat());
         }
         let n_lists = if chroma_format_idc != 3 { 8 } else { 12 };
-        parse_scaling_lists(r, n_lists, ScalingLists::flat())
+        // SPS always uses fall-back rule set A (JVT defaults) — `rule_b = false`.
+        parse_scaling_lists(r, n_lists, ScalingLists::flat(), false)
     }
 
     /// Parse the PPS scaling lists, overriding the already-derived SPS lists.
@@ -142,7 +162,11 @@ impl ScalingLists {
             return Ok(sps_scaling.clone());
         }
         let n_lists = 6 + if transform_8x8 { 2 } else { 0 };
-        parse_scaling_lists(r, n_lists, sps_scaling.clone())
+        // §Table 7-2: a PPS scaling matrix parsed against an SPS that itself
+        // carried a scaling matrix uses fall-back rule set B (absent
+        // first-in-group list ⇒ the SPS list); otherwise set A (⇒ JVT default).
+        let rule_b = sps_scaling.matrix_present;
+        parse_scaling_lists(r, n_lists, sps_scaling.clone(), rule_b)
     }
 
     /// Merge PPS scaling overrides over the SPS set: any list the PPS signalled
@@ -223,61 +247,82 @@ fn parse_scaling_lists(
     r: &mut BitReader,
     n_lists: usize,
     fallback: ScalingLists,
+    rule_b: bool,
 ) -> anyhow::Result<ScalingLists> {
-    let mut out = fallback;
-    let mut prev_intra_4x4: Option<[u8; 16]> = None;
-    let mut prev_inter_4x4: Option<[u8; 16]> = None;
-    let mut prev_8x8: Option<[u8; 64]> = None;
+    let mut out = fallback.clone();
     let mut mask: u16 = 0;
+
+    // First-in-group fall-back lists (§Table 7-2). Rule set B (a PPS matrix over
+    // an SPS matrix) falls the first list of each group back to the *SPS* list;
+    // rule set A falls back to the JVT default matrix. Non-first lists in a group
+    // always fall back to the previously derived list in that group (rule A & B
+    // agree), which `out.list_*[i-1]` already holds.
+    let fb_4x4_intra0 = if rule_b {
+        fallback.list_4x4[0]
+    } else {
+        JVT_DEFAULT_4X4_INTRA
+    };
+    let fb_4x4_inter0 = if rule_b {
+        fallback.list_4x4[3]
+    } else {
+        JVT_DEFAULT_4X4_INTER
+    };
+    let fb_8x8_intra0 = if rule_b {
+        fallback.list_8x8[0]
+    } else {
+        JVT_DEFAULT_8X8
+    };
+    let fb_8x8_inter0 = if rule_b {
+        fallback.list_8x8[1]
+    } else {
+        JVT_DEFAULT_8X8_INTER
+    };
+
     for i in 0..n_lists {
-        let present = r.read_bit().context("scaling_list_present_flag")?;
-        if present == 1 {
-            mask |= 1 << i;
-            if i < 6 {
-                let list = parse_one_scaling_list(
-                    r,
-                    if i < 3 {
-                        &JVT_DEFAULT_4X4_INTRA
-                    } else {
-                        &JVT_DEFAULT_4X4_INTER
-                    },
-                )?;
-                out.list_4x4[i] = list;
-                if i < 3 {
-                    prev_intra_4x4 = Some(list);
-                } else {
-                    prev_inter_4x4 = Some(list);
-                }
+        let present = r.read_bit().context("scaling_list_present_flag")? == 1;
+        if i < 6 {
+            let jvt = if i < 3 {
+                &JVT_DEFAULT_4X4_INTRA
             } else {
-                let idx8 = i - 6;
-                let list = parse_one_scaling_list(r, &JVT_DEFAULT_8X8)?;
-                if idx8 < NUM_SCALING_8X8 {
-                    out.list_8x8[idx8] = list;
-                }
-                prev_8x8 = Some(list);
-            }
-        } else if i < 6 {
-            let list = if i < 3 {
-                prev_intra_4x4.unwrap_or(JVT_DEFAULT_4X4_INTRA)
+                &JVT_DEFAULT_4X4_INTER
+            };
+            let list = if present {
+                mask |= 1 << i;
+                parse_one_scaling_list(r, jvt)?
             } else {
-                prev_inter_4x4.unwrap_or(JVT_DEFAULT_4X4_INTER)
+                match i {
+                    0 => fb_4x4_intra0,
+                    3 => fb_4x4_inter0,
+                    _ => out.list_4x4[i - 1],
+                }
             };
             out.list_4x4[i] = list;
-            if i < 3 {
-                prev_intra_4x4 = Some(list);
-            } else {
-                prev_inter_4x4 = Some(list);
-            }
         } else {
             let idx8 = i - 6;
-            let list = prev_8x8.unwrap_or(JVT_DEFAULT_8X8);
+            let jvt = if idx8 % 2 == 0 {
+                &JVT_DEFAULT_8X8
+            } else {
+                &JVT_DEFAULT_8X8_INTER
+            };
+            let list = if present {
+                mask |= 1 << i;
+                parse_one_scaling_list(r, jvt)?
+            } else {
+                match idx8 {
+                    0 => fb_8x8_intra0,
+                    1 => fb_8x8_inter0,
+                    // 4:4:4 chroma 8×8 lists (out of decoder scope): previous
+                    // derived list in group, clamped to the stored range.
+                    _ => out.list_8x8[(idx8 - 2).min(NUM_SCALING_8X8 - 1)],
+                }
+            };
             if idx8 < NUM_SCALING_8X8 {
                 out.list_8x8[idx8] = list;
             }
-            prev_8x8 = Some(list);
         }
     }
     out.present_mask = mask;
+    out.matrix_present = true;
     Ok(out)
 }
 
