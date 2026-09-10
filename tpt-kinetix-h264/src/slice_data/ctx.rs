@@ -679,14 +679,29 @@ pub(crate) fn luma_cbf_neighbors(
 ) -> (bool, bool) {
     let bx = (block % 4) as i32;
     let by = (block / 4) as i32;
-    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
+    let (left_top_idx, top_idx, left_bot_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols);
 
     let left = if bx > 0 {
         cur.luma[(by * 4 + bx - 1) as usize] > 0
-    } else if let Some(li) = left_idx {
-        nz[li].luma[(by * 4 + 3) as usize] > 0
     } else {
-        is_intra
+        // MBAFF: the current MB's four left-column 4×4s take their neighbour
+        // context from `left_block_options[opt][8 + by]` (raster block index);
+        // the top two (by 0,1) from the left-top MB, the bottom two (by 2,3)
+        // from the left-bottom MB (only different for a field-current MB next
+        // to a frame left pair, `opt == 3`).
+        let li = if by < 2 {
+            left_top_idx
+        } else {
+            left_bot_idx.or(left_top_idx)
+        };
+        match li {
+            Some(li) => {
+                let nbr = crate::mbaff::LEFT_BLOCK_LUMA_NNZ[opt as usize % 4][by as usize];
+                nz[li].luma[nbr] > 0
+            }
+            None => is_intra,
+        }
     };
 
     let top = if by > 0 {

@@ -68,6 +68,19 @@ pub struct MbaffNeighbours {
 /// `left_cbp` bit 1 / bit 3 in `decode_cabac_mb_cbp_luma`.
 pub const LEFT_BLOCK_CBP_SHIFT: [(u32, u32); 4] = [(0, 2), (2, 2), (0, 0), (0, 0)];
 
+/// FFmpeg `left_block_options[opt][8..12]` — the left-neighbour **raster** 4×4
+/// block index that backs each of the current macroblock's four left-column
+/// 4×4 blocks (top→bottom) for the per-4×4 `coded_block_flag` / `nnz` /
+/// intra-4×4-mode neighbour context. Option 0 is the plain right-column
+/// `{3,7,11,15}`; the mixed field/frame options fold the neighbour's 16 lines
+/// onto the current field MB's 32.
+pub const LEFT_BLOCK_LUMA_NNZ: [[usize; 4]; 4] = [
+    [3, 7, 11, 15],
+    [11, 11, 15, 15],
+    [3, 3, 7, 7],
+    [3, 11, 3, 11],
+];
+
 /// Look up the `mb_field_decoding_flag` of frame-MB `idx`, returning `None`
 /// when the index is outside `[0, mb_cols*mb_rows)` (off-picture).
 #[inline]
