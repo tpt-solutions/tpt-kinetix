@@ -170,9 +170,10 @@ fn subpel_kernel(kind: u8, frac: i32) -> &'static [i32; 8] {
 /// interpolation `filter`.
 ///
 /// Reference samples outside the frame are extended by clamping (spec border
-/// handling). The 2-D separable 8-tap filter is applied (horizontal then
-/// vertical), each pass rounded by `>> 7` with the `+64` bias; the final sample
-/// is clamped to `[0, 255]`.
+/// handling). The 2-D separable 8-tap filter is applied over the 128-scale
+/// `Subpel_Filters` table: horizontal pass `Round2(s, InterRound0=3)`, vertical
+/// pass `Round2(s, InterRound1=11)` (§7.11.3.3, 8-bit non-compound), then a
+/// clamp to `[0, 255]`.
 #[allow(clippy::too_many_arguments)]
 pub fn motion_compensate(
     dest: &mut [u8],
