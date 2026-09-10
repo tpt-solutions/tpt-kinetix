@@ -2,6 +2,39 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32be — JM oracle built; freh1_b BIT-EXACT (deblock bS=2 vs 8×8 transform)
+
+**Outcome: `freh1_b` is 100/100 frames bit-exact and promoted to `BitExact`.
+ITU suite now 26 hard-checked bit-exact / 0 failures.**
+
+Built a real normative oracle (`tools/build-jm-oracle.sh` +
+`tools/jm-ldecod-oracle.patch`): JM 19.1 `ldecod`, made to build under
+mingw-w64 gcc, patched with env-gated dumps of per-MB pre/post-deblock luma
+and per-edge `bS` + p/q pixels. JM's decoded YUV is byte-identical to the
+ITU `*_dec.yuv`. (FFmpeg's public API can't emit pre-deblock pixels; a
+libav-linked harness was not possible here — no headers.)
+
+**Bug:** the §8.7.2.1 `bS = 2` test ("the luma block containing p0/q0 has
+non-zero transform coefficient levels") read Kinetix's per-4×4 `nz` array
+directly. That array holds per-4×4 CAVLC `TotalCoeff` counts (needed for the
+nC neighbour context); for an **8×8-transform** MB a 4×4 position can have
+`nz == 0` while its containing 8×8 block is coded. With the 8×8 transform
+the "luma block" is the 8×8 block. Fixed via `effective_nz()` in
+`derive_bs_segments` (`deblock.rs`): when `transform_8x8`, a 4×4 position
+reads as coded iff any of the four sub-blocks of its 8×8 block is non-zero.
+
+Found at: `freh1_b` frame 3 (decode #1, POC 3) MB(6,3) `P_L0_L0_8x16`,
+`transform_8x8`, internal horizontal edge 2 — JM `bS=[2,2,2,2]`, Kinetix
+`bS=[0,0,2,2]`. Pre-deblock recon was already byte-identical to JM (proven
+via the JM pre-deblock dump vs a temp `KX_PREDEBLOCK_DIR` hook, reverted).
+The whole `-skip_loop_filter` cross-check from #32bd stands — it just
+couldn't see this because the confounded P/B path masked it; the JM oracle
+is the clean tool.
+
+No effect on any other clip (the BitExact corpus is flat-matrix and mostly
+4×4-transform). `freh1_b` was also CAVLC, not CABAC (its readme is wrong —
+`entropy_coding_flag == 0`).
+
 ## SESSION #32bd — pre-deblock oracle; freh1_b gap is 100% in the P/B deblock filter
 
 New scratch test `tests/dbg_predeblock_oracle.rs`: diff our decode vs
