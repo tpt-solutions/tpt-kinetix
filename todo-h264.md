@@ -2,6 +2,28 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bg — HCHP2_HHI_A diagnosed (parked); MBAFF bucket next
+
+**HCHP2_HHI_A** (max_diff 10, only display frame 249 / POC 498 wrong):
+the error is **pre-deblock** (our pre-deblock luma vs a JM `JM_DUMP_POC=498`
+dump: max_diff 10, ndiff 32 978 — JM pre-deblock == the ITU ref here). Ref
+lists are correct: `KINETIX_DBG_REFLIST` shows POC 498 has
+`nri_l0=1 nri_l1=1`, no RPLR, no MMCO, `L0=[496] L1=[496]` — and POC 496
+(our display frame 248) is itself bit-exact. **POC 498 is the only frame in
+the clip where `RefPicList0[0] == RefPicList1[0]` (same physical picture).**
+The residual is a signed-diff histogram centred on 0 but skewed
+(−1: 16 904, +1: 7 137, tails to ±10) → a systematic ~1-LSB bias on ~⅓ of
+samples, i.e. a **B-prediction rounding / sub-pel / spatial-direct-MV
+difference that only bites when both lists point at the same picture**
+(implicit-weight `td==0` is already guarded → (32,32); MC `avg()` is
+`(a+b+1)>>1` and spec-correct). Needs an MB-level MV+pred oracle (JM
+`TRACE=1`) to localise — parked.
+
+New env hooks (gated, cheap): `KINETIX_DBG_REFLIST` (per-B-slice cur_poc /
+frame_num / nri / RPLR / MMCO / DPB POCs / L0+L1 POCs, both the single-slice
+and multi-slice paths) and `KINETIX_DUMP_PREDEBLOCK_POC=<poc>`
+(`finalize_picture` pre-deblock luma → `predeblock_poc<poc>.gray`).
+
 ## SESSION #32bf — scaling-list fall-back rules; FRExt1_Panasonic_D BIT-EXACT
 
 **Outcome: `FRExt1_Panasonic_D` 8/8 frames bit-exact, promoted to `BitExact`

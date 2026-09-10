@@ -1010,7 +1010,7 @@ pub fn modify_ref_pic_list(
 /// when `KINETIX_BINTRACE` is set. Used to diff our RefPicList0/L1 contents
 /// against ffmpeg's reference selection for the c_p8x8 row-2 investigation.
 pub(crate) fn trace_ref_list(name: &str, list: &[DpbEntry], ctx: PicNumContext) {
-    if std::env::var("KINETIX_BINTRACE").is_err() {
+    if std::env::var("KINETIX_BINTRACE").is_err() && std::env::var("KINETIX_DBG_REFLIST").is_err() {
         return;
     }
     eprintln!("REFLIST {name} len={}", list.len());

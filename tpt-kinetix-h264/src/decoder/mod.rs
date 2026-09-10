@@ -1083,6 +1083,13 @@ impl H264Decoder {
                     .collect()
             })
             .collect();
+        if let Ok(want) = std::env::var("KINETIX_DUMP_PREDEBLOCK_POC") {
+            if want.parse::<i64>().ok() == Some(_poc) {
+                let p = format!("predeblock_poc{_poc}.gray");
+                eprintln!("PREDEBLOCK(ms) poc={_poc} -> {p}");
+                let _ = std::fs::write(&p, &recon.luma);
+            }
+        }
         for (row_idx, row_info) in mb_info.iter().enumerate() {
             for (col_idx, cur) in row_info.iter().enumerate() {
                 let left = if col_idx > 0 {
@@ -2087,6 +2094,18 @@ impl H264Decoder {
             }
             return Ok(None);
         };
+        if std::env::var_os("KINETIX_DBG_REFLIST").is_some() {
+            eprintln!(
+                "DBG_REFLIST B(ms) cur_poc={current_poc} frame_num={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} rplr_l0={:?} rplr_l1={:?} mmco={:?} dpb={:?} l0_poc={:?} l1_poc={:?}",
+                header.frame_num,
+                header.ref_pic_list_modification_l0,
+                header.ref_pic_list_modification_l1,
+                header.dec_ref_pic_marking,
+                self.dpb.iter().map(|e| (e.pic_order_cnt, e.frame_num, e.is_long_term)).collect::<Vec<_>>(),
+                ref_l0.iter().map(|e| e.pic_order_cnt).collect::<Vec<_>>(),
+                ref_l1.iter().map(|e| e.pic_order_cnt).collect::<Vec<_>>(),
+            );
+        }
         crate::ref_pic::trace_ref_list("B L0 (multi-slice)", &ref_l0, pic_num_ctx);
         crate::ref_pic::trace_ref_list("B L1 (multi-slice)", &ref_l1, pic_num_ctx);
         let ref_frames_l0: Vec<VideoFrame> = ref_l0
@@ -2961,6 +2980,16 @@ impl H264Decoder {
                 &header.ref_pic_list_modification_l1,
             );
 
+            if std::env::var_os("KINETIX_DBG_REFLIST").is_some() {
+                eprintln!(
+                    "DBG_REFLIST B-slice cur_poc={current_poc} frame_num={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} rplr_l0={:?} rplr_l1={:?} mmco={:?} dpb_pocs={:?}",
+                    header.frame_num,
+                    header.ref_pic_list_modification_l0,
+                    header.ref_pic_list_modification_l1,
+                    header.dec_ref_pic_marking,
+                    self.dpb.iter().map(|e| (e.pic_order_cnt, e.frame_num, e.is_long_term)).collect::<Vec<_>>(),
+                );
+            }
             crate::ref_pic::trace_ref_list("B L0", l0_list.as_deref().unwrap_or(&[]), pic_num_ctx);
             crate::ref_pic::trace_ref_list("B L1", l1_list.as_deref().unwrap_or(&[]), pic_num_ctx);
 
