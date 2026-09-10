@@ -43,18 +43,25 @@ Intra4x4 modes + CBP match JM for MB0 and MB1 — the parse was already
 correct, only the recon was wrong.
 
 ### Remaining MBAFF work (the bucket is NOT closed)
-1. **Field-coded pair reconstruction** — `reconstruct_mbaff_intra_frame`'s
-   `field` branch reconstructs at the parity line with `y_step=2` but uses
-   naive `x0-1` / `y0-y_step` neighbour sampling. Wrong when the neighbour
-   pair has a *different* `mb_field_decoding_flag` (§6.4.10.7 / §8.3.2.2.2
-   mixed field/frame remapping). CANLMA2 frame 0's first error is now
-   exactly at pair_row 2 where field pairs begin (`KINETIX_DBG_MBAFF_FIELD`
-   dumps the grid).
-2. **MBAFF inter (P/B)** — `KINETIX_MBAFF_FIELD_MC` gated & not pixel-exact;
+1. **Field-MB CABAC neighbour context** — traced further: on CANLMA2 frame 0
+   the FIRST field macroblock (MB 214 = pair_row 2 / col 17, field-top)
+   already parses `coded_block_pattern = 31` where JM's trace_dec.txt says
+   **39** (@25731). Its `mb_type` (0) and first two Intra4x4 modes match
+   JM, but blkIdx ≥ 2 modes and the CBP diverge → the CABAC **context**
+   (not the engine) is wrong for a field MB: §9.3.3.1.1.4 CBP `condTermFlag`
+   (and the Intra4x4-mode MPM neighbour) resolve the frame-mode neighbour
+   address, not the §6.4.10.7 field/frame/mixed one. This is the real
+   blocker — `mbaff.rs::derive_neighbours` exists with tests but is not
+   fully wired into every neighbour-dependent CABAC context, nor covers all
+   field/frame combos. Fixing it needs §6.4.10.7 mbAddr{A,B,C,D} for MBAFF
+   wired into: mb_skip, mb_type, cbp, intra_chroma_pred_mode,
+   transform_size_8x8, coded_block_flag, mb_qp_delta, and the field
+   significance-context switch (§9.3.3.1.3).
+2. **Field-coded pair reconstruction** (§8.3.2.2.2 mixed remapping) — only
+   reachable once (1) is fixed and the parse is in sync.
+3. **MBAFF inter (P/B)** — `KINETIX_MBAFF_FIELD_MC` gated & not pixel-exact;
    `cvmp_mot_mbaff0_full_B` (max_diff 128, ~95% px) looks like the B path
    scaffolds.
-3. **MBAFF-aware CABAC neighbour context** for real streams (CAMA* still
-   desync from frame 0).
 4. MBAFF B temporal-direct; MBAFF deblock edge cases.
 
 ## SESSION #32bg — HCHP2_HHI_A diagnosed (parked); MBAFF bucket next
