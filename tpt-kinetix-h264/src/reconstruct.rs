@@ -859,7 +859,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
             tracer.on_intra_pred(mb_x, mb_y, TracePlane::Luma, 16, &pred);
 
             // Luma DC Hadamard transform across the 16 sub-block DC coeffs.
-            let dc_raster = inverse_scan_dc(&mb.luma_dc);
+            let dc_raster = inverse_scan_dc_with(&mb.luma_dc, scan4);
             let dc_out = luma_dc_transform(&dc_raster, mb.qp, scaling);
 
             // Each 4×4 sub-block: dequant AC with its DC replaced by dc_out[block].
@@ -4266,10 +4266,15 @@ pub(crate) fn chroma_qp(qpy: i32, offset: i32) -> i32 {
 
 /// Inverse zig-zag scan for the 16 luma DC coefficients (they are stored in the
 /// bitstream in scan order; the DC Hadamard operates on raster order).
-fn inverse_scan_dc(dc_scan: &[i16; 16]) -> [i32; 16] {
+/// §8.5.6: the 16 Intra_16×16 luma DC transform coefficient levels are inverse-
+/// scanned with the **field** 4×4 scan when the macroblock is field-coded
+/// (PAFF field picture or a field-coded MBAFF pair), and the zig-zag scan
+/// otherwise. The caller passes whichever `scan4` it is already using for the
+/// AC blocks.
+fn inverse_scan_dc_with(dc_scan: &[i16; 16], scan4: &[usize; 16]) -> [i32; 16] {
     let mut out = [0i32; 16];
-    for (zz, &raster) in crate::transform::ZIGZAG_4X4.iter().enumerate() {
-        out[raster] = dc_scan[zz] as i32;
+    for (si, &raster) in scan4.iter().enumerate() {
+        out[raster] = dc_scan[si] as i32;
     }
     out
 }

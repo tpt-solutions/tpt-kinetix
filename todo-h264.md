@@ -75,9 +75,51 @@ field MB's top-edge blocks read above-right at `base_y - 2`, in the pair
 *above*, always decoded, for both top and bottom field MBs. Pass `true`.
 **CANLMA2 frame 0: 62 735 → 22 015 → max_diff 12** (from 255 at session
 start). Remaining frame-0 error: a small triangular ~10-fading region
-around 16px cols 3-15 rows 18-26 (one more field-MB recon detail — likely
-the §6.4.12 LEFT-neighbour sample remap when a field MB abuts a frame pair,
-or a residual scan/dequant edge). Everything else in frame 0 is byte-exact.
+around 16px cols 3-15 rows 18-26 (one more field-MB recon detail).
+Everything else in frame 0 is byte-exact.
+
+**SESSION #32bj — §6.4.12 / Table 6-4 hypothesis ELIMINATED.** Pulled the
+full Table 6-4 (2002 draft, §6.4.8.2, "Specification of mbAddrN and yM")
+and worked every current-field-top-MB row (currMbFrameFlag=0,
+mbIsTopMbFlag=1) against `reconstruct_mbaff_intra_frame`'s field branch
+(`base_y = pair_row*32`, `y_step = 2`):
+- LEFT (xN<0, yN 0..15): above FRAME → yN<8: mbAddrA,yM=2·yN; yN≥8:
+  mbAddrA+1,yM=2·yN−16. above FIELD → mbAddrA,yM=yN. **Both collapse to
+  abs frame row `pair_row*32 + 2·yN` = `base_y + i*y_step`** — exactly what
+  the code samples. No remap missing.
+- TOP (xN 0..15, yN=−1): above FRAME → mbAddrB+1 (bottom of pair above),
+  yM=2·yN=−2 → yW row 14 → abs `pair_row*32 − 2`. above FIELD → mbAddrB,
+  yM=yN=−1 → yW row 15 → abs `pair_row*32 − 2`. **Both = `base_y − 2`** —
+  matches `y0 - y_step`.
+- TOP-LEFT (xN<0,yN<0): above-left FRAME → mbAddrD+1,yM=−2 → `base_y−2`;
+  FIELD → mbAddrD,yM=−1 → `base_y−2`. Matches `tl` sampling.
+So every intra neighbour SAMPLE POSITION in the field branch is already
+spec-correct for the top-field-MB case regardless of the abutting pair's
+coding mode. The residual max_diff-12 triangular region is therefore NOT a
+neighbour-remap bug — prime suspects now: (a) one mis-decoded directional
+Intra4x4 mode seed (the fading-triangle shape is classic single-seed
+directional cascade — diff a JM `trace_dec.txt` mode dump for MBs in
+pair_rows 2-3 cols 0-1 against our resolved `pred_modes_4x4`), or
+(b) a FIELD_SCAN_4X4 residual un-scan / dequant edge for field MBs.
+Needs the JM bin/mode oracle, not more spec reading.
+
+**SESSION #32bk — CANLMA2 frame 0 CLOSED, bit-exact.** Ran
+`ldecod_trace.exe` (JM oracle, `/c/Users/phill/jm-oracle/jm/`) on the clip
+→ `trace_dec.txt`; diffed per-MB `mb_type`/cbp/chroma vs a Kinetix
+`on_mb_parsed` dump for the residual region (cols 2-12, rows 13-22).
+First strong error MB(3,18) (JM addr 816) parsed **exactly** right
+(`Intra16x16` pred=3/Plane, cbp_luma 15, chroma mode 1 — identical to JM)
+yet reconstructed +10..12 with a low-frequency gradient signature →
+pointed straight at the Intra_16×16 **luma DC inverse scan**.
+`inverse_scan_dc` hard-coded `ZIGZAG_4X4` for every MB; §8.5.6 requires the
+**field 4×4 scan** for the 16 Intra_16×16 luma DC coefficient levels of a
+field-coded MB (PAFF field picture OR field-coded MBAFF pair). Added
+`inverse_scan_dc_with(dc, scan4)` and passed `reconstruct_luma_at`'s
+existing `scan4` (already `FIELD_SCAN_4X4` on the field path). **CANLMA2
+frame 0 AND frame 15 (both I) now max_diff 0 / diff_bytes 0.** 269 lib
+tests pass, ITU 27/0 no regressions (flat-scan streams unaffected; the only
+BitExact clips with field Intra_16×16 are none — this was pure latent).
+Frames 1-14/16 (P) remain — the MBAFF-inter path, next.
 
 **Frames 1+ (P slices)** still need the separate **MBAFF-inter** path
 (`reconstruct_inter_frame_ex`, `KINETIX_MBAFF_FIELD_MC` gate) — untouched
