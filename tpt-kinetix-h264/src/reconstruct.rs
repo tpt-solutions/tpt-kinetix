@@ -604,9 +604,12 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
-                        // Bottom MB of the pair: upper-right MB is in the next
-                        // (undecoded) pair.
-                        which == 0,
+                        // Field-coded MB (top OR bottom): its top-edge blocks'
+                        // above-right samples sit at `base_y - 2`, i.e. in the
+                        // pair ABOVE, which is always fully decoded. (Only a
+                        // *frame* bottom MB's above-right is the undecoded next
+                        // pair.)
+                        true,
                     );
                     reconstruct_chroma_at(
                         mb,
