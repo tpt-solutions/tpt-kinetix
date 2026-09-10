@@ -26,6 +26,41 @@ bin-level CABAC / MB oracle:
 - **hierarchical / High:** HCHP1_HHI_B (localised, first_bad=1), HCHP3_HHI_A,
   FREXT01/02_JVC, FRExt2/4_Panasonic, freh7_b
 
+## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
+
+Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
+field-coded-pair case. Commits: `add_if_frame` magnitude, `left_cbp` bit
+shifts, luma `coded_block_flag` `left_block` mapping, Intra4x4 MPM
+`left_block` mapping.
+
+- **`add_if_frame()` returned `1` not `mb_cols`** — the single worst bug:
+  a field-current MB's top/topleft/topright neighbour address shift
+  (§6.4.10.1) was one *column*, not one frame-MB *row*. Every field-top MB
+  read the wrong "above" neighbour.
+- `cabac_cbp_neighbors` hardcoded `left_block_options[0]` shifts `(0,2)`;
+  added `MbaffNeighbours::left_block_opt` (0..3) + `LEFT_BLOCK_CBP_SHIFT` +
+  `rebuild_left_cbp()`.
+- `luma_cbf_neighbors` + `mpm_pred_mode` now use
+  `LEFT_BLOCK_LUMA_NNZ[opt][by]` (raster block index) with the top two
+  left-column blocks from the left-top MB, bottom two from the left-bottom
+  MB (only differ for opt 3 = field-current / frame-left).
+
+**Result on CANLMA2_Sony_C frame 0**: parse was desyncing at the FIRST
+field macroblock (MB 214, `cbp` 31 vs JM 39). Now `mb_type` / `cbp` /
+`chroma_pred_mode` / `mb_field_decoding_flag` all match JM's `trace_dec.txt`
+through **~MB 272** (58 field-region MBs). **Pair rows 0-2 — including
+several field-coded pairs — are byte-exact.** 27 ITU clips still bit-exact,
+269 unit tests pass, no regressions.
+
+**Next desync: MB 273** (field-bottom, whose left neighbour is *also*
+field-coded → `left_block_opt` stays 0). `intra_chroma_pred_mode` reads 1
+vs JM 0. Suspect the **chroma `coded_block_flag`** `left_block[12..16]`
+mapping (`1 + N*4` indices — needs FFmpeg's chroma-nnz layout; a naive
+`by*2+1` + left_top/left_bottom split regressed, reverted) OR a field-MB
+residual significance-context detail. Then: field-coded pair
+**reconstruction** geometry (§8.3.2.2.2 — still to do; pair rows 0-2 being
+exact suggests the field intra recon at the parity line is already close).
+
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
 Commit 21cff73. **Root cause via JM `ldecod` TRACE=1 build + our
