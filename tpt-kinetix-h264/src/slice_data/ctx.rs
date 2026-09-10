@@ -522,6 +522,44 @@ impl<'a> NeighbourCtx<'a> {
             self.filter_slice(n.left_bottom),
         )
     }
+
+    /// FFmpeg `sl->left_block` selector (0..3) for the current macroblock — see
+    /// [`crate::mbaff::MbaffNeighbours::left_block_opt`]. Always `0` outside an
+    /// MBAFF frame.
+    pub(crate) fn mbaff_left_block_opt(&self, mb_x: u32, mb_y: u32, mb_cols: u32) -> u8 {
+        if !self.mb_aff {
+            return 0;
+        }
+        crate::mbaff::derive_neighbours(
+            mb_x,
+            mb_y,
+            mb_cols,
+            self.mb_rows,
+            self.cur_field,
+            self.field_flags,
+        )
+        .left_block_opt
+    }
+}
+
+/// Rebuild FFmpeg's `sl->left_cbp` from the left-top / left-bottom neighbour
+/// CBP words (`decode_cabac_mb_cbp_luma`):
+///
+/// ```text
+/// left_cbp = (cbp[LTOP] & 0x7F0)
+///          | ((cbp[LTOP] >> (left_block[0] & ~1)) & 2)
+///          | (((cbp[LBOT] >> (left_block[2] & ~1)) & 2) << 2)
+/// ```
+///
+/// The two shift amounts depend on the MBAFF `left_block` option (§6.4.10.1):
+/// for the plain / all-frame case (`opt == 0`) they are `(0, 2)`, so this
+/// reduces to `(cbp & 0x1F0) | (cbp & 2) | (cbp & 8)` — bits 1 and 3 of the
+/// single left neighbour. For a field-coded current MB next to a frame left
+/// pair (`opt == 3`) they are `(0, 0)`: bit 3 of `left_cbp` then comes from
+/// **bit 1** of the left-*bottom* neighbour, not its bit 3.
+fn rebuild_left_cbp(lt: u16, lb: u16, opt: u8) -> u16 {
+    let (sa, sb) = crate::mbaff::LEFT_BLOCK_CBP_SHIFT[opt as usize % 4];
+    (lt & 0x1F0) | ((lt >> sa) & 0x2) | (((lb >> sb) & 0x2) << 2)
 }
 
 /// Look up `left_cbp`/`top_cbp` (see [`MbCabacCtx::cbp_word`]) for `mb_x`,
@@ -538,20 +576,17 @@ pub(crate) fn cabac_cbp_neighbors(
     nctx: NeighbourCtx,
 ) -> (u16, u16) {
     let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols);
 
     let left = match left_top_idx {
         None => CABAC_CBP_UNAVAILABLE,
         Some(lti) => {
             let lt = grid[lti].cbp_word;
-            match left_bottom_idx {
-                Some(lbi) if lbi != lti => {
-                    let lb = grid[lbi].cbp_word;
-                    let luma = (lt & 0x02) | (lb & 0x08);
-                    let chroma = (lt >> 4) & 0x03;
-                    luma | (chroma << 4)
-                }
-                _ => lt,
-            }
+            let lb = match left_bottom_idx {
+                Some(lbi) => grid[lbi].cbp_word,
+                None => lt,
+            };
+            rebuild_left_cbp(lt, lb, opt)
         }
     };
 
@@ -589,21 +624,18 @@ pub(crate) fn cabac_cbp_neighbors_inter(
 ) -> (u16, u16) {
     let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
 
-    // Left CBP: rebuild luma bits 1,3 from left_top/left_bottom when the left
-    // neighbour is a mixed field/frame pair. Chroma (bits 4-5) from left_top.
+    // Left CBP: rebuild FFmpeg's `left_cbp` from left_top / left_bottom via the
+    // MBAFF `left_block` option shifts (see `rebuild_left_cbp`).
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols);
     let left = match left_top_idx {
         None => inter_sentinel,
         Some(lti) => {
             let lt = grid[lti].cbp_word;
-            match left_bottom_idx {
-                Some(lbi) if lbi != lti => {
-                    let lb = grid[lbi].cbp_word;
-                    let luma = (lt & 0x02) | (lb & 0x08);
-                    let chroma = (lt >> 4) & 0x03;
-                    luma | (chroma << 4)
-                }
-                _ => lt,
-            }
+            let lb = match left_bottom_idx {
+                Some(lbi) => grid[lbi].cbp_word,
+                None => lt,
+            };
+            rebuild_left_cbp(lt, lb, opt)
         }
     };
 

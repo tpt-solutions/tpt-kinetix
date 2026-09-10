@@ -53,7 +53,20 @@ pub struct MbaffNeighbours {
     /// bottom-right partition" (the default); `0` means "use the top-left
     /// partition" (the special case for a frame-current / field-left pair).
     pub topleft_partition: i32,
+    /// FFmpeg `sl->left_block` selector (index into `left_block_options`, 0..3).
+    /// `0` = plain / non-mixed; `1` = frame-bottom-MB next to a field left pair;
+    /// `2` = frame-top-MB next to a field left pair; `3` = field-coded current
+    /// MB next to a frame left pair. Drives the §9.3.3.1.1.4 `left_cbp` bit
+    /// shifts and the per-4×4 `coded_block_flag` / intra-mode left-neighbour
+    /// sub-block selection.
+    pub left_block_opt: u8,
 }
+
+/// FFmpeg `left_block_options[opt]` — for each option, the pair
+/// `(left_block[0] & !1, left_block[2] & !1)`, i.e. the right-shift amounts
+/// applied to the left-top / left-bottom neighbour CBP words when rebuilding
+/// `left_cbp` bit 1 / bit 3 in `decode_cabac_mb_cbp_luma`.
+pub const LEFT_BLOCK_CBP_SHIFT: [(u32, u32); 4] = [(0, 2), (2, 2), (0, 0), (0, 0)];
 
 /// Look up the `mb_field_decoding_flag` of frame-MB `idx`, returning `None`
 /// when the index is outside `[0, mb_cols*mb_rows)` (off-picture).
@@ -100,6 +113,7 @@ pub fn derive_neighbours(
     let mut left_top = mb_xy - 1;
     let mut left_bottom = mb_xy - 1;
     let mut topleft_partition = -1i32;
+    let mut left_block_opt = 0u8;
 
     // FRAME_MBAFF adjustments (the mixed field/frame case).
     let left_mb_field = flag_at(field_flags, left_top, total).unwrap_or(false);
@@ -110,11 +124,11 @@ pub fn derive_neighbours(
             left_bottom = left_top;
             if cur_field {
                 left_bottom += mb_cols;
-                // left_block = left_block_options[3]
+                left_block_opt = 3;
             } else {
                 topleft_xy += mb_cols;
                 topleft_partition = 0;
-                // left_block = left_block_options[1]
+                left_block_opt = 1;
             }
         }
     } else {
@@ -125,22 +139,25 @@ pub fn derive_neighbours(
             // that neighbour is itself frame-coded (i.e. its field flag is 0).
             // Only apply the shift if the initial neighbour address is valid
             // (within the picture). Off-picture neighbours remain unavailable.
+            // NB: FFmpeg indexes `mb_type[top_xy ± 1]` / `mb_type[top_xy]` with
+            // the *pre-shift* `top_xy`, so all three tests read the original
+            // (top_xy-1), (top_xy+1), top_xy field flags.
             if topleft_xy >= 0 {
-                topleft_xy += add_if_frame(flag_at(field_flags, topleft_xy, total));
+                topleft_xy += add_if_frame(flag_at(field_flags, topleft_xy, total), mb_cols);
             }
             if topright_xy >= 0 {
-                topright_xy += add_if_frame(flag_at(field_flags, topright_xy, total));
+                topright_xy += add_if_frame(flag_at(field_flags, topright_xy, total), mb_cols);
             }
             if top_xy >= 0 {
-                top_xy += add_if_frame(flag_at(field_flags, top_xy, total));
+                top_xy += add_if_frame(flag_at(field_flags, top_xy, total), mb_cols);
             }
         }
         if left_mb_field != cur_field {
             if cur_field {
                 left_bottom += mb_cols;
-                // left_block = left_block_options[3]
+                left_block_opt = 3;
             } else {
-                // left_block = left_block_options[2]
+                left_block_opt = 2;
             }
         }
     }
@@ -166,16 +183,19 @@ pub fn derive_neighbours(
         left_top: left.map(|(t, _)| t),
         left_bottom: left.and_then(|(_, b)| b),
         topleft_partition,
+        left_block_opt,
     }
 }
 
-/// `mb_stride & (flag - 1)`: add `mb_cols` when the neighbour is frame-coded
-/// (`flag == false`), add nothing when it is field-coded (`flag == true`).
+/// FFmpeg `top_xy += h->mb_stride & (((mb_type[n] >> 7) & 1) - 1)`: add
+/// `mb_cols` (one frame-MB row) when the neighbour is frame-coded
+/// (`flag == false`) or unavailable, add nothing when it is field-coded
+/// (`flag == true`).
 #[inline]
-fn add_if_frame(flag: Option<bool>) -> isize {
+fn add_if_frame(flag: Option<bool>, mb_cols: isize) -> isize {
     match flag {
         Some(true) => 0,
-        _ => 1, // treat unavailable like frame-coded for the shift amount
+        _ => mb_cols, // frame-coded (or unavailable) → shift down one frame-MB row
     }
 }
 
