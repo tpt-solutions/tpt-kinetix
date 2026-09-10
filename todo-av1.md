@@ -5855,3 +5855,19 @@
 > even plain `COMP_INTER_AVG` isn't bit-exact; (2) verify the large inter
 > inverse transform + tx_type; (3) compound `find_mv_stack` temporal/extended
 > candidates (n_mvs undercount). These form a coherent pixel-domain follow-up.
+
+> **2026-09-10 (cont'd) — MC subpel rounding fixed to §7.11.3.3.** Kinetix's
+> `motion_compensate` (`inter.rs`) applied `(s + 64) >> 7` to BOTH the
+> horizontal and vertical 8-tap passes over the 128-scale `Subpel_Filters`
+> table — wrong: the spec's 8-bit non-compound path is `InterRound0 = 3`
+> (H: `(s + 4) >> 3`) then `InterRound1 = 11` (V: `(s + 1024) >> 11`), and
+> the horizontal pass must cover `bh + 7` rows (the vertical filter's
+> ±3/4-tap support) with each *reference* sample clamped to the frame edge —
+> the old code only filtered `bh` rows and then clamped the *filtered block*
+> at its own top/bottom edge, corrupting the first/last 3 rows of every
+> vertically-filtered MC block. New unit test
+> `motion_compensate_bilinear_halfpel_averages_a_ramp` locks the rounding
+> (a ramp's half-pel sample rounds .5 up). PSNR ~neutral on the corpus
+> (most inter blocks are zero-MV copies) but foundational + intra corpus
+> still 6/6. Compound blend still needs the pre-downshift (`InterRound1 = 7`)
+> `prep` path + `avg`/`w_avg`/`mask`.

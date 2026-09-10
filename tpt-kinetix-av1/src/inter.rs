@@ -198,37 +198,38 @@ pub fn motion_compensate(
     let kw = subpel_kernel(filter, dx);
     let kh = subpel_kernel(filter, dy);
 
-    // Horizontal pass into `tmp` (one full block, no vertical extension yet).
-    let mut tmp = vec![0i32; bw * bh];
-    for y in 0..bh {
-        let ry = base_y + y as i32;
+    // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
+    // 7`); for 8-bit non-compound prediction `InterRound0 = 3`, `InterRound1 =
+    // 11`, `InterPostRound = 0`. The horizontal pass is run over `bh + 7` rows
+    // (the vertical filter's 3-above / 4-below support), each reference sample
+    // clamped to the frame edge — clamping the *filtered block* at its own
+    // edge (the previous behaviour) is wrong for the top/bottom rows.
+    let ext_h = bh + 7;
+    let mut tmp = vec![0i32; bw * ext_h];
+    for ty in 0..ext_h {
+        let ry = (base_y + ty as i32 - 3).clamp(0, ref_h as i32 - 1);
+        let row = ry as usize * ref_stride;
         for x in 0..bw {
             let rx = base_x + x as i32;
             let mut s = 0i32;
             for k in 0..8u32 {
                 let koff = (k as i32) - 3;
-                let sy = ry.clamp(0, ref_h as i32 - 1);
                 let sx = (rx + koff).clamp(0, ref_w as i32 - 1);
-                s += refp[sy as usize * ref_stride + sx as usize] as i32 * kw[k as usize];
+                s += refp[row + sx as usize] as i32 * kw[k as usize];
             }
-            tmp[y * bw + x] = (s + 64) >> 7;
+            tmp[ty * bw + x] = (s + 4) >> 3;
         }
     }
 
-    // Vertical pass from `tmp` into `dest`, with vertical border extension.
-    // `dest` is the destination *block* buffer (stride `dest_stride`, sized
-    // `bw`×`bh`), so the block is written at local coordinates `(y, x)`; the
-    // reference is sampled at frame/superblock coordinates `dst_x`/`dst_y`
-    // above. This lets callers pass a small per-block temp buffer.
+    // Vertical pass from `tmp` (already offset by 3 rows) into `dest`. `dest`
+    // is the destination *block* buffer (stride `dest_stride`, sized `bw`×`bh`).
     for y in 0..bh {
         for x in 0..bw {
             let mut s = 0i32;
-            for k in 0..8u32 {
-                let koff = (k as i32) - 3;
-                let ty = (y as i32 + koff).clamp(0, bh as i32 - 1);
-                s += tmp[ty as usize * bw + x] * kh[k as usize];
+            for k in 0..8usize {
+                s += tmp[(y + k) * bw + x] * kh[k];
             }
-            let v = ((s + 64) >> 7).clamp(0, 255) as u8;
+            let v = ((s + 1024) >> 11).clamp(0, 255) as u8;
             dest[y * dest_stride + x] = v;
         }
     }
@@ -717,6 +718,36 @@ mod tests {
             INTERP_EIGHTTAP_REGULAR,
         );
         assert!(dest.iter().all(|&v| v == 200));
+    }
+
+    #[test]
+    fn motion_compensate_bilinear_halfpel_averages_a_ramp() {
+        // On a horizontal ramp `ref[x] = x`, a half-pel horizontal MV with the
+        // bilinear kernel must land midway between neighbouring samples. AV1
+        // `Round2` rounds a .5 up, so the value at x + 0.5 is `x + 1`.
+        // (§7.11.3.3: 128-scale filter, InterRound0 = 3, InterRound1 = 11.)
+        let stride = 64;
+        let refp: Vec<u8> = (0..64 * 64).map(|i| (i % 64) as u8).collect();
+        let mut dest = vec![0u8; 8 * 8];
+        motion_compensate(
+            &mut dest,
+            8,
+            &refp,
+            stride,
+            64,
+            64,
+            8,
+            8,
+            8,
+            8,
+            Mv::new(0, 4),
+            INTERP_BILINEAR,
+        );
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(dest[y * 8 + x], (8 + x + 1) as u8, "y={y} x={x}");
+            }
+        }
     }
 
     #[test]
