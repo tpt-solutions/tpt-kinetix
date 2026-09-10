@@ -66,6 +66,7 @@ use tpt_kinetix_core::{
 // ──────────────────────────────────────────────────────────────────────────────
 
 const TX_4X4: usize = 0;
+#[allow(dead_code)]
 const TX_8X8: usize = 1;
 const TX_16X16: usize = 2;
 

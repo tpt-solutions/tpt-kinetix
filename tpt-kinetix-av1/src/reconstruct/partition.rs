@@ -706,8 +706,16 @@ impl<'a> TileDecodeState<'a> {
         let is_split = if depth < 2 && from != av1::TX_4X4 {
             let cat = (2 * (av1::TX_64X64 as i32 - av1::TX_SIZE_SQR_UP[from] as i32) - depth as i32)
                 as usize;
-            let a = (self.tx_above[mi_col] as usize) < txw;
-            let l = (self.tx_left[mi_row] as usize) < txh;
+            // dav1d `reset_context` fills the var-tx neighbour context
+            // (`ctx->tx`, distinct from the intra `ctx->tx_intra` which it
+            // fills with -1) with `TX_64X64` at each tile / SB-row boundary,
+            // so an unavailable neighbour compares as the *largest* size and
+            // contributes 0 to `a`/`l` — not the *smallest*, which Kinetix's
+            // shared `0` sentinel would give (`0 < txw` is always true).
+            let above_tx = self.tx_above[mi_col] as usize;
+            let left_tx = self.tx_left[mi_row] as usize;
+            let a = above_tx != 0 && above_tx < txw;
+            let l = left_tx != 0 && left_tx < txh;
             self.mode_cdfs
                 .read_txfm_split(&mut self.dec, cat, a as usize + l as usize)
         } else {

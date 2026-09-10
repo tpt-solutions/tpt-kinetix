@@ -5748,3 +5748,29 @@
 > hierarchical 96x64/64x64 clips (multi-frame-per-TU harness artifact) — the
 > entropy trace is the reliable signal and it is clean now. Next: keep tracing
 > 128x96 poc=6 into the residual / later SB rows.
+
+> **2026-09-10 (cont'd) — inter residual now uses the real var-tx tree.**
+> The non-skip inter residual read `read_tx_size` (the intra single-ternary
+> `tx_depth` symbol) instead of `read_block_tx_size` §5.11.16's inter/IBC
+> branch — a recursive `txfm_split` var-tx tree — desyncing at dav1d's
+> `Post-vartxtree` on the first non-skip inter block. Switched
+> `decode_inter_block` / `decode_skip_mode_block` to the existing
+> `read_block_tx_size_ibc`; rewrote `add_inter_residual` to iterate the
+> returned var-tx leaves for luma (per-leaf coeff read; `clear_coeff_context`
+> on skip) and one uniform `chroma_tx_size` grid for chroma. Also fixed
+> `read_tx_tree`'s neighbour context: dav1d `reset_context` fills the var-tx
+> `ctx->tx` array with `TX_64X64` (largest) at tile/SB-row edges — distinct
+> from the intra `ctx->tx_intra` (-1) — so an unavailable neighbour must
+> compare as the largest size (`a`/`l` = 0). Kinetix's shared `0` sentinel
+> made `0 < txw` always true; now guarded with `!= 0`. **Verified bit-exact
+> vs patched dav1d through the ENTIRE second superblock row of 128x96 poc=6
+> INCLUDING the luma+chroma residual reads** (`Post-vartxtree` / `Post-y-cf-
+> blk` / `Post-uv-cf-blk` rng all match), previously desynced at block 3.
+> Coeffs are always read (entropy) but only applied for `Tx_Size_Sqr_Up <=
+> TX_16X16` (larger inverse transforms not yet conformance-checked for inter).
+> All 139 unit tests + intra corpus (6/6) still pass.
+> **Known regression:** `av1_inter_sequence` frame 1 PSNR 45->31 dB — that
+> frame has compound (jnt-comp) blocks whose ref/mv/mode reads are still a
+> stub, so more-correct entropy after them just reads further into a stream
+> already desynced at the compound block. Compound `find_mv_stack` + jnt/wedge
+> compound reads are the next blocker; the var-tx layer under them is now right.

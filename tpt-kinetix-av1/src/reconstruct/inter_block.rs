@@ -713,16 +713,26 @@ impl<'a> TileDecodeState<'a> {
         self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
         self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
 
-        // Residual: read coefficients per transform block and add to the
-        // prediction already written into the planes. The luma tx size is read
-        // once here (it also drives the neighbour-context update below).
-        let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if !skip && self.tx_mode_select && !self.lossless {
-            self.read_tx_size(bsize, max_tx, mi_row, mi_col)
-        } else {
-            max_tx
-        };
-        self.add_inter_residual(mi_row, mi_col, bsize, skip, luma_tx)?;
+        // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
+        // here (`IsInter == 1`): a recursive var-tx-tree of `txfm_split`
+        // symbols (`read_block_tx_size_ibc`/`read_tx_tree`), NOT the
+        // single-ternary `read_tx_size` used for real intra blocks — the wrong
+        // syntax model desynced the entropy decoder from the first non-skip
+        // inter block (dav1d `Post-vartxtree`). It also updates the shared
+        // `tx_above`/`tx_left` neighbour context internally.
+        let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
+        let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
+        if dbg_b0 {
+            eprintln!(
+                "DBG b0 vartx leaves={} tx0={luma_tx} rng={}",
+                leaves.len(),
+                self.dec.raw_state().0
+            );
+        }
+        self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
+        if dbg_b0 {
+            eprintln!("DBG b0 post-residual rng={}", self.dec.raw_state().0);
+        }
 
         // Update inter neighbour state.
         let skip_byte = skip as u8;
@@ -846,8 +856,11 @@ impl<'a> TileDecodeState<'a> {
         self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
         self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
 
-        let luma_tx = max_tx_size_for_bsize(bsize);
-        self.add_inter_residual(mi_row, mi_col, bsize, true, luma_tx)?;
+        // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
+        // its no-entropy-read branch (uniform max transform).
+        let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, true);
+        let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
+        self.add_inter_residual(mi_row, mi_col, bsize, true, &leaves)?;
 
         let luma_tx_w = av1::TX_WIDTH[luma_tx] as u8;
         let luma_tx_h = av1::TX_HEIGHT[luma_tx] as u8;
@@ -1029,116 +1042,115 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
         skip: bool,
-        luma_tx: usize,
+        leaves: &[(usize, usize, usize)],
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        // Uniform-grid fallback size for the (common) non-split case, used for
+        // the chroma-tx heuristic and the loop-filter metadata grid.
+        let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         let luma_tx_w = av1::TX_WIDTH[luma_tx];
         let luma_tx_h = av1::TX_HEIGHT[luma_tx];
         let subsampling_x = self.subsampling_x as u8;
         let subsampling_y = self.subsampling_y as u8;
 
-        // Whether to actually read residual coefficients — the previous
-        // version of this function returned early here for either
-        // condition, which also skipped every `FrameMeta` recording call
-        // below (`mark_luma_edges`/`record_luma`/etc. never ran for *any*
-        // inter block, skipped or not: `inter_block.rs` had no `self.meta`
-        // references at all). That left the deblock filter blind to every
-        // inter-coded block's transform geometry on every P/B frame — see
-        // todo-av1.md's "inter FrameMeta gap" note. `TxSize` (and therefore
-        // the real transform-edge geometry) is well-defined regardless of
-        // `skip`/`luma_tx`, so the geometry recording below always runs;
-        // only the actual coefficient read is gated on `has_residual`.
-        let has_residual = !skip && luma_tx <= TX_16X16;
+        // The `FrameMeta` geometry recording below always runs (the deblock
+        // filter needs every inter block's transform geometry, skipped or
+        // not); only the coefficient read is gated on `!skip`, per var-tx
+        // leaf for luma and per chroma-tx block for chroma.
 
         // Y residual + per-transform-sub-block deblock-edge geometry
         // (mirrors the intra keyframe path in `intra_block.rs` — see its
         // identical `mark_luma_edges`/`mark_luma_edges4`/`record_luma4`
         // calls for why this must run per transform sub-block, not just
         // once per coded block).
-        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
-                let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                self.meta.mark_luma_edges(
-                    px_x / 8,
-                    px_y / 8,
-                    (px_x + luma_tx_w).div_ceil(8),
-                    (px_y + luma_tx_h).div_ceil(8),
-                );
-                self.meta.mark_luma_edges4(
-                    px_x / 4,
-                    px_y / 4,
-                    (px_x + luma_tx_w).div_ceil(4),
-                    (px_y + luma_tx_h).div_ceil(4),
-                );
-                self.meta.record_luma4(
-                    px_x / 4,
-                    px_y / 4,
-                    (px_x + luma_tx_w).div_ceil(4),
-                    (px_y + luma_tx_h).div_ceil(4),
-                    luma_tx_w as u8,
-                    luma_tx_h as u8,
-                );
-                let mut residual = vec![0i32; luma_tx_w * luma_tx_h];
-                if has_residual {
-                    let blk = TxBlockCtx {
-                        plane: 0,
-                        tx_size: luma_tx,
-                        x4: px_x / 4,
-                        y4: px_y / 4,
-                        max_x4: self.luma_max_x4,
-                        max_y4: self.luma_max_y4,
-                        // See the matching fix/comment in `intra_block.rs`:
-                        // this must be the *coded block's* plane size
-                        // (`bw`/`bh` in samples), not this transform block's
-                        // own `luma_tx_w`/`_h` — otherwise `all_zero`'s
-                        // whole-block `ctx = 0` special case fires
-                        // unconditionally.
-                        block_w: bw * MI_SIZE,
-                        block_h: bh * MI_SIZE,
-                        intra_dir: 0,
-                        uv_mode: 0,
-                        qindex_positive: !self.lossless,
-                        reduced_tx_set: self.reduced_tx_set,
-                        lossless: self.lossless,
-                        is_inter: true,
-                        // Irrelevant for plane 0.
-                        coincident_luma_tx_type: av1::DCT_DCT,
-                    };
-                    let coeffs = read_coeffs(
-                        &mut self.dec,
-                        &mut self.coeff_cdfs,
-                        &mut self.coeff_ctxs,
-                        &blk,
-                    )?;
-                    if coeffs.eob > 0 {
-                        let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                        let dequant =
-                            dequantize_coeffs(&coeffs.quant, luma_tx, qindex_dc, qindex_ac);
-                        inverse_transform(
-                            &dequant,
-                            coeffs.tx_type,
-                            luma_tx,
-                            self.lossless,
-                            &mut residual,
-                        );
-                    }
+        for &(leaf_mi_col, leaf_mi_row, leaf_tx) in leaves {
+            let leaf_tx_w = av1::TX_WIDTH[leaf_tx];
+            let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
+            let px_x = leaf_mi_col * MI_SIZE - self.tile_px_x0;
+            let px_y = leaf_mi_row * MI_SIZE - self.tile_px_y0;
+            self.meta.mark_luma_edges(
+                px_x / 8,
+                px_y / 8,
+                (px_x + leaf_tx_w).div_ceil(8),
+                (px_y + leaf_tx_h).div_ceil(8),
+            );
+            self.meta.mark_luma_edges4(
+                px_x / 4,
+                px_y / 4,
+                (px_x + leaf_tx_w).div_ceil(4),
+                (px_y + leaf_tx_h).div_ceil(4),
+            );
+            self.meta.record_luma4(
+                px_x / 4,
+                px_y / 4,
+                (px_x + leaf_tx_w).div_ceil(4),
+                (px_y + leaf_tx_h).div_ceil(4),
+                leaf_tx_w as u8,
+                leaf_tx_h as u8,
+            );
+            let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
+            let blk = TxBlockCtx {
+                plane: 0,
+                tx_size: leaf_tx,
+                x4: px_x / 4,
+                y4: px_y / 4,
+                max_x4: self.luma_max_x4,
+                max_y4: self.luma_max_y4,
+                // See the matching fix/comment in `intra_block.rs`: the
+                // *coded block's* plane size, not this transform block's.
+                block_w: bw * MI_SIZE,
+                block_h: bh * MI_SIZE,
+                intra_dir: 0,
+                uv_mode: 0,
+                qindex_positive: !self.lossless,
+                reduced_tx_set: self.reduced_tx_set,
+                lossless: self.lossless,
+                is_inter: true,
+                // Irrelevant for plane 0.
+                coincident_luma_tx_type: av1::DCT_DCT,
+            };
+            if skip {
+                // A skipped block reads no coeffs but still must reset the
+                // neighbour context (see `clear_coeff_context`).
+                clear_coeff_context(&mut self.coeff_ctxs, &blk, leaf_tx_w / 4, leaf_tx_h / 4);
+            } else {
+                let coeffs = read_coeffs(
+                    &mut self.dec,
+                    &mut self.coeff_cdfs,
+                    &mut self.coeff_ctxs,
+                    &blk,
+                )?;
+                // Coeffs are always *read* (entropy sync), but only applied
+                // for transform sizes with a verified inverse-transform path
+                // (<= 16x16 square-up) — a larger tx would add a wrong
+                // residual, worse than none. TODO: widen once the 32x32/64x64
+                // inverse transforms are conformance-checked for inter.
+                if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
+                    let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                    let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                    inverse_transform(
+                        &dequant,
+                        coeffs.tx_type,
+                        leaf_tx,
+                        self.lossless,
+                        &mut residual,
+                    );
                 }
-                for dy in 0..luma_tx_h {
-                    let sy = px_y + dy;
-                    if sy >= self.tile_h {
+            }
+            for dy in 0..leaf_tx_h {
+                let sy = px_y + dy;
+                if sy >= self.tile_h {
+                    break;
+                }
+                for dx in 0..leaf_tx_w {
+                    let sx = px_x + dx;
+                    if sx >= self.tile_w {
                         break;
                     }
-                    for dx in 0..luma_tx_w {
-                        let sx = px_x + dx;
-                        if sx >= self.tile_w {
-                            break;
-                        }
-                        if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
-                            *slot = ((*slot as i32 + residual[dy * luma_tx_w + dx]).clamp(0, 255))
-                                as u8;
-                        }
+                    if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
+                        *slot =
+                            ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, 255)) as u8;
                     }
                 }
             }
@@ -1167,25 +1179,37 @@ impl<'a> TileDecodeState<'a> {
             self.delta_lf,
         );
 
-        // Chroma residual.
-        let cw = (luma_tx_w >> subsampling_x).max(4);
-        let ch = (luma_tx_h >> subsampling_y).max(4);
-        let c_tx = if cw >= 16 && ch >= 16 {
-            TX_16X16
-        } else if cw >= 8 && ch >= 8 {
-            TX_8X8
-        } else {
-            TX_4X4
+        // Chroma residual. Inter chroma uses one uniform transform size
+        // (`get_tx_size(get_plane_residual_size)`, §5.11.37) tiling the whole
+        // block's chroma region — dav1d reads it (`Post-uv-cf-blk`) after all
+        // the luma leaves, `pl=0` then `pl=1`.
+        let sub_x = self.subsampling_x as usize;
+        let sub_y = self.subsampling_y as usize;
+        let c_tx = chroma_tx_size(bsize, sub_x, sub_y);
+        let cw = av1::TX_WIDTH[c_tx];
+        let ch = av1::TX_HEIGHT[c_tx];
+        let plane_sz = {
+            let sz = get_plane_residual_size(bsize, sub_x, sub_y);
+            if sz == BLOCK_INVALID {
+                bsize
+            } else {
+                sz
+            }
         };
+        let chroma_bw = BLOCK_WIDTH[plane_sz];
+        let chroma_bh = BLOCK_HEIGHT[plane_sz];
+        let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
+        let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
+        let has_residual = !skip;
         // Computed before the `&mut self.{u,v}_plane` reborrows in the loop
         // below — `qindex_for_plane` takes `&self`, which would conflict
         // with those live disjoint-field mutable borrows if called any later.
         let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
         let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
-        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                let cpx_x = (mi_col * MI_SIZE + tx - self.tile_px_x0) >> subsampling_x;
-                let cpx_y = (mi_row * MI_SIZE + ty - self.tile_px_y0) >> subsampling_y;
+        for ty in (0..chroma_bh).step_by(ch) {
+            for tx in (0..chroma_bw).step_by(cw) {
+                let cpx_x = base_cpx_x + tx;
+                let cpx_y = base_cpx_y + ty;
                 if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                     continue;
                 }
