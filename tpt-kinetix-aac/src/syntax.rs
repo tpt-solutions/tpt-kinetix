@@ -545,11 +545,44 @@ pub enum Element {
     End,
 }
 
+/// One entry in a `program_config_element`'s channel map
+/// (`decode_channel_map`, ISO/IEC 14496-3 Table 4.2).
+#[derive(Debug, Clone, Copy)]
+pub struct PceChannel {
+    /// `true` = CPE (two channels), `false` = SCE (one channel). LFE and CC
+    /// entries are always recorded as `false`.
+    pub is_cpe: bool,
+    /// `element_instance_tag` (4 bits).
+    pub tag: u8,
+}
+
+/// A parsed `program_config_element` (PCE, id 5, ISO/IEC 14496-3 Table 4.2).
+///
+/// Only the fields needed to derive the output channel order are kept; the
+/// object type, mixdown tags, matrix-mixdown, associated-data elements and the
+/// comment field are consumed for correct bit accounting but discarded.
+#[derive(Debug, Clone, Default)]
+pub struct ProgramConfigElement {
+    /// `front_element_is_cpe` / `front_element_tag_select` pairs, in order.
+    pub front: Vec<PceChannel>,
+    /// Side channel map entries, in order.
+    pub side: Vec<PceChannel>,
+    /// Back channel map entries, in order.
+    pub back: Vec<PceChannel>,
+    /// LFE channel map entries (`is_cpe` always `false`), in order.
+    pub lfe: Vec<PceChannel>,
+    /// Coupling channel map entries, in order.
+    pub cc: Vec<PceChannel>,
+}
+
 /// A parsed AAC raw data block: an ordered list of syntactic elements.
 #[derive(Debug, Clone)]
 pub struct RawDataBlock {
     /// Elements in stream order, ending at `Element::End` (if present).
     pub elements: Vec<Element>,
+    /// The `program_config_element` if the block carried one (in-band PCE, for
+    /// `channel_configuration == 0` streams).
+    pub pce: Option<ProgramConfigElement>,
 }
 
 /// Skip a `data_stream_element()` (DSE, id 4) in place.
@@ -576,13 +609,41 @@ fn skip_data_stream_element(reader: &mut BitReader) -> Result<(), AacParseError>
     Ok(())
 }
 
-/// Skip a `program_config_element()` (PCE, id 5) in place.
+/// Parse a `program_config_element()` (PCE, id 5) in place.
 ///
 /// Reads every field of the (fixed-shape, count-driven) PCE so the exact bit
-/// length is consumed, then byte-aligns. PCEs describe the channel topology and
-/// are redundant with the ADTS header's `channel_config` for AAC-LC, so the
-/// decoder ignores them.
-fn skip_program_config_element(reader: &mut BitReader) -> Result<(), AacParseError> {
+/// length is consumed, then byte-aligns, returning the front/side/back/lfe/cc
+/// channel maps needed to derive the output channel order for a
+/// `channel_configuration == 0` stream. Fields not needed for channel ordering
+/// (object type, mixdown tags, matrix mixdown, associated data, comment) are
+/// consumed but discarded.
+fn parse_program_config_element(
+    reader: &mut BitReader,
+) -> Result<ProgramConfigElement, AacParseError> {
+    // `decode_channel_map`: front/side/back each read a 1-bit `is_cpe` then a
+    // 4-bit tag; LFE has no `is_cpe` bit (always SCE); CC skips 1 bit and is
+    // never CPE.
+    fn channel_map(
+        reader: &mut BitReader,
+        n: usize,
+        kind: u8, // 0 = front/side/back, 1 = lfe, 2 = cc
+    ) -> Result<Vec<PceChannel>, AacParseError> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let is_cpe = match kind {
+                1 => false,
+                2 => {
+                    reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
+                    false
+                }
+                _ => reader.read_bit().ok_or(AacParseError::UnexpectedEof)? != 0,
+            };
+            let tag = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)? as u8;
+            out.push(PceChannel { is_cpe, tag });
+        }
+        Ok(out)
+    }
+
     // ISO/IEC 14496-3 Table 4.2 `program_config_element()`. Both the 3-bit
     // `id_syn_ele` and the 4-bit `element_instance_tag` are already consumed by
     // the dispatch in `RawDataBlock::parse` (`4 | 5 =>` arm), so the body here
@@ -609,35 +670,29 @@ fn skip_program_config_element(reader: &mut BitReader) -> Result<(), AacParseErr
         let _ = reader.read_bits(2).ok_or(AacParseError::UnexpectedEof)?;
         let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
     }
-    for _ in 0..num_front {
-        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-    }
-    for _ in 0..num_side {
-        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-    }
-    for _ in 0..num_back {
-        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-    }
-    for _ in 0..num_lfe {
-        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-    }
+
+    let front = channel_map(reader, num_front, 0)?;
+    let side = channel_map(reader, num_side, 0)?;
+    let back = channel_map(reader, num_back, 0)?;
+    let lfe = channel_map(reader, num_lfe, 1)?;
     for _ in 0..num_assoc {
         let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
     }
-    for _ in 0..num_cc {
-        let _ = reader.read_bit().ok_or(AacParseError::UnexpectedEof)?;
-        let _ = reader.read_bits(4).ok_or(AacParseError::UnexpectedEof)?;
-    }
+    let cc = channel_map(reader, num_cc, 2)?;
+
     // `byte_alignment()` comes *before* `comment_field_bytes`, per Table 4.2.
     reader.byte_align();
     let comment_bytes = reader.read_bits(8).ok_or(AacParseError::UnexpectedEof)? as usize;
     for _ in 0..comment_bytes {
         let _ = reader.read_u8().ok_or(AacParseError::UnexpectedEof)?;
     }
-    Ok(())
+    Ok(ProgramConfigElement {
+        front,
+        side,
+        back,
+        lfe,
+        cc,
+    })
 }
 
 impl RawDataBlock {
@@ -657,6 +712,7 @@ impl RawDataBlock {
         }
         let mut reader = BitReader::new(data);
         let mut elements = Vec::new();
+        let mut pce = None;
         let mut _element_count = 0;
         #[allow(clippy::while_let_loop)]
         loop {
@@ -877,13 +933,16 @@ impl RawDataBlock {
                     if id == 4 {
                         skip_data_stream_element(&mut reader)?;
                     } else if id == 5 {
-                        skip_program_config_element(&mut reader)?;
+                        let parsed = parse_program_config_element(&mut reader)?;
+                        if pce.is_none() {
+                            pce = Some(parsed);
+                        }
                     }
                 }
                 _ => return Err(AacParseError::BadElementId),
             }
         }
-        Ok(RawDataBlock { elements })
+        Ok(RawDataBlock { elements, pce })
     }
 }
 

@@ -83,7 +83,7 @@ const EXPECT: &[(&str, Expect, &str)] = &[
     (
         "al22_chCfg0PCE_44",
         Expect::Exact,
-        "LC 7.1-wide, channel_config 0 / PCE (config0_output_order)",
+        "LC 7.1-wide, channel_config 0 / in-band PCE (order via sniff_channel_order)",
     ),
     (
         "al17_44",
@@ -94,10 +94,11 @@ const EXPECT: &[(&str, Expect, &str)] = &[
     (
         "al15_44",
         Expect::KnownGap { max_lsb: 31_000.0 },
-        "LC 6-ch (FL FR FC LFE FLC FRC) + CCE — parses fully, independent \
-         coupling applied (per-channel corr ~1.0); residual is only the \
-         config-0 channel permutation (needs real PCE parsing — its element \
-         shape collides with standard-5.1 al06/al07)",
+        "LC 6-ch (FL FR FC LFE FLC FRC) + CCE — parses fully, correct channel \
+         order (element shape is standard 5.1, resolved by infer). Uncoupled LFE \
+         is bit-exact; the 5 CCE-coupled channels sit at corr ~0.998 / scale 1.0 \
+         — a small broadband residual in the independent-coupling contribution \
+         (CC-channel reconstruction detail), not a permutation or scale error",
     ),
 ];
 

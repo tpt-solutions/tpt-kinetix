@@ -1825,3 +1825,49 @@
         `config0_output_order` both retire). That also nails `al15`.
         Suite/clippy/fmt/pipeline all still green; synthetic `conformance_aac`
         (surround_51/71, no CCE) unaffected.
+
+   — **2026-09-11 (continued): real `program_config_element` parsing +
+        `sniff_channel_order` port; `config0_output_order` table retired.**
+        - `syntax.rs`: `skip_program_config_element` → `parse_program_config_element`,
+          returning a new `ProgramConfigElement { front, side, back, lfe, cc }`
+          (each a `Vec<PceChannel { is_cpe, tag }>`, via a faithful port of
+          ffmpeg `decode_channel_map`). `RawDataBlock` gains `pce:
+          Option<ProgramConfigElement>`. Exported from `lib.rs`.
+        - `decoder.rs`: new `pce_output_order` — a port of ffmpeg's
+          `sniff_channel_order` / `assign_channels` / `count_paired_channels` /
+          `assign_pair` for the layer-0 `aac_channel_map` (every AAC-LC PCE in
+          practice; returns `None` for 22.2 / side-pair / >5-per-position). The
+          PCE appears only in frame 0 of a chCfg-0 stream, so the decoder retains
+          it in `self.last_pce` and reuses it for every following frame (mirrors
+          ffmpeg keeping the `che` config).
+        - Order resolution for `channel_configuration == 0` is now:
+          (1) `infer_channel_config` when the element sequence is an ISO Table 4.5
+          default order — ffmpeg decodes those with the standard layout even when
+          a PCE restates them (al06/al07/al15: their PCE lists 5 front channels
+          but the element shape is a plain standard 5.1, and ffmpeg's own output
+          for al15 is the native FL FR FC LFE FLc FRc order — verified with the
+          local ffmpeg, `.ref.f32` byte-identical to a fresh decode);
+          (2) `pce_output_order` (`sniff_channel_order`) for non-standard element
+          shapes (al22's `SCE CPE CPE LFE CPE` 7.1-wide — **bit-exact**, all 8
+          channels corr 1.0, was previously handled by a hand-built table);
+          (3) identity. The `config0_output_order` table is deleted.
+        - CCE independent-coupling path now also applies the coupling channel's
+          own TNS before the filterbank (ffmpeg renders the CC channel through
+          full `spectral_to_sample`) — correct in principle; al15's CC stream has
+          no TNS so no measurable change there.
+        **ISO suite:** al04/05/06/18/**22** bit-exact; al07_96 gap 80 LSB;
+        al17_44 gap ~13.5k LSB (broken-PCE downmix, low priority); **al15_44
+        still a gap at ~29.8k LSB max / 2.36k rms** — but now correctly
+        diagnosed: channel order is right (uncoupled LFE is bit-exact), and the
+        5 CCE-coupled channels sit at corr ~0.998 / least-squares scale 1.0, i.e.
+        a *small broadband residual* in the independent-coupling contribution
+        (CC-channel spectral reconstruction detail), **not** the permutation or a
+        gain-scale error as the previous note claimed. Next step for al15:
+        instrument the CC channel's decoded spectrum against a patched-ffmpeg
+        `decode_cce` per-band trace (the same method used for the al17/al22
+        desyncs) — candidates are PNS RNG call-ordering for the CC channel or a
+        dequant detail on its bands.
+        Full `tpt-kinetix-aac` suite (13 bins) + clippy `-D warnings` + fmt +
+        `--workspace --no-default-features` build all green. New diagnostic:
+        `tests/dbg_pce.rs` (`--ignored`: dumps the PCE + per-channel corr/scale
+        matrix for the chCfg-0 streams).

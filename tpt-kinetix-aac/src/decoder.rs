@@ -15,8 +15,8 @@ use crate::pns::{apply_pns, PnsRandom};
 use crate::pulse::apply_pulse;
 use crate::stereo::apply_stereo;
 use crate::syntax::{
-    AacParseError, ChannelStream, CouplingChannelElement, Element, IcsInfo, RawDataBlock,
-    WindowSequence,
+    AacParseError, ChannelStream, CouplingChannelElement, Element, IcsInfo, ProgramConfigElement,
+    RawDataBlock, WindowSequence,
 };
 use crate::tables::{SWB_OFFSET_1024, SWB_OFFSET_128};
 use crate::tns::apply_tns;
@@ -126,6 +126,12 @@ pub struct AacDecoder {
     /// Shared, continuously-advanced PNS pseudo-random generator (ffmpeg's
     /// `random_state`). Seeded once at construction and never reset.
     pns_rng: PnsRandom,
+    /// The most recent in-band `program_config_element`. A PCE typically appears
+    /// only in the first frame of a `channel_configuration == 0` stream but its
+    /// channel layout governs every following frame, so it is retained here and
+    /// reused when a later frame carries no PCE of its own (mirrors ffmpeg
+    /// keeping the `che` configuration).
+    last_pce: Option<ProgramConfigElement>,
 }
 
 impl Default for AacDecoder {
@@ -147,6 +153,7 @@ impl AacDecoder {
             sf_index: 4,
             frame_no: 0,
             pns_rng: PnsRandom::new(),
+            last_pce: None,
         }
     }
 
@@ -601,13 +608,28 @@ impl AacDecoder {
                 if cce.coupling_point != 3 {
                     continue;
                 }
+                // ffmpeg renders the coupling channel through its full
+                // `spectral_to_sample` (TNS, then IMDCT + windowing) before the
+                // time-domain mix. `decode_channel_stream` already ran PNS but
+                // deliberately not TNS, so apply it here on a local copy.
+                let mut cc_spectrum = *cc_coeffs;
+                if std::env::var_os("AAC_DBG_NO_TNS").is_none() {
+                    if let Some(tns) = &cce.cc_stream.tns {
+                        let swb = if cce.cc_stream.ics.window_sequence.is_eight_short() {
+                            SWB_OFFSET_128[self.sf_index]
+                        } else {
+                            SWB_OFFSET_1024[self.sf_index]
+                        };
+                        apply_tns(tns, &cce.cc_stream.ics, &mut cc_spectrum, swb);
+                    }
+                }
                 let mut cc_pcm = synthesize(
                     &self.imdct_long,
                     &self.imdct_short,
                     &self.windows,
                     &mut self.cce_channels[cce_i],
                     &cce.cc_stream.ics,
-                    cc_coeffs,
+                    &cc_spectrum,
                 );
                 for s in &mut cc_pcm {
                     *s /= 32768.0;
@@ -655,9 +677,28 @@ impl AacDecoder {
         // effective configuration from the decoded element sequence
         // (SCE/CPE/LFE pattern) and reuse the same permutation table.
         let order = if hdr.channel_configuration == 0 {
-            config0_output_order(&block.elements, ch_count).unwrap_or_else(|| {
-                output_channel_order(infer_channel_config(&block.elements), ch_count)
-            })
+            // Channel-order resolution for a `channel_configuration == 0` (PCE)
+            // stream, in decreasing order of confidence:
+            //   1. the element sequence is one of the ISO Table 4.5 default
+            //      orders — ffmpeg decodes those with the standard layout even
+            //      when a PCE restates them (covers al06/al07/al15, whose PCE
+            //      front lists 5 channels but whose element shape is a plain
+            //      standard config);
+            //   2. a real in-band `program_config_element` (`sniff_channel_order`
+            //      — covers al22's non-standard 7.1-wide element shape);
+            //   3. identity.
+            if block.pce.is_some() {
+                self.last_pce = block.pce.clone();
+            }
+            let inferred = infer_channel_config(&block.elements);
+            let order = if inferred != 0 {
+                Some(output_channel_order(inferred, ch_count))
+            } else {
+                self.last_pce
+                    .as_ref()
+                    .and_then(|pce| pce_output_order(pce, &block.elements, ch_count))
+            };
+            order.unwrap_or_else(|| (0..ch_count).collect())
         } else {
             output_channel_order(hdr.channel_configuration, ch_count)
         };
@@ -849,38 +890,243 @@ fn infer_channel_config(elements: &[Element]) -> u8 {
     config_from_element_seq(&seq)
 }
 
-/// `channel_configuration == 0` output permutation for element sequences that
-/// aren't a standard default order but whose PCE-defined layout is known.
-/// Returns `order` such that `order[k]` is the element-order plane for output
-/// slot `k` (WAV/SMPTE order, matching ffmpeg's decode of the same stream).
+/// Derive the output channel order from an in-band `program_config_element`,
+/// following ffmpeg's `sniff_channel_order` for the layer-0 channel map (every
+/// AAC-LC PCE in practice — no top/bottom channels, i.e. not 22.2).
 ///
-/// Element markers: `0` SCE, `1` CPE (two planes), `3` LFE.
-///
-/// This is a small table of PCE layouts seen in the ISO conformance set; the
-/// principled fix is to parse the `program_config_element` and derive the order
-/// from its front/side/back/lfe channel maps (then `infer_channel_config` and
-/// this function both go away — and `al15`, whose `SCE CPE CPE LFE` shape is
-/// shared with the standard-5.1 `al06`/`al07` but whose PCE places the second
-/// CPE at FLC/FRC rather than the surrounds, would then decode bit-exact too).
-fn config0_output_order(elements: &[Element], n_channels: usize) -> Option<Vec<usize>> {
-    let seq: Vec<u8> = elements
-        .iter()
-        .filter_map(|el| match el {
-            Element::Sce(_) => Some(0),
-            Element::Cpe(_) => Some(1),
-            Element::Lfe(_) => Some(3),
-            _ => None,
-        })
-        .collect();
-    let perm: &[usize] = match seq.as_slice() {
-        // ISO `al22` 7.1-wide vector: SCE(C) CPE(a) CPE(b) LFE CPE(c). Decoded
-        // planes: 0=C, 1,2=a, 3,4=b, 5=LFE, 6,7=c. ffmpeg emits
-        // c_L, c_R, C, LFE, b_L, b_R, a_L, a_R (front pair is the *last* CPE;
-        // verified channel-by-channel bit-exact vs ffmpeg's own decode).
-        [0, 1, 1, 3, 1] => &[6, 7, 0, 5, 3, 4, 1, 2],
-        _ => return None,
+/// Returns `order` such that `order[k]` is the element-order plane index that
+/// belongs in output slot `k` (ffmpeg's native, `av_position`-ascending order),
+/// or `None` if the PCE uses something outside the layer-0 map (a side pair, an
+/// odd front-CPE parity, more than five channels at one position, a position
+/// whose map slot is `AV_CHAN_NONE`) — the caller then falls back to the
+/// known-layout table / element-sequence inference.
+fn pce_output_order(
+    pce: &ProgramConfigElement,
+    elements: &[Element],
+    n_channels: usize,
+) -> Option<Vec<usize>> {
+    // AVChannel enum values (libavutil/channel_layout.h).
+    const FL: i32 = 0;
+    const FR: i32 = 1;
+    const FC: i32 = 2;
+    const LFE: i32 = 3;
+    const BL: i32 = 4;
+    const BR: i32 = 5;
+    const FLC: i32 = 6;
+    const FRC: i32 = 7;
+    const BC: i32 = 8;
+    const SL: i32 = 9;
+    const SR: i32 = 10;
+    const LFE2: i32 = 35;
+    const NONE: i32 = -1;
+    const UNUSED: i32 = -2;
+
+    // `aac_channel_map[0]` (layer 0), rows indexed FRONT/SIDE/BACK/LFE.
+    const FRONT_ROW: [i32; 6] = [FC, FLC, FRC, FL, FR, NONE];
+    const SIDE_ROW: [i32; 6] = [UNUSED, NONE, NONE, NONE, NONE, NONE];
+    const BACK_ROW: [i32; 6] = [UNUSED, SL, SR, BL, BR, BC];
+    const LFE_ROW: [i32; 6] = [LFE, LFE2, NONE, NONE, NONE, NONE];
+
+    // Positions, matching ffmpeg's `AAC_CHANNEL_*` (1-based).
+    const P_FRONT: u8 = 1;
+    const P_SIDE: u8 = 2;
+    const P_BACK: u8 = 3;
+    const P_LFE: u8 = 4;
+
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Sce,
+        Cpe,
+        Lfe,
+    }
+    // Reconstruct ffmpeg's `layout_map`: front, then side, then back, then lfe.
+    let mut layout: Vec<(Kind, u8, u8)> = Vec::new();
+    for e in &pce.front {
+        layout.push((if e.is_cpe { Kind::Cpe } else { Kind::Sce }, e.tag, P_FRONT));
+    }
+    for e in &pce.side {
+        layout.push((if e.is_cpe { Kind::Cpe } else { Kind::Sce }, e.tag, P_SIDE));
+    }
+    for e in &pce.back {
+        layout.push((if e.is_cpe { Kind::Cpe } else { Kind::Sce }, e.tag, P_BACK));
+    }
+    for e in &pce.lfe {
+        layout.push((Kind::Lfe, e.tag, P_LFE));
+    }
+
+    // `count_paired_channels(pos, current)`: length of the run at `pos` starting
+    // at `current`, CPE counting 2, with ffmpeg's SCE-parity guard.
+    let count_paired = |pos: u8, current: usize| -> Option<i32> {
+        let mut num = 0i32;
+        let mut first_cpe = false;
+        let mut sce_parity = false;
+        for &(kind, _, p) in &layout[current..] {
+            if p != pos {
+                break;
+            }
+            match kind {
+                Kind::Cpe => {
+                    if sce_parity {
+                        if pos == P_FRONT && !first_cpe {
+                            sce_parity = false;
+                        } else {
+                            return None;
+                        }
+                    }
+                    num += 2;
+                    first_cpe = true;
+                }
+                _ => {
+                    num += 1;
+                    if pos != P_LFE {
+                        sce_parity = !sce_parity;
+                    }
+                }
+            }
+        }
+        if sce_parity && pos == P_FRONT && first_cpe {
+            return None;
+        }
+        Some(num)
     };
-    (perm.len() == n_channels).then(|| perm.to_vec())
+
+    // One assigned output element: an AV channel-position bitmask plus the
+    // decoded plane(s) it maps to.
+    struct E2c {
+        av_position: u64,
+        planes: Vec<usize>,
+    }
+
+    // Map (kind, tag) -> element-order plane indices, from the decoded elements.
+    let plane_lookup = |kind: Kind, tag: u8| -> Option<Vec<usize>> {
+        let mut plane = 0usize;
+        for el in elements {
+            match el {
+                Element::Sce(s) => {
+                    if matches!(kind, Kind::Sce) && s.instance_tag == tag {
+                        return Some(vec![plane]);
+                    }
+                    plane += 1;
+                }
+                Element::Lfe(l) => {
+                    if matches!(kind, Kind::Lfe) && l.instance_tag == tag {
+                        return Some(vec![plane]);
+                    }
+                    plane += 1;
+                }
+                Element::Cpe(c) => {
+                    if matches!(kind, Kind::Cpe) && c.instance_tag == tag {
+                        return Some(vec![plane, plane + 1]);
+                    }
+                    plane += 2;
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+
+    let mut e2c: Vec<E2c> = Vec::new();
+    let mut i = 0usize;
+    for pos in [P_FRONT, P_SIDE, P_BACK, P_LFE] {
+        let row = match pos {
+            P_FRONT => FRONT_ROW,
+            P_SIDE => SIDE_ROW,
+            P_BACK => BACK_ROW,
+            _ => LFE_ROW,
+        };
+        let mut nb = count_paired(pos, i)?;
+        if !(0..=5).contains(&nb) {
+            return None;
+        }
+        if pos == P_LFE {
+            let mut j = 0usize;
+            while nb > 0 {
+                let map = row[j];
+                if map < 0 {
+                    return None;
+                }
+                let (kind, tag, _) = layout[i];
+                e2c.push(E2c {
+                    av_position: 1u64 << map,
+                    planes: plane_lookup(kind, tag)?,
+                });
+                i += 1;
+                j += 1;
+                nb -= 1;
+            }
+            continue;
+        }
+        // leading odd SCE -> row[0]
+        while nb & 1 != 0 {
+            if row[0] == NONE {
+                return None;
+            }
+            if row[0] == UNUSED {
+                break;
+            }
+            let (kind, tag, _) = layout[i];
+            e2c.push(E2c {
+                av_position: 1u64 << row[0],
+                planes: plane_lookup(kind, tag)?,
+            });
+            i += 1;
+            nb -= 1;
+        }
+        let mut j = if pos != P_SIDE && nb <= 3 {
+            3usize
+        } else {
+            1usize
+        };
+        while nb >= 2 {
+            if row[j] == NONE || row[j + 1] == NONE {
+                return None;
+            }
+            let (kind, tag, _) = layout[i];
+            match kind {
+                Kind::Cpe => {
+                    e2c.push(E2c {
+                        av_position: (1u64 << row[j]) | (1u64 << row[j + 1]),
+                        planes: plane_lookup(Kind::Cpe, tag)?,
+                    });
+                    i += 1;
+                }
+                _ => {
+                    let (_, tag2, _) = layout[i + 1];
+                    e2c.push(E2c {
+                        av_position: 1u64 << row[j],
+                        planes: plane_lookup(Kind::Sce, tag)?,
+                    });
+                    e2c.push(E2c {
+                        av_position: 1u64 << row[j + 1],
+                        planes: plane_lookup(Kind::Sce, tag2)?,
+                    });
+                    i += 2;
+                }
+            }
+            j += 2;
+            nb -= 2;
+        }
+        while nb & 1 != 0 {
+            if row[5] == NONE {
+                return None;
+            }
+            let (kind, tag, _) = layout[i];
+            e2c.push(E2c {
+                av_position: 1u64 << row[5],
+                planes: plane_lookup(kind, tag)?,
+            });
+            i += 1;
+            nb -= 1;
+        }
+    }
+
+    // Stable sort by `av_position` (ffmpeg uses the AV channel position as a
+    // stable sort key for every non-22.2 layout).
+    e2c.sort_by_key(|e| e.av_position);
+
+    let order: Vec<usize> = e2c.into_iter().flat_map(|e| e.planes).collect();
+    (order.len() == n_channels).then_some(order)
 }
 
 /// The `channel_configuration` whose default element order (ISO/IEC 14496-3
