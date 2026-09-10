@@ -162,6 +162,24 @@ contexts of field-coded P pairs. This is the P analog of #32bi's I-slice
 field-neighbour work. Multi-session; needs the bin oracle to verify each
 context.
 
+**#32bl follow-up — MAP_F2F Y-scaling alone is NOT enough (tried, reverted).**
+Implemented FFmpeg's `MAP_F2F` (`h264_mvpred.h`): added `field: bool` to
+`MbInterCabacCtx`, set from the pair's `mb_field_decoding_flag`, and in
+`amvd_sum` scaled the cross-MB neighbour's y-component `>>1` (cur field /
+nbr frame) or `<<1` (cur frame / nbr field). 269 unit + ITU 27/0 stayed
+green (correct, no regression) but CANLMA2 P still desyncs — `MB(4,0)`'s
+mvds got *different*-wrong, not right (`(0,0),(3,0),(-38,1),…` vs JM
+`(-1,2),(0,0),(1,-1),…`). So the missing piece is also the **neighbour
+block-row selection**: `amvd_sum` reads `left MB block by*4+3` /
+`top MB block 3*4+bx` with no §6.4.10.7 field/frame row interleave — for a
+field-top MB abutting a frame pair, cache row `by` must come from
+`{leftTop blk row 2·by  (by<2)} / {leftBottom blk row 2·(by−2)  (by≥2)}`
+(Table 6-4, the same mapping already derived for the intra case in #32bj),
+and `derive_neighbours` must return the correct one of the left/above
+pair's two MBs. The MAP_F2F scaling then layers on top. Do all three
+(cell-row remap + pair-MB selection + MAP_F2F) together, plus the twin
+change in `predict_slice_mvs_ex` (mv predictor), verified bin-by-bin.
+
 Concrete recon bugs already visible in `reconstruct_mbaff_inter_luma`
 (reconstruct.rs ~1915):
   1. `dequant_idct_4x4` uses ZIGZAG, not the field scan, for every field
