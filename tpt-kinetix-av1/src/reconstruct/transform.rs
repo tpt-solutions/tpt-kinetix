@@ -651,3 +651,45 @@ pub(super) fn dq_denom(tx_size: usize) -> i32 {
     let tx_sz_ctx = (av1::TX_SIZE_SQR[tx_size] + av1::TX_SIZE_SQR_UP[tx_size] + 1) >> 1;
     1 << tx_sz_ctx.saturating_sub(2).min(2)
 }
+
+#[cfg(test)]
+mod large_tx_tests {
+    use super::*;
+
+    /// The 64-point 1-D inverse DCT (`n == 6`) must be free of periodic
+    /// discontinuities for a low-frequency impulse — a wrong butterfly index or
+    /// permutation in the spec's 31-step §7.13.2.3 transcription shows up as a
+    /// jump every 8/16 samples.
+    #[test]
+    fn idct64_impulse_is_smooth() {
+        for k in [1usize, 2, 3] {
+            let mut t = vec![0i64; 64];
+            t[k] = 4096;
+            inverse_dct(&mut t, 6, 16);
+            // A pure cosine of frequency k over 64 taps: max |first difference|
+            // is bounded by k * (peak) * pi / 64 ≈ k * 210.
+            let bound = (k as i64) * 230;
+            for w in t.windows(2) {
+                assert!((w[0] - w[1]).abs() <= bound, "k={k} jump in {t:?}");
+            }
+        }
+    }
+
+    /// `inverse_transform` for the rectangular `TX_64X32` DCT_DCT case: a single
+    /// low-frequency horizontal AC coefficient must reconstruct as a smooth
+    /// horizontal cosine across the full 64-wide row (no column banding).
+    #[test]
+    fn itx_64x32_dct_no_column_banding() {
+        let mut dq = vec![0i32; 32 * 32];
+        dq[1] = 200;
+        let mut dst = vec![0i32; 64 * 32];
+        inverse_transform(&dq, crate::coeff_tables::DCT_DCT, 12, false, &mut dst);
+        let row0: Vec<i32> = dst[..64].to_vec();
+        for w in row0.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() <= 6,
+                "column banding in 64x32 row 0: {row0:?}"
+            );
+        }
+    }
+}
