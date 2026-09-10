@@ -26,6 +26,37 @@ bin-level CABAC / MB oracle:
 - **hierarchical / High:** HCHP1_HHI_B (localised, first_bad=1), HCHP3_HHI_A,
   FREXT01/02_JVC, FRExt2/4_Panasonic, freh7_b
 
+## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
+
+Commit 21cff73. **Root cause via JM `ldecod` TRACE=1 build + our
+`KINETIX_BINTRACE` on CANLMA2_Sony_C frame 0** (an MBAFF-I clip): the top MB
+of pair 0 was byte-exact, the bottom MB wrong only in its **top-right 4×4
+block** (blkIdx 5) with a triangular directional-prediction error → stale
+top-right reference samples. `reconstruct_luma_at` / `reconstruct_luma_8x8`
+assumed the MB diagonally above-right is always decoded (true for plain
+raster). For the **bottom MB of an MBAFF pair** that MB is the *top* MB of
+the **next** pair — higher `mbAddr`, not yet decoded → §6.4.9-unavailable.
+Threaded `up_right_mb_avail`; the MBAFF intra reconstructor passes
+`which == 0`. **All frame-coded MBAFF pairs in CANLMA2 frame 0 (MB rows
+0-3) are now byte-exact.** Verified block-by-block: our resolved
+Intra4x4 modes + CBP match JM for MB0 and MB1 — the parse was already
+correct, only the recon was wrong.
+
+### Remaining MBAFF work (the bucket is NOT closed)
+1. **Field-coded pair reconstruction** — `reconstruct_mbaff_intra_frame`'s
+   `field` branch reconstructs at the parity line with `y_step=2` but uses
+   naive `x0-1` / `y0-y_step` neighbour sampling. Wrong when the neighbour
+   pair has a *different* `mb_field_decoding_flag` (§6.4.10.7 / §8.3.2.2.2
+   mixed field/frame remapping). CANLMA2 frame 0's first error is now
+   exactly at pair_row 2 where field pairs begin (`KINETIX_DBG_MBAFF_FIELD`
+   dumps the grid).
+2. **MBAFF inter (P/B)** — `KINETIX_MBAFF_FIELD_MC` gated & not pixel-exact;
+   `cvmp_mot_mbaff0_full_B` (max_diff 128, ~95% px) looks like the B path
+   scaffolds.
+3. **MBAFF-aware CABAC neighbour context** for real streams (CAMA* still
+   desync from frame 0).
+4. MBAFF B temporal-direct; MBAFF deblock edge cases.
+
 ## SESSION #32bg — HCHP2_HHI_A diagnosed (parked); MBAFF bucket next
 
 **HCHP2_HHI_A** (max_diff 10, only display frame 249 / POC 498 wrong):
