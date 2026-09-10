@@ -135,7 +135,34 @@ contexts all still resolve the frame-mode neighbour address, not the
 CABAC *I* path, now needed for P (and B). Multi-session, JM-oracle-driven.
 The `KINETIX_MBAFF_FIELD_MC` recon path + `reconstruct_mbaff_inter_luma`
 bugs below are downstream of that and only matter once the parse is in
-sync. Concrete recon bugs already visible in `reconstruct_mbaff_inter_luma`
+sync.
+
+**#32bl — desync PINNED to the first field-coded P pair's mvd context.**
+Method: `ffmpeg -debug mb_type` grid (ffmpeg matches the ITU ref) +
+Kinetix `on_mb_parsed` grid + `KINETIX_BINTRACE`, on CANLMA2 POC 1.
+JM POC1 pair field flags: pairs 0-3 frame, **pairs 4-7 field**. Kinetix
+decodes pairs 0-3 (frame) with mb_type / sub_mb_type / mvd / cbp all
+**bit-exact vs JM**. Pair 4 (`MB(4,0)`, first FIELD pair): skip=0 ✓,
+mb_field_decoding_flag=1 ✓ (decoded, ctx70), mb_type=P_8x8 ✓,
+sub_mb_type=[0,1,2,2] ✓ — then the **first `mvd_l0` diverges**: Kinetix
+`(0,1)`, JM `(-1,2)`. Kinetix's `amvd_sum` (`slice_data/ctx.rs:255`,
+§9.3.3.1.1.7) reports `asum=0` for the x-component where the frame-coded
+left/top neighbours (pairs 2/3) carry real mvds. It does flat
+`by*4+3` / `3*4+bx` neighbour-block indexing with **no §6.4.10.7 MBAFF
+field/frame remap and no Y-component ×2/÷2 scaling** (FFmpeg
+`fill_decode_caches`: `mvd_cache` Y is doubled/halved on a
+field/frame mismatch between current and neighbour MB). Wrong `asum` →
+wrong bin-0 ctx → wrong mvd → cbp decodes 0 vs JM's 17 → `MB(4,1)` skip
+flag decodes 1 (skipped) vs ffmpeg's coded → whole slice lost after
+~121 MBs (a spurious `decode_terminate` eventually fires).
+**Fix needed:** §6.4.10.7 MBAFF neighbour derivation + field/frame mvd
+Y-scaling in BOTH `amvd_sum` (CABAC ctx) and `predict_slice_mvs_ex` (the
+mv predictor) — plus the same class of remap for the cbp/cbf/skip
+contexts of field-coded P pairs. This is the P analog of #32bi's I-slice
+field-neighbour work. Multi-session; needs the bin oracle to verify each
+context.
+
+Concrete recon bugs already visible in `reconstruct_mbaff_inter_luma`
 (reconstruct.rs ~1915):
   1. `dequant_idct_4x4` uses ZIGZAG, not the field scan, for every field
      MB's inter residual (the inter twin of the #32bk fix).
