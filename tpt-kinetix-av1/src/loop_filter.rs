@@ -1693,7 +1693,7 @@ pub fn apply_post_filters(
     // imprecision, confirmed via an `--inloopfilters norestoration` A/B
     // check), i.e. restoration itself is now correct to the precision its
     // input allows. No corpus clip regressed.
-    if fh.uses_lr {
+    if fh.uses_lr && std::env::var("KINETIX_AV1_NOLR").is_err() {
         apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units, &lr_pre_y, 0);
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units, &lr_pre_u, sub_y);
         apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units, &lr_pre_v, sub_y);
