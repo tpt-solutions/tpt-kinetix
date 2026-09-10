@@ -1430,6 +1430,13 @@ impl<'a> TileDecodeState<'a> {
                 // and produce a worse residual than none (regresses
                 // `av1_inter_sequence` frame 2). TODO: verify the 32x32/64x64
                 // inter inverse-transform + tx_type path, then widen.
+                // Coeffs are always *read* (entropy sync — verified rng-exact
+                // vs dav1d incl. the large `TX_64X32` leaf). The inverse
+                // transform is applied only for `Tx_Size_Sqr_Up <= 16x16`:
+                // applying the 32/64-family inter residual regresses
+                // `av1_inter_sequence` frame 2 (luma diff 4.7k→10k) — a
+                // dequant / large-inverse-transform bug specific to the inter
+                // path, not the coefficient read. TODO: root-cause, then widen.
                 if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
