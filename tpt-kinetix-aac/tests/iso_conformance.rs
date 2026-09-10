@@ -8,10 +8,13 @@
 //! is skipped so CI without the fixtures stays green.
 //!
 //! `al04_44` (LC mono, pulse), `al05_44` (LC stereo), `al18_44` (LC mono),
-//! `al06_44` (LC 5.1, channel_config 0 / PCE) decode **bit-exact**. The
-//! remaining channel_config-0 multi-element / 96 kHz / mismatched-PCE / SSR
-//! streams are recorded as known gaps with a pinned regression ceiling — see
-//! `EXPECT` below.
+//! `al06_44` (LC 5.1, channel_config 0 / PCE) and `al22_chCfg0PCE_44` (LC
+//! 7.1-wide, channel_config 0 / PCE) decode **bit-exact** — channel order comes
+//! from a port of ffmpeg's `sniff_channel_order` over the parsed
+//! `program_config_element`. `al07_96` / `al15_44` (with CCE coupling) are
+//! within ~1–2 orders of magnitude of bit-exact, the residual being lossy-float
+//! rounding in the coupling multiply-add. AAC Main profile (`am00`/`am05`) is
+//! rejected. See `EXPECT` below for each stream's pinned ceiling.
 
 use std::path::{Path, PathBuf};
 use tpt_kinetix_aac::AacDecoder;
@@ -67,7 +70,7 @@ const EXPECT: &[(&str, Expect, &str)] = &[
     (
         "al06_44",
         Expect::Exact,
-        "LC 5.1, channel_config 0 / PCE (layout inferred from element order)",
+        "LC 5.1, channel_config 0 / in-band PCE (order via sniff_channel_order)",
     ),
     (
         "al07_96",
@@ -93,12 +96,12 @@ const EXPECT: &[(&str, Expect, &str)] = &[
     ),
     (
         "al15_44",
-        Expect::KnownGap { max_lsb: 31_000.0 },
-        "LC 6-ch (FL FR FC LFE FLC FRC) + CCE — parses fully, correct channel \
-         order (element shape is standard 5.1, resolved by infer). Uncoupled LFE \
-         is bit-exact; the 5 CCE-coupled channels sit at corr ~0.998 / scale 1.0 \
-         — a small broadband residual in the independent-coupling contribution \
-         (CC-channel reconstruction detail), not a permutation or scale error",
+        Expect::KnownGap { max_lsb: 4.0 },
+        "LC 6-ch (FL FR FC LFE FLC FRC), channel_config 0 / in-band PCE + \
+         independent CCE coupling — correct layout (PCE puts the 2nd front CPE \
+         at FLc/FRc, resolved by sniff_channel_order) and coupling applied in \
+         the time domain. Residual is ~1.5 LSB on a single sample: lossy-float \
+         rounding from the extra coupling multiply-add, same class as al07",
     ),
 ];
 

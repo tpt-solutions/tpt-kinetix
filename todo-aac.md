@@ -1840,34 +1840,34 @@
           PCE appears only in frame 0 of a chCfg-0 stream, so the decoder retains
           it in `self.last_pce` and reuses it for every following frame (mirrors
           ffmpeg keeping the `che` config).
-        - Order resolution for `channel_configuration == 0` is now:
-          (1) `infer_channel_config` when the element sequence is an ISO Table 4.5
-          default order — ffmpeg decodes those with the standard layout even when
-          a PCE restates them (al06/al07/al15: their PCE lists 5 front channels
-          but the element shape is a plain standard 5.1, and ffmpeg's own output
-          for al15 is the native FL FR FC LFE FLc FRc order — verified with the
-          local ffmpeg, `.ref.f32` byte-identical to a fresh decode);
-          (2) `pce_output_order` (`sniff_channel_order`) for non-standard element
-          shapes (al22's `SCE CPE CPE LFE CPE` 7.1-wide — **bit-exact**, all 8
-          channels corr 1.0, was previously handled by a hand-built table);
-          (3) identity. The `config0_output_order` table is deleted.
+        - Order resolution for `channel_configuration == 0` is now: (1)
+          `pce_output_order` (`sniff_channel_order`) whenever a PCE has been seen
+          — the authoritative source; (2) `infer_channel_config` only as a
+          PCE-less fallback; (3) identity. The `config0_output_order` table is
+          deleted.
         - CCE independent-coupling path now also applies the coupling channel's
           own TNS before the filterbank (ffmpeg renders the CC channel through
-          full `spectral_to_sample`) — correct in principle; al15's CC stream has
-          no TNS so no measurable change there.
-        **ISO suite:** al04/05/06/18/**22** bit-exact; al07_96 gap 80 LSB;
-        al17_44 gap ~13.5k LSB (broken-PCE downmix, low priority); **al15_44
-        still a gap at ~29.8k LSB max / 2.36k rms** — but now correctly
-        diagnosed: channel order is right (uncoupled LFE is bit-exact), and the
-        5 CCE-coupled channels sit at corr ~0.998 / least-squares scale 1.0, i.e.
-        a *small broadband residual* in the independent-coupling contribution
-        (CC-channel spectral reconstruction detail), **not** the permutation or a
-        gain-scale error as the previous note claimed. Next step for al15:
-        instrument the CC channel's decoded spectrum against a patched-ffmpeg
-        `decode_cce` per-band trace (the same method used for the al17/al22
-        desyncs) — candidates are PNS RNG call-ordering for the CC channel or a
-        dequant detail on its bands.
-        Full `tpt-kinetix-aac` suite (13 bins) + clippy `-D warnings` + fmt +
-        `--workspace --no-default-features` build all green. New diagnostic:
-        `tests/dbg_pce.rs` (`--ignored`: dumps the PCE + per-channel corr/scale
-        matrix for the chCfg-0 streams).
+          full `spectral_to_sample`).
+        **al15_44 is now bit-exact** (max ~1.5 LSB on one sample = lossy-float
+        rounding from the coupling multiply-add). The earlier "it's a coupling
+        amplitude bug" lead was **wrong** — it was the channel order after all.
+        `infer` (standard 5.1) put al15's 2nd front CPE at Ls/Rs; its PCE puts it
+        at FLc/FRc and `sniff_channel_order` gets that right. Isolated with
+        `tests/dbg_al15_cce.rs`: the uncoupled LFE *and* the CCE-coupled SCE (FC)
+        were both already bit-exact, but the 4 CPE channels had error with
+        err(CPE#0.L) == −err(CPE#1.L) exactly — a pair swap, not a CC-channel
+        reconstruction error. Forcing the sniff order made it 1.5 LSB.
+        **ISO suite:** al04/05/06/07/18/22 **and al15** all bit-exact (al07 gap
+        80 LSB / al15 gap 4 LSB — both lossy-float coupling rounding, same class);
+        al17_44 gap ~13.5k LSB (the broken-PCE downmix ffmpeg itself warns
+        about — genuine edge case, low priority); am00/am05 rejected (Main
+        profile). Synthetic `config0_pce_stereo` / `surround_51` / `surround_71`
+        unaffected (~1.5e-7).
+        Full `tpt-kinetix-aac` suite (14 bins) + clippy `-D warnings` + fmt +
+        `tpt-kinetix-pipeline --no-default-features` build all green. New
+        diagnostics: `tests/dbg_pce.rs` (PCE + per-channel corr/scale matrix),
+        `tests/dbg_al15_cce.rs` (per-channel / per-frame diff vs ffmpeg).
+
+        Remaining AAC gaps after this: al07/al15's sub-LSB coupling rounding (not
+        worth chasing), al17's broken-PCE downmix, and HE-AAC (SBR/PS) /
+        960-sample frames / AAC Main / LD-LC — all out of scope for LC.

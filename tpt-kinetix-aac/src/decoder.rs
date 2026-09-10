@@ -679,26 +679,26 @@ impl AacDecoder {
         let order = if hdr.channel_configuration == 0 {
             // Channel-order resolution for a `channel_configuration == 0` (PCE)
             // stream, in decreasing order of confidence:
-            //   1. the element sequence is one of the ISO Table 4.5 default
-            //      orders — ffmpeg decodes those with the standard layout even
-            //      when a PCE restates them (covers al06/al07/al15, whose PCE
-            //      front lists 5 channels but whose element shape is a plain
-            //      standard config);
-            //   2. a real in-band `program_config_element` (`sniff_channel_order`
-            //      — covers al22's non-standard 7.1-wide element shape);
+            //   1. a real in-band `program_config_element` run through a port of
+            //      ffmpeg's `sniff_channel_order` — the authoritative source
+            //      (al06/al07/al15/al22 all decode bit-exact this way, including
+            //      al15 whose PCE puts the 2nd front CPE at FLc/FRc even though
+            //      its element shape looks like a plain 5.1). A PCE usually only
+            //      appears in frame 0, so it is retained in `self.last_pce`.
+            //   2. inferring a standard ISO Table 4.5 default config from the
+            //      element sequence, for a PCE-less chCfg-0 stream;
             //   3. identity.
             if block.pce.is_some() {
                 self.last_pce = block.pce.clone();
             }
-            let inferred = infer_channel_config(&block.elements);
-            let order = if inferred != 0 {
-                Some(output_channel_order(inferred, ch_count))
-            } else {
-                self.last_pce
-                    .as_ref()
-                    .and_then(|pce| pce_output_order(pce, &block.elements, ch_count))
-            };
-            order.unwrap_or_else(|| (0..ch_count).collect())
+            self.last_pce
+                .as_ref()
+                .and_then(|pce| pce_output_order(pce, &block.elements, ch_count))
+                .or_else(|| {
+                    let inferred = infer_channel_config(&block.elements);
+                    (inferred != 0).then(|| output_channel_order(inferred, ch_count))
+                })
+                .unwrap_or_else(|| (0..ch_count).collect())
         } else {
             output_channel_order(hdr.channel_configuration, ch_count)
         };
