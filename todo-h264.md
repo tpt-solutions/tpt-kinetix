@@ -2,6 +2,30 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## ITU informational landscape after the scaling-list fix (#32bf)
+
+The scaling-matrix fix moved several clips from "fully desynced" to
+"near-exact" — worth chasing before the MBAFF/PAFF desyncs:
+
+| clip | max_diff | note |
+|---|---|---|
+| FRExt1_Panasonic_D | 0 | **DONE — BitExact** |
+| FRExt3_Panasonic_E | 1 | 45 bytes, 2 "PPS-all-default" B frames, a ~1px vertical strip at MB col 2 (x=32) rows 0-2. 8x8-dequant / deblock-tc rounding. All 4 JVT default matrices now verified vs spec Table 7-3/7-4. |
+| HCAFR1_HHI_C | 6 | progressive (frame_mbs_only=1 — NOT MBAFF), High CABAC, SPS matrix present + all lists absent → JVT defaults. ~100-260 samples/frame, starts frame 0 (IDR/intra). Has a JVT `_trc.txt`. |
+| HCHP2_HHI_A | 10 | parked, see #32bg |
+
+Still fully desynced from frame 0 (max_diff 128/255) — each needs a
+bin-level CABAC / MB oracle:
+- **MBAFF CABAC:** CAMA1_Sony_C, CAMA1_TOSHIBA_B, CAMA3_Sand_E, CAMANL1/3,
+  CAMP_MOT_MBAFF_L30, CANLMA2/3_Sony_C, cabac_mot_mbaff0_full, cama1_vtc_c,
+  cama2_vtc_b
+- **MBAFF CAVLC:** cavlc_mot_mbaff0_full_B (max_diff 128 — less broken)
+- **PAFF:** CAPA1/CVPA1_TOSHIBA_B, CVFI1_Sony_D, HCAFF1_HHI_B,
+  Sharp_MP_PAFF_1r2, cabac/cavlc_mot_picaff0_full
+- **field CAVLC:** BA1_FT_C, CI1_FT_B, FM1_FT_E, FM1_BT_B (frame counts off)
+- **hierarchical / High:** HCHP1_HHI_B (localised, first_bad=1), HCHP3_HHI_A,
+  FREXT01/02_JVC, FRExt2/4_Panasonic, freh7_b
+
 ## SESSION #32bg — HCHP2_HHI_A diagnosed (parked); MBAFF bucket next
 
 **HCHP2_HHI_A** (max_diff 10, only display frame 249 / POC 498 wrong):
