@@ -1,0 +1,163 @@
+diff --git a/source/app/ldecod/image.c b/source/app/ldecod/image.c
+index 404e268..0ab0e8e 100644
+--- a/source/app/ldecod/image.c
++++ b/source/app/ldecod/image.c
+@@ -1966,7 +1966,33 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+     }
+     else
+     {
++      {
++        const char *dd = getenv("JM_DUMP_DIR");
++        int tgt = getenv("JM_DUMP_POC") ? atoi(getenv("JM_DUMP_POC")) : -999999;
++        if (dd && (*dec_picture)->poc == tgt) {
++          int W=(*dec_picture)->size_x, H=(*dec_picture)->size_y, y;
++          char fn[512]; FILE*f;
++          snprintf(fn,sizeof fn,"%s/jm_poc%d_predeblock.gray",dd,tgt);
++          f=fopen(fn,"wb");
++          for(y=0;y<H;y++){int xx; for(xx=0;xx<W;xx++){unsigned char bb=(unsigned char)(*dec_picture)->imgY[y][xx]; fputc(bb,f);}}
++          fclose(f);
++          fprintf(stderr,"JM: dumped pre-deblock luma poc=%d %dx%d -> %s\n",tgt,W,H,fn);
++        }
++      }
+       DeblockPicture( p_Vid, *dec_picture );
++      {
++        const char *dd = getenv("JM_DUMP_DIR");
++        int tgt = getenv("JM_DUMP_POC") ? atoi(getenv("JM_DUMP_POC")) : -999999;
++        if (dd && (*dec_picture)->poc == tgt) {
++          int W=(*dec_picture)->size_x, H=(*dec_picture)->size_y, y;
++          char fn[512]; FILE*f;
++          snprintf(fn,sizeof fn,"%s/jm_poc%d_postdeblock.gray",dd,tgt);
++          f=fopen(fn,"wb");
++          for(y=0;y<H;y++){int xx; for(xx=0;xx<W;xx++){unsigned char bb=(unsigned char)(*dec_picture)->imgY[y][xx]; fputc(bb,f);}}
++          fclose(f);
++          fprintf(stderr,"JM: dumped post-deblock luma poc=%d -> %s\n",tgt,fn);
++        }
++      }
+     }
+   }
+   else
+diff --git a/source/app/ldecod/loopFilter.c b/source/app/ldecod/loopFilter.c
+index 51f32cc..1c492a9 100644
+--- a/source/app/ldecod/loopFilter.c
++++ b/source/app/ldecod/loopFilter.c
+@@ -485,9 +485,24 @@ static void get_db_strength(VideoParameters *p_Vid, StorablePicture *p, int MbQA
+ }
+ 
+ 
++int g_jm_dbgmb = 0;
++int g_jm_poc = 0;
+ static void perform_db(VideoParameters *p_Vid, StorablePicture *p, int MbQAddr)
+ {
+   Macroblock   *MbQ = &(p_Vid->mb_data[MbQAddr]) ; // current Mb
++  {
++    const char *e = getenv("JM_TRACE_MB");
++    g_jm_poc = p->poc;
++    g_jm_dbgmb = 0;
++    if (e && getenv("JM_TRACE_POC") && p->poc == atoi(getenv("JM_TRACE_POC"))) {
++      const char *s = e; char buf[8]; int bi=0;
++      while (1) {
++        if (*s==','||*s==0) { buf[bi]=0; if (bi && atoi(buf)==MbQAddr) g_jm_dbgmb=1; bi=0; if(!*s)break; }
++        else if (bi<7) buf[bi++]=*s;
++        s++;
++      }
++    }
++  }
+ 
+   // return, if filter is disabled
+   if (MbQ->DFDisableIdc == 1) 
+diff --git a/source/app/ldecod/loop_filter_normal.c b/source/app/ldecod/loop_filter_normal.c
+index cd416b0..a48c7c7 100644
+--- a/source/app/ldecod/loop_filter_normal.c
++++ b/source/app/ldecod/loop_filter_normal.c
+@@ -532,6 +532,14 @@ static void edge_loop_luma_ver(ColorPlane pl, imgpel** Img, byte *Strength, Macr
+       imgpel **cur_img = &Img[get_pos_y_luma(MbP, 0)];
+       int pel;
+ 
++      {
++        extern int g_jm_dbgmb;
++        if (g_jm_dbgmb && pl==PLANE_Y) {
++          int r; imgpel **ci = cur_img;
++          fprintf(stderr,"JM VER edge=%d A=%d B=%d bs=[%d %d %d %d] px1=%d\n",edge,Alpha,Beta,Strength[0],Strength[1],Strength[2],Strength[3],pos_x1);
++          for(r=0;r<16;r++){imgpel*p=ci[r]+pos_x1;fprintf(stderr,"  row%2d p3..p0=%d %d %d %d | q0..q3=%d %d %d %d\n",r,p[-3],p[-2],p[-1],p[0],p[1],p[2],p[3],p[4]);}
++        }
++      }
+       for( pel = 0 ; pel < MB_BLOCK_SIZE ; pel += 4 )
+       {
+         if(*Strength == 4 )    // INTRA strong filtering
+@@ -541,10 +549,17 @@ static void edge_loop_luma_ver(ColorPlane pl, imgpel** Img, byte *Strength, Macr
+         else if( *Strength != 0) // normal filtering
+         {
+           luma_ver_deblock_normal(cur_img, pos_x1, Alpha, Beta, ClipTab[ *Strength ] * bitdepth_scale, max_imgpel_value);
+-        }        
++        }
+         cur_img += 4;
+         Strength ++;
+       }
++      {
++        extern int g_jm_dbgmb;
++        if (g_jm_dbgmb && pl==PLANE_Y) {
++          int r; imgpel **ci = cur_img - 16;
++          for(r=0;r<16;r++){imgpel*p=ci[r]+pos_x1;fprintf(stderr,"  OUT row%2d p2..p0=%d %d %d | q0..q2=%d %d %d\n",r,p[-2],p[-1],p[0],p[1],p[2],p[3]);}
++        }
++      }
+     }
+   }
+ }
+@@ -736,6 +751,14 @@ static void edge_loop_luma_hor(ColorPlane pl, imgpel** Img, byte *Strength, Macr
+       imgpel *imgP = &Img[get_pos_y_luma(MbP, ypos)][get_pos_x_luma(MbP, 0)];
+       imgpel *imgQ = imgP + width;
+       int pel;
++      {
++        extern int g_jm_dbgmb;
++        if (g_jm_dbgmb && pl==PLANE_Y) {
++          int cc;
++          fprintf(stderr,"JM HOR edge=%d A=%d B=%d bs=[%d %d %d %d]\n",edge,Alpha,Beta,Strength[0],Strength[1],Strength[2],Strength[3]);
++          for(cc=0;cc<16;cc++)fprintf(stderr,"  col%2d p3..p0=%d %d %d %d | q0..q3=%d %d %d %d\n",cc,imgP[cc-3*width],imgP[cc-2*width],imgP[cc-width],imgP[cc],imgQ[cc],imgQ[cc+width],imgQ[cc+2*width],imgQ[cc+3*width]);
++        }
++      }
+ 
+       for( pel = 0 ; pel < BLOCK_SIZE ; pel++ )
+       {
+diff --git a/source/lib/lcommon/win32.c b/source/lib/lcommon/win32.c
+index b946417..5e5a8ef 100644
+--- a/source/lib/lcommon/win32.c
++++ b/source/lib/lcommon/win32.c
+@@ -15,7 +15,7 @@
+ #include "global.h"
+ 
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__MINGW32__)
+ 
+ static LARGE_INTEGER freq;
+ 
+diff --git a/source/lib/lcommon/win32.h b/source/lib/lcommon/win32.h
+index 1f71e7b..1cd832d 100644
+--- a/source/lib/lcommon/win32.h
++++ b/source/lib/lcommon/win32.h
+@@ -25,7 +25,7 @@
+ # define NUM_THREADS 8
+ #endif
+ 
+-#if defined(WIN32) || defined (WIN64)
++#if (defined(WIN32) || defined (WIN64)) && !defined(__MINGW32__)
+ # include <io.h>
+ # include <sys/types.h>
+ # include <sys/stat.h>
+@@ -70,8 +70,14 @@ typedef int   intptr_t;
+ # define  TIMEB    timeb
+ # define  TIME_T   struct timeval
+ # define  tell(fd) lseek(fd, 0, SEEK_CUR)
+-# define  OPENFLAGS_WRITE O_WRONLY|O_CREAT|O_TRUNC
+-# define  OPENFLAGS_READ  O_RDONLY
++# ifdef __MINGW32__
++#  include <fcntl.h>
++#  define  OPENFLAGS_WRITE O_WRONLY|O_CREAT|O_TRUNC|O_BINARY
++#  define  OPENFLAGS_READ  O_RDONLY|O_BINARY
++# else
++#  define  OPENFLAGS_WRITE O_WRONLY|O_CREAT|O_TRUNC
++#  define  OPENFLAGS_READ  O_RDONLY
++# endif
+ # define  OPEN_PERMISSIONS S_IRUSR | S_IWUSR
+ 
+ # if __STDC_VERSION__ >= 199901L
