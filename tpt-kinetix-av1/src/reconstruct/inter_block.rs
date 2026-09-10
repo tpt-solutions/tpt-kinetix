@@ -108,6 +108,22 @@ fn wedge_ctx(bsize: usize) -> usize {
     }
 }
 
+/// `get_obmc_mask(length)` (§7.11.3.9): the raised-cosine blend weights for an
+/// overlap region `length` samples deep. `length` is always a power of two in
+/// `2..=32`; anything else uses the 32-tap mask.
+fn obmc_mask(length: usize) -> &'static [i32] {
+    match length {
+        2 => &[45, 64],
+        4 => &[39, 50, 59, 64],
+        8 => &[36, 42, 48, 53, 57, 61, 64, 64],
+        16 => &[34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64],
+        _ => &[
+            33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60,
+            61, 62, 64, 64, 64, 64, 64, 64, 64, 64,
+        ],
+    }
+}
+
 impl<'a> TileDecodeState<'a> {
     /// `has_overlappable_candidates()` (§5.11.23): true when the block has an
     /// inter-coded neighbour directly above or to the left (within the tile),
@@ -564,6 +580,16 @@ impl<'a> TileDecodeState<'a> {
         // AV1 §7.10.2 `find_mv_stack` — shared by both branches.
         let (stack, ctx, n_mvs, drl_ctx, comp_mode_ctx) =
             self.inter_mv_stack(mi_row, mi_col, bsize, ref_names);
+        if dbg_b0 {
+            eprintln!(
+                "DBG b0 mvstack n_mvs={n_mvs} ctx=0x{ctx:x} comp_ctx={comp_mode_ctx} \
+                 s0=({},{}) s1=({},{})",
+                stack.first().map(|s| s[0].row).unwrap_or(0),
+                stack.first().map(|s| s[0].col).unwrap_or(0),
+                stack.get(1).map(|s| s[0].row).unwrap_or(0),
+                stack.get(1).map(|s| s[0].col).unwrap_or(0),
+            );
+        }
 
         if !compound {
             // §5.11.24 single-ref mode cascade.
@@ -1026,6 +1052,16 @@ impl<'a> TileDecodeState<'a> {
             mask_desc,
         )?;
 
+        // Overlapped motion compensation (§7.11.3.9) — blend the base
+        // prediction with predictions from the above / left neighbours'
+        // motion vectors. WARP (`motion_mode == 2`) prediction is still
+        // unimplemented (falls back to the translational base).
+        if motion_mode == 1 {
+            for plane in 0..3 {
+                self.apply_obmc(mi_row, mi_col, bsize, plane);
+            }
+        }
+
         // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
         // here (`IsInter == 1`): a recursive var-tx-tree of `txfm_split`
         // symbols (`read_block_tx_size_ibc`/`read_tx_tree`), NOT the
@@ -1252,6 +1288,162 @@ impl<'a> TileDecodeState<'a> {
         // `find_mv_stack` can see this skip-mode block's ref pair + MVs.
         self.splat_refmv_full(mi_row, mi_col, bsize, ref_names, mvs, 0);
         Ok(())
+    }
+
+    /// Overlapped motion compensation for one plane (§7.11.3.9 / §7.11.3.10).
+    /// Blends the base prediction already in the plane with predictions formed
+    /// from the above and left neighbours' motion vectors, using the raised-cosine
+    /// `Obmc_Mask_*` weights (decaying away from the shared edge).
+    fn apply_obmc(&mut self, mi_row: usize, mi_col: usize, bsize: usize, plane: usize) {
+        let (subx, suby) = if plane == 0 {
+            (0usize, 0usize)
+        } else {
+            (self.subsampling_x as usize, self.subsampling_y as usize)
+        };
+        let bw4 = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let bh4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
+        let w = (bw4 * MI_SIZE) >> subx;
+        let h = (bh4 * MI_SIZE) >> suby;
+        let row_start = self.tile_px_y0 / MI_SIZE;
+        let col_start = self.tile_px_x0 / MI_SIZE;
+        let avail_u = mi_row > row_start;
+        let avail_l = mi_col > col_start;
+
+        let (pstride, pw, ph) = match plane {
+            1 | 2 => (self.uv_stride, self.tile_cw, self.tile_ch),
+            _ => (self.y_stride, self.tile_w, self.tile_h),
+        };
+        let (hbits, vbits) = if plane == 0 {
+            (3u32, 3u32)
+        } else {
+            (3 + self.subsampling_x as u32, 3 + self.subsampling_y as u32)
+        };
+        let grid_w4 = |r: usize, c: usize| -> usize {
+            self.refmv_grid
+                .get(r * self.refmv_stride + c)
+                .map(|cell| cell.w4 as usize)
+                .unwrap_or(0)
+        };
+        let grid_h4 = |r: usize, c: usize| -> usize {
+            self.refmv_grid
+                .get(r * self.refmv_stride + c)
+                .map(|cell| cell.h4 as usize)
+                .unwrap_or(0)
+        };
+
+        // Collected overlap jobs, gathered first so the mutable plane borrow is
+        // taken only for the blend.
+        struct ObmcJob {
+            pass: u8,
+            px: usize,
+            py: usize,
+            pred_w: usize,
+            pred_h: usize,
+            mv: Mv,
+            filter: u8,
+            nb_ref: u8,
+        }
+        let mut jobs: Vec<ObmcJob> = Vec::new();
+
+        if avail_u && SUBSAMPLED_SIZE[bsize][subx][suby] >= BLOCK_8X8 {
+            let n_limit = 4.min((bw4 as u32).trailing_zeros() as usize);
+            let mut x4 = mi_col;
+            let mut n_count = 0;
+            let x_end = self.mi_cols.min(mi_col + bw4);
+            while n_count < n_limit && x4 < x_end {
+                let cand_row = mi_row - 1;
+                let cand_col = x4 | 1;
+                let step4 = grid_w4(cand_row, cand_col).clamp(2, 16);
+                let nb_ref = self.ref_above.get(cand_col).map(|r| r[0]).unwrap_or(0);
+                if nb_ref > crate::inter::INTRA_FRAME {
+                    n_count += 1;
+                    let pred_w = w.min((step4 * MI_SIZE) >> subx);
+                    let pred_h = (h >> 1).min(32 >> suby);
+                    let px = ((x4 * MI_SIZE) as isize - self.tile_px_x0 as isize) >> subx;
+                    let py = ((mi_row * MI_SIZE) as isize - self.tile_px_y0 as isize) >> suby;
+                    if px >= 0 && py >= 0 && pred_w > 0 && pred_h > 0 {
+                        jobs.push(ObmcJob {
+                            pass: 0,
+                            px: px as usize,
+                            py: py as usize,
+                            pred_w,
+                            pred_h,
+                            mv: self.mv_above[cand_col][0],
+                            filter: self.filter_above[0].get(cand_col).copied().unwrap_or(0),
+                            nb_ref,
+                        });
+                    }
+                }
+                x4 += step4;
+            }
+        }
+        if avail_l {
+            let n_limit = 4.min((bh4 as u32).trailing_zeros() as usize);
+            let mut y4 = mi_row;
+            let mut n_count = 0;
+            let y_end = self.mi_rows.min(mi_row + bh4);
+            while n_count < n_limit && y4 < y_end {
+                let cand_row = y4 | 1;
+                let cand_col = mi_col - 1;
+                let step4 = grid_h4(cand_row, cand_col).clamp(2, 16);
+                let nb_ref = self.ref_left.get(cand_row).map(|r| r[0]).unwrap_or(0);
+                if nb_ref > crate::inter::INTRA_FRAME {
+                    n_count += 1;
+                    let pred_w = (w >> 1).min(32 >> subx);
+                    let pred_h = h.min((step4 * MI_SIZE) >> suby);
+                    let px = ((mi_col * MI_SIZE) as isize - self.tile_px_x0 as isize) >> subx;
+                    let py = ((y4 * MI_SIZE) as isize - self.tile_px_y0 as isize) >> suby;
+                    if px >= 0 && py >= 0 && pred_w > 0 && pred_h > 0 {
+                        jobs.push(ObmcJob {
+                            pass: 1,
+                            px: px as usize,
+                            py: py as usize,
+                            pred_w,
+                            pred_h,
+                            mv: self.mv_left[cand_row][0],
+                            filter: self.filter_left[0].get(cand_row).copied().unwrap_or(0),
+                            nb_ref,
+                        });
+                    }
+                }
+                y4 += step4;
+            }
+        }
+
+        for job in jobs {
+            let ObmcJob { pass, px, py, pred_w, pred_h, mv, filter, nb_ref } = job;
+            let slot = self.ref_to_slot[nb_ref as usize] as usize;
+            let Some(rf) = self.ref_slots.slots[slot] else {
+                continue;
+            };
+            let (rp, rw, rh) = rf.plane(plane);
+            let mut obmc = vec![0u8; pred_w * pred_h];
+            motion_compensate(
+                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filter, hbits, vbits,
+            );
+            let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
+            let dst = match plane {
+                1 => &mut self.u_plane,
+                2 => &mut self.v_plane,
+                _ => &mut self.y_plane,
+            };
+            for i in 0..pred_h {
+                let sy = py + i;
+                if sy >= ph {
+                    break;
+                }
+                for j in 0..pred_w {
+                    let sx = px + j;
+                    if sx >= pw {
+                        break;
+                    }
+                    let m = if pass == 0 { mask[i] } else { mask[j] };
+                    let cur = dst[sy * pstride + sx] as i32;
+                    let o = obmc[i * pred_w + j] as i32;
+                    dst[sy * pstride + sx] = (((m * cur + (64 - m) * o) + 32) >> 6).clamp(0, 255) as u8;
+                }
+            }
+        }
     }
 
     /// Motion-compensate one plane for an inter block: for single reference, copy
