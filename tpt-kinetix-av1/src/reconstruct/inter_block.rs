@@ -1344,11 +1344,12 @@ impl<'a> TileDecodeState<'a> {
                     &mut self.coeff_ctxs,
                     &blk,
                 )?;
-                // Coeffs are always *read* (entropy sync), but only applied
-                // for transform sizes with a verified inverse-transform path
-                // (<= 16x16 square-up) — a larger tx would add a wrong
-                // residual, worse than none. TODO: widen once the 32x32/64x64
-                // inverse transforms are conformance-checked for inter.
+                // Coeffs are always *read* (entropy sync). The inverse
+                // transform is applied only for `Tx_Size_Sqr_Up <= 16x16` —
+                // the larger inter transforms are not yet conformance-checked
+                // and produce a worse residual than none (regresses
+                // `av1_inter_sequence` frame 2). TODO: verify the 32x32/64x64
+                // inter inverse-transform + tx_type path, then widen.
                 if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);

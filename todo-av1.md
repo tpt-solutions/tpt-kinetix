@@ -5837,3 +5837,21 @@
 > 139 tests + intra corpus (6/6) pass. Still stubbed: compound *prediction*
 > (plain average, not weighted/wedge/diffwtd), large-tx inverse transforms,
 > and compound `find_mv_stack` temporal/extended candidates (n_mvs undercount).
+
+> **2026-09-10 (cont'd) — compound ENTROPY chain fully bit-exact.** Re-traced
+> the 128x96 poc=1 first compound block end-to-end: `is_comp` → ref tree →
+> `comp_inter_mode` → drl → per-ref MV → `read_compound_type` → var-tx (1 leaf
+> `TX_64X32`) → luma residual (17 coeffs) → 2× chroma residual all match
+> patched dav1d rng (`post-residual rng=39026` == dav1d `Post-uv-cf-blk[pl=1]
+> r=39026`), and the *next* block's `Post-skip` (r=65402) also matches. So the
+> compound coefficient reads (incl. large rect tx) are correct.
+> Tried applying the large-tx inter inverse transform (removing the
+> `Tx_Size_Sqr_Up <= 16x16` gate): frame 1 luma-diff slightly better but
+> **frame 2 luma-diff 4751→10390** — the 32x32/64x64 inter inverse transform
+> or its `tx_type` is wrong, so the gate stays. Remaining compound work is all
+> PIXEL reconstruction: (1) intermediate-precision MC + `avg`/`w_avg`
+> (jnt_weights)/`mask` (wedge/diffwtd) blend — Kinetix's `motion_compensate`
+> outputs u8 and averages there, dav1d blends in the pre-downshift domain, so
+> even plain `COMP_INTER_AVG` isn't bit-exact; (2) verify the large inter
+> inverse transform + tx_type; (3) compound `find_mv_stack` temporal/extended
+> candidates (n_mvs undercount). These form a coherent pixel-domain follow-up.
