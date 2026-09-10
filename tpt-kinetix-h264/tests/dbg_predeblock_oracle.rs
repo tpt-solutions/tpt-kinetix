@@ -93,7 +93,11 @@ fn predeblock_vs_ffmpeg() {
     let annexb = std::fs::read(&bs).unwrap();
     let reference = std::fs::read(&ff_path).unwrap();
 
-    let mut dec = H264Decoder::new().with_display_order();
+    let decode_order = std::env::var("ORACLE_DECODE_ORDER").is_ok();
+    let mut dec = H264Decoder::new();
+    if !decode_order {
+        dec = dec.with_display_order();
+    }
     let mut frames = Vec::new();
     for (n, u) in split_nals(&annexb).into_iter().enumerate() {
         let pkt = Packet {
@@ -128,11 +132,32 @@ fn predeblock_vs_ffmpeg() {
         .unwrap_or(6);
 
     for (fi, frame) in frames.iter().take(maxf).enumerate() {
-        if frame.data.len() != fl || fi >= nref {
+        if frame.data.len() != fl {
             continue;
         }
         let got = &frame.data;
-        let rf = &reference[fi * fl..(fi + 1) * fl];
+        // best-matching reference frame by SAD (decode-order safe)
+        let mut best = (i64::MAX, 0usize);
+        for ri in 0..nref {
+            let rs = &reference[ri * fl..(ri + 1) * fl];
+            let sad: i64 = got
+                .iter()
+                .zip(rs)
+                .map(|(a, b)| (*a as i64 - *b as i64).abs())
+                .sum();
+            if sad < best.0 {
+                best = (sad, ri);
+            }
+        }
+        let ri = std::env::var("REF_IDX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(best.1);
+        eprintln!("  decoded#{fi} best-matches ref {} (sad {})  using ref {ri}", best.1, best.0);
+        if ri >= nref {
+            continue;
+        }
+        let rf = &reference[ri * fl..(ri + 1) * fl];
         let plane = |name: &str, a: &[u8], b: &[u8], pw: usize| {
             let (mut maxd, mut nd, mut worst) = (0i32, 0usize, None);
             for (i, (x, y)) in a.iter().zip(b).enumerate() {
