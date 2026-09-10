@@ -79,20 +79,6 @@ impl Mv {
             col: ((self.col * num) + (den >> 1)) / den,
         }
     }
-
-    /// Derive the chroma-plane motion vector for a subsampled (4:2:0) plane
-    /// from this luma MV (AV1 §7.11.3): `mv_chroma = (mv * 2 ± 1) >> 2`, with
-    /// the rounding term matching the sign of `mv` (libaom/dav1d `scaled_chroma`).
-    pub fn scaled_chroma(&self) -> Mv {
-        let scale = |v: i32| -> i32 {
-            if v >= 0 {
-                (v * 2 + 1) >> 2
-            } else {
-                (v * 2 - 1) >> 2
-            }
-        };
-        Mv::new(scale(self.row), scale(self.col))
-    }
 }
 
 /// An immutable view of one decoded reference frame's three planes. Indexed by
@@ -147,21 +133,22 @@ pub fn ref_plane_offset(_ref: u8) -> usize {
 
 // --- Sub-pel motion compensation (§7.11.3) ----------------------------------
 
-/// Select the 8-tap sub-pel kernel for `frac` (1/8-pel offset, 0..8) and
-/// filter `kind` (one of `INTERP_*`; `SWITCHABLE` is resolved by the caller).
+/// Select the 8-tap sub-pel kernel for MV-component fraction `frac` and filter
+/// `kind` (one of `INTERP_*`; `SWITCHABLE` is resolved by the caller).
 ///
-/// `use_hp` is the MV precision: `true` = 1/8-pel (fraction used directly as a
-/// table index), `false` = 1/4-pel (fractions are even, which still lands on a
-/// valid kernel position). The generated `SUBPEL_FILTERS` table carries 16
-/// kernel positions per filter; AV1 indexes it by the 1/8 fractional offset.
-fn subpel_kernel(kind: u8, frac: i32) -> &'static [i32; 8] {
+/// `bits` is the sub-pel precision of the MV *component* for this axis: 3 for
+/// luma (1/8-pel), 4 for a 4:2:0/4:2:2 chroma axis (1/16-pel, since a 1/8
+/// luma-pel MV is a 1/16 chroma-pel MV). `SUBPEL_FILTERS` is a 16-row table
+/// indexed by the 1/16 phase, so a luma phase `p` maps to row `p << 1`.
+fn subpel_kernel(kind: u8, frac: i32, bits: u32) -> &'static [i32; 8] {
     let f = match kind {
         INTERP_EIGHTTAP_REGULAR => 0,
         INTERP_EIGHTTAP_SMOOTH => 1,
         INTERP_EIGHTTAP_SHARP => 2,
         _ => 3, // BILINEAR and any unknown value use the bilinear kernels.
     };
-    let pos = ((frac & 7) * 2) as usize;
+    let mask = (1i32 << bits) - 1;
+    let pos = ((frac & mask) << (4 - bits)) as usize;
     &defaults::SUBPEL_FILTERS[f][pos]
 }
 
@@ -188,16 +175,20 @@ pub fn motion_compensate(
     bh: usize,
     mv: Mv,
     filter: u8,
+    // Sub-pel precision of the passed MV per axis: 3 for luma, 4 for a
+    // subsampled chroma axis (dav1d `mvx & (15 >> !ss_hor)` / `>> (3 + ss_hor)`).
+    hbits: u32,
+    vbits: u32,
 ) {
-    let dx = mv.col & 7;
-    let dy = mv.row & 7;
-    let ix = mv.col >> 3;
-    let iy = mv.row >> 3;
+    let dx = mv.col & ((1 << hbits) - 1);
+    let dy = mv.row & ((1 << vbits) - 1);
+    let ix = mv.col >> hbits;
+    let iy = mv.row >> vbits;
     let base_x = dst_x as i32 + ix;
     let base_y = dst_y as i32 + iy;
 
-    let kw = subpel_kernel(filter, dx);
-    let kh = subpel_kernel(filter, dy);
+    let kw = subpel_kernel(filter, dx, hbits);
+    let kh = subpel_kernel(filter, dy, vbits);
 
     // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
     // 7`); for 8-bit non-compound prediction `InterRound0 = 3`, `InterRound1 =
@@ -652,7 +643,8 @@ mod tests {
     use super::*;
 
     fn kern(kind: u8, frac: i32) -> &'static [i32; 8] {
-        subpel_kernel(kind, frac)
+        // 1/8-pel (luma) phase.
+        subpel_kernel(kind, frac, 3)
     }
 
     #[test]
@@ -691,6 +683,8 @@ mod tests {
             16,
             Mv::new(0, 0),
             INTERP_EIGHTTAP_REGULAR,
+            3,
+            3,
         );
         for y in 0..16 {
             for x in 0..16 {
@@ -717,6 +711,8 @@ mod tests {
             8,
             Mv::new(-40 * 8, -40 * 8),
             INTERP_EIGHTTAP_REGULAR,
+            3,
+            3,
         );
         assert!(dest.iter().all(|&v| v == 200));
     }
@@ -743,6 +739,8 @@ mod tests {
             8,
             Mv::new(0, 4),
             INTERP_BILINEAR,
+            3,
+            3,
         );
         for y in 0..8 {
             for x in 0..8 {

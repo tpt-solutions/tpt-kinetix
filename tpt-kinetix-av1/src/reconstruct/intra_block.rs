@@ -1885,6 +1885,8 @@ impl<'a> TileDecodeState<'a> {
                         ch,
                         c_mv,
                         crate::inter::INTERP_BILINEAR,
+                        3,
+                        3,
                     );
                     crate::inter::motion_compensate(
                         &mut pred_v,
@@ -1899,6 +1901,8 @@ impl<'a> TileDecodeState<'a> {
                         ch,
                         c_mv,
                         crate::inter::INTERP_BILINEAR,
+                        3,
+                        3,
                     );
                     for dy in 0..ch {
                         let wy = cpx_y + dy;

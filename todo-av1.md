@@ -5871,3 +5871,15 @@
 > (most inter blocks are zero-MV copies) but foundational + intra corpus
 > still 6/6. Compound blend still needs the pre-downshift (`InterRound1 = 7`)
 > `prep` path + `avg`/`w_avg`/`mask`.
+
+> **2026-09-11 — chroma MC 1/16-pel precision.** `motion_compensate` now takes
+> per-axis `hbits`/`vbits` (3 = luma 1/8-pel, 4 = a subsampled chroma axis
+> 1/16-pel) — dav1d `mvx & (15 >> !ss_hor)` / `>> (3 + ss_hor)`. The chroma
+> callers pass the *luma* MV directly (removed the lossy `Mv::scaled_chroma`
+> pre-halving, which also dropped the bottom 1/16 bit); `inter_predict_plane`
+> derives the bits from `plane` + `subsampling_{x,y}`. IBC chroma keeps
+> `3,3` (its `c_mv` is already `>> ss`-scaled). **testsrc_96x64 f1
+> 25→30.2 dB, testsrc_64x64 f1 ~24→26.4, testsrc_128x96 f2 U 28.9→29.2**;
+> intra corpus still 6/6 (incl. the IBC `testsrc2_big`), conformance 11/11,
+> 140 av1 tests. Next: pre-downshift `prep` MC path + `avg`/`w_avg`/`mask`
+> compound blends (currently plain u8 average).

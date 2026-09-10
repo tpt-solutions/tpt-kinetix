@@ -910,14 +910,14 @@ impl<'a> TileDecodeState<'a> {
 
         // Y plane.
         self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, filter)?;
-        // Chroma planes (sub-sampled MV).
-        let cmv: [Mv; 2] = [mvs[0].scaled_chroma(), mvs[1].scaled_chroma()];
+        // Chroma planes — `inter_predict_plane` interprets the luma MV at
+        // 1/16-pel for the subsampled axes.
         let cpx_x0 = px_x0 / 2;
         let cpx_y0 = px_y0 / 2;
         let cbw_px = (bw_px / 2).max(4);
         let cbh_px = (bh_px / 2).max(4);
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &cmv, filter)?;
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &mvs, filter)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &mvs, filter)?;
 
         // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
         // here (`IsInter == 1`): a recursive var-tx-tree of `txfm_split`
@@ -1064,11 +1064,10 @@ impl<'a> TileDecodeState<'a> {
             self.interpolation_filter
         };
         self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f)?;
-        let cmv: [Mv; 2] = [mvs[0].scaled_chroma(), mvs[1].scaled_chroma()];
         let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
         let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &cmv, f)?;
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f)?;
 
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
         // its no-entropy-read branch (uniform max transform).
@@ -1173,6 +1172,13 @@ impl<'a> TileDecodeState<'a> {
             1 | 2 => self.tile_ch,
             _ => self.tile_h,
         };
+        // MV sub-pel precision per axis: the caller passes the *luma* MV for
+        // every plane; a subsampled chroma axis interprets it at 1/16-pel.
+        let (hbits, vbits) = if plane == 0 {
+            (3u32, 3u32)
+        } else {
+            (3 + self.subsampling_x as u32, 3 + self.subsampling_y as u32)
+        };
 
         let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
         let slot1 = self.ref_to_slot[ref_names[1] as usize] as usize;
@@ -1187,7 +1193,8 @@ impl<'a> TileDecodeState<'a> {
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, rh) = rf.plane(plane);
                     motion_compensate(
-                        &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
+                        &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter, hbits,
+                        vbits,
                     );
                 }
                 t
@@ -1220,13 +1227,13 @@ impl<'a> TileDecodeState<'a> {
             if let Some(rf) = self.ref_slots.slots[slot0] {
                 let (rp, rw, rh) = rf.plane(plane);
                 motion_compensate(
-                    &mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
+                    &mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter, hbits, vbits,
                 );
             }
             if let Some(rf) = self.ref_slots.slots[slot1] {
                 let (rp, rw, rh) = rf.plane(plane);
                 motion_compensate(
-                    &mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter,
+                    &mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter, hbits, vbits,
                 );
             }
             let mut c = vec![0u8; bw * bh];
