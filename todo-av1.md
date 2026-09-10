@@ -5883,3 +5883,16 @@
 > intra corpus still 6/6 (incl. the IBC `testsrc2_big`), conformance 11/11,
 > 140 av1 tests. Next: pre-downshift `prep` MC path + `avg`/`w_avg`/`mask`
 > compound blends (currently plain u8 average).
+
+> **2026-09-11 — compound blend in the intermediate domain.** New
+> `motion_compensate_prep` (§7.11.3.2 `isCompound`: H `Round2(s,3)`, V
+> `Round2(s,7)`, i32 out, no clamp) + `compound_blend` (§7.11.3.1: `avg` =
+> `Round2(p0+p1,5)`, `w_avg` = `Round2(p0*w + p1*(16-w),8)`). `inter_predict_
+> plane`'s compound path now preps both refs and blends, instead of averaging
+> two fully-downshifted u8 predictions. `jnt_weight` computed per block
+> (§7.11.3.15 `distance_weights`: `quant_dist_weight`/`quant_dist_lookup_table`
+> from the ref/cur order-hint POC diffs) for `COMP_INTER_WEIGHTED_AVG`; plain
+> average (weight 8) for `COMP_INTER_AVG` and skip-mode. Wedge / diffwtd masks
+> still fall through to the average (mask generation TODO). **`av1_inter_
+> sequence` frame 1 Y 27.5→31.5 dB, V 27.1→31.1, U 25.0→29.1**; frame 2 U
+> 29.2→30.9. Intra corpus 6/6, conformance 11/11, 140 av1 tests.

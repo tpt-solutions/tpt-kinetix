@@ -38,6 +38,29 @@ fn poc_diff(order_hint_n_bits: u8, poc0: i32, poc1: i32) -> i32 {
     (diff & (mask - 1)) - (diff & mask)
 }
 
+/// dav1d `f->jnt_weights[ref0][ref1]` computed per block (§7.11.3.15
+/// `distance_weights`): the sixteenths weight for `preds[0]` in the
+/// distance-weighted compound blend.
+fn jnt_weight(order_hint_bits: u8, cur: i32, ref0poc: i32, ref1poc: i32) -> i32 {
+    let d1 = poc_diff(order_hint_bits, ref0poc, cur).abs().min(31);
+    let d0 = poc_diff(order_hint_bits, ref1poc, cur).abs().min(31);
+    let order = usize::from(d0 <= d1);
+    const QDW: [[i32; 2]; 3] = [[2, 3], [2, 5], [2, 7]];
+    const QDT: [[i32; 2]; 4] = [[9, 7], [11, 5], [12, 4], [13, 3]];
+    let mut k = 3usize;
+    for (kk, w) in QDW.iter().enumerate() {
+        let c0 = w[order];
+        let c1 = w[1 - order];
+        let d0c0 = d0 * c0;
+        let d1c1 = d1 * c1;
+        if (d0 > d1 && d0c0 < d1c1) || (d0 <= d1 && d0c0 > d1c1) {
+            k = kk;
+            break;
+        }
+    }
+    QDT[k][order]
+}
+
 /// `Size_Group[]` (§ intra-mode size groups) restricted to the inter-intra
 /// path — matches dav1d `ymode_size_context` for the allowed sizes.
 fn size_group(bsize: usize) -> usize {
@@ -908,16 +931,65 @@ impl<'a> TileDecodeState<'a> {
         let bw_px = bw * MI_SIZE;
         let bh_px = bh * MI_SIZE;
 
+        // Compound blend weight (§7.11.3.15): `jnt_weight` for the
+        // distance-weighted type, `8` (plain average) otherwise.
+        let blend_weight = if compound && block_comp_type == 1 {
+            let rp = |n: u8| {
+                self.dpb_order_hints
+                    .get(self.ref_to_slot[n as usize] as usize)
+                    .copied()
+                    .unwrap_or(0) as i32
+            };
+            jnt_weight(
+                self.order_hint_bits,
+                self.cur_order_hint as i32,
+                rp(ref_names[0]),
+                rp(ref_names[1]),
+            )
+        } else {
+            8
+        };
+
         // Y plane.
-        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, filter)?;
+        self.inter_predict_plane(
+            0,
+            px_x0,
+            px_y0,
+            bw_px,
+            bh_px,
+            &ref_names,
+            &mvs,
+            filter,
+            blend_weight,
+        )?;
         // Chroma planes — `inter_predict_plane` interprets the luma MV at
         // 1/16-pel for the subsampled axes.
         let cpx_x0 = px_x0 / 2;
         let cpx_y0 = px_y0 / 2;
         let cbw_px = (bw_px / 2).max(4);
         let cbh_px = (bh_px / 2).max(4);
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &mvs, filter)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw_px, cbh_px, &ref_names, &mvs, filter)?;
+        self.inter_predict_plane(
+            1,
+            cpx_x0,
+            cpx_y0,
+            cbw_px,
+            cbh_px,
+            &ref_names,
+            &mvs,
+            filter,
+            blend_weight,
+        )?;
+        self.inter_predict_plane(
+            2,
+            cpx_x0,
+            cpx_y0,
+            cbw_px,
+            cbh_px,
+            &ref_names,
+            &mvs,
+            filter,
+            blend_weight,
+        )?;
 
         // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
         // here (`IsInter == 1`): a recursive var-tx-tree of `txfm_split`
@@ -1063,11 +1135,12 @@ impl<'a> TileDecodeState<'a> {
         } else {
             self.interpolation_filter
         };
-        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f)?;
+        // Skip-mode blocks are `COMP_INTER_AVG` (plain average, weight 8).
+        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8)?;
         let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
         let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f)?;
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8)?;
 
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
         // its no-entropy-read branch (uniform max transform).
@@ -1159,6 +1232,9 @@ impl<'a> TileDecodeState<'a> {
         ref_names: &[u8; 2],
         mvs: &[Mv; 2],
         filter: u8,
+        // Compound blend weight in sixteenths for `preds[0]` (`8` = plain
+        // average); ignored for single-reference blocks.
+        blend_weight: i32,
     ) -> Result<(), KinetixError> {
         let stride = match plane {
             1 | 2 => self.uv_stride,
@@ -1220,27 +1296,24 @@ impl<'a> TileDecodeState<'a> {
             return Ok(());
         }
 
-        // Compound: average the two predictions into a temp, then write.
+        // Compound: blend the two predictions in the higher-precision
+        // intermediate domain (§7.11.3.1 `avg` / `w_avg`). Wedge / diffwtd
+        // masks are not yet generated — those fall through to `blend_weight`
+        // (a plain average unless the caller narrowed it).
         let combined = {
-            let mut t0 = vec![0u8; bw * bh];
-            let mut t1 = vec![0u8; bw * bh];
-            if let Some(rf) = self.ref_slots.slots[slot0] {
-                let (rp, rw, rh) = rf.plane(plane);
-                motion_compensate(
-                    &mut t0, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter, hbits, vbits,
-                );
-            }
-            if let Some(rf) = self.ref_slots.slots[slot1] {
-                let (rp, rw, rh) = rf.plane(plane);
-                motion_compensate(
-                    &mut t1, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[1], filter, hbits, vbits,
-                );
-            }
-            let mut c = vec![0u8; bw * bh];
-            for i in 0..bw * bh {
-                c[i] = ((t0[i] as u32 + t1[i] as u32 + 1) >> 1) as u8;
-            }
-            c
+            let prep = |slot: usize, mv: Mv| -> Vec<i32> {
+                if let Some(rf) = self.ref_slots.slots[slot] {
+                    let (rp, rw, rh) = rf.plane(plane);
+                    motion_compensate_prep(
+                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filter, hbits, vbits,
+                    )
+                } else {
+                    vec![0i32; bw * bh]
+                }
+            };
+            let t0 = prep(slot0, mvs[0]);
+            let t1 = prep(slot1, mvs[1]);
+            compound_blend(&t0, &t1, blend_weight)
         };
         for dy in 0..bh {
             let sy = px_y + dy;

@@ -218,13 +218,87 @@ pub fn motion_compensate(
     for y in 0..bh {
         for x in 0..bw {
             let mut s = 0i32;
-            for k in 0..8usize {
-                s += tmp[(y + k) * bw + x] * kh[k];
+            for (k, &c) in kh.iter().enumerate() {
+                s += tmp[(y + k) * bw + x] * c;
             }
             let v = ((s + 1024) >> 11).clamp(0, 255) as u8;
             dest[y * dest_stride + x] = v;
         }
     }
+}
+
+/// Compound "prep" motion compensation (§7.11.3.2, `isCompound == 1`): the same
+/// 8-tap interpolation as [`motion_compensate`] but stopping before the final
+/// down-shift — `InterRound1 = 7` for the vertical pass and no clamp — so the
+/// two predictions can be blended in the higher-precision intermediate domain
+/// (`avg` / `w_avg` / mask). Returns a `bw * bh` buffer of intermediate values.
+#[allow(clippy::too_many_arguments)]
+pub fn motion_compensate_prep(
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dst_x: usize,
+    dst_y: usize,
+    bw: usize,
+    bh: usize,
+    mv: Mv,
+    filter: u8,
+    hbits: u32,
+    vbits: u32,
+) -> Vec<i32> {
+    let dx = mv.col & ((1 << hbits) - 1);
+    let dy = mv.row & ((1 << vbits) - 1);
+    let base_x = dst_x as i32 + (mv.col >> hbits);
+    let base_y = dst_y as i32 + (mv.row >> vbits);
+    let kw = subpel_kernel(filter, dx, hbits);
+    let kh = subpel_kernel(filter, dy, vbits);
+
+    let ext_h = bh + 7;
+    let mut tmp = vec![0i32; bw * ext_h];
+    for ty in 0..ext_h {
+        let ry = (base_y + ty as i32 - 3).clamp(0, ref_h as i32 - 1);
+        let row = ry as usize * ref_stride;
+        for x in 0..bw {
+            let rx = base_x + x as i32;
+            let mut s = 0i32;
+            for (k, &c) in kw.iter().enumerate() {
+                let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
+                s += refp[row + sx as usize] as i32 * c;
+            }
+            tmp[ty * bw + x] = (s + 4) >> 3;
+        }
+    }
+
+    let mut out = vec![0i32; bw * bh];
+    for y in 0..bh {
+        for x in 0..bw {
+            let mut s = 0i32;
+            for (k, &c) in kh.iter().enumerate() {
+                s += tmp[(y + k) * bw + x] * c;
+            }
+            out[y * bw + x] = (s + 64) >> 7;
+        }
+    }
+    out
+}
+
+/// Blend two compound "prep" predictions (§7.11.3.1). `weight` is the
+/// `jnt_weight` in sixteenths for `preds[0]` (`8` = plain average). 8-bit:
+/// `InterPostRound = 4`, so `avg` is `Round2(sum, 5)` and `w_avg` is
+/// `Round2(p0*w + p1*(16-w), 8)`.
+pub fn compound_blend(p0: &[i32], p1: &[i32], weight: i32) -> Vec<u8> {
+    p0.iter()
+        .zip(p1)
+        .map(|(&a, &b)| {
+            let v = if weight == 8 {
+                (a + b + 16) >> 5
+            } else {
+                (a * weight + b * (16 - weight) + 128) >> 8
+            };
+            v.clamp(0, 255) as u8
+        })
+        .collect()
 }
 
 // --- MV candidate list (§7.10) ---------------------------------------------
