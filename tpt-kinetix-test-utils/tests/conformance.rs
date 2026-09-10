@@ -268,10 +268,15 @@ fn av1_inter_sequence_vs_dav1d_when_available() {
         return;
     }
 
+    // Feed every IVF frame (decode order) through one decoder and collect the
+    // shown outputs. `Av1Decoder::decode` emits one shown frame per temporal
+    // unit in DISPLAY order (buffering hidden alt-refs and replaying them via
+    // `show_existing_frame`), so the collected sequence lines up 1:1 with
+    // dav1d's display-ordered `ref_frames` — pairing by raw packet index does
+    // not, for a hierarchical GOP.
     let mut dec = Av1Decoder::new();
-    let mut exact_count = 0usize;
-    let mut compared_count = 0usize;
-    for (i, (payload, ref_frame)) in frame_payloads.iter().zip(ref_frames.iter()).enumerate() {
+    let mut kinetix_frames = Vec::new();
+    for (i, payload) in frame_payloads.iter().enumerate() {
         let packet = Packet {
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,
@@ -279,25 +284,25 @@ fn av1_inter_sequence_vs_dav1d_when_available() {
             stream_index: 0,
             is_key_frame: i == 0,
         };
-        let kinetix_frame = match dec.decode(&packet) {
-            Ok(Some(f)) => f,
-            Ok(None) => {
-                eprintln!("[frame {i}] Kinetix produced no frame");
-                continue;
-            }
-            Err(e) => {
-                eprintln!("[frame {i}] Kinetix decode errored: {e}");
-                continue;
-            }
-        };
+        match dec.decode(&packet) {
+            Ok(Some(f)) => kinetix_frames.push(f),
+            Ok(None) => {}
+            Err(e) => eprintln!("[packet {i}] Kinetix decode errored: {e}"),
+        }
+    }
 
+    let mut exact_count = 0usize;
+    let mut compared_count = 0usize;
+    for (i, (kinetix_frame, ref_frame)) in
+        kinetix_frames.iter().zip(ref_frames.iter()).enumerate()
+    {
         compared_count += 1;
-        let exact = within_tolerance(&kinetix_frame, ref_frame, 0);
+        let exact = within_tolerance(kinetix_frame, ref_frame, 0);
         if exact {
             exact_count += 1;
         }
         let (psnr_y, psnr_u, psnr_v) =
-            psnr_yuv420p(&kinetix_frame, ref_frame).unwrap_or((0.0, 0.0, 0.0));
+            psnr_yuv420p(kinetix_frame, ref_frame).unwrap_or((0.0, 0.0, 0.0));
         eprintln!(
             "[frame {i}] {}x{}, PSNR Y/U/V = {:.2}/{:.2}/{:.2} dB, luma diff samples = {}, exact = {}",
             kinetix_frame.width,
@@ -305,7 +310,7 @@ fn av1_inter_sequence_vs_dav1d_when_available() {
             psnr_y,
             psnr_u,
             psnr_v,
-            luma_diff_count(&kinetix_frame, ref_frame),
+            luma_diff_count(kinetix_frame, ref_frame),
             exact,
         );
     }

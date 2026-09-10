@@ -232,6 +232,12 @@ impl Av1Decoder {
         // `show_existing_frame` target).
         let mut produced_any = false;
         let mut shown: Option<VideoFrame> = None;
+        // `finish_frame*` bumps `frame_count` once per frame it actually
+        // reconstructs (shown or hidden). A temporal unit that only carries
+        // hidden frames (a hierarchical-GOP alt-ref) reconstructs and stores
+        // them but has nothing to display — that must surface as `Ok(None)`,
+        // not the grey placeholder used when reconstruction is unsupported.
+        let frames_before = self.frame_count;
         // Accumulator for the separate `FrameHeader` + `TileGroup` OBU form.
         let mut pending: Option<(FrameHeader, ObuPairs)> = None;
 
@@ -296,6 +302,11 @@ impl Av1Decoder {
             return Ok(Some(f));
         }
         if !produced_any {
+            return Ok(None);
+        }
+        // Frames were reconstructed this call but none were shown (hidden
+        // alt-ref TU): no output, but not a failure.
+        if self.frame_count > frames_before {
             return Ok(None);
         }
 
