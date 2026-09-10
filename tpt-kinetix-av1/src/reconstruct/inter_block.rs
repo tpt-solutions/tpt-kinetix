@@ -1,5 +1,43 @@
 use super::*;
 
+/// `interintra_allowed_mask` (dav1d `tables.h`): single-ref block sizes that
+/// may carry an inter-intra flag — {8x8, 8x16, 16x8, 16x16, 16x32, 32x16,
+/// 32x32} in spec `BlockSize` indices.
+fn interintra_allowed(bsize: usize) -> bool {
+    matches!(
+        bsize,
+        BLOCK_8X8 | BLOCK_8X16 | BLOCK_16X8 | BLOCK_16X16 | BLOCK_16X32 | BLOCK_32X16 | BLOCK_32X32
+    )
+}
+
+/// `Size_Group[]` (§ intra-mode size groups) restricted to the inter-intra
+/// path — matches dav1d `ymode_size_context` for the allowed sizes.
+fn size_group(bsize: usize) -> usize {
+    match bsize {
+        BLOCK_8X8 | BLOCK_8X16 | BLOCK_16X8 => 1,
+        BLOCK_16X16 | BLOCK_16X32 | BLOCK_32X16 => 2,
+        BLOCK_32X32 => 3,
+        _ => 0,
+    }
+}
+
+/// dav1d `wedge_ctx_lut` in spec `BlockSize` indices (only the inter-intra /
+/// wedge-allowed sizes are ever queried).
+fn wedge_ctx(bsize: usize) -> usize {
+    match bsize {
+        BLOCK_8X8 => 0,
+        BLOCK_8X16 => 1,
+        BLOCK_16X8 => 2,
+        BLOCK_16X16 => 3,
+        BLOCK_16X32 => 4,
+        BLOCK_32X16 => 5,
+        BLOCK_32X32 => 6,
+        BLOCK_8X32 => 7,
+        BLOCK_32X8 => 8,
+        _ => 0,
+    }
+}
+
 impl<'a> TileDecodeState<'a> {
     /// `has_overlappable_candidates()` (§5.11.23): true when the block has an
     /// inter-coded neighbour directly above or to the left (within the tile),
@@ -120,9 +158,12 @@ impl<'a> TileDecodeState<'a> {
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
-        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row == 0 && mi_col <= 32;
+        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row < 40 && mi_col < 40;
         if dbg_b0 {
-            eprintln!("DBG b0 skip={skip} rng={}", self.dec.raw_state().0);
+            eprintln!(
+                "DBG b0 mi=({mi_col},{mi_row}) bsize={bsize} skip={skip} rng={}",
+                self.dec.raw_state().0
+            );
         }
 
         // AV1 spec §5.11.18 `inter_frame_mode_info()`: `read_cdef()`/
@@ -507,6 +548,42 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        // `read_interintra_mode()` (§5.11.28) — read right after the MV cascade
+        // (dav1d `Post-interintra`) for a single-ref block whose size is in the
+        // inter-intra-allowed set, when the sequence enables inter-intra
+        // compound. One `interintra` bool; if set, an `interintra_mode` symbol
+        // then (for wedge-allowed sizes) an `interintra_wedge` bool and
+        // optionally a `wedge_idx`. Skipping this desynced every eligible block.
+        let mut interintra_type = 0u8; // INTER_INTRA_NONE
+        if self.enable_interintra
+            && !compound
+            && ref_names[1] == NONE_FRAME
+            && interintra_allowed(bsize)
+        {
+            let grp = size_group(bsize);
+            let is_ii = self.dec.read_symbol(&mut self.mode_cdfs.interintra[grp]) == 1;
+            if is_ii {
+                let _mode = self
+                    .dec
+                    .read_symbol(&mut self.mode_cdfs.interintra_mode[grp]);
+                let wctx = wedge_ctx(bsize);
+                // INTER_INTRA_BLEND (1) + wedge bit → BLEND or WEDGE (2).
+                interintra_type = 1 + self
+                    .dec
+                    .read_symbol(&mut self.mode_cdfs.interintra_wedge[wctx])
+                    as u8;
+                if interintra_type == 2 {
+                    let _widx = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
+                }
+            }
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 interintra type={interintra_type} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
+        }
+
         // `read_motion_mode()` (§5.11.23) — read after the MV/mode cascade and
         // before the interpolation filter. dav1d (`Post-motionmode`) reads a
         // symbol here whenever the block is single-ref, not skip_mode, at least
@@ -524,6 +601,7 @@ impl<'a> TileDecodeState<'a> {
                 && self.is_motion_mode_switchable
                 && min_dim >= 8
                 && ref_names[1] == NONE_FRAME
+                && interintra_type == 0
                 && self.has_overlappable_candidates(mi_row, mi_col, bw, bh);
             if eligible {
                 let matching_ref =
@@ -563,6 +641,12 @@ impl<'a> TileDecodeState<'a> {
         // header enables dual filters — reading only one desynced the entropy
         // decoder from the first inter block onward.
         let comp = usize::from(ref_names[1] != NONE_FRAME);
+        if dbg_b0 {
+            eprintln!(
+                "DBG b0 frame_filter={frame_filter} dual={}",
+                self.enable_dual_filter
+            );
+        }
         let mut filters = [frame_filter; 2];
         if frame_filter == INTERP_SWITCHABLE {
             let dirs = if self.enable_dual_filter { 2 } else { 1 };

@@ -5729,3 +5729,22 @@
 > approximated (matching-ref neighbour ⇒ NumSamples>0), OBMC/warp prediction
 > itself is not applied, and later blocks still desync. Next: continue the
 > `KINETIX_AV1_DBG_B0` trace past block (0,16) on poc=6.
+
+> **2026-09-10 (cont'd) — `read_interintra_mode` (§5.11.28) was also missing.**
+> Widened the patched-dav1d `DEBUG_BLOCK_INFO` window to the whole frame. The
+> second SB row of 128x96 poc=6 and every 32x32/16x16-class block of 96x64
+> poc=4 desynced at dav1d's `Post-interintra` — an `interintra` bool (then
+> `interintra_mode` + `interintra_wedge` [+ `wedge_idx`] when set) read for
+> single-ref blocks in {8x8,8x16,16x8,16x16,16x32,32x16,32x32} when
+> `enable_interintra_compound`. Implemented in `inter_block.rs` right after the
+> MV cascade, before `read_motion_mode` (whose eligibility now also requires
+> `interintra_type == 0`, per dav1d). New CDFs
+> `mode_cdfs.{interintra,interintra_mode,interintra_wedge,wedge_idx}` (spec
+> defaults); threaded `seq.enable_interintra_compound`. **VERIFIED bit-exact vs
+> patched dav1d through 3 consecutive blocks of BOTH 128x96 poc=6 and 96x64
+> poc=4** (skip/is_inter/ref/newmv/zeromv/refmv/interintra/motionmode/filter0/
+> filter1 rng all match). The `is_ii==1` wedge sub-path is coded from the spec
+> but unverified (no corpus block hits it). Corpus PSNR stays noisy for the
+> hierarchical 96x64/64x64 clips (multi-frame-per-TU harness artifact) — the
+> entropy trace is the reliable signal and it is clean now. Next: keep tracing
+> 128x96 poc=6 into the residual / later SB rows.

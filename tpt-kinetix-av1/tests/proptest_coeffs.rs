@@ -81,6 +81,7 @@ fn decode_with(
         false,    // enable_dual_filter
         false,    // is_motion_mode_switchable
         false,    // allow_warped_motion
+        false,    // enable_interintra
         [0u8; 9], // ref_to_slot
         RefFrames::empty(),
         &mut meta,

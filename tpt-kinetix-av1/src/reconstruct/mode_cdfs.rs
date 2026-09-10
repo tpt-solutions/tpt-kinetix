@@ -56,6 +56,14 @@ pub(super) struct ModeCdfs {
     /// (0..21). `read_motion_mode` (§5.11.23).
     pub(super) motion_mode: [[u16; 4]; 22],
     pub(super) use_obmc: [[u16; 3]; 22],
+    /// `TileInterIntraCdf` (bool, by `Size_Group` 0..3), `TileInterIntraModeCdf`
+    /// (4 symbols), `TileWedgeInterIntraCdf` (bool, by wedge-ctx 0..6),
+    /// `TileWedgeIndexCdf` (16 symbols, by wedge-ctx 0..8). `read_interintra_mode`
+    /// (§5.11.28).
+    pub(super) interintra: [[u16; 3]; 4],
+    pub(super) interintra_mode: [[u16; 5]; 4],
+    pub(super) interintra_wedge: [[u16; 3]; 7],
+    pub(super) wedge_idx: [[u16; 17]; 9],
     pub(super) filter_intra: [[u16; 3]; 22],
     pub(super) filter_intra_mode: [u16; 6],
     /// `TileUseWienerCdf` / `TileUseSgrprojCdf` / `TileRestorationTypeCdf`
@@ -341,6 +349,68 @@ impl ModeCdfs {
             interp_filter: DEFAULT_INTERP_FILTER_CDF,
             motion_mode: DEFAULT_MOTION_MODE_CDF,
             use_obmc: DEFAULT_USE_OBMC_CDF,
+            // `Default_Inter_Intra_Cdf` / `Default_Inter_Intra_Mode_Cdf` /
+            // `Default_Wedge_Inter_Intra_Cdf` / `Default_Wedge_Index_Cdf`
+            // ("Default CDF tables"). Spec values (increasing to 32768).
+            interintra: [
+                [16384, 32768, 0],
+                [26887, 32768, 0],
+                [27597, 32768, 0],
+                [30237, 32768, 0],
+            ],
+            interintra_mode: [
+                [8192, 16384, 24576, 32768, 0],
+                [1875, 11082, 27332, 32768, 0],
+                [2473, 9996, 26388, 32768, 0],
+                [4238, 11537, 25926, 32768, 0],
+            ],
+            interintra_wedge: [
+                [20036, 32768, 0],
+                [24957, 32768, 0],
+                [26704, 32768, 0],
+                [27530, 32768, 0],
+                [29564, 32768, 0],
+                [29444, 32768, 0],
+                [26872, 32768, 0],
+            ],
+            wedge_idx: [
+                [
+                    2438, 4440, 6599, 8663, 11005, 12874, 15751, 18094, 20359, 22362, 24127, 25702,
+                    27752, 29450, 31171, 32768, 0,
+                ],
+                [
+                    806, 3266, 6005, 6738, 7218, 7367, 7771, 14588, 16323, 17367, 18452, 19422,
+                    22839, 26127, 29629, 32768, 0,
+                ],
+                [
+                    2779, 3738, 4683, 7213, 7775, 8017, 8655, 14357, 17939, 21332, 24520, 27470,
+                    29456, 30529, 31656, 32768, 0,
+                ],
+                [
+                    1684, 3625, 5675, 7108, 9302, 11274, 14429, 17144, 19163, 20961, 22884, 24471,
+                    26719, 28714, 30877, 32768, 0,
+                ],
+                [
+                    1142, 3491, 6277, 7314, 8089, 8355, 9023, 13624, 15369, 16730, 18114, 19313,
+                    22521, 26012, 29550, 32768, 0,
+                ],
+                [
+                    2742, 4195, 5727, 8035, 8980, 9336, 10146, 14124, 17270, 20533, 23434, 25972,
+                    27944, 29570, 31416, 32768, 0,
+                ],
+                [
+                    1727, 3948, 6101, 7796, 9841, 12344, 15766, 18944, 20638, 22038, 23963, 25311,
+                    26988, 28766, 31012, 32768, 0,
+                ],
+                [
+                    154, 987, 1925, 2051, 2088, 2111, 2151, 23033, 23703, 24284, 24985, 25684,
+                    27259, 28883, 30911, 32768, 0,
+                ],
+                [
+                    1135, 1322, 1493, 2635, 2696, 2737, 2770, 21016, 22935, 25057, 27251, 29173,
+                    30089, 30960, 31933, 32768, 0,
+                ],
+            ],
             filter_intra: DEFAULT_FILTER_INTRA_CDF,
             filter_intra_mode: DEFAULT_FILTER_INTRA_MODE_CDF,
             use_wiener: DEFAULT_USE_WIENER_CDF,

@@ -719,6 +719,12 @@ impl FrameHeader {
             let (filt, _is_switchable) = read_interpolation_filter(&mut br)?;
             interpolation_filter = filt;
             is_motion_mode_switchable = read_flag(&mut br)?;
+            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+                eprintln!(
+                    "DBG FH inter oh={order_hint} interp_filter={interpolation_filter} \
+                     mm_switch={is_motion_mode_switchable} w={width} h={height} hp={allow_high_precision_mv}"
+                );
+            }
             if error_resilient_mode || !enable_ref_frame_mvs {
                 use_ref_frame_mvs = false;
             } else {

@@ -636,6 +636,9 @@ struct TileDecodeState<'a> {
     /// warp-sample derivation.
     #[allow(dead_code)]
     allow_warped_motion: bool,
+    /// Sequence-header `enable_interintra_compound` (§5.5.1): gates the
+    /// per-block inter-intra flag reads (§5.11.28).
+    enable_interintra: bool,
     /// `skip_mode_present` / `SkipModeFrame[0..2]` (§6.8.2 / §7.4.13): a
     /// skip-mode block reads one `skip_mode` symbol, then predicts (compound,
     /// no residual) from this fixed forward/backward reference pair.
@@ -773,6 +776,7 @@ impl<'a> TileDecodeState<'a> {
         enable_dual_filter: bool,
         is_motion_mode_switchable: bool,
         allow_warped_motion: bool,
+        enable_interintra: bool,
         ref_to_slot: [u8; 9],
         ref_slots: RefFrames<'a>,
         meta: &'a mut FrameMeta,
@@ -851,6 +855,7 @@ impl<'a> TileDecodeState<'a> {
             reference_select,
             is_motion_mode_switchable,
             allow_warped_motion,
+            enable_interintra,
             skip_mode_present,
             skip_mode_frame,
             skip_mode_above: vec![0u8; mi_cols],
@@ -1153,6 +1158,7 @@ pub fn decode_tile_group(
     enable_dual_filter: bool,
     is_motion_mode_switchable: bool,
     allow_warped_motion: bool,
+    enable_interintra: bool,
     ref_to_slot: [u8; 9],
     ref_slots: RefFrames<'_>,
     meta: &mut FrameMeta,
@@ -1258,6 +1264,7 @@ pub fn decode_tile_group(
         enable_dual_filter,
         is_motion_mode_switchable,
         allow_warped_motion,
+        enable_interintra,
         ref_to_slot,
         ref_slots,
         meta,
@@ -1661,6 +1668,7 @@ pub fn reconstruct_av1_frame(
                 seq.enable_dual_filter,
                 frame_header.is_motion_mode_switchable,
                 frame_header.allow_warp,
+                seq.enable_interintra_compound,
                 ref_to_slot,
                 ref_slots,
                 &mut meta,
