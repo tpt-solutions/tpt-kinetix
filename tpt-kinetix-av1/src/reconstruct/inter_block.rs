@@ -1431,12 +1431,14 @@ impl<'a> TileDecodeState<'a> {
                 // `av1_inter_sequence` frame 2). TODO: verify the 32x32/64x64
                 // inter inverse-transform + tx_type path, then widen.
                 // Coeffs are always *read* (entropy sync — verified rng-exact
-                // vs dav1d incl. the large `TX_64X32` leaf). The inverse
-                // transform is applied only for `Tx_Size_Sqr_Up <= 16x16`:
-                // applying the 32/64-family inter residual regresses
-                // `av1_inter_sequence` frame 2 (luma diff 4.7k→10k) — a
-                // dequant / large-inverse-transform bug specific to the inter
-                // path, not the coefficient read. TODO: root-cause, then widen.
+                // vs dav1d incl. the large `TX_64X32` leaf, and the DC-only
+                // inverse transform is flat at every rect size). Applying the
+                // 32/64-family residual still regresses `av1_inter_sequence`
+                // frame 2 (4.7k→10k) — most likely the *cascade*: it is being
+                // added onto an inter *prediction* that is itself still
+                // approximate (compound blend, no OBMC/warp), so "correct
+                // residual + wrong base" is worse than "small base alone".
+                // Widen once inter prediction is bit-exact.
                 if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);

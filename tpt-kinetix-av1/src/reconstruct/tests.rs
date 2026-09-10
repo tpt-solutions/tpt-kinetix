@@ -1446,6 +1446,10 @@ fn inverse_transform_dc_only_is_flat_at_rectangular_sizes() {
         av1::TX_8X32,
         av1::TX_16X64,
         av1::TX_64X16,
+        av1::TX_16X32,
+        av1::TX_32X16,
+        av1::TX_32X64,
+        av1::TX_64X32,
     ] {
         let w = av1::TX_WIDTH[tx_size];
         let h = av1::TX_HEIGHT[tx_size];
