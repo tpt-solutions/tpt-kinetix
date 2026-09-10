@@ -5774,3 +5774,24 @@
 > stub, so more-correct entropy after them just reads further into a stream
 > already desynced at the compound block. Compound `find_mv_stack` + jnt/wedge
 > compound reads are the next blocker; the var-tx layer under them is now right.
+
+> **2026-09-10 (cont'd) — compound Stage 1: `is_comp` flag + reference-frame
+> tree + §8.3.2 neighbour contexts.** New `reconstruct/comp_ctx.rs` ports
+> dav1d `src/env.h` branch-for-branch: `get_comp_ctx`, `get_comp_dir_ctx`,
+> `av1_get_{fwd,fwd_1,fwd_2,bwd,bwd_1,uni_p1}_ref_ctx`, `av1_get_ref_ctx`,
+> plus `get_mask_comp_ctx`/`get_jnt_comp_ctx` (dead until Stage 2). Added
+> per-mi `comp_type_above/left` neighbour tracking (dav1d `BlockContext::
+> comp_type` numbering; skip-mode + compound blocks record `COMP_INTER_AVG`
+> pending `read_compound_type`). `decode_inter_block`'s compound branch
+> rewritten from the old always-unidir stub to the real §5.11.25 tree
+> (`comp_reference_type` → BIDIR fwd/bwd or UNIDIR), with the dav1d contexts;
+> the `comp_mode` (is_comp) read now uses `get_comp_ctx` + the `min(bw,bh) >
+> 4` gate. Kinetix's `comp_ref`/`comp_bwd_ref`/`uni_comp_ref` CDF tables are
+> stored transposed vs dav1d (`cdf[ctx][i]`), handled at the call sites.
+> **VERIFIED bit-exact vs patched dav1d**: `Post-compflag[1] r=42611` and
+> `Post-refs[0/4] r=63646` (dir_ctx=0) on the 128x96 poc=1 first compound
+> block. 139 unit tests + intra corpus (6/6) still pass. `av1_inter_sequence`
+> frame 1 31→27 dB (the compound *mode/mv* reads after `Post-refs` are still
+> the `decode_ref_and_mv` stub — Stage 2). Next: `comp_inter_mode` 8-way +
+> per-ref drl + compound `find_mv_stack` (§7.10.2 isCompound) + MV residuals,
+> then `read_compound_type` (§5.11.26), then compound prediction.

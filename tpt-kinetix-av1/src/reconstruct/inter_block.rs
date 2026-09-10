@@ -1,5 +1,16 @@
 use super::*;
 
+/// Kinetix ref name (`NONE = 0`, `INTRA = 1`, `LAST_FRAME = 2` … `ALTREF_FRAME
+/// = 8`) → dav1d numbering (`LAST = 0` … `ALTREF = 6`); `NONE`/`INTRA` → `-1`.
+#[inline]
+fn dav1d_ref(k: u8) -> i32 {
+    if k >= LAST_FRAME {
+        k as i32 - 2
+    } else {
+        -1
+    }
+}
+
 /// `interintra_allowed_mask` (dav1d `tables.h`): single-ref block sizes that
 /// may carry an inter-intra flag — {8x8, 8x16, 16x8, 16x16, 16x32, 32x16,
 /// 32x32} in spec `BlockSize` indices.
@@ -98,6 +109,35 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         false
+    }
+
+    /// Build the §8.3.2 compound-context neighbour edge for the mi cell above
+    /// `mi_col` (converting Kinetix ref names `LAST_FRAME = 2 …` to dav1d's
+    /// `LAST = 0 …`).
+    fn comp_edge_above(&self, mi_col: usize) -> CompEdge {
+        if self.is_inter_above.get(mi_col).copied().unwrap_or(0) == 0 {
+            return CompEdge::NA;
+        }
+        let r = self.ref_above[mi_col];
+        CompEdge {
+            intra: false,
+            comp_type: self.comp_type_above[mi_col],
+            ref0: dav1d_ref(r[0]),
+            ref1: dav1d_ref(r[1]),
+        }
+    }
+
+    fn comp_edge_left(&self, mi_row: usize) -> CompEdge {
+        if self.is_inter_left.get(mi_row).copied().unwrap_or(0) == 0 {
+            return CompEdge::NA;
+        }
+        let r = self.ref_left[mi_row];
+        CompEdge {
+            intra: false,
+            comp_type: self.comp_type_left[mi_row],
+            ref0: dav1d_ref(r[0]),
+            ref1: dav1d_ref(r[1]),
+        }
     }
 
     /// Inter-coded leaf block (AV1 Phase E): MV prediction (§7.10) + motion
@@ -320,79 +360,123 @@ impl<'a> TileDecodeState<'a> {
                 if let Some(s) = self.is_inter_left.get_mut(r) {
                     *s = 0;
                 }
+                if let Some(s) = self.comp_type_left.get_mut(r) {
+                    *s = 0;
+                }
             }
             for c in mi_col..(mi_col + bw).min(self.mi_cols) {
                 if let Some(s) = self.is_inter_above.get_mut(c) {
+                    *s = 0;
+                }
+                if let Some(s) = self.comp_type_above.get_mut(c) {
                     *s = 0;
                 }
             }
             return Ok(());
         }
 
-        // Compound vs single reference (§6.8.2). comp_mode is read only when
-        // compound prediction is allowed (here: `reference_select`).
-        let compound = if reference_select {
-            self.dec.read_symbol(&mut self.map_inter_cdfs.comp_mode[0]) == 1
+        // Compound vs single reference (§5.11.25). `comp_mode` is read only
+        // when compound is allowed (`reference_select` / `switchable_comp_refs`
+        // and the block is at least 8x8), with the §8.3.2 `get_comp_ctx`
+        // neighbour context.
+        let cedge_a = self.comp_edge_above(mi_col);
+        let cedge_l = self.comp_edge_left(mi_row);
+        let compound = if reference_select && BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]) > 4 {
+            let ctx = comp_ctx(cedge_a, cedge_l, avail_u, avail_l);
+            self.dec
+                .read_symbol(&mut self.map_inter_cdfs.comp_mode[ctx])
+                == 1
         } else {
             false
         };
+        if dbg_b0 {
+            eprintln!(
+                "DBG b0 compflag={} rng={}",
+                compound as u8,
+                self.dec.raw_state().0
+            );
+        }
 
         // Reference name(s).
         let mut ref_names = [NONE_FRAME; 2];
         if compound {
-            // Compound reference-frame tree (§6.8.2). We consume the same symbols
-            // the encoder wrote to stay in bit-sync; the actual forward/backward
-            // names are derived from the same decisions.
-            let _ct = self
+            // Compound reference-frame tree (§5.11.25), ported from dav1d
+            // (`decode.c`). dav1d ref numbering (LAST=0..ALTREF=6) internally;
+            // `+ 2` converts back to Kinetix's `LAST_FRAME = 2` names. Kinetix's
+            // CDF tables are stored transposed vs dav1d — `cdf[ctx][i]` where
+            // dav1d indexes `cdf[i][ctx]`.
+            let dir_ctx = comp_dir_ctx(cedge_a, cedge_l, avail_u, avail_l);
+            let (fwd, bwd);
+            if self
                 .dec
-                .read_symbol(&mut self.map_inter_cdfs.comp_ref_type[0]);
-            let fwd = if self
-                .dec
-                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][0])
-                == 0
+                .read_symbol(&mut self.map_inter_cdfs.comp_ref_type[dir_ctx.min(4)])
+                == 1
             {
+                // BIDIR
+                let c1 = fwd_ref_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                let f = if self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.comp_ref[c1.min(2)][0])
+                    == 1
+                {
+                    let c2 = fwd_ref_2_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                    2 + self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.comp_ref[c2.min(2)][2])
+                } else {
+                    let c2 = fwd_ref_1_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                    self.dec
+                        .read_symbol(&mut self.map_inter_cdfs.comp_ref[c2.min(2)][1])
+                };
+                let c3 = bwd_ref_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                let b = if self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[c3.min(2)][0])
+                    == 1
+                {
+                    6
+                } else {
+                    let c4 = bwd_ref_1_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                    4 + self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[c4.min(2)][1])
+                };
+                fwd = f as u8 + 2;
+                bwd = b as u8 + 2;
+            } else {
+                // UNIDIR
+                let up = ref_ctx(cedge_a, cedge_l, avail_u, avail_l);
                 if self
                     .dec
-                    .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][1])
-                    == 0
+                    .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[up.min(2)][0])
+                    == 1
                 {
-                    LAST_FRAME
+                    fwd = 6; // dav1d BWDREF(4) + 2
+                    bwd = 8; // dav1d ALTREF(6) + 2
                 } else {
-                    LAST2_FRAME
+                    let up1 = uni_p1_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                    let mut r1 = 1 + self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[up1.min(2)][1]);
+                    if r1 == 2 {
+                        let up2 = fwd_ref_2_ctx(cedge_a, cedge_l, avail_u, avail_l);
+                        r1 += self
+                            .dec
+                            .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[up2.min(2)][2]);
+                    }
+                    fwd = 2; // dav1d LAST(0) + 2
+                    bwd = r1 as u8 + 2;
                 }
-            } else if self
-                .dec
-                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[0][2])
-                == 0
-            {
-                LAST3_FRAME
-            } else {
-                GOLDEN_FRAME
-            };
-            let bwd = if self
-                .dec
-                .read_symbol(&mut self.map_inter_cdfs.uni_comp_ref[1][0])
-                == 0
-            {
-                if self
-                    .dec
-                    .read_symbol(&mut self.map_inter_cdfs.comp_ref[0][0])
-                    == 0
-                {
-                    BWDREF_FRAME
-                } else {
-                    ALTREF_FRAME
-                }
-            } else if self
-                .dec
-                .read_symbol(&mut self.map_inter_cdfs.comp_bwd_ref[0][0])
-                == 0
-            {
-                ALTREF2_FRAME
-            } else {
-                BWDREF_FRAME
-            };
+            }
             ref_names = [fwd, bwd];
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 comprefs={}/{} dir_ctx={dir_ctx} rng={}",
+                    fwd - 2,
+                    bwd - 2,
+                    self.dec.raw_state().0
+                );
+            }
         } else {
             let above_refs = (above_inter != 0).then(|| self.ref_above[mi_col]);
             let left_refs = (left_inter != 0).then(|| self.ref_left[mi_row]);
@@ -738,9 +822,16 @@ impl<'a> TileDecodeState<'a> {
         let skip_byte = skip as u8;
         let luma_tx_w_byte = av1::TX_WIDTH[luma_tx] as u8;
         let luma_tx_h_byte = av1::TX_HEIGHT[luma_tx] as u8;
+        // dav1d `BlockContext::comp_type`: only compound blocks carry one. The
+        // exact mask type (avg / jnt / seg / wedge) awaits `read_compound_type`;
+        // for now a compound block records `COMP_INTER_AVG` (2).
+        let comp_type_byte = if ref_names[1] != NONE_FRAME { 2u8 } else { 0u8 };
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
+            }
+            if let Some(s) = self.comp_type_left.get_mut(r) {
+                *s = comp_type_byte;
             }
             if let Some(slot) = self.ref_left.get_mut(r) {
                 slot[0] = ref_names[0];
@@ -773,6 +864,9 @@ impl<'a> TileDecodeState<'a> {
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(s) = self.is_inter_above.get_mut(c) {
                 *s = 1;
+            }
+            if let Some(s) = self.comp_type_above.get_mut(c) {
+                *s = comp_type_byte;
             }
             if let Some(slot) = self.ref_above.get_mut(c) {
                 slot[0] = ref_names[0];
@@ -868,6 +962,9 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
             }
+            if let Some(s) = self.comp_type_left.get_mut(r) {
+                *s = 2; // skip-mode blocks are COMP_INTER_AVG
+            }
             if let Some(slot) = self.ref_left.get_mut(r) {
                 *slot = ref_names;
             }
@@ -895,6 +992,9 @@ impl<'a> TileDecodeState<'a> {
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
             if let Some(s) = self.is_inter_above.get_mut(c) {
                 *s = 1;
+            }
+            if let Some(s) = self.comp_type_above.get_mut(c) {
+                *s = 2; // skip-mode blocks are COMP_INTER_AVG
             }
             if let Some(slot) = self.ref_above.get_mut(c) {
                 *slot = ref_names;
