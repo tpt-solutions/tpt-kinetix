@@ -146,7 +146,24 @@ pub(crate) fn mpm_pred_mode(
 ) -> u8 {
     let bx = (raster % 4) as i32;
     let by = (raster / 4) as i32;
-    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
+    let (left_top_idx, top_idx, left_bot_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let mbaff_opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols);
+    // MBAFF: the current MB's left-column block `by` takes its MPM neighbour
+    // from `left_block_options[opt][8 + by]` (raster) of the left-top MB (by
+    // 0,1) or the left-bottom MB (by 2,3) — see FFmpeg `fill_decode_caches`
+    // `intra4x4_pred_mode_cache`. For a plain / all-frame pair this reduces to
+    // the left MB's `by*4+3` right-column block.
+    let (left_idx, left_nbr_raster) = {
+        let li = if by < 2 {
+            left_top_idx
+        } else {
+            left_bot_idx.or(left_top_idx)
+        };
+        (
+            li,
+            crate::mbaff::LEFT_BLOCK_LUMA_NNZ[mbaff_opt as usize % 4][by as usize],
+        )
+    };
 
     // §8.3.1.1: each side is one of three states — the neighbouring
     // *macroblock* is off-picture (`Unavailable`), present but not coded
@@ -164,7 +181,7 @@ pub(crate) fn mpm_pred_mode(
         if !n.present {
             NeighbourSide::Unavailable
         } else if n.is_intra4x4 {
-            NeighbourSide::Real(n.modes[(by * 4 + 3) as usize] as u8)
+            NeighbourSide::Real(n.modes[left_nbr_raster] as u8)
         } else {
             NeighbourSide::ForcedDc
         }
