@@ -556,7 +556,21 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
     let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
 
     let total = (mb_cols * mb_rows) as usize;
+    let dbg_field = std::env::var_os("KINETIX_DBG_MBAFF_FIELD").is_some();
     for pair_row in 0..(mb_rows as usize / 2) {
+        if dbg_field {
+            let row: String = (0..mb_cols)
+                .map(|x| {
+                    let ti = pair_row * 2 * mb_cols as usize + x as usize;
+                    match macroblocks.get(ti) {
+                        Some(m) if m.mb_field_flag => 'F',
+                        Some(_) => '.',
+                        None => '?',
+                    }
+                })
+                .collect();
+            eprintln!("MBAFF_FIELD pair_row {pair_row:2}: {row}");
+        }
         for mb_x in 0..mb_cols {
             let top_idx = pair_row * 2 * mb_cols as usize + mb_x as usize;
             let bot_idx = top_idx + mb_cols as usize;
@@ -590,6 +604,9 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
+                        // Bottom MB of the pair: upper-right MB is in the next
+                        // (undecoded) pair.
+                        which == 0,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -621,6 +638,10 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
+                        // Frame-coded pair: the bottom MB's (`which == 1`)
+                        // above-right MB is the top MB of the *next* pair, which
+                        // has a higher address and is not yet decoded (§6.4.9).
+                        which == 0,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -756,6 +777,8 @@ fn reconstruct_luma<T: DecodeTracer>(
         scaling,
         tracer,
         slice_avail,
+        // Progressive raster order: the MB above-right is always decoded.
+        true,
     );
 }
 
@@ -782,6 +805,12 @@ fn reconstruct_luma_at<T: DecodeTracer>(
     scaling: &ScalingLists,
     tracer: &mut T,
     slice_avail: Option<SliceAvail>,
+    // `up_right_mb_avail`: whether the macroblock diagonally above-right is
+    // already decoded (may back the top-right reference samples of a top-edge
+    // 4×4 / 8×8 block). `true` in plain raster order; `false` for the bottom MB
+    // of an MBAFF pair (its upper-right MB belongs to the next pair — address >
+    // CurrMbAddr, so §6.4.9-unavailable).
+    up_right_mb_avail: bool,
 ) {
     let base_x = (mb_x * 16) as usize;
     let base_y = base_y_px;
@@ -877,6 +906,7 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                     scaling,
                     tracer,
                     slice_avail,
+                    up_right_mb_avail,
                 );
             } else {
                 // Process 4×4 blocks in decode (block-scan) order so neighbours are
@@ -918,15 +948,23 @@ fn reconstruct_luma_at<T: DecodeTracer>(
                         // be checked explicitly rather than just frame bounds.
                         let bx_u = block % 4;
                         let by_u = block / 4;
-                        let top_right_available = by_u == 0 || {
-                            if bx_u == 3 {
-                                false
-                            } else {
-                                let (tbx, tby) = (bx_u + 1, by_u - 1);
-                                let target_blk8 = (tby / 2) * 2 + (tbx / 2);
-                                let target_sub = (tby % 2) * 2 + (tbx % 2);
-                                target_blk8 * 4 + target_sub < blk8 * 4 + sub
-                            }
+                        let top_right_available = if by_u == 0 {
+                            // Top edge of the MB: the top-right 4×4 is in the MB
+                            // row above. For `bx_u < 3` it is the MB directly
+                            // above (always decoded). For `bx_u == 3` it crosses
+                            // into the MB to the upper-right — decoded in plain
+                            // raster order, but NOT for the bottom MB of an MBAFF
+                            // pair (whose upper-right MB is the top MB of the
+                            // *next* pair, address > CurrMbAddr → §6.4.9
+                            // unavailable).
+                            bx_u != 3 || up_right_mb_avail
+                        } else if bx_u == 3 {
+                            false
+                        } else {
+                            let (tbx, tby) = (bx_u + 1, by_u - 1);
+                            let target_blk8 = (tby / 2) * 2 + (tbx / 2);
+                            let target_sub = (tby % 2) * 2 + (tbx % 2);
+                            target_blk8 * 4 + target_sub < blk8 * 4 + sub
                         };
                         if top_right_available {
                             for i in 0..4 {
@@ -1014,6 +1052,8 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
     scaling: &ScalingLists,
     tracer: &mut T,
     slice_avail: Option<SliceAvail>,
+    // See `reconstruct_luma_at`: `false` for the bottom MB of an MBAFF pair.
+    up_right_mb_avail: bool,
 ) {
     let base_x = (mb_x * 16) as usize;
     let base_y = base_y_px;
@@ -1047,6 +1087,14 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
         if bx == 8 && by == 8 {
             for i in 8..16 {
                 top[i] = None;
+            }
+        }
+        // Top-right 8×8 block (bx=8, by=0): `top[8..16]` come from the MB
+        // above-right. Unavailable for the bottom MB of an MBAFF pair (next
+        // pair's top MB, not yet decoded).
+        if bx == 8 && by == 0 && !up_right_mb_avail {
+            for s in top.iter_mut().skip(8) {
+                *s = None;
             }
         }
         let mut left = [None; 8];
@@ -1444,6 +1492,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
+                        parity == 0,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -2206,6 +2255,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
+                        parity == 0,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -4596,6 +4646,7 @@ mod tests {
                 &flat,
                 &mut crate::trace::NoopTracer,
                 None,
+                parity == 0,
             );
             reconstruct_chroma_at(
                 mb,

@@ -127,7 +127,18 @@ fn frext_diffmap() {
                     best = (r, s);
                 }
             }
-            eprintln!("our frame {i:3} best-matches ref {:3} (sad {})", best.0, best.1);
+            eprintln!(
+                "our frame {i:3} best-matches ref {:3} (sad {})",
+                best.0, best.1
+            );
+        }
+    }
+
+    if let Ok(fi) = std::env::var("FREXT_DUMP_OURS") {
+        if let Ok(fi) = fi.parse::<usize>() {
+            let p = format!("ours_frame{fi}.yuv");
+            std::fs::write(&p, &frames[fi].data).unwrap();
+            eprintln!("wrote {p} ({}x{})", w, h);
         }
     }
 
