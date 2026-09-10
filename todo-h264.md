@@ -121,6 +121,37 @@ tests pass, ITU 27/0 no regressions (flat-scan streams unaffected; the only
 BitExact clips with field Intra_16×16 are none — this was pure latent).
 Frames 1-14/16 (P) remain — the MBAFF-inter path, next.
 
+**MBAFF-inter diagnosis (#32bk).** CANLMA2 is **CABAC** (PPS
+`entropy_coding_mode_flag=1`) MBAFF — the P slices route through
+`try_decode_real_p_slice_cabac` → `parse_p_slice_cabac_range`, NOT the
+CAVLC `parse_p_slice`. An `on_mb_parsed` dump of "frame 1" shows only
+**121 of 1350 MBs** decoded before the CABAC P parse terminates early:
+MB(0,0)=P8x8 matches JM, but MB(0,1) (pair 0 bottom) decoded P_L0_16x16
+where JM addr 1 is `mb_type 1` = P_L0_L0_16x8 → a ~1-bin CABAC desync
+entering the bottom MB of the first pair. So this is the **CABAC MBAFF P
+neighbour-context** job — the P/skip/sub_mb_type/ref_idx/mvd/cbp/cbf
+contexts all still resolve the frame-mode neighbour address, not the
+§6.4.10.7 field/frame/mixed one — exactly what session #32bi did for the
+CABAC *I* path, now needed for P (and B). Multi-session, JM-oracle-driven.
+The `KINETIX_MBAFF_FIELD_MC` recon path + `reconstruct_mbaff_inter_luma`
+bugs below are downstream of that and only matter once the parse is in
+sync. Concrete recon bugs already visible in `reconstruct_mbaff_inter_luma`
+(reconstruct.rs ~1915):
+  1. `dequant_idct_4x4` uses ZIGZAG, not the field scan, for every field
+     MB's inter residual (the inter twin of the #32bk fix).
+  2. `transform_size_8x8` ignored (no 8×8 inter transform branch).
+  3. `field_planes[ref_idx][bottom as usize]` treats `ref_idx` as a frame
+     index and always picks the MB's own parity — but a field MB's
+     RefPicListX indexes *fields* (§8.4.2.1): idx 0 = nearest same-parity
+     field, idx 1 = opposite parity, etc. Needs a real field ref list.
+  4. MV prediction: `predict_slice_mvs_ex(mbaff=true)` must scale neighbour
+     MV vertical components between field/frame neighbours (§8.4.1.3.2) —
+     verify it does.
+  5. chroma twin (`reconstruct_mbaff_inter_chroma`) has the same 1/3/scan
+     issues + the opposite-parity vertical chroma MV offset (§8.4.1.4).
+Each needs JM-oracle (`ldecod_trace.exe` + a patched pre-deblock pixel
+dump) verification — genuine multi-session feature work.
+
 **Frames 1+ (P slices)** still need the separate **MBAFF-inter** path
 (`reconstruct_inter_frame_ex`, `KINETIX_MBAFF_FIELD_MC` gate) — untouched
 this session. That's the next major chunk after frame-0 closes.
