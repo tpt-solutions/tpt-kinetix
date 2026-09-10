@@ -238,6 +238,32 @@ fn derive_bs_pair(
 /// decoded) and `q` (current) side. `is_mb_edge` is true for a macroblock
 /// boundary edge, false for an interior edge (where `p` and `q` are the same
 /// macroblock).
+/// Effective per-4×4 "has non-zero transform coefficient levels" flags for the
+/// §8.7.2.1 `bS = 2` rule. With the 8×8 transform the relevant "luma block" is
+/// the 8×8 block, so a 4×4 position counts as coded iff **any** of the four
+/// 4×4 sub-blocks of its containing 8×8 block is non-zero. (Kinetix's raw `nz`
+/// array holds per-4×4 CAVLC `TotalCoeff` counts — needed for the nC neighbour
+/// context — which for an 8×8-transform macroblock can legitimately be 0 on a
+/// 4×4 position whose 8×8 block is coded, e.g. `freh1_b` frame 3 MB(6,3).)
+fn effective_nz(mb: &DeblockMbInfo) -> [u8; 16] {
+    if !mb.transform_8x8 {
+        return mb.nz;
+    }
+    let mut out = mb.nz;
+    for g in 0..4 {
+        let base = (g / 2) * 8 + (g % 2) * 2;
+        let sub = [base, base + 1, base + 4, base + 5];
+        if sub.iter().any(|&b| mb.nz[b] != 0) {
+            for &b in &sub {
+                if out[b] == 0 {
+                    out[b] = 1;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn derive_bs_segments(
     p: &DeblockMbInfo,
     q: &DeblockMbInfo,
@@ -248,14 +274,16 @@ fn derive_bs_segments(
 ) -> [u8; 4] {
     let p_intra = is_intra(p.mb_type);
     let q_intra = is_intra(q.mb_type);
+    let p_nz = effective_nz(p);
+    let q_nz = effective_nz(q);
     let mut out = [0u8; 4];
     for seg in 0..4 {
         out[seg] = derive_bs_pair(
             p_intra,
             q_intra,
             is_mb_edge,
-            p.nz[p_blocks[seg]],
-            q.nz[q_blocks[seg]],
+            p_nz[p_blocks[seg]],
+            q_nz[q_blocks[seg]],
             p.cells[p_blocks[seg]],
             q.cells[q_blocks[seg]],
             mvy_limit,

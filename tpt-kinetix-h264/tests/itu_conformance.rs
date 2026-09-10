@@ -211,6 +211,15 @@ const MANIFEST: &[(&str, Expect)] = &[
     // `noSubMbPartSizeLessThan8x8Flag` gate wrongly permitted 4×4 sub-partitions
     // (and B_Direct_8x8 without inference). Now 100/100 frames bit-exact.
     ("freh2_b", Expect::BitExact),
+    // Promoted to BitExact 2026-09-10 (SESSION #32be): CAVLC High, 8×8
+    // transform, hierarchical GOP, temporal direct. The whole non-deblock
+    // pipeline was already bit-exact (verified against a locally-built JM
+    // ldecod pre-deblock dump); the residual ±2..5 luma error was the
+    // deblock `bS = 2` rule reading Kinetix's per-4×4 CAVLC `TotalCoeff`
+    // array directly — for an 8×8-transform macroblock a 4×4 position must
+    // count as coded iff its containing 8×8 block is coded. Now 100/100
+    // frames bit-exact.
+    ("freh1_b", Expect::BitExact),
 ];
 
 fn fixtures_root() -> PathBuf {

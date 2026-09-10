@@ -153,7 +153,10 @@ fn predeblock_vs_ffmpeg() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(best.1);
-        eprintln!("  decoded#{fi} best-matches ref {} (sad {})  using ref {ri}", best.1, best.0);
+        eprintln!(
+            "  decoded#{fi} best-matches ref {} (sad {})  using ref {ri}",
+            best.1, best.0
+        );
         if ri >= nref {
             continue;
         }
