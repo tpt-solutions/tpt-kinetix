@@ -108,6 +108,29 @@ fn frext_diffmap() {
         eprintln!("frame {i:3}: max_diff={maxd:3}  ndiff={ndiff}");
     }
 
+    // For each of our frames, find the ref frame index it best matches
+    // (min total abs diff) — exposes display-order / duplication errors.
+    if std::env::var_os("FREXT_BESTMATCH").is_some() {
+        let nref = reference.len() / fl;
+        for i in 0..frames.len() {
+            if frames[i].data.len() != fl {
+                continue;
+            }
+            let mut best = (usize::MAX, u64::MAX);
+            for r in 0..nref {
+                let rs = &reference[r * fl..(r + 1) * fl];
+                let mut s = 0u64;
+                for (a, b) in frames[i].data.iter().zip(rs) {
+                    s += (*a as i32 - *b as i32).unsigned_abs() as u64;
+                }
+                if s < best.1 {
+                    best = (r, s);
+                }
+            }
+            eprintln!("our frame {i:3} best-matches ref {:3} (sad {})", best.0, best.1);
+        }
+    }
+
     let target = std::env::var("FREXT_FRAME")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
