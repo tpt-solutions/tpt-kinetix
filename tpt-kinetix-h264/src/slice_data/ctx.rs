@@ -732,14 +732,27 @@ pub(crate) fn chroma_cbf_neighbors(
     let base = comp * 4;
     let bx = (block % 2) as i32;
     let by = (block / 2) as i32;
-    let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
+    let (left_top_idx, top_idx, left_bot_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols) as usize % 4;
 
     let left = if bx > 0 {
         cur.chroma[base + (by * 2 + bx - 1) as usize] > 0
-    } else if let Some(li) = left_idx {
-        nz[li].chroma[base + (by * 2 + 1) as usize] > 0
     } else {
-        is_intra
+        // MBAFF: the current MB's left-column chroma block `by` takes its
+        // neighbour from `left_block_options[opt][12 + 2*by]` (decoded to a
+        // right-column chroma raster index by `LEFT_BLOCK_CHROMA_NNZ`); for a
+        // field-current MB next to a frame left pair (opt 3) row 0 reads the
+        // left-top MB, row 1 the left-bottom.
+        let li = if opt == 3 && by > 0 {
+            left_bot_idx.or(left_top_idx)
+        } else {
+            left_top_idx
+        };
+        let nbr = crate::mbaff::LEFT_BLOCK_CHROMA_NNZ[opt][by as usize];
+        match li {
+            Some(li) => nz[li].chroma[base + nbr] > 0,
+            None => is_intra,
+        }
     };
 
     let top = if by > 0 {

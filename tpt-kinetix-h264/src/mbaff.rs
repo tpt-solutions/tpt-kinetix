@@ -81,6 +81,14 @@ pub const LEFT_BLOCK_LUMA_NNZ: [[usize; 4]; 4] = [
     [3, 11, 3, 11],
 ];
 
+/// FFmpeg `left_block_options[opt][12..16]` decoded for 4:2:0 chroma: the
+/// left-neighbour **right-column** chroma 4×4 raster index (1 = top, 3 =
+/// bottom) that backs the current MB's chroma block row `by` (0 or 1). Entry
+/// `12+2i` is `1 + N*4` with `N ∈ {4,5}` → raster `(N-4)*2 + 1`. For `opt == 3`
+/// (field-current / frame-left) `by 0` reads the left-top MB and `by 1` the
+/// left-bottom MB; other options keep the single left neighbour.
+pub const LEFT_BLOCK_CHROMA_NNZ: [[usize; 2]; 4] = [[1, 3], [3, 3], [1, 1], [1, 1]];
+
 /// Look up the `mb_field_decoding_flag` of frame-MB `idx`, returning `None`
 /// when the index is outside `[0, mb_cols*mb_rows)` (off-picture).
 #[inline]
