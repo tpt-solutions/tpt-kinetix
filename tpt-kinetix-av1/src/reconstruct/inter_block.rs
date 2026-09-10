@@ -1,5 +1,24 @@
 use super::*;
 
+/// Masked-compound descriptor for one inter block, passed to every plane's
+/// prediction call (§5.11.26 / §7.11.3.14). `comp_type` uses dav1d numbering:
+/// 3 = `COMPOUND_DIFFWTD` (seg), 4 = `COMPOUND_WEDGE`; any other value means
+/// no masked blend.
+#[derive(Clone, Copy)]
+pub(super) struct MaskDesc {
+    pub comp_type: u8,
+    pub wedge_index: usize,
+    pub mask_sign: bool,
+    pub bsize: usize,
+}
+
+impl MaskDesc {
+    /// No masked blend (single-ref, or `COMP_INTER_AVG` / `_WEIGHTED_AVG`).
+    fn none() -> Self {
+        Self { comp_type: 0, wedge_index: 0, mask_sign: false, bsize: 0 }
+    }
+}
+
 /// Kinetix ref name (`NONE = 0`, `INTRA = 1`, `LAST_FRAME = 2` … `ALTREF_FRAME
 /// = 8`) → dav1d numbering (`LAST = 0` … `ALTREF = 6`); `NONE`/`INTRA` → `-1`.
 #[inline]
@@ -537,6 +556,10 @@ impl<'a> TileDecodeState<'a> {
         let mut single_mode = NEARESTMV;
         // dav1d `BlockContext::comp_type` for this block (0 for single-ref).
         let mut block_comp_type = 0u8;
+        // Masked-compound parameters (§5.11.26): only meaningful when
+        // `block_comp_type` is 3 (COMPOUND_DIFFWTD) or 4 (COMPOUND_WEDGE).
+        let mut wedge_index = 0usize;
+        let mut mask_sign = false;
 
         // AV1 §7.10.2 `find_mv_stack` — shared by both branches.
         let (stack, ctx, n_mvs, drl_ctx, comp_mode_ctx) =
@@ -761,12 +784,12 @@ impl<'a> TileDecodeState<'a> {
                 block_comp_type =
                     4 - self.dec.read_symbol(&mut self.mode_cdfs.wedge_comp[wctx]) as u8;
                 if block_comp_type == 4 {
-                    let _widx = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
+                    wedge_index = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
                 }
-                let _mask_sign = self.dec.read_bool();
+                mask_sign = self.dec.read_bool();
             } else {
                 block_comp_type = 3; // COMP_INTER_SEG
-                let _mask_sign = self.dec.read_bool();
+                mask_sign = self.dec.read_bool();
             }
             if dbg_b0 {
                 eprintln!(
@@ -950,6 +973,15 @@ impl<'a> TileDecodeState<'a> {
             8
         };
 
+        // Masked-compound descriptor passed to every plane: the luma-domain
+        // mask is generated on the plane-0 call and sub-sampled for chroma.
+        let mask_desc = MaskDesc {
+            comp_type: block_comp_type,
+            wedge_index,
+            mask_sign,
+            bsize,
+        };
+
         // Y plane.
         self.inter_predict_plane(
             0,
@@ -961,6 +993,7 @@ impl<'a> TileDecodeState<'a> {
             &mvs,
             filter,
             blend_weight,
+            mask_desc,
         )?;
         // Chroma planes — `inter_predict_plane` interprets the luma MV at
         // 1/16-pel for the subsampled axes.
@@ -978,6 +1011,7 @@ impl<'a> TileDecodeState<'a> {
             &mvs,
             filter,
             blend_weight,
+            mask_desc,
         )?;
         self.inter_predict_plane(
             2,
@@ -989,6 +1023,7 @@ impl<'a> TileDecodeState<'a> {
             &mvs,
             filter,
             blend_weight,
+            mask_desc,
         )?;
 
         // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
@@ -1136,11 +1171,12 @@ impl<'a> TileDecodeState<'a> {
             self.interpolation_filter
         };
         // Skip-mode blocks are `COMP_INTER_AVG` (plain average, weight 8).
-        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8)?;
+        let nm = MaskDesc::none();
+        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8, nm)?;
         let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
         let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8)?;
+        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm)?;
+        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm)?;
 
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
         // its no-entropy-read branch (uniform max transform).
@@ -1235,6 +1271,7 @@ impl<'a> TileDecodeState<'a> {
         // Compound blend weight in sixteenths for `preds[0]` (`8` = plain
         // average); ignored for single-reference blocks.
         blend_weight: i32,
+        mask: MaskDesc,
     ) -> Result<(), KinetixError> {
         let stride = match plane {
             1 | 2 => self.uv_stride,
@@ -1297,9 +1334,8 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Compound: blend the two predictions in the higher-precision
-        // intermediate domain (§7.11.3.1 `avg` / `w_avg`). Wedge / diffwtd
-        // masks are not yet generated — those fall through to `blend_weight`
-        // (a plain average unless the caller narrowed it).
+        // intermediate domain (§7.11.3.1 `avg` / `w_avg`, or the §7.11.3.14
+        // mask blend for COMPOUND_WEDGE / COMPOUND_DIFFWTD).
         let combined = {
             let prep = |slot: usize, mv: Mv| -> Vec<i32> {
                 if let Some(rf) = self.ref_slots.slots[slot] {
@@ -1313,7 +1349,35 @@ impl<'a> TileDecodeState<'a> {
             };
             let t0 = prep(slot0, mvs[0]);
             let t1 = prep(slot1, mvs[1]);
-            compound_blend(&t0, &t1, blend_weight)
+            if mask.comp_type == 3 || mask.comp_type == 4 {
+                // Generate (plane 0) or sub-sample (chroma) the luma-domain
+                // blend mask, then mask-blend per §7.11.3.14.
+                if plane == 0 {
+                    let m = if mask.comp_type == 4 {
+                        crate::reconstruct::wedge::wedge_mask(
+                            mask.bsize,
+                            mask.mask_sign,
+                            mask.wedge_index,
+                        )
+                    } else {
+                        crate::reconstruct::wedge::diffwtd_mask(mask.mask_sign, &t0, &t1, bw, bh)
+                    };
+                    self.compound_mask = Some((m, bw, bh));
+                }
+                let subx = (plane != 0) as usize & self.subsampling_x as usize;
+                let suby = (plane != 0) as usize & self.subsampling_y as usize;
+                crate::reconstruct::wedge::mask_blend(
+                    self.compound_mask.as_ref(),
+                    subx,
+                    suby,
+                    &t0,
+                    &t1,
+                    bw,
+                    bh,
+                )
+            } else {
+                compound_blend(&t0, &t1, blend_weight)
+            }
         };
         for dy in 0..bh {
             let sy = px_y + dy;

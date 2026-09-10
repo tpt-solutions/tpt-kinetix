@@ -27,6 +27,7 @@ mod partition;
 mod predict;
 mod reconstruct_block;
 mod transform;
+mod wedge;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -690,6 +691,10 @@ struct TileDecodeState<'a> {
     /// mask / jnt-comp context derivations (§8.3.2).
     comp_type_above: Vec<u8>,
     comp_type_left: Vec<u8>,
+    /// Scratch: luma-domain blend mask `(weights, w, h)` for the compound block
+    /// currently being predicted — generated on the plane-0 call in
+    /// [`inter_block`], sub-sampled for the chroma calls (§7.11.3.14).
+    compound_mask: Option<(Vec<u8>, usize, usize)>,
     /// Per-mi-row/col neighbour motion vectors (slot 0 used for single ref).
     mv_above: Vec<[Mv; 2]>,
     mv_left: Vec<[Mv; 2]>,
@@ -902,6 +907,7 @@ impl<'a> TileDecodeState<'a> {
             ref_left: vec![[NONE_FRAME; 2]; mi_rows],
             comp_type_above: vec![0u8; mi_cols],
             comp_type_left: vec![0u8; mi_rows],
+            compound_mask: None,
             mv_above: vec![[Mv::default(); 2]; mi_cols],
             mv_left: vec![[Mv::default(); 2]; mi_rows],
             refmv_grid: vec![RefMvCell::default(); mi_cols * mi_rows],
