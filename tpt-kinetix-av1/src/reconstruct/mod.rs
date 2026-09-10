@@ -641,6 +641,16 @@ struct TileDecodeState<'a> {
     /// Sequence-header `enable_interintra_compound` (§5.5.1): gates the
     /// per-block inter-intra flag reads (§5.11.28).
     enable_interintra: bool,
+    /// Sequence-header `enable_masked_compound` / `enable_jnt_comp` (§5.5.1):
+    /// gate `read_compound_type` (§5.11.26)'s `comp_group_idx` / `compound_idx`
+    /// reads.
+    enable_masked_compound: bool,
+    enable_jnt_comp: bool,
+    /// `OrderHintBits` and the current frame's `OrderHint`, plus the DPB slot
+    /// order hints — for `get_jnt_comp_ctx`'s `poc_diff` term.
+    order_hint_bits: u8,
+    cur_order_hint: u8,
+    dpb_order_hints: [u8; 8],
     /// `skip_mode_present` / `SkipModeFrame[0..2]` (§6.8.2 / §7.4.13): a
     /// skip-mode block reads one `skip_mode` symbol, then predicts (compound,
     /// no residual) from this fixed forward/backward reference pair.
@@ -785,6 +795,11 @@ impl<'a> TileDecodeState<'a> {
         is_motion_mode_switchable: bool,
         allow_warped_motion: bool,
         enable_interintra: bool,
+        enable_masked_compound: bool,
+        enable_jnt_comp: bool,
+        order_hint_bits: u8,
+        cur_order_hint: u8,
+        dpb_order_hints: [u8; 8],
         ref_to_slot: [u8; 9],
         ref_slots: RefFrames<'a>,
         meta: &'a mut FrameMeta,
@@ -864,6 +879,11 @@ impl<'a> TileDecodeState<'a> {
             is_motion_mode_switchable,
             allow_warped_motion,
             enable_interintra,
+            enable_masked_compound,
+            enable_jnt_comp,
+            order_hint_bits,
+            cur_order_hint,
+            dpb_order_hints,
             skip_mode_present,
             skip_mode_frame,
             skip_mode_above: vec![0u8; mi_cols],
@@ -1169,6 +1189,11 @@ pub fn decode_tile_group(
     is_motion_mode_switchable: bool,
     allow_warped_motion: bool,
     enable_interintra: bool,
+    enable_masked_compound: bool,
+    enable_jnt_comp: bool,
+    order_hint_bits: u8,
+    cur_order_hint: u8,
+    dpb_order_hints: [u8; 8],
     ref_to_slot: [u8; 9],
     ref_slots: RefFrames<'_>,
     meta: &mut FrameMeta,
@@ -1275,6 +1300,11 @@ pub fn decode_tile_group(
         is_motion_mode_switchable,
         allow_warped_motion,
         enable_interintra,
+        enable_masked_compound,
+        enable_jnt_comp,
+        order_hint_bits,
+        cur_order_hint,
+        dpb_order_hints,
         ref_to_slot,
         ref_slots,
         meta,
@@ -1502,6 +1532,7 @@ pub fn reconstruct_av1_frame(
     seq: &SequenceHeaderObu,
     frame_header: &FrameHeader,
     ref_store: Option<&RefFrameStore>,
+    dpb_order_hints: [u8; 8],
 ) -> Result<Option<VideoFrame>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
@@ -1679,6 +1710,11 @@ pub fn reconstruct_av1_frame(
                 frame_header.is_motion_mode_switchable,
                 frame_header.allow_warp,
                 seq.enable_interintra_compound,
+                seq.enable_masked_compound,
+                seq.enable_jnt_comp,
+                seq.order_hint_bits(),
+                frame_header.order_hint as u8,
+                dpb_order_hints,
                 ref_to_slot,
                 ref_slots,
                 &mut meta,

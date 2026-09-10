@@ -376,7 +376,13 @@ impl Av1Decoder {
         pairs: &[(u8, Vec<u8>)],
     ) -> Option<VideoFrame> {
         self.last_frame_header = Some(fh.clone());
-        let frame = match reconstruct_av1_frame(pairs, seq, fh, Some(&self.ref_frames)) {
+        let frame = match reconstruct_av1_frame(
+            pairs,
+            seq,
+            fh,
+            Some(&self.ref_frames),
+            self.ref_order_hints,
+        ) {
             Ok(Some(f)) => f,
             _ => return None,
         };

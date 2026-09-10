@@ -64,6 +64,12 @@ pub(super) struct ModeCdfs {
     pub(super) interintra_mode: [[u16; 5]; 4],
     pub(super) interintra_wedge: [[u16; 3]; 7],
     pub(super) wedge_idx: [[u16; 17]; 9],
+    /// `TileCompGroupIdxCdf` / `TileCompoundIdxCdf` / `TileCompoundTypeCdf`
+    /// (§8.3.2), `read_compound_type` (§5.11.26). `mask_comp`/`jnt_comp` are
+    /// 6-context bools; `wedge_comp` is a 9-context bool (`wedge_ctx_lut`).
+    pub(super) mask_comp: [[u16; 3]; 6],
+    pub(super) jnt_comp: [[u16; 3]; 6],
+    pub(super) wedge_comp: [[u16; 3]; 9],
     pub(super) filter_intra: [[u16; 3]; 22],
     pub(super) filter_intra_mode: [u16; 6],
     /// `TileUseWienerCdf` / `TileUseSgrprojCdf` / `TileRestorationTypeCdf`
@@ -372,6 +378,33 @@ impl ModeCdfs {
                 [29564, 32768, 0],
                 [29444, 32768, 0],
                 [26872, 32768, 0],
+            ],
+            mask_comp: [
+                [26607, 32768, 0],
+                [22891, 32768, 0],
+                [18840, 32768, 0],
+                [24594, 32768, 0],
+                [19934, 32768, 0],
+                [22674, 32768, 0],
+            ],
+            jnt_comp: [
+                [18244, 32768, 0],
+                [12865, 32768, 0],
+                [7053, 32768, 0],
+                [13259, 32768, 0],
+                [9334, 32768, 0],
+                [4644, 32768, 0],
+            ],
+            wedge_comp: [
+                [23431, 32768, 0],
+                [13171, 32768, 0],
+                [11470, 32768, 0],
+                [9770, 32768, 0],
+                [9100, 32768, 0],
+                [8233, 32768, 0],
+                [6172, 32768, 0],
+                [11820, 32768, 0],
+                [7701, 32768, 0],
             ],
             wedge_idx: [
                 [

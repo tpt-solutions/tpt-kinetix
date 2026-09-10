@@ -21,6 +21,23 @@ fn interintra_allowed(bsize: usize) -> bool {
     )
 }
 
+/// `wedge_allowed_mask` (dav1d `tables.h`): `interintra_allowed` plus 8x32 /
+/// 32x8.
+fn wedge_allowed(bsize: usize) -> bool {
+    interintra_allowed(bsize) || matches!(bsize, BLOCK_8X32 | BLOCK_32X8)
+}
+
+/// dav1d `get_poc_diff` — signed order-hint difference, wrapped to the
+/// `order_hint_n_bits` window.
+fn poc_diff(order_hint_n_bits: u8, poc0: i32, poc1: i32) -> i32 {
+    if order_hint_n_bits == 0 {
+        return 0;
+    }
+    let mask = 1i32 << (order_hint_n_bits - 1);
+    let diff = poc0 - poc1;
+    (diff & (mask - 1)) - (diff & mask)
+}
+
 /// `Size_Group[]` (§ intra-mode size groups) restricted to the inter-intra
 /// path — matches dav1d `ymode_size_context` for the allowed sizes.
 fn size_group(bsize: usize) -> usize {
@@ -495,6 +512,8 @@ impl<'a> TileDecodeState<'a> {
         let force_integer_mv = self.force_integer_mv;
         let mut new_mf = 0u8;
         let mut single_mode = NEARESTMV;
+        // dav1d `BlockContext::comp_type` for this block (0 for single-ref).
+        let mut block_comp_type = 0u8;
 
         // AV1 §7.10.2 `find_mv_stack` — shared by both branches.
         let (stack, ctx, n_mvs, drl_ctx, comp_mode_ctx) =
@@ -679,6 +698,57 @@ impl<'a> TileDecodeState<'a> {
                     mvs[0].col,
                     mvs[1].row,
                     mvs[1].col,
+                    self.dec.raw_state().0
+                );
+            }
+
+            // `read_compound_type()` (§5.11.26): `comp_group_idx` (mask vs
+            // jnt/avg), then either `compound_idx` (jnt vs distance-weighted)
+            // or the wedge / diffwtd branch + mask-sign literal.
+            let mask_ctx = mask_comp_ctx(cedge_a, cedge_l);
+            let comp_group_idx = if self.enable_masked_compound {
+                self.dec
+                    .read_symbol(&mut self.mode_cdfs.mask_comp[mask_ctx.min(5)])
+                    == 1
+            } else {
+                false
+            };
+            if !comp_group_idx {
+                if self.enable_jnt_comp {
+                    // poc diffs for `get_jnt_comp_ctx`.
+                    let poc = self.cur_order_hint as i32;
+                    let ref_poc = |name: u8| -> i32 {
+                        let slot = self.ref_to_slot[name as usize] as usize;
+                        self.dpb_order_hints.get(slot).copied().unwrap_or(0) as i32
+                    };
+                    let d0 = poc_diff(self.order_hint_bits, ref_poc(ref_names[0]), poc).abs();
+                    let d1 = poc_diff(self.order_hint_bits, poc, ref_poc(ref_names[1])).abs();
+                    let jnt_ctx = jnt_comp_ctx(d0 == d1, cedge_a, cedge_l);
+                    // 1 (WEIGHTED_AVG) + bit → 1 or 2 (AVG).
+                    block_comp_type = 1 + self
+                        .dec
+                        .read_symbol(&mut self.mode_cdfs.jnt_comp[jnt_ctx.min(5)])
+                        as u8;
+                } else {
+                    block_comp_type = 2; // COMP_INTER_AVG
+                }
+            } else if wedge_allowed(bsize) {
+                let wctx = wedge_ctx(bsize);
+                // COMP_INTER_WEDGE(4) - bit → 3 (SEG/diffwtd) or 4 (WEDGE).
+                block_comp_type =
+                    4 - self.dec.read_symbol(&mut self.mode_cdfs.wedge_comp[wctx]) as u8;
+                if block_comp_type == 4 {
+                    let _widx = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
+                }
+                let _mask_sign = self.dec.read_bool();
+            } else {
+                block_comp_type = 3; // COMP_INTER_SEG
+                let _mask_sign = self.dec.read_bool();
+            }
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 comptype grp={} type={block_comp_type} rng={}",
+                    comp_group_idx as u8,
                     self.dec.raw_state().0
                 );
             }
@@ -874,10 +944,8 @@ impl<'a> TileDecodeState<'a> {
         let skip_byte = skip as u8;
         let luma_tx_w_byte = av1::TX_WIDTH[luma_tx] as u8;
         let luma_tx_h_byte = av1::TX_HEIGHT[luma_tx] as u8;
-        // dav1d `BlockContext::comp_type`: only compound blocks carry one. The
-        // exact mask type (avg / jnt / seg / wedge) awaits `read_compound_type`;
-        // for now a compound block records `COMP_INTER_AVG` (2).
-        let comp_type_byte = if ref_names[1] != NONE_FRAME { 2u8 } else { 0u8 };
+        // dav1d `BlockContext::comp_type` (from `read_compound_type`).
+        let comp_type_byte = block_comp_type;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;

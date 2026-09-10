@@ -5817,3 +5817,23 @@
 > `read_compound_type` (§5.11.26: `mask_comp`/`wedge`/`jnt_comp`/
 > `compound_idx`) + real compound prediction (dist-weighted / wedge / diffwtd)
 > are still stubbed (plain average). Next: `read_compound_type`.
+
+> **2026-09-10 (cont'd) — compound Stage 3: `read_compound_type` (§5.11.26).**
+> Added `mode_cdfs.{mask_comp,jnt_comp,wedge_comp}` CDFs (spec defaults) and
+> threaded `enable_masked_compound`/`enable_jnt_comp`/`OrderHintBits`/current
+> `OrderHint`/DPB slot order-hints through `reconstruct_av1_frame` →
+> `decode_tile_group` → `TileDecodeState`. Implemented `read_compound_type` in
+> `decode_inter_block`'s compound branch: `comp_group_idx` bool
+> (`mask_comp[get_mask_comp_ctx]`) → jnt/avg path (`jnt_comp[get_jnt_comp_ctx]`
+> with the real `get_poc_diff` term) or the wedge / diffwtd + `mask_sign`
+> literal branch. Per-mi `comp_type_above/left` now records the real decoded
+> type (not a hardcoded `COMP_INTER_AVG`). **VERIFIED bit-exact vs patched
+> dav1d** on 128x96 poc=1 first compound block: `Post-segwedge_vs_jntavg[0]`
+> + `Post-jnt_comp[0,ctx=1]` → Kinetix `comptype grp=0 type=1 rng=47316`,
+> matching dav1d's `r=47316`. The full compound *entropy* chain (is_comp →
+> ref tree → comp_inter_mode → drl → per-ref MV → compound_type) is now
+> bit-exact for that block; the next divergence is the compound residual
+> (`Post-y-cf-blk[tx=12,eob=17]` — a large rect tx, read but not applied).
+> 139 tests + intra corpus (6/6) pass. Still stubbed: compound *prediction*
+> (plain average, not weighted/wedge/diffwtd), large-tx inverse transforms,
+> and compound `find_mv_stack` temporal/extended candidates (n_mvs undercount).

@@ -82,6 +82,11 @@ fn decode_with(
         false,    // is_motion_mode_switchable
         false,    // allow_warped_motion
         false,    // enable_interintra
+        false,    // enable_masked_compound
+        false,    // enable_jnt_comp
+        0,        // order_hint_bits
+        0,        // cur_order_hint
+        [0u8; 8], // dpb_order_hints
         [0u8; 9], // ref_to_slot
         RefFrames::empty(),
         &mut meta,
