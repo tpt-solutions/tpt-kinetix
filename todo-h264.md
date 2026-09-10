@@ -52,14 +52,26 @@ through **~MB 272** (58 field-region MBs). **Pair rows 0-2 — including
 several field-coded pairs — are byte-exact.** 27 ITU clips still bit-exact,
 269 unit tests pass, no regressions.
 
-**Next desync: MB 273** (field-bottom, whose left neighbour is *also*
-field-coded → `left_block_opt` stays 0). `intra_chroma_pred_mode` reads 1
-vs JM 0. Suspect the **chroma `coded_block_flag`** `left_block[12..16]`
-mapping (`1 + N*4` indices — needs FFmpeg's chroma-nnz layout; a naive
-`by*2+1` + left_top/left_bottom split regressed, reverted) OR a field-MB
-residual significance-context detail. Then: field-coded pair
-**reconstruction** geometry (§8.3.2.2.2 — still to do; pair rows 0-2 being
-exact suggests the field intra recon at the parity line is already close).
+**MB 273 CLOSED** (commit, `LEFT_BLOCK_CHROMA_NNZ`): `chroma_cbf_neighbors`
+now applies the `left_block_options[opt][12..16]` mapping — right-column
+chroma raster 1/3 per `1 + N*4` (N∈{4,5}), and for opt 3 chroma row 0 reads
+the left-top MB / row 1 the left-bottom. **CANLMA2 frame 0 diff_bytes
+411 930 → 62 735, max_diff 255 → 129** (no regression, 27 ITU bit-exact).
+
+Loop filter is OFF for CANLMA2 (readme) — the remaining frame-0 error is
+**pure reconstruction**, not deblock:
+- `MB(5,8)` = 129 (pair_row 4) — isolated, first bad.
+- Triangular ~81 block around `MB(19-22, rows 16-23)` — directional intra
+  cascade → one wrong mode/neighbour-sample seed.
+- Diffuse ~20 across the bottom rows 24-29 — likely the **field-coded pair
+  reconstruction geometry** (§8.3.2.2.2 / §6.4.12 left-neighbour sample
+  remapping when a field MB abuts a frame pair, or vice versa —
+  `reconstruct_mbaff_intra_frame`'s `field` branch samples `x0-1` / `y0-2`
+  with no remap).
+
+Next: extend the same `left_block` / §6.4.12 remap to the intra-prediction
+**sample fetch** in `reconstruct_mbaff_intra_frame` (and `reconstruct_luma_at`
+for field MBs). Frames 1+ (P) need the separate MBAFF-inter path.
 
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
