@@ -199,6 +199,13 @@ impl<'a> TileDecodeState<'a> {
                 return;
             }
             let cell = self.refmv_cell(mv_row as usize, mv_col as usize);
+            if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+                eprintln!(
+                    "DBG warp add_sample dr={dr} dc={dc} -> ({mv_row},{mv_col}) \
+                     cell.refs={:?} cell.mv={:?} ref0={ref0}",
+                    cell.refs, cell.mv[0]
+                );
+            }
             if cell.refs[0] != ref0 || cell.refs[1] != NONE_FRAME {
                 return;
             }
