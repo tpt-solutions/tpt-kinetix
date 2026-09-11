@@ -248,15 +248,45 @@ pub(crate) fn partition_dims(
     }
 }
 
+/// FFmpeg `MAP_F2F` (`h264_mvpred.h`): a cross-MB mvd/mv y-component is
+/// re-scaled whenever the current macroblock pair and the neighbour that
+/// supplies the cache cell have different `mb_field_decoding_flag` values.
+/// `MB_FIELD` branch (current field / neighbour frame) halves the neighbour's
+/// y-component; the inverse branch (current frame / neighbour field) doubles
+/// it. Only the y-component (`comp == 1`) is affected -- x is untouched.
+#[inline]
+fn map_f2f_y(v: u32, cur_field: bool, nbr_field: bool) -> u32 {
+    if cur_field && !nbr_field {
+        v >> 1
+    } else if !cur_field && nbr_field {
+        v << 1
+    } else {
+        v
+    }
+}
+
 /// Derive `amvd_sum` (§9.3.3.1.1.7) for one MVD component of a partition.
 ///
 /// `xP`/`yP`/`wP`/`hP` are partition coords in pixels. Returns left + top
 /// |mvd| capped-sum used to select CABAC bin-0 context for `MvdCabacContext`.
+///
+/// MBAFF-aware: `nctx`/`mb_x`/`mb_y`/`mb_cols` resolve the left-top/left-bottom/
+/// top neighbour macroblocks the same way [`luma_cbf_neighbors`] does (§6.4.10.7
+/// row remap for a mixed field/frame pair boundary via
+/// [`crate::mbaff::LEFT_BLOCK_LUMA_NNZ`]), and the cross-MB neighbour's
+/// y-component is additionally re-scaled by [`map_f2f_y`] when that neighbour's
+/// own `mb_field_decoding_flag` differs from the current macroblock's (FFmpeg's
+/// `MAP_F2F`, `h264_mvpred.h`). Degenerates to the plain non-MBAFF lookup
+/// (single left/top neighbour, no scaling) when `nctx` reports `!mb_aff`.
+#[allow(clippy::too_many_arguments)]
 fn amvd_sum(
     inter_grid: &[MbInterCabacCtx],
+    cabac_grid: &[MbCabacCtx],
     cur_inter: &MbInterCabacCtx,
-    left_mb_idx: Option<usize>,
-    top_mb_idx: Option<usize>,
+    nctx: NeighbourCtx,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
     xp: u32,
     yp: u32,
     _wp: u32,
@@ -273,33 +303,46 @@ fn amvd_sum(
     // exactly the c_p8x8 failure trigger (session #32b, todo-h264.md).
     let bx = (xp / 4) as usize;
     let by = (yp / 4) as usize;
+    let cur_field = nctx.is_field();
+    let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols) as usize % 4;
 
     let left_val = if bx > 0 {
-        let blk = by * 4 + (bx - 1);
-        cell(cur_inter, blk, list, comp)
-    } else if let Some(li) = left_mb_idx {
-        if inter_grid[li].present {
-            let blk = by * 4 + 3;
-            cell(&inter_grid[li], blk, list, comp)
-        } else {
-            0
-        }
+        cell(cur_inter, by * 4 + (bx - 1), list, comp)
     } else {
-        0
+        let li = if by < 2 {
+            left_top_idx
+        } else {
+            left_bottom_idx.or(left_top_idx)
+        };
+        match li {
+            Some(li) if inter_grid[li].present => {
+                let blk = crate::mbaff::LEFT_BLOCK_LUMA_NNZ[opt][by];
+                let v = cell(&inter_grid[li], blk, list, comp);
+                if comp == 1 {
+                    map_f2f_y(v, cur_field, cabac_grid[li].mb_field_flag)
+                } else {
+                    v
+                }
+            }
+            _ => 0,
+        }
     };
 
     let top_val = if by > 0 {
-        let blk = (by - 1) * 4 + bx;
-        cell(cur_inter, blk, list, comp)
-    } else if let Some(ti) = top_mb_idx {
-        if inter_grid[ti].present {
-            let blk = 3 * 4 + bx;
-            cell(&inter_grid[ti], blk, list, comp)
-        } else {
-            0
-        }
+        cell(cur_inter, (by - 1) * 4 + bx, list, comp)
     } else {
-        0
+        match top_idx {
+            Some(ti) if inter_grid[ti].present => {
+                let v = cell(&inter_grid[ti], 3 * 4 + bx, list, comp);
+                if comp == 1 {
+                    map_f2f_y(v, cur_field, cabac_grid[ti].mb_field_flag)
+                } else {
+                    v
+                }
+            }
+            _ => 0,
+        }
     };
 
     left_val + top_val
@@ -320,11 +363,19 @@ fn cell(g: &MbInterCabacCtx, blk: usize, list: usize, comp: usize) -> u32 {
 /// Uses ffmpeg's literal `decode_cabac_mb_ref` convention: the ref_cache
 /// cells at `scan8[n]-1` / `scan8[n]-8`, i.e. the neighbours of the
 /// partition's TOP-LEFT 4x4 block (same convention as [`amvd_sum`]).
+///
+/// MBAFF-aware the same way [`amvd_sum`] is (§6.4.10.7 left-neighbour row
+/// remap via [`crate::mbaff::LEFT_BLOCK_LUMA_NNZ`]) -- but with no `MAP_F2F`
+/// y-scaling, since `ref_idx > 0` is unaffected by doubling/halving a value
+/// that's either zero or not (`todo-h264.md` #32bl).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ref_idx_gt0_neighbors(
     inter_grid: &[MbInterCabacCtx],
     cur_inter: &MbInterCabacCtx,
-    left_mb_idx: Option<usize>,
-    top_mb_idx: Option<usize>,
+    nctx: NeighbourCtx,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
     xp: u32,
     yp: u32,
     _wp: u32,
@@ -333,29 +384,33 @@ pub(crate) fn ref_idx_gt0_neighbors(
 ) -> (bool, bool) {
     let bx = (xp / 4) as usize;
     let by = (yp / 4) as usize;
+    let (left_top_idx, top_idx, left_bottom_idx) = nctx.left_top_with_bottom(mb_x, mb_y, mb_cols);
+    let opt = nctx.mbaff_left_block_opt(mb_x, mb_y, mb_cols) as usize % 4;
 
     let left_gt0 = if bx > 0 {
         cell_gt0(cur_inter, by * 4 + (bx - 1), list)
-    } else if let Some(idx) = left_mb_idx {
-        if inter_grid[idx].present {
-            cell_gt0(&inter_grid[idx], by * 4 + 3, list)
-        } else {
-            false
-        }
     } else {
-        false
+        let li = if by < 2 {
+            left_top_idx
+        } else {
+            left_bottom_idx.or(left_top_idx)
+        };
+        match li {
+            Some(li) if inter_grid[li].present => {
+                let blk = crate::mbaff::LEFT_BLOCK_LUMA_NNZ[opt][by];
+                cell_gt0(&inter_grid[li], blk, list)
+            }
+            _ => false,
+        }
     };
 
     let top_gt0 = if by > 0 {
         cell_gt0(cur_inter, (by - 1) * 4 + bx, list)
-    } else if let Some(idx) = top_mb_idx {
-        if inter_grid[idx].present {
-            cell_gt0(&inter_grid[idx], 3 * 4 + bx, list)
-        } else {
-            false
-        }
     } else {
-        false
+        match top_idx {
+            Some(idx) if inter_grid[idx].present => cell_gt0(&inter_grid[idx], 3 * 4 + bx, list),
+            _ => false,
+        }
     };
     (left_gt0, top_gt0)
 }
@@ -521,6 +576,37 @@ impl<'a> NeighbourCtx<'a> {
             self.filter_slice(n.top),
             self.filter_slice(n.left_bottom),
         )
+    }
+
+    /// §7.4.5.1: `ref_idx_lX` is present when `num_ref_idx_lX_active_minus1 > 0
+    /// || mb_field_decoding_flag != field_pic_flag`. The second disjunct only
+    /// ever fires for a field-coded macroblock pair inside an MBAFF *frame*
+    /// picture (`field_pic_flag` is always 0 there) -- a single reference
+    /// *frame* expands into two reference *fields*, so `ref_idx` must be
+    /// signalled even with only one active reference. `mb_aff` here is always
+    /// the caller's `mbaff_frame` (`mb_aff && !field_pic_flag`, see every
+    /// `NeighbourCtx::new_with_slices` call site in `cabac_p.rs`/`cabac_b.rs`),
+    /// so `mb_aff && cur_field` is exactly that mismatch. Missing this bit was
+    /// the actual cause of `todo-h264.md` #32bl's CANLMA2 P-slice desync at the
+    /// first field-coded pair: the decoder silently skipped 4 `ref_idx_l0` bins
+    /// JM's reference decode does read, desyncing the CABAC engine for every
+    /// syntax element after `sub_mb_type` (including `mvd_l0`) regardless of how
+    /// correct `amvd_sum`'s own neighbour derivation is.
+    pub(crate) fn ref_idx_field_mismatch(&self) -> bool {
+        self.mb_aff && self.cur_field
+    }
+
+    /// §7.4.5.1's effective `num_ref_idx_lX_active` for bounds-checking a
+    /// decoded `ref_idx_lX`: doubled for a field-coded macroblock pair inside
+    /// an MBAFF frame (see [`Self::ref_idx_field_mismatch`]) since a single
+    /// reference *frame* is addressed as two reference *fields* there,
+    /// unchanged otherwise.
+    pub(crate) fn effective_ref_idx_active(&self, num_ref_idx_active: u32) -> u32 {
+        if self.ref_idx_field_mismatch() {
+            num_ref_idx_active * 2
+        } else {
+            num_ref_idx_active
+        }
     }
 
     /// FFmpeg `sl->left_block` selector (0..3) for the current macroblock — see
@@ -952,13 +1038,17 @@ impl PbCabacSliceContexts {
 }
 
 /// Decode one MVD component via CABAC and record it in `inter_ctx`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cabac_decode_mvd_component(
     dec: &mut crate::entropy::CabacDecoder,
     ctx: &mut crate::entropy::MvdCabacContext,
     inter_grid: &[MbInterCabacCtx],
+    cabac_grid: &[MbCabacCtx],
     cur_inter: &MbInterCabacCtx,
-    left_mb_idx: Option<usize>,
-    top_mb_idx: Option<usize>,
+    nctx: NeighbourCtx,
+    mb_x: u32,
+    mb_y: u32,
+    mb_cols: u32,
     xp: u32,
     yp: u32,
     wp: u32,
@@ -968,9 +1058,12 @@ pub(crate) fn cabac_decode_mvd_component(
 ) -> R<i32> {
     let asum = amvd_sum(
         inter_grid,
+        cabac_grid,
         cur_inter,
-        left_mb_idx,
-        top_mb_idx,
+        nctx,
+        mb_x,
+        mb_y,
+        mb_cols,
         xp,
         yp,
         wp,
@@ -1015,26 +1108,77 @@ mod tests {
         }
     }
 
+    // Non-MBAFF neighbour coordinates: `left_top_with_bottom`/`mbaff_left_block_opt`
+    // degenerate to the plain raster formula (`mb_y*mb_cols+mb_x-1` / `(mb_y-1)*mb_cols+mb_x`,
+    // `left_bottom = None`, `opt = 0`) whenever `nctx` is `NeighbourCtx::NONE`, exactly
+    // matching the plain single-left/single-top lookup these functions used before they
+    // were made MBAFF-aware. `cabac_grid` entries all default `mb_field_flag = false`, so
+    // `map_f2f_y` is a no-op here (both `NONE`'s `is_field()` and every default neighbour
+    // report frame-coded) -- these tests exercise only the row-selection logic.
+    const CROSS_MB_LEFT: (u32, u32, u32) = (1, 0, 1); // left_idx = 0, top = None
+    const CROSS_MB_TOP: (u32, u32, u32) = (0, 1, 1); // top_idx = 0, left = None
+    const WITHIN_MB: (u32, u32, u32) = (0, 0, 1); // left = top = None
+    // mb_cols=2, mb_x=1, mb_y=1: left_idx = mb_y*mb_cols+mb_x-1 = 2, top_idx = mb_x = 1.
+    const CROSS_MB_BOTH: (u32, u32, u32) = (1, 1, 2);
+
     #[test]
     fn ref_idx_left_neighbor_cross_mb_reads_rightmost_column() {
         // Left neighbor has ref_idx>0 only in its rightmost column (blocks 3, 7, 11, 15).
         let left_mb = ctx_with_l0_ref_gt0(1 << 3 | 1 << 7 | 1 << 11 | 1 << 15);
         let inter_grid = vec![left_mb];
+        let cabac_grid = vec![MbCabacCtx::default()];
         let cur = ctx_with_l0_ref_gt0(0);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_LEFT;
 
         // Partition at bx=0, by=0 (P16x8 top, or P_8x8 top-left).
-        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(lg, "left neighbor block 3 should be gt0");
 
         // Partition at bx=0, by=2 (P16x8 bottom, or P_8x8 bottom-left).
-        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 8, 8, 8, 0);
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            8,
+            8,
+            8,
+            0,
+        );
         assert!(lg, "left neighbor block 11 should be gt0");
 
         // Left neighbor with no ref_idx>0.
         let left_mb_empty = ctx_with_l0_ref_gt0(0);
         let inter_grid_empty = vec![left_mb_empty];
-        let (lg, _tg) =
-            ref_idx_gt0_neighbors(&inter_grid_empty, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        let _ = &cabac_grid;
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid_empty,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(!lg, "left neighbor with no ref_gt0 should be false");
     }
 
@@ -1044,13 +1188,38 @@ mod tests {
         let top_mb = ctx_with_l0_ref_gt0(1 << 12 | 1 << 13 | 1 << 14 | 1 << 15);
         let inter_grid = vec![top_mb];
         let cur = ctx_with_l0_ref_gt0(0);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_TOP;
 
         // Partition at bx=0, by=0.
-        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, Some(0), 0, 0, 8, 8, 0);
+        let (_lg, tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(tg, "top neighbor block 12 should be gt0");
 
         // Partition at bx=2, by=0.
-        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, Some(0), 8, 0, 8, 8, 0);
+        let (_lg, tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(tg, "top neighbor block 14 should be gt0");
     }
 
@@ -1059,17 +1228,54 @@ mod tests {
         // Current MB has ref_idx>0 at blocks 0,1,4,5 (top-left 8x8).
         let cur = ctx_with_l0_ref_gt0(1 << 0 | 1 << 1 | 1 << 4 | 1 << 5);
         let inter_grid = vec![];
+        let (mb_x, mb_y, mb_cols) = WITHIN_MB;
 
         // Partition at bx=2, by=0 (top-right 8x8): left neighbor is block 1 (within MB).
-        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 8, 0, 8, 8, 0);
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(lg, "within-MB left neighbor block 1 should be gt0");
 
         // Partition at bx=0, by=2 (bottom-left 8x8): top neighbor is block 4 (within MB).
-        let (_lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 0, 8, 8, 8, 0);
+        let (_lg, tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            8,
+            8,
+            8,
+            0,
+        );
         assert!(tg, "within-MB top neighbor block 4 should be gt0");
 
         // Partition at bx=2, by=2 (bottom-right 8x8): left=block 9, top=block 6.
-        let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 8, 8, 8, 8, 0);
+        let (lg, tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            8,
+            8,
+            8,
+            0,
+        );
         assert!(!lg, "within-MB left neighbor block 9 should NOT be gt0");
         assert!(!tg, "within-MB top neighbor block 6 should NOT be gt0");
     }
@@ -1081,10 +1287,26 @@ mod tests {
         mvd[3][0] = 5;
         let left_mb = ctx_with_l0_mvd(mvd);
         let inter_grid = vec![left_mb];
+        let cabac_grid = vec![MbCabacCtx::default()];
         let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_LEFT;
 
         // Partition at bx=0, by=0.
-        let asum = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 16, 16, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            16,
+            16,
+            0,
+            0,
+        );
         assert_eq!(asum, 5, "left neighbor |mvd_x| at block 3 should be 5");
     }
 
@@ -1095,9 +1317,25 @@ mod tests {
         mvd[1][0] = 7;
         let cur = ctx_with_l0_mvd(mvd);
         let inter_grid = vec![];
+        let cabac_grid = vec![];
+        let (mb_x, mb_y, mb_cols) = WITHIN_MB;
 
         // Partition at bx=2, by=0: left neighbor is block 1.
-        let asum = amvd_sum(&inter_grid, &cur, None, None, 8, 0, 8, 8, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            0,
+            8,
+            8,
+            0,
+            0,
+        );
         assert_eq!(
             asum, 7,
             "within-MB left neighbor |mvd_x| at block 1 should be 7"
@@ -1111,10 +1349,26 @@ mod tests {
         mvd[12][0] = 6;
         let top_mb = ctx_with_l0_mvd(mvd);
         let inter_grid = vec![top_mb];
+        let cabac_grid = vec![MbCabacCtx::default()];
         let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_TOP;
 
         // Partition at bx=0, by=0.
-        let asum = amvd_sum(&inter_grid, &cur, None, Some(0), 0, 0, 16, 16, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            16,
+            16,
+            0,
+            0,
+        );
         assert_eq!(asum, 6, "top neighbor |mvd_x| at block 12 should be 6");
 
         // Partition at bx=2, by=0: top neighbor is block 14.
@@ -1122,7 +1376,21 @@ mod tests {
         mvd2[14][0] = 9;
         let top_mb2 = ctx_with_l0_mvd(mvd2);
         let inter_grid2 = vec![top_mb2];
-        let asum2 = amvd_sum(&inter_grid2, &cur, None, Some(0), 8, 0, 8, 8, 0, 0);
+        let asum2 = amvd_sum(
+            &inter_grid2,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            0,
+            8,
+            8,
+            0,
+            0,
+        );
         assert_eq!(asum2, 9, "top neighbor |mvd_x| at block 14 should be 9");
     }
 
@@ -1133,9 +1401,25 @@ mod tests {
         mvd[4][0] = 4;
         let cur = ctx_with_l0_mvd(mvd);
         let inter_grid = vec![];
+        let cabac_grid = vec![];
+        let (mb_x, mb_y, mb_cols) = WITHIN_MB;
 
         // Partition at bx=0, by=2: top neighbor is block 4 (within MB).
-        let asum = amvd_sum(&inter_grid, &cur, None, None, 0, 8, 8, 8, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            8,
+            8,
+            8,
+            0,
+            0,
+        );
         assert_eq!(
             asum, 4,
             "within-MB top neighbor |mvd_x| at block 4 should be 4"
@@ -1145,7 +1429,21 @@ mod tests {
         let mut mvd2 = [[0u8; 2]; 16];
         mvd2[6][0] = 11;
         let cur2 = ctx_with_l0_mvd(mvd2);
-        let asum2 = amvd_sum(&inter_grid, &cur2, None, None, 8, 8, 8, 8, 0, 0);
+        let asum2 = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur2,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            8,
+            8,
+            8,
+            8,
+            0,
+            0,
+        );
         assert_eq!(
             asum2, 11,
             "within-MB top neighbor |mvd_x| at block 6 should be 11"
@@ -1166,14 +1464,44 @@ mod tests {
             ..Default::default()
         };
         let inter_grid = vec![mb];
+        let cabac_grid = vec![MbCabacCtx::default()];
         let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_LEFT;
 
         // L1 list, left neighbor cross-MB: should read 8.
-        let asum = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 1, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            1,
+            0,
+        );
         assert_eq!(asum, 8, "L1 left neighbor |mvd_x| at block 3 should be 8");
 
         // L0 list should see 0 (l0_mvd_abs is zero).
-        let asum0 = amvd_sum(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0, 0);
+        let asum0 = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+            0,
+        );
         assert_eq!(asum0, 0, "L0 left neighbor should be 0 when only l1 set");
     }
 
@@ -1185,9 +1513,25 @@ mod tests {
             m
         });
         let inter_grid = vec![];
+        let cabac_grid = vec![];
+        let (mb_x, mb_y, mb_cols) = WITHIN_MB;
 
         // No left or top neighbor (off-picture): sum should be 0.
-        let asum = amvd_sum(&inter_grid, &cur, None, None, 0, 0, 16, 16, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            16,
+            16,
+            0,
+            0,
+        );
         assert_eq!(asum, 0, "off-picture neighbors should yield amvd_sum=0");
     }
 
@@ -1195,18 +1539,35 @@ mod tests {
     fn amvd_sum_caps_at_70() {
         // l0_mvd_abs values are already capped at 70 at storage time.
         // Verify the cap is respected: 70 + 70 = 140.
+        // CROSS_MB_BOTH (mb_cols=2, mb_x=1, mb_y=1) resolves left_idx=2, top_idx=1.
         let mut m = [[0u8; 2]; 16];
         m[3][0] = 70; // left neighbor block 3
-        let left_mb = ctx_with_l0_mvd(m);
-
         let mut m2 = [[0u8; 2]; 16];
         m2[12][0] = 70; // top neighbor block 12
-        let top_mb = ctx_with_l0_mvd(m2);
-        // Put top_mb at index 1 in the grid
-        let inter_grid = vec![left_mb, top_mb];
+        let inter_grid = vec![
+            MbInterCabacCtx::default(),
+            ctx_with_l0_mvd(m2),
+            ctx_with_l0_mvd(m),
+        ];
+        let cabac_grid = vec![MbCabacCtx::default(); 3];
         let cur = ctx_with_l0_mvd([[0u8; 2]; 16]);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_BOTH;
 
-        let asum = amvd_sum(&inter_grid, &cur, Some(0), Some(1), 0, 0, 16, 16, 0, 0);
+        let asum = amvd_sum(
+            &inter_grid,
+            &cabac_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            16,
+            16,
+            0,
+            0,
+        );
         assert_eq!(asum, 140, "70 + 70 should be 140");
     }
 
@@ -1214,9 +1575,22 @@ mod tests {
     fn ref_idx_off_picture_neighbor_returns_false() {
         let cur = ctx_with_l0_ref_gt0(0xFFFF);
         let inter_grid = vec![];
+        let (mb_x, mb_y, mb_cols) = WITHIN_MB;
 
         // No left neighbor (off-picture).
-        let (lg, tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, None, None, 0, 0, 8, 8, 0);
+        let (lg, tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(!lg, "off-picture left neighbor should be false");
         assert!(!tg, "off-picture top neighbor should be false");
     }
@@ -1231,13 +1605,38 @@ mod tests {
         };
         let inter_grid = vec![mb];
         let cur = ctx_with_l0_ref_gt0(0);
+        let (mb_x, mb_y, mb_cols) = CROSS_MB_LEFT;
 
         // L1 list, left neighbor cross-MB.
-        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 1);
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            1,
+        );
         assert!(lg, "L1 left neighbor block 3 should be gt0");
 
         // L0 list should see no ref_gt0.
-        let (lg, _tg) = ref_idx_gt0_neighbors(&inter_grid, &cur, Some(0), None, 0, 0, 8, 8, 0);
+        let (lg, _tg) = ref_idx_gt0_neighbors(
+            &inter_grid,
+            &cur,
+            NeighbourCtx::NONE,
+            mb_x,
+            mb_y,
+            mb_cols,
+            0,
+            0,
+            8,
+            8,
+            0,
+        );
         assert!(!lg, "L0 left neighbor should be false when only l1 set");
     }
 }

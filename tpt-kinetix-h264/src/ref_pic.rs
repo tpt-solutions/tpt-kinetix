@@ -1502,7 +1502,7 @@ fn initial_ref_list_l1(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
 /// own truncated-but-unmodified form, for the §8.2.4.2.3 Note 2 special case:
 /// "When the reference picture list RefPicList1 has more than one entry and
 /// RefPicList1 is identical to the reference picture list RefPicList0, the
-/// first two entries RefPicList1[0] and RefPicList1[1] are switched." Without
+/// first two entries RefPicList1\[0\] and RefPicList1\[1\] are switched." Without
 /// this, an L1 prediction using `ref_idx_l1 == 0` (or `1`) on a B slice whose
 /// two lists happen to coincide silently names the wrong physical reference
 /// picture whenever the two entries are not the same picture.
