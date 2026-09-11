@@ -382,6 +382,134 @@ used above, applied to the `MB172`/`MB173` region (JM trace offset ~173803
 in a fresh `trace_dec.txt`; scratch test `dbg_canlma2_mb4_bintrace.rs`
 already has the harness, just change which MB range gets dumped/compared).
 
+## SESSION #32bo — CANLMA2 MB173 gap: the JM oracle itself was broken, not Kinetix
+
+Picked up exactly where #32bn left off (confirmed via `git log` — no h264 commits
+since `b1a55d3`/its docs commit). Goal was to root-cause the `MB173` gap
+(`MB(41,3)`, pair 86's bottom half) using the same JM-oracle + `KINETIX_BINTRACE`
+method. **Found something more fundamental: the specific `ldecod_trace.exe`
+binary at `C:\Users\phill\jm-oracle\jm` (local, not committed) mis-dispatches
+every P-slice after the first picture through the *I-slice* CABAC decoder**,
+making every "JM ground truth" trace this session (and very likely #32bn's,
+since it names the same oracle location) for `CANLMA2_Sony_C` POC ≥ 1
+**unreliable**.
+
+**How this was found**: regenerated `trace_dec.txt` fresh (the oracle
+binary/patch was still present from a prior session). Cross-referencing
+POC 1's P slice showed *every* macroblock from `MB0` through at least `MB175`
+decoding as small `mb_type` values (0–25) immediately followed by
+`intra4x4_pred_mode`/`Intra16x16`-style reads — i.e. the trace claimed the
+**entire P slice is coded as intra**, with **zero** `mb_skip_flag` reads
+anywhere in the slice (confirmed via `grep -c "mb_skip_flag"` over the exact
+line range — 0 hits) and the slice's own `"*** POC: X MB: N Slice: M Type T
+***"` debug marker printing `Type 2` (JM's `I_SLICE` enum value — see
+`source/lib/lcommon/types.h`: `P_SLICE=0, B_SLICE=1, I_SLICE=2`) even though
+the slice header unambiguously decodes `slice_type=0` (P) — confirmed 3 ways:
+the raw `ue(v)` bit ("1"→0), and the presence of P/B-only header fields
+(`num_ref_idx_override_flag`, `ref_pic_list_reordering_flag_l0`,
+`adaptive_ref_pic_marking_mode_flag`, `cabac_init_idc`) with self-consistent
+values.
+
+Added throwaway `KDBG` instrumentation to `header.c` (print right after
+`p_Vid->type = currSlice->slice_type = tmp` in `FirstPartOfSliceHeader`),
+`mb_read.c` (`setup_read_macroblock` entry, plus wrapped
+`read_one_macroblock_p_slice_cabac`/`_i_slice_cabac` to log which one actually
+runs), and `image.c` (right before the `currSlice->read_one_macroblock(currMB)`
+call site in the macroblock loop), each printing the `Slice*` pointer address
+alongside `slice_type`. Result, byte-exact pointer values:
+
+```
+KDBG header slice_type_raw=2 slice_type=2 currSlice=...83490   (IDR, POC0 — correct, I_SLICE)
+KDBG setup_read_macroblock slice_type=2 currSlice=...83490     (matches)
+KDBG header slice_type_raw=0 slice_type=0 currSlice=...27620   (POC1 — correct, P_SLICE)
+KDBG setup_read_macroblock slice_type=0 currSlice=...27620     (matches — P dispatch correctly configured HERE)
+KDBG loop      currSlice=...83490 slice_type=2 ...             (!!) <- macroblock loop runs with the OLD IDR Slice*
+KDBG dispatch I mbAddr=0                                        (!!) <- calls read_one_macroblock_i_slice_cabac
+```
+
+`setup_read_macroblock` unambiguously sees the freshly-parsed P-slice struct
+(`...27620`, `slice_type=0`) and assigns `currSlice->read_one_macroblock =
+read_one_macroblock_p_slice_cabac` correctly on **that** struct. But
+`decode_slice()`'s own macroblock loop (`image.c`, the `while (end_of_slice ==
+FALSE)` loop right after the `"*** POC..."` marker) runs against the **stale
+IDR `Slice*` from the previous picture** (`...83490`, still `slice_type=2`)
+instead of the one `ppSliceList[iSliceNo]` should have pointed at post-swap.
+The bug is somewhere in `image.c`'s `ppSliceList`/`p_Vid->pNextSlice` swap
+logic (~lines 895–926 of the version in that tree) for the "each picture has
+exactly one slice, `current_header==SOS` every time" case this stream
+exercises — not chased further (out of scope; this is oracle-tooling, not
+Kinetix). **Do not trust this specific oracle checkout's per-MB traces for any
+non-first slice/picture until that swap bug is fixed or a fresh JM clone is
+built and re-verified with the pointer-address check above.**
+
+**Consequence for #32bn's "new gap" writeup**: its description of `MB173`
+("JM shows a 2-partition P `mb_type`, no `sub_mb_type`") was derived from this
+same oracle location and is very likely **also** an artifact of the I-slice
+misdispatch, not real bitstream content — the whole "MB0..MB175+ all render as
+intra with zero skips" pattern this session found is exactly what you'd expect
+from applying I-slice binarization to a real mixed P-slice bitstream. That
+specific characterization of `MB173` should **not** be trusted as a target to
+match against.
+
+**Independent (oracle-free) verification that `MB0` — and by extension
+Kinetix's basic P `mb_type` binarization — is *not* buggy**: wrote a
+from-scratch Python CABAC arithmetic decoder
+(`scripts`/scratch, not committed) that parses `RANGE_TAB_LPS`, `TRANS_IDX_LPS`,
+`TRANS_IDX_MPS`, and `CABAC_CTX_INIT_PB0` directly out of
+`tpt-kinetix-h264/src/entropy.rs` / `cabac_tables.rs` via regex (not
+hand-transcribed) and replays the real `CANLMA2_Sony_C.jsv` bytes for POC 1's
+P slice starting at RBSP byte 6 (`local bit 48` — computed independently from
+the slice-header bit widths, cabac-byte-aligned). Init `codIOffset` computed
+this way is **431 (`0x1af`)**, exactly matching Kinetix's own
+`CabacDecoder::new()` engine state — confirming the slice-header bit
+accounting and byte alignment are correct. Replaying `mb_skip_flag` (ctx 11,
+`ctxIdxInc=0` — no neighbours for `MB0`), `mb_field_decoding_flag` (ctx 70,
+`ctxIdxInc=0`), then the `mb_type` prefix bin (ctx 14) reproduces Kinetix's
+*exact* live `KINETIX_BINTRACE` output bit-for-bit: `R=473 V=284 state=54
+bin=0` (→ inter). Cross-checked the binarization *tree shape* itself (not just
+the tables) against FFmpeg's `ff_h264_decode_mb_cabac` P-slice branch (fetched
+live from `github.com/FFmpeg/FFmpeg` master via `WebFetch`, verbatim): `if
+(get_cabac(ctx[14])==0) { /* single further decision on ctx 15/16/17 */ }
+else { mb_type = decode_cabac_intra_mb_type(sl, 17, 0); goto decode_intra_mb;
+}` — this is *exactly* `MbTypePCabacContext::decode`'s structure (single ctx14
+bin, no secondary disambiguation on the "1" branch). **Conclusion: `MB0`'s
+`P_8x8` decode (`sub_types=[0,0,2,1]`) is the mathematically-forced, correct
+result for this bitstream** — not a bug, contrary to what the broken oracle's
+raw trace superficially suggested.
+
+**Where this leaves the real bug**: still open, still unlocated. Kinetix's
+actual failure point this session (`KINETIX_BINTRACE=1 cargo test -p
+tpt-kinetix-h264 --test dbg_canlma2_mb4_bintrace -- --nocapture`, harness
+range widened to `8..180`) is deterministic and precise:
+`parse_p_macroblock_cabac` (`tpt-kinetix-h264/src/slice_data/cabac_b.rs` —
+shared P/B macroblock body, despite the name; `parse_p_slice_cabac` dispatches
+into it) returns `SliceDataError::Unsupported("ref_idx overflow")` while
+decoding `MB173` = `MB(41,3)` (pair 86, bottom half)'s `P_8x8` `ref_idx_l0`
+for **partition 1**, right after partition 0 successfully decoded `ri=1` (only
+reachable because `nctx.ref_idx_field_mismatch()` is true for this MB — the
+slice's `num_ref_idx_l0_active_minus1==0` means `ref_idx_l0` wouldn't be read
+at all otherwise). **This is a concrete, oracle-independent lead for next
+session**: audit `NeighbourCtx::ref_idx_field_mismatch()` and
+`NeighbourCtx::effective_ref_idx_active()` (`tpt-kinetix-h264/src/slice_data/`
+— `cabac_b.rs` call sites, defined in `ctx.rs`) for pair 86 specifically — is
+this MB genuinely in a field/frame-mismatched-neighbour configuration (in
+which case `effective_ref_idx_active` should double to 2, and a decoded `ri`
+of 1 for partition 0 would be legitimate, not evidence of desync), and if so,
+is the SAME doubling correctly applied to the overflow check for partition 1?
+Given `MB(4,1)`/pair 4 was the stream's *first* field-coded pair and pair 86
+is deep into the stream, there's a wide MB range (pairs 5–85) not yet walked
+bin-by-bin since #32bn's fix landed — recommend redoing the "forward from
+`MB(4,1)`" walk from a **fixed** oracle before assuming the bug is local to
+pair 86 itself.
+
+**No Kinetix source changes this session** — `git status` on the repo is
+clean; 269 unit tests and (unaffected, untouched) 27/27 ITU conformance stand
+as before `b1a55d3`. The JM oracle edits described above live only in
+`C:\Users\phill\jm-oracle\jm` (outside the repo, not committed, per the task's
+own instructions) and should be reverted or fixed properly before reuse — they
+currently contain throwaway `fprintf` debug lines in `cabac.c`, `mb_read.c`,
+`header.c`, and `image.c` beyond the original KDBG cbf/skip instrumentation.
+
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
 Commit 21cff73. **Root cause via JM `ldecod` TRACE=1 build + our
