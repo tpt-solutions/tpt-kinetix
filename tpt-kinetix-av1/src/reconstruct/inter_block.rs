@@ -154,17 +154,20 @@ impl<'a> TileDecodeState<'a> {
         false
     }
 
-    /// §7.10.4 `find_warp_samples` / `add_sample`, reduced to just the
+    /// §7.10.4 `find_warp_samples` / `add_sample`. Returns both the
     /// `NumSamples` count `read_motion_mode` (§5.11.23) needs to decide
-    /// between the 3-way `motion_mode` symbol and the 2-way `use_obmc` bool.
-    /// The actual `CandList` (used by the LOCAL_WARP prediction's least-
-    /// squares affine fit, §7.13.4) is not built — warp motion is still not
-    /// *applied* — but the entropy-critical `NumSamples == 0` test now comes
-    /// from the real spec scan instead of the previous "any same-ref
-    /// neighbour" approximation, which could pick the wrong CDF outright
-    /// (verified against a patched dav1d oracle: same decoded `use_obmc`/
-    /// `motion_mode` symbol value, different `rng`, because the wrong CDF
-    /// table was read).
+    /// between the 3-way `motion_mode` symbol and the 2-way `use_obmc` bool
+    /// (only its zero/nonzero-ness matters there), *and* the raw
+    /// (unfiltered, i.e. not yet mv-diff-thresholded) `CandList` sample
+    /// points the §7.13.4 least-squares affine fit needs when `motion_mode
+    /// == WARP` is actually selected — dav1d's `derive_warpmv` runs its own
+    /// separate threshold-and-replace pass over exactly this list (see
+    /// [`warp::derive_warp_model`]), it does not reuse the entropy-side
+    /// count. The entropy-critical `NumSamples == 0` test comes from the
+    /// real spec scan (verified against a patched dav1d oracle: same
+    /// decoded `use_obmc`/`motion_mode` symbol value, different `rng`, when
+    /// a previous "any same-ref neighbour" approximation picked the wrong
+    /// CDF outright).
     fn find_num_warp_samples(
         &self,
         mi_row: usize,
@@ -172,7 +175,7 @@ impl<'a> TileDecodeState<'a> {
         bsize: usize,
         ref0: u8,
         cur_mv: Mv,
-    ) -> usize {
+    ) -> (usize, Vec<warp::WarpSample>) {
         let w4 = BLOCK_WIDTH[bsize] / MI_SIZE;
         let h4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
         let row_start = self.tile_px_y0 / MI_SIZE;
@@ -186,7 +189,16 @@ impl<'a> TileDecodeState<'a> {
         }
         let mut num_samples = 0usize;
         let mut num_scanned = 0usize;
-        let mut add_sample = |dr: isize, dc: isize| {
+        let mut raw_samples: Vec<warp::WarpSample> = Vec::with_capacity(8);
+        // `px_dx`/`px_dy`/`sx`/`sy` are dav1d `derive_warpmv`'s `add_sample`
+        // point-encoding parameters (§7.10.4): `sx`/`sy` in `{-1, 1}` select
+        // which corner of the *neighbour* block the sample point sits at,
+        // `px_dx`/`px_dy` the mi-unit offset from the current block's
+        // top-left corner. These are independent of `dr`/`dc` (the grid
+        // coordinates used to *fetch* the neighbour cell) whenever a large
+        // neighbour is refetched at an interior mi cell — see the
+        // same-size-neighbour branches below.
+        let mut add_sample = |dr: isize, dc: isize, px_dx: i32, px_dy: i32, sx: i32, sy: i32| {
             const LEAST_SQUARES_SAMPLES_MAX: usize = 8;
             if num_scanned >= LEAST_SQUARES_SAMPLES_MAX {
                 return;
@@ -211,9 +223,24 @@ impl<'a> TileDecodeState<'a> {
             if cell.refs[0] != ref0 || cell.refs[1] != NONE_FRAME {
                 return;
             }
+            num_scanned += 1;
+            // Raw (pre-threshold) point pair — dav1d `add_sample` macro:
+            // `pts[np][0] = 16*(2*dx + sx*bw4(neighbour)) - 8`, `pts[np][1] =
+            // pts[np][0] + neighbour_mv`. Built regardless of the mv-diff
+            // threshold below (that filtering happens later, only if
+            // `motion_mode == WARP` is actually selected).
+            if raw_samples.len() < LEAST_SQUARES_SAMPLES_MAX {
+                let nb_w4 = (cell.w4 as i32).max(1);
+                let nb_h4 = (cell.h4 as i32).max(1);
+                let src_x = 16 * (2 * px_dx + sx * nb_w4) - 8;
+                let src_y = 16 * (2 * px_dy + sy * nb_h4) - 8;
+                raw_samples.push(warp::WarpSample {
+                    src: [src_x, src_y],
+                    dst: [src_x + cell.mv[0].col, src_y + cell.mv[0].row],
+                });
+            }
             let mv_diff = (cell.mv[0].row - cur_mv.row).abs() + (cell.mv[0].col - cur_mv.col).abs();
             let valid = mv_diff <= threshold;
-            num_scanned += 1;
             // §7.10.4.2: an invalid sample past the first scanned one is
             // simply not added to NumSamples/CandList — it must NOT halt
             // the outer scan (only the LEAST_SQUARES_SAMPLES_MAX cap above
@@ -236,21 +263,21 @@ impl<'a> TileDecodeState<'a> {
             let src = self.refmv_cell(mi_row - 1, mi_col);
             let src_w = (src.w4 as usize).max(1);
             if w4 <= src_w {
-                let col_offset = -((mi_col & (src_w - 1)) as isize);
-                if col_offset < 0 {
+                let off = mi_col & (src_w - 1);
+                if off != 0 {
                     do_top_left = false;
                 }
-                if col_offset + src_w as isize > w4 as isize {
+                if src_w - off > w4 {
                     do_top_right = false;
                 }
-                add_sample(-1, 0);
+                add_sample(-1, 0, -(off as i32), 0, 1, -1);
             } else {
                 let mut i = 0usize;
                 let limit = w4.min(self.mi_cols.saturating_sub(mi_col));
                 while i < limit {
                     let cell = self.refmv_cell(mi_row - 1, mi_col + i);
                     let step = w4.min((cell.w4 as usize).max(1)).max(1);
-                    add_sample(-1, i as isize);
+                    add_sample(-1, i as isize, i as i32, 0, 1, -1);
                     i += step;
                 }
             }
@@ -259,32 +286,32 @@ impl<'a> TileDecodeState<'a> {
             let src = self.refmv_cell(mi_row, mi_col - 1);
             let src_h = (src.h4 as usize).max(1);
             if h4 <= src_h {
-                let row_offset = -((mi_row & (src_h - 1)) as isize);
-                if row_offset < 0 {
+                let off = mi_row & (src_h - 1);
+                if off != 0 {
                     do_top_left = false;
                 }
-                add_sample(0, -1);
+                add_sample(0, -1, 0, -(off as i32), -1, 1);
             } else {
                 let mut i = 0usize;
                 let limit = h4.min(self.mi_rows.saturating_sub(mi_row));
                 while i < limit {
                     let cell = self.refmv_cell(mi_row + i, mi_col - 1);
                     let step = h4.min((cell.h4 as usize).max(1)).max(1);
-                    add_sample(i as isize, -1);
+                    add_sample(i as isize, -1, 0, i as i32, -1, 1);
                     i += step;
                 }
             }
         }
         if do_top_left {
-            add_sample(-1, -1);
+            add_sample(-1, -1, 0, 0, -1, -1);
         }
         if do_top_right && w4.max(h4) <= 16 {
-            add_sample(-1, w4 as isize);
+            add_sample(-1, w4 as isize, w4 as i32, 0, 1, -1);
         }
         if num_samples == 0 && num_scanned > 0 {
             num_samples = 1;
         }
-        num_samples
+        (num_samples, raw_samples)
     }
 
     /// Fetch a `refmv_grid` cell, treating out-of-range coordinates as an
@@ -1016,9 +1043,14 @@ impl<'a> TileDecodeState<'a> {
         // overlappable (inter-coded) above/left neighbour. When a *matching-ref*
         // neighbour also exists (dav1d `find_matching_ref` mask nonzero) and
         // warped motion is enabled the 3-way `motion_mode` symbol is read,
-        // otherwise the `use_obmc` bool. Full warp-sample derivation isn't
-        // implemented, so a matching-ref neighbour is treated as `NumSamples>0`.
+        // otherwise the `use_obmc` bool.
         let mut motion_mode = 0u8; // SIMPLE
+        // §7.13.3/§7.13.4 local warp model, derived only when `motion_mode ==
+        // WARP` (2) is actually selected below. `None` covers both "not a
+        // WARP block" and dav1d's own translation-only fallback (LS system
+        // singular, or the fitted shear too extreme to filter) — either way
+        // the caller falls back to the ordinary translational prediction.
+        let mut warp_model: Option<warp::WarpModel> = None;
         {
             let min_dim = BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]);
             let _ = single_mode; // GLOBALMV modelled translation-only: GmType never > TRANSLATION
@@ -1029,7 +1061,7 @@ impl<'a> TileDecodeState<'a> {
                 && interintra_type == 0
                 && self.has_overlappable_candidates(mi_row, mi_col, bw, bh);
             if eligible {
-                let num_samples =
+                let (num_samples, raw_samples) =
                     self.find_num_warp_samples(mi_row, mi_col, bsize, ref_names[0], mvs[0]);
                 // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate) is
                 // not modelled — none of the corpus streams use reference
@@ -1046,6 +1078,25 @@ impl<'a> TileDecodeState<'a> {
                         .dec
                         .read_symbol(&mut self.mode_cdfs.use_obmc[bsize.min(21)])
                         as u8;
+                }
+                if motion_mode == 2 {
+                    let bw4 = bw as i32;
+                    let bh4 = bh as i32;
+                    warp_model = warp::derive_warp_model(
+                        &raw_samples,
+                        bw4,
+                        bh4,
+                        mvs[0],
+                        mi_col as i32,
+                        mi_row as i32,
+                    );
+                    if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+                        eprintln!(
+                            "DBG warp derive samples={} model_valid={}",
+                            raw_samples.len(),
+                            warp_model.is_some()
+                        );
+                    }
                 }
                 if dbg_b0 {
                     eprintln!(
@@ -1171,6 +1222,9 @@ impl<'a> TileDecodeState<'a> {
             filter,
             blend_weight,
             mask_desc,
+            mi_row,
+            mi_col,
+            warp_model.as_ref(),
         )?;
         // Chroma planes — `inter_predict_plane` interprets the luma MV at
         // 1/16-pel for the subsampled axes.
@@ -1189,6 +1243,9 @@ impl<'a> TileDecodeState<'a> {
             filter,
             blend_weight,
             mask_desc,
+            mi_row,
+            mi_col,
+            warp_model.as_ref(),
         )?;
         self.inter_predict_plane(
             2,
@@ -1201,12 +1258,16 @@ impl<'a> TileDecodeState<'a> {
             filter,
             blend_weight,
             mask_desc,
+            mi_row,
+            mi_col,
+            warp_model.as_ref(),
         )?;
 
         // Overlapped motion compensation (§7.11.3.9) — blend the base
         // prediction with predictions from the above / left neighbours'
-        // motion vectors. WARP (`motion_mode == 2`) prediction is still
-        // unimplemented (falls back to the translational base).
+        // motion vectors. Only meaningful for `motion_mode == OBMC` (1);
+        // WARP (2) blocks never run OBMC (dav1d: `motion_mode == MM_OBMC`
+        // is mutually exclusive with `MM_WARP` at the syntax level).
         if motion_mode == 1 {
             for plane in 0..3 {
                 self.apply_obmc(mi_row, mi_col, bsize, plane);
@@ -1376,13 +1437,22 @@ impl<'a> TileDecodeState<'a> {
         } else {
             self.interpolation_filter
         };
-        // Skip-mode blocks are `COMP_INTER_AVG` (plain average, weight 8).
+        // Skip-mode blocks are `COMP_INTER_AVG` (plain average, weight 8) and
+        // always compound (two references), so `motion_mode`/WARP never
+        // applies here (WARP requires single-ref) — `warp_model` is always
+        // `None`.
         let nm = MaskDesc::none();
-        self.inter_predict_plane(0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8, nm)?;
+        self.inter_predict_plane(
+            0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+        )?;
         let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
         let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
-        self.inter_predict_plane(1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm)?;
-        self.inter_predict_plane(2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm)?;
+        self.inter_predict_plane(
+            1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+        )?;
+        self.inter_predict_plane(
+            2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+        )?;
 
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
         // its no-entropy-read branch (uniform max transform).
@@ -1634,6 +1704,16 @@ impl<'a> TileDecodeState<'a> {
         // average); ignored for single-reference blocks.
         blend_weight: i32,
         mask: MaskDesc,
+        // Frame-absolute mi (4-pixel) position of the block — only used by
+        // the WARP path's `block_warp_process` (§7.11.3.5), which evaluates
+        // the affine model in absolute frame coordinates.
+        mi_row: usize,
+        mi_col: usize,
+        // `Some` only for a single-ref block with `motion_mode == WARP` and
+        // a successfully-derived local warp model (§7.13.4); `None` covers
+        // every other case, including dav1d's own translation-only
+        // fallback, and falls back to ordinary translational MC below.
+        warp_model: Option<&warp::WarpModel>,
     ) -> Result<(), KinetixError> {
         let stride = match plane {
             1 | 2 => self.uv_stride,
@@ -1663,14 +1743,49 @@ impl<'a> TileDecodeState<'a> {
         // Single reference: motion-compensate into a local temp (so we don't hold
         // both the reference slice and the output plane borrow at once), then blit.
         if !use_compound {
+            // §7.11.3.5 `block_warp_process` gate: matches dav1d's
+            // `imin(bw4, bh4) > 1` (luma) / `imin(cbw4, cbh4) > 1` (chroma)
+            // check, restated in this plane's own pixel units (`bw`/`bh`
+            // are already the plane-scaled block size, so "> 1 mi unit" is
+            // "> 4 px" here for every plane, luma included).
+            let warp_eligible = bw > 4 && bh > 4;
+            let (ss_hor, ss_ver) = if plane == 0 {
+                (0u32, 0u32)
+            } else {
+                (self.subsampling_x as u32, self.subsampling_y as u32)
+            };
             let tmp = {
                 let mut t = vec![0u8; bw * bh];
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, rh) = rf.plane(plane);
-                    motion_compensate(
-                        &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter, hbits,
-                        vbits,
-                    );
+                    // `KINETIX_AV1_NO_WARP` is a bisection escape hatch (not
+                    // spec behaviour): forces every WARP block back to plain
+                    // translational MC, for isolating how much of a given
+                    // corpus entry's remaining pixel diff is actually
+                    // warp-path-attributable vs a different, pre-existing
+                    // bug. Left in place (mirrors this crate's other
+                    // `KINETIX_AV1_DBG_*` debug hooks) since AV1 inter is
+                    // still not pixel-exact and future sessions will want it.
+                    let warp_forced_off = std::env::var("KINETIX_AV1_NO_WARP").is_ok();
+                    match warp_model {
+                        Some(model) if warp_eligible && !warp_forced_off => {
+                            if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+                                eprintln!(
+                                    "DBG warp APPLY plane={plane} mi=({mi_col},{mi_row}) bw={bw} bh={bh} model={model:?}"
+                                );
+                            }
+                            warp::block_warp_process(
+                                &mut t, bw, rp, rw, rh, model, mi_col as i32, mi_row as i32, bw,
+                                bh, ss_hor, ss_ver,
+                            );
+                        }
+                        _ => {
+                            motion_compensate(
+                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
+                                hbits, vbits,
+                            );
+                        }
+                    }
                 }
                 t
             };

@@ -27,6 +27,7 @@ mod partition;
 mod predict;
 mod reconstruct_block;
 mod transform;
+mod warp;
 mod wedge;
 
 #[cfg(test)]
