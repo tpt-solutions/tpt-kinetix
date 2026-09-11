@@ -201,6 +201,80 @@ dump) verification — genuine multi-session feature work.
 (`reconstruct_inter_frame_ex`, `KINETIX_MBAFF_FIELD_MC` gate) — untouched
 this session. That's the next major chunk after frame-0 closes.
 
+**SESSION #32bm — #32bl's pinned mvd-context bug CLOSED; a second, previously-hidden
+bug found immediately behind it.** Implemented all three pieces #32bl's follow-up
+called for, together:
+
+1. `amvd_sum`/`ref_idx_gt0_neighbors` (`slice_data/ctx.rs`) now take
+   `NeighbourCtx`/`mb_x`/`mb_y`/`mb_cols` instead of plain `left_mb_idx`/
+   `top_mb_idx`, and derive the left neighbour via
+   `NeighbourCtx::left_top_with_bottom` + `mbaff_left_block_opt` +
+   `crate::mbaff::LEFT_BLOCK_LUMA_NNZ[opt][by]` — the *same* row-remap table
+   `luma_cbf_neighbors`/`cabac_cbp_neighbors_inter` already used for
+   `coded_block_flag`/cbp (§6.4.10.7, Table 6-4 `left_block_options[opt][0..4]`
+   — confirmed against FFmpeg's `h264_mvpred.h` `fill_decode_caches` `left_block`
+   fill: the `N` row index it encodes for `mvd_cache`/`intra4x4_pred_mode_cache`
+   is bit-for-bit the same `N` as the `nnz`/`cbf` fill, just addressed through a
+   different internal array). The top neighbour needs NO row remap (FFmpeg
+   always reads the top neighbour's bottom row wholesale) — matches what
+   `luma_cbf_neighbors` already did for top.
+2. `map_f2f_y` (new, `ctx.rs`): FFmpeg's `MAP_F2F` — a cross-MB mvd/mv
+   y-component is halved when current is field-coded and the supplying
+   neighbour is frame-coded, doubled in the reverse case, looked up via the
+   neighbour's `MbCabacCtx::mb_field_flag` (now threaded into `amvd_sum` /
+   `cabac_decode_mvd_component` as a new `cabac_grid: &[MbCabacCtx]` param).
+   x is never scaled.
+3. `cabac_decode_mvd_component`'s ~18 call sites and `ref_idx_gt0_neighbors`'s
+   ~10 call sites in `cabac_b.rs` (P and B CABAC inter parsing) now pass
+   `nctx, mb_x, mb_y, mb_cols` (mechanical regex-driven edit, verified by
+   diffing every call site) instead of the old plain indices.
+
+Verified against a **freshly regenerated** JM `ldecod_trace.exe` trace
+(`tools/build-jm-oracle.sh`, `-p TraceFile=trace_dec.txt`) on CANLMA2_Sony_C
+POC 1 pair 4 (`MB(4,0)`, JM `CurrMbAddr` 8 — MBAFF pair-scan address
+`2*(pair_row*mb_cols+pair_col)+parity`, NOT raster `mb_y*mb_cols+mb_x`; don't
+reuse stale quoted mvd values from old notes, they don't match a from-scratch
+trace 1:1 in general — this session's did, coincidentally): **all 7 of
+`MB(4,0)`'s `mvd_l0` pairs are now bit-exact vs JM** — `(-1,2),(0,0),(1,-1),
+(3,0),(0,0),(1,1),(0,0)` — plus `coded_block_pattern` (17, i.e. `0x11`)
+matches exactly.
+
+**The actual root cause was NOT purely the mvd-context derivation.** Hand-deriving
+the expected `amvd_sum` from JM's own decoded neighbour mvds showed the
+row-remap+MAP_F2F fix alone already produced the *correct* `asum`/`ctx0` bucket
+for `MB(4,0)`'s first bin — the real reason `MB(4,0)` was decoding garbage
+pre-fix was that **`ref_idx_l0` was never being read at all**: §7.4.5.1 requires
+`ref_idx_lX` to be coded whenever `num_ref_idx_lX_active_minus1 > 0 **OR**
+mb_field_decoding_flag != field_pic_flag` — the second disjunct exists because a
+single reference *frame* is addressed as two reference *fields* by a
+field-coded MBAFF pair, even with only one active reference. The parser's gate
+was the plain `num_ref_idx_l0_active > 1`, silently skipping 4 `ref_idx_l0`
+CABAC bins JM's reference decode does read for every field-coded P_8x8/P_8x16/
+P_16x8/16x16 MB — a whole-engine desync no amount of `amvd_sum` correctness
+could fix, since the bitstream position itself was already wrong by the time
+`mvd_l0` decoding started. Fixed via `NeighbourCtx::ref_idx_field_mismatch()` /
+`::effective_ref_idx_active()` (new, `ctx.rs`), gating and bounds-checking all
+~10 `ref_idx_lX` call sites in `cabac_b.rs`.
+
+**Confirmed no regression**: 269 lib unit tests green, ITU 27/0 still bit-exact
+(the fix is a no-op whenever `NeighbourCtx::NONE`/non-MBAFF or an all-frame
+MBAFF pair, since `mb_aff && cur_field` is false there).
+
+**Remaining gap, newly pinned precisely**: the very next macroblock,
+`MB(4,1)` (pair 4's BOTTOM half, JM `CurrMbAddr` 9), now desyncs at
+`sub_mb_type` itself — Kinetix decodes `[0,1,0,0]`, JM `[0,0,1,2]` — i.e. the
+engine drifts somewhere inside `MB(4,0)`'s own residual/cbf decode (cbp and
+all 7 mvds matched, so the drift is downstream of `mvd_l0`, most likely in the
+significant-coefficient/cbf walk for the one coded 8×8 luma group or the
+DC-only chroma block — `MB(4,0)`'s `coded_block_pattern` is `0x11`, luma group
+0 + chroma-DC only) rather than being a repeat of the same `ref_idx`/`amvd_sum`
+bug (those are now proven correct at least at `MB(4,0)`). Needs a bin-level
+diff of `MB(4,0)`'s residual walk against JM's `Luma sng`/`2x2 DC Chroma`
+trace lines — not yet done this session. `ref_idx overflow` (a real, working
+bounds check, not a bug) still fires for a handful of P frames elsewhere in
+the 17-frame clip as a downstream symptom of this same still-open drift, not a
+new defect.
+
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
 Commit 21cff73. **Root cause via JM `ldecod` TRACE=1 build + our
