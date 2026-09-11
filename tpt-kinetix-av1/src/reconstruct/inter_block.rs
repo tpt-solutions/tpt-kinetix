@@ -1073,9 +1073,10 @@ impl<'a> TileDecodeState<'a> {
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         if dbg_b0 {
             eprintln!(
-                "DBG b0 vartx leaves={} tx0={luma_tx} rng={}",
+                "DBG b0 vartx leaves={} tx0={luma_tx} rng={} all={:?}",
                 leaves.len(),
-                self.dec.raw_state().0
+                self.dec.raw_state().0,
+                leaves,
             );
         }
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
