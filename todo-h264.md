@@ -382,6 +382,153 @@ used above, applied to the `MB172`/`MB173` region (JM trace offset ~173803
 in a fresh `trace_dec.txt`; scratch test `dbg_canlma2_mb4_bintrace.rs`
 already has the harness, just change which MB range gets dumped/compared).
 
+## SESSION #32bp — JM oracle fixed for real (fresh clone); real first divergence found at MB142/143 (pair 71), not MB173/pair 86
+
+**Part 1 — oracle.** The stale-`Slice*` bug #32bo found in
+`C:\Users\phill\jm-oracle\jm` (mis-dispatching every POC≥1 P-slice through
+the I-slice CABAC decoder) is **not a real JM bug** — it does not reproduce
+in a fresh `git clone --depth 1 https://vcgit.hhi.fraunhofer.de/jvet/JM.git`
+(built this session into `C:\Users\phill\jm-oracle-fresh\jm`, `-DTRACE=1`,
+same mingw/gcc toolchain as `tools/build-jm-oracle.sh`). Re-ran #32bo's own
+pointer-address instrumentation (`KDBG` env-gated prints in `image.c`'s MB
+loop, `mb_read.c`'s `setup_read_macroblock`, `header.c`'s slice-type parse)
+on the fresh checkout: `currSlice` pointer identity is consistent end to end
+for POC1 — `setup_read_macroblock` configures the P-slice `Slice*`
+(`...8964B0`, `slice_type=0`) and the macroblock loop for POC1/MB0 runs
+against that *same* pointer (`KDBG loop POC=1 MB=0 currSlice=...8964B0
+slice_type=0`), not a stale IDR pointer. `trace_dec.txt` for POC1 now shows
+`Type 0` (P_SLICE) throughout with 21793 real `mb_skip_flag` reads (not 0),
+confirming the earlier "whole P slice decodes as intra" symptom was specific
+to that one disturbed local checkout (almost certainly corrupted by one of
+the many prior sessions' own throwaway edits to that same tree, since
+`tools/build-jm-oracle.sh`'s patch + a stock JM clone do not exhibit it).
+**Do not reuse `C:\Users\phill\jm-oracle\jm` going forward — use
+`C:\Users\phill\jm-oracle-fresh\jm` (or clone fresh again) instead.** The
+`tools/jm-ldecod-oracle.patch` (pixel/edge dump hooks) applies cleanly to
+the fresh clone with no conflicts.
+
+**Part 2 — the MB173 lead from #32bl/#32bn/#32bo is now known to be
+downstream noise, not the real gap.** Built a per-MB (skip-status, mb_type
+shape) comparison: extracted JM's ground truth for POC1 MB0..175 from the
+fresh `trace_dec.txt` (careful parsing needed — JM's `mb_skip_flag` trace
+*value* is inverted from the bitstream semantics, `value1==1` means **NOT**
+skipped, `skip_flag = !value1`; also the "look-ahead" bottom-of-pair
+`mb_skip_flag (of following bottom MB)` / `mb_field_decoding_flag (of
+following bottom MB)` lines must not be confused with the current MB's own
+`mb_skip_flag` line by a naive `grep`/`awk` match — cost an hour of false
+leads before being caught), and cross-referenced against
+`KINETIX_BINTRACE=1 cargo test -p tpt-kinetix-h264 --test
+dbg_canlma2_mb4_bintrace -- --nocapture` (harness already dumps MB8..180).
+JM's raw CABAC `mb_type` codeword (the `act_sym` from
+`readMB_typeInfo_CABAC_p_slice`, values 1/2/3/4) maps to this crate's shape
+enum as `{1:16x16(0), 2:16x8(1), 3:8x16(2), 4:P8x8(3)}` (verified via mvd
+counts per mb_type instance, not guessed — `mb_type=1` always shows exactly
+2 `mvd0_l0`/`mvd1_l0` values in the trace, i.e. one partition).
+
+Result: **every MB from 0 through 142 matches JM exactly** (skip status +
+partition shape). **The first real divergence is `MB143`** (`MB(26,3)`,
+pair 71's bottom half) — JM says `mb_type=1` (`P_L0_16x16`, single
+partition, cbp=0, one mvd pair, **no `ref_idx_l0` read at all** since
+`num_ref_idx_l0_active_minus1==0` and this pair is NOT field/frame
+mismatched); Kinetix decodes `mb_type=Some(3)` (`P8x8`,
+`sub_types=[0,0,2,0]`) at the exact same CABAC engine position (`ctx=14
+st=62 bin=0`, `ctx=15 st=24 bin=0`, `ctx=16 st=9 bin=1` → shape 3) — the
+*physical* context slots match JM's own tree structure bin-for-bin, but the
+**decoded bit value** at `ctx=16` is wrong, meaning the arithmetic
+engine's `(R,V)` state is already different from JM's true state by this
+point — i.e. a real bit-level desync happened somewhere between the end of
+`MB141` (still matching) and `MB143`'s `mb_type` read. This makes #32bn's
+whole `MB173`/pair-86 investigation (and this session's own initial attempt
+to re-derive it against the fixed oracle) **moot** — pair 86 was just where
+the accumulated drift from pair 71 finally produced a hard bounds violation
+instead of a silently-wrong-but-in-range value; the `ref_idx overflow`
+error at `MB173` is a downstream symptom, not the bug site.
+
+**Structural root cause identified (high confidence, not yet fixed in
+source — ran out of session time verifying the exact replacement neighbour
+derivation safely)**: pair 71 (`MB142`/`MB143`) sits immediately to the
+right of pair 70 (`MB140`/`MB141`), and JM's trace shows **pair 70 is
+field-coded** (`mb_field_decoding_flag=1` at `MB140`) while **pair 71 is
+frame-coded** (`mb_field_decoding_flag=0`, read at `MB142` since it's not
+skipped... actually MB142 IS skip in this instance — see below). This is
+exactly the mixed field/frame pair-boundary case `mbaff.rs::derive_neighbours`
+exists to handle — but the bug isn't in `derive_neighbours` itself, it's
+*upstream* of it: JM's `read_one_macroblock_p_slice_cabac`
+(`mb_read.c:1598-1600`) calls `field_flag_inference(currMB)` **before**
+`CheckAvailabilityOfNeighborsCABAC` (hence before `mb_skip_flag` itself is
+read) whenever the current MB is the top of a pair (`mb_nr&1==0`) or the
+bottom immediately following a skipped top (`prevMbSkipped`) — i.e.
+*exactly* the two cases where the pair's own `mb_field_decoding_flag` is
+not yet known but a context still needs to be derived for the skip-flag
+read. `field_flag_inference` (`mb_read.c:722-734`) sets
+`currMB->mb_field = mb_data[mbAddrA].mb_field` if the *pair-level* left
+neighbour (`mbAddrA = 2*(pair-1)`, i.e. the TOP macroblock of the pair one
+column to the left — **not** derived through the full mixed-field
+`derive_neighbours` logic, just the simple per-pair `CheckAvailabilityOfNeighbors`
+addressing from `mb_access.c:56-68**) is available, else the pair above's
+top MB (`mbAddrB = 2*(pair-mb_cols)`), else `FALSE`. Confirmed via added
+`KDBG` prints in `cabac.c`'s `CheckAvailabilityOfNeighborsCABAC` +
+`read_skip_flag_CABAC_p_slice` (still present in
+`C:\Users\phill\jm-oracle-fresh\jm`, gated on `KDBG=1` env var — same
+pattern as #32bo's instrumentation): for `MB142`, JM's `mb_field` used for
+its own skip-context neighbour derivation is **1** (inferred from
+`mbAddrA=MB140`, which is genuinely field-coded), even though pair 71's own
+*real* `mb_field_decoding_flag` later turns out to be **0**.
+
+Kinetix's `cur_field_for_skip_ctx` (both `cabac_p.rs` and the mirrored
+`cabac_b.rs`, ~line 648-652 in each) is **hardcoded to `false` for every
+top-of-pair MB** (`if mbaff_frame && (mb_idx & 1 == 1) {
+field_flags[grid_idx].unwrap_or(false) } else { false }` — the `else`
+branch, hit here since `mb_idx=142` is even) — it does not replicate JM's
+`field_flag_inference` at all for the top-of-pair case, and for the
+skip-lookahead read of a bottom-of-pair-after-a-skipped-top (JM's
+`check_next_mb_and_get_field_mode_CABAC_p_slice`, which inherits the *same*
+inferred field from the top MB — `mb_read.c` cabac.c:186) Kinetix's
+`bot_neighbors` construction (`cabac_p.rs`/`cabac_b.rs` ~line 693-710) is
+entirely hand-coded raw grid arithmetic that bypasses `derive_neighbours`
+and MBAFF field-awareness altogether. **Not fixed this session**: I could
+reproduce JM's inferred-field VALUE (1, via the simple `mbAddrA`/`mbAddrB`
+pair-level lookup: `field_flags[grid_idx-1]` if `mb_x>0` else
+`field_flags[grid_idx-2*mb_cols]` if `mb_y>=2` else `false`, matching JM's
+`2*(pair-1)`/`2*(pair-mb_cols)` addressing), but could **not** reconcile my
+hand-derivation of `derive_neighbours(mb_x,mb_y,...,cur_field=true,...)`'s
+resulting `up`/`left` addresses against JM's actual traced values
+(`up_addr=53` for `MB142`, which my manual `top_xy` arithmetic did not
+reproduce) — meaning either `getNeighbour`'s real addressing convention
+differs subtly from what `mbaff.rs::derive_neighbours` assumes, or there's
+a second wrinkle not yet understood. Given the risk of landing a wrong fix
+that looks plausible but doesn't actually match JM bit-for-bit, this was
+left unfixed rather than guessed.
+
+**For next session**: (1) don't re-derive `MB173`/pair 86 — it's a red
+herring, start from `MB142`/pair 71. (2) The concrete task is: implement a
+`field_flag_inference`-equivalent helper (pair-level `mbAddrA`/`mbAddrB`
+lookup as described above, independent of `derive_neighbours`'s full mixed-
+field logic) and use its result as `cur_field_for_skip_ctx` for **both**
+top-of-pair MBs (replacing the hardcoded `false`) **and** the
+bottom-of-pair skip-lookahead (`bot_neighbors`, which should likely be
+rebuilt via a real `derive_neighbours(mb_x, mb_y+1, ..., inferred_field,
+...)` call instead of hand-coded raw arithmetic — mirroring how JM's
+`check_next_mb_and_get_field_mode_CABAC_p_slice` inherits the top's
+inferred `mb_field` at `mb_read.c` `cabac.c:186` then calls
+`CheckAvailabilityOfNeighborsMBAFF`+`CheckAvailabilityOfNeighborsCABAC` on
+the bottom MB with that value). (3) Before trusting any fix, re-run the
+exact `KDBG=1` instrumentation still sitting in
+`C:\Users\phill\jm-oracle-fresh\jm` (`cabac.c`'s `CheckAvailabilityOfNeighborsCABAC`
+prints `mbAddrX`/`mb_field`/`left_addr`/`up_addr`; `read_skip_flag_CABAC_p_slice`
+prints `a`/`b`) against `KINETIX_BINTRACE=1`'s own context/address choice
+for `MB140`..`MB144`, byte-for-byte, before declaring it fixed — this
+session's own manual arithmetic already produced one wrong prediction
+(`up_addr`), so don't trust hand derivation over the oracle here. (4) Once
+`MB143` matches, re-run the full MB0..173+ shape comparison (methodology
+above) to confirm no *other* divergence hides between pair 71 and pair 86
+before declaring `CANLMA2_Sony_C` fixed.
+
+No Kinetix source was changed this session (fix was not landed with enough
+confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
+full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
+re-verified unchanged as a baseline check only.
+
 ## SESSION #32bo — CANLMA2 MB173 gap: the JM oracle itself was broken, not Kinetix
 
 Picked up exactly where #32bn left off (confirmed via `git log` — no h264 commits
