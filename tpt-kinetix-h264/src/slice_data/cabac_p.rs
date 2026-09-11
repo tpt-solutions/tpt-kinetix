@@ -470,8 +470,46 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
         } else {
             ((mb_idx as u32) % mb_cols, (mb_idx as u32) / mb_cols, mb_idx)
         };
-        let left_idx = (mb_x > 0).then(|| grid_idx - 1);
-        let top_idx = (mb_y > 0).then(|| grid_idx - mb_cols as usize);
+        // §6.4.10.1 / JM `getAffNeighbour`: the whole-MB `mb_skip_flag`/
+        // `mb_type` neighbour address is NOT simply "one frame-MB row/column
+        // away" inside an MBAFF pair. A field-coded macroblock's "top"
+        // neighbour (xN=0,yN=-1) is always the macroblock pair *above* --
+        // TWO frame-MB rows up, landing on that pair's bottom half -- for
+        // BOTH halves of the current field pair, not just the top half; a
+        // plain `grid_idx - mb_cols` instead resolves the bottom MB's "top"
+        // to its own pair-mate (the top MB), which is always available and
+        // never off-picture even when the pair sits in the first pair-row of
+        // the picture. JM's own `read_one_macroblock_p_slice_cabac` reads
+        // `mb_skip_flag` for the pair's TOP macroblock before its field flag
+        // is known and always assumes `mb_field == FALSE` there (matching
+        // `cur_field = false` below); the BOTTOM macroblock inherits the
+        // pair's already-decoded field flag. Missing this (CANLMA2_Sony_C
+        // POC 1, pair 4 -- the stream's first field-coded MBAFF pair) picked
+        // `MB(4,1)`'s own already-decoded pair-top as its "top" neighbour
+        // instead of leaving it unavailable, corrupting the `mb_skip_flag`
+        // ctxIdxInc (2 instead of JM's 1) and desyncing the CABAC engine by
+        // the time `sub_mb_type` was read (`todo-h264.md` #32bn).
+        let cur_field_for_skip_ctx = if mbaff_frame && (mb_idx & 1 == 1) {
+            field_flags[grid_idx].unwrap_or(false)
+        } else {
+            false
+        };
+        let (left_idx, top_idx) = if mbaff_frame {
+            let n = crate::mbaff::derive_neighbours(
+                mb_x,
+                mb_y,
+                mb_cols,
+                mb_rows,
+                cur_field_for_skip_ctx,
+                &field_flags,
+            );
+            (n.left_top, n.top)
+        } else {
+            (
+                (mb_x > 0).then(|| grid_idx - 1),
+                (mb_y > 0).then(|| grid_idx - mb_cols as usize),
+            )
+        };
         // §6.4.9: a resolved neighbour index that belongs to a different (or
         // not-yet-decoded, via the `u16::MAX` sentinel) slice than the
         // current one is treated as unavailable, exactly like an off-picture

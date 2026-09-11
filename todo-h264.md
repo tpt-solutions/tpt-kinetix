@@ -275,6 +275,113 @@ bounds check, not a bug) still fires for a handful of P frames elsewhere in
 the 17-frame clip as a downstream symptom of this same still-open drift, not a
 new defect.
 
+**SESSION #32bn — `MB(4,1)`'s `sub_mb_type` desync CLOSED; a real §6.4.10.1
+`mb_skip_flag`/`mb_type` whole-MB neighbour bug found and fixed, root cause
+was NOT in `MB(4,0)`'s residual.** Method: patched the JM oracle itself
+(`C:\Users\phill\jm-oracle\jm\source\app\ldecod\cabac.c`, NOT committed —
+local build tree outside this repo) to print each traced syntax element's
+live CABAC engine `Drange`/`Dvalue` plus a `KDBG cbf .../KDBG skip ...` line
+showing the exact `upper_bit`/`left_bit` (JM's `condTermFlagN`) and resolved
+neighbour macroblock address for every `coded_block_flag` (luma 4×4 +
+chroma DC) and `mb_skip_flag` decode, by hooking JM's own
+`read_and_store_CBP_block_bit_normal` / `read_skip_flag_CABAC_p_slice` (the
+*generic*, already-correct §6.4.10.1 `getAffNeighbour`-based reference
+implementation — not reimplemented, just instrumented). Rebuilt with
+`gcc -DTRACE=1` and re-ran against `CANLMA2_Sony_C.jsv`.
+
+Cross-referencing this against a `KINETIX_BINTRACE=1` dump of
+`tpt-kinetix-h264/tests/dbg_canlma2_mb4_bintrace.rs` (new, throwaway oracle
+test that calls `parse_p_slice_cabac` directly on the real fixture's POC-1
+NAL) proved **`MB(4,0)`'s entire residual walk — all 4 luma 4×4
+`coded_block_flag` contexts/values in luma group 0, both chroma-DC
+`coded_block_flag`s, and every significant-coefficient level/position — is
+bit-exact vs JM**, contexts included (`ctx_idx`/`up`/`left` match JM's
+`condTermFlagN` derivation exactly, MB-address for MB(4,0)'s block(j=4,*)
+row correctly stays on the same left-neighbour MB addr6 since both rows of
+group 0 fall under yN<8 in Table 6-4 — confirming `luma_cbf_neighbors` +
+`mbaff_left_block_opt` + `LEFT_BLOCK_LUMA_NNZ` are correct for this MB). So
+the desync is NOT inside `MB(4,0)` at all — it's in the handful of
+neighbour-context-dependent decisions between the two MBs.
+
+**Root cause**: `parse_p_slice_cabac`'s (`cabac_p.rs`) and
+`parse_b_slice_cabac`'s (`cabac_b.rs`) per-MB loop computed the `left_idx`/
+`top_idx` used to build `mb_skip_flag`'s `MbSkipNeighbors` context with
+flat, non-MBAFF-aware raster arithmetic — `grid_idx - 1` / `grid_idx -
+mb_cols` — instead of routing through the already-correct
+`crate::mbaff::derive_neighbours` (the same §6.4.10.1 machinery
+`luma_cbf_neighbors`/`amvd_sum`/`ref_idx_gt0_neighbors` already use, fixed in
+#32bi/#32bm). JM's `getAffNeighbour` (verified directly, `mb_access.c`
+~493-528) proves the correct rule: for a **field-coded** macroblock, the
+whole-MB `mb_skip_flag`/`mb_type` "top" neighbour (`xN=0,yN=-1`) is always
+the macroblock **pair above** — two frame-MB rows up, landing on that pair's
+*bottom* half — for **both** halves of the current field pair, not just the
+bottom one's own pair-mate. `grid_idx - mb_cols` instead resolves
+`MB(4,1)`'s (a field pair's bottom half) "top" neighbour to `MB(4,0)` (its
+own pair-top, always already-decoded and available) instead of correctly
+leaving it **unavailable** (pair 4 is in pair-row 0, so "the pair above"
+genuinely doesn't exist). Confirmed against JM's own instrumented output:
+`KDBG skip mbAddr=9 a=1 b=0 left.addr=6 up.addr=-1` — JM's `mb_up` is `NULL`
+(`b=0`) for MB9, giving `ctxIdxInc = 1`; Kinetix's old flat formula resolved
+`top_idx` to MB8 (coded, not skipped) giving `ctxIdxInc = 2` (wrong
+context bank entirely, `ctx=13` instead of JM's `ctx=12` — confirmed via
+`KINETIX_BINTRACE`'s raw `ctx=` print). This ripples forward and desyncs
+every subsequent context-independent decision (`sub_mb_type`'s binarization
+uses fixed contexts 21/22/23, so once the engine's `range`/`offset`
+diverges from a wrong-context adaptation, later bins in the SAME contexts
+come out wrong even though they're neighbour-independent).
+
+Also confirmed via JM (`mb_access.c` line ~372-408, the "frame, top"/
+"bottom" cases) that a **FRAME-coded** pair's bottom MB's top-neighbour
+genuinely IS `mbAddrX - 1` (its own pair-top) — i.e. the OLD flat formula
+was accidentally correct for frame pairs, which is exactly why pairs 0-3
+(all frame-coded per #32bl) stayed bit-exact throughout every prior session
+and only pair 4 (the stream's first *field*-coded pair) exposed this.
+
+**Fix** (`cabac_p.rs` + `cabac_b.rs`, mirrored identically in both slice
+types): when `mbaff_frame`, compute `left_idx`/`top_idx` via
+`crate::mbaff::derive_neighbours(mb_x, mb_y, mb_cols, mb_rows, cur_field,
+&field_flags).{left_top, top}` instead of the flat formula. `cur_field` for
+this specific whole-MB lookup: `false` for the pair's TOP macroblock
+(mirroring JM's own `read_one_macroblock_p_slice_cabac`, which literally
+sets `currMB->mb_field = FALSE` before reading the top MB's own
+`mb_skip_flag` — the pair's real field-ness isn't signalled yet at that
+syntax point, and JM's frame-assumed neighbour-address formulas turn out to
+be address-correct regardless of the pair's eventual or the neighbour
+pair's actual field-ness for this specific whole-MB lookup); the
+already-decoded `field_flags[grid_idx]` (inherited from the top half,
+always populated by the time the bottom half's own loop iteration runs) for
+the BOTTOM macroblock.
+
+**Result**: `MB(4,1)`'s `sub_mb_type` now decodes `[0, 0, 1, 2]` — bit-exact
+vs JM. The parse desync boundary moved from `MB11` (JM addr, the old failure
+point) all the way to `MB173` (pair 86, `MB(41,3)`) — 164 more macroblocks
+correctly parsed. **269 unit tests green, ITU conformance still 27/27
+bit-exact, 0 failures, no regressions** (the fix is a no-op whenever
+`!mbaff_frame`, and reduces to the old flat formula for any frame-coded
+pair, which is the entire previously-verified 27-clip surface).
+`CANLMA2_Sony_C` itself is NOT yet closed (still `max_diff=248` overall,
+still hits `ref_idx overflow` partway through) — the H.264 `capabilities()`/
+strict-mode MBAFF claim in `CLAUDE.md` does NOT need updating.
+
+**New gap, newly pinned**: `MB173` (`MB(41,3)`, pair 86's bottom half, JM
+`CurrMbAddr` 173) — JM's `mb_type` there is a **2-partition** P type
+(exactly 4 `mvd_l0` values, no `sub_mb_type`, no `ref_idx_l0` at all since
+`num_ref_idx_l0_active_minus1 == 0` and this MB isn't in the
+`ref_idx_field_mismatch` case) — while Kinetix decodes the SAME raw
+`mb_type` bin value as its internal `P_8x8` variant (`P8x8 MB(41,3)
+sub_types=[2, 1, 1, 0]` printed, which JM's trace has no equivalent for at
+all). This is very likely a **different** bug from this session's fix
+(possibly a genuine bit-desync earlier in pair 86's own decode, or a
+distinct MBAFF neighbour-context bug in `mb_type`'s own P-type binarization
+context — note P `mb_type`'s CABAC binarization is itself neighbour-
+*independent* per spec, so this must be a real engine-position/context-state
+divergence accumulated somewhere between `MB(4,1)` and `MB173`, not a
+context-selection coincidence). Not yet root-caused this session — needs
+the same JM-`KDBG`-engine-state + `KINETIX_BINTRACE` cross-reference method
+used above, applied to the `MB172`/`MB173` region (JM trace offset ~173803
+in a fresh `trace_dec.txt`; scratch test `dbg_canlma2_mb4_bintrace.rs`
+already has the harness, just change which MB range gets dumped/compared).
+
 ## SESSION #32bh — MBAFF frame-pair intra top-right neighbour (§6.4.9)
 
 Commit 21cff73. **Root cause via JM `ldecod` TRACE=1 build + our

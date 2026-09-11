@@ -639,8 +639,33 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
         } else {
             ((mb_idx as u32) % mb_cols, (mb_idx as u32) / mb_cols, mb_idx)
         };
-        let left_idx = (mb_x > 0).then(|| grid_idx - 1);
-        let top_idx = (mb_y > 0).then(|| grid_idx - mb_cols as usize);
+        // See `cabac_p.rs`'s identical fix (§6.4.10.1 / JM `getAffNeighbour`):
+        // a field-coded macroblock's whole-MB "top" neighbour (xN=0,yN=-1)
+        // for `mb_skip_flag`/`mb_type` context is always the macroblock pair
+        // *above* -- two frame-MB rows up -- for BOTH halves of the current
+        // field pair, not `grid_idx - mb_cols` (which wrongly resolves the
+        // bottom MB's "top" to its own always-available pair-mate).
+        let cur_field_for_skip_ctx = if mbaff_frame && (mb_idx & 1 == 1) {
+            field_flags[grid_idx].unwrap_or(false)
+        } else {
+            false
+        };
+        let (left_idx, top_idx) = if mbaff_frame {
+            let n = crate::mbaff::derive_neighbours(
+                mb_x,
+                mb_y,
+                mb_cols,
+                mb_rows,
+                cur_field_for_skip_ctx,
+                &field_flags,
+            );
+            (n.left_top, n.top)
+        } else {
+            (
+                (mb_x > 0).then(|| grid_idx - 1),
+                (mb_y > 0).then(|| grid_idx - mb_cols as usize),
+            )
+        };
         // §6.4.9: a resolved neighbour index that belongs to a different (or
         // not-yet-decoded, via the `u16::MAX` sentinel) slice than the
         // current one is treated as unavailable, exactly like an off-picture
