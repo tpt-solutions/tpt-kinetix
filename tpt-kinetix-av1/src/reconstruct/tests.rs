@@ -120,6 +120,8 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
+        &mut Vec::new(),
         &mut meta,
     )?;
     Ok((y, u, v))
@@ -620,6 +622,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         &mut meta,
     );
     // No neighbours recorded yet: both AvailU/AvailL false at the origin.
@@ -706,6 +709,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         &mut meta,
     );
     assert_eq!(
@@ -792,6 +796,7 @@ fn make_cdef_delta_state<'a>(
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         meta,
     )
 }
@@ -867,6 +872,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         &mut meta,
     );
     let y_colors = state.read_palette_colors_yu(2, &[], false, false);
@@ -923,6 +929,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         &mut meta,
     );
     let u_colors = state2.read_palette_colors_yu(2, &[], true, false);
@@ -1232,6 +1239,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         [0u8; 8],
         [0u8; 9],
         RefFrames::empty(),
+        [None; 8],
         &mut meta,
     );
     for &bsize in &[BLOCK_8X8, BLOCK_16X16, BLOCK_32X32, BLOCK_64X64] {
@@ -1326,6 +1334,7 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         [0u8; 8],
                         [0u8; 9],
                         RefFrames::empty(),
+                        [None; 8],
                         &mut meta,
                     );
                     let bw4 = BLOCK_WIDTH[bsize] / 4;

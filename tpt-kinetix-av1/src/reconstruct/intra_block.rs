@@ -1405,6 +1405,114 @@ impl<'a> TileDecodeState<'a> {
         }
         let total_matches = have_row + have_col;
 
+        // Temporal candidate (§7.10.2.4 motion_field_projections).
+        // When `use_ref_frame_mvs` is set, look at ALL reference-frame DPB
+        // slots that have a stored motion field and try to project their
+        // co-located 8×8 MVs to the current block's want_refs.
+        let mut zeromv_found = false;
+        if self.use_ref_frame_mvs {
+            // Co-located 8×4 → 8×8 snap: (mi_row | 1, mi_col | 1).
+            let tr_base = (by4 as usize | 1).min(usize::MAX);
+            let tc_base = bx4 as usize | 1;
+
+            let cur_poc = self.cur_order_hint as i32;
+            let ohb = self.order_hint_bits;
+            let poc_diff_fn = |a: i32, b: i32| -> i32 {
+                if ohb == 0 {
+                    return 0;
+                }
+                let mask = 1i32 << (ohb - 1);
+                let d = a - b;
+                (d & (mask - 1)) - (d & mask)
+            };
+            let project_mv = |mv: i32, nd: i32, pd: i32| -> Option<i32> {
+                if pd == 0 || (nd > 0) != (pd > 0) {
+                    return None;
+                }
+                let scaled = (mv as i64 * nd as i64) / pd as i64;
+                Some(scaled.clamp(-16383, 16383) as i32)
+            };
+
+            // Track which DPB slots we have already sampled to avoid duplicate
+            // candidates when multiple named refs alias the same slot.
+            let mut sampled_slots = [false; 8];
+            for named_ref in LAST_FRAME..=crate::inter::ALTREF_FRAME {
+                let slot = self.ref_to_slot.get(named_ref as usize).copied().unwrap_or(0) as usize;
+                if sampled_slots[slot] {
+                    continue;
+                }
+                sampled_slots[slot] = true;
+
+                let tmf = match self.temporal_motion_fields.get(slot) {
+                    Some(Some(t)) => t,
+                    _ => continue,
+                };
+
+                let tr = tr_base.min(tmf.stride.saturating_sub(1));
+                let tc = tc_base.min(tmf.cells.len() / tmf.stride.max(1));
+                let cell = match tmf.cells.get(tr * tmf.stride + tc) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                let temporal_poc = tmf.order_hint as i32;
+                let mut proj = [Mv::default(); 2];
+                let mut proj_ok = [false; 2];
+
+                for n in 0..2usize {
+                    let tref = cell.refs[n];
+                    if tref == NONE_FRAME || tref < LAST_FRAME {
+                        continue;
+                    }
+                    let src_slot =
+                        tmf.ref_to_slot.get(tref as usize).copied().unwrap_or(0) as usize;
+                    let src_poc =
+                        tmf.dpb_order_hints.get(src_slot).copied().unwrap_or(0) as i32;
+                    let pd = poc_diff_fn(temporal_poc, src_poc);
+                    if pd == 0 {
+                        continue;
+                    }
+                    let src_mv = cell.mv[n];
+                    for m in 0..2usize {
+                        if proj_ok[m] {
+                            continue;
+                        }
+                        let dst_ref = want_refs[m];
+                        if dst_ref == NONE_FRAME {
+                            continue;
+                        }
+                        let dst_slot =
+                            self.ref_to_slot.get(dst_ref as usize).copied().unwrap_or(0) as usize;
+                        let dst_poc = self
+                            .dpb_order_hints
+                            .get(dst_slot)
+                            .copied()
+                            .unwrap_or(0) as i32;
+                        let nd = poc_diff_fn(cur_poc, dst_poc);
+                        if let (Some(r), Some(c)) =
+                            (project_mv(src_mv.row, nd, pd), project_mv(src_mv.col, nd, pd))
+                        {
+                            proj[m] = Mv::new(r, c);
+                            proj_ok[m] = true;
+                        }
+                    }
+                }
+
+                let all_ok = if is_compound {
+                    proj_ok[0] && proj_ok[1]
+                } else {
+                    proj_ok[0]
+                };
+                if all_ok {
+                    zeromv_found = true;
+                    let is_dup = stack.iter().any(|e| e.0 == proj);
+                    if !is_dup && stack.len() < 8 {
+                        stack.push((proj, 2));
+                    }
+                }
+            }
+        }
+
         // Weight sort: nearest set, then secondary set (stable).
         let mut tail = stack.split_off(nearest_cnt.min(stack.len()));
         stack.sort_by_key(|e| std::cmp::Reverse(e.1));
@@ -1431,12 +1539,11 @@ impl<'a> TileDecodeState<'a> {
             1 => 1 + c_newmv.min(3),
             _ => (3 + c_newmv).clamp(4, 7),
         } as usize;
-        // ZeroMvContext / globalmv_ctx (§7.10.2 temporal-sample process): when
-        // `use_ref_frame_mvs` is set the co-located temporal block is examined,
-        // and with no motion field yet (the common early-frame case) it stays
-        // at its init value of 1; otherwise 0. A full motion-field projection
-        // would refine this once a reference frame carries usable MVs.
-        let zeromv_ctx = u32::from(self.use_ref_frame_mvs);
+        // ZeroMvContext / globalmv_ctx (§7.10.2): 0 when a temporal candidate
+        // was found (i.e. the co-located block had a usable non-zero MV that
+        // projected successfully), 1 when use_ref_frame_mvs but no candidate
+        // was found, 0 when use_ref_frame_mvs is false.
+        let zeromv_ctx = u32::from(self.use_ref_frame_mvs && !zeromv_found);
         let packed = ((refmv_ctx as u32) << 4) | (zeromv_ctx << 3) | (newmv_ctx as u32);
 
         // DrlCtxStack — dav1d `get_drl_context(stack, idx)`.

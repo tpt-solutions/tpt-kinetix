@@ -15,6 +15,7 @@ use tpt_kinetix_core::{
 
 use crate::{
     frame::FrameHeader,
+    inter::MotionField,
     obu::{parse_obu_sequence, ObuType, SequenceHeaderObu},
     reconstruct::reconstruct_av1_frame,
 };
@@ -32,14 +33,16 @@ type ObuPairs = Vec<(u8, Vec<u8>)>;
 /// A decoded reference frame retained in the decoder's picture buffer.
 ///
 /// AV1 keeps up to eight reference pictures (the `LAST`/`GOLDEN`/`ALTREF`
-/// family); this stores one slot's worth of planar YUV (4:2:0) samples.
-#[derive(Clone)]
+/// family); this stores one slot's worth of planar YUV (4:2:0) samples and the
+/// per-4×4 motion field used for temporal MV candidates (§7.10.2).
 pub struct StoredFrame {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    /// Per-4×4 motion field for temporal MV projection; `None` for keyframes.
+    pub motion_field: Option<MotionField>,
 }
 
 impl StoredFrame {
@@ -83,19 +86,41 @@ impl RefFrameStore {
     }
 
     /// Store `frame` into every slot whose bit is set in `refresh_flags`
-    /// (AV1 §7.20 / `refresh_frame_flags` semantics).
-    pub fn refresh(&mut self, refresh_flags: u8, frame: &VideoFrame) {
+    /// (AV1 §7.20 / `refresh_frame_flags` semantics).  `motion_field` is the
+    /// per-4×4 MV data from the just-decoded frame, used for temporal MV
+    /// candidates (§7.10.2) when this slot is later used as a temporal ref.
+    pub fn refresh(
+        &mut self,
+        refresh_flags: u8,
+        frame: &VideoFrame,
+        motion_field: Option<&MotionField>,
+    ) {
         let (y, u, v) = split_planes(frame);
-        for i in 0..8 {
-            if refresh_flags & (1u8 << i) != 0 {
-                self.slots[i] = Some(StoredFrame {
-                    y: y.clone(),
-                    u: u.clone(),
-                    v: v.clone(),
-                    width: frame.width as usize,
-                    height: frame.height as usize,
-                });
-            }
+        // Collect which slots need refreshing first, then build clones.
+        let to_refresh: Vec<usize> = (0..8)
+            .filter(|&i| refresh_flags & (1u8 << i) != 0)
+            .collect();
+        if to_refresh.is_empty() {
+            return;
+        }
+        // Build the motion field cells once; clone into each slot.
+        let mf_cells_opt: Option<&[crate::inter::MotionFieldCell]> =
+            motion_field.map(|mf| mf.cells.as_slice());
+        for i in to_refresh {
+            self.slots[i] = Some(StoredFrame {
+                y: y.clone(),
+                u: u.clone(),
+                v: v.clone(),
+                width: frame.width as usize,
+                height: frame.height as usize,
+                motion_field: motion_field.map(|mf| MotionField {
+                    cells: mf_cells_opt.unwrap().to_vec(),
+                    stride: mf.stride,
+                    order_hint: mf.order_hint,
+                    dpb_order_hints: mf.dpb_order_hints,
+                    ref_to_slot: mf.ref_to_slot,
+                }),
+            });
         }
     }
 
@@ -387,19 +412,19 @@ impl Av1Decoder {
         pairs: &[(u8, Vec<u8>)],
     ) -> Option<VideoFrame> {
         self.last_frame_header = Some(fh.clone());
-        let frame = match reconstruct_av1_frame(
+        let (frame, motion_field) = match reconstruct_av1_frame(
             pairs,
             seq,
             fh,
             Some(&self.ref_frames),
             self.ref_order_hints,
         ) {
-            Ok(Some(f)) => f,
+            Ok(Some(pair)) => pair,
             _ => return None,
         };
         let refresh = fh.refresh_frame_flags;
         let order_hint = fh.order_hint as u8;
-        self.ref_frames.refresh(refresh, &frame);
+        self.ref_frames.refresh(refresh, &frame, motion_field.as_ref());
         for i in 0..8 {
             if refresh & (1u8 << i) != 0 {
                 self.ref_order_hints[i] = order_hint;

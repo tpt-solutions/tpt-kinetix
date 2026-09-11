@@ -50,9 +50,9 @@ use crate::{
     frame::FrameHeader,
     inter::{
         build_mv_candidates, compound_blend, motion_compensate, motion_compensate_prep, read_mv,
-        read_single_ref_name, InterCdfs, Mv, RefFrames, RefSlot, ALTREF_FRAME,
-        INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
-        NONE_FRAME, ZEROMV,
+        read_single_ref_name, InterCdfs, MotionField, MotionFieldCell, Mv, RefFrames, RefSlot,
+        ALTREF_FRAME, INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV,
+        NEWMV, NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
@@ -687,6 +687,10 @@ struct TileDecodeState<'a> {
     ref_to_slot: [u8; 9],
     /// The 8 DPB reference slots the inter blocks may draw from.
     ref_slots: RefFrames<'a>,
+    /// Per-DPB-slot motion fields from reference frames (for temporal MV
+    /// candidates, §7.10.2).  `None` when a slot has no motion field (keyframe
+    /// reference, or feature not yet available).
+    temporal_motion_fields: [Option<&'a MotionField>; 8],
     /// Adaptive CDF state for inter symbols.
     map_inter_cdfs: InterCdfs,
     /// Per-mi-row/col neighbour "is this block inter" flags.
@@ -818,6 +822,7 @@ impl<'a> TileDecodeState<'a> {
         dpb_order_hints: [u8; 8],
         ref_to_slot: [u8; 9],
         ref_slots: RefFrames<'a>,
+        temporal_motion_fields: [Option<&'a MotionField>; 8],
         meta: &'a mut FrameMeta,
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
@@ -910,6 +915,7 @@ impl<'a> TileDecodeState<'a> {
             filter_left: [vec![3u8; mi_rows], vec![3u8; mi_rows]],
             ref_to_slot,
             ref_slots,
+            temporal_motion_fields,
             map_inter_cdfs: InterCdfs::new(),
             is_inter_above: vec![0u8; mi_cols],
             is_inter_left: vec![0u8; mi_rows],
@@ -1213,6 +1219,8 @@ pub fn decode_tile_group(
     dpb_order_hints: [u8; 8],
     ref_to_slot: [u8; 9],
     ref_slots: RefFrames<'_>,
+    temporal_motion_fields: [Option<&MotionField>; 8],
+    motion_field_out: &mut Vec<MotionFieldCell>,
     meta: &mut FrameMeta,
 ) -> Result<(), KinetixError> {
     let use_128 = _use_128x128_sb;
@@ -1324,6 +1332,7 @@ pub fn decode_tile_group(
         dpb_order_hints,
         ref_to_slot,
         ref_slots,
+        temporal_motion_fields,
         meta,
     );
 
@@ -1419,7 +1428,15 @@ pub fn decode_tile_group(
             (total_data_bits as isize) - (tile_group_header_bits as isize)
         );
     }
-    meta.cdef_idx = state.cdef_idx.clone();
+    // Extract from `state` while it still borrows `meta`, then release.
+    let cdef_idx = state.cdef_idx.clone();
+    motion_field_out.clear();
+    motion_field_out.extend(state.refmv_grid.iter().map(|cell| MotionFieldCell {
+        mv: cell.mv,
+        refs: cell.refs,
+    }));
+    drop(state);
+    meta.cdef_idx = cdef_idx;
     out
 }
 
@@ -1528,6 +1545,22 @@ fn build_ref_frames(ref_store: Option<&RefFrameStore>) -> RefFrames<'_> {
     RefFrames { slots }
 }
 
+/// Build the per-DPB-slot temporal motion field references for §7.10.2.
+/// Returns an array of 8 `Option<&MotionField>`, one per DPB slot, mirroring
+/// `build_ref_frames`.  Slots without a stored motion field (e.g. keyframes)
+/// carry `None`.
+fn build_temporal_fields(ref_store: Option<&RefFrameStore>) -> [Option<&MotionField>; 8] {
+    let mut out: [Option<&MotionField>; 8] = [None; 8];
+    if let Some(store) = ref_store {
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(f) = store.get(i) {
+                *slot = f.motion_field.as_ref();
+            }
+        }
+    }
+    out
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // High-level frame reconstruction
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1550,7 +1583,7 @@ pub fn reconstruct_av1_frame(
     frame_header: &FrameHeader,
     ref_store: Option<&RefFrameStore>,
     dpb_order_hints: [u8; 8],
-) -> Result<Option<VideoFrame>, KinetixError> {
+) -> Result<Option<(VideoFrame, Option<MotionField>)>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
         eprintln!(
@@ -1569,6 +1602,8 @@ pub fn reconstruct_av1_frame(
     // keyframes this is empty; for inter frames it holds the previously
     // reconstructed frames the `ref_frame_idx` names map onto.
     let ref_slots = build_ref_frames(ref_store);
+    // Build temporal motion field references for §7.10.2 temporal candidates.
+    let temporal_fields = build_temporal_fields(ref_store);
     let mut ref_to_slot = [0u8; 9];
     for name in LAST_FRAME..=ALTREF_FRAME {
         ref_to_slot[name as usize] = frame_header.ref_frame_idx[(name - LAST_FRAME) as usize];
@@ -1598,15 +1633,18 @@ pub fn reconstruct_av1_frame(
         let mut data = y_plane;
         data.extend(u_plane);
         data.extend(v_plane);
-        return Ok(Some(VideoFrame {
-            pts: Timestamp::NONE,
-            dts: Timestamp::NONE,
-            data,
-            width: frame_header.width,
-            height: frame_header.height,
-            pixel_format: PixelFormat::Yuv420p,
-            is_key_frame: true,
-        }));
+        return Ok(Some((
+            VideoFrame {
+                pts: Timestamp::NONE,
+                dts: Timestamp::NONE,
+                data,
+                width: frame_header.width,
+                height: frame_header.height,
+                pixel_format: PixelFormat::Yuv420p,
+                is_key_frame: true,
+            },
+            None,
+        )));
     }
 
     // Compute tile layout
@@ -1632,6 +1670,9 @@ pub fn reconstruct_av1_frame(
         y: Vec<u8>,
         u: Vec<u8>,
         v: Vec<u8>,
+        /// Full-frame-sized motion field cells (only this tile's region
+        /// populated; merged into the frame-level MF after all tiles finish).
+        motion_field: Vec<MotionFieldCell>,
     }
 
     // Per-tile geometry, shared across the parallel worker closure.
@@ -1665,6 +1706,7 @@ pub fn reconstruct_av1_frame(
             let mut tu = vec![128u8; (tw / 2) * (th / 2)];
             let mut tv = vec![128u8; (tw / 2) * (th / 2)];
             let mut meta = FrameMeta::new(tw, th);
+            let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
             decode_tile_group(
                 payload,
@@ -1734,6 +1776,8 @@ pub fn reconstruct_av1_frame(
                 dpb_order_hints,
                 ref_to_slot,
                 ref_slots,
+                temporal_fields,
+                &mut mf_cells,
                 &mut meta,
             )?;
 
@@ -1770,12 +1814,15 @@ pub fn reconstruct_av1_frame(
                 y: ty,
                 u: tu,
                 v: tv,
+                motion_field: mf_cells,
             })
         })
         .collect();
 
-    // Blit each finished tile back into the master planes (sequential; disjoint
-    // rectangles, so order does not matter).
+    // Blit each finished tile back into the master planes and merge motion fields.
+    let mi_cols = width.div_ceil(MI_SIZE);
+    let mi_rows = height.div_ceil(MI_SIZE);
+    let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     for tile in decoded {
         let tile = tile?;
         let tw = tile.x1 - tile.x0;
@@ -1791,21 +1838,45 @@ pub fn reconstruct_av1_frame(
                 dst_plane[drow..drow + tw / 2].copy_from_slice(&src_plane[srow..srow + tw / 2]);
             }
         }
+        // Merge this tile's motion field into the full-frame grid.  Each tile's
+        // `motion_field` is full-frame-sized but only its own region is non-default.
+        for (i, cell) in tile.motion_field.iter().enumerate() {
+            if cell.refs[0] != NONE_FRAME {
+                if let Some(dst) = full_mf_cells.get_mut(i) {
+                    *dst = *cell;
+                }
+            }
+        }
     }
+
+    let motion_field = if !frame_is_intra {
+        Some(MotionField {
+            cells: full_mf_cells,
+            stride: mi_cols,
+            order_hint: frame_header.order_hint as u8,
+            dpb_order_hints,
+            ref_to_slot,
+        })
+    } else {
+        None
+    };
 
     let mut data = y_plane;
     data.extend(u_plane);
     data.extend(v_plane);
 
-    Ok(Some(VideoFrame {
-        pts: Timestamp::NONE,
-        dts: Timestamp::NONE,
-        data,
-        width: frame_header.width,
-        height: frame_header.height,
-        pixel_format: PixelFormat::Yuv420p,
-        is_key_frame: true,
-    }))
+    Ok(Some((
+        VideoFrame {
+            pts: Timestamp::NONE,
+            dts: Timestamp::NONE,
+            data,
+            width: frame_header.width,
+            height: frame_header.height,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: true,
+        },
+        motion_field,
+    )))
 }
 
 /// Dump pre-filter YUV planes to a file for comparison with a reference

@@ -81,6 +81,27 @@ impl Mv {
     }
 }
 
+/// One 4×4 motion-field cell stored alongside each decoded reference frame.
+/// Used by the temporal MV candidate process (AV1 §7.10.2).
+#[derive(Clone, Copy, Default)]
+pub struct MotionFieldCell {
+    pub mv: [Mv; 2],
+    pub refs: [u8; 2],
+}
+
+/// Motion field extracted from a decoded frame: per-4×4 MV records plus the
+/// metadata needed to project MVs to a different reference distance.
+pub struct MotionField {
+    pub cells: Vec<MotionFieldCell>,
+    pub stride: usize,
+    pub order_hint: u8,
+    /// Order hints of the frame's own DPB entries (before its refresh).
+    pub dpb_order_hints: [u8; 8],
+    /// `ref_frame_idx` mapping: ref_name (LAST..ALTREF) → DPB slot, same
+    /// shape as `TileDecodeState::ref_to_slot`.
+    pub ref_to_slot: [u8; 9],
+}
+
 /// An immutable view of one decoded reference frame's three planes. Indexed by
 /// DPB slot (0..8) in the tile decoder; the reference *name* (LAST/GOLDEN/…)
 /// maps to a slot via the frame header's `ref_frame_idx`.

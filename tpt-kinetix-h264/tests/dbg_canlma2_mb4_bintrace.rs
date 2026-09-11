@@ -97,10 +97,20 @@ fn canlma2_poc1_mb4_bintrace() {
     match parsed {
         Ok(p) => {
             eprintln!("parsed {} macroblocks OK", p.macroblocks.len());
-            for i in 8..12 {
+            for i in 8..std::cmp::min(180, p.macroblocks.len()) {
                 let mb = &p.macroblocks[i];
+                let motion_str = mb
+                    .motion
+                    .as_ref()
+                    .map(|m| {
+                        format!(
+                            " ref_l0={:?} mvd_l0={:?} sub={:?}",
+                            m.ref_idx_l0, m.mvd_l0, m.sub_mb_type
+                        )
+                    })
+                    .unwrap_or_default();
                 eprintln!(
-                    "raster[{i}] mb_type={:?} cbp={:02x} skip={} field={}",
+                    "raster[{i}] mb_type={:?} cbp={:02x} skip={} field={}{motion_str}",
                     mb.mb_type, mb.cbp, mb.skip, mb.mb_field_flag
                 );
             }

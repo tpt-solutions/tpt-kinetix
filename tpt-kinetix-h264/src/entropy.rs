@@ -38,7 +38,7 @@ pub(crate) fn bin_trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
 }
 
-fn trace_bin(kind: char, ctx_id: u16, pre_state: u8, pre_mps: u8, bin: u32) {
+fn trace_bin(kind: char, ctx_id: u16, pre_state: u8, pre_mps: u8, bin: u32, range: u32, offset: u32) {
     if !bin_trace_enabled() {
         return;
     }
@@ -48,9 +48,11 @@ fn trace_bin(kind: char, ctx_id: u16, pre_state: u8, pre_mps: u8, bin: u32) {
         v
     });
     if kind == 'D' {
-        eprintln!("BIN {n} {kind} ctx={ctx_id} st={pre_state} mps={pre_mps} bin={bin}");
+        eprintln!(
+            "BIN {n} {kind} ctx={ctx_id} st={pre_state} mps={pre_mps} bin={bin} R={range} V={offset}"
+        );
     } else {
-        eprintln!("BIN {n} {kind} bin={bin}");
+        eprintln!("BIN {n} {kind} bin={bin} R={range} V={offset}");
     }
 }
 
@@ -187,8 +189,16 @@ impl<'a> CabacDecoder<'a> {
             bin_val
         };
 
-        trace_bin('D', ctx.ctx_id, ctx.state, ctx.mps, bin_val as u32);
         self.renormalize();
+        trace_bin(
+            'D',
+            ctx.ctx_id,
+            ctx.state,
+            ctx.mps,
+            bin_val as u32,
+            self.range,
+            self.offset,
+        );
         bin_val
     }
 
@@ -201,7 +211,7 @@ impl<'a> CabacDecoder<'a> {
         } else {
             0
         };
-        trace_bin('B', 0xFFFF, 0, 0, bin as u32);
+        trace_bin('B', 0xFFFF, 0, 0, bin as u32, self.range, self.offset);
         bin
     }
 
@@ -232,11 +242,11 @@ impl<'a> CabacDecoder<'a> {
     pub fn decode_terminate(&mut self) -> u8 {
         self.range -= 2;
         if self.offset >= self.range {
-            trace_bin('T', 0xFFFF, 0, 0, 1);
+            trace_bin('T', 0xFFFF, 0, 0, 1, self.range, self.offset);
             1
         } else {
-            trace_bin('T', 0xFFFF, 0, 0, 0);
             self.renormalize();
+            trace_bin('T', 0xFFFF, 0, 0, 0, self.range, self.offset);
             0
         }
     }

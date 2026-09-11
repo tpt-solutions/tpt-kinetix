@@ -491,7 +491,7 @@ pub struct CoupledTarget {
     /// `cc_target_tag_select` — the target element's `element_instance_tag`.
     pub id_select: u8,
     /// `cc_lr` for a CPE target: 0 = left only, 1 = right only, 3 = both.
-    /// SCE targets are always recorded as 2 (mono → "ch[0] only").
+    /// SCE targets are always recorded as 2 (mono → "ch\[0\] only").
     pub ch_select: u8,
 }
 

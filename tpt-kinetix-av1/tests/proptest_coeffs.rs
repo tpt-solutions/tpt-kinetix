@@ -89,6 +89,8 @@ fn decode_with(
         [0u8; 8], // dpb_order_hints
         [0u8; 9], // ref_to_slot
         RefFrames::empty(),
+        [None; 8],
+        &mut Vec::new(),
         &mut meta,
     )
     .is_ok()

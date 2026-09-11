@@ -30,6 +30,7 @@ fn dbg_av1_inter_diffmap() {
         .unwrap_or(0);
 
     let mut dec = Av1Decoder::new();
+    let mut prev_kin: Vec<u8> = Vec::new();
     for (i, (payload, rf)) in payloads.iter().zip(ref_frames.iter()).enumerate() {
         let packet = Packet {
             pts: Timestamp::NONE,
@@ -45,6 +46,29 @@ fn dbg_av1_inter_diffmap() {
                 continue;
             }
         };
+        if std::env::var("KINETIX_DBG_REF").is_ok() && i == target && !prev_kin.is_empty() {
+            let (mut d_own, mut d_dav) = (0i64, 0i64);
+            for y in 64..96 {
+                for x in 0..64 {
+                    d_own += (frame.data[y * W + x] as i64 - prev_kin[y * W + x] as i64).abs();
+                    d_dav += (frame.data[y * W + x] as i64
+                        - ref_frames[0].data[y * W + x] as i64)
+                        .abs();
+                }
+            }
+            eprintln!(
+                "f{i} bottom-left: |kin_f{i} - kin_f0| = {d_own}   |kin_f{i} - dav1d_f0| = {d_dav}"
+            );
+            for y in [64usize, 72, 80, 88] {
+                let f1: Vec<i32> = (32..64).map(|x| frame.data[y * W + x] as i32).collect();
+                let f0: Vec<i32> = (32..64).map(|x| prev_kin[y * W + x] as i32).collect();
+                let dv: Vec<i32> = (32..64).map(|x| rf.data[y * W + x] as i32).collect();
+                eprintln!("y={y} x32..64  kin_f{i}={f1:?}");
+                eprintln!("             kin_f0={f0:?}");
+                eprintln!("             dav_f{i}={dv:?}");
+            }
+        }
+        prev_kin = frame.data.clone();
         if i != target {
             continue;
         }
