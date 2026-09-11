@@ -154,36 +154,131 @@ impl<'a> TileDecodeState<'a> {
         false
     }
 
-    /// Approximation of dav1d `find_matching_ref` / §5.11.23 `find_warp_samples`
-    /// reaching `NumSamples > 0`: an inter-coded above/left neighbour whose
-    /// primary reference frame matches this block's. Enough to decide whether
-    /// `read_motion_mode` reads the 3-way `motion_mode` symbol (warp allowed)
-    /// or the `use_obmc` bool.
-    fn has_matching_ref_candidates(
+    /// §7.10.4 `find_warp_samples` / `add_sample`, reduced to just the
+    /// `NumSamples` count `read_motion_mode` (§5.11.23) needs to decide
+    /// between the 3-way `motion_mode` symbol and the 2-way `use_obmc` bool.
+    /// The actual `CandList` (used by the LOCAL_WARP prediction's least-
+    /// squares affine fit, §7.13.4) is not built — warp motion is still not
+    /// *applied* — but the entropy-critical `NumSamples == 0` test now comes
+    /// from the real spec scan instead of the previous "any same-ref
+    /// neighbour" approximation, which could pick the wrong CDF outright
+    /// (verified against a patched dav1d oracle: same decoded `use_obmc`/
+    /// `motion_mode` symbol value, different `rng`, because the wrong CDF
+    /// table was read).
+    fn find_num_warp_samples(
         &self,
         mi_row: usize,
         mi_col: usize,
-        bw: usize,
-        bh: usize,
+        bsize: usize,
         ref0: u8,
-    ) -> bool {
+        cur_mv: Mv,
+    ) -> usize {
+        let w4 = BLOCK_WIDTH[bsize] / MI_SIZE;
+        let h4 = BLOCK_HEIGHT[bsize] / MI_SIZE;
         let row_start = self.tile_px_y0 / MI_SIZE;
         let col_start = self.tile_px_x0 / MI_SIZE;
-        if mi_row > row_start {
-            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
-                if self.is_inter_above[c] != 0 && self.ref_above[c][0] == ref0 {
-                    return true;
+        let avail_u = mi_row > row_start;
+        let avail_l = mi_col > col_start;
+        let threshold = (BLOCK_WIDTH[bsize].max(BLOCK_HEIGHT[bsize]) as i32).clamp(16, 112);
+
+        let mut num_samples = 0usize;
+        let mut num_scanned = 0usize;
+        let mut stop = false;
+        let mut add_sample = |dr: isize, dc: isize| {
+            const LEAST_SQUARES_SAMPLES_MAX: usize = 8;
+            if stop || num_scanned >= LEAST_SQUARES_SAMPLES_MAX {
+                return;
+            }
+            let mv_row = mi_row as isize + dr;
+            let mv_col = mi_col as isize + dc;
+            if mv_row < row_start as isize
+                || mv_col < col_start as isize
+                || mv_row >= self.mi_rows as isize
+                || mv_col >= self.mi_cols as isize
+            {
+                return;
+            }
+            let cell = self.refmv_cell(mv_row as usize, mv_col as usize);
+            if cell.refs[0] != ref0 || cell.refs[1] != NONE_FRAME {
+                return;
+            }
+            let mv_diff = (cell.mv[0].row - cur_mv.row).abs() + (cell.mv[0].col - cur_mv.col).abs();
+            let valid = mv_diff <= threshold;
+            num_scanned += 1;
+            if !valid && num_scanned > 1 {
+                stop = true;
+                return;
+            }
+            if valid {
+                num_samples += 1;
+            }
+        };
+
+        let mut do_top_left = true;
+        let mut do_top_right = true;
+        if avail_u {
+            let src = self.refmv_cell(mi_row - 1, mi_col);
+            let src_w = (src.w4 as usize).max(1);
+            if w4 <= src_w {
+                let col_offset = -((mi_col & (src_w - 1)) as isize);
+                if col_offset < 0 {
+                    do_top_left = false;
+                }
+                if col_offset + src_w as isize > w4 as isize {
+                    do_top_right = false;
+                }
+                add_sample(-1, 0);
+            } else {
+                let mut i = 0usize;
+                let limit = w4.min(self.mi_cols.saturating_sub(mi_col));
+                while i < limit {
+                    let cell = self.refmv_cell(mi_row - 1, mi_col + i);
+                    let step = w4.min((cell.w4 as usize).max(1)).max(1);
+                    add_sample(-1, i as isize);
+                    i += step;
                 }
             }
         }
-        if mi_col > col_start {
-            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
-                if self.is_inter_left[r] != 0 && self.ref_left[r][0] == ref0 {
-                    return true;
+        if avail_l {
+            let src = self.refmv_cell(mi_row, mi_col - 1);
+            let src_h = (src.h4 as usize).max(1);
+            if h4 <= src_h {
+                let row_offset = -((mi_row & (src_h - 1)) as isize);
+                if row_offset < 0 {
+                    do_top_left = false;
+                }
+                add_sample(0, -1);
+            } else {
+                let mut i = 0usize;
+                let limit = h4.min(self.mi_rows.saturating_sub(mi_row));
+                while i < limit {
+                    let cell = self.refmv_cell(mi_row + i, mi_col - 1);
+                    let step = h4.min((cell.h4 as usize).max(1)).max(1);
+                    add_sample(i as isize, -1);
+                    i += step;
                 }
             }
         }
-        false
+        if do_top_left {
+            add_sample(-1, -1);
+        }
+        if do_top_right && w4.max(h4) <= 16 {
+            add_sample(-1, w4 as isize);
+        }
+        if num_samples == 0 && num_scanned > 0 {
+            num_samples = 1;
+        }
+        num_samples
+    }
+
+    /// Fetch a `refmv_grid` cell, treating out-of-range coordinates as an
+    /// unwritten (`NONE_FRAME`) cell rather than panicking.
+    fn refmv_cell(&self, row: usize, col: usize) -> RefMvCell {
+        if row >= self.mi_rows || col >= self.mi_cols {
+            RefMvCell::default()
+        } else {
+            self.refmv_grid[row * self.refmv_stride + col]
+        }
     }
 
     /// Build the §8.3.2 compound-context neighbour edge for the mi cell above
@@ -476,6 +571,13 @@ impl<'a> TileDecodeState<'a> {
                     *s = 0;
                 }
             }
+            // Every decoded block must splat the 2-D ref-MV grid (see
+            // `splat_refmv`'s doc comment) — an intra-coded block inside an
+            // inter frame was the one call site that didn't, leaving stale
+            // grid cells that `find_warp_samples` (§7.10.4, used by
+            // `read_motion_mode`) and the inter MV stack would misread as an
+            // inter neighbour's real ref/MV.
+            self.splat_refmv(mi_row, mi_col, bsize, None);
             return Ok(());
         }
 
@@ -911,9 +1013,13 @@ impl<'a> TileDecodeState<'a> {
                 && interintra_type == 0
                 && self.has_overlappable_candidates(mi_row, mi_col, bw, bh);
             if eligible {
-                let matching_ref =
-                    self.has_matching_ref_candidates(mi_row, mi_col, bw, bh, ref_names[0]);
-                let allow_warp = self.allow_warped_motion && !force_integer_mv && matching_ref;
+                let num_samples =
+                    self.find_num_warp_samples(mi_row, mi_col, bsize, ref_names[0], mvs[0]);
+                // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate) is
+                // not modelled — none of the corpus streams use reference
+                // scaling, so it is always treated as false.
+                let allow_warp =
+                    self.allow_warped_motion && !force_integer_mv && num_samples > 0;
                 if allow_warp {
                     motion_mode = self
                         .dec
