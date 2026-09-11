@@ -27,6 +27,15 @@ pub(super) struct ModeCdfs {
     pub(super) partition_w64: [[u16; 11]; 4],
     pub(super) partition_w128: [[u16; 9]; 4],
     pub(super) intra_y_mode: [[[u16; 14]; 5]; 5],
+    /// `TileYModeCdf[ctx]` (§8.3.2 `y_mode`) — the non-keyframe `y_mode`
+    /// syntax element (an intra block coded inside an inter frame), context
+    /// `Size_Group[MiSize]`. Distinct from `intra_y_mode` above
+    /// (`intra_frame_y_mode`, keyframe-only, 2D above/left-mode context) —
+    /// conflating the two was a real bug: same symbol alphabet so it never
+    /// desynced by producing an out-of-range value, but the wrong adapted
+    /// CDF state under a wrong context diverges the arithmetic coder's `rng`
+    /// from the very first intra-in-inter-frame block.
+    pub(super) y_mode: [[u16; 14]; 4],
     pub(super) uv_mode_not_allowed: [[u16; 14]; 13],
     pub(super) uv_mode_allowed: [[u16; 15]; 13],
     pub(super) tx_8x8: [[u16; 3]; 3],
@@ -332,6 +341,7 @@ impl ModeCdfs {
             partition_w64: DEFAULT_PARTITION_W64_CDF,
             partition_w128: DEFAULT_PARTITION_W128_CDF,
             intra_y_mode: DEFAULT_INTRA_FRAME_Y_MODE_CDF,
+            y_mode: DEFAULT_Y_MODE_CDF,
             uv_mode_not_allowed: DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF,
             uv_mode_allowed: DEFAULT_UV_MODE_CFL_ALLOWED_CDF,
             tx_8x8: DEFAULT_TX_8X8_CDF,
@@ -734,6 +744,14 @@ impl ModeCdfs {
         left_ctx: usize,
     ) -> usize {
         dec.read_symbol(&mut self.intra_y_mode[above_ctx][left_ctx])
+    }
+
+    /// `y_mode` (AV1 spec §8.3.2, non-keyframe): the CDF for an intra-coded
+    /// block inside an inter frame, `TileYModeCdf[Size_Group[MiSize]]` — see
+    /// the `y_mode` field doc comment for why this must not be confused with
+    /// `read_intra_y_mode`'s keyframe-only `intra_frame_y_mode`.
+    pub(super) fn read_y_mode(&mut self, dec: &mut SymbolDecoder<'_>, size_group: usize) -> usize {
+        dec.read_symbol(&mut self.y_mode[size_group.min(3)])
     }
 
     /// `intra_angle_info_y()`/`intra_angle_info_uv()` (AV1 spec §5.11.42/43):

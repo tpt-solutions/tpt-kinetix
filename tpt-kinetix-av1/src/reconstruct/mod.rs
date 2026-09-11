@@ -211,6 +211,16 @@ const BLOCK_HEIGHT: [usize; BLOCK_SIZES] = [
     4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64, 128, 64, 128, 16, 4, 32, 8, 64, 16,
 ];
 
+/// `Size_Group[BLOCK_SIZES]` (AV1 spec §10 additional tables): maps a block
+/// size to the 0..3 context used by non-keyframe intra syntax elements
+/// (`y_mode`'s `TileYModeCdf[Size_Group[MiSize]]` in particular — see
+/// [`mode_cdfs::ModeCdfs::read_y_mode`]). Not to be confused with the
+/// narrower interintra-only `size_group()` helper in `inter_block.rs`,
+/// which only covers the interintra-eligible size subset.
+const SIZE_GROUP: [usize; BLOCK_SIZES] = [
+    0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 0, 0, 1, 1, 2, 2,
+];
+
 /// `Max_Tx_Depth[BLOCK_SIZES]` (AV1 spec §5.11.15): how many times
 /// `read_tx_size`'s `tx_depth` symbol may split the block's largest
 /// rectangular transform size down, and which `tx_depth` CDF bucket to read

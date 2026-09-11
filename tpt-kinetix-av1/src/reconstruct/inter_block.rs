@@ -325,13 +325,24 @@ impl<'a> TileDecodeState<'a> {
             // Intra-coded block inside an inter frame: reconstruct via the shared
             // intra machinery (mode symbols still read in inter order: skip above
             // is already consumed, so read y/uv mode then dispatch).
-            let above_mode = self.ymode_above[mi_col] as usize;
-            let left_mode = self.ymode_left[mi_row] as usize;
-            let y_mode = self.mode_cdfs.read_intra_y_mode(
-                &mut self.dec,
-                INTRA_MODE_CONTEXT[above_mode],
-                INTRA_MODE_CONTEXT[left_mode],
-            );
+            // `y_mode` (§8.3.2), NOT `intra_frame_y_mode` — an intra block
+            // coded inside an inter frame uses the single-context
+            // `TileYModeCdf[Size_Group[MiSize]]`, unrelated to the
+            // above/left-neighbour-mode 2D context the keyframe path reads
+            // (`read_intra_y_mode`/`intra_y_mode`). Reusing the keyframe CDF
+            // here shares the same 13-mode alphabet so it never desynced by
+            // producing an invalid symbol, but adapts the wrong CDF entries
+            // under the wrong context, diverging the coder's `rng` from the
+            // very first intra-in-inter-frame block onward.
+            let y_mode = self
+                .mode_cdfs
+                .read_y_mode(&mut self.dec, SIZE_GROUP[bsize]);
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 ymode={y_mode} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             // `intra_angle_info_y()` (AV1 spec §5.11.42), same as the
             // keyframe path.
             let angle_delta_y = if bsize >= BLOCK_8X8 && is_directional_mode(y_mode as u8) {
@@ -355,6 +366,12 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 DC_PRED as usize
             };
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 uvmode={uv_mode} has_chroma={has_chroma} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             // `read_cfl_alphas()` (AV1 spec §5.11.45): read only when
             // `UVMode == UV_CFL_PRED`, immediately after `uv_mode` and before
             // `intra_angle_info_uv()`, per the `intra_block_mode_info()`
@@ -416,6 +433,12 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 max_tx
             };
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 intra-in-inter tx={luma_tx} skip={skip} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             self.reconstruct_intra_subblock(
                 mi_row,
                 mi_col,
@@ -430,6 +453,12 @@ impl<'a> TileDecodeState<'a> {
                 angle_delta_uv,
                 &palette,
             )?;
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 intra-in-inter post-residual rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             // Update inter neighbour state (this block is not inter).
             for r in mi_row..(mi_row + bh).min(self.mi_rows) {
                 if let Some(s) = self.is_inter_left.get_mut(r) {
