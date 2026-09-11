@@ -1310,7 +1310,25 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         // 2-D ref-MV grid: record this block's refs + MVs for later stacks.
-        self.splat_refmv_full(mi_row, mi_col, bsize, ref_names, mvs, new_mf);
+        //
+        // §7.10.4.2 `add_sample` excludes any neighbour cell with
+        // `RefFrames[mvRow][mvCol][1] != NONE` outright (return before even
+        // counting it as scanned) — that's how the spec keeps inter-intra
+        // blocks out of `find_warp_samples`'s matching-ref scan even though
+        // they're single-reference. dav1d's own grid-splat implements this by
+        // storing `ref[1] = INTRA_FRAME` (not `NONE`) for such a block
+        // (`splat_oneref_mv`: `.ref.ref = { ref0+1, interintra_type ? 0 : -1 }`,
+        // where dav1d's `0` sentinel is `INTRA_FRAME` in its own numbering).
+        // Kinetix's own `ref_names` (used for ref_above/ref_left context and
+        // MC) correctly keeps `NONE_FRAME` here — only the warp-samples grid
+        // cell needs the inter-intra marker, so it's applied to a separate
+        // `grid_refs` rather than `ref_names` itself.
+        let mut grid_refs = ref_names;
+        if interintra_type != 0 {
+            debug_assert_eq!(grid_refs[1], NONE_FRAME);
+            grid_refs[1] = crate::inter::INTRA_FRAME;
+        }
+        self.splat_refmv_full(mi_row, mi_col, bsize, grid_refs, mvs, new_mf);
         Ok(())
     }
 
