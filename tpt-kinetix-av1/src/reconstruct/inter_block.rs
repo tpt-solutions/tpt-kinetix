@@ -1817,6 +1817,38 @@ impl<'a> TileDecodeState<'a> {
                     ),
                 ] {
                     let mut residual = vec![0i32; cw * ch];
+                    if !has_residual {
+                        // A skipped block reads no chroma coeffs but must
+                        // still reset the neighbour context — the luma path
+                        // above already does this (`clear_coeff_context`);
+                        // this branch was missing here, so a skip inter
+                        // block left the chroma `above_level`/`left_level`/
+                        // `*_dc` arrays holding whatever a previous block (or
+                        // an earlier frame, since the arrays persist across
+                        // `decode()` calls) had written, corrupting
+                        // `all_zero_ctx` for the next real chroma read at
+                        // that position (first observed on a hierarchical-GOP
+                        // stream: a skip block leaving `left=11` stale, then
+                        // desyncing the very next coded TX_8X4 chroma block).
+                        let clear_blk = TxBlockCtx {
+                            plane,
+                            tx_size: c_tx,
+                            x4: cpx_x / 4,
+                            y4: cpx_y / 4,
+                            max_x4: self.uv_max_x4,
+                            max_y4: self.uv_max_y4,
+                            block_w: 0,
+                            block_h: 0,
+                            intra_dir: 0,
+                            uv_mode: 0,
+                            qindex_positive: !self.lossless,
+                            reduced_tx_set: self.reduced_tx_set,
+                            lossless: self.lossless,
+                            is_inter: true,
+                            coincident_luma_tx_type: av1::DCT_DCT,
+                        };
+                        clear_coeff_context(&mut self.coeff_ctxs, &clear_blk, cw / 4, ch / 4);
+                    }
                     if has_residual {
                         let blk = TxBlockCtx {
                             plane,
@@ -1849,14 +1881,7 @@ impl<'a> TileDecodeState<'a> {
                             // KINETIX_AV1_DBG_B0 on a hierarchical-GOP
                             // stream) — the placeholder only happens to be
                             // right when the coincident luma leaf really is
-                            // DCT_DCT. First confirmed entropy desync in the
-                            // inter path so far is right here: a small
-                            // rectangular chroma tx (e.g. TX_8X4) desyncs
-                            // immediately after a rng-exact luma coeff read on
-                            // the same block — still root-causing whether
-                            // it's this placeholder, `all_zero_ctx`'s chroma
-                            // branch, or `uv_max_x4`/`uv_max_y4` neighbour
-                            // bounds.
+                            // DCT_DCT, which won't always hold.
                             coincident_luma_tx_type: av1::DCT_DCT,
                         };
                         let coeffs = read_coeffs(

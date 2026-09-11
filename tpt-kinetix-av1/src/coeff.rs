@@ -902,6 +902,13 @@ fn all_zero_ctx(blk: &TxBlockCtx, ctxs: &CoeffContexts, w4: usize, h4: usize) ->
         if blk.block_w * blk.block_h > w * h {
             ctx += 3;
         }
+        if std::env::var("KINETIX_AV1_DBG_CHROMA_CTX").is_ok() {
+            eprintln!(
+                "DBG chroma allzero_ctx plane={plane} x4={} y4={} w4={w4} h4={h4} above={above} \
+                 left={left} block_w={} block_h={} w={w} h={h} ctx={ctx}",
+                blk.x4, blk.y4, blk.block_w, blk.block_h
+            );
+        }
         ctx
     }
 }
