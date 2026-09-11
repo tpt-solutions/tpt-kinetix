@@ -186,10 +186,9 @@ impl<'a> TileDecodeState<'a> {
         }
         let mut num_samples = 0usize;
         let mut num_scanned = 0usize;
-        let mut stop = false;
         let mut add_sample = |dr: isize, dc: isize| {
             const LEAST_SQUARES_SAMPLES_MAX: usize = 8;
-            if stop || num_scanned >= LEAST_SQUARES_SAMPLES_MAX {
+            if num_scanned >= LEAST_SQUARES_SAMPLES_MAX {
                 return;
             }
             let mv_row = mi_row as isize + dr;
@@ -215,8 +214,15 @@ impl<'a> TileDecodeState<'a> {
             let mv_diff = (cell.mv[0].row - cur_mv.row).abs() + (cell.mv[0].col - cur_mv.col).abs();
             let valid = mv_diff <= threshold;
             num_scanned += 1;
+            // §7.10.4.2: an invalid sample past the first scanned one is
+            // simply not added to NumSamples/CandList — it must NOT halt
+            // the outer scan (only the LEAST_SQUARES_SAMPLES_MAX cap above
+            // does that). A stray `stop` flag here previously caused every
+            // later add_sample() call in the whole find_warp_samples scan
+            // (later top-edge steps, the left edge, top-left, top-right) to
+            // be skipped outright once one early sample missed the mv-diff
+            // threshold, diverging the grid cells visited from dav1d/spec.
             if !valid && num_scanned > 1 {
-                stop = true;
                 return;
             }
             if valid {
