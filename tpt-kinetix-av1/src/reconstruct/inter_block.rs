@@ -1681,6 +1681,14 @@ impl<'a> TileDecodeState<'a> {
                     &mut self.coeff_ctxs,
                     &blk,
                 )?;
+                if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                    eprintln!(
+                        "DBG y-cf-blk tx={leaf_tx} txtp={} eob={} rng={}",
+                        coeffs.tx_type,
+                        coeffs.eob,
+                        self.dec.raw_state().0
+                    );
+                }
                 // Coeffs are always *read* (entropy sync). The inverse
                 // transform is applied only for `Tx_Size_Sqr_Up <= 16x16` —
                 // the larger inter transforms are not yet conformance-checked
@@ -1835,11 +1843,20 @@ impl<'a> TileDecodeState<'a> {
                             // TODO(inter Phase E): like IBC's chroma path
                             // before its own fix, this needs the real
                             // coincident luma leaf's decoded `TxType`
-                            // (`intra_block.rs`'s `luma_tx_types` lookup),
-                            // not a `DCT_DCT` placeholder — not fixed here
-                            // since this path isn't reached yet (`decode_
-                            // inter_block` returns `Ok(None)` for
-                            // non-keyframes).
+                            // (`intra_block.rs`'s `luma_tx_types` lookup), not
+                            // a `DCT_DCT` placeholder. This path *is* reached
+                            // for real inter blocks now (confirmed via
+                            // KINETIX_AV1_DBG_B0 on a hierarchical-GOP
+                            // stream) — the placeholder only happens to be
+                            // right when the coincident luma leaf really is
+                            // DCT_DCT. First confirmed entropy desync in the
+                            // inter path so far is right here: a small
+                            // rectangular chroma tx (e.g. TX_8X4) desyncs
+                            // immediately after a rng-exact luma coeff read on
+                            // the same block — still root-causing whether
+                            // it's this placeholder, `all_zero_ctx`'s chroma
+                            // branch, or `uv_max_x4`/`uv_max_y4` neighbour
+                            // bounds.
                             coincident_luma_tx_type: av1::DCT_DCT,
                         };
                         let coeffs = read_coeffs(
@@ -1848,6 +1865,14 @@ impl<'a> TileDecodeState<'a> {
                             &mut self.coeff_ctxs,
                             &blk,
                         )?;
+                        if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                            eprintln!(
+                                "DBG uv-cf-blk pl={plane} tx={c_tx} txtp={} eob={} rng={}",
+                                coeffs.tx_type,
+                                coeffs.eob,
+                                self.dec.raw_state().0
+                            );
+                        }
                         if coeffs.eob > 0 {
                             let (qindex_dc, qindex_ac) = if plane == 1 {
                                 (u_qindex_dc, u_qindex_ac)
