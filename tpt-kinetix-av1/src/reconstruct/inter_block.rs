@@ -181,6 +181,9 @@ impl<'a> TileDecodeState<'a> {
         let avail_l = mi_col > col_start;
         let threshold = (BLOCK_WIDTH[bsize].max(BLOCK_HEIGHT[bsize]) as i32).clamp(16, 112);
 
+        if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+            eprintln!("DBG warp cur_mv={cur_mv:?} threshold={threshold} w4={w4} h4={h4}");
+        }
         let mut num_samples = 0usize;
         let mut num_scanned = 0usize;
         let mut stop = false;
