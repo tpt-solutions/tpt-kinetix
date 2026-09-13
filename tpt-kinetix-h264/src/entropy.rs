@@ -38,7 +38,15 @@ pub(crate) fn bin_trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
 }
 
-fn trace_bin(kind: char, ctx_id: u16, pre_state: u8, pre_mps: u8, bin: u32, range: u32, offset: u32) {
+fn trace_bin(
+    kind: char,
+    ctx_id: u16,
+    pre_state: u8,
+    pre_mps: u8,
+    bin: u32,
+    range: u32,
+    offset: u32,
+) {
     if !bin_trace_enabled() {
         return;
     }

@@ -1057,19 +1057,7 @@ pub(crate) fn cabac_decode_mvd_component(
     comp: usize,
 ) -> R<i32> {
     let asum = amvd_sum(
-        inter_grid,
-        cabac_grid,
-        cur_inter,
-        nctx,
-        mb_x,
-        mb_y,
-        mb_cols,
-        xp,
-        yp,
-        wp,
-        hp,
-        list,
-        comp,
+        inter_grid, cabac_grid, cur_inter, nctx, mb_x, mb_y, mb_cols, xp, yp, wp, hp, list, comp,
     );
     let ctx0 = if asum < 3 {
         0
@@ -1118,7 +1106,7 @@ mod tests {
     const CROSS_MB_LEFT: (u32, u32, u32) = (1, 0, 1); // left_idx = 0, top = None
     const CROSS_MB_TOP: (u32, u32, u32) = (0, 1, 1); // top_idx = 0, left = None
     const WITHIN_MB: (u32, u32, u32) = (0, 0, 1); // left = top = None
-    // mb_cols=2, mb_x=1, mb_y=1: left_idx = mb_y*mb_cols+mb_x-1 = 2, top_idx = mb_x = 1.
+                                                  // mb_cols=2, mb_x=1, mb_y=1: left_idx = mb_y*mb_cols+mb_x-1 = 2, top_idx = mb_x = 1.
     const CROSS_MB_BOTH: (u32, u32, u32) = (1, 1, 2);
 
     #[test]

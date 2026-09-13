@@ -123,6 +123,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         [None; 8],
         &mut Vec::new(),
         &mut meta,
+        None,
     )?;
     Ok((y, u, v))
 }
@@ -624,6 +625,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         RefFrames::empty(),
         [None; 8],
         &mut meta,
+        None,
     );
     // No neighbours recorded yet: both AvailU/AvailL false at the origin.
     assert_eq!(state.partition_context(0, 0, BLOCK_8X8), 0);
@@ -711,6 +713,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         RefFrames::empty(),
         [None; 8],
         &mut meta,
+        None,
     );
     assert_eq!(
         state.qindex_for_plane(0),
@@ -798,6 +801,7 @@ fn make_cdef_delta_state<'a>(
         RefFrames::empty(),
         [None; 8],
         meta,
+        None,
     )
 }
 
@@ -874,6 +878,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         [None; 8],
         &mut meta,
+        None,
     );
     let y_colors = state.read_palette_colors_yu(2, &[], false, false);
 
@@ -931,6 +936,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         RefFrames::empty(),
         [None; 8],
         &mut meta,
+        None,
     );
     let u_colors = state2.read_palette_colors_yu(2, &[], true, false);
 
@@ -1241,6 +1247,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         RefFrames::empty(),
         [None; 8],
         &mut meta,
+        None,
     );
     for &bsize in &[BLOCK_8X8, BLOCK_16X16, BLOCK_32X32, BLOCK_64X64] {
         let max_tx = max_tx_size_for_bsize(bsize);
@@ -1336,6 +1343,7 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         RefFrames::empty(),
                         [None; 8],
                         &mut meta,
+                        None,
                     );
                     let bw4 = BLOCK_WIDTH[bsize] / 4;
                     let bh4 = BLOCK_HEIGHT[bsize] / 4;

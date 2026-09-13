@@ -34,8 +34,7 @@ fn canlma2_poc1_mb4_bintrace() {
     let slices: Vec<_> = units
         .iter()
         .filter(|u| {
-            u.nal_unit_type == NalUnitType::NonIdrSlice
-                || u.nal_unit_type == NalUnitType::IdrSlice
+            u.nal_unit_type == NalUnitType::NonIdrSlice || u.nal_unit_type == NalUnitType::IdrSlice
         })
         .collect();
     eprintln!("found {} slice NALs", slices.len());
@@ -69,7 +68,10 @@ fn canlma2_poc1_mb4_bintrace() {
         &ctx,
     )
     .expect("slice header");
-    eprintln!("slice_type={:?} frame_num={} mbaff={}", header.slice_type, header.frame_num, sps.mb_adaptive_frame_field_flag);
+    eprintln!(
+        "slice_type={:?} frame_num={} mbaff={}",
+        header.slice_type, header.frame_num, sps.mb_adaptive_frame_field_flag
+    );
     let slice_qp = 26 + pps.pic_init_qp_minus26 + header.slice_qp_delta;
     let num_ref = header.num_ref_idx_l0_active_minus1 + 1;
     let cqo = pps.chroma_qp_index_offset;

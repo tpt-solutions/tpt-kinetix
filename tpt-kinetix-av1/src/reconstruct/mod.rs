@@ -72,6 +72,7 @@ use tpt_kinetix_core::{
 const TX_4X4: usize = 0;
 #[allow(dead_code)]
 const TX_8X8: usize = 1;
+#[allow(dead_code)]
 const TX_16X16: usize = 2;
 
 // Intra prediction modes (AV1 spec Table 7.10)
@@ -769,6 +770,29 @@ struct TileDecodeState<'a> {
 /// `sbSize4` index).
 const BD_STRIDE: usize = 35;
 
+/// Per-frame CDF context (AV1 §6.8.2 / §8 "context update"): the adapted
+/// `ModeCdfs` plus the qindex-seeded `TileCdfs` a decoded frame leaves behind.
+/// Frames whose `primary_ref_frame` names a DPB slot start from that slot's
+/// saved context (§ `primary_ref_frame == PRIMARY_REF_NONE` ⇒ default CDFs);
+/// after a frame whose `refresh_context` is set, its adapted context is saved
+/// into every slot selected by `refresh_frame_flags`. Without this, any
+/// hierarchical-GOP stream whose inter frames chain their CDF state through
+/// `primary_ref_frame` desyncs at its first symbol.
+#[derive(Clone)]
+pub struct FrameCdfContext {
+    pub(crate) mode_cdfs: ModeCdfs,
+    pub(crate) coeff_cdfs: TileCdfs,
+}
+
+impl FrameCdfContext {
+    pub(crate) fn from_parts(mode_cdfs: ModeCdfs, coeff_cdfs: TileCdfs) -> Self {
+        Self {
+            mode_cdfs,
+            coeff_cdfs,
+        }
+    }
+}
+
 impl<'a> TileDecodeState<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -825,6 +849,7 @@ impl<'a> TileDecodeState<'a> {
         ref_slots: RefFrames<'a>,
         temporal_motion_fields: [Option<&'a MotionField>; 8],
         meta: &'a mut FrameMeta,
+        initial_cdfs: Option<&FrameCdfContext>,
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
         let mi_rows = height.div_ceil(MI_SIZE);
@@ -849,8 +874,14 @@ impl<'a> TileDecodeState<'a> {
         }
         TileDecodeState {
             dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
-            coeff_cdfs: TileCdfs::new(qindex),
-            mode_cdfs: ModeCdfs::new(),
+            coeff_cdfs: match initial_cdfs {
+                Some(c) => c.coeff_cdfs.clone(),
+                None => TileCdfs::new(qindex),
+            },
+            mode_cdfs: match initial_cdfs {
+                Some(c) => c.mode_cdfs.clone(),
+                None => ModeCdfs::new(),
+            },
             coeff_ctxs: CoeffContexts::new(width.div_ceil(4), height.div_ceil(4)),
             mi_cols,
             mi_rows,
@@ -1223,7 +1254,8 @@ pub fn decode_tile_group(
     temporal_motion_fields: [Option<&MotionField>; 8],
     motion_field_out: &mut Vec<MotionFieldCell>,
     meta: &mut FrameMeta,
-) -> Result<(), KinetixError> {
+    cdf_context: Option<&FrameCdfContext>,
+) -> Result<FrameCdfContext, KinetixError> {
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
     let sb_mi = sb_size / MI_SIZE;
@@ -1335,6 +1367,7 @@ pub fn decode_tile_group(
         ref_slots,
         temporal_motion_fields,
         meta,
+        cdf_context,
     );
 
     // Full-tile symbol-trace capture for the independent Part 1 oracle
@@ -1436,9 +1469,13 @@ pub fn decode_tile_group(
         mv: cell.mv,
         refs: cell.refs,
     }));
+    // §6.8.2 context update: this tile's post-decode CDF state becomes the
+    // frame's saved context. The spec selects the `contextUpdateTileId` tile;
+    // that is tile 0 for the single-tile streams decoded so far.
+    let adapted = FrameCdfContext::from_parts(state.mode_cdfs.clone(), state.coeff_cdfs.clone());
     drop(state);
     meta.cdef_idx = cdef_idx;
-    out
+    out.map(|()| adapted)
 }
 
 /// Write `av1_tile_trace.json`: the raw tile entropy payload (from the
@@ -1578,13 +1615,19 @@ fn build_temporal_fields(ref_store: Option<&RefFrameStore>) -> [Option<&MotionFi
 /// silently wrong samples, a tile that loses sync with the bitstream fails
 /// the whole frame, which [`crate::decoder::Av1Decoder`] then reports as
 /// [`KinetixError::NotPixelExact`] in strict mode.
+/// What one decoded AV1 frame hands back to the decoder: the frame itself
+/// (plus its optional motion field) and the post-decode CDF context for the
+/// §6.8.2 per-slot context save.
+pub type ReconstructOutput = (VideoFrame, Option<MotionField>, Option<FrameCdfContext>);
+
 pub fn reconstruct_av1_frame(
     obus: &[(u8, Vec<u8>)],
     seq: &SequenceHeaderObu,
     frame_header: &FrameHeader,
     ref_store: Option<&RefFrameStore>,
     dpb_order_hints: [u8; 8],
-) -> Result<Option<(VideoFrame, Option<MotionField>)>, KinetixError> {
+    initial_cdfs: Option<&FrameCdfContext>,
+) -> Result<Option<ReconstructOutput>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
         eprintln!(
@@ -1632,15 +1675,22 @@ pub fn reconstruct_av1_frame(
     if std::env::var("KINETIX_AV1_DBG_TILES").is_ok() {
         eprintln!(
             "DBG TILES frame tile_cols={} tile_rows={} payloads={}",
-            frame_header.tile_cols, frame_header.tile_rows, tile_payloads.len()
+            frame_header.tile_cols,
+            frame_header.tile_rows,
+            tile_payloads.len()
         );
         let tc = frame_header.tile_cols.max(1) as usize;
         let tr = frame_header.tile_rows.max(1) as usize;
         for (i, p) in tile_payloads.iter().enumerate() {
             // Peek at the first few bytes of each tile payload
             let preview: Vec<String> = p.iter().take(8).map(|b| format!("{b:02x}")).collect();
-            eprintln!("  tile[{i}] bytes={} first8=[{}] tile_x={} tile_y={}",
-                p.len(), preview.join(" "), i % tc, i / tc.max(1));
+            eprintln!(
+                "  tile[{i}] bytes={} first8=[{}] tile_x={} tile_y={}",
+                p.len(),
+                preview.join(" "),
+                i % tc,
+                i / tc.max(1)
+            );
             // Try to parse the tile group header bits
             if !p.is_empty() && (tc > 1 || tr > 1) {
                 let flag = (p[0] >> 7) & 1;
@@ -1663,6 +1713,7 @@ pub fn reconstruct_av1_frame(
                 pixel_format: PixelFormat::Yuv420p,
                 is_key_frame: true,
             },
+            None,
             None,
         )));
     }
@@ -1693,6 +1744,9 @@ pub fn reconstruct_av1_frame(
         /// Full-frame-sized motion field cells (only this tile's region
         /// populated; merged into the frame-level MF after all tiles finish).
         motion_field: Vec<MotionFieldCell>,
+        /// This tile's post-decode CDF state (tile 0's becomes the frame's
+        /// saved context, §6.8.2).
+        cdfs: Option<FrameCdfContext>,
     }
 
     // Per-tile geometry, shared across the parallel worker closure.
@@ -1728,7 +1782,7 @@ pub fn reconstruct_av1_frame(
             let mut meta = FrameMeta::new(tw, th);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
-            decode_tile_group(
+            let decoded_cdfs = decode_tile_group(
                 payload,
                 width,
                 height,
@@ -1799,7 +1853,9 @@ pub fn reconstruct_av1_frame(
                 temporal_fields,
                 &mut mf_cells,
                 &mut meta,
+                initial_cdfs,
             )?;
+            let adapted_cdfs = decoded_cdfs;
 
             // Phase D: run the in-loop post-filters (deblock → CDEF →
             // restoration) over the tile-local buffer. Applied per-tile here;
@@ -1835,6 +1891,7 @@ pub fn reconstruct_av1_frame(
                 u: tu,
                 v: tv,
                 motion_field: mf_cells,
+                cdfs: Some(adapted_cdfs),
             })
         })
         .collect();
@@ -1843,8 +1900,14 @@ pub fn reconstruct_av1_frame(
     let mi_cols = width.div_ceil(MI_SIZE);
     let mi_rows = height.div_ceil(MI_SIZE);
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
+    let mut frame_cdf_context: Option<FrameCdfContext> = None;
     for tile in decoded {
         let tile = tile?;
+        // §6.8.2: the saved context comes from the `contextUpdateTileId` tile
+        // (tile 0 in the current decoder's single-tile usage).
+        if frame_cdf_context.is_none() {
+            frame_cdf_context = tile.cdfs.clone();
+        }
         let tw = tile.x1 - tile.x0;
         for (dy, sy) in (tile.y0..tile.y1).enumerate() {
             let dst = &mut y_plane[sy * width + tile.x0..sy * width + tile.x1];
@@ -1896,6 +1959,7 @@ pub fn reconstruct_av1_frame(
             is_key_frame: true,
         },
         motion_field,
+        frame_cdf_context,
     )))
 }
 

@@ -20,7 +20,7 @@ fn j3<const N: usize, const M: usize>(v: &[[[u16; N]; M]]) -> String {
 /// intra modes, transform size, skip, angle delta, interpolation filter).
 /// Initialised from the exact spec default tables in `cdf_tables_gen`.
 #[derive(Clone)]
-pub(super) struct ModeCdfs {
+pub(crate) struct ModeCdfs {
     pub(super) partition_w8: [[u16; 5]; 4],
     pub(super) partition_w16: [[u16; 11]; 4],
     pub(super) partition_w32: [[u16; 11]; 4],

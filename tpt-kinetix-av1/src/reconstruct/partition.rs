@@ -274,6 +274,18 @@ impl<'a> TileDecodeState<'a> {
             }
             _ => return,
         };
+        if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+            match &lr_data {
+                LrUnitData::Sgrproj { set, xqd } => eprintln!(
+                    "KIN SGR pl={plane} set={set} w={xqd:?} rng={}",
+                    self.dec.raw_state().0
+                ),
+                LrUnitData::Wiener { h, v } => eprintln!(
+                    "KIN WIENER pl={plane} h={h:?} v={v:?} rng={}",
+                    self.dec.raw_state().0
+                ),
+            }
+        }
         self.meta
             .lr_units
             .insert((plane, unit_row, unit_col), lr_data);

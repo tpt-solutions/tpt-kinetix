@@ -15,7 +15,12 @@ pub(super) struct MaskDesc {
 impl MaskDesc {
     /// No masked blend (single-ref, or `COMP_INTER_AVG` / `_WEIGHTED_AVG`).
     fn none() -> Self {
-        Self { comp_type: 0, wedge_index: 0, mask_sign: false, bsize: 0 }
+        Self {
+            comp_type: 0,
+            wedge_index: 0,
+            mask_sign: false,
+            bsize: 0,
+        }
     }
 }
 
@@ -116,7 +121,9 @@ fn obmc_mask(length: usize) -> &'static [i32] {
         2 => &[45, 64],
         4 => &[39, 50, 59, 64],
         8 => &[36, 42, 48, 53, 57, 61, 64, 64],
-        16 => &[34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64],
+        16 => &[
+            34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64,
+        ],
         _ => &[
             33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60,
             61, 62, 64, 64, 64, 64, 64, 64, 64, 64,
@@ -472,14 +479,9 @@ impl<'a> TileDecodeState<'a> {
             // producing an invalid symbol, but adapts the wrong CDF entries
             // under the wrong context, diverging the coder's `rng` from the
             // very first intra-in-inter-frame block onward.
-            let y_mode = self
-                .mode_cdfs
-                .read_y_mode(&mut self.dec, SIZE_GROUP[bsize]);
+            let y_mode = self.mode_cdfs.read_y_mode(&mut self.dec, SIZE_GROUP[bsize]);
             if dbg_b0 {
-                eprintln!(
-                    "DBG b0 ymode={y_mode} rng={}",
-                    self.dec.raw_state().0
-                );
+                eprintln!("DBG b0 ymode={y_mode} rng={}", self.dec.raw_state().0);
             }
             // `intra_angle_info_y()` (AV1 spec §5.11.42), same as the
             // keyframe path.
@@ -1045,11 +1047,11 @@ impl<'a> TileDecodeState<'a> {
         // warped motion is enabled the 3-way `motion_mode` symbol is read,
         // otherwise the `use_obmc` bool.
         let mut motion_mode = 0u8; // SIMPLE
-        // §7.13.3/§7.13.4 local warp model, derived only when `motion_mode ==
-        // WARP` (2) is actually selected below. `None` covers both "not a
-        // WARP block" and dav1d's own translation-only fallback (LS system
-        // singular, or the fitted shear too extreme to filter) — either way
-        // the caller falls back to the ordinary translational prediction.
+                                   // §7.13.3/§7.13.4 local warp model, derived only when `motion_mode ==
+                                   // WARP` (2) is actually selected below. `None` covers both "not a
+                                   // WARP block" and dav1d's own translation-only fallback (LS system
+                                   // singular, or the fitted shear too extreme to filter) — either way
+                                   // the caller falls back to the ordinary translational prediction.
         let mut warp_model: Option<warp::WarpModel> = None;
         {
             let min_dim = BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]);
@@ -1066,8 +1068,7 @@ impl<'a> TileDecodeState<'a> {
                 // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate) is
                 // not modelled — none of the corpus streams use reference
                 // scaling, so it is always treated as false.
-                let allow_warp =
-                    self.allow_warped_motion && !force_integer_mv && num_samples > 0;
+                let allow_warp = self.allow_warped_motion && !force_integer_mv && num_samples > 0;
                 if allow_warp {
                     motion_mode = self
                         .dec
@@ -1270,7 +1271,7 @@ impl<'a> TileDecodeState<'a> {
         // motion vectors. Only meaningful for `motion_mode == OBMC` (1);
         // WARP (2) blocks never run OBMC (dav1d: `motion_mode == MM_OBMC`
         // is mutually exclusive with `MM_WARP` at the syntax level).
-        if motion_mode == 1 {
+        if motion_mode == 1 && std::env::var("KINETIX_AV1_NOOBMC").is_err() {
             for plane in 0..3 {
                 self.apply_obmc(mi_row, mi_col, bsize, plane);
             }
@@ -1280,14 +1281,20 @@ impl<'a> TileDecodeState<'a> {
         if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
-            if px_end_y > 56 && px_y0 < 96 && px_end_x > 32 && px_x0 < 128 {
+            if px_end_y > 56 && px_y0 < 96 && px_end_x > 32 && px_x0 < 128
+                || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+            {
                 eprintln!(
                     "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} mv=({},{}) px=({px_x0},{px_y0})",
                     mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y.min(96) {
-                    if row < 56 { continue; }
-                    let vals: Vec<u8> = (px_x0..px_end_x.min(128)).map(|c| self.y_plane[row * self.y_stride + c]).collect();
+                    if row < 56 && std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_err() {
+                        continue;
+                    }
+                    let vals: Vec<u8> = (px_x0..px_end_x.min(128))
+                        .map(|c| self.y_plane[row * self.y_stride + c])
+                        .collect();
                     eprintln!("  y={row}: {vals:?}");
                 }
             }
@@ -1668,21 +1675,35 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok()
-            && plane == 0
-            && mi_row >= 16;
+        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok() && plane == 0 && mi_row >= 16;
         if dbg_obmc {
-            eprintln!("OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}", jobs.len());
+            eprintln!(
+                "OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}",
+                jobs.len()
+            );
             for j in &jobs {
-                eprintln!("  job pass={} px={} py={} w={} h={} nb_ref={} mv=({},{})",
-                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.mv.col, j.mv.row);
+                eprintln!(
+                    "  job pass={} px={} py={} w={} h={} nb_ref={} mv=({},{})",
+                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.mv.col, j.mv.row
+                );
             }
         }
         for job in jobs {
-            let ObmcJob { pass, px, py, pred_w, pred_h, mv, filter, nb_ref } = job;
+            let ObmcJob {
+                pass,
+                px,
+                py,
+                pred_w,
+                pred_h,
+                mv,
+                filter,
+                nb_ref,
+            } = job;
             let slot = self.ref_to_slot[nb_ref as usize] as usize;
             let Some(rf) = self.ref_slots.slots[slot] else {
-                if dbg_obmc { eprintln!("  SKIP job: no ref slot for nb_ref={nb_ref}"); }
+                if dbg_obmc {
+                    eprintln!("  SKIP job: no ref slot for nb_ref={nb_ref}");
+                }
                 continue;
             };
             let (rp, rw, rh) = rf.plane(plane);
@@ -1710,14 +1731,20 @@ impl<'a> TileDecodeState<'a> {
                     let m = if pass == 0 { mask[i] } else { mask[j] };
                     let cur = dst[sy * pstride + sx] as i32;
                     let o = obmc[i * pred_w + j] as i32;
-                    if dbg_obmc && cur != o { any_diff = true; }
+                    if dbg_obmc && cur != o {
+                        any_diff = true;
+                    }
                     // §7.11.3.9: mask weights the *neighbour's* prediction; (64-m) weights current.
-                    dst[sy * pstride + sx] = (((m * o + (64 - m) * cur) + 32) >> 6).clamp(0, 255) as u8;
+                    dst[sy * pstride + sx] =
+                        (((m * o + (64 - m) * cur) + 32) >> 6).clamp(0, 255) as u8;
                 }
             }
             if dbg_obmc {
-                eprintln!("  blend done: any_diff={any_diff} obmc[0]={} dst_sample={}",
-                    obmc[0], dst[py * pstride + px]);
+                eprintln!(
+                    "  blend done: any_diff={any_diff} obmc[0]={} dst_sample={}",
+                    obmc[0],
+                    dst[py * pstride + px]
+                );
             }
         }
     }
@@ -1811,8 +1838,18 @@ impl<'a> TileDecodeState<'a> {
                                 );
                             }
                             warp::block_warp_process(
-                                &mut t, bw, rp, rw, rh, model, mi_col as i32, mi_row as i32, bw,
-                                bh, ss_hor, ss_ver,
+                                &mut t,
+                                bw,
+                                rp,
+                                rw,
+                                rh,
+                                model,
+                                mi_col as i32,
+                                mi_row as i32,
+                                bw,
+                                bh,
+                                ss_hor,
+                                ss_ver,
                             );
                         }
                         _ => {
@@ -2003,15 +2040,17 @@ impl<'a> TileDecodeState<'a> {
                 )?;
                 if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
                     eprintln!(
-                        "DBG y-cf-blk tx={leaf_tx} txtp={} eob={} rng={}",
+                        "DBG y-cf-blk mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} rng={}",
                         coeffs.tx_type,
                         coeffs.eob,
                         self.dec.raw_state().0
                     );
                 }
-                // Coeffs are always *read* (entropy sync). TODO: widen to all
-                // tx sizes once warp/OBMC prediction is bit-exact.
-                if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
+                // Coeffs are always *read* (entropy sync). The residual is
+                // applied at every tx size: `inverse_transform` handles the
+                // adjusted-size (≤32-side) dequant stride and the 32/64-family
+                // shifts generically.
+                if coeffs.eob > 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
                     inverse_transform(

@@ -165,6 +165,11 @@ pub struct Av1Decoder {
     /// `RefOrderHint[0..8]` — the `order_hint` of the frame stored in each DPB
     /// slot, updated by `refresh_frame_flags`. Needed by `skip_mode_params()`.
     ref_order_hints: [u8; 8],
+    /// Per-slot saved CDF contexts (§6.8.2 context update): a frame with
+    /// `primary_ref_frame != PRIMARY_REF_NONE` starts from the named slot's
+    /// adapted CDFs; a `refresh_context` frame saves its adapted CDFs into the
+    /// slots `refresh_frame_flags` selects.
+    ref_cdf_contexts: [Option<std::sync::Arc<crate::reconstruct::FrameCdfContext>>; 8],
 }
 
 impl Av1Decoder {
@@ -177,6 +182,7 @@ impl Av1Decoder {
             tile_data: Vec::new(),
             ref_frames: RefFrameStore::new(),
             ref_order_hints: [0u8; 8],
+            ref_cdf_contexts: [None, None, None, None, None, None, None, None],
         }
     }
 
@@ -412,19 +418,44 @@ impl Av1Decoder {
         pairs: &[(u8, Vec<u8>)],
     ) -> Option<VideoFrame> {
         self.last_frame_header = Some(fh.clone());
-        let (frame, motion_field) = match reconstruct_av1_frame(
+        // §6.8.2 CDF context: a frame whose `primary_ref_frame` names a ref-list
+        // entry starts from the saved (adapted) CDFs of the DPB slot that entry
+        // maps to (`RefCdfFrame[ RefFrameIdx[primary_ref_frame] ]` — dav1d's
+        // `c->cdf[f->frame_hdr->refidx[primary_ref_frame]]`); `PRIMARY_REF_NONE`
+        // (7) starts from the default tables.
+        let initial_cdfs = if fh.primary_ref_frame != 7 {
+            let slot = fh.ref_frame_idx[usize::from(fh.primary_ref_frame)] as usize;
+            self.ref_cdf_contexts[slot].clone()
+        } else {
+            None
+        };
+        let (frame, motion_field, adapted_cdfs) = match reconstruct_av1_frame(
             pairs,
             seq,
             fh,
             Some(&self.ref_frames),
             self.ref_order_hints,
+            initial_cdfs.as_deref(),
         ) {
-            Ok(Some(pair)) => pair,
+            Ok(Some(tuple)) => tuple,
             _ => return None,
         };
         let refresh = fh.refresh_frame_flags;
+        // After a `refresh_context` frame, its adapted CDFs are saved into
+        // every slot selected by `refresh_frame_flags` (§ context update).
+        if !fh.disable_frame_end_update_cdf {
+            if let Some(ctx) = adapted_cdfs {
+                let arc = std::sync::Arc::new(ctx);
+                for i in 0..8 {
+                    if refresh & (1u8 << i) != 0 {
+                        self.ref_cdf_contexts[i] = Some(arc.clone());
+                    }
+                }
+            }
+        }
         let order_hint = fh.order_hint as u8;
-        self.ref_frames.refresh(refresh, &frame, motion_field.as_ref());
+        self.ref_frames
+            .refresh(refresh, &frame, motion_field.as_ref());
         for i in 0..8 {
             if refresh & (1u8 << i) != 0 {
                 self.ref_order_hints[i] = order_hint;

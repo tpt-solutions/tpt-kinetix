@@ -5896,3 +5896,72 @@
 > still fall through to the average (mask generation TODO). **`av1_inter_
 > sequence` frame 1 Y 27.5→31.5 dB, V 27.1→31.1, U 25.0→29.1**; frame 2 U
 > 29.2→30.9. Intra corpus 6/6, conformance 11/11, 140 av1 tests.
+
+> **2026-09-14 — THE INTER-FRAME ENTROPY DESYNC ROOT-CAUSED AND FIXED: the
+> missing §6.8.2 CDF-context save/restore (`primary_ref_frame` → saved
+> adapted CDFs). Also: the large-tx residual gate is gone (net win), the OBMC
+> blend mask weighting was flipped to spec, and a local patched-dav1d
+> workflow now exists on this machine.** The desync that had every inter
+> frame after the first GOP stuck at ~12–26 dB was never an OBMC/warp/blend
+> bug at all. Evidence trail (all reproducible):
+> 1. A/B gates (`KINETIX_AV1_NOOBMC`, existing `KINETIX_AV1_NO_WARP`,
+>    `KINETIX_AV1_NOFILTER`) changed *nothing* on frame 1 — OBMC jobs in that
+>    frame are 5 left-edge blocks whose neighbour predictions are identical
+>    (`any_diff=false`), and there are zero WARP blocks.
+> 2. An independent Python MC oracle (spec §7.11.3.3, eighttap-regular,
+>    clamped borders) reproduced Kinetix's inter prediction **bit-exactly**
+>    (diff 0), so MC was never the problem either.
+> 3. Built a **source-patched dav1d locally** (meson+ninja work out of the
+>    box; clone + ~4 env-gated `fprintf`s in `decode.c`/`obu.c` — see
+>    `/tmp/av1dbg/dav1d-src` on this machine, rebuild from a fresh clone the
+>    same way): per-block `by/bx/bl/bs/bp/rng` at `decode_b` entry, LR unit
+>    reads, SGR set/weights, and per-frame `DAV1D FH` header dumps. Comparing
+>    its trace against `KINETIX_AV1_TRACE`/`KINETIX_AV1_DBG_B0` showed:
+>    p0 + all three sub-frames of p1 (hierarchical-GOP packets pack multiple
+>    OBU_FRAMEs per IVF frame!) decode **block-for-block in sync**, and every
+>    frame from p2 on diverges at the **first partition symbol**.
+> 4. Header dumps (`KINETIX_AV1_DBG_FH_JSON` vs dav1d's parsed header) match
+>    field-for-field; the divergence is the *initial CDF state*: frames with
+>    `primary_ref_frame == 7` (defaults) sync; frames with
+>    `primary_ref_frame != 7` must restore the **adapted CDF context saved by
+>    an earlier frame** — and Kinetix never implemented that at all
+>    (`TileDecodeState::new` hardcoded `ModeCdfs::new()` +
+>    `TileCdfs::new(qindex)` for every frame).
+> 5. The exact restore semantics (from dav1d's `decode.c:3511`):
+>    `in_cdf = c->cdf[ refidx[primary_ref_frame] ]` — **the slot is looked up
+>    through the frame's `ref_frame_idx` map**, not used directly (dav1d's
+>    `pri_ref = refidx[primary_ref_frame]`); save-side is per
+>    `refresh_frame_flags` bit, gated on `refresh_context` (§7.7
+>    frame_end_update_cdf copies Saved→working for the `init_coeff_cdfs` +
+>    `init_non_coeff_cdfs` arrays — coeff CDFs are carried, not re-seeded).
+>    Implementation: `FrameCdfContext { mode_cdfs, coeff_cdfs }` snapshot,
+>    threaded `decode_tile_group` → `reconstruct_av1_frame` →
+>    `Av1Decoder::ref_cdf_contexts[8]` (Arc-cloned into refresh slots;
+>    restore slot = `ref_frame_idx[primary_ref_frame]`).
+> **Result (`av1_inter_sequence`): every inter frame dropped to
+> 2700–3150 luma diff samples** (from 4664–11032), PSNR e.g. frame 2
+> 19.57→28.63 dB, frame 4 18.12→26.30 dB. Intra corpus still 6/6 bit-exact;
+> 153 av1 lib tests + full workspace tests/clippy/fmt green.
+> **With contexts fixed, the read-but-don't-apply gate for >16×16 inter
+> transforms is now a net win and is removed** — the old "apply regresses
+> frame 2 (4.7k→10k)" measurement was an artifact of the desync (garbage
+> coefficients). `inverse_transform` handles the adjusted-size ≤32-side
+> dequant stride, rect sqrt-2 rescale, and 64-family shifts generically.
+> **Debug hooks added (env-gated, per repo convention):**
+> `KINETIX_AV1_DBG_FH_JSON` (per-frame parsed-header dump + bit count),
+> `KINETIX_AV1_DBG_FH_SEC` (per-section header bit positions),
+> `KINETIX_AV1_DBG_PRED_ALL` (PRED dump ignores the y≥56 region gate),
+> `KINETIX_AV1_NOOBMC` (skip OBMC application), `KINETIX_AV1_DBG_LR` now also
+> dumps the decoded SGR/Wiener unit values, `KINETIX_AV1_DBG_B0` luma
+> coefficient lines now carry `mi=`, and `dbg_av1_inter` gained
+> `KINETIX_AV1_SAVE_IVF`. **Remaining inter gap** is the uniform ~3k diff
+> samples/frame in the bottom region — NOT MC (oracle-exact), NOT OBMC/WARP
+> (absent/no-op), NOT deblock/CDEF/LR toggles — concentrated at transform
+> edges above the y=64 SB boundary including inside a 64×64 skip block, i.e.
+> post-reconstruction modification or a per-block metadata difference on
+> inter frames; next session should diff pre-filter pixels per block against
+> the patched dav1d (`DAV1D ITXDUMP`-style dumps on this local build).
+> Harness caveat worth remembering: the inter IVF packs *multiple OBU_FRAMEs
+> into one IVF frame* (aomenc hierarchical GOP) and payload 3 is a
+> show-existing header-only packet — both decoder and harness align by
+> *emitted shown-frame sequence*, not by payload index.

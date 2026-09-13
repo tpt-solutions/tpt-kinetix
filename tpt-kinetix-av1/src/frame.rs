@@ -748,6 +748,9 @@ impl FrameHeader {
             tile_width_in_sb,
             tile_height_in_sb,
         ) = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC tile={}", br.bits_read());
+        }
 
         // --- quantization_params ---
         let base_q_idx = read_f8(&mut br, 8)?;
@@ -791,6 +794,9 @@ impl FrameHeader {
             seg_feature_enabled,
             seg_feature_data,
         ) = parse_segmentation(&mut br, primary_ref_frame, segmentation_enabled)?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEG seg={}", br.bits_read());
+        }
 
         // --- delta_q_params ---
         let (delta_q_present, delta_q_res) =
@@ -799,6 +805,9 @@ impl FrameHeader {
         // --- delta_lf_params ---
         let (delta_lf_present, delta_lf_res, delta_lf_multi) =
             parse_delta_lf_params(&mut br, delta_q_present, allow_intrabc)?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC dlq={}", br.bits_read());
+        }
 
         // --- CodedLossless ---
         let coded_lossless = base_q_idx == 0
@@ -816,6 +825,9 @@ impl FrameHeader {
             loop_filter_delta_enabled,
             loop_filter_deltas,
         ) = parse_loop_filter(&mut br, coded_lossless, allow_intrabc, num_planes)?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC lf={}", br.bits_read());
+        }
 
         // --- cdef_params ---
         let (cdef_damping, cdef_bits, cdef_y_strength, cdef_uv_strength) = parse_cdef(
@@ -825,6 +837,9 @@ impl FrameHeader {
             enable_cdef,
             num_planes,
         )?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC cdef={}", br.bits_read());
+        }
 
         // --- lr_params ---
         let lr_params = parse_lr(
@@ -837,6 +852,9 @@ impl FrameHeader {
             subsampling_y,
             seq.use_128x128_superblock,
         )?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC lr={}", br.bits_read());
+        }
 
         // --- read_tx_mode ---
         let tx_mode_select = if coded_lossless {
@@ -863,6 +881,9 @@ impl FrameHeader {
             &ref_frame_idx,
             ref_order_hint_dpb,
         )?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC skipmode={}", br.bits_read());
+        }
 
         // --- allow_warped_motion ---
         let allow_warp = if frame_is_intra || error_resilient_mode || !enable_warped_motion {
@@ -877,6 +898,9 @@ impl FrameHeader {
         // --- global_motion_params ---
         let (gm_type, gm_params) =
             parse_global_motion(&mut br, frame_is_intra, allow_high_precision_mv)?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!("FHSEC gm={}", br.bits_read());
+        }
 
         // --- film_grain_params ---
         parse_film_grain(
@@ -890,11 +914,39 @@ impl FrameHeader {
             subsampling_x,
             subsampling_y,
         )?;
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!(
+                "FHSEC fg={} fh_type={frame_type:?} refresh={refresh_frame_flags:#04x}",
+                br.bits_read()
+            );
+        }
 
         // `frame_obu()` performs `byte_alignment()` between the uncompressed
         // header and the tile-group payload (§6.8.1), so consume the trailing
         // padding (all-ones) here; this also positions `br` at the tile group.
         byte_align(&mut br)?;
+
+        if std::env::var("KINETIX_AV1_DBG_FH_JSON").is_ok() {
+            eprintln!("KIN FH bits={}", br.bits_read());
+            dbg_dump_frame_header(
+                frame_type,
+                show_frame,
+                refresh_frame_flags,
+                base_q_idx,
+                &lr_params.restoration_type,
+                delta_q_present,
+                delta_lf_present,
+                segmentation_enabled,
+                is_motion_mode_switchable,
+                disable_frame_end_update_cdf,
+                primary_ref_frame,
+                &ref_frame_idx,
+                interpolation_filter,
+                allow_warp,
+                order_hint,
+                &ref_order_hint,
+            );
+        }
 
         Ok((
             FrameHeader {
@@ -991,6 +1043,45 @@ impl FrameHeader {
             br.bits_read(),
         ))
     }
+}
+
+/// Per-frame header dump for differential debugging against dav1d's parsed
+/// header (`DAV1D_DBG_FH` patch) — same fields as the dav1d-side `DAV1D FH`
+/// line. Gated on `KINETIX_AV1_DBG_FH` like the other dumps.
+#[allow(clippy::too_many_arguments)]
+fn dbg_dump_frame_header(
+    frame_type: FrameType,
+    show_frame: bool,
+    refresh_frame_flags: u8,
+    base_q_idx: u8,
+    lr_types: &[u8; 3],
+    delta_q_present: bool,
+    delta_lf_present: bool,
+    segmentation_enabled: bool,
+    is_motion_mode_switchable: bool,
+    disable_frame_end_update_cdf: bool,
+    primary_ref_frame: u8,
+    ref_frame_idx: &[u8; 7],
+    interpolation_filter: u8,
+    allow_warp: bool,
+    order_hint: u32,
+    ref_order_hint: &[u8; 8],
+) {
+    let ft = match frame_type {
+        FrameType::KeyFrame => 0,
+        FrameType::InterFrame => 1,
+        FrameType::IntraOnlyFrame => 2,
+        FrameType::SwitchFrame => 3,
+        FrameType::Reserved => 4,
+    };
+    eprintln!(
+        "KIN FH frame_type={ft} show={show_frame} refresh={refresh_frame_flags:x} \
+         qidx={base_q_idx} lr={lr_types:?} deltaq={delta_q_present} delalf={delta_lf_present} \
+         seg={segmentation_enabled} switchable={is_motion_mode_switchable} \
+         refctx={} primref={primary_ref_frame} refidx={ref_frame_idx:?} filt={interpolation_filter} \
+         warp={allow_warp} oh={order_hint} roh={ref_order_hint:?}",
+        !disable_frame_end_update_cdf,
+    );
 }
 // ===========================================================================
 // Frame header sub-parsers (AV1 spec §5.9 uncompressed_header helpers)

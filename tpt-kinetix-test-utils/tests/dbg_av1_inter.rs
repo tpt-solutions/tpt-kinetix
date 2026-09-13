@@ -58,9 +58,8 @@ fn dbg_av1_inter_diffmap() {
             for y in 64..96 {
                 for x in 0..64 {
                     d_own += (frame.data[y * W + x] as i64 - prev_kin[y * W + x] as i64).abs();
-                    d_dav += (frame.data[y * W + x] as i64
-                        - ref_frames[0].data[y * W + x] as i64)
-                        .abs();
+                    d_dav +=
+                        (frame.data[y * W + x] as i64 - ref_frames[0].data[y * W + x] as i64).abs();
                 }
             }
             eprintln!(

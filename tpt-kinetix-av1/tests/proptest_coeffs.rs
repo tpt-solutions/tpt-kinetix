@@ -92,6 +92,7 @@ fn decode_with(
         [None; 8],
         &mut Vec::new(),
         &mut meta,
+        None,
     )
     .is_ok()
 }

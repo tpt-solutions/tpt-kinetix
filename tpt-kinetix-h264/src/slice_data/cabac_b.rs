@@ -1050,8 +1050,19 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         }
         1 => {
             mb.mb_type = MbType::BL016x16;
-            let (lg, tg) =
-                ref_idx_gt0_neighbors(inter_grid, &this_inter, nctx, mb_x, mb_y, mb_cols, 0, 0, 16, 16, 0);
+            let (lg, tg) = ref_idx_gt0_neighbors(
+                inter_grid,
+                &this_inter,
+                nctx,
+                mb_x,
+                mb_y,
+                mb_cols,
+                0,
+                0,
+                16,
+                16,
+                0,
+            );
             // ref_idx is only coded when num_ref_idx_lX_active_minus1 > 0
             // (§7.3.5.2); with a single reference it is implicitly 0.
             let ri = if num_ref_idx_l0_active > 1 || nctx.ref_idx_field_mismatch() {
@@ -1110,8 +1121,19 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         }
         2 => {
             mb.mb_type = MbType::BL116x16;
-            let (lg, tg) =
-                ref_idx_gt0_neighbors(inter_grid, &this_inter, nctx, mb_x, mb_y, mb_cols, 0, 0, 16, 16, 1);
+            let (lg, tg) = ref_idx_gt0_neighbors(
+                inter_grid,
+                &this_inter,
+                nctx,
+                mb_x,
+                mb_y,
+                mb_cols,
+                0,
+                0,
+                16,
+                16,
+                1,
+            );
             let ri = if num_ref_idx_l1_active > 1 || nctx.ref_idx_field_mismatch() {
                 let r = ctxs.ref_idx.decode(dec, lg, tg);
                 if r >= nctx.effective_ref_idx_active(num_ref_idx_l1_active) {
@@ -1169,8 +1191,19 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
         3 => {
             mb.mb_type = MbType::BBi16x16;
             let blks: Vec<usize> = (0..16).collect();
-            let (lg, tg) =
-                ref_idx_gt0_neighbors(inter_grid, &this_inter, nctx, mb_x, mb_y, mb_cols, 0, 0, 16, 16, 0);
+            let (lg, tg) = ref_idx_gt0_neighbors(
+                inter_grid,
+                &this_inter,
+                nctx,
+                mb_x,
+                mb_y,
+                mb_cols,
+                0,
+                0,
+                16,
+                16,
+                0,
+            );
             let ri0 = if num_ref_idx_l0_active > 1 || nctx.ref_idx_field_mismatch() {
                 let r = ctxs.ref_idx.decode(dec, lg, tg);
                 if r >= nctx.effective_ref_idx_active(num_ref_idx_l0_active) {
@@ -1181,8 +1214,19 @@ fn parse_b_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 0
             };
             motion.ref_idx_l0.push(ri0 as i32);
-            let (lg1, tg1) =
-                ref_idx_gt0_neighbors(inter_grid, &this_inter, nctx, mb_x, mb_y, mb_cols, 0, 0, 16, 16, 1);
+            let (lg1, tg1) = ref_idx_gt0_neighbors(
+                inter_grid,
+                &this_inter,
+                nctx,
+                mb_x,
+                mb_y,
+                mb_cols,
+                0,
+                0,
+                16,
+                16,
+                1,
+            );
             let ri1 = if num_ref_idx_l1_active > 1 || nctx.ref_idx_field_mismatch() {
                 let r = ctxs.ref_idx.decode(dec, lg1, tg1);
                 if r >= nctx.effective_ref_idx_active(num_ref_idx_l1_active) {

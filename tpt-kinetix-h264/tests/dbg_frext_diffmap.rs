@@ -112,15 +112,15 @@ fn frext_diffmap() {
     // (min total abs diff) — exposes display-order / duplication errors.
     if std::env::var_os("FREXT_BESTMATCH").is_some() {
         let nref = reference.len() / fl;
-        for i in 0..frames.len() {
-            if frames[i].data.len() != fl {
+        for (i, fr) in frames.iter().enumerate() {
+            if fr.data.len() != fl {
                 continue;
             }
             let mut best = (usize::MAX, u64::MAX);
             for r in 0..nref {
                 let rs = &reference[r * fl..(r + 1) * fl];
                 let mut s = 0u64;
-                for (a, b) in frames[i].data.iter().zip(rs) {
+                for (a, b) in fr.data.iter().zip(rs) {
                     s += (*a as i32 - *b as i32).unsigned_abs() as u64;
                 }
                 if s < best.1 {

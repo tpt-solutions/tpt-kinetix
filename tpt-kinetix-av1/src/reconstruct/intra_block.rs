@@ -1412,7 +1412,7 @@ impl<'a> TileDecodeState<'a> {
         let mut zeromv_found = false;
         if self.use_ref_frame_mvs {
             // Co-located 8×4 → 8×8 snap: (mi_row | 1, mi_col | 1).
-            let tr_base = (by4 as usize | 1).min(usize::MAX);
+            let tr_base = by4 as usize | 1;
             let tc_base = bx4 as usize | 1;
 
             let cur_poc = self.cur_order_hint as i32;
@@ -1437,7 +1437,11 @@ impl<'a> TileDecodeState<'a> {
             // candidates when multiple named refs alias the same slot.
             let mut sampled_slots = [false; 8];
             for named_ref in LAST_FRAME..=crate::inter::ALTREF_FRAME {
-                let slot = self.ref_to_slot.get(named_ref as usize).copied().unwrap_or(0) as usize;
+                let slot = self
+                    .ref_to_slot
+                    .get(named_ref as usize)
+                    .copied()
+                    .unwrap_or(0) as usize;
                 if sampled_slots[slot] {
                     continue;
                 }
@@ -1466,8 +1470,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     let src_slot =
                         tmf.ref_to_slot.get(tref as usize).copied().unwrap_or(0) as usize;
-                    let src_poc =
-                        tmf.dpb_order_hints.get(src_slot).copied().unwrap_or(0) as i32;
+                    let src_poc = tmf.dpb_order_hints.get(src_slot).copied().unwrap_or(0) as i32;
                     let pd = poc_diff_fn(temporal_poc, src_poc);
                     if pd == 0 {
                         continue;
@@ -1483,15 +1486,13 @@ impl<'a> TileDecodeState<'a> {
                         }
                         let dst_slot =
                             self.ref_to_slot.get(dst_ref as usize).copied().unwrap_or(0) as usize;
-                        let dst_poc = self
-                            .dpb_order_hints
-                            .get(dst_slot)
-                            .copied()
-                            .unwrap_or(0) as i32;
+                        let dst_poc =
+                            self.dpb_order_hints.get(dst_slot).copied().unwrap_or(0) as i32;
                         let nd = poc_diff_fn(cur_poc, dst_poc);
-                        if let (Some(r), Some(c)) =
-                            (project_mv(src_mv.row, nd, pd), project_mv(src_mv.col, nd, pd))
-                        {
+                        if let (Some(r), Some(c)) = (
+                            project_mv(src_mv.row, nd, pd),
+                            project_mv(src_mv.col, nd, pd),
+                        ) {
                             proj[m] = Mv::new(r, c);
                             proj_ok[m] = true;
                         }

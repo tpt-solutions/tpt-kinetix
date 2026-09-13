@@ -128,12 +128,11 @@ fn build_wedge_table() -> WedgeTable {
             let mut shift = (MASK_MASTER_SIZE / 4) as i32;
             let mut i = 0;
             while i < n {
-                let e = WEDGE_MASTER_OBLIQUE_EVEN
-                    [clip3(0, n as i32 - 1, j as i32 - shift) as usize];
+                let e =
+                    WEDGE_MASTER_OBLIQUE_EVEN[clip3(0, n as i32 - 1, j as i32 - shift) as usize];
                 m[WEDGE_OBLIQUE63][i * n + j] = e;
                 shift -= 1;
-                let o = WEDGE_MASTER_OBLIQUE_ODD
-                    [clip3(0, n as i32 - 1, j as i32 - shift) as usize];
+                let o = WEDGE_MASTER_OBLIQUE_ODD[clip3(0, n as i32 - 1, j as i32 - shift) as usize];
                 m[WEDGE_OBLIQUE63][(i + 1) * n + j] = o;
                 m[WEDGE_VERTICAL][i * n + j] = WEDGE_MASTER_VERTICAL[j];
                 m[WEDGE_VERTICAL][(i + 1) * n + j] = WEDGE_MASTER_VERTICAL[j];
@@ -276,7 +275,10 @@ pub(super) fn mask_blend(
                     2,
                 )
             };
-            let v = round2(m * p0[y * w + x] + (64 - m) * p1[y * w + x], 6 + INTER_POST_ROUND);
+            let v = round2(
+                m * p0[y * w + x] + (64 - m) * p1[y * w + x],
+                6 + INTER_POST_ROUND,
+            );
             out[y * w + x] = v.clamp(0, 255) as u8;
         }
     }

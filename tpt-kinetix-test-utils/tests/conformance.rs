@@ -293,8 +293,7 @@ fn av1_inter_sequence_vs_dav1d_when_available() {
 
     let mut exact_count = 0usize;
     let mut compared_count = 0usize;
-    for (i, (kinetix_frame, ref_frame)) in
-        kinetix_frames.iter().zip(ref_frames.iter()).enumerate()
+    for (i, (kinetix_frame, ref_frame)) in kinetix_frames.iter().zip(ref_frames.iter()).enumerate()
     {
         compared_count += 1;
         let exact = within_tolerance(kinetix_frame, ref_frame, 0);
