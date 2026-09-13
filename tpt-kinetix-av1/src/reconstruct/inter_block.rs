@@ -746,6 +746,11 @@ impl<'a> TileDecodeState<'a> {
         let force_integer_mv = self.force_integer_mv;
         let mut new_mf = 0u8;
         let mut single_mode = NEARESTMV;
+        // §7.14.4 loop-filter mode type for this block: 1 for non-GLOBAL
+        // inter modes (NEARESTMV/NEARMV/NEWMV and compound combinations other
+        // than GLOBAL_GLOBALMV), 0 for GLOBALMV/GLOBAL_GLOBALMV. Consumed by
+        // the deblock level derivation.
+        let lf_mode_type: u8;
         // dav1d `BlockContext::comp_type` for this block (0 for single-ref).
         let mut block_comp_type = 0u8;
         // Masked-compound parameters (§5.11.26): only meaningful when
@@ -853,6 +858,8 @@ impl<'a> TileDecodeState<'a> {
                 );
             }
             single_mode = mode;
+            // GLOBALMV/ZEROMV are the only single-ref modes with modeType 0.
+            lf_mode_type = u8::from(mode != crate::inter::GLOBALMV && mode != ZEROMV);
             mvs[0] = match mode {
                 ZEROMV => Mv::default(),
                 NEWMV => {
@@ -894,6 +901,9 @@ impl<'a> TileDecodeState<'a> {
                 [NEWMV, NEWMV],
             ];
             let im = IM[comp_mode.min(7)];
+            // comp_mode 6 = GLOBAL_GLOBALMV — the only compound mode with
+            // §7.14.4 modeType 0.
+            lf_mode_type = u8::from(comp_mode != 6);
 
             let mut drl_idx = 0usize;
             if comp_mode == 7 {
@@ -1317,6 +1327,18 @@ impl<'a> TileDecodeState<'a> {
             );
         }
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
+        // §7.14.4 deblock-level inputs: this block's primary reference (spec
+        // delta index = name − 1; INTRA_FRAME=1 maps to 0) and mode type.
+        // The span is the block's tile-local luma rectangle, mirroring
+        // `record_delta_lf4`'s addressing.
+        self.meta.record_lf4(
+            px_x0 / 4,
+            px_y0 / 4,
+            (px_x0 + bw_px).div_ceil(4),
+            (px_y0 + bh_px).div_ceil(4),
+            ref_names[0] - 1,
+            lf_mode_type,
+        );
         if dbg_b0 {
             eprintln!("DBG b0 post-residual rng={}", self.dec.raw_state().0);
         }

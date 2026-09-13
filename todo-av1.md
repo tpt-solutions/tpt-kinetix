@@ -5965,3 +5965,34 @@
 > into one IVF frame* (aomenc hierarchical GOP) and payload 3 is a
 > show-existing header-only packet — both decoder and harness align by
 > *emitted shown-frame sequence*, not by payload index.
+
+> **2026-09-14 (cont'd) — per-block deblock levels (§7.14.4/§7.14.5) and the
+> remaining gap narrowed to LR SGRPROJ set-14.** Implemented the per-edge
+> filter-level inputs: `FrameMeta` now records each block's `RefFrames[row]
+> [col][0]` (spec delta index, 0=INTRA) and §7.14.4 `modeType` (1 for non-
+> GLOBAL inter modes, 0 for intra/GLOBALMV/GLOBAL_GLOBALMV) on the 4×4-luma
+> grid (`record_lf4`, wired in the intra, inter and compound cascades), and
+> `compute_level` applies `ref_deltas[ref] + mode_deltas[modeType]` for
+> inter edges vs `ref_deltas[INTRA]` alone for intra edges (§7.14.5 step 4),
+> including §7.14.2's re-derivation from the opposite block when the level
+> is 0. Chroma edges resolve the co-located luma cell (`lf_shift`). Effect
+> is small on this stream (deltas mostly 0/1) but it closes a real spec gap
+> for any stream with nonzero per-ref deltas.
+> **Remaining ~2.7-3.1k diff samples/frame localized to loop restoration's
+> SGRPROJ set-14** (r0=2/eps0=30/r1=0 — the r0-only 5×5 variant, never
+> exercised by the intra corpus where mandelbrot used set 10, the r1-only
+> case): the residual band above the y=64 SB boundary disappears entirely
+> under `KINETIX_AV1_NOLR`. The weight mapping is NOT the bug — dav1d's
+> per-variant dispatch is `sgr_5x5`→`w0`, `sgr_3x3`→`w1` (complement),
+> `mix`→`w0`/`w1`, exactly Kinetix's `(xqd[0]*t0 + w1*t1)>>11` (an
+> experiment applying the complement to the 5×5 output regressed 2690→2855
+> and was reverted). The divergence is therefore in the 5×5 pass's
+> stripe/edge handling: dav1d sources out-of-stripe taps from the
+> `lpf_line` pre-CDEF boundary buffer with 2-row availability + edge
+> replication, Kinetix's `compute_pass` reads a clamped whole-plane
+> snapshot with a 1-cell halo; and dav1d's `sgr_finish2` odd-row/even-row
+> finish pattern ((1<<8)>>9 for pair-rows, (1<<7)>>8 for the single row)
+> vs Kinetix's equivalent needs a line-by-line diff on a real set-14 unit.
+> Next session: dump the pre/post-LR planes for frame 1 on both sides
+> (patched dav1d + `KINETIX_AV1_DUMP_PREFILTER`-style hooks) and diff the
+> 5×5 pass row by row.

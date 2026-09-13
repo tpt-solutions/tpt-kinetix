@@ -471,6 +471,16 @@ impl<'a> TileDecodeState<'a> {
                     luma_tx_w as u8,
                     luma_tx_h as u8,
                 );
+                // Intra (and IBC) blocks: §7.14.4 ref = INTRA_FRAME,
+                // modeType = 0.
+                self.meta.record_lf4(
+                    px_x / 4,
+                    px_y / 4,
+                    (px_x + luma_tx_w).div_ceil(4),
+                    (px_y + luma_tx_h).div_ceil(4),
+                    0,
+                    0,
+                );
                 let blk = TxBlockCtx {
                     plane: 0,
                     tx_size: luma_tx,
@@ -1691,6 +1701,15 @@ impl<'a> TileDecodeState<'a> {
                 (px_y + leaf_tx_h).div_ceil(4),
                 leaf_tx_w as u8,
                 leaf_tx_h as u8,
+            );
+            // Intra blocks: §7.14.4 ref = INTRA_FRAME, modeType = 0.
+            self.meta.record_lf4(
+                px_x / 4,
+                px_y / 4,
+                (px_x + leaf_tx_w).div_ceil(4),
+                (px_y + leaf_tx_h).div_ceil(4),
+                0,
+                0,
             );
             // 8×8-luma-grid loop-filter metadata (see `record_luma`'s doc
             // comment) — per leaf, using the leaf's own span, since leaves

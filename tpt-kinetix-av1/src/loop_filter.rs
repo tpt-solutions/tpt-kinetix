@@ -170,6 +170,20 @@ pub struct FrameMeta {
     /// luma deblock pass, which runs on the finer `w4`/`h4` grid (see `w4`'s
     /// doc comment for why luma needs the finer grid).
     pub delta_lf4: Vec<[i8; 4]>,
+    /// Per-block `RefFrames[row][col][0]` (§7.14.4) at 4×4-luma-cell
+    /// resolution, in the *spec's* reference-delta index space (0 =
+    /// INTRA_FRAME, 1 = LAST_FRAME, … 7 = ALTREF_FRAME). Intra and IBC blocks
+    /// record 0; inter blocks record their primary reference. Consumed by
+    /// `compute_level` so each edge's level applies the right
+    /// `loop_filter_ref_deltas` entry — intra edges take
+    /// `ref_deltas[INTRA_FRAME]` alone, inter edges take
+    /// `ref_deltas[ref] + mode_deltas[modeType]` (§7.14.5 step 4).
+    pub lf_ref4: Vec<u8>,
+    /// Per-block `modeType` (§7.14.4): 1 for non-GLOBAL inter prediction
+    /// modes (NEARESTMV/NEARMV/NEWMV and their compound combinations except
+    /// GLOBAL_GLOBALMV), 0 for intra modes and GLOBALMV/GLOBAL_GLOBALMV.
+    /// See `lf_ref4`.
+    pub lf_mode4: Vec<u8>,
     /// Per-64×64-CDEF-unit `cdef_idx` (§5.11.56), keyed by the unit's
     /// top-left MI position `(mi_row, mi_col)`. Populated by the tile decoder
     /// (`read_cdef`) and consumed by the CDEF pass to select each unit's
@@ -228,6 +242,8 @@ impl FrameMeta {
             luma_edge_left4: vec![false; len4],
             luma_edge_top4: vec![false; len4],
             delta_lf4: vec![[0i8; 4]; len4],
+            lf_ref4: vec![0u8; len4],
+            lf_mode4: vec![0u8; len4],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
@@ -401,6 +417,24 @@ impl FrameMeta {
         }
     }
 
+    /// Record the block-level `ref` / `modeType` pair (§7.14.4) over the
+    /// cell span `[bx0,bx1) x [by0,by1)` (4×4-grid coordinates, half-open).
+    /// `r` is the spec's reference-delta index (0 = INTRA_FRAME, 1 =
+    /// LAST_FRAME, …); `m` is the mode type (1 for non-GLOBAL inter modes).
+    /// Idempotent per coded block — every transform leaf of one block writes
+    /// the same pair, mirroring the per-leaf `record_luma4` calls.
+    pub fn record_lf4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize, r: u8, m: u8) {
+        let by1c = by1.min(self.h4);
+        let bx1c = bx1.min(self.w4);
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = self.idx4(bx, by);
+                self.lf_ref4[i] = r;
+                self.lf_mode4[i] = m;
+            }
+        }
+    }
+
     /// Merge a tile-local `FrameMeta` (produced by one parallel tile decode)
     /// into this full-frame meta, offsetting by `(ox, oy)` 8×8-luma-block
     /// positions. AV1 tiles cover disjoint block rectangles, so the `max` /
@@ -445,6 +479,8 @@ impl FrameMeta {
                 self.luma_edge_left4[di] |= src.luma_edge_left4[i];
                 self.luma_edge_top4[di] |= src.luma_edge_top4[i];
                 self.delta_lf4[di] = src.delta_lf4[i];
+                self.lf_ref4[di] = src.lf_ref4[i];
+                self.lf_mode4[di] = src.lf_mode4[i];
             }
         }
     }
@@ -456,8 +492,18 @@ impl FrameMeta {
 
 /// Derive the per-edge loop-filter level (§7.14.5 adaptive filter strength
 /// selection). `plane` is 0 (luma), 1 (U), 2 (V); `pass` is 0 (vertical) or
-/// 1 (horizontal).
-fn compute_level(fh: &FrameHeader, plane: usize, pass: usize, delta_lf: i32) -> i32 {
+/// 1 (horizontal). `ref` is the *edge's* block reference in the spec's
+/// delta-index space (0 = INTRA_FRAME, 1 = LAST_FRAME, …) and `mode_type`
+/// its §7.14.4 mode type (1 for non-GLOBAL inter modes) — both come from the
+/// 4×4-luma block at the edge (see `deblock_plane`).
+fn compute_level(
+    fh: &FrameHeader,
+    plane: usize,
+    pass: usize,
+    delta_lf: i32,
+    ref_idx: usize,
+    mode_type: usize,
+) -> i32 {
     // i = (plane == 0) ? pass : (plane + 1)
     let i = if plane == 0 { pass } else { plane + 1 };
     let base = if i < FRAME_LF_COUNT {
@@ -480,21 +526,23 @@ fn compute_level(fh: &FrameHeader, plane: usize, pass: usize, delta_lf: i32) -> 
         // unconditionally, silently under-strengthening every edge at a
         // frame/segment loop-filter level of 32 or higher.
         let shift = if base >= 32 { 1 } else { 0 };
-        // §7.14.4: for `RefFrame[0] == INTRA_FRAME` (true for every block in
-        // a keyframe-only decoder), only the *ref* delta applies — the mode
-        // delta is added only for inter blocks (`ref_deltas[ref] +
-        // mode_deltas[mode]`, `ref != INTRA_FRAME`). A previous version of
-        // this function added `loop_filter_mode_deltas[0]` unconditionally,
-        // which is wrong for every intra block whenever the bitstream sets a
-        // nonzero mode delta (dav1d's `calc_lf_value`, r=0 case, uses
-        // `ref_delta[0]` alone with no mode-delta term at all) — this
-        // desynced the filter *level itself* (not just which edges get
-        // marked), independently of the deblock-edge-presence and
-        // 4-vs-8-granularity bugs fixed earlier this session, and was found
-        // by comparing dav1d's own `loop_filter()` E/I/H values against
-        // Kinetix's for the exact same edge (mandelbrot's `x=96,y=64`
-        // vertical edge: dav1d `I=19`, Kinetix `I=18` before this fix).
-        lvl += fh.loop_filter_deltas.loop_filter_ref_deltas[0] as i32 * (1 << shift);
+        // §7.14.5 step 4: intra edges (`ref == INTRA_FRAME`) take
+        // `ref_deltas[INTRA_FRAME]` alone; inter edges take
+        // `ref_deltas[ref] + mode_deltas[modeType]` — the mode delta
+        // applies *only* to inter blocks, and the ref delta is the *block's
+        // own* reference (LAST/GOLDEN/…), not the INTRA entry. A previous
+        // version used `ref_deltas[INTRA_FRAME]` for every edge regardless
+        // of the block, which is exact for intra-only keyframes but picked
+        // the wrong level for every inter-block edge the moment a stream
+        // set per-reference deltas.
+        let deltas = &fh.loop_filter_deltas;
+        let d = if ref_idx == 0 {
+            deltas.loop_filter_ref_deltas[0] as i32
+        } else {
+            deltas.loop_filter_ref_deltas[ref_idx.min(7)] as i32
+                + deltas.loop_filter_mode_deltas[mode_type.min(1)] as i32
+        };
+        lvl += d * (1 << shift);
     }
     lvl.clamp(0, MAX_LOOP_FILTER)
 }
@@ -733,6 +781,10 @@ fn deblock_plane(
     edge_left_grid: &[bool],
     edge_top_grid: &[bool],
     delta_lf_grid: &[[i8; 4]],
+    lf_ref_grid: &[u8],
+    lf_mode_grid: &[u8],
+    lf_grid_w: usize,
+    lf_shift: u32,
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
@@ -764,9 +816,38 @@ fn deblock_plane(
             // edge (the one the outer loop is currently positioned at) — the
             // spec addresses `DeltaLFs` by the current block's own MI
             // position, not a min/max of both sides the way `filterSize` is.
+            // The same (row, col) addresses the block's `RefFrames`/`modeType`
+            // (§7.14.4) — for chroma this resolves through the co-located
+            // luma 4×4 cell (`lf_shift` = 1), since `RefFrames` is a luma
+            // array.
             let dlf_i = if plane_index == 0 { 0 } else { plane_index + 1 };
             let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
-            let lvl = compute_level(fh, plane_index, 0, delta_lf);
+            let lfx = bx << lf_shift;
+            let lfy = by << lf_shift;
+            let li = lfy * lf_grid_w + lfx;
+            let mut lvl = compute_level(
+                fh,
+                plane_index,
+                0,
+                delta_lf,
+                lf_ref_grid[li] as usize,
+                lf_mode_grid[li] as usize,
+            );
+            if lvl == 0 && bx > 0 {
+                // §7.14.2: when the current block's level is zero, the whole
+                // strength derivation (deltas included) re-runs against the
+                // block on the other side of the edge.
+                let pi = lfy * lf_grid_w + ((bx - 1) << lf_shift);
+                let pdlf = delta_lf_grid[by * grid_w + (bx - 1)][dlf_i] as i32;
+                lvl = compute_level(
+                    fh,
+                    plane_index,
+                    0,
+                    pdlf,
+                    lf_ref_grid[pi] as usize,
+                    lf_mode_grid[pi] as usize,
+                );
+            }
             if lvl == 0 {
                 continue;
             }
@@ -814,7 +895,30 @@ fn deblock_plane(
             }
             let dlf_i = if plane_index == 0 { 1 } else { plane_index + 1 };
             let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
-            let lvl = compute_level(fh, plane_index, 1, delta_lf);
+            let lfx = bx << lf_shift;
+            let lfy = by << lf_shift;
+            let li = lfy * lf_grid_w + lfx;
+            let mut lvl = compute_level(
+                fh,
+                plane_index,
+                1,
+                delta_lf,
+                lf_ref_grid[li] as usize,
+                lf_mode_grid[li] as usize,
+            );
+            if lvl == 0 && by > 0 {
+                // §7.14.2: zero level re-derives from the block above.
+                let pi = ((by - 1) << lf_shift) * lf_grid_w + lfx;
+                let pdlf = delta_lf_grid[(by - 1) * grid_w + bx][dlf_i] as i32;
+                lvl = compute_level(
+                    fh,
+                    plane_index,
+                    1,
+                    pdlf,
+                    lf_ref_grid[pi] as usize,
+                    lf_mode_grid[pi] as usize,
+                );
+            }
             if lvl == 0 {
                 continue;
             }
@@ -1321,9 +1425,9 @@ fn sgrproj_filter_plane(
         compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
     }
 
-    // §7.17.4's projection weights: `w0` is `xqd[0]` used directly, but `w1`
-    // is *not* `xqd[1]` directly — it's `(1 << SGRPROJ_PRJ_BITS) - xqd[0] -
-    // xqd[1]`, cross-checked against dav1d's `lr_apply_tmpl.c`
+    // §7.17.4's projection weights: `w1` is *not* `xqd[1]` directly — it's
+    // `(1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1]`, cross-checked against dav1d's
+    // `lr_apply_tmpl.c`
     // (`params.sgr.w0 = weights[0]; params.sgr.w1 = 128 - (weights[0] +
     // weights[1]);`, applied unconditionally for every SgrProj unit
     // regardless of which pass(es) are active). A previous version of this
@@ -1515,6 +1619,10 @@ pub fn apply_post_filters(
             &meta.luma_edge_left4,
             &meta.luma_edge_top4,
             &meta.delta_lf4,
+            &meta.lf_ref4,
+            &meta.lf_mode4,
+            meta.w4,
+            0,
             meta.w4,
             meta.h4,
             fh,
@@ -1536,6 +1644,10 @@ pub fn apply_post_filters(
             &meta.chroma_edge_left,
             &meta.chroma_edge_top,
             &meta.delta_lf,
+            &meta.lf_ref4,
+            &meta.lf_mode4,
+            meta.w4,
+            1,
             meta.w8,
             meta.h8,
             fh,
@@ -1555,6 +1667,10 @@ pub fn apply_post_filters(
             &meta.chroma_edge_left,
             &meta.chroma_edge_top,
             &meta.delta_lf,
+            &meta.lf_ref4,
+            &meta.lf_mode4,
+            meta.w4,
+            1,
             meta.w8,
             meta.h8,
             fh,
