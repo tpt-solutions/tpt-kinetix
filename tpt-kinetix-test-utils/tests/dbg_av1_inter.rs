@@ -53,6 +53,15 @@ fn dbg_av1_inter_diffmap() {
                 continue;
             }
         };
+        if let Ok(path) = std::env::var("KINETIX_AV1_SAVE_OUT") {
+            use std::io::Write;
+            let mut out = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("open save-out");
+            out.write_all(&frame.data).expect("write save-out");
+        }
         if std::env::var("KINETIX_DBG_REF").is_ok() && i == target && !prev_kin.is_empty() {
             let (mut d_own, mut d_dav) = (0i64, 0i64);
             for y in 64..96 {

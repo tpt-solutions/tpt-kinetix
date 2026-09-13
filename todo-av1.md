@@ -5996,3 +5996,34 @@
 > Next session: dump the pre/post-LR planes for frame 1 on both sides
 > (patched dav1d + `KINETIX_AV1_DUMP_PREFILTER`-style hooks) and diff the
 > 5×5 pass row by row.
+
+> **2026-09-14 (cont'd 2) — remaining gap narrowed to specific subpel-MV
+> blocks in the hidden first inter frame; filters fully exonerated.**
+> Stage-isolation matrix: the local dav1d build gained env gates
+> (`DAV1D_NODEBLOCK`/`DAV1D_NOCDEF`/`DAV1D_NOLR2`, mirroring Kinetix's) and
+> Kinetix gained `KINETIX_AV1_DUMP_FRAMES` (per-frame raw dumps incl. hidden
+> frames) + `KINETIX_AV1_SAVE_OUT` (harness-side output dump). Comparing
+> every stage configuration: the frame-level diff is **identical with all
+> three filters disabled on both sides** — deblock/CDEF/LR contribute
+> nothing to the remaining gap. Per-frame dumps (both decoders now dump
+> *every* decoded frame, hidden included) show the divergence **starts in
+> p1a, the hidden first inter frame** (2842 luma diff samples, max |d|=228,
+> confined to y=64..95); every later frame's error is inherited through
+> reference-frame prediction and grows (p7 reaches 115k).
+> p1a's divergent blocks are exactly those with non-trivial fractional MVs:
+> (24,16) 32x32 skip mv=(0,31) [pred-vs-dav1d=28752], (12,20) 16x16
+> mv=(12,0), (16,20) 16x16 mv=(10,0), (2,18)/(4,18) mv=(66,0), (0,20)
+> mv=(64,0), (28,17) mv=(0,10); every zero-MV block is pixel-exact, and the
+> prediction-vs-reference diff of the whole frame concentrates in these.
+> The transform/dequant side is exonerated: the two TX_64X32 leaves'
+> dequantized rows and full residual row-sums match dav1d's
+> (`DAV1D_DBG_ITX` dump vs `KINETIX_AV1_DBG_ITX`) **row for row**. p1a's
+> header has allow_high_precision_mv=true, so odd MV components are legal —
+> the MV *values themselves* are now the prime suspect: next session should
+> dump dav1d's `mvstack`/decoded `b->mv` for these blocks (by=16..24, bx=2
+> ..28) against Kinetix's `mvstack`/`read_mv` diffs — e.g. our (0,31) vs
+> dav1d's implied prediction behaves like a slightly different fractional
+> component. Tooling note: dav1d's C-code debug prints require
+> `--cpumask 0` (SIMD silently bypasses patched C functions); dav1d
+> heredoc-patched strings keep breaking — write patch scripts with
+> `chr(92)+'n'` for `\n` inside C string literals.

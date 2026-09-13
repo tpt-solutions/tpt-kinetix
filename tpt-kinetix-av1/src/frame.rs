@@ -927,7 +927,12 @@ impl FrameHeader {
         byte_align(&mut br)?;
 
         if std::env::var("KINETIX_AV1_DBG_FH_JSON").is_ok() {
-            eprintln!("KIN FH bits={}", br.bits_read());
+            eprintln!(
+                "KIN FH bits={} hp={} intmv={}",
+                br.bits_read(),
+                allow_high_precision_mv,
+                force_integer_mv,
+            );
             dbg_dump_frame_header(
                 frame_type,
                 show_frame,

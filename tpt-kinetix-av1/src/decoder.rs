@@ -456,6 +456,11 @@ impl Av1Decoder {
         let order_hint = fh.order_hint as u8;
         self.ref_frames
             .refresh(refresh, &frame, motion_field.as_ref());
+        if std::env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
+            let nm = format!("kfr_{:02}.yuv", self.frame_count);
+            let _ = std::fs::write(&nm, &frame.data);
+            eprintln!("dumped {nm} ({} bytes)", frame.data.len());
+        }
         for i in 0..8 {
             if refresh & (1u8 << i) != 0 {
                 self.ref_order_hints[i] = order_hint;

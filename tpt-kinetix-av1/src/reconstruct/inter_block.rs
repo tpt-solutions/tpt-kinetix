@@ -1295,7 +1295,7 @@ impl<'a> TileDecodeState<'a> {
                 || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
             {
                 eprintln!(
-                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} mv=({},{}) px=({px_x0},{px_y0})",
+                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} mv=({},{}) px=({px_x0},{px_y0})",
                     mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y.min(96) {
@@ -2082,6 +2082,22 @@ impl<'a> TileDecodeState<'a> {
                         self.lossless,
                         &mut residual,
                     );
+                    if std::env::var("KINETIX_AV1_DBG_ITX").is_ok()
+                        && (leaf_tx == 12 || leaf_tx == 4)
+                    {
+                        eprintln!(
+                            "KIN ITX64x32 eob={} txtp={} dequant_row0: {:?}",
+                            coeffs.eob,
+                            coeffs.tx_type,
+                            &dequant[..32.min(dequant.len())]
+                        );
+                        let stride = 64;
+                        let rows = if leaf_tx == 4 { 64 } else { 32 };
+                        let rowsums: Vec<i32> = (0..rows)
+                            .map(|y| residual[y * stride..(y + 1) * stride].iter().sum())
+                            .collect();
+                        eprintln!("KIN RESID rowsums: {rowsums:?}");
+                    }
                 }
             }
             for dy in 0..leaf_tx_h {
