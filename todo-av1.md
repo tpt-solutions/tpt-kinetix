@@ -6027,3 +6027,27 @@
 > `--cpumask 0` (SIMD silently bypasses patched C functions); dav1d
 > heredoc-patched strings keep breaking — write patch scripts with
 > `chr(92)+'n'` for `\n` inside C string literals.
+
+> **2026-09-14 (cont'd 3) — desync localized to a conditional symbol inside
+> p1a's SB(64,64); methodology + tooling for the final symbol diff in place.**
+> dav1d's `DEBUG_BLOCK_INFO` (recon.h) is now getenv-gated
+> (`DAV1D_DBG_BLOCKS`) and the local build prints `Post-skip/Post-cdef_idx/
+> Post-delta_q/Post-ymode/Post-intermode/Post-mv/...` with rng for every
+> block — 282 symbol prints for this stream. dav1d's MV dump
+> (`DAV1D_DBG_MV`, with n_mvs) shows the first divergence: at p1a's SB
+> (64,64), dav1d decodes fine-grained blocks — (by=16,bx=24) 16x8 skip
+> NEARESTMV mv=0 with n_mvs>=1 — while **Kinetix decodes a 32x32 NEWMV
+> block at mi=(24,16) with an EMPTY mvstack (n_mvs=0, s0 fallback (0,0)),
+> final mv=(0,31)**; Kinetix's remaining SB(64,64) blocks then diverge
+> structurally from dav1d's 8x8/16x8 layout. Two concrete hypotheses for
+> the next session: (1) our `find_mv_stack` spatial/temporal candidate scan
+> returns an empty stack where dav1d finds candidates (check the above-
+> neighbour scan at mi_row=16 reading the bottom edge of the 64x64 skip
+> block above, and the temporal projection gating), and/or (2) with
+> n_mvs==0 the spec *skips* the new_mv symbol and forces NEWMV
+> (`if NumMvs == 0, Y is NEWMV` + mv from read_mv_residual on a zero base)
+> — dav1d's cascade with n_mvs>0 reads new_mv, ours also read it with
+> n_mvs=0, i.e. our empty-stack handling may read a symbol dav1d doesn't.
+> Everything else is verified exact this session: MC interpolation
+> (Python oracle), TX_64X32 dequant+transform (row-for-row vs dav1d),
+> filters (stage matrix), CDF contexts, and headers.
