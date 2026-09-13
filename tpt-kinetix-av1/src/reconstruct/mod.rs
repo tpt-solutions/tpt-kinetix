@@ -1629,6 +1629,25 @@ pub fn reconstruct_av1_frame(
             tile_payloads.push(payload.clone());
         }
     }
+    if std::env::var("KINETIX_AV1_DBG_TILES").is_ok() {
+        eprintln!(
+            "DBG TILES frame tile_cols={} tile_rows={} payloads={}",
+            frame_header.tile_cols, frame_header.tile_rows, tile_payloads.len()
+        );
+        let tc = frame_header.tile_cols.max(1) as usize;
+        let tr = frame_header.tile_rows.max(1) as usize;
+        for (i, p) in tile_payloads.iter().enumerate() {
+            // Peek at the first few bytes of each tile payload
+            let preview: Vec<String> = p.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            eprintln!("  tile[{i}] bytes={} first8=[{}] tile_x={} tile_y={}",
+                p.len(), preview.join(" "), i % tc, i / tc.max(1));
+            // Try to parse the tile group header bits
+            if !p.is_empty() && (tc > 1 || tr > 1) {
+                let flag = (p[0] >> 7) & 1;
+                eprintln!("    tile_start_and_end_present_flag={flag}");
+            }
+        }
+    }
 
     if tile_payloads.is_empty() {
         let mut data = y_plane;

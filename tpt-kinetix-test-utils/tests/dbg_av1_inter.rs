@@ -22,6 +22,10 @@ fn dbg_av1_inter_diffmap() {
         eprintln!("skipping: no ffmpeg");
         return;
     };
+    if let Ok(path) = std::env::var("KINETIX_AV1_SAVE_IVF") {
+        std::fs::write(&path, &ivf).expect("write ivf");
+        eprintln!("saved IVF to {path}");
+    }
     let ref_frames = decode_av1_with_dav1d(&ivf, W as u32, H as u32).expect("dav1d");
     let payloads = split_ivf_frames(&ivf);
     let target: usize = std::env::var("KINETIX_AV1_DBG_INTER_FRAME")
@@ -32,6 +36,9 @@ fn dbg_av1_inter_diffmap() {
     let mut dec = Av1Decoder::new();
     let mut prev_kin: Vec<u8> = Vec::new();
     for (i, (payload, rf)) in payloads.iter().zip(ref_frames.iter()).enumerate() {
+        if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+            eprintln!("--- decoding frame {i} ---");
+        }
         let packet = Packet {
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,

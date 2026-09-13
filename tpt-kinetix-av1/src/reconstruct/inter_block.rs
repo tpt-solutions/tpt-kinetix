@@ -1092,9 +1092,11 @@ impl<'a> TileDecodeState<'a> {
                     );
                     if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                         eprintln!(
-                            "DBG warp derive samples={} model_valid={}",
+                            "DBG warp derive mi=({mi_col},{mi_row}) bw4={bw4} bh4={bh4} mv={:?} samples={} model_valid={} model={:?}",
+                            mvs[0],
                             raw_samples.len(),
-                            warp_model.is_some()
+                            warp_model.is_some(),
+                            warp_model
                         );
                     }
                 }
@@ -1274,6 +1276,22 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        // Debug: dump pre-residual prediction for error-region blocks.
+        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
+            let px_end_y = px_y0 + bh_px;
+            let px_end_x = px_x0 + bw_px;
+            if px_end_y > 56 && px_y0 < 96 && px_end_x > 32 && px_x0 < 128 {
+                eprintln!(
+                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} mv=({},{}) px=({px_x0},{px_y0})",
+                    mvs[0].col, mvs[0].row
+                );
+                for row in px_y0..px_end_y.min(96) {
+                    if row < 56 { continue; }
+                    let vals: Vec<u8> = (px_x0..px_end_x.min(128)).map(|c| self.y_plane[row * self.y_stride + c]).collect();
+                    eprintln!("  y={row}: {vals:?}");
+                }
+            }
+        }
         // Residual. `read_block_tx_size` (§5.11.16) takes its inter/IBC branch
         // here (`IsInter == 1`): a recursive var-tx-tree of `txfm_split`
         // symbols (`read_block_tx_size_ibc`/`read_tx_tree`), NOT the
@@ -1650,10 +1668,21 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok()
+            && plane == 0
+            && mi_row >= 16;
+        if dbg_obmc {
+            eprintln!("OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}", jobs.len());
+            for j in &jobs {
+                eprintln!("  job pass={} px={} py={} w={} h={} nb_ref={} mv=({},{})",
+                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.mv.col, j.mv.row);
+            }
+        }
         for job in jobs {
             let ObmcJob { pass, px, py, pred_w, pred_h, mv, filter, nb_ref } = job;
             let slot = self.ref_to_slot[nb_ref as usize] as usize;
             let Some(rf) = self.ref_slots.slots[slot] else {
+                if dbg_obmc { eprintln!("  SKIP job: no ref slot for nb_ref={nb_ref}"); }
                 continue;
             };
             let (rp, rw, rh) = rf.plane(plane);
@@ -1667,6 +1696,7 @@ impl<'a> TileDecodeState<'a> {
                 2 => &mut self.v_plane,
                 _ => &mut self.y_plane,
             };
+            let mut any_diff = false;
             for i in 0..pred_h {
                 let sy = py + i;
                 if sy >= ph {
@@ -1680,8 +1710,14 @@ impl<'a> TileDecodeState<'a> {
                     let m = if pass == 0 { mask[i] } else { mask[j] };
                     let cur = dst[sy * pstride + sx] as i32;
                     let o = obmc[i * pred_w + j] as i32;
-                    dst[sy * pstride + sx] = (((m * cur + (64 - m) * o) + 32) >> 6).clamp(0, 255) as u8;
+                    if dbg_obmc && cur != o { any_diff = true; }
+                    // §7.11.3.9: mask weights the *neighbour's* prediction; (64-m) weights current.
+                    dst[sy * pstride + sx] = (((m * o + (64 - m) * cur) + 32) >> 6).clamp(0, 255) as u8;
                 }
+            }
+            if dbg_obmc {
+                eprintln!("  blend done: any_diff={any_diff} obmc[0]={} dst_sample={}",
+                    obmc[0], dst[py * pstride + px]);
             }
         }
     }
@@ -1973,21 +2009,8 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.raw_state().0
                     );
                 }
-                // Coeffs are always *read* (entropy sync). The inverse
-                // transform is applied only for `Tx_Size_Sqr_Up <= 16x16` —
-                // the larger inter transforms are not yet conformance-checked
-                // and produce a worse residual than none (regresses
-                // `av1_inter_sequence` frame 2). TODO: verify the 32x32/64x64
-                // inter inverse-transform + tx_type path, then widen.
-                // Coeffs are always *read* (entropy sync — verified rng-exact
-                // vs dav1d incl. the large `TX_64X32` leaf, and the DC-only
-                // inverse transform is flat at every rect size). Applying the
-                // 32/64-family residual still regresses `av1_inter_sequence`
-                // frame 2 (4.7k→10k) — most likely the *cascade*: it is being
-                // added onto an inter *prediction* that is itself still
-                // approximate (compound blend, no OBMC/warp), so "correct
-                // residual + wrong base" is worse than "small base alone".
-                // Widen once inter prediction is bit-exact.
+                // Coeffs are always *read* (entropy sync). TODO: widen to all
+                // tx sizes once warp/OBMC prediction is bit-exact.
                 if coeffs.eob > 0 && av1::TX_SIZE_SQR_UP[leaf_tx] <= TX_16X16 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
