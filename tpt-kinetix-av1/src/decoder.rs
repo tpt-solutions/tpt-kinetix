@@ -433,7 +433,17 @@ impl Av1Decoder {
         // (7) starts from the default tables.
         let initial_cdfs = if fh.primary_ref_frame != 7 {
             let slot = fh.ref_frame_idx[usize::from(fh.primary_ref_frame)] as usize;
-            self.ref_cdf_contexts[slot].clone()
+            let ctx = self.ref_cdf_contexts[slot].clone();
+            if std::env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
+                eprintln!(
+                    "KIN CDFLOAD oh={} pri={} restore_slot={} have={}",
+                    fh.order_hint,
+                    fh.primary_ref_frame,
+                    slot,
+                    ctx.is_some()
+                );
+            }
+            ctx
         } else {
             None
         };
@@ -451,6 +461,14 @@ impl Av1Decoder {
         let refresh = fh.refresh_frame_flags;
         // After a `refresh_context` frame, its adapted CDFs are saved into
         // every slot selected by `refresh_frame_flags` (§ context update).
+        if std::env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
+            eprintln!(
+                "KIN CDFSAVE refresh={:#04x} disable_end={} adapted={}",
+                refresh,
+                fh.disable_frame_end_update_cdf,
+                adapted_cdfs.is_some()
+            );
+        }
         if !fh.disable_frame_end_update_cdf {
             if let Some(ctx) = adapted_cdfs {
                 let arc = std::sync::Arc::new(ctx);

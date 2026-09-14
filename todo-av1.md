@@ -6245,3 +6245,32 @@
 > E/F and inherit the drift, so this one fix should clear all three.
 > Probes kept: KINETIX_AV1_DBG_MVSCAN / _CDFROW / dav1d MVSCAN +
 > INTRACDF + PARTCTX (by=bx=bl ctx abyte lbyte) + CDFLOAD/CDFSAVE.
+
+> **2026-09-15 (cont'd 2) — FIXED: all 8 frames now block-exact.** The
+> E/G/H root cause was two-part, both in the §6.8.2 context save/restore:
+> 1. **Adaptation counters must be zeroed at save.** dav1d's
+>    dav1d_cdf_thread_update keeps the adapted values but writes 0 into
+>    every CDF count element (its update_cdf_* macros); we saved the
+>    counts, making every restored frame adapt at a stale rate. Fix:
+>    ModeCdfs/TileCdfs/InterCdfs gained reset_adaptation_counts() walks
+>    (each CDF array's final element = count).
+> 2. **InterCdfs was never saved/restored at all.** The is_inter /
+>    compound / MV-component CDFs live in a separate `InterCdfs` struct
+>    that TileDecodeState re-initialised to defaults every tile
+>    (`InterCdfs::new()`), while dav1d carries the adapted values
+>    frame-to-frame. Frames with primary_ref != NONE (D..H) restored
+>    defaults and diverged at their first is_inter read; frames with
+>    primary_ref == NONE (p1a/p1b) matched because they start from
+>    defaults anyway. Fix: FrameCdfContext now carries `inter_cdfs`
+>    (cloned into the tile state on restore, counter-reset at save).
+> Corrected understanding of dav1d_cdf_thread_update: it does NOT blend
+> with defaults — it memcpy's the adapted tile CDFs and zeroes counters
+> (CDF1(x) macros store 32768-x complements; the m.intra counter lives
+> in the row's second element). Verified with a CDFUPDATE probe.
+> RESULT: p1a..H ALL EIGHT frames block-exact (position+size+entry-rng
+> match every block; counts 46/39/4/4/4/4/4/39). PSNR: f1 51.25, f2
+> 44.86, f3 41.22, f4 42.84, f5 42.79, f6 40.83, f7 35.24 dB; total
+> luma diff samples 4662 (was ~14k at session start, 33k before that).
+> NEXT: the remaining per-pixel diffs (exact=false) are in prediction/
+> filtering details — run the diffmap per frame for the next lead
+> (LR SGRPROJ set-14 stripe handling remains a known gap).

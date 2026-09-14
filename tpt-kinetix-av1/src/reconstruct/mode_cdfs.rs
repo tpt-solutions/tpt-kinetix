@@ -916,3 +916,173 @@ impl ModeCdfs {
         )
     }
 }
+
+// §6.8.2 context update: keep the adapted values, zero the adaptation
+// counters (every CDF array stores its count in the final element).
+// Mirrors dav1d_cdf_thread_update's counter-zeroing pass; regenerate the
+// field walks if the struct fields change.
+impl ModeCdfs {
+    /// §6.8.2 context update: keep the adapted values, zero the adaptation
+    /// counters (every CDF array stores its count in the final element).
+    pub(crate) fn reset_adaptation_counts(&mut self) {
+        for a in &mut self.partition_w8 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.partition_w16 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.partition_w32 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.partition_w64 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.partition_w128 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.intra_y_mode {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.y_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.uv_mode_not_allowed {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.uv_mode_allowed {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.tx_8x8 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.tx_16x16 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.tx_32x32 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.tx_64x64 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.txfm_split {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.skip {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.skip_mode {
+            a[a.len() - 1] = 0;
+        }
+        self.intrabc[self.intrabc.len() - 1] = 0;
+        for a in &mut self.segment_id {
+            a[a.len() - 1] = 0;
+        }
+        self.delta_q[self.delta_q.len() - 1] = 0;
+        self.delta_lf[self.delta_lf.len() - 1] = 0;
+        for a in &mut self.delta_lf_multi {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.angle_delta {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.interp_filter {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.motion_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.use_obmc {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.interintra {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.interintra_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.interintra_wedge {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.wedge_idx {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mask_comp {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.jnt_comp {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.wedge_comp {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.filter_intra {
+            a[a.len() - 1] = 0;
+        }
+        self.filter_intra_mode[self.filter_intra_mode.len() - 1] = 0;
+        self.use_wiener[self.use_wiener.len() - 1] = 0;
+        self.use_sgrproj[self.use_sgrproj.len() - 1] = 0;
+        self.restoration_type[self.restoration_type.len() - 1] = 0;
+        self.cfl_sign[self.cfl_sign.len() - 1] = 0;
+        for a in &mut self.cfl_alpha {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_mode {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.palette_uv_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_size {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_size {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_2 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_3 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_4 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_5 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_6 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_7 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_y_color_8 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_2 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_3 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_4 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_5 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_6 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_7 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.palette_uv_color_8 {
+            a[a.len() - 1] = 0;
+        }
+    }
+}

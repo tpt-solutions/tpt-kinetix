@@ -463,9 +463,10 @@ impl<'a> TileDecodeState<'a> {
         };
         if std::env::var("KINETIX_AV1_DBG_CDFROW").is_ok() {
             eprintln!(
-                "KIN INTRACDF ctx={inter_ctx} row={:?} rng={} mi=({mi_col},{mi_row})",
+                "KIN INTRACDF ctx={inter_ctx} row={:?} rng={} mi=({mi_col},{mi_row}) oh={}",
                 &self.map_inter_cdfs.is_inter[inter_ctx][..],
-                self.dec.raw_state().0
+                self.dec.raw_state().0,
+                self.cur_order_hint
             );
         }
         let is_inter = self

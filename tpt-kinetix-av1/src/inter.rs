@@ -733,6 +733,87 @@ pub fn decode_ref_and_mv(
     Ok((ref_name, mv))
 }
 
+// §6.8.2 context update counter reset (see `FrameCdfContext::from_parts`).
+impl InterCdfs {
+    /// §6.8.2 context update: keep the adapted values, zero the adaptation
+    /// counters (every CDF array stores its count in the final element).
+    pub(crate) fn reset_adaptation_counts(&mut self) {
+        for a in &mut self.is_inter {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.comp_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.comp_ref_type {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.uni_comp_ref {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.comp_ref {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.comp_bwd_ref {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.single_ref {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.new_mv {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.zero_mv {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.ref_mv {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.drl_mode {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.comp_inter_mode {
+            a[a.len() - 1] = 0;
+        }
+        self.mv_joint[self.mv_joint.len() - 1] = 0;
+        for a in &mut self.mv_sign {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class0_bit {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class0_fr {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.mv_class0_hp {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_bit {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.mv_fr {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_hp {
+            a[a.len() - 1] = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

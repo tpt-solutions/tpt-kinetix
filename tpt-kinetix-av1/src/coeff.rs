@@ -1041,6 +1041,99 @@ fn coeff_br_ctx(tx_size: usize, plane_tx_type: usize, quant: &[i32], pos: usize)
     }
 }
 
+impl TileCdfs {
+    /// §6.8.2 context update: keep the adapted values, zero the adaptation
+    /// counters (every CDF array stores its count in the final element).
+    pub(crate) fn reset_adaptation_counts(&mut self) {
+        for a in &mut self.txb_skip {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_16 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_32 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_64 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_128 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_256 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.eob_pt_512 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.eob_pt_1024 {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.eob_extra {
+            for b in a.iter_mut() {
+                for c in b.iter_mut() {
+                    c[c.len() - 1] = 0;
+                }
+            }
+        }
+        for a in &mut self.coeff_base_eob {
+            for b in a.iter_mut() {
+                for c in b.iter_mut() {
+                    c[c.len() - 1] = 0;
+                }
+            }
+        }
+        for a in &mut self.coeff_base {
+            for b in a.iter_mut() {
+                for c in b.iter_mut() {
+                    c[c.len() - 1] = 0;
+                }
+            }
+        }
+        for a in &mut self.coeff_br {
+            for b in a.iter_mut() {
+                for c in b.iter_mut() {
+                    c[c.len() - 1] = 0;
+                }
+            }
+        }
+        for a in &mut self.dc_sign {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.intra_tx_type_set1 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.intra_tx_type_set2 {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.inter_tx_type_set1 {
+            a[a.len() - 1] = 0;
+        }
+        self.inter_tx_type_set2[self.inter_tx_type_set2.len() - 1] = 0;
+        for a in &mut self.inter_tx_type_set3 {
+            a[a.len() - 1] = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::coeff::{

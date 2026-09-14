@@ -570,16 +570,14 @@ fn build_rp_proj(
     let cur = cur_order_hint as i32;
     // refidx m (0=LAST .. 6=ALTREF) ↔ Kinetix name m+2.
     let ref_poc = |m: usize| -> i32 { dpb_order_hints[ref_to_slot[m + 2] as usize] as i32 };
-    let rp_ref = |m: usize| -> Option<&MotionField> {
-        temporal_motion_fields[ref_to_slot[m + 2] as usize]
-    };
+    let rp_ref =
+        |m: usize| -> Option<&MotionField> { temporal_motion_fields[ref_to_slot[m + 2] as usize] };
 
     // mfmv reference selection (dav1d `refmvs_init_frame`).
     let mut mfmv_refs: Vec<usize> = Vec::new();
     let mut total = 2usize;
-    let last_alt_ok = rp_ref(0).is_some_and(|s| {
-        s.dpb_order_hints[s.ref_to_slot[8] as usize] as i32 != ref_poc(3)
-    });
+    let last_alt_ok = rp_ref(0)
+        .is_some_and(|s| s.dpb_order_hints[s.ref_to_slot[8] as usize] as i32 != ref_poc(3));
     if rp_ref(0).is_some() && last_alt_ok {
         mfmv_refs.push(0);
         total = 3;
@@ -940,13 +938,29 @@ const BD_STRIDE: usize = 35;
 /// `primary_ref_frame` desyncs at its first symbol.
 #[derive(Clone)]
 pub struct FrameCdfContext {
+    /// Inter-symbol CDFs (`is_inter`, compound flags, MV components, ...).
+    pub(crate) inter_cdfs: InterCdfs,
     pub(crate) mode_cdfs: ModeCdfs,
     pub(crate) coeff_cdfs: TileCdfs,
 }
 
 impl FrameCdfContext {
-    pub(crate) fn from_parts(mode_cdfs: ModeCdfs, coeff_cdfs: TileCdfs) -> Self {
+    pub(crate) fn from_parts(
+        mut inter_cdfs: InterCdfs,
+        mut mode_cdfs: ModeCdfs,
+        mut coeff_cdfs: TileCdfs,
+    ) -> Self {
+        // §6.8.2 context update: the saved context keeps the adapted values
+        // but *resets every CDF adaptation counter* (dav1d
+        // `dav1d_cdf_thread_update`'s `update_cdf_*` macros zero the count
+        // element of each array). Keeping the counts would make every
+        // restoring frame adapt at a stale (slower) rate and desync the
+        // CDF state from the reference decoder.
+        inter_cdfs.reset_adaptation_counts();
+        mode_cdfs.reset_adaptation_counts();
+        coeff_cdfs.reset_adaptation_counts();
         Self {
+            inter_cdfs,
             mode_cdfs,
             coeff_cdfs,
         }
@@ -1121,7 +1135,12 @@ impl<'a> TileDecodeState<'a> {
             rp_proj,
             rp_stride,
             n_mfmvs,
-            map_inter_cdfs: InterCdfs::new(),
+            // The inter-mode CDFs are part of the saved §6.8.2 context —
+            // restoring them (not re-initialising) is what lets later frames
+            // match dav1d's carried-over adaptation.
+            map_inter_cdfs: initial_cdfs
+                .map(|c| c.inter_cdfs.clone())
+                .unwrap_or_default(),
             is_inter_above: vec![0u8; mi_cols],
             is_inter_left: vec![0u8; mi_rows],
             ref_above: vec![[NONE_FRAME; 2]; mi_cols],
@@ -1645,7 +1664,11 @@ pub fn decode_tile_group(
     // §6.8.2 context update: this tile's post-decode CDF state becomes the
     // frame's saved context. The spec selects the `contextUpdateTileId` tile;
     // that is tile 0 for the single-tile streams decoded so far.
-    let adapted = FrameCdfContext::from_parts(state.mode_cdfs.clone(), state.coeff_cdfs.clone());
+    let adapted = FrameCdfContext::from_parts(
+        state.map_inter_cdfs.clone(),
+        state.mode_cdfs.clone(),
+        state.coeff_cdfs.clone(),
+    );
     drop(state);
     meta.cdef_idx = cdef_idx;
     out.map(|()| adapted)
