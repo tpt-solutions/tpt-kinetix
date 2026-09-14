@@ -1182,6 +1182,19 @@ impl<'a> TileDecodeState<'a> {
         }
     }
 
+    /// Debug target block for `KINETIX_AV1_DBG_MVSCAN="by:bx"` MV-stack traces
+    /// (mirrors the patched-dav1d `MVSCAN` trace format).
+    fn mvscan_target() -> Option<(i32, i32)> {
+        static TARGET: std::sync::OnceLock<Option<(i32, i32)>> = std::sync::OnceLock::new();
+        *TARGET.get_or_init(|| {
+            let v = std::env::var("KINETIX_AV1_DBG_MVSCAN").ok()?;
+            let mut it = v.trim().split(':');
+            let by = it.next()?.trim().parse::<i32>().ok()?;
+            let bx = it.next()?.trim().parse::<i32>().ok()?;
+            Some((by, bx))
+        })
+    }
+
     /// AV1 §7.10.2 `find_mv_stack` for real inter blocks — a port of dav1d's
     /// `dav1d_refmvs_find` covering the spatial scans (primary −1, top-right,
     /// top-left, secondary −3/−5), weight sort, and the §7.10.2.14 context
@@ -1230,12 +1243,36 @@ impl<'a> TileDecodeState<'a> {
         let mut stack: Vec<([Mv; 2], i64)> = Vec::with_capacity(8);
         let mut have_newmv = 0i32;
 
+        // Debug: KINETIX_AV1_DBG_MVSCAN="by:bx" traces every candidate add for
+        // one block, mirroring the patched-dav1d MVSCAN trace format.
+        let mvscan_dbg = Self::mvscan_target() == Some((by4, bx4));
+        if mvscan_dbg {
+            eprintln!(
+                "MVSCAN find by={by4} bx={bx4} bsize={bsize} want=({},{})",
+                want_refs[0], want_refs[1]
+            );
+        }
+
         // dav1d `add_spatial_candidate`.
         let add = |stack: &mut Vec<([Mv; 2], i64)>,
                    have_newmv: &mut i32,
                    have_match: &mut i32,
+                   loc: (i32, i32),
                    cand: RefMvCell,
                    weight: i64| {
+            if mvscan_dbg {
+                eprintln!(
+                    "MVSCAN add_s r={} c={} mv=({},{}) ref=({},{}) mf={} w={}",
+                    loc.0,
+                    loc.1,
+                    cand.mv[0].row,
+                    cand.mv[0].col,
+                    cand.refs[0],
+                    cand.refs[1],
+                    cand.mf,
+                    weight
+                );
+            }
             if cand.refs[0] == crate::inter::NONE_FRAME || cand.refs[0] == crate::inter::INTRA_FRAME
             {
                 return;
@@ -1274,14 +1311,20 @@ impl<'a> TileDecodeState<'a> {
             }
         };
 
+        // `c0` is the column the scan starts at: `bx4` for the primary scan,
+        // `bx4 | 1` for the secondary (§7.10.2.2 `deltaCol = 1 - (MiCol & 1)`).
         let scan_row = |stack: &mut Vec<([Mv; 2], i64)>,
                         have_newmv: &mut i32,
                         have_match: &mut i32,
                         rr: i32,
                         max_n: i32,
-                        step: i32|
+                        step: i32,
+                        c0: i32|
          -> i32 {
-            let first = cell(rr, bx4);
+            if mvscan_dbg {
+                eprintln!("MVSCAN scan_row rr={rr} c0={c0} max_n={max_n} step={step}");
+            }
+            let first = cell(rr, c0);
             let cand_bw4 = (first.w4 as i32).max(1);
             let mut len = step.max(bw4.min(cand_bw4));
             if bw4 <= cand_bw4 {
@@ -1290,28 +1333,45 @@ impl<'a> TileDecodeState<'a> {
                 } else {
                     2.max((2 * max_n).min(first.h4 as i32))
                 };
-                add(stack, have_newmv, have_match, first, (len * weight) as i64);
+                add(
+                    stack,
+                    have_newmv,
+                    have_match,
+                    (rr, c0),
+                    first,
+                    (len * weight) as i64,
+                );
                 return weight >> 1;
             }
             let mut x = 0i32;
             loop {
-                let cb = cell(rr, bx4 + x);
-                add(stack, have_newmv, have_match, cb, (len * 2) as i64);
+                let cb = cell(rr, c0 + x);
+                add(
+                    stack,
+                    have_newmv,
+                    have_match,
+                    (rr, c0 + x),
+                    cb,
+                    (len * 2) as i64,
+                );
                 x += len;
                 if x >= w4 {
                     return 1;
                 }
-                len = step.max((cell(rr, bx4 + x).w4 as i32).max(1));
+                len = step.max((cell(rr, c0 + x).w4 as i32).max(1));
             }
         };
         let scan_col = |stack: &mut Vec<([Mv; 2], i64)>,
                         have_newmv: &mut i32,
                         have_match: &mut i32,
+                        r0: i32,
                         cc: i32,
                         max_n: i32,
                         step: i32|
          -> i32 {
-            let first = cell(by4, cc);
+            // `r0` is the row the scan starts at: `by4` for the primary scan,
+            // `by4 | 1` for the secondary (§7.10.2.3 `deltaRow = 1 - (MiRow & 1)`).
+            let first = cell(r0, cc);
             let cand_bh4 = (first.h4 as i32).max(1);
             let mut len = step.max(bh4.min(cand_bh4));
             if bh4 <= cand_bh4 {
@@ -1320,18 +1380,32 @@ impl<'a> TileDecodeState<'a> {
                 } else {
                     2.max((2 * max_n).min(first.w4 as i32))
                 };
-                add(stack, have_newmv, have_match, first, (len * weight) as i64);
+                add(
+                    stack,
+                    have_newmv,
+                    have_match,
+                    (r0, cc),
+                    first,
+                    (len * weight) as i64,
+                );
                 return weight >> 1;
             }
             let mut y = 0i32;
             loop {
-                let cb = cell(by4 + y, cc);
-                add(stack, have_newmv, have_match, cb, (len * 2) as i64);
+                let cb = cell(r0 + y, cc);
+                add(
+                    stack,
+                    have_newmv,
+                    have_match,
+                    (r0 + y, cc),
+                    cb,
+                    (len * 2) as i64,
+                );
                 y += len;
                 if y >= h4 {
                     return 1;
                 }
-                len = step.max((cell(by4 + y, cc).h4 as i32).max(1));
+                len = step.max((cell(r0 + y, cc).h4 as i32).max(1));
             }
         };
 
@@ -1349,6 +1423,7 @@ impl<'a> TileDecodeState<'a> {
                 by4 - 1,
                 max_rows,
                 if bw4 >= 16 { 4 } else { 1 },
+                bx4,
             );
         }
         if bx4 > col_start {
@@ -1357,6 +1432,7 @@ impl<'a> TileDecodeState<'a> {
                 &mut stack,
                 &mut have_newmv,
                 &mut have_col,
+                by4,
                 bx4 - 1,
                 max_cols,
                 if bh4 >= 16 { 4 } else { 1 },
@@ -1367,6 +1443,7 @@ impl<'a> TileDecodeState<'a> {
                 &mut stack,
                 &mut have_newmv,
                 &mut have_row,
+                (by4 - 1, bx4 + bw4),
                 cell(by4 - 1, bx4 + bw4),
                 4,
             );
@@ -1384,6 +1461,7 @@ impl<'a> TileDecodeState<'a> {
                 &mut stack,
                 &mut have_newmv,
                 &mut have_row,
+                (by4 - 1, bx4 - 1),
                 cell(by4 - 1, bx4 - 1),
                 4,
             );
@@ -1400,6 +1478,7 @@ impl<'a> TileDecodeState<'a> {
                     (by4 - 2 * n + 1) | 1,
                     1 + max_rows - n,
                     if bw4 >= 16 { 4 } else { 2 },
+                    bx4 | 1,
                 );
             }
             if n > n_cols_run && n <= max_cols {
@@ -1407,6 +1486,7 @@ impl<'a> TileDecodeState<'a> {
                     &mut stack,
                     &mut dummy,
                     &mut have_col,
+                    by4 | 1,
                     (bx4 - 2 * n + 1) | 1,
                     1 + max_cols - n,
                     if bh4 >= 16 { 4 } else { 2 },
@@ -1529,6 +1609,20 @@ impl<'a> TileDecodeState<'a> {
         stack.sort_by_key(|e| std::cmp::Reverse(e.1));
         tail.sort_by_key(|e| std::cmp::Reverse(e.1));
         stack.extend(tail);
+
+        if mvscan_dbg {
+            let entries: Vec<String> = stack
+                .iter()
+                .map(|e| format!("[{},{}]w={}", e.0[0].row, e.0[0].col, e.1))
+                .collect();
+            eprintln!(
+                "MVSCAN final cnt={} nearest_cnt={} nearest_match={}: {}",
+                stack.len(),
+                nearest_cnt,
+                close_matches,
+                entries.join(" ")
+            );
+        }
 
         // §7.10.2.14 context derivation.
         let (newmv_ctx, refmv_ctx) = match close_matches {

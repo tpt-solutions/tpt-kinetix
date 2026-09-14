@@ -6171,3 +6171,25 @@
 > bsize=3 — then fix whichever scan position we miss. All work committed
 > through cb9653d; trace files: /tmp/av1dbg/{full.txt, bl3.txt, stack.txt,
 > p1a_tr*.txt} (regenerable via the documented env hooks).
+
+> **2026-09-15 — FIXED: secondary spatial scans missed the §7.10.2.2/§7.10.2.3
+> odd-column/row alignment.** Root cause of the p1a mvstack diff at
+> px(48,80) [mi=(12,20)] 8x8: dav1d (and the spec) start the SECONDARY
+> row scans (deltaRow -3/-5) at column `bx4 | 1` — spec: "deltaCol =
+> 1 - (MiCol & 1)" — and the secondary col scans (deltaCol -3/-5) at row
+> `by4 | 1` ("deltaRow = 1 - (MiRow & 1)"). Our scan_row/scan_col always
+> started at bx4/by4 (even here), hitting different grid cells: at
+> (21,9) sits an 8x4 with mv (0,64) (the missing third candidate, added
+> via the scan_col loop path w=len*2=4) while we read (20,9). Method:
+> env-gated MVSCAN traces on BOTH sides (dav1d patched refmvs.c prints
+> every add_spatial_candidate/add_temporal_candidate + final sorted
+> stack for DAV1D_DBG_MVSCAN="by:bx"; Kinetix mirrors it with
+> KINETIX_AV1_DBG_MVSCAN in inter_mv_stack). After the fix the traces
+> match add-for-add: final cnt=3 [66,0]w=652 [0,0]w=12 [64,0]w=4,
+> nearest_cnt=1, nearest_match=1. The earlier "candidate comes from the
+> 8x8 at px(0,80)" hypothesis was a value coincidence — the real source
+> is the 8x4 at mi (21,9) two rows below, one column right of the
+> block. Result: every inter frame improved (f1 38.83->47.00 dB, f2
+> 32.4->40.65, diffs 1162/1431/1583/1793/1625/998/1612). MVSCAN debug
+> hooks kept in both trees (env-gated). Next: re-run the diffmap to find
+> the next divergent block (LR SGRPROJ set-14 stripe lead remains).
