@@ -404,6 +404,14 @@ impl Av1Decoder {
         if consumed >= payload.len() {
             return None;
         }
+        if std::env::var("KINETIX_AV1_DBG_TILEDATA").is_ok() {
+            let td = &payload[consumed..];
+            let hex: Vec<String> = td[..8.min(td.len())]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            eprintln!("KIN TILE bytes={} first8: {}", td.len(), hex.join(" "));
+        }
         let pairs = vec![(13u8, payload[consumed..].to_vec())];
         self.finish_frame_from_pairs(seq, fh, &pairs)
     }

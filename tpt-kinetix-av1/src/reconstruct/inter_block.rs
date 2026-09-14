@@ -2003,6 +2003,12 @@ impl<'a> TileDecodeState<'a> {
         // identical `mark_luma_edges`/`mark_luma_edges4`/`record_luma4`
         // calls for why this must run per transform sub-block, not just
         // once per coded block).
+        //
+        // Each leaf's decoded `TxType` is also collected: the chroma reads
+        // below derive their tx type (and therefore their eob CDF context —
+        // 1-D vs 2-D transform class) from the *co-located luma leaf*, so a
+        // wrong type here desyncs the chroma coefficient read.
+        let mut luma_leaf_types: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
         for &(leaf_mi_col, leaf_mi_row, leaf_tx) in leaves {
             let leaf_tx_w = av1::TX_WIDTH[leaf_tx];
             let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
@@ -2098,6 +2104,7 @@ impl<'a> TileDecodeState<'a> {
                             .collect();
                         eprintln!("KIN RESID rowsums: {rowsums:?}");
                     }
+                    luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
                 }
             }
             for dy in 0..leaf_tx_h {
@@ -2163,6 +2170,19 @@ impl<'a> TileDecodeState<'a> {
         let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
         let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
         let has_residual = !skip;
+        // §5.11.36/§7.12.3: an inter chroma transform block's tx type derives
+        // from the *co-located luma leaf's* decoded tx type (1-D/identity
+        // luma types make the chroma read use the 1-D eob CDF context).
+        let co_located_luma_type = |clpx_x: usize, clpx_y: usize| -> usize {
+            let lx = clpx_x << sub_x;
+            let ly = clpx_y << sub_y;
+            for &(lx0, ly0, w, _h, t) in &luma_leaf_types {
+                if lx >= lx0 && lx < lx0 + w && ly >= ly0 && ly < ly0 + _h {
+                    return t;
+                }
+            }
+            av1::DCT_DCT
+        };
         // Computed before the `&mut self.{u,v}_plane` reborrows in the loop
         // below — `qindex_for_plane` takes `&self`, which would conflict
         // with those live disjoint-field mutable borrows if called any later.
@@ -2256,17 +2276,13 @@ impl<'a> TileDecodeState<'a> {
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
                             is_inter: true,
-                            // TODO(inter Phase E): like IBC's chroma path
-                            // before its own fix, this needs the real
-                            // coincident luma leaf's decoded `TxType`
-                            // (`intra_block.rs`'s `luma_tx_types` lookup), not
-                            // a `DCT_DCT` placeholder. This path *is* reached
-                            // for real inter blocks now (confirmed via
-                            // KINETIX_AV1_DBG_B0 on a hierarchical-GOP
-                            // stream) — the placeholder only happens to be
-                            // right when the coincident luma leaf really is
-                            // DCT_DCT, which won't always hold.
-                            coincident_luma_tx_type: av1::DCT_DCT,
+                            // The real co-located luma leaf's decoded type —
+                            // `get_uv_inter_txtp` needs it to pick the chroma
+                            // transform family, and `read_eob`'s is_1d CDF
+                            // context depends on it (a DCT_DCT placeholder
+                            // here desynced the chroma read on every inter
+                            // block whose luma leaf used a 1-D/identity type).
+                            coincident_luma_tx_type: co_located_luma_type(cpx_x, cpx_y),
                         };
                         let coeffs = read_coeffs(
                             &mut self.dec,

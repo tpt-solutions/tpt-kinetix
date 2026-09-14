@@ -6051,3 +6051,31 @@
 > Everything else is verified exact this session: MC interpolation
 > (Python oracle), TX_64X32 dequant+transform (row-for-row vs dav1d),
 > filters (stage matrix), CDF contexts, and headers.
+
+> **2026-09-14 (cont'd 4) — the chroma `coincident_luma_tx_type` placeholder
+> is FIXED (real inter-chroma tx-type derivation), every inter frame
+> improved again (chroma +2-6 dB; frame 1 U 32.64→37.80), and the
+> remaining desync is narrowed to a symbol divergence at p1a's SB(64,64)
+> partition reads.** The inter chroma path now records each luma leaf's
+> decoded `TxType` (with its pixel span) during the luma residual loop and
+> derives each chroma transform block's tx type from the co-located luma
+> leaf (replacing the `DCT_DCT` placeholder flagged since the first inter
+> work) — `get_uv_inter_txtp` then picks the chroma family and `read_eob`'s
+> is_1d CDF context follows. Current `av1_inter_sequence`: all 8 frames
+> 2,164-3,141 luma diff samples (frame 1 U 37.80 dB). Per-frame dumps
+> (hidden frames included) confirm the divergence still starts in p1a and
+> propagates. The desync point: dav1d splits p1a's SB(64,64) into 8x8s and
+> 16x8s (NEARESTMV mv=0 etc.) while Kinetix decodes that SB's first
+> partition as NONE into a 32x32 INTRA + 32x32 NEWMV mv=(0,31) with an
+> empty mvstack — i.e. the entropy state diverged at or inside that SB's
+> partition symbols, after 12+ previously-verified-in-sync blocks (the two
+> 64x64 skips and the bottom-left 8x8/16x8 group match dav1d block-for-
+> block, MVs included: 66/66/64 all match). Since the CDF state, header
+> fields and tile bytes are verified identical, the next session should
+> diff the symbol stream across p1a's SB(16,16)=(64,64) 16x16 non-skip
+> block's coefficient read and the following partition symbol — the most
+> likely candidates are a per-coefficient context difference in that block
+> (e.g. the inter `is_inter`-dependent coefficient contexts) or a
+> conditional syntax element gated differently between the decoders
+> (dc_q/luv deltas are absent this frame). The `KIN ITX64x32` and
+> `KIN TILE` debug prints added this session remain env-gated.
