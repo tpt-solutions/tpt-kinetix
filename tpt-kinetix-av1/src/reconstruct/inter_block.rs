@@ -2194,11 +2194,26 @@ impl<'a> TileDecodeState<'a> {
         // with those live disjoint-field mutable borrows if called any later.
         let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
         let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
+        // §7.3.1 has_chroma (4:2:0): a block owns chroma only if its width
+        // exceeds one chroma column-pair (bw > 1 mi) or it sits at an odd
+        // mi_col, and likewise for height/mi_row. Blocks failing this (e.g.
+        // an 8x4 leaf at an even mi_row) have NO chroma — dav1d's
+        // read_coef_blocks skips the chroma coefficient loop entirely
+        // (`if (!has_chroma) continue;`), so reading our uv coefficients
+        // here consumed extra bits and desynced the tile.
+        let has_chroma = (bw > 1 || (mi_col & 1) == 1) && (bh > 1 || (mi_row & 1) == 1);
         for ty in (0..chroma_bh).step_by(ch) {
             for tx in (0..chroma_bw).step_by(cw) {
                 let cpx_x = base_cpx_x + tx;
                 let cpx_y = base_cpx_y + ty;
                 if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                    continue;
+                }
+                if !has_chroma {
+                    // No chroma of its own (§7.3.1): dav1d neither reads
+                    // coefficients nor updates the chroma deblock-edge
+                    // geometry for this block — the co-located chroma belongs
+                    // to the odd-parity neighbour block.
                     continue;
                 }
                 // Real per-transform-sub-block chroma deblock-edge geometry

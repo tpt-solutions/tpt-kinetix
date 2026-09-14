@@ -6126,3 +6126,31 @@
 > had 2 candidates. CAUTION: several of this session's intermediate
 > "mismatches" were trace-window artifacts (payload 1 packs 3 OBU_FRAMEs;
 > always filter traces by FH markers, not line ranges).
+
+> **2026-09-14 (cont'd 7) — the has_chroma fix improved every frame again
+> (frame 1 38.83 dB, all frames 1,807-2,425 samples), and the desync is now
+> pinpointed to `find_mv_stack` at one specific block.** The inter chroma
+> path now checks §7.3.1 has_chroma — for 4:2:0, blocks whose luma height
+> (or width) is ≤ 4px at an even mi_row/col have NO chroma (dav1d's
+> `has_chroma = (bw4 > ss_hor || bx&1) && (bh4 > ss_ver || by&1)`; its
+> read_coef_blocks skips the chroma coefficient loop for them). Kinetix
+> read a uv coefficient block for the has_chroma=false 8x4 leaf at
+> px(32,80), consuming extra bits — fixed with a has_chroma gate on the
+> chroma loop (also skipping chroma edge geometry for those blocks).
+> Every frame improved: frame 1 38.83 dB, frame 6 23.59 dB (18.9 before).
+> **The definitive symbol diff** (dav1d `full.txt` trace with FH/B/MV
+> prints vs Kinetix `B0ENTER`/`B0` traces, frames aligned by
+> (show, refresh) signatures): p1a blocks 0-21 decode identically
+> (positions + entry rngs; MVs 66/66/64 match). The trees diverge at the
+> 8x8 block px(48,80) [mi=(12,20)]: **dav1d's mvstack has n_mvs=3 with
+> NEARMV mv=(0,64); Kinetix's has n_mvs=2 with s0=(0,66), decoding
+> NEARESTMV mv=(0,66)** — the ref_mv symbol then differs (dav1d reads the
+> NEARMV path, we read NEARESTMV), consuming different bits and
+> desyncing the rest of the frame. The missing/different candidate comes
+> from find_mv_stack's spatial scan (the above/left neighbours at
+> px(48,72)/px(40,80)) or the temporal projection. Next session: dump
+> dav1d's refmvs candidates for that block (patch around
+> dav1d_refmvs_find) vs Kinetix's find_mv_stack scan, and fix the
+> candidate-set difference. CAUTION: dav1d's trace prints interleave
+> mid-line (mingw fprintf is not locked across tasks) — always match
+> blocks by by/bx, never by file order.
