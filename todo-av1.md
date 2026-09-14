@@ -6154,3 +6154,20 @@
 > candidate-set difference. CAUTION: dav1d's trace prints interleave
 > mid-line (mingw fprintf is not locked across tasks) — always match
 > blocks by by/bx, never by file order.
+
+> **2026-09-14 (cont'd 8) — mvstack diff captured.** dav1d's p1a mvstack at
+> the divergence block px(48,80) [mi=(12,20), 8x8]: n=3 candidates
+> [(y0,x66), (y0,x0), (y0,x64)] — decoded NEARMV mv=(0,64). Kinetix: n=2
+> [(0,66), (0,0)] — decoded NEARESTMV mv=(0,66). The third candidate
+> (x=64 = 8px) is the final MV of the 8x8 block at px(0,80) [mi=(0,20),
+> NEWMV x=64] — six mi-columns to the left. Our extended col-scan
+> (n=2,3 at mi_col (12-2n+1)|1 = 9,7) does not reach mi_col 0, so the
+> (0,64) candidate must come from a different scan position in dav1d's
+> refmvs scan (possibly the AOD walk extension or the above-row walk
+> reaching further left than our scan_row steps). Next session: trace
+> dav1d's ref_mvs.c scan for this exact block (patch scan_row/scan_col in
+> ref_mvs.c to print positions+mvs) and compare against our
+> scan_row/scan_col in intra_block.rs inter_mv_stack for mi=(12,20)
+> bsize=3 — then fix whichever scan position we miss. All work committed
+> through cb9653d; trace files: /tmp/av1dbg/{full.txt, bl3.txt, stack.txt,
+> p1a_tr*.txt} (regenerable via the documented env hooks).
