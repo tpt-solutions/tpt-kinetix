@@ -6079,3 +6079,25 @@
 > conditional syntax element gated differently between the decoders
 > (dc_q/luv deltas are absent this frame). The `KIN ITX64x32` and
 > `KIN TILE` debug prints added this session remain env-gated.
+
+> **2026-09-14 (cont'd 5) — chroma tx-type fix verified: every frame improved
+> again (frame 1 U 32.64→37.80 dB; all frames 2,164-3,141 samples). Symbol-
+> level alignment tooling added: `KINETIX_AV1_DBG_B0ENTER` prints each
+> block's entry rng (pre-skip) matching dav1d's per-block entry rng, and
+> dav1d's `DEBUG_BLOCK_INFO` symbol prints (`Post-skip/Post-intra/
+> Post-intermode/Post-mv`) are enabled for p1a. The symbol diff confirms:
+> p1a blocks 1-10 decode identically on both sides (64x64 skips, 8x8s,
+> 16x8s, MVs 66/66/64 all match, entry rngs match through the SB(0,64)
+> blocks), and the entropy trees diverge inside p1a's SB(16,16) =
+> px(64..95, 64..95): dav1d splits it into ~13 8x8/8x16/16x8 INTER blocks
+> while Kinetix decodes ONE 32x32 INTRA + one 32x32 NEWMV mv=(0,31) with an
+> empty mvstack. Since the tile bytes, headers and entering CDF state are
+> verified identical, the extra/missing bits were consumed inside the
+> preceding 16x16 non-skip block at mi=(4,20) (luma txtp=11 - a non-DCT
+> type, i.e. the first block exercising the now-fixed chroma tx-type
+> derivation, so its chroma eob is_1d context is the first suspect) or in
+> that block's coefficient contexts. Next session: diff the symbol stream
+> across mi=(4,20)'s chroma reads (dav1d `Post-uv-cf-blk` prints vs
+> `KINETIX_AV1_DBG_B0` uv-cf lines) - the fixed chroma derivation may still
+> differ from dav1d in the eob is_1d context or the coeffs scan for the
+> derived type.

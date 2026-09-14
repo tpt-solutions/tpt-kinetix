@@ -381,6 +381,12 @@ impl<'a> TileDecodeState<'a> {
                 self.dec.bit_position()
             );
         }
+        if std::env::var("KINETIX_AV1_DBG_B0ENTER").is_ok() {
+            eprintln!(
+                "DBG b0enter mi=({mi_col},{mi_row}) bsize={bsize} rng={}",
+                self.dec.raw_state().0
+            );
+        }
         let allow_hp = self.allow_high_precision_mv;
         let frame_filter = self.interpolation_filter;
         let reference_select = self.reference_select;
