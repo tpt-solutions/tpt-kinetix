@@ -6227,14 +6227,21 @@
 > PSNR up again (f1 47->51.25 dB/355 diffs, f7 21.95->33.35 dB).
 > REMAINING: E/G/H diverge (E inside block 2 = (0,16) 64x32 at the
 > is_inter read, G/H at later blocks). VERIFIED NOT the cause: partition
-> ctx, CDF probability+count at the read (probed both sides),
-> intra-bool semantics (100+ aligned reads). CURRENT LEAD: dav1d saves
-> frame-end CDFs via dav1d_cdf_thread_update — the spec 6.8.2 BLENDED
-> update (adapted values merged with DEFAULTS using the adaptation
-> counts) — while we save the raw adapted tile CDFs. E restores slot 4
-> (written by the keyframe; m.intra[0] differs: dav 32059 vs our 31962)
-> and G/H restore slots written by E/F, inheriting the drift. Next
-> session: implement the 6.8.2 blended context update
-> (dav1d_cdf_thread_update in cdf.c) and re-check E/G/H. Probes kept:
-> KINETIX_AV1_DBG_MVSCAN / _CDFROW / dav1d MVSCAN + INTRACDF + PARTCTX
-> (by=bx=bl ctx abyte lbyte) + CDFLOAD/CDFSAVE.
+> ctx, intra-bool semantics (100+ aligned reads), restore-slot mapping
+> (CDFLOAD pri= per frame matches our refidx[primary_ref_frame]).
+> ROOT CAUSE (confirmed by CDF-row probes): dav1d's frame-end CDF save
+> (dav1d_cdf_thread_update, cdf.c) KEEPS the adapted values but ZEROES
+> every CDF adaptation counter (update_cdf_1d sets the count element
+> to 0; memcpy copies values verbatim up to m.intrabc, the tail keeps
+> the restored-in values). Our save keeps the raw adapted CDFs WITH
+> their counters, so after a save the adaptation rate
+> (rate = 3 + cnt>15 + cnt>31 + log2(n)) is too slow and every
+> subsequent restore adapts differently. E's is_inter read at (0,16):
+> dav1d m.intra[0] = complement(709) with cnt=0 (values from earlier
+> frames, counters reset at save); ours = 806/31962-complement with
+> stale counts. FIX: at frame-end save, copy adapted values and reset
+> every CDF count field to 0 (mirror dav1d_cdf_thread_update's field
+> walk, incl. which arrays it touches). G/H restore slots written by
+> E/F and inherit the drift, so this one fix should clear all three.
+> Probes kept: KINETIX_AV1_DBG_MVSCAN / _CDFROW / dav1d MVSCAN +
+> INTRACDF + PARTCTX (by=bx=bl ctx abyte lbyte) + CDFLOAD/CDFSAVE.
