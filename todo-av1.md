@@ -6101,3 +6101,28 @@
 > `KINETIX_AV1_DBG_B0` uv-cf lines) - the fixed chroma derivation may still
 > differ from dav1d in the eob is_1d context or the coeffs scan for the
 > derived type.
+
+> **2026-09-14 (cont'd 6) — alignment methodology note + concrete next step.**
+> The reliable per-block symbol diff procedure (both traces verified working):
+> dav1d side: `DAV1D_DBG_ENTROPY=1 DAV1D_DBG_BLOCKS=1` + `--cpumask 0` gives
+> per-block `DAV1D B by/bx/bs/bp/rng` entry lines (42-46 blocks for p1a) plus
+> `Post-skip/Post-intra/Post-intermode[n_mvs,mv]/DAV1D MV[n_mvs]` lines;
+> Kinetix side: `KINETIX_AV1_DBG_B0ENTER` (per-block entry rng, pre-skip) +
+> `KINETIX_AV1_DBG_B0` (skip/is_inter/ref/mvstack/mode cascade rngs).
+> Verified aligned facts: p1a blocks 1-6 match dav1d block-for-block (positions,
+> entry rngs 40248/53666/35799/33852, MVs 66/66/64); p1a's first divergent
+> block is mi=(8,16) = px(32,64) 32x32, where dav1d decodes 16x8/8x4/8x8
+> INTER blocks (16x8s at (32,64)/(32,80)/(48,64)/(48,80) with MVs incl.
+> x=12/64/66, 8x4s, 8x8s) and Kinetix decodes ONE 32x32 INTRA. I.e. the
+> entropy trees diverge at the partition/is_inter symbols covering
+> px(32..63, 64..95) — after (4,18)/(0,20)/(2,20)/(0,22)/(4,20) decoded
+> identically (MVs 66/64, positions match). dav1d's (20,0) is NEWMV
+> mv=x:64 and Kinetix's (0,20) is mv=(64,0) — identical. The suspect list:
+> the partition symbol CDF context at that block (our partition_context vs
+> dav1d's get_partition_ctx — MiSizes-based, and our KTRACE showed ctx=0 on
+> both sides of earlier blocks), the is_inter symbol's skip_mode gating, or
+> the leftover-block tx-size reads. NOTE: the (24,16) 32x32 NEWMV mv=(0,31)
+> with an empty mvstack is a *consequence* — dav1d's mvstack at that point
+> had 2 candidates. CAUTION: several of this session's intermediate
+> "mismatches" were trace-window artifacts (payload 1 packs 3 OBU_FRAMEs;
+> always filter traces by FH markers, not line ranges).
