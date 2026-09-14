@@ -50,10 +50,10 @@ use crate::{
     entropy::SymbolDecoder,
     frame::FrameHeader,
     inter::{
-        build_mv_candidates, compound_blend, motion_compensate, motion_compensate_prep, read_mv,
-        read_single_ref_name, InterCdfs, MotionField, MotionFieldCell, Mv, RefFrames, RefSlot,
-        ALTREF_FRAME, INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV,
-        NEWMV, NONE_FRAME, ZEROMV,
+        compound_blend, motion_compensate, motion_compensate_prep, read_mv, read_single_ref_name,
+        InterCdfs, MotionField, MotionFieldCell, Mv, RefFrames, RefSlot, ALTREF_FRAME,
+        INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
+        NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
@@ -517,6 +517,158 @@ struct RefMvCell {
     mf: u8,
 }
 
+/// `mv_projection` (AV1 spec §7.9.3 / dav1d `mv_projection`): scale `mv` by
+/// `num`/`den` with the spec's `div_mult` reciprocal table, round-to-nearest
+/// (away from the add-8192 midpoint) and the ±(1<<14-1) clip.
+pub(super) fn mv_projection(mv: Mv, num: i32, den: i32) -> Mv {
+    const DIV_MULT: [u16; 32] = [
+        0, 16384, 8192, 5461, 4096, 3276, 2730, 2340, 2048, 1820, 1638, 1489, 1365, 1260, 1170,
+        1092, 1024, 963, 910, 862, 819, 780, 744, 712, 682, 655, 630, 606, 585, 564, 546, 528,
+    ];
+    debug_assert!(den > 0 && den < 32, "den {den} out of range");
+    debug_assert!(num > -32 && num < 32, "num {num} out of range");
+    let frac = num * DIV_MULT[den as usize] as i32;
+    let scale = |v: i32| -> i32 {
+        let y = v * frac;
+        // C arithmetic shift: `y >> 31` is 0 for non-negative `y`, -1 otherwise.
+        let shifted = (y + 8192 + (y >> 31)) >> 14;
+        shifted.clamp(-0x3fff, 0x3fff)
+    };
+    Mv::new(scale(mv.row), scale(mv.col))
+}
+
+/// Build the projected temporal grid (dav1d `rp_proj`, refmvs.c
+/// `dav1d_refmvs_project` / `dav1d_refmvs_init_frame`). For the up-to-3 `mfmv`
+/// reference frames selected by §7.10.1.3's rules, every valid 8×8 MV of the
+/// source frame's motion field is projected onto the position it *lands on* in
+/// the current frame; the grid stores the original MV plus the poc distance
+/// from the source frame to that MV's own reference (0 = unprojected cell).
+/// Returns `(grid, stride, n_mfmvs)`; `n_mfmvs == 0` disables the temporal
+/// scan entirely (dav1d's `rf->use_ref_frame_mvs`).
+#[allow(clippy::too_many_arguments)]
+fn build_rp_proj(
+    temporal_motion_fields: &[Option<&MotionField>; 8],
+    ref_to_slot: &[u8; 9],
+    dpb_order_hints: &[u8; 8],
+    order_hint_bits: u8,
+    cur_order_hint: u8,
+    use_ref_frame_mvs: bool,
+    width: usize,
+    height: usize,
+) -> (Vec<(Mv, i32)>, usize, usize) {
+    let w8 = (width + 7) >> 3;
+    let h8 = (height + 7) >> 3;
+    let empty = (Vec::new(), w8, 0usize);
+    if !use_ref_frame_mvs || order_hint_bits == 0 {
+        return empty;
+    }
+    let poc_diff = |a: i32, b: i32| -> i32 {
+        let mask = 1i32 << (order_hint_bits - 1);
+        let d = a - b;
+        (d & (mask - 1)) - (d & mask)
+    };
+    let cur = cur_order_hint as i32;
+    // refidx m (0=LAST .. 6=ALTREF) ↔ Kinetix name m+2.
+    let ref_poc = |m: usize| -> i32 { dpb_order_hints[ref_to_slot[m + 2] as usize] as i32 };
+    let rp_ref = |m: usize| -> Option<&MotionField> {
+        temporal_motion_fields[ref_to_slot[m + 2] as usize]
+    };
+
+    // mfmv reference selection (dav1d `refmvs_init_frame`).
+    let mut mfmv_refs: Vec<usize> = Vec::new();
+    let mut total = 2usize;
+    let last_alt_ok = rp_ref(0).is_some_and(|s| {
+        s.dpb_order_hints[s.ref_to_slot[8] as usize] as i32 != ref_poc(3)
+    });
+    if rp_ref(0).is_some() && last_alt_ok {
+        mfmv_refs.push(0);
+        total = 3;
+    }
+    if rp_ref(4).is_some() && poc_diff(ref_poc(4), cur) > 0 {
+        mfmv_refs.push(4);
+    }
+    if rp_ref(5).is_some() && poc_diff(ref_poc(5), cur) > 0 {
+        mfmv_refs.push(5);
+    }
+    if mfmv_refs.len() < total && rp_ref(6).is_some() && poc_diff(ref_poc(6), cur) > 0 {
+        mfmv_refs.push(6);
+    }
+    if mfmv_refs.len() < total && rp_ref(1).is_some() {
+        mfmv_refs.push(1);
+    }
+    if mfmv_refs.is_empty() {
+        return empty;
+    }
+
+    let mut rp = vec![(Mv::default(), 0i32); w8 * h8];
+    for &m in &mfmv_refs {
+        let Some(src) = rp_ref(m) else { continue };
+        let rpoc = ref_poc(m);
+        let diff1 = poc_diff(rpoc, cur);
+        if diff1.abs() > 31 {
+            continue; // dav1d INVALID_REF2CUR
+        }
+        // Forward refs (< 4) measure src→cur, backward ones cur→src.
+        let ref2cur = if m < 4 { -diff1 } else { diff1 };
+        let stride4 = src.stride;
+        for y in 0..h8 {
+            for x in 0..w8 {
+                let cell = &src.cells[(2 * y) * stride4 + 2 * x];
+                // `save_tmvs` filter: compound blocks save their *second*
+                // reference's MV, single-ref blocks the first; the reference
+                // must be in the source frame's past (`mfmv_sign`) and the MV
+                // magnitude under 4096 (1/8-pel units). Everything else saves
+                // as an invalid (zero) cell.
+                let is_past = |name: u8| -> bool {
+                    let slot = src.ref_to_slot[name as usize] as usize;
+                    poc_diff(src.dpb_order_hints[slot] as i32, rpoc) < 0
+                };
+                let small = |mv: &Mv| (mv.row.abs() | mv.col.abs()) < 4096;
+                let (b_mv, b_ref) = if cell.refs[1] >= LAST_FRAME
+                    && is_past(cell.refs[1])
+                    && small(&cell.mv[1])
+                {
+                    (cell.mv[1], cell.refs[1])
+                } else if cell.refs[0] >= LAST_FRAME && is_past(cell.refs[0]) && small(&cell.mv[0])
+                {
+                    (cell.mv[0], cell.refs[0])
+                } else {
+                    continue;
+                };
+                let rrpoc = src.dpb_order_hints[src.ref_to_slot[b_ref as usize] as usize] as i32;
+                let diff2 = poc_diff(rpoc, rrpoc);
+                // dav1d's unsigned compare also maps negatives to 0.
+                if diff2 <= 0 || diff2 > 31 {
+                    continue;
+                }
+                let offset = mv_projection(b_mv, ref2cur, diff2);
+                let ref_sign = m as i32 - 4;
+                // dav1d `apply_sign(abs(offset) >> 6, offset ^ ref_sign)`.
+                let delta = |v: i32| -> i32 {
+                    let mag = v.abs() >> 6;
+                    if (v ^ ref_sign) < 0 {
+                        -mag
+                    } else {
+                        mag
+                    }
+                };
+                let pos_x = x as i32 + delta(offset.col);
+                let pos_y = y as i32 + delta(offset.row);
+                // Writes stay inside the source 8×8 row band and a ±8 cell
+                // window of the source 8×8 column (dav1d's sb-aligned bounds).
+                let y_align = (y as i32) & !7;
+                if pos_y >= y_align && pos_y < (y_align + 8).min(h8 as i32) {
+                    let x_align = (x as i32) & !7;
+                    if pos_x >= (x_align - 8).max(0) && pos_x < (x_align + 16).min(w8 as i32) {
+                        rp[pos_y as usize * w8 + pos_x as usize] = (b_mv, diff2);
+                    }
+                }
+            }
+        }
+    }
+    (rp, w8, mfmv_refs.len())
+}
+
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
 /// and the neighbour-context arrays (partition / luma-mode / chroma-mode /
 /// tx-size) the syntax elements read from.
@@ -689,10 +841,18 @@ struct TileDecodeState<'a> {
     ref_to_slot: [u8; 9],
     /// The 8 DPB reference slots the inter blocks may draw from.
     ref_slots: RefFrames<'a>,
-    /// Per-DPB-slot motion fields from reference frames (for temporal MV
-    /// candidates, §7.10.2).  `None` when a slot has no motion field (keyframe
-    /// reference, or feature not yet available).
+    /// Per-DPB-slot motion fields from reference frames, consumed by
+    /// `build_rp_proj` at construction (§7.10.2 temporal MV candidates).
+    #[allow(dead_code)]
     temporal_motion_fields: [Option<&'a MotionField>; 8],
+    /// Projected temporal grid (dav1d `rp_proj`): per-8×8 cell, the MV of the
+    /// source block that projects onto it plus the source→ref poc distance
+    /// (0 = unprojected). Empty when temporal MV prediction is off.
+    rp_proj: Vec<(Mv, i32)>,
+    rp_stride: usize,
+    /// Number of selected `mfmv` sources — dav1d's `rf->use_ref_frame_mvs`
+    /// (the temporal scan only runs when this is non-zero).
+    n_mfmvs: usize,
     /// Adaptive CDF state for inter symbols.
     map_inter_cdfs: InterCdfs,
     /// Per-mi-row/col neighbour "is this block inter" flags.
@@ -856,6 +1016,16 @@ impl<'a> TileDecodeState<'a> {
         let lossless = qindex == 0;
         let tile_cw = if subsampling_x { tile_w / 2 } else { tile_w };
         let tile_ch = if subsampling_y { tile_h / 2 } else { tile_h };
+        let (rp_proj, rp_stride, n_mfmvs) = build_rp_proj(
+            &temporal_motion_fields,
+            &ref_to_slot,
+            &dpb_order_hints,
+            order_hint_bits,
+            cur_order_hint,
+            use_ref_frame_mvs,
+            width,
+            height,
+        );
         if std::env::var("KINETIX_AV1_DBG_TILE_BYTES").is_ok() {
             let byte_off = bit_offset / 8;
             let hex: String = data[byte_off..]
@@ -948,6 +1118,9 @@ impl<'a> TileDecodeState<'a> {
             ref_to_slot,
             ref_slots,
             temporal_motion_fields,
+            rp_proj,
+            rp_stride,
+            n_mfmvs,
             map_inter_cdfs: InterCdfs::new(),
             is_inter_above: vec![0u8; mi_cols],
             is_inter_left: vec![0u8; mi_rows],

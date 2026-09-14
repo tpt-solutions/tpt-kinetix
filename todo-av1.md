@@ -6193,3 +6193,48 @@
 > 32.4->40.65, diffs 1162/1431/1583/1793/1625/998/1612). MVSCAN debug
 > hooks kept in both trees (env-gated). Next: re-run the diffmap to find
 > the next divergent block (LR SGRPROJ set-14 stripe lead remains).
+
+> **2026-09-15 (cont'd) — THREE more root causes fixed; p1a AND p1b now
+> block-exact.** After the secondary-scan fix, frame-aligned per-block
+> entry-rng comparison (env KINETIX_AV1_DBG_B0ENTER + FH dumps vs dav1d
+> DAV1D_DBG_ENTROPY "DAV1D B" lines, poc added to the format) showed p1a
+> fully aligned and four smaller divergences (p1b@16, E@3, G@1, H@20).
+> Fixed in this round, each verified by add-level traces:
+> 1. **Extended candidate search (7.10.2.12/13)** — dav1d's
+>    add_single/add_compound_extended_candidate + global-MV fill were
+>    missing entirely; without them a compound block with one spatial
+>    candidate skipped the DRL symbol dav1d reads (p1b (12,18)).
+>    Includes RefSignBias derived from wrapped order-hint distances.
+> 2. **Temporal MV projection replaced with dav1d's rp_proj model** —
+>    build_rp_proj (mod.rs) mirrors dav1d_refmvs_project: mfmv source
+>    selection (LAST-if-alt!=gold, future BWD/ALTREF2/ALTREF, LAST2),
+>    ref2cur/ref2ref poc distances clamped to ±31, save_tmvs filter
+>    (compound saves mv[1]/ref[1], single saves mv[0], ref must be in
+>    the source frame's PAST (mfmv_sign), |mv| < 4096), mv_projection
+>    (7.9.3 div_mult table), landing position bounded to the source 8x8
+>    sb-window. find_mv_stack now samples the rp_proj grid inside the
+>    block + the three bottom/right sb cells, with globalmv_ctx =
+>    (|proj| >= 16) from the first cell (7.10.2.14's ZeroMvContext).
+> 3. **fix_mv_precision truncation** — dav1d truncates toward ZERO
+>    ((v - (v>>31)) & !1); our `& !1` rounded -33 to -34 instead of -32
+>    (E block (0,16) and the (4,18) grid cell pair). Also
+>    force_integer_mv -> & !7.
+> 4. **Skip-mode blocks record GlobalMV** — we predicted skip-mode MVs
+>    from the neighbour stack; the spec/dav1d use the global MVs of
+>    SkipModeFrame (zero here). The wrong pair (0,0)|(0,-34) poisoned
+>    the refmv grid and desynced p1b from block 14.
+> Result: p1a AND p1b fully block-exact (46 + 39 blocks); every frame's
+> PSNR up again (f1 47->51.25 dB/355 diffs, f7 21.95->33.35 dB).
+> REMAINING: E/G/H diverge (E inside block 2 = (0,16) 64x32 at the
+> is_inter read, G/H at later blocks). VERIFIED NOT the cause: partition
+> ctx, CDF probability+count at the read (probed both sides),
+> intra-bool semantics (100+ aligned reads). CURRENT LEAD: dav1d saves
+> frame-end CDFs via dav1d_cdf_thread_update — the spec 6.8.2 BLENDED
+> update (adapted values merged with DEFAULTS using the adaptation
+> counts) — while we save the raw adapted tile CDFs. E restores slot 4
+> (written by the keyframe; m.intra[0] differs: dav 32059 vs our 31962)
+> and G/H restore slots written by E/F, inheriting the drift. Next
+> session: implement the 6.8.2 blended context update
+> (dav1d_cdf_thread_update in cdf.c) and re-check E/G/H. Probes kept:
+> KINETIX_AV1_DBG_MVSCAN / _CDFROW / dav1d MVSCAN + INTRACDF + PARTCTX
+> (by=bx=bl ctx abyte lbyte) + CDFLOAD/CDFSAVE.

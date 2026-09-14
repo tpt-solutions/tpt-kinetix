@@ -1495,110 +1495,126 @@ impl<'a> TileDecodeState<'a> {
         }
         let total_matches = have_row + have_col;
 
-        // Temporal candidate (§7.10.2.4 motion_field_projections).
-        // When `use_ref_frame_mvs` is set, look at ALL reference-frame DPB
-        // slots that have a stored motion field and try to project their
-        // co-located 8×8 MVs to the current block's want_refs.
-        let mut zeromv_found = false;
-        if self.use_ref_frame_mvs {
-            // Co-located 8×4 → 8×8 snap: (mi_row | 1, mi_col | 1).
-            let tr_base = by4 as usize | 1;
-            let tc_base = bx4 as usize | 1;
-
-            let cur_poc = self.cur_order_hint as i32;
-            let ohb = self.order_hint_bits;
-            let poc_diff_fn = |a: i32, b: i32| -> i32 {
-                if ohb == 0 {
+        // Temporal candidate scan (§7.10.2.4/§7.10.2.6, dav1d's `rp_proj`
+        // model): sample the projected grid inside the block, then the three
+        // bottom/right neighbour cells within the superblock. Runs only when
+        // at least one mfmv source frame was projectable (dav1d gates on
+        // `rf->use_ref_frame_mvs == n_mfmvs > 0`, not the frame-header flag).
+        let mut globalmv_ctx = i32::from(self.use_ref_frame_mvs);
+        if self.n_mfmvs > 0 {
+            let stride8 = self.rp_stride;
+            let by8 = by4 >> 1;
+            let bx8 = bx4 >> 1;
+            let cell8 = |r: i32, c: i32| -> (Mv, i32) {
+                if r < 0 || c < 0 {
+                    return (Mv::default(), 0);
+                }
+                self.rp_proj
+                    .get(r as usize * stride8 + c as usize)
+                    .copied()
+                    .unwrap_or((Mv::default(), 0))
+            };
+            let poc_diff = |a: i32, b: i32| -> i32 {
+                if self.order_hint_bits == 0 {
                     return 0;
                 }
-                let mask = 1i32 << (ohb - 1);
+                let mask = 1i32 << (self.order_hint_bits - 1);
                 let d = a - b;
                 (d & (mask - 1)) - (d & mask)
             };
-            let project_mv = |mv: i32, nd: i32, pd: i32| -> Option<i32> {
-                if pd == 0 || (nd > 0) != (pd > 0) {
-                    return None;
-                }
-                let scaled = (mv as i64 * nd as i64) / pd as i64;
-                Some(scaled.clamp(-16383, 16383) as i32)
+            let cur = self.cur_order_hint as i32;
+            let pocdiff = |name: u8| -> i32 {
+                let slot = self.ref_to_slot.get(name as usize).copied().unwrap_or(0) as usize;
+                let ref_hint = self.dpb_order_hints.get(slot).copied().unwrap_or(0) as i32;
+                poc_diff(cur, ref_hint).clamp(-31, 31)
             };
-
-            // Track which DPB slots we have already sampled to avoid duplicate
-            // candidates when multiple named refs alias the same slot.
-            let mut sampled_slots = [false; 8];
-            for named_ref in LAST_FRAME..=crate::inter::ALTREF_FRAME {
-                let slot = self
-                    .ref_to_slot
-                    .get(named_ref as usize)
-                    .copied()
-                    .unwrap_or(0) as usize;
-                if sampled_slots[slot] {
-                    continue;
-                }
-                sampled_slots[slot] = true;
-
-                let tmf = match self.temporal_motion_fields.get(slot) {
-                    Some(Some(t)) => t,
-                    _ => continue,
-                };
-
-                let tr = tr_base.min(tmf.stride.saturating_sub(1));
-                let tc = tc_base.min(tmf.cells.len() / tmf.stride.max(1));
-                let cell = match tmf.cells.get(tr * tmf.stride + tc) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let temporal_poc = tmf.order_hint as i32;
-                let mut proj = [Mv::default(); 2];
-                let mut proj_ok = [false; 2];
-
-                for n in 0..2usize {
-                    let tref = cell.refs[n];
-                    if tref == NONE_FRAME || tref < LAST_FRAME {
-                        continue;
-                    }
-                    let src_slot =
-                        tmf.ref_to_slot.get(tref as usize).copied().unwrap_or(0) as usize;
-                    let src_poc = tmf.dpb_order_hints.get(src_slot).copied().unwrap_or(0) as i32;
-                    let pd = poc_diff_fn(temporal_poc, src_poc);
-                    if pd == 0 {
-                        continue;
-                    }
-                    let src_mv = cell.mv[n];
-                    for m in 0..2usize {
-                        if proj_ok[m] {
-                            continue;
-                        }
-                        let dst_ref = want_refs[m];
-                        if dst_ref == NONE_FRAME {
-                            continue;
-                        }
-                        let dst_slot =
-                            self.ref_to_slot.get(dst_ref as usize).copied().unwrap_or(0) as usize;
-                        let dst_poc =
-                            self.dpb_order_hints.get(dst_slot).copied().unwrap_or(0) as i32;
-                        let nd = poc_diff_fn(cur_poc, dst_poc);
-                        if let (Some(r), Some(c)) = (
-                            project_mv(src_mv.row, nd, pd),
-                            project_mv(src_mv.col, nd, pd),
-                        ) {
-                            proj[m] = Mv::new(r, c);
-                            proj_ok[m] = true;
-                        }
-                    }
-                }
-
-                let all_ok = if is_compound {
-                    proj_ok[0] && proj_ok[1]
+            let lower = |mv: Mv| -> Mv {
+                // dav1d `fix_mv_precision`: integer MVs truncate to full-pel,
+                // non-high-precision MVs truncate toward *zero* to 1/4-pel
+                // (the `- (v >> 31)` bias) — plain `& !1` would round -1/4 to
+                // -1/2 instead of 0.
+                if self.force_integer_mv {
+                    Mv::new(mv.row & !7, mv.col & !7)
+                } else if !self.allow_high_precision_mv {
+                    let t = |v: i32| (v - (v >> 31)) & !1;
+                    Mv::new(t(mv.row), t(mv.col))
                 } else {
-                    proj_ok[0]
-                };
-                if all_ok {
-                    zeromv_found = true;
-                    let is_dup = stack.iter().any(|e| e.0 == proj);
-                    if !is_dup && stack.len() < 8 {
-                        stack.push((proj, 2));
+                    mv
+                }
+            };
+            let mut add_t = |stack: &mut Vec<([Mv; 2], i64)>, bmv: Mv, den: i32, first: bool| {
+                if den == 0 {
+                    return;
+                }
+                if !is_compound {
+                    let mv = lower(mv_projection(bmv, pocdiff(want_refs[0]), den));
+                    if mvscan_dbg {
+                        eprintln!(
+                            "MVSCAN add_t rbmv=({},{}) rbref={} proj=({},{})",
+                            bmv.row, bmv.col, den, mv.row, mv.col
+                        );
+                    }
+                    if first {
+                        // dav1d: `globalmv_ctx = dist(projected mv, gmv) >= 16`.
+                        globalmv_ctx = i32::from((mv.col.abs() | mv.row.abs()) >= 16);
+                    }
+                    if let Some(e) = stack.iter_mut().find(|e| e.0[0] == mv) {
+                        e.1 += 2;
+                    } else if stack.len() < 8 {
+                        stack.push(([mv, Mv::default()], 2));
+                    }
+                } else {
+                    let m0 = lower(mv_projection(bmv, pocdiff(want_refs[0]), den));
+                    let m1 = lower(mv_projection(bmv, pocdiff(want_refs[1]), den));
+                    if mvscan_dbg {
+                        eprintln!(
+                            "MVSCAN add_t rbmv=({},{}) rbref={} proj=({},{})|({},{})",
+                            bmv.row, bmv.col, den, m0.row, m0.col, m1.row, m1.col
+                        );
+                    }
+                    let pair = [m0, m1];
+                    if let Some(e) = stack.iter_mut().find(|e| e.0 == pair) {
+                        e.1 += 2;
+                    } else if stack.len() < 8 {
+                        stack.push((pair, 2));
+                    }
+                }
+            };
+            let step_h: i32 = if bw4 >= 16 { 2 } else { 1 };
+            let step_v: i32 = if bh4 >= 16 { 2 } else { 1 };
+            let w8 = ((w4 + 1) >> 1).min(8);
+            let h8 = ((h4 + 1) >> 1).min(8);
+            let mut y = 0;
+            while y < h8 {
+                let mut x = 0;
+                while x < w8 {
+                    let (bmv, den) = cell8(by8 + y, bx8 + x);
+                    add_t(&mut stack, bmv, den, x == 0 && y == 0);
+                    x += step_h;
+                }
+                y += step_v;
+            }
+            // §7.10.2.5's three extra probe cells below/right of the block,
+            // all inside the current superblock's 8×8 window.
+            if bw4.min(bh4) >= 2 && bw4.max(bh4) < 16 {
+                let bh8 = bh4 >> 1;
+                let bw8 = bw4 >> 1;
+                let col_start8 = col_start >> 1;
+                let col_end8 = col_end >> 1;
+                let row_end8 = row_end >> 1;
+                let has_bottom = by8 + bh8 < row_end8.min((by8 & !7) + 8);
+                if has_bottom && bx8 > col_start8.max(bx8 & !7) {
+                    let (bmv, den) = cell8(by8 + bh8, bx8 - 1);
+                    add_t(&mut stack, bmv, den, false);
+                }
+                if bx8 + bw8 < col_end8.min((bx8 & !7) + 8) {
+                    if has_bottom {
+                        let (bmv, den) = cell8(by8 + bh8, bx8 + bw8);
+                        add_t(&mut stack, bmv, den, false);
+                    }
+                    if by8 + bh8 - 1 < row_end8.min((by8 & !7) + 8) {
+                        let (bmv, den) = cell8(by8 + bh8 - 1, bx8 + bw8);
+                        add_t(&mut stack, bmv, den, false);
                     }
                 }
             }
@@ -1622,6 +1638,183 @@ impl<'a> TileDecodeState<'a> {
                 close_matches,
                 entries.join(" ")
             );
+        }
+
+        // §7.10.2.12/§7.10.2.13 extended candidate search (dav1d
+        // `add_single_extended_candidate` / `add_compound_extended_candidate`):
+        // when the stack holds fewer than two candidates, re-scan the nearest
+        // top/left edges for blocks whose reference differs from `want_refs`
+        // and add sign-adjusted (§6.8.4 `RefSignBias`) MVs at "minimal"
+        // weight 2. dav1d appends these after the weight sort; compound
+        // blocks always end up with exactly two entries (global-MV fill).
+        if stack.len() < 2 && want_refs[0] >= LAST_FRAME {
+            // `RefSignBias[ref]`: 1 when the reference frame's order hint is
+            // *after* the current frame's (wrapped) — dav1d `poc_diff > 0`.
+            let sign_bias = |named_ref: u8| -> bool {
+                let slot = self
+                    .ref_to_slot
+                    .get(named_ref as usize)
+                    .copied()
+                    .unwrap_or(0) as usize;
+                let ref_hint = self.dpb_order_hints.get(slot).copied().unwrap_or(0) as i32;
+                if self.order_hint_bits == 0 {
+                    return false;
+                }
+                let mask = 1i32 << (self.order_hint_bits - 1);
+                let d = ref_hint - self.cur_order_hint as i32;
+                let dist = (d & (mask - 1)) - (d & mask);
+                dist > 0
+            };
+            let sz4 = w4.min(h4);
+            if is_compound {
+                let sign0 = sign_bias(want_refs[0]);
+                let sign1 = sign_bias(want_refs[1]);
+                // `same[i][n]`: component `n` of pair candidate `i`;
+                // `diff[k][n]`: component `n` of opposite-ref candidate `k`.
+                let mut same = [[Mv::default(); 2]; 2];
+                let mut same_cnt = [0usize; 2];
+                let mut diff = [[Mv::default(); 2]; 2];
+                let mut diff_cnt = [0usize; 2];
+                let mut add_ext = |cand: RefMvCell| {
+                    for n in 0..2usize {
+                        let cand_ref = cand.refs[n];
+                        if cand_ref <= crate::inter::INTRA_FRAME {
+                            break;
+                        }
+                        let cand_mv = cand.mv[n];
+                        if cand_ref == want_refs[0] {
+                            if same_cnt[0] < 2 {
+                                same[0][same_cnt[0]] = cand_mv;
+                                same_cnt[0] += 1;
+                            }
+                            if diff_cnt[1] < 2 {
+                                diff[1][diff_cnt[1]] = if sign1 ^ sign_bias(cand_ref) {
+                                    Mv::new(-cand_mv.row, -cand_mv.col)
+                                } else {
+                                    cand_mv
+                                };
+                                diff_cnt[1] += 1;
+                            }
+                        } else if cand_ref == want_refs[1] {
+                            if same_cnt[1] < 2 {
+                                same[1][same_cnt[1]] = cand_mv;
+                                same_cnt[1] += 1;
+                            }
+                            if diff_cnt[0] < 2 {
+                                diff[0][diff_cnt[0]] = if sign0 ^ sign_bias(cand_ref) {
+                                    Mv::new(-cand_mv.row, -cand_mv.col)
+                                } else {
+                                    cand_mv
+                                };
+                                diff_cnt[0] += 1;
+                            }
+                        } else {
+                            let inv = Mv::new(-cand_mv.row, -cand_mv.col);
+                            if diff_cnt[0] < 2 {
+                                diff[0][diff_cnt[0]] = if sign0 ^ sign_bias(cand_ref) {
+                                    inv
+                                } else {
+                                    cand_mv
+                                };
+                                diff_cnt[0] += 1;
+                            }
+                            if diff_cnt[1] < 2 {
+                                diff[1][diff_cnt[1]] = if sign1 ^ sign_bias(cand_ref) {
+                                    inv
+                                } else {
+                                    cand_mv
+                                };
+                                diff_cnt[1] += 1;
+                            }
+                        }
+                    }
+                };
+                if by4 > row_start {
+                    let mut x = 0;
+                    while x < sz4 {
+                        let cand = cell(by4 - 1, bx4 + x);
+                        add_ext(cand);
+                        x += (cand.w4 as i32).max(1);
+                    }
+                }
+                if bx4 > col_start {
+                    let mut y = 0;
+                    while y < sz4 {
+                        let cand = cell(by4 + y, bx4 - 1);
+                        add_ext(cand);
+                        y += (cand.h4 as i32).max(1);
+                    }
+                }
+                // Merge: complete each pair from the opposite-ref list, then
+                // fill with the global-MV translation (identity == 0 for the
+                // translation-only streams this decoder models).
+                for n in 0..2usize {
+                    let mut m = same_cnt[n];
+                    if m >= 2 {
+                        continue;
+                    }
+                    let l = diff_cnt[n];
+                    if l > 0 {
+                        same[m][n] = diff[0][n];
+                        m += 1;
+                        if m == 2 {
+                            continue;
+                        }
+                        if l == 2 {
+                            same[1][n] = diff[1][n];
+                            continue;
+                        }
+                    }
+                    while m < 2 {
+                        same[m][n] = Mv::default();
+                        m += 1;
+                    }
+                }
+                let cnt = stack.len();
+                if cnt == 1 && stack[0].0 == same[0] {
+                    // dav1d: if the first extended entry duplicates the
+                    // non-extended one, replace it with the second pair.
+                    stack.push((same[1], 2));
+                } else if cnt == 1 {
+                    stack.push((same[0], 2));
+                } else {
+                    stack.push((same[0], 2));
+                    stack.push((same[1], 2));
+                }
+            } else {
+                let sign = sign_bias(want_refs[0]);
+                let try_cand = |cand: RefMvCell, stack: &mut Vec<([Mv; 2], i64)>| {
+                    for n in 0..2usize {
+                        let cand_ref = cand.refs[n];
+                        if cand_ref <= crate::inter::INTRA_FRAME {
+                            break;
+                        }
+                        let mut cand_mv = cand.mv[n];
+                        if sign ^ sign_bias(cand_ref) {
+                            cand_mv = Mv::new(-cand_mv.row, -cand_mv.col);
+                        }
+                        if !stack.iter().any(|e| e.0[0] == cand_mv) && stack.len() < 8 {
+                            stack.push(([cand_mv, Mv::default()], 2));
+                        }
+                    }
+                };
+                if by4 > row_start {
+                    let mut x = 0;
+                    while x < sz4 && stack.len() < 2 {
+                        let cand = cell(by4 - 1, bx4 + x);
+                        try_cand(cand, &mut stack);
+                        x += (cand.w4 as i32).max(1);
+                    }
+                }
+                if bx4 > col_start {
+                    let mut y = 0;
+                    while y < sz4 && stack.len() < 2 {
+                        let cand = cell(by4 + y, bx4 - 1);
+                        try_cand(cand, &mut stack);
+                        y += (cand.h4 as i32).max(1);
+                    }
+                }
+            }
         }
 
         // §7.10.2.14 context derivation.
@@ -1648,7 +1841,7 @@ impl<'a> TileDecodeState<'a> {
         // was found (i.e. the co-located block had a usable non-zero MV that
         // projected successfully), 1 when use_ref_frame_mvs but no candidate
         // was found, 0 when use_ref_frame_mvs is false.
-        let zeromv_ctx = u32::from(self.use_ref_frame_mvs && !zeromv_found);
+        let zeromv_ctx = globalmv_ctx as u32;
         let packed = ((refmv_ctx as u32) << 4) | (zeromv_ctx << 3) | (newmv_ctx as u32);
 
         // DrlCtxStack — dav1d `get_drl_context(stack, idx)`.

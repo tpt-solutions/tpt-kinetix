@@ -461,6 +461,13 @@ impl<'a> TileDecodeState<'a> {
         } else {
             0
         };
+        if std::env::var("KINETIX_AV1_DBG_CDFROW").is_ok() {
+            eprintln!(
+                "KIN INTRACDF ctx={inter_ctx} row={:?} rng={} mi=({mi_col},{mi_row})",
+                &self.map_inter_cdfs.is_inter[inter_ctx][..],
+                self.dec.raw_state().0
+            );
+        }
         let is_inter = self
             .dec
             .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
@@ -1467,19 +1474,13 @@ impl<'a> TileDecodeState<'a> {
         self.read_deltas = false;
 
         let ref_names = self.skip_mode_frame;
-        let above = [
-            (self.ref_above[mi_col][0], self.mv_above[mi_col][0]),
-            (self.ref_above[mi_col][1], self.mv_above[mi_col][1]),
-        ];
-        let left = [
-            (self.ref_left[mi_row][0], self.mv_left[mi_row][0]),
-            (self.ref_left[mi_row][1], self.mv_left[mi_row][1]),
-        ];
-        let mut mvs = [Mv::default(); 2];
-        for (i, mv) in mvs.iter_mut().enumerate() {
-            let cands = build_mv_candidates(&above, &left, &[ref_names[i]], 2);
-            *mv = cands.first().map(|c| c.mv).unwrap_or_default();
-        }
+        // §5.11.18: a skip-mode block's MVs are the *global* MVs of the two
+        // `SkipModeFrame` references (dav1d's `Post-skipmodeblock` prints the
+        // global-MV pair, not a neighbour prediction). For the translation-only
+        // global motion this decoder models, that is the zero MV — predicting
+        // from the neighbour MV stack instead poisoned the refmv grid for
+        // later spatial scans.
+        let mvs = [Mv::default(); 2];
 
         let px_x0 = mi_col * MI_SIZE - self.tile_px_x0;
         let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
