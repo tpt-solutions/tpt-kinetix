@@ -2204,6 +2204,8 @@ fn dump_prefilter_yuv(
             out.extend(std::iter::repeat_n(128u8, (full_w / 2 - uv_h) * full_uv_w));
         }
     }
-    let _ = std::fs::write(format!("{label}_prefilter.yuv"), &out);
-    eprintln!("DBG prefilter dump: {label}_prefilter.yuv (tile at ({x0},{y0}) {tw}×{th})");
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::write(format!("{label}_{seq:02}_prefilter.yuv"), &out);
+    eprintln!("DBG prefilter dump: {label}_{seq:02}_prefilter.yuv (tile at ({x0},{y0}) {tw}×{th})");
 }

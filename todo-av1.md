@@ -6274,3 +6274,36 @@
 > NEXT: the remaining per-pixel diffs (exact=false) are in prediction/
 > filtering details — run the diffmap per frame for the next lead
 > (LR SGRPROJ set-14 stripe handling remains a known gap).
+
+> **2026-09-15 (cont'd 3) — inter-intra implemented; OBMC mask fixed; all
+> frames 64-70 dB.** Three more fixes, each driven by the pre-filter
+> pixel dumps (KINETIX_AV1_DUMP_PREFILTER now writes per-tile-group
+> numbered dumps) vs dav1d DAV1D_DUMP_FRAMES with the NODEBLOCK/NOCDEF/
+> NOLR2 gates (raw reconstruction on both sides):
+> 1. **Inter-intra prediction (7.11.3.6) implemented.** We read the
+>    interintra_type/mode/wedge_idx symbols but discarded them and never
+>    blended. Now: intra prediction (mode mapped DC/V/H/SMOOTH) from the
+>    reconstructed block edges via block_borders + predict_intra_block,
+>    blended over the inter prediction with the sign-0 wedge mask
+>    (luma + chroma, chroma samples the luma mask at >>sub). dav1d's
+>    blend_px = ((inter*(64-m) + intra*m) + 32) >> 6.
+> 2. **OBMC mask table was wrong.** Our obmc_mask was the SMOOTH
+>    raised-cosine RISING to 64; dav1d_obmc_masks DECAY away from the
+>    shared edge (4 -> {25,14,5,0}, 8 -> {28,22,16,11,7,3,0,0}, ...) and
+>    blend_h truncates to 3/4 of the overlap (the tail is zero-weight).
+>    This was the single biggest error source (f1 52 -> 70.4 dB).
+> 3. **Intra-in-inter blocks now clear ref_left/above + mv_left/above**
+>    (dav1d marks intra blocks ref=INTRA so OBMC's overlap scan skips
+>    them; our stale inter refs made OBMC blend with phantom
+>    neighbours).
+> 4. **Skip-mode MVs = the MV stack's NEARESTMV candidate** (dav1d runs
+>    a full refmvs_find for the SkipModeFrame pair); both the zero-MV
+>    and abridged-neighbour variants were wrong.
+> RESULT: all 8 frames 64-70 dB luma (f1 70.39, f6 63.9->65.1...), total
+> luma diff samples 1285 for the whole sequence (from 33k). Remaining:
+> scattered +-1 rounding pixels near skip-mode neighbours of OBMC blocks
+> — leading suspect: the OBMC job's MC filter provenance (dav1d uses the
+> neighbour's filter_2d 2D combination; we pass filter_above[0] = the
+> vertical component only, and skip-mode neighbours never write the
+> filter arrays at all) and warp-subblock emu-edge extents. Probes:
+> KINETIX_AV1_DBG_OBMC + dav1d DAV1D_DBG_OBMC (per-job x/y/w/h/mv/f).

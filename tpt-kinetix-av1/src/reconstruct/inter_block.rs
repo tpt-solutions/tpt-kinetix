@@ -113,20 +113,22 @@ fn wedge_ctx(bsize: usize) -> usize {
     }
 }
 
-/// `get_obmc_mask(length)` (§7.11.3.9): the raised-cosine blend weights for an
-/// overlap region `length` samples deep. `length` is always a power of two in
-/// `2..=32`; anything else uses the 32-tap mask.
+/// `get_obmc_mask(length)` (§7.11.3.9): the OBMC blend weights for an overlap
+/// region `length` samples deep, weighting the *neighbour's* prediction. The
+/// weights decay away from the shared edge and reach 0 (dav1d
+/// `dav1d_obmc_masks`: 2 → {19, 0}, 4 → {25, 14, 5, 0}, 8, 16, 32 ...).
+/// The earlier table here was the raised-cosine SMOOTH curve rising to 64 —
+/// an inverted, wrong-valued mask that blended the wrong rows with the wrong
+/// weights.
 fn obmc_mask(length: usize) -> &'static [i32] {
     match length {
-        2 => &[45, 64],
-        4 => &[39, 50, 59, 64],
-        8 => &[36, 42, 48, 53, 57, 61, 64, 64],
-        16 => &[
-            34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64,
-        ],
+        2 => &[19, 0],
+        4 => &[25, 14, 5, 0],
+        8 => &[28, 22, 16, 11, 7, 3, 0, 0],
+        16 => &[30, 27, 24, 21, 18, 15, 12, 10, 8, 6, 4, 3, 0, 0, 0, 0],
         _ => &[
-            33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60,
-            61, 62, 64, 64, 64, 64, 64, 64, 64, 64,
+            31, 29, 28, 26, 24, 23, 21, 20, 19, 17, 16, 14, 13, 12, 11, 9, 8, 7, 6, 5, 4, 4, 3, 2,
+            0, 0, 0, 0, 0, 0, 0, 0,
         ],
     }
 }
@@ -613,13 +615,25 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.raw_state().0
                 );
             }
-            // Update inter neighbour state (this block is not inter).
+            // Update inter neighbour state (this block is not inter). The
+            // ref/MV neighbour arrays must also be cleared: dav1d marks intra
+            // blocks with ref == INTRA (so OBMC's `ref.ref[0] > 0` overlap
+            // scan skips them); leaving the previous inter block's ref/MV
+            // here made OBMC blend with phantom neighbours.
             for r in mi_row..(mi_row + bh).min(self.mi_rows) {
                 if let Some(s) = self.is_inter_left.get_mut(r) {
                     *s = 0;
                 }
                 if let Some(s) = self.comp_type_left.get_mut(r) {
                     *s = 0;
+                }
+                if let Some(slot) = self.ref_left.get_mut(r) {
+                    slot[0] = crate::inter::INTRA_FRAME;
+                    slot[1] = crate::inter::NONE_FRAME;
+                }
+                if let Some(slot) = self.mv_left.get_mut(r) {
+                    slot[0] = Mv::default();
+                    slot[1] = Mv::default();
                 }
             }
             for c in mi_col..(mi_col + bw).min(self.mi_cols) {
@@ -628,6 +642,14 @@ impl<'a> TileDecodeState<'a> {
                 }
                 if let Some(s) = self.comp_type_above.get_mut(c) {
                     *s = 0;
+                }
+                if let Some(slot) = self.ref_above.get_mut(c) {
+                    slot[0] = crate::inter::INTRA_FRAME;
+                    slot[1] = crate::inter::NONE_FRAME;
+                }
+                if let Some(slot) = self.mv_above.get_mut(c) {
+                    slot[0] = Mv::default();
+                    slot[1] = Mv::default();
                 }
             }
             // Every decoded block must splat the 2-D ref-MV grid (see
@@ -1033,6 +1055,12 @@ impl<'a> TileDecodeState<'a> {
         // then (for wedge-allowed sizes) an `interintra_wedge` bool and
         // optionally a `wedge_idx`. Skipping this desynced every eligible block.
         let mut interintra_type = 0u8; // INTER_INTRA_NONE
+                                       // Inter-intra mode symbol → our intra prediction mode. The symbol
+                                       // alphabet is {DC, V, H, SMOOTH} (dav1d `InterIntraPredMode`), which
+                                       // coincides with our IntraPredMode numbering for DC/V/H; SMOOTH (3)
+                                       // maps to `SMOOTH` (9).
+        let mut interintra_mode = H_PRED;
+        let mut ii_wedge_index = 0usize;
         if self.enable_interintra
             && !compound
             && ref_names[1] == NONE_FRAME
@@ -1041,9 +1069,15 @@ impl<'a> TileDecodeState<'a> {
             let grp = size_group(bsize);
             let is_ii = self.dec.read_symbol(&mut self.mode_cdfs.interintra[grp]) == 1;
             if is_ii {
-                let _mode = self
+                interintra_mode = match self
                     .dec
-                    .read_symbol(&mut self.mode_cdfs.interintra_mode[grp]);
+                    .read_symbol(&mut self.mode_cdfs.interintra_mode[grp])
+                {
+                    0 => DC_PRED,
+                    1 => V_PRED,
+                    2 => H_PRED,
+                    _ => SMOOTH,
+                };
                 let wctx = wedge_ctx(bsize);
                 // INTER_INTRA_BLEND (1) + wedge bit → BLEND or WEDGE (2).
                 interintra_type = 1 + self
@@ -1051,7 +1085,7 @@ impl<'a> TileDecodeState<'a> {
                     .read_symbol(&mut self.mode_cdfs.interintra_wedge[wctx])
                     as u8;
                 if interintra_type == 2 {
-                    let _widx = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
+                    ii_wedge_index = self.dec.read_symbol(&mut self.mode_cdfs.wedge_idx[wctx]);
                 }
             }
             if dbg_b0 {
@@ -1301,6 +1335,13 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        // Inter-intra (§7.11.3.6): blend an intra prediction built from the
+        // reconstructed block edges with the inter prediction, weighted by
+        // the (sign-0) wedge mask — luma and chroma.
+        if interintra_type != 0 {
+            self.apply_interintra(mi_row, mi_col, bsize, interintra_mode, ii_wedge_index);
+        }
+
         // Debug: dump pre-residual prediction for error-region blocks.
         if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
             let px_end_y = px_y0 + bh_px;
@@ -1475,13 +1516,15 @@ impl<'a> TileDecodeState<'a> {
         self.read_deltas = false;
 
         let ref_names = self.skip_mode_frame;
-        // §5.11.18: a skip-mode block's MVs are the *global* MVs of the two
-        // `SkipModeFrame` references (dav1d's `Post-skipmodeblock` prints the
-        // global-MV pair, not a neighbour prediction). For the translation-only
-        // global motion this decoder models, that is the zero MV — predicting
-        // from the neighbour MV stack instead poisoned the refmv grid for
-        // later spatial scans.
-        let mvs = [Mv::default(); 2];
+        // dav1d (`skip_mode` branch): the block's MVs are the NEARESTMV
+        // candidates of the MV stack built for the SkipModeFrame reference
+        // pair — i.e. a full `dav1d_refmvs_find` run, stack entry 0. (Zeroing
+        // or using the abridged neighbour predictor poisons the refmv grid
+        // for later OBMC/warp-sample scans.)
+        let (stack, _, _, _, _) = self.inter_mv_stack(mi_row, mi_col, bsize, ref_names);
+        let mv0 = stack.first().map(|s| s[0]).unwrap_or_default();
+        let mv1 = stack.first().map(|s| s[1]).unwrap_or_default();
+        let mvs = [mv0, mv1];
 
         let px_x0 = mi_col * MI_SIZE - self.tile_px_x0;
         let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
@@ -1775,6 +1818,94 @@ impl<'a> TileDecodeState<'a> {
                     obmc[0],
                     dst[py * pstride + px]
                 );
+            }
+        }
+    }
+
+    /// Inter-intra blending (§7.11.3.6): predict the block intra from the
+    /// reconstructed above/left edges and weight it over the already-written
+    /// inter prediction with the sign-0 wedge mask
+    /// (`dst = (inter * (64 - m) + intra * m + 32) >> 6`).
+    fn apply_interintra(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        ii_mode: u8,
+        wedge_index: usize,
+    ) {
+        let bw_px = BLOCK_WIDTH[bsize];
+        let bh_px = BLOCK_HEIGHT[bsize];
+        let mask = crate::reconstruct::wedge::wedge_mask(bsize, false, wedge_index);
+        let mw = bw_px;
+        for plane in 0..3usize {
+            let (subx, suby) = if plane == 0 {
+                (0usize, 0usize)
+            } else {
+                (self.subsampling_x as usize, self.subsampling_y as usize)
+            };
+            let pw = bw_px >> subx;
+            let ph = bh_px >> suby;
+            let (pstride, tile_w, tile_h) = match plane {
+                1 => (self.uv_stride, self.tile_cw, self.tile_ch),
+                2 => (self.uv_stride, self.tile_cw, self.tile_ch),
+                _ => (self.y_stride, self.tile_w, self.tile_h),
+            };
+            let plane_buf = match plane {
+                1 => &self.u_plane,
+                2 => &self.v_plane,
+                _ => &self.y_plane,
+            };
+            let px = ((mi_col * MI_SIZE) as isize - self.tile_px_x0 as isize) >> subx;
+            let py = ((mi_row * MI_SIZE) as isize - self.tile_px_y0 as isize) >> suby;
+            if px < 0 || py < 0 {
+                continue;
+            }
+            let (px, py) = (px as usize, py as usize);
+            if px >= tile_w || py >= tile_h {
+                continue;
+            }
+            // Intra prediction from the reconstructed neighbours.
+            let borders = crate::reconstruct::predict::block_borders(
+                plane_buf, pstride, tile_w, tile_h, pw, ph, px, py, true, false,
+            );
+            let mut tmp = vec![0i32; pw * ph];
+            crate::reconstruct::predict::predict_intra_block(
+                ii_mode,
+                &borders,
+                pw,
+                ph,
+                &mut tmp,
+                self.enable_intra_edge_filter,
+                0,
+                0,
+                tile_w.saturating_sub(px),
+                tile_h.saturating_sub(py),
+            );
+            // Blend into the tile plane.
+            let dst = match plane {
+                1 => &mut self.u_plane,
+                2 => &mut self.v_plane,
+                _ => &mut self.y_plane,
+            };
+            for y in 0..ph {
+                let sy = py + y;
+                if sy >= tile_h {
+                    break;
+                }
+                let my = (y << suby).min(bh_px - 1);
+                for x in 0..pw {
+                    let sx = px + x;
+                    if sx >= tile_w {
+                        break;
+                    }
+                    let mx = (x << subx).min(bw_px - 1);
+                    let m = mask[my * mw + mx] as i32;
+                    let idx = sy * pstride + sx;
+                    let d = dst[idx] as i32;
+                    let t = tmp[y * pw + x];
+                    dst[idx] = ((d * (64 - m) + t * m + 32) >> 6).clamp(0, 255) as u8;
+                }
             }
         }
     }
