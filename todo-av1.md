@@ -6336,3 +6336,18 @@
 >    against ours sample-for-sample.
 > STATE: 73/171/225/221/166/120/129 per-frame luma diffs (total 1285,
 > 96% reduction); all frames 64-70 dB; symbols block-exact everywhere.
+
+> **2026-09-15 (cont'd 5) — ±1 chase methodology refined.** Hand-model
+> experiment on p1a (4,18) (skip-block with mv (0,66), subpel-horiz):
+> computing both the spec-model and the dav1d-6-bit predictions from the
+> FILTERED p0 reference shows both decoders AGREE with each other (202/
+> 198/195...) but neither matches the plain-MC model (150) — the block
+> carries a residual (skip=0; the earlier trail read was wrong). The
+> remaining ~1,285 samples are ±1s scattered across residual-carrying
+> OBMC/subpel blocks. DEFINITIVE next tool: dump the PRE-RESIDUAL
+> prediction per block from BOTH decoders (ours: KINETIX_AV1_DBG_PRED
+> already prints error-region blocks; extend to write the prediction
+> plane before add_inter_residual; dav1d: probe recon_tmpl before the
+> residual add) and diff predictions block-by-block — this separates
+> prediction rounding from residual/ITX rounding cleanly. Also verify
+> our ITX matches dav1d's (s+8)>>4 final shift at tx edges.
