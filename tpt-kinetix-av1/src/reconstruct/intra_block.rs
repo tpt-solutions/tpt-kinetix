@@ -2299,6 +2299,7 @@ impl<'a> TileDecodeState<'a> {
                         ch,
                         c_mv,
                         crate::inter::INTERP_BILINEAR,
+                        crate::inter::INTERP_BILINEAR,
                         3,
                         3,
                     );
@@ -2314,6 +2315,7 @@ impl<'a> TileDecodeState<'a> {
                         cw,
                         ch,
                         c_mv,
+                        crate::inter::INTERP_BILINEAR,
                         crate::inter::INTERP_BILINEAR,
                         3,
                         3,

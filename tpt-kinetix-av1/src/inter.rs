@@ -195,7 +195,12 @@ pub fn motion_compensate(
     bw: usize,
     bh: usize,
     mv: Mv,
-    filter: u8,
+    // Per-direction interpolation filters: the first-read (dir-0) symbol is
+    // the *horizontal* kernel and the second-read (dir-1) symbol the
+    // *vertical* one (dav1d `fh = filter_type & 3`, `fv = filter_type >> 2`;
+    // applying one of them to both axes misfilters dual-filter blocks).
+    filter_h: u8,
+    filter_v: u8,
     // Sub-pel precision of the passed MV per axis: 3 for luma, 4 for a
     // subsampled chroma axis (dav1d `mvx & (15 >> !ss_hor)` / `>> (3 + ss_hor)`).
     hbits: u32,
@@ -208,8 +213,8 @@ pub fn motion_compensate(
     let base_x = dst_x as i32 + ix;
     let base_y = dst_y as i32 + iy;
 
-    let kw = subpel_kernel(filter, dx, hbits);
-    let kh = subpel_kernel(filter, dy, vbits);
+    let kw = subpel_kernel(filter_h, dx, hbits);
+    let kh = subpel_kernel(filter_v, dy, vbits);
 
     // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
     // 7`); for 8-bit non-compound prediction `InterRound0 = 3`, `InterRound1 =
@@ -264,7 +269,8 @@ pub fn motion_compensate_prep(
     bw: usize,
     bh: usize,
     mv: Mv,
-    filter: u8,
+    filter_h: u8,
+    filter_v: u8,
     hbits: u32,
     vbits: u32,
 ) -> Vec<i32> {
@@ -272,8 +278,8 @@ pub fn motion_compensate_prep(
     let dy = mv.row & ((1 << vbits) - 1);
     let base_x = dst_x as i32 + (mv.col >> hbits);
     let base_y = dst_y as i32 + (mv.row >> vbits);
-    let kw = subpel_kernel(filter, dx, hbits);
-    let kh = subpel_kernel(filter, dy, vbits);
+    let kw = subpel_kernel(filter_h, dx, hbits);
+    let kh = subpel_kernel(filter_v, dy, vbits);
 
     let ext_h = bh + 7;
     let mut tmp = vec![0i32; bw * ext_h];
@@ -859,6 +865,7 @@ mod tests {
             16,
             Mv::new(0, 0),
             INTERP_EIGHTTAP_REGULAR,
+            INTERP_EIGHTTAP_REGULAR,
             3,
             3,
         );
@@ -887,6 +894,7 @@ mod tests {
             8,
             Mv::new(-40 * 8, -40 * 8),
             INTERP_EIGHTTAP_REGULAR,
+            INTERP_EIGHTTAP_REGULAR,
             3,
             3,
         );
@@ -914,6 +922,7 @@ mod tests {
             8,
             8,
             Mv::new(0, 4),
+            INTERP_BILINEAR,
             INTERP_BILINEAR,
             3,
             3,

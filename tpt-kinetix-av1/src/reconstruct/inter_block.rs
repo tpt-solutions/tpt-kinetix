@@ -1234,7 +1234,7 @@ impl<'a> TileDecodeState<'a> {
         }
         // MC currently applies a single kernel to both axes; use the vertical
         // filter (a full dual-axis kernel split is a follow-up).
-        let filter = filters[0];
+        let filter = filters;
 
         // Motion-compensated prediction into the output planes (Y then chroma),
         // using the reference slots mapped from the reference names.
@@ -1541,15 +1541,51 @@ impl<'a> TileDecodeState<'a> {
         // `None`.
         let nm = MaskDesc::none();
         self.inter_predict_plane(
-            0, px_x0, px_y0, bw_px, bh_px, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+            0,
+            px_x0,
+            px_y0,
+            bw_px,
+            bh_px,
+            &ref_names,
+            &mvs,
+            [f, f],
+            8,
+            nm,
+            mi_row,
+            mi_col,
+            None,
         )?;
         let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
         let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
         self.inter_predict_plane(
-            1, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+            1,
+            cpx_x0,
+            cpx_y0,
+            cbw,
+            cbh,
+            &ref_names,
+            &mvs,
+            [f, f],
+            8,
+            nm,
+            mi_row,
+            mi_col,
+            None,
         )?;
         self.inter_predict_plane(
-            2, cpx_x0, cpx_y0, cbw, cbh, &ref_names, &mvs, f, 8, nm, mi_row, mi_col, None,
+            2,
+            cpx_x0,
+            cpx_y0,
+            cbw,
+            cbh,
+            &ref_names,
+            &mvs,
+            [f, f],
+            8,
+            nm,
+            mi_row,
+            mi_col,
+            None,
         )?;
 
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
@@ -1678,7 +1714,9 @@ impl<'a> TileDecodeState<'a> {
             pred_w: usize,
             pred_h: usize,
             mv: Mv,
-            filter: u8,
+            // The neighbour's per-direction filters: [horizontal (dir 0),
+            // vertical (dir 1)].
+            filters: [u8; 2],
             nb_ref: u8,
         }
         let mut jobs: Vec<ObmcJob> = Vec::new();
@@ -1707,7 +1745,10 @@ impl<'a> TileDecodeState<'a> {
                             pred_w,
                             pred_h,
                             mv: self.mv_above[cand_col][0],
-                            filter: self.filter_above[0].get(cand_col).copied().unwrap_or(0),
+                            filters: [
+                                self.filter_above[0].get(cand_col).copied().unwrap_or(0),
+                                self.filter_above[1].get(cand_col).copied().unwrap_or(0),
+                            ],
                             nb_ref,
                         });
                     }
@@ -1739,7 +1780,10 @@ impl<'a> TileDecodeState<'a> {
                             pred_w,
                             pred_h,
                             mv: self.mv_left[cand_row][0],
-                            filter: self.filter_left[0].get(cand_row).copied().unwrap_or(0),
+                            filters: [
+                                self.filter_left[0].get(cand_row).copied().unwrap_or(0),
+                                self.filter_left[1].get(cand_row).copied().unwrap_or(0),
+                            ],
                             nb_ref,
                         });
                     }
@@ -1769,7 +1813,7 @@ impl<'a> TileDecodeState<'a> {
                 pred_w,
                 pred_h,
                 mv,
-                filter,
+                filters,
                 nb_ref,
             } = job;
             let slot = self.ref_to_slot[nb_ref as usize] as usize;
@@ -1782,7 +1826,8 @@ impl<'a> TileDecodeState<'a> {
             let (rp, rw, rh) = rf.plane(plane);
             let mut obmc = vec![0u8; pred_w * pred_h];
             motion_compensate(
-                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filter, hbits, vbits,
+                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filters[0],
+                filters[1], hbits, vbits,
             );
             let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
             let dst = match plane {
@@ -1923,7 +1968,8 @@ impl<'a> TileDecodeState<'a> {
         bh: usize,
         ref_names: &[u8; 2],
         mvs: &[Mv; 2],
-        filter: u8,
+        // [horizontal (first-read), vertical (second-read)] kernels.
+        filters: [u8; 2],
         // Compound blend weight in sixteenths for `preds[0]` (`8` = plain
         // average); ignored for single-reference blocks.
         blend_weight: i32,
@@ -2015,8 +2061,8 @@ impl<'a> TileDecodeState<'a> {
                         }
                         _ => {
                             motion_compensate(
-                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filter,
-                                hbits, vbits,
+                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filters[0],
+                                filters[1], hbits, vbits,
                             );
                         }
                     }
@@ -2052,7 +2098,8 @@ impl<'a> TileDecodeState<'a> {
                 if let Some(rf) = self.ref_slots.slots[slot] {
                     let (rp, rw, rh) = rf.plane(plane);
                     motion_compensate_prep(
-                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filter, hbits, vbits,
+                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filters[0], filters[1], hbits,
+                        vbits,
                     )
                 } else {
                     vec![0i32; bw * bh]
