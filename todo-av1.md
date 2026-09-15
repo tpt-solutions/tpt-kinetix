@@ -6351,3 +6351,21 @@
 > residual add) and diff predictions block-by-block — this separates
 > prediction rounding from residual/ITX rounding cleanly. Also verify
 > our ITX matches dav1d's (s+8)>>4 final shift at tx edges.
+
+> **2026-09-15 (cont'd 6) — TXPRED prediction probes built both sides.**
+> dav1d: DAV1D_DBG_TXPRED prints pre-residual dst rows for all non-skip
+> blocks by>=16 (recon_tmpl.c, before the b->skip early-return); ours:
+> KINETIX_AV1_DBG_PRED(+_ALL) prints the same per block. FIRST RESULT
+> (p1a (4,18) 16x8 SIMPLE, mv=(0,66) subpel-horiz): predictions differ
+> +-1 at 4 constant columns (ours 180,177,...,151 vs dav 179,176,...,152)
+> — prediction-level, NOT residual. A Python reconstruction of the
+> dav1d-model MC+OBMC blend for that row from the filtered p0 does NOT
+> reproduce dav's values (off by -43..+7 gradient), meaning the block's
+> inputs (base position/mv/lap source) differ from the hand model — the
+> exact OBMC geometry (which neighbour, which mv, which lap rect) must
+> be dumped, not inferred. NEXT: extend the TXPRED probes to also print
+> the block's final mv/filters/ref, and add a dav1d obmc() probe listing
+> its lap MC call args (position, mv, filter, size) per block — then
+> match against our ObmcJob list for the same block. All infrastructure
+> is in place; this is the last-mile ±1 (total 1,285 samples = 0.4% of
+> session start).
