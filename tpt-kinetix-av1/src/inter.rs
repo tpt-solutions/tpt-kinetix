@@ -222,6 +222,9 @@ pub fn motion_compensate(
     // (the vertical filter's 3-above / 4-below support), each reference sample
     // clamped to the frame edge — clamping the *filtered block* at its own
     // edge (the previous behaviour) is wrong for the top/bottom rows.
+    // Per-direction kernels: the first-read symbol is the horizontal kernel,
+    // the second-read symbol the vertical one (dav1d `fh = type & 3`,
+    // `fv = type >> 2`); full-pel axes resolve to the identity kernel.
     let ext_h = bh + 7;
     let mut tmp = vec![0i32; bw * ext_h];
     for ty in 0..ext_h {

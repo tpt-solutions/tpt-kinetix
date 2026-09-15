@@ -6307,3 +6307,32 @@
 > vertical component only, and skip-mode neighbours never write the
 > filter arrays at all) and warp-subblock emu-edge extents. Probes:
 > KINETIX_AV1_DBG_OBMC + dav1d DAV1D_DBG_OBMC (per-job x/y/w/h/mv/f).
+
+> **2026-09-15 (cont'd 4) — dual-filter MC plumbing; 6-bit experiment
+> reverted.** The remaining ±1s sit at subpel-horizontal blocks as
+> CONSTANT-PER-COLUMN offsets (e.g. p1a (4,18): +1 at px 22-23, -1 at
+> 24 and 31 across all 8 rows) — the horizontal subpel kernel/rounding
+> differs from dav1d for those columns. Two findings:
+> 1. **Dual filters fixed and kept**: dav1d's Filter2d pairing applies
+>    the FIRST-read symbol horizontally and the SECOND vertically
+>    (fh = type & 3, fv = type >> 2; the "dir 0 = vertical" comment on
+>    our filter arrays was wrong — dir 0 = horizontal). motion_compensate
+>    and motion_compensate_prep now take (filter_h, filter_v); the OBMC
+>    neighbour jobs carry the neighbour's full pair. (This stream's
+>    dual-filter blocks are full-pel vertically, so no pixel change here,
+>    but required for real content.)
+> 2. **dav1d-6-bit subpel model tried and REVERTED**: porting dav1d's
+>    6-bit mc_subpel_filters + its per-branch rounding ((s+2)>>2 /
+>    (s+512)>>10 both-axes, (s+34)>>6 h-only, (s+32)>>6 v-only) made
+>    every frame WORSE (f1 73 -> 217) even after fixing the phase index
+>    to mx-1. The spec-model (7-bit Subpel_Filters, rounds 3/11) is
+>    empirically closer to dav1d than the literal 6-bit port — the
+>    remaining ±1s are NOT explained by the filter table/rounding alone;
+>    something upstream (reference pixels or the exact kernel rows
+>    dav1d's SIMD-equivalent C selects) still differs. NEXT: pixel-level
+>    probe of dav1d's put_8tap inputs for one divergent column
+>    (e.g. (4,18) px 22: +1 constant) — print (src offsets, kernel row,
+>    s, result) in dav1d's put_8tap_c gated on coordinates, and compare
+>    against ours sample-for-sample.
+> STATE: 73/171/225/221/166/120/129 per-frame luma diffs (total 1285,
+> 96% reduction); all frames 64-70 dB; symbols block-exact everywhere.
