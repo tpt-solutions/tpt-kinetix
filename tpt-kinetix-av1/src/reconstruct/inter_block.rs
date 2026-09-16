@@ -2696,6 +2696,19 @@ impl<'a> TileDecodeState<'a> {
         // §5.11.36/§7.12.3: an inter chroma transform block's tx type derives
         // from the *co-located luma leaf's* decoded tx type (1-D/identity
         // luma types make the chroma read use the 1-D eob CDF context).
+        // §7.3.1 sub-8x8 chroma ownership: a 4px-wide/tall block at odd mi
+        // parity codes the chroma for the whole parent 8x8, so some of its
+        // chroma positions map to the SIBLING sub-block's luma area, which
+        // this block's own leaf list does not cover. dav1d uses the block's
+        // own luma tx type for every chroma tx block it codes (`b->txtp`),
+        // so on a lookup miss fall back to this block's own first luma leaf
+        // instead of DCT_DCT — a DCT_DCT fallback read the chroma tx type
+        // with the wrong CDF context (txtp differs from the bitstream's) and
+        // desynced the tile at the very first chroma read of such a block.
+        let own_luma_tx_type = luma_leaf_types
+            .first()
+            .map(|&(_, _, _, _, t)| t)
+            .unwrap_or(av1::DCT_DCT);
         let co_located_luma_type = |clpx_x: usize, clpx_y: usize| -> usize {
             let lx = clpx_x << sub_x;
             let ly = clpx_y << sub_y;
@@ -2704,7 +2717,7 @@ impl<'a> TileDecodeState<'a> {
                     return t;
                 }
             }
-            av1::DCT_DCT
+            own_luma_tx_type
         };
         // Computed before the `&mut self.{u,v}_plane` reborrows in the loop
         // below — `qindex_for_plane` takes `&self`, which would conflict

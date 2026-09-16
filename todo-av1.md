@@ -6802,3 +6802,22 @@ cosmetic for output but worth one look alongside (1)).
 > chroma rows 37-47. (3) The dav1d-side hooks (DUMPF/PARTCDF) live only
 > in the out-of-repo clone — if the clone is ever recreated, re-apply
 > from this note.
+
+> **2026-09-17 (evening session, cont'd 2) — RESOLVED SAME SESSION: the oh4
+> desync symbol was the CHROMA TX TYPE of the sub-8x8 chroma-owning block.**
+> Kinetix's co-located-luma-type lookup in `add_inter_residual` missed for
+> the VERT-split 8x8's second 4x8 child: that block owns the chroma for the
+> whole parent 8x8 (§7.3.1 HasChroma), so chroma cols 12-13 map to the
+> SIBLING 4x8's luma area, absent from the block's own leaf list — the
+> lookup fell back to DCT_DCT and read the chroma tx type as txtp=0 where
+> the bitstream carries the block's own luma type (txtp=13, dav1d's
+> `b->txtp` behaviour). The first chroma read consumed different symbols
+> (eob 2 vs 4) and desynced the tile. FIXED: a lookup miss now falls back
+> to the block's own first luma leaf's tx type. **64x64 per-frame luma
+> diffs vs dav1d: 505/626/631/492/761 → 210/356/300/5/748** (frame 4
+> nearly bit-exact, 77 dB); no corpus regressions (128x96 unchanged,
+> intra 6/6). Frame 5 (oh5, 748) references the already-drifted oh4 slot
+> plus its own desync; frames 1-3's residual ~200-360 diffs are the next
+> trace targets with the same entropy-diff method (the new
+> KINETIX_DBG_DUMPF/KINETIX_AV1_DUMP_FRAMES pair localizes the first
+> diverging frame in one command).
