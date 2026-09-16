@@ -529,6 +529,125 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32br — CANLMA2 CABAC engine desync ROOT-CAUSED AND FIXED via the
+KDBGBIN Drange trace #32bq prescribed: the pair-bottom must RE-READ its own
+`mb_skip_flag` (and the pair's field flag when coded); JM's lookahead reads are
+speculative (copied engine, restored). Commit `22d2a72`. **POC 1's P slice now
+parses 1350/1350 MBs and all 260 490 bins match the JM engine exactly.**
+
+Method (exactly #32bq's "let the full-stream KDBGBIN run complete", which took
+~4.5 min on this machine, not 10+): rebuilt
+`C:\Users\phill\jm-oracle-fresh\jm\ldecod_kdbgbin.exe` from the instrumented
+tree (`gcc -O2 -w -DTRACE=0`, same line as `tools/build-jm-oracle.sh`), ran
+`KDBGBIN=1 ldecod_kdbgbin.exe -p InputFile=in.264 -p OutputFile=out.yuv`
+(fixtures `.jsv` copied to a space-free dir; JM's config parser chokes on
+spaces), and diffed JM's per-bin `KDBGBIN <n> <D|B|T> R=<Drange> bit=<v>`
+against Kinetix's `KINETIX_BINTRACE` `BIN <n> <D|B|T> … R=<range> V=<offset>`
+lines, windowed between the 2nd and 3rd `SLICE_START` markers (POC 1's P
+slice; note JM calls `arideco_start_decoding` twice before the IDR — the
+first two markers are 0 bins apart, the IDR is the 553 406-bin window). The
+comparison is valid bin-for-bin because JM's `HALF = 0x01FE = 510` matches
+Kinetix's spec init, JM's lazy single-shift MPS renorm is equivalent to the
+spec's full renorm (one shift always suffices given range ∈ [256, 512)), and
+bypass leaves range unchanged in both; the only convention delta is
+`biari_decode_final`=1 printing the PRE-decrement range (add −2 when
+comparing to Kinetix's post-decrement print).
+
+**Bins 1..12 881 matched exactly; at bin 12 882 JM reads a decision bin
+(bit=1) where Kinetix read a terminate (eos, bin=0) — JM had ONE extra real
+bin, everything after realigned with a +1 offset.** With the `KDBG`/`KDBG3`
+element labels interleaved (same binary, `KDBG=1`) the extra bin is
+**MB89's (pair 44's bottom, grid (44,1)) own `mb_skip_flag` read in its own
+loop iteration**. Root cause, from `mb_read.c::read_one_macroblock_p_slice_
+cabac` + `cabac.c::check_next_mb_and_get_field_mode_CABAC_p_slice`: JM's
+"lookahead" after a skipped pair-top runs its bottom-skip/field reads on a
+**COPIED decoding environment** (`memcpy` of `dep_dp` + the three
+`mb_type_contexts` banks + `mb_aff_contexts`) and RESTORES all of it
+afterwards — the speculative bins never consume the real bitstream (they do
+still show up in the KDBGBIN print, which is why the naive printed-stream
+diff shows a phantom "JM extra bin" whose kind/value/range duplicates the
+real read that follows). The lookahead's only surviving side effects are
+`last_dquant = 0` (Kinetix already handles this via `prev_dqp_nonzero =
+false` on the skip path) and a `mb_data[top].mb_field` store (see bug 2
+below). The bottom MB then **re-reads its own skip flag for real** (and the
+pair's field flag for real when coded) in its own iteration — which is also
+what §7.3.4's moreDataFlag derivation says. Kinetix consumed the lookahead
+bins for real and reused their values for the bottom (`next_mb_skipped`),
+i.e. one phantom skip bin per both-skipped pair and one dropped field-flag
+bin per coded bottom-after-skipped-top. Fixed in both `cabac_p.rs` and
+`cabac_b.rs`: the lookahead reads are deleted (JM-bin-stream-equivalent —
+no need to simulate the copies), `prev_mb_skipped` now selects §7.4.4 field
+inference for the bottom's skip-context neighbour derivation, and the
+bottom reads its own skip flag (falling through to the real field-flag read
+when coded) like any other MB.
+
+Two more real bugs pinned and fixed in the same region while iterating the
+trace (each was range/coincidence-invisible until a later bucket read):
+1. **Skipped-pair stored field**: JM's `mb_data[skipped].mb_field` holds the
+   pair's §7.4.4 INFERRED value (both halves run the same pair-level
+   inference), and when the pair's field flag is later read at the bottom,
+   JM's lookahead speculative store OVERWRITES the skipped top's stored
+   value with the pair's REAL flag (`mb_data[current_mb_nr-1].mb_field =
+   field` — `current_mb_nr-1` is the TOP). Kinetix now mirrors both: the
+   skip path records the inferred field for both halves into `field_flags`
+   (previously left `None`/stale-previous-pair), and a field read at the
+   bottom corrects the pair top's entry. Without the correction, pair 72's
+   field-flag context read pair 71's stale inferred `1` instead of the real
+   `0` (inc=1 vs JM's 0).
+2. **The `mb_field_decoding_flag` context is PAIR-level, not field-aware**:
+   `readFieldModeInfo_CABAC`'s `a`/`b` come from `init_mb_neighbours`
+   (`mbAddrA = 2*(pair-1)` = the left pair's TOP MB, `mbAvailA` gated on
+   `PicPos[pair].x != 0`; `mbAddrB = 2*(pair-mb_cols)` = the pair ABOVE's
+   TOP MB, no x-gate) — NOT `CheckAvailabilityOfNeighborsCABAC`'s field-aware
+   `getNeighbour` addresses. Pinned by adding a `KDBGFF` env-gated print in
+   `readFieldModeInfo_CABAC` (mbAddrX/mbAddrA/mbAddrB/a/b/inc + neighbour
+   fields, in the local JM tree only) and diffing per-read `(inc, value)`
+   sequences: an earlier `derive_neighbours`-based implementation matched
+   pair 71 by coincidence (left pair dominates) and diverged at pair 115
+   (MB231 bottom: JM's `b` = pair 70's top flag via `mbAddrB = 2*(115-45) =
+   140`, not any field-aware up). `mb_data[].mb_field` is read ungated by
+   skip, so the `!skip` gating Kinetix previously copied from FFmpeg is
+   gone; `field_flags` (now recording skipped pairs' inferred values) is
+   the source for both a/b and the inference. MB-pair-level `field_flag_
+   inference` addresses in `cur_field_for_skip_ctx` now also cover the
+   bottom-after-skipped-top case (`pair_top_y = mb_y & !1`).
+
+Also in the oracle tree (NOT committed, local only): a `SPEC_ON`/`SPEC_OFF`
+marker pair around both `check_next_mb_and_get_field_mode_*` functions so
+the speculative bins can be stripped from the printed stream (first attempt
+— rewriting the bin-kind `%c` format strings — broke fprintf arg alignment
+and produced garbage traces; reverted to markers). Bin numbers in JM's
+printed stream still count speculative bins, so cross-trace comparisons must
+align by sequence order, not by printed bin index.
+
+**Result**: `KINETIX_BINTRACE` POC-1 parse = 1350/1350 MBs, `parsed OK`
+(previously errored `ref_idx overflow` at pair 86/MB173); the full JM
+real-engine stream (260 490 bins) matches Kinetix bin-for-bin in kind,
+value, and range. `itu_conformance`: CANLMA2_Sony_C now 17/17 frames
+decoded with **2/17 reference frames pixel-exact (was 0, with mid-clip
+grey scaffold from the parse error)** — the remaining gap is the known
+MBAFF **field-inter reconstruction** bucket (field ref lists, field MC,
+field scan — `reconstruct_mbaff_inter_*` items from #32bl/#32bm), not
+parsing; CANLMA3_Sony_C likewise 2/17. All other clips unchanged: 269 lib
+tests, 27 hard-checked ITU bit-exact / 0 failures, clippy `-D warnings`
+clean, fmt clean. `capabilities()`/strict-mode claims still correctly
+exclude MBAFF P/B.
+
+**For next session**: (1) the same KDBGBIN-vs-BINTRACE full-slice diff for
+POCs 2..16 (change the harness's `slices[1]` index) — POC 1 is proven; the
+other 16 P slices should now also parse (the ITU run's 17/17 decoded frames
+suggests yes) but are not bin-verified; (2) the MBAFF-inter reconstruction
+bucket is now unblocked and is the reason CANLMA2 pixels still diverge —
+`reconstruct_mbaff_inter_luma`'s field-scan/dequant bug (ZIGZAG vs field
+scan for inter residuals), `field_planes[ref_idx]`'s frame-index-as-field-
+index bug (§8.4.2.1 field ref lists), and the §8.4.1.3.2 MV vertical
+scaling check in `predict_slice_mvs_ex` (todo items listed under #32bm);
+JM's `ldecod` with the existing `jm-ldecod-oracle.patch` pixel dumps is the
+oracle for those; (3) B-slice MBAFF CABAC is fixed by the same edit but has
+no dedicated bin-verified fixture in this bucket (CANLMA2 is P-only;
+`cvmp_mot_mbaff0_full_B`/CAMA-B clips are candidates, several also need
+MBAFF-B recon).
+
 ## SESSION #32bq — landed #32bp's `field_flag_inference` fix (real bug, verified,
 but proven NOT the MB143 root cause); shared-ctx17 state-drift hypothesis REFUTED
 
