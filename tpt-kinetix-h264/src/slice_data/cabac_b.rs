@@ -624,7 +624,6 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
     let mut cur_pair_field = field_pic_flag;
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
     let mut prev_mb_skipped = false;
-    let mut next_mb_skipped = false;
     let mut decoded_mb_count = total;
     let first_mb = first_mb as usize;
 
@@ -646,19 +645,22 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
         // field pair, not `grid_idx - mb_cols` (which wrongly resolves the
         // bottom MB's "top" to its own always-available pair-mate).
         let cur_field_for_skip_ctx = if mbaff_frame {
-            if mb_idx & 1 == 1 {
-                field_flags[grid_idx].unwrap_or(false)
-            } else {
-                // Top of pair: see `cabac_p.rs`'s identical fix -- §7.4.4
-                // `mb_field_decoding_flag` inference
-                // (`mbaff::field_flag_inference`), not unconditional `false`.
+            // Same JM-verified rule as `cabac_p.rs`: §7.4.4 field inference
+            // (PAIR-level neighbours, `mbAddrA = 2*(pair-1)`) runs for the
+            // pair's TOP macroblock AND for the bottom of a pair whose top
+            // was skipped; the bottom of a pair whose top was coded inherits
+            // the real flag.
+            if mb_idx & 1 == 0 || prev_mb_skipped {
+                let pair_top_y = (mb_y as usize) & !1;
                 let left_pair_top = (mb_x > 0)
-                    .then(|| (mb_y as usize) * mb_cols as usize + (mb_x as usize - 1))
+                    .then(|| pair_top_y * mb_cols as usize + (mb_x as usize - 1))
                     .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
-                let above_pair_top = (mb_y >= 2)
-                    .then(|| (mb_y as usize - 2) * mb_cols as usize + mb_x as usize)
+                let above_pair_top = (pair_top_y >= 2)
+                    .then(|| (pair_top_y - 2) * mb_cols as usize + mb_x as usize)
                     .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
                 crate::mbaff::field_flag_inference(left_pair_top, above_pair_top, &field_flags)
+            } else {
+                field_flags[grid_idx].unwrap_or(false)
             }
         } else {
             false
@@ -695,65 +697,32 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
             top_skipped: top_same_slice && top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let top_of_pair = mbaff_frame && mb_idx % 2 == 0;
-        let is_skip = if mbaff_frame && !top_of_pair && prev_mb_skipped {
-            next_mb_skipped
-        } else {
-            ctxs.mb_skip.decode(&mut dec, &skip_neighbors)
-        };
-        let mut pair_field_pending = false;
-        if mbaff_frame && top_of_pair {
-            if is_skip {
-                let bot_left_skipped = if mb_x > 0 {
-                    // §6.4.9: a different-slice neighbour is unavailable too.
-                    let bl_idx = ((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1;
-                    if slice_id_grid.get(bl_idx).copied() == Some(slice_id) {
-                        macroblocks.get(bl_idx).map(|m| m.skip).unwrap_or(false)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                let bot_neighbors = crate::entropy::MbSkipNeighbors {
-                    left_available: mb_x > 0,
-                    left_skipped: bot_left_skipped,
-                    top_available: true,
-                    top_skipped: true,
-                };
-                next_mb_skipped = ctxs.mb_skip.decode(&mut dec, &bot_neighbors);
-                if !next_mb_skipped {
-                    pair_field_pending = true;
-                }
-            } else {
-                pair_field_pending = true;
-            }
-        }
+        // Same JM-verified element order as `cabac_p.rs`: every macroblock
+        // (including a pair bottom whose top was skipped) reads its own
+        // `mb_skip_flag` from the live engine; JM's
+        // `check_next_mb_and_get_field_mode_CABAC_b_slice` lookahead runs on a
+        // copied, afterwards-restored environment and consumes no real bins.
+        let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        let pair_field_pending = mbaff_frame && !is_skip && (top_of_pair || prev_mb_skipped);
         if pair_field_pending {
+            // Same JM-verified PAIR-LEVEL a/b derivation as `cabac_p.rs`
+            // (`init_mb_neighbours`: left pair's top MB / the pair above's
+            // top MB, stored `mb_field` read ungated by skip).
+            let pair_top_y = (mb_y as usize) & !1;
             let left_field = if mb_x > 0 {
-                let left_idx = (mb_y as usize) * mb_cols as usize + mb_x as usize - 1;
-                // §6.4.9: a different-slice neighbour is unavailable here too.
-                if slice_id_grid.get(left_idx).copied() == Some(slice_id) {
-                    let left_mb = &macroblocks[left_idx];
-                    if !left_mb.skip {
-                        cabac_ctx[left_idx].mb_field_flag
-                    } else {
-                        false
-                    }
+                let idx = pair_top_y * mb_cols as usize + mb_x as usize - 1;
+                if slice_id_grid.get(idx).copied() == Some(slice_id) {
+                    field_flags.get(idx).copied().flatten().unwrap_or(false)
                 } else {
                     false
                 }
             } else {
                 false
             };
-            let top_field = if mb_y > 0 {
-                let top_idx = ((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize;
-                if slice_id_grid.get(top_idx).copied() == Some(slice_id) {
-                    let top_mb = &macroblocks[top_idx];
-                    if !top_mb.skip {
-                        cabac_ctx[top_idx].mb_field_flag
-                    } else {
-                        false
-                    }
+            let top_field = if pair_top_y >= 2 {
+                let idx = (pair_top_y - 2) * mb_cols as usize + mb_x as usize;
+                if slice_id_grid.get(idx).copied() == Some(slice_id) {
+                    field_flags.get(idx).copied().flatten().unwrap_or(false)
                 } else {
                     false
                 }
@@ -761,10 +730,17 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
                 false
             };
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+            // Same both-half recording as `cabac_p.rs`: JM's speculative
+            // store writes the pair's real flag into the skipped TOP's
+            // `mb_data[].mb_field` when the read happens at the bottom.
             field_flags[grid_idx] = Some(cur_pair_field);
-            let bot_grid = grid_idx + mb_cols as usize;
-            if bot_grid < total {
-                field_flags[bot_grid] = Some(cur_pair_field);
+            if top_of_pair {
+                let bot_grid = grid_idx + mb_cols as usize;
+                if bot_grid < total {
+                    field_flags[bot_grid] = Some(cur_pair_field);
+                }
+            } else {
+                field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
             }
         }
         if is_skip {
@@ -772,6 +748,22 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::BSkip;
             mb.qp = qp;
             mb.skip = true;
+            // Same skipped-pair inferred-field recording as `cabac_p.rs`
+            // (both halves of THIS pair, not the grid row below). MBAFF
+            // only: `mb_idx` parity is pair parity, meaningless for
+            // progressive/PAFF-field slices.
+            if mbaff_frame {
+                cur_pair_field = cur_field_for_skip_ctx;
+                field_flags[grid_idx] = Some(cur_pair_field);
+                if mb_idx & 1 == 0 {
+                    let bot_grid = grid_idx + mb_cols as usize;
+                    if bot_grid < total {
+                        field_flags[bot_grid] = Some(cur_pair_field);
+                    }
+                } else {
+                    field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
+                }
+            }
             mb.mb_field_flag = cur_pair_field;
             prev_mb_skipped = true;
             // §9.3.3.1.1.5: ctxIdxInc for the next MB's mb_qp_delta is 0 when

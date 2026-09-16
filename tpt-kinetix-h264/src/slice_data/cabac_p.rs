@@ -448,11 +448,10 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
     // pair and never runs for a field picture.
     let mut cur_pair_field = field_pic_flag;
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
-    // FFmpeg's sl->prev_mb_skipped / sl->next_mb_skipped: when the top MB of a
-    // pair is skipped, the bottom MB's skip flag was already read (and the
-    // pair's field flag decoded if the bottom is coded).
+    // FFmpeg's sl->prev_mb_skipped: the top MB of the pair was skipped, so
+    // this pair's field flag has not been read yet and the bottom MB runs
+    // §7.4.4 field inference before its own skip read (JM `prevMbSkipped`).
     let mut prev_mb_skipped = false;
-    let mut next_mb_skipped = false;
     let mut decoded_mb_count = total;
     let first_mb = first_mb as usize;
 
@@ -490,30 +489,36 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
         // ctxIdxInc (2 instead of JM's 1) and desyncing the CABAC engine by
         // the time `sub_mb_type` was read (`todo-h264.md` #32bn).
         let cur_field_for_skip_ctx = if mbaff_frame {
-            if mb_idx & 1 == 1 {
-                field_flags[grid_idx].unwrap_or(false)
-            } else {
-                // Top of pair: the pair's own field/frame-ness isn't known
-                // yet (§7.4.4 inference, see `mbaff::field_flag_inference`)
-                // -- NOT `false` unconditionally. A field-coded pair
-                // immediately to the left (or, failing that, immediately
-                // above) makes this pair's *inferred* field-ness true for
-                // the purposes of deriving this MB's own `mb_skip_flag`
-                // neighbour availability/parity, even though the pair's real
-                // `mb_field_decoding_flag` (read later, if coded) may turn
-                // out different. Missing this (CANLMA2_Sony_C POC 1, pair 71
-                // -- immediately right of the field-coded pair 70) picked
-                // `ctxIdxInc`/engine-state-consuming decisions that silently
-                // desynced the CABAC engine well before any wrong decoded
-                // bit VALUE appeared, surfacing only later as MB143's
-                // `mb_type` (`todo-h264.md` #32bp).
+            // JM read_one_macroblock_{p,b}_slice_cabac runs §7.4.4
+            // `field_flag_inference` before the skip read for the pair's TOP
+            // macroblock (its field flag isn't known yet) AND for the BOTTOM
+            // macroblock of a pair whose top was skipped (`prevMbSkipped`);
+            // the bottom of a pair whose top was CODED inherits the pair's
+            // real flag instead (`mb_data[mb_nr-1].mb_field`). The inference
+            // uses PAIR-level neighbours (JM `mbAddrA = 2*(pair-1)`,
+            // `mbAddrB = 2*(pair-mb_cols)` -- the left/above pair's TOP MB),
+            // identical for both halves. A field-coded pair immediately to
+            // the left (or, failing that, immediately above) makes this
+            // pair's *inferred* field-ness true for the purposes of deriving
+            // this MB's own `mb_skip_flag` neighbour availability/parity,
+            // even though the pair's real `mb_field_decoding_flag` (read
+            // later, if coded) may turn out different. Missing the top-of-
+            // pair case (CANLMA2_Sony_C POC 1, pair 71 -- immediately right
+            // of the field-coded pair 70) picked `ctxIdxInc`/engine-state-
+            // consuming decisions that silently desynced the CABAC engine
+            // well before any wrong decoded bit VALUE appeared, surfacing
+            // only later as MB143's `mb_type` (`todo-h264.md` #32bp).
+            if mb_idx & 1 == 0 || prev_mb_skipped {
+                let pair_top_y = (mb_y as usize) & !1;
                 let left_pair_top = (mb_x > 0)
-                    .then(|| (mb_y as usize) * mb_cols as usize + (mb_x as usize - 1))
+                    .then(|| pair_top_y * mb_cols as usize + (mb_x as usize - 1))
                     .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
-                let above_pair_top = (mb_y >= 2)
-                    .then(|| (mb_y as usize - 2) * mb_cols as usize + mb_x as usize)
+                let above_pair_top = (pair_top_y >= 2)
+                    .then(|| (pair_top_y - 2) * mb_cols as usize + mb_x as usize)
                     .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
                 crate::mbaff::field_flag_inference(left_pair_top, above_pair_top, &field_flags)
+            } else {
+                field_flags[grid_idx].unwrap_or(false)
             }
         } else {
             false
@@ -551,78 +556,59 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             top_skipped: top_same_slice && top_idx.map(|i| macroblocks[i].skip).unwrap_or(false),
         };
         let (r0, o0) = dec.debug_state();
-        // FFmpeg ff_h264_decode_mb_cabac skip handling (MBAFF pairing):
-        //   - bottom MB of a pair whose top was skipped reuses the already-
-        //     decoded next_mb_skipped instead of reading a bin;
-        //   - a skipped TOP MB pre-reads the bottom MB's skip flag, and if the
-        //     bottom is coded, the pair's mb_field_decoding_flag follows;
-        //   - a coded TOP MB reads the pair's mb_field_decoding_flag.
+        // MBAFF pair skip/field-flag element order, verified bin-for-bin
+        // against JM `read_one_macroblock_p_slice_cabac`: EVERY macroblock --
+        // including the bottom of a pair whose top was skipped -- reads its
+        // own `mb_skip_flag` from the live engine. JM's
+        // `check_next_mb_and_get_field_mode_CABAC_p_slice` "lookahead" after a
+        // skipped top runs its bottom-MB skip/field reads on a COPIED
+        // decoding environment (engine + mb_type/mb_aff contexts) and restores
+        // them afterwards, so those bins never consume the real bitstream;
+        // its only surviving side effects are `last_dquant = 0` (handled by
+        // `prev_dqp_nonzero = false` on the skip path) and the bottom's entry
+        // `mb_field` (overwritten by its own §7.4.4 inference). Kinetix
+        // previously consumed the lookahead reads for real and reused their
+        // values for the bottom MB -- one phantom skip-flag bin per
+        // both-skipped pair and one dropped field-flag read per coded
+        // bottom-after-skipped-top. First divergence vs the JM KDBGBIN
+        // engine trace: CANLMA2_Sony_C POC 1 pair 44 (both MBs skipped, bins
+        // 12880-12882), where JM's real stream contains the bottom's skip
+        // read and ours did not (`todo-h264.md` #32br).
         let top_of_pair = mbaff_frame && mb_idx % 2 == 0;
-        let is_skip = if mbaff_frame && !top_of_pair && prev_mb_skipped {
-            next_mb_skipped
-        } else {
-            ctxs.mb_skip.decode(&mut dec, &skip_neighbors)
-        };
-        let mut pair_field_pending = false;
-        if mbaff_frame && top_of_pair {
-            if is_skip {
-                // Read the bottom MB's skip flag for (x, y+1): its left
-                // neighbour is (x-1, y+1); its top is THIS MB (skip=true).
-                let bot_left_skipped = if mb_x > 0 {
-                    // Left MB of the BOTTOM MB (x-1, y+1): already decoded as
-                    // part of the previous pair.
-                    let bl_idx = ((mb_y as usize) + 1) * mb_cols as usize + mb_x as usize - 1;
-                    if slice_id_grid.get(bl_idx).copied() == Some(slice_id) {
-                        macroblocks.get(bl_idx).map(|m| m.skip).unwrap_or(false)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                let bot_neighbors = crate::entropy::MbSkipNeighbors {
-                    left_available: mb_x > 0,
-                    left_skipped: bot_left_skipped,
-                    top_available: true,
-                    top_skipped: true,
-                };
-                next_mb_skipped = ctxs.mb_skip.decode(&mut dec, &bot_neighbors);
-                if !next_mb_skipped {
-                    pair_field_pending = true;
-                }
-            } else {
-                pair_field_pending = true;
-            }
-        }
+        let is_skip = ctxs.mb_skip.decode(&mut dec, &skip_neighbors);
+        // JM read_top / read_bottom: the pair's `mb_field_decoding_flag`
+        // follows a coded macroblock exactly when it has not already been
+        // read for this pair -- i.e. after a coded TOP MB, or after a coded
+        // BOTTOM MB whose top was skipped. (A coded bottom whose top was
+        // coded finds the flag already recorded at the top's iteration.)
+        let pair_field_pending = mbaff_frame && !is_skip && (top_of_pair || prev_mb_skipped);
         if pair_field_pending {
+            // JM `readFieldModeInfo_CABAC` (verified via KDBGFF oracle
+            // traces): a/b are the PAIR-LEVEL neighbours from
+            // `init_mb_neighbours` -- `mbAddrA = 2*(pair-1)` (left pair's
+            // TOP MB, gated on not being in the leftmost column) and
+            // `mbAddrB = 2*(pair-mb_cols)` (the pair ABOVE's TOP MB) -- NOT
+            // the field-aware §6.4.10.1 neighbours (those only feed
+            // `mb_skip_flag`). Their stored `mb_field` is read ungated by
+            // skip; `field_flags` mirrors it (skipped pairs store their
+            // §7.4.4 inferred value, and the real flag overwrites the pair
+            // top when read at the bottom, mirroring JM's speculative
+            // store).
+            let pair_top_y = (mb_y as usize) & !1;
             let left_field = if mb_x > 0 {
-                let left_idx = (mb_y as usize) * mb_cols as usize + mb_x as usize - 1;
-                // §6.4.9: a different-slice neighbour is unavailable here too.
-                if slice_id_grid.get(left_idx).copied() == Some(slice_id) {
-                    let left_mb = &macroblocks[left_idx];
-                    // FFmpeg uses the mb_type interlaced flag (0 for skipped MBs); the
-                    // mb_field_decoding_flag equals the pair's field flag even for
-                    // skipped MBs, which would over-count ctxIdxInc for skipped neighbours.
-                    if !left_mb.skip {
-                        cabac_ctx[left_idx].mb_field_flag
-                    } else {
-                        false
-                    }
+                let idx = pair_top_y * mb_cols as usize + mb_x as usize - 1;
+                if slice_id_grid.get(idx).copied() == Some(slice_id) {
+                    field_flags.get(idx).copied().flatten().unwrap_or(false)
                 } else {
                     false
                 }
             } else {
                 false
             };
-            let top_field = if mb_y > 0 {
-                let top_idx = ((mb_y as usize) - 1) * mb_cols as usize + mb_x as usize;
-                if slice_id_grid.get(top_idx).copied() == Some(slice_id) {
-                    let top_mb = &macroblocks[top_idx];
-                    if !top_mb.skip {
-                        cabac_ctx[top_idx].mb_field_flag
-                    } else {
-                        false
-                    }
+            let top_field = if pair_top_y >= 2 {
+                let idx = (pair_top_y - 2) * mb_cols as usize + mb_x as usize;
+                if slice_id_grid.get(idx).copied() == Some(slice_id) {
+                    field_flags.get(idx).copied().flatten().unwrap_or(false)
                 } else {
                     false
                 }
@@ -630,11 +616,22 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
                 false
             };
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
+            // Record the pair's real flag on BOTH halves. When this read
+            // happens at the bottom (pair whose top was skipped), the top
+            // half's entry currently holds the §7.4.4 INFERRED value from
+            // its skip path -- JM's `check_next_mb_and_get_field_mode`
+            // speculative store overwrites `mb_data[top].mb_field` with the
+            // pair's real flag at exactly this point, and the NEXT pair's
+            // field-flag context reads it (CANLMA2_Sony_C POC 1 pair 71 ->
+            // pair 72: inc=1 vs JM's inc=0 without this correction).
             field_flags[grid_idx] = Some(cur_pair_field);
-            // The pair's bottom macroblock sits one frame-MB row below.
-            let bot_grid = grid_idx + mb_cols as usize;
-            if bot_grid < total {
-                field_flags[bot_grid] = Some(cur_pair_field);
+            if top_of_pair {
+                let bot_grid = grid_idx + mb_cols as usize;
+                if bot_grid < total {
+                    field_flags[bot_grid] = Some(cur_pair_field);
+                }
+            } else {
+                field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
             }
         }
         let (r1, o1) = dec.debug_state();
@@ -646,6 +643,28 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             mb.mb_type = MbType::PSkip;
             mb.qp = qp;
             mb.skip = true;
+            // JM: a skipped pair never coded an `mb_field_decoding_flag`, but
+            // `mb_data[].mb_field` still holds the pair's §7.4.4 INFERRED
+            // value (both halves run the same pair-level inference, and a
+            // bottom whose top was coded inherits the real flag already
+            // stored in `field_flags[grid_idx]`). Later pairs' field-flag
+            // contexts and field/frame neighbour addressing read it ungated,
+            // so record it on both halves of THIS pair -- not the grid row
+            // below, which belongs to a different pair when the loop is at
+            // the bottom half. MBAFF only: `mb_idx` parity is pair parity,
+            // meaningless for progressive/PAFF-field slices.
+            if mbaff_frame {
+                cur_pair_field = cur_field_for_skip_ctx;
+                field_flags[grid_idx] = Some(cur_pair_field);
+                if mb_idx & 1 == 0 {
+                    let bot_grid = grid_idx + mb_cols as usize;
+                    if bot_grid < total {
+                        field_flags[bot_grid] = Some(cur_pair_field);
+                    }
+                } else {
+                    field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
+                }
+            }
             mb.mb_field_flag = cur_pair_field;
             prev_mb_skipped = true;
             // §9.3.3.1.1.5: ctxIdxInc for the next MB's mb_qp_delta is 0 when
