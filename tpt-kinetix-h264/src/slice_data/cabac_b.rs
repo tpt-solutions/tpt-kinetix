@@ -645,8 +645,21 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
         // *above* -- two frame-MB rows up -- for BOTH halves of the current
         // field pair, not `grid_idx - mb_cols` (which wrongly resolves the
         // bottom MB's "top" to its own always-available pair-mate).
-        let cur_field_for_skip_ctx = if mbaff_frame && (mb_idx & 1 == 1) {
-            field_flags[grid_idx].unwrap_or(false)
+        let cur_field_for_skip_ctx = if mbaff_frame {
+            if mb_idx & 1 == 1 {
+                field_flags[grid_idx].unwrap_or(false)
+            } else {
+                // Top of pair: see `cabac_p.rs`'s identical fix -- §7.4.4
+                // `mb_field_decoding_flag` inference
+                // (`mbaff::field_flag_inference`), not unconditional `false`.
+                let left_pair_top = (mb_x > 0)
+                    .then(|| (mb_y as usize) * mb_cols as usize + (mb_x as usize - 1))
+                    .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
+                let above_pair_top = (mb_y >= 2)
+                    .then(|| (mb_y as usize - 2) * mb_cols as usize + mb_x as usize)
+                    .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
+                crate::mbaff::field_flag_inference(left_pair_top, above_pair_top, &field_flags)
+            }
         } else {
             false
         };

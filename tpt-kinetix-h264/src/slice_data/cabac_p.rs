@@ -489,8 +489,32 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
         // instead of leaving it unavailable, corrupting the `mb_skip_flag`
         // ctxIdxInc (2 instead of JM's 1) and desyncing the CABAC engine by
         // the time `sub_mb_type` was read (`todo-h264.md` #32bn).
-        let cur_field_for_skip_ctx = if mbaff_frame && (mb_idx & 1 == 1) {
-            field_flags[grid_idx].unwrap_or(false)
+        let cur_field_for_skip_ctx = if mbaff_frame {
+            if mb_idx & 1 == 1 {
+                field_flags[grid_idx].unwrap_or(false)
+            } else {
+                // Top of pair: the pair's own field/frame-ness isn't known
+                // yet (§7.4.4 inference, see `mbaff::field_flag_inference`)
+                // -- NOT `false` unconditionally. A field-coded pair
+                // immediately to the left (or, failing that, immediately
+                // above) makes this pair's *inferred* field-ness true for
+                // the purposes of deriving this MB's own `mb_skip_flag`
+                // neighbour availability/parity, even though the pair's real
+                // `mb_field_decoding_flag` (read later, if coded) may turn
+                // out different. Missing this (CANLMA2_Sony_C POC 1, pair 71
+                // -- immediately right of the field-coded pair 70) picked
+                // `ctxIdxInc`/engine-state-consuming decisions that silently
+                // desynced the CABAC engine well before any wrong decoded
+                // bit VALUE appeared, surfacing only later as MB143's
+                // `mb_type` (`todo-h264.md` #32bp).
+                let left_pair_top = (mb_x > 0)
+                    .then(|| (mb_y as usize) * mb_cols as usize + (mb_x as usize - 1))
+                    .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
+                let above_pair_top = (mb_y >= 2)
+                    .then(|| (mb_y as usize - 2) * mb_cols as usize + mb_x as usize)
+                    .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
+                crate::mbaff::field_flag_inference(left_pair_top, above_pair_top, &field_flags)
+            }
         } else {
             false
         };

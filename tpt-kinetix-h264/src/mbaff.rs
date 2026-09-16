@@ -100,6 +100,41 @@ fn flag_at(field_flags: &[Option<bool>], idx: isize, total: usize) -> Option<boo
     }
 }
 
+/// §7.4.4 `mb_field_decoding_flag` inference: "inferred equal to
+/// `mb_field_decoding_flag` of `mbAddrA`; otherwise, if `mbAddrB` is
+/// available, inferred equal to `mb_field_decoding_flag` of `mbAddrB`;
+/// otherwise 0." `mbAddrA`/`mbAddrB` here are the *pair-level* neighbours --
+/// the frame-MB address of the TOP macroblock of the pair immediately to the
+/// left / immediately above -- not the full mixed-field §6.4.10.1
+/// neighbours [`derive_neighbours`] computes (that derivation needs the
+/// *current* macroblock's own `mb_field_decoding_flag` as an input, which is
+/// exactly what this function exists to supply when it isn't known yet: the
+/// pair's own field/frame-ness is only resolved partway through decoding its
+/// TOP macroblock, at the point where `mb_skip_flag`'s CABAC context already
+/// needs the current pair's inferred field-ness). Mirrors JM's
+/// `field_flag_inference` (`mb_read.c`), which performs this exact plain
+/// per-pair lookup rather than routing through JM's own
+/// `getAffNeighbour`.
+///
+/// `left_pair_top` / `above_pair_top` are the frame-MB grid indices of the
+/// two candidate macroblocks, already filtered by the caller for picture
+/// bounds and slice availability (`None` when unavailable); `field_flags` is
+/// the per-frame-MB `mb_field_decoding_flag` grid used elsewhere in the CABAC
+/// parse (`None` for a not-yet-decoded position).
+pub fn field_flag_inference(
+    left_pair_top: Option<usize>,
+    above_pair_top: Option<usize>,
+    field_flags: &[Option<bool>],
+) -> bool {
+    if let Some(idx) = left_pair_top {
+        return field_flags.get(idx).copied().flatten().unwrap_or(false);
+    }
+    if let Some(idx) = above_pair_top {
+        return field_flags.get(idx).copied().flatten().unwrap_or(false);
+    }
+    false
+}
+
 /// Derive the neighbouring macroblock addresses for `mb` at frame-MB position
 /// `(mb_x, mb_y)` inside an MBAFF frame (`mb_aff == true`), per §6.4.10.1.
 ///
