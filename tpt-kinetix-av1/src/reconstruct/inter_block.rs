@@ -2237,6 +2237,20 @@ impl<'a> TileDecodeState<'a> {
             };
             let t0 = prep(slot0, mvs[0]);
             let t1 = prep(slot1, mvs[1]);
+            if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
+                && plane == 0
+                && mi_col == 16
+                && mi_row == 16
+            {
+                eprintln!(
+                    "COMP mi=({mi_col},{mi_row}) ref0={} ref1={} mv0={:?} mv1={:?} weight={blend_weight} comp_type={}",
+                    ref_names[0], ref_names[1], mvs[0], mvs[1], mask.comp_type
+                );
+                for row in 0..bh.min(8) {
+                    eprintln!("  t0 row={row}: {:?}", &t0[row * bw..row * bw + bw.min(20)]);
+                    eprintln!("  t1 row={row}: {:?}", &t1[row * bw..row * bw + bw.min(20)]);
+                }
+            }
             if mask.comp_type == 3 || mask.comp_type == 4 {
                 // Generate (plane 0) or sub-sample (chroma) the luma-domain
                 // blend mask, then mask-blend per §7.11.3.14.

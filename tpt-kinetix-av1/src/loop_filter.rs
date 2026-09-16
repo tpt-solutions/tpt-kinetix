@@ -1596,11 +1596,26 @@ pub fn apply_post_filters(
         let row: Vec<u8> = (32..64).map(|x| plane[y * width + x]).collect();
         eprintln!("{label} y={y}: {row:?}");
     };
+    // `KINETIX_AV1_DBG_PXY=x,y` traces one luma pixel's value across each
+    // post-filter stage (pre-filter/post-deblock/post-cdef/post-lr), to
+    // separate reconstruction bugs from loop-filter bugs.
+    let dbg_pxy = std::env::var("KINETIX_AV1_DBG_PXY").ok().and_then(|s| {
+        let (a, b) = s.split_once(',')?;
+        Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+    });
+    let dump_pxy = |label: &str, plane: &[u8]| {
+        if let Some((x, y)) = dbg_pxy {
+            if x < width && y < height {
+                eprintln!("PXY {label} ({x},{y}) = {}", plane[y * width + x]);
+            }
+        }
+    };
     if dbg {
         for y in 32..48 {
             dump_row("pre-filter", y_plane, y);
         }
     }
+    dump_pxy("pre-filter", y_plane);
 
     // --- Deblocking loop filter (§7.14) ---
     // §7.14 loop filter process: when both luma filter levels are zero the
@@ -1687,6 +1702,7 @@ pub fn apply_post_filters(
             dump_row("post-deblock", y_plane, y);
         }
     }
+    dump_pxy("post-deblock", y_plane);
 
     // Loop restoration's stripe-boundary rows (§7.17.1) are sourced from the
     // *pre-CDEF* (deblock-only) plane, not the post-CDEF pixels the in-stripe
@@ -1729,6 +1745,7 @@ pub fn apply_post_filters(
                 let uw = 64.min(width - ux);
                 cdef_plane_luma(
                     y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
+                    &meta.luma_skip, meta.w8,
                 );
                 ux += 64;
             }
@@ -1755,7 +1772,7 @@ pub fn apply_post_filters(
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
                     u_plane, &src_u, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
-                    uv_sec, uv_damping, uy, ux, uh, uw,
+                    uv_sec, uv_damping, uy, ux, uh, uw, &meta.luma_skip, meta.w8,
                 );
                 ux += uv_step_x;
             }
@@ -1780,7 +1797,7 @@ pub fn apply_post_filters(
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
                     v_plane, &src_v, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
-                    uv_sec, uv_damping, uy, ux, uh, uw,
+                    uv_sec, uv_damping, uy, ux, uh, uw, &meta.luma_skip, meta.w8,
                 );
                 ux += uv_step_x;
             }
@@ -1793,6 +1810,7 @@ pub fn apply_post_filters(
             dump_row("post-cdef", y_plane, y);
         }
     }
+    dump_pxy("post-cdef", y_plane);
 
     // --- Loop restoration (§7.17) ---
     // Enabled by default as of 2026-09-04, after three real bugs were found
@@ -1819,6 +1837,7 @@ pub fn apply_post_filters(
         apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units, &lr_pre_u, sub_y);
         apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units, &lr_pre_v, sub_y);
     }
+    dump_pxy("post-lr", y_plane);
 
     Ok(())
 }
@@ -1843,6 +1862,14 @@ fn cdef_plane_luma(
     x0_unit: usize,
     unit_h: usize,
     unit_w: usize,
+    // Per-8×8-luma-grid-cell skip flag (`FrameMeta::luma_skip`, indexed
+    // `row * w8 + col`): AV1 §7.15.1 only filters an 8×8 block when at least
+    // one of its covered 4×4s carries real coefficients — dav1d gates this
+    // via `noskip_mask`, built in `decode.c` from `if (!b->skip)`. A fully
+    // skipped 8×8 (pure motion-compensated copy, no residual) must be left
+    // untouched by CDEF even when its neighbours are filtered.
+    luma_skip: &[bool],
+    w8: usize,
 ) {
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
@@ -1854,6 +1881,9 @@ fn cdef_plane_luma(
         for c in 0..block_cols {
             let x0 = c * 8;
             if x0 < x0_unit || x0 >= x0_unit + unit_w {
+                continue;
+            }
+            if luma_skip.get(r * w8 + c).copied().unwrap_or(false) {
                 continue;
             }
             let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
@@ -1872,6 +1902,12 @@ fn cdef_plane_luma(
                 0
             };
             let dir = if pri_str == 0 { 0 } else { yd };
+            if std::env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 80 && y0 == 64 {
+                eprintln!(
+                    "CDEFPX x0={x0} y0=64 pri_str={pri_str} sec_str={sec_str} damping={damping} yd={yd} var={var} adj_pri={p} dir={dir} pre={:?}",
+                    (0..8).map(|r| src[(y0 + r) * width + x0]).collect::<Vec<_>>()
+                );
+            }
             cdef_filter_block(
                 plane,
                 width,
@@ -1916,6 +1952,11 @@ fn cdef_plane_chroma(
     x0_unit: usize,
     unit_h: usize,
     unit_w: usize,
+    // See `cdef_plane_luma`'s doc comment: the same per-8×8-luma noskip gate
+    // applies to chroma (dav1d's `noskip_mask` check gates the whole block,
+    // luma *and* chroma, before either filter call runs).
+    luma_skip: &[bool],
+    w8: usize,
 ) {
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
@@ -1935,6 +1976,13 @@ fn cdef_plane_chroma(
             // luma 8×8 block. Chroma direction is then remapped via Cdef_Uv_Dir.
             let luma_x0 = x0 << sub_x;
             let luma_y0 = y0 << sub_y;
+            if luma_skip
+                .get((luma_y0 / 8) * w8 + luma_x0 / 8)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let (yd, _var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
             // §7.15.3 / dav1d `adjust_strength`: the variance-based primary
             // strength adjustment is applied to the *luma* plane only. Chroma
@@ -2379,7 +2427,7 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8);
+        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1);
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
     }
 
@@ -2432,7 +2480,7 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8);
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &[false], 1);
         // With a correctly-capped `var_str`, CDEF must not blend the two
         // halves into a single intermediate value that erases the edge —
         // the two sides should stay clearly separated at every row.
@@ -2460,7 +2508,7 @@ mod tests {
             *v = ((i * 53) % 256) as u8;
         }
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8);
+        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8, &[false; 4], 2);
         for y in 8..16 {
             for x in 0..16 {
                 assert_eq!(
@@ -2470,5 +2518,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cdef_skips_a_fully_skipped_8x8_block() {
+        // Regression test for the missing AV1 §7.15.1 noskip gate: dav1d only
+        // ever calls its CDEF filter for an 8×8 block when `noskip_mask` shows
+        // at least one covered 4×4 has real coefficients (`decode.c`, `if
+        // (!b->skip) noskip_mask |= ...`) — a fully skipped inter block (pure
+        // MC copy, no residual) must come out of CDEF byte-identical, even
+        // with a strong, edge-triggering strength that would otherwise change
+        // it. Before this fix `cdef_plane_luma` had no skip awareness at all
+        // and filtered every 8×8 in the unit unconditionally.
+        let mut plane = vec![0u8; 8 * 8];
+        for y in 0..8 {
+            for x in 0..8 {
+                // A hard step edge: exactly the kind of content CDEF's
+                // primary filter would otherwise pull towards its neighbours.
+                plane[y * 8 + x] = if x < 4 { 145 } else { 210 };
+            }
+        }
+        let orig = plane.clone();
+        let src = plane.clone();
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 2, 4, 0, 0, 8, 8, &[true], 1);
+        assert_eq!(
+            plane, orig,
+            "a fully-skipped 8x8 block must be left untouched by CDEF"
+        );
     }
 }

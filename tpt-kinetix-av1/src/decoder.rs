@@ -106,6 +106,15 @@ impl RefFrameStore {
         // Build the motion field cells once; clone into each slot.
         let mf_cells_opt: Option<&[crate::inter::MotionFieldCell]> =
             motion_field.map(|mf| mf.cells.as_slice());
+        if std::env::var("KINETIX_AV1_DBG_REFRESH").is_ok() {
+            let stride = frame.width as usize;
+            if stride > 80 && y.len() > 66 * stride + 80 {
+                eprintln!(
+                    "REFRESH flags={refresh_flags:#04x} slots={to_refresh:?} y(80,66)={}",
+                    y[66 * stride + 80]
+                );
+            }
+        }
         for i in to_refresh {
             self.slots[i] = Some(StoredFrame {
                 y: y.clone(),

@@ -6418,3 +6418,74 @@
 > case) since the mi(4,18)-class bug is now closed. Warp-affine regression
 > (16 blocks, frame4/6 better vs frame5/7 worse under `KINETIX_AV1_NO_WARP`
 > bisection) is UNTOUCHED this session — still open, unrelated to this fix.
+
+> **2026-09-16 (cont'd) — FOUND + FIXED: CDEF was missing the §7.15.1
+> "noskip" gate, filtering fully-skipped 8×8 blocks it should have left
+> alone.** Continued chasing the (80,66) diff from the session above.
+> Traced `minimal_av1_inter_ivf` frame 1's first-diverging pixel (80,66),
+> found via `dbg_av1_inter.rs`'s diffmap: Kinetix=152, dav1d=153. The
+> DISPLAYED frame's own block at mi(16,16) (16×8, `skip=false`, COMPOUND
+> `COMP_INTER_WEIGHTED_AVG`, `jnt_weight=11`) was traced end-to-end —
+> compound blend math, weight table, intermediate-domain precision all
+> matched dav1d exactly (confirmed via new dav1d instrumentation added to
+> `recon_tmpl.c`'s compound branch, `COMPPX`/`postBLEND` prints) — *except*
+> ref1's intermediate MC value: dav1d's `tmp[1]=2400` (⇒ ref pixel 150),
+> Kinetix's own `t1=2384` (⇒ ref pixel 149). Both engines pull ref1 from
+> the same semantic reference slot; the 1-pixel gap was therefore already
+> baked into a HIDDEN reference frame decoded earlier within the same IVF
+> "frame 1" payload (this synthetic stream packs 3 real OBU frames per
+> IVF-frame entry — 2 hidden + 1 shown; `dbg_av1_inter.rs`'s naive
+> payload-index-as-frame-index diffmap only sees the shown one, so the
+> real bug was invisible to the existing harness and had to be traced via
+> `apply_post_filters`'s new `KINETIX_AV1_DBG_PXY=x,y` stage-tracer and
+> `RefFrameStore::refresh`'s new `KINETIX_AV1_DBG_REFRESH` hook, which
+> together show the pixel's value crossing pre-filter→deblock→CDEF→LR
+> and which physical ref slot each hidden frame's output refreshes).
+> The hidden frame's own trace: pre-filter=150, post-deblock=150 (no
+> change), **post-cdef=149 (CDEF alone introduced the -1)**, post-lr=149.
+> Root cause: `cdef_plane_luma`/`cdef_plane_chroma` (`loop_filter.rs`)
+> filtered *every* 8×8 block in a CDEF unit unconditionally — there was no
+> equivalent of dav1d's `noskip_mask` gate (`decode.c`,
+> `dav1d_cdef_brow`: `if (!(noskip_mask & bx_mask)) { ... goto next_b; }`,
+> populated by `if (!b->skip) noskip_mask |= ...` per coded block). AV1
+> §7.15.1 only applies CDEF to an 8×8 block when at least one of its
+> covered 4×4s carries real coefficients; a fully-skipped block (pure MC
+> copy) must come out byte-identical. `FrameMeta::luma_skip` (already
+> populated per-8×8 by `record_luma`, previously used only by
+> `deblock_plane`) is exactly this flag and was simply never threaded
+> through to CDEF. FIX: added `luma_skip: &[bool], w8: usize` params to
+> both `cdef_plane_luma` and `cdef_plane_chroma`, skip the whole 8×8 body
+> when the covered cell is fully skipped (chroma gates on the co-located
+> *luma* cell, matching dav1d's single shared `noskip_mask`/`bx_mask`
+> check that skips both planes' filters together), wired through both
+> call sites in `apply_post_filters`. Added a regression test
+> (`cdef_skips_a_fully_skipped_8x8_block`) asserting a hard step edge with
+> `luma_skip=true` and a strong pri/sec strength comes out byte-identical.
+> VERIFIED: `av1_inter_sequence_vs_dav1d_when_available` luma diff samples
+> per frame 61/145/180/144/73/26/27 (656 total) → 12/40/48/40/13/0/8 (161
+> total), a 75% reduction; frame 6 is now fully bit-exact (was 26 diffs).
+> `av1_inter_corpus_vs_dav1d_when_available`'s `testsrc_96x64` clip also
+> improved sharply (diffs 1/5/5/0/0, was materially worse); `testsrc_64x64`
+> unchanged (~500-780 diffs per frame, pre-existing separate issue,
+> confirmed via `git stash` A/B — not touched by this fix, likely the warp
+> path). AV1 intra corpus stays 6/6 bit-exact (`cargo test -p
+> tpt-kinetix-av1` 153/153, `cargo clippy -p tpt-kinetix-av1 --all-targets
+> -- -D warnings` clean, `cargo test --workspace --lib --bins` all green).
+> New debug hooks left in place (all off by default): `KINETIX_AV1_DBG_PXY`
+> (loop_filter.rs, trace one pixel across filter stages),
+> `KINETIX_AV1_DBG_REFRESH` (decoder.rs, trace one pixel whenever a DPB
+> slot is refreshed, to identify which internal/hidden frame produced a
+> given reference), `KINETIX_AV1_DBG_COMP` (inter_block.rs, dump compound
+> blend inputs/weight for one mi position), `KINETIX_AV1_DBG_CDEFPX`
+> (loop_filter.rs, dump one CDEF unit's pri/sec/dir/variance/pre-filter
+> row). REMAINING for next session: the residual ~161 diff samples are
+> smaller and more scattered than before — re-run the diffmap fresh
+> (coordinates will have shifted again) rather than assuming (80,66)/
+> mi(16,16) is still the first divergence. `testsrc_64x64`'s much larger
+> per-frame diffs (500-780) were NOT investigated this session and look
+> like a different bug (possibly the still-open warp-affine regression,
+> Thread B from this session's brief — that clip is small enough
+> (64×64, 1 SB) that warp blocks are proportionally more common). Also
+> untouched: the warp-affine regression itself (16 blocks across the
+> 8-frame `minimal_av1_inter_ivf` clip, mixed frame4/6-better vs
+> frame5/7-worse under `KINETIX_AV1_NO_WARP`).
