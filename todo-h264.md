@@ -529,6 +529,90 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bs — MBAFF field-inter reconstruction: three fixes landed behind
+KINETIX_MBAFF_FIELD_MC (commit `de42d44`); JM MV oracle built (KDBGMV/KDBGMVP);
+the MVP neighbour-addressing transcription is ~90% done and parked with one
+known wrinkle. Commit `de42d44` + `93174f6`-era harness.
+
+**Pixel oracle established**: CANLMA2 sets `disable_deblocking_filter_idc=1`,
+so JM never deblocks it (`init_picture_decoding`'s `iDeblockMode` stays 1) —
+the ITU `.yuv` reference IS the pre-deblock reconstruction, and the
+`dbg_itu_pframe` harness (`ITU_CLIP=CANLMA2_Sony_C`,
+`ITU_DUMP_FRAMES_DIR=<dir>` writes `our_fN.yuv`) plus a small python per-MB
+diffmap is the whole loop. (The JM `exit_picture` JM_DUMP_DIR hooks are dead
+for this clip — they sit inside the `!iDeblockMode` branch; and
+`ffprobe -export_side_data mvs` exports zero vectors for this build.) Always
+diff our frame k against reference FRAME k (`ref[fl*k..]`) — a python run
+against frame 0 cost an hour of confusion.
+
+**Three fixes in `reconstruct_mbaff_inter_luma`/`_chroma`** (all behind the
+existing opt-in gate):
+1. Inter residuals of field-coded MBs un-scan with `FIELD_SCAN_4X4` (§8.5.6),
+   luma + chroma AC — the inter twin of #32bk's Intra_16×16 luma-DC fix.
+2. `field_planes` indexed by FIELD ref-list entries: entry 2k = reference
+   frame k's SAME-parity field, entry 2k+1 = opposite-parity (§8.2.4.2.1).
+   The old `field_planes[ref_idx][own_parity]` treated field entries as frame
+   indices — CANLMA2 field MBs legally carry ref_idx=1 (one frame ref → two
+   field entries) and silently decoded as a second copy of entry 0.
+3. Luma residuals use the Inter-Y scaling slot (3), matching the frame path.
+
+Gate-on POC 1 result: Y ndiff 278 492 → 267 446; **the entire top pair row
+(including the previously-diverging pair 4) is pixel-exact and 46 field MBs
+exact (was 0)**; gate stays opt-in (473 field MBs still diverge).
+
+**MVP investigation (the remaining gap) — oracle built, transcription parked:**
+JM's `perform_mc_single` and `GetMotionVectorPredictorMBAFF`
+(`lib/lcommon/mv_prediction.c`) now carry `KDBGMV` / `KDBGMVP` env-gated
+prints (final per-partition MVs with mb_addr/i/j/bsx/bsy/ref/field; and the
+resolved `block[0..2]` PixelPos + resulting pred), in the LOCAL
+`C:\Users\phill\jm-oracle-fresh` tree only, split per-POC by the
+`KDBG exit_picture: poc=` markers (also added this session — note
+`getenv`-gated prints survive the `binmode.o` mingw build). Findings,
+verified against CANLMA2 POC 1 pair 4:
+- Our committed MVs for the field-TOP MB(4,0) match JM's final MVs exactly
+  (all 7 partitions) — parse + MVP + (with the fixes) pixels are right there.
+- JM resolves MVP neighbours via `get_neighbors(currMB, block, mb_x, mb_y,
+  blockshape_x)` → `get4x4Neighbour(mb_x-1, mb_y)` etc: **L/U/UR are the
+  partition's TOP-left-corner lookups, NOT the spec's bottom-left A sample**
+  (`(xP-1, yP+hP-1)` never appears). The `block[]` positions go through
+  `getAffNeighbour` (mb_access.c:281) — the full §6.4.10.1 field/frame ×
+  top/bottom branch tree against PAIR-level `mbAddrA/B/C/D` — and the
+  candidate mv/ref are F2F-converted INLINE per candidate
+  (`GetMotionVectorPredictorMBAFF`: frame neighbour under field current →
+  `ref*2, y/2`; the inverse → `ref>>1, y*2`), C-truncation division.
+- A line-by-line `resolve_aff_neighbour` transcription was written into
+  `mv.rs` and verified to reproduce JM's MVs for MB(4,0) AND most of
+  MB(4,1)'s partitions, but one wrinkle remains: JM's `U`/`D` candidate reads
+  for field MBs hit `mv_info` positions (e.g. pos_y=6 for a pair-row-0
+  bottom-half current whose compressed rows are 0..3) that imply an extra
+  `get_mb_pos`/`block_y_aff` bookkeeping convention for field MBs' own-row
+  reads that was not reverse-engineered before context ran out; the net
+  ndiff of the partial transcription was neutral-to-negative (278 864), so
+  **the transcription was REVERTED from the working tree** (this note + the
+  JM tree preserve everything needed to redo it).
+- `ffprobe`/`ffmpeg` MV export is useless here (empty side data), and the
+  JM `read_motion_info_from_NAL` function pointer's assignment site was
+  never located (grep finds only the declaration + call sites — likely
+  struct-template copying); instrumenting `perform_mc_single` +
+  `GetMotionVectorPredictorMBAFF` directly was the productive path.
+
+**For next session**: (1) re-derive the last wrinkle — dump JM's
+`get_mb_pos`/`block_y`/`block_y_aff` for field MBs (one more KDBG print in
+`getAffNeighbour`/`get_mb_pos`) and finish `resolve_aff_neighbour`; the
+L-column rule already reverse-engineered and confirmed on both parities:
+left pair halves enumerated from the pair's TOP half, `half = by>>1,
+row = by&1` for frame-coded left pairs — but transcribe from `mb_access.c`
+verbatim instead of trusting any hand pattern; (2) then the chroma §8.4.1.4
+vertical adjustment (JM `chroma_vector_adjustment`, visible in
+`perform_mc_single`); (3) then multi-ref field lists (CANLMA2 is
+single-ref; `field_planes` mapping already supports 2k/2k+1); (4) 8×8
+transform branch for field MBs (CANLMA2 PPS has `transform_8x8_mode_flag=0`
+so it is untested); (5) measure with the gate on after each step — target:
+POC 1 Y ndiff → ~0, then flip the gate's default and re-check the ITU
+suite for the other MBAFF clips (CAMA1_Sony_C's I-slice desync is a
+DIFFERENT bug — its CABAC MBAFF-I path still needs the #32bi-era bin
+oracle).
+
 ## SESSION #32br — CANLMA2 CABAC engine desync ROOT-CAUSED AND FIXED via the
 KDBGBIN Drange trace #32bq prescribed: the pair-bottom must RE-READ its own
 `mb_skip_flag` (and the pair's field flag when coded); JM's lookahead reads are
