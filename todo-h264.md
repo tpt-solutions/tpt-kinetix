@@ -529,6 +529,114 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bq — landed #32bp's `field_flag_inference` fix (real bug, verified,
+but proven NOT the MB143 root cause); shared-ctx17 state-drift hypothesis REFUTED
+
+Picked up #32bp's exact "for next session" pointer: implemented
+`mbaff::field_flag_inference` (§7.4.4's `mb_field_decoding_flag` inference:
+equal to `mbAddrA`'s flag if available, else `mbAddrB`'s, else 0 -- the
+pair-level `mbAddrA`/`mbAddrB` lookup, not the full mixed-field
+`derive_neighbours`) and wired it into `cur_field_for_skip_ctx` for
+top-of-pair macroblocks in both `cabac_p.rs` and `cabac_b.rs` (previously
+hardcoded `false`, commit a55f6bd).
+
+**Verified via the JM oracle (rebuilt `C:\Users\phill\jm-oracle-fresh\jm`
+with new `KDBG3`/`KDBGBIN` instrumentation in `cabac.c`/`biaridecod.c` --
+NOT committed, lives only in that local clone) that this is a real,
+previously-missing spec rule**: `KDBG neigh`/`KDBG skipctx` (added
+`read_skip_flag_CABAC_p_slice` env-gated fprintf of `a`/`b`/`left_addr`/
+`up_addr`/`mb_field`) shows JM using `mb_field=1` for `MB142` (`CurrMbAddr`,
+JM's decode-order addressing) when deriving its own `mb_skip_flag` context
+-- inferred from `mbAddrA = MB140` (the pair immediately left, genuinely
+field-coded) -- even though pair 71's *real*, later-read
+`mb_field_decoding_flag` turns out to be 0 (frame). After the fix, Kinetix's
+`derive_neighbours(mb_x=26, mb_y=2, ..., cur_field=true, ...)` resolves
+`left_idx=Some(115)`/`top_idx=Some(71)`, which map exactly to JM's
+`left_addr=140`/`up_addr=53` once translated between Kinetix's frame-raster
+grid addressing and JM's decode-order `mbAddrX` addressing (`up_addr=53` →
+pair 26 → frame position `(mb_x=26, mb_y=1)` → grid index `71`; `left_addr=
+140` → pair 70 → `(mb_x=25, mb_y=2)` → grid index `115`) -- both available,
+neither skipped, `a=1,b=1`/`ctxIdxInc=2` on both sides. **This match is
+new**: before the fix, `cur_field_for_skip_ctx` was hardcoded `false` for
+`MB142`, which per spec is simply wrong (JM's own `field_flag_inference`
+genuinely returns 1 here), even though -- see below -- it didn't happen to
+change the outcome for this specific pair.
+
+**Directly falsifying result: re-ran the exact same `KINETIX_BINTRACE=1`
+dump (`dbg_canlma2_mb4_bintrace.rs`) before and after the fix and the CABAC
+engine's `(range, offset)` trajectory across `MB140`..`MB144` is
+BYTE-IDENTICAL** (`MB142 (26,2) SKIP cabac=0x0136/0x0000012c ->
+0x0176/0x000000c4` unchanged; `MB(26,3) mb_type=Some(3)` unchanged;
+`sub_types=[0,0,2,0]` unchanged). Root cause: for this specific pair's
+geometry, `mbaff::derive_neighbours`'s `left`/`top` computation happens to
+land on the SAME grid indices regardless of `cur_field` -- the "left"
+branch's `left_mb_field != cur_field` check (mbaff.rs:211-218) only ever
+touches `left_block_opt` metadata for a top-of-pair MB, never the address
+itself, and the "top" branch's `cur_field`-gated `add_if_frame` shift
+(mbaff.rs:201-209) exactly cancels back to the plain one-row-up address
+because the row-0 neighbour pair at column 26 happens to itself be
+frame-coded. **So the fix is real, spec-correct, and independently verified
+against JM -- but it is a proven no-op for `CANLMA2_Sony_C` pair 71
+specifically.** `CANLMA2_Sony_C`'s `itu_conformance` numbers are unchanged
+by it (`first_bad=Some(1)`, `max_diff=251`). It may still matter for a
+different clip/geometry where the coincidence doesn't hold -- keep it.
+
+**The `sync_shared_mb_type_ctx_*_p` / ctx17 cross-write hypothesis
+(`ctx.rs:1010-1021`) flagged in the task brief is REFUTED, not just
+unconfirmed.** Dumped ctx16's raw post-decode `(pStateIdx, valMPS)` at
+every touch from `MB0` through `MB141` via `KINETIX_BINTRACE=1`'s existing
+`BIN n D ctx=16 st=.. mps=..` lines (already logs the *post-decode* state,
+`entropy.rs`'s `trace_bin` call happens after the state update) and cross-
+referenced against a JM oracle instrumented directly in
+`readMB_typeInfo_CABAC_p_slice` (`cabac.c:832`, new `KDBG3` env-gated
+fprintf of `mb_type_contexts[6]`/`[7]`'s `.state`/`.MPS` before and after
+each call -- `mb_type_contexts[6]` is JM's ctx16, `[7]` is the shared
+ctx17). **Both sides show IDENTICAL pre-decode state right before the
+divergent `MB143` bin: `st=8, mps=1`.** Since a context's `(state, mps)`
+after N touches is a deterministic function of the full sequence of
+*decoded values* at that context, this proves ctx16's entire decode-value
+history from `MB0`..`MB141` was already bit-for-bit identical between
+Kinetix and JM -- there is no silent probability-state drift accumulating
+on ctx16 (or its shared ctx17 partner) prior to `MB143`. The real
+divergence is a genuine CABAC engine `(range, offset)` desync -- some
+earlier bin consumed a different number of renormalisation steps or used a
+different context's state than JM did -- not a decoded-VALUE mismatch and
+not a mis-adapted probability state on ctx16/17 specifically.
+
+**Not resolved this session, for next time**: pinpoint the exact bin. Tried
+building a full JM `Drange` bin-sequence oracle (new `KDBGBIN` env var,
+instrumented `biari_decode_symbol`/`biari_decode_symbol_eq_prob`/
+`biari_decode_final` in `biaridecod.c` to fprintf a running counter + the
+post-renormalise `Drange` for every single context/bypass/terminate bin,
+plus a `SLICE_START` marker with `kdbgbin_count` reset in
+`arideco_start_decoding`) to diff range-for-range against Kinetix's own
+`KINETIX_BINTRACE` `R=` column (Kinetix's `range` should equal JM's
+`Drange` exactly at every corresponding bin regardless of JM's internal
+`DbitsLeft` value-buffering scheme, since range updates are a pure function
+of decoded-bin history). This works but is too slow to run on the full
+17-frame `CANLMA2_Sony_C.jsv` (unbuffered per-bin `fprintf` to stderr; a
+full run was killed after several minutes still mid-stream, having written
+>3M lines). **Do not naively truncate the Annex-B stream to just the first
+two slice NALs (SPS+PPS+IDR+first-P) to speed this up** -- tried that
+(`/tmp/jmrun/in_trunc.264`, kept via a tiny NAL-start-code-scanning `trunc.c`
+helper) and JM decoded both frames fine (correct POC/frame count in
+`stdout`), but the `SLICE_START` marker's `arideco_start_decoding` call for
+the second (P) slice never fired in the truncated stream even though it
+reliably fires on the full stream at the exact same accumulated bin count
+(553406, cross-checked between both runs) -- something about the truncated
+stream (missing trailing NALs/reference bookkeeping the decoder expects)
+makes JM take a different code path to reach the same pixel output.
+Next session should either (a) let the full-stream `KDBGBIN` run complete
+in the background for its full ~10+ minutes rather than killing it early,
+or (b) find the actual second call site JM uses for a truncated/short
+stream and add the same marker there, then diff the resulting `Drange`
+sequence against `/tmp/kx_seq.txt`-style extraction of Kinetix's `BIN`
+trace (`grep "^BIN " | sed -E 's/^BIN ([0-9]+) ([A-Z]) .*R=([0-9]+).*/\1 \2
+\3/'`) to find the first differing `R` value -- that bin is the true root
+cause, likely somewhere in `MB140`/`MB141`/`MB142`'s own mvd/cbp/residual/
+dqp decode (all downstream of the now-confirmed-correct skip/type context
+selection) rather than in `mb_type` itself.
+
 ## SESSION #32bo — CANLMA2 MB173 gap: the JM oracle itself was broken, not Kinetix
 
 Picked up exactly where #32bn left off (confirmed via `git log` — no h264 commits
