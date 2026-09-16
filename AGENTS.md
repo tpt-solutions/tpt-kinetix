@@ -1,6 +1,6 @@
 # AGENTS.md — TPT Kinetix
 
-Rust Cargo **workspace** for a media processing engine (demux/mux, H.264/AV1/AAC,
+Rust Cargo **workspace** for a media processing engine (demux/mux, H.264/AV1,
 RTMP/HLS streaming, a transcoding pipeline). Each codec/format is its own crate
 with a public API. Read `README.md` for the architecture diagram and crate map.
 
@@ -45,7 +45,7 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 - **Conformance tests are ffmpeg-gated.** In CI they only run where `ffmpeg` is installed
   (the `conformance` job installs it on Ubuntu). Locally use `just conformance`.
   The `--strict` (pixel-exact) conformance assertion is **currently non-blocking**
-  (`continue-on-error: true` in CI) because AV1, AAC, Lean, and Vision decoders are
+  (`continue-on-error: true` in CI) because AV1, Lean, and Vision decoders are
   **not pixel-exact yet** (H.264 reports `pixel_exact: true`).
 - **ffmpeg-dependent `dbg_*`/conformance tests must skip, not panic.** `tpt-kinetix-h264/tests/dbg_*.rs`
   and `examples/dbg_*.rs` (and the `conformance_*`/`phase_c_*` test files) shell out to `ffmpeg`
@@ -62,7 +62,7 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   returns `KinetixError::NotPixelExact` for unsupported features. `capabilities().pixel_exact`
   reports `true` for supported H.264 streams. AV1 decode has its CDF-based entropy decoder
   implemented but not yet wired into `decode_tile_group`, so it still emits placeholder frames.
-  AAC, Lean, and Vision also report `pixel_exact: false`. `KinetixError::NotPixelExact` under
+  Lean and Vision also report `pixel_exact: false`. `KinetixError::NotPixelExact` under
   strict mode signals the gap either way. CLI `probe` works end-to-end; `transcode`/`stream` are
   still stubs. Don't treat decoder output as correct without checking `capabilities()`.
 - **proptest:** `proptest_*.rs` tests under `<crate>/tests/` persist shrunk reproducers in
@@ -91,10 +91,9 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   change to any public API bumps every crate. `release-plz.toml` opens one release PR and
   publishes in dependency order (core → codecs/demux/mux → pipeline → stream → cli).
 - `tpt-kinetix-test-utils` is **never published** (`release = false`).
-- `tpt-kinetix-aac` is documented in the README but lacks an explicit `publish = true` entry in
-  `release-plz.toml`; `tpt-kinetix-lean` is absent from both; `tpt-kinetix-vision` is explicitly
+- `tpt-kinetix-lean` is absent from `release-plz.toml`; `tpt-kinetix-vision` is explicitly
   published in `release-plz.toml` but not shown in the README architecture map. Verify before
-  assuming a change to any of them will be released.
+  assuming a change to either will be released.
 - `tpt-kinetix-demux` and `tpt-kinetix-core` build for `wasm32-unknown-unknown`
   (the in-browser `web-demo`).
 

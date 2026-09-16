@@ -10,13 +10,14 @@ now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, MBAF
 High-profile 8×8 transform (progressive) are all bit-exact vs ffmpeg with full deblocking. Strict
 mode returns `KinetixError::NotPixelExact` only for slices that still hit an unsupported feature
 (multi-slice pictures, non-4:2:0 chroma, >8-bit, B slices using temporal — not spatial —
-direct-mode motion). The AV1 and AAC decoders are still not pixel-exact.
+direct-mode motion). The AV1 decoder is still not pixel-exact.
 `DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
-for the current state of every crate before assuming something works.
+for the current state of every crate before assuming something works. AAC support has been
+removed from this repo (now covered by a separate project) — don't re-add a `tpt-kinetix-aac` crate.
 
-Patents: this project ships source only and obtains no patent licenses. H.264 and AAC are
-patent-encumbered; `tpt-kinetix-pipeline` / `tpt-kinetix-cli` gate them behind default-on
-`codec-h264` / `codec-aac` features (`cargo build --no-default-features` → royalty-free-only).
+Patents: this project ships source only and obtains no patent licenses. H.264 is
+patent-encumbered; `tpt-kinetix-pipeline` / `tpt-kinetix-cli` gate it behind the default-on
+`codec-h264` feature (`cargo build --no-default-features` → royalty-free-only).
 See PATENTS.md; keep its encumbrance table current when touching a codec crate.
 
 ## Commands
@@ -59,7 +60,7 @@ A crash reproducer lands in `fuzz/artifacts/<target>/crash-*`; commit it into `f
 so it becomes a permanent regression case. Run the relevant fuzz target for ≥60s after touching any
 parser before considering the change done.
 
-Benches: `just bench` (Criterion, h264/av1/aac/pipeline crates), `just bench-report` (release + consolidated
+Benches: `just bench` (Criterion, h264/av1/pipeline crates), `just bench-report` (release + consolidated
 timing table via `tpt-kinetix-test-utils`).
 
 Wasm demo: `just wasm-demo` (builds `tpt-kinetix-demux` for `wasm32-unknown-unknown`, serves `web-demo/`).
@@ -79,7 +80,6 @@ breaking change in any public API bumps all of them together):
   heaviest active development — check `todo.md` and the README LIMITATIONS section for current gaps.
 - `tpt-kinetix-av1` — AV1 OBU parser + `rav1e`-backed encoder (encode works); decoder does entropy
   decoding (CDF-based symbol decoder in `entropy.rs`/`entropy_cdf.rs`) but is not yet pixel-exact.
-- `tpt-kinetix-aac` — ADTS/AudioSpecificConfig parsing + native AAC-LC PCM decode (fully native Huffman/IMDCT/TNS/PNS/stereo pipeline, no third-party codec dependency); HE-AAC (SBR/PS) unsupported.
 - `tpt-kinetix-kg` — knowledge-graph tooling that ingests FFmpeg C source / codec specs and generates
   Rust scaffolding for new codecs (`ingest` → `graph` → `analyze` → `codegen`, or `run` for all four).
   Used when starting a new codec crate; see CONTRIBUTING.md's "Adding a new codec" section.
@@ -125,7 +125,7 @@ MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The High-profil
 (progressive Intra_8×8, CAVLC + CABAC) is bit-exact vs ffmpeg. Strict mode returns
 `KinetixError::NotPixelExact` only when a slice actually falls back to the flat-grey scaffold
 (multi-slice pictures, non-4:2:0 chroma, >8-bit depth, B slices with `direct_spatial_mv_pred_flag
-== 0` — temporal direct mode, §8.4.1.2.3, is unimplemented; only spatial direct is). AV1 and AAC
-decoders are not yet pixel-exact.
+== 0` — temporal direct mode, §8.4.1.2.3, is unimplemented; only spatial direct is). The AV1
+decoder is not yet pixel-exact.
 Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
 source of truth, not README prose.

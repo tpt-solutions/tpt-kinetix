@@ -28,7 +28,7 @@ use std::{
 };
 
 use tpt_kinetix_core::{
-    frame::{AudioFrame, SampleFormat, VideoFrame},
+    frame::VideoFrame,
     pixel_format::PixelFormat,
     timestamp::Timestamp,
 };
@@ -335,123 +335,6 @@ pub fn decode_av1_with_ffmpeg(
     )?;
     split_raw_yuv420p(&raw, width, height)
 }
-
-/// Decode an ADTS-framed AAC elementary stream with `ffmpeg`, returning
-/// interleaved `f32` [`AudioFrame`]s (one per 1024-sample AAC block).
-///
-/// Sample rate / channel count are read from the first ADTS header so the
-/// returned frames carry the same geometry as `tpt-kinetix-aac`'s decoder
-/// output. Returns [`RefDecodeError::BinaryUnavailable`] when `ffmpeg` is
-/// missing.
-pub fn decode_aac_with_ffmpeg(adts: &[u8]) -> Result<Vec<AudioFrame>, RefDecodeError> {
-    decode_aac_with_ffmpeg_inner(adts, None)
-}
-
-/// Like [`decode_aac_with_ffmpeg`] but with the interleaved-channel count given
-/// explicitly. Needed for `channel_configuration == 0` streams, whose ADTS
-/// header does not carry the channel count (it lives in a
-/// `program_config_element` this helper does not parse).
-pub fn decode_aac_with_ffmpeg_channels(
-    adts: &[u8],
-    channels: u8,
-) -> Result<Vec<AudioFrame>, RefDecodeError> {
-    decode_aac_with_ffmpeg_inner(adts, Some(channels))
-}
-
-fn decode_aac_with_ffmpeg_inner(
-    adts: &[u8],
-    channels_override: Option<u8>,
-) -> Result<Vec<AudioFrame>, RefDecodeError> {
-    let (sample_rate, hdr_channels) = adts_geometry(adts)?;
-    let channels = channels_override.unwrap_or(hdr_channels);
-
-    let raw_f32 = run_piped(
-        "ffmpeg",
-        &[
-            "-loglevel",
-            "error",
-            "-f",
-            "aac",
-            "-i",
-            "pipe:0",
-            "-acodec",
-            "pcm_f32le",
-            "-f",
-            "f32le",
-            "pipe:1",
-        ],
-        adts,
-    )?;
-
-    // f32le: 4 bytes/sample, interleaved across `channels`.
-    let channels = channels.max(1) as usize;
-    let bytes_per_block = channels * 1024 * 4;
-
-    let mut frames = Vec::new();
-    let mut pts = 0i64;
-    for block in raw_f32.chunks(bytes_per_block) {
-        if block.len() < 4 {
-            break;
-        }
-        frames.push(AudioFrame {
-            pts: Timestamp::new(pts, (1, sample_rate.max(1))),
-            data: block.to_vec(),
-            sample_rate,
-            channels: channels as u8,
-            sample_format: SampleFormat::F32,
-        });
-        pts += 1024;
-    }
-    Ok(frames)
-}
-
-/// Read `(sample_rate, channels)` from the first ADTS header in `adts`.
-fn adts_geometry(adts: &[u8]) -> Result<(u32, u8), RefDecodeError> {
-    // Locate the first 12-bit syncword 0xFFF.
-    let start = adts
-        .windows(2)
-        .position(|w| w[0] == 0xFF && (w[1] & 0xF0) == 0xF0)
-        .ok_or(RefDecodeError::DecoderFailed {
-            binary: "ffmpeg",
-            stderr: "no ADTS syncword found in input".into(),
-        })?;
-
-    let h = &adts[start..];
-    if h.len() < 7 {
-        return Err(RefDecodeError::DecoderFailed {
-            binary: "ffmpeg",
-            stderr: "truncated ADTS header".into(),
-        });
-    }
-
-    // sampling_frequency_index: byte 2 bits 5-2.
-    let sf_index = (h[2] >> 2) & 0x0F;
-    let sample_rate =
-        SAMPLE_RATE_TABLE
-            .get(sf_index as usize)
-            .copied()
-            .ok_or(RefDecodeError::DecoderFailed {
-                binary: "ffmpeg",
-                stderr: "invalid ADTS sampling frequency index".into(),
-            })?;
-
-    // channel_configuration: byte 2 bit 0 + byte 3 bits 7-6.
-    let channel_config = ((h[2] & 0x01) << 2) | ((h[3] >> 6) & 0x03);
-    let channels = match channel_config {
-        0 => 0u8,
-        1..=6 => channel_config,
-        7 => 8,
-        _ => 0,
-    };
-
-    Ok((sample_rate, channels))
-}
-
-/// ADTS sampling-frequency-index → sample rate (ISO/IEC 14496-3 Table 1.16).
-const SAMPLE_RATE_TABLE: [u32; 16] = [
-    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
-    7_350, 0, 0, 0,
-];
 
 /// Split an IVF container (`DKIF` magic, 32-byte file header) into its per-frame
 /// payloads. Each returned `Vec<u8>` is the raw OBU temporal unit for one coded

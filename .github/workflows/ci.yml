@@ -163,7 +163,6 @@ jobs:
         run: |
           cargo nextest run \
             -p tpt-kinetix-h264 \
-            -p tpt-kinetix-aac \
             -p tpt-kinetix-av1 \
             -p tpt-kinetix-stream \
             -p tpt-kinetix-test-utils

@@ -195,8 +195,6 @@ fn decoder_capabilities_for(
         #[cfg(feature = "codec-h264")]
         Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
         Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
-        #[cfg(feature = "codec-aac")]
-        Some(CodecId::Aac) => Some(tpt_kinetix_aac::AacDecoder::new().capabilities()),
         _ => None,
     }
 }

@@ -6,7 +6,6 @@
 //!
 //! With `--strict`, exits non-zero if any decoder reports `pixel_exact == false`.
 
-use tpt_kinetix_aac::AacDecoder;
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::capabilities::DecoderCapabilities;
 use tpt_kinetix_h264::H264Decoder;
@@ -19,7 +18,6 @@ fn main() {
     let decoders: Vec<(&str, DecoderCapabilities)> = vec![
         ("h264", H264Decoder::new().capabilities()),
         ("av1", Av1Decoder::new().capabilities()),
-        ("aac", AacDecoder::new().capabilities()),
         ("lean", LeanDecoder::new().capabilities()),
         ("vision", VisionDecoderImpl::new().capabilities()),
     ];

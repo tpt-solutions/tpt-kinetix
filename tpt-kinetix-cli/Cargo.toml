@@ -27,15 +27,13 @@ tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-h264 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
-tpt-kinetix-aac = { workspace = true, optional = true }
 tpt-kinetix-vision = { workspace = true }
 tpt-kinetix-bitstream = { workspace = true }
 tpt-kinetix-pipeline = { workspace = true, default-features = false }
 tpt-kinetix-stream = { workspace = true }
 
 [features]
-default = ["codec-h264", "codec-aac"]
-# H.264 and AAC are patent-encumbered (see PATENTS.md). Build with
+default = ["codec-h264"]
+# H.264 is patent-encumbered (see PATENTS.md). Build with
 # `--no-default-features` for a royalty-free-only CLI.
 codec-h264 = ["dep:tpt-kinetix-h264", "tpt-kinetix-pipeline/codec-h264"]
-codec-aac = ["dep:tpt-kinetix-aac", "tpt-kinetix-stream/codec-aac"]

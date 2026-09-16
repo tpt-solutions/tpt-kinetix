@@ -5,7 +5,6 @@ members = [
   "tpt-kinetix-demux",
   "tpt-kinetix-h264",
   "tpt-kinetix-av1",
-  "tpt-kinetix-aac",
   "tpt-kinetix-kg",
   "tpt-kinetix-lean",
   "tpt-kinetix-lossless",
@@ -60,7 +59,6 @@ tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.0" }
 tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.0" }
 tpt-kinetix-h264 = { path = "tpt-kinetix-h264", version = "0.1.0" }
 tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.0" }
-tpt-kinetix-aac = { path = "tpt-kinetix-aac", version = "0.1.0" }
 tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.1.0" }
 tpt-kinetix-bitstream = { path = "tpt-kinetix-bitstream", version = "0.1.0" }
 tpt-kinetix-realtime = { path = "tpt-kinetix-realtime", version = "0.1.0" }

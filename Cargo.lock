@@ -1501,17 +1501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tpt-kinetix-aac"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "proptest",
- "thiserror",
- "tpt-kinetix-core",
- "tpt-kinetix-test-utils",
-]
-
-[[package]]
 name = "tpt-kinetix-av1"
 version = "0.1.0"
 dependencies = [
@@ -1539,7 +1528,6 @@ dependencies = [
  "anyhow",
  "clap",
  "tokio",
- "tpt-kinetix-aac",
  "tpt-kinetix-av1",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
@@ -1689,7 +1677,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-test",
- "tpt-kinetix-aac",
  "tpt-kinetix-core",
  "tpt-kinetix-test-utils",
  "tracing",
@@ -1700,7 +1687,6 @@ name = "tpt-kinetix-test-utils"
 version = "0.1.0"
 dependencies = [
  "proptest",
- "tpt-kinetix-aac",
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",

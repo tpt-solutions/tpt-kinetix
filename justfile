@@ -23,8 +23,8 @@ clippy:
 build:
     cargo build --workspace
 
-# Build without the patent-encumbered codecs (drops tpt-kinetix-h264 and
-# tpt-kinetix-aac from the pipeline/CLI dependency graphs). See PATENTS.md.
+# Build without the patent-encumbered codecs (drops tpt-kinetix-h264
+# from the pipeline/CLI dependency graphs). See PATENTS.md.
 build-royalty-free:
     cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli --no-default-features
 
@@ -53,7 +53,6 @@ fuzz-build:
     cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mkv_ebml
     cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse
     cd tpt-kinetix-h264 && cargo fuzz build fuzz_h264_nal
-    cd tpt-kinetix-aac && cargo fuzz build fuzz_aac_decode
     cd tpt-kinetix-stream && cargo fuzz build fuzz_rtmp_chunk && cargo fuzz build fuzz_rtmp_amf && cargo fuzz build fuzz_rtmp_flv && cargo fuzz build fuzz_hls_playlist
 
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
@@ -157,17 +156,9 @@ av1-oracle-tile ENTRY="testsrc":
 fetch-h264-conformance:
     bash tools/fetch-h264-conformance.sh
 
-# Fetch the MPEG-4 / ISO-IEC 14496-26 AAC audio conformance bitstreams (the
-# "al*"/"am*" streams) from the FFmpeg FATE sample suite into
-# tpt-kinetix-aac/tests/fixtures/iso/ (git-ignored). The `iso_conformance` test
-# decodes each and compares against ffmpeg's decode of the same elementary
-# stream. Requires `ffmpeg` on PATH. NAMES="al05_44 al18_44" narrows it.
-fetch-aac-conformance:
-    bash tools/fetch-aac-conformance.sh
-
 # Run every Criterion bench in the workspace.
 bench:
-    cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-aac -p tpt-kinetix-pipeline
+    cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-pipeline
 
 # Run the benches and print a consolidated timing report.
 bench-report:

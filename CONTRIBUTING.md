@@ -61,7 +61,7 @@ The roadmap targets **royalty-free formats only** (VP9, Opus, MP3, MPEG-TS). Any
 adds or changes a codec crate must update the encumbrance table in
 [`PATENTS.md`](PATENTS.md), and — if the codec is patent-encumbered — wire it behind a
 default-on `codec-*` Cargo feature on `tpt-kinetix-pipeline` / `tpt-kinetix-cli` (as
-`tpt-kinetix-h264` and `tpt-kinetix-aac` are) so `cargo build --no-default-features`
+`tpt-kinetix-h264` is) so `cargo build --no-default-features`
 still produces a royalty-free-only engine. See `PATENTS.md` for the project's full
 patent posture.
 
