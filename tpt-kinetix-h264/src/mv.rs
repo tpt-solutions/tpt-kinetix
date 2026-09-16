@@ -93,6 +93,9 @@ pub struct MvStore {
     /// threading a parameter through every helper; the parse is
     /// single-threaded).
     cur_field: std::cell::Cell<bool>,
+    /// MBAFF frame picture flag (6.4.10.1 neighbour addressing differs from
+    /// plain raster only inside MBAFF *frame* pictures).
+    mbaff_frame: std::cell::Cell<bool>,
 }
 
 impl MvStore {
@@ -103,7 +106,18 @@ impl MvStore {
             slice_ids: vec![0; total_mbs],
             mb_field: vec![false; total_mbs],
             cur_field: std::cell::Cell::new(false),
+            mbaff_frame: std::cell::Cell::new(false),
         }
+    }
+
+    /// Declare whether the current picture is an MBAFF *frame* picture,
+    /// enabling the 6.4.10.1 field-aware neighbour resolution.
+    pub(crate) fn set_mbaff_frame(&self, mbaff: bool) {
+        self.mbaff_frame.set(mbaff);
+    }
+
+    fn mbaff_frame(&self) -> bool {
+        self.mbaff_frame.get()
     }
 
     /// Commit the 16-block grid of `mb_idx`, decoded in `slice_id`.
@@ -194,11 +208,315 @@ impl MvStore {
 }
 
 // ---------------------------------------------------------------------------
-// Neighbour resolution (progressive only). Offsets are in luma pixels relative
-// to the macroblock top-left; `blk` indexes the 16 4×4 blocks raster order.
+// Neighbour resolution.
+//
+// For MBAFF frame pictures this is a faithful transcription of JM's
+// `getAffNeighbour` + `get4x4Neighbour` (mb_access.c), the normative
+// section 6.4.10.1 derivation: neighbours are resolved at 4x4-block-unit
+// sample coordinates (x == -1 the left column, y == -1 the above row,
+// x == 16 the above-right column) against the PAIR-level neighbour
+// macroblocks (`mbAddrA/B/C/D` = the left / above / above-right / above-left
+// PAIR's TOP half in decode order, `+1` selecting the bottom half), with the
+// field/frame case split per current-half parity. The neighbour's stored
+// (ref, mv) is then translated into the current macroblock's units by
+// `MvStore::fix_mv_mbaff` (FFmpeg `MAP_F2F`), exactly like JM's inline
+// conversion in `GetMotionVectorPredictorMBAFF`. For non-MBAFF pictures the
+// plain raster addressing below is used.
+//
+// JM resolves L/U/UR at the partition's TOP-left corner
+// (`get_neighbors(currMB, block, mb_x, mb_y, blockshape_x)`), not at the
+// spec's bottom-left A sample; CANLMA2_Sony_C bins+pixels verify the
+// top-left convention against the JM decoder bit-for-bit.
 // ---------------------------------------------------------------------------
 
-/// A: the 4×4 block to the left of the partition top-left.
+/// One resolved neighbour position: grid index of the owning macroblock and
+/// the 4x4 raster block within it.
+type NbCell = (usize, usize);
+
+/// Resolve the neighbour cell for block-unit coordinates `(x_n, y_n)` (each
+/// in -1..=16) from macroblock `mb_idx` inside an MBAFF frame picture.
+/// Returns `None` when the neighbour is off-picture, off-edge or in a
+/// foreign slice.
+fn resolve_aff_neighbour(
+    store: &MvStore,
+    mb_idx: usize,
+    mb_width: usize,
+    x_n: isize,
+    y_n: isize,
+    slice_id: u32,
+) -> Option<NbCell> {
+    let cols = mb_width as isize;
+    let mb_x = (mb_idx as isize) % cols;
+    let mb_y = (mb_idx as isize) / cols;
+    let cur_field = store.cur_field.get();
+    let top = mb_y & 1 == 0;
+
+    // Pair-level neighbour halves as grid indices of their TOP halves
+    // (+mb_width selects the bottom half). `None` when off-picture / off-edge.
+    let a_top = if mb_x > 0 {
+        Some(mb_idx as isize - 1 - (mb_y & 1) * cols)
+    } else {
+        None
+    };
+    let b_top = if mb_y >= 2 {
+        Some(mb_idx as isize - 2 * cols)
+    } else {
+        None
+    };
+    let c_top = if mb_y >= 2 && mb_x + 1 < cols {
+        b_top.map(|b| b + 1)
+    } else {
+        None
+    };
+    let d_top = if mb_y >= 2 && mb_x > 0 {
+        b_top.map(|b| b - 1)
+    } else {
+        None
+    };
+    let pair_avail = |g: Option<isize>| -> Option<usize> {
+        let g = usize::try_from(g?).ok()?;
+        store.is_available(g, slice_id).then_some(g)
+    };
+
+    let mb_field_of_g = |g: usize| store.mb_field_of(g);
+
+    let (addr, y_m): (usize, isize) = if x_n < 0 {
+        if y_n < 0 {
+            // D (above-left)
+            if !cur_field {
+                if top {
+                    let a = pair_avail(d_top)?;
+                    (a, y_n)
+                } else {
+                    // frame bottom: mbAddrA (+1 when the left pair is field)
+                    let a = pair_avail(a_top)?;
+                    if !mb_field_of_g(a) {
+                        (a, y_n)
+                    } else {
+                        (a + cols as usize, (y_n + 16) >> 1)
+                    }
+                }
+            } else if top {
+                // field top: mbAddrD (+1 when the above-left pair is frame)
+                let a = pair_avail(d_top)?;
+                if !mb_field_of_g(a) {
+                    (a + mb_width, 2 * y_n)
+                } else {
+                    (a, y_n)
+                }
+            } else {
+                // field bottom: mbAddrD + 1 (bottom half = +mb_width in grid)
+                let a = pair_avail(d_top)?;
+                (a + mb_width, y_n)
+            }
+        } else {
+            // A (left)
+            if !cur_field {
+                if top {
+                    let a = pair_avail(a_top)?;
+                    if !mb_field_of_g(a) {
+                        (a, y_n)
+                    } else {
+                        (a + (y_n & 1) as usize * mb_width, y_n >> 1)
+                    }
+                } else {
+                    let a = pair_avail(a_top)?;
+                    if !mb_field_of_g(a) {
+                        (a + mb_width, y_n)
+                    } else {
+                        (a + (y_n & 1) as usize * mb_width, (y_n + 16) >> 1)
+                    }
+                }
+            } else if top {
+                // field top: mbAddrA
+                let a = pair_avail(a_top)?;
+                if !mb_field_of_g(a) {
+                    if y_n < 8 {
+                        (a, 2 * y_n)
+                    } else {
+                        (a + mb_width, 2 * y_n - 16)
+                    }
+                } else {
+                    (a, y_n)
+                }
+            } else {
+                // field bottom: mbAddrA
+                let a = pair_avail(a_top)?;
+                if !mb_field_of_g(a) {
+                    if y_n < 8 {
+                        (a, 2 * y_n + 1)
+                    } else {
+                        (a + mb_width, 2 * y_n + 1 - 16)
+                    }
+                } else {
+                    (a + mb_width, y_n)
+                }
+            }
+        }
+    } else if x_n < 16 {
+        if y_n < 0 {
+            // B (above)
+            if !cur_field {
+                if top {
+                    let a = pair_avail(b_top)?;
+                    (a + mb_width, y_n)
+                } else {
+                    // frame bottom: the own pair-mate
+                    (mb_idx - mb_width, y_n)
+                }
+            } else if top {
+                // field top: mbAddrB (+1 when the above pair is frame)
+                let a = pair_avail(b_top)?;
+                if !mb_field_of_g(a) {
+                    (a + mb_width, 2 * y_n)
+                } else {
+                    (a, y_n)
+                }
+            } else {
+                // field bottom: mbAddrB + 1 (bottom half = +mb_width in grid)
+                let a = pair_avail(b_top)?;
+                (a + mb_width, y_n)
+            }
+        } else {
+            // same macroblock
+            (mb_idx, y_n)
+        }
+    } else if y_n < 0 {
+        // C (above-right)
+        if !cur_field {
+            if top {
+                let a = pair_avail(c_top)?;
+                (a + mb_width, y_n)
+            } else {
+                // frame bottom: unavailable
+                return None;
+            }
+        } else if top {
+            // field top: mbAddrC (+1 when the above-right pair is frame)
+            let a = pair_avail(c_top)?;
+            if !mb_field_of_g(a) {
+                (a + mb_width, 2 * y_n)
+            } else {
+                (a, y_n)
+            }
+        } else {
+            // field bottom: mbAddrC + 1 (bottom half = +mb_width in grid)
+            let a = pair_avail(c_top)?;
+            (a + mb_width, y_n)
+        }
+    } else {
+        // x_n >= 16 && y_n >= 0: off-picture
+        return None;
+    };
+
+    if !store.is_available(addr, slice_id) {
+        return None;
+    }
+    let blk = (((y_m & 15) as usize) >> 2) * 4 + (((x_n & 15) as usize) >> 2);
+    Some((addr, blk))
+}
+
+/// Fetch a neighbour cell at block-unit coordinates. MBAFF frames route
+/// through the 6.4.10.1 transcription; non-MBAFF pictures use plain raster.
+fn neighbor_cell(
+    store: &MvStore,
+    cur: &[MvCell; 16],
+    mb_idx: usize,
+    mb_width: usize,
+    x_n: isize,
+    y_n: isize,
+    slice_id: u32,
+    l1: bool,
+) -> Option<MvNeighbor> {
+    if (0..16).contains(&x_n) && y_n >= 0 {
+        let blk = (y_n as usize / 4) * 4 + x_n as usize / 4;
+        let c = cur[blk];
+        return Some(if l1 {
+            MvNeighbor {
+                mv: c.mv_l1,
+                ref_idx: c.ref_idx_l1,
+            }
+        } else {
+            c.into()
+        });
+    }
+    if !store.mbaff_frame() {
+        // plain raster addressing (progressive / PAFF-field pictures)
+        if y_n < 0 {
+            let above_mb = if x_n < 0 {
+                if mb_idx < mb_width + 1 {
+                    return None;
+                }
+                mb_idx - mb_width - 1
+            } else if x_n < 16 {
+                if mb_idx < mb_width {
+                    return None;
+                }
+                mb_idx - mb_width
+            } else {
+                if mb_idx / mb_width == 0 || mb_idx % mb_width + 1 >= mb_width {
+                    return None;
+                }
+                mb_idx - mb_width + 1
+            };
+            if !store.is_available(above_mb, slice_id) {
+                return None;
+            }
+            let blk = 3 * 4 + (((x_n.rem_euclid(16)) as usize) / 4);
+            return Some(if l1 {
+                store.cell_l1(above_mb, blk)
+            } else {
+                store.cell(above_mb, blk)
+            });
+        }
+        if x_n < 0 {
+            if mb_idx % mb_width == 0 {
+                return None;
+            }
+            let left_mb = mb_idx - 1;
+            if !store.is_available(left_mb, slice_id) {
+                return None;
+            }
+            let blk = ((y_n as usize) / 4) * 4 + 3;
+            return Some(if l1 {
+                store.cell_l1(left_mb, blk)
+            } else {
+                store.cell(left_mb, blk)
+            });
+        }
+        return None;
+    }
+    let (addr, blk) = resolve_aff_neighbour(store, mb_idx, mb_width, x_n, y_n, slice_id)?;
+    let n = if l1 {
+        store.cell_l1(addr, blk)
+    } else {
+        store.cell(addr, blk)
+    };
+    if std::env::var("KINETIX_MVPCAND").is_ok() {
+        let decode_addr = {
+            let g = addr as isize;
+            let c = mb_width as isize;
+            let mx = g % c;
+            let my = g / c;
+            2 * ((my >> 1) * c + mx) + (my & 1)
+        };
+        eprintln!(
+            "KXCAND mb={} cur=({},{}) n=({},{}) cell=({},{}) mv=({},{}) r={}",
+            mb_idx,
+            x_n,
+            y_n,
+            decode_addr,
+            blk,
+            (x_n.rem_euclid(16)) / 4,
+            (y_n.rem_euclid(16)) / 4,
+            n.mv[0],
+            n.mv[1],
+            n.ref_idx
+        );
+    }
+    Some(n)
+}
+
 fn neighbor_left(
     store: &MvStore,
     cur: &[MvCell; 16],
@@ -208,22 +526,18 @@ fn neighbor_left(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if px_off > 0 {
-        let blk = (py_off / 4) * 4 + (px_off - 4) / 4;
-        return Some(cur[blk].into());
-    }
-    if mb_idx % mb_width == 0 {
-        return None;
-    }
-    let left_mb = mb_idx - 1;
-    if !store.is_available(left_mb, slice_id) {
-        return None;
-    }
-    let blk = (py_off / 4) * 4 + 3;
-    Some(store.cell(left_mb, blk))
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize - 1,
+        py_off as isize,
+        slice_id,
+        false,
+    )
 }
 
-/// B: the 4×4 block above the partition top-left.
 fn neighbor_above(
     store: &MvStore,
     cur: &[MvCell; 16],
@@ -233,25 +547,18 @@ fn neighbor_above(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if py_off > 0 {
-        let blk = ((py_off - 4) / 4) * 4 + px_off / 4;
-        return Some(cur[blk].into());
-    }
-    if mb_idx / mb_width == 0 {
-        return None;
-    }
-    let above_mb = mb_idx - mb_width;
-    if !store.is_available(above_mb, slice_id) {
-        return None;
-    }
-    let blk = 3 * 4 + px_off / 4;
-    Some(store.cell(above_mb, blk))
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize,
+        py_off as isize - 1,
+        slice_id,
+        false,
+    )
 }
 
-/// C: the 4×4 block above-right of the partition top-left (spec 8.4.1.3.2).
-///
-/// Within the current macroblock, C is unavailable when it falls in an 8×8
-/// sub-macroblock that has not been decoded yet (spec 6.4.11.7).
 #[allow(clippy::too_many_arguments)]
 fn neighbor_above_right(
     store: &MvStore,
@@ -264,46 +571,27 @@ fn neighbor_above_right(
     slice_id: u32,
 ) -> Option<MvNeighbor> {
     let right_col = px_off + part_w;
-
-    if py_off > 0 {
-        if right_col < 16 {
-            let cur_8x8_col = px_off / 8;
-            let tgt_8x8_col = right_col / 8;
-            let cur_8x8_row = py_off / 8;
-            let tgt_8x8_row = (py_off - 4) / 8;
-            let cur_8x8 = cur_8x8_row * 2 + cur_8x8_col;
-            let tgt_8x8 = tgt_8x8_row * 2 + tgt_8x8_col;
-            if tgt_8x8 > cur_8x8 {
-                return None;
-            }
-            let blk = ((py_off - 4) / 4) * 4 + right_col / 4;
-            return Some(cur[blk].into());
-        }
-        return None;
-    }
-
-    if mb_idx / mb_width == 0 {
-        return None;
-    }
-    if right_col < 16 {
-        let above_mb = mb_idx - mb_width;
-        if !store.is_available(above_mb, slice_id) {
+    // 6.4.11.7: within the current MB, C is unavailable when it falls in an
+    // 8x8 sub-macroblock that has not been decoded yet.
+    if py_off > 0 && right_col < 16 {
+        let cur_8x8 = (py_off / 8) * 2 + px_off / 8;
+        let tgt_8x8 = ((py_off - 4) / 8) * 2 + right_col / 8;
+        if tgt_8x8 > cur_8x8 {
             return None;
         }
-        let blk = 3 * 4 + right_col / 4;
-        Some(store.cell(above_mb, blk))
-    } else if mb_idx % mb_width + 1 < mb_width {
-        let above_right_mb = mb_idx - mb_width + 1;
-        if !store.is_available(above_right_mb, slice_id) {
-            return None;
-        }
-        Some(store.cell(above_right_mb, 3 * 4))
-    } else {
-        None
     }
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        right_col as isize,
+        py_off as isize - 1,
+        slice_id,
+        false,
+    )
 }
 
-/// D: the 4×4 block above-left of the partition top-left (fallback for C).
 fn neighbor_above_left(
     store: &MvStore,
     cur: &[MvCell; 16],
@@ -313,46 +601,17 @@ fn neighbor_above_left(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if py_off > 0 && px_off > 0 {
-        let blk = ((py_off - 4) / 4) * 4 + (px_off - 4) / 4;
-        return Some(cur[blk].into());
-    }
-    if py_off == 0 && px_off == 0 {
-        if mb_idx / mb_width == 0 || mb_idx % mb_width == 0 {
-            return None;
-        }
-        let al_mb = mb_idx - mb_width - 1;
-        if !store.is_available(al_mb, slice_id) {
-            return None;
-        }
-        Some(store.cell(al_mb, 3 * 4 + 3))
-    } else if py_off == 0 && px_off > 0 {
-        if mb_idx / mb_width == 0 {
-            return None;
-        }
-        let above_mb = mb_idx - mb_width;
-        if !store.is_available(above_mb, slice_id) {
-            return None;
-        }
-        let blk = 3 * 4 + (px_off - 4) / 4;
-        Some(store.cell(above_mb, blk))
-    } else {
-        // py_off > 0 && px_off == 0
-        if mb_idx % mb_width == 0 {
-            return None;
-        }
-        let left_mb = mb_idx - 1;
-        if !store.is_available(left_mb, slice_id) {
-            return None;
-        }
-        let blk = ((py_off - 4) / 4) * 4 + 3;
-        Some(store.cell(left_mb, blk))
-    }
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize - 1,
+        py_off as isize - 1,
+        slice_id,
+        false,
+    )
 }
-
-// ---------------------------------------------------------------------------
-// L1 neighbour helpers (identical to L0 versions but extract mv_l1/ref_idx_l1).
-// ---------------------------------------------------------------------------
 
 fn neighbor_left_l1(
     store: &MvStore,
@@ -363,23 +622,16 @@ fn neighbor_left_l1(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if px_off > 0 {
-        let blk = (py_off / 4) * 4 + (px_off - 4) / 4;
-        let c = cur[blk];
-        return Some(MvNeighbor {
-            mv: c.mv_l1,
-            ref_idx: c.ref_idx_l1,
-        });
-    }
-    if mb_idx % mb_width == 0 {
-        return None;
-    }
-    let left_mb = mb_idx - 1;
-    if !store.is_available(left_mb, slice_id) {
-        return None;
-    }
-    let blk = (py_off / 4) * 4 + 3;
-    Some(store.cell_l1(left_mb, blk))
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize - 1,
+        py_off as isize,
+        slice_id,
+        true,
+    )
 }
 
 fn neighbor_above_l1(
@@ -391,23 +643,16 @@ fn neighbor_above_l1(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if py_off > 0 {
-        let blk = ((py_off - 4) / 4) * 4 + px_off / 4;
-        let c = cur[blk];
-        return Some(MvNeighbor {
-            mv: c.mv_l1,
-            ref_idx: c.ref_idx_l1,
-        });
-    }
-    if mb_idx / mb_width == 0 {
-        return None;
-    }
-    let above_mb = mb_idx - mb_width;
-    if !store.is_available(above_mb, slice_id) {
-        return None;
-    }
-    let blk = 3 * 4 + px_off / 4;
-    Some(store.cell_l1(above_mb, blk))
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize,
+        py_off as isize - 1,
+        slice_id,
+        true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,45 +667,23 @@ fn neighbor_above_right_l1(
     slice_id: u32,
 ) -> Option<MvNeighbor> {
     let right_col = px_off + part_w;
-    if py_off > 0 {
-        if right_col < 16 {
-            let cur_8x8_col = px_off / 8;
-            let tgt_8x8_col = right_col / 8;
-            let cur_8x8_row = py_off / 8;
-            let tgt_8x8_row = (py_off - 4) / 8;
-            let cur_8x8 = cur_8x8_row * 2 + cur_8x8_col;
-            let tgt_8x8 = tgt_8x8_row * 2 + tgt_8x8_col;
-            if tgt_8x8 > cur_8x8 {
-                return None;
-            }
-            let blk = ((py_off - 4) / 4) * 4 + right_col / 4;
-            let c = cur[blk];
-            return Some(MvNeighbor {
-                mv: c.mv_l1,
-                ref_idx: c.ref_idx_l1,
-            });
-        }
-        return None;
-    }
-    if mb_idx / mb_width == 0 {
-        return None;
-    }
-    if right_col < 16 {
-        let above_mb = mb_idx - mb_width;
-        if !store.is_available(above_mb, slice_id) {
+    if py_off > 0 && right_col < 16 {
+        let cur_8x8 = (py_off / 8) * 2 + px_off / 8;
+        let tgt_8x8 = ((py_off - 4) / 8) * 2 + right_col / 8;
+        if tgt_8x8 > cur_8x8 {
             return None;
         }
-        let blk = 3 * 4 + right_col / 4;
-        Some(store.cell_l1(above_mb, blk))
-    } else if mb_idx % mb_width + 1 < mb_width {
-        let above_right_mb = mb_idx - mb_width + 1;
-        if !store.is_available(above_right_mb, slice_id) {
-            return None;
-        }
-        Some(store.cell_l1(above_right_mb, 3 * 4))
-    } else {
-        None
     }
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        right_col as isize,
+        py_off as isize - 1,
+        slice_id,
+        true,
+    )
 }
 
 fn neighbor_above_left_l1(
@@ -472,45 +695,16 @@ fn neighbor_above_left_l1(
     px_off: usize,
     slice_id: u32,
 ) -> Option<MvNeighbor> {
-    if py_off > 0 && px_off > 0 {
-        let blk = ((py_off - 4) / 4) * 4 + (px_off - 4) / 4;
-        let c = cur[blk];
-        return Some(MvNeighbor {
-            mv: c.mv_l1,
-            ref_idx: c.ref_idx_l1,
-        });
-    }
-    if py_off == 0 && px_off == 0 {
-        if mb_idx / mb_width == 0 || mb_idx % mb_width == 0 {
-            return None;
-        }
-        let al_mb = mb_idx - mb_width - 1;
-        if !store.is_available(al_mb, slice_id) {
-            return None;
-        }
-        Some(store.cell_l1(al_mb, 3 * 4 + 3))
-    } else if py_off == 0 && px_off > 0 {
-        if mb_idx / mb_width == 0 {
-            return None;
-        }
-        let above_mb = mb_idx - mb_width;
-        if !store.is_available(above_mb, slice_id) {
-            return None;
-        }
-        let blk = 3 * 4 + (px_off - 4) / 4;
-        Some(store.cell_l1(above_mb, blk))
-    } else {
-        // py_off > 0 && px_off == 0
-        if mb_idx % mb_width == 0 {
-            return None;
-        }
-        let left_mb = mb_idx - 1;
-        if !store.is_available(left_mb, slice_id) {
-            return None;
-        }
-        let blk = ((py_off - 4) / 4) * 4 + 3;
-        Some(store.cell_l1(left_mb, blk))
-    }
+    neighbor_cell(
+        store,
+        cur,
+        mb_idx,
+        mb_width,
+        px_off as isize - 1,
+        py_off as isize - 1,
+        slice_id,
+        true,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1170,7 @@ pub(crate) fn predict_slice_mvs_ex(
 ) -> Result<(), &'static str> {
     let total = mbs.len();
     let cols = mb_cols as usize;
+    store.set_mbaff_frame(mbaff_frame);
     for d in 0..total {
         let grid_idx = if mbaff_frame {
             let pair = d >> 1;
@@ -996,6 +1191,23 @@ pub(crate) fn predict_slice_mvs_ex(
             predict_inter_macroblock(store, &mut cur, grid_idx, cols, slice_id, mb)?;
         }
         store.commit(grid_idx, cur, slice_id);
+        if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+            eprintln!(
+                "MVP-COMMIT g{} field={} [{}]",
+                grid_idx,
+                mb.mb_field_flag,
+                cur.iter()
+                    .map(|c| {
+                        if c.ref_idx < 0 {
+                            "I".to_string()
+                        } else {
+                            format!("({},{})r{}", c.mv[0], c.mv[1], c.ref_idx)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
     }
     Ok(())
 }
