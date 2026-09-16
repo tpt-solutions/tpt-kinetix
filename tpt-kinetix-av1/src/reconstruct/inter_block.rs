@@ -1329,6 +1329,54 @@ impl<'a> TileDecodeState<'a> {
         // motion vectors. Only meaningful for `motion_mode == OBMC` (1);
         // WARP (2) blocks never run OBMC (dav1d: `motion_mode == MM_OBMC`
         // is mutually exclusive with `MM_WARP` at the syntax level).
+
+        // Debug: dump base MC prediction BEFORE OBMC for blocks in error region.
+        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
+            let px_end_y = px_y0 + bh_px;
+            let px_end_x = px_x0 + bw_px;
+            if px_end_y > 56 && px_y0 < 96 && px_x0 < 128
+                || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+            {
+                eprintln!(
+                    "PRED-BASE mi=({mi_col},{mi_row}) bw={bw} bh={bh} skip={skip} ref={} fh={} fv={} mv=({},{}) px=({px_x0},{px_y0})",
+                    ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
+                );
+                for row in px_y0..px_end_y.min(96) {
+                    if row < 56 && std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_err() {
+                        continue;
+                    }
+                    let vals: Vec<u8> = (px_x0..px_end_x.min(128))
+                        .map(|c| self.y_plane[row * self.y_stride + c])
+                        .collect();
+                    eprintln!("  y={row}: {vals:?}");
+                }
+                // For the specific divergent block mi(4,18), also dump reference
+                // frame pixels to diagnose whether the error is in our reference frame
+                // or in the filter computation itself.
+                if mi_col == 4 && mi_row == 18 {
+                    let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
+                    if let Some(rf) = self.ref_slots.slots[slot0] {
+                        let (rp, rw, rh) = rf.plane(0);
+                        let ix = mvs[0].col >> 3;
+                        let iy = mvs[0].row >> 3;
+                        let base_x = px_x0 as i32 + ix;
+                        let base_y = px_y0 as i32 + iy;
+                        eprintln!("  REF-PIXELS base=({base_x},{base_y}) rw={rw} rh={rh}:");
+                        for ty in 0..(bh_px + 7) {
+                            let ry = (base_y + ty as i32 - 3).clamp(0, rh as i32 - 1) as usize;
+                            let vals: Vec<u8> = (0..bw_px)
+                                .map(|x| {
+                                    let rx = (base_x + x as i32).clamp(0, rw as i32 - 1) as usize;
+                                    rp[ry * rw + rx]
+                                })
+                                .collect();
+                            eprintln!("    ref_row={ry}: {vals:?}");
+                        }
+                    }
+                }
+            }
+        }
+
         if motion_mode == 1 && std::env::var("KINETIX_AV1_NOOBMC").is_err() {
             for plane in 0..3 {
                 self.apply_obmc(mi_row, mi_col, bsize, plane);
@@ -1342,16 +1390,16 @@ impl<'a> TileDecodeState<'a> {
             self.apply_interintra(mi_row, mi_col, bsize, interintra_mode, ii_wedge_index);
         }
 
-        // Debug: dump pre-residual prediction for error-region blocks.
+        // Debug: dump pre-residual prediction (post-OBMC) for error-region blocks.
         if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
-            if px_end_y > 56 && px_y0 < 96 && px_end_x > 32 && px_x0 < 128
+            if px_end_y > 56 && px_y0 < 96 && px_x0 < 128
                 || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
             {
                 eprintln!(
-                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} mv=({},{}) px=({px_x0},{px_y0})",
-                    mvs[0].col, mvs[0].row
+                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} fh={} fv={} mv=({},{}) px=({px_x0},{px_y0})",
+                    ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y.min(96) {
                     if row < 56 && std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_err() {
@@ -1381,7 +1429,51 @@ impl<'a> TileDecodeState<'a> {
                 leaves,
             );
         }
+        // Capture pre-residual snapshot for the specific failing block to compare
+        // prediction vs final output at the row-specific error positions.
+        let pred_snap: Vec<u8> = if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+            && mi_col == 4
+            && mi_row == 18
+            && !skip
+        {
+            let stride = self.y_stride;
+            let mut snap = Vec::with_capacity(bw_px * bh_px);
+            for y in px_y0..px_y0 + bh_px {
+                for x in px_x0..px_x0 + bw_px {
+                    snap.push(self.y_plane[y * stride + x]);
+                }
+            }
+            snap
+        } else {
+            Vec::new()
+        };
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
+        // Debug: show how residual changed prediction at block mi(4,18).
+        if !pred_snap.is_empty() {
+            eprintln!(
+                "RESID mi=(4,18) leaves={} tx0={}",
+                leaves.len(),
+                leaves.first().map(|l| l.2).unwrap_or(0)
+            );
+            for row in 0..bh_px {
+                let y = px_y0 + row;
+                let deltas: Vec<i32> = (0..bw_px)
+                    .map(|col| {
+                        let x = px_x0 + col;
+                        self.y_plane[y * self.y_stride + x] as i32
+                            - pred_snap[row * bw_px + col] as i32
+                    })
+                    .collect();
+                let post: Vec<u8> = (0..bw_px)
+                    .map(|col| {
+                        let x = px_x0 + col;
+                        self.y_plane[y * self.y_stride + x]
+                    })
+                    .collect();
+                eprintln!("  y={y} pred={:?}", &pred_snap[row * bw_px..(row + 1) * bw_px]);
+                eprintln!("       post={post:?}  delta={deltas:?}");
+            }
+        }
         // §7.14.4 deblock-level inputs: this block's primary reference (spec
         // delta index = name − 1; INTRA_FRAME=1 maps to 0) and mode type.
         // The span is the block's tile-local luma rectangle, mirroring
@@ -1793,6 +1885,8 @@ impl<'a> TileDecodeState<'a> {
         }
 
         let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok() && plane == 0 && mi_row >= 16;
+        // Detailed per-sample trace for the specific divergent block.
+        let dbg_obmc_deep = dbg_obmc && mi_col == 4 && mi_row == 18;
         if dbg_obmc {
             eprintln!(
                 "OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}",
@@ -1800,8 +1894,8 @@ impl<'a> TileDecodeState<'a> {
             );
             for j in &jobs {
                 eprintln!(
-                    "  job pass={} px={} py={} w={} h={} nb_ref={} mv=({},{})",
-                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.mv.col, j.mv.row
+                    "  job pass={} px={} py={} w={} h={} nb_ref={} fh={} fv={} mv=({},{})",
+                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.filters[0], j.filters[1], j.mv.col, j.mv.row
                 );
             }
         }
@@ -1863,6 +1957,23 @@ impl<'a> TileDecodeState<'a> {
                     obmc[0],
                     dst[py * pstride + px]
                 );
+            }
+            if dbg_obmc_deep {
+                eprintln!("  DEEP pass={pass} px={px} py={py} pred_w={pred_w} pred_h={pred_h}:");
+                for i in 0..pred_h {
+                    let sy = py + i;
+                    if sy >= ph {
+                        break;
+                    }
+                    let nbr_row: Vec<u8> = (0..pred_w).map(|j| obmc[i * pred_w + j]).collect();
+                    let dst_row: Vec<u8> = (0..pred_w)
+                        .map(|j| {
+                            let sx = px + j;
+                            if sx < pw { dst[sy * pstride + sx] } else { 0 }
+                        })
+                        .collect();
+                    eprintln!("    row={sy} nbr={nbr_row:?} dst_after={dst_row:?}");
+                }
             }
         }
     }
@@ -2260,6 +2371,23 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.raw_state().0
                     );
                 }
+                if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                    && mi_col == 4
+                    && mi_row == 18
+                    && leaf_mi_col == 4
+                    && leaf_mi_row == 18
+                {
+                    let (qdc, qac) = self.qindex_for_plane(0);
+                    eprintln!(
+                        "COEFF mi=(4,18) tx={leaf_tx} txtp={} eob={} qdc={qdc} qac={qac} rng={}",
+                        coeffs.tx_type, coeffs.eob, self.dec.raw_state().0
+                    );
+                    for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
+                        if q != 0 {
+                            eprintln!("  quant[{i}]={q}");
+                        }
+                    }
+                }
                 // Coeffs are always *read* (entropy sync). The residual is
                 // applied at every tx size: `inverse_transform` handles the
                 // adjusted-size (≤32-side) dequant stride and the 32/64-family
@@ -2267,6 +2395,15 @@ impl<'a> TileDecodeState<'a> {
                 if coeffs.eob > 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                    if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                        && mi_col == 4
+                        && mi_row == 18
+                        && leaf_mi_col == 4
+                        && leaf_mi_row == 18
+                    {
+                        eprintln!("  dequant[..16]={:?}", &dequant[..16.min(dequant.len())]);
+                        eprintln!("  residual BEFORE itx (all zeros expected): {:?}", &residual[..16.min(residual.len())]);
+                    }
                     inverse_transform(
                         &dequant,
                         coeffs.tx_type,
@@ -2289,6 +2426,17 @@ impl<'a> TileDecodeState<'a> {
                             .map(|y| residual[y * stride..(y + 1) * stride].iter().sum())
                             .collect();
                         eprintln!("KIN RESID rowsums: {rowsums:?}");
+                    }
+                    if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                        && mi_col == 4
+                        && mi_row == 18
+                        && leaf_mi_col == 4
+                        && leaf_mi_row == 18
+                    {
+                        eprintln!("  residual AFTER itx (row-major 16x8):");
+                        for row in 0..leaf_tx_h {
+                            eprintln!("    row {row}: {:?}", &residual[row * leaf_tx_w..(row + 1) * leaf_tx_w]);
+                        }
                     }
                     luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
                 }

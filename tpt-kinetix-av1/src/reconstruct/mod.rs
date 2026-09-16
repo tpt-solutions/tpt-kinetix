@@ -1943,6 +1943,9 @@ pub fn reconstruct_av1_frame(
         /// This tile's post-decode CDF state (tile 0's becomes the frame's
         /// saved context, §6.8.2).
         cdfs: Option<FrameCdfContext>,
+        /// Per-block deblock / CDEF / LR metadata, tile-local coordinates.
+        /// Merged into the full-frame FrameMeta after all tiles are blitted.
+        meta: FrameMeta,
     }
 
     // Per-tile geometry, shared across the parallel worker closure.
@@ -2053,31 +2056,6 @@ pub fn reconstruct_av1_frame(
             )?;
             let adapted_cdfs = decoded_cdfs;
 
-            // Phase D: run the in-loop post-filters (deblock → CDEF →
-            // restoration) over the tile-local buffer. Applied per-tile here;
-            // the approximation of not filtering across tile boundaries is
-            // acceptable while the decoder is not yet pixel-exact.
-            if std::env::var("KINETIX_AV1_DUMP_PREFILTER").is_ok() {
-                dump_prefilter_yuv(&ty, &tu, &tv, tw, th, x0, y0, width);
-            }
-            if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
-                let _ = apply_post_filters(
-                    &mut ty,
-                    &mut tu,
-                    &mut tv,
-                    tw,
-                    th,
-                    true,
-                    true,
-                    &meta,
-                    frame_header,
-                    seq,
-                    &meta.cdef_idx,
-                    x0,
-                    y0,
-                );
-            }
-
             Ok(DecodedTile {
                 x0,
                 y0,
@@ -2088,15 +2066,18 @@ pub fn reconstruct_av1_frame(
                 v: tv,
                 motion_field: mf_cells,
                 cdfs: Some(adapted_cdfs),
+                meta,
             })
         })
         .collect();
 
-    // Blit each finished tile back into the master planes and merge motion fields.
+    // Blit each finished tile back into the master planes; merge motion fields
+    // and per-block filter metadata into full-frame aggregates.
     let mi_cols = width.div_ceil(MI_SIZE);
     let mi_rows = height.div_ceil(MI_SIZE);
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     let mut frame_cdf_context: Option<FrameCdfContext> = None;
+    let mut frame_meta = FrameMeta::new(width, height);
     for tile in decoded {
         let tile = tile?;
         // §6.8.2: the saved context comes from the `contextUpdateTileId` tile
@@ -2126,6 +2107,36 @@ pub fn reconstruct_av1_frame(
                 }
             }
         }
+        // Merge this tile's deblock/CDEF/LR metadata into the full-frame meta.
+        // Tile-local grid cell (bx, by) maps to frame-global (bx + x0/8, by + y0/8).
+        frame_meta.merge_tile(&tile.meta, tile.x0 / 8, tile.y0 / 8);
+        // cdef_idx and lr_units already use frame-global MI coordinates; just copy.
+        for (k, v) in &tile.meta.cdef_idx {
+            frame_meta.cdef_idx.insert(*k, *v);
+        }
+        for (k, v) in &tile.meta.lr_units {
+            frame_meta.lr_units.insert(*k, v.clone());
+        }
+    }
+
+    // Phase D: full-frame in-loop post-filters (deblock → CDEF → LR).
+    // Running on the assembled frame — not per-tile — matches the AV1 spec
+    // §7.14 requirement that deblocking crosses tile boundaries.
+    if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
+        let _ = apply_post_filters(
+            &mut y_plane,
+            &mut u_plane,
+            &mut v_plane,
+            width,
+            height,
+            true,
+            true,
+            &frame_meta,
+            frame_header,
+            seq,
+            0,
+            0,
+        );
     }
 
     let motion_field = if !frame_is_intra {
