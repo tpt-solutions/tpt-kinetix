@@ -529,6 +529,50 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bt (same continuation) — getAffNeighbour transcription LANDED:
+554/1350 POC-1 MBs now carry fully JM-exact MVs; POC-1 pre-deblock luma error
+-32% (278 492 -> 188 236). Commit `716e84f`.
+
+Completed the parked #32bs work: `MvStore` gained an `mbaff_frame` flag, and
+for MBAFF frame pictures ALL cross-macroblock MV-neighbour resolution now goes
+through `resolve_aff_neighbour` — a line-by-line transcription of JM
+`getAffNeighbour` (mb_access.c:281) over the PAIR-level `mbAddrA/B/C/D`
+(bride-level `+1` = bottom half; in our GRID indexing that is `+mb_width` —
+the first transcription had JM's `+1` applied literally to grid indices and
+silently read one COLUMN over; caught by the candidate-level diff). The
+within-MB UR unavailability rule (6.4.11.7) stays on the pre-existing
+`tgt_8x8 > cur_8x8` form — the alternative "positional" rule tried here came
+from the lencod `get_neighbors` (mv_search.c, the ENCODER twin) and regressed
+13 progressive ITU clips; the ldecod decoder function (definition still not
+textually located — symbol only) demonstrably uses the tgt>cur form, which the
+27/0 ITU re-run confirms. L/U/UR resolve at the partition TOP-left corner per
+JM `get_neighbors`, not the spec's bottom-left A sample.
+
+Measured with KINETIX_MBAFF_FIELD_MC=1 on CANLMA2 POC 1: Y ndiff 267 446 ->
+188 236 (-30% vs the #32bs state, -32% vs gate-off), U 57 413 -> 42 607,
+V 56 290 -> 41 395; 554/1350 MBs carry fully JM-exact motion vectors (all of
+pair row 0, field pairs included). 269 lib tests, ITU 27 hard-checked
+bit-exact / 0 failures, clippy -D warnings clean.
+
+**The remaining 796 mismatching MBs** (3 603/5 425 partitions, starting at
+pair row 1) cascade from the next bug class: the **mvd CONTEXT derivation** —
+`amvd_sum`/`map_f2f_y` (`slice_data/ctx.rs`) still resolve the mvd-neighbour
+cells with plain raster arithmetic; JM decodes DIFFERENT mvd values from the
+same bins because §9.3.3.1.1.7's amvd sample positions need the same
+6.4.10.7 field-aware neighbour mapping the MVP just got. The comparator
+tooling is now complete and fast: JM side `KDBGMV` (final per-partition MVs)
++ `KDBGMVP` (resolved L/U/UR addresses + pred) in the local JM tree;
+Kinetix side `KXCAND` (resolved candidate per fetch) + `MVP-COMMIT` (per-MB
+committed cells) under KINETIX_MBAFF_TRACE/KINETIX_MVPCAND; a python diff
+maps decode-order <-> grid addressing and reports per-MB mismatch counts.
+
+**For next session**: (1) port the same 6.4.10.7 resolution into
+`amvd_sum`'s neighbour-cell selection (`slice_data/ctx.rs`) and re-run the MV
+diff — expect the mismatch count to collapse; (2) re-check the chroma
+§8.4.1.4 vertical adjustment (JM `chroma_vector_adjustment`); (3) target:
+POC 1 Y ndiff -> ~0 with the gate on, then flip the gate default and re-run
+the full ITU suite.
+
 ## SESSION #32bs — MBAFF field-inter reconstruction: three fixes landed behind
 KINETIX_MBAFF_FIELD_MC (commit `de42d44`); JM MV oracle built (KDBGMV/KDBGMVP);
 the MVP neighbour-addressing transcription is ~90% done and parked with one
