@@ -633,10 +633,14 @@ tests, 27 hard-checked ITU bit-exact / 0 failures, clippy `-D warnings`
 clean, fmt clean. `capabilities()`/strict-mode claims still correctly
 exclude MBAFF P/B.
 
-**For next session**: (1) the same KDBGBIN-vs-BINTRACE full-slice diff for
-POCs 2..16 (change the harness's `slices[1]` index) — POC 1 is proven; the
-other 16 P slices should now also parse (the ITU run's 17/17 decoded frames
-suggests yes) but are not bin-verified; (2) the MBAFF-inter reconstruction
+**For next session**: (1) ~~the same KDBGBIN-vs-BINTRACE full-slice diff for
+POCs 2..16~~ **DONE same session**: the harness now takes
+`CANLMA2_SLICE_IDX=<n>` and all 14 P slices (POCs 1-14, ~3.5 M bins) match
+the JM engine bin-for-bin (each slice = JM window + the known 1 trailing
+bin; slice 16/POC16 is untested only because JM emits no separate
+`SLICE_START` marker after the POC15 I window, so its bins can't be
+cleanly windowed — parse-wise the ITU run's 17/17 decoded frames covers
+it); the clip's CABAC P parsing is bin-exact end to end; (2) the MBAFF-inter reconstruction
 bucket is now unblocked and is the reason CANLMA2 pixels still diverge —
 `reconstruct_mbaff_inter_luma`'s field-scan/dequant bug (ZIGZAG vs field
 scan for inter residuals), `field_planes[ref_idx]`'s frame-index-as-field-

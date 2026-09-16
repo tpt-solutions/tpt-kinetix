@@ -38,7 +38,14 @@ fn canlma2_poc1_mb4_bintrace() {
         })
         .collect();
     eprintln!("found {} slice NALs", slices.len());
-    let p = slices[1];
+    // Slice index into the decode-order slice list (0 = IDR, 1 = POC 1's P
+    // slice, …). CANLMA2 is I,P×14,I,P — override with CANLMA2_SLICE_IDX to
+    // bin-verify another slice against the JM KDBGBIN window.
+    let slice_idx: usize = std::env::var("CANLMA2_SLICE_IDX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let p = slices[slice_idx];
     let ctx = SliceHeaderContext {
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
         pic_order_cnt_type: sps.pic_order_cnt_type,
