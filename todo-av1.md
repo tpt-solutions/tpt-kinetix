@@ -6489,3 +6489,125 @@
 > untouched: the warp-affine regression itself (16 blocks across the
 > 8-frame `minimal_av1_inter_ivf` clip, mixed frame4/6-better vs
 > frame5/7-worse under `KINETIX_AV1_NO_WARP`).
+
+> **2026-09-17 — FOUND + FIXED: skip-mode blocks never recorded their
+> `RefFrames`/`modeType` for the deblock filter, so any edge touching one
+> derived its filter *level* from the wrong reference.** Picked Thread A
+> (the residual ~161-diff-sample cluster on `minimal_av1_inter_ivf`) over
+> Thread B (warp) because it had a fresh, concrete repro already described
+> in this file, whereas warp needed a from-scratch trace; re-ran the
+> diffmap fresh per the prior session's own advice rather than trusting
+> the old (80,66)/mi(16,16) coordinate — it had indeed moved. All 161
+> residual diffs are exactly ±1..±3, in small scattered clusters, several
+> recurring at the same (x,y) across consecutive frames (propagation
+> through skip/copy blocks from one bad frame).
+>
+> Traced frame 1's first divergence, (28,71): Kinetix=172, dav1d=171.
+> Added a `debug_frame_seq` module (`AtomicU64`, `next()`/`current()`) so
+> cross-module `eprintln!` traces could be pinned to a specific *decode-order*
+> frame index — necessary because this clip's hierarchical GOP decodes
+> frames out of display order (keyframe oh0, then hidden oh6, hidden oh3,
+> then the 7 shown deltas oh1..oh7), and naively correlating debug output
+> by nearby line numbers or by *guessing* which "call" is which display
+> frame cost real time this session (a `stdout`-vs-`stderr` buffering
+> question was also raised and ruled out: dav1d's own trace printf's are
+> all on the same stream, so their relative order is trustworthy; it's
+> only cross-stream stderr/stdout interleaving from `2>&1` redirection
+> that can lie, and only for prints on *different* streams from each
+> other).
+>
+> With `KINETIX_AV1_DBG_PXY=28,71` + the new `KINETIX_AV1_DBG_SEQ` frame
+> marker, found the actual reconstruction was already correct
+> (pre-filter=170, matching dav1d's own traced value for that same
+> internal frame via a new `KINETIX_DBG_SBROW`-style hook added to the
+> patched dav1d's `dav1d_filter_sbrow`) — **the divergence is introduced by
+> DEBLOCK**, not residual/prediction/LR as a first pass wrongly concluded
+> (the LR/SgrProj no-op that showed up in an earlier trace was just
+> correctly filtering already-corrupted post-deblock input, not a bug of
+> its own). New `KINETIX_AV1_DBG_DEBLOCK` hook (`loop_filter.rs`) isolated
+> the exact edge: a horizontal edge at `y=72`, `bx=7` (a real content step,
+> p-side flat 170 / q-side flat 175) computed `lvl=3` and applied a
+> genuine filter4 correction (hand-verified against §7.14.6.4's formula:
+> `filter=3*(qs0-ps0)=15`, `filter1=filter2=2`, giving `p0'=172`,
+> `q0'=173` — exactly Kinetix's output). dav1d leaves this same edge
+> byte-identical, which is only possible if it computes `lvl=0` there
+> (skips the edge outright) — a *level* bug, not a filter-math bug.
+>
+> Root cause: `lf_ref4`/`lf_mode4` (the per-4×4 `RefFrames`/`modeType`
+> grids `compute_level` (§7.14.4) reads) are written by exactly one call
+> site, `record_lf4()`, called from the ordinary inter-block path
+> (`inter_block.rs`, after `add_inter_residual`). AV1's **skip-mode**
+> feature (§5.11.11's separate `skip_mode` flag — a frame-level shortcut
+> that predicts a whole block from the fixed `SkipModeFrame` pair with no
+> per-block ref/mv/mode signaling at all) is handled by a *different*
+> function, `decode_skip_mode_block`, which also calls
+> `add_inter_residual` but — unlike the ordinary path — never called
+> `record_lf4()`. Every skip-mode block therefore left its covered `lf_ref4`
+> cells at `FrameMeta`'s zero-initialized default, which `compute_level`
+> reads as `ref_idx == 0` == `INTRA_FRAME`, taking the "intra edge" branch
+> (`loop_filter_ref_deltas[INTRA_FRAME]` alone, no mode delta) instead of
+> the block's real inter reference + mode delta. Confirmed directly: a new
+> `KINETIX_AV1_DBG_LFREF` print (recorded ref/mode per block) showed a real
+> gap in mi-column coverage at the failing edge's position in frame 2's own
+> per-block dump — the covering block was invisible to the (pre-existing)
+> `KINETIX_AV1_DBG_B0` per-block tracer too, because `decode_skip_mode_block`
+> returns before reaching that tracer's print statement, which is the same
+> "this path is a separate, easy-to-miss function" shape as the bug itself.
+>
+> FIX (`inter_block.rs`, `decode_skip_mode_block`): added the same
+> `record_lf4(ref_names[0] - 1, mode_type)` call the ordinary path makes,
+> right after its own `add_inter_residual`. `modeType` is hardcoded to `1`
+> unconditionally, matching the ordinary compound path's
+> `comp_mode != GLOBALMV_GLOBALMV` derivation, since skip-mode always
+> predicts from the NEAREST-MV stack entry, never `GLOBALMV_GLOBALMV`.
+>
+> VERIFIED: `av1_inter_sequence_vs_dav1d_when_available` per-frame luma
+> diff samples 12/40/48/40/13/0/8 (161 total) → 8/36/44/35/9/0/8 (140
+> total), a further ~13% reduction with no regression on any frame; frame
+> 6 stays fully bit-exact. `av1_inter_corpus_vs_dav1d_when_available`'s
+> `testsrc_96x64` stays at 0 luma diffs on every frame; `testsrc_64x64`'s
+> large per-frame diffs (492-761, pre-existing) are unchanged, consistent
+> with that clip's gap being the separate warp-affine issue (Thread B,
+> still untouched). AV1 intra corpus stays 6/6 bit-exact. `cargo test -p
+> tpt-kinetix-av1` (154/154 unit + all integration suites),
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`, and
+> `cargo test --workspace --lib --bins` are all clean.
+>
+> New debug hooks left in place (all off by default, all in `tpt-kinetix-av1`
+> unless noted): `KINETIX_AV1_DBG_SEQ` (`decoder.rs`, prints a running
+> per-real-coded-frame index + `order_hint`/`show_frame`/`frame_type` —
+> pairs with the new `debug_frame_seq` module's `current()` to label any
+> other hook's output with *which* frame produced it, essential for this
+> clip's hierarchical decode order), `KINETIX_AV1_DBG_DEBLOCK`
+> (`loop_filter.rs`, dumps level/limit/blimit/filter_size and the raw
+> pre-filter pixel window for the vertical edge at x=28 or horizontal edge
+> near y=71 — coordinates are hardcoded to this session's repro and will
+> need re-pointing for a different one), `KINETIX_AV1_DBG_SGR`
+> (`loop_filter.rs`, dumps SgrProj inputs/correction at pixel (28,71)),
+> `KINETIX_AV1_DBG_LFREF` (`inter_block.rs`, dumps `ref_names`/`mode_type`/
+> the recorded ref-delta index for every ordinary-path inter block — does
+> NOT cover skip-mode blocks even after this fix, since the fix only adds
+> the *write*, not a matching debug print; add one at the same call site if
+> a future session needs to inspect skip-mode ref recording specifically).
+> Outside this repo: the patched dav1d clone
+> (`%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d\dav1d`) gained a `KINETIX_DBG_SBROW`
+> hook in `recon_tmpl.c`'s `dav1d_filter_sbrow` (dumps one pixel
+> pre-deblock/post-deblock/post-cdef/post-lr for a hardcoded
+> `frame_offset`) and a `curpoc`/`refpoc`/raw-reference-pixel dump added to
+> the existing `KINETIX_DBG_MCPX` `COMPPX` print — both reusable, both
+> currently pointed at this session's specific frame/pixel and needing
+> re-coordination for a different repro; remember to `ninja -C build` +
+> manually copy `build/src/dav1d.dll` over `build/tools/dav1d.dll` after
+> editing.
+>
+> REMAINING for next session: 140 diff samples still open on
+> `minimal_av1_inter_ivf`, concentrated in frames 2-4 (36/44/35). Given
+> this session found a whole *class* of missing-metadata bug (skip-mode
+> blocks not updating a per-block grid used by a later pass), it's worth
+> checking whether `decode_skip_mode_block` is missing *other* such
+> updates too (e.g. anything else the ordinary path threads into
+> `FrameMeta` that skip-mode's own bookkeeping loop at the end of the
+> function — the `is_inter_left`/`comp_type_left`/etc. neighbour-context
+> updates — doesn't also cover, such as CDEF's `luma_skip`/`cdef_idx` or
+> the chroma tx-size grids) before re-diffmapping from scratch. The
+> warp-affine regression (Thread B) remains completely untouched.

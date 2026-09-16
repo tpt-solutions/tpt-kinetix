@@ -277,7 +277,8 @@ impl<'a> TileDecodeState<'a> {
         if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
             match &lr_data {
                 LrUnitData::Sgrproj { set, xqd } => eprintln!(
-                    "KIN SGR pl={plane} set={set} w={xqd:?} rng={}",
+                    "KIN SGR n={} pl={plane} set={set} w={xqd:?} rng={}",
+                    crate::debug_frame_seq::current(),
                     self.dec.raw_state().0
                 ),
                 LrUnitData::Wiener { h, v } => eprintln!(

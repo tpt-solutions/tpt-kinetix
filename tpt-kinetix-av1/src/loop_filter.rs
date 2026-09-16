@@ -862,6 +862,23 @@ fn deblock_plane(
             }
             let y0 = by * step;
             let bh = step.min(height.saturating_sub(y0));
+            if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                && plane_index == 0
+                && edge == 28
+                && y0 <= 71
+                && 71 < y0 + bh
+            {
+                eprintln!(
+                    "DBLK n={} vedge x=28 by={by} lvl={lvl} filter_size={filter_size} left_tx={left_tx} right_tx={right_tx} limit={} blimit={} thresh={} pre_line={:?}",
+                    crate::debug_frame_seq::current(),
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                    (edge.saturating_sub(6)..(edge + 6).min(width))
+                        .map(|x| plane[71 * stride + x])
+                        .collect::<Vec<u8>>()
+                );
+            }
             for y in y0..y0 + bh {
                 let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
                 let filtered = filter_line_1d(
@@ -932,6 +949,23 @@ fn deblock_plane(
             }
             let x0 = bx * step;
             let bw = step.min(width.saturating_sub(x0));
+            if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                && plane_index == 0
+                && x0 <= 28
+                && 28 < x0 + bw
+                && edge.abs_diff(71) <= 8
+            {
+                eprintln!(
+                    "DBLK n={} hedge y={edge} bx={bx} lvl={lvl} filter_size={filter_size} top_tx={top_tx} bot_tx={bot_tx} limit={} blimit={} thresh={} pre_col={:?}",
+                    crate::debug_frame_seq::current(),
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                    (edge.saturating_sub(6)..(edge + 6).min(height))
+                        .map(|y| plane[y * stride + 28])
+                        .collect::<Vec<u8>>()
+                );
+            }
             for x in x0..x0 + bw {
                 let mut line: Vec<i32> =
                     (0..height).map(|y| plane[y * stride + x] as i32).collect();
@@ -1452,6 +1486,14 @@ fn sgrproj_filter_plane(
         for x in 0..uw {
             let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
             let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
+            if std::env::var("KINETIX_AV1_DBG_SGR").is_ok() && ux0 + x == 28 && uy0 + y == 71 {
+                eprintln!(
+                    "SGR n={} (28,71) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction}",
+                    crate::debug_frame_seq::current(),
+                    t0[y * uw + x],
+                    t1[y * uw + x]
+                );
+            }
             plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, 255) as u8;
         }
     }

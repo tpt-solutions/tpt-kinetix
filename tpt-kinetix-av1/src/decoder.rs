@@ -434,6 +434,13 @@ impl Av1Decoder {
         fh: &FrameHeader,
         pairs: &[(u8, Vec<u8>)],
     ) -> Option<VideoFrame> {
+        if std::env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
+            let n = crate::debug_frame_seq::next();
+            eprintln!(
+                "DBGSEQ n={n} order_hint={} show_frame={} frame_type={:?}",
+                fh.order_hint, fh.show_frame, fh.frame_type
+            );
+        }
         self.last_frame_header = Some(fh.clone());
         // §6.8.2 CDF context: a frame whose `primary_ref_frame` names a ref-list
         // entry starts from the saved (adapted) CDFs of the DPB slot that entry

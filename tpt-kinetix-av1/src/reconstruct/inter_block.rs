@@ -1479,6 +1479,13 @@ impl<'a> TileDecodeState<'a> {
         // delta index = name − 1; INTRA_FRAME=1 maps to 0) and mode type.
         // The span is the block's tile-local luma rectangle, mirroring
         // `record_delta_lf4`'s addressing.
+        if std::env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
+            eprintln!(
+                "LFREF n={} mi=({mi_col},{mi_row}) px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} ref_names={ref_names:?} lf_mode_type={lf_mode_type} recorded_ref={}",
+                crate::debug_frame_seq::current(),
+                ref_names[0] - 1
+            );
+        }
         self.meta.record_lf4(
             px_x0 / 4,
             px_y0 / 4,
@@ -1686,6 +1693,24 @@ impl<'a> TileDecodeState<'a> {
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, true);
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         self.add_inter_residual(mi_row, mi_col, bsize, true, &leaves)?;
+        // §7.14.4 deblock-level inputs (see the identical call in the ordinary
+        // inter-block path above): a skip-mode block never went through that
+        // path, so without this call `lf_ref4`/`lf_mode4` kept whatever was
+        // left over for this cell (0 == INTRA_FRAME by `FrameMeta`'s default),
+        // making every edge touching a skip-mode block derive its filter
+        // level from `loop_filter_ref_deltas[INTRA_FRAME]` instead of the
+        // block's real `SkipModeFrame` reference. Skip-mode always predicts
+        // from the NEAREST-MV stack entry (never GLOBALMV), so `modeType` is
+        // unconditionally 1 here, matching the `comp_mode != GLOBALMV_GLOBALMV`
+        // derivation used for ordinary compound blocks above.
+        self.meta.record_lf4(
+            px_x0 / 4,
+            px_y0 / 4,
+            (px_x0 + bw_px).div_ceil(4),
+            (px_y0 + bh_px).div_ceil(4),
+            ref_names[0] - 1,
+            1,
+        );
 
         let luma_tx_w = av1::TX_WIDTH[luma_tx] as u8;
         let luma_tx_h = av1::TX_HEIGHT[luma_tx] as u8;
@@ -2239,8 +2264,7 @@ impl<'a> TileDecodeState<'a> {
             let t1 = prep(slot1, mvs[1]);
             if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
                 && plane == 0
-                && mi_col == 16
-                && mi_row == 16
+                && ((mi_col == 16 && mi_row == 16) || (mi_col == 0 && mi_row == 16))
             {
                 eprintln!(
                     "COMP mi=({mi_col},{mi_row}) ref0={} ref1={} mv0={:?} mv1={:?} weight={blend_weight} comp_type={}",
@@ -2249,6 +2273,9 @@ impl<'a> TileDecodeState<'a> {
                 for row in 0..bh.min(8) {
                     eprintln!("  t0 row={row}: {:?}", &t0[row * bw..row * bw + bw.min(20)]);
                     eprintln!("  t1 row={row}: {:?}", &t1[row * bw..row * bw + bw.min(20)]);
+                }
+                if bw > 28 && bh > 7 {
+                    eprintln!("  at (28,7): t0={} t1={}", t0[7 * bw + 28], t1[7 * bw + 28]);
                 }
             }
             if mask.comp_type == 3 || mask.comp_type == 4 {
