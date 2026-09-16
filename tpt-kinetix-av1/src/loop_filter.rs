@@ -862,27 +862,8 @@ fn deblock_plane(
             }
             let y0 = by * step;
             let bh = step.min(height.saturating_sub(y0));
-            let dbg_deblock = std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
-                && plane_index == 0
-                && bx == 20
-                && by >= 16
-                && by <= 17;
             for y in y0..y0 + bh {
                 let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
-                if dbg_deblock {
-                    let get = |off: isize| -> i32 {
-                        let idx = (edge as isize + off).clamp(0, line.len() as isize - 1);
-                        line[idx as usize]
-                    };
-                    eprintln!(
-                        "DEBLOCK-V y={y} bx={bx} by={by} edge={edge} lvl={lvl} fs={filter_size} limit={} blimit={} thresh={}",
-                        lp.limit, lp.blimit, lp.thresh
-                    );
-                    eprintln!(
-                        "  p3={} p2={} p1={} p0={} | q0={} q1={} q2={} q3={}",
-                        get(-4), get(-3), get(-2), get(-1), get(0), get(1), get(2), get(3)
-                    );
-                }
                 let filtered = filter_line_1d(
                     &line,
                     edge,
@@ -892,16 +873,6 @@ fn deblock_plane(
                     filter_size,
                     plane_index == 0,
                 );
-                if dbg_deblock {
-                    let get_f = |off: isize| -> i32 {
-                        let idx = (edge as isize + off).clamp(0, filtered.len() as isize - 1);
-                        filtered[idx as usize]
-                    };
-                    eprintln!(
-                        "  OUT: p3={} p2={} p1={} p0={} | q0={} q1={} q2={} q3={}",
-                        get_f(-4), get_f(-3), get_f(-2), get_f(-1), get_f(0), get_f(1), get_f(2), get_f(3)
-                    );
-                }
                 for x in 0..width {
                     plane[y * stride + x] = filtered[x] as u8;
                 }
@@ -961,28 +932,9 @@ fn deblock_plane(
             }
             let x0 = bx * step;
             let bw = step.min(width.saturating_sub(x0));
-            let dbg_deblock_h = std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
-                && plane_index == 0
-                && by == 16
-                && bx >= 19
-                && bx <= 22;
             for x in x0..x0 + bw {
                 let mut line: Vec<i32> =
                     (0..height).map(|y| plane[y * stride + x] as i32).collect();
-                if dbg_deblock_h {
-                    let get = |off: isize| -> i32 {
-                        let idx = (edge as isize + off).clamp(0, line.len() as isize - 1);
-                        line[idx as usize]
-                    };
-                    eprintln!(
-                        "DEBLOCK-H x={x} bx={bx} by={by} edge={edge} lvl={lvl} fs={filter_size} limit={} blimit={} thresh={}",
-                        lp.limit, lp.blimit, lp.thresh
-                    );
-                    eprintln!(
-                        "  p3={} p2={} p1={} p0={} | q0={} q1={} q2={} q3={}",
-                        get(-4), get(-3), get(-2), get(-1), get(0), get(1), get(2), get(3)
-                    );
-                }
                 let filtered = filter_line_1d(
                     &line,
                     edge,
@@ -992,16 +944,6 @@ fn deblock_plane(
                     filter_size,
                     plane_index == 0,
                 );
-                if dbg_deblock_h {
-                    let get_f = |off: isize| -> i32 {
-                        let idx = (edge as isize + off).clamp(0, filtered.len() as isize - 1);
-                        filtered[idx as usize]
-                    };
-                    eprintln!(
-                        "  OUT: p3={} p2={} p1={} p0={} | q0={} q1={} q2={} q3={}",
-                        get_f(-4), get_f(-3), get_f(-2), get_f(-1), get_f(0), get_f(1), get_f(2), get_f(3)
-                    );
-                }
                 for y in 0..height {
                     plane[y * stride + x] = filtered[y] as u8;
                 }
@@ -1151,8 +1093,11 @@ fn cdef_filter_block(
     dir: usize,
 ) {
     let coeff_shift = 0; // 8-bit
-    // §7.15.3 / dav1d: primary tap row = (PrimaryStrength >> (BitDepth-8)) & 1 XOR (dir & 1)
-    let taps = (((pri_str >> coeff_shift) & 1) as usize) ^ (dir & 1);
+    // dav1d cdef_tmpl.c: pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1)
+    // which selects CDEF_PRI_TAPS row 0 ([4,2]) when pri_strength is even,
+    // row 1 ([3,3]) when odd. No XOR with direction.
+    let taps = ((pri_str >> coeff_shift) & 1) as usize;
+    let src_rows = src.len().div_ceil(src_stride);
     for i in 0..h {
         for j in 0..w {
             let x = src[(y0 + i) * src_stride + (x0 + j)] as i32;
@@ -1167,7 +1112,7 @@ fn cdef_filter_block(
                     let yy = (y0 + i) as isize + dy as isize;
                     let xx = (x0 + j) as isize + dx as isize;
                     if yy >= 0
-                        && (yy as usize) < src.len().div_ceil(src_stride)
+                        && (yy as usize) < src_rows
                         && xx >= 0
                         && (xx as usize) < src_stride
                     {
@@ -1185,7 +1130,7 @@ fn cdef_filter_block(
                         let yy2 = (y0 + i) as isize + dy2 as isize;
                         let xx2 = (x0 + j) as isize + dx2 as isize;
                         if yy2 >= 0
-                            && (yy2 as usize) < src.len().div_ceil(src_stride)
+                            && (yy2 as usize) < src_rows
                             && xx2 >= 0
                             && (xx2 as usize) < src_stride
                         {
@@ -1200,11 +1145,6 @@ fn cdef_filter_block(
             }
             let val = x + ((8 + sum - (if sum < 0 { 1 } else { 0 })) >> 4);
             let out = clip3(val, min, max) as u8;
-            if std::env::var("KINETIX_AV1_DBG_CDEF").is_ok()
-                && x0 + j == 80 && y0 + i == 66
-            {
-                eprintln!("CDEF-DBG px(80,66): x={x} sum={sum} val={val} min={min} max={max} out={out}");
-            }
             dst[(y0 + i) * dst_stride + (x0 + j)] = out;
         }
     }
@@ -1932,9 +1872,6 @@ fn cdef_plane_luma(
                 0
             };
             let dir = if pri_str == 0 { 0 } else { yd };
-            if std::env::var("KINETIX_AV1_DBG_CDEF").is_ok() && x0 == 80 && y0 == 64 {
-                eprintln!("CDEF-DBG luma block ({x0},{y0}): dir={dir} var={var} pri_str={pri_str} p={p} sec_str={sec_str} damping={damping}");
-            }
             cdef_filter_block(
                 plane,
                 width,
