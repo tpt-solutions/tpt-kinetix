@@ -6731,3 +6731,74 @@ centre-MV result is only a fallback there; implementing full global-warp
 MC is its own task. (4) The 64x64 clip’s raw keyframe ±1-2s in the text
 band (rows 46-63; intra prediction of dense text; filtered-to-identity so
 cosmetic for output but worth one look alongside (1)).
+
+> **2026-09-17 (evening session) — dav1d patched to dump HIDDEN frames; the
+> 64x64 clip's remaining gap root-caused to an ENTROPY desync starting in
+> the first hidden frame's VERT-split-8x8 residual read; one real spec fix
+> landed (`disable_cdf_update`).** The dav1d clone gained two hooks:
+> `KINETIX_DBG_DUMPF` (decode.c, `dav1d_decode_frame`'s sbrow-loop exit —
+> writes every fully-filtered frame *including hidden alt-refs* as packed
+> `dfr_NN.yuv` in the CWD, decode-order numbered, printing
+> frame_offset/show_frame per dump) and `KINETIX_DBG_PARTCDF` (decode.c's
+> `decode_partition` — prints the partition CDF row + pre-read rng per
+> read). Both need `ninja -C build` via vcvars
+> (`cmd //c rebuild.bat` at the clone root — sccache had to be stripped
+> from build/build.ninja first) + copy `build/src/dav1d.dll` over
+> `build/tools/dav1d.dll`. Kinetix's counterpart dumps are the existing
+> `KINETIX_AV1_DUMP_FRAMES` (`kfr_NN.yuv`, same decode-order numbering).
+> With both sides dumped, the 64x64 clip's diff chain is exactly: kf
+> bit-exact → **oh4 (hidden, first inter frame) Y=689 diffs, first-bad
+> (31,48)** → oh2 912 → every shown frame inherits. The entropy streams
+> align block-for-block through oh4's `mi(6,14)` VERT-split 8x8 and its
+> first 4x8 child (rng 52580 matched), then diverge inside the SECOND
+> 4x8 child's residual reads: dav1d reads vartx[0/0] + y-cf TX_4X8
+> txtp=13 eob=8 + uv 4x4 eob=4 + uv eob=0 (post 34641), Kinetix arrives
+> at the next partition read with 51208 and decodes bp=8 (HORZ_4) where
+> dav1d decodes bp=3 (SPLIT). From there oh4 decodes
+> differently-but-validly (no panic) and every downstream frame inherits
+> (dav1d's CDF row dump via KINETIX_DBG_PARTCDF vs Kinetix's
+> KINETIX_AV1_DBG_PARTCDF confirmed the CDF rows in the two decoders use
+> different storage conventions — dav1d pre-complements every element via
+> the recursive CDF macros and uses them directly; Kinetix stores the raw
+> spec forward values and complements at read time — and are numerically
+> equivalent, so the divergence is in a *symbol read*, not the table).
+> The concrete next probe: Kinetix's read path for the VERT-child 4x8
+> block's var-tx tree + coefficients — prime suspects are
+> `read_block_tx_size_ibc`'s tx-depth read for BLOCK_4X8 (MAX_TX_DEPTH
+> table verified correct) and `read_coeffs`' eob/tx-type context for
+> TX_4X8 in the inter path. Note the earlier warp attribution was wrong
+> (this clip's warp blocks — mm=2 with alpha/beta models — decode AFTER
+> the desync point, so their pixel diffs are downstream garbage).
+>
+> One real spec fix landed in the process: **Kinetix's `read_symbol`
+> never honored the frame header's `disable_cdf_update` flag (§6.8.2)** —
+> its own doc comment admitted it always adapts. `SymbolDecoder` gained
+> `allow_update_cdf` + `set_allow_update_cdf` (dav1d
+> `msac.allow_update_cdf`), threaded from `FrameHeader.disable_cdf_update`
+> through `TileDecodeState::new`. On `disable_cdf_update=1` frames Kinetix
+> previously adapted its CDFs while dav1d kept them frozen — the same
+> symbol stream eventually decodes differently once any drifted CDF flips
+> a decision (this clip's frames all have the flag=0, so no visible
+> change here — but real RTC encoders set it constantly). Also added:
+> `KINETIX_AV1_DBG_PARTCDF` (mode_cdfs.rs, dumps the W32/ctx2 partition
+> CDF row + count pre-read) and `KINETIX_AV1_DBG_WARPPX`
+> (warp.rs, dumps the warp filter's phases/mids/outputs for the
+> dx==26/dy==48 sub-block — coordinates are this session's repro and
+> need re-pointing for the next one). Debug session confirmed the warp
+> pipeline itself (model derivation, filter table, phase/rounding
+> arithmetic) is numerically identical to dav1d's warp_affine_8x8_c at
+> this repro point.
+>
+> VERIFIED: intra corpus 6/6 bit-exact (all-inf PSNR), 128x96 inter
+> sequence unchanged (frames 0-6 luma bit-exact, frame 0 fully bit-exact,
+> frame 7 = 8 samples), 154 AV1 unit tests, workspace lib/bins tests,
+> tpt-kinetix-av1 clippy -D warnings, fmt — all clean. REMAINING (next
+> session, priority order): (1) oh4's VERT-child 4x8 residual read —
+> trace Kinetix's symbol-by-symbol rng against dav1d's Post-vartxtree/
+> Post-y-cf-blk prints from the (6,14) VERT block; the divergence is
+> between rng 52580 (matched) and the following partition read (51208 vs
+> 34641 pre). (2) The 128x96 chroma gap — the same DUMPF tool now makes
+> this tractable: dump both sides' hidden frames (kf, oh6, oh3) and diff
+> chroma rows 37-47. (3) The dav1d-side hooks (DUMPF/PARTCDF) live only
+> in the out-of-repo clone — if the clone is ever recreated, re-apply
+> from this note.

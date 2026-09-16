@@ -387,6 +387,14 @@ pub struct SymbolDecoder<'a> {
     symbol_value: u32,
     symbol_range: u32,
     symbol_max_bits: i64,
+    /// §6.8.2 `disable_cdf_update` (dav1d `msac.allow_update_cdf`): when the
+    /// frame header sets it, symbol reads must decode against the CDFs
+    /// *without* adapting them. A previous version always adapted, so on
+    /// `disable_cdf_update=1` frames the CDFs drifted from the encoder's
+    /// intent — the same symbols still decoded for a while (bit-exact frames
+    /// masked it), but any later read whose CDF had drifted far enough
+    /// flipped to a different symbol and desynced the rest of the frame.
+    allow_update_cdf: bool,
 }
 
 impl<'a> SymbolDecoder<'a> {
@@ -414,6 +422,7 @@ impl<'a> SymbolDecoder<'a> {
             symbol_value: 0,
             symbol_range: 1 << 15,
             symbol_max_bits: 0,
+            allow_update_cdf: true,
         };
         let remaining_bits = (data.len() * 8).saturating_sub(bit_offset);
         let num_bits = remaining_bits.min(15) as u32;
@@ -423,6 +432,12 @@ impl<'a> SymbolDecoder<'a> {
         dec.symbol_range = 1 << 15;
         dec.symbol_max_bits = remaining_bits as i64 - 15;
         dec
+    }
+
+    /// §6.8.2 `disable_cdf_update`: suppress per-symbol CDF adaptation for
+    /// this frame's tile data. Must be called before the first `read_symbol`.
+    pub fn set_allow_update_cdf(&mut self, allow: bool) {
+        self.allow_update_cdf = allow;
     }
 
     /// Scratch debug accessor, session 2026-08-19: how far into `data` (in
@@ -532,23 +547,26 @@ impl<'a> SymbolDecoder<'a> {
         self.symbol_value = padded_data ^ (((self.symbol_value + 1) << bits) - 1);
         self.symbol_max_bits -= bits as i64;
 
-        // CDF adaptation/update.
-        let count = cdf[n] as u32;
-        let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
-        let mut tmp: u32 = 0;
-        for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
-            if i == symbol {
-                tmp = 1 << 15;
+        // CDF adaptation/update (§6.8.2 `disable_cdf_update`: skipped entirely
+        // when the frame header suppresses it — dav1d `msac.allow_update_cdf`).
+        if self.allow_update_cdf {
+            let count = cdf[n] as u32;
+            let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
+            let mut tmp: u32 = 0;
+            for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
+                if i == symbol {
+                    tmp = 1 << 15;
+                }
+                let c = *slot as u32;
+                *slot = if tmp < c {
+                    (c - ((c - tmp) >> rate)) as u16
+                } else {
+                    (c + ((tmp - c) >> rate)) as u16
+                };
             }
-            let c = *slot as u32;
-            *slot = if tmp < c {
-                (c - ((c - tmp) >> rate)) as u16
-            } else {
-                (c + ((tmp - c) >> rate)) as u16
-            };
-        }
-        if cdf[n] < 32 {
-            cdf[n] += 1;
+            if cdf[n] < 32 {
+                cdf[n] += 1;
+            }
         }
 
         if symbol_trace_enabled() {

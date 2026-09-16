@@ -643,6 +643,17 @@ impl ModeCdfs {
             3 => &mut self.partition_w64[ctx],
             _ => &mut self.partition_w128[ctx],
         };
+        if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bucket == 2 && ctx == 2 {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static PC: AtomicUsize = AtomicUsize::new(0);
+            eprintln!(
+                "PARTCDF i={} pre={} cdf={:?} post_count={}",
+                PC.fetch_add(1, Ordering::Relaxed),
+                dec.raw_state().0,
+                &cdf[..],
+                cdf[10]
+            );
+        }
         dec.read_symbol(cdf)
     }
 

@@ -111,6 +111,7 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         0,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -616,6 +617,7 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -706,6 +708,7 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -796,6 +799,7 @@ fn make_cdef_delta_state<'a>(
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -875,6 +879,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -935,6 +940,7 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -1248,6 +1254,7 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
+        false, // disable_cdf_update
         false,
         false,
         false,
@@ -1346,6 +1353,7 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         INTERP_SWITCHABLE,
                         [0u8; 8],
                         [[0; 6]; 8],
+                        false, // disable_cdf_update
                         false,
                         false,
                         false,

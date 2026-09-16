@@ -481,6 +481,8 @@ fn warp_affine_8x8(
 
     // Horizontal pass: 15 source rows (dy-3 ..= dy+11), 8 columns each,
     // giving the vertical pass its full 8-tap support (3 above / 4 below).
+    let dbg_px = std::env::var("KINETIX_AV1_DBG_WARPPX").is_ok() && dx == 26 && dy == 48;
+    let dbg_n = crate::debug_frame_seq::current();
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;
     for (yy, row) in mid.iter_mut().enumerate() {
@@ -488,6 +490,15 @@ fn warp_affine_8x8(
         let mut tmx = mx_row;
         for (xx, out) in row.iter_mut().enumerate() {
             let filter = filter_row(tmx);
+            if dbg_px && yy == 0 {
+                let idx = (64 + ((tmx + 512) >> 10)).clamp(0, 192);
+                eprintln!(
+                    "WARPPX n={dbg_n} h yy=0 xx={xx} phase={tmx} idx={idx} f={filter:?} taps={:?}",
+                    (0..8)
+                        .map(|k| sample(dx + xx as i32 + k - 3, sy))
+                        .collect::<Vec<_>>()
+                );
+            }
             let sx = dx + xx as i32;
             let mut s = 0i32;
             for (k, &c) in filter.iter().enumerate() {
@@ -497,6 +508,9 @@ fn warp_affine_8x8(
             *out = (s + 4) >> 3;
             tmx += alpha;
         }
+        if dbg_px {
+            eprintln!("WARPPX n={dbg_n} mid row{yy}={:?}", row);
+        }
         mx_row += beta;
     }
 
@@ -505,12 +519,19 @@ fn warp_affine_8x8(
         let mut tmy = my_row;
         for xx in 0..8usize {
             let filter = filter_row(tmy);
+            if dbg_px && yy == 0 && xx >= 6 {
+                let idx = (64 + ((tmy + 512) >> 10)).clamp(0, 192);
+                eprintln!("WARPPX n={dbg_n} v yy=0 xx={xx} phase={tmy} idx={idx} f={filter:?}");
+            }
             let mut s = 0i32;
             for (k, &c) in filter.iter().enumerate() {
                 s += c as i32 * mid[yy + k][xx];
             }
             // sh = 7 + intermediate_bits(4) = 11, then clip to pixel range.
             let v = ((s + 1024) >> 11).clamp(0, 255) as u8;
+            if dbg_px && yy == 0 {
+                eprintln!("WARPPX n={dbg_n} out yy=0 xx={xx} v={v}");
+            }
             dest[(dest_y + yy) * dest_stride + (dest_x + xx)] = v;
             tmy += gamma;
         }

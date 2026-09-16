@@ -80,6 +80,7 @@ fn decode_with(
         0,           // interpolation_filter (EIGHTTAP_REGULAR)
         [0u8; 8],    // gm_type (all IDENTITY)
         [[0; 6]; 8], // gm_params
+        false,       // disable_cdf_update
         false,       // enable_dual_filter
         false,       // is_motion_mode_switchable
         false,       // allow_warped_motion

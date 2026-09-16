@@ -1018,6 +1018,7 @@ impl<'a> TileDecodeState<'a> {
         interpolation_filter: u8,
         gm_type: [u8; 8],
         gm_params: [[i32; 6]; 8],
+        disable_cdf_update: bool,
         enable_dual_filter: bool,
         is_motion_mode_switchable: bool,
         allow_warped_motion: bool,
@@ -1064,8 +1065,10 @@ impl<'a> TileDecodeState<'a> {
                 "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
             );
         }
+        let mut dec = SymbolDecoder::new_with_bit_offset(data, bit_offset);
+        dec.set_allow_update_cdf(!disable_cdf_update);
         TileDecodeState {
-            dec: SymbolDecoder::new_with_bit_offset(data, bit_offset),
+            dec,
             coeff_cdfs: match initial_cdfs {
                 Some(c) => c.coeff_cdfs.clone(),
                 None => TileCdfs::new(qindex),
@@ -1444,6 +1447,7 @@ pub fn decode_tile_group(
     interpolation_filter: u8,
     gm_type: [u8; 8],
     gm_params: [[i32; 6]; 8],
+    disable_cdf_update: bool,
     enable_dual_filter: bool,
     is_motion_mode_switchable: bool,
     allow_warped_motion: bool,
@@ -1560,6 +1564,7 @@ pub fn decode_tile_group(
         interpolation_filter,
         gm_type,
         gm_params,
+        disable_cdf_update,
         enable_dual_filter,
         is_motion_mode_switchable,
         allow_warped_motion,
@@ -2054,6 +2059,7 @@ pub fn reconstruct_av1_frame(
                 frame_header.interpolation_filter,
                 frame_header.gm_type,
                 frame_header.gm_params,
+                frame_header.disable_cdf_update,
                 seq.enable_dual_filter,
                 frame_header.is_motion_mode_switchable,
                 frame_header.allow_warp,
