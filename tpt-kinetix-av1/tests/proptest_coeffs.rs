@@ -70,24 +70,26 @@ fn decode_with(
         false, // allow_intrabc
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
-        true,     // frame_is_intra — these robustness tests exercise the intra path
-        false,    // use_ref_frame_mvs
-        false,    // allow_high_precision_mv
-        false,    // force_integer_mv
-        false,    // reference_select
-        false,    // skip_mode_present
-        [2, 2],   // skip_mode_frame
-        0,        // interpolation_filter (EIGHTTAP_REGULAR)
-        false,    // enable_dual_filter
-        false,    // is_motion_mode_switchable
-        false,    // allow_warped_motion
-        false,    // enable_interintra
-        false,    // enable_masked_compound
-        false,    // enable_jnt_comp
-        0,        // order_hint_bits
-        0,        // cur_order_hint
-        [0u8; 8], // dpb_order_hints
-        [0u8; 9], // ref_to_slot
+        true,        // frame_is_intra — these robustness tests exercise the intra path
+        false,       // use_ref_frame_mvs
+        false,       // allow_high_precision_mv
+        false,       // force_integer_mv
+        false,       // reference_select
+        false,       // skip_mode_present
+        [2, 2],      // skip_mode_frame
+        0,           // interpolation_filter (EIGHTTAP_REGULAR)
+        [0u8; 8],    // gm_type (all IDENTITY)
+        [[0; 6]; 8], // gm_params
+        false,       // enable_dual_filter
+        false,       // is_motion_mode_switchable
+        false,       // allow_warped_motion
+        false,       // enable_interintra
+        false,       // enable_masked_compound
+        false,       // enable_jnt_comp
+        0,           // order_hint_bits
+        0,           // cur_order_hint
+        [0u8; 8],    // dpb_order_hints
+        [0u8; 9],    // ref_to_slot
         RefFrames::empty(),
         [None; 8],
         &mut Vec::new(),

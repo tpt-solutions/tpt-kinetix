@@ -835,6 +835,12 @@ struct TileDecodeState<'a> {
     /// Frame-level `interpolation_filter` (0..4, §6.8.2); `SWITCHABLE`=4 means a
     /// per-block filter is read.
     interpolation_filter: u8,
+    /// Frame-level global motion: `GmType[ref]` (IDENTITY=0, TRANSLATION=1,
+    /// ROTZOOM=2, AFFINE=3) and `gm_params[ref][6]` at the spec's
+    /// `WARPEDMODEL_PREC_BITS` scaling (§5.9.25). GLOBALMV-coded blocks derive
+    /// their MV from these (§7.11.3); IDENTITY is the zero MV.
+    gm_type: [u8; 8],
+    gm_params: [[i32; 6]; 8],
     /// Maps a reference *name* (LAST..ALTREF, indices 2..8) to a DPB slot 0..7.
     ref_to_slot: [u8; 9],
     /// The 8 DPB reference slots the inter blocks may draw from.
@@ -1010,6 +1016,8 @@ impl<'a> TileDecodeState<'a> {
         skip_mode_present: bool,
         skip_mode_frame: [u8; 2],
         interpolation_filter: u8,
+        gm_type: [u8; 8],
+        gm_params: [[i32; 6]; 8],
         enable_dual_filter: bool,
         is_motion_mode_switchable: bool,
         allow_warped_motion: bool,
@@ -1126,6 +1134,8 @@ impl<'a> TileDecodeState<'a> {
             skip_mode_above: vec![0u8; mi_cols],
             skip_mode_left: vec![0u8; mi_rows],
             interpolation_filter,
+            gm_type,
+            gm_params,
             enable_dual_filter,
             filter_above: [vec![3u8; mi_cols], vec![3u8; mi_cols]],
             filter_left: [vec![3u8; mi_rows], vec![3u8; mi_rows]],
@@ -1432,6 +1442,8 @@ pub fn decode_tile_group(
     skip_mode_present: bool,
     skip_mode_frame: [u8; 2],
     interpolation_filter: u8,
+    gm_type: [u8; 8],
+    gm_params: [[i32; 6]; 8],
     enable_dual_filter: bool,
     is_motion_mode_switchable: bool,
     allow_warped_motion: bool,
@@ -1546,6 +1558,8 @@ pub fn decode_tile_group(
         skip_mode_present,
         skip_mode_frame,
         interpolation_filter,
+        gm_type,
+        gm_params,
         enable_dual_filter,
         is_motion_mode_switchable,
         allow_warped_motion,
@@ -2038,6 +2052,8 @@ pub fn reconstruct_av1_frame(
                 frame_header.skip_mode_present,
                 frame_header.skip_mode_frame,
                 frame_header.interpolation_filter,
+                frame_header.gm_type,
+                frame_header.gm_params,
                 seq.enable_dual_filter,
                 frame_header.is_motion_mode_switchable,
                 frame_header.allow_warp,
@@ -2169,4 +2185,3 @@ pub fn reconstruct_av1_frame(
         frame_cdf_context,
     )))
 }
-

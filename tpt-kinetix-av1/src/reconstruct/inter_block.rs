@@ -787,6 +787,11 @@ impl<'a> TileDecodeState<'a> {
         // than GLOBAL_GLOBALMV), 0 for GLOBALMV/GLOBAL_GLOBALMV. Consumed by
         // the deblock level derivation.
         let lf_mode_type: u8;
+        // dav1d `has_subpel_filter`: whether this block's interpolation filter
+        // symbols are read (false → `EIGHTTAP_REGULAR` unconditionally).
+        // Sub-8×8 blocks always interpolate; GLOBALMV blocks interpolate only
+        // when their global motion is a (subpel) TRANSLATION.
+        let mut has_subpel_filter: bool;
         // dav1d `BlockContext::comp_type` for this block (0 for single-ref).
         let mut block_comp_type = 0u8;
         // Masked-compound parameters (§5.11.26): only meaningful when
@@ -896,9 +901,19 @@ impl<'a> TileDecodeState<'a> {
             single_mode = mode;
             // GLOBALMV/ZEROMV are the only single-ref modes with modeType 0.
             lf_mode_type = u8::from(mode != crate::inter::GLOBALMV && mode != ZEROMV);
+            // dav1d `has_subpel_filter`: sub-8×8 blocks always interpolate;
+            // GLOBALMV blocks interpolate only when the global motion is a
+            // (subpel) translation; every other mode always does. Consumed by
+            // the interpolation-filter read below.
+            has_subpel_filter = bw.min(bh) == 1;
             mvs[0] = match mode {
-                ZEROMV => Mv::default(),
+                ZEROMV => {
+                    has_subpel_filter |=
+                        self.gm_type[(ref_names[0] - 1) as usize] == crate::frame::GM_TRANSLATION;
+                    self.get_gmv_2d(ref_names[0], mi_col, mi_row, bw, bh)
+                }
                 NEWMV => {
+                    has_subpel_filter = true;
                     let diff = read_mv(
                         &mut self.dec,
                         &mut self.map_inter_cdfs,
@@ -907,7 +922,10 @@ impl<'a> TileDecodeState<'a> {
                     )?;
                     Mv::new(base_mv.row + diff.row, base_mv.col + diff.col)
                 }
-                _ => base_mv,
+                _ => {
+                    has_subpel_filter = true;
+                    base_mv
+                }
             };
         } else {
             // §5.11.24 compound mode cascade (dav1d `decode.c`, `is_comp`).
@@ -969,10 +987,19 @@ impl<'a> TileDecodeState<'a> {
             }
 
             let base = stack.get(drl_idx).copied().unwrap_or_default();
+            // dav1d `has_subpel_filter`: sub-8×8 blocks and every non-
+            // GLOBAL_GLOBALMV mode always interpolate; a GLOBAL_GLOBALMV block
+            // interpolates only when either reference's global motion is a
+            // (subpel) translation.
+            has_subpel_filter = bw.min(bh) == 1 || comp_mode != 6;
             for i in 0..2 {
                 mvs[i] = match im[i] {
                     NEARESTMV | NEARMV => base[i],
-                    ZEROMV => Mv::default(),
+                    ZEROMV => {
+                        has_subpel_filter |= self.gm_type[(ref_names[i] - 1) as usize]
+                            == crate::frame::GM_TRANSLATION;
+                        self.get_gmv_2d(ref_names[i], mi_col, mi_row, bw, bh)
+                    }
                     NEWMV => {
                         let diff = read_mv(
                             &mut self.dec,
@@ -1191,46 +1218,56 @@ impl<'a> TileDecodeState<'a> {
         }
         let mut filters = [frame_filter; 2];
         if frame_filter == INTERP_SWITCHABLE {
-            let dirs = if self.enable_dual_filter { 2 } else { 1 };
-            for (dir, fout) in filters.iter_mut().enumerate().take(dirs) {
-                let base = ((dir & 1) * 2 + comp) * 4;
-                let left_t = if left_inter != 0
-                    && (self.ref_left[mi_row][0] == ref_names[0]
-                        || self.ref_left[mi_row][1] == ref_names[0])
-                {
-                    self.filter_left[dir][mi_row] as usize
-                } else {
-                    3
-                };
-                let above_t = if above_inter != 0
-                    && (self.ref_above[mi_col][0] == ref_names[0]
-                        || self.ref_above[mi_col][1] == ref_names[0])
-                {
-                    self.filter_above[dir][mi_col] as usize
-                } else {
-                    3
-                };
-                let add = if left_t == above_t {
-                    left_t
-                } else if left_t == 3 {
-                    above_t
-                } else if above_t == 3 {
-                    left_t
-                } else {
-                    3
-                };
-                let ctx = (base + add).min(15);
-                *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
-                if dbg_b0 {
-                    eprintln!(
-                        "DBG b0 filter{dir}={} ctx={ctx} rng={}",
-                        *fout,
-                        self.dec.raw_state().0
-                    );
+            // dav1d: `if (has_subpel_filter) { read filter symbols } else {
+            //   filter[0] = filter[1] = FILTER_8TAP_REGULAR; }` — a GLOBALMV
+            // block over IDENTITY global motion has integer MVs, so dav1d
+            // reads *no* filter symbols for it and forces REGULAR; skipping
+            // this gate read symbols dav1d never produced and desynced the
+            // tile on GLOBALMV-heavy streams.
+            if has_subpel_filter {
+                let dirs = if self.enable_dual_filter { 2 } else { 1 };
+                for (dir, fout) in filters.iter_mut().enumerate().take(dirs) {
+                    let base = ((dir & 1) * 2 + comp) * 4;
+                    let left_t = if left_inter != 0
+                        && (self.ref_left[mi_row][0] == ref_names[0]
+                            || self.ref_left[mi_row][1] == ref_names[0])
+                    {
+                        self.filter_left[dir][mi_row] as usize
+                    } else {
+                        3
+                    };
+                    let above_t = if above_inter != 0
+                        && (self.ref_above[mi_col][0] == ref_names[0]
+                            || self.ref_above[mi_col][1] == ref_names[0])
+                    {
+                        self.filter_above[dir][mi_col] as usize
+                    } else {
+                        3
+                    };
+                    let add = if left_t == above_t {
+                        left_t
+                    } else if left_t == 3 {
+                        above_t
+                    } else if above_t == 3 {
+                        left_t
+                    } else {
+                        3
+                    };
+                    let ctx = (base + add).min(15);
+                    *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
+                    if dbg_b0 {
+                        eprintln!(
+                            "DBG b0 filter{dir}={} ctx={ctx} rng={}",
+                            *fout,
+                            self.dec.raw_state().0
+                        );
+                    }
                 }
-            }
-            if dirs == 1 {
-                filters[1] = filters[0];
+                if dirs == 1 {
+                    filters[1] = filters[0];
+                }
+            } else {
+                filters = [INTERP_EIGHTTAP_REGULAR; 2];
             }
         }
         // MC currently applies a single kernel to both axes; use the vertical
@@ -1471,7 +1508,10 @@ impl<'a> TileDecodeState<'a> {
                         self.y_plane[y * self.y_stride + x]
                     })
                     .collect();
-                eprintln!("  y={y} pred={:?}", &pred_snap[row * bw_px..(row + 1) * bw_px]);
+                eprintln!(
+                    "  y={y} pred={:?}",
+                    &pred_snap[row * bw_px..(row + 1) * bw_px]
+                );
                 eprintln!("       post={post:?}  delta={deltas:?}");
             }
         }
@@ -1595,6 +1635,64 @@ impl<'a> TileDecodeState<'a> {
         Ok(())
     }
 
+    /// dav1d `get_gmv_2d` (env.h): the block motion vector for a GLOBALMV-
+    /// coded block, derived from the frame's global motion model for
+    /// `ref_name` (§7.11.3). TRANSLATION yields the signaled translation
+    /// directly (the parser already scaled it to MV units at
+    /// `<< (GM_TRANS_ONLY_PREC_BITS + !allow_high_precision_mv)`); ROTZOOM/
+    /// AFFINE evaluate the full model at the block centre. IDENTITY is the
+    /// zero MV. `force_integer_mv` rounds the result to whole pixels.
+    ///
+    /// Note: for ROTZOOM/AFFINE dav1d does not use this MV for prediction at
+    /// all — it warps with the full model (`gmv_warp_allowed`). This centre MV
+    /// is only the fallback there; no corpus clip exercises global rotation
+    /// yet.
+    fn get_gmv_2d(&self, ref_name: u8, mi_col: usize, mi_row: usize, bw: usize, bh: usize) -> Mv {
+        let idx = ref_name as usize - 1;
+        if std::env::var("KINETIX_AV1_DBG_GMV").is_ok() {
+            eprintln!(
+                "GMV n={} ref={} type={} mat={:?} mi=({mi_col},{mi_row}) bw={bw} bh={bh}",
+                crate::debug_frame_seq::current(),
+                ref_name,
+                self.gm_type[idx],
+                &self.gm_params[idx][..]
+            );
+        }
+        let mat = &self.gm_params[idx];
+        match self.gm_type[idx] {
+            crate::frame::GM_IDENTITY => Mv::default(),
+            crate::frame::GM_TRANSLATION => {
+                let mut res = Mv::new(mat[0] >> 13, mat[1] >> 13);
+                if self.force_integer_mv {
+                    fix_int_mv_precision(&mut res);
+                }
+                res
+            }
+            _ => {
+                let x = (mi_col * MI_SIZE + bw * MI_SIZE / 2 - 1) as i32;
+                let y = (mi_row * MI_SIZE + bh * MI_SIZE / 2 - 1) as i32;
+                let xc = (mat[2] - (1 << 16)) * x + mat[3] * y + mat[0];
+                let yc = (mat[5] - (1 << 16)) * y + mat[4] * x + mat[1];
+                let shift = 16 - (3 - i32::from(!self.allow_high_precision_mv));
+                let round = (1 << shift) >> 1;
+                let mut res = Mv::new(
+                    apply_sign(
+                        ((yc.abs() + round) >> shift) << i32::from(!self.allow_high_precision_mv),
+                        yc,
+                    ),
+                    apply_sign(
+                        ((xc.abs() + round) >> shift) << i32::from(!self.allow_high_precision_mv),
+                        xc,
+                    ),
+                );
+                if self.force_integer_mv {
+                    fix_int_mv_precision(&mut res);
+                }
+                res
+            }
+        }
+    }
+
     /// A `skip_mode` block (§7.11.3 / §5.11.11): compound prediction from the
     /// fixed `SkipModeFrame` pair with the NEAREST spatial MVs, no residual, no
     /// further entropy reads. The NEAREST MV derivation is the simplified
@@ -1703,6 +1801,16 @@ impl<'a> TileDecodeState<'a> {
         // from the NEAREST-MV stack entry (never GLOBALMV), so `modeType` is
         // unconditionally 1 here, matching the `comp_mode != GLOBALMV_GLOBALMV`
         // derivation used for ordinary compound blocks above.
+        if std::env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
+            eprintln!(
+                "LFREF-SKIPMODE n={} mi=({mi_col},{mi_row}) px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} ref_names={ref_names:?} mvs=({},{}),({},{})",
+                crate::debug_frame_seq::current(),
+                mvs[0].row,
+                mvs[0].col,
+                mvs[1].row,
+                mvs[1].col,
+            );
+        }
         self.meta.record_lf4(
             px_x0 / 4,
             px_y0 / 4,
@@ -1922,7 +2030,16 @@ impl<'a> TileDecodeState<'a> {
             for j in &jobs {
                 eprintln!(
                     "  job pass={} px={} py={} w={} h={} nb_ref={} dir0_v={} dir1_h={} mv=({},{})",
-                    j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.filters[0], j.filters[1], j.mv.col, j.mv.row
+                    j.pass,
+                    j.px,
+                    j.py,
+                    j.pred_w,
+                    j.pred_h,
+                    j.nb_ref,
+                    j.filters[0],
+                    j.filters[1],
+                    j.mv.col,
+                    j.mv.row
                 );
             }
         }
@@ -1998,7 +2115,11 @@ impl<'a> TileDecodeState<'a> {
                     let dst_row: Vec<u8> = (0..pred_w)
                         .map(|j| {
                             let sx = px + j;
-                            if sx < pw { dst[sy * pstride + sx] } else { 0 }
+                            if sx < pw {
+                                dst[sy * pstride + sx]
+                            } else {
+                                0
+                            }
                         })
                         .collect();
                     eprintln!("    row={sy} nbr={nbr_row:?} dst_after={dst_row:?}");
@@ -2440,7 +2561,9 @@ impl<'a> TileDecodeState<'a> {
                     let (qdc, qac) = self.qindex_for_plane(0);
                     eprintln!(
                         "COEFF mi=(4,18) tx={leaf_tx} txtp={} eob={} qdc={qdc} qac={qac} rng={}",
-                        coeffs.tx_type, coeffs.eob, self.dec.raw_state().0
+                        coeffs.tx_type,
+                        coeffs.eob,
+                        self.dec.raw_state().0
                     );
                     for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
                         if q != 0 {
@@ -2462,7 +2585,10 @@ impl<'a> TileDecodeState<'a> {
                         && leaf_mi_row == 18
                     {
                         eprintln!("  dequant[..16]={:?}", &dequant[..16.min(dequant.len())]);
-                        eprintln!("  residual BEFORE itx (all zeros expected): {:?}", &residual[..16.min(residual.len())]);
+                        eprintln!(
+                            "  residual BEFORE itx (all zeros expected): {:?}",
+                            &residual[..16.min(residual.len())]
+                        );
                     }
                     inverse_transform(
                         &dequant,
@@ -2495,7 +2621,10 @@ impl<'a> TileDecodeState<'a> {
                     {
                         eprintln!("  residual AFTER itx (row-major 16x8):");
                         for row in 0..leaf_tx_h {
-                            eprintln!("    row {row}: {:?}", &residual[row * leaf_tx_w..(row + 1) * leaf_tx_w]);
+                            eprintln!(
+                                "    row {row}: {:?}",
+                                &residual[row * leaf_tx_w..(row + 1) * leaf_tx_w]
+                            );
                         }
                     }
                     luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
@@ -2754,4 +2883,20 @@ impl<'a> TileDecodeState<'a> {
         }
         Ok(())
     }
+}
+
+/// dav1d `apply_sign` (common/intops.h).
+fn apply_sign(v: i32, s: i32) -> i32 {
+    if s < 0 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// dav1d `fix_int_mv_precision` (env.h): round both components to whole
+/// pixels (1/8-pel units), sign-aware.
+fn fix_int_mv_precision(mv: &mut Mv) {
+    mv.col = (mv.col - (mv.col >> 15) + 3) & !7;
+    mv.row = (mv.row - (mv.row >> 15) + 3) & !7;
 }

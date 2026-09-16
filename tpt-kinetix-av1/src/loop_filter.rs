@@ -1147,9 +1147,9 @@ fn cdef_filter_block(
     dir: usize,
 ) {
     let coeff_shift = 0; // 8-bit
-    // dav1d cdef_tmpl.c: pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1)
-    // which selects CDEF_PRI_TAPS row 0 ([4,2]) when pri_strength is even,
-    // row 1 ([3,3]) when odd. No XOR with direction.
+                         // dav1d cdef_tmpl.c: pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1)
+                         // which selects CDEF_PRI_TAPS row 0 ([4,2]) when pri_strength is even,
+                         // row 1 ([3,3]) when odd. No XOR with direction.
     let taps = ((pri_str >> coeff_shift) & 1) as usize;
     let src_rows = src.len().div_ceil(src_stride);
     for i in 0..h {
@@ -1165,14 +1165,10 @@ fn cdef_filter_block(
                     let dx = CDEF_DIRECTIONS[dir][k][1] * sign;
                     let yy = (y0 + i) as isize + dy as isize;
                     let xx = (x0 + j) as isize + dx as isize;
-                    if yy >= 0
-                        && (yy as usize) < src_rows
-                        && xx >= 0
-                        && (xx as usize) < src_stride
+                    if yy >= 0 && (yy as usize) < src_rows && xx >= 0 && (xx as usize) < src_stride
                     {
                         let p = src[yy as usize * src_stride + xx as usize] as i32;
-                        sum += CDEF_PRI_TAPS[taps][k]
-                            * cdef_constrain(p - x, pri_str, damping);
+                        sum += CDEF_PRI_TAPS[taps][k] * cdef_constrain(p - x, pri_str, damping);
                         max = max.max(p);
                         min = min.min(p);
                     }
@@ -1189,8 +1185,7 @@ fn cdef_filter_block(
                             && (xx2 as usize) < src_stride
                         {
                             let s = src[yy2 as usize * src_stride + xx2 as usize] as i32;
-                            sum += CDEF_SEC_TAPS[taps][k]
-                                * cdef_constrain(s - x, sec_str, damping);
+                            sum += CDEF_SEC_TAPS[taps][k] * cdef_constrain(s - x, sec_str, damping);
                             max = max.max(s);
                             min = min.min(s);
                         }
@@ -1318,7 +1313,10 @@ fn wiener_filter_plane(
     let fv = build_filter(half_v);
     let wiener_dbg = std::env::var("KINETIX_AV1_DBG_WPX").ok().and_then(|s| {
         let (a, b) = s.split_once(',')?;
-        Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+        Some((
+            a.trim().parse::<usize>().ok()?,
+            b.trim().parse::<usize>().ok()?,
+        ))
     });
     if wiener_dbg.is_some() {
         eprintln!(
@@ -1526,7 +1524,10 @@ fn sgrproj_filter_plane(
             let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
             let sgr_dbg = std::env::var("KINETIX_AV1_DBG_SGRPX").ok().and_then(|s| {
                 let (a, b) = s.split_once(',')?;
-                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
             });
             if sgr_dbg == Some((ux0 + x, uy0 + y)) {
                 eprintln!(
@@ -1702,7 +1703,10 @@ pub fn apply_post_filters(
     // separate reconstruction bugs from loop-filter bugs.
     let dbg_pxy = std::env::var("KINETIX_AV1_DBG_PXY").ok().and_then(|s| {
         let (a, b) = s.split_once(',')?;
-        Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+        Some((
+            a.trim().parse::<usize>().ok()?,
+            b.trim().parse::<usize>().ok()?,
+        ))
     });
     let dump_pxy = |label: &str, plane: &[u8]| {
         if let Some((x, y)) = dbg_pxy {
@@ -1845,8 +1849,19 @@ pub fn apply_post_filters(
                 let uh = 64.min(height - uy);
                 let uw = 64.min(width - ux);
                 cdef_plane_luma(
-                    y_plane, &src_y, width, height, pri, sec, damping, uy, ux, uh, uw,
-                    &meta.luma_skip, meta.w8,
+                    y_plane,
+                    &src_y,
+                    width,
+                    height,
+                    pri,
+                    sec,
+                    damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &meta.luma_skip,
+                    meta.w8,
                 );
                 ux += 64;
             }
@@ -1872,8 +1887,24 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    u_plane, &src_u, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
-                    uv_sec, uv_damping, uy, ux, uh, uw, &meta.luma_skip, meta.w8,
+                    u_plane,
+                    &src_u,
+                    uv_w,
+                    uv_h,
+                    &src_y,
+                    width,
+                    height,
+                    sub_x,
+                    sub_y,
+                    uv_pri,
+                    uv_sec,
+                    uv_damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &meta.luma_skip,
+                    meta.w8,
                 );
                 ux += uv_step_x;
             }
@@ -1897,8 +1928,24 @@ pub fn apply_post_filters(
                 let uh = uv_step_y.min(uv_h - uy);
                 let uw = uv_step_x.min(uv_w - ux);
                 cdef_plane_chroma(
-                    v_plane, &src_v, uv_w, uv_h, &src_y, width, height, sub_x, sub_y, uv_pri,
-                    uv_sec, uv_damping, uy, ux, uh, uw, &meta.luma_skip, meta.w8,
+                    v_plane,
+                    &src_v,
+                    uv_w,
+                    uv_h,
+                    &src_y,
+                    width,
+                    height,
+                    sub_x,
+                    sub_y,
+                    uv_pri,
+                    uv_sec,
+                    uv_damping,
+                    uy,
+                    ux,
+                    uh,
+                    uw,
+                    &meta.luma_skip,
+                    meta.w8,
                 );
                 ux += uv_step_x;
             }
@@ -2609,7 +2656,21 @@ mod tests {
             *v = ((i * 53) % 256) as u8;
         }
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 16, 16, 15, 0, 7, 0, 0, 8, 8, &[false; 4], 2);
+        cdef_plane_luma(
+            &mut plane,
+            &src,
+            16,
+            16,
+            15,
+            0,
+            7,
+            0,
+            0,
+            8,
+            8,
+            &[false; 4],
+            2,
+        );
         for y in 8..16 {
             for x in 0..16 {
                 assert_eq!(

@@ -6611,3 +6611,123 @@
 > updates — doesn't also cover, such as CDEF's `luma_skip`/`cdef_idx` or
 > the chroma tx-size grids) before re-diffmapping from scratch. The
 > warp-affine regression (Thread B) remains completely untouched.
+
+> **2026-09-17 (later session) — FOUND + FIXED: the SgrProj 5×5 pass sampled
+> the WRONG A/B rows for even output rows — every even row of every 5×5 SGR
+> unit computed a slightly wrong projection. This was the entire ~140-sample
+> luma gap on `minimal_av1_inter_ivf`.** The session started from the prior
+> session's hand-off ("check whether `decode_skip_mode_block` is missing
+> other FrameMeta updates, then re-diffmap"). The audit came back CLEAN:
+> every per-block metadata write (`record_luma`/`record_chroma`/edge marks/
+> `delta_lf`/CDEF `luma_skip` inputs) lives in the shared `add_inter_residual`,
+> which skip-mode already calls; the neighbour-context bookkeeping loop is
+> complete; and the one suspicious difference (skip-mode's `new_mf=0` splat)
+> matches dav1d, whose skip-mode blocks report `inter_mode = NEARESTMV` =
+> mode-context 0 in the ordinary path's own encoding (0=NEAREST/NEAR,
+> 1=GLOBALMV, 2=NEWMV). So the remaining diffs were NOT another missing-record
+> bug, and the session pivoted to the new stage-isolation method that ended
+> up carrying the day:
+>
+> **Methodology (reusable): dav1d CLI `--inloopfilters` bitmask vs Kinetix's
+> env gates, per filter stage.** The patched dav1d CLI accepts
+> `--inloopfilters=<bitmask>` (deblock=1, cdef=2, restoration=4; `none`,
+> `0x1`, `0x3`, `0x7`) — decode the SAME stream once per stage and diff
+> against Kinetix runs with the matching `KINETIX_AV1_NODEBLOCK`/`NOCDEF`/
+> `NOLR` subsets (feeding one `dbg_*` harness's `KINETIX_AV1_SAVE_OUT`).
+> First finding from the raw stage: **raw reconstruction is now BIT-EXACT
+> through frame 6** (the 2026-09-14/15 inter-session's work holding), so any
+> residual diff is introduced by the post-filters. Deblock-only: bit-exact.
+> Deblock+CDEF (0x3): bit-exact. Full (0x7): 8/36/44/35/9/0/8 → the entire
+> gap is LOOP RESTORATION. (Yesterday's "deblock introduced the (28,71)
+> divergence" conclusion was correct *at that time* — the skip-mode
+> `record_lf4` fix removed the deblock component, leaving pure LR error.)
+>
+> Root cause: §7.17.4's 5×5 self-guided pass has a per-row-pair structure —
+> ODD rows take their projection from their OWN A/B row (center 6 + sides 5,
+> `>> 8`), but EVEN rows take the "six neighbors" pattern over A/B rows
+> **(y-1, y+1)** — dav1d's `sgr_finish_filter2` reads `A_ptrs[0]`/`A_ptrs[1]`
+> which hold the bracketing rows' projections, NOT the current row's.
+> Kinetix's `sgrproj_filter_plane` `pair_rows` branch sampled `(y, y+1)` —
+> the current and next row — making every even row's projection slightly
+> wrong. Both decoders' A/B *tables* (including the stripe-boundary halo
+> rows) were verified identical by hand-tracing dav1d's ring-buffer
+> construction (`sgr_5x5_c`'s `rotate5_x2` + the `n_lines`/replicate rules in
+> `backup_lpf`); only the even-row sampling differed. This also explains the
+> corpus history: mandelbrot's SGR units are 3×3-only (set 10) — the
+> `pair_rows` path never ran — while testsrc luma uses set 14 (5×5-only), so
+> the bug was invisible until a 5×5 SGR stream was diffed this precisely.
+> FIX: even rows now sample `(y-1, y+1)` (a_tab's ±1 halo covers the edges;
+> segment tops are always even so pair parity stays stripe-aligned for all
+> unit sizes). VERIFIED: `av1_inter_sequence_vs_dav1d_when_available` luma
+> diff samples 8/36/44/35/9/0/8 (140) → **0/0/0/0/0/0/8**; frames 0-6 luma
+> BIT-EXACT (PSNR Y = inf) and frame 0 is now fully bit-exact including
+> chroma (was `exact = false` on chroma); `av1_intra_corpus_vs_dav1d` stays
+> 6/6 bit-exact, now with **inf/inf/inf PSNR on every entry** (mandelbrot's
+> long-standing 72 ±1 pixels were the same bug). Frame 7's 8 residual luma
+> samples trace to its 6 raw-reconstruction diffs, not filtering.
+>
+> **Thread B (testsrc_64x64, 492-761 luma diffs/frame): the "warp-affine
+> regression" attribution is DISPROVEN, and one real bug was found and fixed
+> anyway; the clip's remaining gap is now precisely characterized.** Facts
+> established: (1) `KINETIX_AV1_NO_WARP` changes NOTHING on this clip — warp
+> is never exercised (the prior session's guess that the small clip's gap
+> "looks like warp" was wrong). (2) With all filters off, even the KEYFRAME
+> has 114 ±1-2 raw samples (rows 46-63, the timestamp-text band; the same
+> signature as the old mandelbrot directional-intra note) — but they filter
+> to identity, so the *filtered* keyframe is bit-exact. (3) The inter diffs
+> are reconstruction-level: shown frame oh1 is ONE 64×64 compound
+> GLOBALMV_GLOBALMV zero-MV block averaging the two hidden references
+> (oh4→slot 1, oh2→slot 2), and Kinetix's output ≠ any blend of its own
+> stored refs in the text band (839/12288 px), while the stored keyframe is
+> verified post-filter and bit-exact vs dav1d (0 diffs). Conclusion: the
+> divergence originates in the HIDDEN frames' own reconstructions (oh4
+> first, which has real subpel-MV residual blocks over the text band) and
+> propagates through the blends — the same isolation barrier as the 128x96
+> chroma gap: **dav1d never outputs hidden frames, so next session needs
+> internal-frame dumps from the reference side** (patch dav1d's
+> `dav1d_submit_frame`/filter_sbrow to write every decoded frame, rebuild
+> with `ninja -C build` + copy `build/src/dav1d.dll` over
+> `build/tools/dav1d.dll`; Kinetix's side already dumps every decoded frame
+> via `KINETIX_AV1_DUMP_FRAMES`).
+>
+> Found and fixed along the way (real spec gap, verified dav1d-verbatim but
+> a no-op for identity-global-motion streams): **GLOBALMV-coded blocks never
+> derived their MV from the frame header's global motion parameters.** The
+> single-ref cascade mapped the zero_mv symbol (spec GLOBALMV) and the
+> compound cascade mapped comp_mode 6 (GLOBAL_GLOBALMV) to `Mv::default()`,
+> ignoring `fh.gm_type`/`fh.gm_params` entirely; and the interpolation-
+> filter read lacked dav1d's `has_subpel_filter` gate (a GLOBALMV block over
+> IDENTITY gm has integer MVs → dav1d reads NO filter symbols and forces
+> REGULAR; Kinetix read them anyway, which would desync GLOBALMV-heavy
+> switchable-filter streams). FIX: `gm_type`/`gm_params` threaded into
+> `TileDecodeState`; new `get_gmv_2d` (dav1d env.h verbatim: TRANSLATION =
+> `matrix[0..1] >> 13`, ROTZOOM/AFFINE = full model at the block centre,
+> `fix_int_mv_precision` under `force_integer_mv`; note dav1d *warps* with
+> the full model when `gmv_warp_allowed` — the centre MV is only a fallback
+> there, no corpus clip exercises global rotation yet); `has_subpel_filter`
+> computed per dav1d (sub-8×8 → true; GLOBALMV → gm type == TRANSLATION;
+> compound GLOBAL_GLOBALMV → either ref TRANSLATION) and gating the filter
+> read. Also: the LFREF debug hook now covers skip-mode blocks (the prior
+> session's own suggested follow-up), and `KINETIX_AV1_DUMP_FRAMES` in
+> `decoder.rs` (pre-existing) is confirmed to dump every *decoded* frame
+> including hidden ones.
+>
+> New harness: `tpt-kinetix-test-utils/tests/dbg_av1_warp.rs` — the
+> testsrc_64x64 counterpart of `dbg_av1_inter.rs` (TU-split feeding, OBU
+> save via `KINETIX_AV1_SAVE_OBU` for dav1d CLI stage runs, per-frame diff
+> counts + first-wrong + frame-1 heatmap).
+>
+> REMAINING (next session, priority order): (1) **hidden-frame dump from
+> dav1d** — one patch unlocks both open threads: the 64x64 clip's oh4-first
+> luma chain AND the 128x96 chroma gap (~850 raw samples, chroma rows 37-47,
+> same band as the luma text edges; dav1d stage isolation showed chroma
+> diverges at the DEBLOCK stage but inherits from raw recon diffs of the
+> same shape — both decoders' deblock+CDEF outputs are identical given
+> identical inputs). (2) frame 7 of the 128x96 clip: 6 raw luma samples
+> ((11,80-84) ±1 and (0,84)) — smallest concrete recon case left on that
+> clip; its blocks reference hidden frames too. (3) Global motion
+> ROTZOOM/AFFINE warping (`gmv_warp_allowed`) — `get_gmv_2d`’s
+centre-MV result is only a fallback there; implementing full global-warp
+MC is its own task. (4) The 64x64 clip’s raw keyframe ±1-2s in the text
+band (rows 46-63; intra prediction of dense text; filtered-to-identity so
+cosmetic for output but worth one look alongside (1)).
