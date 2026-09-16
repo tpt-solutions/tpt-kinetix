@@ -6369,3 +6369,52 @@
 > match against our ObmcJob list for the same block. All infrastructure
 > is in place; this is the last-mile ±1 (total 1,285 samples = 0.4% of
 > session start).
+
+> **2026-09-16 — FOUND + FIXED: dual-filter horizontal/vertical assignment
+> was backwards.** Root-caused mi(4,18) 16x8 SIMPLE (mv=(0,66), skip=false,
+> dual filter read [dir0=REGULAR, dir1=SMOOTH]) with a real per-pixel
+> `put_8tap_c` trace added to the patched dav1d (instrumented
+> `recon_tmpl.c`'s `mc(t, dst, ...)` call site + a `kinetix_dbg_mcpx_active`
+> global read inside `mc_tmpl.c`'s `put_8tap_c`, gated on `t->bx==4 &&
+> t->by==18`, printing the literal `fh` row and `FILTER_8TAP` sum dav1d
+> used). dav1d's actual horizontal kernel for this block was
+> `dav1d_mc_subpel_filters[DAV1D_FILTER_8TAP_SMOOTH][3] = {0,0,10,30,21,3,0,0}`
+> (confirmed: `(FILTER_8TAP(...)+34)>>6 = 179`, matching dav1d's own
+> postMC trace exactly), NOT REGULAR as our code assumed — REGULAR at the
+> same phase gives 180, which is what Kinetix printed pre-fix (Kinetix's
+> `PRED-BASE` line showed `fh=0 fv=1` i.e. dir0=REGULAR assigned to
+> horizontal). The bug: 2026-09-15 (cont'd 4)'s "dual-filter" fix assumed
+> "first-read (dir-0) symbol = horizontal, second-read (dir-1) = vertical",
+> reasoning from `Filter2d` enum bit tricks (`filter_type & 3` /
+> `filter_type >> 2`) — but `filter_type` inside `put_8tap_c` is NOT the
+> `Filter2d` enum ordinal at all; each named combination
+> (`filter_fns(smooth_regular, DAV1D_FILTER_8TAP_SMOOTH,
+> DAV1D_FILTER_8TAP_REGULAR)` in `mc_tmpl.c`) builds its own local
+> `type_h | (type_v << 2)` at the call site, and
+> `dav1d_filter_2d[filter[1]][filter[0]] = FILTER_2D_8TAP_SMOOTH_REGULAR`
+> for `filter[1]=SMOOTH, filter[0]=REGULAR` — i.e. `filter[1]` (dir-1,
+> second-read) is horizontal and `filter[0]` (dir-0, first-read) is
+> vertical. Bit-decomposing the plain `Filter2d` enum ordinal (as the
+> previous session did) gives a plausible-looking but WRONG answer for
+> some combinations (verified: `6 & 3 = 2` decodes to SHARP, not the real
+> REGULAR) — this is the actual dead end the "6-bit filter experiment
+> reverted" session hit without knowing it. FIX (commit pending): swapped
+> the two args at all 3 real MC call sites in
+> `reconstruct/inter_block.rs` (`motion_compensate` single-ref,
+> `motion_compensate_prep` compound, and the OBMC neighbour-job
+> `motion_compensate`) to pass `(filters[1], filters[0])` instead of
+> `(filters[0], filters[1])`; left the `dir`-indexed neighbour-context
+> CDF derivation and `filter_above`/`filter_left` storage untouched since
+> those must stay in raw bitstream dir-index form. VERIFIED: mi(4,18)'s
+> block is now bit-exact (was ±1 at 4 columns); total inter-sequence luma
+> diff samples 1220→681 across all 8 frames (44% reduction); frame PSNRs
+> up (f1 Y 71.17, f6 74.88, f7 74.71 dB, from ~65-70 pre-fix); AV1 intra
+> corpus stays 6/6 bit-exact; full `cargo test --workspace --lib --bins`
+> and `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` clean.
+> REMAINING: ~681 luma diff samples still open, now concentrated at mi
+> (20,16)/(24,18)-ish blocks (frame1 first-diverging pixel moved to
+> (80,66)) — root cause not yet investigated; likely a second, unrelated
+> ±1 source (OBMC mask application order, or another filter-context edge
+> case) since the mi(4,18)-class bug is now closed. Warp-affine regression
+> (16 blocks, frame4/6 better vs frame5/7 worse under `KINETIX_AV1_NO_WARP`
+> bisection) is UNTOUCHED this session — still open, unrelated to this fix.

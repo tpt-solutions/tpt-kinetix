@@ -195,10 +195,23 @@ pub fn motion_compensate(
     bw: usize,
     bh: usize,
     mv: Mv,
-    // Per-direction interpolation filters: the first-read (dir-0) symbol is
-    // the *horizontal* kernel and the second-read (dir-1) symbol the
-    // *vertical* one (dav1d `fh = filter_type & 3`, `fv = filter_type >> 2`;
-    // applying one of them to both axes misfilters dual-filter blocks).
+    // Per-direction interpolation filters. CORRECTED (was backwards): the
+    // *second*-read (dir-1) symbol is the *horizontal* kernel and the
+    // *first*-read (dir-0) symbol the *vertical* one. Verified against a
+    // patched-dav1d put_8tap_c trace on `minimal_av1_inter_ivf` mi(4,18):
+    // dav1d's `filter_fns(smooth_regular, SMOOTH, REGULAR)` sets
+    // `type_h = SMOOTH` for `FILTER_2D_8TAP_SMOOTH_REGULAR`, which
+    // `dav1d_filter_2d[filter[1]][filter[0]]` produces from
+    // `filter[1] = SMOOTH, filter[0] = REGULAR` — i.e. `filter[1]` (dir-1)
+    // feeds the horizontal kernel, `filter[0]` (dir-0) the vertical one. The
+    // previous assumption (dir-0 = horizontal) was never checked against a
+    // real dav1d trace and produced a constant-per-column ±1 in every
+    // horizontal-subpel block using a non-degenerate dual filter (dav1d
+    // `fh = filter_type & 3`, `fv = filter_type >> 2`, but `filter_type`
+    // inside `put_8tap_c` is `type_h | (type_v << 2)` from the *named*
+    // per-combination function, not the raw `Filter2d` enum ordinal, which
+    // is a red herring you can bit-decompose and get a plausible-looking but
+    // wrong answer from).
     filter_h: u8,
     filter_v: u8,
     // Sub-pel precision of the passed MV per axis: 3 for luma, 4 for a

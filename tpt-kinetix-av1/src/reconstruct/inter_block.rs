@@ -194,7 +194,7 @@ impl<'a> TileDecodeState<'a> {
         let threshold = (BLOCK_WIDTH[bsize].max(BLOCK_HEIGHT[bsize]) as i32).clamp(16, 112);
 
         if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
-            eprintln!("DBG warp cur_mv={cur_mv:?} threshold={threshold} w4={w4} h4={h4}");
+            eprintln!("DBG warp mi=({mi_col},{mi_row}) cur_mv={cur_mv:?} threshold={threshold} w4={w4} h4={h4}");
         }
         let mut num_samples = 0usize;
         let mut num_scanned = 0usize;
@@ -1151,9 +1151,10 @@ impl<'a> TileDecodeState<'a> {
                     );
                     if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                         eprintln!(
-                            "DBG warp derive mi=({mi_col},{mi_row}) bw4={bw4} bh4={bh4} mv={:?} samples={} model_valid={} model={:?}",
+                            "DBG warp derive mi=({mi_col},{mi_row}) bw4={bw4} bh4={bh4} mv={:?} num_samples={num_samples} raw_len={} raw={:?} model_valid={} model={:?}",
                             mvs[0],
                             raw_samples.len(),
+                            raw_samples,
                             warp_model.is_some(),
                             warp_model
                         );
@@ -1338,7 +1339,7 @@ impl<'a> TileDecodeState<'a> {
                 || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
             {
                 eprintln!(
-                    "PRED-BASE mi=({mi_col},{mi_row}) bw={bw} bh={bh} skip={skip} ref={} fh={} fv={} mv=({},{}) px=({px_x0},{px_y0})",
+                    "PRED-BASE mi=({mi_col},{mi_row}) bw={bw} bh={bh} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y.min(96) {
@@ -1398,7 +1399,7 @@ impl<'a> TileDecodeState<'a> {
                 || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
             {
                 eprintln!(
-                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} fh={} fv={} mv=({},{}) px=({px_x0},{px_y0})",
+                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y.min(96) {
@@ -1806,8 +1807,9 @@ impl<'a> TileDecodeState<'a> {
             pred_w: usize,
             pred_h: usize,
             mv: Mv,
-            // The neighbour's per-direction filters: [horizontal (dir 0),
-            // vertical (dir 1)].
+            // The neighbour's per-direction filters, raw read order:
+            // [dir0 (vertical), dir1 (horizontal)] — swap when passing to
+            // `motion_compensate`.
             filters: [u8; 2],
             nb_ref: u8,
         }
@@ -1894,7 +1896,7 @@ impl<'a> TileDecodeState<'a> {
             );
             for j in &jobs {
                 eprintln!(
-                    "  job pass={} px={} py={} w={} h={} nb_ref={} fh={} fv={} mv=({},{})",
+                    "  job pass={} px={} py={} w={} h={} nb_ref={} dir0_v={} dir1_h={} mv=({},{})",
                     j.pass, j.px, j.py, j.pred_w, j.pred_h, j.nb_ref, j.filters[0], j.filters[1], j.mv.col, j.mv.row
                 );
             }
@@ -1919,9 +1921,11 @@ impl<'a> TileDecodeState<'a> {
             };
             let (rp, rw, rh) = rf.plane(plane);
             let mut obmc = vec![0u8; pred_w * pred_h];
+            // `filters` here is `[dir0, dir1]` (see the neighbour-job
+            // construction above); dir1 is horizontal, dir0 is vertical.
             motion_compensate(
-                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filters[0],
-                filters[1], hbits, vbits,
+                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filters[1],
+                filters[0], hbits, vbits,
             );
             let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
             let dst = match plane {
@@ -2079,7 +2083,8 @@ impl<'a> TileDecodeState<'a> {
         bh: usize,
         ref_names: &[u8; 2],
         mvs: &[Mv; 2],
-        // [horizontal (first-read), vertical (second-read)] kernels.
+        // [dir0 (vertical, first-read), dir1 (horizontal, second-read)]
+        // kernels — swap when passing to `motion_compensate`/`_prep`.
         filters: [u8; 2],
         // Compound blend weight in sixteenths for `preds[0]` (`8` = plain
         // average); ignored for single-reference blocks.
@@ -2171,9 +2176,21 @@ impl<'a> TileDecodeState<'a> {
                             );
                         }
                         _ => {
+                            // §5.11.27 / dav1d `filter_fns`: the interp_filter
+                            // syntax reads `dir 0` first then `dir 1`, but
+                            // dav1d's `dav1d_filter_2d[filter[1]][filter[0]]`
+                            // packing feeds `filter[1]` to the HORIZONTAL
+                            // kernel and `filter[0]` to the VERTICAL one
+                            // (verified against a patched-dav1d put_8tap_c
+                            // trace: mi(4,18) read dir0=REGULAR, dir1=SMOOTH,
+                            // and the real per-pixel filter dav1d applied
+                            // horizontally was SMOOTH, not REGULAR). `filters`
+                            // here is still `[dir0, dir1]` (kept that way for
+                            // the neighbour-context storage below), so swap
+                            // at the point of use.
                             motion_compensate(
-                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filters[0],
-                                filters[1], hbits, vbits,
+                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filters[1],
+                                filters[0], hbits, vbits,
                             );
                         }
                     }
@@ -2208,8 +2225,10 @@ impl<'a> TileDecodeState<'a> {
             let prep = |slot: usize, mv: Mv| -> Vec<i32> {
                 if let Some(rf) = self.ref_slots.slots[slot] {
                     let (rp, rw, rh) = rf.plane(plane);
+                    // See the single-ref motion_compensate call above: `filters`
+                    // is `[dir0, dir1]`; dir1 is horizontal, dir0 is vertical.
                     motion_compensate_prep(
-                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filters[0], filters[1], hbits,
+                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filters[1], filters[0], hbits,
                         vbits,
                     )
                 } else {
