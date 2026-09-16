@@ -949,6 +949,26 @@ fn deblock_plane(
             }
             let x0 = bx * step;
             let bw = step.min(width.saturating_sub(x0));
+            // Compact per-bx dump for one horizontal edge line: env
+            // `KINETIX_AV1_DBG_HEDGES=<edge_y>` prints lvl/filter params for
+            // every grid column along that edge (plane 0 only).
+            if plane_index == 0
+                && std::env::var("KINETIX_AV1_DBG_HEDGES").is_ok()
+                && std::env::var("KINETIX_AV1_DBG_HEDGES")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    == Some(edge)
+            {
+                eprintln!(
+                    "HEDGE n={} y={edge} bx={bx} lvl={lvl} fs={filter_size} top_tx={top_tx} bot_tx={bot_tx} lim={} blim={} thr={} ref={} mode={} dlf={dlf_i}:{delta_lf}",
+                    crate::debug_frame_seq::current(),
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                    lf_ref_grid[li],
+                    lf_mode_grid[li],
+                );
+            }
             if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
                 && plane_index == 0
                 && x0 <= 28
@@ -1296,6 +1316,15 @@ fn wiener_filter_plane(
     };
     let fh = build_filter(half_h);
     let fv = build_filter(half_v);
+    let wiener_dbg = std::env::var("KINETIX_AV1_DBG_WPX").ok().and_then(|s| {
+        let (a, b) = s.split_once(',')?;
+        Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+    });
+    if wiener_dbg.is_some() {
+        eprintln!(
+            "WPX unit=({ux0},{uy0}) taps_h={half_h:?} taps_v={half_v:?} uw={uw} uh={uh} seg_h={uh}"
+        );
+    }
     let src_at = |x: isize, y: isize| -> i32 {
         let xi = x.clamp(0, pw as isize - 1) as usize;
         let yi = y.clamp(0, ph as isize - 1) as usize;
@@ -1402,17 +1431,26 @@ fn sgrproj_filter_plane(
             let s_at = |x: isize, y: isize| src_at(ux0 as isize + x, uy0 as isize + y);
 
             if pair_rows {
-                // 5×5 pass: pairs of output rows use SIX_NEIGHBORS / single-row patterns.
+                // 5×5 pass. Even output rows use §7.17.4's "six neighbors"
+                // pattern over A/B rows **(y-1, y+1)** — NOT (y, y+1): dav1d's
+                // `sgr_finish_filter2` reads `A_ptrs[0]`/`A_ptrs[1]`, which
+                // hold the box-projections of the rows bracketing the even
+                // output row (the odd rows carry their own row's projection).
+                // An earlier version sampled (y, y+1) here, which made every
+                // even row of every 5×5 SGR unit (e.g. testsrc luma's set-14
+                // units) compute a slightly wrong projection — visible as
+                // scattered ±1 LR deltas vs dav1d on smooth gradients.
                 let mut y = 0isize;
                 while y < uh as isize {
-                    let yn = (y + 1).min(uh as isize - 1);
+                    let ya = y - 1;
+                    let yb = (y + 1).min(uh as isize);
                     for x in 0..uw as isize {
                         let xl = x - 1;
                         let xr = x + 1;
-                        let a_sum = (a(x, y) + a(x, yn)) * 6
-                            + (a(xl, y) + a(xl, yn) + a(xr, y) + a(xr, yn)) * 5;
-                        let b_sum = (b(x, y) + b(x, yn)) * 6
-                            + (b(xl, y) + b(xl, yn) + b(xr, y) + b(xr, yn)) * 5;
+                        let a_sum = (a(x, ya) + a(x, yb)) * 6
+                            + (a(xl, ya) + a(xr, ya) + a(xl, yb) + a(xr, yb)) * 5;
+                        let b_sum = (b(x, ya) + b(x, yb)) * 6
+                            + (b(xl, ya) + b(xr, ya) + b(xl, yb) + b(xr, yb)) * 5;
                         t[y as usize * uw + x as usize] =
                             (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
                     }
@@ -1486,10 +1524,16 @@ fn sgrproj_filter_plane(
         for x in 0..uw {
             let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
             let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
-            if std::env::var("KINETIX_AV1_DBG_SGR").is_ok() && ux0 + x == 28 && uy0 + y == 71 {
+            let sgr_dbg = std::env::var("KINETIX_AV1_DBG_SGRPX").ok().and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+            });
+            if sgr_dbg == Some((ux0 + x, uy0 + y)) {
                 eprintln!(
-                    "SGR n={} (28,71) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction}",
+                    "SGR n={} ({},{}) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction} set={set} uw={uw} uh={uh} ux0={ux0} uy0={uy0} seg=(uy0={uy0})",
                     crate::debug_frame_seq::current(),
+                    ux0 + x,
+                    uy0 + y,
                     t0[y * uw + x],
                     t1[y * uw + x]
                 );
@@ -1521,6 +1565,21 @@ fn apply_loop_restoration_plane(
 ) {
     if fh.frame_restoration_type[plane_idx] == 0 {
         return;
+    }
+    if std::env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
+        let mut kinds = std::collections::HashMap::new();
+        for ((pl, ur, uc), u) in lr_units {
+            if *pl == plane_idx {
+                *kinds.entry(format!("{u:?}")).or_insert(0usize) += 1;
+                let _ = (ur, uc);
+            }
+        }
+        eprintln!(
+            "LRMAP n={} plane={plane_idx} type={} unit_size={} units={kinds:?}",
+            crate::debug_frame_seq::current(),
+            fh.frame_restoration_type[plane_idx],
+            fh.lr_unit_size[plane_idx],
+        );
     }
     let unit_size = fh.lr_unit_size[plane_idx] as usize;
     let unit_cols = w.div_ceil(unit_size);
