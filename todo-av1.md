@@ -6821,3 +6821,39 @@ cosmetic for output but worth one look alongside (1)).
 > trace targets with the same entropy-diff method (the new
 > KINETIX_DBG_DUMPF/KINETIX_AV1_DUMP_FRAMES pair localizes the first
 > diverging frame in one command).
+
+> **2026-09-17 (evening session, cont'd 3) — the remaining 64x64 diffs
+> characterized: dav1d's 4-wide/4-tall-special subpel MC filter rows.
+> After the chroma tx-type fix, oh4's internal diff fell 689 → 27 (all
+> ±1, first-bad (18,56) dav=148 kin=149) and the shown frames'
+> residuals are the same class. The block is a 4x4 skip with
+> mv=(0,18) (NEARMV drl 1) — pure horizontal-subpel MC (phase 2/8).
+> A rebuilt dav1d PUT8TAP probe (re-pointed to bx=4/by=14, extended to
+> fire for 4x4 blocks) captured dav1d's literal MC internals: it uses
+> the **4x4-specific 6-bit filter row** `[3+DAV1D_FILTER_8TAP_REGULAR][3]
+> = {0,0,-6,55,19,-4,0,0}` with rnd=34 (`intermediate_rnd = 32 +
+> (1<<(6-intermediate_bits))>>1`, 8-bit) — sum 9495 → dst 148. Kinetix
+> uses its uniform 7-bit `SUBPEL_FILTERS[0][2]` = {0,2,-10,122,18,-4,0,0}
+> → 149. dav1d's GET_H_FILTER/GET_V_FILTER select these [3+type] rows for
+> any block with w==4 or h==4 (`w > 4 ? [type&3][mx-1] :
+> [3+(type&1)][mx-1]`, row index = (mv & 15) - 1 over **15 six-bit rows**;
+> [5] is a pure bilinear set). Kinetix's MC has no 4-wide special case.
+> NOTE the resolved puzzle from earlier sessions: the "6-bit experiment
+> reverted" (2026-09-15 cont'd 4) failed because the dual-filter H/V bug
+> was still live then, not because 6-bit filters were wrong — dav1d's
+> 8-bit MC genuinely runs 6-bit filters + >>6 rounding + per-block-size
+> table selection.
+> NEXT SESSION PLAN (concrete): port dav1d's full subpel filter
+> machinery into Kinetix's motion_compensate: (1) the 6x15x8 6-bit table
+> (tables.c `dav1d_mc_subpel_filters[6][15][8]`, regular/smooth/sharp +
+> the three 4x4 variants + bilinear); (2) row selection
+> `[type][(|mv|&15)-1]` for w>4/h>4, `[3+(type&1)][(|mv|&15)-1]` for
+> w==4, `[3+((type>>2)&1)][...]` for h==4, bilinear [5] for both-small;
+> (3) rounding: 1D `(sum + 34) >> 6` (8-bit), 2D intermediate
+> `(sum + 64) >> 7`?? — read `intermediate_rnd`/shifts from mc_tmpl.c
+> lines 139/208/451 per path (h-only rnd=34>>6 verified here); (4) keep
+> the A/B harness (`dbg_av1_warp.rs` + DUMPF/PARTCDF hooks) as the
+> regression gate. Expected payoff: the 64x64 clip's remaining ~200-750
+> diffs and most of the 128x96 chroma/luma ±1s are subpel-MC-shaped.
+> The dav1d clone's PUT8TAP condition is now
+> `(x==6 && h==8) || (x==2 && h==4)` — re-point per repro.
