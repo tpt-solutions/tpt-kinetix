@@ -28,6 +28,10 @@ use tpt_kinetix_core::frame::VideoFrame;
 
 use crate::ref_pic::FieldRef;
 
+// Throwaway KINETIX_MBAFF_TRACE diagnostic: frame ordinal of the current
+// reconstruct_inter_frame_ex call, for correlating trace output with frames.
+static FIELD_DBG_FRAME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Crop a tightly-packed YUV420p buffer from coded (MB-aligned) dimensions to
 /// the visible (post-crop) rectangle.
 ///
@@ -1365,6 +1369,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
     weighted: &WeightedPred,
     tracer: &mut T,
 ) -> ReconstructedFrame {
+    let dbg_frame = FIELD_DBG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let luma_stride = width as usize;
     let chroma_stride = (width / 2) as usize;
     let mut luma = vec![0u8; luma_stride * height as usize];
@@ -1409,7 +1414,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                     // compensation runs in field coordinates against the
                     // parity plane; output rows land at stride-2 spacing.
                     if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
-                        eprintln!("MBAFF-FIELD-INTER ({mb_x},{mb_y})");
+                        eprintln!("MBAFF-FIELD-INTER f{dbg_frame} ({mb_x},{mb_y})");
                     }
                     reconstruct_mbaff_inter_luma(
                         mb,
@@ -1935,6 +1940,45 @@ fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
+    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+        eprintln!(
+            "MBAFF-CELLS ({mb_x},{mb_y}) field={} coeffs=[{}]",
+            mb.mb_field_flag,
+            grid.iter()
+                .map(|c| {
+                    if c.ref_idx < 0 {
+                        "I".to_string()
+                    } else {
+                        format!("({},{})r{}", c.mv[0], c.mv[1], c.ref_idx)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        eprintln!(
+            "MBAFF-RES ({mb_x},{mb_y}) qp={} cbp={:x} t8={} L=[{}]",
+            mb.qp,
+            mb.cbp,
+            mb.transform_size_8x8,
+            mb.luma_coeffs
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        );
+        if let Some(m) = &mb.motion {
+            eprintln!(
+                "MBAFF-MOT ({mb_x},{mb_y}) type={:?} subs={:?} ri={:?} mvd={:?}",
+                mb.mb_type, m.sub_mb_type, m.ref_idx_l0, m.mvd_l0
+            );
+        }
+    }
+
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
         let by = (block / 4) * 4;
@@ -1942,9 +1986,22 @@ fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
         let fy0 = base_fy + by;
         let ref_idx = cell.ref_idx.max(0) as usize;
 
+        // A field-coded MB's RefPicListX indexes FIELDS, not frames
+        // (§8.2.4.2.1 / §8.4.2.1): entry 2k is reference frame k's field of
+        // the SAME parity as the current MB, entry 2k+1 is frame k's
+        // OPPOSITE-parity field. `field_planes[frame][parity]` therefore
+        // resolves as `frame = ref_idx / 2`, `parity = own ^ (ref_idx & 1)`.
+        // (Indexing `field_planes[ref_idx]` directly treats the field entry
+        // as a frame index and always samples the MB's own parity — visible
+        // on CANLMA2 POC 1, where single-frame-ref field MBs legally carry
+        // ref_idx=1 for the opposite-parity field of that one frame.)
+        let field_entry = cell.ref_idx.max(0) as usize;
+        let frame_i = field_entry / 2;
+        let parity = (bottom as usize) ^ (field_entry & 1);
+
         let mut pred = [0u8; 16];
-        if let Some(ref_entry) = field_planes.get(ref_idx).or_else(|| field_planes.last()) {
-            let (luma_ref, _, _) = &ref_entry[bottom as usize];
+        if let Some(ref_entry) = field_planes.get(frame_i).or_else(|| field_planes.last()) {
+            let (luma_ref, _, _) = &ref_entry[parity];
             let h = luma_ref.len() / stride.max(1);
             crate::motion_comp::interpolate_luma(
                 &mut pred, 4, luma_ref, stride, stride, h, x0 as i32, fy0 as i32, cell.mv[0],
@@ -1963,7 +2020,18 @@ fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
             ref_idx,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 0, scaling);
+        // Field-coded MB residuals are scanned with the FIELD 4×4 scan
+        // (§8.5.6 / §7.3.5 "if MbaffFrameFlag … mb_field_decoding_flag") —
+        // the inter twin of the Intra_16×16 luma-DC fix in #32bk. Inter MBs
+        // use the Inter-Y scaling list (slot 3), same as the frame path.
+        let res = dequant_idct_4x4_scan(
+            &mb.luma_coeffs[block],
+            mb.qp,
+            None,
+            3,
+            scaling,
+            &crate::transform::FIELD_SCAN_4X4,
+        );
         for row in 0..4 {
             // Field row -> frame row: stride-2 with the MB's parity offset.
             let py = 2 * (fy0 + row) + bottom as usize;
@@ -2039,10 +2107,14 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
             let fy0 = base_fy + by;
             let cell = grid[(block / 2) * 8 + (block % 2) * 2];
             let ref_idx = cell.ref_idx.max(0) as usize;
+            // Same FIELD-list semantics as the luma twin above: entry 2k =
+            // frame k same-parity, entry 2k+1 = frame k opposite-parity.
+            let frame_i = ref_idx / 2;
+            let parity = (bottom as usize) ^ (ref_idx & 1);
 
             let mut pred = [0u8; 16];
-            if let Some(ref_entry) = field_planes.get(ref_idx).or_else(|| field_planes.last()) {
-                let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
+            if let Some(ref_entry) = field_planes.get(frame_i).or_else(|| field_planes.last()) {
+                let (_, cb_ref, cr_ref) = &ref_entry[parity];
                 let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
                 let h = plane_ref.len() / stride.max(1);
                 crate::motion_comp::interpolate_chroma(
@@ -2070,7 +2142,16 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
                 ref_idx,
             );
 
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
+            // Field scan for the chroma AC residual of a field-coded MB
+            // (§8.5.6); the 2×2 chroma DC is scan-independent.
+            let res = dequant_idct_4x4_scan(
+                &ac[block],
+                qpc,
+                Some(dc_out[block]),
+                comp + 4,
+                scaling,
+                &crate::transform::FIELD_SCAN_4X4,
+            );
             for row in 0..4 {
                 // Field row -> frame row: stride-2 with the MB's parity offset.
                 let py = 2 * (fy0 + row) + bottom as usize;
