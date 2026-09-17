@@ -529,6 +529,34 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bv (continuation) — amvd port redone with the pixel-unit fix;
+first 810 entries match; a SECOND divergence layer found: frame-BOTTOM MVP
+predictors diverge from JM even in pair row 0 (masked by flat content).
+amvd change REVERTED again (parse desync); MVP transcription (716e84f) STAYS.
+No decoder changes committed this session.
+
+The redo confirmed #32bu's pixel-unit fix: with `aff_cell(..., -1, by*4)` /
+`(..., bx*4, -1)` the amvd sequences matched through entry 809 (pairs 0-30).
+The entry-810 divergence (pair 48 bottom, grid (3,3), blk (0,0)): our U=1 vs
+JM U=0 — and the candidate dump shows the cause is NOT the amvd mapping:
+**grid 48 ((3,1), pair 3 bottom, a FRAME MB) carries MVs that differ from JM
+(KDBGMV mb=7: partitions (−1,1)/(1,2)/(1,1)/(1,1); ours (1,0)/(1,0)/(1,1)/
+(1,0)) even though its mvds are identical** (its amvd entries matched) — i.e.
+the MVP PREDICTORS for frame-BOTTOM macroblocks diverge. Candidates for
+partition (8,0): JM L=blk(0,0) of self, U=grid3 blk(2,3), UR=grid3 blk(1,3)
+(= D — the positional fallback fired); pred (0,1). The UR landing on D and
+the resulting median need re-derivation — the suspicion: JM's
+`get_neighbors` block-unit conventions differ between the MVP path (block
+units) and the mvd path (pixels), and our transcription mixed them.
+
+**For next session**: (1) re-dump KDBGMVP for a frame-bottom MB (mb=7) and
+our KXCAND for the same grid, transcribe the EXACT JM candidate cells for
+frame-bottom L/U/UR (they may legitimately be D-fallbacks our code doesn't
+take); (2) note our old plain raster code PASSED pixels for pairs 0-3 while
+carrying these wrong MVs — pixel-exactness on flat content masks MV errors,
+so the MV comparator is the only trustworthy gate; (3) after frame-bottom
+MVP matches, re-do the amvd port (the #32bu notes hold the recipe).
+
 ## SESSION #32bu (same continuation) — the mvd-CONTEXT bug class confirmed and
 localized; JM `read_mvd_CABAC_mbaff` found; amvd aff_cell port attempted,
 810/10456-entry progress, REVERTED as a net regression (parse desync). No
