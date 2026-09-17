@@ -7091,3 +7091,32 @@ cosmetic for output but worth one look alongside (1)).
 > Post-filter status: with the entropy fixes in, Kinetix full-filter
 > output == dav1d mask-7 dumps exactly (conformance-invisible), so no
 > separate filter bug is visible on these corpora.
+
+> **2026-09-18 (cont'd 3) — chroma root-cause narrowed to an extra
+> overlapping compound block; quadrant experiment reverted.** Implemented
+> dav1d's sub-8x8 chroma quadrant scheme (has_chroma owner + sibling-MV
+> halves) in decode_inter_block and proved it BEHAVIORALLY EQUIVALENT to
+> the committed per-leaf path (each borrowed quadrant's mv == what the
+> sibling leaf itself predicts; ctx-stored filters == the sibling's own
+> filters), so it was reverted to keep the simpler committed code.
+> The real 128x96 lead: new KINETIX_DBG_MCCHK trace (inter_predict_plane
+> chroma calls, gated on chroma rows 38-46) vs the dav1d clone's
+> KINETIX_DBG_MCCH trace (mc() calls for pl!=0, mi rows 19-22, prints
+> dstoff/w/h/mv/f2d) shows, for frame 1 at mi (0,20): Kinetix emits BOTH
+> an 8x8 single-ref chroma (mv (0,64), matching dav1d's call) AND an
+> 8x16-LUMA COMPOUND chroma call (4x8 at chroma (0,40), comp=1, mv
+> (0,0)) that has NO dav1d counterpart. The compound's chroma rows 40-43
+> overwrite the 8x8's prediction (chroma-only ±1 diffs; luma stays exact
+> because the overlapping luma predictions coincide on this content).
+> The extra block smells like a skip-mode/partition edge: dav1d's poc=1
+> trace at (0,0) reads compflag+refs+compintermode[6] (a NORMAL compound
+> 64x64) with no skipmode, so check whether Kinetix decodes a skip_mode
+> or a differently-partitioned block there (DBG b0 skipmode trace now
+> exists at line ~417 of inter_block.rs). Also fixed in passing: the
+> dav1d clone gained a KINETIX_DBG_MCCH hook (src/recon_tmpl.c mc()
+> entry) and rebuild notes: after the temp-cleanup repair, `cmd //c
+> rebuild.bat` then copy build/src/dav1d.dll -> build/tools/. The
+> throwaway harness tpt-kinetix-test-utils/tests/dbg_av1_chroma.rs
+> (untracked) + KINETIX_AV1_CHROMA_OBU env drives the 128x96 stream;
+> ALWAYS `rm -f kfr_*.yuv` before dump runs (stale dumps poisoned one
+> comparison).
