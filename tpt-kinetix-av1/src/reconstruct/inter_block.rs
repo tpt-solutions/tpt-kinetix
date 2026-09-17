@@ -409,9 +409,17 @@ impl<'a> TileDecodeState<'a> {
             false
         } else {
             let ctx = self.skip_mode_above[mi_col] as usize + self.skip_mode_left[mi_row] as usize;
-            self.dec
+            let sm = self
+                .dec
                 .read_symbol(&mut self.mode_cdfs.skip_mode[ctx.min(2)])
-                == 1
+                == 1;
+            if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                eprintln!(
+                    "DBG b0 skipmode={sm} ctx={ctx} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
+            sm
         };
         if skip_mode {
             return self.decode_skip_mode_block(mi_row, mi_col, bsize);
@@ -2396,15 +2404,16 @@ impl<'a> TileDecodeState<'a> {
             let t1 = prep(slot1, mvs[1]);
             if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
                 && plane == 0
-                && ((mi_col == 16 && mi_row == 16) || (mi_col == 0 && mi_row == 16))
+                && (mi_row == 12 || mi_row == 14)
             {
                 eprintln!(
-                    "COMP mi=({mi_col},{mi_row}) ref0={} ref1={} mv0={:?} mv1={:?} weight={blend_weight} comp_type={}",
-                    ref_names[0], ref_names[1], mvs[0], mvs[1], mask.comp_type
+                    "COMP mi=({mi_col},{mi_row}) bw={bw} bh={bh} ref0={} ref1={} mv0={:?} mv1={:?} weight={blend_weight} comp_type={} filters=({},{})",
+                    ref_names[0], ref_names[1], mvs[0], mvs[1], mask.comp_type, filters[0],
+                    filters[1]
                 );
-                for row in 0..bh.min(8) {
-                    eprintln!("  t0 row={row}: {:?}", &t0[row * bw..row * bw + bw.min(20)]);
-                    eprintln!("  t1 row={row}: {:?}", &t1[row * bw..row * bw + bw.min(20)]);
+                for row in 0..bh {
+                    eprintln!("  t0 row={row}: {:?}", &t0[row * bw..row * bw + bw]);
+                    eprintln!("  t1 row={row}: {:?}", &t1[row * bw..row * bw + bw]);
                 }
                 if bw > 28 && bh > 7 {
                     eprintln!("  at (28,7): t0={} t1={}", t0[7 * bw + 28], t1[7 * bw + 28]);
@@ -2423,6 +2432,14 @@ impl<'a> TileDecodeState<'a> {
                     } else {
                         crate::reconstruct::wedge::diffwtd_mask(mask.mask_sign, &t0, &t1, bw, bh)
                     };
+                    if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
+                        && (mi_row == 12 || mi_row == 14)
+                    {
+                        eprintln!("  mask sign={} rows:", mask.mask_sign);
+                        for row in 0..bh {
+                            eprintln!("    {row}: {:?}", &m[row * bw..row * bw + bw]);
+                        }
+                    }
                     self.compound_mask = Some((m, bw, bh));
                 }
                 let subx = (plane != 0) as usize & self.subsampling_x as usize;

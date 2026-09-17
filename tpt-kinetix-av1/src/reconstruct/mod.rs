@@ -611,7 +611,11 @@ fn build_rp_proj(
         let stride4 = src.stride;
         for y in 0..h8 {
             for x in 0..w8 {
-                let cell = &src.cells[(2 * y) * stride4 + 2 * x];
+                // dav1d `save_tmvs_c` stores each 8×8 cell from the block at
+                // 4×4 column `x*2 + 1` of the cell's top 4×4 row (mi (2x+1,
+                // 2y)) — in sub-8×8 splits the leaves carry different MVs, so
+                // the odd column is the cell's identity.
+                let cell = &src.cells[(2 * y) * stride4 + (2 * x + 1)];
                 // `save_tmvs` filter: compound blocks save their *second*
                 // reference's MV, single-ref blocks the first; the reference
                 // must be in the source frame's past (`mfmv_sign`) and the MV
