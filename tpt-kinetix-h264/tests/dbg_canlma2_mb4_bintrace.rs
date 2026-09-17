@@ -114,7 +114,10 @@ fn canlma2_poc1_mb4_bintrace() {
                             gi,
                             mb.motion.is_some(),
                             mb.skip,
-                            mb.pred_modes_4x4.iter().map(|m| *m as u8).collect::<Vec<_>>()
+                            mb.pred_modes_4x4
+                                .iter()
+                                .map(|m| *m as u8)
+                                .collect::<Vec<_>>()
                         );
                     }
                 }
