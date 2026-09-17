@@ -1548,16 +1548,26 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         None,
                     );
                 } else {
-                    reconstruct_luma(
+                    // In pair-scan order the above-right MB is already
+                    // reconstructed only for the pair's TOP half (it is the
+                    // pair-above's bottom half there); for the pair's BOTTOM
+                    // half it lives in the NEXT pair (decode address >
+                    // CurrMbAddr) and is 6.4.9-unavailable.
+                    let up_right_avail = !mb_aff || mb_y % 2 == 0;
+                    reconstruct_luma_at(
                         mb,
                         &mut luma,
                         luma_stride,
                         mb_x,
                         mb_y,
-                        false,
+                        (mb_y * 16) as usize,
+                        1,
+                        &crate::transform::ZIGZAG_4X4,
+                        &crate::transform::ZIGZAG_8X8,
                         scaling,
                         tracer,
                         None,
+                        up_right_avail,
                     );
                     reconstruct_chroma(
                         mb,
