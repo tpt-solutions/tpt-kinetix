@@ -6930,3 +6930,41 @@ cosmetic for output but worth one look alongside (1)).
 > (55-67 dB, pure +-1 rounding at this point) — same OBMC/warp-adjacent
 > suspicion; (3) then the pixel_exact flip discussion for the 8-bit
 > 4:2:0 subset becomes concrete.
+
+> **2026-09-17 (evening session, cont'd 6) — with oh4 bit-exact, the 64x64
+> divergence is now pinpointed to ONE entropy symbol: the compound inter
+> mode CONTEXT of oh2's left JNT strip.** Fresh internal diffs post-6-bit
+> port: kf Y=0, **oh4 Y=0 (bit-exact!)**, oh2 Y=561 (all in its two
+> non-skipmode compound strips: L-y48 DIFFWTD 7, L-y56 JNT 163, R-y48
+> JNT 185, R-y56 0), oh1 364, oh3 470, oh5 1157 — all inherited/descendant.
+> oh2's skipmode strips are ALL exact (plain avg of the now-exact refs ✓).
+> Fresh B0 + partition traces show Kinetix's oh2 ENTROPY SYNCED through
+> the left 32x32's HORZ_4 strips (rng matches dav1d's Post-skip[0]=50136,
+> compflag=60172... wait — synced through strip (0,12)'s comptype
+> r=48718, y-cf r=54576, chroma r=45069 ✓, and strip (0,14)'s
+> skip=44736, compflag=60172, refs=48622 ✓) — then strip (0,14)'s
+> COMPOUND INTER MODE symbol: dav1d reads compintermode=1 from **ctx=3**;
+> Kinetix reads compintermode=0 from **ctx=4** (rng 54664 vs 43880 —
+> desync; everything after in oh2/oh5 decodes as garbage-but-valid,
+> producing the 561/1157 diffs). The ctx: dav1d's comes from
+> `dav1d_refmvs_find`'s compound-pair scan: `switch (refmv_ctx >> 1)
+> { case 0: min(newmv_ctx,1); case 1: 1+min(newmv_ctx,3); case 2:
+> clip(3+newmv_ctx,4,7) }` (refmvs.c ~line 601), where refmv_ctx/
+> newmv_ctx come from the compound ref-pair match counts
+> (count>=2: refmv=min(2,cnt), newmv=cnt>0; count==1: refmv=3,
+> newmv=3-have_newmv; count==0: refmv=5, newmv=5-have_newmv).
+> Kinetix's `comp_mode_ctx` (inter_mv_stack's own §8.3.2-style
+> derivation) gave 4 where dav1d's gives 3 — for a block whose only
+> relevant neighbor is the ABOVE (0,12) compound DIFFWTD strip
+> (refs LAST/ALTREF, mvs (0,6)/(0,-8): row-subpel, col-integer).
+> NEXT SESSION (surgical): align Kinetix's compound comp_mode_ctx with
+> dav1d's switch — reuse the scan's refmv_ctx/newmv_ctx (Kinetix's
+> inter_mv_stack already computes the match counts; verify they equal
+> dav1d's ref_match_count/have_newmv semantics for compound pairs,
+> especially the have_newmv definition) and replace the ctx formula with
+> the three-case switch. Then oh2 should go bit-exact (its inputs are:
+> kf ✓ oh4 ✓ skipmode strips ✓), and oh1/oh3/oh5 (which chain from
+> oh2's slots) follow. The final 64x64 gap after that = oh5's own
+> additional desync (1157 diffs include its own new symbols).
+> dav1d clone state: builds clean; hooks DUMPF/PARTCDF/PUT8TAP/MCPX all
+> functional; the MCIN fprintf experiment was fully removed.
