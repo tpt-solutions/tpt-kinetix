@@ -275,6 +275,41 @@ Regression: 269 lib tests, full ITU conformance (hard-checked clips
 bit-exact), clippy `-D warnings`, `fmt --check` green. Commits: `3b12f71`
 (pair order + chroma adjustment) on top of `f0c5164`/`a29bcc7`/`540f07e`.
 
+## SESSION #32bx ADDENDUM 4 (same continuation) — 6.4.9 above-right
+availability in pair-scan order LANDED: POC-1 luma 1327 -> 370 samples,
+wrong MBs 18 -> 7 (clusters: (0,6)/(0,7) max<=3; (28-30,14)/(29-30,15)
+max 14-27). Chroma state: U 10604 / V 10081 after the parity adjustment.
+
+**Fix 6 (reconstruct_inter_frame_ex's plain intra branch): the above-right
+neighbour availability must follow PAIR-SCAN decode order, not the
+progressive always-available assumption.** For a pair's BOTTOM half the MB
+diagonally above-right lives in the NEXT pair (decode address > CurrMbAddr)
+and is 6.4.9-unavailable; for the pair's TOP half it is the pair-above's
+bottom half (available). Implemented by routing through
+`reconstruct_luma_at` with `up_right_avail = !mb_aff || mb_y % 2 == 0`
+(the B-frame router still has the progressive `true` -- same fix should be
+mirrored there when a B-slice MBAFF clip needs it). Commit `7e70b1b`.
+
+**Chroma forensics state:** `FieldRef::planes()`'s field extraction verified
+correct (luma and chroma both interleave at stride 2 with the parity
+offset); the parity adjustment (addendum 3) halved the chroma error; the
+remaining 277 chroma MBs are wrong across all 64 pixels each at low-to-mid
+magnitude (max 2..102), i.e. a prediction-level offset rather than isolated
+residual spikes. NEXT PROBES: (1) hand-compute one opposite-parity field
+MB's chroma prediction from the extracted field plane and compare against
+our `interpolate_chroma` output at the ±2-adjusted position (units: the ±2
+is LUMA quarter-pels added to `vec1_y` BEFORE the chroma /2 halving —
+verify our halving happens after the adjustment, which the current code
+does by passing `mv_y_cr` into `interpolate_chroma`); (2) check whether the
+chroma BASE row for a field MB is the field-chroma row (`(mb_y>>1)*8+by`,
+current) or needs the parity offset folded in; (3) confirm the chroma AC
+FIELD scan is applied to the right coefficient count (`comp+4` context cat
+is verified by the progressive suites).
+
+Regression: 269 lib tests, full ITU conformance (hard-checked clips
+bit-exact), clippy `-D warnings`, `fmt --check` green. Commits this
+continuation: `7e70b1b` (above-right availability).
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
