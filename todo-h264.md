@@ -180,6 +180,55 @@ offset; (3) the field ref-list (`field_planes_l0` index-by-field-parity, the
 (#32bl item 1). The `dbg_itu_pframe` diffmap + `KDBGMV` vs `MVP-COMMIT` per-MB
 diff localizes the first block whose MC output diverges.
 
+## SESSION #32bx ADDENDUM 2 (same continuation) — recon-side localization:
+with motion data now JM-exact everywhere, the remaining POC-1 error is pinned
+to `reconstruct_luma`'s intra 4x4 prediction SAMPLE reads for macroblocks
+below field-written rows (CANLMA2 POC 1 first bad MB = (17,4), decode 214,
+the Intra4x4-in-P MB of pair 107 top).
+
+Verification ladder completed this continuation (all tooling landed or
+recreateable):
+1. **Final committed MVs are JM-exact**: comparing our per-MB `MVP-COMMIT`
+   16-cell grid against JM `KDBGMV` MC-time values (POC 1 windowed via MB-
+   number restart; NOTE JM's `i`/`j` are 4x4-BLOCK units while `bsx`/`bsy`
+   are pixels; cells must be tokenized with a regex — the bracket list
+   contains negative MVs, a naive comma-split breaks) — **0 mismatches over
+   all 1232 inter MBs** (118 intra-in-P MBs produce no MC lines). Motion
+   data, candidate resolution, predictors, committed MVs: ALL exact.
+2. **Resolved Intra4x4 modes are JM-exact**: rebuilt the JM oracle with a
+   `KDBGMODE` print inside `read_ipred_4x4_modes_mbaff` (mb_read.c — the
+   I4MB variant; the dispatcher routes I8MB to the 8x8 variant, so patch the
+   right one; binary `C:/Users/phill/jm-oracle-fresh/jm/ldecod_kdbgmode.exe`,
+   build = the build-jm-oracle.sh gcc line). JM's `ipredmode` values are the
+   SPEC mode numbering (identity mapping — do NOT remap). Our per-MB
+   `pred_modes_4x4` (dump via `CANLMA2_MODE_ALL=1` on
+   `dbg_canlma2_mb4_bintrace`, prints `MODES grid=N motion= skip= [...]` for
+   every Intra4x4 MB): **all 105 POC-1 Intra4x4 MBs match JM exactly**, incl.
+   grid 197 = [1,2,5,8,1,3,7,1,1,4,5,2,5,4,2,5].
+3. The router is correct: grid 197 has `motion=false skip=false` → the plain
+   intra path (`reconstruct_luma`, not the field-MC path).
+4. Pixel forensics at MB (17,4) (x 272-287, y 64-79; neighbours (16,4),
+   (17,3), (18,3) all diffmap-exact, and the ITU row 63 samples it reads are
+   byte-exact): block (0,0) row 0 is EXACT while rows 1-3 collapse to ~0-8
+   (as if prediction samples were read from the zero-initialised plane), and
+   block (1,0) is uniformly off by ~-32 (consistent with contaminated left
+   samples once (0,0) went wrong). Modes/residuals being exact, **the bug is
+   inside `reconstruct_luma`'s prediction-sample fetching for an intra MB
+   whose above neighbours were written by the field path** — prime suspects:
+   an above/above-right sample row computed with a field parity/stride-2
+   offset, or an unwritten-row read (the plane is zero-initialised, so
+   unwritten reads read 0, matching the observed ~0 pixels).
+
+NEXT SESSION: instrument `reconstruct_luma`/`predict_4x4` (or dump the 4x4
+input sample rows) for grid 197's blocks and compare against the ITU row-63
+samples; expect a parity/half-row offset in the above-row sample index when
+the above MB pair is field-coded. Once (17,4) and the ~6 other clusters fall,
+the KINETIX_MBAFF_FIELD_MC gate can flip and CANLMA2_Sony_C closes.
+
+Preamble done — regression state: 269 lib tests, full ITU conformance
+(hard-checked clips bit-exact), clippy `-D warnings`, `fmt --check` all
+green at `f0c5164` + this note.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the

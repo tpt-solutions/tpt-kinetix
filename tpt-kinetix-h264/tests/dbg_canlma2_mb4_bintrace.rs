@@ -106,6 +106,19 @@ fn canlma2_poc1_mb4_bintrace() {
     match parsed {
         Ok(p) => {
             eprintln!("parsed {} macroblocks OK", p.macroblocks.len());
+            if std::env::var("CANLMA2_MODE_ALL").is_ok() {
+                for (gi, mb) in p.macroblocks.iter().enumerate() {
+                    if matches!(mb.mb_type, tpt_kinetix_h264::macroblock::MbType::Intra4x4) {
+                        eprintln!(
+                            "MODES grid={} motion={} skip={} {:?}",
+                            gi,
+                            mb.motion.is_some(),
+                            mb.skip,
+                            mb.pred_modes_4x4.iter().map(|m| *m as u8).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
             for i in 0..p.macroblocks.len() {
                 let mb = &p.macroblocks[i];
                 let motion_str = mb
