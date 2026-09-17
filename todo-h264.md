@@ -310,6 +310,33 @@ Regression: 269 lib tests, full ITU conformance (hard-checked clips
 bit-exact), clippy `-D warnings`, `fmt --check` green. Commits this
 continuation: `7e70b1b` (above-right availability).
 
+## SESSION #32bx ADDENDUM 5 (same continuation) — chroma error correlation +
+wrap-up. Correlating all 277 wrong POC-1 chroma MBs against the surrounding
+frame MBs' coding (field/frame, ref parity classes from `MVP-COMMIT`):
+- 63 wrong chroma MBs touch ONLY frame-coded MBs (e.g. (0,6),(0,9)) — these
+  use the plain `reconstruct_chroma` path, which is proven exact on
+  progressive streams. Suspects for next session: (a) intra-in-P chroma
+  prediction reading neighbour CHROMA rows written by the field path
+  (stride-2) — the chroma twin of the luma sample bug; (b) a chroma MB
+  region straddling a field pair's odd-row writes from a neighbouring
+  column.
+- 32+25+19+18+17...: the rest involve field-coded pairs with mixed
+  same/opposite ref parities — the parity adjustment (addendum 3) is in and
+  sign-verified against JM `set_chroma_vector`, so the residual error there
+  is either the ±2 magnitude/units interacting with the chroma half-pel
+  filter phase, or the field-chroma base row (`fy0`) needing the parity
+  folded in. `interpolate_chroma` conventions verified: it takes the mv in
+  LUMA quarter-pels read as CHROMA eighth-pels (numerically equal scaling),
+  so `mv_y_cr` composes exactly like JM's `vec1_y_cr`.
+
+Session totals (CANLMA2_Sony_C POC 1, gate on): Y 188236 -> 370 (-99.8%),
+U 42607 -> 10604 (-75%), V 41395 -> 10081 (-76%). Wrong luma MBs: 18 -> 7.
+All fixes mirror-verified against the JM oracle at every layer (bins, flag
+contexts, amvd, MVP candidates, committed MVs, intra modes). Remaining:
+7 luma MBs (above-right class mostly resolved; residual cluster at
+(28-30,14)/(29-30,15)) and the two chroma classes above; then the
+KINETIX_MBAFF_FIELD_MC gate flip and the CANLMA2_Sony_C closure.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
