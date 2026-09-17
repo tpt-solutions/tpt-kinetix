@@ -154,11 +154,6 @@ pub fn ref_plane_offset(_ref: u8) -> usize {
 
 // --- Sub-pel motion compensation (§7.11.3) ----------------------------------
 
-/// Select the 8-tap sub-pel kernel for MV-component fraction `frac` and filter
-/// `kind` (one of `INTERP_*`; `SWITCHABLE` is resolved by the caller).
-///
-/// `bits` is the sub-pel precision of the MV *component* for this axis: 3 for
-/// luma (1/8-pel), 4 for a 4:2:0/4:2:2 chroma axis (1/16-pel, since a 1/8
 /// Select the 8-tap sub-pel kernel for MV-component fraction `frac` and
 /// filter `kind` (one of `INTERP_*`; `SWITCHABLE` is resolved by the caller).
 ///
@@ -186,11 +181,7 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
     let mask = (1i32 << bits) - 1;
     let frac = frac & mask;
     let pos = if bits == 3 { 2 * frac - 1 } else { frac - 1 };
-    let set = if small {
-        3 + (f & 1)
-    } else {
-        f
-    };
+    let set = if small { 3 + (f & 1) } else { f };
     defaults::SUBPEL_FILTERS[set][pos as usize]
 }
 
@@ -247,9 +238,94 @@ pub fn motion_compensate(
     let base_x = dst_x as i32 + ix;
     let base_y = dst_y as i32 + iy;
 
-    let kw = subpel_kernel(filter_h, dx, hbits);
-    let kh = subpel_kernel(filter_v, dy, vbits);
+    // dav1d 8-bit put_8tap_c rounds each topology differently: the 2-D chain
+    // shifts /2 then /10, but a single subpel axis uses a one-pass
+    // (sum + 34) >> 6 (horizontal) or (sum + 32) >> 6 (vertical) — routing a
+    // single-axis filter through the identity-kernel 2-D chain rounds at a
+    // different point and lands +-1 off dav1d on subpel blocks.
+    let h_subpel = dx != 0;
+    let v_subpel = dy != 0;
+    if filter_h == INTERP_BILINEAR || filter_v == INTERP_BILINEAR {
+        // dav1d put_bilin_c (8-bit): a 2-tap 16-scale interpolation,
+        // mx16/my16 = the MV fraction on a 0..15 scale (luma 1/8-pel phases
+        // doubled to 1/16). H-only rounds (16-scale + 8) >> 4; V-only rounds
+        // (16-scale + 8) >> 4 vertically; 2-D chains the unrounded 16-scale
+        // H result into a (… + 128) >> 8 V pass. Used by the IBC chroma
+        // path (odd luma displacements give half-pel chroma).
+        let mx16 = dx << (4 - hbits);
+        let my16 = dy << (4 - vbits);
+        for y in 0..bh {
+            let ry = (base_y + y as i32).clamp(0, ref_h as i32 - 1);
+            for x in 0..bw {
+                let rx = base_x + x as i32;
+                let s00 =
+                    refp[ry as usize * ref_stride + rx.clamp(0, ref_w as i32 - 1) as usize] as i32;
+                if h_subpel {
+                    let s01 = refp
+                        [ry as usize * ref_stride + (rx + 1).clamp(0, ref_w as i32 - 1) as usize]
+                        as i32;
+                    let v = if v_subpel {
+                        let s10 = refp[(ry as usize + 1).min(ref_h - 1) * ref_stride
+                            + rx.clamp(0, ref_w as i32 - 1) as usize]
+                            as i32;
+                        let s11 = refp[(ry as usize + 1).min(ref_h - 1) * ref_stride
+                            + (rx + 1).clamp(0, ref_w as i32 - 1) as usize]
+                            as i32;
+                        let mid = 16 * s00 + mx16 * (s01 - s00);
+                        let mid01 = 16 * s10 + mx16 * (s11 - s10);
+                        (16 * mid + my16 * (mid01 - mid) + 128) >> 8
+                    } else {
+                        (16 * s00 + mx16 * (s01 - s00) + 8) >> 4
+                    };
+                    dest[y * dest_stride + x] = v.clamp(0, 255) as u8;
+                } else if v_subpel {
+                    let s10 = refp[(ry as usize + 1).min(ref_h - 1) * ref_stride
+                        + rx.clamp(0, ref_w as i32 - 1) as usize]
+                        as i32;
+                    let v = (16 * s00 + my16 * (s10 - s00) + 8) >> 4;
+                    dest[y * dest_stride + x] = v.clamp(0, 255) as u8;
+                } else {
+                    dest[y * dest_stride + x] = s00 as u8;
+                }
+            }
+        }
+        return;
+    }
+    let kw = subpel_kernel(filter_h, dx, hbits, bw <= 4);
+    let kh = subpel_kernel(filter_v, dy, vbits, bh <= 4);
 
+    if h_subpel && !v_subpel {
+        // Horizontal-only: dav1d put_8tap_c fh-only branch, (sum + 34) >> 6.
+        for y in 0..bh {
+            let ry = (base_y + y as i32).clamp(0, ref_h as i32 - 1);
+            let row = ry as usize * ref_stride;
+            for x in 0..bw {
+                let rx = base_x + x as i32;
+                let mut s = 0i32;
+                for k in 0..8u32 {
+                    let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
+                    s += refp[row + sx as usize] as i32 * kw[k as usize];
+                }
+                dest[y * dest_stride + x] = ((s + 34) >> 6).clamp(0, 255) as u8;
+            }
+        }
+        return;
+    }
+    if !h_subpel && v_subpel {
+        // Vertical-only: dav1d put_8tap_c fv-only branch, (sum + 32) >> 6.
+        for x in 0..bw {
+            for y in 0..bh {
+                let mut s = 0i32;
+                for k in 0..8u32 {
+                    let ry = (base_y + y as i32 + k as i32 - 3).clamp(0, ref_h as i32 - 1);
+                    let sx = (base_x + x as i32).clamp(0, ref_w as i32 - 1);
+                    s += refp[ry as usize * ref_stride + sx as usize] as i32 * kh[k as usize];
+                }
+                dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, 255) as u8;
+            }
+        }
+        return;
+    }
     // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
     // 7`); for 8-bit non-compound prediction `InterRound0 = 3`, `InterRound1 =
     // 11`, `InterPostRound = 0`. The horizontal pass is run over `bh + 7` rows
@@ -272,7 +348,7 @@ pub fn motion_compensate(
                 let sx = (rx + koff).clamp(0, ref_w as i32 - 1);
                 s += refp[row + sx as usize] as i32 * kw[k as usize];
             }
-            tmp[ty * bw + x] = (s + 4) >> 3;
+            tmp[ty * bw + x] = (s + 2) >> 2;
         }
     }
 
@@ -284,7 +360,7 @@ pub fn motion_compensate(
             for (k, &c) in kh.iter().enumerate() {
                 s += tmp[(y + k) * bw + x] * c;
             }
-            let v = ((s + 1024) >> 11).clamp(0, 255) as u8;
+            let v = ((s + 512) >> 10).clamp(0, 255) as u8;
             dest[y * dest_stride + x] = v;
         }
     }
@@ -315,8 +391,8 @@ pub fn motion_compensate_prep(
     let dy = mv.row & ((1 << vbits) - 1);
     let base_x = dst_x as i32 + (mv.col >> hbits);
     let base_y = dst_y as i32 + (mv.row >> vbits);
-    let kw = subpel_kernel(filter_h, dx, hbits);
-    let kh = subpel_kernel(filter_v, dy, vbits);
+    let kw = subpel_kernel(filter_h, dx, hbits, bw <= 4);
+    let kh = subpel_kernel(filter_v, dy, vbits, bh <= 4);
 
     let ext_h = bh + 7;
     let mut tmp = vec![0i32; bw * ext_h];
@@ -330,7 +406,7 @@ pub fn motion_compensate_prep(
                 let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
                 s += refp[row + sx as usize] as i32 * c;
             }
-            tmp[ty * bw + x] = (s + 4) >> 3;
+            tmp[ty * bw + x] = (s + 2) >> 2;
         }
     }
 
@@ -341,7 +417,7 @@ pub fn motion_compensate_prep(
             for (k, &c) in kh.iter().enumerate() {
                 s += tmp[(y + k) * bw + x] * c;
             }
-            out[y * bw + x] = (s + 64) >> 7;
+            out[y * bw + x] = (s + 32) >> 6;
         }
     }
     out
@@ -861,26 +937,26 @@ impl InterCdfs {
 mod tests {
     use super::*;
 
-    fn kern(kind: u8, frac: i32) -> &'static [i32; 8] {
+    fn kern(kind: u8, frac: i32) -> [i32; 8] {
         // 1/8-pel (luma) phase.
-        subpel_kernel(kind, frac, 3)
+        subpel_kernel(kind, frac, 3, false)
     }
 
     #[test]
     fn subpel_identity_kernel_is_passthrough() {
-        // frac 0 / regular: only the centre tap (index 3) is 128.
+        // frac 0 / regular: only the centre tap (index 3) is 64.
         let k = kern(INTERP_EIGHTTAP_REGULAR, 0);
-        assert_eq!(k[3], 128);
+        assert_eq!(k[3], 64);
         assert!(k.iter().take(3).all(|&v| v == 0));
         assert!(k.iter().skip(4).all(|&v| v == 0));
     }
 
     #[test]
     fn subpel_bilinear_half_is_average() {
-        // Bilinear at frac 4 (1/2 pel) uses 64/64 on the two centre taps.
+        // Bilinear at frac 4 (1/2 pel) uses 32/32 on the two centre taps.
         let k = kern(INTERP_BILINEAR, 4);
-        assert_eq!(k[3], 64);
-        assert_eq!(k[4], 64);
+        assert_eq!(k[3], 32);
+        assert_eq!(k[4], 32);
     }
 
     #[test]

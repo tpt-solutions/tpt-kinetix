@@ -6884,3 +6884,49 @@ cosmetic for output but worth one look alongside (1)).
 > The dav1d clone now also has a MCIN probe stub REMOVED (a broken
 > fprintf experiment was fully excised; the clone builds clean again and
 > the PUT8TAP/MCPX/DUMPF/PARTCDF hooks all work).
+
+> **2026-09-17 (evening session, cont'd 5) — FOUND + FIXED: Kinetix's
+> subpel filter table was VP9's, not AV1's. This was THE root cause of
+> every remaining subpel +-1.** The probe mystery resolved: dav1d's mc()
+> computes `mx = mvx & (15 >> !ss_hor)` = `mvx & 7` for luma and passes
+> `mx << !ss_hor` = `mx << 1` to put_8tap_c, which indexes
+> `[set][(mx<<1) - 1]` — so a luma phase m/8 selects the ODD row 2m-1 of
+> a 15-row SIX-BIT (sum = 64) coefficient table. The printed mx=4 for
+> mv.x=18 was `((mv.x & 7) << 1)` = the already-doubled index, row 3,
+> exactly as captured. Kinetix's table held the VP9 128-scale bank
+> ({0,2,-10,122,18,-4,0,0} sums to 128) at even rows — double wrong
+> (coefficients AND effective phase). FIX (inter.rs + cdf_tables_gen.rs):
+> (1) `SUBPEL_FILTERS` replaced with dav1d's 6-bit
+> `dav1d_mc_subpel_filters[6][15][8]` (sets: regular / smooth / sharp /
+> 4x4-regular / 4x4-smooth / bilinear); (2) `subpel_kernel` now resolves
+> luma phase m to odd row 2m-1, chroma 1/16 phase c to row c-1, honours
+> the 4x4 set selection (w==4 -> H set [3+(kind&1)], h==4 -> V set
+> [3+((kind>>2)&1)]), and returns the identity [0,0,0,64,0,0,0,0] for
+> full-pel; (3) rounding ported per topology from dav1d 8-bit
+> put_8tap_c: 2-D chain (sum+2)>>2 then (sum_v+512)>>10, horizontal-only
+> (sum+34)>>6, vertical-only (sum+32)>>6 (the prior 7-bit table's
+> /3-then-/11 chain matched VP9's scale, not AV1's); (4) BILINEAR moved
+> off the 8-tap table onto a faithful port of dav1d's put_bilin_c
+> (2-tap 16-scale: H-only (16s+mx16*(s1-s0)+8)>>4, V-only likewise,
+> 2-D unrounded 16-scale H chained into (…+128)>>8 V) — this also
+> restored the IBC chroma path (testsrc2_big intra entry had regressed
+> to chroma diffs when BILINEAR briefly mapped into the 4x4-SMOOTH 8-tap
+> set). The compound prep path keeps its 16-scale intermediate (the new
+> 6-bit pipeline produces the same 16-scale as the old 7-bit one) so the
+> avg/w_avg/mask blends are unchanged.
+> RESULTS: av1_intra_corpus 6/6 bit-exact ALL-INF restored;
+> 128x96 inter sequence luma diff samples 0/0/0/0/0/0/8 -> 0/0/0/0/0/0/0
+> — **ALL EIGHT FRAMES LUMA BIT-EXACT, frame 7's last 8 samples gone**;
+> chroma PSNR improved across the board (frame 1 U 66.38 -> 67.32);
+> testsrc_64x64 frame 4 -> fully bit-exact (inf/inf/inf, was 5 diffs),
+> frame 5 761 -> 734, frames 1-3 unchanged (their diffs predate the MC —
+> they inherit oh4's 27 residual +-1s through the reference chain).
+> 154 AV1 unit tests, workspace lib/bins, clippy -D warnings, fmt clean.
+> REMAINING (next session): (1) oh4's 27 +-1s — now the ONLY luma error
+> source in the 64x64 clip; with the filters now correct, re-run the
+> per-block trace: the +-1s sit on 4x4/4x8 subpel blocks adjacent to
+> warp/OBMC blocks (candidates: OBMC lap MC filter provenance, warp
+> sub-block emu-edge extents); (2) the 128x96 chroma residuals
+> (55-67 dB, pure +-1 rounding at this point) — same OBMC/warp-adjacent
+> suspicion; (3) then the pixel_exact flip discussion for the 8-bit
+> 4:2:0 subset becomes concrete.
