@@ -106,7 +106,7 @@ fn canlma2_poc1_mb4_bintrace() {
     match parsed {
         Ok(p) => {
             eprintln!("parsed {} macroblocks OK", p.macroblocks.len());
-            for i in 8..std::cmp::min(180, p.macroblocks.len()) {
+            for i in 0..p.macroblocks.len() {
                 let mb = &p.macroblocks[i];
                 let motion_str = mb
                     .motion

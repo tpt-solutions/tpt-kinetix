@@ -253,22 +253,29 @@ fn resolve_aff_neighbour(
 
     // Pair-level neighbour halves as grid indices of their TOP halves
     // (+mb_width selects the bottom half). `None` when off-picture / off-edge.
+    // The lookups anchor to the current PAIR's top row (`mb_y & !1`), NOT to
+    // `mb_idx - 2*cols`: for a bottom-half MB that expression lands on the
+    // pair-above's BOTTOM half, shifting every B/C/D candidate up one
+    // half-pair (CANLMA2_Sony_C POC 1, pair 48 bottom -- grid 138 -- resolved
+    // its B candidate to its own pair-mate instead of the pair-above's
+    // bottom half).
+    let pair_top_y = mb_y & !1;
     let a_top = if mb_x > 0 {
-        Some(mb_idx as isize - 1 - (mb_y & 1) * cols)
+        Some(pair_top_y * cols + mb_x - 1)
     } else {
         None
     };
-    let b_top = if mb_y >= 2 {
-        Some(mb_idx as isize - 2 * cols)
+    let b_top = if pair_top_y >= 2 {
+        Some((pair_top_y - 2) * cols + mb_x)
     } else {
         None
     };
-    let c_top = if mb_y >= 2 && mb_x + 1 < cols {
+    let c_top = if pair_top_y >= 2 && mb_x + 1 < cols {
         b_top.map(|b| b + 1)
     } else {
         None
     };
-    let d_top = if mb_y >= 2 && mb_x > 0 {
+    let d_top = if pair_top_y >= 2 && mb_x > 0 {
         b_top.map(|b| b - 1)
     } else {
         None
@@ -427,10 +434,34 @@ fn neighbor_cell(
     y_n: isize,
     slice_id: u32,
     l1: bool,
+    role: &str,
 ) -> Option<MvNeighbor> {
     if (0..16).contains(&x_n) && y_n >= 0 {
         let blk = (y_n as usize / 4) * 4 + x_n as usize / 4;
         let c = cur[blk];
+        if std::env::var("KINETIX_MVPCAND").is_ok() {
+            let decode_addr = if store.mbaff_frame() {
+                let g = mb_idx;
+                2 * ((g / mb_width / 2) * mb_width + g % mb_width) + (g / mb_width) % 2
+            } else {
+                mb_idx
+            };
+            eprintln!(
+                "KXCAND {} mb={} cur=({},{}) n=({}, {}) cell=({}, {}) mv=({}, {}) r={} intra={}",
+                role,
+                mb_idx,
+                x_n,
+                y_n,
+                decode_addr,
+                blk,
+                (x_n.rem_euclid(16)) / 4,
+                (y_n.rem_euclid(16)) / 4,
+                c.mv[0],
+                c.mv[1],
+                c.ref_idx,
+                c.ref_idx < 0,
+            );
+        }
         return Some(if l1 {
             MvNeighbor {
                 mv: c.mv_l1,
@@ -486,7 +517,17 @@ fn neighbor_cell(
         }
         return None;
     }
-    let (addr, blk) = resolve_aff_neighbour(store, mb_idx, mb_width, x_n, y_n, slice_id)?;
+    let resolved = resolve_aff_neighbour(store, mb_idx, mb_width, x_n, y_n, slice_id);
+    if resolved.is_none() {
+        if std::env::var("KINETIX_MVPCAND").is_ok() {
+            eprintln!(
+                "KXCAND {} mb={} cur=({},{}) UNAVAIL",
+                role, mb_idx, x_n, y_n
+            );
+        }
+        return None;
+    }
+    let (addr, blk) = resolved?;
     let n = if l1 {
         store.cell_l1(addr, blk)
     } else {
@@ -501,7 +542,8 @@ fn neighbor_cell(
             2 * ((my >> 1) * c + mx) + (my & 1)
         };
         eprintln!(
-            "KXCAND mb={} cur=({},{}) n=({},{}) cell=({},{}) mv=({},{}) r={}",
+            "KXCAND {} mb={} cur=({},{}) n=({},{}) cell=({},{}) mv=({},{}) r={}",
+            role,
             mb_idx,
             x_n,
             y_n,
@@ -535,6 +577,7 @@ fn neighbor_left(
         py_off as isize,
         slice_id,
         false,
+        "L",
     )
 }
 
@@ -556,6 +599,7 @@ fn neighbor_above(
         py_off as isize - 1,
         slice_id,
         false,
+        "U",
     )
 }
 
@@ -577,6 +621,14 @@ fn neighbor_above_right(
         let cur_8x8 = (py_off / 8) * 2 + px_off / 8;
         let tgt_8x8 = ((py_off - 4) / 8) * 2 + right_col / 8;
         if tgt_8x8 > cur_8x8 {
+            if std::env::var("KINETIX_MVPCAND").is_ok() {
+                eprintln!(
+                    "KXCAND UR mb={} cur=({},{}) UNAVAIL",
+                    mb_idx,
+                    right_col,
+                    py_off as isize - 1
+                );
+            }
             return None;
         }
     }
@@ -589,6 +641,7 @@ fn neighbor_above_right(
         py_off as isize - 1,
         slice_id,
         false,
+        "UR",
     )
 }
 
@@ -610,6 +663,7 @@ fn neighbor_above_left(
         py_off as isize - 1,
         slice_id,
         false,
+        "D",
     )
 }
 
@@ -631,6 +685,7 @@ fn neighbor_left_l1(
         py_off as isize,
         slice_id,
         true,
+        "L",
     )
 }
 
@@ -652,6 +707,7 @@ fn neighbor_above_l1(
         py_off as isize - 1,
         slice_id,
         true,
+        "U",
     )
 }
 
@@ -683,6 +739,7 @@ fn neighbor_above_right_l1(
         py_off as isize - 1,
         slice_id,
         true,
+        "UR",
     )
 }
 
@@ -704,6 +761,7 @@ fn neighbor_above_left_l1(
         py_off as isize - 1,
         slice_id,
         true,
+        "D",
     )
 }
 
