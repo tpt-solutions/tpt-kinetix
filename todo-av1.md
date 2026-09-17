@@ -7120,3 +7120,47 @@ cosmetic for output but worth one look alongside (1)).
 > (untracked) + KINETIX_AV1_CHROMA_OBU env drives the 128x96 stream;
 > ALWAYS `rm -f kfr_*.yuv` before dump runs (stale dumps poisoned one
 > comparison).
+
+> **2026-09-18 (cont'd 4) — chroma desync is in the OBMC blend; prior
+> "extra compound block" lead was a trace-interleaving artifact.**
+> Corrections first: the MCCH/MCCHK traces were not frame-tagged, so
+> last session's "8x16 compound at mi(0,20)" conclusion mixed frames.
+> Properly tagged now (dav1d MCCH prints frame_offset; Kinetix MCCHK
+> prints cur_order_hint; both committed). ALSO: the 128x96 clip HAS
+> hidden frames — decode order is oh0, oh6(hidden), oh3(hidden), oh1,
+> oh2, oh4, oh5, [oh6 show_existing replay], oh7; dfr/kfr index → oh
+> mapping is 0,6,3,1,2,4,5,(6),7 — "frame 1" in earlier notes = the
+> HIDDEN alt-ref oh6. The show_existing replay makes kfr_05 go missing
+> (count increments, no dump) — key diffs to that when pairing dumps.
+> FINDINGS: oh6's chroma diffs (rows 40-43, x 0-15/48-55, ±1-5) sit
+> exactly in OBMC-blend regions. Hash-proven: KINETIX_AV1_NOOBMC
+> changes oh6's output (md5 differs) — OBMC is active. dav1d's
+> Post-motionmode[1] confirms the (4,20) 16x16 is an OBMC block. Row
+> 40 of the diverging regions matches dav1d, blended rows 41-43 differ
+> (dav1d blend_h blends only (h*3)>>2 rows with masks {25,14,5} from
+> obmc_masks[4]; row 40 should be blended with m=25 yet matches —
+> suspicious). Kinetix's obmc_mask table, blend formula
+> ((m*o+(64-m)*cur+32)>>6 = dav1d's blend_px exactly), job shapes and
+> ctx-based mv/filter sourcing all MATCH dav1d on paper. Remaining
+> delta candidates for the next probe: (a) job collection — Kinetix
+> n_limit = 4.min(bw4.trailing_zeros()) vs dav1d imin(b_dim[2],4)
+> (b_dim[2] = 8x8 units per edge — SAME for square blocks but the
+> boundary-skip differs: dav1d neighbors at odd offsets
+> bx+x+1 stepping by the NEIGHBOR's clipped width, Kinetix x4|1
+> stepping by grid_w4 — check the (0,20) 8x8 + (2,20)?? column
+> coverage at x 0-3/4-7); (b) the above-pass overlap HEIGHT formula
+> (oh4 = min(b_dim[1],16)>>1, mc height (oh4*3+3)>>2) vs Kinetix's
+> pred_h = (h>>1).min(32); (c) the subpel lap rounding for chroma
+> vbits=4 (neighbor mv (0,66) → V-only subpel phase 2 — verify 1D-V
+> rounding (s+32)>>6 with the 16-phase kernel row frac-1=1 through
+> Kinetix's motion_compensate for a chroma-sized block).
+> TOOLING: KINETIX_DBG_MCCH (dav1d, now poc-tagged, gate by>=12&&by<=24),
+> KINETIX_DBG_MCCHK (Kinetix, oh-tagged, chroma rows 24-52),
+> KINETIX_AV1_DBG_OBMC with DEEP mode (retune its mi_col==4&&mi_row==18
+> gate to the (4,20) block), KINETIX_AV1_NOOBMC (escape hatch).
+> Harness: dbg_av1_chroma.rs + KINETIX_AV1_CHROMA_OBU=$TEMP/t128.obu.
+> ALWAYS rm -f kfr_*.yuv before dump runs. NEXT: dump Kinetix's job
+> list (OBMC debug) for oh6 mi(4,20) vs dav1d's obmc() calls (add a
+> KINETIX_DBG_OBMCD print in dav1d's obmc(): neighbor mi, mv, overlap
+> w/h, per-row masks), align per-sample, fix, then 128x96/96x64 should
+> go fully bit-exact.
