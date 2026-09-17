@@ -6991,3 +6991,43 @@ cosmetic for output but worth one look alongside (1)).
 > fix the `& 1` mask, and reconcile close_matches; then re-check the
 > ctx (target: dav1d's 3) and the compintermode symbol (target: 1).
 > Everything downstream (oh2's JNT strip, then oh1/oh3/oh5) follows.
+
+> **2026-09-18 — refmvs ctx derivation aligned with dav1d refmvs.c
+> (04cdb75); oh2 (0,14) now reads ctx=3.** The 64x64 warp clip's oh2
+> compound strip desync had FOUR interlocking causes, all fixed in
+> intra_block.rs + inter_block.rs:
+> 1. have_newmv pollution: `*have_newmv |= (cand.mf >> 1) as i32`
+>    leaked the full mf bitfield; now masked `i32::from((mf>>1)&1)`.
+> 2. The top-left corner probe add((by4-1, bx4-1)) was fed the REAL
+>    have_newmv; dav1d (refmvs.c:468-471) passes a DUMMY there, so the
+>    probe must count toward ref_match_count but never toward
+>    have_newmv. (Kinetix's flow = dav1d's: top scan, left scan,
+>    top-right probe (real newmv), THEN snapshot nearest_match/num_new,
+>    then top-left probe (dummy newmv), then secondary scans.)
+> 3. The ctx switches now select on `close_matches` (= dav1d's
+>    nearest_match, snapshot BEFORE the top-left probe) with
+>    `total_matches` (= dav1d's ref_match_count, after probe+secondary)
+>    inside. dav1d's single table (one switch serves BOTH the single-ref
+>    packed ctx and the compound fold): nm==0: (rmc>0, min(2,rmc));
+>    nm==1: (3-have_newmv, min(rmc*3,4)); else (5-have_newmv, 5).
+>    Kinetix's old single-ref arms used `total` and `2+total` — wrong
+>    for rmc==0 and rmc>=3; the old "compound formulas differ" comment
+>    was wrong (they never differed in dav1d).
+> 4. Compound path NEVER splatted new_mf (stayed 0): now dav1d
+>    splat_tworef_mv: comp_mode 6 -> 1, (1<<mode)&0xbc -> 2 (rows
+>    2,3,4,5,7), else 0 (rows 0,1). Skip-mode blocks keep mf=0
+>    (dav1d gives them NEARESTMV_NEARESTMV = mf 0). Single-ref splat
+>    was already right (ZEROMV->1, NEWMV->2; GLOBALMV implies >=8x8).
+> Verified: KINETIX_AV1_DBG_B0=1 + MVSCAN="14:0" — oh2's (0,14)
+> compound strip now builds stack s0=(0,6) mf=2, nearest_match=1,
+> comp_ctx=3 (was 4). 64x64 warp per-frame luma diffs
+> 210/355/300/0/734 -> 172/292/249/0/739 (frames 1-3 improved, frame 5
+> shuffled ±5 — its refs changed under it). 128x96: all 8 frames luma
+> still bit-exact. Suites + conformance + clippy + fmt clean.
+> NEXT: frame 1 (oh4) first-wrong (37,48) 101->102 and frames 2/3
+> (48,47) 79->80 are ±1 LSB diffs — prediction/rounding-family, not
+> entropy desyncs (deltas of 1). Suspects: MC subpel rounding on some
+> 4x4 path, or SGR/Wiener edge (loop filter already staged-out before).
+> Run stage isolation (--inloopfilters) on the warp clip for frame 1 to
+> bracket which in-loop stage (if any) carries the ±1; if present
+> pre-filter, probe dav1d's put_8tap for that exact (x,y,h,mx,my).
