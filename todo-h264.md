@@ -229,6 +229,52 @@ Preamble done — regression state: 269 lib tests, full ITU conformance
 (hard-checked clips bit-exact), clippy `-D warnings`, `fmt --check` all
 green at `f0c5164` + this note.
 
+## SESSION #32bx ADDENDUM 3 (same continuation) — pair-scan recon order +
+field chroma parity adjustment LANDED: POC-1 error Y 5444 -> 1327, U 19567 ->
+10604, V 18702 -> 10081 (session total: Y -97%, U -75%, V -76% vs the
+188 236 / 42 607 / 41 395 starting point).
+
+**Fix 4 (reconstruct_inter_frame_ex): the reconstruction loop walked plain
+RASTER order; MBAFF requires PAIR-scan order** (§6.4.2: pair 0 top/bottom,
+pair 1 top/bottom, ...). The bottom half of a field-coded pair owns the ODD
+frame rows of its region; a frame-coded MB in the next pair column reads
+those rows as its intra-prediction LEFT samples — under raster order the
+field pair's bottom half is only reconstructed one full MB row later, so the
+samples read as zeros (the observed "prediction collapses to ~0" signature
+at MB (17,4)). Non-MBAFF keeps raster (identical to pair order). NOTE: the
+non-MBAFF else-branch MUST build the raster sequence — a first draft left it
+empty and silently reconstructed nothing for progressive pictures (caught by
+3 lib-test failures + 10 ITU clip failures; stash-verified).
+
+**Fix 5 (reconstruct_mbaff_inter_chroma): JM's `set_chroma_vector` adjustment
+was missing — a field-coded MB predicting from the OPPOSITE-parity field
+shifts the chroma vertical vector by -2 (top MB) / +2 (bottom MB) luma
+quarter-pels; same-parity refs are unadjusted** (mb_prediction.c
+set_chroma_vector; the ±2 lands in `vec1_y_cr` in luma quarter-pel units and
+the chroma halving happens inside the MC). Applied as `mv_y_cr = cell.mv[1]
++ (opposite ? (bottom ? 2 : -2) : 0)` with opposite ⇔ `ref_idx & 1 == 1`.
+
+A/B result worth pinning: the CHROMA AC residual of a field MB uses the
+FIELD scan (zigzag is 70% worse: U 10604 -> 18081) — the current
+FIELD_SCAN_4X4 in the chroma call is correct.
+
+**Remaining POC-1 error (Y 1327, U 10604, V 10081):** luma clusters at
+frame rows 11-14 x cols 28-37 and rows 4-5 x cols 0-2; chroma co-locates
+(rows 24-29 x cols 28-37 chroma MB cols 28-31) — the SAME pairs, so one
+remaining root cause per region, likely in the field-MC application of
+those specific field pairs (suspects: residual dequant/scan interaction for
+those field MBs, or the interpolate_luma/chroma sub-pel path on the
+half-height field planes). The chroma error is otherwise broad (277 chroma
+MBs with all-64-pixel diffs at low magnitudes max<=12), suggesting a global
+field-chroma geometry offset still present — candidate next probes: dump
+our field-chroma pred for one opposite-parity ref block and compare the
+±2-adjusted position against JM's `vec1_y_cr` math, and check
+`FieldRef::planes()`'s bottom-field row extraction (odd rows 1,3,5...).
+
+Regression: 269 lib tests, full ITU conformance (hard-checked clips
+bit-exact), clippy `-D warnings`, `fmt --check` green. Commits: `3b12f71`
+(pair order + chroma adjustment) on top of `f0c5164`/`a29bcc7`/`540f07e`.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
