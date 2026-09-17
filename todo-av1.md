@@ -6968,3 +6968,26 @@ cosmetic for output but worth one look alongside (1)).
 > additional desync (1157 diffs include its own new symbols).
 > dav1d clone state: builds clean; hooks DUMPF/PARTCDF/PUT8TAP/MCPX all
 > functional; the MCIN fprintf experiment was fully removed.
+
+> **2026-09-17 (evening session, cont'd 7) — additional lead found: the
+> have_newmv pollution bug candidate.** Kinetix's compound scan
+> (intra_block.rs scan_col/scan_row closures, ~line 1290-1305) does
+> `*have_newmv |= (cand.mf >> 1) as i32` — WITHOUT `& 1`. Kinetix's
+> RefMvCell.mf packs `refmv_ctx<<4 | zeromv_ctx<<3 | newmv_ctx`, so
+> `mf >> 1` = `zeromv<<2 | newmv` plus ALL the refmv bits — every match
+> pollutes have_newmv with the neighbor's refmv_ctx value. dav1d's
+> equivalent scan masks properly. Downstream: num_new = have_newmv feeds
+> the compound ctx switch `(close_matches) { 0: (min(total,2), total>0);
+> 1: ((total*3).min(4), 3-min(num_new,1)); _: (5, 5-min(num_new,1)) }` —
+> for oh2's (0,14) strip (close=1: above-only match), the polluted
+> num_new forces c_newmv = 2, ctx = 3 — which coincidentally equals
+> dav1d's ctx... yet Kinetix PRINTED ctx=4 for this block, meaning its
+> close_matches must actually be ≥ 2 or 0 (have_row/have_col ≠ the
+> expected 1/0) — i.e. there is a SECOND divergence in the match
+> counting itself (the above-scan for the 32x8 strip should find the
+> (0,12) DIFFWTD strip's pair once → have_row=1). NEXT SESSION: run
+> KINETIX_AV1_DBG_MVSCAN="14:0" (the existing MVSCAN hook) on oh2 to
+> dump have_row/have_col/num_new/close_matches for exactly this block,
+> fix the `& 1` mask, and reconcile close_matches; then re-check the
+> ctx (target: dav1d's 3) and the compintermode symbol (target: 1).
+> Everything downstream (oh2's JNT strip, then oh1/oh3/oh5) follows.
