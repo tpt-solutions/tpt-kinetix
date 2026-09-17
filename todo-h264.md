@@ -406,6 +406,35 @@ does that for a zero-mv block, then a -2-adjusted odd-ref block, is the
 answer. ~30 minutes with the existing harness. Everything else (parse,
 motion, modes, luma MC) remains proven JM-exact.
 
+## SESSION #32bx ADDENDUM 8 — the chroma error is the RESIDUAL, not the MC
+position. Decisive zero-instrumentation test on MB (0,6) block 0 (mv=(0,0),
+ref_idx=0 -> co-located, same parity): with pred := reference-frame-0 chroma
+at the co-located field rows (frame chroma rows 48,50,52,54 x cols 0-3) —
+- our output − pred = [2,2,2,2] on every row (a flat DC-only residual);
+- reference-frame-1 − pred = [2,2,-4,-1]/[2,2,0,0]/... (DC + real AC).
+So the MC POSITION, plane parity, and pred sampling are CORRECT (pred
+reproduces reference-frame-0 exactly; no geometry offset!). The bug: **the
+chroma AC coefficients of field MBs are not reaching the reconstructed
+pixels** — our residual applies only the DC while the encoder's block had
+small AC terms. The coefficients themselves are parse-exact (bins proven
+identical), so the loss is in `dequant_idct_4x4_scan` + FIELD_SCAN_4X4 as
+applied to the chroma AC blocks of field MBs (or in our block-index
+assignment of the parsed AC groups).
+
+NEXT SESSION (precise): find JM's per-block chroma inverse-transform caller
+for field MBs (which joff/ioff each cof block (0,0)/(4,0)/(0,4)/(4,4) maps
+to — note `Inv_Residual_trans_Chroma` reads only cof rows 0..3 for field
+MBs, height = mb_cr_size_y = 4, so cof block-row 1 goes somewhere specific),
+then compare our `dequant_idct_4x4_scan(..., FIELD_SCAN_4X4)` placement.
+Candidate bugs: (a) FIELD_SCAN_4X4 vs the correct chroma field scan table
+(the luma field scan may not be the chroma field scan!); (b) the DC
+injection position for field chroma (Some(dc_out[block]) replaces cof[0][0]
+— verify against JM's cof block-row mapping); (c) our block-index ->
+luma-quadrant mapping for the mv cells. Also worth reading: JM
+`itrans4x4` callers in mb_prediction.c's chroma path.
+
+Regression state: 269 lib tests green; tree clean at `a4cc38e` + this note.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
