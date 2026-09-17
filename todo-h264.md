@@ -529,6 +529,58 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bu (same continuation) — the mvd-CONTEXT bug class confirmed and
+localized; JM `read_mvd_CABAC_mbaff` found; amvd aff_cell port attempted,
+810/10456-entry progress, REVERTED as a net regression (parse desync). No
+source changes committed this session; findings + oracle below are the
+handoff.
+
+Located JM's mvd reader: `cabac.c` `read_MVD_CABAC` (non-MBAFF, line ~355)
+and **`read_mvd_CABAC_mbaff` (line ~420)** — the latter is the normative
+derivation for these streams: L = `get4x4NeighbourBase(i-1, j)`, U =
+`get4x4NeighbourBase(i, j-1)` (the partition TOP-left-based lookups through
+the full `getAffNeighbour` field-aware resolution), `a = iabs(mvd[L])` with
+the F2F conversion applied per candidate (curr frame & nbr field -> `*=2`;
+curr field & nbr frame -> `/=2`; y-component only), same for b, sum, and the
+`<3 / >32 / else` bucket split — identical to our `map_f2f_y` + bucket code.
+**JM's `i`/`j` (subblock_x/y) are PIXEL units** (`i in {0,4,8,12}`), and the
+`&15 >> 2` masking inside `getAffNeighbour`/`get4x4NeighbourBase` converts
+them back to block cells — our first port passed BLOCK rows and regressed
+immediately; passing `by*4` pixels fixed the bulk.
+
+An `NeighbourCtx::aff_cell` transcription (the getAffNeighbour branch tree
+over the parse-time grids) plus the `amvd_sum` rewiring reached
+**810/10456 POC-1 amvd entries matching** (pairs 0-30, field pairs included —
+18x the pre-pixel-fix state) before the next divergence: mb (3,3) = pair 31
+bottom, blk (0,0), k=0: JM amvd=2 vs ours 3 — one contributing cell value
+still differs (the U read for a field-bottom current = `mbAddrB+1` =
+pair-above BOTTOM half, blk row 3; the value there depends on pair-above's
+own decode). Because the mismatching bucket (`<3` vs `else`) decodes
+different EGk values from the same bins, the incomplete state DESYNCS the
+parse (`ref_idx overflow`) — worse than not touching it — so the ctx.rs
+change was REVERTED (HEAD state: 269 lib tests, ITU 27/0, ndiff 188 236
+retained).
+
+**Oracle additions (local JM tree)**: `KDBGAMVD` env print in
+`read_mvd_CABAC_mbaff` (mb/i/j/list/k/a(total)/b/amvd per mvd read; note its
+`a` is cumulative, `b` separate). Kinetix side: a matching `KINETIX_AMVD`
+print existed transiently in `amvd_sum` (removed with the revert; re-add
+from this note). Dumps: `kdbgamvd.log` (JM) / `kx_amvd*.txt` (ours) in
+/tmp/jmrun; the python diff normalizes JM decode-order mb -> (px,py) and
+JM's pixel-unit i/j -> blocks.
+
+**For next session**: (1) re-apply the aff_cell port (this note + the
+#32bs/bt oracle prints make it a ~1-hour redo) with the PIXEL-unit fix
+included; (2) hunt the entry-810 cell: dump g46[3]/g92-x cells both sides at
+pair 31 (the stored mvd VALUES may already diverge via an earlier context —
+cross-check the KDBGMV final MVs, which matched for pair row 0, against the
+per-block mvds); (3) the `get4x4NeighbourBase` "Base" variant keeps
+`pos_x/pos_y` in PIXELS (unlike `get4x4Neighbour`) — the read indexes
+`mvd[list][pix->y >> 2][pix->x >> 2]`, i.e. the &15>>2 masking already used
+in the transcription; (4) expect the MV mismatch count (currently 3 603
+partitions / 796 MBs) to collapse once amvd matches, closing the
+KINETIX_MBAFF_FIELD_MC gate flip.
+
 ## SESSION #32bt (same continuation) — getAffNeighbour transcription LANDED:
 554/1350 POC-1 MBs now carry fully JM-exact MVs; POC-1 pre-deblock luma error
 -32% (278 492 -> 188 236). Commit `716e84f`.
