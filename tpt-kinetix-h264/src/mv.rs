@@ -289,11 +289,15 @@ fn resolve_aff_neighbour(
 
     let (addr, y_m): (usize, isize) = if x_n < 0 {
         if y_n < 0 {
-            // D (above-left)
+            // D (above-left). JM's frame-top branch resolves mbAddrD + 1: the
+            // sample sits at yM = -1, i.e. the BOTTOM row of the above-left
+            // pair's bottom half -- taking the top half here shifts the D
+            // fallback up one half-pair (CANLMA2_Sony_C POC 1, pair 539 top's
+            // UR candidate).
             if !cur_field {
                 if top {
                     let a = pair_avail(d_top)?;
-                    (a, y_n)
+                    (a + mb_width, y_n)
                 } else {
                     // frame bottom: mbAddrA (+1 when the left pair is field)
                     let a = pair_avail(a_top)?;

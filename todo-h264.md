@@ -135,6 +135,51 @@ builds intact; dumps in `/tmp/jmrun`: `kdbgff.log`, `kdbgamvd3.log`,
 `kx_ff_head.txt`).
 
 """
+## SESSION #32bx ADDENDUM (same continuation) — third fix (frame-top D =
+mbAddrD + 1): MVP candidate comparator now 5396/5396 EXACT vs JM; the "34
+intra-in-P flag mismatches" above were an ARTIFACT; the CABAC bin streams are
+PROVEN fully identical, so the remaining CANLMA2 POC-1 error is purely
+downstream of the parse.
+
+Bin-level proof: JM's `KDBGBIN` trace prints even the `check_next_mb`
+lookahead reads (they run on a copied engine but still hit the print inside
+`biari_decode_symbol`) — filtering lines between the `SPEC_ON`/`SPEC_OFF`
+markers leaves JM's 260 490 REAL POC-1 bins, and the comparison against
+`KINETIX_BINTRACE` shows kind, decoded bit AND post-renormalisation range
+IDENTICAL for all 260 490 bins (ours has 1 extra trailing line from final
+slice-end handling; JM's terminate/bit=1 print also emits the pre-subtraction
+range — both cosmetic). **The P-slice CABAC parse for CANLMA2 POC 1 is
+bit-, value- and state-exact vs JM, end to end.** The earlier "flag VALUES
+diverge at 34 intra-in-P MBs" claim was a comparator artifact: intra MBs
+produce no `KDBGMV` (MC) lines in POC 1, so a first-occurrence scrape of the
+whole-stream `kdbgmv.log` silently compared our POC-1 flags against JM's
+POC-2+ flags. The `(mb, a, b, inc)` flag-context stream (632 reads) and the
+amvd stream (10 456 entries) remain exactly aligned as reported above.
+
+**Bug 3 (FIXED, `mv.rs` `resolve_aff_neighbour`): the frame-top D (above-left)
+branch resolved to `d_top` itself; JM's frame-top branch resolves
+`mbAddrD + 1`** — the D sample sits at yM = -1, the bottom row of the
+above-left pair's BOTTOM half, so taking the pair's top half shifted the D
+fallback up one half-pair (CANLMA2 POC 1, pair 539 top's UR candidate:
+JM=(987,3,3) vs OUR=(986,3,3)). Fix: `(a + mb_width, y_n)`.
+
+**Result: `/tmp/mvp_cmp2.py` reports 5396/5396 partitions with ALL THREE
+candidate resolutions (L/U/effective-UR) matching JM exactly.** POC-1
+pre-deblock Y ndiff (gate ON) 6 097 -> 5 444; U 19 599 -> 19 567; V 18 728 ->
+18 702. 269 lib tests, ITU conformance (all hard-checked clips), clippy
+`-D warnings`, fmt --check all green.
+
+**Next session (recon, not parse — the parse is done):** with candidates AND
+mvds AND field flags all JM-exact, the remaining 5 444-sample error lives in
+the reconstruction/MC application: (1) the MVP-COMMIT final-MV comparison
+(KDBGMV vs `MVP-COMMIT`/`KDBGMV` values) — verify our committed MVs now equal
+JM's per block (fix_mv_mbaff y-scaling on cross-field neighbours, §8.4.1.3.2);
+(2) chroma `chroma_vector_adjustment` (§8.4.1.4) opposite-parity vertical
+offset; (3) the field ref-list (`field_planes_l0` index-by-field-parity, the
+#32bl recon bug list items 3/5); (4) field inverse scans for inter residuals
+(#32bl item 1). The `dbg_itu_pframe` diffmap + `KDBGMV` vs `MVP-COMMIT` per-MB
+diff localizes the first block whose MC output diverges.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the

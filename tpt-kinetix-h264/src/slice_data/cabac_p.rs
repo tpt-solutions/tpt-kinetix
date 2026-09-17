@@ -516,7 +516,25 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
                 let above_pair_top = (pair_top_y >= 2)
                     .then(|| (pair_top_y - 2) * mb_cols as usize + mb_x as usize)
                     .filter(|&idx| slice_id_grid.get(idx).copied() == Some(slice_id));
-                crate::mbaff::field_flag_inference(left_pair_top, above_pair_top, &field_flags)
+                {
+                    let r = crate::mbaff::field_flag_inference(
+                        left_pair_top,
+                        above_pair_top,
+                        &field_flags,
+                    );
+                    if std::env::var("KINETIX_FFLAG").is_ok() {
+                        eprintln!(
+                            "KXINF mb={} left={:?} lval={:?} above={:?} aval={:?} -> {}",
+                            mb_idx,
+                            left_pair_top,
+                            left_pair_top.and_then(|i| field_flags.get(i).copied().flatten()),
+                            above_pair_top,
+                            above_pair_top.and_then(|i| field_flags.get(i).copied().flatten()),
+                            r,
+                        );
+                    }
+                    r
+                }
             } else {
                 field_flags[grid_idx].unwrap_or(false)
             }
