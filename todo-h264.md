@@ -376,6 +376,36 @@ diffmap), so only chroma needs this restructure.
 Regression state at `0b33c7d`: 269 lib tests, ITU conformance (hard-checked
 clips bit-exact), clippy, fmt green; POC-1 = Y 370 / U 10604 / V 10081.
 
+## SESSION #32bx ADDENDUM 7 — the last open question, precisely scoped:
+the field-chroma vertical UNIT. Verified this round from JM
+`get_block_chroma` (mc_prediction.c:1076): the chroma position is
+`vec1_y_cr >> shiftpel_y` (eighth-pel, `& 7` fraction) with
+`vec1_y_cr = (block_y_aff + j) * mv_mul + mv_y + adjustment` — i.e. JM
+passes the FIELD LUMA quarter-pel number directly as CHROMA eighth-pels
+(base row = `block_y_aff`-derived, the pair's band). Our current code passes
+`mv_y_cr` into `interpolate_chroma` the same way BUT our base `fy0` is the
+FIELD-PLANE row (`(mb_y>>1)*8`) whose scale relationship to the frame-chroma
+band is exactly what needs settling, together with the output write
+(currently `2*(fy0+row)+bottom` — verified correct coverage of the pair's
+16-row chroma band, contra addendum 6's "16-row spill" analysis: each half
+writes 8 frame chroma rows at stride 2, which IS the correct 8-row
+footprint).
+
+So the addendum-6 "16-row spill" conclusion is RETRACTED — the write
+footprint is right; the error must be in the SAMPLE READ position: for a
+field MB the chroma MC should read the parity plane at rows derived from the
+FRAME chroma band (band chroma rows of the same parity), and the two
+candidate fixes are (a) `fy0_read = band_row_base` with the plane's stride-2
+deinterleave already applied (planes() gives parity rows; band frame row r
+` = parity plane row r` — the current code may already be right here), or
+(b) an mv vertical unit difference (field-qp to chroma-eighth = x1 or x2).
+RESOLVE EMPIRICALLY next session: A/B the three candidate (base, unit)
+combinations on chroma MB (0,6) — a zero-mv r0 block must reproduce the
+reference's frame chroma rows 48,50,52,54 exactly; whichever combination
+does that for a zero-mv block, then a -2-adjusted odd-ref block, is the
+answer. ~30 minutes with the existing harness. Everything else (parse,
+motion, modes, luma MC) remains proven JM-exact.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
