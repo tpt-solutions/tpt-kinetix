@@ -1401,8 +1401,37 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
         }
     }
 
-    for mb_y in 0..mb_rows {
-        for mb_x in 0..mb_cols {
+    // Iterate in MBAFF pair-scan order (§6.4.2: pair 0 top/bottom, pair 1
+    // top/bottom, ...) so that a macroblock's intra-prediction samples are
+    // always fetched from pairs that are already reconstructed. Plain raster
+    // order breaks this for mixed field/frame pairs: the bottom half of a
+    // field-coded pair owns the ODD frame rows of the region, and a
+    // frame-coded MB in the next pair column reads those rows as its left
+    // edge -- under raster order the field pair's bottom half is only
+    // reconstructed one full MB row later, so those samples read as zeros
+    // (CANLMA2_Sony_C POC 1, MB (17,4) reading pair 106's odd rows).
+    // Non-MBAFF pictures keep plain raster, which is identical to pair order.
+    let recon_order: Vec<(u32, u32)> = if mb_aff {
+        let pairs = (mb_cols * mb_rows / 2) as usize;
+        let mut v = Vec::with_capacity(pairs * 2);
+        for p in 0..pairs {
+            let px = (p % mb_cols as usize) as u32;
+            let py_pair = (p / mb_cols as usize) as u32;
+            v.push((px, 2 * py_pair));
+            v.push((px, 2 * py_pair + 1));
+        }
+        v
+    } else {
+        let mut v = Vec::with_capacity((mb_cols * mb_rows) as usize);
+        for mb_y in 0..mb_rows {
+            for mb_x in 0..mb_cols {
+                v.push((mb_x, mb_y));
+            }
+        }
+        v
+    };
+    for (mb_x, mb_y) in recon_order.iter().copied() {
+        {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
             if mb.motion.is_some() || mb.skip {
@@ -2113,13 +2142,22 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
             let parity = (bottom as usize) ^ (ref_idx & 1);
 
             let mut pred = [0u8; 16];
+            // §8.4.1.4 / JM `set_chroma_vector`: a field-coded MB predicting
+            // from the OPPOSITE-parity field shifts the CHROMA vertical
+            // vector by +/-2 luma quarter-pels (top MB -2, bottom MB +2);
+            // same-parity references are unadjusted. Luma is never adjusted.
+            let mv_y_cr = if ref_idx & 1 == 1 {
+                cell.mv[1] + if bottom { 2 } else { -2 }
+            } else {
+                cell.mv[1]
+            };
             if let Some(ref_entry) = field_planes.get(frame_i).or_else(|| field_planes.last()) {
                 let (_, cb_ref, cr_ref) = &ref_entry[parity];
                 let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
                 let h = plane_ref.len() / stride.max(1);
                 crate::motion_comp::interpolate_chroma(
                     &mut pred, 4, plane_ref, stride, stride, h, x0 as i32, fy0 as i32, cell.mv[0],
-                    cell.mv[1], 4, 4,
+                    mv_y_cr, 4, 4,
                 );
             }
             let pred = combine_weighted(
