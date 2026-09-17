@@ -345,6 +345,47 @@ fn amvd_sum(
         }
     };
 
+    if std::env::var("KINETIX_AMVD").is_ok() {
+        let decode_addr =
+            2 * ((mb_y as usize / 2) * mb_cols as usize + mb_x as usize) + (mb_y as usize & 1);
+        let lcell = if bx > 0 {
+            format!("[{} {}]", decode_addr, by * 4 + (bx - 1))
+        } else {
+            match if by < 2 {
+                left_top_idx
+            } else {
+                left_bottom_idx.or(left_top_idx)
+            } {
+                Some(li) if inter_grid[li].present => {
+                    format!("[{} {}]", li, crate::mbaff::LEFT_BLOCK_LUMA_NNZ[opt][by])
+                }
+                _ => "[-1 -1 -1]".to_string(),
+            }
+        };
+        let ucell = if by > 0 {
+            format!("[{} {}]", decode_addr, (by - 1) * 4 + bx)
+        } else {
+            match top_idx {
+                Some(ti) if inter_grid[ti].present => format!("[{} {}]", ti, 3 * 4 + bx),
+                _ => "[-1 -1 -1]".to_string(),
+            }
+        };
+        eprintln!(
+            "KXAMVD mb={} i={} j={} list={} k={} aL={} bU={} amvd={} Lcell={} Ucell={} curfield={}",
+            decode_addr,
+            xp,
+            yp,
+            list,
+            comp,
+            left_val,
+            top_val,
+            left_val + top_val,
+            lcell,
+            ucell,
+            cur_field as u8,
+        );
+    }
+
     left_val + top_val
 }
 

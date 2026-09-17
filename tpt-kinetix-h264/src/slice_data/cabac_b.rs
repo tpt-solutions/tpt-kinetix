@@ -740,7 +740,18 @@ pub fn parse_b_slice_cabac_range<T: crate::trace::DecodeTracer>(
                     field_flags[bot_grid] = Some(cur_pair_field);
                 }
             } else {
-                field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
+                let top_grid = grid_idx - mb_cols as usize;
+                field_flags[top_grid] = Some(cur_pair_field);
+                // Mirror of the cabac_p.rs correction: the skipped top half's
+                // stored Macroblock still carries the §7.4.4 inferred field;
+                // the MVP / field-MC paths read `Macroblock::mb_field_flag`,
+                // so overwrite it with the pair's real flag like JM's
+                // `mb_data[top]` speculative store.
+                if slice_id_grid.get(top_grid).copied() == Some(slice_id)
+                    && macroblocks[top_grid].skip
+                {
+                    macroblocks[top_grid].mb_field_flag = cur_pair_field;
+                }
             }
         }
         if is_skip {

@@ -615,6 +615,17 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             } else {
                 false
             };
+            if std::env::var("KINETIX_FFLAG").is_ok() {
+                eprintln!(
+                    "KXFF mb={} a={} b={} inc={} field_pending_top={}",
+                    2 * ((mb_y as usize / 2) * mb_cols as usize + mb_x as usize)
+                        + (mb_y as usize & 1),
+                    left_field as u8,
+                    top_field as u8,
+                    left_field as u8 + top_field as u8,
+                    top_of_pair,
+                );
+            }
             cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
             // Record the pair's real flag on BOTH halves. When this read
             // happens at the bottom (pair whose top was skipped), the top
@@ -631,7 +642,20 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
                     field_flags[bot_grid] = Some(cur_pair_field);
                 }
             } else {
-                field_flags[grid_idx - mb_cols as usize] = Some(cur_pair_field);
+                let top_grid = grid_idx - mb_cols as usize;
+                field_flags[top_grid] = Some(cur_pair_field);
+                // The top half's already-stored MACROBLOCK record still holds
+                // the §7.4.4 inferred value from its skip path; the motion
+                // vector predictor and the field-MC reconstruction read
+                // `Macroblock::mb_field_flag` (not `field_flags`), so it must
+                // be overwritten here exactly like JM's `mb_data[top]`
+                // (CANLMA2_Sony_C POC 1 pair 71: the predictor saw the stale
+                // inferred `1` where JM has the real flag `0`).
+                if slice_id_grid.get(top_grid).copied() == Some(slice_id)
+                    && macroblocks[top_grid].skip
+                {
+                    macroblocks[top_grid].mb_field_flag = cur_pair_field;
+                }
             }
         }
         let (r1, o1) = dec.debug_state();
