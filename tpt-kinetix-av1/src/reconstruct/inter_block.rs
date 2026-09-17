@@ -955,6 +955,17 @@ impl<'a> TileDecodeState<'a> {
                 [NEWMV, NEWMV],
             ];
             let im = IM[comp_mode.min(7)];
+            // dav1d `splat_tworef_mv`: mf bit0 = GLOBALMV_GLOBALMV, bit1 =
+            // NEWMV-containing modes (mask `!!((1 << mode) & 0xbc) * 2`; the
+            // GLOBAL_NEWMV-shaped row 1 is excluded along with the
+            // NEAREST/NEAR-only rows 0-1).
+            new_mf = if comp_mode == 6 {
+                1
+            } else if (1 << comp_mode) & 0xbc != 0 {
+                2
+            } else {
+                0
+            };
             // comp_mode 6 = GLOBAL_GLOBALMV — the only compound mode with
             // §7.14.4 modeType 0.
             lf_mode_type = u8::from(comp_mode != 6);

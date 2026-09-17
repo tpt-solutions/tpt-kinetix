@@ -1282,7 +1282,7 @@ impl<'a> TileDecodeState<'a> {
                     if cand.refs[n] == want_refs[0] {
                         let mv = [cand.mv[n], Mv::default()];
                         *have_match = 1;
-                        *have_newmv |= (cand.mf >> 1) as i32;
+                        *have_newmv |= i32::from((cand.mf >> 1) & 1);
                         for e in stack.iter_mut() {
                             if e.0[0] == mv[0] {
                                 e.1 += weight;
@@ -1298,7 +1298,7 @@ impl<'a> TileDecodeState<'a> {
             } else if cand.refs == want_refs {
                 let mv = [cand.mv[0], cand.mv[1]];
                 *have_match = 1;
-                *have_newmv |= (cand.mf >> 1) as i32;
+                *have_newmv |= i32::from((cand.mf >> 1) & 1);
                 for e in stack.iter_mut() {
                     if e.0 == mv {
                         e.1 += weight;
@@ -1450,23 +1450,27 @@ impl<'a> TileDecodeState<'a> {
         }
 
         let close_matches = have_row + have_col;
+        // dav1d: the NEAREST-scan match flags (0..2), snapshotted before the
+        // secondary scans; drives the ctx switch, with ref_match_count inside.
         let nearest_cnt = stack.len();
         let num_new = have_newmv;
         for e in stack.iter_mut().take(nearest_cnt) {
             e.1 += REF_CAT_LEVEL;
         }
 
+        // dav1d feeds this probe a dummy newmv flag (refmvs.c:468-471), so it
+        // counts toward ref_match_count but not toward have_newmv.
+        let mut dummy = 0i32;
         if n_rows != -1 || n_cols != -1 {
             add(
                 &mut stack,
-                &mut have_newmv,
+                &mut dummy,
                 &mut have_row,
                 (by4 - 1, bx4 - 1),
                 cell(by4 - 1, bx4 - 1),
                 4,
             );
         }
-        let mut dummy = 0i32;
         let mut n_rows_run = n_rows.max(0);
         let mut n_cols_run = n_cols.max(0);
         for n in 2..=3i32 {
@@ -1817,16 +1821,18 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        // §7.10.2.14 context derivation.
+        // §7.10.2.14 context derivation (`close_matches` is dav1d's
+        // `nearest_match`, snapshotted before the top-left probe; the probe
+        // and the secondary scans feed `total_matches` =
+        // dav1d's `ref_match_count`).
         let (newmv_ctx, refmv_ctx) = match close_matches {
-            0 => (total_matches.min(1), total_matches),
-            1 => (3 - num_new.min(1), 2 + total_matches),
+            0 => (i32::from(total_matches > 0), total_matches.min(2)),
+            1 => (3 - num_new.min(1), (total_matches * 3).min(4)),
             _ => (5 - num_new.min(1), 5),
         };
-        // Compound `comp_inter_mode` context (dav1d `refmvs.c`, isCompound
-        // branch): built from the dav1d compound `refmv_ctx`/`newmv_ctx`
-        // (which differ from the single-ref formulas above) then folded via
-        // `refmv_ctx >> 1`.
+        // Compound `comp_inter_mode` context (dav1d `refmvs.c`): same
+        // `refmv_ctx`/`newmv_ctx` switch as the single-ref path (refmvs.c has
+        // only one), then folded via `refmv_ctx >> 1`.
         let (c_refmv, c_newmv) = match close_matches {
             0 => (total_matches.min(2), i32::from(total_matches > 0)),
             1 => ((total_matches * 3).min(4), 3 - num_new.min(1)),
