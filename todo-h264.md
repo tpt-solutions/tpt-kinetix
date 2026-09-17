@@ -337,6 +337,45 @@ contexts, amvd, MVP candidates, committed MVs, intra modes). Remaining:
 (28-30,14)/(29-30,15)) and the two chroma classes above; then the
 KINETIX_MBAFF_FIELD_MC gate flip and the CANLMA2_Sony_C closure.
 
+## SESSION #32bx ADDENDUM 6 (same continuation) — the structural chroma bug
+FOUND: `reconstruct_mbaff_inter_chroma` treats a field MB's chroma as 8 cols
+x 8 FIELD rows and writes them to frame chroma rows `2*(fy0+row)+bottom` --
+i.e. 16 FRAME chroma rows per MB -- double the true coverage, spilling 8
+rows into the neighbouring MB row pair. JM's field chroma is 8 cols x **4**
+FIELD chroma rows, written CONTIGUOUSLY (no stride-2!) at `pix_c_y`:
+- mc_prediction.c:1421-1428: `block_size_y_cr = block_size_y >> 1`,
+  `joff_cr = joff >> 1` for field MBs (`mb_cr_size_y != MB_BLOCK_SIZE`);
+- mb_prediction.c:1252-1262: the picture write is
+  `imgUV[k][pix_c_y + i][pix_c_x + j]` for `i < mb_cr_size_y` (4 rows,
+  contiguous frame chroma rows).
+So the per-MB-half chroma field region is `fy0 = (mb_y>>1)*8 + parity*4`,
+4 rows tall (the parity offsets the two MB halves' chroma inside the pair's
+8-row field chroma band), luma MC quarter-pel vectors as today, residual
+blocks 4 wide x 2 field rows each (the 4 coefficient blocks of the 2x2
+frame grid squash to 8x4), and the frame write is CONTIGUOUS rows
+`pix_c_y .. pix_c_y+3` with `pix_c_y = (mb_y>>1)*8 + parity*4`.
+
+THE FIX (next session, ~1-2h with the A/B harness):
+1. In `reconstruct_mbaff_inter_chroma`: iterate the 4 chroma coefficient
+   blocks with `bx = (block%2)*4`, `by_f = (block/2)*2` (2 field rows);
+2. MC per block: `interpolate_chroma` 4 wide x 2 tall at
+   `(x0+bx, fy0 + by_f)` where `fy0 = (mb_y>>1)*8 + parity*4`, with the
+   existing `mv_y_cr` parity adjustment;
+3. Output rows: CONTIGUOUS frame chroma rows `pix_c_y + by_f + row` where
+   `pix_c_y = (mb_y>>1)*8 + parity*4` (no `2*(...)+bottom`);
+4. Verify the ±2 chroma parity adjustment still lands identically after the
+   geometry change (it composes into the mv before halving, unchanged);
+5. Expect chroma ndiff to collapse; then re-check the 63 pure-frame chroma
+   MBs (their region was being clobbered by the neighbouring field pairs'
+   spilled writes -- likely fixed by the same change).
+
+Also confirm the LUMA field path's residual blocks are 4x4 FIELD pixels
+(they are: 16 blocks x 4 field rows, verified exact vs KDBGMV/luma
+diffmap), so only chroma needs this restructure.
+
+Regression state at `0b33c7d`: 269 lib tests, ITU conformance (hard-checked
+clips bit-exact), clippy, fmt green; POC-1 = Y 370 / U 10604 / V 10081.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
