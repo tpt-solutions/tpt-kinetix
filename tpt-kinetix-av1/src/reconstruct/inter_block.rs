@@ -2291,6 +2291,15 @@ impl<'a> TileDecodeState<'a> {
         let ref1_none = self.ref_slots.slots[slot1].is_none();
         let use_compound = ref_names[1] != NONE_FRAME && !ref1_none;
 
+        if plane != 0 && std::env::var("KINETIX_DBG_MCCHK").is_ok() && (24..=52).contains(&px_y) {
+            eprintln!(
+                "MCCHK oh={} pl={} x={} y={} w={} h={} mv0=({},{}) mv1=({},{}) f=({},{}) comp={} ref0={} mi=({},{})",
+                self.cur_order_hint,
+                plane, px_x, px_y, bw, bh, mvs[0].row, mvs[0].col, mvs[1].row, mvs[1].col,
+                filters[0], filters[1], use_compound as u8, ref_names[0], mi_col, mi_row
+            );
+        }
+
         // Single reference: motion-compensate into a local temp (so we don't hold
         // both the reference slice and the output plane borrow at once), then blit.
         if !use_compound {
