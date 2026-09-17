@@ -7164,3 +7164,37 @@ cosmetic for output but worth one look alongside (1)).
 > KINETIX_DBG_OBMCD print in dav1d's obmc(): neighbor mi, mv, overlap
 > w/h, per-row masks), align per-sample, fix, then 128x96/96x64 should
 > go fully bit-exact.
+
+> **2026-09-18 (cont'd 5) — MM-read counts don't reconcile; Kinetix
+> appears to decode the show_existing replay as a real frame.** Per-frame
+> motion-mode reads (dav1d KINETIX_DBG_MM, poc-tagged, 62 total: poc6=36,
+> poc3=8, poc7=18, poc5=0) vs Kinetix (DBG b0 motion_mode, 65 total:
+> oh6=33, oh3=8, oh5=3, replay-slot=3, oh7=18). Key facts:
+> 1. Kinetix processes 10 frame events vs dav1d's 9 — the show_existing
+>    replay performs 3 REAL motion-mode symbol reads (at mi
+>    (0,16),(16,0),(16,16)) in Kinetix where dav1d replays without
+>    decoding. A replay must not read any symbols.
+> 2. Kinetix's replay is processed at event position 5 (kfr_05 gap,
+>    between oh2 and oh4) while dav1d's is position 8 (between oh5 and
+>    oh7) — either the OBU order differs between decoders (packet/TU
+>    splitting in the harness?) or Kinetix defers/misplaces the replay.
+> 3. oh6: Kinetix reads 33 MM symbols vs dav1d's 36; oh5: 3 vs 0.
+>    has_overlappable_candidates scans ALL 4x4 boundary-adjacent
+>    positions (is_inter_above[c], c in mi_col..mi_col+bw) while the
+>    spec/dav1d gate is findoddzero at ODD offsets only
+>    (a->intra[bx4+1], [bx4+3], ... 8x8 granularity, boundary 8x8
+>    skipped) — Kinetix's gate is more permissive in shape, yet oh6 has
+>    FEWER reads, so position-level gate fixes alone won't reconcile;
+>    the frame-event/shuffle issue (items 1-2) must be fixed FIRST.
+> The luma-exact-desync paradox (entropy divergence with pixel-exact
+> luma) remains: until item 1-2 are fixed, per-block entropy alignment
+> on this clip is meaningless — the dumps may pair different logical
+> frames. Suggested order for the next session: (a) dump the harness's
+> fed packets per frame (dbg_av1_chroma already feeds TU packets — log
+> obu types per packet); (b) check decoder.rs show_existing handling
+> (does it decode? which OBU triggers the extra event?); (c) fix the
+> replay to not decode symbols; (d) re-align MM reads (expect 36/8/0/18
+> exactly); (e) only then re-examine chroma pixels. NOTE: dav1d MM hook
+> gate was widened (decode.c, prints all poc); KINETIX_DBG_OBMCD added
+> (dav1d obmc() per-call print); Kinetix OBMC deep trace retuned to
+> mi(4,20) plane 1 with before-values (all committed).

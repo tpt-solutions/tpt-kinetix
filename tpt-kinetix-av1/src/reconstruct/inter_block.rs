@@ -2038,9 +2038,11 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok() && plane == 0 && mi_row >= 16;
+        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok()
+            && plane == 1
+            && (16..=22).contains(&mi_row);
         // Detailed per-sample trace for the specific divergent block.
-        let dbg_obmc_deep = dbg_obmc && mi_col == 4 && mi_row == 18;
+        let dbg_obmc_deep = dbg_obmc && mi_col == 4 && mi_row == 20;
         if dbg_obmc {
             eprintln!(
                 "OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}",
@@ -2095,6 +2097,7 @@ impl<'a> TileDecodeState<'a> {
                 _ => &mut self.y_plane,
             };
             let mut any_diff = false;
+            let mut before: Vec<u8> = Vec::new();
             for i in 0..pred_h {
                 let sy = py + i;
                 if sy >= ph {
@@ -2110,6 +2113,9 @@ impl<'a> TileDecodeState<'a> {
                     let o = obmc[i * pred_w + j] as i32;
                     if dbg_obmc && cur != o {
                         any_diff = true;
+                    }
+                    if dbg_obmc_deep {
+                        before.push(dst[sy * pstride + sx]);
                     }
                     // §7.11.3.9: mask weights the *neighbour's* prediction; (64-m) weights current.
                     dst[sy * pstride + sx] =
@@ -2131,6 +2137,8 @@ impl<'a> TileDecodeState<'a> {
                         break;
                     }
                     let nbr_row: Vec<u8> = (0..pred_w).map(|j| obmc[i * pred_w + j]).collect();
+                    let bef_row: Vec<u8> =
+                        (0..pred_w).map(|j| before.get(i * pred_w + j).copied().unwrap_or(0)).collect();
                     let dst_row: Vec<u8> = (0..pred_w)
                         .map(|j| {
                             let sx = px + j;
@@ -2141,7 +2149,7 @@ impl<'a> TileDecodeState<'a> {
                             }
                         })
                         .collect();
-                    eprintln!("    row={sy} nbr={nbr_row:?} dst_after={dst_row:?}");
+                    eprintln!("    row={sy} nbr={nbr_row:?} before={bef_row:?} dst_after={dst_row:?}");
                 }
             }
         }
