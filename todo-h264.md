@@ -529,6 +529,41 @@ confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
+## SESSION #32bw addendum (same continuation) — the entry-810 root localized
+one more level: the divergence starts at a PAIR FIELD-FLAG read around
+pairs 45-48 (pair row 1), not at the mvd cells themselves.
+
+Evidence chain (all POC 1): JM's KDBGFF (flag-context print, whole-stream log
+`kdbgff.log`, no POC markers — the first 675 flag reads are POC0's) shows for
+POC 1: pairs 46/47/48 flag contexts a=0,b=0 (all FRAME; pair 48's read has
+a=mb_data[pair47]=0), while **our store carries pair 46 top (g91) as
+field=true with all-16-blocks (0,-2)r1 cells** — a field-coded 16x16 ref-1 MB
+where JM has a frame-coded MB. Pair 45 (g90/g135) is frame/skip-like in both.
+So the first flag divergence is pair 46 (or its engine state): same nominal
+context (a=0,b=0 -> ctx 70+0) yet different flag values implies the ENGINE
+already diverged earlier in a way amvd entries 0..809 don't capture — most
+likely a REF_IDX read difference (ref_idx bins don't feed amvd): a field-MB
+reads ref_idx where a frame-MB doesn't, or vice versa, and the ref_idx
+contexts (`ref_idx_gt0_neighbors`) read neighbour cells through their own
+mapping that may have the same frame/field-addressing gap as amvd had.
+
+Data for the next session (all captured, no re-run needed):
+- JM: `kdbgamvd3.log` (KDBGAMVD now prints Lcell/Ucell as [mb_addr x y] +
+  curfield per mvd read), `kdbgmvp.log` (KDBGMVP candidate resolutions),
+  `kdbgff.log` (KDBGFF flag contexts, whole stream).
+- Ours: `run3.log` (MVP-COMMIT + KXAMVD for the aff_cell port build).
+- Grid/decode addr map for the region: pair 45 = g90/g135 (decode 90/91),
+  pair 46 = g91/g136 (92/93), pair 47 = g92/g137 (94/95), pair 48 = g93/g138
+  (96/97). NOTE: grid idx 93 = (3,2) = pair 48 TOP (not 92 — 92 is pair 47
+  top); grid 138 = (3,3) = pair 48 bottom.
+
+Hypothesis to test first next session: dump both sides' ref_idx reads around
+pairs 45-48 (JM: `REFIDX`-equivalent trace or KDBGFF's neighbours; ours: the
+REFIDX_GT0 bintrace lines) and check whether OUR parse reads a ref_idx for a
+pair that JM reads as frame, or misses one — i.e. the flag VALUE divergence
+is a symptom and the ref_idx gating (`ref_idx_field_mismatch()`, which
+depends on the SAME cur_field flag) is where the engines part ways.
+
 ## SESSION #32bv (continuation) — amvd port redone with the pixel-unit fix;
 first 810 entries match; a SECOND divergence layer found: frame-BOTTOM MVP
 predictors diverge from JM even in pair row 0 (masked by flat content).
