@@ -26,6 +26,115 @@ bin-level CABAC / MB oracle:
 - **hierarchical / High:** HCHP1_HHI_B (localised, first_bad=1), HCHP3_HHI_A,
   FREXT01/02_JVC, FRExt2/4_Panasonic, freh7_b
 
+## SESSION #32bx — MVP pair-top anchor bug + stale pair-top field flag FIXED:
+POC-1 pre-deblock luma error -97% (188 236 -> 6 097 with
+`KINETIX_MBAFF_FIELD_MC=1`); amvd port thread (#32bu/#32bv) CLOSED as moot
+(exonerated with full-stream data); remaining gap re-pinned to a CABAC engine
+drift whose first VALUE-visible symptom is pair 107's intra-in-P
+`mb_field_decoding_flag`.
+
+Picked up the #32bw addendum handoff ("dump both sides' ref_idx reads around
+pairs 45-48"). Before touching the ref_idx hypothesis, rebuilt the
+comparability tooling — and that alone re-wrote the picture:
+
+**Tooling (all landed):** (1) `mv.rs`'s `KINETIX_MVPCAND`/`KXCAND` trace now
+tags each fetch with its candidate ROLE (`KXCAND L|U|UR|D mb=...`), also fires
+for WITHIN-MB candidates (JM's `get_neighbors` resolves those too, reading the
+current MB's own already-decoded sub-blocks), and prints an explicit
+`UNAVAIL` line when a fetch returns `None` — without the latter, POC-1 keys
+that simply were not fetched poisoned "first occurrence wins" comparisons with
+later frames' entries (the old `mvp_cmp.py`'s 7/5396 "match" was an artifact
+of exactly this, on top of it still reading the pre-revert `kx_cand.log`).
+(2) New comparator `/tmp/mvp_cmp2.py` (recreate from this note if needed):
+parses JM `kdbgmvp.log` POC 1 (window = `exit_picture: poc=0 ` .. `poc=1 `)
+into per-partition `(L, U, UR)` tuples of `[avail, decode_addr, block_x,
+block_y]` — NOTE JM's printed `pos_x/pos_y` are FRAME BLOCK coordinates
+(`mv_info` is on the 4x4 grid), so within-MB = `& 3`, NOT `>> 2`; parses our
+`KXCAND` lines first-occurrence-wins keyed `(grid, role, cur)`; folds UR as
+C-else-D on both sides to mirror `c_raw.or(d)` / `block[2] = block[3]`.
+(3) `KINETIX_AMVD=1` re-adds the per-mvd-component `KXAMVD` print in
+`amvd_sum` (`ctx.rs`, mirrors JM `KDBGAMVD`). (4) `KINETIX_FFLAG=1` adds
+`KXFF` (per-flag-read `a`/`b`/`inc`) in `cabac_p.rs`, comparable to JM's
+`KDBGFF`. (5) `tests/dbg_canlma2_mb4_bintrace.rs` now dumps ALL 1350 MBs
+(was 8..180). Addressing reminder that cost half a session of confusion:
+pair `p` has pair_row `p/45` and col `p%45`; its TOP half sits at grid
+`g = 2*(p/45)*45 + p%45` (bottom: `+45`), decode addr = `2p + parity`; the
+harness's `raster[N]` prints are GRID indices, NOT decode addresses (grid 8
+= decode 16, not 8).
+
+**Bug 1 (FIXED, `mv.rs` `resolve_aff_neighbour`): the pair-level B/C/D
+neighbour anchors were computed as `mb_idx - 2*cols`, which is only correct
+for TOP-half macroblocks.** For a bottom-half MB (odd grid row) that lands on
+the pair-above's BOTTOM half, shifting every B/C/D candidate up one
+half-pair: pair 48 bottom (grid 138, decode 97) resolved its B candidate to
+its OWN pair-mate (grid 93) where JM resolves the pair-above's bottom half
+(decode 7 = grid 48) — `JM=(7,0,3) OUR=(96,0,3)` in the comparator. Fix:
+anchor to the pair's top row (`pair_top_y = mb_y & !1`; `a_top =
+pair_top_y*cols + mb_x - 1`, `b_top = (pair_top_y-2)*cols + mb_x`,
+`c_top/d_top = b_top +/- 1`). `a_top`'s old form was already equivalent; the
+bug was in `b_top` and everything derived from it.
+
+**Bug 2 (FIXED, `cabac_p.rs` + mirrored `cabac_b.rs`): when a pair's real
+`mb_field_decoding_flag` is read at the BOTTOM (pair whose top was skipped),
+the parse corrected the `field_flags[]` context array but never the already-
+stored TOP half's `Macroblock.mb_field_flag`** — which still carried the
+§7.4.4 INFERRED value from its skip path. The MVP (`predict_slice_mvs_ex` ->
+`store.set_mb_field`) and the field-MC recon read the Macroblock record, so
+every later neighbour lookup against that pair saw field/frame inverted
+(CANLMA2 POC 1 pair 71 top: stale inferred `1`, JM has the real `0` — exactly
+the #32bq data point, now closed end-to-end). Fix: the bottom's
+`pair_field_pending` branch also overwrites
+`macroblocks[top_grid].mb_field_flag` (same-slice + skip guarded), mirroring
+JM's `check_next_mb` speculative store into `mb_data[top]`.
+
+**Measured after both fixes** (CANLMA2_Sony_C POC 1, gate ON):
+MVP candidate mismatches 1791 -> 223 (of 5396 partitions x L/U/UR), starting
+exactly at pair 107; pre-deblock luma ndiff 188 236 -> 6 097 (U 42 607 ->
+19 599, V 41 395 -> 18 728); gate OFF Y ndiff 156 260 (was 267 446
+pre-#32bt). 269 lib tests, full ITU conformance (all hard-checked
+`expect BitExact` clips, incl. the CABAC MBAFF all-frame `mbaff_ip`/
+`mbaff_ibp` cells), clippy `-D warnings`, `fmt --check` all green.
+
+**amvd port thread CLOSED (#32bu/#32bv recipe never needed).** Re-ran the
+full-stream amvd comparison with `KXAMVD` vs JM `kdbgamvd3.log`: all 10 456
+POC-1 entries align 1:1 in `(mb, i, j, list, k)` order, and only 50 differ in
+VALUE — every one of them our FFmpeg-style `|mvd|` cap at 70 vs JM's raw sums
+(e.g. ours 70 vs JM 87), which can NEVER change the `<3 / >32 / else` context
+bucket (70 > 32, and capping only moves values toward 70). So `amvd_sum`'s
+FFmpeg convention is context-equivalent to JM's `read_mvd_CABAC_mbaff` for
+every entry of this stream; the #32bu/#32bv port desyncs were almost
+certainly this session's Bug 1 (the aff_cell transcription carried the same
+`mb_idx - 2*cols` anchor) — do NOT redo the port.
+
+**Flag-read contexts fully verified.** `KXFF` vs JM `KDBGFF` (POC 1 window =
+KDBGFF lines [675, 1372) — careful: the first 675 KDBGFF lines are POC 0's):
+all 632 of our reads match JM's real reads `(mb, a, b, inc)` exactly; JM's 65
+extra lines are `check_next_mb` copy-environment lookahead prints (bottom
+address, odd `mbAddrX`), which consume no bins and print inside the
+KDBGBIN `SPEC_ON`/`SPEC_OFF` markers.
+
+**Remaining gap, pinned one level deeper:** the flag VALUES diverge at
+exactly 34 MBs, ALL of them intra-in-P (`Intra4x4` inside the P slice,
+coded), starting pair 107 top (grid 197, decode 214): same context `inc=2`
+(a=pair 106 field=1, b=pair 62 field=1) on both sides, different decoded
+value (ours 0, JM 1) — i.e. the arithmetic ENGINE state already differed at
+that read, while every flag CONTEXT input, every amvd bucket, and every
+inter-MB value still matched. The 223 residual MVP mismatches and the 6 097
+pixel diffs are downstream symptoms of this drift. NEXT SESSION: per-bin
+engine `(range, offset)` comparison from pair ~44 forward (JM `KDBGBIN`
+`N R=` lines vs `KINETIX_BINTRACE`, the #32bq/#32br method) to find the
+FIRST element whose engine state diverges without shifting the value stream;
+prime suspects are a context-VARIABLE choice difference that preserves
+values (ref_idx reads gated by `ref_idx_field_mismatch`, or the
+cbp/cbf/`coded_block_flag` contexts for intra-in-P MBs whose left/top
+neighbours are field-coded). All comparisons above are reproducible from the
+committed env-gated prints + the JM oracle in
+`C:/Users/phill/jm-oracle-fresh/jm` (KDBGFF/KDBGAMVD/KDBGMVP/KDBGMV/KDBGBIN
+builds intact; dumps in `/tmp/jmrun`: `kdbgff.log`, `kdbgamvd3.log`,
+`kdbgmvp.log`, `kdbgmv.log`, fresh `kx_cand_head.log`, `kx_amvd_head.txt`,
+`kx_ff_head.txt`).
+
+"""
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
