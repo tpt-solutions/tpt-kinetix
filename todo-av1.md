@@ -7031,3 +7031,40 @@ cosmetic for output but worth one look alongside (1)).
 > Run stage isolation (--inloopfilters) on the warp clip for frame 1 to
 > bracket which in-loop stage (if any) carries the ±1; if present
 > pre-filter, probe dav1d's put_8tap for that exact (x,y,h,mx,my).
+
+> **2026-09-18 (cont'd) — TEMPORAL SAMPLING FIX (882da15): 64x64 warp
+> clip now FULLY bit-exact vs dav1d.** After the refmvs-ctx commit the
+> mask-0 hidden-frame dumps showed oh4 exact (its diffs were pure
+> post-filter echo) but oh2/oh1/oh3/oh5 still desynced. The COMPPX vs
+> DBG_COMP probe pair (retuned to rows 12/14) caught it: oh2's
+> compound strip (0,14) had dav1d n_mvs=2 vs Kinetix stack cnt=3 —
+> Kinetix added a temporal candidate (0,8)/(0,-8) dav1d never produced
+> (MVSCAN: rp_proj cell (7,4) = (mv (0,18), ref2ref 4)), read a DRL
+> symbol dav1d didn't, and desynced oh2 mid-frame (poisoning
+> oh1/oh3/oh5 downstream). Root cause: build_rp_proj sampled each 8x8
+> temporal cell from grid cell mi (2x, 2y) = top-LEFT 4x4, but dav1d
+> save_tmvs_c stores the cell from mi (2x+1, 2y) = top-RIGHT 4x4
+> (cand_b = &b[x*2+1]) — indistinguishable except in sub-8x8 splits,
+> where leaves have per-4x4 MVs (oh4's 4x4 (8,14) saved (0,18)/kf,
+> (9,14) saves nothing). One-character fix, huge blast radius:
+> **all 6 frames — kf + oh4/oh2/oh1/oh3/oh5 — bit-exact, ALL planes,
+> full deblock+CDEF+LR** (verified against the dav1d clone's internal
+> dumps at inloopfilters=0 AND =7). testsrc_64x64 5/5 shown frames
+> exact; intra corpus 6/6; luma exact on every clip.
+> dav1d clone repair note: the Temp clone lost its root files (meson
+> build files, .git — external temp cleanup); build/build.ninja +
+> sources + generated headers survived. Fixed by deleting the
+> REGENERATE_BUILD edges from build.ninja and stubbing the lost
+> src/dav1d.rc + tools/dav1d.rc + dav1d.manifest (version resources
+> are cosmetic) INSIDE build/{src,tools}/ (ninja resolves those paths
+> build-relative). COMPPX gate retuned to (by == 12 || by == 14).
+> REMAINING GAP: chroma-only ±1 diffs on 128x96 (U/V 55-67 dB) and
+> 96x64 (U/V 57-73 dB) inter clips; luma 100% exact everywhere. The
+> chroma motion field is derived from luma, so the save fix doesn't
+> touch chroma directly. NEXT SESSION: same method — save OBU, decode
+> with KINETIX_AV1_DUMP_FRAMES vs the clone's DUMPF at inloopfilters=0
+> for the 128x96 stream (its hidden frames too), find the first
+> chroma-diverging block, then probe put_8tap chroma (phase = frac-1,
+> 4x4 filter sets when chroma bw<8, GET_H/V table rows) and sub-8x8
+> chroma tx-type/co-located logic. All the tooling (DBG_COMP rows,
+> MVSCAN, skipmode trace, dump harness) is env-gated and in place.
