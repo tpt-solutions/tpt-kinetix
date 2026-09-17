@@ -6857,3 +6857,30 @@ cosmetic for output but worth one look alongside (1)).
 > diffs and most of the 128x96 chroma/luma ±1s are subpel-MC-shaped.
 > The dav1d clone's PUT8TAP condition is now
 > `(x==6 && h==8) || (x==2 && h==4)` — re-point per repro.
+
+> **2026-09-17 (evening session, cont'd 4) — subpel MC probe data complete;
+> one dav1d semantic question isolated for the port.** The rebuilt PUT8TAP
+> probe (now printing mx/w too) captured dav1d's literal MC execution at
+> the oh4 (4,14) 4x4 block (mv=(0,18) per both its prints): mx=4, w=4,
+> fh=[0,0,-6,55,19,-4,0,0] = the 4x4-REGULAR table row 3, rnd=34,
+> sum=9495, dst=148. Kinetix's uniform 7-bit filter gives 149. The open
+> question: dav1d's `GET_H_FILTER` indexes `[3+REGULAR][(mx)-1]` with
+> `mx = mvx & (15 >> !ss_hor)` — for mv.x=18 that arithmetic gives mx=2 →
+> row 1 → sum 9511 → 149, but dav1d executed row 3 (mx=4). Either dav1d's
+> mv.x at mc time is 20 (something between Post-intermode and mc adjusts
+> it — no known dav1d code path does), or the row indexing for the 4x4
+> tables is `[(mv>>2)-1]` (18>>2 = 4 → row 3 ✓) — i.e. the 4x4 tables are
+> indexed by HALF-PEL phase (consistent with the spec's rule that 4-wide
+> blocks only have half-pel-sharp effective filters). Next session:
+> (1) dump dav1d's mx at a SECOND 4x4 block with a different mv (e.g.
+> (5,14)'s neighbor (6,14) 4x8 mv=(0,0)... or another clip) to
+> disambiguate `[mx-1]` vs `[(mv>>2)-1]`; (2) port the 6x15x8 6-bit table
+> + selection + rnd=34>>6 1D rounding into motion_compensate per the
+> resolved mapping; (3) the 2D (both-axes) path rounds H at
+> (sum+4)>>3 = 6-intermediate_bits and V at (sum+1024)>>11 =
+> 6+intermediate_bits (mc_tmpl.c put_8tap_c, 8-bit intermediate_bits=4)
+> — Kinetix's current 2D rounding already matches these; only the 1D
+> rounding (34 vs 64>>7?) and the table/selection need the port.
+> The dav1d clone now also has a MCIN probe stub REMOVED (a broken
+> fprintf experiment was fully excised; the clone builds clean again and
+> the PUT8TAP/MCPX/DUMPF/PARTCDF hooks all work).
