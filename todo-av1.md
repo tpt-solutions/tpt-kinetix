@@ -7068,3 +7068,26 @@ cosmetic for output but worth one look alongside (1)).
 > 4x4 filter sets when chroma bw<8, GET_H/V table rows) and sub-8x8
 > chroma tx-type/co-located logic. All the tooling (DBG_COMP rows,
 > MVSCAN, skipmode trace, dump harness) is env-gated and in place.
+
+> **2026-09-18 (cont'd 2) — chroma frontier localized (new dbg_av1_chroma
+> harness, untracked).** 128x96 inter clip, mask-0 hidden-frame method:
+> kf EXACT all planes; EVERY inter frame (1-7) has CHROMA-ONLY diffs
+> (49-134 samples) confined to chroma rows 40-43 of BOTH U and V = luma
+> mi rows 20-21 exactly; luma 100% exact everywhere. ±1 LSB per sample
+> and same-band recurrence across frames = wrong leaf's MV chosen for
+> the SUB-8x8 chroma MC in those rows (they hold 4x4/8x4 splits with
+> per-leaf MVs), not an entropy desync. Gotcha hit: stale kfr_*.yuv
+> from a previous run made a full-filter-vs-mask-0 comparison look
+> like a kf chroma error — always `rm -f kfr_*.yuv` before dumping.
+> dav1d rule to verify against: sub-8x8 chroma uses ONE mv per 8x8
+> (dav1d recon/decode picks the co-located luma leaf — check whether
+> it's (bx4+bw4-1, by4+bh4-1) bottom-right or top-right, and whether
+> Kinetix's chroma path picks the same leaf; Kinetix already has a
+> co-located-luma-type fallback in add_inter_residual for tx-type,
+> same grid). Probe plan: MCPX-style print of dav1d's chroma mc mv for
+> one diverging block in frame 1 (mi row 20-21), vs Kinetix's chroma
+> mv at the same block (DBG_COMP/PRED extensions), fix the leaf rule,
+> then 128x96 + 96x64 should go fully bit-exact like the 64x64 clip.
+> Post-filter status: with the entropy fixes in, Kinetix full-filter
+> output == dav1d mask-7 dumps exactly (conformance-invisible), so no
+> separate filter bug is visible on these corpora.
