@@ -26,6 +26,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 26 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, real PAFF pixels, 4:2:2/4:4:4) are tracked, not yet fixed |
 | AV1 decode | 🟡 Not pixel-exact | OBU + sequence header parsing; CDF-based entropy/symbol decoder implemented (`entropy.rs`/`entropy_cdf.rs`), but `decode_tile_group` is not yet rewired onto it |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
+| VP9 decode | 🟡 Not pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) pipeline implemented end-to-end (headers, bool decoder, tiles/partitions/modes/MVs, coefficients, transforms, intra/inter prediction, loop filter, frame-context adaptation, superframes); tables extracted and `verify-tables`-checked vs pinned ffmpeg; output not yet reference-exact (`tpt-kinetix-vp9`, see `todo-vp9.md`) |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
@@ -98,6 +99,8 @@ tpt-kinetix (workspace)
 ├── tpt-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
 │
 ├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
+│
+├── tpt-kinetix-vp9         — VP9 decoder (bool coder, tiles, intra/inter, loop filter)
 │
 ├── tpt-kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
 │

@@ -1719,6 +1719,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpt-kinetix-vp9"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror",
+ "tpt-kinetix-core",
+]
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"

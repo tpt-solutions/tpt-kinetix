@@ -1898,13 +1898,24 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
 - [ ] **Precondition** — close the H.264 High-profile 8×8 transform (`NotPixelExact`
       → bit-exact) and get AV1 decode to `capabilities().pixel_exact` (or explicitly
       park AV1) before starting a new codec. Don't add a 4th half-finished decoder.
-- [ ] **VP9 decode (next)** — new `tpt-kinetix-vp9` crate via the cargo-generate
+- [~] **VP9 decode (next)** — new `tpt-kinetix-vp9` crate via the cargo-generate
       template + `tpt-kinetix-kg` ingest of `libvpx`/FFmpeg `vp9*.c`. Royalty-free;
       structurally a simpler AV1 (superblocks, tiles, similar transforms, bool-coder
       vs AV1's symbol decoder) so it de-risks the AV1 reconstruction pipeline family.
       Register in root `Cargo.toml` `[workspace] members`. Bit-exact vs
       `ffmpeg -c:v vp9` / `libvpx` in `tpt-kinetix-test-utils::conformance`; add a
       `*_never_panics` proptest for the frame/superblock parser; fuzz target ≥60s.
+      **Started 2026-09-17 (session #v1, see [todo-vp9.md](todo-vp9.md)):** crate
+      bootstrapped and registered; full decode pipeline implemented (headers, bool
+      decoder, tiles/partitions/modes/MVs, coefficients, transforms, intra+inter
+      prediction, loop filter, frame-context adaptation, superframes); all 26
+      table extracts verify-tables-clean against pinned FFmpeg
+      `c3ff7168`; bool decoder round-trip tested vs a reference encoder; proptest
+      `vp9_decode_never_panics` (20k-case release sweep) + `fuzz/fuzz_vp9_frame`
+      wired (compile-only on CI, local nightly lacks libFuzzer runtime). Decode
+      runs end-to-end on an 8-clip ffmpeg conformance corpus with correct
+      geometry but wrong pixels (~5–50 dB) — `pixel_exact` stays false; leading
+      suspect (skip-flag desync) and next steps in todo-vp9.md.
 - [ ] **Opus decode (after VP9)** — new `tpt-kinetix-opus` crate. Native impl
       (SILK + CELT + hybrid), **do not wrap `opus`/`audiopus`** — keep the
       no-third-party-codec stance the native AAC decoder set. Royalty-free; the

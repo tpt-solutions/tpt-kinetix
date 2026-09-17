@@ -27,11 +27,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use tpt_kinetix_core::{
-    frame::VideoFrame,
-    pixel_format::PixelFormat,
-    timestamp::Timestamp,
-};
+use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
 
 /// Errors that can arise while driving an external reference decoder.
 #[derive(Debug)]

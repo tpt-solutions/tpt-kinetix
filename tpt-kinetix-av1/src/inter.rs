@@ -159,18 +159,39 @@ pub fn ref_plane_offset(_ref: u8) -> usize {
 ///
 /// `bits` is the sub-pel precision of the MV *component* for this axis: 3 for
 /// luma (1/8-pel), 4 for a 4:2:0/4:2:2 chroma axis (1/16-pel, since a 1/8
-/// luma-pel MV is a 1/16 chroma-pel MV). `SUBPEL_FILTERS` is a 16-row table
-/// indexed by the 1/16 phase, so a luma phase `p` maps to row `p << 1`.
-fn subpel_kernel(kind: u8, frac: i32, bits: u32) -> &'static [i32; 8] {
+/// Select the 8-tap sub-pel kernel for MV-component fraction `frac` and
+/// filter `kind` (one of `INTERP_*`; `SWITCHABLE` is resolved by the caller).
+///
+/// `bits` is the sub-pel precision of the MV *component* for this axis: 3 for
+/// luma (1/8-pel), 4 for a 4:2:0 chroma axis (1/16-pel). The table is
+/// dav1d's 6-bit 15-phase bank (spec `Subpel_Filters`, coefficients sum to
+/// 64): a luma phase `m`/8 addresses the odd row `2m-1` (dav1d doubles
+/// `mx = mvx & 7` before indexing, because the same 15 rows serve chroma's
+/// 1/16-pel phases); a chroma phase addresses row `frac-1` directly.
+/// `small` selects the 4x4-specific set dav1d uses for 4-wide/4-tall
+/// blocks: the horizontal axis picks `[3+(kind&1)]` (smooth -> 4x4-smooth,
+/// regular/sharp -> 4x4-regular) and the vertical axis `[3]` (dav1d's
+/// `filter_type >> 2 & 1` is 0 for every switchable kind). Fraction 0 is
+/// the full-pel identity (64 at the centre tap).
+fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
+    if frac == 0 {
+        return [0, 0, 0, 64, 0, 0, 0, 0];
+    }
     let f = match kind {
         INTERP_EIGHTTAP_REGULAR => 0,
         INTERP_EIGHTTAP_SMOOTH => 1,
         INTERP_EIGHTTAP_SHARP => 2,
-        _ => 3, // BILINEAR and any unknown value use the bilinear kernels.
+        _ => 5, // BILINEAR and any unknown value use the bilinear set.
     };
     let mask = (1i32 << bits) - 1;
-    let pos = ((frac & mask) << (4 - bits)) as usize;
-    &defaults::SUBPEL_FILTERS[f][pos]
+    let frac = frac & mask;
+    let pos = if bits == 3 { 2 * frac - 1 } else { frac - 1 };
+    let set = if small {
+        3 + (f & 1)
+    } else {
+        f
+    };
+    defaults::SUBPEL_FILTERS[set][pos as usize]
 }
 
 /// Motion-compensate a `bw`×`bh` luma/chroma block at tile-local pixel

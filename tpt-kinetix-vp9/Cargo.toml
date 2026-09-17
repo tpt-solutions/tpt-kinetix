@@ -1,0 +1,23 @@
+[package]
+name = "tpt-kinetix-vp9"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VP9 video decoder for the TPT Kinetix media processing engine"
+keywords = ["tpt-kinetix", "vp9", "codec", "multimedia", "video"]
+categories = ["multimedia::video"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-vp9"
+
+[dependencies]
+tpt-kinetix-core = { path = "../tpt-kinetix-core" }
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+
+[lib]
+path = "src/lib.rs"
