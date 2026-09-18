@@ -703,6 +703,31 @@ luma field MC per-cell vs JM for one wrong MB (the KDBGCR oracle's luma
 twin `KDBGMV` already prints per-block mv — the vy/vx fit machinery from
 addendum 12 applies directly to luma), then the gate flip.
 
+## SESSION #32bx ADDENDUM 16 — the luma residue fingerprint. POC-1 pixel
+dump of MB (29,14) (pair 343 top, whose 16x16 region interleaves the TOP
+MB's even frame rows 224,226,... and the BOTTOM MB's odd rows 225,227,...):
+EVEN rows are EXACT (+0 — our top-half luma pred/write verified again);
+ODD rows are wrong by -14..-27 with a per-row gradient — the signature of
+the bottom-half luma MC PRED being shifted by ~one plane row (content
+sampled one row off a vertical gradient reads ~constant-times-gradient
+low). So: TOP-half luma MC = exact; BOTTOM-half luma MC = off by ~1 plane
+row, same class as the chroma band-offset family (but luma has NO
+contiguous-split — the chroma contiguous model measured 3x worse for luma
+too when applied to both halves in the addendum-14 A/Bs... the luma half
+of those A/Bs was contaminated by the chroma regression in the same runs —
+RE-TEST bottom-only contiguous luma cleanly!).
+
+NEXT SESSION (bounded): (1) instrument JM's LUMA `get_block_luma` call for
+a bottom field MB (print y_pos/vec1_y and the plane base) exactly like
+KDBGCR did for chroma, and print ours from
+`reconstruct_mbaff_inter_luma` — the row offset will be directly visible;
+(2) A/B `base_fy += parity*16`-style fixes for the bottom half only (the
+chroma analogue landed at +4 chroma plane rows; the luma analogue would be
++16 luma plane rows = one pair band half);
+(3) then the small-MB rounding class ((0,6)/(0,7) max<=3) and the gate
+flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
+(30,14) 29, (29,15) 27, (30,15) 127 samples.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
