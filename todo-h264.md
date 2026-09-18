@@ -435,6 +435,41 @@ luma-quadrant mapping for the mv cells. Also worth reading: JM
 
 Regression state: 269 lib tests green; tree clean at `a4cc38e` + this note.
 
+## SESSION #32bx ADDENDUM 9 (same continuation) — geometry re-analysis:
+part of addendum 6's chroma diagnosis is RETRACTED. Careful re-derivation:
+a field MB-half's chroma = 8 FIELD chroma rows (= the pair band's 16 frame
+chroma rows split by parity: top MB writes even rows 48,50,...,62; bottom MB
+odd rows 49,...,63). The current `reconstruct_mbaff_inter_chroma` write
+`py = 2*(fy0+row)+bottom` with `fy0 = pair_row*8 + by` covers exactly those
+8 rows — NO spill; the "16-row spill" of addendum 6 was a miscount.
+JM confirms: `mb_cr_size_y = 8` for the band (image.c y0 = (pix_y*8)>>4 =
+48 ✓), chroma MC `y_cr = y>>1` = 8 rows, residual cof 8x8 with blocks at
+rows {0,4} x cols {0,4} (`cofuv_blk` tables), `itrans4x4` per cof block at
+`subblk_offset` positions {0,4} — the transform layout is the standard
+frame 8x8, unchanged by field-ness; only the final picture write
+(`update_mbaff_macroblock_data`) deinterleaves at stride 2.
+
+That leaves the observed chroma errors (+40..+119, e.g. chroma MB (0,6)
+rows 48-55 all wrong, both parities) WITHOUT a confirmed structural cause.
+The zero-mv probe (addendum 8) proved pred position correct for blk0;
+contradictory signals (blocks 2/3 "spill" vs near-exact rows 56-62 in
+MB (0,7)) mean the remaining analysis needs the sample-level pred/res probe
+(`KINETIX_CHROMAPROBE`) re-implemented CAREFULLY (the previous attempt
+broke braces via scripted text surgery — apply it as a small hand-written
+diff, or dump from `dequant_idct_4x4_scan`'s caller with unit tests).
+Concrete probe plan: for MB (0,6) and its neighbour (0,7), print per chroma
+block: cell mv, fy0, the 16 pred values, the 16 res values, and the target
+frame rows — then compare pred against reference-frame-0 chroma and res
+against (ref1 - pred) per row. The first row where pred != ref0-content
+localizes the read; if pred == ref0 everywhere and res != ref1-pred, the
+bug is chroma residual placement/scan (compare our FIELD_SCAN_4X4-placed
+IDCT output against JM's per-block itrans4x4 output for the same
+coefficients — JM KDBG instrumentation may be needed on the transform).
+
+Do NOT land any geometry change without that probe output; the current
+committed state (Y 370 / U 10604 / V 10081, all suites green) is the best
+known.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
