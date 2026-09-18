@@ -509,6 +509,48 @@ Harness: `CANLMA2_AC_GRID=<grid>` dumps cbp + the 4 chroma AC coefficient
 blocks (committed) — pairs with KDBGMODE/KDBGMV for full MB-level oracle
 work.
 
+## SESSION #32bx ADDENDUM 11 — field-chroma structure CONFIRMED correct via
+JM `KDBGCR` probe (new oracle build `ldecod_kdbgcr.exe` in
+`C:/Users/phill/jm-oracle-fresh/jm`, print inside `perform_mc_single`'s
+chroma call — note the first patch landed in `perform_mc_single_wp` which
+CANLMA2 never exercises; the non-WP site is the one ~line 1525). Findings
+for MB (0,6) (grid 270, pair 135 top, field, P8x8):
+- JM chroma MC base = field chroma row 24 = our fy0 `(mb_y>>1)*8` ✓;
+- per-block positions agree at the base (vy=192 = 24*8 for the zero-mv
+  block) with fractional eighth-pel offsets from the mv ✓;
+- JM's per-block geometry: bsx/bsy are LUMA partition sizes (e.g. 4x8 = 4
+  luma cols x 8 FIELD rows) with chroma bsycr = bsy>>1, ioffcr/ioffcr
+  halved — i.e. chroma MC blocks are 4 wide x 4 field chroma rows, matching
+  our per-block layout ✓;
+- units: vy in CHROMA field eighth-pels (= field luma quarter-pels, x1 —
+  the x2 hypothesis is disproven).
+- The earlier addendum-6 "16-row spill" and "4 contiguous rows" claims are
+  BOTH superseded: the true footprint is 8 field chroma rows (band even
+  rows for top half, odd for bottom) written at stride 2 — which is what
+  the current code does.
+
+**Consequence:** the structural geometry (positions, units, footprint) is
+confirmed CORRECT, so the remaining ~10k U/V error is NOT the MC geometry.
+The zero-mv probe (addendum 8) showed our block-0 residual = flat +2 where
+the reference implies DC+small-AC — with cbp chroma = DC-only for that MB
+and all-zero AC coefficients parsed (addendum 10), while the reference's
+per-pixel variation implies AC terms exist in JM's reconstruction of the
+SAME bins. PRIME SUSPECT (next session): our parse's chroma AC reading for
+FIELD MBs — JM reads the 4 chroma AC blocks into cof 8x8 and reconstructs
+per `subblk_offset` positions (block.c:771-782, tables `subblk_offset_x/y`
++ `cofuv_blk`); our parse may be mis-placing the field MB's chroma AC
+coefficients (e.g. reading them into the wrong block indices, or the
+cbp-chroma interpretation for field MBs differing — our grid 270 cbp=0x1a
+chroma bits = DC-only... VERIFY against JM whether that MB's cbp chroma is
+DC-only or DC+AC: if DC-only, the reference's per-pixel AC variation must
+come from a different source — e.g. the chroma DC Hadamard producing
+non-flat output (2x2 IHADAMARD output is 4 values, placed per quadrant —
+flat only if 3 of 4 are equal... our `chroma_dc_transform` output
+`dc_out[block]` per quadrant may be wrong for field MBs).
+
+Also to check: whether `chroma_dc_transform`'s 2x2 Hadamard output maps
+dc_out[0..3] to the same block order we use for `Some(dc_out[block])`.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
