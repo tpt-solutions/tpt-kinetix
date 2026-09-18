@@ -631,6 +631,31 @@ exactly, which is by definition the correct decode.)
 Also mirror the same change into
 `reconstruct_mbaff_b_inter_chroma` (the B twin) once validated on P.
 
+## SESSION #32bx ADDENDUM 13 — the field-chroma root cause CONFIRMED: MC
+granularity. JM's chroma MC (KDBGCR) runs per LUMA 4x4 SUB-BLOCK ->
+chroma 2x2 px (vx=15 for ioffcr=2 = chroma px 2 with mv_x=-1 from that
+sub-block's own cell; vx=0/15/33/49 across the four 2x2 sub-blocks of one
+8x8 = four DIFFERENT mvs). Our `reconstruct_mbaff_inter_chroma` uses ONE mv
+per 4x4 chroma block (cell qbase only) — the per-pixel variation we could
+not match. OUR OWN PROGRESSIVE PATH ALREADY DOES IT RIGHT:
+`reconstruct_inter_chroma` (reconstruct.rs ~4300) iterates the 2x2 sub-blocks
+`grid[qbase + {0,1,4,5}]` with per-sub-block `interpolate_chroma` — copy that
+structure into the field path, with:
+- read plane = `ref_frames[frame_i]` full chroma (frame.data, offset
+  luma_len + comp*chroma_len, stride w/2, h/2) — NOT the parity field plane;
+- vertical base = `(mb_y>>1)*16 + parity*8` frame chroma rows (the half's
+  contiguous 8-row span: top MB rows 16k..16k+7, bottom 16k+8..15 — per the
+  KDBGCR vy fit: JM_vy = our_eighth + (pair_row+1)*64 exactly, all 5425
+  POC-1 records);
+- per sub-block mv + the addendum-3 ±2 parity adjustment on mv_y;
+- write contiguous rows (the sub-block pred is 2x2 px; assemble the 4
+  sub-block preds into the 8x8 half-band and write CONTIGUOUSLY at
+  fy0..fy0+7 — NOT stride-2).
+The residual (DC 2x2 + AC 4 blocks, FIELD scan A/B-verified better) applies
+on top unchanged. The zero-mv same-parity blocks were exact under the old
+coarse path only because all four sub-block mvs coincided; every block with
+mixed sub-mvs (like (0,6)'s right half: mvs (1,-2)/(1,-1)) diverged.
+Harness: `CANLMA2_AC_GRID` (committed) dumps parsed chroma AC for one grid.
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
