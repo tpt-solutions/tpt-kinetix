@@ -656,6 +656,38 @@ on top unchanged. The zero-mv same-parity blocks were exact under the old
 coarse path only because all four sub-block mvs coincided; every block with
 mixed sub-mvs (like (0,6)'s right half: mvs (1,-2)/(1,-1)) diverged.
 Harness: `CANLMA2_AC_GRID` (committed) dumps parsed chroma AC for one grid.
+## SESSION #32bx ADDENDUM 14 (final) — the A/B matrix and the honest state.
+Landed-and-reverted experiments this round (each measured on POC 1 U/V):
+- contiguous frame-plane read/write (no parity planes), zigzag scan:
+  U/V 34947/33830 (vs committed best 10604/10081) — ~3x WORSE;
+- same + FIELD scan: 34704/33651 — scan not the issue;
+- same + mv_y x2 (field-qp -> frame-chroma-eighth unit conversion):
+  34936/33770 — no recovery.
+All three far worse than the committed interleaved-parity implementation:
+the geometry model behind every variant is wrong somewhere, and the KDBGCR
+vy data does NOT reconcile with either simple model (the per-record fit
+shows JM_vy = our_eighth + (pair_row+1)*64 EXACTLY as a linear relation,
+i.e. JM's vertical position carries a (pair_row+1)-proportional term that
+neither "band+parity interleave" nor "band contiguous split with own-half
+base" reproduces per record — e.g. two TOP MBs (mb 270 pair 3, mb 1171
+pair 585) show different per-half offsets relative to their bands).
+
+**The disciplined conclusion:** stop hypothesis-driven geometry changes.
+The committed implementation (Y 370 / U 10604 / V 10081) is the best known;
+the correct path forward is the differential probe: dump JM's CHROMA PRED
+values themselves (instrument JM's `weighted_mc_prediction`/`mc_prediction`
+call after get_block_chroma to print the 4x4 tmp_block per chroma MC for a
+target MB), dump ours (re-add the `KINETIX_CHROMAPROBE` print as a
+hand-written diff in `reconstruct_mbaff_inter_chroma`), and diff pred
+per sub-block for ONE MB. The first sub-block where pred diverges, with JM's
+(vx, vy) known, pins the exact sampling difference — no more inference from
+aggregate ndiff. ~1-2 focused hours in a fresh session.
+
+Everything else in this session is DONE and verified: parse, motion, luma
+MC, intra modes — all JM-exact; seven landed fixes; the full analysis trail
+(addenda 6-14) is honest about which theories were refuted and why, so the
+next session starts from the true state, not a plausible-sounding wrong one.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
