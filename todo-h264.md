@@ -551,6 +551,42 @@ flat only if 3 of 4 are equal... our `chroma_dc_transform` output
 Also to check: whether `chroma_dc_transform`'s 2x2 Hadamard output maps
 dc_out[0..3] to the same block order we use for `Some(dc_out[block])`.
 
+## SESSION #32bx ADDENDUM 12 — the field-chroma ground truth is CAPTURED.
+New JM oracle build `ldecod_kdbgcr.exe` (patch: `KDBGCR` print before the
+non-WP `get_block_chroma` call inside `perform_mc_single`,
+mc_prediction.c ~1525 — NOTE: the first patch attempt landed inside
+`perform_mc_single_wp`, which CANLMA2 (no weighted pred) never exercises;
+both prints now exist, harmless). Full-stream dump:
+`/tmp/jm_cr_all.txt` (80 894 KDBGCR records, whole stream; POC 1 = the
+first monotonic mb run). Record format:
+`KDBGCR mb=<decode> i=<blk4col> j=<blk4row> bsx=<luma> bsy=<luma>
+vx=<chroma eighth-px> vy=<chroma eighth-px> bya=<block_y_aff> mf=<field>
+bsycr=<chroma bsy> joffcr=<> ioffcr=<>`.
+Example (mb=270 = grid 270 = MB (0,6), P8x8 field top):
+`KDBGCR mb=270 i=0 j=0 bsx=4 bsy=8 vx=0 vy=192 bya=12 mf=1 bsycr=4 joffcr=0 ioffcr=0`
+— JM's vy=192 chroma-eighths = chroma field row 24 = OUR fy0 for this
+half ✓ base agrees; fractional offsets from mv present (vy=193, 205, 224,
+241 across blocks).
+
+NEXT SESSION (the actual fix, well-bounded):
+1. Fit our per-block chroma read position against JM's `vy` for a few
+   hundred field-MB blocks (POC 1 window = first monotonic mb run in
+   /tmp/jm_cr_all.txt; ours = the `KXCAND`/MVP-COMMIT cell mvs): the
+   formula to match is ours `read_row = fy0*8 + mv_y_cr` vs JM's `vy` —
+   determine the exact relation (x1 confirmed at the base; the ±2
+   adjustment phase and any parity*4 band offset inside vy remain to be
+   fitted).
+2. Note JM's chroma MC block list per MB is NOT our 2x2-of-4x4 layout:
+   JM calls per LUMA PARTITION with bsycr = bsy>>1 (e.g. bsy=8 -> bsycr=4)
+   at joffcr = joff>>1, ioffcr = ioff>>1 — mirror this iteration order when
+   correlating (a python fit script over `sub_mb_type` partitions).
+3. After the chroma fix lands: re-run `CANLMA2_MODE_ALL` + the Y/U/V
+   diffmap, sweep the 7 remaining luma MBs, flip `KINETIX_MBAFF_FIELD_MC`,
+   and re-run the full ITU conformance suite before the gate flip commit.
+
+Regression floor intact at `7a0e5b5` + this note: 269 lib tests, tree
+clean; POC-1 = Y 370 / U 10604 / V 10081.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
