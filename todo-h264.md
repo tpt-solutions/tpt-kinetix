@@ -688,6 +688,21 @@ MC, intra modes — all JM-exact; seven landed fixes; the full analysis trail
 (addenda 6-14) is honest about which theories were refuted and why, so the
 next session starts from the true state, not a plausible-sounding wrong one.
 
+## SESSION #32bx ADDENDUM 15 — CHROMA CLOSED: per-sub-block field chroma MC
+LANDED (`8b91ce9`): U/V = 0/0 BIT-EXACT on POC 1 (was 10604/10081). The
+granularity was the whole story — per 2x2-px sub-block, each with its own
+luma cell's MV and parity plane (mirroring `reconstruct_inter_chroma`'s
+qbase+{0,1,4,5} structure). Weighted-pred caveat: the block-level
+`combine_weighted` runs once per 4x4 with the qbase ref_idx (CANLMA2 is
+Default-WP; explicit-WP MBAFF streams would need per-sub-block weighting).
+
+Remaining: Y = 370 samples in 7 MBs, ALL concentrated in the RIGHT half
+(cols 8-15) of each MB — (0,6)/(0,7) max<=3; (28-30,14)/(29-30,15) max
+14-27, with MB (29,15)/(30,15) showing full-MB coverage. Next: check the
+luma field MC per-cell vs JM for one wrong MB (the KDBGCR oracle's luma
+twin `KDBGMV` already prints per-block mv — the vy/vx fit machinery from
+addendum 12 applies directly to luma), then the gate flip.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
