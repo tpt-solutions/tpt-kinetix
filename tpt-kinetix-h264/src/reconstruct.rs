@@ -2144,50 +2144,80 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = base_x + bx;
             let fy0 = base_fy + by;
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
-            let ref_idx = cell.ref_idx.max(0) as usize;
-            // Same FIELD-list semantics as the luma twin above: entry 2k =
-            // frame k same-parity, entry 2k+1 = frame k opposite-parity.
-            let frame_i = ref_idx / 2;
-            let parity = (bottom as usize) ^ (ref_idx & 1);
-
+            // The 4x4 chroma block = 4 2x2 sub-blocks, each motion-compensated
+            // with its own luma 4x4 cell's MV (§8.4.1.4 / ffmpeg `mc_dir_part`).
+            // The quadrant's four cells sit at `qbase + {0,1,4,5}`.
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
             let mut pred = [0u8; 16];
-            // §8.4.1.4 / JM `set_chroma_vector`: a field-coded MB predicting
-            // from the OPPOSITE-parity field shifts the CHROMA vertical
-            // vector by +/-2 luma quarter-pels (top MB -2, bottom MB +2);
-            // same-parity references are unadjusted. Luma is never adjusted.
-            let mv_y_cr = if ref_idx & 1 == 1 {
-                cell.mv[1] + if bottom { 2 } else { -2 }
-            } else {
-                cell.mv[1]
-            };
-            if let Some(ref_entry) = field_planes.get(frame_i).or_else(|| field_planes.last()) {
-                let (_, cb_ref, cr_ref) = &ref_entry[parity];
-                let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
-                let h = plane_ref.len() / stride.max(1);
-                crate::motion_comp::interpolate_chroma(
-                    &mut pred, 4, plane_ref, stride, stride, h, x0 as i32, fy0 as i32, cell.mv[0],
-                    mv_y_cr, 4, 4,
+            for (sub, cell) in [
+                grid[qbase],
+                grid[qbase + 1],
+                grid[qbase + 4],
+                grid[qbase + 5],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (sr, sc) = (sub / 2, sub % 2);
+                let ref_idx = cell.ref_idx.max(0) as usize;
+                // Same FIELD-list semantics as the luma twin above: entry 2k =
+                // frame k same-parity, entry 2k+1 = frame k opposite-parity.
+                let frame_i = ref_idx / 2;
+                let parity = (bottom as usize) ^ (ref_idx & 1);
+
+                let mut sp = [0u8; 4];
+                // §8.4.1.4 / JM `set_chroma_vector`: a field-coded MB predicting
+                // from the OPPOSITE-parity field shifts the CHROMA vertical
+                // vector by +/-2 luma quarter-pels (top MB -2, bottom MB +2);
+                // same-parity references are unadjusted. Luma is never adjusted.
+                let mv_y_cr = if ref_idx & 1 == 1 {
+                    cell.mv[1] + if bottom { 2 } else { -2 }
+                } else {
+                    cell.mv[1]
+                };
+                if let Some(ref_entry) = field_planes.get(frame_i).or_else(|| field_planes.last()) {
+                    let (_, cb_ref, cr_ref) = &ref_entry[parity];
+                    let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                    let h = plane_ref.len() / stride.max(1);
+                    crate::motion_comp::interpolate_chroma(
+                        &mut sp,
+                        2,
+                        plane_ref,
+                        stride,
+                        stride,
+                        h,
+                        (x0 + sc * 2) as i32,
+                        (fy0 + sr * 2) as i32,
+                        cell.mv[0],
+                        mv_y_cr,
+                        2,
+                        2,
+                    );
+                }
+                for r in 0..2usize {
+                    for c in 0..2usize {
+                        pred[(sr * 2 + r) * 4 + sc * 2 + c] = sp[r * 2 + c];
+                    }
+                }
+                tracer.on_motion_comp(
+                    mb_x,
+                    mb_y,
+                    trace_plane,
+                    (qbase + sub) as u8,
+                    &sp,
+                    cell.mv,
+                    ref_idx,
                 );
             }
             let pred = combine_weighted(
                 weighted,
                 true,
                 false,
-                ref_idx,
+                grid[qbase].ref_idx.max(0) as usize,
                 0,
                 &pred,
                 &[0u8; 16],
                 Some(comp),
-            );
-            tracer.on_motion_comp(
-                mb_x,
-                mb_y,
-                trace_plane,
-                block as u8,
-                &pred,
-                cell.mv,
-                ref_idx,
             );
 
             // Field scan for the chroma AC residual of a field-coded MB
