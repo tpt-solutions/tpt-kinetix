@@ -587,6 +587,50 @@ NEXT SESSION (the actual fix, well-bounded):
 Regression floor intact at `7a0e5b5` + this note: 269 lib tests, tree
 clean; POC-1 = Y 370 / U 10604 / V 10081.
 
+## SESSION #32bx ADDENDUM 12 — the field-chroma ground truth is CAPTURED.
+New JM oracle build `ldecod_kdbgcr.exe` (patch: `KDBGCR` print before the
+non-WP `get_block_chroma` call inside `perform_mc_single`,
+mc_prediction.c ~1525 — the first patch attempt landed inside
+`perform_mc_single_wp` which CANLMA2 never exercises). Full-stream dump:
+`/tmp/jm_cr_all.txt` (80 001 records, whole stream, lines prefixed `n` from
+a doubled `
+n` format — harmless). POC 1 = the first monotonic mb run
+(5425 records). Record: `KDBGCR mb=<decode> i=<blkcol> j=<blkrow>
+bsx=<luma> bsy=<luma> vx=<> vy=<> bya=<block_y_aff> mf=<field>
+bsycr=<chroma bsy> joffcr=<> ioffcr=<>`.
+
+**THE FIT (exact, all 5425 POC-1 field records):**
+`JM_vy = our_eighth + (pair_row + 1) * 64`
+where our_eighth = `(pair_row*8 + by)*8 + mv_y + adj` (our current read
+position in field-plane eighths; by = joffcr; adj = the addendum-3 parity
+adjustment). The histogram is a clean comb at multiples of 64 eighths
+(= 8 chroma rows per pair-row step) with delta 0 for 3583 records (pair
+row 0 — where (pair_row+1)*64 = 64*1... note pair 0 records also show
+delta 0 after the mv terms, i.e. the mv/adjustment terms match exactly).
+Concretely: JM's chroma read row (its `get_block_chroma` y_pos>>3, an
+ABSOLUTE row of the reference it indexes) = `(our_eighth + (pair_row+1)*64) >> 3`,
+e.g. pair 13 bottom: our 832 -> JM 1728 (>>3 = 216 = the MB's own frame
+chroma row 216 ✓ = frame luma rows 432-433, inside pair 13's luma band
+416-447 ✓); pair 10 bottom: our 640+mv 3 -> JM 1347 (>>3 = 168.375 =
+frame chroma rows 168/169 ✓ = frame luma 336-337 ✓).
+
+**THE FIX (next session, mechanical):** make `reconstruct_mbaff_inter_chroma`
+read the reference chroma at JM's absolute row instead of our field-plane
+row: `read_row = (our_eighth + (pair_row+1)*64) >> 3`, sampled from the
+FULL-height frame chroma plane of `ref_frames[frame_i]` (pass `ref_frames`
+in; the parity-plane selection and `planes()` extraction drop out of the
+MC entirely), keeping mv_x, the ±2 adjustment, the DC/AC residual handling
+and the interpolation function unchanged. Then A/B: chroma ndiff should
+collapse from ~10.6k/10.1k; verify Y stays 370; sweep the 7 luma MBs; flip
+`KINETIX_MBAFF_FIELD_MC`; full ITU suite before the gate-flip commit.
+(The meaning of `(pair_row+1)*64` — whether it is a band-split, a
+field-chroma phase, or a JM plane-convention artifact — is interesting but
+IRRELEVANT to landing the fix: the formula reproduces JM's sample rows
+exactly, which is by definition the correct decode.)
+
+Also mirror the same change into
+`reconstruct_mbaff_b_inter_chroma` (the B twin) once validated on P.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
