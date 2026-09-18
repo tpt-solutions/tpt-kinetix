@@ -122,6 +122,14 @@ fn canlma2_poc1_mb4_bintrace() {
                     }
                 }
             }
+            if let Ok(g) = std::env::var("CANLMA2_AC_GRID") {
+                let gi: usize = g.parse().unwrap();
+                let mb = &p.macroblocks[gi];
+                eprintln!("ACCOPY grid={} cbp={:x}", gi, mb.cbp);
+                for (bi, blk) in mb.chroma_cb_coeffs.iter().enumerate() {
+                    eprintln!("ACCOPY grid={} blk={} {:?}", gi, bi, &blk[..]);
+                }
+            }
             for i in 0..p.macroblocks.len() {
                 let mb = &p.macroblocks[i];
                 let motion_str = mb

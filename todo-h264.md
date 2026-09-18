@@ -470,6 +470,45 @@ Do NOT land any geometry change without that probe output; the current
 committed state (Y 370 / U 10604 / V 10081, all suites green) is the best
 known.
 
+## SESSION #32bx ADDENDUM 10 (same continuation) — addendum 9's retraction is
+RETRACTED: the field-MB chroma band splits CONTIGUOUSLY (4+4 frame chroma
+rows), not interleaved. Decisive evidence: MB (0,6) has cbp chroma = DC-only
+(0x1a, chroma AC blocks all zero — verified via the new `CANLMA2_AC_GRID`
+harness dump), yet the reference-vs-pred residual shows per-pixel AC
+variation within single 4x4 chroma blocks ([2,2,-4,-1] on one row of a
+DC-only block is impossible) — i.e. OUR PRED is wrong, and by an amount
+consistent with sampling the wrong band rows: for 4:2:0 field MBs each
+chroma row spans an even AND an odd luma row, so the pair's 16-row chroma
+band CANNOT be split by parity-interleaving; the spec splits it CONTIGUOUSLY
+(top field MB = band rows 0-3, bottom MB = rows 4-7), exactly as addendum 6
+stated (pix_c_y = pair_row*8 + parity*4, contiguous 4 rows).
+
+THE FIX (next session, bounded):
+1. `reconstruct_mbaff_inter_chroma`: MB-half chroma = 8 cols x 4 CONTIGUOUS
+   field chroma rows. Field-plane read rows (planes() parity rows) =
+   pair_row*4 + parity*2 .. +1 (each plane row = frame chroma row
+   2*r+parity; the half's frame rows pair_row*8+parity*4 .. +3 map to two
+   plane rows) — CAREFUL: the 4 frame chroma rows of the half are
+   CONTIGUOUS frame rows, which alternate parity in planes() terms, so they
+   do NOT map to contiguous parity-plane rows; the pred must be computed in
+   FRAME chroma rows from the parity plane content (4 frame rows = parity
+   rows stride 2) or the planes() extraction changed to keep the half-band
+   contiguous. Resolve by testing both read layouts against the zero-mv
+   block (pred must equal reference chroma rows band+parity*4 .. +3).
+2. Output write: contiguous frame chroma rows pair_row*8 + parity*4 .. +3
+   (no 2*(...)+bottom).
+3. MV vertical unit: with the 4-row chroma geometry the mv_y field-qp ->
+   chroma-eighth scale is x2 (1 field qp = 2 frame chroma eighths, since the
+   field luma pel = 2 frame chroma rows)... resolve empirically together
+   with (1): candidates x1 (current) vs x2, on the zero-mv block first
+   (zero mv is scale-independent — land (1)+(2) first, then tune (3) on the
+   r1 blocks via the comparator).
+4. Luma path untouched (verified exact).
+
+Harness: `CANLMA2_AC_GRID=<grid>` dumps cbp + the 4 chroma AC coefficient
+blocks (committed) — pairs with KDBGMODE/KDBGMV for full MB-level oracle
+work.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
