@@ -747,14 +747,18 @@ mode-8 (HU, left-only) neighbours — (7,1) block 1 (cols 8-15) is an origin:
 its HU pred provably correct (left = exact block-0 recon), so the ±1..6 error
 is in the **8x8 RESIDUAL path** (CABAC 8x8 coefficient decode → inverse scan →
 dequant/IDCT). (8,1)'s 4 wrongs = its block 0 cascading from (7,1).blk1's
-recon. Suspects, in order: (a) 8x8 significant-flag context nC derivation —
-JM `read_and_store_cbp`/significance applies the rule that a NEIGHBOUR MB with
-luma_transform_size_8x8_flag==0 contributes 0 to an 8x8 block's contexts
-(jm-oracle-fresh cabac.c ~1517/1546); check our `decode_block_8x8`'s nC
-neighbour read honors it; (b) an 8x8 scan-table position error (only bites
-when coefficients land there); (c) 8x8 scaling-list slot mapping (defaults
-look right — JVT_DEFAULT_8X8 present — and only 6 of many t8 MBs are wrong,
-so a global list error is unlikely).
+recon. Suspects, REVISED after audit: (a) DEAD — 8x8 significant/last contexts are
+POSITION-indexed (no neighbour nC at all, §9.3.3.1.3.1), and our
+`decode_block_8x8` matches FFmpeg's structure exactly: field difference lives
+in the ctx BASE (last_coeff_flag_offset[MB_FIELD][cat5]: 417 frame / 451
+field) while the INC table `ff_h264_last_coeff_flag_offset_8x8` is a single
+shared 63-entry table — so entropy.rs:794 using LAST_COEFF_CTX_INC_8X8_FRAME
+in both branches is CORRECT (no field INC table exists; verified against
+ff_h264_cabac.c ~1660-1696). Remaining: (b) mpm_pred_mode_8x8's neighbour
+mode mapping (block 1's mode = raw 7 + MPM; a wrong MPM flips the mode while
+bins stay in sync), or (c) an 8x8 scan-position/dequant edge. Deciding
+either needs the coefficient-level diff: instrument JM to print MB 29
+(frame 0) blk1's 64 levels and dump our luma_coeffs_8x8[1] alongside.
 
 HARNESS CAVEAT (cost an hour): the recorder keys are (mb_x, mb_y, blk) with NO
 frame dimension — a later frame's intra MB at the same coordinates overwrites
