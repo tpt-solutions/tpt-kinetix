@@ -50,7 +50,6 @@ impl DecodeTracer for Recorder {
             self.intra.insert((mb_x, mb_y, blk), pred.to_vec());
         }
     }
-
 }
 
 fn nal_starts(annexb: &[u8]) -> Vec<usize> {
@@ -124,7 +123,11 @@ fn triage_clip() {
         let stride = *w as usize;
         let fl = stride * *h as usize * 3 / 2;
         if f.len() != fl || refyuv.len() < fl * (i + 1) {
-            eprintln!("frame {i}: size mismatch ({} vs ref {}), stopping", f.len(), fl);
+            eprintln!(
+                "frame {i}: size mismatch ({} vs ref {}), stopping",
+                f.len(),
+                fl
+            );
             break;
         }
         let r = &refyuv[fl * i..fl * (i + 1)];
@@ -152,7 +155,6 @@ fn triage_clip() {
         let stride = w as usize;
         let fl = stride * h as usize * 3 / 2;
         let r = &refyuv[fl * i..fl * (i + 1)];
-        let yl = stride * h as usize;
         eprintln!("\nfirst bad frame {i}: region map (16x16, count of wrong samples):");
         let mb_cols = stride / 16;
         let mb_rows = h as usize / 16;
@@ -185,7 +187,11 @@ fn triage_clip() {
                 if d != 0 {
                     maxd = maxd.max(d.abs());
                     if shown < 8 {
-                        eprintln!("  sample ({x},{y}) ours={} ref={} d={d:+}", f[y * stride + x], r[y * stride + x]);
+                        eprintln!(
+                            "  sample ({x},{y}) ours={} ref={} d={d:+}",
+                            f[y * stride + x],
+                            r[y * stride + x]
+                        );
                         shown += 1;
                     }
                 }
