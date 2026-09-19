@@ -728,6 +728,55 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 17 — CANLMA2 CLOSED: all 17 frames Y/U/V BIT-EXACT;
+the "luma residue" was NEVER an MC bug (addendum-16 hypothesis DEAD), and the
+JM `mbAddrX` in the KDBG* prints is PAIR-MAJOR (addr = 2*pair + half), not
+raster — every cross-walk before this session mis-attributed MBs.
+
+Method (scratch `dbg_mbaff_luma_rowshift.rs`, kept): decode CANLMA2 via
+`H264Decoder`, diff POC 1 vs the fixture `.yuv`, classify each wrong sample
+against ±1/±2 row/col shifts of the reference (338/370 explained by NO shift
+→ addendum-16's "bottom-half MC pred one plane row off" is false); a new
+`decode_with_tracer` recorder (`on_motion_comp`/`on_intra_pred`/`on_mb_parsed`
+snapshotted at the frame the decoder returns — the f0/f1 MBAFF-CELLS sections
+ambiguity resolved: f0 == POC 1, one recon per frame, 0 double-MC'd blocks)
+plus a python fit vs a rebuilt JM oracle (`ldecod_kdbgl2.exe`: KDBGL print of
+`vec1_x/vec1_y` + `list->structure/poc` added before `get_block_luma`).
+
+Truth table (JM pair-major → our (mb_x,mb_y)): (0,6) P8x8 field == JM
+cell-for-cell; (29,14) P8x8 field == JM; (0,7)/(28,15)/(29,15)/(30,15) =
+Intra4x4 == JM mb_type 6 — PARSE FULLY IN SYNC, five of the seven "wrong"
+MBs are intra. Re-attributing the interleaved 16x16 diff regions to
+mb-pair bands: EVERY wrong sample belongs to the BOTTOM MBs of field pairs,
+right-half columns only — the exact signature #32p's revert note called
+"revisit if a real diff is ever traced here": the bottom field MB's
+above-right intra edge.
+
+Root cause: `reconstruct_inter_frame_ex`'s P-slice field-intra call site
+(and the B twin in `reconstruct_b_frame_mbaff`) passed
+`up_right_mb_avail = parity == 0` — the pre-#32bi state — so a BOTTOM field
+MB's top-edge 4x4 blocks (bx_u 2/3) got top-right := replicate-T3
+("unavailable"), while the spec rule (and `reconstruct_mbaff_intra_frame`'s
+I-frame branch since #32bi) is: a FIELD MB's above-right samples sit at
+`base_y - 2`, i.e. in the pair ABOVE, always decoded → `true`.
+Verified per-sample on MB (0,7) block 3 (mode 7 VL): true pred
+(= ref − residual) = [188 199 210 216 / 193 204 213 216 / 199 210 216 217 /
+204 213 216 221] — reproduces EXACTLY from top = frame row 95 (= base_y−2)
+cols 12..18 (T4,T5,T6 = 213,221,229), while ours replicated T3=218.
+Fix: pass `true` at both inter-slice field-intra call sites (+ the
+`mbaff_field_intra_writes_interleaved_rows` unit test arg), matching the
+I-frame path. CANLMA2 POC-1: Y 370 → 0 (U/V stay 0); ALL 17 frames now
+Y/U/V 0 wrong.
+
+Gate flip (addendum-12 plan's final step) also landed: the three
+`reconstruct.rs` gate checks now share `mbaff_field_mc_enabled()`
+(**default ON**; `KINETIX_MBAFF_FIELD_MC=0` opts out to the progressive
+fallback). CANLMA2_Sony_C promoted to `itu_conformance` MANIFEST as
+**BitExact** (28 hard-checked clips, 0 failures; 17/17 frames max_diff 0,
+diff_bytes 0/8 812 800) and added to `tools/fetch-h264-conformance.sh`.
+Full suite: 269 lib + 113 integration green, clippy `-D warnings` clean,
+fmt clean.
+
 ## SESSION #32bi — MBAFF field-MB CABAC neighbour derivation (parse now in sync)
 
 Ported FFmpeg `fill_decode_neighbors` / `fill_decode_caches` for the
