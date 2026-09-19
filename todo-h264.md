@@ -728,6 +728,44 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 18 — next frontier triaged: HCAFR1_HHI_C (High
+profile, progressive, CABAC, 8×8 transform + loop filter, "Frame only" despite
+the name). New generic triage harness `tests/dbg_itu_triage.rs`
+(`TRIAGE_CLIP=<dir>`): per-frame Y/U/V wrong counts + first-bad-frame 16×16
+region map + per-MB parse info/pred dump.
+
+State: IDR (frame 0) has only **108 wrong luma samples** (max |delta| 6) in 6
+regions; frames 1..9 are 70-85k wrong (their own P/B gaps, partly cascade).
+Parse vs the shipped JM `_trc.txt` is IN SYNC for the checked MBs: MB #29 =
+(7,1) is Intra_8x8 (`transformSize8x8Flag` set, FOUR IntraPredModeLuma reads
+(5,7,7,-1), LUMA_8x8 residuals, cbp 0x1f) and our expansion pred_modes_4x4 =
+[5,5,8,8,5,5,8,8,8,8,8,8,8,8,8,8] = spec expansion of 8x8 modes [5,8,8,8] —
+raw code 7 + MPM 7 → mode 8 ✓, engine in sync.
+
+Localization: wrongs ORIGINATE in specific 8x8 blocks and cascade right via
+mode-8 (HU, left-only) neighbours — (7,1) block 1 (cols 8-15) is an origin:
+its HU pred provably correct (left = exact block-0 recon), so the ±1..6 error
+is in the **8x8 RESIDUAL path** (CABAC 8x8 coefficient decode → inverse scan →
+dequant/IDCT). (8,1)'s 4 wrongs = its block 0 cascading from (7,1).blk1's
+recon. Suspects, in order: (a) 8x8 significant-flag context nC derivation —
+JM `read_and_store_cbp`/significance applies the rule that a NEIGHBOUR MB with
+luma_transform_size_8x8_flag==0 contributes 0 to an 8x8 block's contexts
+(jm-oracle-fresh cabac.c ~1517/1546); check our `decode_block_8x8`'s nC
+neighbour read honors it; (b) an 8x8 scan-table position error (only bites
+when coefficients land there); (c) 8x8 scaling-list slot mapping (defaults
+look right — JVT_DEFAULT_8X8 present — and only 6 of many t8 MBs are wrong,
+so a global list error is unlikely).
+
+HARNESS CAVEAT (cost an hour): the recorder keys are (mb_x, mb_y, blk) with NO
+frame dimension — a later frame's intra MB at the same coordinates overwrites
+the snapshot's preds ("double recon" was frame 1's own MB (7,1), not a bug).
+The triage harness doc records this.
+
+Also: HCHP2_HHI_A is 249/250 exact (only frame 249, 33k bytes); FRExt3_Panasonic_E
+is 45 bytes / max_diff 1 (9/11 exact) — cheap follow-ups after HCAFR1's 8x8 fix.
+HCHP1_HHI_B's documented intra-4x4 DC-availability bug (manifest comment) is
+still open and likely the bulk of its 250-frame diff.
+
 ## SESSION #32bx ADDENDUM 17 — CANLMA2 CLOSED: all 17 frames Y/U/V BIT-EXACT;
 the "luma residue" was NEVER an MC bug (addendum-16 hypothesis DEAD), and the
 JM `mbAddrX` in the KDBG* prints is PAIR-MAJOR (addr = 2*pair + half), not
