@@ -1349,11 +1349,20 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
 /// parity offset — mirroring FFmpeg's doubled `mb_linesize` and parity-shifted
 /// destination (h264_slice_ref.c @n5.1 lines 2591–2598).
 ///
-/// The field-macroblock path is currently **opt-in** via
-/// `KINETIX_MBAFF_FIELD_MC=1`: intra macroblocks inside a P pair are still
+/// The field-macroblock path is **default-on** (see
+/// [`mbaff_field_mc_enabled`]); `KINETIX_MBAFF_FIELD_MC=0` opts out. Intra
+/// macroblocks inside a P pair are still
 /// reconstructed with contiguous (frame-convention) addressing, so mixing the
 /// two conventions is not yet pixel-exact on real content. Frame-coded pairs
 /// are unaffected by the gate.
+/// Whether the MBAFF field-macroblock inter/intra reconstruction path is
+/// active. Default **on** since the CANLMA2_Sony_C gate-flip (2026-09-20):
+/// set `KINETIX_MBAFF_FIELD_MC=0` to opt out and fall back to the progressive
+/// (frame-convention) reconstruction for field-coded MBs.
+fn mbaff_field_mc_enabled() -> bool {
+    std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("0")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
     macroblocks: &[Macroblock],
@@ -1435,10 +1444,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
             if mb.motion.is_some() || mb.skip {
-                if mb_aff
-                    && mb.mb_field_flag
-                    && std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1")
-                {
+                if mb_aff && mb.mb_field_flag && mbaff_field_mc_enabled() {
                     // Field macroblock inside the MBAFF frame pair: motion
                     // compensation runs in field coordinates against the
                     // parity plane; output rows land at stride-2 spacing.
@@ -1504,10 +1510,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                     );
                 }
             } else {
-                if mb_aff
-                    && mb.mb_field_flag
-                    && std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1")
-                {
+                if mb_aff && mb.mb_field_flag && mbaff_field_mc_enabled() {
                     // Intra macroblock inside a *field-coded* pair of a P
                     // slice: reconstruct at the pair's parity line with
                     // doubled vertical step and the field scan tables —
@@ -1529,7 +1532,14 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
-                        parity == 0,
+                        // Field-coded MB (top OR bottom): its top-edge blocks'
+                        // above-right samples sit at `base_y - 2`, i.e. in the
+                        // pair ABOVE, which is always fully decoded — same rule
+                        // as `reconstruct_mbaff_intra_frame`'s field branch.
+                        // (`parity == 0` here left the bottom half's top-right
+                        // 4×4 edge reading as unavailable → replicated-T3
+                        // prediction; CANLMA2_Sony_C POC-1 luma 370 → 0.)
+                        true,
                     );
                     reconstruct_chroma_at(
                         mb,
@@ -2252,7 +2262,8 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
 /// macroblock between the frame-coded path (plain `reconstruct_b_inter_luma`/
 /// `reconstruct_b_inter_chroma`) and the field-coded path (`reconstruct_mbaff_b_inter_luma`/
 /// `reconstruct_mbaff_b_inter_chroma`) based on the macroblock's
-/// `mb_field_decoding_flag`, behind the `KINETIX_MBAFF_FIELD_MC` gate.
+/// `mb_field_decoding_flag`, behind the [`mbaff_field_mc_enabled`] gate
+/// (default on; `KINETIX_MBAFF_FIELD_MC=0` opts out).
 ///
 /// For the all-frame-coded case (`mbaff_ip`/`mbaff_ibp`) every macroblock has
 /// `mb_field_flag == false`, so this collapses to the progressive B path into
@@ -2279,7 +2290,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
     let mut cb = vec![0u8; chroma_stride * (height as usize / 2)];
     let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
 
-    let gate = std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() == Ok("1");
+    let gate = mbaff_field_mc_enabled();
 
     let mut field_planes_l0: Vec<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = Vec::new();
     let mut field_planes_l1: Vec<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>> = Vec::new();
@@ -2417,7 +2428,14 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                         scaling,
                         tracer,
                         None,
-                        parity == 0,
+                        // Field-coded MB (top OR bottom): its top-edge blocks'
+                        // above-right samples sit at `base_y - 2`, i.e. in the
+                        // pair ABOVE, which is always fully decoded — same rule
+                        // as `reconstruct_mbaff_intra_frame`'s field branch.
+                        // (`parity == 0` here left the bottom half's top-right
+                        // 4×4 edge reading as unavailable → replicated-T3
+                        // prediction; CANLMA2_Sony_C POC-1 luma 370 → 0.)
+                        true,
                     );
                     reconstruct_chroma_at(
                         mb,

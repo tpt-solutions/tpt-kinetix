@@ -51,6 +51,7 @@ declare -A CLIP_GROUP=(
   [CANL1_Sony_E]=AVCv1
   [CANL2_Sony_E]=AVCv1
   [CANL3_Sony_C]=AVCv1
+  [CANLMA2_Sony_C]=AVCv1    # MBAFF (frame_adaptive) CABAC I/P
   [CACQP3_Sony_D]=AVCv1
   [CABAST3_Sony_E]=AVCv1
   [CABASTBR3_Sony_B]=AVCv1

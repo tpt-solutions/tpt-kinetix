@@ -2770,8 +2770,8 @@ impl H264Decoder {
                             sps.mb_adaptive_frame_field_flag && !header.field_pic_flag;
                         match Self::mbaff_deblock_infos(&parsed, mbaff_frame_pic) {
                             Some(mcaff_infos) => {
-                                // MBAFF frame picture: full-frame field-aware (default)
-                                // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
+                                // MBAFF frame picture: full-frame field-aware
+                                // (default) deblocking orchestrator.
                                 Self::run_mbaff_deblock(
                                     &mut recon,
                                     &mcaff_infos,
@@ -3133,8 +3133,8 @@ impl H264Decoder {
                             sps.mb_adaptive_frame_field_flag && !header.field_pic_flag;
                         match Self::mbaff_deblock_infos(&parsed, mbaff_frame_pic) {
                             Some(mcaff_infos) => {
-                                // MBAFF frame picture: full-frame field-aware (default)
-                                // orchestrator behind KINETIX_MBAFF_FIELD_MC=1.
+                                // MBAFF frame picture: full-frame field-aware
+                                // (default) deblocking orchestrator.
                                 Self::run_mbaff_deblock(
                                     &mut recon,
                                     &mcaff_infos,

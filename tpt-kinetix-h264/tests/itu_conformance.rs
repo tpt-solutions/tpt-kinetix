@@ -62,9 +62,18 @@ const MANIFEST: &[(&str, Expect)] = &[
     ("BA2_Sony_F", Expect::BitExact),     // CAVLC I/P, multi-ref (300 frames)
     ("CANL1_Sony_E", Expect::BitExact),   // CABAC I/P no loop filter
     ("CANL2_Sony_E", Expect::BitExact),   // CABAC I/P multi-ref
-    ("NL1_Sony_D", Expect::BitExact),     // CAVLC I/P no loop filter
-    ("NL2_Sony_H", Expect::BitExact),     // CAVLC I/P no loop filter, 300 frames
-    ("SVA_NL2_E", Expect::BitExact),      // CAVLC no loop filter
+    // MBAFF (frame_adaptive) CABAC I/P, 720x480 — the MBAFF flagship clip
+    // (sessions #32d..#32bx, see todo-h264.md). Bit-exact once the field-MB
+    // reconstruction chain landed: field-scan residual + Intra16x16 DC
+    // (#32bk), MBAFF CABAC neighbour derivation (#32bi), per-2x2-sub-block
+    // field chroma MC (`8b91ce9`), and the bottom-half field-MB top-right
+    // intra edge fix (P/B call sites passed `up_right_mb_avail = parity==0`
+    // where the I-frame path passes `true`; addendum 17). All 17 frames are
+    // Y/U/V byte-identical; requires the (default-on) field-MC path.
+    ("CANLMA2_Sony_C", Expect::BitExact),
+    ("NL1_Sony_D", Expect::BitExact), // CAVLC I/P no loop filter
+    ("NL2_Sony_H", Expect::BitExact), // CAVLC I/P no loop filter, 300 frames
+    ("SVA_NL2_E", Expect::BitExact),  // CAVLC no loop filter
     ("NL3_SVA_E", Expect::BitExact), // CAVLC I/P/B, spatial direct — exact once display-order reordering is on
     (
         "BA1_FT_C",
