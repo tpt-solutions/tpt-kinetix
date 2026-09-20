@@ -667,6 +667,45 @@ impl<'a> TileDecodeState<'a> {
             // `read_motion_mode`) and the inter MV stack would misread as an
             // inter neighbour's real ref/MV.
             self.splat_refmv(mi_row, mi_col, bsize, None);
+            // §7.14.4: record the block's current DeltaLF over its span. The
+            // inter path does this after its residual; this early-returning
+            // intra branch previously skipped it, leaving stale (all-zero)
+            // grid deltas for these cells — and since DeltaLF persists until
+            // a later block re-reads it, every edge whose level resolves
+            // through such a cell derived its strength from a delta that
+            // was never the block's own.
+            let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
+            let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
+            let bx0 = blk_px_x / 8;
+            let by0 = blk_px_y / 8;
+            let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+            let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
+            self.meta.record_delta_lf(bx0, by0, bx1, by1, self.delta_lf);
+            self.meta.record_delta_lf4(
+                blk_px_x / 4,
+                blk_px_y / 4,
+                (blk_px_x + bw * MI_SIZE).div_ceil(4),
+                (blk_px_y + bh * MI_SIZE).div_ceil(4),
+                self.delta_lf,
+            );
+            // Intra block: ref = INTRA_FRAME (0), modeType = 0 (§7.14.4).
+            let (lu, lv) = crate::reconstruct::chroma_lf_levels_snapshot(
+                self.lf_frame_levels,
+                self.lf_ref_deltas,
+                self.lf_mode_deltas,
+                self.lf_delta_enabled,
+                self.delta_lf,
+                0,
+                0,
+            );
+            self.meta.record_lf_level_chroma(
+                blk_px_x / 8,
+                blk_px_y / 8,
+                (blk_px_x + bw * MI_SIZE).div_ceil(8),
+                (blk_px_y + bh * MI_SIZE).div_ceil(8),
+                lu as u8,
+                lv as u8,
+            );
             return Ok(());
         }
 
@@ -1346,40 +1385,210 @@ impl<'a> TileDecodeState<'a> {
         )?;
         // Chroma planes — `inter_predict_plane` interprets the luma MV at
         // 1/16-pel for the subsampled axes.
+        //
+        // §7.11.3.4 sub-8x8 chroma (4:2:0): a leaf narrower or shorter than
+        // 8 luma px shares the parent 8x8's chroma with its siblings, and
+        // dav1d's scheme (recon_tmpl.c `is_sub8x8`) is:
+        //   * every sub-8x8 leaf runs one MC per *quadrant* it can attribute
+        //     a neighbour mv to — for an 8x4 leaf: the top half from the cell
+        //     directly above (with the above cell's mv + filters), the bottom
+        //     half from its own mv; a 4x8 leaf mirrors this with the left
+        //     cell; a 4x4 leaf fills TL from the diagonal cell (whose filter
+        //     is the running `tl_filter2d`), BL from the left cell, TR from
+        //     the above cell and BR from its own mv — every call writes a
+        //     2x2-chroma quadrant at the leaf's own chroma origin plus the
+        //     offsets, so the writes overlap the sibling quadrants and the
+        //     last leaf's writes win;
+        //   * when a quadrant's attributing cell is NOT inter-coded
+        //     (`is_sub8x8` gate fails), the leaf instead makes ONE mc over
+        //     the whole parent 8x8 chroma (`bw4 << (bw4 == ss_hor)`,
+        //     `t->bx & ~ss_hor`) with its own mv and filters.
+        // The previous per-leaf-only scheme happened to match dav1d on the
+        // 128x96 clip (coinciding mvs) and diverged on 96x64's mixed
+        // intra/inter 8x4 splits.
         let cpx_x0 = px_x0 / 2;
         let cpx_y0 = px_y0 / 2;
-        let cbw_px = (bw_px / 2).max(4);
-        let cbh_px = (bh_px / 2).max(4);
-        self.inter_predict_plane(
-            1,
-            cpx_x0,
-            cpx_y0,
-            cbw_px,
-            cbh_px,
-            &ref_names,
-            &mvs,
-            filter,
-            blend_weight,
-            mask_desc,
-            mi_row,
-            mi_col,
-            warp_model.as_ref(),
-        )?;
-        self.inter_predict_plane(
-            2,
-            cpx_x0,
-            cpx_y0,
-            cbw_px,
-            cbh_px,
-            &ref_names,
-            &mvs,
-            filter,
-            blend_weight,
-            mask_desc,
-            mi_row,
-            mi_col,
-            warp_model.as_ref(),
-        )?;
+        let cbw_px = bw_px >> self.subsampling_x as u32;
+        let cbh_px = bh_px >> self.subsampling_y as u32;
+        let is_420 = self.subsampling_x && self.subsampling_y;
+        // dav1d `has_chroma`: only the odd-parity half of a sub-8x8 pair (or
+        // the bottom-right 4x4 of a quad) owns the parent 8x8's chroma at all.
+        let has_chroma = (bw > 1 || (mi_col & 1) == 1) && (bh > 1 || (mi_row & 1) == 1);
+        let sub8x8_leaf = is_420 && (bw == 1 || bh == 1) && has_chroma;
+        if sub8x8_leaf {
+            // All sub-8x8 chroma MCs are based at the PARENT 8x8's chroma
+            // origin (dav1d's `uvdstoff` floors `t->bx/by >> ss_hor/ver`).
+            let base_x = ((mi_col & !1) * MI_SIZE - self.tile_px_x0) / 2;
+            let base_y = ((mi_row & !1) * MI_SIZE - self.tile_px_y0) / 2;
+            let mut gate = true;
+            if bw == 1 {
+                gate &= mi_col > 0
+                    && self.refmv_cell(mi_row, mi_col - 1).refs[0] > crate::inter::INTRA_FRAME;
+            }
+            if bh == 1 {
+                gate &= mi_row > 0
+                    && self.refmv_cell(mi_row - 1, mi_col).refs[0] > crate::inter::INTRA_FRAME;
+            }
+            if bw == 1 && bh == 1 {
+                gate &= mi_col > 0
+                    && mi_row > 0
+                    && self.refmv_cell(mi_row - 1, mi_col - 1).refs[0] > crate::inter::INTRA_FRAME;
+            }
+            if gate {
+                // Quadrant MCs, in dav1d's order, each at the parent chroma
+                // origin plus the running offsets.
+                let mut h_off = 0usize;
+                let mut v_off = 0usize;
+                if bw == 1 && bh == 1 {
+                    // TL quadrant from the diagonal cell; its filter is the
+                    // running `tl_filter2d` (dav1d `t->tl_4x4_filter`).
+                    let cell = self.refmv_cell(mi_row - 1, mi_col - 1);
+                    let f = self.tl_filter2d.unwrap_or((0, 0));
+                    for plane in 1..=2usize {
+                        self.inter_predict_plane(
+                            plane,
+                            base_x,
+                            base_y,
+                            cbw_px,
+                            cbh_px,
+                            &ref_names,
+                            &[cell.mv[0], Mv::default()],
+                            [f.1, f.0],
+                            blend_weight,
+                            mask_desc,
+                            mi_row,
+                            mi_col,
+                            None,
+                        )?;
+                    }
+                    v_off = 2;
+                    h_off = 2;
+                }
+                if bw == 1 {
+                    // BL quadrant from the left cell (4x4) / the whole leaf
+                    // (4x8), with the left cell's filters.
+                    let cell = self.refmv_cell(mi_row, mi_col - 1);
+                    let f = (self.filter_left[0][mi_row], self.filter_left[1][mi_row]);
+                    for plane in 1..=2usize {
+                        self.inter_predict_plane(
+                            plane,
+                            base_x,
+                            base_y + v_off,
+                            cbw_px,
+                            cbh_px,
+                            &ref_names,
+                            &[cell.mv[0], Mv::default()],
+                            [f.1, f.0],
+                            blend_weight,
+                            mask_desc,
+                            mi_row,
+                            mi_col,
+                            None,
+                        )?;
+                    }
+                    h_off = 2;
+                }
+                if bh == 1 {
+                    // TR quadrant from the above cell with the above cell's
+                    // filters.
+                    let cell = self.refmv_cell(mi_row - 1, mi_col);
+                    let f = (self.filter_above[0][mi_col], self.filter_above[1][mi_col]);
+                    for plane in 1..=2usize {
+                        self.inter_predict_plane(
+                            plane,
+                            base_x + h_off,
+                            base_y,
+                            cbw_px,
+                            cbh_px,
+                            &ref_names,
+                            &[cell.mv[0], Mv::default()],
+                            [f.1, f.0],
+                            blend_weight,
+                            mask_desc,
+                            mi_row,
+                            mi_col,
+                            None,
+                        )?;
+                    }
+                    v_off = 2;
+                }
+                // BR quadrant (or the sibling half) with the leaf's own mv
+                // and filters.
+                for plane in 1..=2usize {
+                    self.inter_predict_plane(
+                        plane,
+                        base_x + h_off,
+                        base_y + v_off,
+                        cbw_px,
+                        cbh_px,
+                        &ref_names,
+                        &mvs,
+                        filter,
+                        blend_weight,
+                        mask_desc,
+                        mi_row,
+                        mi_col,
+                        None,
+                    )?;
+                }
+            } else {
+                // Normal path: one mc over the WHOLE parent 8x8's chroma
+                // (dav1d `bw4 << (bw4 == ss_hor)`, `t->bx & ~ss_hor`) with
+                // this leaf's own mv and filters.
+                let pw = cbw_px << (bw == 1) as u32;
+                let ph = cbh_px << (bh == 1) as u32;
+                for plane in 1..=2usize {
+                    self.inter_predict_plane(
+                        plane,
+                        base_x,
+                        base_y,
+                        pw,
+                        ph,
+                        &ref_names,
+                        &mvs,
+                        filter,
+                        blend_weight,
+                        mask_desc,
+                        mi_row,
+                        mi_col,
+                        None,
+                    )?;
+                }
+            }
+            // dav1d `skip_inter_chroma_pred: t->tl_4x4_filter = filter_2d`.
+            self.tl_filter2d = Some((filter[0], filter[1]));
+        } else {
+            self.inter_predict_plane(
+                1,
+                cpx_x0,
+                cpx_y0,
+                cbw_px,
+                cbh_px,
+                &ref_names,
+                &mvs,
+                filter,
+                blend_weight,
+                mask_desc,
+                mi_row,
+                mi_col,
+                warp_model.as_ref(),
+            )?;
+            self.inter_predict_plane(
+                2,
+                cpx_x0,
+                cpx_y0,
+                cbw_px,
+                cbh_px,
+                &ref_names,
+                &mvs,
+                filter,
+                blend_weight,
+                mask_desc,
+                mi_row,
+                mi_col,
+                warp_model.as_ref(),
+            )?;
+        }
 
         // Overlapped motion compensation (§7.11.3.9) — blend the base
         // prediction with predictions from the above / left neighbours'
@@ -1441,8 +1650,12 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Inter-intra (§7.11.3.6): blend an intra prediction built from the
-        // reconstructed block edges with the inter prediction, weighted by
-        // the (sign-0) wedge mask — luma and chroma.
+        // reconstructed block edges with the inter prediction, weighted by the
+        // (sign-0) wedge mask. **Luma only** — dav1d applies `II_MASK(0, ..)`
+        // on plane 0's `dst`/stride alone and never touches planes 1-2; the
+        // previous all-plane loop blended intra prediction into U/V, corrupting
+        // chroma on every inter-intra block (visible as ±1-13 sample chroma
+        // diffs on the 128x96 inter clip's inter-intra blocks).
         if interintra_type != 0 {
             self.apply_interintra(mi_row, mi_col, bsize, interintra_mode, ii_wedge_index);
         }
@@ -1552,6 +1765,27 @@ impl<'a> TileDecodeState<'a> {
             (px_y0 + bh_px).div_ceil(4),
             ref_names[0] - 1,
             lf_mode_type,
+        );
+        // §7.14.4: the block's own final chroma levels — the chroma level
+        // cache is last-decoded-block-wins (dav1d `f->lf.level` chroma
+        // writes), so a chroma cell shared with an earlier block of a
+        // different kind keeps THIS block's level.
+        let (lu, lv) = crate::reconstruct::chroma_lf_levels_snapshot(
+            self.lf_frame_levels,
+            self.lf_ref_deltas,
+            self.lf_mode_deltas,
+            self.lf_delta_enabled,
+            self.delta_lf,
+            ref_names[0] - 1,
+            lf_mode_type,
+        );
+        self.meta.record_lf_level_chroma(
+            px_x0 / 8,
+            px_y0 / 8,
+            (px_x0 + bw_px).div_ceil(8),
+            (px_y0 + bh_px).div_ceil(8),
+            lu as u8,
+            lv as u8,
         );
         if dbg_b0 {
             eprintln!("DBG b0 post-residual rng={}", self.dec.raw_state().0);
@@ -1830,6 +2064,23 @@ impl<'a> TileDecodeState<'a> {
                 mvs[1].col,
             );
         }
+        let (lu, lv) = crate::reconstruct::chroma_lf_levels_snapshot(
+            self.lf_frame_levels,
+            self.lf_ref_deltas,
+            self.lf_mode_deltas,
+            self.lf_delta_enabled,
+            self.delta_lf,
+            ref_names[0] - 1,
+            1,
+        );
+        self.meta.record_lf_level_chroma(
+            px_x0 / 8,
+            px_y0 / 8,
+            (px_x0 + bw_px).div_ceil(8),
+            (px_y0 + bh_px).div_ceil(8),
+            lu as u8,
+            lv as u8,
+        );
         self.meta.record_lf4(
             px_x0 / 4,
             px_y0 / 4,
@@ -1837,6 +2088,23 @@ impl<'a> TileDecodeState<'a> {
             (px_y0 + bh_px).div_ceil(4),
             ref_names[0] - 1,
             1,
+        );
+        // §7.14.4: skip-mode blocks read DeltaLF just like the ordinary path
+        // (`read_delta_lf` above); record the running values for this span
+        // so edge levels resolved through these cells use them.
+        self.meta.record_delta_lf(
+            px_x0 / 8,
+            px_y0 / 8,
+            (px_x0 + bw_px).div_ceil(8),
+            (px_y0 + bh_px).div_ceil(8),
+            self.delta_lf,
+        );
+        self.meta.record_delta_lf4(
+            px_x0 / 4,
+            px_y0 / 4,
+            (px_x0 + bw_px).div_ceil(4),
+            (px_y0 + bh_px).div_ceil(4),
+            self.delta_lf,
         );
 
         let luma_tx_w = av1::TX_WIDTH[luma_tx] as u8;
@@ -2137,8 +2405,9 @@ impl<'a> TileDecodeState<'a> {
                         break;
                     }
                     let nbr_row: Vec<u8> = (0..pred_w).map(|j| obmc[i * pred_w + j]).collect();
-                    let bef_row: Vec<u8> =
-                        (0..pred_w).map(|j| before.get(i * pred_w + j).copied().unwrap_or(0)).collect();
+                    let bef_row: Vec<u8> = (0..pred_w)
+                        .map(|j| before.get(i * pred_w + j).copied().unwrap_or(0))
+                        .collect();
                     let dst_row: Vec<u8> = (0..pred_w)
                         .map(|j| {
                             let sx = px + j;
@@ -2149,7 +2418,9 @@ impl<'a> TileDecodeState<'a> {
                             }
                         })
                         .collect();
-                    eprintln!("    row={sy} nbr={nbr_row:?} before={bef_row:?} dst_after={dst_row:?}");
+                    eprintln!(
+                        "    row={sy} nbr={nbr_row:?} before={bef_row:?} dst_after={dst_row:?}"
+                    );
                 }
             }
         }
@@ -2170,7 +2441,14 @@ impl<'a> TileDecodeState<'a> {
         let bw_px = BLOCK_WIDTH[bsize];
         let bh_px = BLOCK_HEIGHT[bsize];
         let mask = crate::reconstruct::wedge::wedge_mask(bsize, false, wedge_index);
-        let mw = bw_px;
+        // Inter-intra blends ALL THREE planes (dav1d recon_tmpl.c runs the
+        // same `interintra_type` block for luma (II_MASK(0, ..)) and again
+        // per chroma plane (II_MASK(chr_layout_idx, ..)) with intra
+        // prediction built from each plane's own reconstructed edges). The
+        // chroma planes use the CHROMA-layout wedge masks (generated at
+        // chroma resolution per the spec's per-plane wedge mask process),
+        // not the sub-sampled luma mask.
+        let chroma_mask = crate::reconstruct::wedge::wedge_mask_420(bsize, false, wedge_index);
         for plane in 0..3usize {
             let (subx, suby) = if plane == 0 {
                 (0usize, 0usize)
@@ -2179,6 +2457,13 @@ impl<'a> TileDecodeState<'a> {
             };
             let pw = bw_px >> subx;
             let ph = bh_px >> suby;
+            // Per-plane mask: the luma-layout mask for plane 0, the
+            // chroma-layout mask (at chroma resolution) for planes 1-2.
+            let (plane_mask, pmw) = if plane == 0 {
+                (&mask, bw_px)
+            } else {
+                (&chroma_mask, bw_px >> self.subsampling_x as usize)
+            };
             let (pstride, tile_w, tile_h) = match plane {
                 1 => (self.uv_stride, self.tile_cw, self.tile_ch),
                 2 => (self.uv_stride, self.tile_cw, self.tile_ch),
@@ -2198,7 +2483,7 @@ impl<'a> TileDecodeState<'a> {
             if px >= tile_w || py >= tile_h {
                 continue;
             }
-            // Intra prediction from the reconstructed neighbours.
+            // Intra prediction from this plane's own reconstructed neighbours.
             let borders = crate::reconstruct::predict::block_borders(
                 plane_buf, pstride, tile_w, tile_h, pw, ph, px, py, true, false,
             );
@@ -2215,7 +2500,27 @@ impl<'a> TileDecodeState<'a> {
                 tile_w.saturating_sub(px),
                 tile_h.saturating_sub(py),
             );
-            // Blend into the tile plane.
+            if std::env::var("KINETIX_AV1_DBG_IIDUMP").is_ok() && mi_col == 4 && mi_row == 20 {
+                eprintln!(
+                    "IIDUMP plane={plane} ii_mode={ii_mode} wedge={wedge_index} pw={pw} ph={ph} intra={:?} mask={:?}",
+                    &tmp[..(pw * ph).min(32)],
+                    {
+                        let sub = if plane == 0 { 0 } else { 1 };
+                        (0..4)
+                            .map(|y| {
+                                (0..8)
+                                    .map(|x| {
+                                        mask[((y << sub).min(bh_px - 1)) * bw_px
+                                            + ((x << sub).min(bw_px - 1))]
+                                    })
+                                    .collect::<Vec<u8>>()
+                            })
+                            .collect::<Vec<Vec<u8>>>()
+                    }
+                );
+            }
+            // Blend into the tile plane. Chroma planes fetch the mask at
+            // chroma resolution from the chroma-layout table.
             let dst = match plane {
                 1 => &mut self.u_plane,
                 2 => &mut self.v_plane,
@@ -2226,14 +2531,14 @@ impl<'a> TileDecodeState<'a> {
                 if sy >= tile_h {
                     break;
                 }
-                let my = (y << suby).min(bh_px - 1);
+                let my = if plane == 0 { y } else { y.min(ph - 1) };
                 for x in 0..pw {
                     let sx = px + x;
                     if sx >= tile_w {
                         break;
                     }
-                    let mx = (x << subx).min(bw_px - 1);
-                    let m = mask[my * mw + mx] as i32;
+                    let mx = if plane == 0 { x } else { x.min(pw - 1) };
+                    let m = plane_mask[my * pmw + mx] as i32;
                     let idx = sy * pstride + sx;
                     let d = dst[idx] as i32;
                     let t = tmp[y * pw + x];
@@ -2294,6 +2599,22 @@ impl<'a> TileDecodeState<'a> {
             (3 + self.subsampling_x as u32, 3 + self.subsampling_y as u32)
         };
 
+        // Malformed / not-yet-supported streams (e.g. frame-header features
+        // this parser doesn't implement) can leave a ref name whose slot
+        // mapping is unset — reject them with an error instead of panicking.
+        if ref_names[0] as usize >= self.ref_to_slot.len()
+            || ref_names[1] as usize >= self.ref_to_slot.len()
+            || self.ref_to_slot[ref_names[0] as usize] >= 8
+            || self.ref_to_slot[ref_names[1] as usize] >= 8
+        {
+            return Err(KinetixError::Unsupported(format!(
+                "AV1 inter block references unmapped reference frame slot \
+                 (names {:?} -> slots {:?}/{:?})",
+                ref_names,
+                self.ref_to_slot.get(ref_names[0] as usize),
+                self.ref_to_slot.get(ref_names[1] as usize),
+            )));
+        }
         let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
         let slot1 = self.ref_to_slot[ref_names[1] as usize] as usize;
         let ref1_none = self.ref_slots.slots[slot1].is_none();
@@ -2379,6 +2700,13 @@ impl<'a> TileDecodeState<'a> {
                 }
                 t
             };
+            if std::env::var("KINETIX_AV1_DBG_PREDUMP").is_ok() && plane == 1 {
+                eprintln!(
+                    "PREDUMP mi=({mi_col},{mi_row}) cpx=({px_x},{px_y}) w={bw} h={bh} mv=({},{}) f=({},{}) pred={:?}",
+                    mvs[0].row, mvs[0].col, filters[0], filters[1],
+                    &tmp[..(bw * bh).min(64)]
+                );
+            }
             for dy in 0..bh {
                 let sy = px_y + dy;
                 if sy >= h {
@@ -2888,7 +3216,7 @@ impl<'a> TileDecodeState<'a> {
                         )?;
                         if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
                             eprintln!(
-                                "DBG uv-cf-blk pl={plane} tx={c_tx} txtp={} eob={} rng={}",
+                                "DBG uv-cf-blk mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} eob={} rng={}",
                                 coeffs.tx_type,
                                 coeffs.eob,
                                 self.dec.raw_state().0
@@ -2909,6 +3237,18 @@ impl<'a> TileDecodeState<'a> {
                                 self.lossless,
                                 &mut residual,
                             );
+                            if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
+                                eprintln!(
+                                    "RESDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} residual={:?}",
+                                    coeffs.tx_type,
+                                    &residual[..(cw * ch).min(64)]
+                                );
+                                eprintln!(
+                                    "COEFFDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} eob={} dequant={:?}",
+                                    coeffs.eob,
+                                    &dequant[..(cw * ch).min(64)]
+                                );
+                            }
                         }
                     }
                     for dy in 0..ch {
@@ -2926,6 +3266,24 @@ impl<'a> TileDecodeState<'a> {
                                     ((*slot as i32 + residual[dy * cw + dx]).clamp(0, 255)) as u8;
                             }
                         }
+                    }
+                    if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
+                        && mi_col == 4
+                        && mi_row == 20
+                        && cpx_x == 8
+                        && cpx_y == 40
+                        && plane == 1
+                    {
+                        eprintln!(
+                            "POSTADD u rows40-43 cols8-15: {:?}",
+                            (0..4)
+                                .map(|r| {
+                                    (0..8)
+                                        .map(|c| dst[(40 + r) * stride + 8 + c])
+                                        .collect::<Vec<u8>>()
+                                })
+                                .collect::<Vec<Vec<u8>>>()
+                        );
                     }
                 }
             }

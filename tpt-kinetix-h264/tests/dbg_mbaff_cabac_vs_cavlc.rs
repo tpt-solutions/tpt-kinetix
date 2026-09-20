@@ -187,6 +187,7 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
             t8,
             true, // mb_aff
             false,
+            false,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         )
     };

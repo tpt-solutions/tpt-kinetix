@@ -5,7 +5,7 @@ use tpt_kinetix_h264::bitreader::BitReader;
 use tpt_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
 use tpt_kinetix_h264::pps::PicParameterSet;
 use tpt_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
-use tpt_kinetix_h264::slice_data::parse_i_slice;
+use tpt_kinetix_h264::slice_data::parse_i_slice_single;
 use tpt_kinetix_h264::sps::SeqParameterSet;
 use tpt_kinetix_h264::trace::{DecodeTracer, TracePlane};
 
@@ -168,7 +168,7 @@ fn mandelbrot_iframe_cavlc_trace() {
     reader.seek_to_bit(header.data_bit_offset);
 
     let mut tracer = Recorder::default();
-    let result = parse_i_slice(
+    let result = parse_i_slice_single(
         &mut reader,
         mb_cols,
         mb_rows,

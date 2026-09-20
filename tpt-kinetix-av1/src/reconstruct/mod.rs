@@ -776,6 +776,13 @@ struct TileDecodeState<'a> {
     current_q_index: u8,
     /// `DeltaLF[FRAME_LF_COUNT]` (§5.11.19), reset to 0 once per tile.
     delta_lf: [i8; 4],
+    /// Snapshot of the frame header's loop-filter parameters (§6.8.13),
+    /// needed by the block decode paths to compute each block's own final
+    /// chroma deblock level for the `FrameMeta::lf_level_u4`/`_v4` caches.
+    lf_frame_levels: [u8; 4],
+    lf_ref_deltas: [i8; 8],
+    lf_mode_deltas: [i8; 2],
+    lf_delta_enabled: bool,
     /// `ReadDeltas` (§5.11.4's `decode_tile()`): true only for the first
     /// coded block of each superblock (when `delta_q_present`), forced back
     /// to false immediately after `read_delta_lf` regardless of whether that
@@ -819,6 +826,12 @@ struct TileDecodeState<'a> {
     order_hint_bits: u8,
     cur_order_hint: u8,
     dpb_order_hints: [u8; 8],
+    /// dav1d `t->tl_4x4_filter`: the interpolation-filter pair (dir0 vertical,
+    /// dir1 horizontal) of the most recently decoded inter block, used as the
+    /// diagonal quadrant's filter in the §7.11.3.4 sub-8x8 chroma scheme.
+    /// Set at the end of every inter leaf's chroma prediction; never touched
+    /// by intra leaves.
+    tl_filter2d: Option<(u8, u8)>,
     /// `skip_mode_present` / `SkipModeFrame[0..2]` (§6.8.2 / §7.4.13): a
     /// skip-mode block reads one `skip_mode` symbol, then predicts (compound,
     /// no residual) from this fixed forward/backward reference pair.
@@ -1002,6 +1015,10 @@ impl<'a> TileDecodeState<'a> {
         tile_w: usize,
         tile_h: usize,
         monochrome: bool,
+        lf_levels: [u8; 4],
+        lf_ref_deltas: [i8; 8],
+        lf_mode_deltas: [i8; 2],
+        lf_delta_enabled: bool,
         segmentation_enabled: bool,
         seg_feature_skip: bool,
         #[allow(dead_code)] seg_feature_alt_q: bool,
@@ -1121,6 +1138,10 @@ impl<'a> TileDecodeState<'a> {
             num_planes: if monochrome { 1 } else { 3 },
             current_q_index: qindex,
             delta_lf: [0i8; 4],
+            lf_frame_levels: lf_levels,
+            lf_ref_deltas: lf_ref_deltas,
+            lf_mode_deltas: lf_mode_deltas,
+            lf_delta_enabled: lf_delta_enabled,
             read_deltas: false,
             cdef_idx: std::collections::HashMap::new(),
             frame_is_intra,
@@ -1169,6 +1190,7 @@ impl<'a> TileDecodeState<'a> {
             mv_left: vec![[Mv::default(); 2]; mi_rows],
             refmv_grid: vec![RefMvCell::default(); mi_cols * mi_rows],
             refmv_stride: mi_cols,
+            tl_filter2d: None,
             y_plane,
             u_plane,
             v_plane,
@@ -1413,6 +1435,39 @@ impl<'a> TileDecodeState<'a> {
 /// self-inconsistent, which means the decoder has lost sync with the
 /// bitstream and the rest of the tile cannot be trusted.
 #[allow(clippy::too_many_arguments)]
+/// This block's own final U/V deblock levels (§7.14.4) — the values the
+/// block writes into the chroma level cache.
+pub(crate) fn chroma_lf_levels_snapshot(
+    lf_frame_levels: [u8; 4],
+    lf_ref_deltas: [i8; 8],
+    lf_mode_deltas: [i8; 2],
+    lf_delta_enabled: bool,
+    delta_lf: [i8; 4],
+    ref_idx: u8,
+    mode_type: u8,
+) -> (i32, i32) {
+    (
+        crate::loop_filter::compute_level_parts(
+            lf_frame_levels[2],
+            lf_delta_enabled,
+            &lf_ref_deltas,
+            &lf_mode_deltas,
+            i32::from(delta_lf[2]),
+            ref_idx as usize,
+            mode_type as usize,
+        ),
+        crate::loop_filter::compute_level_parts(
+            lf_frame_levels[3],
+            lf_delta_enabled,
+            &lf_ref_deltas,
+            &lf_mode_deltas,
+            i32::from(delta_lf[3]),
+            ref_idx as usize,
+            mode_type as usize,
+        ),
+    )
+}
+
 pub fn decode_tile_group(
     data: &[u8],
     width: usize,
@@ -1432,6 +1487,10 @@ pub fn decode_tile_group(
     uv_stride: usize,
     tx_mode_select: bool,
     reduced_tx_set: bool,
+    lf_levels: [u8; 4],
+    lf_ref_deltas: [i8; 8],
+    lf_mode_deltas: [i8; 2],
+    lf_delta_enabled: bool,
     segmentation_enabled: bool,
     seg_feature_skip: bool,
     seg_feature_alt_q: bool,
@@ -1548,6 +1607,10 @@ pub fn decode_tile_group(
         tile_w,
         tile_h,
         false,
+        lf_levels,
+        lf_ref_deltas,
+        lf_mode_deltas,
+        lf_delta_enabled,
         segmentation_enabled,
         seg_feature_skip,
         seg_feature_alt_q,
@@ -1837,7 +1900,29 @@ fn build_temporal_fields(ref_store: Option<&RefFrameStore>) -> [Option<&MotionFi
 /// What one decoded AV1 frame hands back to the decoder: the frame itself
 /// (plus its optional motion field) and the post-decode CDF context for the
 /// §6.8.2 per-slot context save.
-pub type ReconstructOutput = (VideoFrame, Option<MotionField>, Option<FrameCdfContext>);
+pub type ReconstructOutput = (
+    VideoFrame,
+    Option<MotionField>,
+    Option<FrameCdfContext>,
+    Option<PaddedPlanes>,
+);
+
+/// The just-decoded frame's planes at the **mi-grid extent**
+/// (`MiCols*4 × MiRows*4` — e.g. 160×92 for a 160×90 frame). The last
+/// superblock row reconstructs into the padding rows too, and motion
+/// compensation for bottom-edge blocks reads them (dav1d's references are
+/// padded the same way). The visible crop is `real_width × real_height`.
+pub struct PaddedPlanes {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    /// Plane stride = `grid_width` (planes are dense).
+    pub stride: usize,
+    pub grid_width: usize,
+    pub grid_height: usize,
+    pub real_width: usize,
+    pub real_height: usize,
+}
 
 pub fn reconstruct_av1_frame(
     obus: &[(u8, Vec<u8>)],
@@ -1874,14 +1959,23 @@ pub fn reconstruct_av1_frame(
 
     let width = frame_header.width as usize;
     let height = frame_header.height as usize;
-    let y_size = width * height;
-    let uv_w = width / 2;
-    let uv_h = height / 2;
-    let uv_size = uv_w * uv_h;
+    // §5.9.15: the mode-info grid rounds the frame up to 8-pixel multiples
+    // (`MiCols = 2*ceil(W/8)`, `MiRows = 2*ceil(H/8)`) — NOT plain `ceil/4`.
+    // The last superblock row/col reconstructs into the padding rows/columns
+    // (they exist in dav1d's picture buffer and are read by motion
+    // compensation for bottom/right-edge blocks), so everything downstream —
+    // tile planes, context grids, the reference pictures — uses the grid
+    // extent; only the final output crop is the visible frame.
+    let mi_cols = 2 * width.div_ceil(8);
+    let mi_rows = 2 * height.div_ceil(8);
+    let grid_w = mi_cols * MI_SIZE;
+    let grid_h = mi_rows * MI_SIZE;
+    let uv_grid_w = grid_w / 2;
+    let uv_grid_h = grid_h / 2;
 
-    let mut y_plane = vec![128u8; y_size];
-    let mut u_plane = vec![128u8; uv_size];
-    let mut v_plane = vec![128u8; uv_size];
+    let mut y_plane = vec![128u8; grid_w * grid_h];
+    let mut u_plane = vec![128u8; uv_grid_w * uv_grid_h];
+    let mut v_plane = vec![128u8; uv_grid_w * uv_grid_h];
 
     // Collect tile group payloads
     let mut tile_payloads: Vec<Vec<u8>> = Vec::new();
@@ -1919,19 +2013,18 @@ pub fn reconstruct_av1_frame(
     }
 
     if tile_payloads.is_empty() {
-        let mut data = y_plane;
-        data.extend(u_plane);
-        data.extend(v_plane);
+        let cropped = crop_planes(&y_plane, &u_plane, &v_plane, grid_w, width, height);
         return Ok(Some((
             VideoFrame {
                 pts: Timestamp::NONE,
                 dts: Timestamp::NONE,
-                data,
+                data: cropped,
                 width: frame_header.width,
                 height: frame_header.height,
                 pixel_format: PixelFormat::Yuv420p,
                 is_key_frame: true,
             },
+            None,
             None,
             None,
         )));
@@ -1946,8 +2039,8 @@ pub fn reconstruct_av1_frame(
         64
     };
     let sb_mi = sb_size / MI_SIZE;
-    let sb_cols_mi = (width.div_ceil(MI_SIZE)).div_ceil(sb_mi);
-    let sb_rows_mi = (height.div_ceil(MI_SIZE)).div_ceil(sb_mi);
+    let sb_cols_mi = mi_cols.div_ceil(sb_mi);
+    let sb_rows_mi = mi_rows.div_ceil(sb_mi);
     let tile_w_sb = sb_cols_mi.div_ceil(tile_cols);
     let tile_h_sb = sb_rows_mi.div_ceil(tile_rows);
 
@@ -1971,7 +2064,9 @@ pub fn reconstruct_av1_frame(
         meta: FrameMeta,
     }
 
-    // Per-tile geometry, shared across the parallel worker closure.
+    // Per-tile geometry, shared across the parallel worker closure. Tiles
+    // cover the mi-grid extent (grid_w × grid_h), not the visible frame —
+    // the last superblock row/col reconstructs into the padding too.
     let geometry: Vec<(usize, usize, usize, usize)> = (0..tile_payloads.len())
         .map(|i| {
             let tc = (i % tile_cols).min(tile_cols - 1);
@@ -1980,10 +2075,10 @@ pub fn reconstruct_av1_frame(
             let sb_col_end = ((tc + 1) * tile_w_sb).min(sb_cols_mi);
             let sb_row_start = tr * tile_h_sb;
             let sb_row_end = ((tr + 1) * tile_h_sb).min(sb_rows_mi);
-            let x0 = (sb_col_start * sb_size).min(width);
-            let y0 = (sb_row_start * sb_size).min(height);
-            let x1 = (sb_col_end * sb_size).min(width);
-            let y1 = (sb_row_end * sb_size).min(height);
+            let x0 = (sb_col_start * sb_size).min(grid_w);
+            let y0 = (sb_row_start * sb_size).min(grid_h);
+            let x1 = (sb_col_end * sb_size).min(grid_w);
+            let y1 = (sb_row_end * sb_size).min(grid_h);
             (x0, y0, x1, y1)
         })
         .collect();
@@ -2006,8 +2101,8 @@ pub fn reconstruct_av1_frame(
 
             let decoded_cdfs = decode_tile_group(
                 payload,
-                width,
-                height,
+                grid_w,
+                grid_h,
                 frame_header.bit_depth,
                 frame_header.base_q_idx,
                 DeltaQ {
@@ -2029,6 +2124,10 @@ pub fn reconstruct_av1_frame(
                 tw / 2,
                 frame_header.tx_mode_select,
                 frame_header.reduced_tx_set,
+                frame_header.loop_filter_level,
+                frame_header.loop_filter_deltas.loop_filter_ref_deltas,
+                frame_header.loop_filter_deltas.loop_filter_mode_deltas,
+                frame_header.loop_filter_delta_enabled,
                 frame_header.segmentation_enabled,
                 false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
                 false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
@@ -2098,12 +2197,12 @@ pub fn reconstruct_av1_frame(
         .collect();
 
     // Blit each finished tile back into the master planes; merge motion fields
-    // and per-block filter metadata into full-frame aggregates.
-    let mi_cols = width.div_ceil(MI_SIZE);
-    let mi_rows = height.div_ceil(MI_SIZE);
+    // and per-block filter metadata into full-frame aggregates. The master
+    // planes are at the mi-grid extent and tiles are grid-clipped, so the
+    // blit is a straight copy (no visible-area clipping — padding rows stay).
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     let mut frame_cdf_context: Option<FrameCdfContext> = None;
-    let mut frame_meta = FrameMeta::new(width, height);
+    let mut frame_meta = FrameMeta::new(grid_w, grid_h);
     for tile in decoded {
         let tile = tile?;
         // §6.8.2: the saved context comes from the `contextUpdateTileId` tile
@@ -2113,13 +2212,13 @@ pub fn reconstruct_av1_frame(
         }
         let tw = tile.x1 - tile.x0;
         for (dy, sy) in (tile.y0..tile.y1).enumerate() {
-            let dst = &mut y_plane[sy * width + tile.x0..sy * width + tile.x1];
+            let dst = &mut y_plane[sy * grid_w + tile.x0..sy * grid_w + tile.x1];
             let src = &tile.y[dy * tw..(dy + 1) * tw];
             dst.copy_from_slice(src);
         }
         for (src_plane, dst_plane) in [(&tile.u, &mut u_plane), (&tile.v, &mut v_plane)] {
             for (dy, sy) in (tile.y0 / 2..tile.y1.div_ceil(2)).enumerate() {
-                let drow = sy * uv_w + tile.x0 / 2;
+                let drow = sy * uv_grid_w + tile.x0 / 2;
                 let srow = dy * (tw / 2);
                 dst_plane[drow..drow + tw / 2].copy_from_slice(&src_plane[srow..srow + tw / 2]);
             }
@@ -2147,14 +2246,16 @@ pub fn reconstruct_av1_frame(
 
     // Phase D: full-frame in-loop post-filters (deblock → CDEF → LR).
     // Running on the assembled frame — not per-tile — matches the AV1 spec
-    // §7.14 requirement that deblocking crosses tile boundaries.
+    // §7.14 requirement that deblocking crosses tile boundaries. dav1d filters
+    // the full superblock-aligned picture (padding rows included), so the
+    // filters run over the grid extent here as well.
     if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
         let _ = apply_post_filters(
             &mut y_plane,
             &mut u_plane,
             &mut v_plane,
-            width,
-            height,
+            grid_w,
+            grid_h,
             true,
             true,
             &frame_meta,
@@ -2177,9 +2278,36 @@ pub fn reconstruct_av1_frame(
         None
     };
 
-    let mut data = y_plane;
-    data.extend(u_plane);
-    data.extend(v_plane);
+    let padded = PaddedPlanes {
+        y: y_plane.clone(),
+        u: u_plane.clone(),
+        v: v_plane.clone(),
+        stride: grid_w,
+        grid_width: grid_w,
+        grid_height: grid_h,
+        real_width: width,
+        real_height: height,
+    };
+    if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() {
+        let nm = std::env::var("KINETIX_AV1_DUMP_GRID").unwrap_or_default();
+        let mut blob = Vec::with_capacity(grid_w * grid_h * 3 / 2);
+        for r in 0..grid_h {
+            blob.extend_from_slice(&padded.y[r * grid_w..r * grid_w + grid_w]);
+        }
+        let uv_w = grid_w / 2;
+        let uv_h = grid_h / 2;
+        for pl in [&padded.u, &padded.v] {
+            for r in 0..uv_h {
+                blob.extend_from_slice(&pl[r * uv_w..r * uv_w + uv_w]);
+            }
+        }
+        static GRID_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = GRID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = format!("{}/kgr_{:02}.yuv", nm, seq);
+        let _ = std::fs::write(&path, &blob);
+        eprintln!("dumped {path} ({} bytes)", blob.len());
+    }
+    let data = crop_planes(&padded.y, &padded.u, &padded.v, grid_w, width, height);
 
     Ok(Some((
         VideoFrame {
@@ -2193,5 +2321,30 @@ pub fn reconstruct_av1_frame(
         },
         motion_field,
         frame_cdf_context,
+        Some(padded),
     )))
+}
+
+/// Crop mi-grid-extent planes (dense, `grid_w` stride) down to the visible
+/// `width × height` frame, packed Y then U then V.
+fn crop_planes(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    grid_w: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(width * height * 3 / 2);
+    for row in 0..height {
+        data.extend_from_slice(&y[row * grid_w..row * grid_w + width]);
+    }
+    let uw = grid_w / 2;
+    for row in 0..height.div_ceil(2) {
+        data.extend_from_slice(&u[row * uw..row * uw + width / 2]);
+    }
+    for row in 0..height.div_ceil(2) {
+        data.extend_from_slice(&v[row * uw..row * uw + width / 2]);
+    }
+    data
 }

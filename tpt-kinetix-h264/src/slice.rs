@@ -140,6 +140,9 @@ pub struct SliceHeader {
     pub idr_pic_id: Option<u32>,
     /// Present when `pic_order_cnt_type == 0`.
     pub pic_order_cnt_lsb: Option<u32>,
+    /// `delta_pic_order_cnt[0]` (§7.3.3, POC type 1) — feeds the §8.2.1.2
+    /// `ExpectedPicOrderCnt` adjustment; `None` for POC types 0/2.
+    pub delta_pic_order_cnt_0: Option<i64>,
     /// `delta_pic_order_cnt_bottom` (§7.3.3) — read from the bitstream for
     /// *frame* pictures only when `bottom_field_pic_order_in_frame_present_flag`
     /// is set; it derives `BottomFieldOrderCnt` via §8.2.1.1. Always `None` for
@@ -373,6 +376,7 @@ impl SliceHeader {
         };
 
         let mut pic_order_cnt_lsb = None;
+        let mut delta_pic_order_cnt_0: Option<i64> = None;
         let mut delta_pic_order_cnt_bottom: Option<i64> = None;
         if ctx.pic_order_cnt_type == 0 {
             let bits = (ctx.log2_max_pic_order_cnt_lsb_minus4 + 4) as u8;
@@ -385,9 +389,12 @@ impl SliceHeader {
                     Some(r.read_se().context("delta_pic_order_cnt_bottom")? as i64);
             }
         } else if ctx.pic_order_cnt_type == 1 && !ctx.delta_pic_order_always_zero_flag {
-            let _d0 = r.read_se().context("delta_pic_order_cnt[0]")?;
+            delta_pic_order_cnt_0 = Some(r.read_se().context("delta_pic_order_cnt[0]")? as i64);
+            // `delta_pic_order_cnt[1]` exists only for frame pictures; stored
+            // in `delta_pic_order_cnt_bottom` (same syntactic slot).
             if ctx.bottom_field_pic_order_in_frame_present_flag && !field_pic_flag {
-                let _d1 = r.read_se().context("delta_pic_order_cnt[1]")?;
+                delta_pic_order_cnt_bottom =
+                    Some(r.read_se().context("delta_pic_order_cnt[1]")? as i64);
             }
         }
 
@@ -507,6 +514,7 @@ impl SliceHeader {
             bottom_field_flag,
             idr_pic_id,
             pic_order_cnt_lsb,
+            delta_pic_order_cnt_0,
             delta_pic_order_cnt_bottom,
             slice_qp_delta,
             num_ref_idx_l0_active_minus1,

@@ -173,6 +173,7 @@ fn dump(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
             false,
             false,
             false,
+            false,
             &mut tpt_kinetix_h264::trace::NoopTracer,
         )
         .expect("cavlc parse")

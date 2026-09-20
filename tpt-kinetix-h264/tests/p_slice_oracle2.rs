@@ -413,6 +413,7 @@ fn oracle_mismatches(annexb: &[u8]) -> usize {
         false,
         false,
         false,
+        false,
         &mut rec,
     );
     let decoder_coeffs = rec.map.into_inner().unwrap();

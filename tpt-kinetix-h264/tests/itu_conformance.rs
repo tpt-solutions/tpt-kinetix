@@ -75,12 +75,16 @@ const MANIFEST: &[(&str, Expect)] = &[
     ("NL2_Sony_H", Expect::BitExact), // CAVLC I/P no loop filter, 300 frames
     ("SVA_NL2_E", Expect::BitExact),  // CAVLC no loop filter
     ("NL3_SVA_E", Expect::BitExact), // CAVLC I/P/B, spatial direct — exact once display-order reordering is on
-    (
-        "BA1_FT_C",
-        Expect::KnownGap(
-            "CIF I/P — frame 0 already wrong (max_diff 127) + 2x frame count; structural",
-        ),
-    ),
+    // Promoted to BitExact 2026-09-20 (session #32bz): CAVLC I/P multi-slice
+    // CIF (290 pictures, up to 10 slices each — "FT" is a misnomer, the
+    // readme says Frame coding). Previously every frame scaffolded: the
+    // decoder's CAVLC paths were single-slice-only, so multi-slice pictures
+    // either EOF'd (I slices) or decoded slice 0 and skipped the rest (P).
+    // Multi-slice CAVLC accumulation (shared PictureAccumulator + slice-aware
+    // neighbour contexts + per-slice ref lists, mirroring the CABAC I path)
+    // plus §8.3.1.1 constrained_intra_pred availability (this stream is
+    // constrained) landed 2026-09-20. 299/299 frames byte-exact.
+    ("BA1_FT_C", Expect::BitExact),
     // CAVLC I/P/B spatial-direct, 5 refs. Two spatial-direct bugs fixed
     // 2026-09-05 (B_8x8 direct/explicit interleaving order + col_zero_flag
     // corner-index formula) got diff_bytes to 1899->520 (max 112->4); the

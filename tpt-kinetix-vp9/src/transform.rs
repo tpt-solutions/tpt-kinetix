@@ -15,12 +15,6 @@ fn rsh14(v: i64) -> i32 {
     ((v + C1) >> 14) as i32
 }
 
-#[inline]
-fn rsh14_u(v: u32) -> i32 {
-    // (int)(value computed in unsigned arithmetic) >> 14, as in the reference
-    (v as i32) >> 14
-}
-
 fn idct4_1d(inp: &[i32], out: &mut [i32]) {
     let i = |x: usize| inp[x];
     let t0 = rsh14((i(0) + i(2)) as i64 * 11585);
@@ -78,65 +72,68 @@ fn idct8_1d(inp: &[i32], out: &mut [i32]) {
 }
 
 fn iadst8_1d(inp: &[i32], out: &mut [i32]) {
-    let i = |x: usize| inp[x] as i64;
-    let t0a = 16305 * i(7) + 1606 * i(0);
-    let t1a = 1606 * i(7) - 16305 * i(0);
-    let t2a = 14449 * i(5) + 7723 * i(2);
-    let t3a = 7723 * i(5) - 14449 * i(2);
-    let t4a = 10394 * i(3) + 12665 * i(4);
-    let t5a = 12665 * i(3) - 10394 * i(4);
-    let t6a = 4756 * i(1) + 15679 * i(6);
-    let t7a = 15679 * i(1) - 4756 * i(6);
+    // Literal port of libvpx iadst8_c, including its input permutation
+    // (x0 = in[7], x1 = in[0], ...) and per-stage rounding.
+    let mut x0 = inp[7] as i64;
+    let mut x1 = inp[0] as i64;
+    let mut x2 = inp[5] as i64;
+    let mut x3 = inp[2] as i64;
+    let mut x4 = inp[3] as i64;
+    let mut x5 = inp[4] as i64;
+    let mut x6 = inp[1] as i64;
+    let mut x7 = inp[6] as i64;
 
-    let t0 = ((t0a + t4a + C1) >> 14) as i32;
-    let t1 = ((t1a + t5a + C1) >> 14) as i32;
-    let t2 = ((t2a + t6a + C1) >> 14) as i32;
-    let t3 = ((t3a + t7a + C1) >> 14) as i32;
-    let t4 = ((t0a - t4a + C1) >> 14) as i32;
-    let t5 = ((t1a - t5a + C1) >> 14) as i32;
-    let t6 = ((t2a - t6a + C1) >> 14) as i32;
-    let t7 = ((t3a - t7a + C1) >> 14) as i32;
+    // stage 1
+    let s0 = 16305 * x0 + 1606 * x1;
+    let s1 = 1606 * x0 - 16305 * x1;
+    let s2 = 14449 * x2 + 7723 * x3;
+    let s3 = 7723 * x2 - 14449 * x3;
+    let s4 = 10394 * x4 + 12665 * x5;
+    let s5 = 12665 * x4 - 10394 * x5;
+    let s6 = 4756 * x6 + 15679 * x7;
+    let s7 = 15679 * x6 - 4756 * x7;
+    x0 = i64::from(rsh14(s0 + s4));
+    x1 = i64::from(rsh14(s1 + s5));
+    x2 = i64::from(rsh14(s2 + s6));
+    x3 = i64::from(rsh14(s3 + s7));
+    x4 = i64::from(rsh14(s0 - s4));
+    x5 = i64::from(rsh14(s1 - s5));
+    x6 = i64::from(rsh14(s2 - s6));
+    x7 = i64::from(rsh14(s3 - s7));
 
-    // The reference computes this stage in unsigned arithmetic; reproduce the
-    // exact wrap-then-reinterpret semantics.
-    let (t4u, t5u, t6u, t7u) = (t4 as u32, t5 as u32, t6 as u32, t7 as u32);
-    let ta = 15137u32
-        .wrapping_mul(t4u)
-        .wrapping_add(6270u32.wrapping_mul(t5u));
-    let tb = 6270u32
-        .wrapping_mul(t4u)
-        .wrapping_sub(15137u32.wrapping_mul(t5u));
-    let tc = 15137u32
-        .wrapping_mul(t7u)
-        .wrapping_sub(6270u32.wrapping_mul(t6u));
-    let td = 6270u32
-        .wrapping_mul(t7u)
-        .wrapping_add(15137u32.wrapping_mul(t6u));
+    // stage 2
+    let s0 = x0;
+    let s1 = x1;
+    let s2 = x2;
+    let s3 = x3;
+    let s4 = 15137 * x4 + 6270 * x5;
+    let s5 = 6270 * x4 - 15137 * x5;
+    let s6 = -6270 * x6 + 15137 * x7;
+    let s7 = 15137 * x6 + 6270 * x7;
+    let u0 = s0 + s2;
+    let u1 = s1 + s3;
+    let v2 = s0 - s2;
+    let v3 = s1 - s3;
+    let x4 = i64::from(rsh14(s4 + s6));
+    let x5 = i64::from(rsh14(s5 + s7));
+    let x6 = i64::from(rsh14(s4 - s6));
+    let x7 = i64::from(rsh14(s5 - s7));
 
-    out[0] = t0 + t2;
-    out[7] = -(t1 + t3);
-    let t2 = t0 - t2;
-    let t3 = t1 - t3;
+    // stage 3
+    let x2 = i64::from(rsh14(11585 * (v2 + v3)));
+    let x3 = i64::from(rsh14(11585 * (v2 - v3)));
+    let x6n = i64::from(rsh14(11585 * (x6 + x7)));
+    let x7n = i64::from(rsh14(11585 * (x6 - x7)));
+    let (x6, x7) = (x6n, x7n);
 
-    let u = |v: u32| v.wrapping_add(1 << 13);
-    out[1] = -rsh14_u(u(ta).wrapping_add(tc));
-    out[6] = rsh14_u(u(tb).wrapping_add(td));
-    let t6 = rsh14_u(u(ta).wrapping_sub(tc));
-    let t7 = rsh14_u(u(tb).wrapping_sub(td));
-
-    out[3] = -rsh14_signed_mul(t2, t3, true);
-    out[4] = rsh14_signed_mul(t2, t3, false);
-    out[2] = rsh14_signed_mul(t6, t7, false);
-    out[5] = rsh14_signed_mul(t6, t7, true);
-}
-
-/// `(a ± b) * 11585` with the reference's unsigned-multiply-then-shift
-/// semantics.
-#[inline]
-fn rsh14_signed_mul(a: i32, b: i32, minus: bool) -> i32 {
-    let d = if minus { a - b } else { a + b };
-    let v = (d as i64 * 11585) as u32;
-    rsh14_u(v.wrapping_add(1 << 13))
+    out[0] = u0 as i32;
+    out[1] = -x4 as i32;
+    out[2] = x6 as i32;
+    out[3] = -x2 as i32;
+    out[4] = x3 as i32;
+    out[5] = -x7 as i32;
+    out[6] = x5 as i32;
+    out[7] = -u1 as i32;
 }
 
 fn idct16_1d(inp: &[i32], out: &mut [i32]) {
@@ -222,150 +219,6 @@ fn idct16_1d(inp: &[i32], out: &mut [i32]) {
     out[13] = t2a - t13a;
     out[14] = t1a - t14;
     out[15] = t0a - t15a;
-}
-
-fn iadst16_1d(inp: &[i32], out: &mut [i32]) {
-    let i = |x: usize| inp[x] as i64;
-    let u = |v: u32| v.wrapping_add(1 << 13);
-    let ur = |v: u32| rsh14_u(u(v));
-    let rr = |v: i64| rsh14(v);
-
-    let t0 = i(15) * 16364 + i(0) * 804;
-    let t1 = i(15) * 804 - i(0) * 16364;
-    let t2 = i(13) * 15893 + i(2) * 3981;
-    let t3 = i(13) * 3981 - i(2) * 15893;
-    let t4 = i(11) * 14811 + i(4) * 7005;
-    let t5 = i(11) * 7005 - i(4) * 14811;
-    let t6 = i(9) * 13160 + i(6) * 9760;
-    let t7 = i(9) * 9760 - i(6) * 13160;
-    let t8 = i(7) * 11003 + i(8) * 12140;
-    let t9 = i(7) * 12140 - i(8) * 11003;
-    let t10 = i(5) * 8423 + i(10) * 14053;
-    let t11 = i(5) * 14053 - i(10) * 8423;
-    let t12 = i(3) * 5520 + i(12) * 15426;
-    let t13 = i(3) * 15426 - i(12) * 5520;
-    let t14 = i(1) * 2404 + i(14) * 16207;
-    let t15 = i(1) * 16207 - i(14) * 2404;
-
-    let t0a = rr(t0 + t8);
-    let t1a = rr(t1 + t9);
-    let t2a = rr(t2 + t10);
-    let t3a = rr(t3 + t11);
-    let t4a = rr(t4 + t12);
-    let t5a = rr(t5 + t13);
-    let t6a = rr(t6 + t14);
-    let t7a = rr(t7 + t15);
-    let t8a = rr(t0 - t8);
-    let t9a = rr(t1 - t9);
-    let t10a = rr(t2 - t10);
-    let t11a = rr(t3 - t11);
-    let t12a = rr(t4 - t12);
-    let t13a = rr(t5 - t13);
-    let t14a = rr(t6 - t14);
-    let t15a = rr(t7 - t15);
-
-    let (t8u, t9u, t10u, t11u, t12u, t13u, t14u, t15u) = (
-        t8a as u32,
-        t9a as u32,
-        t10a as u32,
-        t11a as u32,
-        t12a as u32,
-        t13a as u32,
-        t14a as u32,
-        t15a as u32,
-    );
-    let u8s = 16069u32
-        .wrapping_mul(t8u)
-        .wrapping_add(3196u32.wrapping_mul(t9u));
-    let u9s = 3196u32
-        .wrapping_mul(t8u)
-        .wrapping_sub(16069u32.wrapping_mul(t9u));
-    let u10s = 9102u32
-        .wrapping_mul(t10u)
-        .wrapping_add(13623u32.wrapping_mul(t11u));
-    let u11s = 13623u32
-        .wrapping_mul(t10u)
-        .wrapping_sub(9102u32.wrapping_mul(t11u));
-    let u12s = 16069u32
-        .wrapping_mul(t13u)
-        .wrapping_sub(3196u32.wrapping_mul(t12u));
-    let u13s = 3196u32
-        .wrapping_mul(t13u)
-        .wrapping_add(16069u32.wrapping_mul(t12u));
-    let u14s = 9102u32
-        .wrapping_mul(t15u)
-        .wrapping_sub(13623u32.wrapping_mul(t14u));
-    let u15s = 13623u32
-        .wrapping_mul(t15u)
-        .wrapping_add(9102u32.wrapping_mul(t14u));
-
-    let t0 = t0a + t4a;
-    let t1 = t1a + t5a;
-    let t2 = t2a + t6a;
-    let t3 = t3a + t7a;
-    let t4 = t0a - t4a;
-    let t5 = t1a - t5a;
-    let t6 = t2a - t6a;
-    let t7 = t3a - t7a;
-    let t8a = ur(u8s.wrapping_add(u12s));
-    let t9a = ur(u9s.wrapping_add(u13s));
-    let t10a = ur(u10s.wrapping_add(u14s));
-    let t11a = ur(u11s.wrapping_add(u15s));
-    let t12a = ur(u8s.wrapping_sub(u12s));
-    let t13a = ur(u9s.wrapping_sub(u13s));
-    let t14a = ur(u10s.wrapping_sub(u14s));
-    let t15a = ur(u11s.wrapping_sub(u15s));
-
-    let s4 = 15137i64
-        .wrapping_mul(t4 as i64)
-        .wrapping_add(6270i64.wrapping_mul(t5 as i64));
-    let s5 = 6270i64
-        .wrapping_mul(t4 as i64)
-        .wrapping_sub(15137i64.wrapping_mul(t5 as i64));
-    let s6 = 15137i64
-        .wrapping_mul(t7 as i64)
-        .wrapping_sub(6270i64.wrapping_mul(t6 as i64));
-    let s7 = 6270i64
-        .wrapping_mul(t7 as i64)
-        .wrapping_add(15137i64.wrapping_mul(t6 as i64));
-    let s12 = 15137u32
-        .wrapping_mul(t12a as u32)
-        .wrapping_add(6270u32.wrapping_mul(t13a as u32));
-    let s13 = 6270u32
-        .wrapping_mul(t12a as u32)
-        .wrapping_sub(15137u32.wrapping_mul(t13a as u32));
-    let s14 = 15137u32
-        .wrapping_mul(t15a as u32)
-        .wrapping_sub(6270u32.wrapping_mul(t14a as u32));
-    let s15 = 6270u32
-        .wrapping_mul(t15a as u32)
-        .wrapping_add(15137u32.wrapping_mul(t14a as u32));
-
-    out[0] = t0 + t2;
-    out[15] = -(t1 + t3);
-    let t2a = t0 - t2;
-    let t3a = t1 - t3;
-    out[3] = -ur(s4 as u32);
-    out[12] = ur(s5 as u32);
-    let t6 = ur(s6 as u32);
-    let t7 = ur(s7 as u32);
-    out[1] = -(t8a + t10a);
-    out[14] = t9a + t11a;
-    let t10 = t8a - t10a;
-    let t11 = t9a - t11a;
-    out[2] = ur(s12);
-    out[13] = -ur(s13);
-    let t14a = ur(s14);
-    let t15a = ur(s15);
-
-    out[7] = rsh14_signed_mul(t2a, t3a, true);
-    out[8] = rsh14_signed_mul(t2a, t3a, false);
-    out[4] = rsh14_signed_mul(t7, t6, false);
-    out[11] = rsh14_signed_mul(t7, t6, true);
-    out[6] = rsh14_signed_mul(t11, t10, false);
-    out[9] = rsh14_signed_mul(t11, t10, true);
-    out[5] = rsh14_signed_mul(t14a, t15a, true);
-    out[10] = rsh14_signed_mul(t14a, t15a, false);
 }
 
 fn idct32_1d(inp: &[i32], out: &mut [i32]) {
@@ -577,6 +430,163 @@ fn idct32_1d(inp: &[i32], out: &mut [i32]) {
     out[31] = t0 - t31;
 }
 
+fn iadst16_1d(inp: &[i32], out: &mut [i32]) {
+    // Literal port of libvpx iadst16_c, including its input permutation and
+    // per-stage rounding (cospi_N_64 values inlined).
+    let mut x0 = inp[15] as i64;
+    let mut x1 = inp[0] as i64;
+    let mut x2 = inp[13] as i64;
+    let mut x3 = inp[2] as i64;
+    let mut x4 = inp[11] as i64;
+    let mut x5 = inp[4] as i64;
+    let mut x6 = inp[9] as i64;
+    let mut x7 = inp[6] as i64;
+    let mut x8 = inp[7] as i64;
+    let mut x9 = inp[8] as i64;
+    let mut x10 = inp[5] as i64;
+    let mut x11 = inp[10] as i64;
+    let mut x12 = inp[3] as i64;
+    let mut x13 = inp[12] as i64;
+    let mut x14 = inp[1] as i64;
+    let mut x15 = inp[14] as i64;
+
+    // stage 1
+    let s0 = x0 * 16364 + x1 * 804;
+    let s1 = x0 * 804 - x1 * 16364;
+    let s2 = x2 * 15893 + x3 * 3981;
+    let s3 = x2 * 3981 - x3 * 15893;
+    let s4 = x4 * 14811 + x5 * 7005;
+    let s5 = x4 * 7005 - x5 * 14811;
+    let s6 = x6 * 13160 + x7 * 9760;
+    let s7 = x6 * 9760 - x7 * 13160;
+    let s8 = x8 * 11003 + x9 * 12140;
+    let s9 = x8 * 12140 - x9 * 11003;
+    let s10 = x10 * 8423 + x11 * 14053;
+    let s11 = x10 * 14053 - x11 * 8423;
+    let s12 = x12 * 5520 + x13 * 15426;
+    let s13 = x12 * 15426 - x13 * 5520;
+    let s14 = x14 * 2404 + x15 * 16207;
+    let s15 = x14 * 16207 - x15 * 2404;
+
+    x0 = i64::from(rsh14(s0 + s8));
+    x1 = i64::from(rsh14(s1 + s9));
+    x2 = i64::from(rsh14(s2 + s10));
+    x3 = i64::from(rsh14(s3 + s11));
+    x4 = i64::from(rsh14(s4 + s12));
+    x5 = i64::from(rsh14(s5 + s13));
+    x6 = i64::from(rsh14(s6 + s14));
+    x7 = i64::from(rsh14(s7 + s15));
+    x8 = i64::from(rsh14(s0 - s8));
+    x9 = i64::from(rsh14(s1 - s9));
+    x10 = i64::from(rsh14(s2 - s10));
+    x11 = i64::from(rsh14(s3 - s11));
+    x12 = i64::from(rsh14(s4 - s12));
+    x13 = i64::from(rsh14(s5 - s13));
+    x14 = i64::from(rsh14(s6 - s14));
+    x15 = i64::from(rsh14(s7 - s15));
+
+    // stage 2
+    let s0 = x0;
+    let s1 = x1;
+    let s2 = x2;
+    let s3 = x3;
+    let s4 = x4;
+    let s5 = x5;
+    let s6 = x6;
+    let s7 = x7;
+    let s8 = x8 * 16069 + x9 * 3196;
+    let s9 = x8 * 3196 - x9 * 16069;
+    let s10 = x10 * 9102 + x11 * 13623;
+    let s11 = x10 * 13623 - x11 * 9102;
+    let s12 = -x12 * 3196 + x13 * 16069;
+    let s13 = x12 * 16069 + x13 * 3196;
+    let s14 = -x14 * 13623 + x15 * 9102;
+    let s15 = x14 * 9102 + x15 * 13623;
+
+    x0 = s0 + s4;
+    x1 = s1 + s5;
+    x2 = s2 + s6;
+    x3 = s3 + s7;
+    x4 = s0 - s4;
+    x5 = s1 - s5;
+    x6 = s2 - s6;
+    x7 = s3 - s7;
+    x8 = i64::from(rsh14(s8 + s12));
+    x9 = i64::from(rsh14(s9 + s13));
+    x10 = i64::from(rsh14(s10 + s14));
+    x11 = i64::from(rsh14(s11 + s15));
+    x12 = i64::from(rsh14(s8 - s12));
+    x13 = i64::from(rsh14(s9 - s13));
+    x14 = i64::from(rsh14(s10 - s14));
+    x15 = i64::from(rsh14(s11 - s15));
+
+    // stage 3
+    let s0 = x0;
+    let s1 = x1;
+    let s2 = x2;
+    let s3 = x3;
+    let s4 = x4 * 15137 + x5 * 6270;
+    let s5 = x4 * 6270 - x5 * 15137;
+    let s6 = -x6 * 6270 + x7 * 15137;
+    let s7 = x6 * 15137 + x7 * 6270;
+    let s8 = x8;
+    let s9 = x9;
+    let s10 = x10;
+    let s11 = x11;
+    let s12 = x12 * 15137 + x13 * 6270;
+    let s13 = x12 * 6270 - x13 * 15137;
+    let s14 = -x14 * 6270 + x15 * 15137;
+    let s15 = x14 * 15137 + x15 * 6270;
+
+    x0 = s0 + s2;
+    x1 = s1 + s3;
+    x2 = s0 - s2;
+    x3 = s1 - s3;
+    x4 = i64::from(rsh14(s4 + s6));
+    x5 = i64::from(rsh14(s5 + s7));
+    x6 = i64::from(rsh14(s4 - s6));
+    x7 = i64::from(rsh14(s5 - s7));
+    x8 = s8 + s10;
+    x9 = s9 + s11;
+    x10 = s8 - s10;
+    x11 = s9 - s11;
+    x12 = i64::from(rsh14(s12 + s14));
+    x13 = i64::from(rsh14(s13 + s15));
+    x14 = i64::from(rsh14(s12 - s14));
+    x15 = i64::from(rsh14(s13 - s15));
+
+    // stage 4
+    let x2n = i64::from(rsh14(-11585 * (x2 + x3)));
+    let x3n = i64::from(rsh14(11585 * (x2 - x3)));
+    let x6n = i64::from(rsh14(11585 * (x6 + x7)));
+    let x7n = i64::from(rsh14(11585 * (-x6 + x7)));
+    let x10n = i64::from(rsh14(11585 * (x10 + x11)));
+    let x11n = i64::from(rsh14(11585 * (-x10 + x11)));
+    let x14n = i64::from(rsh14(-11585 * (x14 + x15)));
+    let x15n = i64::from(rsh14(11585 * (x14 - x15)));
+    let (x2, x3) = (x2n, x3n);
+    let (x6, x7) = (x6n, x7n);
+    let (x10, x11) = (x10n, x11n);
+    let (x14, x15) = (x14n, x15n);
+
+    out[0] = x0 as i32;
+    out[1] = -x8 as i32;
+    out[2] = x12 as i32;
+    out[3] = -x4 as i32;
+    out[4] = x6 as i32;
+    out[5] = x14 as i32;
+    out[6] = x10 as i32;
+    out[7] = x2 as i32;
+    out[8] = x3 as i32;
+    out[9] = x11 as i32;
+    out[10] = x15 as i32;
+    out[11] = x7 as i32;
+    out[12] = x5 as i32;
+    out[13] = -x13 as i32;
+    out[14] = x9 as i32;
+    out[15] = -x1 as i32;
+}
+
 fn iwht4_1d(inp: &[i32], out: &mut [i32], pass: u32) {
     let (t0, t1, t2, t3) = if pass == 0 {
         (inp[0] >> 2, inp[3] >> 2, inp[1] >> 2, inp[2] >> 2)
@@ -673,19 +683,22 @@ pub fn inverse_transform_add(
     let mut out = vec![0i32; sz];
     let mut col = vec![0i32; sz];
 
-    // Pass A: columns of the block, written out as rows of `tmp`.
+    // Pass A: rows of the block (the reference transforms row vectors
+    // first), written out as rows of `tmp`.
     for i in 0..sz {
         for k in 0..sz {
-            col[k] = block[i + k * sz];
+            col[k] = block[i * sz + k];
         }
         run_1d(use_wht, a_kind, &col, &mut out, 0);
         for k in 0..sz {
             tmp[i * sz + k] = out[k];
         }
     }
-    // Pass B: rows of `tmp`, added into destination columns.
+    // Pass B: COLUMNS of `tmp` (the reference reads tmp + i with stride sz),
+    // added into destination columns.
     for i in 0..sz {
-        run_1d(use_wht, b_kind, &tmp[i * sz..i * sz + sz], &mut out, 1);
+        let tcol: Vec<i32> = (0..sz).map(|k| tmp[k * sz + i]).collect();
+        run_1d(use_wht, b_kind, &tcol, &mut out, 1);
         for j in 0..sz {
             add_to_pixel(&mut dst[dst_off + j * stride + i], out[j], bits);
         }
@@ -706,4 +719,13 @@ fn run_1d(use_wht: bool, kind: Xf, inp: &[i32], out: &mut [i32], pass: u32) {
         (16, _) => iadst16_1d(inp, out),
         _ => idct32_1d(inp, out),
     }
+}
+
+#[cfg(test)]
+mod wht_tests {
+    // NOTE: a DC-only lossless coefficient block is NOT a valid encoder
+    // output (libvpx's fwht4x4 of a constant block scatters into all four
+    // row positions per pass), so there is no hand-derivable "correct"
+    // result to assert here; lossless correctness is covered end-to-end by
+    // the ffmpeg-gated conformance clips (tests/conformance_vp9.rs).
 }

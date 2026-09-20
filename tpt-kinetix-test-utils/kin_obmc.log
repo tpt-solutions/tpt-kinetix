@@ -1,0 +1,118 @@
+   Compiling tpt-kinetix-test-utils v0.1.0 (D:\Programming\1PRODUCTION\Open Source\tpt-kinetix\tpt-kinetix-test-utils)
+warning: unused variable: `frame`
+  --> tpt-kinetix-test-utils\tests\dbg_av1_chroma.rs:68:21
+   |
+68 |         if let Some(frame) = dec.decode(&pk).expect("decode") {
+   |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tpt-kinetix-test-utils` (test "dbg_av1_chroma") generated 1 warning (run `cargo fix --test "dbg_av1_chroma" -p tpt-kinetix-test-utils` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.67s
+     Running tests\dbg_av1_chroma.rs (D:\Programming\1PRODUCTION\Open Source\tpt-kinetix\target\debug\deps\dbg_av1_chroma-7988229134dffa93.exe)
+OBMC mi=(0,16) bsize=3 jobs=0
+OBMC mi=(2,16) bsize=3 jobs=1
+  job pass=1 px=4 py=32 w=2 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=128 dst_sample=128
+OBMC mi=(0,18) bsize=3 jobs=0
+OBMC mi=(4,16) bsize=5 jobs=1
+  job pass=1 px=8 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=165 dst_sample=165
+OBMC mi=(0,22) bsize=5 jobs=0
+OBMC mi=(8,16) bsize=5 jobs=1
+  job pass=1 px=16 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=202 dst_sample=202
+OBMC mi=(12,16) bsize=5 jobs=1
+  job pass=1 px=24 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=241 dst_sample=241
+OBMC mi=(8,22) bsize=3 jobs=1
+  job pass=1 px=16 py=44 w=2 h=4 nb_ref=2 dir0_v=0 dir1_h=1 mv=(0,0)
+  blend done: any_diff=false obmc[0]=202 dst_sample=202
+OBMC mi=(10,22) bsize=3 jobs=1
+  job pass=1 px=20 py=44 w=2 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=202 dst_sample=202
+OBMC mi=(12,20) bsize=3 jobs=0
+OBMC mi=(12,22) bsize=5 jobs=1
+  job pass=1 px=24 py=44 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=241 dst_sample=241
+OBMC mi=(16,16) bsize=3 jobs=1
+  job pass=1 px=32 py=32 w=2 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=16 dst_sample=16
+OBMC mi=(18,16) bsize=3 jobs=1
+  job pass=1 px=36 py=32 w=2 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=16 dst_sample=16
+OBMC mi=(16,20) bsize=3 jobs=0
+OBMC mi=(20,20) bsize=3 jobs=0
+OBMC mi=(20,22) bsize=5 jobs=1
+  job pass=1 px=40 py=44 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=53 dst_sample=53
+OBMC mi=(24,16) bsize=5 jobs=1
+  job pass=1 px=48 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=90 dst_sample=90
+OBMC mi=(28,16) bsize=5 jobs=1
+  job pass=1 px=56 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=128 dst_sample=128
+OBMC mi=(28,22) bsize=5 jobs=1
+  job pass=1 px=56 py=44 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=128 dst_sample=128
+OBMC mi=(18,20) bsize=4 jobs=1
+  job pass=1 px=36 py=40 w=2 h=8 nb_ref=2 dir0_v=0 dir1_h=0 mv=(32,0)
+  blend done: any_diff=true obmc[0]=208 dst_sample=207
+OBMC mi=(30,20) bsize=4 jobs=1
+  job pass=1 px=60 py=40 w=2 h=8 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=128 dst_sample=111
+OBMC mi=(0,16) bsize=5 jobs=0
+OBMC mi=(4,16) bsize=5 jobs=1
+  job pass=1 px=8 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=166 dst_sample=165
+OBMC mi=(8,16) bsize=5 jobs=1
+  job pass=1 px=16 py=32 w=4 h=4 nb_ref=6 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=202 dst_sample=202
+OBMC mi=(8,18) bsize=5 jobs=1
+  job pass=1 px=16 py=36 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(12,0)
+  blend done: any_diff=true obmc[0]=66 dst_sample=66
+OBMC mi=(12,16) bsize=5 jobs=1
+  job pass=1 px=24 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=240 dst_sample=240
+OBMC mi=(8,20) bsize=6 jobs=3
+  job pass=0 px=16 py=40 w=8 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(12,0)
+  job pass=1 px=16 py=40 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  job pass=1 px=16 py=44 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=57 dst_sample=53
+  blend done: any_diff=true obmc[0]=51 dst_sample=52
+  blend done: any_diff=false obmc[0]=202 dst_sample=202
+OBMC mi=(12,20) bsize=6 jobs=2
+  job pass=0 px=24 py=40 w=8 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  job pass=1 px=24 py=40 w=4 h=8 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=132 dst_sample=128
+  blend done: any_diff=true obmc[0]=126 dst_sample=127
+OBMC mi=(20,16) bsize=5 jobs=1
+  job pass=1 px=40 py=32 w=4 h=4 nb_ref=2 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=53 dst_sample=53
+OBMC mi=(20,18) bsize=5 jobs=1
+  job pass=1 px=40 py=36 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  blend done: any_diff=false obmc[0]=219 dst_sample=219
+OBMC mi=(20,20) bsize=6 jobs=3
+  job pass=0 px=40 py=40 w=8 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  job pass=1 px=40 py=40 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  job pass=1 px=40 py=44 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=229 dst_sample=231
+  blend done: any_diff=true obmc[0]=233 dst_sample=232
+  blend done: any_diff=false obmc[0]=53 dst_sample=53
+OBMC mi=(24,16) bsize=5 jobs=1
+  job pass=1 px=48 py=32 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=90 dst_sample=90
+OBMC mi=(24,18) bsize=5 jobs=1
+  job pass=1 px=48 py=36 w=4 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  blend done: any_diff=true obmc[0]=194 dst_sample=194
+OBMC mi=(24,20) bsize=6 jobs=2
+  job pass=0 px=48 py=40 w=8 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  job pass=1 px=48 py=40 w=4 h=8 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=true obmc[0]=200 dst_sample=203
+  blend done: any_diff=true obmc[0]=205 dst_sample=204
+OBMC mi=(28,20) bsize=6 jobs=2
+  job pass=0 px=56 py=40 w=8 h=4 nb_ref=5 dir0_v=0 dir1_h=0 mv=(10,0)
+  job pass=1 px=56 py=40 w=4 h=8 nb_ref=5 dir0_v=0 dir1_h=0 mv=(0,0)
+  blend done: any_diff=false obmc[0]=119 dst_sample=119
+  blend done: any_diff=true obmc[0]=126 dst_sample=122
+decoded 8 shown frames

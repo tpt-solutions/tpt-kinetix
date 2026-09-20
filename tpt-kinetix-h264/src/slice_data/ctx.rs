@@ -95,6 +95,14 @@ pub struct MbPredCtx {
     /// Per §8.3.1.1, a neighbour that is unavailable or not Intra_4×4 (or
     /// Intra_8×8) is treated as predicting DC (mode 2).
     pub is_intra4x4: bool,
+    /// Whether this MB was coded INTER (P/B-slice inter `mb_type`, or skip).
+    /// Only consulted when the PPS sets `constrained_intra_pred_flag`, which
+    /// (unlike the unconstrained ForcedDc rule above) makes an INTER
+    /// neighbour fully UNAVAILABLE for `predIntra4x4PredMode` derivation —
+    /// forcing `dcPredModePredictedFlag = 1` — while an `Intra16x16`/
+    /// `Intra_8x8`/I_PCM neighbour stays available (contributing its
+    /// ForcedDc side).
+    pub is_inter: bool,
     pub modes: [Intra4x4Mode; 16],
 }
 
@@ -103,6 +111,7 @@ impl Default for MbPredCtx {
         MbPredCtx {
             present: false,
             is_intra4x4: false,
+            is_inter: false,
             modes: [Intra4x4Mode::Dc; 16],
         }
     }
@@ -509,30 +518,16 @@ impl NeighbourCtx<'static> {
 }
 
 impl<'a> NeighbourCtx<'a> {
-    pub(crate) fn new(
-        mb_aff: bool,
-        mb_rows: u32,
-        cur_field: bool,
-        field_flags: &'a [Option<bool>],
-    ) -> Self {
-        NeighbourCtx {
-            mb_aff,
-            mb_rows,
-            cur_field,
-            field_flags,
-            slice_id_grid: None,
-            cur_slice_id: 0,
-        }
-    }
-
-    /// Same as [`Self::new`] but additionally enforces the §6.4.9
-    /// slice-boundary neighbour-availability rule: a resolved neighbour is
-    /// discarded (treated as off-picture) unless `slice_id_grid[idx] ==
-    /// cur_slice_id`. Used by the multi-slice-capable CABAC I-slice parser;
-    /// `slice_id_grid` must be pre-seeded with a sentinel not equal to any
-    /// real slice id (e.g. `u16::MAX`) for macroblocks not yet decoded this
-    /// picture, so an in-range-but-undecoded index is also correctly treated
-    /// as unavailable.
+    /// The slice-aware constructor used by every accumulator-driven parser:
+    /// enforces the §6.4.9 slice-boundary neighbour-availability rule (a
+    /// resolved neighbour is discarded — treated as off-picture — unless
+    /// `slice_id_grid[idx] == cur_slice_id`) and, since the CAVLC parsers
+    /// moved onto the shared picture accumulator, singles out nothing else:
+    /// every CAVLC/CABAC slice parse now goes through it. `slice_id_grid`
+    /// must be pre-seeded with a sentinel not equal to any real slice id
+    /// (e.g. `u16::MAX`) for macroblocks not yet decoded this picture, so an
+    /// in-range-but-undecoded index is also correctly treated as
+    /// unavailable.
     pub(crate) fn new_with_slices(
         mb_aff: bool,
         mb_rows: u32,

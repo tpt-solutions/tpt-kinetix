@@ -23,6 +23,15 @@ pub struct SeqParameterSet {
     pub pic_order_cnt_type: u32,
     /// Only present when `pic_order_cnt_type == 0`.
     pub log2_max_pic_order_cnt_lsb_minus4: u32,
+    /// §7.3.2.1.1 POC type 1 constants (parsed but previously discarded —
+    /// `derive_pic_order_cnt` had no type-1 branch, so every POC-type-1
+    /// stream, e.g. ITU `Sharp_MP_PAFF_1r2`, failed to store references and
+    /// degraded to grey scaffold fields).
+    pub delta_pic_order_always_zero_flag: bool,
+    pub offset_for_non_ref_pic: i32,
+    pub offset_for_top_to_bottom_field: i32,
+    pub num_ref_frames_in_pic_order_cnt_cycle: u32,
+    pub offset_for_ref_frame: Vec<i32>,
     pub num_ref_frames: u32,
     pub gaps_in_frame_num_value_allowed_flag: bool,
     pub pic_width_in_mbs_minus1: u32,
@@ -91,6 +100,13 @@ impl SeqParameterSet {
         let pic_order_cnt_type = r.read_ue().context("pic_order_cnt_type")?;
 
         let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
+        // POC type 1 constants (assigned in the `== 1` branch below).
+        let mut delta_pic_order_always_zero_flag = false;
+        let mut offset_for_non_ref_pic = 0i32;
+        let mut offset_for_top_to_bottom_field = 0i32;
+        let mut num_ref_frames_in_pic_order_cnt_cycle = 0u32;
+        let mut offset_for_ref_frame = Vec::new();
+
         if pic_order_cnt_type == 0 {
             log2_max_pic_order_cnt_lsb_minus4 =
                 r.read_ue().context("log2_max_pic_order_cnt_lsb_minus4")?;
@@ -101,14 +117,14 @@ impl SeqParameterSet {
                 ));
             }
         } else if pic_order_cnt_type == 1 {
-            let _delta_pic_order_always_zero_flag =
-                r.read_bit().context("delta_pic_order_always_zero_flag")?;
-            let _offset_for_non_ref_pic = r.read_se().context("offset_for_non_ref_pic")?;
-            let _offset_for_top_to_bottom_field =
+            delta_pic_order_always_zero_flag =
+                r.read_bit().context("delta_pic_order_always_zero_flag")? == 1;
+            offset_for_non_ref_pic = r.read_se().context("offset_for_non_ref_pic")?;
+            offset_for_top_to_bottom_field =
                 r.read_se().context("offset_for_top_to_bottom_field")?;
-            let num_ref_frames_in_poc_cycle = r.read_ue().context("num_ref_frames_in_poc_cycle")?;
-            for _ in 0..num_ref_frames_in_poc_cycle {
-                let _offset = r.read_se().context("offset_for_ref_frame")?;
+            num_ref_frames_in_pic_order_cnt_cycle = r.read_ue().context("num_ref_frames_in_poc_cycle")?;
+            for _ in 0..num_ref_frames_in_pic_order_cnt_cycle {
+                offset_for_ref_frame.push(r.read_se().context("offset_for_ref_frame")? as i32);
             }
         }
 
@@ -150,6 +166,23 @@ impl SeqParameterSet {
             return Err(anyhow!("invalid level_idc 0"));
         }
 
+        if std::env::var_os("KINETIX_SPS_DBG").is_some() {
+            eprintln!(
+                "SPS-DBG id={} log2_mfn4={} poc_type={} log2_poc4={} nref={} w={} h={} fmo={} aff={} d8={} crop={}",
+                seq_parameter_set_id,
+                log2_max_frame_num_minus4,
+                pic_order_cnt_type,
+                log2_max_pic_order_cnt_lsb_minus4,
+                num_ref_frames,
+                pic_width_in_mbs_minus1,
+                pic_height_in_map_units_minus1,
+                frame_mbs_only_flag,
+                mb_adaptive_frame_field_flag,
+                direct_8x8_inference_flag,
+                frame_cropping_flag,
+            );
+        }
+
         Ok(Self {
             profile_idc,
             level_idc,
@@ -159,6 +192,11 @@ impl SeqParameterSet {
             log2_max_frame_num_minus4,
             pic_order_cnt_type,
             log2_max_pic_order_cnt_lsb_minus4,
+            delta_pic_order_always_zero_flag,
+            offset_for_non_ref_pic,
+            offset_for_top_to_bottom_field,
+            num_ref_frames_in_pic_order_cnt_cycle,
+            offset_for_ref_frame,
             num_ref_frames,
             gaps_in_frame_num_value_allowed_flag,
             pic_width_in_mbs_minus1,
@@ -274,6 +312,11 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 1,
             gaps_in_frame_num_value_allowed_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: Vec::new(),
             pic_width_in_mbs_minus1: 19,        // (19+1)*16 = 320 px
             pic_height_in_map_units_minus1: 14, // (14+1)*16 = 240 px
             frame_mbs_only_flag: true,
@@ -304,6 +347,11 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 2,
             gaps_in_frame_num_value_allowed_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: Vec::new(),
             pic_width_in_mbs_minus1: 119,       // (119+1)*16 = 1920
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
@@ -419,6 +467,11 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 2,
             gaps_in_frame_num_value_allowed_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: Vec::new(),
             pic_width_in_mbs_minus1: 119,       // (119+1)*16 = 1920
             pic_height_in_map_units_minus1: 67, // (67+1)*16 = 1088
             frame_mbs_only_flag: true,
@@ -452,6 +505,11 @@ mod tests {
             log2_max_pic_order_cnt_lsb_minus4: 4,
             num_ref_frames: 2,
             gaps_in_frame_num_value_allowed_flag: false,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: Vec::new(),
             pic_width_in_mbs_minus1: 9,         // (9+1)*16 = 160
             pic_height_in_map_units_minus1: 17, // (17+1)*16*2 = 576 coded
             frame_mbs_only_flag: false,

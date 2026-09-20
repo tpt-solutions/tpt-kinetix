@@ -100,7 +100,7 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             let mut modes8 = [0u8; 4];
             for i8 in 0..4usize {
                 let pred_mode =
-                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx);
+                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx, false);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
@@ -111,8 +111,16 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
         } else {
             for blk_idx in 0..16usize {
                 let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-                let pred_mode =
-                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, nctx);
+                let pred_mode = mpm_pred_mode(
+                    pred_ctx_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &modes,
+                    raster,
+                    nctx,
+                    false,
+                );
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
                 modes[raster] = Intra4x4Mode::from_u8(final_mode);
             }

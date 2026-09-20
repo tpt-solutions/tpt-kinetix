@@ -45,12 +45,6 @@ impl<'a> BoolDecoder<'a> {
         let split = 1 + (((u32::from(self.range) - 1) * u32::from(prob)) >> 8); // 1..=255
         let bigsplit = (split << 8) as u16;
         let bit = self.value >= bigsplit;
-        if std::env::var("TPT_VP9_READS").is_ok() {
-            eprintln!(
-                "READ p={prob} -> {} (val={:#06x} range={} consumed={})",
-                u8::from(bit), self.value, self.range, self.next_bit
-            );
-        }
         if bit {
             self.range -= split as u16;
             self.value -= bigsplit;
@@ -58,6 +52,15 @@ impl<'a> BoolDecoder<'a> {
             self.range = split as u16;
         }
         self.normalize();
+        if std::env::var_os("TPT_VP9_TRACE").is_some() {
+            eprintln!(
+                "SYMP p={} bit={} b={} range={}",
+                prob,
+                bit as u8,
+                self.next_bit.saturating_sub(24),
+                self.range
+            );
+        }
         bit
     }
 
@@ -66,6 +69,24 @@ impl<'a> BoolDecoder<'a> {
     #[inline]
     pub fn read_bool_u32(&mut self, prob: u8) -> u32 {
         u32::from(self.read_bool(prob))
+    }
+
+    /// Bits consumed from the tile data so far (debug-trace helper).
+    #[inline]
+    pub fn consumed(&self) -> usize {
+        self.next_bit - 16
+    }
+
+    /// Current range value (debug-trace helper).
+    #[inline]
+    pub fn range(&self) -> u16 {
+        self.range
+    }
+
+    /// Current 16-bit value window (debug-trace helper).
+    #[inline]
+    pub fn value(&self) -> u16 {
+        self.value
     }
 
     #[inline]
@@ -81,11 +102,6 @@ impl<'a> BoolDecoder<'a> {
             self.next_bit += 1;
             self.value = (self.value << 1) | u16::from(bit);
         }
-    }
-
-    /// Bits consumed so far (for debugging).
-    pub fn bits_consumed(&self) -> usize {
-        self.next_bit
     }
 
     /// `L(n)` in the spec: n literal bits, MSB first, each with prob 128.

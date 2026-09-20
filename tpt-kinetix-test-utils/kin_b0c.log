@@ -1,0 +1,1622 @@
+warning: unused variable: `frame`
+  --> tpt-kinetix-test-utils\tests\dbg_av1_chroma.rs:68:21
+   |
+68 |         if let Some(frame) = dec.decode(&pk).expect("decode") {
+   |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `tpt-kinetix-test-utils` (test "dbg_av1_chroma") generated 1 warning (run `cargo fix --test "dbg_av1_chroma" -p tpt-kinetix-test-utils` to apply 1 suggestion)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.13s
+     Running tests\dbg_av1_chroma.rs (D:\Programming\1PRODUCTION\Open Source\tpt-kinetix\target\debug\deps\dbg_av1_chroma-7988229134dffa93.exe)
+DBG FH frame_type=KeyFrame intra=true err_res=true order_hint=0 primary_ref=7 disable_cdf_update=false
+DBG refresh oh=0 show=true flags=0b11111111 -> hints=[0, 0, 0, 0, 0, 0, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=6 primary_ref=7 disable_cdf_update=false
+DBG FH inter oh=6 interp_filter=4 mm_switch=true w=128 h=96 hp=true
+DBG b0 mi=(0,0) bsize=12 skip=true rng=42816
+DBG b0 is_inter=true ctx=0 rng=41670
+DBG b0 compflag=0 rng=41670
+DBG b0 ref=2 rng=39656
+DBG b0 mvstack n_mvs=0 ctx=0x8 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=41904
+DBG b0 zero_mv near=true rng=40346
+DBG b0 ref_mv=0 ctx=0 rng=59176
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=3 rng=51083
+DBG b0 filter1=0 ctx=11 rng=42817
+DBG b0 vartx leaves=1 tx0=4 rng=42817 all=[(0, 0, 4)]
+DBG b0 post-residual rng=42817
+DBG b0 mi=(16,0) bsize=12 skip=true rng=52884
+DBG b0 is_inter=true ctx=0 rng=51504
+DBG b0 compflag=0 rng=51504
+DBG b0 ref=2 rng=43454
+DBG b0 mvstack n_mvs=1 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=64228
+DBG b0 zero_mv near=true rng=62004
+DBG b0 ref_mv=0 ctx=3 rng=54256
+DBG b0 motion_mode=0 warp_allowed=true rng=48973
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=47724
+DBG b0 filter1=0 ctx=8 rng=46507
+DBG b0 vartx leaves=1 tx0=4 rng=46507 all=[(16, 0, 4)]
+DBG b0 post-residual rng=46507
+DBG b0 mi=(0,16) bsize=3 skip=true rng=37538
+DBG b0 is_inter=true ctx=0 rng=63004
+DBG b0 compflag=0 rng=63004
+DBG b0 ref=2 rng=53720
+DBG b0 mvstack n_mvs=1 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=40654
+DBG b0 zero_mv near=true rng=39267
+DBG b0 ref_mv=0 ctx=3 rng=34673
+DBG b0 interintra type=0 rng=57054
+DBG b0 motion_mode=1 warp_allowed=true rng=59282
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=57888
+DBG b0 filter1=0 ctx=8 rng=56524
+DBG b0 vartx leaves=1 tx0=1 rng=56524 all=[(0, 16, 1)]
+DBG b0 post-residual rng=56524
+DBG b0 mi=(2,16) bsize=3 skip=true rng=58088
+DBG b0 is_inter=true ctx=0 rng=56617
+DBG b0 compflag=0 rng=56617
+DBG b0 ref=2 rng=48774
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=41614
+DBG b0 zero_mv near=true rng=40342
+DBG b0 ref_mv=0 ctx=5 rng=49276
+DBG b0 interintra type=0 rng=41016
+DBG b0 motion_mode=1 warp_allowed=true rng=45128
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=44152
+DBG b0 filter1=0 ctx=8 rng=43198
+DBG b0 vartx leaves=1 tx0=1 rng=43198 all=[(2, 16, 1)]
+DBG b0 post-residual rng=43198
+DBG b0 mi=(0,18) bsize=3 skip=false rng=47162
+DBG b0 is_inter=true ctx=0 rng=46188
+DBG b0 compflag=0 rng=46188
+DBG b0 ref=2 rng=40206
+DBG b0 mvstack n_mvs=1 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=62180
+DBG b0 zero_mv near=true rng=60383
+DBG b0 ref_mv=0 ctx=3 rng=53799
+DBG b0 interintra type=0 rng=45395
+DBG b0 motion_mode=1 warp_allowed=true rng=52578
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=51545
+DBG b0 filter1=0 ctx=8 rng=50432
+DBG b0 vartx leaves=1 tx0=1 rng=43435 all=[(0, 18, 1)]
+DBG y-cf-blk mi=(0,18) tx=1 txtp=0 eob=1 rng=61704
+DBG uv-cf-blk pl=1 tx=0 txtp=0 eob=1 rng=47958
+DBG uv-cf-blk pl=2 tx=0 txtp=0 eob=1 rng=34568
+DBG b0 post-residual rng=34568
+DBG b0 mi=(2,18) bsize=3 skip=true rng=44864
+DBG b0 is_inter=true ctx=0 rng=43929
+DBG b0 compflag=0 rng=43929
+DBG b0 ref=2 rng=38564
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=false rng=42680
+DBG b0 interintra type=0 rng=38023
+DBG b0 motion_mode=0 warp_allowed=true rng=59624
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=58456
+DBG b0 filter1=0 ctx=8 rng=57308
+DBG b0 vartx leaves=1 tx0=1 rng=57308 all=[(2, 18, 1)]
+DBG b0 post-residual rng=57308
+DBG b0 mi=(4,16) bsize=5 skip=true rng=47512
+DBG b0 is_inter=true ctx=0 rng=46531
+DBG b0 compflag=0 rng=46531
+DBG b0 ref=2 rng=41268
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=33411
+DBG b0 zero_mv near=true rng=65008
+DBG b0 ref_mv=0 ctx=5 rng=41222
+DBG b0 interintra type=0 rng=35503
+DBG b0 motion_mode=1 warp_allowed=true rng=43340
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=42572
+DBG b0 filter1=0 ctx=8 rng=41817
+DBG b0 vartx leaves=1 tx0=8 rng=41817 all=[(4, 16, 8)]
+DBG b0 post-residual rng=41817
+DBG b0 mi=(4,18) bsize=5 skip=false rng=41760
+DBG b0 is_inter=true ctx=0 rng=40998
+DBG b0 compflag=0 rng=40998
+DBG b0 ref=2 rng=36574
+DBG b0 mvstack n_mvs=2 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=45590
+DBG b0 zero_mv near=true rng=44504
+DBG b0 ref_mv=1 ctx=5 rng=60912
+DBG b0 interintra type=0 rng=53087
+DBG b0 motion_mode=0 warp_allowed=true rng=33056
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=65064
+DBG b0 filter1=1 ctx=8 rng=36704
+DBG b0 vartx leaves=1 tx0=8 rng=59530 all=[(4, 18, 8)]
+DBG y-cf-blk mi=(4,18) tx=8 txtp=0 eob=1 rng=47412
+DBG uv-cf-blk pl=1 tx=6 txtp=0 eob=1 rng=57690
+DBG uv-cf-blk pl=2 tx=6 txtp=0 eob=8 rng=51976
+DBG b0 post-residual rng=51976
+DBG b0 mi=(0,20) bsize=3 skip=true rng=56128
+DBG b0 is_inter=true ctx=0 rng=55192
+DBG b0 compflag=0 rng=55192
+DBG b0 ref=2 rng=49652
+DBG b0 mvstack n_mvs=2 ctx=0x3a comp_ctx=3 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=false rng=46800
+DBG b0 interintra type=2 rng=51328
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=50520
+DBG b0 filter1=0 ctx=8 rng=46572
+DBG b0 vartx leaves=1 tx0=1 rng=46572 all=[(0, 20, 1)]
+DBG b0 post-residual rng=46572
+DBG b0 mi=(2,20) bsize=3 skip=false rng=33872
+DBG b0 is_inter=false ctx=0 rng=38656
+DBG b0 ymode=12 rng=35088
+DBG b0 uvmode=12 has_chroma=true rng=39600
+DBG b0 intra-in-inter tx=0 skip=false rng=40672
+DBG b0 intra-in-inter post-residual rng=34824
+DBG b0 mi=(0,22) bsize=5 skip=true rng=38360
+DBG b0 is_inter=true ctx=0 rng=35242
+DBG b0 compflag=0 rng=35242
+DBG b0 ref=2 rng=63796
+DBG b0 mvstack n_mvs=3 ctx=0x3a comp_ctx=3 s0=(0,64) s1=(0,0)
+DBG b0 new_mv not=true rng=63502
+DBG b0 zero_mv near=true rng=62128
+DBG b0 ref_mv=1 ctx=3 rng=51336
+DBG b0 interintra type=0 rng=49175
+DBG b0 motion_mode=1 warp_allowed=false rng=35140
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=34653
+DBG b0 filter1=0 ctx=8 rng=64160
+DBG b0 vartx leaves=1 tx0=8 rng=64160 all=[(0, 22, 8)]
+DBG b0 post-residual rng=64160
+DBG b0 mi=(4,20) bsize=6 skip=false rng=35255
+DBG b0 is_inter=true ctx=1 rng=34394
+DBG b0 compflag=0 rng=34394
+DBG b0 ref=2 rng=62763
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=51576
+DBG b0 zero_mv near=true rng=50455
+DBG b0 ref_mv=0 ctx=5 rng=62094
+DBG b0 interintra type=2 rng=47936
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=47274
+DBG b0 filter1=1 ctx=9 rng=41128
+DBG b0 vartx leaves=4 tx0=1 rng=57284 all=[(4, 20, 1), (6, 20, 1), (4, 22, 1), (6, 22, 1)]
+DBG y-cf-blk mi=(4,20) tx=1 txtp=11 eob=14 rng=36360
+DBG y-cf-blk mi=(4,20) tx=1 txtp=11 eob=5 rng=37896
+DBG y-cf-blk mi=(4,20) tx=1 txtp=0 eob=0 rng=33752
+DBG y-cf-blk mi=(4,20) tx=1 txtp=0 eob=0 rng=64468
+DBG uv-cf-blk pl=1 tx=1 txtp=11 eob=11 rng=63752
+DBG uv-cf-blk pl=2 tx=1 txtp=11 eob=19 rng=56328
+DBG b0 post-residual rng=56328
+DBG b0 mi=(8,16) bsize=5 skip=true rng=39010
+DBG b0 is_inter=true ctx=0 rng=36104
+DBG b0 compflag=0 rng=36104
+DBG b0 ref=2 rng=33138
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=55090
+DBG b0 zero_mv near=true rng=53969
+DBG b0 ref_mv=0 ctx=5 rng=34540
+DBG b0 interintra type=0 rng=57816
+DBG b0 motion_mode=1 warp_allowed=true rng=34429
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=34019
+DBG b0 filter1=0 ctx=8 rng=63402
+DBG b0 vartx leaves=1 tx0=8 rng=63402 all=[(8, 16, 8)]
+DBG b0 post-residual rng=63402
+DBG b0 mi=(8,18) bsize=5 skip=false rng=53684
+DBG b0 is_inter=true ctx=0 rng=49955
+DBG b0 compflag=0 rng=49955
+DBG b0 ref=2 rng=46042
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=38668
+DBG b0 zero_mv near=true rng=37980
+DBG b0 ref_mv=1 ctx=5 rng=51224
+DBG b0 interintra type=0 rng=43320
+DBG b0 motion_mode=2 warp_allowed=true rng=62896
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=51745 all=[(8, 18, 8)]
+DBG y-cf-blk mi=(8,18) tx=8 txtp=0 eob=1 rng=34670
+DBG uv-cf-blk pl=1 tx=6 txtp=0 eob=1 rng=52708
+DBG uv-cf-blk pl=2 tx=6 txtp=0 eob=1 rng=54856
+DBG b0 post-residual rng=54856
+DBG b0 mi=(12,16) bsize=5 skip=true rng=47641
+DBG b0 is_inter=true ctx=0 rng=44644
+DBG b0 compflag=0 rng=44644
+DBG b0 ref=2 rng=41398
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=35182
+DBG b0 zero_mv near=true rng=34459
+DBG b0 ref_mv=0 ctx=5 rng=42914
+DBG b0 interintra type=0 rng=36731
+DBG b0 motion_mode=1 warp_allowed=true rng=42766
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=42257
+DBG b0 filter1=0 ctx=8 rng=39527
+DBG b0 vartx leaves=1 tx0=8 rng=39527 all=[(12, 16, 8)]
+DBG b0 post-residual rng=39527
+DBG b0 mi=(12,18) bsize=5 skip=false rng=36234
+DBG b0 is_inter=true ctx=0 rng=33985
+DBG b0 compflag=0 rng=33985
+DBG b0 ref=2 rng=63414
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=54591
+DBG b0 zero_mv near=true rng=53680
+DBG b0 ref_mv=1 ctx=5 rng=38046
+DBG b0 interintra type=0 rng=32936
+DBG b0 motion_mode=2 warp_allowed=true rng=56864
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=2 tx0=1 rng=59178 all=[(12, 18, 1), (14, 18, 1)]
+DBG y-cf-blk mi=(12,18) tx=1 txtp=0 eob=0 rng=36502
+DBG y-cf-blk mi=(12,18) tx=1 txtp=0 eob=0 rng=65470
+DBG uv-cf-blk pl=1 tx=6 txtp=0 eob=8 rng=50696
+DBG uv-cf-blk pl=2 tx=6 txtp=0 eob=0 rng=46142
+DBG b0 post-residual rng=46142
+DBG b0 mi=(8,20) bsize=2 skip=false rng=41484
+DBG b0 is_inter=true ctx=0 rng=39127
+DBG b0 compflag=0 rng=39127
+DBG b0 ref=2 rng=36576
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,66) s1=(0,0)
+DBG b0 new_mv not=true rng=63340
+DBG b0 zero_mv near=true rng=62248
+DBG b0 ref_mv=0 ctx=5 rng=37580
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=37134
+DBG b0 filter1=0 ctx=11 rng=62942
+DBG b0 vartx leaves=1 tx0=6 rng=54731 all=[(8, 20, 6)]
+DBG y-cf-blk mi=(8,20) tx=6 txtp=2 eob=1 rng=56372
+DBG b0 post-residual rng=56372
+DBG b0 mi=(8,21) bsize=2 skip=true rng=58992
+DBG b0 is_inter=true ctx=0 rng=55779
+DBG b0 compflag=0 rng=55779
+DBG b0 ref=2 rng=52354
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=false rng=51600
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=42197
+DBG b0 filter1=0 ctx=11 rng=36203
+DBG b0 vartx leaves=1 tx0=6 rng=36203 all=[(8, 21, 6)]
+DBG b0 post-residual rng=36203
+DBG b0 mi=(10,20) bsize=3 skip=false rng=45341
+DBG b0 is_inter=false ctx=0 rng=37216
+DBG b0 ymode=12 rng=52256
+DBG b0 uvmode=12 has_chroma=true rng=60392
+DBG b0 intra-in-inter tx=0 skip=false rng=47008
+DBG b0 intra-in-inter post-residual rng=55622
+DBG b0 mi=(8,22) bsize=3 skip=true rng=34720
+DBG b0 is_inter=true ctx=0 rng=63592
+DBG b0 compflag=0 rng=63592
+DBG b0 ref=2 rng=60164
+DBG b0 mvstack n_mvs=3 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=39014
+DBG b0 zero_mv near=true rng=38384
+DBG b0 ref_mv=0 ctx=5 rng=48450
+DBG b0 interintra type=0 rng=42304
+DBG b0 motion_mode=1 warp_allowed=true rng=48022
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=47547
+DBG b0 filter1=0 ctx=11 rng=41157
+DBG b0 vartx leaves=1 tx0=1 rng=41157 all=[(8, 22, 1)]
+DBG b0 post-residual rng=41157
+DBG b0 mi=(10,22) bsize=3 skip=true rng=55760
+DBG b0 is_inter=true ctx=1 rng=57946
+DBG b0 compflag=0 rng=57946
+DBG b0 ref=2 rng=54820
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=43232
+DBG b0 zero_mv near=true rng=42424
+DBG b0 ref_mv=0 ctx=4 rng=63060
+DBG b0 interintra type=0 rng=55553
+DBG b0 motion_mode=1 warp_allowed=true rng=33096
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=65532
+DBG b0 filter1=0 ctx=8 rng=61572
+DBG b0 vartx leaves=1 tx0=1 rng=61572 all=[(10, 22, 1)]
+DBG b0 post-residual rng=61572
+DBG b0 mi=(12,20) bsize=3 skip=true rng=34724
+DBG b0 is_inter=true ctx=1 rng=38212
+DBG b0 compflag=0 rng=38212
+DBG b0 ref=2 rng=36223
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,66) s1=(0,0)
+DBG b0 new_mv not=true rng=57818
+DBG b0 zero_mv near=true rng=56929
+DBG b0 ref_mv=1 ctx=4 rng=54628
+DBG b0 interintra type=0 rng=38242
+DBG b0 motion_mode=1 warp_allowed=true rng=47242
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=46866
+DBG b0 filter1=0 ctx=8 rng=44205
+DBG b0 vartx leaves=1 tx0=1 rng=44205 all=[(12, 20, 1)]
+DBG b0 post-residual rng=44205
+DBG b0 mi=(14,20) bsize=3 skip=false rng=38350
+DBG b0 is_inter=false ctx=0 rng=50912
+DBG b0 ymode=12 rng=46760
+DBG b0 uvmode=12 has_chroma=true rng=55154
+DBG b0 intra-in-inter tx=0 skip=false rng=33332
+DBG b0 intra-in-inter post-residual rng=37896
+DBG b0 mi=(12,22) bsize=5 skip=true rng=60392
+DBG b0 is_inter=true ctx=0 rng=53701
+DBG b0 compflag=0 rng=53701
+DBG b0 ref=2 rng=50910
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=41782
+DBG b0 zero_mv near=true rng=41243
+DBG b0 ref_mv=0 ctx=5 rng=53820
+DBG b0 interintra type=0 rng=48146
+DBG b0 motion_mode=1 warp_allowed=true rng=55280
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=54842
+DBG b0 filter1=0 ctx=8 rng=51945
+DBG b0 vartx leaves=1 tx0=8 rng=51945 all=[(12, 22, 8)]
+DBG b0 post-residual rng=51945
+DBG b0 mi=(16,16) bsize=3 skip=true rng=37769
+DBG b0 is_inter=true ctx=0 rng=58526
+DBG b0 compflag=0 rng=58526
+DBG b0 ref=2 rng=55703
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=46442
+DBG b0 zero_mv near=true rng=45797
+DBG b0 ref_mv=0 ctx=5 rng=61860
+DBG b0 interintra type=0 rng=55831
+DBG b0 motion_mode=1 warp_allowed=true rng=35974
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=35686
+DBG b0 filter1=0 ctx=8 rng=33941
+DBG b0 vartx leaves=1 tx0=1 rng=33941 all=[(16, 16, 1)]
+DBG b0 post-residual rng=33941
+DBG b0 mi=(18,16) bsize=3 skip=true rng=36210
+DBG b0 is_inter=true ctx=0 rng=65008
+DBG b0 compflag=0 rng=65008
+DBG b0 ref=2 rng=61875
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=52180
+DBG b0 zero_mv near=true rng=51363
+DBG b0 ref_mv=0 ctx=5 rng=35759
+DBG b0 interintra type=0 rng=64700
+DBG b0 motion_mode=1 warp_allowed=true rng=42970
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=42628
+DBG b0 filter1=0 ctx=8 rng=40628
+DBG b0 vartx leaves=1 tx0=1 rng=40628 all=[(18, 16, 1)]
+DBG b0 post-residual rng=40628
+DBG b0 mi=(16,18) bsize=3 skip=true rng=57064
+DBG b0 is_inter=true ctx=0 rng=51286
+DBG b0 compflag=0 rng=51286
+DBG b0 ref=2 rng=48811
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=41614
+DBG b0 zero_mv near=true rng=40990
+DBG b0 ref_mv=1 ctx=5 rng=47056
+DBG b0 interintra type=0 rng=42752
+DBG b0 motion_mode=0 warp_allowed=true rng=60728
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=60246
+DBG b0 filter1=0 ctx=8 rng=57653
+DBG b0 vartx leaves=1 tx0=1 rng=57653 all=[(16, 18, 1)]
+DBG b0 post-residual rng=57653
+DBG b0 mi=(18,18) bsize=3 skip=true rng=64484
+DBG b0 is_inter=true ctx=0 rng=58236
+DBG b0 compflag=0 rng=58236
+DBG b0 ref=2 rng=55649
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=47961
+DBG b0 zero_mv near=true rng=47315
+DBG b0 ref_mv=1 ctx=5 rng=62208
+DBG b0 interintra type=0 rng=56615
+DBG b0 motion_mode=0 warp_allowed=true rng=51840
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=51428
+DBG b0 filter1=0 ctx=8 rng=49220
+DBG b0 vartx leaves=1 tx0=1 rng=49220 all=[(18, 18, 1)]
+DBG b0 post-residual rng=49220
+DBG b0 mi=(20,16) bsize=4 skip=true rng=52060
+DBG b0 is_inter=true ctx=0 rng=47201
+DBG b0 compflag=0 rng=47201
+DBG b0 ref=2 rng=45191
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=false rng=46808
+DBG b0 interintra type=0 rng=47956
+DBG b0 motion_mode=0 warp_allowed=true rng=56712
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=56373
+DBG b0 filter1=0 ctx=8 rng=54055
+DBG b0 vartx leaves=1 tx0=7 rng=54055 all=[(20, 16, 7)]
+DBG b0 post-residual rng=54055
+DBG b0 mi=(22,16) bsize=3 skip=true rng=46107
+DBG b0 is_inter=true ctx=0 rng=42034
+DBG b0 compflag=0 rng=42034
+DBG b0 ref=2 rng=40321
+DBG b0 mvstack n_mvs=2 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=54016
+DBG b0 zero_mv near=true rng=53492
+DBG b0 ref_mv=0 ctx=5 rng=33624
+DBG b0 interintra type=0 rng=61608
+DBG b0 motion_mode=0 warp_allowed=true rng=34400
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=34191
+DBG b0 filter1=0 ctx=8 rng=32853
+DBG b0 vartx leaves=1 tx0=1 rng=32853 all=[(22, 16, 1)]
+DBG b0 post-residual rng=32853
+DBG b0 mi=(22,18) bsize=3 skip=false rng=36488
+DBG b0 is_inter=true ctx=0 rng=33232
+DBG b0 compflag=0 rng=33232
+DBG b0 ref=2 rng=63766
+DBG b0 mvstack n_mvs=3 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=44077
+DBG b0 zero_mv near=true rng=43606
+DBG b0 ref_mv=1 ctx=5 rng=60876
+DBG b0 interintra type=0 rng=55826
+DBG b0 motion_mode=0 warp_allowed=true rng=35990
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=35772
+DBG b0 filter1=1 ctx=8 rng=44608
+DBG b0 vartx leaves=1 tx0=1 rng=39123 all=[(22, 18, 1)]
+DBG y-cf-blk mi=(22,18) tx=1 txtp=0 eob=1 rng=64416
+DBG uv-cf-blk pl=1 tx=0 txtp=0 eob=1 rng=43202
+DBG uv-cf-blk pl=2 tx=0 txtp=0 eob=10 rng=46856
+DBG b0 post-residual rng=46856
+DBG b0 mi=(16,20) bsize=3 skip=true rng=57608
+DBG b0 is_inter=true ctx=1 rng=33416
+DBG b0 compflag=0 rng=33416
+DBG b0 ref=2 rng=64118
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,66) s1=(0,0)
+DBG b0 new_mv not=true rng=52129
+DBG b0 zero_mv near=true rng=51464
+DBG b0 ref_mv=1 ctx=4 rng=59512
+DBG b0 interintra type=0 rng=47276
+DBG b0 motion_mode=1 warp_allowed=true rng=49872
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=49573
+DBG b0 filter1=0 ctx=8 rng=46188
+DBG b0 vartx leaves=1 tx0=1 rng=46188 all=[(16, 20, 1)]
+DBG b0 post-residual rng=46188
+DBG b0 mi=(18,20) bsize=3 skip=false rng=35696
+DBG b0 is_inter=false ctx=0 rng=49552
+DBG b0 ymode=12 rng=56384
+DBG b0 uvmode=12 has_chroma=true rng=34104
+DBG b0 intra-in-inter tx=0 skip=false rng=47364
+DBG b0 intra-in-inter post-residual rng=39688
+DBG b0 mi=(16,22) bsize=5 skip=true rng=60148
+DBG b0 is_inter=true ctx=0 rng=53239
+DBG b0 compflag=0 rng=53239
+DBG b0 ref=2 rng=51179
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=41694
+DBG b0 zero_mv near=true rng=41071
+DBG b0 ref_mv=0 ctx=5 rng=51894
+DBG b0 interintra type=0 rng=47951
+DBG b0 motion_mode=0 warp_allowed=true rng=58168
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=57820
+DBG b0 filter1=0 ctx=8 rng=53987
+DBG b0 vartx leaves=1 tx0=8 rng=53987 all=[(16, 22, 8)]
+DBG b0 post-residual rng=53987
+DBG b0 mi=(20,20) bsize=3 skip=true rng=48328
+DBG b0 is_inter=true ctx=1 rng=58288
+DBG b0 compflag=0 rng=58288
+DBG b0 ref=2 rng=56143
+DBG b0 mvstack n_mvs=3 ctx=0x4a comp_ctx=5 s0=(0,64) s1=(0,66)
+DBG b0 new_mv not=true rng=59356
+DBG b0 zero_mv near=true rng=58562
+DBG b0 ref_mv=0 ctx=4 rng=39178
+DBG b0 interintra type=0 rng=36267
+DBG b0 motion_mode=1 warp_allowed=true rng=40474
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=40229
+DBG b0 filter1=0 ctx=8 rng=37631
+DBG b0 vartx leaves=1 tx0=1 rng=37631 all=[(20, 20, 1)]
+DBG b0 post-residual rng=37631
+DBG b0 mi=(22,20) bsize=3 skip=false rng=58528
+DBG b0 is_inter=false ctx=0 rng=51408
+DBG b0 ymode=12 rng=34816
+DBG b0 uvmode=2 has_chroma=true rng=33792
+DBG b0 intra-in-inter tx=0 skip=false rng=46736
+DBG b0 intra-in-inter post-residual rng=42248
+DBG b0 mi=(20,22) bsize=5 skip=true rng=65348
+DBG b0 is_inter=true ctx=0 rng=56359
+DBG b0 compflag=0 rng=56359
+DBG b0 ref=2 rng=54391
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=44736
+DBG b0 zero_mv near=true rng=44113
+DBG b0 ref_mv=0 ctx=5 rng=56742
+DBG b0 interintra type=0 rng=52760
+DBG b0 motion_mode=1 warp_allowed=true rng=59130
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=58777
+DBG b0 filter1=0 ctx=8 rng=55105
+DBG b0 vartx leaves=1 tx0=8 rng=55105 all=[(20, 22, 8)]
+DBG b0 post-residual rng=55105
+DBG b0 mi=(24,16) bsize=5 skip=true rng=44938
+DBG b0 is_inter=true ctx=0 rng=38854
+DBG b0 compflag=0 rng=38854
+DBG b0 ref=2 rng=37497
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,64)
+DBG b0 new_mv not=true rng=61912
+DBG b0 zero_mv near=true rng=61097
+DBG b0 ref_mv=0 ctx=5 rng=39911
+DBG b0 interintra type=0 rng=37195
+DBG b0 motion_mode=1 warp_allowed=true rng=43798
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=43534
+DBG b0 filter1=0 ctx=8 rng=40891
+DBG b0 vartx leaves=1 tx0=8 rng=40891 all=[(24, 16, 8)]
+DBG b0 post-residual rng=40891
+DBG b0 mi=(24,18) bsize=5 skip=false rng=34870
+DBG b0 is_inter=true ctx=0 rng=60528
+DBG b0 compflag=0 rng=60528
+DBG b0 ref=2 rng=58416
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=48682
+DBG b0 zero_mv near=true rng=48169
+DBG b0 ref_mv=1 ctx=5 rng=64688
+DBG b0 interintra type=0 rng=42519
+DBG b0 motion_mode=2 warp_allowed=true rng=34876
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=54512 all=[(24, 18, 8)]
+DBG y-cf-blk mi=(24,18) tx=8 txtp=0 eob=1 rng=62592
+DBG uv-cf-blk pl=1 tx=6 txtp=0 eob=0 rng=61252
+DBG uv-cf-blk pl=2 tx=6 txtp=0 eob=1 rng=48966
+DBG b0 post-residual rng=48966
+DBG b0 mi=(28,16) bsize=5 skip=true rng=62938
+DBG b0 is_inter=true ctx=0 rng=54639
+DBG b0 compflag=0 rng=54639
+DBG b0 ref=2 rng=52730
+DBG b0 mvstack n_mvs=1 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=44079
+DBG b0 zero_mv near=true rng=43692
+DBG b0 ref_mv=0 ctx=5 rng=56266
+DBG b0 interintra type=0 rng=52649
+DBG b0 motion_mode=1 warp_allowed=true rng=60484
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=60122
+DBG b0 filter1=0 ctx=8 rng=56604
+DBG b0 vartx leaves=1 tx0=8 rng=56604 all=[(28, 16, 8)]
+DBG b0 post-residual rng=56604
+DBG b0 mi=(28,18) bsize=3 skip=true rng=61224
+DBG b0 is_inter=true ctx=0 rng=53420
+DBG b0 compflag=0 rng=53420
+DBG b0 ref=2 rng=51758
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=43636
+DBG b0 zero_mv near=true rng=43184
+DBG b0 ref_mv=1 ctx=5 rng=59488
+DBG b0 interintra type=0 rng=55772
+DBG b0 motion_mode=0 warp_allowed=true rng=36012
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=35794
+DBG b0 filter1=0 ctx=8 rng=33771
+DBG b0 vartx leaves=1 tx0=1 rng=33771 all=[(28, 18, 1)]
+DBG b0 post-residual rng=33771
+DBG b0 mi=(30,18) bsize=3 skip=false rng=55296
+DBG b0 is_inter=false ctx=0 rng=55264
+DBG b0 ymode=12 rng=43016
+DBG b0 uvmode=2 has_chroma=true rng=63232
+DBG b0 intra-in-inter tx=1 skip=false rng=33829
+DBG b0 intra-in-inter post-residual rng=38540
+DBG b0 mi=(24,20) bsize=6 skip=false rng=36506
+DBG b0 is_inter=true ctx=1 rng=45874
+DBG b0 compflag=0 rng=45874
+DBG b0 ref=2 rng=44443
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=37631
+DBG b0 zero_mv near=true rng=37088
+DBG b0 ref_mv=0 ctx=5 rng=47240
+DBG b0 interintra type=2 rng=51024
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=50817
+DBG b0 filter1=0 ctx=8 rng=48037
+DBG b0 vartx leaves=1 tx0=2 rng=53244 all=[(24, 20, 2)]
+DBG y-cf-blk mi=(24,20) tx=2 txtp=11 eob=38 rng=35592
+DBG uv-cf-blk pl=1 tx=1 txtp=11 eob=19 rng=47624
+DBG uv-cf-blk pl=2 tx=1 txtp=11 eob=19 rng=37896
+DBG b0 post-residual rng=37896
+DBG b0 mi=(28,20) bsize=3 skip=true rng=51224
+DBG b0 is_inter=true ctx=0 rng=44104
+DBG b0 compflag=0 rng=44104
+DBG b0 ref=2 rng=42729
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=36275
+DBG b0 zero_mv near=true rng=35818
+DBG b0 ref_mv=1 ctx=5 rng=50332
+DBG b0 interintra type=0 rng=47290
+DBG b0 motion_mode=0 warp_allowed=true rng=34580
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=34437
+DBG b0 filter1=0 ctx=8 rng=65240
+DBG b0 vartx leaves=1 tx0=1 rng=65240 all=[(28, 20, 1)]
+DBG b0 post-residual rng=65240
+DBG b0 mi=(30,20) bsize=3 skip=false rng=54780
+DBG b0 is_inter=false ctx=1 rng=38198
+DBG b0 ymode=12 rng=33688
+DBG b0 uvmode=2 has_chroma=true rng=64000
+DBG b0 intra-in-inter tx=0 skip=false rng=48968
+DBG b0 intra-in-inter post-residual rng=52488
+DBG b0 mi=(28,22) bsize=5 skip=true rng=59252
+DBG b0 is_inter=true ctx=0 rng=51170
+DBG b0 compflag=0 rng=51170
+DBG b0 ref=2 rng=49579
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,66)
+DBG b0 new_mv not=true rng=42367
+DBG b0 zero_mv near=true rng=41914
+DBG b0 ref_mv=0 ctx=5 rng=52524
+DBG b0 interintra type=0 rng=49445
+DBG b0 motion_mode=1 warp_allowed=true rng=59452
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=59212
+DBG b0 filter1=0 ctx=8 rng=56201
+DBG b0 vartx leaves=1 tx0=8 rng=56201 all=[(28, 22, 8)]
+DBG b0 post-residual rng=56201
+DBG refresh oh=6 show=false flags=0b00000010 -> hints=[0, 6, 0, 0, 0, 0, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=3 primary_ref=7 disable_cdf_update=false
+DBG FH inter oh=3 interp_filter=4 mm_switch=true w=128 h=96 hp=false
+DBG skip_mode oh=3 fwd=0 bwd=6 allowed=true sm=[0,6] dpb_hints=[0, 6, 0, 0, 0, 0, 0, 0] ref_idx=[0, 0, 0, 0, 0, 0, 1]
+DBG b0 skipmode=true ctx=0 rng=39936
+DBG b0 skipmode=true ctx=1 rng=36668
+DBG b0 skipmode=true ctx=1 rng=48472
+DBG b0 skipmode=false ctx=1 rng=46530
+DBG b0 mi=(0,18) bsize=5 skip=true rng=45800
+DBG b0 is_inter=true ctx=0 rng=44415
+DBG b0 compflag=0 rng=58276
+DBG b0 ref=2 rng=56388
+DBG b0 mvstack n_mvs=2 ctx=0x33 comp_ctx=4 s0=(0,0) s1=(0,32)
+DBG b0 new_mv not=true rng=41804
+DBG b0 zero_mv near=true rng=38961
+DBG b0 ref_mv=1 ctx=3 rng=38944
+DBG b0 interintra type=0 rng=64048
+DBG b0 motion_mode=0 warp_allowed=false rng=36588
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=35657
+DBG b0 filter1=0 ctx=8 rng=34746
+DBG b0 vartx leaves=1 tx0=8 rng=34746 all=[(0, 18, 8)]
+DBG b0 post-residual rng=34746
+DBG b0 skipmode=true ctx=2 rng=53522
+DBG b0 skipmode=false ctx=1 rng=62520
+DBG b0 mi=(4,18) bsize=3 skip=true rng=53684
+DBG b0 is_inter=true ctx=0 rng=52254
+DBG b0 compflag=1 rng=33052
+DBG b0 comprefs=0/6 dir_ctx=1 rng=51281
+DBG b0 mvstack n_mvs=2 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=1 ctx=4 n_mvs=2 rng=55232
+DBG b0 compmv drl=1 mv0=(0,32) mv1=(0,-32) rng=55232
+DBG b0 comptype grp=0 type=2 rng=64058
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=61050
+DBG b0 filter1=0 ctx=12 rng=57829
+DBG b0 vartx leaves=1 tx0=1 rng=57829 all=[(4, 18, 1)]
+DBG b0 post-residual rng=57829
+DBG b0 skipmode=true ctx=1 rng=45008
+DBG b0 skipmode=true ctx=0 rng=40864
+DBG b0 skipmode=false ctx=1 rng=46900
+DBG b0 mi=(2,20) bsize=4 skip=true rng=40630
+DBG b0 is_inter=true ctx=0 rng=39504
+DBG b0 compflag=0 rng=54820
+DBG b0 ref=8 rng=38233
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,-32)
+DBG b0 new_mv not=true rng=65270
+DBG b0 zero_mv near=true rng=62869
+DBG b0 ref_mv=1 ctx=5 rng=49008
+DBG b0 interintra type=0 rng=40791
+DBG b0 motion_mode=0 warp_allowed=false rng=47080
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=45974
+DBG b0 filter1=0 ctx=8 rng=44892
+DBG b0 vartx leaves=1 tx0=7 rng=44892 all=[(2, 20, 7)]
+DBG b0 post-residual rng=44892
+DBG b0 skipmode=false ctx=0 rng=61368
+DBG b0 mi=(4,20) bsize=3 skip=false rng=61672
+DBG b0 is_inter=true ctx=0 rng=60124
+DBG b0 compflag=1 rng=37912
+DBG b0 comprefs=0/6 dir_ctx=1 rng=59639
+DBG b0 mvstack n_mvs=2 ctx=0x4b comp_ctx=6 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=6 n_mvs=2 rng=62614
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=62614
+DBG b0 comptype grp=0 type=2 rng=40392
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=38657
+DBG b0 filter1=0 ctx=12 rng=36762
+DBG b0 vartx leaves=1 tx0=1 rng=36762 all=[(4, 20, 1)]
+DBG y-cf-blk mi=(4,20) tx=1 txtp=6 eob=4 rng=37896
+DBG uv-cf-blk pl=1 tx=0 txtp=6 eob=1 rng=46862
+DBG uv-cf-blk pl=2 tx=0 txtp=0 eob=0 rng=38342
+DBG b0 post-residual rng=38342
+DBG b0 skipmode=false ctx=0 rng=33868
+DBG b0 mi=(4,22) bsize=3 skip=true rng=35648
+DBG b0 is_inter=true ctx=0 rng=34893
+DBG b0 compflag=1 rng=45568
+DBG b0 comprefs=0/6 dir_ctx=1 rng=36319
+DBG b0 mvstack n_mvs=2 ctx=0x4b comp_ctx=6 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=6 n_mvs=2 rng=39306
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=39306
+DBG b0 comptype grp=0 type=2 rng=52056
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=49917
+DBG b0 filter1=0 ctx=12 rng=47678
+DBG b0 vartx leaves=1 tx0=1 rng=47678 all=[(4, 22, 1)]
+DBG b0 post-residual rng=47678
+DBG b0 skipmode=true ctx=1 rng=38138
+DBG b0 skipmode=true ctx=2 rng=47240
+DBG b0 skipmode=false ctx=2 rng=41744
+DBG b0 mi=(8,18) bsize=5 skip=true rng=34315
+DBG b0 is_inter=true ctx=0 rng=33638
+DBG b0 compflag=1 rng=61054
+DBG b0 comprefs=0/6 dir_ctx=0 rng=50236
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=4 ctx=7 n_mvs=2 rng=36128
+DBG b0 compmv drl=1 mv0=(0,32) mv1=(0,-40) rng=34768
+DBG b0 comptype grp=0 type=1 rng=57584
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=55336
+DBG b0 filter1=0 ctx=12 rng=52952
+DBG b0 vartx leaves=1 tx0=8 rng=52952 all=[(8, 18, 8)]
+DBG b0 post-residual rng=52952
+DBG b0 skipmode=true ctx=2 rng=39379
+DBG b0 skipmode=false ctx=1 rng=44478
+DBG b0 mi=(12,18) bsize=5 skip=true rng=36853
+DBG b0 is_inter=true ctx=0 rng=35968
+DBG b0 compflag=1 rng=32834
+DBG b0 comprefs=0/6 dir_ctx=0 rng=54809
+DBG b0 mvstack n_mvs=3 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=1 ctx=7 n_mvs=3 rng=32964
+DBG b0 compmv drl=1 mv0=(0,32) mv1=(0,-40) rng=49536
+DBG b0 comptype grp=0 type=1 rng=44940
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=43357
+DBG b0 filter1=0 ctx=12 rng=41575
+DBG b0 vartx leaves=1 tx0=8 rng=41575 all=[(12, 18, 8)]
+DBG b0 post-residual rng=41575
+DBG b0 skipmode=false ctx=1 rng=33861
+DBG b0 mi=(8,20) bsize=3 skip=true rng=57032
+DBG b0 is_inter=true ctx=0 rng=55837
+DBG b0 compflag=1 rng=51452
+DBG b0 comprefs=0/6 dir_ctx=0 rng=43015
+DBG b0 mvstack n_mvs=3 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=1 ctx=7 n_mvs=3 rng=55456
+DBG b0 compmv drl=1 mv0=(0,32) mv1=(0,-40) rng=42492
+DBG b0 comptype grp=1 type=4 rng=41992
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=40590
+DBG b0 filter1=0 ctx=12 rng=39081
+DBG b0 vartx leaves=1 tx0=1 rng=39081 all=[(8, 20, 1)]
+DBG b0 post-residual rng=39081
+DBG b0 skipmode=true ctx=1 rng=59904
+DBG b0 skipmode=false ctx=0 rng=53348
+DBG b0 mi=(10,20) bsize=4 skip=true rng=45452
+DBG b0 is_inter=true ctx=0 rng=44608
+DBG b0 compflag=1 rng=41242
+DBG b0 comprefs=0/6 dir_ctx=0 rng=35140
+DBG b0 mvstack n_mvs=2 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=7 n_mvs=2 rng=51124
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=51124
+DBG b0 comptype grp=1 type=3 rng=36782
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=35630
+DBG b0 filter1=0 ctx=12 rng=34371
+DBG b0 vartx leaves=1 tx0=7 rng=34371 all=[(10, 20, 7)]
+DBG b0 post-residual rng=34371
+DBG b0 skipmode=false ctx=0 rng=64600
+DBG b0 mi=(12,20) bsize=4 skip=true rng=55570
+DBG b0 is_inter=true ctx=0 rng=54688
+DBG b0 compflag=1 rng=50698
+DBG b0 comprefs=0/6 dir_ctx=0 rng=43525
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=7 n_mvs=3 rng=33274
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=33274
+DBG b0 comptype grp=1 type=3 rng=56612
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=54947
+DBG b0 filter1=0 ctx=12 rng=53120
+DBG b0 vartx leaves=1 tx0=7 rng=53120 all=[(12, 20, 7)]
+DBG b0 post-residual rng=53120
+DBG b0 skipmode=false ctx=0 rng=48045
+DBG b0 mi=(14,20) bsize=4 skip=true rng=41705
+DBG b0 is_inter=true ctx=0 rng=40909
+DBG b0 compflag=0 rng=45200
+DBG b0 ref=8 rng=38635
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,-40)
+DBG b0 new_mv not=false rng=43248
+DBG b0 interintra type=0 rng=57832
+DBG b0 motion_mode=0 warp_allowed=false rng=38706
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=37868
+DBG b0 filter1=0 ctx=8 rng=37052
+DBG b0 vartx leaves=1 tx0=7 rng=37052 all=[(14, 20, 7)]
+DBG b0 post-residual rng=37052
+DBG b0 mi=(16,16) bsize=17 skip=true rng=52204
+DBG b0 is_inter=true ctx=0 rng=47979
+DBG b0 compflag=0 rng=47979
+DBG b0 ref=2 rng=46243
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=37354
+DBG b0 zero_mv near=true rng=34804
+DBG b0 ref_mv=0 ctx=5 rng=39900
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=39117
+DBG b0 filter1=0 ctx=8 rng=38273
+DBG b0 vartx leaves=1 tx0=14 rng=38273 all=[(16, 16, 14)]
+DBG b0 post-residual rng=38273
+DBG b0 mi=(16,17) bsize=17 skip=true rng=33827
+DBG b0 is_inter=true ctx=0 rng=33400
+DBG b0 compflag=0 rng=33400
+DBG b0 ref=2 rng=53295
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=43788
+DBG b0 zero_mv near=true rng=41215
+DBG b0 ref_mv=0 ctx=5 rng=49462
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=48489
+DBG b0 filter1=0 ctx=8 rng=47536
+DBG b0 vartx leaves=1 tx0=14 rng=47536 all=[(16, 17, 14)]
+DBG b0 post-residual rng=47536
+DBG b0 mi=(16,18) bsize=17 skip=true rng=42276
+DBG b0 is_inter=true ctx=0 rng=41749
+DBG b0 compflag=0 rng=41749
+DBG b0 ref=2 rng=33814
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 new_mv not=true rng=56372
+DBG b0 zero_mv near=true rng=54564
+DBG b0 ref_mv=1 ctx=5 rng=41116
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=40388
+DBG b0 filter1=0 ctx=8 rng=39674
+DBG b0 vartx leaves=1 tx0=14 rng=39674 all=[(16, 18, 14)]
+DBG b0 post-residual rng=39674
+DBG b0 mi=(16,19) bsize=17 skip=true rng=35501
+DBG b0 is_inter=true ctx=0 rng=34918
+DBG b0 compflag=0 rng=34918
+DBG b0 ref=2 rng=57317
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,32) s1=(0,0)
+DBG b0 new_mv not=true rng=48172
+DBG b0 zero_mv near=true rng=46722
+DBG b0 ref_mv=0 ctx=5 rng=54670
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=53810
+DBG b0 filter1=0 ctx=8 rng=52857
+DBG b0 vartx leaves=1 tx0=14 rng=52857 all=[(16, 19, 14)]
+DBG b0 post-residual rng=52857
+DBG b0 skipmode=true ctx=1 rng=48398
+DBG b0 skipmode=false ctx=1 rng=52374
+DBG b0 mi=(20,18) bsize=5 skip=true rng=47332
+DBG b0 is_inter=true ctx=0 rng=46648
+DBG b0 compflag=1 rng=57156
+DBG b0 comprefs=0/6 dir_ctx=1 rng=48367
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=1 ctx=6 n_mvs=3 rng=39496
+DBG b0 compmv drl=2 mv0=(0,32) mv1=(0,-40) rng=33118
+DBG b0 comptype grp=1 type=3 rng=35388
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=34414
+DBG b0 filter1=0 ctx=12 rng=33334
+DBG b0 vartx leaves=1 tx0=8 rng=33334 all=[(20, 18, 8)]
+DBG b0 post-residual rng=33334
+DBG b0 skipmode=false ctx=0 rng=38376
+DBG b0 mi=(16,20) bsize=4 skip=true rng=34795
+DBG b0 is_inter=true ctx=0 rng=34226
+DBG b0 compflag=0 rng=50356
+DBG b0 ref=2 rng=52278
+DBG b0 mvstack n_mvs=2 ctx=0x4b comp_ctx=6 s0=(0,32) s1=(0,0)
+DBG b0 new_mv not=true rng=39682
+DBG b0 zero_mv near=true rng=38599
+DBG b0 ref_mv=0 ctx=4 rng=57390
+DBG b0 interintra type=0 rng=48986
+DBG b0 motion_mode=2 warp_allowed=true rng=47764
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=7 rng=47764 all=[(16, 20, 7)]
+DBG b0 post-residual rng=47764
+DBG b0 skipmode=false ctx=0 rng=43761
+DBG b0 mi=(18,20) bsize=4 skip=true rng=39954
+DBG b0 is_inter=true ctx=0 rng=39550
+DBG b0 compflag=0 rng=64924
+DBG b0 ref=8 rng=61258
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,-40) s1=(0,0)
+DBG b0 new_mv not=false rng=55728
+DBG b0 interintra type=0 rng=58484
+DBG b0 motion_mode=1 warp_allowed=false rng=36598
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=3 rng=63240
+DBG b0 filter1=1 ctx=11 rng=40028
+DBG b0 vartx leaves=1 tx0=7 rng=40028 all=[(18, 20, 7)]
+DBG b0 post-residual rng=40028
+DBG b0 skipmode=false ctx=0 rng=54104
+DBG b0 mi=(20,20) bsize=4 skip=true rng=49800
+DBG b0 is_inter=true ctx=0 rng=49183
+DBG b0 compflag=0 rng=63852
+DBG b0 ref=2 rng=36891
+DBG b0 mvstack n_mvs=2 ctx=0x4b comp_ctx=6 s0=(0,32) s1=(0,0)
+DBG b0 new_mv not=true rng=53576
+DBG b0 zero_mv near=true rng=52149
+DBG b0 ref_mv=0 ctx=4 rng=39661
+DBG b0 interintra type=0 rng=34575
+DBG b0 motion_mode=0 warp_allowed=true rng=37856
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=37260
+DBG b0 filter1=0 ctx=8 rng=36672
+DBG b0 vartx leaves=1 tx0=7 rng=36672 all=[(20, 20, 7)]
+DBG b0 post-residual rng=36672
+DBG b0 skipmode=false ctx=0 rng=33951
+DBG b0 mi=(22,20) bsize=4 skip=true rng=62444
+DBG b0 is_inter=true ctx=0 rng=61604
+DBG b0 compflag=1 rng=39244
+DBG b0 comprefs=0/6 dir_ctx=1 rng=33460
+DBG b0 mvstack n_mvs=2 ctx=0x3b comp_ctx=4 s0=(0,32) s1=(0,0)
+DBG b0 compintermode=1 ctx=4 n_mvs=2 rng=43192
+DBG b0 compmv drl=1 mv0=(0,0) mv1=(0,0) rng=43192
+DBG b0 comptype grp=1 type=3 rng=42908
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=41815
+DBG b0 filter1=0 ctx=12 rng=40585
+DBG b0 vartx leaves=1 tx0=7 rng=40585 all=[(22, 20, 7)]
+DBG b0 post-residual rng=40585
+DBG b0 skipmode=true ctx=2 rng=33516
+DBG b0 skipmode=false ctx=1 rng=38294
+DBG b0 mi=(24,18) bsize=5 skip=true rng=35391
+DBG b0 is_inter=true ctx=0 rng=34987
+DBG b0 compflag=1 rng=61072
+DBG b0 comprefs=0/6 dir_ctx=0 rng=53741
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=1 ctx=7 n_mvs=3 rng=34494
+DBG b0 compmv drl=1 mv0=(0,32) mv1=(0,-40) rng=50622
+DBG b0 comptype grp=0 type=2 rng=47884
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=46754
+DBG b0 filter1=0 ctx=12 rng=45472
+DBG b0 vartx leaves=1 tx0=8 rng=45472 all=[(24, 18, 8)]
+DBG b0 post-residual rng=45472
+DBG b0 skipmode=true ctx=2 rng=43796
+DBG b0 skipmode=false ctx=1 rng=52188
+DBG b0 mi=(28,18) bsize=5 skip=true rng=48318
+DBG b0 is_inter=true ctx=0 rng=47756
+DBG b0 compflag=0 rng=44984
+DBG b0 ref=8 rng=36509
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,-40)
+DBG b0 new_mv not=false rng=43824
+DBG b0 interintra type=0 rng=39156
+DBG b0 motion_mode=0 warp_allowed=false rng=52336
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=51614
+DBG b0 filter1=0 ctx=8 rng=50802
+DBG b0 vartx leaves=1 tx0=8 rng=50802 all=[(28, 18, 8)]
+DBG b0 post-residual rng=50802
+DBG b0 skipmode=false ctx=0 rng=60545
+DBG b0 mi=(24,20) bsize=5 skip=false rng=34040
+DBG b0 is_inter=true ctx=0 rng=33532
+DBG b0 compflag=1 rng=55128
+DBG b0 comprefs=0/6 dir_ctx=0 rng=48910
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=7 n_mvs=3 rng=38172
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=38172
+DBG b0 comptype grp=0 type=2 rng=38254
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=37352
+DBG b0 filter1=0 ctx=12 rng=36402
+DBG b0 vartx leaves=1 tx0=8 rng=36402 all=[(24, 20, 8)]
+DBG y-cf-blk mi=(24,20) tx=8 txtp=6 eob=6 rng=64776
+DBG uv-cf-blk pl=1 tx=6 txtp=6 eob=1 rng=58592
+DBG uv-cf-blk pl=2 tx=6 txtp=0 eob=0 rng=49594
+DBG b0 post-residual rng=49594
+DBG b0 skipmode=true ctx=0 rng=51008
+DBG b0 skipmode=false ctx=0 rng=64328
+DBG b0 mi=(28,20) bsize=4 skip=true rng=35771
+DBG b0 is_inter=true ctx=0 rng=35310
+DBG b0 compflag=1 rng=44532
+DBG b0 comprefs=0/6 dir_ctx=1 rng=38614
+DBG b0 mvstack n_mvs=3 ctx=0x4b comp_ctx=6 s0=(0,0) s1=(0,32)
+DBG b0 compintermode=0 ctx=6 n_mvs=3 rng=41472
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=41472
+DBG b0 comptype grp=0 type=2 rng=54525
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=4 rng=53351
+DBG b0 filter1=0 ctx=12 rng=52095
+DBG b0 vartx leaves=1 tx0=7 rng=52095 all=[(28, 20, 7)]
+DBG b0 post-residual rng=52095
+DBG b0 skipmode=false ctx=0 rng=46103
+DBG b0 mi=(30,20) bsize=4 skip=true rng=41584
+DBG b0 is_inter=true ctx=0 rng=41152
+DBG b0 compflag=0 rng=57072
+DBG b0 ref=8 rng=43212
+DBG b0 mvstack n_mvs=2 ctx=0x5c comp_ctx=7 s0=(0,0) s1=(0,-34)
+DBG b0 new_mv not=true rng=53936
+DBG b0 zero_mv near=true rng=52504
+DBG b0 ref_mv=1 ctx=5 rng=41008
+DBG b0 interintra type=0 rng=36364
+DBG b0 motion_mode=1 warp_allowed=true rng=39058
+DBG b0 frame_filter=4 dual=true
+DBG b0 filter0=0 ctx=0 rng=38518
+DBG b0 filter1=0 ctx=8 rng=37985
+DBG b0 vartx leaves=1 tx0=7 rng=37985 all=[(30, 20, 7)]
+DBG b0 post-residual rng=37985
+DBG refresh oh=3 show=false flags=0b00000100 -> hints=[0, 6, 3, 0, 0, 0, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=1 primary_ref=7 disable_cdf_update=false
+DBG FH inter oh=1 interp_filter=0 mm_switch=true w=128 h=96 hp=true
+DBG skip_mode oh=1 fwd=0 bwd=4 allowed=true sm=[0,4] dpb_hints=[0, 6, 3, 0, 0, 0, 0, 0] ref_idx=[0, 0, 0, 0, 2, 0, 1]
+DBG b0 skipmode=true ctx=0 rng=41216
+DBG b0 skipmode=true ctx=1 rng=37796
+DBG b0 skipmode=false ctx=1 rng=64348
+DBG b0 mi=(0,16) bsize=11 skip=false rng=65186
+DBG b0 is_inter=true ctx=0 rng=63377
+DBG b0 compflag=1 rng=42611
+DBG b0 comprefs=0/4 dir_ctx=0 rng=63646
+DBG b0 mvstack n_mvs=3 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,11)
+DBG b0 compintermode=0 ctx=4 n_mvs=3 rng=36834
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=36834
+DBG b0 comptype grp=0 type=1 rng=47316
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=47316 all=[(0, 16, 12)]
+DBG y-cf-blk mi=(0,16) tx=12 txtp=0 eob=18 rng=54536
+DBG uv-cf-blk pl=1 tx=10 txtp=0 eob=0 rng=45905
+DBG uv-cf-blk pl=2 tx=10 txtp=0 eob=0 rng=39026
+DBG b0 post-residual rng=39026
+DBG b0 skipmode=false ctx=1 rng=60908
+DBG b0 mi=(16,16) bsize=11 skip=false rng=65402
+DBG b0 is_inter=true ctx=0 rng=63754
+DBG b0 compflag=1 rng=58021
+DBG b0 comprefs=0/4 dir_ctx=0 rng=44046
+DBG b0 mvstack n_mvs=3 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,11)
+DBG b0 compintermode=0 ctx=7 n_mvs=3 rng=35060
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=35060
+DBG b0 comptype grp=0 type=1 rng=49970
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=49970 all=[(16, 16, 12)]
+DBG y-cf-blk mi=(16,16) tx=12 txtp=0 eob=26 rng=45576
+DBG uv-cf-blk pl=1 tx=10 txtp=0 eob=0 rng=39253
+DBG uv-cf-blk pl=2 tx=10 txtp=0 eob=0 rng=34123
+DBG b0 post-residual rng=34123
+DBG refresh oh=1 show=true flags=0b00001000 -> hints=[0, 6, 3, 1, 0, 0, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=2 primary_ref=0 disable_cdf_update=false
+DBG FH inter oh=2 interp_filter=0 mm_switch=true w=128 h=96 hp=true
+DBG skip_mode oh=2 fwd=0 bwd=4 allowed=true sm=[0,4] dpb_hints=[0, 6, 3, 1, 0, 0, 0, 0] ref_idx=[3, 0, 0, 0, 2, 0, 1]
+DBG b0 skipmode=true ctx=0 rng=44400
+DBG b0 skipmode=true ctx=1 rng=41182
+DBG b0 skipmode=true ctx=1 rng=47916
+DBG b0 skipmode=true ctx=2 rng=45049
+DBG refresh oh=2 show=true flags=0b00010000 -> hints=[0, 6, 3, 1, 2, 0, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=4 primary_ref=1 disable_cdf_update=false
+DBG FH inter oh=4 interp_filter=0 mm_switch=true w=128 h=96 hp=true
+DBG skip_mode oh=4 fwd=0 bwd=6 allowed=true sm=[0,6] dpb_hints=[0, 6, 3, 1, 2, 0, 0, 0] ref_idx=[2, 4, 3, 0, 0, 0, 1]
+DBG b0 skipmode=true ctx=0 rng=43296
+DBG b0 skipmode=true ctx=1 rng=50628
+DBG b0 skipmode=false ctx=1 rng=40356
+DBG b0 mi=(0,16) bsize=11 skip=true rng=35018
+DBG b0 is_inter=true ctx=0 rng=34004
+DBG b0 compflag=1 rng=47000
+DBG b0 comprefs=0/6 dir_ctx=0 rng=38164
+DBG b0 mvstack n_mvs=2 ctx=0x3b comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 compintermode=0 ctx=4 n_mvs=2 rng=45132
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=45132
+DBG b0 comptype grp=0 type=1 rng=35334
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=35334 all=[(0, 16, 12)]
+DBG b0 post-residual rng=35334
+DBG b0 skipmode=false ctx=1 rng=49456
+DBG b0 mi=(16,16) bsize=11 skip=true rng=42464
+DBG b0 is_inter=true ctx=0 rng=41336
+DBG b0 compflag=1 rng=37758
+DBG b0 comprefs=0/6 dir_ctx=0 rng=61798
+DBG b0 mvstack n_mvs=2 ctx=0x5d comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 compintermode=0 ctx=7 n_mvs=2 rng=51722
+DBG b0 compmv drl=0 mv0=(0,0) mv1=(0,0) rng=51722
+DBG b0 comptype grp=0 type=1 rng=43950
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=43950 all=[(16, 16, 12)]
+DBG b0 post-residual rng=43950
+DBG refresh oh=4 show=true flags=0b00100000 -> hints=[0, 6, 3, 1, 2, 4, 0, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=5 primary_ref=0 disable_cdf_update=false
+DBG FH inter oh=5 interp_filter=0 mm_switch=true w=128 h=96 hp=true
+DBG skip_mode oh=5 fwd=0 bwd=6 allowed=true sm=[0,6] dpb_hints=[0, 6, 3, 1, 2, 4, 0, 0] ref_idx=[5, 2, 4, 0, 3, 0, 1]
+DBG b0 skipmode=true ctx=0 rng=64064
+DBG b0 skipmode=true ctx=1 rng=36472
+DBG b0 skipmode=true ctx=1 rng=50148
+DBG b0 skipmode=true ctx=2 rng=48416
+DBG refresh oh=5 show=true flags=0b01000000 -> hints=[0, 6, 3, 1, 2, 4, 5, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=6 primary_ref=0 disable_cdf_update=false
+DBG FH inter oh=6 interp_filter=0 mm_switch=true w=128 h=96 hp=false
+DBG b0 mi=(0,0) bsize=12 skip=true rng=48800
+DBG b0 is_inter=true ctx=0 rng=47694
+DBG b0 compflag=0 rng=47694
+DBG b0 ref=8 rng=44508
+DBG b0 mvstack n_mvs=1 ctx=0x0 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=47072
+DBG b0 zero_mv near=true rng=43741
+DBG b0 ref_mv=0 ctx=0 rng=64184
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=4 rng=64184 all=[(0, 0, 4)]
+DBG b0 post-residual rng=64184
+DBG b0 mi=(16,0) bsize=12 skip=true rng=42906
+DBG b0 is_inter=true ctx=0 rng=41921
+DBG b0 compflag=0 rng=41921
+DBG b0 ref=8 rng=33607
+DBG b0 mvstack n_mvs=1 ctx=0x33 comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=49788
+DBG b0 zero_mv near=true rng=46564
+DBG b0 ref_mv=0 ctx=3 rng=40768
+DBG b0 motion_mode=0 warp_allowed=true rng=36785
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=4 rng=36785 all=[(16, 0, 4)]
+DBG b0 post-residual rng=36785
+DBG b0 mi=(0,16) bsize=11 skip=true rng=57800
+DBG b0 is_inter=true ctx=0 rng=56591
+DBG b0 compflag=0 rng=56591
+DBG b0 ref=8 rng=46214
+DBG b0 mvstack n_mvs=1 ctx=0x33 comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=35014
+DBG b0 zero_mv near=true rng=32780
+DBG b0 ref_mv=0 ctx=3 rng=57872
+DBG b0 motion_mode=0 warp_allowed=true rng=38315
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=38315 all=[(0, 16, 12)]
+DBG b0 post-residual rng=38315
+DBG b0 mi=(16,16) bsize=11 skip=true rng=41740
+DBG b0 is_inter=true ctx=0 rng=40998
+DBG b0 compflag=0 rng=40998
+DBG b0 ref=8 rng=33814
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=57824
+DBG b0 zero_mv near=true rng=54341
+DBG b0 ref_mv=0 ctx=5 rng=33137
+DBG b0 motion_mode=0 warp_allowed=true rng=45360
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=12 rng=45360 all=[(16, 16, 12)]
+DBG b0 post-residual rng=45360
+DBG refresh oh=6 show=true flags=0b00000000 -> hints=[0, 6, 3, 1, 2, 4, 5, 0]
+DBG FH frame_type=InterFrame intra=false err_res=false order_hint=7 primary_ref=4 disable_cdf_update=false
+DBG FH inter oh=7 interp_filter=0 mm_switch=true w=128 h=96 hp=false
+DBG b0 mi=(0,0) bsize=12 skip=true rng=39936
+DBG b0 is_inter=true ctx=0 rng=38926
+DBG b0 compflag=0 rng=38926
+DBG b0 ref=2 rng=36784
+DBG b0 mvstack n_mvs=1 ctx=0x0 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=38912
+DBG b0 zero_mv near=true rng=36332
+DBG b0 ref_mv=0 ctx=0 rng=53340
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=4 rng=53340 all=[(0, 0, 4)]
+DBG b0 post-residual rng=53340
+DBG b0 mi=(16,0) bsize=12 skip=true rng=64016
+DBG b0 is_inter=true ctx=0 rng=62504
+DBG b0 compflag=0 rng=62504
+DBG b0 ref=2 rng=52735
+DBG b0 mvstack n_mvs=1 ctx=0x33 comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=38954
+DBG b0 zero_mv near=true rng=36484
+DBG b0 ref_mv=0 ctx=3 rng=63872
+DBG b0 motion_mode=0 warp_allowed=true rng=57639
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=4 rng=57639 all=[(16, 0, 4)]
+DBG b0 post-residual rng=57639
+DBG b0 mi=(0,16) bsize=5 skip=true rng=59678
+DBG b0 is_inter=true ctx=0 rng=58254
+DBG b0 compflag=0 rng=58254
+DBG b0 ref=2 rng=49668
+DBG b0 mvstack n_mvs=1 ctx=0x33 comp_ctx=4 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=37737
+DBG b0 zero_mv near=true rng=35431
+DBG b0 ref_mv=0 ctx=3 rng=62574
+DBG b0 interintra type=0 rng=51468
+DBG b0 motion_mode=1 warp_allowed=true rng=63122
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=63122 all=[(0, 16, 8)]
+DBG b0 post-residual rng=63122
+DBG b0 mi=(0,18) bsize=5 skip=true rng=35059
+DBG b0 is_inter=true ctx=0 rng=34072
+DBG b0 compflag=0 rng=34072
+DBG b0 ref=5 rng=54248
+DBG b0 mvstack n_mvs=1 ctx=0x0 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=false rng=37470
+DBG b0 interintra type=0 rng=64792
+DBG b0 motion_mode=0 warp_allowed=false rng=36978
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=36978 all=[(0, 18, 8)]
+DBG b0 post-residual rng=36978
+DBG b0 mi=(4,16) bsize=5 skip=true rng=40264
+DBG b0 is_inter=true ctx=0 rng=39411
+DBG b0 compflag=0 rng=39411
+DBG b0 ref=6 rng=44168
+DBG b0 mvstack n_mvs=1 ctx=0x0 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=51272
+DBG b0 zero_mv near=true rng=48304
+DBG b0 ref_mv=0 ctx=0 rng=36268
+DBG b0 interintra type=0 rng=61248
+DBG b0 motion_mode=1 warp_allowed=false rng=40992
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=40992 all=[(4, 16, 8)]
+DBG b0 post-residual rng=40992
+DBG b0 mi=(4,18) bsize=5 skip=true rng=35524
+DBG b0 is_inter=true ctx=0 rng=34642
+DBG b0 compflag=0 rng=34642
+DBG b0 ref=5 rng=63624
+DBG b0 mvstack n_mvs=2 ctx=0x32 comp_ctx=3 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=33732
+DBG b0 zero_mv near=true rng=63542
+DBG b0 ref_mv=0 ctx=3 rng=56594
+DBG b0 interintra type=0 rng=48303
+DBG b0 motion_mode=2 warp_allowed=true rng=39872
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=39872 all=[(4, 18, 8)]
+DBG b0 post-residual rng=39872
+DBG b0 mi=(0,20) bsize=16 skip=true rng=46652
+DBG b0 is_inter=true ctx=0 rng=45777
+DBG b0 compflag=0 rng=45777
+DBG b0 ref=5 rng=33619
+DBG b0 mvstack n_mvs=2 ctx=0x32 comp_ctx=3 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=37604
+DBG b0 zero_mv near=true rng=35555
+DBG b0 ref_mv=0 ctx=3 rng=63788
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=13 rng=63788 all=[(0, 20, 13)]
+DBG b0 post-residual rng=63788
+DBG b0 mi=(1,20) bsize=16 skip=true rng=55904
+DBG b0 is_inter=true ctx=0 rng=54831
+DBG b0 compflag=0 rng=54831
+DBG b0 ref=5 rng=41171
+DBG b0 mvstack n_mvs=2 ctx=0x54 comp_ctx=7 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=51368
+DBG b0 zero_mv near=true rng=48804
+DBG b0 ref_mv=0 ctx=5 rng=59600
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=13 rng=59600 all=[(1, 20, 13)]
+DBG b0 post-residual rng=59600
+DBG b0 mi=(2,20) bsize=16 skip=true rng=52552
+DBG b0 is_inter=true ctx=0 rng=51664
+DBG b0 compflag=0 rng=51664
+DBG b0 ref=5 rng=39504
+DBG b0 mvstack n_mvs=2 ctx=0x54 comp_ctx=7 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=51136
+DBG b0 zero_mv near=true rng=48759
+DBG b0 ref_mv=0 ctx=5 rng=61790
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=13 rng=61790 all=[(2, 20, 13)]
+DBG b0 post-residual rng=61790
+DBG b0 mi=(3,20) bsize=16 skip=true rng=54952
+DBG b0 is_inter=true ctx=0 rng=53932
+DBG b0 compflag=0 rng=53932
+DBG b0 ref=5 rng=42088
+DBG b0 mvstack n_mvs=2 ctx=0x54 comp_ctx=7 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=56424
+DBG b0 zero_mv near=true rng=54014
+DBG b0 ref_mv=1 ctx=5 rng=36968
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=13 rng=36968 all=[(3, 20, 13)]
+DBG b0 post-residual rng=36968
+DBG b0 mi=(4,20) bsize=17 skip=true rng=43474
+DBG b0 is_inter=true ctx=0 rng=42676
+DBG b0 compflag=0 rng=42676
+DBG b0 ref=5 rng=33821
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=57824
+DBG b0 zero_mv near=true rng=55354
+DBG b0 ref_mv=0 ctx=5 rng=34074
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=34074 all=[(4, 20, 14)]
+DBG b0 post-residual rng=34074
+DBG b0 mi=(4,21) bsize=17 skip=true rng=61586
+DBG b0 is_inter=true ctx=0 rng=60604
+DBG b0 compflag=0 rng=60604
+DBG b0 ref=5 rng=48949
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=42310
+DBG b0 zero_mv near=true rng=40759
+DBG b0 ref_mv=1 ctx=5 rng=58844
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=58844 all=[(4, 21, 14)]
+DBG b0 post-residual rng=58844
+DBG b0 mi=(4,22) bsize=17 skip=true rng=53361
+DBG b0 is_inter=true ctx=0 rng=52628
+DBG b0 compflag=0 rng=52628
+DBG b0 ref=5 rng=42925
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,12)
+DBG b0 new_mv not=true rng=37328
+DBG b0 zero_mv near=true rng=35891
+DBG b0 ref_mv=0 ctx=5 rng=43074
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=43074 all=[(4, 22, 14)]
+DBG b0 post-residual rng=43074
+DBG b0 mi=(4,23) bsize=17 skip=true rng=39400
+DBG b0 is_inter=true ctx=0 rng=38713
+DBG b0 compflag=0 rng=38713
+DBG b0 ref=5 rng=63885
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,12)
+DBG b0 new_mv not=true rng=56153
+DBG b0 zero_mv near=true rng=54316
+DBG b0 ref_mv=0 ctx=5 rng=33960
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=33960 all=[(4, 23, 14)]
+DBG b0 post-residual rng=33960
+DBG b0 mi=(8,16) bsize=5 skip=true rng=38626
+DBG b0 is_inter=true ctx=0 rng=37954
+DBG b0 compflag=0 rng=37954
+DBG b0 ref=2 rng=38554
+DBG b0 mvstack n_mvs=1 ctx=0x43 comp_ctx=6 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=59408
+DBG b0 zero_mv near=true rng=57656
+DBG b0 ref_mv=0 ctx=4 rng=42802
+DBG b0 interintra type=0 rng=36870
+DBG b0 motion_mode=1 warp_allowed=true rng=44072
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=44072 all=[(8, 16, 8)]
+DBG b0 post-residual rng=44072
+DBG b0 mi=(8,18) bsize=5 skip=true rng=40768
+DBG b0 is_inter=true ctx=0 rng=40310
+DBG b0 compflag=0 rng=40310
+DBG b0 ref=5 rng=54688
+DBG b0 mvstack n_mvs=2 ctx=0x33 comp_ctx=4 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=true rng=43030
+DBG b0 zero_mv near=true rng=41836
+DBG b0 ref_mv=0 ctx=3 rng=37757
+DBG b0 interintra type=0 rng=32902
+DBG b0 motion_mode=1 warp_allowed=true rng=40840
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=40840 all=[(8, 18, 8)]
+DBG b0 post-residual rng=40840
+DBG b0 mi=(12,16) bsize=5 skip=true rng=54268
+DBG b0 is_inter=true ctx=0 rng=53492
+DBG b0 compflag=0 rng=53492
+DBG b0 ref=2 rng=43838
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=38906
+DBG b0 zero_mv near=true rng=37678
+DBG b0 ref_mv=0 ctx=5 rng=48888
+DBG b0 interintra type=0 rng=42994
+DBG b0 motion_mode=1 warp_allowed=true rng=55286
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=55286 all=[(12, 16, 8)]
+DBG b0 post-residual rng=55286
+DBG b0 mi=(12,18) bsize=5 skip=true rng=51496
+DBG b0 is_inter=true ctx=0 rng=50957
+DBG b0 compflag=0 rng=50957
+DBG b0 ref=5 rng=38560
+DBG b0 mvstack n_mvs=2 ctx=0x33 comp_ctx=4 s0=(0,12) s1=(0,0)
+DBG b0 new_mv not=false rng=62448
+DBG b0 interintra type=0 rng=52760
+DBG b0 motion_mode=0 warp_allowed=true rng=51216
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=51216 all=[(12, 18, 8)]
+DBG b0 post-residual rng=51216
+DBG b0 mi=(8,20) bsize=6 skip=true rng=32952
+DBG b0 is_inter=true ctx=0 rng=64904
+DBG b0 compflag=0 rng=64904
+DBG b0 ref=5 rng=55192
+DBG b0 mvstack n_mvs=3 ctx=0x54 comp_ctx=7 s0=(0,0) s1=(0,12)
+DBG b0 new_mv not=true rng=38059
+DBG b0 zero_mv near=true rng=36930
+DBG b0 ref_mv=0 ctx=5 rng=49516
+DBG b0 interintra type=0 rng=41792
+DBG b0 motion_mode=1 warp_allowed=true rng=37508
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=2 rng=37508 all=[(8, 20, 2)]
+DBG b0 post-residual rng=37508
+DBG b0 mi=(12,20) bsize=6 skip=true rng=33021
+DBG b0 is_inter=true ctx=0 rng=64904
+DBG b0 compflag=0 rng=64904
+DBG b0 ref=5 rng=55806
+DBG b0 mvstack n_mvs=3 ctx=0x54 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=39498
+DBG b0 zero_mv near=true rng=38504
+DBG b0 ref_mv=0 ctx=5 rng=53300
+DBG b0 interintra type=0 rng=45496
+DBG b0 motion_mode=1 warp_allowed=true rng=49576
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=2 rng=49576 all=[(12, 20, 2)]
+DBG b0 post-residual rng=49576
+DBG b0 mi=(16,16) bsize=17 skip=true rng=42112
+DBG b0 is_inter=true ctx=0 rng=41578
+DBG b0 compflag=0 rng=41578
+DBG b0 ref=2 rng=35021
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=62432
+DBG b0 zero_mv near=true rng=60754
+DBG b0 ref_mv=0 ctx=5 rng=43212
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=43212 all=[(16, 16, 14)]
+DBG b0 post-residual rng=43212
+DBG b0 mi=(16,17) bsize=17 skip=true rng=40828
+DBG b0 is_inter=true ctx=0 rng=40390
+DBG b0 compflag=0 rng=40390
+DBG b0 ref=2 rng=34308
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=61916
+DBG b0 zero_mv near=true rng=60254
+DBG b0 ref_mv=0 ctx=5 rng=43918
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=43918 all=[(16, 17, 14)]
+DBG b0 post-residual rng=43918
+DBG b0 mi=(16,18) bsize=17 skip=true rng=41642
+DBG b0 is_inter=true ctx=0 rng=41152
+DBG b0 compflag=0 rng=41152
+DBG b0 ref=5 rng=34091
+DBG b0 mvstack n_mvs=3 ctx=0x32 comp_ctx=3 s0=(0,10) s1=(0,12)
+DBG b0 new_mv not=true rng=40040
+DBG b0 zero_mv near=true rng=39082
+DBG b0 ref_mv=0 ctx=3 rng=35582
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=35582 all=[(16, 18, 14)]
+DBG b0 post-residual rng=35582
+DBG b0 mi=(16,19) bsize=17 skip=true rng=33676
+DBG b0 is_inter=true ctx=0 rng=33278
+DBG b0 compflag=0 rng=33278
+DBG b0 ref=5 rng=58194
+DBG b0 mvstack n_mvs=3 ctx=0x54 comp_ctx=7 s0=(0,10) s1=(0,12)
+DBG b0 new_mv not=true rng=42339
+DBG b0 zero_mv near=true rng=41336
+DBG b0 ref_mv=0 ctx=5 rng=61734
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=61734 all=[(16, 19, 14)]
+DBG b0 post-residual rng=61734
+DBG b0 mi=(20,16) bsize=5 skip=true rng=41972
+DBG b0 is_inter=true ctx=0 rng=41406
+DBG b0 compflag=0 rng=41406
+DBG b0 ref=5 rng=33429
+DBG b0 mvstack n_mvs=1 ctx=0x0 comp_ctx=0 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=44736
+DBG b0 zero_mv near=true rng=43591
+DBG b0 ref_mv=0 ctx=0 rng=33387
+DBG b0 interintra type=0 rng=59746
+DBG b0 motion_mode=1 warp_allowed=false rng=41245
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=41245 all=[(20, 16, 8)]
+DBG b0 post-residual rng=41245
+DBG b0 mi=(20,18) bsize=5 skip=true rng=39368
+DBG b0 is_inter=true ctx=0 rng=38866
+DBG b0 compflag=0 rng=38866
+DBG b0 ref=5 rng=34159
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=61852
+DBG b0 zero_mv near=true rng=60495
+DBG b0 ref_mv=1 ctx=5 rng=57600
+DBG b0 interintra type=0 rng=51859
+DBG b0 motion_mode=1 warp_allowed=true rng=64850
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=64850 all=[(20, 18, 8)]
+DBG b0 post-residual rng=64850
+DBG b0 mi=(16,20) bsize=17 skip=true rng=54149
+DBG b0 is_inter=true ctx=0 rng=53598
+DBG b0 compflag=0 rng=53598
+DBG b0 ref=5 rng=47315
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,10) s1=(0,0)
+DBG b0 new_mv not=true rng=43060
+DBG b0 zero_mv near=true rng=42172
+DBG b0 ref_mv=0 ctx=5 rng=60392
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=60392 all=[(16, 20, 14)]
+DBG b0 post-residual rng=60392
+DBG b0 mi=(16,21) bsize=17 skip=true rng=57579
+DBG b0 is_inter=true ctx=0 rng=56900
+DBG b0 compflag=0 rng=56900
+DBG b0 ref=5 rng=50450
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=46397
+DBG b0 zero_mv near=true rng=45435
+DBG b0 ref_mv=0 ctx=5 rng=33307
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=33307 all=[(16, 21, 14)]
+DBG b0 post-residual rng=33307
+DBG b0 mi=(16,22) bsize=17 skip=true rng=63838
+DBG b0 is_inter=true ctx=0 rng=63250
+DBG b0 compflag=0 rng=63250
+DBG b0 ref=5 rng=56534
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=52034
+DBG b0 zero_mv near=true rng=51058
+DBG b0 ref_mv=0 ctx=5 rng=38219
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=38219 all=[(16, 22, 14)]
+DBG b0 post-residual rng=38219
+DBG b0 mi=(16,23) bsize=17 skip=true rng=36658
+DBG b0 is_inter=true ctx=0 rng=36326
+DBG b0 compflag=0 rng=36326
+DBG b0 ref=5 rng=64904
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=60218
+DBG b0 zero_mv near=true rng=59106
+DBG b0 ref_mv=0 ctx=5 rng=44727
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=44727 all=[(16, 23, 14)]
+DBG b0 post-residual rng=44727
+DBG b0 mi=(20,20) bsize=6 skip=true rng=64460
+DBG b0 is_inter=true ctx=0 rng=63883
+DBG b0 compflag=0 rng=63883
+DBG b0 ref=5 rng=57548
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=53540
+DBG b0 zero_mv near=true rng=52567
+DBG b0 ref_mv=0 ctx=5 rng=40161
+DBG b0 interintra type=0 rng=34619
+DBG b0 motion_mode=1 warp_allowed=true rng=44296
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=2 rng=44296 all=[(20, 20, 2)]
+DBG b0 post-residual rng=44296
+DBG b0 mi=(24,16) bsize=5 skip=true rng=61382
+DBG b0 is_inter=true ctx=0 rng=60829
+DBG b0 compflag=0 rng=60829
+DBG b0 ref=2 rng=59309
+DBG b0 mvstack n_mvs=1 ctx=0x43 comp_ctx=6 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=44471
+DBG b0 zero_mv near=true rng=43513
+DBG b0 ref_mv=0 ctx=4 rng=33116
+DBG b0 interintra type=0 rng=60032
+DBG b0 motion_mode=1 warp_allowed=true rng=38965
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=38965 all=[(24, 16, 8)]
+DBG b0 post-residual rng=38965
+DBG b0 mi=(24,18) bsize=5 skip=true rng=37472
+DBG b0 is_inter=true ctx=0 rng=37161
+DBG b0 compflag=0 rng=37161
+DBG b0 ref=5 rng=63886
+DBG b0 mvstack n_mvs=2 ctx=0x43 comp_ctx=6 s0=(0,10) s1=(0,0)
+DBG b0 new_mv not=true rng=48932
+DBG b0 zero_mv near=true rng=48136
+DBG b0 ref_mv=0 ctx=4 rng=37228
+DBG b0 interintra type=0 rng=33962
+DBG b0 motion_mode=1 warp_allowed=true rng=45416
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=8 rng=45416 all=[(24, 18, 8)]
+DBG b0 post-residual rng=45416
+DBG b0 mi=(28,16) bsize=17 skip=true rng=62742
+DBG b0 is_inter=true ctx=0 rng=62356
+DBG b0 compflag=0 rng=62356
+DBG b0 ref=2 rng=51033
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=47764
+DBG b0 zero_mv near=true rng=46876
+DBG b0 ref_mv=0 ctx=5 rng=36167
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=36167 all=[(28, 16, 14)]
+DBG b0 post-residual rng=36167
+DBG b0 mi=(28,17) bsize=17 skip=true rng=34901
+DBG b0 is_inter=true ctx=0 rng=34616
+DBG b0 compflag=0 rng=34616
+DBG b0 ref=2 rng=57290
+DBG b0 mvstack n_mvs=1 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,0)
+DBG b0 new_mv not=true rng=53747
+DBG b0 zero_mv near=true rng=52672
+DBG b0 ref_mv=0 ctx=5 rng=41086
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=41086 all=[(28, 17, 14)]
+DBG b0 post-residual rng=41086
+DBG b0 mi=(28,18) bsize=17 skip=true rng=39604
+DBG b0 is_inter=true ctx=0 rng=39197
+DBG b0 compflag=0 rng=39197
+DBG b0 ref=5 rng=36254
+DBG b0 mvstack n_mvs=2 ctx=0x33 comp_ctx=4 s0=(0,10) s1=(0,0)
+DBG b0 new_mv not=true rng=56408
+DBG b0 zero_mv near=true rng=55444
+DBG b0 ref_mv=0 ctx=3 rng=50688
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=50688 all=[(28, 18, 14)]
+DBG b0 post-residual rng=50688
+DBG b0 mi=(28,19) bsize=17 skip=true rng=49108
+DBG b0 is_inter=true ctx=0 rng=48613
+DBG b0 compflag=0 rng=48613
+DBG b0 ref=5 rng=44113
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,10) s1=(0,0)
+DBG b0 new_mv not=true rng=41628
+DBG b0 zero_mv near=true rng=40828
+DBG b0 ref_mv=0 ctx=5 rng=64158
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=14 rng=64158 all=[(28, 19, 14)]
+DBG b0 post-residual rng=64158
+DBG b0 mi=(24,20) bsize=6 skip=true rng=58284
+DBG b0 is_inter=true ctx=0 rng=57775
+DBG b0 compflag=0 rng=57775
+DBG b0 ref=5 rng=52478
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=49474
+DBG b0 zero_mv near=true rng=48640
+DBG b0 ref_mv=0 ctx=5 rng=38566
+DBG b0 interintra type=0 rng=33612
+DBG b0 motion_mode=1 warp_allowed=true rng=48484
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=2 rng=48484 all=[(24, 20, 2)]
+DBG b0 post-residual rng=48484
+DBG b0 mi=(28,20) bsize=6 skip=true rng=45636
+DBG b0 is_inter=true ctx=0 rng=45305
+DBG b0 compflag=0 rng=45305
+DBG b0 ref=5 rng=41406
+DBG b0 mvstack n_mvs=2 ctx=0x55 comp_ctx=7 s0=(0,0) s1=(0,10)
+DBG b0 new_mv not=true rng=39127
+DBG b0 zero_mv near=true rng=38384
+DBG b0 ref_mv=1 ctx=5 rng=61416
+DBG b0 interintra type=0 rng=54003
+DBG b0 motion_mode=1 warp_allowed=true rng=43268
+DBG b0 frame_filter=0 dual=true
+DBG b0 vartx leaves=1 tx0=2 rng=43268 all=[(28, 20, 2)]
+DBG b0 post-residual rng=43268
+DBG refresh oh=7 show=true flags=0b10000000 -> hints=[0, 6, 3, 1, 2, 4, 5, 7]
+decoded 8 shown frames

@@ -62,7 +62,9 @@ impl<'a> TileDecoder<'a> {
                 } else {
                     0
                 };
-                let txtp = if intra {
+                // Directional scans apply to 4x4/8x8/16x16; only 32x32 is
+                // all-default (reference vp9_scan_orders TX_32X32 row).
+                let txtp = if intra && tx < 3 {
                     INTRA_TXFM_TYPE[self.b.mode[mode_idx]] as usize
                 } else {
                     DCT_DCT
@@ -172,6 +174,7 @@ impl<'a> TileDecoder<'a> {
         let step = 1usize << (tx * 2);
         let tx4 = if self.lossless { 4 } else { tx };
         let skip = self.b.skip;
+        let trace = std::env::var_os("TPT_VP9_TRACE").is_some();
 
         let mut n = 0usize;
         let mut y = 0usize;
@@ -184,6 +187,7 @@ impl<'a> TileDecoder<'a> {
                     0
                 };
                 let mode = self.b.mode[mode_idx];
+                let hr = x * 4 + (4 << tx) < bw4 * 8;
                 let (edges, mode) = gather_intra_edges(
                     &self.state.frame.y,
                     stride,
@@ -193,12 +197,56 @@ impl<'a> TileDecoder<'a> {
                     mode,
                     row > 0 || y > 0,
                     col > self.tile_col_start || x > 0,
+                    hr,
                     (self.cols() - col) * 8 - x * 4,
                     (self.rows() - row) * 8 - y * 4,
                 );
                 let off = (row * 8 + y * 4) * stride + col * 8 + x * 4;
                 intra_predict(mode, &edges, &mut self.state.frame.y, off, stride);
+                if trace {
+                    eprintln!(
+                        "EDGE hr={} above={} {} {} {} {} {} {} {} {} {}",
+                        usize::from(hr),
+                        edges.top[1],
+                        edges.top[2],
+                        edges.top[3],
+                        edges.top[4],
+                        edges.top[5],
+                        edges.top[6],
+                        edges.top[7],
+                        edges.top[8],
+                        edges.top[9],
+                        edges.top[10]
+                    );
+                    let wsz = 4 << tx;
+                    for r in 0..wsz {
+                        let vals: Vec<String> = (0..wsz)
+                            .map(|c| self.state.frame.y[off + r * stride + c].to_string())
+                            .collect();
+                        eprintln!(
+                            "PREDP m={} tx={} x={} y={} ht={} hl={} row{}={}",
+                            mode,
+                            tx,
+                            x * 4,
+                            y * 4,
+                            usize::from(row > 0 || y > 0),
+                            usize::from(col > self.tile_col_start || x > 0),
+                            r,
+                            vals.join(" ")
+                        );
+                    }
+                }
                 let eob = usize::from(!skip) * self.eob_y[n] as usize;
+                if trace && !skip {
+                    let txtp = INTRA_TXFM_TYPE[self.b.mode[mode_idx]] as usize;
+                    eprintln!(
+                        "BLK mode={} tx_type={} plane=0 row={} col={}",
+                        self.b.mode[mode_idx],
+                        txtp,
+                        y >> tx,
+                        x >> tx
+                    );
+                }
                 if eob != 0 {
                     let txtp = INTRA_TXFM_TYPE[self.b.mode[mode_idx]] as usize;
                     let sz = (4 << tx) * (4 << tx);
@@ -212,6 +260,22 @@ impl<'a> TileDecoder<'a> {
                         off,
                         stride,
                     );
+                    if trace {
+                        let wsz = 4 << tx;
+                        for r in 0..wsz {
+                            let vals: Vec<String> = (0..wsz)
+                                .map(|c| self.state.frame.y[off + r * stride + c].to_string())
+                                .collect();
+                            eprintln!(
+                                "PSTR tx={} x={} y={} row{}={}",
+                                tx,
+                                x * 4,
+                                y * 4,
+                                r,
+                                vals.join(" ")
+                            );
+                        }
+                    }
                 }
                 n += step;
                 x += step1d;
@@ -248,17 +312,11 @@ impl<'a> TileDecoder<'a> {
                         self.b.uvmode,
                         row > 0 || y > 0,
                         col > self.tile_col_start || x > 0,
+                        x * 4 + (4 << self.b.uvtx) < bw4 * 4,
                         (mi_cols - col) * 4 - x * 4,
                         (mi_rows - row) * 4 - y * 4,
                     );
                     let off = (row * 4 + y * 4) * uv_stride + col * 4 + x * 4;
-                    if std::env::var("TPT_VP9_TRACE").is_ok() {
-                        eprintln!(
-                            "chroma p{} x={} y={} mode={} tl={} top4={:?} left4={:?}",
-                            pl, x, y, mode, edges.top[0],
-                            &edges.top[1..5], &edges.left[..4]
-                        );
-                    }
                     intra_predict(mode, &edges, plane, off, uv_stride);
                     let eob = usize::from(!skip) * self.eob_uv[pl][n] as usize;
                     if eob != 0 {
@@ -609,7 +667,9 @@ impl<'a> TileDecoder<'a> {
         Ok(())
     }
 
-    /// Record loop-filter level and edge masks for the current block.
+    /// Record loop-filter level and per-unit info for the current block
+    /// (the reference stores these in the mode-info grid, read later by
+    /// `vp9_setup_mask`).
     pub(super) fn record_filter_edges(&mut self, w4: usize, h4: usize) {
         if self.hdr.loop_filter.level == 0 {
             return;
@@ -622,57 +682,23 @@ impl<'a> TileDecoder<'a> {
         };
         let mode_idx = usize::from(self.b.mode[3] != 12); // != ZEROMV
         let lvl = self.seg.lflvl[seg][lvl_idx][mode_idx];
-        if lvl == 0 {
-            return;
-        }
         let col7 = self.col & 7;
         let row7 = self.row7;
         let sb_index = (self.row / 8) * self.state.frame.sb64_cols + (self.col / 8);
         let mut sf = std::mem::take(&mut self.state.lflvl[sb_index]);
-        for y in 0..h4.min(8 - row7) {
-            for x in 0..w4.min(8 - col7) {
-                sf.level[(row7 + y) * 8 + col7 + x] = lvl;
+        let uvtx = crate::loop_filter::uv_txsize(self.b.bs, self.b.tx) as u8;
+        let skip_inter = !self.b.intra && self.b.skip;
+        let w = w4.min(8 - col7);
+        let h = h4.min(8 - row7);
+        for y in 0..h {
+            for x in 0..w {
+                let u = &mut sf.unit[(row7 + y) * 8 + col7 + x];
+                u.bs = self.b.bs as u8;
+                u.tx = self.b.tx as u8;
+                u.uvtx = uvtx;
+                u.skip_inter = skip_inter;
+                u.lvl = lvl;
             }
-        }
-        let x_end = w4.min(self.cols() - self.col);
-        let y_end = h4.min(self.rows() - self.row);
-        crate::loop_filter::mask_edges(
-            &mut sf.mask[0],
-            0,
-            0,
-            row7,
-            col7,
-            x_end,
-            y_end,
-            0,
-            0,
-            self.b.tx,
-            !self.b.intra && self.b.skip,
-        );
-        if self.hdr.subsampling_x != 0 || self.hdr.subsampling_y != 0 {
-            let col_end = if self.cols() & 1 != 0 && self.col + w4 >= self.cols() {
-                self.cols() & 7
-            } else {
-                0
-            };
-            let row_end = if self.rows() & 1 != 0 && self.row + h4 >= self.rows() {
-                self.rows() & 7
-            } else {
-                0
-            };
-            crate::loop_filter::mask_edges(
-                &mut sf.mask[1],
-                1,
-                1,
-                row7,
-                col7,
-                x_end,
-                y_end,
-                col_end,
-                row_end,
-                self.b.uvtx,
-                !self.b.intra && self.b.skip,
-            );
         }
         self.state.lflvl[sb_index] = sf;
     }

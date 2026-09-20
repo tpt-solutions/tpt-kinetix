@@ -35,30 +35,53 @@ type ObuPairs = Vec<(u8, Vec<u8>)>;
 /// AV1 keeps up to eight reference pictures (the `LAST`/`GOLDEN`/`ALTREF`
 /// family); this stores one slot's worth of planar YUV (4:2:0) samples and the
 /// per-4×4 motion field used for temporal MV candidates (§7.10.2).
+///
+/// The planes are stored at the **mi-grid extent** (`MiCols*4 × MiRows*4`,
+/// e.g. 160×92 for a 160×90 frame): blocks of the last superblock row
+/// reconstruct into the padding rows too, and motion compensation for
+/// bottom-edge blocks reads them — matching dav1d's padded references. The
+/// visible `real_width × real_height` crop is only applied when the frame is
+/// output (`to_video_frame`).
 pub struct StoredFrame {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,
+    /// Grid width (= plane stride; planes are dense).
     pub width: usize,
+    /// Grid height (mi rows × 4).
     pub height: usize,
+    /// The visible frame dimensions (≤ grid dims) used for output cropping.
+    pub real_width: usize,
+    pub real_height: usize,
     /// Per-4×4 motion field for temporal MV projection; `None` for keyframes.
     pub motion_field: Option<MotionField>,
 }
 
 impl StoredFrame {
     /// Rebuild a planar [`VideoFrame`] (Y then U then V) from this stored
-    /// reference — used to satisfy `show_existing_frame` (§7.4).
+    /// reference — used to satisfy `show_existing_frame` (§7.4). The padding
+    /// rows/columns of the mi-grid-extent planes are cropped away.
     fn to_video_frame(&self) -> VideoFrame {
-        let mut data = Vec::with_capacity(self.y.len() + self.u.len() + self.v.len());
-        data.extend_from_slice(&self.y);
-        data.extend_from_slice(&self.u);
-        data.extend_from_slice(&self.v);
+        let mut data = Vec::with_capacity(self.real_width * self.real_height * 3 / 2);
+        let uv_stride = self.width / 2;
+        for row in 0..self.real_height {
+            let off = row * self.width;
+            data.extend_from_slice(&self.y[off..off + self.real_width]);
+        }
+        for row in 0..self.real_height.div_ceil(2) {
+            let off = row * uv_stride;
+            data.extend_from_slice(&self.u[off..off + self.real_width / 2]);
+        }
+        for row in 0..self.real_height.div_ceil(2) {
+            let off = row * uv_stride;
+            data.extend_from_slice(&self.v[off..off + self.real_width / 2]);
+        }
         VideoFrame {
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,
             data,
-            width: self.width as u32,
-            height: self.height as u32,
+            width: self.real_width as u32,
+            height: self.real_height as u32,
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: false,
         }
@@ -85,17 +108,19 @@ impl RefFrameStore {
         }
     }
 
-    /// Store `frame` into every slot whose bit is set in `refresh_flags`
-    /// (AV1 §7.20 / `refresh_frame_flags` semantics).  `motion_field` is the
+    /// Store the just-decoded frame's mi-grid-extent planes into every slot
+    /// whose bit is set in `refresh_flags` (AV1 §7.20). `motion_field` is the
     /// per-4×4 MV data from the just-decoded frame, used for temporal MV
     /// candidates (§7.10.2) when this slot is later used as a temporal ref.
     pub fn refresh(
         &mut self,
         refresh_flags: u8,
-        frame: &VideoFrame,
+        planes: &crate::reconstruct::PaddedPlanes,
         motion_field: Option<&MotionField>,
     ) {
-        let (y, u, v) = split_planes(frame);
+        let y = &planes.y;
+        let u = &planes.u;
+        let v = &planes.v;
         // Collect which slots need refreshing first, then build clones.
         let to_refresh: Vec<usize> = (0..8)
             .filter(|&i| refresh_flags & (1u8 << i) != 0)
@@ -107,7 +132,7 @@ impl RefFrameStore {
         let mf_cells_opt: Option<&[crate::inter::MotionFieldCell]> =
             motion_field.map(|mf| mf.cells.as_slice());
         if std::env::var("KINETIX_AV1_DBG_REFRESH").is_ok() {
-            let stride = frame.width as usize;
+            let stride = planes.stride;
             if stride > 80 && y.len() > 66 * stride + 80 {
                 eprintln!(
                     "REFRESH flags={refresh_flags:#04x} slots={to_refresh:?} y(80,66)={}",
@@ -120,8 +145,10 @@ impl RefFrameStore {
                 y: y.clone(),
                 u: u.clone(),
                 v: v.clone(),
-                width: frame.width as usize,
-                height: frame.height as usize,
+                width: planes.grid_width,
+                height: planes.grid_height,
+                real_width: planes.real_width,
+                real_height: planes.real_height,
                 motion_field: motion_field.map(|mf| MotionField {
                     cells: mf_cells_opt.unwrap().to_vec(),
                     stride: mf.stride,
@@ -142,18 +169,6 @@ impl RefFrameStore {
     pub fn populated(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
     }
-}
-
-/// Split a packed 4:2:0 [`VideoFrame`] into its three component planes.
-fn split_planes(f: &VideoFrame) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    let w = f.width as usize;
-    let h = f.height as usize;
-    let ysz = w * h;
-    let uvsz = (w / 2) * (h / 2);
-    let y = f.data[..ysz].to_vec();
-    let u = f.data[ysz..ysz + uvsz].to_vec();
-    let v = f.data[ysz + uvsz..ysz + 2 * uvsz].to_vec();
-    (y, u, v)
 }
 
 /// Stateful AV1 decoder.
@@ -228,12 +243,14 @@ impl Av1Decoder {
                     copy with find_mv_stack DV prediction + bilinear chroma sub-pel, \
                     in-loop deblock + CDEF + loop restoration, rayon parallel tiles) \
                     is bit-exact vs dav1d across the synthesized intra conformance \
-                    corpus (Phase G gate). Inter prediction is wired end-to-end (MV \
-                    candidate derivation, NEWMV / NEARMV / NEARESTMV / ZEROMV, \
-                    switchable + bilinear interpolation, single- and compound \
-                    reference, residual add) but is NOT yet bit-exact — non-keyframes \
-                    diverge from the reference. `pixel_exact` stays false until the \
-                    inter path is validated and official AOM/ITU vectors are wired in",
+                    corpus (Phase G gate). Inter prediction (MV candidate \
+                    derivation, NEWMV / NEARMV / NEARESTMV / ZEROMV, switchable + \
+                    bilinear interpolation, single- and compound reference, OBMC, \
+                    warp, inter-intra, sub-8x8 chroma, residual add, show_existing \
+                    replay) is bit-exact vs dav1d across the synthesized inter \
+                    conformance corpus (128x96 / 96x64 / 64x64, every frame, all \
+                    planes, with and without in-loop filters). `pixel_exact` stays \
+                    false pending official AOM/ITU conformance vectors",
         }
     }
 
@@ -463,7 +480,7 @@ impl Av1Decoder {
         } else {
             None
         };
-        let (frame, motion_field, adapted_cdfs) = match reconstruct_av1_frame(
+        let (frame, motion_field, adapted_cdfs, padded) = match reconstruct_av1_frame(
             pairs,
             seq,
             fh,
@@ -496,12 +513,14 @@ impl Av1Decoder {
             }
         }
         let order_hint = fh.order_hint as u8;
-        self.ref_frames
-            .refresh(refresh, &frame, motion_field.as_ref());
+        if let Some(planes) = &padded {
+            self.ref_frames
+                .refresh(refresh, planes, motion_field.as_ref());
+        }
         if std::env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
             let nm = format!("kfr_{:02}.yuv", self.frame_count);
             let _ = std::fs::write(&nm, &frame.data);
-            eprintln!("dumped {nm} ({} bytes)", frame.data.len());
+            eprintln!("dumped {nm} ({} bytes) oh={}", frame.data.len(), order_hint);
         }
         for i in 0..8 {
             if refresh & (1u8 << i) != 0 {

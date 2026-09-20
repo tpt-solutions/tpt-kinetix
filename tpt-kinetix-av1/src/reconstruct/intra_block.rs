@@ -61,6 +61,12 @@ impl<'a> TileDecodeState<'a> {
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            eprintln!(
+                "KTRACE SKIP bx={mi_col} by={mi_row} skip={skip} r={}",
+                self.dec.raw_state().0
+            );
+        }
 
         // AV1 spec §5.11.7: `read_cdef()`/`read_delta_qindex()`/
         // `read_delta_lf()` come right after `read_skip()`, then
@@ -79,6 +85,12 @@ impl<'a> TileDecodeState<'a> {
         // corruption.
         if self.allow_intrabc {
             let use_intrabc = self.mode_cdfs.read_use_intrabc(&mut self.dec);
+            if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                eprintln!(
+                    "KTRACE IBCFLAG bx={mi_col} by={mi_row} use={use_intrabc} r={}",
+                    self.dec.raw_state().0
+                );
+            }
             if use_intrabc {
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
                     eprintln!(
@@ -143,6 +155,12 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[above_mode],
             INTRA_MODE_CONTEXT[left_mode],
         );
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            eprintln!(
+                "KTRACE YMODE bx={mi_col} by={mi_row} ym={y_mode} r={}",
+                self.dec.raw_state().0
+            );
+        }
         if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok()
             && (mi_row <= 20 || ((8..=10).contains(&mi_row) && mi_col <= 2))
         {
@@ -185,6 +203,12 @@ impl<'a> TileDecodeState<'a> {
         } else {
             DC_PRED as usize
         };
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() && has_chroma {
+            eprintln!(
+                "KTRACE UVMODE bx={mi_col} by={mi_row} uvm={uv_mode} r={}",
+                self.dec.raw_state().0
+            );
+        }
 
         // `read_cfl_alphas()` (AV1 spec §5.11.45): read only when
         // `UVMode == UV_CFL_PRED`, immediately after `uv_mode` and before
@@ -480,6 +504,23 @@ impl<'a> TileDecodeState<'a> {
                     (px_y + luma_tx_h).div_ceil(4),
                     0,
                     0,
+                );
+                let (lu, lv) = chroma_lf_levels_snapshot(
+                    self.lf_frame_levels,
+                    self.lf_ref_deltas,
+                    self.lf_mode_deltas,
+                    self.lf_delta_enabled,
+                    self.delta_lf,
+                    0,
+                    0,
+                );
+                self.meta.record_lf_level_chroma(
+                    px_x / 8,
+                    px_y / 8,
+                    (px_x + luma_tx_w).div_ceil(8),
+                    (px_y + luma_tx_h).div_ceil(8),
+                    lu as u8,
+                    lv as u8,
                 );
                 let blk = TxBlockCtx {
                     plane: 0,

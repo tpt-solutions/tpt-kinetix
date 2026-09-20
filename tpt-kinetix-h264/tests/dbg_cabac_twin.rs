@@ -182,6 +182,7 @@ fn cabac_cavlc_mb_table_diff() {
                 false,
                 false,
                 false,
+                false,
                 &mut cap,
             ) {
                 eprintln!("cavlc parse error: {e}");

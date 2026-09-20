@@ -216,6 +216,7 @@ pub fn derive_pic_order_cnt(
     pic_order_cnt_lsb: Option<u32>,
     field_pic_flag: bool,
     bottom_field_flag: bool,
+    delta_pic_order_cnt_0: Option<i64>,
     delta_pic_order_cnt_bottom: Option<i64>,
     state: &mut PocState,
 ) -> Result<i64, PicOrderCntError> {
@@ -231,6 +232,17 @@ pub fn derive_pic_order_cnt(
             delta_pic_order_cnt_bottom,
             state,
         ),
+        1 => derive_poc_type1(
+            sps,
+            is_idr,
+            is_reference,
+            frame_num,
+            field_pic_flag,
+            bottom_field_flag,
+            delta_pic_order_cnt_0,
+            delta_pic_order_cnt_bottom,
+            state,
+        ),
         2 => derive_poc_type2(
             sps,
             is_idr,
@@ -240,8 +252,90 @@ pub fn derive_pic_order_cnt(
             bottom_field_flag,
             state,
         ),
-        _ => Err(PicOrderCntError("pic_order_cnt_type 1 is not implemented")),
+        _ => Err(PicOrderCntError("pic_order_cnt_type out of range")),
     }
+}
+
+/// §8.2.1.2 — `pic_order_cnt_type == 1` (frame and field).
+///
+/// The expected order count accumulates the SPS's per-picture offsets over
+/// `absFrameNum` (the reference-frame counter, with the non-reference
+/// decrement), plus the slice's own `delta_pic_order_cnt[0]`; frames add
+/// `delta_pic_order_cnt[1]`/`offset_for_top_to_bottom_field` for the bottom
+/// field, while a bottom FIELD adds `offset_for_top_to_bottom_field` only
+/// (`delta_pic_order_cnt_bottom` is a frame-picture syntax element).
+#[allow(clippy::too_many_arguments)]
+fn derive_poc_type1(
+    sps: &SeqParameterSet,
+    is_idr: bool,
+    is_reference: bool,
+    frame_num: u32,
+    field_pic_flag: bool,
+    bottom_field_flag: bool,
+    delta_pic_order_cnt_0: Option<i64>,
+    delta_pic_order_cnt_bottom: Option<i64>,
+    state: &mut PocState,
+) -> Result<i64, PicOrderCntError> {
+    let _ = field_pic_flag; // parity enters only via `bottom_field_flag` below
+    if is_idr {
+        // §8.2.1: an IDR picture resets the reference-frame POC predictor.
+        state.prev_frame_num = 0;
+    }
+
+    let d0 = delta_pic_order_cnt_0.unwrap_or(0);
+
+    // absFrameNum (§8.2.1.2): 0 when the SPS defines no POC cycle;
+    // otherwise prevRefFrameNum + 1, decremented for a non-reference picture.
+    let cycle_len = sps.num_ref_frames_in_pic_order_cnt_cycle as i64;
+    let mut abs_frame_num: i64 = if cycle_len == 0 {
+        0
+    } else {
+        state.prev_frame_num as i64 + 1
+    };
+    if !is_reference {
+        abs_frame_num -= 1;
+    }
+
+    let expected_pic_order_cnt = if abs_frame_num > 0 {
+        let expected_delta_per_pic_order_cnt_cycle: i64 = sps
+            .offset_for_ref_frame
+            .iter()
+            .take(cycle_len as usize)
+            .map(|&v| v as i64)
+            .sum();
+        let cycle_cnt = (abs_frame_num - 1) / cycle_len;
+        let frame_num_in_poc_cycle = (abs_frame_num - 1) % cycle_len;
+        let mut expected = cycle_cnt * expected_delta_per_pic_order_cnt_cycle;
+        for i in 0..=frame_num_in_poc_cycle {
+            expected += sps.offset_for_ref_frame[i as usize] as i64;
+        }
+        expected
+    } else {
+        0
+    };
+
+    let poc = if !field_pic_flag {
+        // Frame picture (§8.2.1.2 (8-8)/(8-9)): the bottom field adds
+        // offset_for_top_to_bottom_field + delta_pic_order_cnt[1].
+        let top = expected_pic_order_cnt + d0;
+        if bottom_field_flag {
+            top + sps.offset_for_top_to_bottom_field as i64
+                + delta_pic_order_cnt_bottom.unwrap_or(0)
+        } else {
+            top
+        }
+    } else if bottom_field_flag {
+        // Bottom field (§8.2.1.2 (8-11)).
+        expected_pic_order_cnt + sps.offset_for_top_to_bottom_field as i64 + d0
+    } else {
+        // Top field (§8.2.1.2 (8-10)).
+        expected_pic_order_cnt + d0
+    };
+
+    if is_reference {
+        state.prev_frame_num = frame_num;
+    }
+    Ok(poc)
 }
 
 /// §8.2.1.1 — `pic_order_cnt_type == 0` (frame and field).
@@ -1280,19 +1374,66 @@ pub fn build_field_ref_list_l0(
             let _ = pic_num;
         }
     }
-    st_top.sort_by_key(|f| std::cmp::Reverse(field_pic_num(f, dpb, ctx)));
-    st_bottom.sort_by_key(|f| std::cmp::Reverse(field_pic_num(f, dpb, ctx)));
     lt_top.sort_by_key(|f| field_long_num(f, dpb));
     lt_bottom.sort_by_key(|f| field_long_num(f, dpb));
 
+    // Short-term ordering (§8.2.4.2.5): the two FIELDS of each reference
+    // frame are ADJACENT list entries — frames in descending FrameNumWrap
+    // order, and within a frame the field sharing the CURRENT field's parity
+    // first (its doubled FieldPicNum carries the +1). Sorting all candidate
+    // fields by the descending key 2*FrameNumWrap + (co-parity) produces
+    // exactly that interleave. The previous parity-GROUPED order
+    // ([all bottoms…, all tops…]) diverges from the spec as soon as the list
+    // spans more than one reference frame, silently mapping every
+    // ref_idx ≥ 2 to the wrong field on multi-reference field streams
+    // (CVFI1_Sony_D signals 9-10-entry lists).
+    // Triage (#32bz): selectable short-term field ordering variants.
+    //   "swap"    – opposite-parity first within each frame
+    //   "grouped" – ALL same-parity fields first, then ALL opposite-parity
+    //   default   – per-frame interleave, co-parity first (2*fnw + co_parity)
+    let order_mode = std::env::var("KINETIX_FIELD_ORDER").unwrap_or_default();
     let mut ordered: Vec<FieldRef> = Vec::new();
+    if order_mode == "grouped" {
+        let key = |f: &FieldRef| -> i64 { frame_num_wrap_of(f, dpb, ctx) };
+        let mut same: Vec<&FieldRef> = st_top
+            .iter()
+            .chain(st_bottom.iter())
+            .filter(|f| f.bottom == current_bottom)
+            .copied()
+            .collect();
+        let mut opp: Vec<&FieldRef> = st_top
+            .iter()
+            .chain(st_bottom.iter())
+            .filter(|f| f.bottom != current_bottom)
+            .copied()
+            .collect();
+        same.sort_by_key(|f| std::cmp::Reverse(key(f)));
+        opp.sort_by_key(|f| std::cmp::Reverse(key(f)));
+        for f in same {
+            ordered.push((*f).clone());
+        }
+        for f in opp {
+            ordered.push((*f).clone());
+        }
+    } else {
+        let mut st_fields: Vec<(&FieldRef, i64)> =
+            Vec::with_capacity(st_top.len() + st_bottom.len());
+        for f in st_top.iter().chain(&st_bottom) {
+            let fnw = frame_num_wrap_of(f, dpb, ctx);
+            let co_parity = f.bottom == current_bottom;
+            let bonus = if order_mode == "swap" {
+                (f.bottom != current_bottom) as i64
+            } else {
+                co_parity as i64
+            };
+            st_fields.push((f, 2 * fnw + bonus));
+        }
+        st_fields.sort_by_key(|(_, key)| std::cmp::Reverse(*key));
+        for (f, _) in &st_fields {
+            ordered.push((*f).clone());
+        }
+    }
     if current_bottom {
-        for f in st_bottom {
-            ordered.push(f.clone());
-        }
-        for f in st_top {
-            ordered.push(f.clone());
-        }
         for f in lt_bottom {
             ordered.push(f.clone());
         }
@@ -1300,12 +1441,6 @@ pub fn build_field_ref_list_l0(
             ordered.push(f.clone());
         }
     } else {
-        for f in st_top {
-            ordered.push(f.clone());
-        }
-        for f in st_bottom {
-            ordered.push(f.clone());
-        }
         for f in lt_top {
             ordered.push(f.clone());
         }
@@ -1314,6 +1449,14 @@ pub fn build_field_ref_list_l0(
         }
     }
 
+    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
+        for (i, f) in ordered.iter().enumerate() {
+            eprintln!(
+                "  FIELD-L0[{i}]: bottom={} is_frame={} poc={}",
+                f.bottom, f.is_frame, f.pic_order_cnt
+            );
+        }
+    }
     ordered.truncate(num_active);
     while ordered.len() < num_ref_idx_l0_active {
         let last = ordered.last()?.clone();
@@ -1344,6 +1487,27 @@ pub fn build_field_ref_list_l1(
 /// (`f.is_frame`) the DPB entry is a frame picture whose `pic_num` is the
 /// undoubled `FrameNumWrap`; per §8.2.4.2.5 we must double it here and add
 /// the field's parity (`f.bottom`).
+/// `FrameNumWrap` of the DPB entry backing a candidate field reference
+/// (§8.2.4.2.5's FrameNumWrap, shared by both of a frame's fields).
+fn frame_num_wrap_of(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
+    let found = dpb.iter().find(|e| {
+        e.field_pic_flag == f.is_field()
+            && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+            && e.pic_order_cnt == f.pic_order_cnt
+    });
+    match found {
+        Some(e) => {
+            let frame_num = e.frame_num as i64;
+            if frame_num > ctx.curr_frame_num as i64 {
+                frame_num - ctx.max_frame_num as i64
+            } else {
+                frame_num
+            }
+        }
+        None => 0,
+    }
+}
+
 fn field_pic_num(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
     let found = dpb.iter().find(|e| {
         e.field_pic_flag == f.is_field()
@@ -1574,6 +1738,11 @@ mod tests {
             frame_crop_right_offset: 0,
             frame_crop_top_offset: 0,
             frame_crop_bottom_offset: 0,
+            delta_pic_order_always_zero_flag: false,
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: Vec::new(),
             scaling: ScalingLists::flat(),
         }
     }
@@ -1652,7 +1821,7 @@ mod tests {
         let sps = sps(0, 4, 0, 1); // MaxPicOrderCntLsb = 256
         let mut state = PocState::default();
         let poc =
-            derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state)
+            derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, None, &mut state)
                 .unwrap();
         assert_eq!(poc, 0);
         let poc = derive_pic_order_cnt(
@@ -1663,6 +1832,7 @@ mod tests {
             Some(1),
             false,
             false,
+            None,
             None,
             &mut state,
         )
@@ -1677,6 +1847,7 @@ mod tests {
             false,
             false,
             None,
+            None,
             &mut state,
         )
         .unwrap();
@@ -1688,7 +1859,7 @@ mod tests {
         // MaxPicOrderCntLsb = 16, wrap threshold half = 8.
         let sps = sps(0, 0, 0, 1);
         let mut state = PocState::default();
-        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
+        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, None, &mut state).unwrap();
         // lsb 6 (poc 6), then lsb 13 (diff 7 <= 8, no wrap) → poc 13,
         // then lsb 2: 13 - 2 = 11 >= 8 → msb += 16 → 18.
         assert_eq!(
@@ -1700,6 +1871,7 @@ mod tests {
                 Some(6),
                 false,
                 false,
+                None,
                 None,
                 &mut state
             )
@@ -1716,6 +1888,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 &mut state
             )
             .unwrap(),
@@ -1731,6 +1904,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 &mut state
             )
             .unwrap(),
@@ -1742,7 +1916,7 @@ mod tests {
     fn poc_type0_msb_wraparound_backward() {
         let sps = sps(0, 0, 0, 1); // MaxPicOrderCntLsb = 16
         let mut state = PocState::default();
-        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
+        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, None, &mut state).unwrap();
         // lsb 2 (poc 2), then lsb 14: 14 - 2 = 12 > 8 → msb -= 16 → -2.
         assert_eq!(
             derive_pic_order_cnt(
@@ -1753,6 +1927,7 @@ mod tests {
                 Some(2),
                 false,
                 false,
+                None,
                 None,
                 &mut state
             )
@@ -1769,6 +1944,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 &mut state
             )
             .unwrap(),
@@ -1780,7 +1956,7 @@ mod tests {
     fn poc_type0_non_reference_does_not_advance_state() {
         let sps = sps(0, 4, 0, 1);
         let mut state = PocState::default();
-        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
+        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, None, &mut state).unwrap();
         // Non-reference picture with lsb 50 must not update prev state.
         let poc = derive_pic_order_cnt(
             &sps,
@@ -1790,6 +1966,7 @@ mod tests {
             Some(50),
             false,
             false,
+            None,
             None,
             &mut state,
         )
@@ -1805,17 +1982,17 @@ mod tests {
         let sps = sps(2, 0, 4, 1); // MaxFrameNum = 256
         let mut state = PocState::default();
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, None, false, false, None, &mut state)
+            derive_pic_order_cnt(&sps, true, true, 0, None, false, false, None, None, &mut state)
                 .unwrap(),
             0
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, None, false, false, None, &mut state)
+            derive_pic_order_cnt(&sps, false, true, 1, None, false, false, None, None, &mut state)
                 .unwrap(),
             2
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 2, None, false, false, None, &mut state)
+            derive_pic_order_cnt(&sps, false, true, 2, None, false, false, None, None, &mut state)
                 .unwrap(),
             4
         );
@@ -1830,22 +2007,22 @@ mod tests {
         let mut state = PocState::default();
         // IDR top field (frame 0): 0
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, None, true, false, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, true, true, 0, None, true, false, None, None, &mut state).unwrap(),
             0
         );
         // IDR bottom field (frame 0): 1
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, None, true, true, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, true, true, 0, None, true, true, None, None, &mut state).unwrap(),
             1
         );
         // Next frame's top field: (1 * 2) + 0 = 2 (frame_num advances, top=+0)
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, None, true, false, None, &mut state)
+            derive_pic_order_cnt(&sps, false, true, 1, None, true, false, None, None, &mut state)
                 .unwrap(),
             2
         );
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, None, true, true, None, &mut state).unwrap(),
+            derive_pic_order_cnt(&sps, false, true, 1, None, true, true, None, None, &mut state).unwrap(),
             3
         );
     }
@@ -1860,25 +2037,25 @@ mod tests {
         let mut state = PocState::default();
         // IDR top field of frame 0: lsb 0 → 0
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, &mut state)
+            derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, None, &mut state)
                 .unwrap(),
             0
         );
         // IDR bottom field of frame 0: lsb 1 → 1
         assert_eq!(
-            derive_pic_order_cnt(&sps, true, true, 0, Some(1), true, true, None, &mut state)
+            derive_pic_order_cnt(&sps, true, true, 0, Some(1), true, true, None, None, &mut state)
                 .unwrap(),
             1
         );
         // Frame 1 top field: lsb 2 → 2
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(2), true, false, None, &mut state)
+            derive_pic_order_cnt(&sps, false, true, 1, Some(2), true, false, None, None, &mut state)
                 .unwrap(),
             2
         );
         // Frame 1 bottom field: lsb 3 → 3
         assert_eq!(
-            derive_pic_order_cnt(&sps, false, true, 1, Some(3), true, true, None, &mut state)
+            derive_pic_order_cnt(&sps, false, true, 1, Some(3), true, true, None, None, &mut state)
                 .unwrap(),
             3
         );
@@ -1902,6 +2079,7 @@ mod tests {
                 Some(0),
                 false,
                 false,
+                None,
                 Some(4),
                 &mut state
             )
@@ -1921,6 +2099,7 @@ mod tests {
                 Some(2),
                 false,
                 false,
+                None,
                 Some(6),
                 &mut state
             )
@@ -1938,7 +2117,7 @@ mod tests {
     fn poc_type0_field_ignores_delta_pic_order_cnt_bottom() {
         let sps = sps(0, 4, 0, 1);
         let mut state = PocState::default();
-        derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, &mut state).unwrap();
+        derive_pic_order_cnt(&sps, true, true, 0, Some(0), true, false, None, None, &mut state).unwrap();
         // A top field with delta present must NOT fold the delta into its POC.
         assert_eq!(
             derive_pic_order_cnt(
@@ -1949,6 +2128,7 @@ mod tests {
                 Some(5),
                 true,
                 false,
+                None,
                 Some(99),
                 &mut state
             )
@@ -2382,7 +2562,7 @@ mod tests {
     fn mmco5_poc_state_reset_makes_the_next_picture_start_from_zero() {
         let sps = sps(0, 4, 0, 4); // MaxPicOrderCntLsb = 256, wrap threshold 128
         let mut state = PocState::default();
-        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, &mut state).unwrap();
+        derive_pic_order_cnt(&sps, true, true, 0, Some(0), false, false, None, None, &mut state).unwrap();
         assert_eq!(
             derive_pic_order_cnt(
                 &sps,
@@ -2392,6 +2572,7 @@ mod tests {
                 Some(100),
                 false,
                 false,
+                None,
                 None,
                 &mut state
             )
@@ -2407,6 +2588,7 @@ mod tests {
                 Some(200),
                 false,
                 false,
+                None,
                 None,
                 &mut state
             )
@@ -2427,6 +2609,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 &mut stale
             )
             .unwrap(),
@@ -2446,6 +2629,7 @@ mod tests {
                 Some(2),
                 false,
                 false,
+                None,
                 None,
                 &mut state
             )

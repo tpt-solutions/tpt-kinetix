@@ -27,7 +27,6 @@ impl<'a> TileDecoder<'a> {
     pub(super) fn decode_mode(&mut self, bc: &mut BoolDecoder) -> Result<(), KinetixError> {
         let row = self.row;
         let col = self.col;
-        let row7 = self.row7;
         let bs = self.b.bs;
         let (bw4u, bh4u) = crate::header::bwh(1, bs);
         let w4 = bw4u.min(self.cols() - col);
@@ -38,10 +37,77 @@ impl<'a> TileDecoder<'a> {
 
         self.parse_segmentation_and_skip(bc, w4, h4, have_a, have_l, is_key_or_intra)?;
 
-        // tx size
+        // tx size — intra blocks read it now; inter blocks read it AFTER the
+        // inter mode/MV info (reference read_inter_frame_mode_info order).
         let max_tx = MAX_TX_FOR_BS[bs];
         let txfm_switchable = self.hdr.txfm_mode == crate::header::TxfmMode::Switchable;
-        if (self.b.intra || !self.b.skip) && txfm_switchable {
+        if is_key_or_intra || self.b.intra {
+            self.parse_tx_size(bc, bs, max_tx, txfm_switchable, have_a, have_l, true);
+        }
+        if is_key_or_intra {
+            self.b.comp = false;
+            self.b.ref_ = [0; 2];
+            self.parse_kf_intra_modes(bc, bs);
+        } else if self.b.intra {
+            self.b.comp = false;
+            self.b.ref_ = [0; 2];
+            if bs > BS_8X8 {
+                for i in 0..4 {
+                    let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
+                    self.b.mode[i] = m;
+                    self.counts.y_mode[0][m] += 1;
+                }
+                if bs == BS_8X4 {
+                    self.b.mode[1] = self.b.mode[0];
+                    self.b.mode[3] = self.b.mode[2];
+                } else if bs == BS_4X8 {
+                    self.b.mode[2] = self.b.mode[0];
+                    self.b.mode[3] = self.b.mode[1];
+                }
+            } else {
+                let sz = INTRA_SIZE_GROUP[bs];
+                let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[sz]);
+                self.b.mode = [m; 4];
+                self.counts.y_mode[sz][m] += 1;
+            }
+            let uv_probs = self.probs.mode.uv_mode[self.b.mode[3]];
+            self.b.uvmode = crate::mv::read_tree(bc, &INTRAMODE_TREE, &uv_probs);
+            self.counts.uv_mode[self.b.mode[3]][self.b.uvmode] += 1;
+        } else {
+            self.parse_inter_mode_info(bc, have_a, have_l)?;
+            // reference: read_tx_size(cm, xd, !skip || !inter, r)
+            self.parse_tx_size(
+                bc,
+                bs,
+                max_tx,
+                txfm_switchable,
+                have_a,
+                have_l,
+                !self.b.skip,
+            );
+        }
+
+        self.set_ctxs(have_a, have_l, w4, h4);
+        self.write_mvref_grid(w4, h4);
+        Ok(())
+    }
+
+    /// The tx-size parse (reference `read_tx_size`): a tree read under the
+    /// tx-size context when selection is allowed, otherwise the clamped max.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_tx_size(
+        &mut self,
+        bc: &mut BoolDecoder,
+        bs: usize,
+        max_tx: usize,
+        txfm_switchable: bool,
+        have_a: bool,
+        have_l: bool,
+        allow_select: bool,
+    ) {
+        if allow_select && txfm_switchable && bs >= BS_8X8 {
+            let col = self.col;
+            let row7 = self.row7;
             let c: usize = if have_a {
                 if have_l {
                     let above = if self.state.above_skip_ctx[col] != 0 {
@@ -99,43 +165,6 @@ impl<'a> TileDecoder<'a> {
         } else {
             self.b.tx = max_tx.min(self.hdr.txfm_mode as usize);
         }
-
-        if is_key_or_intra {
-            self.b.comp = false;
-            self.b.ref_ = [0; 2];
-            self.parse_kf_intra_modes(bc, bs);
-        } else if self.b.intra {
-            self.b.comp = false;
-            self.b.ref_ = [0; 2];
-            if bs > BS_8X8 {
-                for i in 0..4 {
-                    let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
-                    self.b.mode[i] = m;
-                    self.counts.y_mode[0][m] += 1;
-                }
-                if bs == BS_8X4 {
-                    self.b.mode[1] = self.b.mode[0];
-                    self.b.mode[3] = self.b.mode[2];
-                } else if bs == BS_4X8 {
-                    self.b.mode[2] = self.b.mode[0];
-                    self.b.mode[3] = self.b.mode[1];
-                }
-            } else {
-                let sz = INTRA_SIZE_GROUP[bs];
-                let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[sz]);
-                self.b.mode = [m; 4];
-                self.counts.y_mode[sz][m] += 1;
-            }
-            let uv_probs = self.probs.mode.uv_mode[self.b.mode[3]];
-            self.b.uvmode = crate::mv::read_tree(bc, &INTRAMODE_TREE, &uv_probs);
-            self.counts.uv_mode[self.b.mode[3]][self.b.uvmode] += 1;
-        } else {
-            self.parse_inter_mode_info(bc, have_a, have_l)?;
-        }
-
-        self.set_ctxs(have_a, have_l, w4, h4);
-        self.write_mvref_grid(w4, h4);
-        Ok(())
     }
 
     fn parse_segmentation_and_skip(
@@ -253,20 +282,45 @@ impl<'a> TileDecoder<'a> {
     fn parse_kf_intra_modes(&mut self, bc: &mut BoolDecoder, bs: usize) {
         let col = self.col;
         let row7 = self.row7;
+        let row = self.row;
         if bs > BS_8X8 {
-            let mut a0 = self.state.above_mode_ctx[col * 2];
-            let mut a1 = self.state.above_mode_ctx[col * 2 + 1];
-            let mut l0 = self.left.mode[row7 * 2];
-            let mut l1 = self.left.mode[row7 * 2 + 1];
+            // Missing (out-of-frame) neighbours read DC_PRED (0) — the
+            // context arrays hold NO_NEIGHBOUR_MODE (14) there.
+            let mut a0 = if row > 0 {
+                self.state.above_mode_ctx[col * 2]
+            } else {
+                0
+            };
+            let mut a1 = if row > 0 {
+                self.state.above_mode_ctx[col * 2 + 1]
+            } else {
+                0
+            };
+            let mut l0 = if col > self.tile_col_start {
+                self.left.mode[row7 * 2]
+            } else {
+                0
+            };
+            let mut l1 = if col > self.tile_col_start {
+                self.left.mode[row7 * 2 + 1]
+            } else {
+                0
+            };
             let tree = &INTRAMODE_TREE;
 
-            let m0 =
-                crate::mv::read_tree(bc, tree, &crate::header::kf_ymode_probs_for(a0, l0)) as u8;
+            let m0 = {
+                let __p = crate::header::kf_ymode_probs_for(a0, l0);
+
+                crate::mv::read_tree(bc, tree, &__p) as u8
+            };
             self.b.mode[0] = m0 as usize;
             a0 = m0;
             if bs != BS_8X4 {
-                let m1 = crate::mv::read_tree(bc, tree, &crate::header::kf_ymode_probs_for(a1, m0))
-                    as u8;
+                let m1 = {
+                    let __p = crate::header::kf_ymode_probs_for(a1, m0);
+
+                    crate::mv::read_tree(bc, tree, &__p) as u8
+                };
                 self.b.mode[1] = m1 as usize;
                 l0 = m1;
                 a1 = m1;
@@ -276,14 +330,19 @@ impl<'a> TileDecoder<'a> {
                 a1 = m0;
             }
             if bs != BS_4X8 {
-                let m2 = crate::mv::read_tree(bc, tree, &crate::header::kf_ymode_probs_for(a0, l1))
-                    as u8;
+                let m2 = {
+                    let __p = crate::header::kf_ymode_probs_for(a0, l1);
+
+                    crate::mv::read_tree(bc, tree, &__p) as u8
+                };
                 self.b.mode[2] = m2 as usize;
                 a0 = m2;
                 if bs != BS_8X4 {
-                    let m3 =
-                        crate::mv::read_tree(bc, tree, &crate::header::kf_ymode_probs_for(a1, m2))
-                            as u8;
+                    let m3 = {
+                        let __p = crate::header::kf_ymode_probs_for(a1, m2);
+
+                        crate::mv::read_tree(bc, tree, &__p) as u8
+                    };
                     self.b.mode[3] = m3 as usize;
                     l1 = m3;
                     a1 = m3;
@@ -304,8 +363,16 @@ impl<'a> TileDecoder<'a> {
             self.left.mode[row7 * 2 + 1] = l1;
         } else {
             let probs = crate::header::kf_ymode_probs_for(
-                self.state.above_mode_ctx[col * 2],
-                self.left.mode[row7 * 2],
+                if row > 0 {
+                    self.state.above_mode_ctx[col * 2]
+                } else {
+                    0
+                },
+                if col > self.tile_col_start {
+                    self.left.mode[row7 * 2]
+                } else {
+                    0
+                },
             );
             let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &probs) as u8;
             self.b.mode = [m as usize; 4];
@@ -640,8 +707,20 @@ impl<'a> TileDecoder<'a> {
                 let off = INTER_MODE_OFF[bs];
                 let c = INTER_MODE_CTX_LUT[self.state.above_mode_ctx[col + off] as usize]
                     [self.left.mode[row7 + off] as usize] as usize;
+                if std::env::var_os("TPT_VP9_TRACE").is_some() {
+                    eprintln!(
+                        "IMCTX r={} c={} ctx={} p={} {} {}",
+                        self.row,
+                        col,
+                        c,
+                        self.probs.mode.mv_mode[c][0],
+                        self.probs.mode.mv_mode[c][1],
+                        self.probs.mode.mv_mode[c][2]
+                    );
+                }
                 let m = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
-                self.b.mode = [m; 4];
+                // tree leaves: 0=ZEROMV, 1=NEARESTMV, 2=NEARMV, 3=NEWMV
+                self.b.mode = [[ZEROMV, NEARESTMV, NEARMV, NEWMV][m]; 4];
                 self.counts.mv_mode[c][m] += 1;
             }
         }
@@ -687,12 +766,12 @@ impl<'a> TileDecoder<'a> {
             let _ = &mut read_mode;
             let m0 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
             self.counts.mv_mode[c][m0] += 1;
-            self.b.mode[0] = m0;
+            self.b.mode[0] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m0];
             self.fill_mv(bc, 0, m0);
             if bs != BS_8X4 {
                 let m1 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                 self.counts.mv_mode[c][m1] += 1;
-                self.b.mode[1] = m1;
+                self.b.mode[1] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m1];
                 self.fill_mv(bc, 1, m1);
             } else {
                 self.b.mode[1] = self.b.mode[0];
@@ -701,13 +780,13 @@ impl<'a> TileDecoder<'a> {
             if bs != BS_4X8 {
                 let m2 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                 self.counts.mv_mode[c][m2] += 1;
-                self.b.mode[2] = m2;
+                self.b.mode[2] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m2];
                 self.fill_mv(bc, 2, m2);
                 if bs != BS_8X4 {
                     let m3 =
                         crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                     self.counts.mv_mode[c][m3] += 1;
-                    self.b.mode[3] = m3;
+                    self.b.mode[3] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m3];
                     self.fill_mv(bc, 3, m3);
                 } else {
                     self.b.mode[3] = self.b.mode[2];

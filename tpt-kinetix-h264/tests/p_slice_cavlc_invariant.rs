@@ -149,6 +149,7 @@ fn p_slice_cavlc_parse_succeeds() {
         false,
         false,
         false,
+        false,
         &mut NoopTracer,
     );
     assert!(

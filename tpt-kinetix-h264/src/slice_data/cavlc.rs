@@ -1,5 +1,22 @@
 use super::*;
 
+/// Multi-slice-capable CAVLC I-slice parser (§7.3.4).
+///
+/// Parses one slice of an I picture into a CALLER-OWNED picture accumulator
+/// (the same shape as [`parse_i_slice_cabac`]): `first_mb` is this slice's
+/// `first_mb_in_slice`, `slice_id` is the picture-local sequential slice
+/// number, and the four grid slices are shared across all of the picture's
+/// slices. `slice_id_grid` must be pre-seeded with a sentinel unequal to any
+/// real slice id (e.g. `u16::MAX`) for every not-yet-decoded macroblock; the
+/// slice-aware [`NeighbourCtx`] then enforces the §6.4.9/§7.4.4 rule that a
+/// neighbour from a DIFFERENT slice of the same picture is unavailable for
+/// MPM and nC derivation (both go through `NeighbourCtx::left_top*`, so the
+/// filter applies uniformly).
+///
+/// Returns the macroblock address one past the last decoded MB — `total`
+/// when the slice completed the picture, some smaller value when the slice's
+/// data ended first (a genuine multi-slice picture; the decoder accumulates
+/// and the picture finalizes on a later slice or on flush).
 pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     reader: &mut BitReader,
     mb_cols: u32,
@@ -10,11 +27,18 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     mb_aff: bool,
     field_pic_flag: bool,
     tracer: &mut T,
-) -> R<ParsedSlice> {
+    first_mb: u32,
+    slice_id: u16,
+    macroblocks: &mut [Macroblock],
+    nz: &mut [MbNz],
+    pred_ctx: &mut [MbPredCtx],
+    slice_id_grid: &mut [u16],
+) -> R<usize> {
     let total = (mb_cols * mb_rows) as usize;
-    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
-    let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
-    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    debug_assert_eq!(macroblocks.len(), total);
+    debug_assert_eq!(nz.len(), total);
+    debug_assert_eq!(pred_ctx.len(), total);
+    debug_assert_eq!(slice_id_grid.len(), total);
     let mut qp = slice_qp;
     // §7.4.4: `mb_field_decoding_flag` is read once per *macroblock pair* when
     // the picture is an MBAFF frame (the SPS enables
@@ -24,13 +48,16 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
     // applies to both the top and bottom macroblock of the pair; for
     // frame-only / PAFF streams it is simply absent.
     let mbaff_frame = mb_aff && !field_pic_flag;
-    let mut cur_pair_field = false;
+    // A PAFF field picture (`field_pic_flag == 1`) is field-coded throughout —
+    // mirror `parse_i_slice_cabac`, which initialises its pair-field state the
+    // same way.
+    let mut cur_pair_field = field_pic_flag;
     // Phase G.4: per-frame-MB `mb_field_decoding_flag`, populated as each
     // pair is read so `NeighbourCtx` can resolve mixed field/frame neighbour
     // addresses (§6.4.10.1) for already-decoded macroblocks.
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
 
-    for mb_idx in 0..total {
+    for mb_idx in first_mb as usize..total {
         // MBAFF addressing (§6.4.2/§7.4.4): consecutive macroblock addresses
         // enumerate each PAIR as (top, bottom) before advancing horizontally —
         // addr 2k/2k+1 are the two MBs of pair k (pair k sits at frame-MB
@@ -69,7 +96,14 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
                 reader.bit_position()
             );
         }
-        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
+        let nctx = NeighbourCtx::new_with_slices(
+            mbaff_frame,
+            mb_rows,
+            cur_pair_field,
+            &field_flags,
+            slice_id_grid,
+            slice_id,
+        );
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
         if std::env::var("KINETIX_BINTRACE").is_ok() {
@@ -80,14 +114,18 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
             mb_x,
             mb_y,
             mb_cols,
-            &nz,
-            &pred_ctx,
+            nz,
+            pred_ctx,
             qp,
             chroma_qp_index_offset,
             tracer,
             mb_type,
             transform_8x8_mode,
             nctx,
+            // I slices: every decoded neighbour is intra, so the
+            // constrained_intra_pred_flag availability restriction is a
+            // no-op here.
+            false,
         )?;
         qp = new_qp;
         nz[grid_idx] = this_nz;
@@ -95,8 +133,60 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
         macroblocks[grid_idx] = mb;
+        slice_id_grid[grid_idx] = slice_id;
+
+        // A slice's data ends with `rbsp_stop_one_bit` + alignment zeros; once
+        // the reader is past the last real payload bit this slice is over even
+        // if the picture has MBs left (a continuation slice carries them, in
+        // its own NAL, starting at its own `first_mb_in_slice`).
+        if mb_idx + 1 < total && !reader.more_rbsp_data() {
+            return Ok(mb_idx + 1);
+        }
     }
 
+    Ok(total)
+}
+
+/// Single-slice adapter preserving `parse_i_slice`'s historical
+/// fresh-buffers-every-call shape: allocates the grids, parses the whole
+/// picture from MB 0, and errors if the slice data ended before the picture
+/// did (previously surfaced as an EOF error from the loop itself).
+pub fn parse_i_slice_single<T: crate::trace::DecodeTracer>(
+    reader: &mut BitReader,
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
+    mb_aff: bool,
+    field_pic_flag: bool,
+    tracer: &mut T,
+) -> R<ParsedSlice> {
+    let total = (mb_cols * mb_rows) as usize;
+    let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
+    let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
+    let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    let mut slice_id_grid: Vec<u16> = vec![u16::MAX; total];
+    let decoded = parse_i_slice(
+        reader,
+        mb_cols,
+        mb_rows,
+        slice_qp,
+        chroma_qp_index_offset,
+        transform_8x8_mode,
+        mb_aff,
+        field_pic_flag,
+        tracer,
+        0,
+        0,
+        &mut macroblocks,
+        &mut nz,
+        &mut pred_ctx,
+        &mut slice_id_grid,
+    )?;
+    if decoded < total {
+        return Err(SliceDataError::Eof("slice ended before end of picture"));
+    }
     Ok(ParsedSlice {
         macroblocks,
         nz,
@@ -143,6 +233,7 @@ pub(crate) fn mpm_pred_mode(
     modes: &[Intra4x4Mode; 16],
     raster: usize,
     nctx: NeighbourCtx,
+    constrained_intra: bool,
 ) -> u8 {
     let bx = (raster % 4) as i32;
     let by = (raster / 4) as i32;
@@ -178,7 +269,10 @@ pub(crate) fn mpm_pred_mode(
         NeighbourSide::Real(modes[(by * 4 + bx - 1) as usize] as u8)
     } else if let Some(li) = left_idx {
         let n = &pred_ctx_grid[li];
-        if !n.present {
+        // `constrained_intra_pred_flag` (§8.3.1.1 availability): an INTER
+        // neighbour is not merely ForcedDc but fully unavailable, forcing
+        // `dcPredModePredictedFlag = 1` (both sides DC).
+        if !n.present || (constrained_intra && n.is_inter) {
             NeighbourSide::Unavailable
         } else if n.is_intra4x4 {
             NeighbourSide::Real(n.modes[left_nbr_raster] as u8)
@@ -193,7 +287,7 @@ pub(crate) fn mpm_pred_mode(
         NeighbourSide::Real(modes[((by - 1) * 4 + bx) as usize] as u8)
     } else if let Some(ti) = top_idx {
         let n = &pred_ctx_grid[ti];
-        if !n.present {
+        if !n.present || (constrained_intra && n.is_inter) {
             NeighbourSide::Unavailable
         } else if n.is_intra4x4 {
             NeighbourSide::Real(n.modes[(3 * 4 + bx) as usize] as u8)
@@ -230,11 +324,12 @@ fn side_cross(
     idx: Option<usize>,
     r: usize,
     c: usize,
+    constrained_intra: bool,
 ) -> NeighbourSide {
     match idx {
         Some(li) => {
             let n = &pred_ctx_grid[li];
-            if !n.present {
+            if !n.present || (constrained_intra && n.is_inter) {
                 NeighbourSide::Unavailable
             } else if n.is_intra4x4 {
                 NeighbourSide::Real(n.modes[raster_of_8x8_sub(r, c)] as u8)
@@ -254,6 +349,7 @@ pub(crate) fn mpm_pred_mode_8x8(
     modes: &[Intra4x4Mode; 16],
     i8: usize,
     nctx: NeighbourCtx,
+    constrained_intra: bool,
 ) -> u8 {
     let (left_idx, top_idx) = nctx.left_top(mb_x, mb_y, mb_cols);
     // Cross-MB neighbour 8×8 blocks follow the 4×4-grid adjacency of the
@@ -284,15 +380,15 @@ pub(crate) fn mpm_pred_mode_8x8(
     // Exact sub-blocks matter when the neighbour is plain Intra_4×4 (whose
     // four sub-blocks carry independent modes).
     let left = match i8 {
-        0 => side_cross(pred_ctx_grid, left_idx, 1, 1),
+        0 => side_cross(pred_ctx_grid, left_idx, 1, 1, constrained_intra),
         1 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 1)] as u8),
-        2 => side_cross(pred_ctx_grid, left_idx, 3, 1),
+        2 => side_cross(pred_ctx_grid, left_idx, 3, 1, constrained_intra),
         _ => NeighbourSide::Real(modes[raster_of_8x8_sub(2, 1)] as u8),
     };
 
     let top = match i8 {
-        0 => side_cross(pred_ctx_grid, top_idx, 2, 2),
-        1 => side_cross(pred_ctx_grid, top_idx, 3, 2),
+        0 => side_cross(pred_ctx_grid, top_idx, 2, 2, constrained_intra),
+        1 => side_cross(pred_ctx_grid, top_idx, 3, 2, constrained_intra),
         2 => NeighbourSide::Real(modes[raster_of_8x8_sub(0, 2)] as u8),
         _ => NeighbourSide::Real(modes[raster_of_8x8_sub(1, 2)] as u8),
     };
@@ -401,6 +497,7 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
     mb_type: u32,
     transform_8x8_mode: bool,
     nctx: NeighbourCtx,
+    constrained_intra: bool,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
     mb.skip = false;
@@ -487,8 +584,16 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
             // its four 4×4 sub-blocks so neighbouring macroblocks derive the
             // most-probable mode from the correct neighbour block (§8.3.2.1.1).
             for i8 in 0..4usize {
-                let pred_mode =
-                    mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx);
+                let pred_mode = mpm_pred_mode_8x8(
+                    pred_ctx_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &modes,
+                    i8,
+                    nctx,
+                    constrained_intra,
+                );
                 let prev_flag = r
                     .read_bit()
                     .ok_or(SliceDataError::Eof("prev_intra8x8_pred_mode_flag"))?;
@@ -522,8 +627,16 @@ fn parse_intra_macroblock<T: crate::trace::DecodeTracer>(
             // picture or wasn't coded as Intra_4×4.
             for blk_idx in 0..16usize {
                 let raster = raster_of_8x8_sub(blk_idx / 4, blk_idx % 4);
-                let pred_mode =
-                    mpm_pred_mode(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, raster, nctx);
+                let pred_mode = mpm_pred_mode(
+                    pred_ctx_grid,
+                    mb_x,
+                    mb_y,
+                    mb_cols,
+                    &modes,
+                    raster,
+                    nctx,
+                    constrained_intra,
+                );
 
                 let prev_flag = r
                     .read_bit()
@@ -653,14 +766,91 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
     transform_8x8_mode: bool,
     mb_aff: bool,
     field_pic_flag: bool,
+    constrained_intra: bool,
     tracer: &mut T,
 ) -> R<ParsedSlice> {
     let total = (mb_cols * mb_rows) as usize;
-    // Grid-indexed so `predict_slice_mvs` sees each MB at its frame-MB address
-    // even though the pair enumeration order differs under MBAFF.
     let mut macroblocks: Vec<Macroblock> = (0..total).map(|_| Macroblock::new_skip()).collect();
     let mut nz: Vec<MbNz> = vec![MbNz::default(); total];
     let mut pred_ctx: Vec<MbPredCtx> = vec![MbPredCtx::default(); total];
+    let mut slice_id_grid: Vec<u16> = vec![u16::MAX; total];
+    let decoded = parse_p_slice_range(
+        reader,
+        mb_cols,
+        mb_rows,
+        slice_qp,
+        num_ref_idx_l0_active,
+        chroma_qp_index_offset,
+        transform_8x8_mode,
+        mb_aff,
+        field_pic_flag,
+        constrained_intra,
+        tracer,
+        0,
+        0,
+        &mut macroblocks,
+        &mut nz,
+        &mut pred_ctx,
+        &mut slice_id_grid,
+    )?;
+    if decoded < total {
+        return Err(SliceDataError::Eof("slice ended before end of picture"));
+    }
+
+    // Derive motion vectors for every inter macroblock (§8.4.1). The store is
+    // per-slice; single-slice pictures use slice id 0.
+    let mut mv_store = MvStore::new(total);
+    crate::mv::predict_slice_mvs_ex(
+        &mut mv_store,
+        mb_cols,
+        0,
+        0,
+        &macroblocks,
+        mb_aff && !field_pic_flag,
+    )?;
+
+    Ok(ParsedSlice {
+        macroblocks,
+        nz,
+        mv_store,
+        decoded_mb_count: total,
+    })
+}
+
+/// Multi-slice-capable CAVLC P-slice parser — the range/accumulator twin of
+/// [`parse_i_slice`] (see its doc for the shared-grid contract and the
+/// §6.4.9 slice-boundary neighbour rule; `MvStore` neighbour availability is
+/// likewise gated on `slice_id` by the driver's per-range
+/// `predict_slice_mvs_ex` call). `mb_skip_run` state is per slice, exactly
+/// as the syntax requires.
+///
+/// Returns the macroblock address one past the last decoded MB (`total` when
+/// the slice completed the picture). Motion-vector prediction is NOT run
+/// here — the multi-slice driver runs it per slice over the decoded range.
+pub fn parse_p_slice_range<T: crate::trace::DecodeTracer>(
+    reader: &mut BitReader,
+    mb_cols: u32,
+    mb_rows: u32,
+    slice_qp: i32,
+    num_ref_idx_l0_active: u32,
+    chroma_qp_index_offset: i32,
+    transform_8x8_mode: bool,
+    mb_aff: bool,
+    field_pic_flag: bool,
+    constrained_intra: bool,
+    tracer: &mut T,
+    first_mb: u32,
+    slice_id: u16,
+    macroblocks: &mut [Macroblock],
+    nz: &mut [MbNz],
+    pred_ctx: &mut [MbPredCtx],
+    slice_id_grid: &mut [u16],
+) -> R<usize> {
+    let total = (mb_cols * mb_rows) as usize;
+    debug_assert_eq!(macroblocks.len(), total);
+    debug_assert_eq!(nz.len(), total);
+    debug_assert_eq!(pred_ctx.len(), total);
+    debug_assert_eq!(slice_id_grid.len(), total);
     let mut qp = slice_qp;
     // `mb_skip_run` is signalled once per slice and again after each coded MB
     // (§7.4.5); `-1` (ffmpeg's sentinel) means a fresh value must be read for
@@ -674,10 +864,10 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
     //     BOTTOM MB is about to be coded);
     //   * otherwise the bit is read before mb_type of every coded pair-top MB.
     let mbaff_frame = mb_aff && !field_pic_flag;
-    let mut cur_pair_field = false;
+    let mut cur_pair_field = field_pic_flag;
     let mut field_flags: Vec<Option<bool>> = vec![None; total];
 
-    for mb_idx in 0..total {
+    for mb_idx in first_mb as usize..total {
         let (mb_x, mb_y, grid_idx) = if mbaff_frame {
             let pair = mb_idx >> 1;
             let parity = mb_idx & 1;
@@ -735,9 +925,21 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
             // cascading to its own neighbours).
             pred_ctx[grid_idx] = MbPredCtx {
                 present: true,
+                is_inter: true,
                 ..Default::default()
             };
             macroblocks[grid_idx] = mb;
+            slice_id_grid[grid_idx] = slice_id;
+            // Skip-run members consume NO bits (the run value already counted
+            // them), so "no data left" while the run is still ACTIVE is the
+            // normal end-of-slice state. But when the run just hit ZERO on
+            // this MB, the next bit would be the next MB's own syntax — no
+            // bits left means the slice ended here (a common real-stream
+            // shape: the encoder ends a slice on an exactly-exhausted skip
+            // run, e.g. CVFI1_Sony_D slice 4 ending at a skipped MB 494).
+            if mb_skip_run == 0 && mb_idx + 1 < total && !reader.more_rbsp_data() {
+                return Ok(mb_idx + 1);
+            }
             continue;
         }
         mb_skip_run = -1;
@@ -752,20 +954,28 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
                 field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
             }
         }
-        let nctx = NeighbourCtx::new(mbaff_frame, mb_rows, cur_pair_field, &field_flags);
+        let nctx = NeighbourCtx::new_with_slices(
+            mbaff_frame,
+            mb_rows,
+            cur_pair_field,
+            &field_flags,
+            slice_id_grid,
+            slice_id,
+        );
 
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_p_macroblock(
             reader,
             mb_x,
             mb_y,
             mb_cols,
-            &nz,
-            &pred_ctx,
+            nz,
+            pred_ctx,
             qp,
             num_ref_idx_l0_active,
             chroma_qp_index_offset,
             transform_8x8_mode,
             nctx,
+            constrained_intra,
             tracer,
         )?;
         qp = new_qp;
@@ -774,19 +984,14 @@ pub fn parse_p_slice<T: crate::trace::DecodeTracer>(
         let mut mb = mb;
         mb.mb_field_flag = cur_pair_field;
         macroblocks[grid_idx] = mb;
+        slice_id_grid[grid_idx] = slice_id;
+
+        if mb_idx + 1 < total && !reader.more_rbsp_data() {
+            return Ok(mb_idx + 1);
+        }
     }
 
-    // Derive motion vectors for every inter macroblock (§8.4.1). The store is
-    // per-slice; single-slice pictures use slice id 0.
-    let mut mv_store = MvStore::new(total);
-    crate::mv::predict_slice_mvs_ex(&mut mv_store, mb_cols, 0, 0, &macroblocks, mbaff_frame)?;
-
-    Ok(ParsedSlice {
-        macroblocks,
-        nz,
-        mv_store,
-        decoded_mb_count: total,
-    })
+    Ok(total)
 }
 
 /// Decode `refIdxL0` for one partition (§7.3.5.1). A reference count of 1
@@ -818,6 +1023,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     chroma_qp_index_offset: i32,
     transform_8x8_mode: bool,
     nctx: NeighbourCtx,
+    constrained_intra: bool,
     tracer: &mut T,
 ) -> R<(Macroblock, MbNz, MbPredCtx, i32)> {
     let mut mb = Macroblock::new_skip();
@@ -828,10 +1034,14 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     };
     let this_pred_ctx = MbPredCtx {
         present: true,
+        is_inter: true,
         ..Default::default()
     };
 
     let mb_type_raw = r.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
+    // Table 7-14 / ffmpeg h264_cavlc.c: intra types start at mb_type 5 in P
+    // slices in ALL cases; type 4 is P_L0_8x8ref0 (ref_idx not coded, reads
+    // as index 0) regardless of num_ref_idx_l0_active.
     if mb_type_raw >= 5 {
         let i_type = mb_type_raw - 5;
         if i_type > 25 {
@@ -854,6 +1064,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             i_type,
             transform_8x8_mode,
             nctx,
+            constrained_intra,
         );
     }
 
@@ -962,6 +1173,23 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     }
     mb.qp = qp;
 
+    // Triage (#32bz): per-MB parse dump for the independent walker diff.
+    if std::env::var_os("KINETIX_PARSE_DUMP").is_some() && mb_y < 2 && mb_x < 6 {
+        let tcs: usize = mb
+            .luma_coeffs
+            .iter()
+            .chain(mb.chroma_cb_coeffs.iter())
+            .chain(mb.chroma_cr_coeffs.iter())
+            .map(|c| c.iter().filter(|&&v| v != 0).count())
+            .sum();
+        eprintln!(
+            "PARSE-DBG mb=({mb_x},{mb_y}) type={mb_type_raw} ri={:?} mvd={:?} cbp={:#04x} qp={qp} tcs={tcs}",
+            mb.motion.as_ref().map(|m| m.ref_idx_l0.clone()).unwrap_or_default(),
+            mb.motion.as_ref().map(|m| m.mvd_l0.clone()).unwrap_or_default(),
+            cbp,
+        );
+    }
+
     parse_intra_residuals(
         r,
         &mut mb,
@@ -1049,6 +1277,7 @@ pub fn parse_b_slice<T: crate::trace::DecodeTracer>(
             };
             pred_ctx[mb_idx] = MbPredCtx {
                 present: true,
+                is_inter: true,
                 ..Default::default()
             };
             macroblocks.push(mb);
@@ -1124,6 +1353,7 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
     };
     let this_pred_ctx = MbPredCtx {
         present: true,
+        is_inter: true,
         ..Default::default()
     };
 
@@ -1150,6 +1380,9 @@ fn parse_b_macroblock<T: crate::trace::DecodeTracer>(
             i_type,
             transform_8x8_mode,
             NeighbourCtx::NONE,
+            // constrained_intra_pred_flag is not yet threaded for B slices
+            // (no CAVLC-B constrained clip in the conformance suite).
+            false,
         );
     }
 

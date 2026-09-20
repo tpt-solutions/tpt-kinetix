@@ -47,21 +47,30 @@ pub(crate) const INTRA_SIZE_GROUP: [usize; 10] = [3, 3, 3, 3, 2, 2, 2, 1, 1, 1];
 
 /// Inter-mode context LUT (`inter_mode_ctx_lut[above][left]`; cache values
 /// < 10 are intra, 10..13 the inter modes).
-pub(crate) const INTER_MODE_CTX_LUT: [[u8; 14]; 14] = [
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5],
-    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 1, 3],
-    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 1, 3],
-    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 1, 1, 0, 3],
-    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 3, 3, 3, 4],
+/// Mode-context value for a missing (out-of-frame) neighbour: the reference
+/// skips such candidates entirely, i.e. they contribute 0 to the counter.
+pub(crate) const NO_NEIGHBOUR_MODE: u8 = 14;
+
+/// Inter-mode context per the reference `get_mode_context`:
+/// entry [a][l] = `counter_to_context[mode_2_counter[a] + mode_2_counter[l]]`
+/// with intra modes weighing 9, NEARESTMV/NEARMV 0, ZEROMV 3, NEWMV 1, and
+/// index 14 = "no neighbour" weighing 0.
+pub(crate) const INTER_MODE_CTX_LUT: [[u8; 15]; 15] = [
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 1, 3, 2],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 1, 3, 2],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 1, 1, 0, 3, 1],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 3, 3, 3, 4, 3],
+    [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 2, 1, 3, 2],
 ];
 
 /// Sub-block neighbour offset for the <=8x8 inter-mode context.
@@ -89,28 +98,28 @@ pub(crate) const BAND_COUNTS: [[i16; 6]; 4] = [
 pub(crate) fn scans(tx4: usize, tx_type: usize) -> (&'static [i16], &'static [i16]) {
     match (tx4, tx_type) {
         (0, 1) => (
-            &crate::tables::COL_SCAN_4X4,
-            &crate::tables::COL_SCAN_4X4_NB,
-        ),
-        (0, 2) => (
             &crate::tables::ROW_SCAN_4X4,
             &crate::tables::ROW_SCAN_4X4_NB,
         ),
-        (1, 1) => (
-            &crate::tables::COL_SCAN_8X8,
-            &crate::tables::COL_SCAN_8X8_NB,
+        (0, 2) => (
+            &crate::tables::COL_SCAN_4X4,
+            &crate::tables::COL_SCAN_4X4_NB,
         ),
-        (1, 2) => (
+        (1, 1) => (
             &crate::tables::ROW_SCAN_8X8,
             &crate::tables::ROW_SCAN_8X8_NB,
         ),
-        (2, 1) => (
-            &crate::tables::COL_SCAN_16X16,
-            &crate::tables::COL_SCAN_16X16_NB,
+        (1, 2) => (
+            &crate::tables::COL_SCAN_8X8,
+            &crate::tables::COL_SCAN_8X8_NB,
         ),
-        (2, 2) => (
+        (2, 1) => (
             &crate::tables::ROW_SCAN_16X16,
             &crate::tables::ROW_SCAN_16X16_NB,
+        ),
+        (2, 2) => (
+            &crate::tables::COL_SCAN_16X16,
+            &crate::tables::COL_SCAN_16X16_NB,
         ),
         // lossless row (4): WHT always uses the default 4x4 scan
         (4, _) => (DEFAULT_SCAN_4X4.as_slice(), DEFAULT_SCAN_4X4_NB.as_slice()),
@@ -181,19 +190,44 @@ impl FrameData {
     }
 }
 
-/// Per-superblock loop-filter level and edge masks (reference `VP9Filter`).
+/// Per-8x8-unit loop-filter info (the flattened `MODE_INFO` fields the
+/// reference mask walk reads).
+#[derive(Clone, Copy, Default)]
+pub struct SbUnit {
+    /// Block size index (frame `BS_*`); 255 marks units outside the frame.
+    pub bs: u8,
+    pub tx: u8,
+    pub uvtx: u8,
+    pub skip_inter: bool,
+    pub lvl: u8,
+}
+
+/// Per-superblock loop-filter masks (reference `LOOP_FILTER_MASK`).
 #[derive(Clone)]
 pub struct SbFilter {
-    pub level: [u8; 64],
-    /// `[plane 0=y 1=uv][0=col 1=row][8 rows][4 width classes]` masks.
-    pub mask: [[[[u8; 4]; 8]; 2]; 2],
+    pub unit: [SbUnit; 64],
+    pub left_y: [u64; 4],
+    pub above_y: [u64; 4],
+    pub int_4x4_y: u64,
+    pub left_uv: [u16; 4],
+    pub above_uv: [u16; 4],
+    pub int_4x4_uv: u16,
+    pub lfl_y: [u8; 64],
+    pub lfl_uv: [u8; 16],
 }
 
 impl Default for SbFilter {
     fn default() -> Self {
         Self {
-            level: [0; 64],
-            mask: [[[[0; 4]; 8]; 2]; 2],
+            unit: [SbUnit::default(); 64],
+            left_y: [0; 4],
+            above_y: [0; 4],
+            int_4x4_y: 0,
+            left_uv: [0; 4],
+            above_uv: [0; 4],
+            int_4x4_uv: 0,
+            lfl_y: [0; 64],
+            lfl_uv: [0; 16],
         }
     }
 }
@@ -225,7 +259,7 @@ impl FrameState {
         Self {
             frame,
             above_partition_ctx: vec![0; cols],
-            above_mode_ctx: vec![0; cols * 2],
+            above_mode_ctx: vec![NO_NEIGHBOUR_MODE; cols * 2],
             above_y_nnz: vec![0; cols * 2],
             above_uv_nnz: [vec![0; cols], vec![0; cols]],
             above_skip_ctx: vec![0; cols],
@@ -242,7 +276,6 @@ impl FrameState {
 }
 
 /// Per-tile left-context caches.
-#[derive(Default)]
 pub struct LeftCtx {
     pub y_nnz: [u8; 16],
     pub mode: [u8; 16],
@@ -256,6 +289,32 @@ pub struct LeftCtx {
     pub comp: [u8; 8],
     pub ref_: [u8; 8],
     pub filter: [u8; 8],
+}
+
+impl Default for LeftCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LeftCtx {
+    fn new() -> Self {
+        Self {
+            y_nnz: [0; 16],
+            // out-of-frame neighbours contribute 0 to the inter-mode counter
+            mode: [NO_NEIGHBOUR_MODE; 16],
+            mv: [[Mv::default(); 2]; 16],
+            uv_nnz: [[0; 16]; 2],
+            partition: [0; 8],
+            skip: [0; 8],
+            txfm: [0; 8],
+            segpred: [0; 8],
+            intra: [0; 8],
+            comp: [0; 8],
+            ref_: [0; 8],
+            filter: [0; 8],
+        }
+    }
 }
 
 /// Adaptation statistics gathered across a frame (reference `counts`).
@@ -306,7 +365,7 @@ impl Counts {
     #[inline]
     pub fn coef_bin(tx: usize, bt: usize, pt: usize, band: usize, ctx: usize) -> usize {
         debug_assert!(!(band == 0 && ctx >= 3));
-        (tx * 4 + bt * 2 + pt) * 33
+        (tx * 4 + pt * 2 + bt) * 33
             + if band == 0 {
                 ctx
             } else {
@@ -403,7 +462,7 @@ impl<'a> TileDecoder<'a> {
             tile_col_end,
             tile_row_start: 0,
             tile_row_end: usize::MAX,
-            left: LeftCtx::default(),
+            left: LeftCtx::new(),
             b: BlockInfo::default(),
             row: 0,
             col: 0,
@@ -432,6 +491,12 @@ impl<'a> TileDecoder<'a> {
         let sb_end = (self.tile_col_end / 8).min(self.state.frame.sb64_cols);
         let row_end = (self.tile_row_end / 8).min(self.state.frame.sb64_rows());
         for sb_row in (self.tile_row_start / 8)..row_end {
+            // The reference resets all left-context arrays at the top of
+            // every superblock row (decode_tiles' per-row memsets).
+            self.left = LeftCtx::default();
+            // The reference's left neighbour is NULL at each superblock-row
+            // start, i.e. it contributes 0 to the inter-mode counter.
+            self.left.mode = [NO_NEIGHBOUR_MODE; 16];
             for sb_col in (self.tile_col_start / 8)..sb_end {
                 self.decode_sb(bc, sb_row * 8, sb_col * 8, BL_64X64)?;
             }
@@ -464,6 +529,12 @@ impl<'a> TileDecoder<'a> {
         };
 
         if bl == BL_8X8 {
+            if std::env::var_os("TPT_VP9_TRACE").is_some() {
+                eprintln!(
+                    "PART r={} c={} ctx={} p={} {} {}",
+                    row, col, c, p[0], p[1], p[2]
+                );
+            }
             let bp = read_tree(bc, &PARTITION_TREE, &p);
             self.counts.partition[bl][c][bp] += 1;
             self.decode_block(bc, row, col, bl, bp)
@@ -519,7 +590,6 @@ impl<'a> TileDecoder<'a> {
         bl: usize,
         bp: usize,
     ) -> Result<(), KinetixError> {
-        let trace_start_bits = bc.bits_consumed();
         self.row = row;
         self.row7 = row & 7;
         self.col = col;
@@ -581,21 +651,23 @@ impl<'a> TileDecoder<'a> {
             self.inter_recon()?;
         }
 
-        self.record_filter_edges(w4, h4);
-
-        if std::env::var("TPT_VP9_TRACE").is_ok() {
+        if std::env::var_os("TPT_VP9_TRACE").is_some() {
             eprintln!(
-                "TRACE block r{row} c{col} bs={bs} skip={} intra={} modes={:?} uv={} tx={} seg={} bytes={}..{}",
-                self.b.skip,
-                self.b.intra,
-                self.b.mode,
-                self.b.uvmode,
+                "BLK2 r={} c={} bs={} intra={} skip={} mode={} ref={} mv={},{} tx={} filt={}",
+                self.row,
+                self.col,
+                12 - self.b.bs,
+                usize::from(!self.b.intra),
+                usize::from(self.b.skip),
+                self.b.mode[3],
+                self.b.ref_[0] + 1,
+                self.b.mv[3][0].y,
+                self.b.mv[3][0].x,
                 self.b.tx,
-                self.b.seg_id,
-                trace_start_bits / 8,
-                bc.bits_consumed() / 8
+                self.b.filter
             );
         }
+        self.record_filter_edges(w4, h4);
 
         // left/above MV cache update (inter frames only)
         if self.hdr.frame_type != FrameType::Key && !self.hdr.intra_only {

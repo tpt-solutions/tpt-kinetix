@@ -176,6 +176,7 @@ fn record_p_slice() {
         false,
         false,
         false,
+        false,
         &mut rec,
     );
     let log = rec.blocks.lock().unwrap();

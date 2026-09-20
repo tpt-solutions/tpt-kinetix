@@ -165,13 +165,6 @@ impl Vp9Decoder {
         let ch = &data[h.compressed_header_offset..ch_end];
         let mut bc = BoolDecoder::new(ch)?;
         parse_compressed_header(&mut bc, &mut h, &mut probs, &self.frame_ctxs[c])?;
-        if std::env::var("TPT_VP9_TRACE").is_ok() {
-            eprintln!(
-                "TRACE ch: consumed {}/{} bytes",
-                bc.bits_consumed() / 8,
-                h.compressed_header_size
-            );
-        }
 
         let seg = derive_segment_features(&h);
 
@@ -228,6 +221,7 @@ impl Vp9Decoder {
 
         // tile data
         let tile_data = &data[ch_end..];
+
         let tile_cols = h.tile.tile_cols();
         let tile_rows = h.tile.tile_rows();
         let mut offset = 0usize;
@@ -274,16 +268,7 @@ impl Vp9Decoder {
                 if tbc.read_bool(128) {
                     return Err(KinetixError::Parse("vp9: tile marker bit set".into()));
                 }
-                if std::env::var("TPT_VP9_TRACE").is_ok() {
-                    eprintln!(
-                        "TRACE tile ({tr},{tc}): {} bytes, ch_off={} ch_size={}, first bytes {:02x?}",
-                        chunk.len(),
-                        h.compressed_header_offset,
-                        h.compressed_header_size,
-                        &chunk[..chunk.len().min(6)]
-                    );
-                }
-                let tile_start_bits = tbc.bits_consumed();
+
                 let fctx = FrameDecodeCtx {
                     refs: &self.refs,
                     mvpair: mvpair_src.as_deref().map(|f| f.mvrefs.as_slice()),
@@ -309,13 +294,6 @@ impl Vp9Decoder {
                     tile.tile_row_start = row_start;
                     tile.tile_row_end = row_end;
                     tile.decode_tile(&mut tbc)?;
-                    if std::env::var("TPT_VP9_TRACE").is_ok() {
-                        eprintln!(
-                            "TRACE tile ({tr},{tc}) done: consumed {}/{} bytes",
-                            (tbc.bits_consumed() - tile_start_bits) / 8,
-                            chunk.len()
-                        );
-                    }
                 }
             }
         }
@@ -333,20 +311,15 @@ impl Vp9Decoder {
         }
 
         // loop filter
-        if h.loop_filter.level != 0 {
+        if std::env::var_os("TPT_VP9_TRACE").is_some() {
+            eprintln!("FRAMEMARK");
+        }
+        if h.loop_filter.level != 0 && std::env::var_os("TPT_VP9_NO_LF").is_none() {
             let luts = FilterLut::new(h.loop_filter.sharpness);
             for sb_row in 0..state.frame.sb64_rows() {
                 for sb_col in 0..state.frame.sb64_cols {
                     let sf = state.lflvl[sb_row * state.frame.sb64_cols + sb_col].clone();
-                    loopfilter_sb(
-                        &mut state.frame,
-                        &sf,
-                        &luts,
-                        sb_row,
-                        sb_col,
-                        h.subsampling_x,
-                        h.subsampling_y,
-                    );
+                    loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
                 }
             }
         }
@@ -605,9 +578,10 @@ fn adapt_probs(
     }
     for i in 0..7 {
         let c = counts.mv_mode[i];
-        adapt(&mut p.mv_mode[i][0], c[2], c[1] + c[0] + c[3], 20, 128);
-        adapt(&mut p.mv_mode[i][1], c[0], c[1] + c[3], 20, 128);
-        adapt(&mut p.mv_mode[i][2], c[1], c[3], 20, 128);
+        // tree node counts for NEARESTMV | NEARMV | ZEROMV | NEWMV
+        adapt(&mut p.mv_mode[i][0], c[0], c[1] + c[2] + c[3], 20, 128);
+        adapt(&mut p.mv_mode[i][1], c[1], c[2] + c[3], 20, 128);
+        adapt(&mut p.mv_mode[i][2], c[2], c[3], 20, 128);
     }
     {
         let c = counts.mv_joint;

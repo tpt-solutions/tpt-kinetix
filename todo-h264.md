@@ -2,6 +2,88 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32bz (2026-09-20) — MULTI-SLICE CAVLC + §8.3 constrained intra LANDED; BA1_FT_C / CI1_FT_B / NL2_Sony_H now bit-exact
+
+Scope: the two tracked items "BA2/CABA2 small P-frame recon error" and "PAFF
+real streams (CVFI1, CVPA1, FM1_*)". First finding: **the BA2/CABA2 gap was
+stale** — both clips went 300/300 byte-exact in #32aj's own commit
+`e22fe10` (qpel (3,3) formula + P ref_idx/mvd ordering); the prose gap list
+was never updated. Second finding: every failing "field CAVLC" clip is
+actually **multi-slice** (CI1_FT_B 549 slices/291 pics; BA1_FT_C 2-10
+slices/pic with per-picture boundaries; CVFI1 ~7 slices per FIELD picture
+despite its readme's "Slices per Picture: 1"; CVPA1/CAPA1 mix frame
+pictures and field pairs), and the multi-slice `PictureAccumulator` only
+existed for CABAC.
+
+**Landed (working tree, this session):**
+
+1. **`parse_i_slice`/`parse_p_slice` → range parsers** (`cavlc.rs`):
+   `(first_mb, slice_id, shared grids…) -> R<usize>` signatures mirroring
+   `parse_i_slice_cabac`; `NeighbourCtx::new_with_slices` everywhere (so
+   §6.4.9 slice-boundary availability covers MPM **and** nC — both route
+   through `left_top*` filtering); `more_rbsp_data` early exit after each
+   **coded** MB only. GOTCHA that cost a regression hunt: the SKIP arm must
+   NOT early-exit — skip-run members consume no bits, so end-of-data while
+   a run is active is the NORMAL slice end (symptom when wrong: rare
+   single black-MB frames, e.g. NL2 frame 59 MB(10,8), finalized by the
+   next picture's §7.4.1.2.4 safety net). Single-slice adapters
+   `parse_i_slice_single` / `parse_p_slice` (old signature +1
+   `constrained_intra` arg) preserve fresh-buffer behaviour.
+2. **Accumulator drivers**: progressive CAVLC I (replacing the "CAVLC
+   multi-slice out of scope" scaffold trigger in `try_decode_real_slice`)
+   and progressive CAVLC P (`try_decode_real_p_slice_cavlc`, mirroring the
+   CABAC P driver: per-slice RefPicList0 → `parse_p_slice_range` →
+   per-range `predict_slice_mvs_ex` → `reconstruct_inter_frame_range`).
+   CAVLC B still falls to `decode_slice` (no multi-slice CAVLC-B fixture).
+3. **I-field PAFF accumulator** (`interlaced.rs`): CAVLC field pictures
+   decode into a `PictureAccumulator` sized to the FIELD grid; new
+   `finalize_field_picture` (field recon + per-slice-params field deblock +
+   DPB store + `accumulate_field`, `Option<VideoFrame>` semantics).
+   `flush()` now dispatches pending accumulators by `field_pic_flag`
+   (flushing a FIELD accumulator through progressive `finalize_picture`
+   cropped 720x240 → 720x480 and PANICKED). CVFI1's I-fields are now real
+   (17 frames emitted end-to-end).
+4. **§8.3.1.1 `constrained_intra_pred_flag` — was parsed but never used.**
+   Pinned via CI1_FT_B frame 2 MB(13,1) blk z8: encoder pred = 2 (DC
+   forced — inter left neighbour UNAVAILABLE) vs our min(ForcedDc 2,
+   top 0) = 0. Implementation: `MbPredCtx.is_inter` (set at CAVLC P/B
+   inter/skip sites); `mpm_pred_mode`/`mpm_pred_mode_8x8`/`side_cross` map
+   `(constrained && is_inter)` → Unavailable (ForcedDc would let the other
+   side win the min — different semantics!); `SliceAvail.
+   constrained_intra_mbs` makes inter neighbours contribute no prediction
+   samples; threaded through `parse_p_slice_range`, both P drivers,
+   `reconstruct_inter_frame_range`, `reconstruct_intra_mbs_remaining`
+   (finalize looks the flag up from `pps_store`). CABAC parsers have the
+   plumbing but pass `false` (no constrained CABAC fixture yet).
+
+**Results (ITU suite, 64 clips): 29 hard-checked BitExact, 0 failures.**
+- `BA1_FT_C` **promoted KnownGap → BitExact** (299/299 byte-exact).
+- `CI1_FT_B` **DECODE-EXACT**: every ref frame byte-exact somewhere;
+  in-order diverges only from frame 242 (emission order/count tail).
+- `NL2_Sony_H` 300/300 byte-exact (was failing mid-session via the
+  skip-arm bug). `FM1_FT_E` first_bad 0→119, 119/300 exact somewhere.
+- No previously-exact clip regressed (the 8-clip regression seen
+  mid-session was the skip-arm early-exit bug, fixed).
+
+**Remaining in this track (next session):**
+- [ ] CVFI1 P-fields: wire `decode_interlaced_p_field` onto the accumulator
+      (same pattern as 3) — ~7 slices/field; currently only slice 0 decodes
+      and pair accounting emits 20/17 frames.
+- [ ] Sharp_MP_PAFF_1r2: **POC type 1 is unimplemented** — `sps.rs` reads
+      `offset_for_non_ref_pic`/`offset_for_top_to_bottom_field` into
+      underscore-locals and drops them (and never reads
+      `num_ref_frames_in_pic_order_cnt_cycle` + offset list), and
+      `derive_pic_order_cnt` has no type-1 branch → `store_reference_picture`
+      early-returns → DPB stays empty → every P-field emits a grey
+      `emit_skip_field` (dpb=0). Implement §8.2.1 type 1 end-to-end.
+- [ ] CVPA1/CAPA1_TOSHIBA_B: mixed frame/field pictures (138 VCL = 42
+      frame pics + 48 field pairs); emission 124/90 with duplicates —
+      frame pictures must cooperate with `field_accum`/reorder accounting.
+- [ ] FM1_BT_B (971/400 emitted) and CI1_FT_B's frame-242+ emission order.
+- [ ] `itu_conformance` MANIFEST: CVFI1 comment (readme's "Slices per
+      Picture: 1" is wrong — ~7 slices/field), CI1 promotion path once the
+      order tail is fixed.
+
 ## ITU informational landscape after the scaling-list fix (#32bf)
 
 The scaling-matrix fix moved several clips from "fully desynced" to
@@ -4329,17 +4411,12 @@ byte-exact all 30 frames. NOTE: I_PCM + deblocking-on is still untested (no such
 clip in the set yet) — §8.7 filters I_PCM MB *boundary* edges but not internal.
 
 REMAINING GAPS (manifest `KnownGap`, tracked not asserted):
-- [ ] **1. Small P-frame reconstruction error — HIGHEST VALUE.** `BA2_Sony_F`
-      (CAVLC I/P) **and** `CABA2_Sony_E` (CABAC I/P) show the *identical* profile:
-      frame 0 byte-exact, **frame 1 max_diff = 3**, then cascades to ~116 by
-      frame 2 as the error compounds through the prediction loop. CAVLC ≡ CABAC
-      ⇒ the bug is in **shared P reconstruction** (MC sub-pel rounding / residual
-      / deblock), NOT entropy. `BA3_SVA_C` frame 1 max_diff ~98 (worse, maybe
-      compounded). This is the same *class* as the 2026-08-08 P-frame bug
-      (deblock bS). Content is "Foreman"-type — real motion the synthetic
-      `testsrc`/`p_frame_conformance` clips don't exercise. Localize frame 1's
-      diff-3 by plane/region (extend `dbg_*` or the ITU harness's
-      `ITU_PER_FRAME` hook).
+- [x] **1. Small P-frame reconstruction error — CLOSED (stale entry).**
+      `BA2_Sony_F`/`CABA2_Sony_E` went byte-exact in this very session's
+      commit `e22fe10` (bugs 2+3: qpel (3,3) formula + P ref_idx/mvd
+      bitstream order) — 300/300 frames max_diff=0, re-verified 2026-09-20
+      (#32bz). The prose below is kept for the record: the frame-1
+      max_diff=3 profile was exactly the qpel (3,3) rounding error.
 - [ ] **2. `CAMA1_Sony_C` — real MBAFF CABAC-I 720×480 → grey-scaffold fallback**
       (max_diff 128). Synthetic `g6_cabac_i` is bit-exact, so a stream-shape
       trigger. Instrument the fallback branch for *why* it bails.

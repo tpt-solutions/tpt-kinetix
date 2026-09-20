@@ -216,20 +216,44 @@ fn check_clip_tagged(
     }
     let _ = name;
     let (py, pu, pv) = psnr(&ours, &reference, ivf.width as usize, ivf.height as usize);
-    eprintln!("[{name}] PSNR Y={py:.2} U={pu:.2} V={pv:.2} dB");
+    let cw = ivf.width.div_ceil(2) as usize;
+    let ch = ivf.height.div_ceil(2) as usize;
+    let u_off = ivf.width as usize * ivf.height as usize;
+    let u_bad = ours[u_off..u_off + cw * ch]
+        .iter()
+        .zip(&reference[u_off..u_off + cw * ch])
+        .filter(|(a, b)| a != b)
+        .count();
+    let mut u_diff_pos = Vec::new();
+    for (i, (a, b)) in ours[u_off..u_off + cw * ch]
+        .iter()
+        .zip(&reference[u_off..u_off + cw * ch])
+        .enumerate()
+    {
+        if a != b {
+            u_diff_pos.push((i, *a, *b));
+        }
+    }
+    eprintln!(
+        "[{name}] PSNR Y={py:.2} U={pu:.2} V={pv:.2} dB (u_bad={u_bad}, first={:?})",
+        &u_diff_pos[..u_diff_pos.len().min(6)]
+    );
 }
 
 #[test]
 fn conformance_vp9_solid_lossless() {
-    check_clip_tagged(
-        "solid_black_lossless",
-        "solidll",
-        64,
-        64,
-        "color=black",
-        1,
-        &["-lossless", "1", "-cpu-used", "4"],
-    );
+    for sz in [16usize, 32, 48, 64, 96] {
+        let sz = sz as u32;
+        check_clip_tagged(
+            &format!("solid_black_lossless_{sz}"),
+            &format!("solidll{sz}"),
+            sz,
+            sz,
+            "color=black",
+            1,
+            &["-lossless", "1", "-cpu-used", "4"],
+        );
+    }
 }
 
 /// 16x16 gray-128 lossless: DC_128 prediction equals the source, so every
@@ -245,6 +269,36 @@ fn conformance_vp9_micro_skip() {
         "color=0x828282",
         1,
         &["-lossless", "1", "-cpu-used", "4"],
+    );
+}
+
+/// 16x16 lossy (default quant) with zero chroma residual: isolates the
+/// chroma prediction + EOB-empty path at lossy quantization.
+#[test]
+fn conformance_vp9_micro_lossy_chroma() {
+    check_clip_tagged(
+        "micro128_lossy",
+        "microly",
+        16,
+        16,
+        "color=0x808080",
+        1,
+        &["-cpu-used", "4"],
+    );
+}
+
+/// 64x64 lossy solid: exercises 32x32/16x16 block partitioning and the
+/// loop filter on a flat scene.
+#[test]
+fn conformance_vp9_solid64_lossy() {
+    check_clip_tagged(
+        "solid64_lossy",
+        "s64ly",
+        64,
+        64,
+        "color=0x808080",
+        1,
+        &["-cpu-used", "4"],
     );
 }
 

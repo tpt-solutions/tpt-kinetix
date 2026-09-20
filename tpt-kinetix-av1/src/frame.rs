@@ -689,7 +689,13 @@ impl FrameHeader {
                 if frame_refs_short_signaling {
                     last_frame_idx = read_f8(&mut br, 3)?;
                     gold_frame_idx = read_f8(&mut br, 3)?;
-                    ref_frame_idx = set_frame_refs(last_frame_idx, gold_frame_idx);
+                    ref_frame_idx = set_frame_refs(
+                        last_frame_idx,
+                        gold_frame_idx,
+                        order_hint as u8,
+                        order_hint_bits,
+                        ref_order_hint_dpb,
+                    );
                 }
             }
             for idx in ref_frame_idx.iter_mut() {
@@ -1110,18 +1116,104 @@ fn byte_align(br: &mut BitReader<'_>) -> Result<(), KinetixError> {
     Ok(())
 }
 
-/// `set_frame_refs()` (§6.8.2): derive the seven reference-frame slots from
+/// `set_frame_refs()` (§7.4.12): derive the seven reference-frame slots from
 /// `last_frame_idx` / `gold_frame_idx` when `frame_refs_short_signaling` is on.
-fn set_frame_refs(last: u8, gold: u8) -> [u8; 7] {
-    [
-        last.wrapping_add(1),
-        last,
-        last.wrapping_sub(1),
-        last.wrapping_sub(2),
-        gold.wrapping_add(1),
-        gold,
-        gold.wrapping_sub(1),
-    ]
+///
+/// Ported from dav1d obu.c's `frame_refs_short_signaling` block: LAST and
+/// GOLDEN take `last_frame_idx` / `gold_frame_idx` directly, ALTREF takes the
+/// slot with the latest signed poc distance from the current frame, BWDREF /
+/// ALTREF2 take the earliest remaining slots (unsigned compare), and the rest
+/// are filled with the latest remaining slots, falling back to the earliest
+/// slot overall. Slots claimed with `INT_MIN` are out of the searches.
+fn set_frame_refs(
+    last: u8,
+    gold: u8,
+    cur_order_hint: u8,
+    order_hint_bits: u8,
+    ref_order_hints: &[u8; 8],
+) -> [u8; 7] {
+    const INT_MIN: i32 = i32::MIN;
+    let mask: i32 = (1i32 << order_hint_bits) - 1;
+    // dav1d `get_poc_diff(bits, slot_hint, cur)`: signed distance from the
+    // current frame's order hint to the slot's.
+    let diff = |slot_hint: u8| -> i32 {
+        let d = (slot_hint as i32 - cur_order_hint as i32) & mask;
+        if d >= (1 << (order_hint_bits - 1)) {
+            d - (1 << order_hint_bits)
+        } else {
+            d
+        }
+    };
+
+    let mut frame_offset = [0i32; 8];
+    let mut refidx = [-1i32; 7];
+    refidx[0] = last as i32;
+    refidx[3] = gold as i32;
+    let mut earliest_ref = 0i32;
+    let mut earliest_offset = i32::MAX;
+    for (i, &hint) in ref_order_hints.iter().enumerate() {
+        let d = diff(hint);
+        frame_offset[i] = d;
+        if d < earliest_offset {
+            earliest_offset = d;
+            earliest_ref = i as i32;
+        }
+    }
+    frame_offset[last as usize] = INT_MIN;
+    frame_offset[gold as usize] = INT_MIN;
+
+    // ALTREF: the latest remaining offset.
+    let mut r = -1i32;
+    let mut latest = 0i32;
+    for (i, &off) in frame_offset.iter().enumerate() {
+        if off >= latest {
+            latest = off;
+            r = i as i32;
+        }
+    }
+    if r >= 0 {
+        frame_offset[r as usize] = INT_MIN;
+    }
+    refidx[6] = r;
+
+    // BWDREF / ALTREF2: the earliest remaining offsets (unsigned compare —
+    // negative distances sort after positive ones, as in dav1d).
+    for slot in refidx.iter_mut().take(6).skip(4) {
+        let mut rr = -1i32;
+        let mut earliest: u32 = 255;
+        for (j, &h) in frame_offset.iter().enumerate() {
+            if (h as u32) < earliest {
+                earliest = h as u32;
+                rr = j as i32;
+            }
+        }
+        if rr >= 0 {
+            frame_offset[rr as usize] = INT_MIN;
+        }
+        *slot = rr;
+    }
+
+    // LAST2 / LAST3 (and any unfilled slot): the latest remaining offsets,
+    // falling back to the earliest slot overall.
+    for slot in refidx.iter_mut().take(6).skip(1) {
+        if *slot < 0 {
+            let mut rr = -1i32;
+            let mut latest: u32 = !255u32;
+            for (j, &h) in frame_offset.iter().enumerate() {
+                if (h as u32) >= latest {
+                    latest = h as u32;
+                    rr = j as i32;
+                }
+            }
+            if rr >= 0 {
+                frame_offset[rr as usize] = INT_MIN;
+            }
+            *slot = if rr >= 0 { rr } else { earliest_ref };
+        }
+    }
+    // -1 (no candidate — possible on desynced/edge streams) clamps to slot 0
+    // rather than wrapping to 255 and panicking downstream index lookups.
+    refidx.map(|v| v.max(0) as u8)
 }
 
 /// `read_interpolation_filter()` (§6.8.2): returns the `interpolation_filter`

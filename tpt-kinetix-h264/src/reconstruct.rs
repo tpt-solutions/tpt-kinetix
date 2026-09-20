@@ -388,7 +388,7 @@ fn combine_weighted(
 /// Copy one I_PCM macroblock's raw samples into the frame planes (4:2:0, 8-bit):
 /// 256 luma bytes in raster order, then 64 Cb, then 64 Cr (§7.3.5 / §8.3.5).
 #[allow(clippy::too_many_arguments)]
-fn place_ipcm_mb(
+pub(crate) fn place_ipcm_mb(
     samples: &[u8],
     luma: &mut [u8],
     cb: &mut [u8],
@@ -459,12 +459,14 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
                 mb_cols,
                 cur_slice_id: grid[idx],
                 mb_size: 16,
+                constrained_intra_mbs: None,
             });
             let chroma_avail = slice_id_grid.map(|grid| SliceAvail {
                 slice_id_grid: grid,
                 mb_cols,
                 cur_slice_id: grid[idx],
                 mb_size: 8,
+                constrained_intra_mbs: None,
             });
             if mb.mb_type == MbType::IPcm {
                 // §8.3.5: I_PCM "reconstruction" is a verbatim copy of the raw
@@ -691,7 +693,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
 /// added) — mirroring `slice_data::ctx::NeighbourCtx::new` vs
 /// `new_with_slices`.
 #[derive(Clone, Copy)]
-struct SliceAvail<'a> {
+pub(crate) struct SliceAvail<'a> {
     /// One entry per macroblock (`mb_cols * mb_rows`, same indexing as the
     /// `macroblocks` slice), the slice id that decoded that macroblock.
     slice_id_grid: &'a [u16],
@@ -702,6 +704,12 @@ struct SliceAvail<'a> {
     /// 8 for chroma (both planes share the same `mb_cols`/`slice_id_grid`
     /// macroblock grid).
     mb_size: u32,
+    /// When the PPS sets `constrained_intra_pred_flag` (§8.3.2.2): the
+    /// macroblock grid, used to treat an already-decoded INTER neighbour as
+    /// unavailable for intra prediction samples (its reconstructed pixels
+    /// may not cross into an intra macroblock's prediction). `None` when the
+    /// flag is unset (or every neighbour is intra, as in I slices).
+    constrained_intra_mbs: Option<&'a [Macroblock]>,
 }
 
 impl SliceAvail<'_> {
@@ -714,12 +722,35 @@ impl SliceAvail<'_> {
         let mb_y = y as u32 / self.mb_size;
         let idx = (mb_y * self.mb_cols + mb_x) as usize;
         match self.slice_id_grid.get(idx) {
-            Some(&sid) => sid == self.cur_slice_id,
+            Some(&sid) => {
+                if sid != self.cur_slice_id {
+                    return false;
+                }
+                if let Some(mbs) = self.constrained_intra_mbs {
+                    // constrained_intra_pred_flag: a decoded INTER neighbour
+                    // contributes no prediction samples (§8.3.2.2). Undecoded
+                    // positions carry the u16::MAX sentinel and already failed
+                    // the slice check above.
+                    if !is_intra_mb(&mbs[idx]) {
+                        return false;
+                    }
+                }
+                true
+            }
             // Out of the grid entirely (shouldn't happen for an in-picture
             // position) -- fail open to the pre-existing behaviour.
             None => true,
         }
     }
+}
+
+/// Whether this macroblock is intra-coded — the availability test
+/// `constrained_intra_pred_flag` applies to neighbours (§8.3.2.2).
+fn is_intra_mb(mb: &Macroblock) -> bool {
+    matches!(
+        mb.mb_type,
+        MbType::Intra4x4 | MbType::Intra16x16 { .. } | MbType::IPcm
+    )
 }
 
 /// Sample a luma neighbour at absolute (x, y), or `None` if outside the picture,
@@ -752,7 +783,7 @@ fn get_luma(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn reconstruct_luma<T: DecodeTracer>(
+pub(crate) fn reconstruct_luma<T: DecodeTracer>(
     mb: &Macroblock,
     plane: &mut [u8],
     stride: usize,
@@ -1151,7 +1182,7 @@ fn reconstruct_luma_8x8<T: DecodeTracer>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reconstruct_chroma<T: DecodeTracer>(
+pub(crate) fn reconstruct_chroma<T: DecodeTracer>(
     mb: &Macroblock,
     cb: &mut [u8],
     cr: &mut [u8],
@@ -1636,6 +1667,7 @@ pub(crate) fn reconstruct_intra_mbs_remaining<T: DecodeTracer>(
     tracer: &mut T,
     slice_id_grid: &[u16],
     already_done: &[bool],
+    constrained_intra_pred: bool,
 ) {
     for (idx, mb) in macroblocks.iter().enumerate() {
         if already_done[idx] {
@@ -1657,17 +1689,20 @@ pub(crate) fn reconstruct_intra_mbs_remaining<T: DecodeTracer>(
             );
             continue;
         }
+        let constrained_mbs = constrained_intra_pred.then_some(macroblocks);
         let luma_avail = Some(SliceAvail {
             slice_id_grid,
             mb_cols,
             cur_slice_id,
             mb_size: 16,
+            constrained_intra_mbs: constrained_mbs,
         });
         let chroma_avail = Some(SliceAvail {
             slice_id_grid,
             mb_cols,
             cur_slice_id,
             mb_size: 8,
+            constrained_intra_mbs: constrained_mbs,
         });
         reconstruct_luma(
             mb,
@@ -1739,6 +1774,7 @@ pub(crate) fn reconstruct_inter_frame_range<T: DecodeTracer>(
     weighted: &WeightedPred,
     tracer: &mut T,
     slice_id_grid: &[u16],
+    constrained_intra_pred: bool,
 ) {
     for idx in first_mb..end_mb {
         let mb_x = (idx as u32) % mb_cols;
@@ -1782,17 +1818,20 @@ pub(crate) fn reconstruct_inter_frame_range<T: DecodeTracer>(
             // `reconstruct_inter_frame_ex`'s equivalent branch, which always
             // passes `None` since it has no multi-slice caller).
             let cur_slice_id = slice_id_grid[idx];
+            let constrained_mbs = constrained_intra_pred.then_some(macroblocks);
             let luma_avail = Some(SliceAvail {
                 slice_id_grid,
                 mb_cols,
                 cur_slice_id,
                 mb_size: 16,
+                constrained_intra_mbs: constrained_mbs,
             });
             let chroma_avail = Some(SliceAvail {
                 slice_id_grid,
                 mb_cols,
                 cur_slice_id,
                 mb_size: 8,
+                constrained_intra_mbs: constrained_mbs,
             });
             reconstruct_luma(
                 mb,
@@ -1921,12 +1960,14 @@ pub(crate) fn reconstruct_bi_frame_range<T: DecodeTracer>(
                 mb_cols,
                 cur_slice_id,
                 mb_size: 16,
+                constrained_intra_mbs: None,
             });
             let chroma_avail = Some(SliceAvail {
                 slice_id_grid,
                 mb_cols,
                 cur_slice_id,
                 mb_size: 8,
+                constrained_intra_mbs: None,
             });
             reconstruct_luma(
                 mb,
@@ -2895,6 +2936,175 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
     }
 }
 
+/// Multi-slice-capable field-P range reconstruction: motion-compensates (or
+/// intra-reconstructs) the macroblock range `[first_mb, end_mb)` of a PAFF
+/// field picture into a CALLER-OWNED half-height `ReconstructedFrame`, using
+/// THIS slice's own `ref_fields` — the exact analogue of
+/// [`reconstruct_inter_frame_range`] for fields, used by the field
+/// accumulator driver in `decoder::interlaced` so each slice of a multi-slice
+/// field picture writes its own range as it is decoded (inter reconstruction
+/// only ever reads DPB reference fields, never sibling macroblocks).
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
+    recon: &mut ReconstructedFrame,
+    macroblocks: &[Macroblock],
+    mv_store: &crate::mv::MvStore,
+    ref_fields: &[FieldRef],
+    current_bottom: bool,
+    mb_cols: u32,
+    first_mb: usize,
+    end_mb: usize,
+    chroma_qp_index_offset: i32,
+    scaling: &ScalingLists,
+    weighted: &WeightedPred,
+    tracer: &mut T,
+) {
+    // Pre-extract the contiguous half-height field planes for every reference
+    // field once (same as `reconstruct_inter_field_frame`).
+    let mut ref_luma: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let mut ref_cb: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let mut ref_cr: Vec<&[u8]> = Vec::with_capacity(ref_fields.len());
+    let extracts: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+        ref_fields.iter().map(|f| f.planes()).collect();
+    for (l, c1, c2) in &extracts {
+        ref_luma.push(l);
+        ref_cb.push(c1);
+        ref_cr.push(c2);
+    }
+    let chroma_mv_y_off: Vec<i32> = ref_fields
+        .iter()
+        .map(|f| 2 * (current_bottom as i32 - f.bottom as i32))
+        .collect();
+
+    // Triage (#32bz): per-range histogram of committed cell ref_idx values.
+    let tally = std::env::var_os("KINETIX_REF_TALLY").is_some();
+    let mut ri_hist: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let (mut nskip, mut ncoeff, mut ninter) = (0usize, 0usize, 0usize);
+    let (mut mv_sum, mut mv_max) = (0u64, i32::MIN);
+    if tally {
+        for mb_idx in first_mb..end_mb {
+            let mb = &macroblocks[mb_idx];
+            if mb.skip {
+                nskip += 1;
+            }
+            if mb.motion.is_some() {
+                ninter += 1;
+            }
+            ncoeff += mb.luma_coeffs.iter().filter(|c| c.iter().any(|&v| v != 0)).count();
+            if let Some(cells) = mv_store.cells_of(mb_idx) {
+                for c in cells {
+                    if c.ref_idx >= 0 {
+                        *ri_hist.entry(c.ref_idx as usize).or_insert(0) += 1;
+                    }
+                }
+                mv_sum += cells.iter().map(|c| c.mv[0].abs() as u64 + c.mv[1].abs() as u64).sum::<u64>();
+                mv_max = mv_max.max(cells.iter().map(|c| c.mv[0].abs().max(c.mv[1].abs())).max().unwrap_or(0));
+            }
+        }
+        eprintln!(
+            "REF-TALLY mb[{first_mb}..{end_mb}) bottom={current_bottom}: {ri_hist:?} skip={nskip} inter={ninter} coded4x4={ncoeff} mv_sum={mv_sum} mv_max={mv_max}"
+        );
+    }
+
+    // Triage (#32bz): full-field MB-type map, printed when this call covers
+    // the last slice range of the field (end_mb == field MB count).
+    if std::env::var_os("KINETIX_MB_MAP").is_some() && end_mb == macroblocks.len() {
+        eprintln!("OURMAP bottom={current_bottom}");
+        let rows = macroblocks.len() / mb_cols as usize;
+        for my in 0..rows {
+            let mut line = String::new();
+            for mx in 0..mb_cols as usize {
+                let mb = &macroblocks[my * mb_cols as usize + mx];
+                let c = if mb.skip {
+                    'S'
+                } else if mb.motion.is_some() {
+                    match mb.motion.as_ref().unwrap().sub_mb_type {
+                        Some(_) => '8',
+                        None => {
+                            let np = mb.motion.as_ref().unwrap().ref_idx_l0.len();
+                            match np {
+                                1 => '1',
+                                2 => '2',
+                                _ => '?',
+                            }
+                        }
+                    }
+                } else {
+                    'I'
+                };
+                line.push(c);
+            }
+            eprintln!("{line}");
+        }
+    }
+
+    for idx in first_mb..end_mb {
+        let mb_x = (idx as u32) % mb_cols;
+        let mb_y = (idx as u32) / mb_cols;
+        let mb = &macroblocks[idx];
+        if mb.motion.is_some() || mb.skip {
+            reconstruct_field_inter_luma(
+                mb,
+                mv_store,
+                &ref_luma,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                scaling,
+                weighted,
+                tracer,
+            );
+            reconstruct_field_inter_chroma(
+                mb,
+                mv_store,
+                &ref_cb,
+                &ref_cr,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_cols,
+                mb_x,
+                mb_y,
+                &chroma_mv_y_off,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+            );
+        } else {
+            // Intra macroblock inside a field P-slice: field-scan intra
+            // reconstruction addressing the half-height plane (§8.5.6).
+            reconstruct_luma(
+                mb,
+                &mut recon.luma,
+                recon.luma_stride,
+                mb_x,
+                mb_y,
+                true,
+                scaling,
+                tracer,
+                None,
+            );
+            reconstruct_chroma(
+                mb,
+                &mut recon.chroma_cb,
+                &mut recon.chroma_cr,
+                recon.chroma_stride,
+                mb_x,
+                mb_y,
+                true,
+                chroma_qp_index_offset,
+                scaling,
+                weighted,
+                tracer,
+                None,
+            );
+        }
+    }
+}
+
 /// Field-coordinate **B-field** reconstruction: bi-predictive motion compensation
 /// from two field reference lists (§8.4.2.2, §8.2.4.2.5).
 ///
@@ -3344,6 +3554,14 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
     let grid = mv_store
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+    if std::env::var_os("KINETIX_MB_GRID").is_some() && mb_y < 2 && mb_x < 2 {
+        eprintln!(
+            "GRID-PAFF ({mb_x},{mb_y}) idx={idx}: {:?}",
+            grid.iter()
+                .map(|c| (c.mv, c.ref_idx))
+                .collect::<Vec<_>>()
+        );
+    }
 
     for (block, &cell) in grid.iter().enumerate() {
         let bx = (block % 4) * 4;
@@ -3351,6 +3569,13 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         let x0 = (base_x + bx) as i32;
         let y0 = (base_y + by) as i32;
         let ref_idx = cell.ref_idx.max(0) as usize;
+        // Triage (#32bz): force every inter cell onto RefPicList0[0] to test
+        // whether multi-reference divergence comes from ref_idx > 0 entries.
+        let ref_idx = if std::env::var_os("KINETIX_CLAMP_REF0").is_some() {
+            0
+        } else {
+            ref_idx
+        };
 
         let mut pred = [0u8; 16];
         if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
@@ -3472,6 +3697,12 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
             // top-left luma cell; its four cells sit at `qbase + {0,1,4,5}`.
             let qbase = (block / 2) * 8 + (block % 2) * 2;
             let ref_idx = grid[qbase].ref_idx.max(0) as usize;
+            // Same triage clamp as the luma path (KINETIX_CLAMP_REF0).
+            let ref_idx = if std::env::var_os("KINETIX_CLAMP_REF0").is_some() {
+                0
+            } else {
+                ref_idx
+            };
             let cmv_y_off = chroma_mv_y_off.get(ref_idx).copied().unwrap_or(0);
 
             let mut pred = [0u8; 16];

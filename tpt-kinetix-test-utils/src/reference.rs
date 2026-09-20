@@ -180,6 +180,52 @@ fn run_piped(bin: &'static str, args: &[&str], input: &[u8]) -> Result<Vec<u8>, 
     Ok(output.stdout)
 }
 
+/// Decode `bitstream` (IVF or raw OBU) with the standalone `dav1d` binary,
+/// returning raw YUV420p bytes on stdout.
+///
+/// The bitstream is handed over through a temp file rather than stdin: some
+/// dav1d builds (notably the mingw/Windows toolchain this repo's reference
+/// clone uses) cannot open `-` as an input file, while file input and stdout
+/// output work everywhere.
+fn run_dav1d_file(bitstream: &[u8]) -> Result<Vec<u8>, RefDecodeError> {
+    if !binary_available("dav1d") {
+        return Err(RefDecodeError::BinaryUnavailable("dav1d"));
+    }
+    let mut path = std::env::temp_dir();
+    path.push(format!("kinetix-dav1d-in-{}.obu", std::process::id()));
+    std::fs::write(&path, bitstream)?;
+    let child = Command::new("dav1d")
+        .args([
+            "-q",
+            "-i",
+            path.to_str().expect("temp path is utf-8"),
+            "-o",
+            "-",
+            "--muxer",
+            "yuv",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let result = match child {
+        Ok(child) => {
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                Err(RefDecodeError::DecoderFailed {
+                    binary: "dav1d",
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            } else {
+                Ok(output.stdout)
+            }
+        }
+        Err(e) => Err(e.into()),
+    };
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
 /// Decode an H.264 Annex B bitstream with `ffmpeg`, returning YUV420p frames.
 ///
 /// `width`/`height` are required to slice the raw planar output into frames.
@@ -221,11 +267,7 @@ pub fn decode_av1_with_dav1d(
 ) -> Result<Vec<VideoFrame>, RefDecodeError> {
     // Prefer the standalone `dav1d` binary.
     if binary_available("dav1d") {
-        let raw = run_piped(
-            "dav1d",
-            &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"],
-            ivf_or_obu,
-        )?;
+        let raw = run_dav1d_file(ivf_or_obu)?;
         return split_raw_yuv420p(&raw, width, height);
     }
     // Fall back to `ffmpeg`'s built-in libdav1d (auto-detects IVF vs OBU input).
@@ -268,11 +310,7 @@ pub fn decode_av1_obu_with_dav1d(
     height: u32,
 ) -> Result<Vec<VideoFrame>, RefDecodeError> {
     if binary_available("dav1d") {
-        let raw = run_piped(
-            "dav1d",
-            &["-q", "-i", "-", "-o", "-", "--muxer", "yuv"],
-            obu,
-        )?;
+        let raw = run_dav1d_file(obu)?;
         return split_raw_yuv420p(&raw, width, height);
     }
     if ffmpeg_libdav1d_available() {

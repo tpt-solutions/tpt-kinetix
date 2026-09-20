@@ -134,6 +134,11 @@ pub struct FrameMeta {
     pub w4: usize,
     /// Number of 4×4-luma cells vertically. See `w4`.
     pub h4: usize,
+    /// Chroma 4×4-cell grid dimensions (`(w4 + 1) / 2`, `(h4 + 1) / 2`) —
+    /// the resolution of `lf_level_u4`/`lf_level_v4`.
+    pub cw4: usize,
+    /// Number of chroma 4×4 cells vertically. See `cw4`.
+    pub ch4: usize,
     /// Same role as `luma_tx_w`, at 4×4-luma-cell resolution.
     pub luma_tx_w4: Vec<u8>,
     /// Same role as `luma_tx_h`, at 4×4-luma-cell resolution.
@@ -157,6 +162,18 @@ pub struct FrameMeta {
     /// has no separate `u`-vs-`v` block-span notion).
     pub chroma_edge_left: Vec<bool>,
     pub chroma_edge_top: Vec<bool>,
+    /// Per-chroma-4x4-cell final deblock level for U and V (dav1d's
+    /// `f->lf.level` chroma slots). A chroma 4x4 cell covers FOUR luma 4x4
+    /// cells, which sub-8x8 partitions can split between blocks with
+    /// *different* levels (e.g. an intra 4x8 leaf next to an inter 4x8
+    /// leaf); dav1d resolves such cells with last-decoded-block-wins —
+    /// each coded block writes its own chroma level over its chroma span
+    /// at decode time, and the deblock pass reads the surviving value.
+    /// Written by `record_lf_level_chroma`; `deblock_plane`'s chroma passes
+    /// read it instead of re-deriving the level from the top-left luma
+    /// cell's ref/mode/delta state.
+    pub lf_level_u4: Vec<u8>,
+    pub lf_level_v4: Vec<u8>,
     /// Per-coded-block `DeltaLF` state (§7.12.1's `DeltaLFs[row][col]`,
     /// AV1 spec array of 4: `[y_vertical, y_horizontal, u, v]`), at 8×8-luma
     /// grid resolution — used by `compute_level` for the chroma deblock
@@ -234,9 +251,21 @@ impl FrameMeta {
             luma_edge_top: vec![false; len],
             chroma_edge_left: vec![false; len],
             chroma_edge_top: vec![false; len],
+            lf_level_u4: {
+                let cw = (w4 + 1) / 2;
+                let ch = (h4 + 1) / 2;
+                vec![0u8; cw * ch]
+            },
+            lf_level_v4: {
+                let cw = (w4 + 1) / 2;
+                let ch = (h4 + 1) / 2;
+                vec![0u8; cw * ch]
+            },
             delta_lf: vec![[0i8; 4]; len],
             w4,
             h4,
+            cw4: (w4 + 1) / 2,
+            ch4: (h4 + 1) / 2,
             luma_tx_w4: vec![0u8; len4],
             luma_tx_h4: vec![0u8; len4],
             luma_edge_left4: vec![false; len4],
@@ -423,9 +452,58 @@ impl FrameMeta {
     /// LAST_FRAME, …); `m` is the mode type (1 for non-GLOBAL inter modes).
     /// Idempotent per coded block — every transform leaf of one block writes
     /// the same pair, mirroring the per-leaf `record_luma4` calls.
+    /// Record a coded block's final chroma deblock levels over its chroma
+    /// 4×4-cell span `[bx0,bx1) x [by0,by1)` (chroma 4×4 coordinates,
+    /// half-open). Mirrors dav1d's per-block chroma write into
+    /// `f->lf.level`: the last decoded block covering a chroma cell owns
+    /// its level (`deblock_plane` reads the surviving value).
+    /// `lu`/`lv` are the block's own U/V levels (§7.14.4, already
+    /// including the block's ref/mode deltas and current DeltaLF).
+    pub fn record_lf_level_chroma(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        lu: u8,
+        lv: u8,
+    ) {
+        let by1c = by1.min(self.ch4);
+        let bx1c = bx1.min(self.cw4);
+        if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
+            && bx0 <= 12
+            && 12 < bx1c
+            && by0 <= 9
+            && 9 < by1c
+        {
+            eprintln!(
+                "LFCELL chroma write span=({bx0},{by0})-({bx1},{by1}) lu={lu} lv={lv} frame={}",
+                crate::debug_frame_seq::current()
+            );
+        }
+        for by in by0..by1c {
+            for bx in bx0..bx1c {
+                let i = by * self.cw4 + bx;
+                self.lf_level_u4[i] = lu;
+                self.lf_level_v4[i] = lv;
+            }
+        }
+    }
+
     pub fn record_lf4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize, r: u8, m: u8) {
         let by1c = by1.min(self.h4);
         let bx1c = bx1.min(self.w4);
+        if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
+            && bx0 <= 24
+            && 24 < bx1c
+            && by0 <= 18
+            && 18 < by1c
+        {
+            eprintln!(
+                "LFCELL record_lf4 span=({bx0},{by0})-({bx1},{by1}) r={r} m={m} frame={}",
+                crate::debug_frame_seq::current()
+            );
+        }
         for by in by0..by1c {
             for bx in bx0..bx1c {
                 let i = self.idx4(bx, by);
@@ -496,6 +574,34 @@ impl FrameMeta {
 /// delta-index space (0 = INTRA_FRAME, 1 = LAST_FRAME, …) and `mode_type`
 /// its §7.14.4 mode type (1 for non-GLOBAL inter modes) — both come from the
 /// 4×4-luma block at the edge (see `deblock_plane`).
+/// §7.14.4 level for one plane from raw frame-header parameters — the
+/// shared core of [`compute_level`] and the chroma level cache recording
+/// (`FrameMeta::lf_level_u4`/`_v4`), which runs from the tile decode state
+/// (which snapshots these parameters instead of holding a `FrameHeader`).
+pub(crate) fn compute_level_parts(
+    base: u8,
+    delta_enabled: bool,
+    ref_deltas: &[i8; 8],
+    mode_deltas: &[i8; 2],
+    delta_lf: i32,
+    ref_idx: usize,
+    mode_type: usize,
+) -> i32 {
+    let base = base as i32;
+    let base = (base + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    let mut lvl = base;
+    if delta_enabled {
+        let shift = if base >= 32 { 1 } else { 0 };
+        let d = if ref_idx == 0 {
+            ref_deltas[0] as i32
+        } else {
+            ref_deltas[ref_idx.min(7)] as i32 + mode_deltas[mode_type.min(1)] as i32
+        };
+        lvl += d * (1 << shift);
+    }
+    lvl.clamp(0, MAX_LOOP_FILTER)
+}
+
 fn compute_level(
     fh: &FrameHeader,
     plane: usize,
@@ -722,8 +828,15 @@ fn filter_line_1d(
             let f = round2(f1, 1);
             let oq1 = clip3(qs1 - f + 128, 0, 255);
             let op1 = clip3(ps1 + f + 128, 0, 255);
-            out[edge + 1] = oq1;
-            out[edge - 2] = op1;
+            // An edge can sit on the frame's last sample (e.g. the final
+            // transform row of a height like 90), where q1/p1 fall outside
+            // the plane — clamp the writes the same way `get` clamps reads.
+            if edge + 1 < out.len() {
+                out[edge + 1] = oq1;
+            }
+            if edge >= 2 {
+                out[edge - 2] = op1;
+            }
         }
         return out;
     }
@@ -788,87 +901,137 @@ fn deblock_plane(
     grid_w: usize,
     grid_h: usize,
     fh: &FrameHeader,
+    // Chroma level cache (`FrameMeta::lf_level_u4`/`_v4`) with its stride;
+    // empty for the luma pass (which derives levels per edge instead).
+    lf_level_cache: &[u8],
+    lf_cache_stride: usize,
 ) {
-    // Vertical edges (pass 0): boundary between block bx-1 and bx. §7.14.3:
-    // baseSize = Min(Tx_Width[prevTxSz], Tx_Width[txSz]) for pass 0 — the
-    // *smaller* of the two transform widths straddling the edge, not the
-    // larger. Using `max` here (an earlier version of this function did)
-    // lets a filter size sized for a large neighbouring transform run right
-    // through a much smaller transform on the other side of the edge, e.g.
-    // treating a `TX_16X4`/`TX_8X4` edge as filterSize 16 instead of the
-    // spec-correct 4.
-    //
-    // `edge_left_grid[by*grid_w+bx]` gates this on whether `bx` is actually
-    // the left edge of a real transform block (AV1 §7.14.1's
-    // `isTxEdge`/`isBlockEdge`) — a transform wider than 8 samples spans
-    // multiple grid cells with the *same* recorded size, which
-    // `left_tx.min(right_tx)` alone can't distinguish from two independent
-    // same-size transforms meeting at a real edge. Skipping this check used
-    // to filter every 8-px grid line unconditionally, including ones
-    // strictly inside a single wide transform where AV1 has no edge to
-    // filter at all.
-    for by in 0..grid_h {
-        for bx in 1..grid_w {
-            if !edge_left_grid[by * grid_w + bx] {
-                continue;
-            }
-            // §7.14.4's DeltaLF lookup uses the block on the q-side of the
-            // edge (the one the outer loop is currently positioned at) — the
-            // spec addresses `DeltaLFs` by the current block's own MI
-            // position, not a min/max of both sides the way `filterSize` is.
-            // The same (row, col) addresses the block's `RefFrames`/`modeType`
-            // (§7.14.4) — for chroma this resolves through the co-located
-            // luma 4×4 cell (`lf_shift` = 1), since `RefFrames` is a luma
-            // array.
-            let dlf_i = if plane_index == 0 { 0 } else { plane_index + 1 };
-            let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
-            let lfx = bx << lf_shift;
-            let lfy = by << lf_shift;
-            let li = lfy * lf_grid_w + lfx;
-            let mut lvl = compute_level(
-                fh,
-                plane_index,
-                0,
-                delta_lf,
-                lf_ref_grid[li] as usize,
-                lf_mode_grid[li] as usize,
-            );
-            if lvl == 0 && bx > 0 {
-                // §7.14.2: when the current block's level is zero, the whole
-                // strength derivation (deltas included) re-runs against the
-                // block on the other side of the edge.
-                let pi = lfy * lf_grid_w + ((bx - 1) << lf_shift);
-                let pdlf = delta_lf_grid[by * grid_w + (bx - 1)][dlf_i] as i32;
-                lvl = compute_level(
-                    fh,
-                    plane_index,
-                    0,
-                    pdlf,
-                    lf_ref_grid[pi] as usize,
-                    lf_mode_grid[pi] as usize,
-                );
-            }
-            if lvl == 0 {
-                continue;
-            }
-            let lp = level_params(lvl, fh.loop_filter_sharpness);
-            let left_tx = tx_w_grid[by * grid_w + (bx - 1)];
-            let right_tx = tx_w_grid[by * grid_w + bx];
-            let filter_size =
-                filter_size_from_tx_samples(left_tx.min(right_tx) as usize, plane_index);
-            let edge = bx * step;
-            if edge >= width {
-                continue;
-            }
-            let y0 = by * step;
-            let bh = step.min(height.saturating_sub(y0));
-            if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
-                && plane_index == 0
-                && edge == 28
-                && y0 <= 71
-                && 71 < y0 + bh
-            {
-                eprintln!(
+    // dav1d interleaves the two passes per superblock row (cols, rows,
+    // next sbrow's cols, ...) rather than running all columns then all
+    // rows. The passes are not order-independent: a 14-wide horizontal
+    // filter's reach extends up to 6 samples past its edge, crossing into
+    // the next superblock row's band, so the two orders apply overlapping
+    // edits around band boundaries in different sequences and produce
+    // different pixels. Match dav1d's `dav1d_loopfilter_sbrow_{cols,rows}`
+    // scheduling: per band, vertical edges for the band's 4x4 rows, then
+    // horizontal edges for the band's edge rows (including the band's top
+    // edge, which `have_top` gates on band > 0).
+    let sb_step4 = if fh.use_128x128_superblock { 32 } else { 16 };
+    for band in 0..grid_h.div_ceil(sb_step4) {
+        let v0 = band * sb_step4;
+        let v1 = (v0 + sb_step4).min(grid_h);
+        let h0 = v0.max(1);
+        let h1 = v1;
+        // Vertical edges (pass 0): boundary between block bx-1 and bx. §7.14.3:
+        // baseSize = Min(Tx_Width[prevTxSz], Tx_Width[txSz]) for pass 0 — the
+        // *smaller* of the two transform widths straddling the edge, not the
+        // larger. Using `max` here (an earlier version of this function did)
+        // lets a filter size sized for a large neighbouring transform run right
+        // through a much smaller transform on the other side of the edge, e.g.
+        // treating a `TX_16X4`/`TX_8X4` edge as filterSize 16 instead of the
+        // spec-correct 4.
+        //
+        // `edge_left_grid[by*grid_w+bx]` gates this on whether `bx` is actually
+        // the left edge of a real transform block (AV1 §7.14.1's
+        // `isTxEdge`/`isBlockEdge`) — a transform wider than 8 samples spans
+        // multiple grid cells with the *same* recorded size, which
+        // `left_tx.min(right_tx)` alone can't distinguish from two independent
+        // same-size transforms meeting at a real edge. Skipping this check used
+        // to filter every 8-px grid line unconditionally, including ones
+        // strictly inside a single wide transform where AV1 has no edge to
+        // filter at all.
+        for by in v0..v1 {
+            for bx in 1..grid_w {
+                if !edge_left_grid[by * grid_w + bx] {
+                    continue;
+                }
+                // §7.14.4's DeltaLF lookup uses the block on the q-side of the
+                // edge (the one the outer loop is currently positioned at) — the
+                // spec addresses `DeltaLFs` by the current block's own MI
+                // position, not a min/max of both sides the way `filterSize` is.
+                // The same (row, col) addresses the block's `RefFrames`/`modeType`
+                // (§7.14.4) — for chroma this resolves through the co-located
+                // luma 4×4 cell (`lf_shift` = 1), since `RefFrames` is a luma
+                // array.
+                let (dlf_i, delta_lf, lvl) = if plane_index > 0 {
+                    // Chroma: dav1d's `f->lf.level` chroma cache — the level
+                    // recorded by the LAST decoded block covering this chroma
+                    // cell (sub-8x8 partitions can split a chroma cell between
+                    // leaves of different kinds); a zero cell falls back to the
+                    // cell ABOVE (`l[0][2] ? l[0][2] : l[-b4_stride][2]` in
+                    // dav1d's `loop_filter_v_sb128uv_c`).
+                    let mut lv = lf_level_cache[by * lf_cache_stride + bx] as i32;
+                    if lv == 0 && by > 0 {
+                        lv = lf_level_cache[(by - 1) * lf_cache_stride + bx] as i32;
+                    }
+                    (0, 0, lv)
+                } else {
+                    let dlf_i = 0;
+                    let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
+                    let lfx = bx << lf_shift;
+                    let lfy = by << lf_shift;
+                    let li = lfy * lf_grid_w + lfx;
+                    let mut lvl = compute_level(
+                        fh,
+                        plane_index,
+                        0,
+                        delta_lf,
+                        lf_ref_grid[li] as usize,
+                        lf_mode_grid[li] as usize,
+                    );
+                    if lvl == 0 && bx > 0 {
+                        // §7.14.2: when the current block's level is zero, the whole
+                        // strength derivation (deltas included) re-runs against the
+                        // block on the other side of the edge.
+                        let pi = lfy * lf_grid_w + ((bx - 1) << lf_shift);
+                        let pdlf = delta_lf_grid[by * grid_w + (bx - 1)][dlf_i] as i32;
+                        lvl = compute_level(
+                            fh,
+                            plane_index,
+                            0,
+                            pdlf,
+                            lf_ref_grid[pi] as usize,
+                            lf_mode_grid[pi] as usize,
+                        );
+                    }
+                    (dlf_i, delta_lf, lvl)
+                };
+                if lvl == 0 {
+                    continue;
+                }
+                let lp = level_params(lvl, fh.loop_filter_sharpness);
+                let left_tx = tx_w_grid[by * grid_w + (bx - 1)];
+                let right_tx = tx_w_grid[by * grid_w + bx];
+                let filter_size =
+                    filter_size_from_tx_samples(left_tx.min(right_tx) as usize, plane_index);
+                let edge = bx * step;
+                if edge >= width {
+                    continue;
+                }
+                let y0 = by * step;
+                let bh = step.min(height.saturating_sub(y0));
+                let lfdbg = std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
+                    && crate::debug_frame_seq::current() == 1;
+                let lf_pre = if lfdbg {
+                    Some(
+                        (y0..y0 + bh)
+                            .map(|y| {
+                                (edge.saturating_sub(6)..(edge + 2).min(width))
+                                    .map(|x| plane[y * stride + x])
+                                    .collect::<Vec<u8>>()
+                            })
+                            .collect::<Vec<Vec<u8>>>(),
+                    )
+                } else {
+                    None
+                };
+                if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                    && plane_index == 0
+                    && edge == 28
+                    && y0 <= 71
+                    && 71 < y0 + bh
+                {
+                    eprintln!(
                     "DBLK n={} vedge x=28 by={by} lvl={lvl} filter_size={filter_size} left_tx={left_tx} right_tx={right_tx} limit={} blimit={} thresh={} pre_line={:?}",
                     crate::debug_frame_seq::current(),
                     lp.limit,
@@ -878,104 +1041,147 @@ fn deblock_plane(
                         .map(|x| plane[71 * stride + x])
                         .collect::<Vec<u8>>()
                 );
-            }
-            for y in y0..y0 + bh {
-                let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
-                let filtered = filter_line_1d(
-                    &line,
-                    edge,
-                    lp.limit,
-                    lp.blimit,
-                    lp.thresh,
-                    filter_size,
-                    plane_index == 0,
-                );
-                for x in 0..width {
-                    plane[y * stride + x] = filtered[x] as u8;
                 }
-            }
-        }
-    }
-    // Horizontal edges (pass 1). §7.14.3: baseSize = Min(Tx_Height[prevTxSz],
-    // Tx_Height[txSz]) for pass 1 — the transform *height* axis, not width.
-    // Reusing the width grid here (an earlier version of this function did,
-    // since `FrameMeta` only tracked one tx-size value per 8×8 cell) meant a
-    // wide-but-short transform like `TX_16X4`/`TX_8X4` was treated as
-    // filterSize 16 for its horizontal (row-boundary) edges, engaging the
-    // 13-tap wide filter's up-to-6-sample reach across content the actual 4-
-    // sample-tall transform never spans — smoothing a real, unrelated
-    // content transition into the flat region next to it.
-    for bx in 0..grid_w {
-        for by in 1..grid_h {
-            if !edge_top_grid[by * grid_w + bx] {
-                continue;
-            }
-            let dlf_i = if plane_index == 0 { 1 } else { plane_index + 1 };
-            let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
-            let lfx = bx << lf_shift;
-            let lfy = by << lf_shift;
-            let li = lfy * lf_grid_w + lfx;
-            let mut lvl = compute_level(
-                fh,
-                plane_index,
-                1,
-                delta_lf,
-                lf_ref_grid[li] as usize,
-                lf_mode_grid[li] as usize,
-            );
-            if lvl == 0 && by > 0 {
-                // §7.14.2: zero level re-derives from the block above.
-                let pi = ((by - 1) << lf_shift) * lf_grid_w + lfx;
-                let pdlf = delta_lf_grid[(by - 1) * grid_w + bx][dlf_i] as i32;
-                lvl = compute_level(
-                    fh,
-                    plane_index,
-                    1,
-                    pdlf,
-                    lf_ref_grid[pi] as usize,
-                    lf_mode_grid[pi] as usize,
-                );
-            }
-            if lvl == 0 {
-                continue;
-            }
-            let lp = level_params(lvl, fh.loop_filter_sharpness);
-            let top_tx = tx_h_grid[(by - 1) * grid_w + bx];
-            let bot_tx = tx_h_grid[by * grid_w + bx];
-            let filter_size = filter_size_from_tx_samples(top_tx.min(bot_tx) as usize, plane_index);
-            let edge = by * step;
-            if edge >= height {
-                continue;
-            }
-            let x0 = bx * step;
-            let bw = step.min(width.saturating_sub(x0));
-            // Compact per-bx dump for one horizontal edge line: env
-            // `KINETIX_AV1_DBG_HEDGES=<edge_y>` prints lvl/filter params for
-            // every grid column along that edge (plane 0 only).
-            if plane_index == 0
-                && std::env::var("KINETIX_AV1_DBG_HEDGES").is_ok()
-                && std::env::var("KINETIX_AV1_DBG_HEDGES")
-                    .ok()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-                    == Some(edge)
-            {
-                eprintln!(
-                    "HEDGE n={} y={edge} bx={bx} lvl={lvl} fs={filter_size} top_tx={top_tx} bot_tx={bot_tx} lim={} blim={} thr={} ref={} mode={} dlf={dlf_i}:{delta_lf}",
+                for y in y0..y0 + bh {
+                    let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
+                    let filtered = filter_line_1d(
+                        &line,
+                        edge,
+                        lp.limit,
+                        lp.blimit,
+                        lp.thresh,
+                        filter_size,
+                        plane_index == 0,
+                    );
+                    for x in 0..width {
+                        plane[y * stride + x] = filtered[x] as u8;
+                    }
+                }
+                if let Some(pre) = lf_pre {
+                    let post: Vec<Vec<u8>> = (y0..y0 + bh)
+                        .map(|y| {
+                            (edge.saturating_sub(6)..(edge + 2).min(width))
+                                .map(|x| plane[y * stride + x])
+                                .collect::<Vec<u8>>()
+                        })
+                        .collect();
+                    eprintln!(
+                    "LFEDGE kin fr={} pl={plane_index} v edge={edge} bx={bx} by={by} lvl={lvl} fs={filter_size} lim={} blim={} thr={} dlf={dlf_i}:{delta_lf} pre={pre:?} post={post:?}",
                     crate::debug_frame_seq::current(),
                     lp.limit,
                     lp.blimit,
                     lp.thresh,
-                    lf_ref_grid[li],
-                    lf_mode_grid[li],
                 );
+                }
             }
-            if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
-                && plane_index == 0
-                && x0 <= 28
-                && 28 < x0 + bw
-                && edge.abs_diff(71) <= 8
-            {
-                eprintln!(
+        }
+        // Horizontal edges (pass 1). §7.14.3: baseSize = Min(Tx_Height[prevTxSz],
+        // Tx_Height[txSz]) for pass 1 — the transform *height* axis, not width.
+        // Reusing the width grid here (an earlier version of this function did,
+        // since `FrameMeta` only tracked one tx-size value per 8×8 cell) meant a
+        // wide-but-short transform like `TX_16X4`/`TX_8X4` was treated as
+        // filterSize 16 for its horizontal (row-boundary) edges, engaging the
+        // 13-tap wide filter's up-to-6-sample reach across content the actual 4-
+        // sample-tall transform never spans — smoothing a real, unrelated
+        // content transition into the flat region next to it.
+        for by in h0..h1 {
+            for bx in 0..grid_w {
+                if !edge_top_grid[by * grid_w + bx] {
+                    continue;
+                }
+                let (dlf_i, delta_lf, lvl) = if plane_index > 0 {
+                    // Chroma level cache (see the vertical pass) — the zero
+                    // fallback reads the cell to the LEFT
+                    // (`l[0][2] ? l[0][2] : l[-1][2]` in dav1d's
+                    // `loop_filter_h_sb128uv_c`).
+                    let mut lv = lf_level_cache[by * lf_cache_stride + bx] as i32;
+                    if lv == 0 && bx > 0 {
+                        lv = lf_level_cache[by * lf_cache_stride + bx - 1] as i32;
+                    }
+                    (1, 0, lv)
+                } else {
+                    let dlf_i = 1;
+                    let delta_lf = delta_lf_grid[by * grid_w + bx][dlf_i] as i32;
+                    let lfx = bx << lf_shift;
+                    let lfy = by << lf_shift;
+                    let li = lfy * lf_grid_w + lfx;
+                    let mut lvl = compute_level(
+                        fh,
+                        plane_index,
+                        1,
+                        delta_lf,
+                        lf_ref_grid[li] as usize,
+                        lf_mode_grid[li] as usize,
+                    );
+                    if lvl == 0 && by > 0 {
+                        // §7.14.2: zero level re-derives from the block above.
+                        let pi = ((by - 1) << lf_shift) * lf_grid_w + lfx;
+                        let pdlf = delta_lf_grid[(by - 1) * grid_w + bx][dlf_i] as i32;
+                        lvl = compute_level(
+                            fh,
+                            plane_index,
+                            1,
+                            pdlf,
+                            lf_ref_grid[pi] as usize,
+                            lf_mode_grid[pi] as usize,
+                        );
+                    }
+                    (dlf_i, delta_lf, lvl)
+                };
+                if lvl == 0 {
+                    continue;
+                }
+                let lp = level_params(lvl, fh.loop_filter_sharpness);
+                let top_tx = tx_h_grid[(by - 1) * grid_w + bx];
+                let bot_tx = tx_h_grid[by * grid_w + bx];
+                let filter_size =
+                    filter_size_from_tx_samples(top_tx.min(bot_tx) as usize, plane_index);
+                let edge = by * step;
+                if edge >= height {
+                    continue;
+                }
+                let x0 = bx * step;
+                let bw = step.min(width.saturating_sub(x0));
+                let lfdbg_h = std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
+                    && crate::debug_frame_seq::current() == 1;
+                let lf_pre_h = if lfdbg_h {
+                    Some(
+                        (x0..x0 + bw)
+                            .map(|x| {
+                                (edge.saturating_sub(6)..(edge + 2).min(height))
+                                    .map(|y| plane[y * stride + x])
+                                    .collect::<Vec<u8>>()
+                            })
+                            .collect::<Vec<Vec<u8>>>(),
+                    )
+                } else {
+                    None
+                };
+                // Compact per-bx dump for one horizontal edge line: env
+                // `KINETIX_AV1_DBG_HEDGES=<edge_y>` prints lvl/filter params for
+                // every grid column along that edge (plane 0 only).
+                if plane_index == 0
+                    && std::env::var("KINETIX_AV1_DBG_HEDGES").is_ok()
+                    && std::env::var("KINETIX_AV1_DBG_HEDGES")
+                        .ok()
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                        == Some(edge)
+                {
+                    eprintln!(
+                    "HEDGE n={} y={edge} bx={bx} lvl={lvl} fs={filter_size} top_tx={top_tx} bot_tx={bot_tx} lim={} blim={} thr={} dlf={dlf_i}:{delta_lf}",
+                    crate::debug_frame_seq::current(),
+                    lp.limit,
+                    lp.blimit,
+                    lp.thresh,
+                );
+                }
+                if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                    && plane_index == 0
+                    && x0 <= 28
+                    && 28 < x0 + bw
+                    && edge.abs_diff(71) <= 8
+                {
+                    eprintln!(
                     "DBLK n={} hedge y={edge} bx={bx} lvl={lvl} filter_size={filter_size} top_tx={top_tx} bot_tx={bot_tx} limit={} blimit={} thresh={} pre_col={:?}",
                     crate::debug_frame_seq::current(),
                     lp.limit,
@@ -985,23 +1191,39 @@ fn deblock_plane(
                         .map(|y| plane[y * stride + 28])
                         .collect::<Vec<u8>>()
                 );
-            }
-            for x in x0..x0 + bw {
-                let mut line: Vec<i32> =
-                    (0..height).map(|y| plane[y * stride + x] as i32).collect();
-                let filtered = filter_line_1d(
-                    &line,
-                    edge,
+                }
+                for x in x0..x0 + bw {
+                    let line: Vec<i32> =
+                        (0..height).map(|y| plane[y * stride + x] as i32).collect();
+                    let filtered = filter_line_1d(
+                        &line,
+                        edge,
+                        lp.limit,
+                        lp.blimit,
+                        lp.thresh,
+                        filter_size,
+                        plane_index == 0,
+                    );
+                    for y in 0..height {
+                        plane[y * stride + x] = filtered[y] as u8;
+                    }
+                }
+                if let Some(pre) = lf_pre_h {
+                    let post: Vec<Vec<u8>> = (x0..x0 + bw)
+                        .map(|x| {
+                            (edge.saturating_sub(6)..(edge + 6).min(height))
+                                .map(|y| plane[y * stride + x])
+                                .collect::<Vec<u8>>()
+                        })
+                        .collect();
+                    eprintln!(
+                    "LFEDGE kin fr={} pl={plane_index} h edge={edge} bx={bx} by={by} lvl={lvl} fs={filter_size} lim={} blim={} thr={} dlf={dlf_i}:{delta_lf} pre={pre:?} post={post:?}",
+                    crate::debug_frame_seq::current(),
                     lp.limit,
                     lp.blimit,
                     lp.thresh,
-                    filter_size,
-                    plane_index == 0,
                 );
-                for y in 0..height {
-                    plane[y * stride + x] = filtered[y] as u8;
                 }
-                let _ = &mut line;
             }
         }
     }
@@ -1730,6 +1952,25 @@ pub fn apply_post_filters(
     let skip_deblock = skip_deblock || deblock_disabled;
     let uv_w = width >> subsampling_x as usize;
     let uv_h = height >> subsampling_y as usize;
+    // The deblocking edge iteration covers the *visible* frame's MI grid
+    // (`(H+3)>>2` 4×4 rows, dav1d's `f->h4`), not the full reconstruction
+    // grid: blocks extend into the mi-grid padding rows below the visible
+    // frame, but their edges there are not real §7.14.1 block/tx boundaries
+    // and dav1d's level/mask arrays stop at `h4`. Filtering the padding rows
+    // anyway desyncs the stored reference planes (references include the
+    // post-filtered grid), which then desyncs the next frame's MC.
+    if std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok() {
+        eprintln!(
+            "LFPAR fr={} levels={:?} sharp={} deltas_en={} ref_deltas={:?} mode_deltas={:?}",
+            crate::debug_frame_seq::current(),
+            fh.loop_filter_level,
+            fh.loop_filter_sharpness,
+            fh.loop_filter_delta_enabled,
+            fh.loop_filter_deltas.loop_filter_ref_deltas,
+            fh.loop_filter_deltas.loop_filter_mode_deltas,
+        );
+    }
+    let lf_h4 = (fh.height as usize + 3) >> 2;
     if !skip_deblock {
         deblock_plane(
             y_plane,
@@ -1749,8 +1990,10 @@ pub fn apply_post_filters(
             meta.w4,
             0,
             meta.w4,
-            meta.h4,
+            lf_h4,
             fh,
+            &[],
+            0,
         );
     }
     let sub_x = subsampling_x as usize;
@@ -1776,6 +2019,8 @@ pub fn apply_post_filters(
             meta.w8,
             meta.h8,
             fh,
+            &meta.lf_level_u4,
+            meta.cw4,
         );
     }
     if !skip_deblock {
@@ -1799,6 +2044,8 @@ pub fn apply_post_filters(
             meta.w8,
             meta.h8,
             fh,
+            &meta.lf_level_v4,
+            meta.cw4,
         );
     }
 
@@ -1905,6 +2152,9 @@ pub fn apply_post_filters(
                     uw,
                     &meta.luma_skip,
                     meta.w8,
+                    fh.order_hint,
+                    fh.show_frame,
+                    'U',
                 );
                 ux += uv_step_x;
             }
@@ -1946,6 +2196,9 @@ pub fn apply_post_filters(
                     uw,
                     &meta.luma_skip,
                     meta.w8,
+                    fh.order_hint,
+                    fh.show_frame,
+                    'V',
                 );
                 ux += uv_step_x;
             }
@@ -1980,10 +2233,43 @@ pub fn apply_post_filters(
     // imprecision, confirmed via an `--inloopfilters norestoration` A/B
     // check), i.e. restoration itself is now correct to the precision its
     // input allows. No corpus clip regressed.
+    if std::env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
+        eprintln!(
+            "DBG LRPOST w={width} h={height} uses_lr={} types={:?} unit={:?} lr_units_n={} lr_pre_n={}",
+            fh.uses_lr, fh.frame_restoration_type, fh.lr_unit_size, meta.lr_units.len(),
+            lr_pre_u.len()
+        );
+    }
     if fh.uses_lr && std::env::var("KINETIX_AV1_NOLR").is_err() {
-        apply_loop_restoration_plane(y_plane, width, height, 0, fh, &meta.lr_units, &lr_pre_y, 0);
-        apply_loop_restoration_plane(u_plane, uv_w, uv_h, 1, fh, &meta.lr_units, &lr_pre_u, sub_y);
-        apply_loop_restoration_plane(v_plane, uv_w, uv_h, 2, fh, &meta.lr_units, &lr_pre_v, sub_y);
+        // LR clips at the VISIBLE frame height (dav1d `lr_sbrow`: `row_h =
+        // imin(next_row_y - offset, h)` with `h` = visible chroma/luma
+        // height) — unlike deblock/CDEF, which run over the whole mi grid.
+        // Restoring the mi-grid padding rows below the visible frame desyncs
+        // the next frame's CDEF, which reads those rows as sbrow-boundary
+        // context (dav1d's `lr_lpf_line` holds unrestored padding rows).
+        let vis_h = fh.height as usize;
+        let vis_ch = vis_h.div_ceil(2);
+        apply_loop_restoration_plane(y_plane, width, vis_h, 0, fh, &meta.lr_units, &lr_pre_y, 0);
+        apply_loop_restoration_plane(
+            u_plane,
+            uv_w,
+            vis_ch,
+            1,
+            fh,
+            &meta.lr_units,
+            &lr_pre_u,
+            sub_y,
+        );
+        apply_loop_restoration_plane(
+            v_plane,
+            uv_w,
+            vis_ch,
+            2,
+            fh,
+            &meta.lr_units,
+            &lr_pre_v,
+            sub_y,
+        );
     }
     dump_pxy("post-lr", y_plane);
 
@@ -2105,6 +2391,9 @@ fn cdef_plane_chroma(
     // luma *and* chroma, before either filter call runs).
     luma_skip: &[bool],
     w8: usize,
+    order_hint: u32,
+    shown: bool,
+    plane_label: char,
 ) {
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
@@ -2143,6 +2432,44 @@ fn cdef_plane_chroma(
             } else {
                 CDEF_UV_DIR[sub_x][sub_y][yd]
             };
+            if std::env::var("KINETIX_DBG_CDEFUV").is_ok()
+                && (order_hint == 1 && shown
+                    || ((luma_x0 == 96 && luma_y0 == 64) || (luma_x0 == 96 && luma_y0 == 72)))
+            {
+                eprintln!(
+                    "CDEFUV kin oh={order_hint} shown={shown} pl={plane_label} x0={x0} y0={y0} luma_dir={yd} dir={dir} uv_pri={p} uv_sec={sec_str} damp={damping}"
+                );
+                let dump44 = |buf: &[u8]| {
+                    (0..4)
+                        .map(|yy| {
+                            (0..4)
+                                .map(|xx| buf[(y0 + yy) * width + x0 + xx].to_string())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                eprintln!("CDEFUV pre (4x4 chroma): {}", dump44(src));
+                cdef_filter_block(
+                    plane,
+                    width,
+                    src,
+                    width,
+                    x0,
+                    y0,
+                    w_block.min(width - x0),
+                    h_block.min(height - y0),
+                    sub_x,
+                    sub_y,
+                    p,
+                    sec_str,
+                    damping,
+                    dir,
+                );
+                eprintln!("CDEFUV post (4x4 chroma): {}", dump44(plane));
+                continue;
+            }
             cdef_filter_block(
                 plane,
                 width,

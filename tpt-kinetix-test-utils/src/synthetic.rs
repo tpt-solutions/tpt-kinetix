@@ -347,10 +347,15 @@ pub fn av1_multiframe_obu(width: u32, height: u32, frames: u32) -> Option<Vec<u8
 /// `ffmpeg` missing) are silently omitted; callers should treat an empty corpus
 /// as "skip this test".
 pub fn av1_inter_corpus() -> Vec<Av1InterCorpusEntry> {
+    // 160x90 has a height that is neither 16- nor 8-aligned (90 = 8*11 + 2),
+    // which stresses bottom/superblock-edge sub-8x8 splits; smptebars is
+    // near-static, producing skip-heavy inter frames.
     const SOURCES: &[(&str, u32, u32, u32)] = &[
         ("testsrc_128x96", 128, 96, 8),
         ("testsrc_96x64", 96, 64, 6),
         ("testsrc_64x64", 64, 64, 6),
+        ("testsrc_160x90", 160, 90, 8),
+        ("smptebars_96x64", 96, 64, 6),
     ];
 
     SOURCES

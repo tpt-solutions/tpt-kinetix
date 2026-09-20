@@ -17,7 +17,7 @@ use crate::{
     trace::DecodeTracer,
 };
 
-use super::H264Decoder;
+use super::{H264Decoder, PictureAccumulator};
 
 /// Adapts [`crate::slice_data::parse_i_slice_cabac`]'s multi-slice-capable
 /// signature (added for progressive multi-slice pictures, see
@@ -155,7 +155,7 @@ impl H264Decoder {
             bottom_field_pic_order_in_frame_present_flag: pps
                 .map(|p| p.bottom_field_pic_order_in_frame_present_flag)
                 .unwrap_or(false),
-            delta_pic_order_always_zero_flag: false,
+            delta_pic_order_always_zero_flag: sps.delta_pic_order_always_zero_flag,
             num_ref_idx_l0_default_active_minus1: pps
                 .map(|p| p.num_ref_idx_l0_default_active_minus1)
                 .unwrap_or(0),
@@ -197,6 +197,21 @@ impl H264Decoder {
             header.slice_type,
             header.first_mb_in_slice
         );
+        // Triage (#32bz): verify the header ctx vs data_bit_offset.
+        if std::env::var_os("KINETIX_HDR_DBG").is_some() {
+            eprintln!(
+                "HDR-DBG ctx: log2_mfn={} log2_poc={} fmo={} data_bit_offset={} frame_num={} poc_lsb={:?} qp_delta={} nref_minus1={} deb={}",
+                ctx.log2_max_frame_num_minus4,
+                ctx.log2_max_pic_order_cnt_lsb_minus4,
+                ctx.frame_mbs_only_flag,
+                header.data_bit_offset,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                header.slice_qp_delta,
+                header.num_ref_idx_l0_active_minus1,
+                header.disable_deblocking_filter_idc,
+            );
+        }
         // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
         // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
         // pictures remain unsupported and fall back.
@@ -223,9 +238,13 @@ impl H264Decoder {
         if !header.field_pic_flag {
             return Ok(InterlacedOutcome::Fallback);
         }
-        if header.first_mb_in_slice != 0 {
-            return Ok(InterlacedOutcome::Fallback);
-        }
+        // NOTE: no `first_mb_in_slice != 0 -> Fallback` guard here. Real PAFF
+        // field pictures are multi-slice (ITU `CVFI1_Sony_D`: ~7 slices per
+        // field), and the CAVLC field drivers below route continuation
+        // slices into the shared `PictureAccumulator` themselves — this
+        // pre-accumulator-era guard silently dropped every continuation
+        // slice, leaving the field forever incomplete. (The MBAFF path has
+        // its own guard inside `decode_interlaced_mbaff`.)
 
         let coded_width = sps.coded_width_pixels();
         let coded_height = sps.coded_height_pixels();
@@ -284,9 +303,13 @@ impl H264Decoder {
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
 
-        let parsed = if entropy_coding_mode_flag {
+        if entropy_coding_mode_flag {
+            // CABAC I-field pictures remain single-slice (no known ITU fixture
+            // needs multi-slice CABAC fields): parse fresh buffers and
+            // reconstruct immediately, exactly as before the CAVLC
+            // accumulator below existed.
             reader.byte_align();
-            parse_i_slice_cabac_single(
+            let parsed = match parse_i_slice_cabac_single(
                 reader.remaining_bytes(),
                 mb_cols,
                 mb_rows_field,
@@ -295,55 +318,498 @@ impl H264Decoder {
                 header.field_pic_flag,
                 pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                 tracer,
-            )
-        } else {
-            crate::slice_data::parse_i_slice(
-                &mut reader,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    paff_dbg!("interlaced I-field parse failed: {e}");
+                    return Ok(InterlacedOutcome::Fallback);
+                }
+            };
+
+            if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+                for (i, mb) in parsed.macroblocks.iter().enumerate() {
+                    eprintln!(
+                        "PAFF_IFIELD_MB[{i}] type={:?} t8x8={} cbp={} pm8={:?}",
+                        mb.mb_type, mb.transform_size_8x8, mb.cbp, mb.pred_modes_8x8
+                    );
+                }
+            }
+            let mut recon = crate::reconstruct::reconstruct_intra_frame(
+                &parsed.macroblocks,
                 mb_cols,
                 mb_rows_field,
-                slice_qp,
+                coded_width,
+                field_height,
+                true,
                 chroma_qp_index_offset,
-                pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
-                mb_adaptive,
-                header.field_pic_flag,
+                scaling,
+                &crate::reconstruct::WeightedPred::Default,
                 tracer,
-            )
-        };
-        let parsed = match parsed {
-            Ok(p) => p,
-            Err(_) => return Ok(InterlacedOutcome::Fallback),
+                None,
+            );
+
+            let deblock_params = crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            };
+            Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+            return self.finalize_field(recon, nal, sps, &header, packet);
+        }
+
+        // ---- CAVLC I-field path: multi-slice-capable accumulator ----
+        //
+        // Real field streams carry several slices per field picture (ITU
+        // `CVFI1_Sony_D`: ~7 per field), so — exactly like the progressive
+        // CAVLC I path in `decoder::mod` — every slice decodes into the
+        // shared `PictureAccumulator` (sized to the FIELD grid), and the
+        // field only reconstructs/deblocks/pairs once its last MB is
+        // covered. `is_field_picture` finalization routes through
+        // `finalize_field_picture` (half-height recon + field deblock +
+        // field pairing), not the progressive `finalize_picture`.
+        let is_continuation = header.first_mb_in_slice != 0;
+        let pps_id_val = header.pic_parameter_set_id;
+        // A previous accumulator finalized here (the safety-net paths below)
+        // rather than by its own last slice — queued so it isn't lost, since
+        // this call can return only one frame.
+        let mut extra_frame: Option<VideoFrame> = None;
+
+        if !is_continuation {
+            if let Some(prev) = self.pending_picture.take() {
+                extra_frame = self.finalize_field_picture(prev, tracer)?;
+            }
+            let is_idr_new = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let poc_new = {
+                let mut scratch = self.poc_state.clone();
+                crate::ref_pic::derive_pic_order_cnt(
+                    sps,
+                    is_idr_new,
+                    nal.nal_ref_idc != 0,
+                    header.frame_num,
+                    header.pic_order_cnt_lsb,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    header.delta_pic_order_cnt_0,
+   header.delta_pic_order_cnt_bottom,
+                    &mut scratch,
+                )
+                .unwrap_or(0)
+            };
+            self.pending_picture = Some(PictureAccumulator::new(
+                mb_cols,
+                mb_rows_field,
+                coded_width,
+                field_height,
+                width,
+                height,
+                chroma_qp_index_offset,
+                scaling.clone(),
+                sps.clone(),
+                pps_id_val,
+                nal,
+                &header,
+                is_idr_new,
+                poc_new,
+                packet.pts,
+                packet.dts,
+            ));
+        } else {
+            let matches_pending = self.pending_picture.as_ref().is_some_and(|acc| {
+                acc.matches(
+                    header.frame_num,
+                    pps_id_val,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    nal.nal_ref_idc,
+                )
+            });
+            if !matches_pending {
+                // Corruption safety net (§7.4.1.2.4): this continuation
+                // doesn't belong to any picture we're tracking. Finalize
+                // whatever WAS pending (if anything) and drop this stray
+                // slice.
+                if let Some(prev) = self.pending_picture.take() {
+                    if let Some(f) = self.finalize_field_picture(prev, tracer)? {
+                        self.frame_queue.push_back(f);
+                    }
+                }
+                self.suppress_frame = true;
+                return Ok(InterlacedOutcome::Handled);
+            }
+        }
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("just created or matched above");
+        let slice_id = acc.next_slice_id;
+        acc.next_slice_id += 1;
+        acc.deblock_params_per_slice
+            .push(crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            });
+        acc.ref_poc_per_slice.push((Vec::new(), Vec::new()));
+
+        let field_total = (mb_cols * mb_rows_field) as usize;
+        let end_mb = match crate::slice_data::parse_i_slice(
+            &mut reader,
+            mb_cols,
+            mb_rows_field,
+            slice_qp,
+            chroma_qp_index_offset,
+            pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+            mb_adaptive,
+            header.field_pic_flag,
+            tracer,
+            header.first_mb_in_slice,
+            slice_id,
+            &mut acc.macroblocks,
+            &mut acc.nz,
+            &mut acc.pred_ctx,
+            &mut acc.slice_id_grid,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                paff_dbg!("interlaced I-field parse failed: {e}");
+                // A parse failure mid-picture leaves the accumulator in an
+                // unusable state; drop the whole in-progress picture rather
+                // than risk emitting a garbage frame later.
+                self.pending_picture = None;
+                if let Some(ef) = extra_frame {
+                    return Ok(InterlacedOutcome::Frame(ef));
+                }
+                return Ok(InterlacedOutcome::Fallback);
+            }
         };
 
-        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
-            for (i, mb) in parsed.macroblocks.iter().enumerate() {
-                eprintln!(
-                    "PAFF_IFIELD_MB[{i}] type={:?} t8x8={} cbp={} pm8={:?}",
-                    mb.mb_type, mb.transform_size_8x8, mb.cbp, mb.pred_modes_8x8
+        paff_dbg!(
+            "I-FIELD slice end: first_mb={} end_mb={}/{}",
+            header.first_mb_in_slice,
+            end_mb,
+            field_total
+        );
+        if end_mb >= field_total {
+            let acc = self.pending_picture.take().unwrap();
+            let new_frame = self.finalize_field_picture(acc, tracer)?;
+            match (extra_frame, new_frame) {
+                // Both a queued safety-net frame and a completed pair:
+                // queue the safety-net frame, emit the pair.
+                (Some(ef), Some(f)) => {
+                    self.frame_queue.push_back(ef);
+                    return Ok(InterlacedOutcome::Frame(f));
+                }
+                (Some(ef), None) => return Ok(InterlacedOutcome::Frame(ef)),
+                (None, Some(f)) => return Ok(InterlacedOutcome::Frame(f)),
+                (None, None) => return Ok(InterlacedOutcome::Handled),
+            }
+        }
+        // Field still incomplete: more slices of this picture are expected.
+        // Fully handled — no frame yet, and the caller must NOT fall through
+        // to the scaffold path.
+        if let Some(ef) = extra_frame {
+            return Ok(InterlacedOutcome::Frame(ef));
+        }
+        Ok(InterlacedOutcome::Handled)
+    }
+
+    /// Finalize a completed FIELD-picture accumulator: whole-field intra
+    /// reconstruction at the half-height grid, field deblocking with each
+    /// macroblock's owning slice's `DeblockParams`, then the shared
+    /// store/DPB/pairing logic of `finalize_field`.
+    ///
+    /// Returns `Some(frame)` when this field completed a complementary pair
+    /// (the interleaved output frame is ready) and `None` when the field was
+    /// buffered awaiting its pair — the same semantics as `finalize_field`'s
+    /// `Frame`/`Handled` split.
+    ///
+    /// (A FRAME-picture accumulator is finalized by `finalize_picture`
+    /// instead; the two never mix because `PictureAccumulator::matches`
+    /// compares `field_pic_flag`/`bottom_field_flag`.)
+    pub(super) fn finalize_field_picture<T: DecodeTracer>(
+        &mut self,
+        acc: PictureAccumulator,
+        tracer: &mut T,
+    ) -> Result<Option<VideoFrame>, KinetixError> {
+        let PictureAccumulator {
+            macroblocks,
+            nz,
+            slice_id_grid,
+            deblock_params_per_slice,
+            mb_cols,
+            mb_rows,
+            chroma_qp_index_offset,
+            scaling,
+            sps,
+            frame_num,
+            bottom_field_flag,
+            nal_ref_idc,
+            nal_unit_type,
+            pps_id,
+            pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom,
+            dec_ref_pic_marking,
+            pts,
+            dts,
+            recon: prebuilt_recon,
+            reconstructed,
+            mv_store,
+            ..
+        } = acc;
+        let coded_width = sps.coded_width_pixels();
+
+        // A P-field accumulator built `recon` incrementally, slice by slice
+        // (each slice's own range motion-compensated with that slice's own
+        // field reference list, via `reconstruct_inter_field_frame_range`);
+        // an intra-only (I-field) accumulator still needs the whole-field
+        // intra reconstruction pass here. A picture may legally mix I-type
+        // and P-type slices (§7.4.3): unreconstructed macroblocks (I-slice
+        // MBs no P slice's range covered) are filled in field-mode below.
+        let had_p_recon = prebuilt_recon.is_some();
+        let mut recon = match prebuilt_recon {
+            Some(r) => r,
+            None => crate::reconstruct::reconstruct_intra_frame(
+                &macroblocks,
+                mb_cols,
+                mb_rows,
+                coded_width,
+                mb_rows * 16,
+                true,
+                chroma_qp_index_offset,
+                &scaling,
+                &crate::reconstruct::WeightedPred::Default,
+                tracer,
+                Some(&slice_id_grid),
+            ),
+        };
+        if had_p_recon {
+            for (idx, &done) in reconstructed.iter().enumerate() {
+                if done {
+                    continue;
+                }
+                let mb_x = (idx as u32) % mb_cols;
+                let mb_y = (idx as u32) / mb_cols;
+                let mb = &macroblocks[idx];
+                if mb.mb_type == crate::macroblock::MbType::IPcm {
+                    crate::reconstruct::place_ipcm_mb(
+                        &mb.pcm_samples,
+                        &mut recon.luma,
+                        &mut recon.chroma_cb,
+                        &mut recon.chroma_cr,
+                        recon.luma_stride,
+                        recon.chroma_stride,
+                        mb_x,
+                        mb_y,
+                    );
+                    continue;
+                }
+                crate::reconstruct::reconstruct_luma(
+                    mb,
+                    &mut recon.luma,
+                    recon.luma_stride,
+                    mb_x,
+                    mb_y,
+                    true,
+                    &scaling,
+                    tracer,
+                    None,
+                );
+                crate::reconstruct::reconstruct_chroma(
+                    mb,
+                    &mut recon.chroma_cb,
+                    &mut recon.chroma_cr,
+                    recon.chroma_stride,
+                    mb_x,
+                    mb_y,
+                    true,
+                    chroma_qp_index_offset,
+                    &scaling,
+                    &crate::reconstruct::WeightedPred::Default,
+                    tracer,
+                    None,
                 );
             }
         }
-        let mut recon = crate::reconstruct::reconstruct_intra_frame(
-            &parsed.macroblocks,
-            mb_cols,
-            mb_rows_field,
-            coded_width,
-            field_height,
-            true,
-            chroma_qp_index_offset,
-            scaling,
-            &crate::reconstruct::WeightedPred::Default,
-            tracer,
-            None,
-        );
 
-        let deblock_params = crate::deblock::DeblockParams {
-            disable_idc: header.disable_deblocking_filter_idc as u8,
-            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
-            beta_offset_div2: header.slice_beta_offset_div2,
-            chroma_qp_index_offset,
+        // Field deblocking (same per-MB walk as `deblock_field`, but each
+        // macroblock uses its OWN slice's params and the bS inputs come from
+        // the shared accumulator grids).
+        let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = macroblocks
+            .chunks(mb_cols as usize)
+            .enumerate()
+            .map(|(row_idx, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(col_idx, mb)| {
+                        let idx = row_idx * mb_cols as usize + col_idx;
+                        let mb_nz = nz[idx].luma;
+                        let sid = slice_id_grid[idx];
+                        let params = deblock_params_per_slice
+                            .get(sid as usize)
+                            .copied()
+                            .unwrap_or_default();
+                        // A P-field accumulator's `mv_store` carries real
+                        // motion for deblocking's MV-based boundary-strength
+                        // derivation (§8.7.2.1); an intra-only field has none.
+                        let cells = mv_store
+                            .as_ref()
+                            .and_then(|s| s.cells_of(idx))
+                            .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                        crate::deblock::DeblockMbInfo {
+                            transform_8x8: mb.transform_size_8x8,
+                            field: true,
+                            slice_id: sid,
+                            params,
+                            ..crate::deblock::DeblockMbInfo::new(mb.mb_type, mb_nz, cells, mb.qp)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        // Triage (#32bz): KINETIX_NO_DEBLOCK skips the field deblock pass so
+        // pre-deblock recon can be compared against the reference directly.
+        if std::env::var_os("KINETIX_NO_DEBLOCK").is_none() {
+            for (row_idx, row_info) in mb_info.iter().enumerate() {
+                for (col_idx, cur) in row_info.iter().enumerate() {
+                    let left = if col_idx > 0 {
+                        Some(&row_info[col_idx - 1])
+                    } else {
+                        None
+                    };
+                    let top = if row_idx > 0 {
+                        Some(&mb_info[row_idx - 1][col_idx])
+                    } else {
+                        None
+                    };
+                    crate::deblock::deblock_luma_mb(
+                        &mut recon.luma,
+                        recon.luma_stride,
+                        col_idx,
+                        row_idx,
+                        cur,
+                        left,
+                        top,
+                        cur.params,
+                    );
+                    crate::deblock::deblock_chroma_mb(
+                        &mut recon.chroma_cb,
+                        &mut recon.chroma_cr,
+                        recon.chroma_stride,
+                        col_idx,
+                        row_idx,
+                        cur,
+                        left,
+                        top,
+                        cur.params,
+                    );
+                }
+            }
+        }
+
+        // Shared tail with the single-slice field path: assemble the
+        // half-height field frame, store it in the DPB, and pair it with its
+        // complementary field (emitting the interleaved frame when complete).
+        let field_height = (recon.luma.len() / recon.luma_stride) as u32;
+        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+            let sum: u64 = recon.luma.iter().map(|&v| v as u64).sum();
+            let mean = sum / recon.luma.len() as u64;
+            let nconst = recon.luma.iter().filter(|&&v| v == 128).count();
+            eprintln!(
+                "FIELD-RECON luma mean={mean} n128={nconst}/{}",
+                recon.luma.len()
+            );
+        }
+        let mut data = recon.luma;
+        data.extend(recon.chroma_cb);
+        data.extend(recon.chroma_cr);
+
+        let field_frame = VideoFrame {
+            pts,
+            dts,
+            data,
+            width: recon.luma_stride as u32,
+            height: field_height,
+            pixel_format: PixelFormat::Yuv420p,
+            is_key_frame: matches!(nal_unit_type, NalUnitType::IdrSlice),
         };
-        Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
-        self.finalize_field(recon, nal, sps, &header, packet)
+
+        // Synthetic nal/header carrying only the fields `store_reference_
+        // picture` reads — the real ones aren't available here (this may run
+        // on a LATER NAL's call stack).
+        let synth_nal = crate::nal::NalUnit {
+            nal_unit_type,
+            nal_ref_idc,
+            rbsp: Vec::new(),
+        };
+        let synth_header = crate::slice::SliceHeader {
+            first_mb_in_slice: 0,
+            slice_type: crate::slice::SliceType::I,
+            pic_parameter_set_id: pps_id,
+            frame_num,
+            field_pic_flag: true,
+            bottom_field_flag,
+            idr_pic_id: None,
+            pic_order_cnt_lsb,
+            delta_pic_order_cnt_bottom,
+            slice_qp_delta: 0,
+            num_ref_idx_l0_active_minus1: 0,
+            num_ref_idx_l1_active_minus1: 0,
+            disable_deblocking_filter_idc: 0,
+            slice_alpha_c0_offset_div2: 0,
+            slice_beta_offset_div2: 0,
+            ref_pic_list_modification_l0: Vec::new(),
+            ref_pic_list_modification_l1: Vec::new(),
+            dec_ref_pic_marking,
+            delta_pic_order_cnt_0: acc.delta_pic_order_cnt_0,
+            cabac_init_idc: 0,
+            direct_spatial_mv_pred_flag: false,
+            data_bit_offset: 0,
+            pred_weight_table: None,
+        };
+        paff_dbg!(
+            "FIELD-ACC STORE: ref_idc={} poc_lsb={:?} frame_num={} dpb_before={}",
+            nal_ref_idc,
+            pic_order_cnt_lsb,
+            frame_num,
+            self.dpb().len()
+        );
+        self.store_reference_picture(
+            &synth_nal,
+            &sps,
+            &synth_header,
+            &field_frame,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        paff_dbg!("FIELD-ACC STORE: dpb_after={}", self.dpb().len());
+
+        let visible_width = sps.pic_width_pixels();
+        let visible_height = sps.pic_height_pixels();
+        paff_dbg!(
+            "FINALIZE(field acc): frame_num={} bottom={} field_height={}",
+            frame_num,
+            bottom_field_flag,
+            field_height
+        );
+        Ok(self
+            .accumulate_field(field_frame, bottom_field_flag, frame_num)
+            .map(|full| VideoFrame {
+                data: crate::reconstruct::crop_yuv420p(
+                    &full.data,
+                    full.width,
+                    full.height,
+                    visible_width,
+                    visible_height,
+                ),
+                width: visible_width,
+                height: visible_height,
+                ..full
+            }))
     }
 
     /// Reconstruct an **MBAFF** I-slice frame (§6.4.10.1, Phase G.4).
@@ -437,7 +903,8 @@ impl H264Decoder {
                     header.pic_order_cnt_lsb,
                     header.field_pic_flag,
                     header.bottom_field_flag,
-                    header.delta_pic_order_cnt_bottom,
+                    header.delta_pic_order_cnt_0,
+   header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0);
@@ -579,6 +1046,7 @@ impl H264Decoder {
                             pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
                             sps.mb_adaptive_frame_field_flag,
                             header.field_pic_flag,
+                            pps.map(|p| p.constrained_intra_pred_flag).unwrap_or(false),
                             tracer,
                         )
                     }
@@ -778,7 +1246,7 @@ impl H264Decoder {
                 tracer,
             )
         } else {
-            crate::slice_data::parse_i_slice(
+            crate::slice_data::parse_i_slice_single(
                 &mut reader,
                 mb_cols,
                 mb_rows,
@@ -921,14 +1389,56 @@ impl H264Decoder {
 
         let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
         let pic_num_ctx = PicNumContext::new(sps, header.frame_num, true, header.bottom_field_flag);
+        // Triage (#32bz): save the raw RBSP + header fields of a chosen
+        // P-field slice (KINETIX_DUMP_PSLICE_NAL=path, frame 1 top, first_mb 0)
+        // for the independent Python syntax walker.
+        if let Ok(path) = std::env::var("KINETIX_DUMP_PSLICE_NAL") {
+            if header.first_mb_in_slice == 0 && header.frame_num == 1 && !header.bottom_field_flag {
+                std::fs::write(&path, &nal.rbsp).unwrap();
+                eprintln!(
+                    "PSLICE-DUMP frame_num={} bottom={} first_mb={} slice_type={:?} qp={} nref={} data_bit_offset={} rbsp_len={}",
+                    header.frame_num,
+                    header.bottom_field_flag,
+                    header.first_mb_in_slice,
+                    header.slice_type,
+                    26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0) + header.slice_qp_delta,
+                    num_ref_idx_l0_active,
+                    header.data_bit_offset,
+                    nal.rbsp.len()
+                );
+            }
+        }
+        if !header.ref_pic_list_modification_l0.is_empty() {
+            paff_dbg!(
+                "P-FIELD list_mod n={} cmds={:?} first_mb={} frame_num={} dpb={}",
+                header.ref_pic_list_modification_l0.len(),
+                header.ref_pic_list_modification_l0,
+                header.first_mb_in_slice,
+                header.frame_num,
+                self.dpb().len()
+            );
+        }
         let ref_list = match build_field_ref_list_l0(
             self.dpb(),
             header.bottom_field_flag,
             num_ref_idx_l0_active as usize,
             pic_num_ctx,
         ) {
-            Some(l) => l,
+            Some(l) => {
+                paff_dbg!(
+                    "P-FIELD reflist len={} dpb={} bottom={}",
+                    l.len(),
+                    self.dpb().len(),
+                    header.bottom_field_flag
+                );
+                l
+            }
             None => {
+                paff_dbg!(
+                    "P-FIELD reflist FAILED dpb={} bottom={}",
+                    self.dpb().len(),
+                    header.bottom_field_flag
+                );
                 return self.emit_skip_field(
                     sps.coded_width_pixels(),
                     field_height,
@@ -961,9 +1471,14 @@ impl H264Decoder {
         reader.seek_to_bit(header.data_bit_offset);
 
         let transform_8x8 = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
-        let parsed = if entropy_coding_mode_flag {
+
+        if entropy_coding_mode_flag {
+            // CABAC P-field pictures remain single-slice (no known ITU
+            // fixture needs multi-slice CABAC fields): parse fresh buffers
+            // and reconstruct immediately, exactly as before the CAVLC
+            // accumulator below existed.
             reader.byte_align();
-            crate::slice_data::parse_p_slice_cabac(
+            let parsed = match crate::slice_data::parse_p_slice_cabac(
                 reader.remaining_bytes(),
                 mb_cols,
                 mb_rows_field,
@@ -976,49 +1491,250 @@ impl H264Decoder {
                 transform_8x8,
                 sps.direct_8x8_inference_flag,
                 tracer,
-            )
-        } else {
-            crate::slice_data::parse_p_slice(
-                &mut reader,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    paff_dbg!("interlaced P-field parse failed: {e}");
+                    return Ok(InterlacedOutcome::Fallback);
+                }
+            };
+
+            let mut recon = crate::reconstruct::reconstruct_inter_field_frame(
+                &parsed.macroblocks,
+                &parsed.mv_store,
+                &ref_list,
+                header.bottom_field_flag,
                 mb_cols,
                 mb_rows_field,
-                slice_qp,
-                num_ref_idx_l0_active,
+                width,
+                field_height,
                 chroma_qp_index_offset,
-                transform_8x8,
-                sps.mb_adaptive_frame_field_flag,
-                header.field_pic_flag,
+                scaling,
+                &weighted_pred,
                 tracer,
-            )
-        };
-        let parsed = match parsed {
-            Ok(p) => p,
-            Err(_) => return Ok(InterlacedOutcome::Fallback),
-        };
+            );
 
-        let mut recon = crate::reconstruct::reconstruct_inter_field_frame(
-            &parsed.macroblocks,
-            &parsed.mv_store,
-            &ref_list,
-            header.bottom_field_flag,
+            let deblock_params = crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            };
+            Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+            return self.finalize_field(recon, nal, sps, header, packet);
+        }
+
+        // ---- CAVLC P-field path: multi-slice-capable accumulator ----
+        //
+        // Real field P pictures carry several slices (ITU `CVFI1_Sony_D`:
+        // ~7 per field). Each slice decodes into the shared
+        // `PictureAccumulator` (sized to the FIELD grid); MV prediction and
+        // motion compensation run per slice over the slice's own range with
+        // that slice's own field reference list (inter reconstruction only
+        // reads DPB reference fields, never sibling macroblocks), and the
+        // field finalizes - deblock + DPB store + pair - once its last MB is
+        // covered. `finalize_field_picture` handles both this P-shaped
+        // accumulator (prebuilt `recon`) and the I-shaped one.
+        let is_continuation = header.first_mb_in_slice != 0;
+        let pps_id_val = header.pic_parameter_set_id;
+        let field_total = (mb_cols * mb_rows_field) as usize;
+        let mut extra_frame: Option<VideoFrame> = None;
+
+        if !is_continuation {
+            if let Some(prev) = self.pending_picture.take() {
+                extra_frame = self.finalize_field_picture(prev, tracer)?;
+            }
+            let is_idr_new = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+            let poc_new = {
+                let mut scratch = self.poc_state.clone();
+                crate::ref_pic::derive_pic_order_cnt(
+                    sps,
+                    is_idr_new,
+                    nal.nal_ref_idc != 0,
+                    header.frame_num,
+                    header.pic_order_cnt_lsb,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    header.delta_pic_order_cnt_0,
+   header.delta_pic_order_cnt_bottom,
+                    &mut scratch,
+                )
+                .unwrap_or(0)
+            };
+            self.pending_picture = Some(PictureAccumulator::new(
+                mb_cols,
+                mb_rows_field,
+                width,
+                field_height,
+                width,
+                sps.pic_height_pixels(),
+                chroma_qp_index_offset,
+                scaling.clone(),
+                sps.clone(),
+                pps_id_val,
+                nal,
+                header,
+                is_idr_new,
+                poc_new,
+                packet.pts,
+                packet.dts,
+            ));
+        } else {
+            let matches_pending = self.pending_picture.as_ref().is_some_and(|acc| {
+                acc.matches(
+                    header.frame_num,
+                    pps_id_val,
+                    header.field_pic_flag,
+                    header.bottom_field_flag,
+                    nal.nal_ref_idc,
+                )
+            });
+            if !matches_pending {
+                // Corruption safety net (7.4.1.2.4): finalize whatever WAS
+                // pending and drop this stray slice.
+                if let Some(prev) = self.pending_picture.take() {
+                    if let Some(f) = self.finalize_field_picture(prev, tracer)? {
+                        self.frame_queue.push_back(f);
+                    }
+                }
+                self.suppress_frame = true;
+                return Ok(InterlacedOutcome::Handled);
+            }
+        }
+
+        let acc = self
+            .pending_picture
+            .as_mut()
+            .expect("just created or matched above");
+        let slice_id = acc.next_slice_id;
+        acc.next_slice_id += 1;
+        acc.deblock_params_per_slice
+            .push(crate::deblock::DeblockParams {
+                disable_idc: header.disable_deblocking_filter_idc as u8,
+                alpha_offset_div2: header.slice_alpha_c0_offset_div2,
+                beta_offset_div2: header.slice_beta_offset_div2,
+                chroma_qp_index_offset,
+            });
+        acc.ref_poc_per_slice.push((
+            ref_list.iter().map(|f| f.pic_order_cnt).collect(),
+            Vec::new(),
+        ));
+
+        let end_mb = match crate::slice_data::parse_p_slice_range(
+            &mut reader,
             mb_cols,
             mb_rows_field,
-            width,
-            field_height,
+            slice_qp,
+            num_ref_idx_l0_active,
             chroma_qp_index_offset,
-            scaling,
-            &weighted_pred,
+            transform_8x8,
+            sps.mb_adaptive_frame_field_flag,
+            header.field_pic_flag,
+            pps.map(|p| p.constrained_intra_pred_flag).unwrap_or(false),
             tracer,
-        );
-
-        let deblock_params = crate::deblock::DeblockParams {
-            disable_idc: header.disable_deblocking_filter_idc as u8,
-            alpha_offset_div2: header.slice_alpha_c0_offset_div2,
-            beta_offset_div2: header.slice_beta_offset_div2,
-            chroma_qp_index_offset,
+            header.first_mb_in_slice,
+            slice_id,
+            &mut acc.macroblocks,
+            &mut acc.nz,
+            &mut acc.pred_ctx,
+            &mut acc.slice_id_grid,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                paff_dbg!("interlaced P-field parse failed: {e}");
+                self.pending_picture = None;
+                if let Some(ef) = extra_frame {
+                    return Ok(InterlacedOutcome::Frame(ef));
+                }
+                return Ok(InterlacedOutcome::Fallback);
+            }
         };
-        Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
-        self.finalize_field(recon, nal, sps, header, packet)
+
+        // MV prediction (8.4.1.3) over THIS slice's own range - see the
+        // progressive CAVLC P driver's note on `MvStore` slice-id gating.
+        let first_mb_usize = header.first_mb_in_slice as usize;
+        {
+            let mv_store = acc
+                .mv_store
+                .get_or_insert_with(|| crate::mv::MvStore::new(field_total));
+            if let Err(e) = crate::mv::predict_slice_mvs_ex(
+                mv_store,
+                mb_cols,
+                slice_id as u32,
+                header.first_mb_in_slice,
+                &acc.macroblocks[first_mb_usize..end_mb],
+                false,
+            ) {
+                paff_dbg!("interlaced P-field MV prediction failed: {e}");
+                self.pending_picture = None;
+                if let Some(ef) = extra_frame {
+                    return Ok(InterlacedOutcome::Frame(ef));
+                }
+                return Ok(InterlacedOutcome::Fallback);
+            }
+        }
+
+        // Motion-compensate THIS slice's range into the shared half-height
+        // field buffer, using this slice's own field reference list.
+        {
+            let acc = self
+                .pending_picture
+                .as_mut()
+                .expect("still pending: just decoded into it");
+            let luma_stride = width as usize;
+            let chroma_stride = (width / 2) as usize;
+            let recon_buf = acc
+                .recon
+                .get_or_insert_with(|| crate::reconstruct::ReconstructedFrame {
+                    luma: vec![0u8; luma_stride * field_height as usize],
+                    chroma_cb: vec![0u8; chroma_stride * (field_height as usize / 2)],
+                    chroma_cr: vec![0u8; chroma_stride * (field_height as usize / 2)],
+                    luma_stride,
+                    chroma_stride,
+                });
+            crate::reconstruct::reconstruct_inter_field_frame_range(
+                recon_buf,
+                &acc.macroblocks,
+                acc.mv_store.as_ref().expect("just populated above"),
+                &ref_list,
+                header.bottom_field_flag,
+                mb_cols,
+                first_mb_usize,
+                end_mb,
+                chroma_qp_index_offset,
+                &acc.scaling,
+                &weighted_pred,
+                tracer,
+            );
+            for done in &mut acc.reconstructed[first_mb_usize..end_mb] {
+                *done = true;
+            }
+        }
+
+        paff_dbg!(
+            "P-FIELD slice end: first_mb={} end_mb={}/{}",
+            header.first_mb_in_slice,
+            end_mb,
+            field_total
+        );
+        if end_mb >= field_total {
+            let acc = self.pending_picture.take().unwrap();
+            let new_frame = self.finalize_field_picture(acc, tracer)?;
+            match (extra_frame, new_frame) {
+                (Some(ef), Some(f)) => {
+                    self.frame_queue.push_back(ef);
+                    return Ok(InterlacedOutcome::Frame(f));
+                }
+                (Some(ef), None) => return Ok(InterlacedOutcome::Frame(ef)),
+                (None, Some(f)) => return Ok(InterlacedOutcome::Frame(f)),
+                (None, None) => return Ok(InterlacedOutcome::Handled),
+            }
+        }
+        // Field still incomplete: more slices of this picture are expected.
+        if let Some(ef) = extra_frame {
+            return Ok(InterlacedOutcome::Frame(ef));
+        }
+        Ok(InterlacedOutcome::Handled)
     }
 
     /// PAFF B-field picture decode: build both field reference lists
@@ -1101,7 +1817,8 @@ impl H264Decoder {
                 header.pic_order_cnt_lsb,
                 header.field_pic_flag,
                 header.bottom_field_flag,
-                header.delta_pic_order_cnt_bottom,
+                header.delta_pic_order_cnt_0,
+   header.delta_pic_order_cnt_bottom,
                 &mut scratch,
             )
             .unwrap_or(0)

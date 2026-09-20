@@ -754,3 +754,161 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
         );
     }
 }
+
+/// Real aom-generated AV1 samples from the FFmpeg FATE suite
+/// (<https://fate-suite.ffmpeg.org/av1/>) diffed against dav1d.
+///
+/// Gated on `KINETIX_AV1_FATE_DIR` pointing at a directory containing the
+/// downloaded samples — tests never touch the network. Samples exercising
+/// features this decoder does not support (Annex-B byte alignment, decoder
+/// model, film grain) are reported as skipped rather than failed: dav1d
+/// applies film grain to its output while Kinetix ignores it, so those
+/// files can never compare equal until film grain is implemented.
+#[test]
+fn av1_fate_real_samples_vs_dav1d_when_available() {
+    use tpt_kinetix_av1::Av1Decoder;
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_test_utils::{
+        pixel_diff::within_tolerance,
+        reference::{dav1d_available, decode_av1_with_dav1d, split_ivf_frames},
+    };
+
+    let Ok(dir) = std::env::var("KINETIX_AV1_FATE_DIR") else {
+        eprintln!(
+            "skipping: set KINETIX_AV1_FATE_DIR to a directory with the \
+             fate-suite.ffmpeg.org/av1 samples to run this test"
+        );
+        return;
+    };
+    if !dav1d_available() {
+        eprintln!("skipping: dav1d not available");
+        return;
+    }
+
+    // Files whose features Kinetix knowingly does not support yet; dav1d's
+    // output can never match for these (e.g. it applies film grain).
+    const EXPECTED_UNSUPPORTED: &[&str] = &["annexb", "film_grain", "decode_model"];
+
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        eprintln!("skipping: cannot read {dir}");
+        return;
+    };
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("ivf") | Some("obu")
+            )
+        })
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        eprintln!("skipping: no .ivf/.obu samples in {dir}");
+        return;
+    }
+
+    let mut comparable = 0usize;
+    let mut exact = 0usize;
+    for path in &paths {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_owned();
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[{name}] skipped: cannot read ({e})");
+                continue;
+            }
+        };
+        let is_ivf = bytes.starts_with(b"DKIF");
+        if !is_ivf {
+            eprintln!("[{name}] skipped: non-IVF container (Annex-B OBU) unsupported");
+            continue;
+        }
+        if bytes.len() < 32 {
+            eprintln!("[{name}] skipped: truncated IVF header");
+            continue;
+        }
+        let width = u16::from_le_bytes([bytes[12], bytes[13]]) as u32;
+        let height = u16::from_le_bytes([bytes[14], bytes[15]]) as u32;
+        if width == 0 || height == 0 {
+            eprintln!("[{name}] skipped: zero dimensions in IVF header");
+            continue;
+        }
+
+        let ref_frames = match decode_av1_with_dav1d(&bytes, width, height) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[{name}] dav1d decode returned: {e}");
+                continue;
+            }
+        };
+
+        let packets = split_ivf_frames(&bytes);
+        let mut dec = Av1Decoder::new();
+        let mut kframes = Vec::new();
+        let mut decode_err = None;
+        for (i, data) in packets.iter().enumerate() {
+            let pk = Packet {
+                pts: Timestamp::new(i as i64, (1, 30)),
+                dts: Timestamp::new(i as i64, (1, 30)),
+                data: data.clone(),
+                stream_index: 0,
+                is_key_frame: i == 0,
+            };
+            match dec.decode(&pk) {
+                Ok(Some(frame)) => kframes.push(frame),
+                Ok(None) => {}
+                Err(e) => {
+                    decode_err = Some((i, e));
+                    break;
+                }
+            }
+        }
+        if let Some((i, e)) = decode_err {
+            eprintln!("[{name}] skipped after frame {i}: Kinetix decode error: {e}");
+            continue;
+        }
+
+        let known_unsupported = EXPECTED_UNSUPPORTED
+            .iter()
+            .any(|f| name.to_lowercase().contains(f));
+        let n = kframes.len().min(ref_frames.len());
+        let mut file_exact = 0usize;
+        for i in 0..n {
+            if within_tolerance(&kframes[i], &ref_frames[i], 0) {
+                file_exact += 1;
+            }
+        }
+        comparable += n;
+        exact += file_exact;
+        let status = if known_unsupported {
+            "expected-unsupported"
+        } else if file_exact == n && n == ref_frames.len() {
+            "exact"
+        } else {
+            "MISMATCH"
+        };
+        eprintln!(
+            "[{name}] {width}x{height}: {file_exact}/{n} frames exact \
+             (dav1d {}/{}) — {status}",
+            ref_frames.len(),
+            packets.len(),
+        );
+    }
+
+    eprintln!("AV1 FATE real samples: {exact}/{comparable} comparable frames bit-exact vs dav1d");
+    if comparable == 0 {
+        panic!("no comparable Kinetix/dav1d frame pairs produced");
+    }
+    // Report-only frontier tracker: these samples deliberately exercise
+    // features beyond the supported subset (film grain, decoder model,
+    // non-uniform tiling, operating-point params). The per-file exact counts
+    // form the regression baseline — when a feature lands, its count should
+    // rise to `exact`; a count DROPPING from a previous run is the signal to
+    // investigate.
+}

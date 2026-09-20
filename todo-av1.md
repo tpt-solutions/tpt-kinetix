@@ -7198,3 +7198,324 @@ cosmetic for output but worth one look alongside (1)).
 > gate was widened (decode.c, prints all poc); KINETIX_DBG_OBMCD added
 > (dav1d obmc() per-call print); Kinetix OBMC deep trace retuned to
 > mi(4,20) plane 1 with before-values (all committed).
+
+> **2026-09-19 — INTER DECODE IS BIT-EXACT: 128x96 7/7, 96x64 5/5 (was 0/5),
+> 64x64 5/5 inter frames + intra corpus 6/6 — every frame, all planes, with
+> and without in-loop filters, hidden frames and show_existing replay
+> included.** The "MM-read mismatch / replay decodes symbols" lead from the
+> 09-18 cont'd-5 note was a FALSE ALARM, and the session that actually closed
+> the chroma gap found three real bugs. In order:
+>
+> 1. **Cont'd-5 retraction.** The stream contains TWO frames with
+>    order_hint=6 (the hidden alt-ref AND a real shown frame, OBU#16 at
+>    TU6); dav1d's KINETIX_DBG_MM tags by frame_offset so its "poc6=36" was
+>    33+3 lumped. Chronological run-lengths match Kinetix exactly:
+>    33/8/3/18 = 33/8/3/18 (total 62). The show_existing replay (TU3,
+>    `FRAME_HDR` payload 0xa8 = show_existing idx 2 → replays oh3, not oh6)
+>    goes through decoder.rs's early-return and reads ZERO symbols. The
+>    "position 5 vs 8" discrepancy was dump-index confusion: Kinetix names
+>    kfr_NN by frame_count which the replay increments without dumping
+>    (kfr_05 missing), dav1d's DFR hook doesn't dump the replay at all —
+>    pair kfr_00..04↔dfr_00..04, then kfr_06..09↔dfr_05..08. ffmpeg's av1
+>    encode is deterministic across runs (verified byte-identical), so
+>    cross-run dump pairing is safe.
+> 2. **Sub-8x8 chroma prediction extent** (inter_block.rs): the
+>    `.max(4)` clamp on cbw/cbh made every sub-8x8 leaf smear its MC over
+>    the whole parent 8x8's chroma (8x4 → 4 rows, 4x4 → 4x4), so sibling
+>    halves and 4x4 quad quadrants were decided last-writer-wins with the
+>    wrong leaf's mv. Removed the clamp; each leaf predicts its own extent.
+>    Necessary but not sufficient (fixed some samples only where later
+>    writes coincidentally overwrote the damage).
+> 3. **Inter-intra chroma masks** (wedge.rs/inter_block.rs): dav1d applies
+>    the II blend to ALL THREE planes (recon_tmpl.c runs the interintra
+>    block again per chroma plane with `II_MASK(chr_layout_idx, ..)`), and
+>    the chroma-layout masks are the **2x2 box-average of the luma masks**
+>    (`init_chroma`: `(l00+l01+l10+l11+2)>>2`), not a re-generation at
+>    chroma resolution and not the raw sub-sampled luma mask. Added
+>    `wedge_table_420()` + `wedge_mask_420()`; apply_interintra now blends
+>    luma with the luma mask and chroma with the 2x2-averaged mask. This
+>    was THE 128x96 chroma bug (its 3 wedge blocks: rows 40-43 blended with
+>    luma weights, ±1-13 chroma diffs in every inter frame).
+> 4. **Sub-8x8 chroma scheme for mixed intra/inter splits** (the 96x64
+>    bug, 8 samples in one 8x8): for an inter has_chroma leaf whose
+>    attributing neighbour cells are inter, dav1d's quadrant scheme applies
+>    (per-quadrant MCs from the left/above/diagonal cells' mv + that cell's
+>    filter, own mv for BR — all based at the PARENT 8x8's chroma origin
+>    because `uvdstoff` floors `bx/by >> ss`); when a needed cell is INTRA
+>    the gate fails and the leaf instead makes ONE mc over the whole parent
+>    8x8 chroma (`bw4 << (bw4 == ss_hor)`, `bx & ~ss_hor`) with its own mv.
+>    Implemented the gate + quadrant calls + parent-extent fallback in
+>    decode_inter_block, the running `tl_filter2d` (dav1d
+>    `t->tl_4x4_filter`, set at each inter leaf's chroma-pred end, untouched
+>    by intra), and dav1d's BS_4X4 SPLIT save/restore of that variable in
+>    partition.rs's quad walk. NOTE: the earlier "per-leaf output ==
+>    quadrant scheme" equivalence claim (09-18 cont'd 3) was WRONG — it
+>    only holds when the attributing cells' mvs coincide with the leaves';
+>    128x96 passed coincidentally, 96x64 (inter leaf under an intra
+>    sibling) exposed it.
+> 5. **Reference helper** (test-utils/reference.rs): `decode_av1_with_dav1d`
+>    / `decode_av1_obu_with_dav1d` now feed dav1d through a temp file — the
+>    mingw/Windows dav1d build cannot open `-` (stdin), so the conformance
+>    suite silently degraded to "no comparable pairs" on Windows. It runs
+>    green here now.
+>
+> New env-gated hooks (all committed): KINETIX_AV1_DBG_PREDUMP (per-leaf
+> chroma MC prediction), KINETIX_AV1_DBG_RESDUMP/COEFFDUMP (chroma residual
+> + dequant grid), KINETIX_AV1_DBG_IIDUMP (inter-intra intra-pred + mask),
+> DBG uv-cf-blk position tags. dav1d clone: Post-uv-cf-blk gained
+> `bx=%d,by=%d` (all three print sites; site 2's arg list had to be fixed —
+> garbage varargs if format/args disagree), rebuilt + copied to build/tools.
+> capabilities() notes updated (inter bit-exact on the corpus);
+> `pixel_exact` stays false pending official AOM/ITU vectors. NEXT: run the
+> official AOM/ITU vector set through the strict conformance gate; if green,
+> flip `pixel_exact` and the AGENTS.md/README AV1 status lines.
+
+> **2026-09-19 (cont'd) — hardening pass.** (a) Added the FATE real-sample
+> conformance test (`av1_fate_real_samples_vs_dav1d_when_available`,
+> env-gated on `KINETIX_AV1_FATE_DIR` pointing at
+> fate-suite.ffmpeg.org/av1 samples; report-only frontier tracker). All 7
+> samples decode end-to-end now; the frame-count baselines vs dav1d are
+> decode_model 22/24, film_grain 10/10 (grain unapplied — can never match
+> until film grain lands), frames_refs_short_signaling 50/50 decoded but
+> 0 exact, non_uniform_tiling 24/24 decoded 0 exact, seq_hdr_op_param_info
+> 60/64 decoded 0 exact, annexb (Annex-B container) unsupported. PIXEL
+> exactness on all of these is the OPEN frontier — each filename is a
+> feature lead (decoder-model temporal_point_info in frame headers,
+> non-uniform tiling, operating-point params, film grain).
+> (b) REAL BUG: `set_frame_refs` (frame_refs_short_signaling) used
+> `wrapping_add/sub` slot arithmetic — the spec's SetFrameRefs is an
+> ORDER-HINT SEARCH over the 8 DPB slots (ALTREF = latest signed poc
+> distance, BWDREF/ALTREF2 = earliest remaining, LAST2/LAST3 = latest
+> remaining, fallback earliest slot). Ported dav1d obu.c's
+> frame_refs_short_signaling block verbatim into frame.rs; the old version
+> produced slot index 255 (wrapping_sub underflow) and PANICKED the decoder
+> on the first frames_refs_short_signaling stream it ever met. (c) REAL
+> BUG: the tile→frame blit rounded the mi extent (90-tall frame → 92 rows)
+> and panicked indexing the output planes; now clipped to the frame bounds
+> (reconstruct/mod.rs). (d) REAL BUG (160x90): deblock `filter_line_1d`
+> wrote `out[edge+1]` past the plane when an edge sat on the last frame
+> sample; writes now bounds-checked like the reads. (e) Broadened the
+> synthetic inter corpus: testsrc_160x90 (height not 8-aligned → SB-edge
+> stress; currently 0/7, ~16 dB, ~3470 luma samples — THE NEXT DEBUGGING
+> TARGET) and smptebars_96x64 (skip-heavy; 5/5 exact immediately).
+> (f) dav1d-rebuild note: the clone's always-on DEBUG_BLOCK_INFO prints go
+> to STDOUT and are enormous — redirect stdout when scripting it.
+> Gates: clippy clean (0 warnings), fmt clean (AV1/test-utils; the vp9
+> fmt diff in the tree predates this session), av1 tests green,
+> conformance 11/11 green including the FATE report-only test.
+
+> **2026-09-19 (cont'd 2) — 160x90 root cause LOCALIZED: keyframe sub-8x8
+> intra y-mode syntax.** Method: pin ONE saved stream (ffmpeg's av1 encode
+> is NONDETERMINISTIC across runs for 160x90 — the harness re-encodes per
+> run, which poisoned the first trace comparison), extract the kf-only OBU
+> stream, add a `KINETIX_DBG_KFINTRA` hook to the dav1d clone's
+> recon_b_intra (kf keyframe blocks print NO decode_b traces at all:
+> DEBUG_BLOCK_INFO is `frame_offset >= 1`), and diff the 72-block kf leaf
+> walk (bx/by/bs/ym/pal/rng) against kinetix's `KINETIX_AV1_TRACE`
+> KTRACE BLOCK lines (watch the regex: uvmode is omitted for chroma-less
+> leaves, and `r=` is capture group 9). Leaves 0-27 are IDENTICAL (modes,
+> rng). First divergence at leaf 28, block mi (0,17) — a sub-8x8 block in
+> the last SB row: SAME rng 60360 but dav1d ym=13 vs kinetix ym=0, i.e.
+> the two decoders read this symbol from DIFFERENT CDFs. dav1d's keyframe
+> path (decode.c ~1070) reads kf y-mode from
+> `cdf.kfym[dav1d_intra_mode_context[a->mode[bx4]]]
+> [dav1d_intra_mode_context[l.mode[by4]]]` — a 2D above/left-MODE context —
+> and for sub-8x8 blocks reads PER-SUB-BLOCK modes. Kinetix reads one
+> y-mode per leaf from the size-group CDF with no mode-context. THE FIX
+> (next session): implement the kf per-sub-block intra_frame_y_mode reads
+> with the above/left-mode-context CDFs (needs the kfym CDF tables +
+> dav1d_intra_mode_context mapping + per-sub-block mode storage feeding
+> the intra edge arrays), then re-run this exact trace diff until the full
+> kf is leaf-identical. The 8x8-coarse parse above stays aligned, which is
+> why rows 0-62 are exact and only the SB row containing the sub-8x8
+> splits diverges. (The 23-vs-24 mi_rows formula discrepancy between
+> reconstruct/mod.rs `height.div_ceil(4)` and frame.rs's spec
+> `2*ceil(H/8)` is also worth auditing while in there.)
+
+> **2026-09-19 (cont'd 3) — 160x90 root cause chain COMPLETE (fix = next
+> session's first task, recipe below).** The "kf sub-8x8 y-mode" theory from
+> cont'd 2 was WRONG (ym=13 = dav1d FILTER_PRED; kinetix's KTRACE prints the
+> raw y_mode=0 with filter_intra in a separate field — they agreed, and the
+> entropy stayed aligned 37 more leaves). The real chain, proven by
+> per-pixel palette-index traces on BOTH decoders (`KINETIX_DBG_PALIDX` now
+> in kinetix's read_color_map and the dav1d clone's read_pal_indices):
+> palette index reads match for 5701 consecutive reads across the whole kf,
+> then Kinetix SKIPS one pixel — its `onscreen_height` is one row short.
+> Underneath: **reconstruct/mod.rs computes mi_rows = ceil(H/4) = 23 for
+> H=90, while the spec (and frame.rs's own parse_tile_info!) uses
+> MiRows = 2*ceil(H/8) = 24** — they coincide for every 8-aligned height,
+> which is why ONLY non-8-aligned frames diverge. On the short grid the
+> partition walk force-splits bottom-row blocks differently (different leaf
+> tree → different palette-map read extents → entropy desync), and the
+> palette color map clips `onscreen_height` at the wrong grid. THE FIX (a
+> coherent padded-buffer redesign): (1) reconstruct/mod.rs mi_cols/mi_rows
+> → `2*ceil(dim/8)` at all four sites (TileDecodeState::new, decode_sbrow,
+> tile geometry, frame blit); (2) allocate the tile/FRAME planes at the mi
+> extent (width × mi_rows*4, chroma likewise) so padding rows have storage;
+> (3) StoredFrame keeps the padded planes (to_video_frame crops on
+> output — already done by the blit clip); (4) MC/borders then behave like
+> dav1d's padded refs automatically; (5) the palette onscreen clip becomes
+> a no-op (keep it as a grid safety check). Deblock/CDEF/LR iterate grid
+> edges — padding-row edges are cropped out at blit, harmless. After: re-run
+> the 160x90 trace diff (KINETIX_DBG_PALIDX both sides + KFINTRA/KTRACE
+> BLOCK) until the full kf is leaf-identical, then the inter corpus.
+> Also verified this session: ffmpeg's av1 encode is NONDETERMINISTIC
+> across processes for 160x90 (byte-different streams) — ALWAYS pin one
+> saved stream per comparison (KINETIX_AV1_CHROMA_OBU + extract).
+> Debug hooks added: KINETIX_DBG_PALIDX (kinetix per-pixel palette reads),
+> KINETIX_DBG_KFINTRA + PALIDX (dav1d clone, rebuilt), KTRACE SKIP/IBCFLAG/
+> YMODE/UVMODE/PALUV/PALUVC/COLORMAP (kinetix keyframe symbol chain).
+
+> **2026-09-20 — PADDED-BUFFER REDESIGN LANDED. 160x90 luma bit-exact; the
+> entire "bottom-band" divergence is gone.** Implemented per the cont'd-3
+> recipe: reconstruct/mod.rs now computes MiCols/MiRows with the spec
+> formula (`2*ceil(dim/8)`) and builds grid-extent planes
+> (`PaddedPlanes`, new pub struct + 4th element of ReconstructOutput);
+> tile geometry clips to the grid; decode_tile_group receives grid dims;
+> the blit is a straight grid-space copy; post-filters run over the padded
+> planes (dav1d-like); the output VideoFrame is cropped via `crop_planes`.
+> decoder.rs: `StoredFrame` stores the padded planes (grid dims + real
+> dims; `to_video_frame` crops), `RefFrameStore::refresh` takes
+> `&PaddedPlanes`, so motion compensation reads decoded padding rows like
+> dav1d. Verified: 160x90 UNFILTERED fully exact vs dav1d (Y, U, V, all 8
+> frames + hidden), and filtered luma FULLY exact (Y=0 vs dav1d mask 7).
+> REMAINING (tiny): 5 chroma samples in frame 1 at uv (48-51, 35-36) — the
+> TL/BL sub-8x8 boundary of the CDEF'd 32x32 compound block at mi
+> (24,16) — differ by ±1-2. Stage bisect (dav1d --inloopfilters masks +
+> KINETIX_AV1_NOFILTER/NODEBLOCK/NOCDEF/NOLR): deblock matches on all
+> planes; kinetix's chroma CDEF changes 403 uv samples where dav1d's
+> changes 402, 5 of them differing. NEXT: chroma-CDEF direction/damping
+> edge case for that block (dump per-block cdef direction + the 5
+> samples' filter taps on both sides). NOTE: ffmpeg's av1 encode is
+> NONDETERMINISTIC across processes for 160x90 — the harness now LOADS a
+> pinned OBU if KINETIX_AV1_CHROMA_OBU points at an existing file
+> (generate once, reuse for every comparison). Also: dav1d CLI exits 1
+> with `-o /dev/null` on Windows ("No extension found for file nul") —
+> use a real output path; decode itself is unaffected (DUMPF still dumps).
+
+> **2026-09-20 (cont'd) — chroma residue re-diagnosed: LR stripe-2 boundary,
+> NOT cdef.** Stage isolation on the pinned 160x90 stream (kinetix
+> NODEBLOCK/NOCDEF/NOLR vs dav1d --inloopfilters 1/3/4/7) proves: deblock ✓
+> exact all planes; CDEF ✓ exact all planes (kin DC == dav mask3); LR-only ✓
+> exact (kin LR-only == dav mask4 — the restoration function itself is
+> correct on identical input). But FULL pipelines differ by ~130 uv samples
+> whose pattern starts EXACTLY at uv row 32 = chroma LR stripe 2 boundary
+> (luma row 64), pattern = "dav1d's LR changed it, kinetix's didn't" (plus
+> scattered "both changed differently" further into stripe 2). Root cause
+> hypothesis: chroma LR stripe geometry for 4:2:0 at non-8-aligned heights.
+> dav1d's `dav1d_copy_lpf` computes chroma stripe boundaries as
+> `(sby << ((6 - ss_ver) + sb128)) - offset_uv` (offset_uv = 8*!!sby >>
+> ss_ver) and `row_h = imin((sby+1) << ((6-ss_ver)+sb128), h-1)` — the
+> -ss_ver shifts put the chroma stripe-2 boundary and its 2-row
+> `lr_lpf_line` backup at chroma rows that Kinetix's
+> `apply_loop_restoration_plane` (which stripes by plain 32-chroma-rows per
+> 64-luma-stripe from the PLANE top) computes differently once the frame
+> height isn't a multiple of 64. NEXT: port dav1d's exact stripe
+> row/backup-row arithmetic (including the `imin(..., h-1)` frame-edge
+> clamp and the `offset = 8*!!sby` deblock-overlap rows) into
+> apply_loop_restoration_plane for chroma, then re-run this stage-isolated
+> diff until LR-full matches. Also note: dav1d CLI on Windows fails
+> `-o /dev/null` (exit 1, "No extension found for file nul") — always pass
+> a real output filename when scripting it; decode + DUMPF still run.
+
+> **2026-09-20 (cont'd 2) — CORRECTION to the residue attribution above: the
+> 5-sample "chroma CDEF" claim was measured against a STALE dump (the
+> t160cmp/kfr_* files predated the redesign; ffmpeg's per-process
+> nondeterminism struck again). With correctly pinned dumps the residue is
+> ~130-336 uv samples and the diagnosis is the LR STRIPE one that follows.
+> Lesson: every dump comparison must use files from the SAME pinned stream
+> and the SAME binary build; delete stale dumps before each run.
+> Cleanup: dead `split_planes` removed from decoder.rs (refresh now takes
+> PaddedPlanes). All gates green after cleanup.
+
+> **2026-09-20 (cont'd 3) — chroma residue FINAL characterization.** The
+> LR-stripe theory from cont'd 2 was also wrong (stage isolation showed
+> LR-only == dav mask4 exactly, and LR is DISABLED in the inter frames'
+> headers anyway — both decoders parse types=[0,0,0] for every inter
+> frame, confirmed by dav1d's own LRHDR probe on the pinned stream). The
+> true residue: 44 chroma samples total across the 8 inter frames (43 U +
+> 1 V, ±1-2 each, zero luma), all inside ONE chroma 8x8 per frame — the
+> block at chroma (48-55, 32-39) = luma (96-111, 64-79), inside the 32x32
+> compound block at mi (24,16). Stage attribution on the pinned stream:
+> recon ✓ exact; deblock ✓ exact (kin DEBLOCK == dav mask1, 0 chroma
+> diffs); the divergence enters in the CDEF(+LR=no-op) stage: dav1d's cdef
+> changes 3 of the 5 samples, kinetix's changes a different subset. The
+> chroma 8x8 sits at the TOP of the second superblock row (chroma row 32
+> = the sbrow boundary), where dav1d's cdef reads `top`/`bot` context
+> lines from `lr_lpf_line`/`cdef_line` buffers — the sbrow-boundary line
+> content or the uv direction remap (Cdef_Uv_Dir) for THIS boundary is
+> the remaining suspect. NEXT (small, isolated): dump dav1d's cdef dir +
+> uv_dir + pri/sec strengths for the chroma 8x8 at (48,32) frame 1
+> (hook cdef_apply_tmpl.c like KFINTRA), compare with kinetix's
+> cdef_plane_chroma dir/strengths (add a CDEFCHROMA trace), and diff the
+> filter taps. Also possible: dav1d's --inloopfilters CLI forces
+> restore_planes bits that interact with copy_lpf/lr_lpf_line content at
+> sbrow boundaries — compare dav mask2 (cdef only) vs the pinned kinetix
+> deblock+cdef output to decouple.
+> Session totals: 160x90 Y EXACT all 9 frames (filtered + unfiltered);
+> chroma 44 samples ±1-2 across 8 frames (was: ~2100 chroma samples at
+> ~15 dB + 3450 luma). All other corpora fully bit-exact. Gates green.
+
+> **2026-09-20 (cont'd 4) — CDEF exonerated; residue re-attributed to
+> frame n1's recon/deblock stage; all previous stage attributions were
+> cross-run artifacts.** Built frame-identified (order_hint + show_frame)
+> probes into BOTH decoders' chroma CDEF (kin `cdef_plane_chroma` CDEFUV,
+> dav `cdef_apply_tmpl.c`) and per-frame stored-reference grid dumps
+> (kin `KINETIX_AV1_DUMP_GRID` in reconstruct/mod.rs writing kgr_NN.yuv
+> by decode sequence; dav `KINETIX_DBG_DUMPCUR` hooking
+> `dav1d_decode_frame_exit`, kgr_NN.yuv keyed by order_hint — beware
+> n1/n7 both have oh=6 so dav's n1 dump is overwritten by n7's; the two
+> frames' FILTERED grids are byte-identical in dav, and kin's kfr dumps
+> showed n1's and n7's recon are also identical, so kgr_06 = both).
+>
+> Stream anatomy of pinned.obu (1341 B, 160x90 testsrc): 9 coded frames
+> + 1 show_existing, decode order oh = 0(K),6*,3*,1,2,SE,4,5,6,7 where
+> n1(oh6, show_frame=0) and n2(oh3, show_frame=0) are HIDDEN alt-refs,
+> the SE replay re-displays n1, and n7 is a second coded frame that
+> re-encodes n1's exact recon. TU#2 carries THREE frames (TD,FRAME,FRAME
+> ,FRAME — obu6 has no TD); the test harness's TD-based TU splitter
+> handles it. kin reconstructs 9 coded frames; dav's CLI reports 8 shown.
+>
+> Key semantics settled: AV1 references ARE the post-deblock+post-CDEF
+> (and post-LR) planes (dav1d: f->cur aliases f->sr_cur, decode.c:3618,
+> and c->refs[].p = sr_cur) — kin storing `padded` cloned AFTER
+> apply_post_filters (reconstruct/mod.rs:2221) is CORRECT; do not "fix"
+> it back to pre-filter. Both decoders' parsed LR headers agree frame by
+> frame (LR only on the keyframe, V-plane SgrProj). Deblock/CDEF
+> parameters at the probe block are identical in both decoders on every
+> frame that filters it (oh=0: pri=2/dir=1; oh=6/n1: pri=3/dir=2;
+> oh=7: sec=4/dir=0; kin also prints oh=1 with pri=0 = dav's skip_uv).
+>
+> Re-attribution: the "44 samples, divergence enters at CDEF" claim came
+> from comparing dumps across RUNS with different --inloopfilters env —
+> meaningless once references include filtered content (each run's
+> frames n>=1 recon legitimately differs). Ground truth from same-run
+> full-grid comparisons (23040 B = 160x96 grid incl. padding rows
+> 90..95): n0 EXACT (0 diffs incl. padding — the padded-recon + KF LR
+> path is fully verified); n1 grid diffs = 6 Y + 33 U + 37 V; n2..n6 ≈
+> 30 U + 25-32 V each, 0-14 Y; final visible outputs 0/19/8/2/4/6/5/5/9
+> ≈ 58 samples ±1-2. The diffs cluster at (a) chroma rows 31-32 = the
+> luma y=64 SB-ROW BOUNDARY (U(72,31), U(78,31), U(79,31), V(8,31)…),
+> (b) luma row 64-65 x=63/124-127 (the same boundary), and (c) the chroma
+> 4x4s at (48,32)/(48,36) [luma (96,64)/(96,72)] — and the kin CDEFUV
+> probe shows n1's PRE-CDEF block already differing at U(50,35) (kin 235
+> vs dav 232) in the full run, i.e. the divergence is in n1's RECON or
+> DEBLOCK, NOT CDEF. In the deblock-only staged run (NOCDEF+NOLR) kin n1
+> == dav n1 except 10 samples at exactly such SB-boundary edges —
+> Y(63,66), Y(64,66), U(72,31), U(78,31), U(79,31), V(63,15), V(8,31),
+> V(62,31), V(31,34), V(32,34) — pointing at kin's deblock EDGE FLAGS or
+> LEVELS on frame n1's SB(16,16) top/left boundary (luma x=64 / y=64) as
+> the root cause; CDEF then copies those ±1s into the residue pattern.
+> NEXT (concrete): dump kin's deblock edge-flag/level decisions for frame
+> n1 (meta.u_tx_w/u_tx_h/chroma_edge_left/chroma_edge_top around
+> mi(16,16) and the luma maps at x=64/y=64) against a dav1d
+> loopfilter_tmpl.c probe gated to that frame+edges; diff which edges
+> each decoder filters. CAVEAT recorded: dav1d 1.5.4's own output on this
+> stream differs by 4-8 visible samples/frame between --threads 1 and
+> default MT (1ed92ccf vs 44202e14 md5) — the conformance harness uses
+> default MT as ground truth; kin sits within ~±2 of both.
+> New env probes this session (all no-op unless set, keep):
+> KINETIX_AV1_DUMP_GRID=<dir>, KINETIX_DBG_CDEFUV (now also covers
+> luma (96,72)), KINETIX_DBG_DUMPCUR/LRHDR (dav1d clone), and oh= dump
+> tags in KINETIX_AV1_DUMP_FRAMES output. All gates green (fmt, clippy,
+> AV1 154 tests, test-utils incl. conformance 11/11).

@@ -1003,6 +1003,7 @@ fn main() {
         false,
         false,
         false,
+        false,
         &mut tpt_kinetix_h264::trace::NoopTracer,
     )
     .unwrap();

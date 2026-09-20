@@ -281,6 +281,7 @@ fn residual_block_oracle() {
         false,
         false,
         false,
+        false,
         &mut cap,
     )
     .expect("parse_p_slice");

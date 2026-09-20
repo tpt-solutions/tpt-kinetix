@@ -459,9 +459,21 @@ impl<'a> TileDecodeState<'a> {
                 let size = 2 + self
                     .mode_cdfs
                     .read_palette_size_uv(&mut self.dec, bsize_ctx);
+                if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                    eprintln!(
+                        "KTRACE PALUV bx={mi_col} by={mi_row} size={size} r={}",
+                        self.dec.raw_state().0
+                    );
+                }
                 let cache = self.get_palette_cache(1, mi_row, mi_col);
                 colors_u = self.read_palette_colors_yu(size, &cache, true, false);
                 colors_v = self.read_palette_colors_v(size);
+                if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                    eprintln!(
+                        "KTRACE PALUVC bx={mi_col} by={mi_row} colors_u={colors_u:?} r={}",
+                        self.dec.raw_state().0
+                    );
+                }
             }
         }
 
@@ -529,6 +541,12 @@ impl<'a> TileDecodeState<'a> {
                         self.mode_cdfs
                             .read_palette_color_idx_y(&mut self.dec, n, ctx)
                     };
+                    if std::env::var("KINETIX_DBG_PALIDX").is_ok() {
+                        eprintln!(
+                            "PALIDX i={i} j={c} ctx={ctx} idx={sym} r={}",
+                            self.dec.raw_state().0
+                        );
+                    }
                     map[r * stride + c] = color_order[sym];
                     if j == j_lo {
                         break;
@@ -551,6 +569,13 @@ impl<'a> TileDecodeState<'a> {
                 let edge_row = &src[(onscreen_height - 1) * stride..onscreen_height * stride];
                 dst[..block_width].copy_from_slice(edge_row);
             }
+        }
+        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            let uv = if is_uv { "uv" } else { "y" };
+            eprintln!(
+                "KTRACE COLORMAP {uv} mi=({mi_col},{mi_row}) n={n} r={}",
+                self.dec.raw_state().0
+            );
         }
         (map, stride)
     }

@@ -118,6 +118,46 @@ fn wedge_table() -> &'static WedgeTable {
     TABLE.get_or_init(build_wedge_table)
 }
 
+/// Wedge masks for the 4:2:0 chroma plane layout. The spec's wedge mask
+/// process runs per *plane*, and the chroma-layout masks are the 2×2
+/// box-average of the luma masks (dav1d's `init_chroma`: each chroma weight
+/// is `(l00 + l01 + l10 + l11 + 2) >> 2` over the four corresponding luma
+/// weights of the same sign) — NOT a regeneration at chroma resolution.
+fn wedge_table_420() -> &'static WedgeTable {
+    static TABLE: OnceLock<WedgeTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let luma = wedge_table();
+        let empty = || std::array::from_fn(|_| Vec::new());
+        let mut table: WedgeTable = (0..BLOCK_SIZES).map(|_| [empty(), empty()]).collect();
+        for bsize in 0..BLOCK_SIZES {
+            if WEDGE_BITS[bsize] == 0 {
+                continue;
+            }
+            let w = BLOCK_WIDTH[bsize];
+            let h = BLOCK_HEIGHT[bsize];
+            for wedge in 0..WEDGE_TYPES {
+                let l = &luma[bsize][0][wedge];
+                if l.is_empty() {
+                    continue;
+                }
+                let mut m = vec![0u8; (w >> 1) * (h >> 1)];
+                for y in 0..h / 2 {
+                    for x in 0..w / 2 {
+                        let s = l[(2 * y) * w + 2 * x] as u32
+                            + l[(2 * y) * w + 2 * x + 1] as u32
+                            + l[(2 * y + 1) * w + 2 * x] as u32
+                            + l[(2 * y + 1) * w + 2 * x + 1] as u32;
+                        m[y * (w >> 1) + x] = ((s + 2) >> 2) as u8;
+                    }
+                }
+                table[bsize][0][wedge] = m.clone();
+                table[bsize][1][wedge] = m.iter().map(|&v| 64 - v).collect();
+            }
+        }
+        table
+    })
+}
+
 fn build_wedge_table() -> WedgeTable {
     // Build the 64×64 master masks for the six directions.
     let n = MASK_MASTER_SIZE;
@@ -205,6 +245,19 @@ pub(super) fn wedge_mask(bsize: usize, wedge_sign: bool, wedge_index: usize) -> 
         // Not a wedge-enabled size (shouldn't happen — caller gates on
         // `wedge_allowed`); fall back to a flat half-weight mask.
         vec![32u8; BLOCK_WIDTH[bsize] * BLOCK_HEIGHT[bsize]]
+    } else {
+        m.clone()
+    }
+}
+
+/// Chroma-layout (4:2:0) wedge masks: `cw × ch` at the chroma plane's own
+/// resolution — the blend for chroma planes of an inter-intra block must use
+/// these, not the sub-sampled luma mask (see [`wedge_table_420`]).
+pub(super) fn wedge_mask_420(bsize: usize, wedge_sign: bool, wedge_index: usize) -> Vec<u8> {
+    let idx = wedge_index.min(WEDGE_TYPES - 1);
+    let m = &wedge_table_420()[bsize][wedge_sign as usize][idx];
+    if m.is_empty() {
+        vec![32u8; (BLOCK_WIDTH[bsize] >> 1) * (BLOCK_HEIGHT[bsize] >> 1)]
     } else {
         m.clone()
     }

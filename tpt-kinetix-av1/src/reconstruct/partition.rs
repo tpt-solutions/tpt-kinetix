@@ -429,6 +429,24 @@ impl<'a> TileDecodeState<'a> {
             for (sub_bsize, ro, co) in subs {
                 self.decode_partition(mi_row + ro, mi_col + co, sub_bsize)?;
             }
+        } else if partition == PARTITION_SPLIT && bsize == BLOCK_8X8 {
+            // The four 4x4 leaves of a split 8x8: dav1d saves
+            // `t->tl_4x4_filter` before the top-left leaf and restores it
+            // before the bottom-left leaf (decode.c's BS_4X4 SPLIT walk), so
+            // the diagonal-quadrant filter of the §7.11.3.4 sub-8x8 chroma
+            // scheme sees the pre-quad value for TL and BL and the
+            // previously-decoded sibling's own filter for TR and BR.
+            let saved_tl_filter = self.tl_filter2d;
+            for (idx, (sub_bsize, ro, co)) in subs.iter().enumerate() {
+                let srow = mi_row + ro;
+                let scol = mi_col + co;
+                if srow < self.mi_rows && scol < self.mi_cols {
+                    if idx == 2 {
+                        self.tl_filter2d = saved_tl_filter;
+                    }
+                    self.decode_block(srow, scol, *sub_bsize)?;
+                }
+            }
         } else {
             for (sub_bsize, ro, co) in subs {
                 let srow = mi_row + ro;

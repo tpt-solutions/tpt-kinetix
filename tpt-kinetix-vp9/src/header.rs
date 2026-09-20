@@ -608,7 +608,9 @@ pub const DEFAULT_PROBS: ProbsCtx = ProbsCtx {
 #[inline]
 pub fn coef_model_idx(tx: usize, bt: usize, pt: usize, band: usize, ctx: usize) -> usize {
     debug_assert!(!(band == 0 && ctx >= 3), "band 0 has only 3 contexts");
-    let base = (tx * 2 * 2 + bt * 2 + pt) * 99;
+    // FFmpeg's coef table is [tx][plane][intra/inter] (runtime index
+    // `coef[tx][0 /* y */][!intra]`), NOT [tx][intra][plane].
+    let base = (tx * 2 * 2 + pt * 2 + bt) * 99;
     let off = if band == 0 {
         ctx * 3
     } else {
@@ -622,7 +624,7 @@ pub fn coef_model_idx(tx: usize, bt: usize, pt: usize, band: usize, ctx: usize) 
 /// unused ones are never read).
 #[inline]
 pub fn coef_full_idx(tx: usize, bt: usize, pt: usize, band: usize, ctx: usize) -> usize {
-    let base = (tx * 2 * 2 + bt * 2 + pt) * (6 * 6 * 11);
+    let base = (tx * 2 * 2 + pt * 2 + bt) * (6 * 6 * 11);
     base + (band * 6 + ctx) * 11
 }
 
@@ -806,7 +808,12 @@ pub fn parse_compressed_header(
                                 break; // dc band has only 3 contexts
                             }
                             for n in 0..3 {
-                                let idx = coef_model_idx(i, j, k, l, m);
+                                // The reference streams updates as
+                                // [plane][intra/inter] (`coef[i][j][k]` with
+                                // j = plane, k = intra/inter); our layout's
+                                // parameter order is (bt, pt), so pass k
+                                // before j.
+                                let idx = coef_model_idx(i, k, j, l, m);
                                 probs.coef_model[idx + n] = if bc.read_bool(252) {
                                     update_prob(bc, ctx.coef_model[idx + n])
                                 } else {
@@ -825,7 +832,7 @@ pub fn parse_compressed_header(
                             if m >= 3 && l == 0 {
                                 break;
                             }
-                            let idx = coef_model_idx(i, j, k, l, m);
+                            let idx = coef_model_idx(i, k, j, l, m);
                             probs.coef_model[idx..idx + 3]
                                 .copy_from_slice(&ctx.coef_model[idx..idx + 3]);
                         }
@@ -1047,7 +1054,10 @@ pub fn derive_segment_features(h: &FrameHeader) -> SegFeatures {
 /// `[V, H, DC, D45, D113, D157, D203, D67, ..]` (enum: VERT=0, HOR=1,
 /// DC=2), while this decoder uses the spec order `[DC, V, H, D45, ...]`.
 /// Map spec mode value -> FFmpeg table row.
-const SPEC_TO_FFMPEG_MODE: [usize; 10] = [2, 0, 1, 3, 4, 5, 6, 7, 8, 9];
+// FFmpeg's enum is [V, H, DC, D45, D135, D113, D157, D67, D203, TM] in
+// spec-value terms (its `VERT_LEFT`/`HOR_UP` names map to spec D67/D203 at
+// positions 7/8): rotate the first three, swap D203/D67.
+const SPEC_TO_FFMPEG_MODE: [usize; 10] = [2, 0, 1, 3, 4, 5, 6, 8, 7, 9];
 
 /// Keyframe y-mode probs for one (above, left) context, spec mode values.
 #[inline]

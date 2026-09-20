@@ -106,7 +106,11 @@ fn triage_clip() {
             is_key_frame: true,
         };
         if let Some(f) = dec.decode_with_tracer(&pkt, &mut rec).unwrap() {
-            if rec.frame_idx == 0 {
+            let snap_at: usize = std::env::var("TRIAGE_SNAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if rec.frame_idx == snap_at {
                 rec.snap_info = rec.mb_info.clone();
                 rec.snap_intra = rec.intra.clone();
             }
