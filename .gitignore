@@ -48,6 +48,7 @@ Thumbs.db
 # Scratch / work artifacts
 scratch_*.txt
 *.bak
+*.log
 *.ps1
 # ffmpeg reference headers/extracted source dropped in during codec bring-up
 ff_*.h
