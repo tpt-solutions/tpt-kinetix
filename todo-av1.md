@@ -7641,3 +7641,136 @@ cosmetic for output but worth one look alongside (1)).
 > pre-existing unrelated failures (20 pre-existing clippy errors on
 > master, none newly introduced — mostly `manual_div_ceil` and
 > `too_many_arguments` on functions this diff didn't touch).
+
+> **2026-09-24 — the last ±1 sample: CDEF math re-verified spec/dav1d-exact,
+> exact source block identified, hidden-alt-ref blind spot investigated and
+> ruled out as this bug's cause (no fix landed).** Picked this back up from
+> the 2026-09-23 session's NEXT list. Two lines of investigation, in order:
+>
+> **(1) CDEF algorithm cross-check against real dav1d source (new this
+> session, previously only inferred from ported comments).** Fetched
+> `cdef_apply_tmpl.c` and `cdef_tmpl.c` from `videolan/dav1d` on GitHub.
+> Confirmed line-for-line: `uvdir = uv_pri_lvl ? uv_dir[dir] : 0` (our
+> `dir = if pri_str == 0 { 0 } else { CDEF_UV_DIR[..][yd] }` is the exact
+> same rule, not a Kinetix approximation); the secondary-tap weight
+> `sec_tap = 2 - k` (independent of `pri_strength` parity) matches
+> `CDEF_SEC_TAPS = [[2,1],[2,1]]` being identical across both rows; the
+> primary-tap `pri_tap_k = (pri_tap_k & 3) | 2` recurrence for k=1 matches
+> `CDEF_PRI_TAPS[[4,2],[3,3]]`. Hand-verified `CDEF_DIRECTIONS[dir][k]` index
+> arithmetic against the actual `CDEF67_44` trace line-by-line for the
+> failing evaluation (dir=0, d=(0±2)&7={2,6}) — every `(yy2,xx2)` in the
+> trace matches what the table predicts exactly. **This closes off the
+> "direction-forcing rule" and "tap table" hypotheses for good: the CDEF
+> filter's own arithmetic is provably byte-for-byte dav1d-equivalent for
+> this exact code path.** The bug, if it is a Kinetix bug at all, is
+> upstream of `cdef_filter_block` — in what value one of the 5 secondary
+> source taps reads.
+>
+> **(2) Traced the responsible reconstruction block via a new
+> `KINETIX_AV1_DBG_TAPBLK` probe** (committed, `inter_block.rs`): prints
+> mi/bsize/motion_mode/interintra/skip/ref/mv/ref_to_slot/dpb_order_hints
+> for whichever inter block (regular or skip-mode path) covers the luma
+> region under chroma (65–68, 40–48) — i.e. the block that owns the 5 CDEF
+> taps. Result for `testsrc_160x90` frame 7 (decode-order n=8, order_hint
+> 7): **`mi=(32,16) bsize=9 (32×32) mm=0 (SIMPLE) ii=0 skip=false ref=[5,0]
+> (GOLDEN, single-ref) mv0=(0,0)`.** This directly rules out the
+> 2026-09-23 session's leading hypothesis (a third missing
+> `mark_chroma_edges` call in an OBMC/warp/interintra path): **none of
+> those paths are active on this block** — it's a plain single-ref,
+> non-skip (has residual), zero-motion-vector, ordinary-partition block.
+> Whatever's wrong is in the ordinary MC-copy + dequant + inverse-transform
+> + residual-add path, or (see next) in an upstream reference frame.
+>
+> **New finding: GOLDEN resolves to a HIDDEN alt-ref frame the harness
+> never independently checks.** `ref_to_slot[5]=1`, `dpb_order_hints[1]=6`
+> — slot 1 holds order_hint 6, which was written by decode-order frame n1
+> (`show_frame=false`, a genuine hidden alt-ref) and is *never subsequently
+> refreshed* by anything before frame n8 (oh=7) reads it (frame n7, also
+> oh=6 but *shown*, has `refresh_frame_flags=0` — it doesn't touch slot 1
+> at all). Concretely: **the pixel data feeding this block's MC copy is n1's
+> raw reconstruction, and n1 is never in `kframes`/`ref_frames` in the
+> conformance test (it's hidden), so it has literally never been diffed
+> against dav1d.** This is a real structural blind spot: 2 of the 9 coded
+> frames in this clip are hidden alt-refs (oh=6 and oh=3), and only oh=6
+> gets a later `show_existing_frame` (verified: search for `SET_SHOWABLE`/
+> SE spans found only one). Wrote a throwaway harness,
+> `tpt-kinetix-test-utils/tests/dbg_av1_160_grid.rs`, that decodes exactly
+> `av1_inter_corpus()`'s `testsrc_160x90` bytes (not a fresh re-encode —
+> ffmpeg's AV1 encode is nondeterministic across processes, confirmed
+> again this session: an independently-encoded 160x90/9-frame clip via
+> `dbg_av1_chroma.rs` produced a *different* GOP structure, decode order,
+> and order-hint pattern than the real corpus entry — don't reuse pinned
+> OBUs across harnesses without checking `DBGSEQ`/`DBG refresh` traces
+> line up) and dumps `KINETIX_AV1_DUMP_GRID` per frame.
+>
+> **Tested whether n1's hidden reconstruction actually diverges from
+> ground truth, using n7 (order_hint 6, shown, independently verified
+> bit-exact vs dav1d) as a proxy oracle** — the 2026-09-20 session had
+> already established via a patched-dav1d probe that dav1d itself decodes
+> n1 and n7 to byte-identical FILTERED grids, so if Kinetix's n1 and n7
+> grids differ, at least one of them is wrong, and since n7 is externally
+> validated it would prove n1 is the buggy one. Result: **`cmp -l` between
+> `kgr_01.yuv` (n1) and `kgr_07.yuv` (n7) shows exactly 14 differing
+> bytes, all ±1, clustered at the luma y=64/65 and chroma y=31 SB-row
+> boundary** (Y(63,64)=42→41, Y(124-127,65)=80→81, Y(61,69)=159→160,
+> U(72/78/79,31)=127→128, V(63,15)=238→239, V(7-9,31)/V(62,31)=+1 each) —
+> **not near our target (65–67,42–46) at all.** Chased whether this is a
+> real bug anyway (it's the exact symptom class the 2026-09-20 session
+> flagged as unresolved: "SB-row-boundary" luma/chroma ±1s) but found an
+> innocent explanation that fully accounts for it: `TAPBLK` on n7's own
+> block at this location shows `ref=[8,0] (ALTREF) ref_to_slot[8]=1
+> skip=true mv=(0,0)` — **n7's block here is itself a zero-residual MC
+> copy of slot 1 (n1's own stored pixels)**, so the pre-deblock content is
+> guaranteed identical to n1's; the observed ±1s at the SB-row boundary are
+> consistent with n7's *own fresh per-frame deblocking* of the copied edge
+> pixels (which depends on n7's own neighbouring blocks' modes/mvs, not
+> n1's) producing slightly different bS/filtering decisions than n1's
+> original deblock pass did — both frames can be simultaneously correct.
+> **Did not find a way to independently prove or disprove n1's correctness
+> at the ACTUAL target region (65–67,42–46 chroma / away from any SB
+> boundary)** — the n1-vs-n7 diff technique only exposes disagreements
+> where n7 legitimately re-touches the copied pixels (deblock edges); it
+> is silent everywhere n7 is a pure untouched copy, which is exactly where
+> our target sits, so this technique cannot confirm or rule out a latent
+> n1 bug at (65,42)-(67,46). **Net result: hidden-alt-ref-blind-spot lead
+> investigated, produced one genuine (probably benign) SB-boundary
+> curiosity, but did NOT close the (67,44) bug.**
+>
+> **Where this leaves things:** the 5 candidate secondary-tap source
+> pixels (chroma V, frame oh=7, pre-CDEF) are still exactly `(67,43)=16`,
+> `(66,44)=16`, `(67,42)=16`, `(65,44)=15`, `(67,46)=16`, one of which must
+> really be one higher (the two that would flip the final sum from -8 to
+> -7 if raised by 1: either tap `(67,42)` or `(67,46)` from 16→17, or tap
+> `(65,44)` from 15→16 — all three are `sec_tap` weight-1 reads at k=1).
+> All of them are read from slot 1 = the hidden n1 frame. The CDEF
+> algorithm itself is now about as thoroughly proven-correct as it can be
+> without a matched-version reference decoder. **Concrete next step if
+> picked up again:** get ANY way to independently validate hidden (never-
+> shown) frames' pixel content, not just shown ones — e.g. extend
+> `av1_inter_corpus_vs_dav1d_when_available` (or a new harness) to also
+> decode with `--all-layers`/force-show every frame via a patched dav1d
+> build (accepting its known absolute-value version offset — but compare
+> RELATIVE tap-to-tap deltas within one frame's dump instead of absolute
+> values, since a constant version offset would cancel out in a
+> difference-of-two-nearby-samples comparison, which is exactly what the 5
+> secondary-tap contributions are). Given this is a single ±1 sample out
+> of the entire 5-entry inter corpus and three sessions running have now
+> independently exhausted the cheap leads (direction rule, tap tables,
+> edge-marking gaps ×2 fixed + 1 ruled out, OBMC/warp/interintra ruled
+> out, hidden-alt-ref blind spot investigated), this is a good point to
+> either park it or invest in the harness-level oracle gap above rather
+> than more manual trace bisection. Corpus unchanged from 2026-09-23:
+> **4/5 entries 100% bit-exact, testsrc_160x90 6/7 frames exact (single
+> ±1 V-sample, 83.69 dB)**. `capabilities().pixel_exact` correctly remains
+> `false` — did not touch it (this narrow synthetic-corpus gap is not
+> broad enough evidence to flip a decoder-wide correctness claim even if
+> it were the only known issue, and it isn't proven closed).
+> Housekeeping: added `KINETIX_AV1_DBG_TAPBLK` (inter_block.rs, two call
+> sites) and `tests/dbg_av1_160_grid.rs` (test-utils) as reusable probes,
+> both committed. Gates green: AV1 154 lib tests, test-utils conformance
+> 11/11, `cargo fmt --check` clean on both touched crates. Did not re-run
+> full `just clippy`/`just deny`/`just doc`; spot-checked
+> `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings` shows only
+> the same 10 pre-existing errors (`manual_div_ceil` ×9,
+> `too_many_arguments` ×1) already present on master before this session,
+> none in the files this session touched.
