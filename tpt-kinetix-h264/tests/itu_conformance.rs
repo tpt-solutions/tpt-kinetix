@@ -85,6 +85,26 @@ const MANIFEST: &[(&str, Expect)] = &[
     // plus §8.3.1.1 constrained_intra_pred availability (this stream is
     // constrained) landed 2026-09-20. 299/299 frames byte-exact.
     ("BA1_FT_C", Expect::BitExact),
+    // Promoted to BitExact 2026-09-24 (session #32ca): CAVLC I/P multi-slice,
+    // 291 pictures, `pic_order_cnt_type == 2`, `log2_max_frame_num_minus4 ==
+    // 4` (`MaxFrameNum == 256`) — this stream's `frame_num` wraps once
+    // around picture 256. `derive_poc_type2`'s `FrameNumOffset` was a
+    // stateless per-call "did frame_num just decrease" recompute instead of
+    // an accumulator (§8.2.1.3 requires `FrameNumOffset = prevFrameNumOffset
+    // + MaxFrameNum`, carried forward): it correctly bumped by `MaxFrameNum`
+    // for the ONE picture where the wrap was detected, then silently forgot
+    // that offset on the very next call (frame_num no longer "decreasing"),
+    // so `PicOrderCnt` collapsed back down near 0 for every picture after
+    // the wrap. The multi-slice CAVLC decode itself was already fully
+    // correct (every reference frame was present byte-exact in the decoded
+    // set — "DECODE-EXACT (display-order gap only)" — before this fix); only
+    // `with_display_order`'s min-POC reorder buffer, fed these
+    // now-collapsed-low POC values for the back half of the stream, emitted
+    // them out of order. Fixed by adding `prev_frame_num_offset_t2`/
+    // `prev_frame_num_any_t2` accumulator state to `PocState` (mirroring the
+    // equivalent type-1 fix landed the same session). 291/291 frames
+    // byte-exact.
+    ("CI1_FT_B", Expect::BitExact),
     // CAVLC I/P/B spatial-direct, 5 refs. Two spatial-direct bugs fixed
     // 2026-09-05 (B_8x8 direct/explicit interleaving order + col_zero_flag
     // corner-index formula) got diff_bytes to 1899->520 (max 112->4); the

@@ -156,7 +156,32 @@ pub struct PocState {
     /// field.
     pub prev_bottom_field_order_cnt: i64,
     /// `prev_frame_num` — `frame_num` of the previous reference picture.
+    /// Used by POC types 0 and 2 (§8.2.1.1 / §8.2.1.3), which only advance on
+    /// reference pictures.
     pub prev_frame_num: u32,
+    /// `prevFrameNumOffset` (§8.2.1.2) — POC type 1's own `FrameNumOffset`
+    /// accumulator. Unlike `prev_frame_num` above, spec's `prevFrameNum` for
+    /// type 1 is the `frame_num` of the *previous picture in decoding order*
+    /// regardless of its reference status, so this is tracked separately.
+    pub prev_frame_num_offset_t1: i64,
+    /// `frame_num` of the previous picture in decoding order (any reference
+    /// status) — the type-1-specific `prevFrameNum` companion to
+    /// `prev_frame_num_offset_t1`.
+    pub prev_frame_num_any_t1: u32,
+    /// `prevFrameNumOffset` (§8.2.1.3) — POC type 2's own `FrameNumOffset`
+    /// accumulator, same rationale as the type-1 fields above (a fresh
+    /// per-call `if frame_num wrapped { MaxFrameNum } else { 0 }` recompute
+    /// — the previous implementation — loses the running total after
+    /// exactly one wrapped picture, resetting PicOrderCnt back down near 0
+    /// for every picture that follows the *second* frame_num wrap; ITU
+    /// `CI1_FT_B`, 291 pictures with `log2_max_frame_num_minus4 == 4`
+    /// (`MaxFrameNum == 256`), wraps once around picture 256 and exposed
+    /// this).
+    pub prev_frame_num_offset_t2: i64,
+    /// `frame_num` of the previous picture in decoding order (any reference
+    /// status) — the type-2-specific `prevFrameNum` companion to
+    /// `prev_frame_num_offset_t2`.
+    pub prev_frame_num_any_t2: u32,
 }
 
 impl PocState {
@@ -174,6 +199,10 @@ impl PocState {
         self.prev_top_field_order_cnt = 0;
         self.prev_bottom_field_order_cnt = 0;
         self.prev_frame_num = 0;
+        self.prev_frame_num_offset_t1 = 0;
+        self.prev_frame_num_any_t1 = 0;
+        self.prev_frame_num_offset_t2 = 0;
+        self.prev_frame_num_any_t2 = 0;
     }
 }
 
@@ -284,19 +313,33 @@ fn derive_poc_type1(
 
     let d0 = delta_pic_order_cnt_0.unwrap_or(0);
 
-    // absFrameNum (§8.2.1.2): 0 when the SPS defines no POC cycle;
-    // otherwise prevRefFrameNum + 1, decremented for a non-reference picture.
+    // FrameNumOffset (§8.2.1.2): 0 for an IDR picture; otherwise the previous
+    // picture's FrameNumOffset, plus MaxFrameNum when frame_num wrapped since
+    // that previous picture. Spec's "previous picture" here is the previous
+    // picture in DECODING ORDER regardless of reference status — distinct
+    // from `prev_frame_num` (used by POC types 0/2), which only advances on
+    // reference pictures, hence the separate `*_t1` state fields.
+    let max_frame_num = 1i64 << (sps.log2_max_frame_num_minus4 + 4);
     let cycle_len = sps.num_ref_frames_in_pic_order_cnt_cycle as i64;
-    let mut abs_frame_num: i64 = if cycle_len == 0 {
+    let frame_num_offset = if is_idr {
         0
+    } else if (state.prev_frame_num_any_t1 as i64) > frame_num as i64 {
+        state.prev_frame_num_offset_t1 + max_frame_num
     } else {
-        state.prev_frame_num as i64 + 1
+        state.prev_frame_num_offset_t1
     };
-    if !is_reference {
+
+    // absFrameNum (§8.2.1.2): FrameNumOffset + frame_num, decremented for a
+    // non-reference picture. `cycle_len == 0` (no POC cycle declared) is
+    // guarded separately below to avoid a divide-by-zero in the cycle-count
+    // math — such an SPS has no offset_for_ref_frame entries to sum, so
+    // expected_pic_order_cnt is always 0 regardless of abs_frame_num.
+    let mut abs_frame_num: i64 = frame_num_offset + frame_num as i64;
+    if !is_reference && abs_frame_num > 0 {
         abs_frame_num -= 1;
     }
 
-    let expected_pic_order_cnt = if abs_frame_num > 0 {
+    let mut expected_pic_order_cnt = if abs_frame_num > 0 && cycle_len > 0 {
         let expected_delta_per_pic_order_cnt_cycle: i64 = sps
             .offset_for_ref_frame
             .iter()
@@ -313,6 +356,15 @@ fn derive_poc_type1(
     } else {
         0
     };
+    // §8.2.1.2: a non-reference picture's expected order count is further
+    // offset by `offset_for_non_ref_pic` — previously missing entirely,
+    // which made every non-reference (nal_ref_idc == 0) picture's POC
+    // collide with/derive from its predecessor's as if it were a reference
+    // picture (e.g. ITU Sharp_MP_PAFF_1r2's hierarchical b-pictures all
+    // computed the same expected_pic_order_cnt as the preceding P-picture).
+    if !is_reference {
+        expected_pic_order_cnt += sps.offset_for_non_ref_pic as i64;
+    }
 
     let poc = if !field_pic_flag {
         // Frame picture (§8.2.1.2 (8-8)/(8-9)): the bottom field adds
@@ -332,9 +384,22 @@ fn derive_poc_type1(
         expected_pic_order_cnt + d0
     };
 
+    if std::env::var_os("KINETIX_POC1_DBG").is_some() {
+        eprintln!(
+            "POC1-DBG frame_num={frame_num} is_ref={is_reference} is_idr={is_idr} d0={d0} \
+             cycle_len={cycle_len} abs_frame_num={abs_frame_num} \
+             expected_pic_order_cnt={expected_pic_order_cnt} poc={poc} \
+             prev_frame_num_before={0} offset_for_ref_frame={1:?}",
+            state.prev_frame_num, sps.offset_for_ref_frame
+        );
+    }
     if is_reference {
         state.prev_frame_num = frame_num;
     }
+    // Type 1's own FrameNumOffset predictor advances on every picture in
+    // decoding order, reference or not (unlike `prev_frame_num` above).
+    state.prev_frame_num_offset_t1 = frame_num_offset;
+    state.prev_frame_num_any_t1 = frame_num;
     Ok(poc)
 }
 
@@ -413,18 +478,26 @@ fn derive_poc_type2(
     bottom_field_flag: bool,
     state: &mut PocState,
 ) -> Result<i64, PicOrderCntError> {
+    // FrameNumOffset (§8.2.1.3): accumulates like type 1's — 0 for IDR,
+    // otherwise the previous picture's FrameNumOffset (+MaxFrameNum when
+    // frame_num wrapped since then), tracked against the previous picture in
+    // decoding order regardless of its reference status (not gated on the
+    // CURRENT picture being a reference, and not just a flat "wrapped or
+    // not" recompute — see `prev_frame_num_offset_t2`'s doc comment).
     let max_frame_num = 1i64 << (sps.log2_max_frame_num_minus4 + 4);
     let frame_num_offset = if is_idr {
         0
-    } else if is_reference && (frame_num as i64) < state.prev_frame_num as i64 {
-        max_frame_num
+    } else if (state.prev_frame_num_any_t2 as i64) > frame_num as i64 {
+        state.prev_frame_num_offset_t2 + max_frame_num
     } else {
-        0
+        state.prev_frame_num_offset_t2
     };
 
     if is_reference {
         state.prev_frame_num = frame_num;
     }
+    state.prev_frame_num_offset_t2 = frame_num_offset;
+    state.prev_frame_num_any_t2 = frame_num;
 
     // §8.2.1.3: a field carries `PicOrderCnt = (frame_num_offset + frame_num) * 2
     // + 1` for the bottom field, `+ 0` for the top field; a frame picture is the
@@ -1679,19 +1752,24 @@ fn dpb_entry_identity(e: &DpbEntry) -> (u32, bool, bool, i64, bool, i32) {
 /// short-term `POC >= current_poc` ascending, then long-term ascending
 /// `LongTermPicNum`. Returns `None` when the DPB holds no reference pictures.
 fn initial_ref_list_l0_b(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
-    let mut before: Vec<&DpbEntry> = dpb
+    // §8.2.4.2.1's frame-mode "reference frames and complementary reference
+    // field pairs" rule applies to B-slice frame-mode list construction too
+    // (mixed PAFF frame/field streams) — see `build_ref_list_l0`'s doc
+    // comment for the full rationale.
+    let combined = combine_field_pairs_into_frames(dpb);
+    let mut before: Vec<&DpbEntry> = combined
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt < current_poc)
         .collect();
     before.sort_by_key(|e| std::cmp::Reverse(e.pic_order_cnt));
 
-    let mut at_or_after: Vec<&DpbEntry> = dpb
+    let mut at_or_after: Vec<&DpbEntry> = combined
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt >= current_poc)
         .collect();
     at_or_after.sort_by_key(|e| e.pic_order_cnt);
 
-    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    let mut longs: Vec<&DpbEntry> = combined.iter().filter(|e| e.is_long_term).collect();
     longs.sort_by_key(|e| e.long_term_pic_num);
 
     if before.is_empty() && at_or_after.is_empty() && longs.is_empty() {
@@ -1713,19 +1791,22 @@ fn initial_ref_list_l0_b(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
 /// short-term `POC <= current_poc` descending, then long-term ascending
 /// `LongTermPicNum`. Returns `None` when the DPB holds no reference pictures.
 fn initial_ref_list_l1(dpb: &Dpb, current_poc: i64) -> Option<Vec<DpbEntry>> {
-    let mut after: Vec<&DpbEntry> = dpb
+    // See `initial_ref_list_l0_b`'s comment — same frame-mode field-pair
+    // combining applies to RefPicList1.
+    let combined = combine_field_pairs_into_frames(dpb);
+    let mut after: Vec<&DpbEntry> = combined
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt > current_poc)
         .collect();
     after.sort_by_key(|e| e.pic_order_cnt);
 
-    let mut at_or_before: Vec<&DpbEntry> = dpb
+    let mut at_or_before: Vec<&DpbEntry> = combined
         .iter()
         .filter(|e| e.is_short_term && e.pic_order_cnt <= current_poc)
         .collect();
     at_or_before.sort_by_key(|e| std::cmp::Reverse(e.pic_order_cnt));
 
-    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    let mut longs: Vec<&DpbEntry> = combined.iter().filter(|e| e.is_long_term).collect();
     longs.sort_by_key(|e| e.long_term_pic_num);
 
     if after.is_empty() && at_or_before.is_empty() && longs.is_empty() {

@@ -76,6 +76,15 @@ pub struct H264Decoder {
     /// to place the frame into `reorder_buf`.
     pending_poc: i64,
     pending_is_idr: bool,
+    /// Set when the picture just stored to the DPB carried
+    /// `memory_management_control_operation == 5` (§8.2.5.4.5): like an IDR,
+    /// this rebases `PicOrderCnt`/`frame_num` for every later picture, so any
+    /// higher-POC pictures already sitting in `reorder_buf` must be flushed
+    /// before this (now POC-rebased-low) picture is inserted — otherwise the
+    /// fixed-depth min-POC eviction in `reorder_push` interleaves pre- and
+    /// post-reset pictures out of order. Consumed (cleared) by the next
+    /// `reorder_push` call alongside `pending_is_idr`.
+    pending_mmco5: bool,
     /// Set by [`H264Decoder::decode_slice`] when the slice is a continuation
     /// slice of the current picture (`first_mb_in_slice != 0`). `decode_impl`
     /// reads it to drop the frame that slice would otherwise contribute, so a
@@ -369,6 +378,7 @@ impl H264Decoder {
             reorder_buf: Vec::new(),
             pending_poc: 0,
             pending_is_idr: false,
+            pending_mmco5: false,
             suppress_frame: false,
             pending_picture: None,
         }
@@ -556,6 +566,13 @@ impl H264Decoder {
             }
         }
         self.reorder_buf.push((poc, frame));
+        if std::env::var_os("KINETIX_REORDER_DBG").is_some() {
+            eprintln!(
+                "REORDER-DBG push poc={poc} buf_len={} bufpocs={:?}",
+                self.reorder_buf.len(),
+                self.reorder_buf.iter().map(|(p, _)| *p).collect::<Vec<_>>()
+            );
+        }
         if self.reorder_buf.len() > Self::REORDER_DEPTH {
             if let Some((idx, _)) = self
                 .reorder_buf
@@ -773,7 +790,10 @@ impl H264Decoder {
                                         .to_string(),
                                 ));
                             }
-                            let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                            let (poc, is_idr) = (
+                                self.pending_poc,
+                                self.pending_is_idr || std::mem::take(&mut self.pending_mmco5),
+                            );
                             if std::env::var("KINETIX_BINTRACE").is_ok() {
                                 eprintln!("REORDER_PUSH[i-slice] poc={poc} is_idr={is_idr}");
                             }
@@ -830,7 +850,10 @@ impl H264Decoder {
                         // Coded order ≠ display order when B pictures are
                         // present: route through the reorder buffer, which is a
                         // passthrough unless `with_display_order` was set.
-                        let (poc, is_idr) = (self.pending_poc, self.pending_is_idr);
+                        let (poc, is_idr) = (
+                            self.pending_poc,
+                            self.pending_is_idr || std::mem::take(&mut self.pending_mmco5),
+                        );
                         if std::env::var("KINETIX_BINTRACE").is_ok() {
                             eprintln!("REORDER_PUSH[p/b-slice] poc={poc} is_idr={is_idr}");
                         }
@@ -2670,6 +2693,10 @@ impl H264Decoder {
                     // current picture's frame_num 0 for everything that
                     // follows.
                     self.poc_state.reset_after_mmco5();
+                    self.pending_mmco5 = true;
+                    if std::env::var_os("KINETIX_MMCO5_DBG").is_some() {
+                        eprintln!("MMCO5 fired: frame_num={}", header.frame_num);
+                    }
                 }
             }
             Err(_e) => {
@@ -2961,6 +2988,20 @@ impl H264Decoder {
                 header.field_pic_flag,
                 header.bottom_field_flag,
             );
+            if std::env::var_os("KINETIX_P_HDR_DBG").is_some() {
+                eprintln!(
+                    "P-HDR-DBG frame_num={} field_pic={} qp={} idc={} nref_l0={} t8x8={} wpf={} disable_deblock_idc={} ref_pic_list_mod={:?}",
+                    header.frame_num,
+                    header.field_pic_flag,
+                    slice_qp,
+                    header.cabac_init_idc,
+                    num_ref_idx_l0_active,
+                    pps.as_ref().map(|p| p.transform_8x8_mode_flag).unwrap_or(false),
+                    pps.as_ref().map(|p| p.weighted_pred_flag).unwrap_or(false),
+                    header.disable_deblocking_filter_idc,
+                    header.ref_pic_list_modification_l0,
+                );
+            }
 
             if let Some(ref_list) = crate::ref_pic::build_ref_list_l0(
                 &self.dpb,
@@ -3048,6 +3089,49 @@ impl H264Decoder {
                         if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
                             self.scaffold_fallback = true;
                         }
+                        if std::env::var_os("KINETIX_P_MB_DBG").is_some() {
+                            for (i, mb) in parsed.macroblocks.iter().enumerate().take(24) {
+                                let cells = parsed.mv_store.cells_of(i);
+                                eprintln!(
+                                    "P-MB-DBG[{i}] type={:?} skip={} cbp={} qp={} cells0_mv={:?} cells0_ref={:?}",
+                                    mb.mb_type,
+                                    mb.skip,
+                                    mb.cbp,
+                                    mb.qp,
+                                    cells.map(|c| c[0].mv),
+                                    cells.map(|c| c[0].ref_idx),
+                                );
+                            }
+                            let mut n_skip = 0usize;
+                            let mut n_intra = 0usize;
+                            let mut mv_abs_max = 0i32;
+                            for (i, mb) in parsed.macroblocks.iter().enumerate() {
+                                if mb.skip {
+                                    n_skip += 1;
+                                }
+                                if matches!(
+                                    mb.mb_type,
+                                    crate::macroblock::MbType::Intra4x4
+                                        | crate::macroblock::MbType::Intra16x16 { .. }
+                                        | crate::macroblock::MbType::IPcm
+                                ) {
+                                    n_intra += 1;
+                                }
+                                if let Some(cells) = parsed.mv_store.cells_of(i) {
+                                    for c in cells {
+                                        mv_abs_max =
+                                            mv_abs_max.max(c.mv[0].abs()).max(c.mv[1].abs());
+                                    }
+                                }
+                            }
+                            eprintln!(
+                                "P-MB-DBG SUMMARY: total={} skip={} intra={} mv_abs_max={}",
+                                parsed.macroblocks.len(),
+                                n_skip,
+                                n_intra,
+                                mv_abs_max
+                            );
+                        }
                         // Explicit weighted prediction (§8.4.2.3.2): only P/SP
                         // slices with `weighted_pred_flag` carry a
                         // `pred_weight_table`; P-slices never use implicit
@@ -3078,6 +3162,14 @@ impl H264Decoder {
                             &weighted_pred,
                             tracer,
                         );
+                        if let Ok(path) = std::env::var("KINETIX_DUMP_PREDEBLOCK") {
+                            let path = format!("{path}.fn{}", header.frame_num);
+                            std::fs::write(&path, &recon.luma).ok();
+                            eprintln!(
+                                "DUMP_PREDEBLOCK: wrote {} bytes to {path}",
+                                recon.luma.len()
+                            );
+                        }
 
                         let deblock_params = crate::deblock::DeblockParams {
                             disable_idc: header.disable_deblocking_filter_idc as u8,

@@ -52,6 +52,9 @@ fn field_triage_strict() {
         .and_then(|p| std::fs::read(p).ok());
 
     let mut dec = H264Decoder::new().with_strict(true);
+    if std::env::var_os("FIELD_DISPLAY_ORDER").is_some() {
+        dec = dec.with_display_order();
+    }
     let mut emitted_count = 0usize;
     for (n, &s) in starts.iter().enumerate() {
         let e = starts.get(n + 1).copied().unwrap_or(annexb.len());
@@ -72,6 +75,24 @@ fn field_triage_strict() {
                     f.height,
                     f.data.len()
                 );
+                if std::env::var_os("FIELD_MATCH_SEARCH").is_some() {
+                    if let Some(refy) = &refyuv {
+                        let fl = f.width as usize * f.height as usize * 3 / 2;
+                        if fl > 0 && f.data.len() == fl {
+                            let mut matched = None;
+                            let nframes = refy.len() / fl;
+                            for ri in 0..nframes {
+                                if refy[ri * fl..(ri + 1) * fl] == f.data[..] {
+                                    matched = Some(ri);
+                                    break;
+                                }
+                            }
+                            eprintln!(
+                                "        emitted#{emitted_count} (NAL {n}) matches ref index {matched:?}"
+                            );
+                        }
+                    }
+                }
                 if let Some(refy) = &refyuv {
                     let fl = f.width as usize * f.height as usize * 3 / 2;
                     if refy.len() >= fl {
