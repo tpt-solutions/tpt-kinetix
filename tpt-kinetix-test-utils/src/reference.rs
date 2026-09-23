@@ -197,6 +197,8 @@ fn run_dav1d_file(bitstream: &[u8]) -> Result<Vec<u8>, RefDecodeError> {
     let child = Command::new("dav1d")
         .args([
             "-q",
+            "--threads",
+            "1",
             "-i",
             path.to_str().expect("temp path is utf-8"),
             "-o",

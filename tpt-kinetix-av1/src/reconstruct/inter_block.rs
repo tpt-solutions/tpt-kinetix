@@ -427,12 +427,11 @@ impl<'a> TileDecodeState<'a> {
 
         // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
         // syntax order.
+        let skip_ctx = (above_skip + left_skip).min(2);
         let skip = if self.seg_feature_skip {
             true
         } else {
-            self.mode_cdfs
-                .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
-                == 1
+            self.mode_cdfs.read_skip(&mut self.dec, skip_ctx) == 1
         };
         let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row < 40 && mi_col < 40;
         if dbg_b0 {
@@ -2081,6 +2080,18 @@ impl<'a> TileDecodeState<'a> {
             lu as u8,
             lv as u8,
         );
+        // §7.14.1: skip-mode blocks are real inter block boundaries — mark the
+        // chroma deblock edge even though they have no chroma coefficients.
+        // The skip-mode path never enters the chroma-tx loop (which is the
+        // only other mark_chroma_edges call site for inter blocks), so without
+        // this call the edge flag stays false and the horizontal deblock filter
+        // skips the row boundary, diverging from dav1d.
+        self.meta.mark_chroma_edges(
+            px_x0 / 8,
+            px_y0 / 8,
+            (px_x0 + bw_px).div_ceil(8),
+            (px_y0 + bh_px).div_ceil(8),
+        );
         self.meta.record_lf4(
             px_x0 / 4,
             px_y0 / 4,
@@ -3112,22 +3123,22 @@ impl<'a> TileDecodeState<'a> {
                 if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                     continue;
                 }
-                if !has_chroma {
-                    // No chroma of its own (§7.3.1): dav1d neither reads
-                    // coefficients nor updates the chroma deblock-edge
-                    // geometry for this block — the co-located chroma belongs
-                    // to the odd-parity neighbour block.
-                    continue;
-                }
-                // Real per-transform-sub-block chroma deblock-edge geometry
-                // — mirrors the intra keyframe path's identical
-                // `mark_chroma_edges` call in `intra_block.rs`.
+                // AV1 §7.14.1: chroma deblock edges are at luma block
+                // boundaries, regardless of whether this block owns chroma
+                // samples (has_chroma). A block at even (mi_col, mi_row) with
+                // 4×4 luma size has_chroma=false but still creates a real
+                // luma-grid boundary that the chroma deblock must filter.
                 self.meta.mark_chroma_edges(
                     cpx_x / 4,
                     cpx_y / 4,
                     (cpx_x + cw).div_ceil(4),
                     (cpx_y + ch).div_ceil(4),
                 );
+                if !has_chroma {
+                    // No chroma of its own (§7.3.1): skip coefficient reading
+                    // and reconstruction, but edge geometry above is still needed.
+                    continue;
+                }
                 for (plane, dst, stride, w, h) in [
                     (
                         1usize,

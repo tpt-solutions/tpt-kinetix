@@ -92,6 +92,10 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         uv_w,
         true,
         false,
+        [0u8; 4], // lf_levels
+        [0i8; 8], // lf_ref_deltas
+        [0i8; 2], // lf_mode_deltas
+        false,    // lf_delta_enabled
         false,
         false,
         false,
@@ -597,6 +601,10 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         8,
         8,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -604,11 +612,13 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         false,
         false,
         true,
-        false, // use_128x128_superblock
+        false,
+        // use_128x128_superblock
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -617,7 +627,8 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -688,6 +699,10 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         8,
         8,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -695,11 +710,13 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         false,
         false,
         true,
-        false, // use_128x128_superblock
+        false,
+        // use_128x128_superblock
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -708,7 +725,8 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -779,6 +797,10 @@ fn make_cdef_delta_state<'a>(
         8,
         8,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -790,7 +812,8 @@ fn make_cdef_delta_state<'a>(
         LrDecodeParams::default(),
         cdef_delta,
         false,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -799,7 +822,8 @@ fn make_cdef_delta_state<'a>(
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -859,6 +883,10 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         8,
         8,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -870,7 +898,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -879,7 +908,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -920,6 +950,10 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         8,
         8,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -931,7 +965,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         true,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -940,7 +975,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -1234,6 +1270,10 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         64,
         64,
         true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
         false,
         false,
         false,
@@ -1241,11 +1281,13 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         false,
         false,
         true,
-        false, // use_128x128_superblock
+        false,
+        // use_128x128_superblock
         LrDecodeParams::default(),
         CdefDeltaParams::default(),
         false,
-        false, // use_ref_frame_mvs
+        false,
+        // use_ref_frame_mvs
         false,
         false,
         false,
@@ -1254,7 +1296,8 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         INTERP_SWITCHABLE,
         [0u8; 8],
         [[0; 6]; 8],
-        false, // disable_cdf_update
+        false,
+        // disable_cdf_update
         false,
         false,
         false,
@@ -1333,6 +1376,10 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         64,
                         64,
                         true,
+                        [0u8; 4], /* lf_levels */
+                        [0i8; 8], /* lf_ref_deltas */
+                        [0i8; 2], /* lf_mode_deltas */
+                        false,    /* lf_delta_enabled */
                         false,
                         false,
                         false,
@@ -1344,7 +1391,8 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         LrDecodeParams::default(),
                         CdefDeltaParams::default(),
                         false,
-                        false, // use_ref_frame_mvs
+                        false,
+                        // use_ref_frame_mvs
                         false,
                         false,
                         false,
@@ -1353,7 +1401,8 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         INTERP_SWITCHABLE,
                         [0u8; 8],
                         [[0; 6]; 8],
-                        false, // disable_cdf_update
+                        false,
+                        // disable_cdf_update
                         false,
                         false,
                         false,

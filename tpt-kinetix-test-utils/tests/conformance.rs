@@ -743,6 +743,29 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
                     entry.label,
                     luma_diff_count(&kframes[i], &ref_frames[i]),
                 );
+                if !is_exact && p_v < 99.0 {
+                    let w = entry.width as usize;
+                    let h = entry.height as usize;
+                    let cw = (w + 1) / 2;
+                    let ch = (h + 1) / 2;
+                    let y_off = w * h;
+                    let u_off = y_off + cw * ch;
+                    let kd = &kframes[i].data;
+                    let rd = &ref_frames[i].data;
+                    for cy in 0..ch {
+                        for cx in 0..cw {
+                            let vi = u_off + cy * cw + cx;
+                            if vi < kd.len() && vi < rd.len() && kd[vi] != rd[vi] {
+                                eprintln!(
+                                    "  V diff @ chroma ({cx},{cy}): kin={} ref={} delta={}",
+                                    kd[vi],
+                                    rd[vi],
+                                    kd[vi] as i32 - rd[vi] as i32
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         eprintln!(

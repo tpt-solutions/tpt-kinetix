@@ -349,6 +349,12 @@ impl FrameMeta {
             return;
         }
         let i = self.idx(bx, by);
+        if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && bx == 16 && by == 11 {
+            eprintln!(
+                "record_luma bx={bx} by={by} i={i} skip={skip} old_skip={}",
+                self.luma_skip[i]
+            );
+        }
         self.luma_tx_w[i] = self.luma_tx_w[i].max(tx_w);
         self.luma_tx_h[i] = self.luma_tx_h[i].max(tx_h);
         self.luma_skip[i] = self.luma_skip[i] && skip;
@@ -401,6 +407,15 @@ impl FrameMeta {
     pub fn mark_chroma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
         let by1c = by1.min(self.h8);
         let bx1c = bx1.min(self.w8);
+        if std::env::var("KINETIX_AV1_DBG_CHROMA_EDGE_MARK").is_ok()
+            && bx0 <= 16
+            && 16 < bx1
+            && by0 == 11
+        {
+            eprintln!(
+                "mark_chroma_edges bx0={bx0} by0={by0} bx1={bx1} by1={by1} bx1c={bx1c} by1c={by1c}"
+            );
+        }
         if bx0 < self.w8 {
             for by in by0..by1c {
                 let i = self.idx(bx0, by);
@@ -471,10 +486,8 @@ impl FrameMeta {
         let by1c = by1.min(self.ch4);
         let bx1c = bx1.min(self.cw4);
         if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
-            && bx0 <= 12
-            && 12 < bx1c
-            && by0 <= 9
-            && 9 < by1c
+            && ((bx0 <= 12 && 12 < bx1c && by0 <= 9 && 9 < by1c)
+                || (bx0 <= 16 && 16 < bx1c && by0 <= 11 && 11 < by1c))
         {
             eprintln!(
                 "LFCELL chroma write span=({bx0},{by0})-({bx1},{by1}) lu={lu} lv={lv} frame={}",
@@ -541,6 +554,14 @@ impl FrameMeta {
                 self.luma_edge_top[di] |= src.luma_edge_top[i];
                 self.chroma_edge_left[di] |= src.chroma_edge_left[i];
                 self.chroma_edge_top[di] |= src.chroma_edge_top[i];
+                // Merge chroma deblock-level cache (cw4 × ch4, same resolution as
+                // lf_level_u4/v4; cw4 == w8 for superblock-aligned grids).
+                if dbx < self.cw4 && dby < self.ch4 {
+                    let ci = by * src.cw4 + bx;
+                    let cdi = dby * self.cw4 + dbx;
+                    self.lf_level_u4[cdi] = src.lf_level_u4[ci];
+                    self.lf_level_v4[cdi] = src.lf_level_v4[ci];
+                }
             }
         }
         for by in 0..src.h4 {
@@ -916,7 +937,14 @@ fn deblock_plane(
     // scheduling: per band, vertical edges for the band's 4x4 rows, then
     // horizontal edges for the band's edge rows (including the band's top
     // edge, which `have_top` gates on band > 0).
-    let sb_step4 = if fh.use_128x128_superblock { 32 } else { 16 };
+    // Luma grid: 4×4-luma-cell resolution; 1 SB row = 16 cells (64×64 SB) or 32 (128×128).
+    // Chroma grid: 8×8-luma-cell = 4×4-chroma-cell resolution; 1 SB row = half as many cells.
+    let luma_sb_step4 = if fh.use_128x128_superblock { 32 } else { 16 };
+    let sb_step4 = if plane_index == 0 {
+        luma_sb_step4
+    } else {
+        luma_sb_step4 / 2
+    };
     for band in 0..grid_h.div_ceil(sb_step4) {
         let v0 = band * sb_step4;
         let v1 = (v0 + sb_step4).min(grid_h);
@@ -942,6 +970,15 @@ fn deblock_plane(
         // filter at all.
         for by in v0..v1 {
             for bx in 1..grid_w {
+                if std::env::var("KINETIX_AV1_DBG_CHROMA_VEDGE").is_ok()
+                    && plane_index > 0
+                    && by == 11
+                    && (bx == 16 || bx == 17)
+                {
+                    let edge_f = edge_left_grid[by * grid_w + bx];
+                    let lv0 = lf_level_cache[by * lf_cache_stride + bx] as i32;
+                    eprintln!("CHROMA_VEDGE pl={plane_index} by={by} bx={bx} edge_left={edge_f} lv_cell={lv0}");
+                }
                 if !edge_left_grid[by * grid_w + bx] {
                     continue;
                 }
@@ -1086,6 +1123,22 @@ fn deblock_plane(
         // content transition into the flat region next to it.
         for by in h0..h1 {
             for bx in 0..grid_w {
+                if std::env::var("KINETIX_AV1_DBG_CHROMA_HEDGE").is_ok()
+                    && plane_index > 0
+                    && by == 11
+                    && bx == 16
+                {
+                    let lv0 = lf_level_cache[by * lf_cache_stride + bx] as i32;
+                    let lv_l = if bx > 0 {
+                        lf_level_cache[by * lf_cache_stride + bx - 1] as i32
+                    } else {
+                        -1
+                    };
+                    let edge_f = edge_top_grid[by * grid_w + bx];
+                    eprintln!(
+                        "CHROMA_HEDGE pl={plane_index} by={by} bx={bx} edge_top={edge_f} lv_cell={lv0} lv_left={lv_l}"
+                    );
+                }
                 if !edge_top_grid[by * grid_w + bx] {
                     continue;
                 }
@@ -1374,9 +1427,12 @@ fn cdef_filter_block(
                          // row 1 ([3,3]) when odd. No XOR with direction.
     let taps = ((pri_str >> coeff_shift) & 1) as usize;
     let src_rows = src.len().div_ceil(src_stride);
+    let dbg_cdef = std::env::var("KINETIX_AV1_DBG_CDEF67_44").is_ok();
     for i in 0..h {
         for j in 0..w {
-            let x = src[(y0 + i) * src_stride + (x0 + j)] as i32;
+            let abs_x = x0 + j;
+            let abs_y = y0 + i;
+            let x = src[abs_y * src_stride + abs_x] as i32;
             let mut sum = 0i32;
             let mut max = x;
             let mut min = x;
@@ -1385,12 +1441,17 @@ fn cdef_filter_block(
                     // Primary taps.
                     let dy = CDEF_DIRECTIONS[dir][k][0] * sign;
                     let dx = CDEF_DIRECTIONS[dir][k][1] * sign;
-                    let yy = (y0 + i) as isize + dy as isize;
-                    let xx = (x0 + j) as isize + dx as isize;
+                    let yy = abs_y as isize + dy as isize;
+                    let xx = abs_x as isize + dx as isize;
                     if yy >= 0 && (yy as usize) < src_rows && xx >= 0 && (xx as usize) < src_stride
                     {
                         let p = src[yy as usize * src_stride + xx as usize] as i32;
-                        sum += CDEF_PRI_TAPS[taps][k] * cdef_constrain(p - x, pri_str, damping);
+                        let contrib =
+                            CDEF_PRI_TAPS[taps][k] * cdef_constrain(p - x, pri_str, damping);
+                        if dbg_cdef && abs_y == 44 && (abs_x == 67 || abs_x == 73) {
+                            eprintln!("CDEF{abs_x}_44 PRI k={k} sign={sign} yy={yy} xx={xx} p={p} constrain={} contrib={contrib}", cdef_constrain(p - x, pri_str, damping));
+                        }
+                        sum += contrib;
                         max = max.max(p);
                         min = min.min(p);
                     }
@@ -1399,24 +1460,34 @@ fn cdef_filter_block(
                         let d = (dir as i32 + dir_off) & 7;
                         let dy2 = CDEF_DIRECTIONS[d as usize][k][0] * sign;
                         let dx2 = CDEF_DIRECTIONS[d as usize][k][1] * sign;
-                        let yy2 = (y0 + i) as isize + dy2 as isize;
-                        let xx2 = (x0 + j) as isize + dx2 as isize;
+                        let yy2 = abs_y as isize + dy2 as isize;
+                        let xx2 = abs_x as isize + dx2 as isize;
                         if yy2 >= 0
                             && (yy2 as usize) < src_rows
                             && xx2 >= 0
                             && (xx2 as usize) < src_stride
                         {
                             let s = src[yy2 as usize * src_stride + xx2 as usize] as i32;
-                            sum += CDEF_SEC_TAPS[taps][k] * cdef_constrain(s - x, sec_str, damping);
+                            let contrib =
+                                CDEF_SEC_TAPS[taps][k] * cdef_constrain(s - x, sec_str, damping);
+                            if dbg_cdef && abs_y == 44 && (abs_x == 67 || abs_x == 73) {
+                                eprintln!("CDEF{abs_x}_44 SEC k={k} sign={sign} d={d} yy2={yy2} xx2={xx2} s={s} constrain={} contrib={contrib}", cdef_constrain(s - x, sec_str, damping));
+                            }
+                            sum += contrib;
                             max = max.max(s);
                             min = min.min(s);
+                        } else if dbg_cdef && abs_y == 44 && (abs_x == 67 || abs_x == 73) {
+                            eprintln!("CDEF{abs_x}_44 SEC k={k} sign={sign} d={d} yy2={yy2} xx2={xx2} OOB src_rows={src_rows}");
                         }
                     }
                 }
             }
             let val = x + ((8 + sum - (if sum < 0 { 1 } else { 0 })) >> 4);
             let out = clip3(val, min, max) as u8;
-            dst[(y0 + i) * dst_stride + (x0 + j)] = out;
+            if dbg_cdef && abs_y == 44 && (abs_x == 67 || abs_x == 73) {
+                eprintln!("CDEF{abs_x}_44 x={x} sum={sum} val={val} min={min} max={max} out={out} dir={dir} pri={pri_str} sec={sec_str} damp={damping}");
+            }
+            dst[abs_y * dst_stride + abs_x] = out;
         }
     }
 }
@@ -1904,6 +1975,7 @@ pub fn apply_post_filters(
     v_plane: &mut [u8],
     width: usize,
     height: usize,
+    vis_height: usize,
     subsampling_x: bool,
     subsampling_y: bool,
     meta: &FrameMeta,
@@ -2023,6 +2095,21 @@ pub fn apply_post_filters(
             meta.cw4,
         );
     }
+    let dbg_cpxy = std::env::var("KINETIX_AV1_DBG_CPXY").ok().and_then(|s| {
+        let (a, b) = s.split_once(',')?;
+        Some((
+            a.trim().parse::<usize>().ok()?,
+            b.trim().parse::<usize>().ok()?,
+        ))
+    });
+    let dump_cpxy = |label: &str, plane: &[u8], stride: usize| {
+        if let Some((x, y)) = dbg_cpxy {
+            if x < stride && y * stride + x < plane.len() {
+                eprintln!("CPXY {label} ({x},{y}) = {}", plane[y * stride + x]);
+            }
+        }
+    };
+    dump_cpxy("pre-deblock-V", v_plane, uv_w);
     if !skip_deblock {
         deblock_plane(
             v_plane,
@@ -2048,6 +2135,7 @@ pub fn apply_post_filters(
             meta.cw4,
         );
     }
+    dump_cpxy("post-deblock-V", v_plane, uv_w);
 
     if dbg {
         for y in 32..48 {
@@ -2081,6 +2169,24 @@ pub fn apply_post_filters(
         // independent. For the current corpus (`cdef_bits == 0`) every unit maps
         // to `cdef_idx == 0`, so this is byte-identical to the previous
         // whole-plane single-strength path.
+        //
+        // The CDEF direction is derived from the co-located 8×8 luma block.
+        // At the bottom of a frame (e.g. 90-px tall → last luma 8×8 at y=88
+        // spans rows 88–95 where only 88–89 are visible), including the
+        // padding rows in the direction computation introduces wrong variance
+        // estimates. Clip the luma source height to the visible frame for
+        // direction derivation only.
+        // For WRITE bounds, CDEF must write to ALL reconstructed rows (including
+        // MI-aligned padding rows up to tile_h/tile_ch) so that inter-frame MC
+        // in subsequent frames reads CDEF-filtered values rather than raw intra
+        // values — dav1d does NOT clip CDEF writes to the visible frame.
+        let vis_luma_h = vis_height;
+        // dav1d's CDEF writes to ALL reconstructed rows (including MI-aligned padding
+        // rows up to tile_ch) and uses the full tile luma height for direction
+        // derivation (no clamping to vis_height). Using vis_height for direction
+        // causes wrong variance estimates for the last 8×8 luma block.
+        let cdef_write_uv_h = uv_h;
+        let cdef_luma_dir_h = height;
         let src_y = y_plane.to_vec();
         let mut uy = 0;
         while uy < height {
@@ -2099,7 +2205,7 @@ pub fn apply_post_filters(
                     y_plane,
                     &src_y,
                     width,
-                    height,
+                    vis_luma_h,
                     pri,
                     sec,
                     damping,
@@ -2137,10 +2243,10 @@ pub fn apply_post_filters(
                     u_plane,
                     &src_u,
                     uv_w,
-                    uv_h,
+                    cdef_write_uv_h,
                     &src_y,
                     width,
-                    height,
+                    cdef_luma_dir_h,
                     sub_x,
                     sub_y,
                     uv_pri,
@@ -2181,10 +2287,10 @@ pub fn apply_post_filters(
                     v_plane,
                     &src_v,
                     uv_w,
-                    uv_h,
+                    cdef_write_uv_h,
                     &src_y,
                     width,
-                    height,
+                    cdef_luma_dir_h,
                     sub_x,
                     sub_y,
                     uv_pri,
@@ -2206,6 +2312,7 @@ pub fn apply_post_filters(
         }
     }
 
+    dump_cpxy("post-cdef-V", v_plane, uv_w);
     if dbg {
         for y in 32..48 {
             dump_row("post-cdef", y_plane, y);
@@ -2271,6 +2378,7 @@ pub fn apply_post_filters(
             sub_y,
         );
     }
+    dump_cpxy("post-lr-V", v_plane, uv_w);
     dump_pxy("post-lr", y_plane);
 
     Ok(())
@@ -2413,11 +2521,20 @@ fn cdef_plane_chroma(
             // luma 8×8 block. Chroma direction is then remapped via Cdef_Uv_Dir.
             let luma_x0 = x0 << sub_x;
             let luma_y0 = y0 << sub_y;
-            if luma_skip
-                .get((luma_y0 / 8) * w8 + luma_x0 / 8)
-                .copied()
-                .unwrap_or(false)
+            let skip_idx = (luma_y0 / 8) * w8 + luma_x0 / 8;
+            let skip_val = luma_skip.get(skip_idx).copied().unwrap_or(false);
+            if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok()
+                && plane_label == 'V'
+                && x0 <= 67
+                && x0 + 4 > 67
+                && y0 <= 44
+                && y0 + 4 > 44
             {
+                eprintln!(
+                    "CDEF_SKIP oh={order_hint} x0={x0} y0={y0} luma_x0={luma_x0} luma_y0={luma_y0} skip_idx={skip_idx} skip={skip_val}"
+                );
+            }
+            if skip_val {
                 continue;
             }
             let (yd, _var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
@@ -2470,22 +2587,34 @@ fn cdef_plane_chroma(
                 eprintln!("CDEFUV post (4x4 chroma): {}", dump44(plane));
                 continue;
             }
+            let ww = w_block.min(width - x0);
+            let hh = h_block.min(height - y0);
             cdef_filter_block(
-                plane,
-                width,
-                src,
-                width,
-                x0,
-                y0,
-                w_block.min(width - x0),
-                h_block.min(height - y0),
-                sub_x,
-                sub_y,
-                p,
-                sec_str,
-                damping,
-                dir,
+                plane, width, src, width, x0, y0, ww, hh, sub_x, sub_y, p, sec_str, damping, dir,
             );
+            if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && plane_label == 'V' {
+                if x0 <= 67 && x0 + ww > 67 && y0 <= 46 && y0 + hh > 46 {
+                    let pre46 = src[46 * width + 67];
+                    let post46 = plane[46 * width + 67];
+                    eprintln!(
+                        "CDEF_6746 oh={order_hint} shown={shown} x0={x0} y0={y0} dir={dir} p={p} s={sec_str} d={damping} pre_6746={pre46} post_6746={post46}"
+                    );
+                }
+                if x0 <= 67 && x0 + ww > 67 && y0 <= 45 && y0 + hh > 45 {
+                    let pre45 = src[45 * width + 67];
+                    let post45 = plane[45 * width + 67];
+                    eprintln!(
+                        "CDEF_6745 oh={order_hint} shown={shown} x0={x0} y0={y0} dir={dir} p={p} s={sec_str} d={damping} pre_6745={pre45} post_6745={post45}"
+                    );
+                }
+                if x0 <= 73 && x0 + ww > 73 && y0 <= 46 && y0 + hh > 46 {
+                    let pre73 = src[46 * width + 73];
+                    let post73 = plane[46 * width + 73];
+                    eprintln!(
+                        "CDEF_7346 oh={order_hint} shown={shown} x0={x0} y0={y0} dir={dir} p={p} s={sec_str} d={damping} pre_7346={pre73} post_7346={post73}"
+                    );
+                }
+            }
         }
     }
 }

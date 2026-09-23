@@ -7519,3 +7519,66 @@ cosmetic for output but worth one look alongside (1)).
 > luma (96,72)), KINETIX_DBG_DUMPCUR/LRHDR (dav1d clone), and oh= dump
 > tags in KINETIX_AV1_DUMP_FRAMES output. All gates green (fmt, clippy,
 > AV1 154 tests, test-utils incl. conformance 11/11).
+
+> **2026-09-23 — chroma edge-marking bug FOUND + FIXED; 44-sample residue
+> collapsed to 1.** Root cause: skip-mode inter blocks (§5.11.11's
+> `is_inter && skip_mode`) never call `mark_chroma_edges` — the only
+> other call site for inter blocks is inside the chroma-tx loop, which
+> skip-mode blocks never enter — so the chroma horizontal deblock filter
+> silently skipped every skip-mode block's row boundary. Fixed in
+> `inter_block.rs` (`decode_inter_block`): mark_chroma_edges is now
+> called unconditionally right after the skip-mode reconstruction call.
+> Second related fix in the regular (non-skip-mode) inter chroma-tx
+> loop: `has_chroma == false` sub-blocks (odd-parity 4×4 luma blocks at
+> even mi_row/mi_col) were skipping `mark_chroma_edges` entirely too —
+> moved the edge-mark call above the `has_chroma` early-continue so
+> geometry is always recorded even when this particular sub-block owns
+> no chroma samples of its own (§7.14.1: edges are at luma block
+> boundaries, not gated on chroma ownership).
+> Also: `tile_ch` in `TileDecodeState::new` was truncating to
+> `tile_h / 2` (floor) instead of covering the full MI-aligned chroma
+> extent (`tile_h.div_ceil(MI_SIZE) * (MI_SIZE/2)`) — for a 90px-tall
+> frame this left the last partial MI row's chroma content at the
+> initial 128-fill instead of real reconstructed pixels, which CDEF's
+> secondary taps could then read as neighbours. `apply_post_filters`
+> gained a `vis_height` parameter so CDEF direction-derivation still
+> clips to the visible frame (wrong variance estimates otherwise) while
+> CDEF's WRITE bounds cover the full padded/MI-aligned extent, matching
+> dav1d (references are post-filter planes, so subsequent inter frames'
+> MC must read real CDEF output in the padding rows, not stale fill).
+> Corpus result: testsrc_128x96/testsrc_96x64/testsrc_64x64/
+> smptebars_96x64 all now **100% bit-exact** (were ~44 chroma samples
+> off, ~15dB). testsrc_160x90 down to a **single** ±1 V-sample at
+> chroma (67,44) frame 7 (83.69dB) — traced with the existing
+> `KINETIX_AV1_DBG_CDEF67_44` hook to a secondary-tap-only CDEF case
+> (pri_str=0, sec_str=4, damp=4, dir=0): kin sums 5 secondary-tap
+> contributions to sum=-8, `val = 17 + ((8 - 8 - 1) >> 4) = 16`; dav1d's
+> ref is 17. One of the 5 secondary-neighbour samples (candidates: the
+> two reads at xx2=67 == the block's own column, at yy2=42/44/46, or the
+> xx2=65/66 reads) is off by ±1 from what dav1d reads at the identical
+> tap, OR the >>4 rounding of a small negative sum differs at this exact
+> boundary. NEXT: dump dav1d's own CDEF secondary-tap trace for this
+> exact chroma pixel (frame with order_hint matching kin's 7th decoded
+> inter frame) via `cdef_apply_tmpl.c`, diff sample-by-sample against
+> the `CDEF67_44 SEC k=... s=...` lines above.
+> Housekeeping: fixed a **pre-existing, unrelated** compile break in
+> `reconstruct/tests.rs` (8 call sites of `decode_tile_group`/
+> `TileDecodeState::new` were stale by 4 positional args —
+> `lf_levels`/`lf_ref_deltas`/`lf_mode_deltas`/`lf_delta_enabled` — from
+> an earlier session; `cargo test -p tpt-kinetix-av1 --lib` would not
+> compile at all before this fix). Also added `--threads 1` to the
+> standalone-`dav1d` reference path (`reference.rs`) per the documented
+> MT-nondeterminism caveat, and per-chroma-sample diff dumping in
+> `av1_inter_corpus_vs_dav1d_when_available`. CAVEAT for next session:
+> do NOT put the patched tracing dav1d build
+> (`%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d`) on `PATH` for conformance
+> runs — it prints its unconditional per-symbol trace to *stdout* (not
+> stderr) when invoked with `-o -`, corrupting the captured YUV and
+> making every reference decode look broken ("not a multiple of frame
+> size"). The workspace has no clean standalone `dav1d`; conformance
+> tests fall back to `ffmpeg`'s `libdav1d` automatically as long as the
+> patched build isn't on PATH. Gates green: workspace build clean, AV1
+> 154 lib tests pass, test-utils conformance 11/11, clippy/fmt show only
+> pre-existing unrelated failures (20 pre-existing clippy errors on
+> master, none newly introduced — mostly `manual_div_ceil` and
+> `too_many_arguments` on functions this diff didn't touch).

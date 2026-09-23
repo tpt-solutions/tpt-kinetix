@@ -1059,7 +1059,16 @@ impl<'a> TileDecodeState<'a> {
         let mi_rows = height.div_ceil(MI_SIZE);
         let lossless = qindex == 0;
         let tile_cw = if subsampling_x { tile_w / 2 } else { tile_w };
-        let tile_ch = if subsampling_y { tile_h / 2 } else { tile_h };
+        // MI rows cover `mi_rows * MI_SIZE` luma rows (MI_SIZE = 4), including any
+        // partial row at the bottom of the frame (e.g. 90px → 23 MI rows → 92 luma
+        // grid rows). Reconstruction must write all MI-covered rows so that loop
+        // filters (CDEF secondary taps) read real content rather than the initial
+        // fill value (128), matching dav1d's behaviour.
+        let tile_ch = if subsampling_y {
+            tile_h.div_ceil(MI_SIZE) * (MI_SIZE / 2)
+        } else {
+            tile_h
+        };
         let (rp_proj, rp_stride, n_mfmvs) = build_rp_proj(
             &temporal_motion_fields,
             &ref_to_slot,
@@ -2246,9 +2255,11 @@ pub fn reconstruct_av1_frame(
 
     // Phase D: full-frame in-loop post-filters (deblock → CDEF → LR).
     // Running on the assembled frame — not per-tile — matches the AV1 spec
-    // §7.14 requirement that deblocking crosses tile boundaries. dav1d filters
-    // the full superblock-aligned picture (padding rows included), so the
-    // filters run over the grid extent here as well.
+    // §7.14 requirement that deblocking crosses tile boundaries. The planes are
+    // grid-aligned (grid_w × grid_h), but CDEF writes only to visible-area
+    // pixels (dav1d clips output to visible height) — padding rows hold real
+    // reconstructed content so CDEF secondary taps can read them, but the
+    // filter output must not overwrite them.
     if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
         let _ = apply_post_filters(
             &mut y_plane,
@@ -2256,6 +2267,7 @@ pub fn reconstruct_av1_frame(
             &mut v_plane,
             grid_w,
             grid_h,
+            height,
             true,
             true,
             &frame_meta,
