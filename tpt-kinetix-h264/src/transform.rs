@@ -75,23 +75,62 @@ pub const JVT_DEFAULT_4X4_INTER: [u8; 16] = [
     10, 14, 14, 20, 20, 20, 24, 24, 24, 24, 27, 27, 27, 30, 30, 34,
 ];
 
-/// JVT default 8×8 **intra** scaling matrix (ffmpeg `ff_h264_default_scaling8[0]`,
-/// zig-zag order). Backs the first (luma-intra) 8×8 list.
-pub const JVT_DEFAULT_8X8: [u8; 64] = [
-    6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23, 23, 23, 23, 23, 23, 25, 25, 25,
-    25, 25, 25, 25, 27, 27, 27, 27, 27, 27, 27, 27, 29, 29, 29, 29, 29, 29, 29, 31, 31, 31, 31, 31,
-    31, 31, 33, 33, 33, 33, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38,
+/// JVT default 8×8 **intra**/**inter** scaling matrices (§7.4.2.1.1.1 Table
+/// 7-4 / JM `quant8_intra_default`/`quant8_inter_default`, `quant.c`), in
+/// **raster** order (row-major, matching how the spec and every reference
+/// decoder tabulate them). Converted to scan order below via [`ZIGZAG_8X8`]
+/// — do not hand-transcribe a scan-order version of these tables again: an
+/// earlier hand-transcription (claiming to already be zig-zag order) had the
+/// 31/33 (intra) and 21/22, 28/30/33 (inter) run-length boundaries shifted by
+/// one position each, corrupting every 8×8 dequant at scan positions ~21 and
+/// ~49+ whenever a stream relies on the *default* (not explicitly
+/// transmitted) 8×8 scaling list — confirmed against JM `ldecod`'s own
+/// `quant8_intra_default`/`InvLevelScale8x8` output on ITU HCAFR1_HHI_C MB29
+/// block1 (`todo-h264.md` addendum 20).
+#[rustfmt::skip]
+const RASTER_DEFAULT_8X8_INTRA: [u8; 64] = [
+     6, 10, 13, 16, 18, 23, 25, 27,
+    10, 11, 16, 18, 23, 25, 27, 29,
+    13, 16, 18, 23, 25, 27, 29, 31,
+    16, 18, 23, 25, 27, 29, 31, 33,
+    18, 23, 25, 27, 29, 31, 33, 36,
+    23, 25, 27, 29, 31, 33, 36, 38,
+    25, 27, 29, 31, 33, 36, 38, 40,
+    27, 29, 31, 33, 36, 38, 40, 42,
 ];
 
-/// JVT default 8×8 **inter** scaling matrix (ffmpeg `ff_h264_default_scaling8[1]`,
-/// zig-zag order). Backs the luma-inter 8×8 list — distinct from the intra
-/// default; using the intra table for the inter list mis-scales every
-/// 8×8-transform inter block whenever the inter list falls back to its default.
-pub const JVT_DEFAULT_8X8_INTER: [u8; 64] = [
-    9, 13, 13, 15, 13, 15, 17, 17, 17, 17, 19, 19, 19, 19, 19, 21, 21, 21, 21, 21, 21, 21, 22, 22,
-    22, 22, 22, 22, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27,
-    27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 30, 30, 30, 30, 33,
+#[rustfmt::skip]
+const RASTER_DEFAULT_8X8_INTER: [u8; 64] = [
+     9, 13, 15, 17, 19, 21, 22, 24,
+    13, 13, 17, 19, 21, 22, 24, 25,
+    15, 17, 19, 21, 22, 24, 25, 27,
+    17, 19, 21, 22, 24, 25, 27, 28,
+    19, 21, 22, 24, 25, 27, 28, 30,
+    21, 22, 24, 25, 27, 28, 30, 32,
+    22, 24, 25, 27, 28, 30, 32, 33,
+    24, 25, 27, 28, 30, 32, 33, 35,
 ];
+
+const fn raster_to_scan_8x8(raster: &[u8; 64]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    let mut z = 0;
+    while z < 64 {
+        out[z] = raster[ZIGZAG_8X8[z]];
+        z += 1;
+    }
+    out
+}
+
+/// JVT default 8×8 **intra** scaling matrix, in zig-zag scan order — the
+/// order every dequant call site here indexes with. See
+/// [`RASTER_DEFAULT_8X8_INTRA`].
+pub const JVT_DEFAULT_8X8: [u8; 64] = raster_to_scan_8x8(&RASTER_DEFAULT_8X8_INTRA);
+
+/// JVT default 8×8 **inter** scaling matrix, in zig-zag scan order —
+/// distinct from the intra default; using the intra table for the inter
+/// list mis-scales every 8×8-transform inter block whenever the inter list
+/// falls back to its default. See [`RASTER_DEFAULT_8X8_INTER`].
+pub const JVT_DEFAULT_8X8_INTER: [u8; 64] = raster_to_scan_8x8(&RASTER_DEFAULT_8X8_INTER);
 
 /// The scaling matrices active for a picture (§8.5.9), derived from the SPS
 /// (and any PPS override). Each 4×4 list is 16 entries in zig-zag scan order;
@@ -823,6 +862,13 @@ pub fn dequant_idct_8x8_scan(
         } else {
             (scaled + (1 << (5 - shift as i32))) >> (6 - shift as i32)
         };
+        if std::env::var("KINETIX_DBG_DEQUANT8").is_ok() && coeffs[z] != 0 {
+            let (col, row) = (raster % 8, raster / 8);
+            eprintln!(
+                "KDEQUANT z={z} pos=({col},{row}) level={} weight={weight} cls={cls} ls={ls} d={}",
+                coeffs[z], d[z]
+            );
+        }
     }
 
     // 2. Inverse zigzag scan to raster order for the 2-D transform.

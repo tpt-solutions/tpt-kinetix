@@ -244,6 +244,20 @@ const MANIFEST: &[(&str, Expect)] = &[
     // count as coded iff its containing 8×8 block is coded. Now 100/100
     // frames bit-exact.
     ("freh1_b", Expect::BitExact),
+    // Promoted to BitExact 2026-09-23 (addendum 20): High CABAC, progressive
+    // 8x8 transform, JVT *default* (not explicitly transmitted) 8x8 scaling
+    // matrix. `transform.rs`'s hand-transcribed scan-order
+    // `JVT_DEFAULT_8X8`/`JVT_DEFAULT_8X8_INTER` constants had their 31/33
+    // (intra) and 21/22 + 28/30/33 (inter) run-length boundaries shifted by
+    // one scan position each — confirmed against a locally-patched JM
+    // `ldecod`'s own `InvLevelScale8x8` dequant output for MB29 block1.
+    // Replaced the hand-transcribed tables with ones computed from the
+    // canonical *raster*-order default tables (JM `quant8_intra_default`/
+    // `quant8_inter_default`) via the already-verified `ZIGZAG_8X8` scan.
+    // Only affects streams relying on the *default* 8x8 scaling list (no
+    // explicit `scaling_list()` in the SPS/PPS) with real high-frequency
+    // 8x8 content. Frame 0 (IDR): 108 wrong luma samples -> 0.
+    ("HCAFR1_HHI_C", Expect::BitExact),
 ];
 
 fn fixtures_root() -> PathBuf {

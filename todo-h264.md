@@ -810,6 +810,69 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 20 — HCAFR1 ROOT CAUSE FOUND AND FIXED: the JVT
+default 8×8 scaling-list constants were mis-transcribed. HCAFR1_HHI_C now
+**fully bit-exact, all 10 frames** (0/1520640 diff bytes), promoted to
+`Expect::BitExact` in `itu_conformance.rs` — ITU suite now 30 hard-checked.
+
+Built on addendum 19's proof that MPM/mode selection (block1 = HU, correct)
+and the CABAC coefficient decode (bit-exact vs JM, addendum below) were both
+innocent; the only remaining suspect was dequant/IDCT. Extended
+`tools/build-jm-oracle.sh`'s JM checkout with a **local, uncommitted**
+instrumentation patch to `read_comp_cabac.c::readCompCoeff8x8_CABAC`
+(`JM_DUMP_MB=<addr> JM_DUMP_B8=<0..3>` env vars, `fprintf(stderr, ...)` per
+coefficient with `run`/`level`/`pos`/`qp_per`/`qp_rem`/`InvLevelScale8x8`/
+dequantised value) — not part of `tools/jm-ldecod-oracle.patch`, regenerate
+by hand from this addendum if needed again.
+
+**Coefficient decode: bit-exact.** New `KINETIX_DBG_COEFF8=<mb_x>,<mb_y>,
+<b8>` hook in `cabac_p.rs`'s `is_8x8` residual loop dumps
+`(scan_pos, level, raster_pos)` for one block. All 14 of MB29 block1's
+(level, position) pairs matched JM's raw CABAC-decoded (run,level) trace
+exactly, in the same order — the CABAC parse of §9.3.3.1.1.9/Luma8x8
+residual is provably correct for this block.
+
+**Dequantisation: found the bug.** New `KINETIX_DBG_DEQUANT8=1` hook in
+`transform.rs::dequant_idct_8x8_scan` dumps `(scan_pos, level, weight, cls,
+ls, dequantised)` for every nonzero coefficient. Cross-referencing against
+JM's `InvLevelScale8x8[j][i]`/dequantised output for the same 14
+coefficients: 13/14 matched exactly, but position `(col=3,row=7)` (scan
+index 49) diverged — kinetix `weight=31` vs JM's effective `weight=33`
+(`ls=558` vs `594`, `d=-279` vs JM's `dq=-297`).
+
+Root cause: `JVT_DEFAULT_8X8`'s hand-transcribed **scan-order** constant
+(claimed to be `ffmpeg ff_h264_default_scaling8[0]`) had its run-length
+boundaries shifted — 7×`31` + 9×`33` (indices 43-58) where the correct
+sequence (independently re-derived by converting JM's own **raster-order**
+`quant8_intra_default[64]` from `quant.c` through the already-verified
+`ZIGZAG_8X8` table) is 6×`31` + 5×`33` + 4×`36` + 3×`38` + 2×`40` + 1×`42`
+(indices 43-63) — our table was **missing the values 40 and 42 entirely**,
+capping at 38. `JVT_DEFAULT_8X8_INTER` had an analogous, independent
+mis-transcription (an extra `21` / missing `22` around index 21, plus a
+similar tail-boundary shift capping at 33 instead of reaching 35). Both
+default tables were simply wrong, likely from a faulty original
+hand-transcription years earlier that no test happened to exercise (needs
+a real intra 8×8 block with nonzero high-frequency coefficients *and* a
+default, non-transmitted 8×8 scaling matrix — rare in the synthetic
+corpus).
+
+**Fix**: replaced both hand-transcribed scan-order tables with `const fn`
+conversions from freshly-transcribed **raster**-order tables (row-major,
+matching JM's `quant8_intra_default`/`quant8_inter_default` and the spec's
+own tabulation, far less error-prone to transcribe correctly) through
+`ZIGZAG_8X8`, computed at compile time. See `transform.rs`
+`RASTER_DEFAULT_8X8_INTRA`/`RASTER_DEFAULT_8X8_INTER` +
+`raster_to_scan_8x8`. No more hand-transcribed scan-order default tables
+anywhere in the crate.
+
+Verified: `ZIGZAG_8X8` itself cross-checked position-by-position against
+JM's `SNGL_SCAN8x8[64][2]` (macroblock.h) — identical, not the bug.
+
+Gates: 269 H.264 lib tests pass (incl. new
+`transform::tests::jvt_default_scaling_matrix_is_non_flat` and existing
+scaling-list tests, none needed changes), ITU suite 30/30 hard-checked
+clips bit-exact (was 29), 0 failures, no new clippy/fmt issues.
+
 ## SESSION #32bx ADDENDUM 19 — HCAFR1 MB29 hypothesis (b) MPM mapping RULED
 OUT with a full hand-verified proof (not just "provably correct" assertion);
 suspect (c) 8x8 residual is now the sole remaining lead.

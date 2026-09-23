@@ -208,6 +208,32 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             // undetected by `high8x8_i` because that fixture's 8×8 blocks are
             // DC-dominant, where the permutation is near-identity). Mirrors the
             // inter path in `cabac_b.rs`.
+            if let Ok(spec) = std::env::var("KINETIX_DBG_COEFF8") {
+                let mut parts = spec.split(',');
+                let want = (
+                    parts.next().and_then(|s| s.parse::<u32>().ok()),
+                    parts.next().and_then(|s| s.parse::<u32>().ok()),
+                    parts.next().and_then(|s| s.parse::<usize>().ok()),
+                );
+                if want == (Some(mb_x), Some(mb_y), Some(blk8)) {
+                    const ZIGZAG_8X8: [usize; 64] = [
+                        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40,
+                        48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36,
+                        29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61,
+                        54, 47, 55, 62, 63,
+                    ];
+                    for scan_pos in 0..64usize {
+                        if coeffs_scan[scan_pos] != 0 {
+                            let raster = ZIGZAG_8X8[scan_pos];
+                            let (col, row) = (raster % 8, raster / 8);
+                            eprintln!(
+                                "KCOEFF mb=({mb_x},{mb_y}) b8={blk8} scan={scan_pos} level={} pos=({col},{row})",
+                                coeffs_scan[scan_pos]
+                            );
+                        }
+                    }
+                }
+            }
             mb.luma_coeffs_8x8[blk8] = coeffs_scan;
             for sub in 0..4usize {
                 this_nz.luma[raster_of_8x8_sub(blk8, sub)] = count;
