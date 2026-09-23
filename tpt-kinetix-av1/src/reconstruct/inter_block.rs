@@ -1642,6 +1642,18 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+            let px_end_x = px_x0 + bw_px;
+            let px_end_y = px_y0 + bh_px;
+            if px_x0 < 138 && px_end_x > 128 && px_y0 < 96 && px_end_y > 82 {
+                eprintln!(
+                    "TAPBLK seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} mm={motion_mode} ii={interintra_type} skip={skip} ref={:?} mv0={:?}",
+                    crate::debug_frame_seq::current(),
+                    ref_names,
+                    mvs[0],
+                );
+            }
+        }
         if motion_mode == 1 && std::env::var("KINETIX_AV1_NOOBMC").is_err() {
             for plane in 0..3 {
                 self.apply_obmc(mi_row, mi_col, bsize, plane);
@@ -1980,6 +1992,18 @@ impl<'a> TileDecodeState<'a> {
         let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
         let bw_px = bw * MI_SIZE;
         let bh_px = bh * MI_SIZE;
+        if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+            let px_end_x = px_x0 + bw_px;
+            let px_end_y = px_y0 + bh_px;
+            if px_x0 < 138 && px_end_x > 128 && px_y0 < 96 && px_end_y > 82 {
+                eprintln!(
+                    "TAPBLK-SKIPMODE seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} ref={:?} mv0={:?}",
+                    crate::debug_frame_seq::current(),
+                    ref_names,
+                    mvs[0],
+                );
+            }
+        }
         let f = if self.interpolation_filter == INTERP_SWITCHABLE {
             0
         } else {
