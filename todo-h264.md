@@ -2,6 +2,166 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ca ADDENDUM (same day, continuation) — POC type 1/2 FrameNumOffset accumulator bug FIXED; CI1_FT_B promoted to BitExact (32→33); Sharp_MP_PAFF_1r2 POC now JM-exact but a separate B-slice pixel bug remains
+
+Continued straight from this session's first pass (frame-pair-combine fix,
+below). Picked the investigation back up on Sharp_MP_PAFF_1r2's remaining
+gap per the handoff's suggested next step (compare `parsed.macroblocks`/
+`mv_store` against a JM oracle decode).
+
+**Tooling built:** froze a fresh JM `ldecod.exe` via
+`tools/build-jm-oracle.sh` (the pre-existing `C:/Users/phill/jm-oracle-fresh`
+build's `JM_DUMP_POC` hook never fired for this stream — traced to
+`exit_picture`'s outer `if(!p_Vid->iDeblockMode && (bDeblockEnable &
+(1<<used_for_reference)))` gate never being true for ANY picture in this
+run, even with a freshly-rebuilt binary from the current patch; root cause
+not chased further, noted as a live gap in the JM-oracle tooling for
+whoever needs per-MB JM dumps next — the plain per-frame `ldecod.exe`
+table output is still fully usable and was enough for this session).
+New Kinetix-side debug hooks (all in `tpt-kinetix-h264/src/decoder/mod.rs`
+/ `ref_pic.rs` / `tests/dbg_field_triage.rs`, all committed, all
+env-gated): `KINETIX_P_HDR_DBG` (slice_qp/idc/nref/deblock-idc for the
+legacy single-buffer P path), `KINETIX_P_MB_DBG` (first-24-MB types/MVs +
+whole-picture MV/skip/intra summary), `KINETIX_DUMP_PREDEBLOCK` (dumps
+`recon.luma` before deblocking, per `frame_num`), `KINETIX_POC1_DBG` (every
+`derive_poc_type1` call's intermediate values), `KINETIX_REORDER_DBG`
+(every `reorder_push` call's buffer state), `KINETIX_MMCO5_DBG`. Plus
+`dbg_field_triage.rs`'s `FIELD_DISPLAY_ORDER=1` (opt into
+`.with_display_order()`, off by default to preserve existing callers'
+behaviour) and `FIELD_MATCH_SEARCH=1` (for each emitted frame, byte-search
+the whole reference YUV and print which reference index it matches, if
+any — the key tool for both bugs below).
+
+**Debugging false-start worth recording:** without `FIELD_DISPLAY_ORDER`,
+`dbg_field_triage`'s "frame 1" is our SECOND DECODED picture (decode
+order), not the second DISPLAYED one. Comparing that directly against the
+reference YUV's frame-index-1 bytes (which IS in display order) silently
+compares two unrelated pictures whenever a stream has any B/b-frames. This
+produced an entire false lead early in the session (apparent "prediction
+samples from a completely wrong region" pattern that was actually just
+two different pictures' pixels being diffed against each other). Always
+pass `FIELD_DISPLAY_ORDER=1` when comparing against a reference YUV for a
+stream that might reorder — cross-checked this session by rebuilding a
+correct manual JM-table reading (JM's printed "frame" column is not decode
+order, it's the picture's PRECOMPUTED display index, printed at DECODE
+time — sort by that column, not by print order, to get true display
+order).
+
+**Real bug 1 (FIXED): `derive_poc_type1` was missing `offset_for_non_ref_pic`
+entirely.** §8.2.1.2 requires a non-reference picture's
+`expectedPicOrderCnt` to be further offset by `offset_for_non_ref_pic`
+before `delta_pic_order_cnt[0]` is added; the field was parsed into the SPS
+(by whatever session landed POC-type-1 parsing before this one) but never
+read in the derivation. Every non-reference picture's POC collapsed to the
+SAME `expected_pic_order_cnt` as its preceding reference picture (e.g.
+Sharp_MP_PAFF_1r2's first B-picture computed POC=6, identical to the P
+picture immediately before it, instead of POC=2).
+
+**Real bug 2 (FIXED, both POC type 1 and type 2): `FrameNumOffset` was a
+stateless per-call recompute, not the spec's running accumulator.** §8.2.1.2/
+§8.2.1.3 both define `FrameNumOffset` as carried forward from picture to
+picture (`prevFrameNumOffset + MaxFrameNum` on a wrap, else
+`prevFrameNumOffset` unchanged) — `prevFrameNum`/`prevFrameNumOffset` here
+are the PREVIOUS PICTURE IN DECODING ORDER, regardless of its reference
+status (a different, decoder-wide-per-call semantics from the
+`prev_frame_num` field POC types 0/2's OTHER prior logic — nothing to do
+with type 2, mislabelled — already used, which only advances on
+*reference* pictures and is shared with type 0). The old code instead did
+`if frame_num < prev_frame_num_of_last_REFERENCE_picture { MaxFrameNum }
+else { 0 }` fresh every call: correct for exactly the one picture where a
+wrap is detected, then silently forgotten on the very next call (since
+frame_num "isn't decreasing" relative to itself). Net effect: `PicOrderCnt`
+collapsed back down near 0 for every picture after a SECOND type-1 wrap, or
+after the FIRST type-2 wrap on any stream long enough to hit one.
+
+Fixed by adding `prev_frame_num_offset_t1`/`prev_frame_num_any_t1` and the
+type-2-equivalent fields to `PocState`, updated on every
+`derive_poc_type{1,2}` call (any reference status) and reset alongside the
+existing MMCO-5 predictor reset. Also removed the (spec-incorrect) `&&
+is_reference` gate on the wrap-detection comparison for both types.
+
+**Verification — type 1 (Sharp_MP_PAFF_1r2):** `KINETIX_POC1_DBG=1` dump
+of every derive call, compared row-by-row against a fresh `ldecod.exe`
+run's own frame table (`tools/build-jm-oracle.sh`). After both fixes, our
+POC values (top/bottom field split for the field pairs) match JM's
+displayed per-picture POC exactly for every picture checked: IDR
+(0/1↔JM's displayed "1"), the first P (poc=6, exact), the first b (poc=2,
+exact), the first field-pair b|b (poc=4/5, JM shows "5" — matches the
+bottom field), the second P field-pair (poc=12/13, JM shows "13" —
+matches), the second b|b (poc=8/9, JM shows "9" — matches). This is now a
+*bit-for-bit spec-correct* implementation, not a coincidentally-working
+one — the old code, before either fix, only "worked" for the first two
+pictures.
+
+**Verification — type 2 (CI1_FT_B): full fix, clip promoted BitExact.**
+`KINETIX_REORDER_DBG=1` traced `reorder_push`'s buffer state across the
+whole 291-picture stream: with the bug, POC climbed cleanly 434→512 then
+**reset to 2** on the very next push (`log2_max_frame_num_minus4 == 4` ⇒
+`MaxFrameNum == 256`; this clip's `frame_num` wraps once around picture
+256) — after the fix, POC continues cleanly past 512 to 514, 516, 518,
+... From there `with_display_order`'s fixed-depth-17 min-POC eviction
+buffer, previously reading nonsense low POCs for the back third of the
+stream, correctly maintains steady-state order throughout.
+**CI1_FT_B is now 291/291 byte-exact** (`max_diff=0 diff_bytes=0`) — the
+multi-slice CAVLC decode itself was ALREADY fully correct before this fix
+(every reference frame was present, byte-exact, somewhere in the decoded
+set — the #32bz "DECODE-EXACT" note was accurate), this was purely a
+reorder-buffer feed problem. Promoted `("CI1_FT_B", Expect::BitExact)` in
+the MANIFEST (32→33 hard-checked clips).
+
+**Real bug 3 (FIXED, same session): B-slice frame-mode reference list
+builders had the identical raw-field-DPB-entry bug as the P-slice one
+fixed earlier this session.** `initial_ref_list_l0_b` / `initial_ref_list_l1`
+(both feed `build_ref_list_l0_b_slice` / `build_ref_list_l1`) iterated
+`dpb.iter()` directly, same as `build_ref_list_l0` before its fix. Now both
+route through `combine_field_pairs_into_frames` too. Found while tracing
+Sharp_MP_PAFF_1r2's first B-picture, whose `RefPicList0` needs exactly this
+(it references frame 0's stored field pair).
+
+**Sharp_MP_PAFF_1r2 status: POC now provably correct, but the clip is NOT
+yet bit-exact — a separate bug remains, unlocalized.** With
+`FIELD_DISPLAY_ORDER=1` (matching `itu_conformance`'s real harness),
+display-frame 1 (POC=2, the first non-reference B-picture) is still
+~66% wrong (`ndiff≈171k/259200` per field, same magnitude as before any of
+this session's fixes) even though: its own POC is now exactly right, its
+`RefPicList0`/`RefPicList1` are now built from the correctly-combined
+frame-mode references (bug 3 above), and the underlying reference content
+(the I+P field pair) is proven byte-exact. This B-picture's own pixel
+content is the next thing to root-cause — NOT YET STARTED this session
+(ran out of time after confirming refs/POC are clean). Next steps: (1) get
+the JM-oracle per-MB dump hook actually firing (see tooling note above) for
+a real oracle comparison of this specific B-picture's modes/MVs/direct-mode
+derivation; (2) failing that, apply the same `KINETIX_P_MB_DBG`-style
+dump to the B-slice path and manually sanity-check MV plausibility/
+direct-mode selection against the visible content, the way `KINETIX_P_MB_DBG`
+was used for the (now-confirmed-correct) P-picture. The P-picture's own
+content was never fully re-verified after the POC/ref-list fixes (the
+FIELD_MATCH_SEARCH tool proved the DECODE ORDER content was always
+correct even before this session's fixes — see the false-start note above —
+so there's no reason to suspect the P-picture itself, but it hasn't been
+re-checked byte-for-byte since).
+
+**FM1_BT_B: unchanged, not investigated this session** (checked once
+after each fix landed — `diff_bytes=14974966/15206400`, `max_diff=122`,
+identical across the whole session — none of today's fixes touch whatever
+its bug is).
+
+**MBAFF CABAC (CANLMA2's pinned raw-CABAC-engine desync lead): not reached
+this session** — ran out of time after the CI1_FT_B fix. The lead from
+prior sessions (a proven raw `(range,offset)` desync from an EARLIER bin,
+not a context/decode-value bug, "tooling built not run to completion")
+is still exactly where it was left; see the memory system's
+`project_h264_current_open_work` note and this file's own CANLMA2 sections
+for where to pick it up.
+
+Regression check: `cargo fmt --all -- --check`, `cargo clippy -p
+tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+tpt-kinetix-h264 --release --lib --bins --tests` (269+ lib tests + every
+integration test, all green, including the pre-existing `poc_type2_*` unit
+tests — unaffected by the accumulator fix since they only exercise a
+single call each), and the full ITU conformance suite (33/33 hard-checked
+BitExact, 0 failures, up from 32) all pass. Commit `f4cc631`.
+
 ## SESSION #32ca (2026-09-24) — frame-mode ref-list fix for mixed PAFF frame/field streams; POC type 1 / CVFI1 P-field items found ALREADY DONE by a concurrent session
 
 Picked up the handoff list (Sharp_MP_PAFF_1r2 POC type 1, CVFI1 P-fields,
