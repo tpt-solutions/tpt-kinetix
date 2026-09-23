@@ -810,6 +810,52 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 23 (same continuation) — HCHP2_HHI_A poc=498 (the
+final displayed picture) is a **degenerate B-slice: RefPicList0 and
+RefPicList1 both resolve to the SAME single entry** (frame_num=121,
+poc=496, short-term). Traced via `KINETIX_BINTRACE`'s existing
+`REORDER_PUSH`/`REFLIST` prints (no new tooling needed for this step —
+`REFLIST` already logs `pic_num`/`frame_num`/`poc` per entry, just grep
+around the target `REORDER_PUSH poc=498` line in a full-clip trace dump).
+
+Max POC in the stream is 498 (250 frames × POC step 2), confirming this
+picture — decoded near the very end, as expected for a low-delay closing
+B-frame with no true future picture to reference — is display frame 249.
+Its `REFLIST B L0 (multi-slice)`/`REFLIST B L1 (multi-slice)` both show a
+single entry pointing at poc=496: `num_ref_idx_l0/l1_active` is 1 for this
+slice, and with 496 apparently the only available short-term reference at
+this point (494's own `REORDER_PUSH` precedes it, and most of the tail
+NALs are `ref_idc=0` — non-reference leaf B-frames that never enter the
+DPB), this is architecturally *plausible* as spec-correct encoder
+behaviour for the true final picture of the sequence (no future frame
+exists beyond POC 498, so a B-slice here must reference backward for both
+lists) — but this was NOT independently verified against JM; it remains
+a hypothesis, not a proven-correct reference selection.
+
+Checked `mv.rs::derive_spatial_direct`/`apply_spatial_direct` (this clip
+uses spatial direct per the HCHP1 comment) for an edge case specific to
+`RefPicList0[refIdx] == RefPicList1[refIdx]` pointing at the identical
+physical picture — found nothing obviously wrong in either function
+(candidate/median selection and `col_zero_flag` derivation don't special-
+case or get confused by identical L0/L1 targets in the code as written),
+but this was a read-through, not a bin-level or pixel-level proof the way
+addenda 19/20 achieved for HCAFR1 — do not treat spatial-direct as
+cleared.
+
+NEXT (concrete, still unbuilt): extend the JM oracle patch (same
+technique as addendum 20 — `JM_DUMP_MB`/`JM_DUMP_B8`-style env-gated
+`fprintf` hooks, this time in JM's own `RefPicList0`/`RefPicList1`
+construction, e.g. `mbuffer.c`'s `init_lists`/`reorder_ref_pic_list`) to
+dump JM's own reference-list content for its internal picture matching
+POC 498, and diff against the `REFLIST` trace above — this is the one
+piece of ground truth this addendum is still missing. If JM's list
+DIFFERS from ours (e.g. it has 2 active refs, or a different single
+entry), the bug is in list construction/MMCO/sliding-window bookkeeping.
+If it MATCHES, the bug is downstream (spatial-direct motion derivation,
+weighted prediction, or something else specific to the same-picture-both-
+lists case) and `apply_spatial_direct` needs the bin-level scrutiny it
+hasn't had yet.
+
 ## SESSION #32bx ADDENDUM 22 (same continuation) — HCHP2_HHI_A re-triaged
 with the CORRECT (display-ordered) comparison; addendum 21's "localized
 bottom-right region" claim was an artifact of a flawed diagnostic and is
