@@ -7774,3 +7774,174 @@ cosmetic for output but worth one look alongside (1)).
 > the same 10 pre-existing errors (`manual_div_ceil` ×9,
 > `too_many_arguments` ×1) already present on master before this session,
 > none in the files this session touched.
+
+> **2026-09-24 — MAJOR progress: built a validated independent dav1d oracle,
+> disproved the leading "hidden alt-ref" hypothesis, and root-caused the
+> bug to OH=7's own V-plane chroma leaf (16×16, `eob=0`) diverging from
+> dav1d specifically in the padded rows below the visible frame — no fix
+> landed, but this is now an extremely narrow, well-isolated target.**
+> Picked this up per an explicit instruction to pursue the prior session's
+> "relative tap-to-tap delta against patched dav1d" idea.
+>
+> **Part 1: got a real, working, rebuildable dav1d oracle (this didn't
+> exist before this session).** The existing "patched tracing dav1d" at
+> `%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d` turned out to be UNREBUILDABLE
+> — its `src/` directory only contains the ~10 files a past session
+> patched (`cdef_apply_tmpl.c`, `decode.c`, `lf_apply_tmpl.c`, `lf_mask.c`,
+> `loopfilter_tmpl.c`, `mc_tmpl.c`, `obu.c`, `recon.h`, `recon_tmpl.c`),
+> not a full dav1d source tree; `ninja` fails immediately (missing
+> `vcs_version.h.in`, then missing everything else). **Fixed by freshly
+> cloning `videolan/dav1d` tag `1.5.4` to `%LOCALAPPDATA%\Temp\dav1d_fresh`,
+> copying over only the already-patched `cdef_apply_tmpl.c`** (the other
+> 8 patched files are stale relative to 1.5.4's headers — `decode.c`
+> fails to compile against the real 1.5.4 `refmvs.h`, `const refmvs_block
+> *const *` vs `refmvs_block **` — so they were left at the fresh clone's
+> unpatched 1.5.4 version) **and running `meson setup build
+> --buildtype=release` + `ninja -C build tools/dav1d.exe`** (needs
+> `vcvars64.bat`'s environment; `meson`/`ninja`/`nasm`/`cmake` are all on
+> PATH already via scoop/pip). Builds clean in ~15s incremental. The
+> resulting `dav1d.exe` needs `PATH` to include `build/src` (for
+> `libdav1d.dll`) or it fails silently. **This is now a real, working,
+> re-editable dav1d 1.5.4 — commit this recipe if a future session wants
+> to keep using it** (not preserved in the repo since it lives entirely
+> under `%LOCALAPPDATA%\Temp`, gitignored territory, and rebuilding takes
+> under a minute once cloned).
+>
+> **Part 2: the "18 vs 17 version difference" from 2026-09-23 was NEVER a
+> version difference — it was `--threads 1` corrupting the decode.**
+> Decoded the real `testsrc_160x90` corpus OBU (saved via the new
+> `KINETIX_AV1_160_OBU_OUT` env var on `dbg_av1_160_grid.rs`, since
+> ffmpeg's AV1 encoder is nondeterministic across processes and a fresh
+> re-encode is NOT the same bitstream — confirmed this again the hard
+> way: an independently-encoded 160x90/9-frame clip via
+> `dbg_av1_chroma.rs` has a completely different GOP/order-hint pattern)
+> three ways: `ffmpeg -i … -pix_fmt yuv420p -f rawvideo` (libdav1d 1.3.0,
+> the conformance harness's actual ground truth), my fresh `dav1d.exe`
+> with default (multi-threaded) settings, and my fresh `dav1d.exe` with
+> `--threads 1`. **Default-MT dav1d 1.5.4 matches ffmpeg's 1.3.0 EXACTLY**
+> at every sampled pixel (frame 7 V-plane row44 x64-71:
+> `14 15 16 17 17 17 127 126` — identical in both). **`--threads 1` on
+> the SAME binary gives a DIFFERENT, wrong-looking result**
+> (`14 15 17 18 18 17 127 126` pre-CDEF at the same block) — this is
+> backwards from what every prior session assumed (that `--threads 1`
+> was the more-reliable/deterministic setting and MT was the risky one);
+> here it's `--threads 1` that's the outlier. **Conclusion: always use
+> default (or explicitly multi-threaded) settings with this dav1d build
+> for reference comparisons; never pass `--threads 1`.** This fully
+> resolves the "dav1d 1.5.4 pre-CDEF value differs from ffmpeg's 1.3.0
+> by a constant-ish offset, a real version difference" claim from
+> 2026-09-23 — it wasn't a version difference at all.
+>
+> **Part 3: with a validated oracle, re-did the (67,44) 5-tap comparison
+> properly and found the real single wrong tap.** Added a `TAP67 dav`
+> debug hook (`cdef_apply_tmpl.c`, gated on `KINETIX_DBG_TAP67`,
+> `frame_offset==7 && show_frame`, `bx==32 && by∈{20,22}`) that dumps the
+> pre-CDEF chroma V 4×4 windows at `(64,40)` and `(64,44)`, and a mirror
+> `KINETIX_DBG_TAP67` hook in Kinetix's own `cdef_plane_chroma`
+> (`loop_filter.rs`). With the trusted (default-MT) oracle, dav1d's block2
+> (chroma rows 44-47, cols 64-67) is **flat: `14 15 16 17` repeated
+> identically on every one of the 4 rows.** Diffing this against
+> Kinetix's known 5-tap values (from the 2026-09-23 `CDEF67_44` trace) —
+> `(67,43)=16✓`, `(66,44)=16✓`, `(67,42)=16✓`, `(65,44)=15✓`,
+> **`(67,46)=16✗ (dav1d: 17)`** — every tap now matches except `(67,46)`,
+> exactly the swing needed to flip the CDEF sum from -8 to -7 (the tap's
+> weight-1 `sec_tap`, diff 16-17=-1→constrain=-1→contrib=-1; raising it
+> to 17 makes diff=0→contrib=0, sum -8→-7, final value 16→17, matching
+> ground truth). **This is the first session to pin the exact wrong
+> sample with a validated oracle rather than guessing among candidates.**
+>
+> **Part 4: traced `(67,46)`'s wrongness back through 3 frames and
+> disproved the "hidden alt-ref frame is buggy" hypothesis from earlier
+> in this same session (see the addendum above this one) — the keyframe
+> IS correct.** `(67,46)`'s content is inherited via a chain: OH=7's
+> block at mi(32,16) is single-ref GOLDEN (slot 1 = the hidden n1 frame,
+> order_hint 6) with `mv=(0,0)`; n1's own block there is `skip=true`
+> from the keyframe (also `mv=(0,0)`). Dumped `KINETIX_AV1_DUMP_GRID` for
+> all 3 frames (keyframe, n1, oh=7) and found the SAME pattern at chroma
+> (64-67,44-47) in the keyframe and n1 (`14 15 16 17 | 14 16 17 17 |
+> 14 16 16 16 | 16 16 16 16`), which looked like a shared bug at first —
+> **but then built the `TAP67 dav pre`/`post` pair for the KEYFRAME
+> specifically (`frame_offset==0`) and found dav1d's OWN post-CDEF
+> keyframe value at this exact block is `14 15 16 17 | 14 16 17 17 |
+> 14 16 16 16 | 16 16 16 16` — IDENTICAL to Kinetix's.** The keyframe
+> (and therefore n1's inherited copy of it) is 100% correct, including
+> every padding row, including through CDEF. The "flat 14 15 16 17"
+> pattern from Part 3 belongs to OH=7's OWN reconstruction only, not
+> something inherited from upstream — my first pass at this conflated
+> the keyframe's actual (non-flat) correct content with OH=7's
+> after-residual flat content and wrongly concluded the keyframe was
+> buggy; re-checking against the dav1d oracle (not just Kinetix's own
+> internal consistency) caught the error. **Record this dead end
+> explicitly so a future session doesn't re-chase the keyframe.**
+>
+> **Part 5: found where the "prediction → flat" transformation actually
+> happens (or fails to) — landed on either a missing bottom-of-grid
+> deblock edge or a real entropy desync, did not distinguish between
+> the two.** OH=7's V-plane chroma residual at mi(32,16) is a SINGLE
+> 16×16 leaf (`cw=16 ch=16`, confirmed via a `KINETIX_AV1_DBG_B0` trace
+> extended this session with `seq=`/`cw=`/`ch=` — decode-order `seq=8` is
+> confirmed to be OH=7 via the `DBGSEQ` cross-reference) with **`eob=0`**
+> — Kinetix reads ZERO residual coefficients for chroma V here, so its
+> reconstructed value is the pure MC-copy prediction (`ref=GOLDEN
+> mv=(0,0)`, i.e. exactly n1/keyframe's stored content, which Part 4
+> proved correct: `14 15 16 17 | 14 16 17 17 | 14 16 16 16 | 16 16 16 16`
+> for rows 44-47). dav1d's actual pre-CDEF value for the SAME block is
+> **flat `14 15 16 17` on every row** (Part 3). The row-by-row delta
+> needed to turn Kinetix's prediction into dav1d's answer is
+> `[0,0,0,0]` (row44) → `[0,-1,-1,0]` (row45) → `[0,-1,0,1]` (row46) →
+> `[-2,-1,0,1]` (row47) — **magnitude increases monotonically toward
+> row47, the LAST row of the padded mi-grid** (chroma height 48, real
+> content ends at row44), which is the textbook shape of a deblocking
+> filter's taper *from an edge below row47* (bigger correction closer to
+> the edge), not a random residual pattern. Two live hypotheses, NOT
+> distinguished this session:
+> (a) **dav1d applies a deblock edge at/near the bottom mi-grid boundary
+> (row48, i.e. the bottom of the LAST superblock row) that Kinetix
+> doesn't** — plausible since AV1 SBs always cover full 64×64 (or
+> 128×128) units regardless of crop, so a real edge could exist at the
+> superblock's own bottom boundary even past the visible frame, and nothes
+> found by grepping don't show any special-casing for "last real SB row's
+> bottom edge" in `deblock_plane`'s band iteration (worth checking
+> `mark_chroma_edges` calls near the tile's bottom edge specifically, and
+> whether a below-tile "virtual" edge should be synthesized the way a
+> real edge would be, similar in spirit to the two already-fixed
+> `mark_chroma_edges` gaps from 2026-09-23);
+> (b) **`eob=0` is itself the bug — a genuine entropy desync** that
+> silently reads zero coefficients when the true bitstream has real ones,
+> possibly not cascading further because this may be the last (or a very
+> late) coefficient read in its tile. Consistency check NOT done this
+> session: whether U-plane (which DID get `eob=11` at the same mi/cpx) is
+> itself correct at these same padding rows — if U matches dav1d exactly,
+> that weakens the "shared desync" theory and points at V specifically
+> (or an oddity specific to V's context/CDF path); if U is ALSO wrong in
+> the same taper shape, that's much stronger evidence for hypothesis (a),
+> a genuine missing edge affecting both chroma planes identically.
+> **This U-plane check is the single highest-value next step.**
+>
+> **This closes the loop on why the original CDEF trace ever looked like
+> a CDEF bug**: `(67,44)` itself is untouched by this — Kinetix's own
+> pre-CDEF value there already matches dav1d exactly — the bug is purely
+> that ONE of `(67,44)`'s secondary-tap NEIGHBOURS, `(67,46)`, sits in
+> the affected padding-row region and is 1 too low, and CDEF (fully
+> spec-correct, re-verified against real dav1d source in the previous
+> addendum) faithfully propagates that pre-existing error into a visible
+> ±1 at the one displayed pixel whose secondary tap happens to reach that
+> far down. **Fixing the row45-47 V-plane divergence (whichever of (a)/(b)
+> it turns out to be) should close the (67,44) mismatch as a side effect
+> — no CDEF-side change is needed or should be made.**
+>
+> Housekeeping: `KINETIX_DBG_TAP67` added to both `loop_filter.rs`
+> (Kinetix) and the fresh dav1d clone's `cdef_apply_tmpl.c` (not part of
+> this repo); `KINETIX_AV1_DBG_B0`'s `uv-cf-blk` trace gained `seq=`/
+> `cw=`/`ch=`; `dbg_av1_160_grid.rs` gained `KINETIX_AV1_160_OBU_OUT`. All
+> three Kinetix-side changes committed (`av1: add KINETIX_DBG_TAP67...`).
+> Corpus unchanged: **4/5 entries 100% bit-exact, testsrc_160x90 6/7
+> frames exact (single ±1 V-sample, 83.69 dB)** — re-verified via
+> `cargo test -p tpt-kinetix-test-utils --test conformance
+> av1_inter_corpus_vs_dav1d_when_available -- --nocapture` after every
+> change this session; no regression at any point. `capabilities().
+> pixel_exact` correctly left `false`. Gates green: AV1 154 lib tests,
+> test-utils conformance 11/11, `cargo fmt --check` clean on both touched
+> crates, `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`
+> shows the same pre-existing errors only (none in files this session
+> touched).
