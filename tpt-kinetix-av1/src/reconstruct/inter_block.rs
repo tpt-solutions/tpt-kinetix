@@ -1646,8 +1646,10 @@ impl<'a> TileDecodeState<'a> {
             let px_end_x = px_x0 + bw_px;
             let px_end_y = px_y0 + bh_px;
             if px_x0 < 138 && px_end_x > 128 && px_y0 < 96 && px_end_y > 82 {
+                let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
+                let ref_oh0 = self.dpb_order_hints.get(slot0).copied().unwrap_or(255);
                 eprintln!(
-                    "TAPBLK seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} mm={motion_mode} ii={interintra_type} skip={skip} ref={:?} mv0={:?}",
+                    "TAPBLK seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} mm={motion_mode} ii={interintra_type} skip={skip} ref={:?} ref_slot0={slot0} ref_oh0={ref_oh0} mv0={:?}",
                     crate::debug_frame_seq::current(),
                     ref_names,
                     mvs[0],
