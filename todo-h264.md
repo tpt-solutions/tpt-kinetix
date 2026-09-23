@@ -810,6 +810,48 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 21 — next frontier triaged: HCHP2_HHI_A's single
+bad frame (was "249/250 ref frames exact somewhere" before and after
+addendum 20's fix — unrelated bug, cheap follow-up not yet closed).
+
+`itu_conformance.rs`'s naive same-index compare shows huge diffs on most
+frames for this clip because it's read WITHOUT `.with_display_order()` in
+that harness's `decode_all` — no, correction: `decode_all` DOES call
+`.with_display_order()`; the huge per-frame numbers `dbg_itu_triage.rs`
+reports for this clip are bogus (that harness's own decode loop does NOT
+reorder — known caveat, don't trust its frame-indexed diffs for any
+clip with B-frames/hierarchical GOP; only trust `itu_conformance.rs`'s
+`exact_via_reorder` search).
+
+Using `itu_conformance.rs`'s own `decode_all` (correctly display-ordered)
+plus a byte-exact search over the full decoded set: **249 of 250
+reference frames match some decoded frame exactly; reference frame 249
+(the last) has no exact match anywhere.** The closest decoded frame by
+diff count is index 247 (5670 diff bytes: 5447 Y / 174 U / 49 V) — errors
+are NOT whole-frame-wrong (would be ~100k+ diffs like a mis-ordered/wrong
+frame), they're **localized to the bottom-right ~4 MB rows × ~9 MB cols**
+(approx MB (13..21, 14..17) of a 22×18 MB grid, 352×288), with some
+individual MBs off by up to 242 (essentially uncorrelated with the source,
+i.e. wrong block entirely, not a rounding gap) alongside many exactly-0
+MBs in the same region. This is NOT the addendum-20 scaling-list bug
+(that produces small ±1..~6 diffs from a wrong dequant weight, not
+localized 100+ magnitude block-level errors) — a different bug.
+
+Open questions (not yet investigated): why 247 and not another index —
+confirm 247 really is the correctly-ordered decode of display frame 249,
+not a coincidental low-diff-count false match; whether this is a
+hierarchical-GOP reference/MMCO issue specific to the picture at the
+deepest B-pyramid level; why the error is confined to a screen REGION
+rather than affecting specific block/mb_types picture-wide (suggests a
+spatially-local cause — maybe a slice/tile boundary, or content-dependent
+motion in that region hitting an actual bug rather than something
+structural). NEXT: dump MB type/qp/ref_idx/mv for the MBs in the bad
+region at decoded-frame-index 247 (extend `dbg_itu_triage.rs`'s recorder
+to work on a `.with_display_order()` decode, or write a fresh scratch
+harness — do NOT trust the existing recorder's frame-indexed snapshots for
+this clip) and compare against JM's trace/pixel dump for the
+corresponding picture.
+
 ## SESSION #32bx ADDENDUM 20 — HCAFR1 ROOT CAUSE FOUND AND FIXED: the JVT
 default 8×8 scaling-list constants were mis-transcribed. HCAFR1_HHI_C now
 **fully bit-exact, all 10 frames** (0/1520640 diff bytes), promoted to
