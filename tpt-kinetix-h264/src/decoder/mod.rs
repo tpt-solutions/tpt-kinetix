@@ -2973,6 +2973,18 @@ impl H264Decoder {
                     .iter()
                     .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
                     .collect();
+                if let Ok(path) = std::env::var("KINETIX_DUMP_REFLIST0") {
+                    if let Some(f) = ref_frames.first() {
+                        let path = format!("{path}.fn{}", header.frame_num);
+                        std::fs::write(&path, &f.data).ok();
+                        eprintln!(
+                            "DUMP_REFLIST0: wrote {} bytes ({}x{}) to {path}",
+                            f.data.len(),
+                            f.width,
+                            f.height
+                        );
+                    }
+                }
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
                 let entropy_coding_mode_flag = pps

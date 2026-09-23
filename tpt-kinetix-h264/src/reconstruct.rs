@@ -2990,15 +2990,28 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
             if mb.motion.is_some() {
                 ninter += 1;
             }
-            ncoeff += mb.luma_coeffs.iter().filter(|c| c.iter().any(|&v| v != 0)).count();
+            ncoeff += mb
+                .luma_coeffs
+                .iter()
+                .filter(|c| c.iter().any(|&v| v != 0))
+                .count();
             if let Some(cells) = mv_store.cells_of(mb_idx) {
                 for c in cells {
                     if c.ref_idx >= 0 {
                         *ri_hist.entry(c.ref_idx as usize).or_insert(0) += 1;
                     }
                 }
-                mv_sum += cells.iter().map(|c| c.mv[0].abs() as u64 + c.mv[1].abs() as u64).sum::<u64>();
-                mv_max = mv_max.max(cells.iter().map(|c| c.mv[0].abs().max(c.mv[1].abs())).max().unwrap_or(0));
+                mv_sum += cells
+                    .iter()
+                    .map(|c| c.mv[0].unsigned_abs() as u64 + c.mv[1].unsigned_abs() as u64)
+                    .sum::<u64>();
+                mv_max = mv_max.max(
+                    cells
+                        .iter()
+                        .map(|c| c.mv[0].abs().max(c.mv[1].abs()))
+                        .max()
+                        .unwrap_or(0),
+                );
             }
         }
         eprintln!(
@@ -3557,9 +3570,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
     if std::env::var_os("KINETIX_MB_GRID").is_some() && mb_y < 2 && mb_x < 2 {
         eprintln!(
             "GRID-PAFF ({mb_x},{mb_y}) idx={idx}: {:?}",
-            grid.iter()
-                .map(|c| (c.mv, c.ref_idx))
-                .collect::<Vec<_>>()
+            grid.iter().map(|c| (c.mv, c.ref_idx)).collect::<Vec<_>>()
         );
     }
 

@@ -1153,9 +1153,20 @@ pub fn build_ref_list_l0(
 ) -> Option<Vec<DpbEntry>> {
     let num_active = num_ref_idx_l0_active.max(1);
 
-    let mut shorts: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_short_term).collect();
+    // §8.2.4.2.1: a *frame* picture's reference list is built from reference
+    // frames and complementary reference *field pairs* — a DPB holding raw
+    // field entries (mixed PAFF frame/field streams, e.g. ITU
+    // Sharp_MP_PAFF_1r2 / CVPA1_TOSHIBA_B, whose frame-coded pictures
+    // reference an earlier field-coded picture) must first pair up each
+    // frame_num's top/bottom fields into one full-height reference frame
+    // before the usual FrameNumWrap ordering — using the raw half-height
+    // field entries directly here would feed frame-mode motion compensation
+    // out-of-bounds/half-stride samples.
+    let combined = combine_field_pairs_into_frames(dpb);
+
+    let mut shorts: Vec<&DpbEntry> = combined.iter().filter(|e| e.is_short_term).collect();
     shorts.sort_by_key(|e| std::cmp::Reverse(e.pic_num(ctx)));
-    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    let mut longs: Vec<&DpbEntry> = combined.iter().filter(|e| e.is_long_term).collect();
     longs.sort_by_key(|e| e.long_term_pic_num);
 
     if shorts.is_empty() && longs.is_empty() {
@@ -1170,6 +1181,84 @@ pub fn build_ref_list_l0(
         list.push(last);
     }
     Some(list)
+}
+
+/// Pair up complementary reference *field* entries stored in the DPB
+/// (opposite `bottom_field_flag`, same `frame_num`, same short/long-term
+/// status) into single full-height frame references, and pass non-field
+/// entries through unchanged. Used by frame-mode reference list construction
+/// (§8.2.4.2.1) for streams that mix PAFF field pictures with frame pictures.
+///
+/// An unpaired field (its complementary field is missing, e.g. dropped by an
+/// MMCO or never coded) cannot alone form a reference frame per spec and is
+/// dropped from the frame-mode list; it remains usable by later *field*
+/// pictures via `build_field_ref_list_l0`, which reads the DPB directly.
+fn combine_field_pairs_into_frames(dpb: &Dpb) -> Vec<DpbEntry> {
+    let entries: Vec<&DpbEntry> = dpb.iter().collect();
+    let mut out = Vec::with_capacity(entries.len());
+    let mut used = vec![false; entries.len()];
+    for i in 0..entries.len() {
+        if used[i] {
+            continue;
+        }
+        let e = entries[i];
+        if !e.field_pic_flag {
+            used[i] = true;
+            out.push(e.clone());
+            continue;
+        }
+        let partner = entries.iter().enumerate().find(|&(j, o)| {
+            j != i
+                && !used[j]
+                && o.field_pic_flag
+                && o.frame_num == e.frame_num
+                && o.bottom_field_flag != e.bottom_field_flag
+                && o.is_short_term == e.is_short_term
+                && o.is_long_term == e.is_long_term
+        });
+        if let Some((j, other)) = partner {
+            used[i] = true;
+            used[j] = true;
+            let (top, bottom) = if e.bottom_field_flag {
+                (*other, e)
+            } else {
+                (e, *other)
+            };
+            out.push(interleave_field_pair_entry(top, bottom));
+        }
+        // else: unpaired field — dropped from the frame-mode list (see doc
+        // comment above).
+    }
+    out
+}
+
+/// Combine two complementary field `DpbEntry`s into one full-height frame
+/// `DpbEntry`, using the same top/bottom scanline interleave as output field
+/// pairing (`H264Decoder::interleave_fields`).
+fn interleave_field_pair_entry(top: &DpbEntry, bottom: &DpbEntry) -> DpbEntry {
+    let frame = crate::decoder::H264Decoder::interleave_fields(&top.frame, &bottom.frame);
+    let mc_frame = match (&top.mc_frame, &bottom.mc_frame) {
+        (Some(t), Some(b)) => Some(crate::decoder::H264Decoder::interleave_fields(t, b)),
+        _ => None,
+    };
+    DpbEntry {
+        frame,
+        frame_num: top.frame_num,
+        field_pic_flag: false,
+        bottom_field_flag: false,
+        pic_order_cnt: top.pic_order_cnt.min(bottom.pic_order_cnt),
+        is_short_term: top.is_short_term,
+        is_long_term: top.is_long_term,
+        long_term_pic_num: top.long_term_pic_num,
+        // Not a real decoded picture — no per-MB MV grid or list POCs exist
+        // for the synthetic combined frame, so it cannot yet serve as a
+        // temporal-direct co-located picture. No known mixed frame/field
+        // fixture exercises that combination.
+        mv_grid: None,
+        list0_poc: Vec::new(),
+        list1_poc: Vec::new(),
+        mc_frame,
+    }
 }
 
 /// A reference *field* for interlaced (PAFF / MBAFF) motion compensation.

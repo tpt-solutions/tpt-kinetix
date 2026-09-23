@@ -97,7 +97,8 @@ fn field_triage_strict() {
                     let idx = emitted_count;
                     if refy.len() >= yl * (idx + 1) {
                         let r = &refy[yl * idx..yl * (idx + 1)];
-                        let (mut top_n, mut bot_n, mut tmax, mut bmax) = (0usize, 0usize, 0i32, 0i32);
+                        let (mut top_n, mut bot_n, mut tmax, mut bmax) =
+                            (0usize, 0usize, 0i32, 0i32);
                         for y in 0..h {
                             for x in 0..w {
                                 let d = (f.data[y * w + x] as i32 - r[y * w + x] as i32).abs();
@@ -143,7 +144,7 @@ fn field_triage_strict() {
                             // ASCII per-MB error map of each field: 45x30
                             // grid, '.' <=8 wrong samples, '0'-'9' tens,
                             // '#' >99. Field-row r of MB row R is 16R+r.
-                            for (parity, tag) in [(0usize, "TOP"), (1usize, "BOT")] {
+                            for (_parity, tag) in [(0usize, "TOP"), (1usize, "BOT")] {
                                 eprintln!("          MB map {tag}:");
                                 for my in 0..(h / 16) {
                                     let mut line = String::new();

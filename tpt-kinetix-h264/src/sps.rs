@@ -122,9 +122,10 @@ impl SeqParameterSet {
             offset_for_non_ref_pic = r.read_se().context("offset_for_non_ref_pic")?;
             offset_for_top_to_bottom_field =
                 r.read_se().context("offset_for_top_to_bottom_field")?;
-            num_ref_frames_in_pic_order_cnt_cycle = r.read_ue().context("num_ref_frames_in_poc_cycle")?;
+            num_ref_frames_in_pic_order_cnt_cycle =
+                r.read_ue().context("num_ref_frames_in_poc_cycle")?;
             for _ in 0..num_ref_frames_in_pic_order_cnt_cycle {
-                offset_for_ref_frame.push(r.read_se().context("offset_for_ref_frame")? as i32);
+                offset_for_ref_frame.push(r.read_se().context("offset_for_ref_frame")?);
             }
         }
 
