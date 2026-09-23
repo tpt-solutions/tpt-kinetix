@@ -235,6 +235,12 @@ const MANIFEST: &[(&str, Expect)] = &[
     // `ff_h264_default_scaling8[0]` (intra) instead of `[1]` (inter). Fixed in
     // transform.rs `parse_scaling_lists`. diff_bytes 12,109 -> 0.
     ("FRExt1_Panasonic_D", Expect::BitExact),
+    // Promoted to BitExact 2026-09-23 (addendum 20 fallout): CAVLC High,
+    // 8x8 transform, JVT default scaling matrix. Was max_diff=1 (9/11
+    // frames exact, ~45 diff bytes) before the JVT_DEFAULT_8X8/_INTER
+    // scan-order transcription fix (todo-h264.md addendum 20) — same root
+    // cause as HCAFR1_HHI_C, now 0/1672704 diff bytes.
+    ("FRExt3_Panasonic_E", Expect::BitExact),
     // Promoted to BitExact 2026-09-10 (SESSION #32be): CAVLC High, 8×8
     // transform, hierarchical GOP, temporal direct. The whole non-deblock
     // pipeline was already bit-exact (verified against a locally-built JM
