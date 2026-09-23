@@ -1191,6 +1191,34 @@ mod tests {
     }
 
     #[test]
+    fn jvt_default_8x8_matches_jm_raster_tables_via_zigzag() {
+        // Regression pin for the addendum-20 bug: JVT_DEFAULT_8X8/_INTER's
+        // hand-transcribed scan-order values had their run-length boundaries
+        // shifted by one position (the intra table was missing 40/42
+        // entirely, capping at 38). These are the correct scan-order
+        // sequences, independently hand-derived from JM ldecod's own
+        // raster-order `quant8_intra_default`/`quant8_inter_default`
+        // (`quant.c`) through the verified `ZIGZAG_8X8` table — see
+        // todo-h264.md addendum 20 for the derivation.
+        #[rustfmt::skip]
+        const EXPECTED_INTRA: [u8; 64] = [
+            6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23,
+            23, 23, 23, 23, 23, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27,
+            27, 27, 27, 27, 29, 29, 29, 29, 29, 29, 29, 31, 31, 31, 31, 31,
+            31, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38, 38, 38, 40, 40, 42,
+        ];
+        #[rustfmt::skip]
+        const EXPECTED_INTER: [u8; 64] = [
+            9, 13, 13, 15, 13, 15, 17, 17, 17, 17, 19, 19, 19, 19, 19, 21,
+            21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 24, 24, 24, 24,
+            24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27,
+            27, 28, 28, 28, 28, 28, 30, 30, 30, 30, 32, 32, 32, 33, 33, 35,
+        ];
+        assert_eq!(JVT_DEFAULT_8X8, EXPECTED_INTRA);
+        assert_eq!(JVT_DEFAULT_8X8_INTER, EXPECTED_INTER);
+    }
+
+    #[test]
     fn zigzag_weight_scale_uses_scan_position() {
         // weight_scale_4x4 reads the scaling-list entry at the zig-zag position
         // corresponding to a raster index, not the raster index directly.
