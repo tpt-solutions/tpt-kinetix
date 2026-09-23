@@ -3255,7 +3255,8 @@ impl<'a> TileDecodeState<'a> {
                         )?;
                         if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
                             eprintln!(
-                                "DBG uv-cf-blk mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} eob={} rng={}",
+                                "DBG uv-cf-blk seq={} mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} cw={cw} ch={ch} txtp={} eob={} rng={}",
+                                crate::debug_frame_seq::current(),
                                 coeffs.tx_type,
                                 coeffs.eob,
                                 self.dec.raw_state().0

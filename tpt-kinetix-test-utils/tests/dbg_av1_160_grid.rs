@@ -16,6 +16,15 @@ fn dbg_av1_160_grid_dump() {
         return;
     };
 
+    // `KINETIX_AV1_160_OBU_OUT=<path>` saves the exact corpus OBU bytes so an
+    // external reference decoder (patched dav1d) can be fed the identical
+    // bitstream for a relative-value cross-check, without relying on
+    // re-encoding (ffmpeg's AV1 encoder is nondeterministic across processes).
+    if let Ok(path) = std::env::var("KINETIX_AV1_160_OBU_OUT") {
+        std::fs::write(&path, &entry.obu).expect("write obu");
+        eprintln!("saved OBU ({}) to {path}", entry.obu.len());
+    }
+
     let spans = obu_spans(&entry.obu);
     let seq_span: Option<(usize, usize)> = spans.iter().find(|s| s.0 == 1).map(|s| (s.1, s.2));
     let mut tu_spans: Vec<(usize, usize)> = Vec::new();

@@ -2587,6 +2587,22 @@ fn cdef_plane_chroma(
                 eprintln!("CDEFUV post (4x4 chroma): {}", dump44(plane));
                 continue;
             }
+            if std::env::var("KINETIX_DBG_TAP67").is_ok()
+                && plane_label == 'V'
+                && order_hint == 7
+                && shown
+                && x0 == 64
+                && (y0 == 40 || y0 == 44)
+            {
+                let mut s = String::new();
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        s.push_str(&format!("{} ", src[(y0 + yy) * width + x0 + xx]));
+                    }
+                    s.push_str("| ");
+                }
+                eprintln!("TAP67 kin pl=V pre (4x4 chroma, block x0={x0} y0={y0}): {s}");
+            }
             let ww = w_block.min(width - x0);
             let hh = h_block.min(height - y0);
             cdef_filter_block(
