@@ -7930,6 +7930,41 @@ cosmetic for output but worth one look alongside (1)).
 > it turns out to be) should close the (67,44) mismatch as a side effect
 > — no CDEF-side change is needed or should be made.**
 >
+> **Part 6 (did the Part 5 U-plane consistency check before stopping):
+> U is ALSO wrong, in a smaller, differently-shaped way, at the exact
+> same bottom-of-grid rows — this favours hypothesis (a) (missing
+> deblock edge) over (b) (entropy desync).** Extended `KINETIX_DBG_TAP67`
+> to dump plane U too (both the dav1d hook and Kinetix's, committed).
+> dav1d's U pre-CDEF block2 (rows 44-47, cols 64-67): `168 167 166 166`
+> (row44) / `168 167 166 166` (row45) / `169 168 167 167` (row46) /
+> `170 169 168 168` (row47) — a smooth gradient, NOT flat like V (U had
+> real residual, `eob=11`, unlike V's `eob=0`). Kinetix's U pre-CDEF same
+> block: rows 44-45 match dav1d EXACTLY; **rows 46-47 differ only at
+> column 3 (x=67)**: kin `166`/`167` vs dav1d `167`/`168`, both -1. So
+> **both chroma planes are correct through row45 and both develop a
+> small, col/row-localized defect starting exactly at row46** — V's is
+> large (whole-row, because V has zero residual to mask it) and U's is
+> tiny (one column, because U's real residual already did most of the
+> correct shaping and only the boundary-filter's own small contribution
+> is missing). A generic entropy desync on V's coefficient read would
+> not plausibly produce this exact, independent, boundary-shaped defect
+> in U too (U's own coefficient read is a separate, unrelated symbol
+> sequence). This is a strong (not proven) signal that hypothesis (a) —
+> **a real deblock edge Kinetix isn't applying, specifically at/near the
+> bottom-right of the last superblock row's chroma grid (row 46/47,
+> column ~67-68)** — is the right one to chase first next session, ahead
+> of auditing `read_coeffs`/eob desync theories.
+> **Concrete next step:** find where `deblock_plane`'s band/edge loop
+> (`loop_filter.rs`) determines the LAST band's bottom edge availability
+> for chroma, and check whether the padded grid's bottom-most 4-chroma-
+> row cell (covering rows 44-47, `by=11` in the `h8`-scaled grid used by
+> the chroma deblock call) or its right-neighbour cell around chroma
+> column 64-68 has a missing/zeroed edge flag or filter-size compared to
+> what dav1d's own `lf_mask`/`Av1Filter` would compute for the same
+> position — the CANDIDATE region is now down to roughly 2 chroma rows
+> × a handful of columns, about as narrow as this bug is going to get
+> without a byte-level entropy-trace oracle.
+>
 > Housekeeping: `KINETIX_DBG_TAP67` added to both `loop_filter.rs`
 > (Kinetix) and the fresh dav1d clone's `cdef_apply_tmpl.c` (not part of
 > this repo); `KINETIX_AV1_DBG_B0`'s `uv-cf-blk` trace gained `seq=`/
