@@ -2588,7 +2588,7 @@ fn cdef_plane_chroma(
                 continue;
             }
             if std::env::var("KINETIX_DBG_TAP67").is_ok()
-                && plane_label == 'V'
+                && (plane_label == 'V' || plane_label == 'U')
                 && order_hint == 7
                 && shown
                 && x0 == 64
@@ -2601,7 +2601,9 @@ fn cdef_plane_chroma(
                     }
                     s.push_str("| ");
                 }
-                eprintln!("TAP67 kin pl=V pre (4x4 chroma, block x0={x0} y0={y0}): {s}");
+                eprintln!(
+                    "TAP67 kin pl={plane_label} pre (4x4 chroma, block x0={x0} y0={y0}): {s}"
+                );
             }
             let ww = w_block.min(width - x0);
             let hh = h_block.min(height - y0);
