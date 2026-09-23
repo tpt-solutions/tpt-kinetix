@@ -2,6 +2,133 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ca (2026-09-24) — frame-mode ref-list fix for mixed PAFF frame/field streams; POC type 1 / CVFI1 P-field items found ALREADY DONE by a concurrent session
+
+Picked up the handoff list (Sharp_MP_PAFF_1r2 POC type 1, CVFI1 P-fields,
+CVPA1/CAPA1 mixed frame/field, FM1_BT_B/CI1_FT_B tail, MBAFF CABAC). First
+finding: **items 1 and 2 of the handoff were stale** — some other process
+(the repo's concurrent-activity note in memory) had already landed both
+between the handoff being written and this session starting:
+- `sps.rs` already parses `pic_order_cnt_type == 1` fully
+  (`delta_pic_order_always_zero_flag`/`offset_for_non_ref_pic`/
+  `offset_for_top_to_bottom_field`/`num_ref_frames_in_pic_order_cnt_cycle`/
+  `offset_for_ref_frame[]`), and `ref_pic.rs` has a complete
+  `derive_poc_type1` (§8.2.1.2) wired into `derive_pic_order_cnt`'s
+  dispatch — committed, not part of this session's diff.
+- `decode_interlaced_p_field` (`interlaced.rs`) already drives P-fields
+  through the shared multi-slice `PictureAccumulator`, same pattern as the
+  I-field accumulator from #32bz. CVFI1_Sony_D and FM1_BT_B's frame counts
+  are already correct (17/17, 400/400) — the handoff's "20/17" and "971/400"
+  numbers were stale too.
+
+Re-baselined via `cargo test -p tpt-kinetix-h264 --test itu_conformance
+--release -- --nocapture`: **32 hard-checked BitExact, 0 failures** (up from
+29 at #32bz's own end — HCHP2_HHI_A and FRExt3_Panasonic_E were promoted by
+addendum 20/24 in between, already reflected in the MANIFEST).
+
+**Real bug found and fixed this session:** `Sharp_MP_PAFF_1r2` triaged with
+`FIELD_CLIP=Sharp_MP_PAFF_1r2 DIFF_FRAME=1 cargo test -p tpt-kinetix-h264
+--test dbg_field_triage -- --nocapture` (`KINETIX_PAFF_DBG=1` to see the
+dispatch trace). Frame 0 (the IDR field pair) is byte-exact; frame 1 — the
+first P picture — decodes via `DECODE_INTERLACED: field_pic=false ...`, i.e.
+this stream **mixes PAFF field pictures with plain frame pictures**
+(`frame_mbs_only_flag == 0`, but not every picture sets `field_pic_flag`).
+`decode_interlaced` correctly falls back for `field_pic_flag == false`
+(line ~239, by design — frame pictures aren't PAFF-field-specific), so the
+picture decodes through the ordinary progressive P-slice path
+(`decode_slice` / `try_decode_real_slice`) — but **that path's
+`build_ref_list_l0` (§8.2.4.2.1, frame-mode ref-list construction) iterated
+the raw DPB entries directly**, which for this picture are two *field*
+entries (top + bottom I-field, each a half-height 720×240 buffer with
+`field_pic_flag == true`) stored individually by the field accumulator.
+Frame-mode motion compensation received two half-height buffers passed off
+as full-height frame references — wrong stride, wrong sample positions,
+visibly ~90% of the frame corrupted (`ndiff≈487k/518400`, uniform across the
+whole picture, not a localized MB cluster).
+
+Fixed in `ref_pic.rs`: `build_ref_list_l0` now runs the raw DPB entries
+through a new `combine_field_pairs_into_frames` step before the usual
+FrameNumWrap sort/truncate/modify. It pairs up complementary field entries
+(same `frame_num`, opposite `bottom_field_flag`, matching short/long-term
+status) and interleaves each pair into one full-height frame `DpbEntry` via
+the existing `H264Decoder::interleave_fields` helper (the same routine the
+field-pairing output path already uses, so the two are provably consistent);
+non-field entries pass through unchanged. An unpaired field (partner
+missing, e.g. dropped by MMCO) is dropped from the frame-mode list — it
+remains usable by later *field* pictures via `build_field_ref_list_l0`,
+which still reads the DPB directly and is untouched by this change. This is
+exactly the §8.2.4.2.1 "reference frames and complementary reference field
+pairs" construction rule.
+
+**Verified correct in isolation**, not just by output diff: dumped the
+constructed reference (`ref_list[0]`) used for frame_num=1's P slice and
+diffed it byte-for-byte against the ITU reference YUV's frame 0 — **0/345600
+luma bytes differ, maxdiff=0**. (A debugging false alarm along the way: an
+earlier version of this check appeared to show the combine producing wrong
+bytes, but that was the debug dump file being silently overwritten by a
+*later* picture's combine call in the same process — the clip triggers this
+path 3 times over the stream, not once. Once the dump was scoped to
+`frame_num==1` specifically it confirmed the combine is exact. Lesson: any
+future one-shot debug dump in a decode loop needs unique-per-picture output
+paths, this decoder calls these builders far more often than "once per
+manifest clip".)
+
+**Net effect measured via `itu_conformance` (still 32/32 hard-checked, 0
+regressions):**
+- `Sharp_MP_PAFF_1r2`: diff_bytes 6,867,951→6,619,494; 1→2 frames exact
+  somewhere.
+- `CAPA1_TOSHIBA_B` (mixed frame/field, item 3 on the handoff list):
+  diff_bytes 13,225,318→13,041,397; 2→3 frames exact somewhere.
+- `CVPA1_TOSHIBA_B`: diff_bytes 13,210,844→13,024,467; 5→6 frames exact
+  somewhere.
+- No hard-checked clip regressed.
+
+**Sharp_MP_PAFF_1r2 remains a KnownGap** — the ref list is now proven
+correct, so frame 1's remaining ~88% pixel error (`ndiff≈456k/518400`,
+`max_diff≈244`, roughly even split between odd/even output rows, i.e. not a
+field-specific asymmetry) is a **separate, still-open bug downstream of
+ref-list construction** — inside the frame-mode P-slice CABAC parse or
+`reconstruct_inter_frame_ex`'s MC/mode application for this specific stream.
+No CABAC parse error is reported (`parsed.decoded_mb_count` reaches the full
+MB count, no scaffold fallback) — the bits decode "successfully" but to the
+wrong macroblock content, so the bug is either an entropy-context or
+mode/MV-derivation bug for a frame P-slice following a stored field-pair
+reference. NOT YET INVESTIGATED further this session (ran out of budget
+after confirming the ref-list is clean) — next session: dump
+`parsed.macroblocks`/`mv_store` for the first few MBs of frame_num=1 and
+compare motion vectors/modes against a JM oracle decode of this specific
+stream (the JM oracle at `tools/build-jm-oracle.sh` should handle this
+clip — it's Main profile CABAC PAFF, no exotic features).
+
+**Also fixed in passing (blocking `just check`, unrelated to the PAFF work,
+introduced by whatever session added POC-type-1 support to `sps.rs`):**
+- `sps.rs`: `SeqParameterSet` gained 5 new POC-type-1 fields but
+  `benches/decode_throughput.rs`'s hand-built `SeqParameterSet { .. }`
+  literal was never updated — `cargo clippy --all-targets` failed to even
+  compile the bench. Added the 5 missing fields (all POC-type-0 defaults).
+- Two pre-existing clippy `-D warnings` violations in the h264 crate
+  (`i32::abs() as u64` → `.unsigned_abs()` in `reconstruct.rs`; a redundant
+  `as i32` cast on an already-`i32` `read_se()` result in `sps.rs`'s new
+  POC-type-1 parsing).
+- `tests/dbg_field_triage.rs`'s unused `parity` loop variable.
+
+**`just check` / workspace-wide status:** `cargo fmt --all -- --check` and
+`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` are both
+clean. `cargo clippy --workspace --all-targets -- -D warnings` currently
+fails, but **only in `tpt-kinetix-av1`** (`redundant_field_names`,
+`manual_div_ceil` ×6, `too_many_arguments` on `decode_tile_group`) —
+pre-existing, untouched by this session, unrelated to any h264 file; not
+fixed here (out of scope, and the memory notes flag a concurrent process
+with independent push access that may already be mid-edit on that crate).
+`cargo test -p tpt-kinetix-h264 --release --lib --bins --tests` and the ITU
+suite both pass (269+ lib tests, 32/32 hard-checked ITU clips).
+
+Working-tree note: this session also picked up and committed the
+pre-existing uncommitted `cargo fmt`-only reformatting in
+`reconstruct.rs`/`sps.rs`/`tests/dbg_field_triage.rs` mentioned in the
+session handoff (pure whitespace, folded into the POC-1/bench-fix commit
+since `cargo fmt --all` re-touched the same lines).
+
 ## SESSION #32bz (2026-09-20) — MULTI-SLICE CAVLC + §8.3 constrained intra LANDED; BA1_FT_C / CI1_FT_B / NL2_Sony_H now bit-exact
 
 Scope: the two tracked items "BA2/CABA2 small P-frame recon error" and "PAFF
