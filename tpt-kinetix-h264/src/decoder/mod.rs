@@ -534,7 +534,7 @@ impl H264Decoder {
             header.field_pic_flag,
             header.bottom_field_flag,
             header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+            header.delta_pic_order_cnt_bottom,
             &mut scratch,
         )
         .unwrap_or(0)
@@ -2365,7 +2365,7 @@ impl H264Decoder {
                 header.field_pic_flag,
                 header.bottom_field_flag,
                 header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                header.delta_pic_order_cnt_bottom,
                 &mut scratch,
             )
             .unwrap_or(0)
@@ -2381,7 +2381,6 @@ impl H264Decoder {
         let l1_list = crate::ref_pic::build_ref_list_l1(
             &self.dpb,
             num_ref_idx_l1_active as usize,
-            num_ref_idx_l0_active as usize,
             current_poc,
             pic_num_ctx,
             &header.ref_pic_list_modification_l1,
@@ -2631,7 +2630,7 @@ impl H264Decoder {
             header.field_pic_flag,
             header.bottom_field_flag,
             header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+            header.delta_pic_order_cnt_bottom,
             &mut self.poc_state,
         ) else {
             return;
@@ -3267,7 +3266,7 @@ impl H264Decoder {
                     header.field_pic_flag,
                     header.bottom_field_flag,
                     header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                    header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0)
@@ -3283,7 +3282,6 @@ impl H264Decoder {
             let l1_list = crate::ref_pic::build_ref_list_l1(
                 &self.dpb,
                 num_ref_idx_l1_active as usize,
-                num_ref_idx_l0_active as usize,
                 current_poc,
                 pic_num_ctx,
                 &header.ref_pic_list_modification_l1,

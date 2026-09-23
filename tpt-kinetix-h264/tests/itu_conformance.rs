@@ -194,6 +194,20 @@ const MANIFEST: &[(&str, Expect)] = &[
              inter-coded (this clip is spatial-direct B). No .trc for HCHP1.",
         ),
     ),
+    // Promoted to BitExact 2026-09-24 (addendum 24): the same hierarchical
+    // GOP-16 + spatial direct + ref-pic-list reorder + MMCO family as HCHP1,
+    // but the bug here was in `ref_pic.rs::build_ref_list_l1`'s §8.2.4.2.3
+    // Note 2 "swap first two entries when RefPicList1 == RefPicList0" special
+    // case: it compared the lists *after* truncating to `num_ref_idx_active`
+    // (almost always 1 for this clip's B slices, so `len() > 1` was false and
+    // the swap never ran) instead of on the full, untruncated candidate
+    // lists the way JM's `mbuffer.c` `init_lists_b_slice` does it. Confirmed
+    // against a JM-oracle reference-list dump for the stream's final picture
+    // (POC 498): both decoders build an identical full candidate list, but
+    // only JM swaps before truncating, landing RefPicList1[0] on POC 492
+    // instead of 496. All 250 frames now bit-exact (was diff_bytes=33162 on
+    // frame 249 alone).
+    ("HCHP2_HHI_A", Expect::BitExact),
     // --- multiple IDR / multiple parameter sets ---
     // Both promoted to BitExact 2026-09-07 (SESSION #32aq): there was never a
     // real frame_num gap in either clip — that "gap" was entirely an artifact

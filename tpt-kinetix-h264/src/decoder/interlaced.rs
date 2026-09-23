@@ -391,7 +391,7 @@ impl H264Decoder {
                     header.field_pic_flag,
                     header.bottom_field_flag,
                     header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                    header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0)
@@ -904,7 +904,7 @@ impl H264Decoder {
                     header.field_pic_flag,
                     header.bottom_field_flag,
                     header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                    header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0);
@@ -965,7 +965,6 @@ impl H264Decoder {
                 let list = crate::ref_pic::build_ref_list_l1(
                     &self.dpb,
                     num_ref_idx_l1_active as usize,
-                    num_ref_idx_l0_active as usize,
                     current_poc,
                     pic_num_ctx,
                     &header.ref_pic_list_modification_l1,
@@ -1556,7 +1555,7 @@ impl H264Decoder {
                     header.field_pic_flag,
                     header.bottom_field_flag,
                     header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                    header.delta_pic_order_cnt_bottom,
                     &mut scratch,
                 )
                 .unwrap_or(0)
@@ -1683,15 +1682,15 @@ impl H264Decoder {
                 .expect("still pending: just decoded into it");
             let luma_stride = width as usize;
             let chroma_stride = (width / 2) as usize;
-            let recon_buf = acc
-                .recon
-                .get_or_insert_with(|| crate::reconstruct::ReconstructedFrame {
-                    luma: vec![0u8; luma_stride * field_height as usize],
-                    chroma_cb: vec![0u8; chroma_stride * (field_height as usize / 2)],
-                    chroma_cr: vec![0u8; chroma_stride * (field_height as usize / 2)],
-                    luma_stride,
-                    chroma_stride,
-                });
+            let recon_buf =
+                acc.recon
+                    .get_or_insert_with(|| crate::reconstruct::ReconstructedFrame {
+                        luma: vec![0u8; luma_stride * field_height as usize],
+                        chroma_cb: vec![0u8; chroma_stride * (field_height as usize / 2)],
+                        chroma_cr: vec![0u8; chroma_stride * (field_height as usize / 2)],
+                        luma_stride,
+                        chroma_stride,
+                    });
             crate::reconstruct::reconstruct_inter_field_frame_range(
                 recon_buf,
                 &acc.macroblocks,
@@ -1818,7 +1817,7 @@ impl H264Decoder {
                 header.field_pic_flag,
                 header.bottom_field_flag,
                 header.delta_pic_order_cnt_0,
-   header.delta_pic_order_cnt_bottom,
+                header.delta_pic_order_cnt_bottom,
                 &mut scratch,
             )
             .unwrap_or(0)
