@@ -2746,6 +2746,31 @@ impl<'a> TileDecodeState<'a> {
                     &tmp[..(bw * bh).min(64)]
                 );
             }
+            if std::env::var("KINETIX_AV1_DBG_PREDUMP2").is_ok()
+                && plane == 2
+                && px_x == 64
+                && px_y == 32
+                && bw >= 4
+                && bh >= 16
+            {
+                eprintln!(
+                    "PREDUMP2 seq={} mi=({mi_col},{mi_row}) cpx=({px_x},{px_y}) w={bw} h={bh} mv=({},{}) f=({},{}) slot0={slot0}",
+                    crate::debug_frame_seq::current(),
+                    mvs[0].row, mvs[0].col, filters[0], filters[1],
+                );
+                for row in 12..16 {
+                    let vals: Vec<u8> = (0..4).map(|c| tmp[row * bw + c]).collect();
+                    eprintln!("  PREDUMP2 row{row}: {vals:?}");
+                }
+                if let Some(rf) = self.ref_slots.slots[slot0] {
+                    let (rp, rw, rh) = rf.plane(plane);
+                    eprintln!("  PREDUMP2 ref rw={rw} rh={rh}");
+                    for row in 44..48 {
+                        let vals: Vec<u8> = (0..4).map(|c| rp[row * rw + 64 + c]).collect();
+                        eprintln!("  PREDUMP2 ref row{row}: {vals:?}");
+                    }
+                }
+            }
             for dy in 0..bh {
                 let sy = px_y + dy;
                 if sy >= h {
