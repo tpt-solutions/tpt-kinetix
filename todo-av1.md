@@ -7980,3 +7980,99 @@ cosmetic for output but worth one look alongside (1)).
 > crates, `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`
 > shows the same pre-existing errors only (none in files this session
 > touched).
+
+> **2026-09-24 (cont'd) — audited `deblock_plane` for the candidate
+> region per an explicit follow-up instruction; the "missing deblock
+> edge" hypothesis from Part 5/6 above is now WEAKER, not confirmed —
+> new direct evidence instead points back toward hypothesis (b), a
+> real entropy desync, though still not proven either way.** No fix
+> landed; corpus still unchanged (4/5 entries 100% exact, testsrc_160x90
+> 6/7 frames, single ±1 V-sample).
+>
+> **Checked the edge grids directly** using two debug hooks that turned
+> out to already exist in `deblock_plane` from an earlier session
+> (`KINETIX_AV1_DBG_CHROMA_HEDGE`/`_VEDGE`, both pre-targeted at exactly
+> `by=11, bx=16/17` — i.e. someone already suspected this exact cell).
+> For OH=7 (`seq=8`): **`edge_top=false` at by=11** (no horizontal edge
+> between the row40-43 and row44-47 chroma cells — expected, since this
+> block's chroma is one unified `TX_16X16` leaf spanning rows 32-47, so
+> there's no real transform boundary at row 44). **Also checked the
+> KEYFRAME at the same cell: `edge_top=false` there too**, yet the
+> keyframe is proven fully correct (Part 4) — so `edge_top=false` here
+> is not inherently wrong; a block can be correct without any edge if
+> its prediction+residual already lands on the right values (as the
+> keyframe's real PALETTE residual did). This weakens, not strengthens,
+> the "missing horizontal edge" theory: if dav1d used the *same*
+> `edge_top=false` (plausible, since both decoders should derive UV tx
+> size the same way — chroma tx-tree splitting is independent of luma's
+> var-tx-tree for inter blocks), dav1d's output would ALSO equal
+> unmodified prediction, which it does NOT.
+>
+> **Checked the vertical edges too**: `edge_left=true` at bx=16 (the
+> block's own left outer edge, x=64) with a real level; `edge_left=false`
+> at bx=17 (x=68, no internal vertical edge — ruled out a hypothesized
+> internal vertical split). The x=64 left edge is real and Kinetix DOES
+> filter it, uniformly across rows 44-47 (one `by=11` band call covers
+> all 4 rows). But a single vertical edge at x=64 can't explain the
+> dav1d target pattern's shape: **dav1d's 4 target rows are IDENTICAL
+> (`14 15 16 17` on every one of rows 44-47) despite Kinetix's (verified
+> correct — see next paragraph) prediction being 4 DIFFERENT rows
+> (`14 15 16 17` / `14 16 17 17` / `14 16 16 16` / `16 16 16 16`).**
+> Turning 4 different rows into 1 identical row is what a HORIZONTAL
+> (row-direction) filter does, not a vertical (column-direction) one —
+> so if this is deblock at all, it has to be a horizontal edge, and no
+> horizontal edge is marked here in either decoder's most likely shared
+> geometry.
+>
+> **Added `KINETIX_AV1_DBG_PREDUMP2` (committed) to dump the raw MC
+> prediction straight from `inter_predict_plane`'s output buffer, before
+> any residual/deblock/CDEF** — this is a more direct instrument than
+> the grid-dump comparisons Part 4/5 relied on. Result: **the prediction
+> itself is byte-for-byte identical to the reference slot's stored
+> content** (`14 15 16 17` / `14 16 17 17` / `14 16 16 16` / `16 16 16 16`
+> for rows 44-47, matching slot 1's own `ref row44..47` dump printed in
+> the same debug line) — confirms Part 4's conclusion again, from a much
+> more direct source than the grid-dump byte-offset arithmetic used
+> before. **Also found and discarded a bad data point**: an earlier
+> `KINETIX_AV1_NODEBLOCK=1 + KINETIX_AV1_DUMP_GRID` comparison in this
+> same session appeared to show OH=7's raw (nodeblock) reconstruction
+> DIFFERING from n1's stored content — this contradicts the
+> `PREDUMP2` result and should not be trusted (likely a measurement
+> mistake, e.g. comparing across different processes/dumps rather than a
+> real effect); `PREDUMP2` reads directly from the live buffer in the
+> same process and is authoritative. Do not repeat the nodeblock-grid-
+> dump technique for this specific check without cross-validating
+> against a `PREDUMP2`-style direct read first.
+>
+> **Revised assessment**: since prediction is now conclusively exact and
+> the deblock edge geometry at the plausible candidate cells doesn't
+> obviously explain a 4-different-rows→1-identical-row transformation,
+> **hypothesis (b) — `read_coeffs` returning `eob=0` for this V-plane
+> leaf when dav1d's true bitstream has a small nonzero residual — is now
+> the more likely explanation**, walking back Part 6's lean toward (a).
+> The row-by-row delta needed (computed in Part 5:
+> `[0,0,0,0]/[0,-1,-1,0]/[0,-1,0,1]/[-2,-1,0,1]`) is small and plausible
+> as a real quantized 2D residual, not obviously deblock-shaped once the
+> "4 rows → 1 identical row" requirement is taken seriously. Could not
+> confirm this without a real bitstream/entropy-level oracle (dav1d's
+> own `eob`/coefficient trace for this exact block) — building one would
+> mean instrumenting the fresh dav1d 1.5.4 clone's `decode.c`/`msac.c`
+> coefficient-read path and is a substantially bigger undertaking than
+> today's CDEF-level hooks (the entropy decoder's state isn't neatly
+> exposed at a single call site the way CDEF's per-pixel loop was).
+>
+> **Recommendation: park this specific ±1-sample bug.** Four sessions
+> (2026-09-20, -23, and two passes this session) have now examined
+> direction rules, tap tables, two real + one ruled-out edge-marking
+> bug class, OBMC/warp/interintra, the hidden-alt-ref chain, keyframe
+> correctness, deblock edge/level grids at the exact candidate cell, and
+> the MC prediction step directly — all either fixed (two real bugs
+> already landed) or exonerated. What remains needs a byte-level
+> dav1d entropy-decoder trace to make further progress, which is a
+> different order of investigation (a proper multi-session tooling
+> project, not a bisection step) — not a good next target for another
+> manual-trace session. If revisited, start by building that entropy
+> oracle rather than more manual pixel bisection.
+> Housekeeping: `KINETIX_AV1_DBG_PREDUMP2` added to `inter_block.rs`,
+> committed. Re-verified gates green after this pass too: AV1 154 lib
+> tests, test-utils conformance 11/11, `cargo fmt --check` clean.
