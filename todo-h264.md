@@ -810,6 +810,65 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 19 — HCAFR1 MB29 hypothesis (b) MPM mapping RULED
+OUT with a full hand-verified proof (not just "provably correct" assertion);
+suspect (c) 8x8 residual is now the sole remaining lead.
+
+New debug hook: `KINETIX_DBG_MPM8=<mb_x>,<mb_y>` in
+`slice_data/cabac_p.rs::parse_intra_macroblock_cabac`'s `is_8x8` loop prints
+`pred_mode`/`final_mode` per `i8` (0..3) for the named MB — reuse for any
+future Intra_8x8 MPM audit.
+
+Hand-derived, from the shipped `HCAFR1_HHI_trc.txt`'s raw `IntraPredModeLuma`
+codes (in JM's zigzag block-scan order: idx 0,1,2,3 → raster 0,1,4,5; idx
+4-7 → raster 2,3,6,7; idx 8-11 → raster 8,9,12,13; idx 12-15 → raster
+10,11,14,15) and the spec's `final = raw<0 ? MPM : (raw<MPM ? raw : raw+1)`
+reconstruction rule, **all 16 of MB7's (mb_x=7,mb_y=0, top neighbour of
+MB29) Intra_4×4 modes independently by hand**: `[2,2,2,2,2,2,2,8,7,1,1,8,8,
+8,8,7]`. This is byte-identical to our decoder's own `TRC MB7` dump
+(`modes=[2, 2, 2, 2, 2, 2, 2, 8, 7, 1, 1, 8, 8, 8, 8, 7]`) — MB7's decode is
+fully correct, not just at the specific raster position MB29 reads.
+
+MB29 (mb_x=7,mb_y=1) `i8=1` (block 1, cols 8-15 — the addendum-18-flagged
+error origin) reads `left = own block0's raster1` and `top = MB7's
+raster14 = 8` (hand-verified above). Both inputs independently confirmed
+correct:
+  - `i8=0`: `left = MB28's raster3` (=8, from our `TRC MB28` dump, not
+    independently re-derived — MB28's OWN decode chain is a separate,
+    unverified link), `top = MB7's raster12 = 8` (hand-verified above,
+    part of the same 16-mode check). `MPM = min(8,8) = 8`; raw=5, `5 < 8`
+    → `final = 5`. Matches our `MPM8` debug output exactly
+    (`pred_mode=8 final_mode=5`).
+  - `i8=1`: `left = own block0 = 5` (just derived), `top = MB7 raster14 =
+    8` (hand-verified). `MPM = min(5,8) = 5`; raw=7, `7 >= 5` → `final =
+    7+1 = 8`. Matches our `MPM8` debug output exactly (`pred_mode=5
+    final_mode=8`).
+
+**Conclusion: MB29 block1's decoded mode (8 = HU) is arithmetically
+correct given its inputs, and its inputs are independently correct** (MB7
+fully hand-verified, MB29 block0 correctly derived from MB7 + raw code).
+This is a genuine proof, not the addendum-18 "HU pred implementation looks
+right" inference — hypothesis (b) `mpm_pred_mode_8x8` neighbour-mode
+mapping is DEAD for this MB. (MB28's raster3 input to `i8=0` was NOT
+independently re-derived — if a bug exists upstream in MB28's own MPM
+chain it would need the same treatment, but it's a different MB/different
+bug class, not this function.)
+
+NEXT: the sole remaining suspect is (c), the 8×8 CABAC residual
+coefficient path (scan/dequant) for real payloads — needs the
+coefficient-level diff the addendum-18 author already scoped: instrument
+JM (`tools/build-jm-oracle.sh`'s patch, or a fresh `-DTRACE=1` JM build
+with a coefficient-dump hook added to `readCBP_CABAC`/
+`read_significance_map`) to print MB29 (frame 0) block1's 64 levels, dump
+`luma_coeffs_8x8[1]` from Kinetix's own decode alongside (add a debug
+`KINETIX_DBG_COEFF8=7,1,1`-style hook mirroring `KINETIX_DBG_MPM8` in
+`entropy.rs`'s 8×8 residual decode / `decode_block_8x8`), and diff
+level-by-level. The shipped `HCAFR1_HHI_trc.txt` does NOT carry coefficient
+levels (only `LUMA_8x8: <blk>` markers with no values) — confirmed this
+session — so this needs either the JM oracle extension or a from-spec
+hand-derivation of the CABAC bin stream, which is much higher effort than
+the MPM check above.
+
 ## SESSION #32bx ADDENDUM 18 — next frontier triaged: HCAFR1_HHI_C (High
 profile, progressive, CABAC, 8×8 transform + loop filter, "Frame only" despite
 the name). New generic triage harness `tests/dbg_itu_triage.rs`

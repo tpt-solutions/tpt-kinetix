@@ -102,6 +102,15 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let pred_mode =
                     mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx, false);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
+                if let Ok(spec) = std::env::var("KINETIX_DBG_MPM8") {
+                    if let Some((sx, sy)) = spec.split_once(',') {
+                        if sx.parse::<u32>() == Ok(mb_x) && sy.parse::<u32>() == Ok(mb_y) {
+                            eprintln!(
+                                "MPM8 mb=({mb_x},{mb_y}) i8={i8} pred_mode={pred_mode} final_mode={final_mode}"
+                            );
+                        }
+                    }
+                }
                 modes8[i8] = final_mode;
                 for sub in 0..4usize {
                     modes[raster_of_8x8_sub(i8, sub)] = Intra4x4Mode::from_u8(final_mode);
