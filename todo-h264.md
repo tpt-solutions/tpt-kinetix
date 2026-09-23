@@ -810,6 +810,74 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
+**RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
+comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
+250 frames now bit-exact; promoted to `Expect::BitExact` (32/32 hard-
+checked ITU clips).**
+
+Built the missing piece of ground truth addendum 23 called for: extended
+the local JM oracle build (patch NOT committed to
+`tools/jm-ldecod-oracle.patch` — see below to regenerate) with an
+unconditional `fprintf` in `image.c::reorder_lists`, right after
+`free_ref_pic_list_reordering_buffer(currSlice)`, gated by
+`JM_DUMP_REFLIST=1`, dumping `currSlice->ThisPOC`/`frame_num`/`slice_type`/
+`listXsize[0,1]` and every `listX[0][i]`/`listX[1][i]`'s
+`poc`/`pic_num`/`frame_num`/`is_long_term`. Rebuilt with the same
+`build-jm-oracle.sh` recipe, ran with `JM_DUMP_REFLIST=1` against
+HCHP2_HHI_A, grepped for `poc=498` (the stream's final, highest-POC
+picture — 250 frames × POC step 2).
+
+**JM's actual list for POC 498: `L0[0]=poc496`, `L1[0]=poc492`.** Our own
+`KINETIX_DBG_REFLIST` trace (already existed, `decoder/mod.rs`'s
+multi-slice B path) showed `l0_poc=[496] l1_poc=[496]` — **both lists
+pointing at the SAME picture**, confirming addendum 23's suspicion.
+`rplr_l1=[]` in the same trace line ruled out a list-*modification*
+(`ref_pic_list_modification_l1`) explanation — this is a pure
+*initialization* bug.
+
+Root cause, found by reading JM's real `init_lists_b_slice`
+(`mbuffer.c`) line by line: JM builds BOTH candidate lists at FULL size
+first (all 15 DPB short-term refs here, since POC 498 is the stream max
+so the "POC greater than current" bucket is empty and every ref falls
+into the single "POC less/equal, descending" bucket = `[496, 492, 488,
+...]` for both L0 and L1 initially — L1 is literally copied from L0 in
+this all-refs-are-past case). THEN, still inside `init_lists_b_slice`,
+**before any truncation to `num_ref_idx_active`**, JM checks: if
+`listXsize[0] == listXsize[1]` (both still 15) `&& listXsize[0] > 1` and
+the two full lists are identical, swap `listX[1][0]` and `listX[1][1]`
+— turning L1 into `[492, 496, 488, ...]`. Truncation to
+`num_ref_idx_l1_active` (1, for this slice) happens LATER, in
+`image.c::reorder_lists`, giving the final `RefPicList1 = [492]`.
+
+Our `ref_pic.rs::build_ref_list_l1` did the swap check on the
+ALREADY-TRUNCATED list (`list.truncate(num_active)` ran *before* the
+`if list.len() > 1` swap check) — with `num_ref_idx_l1_active` almost
+always 1 for this clip's B slices, `list.len() > 1` was false and the
+swap silently never fired. Fixed by building the swap check on the full
+untruncated lists (matching JM's order of operations exactly) and moving
+`list.truncate(num_active)` to after it; dropped the now-unused
+`num_ref_idx_l0_active` parameter (list0's own truncation was never part
+of the correct comparison either — JM compares FULL list0 against FULL
+list1, not `num_ref_idx_l0_active`-truncated list0). See `ref_pic.rs`'s
+updated doc comment on `build_ref_list_l1` for the full citation.
+
+Gates: 270 H.264 lib tests pass, ITU suite 32/32 hard-checked bit-exact (0
+failures, no regressions on any other clip), no new clippy/fmt issues.
+
+**Regenerating the JM oracle instrumentation** (not committed, ephemeral —
+same pattern as addendum 20's coefficient-dump patch): in
+`source/app/ldecod/image.c`, inside `reorder_lists()`, right after the
+`free_ref_pic_list_reordering_buffer(currSlice);` call and before the
+`if ( currSlice->slice_type == P_SLICE )` block, add an
+`if (getenv("JM_DUMP_REFLIST")) { ... }` block that `fprintf(stderr, ...)`s
+`currSlice->ThisPOC`, `currSlice->frame_num`, `currSlice->slice_type`,
+`currSlice->listXsize[0]`/`[1]`, and loops `currSlice->listX[0][i]`/
+`listX[1][i]` printing `->poc`/`->pic_num`/`->frame_num`/`->is_long_term`.
+Rebuild with `tools/build-jm-oracle.sh`'s compile line (same flags), run
+`JM_DUMP_REFLIST=1 ldecod.exe -p InputFile=in.264 -p OutputFile=out.yuv
+2>stderr.log`, grep `stderr.log` for `poc=<target>`.
+
 ## SESSION #32bx ADDENDUM 23 (same continuation) — HCHP2_HHI_A poc=498 (the
 final displayed picture) is a **degenerate B-slice: RefPicList0 and
 RefPicList1 both resolve to the SAME single entry** (frame_num=121,
