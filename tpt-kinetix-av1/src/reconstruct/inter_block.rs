@@ -1649,10 +1649,12 @@ impl<'a> TileDecodeState<'a> {
                 let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
                 let ref_oh0 = self.dpb_order_hints.get(slot0).copied().unwrap_or(255);
                 eprintln!(
-                    "TAPBLK seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} mm={motion_mode} ii={interintra_type} skip={skip} ref={:?} ref_slot0={slot0} ref_oh0={ref_oh0} mv0={:?}",
+                    "TAPBLK seq={} mi=({mi_col},{mi_row}) bsize={bsize} px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} mm={motion_mode} ii={interintra_type} skip={skip} ref={:?} ref_slot0={slot0} ref_oh0={ref_oh0} mv0={:?} ref_to_slot={:?} dpb_oh={:?}",
                     crate::debug_frame_seq::current(),
                     ref_names,
                     mvs[0],
+                    self.ref_to_slot,
+                    self.dpb_order_hints,
                 );
             }
         }
