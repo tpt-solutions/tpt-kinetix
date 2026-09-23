@@ -7561,6 +7561,65 @@ cosmetic for output but worth one look alongside (1)).
 > exact chroma pixel (frame with order_hint matching kin's 7th decoded
 > inter frame) via `cdef_apply_tmpl.c`, diff sample-by-sample against
 > the `CDEF67_44 SEC k=... s=...` lines above.
+> **2026-09-23 (cont'd) — the last ±1 sample: one bad neighbour tap,
+> root cause NOT found, one hypothesis ruled out (keep this note so the
+> next session doesn't re-walk it).** Isolated exactly: kin sums 5
+> secondary CDEF taps to sum=-8 at chroma (67,44) frame 7 (V plane,
+> pri=0, sec=4, damp=4, dir=0, x=17); dav1d's ref is 17, which requires
+> sum=-7 (val = x + ((8+sum-borrow)>>4); sum=-8 gives -1 after shift,
+> sum=-7 gives 0). One of the 5 nonzero-magnitude taps must be off by
+> exactly 1: candidates are s@(66,44)=16, s@(65,44)=15, or the 3 reads
+> of the SAME column (67,42)/(67,43)/(67,46), all =16. Confirmed via a
+> `scratch_px_compare.rs` harness (decode + dump a V-plane window,
+> deleted after use — recreate from `av1_inter_corpus_vs_dav1d_when_available`'s
+> body in conformance.rs if repeating this) that every OTHER pixel in a
+> 12×12 window around this one matches the reference exactly, both in
+> rows above (43, 42, 41...) that feed the vertical secondary taps AND
+> in the final post-CDEF output — so this is not a propagated multi-row
+> drift, it's isolated to this one CDEF evaluation.
+> RULED OUT: hypothesized that `TileDecodeState::new`'s `tile_ch`
+> (chroma reconstruction height bound) was 2 rows short of the real
+> buffer extent — reconstruct/mod.rs's `grid_h`/`uv_grid_h` use the
+> spec §5.9.15 8-pixel-rounded `MiRows = 2*ceil(H/8)` formula (90px →
+> 96 luma / 48 chroma rows), while `tile_ch` used plain `ceil(H/4)*2`
+> MI rounding (90px → 46 chroma rows) — 2 rows short, meaning the CDEF
+> secondary tap at chroma row 46 could've been reading stale 128-fill.
+> **Fixed this regardless (it's a real, spec-correct bug: `tile_cw`/
+> `tile_ch` now match the 8-px-rounded grid extent) but it did NOT
+> change the CDEF trace at all** — row 46's value was already `16`
+> (not the 128 fill) *before* the fix, meaning something other than the
+> tile_ch-bounded residual-add path (most likely: inter MC prediction
+> copy for skip-mode blocks, which isn't obviously gated by tile_ch)
+> already populates rows beyond the old bound. Kept the fix since it's
+> correct per spec regardless of this bug; no corpus regression (11/11
+> conformance tests still pass, 154 AV1 lib tests still pass).
+> NEXT: since the direction-forcing rule (`dir = 0 if pri_str == 0`) is
+> validated by 100%-exact luma across the whole corpus using the exact
+> same code shape, it's very unlikely to be the bug (ruled out by
+> induction, not directly tested). The real next step is a genuine
+> pixel-level oracle for the PRE-CDEF (post-deblock) plane at frame 7 —
+> neither the patched tracing dav1d (absolute pixel values differ from
+> ffmpeg's vendored libdav1d 1.3.0 by a constant-ish offset at this
+> pixel: 18 vs 17, a real *version* difference between the two dav1d
+> builds on this machine, not just an MT nondeterminism artifact) nor
+> ffmpeg's libdav1d (only exposes fully-filtered output) can supply this
+> directly. Options: (a) patch the patched dav1d's `--inloopfilters
+> deblock` output back against ITSELF at frame 6 (known-bit-exact) to
+> at least establish whether ITS OWN row 46 tap differs frame-to-frame
+> in a way suggesting a boundary condition; (b) instrument Kinetix's own
+> pre-CDEF plane dump (`KINETIX_AV1_NOCDEF` + a raw-plane-write hook)
+> and manually trace which reconstruction code path (residual-add vs MC
+> copy vs OBMC/interintra blend) actually wrote chroma row 46 in this
+> specific frame, then check whether an OBMC/warped-motion/interintra
+> block near mi (32,22) has a **third** missing `mark_chroma_edges`
+> call site of the same class as the two fixed earlier this session
+> (skip-mode, has_chroma==false) — this is the most likely remaining
+> bug shape given the session's track record. Given how narrow and
+> deep this is (a single ±1 sample across 5 corpus entries × up to 8
+> frames each), further investigation has low ROI per session unless a
+> genuine pre-CDEF oracle becomes available; the corpus is otherwise
+> **100% bit-exact** (`4/5 entries fully exact, 1 entry 6/7 frames
+> exact`).
 > Housekeeping: fixed a **pre-existing, unrelated** compile break in
 > `reconstruct/tests.rs` (8 call sites of `decode_tile_group`/
 > `TileDecodeState::new` were stale by 4 positional args —

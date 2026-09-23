@@ -1058,14 +1058,23 @@ impl<'a> TileDecodeState<'a> {
         let mi_cols = width.div_ceil(MI_SIZE);
         let mi_rows = height.div_ceil(MI_SIZE);
         let lossless = qindex == 0;
-        let tile_cw = if subsampling_x { tile_w / 2 } else { tile_w };
-        // MI rows cover `mi_rows * MI_SIZE` luma rows (MI_SIZE = 4), including any
-        // partial row at the bottom of the frame (e.g. 90px → 23 MI rows → 92 luma
-        // grid rows). Reconstruction must write all MI-covered rows so that loop
-        // filters (CDEF secondary taps) read real content rather than the initial
-        // fill value (128), matching dav1d's behaviour.
+        // §5.9.15: the mode-info grid rounds up to 8-pixel multiples
+        // (`MiCols = 2*ceil(W/8)`, `MiRows = 2*ceil(H/8)`), not plain
+        // MI_SIZE=4 rounding — this is the same grid_w/grid_h the caller
+        // (`reconstruct_av1_frame`) allocates the planes at. A previous
+        // revision here rounded chroma height to plain-MI granularity
+        // (`ceil(H/4)*2`, e.g. 90px → 46 chroma rows), 2 rows short of the
+        // real grid (90px → 48 chroma rows) — the last 2 chroma rows never
+        // got reconstructed and stayed at the initial 128 fill, which
+        // deblock/CDEF then read as real neighbour content on subsequent
+        // frames' vertical/secondary-tap boundary reads.
+        let tile_cw = if subsampling_x {
+            tile_w.div_ceil(8) * 4
+        } else {
+            tile_w
+        };
         let tile_ch = if subsampling_y {
-            tile_h.div_ceil(MI_SIZE) * (MI_SIZE / 2)
+            tile_h.div_ceil(8) * 4
         } else {
             tile_h
         };
