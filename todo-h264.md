@@ -810,6 +810,64 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32bx ADDENDUM 22 (same continuation) — HCHP2_HHI_A re-triaged
+with the CORRECT (display-ordered) comparison; addendum 21's "localized
+bottom-right region" claim was an artifact of a flawed diagnostic and is
+WRONG — retract it. Real signature: widespread small errors, new lead
+(MMCO/DPB reference selection) scoped, not yet fixed.
+
+Addendum 21's "closest decoded frame by raw diff-byte COUNT" search (any
+frame, not index-matched) picked decoded index 247 as the best match for
+reference frame 249 and reported a region concentrated in the bottom-right
+~4×9 MBs. This was a **methodologically wrong comparison**: fewer
+mismatched bytes doesn't mean a better content match — a completely
+different (but visually similar, since it's real video) frame can score
+lower on raw byte-diff count than the true corresponding frame just by
+having more coincidentally-matching background pixels. `first_bad_frame
+= Some(249)` already told us frames 0..248 are ALL exactly right at their
+own index — the correct comparison is simply `decoded[249]` (the properly
+`.with_display_order()`-emitted 250th frame) against `reference[249]`
+directly, not a global nearest-neighbour search.
+
+Redone correctly: `decoded[249]` vs `reference[249]` — **Y diffs=33010,
+U=130, V=22** (matches `itu_conformance.rs`'s own `diff_bytes=33162`,
+`max_diff=10` exactly). The wrong-count/max-delta 16×16 region maps show
+errors **spread across nearly the entire frame** (most MBs have 50-200
+wrong samples, magnitude mostly 1-6, occasional up to 10), with only a
+scattered few MBs exactly 0 — not a block-local defect.
+
+RULED OUT this session: (a) `JVT_DEFAULT_4X4_INTRA`/`_INTER` — hand-verified
+by converting JM's raster-order `quant_intra_default`/`quant_inter_default`
+(`quant.c`) through the (already-verified) 4×4 `ZZ_SCAN`/zigzag table by
+hand; both match our constants exactly, so this is NOT the same bug class
+as addendum 20's 8×8 tables. (b) Any parse/decode error — the last 20 NALs
+of the stream (`nal[232..251]`, dumped via a scratch harness) are all
+ordinary type=1 (non-IDR) slices with no anomalies; `decode()` emits 234
+frames + `flush()` emits the remaining 16 buffered ones = 250 total,
+exactly matching the reference count, so this is not a dropped/duplicated
+picture either.
+
+Working hypothesis (not yet verified): the small-widespread-everywhere
+signature — most blocks off by a little rather than a few blocks off by a
+lot — is the classic fingerprint of **predicting from a genuinely wrong
+(but visually similar) reference picture** rather than a residual/dequant
+bug (residual bugs are near-zero in skip/zero-cbp blocks; a wrong
+reference pollutes skip blocks too, since their pixels ARE the reference
+verbatim). This clip is "hierarchical GOP-16" with ref-pic-list reorder +
+MMCO (per the HCHP1 comment); 250 frames = 15 full GOP-16s + a truncated
+16-frame tail (240-249) — frame 249 is inside that final, possibly
+irregularly-structured GOP. NEXT: trace this picture's actual
+`RefPicList0`/`RefPicList1` construction (`ref_pic.rs::trace_ref_list`,
+already wired for `KINETIX_BINTRACE`, see addendum for c_p8x8) and its
+`dec_ref_pic_marking`/MMCO commands, and compare against what the DPB
+sliding-window/MMCO state SHOULD be for the true last picture of a
+16-frame hierarchical GOP whose own GOP is shorter than 16 (truncated at
+end of stream) — building a POC-correlated MB/ref-list dumper under
+`.with_display_order()` (the existing `dbg_itu_triage.rs` recorder does
+NOT reorder and its per-frame snapshots are unusable for any B-frame
+clip, addendum 21's original mistake) is the concrete next infrastructure
+piece needed.
+
 ## SESSION #32bx ADDENDUM 21 — next frontier triaged: HCHP2_HHI_A's single
 bad frame (was "249/250 ref frames exact somewhere" before and after
 addendum 20's fix — unrelated bug, cheap follow-up not yet closed).
