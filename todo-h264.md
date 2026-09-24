@@ -133,6 +133,23 @@ the tz lines around poc3's first slice, and align against JM's
 `tz=<value> pos_after_tz=<abs pos> c=<tc>` — tz is the decoded value and
 pos_after_tz is the absolute RBSP bit position after the codeword.
 
+**WARNING for the next session (measurement contamination):** several of the
+MB0-cell0 numbers quoted across this session's addenda were captured from
+runs with `KINETIX_NO_DEBLOCK=1` set, where our DPB reference is the
+PRE-deblock IDR (so our predictions sample different reference pixels than
+the normal pipeline). All cross-run comparisons (our pred vs JM implied
+residual, per-MB diff counts) MUST be regenerated in a single consistent
+mode before being trusted: run `KINETIX_FIELD_BUF_OUT=fbuf
+KINETIX_FIELD_PRED_DBG=1 FIELD_CLIP=CVFI1_Sony_D ...` (deblocking ON) and
+compare `fbuf_pre_poc3_bottomtrue.gray` against `jm_poc3_predeblock.gray`
+regenerated the same way - both sides then use the same post-deblock IDR as
+the MC reference. The 5-sample "our residual [5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2
+/ -5,-5,-5,-5] vs JM [9,10,9,3 / ...]" comparison in this addendum IS
+same-mode (both post-fc24b45, deblock ON, same pred array printed by
+FIELDPRED) and stands: our cell0 = single coefficient at zigzag position 2
+((1,0) basis), JM's = multi-coefficient pattern. That contradiction with the
+JM trace's "#c=1" print remains the open question.
+
 **Correction to the cell0 residual reading above (verified against the current
 build):** our cell0 residual is NOT flat-DC — it is row-varying/col-constant
 `[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 / -5,-5,-5,-5]` = the (1,0) basis, i.e. our
