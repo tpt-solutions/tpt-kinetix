@@ -2,6 +2,48 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cc ADDENDUM (same continuation) — slice-boundary intra sample availability was the P-field bug; CVFI1 frame 0 now fully byte-exact
+
+The postmortem's "concrete next step" resolved faster than expected. Revisited
+the MB138 data with fresh eyes: its wrong cells (1,2,3 — top-row 4×4s) are
+exactly the cells whose INTRA PREDICTION samples the macroblock ABOVE, and
+MB138's above MB93 belongs to a different slice of the same field. In
+`reconstruct_inter_field_frame_range`'s intra branch, `reconstruct_luma` /
+`reconstruct_chroma` were called with `slice_avail = None` — the
+§6.4.9/§8.3.2.2.1 slice-boundary availability rule was silently skipped for
+intra MBs inside P field slices, so prediction crossed the slice boundary and
+every dependent block inherited the other slice's pixels as a constant-offset
+base. This also retroactively explains why the I-field accumulator path was
+never affected: `reconstruct_intra_frame`'s accumulator call already passed
+`Some(SliceAvail)`.
+
+**Fixed** (commit `fc24b45`): `reconstruct_inter_field_frame_range` now takes
+the accumulator's `slice_id_grid` and passes `Some(SliceAvail { ..,
+cur_slice_id: slice_id_grid[idx] .. })` (mb_size 16 luma / 8 chroma) to the
+intra branch of every MB in its range.
+
+**Verified: CVFI1_Sony_D display frame 0 (IDR pair + first P-field pair) is
+now FULLY byte-exact — top_diff=0 / bottom_diff=0 / chroma 0** (the frame 0
+bottom field's 2,617 wrong pixels are gone; the earlier pre-deblock
+2,171-sample diff and the post-deblock 2,617 both collapse to zero — the
+residual/MPM-candidate hypotheses from the postmortem are moot; the offset
+base was intra prediction, not coefficients). ITU suite: `first_bad` 0 → 1,
+diff_bytes 6,195,508 → 6,146,191, 33/33 hard-checked clips unchanged, Sharp /
+CAPA / CVPA unchanged. Gates: fmt, clippy `-D warnings`, 270 lib tests green.
+
+**Next (frame 1 bottom field):** display frame 1's top field is already exact;
+its bottom field fails from MB(0,0) (P8x16, mvds (0,0)/(1,0), dpb=3 → L0 =
+[poc2-top, poc1-bottom, poc0-top] with L0[0] = the just-decoded exact poc2
+top field — a zero-MV copy should be exact, so something else differs).
+Suggested: repeat the poc-vs-poc dump comparison (`KINETIX_FIELD_BUF_OUT`
++ JM's `jm_poc3_predeblock/postdeblock.gray` — regenerate the truncated
+in.264 and the dumps, they are one command each with the toolchain from the
+session above). Check first whether our L0[0] for this field is really poc2
+(`KINETIX_DUMP_FIELD_REF=1`, the PicNum co-parity interleave order) and
+whether MB0's residual is non-zero (nz_per_block=1000010000000000 → blocks
+0 and 5 coded) — a wrong reference PARITY (bottom flag) on the genuine-field
+FieldRef would produce exactly "everything slightly off" here.
+
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
 
 Picked up #32cb's handoff (CVFI1_Sony_D IDR-bottom "scattered intra errors").
