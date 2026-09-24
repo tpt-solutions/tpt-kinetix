@@ -2,6 +2,142 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ca ADDENDUM 2 (same day, continuation) — JM oracle tooling fix landed; Sharp_MP_PAFF_1r2 P-frame bug localized to a single wrongly-nonzero 8x8 luma residual block; FM1_BT_B root-caused to unimplemented FMO/slice-groups (not a bug); MBAFF not reached
+
+**JM-oracle tooling fix (landed, commit `0254b6e`):** the `JM_DUMP_POC`
+pre/post-deblock dump hooks live inside `exit_picture`'s
+`if(!iDeblockMode && (bDeblockEnable & (1<<used_for_reference)))` branch —
+confirmed this is exactly why they never fired for Sharp_MP_PAFF_1r2: this
+clip's `disable_deblocking_filter_idc == 1` on every single slice (P and
+B), so JM's own deblock-enable gate is false for every picture, and the
+whole branch — dump hooks included — is skipped regardless of whether a
+picture is being deblocked or not. Added a third, unconditional dump
+(`<dir>/jm_poc<poc>_final.gray`) right after both arms of that if/else
+converge; verified byte-identical to JM's own `-p OutputFile=` output for
+the same POC. Regenerated `tools/jm-ldecod-oracle.patch` via `git diff`
+against a fresh pristine JM clone (my first attempt at hand-editing the
+`.patch` file directly corrupted a blank context line — always regenerate
+patches from a real `git diff`, never hand-edit the `@@` hunk math) and
+verified the full pipeline end to end: clone → apply → build → hook fires
+→ output matches JM's own YUV.
+
+**Sharp_MP_PAFF_1r2 — corrected an error in the previous addendum, then
+localized the bug precisely.** The prior addendum claimed "the P-picture's
+own content was never fully re-verified... but there's no reason to
+suspect it" — **that reasoning was wrong**, and the citation backing it
+(FIELD_MATCH_SEARCH proving decode-order content was always correct) was
+actually about **CI1_FT_B**, mis-attributed to Sharp_MP_PAFF_1r2 while
+writing up two unrelated investigations in the same sitting. Apologies to
+whoever read that literally — always re-verify a claim against its actual
+tool output before writing it into a doc, not from memory of "similar"
+investigations run the same session.
+
+With the JM-oracle fix above, built a real per-picture oracle for both the
+first P-picture (POC 6) and first B-picture (POC 2) and found **the
+P-picture is ALSO wrong** (`diff=326270/345600 max=255` against
+`jm_poc6_final.gray`) — not just the B-picture. Since the B-picture's `MB0`
+is `BL116x16` (backward-only, predicting from the P-picture as its sole
+reference), **the B-picture's corruption is very likely just inherited
+from the P-picture being wrong**, not a separate bug — next session should
+re-check the B-picture ONLY after the P-picture is fixed, not in parallel.
+
+**Localized the P-picture's `MB0` (`P8x16`, `cbp=25`) precisely:**
+- `cbp=25` = `0b11001`: luma 8×8 blocks 0 (top-left, x0-7/y0-7) and 3
+  (bottom-right, x8-15/y8-15) carry residual; blocks 1 (top-right,
+  x8-15/y0-7) and 2 (bottom-left) do **not** (`cbp_luma` bits 1,2 clear).
+- The right partition's MV (`all16_mv` dump, cells 2/3/6/7/10/11/14/15) is
+  `[-16, 68]` — both components exact multiples of 4 (pure integer-pel,
+  `-4px, +17px`), so block 1's correct output is a **literal, un-interpolated
+  copy** from the reference at `(x-4, y+17)` — no rounding, no filter, no
+  residual (bit clear). Manually computed that copy from the (proven
+  byte-exact) reference frame: **flat 38 across x8-15, y0-7**. JM's own
+  output at that exact region: flat 38, matching the hand computation
+  exactly (as it must — trivial case). **Our own output at that region:
+  `28,29,31,32,38,38,38,38`** — the left half of the "no-residual" block is
+  wrong by a small, smoothly-varying amount (`-10,-9,-7,-6`), the right half
+  happens to be correct.
+- This is not plausibly an MC/interpolation bug (the case is a pure integer
+  copy, nothing to get subtly wrong) and not plausibly "wrong MV" (a wrong
+  MV would sample a *different* region of the reference, not produce a
+  small smooth deviation from the *correct* region). It reads as a small,
+  spatially-coherent AC-like residual being added to a block whose `cbp`
+  bit says it should have none — i.e. a **`cbp`-bit-to-8×8-block mapping or
+  coefficient-buffer bug specific to this bit pattern** (bits 0+3 set,
+  1+2 clear — the two DIAGONAL 8×8 blocks coded, the other diagonal not).
+  Block 0 (which *does* have real residual per `cbp`) shows a similarly
+  smooth deviation pattern in its own reconstruction, consistent with
+  block 1 picking up a stray/leftover copy of (some transform of) block
+  0's coefficients rather than being cleared.
+
+**NEXT SESSION, concretely:** instrument the CABAC coefficient-token
+decode (`slice_data.rs`'s `parse_p_slice_cabac_range`/whatever populates
+each 4×4 or 8×8 residual buffer per macroblock) to dump, for this specific
+MB0, which 8×8 blocks it believes have `coded_block_pattern` bits set and
+what coefficient values (if any) end up attached to block 1 specifically —
+compare against a hand-decode of the raw CABAC bits (or, since P is CABAC
+here, a JM `TRACE=1` build's own per-MB trace, which — now that the
+oracle tooling works — should also be reachable via a fresh
+`build-jm-oracle.sh` build with `-DTRACE=1` instead of `-DTRACE=0`, giving
+JM's own textual residual/mode dump per MB for direct comparison; not
+tried yet this session, the `_final.gray` pixel oracle was enough for this
+level of localization). Reproduce via: `KINETIX_P_MB_DBG=1
+FIELD_DISPLAY_ORDER=1 FIELD_CLIP=Sharp_MP_PAFF_1r2 cargo test -p
+tpt-kinetix-h264 --test dbg_field_triage --release -- --nocapture` (dumps
+`all16_mv` per MB — added this session) plus a fresh
+`JM_DUMP_DIR=<dir> JM_DUMP_POC=6 <jm-oracle>/ldecod.exe -p
+InputFile=<Sharp_MP_PAFF_1r2.jvt copied to in.264> -p OutputFile=out.yuv`
+for the pixel oracle (`_final.gray`, unconditional dump — works now).
+
+**FM1_BT_B — root-caused, NOT a bug: this clip needs FMO/slice-groups
+(§8.2.2), which this decoder has never implemented.** `first_bad=0` (wrong
+from the very first, pure-intra IDR frame — a much more fundamental
+failure than Sharp's inter-prediction issue) sent this down a completely
+different path. Traced via a new `KINETIX_PPS_DBG` hook (dumps every
+parsed PPS's `num_slice_groups_minus1` and other fields): this stream
+carries **8 different PPS, `num_slice_groups_minus1` values 0, 7, 7, 2, 1,
+1, 1, 6** — i.e. up to **8 slice groups** via Flexible Macroblock Ordering,
+switched per-picture by referencing different PPS ids. `strict` mode
+already correctly rejects it (`KinetixError::NotPixelExact("...slice not
+decodable by the pixel-exact path yet...")`); non-strict falls back to a
+partial/scaffold reconstruction, which is what the `max_diff≈115,
+first_bad=0` result reflects. This is a real, substantial, unimplemented
+H.264 feature (the `MbToSliceGroupMap` derivation process, §8.2.2, with 7
+different `slice_group_map_type` variants — interleaved, dispersed,
+foreground+leftover, box-out, raster-scan, wipe, explicit — plus every
+downstream neighbour-availability/deblocking rule needing to respect
+slice-group boundaries, not a small patch). **Not attempted this
+session** — flagging as a scoped-but-substantial feature gap for a
+dedicated future session, not a "bug to fix." (Debugging note for next
+time: `dbg_field_triage.rs`'s NAL splitter is a simple substring scan with
+no protection against the harness's `--strict` mode `break`-ing the loop
+on the FIRST decode error, which silently truncated apparent "NAL count"
+to whatever NAL index hit the first strict-mode rejection — for FM1_BT_B
+that was NAL 9, the very first slice, making the file look like it only
+had 10 NALs in it when it actually has ~1696 real start codes. Don't
+trust `dbg_field_triage`'s implied NAL count under `--strict`; check for
+an `ERR` line before concluding a file is short.)
+
+**MBAFF CABAC (CANLMA2 lead): not reached this session** — same as the
+previous addendum, ran out of time before getting to it. Still exactly
+where prior sessions left it (see the memory system's
+`project_h264_current_open_work` note and this file's CANLMA2 sections).
+
+New debug hooks added this continuation (all env-gated, all in
+`tpt-kinetix-h264/src/decoder/mod.rs`): `KINETIX_B_MB_DBG` (B-slice
+MB types/CABAC-vs-CAVLC/direct-mode header dump, both the multi-slice and
+legacy single-slice B paths), `KINETIX_PPS_DBG` (every parsed PPS's key
+fields, immediately would have saved time on the FM1_BT_B misdirection had
+it existed already), and extended `KINETIX_P_MB_DBG` to also dump all 16
+per-4×4-cell MVs (not just cell 0) so both partitions of a P8x16/P16x8/P8x8
+MB are visible.
+
+Regression check: `cargo fmt --all -- --check`, `cargo clippy -p
+tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+tpt-kinetix-h264 --release --lib --bins --tests`, and the full ITU
+conformance suite (33/33 hard-checked BitExact, 0 failures, unchanged from
+addendum 1 — this continuation was pure investigation + tooling, no
+decoder logic changed) all pass.
+
 ## SESSION #32ca ADDENDUM (same day, continuation) — POC type 1/2 FrameNumOffset accumulator bug FIXED; CI1_FT_B promoted to BitExact (32→33); Sharp_MP_PAFF_1r2 POC now JM-exact but a separate B-slice pixel bug remains
 
 Continued straight from this session's first pass (frame-pair-combine fix,
