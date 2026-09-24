@@ -73,7 +73,6 @@ fn loop_filter_edge(
         );
     }
     let f = 1i32;
-    eprintln!("LFEDGE-ENTER off={} wd={}", off, wd);
     for step in 0..8 {
         let p = off + step * stridea;
         if dbg56 {

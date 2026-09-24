@@ -59,13 +59,17 @@ fn decode_with(
         &mut v,
         width,
         uv_w,
-        true,
-        false,
-        false,
-        false,
-        false,
-        false, // enable_filter_intra
-        false, // enable_intra_edge_filter
+        true,     // tx_mode_select
+        false,    // reduced_tx_set
+        [0u8; 4], // lf_levels
+        [0i8; 8], // lf_ref_deltas
+        [0i8; 2], // lf_mode_deltas
+        false,    // lf_delta_enabled
+        false,    // segmentation_enabled
+        false,    // seg_feature_skip
+        false,    // seg_feature_alt_q
+        false,    // enable_filter_intra
+        false,    // enable_intra_edge_filter
         allow_screen_content_tools,
         false, // allow_intrabc
         LrDecodeParams::default(),

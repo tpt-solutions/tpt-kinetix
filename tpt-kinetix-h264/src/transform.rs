@@ -123,13 +123,13 @@ const fn raster_to_scan_8x8(raster: &[u8; 64]) -> [u8; 64] {
 
 /// JVT default 8×8 **intra** scaling matrix, in zig-zag scan order — the
 /// order every dequant call site here indexes with. See
-/// [`RASTER_DEFAULT_8X8_INTRA`].
+/// `RASTER_DEFAULT_8X8_INTRA`.
 pub const JVT_DEFAULT_8X8: [u8; 64] = raster_to_scan_8x8(&RASTER_DEFAULT_8X8_INTRA);
 
 /// JVT default 8×8 **inter** scaling matrix, in zig-zag scan order —
 /// distinct from the intra default; using the intra table for the inter
 /// list mis-scales every 8×8-transform inter block whenever the inter list
-/// falls back to its default. See [`RASTER_DEFAULT_8X8_INTER`].
+/// falls back to its default. See `RASTER_DEFAULT_8X8_INTER`.
 pub const JVT_DEFAULT_8X8_INTER: [u8; 64] = raster_to_scan_8x8(&RASTER_DEFAULT_8X8_INTER);
 
 /// The scaling matrices active for a picture (§8.5.9), derived from the SPS

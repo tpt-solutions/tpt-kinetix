@@ -2303,7 +2303,7 @@ fn reconstruct_mbaff_inter_chroma<T: DecodeTracer>(
 /// macroblock between the frame-coded path (plain `reconstruct_b_inter_luma`/
 /// `reconstruct_b_inter_chroma`) and the field-coded path (`reconstruct_mbaff_b_inter_luma`/
 /// `reconstruct_mbaff_b_inter_chroma`) based on the macroblock's
-/// `mb_field_decoding_flag`, behind the [`mbaff_field_mc_enabled`] gate
+/// `mb_field_decoding_flag`, behind the `mbaff_field_mc_enabled` gate
 /// (default on; `KINETIX_MBAFF_FIELD_MC=0` opts out).
 ///
 /// For the all-frame-coded case (`mbaff_ip`/`mbaff_ibp`) every macroblock has
@@ -2571,14 +2571,21 @@ fn reconstruct_mbaff_b_inter_luma<T: DecodeTracer>(
         let l1_active = cell.ref_idx_l1 >= 0;
         let ref_idx0 = cell.ref_idx.max(0) as usize;
         let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+        // A field-coded MBAFF macroblock addresses reference fields, not
+        // reference frames: entry 2k is frame k's same-parity field and
+        // entry 2k+1 is frame k's opposite-parity field (§8.2.4.2.1).
+        let frame_idx0 = ref_idx0 / 2;
+        let parity0 = (bottom as usize) ^ (ref_idx0 & 1);
+        let frame_idx1 = ref_idx1 / 2;
+        let parity1 = (bottom as usize) ^ (ref_idx1 & 1);
 
         let mut pred_l0 = [0u8; 16];
         if l0_active {
             if let Some(ref_entry) = field_planes_l0
-                .get(ref_idx0)
+                .get(frame_idx0)
                 .or_else(|| field_planes_l0.last())
             {
-                let (luma_ref, _, _) = &ref_entry[bottom as usize];
+                let (luma_ref, _, _) = &ref_entry[parity0];
                 let h = luma_ref.len() / stride.max(1);
                 crate::motion_comp::interpolate_luma(
                     &mut pred_l0,
@@ -2599,10 +2606,10 @@ fn reconstruct_mbaff_b_inter_luma<T: DecodeTracer>(
         let mut pred_l1 = [0u8; 16];
         if l1_active {
             if let Some(ref_entry) = field_planes_l1
-                .get(ref_idx1)
+                .get(frame_idx1)
                 .or_else(|| field_planes_l1.last())
             {
-                let (luma_ref, _, _) = &ref_entry[bottom as usize];
+                let (luma_ref, _, _) = &ref_entry[parity1];
                 let h = luma_ref.len() / stride.max(1);
                 crate::motion_comp::interpolate_luma(
                     &mut pred_l1,
@@ -2635,7 +2642,14 @@ fn reconstruct_mbaff_b_inter_luma<T: DecodeTracer>(
             ref_idx0,
         );
 
-        let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
+        let res = dequant_idct_4x4_scan(
+            &mb.luma_coeffs[block],
+            mb.qp,
+            None,
+            3,
+            scaling,
+            &crate::transform::FIELD_SCAN_4X4,
+        );
         for row in 0..4 {
             let py = 2 * (fy0 + row) + bottom as usize;
             for col in 0..4 {
@@ -2706,85 +2720,127 @@ fn reconstruct_mbaff_b_inter_chroma<T: DecodeTracer>(
             let by = (block / 2) * 4;
             let x0 = base_x + bx;
             let fy0 = base_fy + by;
-            let cell = grid[(block / 2) * 8 + (block % 2) * 2];
+            // A chroma 4x4 block is predicted as four 2x2 sub-blocks. Each
+            // sub-block uses the corresponding luma 4x4 cell's MV/reference,
+            // rather than inheriting the quadrant's top-left cell.
+            let qbase = (block / 2) * 8 + (block % 2) * 2;
+            let mut pred = [0u8; 16];
+            for (sub, &cell) in [
+                grid[qbase],
+                grid[qbase + 1],
+                grid[qbase + 4],
+                grid[qbase + 5],
+            ]
+            .iter()
+            .enumerate()
+            {
+                let (sr, sc) = (sub / 2, sub % 2);
+                let l0_active = cell.ref_idx >= 0;
+                let l1_active = cell.ref_idx_l1 >= 0;
+                let ref_idx0 = cell.ref_idx.max(0) as usize;
+                let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+                // Field-coded MBAFF lists contain two entries per reference
+                // frame: same parity first, opposite parity second.
+                let frame_idx0 = ref_idx0 / 2;
+                let parity0 = (bottom as usize) ^ (ref_idx0 & 1);
+                let frame_idx1 = ref_idx1 / 2;
+                let parity1 = (bottom as usize) ^ (ref_idx1 & 1);
+                let mv_y_cr0 = if ref_idx0 & 1 == 1 {
+                    cell.mv[1] + if bottom { 2 } else { -2 }
+                } else {
+                    cell.mv[1]
+                };
+                let mv_y_cr1 = if ref_idx1 & 1 == 1 {
+                    cell.mv_l1[1] + if bottom { 2 } else { -2 }
+                } else {
+                    cell.mv_l1[1]
+                };
 
-            let l0_active = cell.ref_idx >= 0;
-            let l1_active = cell.ref_idx_l1 >= 0;
-            let ref_idx0 = cell.ref_idx.max(0) as usize;
-            let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
-
-            let mut pred_l0 = [0u8; 16];
-            if l0_active {
-                if let Some(ref_entry) = field_planes_l0
-                    .get(ref_idx0)
-                    .or_else(|| field_planes_l0.last())
-                {
-                    let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
-                    let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
-                    let h = plane_ref.len() / stride.max(1);
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l0,
-                        4,
-                        plane_ref,
-                        stride,
-                        stride,
-                        h,
-                        x0 as i32,
-                        fy0 as i32,
-                        cell.mv[0],
-                        cell.mv[1],
-                        4,
-                        4,
-                    );
+                let mut pred_l0 = [0u8; 16];
+                if l0_active {
+                    if let Some(ref_entry) = field_planes_l0
+                        .get(frame_idx0)
+                        .or_else(|| field_planes_l0.last())
+                    {
+                        let (_, cb_ref, cr_ref) = &ref_entry[parity0];
+                        let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                        let h = plane_ref.len() / stride.max(1);
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pred_l0,
+                            2,
+                            plane_ref,
+                            stride,
+                            stride,
+                            h,
+                            (x0 + sc * 2) as i32,
+                            (fy0 + sr * 2) as i32,
+                            cell.mv[0],
+                            mv_y_cr0,
+                            2,
+                            2,
+                        );
+                    }
                 }
-            }
-            let mut pred_l1 = [0u8; 16];
-            if l1_active {
-                if let Some(ref_entry) = field_planes_l1
-                    .get(ref_idx1)
-                    .or_else(|| field_planes_l1.last())
-                {
-                    let (_, cb_ref, cr_ref) = &ref_entry[bottom as usize];
-                    let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
-                    let h = plane_ref.len() / stride.max(1);
-                    crate::motion_comp::interpolate_chroma(
-                        &mut pred_l1,
-                        4,
-                        plane_ref,
-                        stride,
-                        stride,
-                        h,
-                        x0 as i32,
-                        fy0 as i32,
-                        cell.mv_l1[0],
-                        cell.mv_l1[1],
-                        4,
-                        4,
-                    );
+                let mut pred_l1 = [0u8; 4];
+                if l1_active {
+                    if let Some(ref_entry) = field_planes_l1
+                        .get(frame_idx1)
+                        .or_else(|| field_planes_l1.last())
+                    {
+                        let (_, cb_ref, cr_ref) = &ref_entry[parity1];
+                        let plane_ref: &[u8] = if comp == 0 { cb_ref } else { cr_ref };
+                        let h = plane_ref.len() / stride.max(1);
+                        crate::motion_comp::interpolate_chroma(
+                            &mut pred_l1,
+                            2,
+                            plane_ref,
+                            stride,
+                            stride,
+                            h,
+                            (x0 + sc * 2) as i32,
+                            (fy0 + sr * 2) as i32,
+                            cell.mv_l1[0],
+                            mv_y_cr1,
+                            2,
+                            2,
+                        );
+                    }
                 }
+
+                let sub_pred = combine_weighted(
+                    weighted,
+                    l0_active,
+                    l1_active,
+                    ref_idx0,
+                    ref_idx1,
+                    &pred_l0,
+                    &pred_l1,
+                    Some(comp),
+                );
+                for r in 0..2usize {
+                    for c in 0..2usize {
+                        pred[(sr * 2 + r) * 4 + sc * 2 + c] = sub_pred[r * 2 + c];
+                    }
+                }
+                tracer.on_motion_comp(
+                    mb_x,
+                    mb_y,
+                    trace_plane,
+                    (qbase + sub) as u8,
+                    &sub_pred,
+                    cell.mv,
+                    ref_idx0,
+                );
             }
 
-            let pred = combine_weighted(
-                weighted,
-                l0_active,
-                l1_active,
-                ref_idx0,
-                ref_idx1,
-                &pred_l0,
-                &pred_l1,
-                Some(comp),
+            let res = dequant_idct_4x4_scan(
+                &ac[block],
+                qpc,
+                Some(dc_out[block]),
+                comp + 4,
+                scaling,
+                &crate::transform::FIELD_SCAN_4X4,
             );
-            tracer.on_motion_comp(
-                mb_x,
-                mb_y,
-                trace_plane,
-                block as u8,
-                &pred,
-                cell.mv,
-                ref_idx0,
-            );
-
-            let res = dequant_idct_4x4(&ac[block], qpc, Some(dc_out[block]), comp + 4, scaling);
             for row in 0..4 {
                 let py = 2 * (fy0 + row) + bottom as usize;
                 for col in 0..4 {
@@ -2940,7 +2996,7 @@ pub fn reconstruct_inter_field_frame<T: DecodeTracer>(
 /// intra-reconstructs) the macroblock range `[first_mb, end_mb)` of a PAFF
 /// field picture into a CALLER-OWNED half-height `ReconstructedFrame`, using
 /// THIS slice's own `ref_fields` — the exact analogue of
-/// [`reconstruct_inter_frame_range`] for fields, used by the field
+/// `reconstruct_inter_frame_range` for fields, used by the field
 /// accumulator driver in `decoder::interlaced` so each slice of a multi-slice
 /// field picture writes its own range as it is decoded (inter reconstruction
 /// only ever reads DPB reference fields, never sibling macroblocks).

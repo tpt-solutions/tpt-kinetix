@@ -543,7 +543,7 @@ pub static DEFAULT_MV_FR_CDF: [[u16; 5]; 2] = [
     [8192, 17408, 21248, 32768, 0],
 ];
 pub static DEFAULT_MV_HP_CDF: [u16; 3] = [16384, 32768, 0];
-/// dav1d dav1d_mc_subpel_filters[6][15][8] (tables.c): the AV1 6-bit
+/// dav1d dav1d_mc_subpel_filters\[6\]\[15\]\[8\] (tables.c): the AV1 6-bit
 /// subpel interpolation filters, 15 rows of 1/16-pel phases per set
 /// (coefficients sum to 64; rounds are /6-scale, NOT the /7-scale 128
 /// filters - the previous table here was the VP9 filter bank, which
@@ -551,7 +551,7 @@ pub static DEFAULT_MV_HP_CDF: [u16; 3] = [16384, 32768, 0];
 /// 1 = EIGHTTAP_SMOOTH, 2 = EIGHTTAP_SHARP, 3 = 4x4-REGULAR, 4 = 4x4-SMOOTH,
 /// 5 = BILINEAR. Luma rows: only odd rows (2m-1 for 1/8-pel phase m);
 /// even rows serve chroma 1/16-pel phases.
-/// dav1d dav1d_mc_subpel_filters[6][15][8] (tables.c): the AV1 6-bit
+/// dav1d dav1d_mc_subpel_filters\[6\]\[15\]\[8\] (tables.c): the AV1 6-bit
 /// subpel interpolation filters, 15 rows of 1/16-pel phases per set
 /// (coefficients sum to 64; rounds are /6-scale - the previous table
 /// here was the VP9 128-scale filter bank, which cost a constant +-1

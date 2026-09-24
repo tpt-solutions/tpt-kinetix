@@ -1,6 +1,6 @@
 //! Tile-decoder mode parsing: `decode_mode`'s intra/keyframe branches, the
 //! inter reference-selection ladders, context-cache updates and MV filling.
-//! Inherent impls on [`TileDecoder`](super::frame::TileDecoder).
+//! Inherent impls on [`TileDecoder`].
 
 use tpt_kinetix_core::error::KinetixError;
 

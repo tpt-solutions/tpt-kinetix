@@ -1,7 +1,7 @@
 //! Tile-decoder reconstruction: coefficient decoding per transform block,
 //! intra reconstruction, inter reconstruction (motion compensation +
 //! residual), and loop-filter level/edge-mask recording. Inherent impls on
-//! [`TileDecoder`](crate::frame::TileDecoder).
+//! [`TileDecoder`].
 
 #![allow(clippy::too_many_arguments)]
 

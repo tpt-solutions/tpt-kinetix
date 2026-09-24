@@ -746,8 +746,8 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
                 if !is_exact && p_v < 99.0 {
                     let w = entry.width as usize;
                     let h = entry.height as usize;
-                    let cw = (w + 1) / 2;
-                    let ch = (h + 1) / 2;
+                    let cw = w.div_ceil(2);
+                    let ch = h.div_ceil(2);
                     let y_off = w * h;
                     let u_off = y_off + cw * ch;
                     let kd = &kframes[i].data;

@@ -252,20 +252,20 @@ impl FrameMeta {
             chroma_edge_left: vec![false; len],
             chroma_edge_top: vec![false; len],
             lf_level_u4: {
-                let cw = (w4 + 1) / 2;
-                let ch = (h4 + 1) / 2;
+                let cw = w4.div_ceil(2);
+                let ch = h4.div_ceil(2);
                 vec![0u8; cw * ch]
             },
             lf_level_v4: {
-                let cw = (w4 + 1) / 2;
-                let ch = (h4 + 1) / 2;
+                let cw = w4.div_ceil(2);
+                let ch = h4.div_ceil(2);
                 vec![0u8; cw * ch]
             },
             delta_lf: vec![[0i8; 4]; len],
             w4,
             h4,
-            cw4: (w4 + 1) / 2,
-            ch4: (h4 + 1) / 2,
+            cw4: w4.div_ceil(2),
+            ch4: h4.div_ceil(2),
             luma_tx_w4: vec![0u8; len4],
             luma_tx_h4: vec![0u8; len4],
             luma_edge_left4: vec![false; len4],

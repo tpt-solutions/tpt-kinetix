@@ -1157,9 +1157,9 @@ impl<'a> TileDecodeState<'a> {
             current_q_index: qindex,
             delta_lf: [0i8; 4],
             lf_frame_levels: lf_levels,
-            lf_ref_deltas: lf_ref_deltas,
-            lf_mode_deltas: lf_mode_deltas,
-            lf_delta_enabled: lf_delta_enabled,
+            lf_ref_deltas,
+            lf_mode_deltas,
+            lf_delta_enabled,
             read_deltas: false,
             cdef_idx: std::collections::HashMap::new(),
             frame_is_intra,
@@ -1486,6 +1486,7 @@ pub(crate) fn chroma_lf_levels_snapshot(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn decode_tile_group(
     data: &[u8],
     width: usize,

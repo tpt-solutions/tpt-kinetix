@@ -11,7 +11,7 @@
 /// Block sizes, spec order: index = `block_level * 3 + block_partition`.
 pub const N_BS_SIZES: usize = 13;
 
-/// [above_idx][left_idx][9] keyframe intra mode probs (spec section 13.4).
+/// \[above_idx\]\[left_idx\]\[9\] keyframe intra mode probs (spec section 13.4).
 // verify-tables: rust=DEFAULT_KF_YMODE_PROBS symbol=ff_vp9_default_kf_ymode_probs commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/vp9data.c
 pub const DEFAULT_KF_YMODE_PROBS: [u8; 900] = [
     43, 46, 168, 134, 107, 128, 69, 142, 92, 44, 29, 68, 159, 201, 177, 50, 57, 77, 63, 36, 126,
@@ -58,7 +58,7 @@ pub const DEFAULT_KF_YMODE_PROBS: [u8; 900] = [
     52, 34, 29, 129, 183, 227, 42, 35, 43, 43, 81, 53, 140, 169, 204, 68, 84, 72,
 ];
 
-/// [y_mode][9] keyframe chroma intra mode probs (spec section 13.4).
+/// \[y_mode\]\[9\] keyframe chroma intra mode probs (spec section 13.4).
 // verify-tables: rust=DEFAULT_KF_UVMODE_PROBS symbol=ff_vp9_default_kf_uvmode_probs commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/vp9data.c
 pub const DEFAULT_KF_UVMODE_PROBS: [u8; 90] = [
     118, 15, 123, 148, 131, 101, 44, 93, 131, 113, 12, 23, 188, 226, 142, 26, 32, 125, 144, 11, 54,
@@ -68,7 +68,7 @@ pub const DEFAULT_KF_UVMODE_PROBS: [u8; 90] = [
     182, 122, 35, 59, 128,
 ];
 
-/// [block_level][partition_ctx][3] keyframe partition probs (spec section 13.3).
+/// \[block_level\]\[partition_ctx\]\[3\] keyframe partition probs (spec section 13.3).
 // verify-tables: rust=DEFAULT_KF_PARTITION_PROBS symbol=ff_vp9_default_kf_partition_probs commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/vp9data.c
 pub const DEFAULT_KF_PARTITION_PROBS: [u8; 48] = [
     174, 35, 49, 68, 11, 27, 57, 15, 9, 12, 3, 3, 150, 40, 39, 78, 12, 26, 67, 33, 11, 24, 7, 5,
@@ -76,7 +76,7 @@ pub const DEFAULT_KF_PARTITION_PROBS: [u8; 48] = [
     67,
 ];
 
-/// [2][13][2] flattened: [half][bs][0] = width in 8px units, [1] = height.
+/// \[2\]\[13\]\[2\] flattened: \[half\]\[bs\]\[0\] = width in 8px units, \[1\] = height.
 // verify-tables: rust=BWH_TAB symbol=ff_vp9_bwh_tab commit=c3ff71680805267bc8f3fff86c1cf917f810c0d9 file=libavcodec/vp9data.c
 pub const BWH_TAB: [u8; 52] = [
     16, 16, 16, 8, 8, 16, 8, 8, 8, 4, 4, 8, 4, 4, 4, 2, 2, 4, 2, 2, 2, 1, 1, 2, 1, 1, 8, 8, 8, 4,
@@ -630,7 +630,7 @@ pub const DEFAULT_SCAN_32X32_NB: [i16; 2048] = [
     1020, 958, 989, 927, 958, 990, 1021, 959, 990, 991, 1022,
 ];
 
-/// Sub-pel interpolation filters [type][phase][8] flattened
+/// Sub-pel interpolation filters \[type\]\[phase\]\[8\] flattened
 /// (rows: 0 = REGULAR, 1 = SHARP, 2 = SMOOTH).
 // (verify-tables not applicable: extracted textually; see doc comment)
 pub const SUBPEL_FILTERS: [i16; 384] = [
@@ -673,7 +673,7 @@ pub const INV_MAP_TABLE: [u8; 255] = [
 /// Coefficient probability model, compact FFmpeg layout: per
 /// (tx group, block type, plane type) band 0 has 3 contexts and bands 1..5
 /// have 6 (band-0 contexts 3..5 are never coded). Index with
-/// [`coef_prob_idx`].
+/// `coef_prob_idx`.
 // (verify-tables not applicable: extracted textually; see doc comment)
 pub const DEFAULT_COEF_PROBS: [u8; 1584] = [
     195, 29, 183, 84, 49, 136, 8, 42, 71, 31, 107, 169, 35, 99, 159, 17, 82, 140, 8, 66, 114, 2,
