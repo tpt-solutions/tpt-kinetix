@@ -4505,6 +4505,20 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
         );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
+        if let Ok(spec) = std::env::var("KINETIX_DBG_BLOCK4") {
+            let mut parts = spec.split(',');
+            let want = (
+                parts.next().and_then(|s| s.parse::<u32>().ok()),
+                parts.next().and_then(|s| s.parse::<u32>().ok()),
+                parts.next().and_then(|s| s.parse::<usize>().ok()),
+            );
+            if want == (Some(mb_x), Some(mb_y), Some(block)) {
+                eprintln!(
+                    "BLOCK4-DBG mb=({mb_x},{mb_y}) block={block} cell_mv={:?} cell_ref={} coeffs={:?} pred={:?} res={:?}",
+                    cell.mv, cell.ref_idx, mb.luma_coeffs[block], pred, res,
+                );
+            }
+        }
         let mut recon_blk = [0u8; 16];
         for row in 0..4 {
             for col in 0..4 {

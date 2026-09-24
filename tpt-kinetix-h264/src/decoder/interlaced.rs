@@ -102,6 +102,13 @@ pub(super) struct FieldAccum {
     /// the first was paired).
     #[allow(dead_code)]
     pub(super) last_bottom: bool,
+    /// `PicOrderCnt` and `is_idr` of whichever field arrived FIRST for this
+    /// pair, captured so the completed pair's frame can be routed through
+    /// the same POC-ordered `reorder_push` the progressive paths use
+    /// (`H264Decoder::finalize_field_picture`) — using `min(first, second)`
+    /// as the pair's representative POC and `first || second` for is_idr.
+    pub(super) pending_poc: i64,
+    pub(super) pending_is_idr: bool,
 }
 
 /// Result of attempting to decode an interlaced (PAFF / MBAFF) slice.
@@ -557,6 +564,8 @@ impl H264Decoder {
             recon: prebuilt_recon,
             reconstructed,
             mv_store,
+            is_idr,
+            poc,
             ..
         } = acc;
         let coded_width = sps.coded_width_pixels();
@@ -796,20 +805,41 @@ impl H264Decoder {
             bottom_field_flag,
             field_height
         );
-        Ok(self
-            .accumulate_field(field_frame, bottom_field_flag, frame_num)
-            .map(|full| VideoFrame {
-                data: crate::reconstruct::crop_yuv420p(
-                    &full.data,
-                    full.width,
-                    full.height,
-                    visible_width,
-                    visible_height,
-                ),
-                width: visible_width,
-                height: visible_height,
-                ..full
-            }))
+        let paired = self
+            .accumulate_field(field_frame, bottom_field_flag, frame_num, poc, is_idr)
+            .map(|(full, pair_poc, pair_is_idr)| {
+                (
+                    VideoFrame {
+                        data: crate::reconstruct::crop_yuv420p(
+                            &full.data,
+                            full.width,
+                            full.height,
+                            visible_width,
+                            visible_height,
+                        ),
+                        width: visible_width,
+                        height: visible_height,
+                        ..full
+                    },
+                    pair_poc,
+                    pair_is_idr,
+                )
+            });
+        // §C.4.5.3 display-order reordering (`with_display_order`) must see
+        // EVERY emitted picture, not just progressive ones -- a PAFF
+        // field-pair frame that instead bypasses straight to the caller (the
+        // pre-fix behaviour) is emitted in raw decode order, immediately,
+        // while progressive frame pictures are properly POC-buffered; for a
+        // stream that mixes PAFF field pairs with frame pictures (ITU
+        // Sharp_MP_PAFF_1r2), that desyncs the two output streams entirely
+        // (todo-h264.md session #32ca). Route this pair's frame through the
+        // same `reorder_push` the progressive paths use, keyed by
+        // `min(top.poc, bottom.poc)` / `top.is_idr || bottom.is_idr` (see
+        // `accumulate_field`) -- the pair's true PicOrderCnt.
+        Ok(match paired {
+            Some((frame, pair_poc, pair_is_idr)) => self.reorder_push(pair_poc, frame, pair_is_idr),
+            None => None,
+        })
     }
 
     /// Reconstruct an **MBAFF** I-slice frame (§6.4.10.1, Phase G.4).
@@ -1347,19 +1377,48 @@ impl H264Decoder {
 
         let visible_width = sps.pic_width_pixels();
         let visible_height = sps.pic_height_pixels();
-        match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
-            Some(full) => Ok(InterlacedOutcome::Frame(VideoFrame {
-                data: crate::reconstruct::crop_yuv420p(
-                    &full.data,
-                    full.width,
-                    full.height,
-                    visible_width,
-                    visible_height,
-                ),
-                width: visible_width,
-                height: visible_height,
-                ..full
-            })),
+        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let poc = {
+            let mut scratch = self.poc_state.clone();
+            crate::ref_pic::derive_pic_order_cnt(
+                sps,
+                is_idr,
+                nal.nal_ref_idc != 0,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+                header.delta_pic_order_cnt_0,
+                header.delta_pic_order_cnt_bottom,
+                &mut scratch,
+            )
+            .unwrap_or(0)
+        };
+        match self.accumulate_field(
+            field_frame,
+            header.bottom_field_flag,
+            header.frame_num,
+            poc,
+            is_idr,
+        ) {
+            Some((full, pair_poc, pair_is_idr)) => {
+                let frame = VideoFrame {
+                    data: crate::reconstruct::crop_yuv420p(
+                        &full.data,
+                        full.width,
+                        full.height,
+                        visible_width,
+                        visible_height,
+                    ),
+                    width: visible_width,
+                    height: visible_height,
+                    ..full
+                };
+                Ok(match self.reorder_push(pair_poc, frame, pair_is_idr) {
+                    Some(f) => InterlacedOutcome::Frame(f),
+                    None => InterlacedOutcome::Handled,
+                })
+            }
             None => Ok(InterlacedOutcome::Handled),
         }
     }
@@ -2044,10 +2103,33 @@ impl H264Decoder {
             field_height,
             nal.nal_unit_type
         );
-        match self.accumulate_field(field_frame, header.bottom_field_flag, header.frame_num) {
-            Some(full) => {
+        let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
+        let poc = {
+            let mut scratch = self.poc_state.clone();
+            crate::ref_pic::derive_pic_order_cnt(
+                sps,
+                is_idr,
+                nal.nal_ref_idc != 0,
+                header.frame_num,
+                header.pic_order_cnt_lsb,
+                header.field_pic_flag,
+                header.bottom_field_flag,
+                header.delta_pic_order_cnt_0,
+                header.delta_pic_order_cnt_bottom,
+                &mut scratch,
+            )
+            .unwrap_or(0)
+        };
+        match self.accumulate_field(
+            field_frame,
+            header.bottom_field_flag,
+            header.frame_num,
+            poc,
+            is_idr,
+        ) {
+            Some((full, pair_poc, pair_is_idr)) => {
                 paff_dbg!("FINALIZE: -> Frame emitted");
-                Ok(InterlacedOutcome::Frame(VideoFrame {
+                let frame = VideoFrame {
                     data: crate::reconstruct::crop_yuv420p(
                         &full.data,
                         full.width,
@@ -2058,7 +2140,11 @@ impl H264Decoder {
                     width: visible_width,
                     height: visible_height,
                     ..full
-                }))
+                };
+                Ok(match self.reorder_push(pair_poc, frame, pair_is_idr) {
+                    Some(f) => InterlacedOutcome::Frame(f),
+                    None => InterlacedOutcome::Handled,
+                })
             }
             None => Ok(InterlacedOutcome::Handled),
         }
@@ -2077,7 +2163,9 @@ impl H264Decoder {
         field: VideoFrame,
         bottom: bool,
         key: u32,
-    ) -> Option<VideoFrame> {
+        poc: i64,
+        is_idr: bool,
+    ) -> Option<(VideoFrame, i64, bool)> {
         paff_dbg!(
             "ACCUM: bottom={bottom} key={key} accum={}",
             match &self.field_accum {
@@ -2097,11 +2185,13 @@ impl H264Decoder {
                 } else {
                     accum.top = Some(field);
                 }
+                let pair_poc = accum.pending_poc.min(poc);
+                let pair_is_idr = accum.pending_is_idr || is_idr;
                 if let (Some(top), Some(bottom)) = (&accum.top, &accum.bottom) {
                     let full = Self::interleave_fields(top, bottom);
                     self.field_accum = None;
                     paff_dbg!("ACCUM: -> INTERLEAVE frame {}", full.height);
-                    Some(full)
+                    Some((full, pair_poc, pair_is_idr))
                 } else {
                     self.field_accum = Some(accum);
                     paff_dbg!("ACCUM: -> buffered (waiting for pair)");
@@ -2116,16 +2206,26 @@ impl H264Decoder {
                 let mut discarded = None;
                 if let Some(top) = &accum.top {
                     let grey_bottom = Self::grey_field(top);
-                    discarded = Some(Self::interleave_fields(top, &grey_bottom));
+                    discarded = Some((
+                        Self::interleave_fields(top, &grey_bottom),
+                        accum.pending_poc,
+                        accum.pending_is_idr,
+                    ));
                 } else if let Some(bottom) = &accum.bottom {
                     let grey_top = Self::grey_field(bottom);
-                    discarded = Some(Self::interleave_fields(&grey_top, bottom));
+                    discarded = Some((
+                        Self::interleave_fields(&grey_top, bottom),
+                        accum.pending_poc,
+                        accum.pending_is_idr,
+                    ));
                 }
                 let mut accum = FieldAccum {
                     key,
                     top: None,
                     bottom: None,
                     last_bottom: bottom,
+                    pending_poc: poc,
+                    pending_is_idr: is_idr,
                 };
                 if bottom {
                     accum.bottom = Some(field);
@@ -2142,6 +2242,8 @@ impl H264Decoder {
                     top: None,
                     bottom: None,
                     last_bottom: bottom,
+                    pending_poc: poc,
+                    pending_is_idr: is_idr,
                 };
                 if bottom {
                     accum.bottom = Some(field);
