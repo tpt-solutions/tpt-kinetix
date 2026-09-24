@@ -73,6 +73,46 @@ Diff signature for regression tracking: poc3 pre-deblock vs
 at MB(0,0) — every later MB references corrupted history, so MB0 alone is
 the target.
 
+**Addendum 2 continued (same sitting) — the divergence is now at BIT-level
+granularity.** Deep-probed poc3's MB(0,0) first cell (nC=0, simplest
+possible context):
+- our parse: coeff_token (1,1) [bits "01"], sign "0" → +1, total_zeros
+  codeword "1" → tz=0 → coefficient at zigzag position 0 → FLAT +5 residual
+  (pred[7,7,42,49] → output [12,12,47,54]).
+- JM: coeff_token (1,1) — its own trace prints `#c=1 #t1=1` (genuine
+  decoded values, cross-checked against the FFmpeg table) — 1 sign, then
+  total_zeros codeword "011" → tz=1 → coefficient at zigzag position 1 →
+  varying residual `[9,10,9,3 | 9,7,19,18 | -5,-4,10,13 | -4,-5,-21,-22]`.
+- Both decoders consume the same bits for token and sign. At the
+  total_zeros read our position holds a leading "1" (→ tz=0, 1-bit
+  codeword) where JM holds "011" (→ tz=1, 3-bit codeword): a 2-bit
+  consumption shortfall upstream of the total_zeros read, which then
+  cascades (JM's cell (1,1) decodes #c=3 with 3 coefficients at high
+  zigzag positions; ours reads #c=1 there).
+- The coeff_token and total_zeros VLC tables themselves are IDENTICAL to
+  FFmpeg's `coeff_token_len/bits[4]` and `total_zeros_len/bits` (verified
+  entry-by-entry), so the shortfall is in one of the elements BETWEEN the
+  verified-identical qp_delta and the total_zeros read of cell0 — the
+  candidates: (1) our `decode_vlc` prefix-matching order for the token
+  (both (c=1,t1=1)="01" and longer codewords share the "0" prefix — if
+  decode_vlc tests entries in table order rather than by exact prefix
+  uniqueness, a 2-bit "01" could match where the true codeword is 3 bits),
+  (2) the sign/total_zeros interleaving for t1>0 vs c>t1, (3) an
+  off-by-one in the cell0 nC derivation picking a neighbouring VLC table.
+- CONCRETE NEXT: add a bit-offset trace (bit position after each element)
+  to the CAVLC residual parse (`KINETIX_CAVLC_BINTRACE`), dump MB0 of
+  poc3's first slice, and diff element-by-element against JM's trace bit
+  positions (@540139 mb_skip_run → @540170 totalrun ≈ bits 540139..540175).
+  The first element whose END-position differs by ±2 bits is the bug.
+
+Also note for the record: JM's general syntax-element trace parenthesised
+value IS the decoded value for ue/se elements (mb_type, mvd — used
+throughout the #32cb/#32cc analyses), but for VLC-table elements
+(coeff_token, total_zeros, run_before) the parenthesised value is the raw
+VLC CODE, not the decoded symbol — reading JM's coeff traces required
+this distinction.
+
+
 
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
 
