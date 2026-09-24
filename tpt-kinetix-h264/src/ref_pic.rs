@@ -1497,23 +1497,20 @@ fn field_ref_identity(f: &FieldRef) -> (bool, bool, i64) {
 
 /// `build_def_list`'s same-parity/opposite-parity alternation (FFmpeg
 /// `h264_refs.c`): two cursors — one over the current-parity entries, one over
-/// the opposite-parity entries, both walking `sorted` in order — appending
+/// the opposite-parity entries, both walking `items` in order — appending
 /// alternately, starting with the current parity.
-fn interleave_field_parities<'a>(
-    sorted: &[&'a FieldRef],
-    current_bottom: bool,
-) -> Vec<&'a FieldRef> {
-    let mut same = sorted.iter().filter(|f| f.bottom == current_bottom);
-    let mut opp = sorted.iter().filter(|f| f.bottom != current_bottom);
-    let mut out = Vec::with_capacity(sorted.len());
+fn interleave_field_parities(items: &[FieldRef], current_bottom: bool) -> Vec<FieldRef> {
+    let mut same = items.iter().filter(|f| f.bottom == current_bottom);
+    let mut opp = items.iter().filter(|f| f.bottom != current_bottom);
+    let mut out = Vec::with_capacity(items.len());
     loop {
         let mut any = false;
         if let Some(f) = same.next() {
-            out.push(*f);
+            out.push(f.clone());
             any = true;
         }
         if let Some(f) = opp.next() {
-            out.push(*f);
+            out.push(f.clone());
             any = true;
         }
         if !any {
@@ -1544,53 +1541,104 @@ fn initial_b_field_list(
     current_poc: i64,
     list1: bool,
 ) -> Option<Vec<FieldRef>> {
-    let fields = expand_dpb_fields(dpb);
-    if fields.is_empty() {
+    if !dpb.iter().any(|e| e.is_short_term || e.is_long_term) {
         return None;
     }
 
-    let mut past: Vec<&FieldRef> = Vec::new();
-    let mut future: Vec<&FieldRef> = Vec::new();
-    for f in &fields {
-        let (is_short, is_long) = field_short_long(f, dpb);
-        if !is_short {
-            continue;
-        }
-        let _ = is_long;
-        if f.pic_order_cnt <= current_poc {
-            past.push(f);
+    // Sort at the DPB-ENTRY level (FFmpeg `add_sorted` walks short_ref, whose
+    // members are pictures): a stored frame is ONE entry here and only splits
+    // into its two field references AFTER sorting (`build_def_list`'s
+    // `split_field_copy`). Deduping after field expansion would instead drop
+    // the second field of every frame reference, because both fields of a
+    // frame-coded picture share the frame's PicOrderCnt.
+    let mut past: Vec<&DpbEntry> = Vec::new();
+    let mut future: Vec<&DpbEntry> = Vec::new();
+    for e in dpb.iter().filter(|e| e.is_short_term) {
+        if e.pic_order_cnt <= current_poc {
+            past.push(e);
         } else {
-            future.push(f);
+            future.push(e);
         }
     }
     // `add_sorted` walks each side with a strict running limit, so entries
-    // sharing a POC only appear once (the closest one wins the first slot).
-    past.sort_by_key(|f| std::cmp::Reverse(f.pic_order_cnt));
-    past.dedup_by_key(|f| f.pic_order_cnt);
-    future.sort_by_key(|f| f.pic_order_cnt);
-    future.dedup_by_key(|f| f.pic_order_cnt);
+    // sharing a POC only contribute once (the closest one wins the slot).
+    past.sort_by_key(|e| std::cmp::Reverse(e.pic_order_cnt));
+    past.dedup_by_key(|e| (e.field_pic_flag, e.bottom_field_flag, e.pic_order_cnt));
+    future.sort_by_key(|e| e.pic_order_cnt);
+    future.dedup_by_key(|e| (e.field_pic_flag, e.bottom_field_flag, e.pic_order_cnt));
 
-    let sorted: Vec<&FieldRef> = if list1 {
+    let sorted: Vec<&DpbEntry> = if list1 {
         future.into_iter().chain(past).collect()
     } else {
         past.into_iter().chain(future).collect()
     };
-    let mut ordered: Vec<FieldRef> = interleave_field_parities(&sorted, current_bottom)
-        .into_iter()
-        .cloned()
-        .collect();
 
-    // Long-term fields: ascending LongTermPicNum, same parity interleave.
-    let mut longs: Vec<&FieldRef> = Vec::new();
-    for f in &fields {
-        let (_, is_long) = field_short_long(f, dpb);
-        if is_long {
-            longs.push(f);
-        }
-    }
-    longs.sort_by_key(|f| field_long_num(f, dpb));
-    let longs_interleaved = interleave_field_parities(&longs, current_bottom);
-    ordered.extend(longs_interleaved.into_iter().cloned());
+    // Split each sorted entry into its field references: genuine fields
+    // contribute themselves, frames contribute (top, bottom) —
+    // `split_field_copy` semantics.
+    let expanded: Vec<FieldRef> = sorted
+        .iter()
+        .flat_map(|e| {
+            if e.field_pic_flag {
+                vec![FieldRef {
+                    frame: e.frame.clone(),
+                    is_frame: false,
+                    bottom: e.bottom_field_flag,
+                    pic_order_cnt: e.pic_order_cnt,
+                }]
+            } else {
+                vec![
+                    FieldRef {
+                        frame: e.frame.clone(),
+                        is_frame: true,
+                        bottom: false,
+                        pic_order_cnt: e.pic_order_cnt,
+                    },
+                    FieldRef {
+                        frame: e.frame.clone(),
+                        is_frame: true,
+                        bottom: true,
+                        pic_order_cnt: e.pic_order_cnt,
+                    },
+                ]
+            }
+        })
+        .collect();
+    let mut ordered: Vec<FieldRef> = interleave_field_parities(&expanded, current_bottom);
+
+    // Long-term entries: ascending LongTermPicNum, same parity interleave.
+    let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
+    longs.sort_by_key(|e| e.long_term_pic_num);
+    let longs_expanded: Vec<FieldRef> = longs
+        .iter()
+        .flat_map(|e| {
+            if e.field_pic_flag {
+                vec![FieldRef {
+                    frame: e.frame.clone(),
+                    is_frame: false,
+                    bottom: e.bottom_field_flag,
+                    pic_order_cnt: e.pic_order_cnt,
+                }]
+            } else {
+                vec![
+                    FieldRef {
+                        frame: e.frame.clone(),
+                        is_frame: true,
+                        bottom: false,
+                        pic_order_cnt: e.pic_order_cnt,
+                    },
+                    FieldRef {
+                        frame: e.frame.clone(),
+                        is_frame: true,
+                        bottom: true,
+                        pic_order_cnt: e.pic_order_cnt,
+                    },
+                ]
+            }
+        })
+        .collect();
+    let longs_interleaved = interleave_field_parities(&longs_expanded, current_bottom);
+    ordered.extend(longs_interleaved);
 
     if ordered.is_empty() {
         None

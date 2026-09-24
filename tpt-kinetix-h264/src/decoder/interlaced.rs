@@ -1962,18 +1962,26 @@ impl H264Decoder {
                     .mv_store
                     .cells_of(idx)
                     .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                let grid: Vec<String> = cells
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "({},{})/{}|({},{})/{}",
+                            c.mv[0], c.mv[1], c.ref_idx, c.mv_l1[0], c.mv_l1[1], c.ref_idx_l1
+                        )
+                    })
+                    .collect();
                 eprintln!(
-                    "BFIELD_MB frame_num={} bottom={} mb={idx} type={:?} skip={} ref0={:?} mv0={:?} ref1={:?} mv1={:?} nz_luma={}",
+                    "BFIELD_MB frame_num={} bottom={} mb={idx} type={:?} skip={} nz={}",
                     header.frame_num,
                     header.bottom_field_flag,
                     mb.mb_type,
                     mb.skip,
-                    cells[0].ref_idx,
-                    cells[0].mv,
-                    cells[0].ref_idx_l1,
-                    cells[0].mv_l1,
                     parsed.nz[idx].luma.iter().sum::<u8>(),
                 );
+                for row in grid.chunks(4) {
+                    eprintln!("    {}", row.join(" "));
+                }
             }
             eprintln!(
                 "BFIELD_HDR frame_num={} bottom={} direct_spatial={} l0_len={} l1_len={} poc={} mod_l0={:?} mod_l1={:?}",
@@ -1989,17 +1997,13 @@ impl H264Decoder {
             for (i, f) in ref_l0.iter().enumerate() {
                 eprintln!(
                     "  L0[{i}] poc={} bottom={} is_frame={}",
-                    f.pic_order_cnt,
-                    f.bottom,
-                    f.is_frame
+                    f.pic_order_cnt, f.bottom, f.is_frame
                 );
             }
             for (i, f) in ref_l1.iter().enumerate() {
                 eprintln!(
                     "  L1[{i}] poc={} bottom={} is_frame={}",
-                    f.pic_order_cnt,
-                    f.bottom,
-                    f.is_frame
+                    f.pic_order_cnt, f.bottom, f.is_frame
                 );
             }
         }
