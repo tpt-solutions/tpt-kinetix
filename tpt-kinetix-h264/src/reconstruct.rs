@@ -3026,6 +3026,7 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
     mb_cols: u32,
     first_mb: usize,
     end_mb: usize,
+    slice_id_grid: &[u16],
     chroma_qp_index_offset: i32,
     scaling: &ScalingLists,
     weighted: &WeightedPred,
@@ -3160,7 +3161,27 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
             );
         } else {
             // Intra macroblock inside a field P-slice: field-scan intra
-            // reconstruction addressing the half-height plane (§8.5.6).
+            // reconstruction addressing the half-height plane (§8.5.6). The
+            // slice availability filter is load-bearing here: the MB above an
+            // early-in-slice intra MB usually belongs to the PREVIOUS slice
+            // (multi-slice P fields), and §6.4.9 makes its samples unavailable
+            // for intra prediction — without the filter the prediction reads
+            // the other slice's pixels and every top-row 4×4 block lands on a
+            // constant-offset base.
+            let luma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id: slice_id_grid[idx],
+                mb_size: 16,
+                constrained_intra_mbs: None,
+            });
+            let chroma_avail = Some(SliceAvail {
+                slice_id_grid,
+                mb_cols,
+                cur_slice_id: slice_id_grid[idx],
+                mb_size: 8,
+                constrained_intra_mbs: None,
+            });
             reconstruct_luma(
                 mb,
                 &mut recon.luma,
@@ -3170,7 +3191,7 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
                 true,
                 scaling,
                 tracer,
-                None,
+                luma_avail,
             );
             reconstruct_chroma(
                 mb,
@@ -3184,7 +3205,7 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
                 scaling,
                 weighted,
                 tracer,
-                None,
+                chroma_avail,
             );
         }
     }

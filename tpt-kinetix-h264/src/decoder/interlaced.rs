@@ -1825,6 +1825,7 @@ impl H264Decoder {
                 mb_cols,
                 first_mb_usize,
                 end_mb,
+                &acc.slice_id_grid,
                 chroma_qp_index_offset,
                 &acc.scaling,
                 &weighted_pred,
