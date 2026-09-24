@@ -1,5 +1,5 @@
 diff --git a/source/app/ldecod/image.c b/source/app/ldecod/image.c
-index 404e268..0ab0e8e 100644
+index 404e268..db7a6b8 100644
 --- a/source/app/ldecod/image.c
 +++ b/source/app/ldecod/image.c
 @@ -1966,7 +1966,33 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
@@ -36,6 +36,27 @@ index 404e268..0ab0e8e 100644
      }
    }
    else
+@@ -1977,6 +2003,20 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+     }
+   }
+ 
++  {
++    const char *dd = getenv("JM_DUMP_DIR");
++    int tgt = getenv("JM_DUMP_POC") ? atoi(getenv("JM_DUMP_POC")) : -999999;
++    if (dd && (*dec_picture)->poc == tgt) {
++      int W=(*dec_picture)->size_x, H=(*dec_picture)->size_y, y;
++      char fn[512]; FILE*f;
++      snprintf(fn,sizeof fn,"%s/jm_poc%d_final.gray",dd,tgt);
++      f=fopen(fn,"wb");
++      for(y=0;y<H;y++){int xx; for(xx=0;xx<W;xx++){unsigned char bb=(unsigned char)(*dec_picture)->imgY[y][xx]; fputc(bb,f);}}
++      fclose(f);
++      fprintf(stderr,"JM: dumped final (unconditional, post if/else) luma poc=%d %dx%d -> %s\n",tgt,W,H,fn);
++    }
++  }
++
+   if ((*dec_picture)->mb_aff_frame_flag)
+     MbAffPostProc(p_Vid);
+ 
 diff --git a/source/app/ldecod/loopFilter.c b/source/app/ldecod/loopFilter.c
 index 51f32cc..1c492a9 100644
 --- a/source/app/ldecod/loopFilter.c

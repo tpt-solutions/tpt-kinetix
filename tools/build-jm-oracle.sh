@@ -23,6 +23,21 @@
 # Dump hooks (env vars, read by the patched ldecod):
 #   JM_DUMP_DIR=<dir> JM_DUMP_POC=<poc>   -> <dir>/jm_poc<poc>_{pre,post}deblock.gray
 #                                           (8-bit luma, size_x*size_y bytes)
+#                                           PLUS <dir>/jm_poc<poc>_final.gray, an
+#                                           UNCONDITIONAL dump right after both
+#                                           branches of exit_picture's deblock-or-not
+#                                           if/else converge. The pre/postdeblock
+#                                           pair live INSIDE that if's deblock-enabled
+#                                           branch, so for a stream that disables
+#                                           deblocking on every slice
+#                                           (disable_deblocking_filter_idc == 1
+#                                           throughout, e.g. ITU Sharp_MP_PAFF_1r2)
+#                                           that branch never runs and neither ever
+#                                           fires — use `_final.gray` in that case
+#                                           (confirmed byte-identical to JM's own
+#                                           `-p OutputFile=` output for that POC
+#                                           either way, so it's always safe to use
+#                                           instead of the pre/post pair).
 #   JM_TRACE_POC=<poc> JM_TRACE_MB=<addr[,addr...]>
 #       -> stderr: per-edge "JM VER/HOR edge=.. A=.. B=.. bs=[..]" + p/q pixels
 #          before and "OUT row/col .." after, for the listed macroblock addresses
