@@ -654,6 +654,22 @@ impl H264Decoder {
                                 .map(|s| &s.scaling);
                             match PicParameterSet::parse(&nal.rbsp, sps_scaling) {
                                 Ok(pps) => {
+                                    if std::env::var_os("KINETIX_PPS_DBG").is_some() {
+                                        eprintln!(
+                                            "PPS-DBG id={} sps_id={} cabac={} nsg1={} nri_l0={} nri_l1={} wpf={} wbi={} qp={} cip={} t8x8={}",
+                                            pps.pic_parameter_set_id,
+                                            pps.seq_parameter_set_id,
+                                            pps.entropy_coding_mode_flag,
+                                            pps.num_slice_groups_minus1,
+                                            pps.num_ref_idx_l0_default_active_minus1,
+                                            pps.num_ref_idx_l1_default_active_minus1,
+                                            pps.weighted_pred_flag,
+                                            pps.weighted_bipred_idc,
+                                            pps.pic_init_qp_minus26,
+                                            pps.constrained_intra_pred_flag,
+                                            pps.transform_8x8_mode_flag,
+                                        );
+                                    }
                                     self.pps_store.insert(pps.pic_parameter_set_id, pps);
                                 }
                                 Err(e) => eprintln!("PPS_PARSE_ERR(2): {e:?}"),
@@ -2513,6 +2529,26 @@ impl H264Decoder {
             }
         };
 
+        if std::env::var_os("KINETIX_B_MB_DBG").is_some() {
+            eprintln!(
+                "B-HDR-DBG frame_num={} poc={current_poc} qp={slice_qp} idc={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} direct_spatial={} disable_deblock_idc={}",
+                header.frame_num,
+                header.cabac_init_idc,
+                header.direct_spatial_mv_pred_flag,
+                header.disable_deblocking_filter_idc,
+            );
+            for (i, mb) in acc.macroblocks[header.first_mb_in_slice as usize..end_mb]
+                .iter()
+                .enumerate()
+                .take(24)
+            {
+                eprintln!(
+                    "B-MB-DBG[{i}] type={:?} skip={} cbp={} qp={}",
+                    mb.mb_type, mb.skip, mb.cbp, mb.qp,
+                );
+            }
+        }
+
         // MV prediction (§8.4.1.3, direct mode §8.4.1.2), scoped to THIS
         // slice's own macroblock range: `MvStore::is_available` (and every
         // spatial-direct neighbour helper built on it) gates neighbour
@@ -3101,6 +3137,12 @@ impl H264Decoder {
                                     cells.map(|c| c[0].mv),
                                     cells.map(|c| c[0].ref_idx),
                                 );
+                                if let Some(c) = cells {
+                                    eprintln!(
+                                        "  all16_mv={:?}",
+                                        c.iter().map(|x| x.mv).collect::<Vec<_>>()
+                                    );
+                                }
                             }
                             let mut n_skip = 0usize;
                             let mut n_intra = 0usize;
@@ -3497,6 +3539,31 @@ impl H264Decoder {
                         // fired early is one slice of a multi-slice picture.
                         if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
                             self.scaffold_fallback = true;
+                        }
+                        if std::env::var_os("KINETIX_B_MB_DBG").is_some() {
+                            eprintln!(
+                                "B-HDR-DBG(legacy) frame_num={} poc={current_poc} qp={slice_qp} idc={} entropy_cabac={entropy_coding_mode_flag} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} direct_spatial={} disable_deblock_idc={} decoded_mb_count={} of {}",
+                                header.frame_num,
+                                header.cabac_init_idc,
+                                header.direct_spatial_mv_pred_flag,
+                                header.disable_deblocking_filter_idc,
+                                parsed.decoded_mb_count,
+                                mb_cols * mb_rows,
+                            );
+                            for (i, mb) in parsed.macroblocks.iter().enumerate().take(24) {
+                                let cells = parsed.mv_store.cells_of(i);
+                                eprintln!(
+                                    "B-MB-DBG(legacy)[{i}] type={:?} skip={} cbp={} qp={} cells0_mv={:?} cells0_ref={:?} cells0_mv_l1={:?} cells0_ref_l1={:?}",
+                                    mb.mb_type,
+                                    mb.skip,
+                                    mb.cbp,
+                                    mb.qp,
+                                    cells.map(|c| c[0].mv),
+                                    cells.map(|c| c[0].ref_idx),
+                                    cells.map(|c| c[0].mv_l1),
+                                    cells.map(|c| c[0].ref_idx_l1),
+                                );
+                            }
                         }
                         // Weighted bi-prediction (§8.4.2.3.2): explicit when
                         // `weighted_bipred_idc == 1` (uses the parsed
