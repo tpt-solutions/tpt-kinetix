@@ -1433,6 +1433,225 @@ impl FieldRef {
     }
 }
 
+/// Expand the DPB into candidate `FieldRef`s — one entry per stored field
+/// picture, two entries (top and bottom) per stored frame picture (§8.2.4.2.5:
+/// field lists address individual fields, and a stored frame contributes its
+/// complementary field pair).
+fn expand_dpb_fields(dpb: &Dpb) -> Vec<FieldRef> {
+    let mut fields: Vec<FieldRef> = Vec::new();
+    for e in dpb.iter() {
+        if e.field_pic_flag {
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: false,
+                bottom: e.bottom_field_flag,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+        } else {
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+            fields.push(FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: e.pic_order_cnt,
+            });
+        }
+    }
+    fields
+}
+
+/// `(is_short_term, is_long_term)` of the DPB entry backing a candidate field.
+fn field_short_long(f: &FieldRef, dpb: &Dpb) -> (bool, bool) {
+    let matching = |e: &&DpbEntry| {
+        e.field_pic_flag == f.is_field()
+            && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+            && e.pic_order_cnt == f.pic_order_cnt
+    };
+    let is_short = dpb.iter().filter(matching).any(|e| e.is_short_term);
+    let is_long = dpb.iter().filter(matching).any(|e| e.is_long_term);
+    (is_short, is_long)
+}
+
+/// `LongTermPicNum` of a candidate long-term field reference.
+fn field_long_num(f: &FieldRef, dpb: &Dpb) -> i64 {
+    dpb.iter()
+        .find(|e| {
+            e.field_pic_flag == f.is_field()
+                && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+                && e.pic_order_cnt == f.pic_order_cnt
+        })
+        .map(|e| e.long_term_pic_num as i64)
+        .unwrap_or(0)
+}
+
+/// Identity key for field-reference-list equality comparisons (the B-slice
+/// "RefPicList1 identical to RefPicList0 → swap first two" rule).
+fn field_ref_identity(f: &FieldRef) -> (bool, bool, i64) {
+    (f.is_frame, f.bottom, f.pic_order_cnt)
+}
+
+/// `build_def_list`'s same-parity/opposite-parity alternation (FFmpeg
+/// `h264_refs.c`): two cursors — one over the current-parity entries, one over
+/// the opposite-parity entries, both walking `sorted` in order — appending
+/// alternately, starting with the current parity.
+fn interleave_field_parities<'a>(
+    sorted: &[&'a FieldRef],
+    current_bottom: bool,
+) -> Vec<&'a FieldRef> {
+    let mut same = sorted.iter().filter(|f| f.bottom == current_bottom);
+    let mut opp = sorted.iter().filter(|f| f.bottom != current_bottom);
+    let mut out = Vec::with_capacity(sorted.len());
+    loop {
+        let mut any = false;
+        if let Some(f) = same.next() {
+            out.push(*f);
+            any = true;
+        }
+        if let Some(f) = opp.next() {
+            out.push(*f);
+            any = true;
+        }
+        if !any {
+            break;
+        }
+    }
+    out
+}
+
+/// Initial (pre-truncation) field-list ordering for a B slice (§8.2.4.2.5 /
+/// §8.2.4.2.6): short-term fields ordered by their own `PicOrderCnt` around the
+/// CURRENT FIELD's POC — for L0, past-POC descending then future-POC ascending;
+/// for L1 the reverse — then the same-parity/opposite-parity alternation of
+/// [`interleave_field_parities`], then long-term fields (ascending
+/// `LongTermPicNum`) with the same alternation.
+///
+/// This is the field-picture counterpart of `initial_ref_list_l0_b` /
+/// `initial_ref_list_l1`, mirroring FFmpeg `h264_refs.c`'s B branch
+/// (`add_sorted` with the per-field POC as the pivot + `build_def_list`'s
+/// parity interleave). The PicNum ordering [`build_field_ref_list_l0`] uses is
+/// correct only for P field slices; applying it to B field slices maps L0[0] to
+/// the most-recently-decoded reference instead of the closest PAST one, which
+/// for b|b pairs following a P-frame picture picks the wrong reference for
+/// every macroblock (Sharp_MP_PAFF_1r2's mid-stream field pairs).
+fn initial_b_field_list(
+    dpb: &Dpb,
+    current_bottom: bool,
+    current_poc: i64,
+    list1: bool,
+) -> Option<Vec<FieldRef>> {
+    let fields = expand_dpb_fields(dpb);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut past: Vec<&FieldRef> = Vec::new();
+    let mut future: Vec<&FieldRef> = Vec::new();
+    for f in &fields {
+        let (is_short, is_long) = field_short_long(f, dpb);
+        if !is_short {
+            continue;
+        }
+        let _ = is_long;
+        if f.pic_order_cnt <= current_poc {
+            past.push(f);
+        } else {
+            future.push(f);
+        }
+    }
+    // `add_sorted` walks each side with a strict running limit, so entries
+    // sharing a POC only appear once (the closest one wins the first slot).
+    past.sort_by_key(|f| std::cmp::Reverse(f.pic_order_cnt));
+    past.dedup_by_key(|f| f.pic_order_cnt);
+    future.sort_by_key(|f| f.pic_order_cnt);
+    future.dedup_by_key(|f| f.pic_order_cnt);
+
+    let sorted: Vec<&FieldRef> = if list1 {
+        future.into_iter().chain(past).collect()
+    } else {
+        past.into_iter().chain(future).collect()
+    };
+    let mut ordered: Vec<FieldRef> = interleave_field_parities(&sorted, current_bottom)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    // Long-term fields: ascending LongTermPicNum, same parity interleave.
+    let mut longs: Vec<&FieldRef> = Vec::new();
+    for f in &fields {
+        let (_, is_long) = field_short_long(f, dpb);
+        if is_long {
+            longs.push(f);
+        }
+    }
+    longs.sort_by_key(|f| field_long_num(f, dpb));
+    let longs_interleaved = interleave_field_parities(&longs, current_bottom);
+    ordered.extend(longs_interleaved.into_iter().cloned());
+
+    if ordered.is_empty() {
+        None
+    } else {
+        Some(ordered)
+    }
+}
+
+/// Build the `RefPicList0` for an interlaced B *field* picture (§8.2.4.2.5).
+/// See [`initial_b_field_list`] for the ordering rule.
+pub fn build_field_ref_list_l0_b(
+    dpb: &Dpb,
+    current_bottom: bool,
+    num_ref_idx_l0_active: usize,
+    current_poc: i64,
+) -> Option<Vec<FieldRef>> {
+    let num_active = num_ref_idx_l0_active.max(1);
+    let mut list = initial_b_field_list(dpb, current_bottom, current_poc, false)?;
+    list.truncate(num_active);
+    while list.len() < num_ref_idx_l0_active {
+        let last = list.last()?.clone();
+        list.push(last);
+    }
+    Some(list)
+}
+
+/// Build the `RefPicList1` for an interlaced B *field* picture (§8.2.4.2.5).
+///
+/// Besides the reversed POC ordering, the §8.2.4.2.3 Note 2 rule applies here
+/// exactly as in the frame path ([`build_ref_list_l1`]): when the full
+/// pre-truncation candidate lists are identical, `RefPicList1[0]` and
+/// `RefPicList1[1]` are switched.
+pub fn build_field_ref_list_l1_b(
+    dpb: &Dpb,
+    current_bottom: bool,
+    num_ref_idx_l1_active: usize,
+    current_poc: i64,
+) -> Option<Vec<FieldRef>> {
+    let num_active = num_ref_idx_l1_active.max(1);
+    let mut list = initial_b_field_list(dpb, current_bottom, current_poc, true)?;
+
+    if list.len() > 1 {
+        if let Some(list0) = initial_b_field_list(dpb, current_bottom, current_poc, false) {
+            let identical = list0.len() == list.len()
+                && list0
+                    .iter()
+                    .zip(list.iter())
+                    .all(|(a, b)| field_ref_identity(a) == field_ref_identity(b));
+            if identical {
+                list.swap(0, 1);
+            }
+        }
+    }
+    list.truncate(num_active);
+    while list.len() < num_ref_idx_l1_active {
+        let last = list.last()?.clone();
+        list.push(last);
+    }
+    Some(list)
+}
+
 /// Build the `RefPicList0` for an interlaced *field* picture (§8.2.4.2.5).
 ///
 /// Reference fields are collected from the DPB — a stored field contributes one
@@ -1473,30 +1692,7 @@ pub fn build_field_ref_list_l0(
             );
         }
     }
-    let mut fields: Vec<FieldRef> = Vec::new();
-    for e in dpb.iter() {
-        if e.field_pic_flag {
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: false,
-                bottom: e.bottom_field_flag,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-        } else {
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: true,
-                bottom: false,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: true,
-                bottom: true,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-        }
-    }
+    let fields = expand_dpb_fields(dpb);
     if fields.is_empty() {
         return None;
     }
@@ -1507,19 +1703,7 @@ pub fn build_field_ref_list_l0(
     let mut lt_top: Vec<&FieldRef> = Vec::new();
     let mut lt_bottom: Vec<&FieldRef> = Vec::new();
     for f in &fields {
-        // Determine the underlying DPB short/long status by matching the frame.
-        // Match on field flags (and parity for genuine fields) rather than the
-        // fragile height+POC combination, which can alias across entries.
-        // A frame-derived FieldRef (is_frame) matches a DPB frame entry; a
-        // genuine field (!is_frame) matches a DPB field entry of the same parity.
-        let matching = |e: &&DpbEntry| {
-            e.field_pic_flag == f.is_field()
-                && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-                && e.pic_order_cnt == f.pic_order_cnt
-        };
-        let is_short = dpb.iter().filter(matching).any(|e| e.is_short_term);
-        let is_long = dpb.iter().filter(matching).any(|e| e.is_long_term);
-        let pic_num = field_pic_num(f, dpb, ctx);
+        let (is_short, is_long) = field_short_long(f, dpb);
         if is_short {
             if f.bottom {
                 st_bottom.push(f);
@@ -1532,8 +1716,6 @@ pub fn build_field_ref_list_l0(
             } else {
                 lt_top.push(f);
             }
-        } else {
-            let _ = pic_num;
         }
     }
     lt_top.sort_by_key(|f| field_long_num(f, dpb));
@@ -1627,20 +1809,6 @@ pub fn build_field_ref_list_l0(
     Some(ordered)
 }
 
-/// Build the `RefPicList1` for an interlaced *field* picture (§8.2.4.2.5).
-///
-/// For field pictures both reference lists are constructed by the same
-/// field-ordering rule (unlike frame pictures, where L0 / L1 differ by POC
-/// direction); see [`build_field_ref_list_l0`].
-pub fn build_field_ref_list_l1(
-    dpb: &Dpb,
-    current_bottom: bool,
-    num_ref_idx_l1_active: usize,
-    ctx: PicNumContext,
-) -> Option<Vec<FieldRef>> {
-    build_field_ref_list_l0(dpb, current_bottom, num_ref_idx_l1_active, ctx)
-}
-
 /// `PicNum` of a candidate field reference (§8.2.4.2.5), doubled for fields.
 ///
 /// For a genuine field reference (`f.is_field()`) the DPB entry is a field
@@ -1668,40 +1836,6 @@ fn frame_num_wrap_of(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
         }
         None => 0,
     }
-}
-
-fn field_pic_num(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
-    let found = dpb.iter().find(|e| {
-        e.field_pic_flag == f.is_field()
-            && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-            && e.pic_order_cnt == f.pic_order_cnt
-    });
-    match found {
-        Some(e) if f.is_frame => {
-            // §8.2.4.2.5: frame-derived field PicNum = 2*FrameNumWrap + parity.
-            let frame_num = e.frame_num as i64;
-            let frame_num_wrap = if frame_num > ctx.curr_frame_num as i64 {
-                frame_num - ctx.max_frame_num as i64
-            } else {
-                frame_num
-            };
-            2 * frame_num_wrap + f.bottom as i64
-        }
-        Some(e) => e.pic_num(ctx),
-        None => 0,
-    }
-}
-
-/// `LongTermPicNum` of a candidate long-term field reference.
-fn field_long_num(f: &FieldRef, dpb: &Dpb) -> i64 {
-    dpb.iter()
-        .find(|e| {
-            e.field_pic_flag == f.is_field()
-                && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-                && e.pic_order_cnt == f.pic_order_cnt
-        })
-        .map(|e| e.long_term_pic_num as i64)
-        .unwrap_or(0)
 }
 
 /// Build `RefPicList0` for a B-slice (§8.2.4.2.3).

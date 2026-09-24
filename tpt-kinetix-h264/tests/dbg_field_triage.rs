@@ -217,6 +217,14 @@ fn field_triage_strict() {
     if let Ok(rest) = dec.flush() {
         emitted.extend(rest);
     }
+    if let Some(out) = std::env::var_os("FIELD_DUMP_OUT") {
+        let mut blob = Vec::new();
+        for f in &emitted {
+            blob.extend_from_slice(&f.data);
+        }
+        std::fs::write(&out, blob).unwrap();
+        eprintln!("wrote {} frames to {out:?}", emitted.len());
+    }
     for (idx, f) in emitted.iter().enumerate() {
         eprintln!(
             "FLUSHED emitted#{idx} {}x{} len={}",

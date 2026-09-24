@@ -1815,54 +1815,15 @@ impl H264Decoder {
         tracer: &mut T,
         packet: &Packet,
     ) -> Result<InterlacedOutcome, KinetixError> {
-        use crate::ref_pic::{build_field_ref_list_l0, build_field_ref_list_l1, PicNumContext};
+        use crate::ref_pic::{build_field_ref_list_l0_b, build_field_ref_list_l1_b};
 
         let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
         let num_ref_idx_l1_active = header.num_ref_idx_l1_active_minus1 + 1;
-        let pic_num_ctx = PicNumContext::new(sps, header.frame_num, true, header.bottom_field_flag);
 
-        // Field pictures use the same field-ordering rule for both reference
-        // lists (§8.2.4.2.5); build L0 and L1 independently.
-        let ref_l0 = match build_field_ref_list_l0(
-            self.dpb(),
-            header.bottom_field_flag,
-            num_ref_idx_l0_active as usize,
-            pic_num_ctx,
-        ) {
-            Some(l) => l,
-            None => {
-                return self.emit_skip_field(
-                    sps.coded_width_pixels(),
-                    field_height,
-                    packet,
-                    nal,
-                    sps,
-                    header,
-                );
-            }
-        };
-        let ref_l1 = match build_field_ref_list_l1(
-            self.dpb(),
-            header.bottom_field_flag,
-            num_ref_idx_l1_active as usize,
-            pic_num_ctx,
-        ) {
-            Some(l) => l,
-            None => {
-                return self.emit_skip_field(
-                    sps.coded_width_pixels(),
-                    field_height,
-                    packet,
-                    nal,
-                    sps,
-                    header,
-                );
-            }
-        };
-
-        // Current field's POC (§8.2.1) — needed for implicit bi-prediction
-        // weights (weighted_bipred_idc == 2). Derived against a scratch state so
-        // we don't advance the real poc_state (store_reference_picture handles
+        // Current field's POC (§8.2.1) — needed both for the B-slice field
+        // ref-list POC ordering and for implicit bi-prediction weights
+        // (weighted_bipred_idc == 2). Derived against a scratch state so we
+        // don't advance the real poc_state (store_reference_picture handles
         // that later).
         let is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
         let current_poc = {
@@ -1880,6 +1841,47 @@ impl H264Decoder {
                 &mut scratch,
             )
             .unwrap_or(0)
+        };
+
+        // B field pictures order their reference lists by POC distance to the
+        // current FIELD (§8.2.4.2.5/8.2.4.2.6 — L0 past-descending then
+        // future-ascending, L1 the reverse), NOT by PicNum like P field
+        // pictures; see `initial_b_field_list`.
+        let ref_l0 = match build_field_ref_list_l0_b(
+            self.dpb(),
+            header.bottom_field_flag,
+            num_ref_idx_l0_active as usize,
+            current_poc,
+        ) {
+            Some(l) => l,
+            None => {
+                return self.emit_skip_field(
+                    sps.coded_width_pixels(),
+                    field_height,
+                    packet,
+                    nal,
+                    sps,
+                    header,
+                );
+            }
+        };
+        let ref_l1 = match build_field_ref_list_l1_b(
+            self.dpb(),
+            header.bottom_field_flag,
+            num_ref_idx_l1_active as usize,
+            current_poc,
+        ) {
+            Some(l) => l,
+            None => {
+                return self.emit_skip_field(
+                    sps.coded_width_pixels(),
+                    field_height,
+                    packet,
+                    nal,
+                    sps,
+                    header,
+                );
+            }
         };
 
         // Weighted bi-prediction (§8.4.2.3.2): explicit when
@@ -1952,6 +1954,55 @@ impl H264Decoder {
             Ok(p) => p,
             Err(_) => return Ok(InterlacedOutcome::Fallback),
         };
+
+        if std::env::var_os("KINETIX_B_FIELD_MB_DBG").is_some() {
+            let n = parsed.macroblocks.len().min(8);
+            for (idx, mb) in parsed.macroblocks.iter().enumerate().take(n) {
+                let cells = parsed
+                    .mv_store
+                    .cells_of(idx)
+                    .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                eprintln!(
+                    "BFIELD_MB frame_num={} bottom={} mb={idx} type={:?} skip={} ref0={:?} mv0={:?} ref1={:?} mv1={:?} nz_luma={}",
+                    header.frame_num,
+                    header.bottom_field_flag,
+                    mb.mb_type,
+                    mb.skip,
+                    cells[0].ref_idx,
+                    cells[0].mv,
+                    cells[0].ref_idx_l1,
+                    cells[0].mv_l1,
+                    parsed.nz[idx].luma.iter().sum::<u8>(),
+                );
+            }
+            eprintln!(
+                "BFIELD_HDR frame_num={} bottom={} direct_spatial={} l0_len={} l1_len={} poc={} mod_l0={:?} mod_l1={:?}",
+                header.frame_num,
+                header.bottom_field_flag,
+                header.direct_spatial_mv_pred_flag,
+                ref_l0.len(),
+                ref_l1.len(),
+                current_poc,
+                header.ref_pic_list_modification_l0,
+                header.ref_pic_list_modification_l1,
+            );
+            for (i, f) in ref_l0.iter().enumerate() {
+                eprintln!(
+                    "  L0[{i}] poc={} bottom={} is_frame={}",
+                    f.pic_order_cnt,
+                    f.bottom,
+                    f.is_frame
+                );
+            }
+            for (i, f) in ref_l1.iter().enumerate() {
+                eprintln!(
+                    "  L1[{i}] poc={} bottom={} is_frame={}",
+                    f.pic_order_cnt,
+                    f.bottom,
+                    f.is_frame
+                );
+            }
+        }
 
         let mut recon = crate::reconstruct::reconstruct_inter_b_field_frame(
             &parsed.macroblocks,
