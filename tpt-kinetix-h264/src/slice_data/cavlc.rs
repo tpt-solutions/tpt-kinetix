@@ -1876,7 +1876,8 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
     let mut out = [0i16; 16];
     let bt = std::env::var("KINETIX_CAVLC_BITTRACE").ok().and_then(|v| v.parse::<i32>().ok());
-    if bt == Some(n_c) {
+    let trace_all = std::env::var("KINETIX_CAVLC_BITTRACE").ok().as_deref() == Some("all");
+    if bt == Some(n_c) || trace_all {
         eprintln!(
             "CAVLCBIT nC={n_c} start={} bits_next3={:03b}",
             r.bit_position(),

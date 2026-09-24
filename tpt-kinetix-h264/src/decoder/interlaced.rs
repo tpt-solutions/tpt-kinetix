@@ -1545,6 +1545,23 @@ impl H264Decoder {
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
+        if std::env::var_os("KINETIX_CAVLC_BITTRACE").is_some() {
+            let mut bits = String::new();
+            for k in 0..40u8 {
+                let bitpos = header.data_bit_offset as usize + k as usize;
+                let byte = nal.rbsp[bitpos / 8];
+                let bit = (byte >> (7 - (bitpos % 8))) & 1;
+                bits.push(if bit == 1 { '1' } else { '0' });
+            }
+            eprintln!(
+                "PSLICE_MARK first_mb={} bottom={} data_bit_offset={} abs={} frame_num={} bits40={bits}",
+                header.first_mb_in_slice,
+                header.bottom_field_flag,
+                header.data_bit_offset,
+                reader.bit_position(),
+                header.frame_num
+            );
+        }
 
         let transform_8x8 = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
 
