@@ -643,6 +643,15 @@ impl H264Decoder {
             }
         }
 
+        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            let stride = recon.luma_stride;
+            std::fs::write(
+                format!("{path}_pre_poc{poc}_bottom{bottom_field_flag}.gray"),
+                &recon.luma[..stride * (recon.luma.len() / stride)],
+            )
+            .unwrap();
+        }
+
         // Field deblocking (same per-MB walk as `deblock_field`, but each
         // macroblock uses its OWN slice's params and the bS inputs come from
         // the shared accumulator grids).
@@ -734,6 +743,15 @@ impl H264Decoder {
         let mut data = recon.luma;
         data.extend(recon.chroma_cb);
         data.extend(recon.chroma_cr);
+
+        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            let stride = recon.luma_stride;
+            std::fs::write(
+                format!("{path}_post_poc{poc}_bottom{bottom_field_flag}.gray"),
+                &data[..stride * field_height as usize],
+            )
+            .unwrap();
+        }
 
         let field_frame = VideoFrame {
             pts,
@@ -1729,6 +1747,54 @@ impl H264Decoder {
                     return Ok(InterlacedOutcome::Frame(ef));
                 }
                 return Ok(InterlacedOutcome::Fallback);
+            }
+            if let Some(idx) = std::env::var("KINETIX_PFIELD_MB_DBG")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                if idx >= first_mb_usize && idx < end_mb {
+                    let mb = &acc.macroblocks[idx];
+                    let cells = mv_store
+                        .cells_of(idx)
+                        .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                    let grid: Vec<String> = cells
+                        .iter()
+                        .map(|c| format!("({},{})/{}", c.mv[0], c.mv[1], c.ref_idx))
+                        .collect();
+                    eprintln!(
+                            "PFIELD_MB idx={idx} bottom={} slice={slice_id} first_mb={} type={:?} skip={} qp={} nz={}",
+                            header.bottom_field_flag,
+                            header.first_mb_in_slice,
+                            mb.mb_type,
+                            mb.skip,
+                            mb.qp,
+                            mb.luma_coeffs.iter().map(|b| b.iter().any(|&c| c != 0) as u8).sum::<u8>(),
+                        );
+                    if mb.mb_type == crate::macroblock::MbType::Intra4x4 {
+                        let modes: Vec<String> =
+                            mb.pred_modes_4x4.iter().map(|m| format!("{m:?}")).collect();
+                        eprintln!(
+                            "PFIELD_MODES idx={idx} bottom={} modes={:?}",
+                            header.bottom_field_flag,
+                            modes.chunks(4).collect::<Vec<_>>()
+                        );
+                    }
+                    if let Some(motion) = &mb.motion {
+                        eprintln!(
+                            "PFIELD_MVD idx={idx} subs={:?} refidx={:?} mvds={:?}",
+                            motion.sub_mb_type, motion.ref_idx_l0, motion.mvd_l0
+                        );
+                    }
+                    let nzs: Vec<String> = mb
+                        .luma_coeffs
+                        .iter()
+                        .map(|b| format!("{}", b.iter().any(|&c| c != 0) as u8))
+                        .collect();
+                    eprintln!("    nz_per_block={}", nzs.join(""));
+                    for row in grid.chunks(4) {
+                        eprintln!("    {}", row.join(" "));
+                    }
+                }
             }
         }
 

@@ -446,6 +446,22 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
+            if std::env::var("KINETIX_IFIELD_MB_DBG").is_ok_and(|v| {
+                let mut it = v.split(',');
+                it.next().and_then(|x| x.parse::<u32>().ok()) == Some(mb_x)
+                    && it.next().and_then(|y| y.parse::<u32>().ok()) == Some(mb_y)
+            }) {
+                let modes: Vec<String> =
+                    mb.pred_modes_4x4.iter().map(|m| format!("{m:?}")).collect();
+                eprintln!(
+                    "IFIELD_MB ({mb_x},{mb_y}) type={:?} qp={} chroma_mode={} modes4x4={:?} nzblocks={}",
+                    mb.mb_type,
+                    mb.qp,
+                    mb.intra_chroma_pred_mode,
+                    modes.chunks(4).collect::<Vec<_>>(),
+                    mb.luma_coeffs.iter().map(|b| b.iter().any(|&c| c != 0) as u8).sum::<u8>(),
+                );
+            }
             // §6.4.9: a neighbour macroblock decoded by a different slice
             // than the current one is unavailable for intra-prediction
             // reference samples, exactly like an off-picture neighbour.
@@ -3684,6 +3700,21 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         let mut pred = [0u8; 16];
         if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
             let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
+            if std::env::var_os("KINETIX_FIELD_REF_DBG").is_some() && idx == 148 && block == 1 {
+                let h = luma_h_of(plane_ref, stride);
+                eprintln!(
+                    "FIELDREF148: plane {}x{} cols2-9 rows0-5: {:?} mv=({},{})",
+                    plane_w,
+                    h,
+                    (0..6)
+                        .map(|r| (0..8)
+                            .map(|c| plane_ref[r * plane_w + 2 + c])
+                            .collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                    cell.mv[0],
+                    cell.mv[1]
+                );
+            }
             crate::motion_comp::interpolate_luma(
                 &mut pred,
                 4,
@@ -3700,6 +3731,13 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
             );
         }
         let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
+
+        if std::env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 {
+            eprintln!(
+                "FIELDPRED mb0 blk{block} mv=({},{}) pred={pred:?}",
+                cell.mv[0], cell.mv[1]
+            );
+        }
 
         tracer.on_motion_comp(
             mb_x,
@@ -3733,6 +3771,15 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
                     plane[off] = v;
                 }
             }
+        }
+        if std::env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 && block == 8 {
+            eprintln!(
+                "FIELDPRED-WRITE blk8 res0row={:?} plane_after[(8,0)]={} plane.len={} stride={}",
+                &res[..4],
+                plane[y0 as usize * stride + x0 as usize],
+                plane.len(),
+                stride,
+            );
         }
     }
 }

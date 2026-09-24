@@ -2,6 +2,101 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
+
+Picked up #32cb's handoff (CVFI1_Sony_D IDR-bottom "scattered intra errors").
+That lead was mislabelled: **the bottom field of display frame 0 is not intra —
+it is the stream's first P field picture** (JM's trace shows POC 0 = I-field,
+POC 1 = P-field; `POC: 1 MB: 273` decodes as `P_8x8`). All findings below were
+obtained with a newly built oracle toolchain; no decoder logic changed this
+continuation (the one speculative mapping "fix" I attempted for P-slice intra
+`mb_type`s was **reverted** — the original `i_type = mb_type_raw - 5` mapping is
+CORRECT, see the postmortem at the end).
+
+**Tooling built (all reusable, this was the missing piece for field work):**
+- A **TRACE=1 JM build**: `jm/source/ldecod-trace.exe` (built from
+  `C:/Users/phill/jm-oracle-fresh/jm` with `-DTRACE=1`). Per-MB syntax trace
+  (`*********** POC: n (I/P) MB: addr Slice: s Type: t **********` headers, every
+  syntax element with raw bits + decoded value). This is the per-MB ground truth
+  prior addenda kept wishing for.
+- A **predictor dump hook** patched into JM's `GetMotionVectorPredictorNormal`
+  (`lib/lcommon/mv_prediction.c`): `JM_MVP_TRACE=1 JM_MVP_ADDR=<addr>` prints
+  L/U/UR availability, ref indices and MVs per partition. NOTE: the printed
+  `pred=` value is pre-switch garbage — compute the predictor from the printed
+  L/U/UR via the median/match rules yourself.
+- **Pre/post-deblock per-picture dumps** (existing `JM_DUMP_DIR/JM_DUMP_POC`
+  hooks): they DO fire for CVFI1 (its P slices enable deblocking; the
+  "hooks never fire" note from #32ca addendum 2 is Sharp-specific, whose slices
+  set `disable_deblocking_filter_idc=1`). `jm_pocN_predeblock.gray` is a
+  720×240 half-height FIELD plane.
+- Kinetix-side env hooks (committed): `KINETIX_B_FIELD_MB_DBG` (B-field MB +
+  ref-list dump, from #32cb), `KINETIX_PFIELD_MB_DBG=<idx>` (P-field per-MB
+  type/qp/nz/4×4 MV grid + `PFIELD_MVD` mvd/sub/ref list + `PFIELD_MODES` Intra4x4
+  modes), `KINETIX_IFIELD_MB_DBG=x,y`, `KINETIX_FIELD_PRED_DBG`,
+  `KINETIX_FIELD_REF_DBG`, `KINETIX_FIELD_BUF_OUT=<prefix>` (dumps each field's
+  pre- and post-deblock luma plane as `<prefix>_pre|post_poc<N>_bottom<B>.gray`),
+  plus `FIELD_DUMP_OUT` in dbg_field_triage (from #32cb).
+
+**Measured, with the new oracle (display frame 0 = poc0 I-field + poc1 P-field):**
+1. Our I-field pre-deblock recon == JM's `jm_poc0_predeblock` **byte-exact**
+   (0/172,800). Reference storage, field extraction, everything upstream — clean.
+2. Our P-field pre-deblock recon vs JM's `jm_poc1_predeblock`: **2,171 diffs
+   (98.7% correct), confined to 15 macroblocks** — first at MB(3,3) (=idx 138):
+   rows 0-3, cols 4-15 wrong by a CONSTANT per-cell offset (-15 at cell1, -34 at
+   cells 2,3) — i.e. a residual-DC-level difference, with everything else in the
+   MB correct.
+3. For the probed MBs the divergence is NOT in ref lists, NOT in mvd/MVP, NOT in
+   MC:
+   - MB idx 273 (3,6): sub_mb_types [1,1,0,1], all 7 mvds, all 7 predictors, and
+     all final MVs byte-verified IDENTICAL to JM (JM's A/B/C from the hook
+     → medians → mv = our mv, e.g. partition (12,8): pred (-7,-6), mvd (-6,-1),
+     mv (-13,-7) both sides).
+   - MB idx 148: all 7 predictors identical (its earlier "wrong" reading was my
+     index error: MB(3,3) is idx 138, not 148 — 45 MBs/row).
+   - MB138's reference plane content == JM's byte-exact.
+4. Post-deblock, the small recon diff becomes the visible 2,617-sample error
+   (JM's own deblock touches 38,551 samples; ours 38,571 — comparable magnitude,
+   slightly different decisions amplifying the 2,171).
+
+**Root-cause status: the remaining P-field divergence is a per-macroblock
+residual/mode-level parse difference.** For MB138 (I_4x4 inside the P slice —
+mb_type ue 5, confirmed by JM reading 16 `intra4x4_pred_mode`s + chroma + a
+CBP (ue 0 → cbp 47 via the intra4x4 cbp mapping) + qp_delta) our modes are
+consistent with the same bits once JM's `-1`-printed entries are understood as
+MPM (`prev_intra4x4_pred_mode`) cases whose printed value is the pre-derivation
+rem, NOT the final mode — an initial "our MPM differs" reading was an artifact
+of comparing rem values to final modes. The concrete NEXT step is a strict
+symbol-by-symbol diff for the 15 bad MBs: for each, walk JM's trace syntax
+elements and Kinetix's parse side by side (both are now cheap via the hooks),
+and find the FIRST element whose decoded value differs — the candidates in
+order of likelihood: (a) nC/MPM neighbour-context resolution for blocks whose
+above neighbour is in a different slice of the same field (MB138's above MB93
+is in slice 0, MB138 in slice 1 — verify our `NeighbourCtx::new_with_slices`
+gating matches JM's per-element availability); (b) the coefficient-token
+value mapping under those contexts (a ±1 TotalCoeff difference produces exactly
+the observed constant-DC-per-cell offsets).
+
+**Postmortem — the speculative "fix" I attempted and reverted:** I initially
+concluded from JM's mb_type trace that P-slice intra mapping was broken and
+changed `i_type = mb_type_raw - 5` to a Table 7-14-style translation. That made
+CVFI1 frame 0 dramatically worse (2,617 → 170,838) — because the original
+mapping is right: FFmpeg's `ff_h264_decode_mb_cavlc` does `mb_type -= 5;
+goto decode_intra_mb` and indexes `ff_h264_i_mb_type_info` (0 = I_4x4 with
+implied cbp... actually cbp READ via the intra4x4 golomb table, 1..24 =
+I_16x16 variants, 25 = I_PCM) — exactly Kinetix's `parse_intra_macroblock`
+encoding. Lesson (same one as #32ca addendum 2, again): verify a claimed
+mapping against the actual oracle BEFORE writing the fix — my first pass
+trusted an under-specified memory of Table 7-14 over the observed JM trace.
+
+**NEXT SESSION:** pick up at the strict per-symbol diff above (the JM trace +
+hooks make it a half-session job), starting with MB138/MB(3,3). If (a) confirms
+— fix `NeighbourCtx` slice gating for intra-in-P-field; if (b) — audit the
+coeff_token context mapping for field pictures. CVFI1's other 16 frames and
+Sharp's P-pair (POC 12/13, display frame 5: top 27,736 / bottom 137,163) share
+this code path and should improve together. Sharp stands at 3,063,869
+diff_bytes with frames 2/4 improved by #32cb's B-field work; the pre-deblock
+P-field analysis here also applies to its P-pair.
+
 ## SESSION #32cb (2026-09-25) — B-field reference lists rebuilt on the POC-distance rule; Sharp_MP_PAFF_1r2's mid-stream field pairs go from fully-wrong to ~99% correct
 
 Picked up addendum 3's NEXT list (mid-stream field pairs 2/4/5/6/7 of
