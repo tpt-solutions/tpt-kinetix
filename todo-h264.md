@@ -2,6 +2,106 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ca ADDENDUM 3 (same day, continuation) — REAL BUG FOUND AND FIXED: PAFF field pairs never entered the display-order reorder buffer; Sharp_MP_PAFF_1r2 frames 0/1 now bit-exact (were both fully wrong)
+
+Picked up the tightly-scoped repro from addendum 2 (MB0's right 8×16
+partition, `cbp` bit clear, apparently getting a stray residual). First
+step: instrument the actual coefficient decode
+(`KINETIX_DBG_BLOCK4=mb_x,mb_y,block` — new env hook in
+`reconstruct.rs`, dumps `cell.mv`/`mb.luma_coeffs[block]`/`pred`/`res`
+for one 4×4 block) for MB0 block 2 (the "wrongly nonzero" one). Result:
+**`coeffs` were all zero, `pred` was flat 38, `res` was all zero** — the
+reconstruction of that exact block, in isolation, is correct. The
+"residual bug" hypothesis from addendum 2 was wrong.
+
+Since the block computed correctly but the picture still looked ~66%
+wrong, the next question was whether the WHOLE picture is actually
+correct and something downstream corrupts it. Direct test: dump the
+same picture's content via `dbg_field_triage` **without**
+`FIELD_DISPLAY_ORDER` (raw decode order) vs **with** it, and diff each
+against the `jm_poc6_final.gray` oracle:
+- Without reordering: **byte-exact, `diff=0/345600`.**
+- With reordering (matching `itu_conformance`'s real harness): garbage,
+  and `FIELD_MATCH_SEARCH` showed it matching **no reference frame at
+  all** — not misplaced, actually different content.
+
+That is the tell: reordering was not just picking the wrong frame, it
+was materially changing what came out. Traced it to
+`InterlacedOutcome::Frame`: a completed PAFF field pair (from
+`finalize_field_picture`, `finalize_field`, and `emit_skip_field`) was
+hand-returned straight to the caller, which stuffs it directly into
+`output_frame`/`frame_queue` — **completely bypassing `reorder_push`**.
+Every progressive frame picture, by contrast, always goes through
+`reorder_push`, which holds pictures in a POC-sorted buffer and only
+releases them in display order once `with_display_order()` is set. For
+a stream that mixes PAFF field pairs with frame pictures — exactly
+Sharp_MP_PAFF_1r2's structure (field pair, then several frame-coded
+P/B pictures, then more field pairs) — the two emission paths were
+never merged into one globally-ordered sequence: field pairs always
+popped out immediately in raw decode order, while frame pictures
+queued up separately in POC order, corrupting the interleave of the
+two streams from the very first field pair onward.
+
+**Fixed** (commit `c31f3fd`): `accumulate_field` now threads each
+field's own `PicOrderCnt`/`is_idr` through (new `FieldAccum` fields
+`pending_poc`/`pending_is_idr`, captured from whichever field of the
+pair arrives first) and returns `(VideoFrame, pair_poc, pair_is_idr)`
+with `pair_poc = min(top.poc, bottom.poc)` — the pair's true
+`PicOrderCnt` — instead of just the `VideoFrame`. All three call sites
+that finalize a field pair now route the result through
+`self.reorder_push(pair_poc, frame, pair_is_idr)` before wrapping it in
+`InterlacedOutcome::Frame`, exactly mirroring the progressive paths.
+
+**Result:** `Sharp_MP_PAFF_1r2` diff_bytes `6,446,102 → 3,745,196` (42%
+down), `first_bad_frame` `0 → 2` — **frame 0 (IDR field pair) and frame
+1 (POC 2, the first B-picture, previously ~66% wrong) are now
+byte-exact** against the ITU reference (`max_diff=0` for both, verified
+via `ITU_PER_FRAME=1`). `CAPA1_TOSHIBA_B`/`CVPA1_TOSHIBA_B` (also mixed
+frame/field streams) improved the same way (`first_bad_frame` `0 → 3`
+on both). **No regressions**: ITU conformance still 33/33 hard-checked
+BitExact. `cargo fmt --all -- --check`, `cargo clippy -p
+tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+tpt-kinetix-h264 --release --lib --bins --tests` all green.
+
+This is a real architectural fix, not a Sharp-specific patch — it
+applies to any stream mixing PAFF field pairs with frame pictures under
+`with_display_order()`. Worth checking whether it also helps any other
+currently-`informational` PAFF-adjacent clip beyond the three already
+observed to improve.
+
+**Remaining gap on Sharp_MP_PAFF_1r2, now much better localized:**
+`ITU_PER_FRAME=1` shows frames 0/1/3 exact (`max_diff=0`) and frames
+2/4/5/6/7 still wrong (`max_diff` 230-244). Cross-checked against the
+JM table: frame 3 (POC 6, a plain frame-coded P picture) is correct;
+frames 2/4/5/6/7 are all the **field-pair** pictures (`P|P`, `b|b`
+labels in JM's table) — i.e. **every plain frame picture is now
+correct, but every mid-stream PAFF field pair still fails.** This
+strongly suggests a second, separate, genuine PAFF field-decode bug
+(not a reordering artifact — reordering is proven fixed by frames 0/1
+being exact) for field pairs that occur *after* the stream has already
+decoded frame-coded pictures. Checked one hypothesis and ruled it out:
+`build_field_ref_list_l0` (§8.2.4.2.5 field ref-list construction)
+**already** correctly splits a stored FRAME DPB entry into two
+`FieldRef`s (`is_frame: true`, `bottom: false`/`true`, sampled via
+`FieldRef::sample_y`/`planes()`) — so this is not the "inverse of the
+`combine_field_pairs_into_frames` fix" gap it might look like at first
+glance; that part was already handled. **NEXT SESSION:** the bug is
+somewhere else in the mid-stream field-pair decode/reconstruction path
+(`decode_interlaced_b_field`/`decode_interlaced_p_field`) — start by
+diffing frame 2 (POC 5, the first `b|b` field pair, decoded via
+`decode_interlaced_b_field` → `finalize_field`) against a JM oracle
+dump for that POC the same way this session did for frame 1, and check
+whether it's a field-parity/MC issue specific to referencing a
+FRAME-coded picture from a field slice (this pair's references include
+POC 6, the frame picture decoded just before it) versus referencing
+another field.
+
+**MBAFF CABAC (CANLMA2 lead): still not reached** — this continuation's
+full budget went to the reorder-buffer bug above, which turned out to
+be a real, high-value architectural fix worth the full session. Exactly
+where prior sessions left it; see the memory system's
+`project_h264_current_open_work` note and this file's CANLMA2 sections.
+
 ## SESSION #32ca ADDENDUM 2 (same day, continuation) — JM oracle tooling fix landed; Sharp_MP_PAFF_1r2 P-frame bug localized to a single wrongly-nonzero 8x8 luma residual block; FM1_BT_B root-caused to unimplemented FMO/slice-groups (not a bug); MBAFF not reached
 
 **JM-oracle tooling fix (landed, commit `0254b6e`):** the `JM_DUMP_POC`
