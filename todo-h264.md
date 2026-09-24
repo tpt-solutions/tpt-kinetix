@@ -31,18 +31,48 @@ base was intra prediction, not coefficients). ITU suite: `first_bad` 0 → 1,
 diff_bytes 6,195,508 → 6,146,191, 33/33 hard-checked clips unchanged, Sharp /
 CAPA / CVPA unchanged. Gates: fmt, clippy `-D warnings`, 270 lib tests green.
 
-**Next (frame 1 bottom field):** display frame 1's top field is already exact;
-its bottom field fails from MB(0,0) (P8x16, mvds (0,0)/(1,0), dpb=3 → L0 =
-[poc2-top, poc1-bottom, poc0-top] with L0[0] = the just-decoded exact poc2
-top field — a zero-MV copy should be exact, so something else differs).
-Suggested: repeat the poc-vs-poc dump comparison (`KINETIX_FIELD_BUF_OUT`
-+ JM's `jm_poc3_predeblock/postdeblock.gray` — regenerate the truncated
-in.264 and the dumps, they are one command each with the toolchain from the
-session above). Check first whether our L0[0] for this field is really poc2
-(`KINETIX_DUMP_FIELD_REF=1`, the PicNum co-parity interleave order) and
-whether MB0's residual is non-zero (nz_per_block=1000010000000000 → blocks
-0 and 5 coded) — a wrong reference PARITY (bottom flag) on the genuine-field
-FieldRef would produce exactly "everything slightly off" here.
+**Next (frame 1 bottom field):** see the addendum below — the ref-list
+hypothesis is RULED OUT (L0[0] = poc2 verified correct), and the divergence
+is now pinned to the coefficient-decode level for the first MB.
+
+## SESSION #32cc ADDENDUM 2 (same continuation) — frame 1 bottom field: ref lists RULED OUT; divergence pinned to coeff_token/residual level on MB0
+
+Executed the suggested probes for display frame 1's bottom field (poc 3,
+dpb=3, num_ref_idx_l0_active=3):
+- **Ref list RULED OUT**: `KINETIX_DUMP_FIELD_REF` shows
+  `L0[0] poc=2 bottom=false` — the just-decoded, byte-exact frame-1 top
+  field, exactly what the PicNum co-parity ordering requires.
+- **Parse of MB(0,0) RULED OUT**: JM's trace for `POC: 3 MB: 0` is
+  `mb_type ue 2 = P_L0_L0_8x16`, mvds `(0,0)` and `(1,0)` — identical to
+  ours (`P8x16`, same mvds, same predictors → same MVs).
+- **Prediction VERIFIED CORRECT**: `KINETIX_FIELD_PRED_DBG` shows our
+  MB0 blk0 pred = `[7,7,42,49 | 12,11,50,50 | 20,23,97,99 | 19,19,95,96]`
+  = a verified byte-copy of the poc2 top field at (0,0) — the zero-MV
+  prediction JM also derives.
+
+**The divergence is the DECODED RESIDUAL of MB0's first cell.** Our cell0
+parses ONE coefficient (level +1) → a flat +5 residual; JM's implied
+residual for the same samples is `+9,+10,+9,+3` — varying, i.e. multiple
+coefficients. JM's trace lines for that cell read token bits `01`, one
+trailing-one sign `0`, then `totalrun ... 011 (3)` — the totalrun read
+implies more coefficients than our `#c=1`. The prime suspect is now
+**Kinetix's coeff_token codeNum→(TotalCoeff,TrailingOnes) table and/or the
+totalrun suffix-length logic for the nC∈[0,2) table** (MB0's cell0 has
+nC=0: picture-corner block, no intra neighbours, so this is the simplest
+possible context — the mismatch must be in the table/decoding itself, not
+in neighbour lookup). Comparing our `coeff_token` VLC tables
+(`slice_data`'s token mapping for luma nC∈[0,2)) entry-by-entry against
+spec Table 9-5 / FFmpeg's `coeff_token_len[4][4][17]` +
+`coeff_token_table_index` mapping is the concrete next step; note JM's own
+trace prints for the token are ambiguous (its `#c=1 #t1=1` print followed
+by a totalrun read is internally inconsistent unless the label ordering
+differs), so verify against the spec table, not the trace labels.
+
+Diff signature for regression tracking: poc3 pre-deblock vs
+`jm_poc3_predeblock.gray` = 148,026/172,800 samples, 669/900 MBs, starting
+at MB(0,0) — every later MB references corrupted history, so MB0 alone is
+the target.
+
 
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
 
