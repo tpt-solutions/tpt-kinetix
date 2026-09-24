@@ -2,6 +2,89 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cb (2026-09-25) — B-field reference lists rebuilt on the POC-distance rule; Sharp_MP_PAFF_1r2's mid-stream field pairs go from fully-wrong to ~99% correct
+
+Picked up addendum 3's NEXT list (mid-stream field pairs 2/4/5/6/7 of
+Sharp_MP_PAFF_1r2 still failing while every frame-coded picture is exact).
+Three commits landed; all gates green throughout; no hard-checked clip
+regressed.
+
+**First: adopted the previous session's uncommitted working tree
+(`8e630f2`).** It reverted the luma half of commit `31357cb` (POC-scaling
+cross-parity luma MVs via `scale_field_mv_y` when the reference is a frame)
+while keeping the chroma opposite-parity offset, plus triage-harness
+extensions. A/B on the ITU suite confirmed the revert is the better state
+(Sharp diff_bytes 3,873,602 with scaling vs 3,739,863 without). H.264
+269/270→270 lib tests, clippy, fmt clean.
+
+**Root cause 1 (commit `cbc57f3`): B field pictures ordered their reference
+lists with the P-slice PicNum rule.** `build_field_ref_list_l0` (and its
+`build_field_ref_list_l1` alias) ordered short-term fields by descending
+FrameNumWrap/PicNum for BOTH P and B field slices — right for P, wrong for
+B. The spec's B-field rule (mirroring FFmpeg `h264_refs.c`'s `add_sorted` +
+`build_def_list`, which match JM and the ITU YUV): order short-term fields
+by their own PicOrderCnt around the CURRENT FIELD's POC — L0 = past-POC
+descending then future-POC ascending, L1 the reverse — then interleave
+same-parity/opposite-parity entries starting with the current parity, then
+long-term, then apply the §8.2.4.2.3 Note-2 "identical lists → swap
+first two" rule on the FULL candidate lists (same as the frame B path).
+Evidence that pinned it: the first b|b pair (POC 4/5) has l0/l1 both
+`= [P-top, P-bottom]` under the old rule, but its MB0 is `BSkip` (zero-MV,
+no residual) and the ITU YUV's MB0 equals `avg(IDR-top, P-top)` — computed
+offline byte-exactly from our own byte-exact IDR/P frames — so L0[0] must
+be IDR-top (POC 0), not P-top (POC 6). Implemented as
+`initial_b_field_list` + `build_field_ref_list_l0_b/l1_b` in `ref_pic.rs`;
+`decode_interlaced_b_field` now passes `current_poc` (derivation moved ahead
+of list construction) and no longer builds a `PicNumContext`. The stale
+`build_field_ref_list_l1` alias is deleted. Result: Sharp 3,739,863 →
+3,374,920; display frame 2's top field 98,947 → 11,185 wrong pixels, first
+mismatch MB(1,0) instead of MB(0,0).
+
+**Root cause 2 (commit `0086fce`): the first cut of `initial_b_field_list`
+deduped by POC after expanding frames into field refs, dropping the second
+field of every frame-coded reference** (both fields of a frame picture share
+the frame's PicOrderCnt) — which silently mapped L1[0] for the b|b bottom
+field to IDR-bottom instead of P-bottom and made the bottom field worse
+(92,981 → 127,677). FFmpeg's `add_sorted` dedupe operates on short_ref
+ENTRIES (a frame picture is one entry; `build_def_list`'s
+`split_field_copy` splits it afterwards). Rewrote `initial_b_field_list` to
+sort DPB entries first (dedupe at entry level by (field,parity,POC)), then
+split entries into field refs, then interleave. Result: Sharp → 3,063,869
+(from 3,739,863 at session start); frame 2 now ~99% correct: top 2,658 /
+bottom 5,400 wrong pixels, first mismatch MB(38,23) — the error is no
+longer systematic.
+
+**Verification**: per-frame triage via `FIELD_CLIP=… FIELD_DISPLAY_ORDER=1
+FIELD_DUMP_OUT=<f> cargo test -p tpt-kinetix-h264 --test dbg_field_triage
+--release -- --nocapture` (harness gained `FIELD_DUMP_OUT`, flush handling,
+and a per-frame top/bottom-field diff summary); full ITU suite re-run after
+every commit — 33/33 hard-checked BitExact, CAPA1/CVPA1 numbers unchanged;
+`cargo fmt --all -- --check`, `cargo clippy -p tpt-kinetix-h264
+--all-targets -- -D warnings`, `cargo test -p tpt-kinetix-h264 --release
+--lib` (270 tests) all green. New debug hook:
+`KINETIX_B_FIELD_MB_DBG` in `decode_interlaced_b_field` (per-MB type/skip/
+4×4-cell MV+ref grid dump + ref-list contents + slice-header modification
+lists; confirmed `mod_l0/mod_l1` are empty for this clip, so reordering was
+never the issue).
+
+**What remains for the mid-stream field pairs (NEXT):** frames 4+ of
+Sharp_MP_PAFF_1r2 still carry large BOTTOM-field errors, but they now
+inherit from the P field pair (POC 12/13, display frame 5: top 27,736 /
+bottom 137,163 wrong — untouched this session) rather than from B-list
+construction. The cleanest P-field target is **CVFI1_Sony_D** (pure P-field
+CAVLC, 0/17 exact): its IDR field pair's TOP field is byte-exact and its
+BOTTOM field has small, isolated, non-spreading error clusters (65 px at
+MB(3,6), 32 px at MB(6,10), ~2.6k px total) — a content-dependent intra
+reconstruction bug (specific Intra mode / neighbour-availability case in
+`reconstruct_intra_frame`'s field path), NOT a list/parity issue. Frame 1+'s
+bottom fields then explode via MC from the wrong IDR bottom. Suggested
+first step: dump MB types/pred modes for the CVFI1 IDR bottom field around
+MB(3,6) (`KINETIX_PAFF_DBG=1` prints types for the CABAC path; the CAVLC
+accumulator path needs the equivalent) and hand-verify the failing MB's
+intra prediction against its (top-field-proven) neighbours. The B-field
+residuals (frame 2's remaining ~8k pixels) should be re-checked after the
+P-field/IDR-bottom fix, since later frames feed on it.
+
 ## SESSION #32ca ADDENDUM 3 (same day, continuation) — REAL BUG FOUND AND FIXED: PAFF field pairs never entered the display-order reorder buffer; Sharp_MP_PAFF_1r2 frames 0/1 now bit-exact (were both fully wrong)
 
 Picked up the tightly-scoped repro from addendum 2 (MB0's right 8×16
