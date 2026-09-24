@@ -17,6 +17,12 @@ fn canlma2_poc1_mb4_bintrace() {
         .join("itu")
         .join("CANLMA2_Sony_C")
         .join("CANLMA2_Sony_C.jsv");
+    if !fixture.exists() {
+        eprintln!(
+            "skipping: ITU fixture not found at {fixture:?} (run `just fetch-h264-conformance`)"
+        );
+        return;
+    }
     let annexb = std::fs::read(&fixture).expect("read fixture");
     let units = parse_nal_units_from_annexb(&annexb);
     let sps = units

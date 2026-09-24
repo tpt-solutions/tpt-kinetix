@@ -3187,6 +3187,8 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
     mv_store: &crate::mv::MvStore,
     ref_fields_l0: &[FieldRef],
     ref_fields_l1: &[FieldRef],
+    current_poc: i64,
+    current_bottom: bool,
     mb_cols: u32,
     mb_rows_field: u32,
     width: u32,
@@ -3210,6 +3212,18 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
         ref_fields_l0.iter().map(|f| f.planes()).collect();
     let extracts_l1: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> =
         ref_fields_l1.iter().map(|f| f.planes()).collect();
+    let ref_bottom_l0: Vec<bool> = ref_fields_l0.iter().map(|f| f.bottom).collect();
+    let ref_bottom_l1: Vec<bool> = ref_fields_l1.iter().map(|f| f.bottom).collect();
+    let ref_is_frame_l0: Vec<bool> = ref_fields_l0.iter().map(|f| f.is_frame).collect();
+    let ref_is_frame_l1: Vec<bool> = ref_fields_l1.iter().map(|f| f.is_frame).collect();
+    let ref_field_poc_l0: Vec<i64> = ref_fields_l0
+        .iter()
+        .map(|f| f.pic_order_cnt + i64::from(f.bottom))
+        .collect();
+    let ref_field_poc_l1: Vec<i64> = ref_fields_l1
+        .iter()
+        .map(|f| f.pic_order_cnt + i64::from(f.bottom))
+        .collect();
     let mut ref_luma_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
     let mut ref_cb_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
     let mut ref_cr_l0: Vec<&[u8]> = Vec::with_capacity(ref_fields_l0.len());
@@ -3250,6 +3264,11 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     mv_store,
                     &ref_luma_l0,
                     &ref_luma_l1,
+                    &ref_is_frame_l0,
+                    &ref_is_frame_l1,
+                    &ref_field_poc_l0,
+                    &ref_field_poc_l1,
+                    current_poc,
                     &mut luma,
                     luma_stride,
                     mb_cols,
@@ -3266,6 +3285,9 @@ pub fn reconstruct_inter_b_field_frame<T: DecodeTracer>(
                     &ref_cr_l0,
                     &ref_cb_l1,
                     &ref_cr_l1,
+                    &ref_bottom_l0,
+                    &ref_bottom_l1,
+                    current_bottom,
                     &mut cb,
                     &mut cr,
                     chroma_stride,
@@ -3325,6 +3347,11 @@ fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
     mv_store: &crate::mv::MvStore,
     ref_luma_l0: &[&[u8]],
     ref_luma_l1: &[&[u8]],
+    ref_is_frame_l0: &[bool],
+    ref_is_frame_l1: &[bool],
+    ref_field_poc_l0: &[i64],
+    ref_field_poc_l1: &[i64],
+    current_poc: i64,
     plane: &mut [u8],
     stride: usize,
     mb_cols: u32,
@@ -3366,7 +3393,19 @@ fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
                     x0,
                     y0,
                     cell.mv[0],
-                    cell.mv[1],
+                    if ref_is_frame_l0.get(ref_idx0).copied().unwrap_or(false) {
+                        crate::mv::scale_field_mv_y(
+                            cell.mv[1],
+                            (current_poc
+                                - ref_field_poc_l0
+                                    .get(ref_idx0)
+                                    .copied()
+                                    .unwrap_or(current_poc)) as i32,
+                            1,
+                        )
+                    } else {
+                        cell.mv[1]
+                    },
                     4,
                     4,
                 );
@@ -3386,7 +3425,19 @@ fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
                     x0,
                     y0,
                     cell.mv_l1[0],
-                    cell.mv_l1[1],
+                    if ref_is_frame_l1.get(ref_idx1).copied().unwrap_or(false) {
+                        crate::mv::scale_field_mv_y(
+                            cell.mv_l1[1],
+                            (current_poc
+                                - ref_field_poc_l1
+                                    .get(ref_idx1)
+                                    .copied()
+                                    .unwrap_or(current_poc)) as i32,
+                            1,
+                        )
+                    } else {
+                        cell.mv_l1[1]
+                    },
                     4,
                     4,
                 );
@@ -3439,6 +3490,9 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
     ref_cr_l0: &[&[u8]],
     ref_cb_l1: &[&[u8]],
     ref_cr_l1: &[&[u8]],
+    ref_bottom_l0: &[bool],
+    ref_bottom_l1: &[bool],
+    current_bottom: bool,
     cb: &mut [u8],
     cr: &mut [u8],
     stride: usize,
@@ -3510,6 +3564,34 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
                 let l1_active = cell.ref_idx_l1 >= 0;
                 let ref_idx0 = cell.ref_idx.max(0) as usize;
                 let ref_idx1 = cell.ref_idx_l1.max(0) as usize;
+                let mv_y_cr0 = cell.mv[1]
+                    + if ref_bottom_l0
+                        .get(ref_idx0)
+                        .copied()
+                        .is_some_and(|bottom| bottom != current_bottom)
+                    {
+                        if current_bottom {
+                            2
+                        } else {
+                            -2
+                        }
+                    } else {
+                        0
+                    };
+                let mv_y_cr1 = cell.mv_l1[1]
+                    + if ref_bottom_l1
+                        .get(ref_idx1)
+                        .copied()
+                        .is_some_and(|bottom| bottom != current_bottom)
+                    {
+                        if current_bottom {
+                            2
+                        } else {
+                            -2
+                        }
+                    } else {
+                        0
+                    };
 
                 let mut pl0 = [0u8; 16];
                 if l0_active {
@@ -3525,7 +3607,7 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
                             sx,
                             sy,
                             cell.mv[0],
-                            cell.mv[1],
+                            mv_y_cr0,
                             2,
                             2,
                         );
@@ -3545,7 +3627,7 @@ fn reconstruct_field_b_inter_chroma<T: DecodeTracer>(
                             sx,
                             sy,
                             cell.mv_l1[0],
-                            cell.mv_l1[1],
+                            mv_y_cr1,
                             2,
                             2,
                         );

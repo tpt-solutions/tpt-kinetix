@@ -1958,6 +1958,8 @@ impl H264Decoder {
             &parsed.mv_store,
             &ref_l0,
             &ref_l1,
+            current_poc,
+            header.bottom_field_flag,
             mb_cols,
             mb_rows_field,
             width,

@@ -26,6 +26,12 @@ fn field_triage_strict() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/itu")
         .join(&name);
+    if !dir.exists() {
+        eprintln!(
+            "skipping: ITU fixture dir not found at {dir:?} (run `just fetch-h264-conformance`)"
+        );
+        return;
+    }
     let mut stream = None;
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
         let path = e.path();
