@@ -149,6 +149,17 @@ the element boundary the 1-bit shift enters. Note the token codeword "01" is
 nC-table selection for this block — the tz read is not (row 0 vs row 1 of
 TOTAL_ZEROS).
 
+**Instrumentation status:** KINETIX_CAVLC_BITTRACE + KINETIX_PFIELD_MB_DBG
+captured together work, but the CAVLCBIT lines currently lack slice/MB
+identity (26k+ lines stream-wide) — locating poc3 slice-0 MB0 by position
+alone failed once already (the print preceding a PFIELD line was the slice's
+LAST nC=0 block, not MB0: predict runs after the whole slice parses). Next
+session's first 15 minutes: extend the CAVLCBIT print with the slice's
+data_bit_offset (thread it into parse_cavlc_block, or print
+reader.bit_position() at slice start in decode_interlaced_p_field) so MB0's
+line is identifiable as `start ≈ data_bit_offset + 18`; then the element
+boundary diff vs JM's @540139-540160 collapses the 1-bit question.
+
 
 
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
