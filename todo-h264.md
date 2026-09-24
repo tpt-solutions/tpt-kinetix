@@ -133,6 +133,22 @@ the tz lines around poc3's first slice, and align against JM's
 `tz=<value> pos_after_tz=<abs pos> c=<tc>` — tz is the decoded value and
 pos_after_tz is the absolute RBSP bit position after the codeword.
 
+**Correction to the cell0 residual reading above (verified against the current
+build):** our cell0 residual is NOT flat-DC — it is row-varying/col-constant
+`[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 / -5,-5,-5,-5]` = the (1,0) basis, i.e. our
+tz=2 (codeword "010", 3 bits) placing the coefficient at zigzag position 2.
+JM decodes tz=1 (codeword "011", 3 bits, position (0,1)) yet its cell0 residual
+`[9,10,9,3 / 9,7,19,18 / -5,-4,10,13 / -4,-5,-21,-22]` is neither
+row-constant nor col-constant — i.e. it contains MORE than one coefficient,
+which contradicts the token's (c=1) unless a LATER cell's coefficients are
+being attributed differently than assumed. Both readings cannot hold with
+identical bit consumption; the KINETIX_CAVLC_BITTRACE + JM @-position diff
+(start pos of every element through MB0's four cells) resolves which side of
+the element boundary the 1-bit shift enters. Note the token codeword "01" is
+(1,1) in BOTH the nC<2 and 2<=nC<4 tables, so the token is insensitive to the
+nC-table selection for this block — the tz read is not (row 0 vs row 1 of
+TOTAL_ZEROS).
+
 
 
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
