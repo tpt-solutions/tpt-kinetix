@@ -185,46 +185,47 @@ fn run_piped(bin: &'static str, args: &[&str], input: &[u8]) -> Result<Vec<u8>, 
 ///
 /// The bitstream is handed over through a temp file rather than stdin: some
 /// dav1d builds (notably the mingw/Windows toolchain this repo's reference
-/// clone uses) cannot open `-` as an input file, while file input and stdout
-/// output work everywhere.
+/// clone uses) cannot open `-` as an input file. The decoded output also goes
+/// to a temp file because this Windows build emits three non-frame bytes when
+/// `-o -` is used for the raw `yuv` muxer. Do not force `--threads 1`: the
+/// validated dav1d reference agrees with ffmpeg's libdav1d output in its
+/// default threading mode, while single-threaded output differs for some valid
+/// AV1 streams.
 fn run_dav1d_file(bitstream: &[u8]) -> Result<Vec<u8>, RefDecodeError> {
     if !binary_available("dav1d") {
         return Err(RefDecodeError::BinaryUnavailable("dav1d"));
     }
-    let mut path = std::env::temp_dir();
-    path.push(format!("kinetix-dav1d-in-{}.obu", std::process::id()));
-    std::fs::write(&path, bitstream)?;
-    let child = Command::new("dav1d")
+    let mut input_path = std::env::temp_dir();
+    input_path.push(format!("kinetix-dav1d-in-{}.obu", std::process::id()));
+    let mut output_path = std::env::temp_dir();
+    output_path.push(format!("kinetix-dav1d-out-{}.yuv", std::process::id()));
+    std::fs::write(&input_path, bitstream)?;
+    let result = match Command::new("dav1d")
         .args([
             "-q",
-            "--threads",
-            "1",
             "-i",
-            path.to_str().expect("temp path is utf-8"),
+            input_path.to_str().expect("temp path is utf-8"),
             "-o",
-            "-",
+            output_path.to_str().expect("temp path is utf-8"),
             "--muxer",
             "yuv",
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn();
-    let result = match child {
-        Ok(child) => {
-            let output = child.wait_with_output()?;
-            if !output.status.success() {
-                Err(RefDecodeError::DecoderFailed {
-                    binary: "dav1d",
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                })
-            } else {
-                Ok(output.stdout)
-            }
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            std::fs::read(&output_path).map_err(RefDecodeError::Io)
         }
-        Err(e) => Err(e.into()),
+        Ok(output) => Err(RefDecodeError::DecoderFailed {
+            binary: "dav1d",
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }),
+        Err(error) => Err(RefDecodeError::Io(error)),
     };
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
     result
 }
 

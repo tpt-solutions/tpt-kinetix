@@ -1330,7 +1330,7 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
     // Luma: 16 every-other-row positions from `y0`.
     for k in 0..16usize {
         let y = y0 + 2 * k;
-        if y < 4 || y + 3 >= height {
+        if y < 8 || y + 6 >= height {
             continue;
         }
         let bseg = bs[k >> 2];
@@ -1343,29 +1343,29 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
                 continue;
             }
             let mut pp = [
-                luma[(y - 1) * luma_stride + x] as i32,
                 luma[(y - 2) * luma_stride + x] as i32,
-                luma[(y - 3) * luma_stride + x] as i32,
                 luma[(y - 4) * luma_stride + x] as i32,
+                luma[(y - 6) * luma_stride + x] as i32,
+                luma[(y - 8) * luma_stride + x] as i32,
             ];
             let mut qq = [
                 luma[y * luma_stride + x] as i32,
-                luma[(y + 1) * luma_stride + x] as i32,
                 luma[(y + 2) * luma_stride + x] as i32,
-                luma[(y + 3) * luma_stride + x] as i32,
+                luma[(y + 4) * luma_stride + x] as i32,
+                luma[(y + 6) * luma_stride + x] as i32,
             ];
             // ffmpeg passes intra = 0 here, so this edge always uses the
             // weak path even when bS would otherwise warrant the strong one.
             let tc0 = TC0_TAB[bseg as usize - 1][qpi as usize];
             filter_luma_edge(&mut pp, &mut qq, alpha, beta, tc0, bseg);
-            luma[(y - 1) * luma_stride + x] = clip_pixel(pp[0]);
+            luma[(y - 2) * luma_stride + x] = clip_pixel(pp[0]);
             luma[y * luma_stride + x] = clip_pixel(qq[0]);
-            luma[(y - 2) * luma_stride + x] = clip_pixel(pp[1]);
-            luma[(y + 1) * luma_stride + x] = clip_pixel(qq[1]);
-            luma[(y - 3) * luma_stride + x] = clip_pixel(pp[2]);
-            luma[(y + 2) * luma_stride + x] = clip_pixel(qq[2]);
-            luma[(y - 4) * luma_stride + x] = clip_pixel(pp[3]);
-            luma[(y + 3) * luma_stride + x] = clip_pixel(qq[3]);
+            luma[(y - 4) * luma_stride + x] = clip_pixel(pp[1]);
+            luma[(y + 2) * luma_stride + x] = clip_pixel(qq[1]);
+            luma[(y - 6) * luma_stride + x] = clip_pixel(pp[2]);
+            luma[(y + 4) * luma_stride + x] = clip_pixel(qq[2]);
+            luma[(y - 8) * luma_stride + x] = clip_pixel(pp[3]);
+            luma[(y + 6) * luma_stride + x] = clip_pixel(qq[3]);
         }
     }
 
@@ -1381,7 +1381,7 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
     let cheight = cb.len() / chroma_stride.max(1);
     for k in 0..8usize {
         let y = cy0 + 2 * k;
-        if y < 2 || y + 1 >= cheight {
+        if y < 4 || y + 3 >= cheight {
             continue;
         }
         let bseg = bs[k >> 1];
@@ -1395,19 +1395,19 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
             }
             for plane in [&mut *cb, &mut *cr] {
                 let mut pp = [
-                    plane[(y - 1) * chroma_stride + x] as i32,
                     plane[(y - 2) * chroma_stride + x] as i32,
+                    plane[(y - 4) * chroma_stride + x] as i32,
                 ];
                 let mut qq = [
                     plane[y * chroma_stride + x] as i32,
-                    plane[(y + 1) * chroma_stride + x] as i32,
+                    plane[(y + 2) * chroma_stride + x] as i32,
                 ];
                 let tc = TC0_TAB[bseg as usize - 1][cqpi as usize] + 1;
                 filter_chroma_edge(&mut pp, &mut qq, calpha, cbeta, tc);
-                plane[(y - 1) * chroma_stride + x] = clip_pixel(pp[0]);
+                plane[(y - 2) * chroma_stride + x] = clip_pixel(pp[0]);
                 plane[y * chroma_stride + x] = clip_pixel(qq[0]);
-                plane[(y - 2) * chroma_stride + x] = clip_pixel(pp[1]);
-                plane[(y + 1) * chroma_stride + x] = clip_pixel(qq[1]);
+                plane[(y - 4) * chroma_stride + x] = clip_pixel(pp[1]);
+                plane[(y + 2) * chroma_stride + x] = clip_pixel(qq[1]);
             }
         }
     }

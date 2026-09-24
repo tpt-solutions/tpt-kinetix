@@ -2781,7 +2781,7 @@ fn reconstruct_mbaff_b_inter_chroma<T: DecodeTracer>(
                         );
                     }
                 }
-                let mut pred_l1 = [0u8; 4];
+                let mut pred_l1 = [0u8; 16];
                 if l1_active {
                     if let Some(ref_entry) = field_planes_l1
                         .get(frame_idx1)
