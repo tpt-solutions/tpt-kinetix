@@ -134,6 +134,20 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Peek the next `n` bits (n ≤ 8) without consuming them. `None` at EOF.
+    pub fn peek_bits(&self, n: u8) -> Option<u32> {
+        if self.byte_pos >= self.data.len() {
+            return None;
+        }
+        let mut v = 0u32;
+        for k in 0..n {
+            let bitpos = self.bit_pos as usize + k as usize;
+            let byte = *self.data.get(self.byte_pos + bitpos / 8)?;
+            v = (v << 1) | ((byte >> (7 - (bitpos % 8))) & 1) as u32;
+        }
+        Some(v)
+    }
+
     /// Returns `true` if the current position is byte-aligned (`bit_pos == 0`).
     #[inline]
     pub fn is_aligned(&self) -> bool {

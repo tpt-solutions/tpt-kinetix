@@ -1875,7 +1875,22 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
 pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
     let mut out = [0i16; 16];
+    let bt = std::env::var("KINETIX_CAVLC_BITTRACE").ok().and_then(|v| v.parse::<i32>().ok());
+    if bt == Some(n_c) {
+        eprintln!(
+            "CAVLCBIT nC={n_c} start={} bits_next3={:03b}",
+            r.bit_position(),
+            r.peek_bits(3).unwrap_or(0)
+        );
+    }
     let (total_coeff, trailing_ones) = cavlc_tables::read_coeff_token(r, n_c)?;
+    if bt == Some(n_c) {
+        eprintln!(
+            "CAVLCBIT nC={n_c} after_token c={total_coeff} t1={trailing_ones} pos={} next3={:03b}",
+            r.bit_position(),
+            r.peek_bits(3).unwrap_or(0)
+        );
+    }
     if total_coeff == 0 {
         return Ok((out, 0, 0));
     }
@@ -1950,8 +1965,22 @@ pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i
     }
 
     // total_zeros + run_before (§9.2.3, §9.2.4).
+    if bt == Some(n_c) {
+        eprintln!(
+            "CAVLCBIT nC={n_c} after_levels pos={} next3={:03b}",
+            r.bit_position(),
+            r.peek_bits(3).unwrap_or(0)
+        );
+    }
     let total_zeros = if tc < max_coeff {
-        cavlc_tables::read_total_zeros_4x4(r, total_coeff)? as i32
+        let tz = cavlc_tables::read_total_zeros_4x4(r, total_coeff)? as i32;
+        if bt == Some(n_c) {
+            eprintln!(
+                "CAVLCBIT nC={n_c} tz={tz} pos_after_tz={} c={tc}",
+                r.bit_position()
+            );
+        }
+        tz
     } else {
         0
     };

@@ -112,6 +112,27 @@ throughout the #32cb/#32cc analyses), but for VLC-table elements
 VLC CODE, not the decoded symbol — reading JM's coeff traces required
 this distinction.
 
+**Addendum 2 final state (same sitting):** implemented
+`KINETIX_CAVLC_BITTRACE=<nC>` (cavlc.rs + a new `BitReader::peek_bits`) —
+prints start/after_token/after_levels/tz bit positions and next-bits for
+every residual block with the requested nC. First correlated findings for
+poc3 MB0 cell0: our residual places its single coefficient at zigzag
+position 2 (tz=2, codeword "010") giving the (1,0)-basis pattern
+[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 / -5,-5,-5,-5]; JM's places it at zigzag
+position 1 (tz=1, codeword "011") — same 3-bit length, DIFFERENT codeword
+and position. Since token/sign consumption is verified identical (2+1
+bits) and the tables are identical to FFmpeg's, the remaining suspects are
+(a) the nC=0 vs nC=1 table row (is our nC for this block really 0?) or (b)
+one of the elements between cbp and the tz read consuming a different
+number of bits than JM's (@540150 cbp → @540153 qp_delta → @540154 token
+→ @540157 tz). The hooks now emit everything needed to finish the diff in
+minutes: run
+`KINETIX_CAVLC_BITTRACE=0 FIELD_CLIP=CVFI1_Sony_D ... --nocapture`, take
+the tz lines around poc3's first slice, and align against JM's
+@540154-540160 token/sign/tz positions. Note the tz hook prints
+`tz=<value> pos_after_tz=<abs pos> c=<tc>` — tz is the decoded value and
+pos_after_tz is the absolute RBSP bit position after the codeword.
+
 
 
 ## SESSION #32cc (2026-09-25, continuation) — the CVFI1 "frame 0" bottom field is a P-FIELD; JM TRACE oracle built; recon proven 98.7% JM-identical; divergence narrowed to per-4×4-block residual/MPM-level diffs
