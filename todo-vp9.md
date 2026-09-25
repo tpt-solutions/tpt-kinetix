@@ -760,8 +760,16 @@ oracle still decodes the clip byte-exact vs ffmpeg BEFORE trusting its
 dumps, and remember the file is CRLF (patch scripts must preserve it).
 
 **Remaining (from the old list, now unblocked):**
-1. Wire VP9 into `tpt-kinetix-pipeline`/CLI decode paths and the README
-   status table (the pixel-exact precondition is met).
+1. ~~Wire VP9 into `tpt-kinetix-pipeline`/CLI decode paths~~ **Done
+   (2026-09-26):** new `codec-vp9` pipeline feature (on by default,
+   royalty-free) with `Vp9DecodeStage`; the CLI `probe` reports VP9 decoder
+   capabilities and `transcode --vcodec av1` dispatches on the probed input
+   codec — VP9 input takes the `Vp9DecodeStage` path, H.264 input the
+   existing `codec-h264` path. An ffmpeg-gated pipeline test
+   (`tpt-kinetix-pipeline/tests/vp9_pipeline.rs`) covers VP9-in-MP4 end to
+   end. Two pre-existing CLI rough edges noticed on the way (not VP9):
+   rav1e's AV1 IVF output is not dav1d-decodable yet, and the H.264-input
+   transcode path produced "no packets" on the test inputs.
 2. Optional hardening: fuzz the superframe splitter and odd-size paths
    (CI `fuzz-check` compiles; local fuzzing still lacks the ASAN runtime).
 3. Profile-1/4:4:4 and 10/12-bit remain out of scope (rejected in strict

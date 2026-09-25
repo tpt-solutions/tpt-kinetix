@@ -26,28 +26,20 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 26 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, real PAFF pixels, 4:2:2/4:4:4) are tracked, not yet fixed |
 | AV1 decode | 🟡 Not pixel-exact | Intra and inter reconstruction, transforms, deblock/CDEF/restoration, reference management, and temporal MV reconstruction are implemented. The local synthetic intra corpus is 6/6 byte-exact vs dav1d and the synthetic inter corpus is 4/5 entries exact, but the official FFmpeg FATE AV1 set currently passes only 1/198 comparable frames (its closest keyframe reaches ~67 dB luma PSNR vs dav1d after the CDEF strength-table read-order fix); `pixel_exact` remains false pending official-vector closure (`todo-av1.md`). |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
-| VP9 decode | 🟡 Not pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode is implemented end-to-end, including reconstruction, reference management, and loop filtering. Flat/lossless vectors and all U/V planes in the ffmpeg conformance corpus are byte-exact; sparse luma residuals remain on odd-size, multitile, and multi-frame vectors because frame-1 vertical TX masks differ from libvpx (`tpt-kinetix-vp9`, see `todo-vp9.md`). |
+| VP9 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode implemented end-to-end (reconstruction, reference management, loop filtering, superframes). The whole ffmpeg conformance corpus — 13 clips covering lossless/lossy, content, intra-only, inter, odd size 125x67, and multitile — decodes byte-exact vs `ffmpeg -c:v vp9` on every plane, and the test asserts it (`capabilities().pixel_exact == true`; `tpt-kinetix-vp9`, see `todo-vp9.md`). Wired into the pipeline (`Vp9DecodeStage`) and the CLI (`probe` reports decoder status; VP9-input transcode to AV1 takes this royalty-free path). |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| CLI `probe` | ✅ Works | Inspect containers today; `transcode`/`stream` still stubs |
+| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities. `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path, H.264 input the `codec-h264` path. `stream` is still a stub. |
 
-> ⚠️ **Decode correctness:** The H.264 decoder reports `pixel_exact: true`
-> for CAVLC/CABAC I/P/B progressive and interlaced (PAFF/MBAFF) streams,
-> including the High-profile 8×8 transform. Strict mode still returns
-> `KinetixError::NotPixelExact` for slices that hit an unsupported feature
-> (multi-slice pictures, non-4:2:0 chroma, >8-bit depth). The AV1
-> decoder is not yet pixel-exact. Call `capabilities()` (or `tpt-kinetix
-> probe`) to check at runtime; in strict mode decoders return
-> `KinetixError::NotPixelExact` instead of emitting approximate frames.
->
-> The decoder is also run against the **official ITU-T H.264.1 conformance
-> bitstreams** (`just fetch-h264-conformance`, compared byte-exact to the
-> standard's own reference YUV — no third-party decoder in the loop). 26
-> curated clips pass byte-exact today; a handful of real-world features
-> (multi-slice picture reconstruction, real MBAFF-CABAC-I, some
-> hierarchical-B GOPs, real PAFF field pixels, 4:2:2/4:4:4) are decoded
-> but not yet bit-exact and are tracked as known gaps.
+> ⚠️ **Decode correctness:** The H.264 and VP9 decoders report
+> `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
+> I/P/B progressive and interlaced (PAFF/MBAFF) including the High-profile
+> 8×8 transform; VP9: profile 0 8-bit 4:2:0). Strict mode still returns
+> `KinetixError::NotPixelExact` when a stream hits an unsupported feature
+> (multi-slice or non-4:2:0/>8-bit H.264; non-profile-0 VP9). The AV1
+> decoder is not yet pixel-exact. Call `capabilities()` (or
+> `tpt-kinetix probe`) to check at runtime.
 
 > ⚖️ **Patents:** H.264 (`tpt-kinetix-h264`) is patent-encumbered. This
 > project ships source only and obtains no patent
