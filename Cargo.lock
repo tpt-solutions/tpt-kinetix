@@ -1698,6 +1698,7 @@ dependencies = [
  "tpt-kinetix-lean",
  "tpt-kinetix-realtime",
  "tpt-kinetix-vision",
+ "tpt-kinetix-vp9",
 ]
 
 [[package]]
