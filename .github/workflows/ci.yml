@@ -138,6 +138,9 @@ jobs:
       - name: Check fuzz targets compile (h264)
         run: cargo fuzz build fuzz_h264_nal
         working-directory: tpt-kinetix-h264
+      - name: Check fuzz targets compile (vp9)
+        run: cargo fuzz build fuzz_vp9_frame
+        working-directory: tpt-kinetix-vp9
       - name: Check fuzz targets compile (stream)
         run: |
           cargo fuzz build fuzz_rtmp_chunk

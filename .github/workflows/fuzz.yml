@@ -37,6 +37,8 @@ jobs:
             target: fuzz_obu_parse
           - crate: tpt-kinetix-h264
             target: fuzz_h264_nal
+          - crate: tpt-kinetix-vp9
+            target: fuzz_vp9_frame
           - crate: tpt-kinetix-stream
             target: fuzz_rtmp_chunk
           - crate: tpt-kinetix-stream
