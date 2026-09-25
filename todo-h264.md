@@ -221,6 +221,44 @@ Re-correlated with the correct markers:
   (JM's scan order); if POSITIONS match but SCALES differ, audit
   the dequant tables for field pictures.
 
+**EXECUTED (same sitting): JM dequant trace built and data captured.**
+- JM's placement loop traced: `JM_DEQ_TRACE=1` prints, per nonzero coeff in
+  the luma CAVLC dequant loop (read_comp_cavlc.c ~line 748), the block origin,
+  scan position (i0, j0), decoded level, and the DEQUANTIZED cof value.
+- poc3-MB0-cell0 in JM: single coeff, level +1, at (i0=0, j0=1) = raster
+  (row 1, col 0), deq value 320. Our placement maps position 1 -> raster 4 =
+  (row 1, col 0) IDENTICALLY (FIELD_SCAN_4X4[1] = 4 ✓, matching JM's
+  FIELD_SCAN[1] = {0,1} = (x=0, y=1)).
+- BUT the pixel-level comparison remains contradictory: our residual for the
+  cell is the clean (1,0) basis `[5,3,-2,-5]`-per-column (IDCT of 320 at
+  (1,0) = `[10,5,-5,-10]` per-column, matching after pred rounding), while
+  JM's implied residual is rich `[9,10,9,3 / 9,7,19,18 / ...]` -- a pattern
+  impossible for a #c=1 cell -- even though BOTH the JM trace (#c=1) and the
+  JM deq trace (1 coeff) agree with our parse.
+- The remaining explanations: (1) the jmdump/poc3 file is NOT the picture the
+  POC:3 trace section describes (poc labeling mismatch between the trace
+  header and the dump hook -- VERIFY: regenerate the trace AND dump in the
+  SAME ldecod-trace.exe run and cross-check the dump bytes against the
+  out.yuv frame ordering), or (2) our pred for poc3-MB0 (poc2@(0,0), verified
+  byte-equal to JM's poc2 dump) is sampled at a different field position by
+  JM (field-parity MC offset: bottom-field MB referencing the TOP field of
+  the SAME frame -- check JM's MB field-position mapping for
+  bottom-field-references-top-field MC, spec 8.4.2.2 field MC with mv (0,0)).
+- Candidate (2) is now the STRONGEST: a bottom-field MB referencing the TOP
+  field of the same frame with mv (0,0) samples the reference at the
+  vertically-ALIGNED position, but the frame-1 bottom field's mv (0,0) may
+  need the field-parity HALF-SAMPLE vertical offset relative to our
+  full-pel copy (JM's pred would then be vertically interpolated vs our
+  identity copy -- and the rich 'implied residual' pattern IS consistent
+  with pred sampled half-a-row off plus the (1,0)-basis residual).
+- DEFINITIVE NEXT: print JM's actual MC prediction samples for poc3-MB0
+  (trace inside JM's MC or compare pred by regenerating our FIELDPRED for
+  poc3 with mv (0,0) against poc2-postdeblock INTERPOLATED at half-row:
+  pred_half(y) = (poc2(2y) + poc2(2y+2) + 1) >> 1 style vertical filter --
+  if that matches JM's pixels-minus-residual, the bug is our missing
+  parity-based MC position adjustment for bottom-field-references-top-field.
+
+
 **EXECUTED (same sitting) — the dequant amplitude difference is MEASURED.**
 Added `PFIELD_COEFFS` (prints parsed luma_coeffs for MB0 cells 0/5). Our
 poc3-MB0 parse (post-run verification): cell0 = 1 coeff, level +1, at
