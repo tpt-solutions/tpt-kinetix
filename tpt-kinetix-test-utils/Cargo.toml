@@ -12,6 +12,7 @@ publish = false
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-h264 = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
+tpt-kinetix-vp9 = { workspace = true }
 tpt-kinetix-realtime = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

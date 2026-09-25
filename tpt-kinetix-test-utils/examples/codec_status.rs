@@ -11,12 +11,14 @@ use tpt_kinetix_core::capabilities::DecoderCapabilities;
 use tpt_kinetix_h264::H264Decoder;
 use tpt_kinetix_lean::LeanDecoder;
 use tpt_kinetix_vision::VisionDecoderImpl;
+use tpt_kinetix_vp9::Vp9Decoder;
 
 fn main() {
     let strict = std::env::args().any(|a| a == "--strict");
 
     let decoders: Vec<(&str, DecoderCapabilities)> = vec![
         ("h264", H264Decoder::new().capabilities()),
+        ("vp9", Vp9Decoder::new().capabilities()),
         ("av1", Av1Decoder::new().capabilities()),
         ("lean", LeanDecoder::new().capabilities()),
         ("vision", VisionDecoderImpl::new().capabilities()),
