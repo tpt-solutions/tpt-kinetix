@@ -137,6 +137,55 @@ impl Stage for DecodeStage {
     }
 }
 
+// ── Vp9DecodeStage ───────────────────────────────────────────────────────────
+
+/// Decode stage: receives [`PipelineMessage::Packet`]s and emits decoded
+/// [`PipelineMessage::Frame`]s via the VP9 decoder (profile 0, 8-bit 4:2:0).
+///
+/// VP9 has no presentation reordering, so every decoded frame is shown
+/// immediately and there is no flush buffer. Royalty-free — enabled by the
+/// `codec-vp9` feature (on by default).
+#[cfg(feature = "codec-vp9")]
+pub struct Vp9DecodeStage;
+
+#[cfg(feature = "codec-vp9")]
+impl Stage for Vp9DecodeStage {
+    fn name(&self) -> &'static str {
+        "decode_vp9"
+    }
+
+    fn spawn(
+        self: Box<Self>,
+        input: Receiver<PipelineMessage>,
+        output: Sender<PipelineMessage>,
+    ) -> JoinHandle<Result<(), KinetixError>> {
+        std::thread::spawn(move || {
+            let mut decoder = tpt_kinetix_vp9::Vp9Decoder::new();
+            for msg in input {
+                match msg {
+                    PipelineMessage::Packet(pkt) => match decoder.decode(&pkt) {
+                        Ok(Some(frame)) => {
+                            output.send(PipelineMessage::Frame(frame)).ok();
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            output.send(PipelineMessage::Error(e.to_string())).ok();
+                        }
+                    },
+                    PipelineMessage::Flush => {
+                        output.send(PipelineMessage::Flush).ok();
+                        break;
+                    }
+                    other => {
+                        output.send(other).ok();
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 // ── FilterStage ──────────────────────────────────────────────────────────────
 
 /// Filter stage: applies a pluggable per-frame transform (e.g. scaling,

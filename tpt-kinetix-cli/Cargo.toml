@@ -26,6 +26,7 @@ tokio = { version = "1.38", features = ["full"] }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-h264 = { workspace = true, optional = true }
+tpt-kinetix-vp9 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-vision = { workspace = true }
 tpt-kinetix-bitstream = { workspace = true }
@@ -33,7 +34,9 @@ tpt-kinetix-pipeline = { workspace = true, default-features = false }
 tpt-kinetix-stream = { workspace = true }
 
 [features]
-default = ["codec-h264"]
+default = ["codec-h264", "codec-vp9"]
 # H.264 is patent-encumbered (see PATENTS.md). Build with
-# `--no-default-features` for a royalty-free-only CLI.
+# `--no-default-features` for a royalty-free-only CLI (VP9 decode stays
+# available: it covers VP9-input transcodes and probe capabilities).
 codec-h264 = ["dep:tpt-kinetix-h264", "tpt-kinetix-pipeline/codec-h264"]
+codec-vp9 = ["dep:tpt-kinetix-vp9", "tpt-kinetix-pipeline/codec-vp9"]

@@ -194,6 +194,8 @@ fn decoder_capabilities_for(
     match codec {
         #[cfg(feature = "codec-h264")]
         Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
+        #[cfg(feature = "codec-vp9")]
+        Some(CodecId::Vp9) => Some(tpt_kinetix_vp9::Vp9Decoder::new().capabilities()),
         Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
         _ => None,
     }
@@ -271,9 +273,29 @@ fn input_video_geometry(data: &[u8]) -> Option<(u32, u32, u32, u32)> {
     Some((track.width, track.height, fps_num, 1000))
 }
 
+/// Returns the [`tpt_kinetix_core::codec::CodecId`] of the first video track.
+#[cfg_attr(
+    not(any(feature = "codec-h264", feature = "codec-vp9")),
+    allow(dead_code)
+)]
+fn input_video_codec(data: &[u8]) -> Option<tpt_kinetix_core::codec::CodecId> {
+    use tpt_kinetix_core::codec::MediaType;
+
+    let demuxer = tpt_kinetix_demux::Mp4Demuxer::new(data.to_vec()).ok()?;
+    let track = demuxer
+        .tracks()
+        .iter()
+        .find(|t| t.media_type == MediaType::Video)?;
+    track.codec
+}
+
 /// Geometry and timing of the input video track, used to size the output.
-// Fields are only read on the H.264-decode transcode path (`codec-h264`).
-#[cfg_attr(not(feature = "codec-h264"), allow(dead_code))]
+// Fields are only read on the transcode paths (one decode feature must be on
+// for `transcode` to do anything).
+#[cfg_attr(
+    not(any(feature = "codec-h264", feature = "codec-vp9")),
+    allow(dead_code)
+)]
 struct VideoGeometry {
     width: u32,
     height: u32,
@@ -281,9 +303,11 @@ struct VideoGeometry {
     fps_den: u32,
 }
 
-// AV1 output requires decoding the H.264 input first, so this path depends on
-// the patent-encumbered `codec-h264` feature (see PATENTS.md).
-#[cfg(not(feature = "codec-h264"))]
+/// Transcode MP4 input to AV1 output, dispatching on the probed input codec:
+/// VP9 input takes the royalty-free decode path (`codec-vp9`); every other
+/// input falls back to the H.264 decode path (`codec-h264`,
+/// patent-encumbered — see PATENTS.md).
+#[cfg(not(any(feature = "codec-h264", feature = "codec-vp9")))]
 fn transcode_to_av1(
     _data: &[u8],
     _output: &str,
@@ -292,13 +316,54 @@ fn transcode_to_av1(
     _geometry: VideoGeometry,
 ) -> Result<()> {
     anyhow::bail!(
-        "transcode requires the `codec-h264` feature (H.264 input decoding is \
-         patent-encumbered and disabled in this build; see PATENTS.md)"
+        "transcode requires the `codec-vp9` (royalty-free) or `codec-h264` \
+         (patent-encumbered) decode feature; neither is enabled in this build \
+         (see PATENTS.md)"
     )
 }
 
-#[cfg(feature = "codec-h264")]
+#[cfg(any(feature = "codec-h264", feature = "codec-vp9"))]
 fn transcode_to_av1(
+    data: &[u8],
+    output: &str,
+    rate_control: tpt_kinetix_core::encode::RateControl,
+    speed: u8,
+    geometry: VideoGeometry,
+) -> Result<()> {
+    #[cfg(feature = "codec-vp9")]
+    if input_video_codec(data) == Some(tpt_kinetix_core::codec::CodecId::Vp9) {
+        tracing::info!("input codec vp9: using the royalty-free decode path");
+        return transcode_to_av1_via(
+            tpt_kinetix_pipeline::Vp9DecodeStage,
+            data,
+            output,
+            rate_control,
+            speed,
+            geometry,
+        );
+    }
+
+    #[cfg(feature = "codec-h264")]
+    return transcode_to_av1_via(
+        tpt_kinetix_pipeline::DecodeStage,
+        data,
+        output,
+        rate_control,
+        speed,
+        geometry,
+    );
+
+    #[cfg(not(feature = "codec-h264"))]
+    anyhow::bail!(
+        "no decoder available for this input in this build: VP9 input needs \
+         the `codec-vp9` feature, H.264 input the patent-encumbered \
+         `codec-h264` feature (see PATENTS.md)"
+    );
+}
+
+#[cfg(any(feature = "codec-h264", feature = "codec-vp9"))]
+fn transcode_to_av1_via<S: tpt_kinetix_pipeline::Stage>(
+    decode_stage: S,
     data: &[u8],
     output: &str,
     rate_control: tpt_kinetix_core::encode::RateControl,
@@ -321,7 +386,7 @@ fn transcode_to_av1(
         .add_stage(tpt_kinetix_pipeline::DemuxStage {
             data: data.to_vec(),
         })
-        .add_stage(tpt_kinetix_pipeline::DecodeStage)
+        .add_stage(decode_stage)
         .add_stage(tpt_kinetix_pipeline::EncodeStage::new(config))
         .add_stage(sink);
 
@@ -392,6 +457,11 @@ fn write_ivf(
     fps_num: u32,
     fps_den: u32,
 ) -> Result<()> {
+    // The encoder can emit zero-length placeholders (e.g. the leading packet
+    // before the first sequence header); they must not reach the IVF frame
+    // index or every subsequent frame offset is misread.
+    let packets: Vec<&tpt_kinetix_core::packet::Packet> =
+        packets.iter().filter(|p| !p.data.is_empty()).collect();
     let mut out = Vec::new();
 
     out.extend_from_slice(b"DKIF");

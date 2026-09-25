@@ -21,13 +21,16 @@ tracing = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-h264 = { workspace = true, optional = true }
+tpt-kinetix-vp9 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
 
 [features]
-default = ["codec-h264"]
+default = ["codec-h264", "codec-vp9"]
 # H.264 is patent-encumbered (see PATENTS.md). Building with
-# `--no-default-features` drops the decoder from the pipeline entirely.
+# `--no-default-features` drops the H.264 decoder from the pipeline
+# entirely; the royalty-free VP9 decoder stays available via `codec-vp9`.
 codec-h264 = ["dep:tpt-kinetix-h264"]
+codec-vp9 = ["dep:tpt-kinetix-vp9"]
 
 [dev-dependencies]
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }

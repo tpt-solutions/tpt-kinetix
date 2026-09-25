@@ -1536,6 +1536,7 @@ dependencies = [
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tpt-kinetix-vision",
+ "tpt-kinetix-vp9",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1643,6 +1644,7 @@ dependencies = [
  "tpt-kinetix-demux",
  "tpt-kinetix-h264",
  "tpt-kinetix-test-utils",
+ "tpt-kinetix-vp9",
  "tracing",
 ]
 
