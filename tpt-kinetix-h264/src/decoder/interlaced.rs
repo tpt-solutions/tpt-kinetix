@@ -1783,7 +1783,9 @@ impl H264Decoder {
                         .map(|c| format!("({},{})/{}", c.mv[0], c.mv[1], c.ref_idx))
                         .collect();
                     eprintln!(
-                            "PFIELD_MB idx={idx} bottom={} slice={slice_id} first_mb={} type={:?} skip={} qp={} nz={}",
+                            "PFIELD_MB frame_num={} poc={} idx={idx} bottom={} slice={slice_id} first_mb={} type={:?} skip={} qp={} nz={}",
+                            header.frame_num,
+                            acc.poc,
                             header.bottom_field_flag,
                             header.first_mb_in_slice,
                             mb.mb_type,
@@ -1802,14 +1804,18 @@ impl H264Decoder {
                     }
                     if let Some(motion) = &mb.motion {
                         eprintln!(
-                            "PFIELD_MVD idx={idx} subs={:?} refidx={:?} mvds={:?}",
+                            "PFIELD_MVD frame_num={} poc={} idx={idx} subs={:?} refidx={:?} mvds={:?}",
+                            header.frame_num,
+                            acc.poc,
                             motion.sub_mb_type, motion.ref_idx_l0, motion.mvd_l0
                         );
                     }
                     if idx == 0 {
                         for cell in [0usize, 5usize] {
                             eprintln!(
-                                "PFIELD_COEFFS idx=0 cell={cell} coeffs={:?}",
+                                "PFIELD_COEFFS frame_num={} poc={} idx=0 cell={cell} coeffs={:?}",
+                                header.frame_num,
+                                acc.poc,
                                 &mb.luma_coeffs[cell][..]
                             );
                         }
@@ -1823,12 +1829,30 @@ impl H264Decoder {
                     for row in grid.chunks(4) {
                         eprintln!("    {}", row.join(" "));
                     }
+                    if std::env::var_os("KINETIX_PFIELD_FINAL_MV_DBG").is_some() {
+                        eprintln!(
+                            "PFIELD_FINAL_MV frame_num={} poc={} idx={idx} bottom={} grid={:?}",
+                            header.frame_num, acc.poc, header.bottom_field_flag, grid
+                        );
+                    }
                 }
             }
         }
 
         // Motion-compensate THIS slice's range into the shared half-height
         // field buffer, using this slice's own field reference list.
+        if std::env::var_os("KINETIX_PFIELD_REF_DBG").is_some() && header.first_mb_in_slice == 0 {
+            paff_dbg!(
+                "PFIELD_REF frame_num={} bottom={} poc={} refs={:?}",
+                header.frame_num,
+                header.bottom_field_flag,
+                acc.poc,
+                ref_list
+                    .iter()
+                    .map(|f| (f.pic_order_cnt, f.bottom, f.is_frame))
+                    .collect::<Vec<_>>()
+            );
+        }
         {
             let acc = self
                 .pending_picture

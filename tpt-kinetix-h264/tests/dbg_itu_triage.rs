@@ -62,17 +62,23 @@ fn nal_starts(annexb: &[u8]) -> Vec<usize> {
     starts
 }
 
-fn find_clip_dir(name: &str) -> PathBuf {
+fn find_clip_dir(name: &str) -> Option<PathBuf> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/itu");
     let p = base.join(name);
-    assert!(p.is_dir(), "clip dir missing: {}", p.display());
-    p
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 #[test]
 fn triage_clip() {
     let name = std::env::var("TRIAGE_CLIP").unwrap_or_else(|_| "HCAFR1_HHI_C".into());
-    let dir = find_clip_dir(&name);
+    let Some(dir) = find_clip_dir(&name) else {
+        eprintln!("skipping: clip dir missing for {name} (run `just fetch-h264-conformance`)");
+        return;
+    };
     // first .264/.jsv and first .yuv in the dir
     let mut stream = None;
     let mut yuv = None;

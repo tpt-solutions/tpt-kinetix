@@ -2,6 +2,121 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cc ADDENDUM 9 (2026-09-25) — CVFI1 PAFF P-field reference-list cursor fixed; clip is bit-exact
+
+Instrumented the local JM decoder at POC 4 top MB 90 and confirmed that Kinetix
+and JM parse identical P8x8 sub-types, references, MVDs, predictors, and final
+MVs. The first divergence was reference selection, not arithmetic:
+
+- JM L0: `[POC 2 top, POC 3 bottom, POC 0 top, POC 1 bottom]`
+- Kinetix L0: `[POC 2 top, POC 0 top, POC 3 bottom, POC 1 bottom]`
+
+Both target partitions use `ref_idx=1`, so Kinetix sampled POC 0 top while JM
+sampled POC 3 bottom. Auditing JM's `init_lists_p_slice` +
+`gen_pic_list_from_frame_list` found the exact rule: sort DPB frame slots by
+descending `FrameNumWrap`, then run independent current-parity and
+opposite-parity cursors. Each cursor advances past a slot only when that parity
+exists. Kinetix previously used a single parity-grouped sort, which happened
+to make frame 1 exact but diverged once a complete preceding field pair was in
+the DPB.
+
+`build_field_ref_list_l0` now transcribes those two cursors. Regression tests
+cover both CVFI1 states: one-field-only DPB slots produce POC-3
+`[POC1 bottom, POC2 top, POC0 top]`, while complete frame pairs produce POC-4
+`[POC2 top, POC3 bottom, POC0 top, POC1 bottom]`.
+
+Result on the complete `CVFI1_Sony_D.jsv`: **17/17 display frames byte-exact**
+(`max_diff=0` for every frame). The fixed pframe diagnostic now prefers the
+complete `.jsv` when a fixture directory also contains a short `.264` preview.
+
+## SESSION #32cc ADDENDUM 8 (2026-09-25) — P8x8 MVD count verified; parser mismatch hypothesis withdrawn
+
+The full JM trace and Kinetix's picture-qualified trace agree on POC 4 MB 90
+syntax and MVDs. The apparent MVD-count mismatch was an analysis counting
+error:
+
+- POC 4 top sub-types `[0,1,2,0]` require `1+2+2+1 = 6` MVDs; both decoders
+  read 6.
+- POC 5 bottom sub-types `[1,1,2,0]` require `2+2+2+1 = 7` MVDs; both
+  decoders read 7.
+
+The P8×8 parser and partition cursor are therefore not the cause. The
+remaining gap is after parsing: field MV prediction or field-coordinate MC.
+The KINETIX picture-qualified MB/MVD/final-MV diagnostics remain useful for
+the next oracle-backed comparison.
+
+
+## SESSION #32cc ADDENDUM 7 (2026-09-25) — P8x8 placement hypothesis disproven; no arithmetic change
+
+The first bad POC-4 top MB `(2,0)` uses `P8x8` with sub-types
+`[0,1,2,0]`. A source audit initially suggested that sub-type 2 (`4x8`) was
+placed in the wrong quadrant, but `mv.rs::predict_inter_macroblock` already maps
+`8x4` to `(bx, by + 4*j)` and `4x8` to `(bx + 4*j, by)`, matching Table 7-13.
+No placement change was made.
+
+The qualified final grid was captured for the target block:
+
+- POC 4 top: `[(0,-2),(1,-2), ... (37,9), (49,8), ...]`, all `ref_idx=1`
+- POC 5 bottom: `[(0,3),(-1,3), ... (51,8), (49,8), (64,8), ...]`, all
+  `ref_idx=1`
+
+The available ffmpeg `export_mvs` side data uses field-coordinate records
+that do not map unambiguously to this PAFF target without a documented
+interlaced conversion. It is not used as a final-MV oracle. The next safe step
+remains restoring the JM `KDBGMV/KDBGMVP` hook or adding an equivalent oracle
+with explicit field/parity coordinates.
+
+
+## SESSION #32cc ADDENDUM 6 (2026-09-25) — full CVFI1 oracle available; first bad P-field block isolated; PAFF MV context audited
+
+The complete `CVFI1_Sony_D.jsv` fixture is now available to the local JM
+decoder, and its decoded output matches the official 17-frame reference. The
+first Kinetix difference is frame 2, at `(x=32,y=0)`: top-field MB `(2,0)`,
+linear field-MB index 90. The picture-qualified Kinetix trace identifies it as
+POC 4 top, `P8x8`, with all four 8x8 partitions using `ref_idx=1` and nontrivial
+MVDs. The corresponding bottom-field POC 5 MB is also nontrivial. The stored
+POC 2 top reference field is byte-exact, so DPB storage and POC pairing are
+not the source of the first failure.
+
+The existing JM pixel oracle is now sufficient to compare field outputs, but
+the referenced `KDBGMV/KDBGMVP` instrumentation is absent from the available
+`jm-oracle-fresh` source. Final per-partition JM MVs therefore cannot be claimed
+yet. Kinetix's picture-qualified P-field MB/MVD/coeff diagnostics were added and
+validated, but no production arithmetic was changed without an authoritative
+MV diff.
+
+The PAFF P-field MV call sequence was audited. `parse_p_slice_range` sets
+`mb_field_flag` to `field_pic_flag` for PAFF, and the field driver invokes
+`predict_slice_mvs_ex(..., false)`: plain raster addressing is intentional for
+a standalone field picture, while MBAFF pair addressing/conversion must remain
+disabled. Changing this to MBAFF mode would be a speculative and likely
+incorrect fix.
+
+The confirmed state remains: frames 0-1 exact, frame 2 wrong pre-deblock with
+`max_diff=226`; P-list ordering variants and `L0[0]` clamping do not resolve it.
+The next authoritative step is to restore or build the JM per-partition MV hook
+and compare POC 4 MB 90 directly with Kinetix's qualified final-MV grid.
+
+
+## SESSION #32cc ADDENDUM 5 (2026-09-25) — frame-2 oracle comparison bounded; later-pair gap remains open
+
+The confirmed P-field ordering fix was rechecked on `CVFI1_Sony_D` with all
+`KINETIX_*` overrides cleared. Frames 0 and 1 remain byte-exact. Frame 2 remains
+open with `max_diff=226` and about 192k differing luma samples. Both its top
+and bottom fields are already wrong before deblocking, so the failure is in
+field-inter reconstruction rather than the loop filter. The three candidate
+P-list orders (parity-grouped default, per-frame, and parity-swap) all fail
+frame 2; forcing all partitions to `L0[0]` makes it worse. A local JM run was
+bounded to the first two field pairs, so its partial output is not evidence for
+frame 2 and was not used for a production change.
+
+Added `p_field_list_groups_current_parity_before_opposite_parity` in
+`ref_pic.rs` to lock in the confirmed first-pair list construction. The next
+authoritative step is a full JM trace of the later P-field pair, including its
+field-reference list and per-partition MVs, before changing motion-coordinate
+logic.
+
+
 ## SESSION #32cc ADDENDUM 4 (2026-09-25) — P-field reference-list parity ordering fixed; CVFI1 frames 0-1 exact
 
 The focused CVFI1 diagnostic localized the next structural failure to P-field

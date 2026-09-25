@@ -61,6 +61,13 @@ fn decode_all(annexb: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
 fn canlma2_poc1_luma_rowshift_classify() {
     let dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/itu/CANLMA2_Sony_C");
+    if !dir.exists() {
+        eprintln!(
+            "skipping: fixture dir missing: {} (run `just fetch-h264-conformance`)",
+            dir.display()
+        );
+        return;
+    }
     let jsv = std::fs::read(dir.join("CANLMA2_Sony_C.jsv")).expect("fixture jsv");
     let refyuv = std::fs::read(dir.join("CANLMA2_Sony_C.yuv")).expect("fixture yuv");
     let _ = ffmpeg_available(); // informational only; this harness needs no ffmpeg

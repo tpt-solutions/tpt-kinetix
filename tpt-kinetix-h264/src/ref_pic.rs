@@ -1648,7 +1648,7 @@ fn initial_b_field_list(
 }
 
 /// Build the `RefPicList0` for an interlaced B *field* picture (§8.2.4.2.5).
-/// See [`initial_b_field_list`] for the ordering rule.
+/// See `initial_b_field_list` (private, this module) for the ordering rule.
 pub fn build_field_ref_list_l0_b(
     dpb: &Dpb,
     current_bottom: bool,
@@ -1769,53 +1769,41 @@ pub fn build_field_ref_list_l0(
     lt_top.sort_by_key(|f| field_long_num(f, dpb));
     lt_bottom.sort_by_key(|f| field_long_num(f, dpb));
 
-    // Field reference-list ordering for P field pictures. FFmpeg's
-    // `build_def_list` constructs two cursors: all fields with the current
-    // parity first, followed by all fields with the opposite parity. Within
-    // each parity, retain descending FrameNumWrap order. This is not the
-    // per-frame top/bottom interleave: for a bottom field, CVFI1's L0[0] is
-    // the most recent same-parity field, not the most recent opposite-parity
-    // field. The latter is the first field of the immediately preceding frame
-    // and causes whole-field motion-compensation errors.
-    //
-    // `per_frame` retains the old ordering for differential diagnostics only.
-    // `swap` reverses the parity preference for experiments.
-    let order_mode = std::env::var("KINETIX_FIELD_ORDER").unwrap_or_default();
-    let mut ordered: Vec<FieldRef> = Vec::new();
-    if order_mode == "per_frame" {
-        let mut st_fields: Vec<(&FieldRef, i64)> =
-            Vec::with_capacity(st_top.len() + st_bottom.len());
-        for f in st_top.iter().chain(&st_bottom) {
-            let fnw = frame_num_wrap_of(f, dpb, ctx);
-            let co_parity = f.bottom == current_bottom;
-            st_fields.push((f, 2 * fnw + co_parity as i64));
-        }
-        st_fields.sort_by_key(|(_, key)| std::cmp::Reverse(*key));
-        for (f, _) in &st_fields {
-            ordered.push((*f).clone());
-        }
-    } else {
-        let key = |f: &FieldRef| frame_num_wrap_of(f, dpb, ctx);
-        let mut same: Vec<&FieldRef> = st_top
-            .iter()
-            .chain(&st_bottom)
-            .filter(|f| f.bottom == current_bottom)
-            .copied()
-            .collect();
-        let mut opposite: Vec<&FieldRef> = st_top
-            .iter()
-            .chain(&st_bottom)
-            .filter(|f| f.bottom != current_bottom)
-            .copied()
-            .collect();
-        same.sort_by_key(|f| std::cmp::Reverse(key(f)));
-        opposite.sort_by_key(|f| std::cmp::Reverse(key(f)));
-        if order_mode == "swap" {
-            ordered.extend(opposite.into_iter().cloned());
-            ordered.extend(same.into_iter().cloned());
+    // Field reference-list ordering for P field pictures (§8.2.4.2.5),
+    // transcribed from JM's `gen_pic_list_from_frame_list`: DPB slots are
+    // sorted by descending FrameNumWrap, then independent cursors emit the
+    // current-parity and opposite-parity fields. A cursor advances only past a
+    // slot that contains its parity. Consequently a frame with only one field
+    // lets the other cursor advance first, while complete frame pairs are
+    // emitted top/bottom (or bottom/top) interleaved.
+    let key = |f: &FieldRef| frame_num_wrap_of(f, dpb, ctx);
+    let mut st_fields: Vec<&FieldRef> = st_top.iter().chain(&st_bottom).copied().collect();
+    st_fields.sort_by_key(|f| std::cmp::Reverse(key(f)));
+    let mut frame_slots: Vec<Vec<&FieldRef>> = Vec::new();
+    for f in st_fields {
+        if let Some(slot) = frame_slots.last_mut().filter(|slot| key(slot[0]) == key(f)) {
+            slot.push(f);
         } else {
-            ordered.extend(same.into_iter().cloned());
-            ordered.extend(opposite.into_iter().cloned());
+            frame_slots.push(vec![f]);
+        }
+    }
+    let mut ordered: Vec<FieldRef> = Vec::new();
+    let mut cursors = [0usize, 0usize]; // [current parity, opposite parity]
+    while cursors[0] < frame_slots.len() || cursors[1] < frame_slots.len() {
+        for (cursor, wanted_bottom) in [(0usize, current_bottom), (1usize, !current_bottom)] {
+            let mut found = None;
+            for idx in cursors[cursor]..frame_slots.len() {
+                if let Some(f) = frame_slots[idx].iter().find(|f| f.bottom == wanted_bottom) {
+                    found = Some((idx, *f));
+                    break;
+                }
+            }
+            if let Some((idx, f)) = found {
+                ordered.push(f.clone());
+                cursors[cursor] = idx + 1;
+            } else {
+                cursors[cursor] = frame_slots.len();
+            }
         }
     }
     if current_bottom {
@@ -2904,6 +2892,74 @@ mod tests {
             bottom_field_flag: bottom,
             ..entry(frame_num, poc)
         }
+    }
+
+    /// P-field lists order references by descending `FrameNumWrap`, placing the
+    /// current field parity first within each reference frame. This is the
+    /// CVFI1 POC-4 top-field ordering confirmed by JM.
+    #[test]
+    fn p_field_list_orders_each_frame_with_current_parity_first() {
+        let mut dpb = Dpb::new();
+        for (frame_num, poc) in [(0, 0), (1, 2)] {
+            mark(
+                &mut dpb,
+                field_entry(frame_num, poc, false),
+                &DecRefPicMarking::SlidingWindow,
+                10,
+            )
+            .unwrap();
+            mark(
+                &mut dpb,
+                field_entry(frame_num, poc + 1, true),
+                &DecRefPicMarking::SlidingWindow,
+                10,
+            )
+            .unwrap();
+        }
+
+        let field_ctx = PicNumContext {
+            curr_frame_num: 2,
+            max_frame_num: 16,
+            field_pic_flag: true,
+            bottom_field_flag: false,
+        };
+        let list = build_field_ref_list_l0(&dpb, false, 4, field_ctx).unwrap();
+        let ordering: Vec<(i64, bool)> = list.iter().map(|f| (f.pic_order_cnt, f.bottom)).collect();
+        assert_eq!(ordering, vec![(2, false), (3, true), (0, false), (1, true)]);
+    }
+
+    /// A recent frame with only its top field stored lets the bottom-parity
+    /// cursor advance to the older frame first, matching JM's POC-3 list
+    /// `[POC1 bottom, POC2 top, POC0 top]`.
+    #[test]
+    fn p_field_list_one_field_dpbslot_advances_other_cursor_first() {
+        let mut dpb = Dpb::new();
+        for (frame_num, poc) in [(0, 0), (1, 2)] {
+            mark(
+                &mut dpb,
+                field_entry(frame_num, poc, false),
+                &DecRefPicMarking::SlidingWindow,
+                10,
+            )
+            .unwrap();
+        }
+        mark(
+            &mut dpb,
+            field_entry(0, 1, true),
+            &DecRefPicMarking::SlidingWindow,
+            10,
+        )
+        .unwrap();
+
+        let field_ctx = PicNumContext {
+            curr_frame_num: 1,
+            max_frame_num: 16,
+            field_pic_flag: true,
+            bottom_field_flag: true,
+        };
+        let list = build_field_ref_list_l0(&dpb, true, 3, field_ctx).unwrap();
+        let ordering: Vec<(i64, bool)> = list.iter().map(|f| (f.pic_order_cnt, f.bottom)).collect();
+        assert_eq!(ordering, vec![(1, true), (2, false), (0, false)]);
     }
 
     /// §8.2.5.3: the second field of a complementary reference field pair does

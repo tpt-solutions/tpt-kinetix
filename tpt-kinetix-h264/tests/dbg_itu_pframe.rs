@@ -43,10 +43,26 @@ fn ba2_pframe_diffmap() {
         .join(&clip);
     let (Some(bs), Some(yuv_path)) = (
         std::fs::read_dir(&dir).ok().and_then(|rd| {
-            rd.flatten().map(|e| e.path()).find(|p| {
-                p.extension()
-                    .is_some_and(|x| matches!(x.to_str(), Some("264" | "jsv" | "h264" | "avc")))
-            })
+            let mut streams: Vec<_> = rd
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension().is_some_and(|ext| {
+                        matches!(ext.to_str(), Some("264" | "jsv" | "h264" | "avc"))
+                    })
+                })
+                .collect();
+            // Several ITU fixture directories contain a short `.264` diagnostic
+            // preview alongside the complete `.jsv` conformance bitstream. Prefer
+            // the complete source so frame-count and later-field diagnostics match
+            // the official reference YUV.
+            streams.sort_by_key(|path| {
+                (
+                    path.extension().and_then(|ext| ext.to_str()) != Some("jsv"),
+                    path.clone(),
+                )
+            });
+            streams.into_iter().next()
         }),
         std::fs::read_dir(&dir).ok().and_then(|rd| {
             rd.flatten().map(|e| e.path()).find(|p| {
