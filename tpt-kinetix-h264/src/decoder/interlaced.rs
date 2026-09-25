@@ -1547,10 +1547,14 @@ impl H264Decoder {
         reader.seek_to_bit(header.data_bit_offset);
         if std::env::var_os("KINETIX_CAVLC_BITTRACE").is_some() {
             let mut bits = String::new();
-            for k in 0..40u8 {
-                let bitpos = header.data_bit_offset + k as usize;
-                let byte = nal.rbsp[bitpos / 8];
-                let bit = (byte >> (7 - (bitpos % 8))) & 1;
+            for k in -64i32..192 {
+                let bitpos_i = header.data_bit_offset as i32 + k;
+                if bitpos_i < 0 || bitpos_i as usize >= nal.rbsp.len() * 8 {
+                    bits.push('?');
+                    continue;
+                }
+                let byte = nal.rbsp[bitpos_i as usize / 8];
+                let bit = (byte >> (7 - (bitpos_i as usize % 8))) & 1;
                 bits.push(if bit == 1 { '1' } else { '0' });
             }
             eprintln!(
