@@ -8,24 +8,19 @@ architecture diagram, and quickstart guide.
 
 ## Status & known limitations
 
-`tpt-kinetix-h264` is **pixel-exact for a substantial subset** of H.264 and
-honest about the rest. CAVLC *and* CABAC decode of I/P/B slices — intra
-prediction, inter prediction (motion compensation), weighted prediction,
-reference-picture management (DPB/POC/`ref_pic_list_modification`/MMCO), and the
-in-loop deblocking filter — all decode **bit-exact** (max_abs_diff == 0) against
-`ffmpeg` for 4:2:0, progressive, 16-px-aligned pictures without the 8×8
-transform. This is exercised continuously by `tests/conformance_matrix.rs` and the
-per-feature `*_conformance.rs` suites.
+`tpt-kinetix-h264` reports `pixel_exact: true`. CAVLC and CABAC I/P/B
+reconstruction, progressive High-profile 8×8 transforms, PAFF field pictures,
+MBAFF frames, reference-list construction, MMCO, and in-loop deblocking are
+byte-exact for the supported 8-bit 4:2:0 subset. Strict mode still returns
+`KinetixError::NotPixelExact` when a stream uses a feature outside that subset.
 
-`H264Decoder::capabilities().pixel_exact` therefore remains `false` only because
-of the genuine gaps below — the global flag is a hard honesty guarantee, not a
-per-feature one. For any stream the decoder cannot decode pixel-exactly,
-`H264Decoder::with_strict(true)` makes `decode()` return
-`KinetixError::NotPixelExact` instead of emitting approximate frames.
-
-This prose describes current reality; the canonical, machine-readable status is
-`H264Decoder::capabilities()` (run `just conformance` to print it) and the CI
-`conformance` job.
+The current official ITU fixture run has 33 hard-checked bit-exact clips. Three
+curated streams remain explicit `KnownGap` fixtures with reproduced diagnostics:
+`CAMA1_Sony_C` (real MBAFF CABAC I desync), `HCHP1_HHI_B` (hierarchical B
+intra-neighbour availability), and `Sharp_MP_PAFF_1r2` (real PAFF pixels). These
+are conformance-frontier failures, not permission to claim approximate output
+is exact. See `todo-h264.md` and `tests/itu_conformance.rs` for the current
+first-divergence evidence.
 
 ### Implemented
 
@@ -61,29 +56,22 @@ This prose describes current reality; the canonical, machine-readable status is
   chroma; **bit-exact vs `ffmpeg`** (`deblock`)
 - `rayon` parallel macroblock-row reconstruction (`decoder`)
 
-### Not yet pixel-exact / unsupported
+### Known conformance gaps
 
-- **8×8 transform** (`transform_8x8_mode_flag`) — parsed and reconstructed for
-  **intra** macroblocks in both CAVLC and CABAC (Phase F.4); not yet
-  bit-exact against `ffmpeg` on real (non-DC) coefficient content, so
-  High-profile streams remain rejected in strict mode. Inter (P_8x8/B_Direct)
-  8×8 transform is unimplemented for both entropy modes. Tracked as Phase F.
-- **Field / interlaced coding** (`frame_mbs_only_flag == 0`, MBAFF/PAFF) —
-  rejected in strict mode. Tracked as Phase G.
-- **Non-16-aligned picture dimensions** — cropped-edge edge-sample handling for
-  the partial final macroblock row/column still shows small (≤ a few dozen
-  sample) diffs clustered at the crop boundary; tracked as a follow-up to
-  Phase 12 A.
-- Multiple/arbitrary slice groups (FMO) reconstruction
-- High-profile scaling lists applied at dequant
+- `CAMA1_Sony_C`: real MBAFF CABAC I desync after the initial frames.
+- `HCHP1_HHI_B`: localized Intra_4×4 neighbour-availability mismatch that
+  propagates through a hierarchical GOP.
+- `Sharp_MP_PAFF_1r2`: some PAFF field pictures still differ despite correct
+  frame count and most exact fields.
+- Features outside the declared 8-bit 4:2:0 subset (for example >8-bit or
+  4:2:2/4:4:4) remain rejected in strict mode.
 
-As a result, decoded output for those paths is **not** pixel-exact; callers
-should check `H264Decoder::capabilities().pixel_exact` and/or use strict mode
-before trusting frames.
+Callers should check `H264Decoder::capabilities().pixel_exact` and use strict
+mode when the input feature set is not known.
 
 ### Roadmap
 
-Flipping `capabilities().pixel_exact = true` (Phase H) is gated on closing the
-unsupported subset above: the 8×8 transform (Phase F), interlaced coding
-(Phase G), and the non-16-aligned dimension gap. Until then the decoder stays
-honest — bit-exact where it claims to be, and `NotPixelExact` everywhere else.
+The capability flip is complete. The remaining conformance work is to close the
+three explicit official-fixture gaps without regressing the 33 byte-exact
+manifest entries. Strict-mode feature rejection for unsupported pixel formats
+and bit depths remains intentional.

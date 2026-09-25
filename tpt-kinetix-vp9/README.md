@@ -7,25 +7,24 @@ Specification (RFC 9628), profile 0 (8-bit 4:2:0).
 
 ## Status
 
-**In progress — structurally complete, not yet pixel-exact.** The full decode
-pipeline is implemented and runs end-to-end on real `libvpx-vp9` streams:
-uncompressed header, compressed header (probability updates), bool decoder,
-tiles and superblock partitions, intra/inter mode info with the complete
-reference-selection ladders, MV prediction, coefficient decoding, inverse
-transforms, motion compensation (8-tap, unscaled and scaled references) and
-the deblocking loop filter.
+**Pixel-exact for the supported subset.** The full decode pipeline is
+implemented and runs end-to-end on real `libvpx-vp9` streams: uncompressed/
+compressed headers, bool decoder, tiles and superblock partitions, intra/inter
+modes, MV prediction, coefficients, inverse transforms, motion compensation,
+loop filtering, frame-context adaptation, and reference management.
 
-What is **not** done yet: the reconstruction output does not match a reference
-decoder pixel-for-pixel (`capabilities().pixel_exact == false`). Decoded frames
-have the correct geometry but wrong samples. The next debugging step (per the
-conformance corpus in `tests/conformance_vp9.rs`) is to trace the first
-keyframe's skip-flag / mode parsing against `ffmpeg -c:v vp9`, then bisect
-coefficients → prediction → loop filter as the AV1 crate did.
+`capabilities().pixel_exact == true`: the whole ffmpeg-gated conformance corpus
+(13 clips: lossless/lossy solids and micro-clips, content clips, intra-only,
+inter, odd size 125x67, multitile) decodes byte-exact against
+`ffmpeg -c:v vp9` on every plane of every frame, and the test asserts it.
+The conformance-frontier work (per-block loop-filter mask construction and the
+persistent loop-filter delta header state) is documented in `todo-vp9.md`.
 
 ## Capabilities
 
-- `Vp9Decoder::capabilities()` reports `pixel_exact: false` while the output
-  is not reference-exact; strict mode returns `KinetixError::NotPixelExact`.
+- `Vp9Decoder::capabilities()` reports `pixel_exact: true` for the supported
+  profile 0 subset; strict mode rejects streams outside it (other profiles
+  with `KinetixError::Unsupported`).
 - Profile 0 only (8-bit, 4:2:0). Other profiles are rejected with
   `KinetixError::Unsupported`.
 - Superframe packets are split internally.

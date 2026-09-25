@@ -56,15 +56,13 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   so they **skip** when `ffmpeg` is absent from `PATH`. Never `.unwrap()` a
   `Command::new("ffmpeg").output()` result — when `ffmpeg` is missing this panics with
   `Os { kind: NotFound, … "No such file or directory" }` and fails the whole test run.
-- **Decoders are incomplete by design.** H.264 CAVLC I/P/B and CABAC I slices are bit-exact vs
-  `ffmpeg` for a supported subset (4:2:0, progressive, 16-px-aligned, no 8x8 transform); CABAC
-  P/B, the 8x8 transform/High profile, and interlaced (PAFF/MBAFF) are not yet, so strict mode
-  returns `KinetixError::NotPixelExact` for unsupported features. `capabilities().pixel_exact`
-  reports `true` for supported H.264 streams. AV1 decode has its CDF-based entropy decoder
-  implemented but not yet wired into `decode_tile_group`, so it still emits placeholder frames.
-  Lean and Vision also report `pixel_exact: false`. `KinetixError::NotPixelExact` under
-  strict mode signals the gap either way. CLI `probe` works end-to-end; `transcode`/`stream` are
-  still stubs. Don't treat decoder output as correct without checking `capabilities()`.
+- **Decoders are incomplete by design.** H.264 and VP9 report `pixel_exact: true` for their supported
+  subsets (H.264: CAVLC/CABAC 8-bit 4:2:0 subset; VP9: profile 0 8-bit 4:2:0). AV1 implements
+  end-to-end reconstruction but still reports `pixel_exact: false`: its official FATE run is 1/198
+  comparable frames exact. Lean and Vision also report `pixel_exact: false`. `KinetixError::NotPixelExact`
+  under strict mode signals these gaps. CLI `probe` works end-to-end; `transcode`/`stream` are still
+  stubs. Don't treat decoder output as correct without checking `capabilities()` and the conformance
+  status.
 - **proptest:** `proptest_*.rs` tests under `<crate>/tests/` persist shrunk reproducers in
   committed `.proptest-regressions/` files — keep them.
 - Fuzz crashes reproduce in `fuzz/artifacts/<target>/crash-*`; add them to

@@ -669,3 +669,100 @@ IMCTX/BLK2 prints (rebuild the oracle manually with gcc: `gcc -I. -c <file>`
   etc.) are concentrated at 4x4-internal boundaries (60/116) and 8px block
   edges. They require a per-op input/output diff at the loop_filter_edge
   level, which the current tooling supports but needs a fresh session.
+
+## Session 2026-09-25 — HEV scalar fix; vertical-mask gap isolated
+
+The earlier per-op conclusions above are superseded by a byte-level differential
+against an untouched libvpx v1.17.0 tree with all VP9 loop-filter RTCD entries
+forced to the scalar C kernels. The first concrete kernel bug was in
+`filter4`'s HEV branch: after computing the combined signed delta
+`f1 = clamp(p1 - q1) + 3 * (q0 - p0)`, the Rust port used the outer flatness
+constant (`f = 1`) for `f1v` instead of the combined `f1`. Fixing
+`(f1 + 4) >> 3` removed the bulk of the loop-filter error. All U/V planes and
+the single-frame `intra128` vector are now byte-exact, and all 13 ffmpeg-gated
+VP9 tests pass under the diagnostic gate.
+
+The conformance harness itself had a reporting bug: it treated concatenated
+output as planar-all-Y, then planar-all-U, then planar-all-V. It now splits each
+frame into contiguous Y/U/V planes, accumulates PSNR across those planes, and
+reports exact mismatch counts and first coordinates for every plane. The test
+remains diagnostic rather than asserting all-zero counts until the remaining
+luma gap is closed.
+
+The remaining discrepancy is in **vertical mask construction**, not the scalar
+kernel. For frame 1 of `odd125x67`, pre-filter output is byte-exact to libvpx,
+and the luma horizontal masks and levels match. However, the first frame-1 luma
+vertical entry differs: Kinetix's adjusted left masks are TX_16=`0x10`,
+TX_8=`0xe`, TX_4=`0`, while the clean libvpx driver reports TX_16=`0x10101010`,
+TX_8=`0`, TX_4=`0`. That vertical state causes the later horizontal x=32 pass
+to receive different p-side taps and leaves one wrong luma sample. Corrected
+full-plane counts are: `intra128` 0/0/0, `odd125x67` 1/0/0,
+`tiled256x144` 25/0/0, and `inter128x96` 42/0/0.
+
+**Next step:** compare the `SbUnit`/mask-building records for frame 1 against a
+clean libvpx `MODE_INFO` trace, starting with the superblock containing
+`mi=(8,4)`, where Kinetix records `BLOCK_32X16`, TX_16x16. Do not change the
+scalar filter or flip `capabilities().pixel_exact` until all three failing
+vectors have zero luma mismatches.
+
+## Session 2026-09-26 — VP9 byte-exact end-to-end; pixel_exact flipped
+
+**State.** All 13 conformance clips now decode byte-exact vs
+`ffmpeg -c:v vp9` (y/u/v_bad = 0 on every frame). The conformance harness
+asserts it, and `capabilities().pixel_exact` is flipped to `true` (the bar
+this file set). The odd125x67/tiled256x144/inter128x96 luma gaps were TWO
+independent bugs, neither in the mask walk:
+
+1. **MC source-border clamp used the MI-aligned extent, not the crop extent**
+   (`frame_recon.rs` `mc_luma`/`mc_chroma`). libvpx extends reference-frame
+   borders from the *visible* (cropped) dimensions, so MC reads beyond the
+   visible edge replicate the last visible row/column. We clamped at
+   `mi_cols*8 / mi_rows*8` and read real reconstructed overhang content
+   (rows 67-71 of a 67-tall frame). This fixed odd125x67 completely (its
+   failing pixel was an mv=(0,0) copy of a row-67 sample). Change: pass
+   `frame.width/height` (chroma: `(w+1)/2, (h+1)/2`) as `src_w/src_h`.
+2. **Loop-filter ref/mode deltas were not carried between frames**
+   (`header.rs` + `decoder.rs`). The deltas are persistent header state:
+   libvpx keeps them in `cm->lf` and resets to the defaults only on key /
+   error-resilient / intra-only frames. We started every frame from
+   `Default` ([0,0,0,0]), so a non-key frame with `delta_updated == 0`
+   derived per-block levels from zeros instead of the inherited deltas
+   (ours lvl=7 vs libvpx 9/8 = base 7 + inherited +2/-1). Fix: pass the
+   previous frame's `LoopFilterHeader` into `parse_uncompressed_header`
+   and store the parsed state back after each frame.
+
+This supersedes the "vertical mask construction" hypothesis in the previous
+session note: the per-SB masks, levels grids and op streams were verified
+**identical** to a cleanly rebuilt instrumented libvpx v1.17.0
+(`harness_kd.exe` in `C:/Users/phill/AppData/Local/Temp/libvpx2/`; per-kernel
+`KI/KO wd.. off=..` dumps of every luma filter call, matched positionally
+against ours via `TPT_VP9_OPS=1`). The last SB-row "mask divergence" recorded
+earlier was an artifact of comparing a stale instrumented exe against a
+mislabelled frame. Debug tooling added this session (env-gated, keep):
+`TPT_VP9_OPS` (per-op input/output hex dump of every `loop_filter_edge`
+call), `TPT_VP9_BUF` / `TPT_VP9_BUF_POST` (raw strided-buffer row dumps
+before/after the LF, `y0:y1:x0:x1`), and `dbg_trace` now writes per-frame
+YUV files (`out.fN`) for frame-by-frame diffs.
+
+**Oracle rebuild recipe that finally worked (for next time):** edit
+`vp9/common/vp9_loopfilter.c` (driver prints: `STORED` pre-adjust masks,
+`OBUF`/`OPOST` buffer dumps, per-plane kernel-dump gate
+`g_lpf_dump_plane`) and/or `vpx_dsp/loopfilter.c` (KI/KO dumps inside the
+six scalar kernels; note `mb_lpf_*_edge_w` steps = `count` for vertical,
+`8*count` for horizontal, and `g_lpf_frame_base`-relative offsets need
+`extern`), then
+`gcc -I. -fno-common -m64 -O2 -c <file.c> -o <obj>`, copy the object over
+the archive member name (`loopfilter.c.o` / `vp9_loopfilter.c.o`) —
+`ar r libvpx.a <member>` — delete stale members (`loopfilter.o`,
+`loopfilter_trace.o`) which otherwise shadow yours, and relink
+`gcc -I. -O2 harness.c -o harness_kd.exe libvpx.a`. Verify the rebuilt
+oracle still decodes the clip byte-exact vs ffmpeg BEFORE trusting its
+dumps, and remember the file is CRLF (patch scripts must preserve it).
+
+**Remaining (from the old list, now unblocked):**
+1. Wire VP9 into `tpt-kinetix-pipeline`/CLI decode paths and the README
+   status table (the pixel-exact precondition is met).
+2. Optional hardening: fuzz the superframe splitter and odd-size paths
+   (CI `fuzz-check` compiles; local fuzzing still lacks the ASAN runtime).
+3. Profile-1/4:4:4 and 10/12-bit remain out of scope (rejected in strict
+   mode with `KinetixError::Unsupported`).
