@@ -903,8 +903,20 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
         let n = kframes.len().min(ref_frames.len());
         let mut file_exact = 0usize;
         for i in 0..n {
-            if within_tolerance(&kframes[i], &ref_frames[i], 0) {
+            let exact = within_tolerance(&kframes[i], &ref_frames[i], 0);
+            if exact {
                 file_exact += 1;
+            } else {
+                let (y_psnr, u_psnr, v_psnr) =
+                    psnr_yuv420p(&kframes[i], &ref_frames[i]).unwrap_or((0.0, 0.0, 0.0));
+                let first = kframes[i]
+                    .data
+                    .iter()
+                    .zip(&ref_frames[i].data)
+                    .position(|(a, b)| a != b);
+                eprintln!(
+                    "[{name}] frame {i} mismatch: PSNR Y/U/V={y_psnr:.2}/{u_psnr:.2}/{v_psnr:.2}, first_byte={first:?}"
+                );
             }
         }
         comparable += n;
