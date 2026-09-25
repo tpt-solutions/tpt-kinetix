@@ -1806,6 +1806,14 @@ impl H264Decoder {
                             motion.sub_mb_type, motion.ref_idx_l0, motion.mvd_l0
                         );
                     }
+                    if idx == 0 {
+                        for cell in [0usize, 5usize] {
+                            eprintln!(
+                                "PFIELD_COEFFS idx=0 cell={cell} coeffs={:?}",
+                                &mb.luma_coeffs[cell][..]
+                            );
+                        }
+                    }
                     let nzs: Vec<String> = mb
                         .luma_coeffs
                         .iter()

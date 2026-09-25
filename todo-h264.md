@@ -221,6 +221,33 @@ Re-correlated with the correct markers:
   (JM's scan order); if POSITIONS match but SCALES differ, audit
   the dequant tables for field pictures.
 
+**EXECUTED (same sitting) — the dequant amplitude difference is MEASURED.**
+Added `PFIELD_COEFFS` (prints parsed luma_coeffs for MB0 cells 0/5). Our
+poc3-MB0 parse (post-run verification): cell0 = 1 coeff, level +1, at
+scan position 1; cell5 = levels +1,+1,+1 at positions 0,1,2 — EXACTLY
+matching JM's trace (#c=1 t1=1 tz=1; #c=3 t1=3 tz=0). The reconstructed
+residuals:
+- ours: cell0 = (1,0)-basis, amplitude 2.5/level (`[5,3,-2,-5]` per column);
+  cell5 = (0,0)+(0,1)+(1,0) mix.
+- JM's implied (jm_poc3_predeblock - pred): cell0 = (1,0)-basis at amplitude
+  ~4.4/level (`[9,9,-5,-4]` down col0) PLUS additional column-variance
+  (col1 `[10,7,-4,-5]`, col2 `[...,10,10]`, col3 `[3,18,13,-22]`) that a
+  1-coeff cell cannot produce -- note JM's cell5 (3 coeffs at positions
+  0,1,2) produces exactly the (0,0)+(0,1)+(1,0) mix whose column-variance
+  spills into... NO WAIT -- cells are independent 4x4 IDCTs; cell5's coeffs
+  cannot affect cell0's pixels. The column-variance in JM's CELL0 region
+  means JM's CELL0 itself decodes to more/different levels than our trace
+  reading suggested -- i.e. our earlier "parse matches JM" comparison (which
+  aligned JM's POC:3 trace section token lines to cells 0,1,4,5 in order)
+  still has an unresolved attribution subtlety, OR the trace's "#c=1" line
+  ordering does not map to cells the way assumed.
+- DEFINITIVE next step (fresh session): in the JM TRACE build, add a trace
+  print of the DECODED levels per cell in read_comp_cavlc.c's placement loop
+  (levarr[k] with the raster position j from FIELD_SCAN), dump poc3-MB0
+  levels+positions, and compare with ours cell-for-cell. That ends the
+  ambiguity: JM's own placement loop is the ground truth for both the scan
+  mapping AND the level values.
+
 **FINAL NARROWING (same sitting, after dump-identity verification):** the
 poc3 dump identity was verified (jm_poc3_postdeblock == JM's own display
 output frame 1 odd rows, 0 diffs), so all JM-side data is trustworthy. Full
