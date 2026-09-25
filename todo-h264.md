@@ -221,6 +221,32 @@ Re-correlated with the correct markers:
   (JM's scan order); if POSITIONS match but SCALES differ, audit
   the dequant tables for field pictures.
 
+**FINAL NARROWING (same sitting, after dump-identity verification):** the
+poc3 dump identity was verified (jm_poc3_postdeblock == JM's own display
+output frame 1 odd rows, 0 diffs), so all JM-side data is trustworthy. Full
+chain status for poc3-slice0-MB0-cell0 (field-scan position 1, level +1):
+- our CAVLCBIT: token "01" (c=1,t1=1) at data-rel 16, sign, tz codeword
+  "011" -> tz=1 -- identical to JM's trace @540154-540160 bit-for-bit.
+- our residual: (1,0) basis rows `[5,3,-2,-5]` per column = coeff placed at
+  field-scan position 1 = raster (1,0), dequant amplitude ~5 at qp 28 --
+  placement per the spec field scan (position 1 = (1,0)) is CORRECT.
+- JM's implied residual col0 = `[9,9,-5,-4]` is ALSO approximately (1,0)-shaped
+  (amplitude ~4.5) but with per-column variation (col1 `[10,7,-4,-5]`, col3
+  `[3,18,13,-22]`) that a #c=1 block cannot produce.
+- the remaining suspects, in order: (1) our dequant amplitude for this
+  coefficient (5 vs JM's ~4.5/9: check dequant_idct_4x4_scan's LevelScale
+  selection for FIELD P-slice INTER blocks -- the field-picture normAdjust
+  path), (2) an additional coefficient JM reads that we attribute to another
+  cell (the #c counts per cell matched: cell0 #c=1, cell5 #c=3 -- but verify
+  the LEVELS of cell5's three coefficients and their positions), (3) the
+  IDCT rounding for field blocks.
+- MEASUREMENT RECIPE (single-run): `KINETIX_CAVLC_BITTRACE=all
+  KINETIX_PFIELD_MB_DBG=0` plus an extension of the PFIELD dump to print
+  `mb.luma_coeffs[0]` and `[5]` (16 values each) for poc3-slice0-MB0; then
+  hand-compute dequant+IDCT in Python against jm_poc3_predeblock-pred
+  (pred = poc2 postdeblock cell pixels = verified) to find the exact
+  level/scale/position mismatch. No new JM tooling needed.
+
 **Correction to the cell0 residual reading above (verified against the current
 build):** our cell0 residual is NOT flat-DC — it is row-varying/col-constant
 `[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 / -5,-5,-5,-5]` = the (1,0) basis, i.e. our
