@@ -188,6 +188,39 @@ Also fixed the CAVLCBIT hook to support `KINETIX_CAVLC_BITTRACE=all` (trace
 every residual block regardless of nC) and `PSLICE_MARK` now embeds the 40 raw
 bits at the slice data start.
 
+**RESOLUTION OF THE MARKER CONFUSION + FINAL NARROWING (same sitting):** the
+PAFF poc/fn mapping is poc = 2*frame_num + bottom: poc1 = fn0 BOTTOM (display
+frame 0 bottom, EXACT), poc3 = fn1 BOTTOM (display frame 1 bottom, FAILING),
+poc5 = fn2 BOTTOM. The earlier "frame_num=2" analysis was poc5, not poc3.
+Re-correlated with the correct markers:
+- poc3-slice0-MB0 (dbo=47, fn=1, bottom=true): our CAVLCBIT trace
+  (cell0: token "01" (c=1,t1=1) at data-rel 16, sign, tz codeword "011" ->
+  tz=1; cell5: "00011" (3,3), tz codeword "0101" -> tz=0) matches JM's
+  POC:3-MB0 trace **cell-for-cell, bit-for-bit**. THE PARSE IS CORRECT.
+- Same-mode pixel comparison (fbuf_pre_poc3 vs jm_poc3_predeblock, both
+  post-fc24b45, deblock ON): our cell0 residual = single coefficient at
+  FIELD-scan position 1 (the (1,0) basis: `[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 /
+  -5,-5,-5,-5]`), JM's implied residual is a rich multi-basis pattern
+  `[9,10,9,3 / 9,7,19,18 / -5,-4,10,13 / -4,-5,-21,-22]` -- for the SAME
+  parsed coefficients (cell0: 1 coeff tz=1, cell5: 3 coeffs tz=0).
+- THEREFORE the divergence is AFTER the parse, in the coefficient
+  placement/dequant/IDCT/add path for INTER FIELD macroblocks:
+  `dequant_idct_4x4_scan(..., FIELD_SCAN_4X4)` inside
+  `reconstruct_field_inter_luma` (or the equivalent for the parse->coeffs
+  hand-off). Note our single-coeff-at-field-pos-1 lands as the (1,0) basis;
+  if FIELD_SCAN_4X4[1] maps to raster (1,0) while JM's field scan maps
+  position 1 elsewhere (or vice versa), that alone explains the difference.
+  Also verify the dequant LevelScale for FIELD pictures (field-picture
+  normAdjust tables?) and whether inter field MBs should use the field scan
+  at all vs. the frame scan for P-slice field pictures.
+- CONCRETE NEXT: extend the PFIELD dump to print our parsed 16-value
+  luma_coeffs array for poc3-MB0 cells 0 and 5, invert JM's implied residual
+  (forward transform of jm_pre - pred -> dequant-inverse) to get JM's
+  coefficients, and compare position-by-position: if the COEFFICIENT
+  POSITIONS differ, audit FIELD_SCAN_4X4 against the spec's field scan
+  (JM's scan order); if POSITIONS match but SCALES differ, audit
+  the dequant tables for field pictures.
+
 **Correction to the cell0 residual reading above (verified against the current
 build):** our cell0 residual is NOT flat-DC — it is row-varying/col-constant
 `[5,5,5,5 / 3,3,3,3 / -2,-2,-2,-2 / -5,-5,-5,-5]` = the (1,0) basis, i.e. our
