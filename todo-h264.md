@@ -2,6 +2,35 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cc ADDENDUM 4 (2026-09-25) — P-field reference-list parity ordering fixed; CVFI1 frames 0-1 exact
+
+The focused CVFI1 diagnostic localized the next structural failure to P-field
+reference-list ordering, not motion compensation or residual reconstruction.
+For the first P-field pair, the old ordering used the most recent
+opposite-parity field at `L0[0]`; FFmpeg/JM's field-list construction uses all
+fields of the current parity first, in descending `FrameNumWrap`, followed by
+all fields of the opposite parity. The old per-frame top/bottom interleave
+made the second P field's first macroblocks predict from the wrong field and
+spread the error across the frame.
+
+**Fixed:** `build_field_ref_list_l0` now uses parity-grouped ordering by
+default. `KINETIX_FIELD_ORDER=per_frame` retains the previous behavior for
+oracle experiments, and `KINETIX_FIELD_ORDER=swap` reverses the parity
+preference.
+
+**Measured on `CVFI1_Sony_D`:**
+- Before: display frame 0 exact; display frame 1 `max_diff=210`,
+  `148,731` differing luma samples.
+- After: display frames 0 and 1 are both byte-exact (`max_diff=0`).
+- Later field pictures remain a separate open gap: frame 2 begins with
+  `max_diff=226`; the official suite still reports 33 hard-checked bit-exact
+  clips and zero failures.
+
+Gates for this change: `cargo fmt --all -- --check`, focused CVFI1 diagnostic,
+and the official `itu_conformance` run pass. The remaining CVFI1 work is now
+post-frame-1 field-pair ordering/decode behavior, not the first P-field list.
+
+
 ## SESSION #32cc ADDENDUM (same continuation) — slice-boundary intra sample availability was the P-field bug; CVFI1 frame 0 now fully byte-exact
 
 The postmortem's "concrete next step" resolved faster than expected. Revisited
@@ -328,16 +357,55 @@ the element boundary the 1-bit shift enters. Note the token codeword "01" is
 nC-table selection for this block — the tz read is not (row 0 vs row 1 of
 TOTAL_ZEROS).
 
-**Instrumentation status:** KINETIX_CAVLC_BITTRACE + KINETIX_PFIELD_MB_DBG
-captured together work, but the CAVLCBIT lines currently lack slice/MB
-identity (26k+ lines stream-wide) — locating poc3 slice-0 MB0 by position
-alone failed once already (the print preceding a PFIELD line was the slice's
-LAST nC=0 block, not MB0: predict runs after the whole slice parses). Next
-session's first 15 minutes: extend the CAVLCBIT print with the slice's
-data_bit_offset (thread it into parse_cavlc_block, or print
-reader.bit_position() at slice start in decode_interlaced_p_field) so MB0's
-line is identifiable as `start ≈ data_bit_offset + 18`; then the element
-boundary diff vs JM's @540139-540160 collapses the 1-bit question.
+
+
+## SESSION #32cc ADDENDUM 3 — JM placement trace completed; internal POC mapping resolved
+
+The requested JM placement-loop trace is now operational in the external
+oracle tree. The rebuilt release TRACE executable is stable under the current
+MinGW toolchain and the existing oracle input decodes successfully. The first
+attempt used the task note's display-frame label (`poc3`) as the JM filter,
+but JM's internal field-picture sequence labels the relevant picture `POC 2`;
+the trace confirms that `POC 3` is not a valid `p_Vid->ThisPOC` value in this
+fixture. This explains why the initial `JM_COEFF_TRACE_POC=3` run produced no
+coefficient lines.
+
+For **JM internal `POC 2`, MB 0**, the luma CAVLC placement loop reports:
+
+`d:\Programming\1PRODUCTION\Open Source\tpt-kinetix\todo-h264.md`
+
+```text
+cell (0,0):  numcoeff=1  levarr=[1]       runarr=[4]
+             level +1 -> scan (0,3) -> raster (0,3), deq=320
+cell (4,0):  numcoeff=0
+cell (0,4):  numcoeff=0
+cell (4,4):  numcoeff=2  levarr=[-1,2]    runarr=[3,0]
+             -1 -> scan (0,2) -> raster (4,6), deq=-256
+             +2 -> scan (0,3) -> raster (4,7), deq=640
+cell (8,0):  numcoeff=0
+cell (12,0): numcoeff=0
+cell (8,4):  numcoeff=2  levarr=[-1,1]    runarr=[3,0]
+             -1 -> scan (0,2) -> raster (8,6), deq=-256
+             +1 -> scan (0,3) -> raster (8,7), deq=320
+cell (12,4): numcoeff=2  levarr=[1,-1]    runarr=[1,1]
+             +1 -> scan (0,1) -> raster (12,5), deq=320
+             -1 -> scan (0,2) -> raster (12,6), deq=-256
+```
+
+The trace hook is in the external file
+`C:\Users\phill\jm-oracle-fresh\jm\source\app\ldecod\read_comp_cavlc.c` and
+is controlled by `JM_COEFF_TRACE_POC` and `JM_COEFF_TRACE_MB`. It prints the
+raw decoded `levarr`/`runarr`, scan coordinates, final raster coordinates, and
+the dequantized value. The local Rust workspace is unchanged by this
+instrumentation.
+
+**Comparison result:** the earlier “JM says cell0 has one coefficient but its
+implied residual contains multiple coefficients” contradiction is resolved:
+the old display-frame `poc3` trace was being aligned against a different
+internal field picture. The next comparison must use Kinetix's display-frame
+`poc3` bottom-field MB0 against JM internal `POC 2` MB0, with the block/scan
+coordinates above—not against JM's earlier `POC: 3` section, which does not
+exist in this oracle run.
 
 
 
@@ -1957,6 +2025,56 @@ construction, e.g. `mbuffer.c`'s `init_lists`/`reorder_ref_pic_list`) to
 dump JM's own reference-list content for its internal picture matching
 POC 498, and diff against the `REFLIST` trace above — this is the one
 piece of ground truth this addendum is still missing. If JM's list
+
+
+## SESSION #32cc ADDENDUM 5 — pre/post-deblock isolation; CAVLC level experiment reverted
+
+The normal `CVFI1_Sony_D` field-buffer comparison was repeated with the
+failing display-frame-1 bottom field. The pre-deblock field has `151,010`
+differing luma samples against the reference field; after deblocking it has
+`148,731`. Therefore deblocking is not the source of the broad error.
+
+The first bad samples are MB0, cell 0:
+- Kinetix prediction is the correct copy of the preceding top field.
+- Kinetix parsed cell 0 as one `+1` coefficient at field-scan index 1.
+- Kinetix runtime reconstruction produces the expected vertical-basis residual.
+- The reference field requires a different, varying residual pattern.
+
+The JM oracle input `tpt-kinetix-h264/jmtrace/in.264` is an exact byte prefix
+of the full `CVFI1_Sony_D.jsv` fixture (101,805 bytes versus 524,421 bytes), so
+its first-picture trace is valid but it cannot establish the full-stream
+frame-1 result. The earlier “POC 3” JM coefficient comparison must not be used
+as the full-fixture oracle without decoding the complete stream.
+
+A standards-looking CAVLC level-prefix adjustment for `level_prefix == 14` was
+implemented and unit-tested, but the real CVFI1 fixture then took an unsupported
+parse fallback. It was fully reverted. The next investigation must compare the
+complete-fixture JM placement loop or independently hand-decode the exact
+full-fixture MB0 residual before changing the CAVLC level decoder.
+
+
+
+## SESSION #32cc ADDENDUM 4 — field MV scaling experiment disproven; inter-Y scaling retained
+
+The full CVFI1_Sony_D fixture was rerun with field-residual instrumentation.
+The target bottom-field MB0 (`P8x16`, QP 28) has parsed cell 0 coefficient
+`+1` at field-scan index 1. Runtime reconstruction confirms the field scan
+produces the expected vertical-basis residual, so the old apparent coefficient
+placement contradiction is resolved.
+
+The normal field reference list is also correct: the target bottom field uses
+`L0[0]` = preceding top field, with MB0 reference indices `[0, 0]`. A proposed
+application of `scale_field_mv_y` to field luma/chroma prediction was tested
+against the full fixture. It worsened the result immediately (frame 0 changed
+from byte-exact to 131,415 differing luma samples), proving the stored field MVs
+are already in the coordinate units expected by this path. That experiment was
+fully reverted.
+
+The retained production fix is the inter-Y scaling-list correction in
+`reconstruct_field_inter_luma`: field inter luma now uses scaling-list group 3,
+matching the MBAFF inter path and reference decoder. Focused and library tests
+remain green.
+
 DIFFERS from ours (e.g. it has 2 active refs, or a different single
 entry), the bug is in list construction/MMCO/sliding-window bookkeeping.
 If it MATCHES, the bug is downstream (spatial-direct motion derivation,

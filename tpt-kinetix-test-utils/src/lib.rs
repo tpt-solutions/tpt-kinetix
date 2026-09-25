@@ -22,4 +22,5 @@ pub mod realtime_bench;
 pub mod reference;
 pub mod synthetic;
 pub mod tmc13;
+pub mod trace;
 pub mod trace_dump;

@@ -60,6 +60,8 @@ const INV_ZIGZAG_4X4: [usize; 16] = [0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 1
 /// Number of 4×4 scaling lists for 4:2:0 (luma, Cb, Cr, luma-Intra16 DC,
 /// Cb-Intra16 DC, Cr-Intra16 DC).
 pub const NUM_SCALING_4X4: usize = 6;
+/// 4×4 scaling-list index for inter-predicted luma (`Sl_4x4_Inter_Y`, §7.4.2.1.1.1).
+pub(crate) const LUMA_INTER_4X4_LIST: usize = 3;
 /// Number of 8×8 scaling lists for 4:2:0 (luma, chroma).
 pub const NUM_SCALING_8X8: usize = 2;
 
@@ -1175,6 +1177,26 @@ mod tests {
             flat.chroma_dc_level_scale(0, 0, false),
             16 * NORM_ADJUST_4X4[0][0]
         );
+    }
+
+    #[test]
+    fn inter_luma_uses_inter_y_scaling_list() {
+        let mut lists = ScalingLists::flat();
+        lists.set_4x4(0, &[8; 16]);
+        lists.set_4x4(LUMA_INTER_4X4_LIST, &[32; 16]);
+        let mut coeffs = [0i16; 16];
+        coeffs[0] = 1;
+        let intra = dequant_idct_4x4_scan(&coeffs, 24, None, 0, &lists, &FIELD_SCAN_4X4);
+        let inter = dequant_idct_4x4_scan(
+            &coeffs,
+            24,
+            None,
+            LUMA_INTER_4X4_LIST,
+            &lists,
+            &FIELD_SCAN_4X4,
+        );
+        assert_ne!(intra, inter);
+        assert!(inter.iter().all(|&value| value > 0));
     }
 
     #[test]

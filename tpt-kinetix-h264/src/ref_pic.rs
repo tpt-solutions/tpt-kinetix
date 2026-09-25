@@ -1769,60 +1769,53 @@ pub fn build_field_ref_list_l0(
     lt_top.sort_by_key(|f| field_long_num(f, dpb));
     lt_bottom.sort_by_key(|f| field_long_num(f, dpb));
 
-    // Short-term ordering (§8.2.4.2.5): the two FIELDS of each reference
-    // frame are ADJACENT list entries — frames in descending FrameNumWrap
-    // order, and within a frame the field sharing the CURRENT field's parity
-    // first (its doubled FieldPicNum carries the +1). Sorting all candidate
-    // fields by the descending key 2*FrameNumWrap + (co-parity) produces
-    // exactly that interleave. The previous parity-GROUPED order
-    // ([all bottoms…, all tops…]) diverges from the spec as soon as the list
-    // spans more than one reference frame, silently mapping every
-    // ref_idx ≥ 2 to the wrong field on multi-reference field streams
-    // (CVFI1_Sony_D signals 9-10-entry lists).
-    // Triage (#32bz): selectable short-term field ordering variants.
-    //   "swap"    – opposite-parity first within each frame
-    //   "grouped" – ALL same-parity fields first, then ALL opposite-parity
-    //   default   – per-frame interleave, co-parity first (2*fnw + co_parity)
+    // Field reference-list ordering for P field pictures. FFmpeg's
+    // `build_def_list` constructs two cursors: all fields with the current
+    // parity first, followed by all fields with the opposite parity. Within
+    // each parity, retain descending FrameNumWrap order. This is not the
+    // per-frame top/bottom interleave: for a bottom field, CVFI1's L0[0] is
+    // the most recent same-parity field, not the most recent opposite-parity
+    // field. The latter is the first field of the immediately preceding frame
+    // and causes whole-field motion-compensation errors.
+    //
+    // `per_frame` retains the old ordering for differential diagnostics only.
+    // `swap` reverses the parity preference for experiments.
     let order_mode = std::env::var("KINETIX_FIELD_ORDER").unwrap_or_default();
     let mut ordered: Vec<FieldRef> = Vec::new();
-    if order_mode == "grouped" {
-        let key = |f: &FieldRef| -> i64 { frame_num_wrap_of(f, dpb, ctx) };
-        let mut same: Vec<&FieldRef> = st_top
-            .iter()
-            .chain(st_bottom.iter())
-            .filter(|f| f.bottom == current_bottom)
-            .copied()
-            .collect();
-        let mut opp: Vec<&FieldRef> = st_top
-            .iter()
-            .chain(st_bottom.iter())
-            .filter(|f| f.bottom != current_bottom)
-            .copied()
-            .collect();
-        same.sort_by_key(|f| std::cmp::Reverse(key(f)));
-        opp.sort_by_key(|f| std::cmp::Reverse(key(f)));
-        for f in same {
-            ordered.push((*f).clone());
-        }
-        for f in opp {
-            ordered.push((*f).clone());
-        }
-    } else {
+    if order_mode == "per_frame" {
         let mut st_fields: Vec<(&FieldRef, i64)> =
             Vec::with_capacity(st_top.len() + st_bottom.len());
         for f in st_top.iter().chain(&st_bottom) {
             let fnw = frame_num_wrap_of(f, dpb, ctx);
             let co_parity = f.bottom == current_bottom;
-            let bonus = if order_mode == "swap" {
-                (f.bottom != current_bottom) as i64
-            } else {
-                co_parity as i64
-            };
-            st_fields.push((f, 2 * fnw + bonus));
+            st_fields.push((f, 2 * fnw + co_parity as i64));
         }
         st_fields.sort_by_key(|(_, key)| std::cmp::Reverse(*key));
         for (f, _) in &st_fields {
             ordered.push((*f).clone());
+        }
+    } else {
+        let key = |f: &FieldRef| frame_num_wrap_of(f, dpb, ctx);
+        let mut same: Vec<&FieldRef> = st_top
+            .iter()
+            .chain(&st_bottom)
+            .filter(|f| f.bottom == current_bottom)
+            .copied()
+            .collect();
+        let mut opposite: Vec<&FieldRef> = st_top
+            .iter()
+            .chain(&st_bottom)
+            .filter(|f| f.bottom != current_bottom)
+            .copied()
+            .collect();
+        same.sort_by_key(|f| std::cmp::Reverse(key(f)));
+        opposite.sort_by_key(|f| std::cmp::Reverse(key(f)));
+        if order_mode == "swap" {
+            ordered.extend(opposite.into_iter().cloned());
+            ordered.extend(same.into_iter().cloned());
+        } else {
+            ordered.extend(same.into_iter().cloned());
+            ordered.extend(opposite.into_iter().cloned());
         }
     }
     if current_bottom {

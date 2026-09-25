@@ -21,7 +21,7 @@ use crate::{
     trace::{DecodeTracer, TracePlane},
     transform::{
         chroma_dc_transform, dequant_idct_4x4, dequant_idct_4x4_scan, dequant_idct_8x8_scan,
-        luma_dc_transform, ScalingLists,
+        luma_dc_transform, ScalingLists, LUMA_INTER_4X4_LIST,
     },
 };
 use tpt_kinetix_core::frame::VideoFrame;
@@ -2134,7 +2134,7 @@ fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
             &mb.luma_coeffs[block],
             mb.qp,
             None,
-            3,
+            LUMA_INTER_4X4_LIST,
             scaling,
             &crate::transform::FIELD_SCAN_4X4,
         );
@@ -3450,12 +3450,13 @@ fn reconstruct_field_b_inter_luma<T: DecodeTracer>(
             ref_idx0,
         );
 
-        // Field-coded: un-scan the residual with the field scan (§8.5.6).
+        // Field-coded inter luma uses the field scan (§8.5.6) and the
+        // Inter-Y scaling list (`Sl_4x4_Inter_Y`, §7.4.2.1.1.1).
         let res = dequant_idct_4x4_scan(
             &mb.luma_coeffs[block],
             mb.qp,
             None,
-            0,
+            LUMA_INTER_4X4_LIST,
             scaling,
             &crate::transform::FIELD_SCAN_4X4,
         );
@@ -3717,7 +3718,6 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         } else {
             ref_idx
         };
-
         let mut pred = [0u8; 16];
         if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
             let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
@@ -3774,11 +3774,14 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         // coefficients were parsed against the field scan (§8.5.6 / Table 8-13),
         // so they must be un-scanned with `FIELD_SCAN_4X4`, not the default
         // zigzag `dequant_idct_4x4` uses (which garbled every coded 8×8 group).
+        // Inter luma uses scaling-list group 3 (the inter-Y matrix), not the
+        // intra luma group 0. This matches the MBAFF field-inter path and the
+        // reference decoder's field-picture reconstruction.
         let res = dequant_idct_4x4_scan(
             &mb.luma_coeffs[block],
             mb.qp,
             None,
-            0,
+            LUMA_INTER_4X4_LIST,
             scaling,
             &crate::transform::FIELD_SCAN_4X4,
         );
@@ -3876,7 +3879,6 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
                 ref_idx
             };
             let cmv_y_off = chroma_mv_y_off.get(ref_idx).copied().unwrap_or(0);
-
             let mut pred = [0u8; 16];
             if let Some(plane_ref) = ref_plane.get(ref_idx).or_else(|| ref_plane.last()) {
                 let plane_w = plane_ref.len() / chroma_h_of(plane_ref, stride);

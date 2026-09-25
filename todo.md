@@ -1837,7 +1837,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 - [x] Add code coverage reporting (e.g. `cargo-llvm-cov`) wired into CI
 - [x] Document the full testing strategy in `CONTRIBUTING.md`
 
-### Phase 7.1 — Unified trace/diff tooling (started 2026-08-24, plan approved, not yet implemented)
+### Phase 7.1 — Unified trace/diff tooling (started 2026-08-24; core implemented, diagnostic migrations remain)
 
 Consolidates 23 duplicated ad-hoc `dbg_*.rs` files in `tpt-kinetix-h264` (each hand-rolling
 print/compare boilerplate) onto the existing-but-underused `DecodeTracer`/`MapTracer` (h264) and
@@ -1845,21 +1845,23 @@ print/compare boilerplate) onto the existing-but-underused `DecodeTracer`/`MapTr
 Tier 1 scope — an ffmpeg-internal-state oracle harness was considered and explicitly deferred as a
 separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking-with-all-synchronous-pretzel.md`.
 
-- [ ] `TraceCapture`/`TraceKey`/`TraceValue` core types + serde + `From<&MapTracer>` in new
-      `tpt-kinetix-test-utils/src/trace/mod.rs`
-- [ ] `tpt-kinetix-test-utils/examples/trace_diff.rs` — shared first-divergence diff CLI operating
+- [x] `TraceCapture`/`TraceKey`/`TraceValue` core types + serde + `From<&MapTracer>` in new
+      `tpt-kinetix-test-utils/src/trace.rs` (implemented as a single module rather
+      than the originally planned `trace/mod.rs`)
+- [x] `tpt-kinetix-test-utils/examples/trace_diff.rs` — shared first-divergence diff CLI operating
       on two `TraceCapture` JSON dumps, generalizing `av1_symbol_trace_diff.rs`'s bespoke logic
-- [ ] AV1 `SymbolTraceEntry`/`BlockMarker` → `TraceCapture` conversion; rewire
-      `av1_symbol_trace_diff.rs` onto the shared diff function
-- [ ] Migrate 9 h264 localize-style `dbg_*.rs` files onto `trace_diff` (`dbg_chroma_localize.rs`,
-      `dbg_8x8_region.rs`, `dbg_hp352_localize.rs`, `dbg_skip_lf.rs`, `dbg_mb0_trace.rs`,
-      `dbg_ipppp.rs`, `dbg_8x8_localize.rs`, `dbg_cabac_b.rs`, `dbg_cabac_p_matrix.rs`); delete 8
-      stale ones already superseded by `MapTracer`/`trace_mb.rs` (`dbg_decode.rs`, `dbg_qpel_31.rs`,
-      `dbg_mb9.rs`, `dbg_mb11.rs`, `dbg_p2.rs`, `dbg_ipp.rs`, `dbg_pslice_bits.rs`,
-      `dbg_cabac_skip_probe.rs`)
-- [ ] `tpt-kinetix-aac/src/trace.rs` — new `AacTracer` trait (`on_scalefactors`/`on_pns_energy`/
-      `on_imdct_output`) + `MapAacTracer` in test-utils; replace `dbg_pns.rs`/`dbg_aac_noise.rs`
-      hand-rolled comparisons
+- [~] AV1 `SymbolTraceEntry`/`BlockMarker` → `TraceCapture` conversion and the
+      `av1_trace_capture` JSON producer are implemented. The legacy
+      `av1_symbol_trace_diff.rs` pixel-diff/report path is not rewired because
+      dav1d does not expose equivalent symbol callbacks through ffmpeg.
+- [ ] Reconcile and migrate the remaining H.264 localize/oracle diagnostics.
+      The original list is stale: `dbg_ipppp.rs`, `dbg_8x8_localize.rs`,
+      `dbg_cabac_b.rs`, and `dbg_cabac_p_matrix.rs` no longer exist; the other
+      five named files still contain bespoke comparison logic. The eight stale
+      files listed in the original plan are also already absent.
+- [ ] AAC tracing — **blocked in the current workspace**: the referenced
+      `tpt-kinetix-aac` crate is not a workspace member and no AAC crate exists
+      under the repository root. Reopen when an AAC decoder crate is restored.
 - [ ] Convert the 5 bespoke hand-transcribed-FFmpeg oracle-replay files
       (`dbg_bintrace_replay.rs`, `dbg_p_oracle_replay.rs`, `dbg_b_implied_pred.rs`,
       `dbg_b_qp_sweep.rs`, `dbg_cabac_twin.rs`) to emit `TraceCapture` JSON, logic unchanged
