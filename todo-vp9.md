@@ -770,7 +770,14 @@ dumps, and remember the file is CRLF (patch scripts must preserve it).
    end. Two pre-existing CLI rough edges noticed on the way (not VP9):
    rav1e's AV1 IVF output is not dav1d-decodable yet, and the H.264-input
    transcode path produced "no packets" on the test inputs.
-2. Optional hardening: fuzz the superframe splitter and odd-size paths
-   (CI `fuzz-check` compiles; local fuzzing still lacks the ASAN runtime).
+2. ~~Fuzz hardening: superframe splitter / odd-size paths~~ **Wired
+   (2026-09-26):** `fuzz_vp9_frame` feeds arbitrary bytes through the full
+   `Vp9Decoder::decode` path (superframe split → headers → tiles → recon), and
+   is now compiled by CI's `fuzz-check` job, executed nightly by the
+   `fuzz.yml` scheduled workflow (120 s default), and included in
+   `just fuzz-build`. It previously was NOT in any of those despite the todo
+   claiming so. Local execution is still impossible (nightly lacks the
+   libFuzzer/ASAN runtime on this machine); the documented local substitute
+   remains the 20k-case release proptest sweep.
 3. Profile-1/4:4:4 and 10/12-bit remain out of scope (rejected in strict
    mode with `KinetixError::Unsupported`).

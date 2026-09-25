@@ -16,3 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phase 4: AV1 OBU parser + rav1e encoder integration
 - Phase 5: Concurrent processing pipeline (crossbeam stages, backpressure)
 - Phase 6: RTMP ingest server + HLS packaging engine
+- VP9 decoder (`tpt-kinetix-vp9`): profile-0 8-bit 4:2:0 decode end to end
+  (superframes, tiles, intra/inter prediction, loop filter, frame-context
+  adaptation); byte-exact vs `ffmpeg -c:v vp9` on the 13-clip conformance
+  corpus (`pixel_exact: true`); wired into the pipeline (`codec-vp9` feature,
+  `Vp9DecodeStage`) and the CLI (`probe`, `transcode --vcodec av1`)
