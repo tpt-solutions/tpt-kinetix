@@ -101,13 +101,10 @@ fn ffmpeg_decode_to_yuv(ivf: &[u8], tag_of: &str) -> Option<Vec<u8>> {
     std::fs::read(&out).ok()
 }
 
-/// Planar MSE-based PSNR over Y then U then V; returns (y, u, v) dB.
+/// Planar MSE-based PSNR over each frame's contiguous Y/U/V layout.
 fn psnr(a: &[u8], b: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
-    fn plane_psnr(a: &[u8], b: &[u8]) -> f64 {
-        if a.is_empty() {
-            return 99.0;
-        }
-        let mse: u64 = a
+    fn plane_mse(a: &[u8], b: &[u8]) -> (u64, usize) {
+        let mse = a
             .iter()
             .zip(b)
             .map(|(x, y)| {
@@ -115,18 +112,39 @@ fn psnr(a: &[u8], b: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
                 (d * d) as u64
             })
             .sum();
-        let n = a.len() as u64;
-        if mse == 0 {
-            return 99.0;
-        }
-        10.0 * (255.0 * 255.0 * n as f64 / mse as f64).log10()
+        (mse, a.len())
     }
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    let (ya, rest) = a.split_at(w * h);
-    let (ua, va) = rest.split_at(cw * ch);
-    let (yb, rest) = b.split_at(w * h);
-    let (ub, vb) = rest.split_at(cw * ch);
-    (plane_psnr(ya, yb), plane_psnr(ua, ub), plane_psnr(va, vb))
+
+    let y_size = w * h;
+    let chroma_size = w.div_ceil(2) * h.div_ceil(2);
+    let frame_size = y_size + 2 * chroma_size;
+    assert_eq!(a.len() % frame_size, 0);
+    assert_eq!(b.len(), a.len());
+
+    let mut mse = [0u64; 3];
+    let mut samples = [0usize; 3];
+    for (frame_a, frame_b) in a.chunks_exact(frame_size).zip(b.chunks_exact(frame_size)) {
+        let (a_y, a_rest) = frame_a.split_at(y_size);
+        let (a_u, a_v) = a_rest.split_at(chroma_size);
+        let (b_y, b_rest) = frame_b.split_at(y_size);
+        let (b_u, b_v) = b_rest.split_at(chroma_size);
+        for (plane, (plane_a, plane_b)) in
+            [(a_y, b_y), (a_u, b_u), (a_v, b_v)].into_iter().enumerate()
+        {
+            let (plane_mse, plane_samples) = plane_mse(plane_a, plane_b);
+            mse[plane] += plane_mse;
+            samples[plane] += plane_samples;
+        }
+    }
+
+    let score = |plane: usize| {
+        if mse[plane] == 0 {
+            99.0
+        } else {
+            10.0 * (255.0 * 255.0 * samples[plane] as f64 / mse[plane] as f64).log10()
+        }
+    };
+    (score(0), score(1), score(2))
 }
 
 /// Decode an IVF with the Kinetix decoder and return the concatenated planar
@@ -136,7 +154,11 @@ fn kinetix_decode(ivf: &Ivf) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     for (i, frame) in ivf.frames.iter().enumerate() {
         if std::env::var("TPT_VP9_DBG").is_ok() {
-            if let Ok(h) = tpt_kinetix_vp9::header::parse_uncompressed_header(frame, &[None; 8]) {
+            if let Ok(h) = tpt_kinetix_vp9::header::parse_uncompressed_header(
+                frame,
+                &[None; 8],
+                &Default::default(),
+            ) {
                 eprintln!(
                     "frame {i}: {}x{} key={:?} intra_only={} ch_off={} ch_size={} tiles={}x{} q={} lf={}",
                     h.width, h.height, h.frame_type, h.intra_only,
@@ -218,25 +240,51 @@ fn check_clip_tagged(
     let (py, pu, pv) = psnr(&ours, &reference, ivf.width as usize, ivf.height as usize);
     let cw = ivf.width.div_ceil(2) as usize;
     let ch = ivf.height.div_ceil(2) as usize;
-    let u_off = ivf.width as usize * ivf.height as usize;
-    let u_bad = ours[u_off..u_off + cw * ch]
-        .iter()
-        .zip(&reference[u_off..u_off + cw * ch])
-        .filter(|(a, b)| a != b)
-        .count();
+    let y_size = ivf.width as usize * ivf.height as usize;
+    let chroma_size = cw * ch;
+    let frame_size = y_size + 2 * chroma_size;
+    let mut y_bad = 0usize;
+    let mut u_bad = 0usize;
+    let mut v_bad = 0usize;
+    let mut y_diff_pos = Vec::new();
     let mut u_diff_pos = Vec::new();
-    for (i, (a, b)) in ours[u_off..u_off + cw * ch]
-        .iter()
-        .zip(&reference[u_off..u_off + cw * ch])
+    let mut v_diff_pos = Vec::new();
+    for (frame, (frame_a, frame_b)) in ours
+        .chunks_exact(frame_size)
+        .zip(reference.chunks_exact(frame_size))
         .enumerate()
     {
-        if a != b {
-            u_diff_pos.push((i, *a, *b));
+        let (a_y, a_rest) = frame_a.split_at(y_size);
+        let (a_u, a_v) = a_rest.split_at(chroma_size);
+        let (b_y, b_rest) = frame_b.split_at(y_size);
+        let (b_u, b_v) = b_rest.split_at(chroma_size);
+        for (plane_a, plane_b, plane_width, bad, positions) in [
+            (a_y, b_y, ivf.width as usize, &mut y_bad, &mut y_diff_pos),
+            (a_u, b_u, cw, &mut u_bad, &mut u_diff_pos),
+            (a_v, b_v, cw, &mut v_bad, &mut v_diff_pos),
+        ] {
+            for (i, (a, b)) in plane_a.iter().zip(plane_b).enumerate() {
+                if a != b {
+                    *bad += 1;
+                    if positions.len() < 6 {
+                        let x = i % plane_width;
+                        let y = i / plane_width;
+                        positions.push((frame, x, y, *a, *b));
+                    }
+                }
+            }
         }
     }
     eprintln!(
-        "[{name}] PSNR Y={py:.2} U={pu:.2} V={pv:.2} dB (u_bad={u_bad}, first={:?})",
-        &u_diff_pos[..u_diff_pos.len().min(6)]
+        "[{name}] PSNR Y={py:.2} U={pu:.2} V={pv:.2} dB (y_bad={y_bad}, first={:?}, u_bad={u_bad}, first={:?}, v_bad={v_bad}, first={:?})",
+        y_diff_pos, u_diff_pos, v_diff_pos
+    );
+    // The decoder reports `pixel_exact: true` for this supported subset, so
+    // the harness asserts byte-exact output instead of staying diagnostic.
+    assert_eq!(
+        (y_bad, u_bad, v_bad),
+        (0, 0, 0),
+        "{name}: decoded planes differ from the ffmpeg/libvpx reference"
     );
 }
 

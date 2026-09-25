@@ -240,7 +240,7 @@ fn loop_filter_edge(
             if hev {
                 let mut f1 = (p1 - q1).clamp(-128, 127);
                 f1 = (3 * (q0 - p0) + f1).clamp(-128, 127);
-                let f1v = (f + 4).min(127) >> 3;
+                let f1v = (f1 + 4).min(127) >> 3;
                 let f2v = (f1 + 3).min(127) >> 3;
                 set!(-1, p0 + f2v);
                 set!(0, q0 - f1v);
@@ -632,6 +632,43 @@ fn apply(
     };
     if std::env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!("LFP k={} wd={} off={} pitch={}", k, wd, off, stride);
+    }
+    if std::env::var_os("TPT_VP9_OPS").is_some() {
+        // dump the kernel's touched window (8(+8) steps along `strtea`,
+        // [-depth, depth-1] along `strideb`) before/after, matching the
+        // oracle's KI/KO dumps byte-for-byte for op-level comparison
+        let depth: usize = if wd == 4 { 4 } else { wd / 2 };
+        let grab = |d: &[u8]| -> String {
+            // our loop_filter_edge always filters 8 steps per call (a 16_dual
+            // on the oracle side is two consecutive calls); oracle count=16
+            // dumps are split into 8-step halves when comparing
+            let mut s = String::new();
+            for step in 0..8usize {
+                let p = off + step * stepta;
+                for j in -(depth as i64)..(depth as i64) {
+                    let q = p as i64 + j * strideb as i64;
+                    if q < 0 || q as usize >= d.len() {
+                        continue;
+                    }
+                    s.push_str(&format!("{:02x}", d[q as usize]));
+                }
+            }
+            s
+        };
+        let pre = grab(data);
+        loop_filter_edge(data, off, stepta, strideb, e, i, h, wd);
+        eprintln!(
+            "OPD k={} wd={} off={} e={} i={} h={}\n  in={} out={}",
+            k,
+            wd,
+            off,
+            e,
+            i,
+            h,
+            pre,
+            grab(data)
+        );
+        return;
     }
     loop_filter_edge(data, off, stepta, strideb, e, i, h, wd);
 }

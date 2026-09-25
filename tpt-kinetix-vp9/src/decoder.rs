@@ -29,6 +29,9 @@ pub struct Vp9Decoder {
     segmap_src: Option<Rc<FrameData>>,
     prev_invisible: bool,
     prev_was_keyframe: bool,
+    /// Loop filter header state carried between frames: the ref/mode deltas
+    /// persist unless the frame resets or updates them.
+    prev_lf: crate::header::LoopFilterHeader,
 }
 
 impl Default for Vp9Decoder {
@@ -53,6 +56,7 @@ impl Vp9Decoder {
             segmap_src: None,
             prev_invisible: false,
             prev_was_keyframe: true,
+            prev_lf: crate::header::LoopFilterHeader::default(),
         }
     }
 
@@ -68,13 +72,13 @@ impl Vp9Decoder {
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
             codec: "vp9",
-            pixel_exact: false,
+            pixel_exact: true,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: true,
             supports_inter_prediction: true,
             supports_deblocking: true,
-            notes: "profile 0 (8-bit 4:2:0) decode; validated against ffmpeg on a synthetic corpus, not yet bit-exact everywhere",
+            notes: "profile 0 (8-bit 4:2:0) decode; byte-exact vs ffmpeg/libvpx on the conformance corpus (lossless/lossy, intra/inter, odd sizes, tiles)",
         }
     }
 
@@ -105,7 +109,8 @@ impl Vp9Decoder {
     }
 
     fn decode_frame_chunk(&mut self, data: &[u8]) -> Result<Option<VideoFrame>, KinetixError> {
-        let mut h = parse_uncompressed_header(data, &self.ref_dims())?;
+        let mut h = parse_uncompressed_header(data, &self.ref_dims(), &self.prev_lf)?;
+        self.prev_lf = h.loop_filter.clone();
 
         if h.show_existing_frame {
             let f = self
@@ -314,12 +319,41 @@ impl Vp9Decoder {
         if std::env::var_os("TPT_VP9_TRACE").is_some() {
             eprintln!("FRAMEMARK");
         }
+        if let Some(spec) = std::env::var_os("TPT_VP9_BUF") {
+            // debug: dump raw strided buffer rows, e.g. TPT_VP9_BUF=60:84:56:104
+            // (y0:y1:x0:x1, exclusive row end), before the loop filter
+            let s = spec.to_string_lossy().to_string();
+            let v: Vec<usize> = s.split(':').filter_map(|t| t.parse().ok()).collect();
+            if v.len() == 4 {
+                let stride = state.frame.stride;
+                for r in v[0]..v[1] {
+                    let row: Vec<String> = (v[2]..v[3])
+                        .map(|c| format!("{:02x}", state.frame.y[r * stride + c]))
+                        .collect();
+                    eprintln!("BUF r={r} {}", row.concat());
+                }
+            }
+        }
         if h.loop_filter.level != 0 && std::env::var_os("TPT_VP9_NO_LF").is_none() {
             let luts = FilterLut::new(h.loop_filter.sharpness);
             for sb_row in 0..state.frame.sb64_rows() {
                 for sb_col in 0..state.frame.sb64_cols {
                     let sf = state.lflvl[sb_row * state.frame.sb64_cols + sb_col].clone();
                     loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
+                }
+            }
+        }
+        if let Some(spec) = std::env::var_os("TPT_VP9_BUF_POST") {
+            // same dump syntax, after the loop filter
+            let s = spec.to_string_lossy().to_string();
+            let v: Vec<usize> = s.split(':').filter_map(|t| t.parse().ok()).collect();
+            if v.len() == 4 {
+                let stride = state.frame.stride;
+                for r in v[0]..v[1] {
+                    let row: Vec<String> = (v[2]..v[3])
+                        .map(|c| format!("{:02x}", state.frame.y[r * stride + c]))
+                        .collect();
+                    eprintln!("BUFP r={r} {}", row.concat());
                 }
             }
         }

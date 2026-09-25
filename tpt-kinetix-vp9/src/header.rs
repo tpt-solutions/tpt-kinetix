@@ -199,12 +199,18 @@ fn get_sbits_inv(br: &mut BitReader, n: u32, what: &str) -> Result<i32, KinetixE
 
 /// Parse the uncompressed header. `ref_dims` carries the (w, h) of the eight
 /// reference slots, or `None` where a slot is empty, for
-/// `frame_size_with_refs` and validity checks.
+/// `frame_size_with_refs` and validity checks. `lf_in` is the loop filter
+/// header state carried over from the previous frame: the ref/mode deltas are
+/// persistent and only reset on key / error-resilient / intra-only frames.
 pub fn parse_uncompressed_header(
     data: &[u8],
     ref_dims: &[Option<(u32, u32)>; 8],
+    lf_in: &LoopFilterHeader,
 ) -> Result<FrameHeader, KinetixError> {
-    let mut h = FrameHeader::default();
+    let mut h = FrameHeader {
+        loop_filter: lf_in.clone(),
+        ..FrameHeader::default()
+    };
     let mut br = BitReader::new(data);
 
     if br.try_f(2, "frame_marker")? != FRAME_MARKER {

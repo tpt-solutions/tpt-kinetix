@@ -41,7 +41,10 @@ fn main() {
                     vf.data.len()
                 );
                 if let Some(out) = std::env::var_os("TPT_VP9_YUV") {
-                    std::fs::write(out, &vf.data).expect("write yuv");
+                    // per-frame files so multi-frame clips can be compared
+                    // frame-by-frame against the oracle
+                    let p = std::path::PathBuf::from(&out).with_extension(format!("f{n}"));
+                    std::fs::write(p, &vf.data).expect("write yuv");
                 }
             }
             Ok(None) => eprintln!("frame {n}: no output"),
