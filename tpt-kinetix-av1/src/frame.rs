@@ -1381,13 +1381,30 @@ fn parse_cdef(
     let n = 1u32 << bits;
     let mut y = Vec::with_capacity(n as usize);
     let mut uv = Vec::with_capacity(n as usize);
+    // §5.9.17 `cdef_params()` reads the luma and chroma strengths
+    // *interleaved per index* — `cdef_y_pri_strength[i]`/`cdef_y_sec_strength[i]`
+    // immediately followed by `cdef_uv_pri_strength[i]`/`cdef_uv_sec_strength[i]`
+    // inside the same loop body, not as two separate passes over the table.
+    // Each strength is a single 6-bit field `pri | (sec_idx << 4)`
+    // (`cdef_y_pri_strength` is bits 0-3, `cdef_y_sec_strength` is the 2-bit
+    // index into `CDEF_SEC_STRENGTH = [0, 1, 2, 4]`).
+    //
+    // dav1d reads the same 6 bits in one go (`obu.c`):
+    //   for (i = 0; i < (1 << n_bits); i++) {
+    //       y_strength[i]  = get_bits(gb, 6);
+    //       if (!monochrome) uv_strength[i] = get_bits(gb, 6);
+    //   }
+    //
+    // Reading all luma entries first and all chroma entries afterwards (an
+    // earlier version of this function) misparses every chroma strength once
+    // `cdef_bits > 0` and, worse, leaves the bitstream at the wrong offset for
+    // *all* following frame-header syntax (loop restoration, tile info), which
+    // desyncs the whole frame.
     for _ in 0..n {
         let pri = read_f8(br, 4)?;
         let sec = read_f8(br, 2)?;
         y.push(pri | (sec << 4));
-    }
-    if num_planes > 1 {
-        for _ in 0..n {
+        if num_planes > 1 {
             let pri = read_f8(br, 4)?;
             let sec = read_f8(br, 2)?;
             uv.push(pri | (sec << 4));
@@ -2445,6 +2462,138 @@ mod tests {
         // cdef_y_pri=11, sec_idx=2 → 11 | (2<<4) = 43; uv pri=0, sec_idx=2 → 32.
         assert_eq!(fh.cdef_y_strength, vec![11 | (2 << 4)]);
         assert_eq!(fh.cdef_uv_strength, vec![(2 << 4)]);
+    }
+
+    #[test]
+    fn parse_cdef_reads_luma_and_chroma_strengths_interleaved_per_index() {
+        // §5.9.17 `cdef_params()`:
+        //   cdef_damping_minus_3  f(2)
+        //   cdef_bits            f(2)
+        //   for ( i = 0; i < ( 1 << CdefBits ); i++ ) {
+        //       cdef_y_pri_strength[ i ]  f(4)
+        //       cdef_y_sec_strength[ i ]  f(2)
+        //       if ( num_planes > 1 ) {
+        //           cdef_uv_pri_strength[ i ] f(4)
+        //           cdef_uv_sec_strength[ i ] f(2)
+        //       }
+        //   }
+        //
+        // The chroma pair for index `i` is read *before* the luma pair for
+        // index `i+1`. Reading the table as "all luma, then all chroma" yields
+        // the same result only when `cdef_bits == 0` (a single entry) — it
+        // desyncs every real stream that signals more than one entry.
+        //
+        // A table entry is stored packed as `pri | (sec_idx << 4)`, so the low
+        // nibble carries the primary strength and the top two bits the
+        // secondary index (`CDEF_SEC_STRENGTH = [0, 1, 2, 4]`).
+        //
+        // The values are deliberately asymmetric so that swapping the read
+        // order changes the result. Luma entries are `pri` 1..=4 with descending
+        // secondary indices; chroma entries are `pri` 5..=8 with ascending
+        // secondary indices.
+        let luma: [(u8, u8); 4] = [(1, 3), (2, 2), (3, 1), (4, 0)];
+        let chroma: [(u8, u8); 4] = [(5, 0), (6, 1), (7, 2), (8, 3)];
+        let mut bw = BitWriter::new();
+        bw.bits(0, 2); // cdef_damping_minus_3 = 0 → damping 3
+        bw.bits(2, 2); // cdef_bits = 2 → four entries
+        for ((y_pri, y_sec), (uv_pri, uv_sec)) in luma.iter().zip(chroma.iter()) {
+            bw.bits(*y_pri as u32, 4); // cdef_y_pri_strength[i]   f(4)
+            bw.bits(*y_sec as u32, 2); // cdef_y_sec_strength[i]   f(2)
+            bw.bits(*uv_pri as u32, 4); // cdef_uv_pri_strength[i] f(4)
+            bw.bits(*uv_sec as u32, 2); // cdef_uv_sec_strength[i] f(2)
+        }
+        let data = bw.finish();
+        let mut br = BitReader::new(&data);
+        let (damping, bits, y, uv) = parse_cdef(&mut br, false, false, true, 3).unwrap();
+        assert_eq!(damping, 3);
+        assert_eq!(bits, 2);
+        let pack = |pri: u8, sec: u8| pri | (sec << 4);
+        assert_eq!(
+            y,
+            luma.iter().map(|&(p, s)| pack(p, s)).collect::<Vec<u8>>()
+        );
+        assert_eq!(
+            uv,
+            chroma.iter().map(|&(p, s)| pack(p, s)).collect::<Vec<u8>>()
+        );
+        // 2 (damping) + 2 (bits) + 4 * 12 (four 12-bit y/uv groups) = 52 bits.
+        assert_eq!(
+            br.bits_read(),
+            52,
+            "cdef_params must consume exactly 2 + 2 + 12 * (1 << cdef_bits) bits"
+        );
+    }
+
+    #[test]
+    fn parse_cdef_packs_each_six_bit_field_as_pri_plus_shifted_secondary_index() {
+        // Each plane's `(pri, sec_idx)` pair is one contiguous 6-bit field
+        // `pri | (sec_idx << 4)`, exactly as dav1d reads it with a single
+        // `dav1d_get_bits(gb, 6)`. Writing raw 6-bit values must round-trip.
+        let luma: [(u8, u8); 4] = [(0, 0), (5, 1), (10, 2), (15, 3)];
+        let chroma: [(u8, u8); 4] = [(0, 3), (5, 2), (10, 1), (15, 0)];
+        let mut bw = BitWriter::new();
+        bw.bits(1, 2); // damping_minus_3 = 1 → damping 4
+        bw.bits(2, 2); // cdef_bits = 2 → four entries
+        for ((y_pri, y_sec), (uv_pri, uv_sec)) in luma.iter().zip(chroma.iter()) {
+            bw.bits(u32::from(*y_pri), 4);
+            bw.bits(u32::from(*y_sec), 2);
+            bw.bits(u32::from(*uv_pri), 4);
+            bw.bits(u32::from(*uv_sec), 2);
+        }
+        let data = bw.finish();
+        let mut br = BitReader::new(&data);
+        let (damping, bits, y, uv) = parse_cdef(&mut br, false, false, true, 3).unwrap();
+        assert_eq!((damping, bits), (4, 2));
+        let pack = |pri: u8, sec: u8| pri | (sec << 4);
+        assert_eq!(
+            y,
+            luma.iter().map(|&(p, s)| pack(p, s)).collect::<Vec<u8>>()
+        );
+        assert_eq!(
+            uv,
+            chroma.iter().map(|&(p, s)| pack(p, s)).collect::<Vec<u8>>()
+        );
+    }
+
+    #[test]
+    fn parse_cdef_skips_chroma_strengths_for_monochrome() {
+        // `num_planes == 1` (monochrome) omits the chroma strength fields, so
+        // the whole table is 6 bits per entry and the reader must not consume
+        // any chroma bits.
+        let mut bw = BitWriter::new();
+        bw.bits(0, 2); // damping_minus_3 = 0
+        bw.bits(1, 2); // cdef_bits = 1 → 2 entries
+        bw.bits(5, 4); // cdef_y_pri_strength[0]
+        bw.bits(2, 2); // cdef_y_sec_strength[0]
+        bw.bits(9, 4); // cdef_y_pri_strength[1]
+        bw.bits(0, 2); // cdef_y_sec_strength[1]
+        let data = bw.finish();
+        let mut br = BitReader::new(&data);
+        let (damping, bits, y, uv) = parse_cdef(&mut br, false, false, true, 1).unwrap();
+        assert_eq!((damping, bits), (3, 1));
+        assert_eq!(y, vec![5 | (2 << 4), 9]);
+        assert!(uv.is_empty());
+        assert_eq!(br.bits_read(), 2 + 2 + 2 * 6);
+    }
+
+    #[test]
+    fn parse_cdef_reads_nothing_for_lossless_or_intrabc_streams() {
+        // §5.9.17 short-circuits: `coded_lossless || allow_intrabc || !enable_cdef`
+        // consumes zero bits and yields the §5.9.17 default (`damping 3`,
+        // `cdef_bits 0`, one zero entry per plane).
+        let data = [0xFFu8; 4];
+        for (lossless, intrabc, enable) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let mut br = BitReader::new(&data);
+            let (damping, bits, y, uv) = parse_cdef(&mut br, lossless, intrabc, enable, 3).unwrap();
+            assert_eq!((damping, bits), (3, 0));
+            assert_eq!(y, vec![0]);
+            assert_eq!(uv, vec![0]);
+            assert_eq!(br.bits_read(), 0);
+        }
     }
 
     #[test]

@@ -8078,3 +8078,166 @@ cosmetic for output but worth one look alongside (1)).
 > tests, test-utils conformance 11/11, `cargo fmt --check` clean.
 > **2026-09-24 (cont'd) — corrected the standalone dav1d reference harness; no decoder change.** The workspace's `tpt-kinetix-test-utils::reference::run_dav1d_file` had two Windows-specific correctness issues: it forced `--threads 1`, which diverges from ffmpeg/libdav1d for some valid AV1 streams, and it used `-o -`, which this dav1d build contaminates with three non-frame bytes. The wrapper now uses default threading and writes to a temporary YUV file, then reads and removes that file. Re-run with dav1d 1.5.4: AV1 intra corpus **6/6 exact**; inter corpus remains **4/5 entries fully exact**, with `testsrc_160x90` at **6/7**, differing only at V `(67,44)` by `-1` (same known gap). This fixes the reference harness, not the remaining decoder discrepancy; `pixel_exact` remains `false`. Focused AV1/test-utils tests, clippy, and formatting pass.
 > **2026-09-24 (cont'd) — entropy oracle comparison completed; the remaining discrepancy is pre-CDEF, not coefficient desynchronization.** Rebuilt the temporary dav1d 1.5.4 oracle with a narrowly scoped `Post-uv-cf-blk` trace and compared it against Kinetix's existing `uv-cf-blk` trace for `testsrc_160x90` frame offset 7, block `mi=(32,16)`, chroma `(64,32)`, V plane, `16×16` transform. Both decoders read an all-zero block: dav1d reports `eob=-1` (its all-zero sentinel) and Kinetix reports `eob=0`; dav1d's trace reports `txtp=0`, matching Kinetix. Their pre-CDEF V pixels still differ: dav1d is flat `14 15 16 17` on all four rows, while Kinetix is `14 15 16 17 | 14 16 17 17 | 14 16 16 16 | 16 16 16 16`. Existing edge diagnostics show the visible vertical chroma edge is present but its filter mask correctly rejects the large discontinuity; no speculative deblock patch is justified. CDEF arithmetic is therefore ruled out again, and the remaining work is the pre-CDEF reconstruction/deblock line-state path. Temporary dav1d instrumentation was outside the repository; the Kinetix diagnostic gate was restored unchanged. A follow-up Kinetix LFEDGE trace captured the target `x=64` V edge: the filter is invoked with the expected nonzero level, but its pre/post values are unchanged because the filter mask rejects the edge; the differing target columns (`66–67`) are outside the filter's two-tap q-side reach. This rules out the visible vertical edge as the cause and narrows the bug to pre-deblock reconstruction of those columns.
+
+
+## Session 2026-09-26 — official short-signaling keyframe classified
+
+The local official FATE set was rerun with per-frame mismatch reporting. The
+`frames_refs_short_signaling.ivf` stream is a real 640x360 stream whose frame 0
+is an I-frame. Kinetix frame 0 already differs from dav1d at the first luma
+sample (x=39,y=0), with 66,272 differing bytes and PSNR Y/U/V
+53.18/58.64/58.83 dB. The parsed Kinetix header is an error-resilient keyframe,
+base qindex 138, no segmentation, no delta-Q, no delta-LF, and loop restoration
+enabled on all three planes (`lr=[1,1,1]`).
+
+Stage bisection for this first frame gives: normal 53.18 dB, no LR 51.13 dB,
+no CDEF 55.37 dB, no deblock 50.02 dB, and no LR/no CDEF 52.43 dB. All filters
+disabled is 48.54 dB, so the error begins before post-filters and the filter
+chain partially masks/propagates it. The next concrete investigation is the
+feature-rich CDEF index/strength path for this keyframe, followed by restoration
+unit metadata; no speculative reconstruction change should be made from the
+official aggregate alone.
+## Session 2026-09-25 — official FATE vectors run
+
+The official AV1 path is already implemented in
+`tpt-kinetix-test-utils/tests/conformance.rs` as
+`av1_fate_real_samples_vs_dav1d_when_available`, gated by
+`KINETIX_AV1_FATE_DIR`. A local copy of the FFmpeg FATE AV1 samples was run
+against ffmpeg's libdav1d reference decoder. Results:
+
+- `annexb`: skipped (Annex-B OBU container is not supported by this harness).
+- `decode_model`: 0/22 exact, expected-unsupported.
+- `film_grain`: 0/10 exact, expected-unsupported.
+- `frames_refs_short_signaling`: 0/50 exact.
+- `non_uniform_tiling`: 0/24 exact.
+- `seq_hdr_op_param_info`: 0/60 comparable frames exact.
+- `switch_frame`: 1/32 exact.
+- Overall official FATE result: **1/198 comparable frames bit-exact**.
+
+The synthetic corpus remains substantially healthier (6/6 exact intra
+entries; four of five inter entries exact, with one ±1 V sample in one frame),
+but the official vectors prove that AV1 is not yet globally pixel-exact. The
+single synthetic pre-CDEF discrepancy is not the whole official-vector gap;
+operating-point/header information, non-uniform tiling, and frame-switching
+paths require separate closure. `capabilities().pixel_exact` correctly remains
+`false`. The next priority is to classify each official mismatch by unsupported
+feature versus a decoder bug before changing reconstruction code.
+
+## Session 2026-09-25 — CDEF strength-table read order (real header desync)
+
+Classification of the `frames_refs_short_signaling` frame-0 mismatch found a
+genuine header-parsing bug, not a filter-arithmetic bug.
+
+`frames_refs_short_signaling.ivf` frame 0 parses as a 640x360 error-resilient
+keyframe with `cdef_bits = 3` — i.e. **eight** CDEF strength entries, the first
+official vector in the corpus that exercises more than one entry. The synthetic
+corpus only ever signals `cdef_bits = 0` (a single entry), which is why every
+prior session measured CDEF as "working".
+
+### The bug
+
+AV1 §5.9.17 `cdef_params()` reads each plane pair **interleaved per index**:
+
+```
+cdef_damping_minus_3  f(2)
+cdef_bits            f(2)
+for ( i = 0; i < ( 1 << CdefBits ); i++ ) {
+    cdef_y_pri_strength[ i ]  f(4)
+    cdef_y_sec_strength[ i ]  f(2)
+    if ( num_planes > 1 ) {
+        cdef_uv_pri_strength[ i ] f(4)
+        cdef_uv_sec_strength[ i ] f(2)
+    }
+}
+```
+
+`dav1d` (`src/obu.c:882-886`) does the same, reading one contiguous 6-bit field
+per plane per index:
+
+```c
+for (int i = 0; i < (1 << hdr->cdef.n_bits); i++) {
+    hdr->cdef.y_strength[i] = dav1d_get_bits(gb, 6);
+    if (!seqhdr->monochrome)
+        hdr->cdef.uv_strength[i] = dav1d_get_bits(gb, 6);
+}
+```
+
+`parse_cdef()` in `tpt-kinetix-av1/src/frame.rs` instead read **all** luma
+entries in one loop and **all** chroma entries in a second loop. The two orders
+coincide only when `cdef_bits == 0`. For `cdef_bits > 0` the parser therefore:
+
+1. Misassigned every chroma strength (reading luma bits as chroma and vice
+   versa), and
+2. — far worse — left the bitstream at the **wrong offset** for every
+   following frame-header field, since the total bit count is identical but the
+   contents are not. That desynced loop-restoration params, tile info, and the
+   entire tile payload.
+
+This is why the earlier per-stage bisection was confusing: disabling CDEF
+*improved* the frame (53.18 -> 55.37 dB) because the wrong strength table was
+actively applying the wrong filter strengths, and disabling deblock or loop
+restoration made it worse for reasons downstream of the bad header parse.
+
+### The fix
+
+`parse_cdef()` now reads each index's luma pair followed by its chroma pair
+inside a single loop, gated on `num_planes > 1`.
+
+### Measured effect
+
+Official `frames_refs_short_signaling` frame 0, against ffmpeg's libdav1d:
+
+| | Luma PSNR | Differing bytes (of 345600) |
+|---|---|---|
+| Before | 53.18 dB | 66,272 |
+| After | **67.62 dB** | **2,789** |
+
+The parsed chroma table changed completely, as expected:
+
+- luma (unchanged, it is read first in both orders): `[1, 3, 51, 6, 0, 33, 32, 17]`
+- chroma before: `[0, 2, 33, 1, 32, 0, 17, 1]`  (actually luma bits 2..7)
+- chroma after:  `[16, 0, 17, 0, 2, 1, 0, 1]`
+
+The first differing byte moved from offset 39 to offset 163,844 — luma
+`(4, 256)`, deep inside the frame rather than in the first superblock row, which
+is consistent with the whole *header* having been wrong rather than one filter.
+
+Official-set frame-0 PSNR after the fix:
+
+- `frames_refs_short_signaling`: 66.85 / 70.46 / 69.16 dB (was 53.18 / 58.64 / 58.83)
+- `decode_model`, `film_grain`, `non_uniform_tiling`, `seq_hdr_op_param_info`:
+  unchanged — those vectors still diverge for their own reasons (decoder model,
+  film grain, tiling, operating-point switching).
+
+The aggregate official figure is **still 1/198 exact**, because conformance is
+all-or-nothing per frame and no frame became byte-exact. `pixel_exact` correctly
+remains `false`. But frame 0 of the cleanest official keyframe is now 14 dB
+closer, and the remaining 2,789 differing bytes are a real reconstruction gap
+rather than a garbage header.
+
+### Regression coverage
+
+Four new unit tests in `tpt-kinetix-av1/src/frame.rs`:
+
+- `parse_cdef_reads_luma_and_chroma_strengths_interleaved_per_index` — asserts
+  the exact tables and that `cdef_params` consumes exactly
+  `2 + 2 + 12 * (1 << cdef_bits)` bits. The values are deliberately asymmetric so
+  that reverting to the two-pass order fails the test.
+- `parse_cdef_packs_each_six_bit_field_as_pri_plus_shifted_secondary_index` —
+  round-trips raw 6-bit fields the way dav1d reads them.
+- `parse_cdef_skips_chroma_strengths_for_monochrome` — `num_planes == 1` must
+  not consume any chroma bits and must leave the chroma table empty.
+- `parse_cdef_reads_nothing_for_lossless_or_intrabc_streams` — the §5.9.17
+  short-circuit consumes zero bits for `coded_lossless`, `allow_intrabc`, or
+  `!enable_cdef`.
+
+All 169 AV1 crate tests pass; clippy is clean with `-D warnings`.
+
+### Lesson
+
+Every prior session's "CDEF looks fine" conclusion was drawn from a corpus where
+`cdef_bits == 0`. The synthetic corpus has a **structural blind spot**: it never
+signals a multi-entry strength table, so a whole class of header-parsing bugs in
+CDEF (and any other per-index-signalled table) is invisible to it. The official
+FATE vectors immediately exposed it. Worth adding a synthetic entry with
+`cdef_bits > 0` so the fast local corpus covers this path too.
