@@ -63,13 +63,51 @@ Gates: 273/273 lib tests, ITU suite still 33/33 hard-checked BitExact (0
 regressions), clippy `-D warnings` clean, fmt clean, full `cargo build
 --workspace` clean.
 
-**Next session**: (1) CAPA1/CVPA1's Case A (frame-coded B pictures, still
-wholesale wrong) — needs its own per-MB trace vs JM; (2) the residual small
-diffs now visible on 18/19/21/22/24/25/28 (post this fix) — likely a
-deblock-rounding-class gap like frames 3/4/6/16, or a smaller remaining
-addressing detail; (3) Sharp's frames 5/11/13 (same-kind field-pair col,
-per #32ce item 1) still need their own trace — this session's fixes were
-both neutral there by design, not yet a fix for that class.
+**Follow-up same session — a second real `TemporalDirectCtx.col_poc` bug
+found and fixed, but it's NOT what's wrong with CAPA1/CVPA1's Case A.**
+`derive_temporal_direct` read `ctx.col_poc` — a single scalar, shared across
+every quadrant of a macroblock — for its `td` distance calculation, while
+`col_list0_poc`/`col_list1_poc` (the co-located block's own reference lists)
+were ALREADY correctly resolved per-quadrant by `apply_temporal_direct`'s
+`colocated_cell` closure (the `col_pair` branch picks whichever field —
+top or bottom — actually coded that specific 4×4/8×8 cell). For the
+`col_pair` case (current FRAME, colocated a synthesized field pair) this is
+a real bug: two quadrants coded by different fields of the pair need
+different `td` (their distance to the current picture differs), but every
+quadrant got the SAME `col_poc` (`col.pic_order_cnt`, itself only the
+pair's `min(top,bottom)` — see `interleave_field_pair_entry`). Fixed by
+threading `col_poc` through the closure as an explicit per-call value
+(`derive_temporal_direct` now takes it as a parameter instead of reading
+`ctx.col_poc` directly), matching how `col_list0_poc`/`col_list1_poc`
+already worked. The `current_field_parity`/same-kind branches are
+unaffected (single physical col field either way, `ctx.col_poc` already
+correct there).
+
+**Measured**: no change on Sharp (12/15, expected — no col_pair case there)
+or on CAPA1/CVPA1's frame 7/30+ (unchanged wholesale-wrong). **Root-caused
+why**: `KINETIX_B_MB_DBG` on CAPA1's frame_num=3/poc=10 slice (the wholesale-
+wrong display-7 picture) shows `direct_spatial=false` (temporal direct is
+selected) but the first 24 macroblocks are almost all explicit `BB8x8`/
+`B16x8`/`BL0`/`BL1_16x16` types with real nonzero `cbp` and plausible-looking
+MVs — only 2 of 24 are `BSkip`/direct-derived. A wholesale, whole-frame wrong
+result can't come from 2 skip MBs; **the actual bug for CAPA1/CVPA1's Case A
+is in ordinary (non-direct) B-slice motion compensation or MV prediction
+against a synthesized combined-pair reference frame, not in temporal direct
+at all** — this session's `col_pair`/`col_poc` work, while a real and now-
+fixed bug, was never Case A's cause. Correctness fix kept regardless (it's
+provably right per spec and regression-tested clean); Case A itself is
+still open.
+
+**Next session**: (1) **CAPA1/CVPA1's actual Case A bug** — trace ordinary
+B MC/MV-prediction (not direct mode) against a `combine_field_pairs_into_frames`-
+synthesized reference on frame_num=3/poc=10; the interleaved reference
+frame's pixel data, `mc_frame`/`frame` selection, or explicit-mode MV
+prediction against a combined-pair neighbour are the next suspects, in that
+order; (2) the residual small diffs now visible on 18/19/21/22/24/25/28 —
+likely a deblock-rounding-class gap like frames 3/4/6/16, revisit once (1)
+lands; (3) Sharp's frames 5/11/13 (same-kind field-pair col, per #32ce item
+1) still need their own trace — untouched by this session's three fixes by
+design.
 
 ## SESSION #32cf (2026-09-26, later) — real DpbEntry gap found (frame pictures lose BottomFieldOrderCnt); fix attempted and REVERTED (net regression on Sharp, root cause of the regression not pinned)
 

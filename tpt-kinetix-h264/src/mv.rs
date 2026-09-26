@@ -1647,9 +1647,12 @@ enum MvYConv {
 /// `libavcodec/h264_direct.c`). Returns `(mvL0, refIdxL0, mvL1)`; `refIdxL1`
 /// is always 0 — the co-located picture is always `RefPicList1[0]` itself.
 ///
-/// `col_list0_poc`/`col_list1_poc` are the reference lists the co-located
-/// cell's `ref_idx` indexes — for a combined field-pair co-located picture
-/// these are the coding field's own lists (see [`ColPairCtx`]).
+/// `col_poc`/`col_list0_poc`/`col_list1_poc` are the co-located PICTURE'S own
+/// poc and the reference lists its `ref_idx` indexes — for a combined
+/// field-pair co-located picture these are the SPECIFIC coding field's own
+/// poc/lists (see [`ColPairCtx`]), not `ctx.col_poc`/`ctx.col_list*_poc`
+/// (which describe the pair as a whole and are wrong for `td`'s per-field
+/// distance once a specific quadrant's coding field is known).
 ///
 /// Unlike spatial direct, list usage is unconditional here: even a
 /// co-located intra block yields a valid (zero-motion, ref 0) bi-predictive
@@ -1657,6 +1660,7 @@ enum MvYConv {
 fn derive_temporal_direct(
     col: &MvCell,
     ctx: &TemporalDirectCtx,
+    col_poc: i64,
     col_list0_poc: &[i64],
     col_list1_poc: &[i64],
     yconv: MvYConv,
@@ -1696,7 +1700,7 @@ fn derive_temporal_direct(
         MvYConv::FrameToField => mv_col[1] / 2,
     };
     let tb = (ctx.current_poc - pic_a_poc).clamp(-128, 127) as i32;
-    let td = (ctx.col_poc - pic_a_poc).clamp(-128, 127) as i32;
+    let td = (col_poc - pic_a_poc).clamp(-128, 127) as i32;
     if td == 0 {
         // JM's mvscale == 9999 branch: copy the converted motion, L1 = 0.
         return ([mv_col[0], mv_y], ref_idx_l0 as i32, [0, 0]);
@@ -1734,77 +1738,88 @@ fn apply_temporal_direct(
     // coordinate, returning it with the coding field's list pocs and the
     // vertical unit conversion — JM `mc_direct.c`'s three co-located access
     // branches (same-kind / combined field pair / frame-into-field view).
-    let colocated_cell = |cy: usize, cx: usize| -> Option<(&MvCell, &[i64], &[i64], MvYConv)> {
-        let grid = colocated?;
-        if let Some(pair) = &ctx.col_pair {
-            // Current FRAME, co-located picture is a combined field pair:
-            // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
-            // inference), coding field = the pair field closer to the current
-            // poc; the pair's grid row `2k + parity` holds field MB row `k`.
-            let f = if ctx.direct_8x8_inference_flag {
-                rsd(cy >> 1)
-            } else {
-                cy >> 1
-            };
-            let fx = if ctx.direct_8x8_inference_flag {
-                rsd(cx)
-            } else {
-                cx
-            };
-            let bottom =
-                (ctx.current_poc - pair.bottom_poc).abs() >= (ctx.current_poc - pair.top_poc).abs();
-            let (l0, l1) = if bottom {
-                (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
-            } else {
-                (&pair.top_list0_poc, &pair.top_list1_poc)
-            };
-            let grid_row = 2 * (f / 4) + bottom as usize;
-            let cell = grid.get(grid_row * mb_width + mb_col)?;
-            return Some((
-                cell.get((f % 4) * 4 + (fx % 4))?,
-                l0,
-                l1,
-                MvYConv::FieldToFrame,
-            ));
-        }
-        if let Some(parity) = ctx.current_field_parity {
-            // Current FIELD, co-located picture is a frame: read the
-            // SAME-parity field view — frame 4×4 row = 2·(field 4×4 row) +
-            // parity; col motion is in frame units.
-            let v = if ctx.direct_8x8_inference_flag {
-                rsd(cy)
-            } else {
-                cy
-            };
-            let vx = if ctx.direct_8x8_inference_flag {
-                rsd(cx)
-            } else {
-                cx
-            };
-            let frame4 = 2 * v + parity as usize;
-            let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
-            return Some((
-                cell.get((frame4 % 4) * 4 + (vx % 4))?,
+    let colocated_cell =
+        |cy: usize, cx: usize| -> Option<(&MvCell, i64, &[i64], &[i64], MvYConv)> {
+            let grid = colocated?;
+            if let Some(pair) = &ctx.col_pair {
+                // Current FRAME, co-located picture is a combined field pair:
+                // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
+                // inference), coding field = the pair field closer to the current
+                // poc; the pair's grid row `2k + parity` holds field MB row `k`.
+                let f = if ctx.direct_8x8_inference_flag {
+                    rsd(cy >> 1)
+                } else {
+                    cy >> 1
+                };
+                let fx = if ctx.direct_8x8_inference_flag {
+                    rsd(cx)
+                } else {
+                    cx
+                };
+                let bottom = (ctx.current_poc - pair.bottom_poc).abs()
+                    >= (ctx.current_poc - pair.top_poc).abs();
+                let (l0, l1) = if bottom {
+                    (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
+                } else {
+                    (&pair.top_list0_poc, &pair.top_list1_poc)
+                };
+                let grid_row = 2 * (f / 4) + bottom as usize;
+                let cell = grid.get(grid_row * mb_width + mb_col)?;
+                let col_poc = if bottom {
+                    pair.bottom_poc
+                } else {
+                    pair.top_poc
+                };
+                return Some((
+                    cell.get((f % 4) * 4 + (fx % 4))?,
+                    col_poc,
+                    l0,
+                    l1,
+                    MvYConv::FieldToFrame,
+                ));
+            }
+            if let Some(parity) = ctx.current_field_parity {
+                // Current FIELD, co-located picture is a frame: read the
+                // SAME-parity field view — frame 4×4 row = 2·(field 4×4 row) +
+                // parity; col motion is in frame units.
+                let v = if ctx.direct_8x8_inference_flag {
+                    rsd(cy)
+                } else {
+                    cy
+                };
+                let vx = if ctx.direct_8x8_inference_flag {
+                    rsd(cx)
+                } else {
+                    cx
+                };
+                let frame4 = 2 * v + parity as usize;
+                let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
+                return Some((
+                    cell.get((frame4 % 4) * 4 + (vx % 4))?,
+                    ctx.col_poc,
+                    ctx.col_list0_poc,
+                    ctx.col_list1_poc,
+                    MvYConv::FrameToField,
+                ));
+            }
+            // Same picture kind: the current MB's own co-located MB.
+            let cell = grid.get(mb_idx)?;
+            Some((
+                cell.get((cy % 4) * 4 + (cx % 4))?,
+                ctx.col_poc,
                 ctx.col_list0_poc,
                 ctx.col_list1_poc,
-                MvYConv::FrameToField,
-            ));
-        }
-        // Same picture kind: the current MB's own co-located MB.
-        let cell = grid.get(mb_idx)?;
-        Some((
-            cell.get((cy % 4) * 4 + (cx % 4))?,
-            ctx.col_list0_poc,
-            ctx.col_list1_poc,
-            MvYConv::None,
-        ))
-    };
+                MvYConv::None,
+            ))
+        };
     for &q in quads {
         if ctx.direct_8x8_inference_flag {
             let corner = 12 * (q / 2) + 3 * (q % 2);
             let (cy, cx) = (4 * mb_row + corner / 4, 4 * mb_col + corner % 4);
             let derived = match colocated_cell(cy, cx) {
-                Some((col, l0, l1, yconv)) => derive_temporal_direct(col, ctx, l0, l1, yconv),
+                Some((col, col_poc, l0, l1, yconv)) => {
+                    derive_temporal_direct(col, ctx, col_poc, l0, l1, yconv)
+                }
                 None => ([0, 0], 0, [0, 0]),
             };
             let (mv0, ref0, mv1) = derived;
@@ -1815,7 +1830,9 @@ fn apply_temporal_direct(
                 let bx = 2 * (q % 2) + sub % 2;
                 let (cy, cx) = (4 * mb_row + by, 4 * mb_col + bx);
                 let derived = match colocated_cell(cy, cx) {
-                    Some((col, l0, l1, yconv)) => derive_temporal_direct(col, ctx, l0, l1, yconv),
+                    Some((col, col_poc, l0, l1, yconv)) => {
+                        derive_temporal_direct(col, ctx, col_poc, l0, l1, yconv)
+                    }
                     None => ([0, 0], 0, [0, 0]),
                 };
                 let (mv0, ref0, mv1) = derived;
@@ -2513,6 +2530,7 @@ mod tests {
         let (mv0, ref0, mv1) = derive_temporal_direct(
             &col,
             &ctx,
+            ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
             MvYConv::None,
@@ -2544,6 +2562,7 @@ mod tests {
         let (mv0, ref0, mv1) = derive_temporal_direct(
             &col,
             &ctx,
+            ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
             MvYConv::None,
@@ -2572,6 +2591,7 @@ mod tests {
         let (mv0, ref0, mv1) = derive_temporal_direct(
             &MvCell::INTRA,
             &ctx,
+            ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
             MvYConv::None,
@@ -2599,6 +2619,7 @@ mod tests {
         let (_, ref0, _) = derive_temporal_direct(
             &col,
             &ctx,
+            ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
             MvYConv::None,
