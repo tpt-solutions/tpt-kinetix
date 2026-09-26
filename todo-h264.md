@@ -1,5 +1,88 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 (2026-09-27) — REAL FIX: inverted field-parity selection in temporal-direct's field-pair lookup; a second, larger bug remains
+
+Followed the addendum above's own plan (dump the derived MV, compare to a
+hand/spec re-derivation) and found the actual bug directly, without needing
+to instrument JM further — a straight read of JM's `mc_direct.c`
+(`update_direct_mv_info_temporal`) against our own `apply_temporal_direct`
+was enough once the right function was located.
+
+**The bug.** When temporal direct's co-located reference is a synthesized
+combined field pair (`ctx.col_pair`), both `apply_temporal_direct` (mv.rs
+~1766) and `resolve_spatial_colocated_cells` (mv.rs ~1461, the col_zero_flag
+lookup used by spatial direct) picked "the field whose POC is farther from
+the current picture's POC" as the co-located source, via:
+
+```rust
+let bottom = (current_poc - pair.bottom_poc).abs() >= (current_poc - pair.top_poc).abs();
+```
+
+JM's `mc_direct.c` picks the **closer** one: `iabs(poc-bottom) >
+iabs(poc-top) → use TOP; else → use BOTTOM` — i.e. bottom is selected
+whenever it's closer-or-tied, which is `<=`, not `>=`. The comment already
+sitting directly above the buggy line even said "coding field = the pair
+field **closer** to the current poc" — the code just did the opposite of its
+own documentation. Fixed both occurrences (commit follows this entry).
+
+**Verified with a real pixel comparison, not just spec reasoning.** MB(0,0)
+of CAPA1's target slice (POC=10, frame_num=3) has a zero-residual first
+4×4 luma block (`cbf=false`, confirmed via the #32d3 CABAC trace), so its
+pre-deblock pixels are pure MC output with nothing else applied. Before the
+fix it differed from JM's own `predeblock_poc10.gray` dump; after, that
+whole 8×8 quadrant (quadrants 0, 1 — both `B_Direct_8x8`) is bit-exact, and
+so is quadrant 2 (`B_L0_8x8`, explicit — presumably improved as a
+side-effect of quadrant 0/1's neighbour-MV-predictor input now being
+correct, since explicit blocks predict their MV from already-decoded
+neighbours in the same macroblock).
+
+**Gates: 273/273 lib, ITU suite 33/33 hard-checked BitExact (no
+regressions), clippy/fmt clean.** `CAPA1_TOSHIBA_B`/`CVPA1_TOSHIBA_B`'s
+own hard-exact-frame count is unchanged at 50/90 — this fix is real and
+locally verified, but the picture-level scoring hasn't moved yet because a
+**second, much larger bug remains** (below).
+
+**A second, separate, much bigger bug is still open.** Two findings:
+1. MB(0,0)'s own quadrant 3 (`B_Direct_8x8`, the exact same code path as the
+   now-fixed quadrants 0/1) still differs after the fix: `nd=59/64,
+   max_diff=14` within that one 8×8 quadrant. Its colocated corner lookup
+   (`q=3` → `corner=15` → `(cy,cx)=(3,3)` → after `rsd()`, `f=0, fx=3`) reads
+   the *same* `(grid_row, mb_col)` cell as quadrant 0 did (now proven
+   correct) but at sub-index 3 instead of 0 — so either that specific
+   sub-index within the cell is wrong, or (more likely, given the small
+   magnitude) this is a genuinely different, smaller bug, not a recurrence
+   of the parity flip.
+2. Far more importantly: **362 of this frame's 396 macroblocks still differ
+   substantially** (typically ~254/256 luma samples wrong per MB,
+   `max_diff` up to 166) — checked via a per-MB diff histogram over the full
+   `predeblock_poc10.gray` comparison. This is a completely different scale
+   of corruption than quadrant 3's small residual-sized error, and it can't
+   be the same field-parity bug: the three reference pictures this slice
+   actually uses (`POC` pairs `(0,1)`, `(6,7)`, `(12,13)` — write-out indices
+   2, 5, 8) are each independently confirmed **bit-exact as their own
+   standalone displayed frames**, so the corruption isn't in reference pixel
+   data, isn't in reference-list construction (already verified in #32d2),
+   and (per #32d3) isn't in CABAC parsing. It has to be in how *most*
+   macroblocks' motion compensation actually samples/combines those
+   (correct) reference pictures — plausibly not direct-mode-specific at all,
+   given how many MBs are affected.
+
+**Next session:** don't assume the remaining bug is related to today's fix —
+treat it as a fresh, much-higher-impact investigation. Pick one badly-wrong
+MB from the diff histogram (e.g. `MB(20,0)`, `nd≈254, max_diff=154` — dumped
+this session but not yet inspected), get its `KINETIX_BINTRACE` mode/mv/
+ref_idx info the same way #32d2/#32d3 did for MB(0,0), and check: is it
+Direct or explicit? Which `ref_idx`/list? Given the reference pixels and MVs
+plausibly check out individually, suspect either (a) explicit bi-pred
+averaging/rounding (`(predL0+predL1+1)>>1`, §8.4.2.3.2) applied to a
+correctly-fetched-per-list pair, or (b) sub-pel luma interpolation
+(§8.4.2.2.1) itself being wrong for *this* multi-slice B accumulator's
+finalize path specifically — remember frame-coded P slices in this exact
+clip are already proven bit-exact (#32d2), so whatever's wrong must be
+something the **B**-specific reconstruction code does differently from the
+already-correct P path (bi-pred combination being the obvious candidate,
+since P never needs it).
+
 ## SESSION #32d3 ADDENDUM 2 (2026-09-27) — narrowed to MC itself: block0 (zero residual, `cbf=false`) already shows a small but real, growing error
 
 Went one step further on the addendum above's own suggestion: MB(0,0)'s
