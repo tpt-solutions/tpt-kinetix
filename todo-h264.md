@@ -1,5 +1,94 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 6 (2026-09-27) — REAL FIX #3 landed: combined-field-pair colocated row mapping halved the frame 4×4 row BEFORE the direct-8×8-inference rounding; L1 grid now byte-identical to JM; CAPA1/CVPA1 50/90 → 56/90 bit-exact
+
+Followed addendum 5's next step, with one improvement to the method: instead
+of diffing the field grids one hop upstream (poc 12/13 stores), instrument
+the **colocated read at the point of consumption** — a `JM_COL` dump inside
+JM's `update_direct_mv_info_temporal` (mc_direct.c, gated framepoc/mb.y,
+env `KINETIX_DBG_JM_COL`; binary `/tmp/jm-oracle/jm/ldecod_col2.exe`) and a
+`KCOL` dump at our `apply_temporal_direct`'s colocated_cell call — both
+printing the colocated cell's contents, the chosen list, and the derived
+mv0/ref0/mv1 per direct quadrant. This collapses all intermediate
+representation questions (pair-row mapping, RSD corner choice, field
+conversion) into one directly diffable line.
+
+**Direct mode's consumption is CORRECT at row 13.** The first comparison
+(mb row 13, all direct quadrants): every colocated read and every derived
+vector matched JM exactly — addendum 5's leading theory ("colocated grid
+carries mv_x off by one") was wrong *for that row*; direct mode was
+exonerated and the 512-cell diff had to come from explicit-L1 partitions.
+
+**Re-localized to the first diverging cell in raster order.** With JM_PRED
+widened to rows {0,5,13} (all columns; `ldecod_pred2.exe`), the explicit-L1
+diff cells' mvd/pred/final all matched JM except where their predictor read
+a wrong stored neighbour — and the earliest such neighbour is **MB(0,0)
+q3** (stored L1 ours (5,3) vs JM (4,3), exactly +1 in x), whose L1 comes
+from temporal direct. `KCOL`/`JM_COL` at row 0 caught it red-handed:
+
+```
+MB(0,0) q1 (corner 4×4 row 0): JM col=(-14,-4) @pair(0,2)  → mv1=( 5,3)
+MB(0,0) q3 (corner 4×4 row 3): JM col=(-13,-4) @pair(1,2)  → mv1=( 4,3)
+ours   q1:                     col=(-14,-4)                → mv1=( 5,3) ✓
+ours   q3:                     col=(-14,-4)                → mv1=( 5,3) ✗
+```
+
+JM's q1 and q3 read DIFFERENT pair cells; ours read the SAME one.
+
+**The bug.** In `apply_temporal_direct`'s `col_pair` branch, the field-view
+4×4 row was computed as `rsd(cy >> 1)` — halving the frame 4×4 row BEFORE
+the direct-8×8-inference rounding. JM (and the spec's inference rule) round
+the FRAME row first, THEN halve: `RSD(block_y + j0) >> 1`. Our `rsd` is a
+byte-exact transcription of JM's `RSD` (`((x&2) ? (x|1) : (x&~1))`, verified
+against `lib/lcommon/ifunctions.h`), so the column mapping was fine and the
+same-kind/parity branches were fine (corner coordinates are RSD fixed
+points) — only the pair branch's ORDER was wrong. Concretely: for a
+bottom-half quadrant of MB row r, the corner frame row is 4r+3; JM reads
+field 4×4 row RSD(4r+3)>>1 = 2r+1, while our `rsd(2r+1)` = 2r for even r —
+one field row too high. Odd MB rows coincide (rsd(2r+1) = 2r+1 there),
+which is exactly why row 13 matched while row 0 diverged.
+
+**Effect — full closure of the stored-grid gap.** Re-diffing the poc-10
+stored L1 grid after the fix: **512 → 0 differing cells** — our committed
+grid is now byte-identical to JM's `mv_info` for the previously
+wholesale-wrong frame-coded B picture. Whole-clip display-order comparison
+vs JM/ITU reference: **CAPA1_TOSHIBA_B 50/90 → 56/90 bit-exact frames**
+(and CVPA1_TOSHIBA_B likewise 50/90 → 56/90), with every remaining wrong
+frame now a small-to-moderate residual diff (e.g. CAPA1 frame 18: ~11% of
+luma samples, max_diff 118 — vs "362 of 396 MBs wholesale wrong" before
+this fix chain started). ITU conformance suite passes (no regressions).
+
+**Why this survived addendum 3's per-quadrant verification:** that
+verification was done at row 13 only, where the two orderings coincide for
+bottom-half quadrants (r = 13 is odd). Row 0's q3 is the earliest divergent
+case and had never been checked cell-for-cell until this session's
+consumption-point dump.
+
+**Remaining CAPA1/CVPA1 gap (next session):** 34 wrong frames remain, all
+small-fraction diffs. Candidates, in rough priority:
+1. `resolve_spatial_colocated_cells`'s `col_pair` branch still computes
+   `f = (4*mb_row + by) >> 1` with **no RSD at all** (its parity branch is
+   plain too). JM's spatial colZero colocated reads use `RSD(...)` under
+   inference (`mb_prediction.c`'s `get_colocated_MVs`-equivalent); mirror
+   the fixed temporal mapping there and re-measure. Spatial-direct-heavy
+   frames (CAPA1's `direct_spatial_mv_pred_flag` varies per stream, but
+   CVPA1 rows dominated by spatial direct) are the suspects.
+2. Field-coded B pictures' temporal direct (the `(0,±small)` residual
+   frames like CAPA1 3/4/6 with nd≈60-70) — likely the same
+   field-view mapping family; the same `JM_COL` technique applies (gate
+   framepoc to the field pictures' pocs).
+3. Deblocking-level residual diffs (max_diff 2-6 frames) — possibly the
+   same BS/mirrored-reference class as prior sessions' fixed items, worth
+   a `predeblock` vs `postdeblock` split to localize.
+
+**Housekeeping:** all probes reverted (mv.rs keeps only the fix + comment;
+decoder/mod.rs clean). Gates on the clean tree: `cargo fmt --check`,
+`clippy -D warnings`, `cargo test -p tpt-kinetix-h264` 388/0,
+`itu_conformance` ok. JM tooling in `/tmp/jm-oracle/jm`:
+`ldecod_col2.exe` (`JM_COL`, rows 0/5/13), `ldecod_pred2.exe` (`JM_PRED`,
+rows 0/5/13), `ldecod_grid.exe` (`JMG` full-picture poc 10),
+`ldecod_mv3.exe` (`JM_MV` mb.x∈{15,16} row 13).
+
 ## SESSION #32d4 ADDENDUM 5 (2026-09-27) — built full-picture MV-grid oracle; L1 store proven correctly persisted; real residual diff is 512 L1 cells whose dominant signature (JM x = ours − 1, 320 cells) points at the colocated field-pair grid's mv_x, i.e. the P-field decoders' stored MV grids
 
 Picked up addendum 4's next step (dump JM's left-neighbour A for
