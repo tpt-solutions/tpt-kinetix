@@ -8241,3 +8241,43 @@ signals a multi-entry strength table, so a whole class of header-parsing bugs in
 CDEF (and any other per-index-signalled table) is invisible to it. The official
 FATE vectors immediately exposed it. Worth adding a synthetic entry with
 `cdef_bits > 0` so the fast local corpus covers this path too.
+
+## SESSION #47 (2026-09-26) — reconciliation: local corpus is now essentially bit-exact; memory describing "testsrc2 IBC/warp-affine gaps" is stale
+
+Re-ran the full `dav1d`-gated local test suite (`cargo test -p
+tpt-kinetix-test-utils --test conformance -- av1 --nocapture`, `dav1d`
+available in this environment) rather than trusting prior session notes/
+memory, per CLAUDE.md's "check code before trusting todo.md checkboxes."
+Result — **every intra and inter entry in `av1_intra_corpus`/
+`av1_inter_corpus`/`av1_inter_sequence`/the plain ffmpeg-reference test is
+now bit-exact vs `dav1d`**, including `testsrc2`, `testsrc_64x64`,
+`mandelbrot`, `smptebars_96x64` — all the clips this file's older sessions
+(warp-sample scan bug, IBC/Phase-E gate, `decode_skip_mode_block` audit) left
+as open/gated. Whatever concurrent work landed those fixes wasn't captured
+back into this file's running log or into memory
+([[project_av1_testsrc2_ibc_progress]] is now stale) — treat this session's
+measurement as current ground truth over that file's narrative.
+
+**Exactly one gap found in the whole local corpus:** `testsrc_160x90` frame 7
+(of 8), one V-plane chroma sample at `(67,44)`: `kin=16 ref=17`, a plain
+off-by-one (delta=-1), 83.69 dB. Everything else in that same clip (frames
+1-6, and Y/U elsewhere in frame 7) is exact, so this is a single rounding
+edge case, not an entropy or reference-management desync. Not root-caused
+this session (budget spent re-establishing the baseline instead) — likely
+candidates for next time: chroma subpel MC convolution rounding (`ROUND0`/
+`ROUND1`-equivalent shift) at a specific fractional-MV phase, or CfL/chroma-
+from-luma prediction rounding, since both are the usual suspects for an
+isolated ±1 chroma LSB. `dbg_av1_160_grid.rs` (test-utils) already exists as
+a scratch harness for re-decoding this exact corpus entry frame-by-frame;
+extend it with a per-plane diff dump at frame 7 rather than starting fresh.
+
+**Remaining actual open item is the official FATE corpus**, not this local
+one: `av1_fate_real_samples_vs_dav1d_when_available` needs
+`KINETIX_AV1_FATE_DIR` to run (skipped in this environment), and the prior
+CDEF-fix session above measured the official set at 1/198 byte-exact with
+`decode_model`/`film_grain`/`non_uniform_tiling`/`seq_hdr_op_param_info`
+still diverging for their own (much larger-scope: decoder-model timing,
+film-grain synthesis, non-uniform tiling, operating-point switching) reasons
+— those are real, sizeable features, not bugs in the already-implemented
+path, and are the actual next milestone before `pixel_exact` can honestly
+flip for anything beyond this synthetic corpus.
