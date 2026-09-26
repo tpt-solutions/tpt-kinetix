@@ -1,5 +1,184 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d2 ADDENDUM 2 (2026-09-26, later still) — the `mb_skip_flag` lead was a false trail; our MB(0,0) decode is provably correct
+
+The addendum below this one ends with "next session: print the actual byte
+offset / first two raw bytes handed to `CabacDecoder::new`... and compare
+directly". Did exactly that instead of waiting for a future session, and it
+**disproves the whole `mb_skip_flag`-divergence hypothesis** rather than
+confirming it — a genuinely useful negative result, not a dead end, so
+recorded in full here to stop anyone re-treading it.
+
+**The byte-level check.** Added a temporary debug print (not committed —
+reverted after use) of `header.data_bit_offset` and the RBSP's first 8 bytes
+at the point `try_decode_real_b_slice_cabac` receives them. Result:
+`data_bit_offset=23`, `rbsp_head=[9e, 65, 07, f6, 21, 6c, bd, 0a]` — and 23
+bits is *exactly* what hand-summing every header field's bit width from the
+JM trace gives (`1+5+1+4+1+5+1+1+1+1+1+1 = 23`: first_mb_in_slice,
+slice_type, pic_parameter_set_id, frame_num, field_pic_flag,
+pic_order_cnt_lsb, direct_spatial_mv_pred_flag, num_ref_idx_override_flag,
+ref_pic_list_reordering_flag_l0/l1, cabac_init_idc, slice_qp_delta). Since
+NAL units are always byte-aligned in the stream, a bit offset's value mod 8
+is meaningful even when read off JM's own (differently-based) internal
+counters — 23 mod 8 = 7, one `cabac_alignment_one_bit` pads to byte 3, and
+`rbsp[3] = 0xf6` is confirmed to be bit `1` (spec requires this alignment bit
+literal `1`) by inspecting `rbsp[2] = 0x07 = 00000111` — its LSB is `1`.
+**Conclusion: both decoders are handed the identical bytes at the identical
+offset for this slice's CABAC data.** The byte-alignment hypothesis from the
+previous addendum is dead — not "probably fine", *confirmed* fine.
+
+**Then went one step further than planned: hand-ran the CABAC engine itself.**
+Per §9.3.1.2, `codIRange = 510`, `codIOffset = read_bits(9)` from
+`[0xf6, 0x21]` = `111101100`₂ = **492**. First bin: `mb_skip_flag`, ctxIdx 24
+(B, ctxIdxInc=0, no neighbours at MB(0,0)), `pStateIdx=28`, `valMPS=1` (hand
+re-verified in the previous addendum). Per §9.3.3.2.1: `qCodIRangeIdx =
+(510>>6)&3 = 3`; `rangeTabLps[28][3] = 56` (this codebase's own
+`RANGE_TAB_LPS` table, row 28); `codIRange -= 56` → `454`; compare
+`codIOffset(492) >= codIRange(454)` → **true, so this is the LPS branch**:
+`binVal = !valMPS = !1 = 0`. **`mb_skip_flag` decodes to `0` (not skipped) —
+exactly what our decoder computed.** This is a from-first-principles,
+spec-literal replay using bytes both decoders provably share, independent of
+either decoder's own source code, and it says our decode of MB(0,0) is
+**correct**, not buggy.
+
+**So what was actually going on with JM's `mb_skip_flag (1)` trace line?**
+Given the byte/engine math above, it cannot describe the true value of
+`mb_skip_flag` for this MB under the shared context model — it must be
+something this session misread: quite possibly (as floated and then
+half-dismissed in the very first version of this investigation, before the
+"corrected" edit overwrote it) actually the trace line for a **different**
+macroblock address than assumed, or JM's own accounting associates it with a
+different slice than the one this session cross-referenced via the ambiguous
+`*** POC: N ... Type M ***` header line — which this session's own text
+already flagged as not matching any independently-computed POC/type value
+cleanly (`POC: 9`/`POC: 18` matched neither `framepoc` nor a simple picture
+counter). That header line's real meaning was never pinned down and should
+not be trusted for NAL identification without independent verification
+(exactly what caught this false trail before it went further).
+
+**Net effect on the open bug.** The wholesale corruption in
+CAPA1/CVPA1's 6 frame-coded B pictures is real (confirmed independently via
+both the ITU fixture and ffmpeg/JM raw output, all agreeing) but its cause is
+**not** the first macroblock's skip decision — that's now proven correct.
+The actual divergence is somewhere later in the same slice's CABAC stream
+(direct-mode sub-block, a later macroblock's context, or the residual path),
+and finding it needs the bit-level, per-bin oracle comparison this
+investigation kept deferring — JM's plain `-DTRACE=1` syntax dump is
+fundamentally the wrong tool for this (proven twice now: once by #32d1's
+MB-address blocker, once by this session's mis-attributed trace line).
+
+**Next session: build the real bit-level oracle before touching this bug
+again.** Patch JM's `biaridecod.c` (`decode_decision`/`biari_decode_symbol`)
+to `fprintf` `(ctxIdx or a caller-supplied tag, codIRange, codIOffset,
+pStateIdx, valMPS, binVal)` for every call, add the symmetric print to
+`entropy::CabacDecoder::decode_decision` (gated by an env var, like the
+existing `BINTRACE` machinery in this file already does for higher-level
+events), then run both on the exact same NAL (`frame_num=3`, `POC=10`,
+`first_mb_in_slice=0`) and diff line-by-line. The first line where `binVal`
+differs is the real bug's location — no more guessing from syntax-level
+summaries or ambiguous trace headers.
+
+## SESSION #32d2 ADDENDUM (2026-09-26, later) — narrowed to the exact first divergent bin: `mb_skip_flag` at MB(0,0)
+
+Continued directly from #32d2's "next session" plan, using the same
+patched-JM-`fprintf` technique rather than the planned bit-level trace (didn't
+need it yet — got far enough with the existing `-DTRACE=1` syntax dump).
+
+**Found the precise divergence.** For the target slice (frame_num=3, POC=10,
+`first_mb=0`, the frame-coded B slice from #32d2), JM's `trace_dec.txt` shows
+its very first macroblock syntax element is `mb_skip_flag (1)` — i.e. **JM
+decodes MB address 0 as skipped** (`B_Skip`, pure direct mode, no further
+data) — and the `mb_type (22)`/`sub_mb_type`/`ref_idx`/`mvd` sequence that
+looks exactly like our own `KINETIX_BINTRACE` dump (`B-MB(0,0) b_type_raw=22`,
+`sub_types=[0,0,1,0]`) belongs to JM's macroblock address **1**, not 0. Our
+decoder's own trace prints that identical `b_type_raw=22` content directly
+under the label `B-MB(0,0)` — i.e. **our decoder treats MB address 0 itself
+as non-skip** and reads `mb_type` there instead of skipping it. This is the
+first CABAC decision of the slice diverging between the two decoders.
+
+Ruled out as the cause, each fairly conclusively:
+- **Not the slice header / bit-position going into CABAC data.** Every header
+  field JM parses for this NAL matches ours exactly, field by field
+  (`frame_num=3`, `field_pic_flag=0`, `pic_order_cnt_lsb=10`,
+  `direct_spatial_mv_pred_flag=0`, `num_ref_idx_override_flag=0`,
+  `cabac_init_idc=0`, `slice_qp_delta=0`) — confirmed by re-deriving the SPS's
+  actual `pic_order_cnt_type` while checking this (it's **0**, not 1 as
+  earlier sessions' notes imply elsewhere — re-verify before trusting any
+  POC-type-1-specific hypothesis about this stream). This is the same header
+  shape as every already-bit-exact P slice in this same clip, so the header
+  parser and its resulting `data_bit_offset`/CABAC-alignment are proven
+  correct for this exact SPS/PPS pairing.
+- **Not the MBAFF pairing branch.** `mbaff_frame = mb_aff && !field_pic_flag`
+  in `parse_b_slice_cabac_range` (`slice_data/cabac_b.rs:620`) correctly
+  evaluates `false` here (`sps.mb_adaptive_frame_field_flag == 0` for this
+  SPS) — checked the call site (`decoder/mod.rs:3607`) passes
+  `sps.mb_adaptive_frame_field_flag` (not e.g. `!frame_mbs_only_flag`, which
+  would have wrongly made every interlaced-SPS frame picture take the MBAFF
+  pairing path). MB(0,0)'s address resolves via the plain `else` branch
+  (`(mb_idx % mb_cols, mb_idx / mb_cols, mb_idx)`), confirming the `(0,0)`
+  label in our trace is a genuine mb_idx=0 read, not a mislabeled mb_idx=1.
+- **Not the `mb_skip_flag` context-index derivation or its init table.**
+  `MbSkipNeighbors::ctx_idx_inc` at MB(0,0) (no left/top neighbour in either
+  decoder, interlaced or not) is `0` regardless of any interlaced-vs-
+  progressive distinction — nothing picture-structure-dependent feeds into it.
+  `MbSkipFlagContext::new_b_slice`'s init table (`MB_SKIP_FLAG_B_CTX`, ctxIdx
+  24..26) has its own detailed doc comment recording a previously-found and
+  fixed transcription bug in this exact table, i.e. it has already been
+  cross-checked against the real FFmpeg/spec tables once; skimmed it again
+  here and it still reads correctly against `cabac_init_idc=0`.
+
+**What's left, unconfirmed:** either the CABAC arithmetic engine's initial
+(`codIRange`, `codIOffset`) at this exact byte position is wrong (would be a
+generic engine bug, surprising given how much CABAC content elsewhere in this
+same codebase is proven bit-exact), or something about the *specific*
+sequence of contexts adapted between engine init and this first
+`mb_skip_flag` decode leaves `ctx[0]`'s `(pStateIdx, valMPS)` different from
+JM's — but `new_b_slice` runs fresh per slice-data call with no
+carried-over adaptation, so there is no earlier adaptation *within this
+slice* to diverge on; the state going into the very first decode is exactly
+`init_pb_ctx(24, 0, 25)`'s output, which was "skimmed and reads correctly"
+above but not exhaustively hand-verified bit-for-bit against Table 9-12 of
+the spec (only compared against this codebase's own already-tested constant
+table, which cross-checks internal consistency, not spec conformance from
+first principles).
+
+**Update, same session: hand-verified the init arithmetic — it's correct,
+which shrinks the remaining suspect list to one item.** `CABAC_CTX_INIT_PB0[24]
+= (18, 64)` (this codebase's table, carrying its own `verify-tables`
+provenance comment against a specific FFmpeg commit). Plugging `m=18, n=64,
+SliceQPY=25` into `CabacContext::init` by hand: `preCtxState =
+Clip3(1,126, ((18*25)>>4)+64) = Clip3(1,126, 28+64) = 92`; since `92 > 63`,
+`pStateIdx = 92-64 = 28`, `valMPS = 1`. `entropy.rs`'s `CabacContext::init`
+implements exactly this formula (`(((m*qp)>>4)+n).clamp(1,126)`, then the
+same `<=63`/`>63` split) — no bug found. **`valMPS = 1` here means the model's
+own prior favours `mb_skip_flag = 1` (skip)** — consistent with JM's actual
+decode (skip) being the *expected*, high-probability outcome for this
+context, not a surprising edge case; our decoder producing the *opposite*
+(non-skip, the low-probability LPS branch) at the very first bin of the slice
+now looks less like "wrong context" and more like either the codIRange/
+codIOffset entering this decode being wrong (data-dependent engine bug, or a
+wrong byte fed to `CabacDecoder::new`), or a genuinely rare correct LPS event
+that JM's independent engine would also treat as LPS were it given the exact
+same bytes — which is the one thing not yet directly checked: **whether our
+`data_bit_offset`/`byte_align()` computation for this specific slice header
+shape lands on the same start-of-CABAC-data byte as JM's**, byte-for-byte,
+not just "should be the same because the header fields matched" (matching
+decoded field *values* proves the bit reader consumed the right *number* of
+bits per field, but doesn't rule out an off-by-one in `byte_align()`'s
+rounding itself, which would shift the CABAC start by up to 7 bits and is
+untested in isolation here).
+
+**Next session:** print the actual byte offset / first two raw bytes handed
+to `CabacDecoder::new` for this slice (both decoders) and compare directly —
+cheaper than building a full bit-level oracle and rules out or confirms the
+byte-alignment hypothesis in one step. If the bytes match, the bug is in the
+arithmetic engine itself for this specific (codIRange, codIOffset, pStateIdx,
+valMPS) tuple, at which point build a **bit-level** oracle (JM
+`biaridecod.c` instrumented to `fprintf` `codIRange`/`codIOffset`/`binVal`
+per call, symmetric debug output added to
+`entropy::CabacDecoder::decode_decision`) — the syntax-level `-DTRACE=1` dump
+used this session cannot see engine internals.
+
 ## SESSION #32d2 (2026-09-26) — CAPA1's "wholesale-wrong B" class root-caused to frame-coded CABAC B routing; routing fixed, real bug is downstream and still open
 
 Picked up #32d1's blocked oracle attempt with a different, faster approach:
