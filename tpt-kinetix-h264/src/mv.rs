@@ -1749,8 +1749,15 @@ fn apply_temporal_direct(
                 // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
                 // inference), coding field = the pair field closer to the current
                 // poc; the pair's grid row `2k + parity` holds field MB row `k`.
+                // Field 4×4 row: apply the direct-8×8-inference rounding to the
+                // FRAME 4×4 row FIRST (JM `RSD(block_y + j0) >> 1`), THEN halve
+                // to the field view. Halving before rounding (`rsd(cy >> 1)`)
+                // put every bottom-half quadrant of an even MB row one field
+                // row too high — RSD(4r+3)>>1 = 2r+1, while rsd(2r+1) = 2r for
+                // even r — reading the co-located 8×8 directly above the one
+                // JM reads.
                 let f = if ctx.direct_8x8_inference_flag {
-                    rsd(cy >> 1)
+                    rsd(cy) >> 1
                 } else {
                     cy >> 1
                 };
