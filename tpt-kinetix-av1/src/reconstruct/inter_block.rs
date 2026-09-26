@@ -1707,7 +1707,14 @@ impl<'a> TileDecodeState<'a> {
         // chroma on every inter-intra block (visible as ±1-13 sample chroma
         // diffs on the 128x96 inter clip's inter-intra blocks).
         if interintra_type != 0 {
-            self.apply_interintra(mi_row, mi_col, bsize, interintra_mode, ii_wedge_index);
+            self.apply_interintra(
+                mi_row,
+                mi_col,
+                bsize,
+                interintra_type,
+                interintra_mode,
+                ii_wedge_index,
+            );
         }
 
         // Debug: dump pre-residual prediction (post-OBMC) for error-region blocks.
@@ -2535,19 +2542,21 @@ impl<'a> TileDecodeState<'a> {
         mi_row: usize,
         mi_col: usize,
         bsize: usize,
+        interintra_type: u8,
         ii_mode: u8,
         wedge_index: usize,
     ) {
         let bw_px = BLOCK_WIDTH[bsize];
         let bh_px = BLOCK_HEIGHT[bsize];
-        let mask = crate::reconstruct::wedge::wedge_mask(bsize, false, wedge_index);
-        // Inter-intra blends ALL THREE planes (dav1d recon_tmpl.c runs the
-        // same `interintra_type` block for luma (II_MASK(0, ..)) and again
-        // per chroma plane (II_MASK(chr_layout_idx, ..)) with intra
-        // prediction built from each plane's own reconstructed edges). The
-        // chroma planes use the CHROMA-layout wedge masks (generated at
-        // chroma resolution per the spec's per-plane wedge mask process),
-        // not the sub-sampled luma mask.
+        // §7.11.3.6: a WEDGE block uses the (sign-0) wedge mask; a plain
+        // INTERINTRA (BLEND) block uses the mode-dependent 1-D ramp of
+        // `ii_weights_1d` (dav1d `build_nondc_ii_masks` / `ii_dc` = all-32),
+        // sub-sampled by the plane's subsampling.
+        const II_WEIGHTS_1D: [u8; 32] = [
+            60, 52, 45, 39, 34, 30, 26, 22, 19, 17, 15, 13, 11, 10, 8, 7, 6, 6, 5, 4, 4, 3, 3, 2,
+            2, 2, 2, 1, 1, 1, 1, 1,
+        ];
+        let wedge_mask = crate::reconstruct::wedge::wedge_mask(bsize, false, wedge_index);
         let chroma_mask = crate::reconstruct::wedge::wedge_mask_420(bsize, false, wedge_index);
         for plane in 0..3usize {
             let (subx, suby) = if plane == 0 {
@@ -2557,13 +2566,31 @@ impl<'a> TileDecodeState<'a> {
             };
             let pw = bw_px >> subx;
             let ph = bh_px >> suby;
-            // Per-plane mask: the luma-layout mask for plane 0, the
-            // chroma-layout mask (at chroma resolution) for planes 1-2.
-            let (plane_mask, pmw) = if plane == 0 {
-                (&mask, bw_px)
+            // Per-plane mask: luma-layout for plane 0, chroma-layout for
+            // planes 1-2 (WEDGE), or the ii ramp (BLEND).
+            let plane_mask: Vec<u8>;
+            let pmw;
+            if interintra_type == 2 {
+                if plane == 0 {
+                    plane_mask = wedge_mask.to_vec();
+                    pmw = bw_px;
+                } else {
+                    plane_mask = chroma_mask.to_vec();
+                    pmw = bw_px >> self.subsampling_x as usize;
+                }
             } else {
-                (&chroma_mask, bw_px >> self.subsampling_x as usize)
-            };
+                let w_at = |y: usize, x: usize| match ii_mode {
+                    0 => 32u8,                                                // DC: flat 50/50
+                    1 => II_WEIGHTS_1D[(y << suby).min(31)],                  // V: ramp over y
+                    2 => II_WEIGHTS_1D[(x << subx).min(31)],                  // H: ramp over x
+                    _ => II_WEIGHTS_1D[(y.min(x) << subx.max(suby)).min(31)], // SMOOTH
+                };
+                plane_mask = (0..ph)
+                    .flat_map(|y| (0..pw).map(move |x| (y, x)))
+                    .map(|(y, x)| w_at(y, x))
+                    .collect();
+                pmw = pw;
+            }
             let (pstride, tile_w, tile_h) = match plane {
                 1 => (self.uv_stride, self.tile_cw, self.tile_ch),
                 2 => (self.uv_stride, self.tile_cw, self.tile_ch),
@@ -2584,8 +2611,21 @@ impl<'a> TileDecodeState<'a> {
                 continue;
             }
             // Intra prediction from this plane's own reconstructed neighbours.
+            // Edge availability is tile-relative (dav1d passes
+            // `bx > tiling.col_start` / `by > tiling.row_start`): a block at
+            // the tile's top row has no above edge, one at the left column no
+            // left edge — unavailable edges are the 128 fill.
             let borders = crate::reconstruct::predict::block_borders(
-                plane_buf, pstride, tile_w, tile_h, pw, ph, px, py, true, false,
+                plane_buf,
+                pstride,
+                tile_w,
+                tile_h,
+                pw,
+                ph,
+                px,
+                py,
+                py > 0,
+                px > 0,
             );
             let mut tmp = vec![0i32; pw * ph];
             crate::reconstruct::predict::predict_intra_block(
@@ -2602,17 +2642,13 @@ impl<'a> TileDecodeState<'a> {
             );
             if std::env::var("KINETIX_AV1_DBG_IIDUMP").is_ok() && mi_col == 4 && mi_row == 20 {
                 eprintln!(
-                    "IIDUMP plane={plane} ii_mode={ii_mode} wedge={wedge_index} pw={pw} ph={ph} intra={:?} mask={:?}",
+                    "IIDUMP plane={plane} ii_type={interintra_type} ii_mode={ii_mode} wedge={wedge_index} pw={pw} ph={ph} intra={:?} mask={:?}",
                     &tmp[..(pw * ph).min(32)],
                     {
-                        let sub = if plane == 0 { 0 } else { 1 };
                         (0..4)
                             .map(|y| {
                                 (0..8)
-                                    .map(|x| {
-                                        mask[((y << sub).min(bh_px - 1)) * bw_px
-                                            + ((x << sub).min(bw_px - 1))]
-                                    })
+                                    .map(|x| plane_mask[y.min(ph - 1) * pmw + x.min(pmw - 1)])
                                     .collect::<Vec<u8>>()
                             })
                             .collect::<Vec<Vec<u8>>>()

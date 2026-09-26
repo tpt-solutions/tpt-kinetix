@@ -8452,3 +8452,41 @@ Frame 1's (415..447, 68..100) region: identify the block at mi ≈ (104,17)
 (`KINETIX_AV1_DBG_PX` with tile-local px, `KINETIX_AV1_DBG_OBMC` covers
 mi_row 16-22), decide whether it is OBMC-blend or MC-edge; then re-check
 frames 3+ for cascade collapse.
+
+## Session 2026-09-27 (cont'd 2) — inter-intra blend masks and edge availability fixed; frame 1 residue 1,773 → 1,219 bytes
+
+The remaining frame-1 region (415-447, 68-100) is a 32×32 BLEND-type
+inter-intra block at mi (104,16) (dav1d trace: `Post-interintra[t=1,m=1,w=0]`,
+32×32 NONE, mv=(8,44), y-cf eob=11). Entropy matches dav1d for the whole
+region; two prediction-side bugs found in `apply_interintra`:
+
+1. **Wrong mask for BLEND blocks**: `apply_interintra` used the WEDGE mask
+   (`wedge_mask(bsize, sign-0, wedge_index)`) for every inter-intra type. A
+   BLEND (non-wedge, spec `interintra_type == INTERINTRA`) block must use the
+   mode-dependent 1-D ramp `ii_weights_1d[32] = {60,52,45,...}` (dav1d
+   `build_nondc_ii_masks`): flat 32 for DC, ramp over y for V, over x for H,
+   over min(x,y) for SMOOTH, sub-sampled by the plane's subsampling. dav1d's
+   `II_MASK` selects `ii[interintra_mode]` for BLEND vs `wedge[0][wedge_idx]`
+   for WEDGE. (Inter-intra wedges read no sign bit — dav1d's `II_MASK` uses
+   `wedge[0]` unconditionally — so Kinetix not reading a sign is correct.)
+2. **Hardcoded edge availability**: the intra half of the blend built its
+   borders with `have_above=true, have_left=false` unconditionally. dav1d's
+   `prepare_intra_edges` passes tile-relative availability
+   (`bx > tiling.col_start`, `by > tiling.row_start`) — the (104,16) block
+   sits on tile 1's top row, so dav1d has NO above edge (128 fill) while
+   Kinetix read the previous tile-plane row. Fixed to `py > 0` / `px > 0`.
+
+Frame 1 residue: 1,773 → **1,219** bytes (±2 max), now scattered across
+cols 401-447 rows 83-127 and tile 3 / chroma (943 bytes outside tile 1's
+luma rows). Frames 3+ first-diff positions moved (cascade shifts as
+upstream improves) but remain ~120-220k bytes — later frames carry their
+own inter-intra/OBMC/warp mixes compounding through references.
+
+### Next session's starting point
+
+The (403,83) block: 16×8 VERT leaf at mi (100,20), skip=1, mv=(1,-1) —
+BLEND with SMOOTH intra (mask over min(x,y)) on leaf 1; leaf 2 is motion_mode
+OBMC (`Post-motionmode[1]`). Verify the SMOOTH blend and the OBMC neighbour
+prediction positions tile-locally vs frame-globally (the OBMC job px/py are
+tile-local; the reference read was fixed but the neighbour-blend write side
+may still need the same treatment for OBMC-over-tile-edge cases).
