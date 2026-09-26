@@ -1458,7 +1458,10 @@ fn resolve_spatial_colocated_cells(
         // Current is a FRAME, co-located picture is a synthesized combined
         // field pair: mirrors `apply_temporal_direct`'s `col_pair` branch.
         let current_poc = ctx.map(|c| c.current_poc).unwrap_or(0);
-        let bottom = (current_poc - pair.bottom_poc).abs() >= (current_poc - pair.top_poc).abs();
+        // See the identical fix + rationale in `apply_temporal_direct`'s
+        // `col_pair` branch (session #32d4): JM picks the closer-or-tied
+        // field, i.e. `<=`, not `>=`.
+        let bottom = (current_poc - pair.bottom_poc).abs() <= (current_poc - pair.top_poc).abs();
         let mut out = [MvCell::INTRA; 16];
         for by in 0..4usize {
             let f = (4 * mb_row + by) >> 1;
@@ -1756,8 +1759,15 @@ fn apply_temporal_direct(
                 } else {
                     cx
                 };
+                // JM `mc_direct.c`'s `update_direct_mv_info_temporal`: pick TOP
+                // only when BOTTOM is *strictly farther* from the current POC
+                // (`iabs(poc - bottom) > iabs(poc - top)`); ties, and every
+                // other case, pick BOTTOM. i.e. `bottom` is true whenever
+                // bottom is the closer-or-tied field, which is `<=`, not `>=`
+                // (a flipped comparison previously selected the FARTHER field
+                // as the co-located source — see todo-h264.md session #32d4).
                 let bottom = (ctx.current_poc - pair.bottom_poc).abs()
-                    >= (ctx.current_poc - pair.top_poc).abs();
+                    <= (ctx.current_poc - pair.top_poc).abs();
                 let (l0, l1) = if bottom {
                     (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
                 } else {
