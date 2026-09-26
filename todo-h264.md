@@ -1,5 +1,128 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d2 (2026-09-26) — CAPA1's "wholesale-wrong B" class root-caused to frame-coded CABAC B routing; routing fixed, real bug is downstream and still open
+
+Picked up #32d1's blocked oracle attempt with a different, faster approach:
+instead of parsing JM's `TRACE=1` syntax dump, patched JM's `write_out_picture`
+(`output.c`) and `decode_poc`'s call site (`image.c`) to `fprintf(stderr, ...)`
+the POC/structure/frame_num of every picture as it's written or decoded —
+two ad-hoc counters, ~10 lines total, rebuilt in seconds. This gave an exact
+`our display index -> JM POC` table in one run, which the trace-parsing
+approach in #32d1 was blocked on. Worth remembering as the default technique
+next time a decode-order/display-order correlation is needed against JM.
+
+**First, a methodology correction of my own within this session:** re-measuring
+CAPA1 without `FIELD_DISPLAY_ORDER=1` gives ~89% wrong on *every* frame
+including the IDR — that is not a regression, it is comparing decode-order
+output against a display-order reference (CAPA1 has B pictures, so the two
+orders differ from frame 1 onward). `dbg_field_triage` requires
+`FIELD_DISPLAY_ORDER=1` for any of its per-frame numbers to mean anything on a
+clip with B pictures; without it every prior session's "N/90 bit-exact" count
+would also be nonsense, so this must have been implicit good practice already
+— just wasn't written down. Written down now: **always set
+`FIELD_DISPLAY_ORDER=1`** for CAPA1/CVPA1/any B-picture clip. With it set,
+JM's `out.yuv` and `ffmpeg -pix_fmt yuv420p -f rawvideo` output are
+byte-identical to each other (confirmed via `cmp`) and reproduce exactly the
+documented 50/90, confirming both are safe oracles and #32d0/#32d1's numbers
+were real.
+
+**Root cause of the 6 "wholesale-wrong" frames (display 7/33/34/58/85/88).**
+The JM instrumentation shows all 6 share one property none of the prior
+B-field hypotheses checked: `structure=0` (JM's FRAME, not TOP_FIELD/
+BOTTOM_FIELD) with `slice_type=1` (B). They are **frame-coded B pictures**,
+the B-slice counterpart of the frame-coded *intra* picture #32d0 fixed —
+CAPA1 mixes field- and frame-coded pictures freely (`frame_mbs_only_flag=0`,
+`mb_adaptive_frame_field_flag=0`, so plain non-MBAFF frame pictures are legal
+per-access-unit anywhere in the stream). `decode_interlaced` correctly
+returns `Fallback` for every frame-coded picture (`!header.field_pic_flag`),
+but `try_decode_real_slice`'s post-#32d0 gate (`decodable_as_frame =
+header.field_pic_flag || is_intra_slice`) only admitted the intra case,
+declining frame-coded B — which then fell through to `decode_slice`, whose B
+path is CAVLC-only-by-design (the CABAC B accumulator lives in
+`try_decode_real_slice`, per that function's own doc comment) and cannot
+actually decode a CABAC B slice, corrupting the whole frame.
+
+Also worth recording precisely because it contradicts the obvious guess:
+**frame-coded P pictures already worked.** There are 14 frame-coded P
+pictures in this same clip (POC 18/24/36/42/48/54/72/78/84/96/102/108/138/156)
+declined by the exact same gate and routed to the exact same `decode_slice`
+fallback — and every one of them is bit-exact. `decode_slice`'s P path,
+unlike its B path, is a complete implementation. So the bug was never "frame-
+coded inter pictures are unhandled here" in general, only "frame-coded CABAC
+B specifically has no complete decode path outside `try_decode_real_slice`".
+
+**Fix applied (commit follows this entry):** `decodable_as_frame` in
+`try_decode_real_slice` (`decoder/mod.rs`) now also admits a frame-coded
+picture when it's a CABAC B slice, routing it to the same real B-slice
+accumulator progressive streams already use. Also simplified/corrected the
+gate's field-picture term to `!header.field_pic_flag` — `header.field_pic_flag
+|| is_intra_slice` was accidentally an *or*, which looks like it would have
+wrongly admitted every field picture too; in practice this was a no-op bug
+(never triggered) because `decode_interlaced` never returns `Fallback` for a
+genuine field picture in this codebase — it fully drives every field slice
+type itself — so `header.field_pic_flag` is always `false` by the time this
+function runs on an interlaced SPS. Left a comment explaining why the
+`!field_pic_flag` guard is still worth keeping despite currently being
+always-true (defends the half-height-crop panic class documented below it
+if that invariant ever changes).
+
+**This fix does NOT change CAPA1's byte output at all** — confirmed via
+`cmp` that `ours_capa1_disp.yuv` (before) and `ours_capa1_fix.yuv` (after)
+are bit-identical, despite `KINETIX_BINTRACE` confirming the display-poc=10 B
+slice now genuinely runs through `try_decode_real_slice`'s CABAC B path
+(`REFLIST B L0/L1 (multi-slice)` + real per-MB CABAC decode + `REORDER_PUSH
+[i-slice] poc=10`) instead of being declined to `decode_slice`. **The real
+bug is downstream, shared by both entry points** — `decode_slice`'s B path
+and `try_decode_real_slice`'s B path apparently converge on the same
+(wrong) reconstruction for this picture, which rules out "wrong entry point"
+as the actual defect and points at something in the shared B-slice
+reconstruction/reference-list/CABAC-context code that has never been
+exercised on a *frame-coded* B picture whose reference pool includes
+*field-pair-combined* DPB entries before.
+
+Checked and ruled out as the culprit before running out of session budget:
+- **`col_pair` / temporal-direct field-pair context is correctly populated.**
+  Added a temporary instrumented print (not committed — reverted) confirming
+  `TemporalDirectCtx.col_pair = Some((top_poc=12, bottom_poc=13))` for
+  display-POC-10's MB(0,0), exactly matching the two genuine P fields
+  (`frame_num=2`, JM `structure=1`/`2`, POC 12/13) that JM's own DPB combines
+  into RefPicList1[0] for this slice. `combine_field_pairs_into_frames` and
+  `interleave_field_pair_entry` (`ref_pic.rs`) are doing their job; the
+  colocated grid is present (`colocated_is_some=true`).
+- MB(0,0) itself is `B_8x8` with `sub_types=[0,0,1,0]` (§B_Sub_Mb_Type: 0 =
+  B_Direct_8x8, 1 = B_L0_8x8) — a mix of direct and explicit sub-blocks, and
+  the CABAC bitstream trace around it (`KINETIX_BINTRACE`) shows a normal
+  `mvd_l0`/CBF/residual sequence with no obviously-wrong values inline.
+- The scale of the corruption (≈59% of samples wrong, `max_diff` up to 216,
+  starting from `first_mb=(0,0)`) reads more like an **early CABAC context
+  desync** than a handful of wrong direct-mode MVs — a wrong MV/reference for
+  one 8×8 quadrant should stay fairly localized (see the "mild" ≤235-byte
+  clips), not corrupt the entire picture from the first macroblock.
+
+**Next session:** trace `try_decode_real_slice`'s B-CABAC path bin-by-bin for
+this exact NAL (frame_num=3, POC=10, `first_mb=0`) against a JM CABAC trace
+of the same NAL (the `-DTRACE=1` `ldecod_trace.exe` built in #32d1, still at
+`/tmp/jm-oracle/jm/ldecod_trace.exe`, or add `fprintf` context-index/range
+prints directly into JM's `biaridecod.c` next to this session's POC
+instrumentation) — find the first CABAC decision where the two diverge. Given
+frame-coded P already works, suspect something CABAC-B-specific that isn't
+exercised by any currently-passing clip: candidates are the B-slice
+`mb_skip_flag` context derivation when neighbour availability spans a
+field/frame reference boundary, or `ref_idx`/`mvd` context selection reading
+neighbour state left behind by the P-field decode of the *previous* picture
+(frame_num=2) via a different code path (`decode_interlaced_p_field`) that
+may not populate whatever per-MB context state (`cbp`, `intra4x4_pred_mode`,
+skip flags) the progressive B path's neighbour-availability logic expects at
+picture-start MB(0,0)'s above/left neighbours — MB(0,0) has no left/above
+neighbour in ITS OWN picture, but its CABAC init/first-bin context depends on
+nothing external, so a desync this early more likely means a genuinely wrong
+bin read inside the slice itself rather than cross-picture context leakage;
+verify against the JM trace before assuming either.
+
+Gates before commit: 273/273 lib, ITU suite 33/33 hard-checked BitExact
+(0 regressions vs #32d0/#32d1's baseline), `fuzz_structured_seeds` 209k
+iterations / 60s / 0 crashes, clippy `-D warnings` clean, fmt clean.
+
 ## SESSION #32d1 (2026-09-26) — attempted the #32d0 per-MB oracle; blocked on MB-address correlation, not a dead end
 
 Picked up #32d0's "efficient next step: a per-MB oracle" for the B-field

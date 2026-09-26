@@ -1355,29 +1355,48 @@ impl H264Decoder {
         // CABAC-coded. CAVLC B still falls through to `decode_slice`'s
         // existing (single-slice) paths.
         //
-        // A *frame-coded intra* picture in an interlaced (PAFF / MBAFF) stream is
-        // decoded exactly like a progressive one: intra prediction and residual
-        // reconstruction take no reference picture and no field parity, and its
-        // macroblocks are in ordinary raster order over the full frame. So an
-        // I/Si frame picture of a PAFF stream can safely use the frame paths
-        // below — which matters because the first such picture in ITU
-        // `CAPA1_TOSHIBA_B` (display position 30) previously fell through to
-        // the grey scaffold and aborted the whole clip in strict mode.
+        // A *frame-coded* picture in an interlaced (PAFF / MBAFF) stream — one
+        // with `field_pic_flag == 0` inside a `!frame_mbs_only_flag` SPS — is
+        // decoded exactly like a progressive one: its macroblocks are in
+        // ordinary raster order over the full frame with no field parity to
+        // track. `decode_interlaced` already returns `Fallback` for every such
+        // picture (it only drives genuine field pictures and MBAFF frames), so
+        // this function is the only place that can pick it up:
+        //   * I/Si is safe unconditionally (no reference picture involved) —
+        //     this matters because the first such picture in ITU
+        //     `CAPA1_TOSHIBA_B` (display position 30) previously fell through
+        //     to the grey scaffold and aborted the whole clip in strict mode.
+        //   * B is safe only when CABAC-coded, because this function's own
+        //     B-slice path below is CABAC-only (`decode_slice`'s CAVLC B path
+        //     is a distinct, separate implementation) — admitting a CAVLC
+        //     frame-coded B slice here would hit that same restriction and
+        //     decline anyway, so it is excluded up front rather than round
+        //     tripped. A frame-coded CABAC B slice previously reached
+        //     `decode_slice` instead (declined here), whose B path does not
+        //     handle it and scaffolds, wholesale-corrupting the frame (ITU
+        //     `CAPA1_TOSHIBA_B` display positions 7/33/34/58/85/88 — all its
+        //     frame-coded B pictures).
+        // P is excluded: `decode_slice`'s progressive P path already decodes
+        // frame-coded P slices of an interlaced stream correctly (proven
+        // bit-exact for every frame-coded P picture in `CAPA1_TOSHIBA_B`), so
+        // there is no bug to fix there, and routing P through this function
+        // instead is exactly what caused the half-height-crop panic
+        // documented below for a fuzz-found PAFF seed.
         //
-        // Everything else stays declined, for two distinct reasons:
-        //   * a field picture, or an MBAFF frame (`mb_adaptive_frame_field_flag`
-        //     with `field_pic_flag == 0`), genuinely needs the dedicated
-        //     interlaced driver, which has already returned `Fallback` here;
-        //   * a *frame-coded inter* (P/B) picture of an interlaced stream still
-        //     needs the field-aware reference-list construction, weighted
-        //     prediction and deblocking that only the interlaced path performs.
-        //     Admitting it here decoded it with progressive-only assumptions and
-        //     could crop past the end of a half-height reconstruction buffer
-        //     (fuzz `fuzz_from_seed` seed: `field_pic_flag == 0` P slice of a
-        //     1-map-unit PAFF SPS, `pic_height_pixels` = 32 vs a
-        //     `coded_height_pixels`-sized 16-row buffer).
+        // A field picture, or an MBAFF frame (`mb_adaptive_frame_field_flag`
+        // with `field_pic_flag == 0`), genuinely needs the dedicated
+        // interlaced driver and is excluded too, though `header.field_pic_flag`
+        // is always false by the time this function runs for an interlaced
+        // SPS: `decode_interlaced` handles every genuine field picture itself
+        // and never falls back to here for one. Admitting an inter (P/B)
+        // picture here without that guard decoded it with progressive-only
+        // assumptions and could crop past the end of a half-height
+        // reconstruction buffer (fuzz `fuzz_from_seed` seed: `field_pic_flag
+        // == 0` P slice of a 1-map-unit PAFF SPS, `pic_height_pixels` = 32 vs
+        // a `coded_height_pixels`-sized 16-row buffer).
         let is_intra_slice = matches!(header.slice_type, SliceType::I | SliceType::Si);
-        let decodable_as_frame = header.field_pic_flag || is_intra_slice;
+        let is_cabac_b_slice = header.slice_type == SliceType::B && entropy_coding_mode_flag;
+        let decodable_as_frame = !header.field_pic_flag && (is_intra_slice || is_cabac_b_slice);
         if !sps.frame_mbs_only_flag && !decodable_as_frame {
             return Ok(None);
         }
