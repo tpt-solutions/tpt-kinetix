@@ -2579,11 +2579,16 @@ impl<'a> TileDecodeState<'a> {
                     pmw = bw_px >> self.subsampling_x as usize;
                 }
             } else {
+                // The 32-entry ramp is scaled to the block: the spec's
+                // per-size tables (dav1d's BUILD_NONDC_II_MASKS steps) are
+                // `step = 32 / max(pw, ph)` — a 16×16 luma block samples
+                // every second weight, an 8×8 every fourth.
+                let step = (32 / pw.max(ph)).max(1);
                 let w_at = |y: usize, x: usize| match ii_mode {
-                    0 => 32u8,                                                // DC: flat 50/50
-                    1 => II_WEIGHTS_1D[(y << suby).min(31)],                  // V: ramp over y
-                    2 => II_WEIGHTS_1D[(x << subx).min(31)],                  // H: ramp over x
-                    _ => II_WEIGHTS_1D[(y.min(x) << subx.max(suby)).min(31)], // SMOOTH
+                    0 => 32u8,                                     // DC: flat 50/50
+                    1 => II_WEIGHTS_1D[(y * step).min(31)],        // V: ramp over y
+                    2 => II_WEIGHTS_1D[(x * step).min(31)],        // H: ramp over x
+                    _ => II_WEIGHTS_1D[(y.min(x) * step).min(31)], // SMOOTH
                 };
                 plane_mask = (0..ph)
                     .flat_map(|y| (0..pw).map(move |x| (y, x)))

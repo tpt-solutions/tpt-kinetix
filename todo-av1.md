@@ -8490,3 +8490,31 @@ OBMC (`Post-motionmode[1]`). Verify the SMOOTH blend and the OBMC neighbour
 prediction positions tile-locally vs frame-globally (the OBMC job px/py are
 tile-local; the reference read was fixed but the neighbour-blend write side
 may still need the same treatment for OBMC-over-tile-edge cases).
+
+## Session 2026-09-27 (cont'd 3) — ii-blend ramp must scale with block size; frame 1 residue 1,219 → 130 bytes
+
+The next-layer block, (28,108) (16×16, skip, BLEND-V, mv=(3,-1), 148 of the
+remaining diffs), revealed the ramp-index scaling: the inter-intra blend
+ramp is not indexed by raw block-local coordinates — the spec's per-size
+tables (dav1d `BUILD_NONDC_II_MASKS` steps) scale the 32-entry
+`ii_weights_1d` by `step = 32 / max(pw, ph)`. A 32×32 luma block samples
+every weight (step 1 — which is why the 32×32 block at (104,16) had
+already been fixed correctly), a 16×16 samples every second, 8×8 every
+fourth. The first fix indexed `y << subsampling`, correct only for 32×32.
+
+With the size-scaled ramp, shown frame 1's residue drops 1,219 → **130
+bytes** and frame 2's 1,397 → **192** — every remaining shown-frame 0-2
+diff sits at rows 295-299 around col 600 (±1, luma only), i.e. the frame
+bottom edge inside tile 3's merged trailing LR unit, propagating from
+frame 0's own 11-byte residue at (600,296) via inter prediction. The
+hidden (non-shown) alt-ref in packet 1 still carries ~104k differing
+bytes and propagates into later shown frames (3+ remain ~120-220k).
+
+### Next session's starting point
+
+Frame 0's 11 bottom-edge bytes ((600-607, 296-299), all ±1, chroma
+exact): inside the merged trailing LR unit's last rows — candidates are
+the wiener bottom-border tap handling at the visible/padding boundary
+(rows 300-303) or the pre-CDEF boundary-row substitution for the final
+stripe. The hidden alt-ref's wholesale diff (rows 0+ from col 25) is its
+own investigation once shown frames 0-2 are clean.
