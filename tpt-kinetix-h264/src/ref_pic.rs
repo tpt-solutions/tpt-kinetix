@@ -1377,18 +1377,31 @@ fn interleave_field_pair_entry(top: &DpbEntry, bottom: &DpbEntry) -> DpbEntry {
         (Some(t), Some(b)) => Some(crate::decoder::H264Decoder::interleave_fields(t, b)),
         _ => None,
     };
-    // Synthesize the combined motion grid: grid row `2k + parity` holds field
-    // MB row `k` of that parity's field (matching the pixel interleave above
-    // and JM's parity-addressed field storage), so the entry can serve as a
-    // temporal-direct co-located picture for frame-coded B pictures in mixed
-    // PAFF frame/field streams. Only possible when BOTH fields persisted a
-    // grid (intra fields leave it `None`, degrading to zero motion).
+    // Synthesize the combined motion grid: grid row `2r + parity` holds field
+    // MB *row* `r` (a whole row of `mb_width` per-MB cells) of that parity's
+    // field (matching the pixel interleave above and JM's parity-addressed
+    // field storage), so the entry can serve as a temporal-direct co-located
+    // picture for frame-coded B pictures in mixed PAFF frame/field streams.
+    // Only possible when BOTH fields persisted a grid (intra fields leave it
+    // `None`, degrading to zero motion).
+    //
+    // `top`/`bottom.mv_grid` are flat, one `[MvCell;16]` per MB address in
+    // raster order (`mb_width` MBs per row) — interleaving by raw *index*
+    // (`t[k]`/`b[k]` for a flat `k`) instead of by *row* silently shuffled
+    // every MB's colocated lookup onto a same-parity MB from a DIFFERENT
+    // column (e.g. `mb_width == 22`: flat index 8 is row 0 col 8, but this
+    // function's old per-index interleave placed row-1-col-8's field entry
+    // there instead) — the resulting motion was internally self-consistent
+    // enough to look like plausible (if wrong) MC, not garbage, which is why
+    // it survived undetected until traced against JM MV-by-MV (session
+    // #32d4).
+    let mb_width = (top.frame.width as usize) / 16;
     let mv_grid = match (&top.mv_grid, &bottom.mv_grid) {
-        (Some(t), Some(b)) if t.len() == b.len() => {
+        (Some(t), Some(b)) if t.len() == b.len() && mb_width > 0 && t.len() % mb_width == 0 => {
             let mut g = Vec::with_capacity(2 * t.len());
-            for k in 0..t.len() {
-                g.push(t[k]);
-                g.push(b[k]);
+            for row in t.chunks_exact(mb_width).zip(b.chunks_exact(mb_width)) {
+                g.extend_from_slice(row.0);
+                g.extend_from_slice(row.1);
             }
             Some(std::sync::Arc::new(g))
         }

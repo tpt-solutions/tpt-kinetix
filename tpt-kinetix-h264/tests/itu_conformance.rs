@@ -242,17 +242,18 @@ const MANIFEST: &[(&str, Expect)] = &[
     // #32aq for the full root-cause trail.
     ("MIDR_MW_D", Expect::BitExact),
     ("MPS_MW_A", Expect::BitExact),
-    (
-        "Sharp_MP_PAFF_1r2",
-        Expect::KnownGap(
-            "real PAFF 720x480 — 12/15 frames byte-exact (sessions #32ca-#32cf: \
-             display-order buffer, B-field ref lists, direct-mode context, \
-             apply_spatial_direct's colocated-motion lookup given the same \
-             frame/field row remap apply_temporal_direct already had). \
-             Remaining mid-stream field pairs (display index 5/11/13) carry \
-             localized diffs — see todo-h264.md #32cf",
-        ),
-    ),
+    // Promoted to BitExact 2026-09-27 (SESSION #32d4): the remaining
+    // mid-stream field-pair diffs (display index 5/11/13) were
+    // `interleave_field_pair_entry`'s combined mv_grid interleaving fields
+    // *per flat MB index* instead of *per MB row* — every temporal-direct
+    // colocated lookup into a combined field-pair reference silently read a
+    // same-parity MB from the wrong column (e.g. `mb_width == 22`: flat
+    // index 8 resolved to row-1-col-8's entry instead of row-0-col-8's).
+    // Found by tracing CAPA1_TOSHIBA_B's own colocated MV against a patched
+    // JM `mc_direct.c` MV-by-MV; see todo-h264.md SESSION #32d4 for the full
+    // trail (also fixed an inverted field-parity selection in the same area
+    // as a separate, earlier bug in the same session).
+    ("Sharp_MP_PAFF_1r2", Expect::BitExact),
     // IPB stream, multi-slice, mixes P/B slices per picture. Was blocked on
     // the same direct_8x8_inference_flag=0 temporal-direct corner-sampling
     // bug as CABA3_Sony_C/CANL3_Sony_C/CACQP3_Sony_D (fixed 2026-09-06).
