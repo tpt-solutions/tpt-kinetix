@@ -1,5 +1,243 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d0 (2026-09-26) — interlaced blanket-gate removed for frame-coded INTRA; CAPA1/CVPA1 now decode all 90 frames (50/90 bit-exact)
+
+Started on #32cf's "Next session" item (1), but the stated premise did not
+survive measurement, so this session re-derived the state before changing
+anything. Two corrections first:
+
+- **The `dbg_field_triage` harness's inline `vs ref frame 0: max_diff=…`
+  line is meaningless as a per-frame signal** — it compares *every* emitted
+  frame against reference frame **0** (harness line ~107), so it prints
+  "wholesale wrong" for frames that are in fact bit-exact. Its separate
+  `FRAME n:` lines (which index the reference properly) are correct. Always
+  re-measure CAPA1/CVPA1 by dumping via `FIELD_DUMP_OUT` and diffing offline
+  against `ffmpeg -i <clip> -pix_fmt yuv420p -f rawvideo` output.
+- **CAPA1_TOSHIBA_B was not "22/30 with small residuals" — it aborted.** In
+  strict mode the decode returned
+  `NotPixelExact("H.264: slice not decodable by the pixel-exact path yet
+  (unsupported feature)")` at **NAL 143** and the harness `break`s on error,
+  so only **30 of 90 frames** were ever produced. The #32cf numbers were
+  measured on that truncated prefix.
+
+**Root cause (real, fixed).** `H264Decoder::try_decode_real_slice`
+(`decoder/mod.rs`) opened with a blanket interlaced reject placed *before* the
+slice header was even parsed:
+
+```rust
+// Interlaced not handled.
+if !sps.frame_mbs_only_flag { return Ok(None); }
+```
+
+CAPA1 is a mixed PAFF stream, and NAL 143 is its first **frame-coded I
+slice** (intra period 15 → display position 30). `decode_interlaced` returns
+`Fallback` for it because it is not a field picture, and this blanket gate
+then declined it too, so it fell through to `emit_skip_frame`'s grey scaffold
+and strict mode rejected the frame — killing the rest of the clip.
+
+A frame-coded *intra* picture needs no reference picture and no field parity,
+so the ordinary frame paths are correct for it. The gate now runs *after* the
+header parse and admits exactly that case:
+
+```rust
+let is_intra_slice = matches!(header.slice_type, SliceType::I | SliceType::Si);
+let decodable_as_frame = header.field_pic_flag || is_intra_slice;
+if !sps.frame_mbs_only_flag && !decodable_as_frame { return Ok(None); }
+```
+
+**A second, latent bug the gates caught (also fixed).** The first attempt
+admitted *all* frame pictures of an interlaced stream. That passed the ITU
+suite but **broke `fuzz_from_seed`** with a genuine panic
+(`range end index 544 out of range for slice of length 512` in
+`ReconstructedFrame::crop_yuv420p`, via `finalize_picture` ←
+`try_decode_real_p_slice_cavlc`): a frame-coded **P** slice of a 1-map-unit
+PAFF SPS has `pic_height_pixels` = 32 while the reconstruction buffer is
+`coded_height_pixels` (16) rows tall, so the crop walks past the end.
+Frame-coded P/B pictures of an interlaced stream still need the field-aware
+ref-list construction / weighted prediction / deblocking that only the
+interlaced path performs, hence the intra-only gate above. The 44-byte
+reproducer is `tpt-kinetix-h264/fuzz_crash_input.bin` (restored to its
+committed bytes — it is a *seed corpus* file, not a new crash artifact).
+
+**Measured (offline, vs ffmpeg, 352x288):** CAPA1_TOSHIBA_B 30 → **90/90
+frames emitted**, **50/90 bit-exact**; CVPA1_TOSHIBA_B likewise 90/90 frames,
+50/90 bit-exact. Gates: 273/273 lib, ITU suite 33/33 hard-checked BitExact
+(0 failures), `fuzz_from_seed` 3/3, workspace `--lib --bins --tests` exit 0,
+clippy `-D warnings` clean, fmt clean.
+
+**Still-open triage data for the next session (replaces #32cf's item 1).**
+All 40 remaining CAPA1 failures are **B pictures** — every P and I picture in
+the clip is bit-exact, so the residual is entirely a B-field problem, not the
+"ordinary B MC against a combined-pair reference" framing #32cf assumed. Two
+classes:
+- **Wholesale (both fields wrong, `first_mb` at MB (0,0), max_diff 157–232):**
+  display 7, 33, 34, 58, 85, 88. These are exactly the B pictures with
+  `top_field_first = 0`; the wholesale class lines up with field parity
+  ordering, not with direct-vs-explicit mode.
+- **Bottom-field-dominant (top_diff ≤ ~50, bottom_diff 300–30 000):**
+  18, 19, 21, 22, 24, 25, 28, 36, 57, 60, 61, 64, 67, 69, 73, 79, 82, 87 —
+  all the `top_field_first = 1` B pictures. Top field essentially exact,
+  bottom field wrong ⇒ suspect bottom-field ref-list parity
+  (`initial_b_field_list`'s `interleave_field_parities` /
+  `build_field_ref_list_l1_b`'s §8.2.4.2.3-Note-2 swap) rather than MC itself.
+
+Next session: (1) dump `build_field_ref_list_l0_b`/`l1_b` for a *correct*
+frame-8 B-field pair vs a wrong one and diff the ordering; note
+`num_ref_idx_l0_active = 10` while `num_ref_frames = 5` (2 fields x 5 frames
+= 10 is consistent, but confirm the truncation/padding to `nri` is right);
+(2) attack the wholesale `top_field_first = 0` class — both fields wrong from
+MB (0,0) suggests a wrong *reference*, not wrong MVs, so check
+`split_field_copy`/`field_poc` for the frame entries the DPB holds
+(`dpb=[(3,false,false,18),(4,false,false,24),...]` — frame-coded entries are
+being split into field refs for B-field reference lists, which is the
+`combine_field_pairs_into_frames` inverse and the prime suspect); (3) the
+mild `max_diff ≤ 2` frames (3, 4, 6, 30, 46, 63, 66, 72, 76, 84) look like a
+deblock-rounding-class gap, worth checking only after (1)/(2).
+
+### Ruled OUT by experiment (same session — do not re-tread these)
+
+Each of these was measured on the 90-frame dump vs ffmpeg; none moved the
+needle, so the B-field bug is *not* any of them:
+
+- **Not deblocking.** `KINETIX_NO_DEBLOCK=1` (skips `Self::deblock_field`)
+  leaves every wholesale frame exactly as wrong (frame 7: 216 → 226, frame 33:
+  232 → 232, frame 58: 220 → 220). Mild frames get *worse* (frame 18: 118 →
+  226), i.e. deblock is helping them, not hurting.
+- **Not reference-index selection.** `KINETIX_CLAMP_REF0=1` (forces every
+  inter cell onto `RefPicList0[0]`) changes nothing on the wholesale set
+  (33: 232→232, 58: 220→220, 85: 199→199) and makes 7/34/88 slightly worse.
+  So the refs the blocks *do* pick are not the problem.
+- **Not a corrupt reference picture.** Frames 5 and 6 are *near*-exact
+  (top_diff 0/36) yet frame 7 — decoded straight off them — is wholly wrong.
+  The inputs are good; frame 7's own decode is wrong.
+- **Not field mis-pairing.** `ACCUM:` shows 0 `KEY CHANGE` and 0
+  `buffered (waiting for pair)` across the whole clip, 48 clean `INTERLEAVE`s.
+  The top/bottom accumulator never crosses pairs.
+- **Not the repeated `frame_num` in the FINALIZE trace** (`fn=7` twice,
+  `fn=8` twice, ...). That repeat is *legitimate*: CAPA1's B pictures are
+  non-reference (`nal_ref_idc == 0`), so §8.2.4.1 does not advance `frame_num`
+  for them and consecutive B fields legitimately share a value. Do not
+  "fix" `accumulate_field`'s `frame_num`-only key on this basis.
+
+### Strongest remaining lead
+
+CAPA1 sets `direct_spatial_mv_pred_flag = 0` ⇒ **every** B field uses
+*temporal* direct, whose result is derived entirely from the co-located
+picture. Instrumenting the `col_entry` resolution in `decode_interlaced_b_field`
+shows the col picture resolves (`col_found=true` throughout) but its stored
+metadata is **degenerate for field pictures**:
+
+```
+BCOL fn=2 bottom=false poc=2  l1_0_poc=Some(6)  col_grid=true  col_l0=2  col_l1=0
+BCOL fn=6 bottom=false poc=28 l1_0_poc=Some(30) col_grid=false col_l0=0  col_l1=0
+BCOL fn=8 bottom=false poc=38 l1_0_poc=Some(42) col_grid=true  col_l0=5  col_l1=0
+```
+
+Two things stand out: `col_list1_poc` is **always empty**, and one case
+(`fn=6 bottom=false`) has **no `mv_grid` at all** (`col_grid=false`), so
+`colocated_mv` is `None` and temporal direct degrades to zero motion. In
+`derive_temporal_direct` (`mv.rs`) an empty `col_list1_poc` makes the
+`col.ref_idx < 0` branch return `target_poc = None` → `([0,0], 0, [0,0])`,
+i.e. **every co-located block whose L0 ref is unused silently becomes
+zero-motion ref 0**. Check next: whether B *fields* persist `list1_poc` into
+their `DpbEntry` (`finalize_field` is handed `field_pocs_l1`, but
+`store_reference_picture` may be dropping it) and why `fn=6 bottom=false`
+lost its grid — that single missing grid plausibly explains the wholesale
+`top_field_first = 0` class, since a whole field decoding against zero motion
+is exactly a whole-field error.
+
+### CORRECTION to the lead above — it is weaker than it looked (same session)
+
+Follow-up instrumentation showed both symptoms have **innocent explanations**,
+so do NOT treat them as the bug without re-deriving them first:
+
+- **`col_list1_poc` empty is CORRECT here, not a dropped value.** The empty
+  entries all belong to **P-field** col pictures: `decode_interlaced_p_field`
+  finalizes with `(field_pocs, Vec::new())` (`interlaced.rs` ~1754) because a
+  P picture genuinely has no List1. The cases with a non-empty `col_l0` and
+  `col_l1=0` are exactly the P-field cols. Only the I-field path passes
+  `(Vec::new(), Vec::new())` with `mv_grid = None` (line ~371), and
+  `store_reference_picture` does store both lists faithfully (it early-returns
+  only for `nal_ref_idc == 0`, which CAPA1's B fields are — see below). So
+  there is no missing-`list1_poc` bug to fix.
+- **CAPA1's B fields are all `nal_ref_idc == 0`** (verified by scanning the
+  Annex B NAL headers: slices alternate `nal_ref_idc` 1,0,0,1,1,0,0,0,1,…).
+  `store_reference_picture` therefore **never stores a B field in the DPB at
+  all**. So the co-located picture for a B field is always a P or I field —
+  never another B field. That is consistent with the trace, and it means the
+  "B field whose col is another field pair" framing from #32ce/#32cf **cannot
+  occur in this clip at all**: there is no B field in the DPB to be one.
+  Those earlier notes' hypotheses were reasoning about a case this bitstream
+  does not contain.
+- Consequently `col_entry` resolving to a P field with an empty List1 is
+  exactly right, and `derive_temporal_direct`'s `col_list1_poc`-empty path
+  should not be reachable here via a col block that genuinely used L1.
+
+**Net effect: the previous session's lead is dead.** Temporal direct's col
+plumbing looks self-consistent for this clip. The wholesale-wrong class is
+still unexplained, but it is now known *not* to be: deblocking, ref-index
+selection, corrupt references, field mis-pairing, `frame_num` repetition, or
+co-located list persistence.
+
+Remaining untested surface, in the order I would attack it next:
+1. **`is_frame=true` field references inside a B-field list.** Every
+   `BFIELD_HDR` for the wholesale-wrong frames shows L0 built almost entirely
+   from `is_frame=true` entries (`poc=36/24/18 … is_frame=true`) — i.e. field
+   references carved out of *frame-coded* pictures via `split_field_copy`,
+   while the *correct* frames use `is_frame=false` genuine fields. The
+   `FieldRef::sample_y` / `planes()` stride-2 path for a frame-backed field
+   reference is the least-exercised code in this path; verify the frame's
+   `pair_field_pocs` top/bottom mapping lines up with which parity the list
+   slot claims (`bottom=` flag) before MC reads it.
+2. **Ordering of same-picture frame refs in the list** — `L0[0]=poc36 false`,
+   `L0[1]=poc36 true`, `L0[4]=poc24 false`, `L0[5]=poc24 true` is
+   `interleave_field_parities` output; if the reference *slot order* for a
+   frame-backed pair is transposed relative to JM, every macroblock
+   bi-predicts from the wrong field and the frame is wholly wrong while
+   still "looking" plausible. This is the highest-value untested idea.
+
+### Session #32d0 continued — four more hypotheses eliminated by measurement
+
+All run offline on the 90-frame dump vs ffmpeg; `interlaced.rs` was restored
+with `git checkout` after each temporary diagnostic (it is **not** modified).
+
+- **Not a field swap in the interleave.** For the wholesale frames, our
+  even-row samples match the reference's even rows far better than the
+  reference's odd rows (frame 7: 16986 normal vs 5688 swapped; frame 34:
+  25801 vs 5970). So `interleave_fields`' top→even-row placement is right.
+- **Not the wrong reference picture, and not a display-position error.** Each
+  of our wholesale frames correlates best with the reference frame at the
+  *same* index by a wide margin (frame 7: ref7=1028 vs ref8=432/ref6=412;
+  frame 88: ref88=1336 vs ref89=520). The right picture is being predicted
+  from, at the right position.
+- **Not a global motion-vector offset.** Cross-correlating our output against
+  the reference over integer shifts of ±3 px in both axes, `(0,0)` wins
+  decisively (frame 7: 354 at (0,0) vs 131 at (0,1); frame 34: 451 vs 110 at
+  (-1,0)). So there is no constant MV bias to recover.
+- **Direct mode is the RIGHT mode — temporal direct is not the bug.** Forcing
+  `direct_spatial_mv_pred_flag = true` for B fields (temporary
+  `ZZ_FORCE_SPATIAL` diagnostic) makes the clip dramatically **worse**:
+  **50/90 → 5/90 bit-exact**, and the wholesale frames get no better
+  (33: 232→232, 58: 220→220, 85: 199→199). Temporal direct is doing real,
+  mostly-correct work; the residual is *not* "we should have used spatial".
+
+**Where this leaves the bug.** The error is now bounded quite tightly: the
+right reference picture, at the right position, with the right field parity,
+no global MV offset, and correct deblocking and reference-index selection —
+yet individual samples still differ. That points at **per-macroblock/per-sub-block
+motion derivation for B *field* pictures**: either the field-coordinate MV
+prediction (neighbour geometry in §6.4.11.2 field mode) or the
+frame-backed-field reference sampling (`FieldRef::sample_y`/`planes()`
+stride-2 path, still untested), applied per block rather than globally.
+
+The efficient next step is a per-MB oracle rather than more whole-frame
+hypotheses: dump, for one wholesale-wrong B field, the final per-MB
+`mv`/`ref_idx` for both lists and compare against a reference decoder's MVs
+(ffmpeg `-debug mb_type`/`vis_mv` frame dumps via
+`ffmpeg -i clip -vf codecview=mv=pf+bf+bb -f null -`, or JM). Whole-frame
+statistics have now exhausted the cheap discriminators.
+
+
 > Active work. See [todo.md](todo.md) for the project index.
 
 ## SESSION #32cf ADDENDUM (2026-09-26, later still) — `apply_spatial_direct`'s missing frame/field colocated remap FIXED; Sharp 10/15 → 12/15

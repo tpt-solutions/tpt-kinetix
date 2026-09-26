@@ -1292,10 +1292,6 @@ impl H264Decoder {
         // to the scaffold there and strict mode rejects it via
         // `scaffold_fallback`.
         let transform_8x8_mode_flag = pps.map(|p| p.transform_8x8_mode_flag).unwrap_or(false);
-        // Interlaced not handled.
-        if !sps.frame_mbs_only_flag {
-            return Ok(None);
-        }
 
         let ctx = SliceHeaderContext {
             log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
@@ -1358,6 +1354,34 @@ impl H264Decoder {
         // CAVLC via `try_decode_real_p_slice_cavlc`); B slices only when
         // CABAC-coded. CAVLC B still falls through to `decode_slice`'s
         // existing (single-slice) paths.
+        //
+        // A *frame-coded intra* picture in an interlaced (PAFF / MBAFF) stream is
+        // decoded exactly like a progressive one: intra prediction and residual
+        // reconstruction take no reference picture and no field parity, and its
+        // macroblocks are in ordinary raster order over the full frame. So an
+        // I/Si frame picture of a PAFF stream can safely use the frame paths
+        // below — which matters because the first such picture in ITU
+        // `CAPA1_TOSHIBA_B` (display position 30) previously fell through to
+        // the grey scaffold and aborted the whole clip in strict mode.
+        //
+        // Everything else stays declined, for two distinct reasons:
+        //   * a field picture, or an MBAFF frame (`mb_adaptive_frame_field_flag`
+        //     with `field_pic_flag == 0`), genuinely needs the dedicated
+        //     interlaced driver, which has already returned `Fallback` here;
+        //   * a *frame-coded inter* (P/B) picture of an interlaced stream still
+        //     needs the field-aware reference-list construction, weighted
+        //     prediction and deblocking that only the interlaced path performs.
+        //     Admitting it here decoded it with progressive-only assumptions and
+        //     could crop past the end of a half-height reconstruction buffer
+        //     (fuzz `fuzz_from_seed` seed: `field_pic_flag == 0` P slice of a
+        //     1-map-unit PAFF SPS, `pic_height_pixels` = 32 vs a
+        //     `coded_height_pixels`-sized 16-row buffer).
+        let is_intra_slice = matches!(header.slice_type, SliceType::I | SliceType::Si);
+        let decodable_as_frame = header.field_pic_flag || is_intra_slice;
+        if !sps.frame_mbs_only_flag && !decodable_as_frame {
+            return Ok(None);
+        }
+
         let is_p_slice = header.slice_type == SliceType::P;
         let is_b_slice = header.slice_type == SliceType::B;
         if !matches!(header.slice_type, SliceType::I | SliceType::Si)
