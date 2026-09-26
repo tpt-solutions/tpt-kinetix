@@ -1,5 +1,53 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d1 (2026-09-26) — attempted the #32d0 per-MB oracle; blocked on MB-address correlation, not a dead end
+
+Picked up #32d0's "efficient next step: a per-MB oracle" for the B-field
+wholesale-wrong class. Two concrete steps landed, one open blocker found:
+
+- **JM `ldecod` built with `TRACE=1`** (not the deblock-only `-DTRACE=0`
+  instrumented build `tools/build-jm-oracle.sh` normally produces): plain
+  `gcc -O2 -w -DTRACE=1 -D_FILE_OFFSET_BITS=64 -I app/ldecod -I lib/lcommon
+  app/ldecod/*.c lib/lcommon/*.c -o ldecod_trace.exe -lm -lws2_32
+  $(gcc -print-file-name=binmode.o)` against the same patched `jm-oracle`
+  checkout compiles clean and runs CAPA1_TOSHIBA_B to completion, emitting
+  `trace_dec.txt` (~200 MB for this 90-field clip) with every parsed syntax
+  element (`mb_type`, `mvd_l0`/`mvd_l1`, `ref_idx_l0`/`ref_idx_l1`, `cbp`,
+  residual levels, …) each tagged with its bitstream bit offset `@N`. This is
+  new capability, not something a prior session already had — `jmbuild`'s
+  `ldecod_dbg*.exe` binaries in `/tmp` are the deblock-boundary-strength
+  instrumented build, which does not emit a syntax trace at all.
+- **Blocker: the trace has no macroblock-address field.** JM's `TRACE=1`
+  output logs each syntax element in bitstream order with its symbol value
+  but does not print `CurrMbAddr` alongside `mb_type`/`mvd_l0`/etc, and slices
+  are not visually delimited beyond the `Annex B NALU` headers. Correlating a
+  `mvd_l0` line to "which MB, which field, which display frame" therefore
+  needs a small counting pass (walk the trace in order, track slice
+  boundaries via the `SH:` header blocks, increment a MB counter on each
+  `mb_type` per the current slice's macroblock-to-slice-group mapping) before
+  any per-MB comparison against our own decoder's trace is possible. Not
+  attempted this session — budget ran out on the oracle side before reaching
+  the comparison.
+- **Also unresolved: mapping our own `emitted[idx]` (decode/emit order from
+  `dbg_field_triage`) to JM's `stdout.log` "Frame POC Pic#" table.** JM's
+  frame-label column (`00000`, `-0001`, `00003`, …) is not simply an index
+  and the Pic# column groups a variable number of field rows per display
+  picture (some display positions show 2 rows, one shows 3) in this dump —
+  the grouping rule was not reverse-engineered this session.
+
+**Next session, in order:** (1) write the MB-address counting pass over
+`trace_dec.txt` (or add a one-line `CurrMbAddr` print into the patched JM
+source directly — far cheaper than post-hoc counting, and the same
+`tools/build-jm-oracle.sh` patch mechanism already used for the deblock trace
+applies); (2) resolve the `emitted[idx]` ↔ JM `Frame`/`Pic#` mapping by
+diffing `out.yuv` (JM's own reconstruction, already proven bit-exact vs the
+ITU `_dec.yuv`) frame-by-frame against our `FIELD_DUMP_OUT` blob instead of
+against the ITU file's nominal order — that sidesteps the label parsing
+entirely; (3) only then pull MVs for one wholesale-wrong B field's MBs from
+both decoders. `/tmp/jm_capa1_trace/{trace_dec.txt,out.yuv,stdout.log}` and
+`/tmp/jm-oracle/jm/ldecod_trace.exe` are left in place for the next session to
+resume from directly.
+
 ## SESSION #32d0 (2026-09-26) — interlaced blanket-gate removed for frame-coded INTRA; CAPA1/CVPA1 now decode all 90 frames (50/90 bit-exact)
 
 Started on #32cf's "Next session" item (1), but the stated premise did not
