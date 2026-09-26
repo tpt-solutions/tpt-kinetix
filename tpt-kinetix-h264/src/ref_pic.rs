@@ -62,6 +62,16 @@ pub struct DpbEntry {
     /// instead of `frame` (which is cropped to display size). `None` when coded
     /// and display dimensions are equal.
     pub mc_frame: Option<VideoFrame>,
+    /// For a synthesized combined field-pair entry (see
+    /// `combine_field_pairs_into_frames`): the pair's `(top_poc, bottom_poc)`,
+    /// so a co-located FIELD-level reference poc can match either half of the
+    /// pair (JM matches by picture identity). `None` for real decoded entries.
+    pub pair_field_pocs: Option<(i64, i64)>,
+    /// For a synthesized combined field-pair entry: the two fields' OWN
+    /// reference-list pocs `(top_list0, top_list1, bottom_list0, bottom_list1)`
+    /// — a co-located cell's `ref_idx` indexes the list of the field that
+    /// coded it. `None` for real decoded entries.
+    pub pair_field_lists: Option<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>)>,
 }
 
 impl DpbEntry {
@@ -1314,6 +1324,23 @@ fn interleave_field_pair_entry(top: &DpbEntry, bottom: &DpbEntry) -> DpbEntry {
         (Some(t), Some(b)) => Some(crate::decoder::H264Decoder::interleave_fields(t, b)),
         _ => None,
     };
+    // Synthesize the combined motion grid: grid row `2k + parity` holds field
+    // MB row `k` of that parity's field (matching the pixel interleave above
+    // and JM's parity-addressed field storage), so the entry can serve as a
+    // temporal-direct co-located picture for frame-coded B pictures in mixed
+    // PAFF frame/field streams. Only possible when BOTH fields persisted a
+    // grid (intra fields leave it `None`, degrading to zero motion).
+    let mv_grid = match (&top.mv_grid, &bottom.mv_grid) {
+        (Some(t), Some(b)) if t.len() == b.len() => {
+            let mut g = Vec::with_capacity(2 * t.len());
+            for k in 0..t.len() {
+                g.push(t[k]);
+                g.push(b[k]);
+            }
+            Some(std::sync::Arc::new(g))
+        }
+        _ => None,
+    };
     DpbEntry {
         frame,
         frame_num: top.frame_num,
@@ -1323,14 +1350,17 @@ fn interleave_field_pair_entry(top: &DpbEntry, bottom: &DpbEntry) -> DpbEntry {
         is_short_term: top.is_short_term,
         is_long_term: top.is_long_term,
         long_term_pic_num: top.long_term_pic_num,
-        // Not a real decoded picture — no per-MB MV grid or list POCs exist
-        // for the synthetic combined frame, so it cannot yet serve as a
-        // temporal-direct co-located picture. No known mixed frame/field
-        // fixture exercises that combination.
-        mv_grid: None,
-        list0_poc: Vec::new(),
-        list1_poc: Vec::new(),
+        mv_grid,
+        list0_poc: top.list0_poc.clone(),
+        list1_poc: top.list1_poc.clone(),
         mc_frame,
+        pair_field_pocs: Some((top.pic_order_cnt, bottom.pic_order_cnt)),
+        pair_field_lists: Some((
+            top.list0_poc.clone(),
+            top.list1_poc.clone(),
+            bottom.list0_poc.clone(),
+            bottom.list1_poc.clone(),
+        )),
     }
 }
 
@@ -2104,6 +2134,8 @@ mod tests {
             long_term_pic_num: -1,
             mv_grid: None,
             mc_frame: None,
+            pair_field_pocs: None,
+            pair_field_lists: None,
             list0_poc: Vec::new(),
             list1_poc: Vec::new(),
         }

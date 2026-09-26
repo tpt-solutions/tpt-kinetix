@@ -434,6 +434,12 @@ impl<'a> TileDecodeState<'a> {
             self.mode_cdfs.read_skip(&mut self.dec, skip_ctx) == 1
         };
         let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row < 40 && mi_col < 40;
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+            eprintln!(
+                "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={}",
+                self.dec.raw_state().0
+            );
+        }
         if dbg_b0 {
             eprintln!(
                 "DBG b0 mi=({mi_col},{mi_row}) bsize={bsize} skip={skip} rng={}",
@@ -485,6 +491,13 @@ impl<'a> TileDecodeState<'a> {
         if dbg_b0 {
             eprintln!(
                 "DBG b0 is_inter={is_inter} ctx={inter_ctx} rng={}",
+                self.dec.raw_state().0
+            );
+        }
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+            eprintln!(
+                "KINTRA mi=({mi_col},{mi_row}) intra={} ictx={inter_ctx} rng={}",
+                !is_inter,
                 self.dec.raw_state().0
             );
         }
@@ -599,6 +612,15 @@ impl<'a> TileDecodeState<'a> {
             if dbg_b0 {
                 eprintln!(
                     "DBG b0 intra-in-inter tx={luma_tx} skip={skip} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
+            if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+                eprintln!(
+                    "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=1 ymode={y_mode} skip={skip}"
+                );
+                eprintln!(
+                    "KYMODE mi=({mi_col},{mi_row}) ymode={y_mode} rng={}",
                     self.dec.raw_state().0
                 );
             }
@@ -1382,6 +1404,19 @@ impl<'a> TileDecodeState<'a> {
             mi_col,
             warp_model.as_ref(),
         )?;
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+            eprintln!(
+                "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=0 mv=({},{} ({},{})) ref=[{},{}] mm={motion_mode} filt=[{},{}] skip={skip}",
+                mvs[0].row,
+                mvs[0].col,
+                mvs[1].row,
+                mvs[1].col,
+                ref_names[0],
+                ref_names[1],
+                filter[1],
+                filter[0],
+            );
+        }
         // Chroma planes — `inter_predict_plane` interprets the luma MV at
         // 1/16-pel for the subsampled axes.
         //
@@ -1706,6 +1741,14 @@ impl<'a> TileDecodeState<'a> {
         // `tx_above`/`tx_left` neighbour context internally.
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
+        if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_row < 4 {
+            eprintln!(
+                "POSTVTX mi=({mi_col},{mi_row}) rng={} leaves={} all={:?}",
+                self.dec.raw_state().0,
+                leaves.len(),
+                &leaves[..leaves.len().min(6)],
+            );
+        }
         if dbg_b0 {
             eprintln!(
                 "DBG b0 vartx leaves={} tx0={luma_tx} rng={} all={:?}",
@@ -2730,6 +2773,29 @@ impl<'a> TileDecodeState<'a> {
                             // here is still `[dir0, dir1]` (kept that way for
                             // the neighbour-context storage below), so swap
                             // at the point of use.
+                            if std::env::var("KINETIX_AV1_MCSUM").is_ok()
+                                && plane == 0
+                                && mi_col == 4
+                                && mi_row == 0
+                            {
+                                let (rp, rw, rh) = rf.plane(plane);
+                                let iy = px_y as i32 + (mvs[0].row >> 3);
+                                let ix = px_x as i32 + (mvs[0].col >> 3);
+                                let row: Vec<i32> = (-4..(bw as i32 + 4))
+                                    .map(|k| {
+                                        let y = iy.clamp(0, rh as i32 - 1) as usize;
+                                        let x = (ix + k).clamp(0, rw as i32 - 1) as usize;
+                                        rp[y * rw + x] as i32
+                                    })
+                                    .collect();
+                                eprintln!(
+                                    "KINMCSUM mi=(4,0) bw={bw} bh={bh} dx={ix} dy={iy} mx={} my={} f2d=(h={},v={}) refrow0={row:?}",
+                                    (mvs[0].col & 7) << 1,
+                                    (mvs[0].row & 7) << 1,
+                                    filters[1],
+                                    filters[0],
+                                );
+                            }
                             motion_compensate(
                                 &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filters[1],
                                 filters[0], hbits, vbits,
@@ -2739,6 +2805,15 @@ impl<'a> TileDecodeState<'a> {
                 }
                 t
             };
+            if std::env::var("KINETIX_AV1_MCSUM").is_ok()
+                && plane == 0
+                && mi_col == 4
+                && mi_row == 0
+            {
+                let col15: Vec<i32> = (0..bh).map(|r| tmp[r * bw + 15] as i32).collect();
+                let row0: Vec<i32> = (0..bw).map(|c| tmp[c] as i32).collect();
+                eprintln!("KINMCOUT row0={row0:?} col15={col15:?}");
+            }
             if std::env::var("KINETIX_AV1_DBG_PREDUMP").is_ok() && plane == 1 {
                 eprintln!(
                     "PREDUMP mi=({mi_col},{mi_row}) cpx=({px_x},{px_y}) w={bw} h={bh} mv=({},{}) f=({},{}) pred={:?}",
@@ -2981,6 +3056,18 @@ impl<'a> TileDecodeState<'a> {
                     &mut self.coeff_ctxs,
                     &blk,
                 )?;
+                if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0 {
+                    let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                    let dequant_dbg =
+                        dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                    eprintln!(
+                        "KINCFS tx={leaf_tx} txtp={} eob={} quant[..16]={:?} dequant[..16]={:?}",
+                        coeffs.tx_type,
+                        coeffs.eob,
+                        &coeffs.quant[..16.min(coeffs.quant.len())],
+                        &dequant_dbg[..16.min(dequant_dbg.len())],
+                    );
+                }
                 if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
                     eprintln!(
                         "DBG y-cf-blk mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} rng={}",

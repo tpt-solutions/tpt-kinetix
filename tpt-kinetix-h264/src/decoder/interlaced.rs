@@ -362,7 +362,15 @@ impl H264Decoder {
                 chroma_qp_index_offset,
             };
             Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
-            return self.finalize_field(recon, nal, sps, &header, packet);
+            return self.finalize_field(
+                recon,
+                nal,
+                sps,
+                &header,
+                packet,
+                None,
+                (Vec::new(), Vec::new()),
+            );
         }
 
         // ---- CAVLC I-field path: multi-slice-capable accumulator ----
@@ -564,6 +572,7 @@ impl H264Decoder {
             recon: prebuilt_recon,
             reconstructed,
             mv_store,
+            ref_poc_per_slice,
             is_idr,
             poc,
             ..
@@ -803,15 +812,23 @@ impl H264Decoder {
             frame_num,
             self.dpb().len()
         );
+        // Inter fields persist their motion grid + own reference-list POCs so
+        // they can later serve as the co-located picture for B-field
+        // direct-mode derivation (§8.4.1.2.2/§8.4.1.2.3).
+        let field_motion = mv_store.map(|s| std::sync::Arc::new(s.to_grid_vec()));
+        let (l0_pocs, l1_pocs) = ref_poc_per_slice
+            .first()
+            .cloned()
+            .unwrap_or((Vec::new(), Vec::new()));
         self.store_reference_picture(
             &synth_nal,
             &sps,
             &synth_header,
             &field_frame,
+            field_motion,
             None,
-            None,
-            Vec::new(),
-            Vec::new(),
+            l0_pocs,
+            l1_pocs,
         );
         paff_dbg!("FIELD-ACC STORE: dpb_after={}", self.dpb().len());
 
@@ -1596,6 +1613,62 @@ impl H264Decoder {
                 }
             };
 
+            if let Some(idx) = std::env::var("KINETIX_PFIELD_MB_DBG")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&idx| idx < parsed.macroblocks.len())
+            {
+                // CABAC P-field parse dump (mirror of the CAVLC accumulator
+                // hook below): parsed motion syntax + final predicted MV grid
+                // for one macroblock, aligned against the JM TRACE oracle.
+                let poc = {
+                    let mut scratch = self.poc_state.clone();
+                    crate::ref_pic::derive_pic_order_cnt(
+                        sps,
+                        matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                        nal.nal_ref_idc != 0,
+                        header.frame_num,
+                        header.pic_order_cnt_lsb,
+                        header.field_pic_flag,
+                        header.bottom_field_flag,
+                        header.delta_pic_order_cnt_0,
+                        header.delta_pic_order_cnt_bottom,
+                        &mut scratch,
+                    )
+                    .unwrap_or(0)
+                };
+                let mb = &parsed.macroblocks[idx];
+                let cells = parsed
+                    .mv_store
+                    .cells_of(idx)
+                    .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                eprintln!(
+                    "PFIELD_MB_CABAC frame_num={} poc={} idx={idx} bottom={} type={:?} skip={} qp={} cbp={:#x}",
+                    header.frame_num,
+                    poc,
+                    header.bottom_field_flag,
+                    mb.mb_type,
+                    mb.skip,
+                    mb.qp,
+                    mb.cbp,
+                );
+                if let Some(motion) = &mb.motion {
+                    eprintln!(
+                        "PFIELD_MVD_CABAC idx={idx} subs={:?} refidx={:?} mvds={:?}",
+                        motion.sub_mb_type, motion.ref_idx_l0, motion.mvd_l0
+                    );
+                }
+                for row in cells.chunks(4) {
+                    eprintln!(
+                        "    {}",
+                        row.iter()
+                            .map(|c| format!("({},{})/{}", c.mv[0], c.mv[1], c.ref_idx))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+            }
+
             let mut recon = crate::reconstruct::reconstruct_inter_field_frame(
                 &parsed.macroblocks,
                 &parsed.mv_store,
@@ -1617,8 +1690,69 @@ impl H264Decoder {
                 beta_offset_div2: header.slice_beta_offset_div2,
                 chroma_qp_index_offset,
             };
+            if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+                let poc = {
+                    let mut scratch = self.poc_state.clone();
+                    crate::ref_pic::derive_pic_order_cnt(
+                        sps,
+                        matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                        nal.nal_ref_idc != 0,
+                        header.frame_num,
+                        header.pic_order_cnt_lsb,
+                        header.field_pic_flag,
+                        header.bottom_field_flag,
+                        header.delta_pic_order_cnt_0,
+                        header.delta_pic_order_cnt_bottom,
+                        &mut scratch,
+                    )
+                    .unwrap_or(0)
+                };
+                std::fs::write(
+                    format!(
+                        "{path}_pre_poc{poc}_bottom{}.gray",
+                        header.bottom_field_flag
+                    ),
+                    &recon.luma,
+                )
+                .unwrap();
+            }
             Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
-            return self.finalize_field(recon, nal, sps, header, packet);
+            if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+                let poc = {
+                    let mut scratch = self.poc_state.clone();
+                    crate::ref_pic::derive_pic_order_cnt(
+                        sps,
+                        matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
+                        nal.nal_ref_idc != 0,
+                        header.frame_num,
+                        header.pic_order_cnt_lsb,
+                        header.field_pic_flag,
+                        header.bottom_field_flag,
+                        header.delta_pic_order_cnt_0,
+                        header.delta_pic_order_cnt_bottom,
+                        &mut scratch,
+                    )
+                    .unwrap_or(0)
+                };
+                std::fs::write(
+                    format!(
+                        "{path}_post_poc{poc}_bottom{}.gray",
+                        header.bottom_field_flag
+                    ),
+                    &recon.luma,
+                )
+                .unwrap();
+            }
+            let field_pocs: Vec<i64> = ref_list.iter().map(|f| f.pic_order_cnt).collect();
+            return self.finalize_field(
+                recon,
+                nal,
+                sps,
+                header,
+                packet,
+                Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+                (field_pocs, Vec::new()),
+            );
         }
 
         // ---- CAVLC P-field path: multi-slice-capable accumulator ----
@@ -2025,6 +2159,43 @@ impl H264Decoder {
             _ => crate::reconstruct::WeightedPred::Default,
         };
 
+        // Co-located picture (§8.4.1.2.2): reference 0 of list 1. Its DPB
+        // entry carries the persisted per-macroblock motion grid (spatial
+        // direct's colZeroFlag input) and the picture's OWN reference-list
+        // POCs (temporal direct's MapColToList0 input), exactly like the
+        // progressive B paths in `decoder/mod.rs`.
+        let col_entry = ref_l1.first().and_then(|f| {
+            self.dpb().iter().find(|e| {
+                e.pic_order_cnt == f.pic_order_cnt
+                    && e.field_pic_flag != f.is_frame
+                    && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
+            })
+        });
+        let colocated_mv: Option<Vec<[crate::mv::MvCell; 16]>> = col_entry
+            .and_then(|e| e.mv_grid.clone())
+            .map(|g| (*g).clone());
+        let current_list0_poc: Vec<(i64, i64)> = ref_l0
+            .iter()
+            .map(|f| (f.pic_order_cnt, f.pic_order_cnt))
+            .collect();
+        // The current FIELD decoding against a co-located FRAME picture reads
+        // that frame's same-parity field view with frame→field motion-unit
+        // conversion (JM `mc_direct.c`); a co-located field decodes with the
+        // plain same-kind addressing.
+        let current_field_parity = col_entry
+            .filter(|col| !col.field_pic_flag)
+            .map(|_| header.bottom_field_flag);
+        let temporal_ctx = col_entry.map(|col| crate::mv::TemporalDirectCtx {
+            current_poc,
+            current_list0_poc: &current_list0_poc,
+            col_poc: col.pic_order_cnt,
+            col_list0_poc: &col.list0_poc,
+            col_list1_poc: &col.list1_poc,
+            col_pair: None,
+            current_field_parity,
+            direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
+        });
+
         let pic_init_qp = 26 + pps.map(|p| p.pic_init_qp_minus26).unwrap_or(0);
         let slice_qp = pic_init_qp + header.slice_qp_delta;
         let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
@@ -2048,9 +2219,9 @@ impl H264Decoder {
                 chroma_qp_index_offset,
                 transform_8x8,
                 sps.direct_8x8_inference_flag,
-                None,
+                colocated_mv.as_deref(),
                 header.direct_spatial_mv_pred_flag,
-                None,
+                temporal_ctx.as_ref(),
                 tracer,
             )
         } else {
@@ -2064,15 +2235,23 @@ impl H264Decoder {
                 chroma_qp_index_offset,
                 transform_8x8,
                 sps.direct_8x8_inference_flag,
-                None,
+                colocated_mv.as_deref(),
                 header.direct_spatial_mv_pred_flag,
-                None,
+                temporal_ctx.as_ref(),
                 tracer,
             )
         };
         let parsed = match parsed {
             Ok(p) => p,
-            Err(_) => return Ok(InterlacedOutcome::Fallback),
+            Err(e) => {
+                paff_dbg!(
+                    "interlaced B-field parse failed (fn={} bottom={} dpb={}): {e}",
+                    header.frame_num,
+                    header.bottom_field_flag,
+                    self.dpb().len()
+                );
+                return Ok(InterlacedOutcome::Fallback);
+            }
         };
 
         if std::env::var_os("KINETIX_B_FIELD_MB_DBG").is_some() {
@@ -2150,8 +2329,28 @@ impl H264Decoder {
             beta_offset_div2: header.slice_beta_offset_div2,
             chroma_qp_index_offset,
         };
+        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            std::fs::write(
+                format!(
+                    "{path}_bpre_poc{current_poc}_bottom{}.gray",
+                    header.bottom_field_flag
+                ),
+                &recon.luma,
+            )
+            .unwrap();
+        }
         Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
-        self.finalize_field(recon, nal, sps, header, packet)
+        let field_pocs_l0: Vec<i64> = ref_l0.iter().map(|f| f.pic_order_cnt).collect();
+        let field_pocs_l1: Vec<i64> = ref_l1.iter().map(|f| f.pic_order_cnt).collect();
+        self.finalize_field(
+            recon,
+            nal,
+            sps,
+            header,
+            packet,
+            Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
+            (field_pocs_l0, field_pocs_l1),
+        )
     }
 
     /// Apply the in-loop deblocking filter to a half-height field buffer
@@ -2240,6 +2439,8 @@ impl H264Decoder {
         sps: &SeqParameterSet,
         header: &crate::slice::SliceHeader,
         packet: &Packet,
+        mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
+        ref_pocs: (Vec<i64>, Vec<i64>),
     ) -> Result<InterlacedOutcome, KinetixError> {
         let field_height = (recon.luma.len() / recon.luma_stride) as u32;
         let mut data = recon.luma;
@@ -2257,16 +2458,19 @@ impl H264Decoder {
         };
 
         // Store the half-height field in the DPB so later inter slices can build
-        // their field reference lists from it (§8.2.4.2.5).
+        // their field reference lists from it (§8.2.4.2.5). Inter fields also
+        // persist their motion grid + own reference-list POCs: they later serve
+        // as the co-located picture for B-field direct-mode derivation
+        // (§8.4.1.2.2/§8.4.1.2.3), exactly like the progressive paths.
         self.store_reference_picture(
             nal,
             sps,
             header,
             &field_frame,
+            mv_grid,
             None,
-            None,
-            Vec::new(),
-            Vec::new(),
+            ref_pocs.0,
+            ref_pocs.1,
         );
 
         // Buffer the field and emit the interleaved frame once the pair is complete.

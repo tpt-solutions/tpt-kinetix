@@ -244,7 +244,12 @@ const MANIFEST: &[(&str, Expect)] = &[
     ("MPS_MW_A", Expect::BitExact),
     (
         "Sharp_MP_PAFF_1r2",
-        Expect::KnownGap("real PAFF 720x480 — correct frame count, grey-scaffold pixels"),
+        Expect::KnownGap(
+            "real PAFF 720x480 — 10/15 frames byte-exact (sessions #32ca-#32cd: \
+             display-order buffer, B-field ref lists, direct-mode context). \
+             Remaining mid-stream field pairs carry localized diffs — \
+             see todo-h264.md #32cb/#32cd",
+        ),
     ),
     // IPB stream, multi-slice, mixes P/B slices per picture. Was blocked on
     // the same direct_8x8_inference_flag=0 temporal-direct corner-sampling

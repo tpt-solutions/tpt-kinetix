@@ -1520,12 +1520,42 @@ fn apply_spatial_direct(
 /// picture `refIdxCol` names, via that picture's own reference lists at the
 /// time *it* was decoded).
 #[derive(Clone, Copy)]
+/// Per-field context of a co-located picture that is a synthesized combined
+/// field pair (mixed PAFF frame/field streams — see
+/// `ref_pic::combine_field_pairs_into_frames`).
+pub struct ColPairCtx<'a> {
+    pub top_poc: i64,
+    pub bottom_poc: i64,
+    /// Each field's OWN reference-list pocs: a co-located cell was coded by
+    /// one specific field, so its `ref_idx` indexes that field's list (JM
+    /// `mc_direct.c` reads the col cell through the chosen field's view).
+    pub top_list0_poc: &'a [i64],
+    pub bottom_list0_poc: &'a [i64],
+    pub top_list1_poc: &'a [i64],
+    pub bottom_list1_poc: &'a [i64],
+}
+
 pub struct TemporalDirectCtx<'a> {
     pub current_poc: i64,
-    pub current_list0_poc: &'a [i64],
+    /// Current L0 entries as `(own_poc, other_field_poc)`: `other_field_poc ==
+    /// own_poc` for plain entries; a synthesized combined field-pair entry
+    /// carries `(top_poc, bottom_poc)` so a co-located FIELD-level poc can
+    /// match either half (JM matches by picture identity — `mc_direct.c`
+    /// `list0[iref]->top_field == colocated->ref_pic || ...`).
+    pub current_list0_poc: &'a [(i64, i64)],
     pub col_poc: i64,
     pub col_list0_poc: &'a [i64],
     pub col_list1_poc: &'a [i64],
+    /// Co-located picture is a synthesized combined field pair: its grid row
+    /// `2k + parity` holds field MB row `k` coded by that parity's field, the
+    /// coding field is the pair field closer to `current_poc`, and cell motion
+    /// is in FIELD units (`mv_y × 2` → current frame units).
+    pub col_pair: Option<ColPairCtx<'a>>,
+    /// `Some(bottom_field_parity)` when the CURRENT picture is a field whose
+    /// co-located picture is a frame: cells are read from the same-parity
+    /// field view (frame 4×4 row `2·r + parity`) and col motion is in FRAME
+    /// units (`mv_y ÷ 2` → field units).
+    pub current_field_parity: Option<bool>,
     /// `sps.direct_8x8_inference_flag` (§7.3.2.1). When `true`, each Direct
     /// 8×8 quadrant derives its motion from a single "outer corner" 4×4
     /// co-located sample (FFmpeg's `IS_SUB_8X8(sub_mb_type)` path). When
@@ -1538,54 +1568,93 @@ pub struct TemporalDirectCtx<'a> {
     pub direct_8x8_inference_flag: bool,
 }
 
+/// JM `RSD` (ifunctions.h): map a 4×4 coordinate to the outer-corner 4×4 of
+/// its 8×8 block (`direct_8x8_inference_flag` co-located sampling).
+fn rsd(x: usize) -> usize {
+    if x & 2 != 0 {
+        x | 1
+    } else {
+        x & !1
+    }
+}
+
+/// Vertical motion-unit conversion between a field-coded co-located cell and
+/// the current picture (JM `mc_direct.c` lines 229-234).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MvYConv {
+    None,
+    /// Co-located cell is field-coded, current picture is a frame: `mv_y * 2`.
+    FieldToFrame,
+    /// Co-located cell is frame-coded, current picture is a field: `mv_y / 2`.
+    FrameToField,
+}
+
 /// Temporal direct-mode motion derivation for one co-located 4×4 block
 /// (§8.4.1.2.3; cross-checked against FFmpeg's `pred_temp_direct_motion`,
 /// `libavcodec/h264_direct.c`). Returns `(mvL0, refIdxL0, mvL1)`; `refIdxL1`
 /// is always 0 — the co-located picture is always `RefPicList1[0]` itself.
 ///
+/// `col_list0_poc`/`col_list1_poc` are the reference lists the co-located
+/// cell's `ref_idx` indexes — for a combined field-pair co-located picture
+/// these are the coding field's own lists (see [`ColPairCtx`]).
+///
 /// Unlike spatial direct, list usage is unconditional here: even a
 /// co-located intra block yields a valid (zero-motion, ref 0) bi-predictive
 /// result rather than "list dropped".
-fn derive_temporal_direct(col: &MvCell, ctx: &TemporalDirectCtx) -> ([i32; 2], i32, [i32; 2]) {
+fn derive_temporal_direct(
+    col: &MvCell,
+    ctx: &TemporalDirectCtx,
+    col_list0_poc: &[i64],
+    col_list1_poc: &[i64],
+    yconv: MvYConv,
+) -> ([i32; 2], i32, [i32; 2]) {
     if col.ref_idx < 0 && col.ref_idx_l1 < 0 {
         // Co-located block is intra: no motion to scale.
         return ([0, 0], 0, [0, 0]);
     }
     // Prefer the co-located block's own List0 over its List1 (§8.4.1.2.3).
     let (target_poc, mv_col) = if col.ref_idx >= 0 {
-        (ctx.col_list0_poc.get(col.ref_idx as usize).copied(), col.mv)
+        (col_list0_poc.get(col.ref_idx as usize).copied(), col.mv)
     } else {
         (
-            ctx.col_list1_poc.get(col.ref_idx_l1 as usize).copied(),
+            col_list1_poc.get(col.ref_idx_l1 as usize).copied(),
             col.mv_l1,
         )
     };
     let Some(target_poc) = target_poc else {
         return ([0, 0], 0, [0, 0]);
     };
-    // MapColToList0: find the same physical reference picture (by POC) in
-    // the current picture's own RefPicList0; falls back to 0 (spec-permitted
+    // MapColToList0: find the same physical reference picture (by POC — a
+    // combined field-pair entry matches either of its fields' pocs) in the
+    // current picture's own RefPicList0; falls back to 0 (spec-permitted
     // default) when no match exists.
     let ref_idx_l0 = ctx
         .current_list0_poc
         .iter()
-        .position(|&p| p == target_poc)
+        .position(|&(own, other)| target_poc == own || target_poc == other)
         .unwrap_or(0);
-    let Some(&pic_a_poc) = ctx.current_list0_poc.get(ref_idx_l0) else {
+    let Some(&(pic_a_poc, _)) = ctx.current_list0_poc.get(ref_idx_l0) else {
         return (mv_col, ref_idx_l0 as i32, [0, 0]);
+    };
+    // Vertical field↔frame unit conversion BEFORE scaling (JM lines 228-234).
+    let mv_y = match yconv {
+        MvYConv::None => mv_col[1],
+        MvYConv::FieldToFrame => mv_col[1] * 2,
+        MvYConv::FrameToField => mv_col[1] / 2,
     };
     let tb = (ctx.current_poc - pic_a_poc).clamp(-128, 127) as i32;
     let td = (ctx.col_poc - pic_a_poc).clamp(-128, 127) as i32;
     if td == 0 {
-        return (mv_col, ref_idx_l0 as i32, [0, 0]);
+        // JM's mvscale == 9999 branch: copy the converted motion, L1 = 0.
+        return ([mv_col[0], mv_y], ref_idx_l0 as i32, [0, 0]);
     }
     let tx = (16384 + td.unsigned_abs() as i32 / 2) / td;
     let dist_scale_factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let mv_l0 = [
         (dist_scale_factor * mv_col[0] + 128) >> 8,
-        (dist_scale_factor * mv_col[1] + 128) >> 8,
+        (dist_scale_factor * mv_y + 128) >> 8,
     ];
-    let mv_l1 = [mv_l0[0] - mv_col[0], mv_l0[1] - mv_col[1]];
+    let mv_l1 = [mv_l0[0] - mv_col[0], mv_l0[1] - mv_y];
     (mv_l0, ref_idx_l0 as i32, mv_l1)
 }
 
@@ -1601,24 +1670,102 @@ fn derive_temporal_direct(col: &MvCell, ctx: &TemporalDirectCtx) -> ([i32; 2], i
 fn apply_temporal_direct(
     cur: &mut [MvCell; 16],
     mb_idx: usize,
+    mb_width: usize,
     quads: &[usize],
     colocated: Option<&[[MvCell; 16]]>,
     ctx: &TemporalDirectCtx,
 ) {
-    let cells = colocated.and_then(|g| g.get(mb_idx));
+    let mb_row = mb_idx / mb_width;
+    let mb_col = mb_idx % mb_width;
+    // Resolve the co-located cell for one current picture-level 4×4
+    // coordinate, returning it with the coding field's list pocs and the
+    // vertical unit conversion — JM `mc_direct.c`'s three co-located access
+    // branches (same-kind / combined field pair / frame-into-field view).
+    let colocated_cell = |cy: usize, cx: usize| -> Option<(&MvCell, &[i64], &[i64], MvYConv)> {
+        let grid = colocated?;
+        if let Some(pair) = &ctx.col_pair {
+            // Current FRAME, co-located picture is a combined field pair:
+            // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
+            // inference), coding field = the pair field closer to the current
+            // poc; the pair's grid row `2k + parity` holds field MB row `k`.
+            let f = if ctx.direct_8x8_inference_flag {
+                rsd(cy >> 1)
+            } else {
+                cy >> 1
+            };
+            let fx = if ctx.direct_8x8_inference_flag {
+                rsd(cx)
+            } else {
+                cx
+            };
+            let bottom =
+                (ctx.current_poc - pair.bottom_poc).abs() >= (ctx.current_poc - pair.top_poc).abs();
+            let (l0, l1) = if bottom {
+                (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
+            } else {
+                (&pair.top_list0_poc, &pair.top_list1_poc)
+            };
+            let grid_row = 2 * (f / 4) + bottom as usize;
+            let cell = grid.get(grid_row * mb_width + mb_col)?;
+            return Some((
+                cell.get((f % 4) * 4 + (fx % 4))?,
+                l0,
+                l1,
+                MvYConv::FieldToFrame,
+            ));
+        }
+        if let Some(parity) = ctx.current_field_parity {
+            // Current FIELD, co-located picture is a frame: read the
+            // SAME-parity field view — frame 4×4 row = 2·(field 4×4 row) +
+            // parity; col motion is in frame units.
+            let v = if ctx.direct_8x8_inference_flag {
+                rsd(cy)
+            } else {
+                cy
+            };
+            let vx = if ctx.direct_8x8_inference_flag {
+                rsd(cx)
+            } else {
+                cx
+            };
+            let frame4 = 2 * v + parity as usize;
+            let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
+            return Some((
+                cell.get((frame4 % 4) * 4 + (vx % 4))?,
+                ctx.col_list0_poc,
+                ctx.col_list1_poc,
+                MvYConv::FrameToField,
+            ));
+        }
+        // Same picture kind: the current MB's own co-located MB.
+        let cell = grid.get(mb_idx)?;
+        Some((
+            cell.get((cy % 4) * 4 + (cx % 4))?,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            MvYConv::None,
+        ))
+    };
     for &q in quads {
         if ctx.direct_8x8_inference_flag {
             let corner = 12 * (q / 2) + 3 * (q % 2);
-            let col = cells.map(|c| c[corner]).unwrap_or(MvCell::INTRA);
-            let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
+            let (cy, cx) = (4 * mb_row + corner / 4, 4 * mb_col + corner % 4);
+            let derived = match colocated_cell(cy, cx) {
+                Some((col, l0, l1, yconv)) => derive_temporal_direct(col, ctx, l0, l1, yconv),
+                None => ([0, 0], 0, [0, 0]),
+            };
+            let (mv0, ref0, mv1) = derived;
             commit_rect(cur, 8 * (q % 2), 8 * (q / 2), 8, 8, mv0, ref0, mv1, 0);
         } else {
             for sub in 0..4 {
                 let by = 2 * (q / 2) + sub / 2;
                 let bx = 2 * (q % 2) + sub % 2;
-                let idx = by * 4 + bx;
-                let col = cells.map(|c| c[idx]).unwrap_or(MvCell::INTRA);
-                let (mv0, ref0, mv1) = derive_temporal_direct(&col, ctx);
+                let (cy, cx) = (4 * mb_row + by, 4 * mb_col + bx);
+                let derived = match colocated_cell(cy, cx) {
+                    Some((col, l0, l1, yconv)) => derive_temporal_direct(col, ctx, l0, l1, yconv),
+                    None => ([0, 0], 0, [0, 0]),
+                };
+                let (mv0, ref0, mv1) = derived;
                 commit_rect(cur, 4 * bx, 4 * by, 4, 4, mv0, ref0, mv1, 0);
             }
         }
@@ -1645,7 +1792,7 @@ pub(crate) fn predict_inter_b_macroblock(
                 let Some(ctx) = temporal else {
                     return Err("B slice: temporal direct mode needs RefPicList0/1 POC context");
                 };
-                apply_temporal_direct(cur, mb_idx, &[0, 1, 2, 3], colocated, ctx);
+                apply_temporal_direct(cur, mb_idx, mb_width, &[0, 1, 2, 3], colocated, ctx);
                 return Ok(());
             }
             apply_spatial_direct(
@@ -1825,7 +1972,7 @@ pub(crate) fn predict_inter_b_macroblock(
                                 "B slice: temporal direct mode needs RefPicList0/1 POC context",
                             );
                         };
-                        apply_temporal_direct(cur, mb_idx, &[part], colocated, ctx);
+                        apply_temporal_direct(cur, mb_idx, mb_width, &[part], colocated, ctx);
                         continue;
                     }
                     apply_spatial_direct(
@@ -2296,17 +2443,25 @@ mod tests {
     /// implementation, not just self-consistency.
     #[test]
     fn temporal_direct_halfway_b_picture_halves_the_colocated_mv() {
-        let current_list0_poc = [0i64, -4];
+        let current_list0_poc = [(0i64, 0i64), (-4, -4)];
         let ctx = TemporalDirectCtx {
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            col_pair: None,
+            current_field_parity: None,
             direct_8x8_inference_flag: true,
         };
         let col = cell([40, 0], 0); // co-located block: List0, ref 0, mv (40,0)
-        let (mv0, ref0, mv1) = derive_temporal_direct(&col, &ctx);
+        let (mv0, ref0, mv1) = derive_temporal_direct(
+            &col,
+            &ctx,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            MvYConv::None,
+        );
         // tb = 4-0 = 4, td = 8-0 = 8 -> half distance -> mv scaled by ~1/2.
         assert_eq!(ref0, 0);
         assert_eq!(mv0, [20, 0]);
@@ -2317,19 +2472,27 @@ mod tests {
     /// preferring List0 only when it is actually present (§8.4.1.2.3).
     #[test]
     fn temporal_direct_prefers_available_list0_falls_back_to_list1() {
-        let current_list0_poc = [0i64];
+        let current_list0_poc = [(0i64, 0i64)];
         let ctx = TemporalDirectCtx {
             current_poc: 2,
             current_list0_poc: &current_list0_poc,
             col_poc: 4,
             col_list0_poc: &[],
             col_list1_poc: &[0],
+            col_pair: None,
+            current_field_parity: None,
             direct_8x8_inference_flag: true,
         };
         let mut col = cell([0, 0], LIST_NOT_USED);
         col.ref_idx_l1 = 0;
         col.mv_l1 = [20, -8];
-        let (mv0, ref0, mv1) = derive_temporal_direct(&col, &ctx);
+        let (mv0, ref0, mv1) = derive_temporal_direct(
+            &col,
+            &ctx,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            MvYConv::None,
+        );
         // tb = 2-0 = 2, td = 4-0 = 4 -> half distance again.
         assert_eq!(ref0, 0);
         assert_eq!(mv0, [10, -4]);
@@ -2340,16 +2503,24 @@ mod tests {
     /// exactly zero motion at reference 0, not garbage from an unset MV.
     #[test]
     fn temporal_direct_intra_colocated_block_is_zero_motion() {
-        let current_list0_poc = [0i64];
+        let current_list0_poc = [(0i64, 0i64)];
         let ctx = TemporalDirectCtx {
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            col_pair: None,
+            current_field_parity: None,
             direct_8x8_inference_flag: true,
         };
-        let (mv0, ref0, mv1) = derive_temporal_direct(&MvCell::INTRA, &ctx);
+        let (mv0, ref0, mv1) = derive_temporal_direct(
+            &MvCell::INTRA,
+            &ctx,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            MvYConv::None,
+        );
         assert_eq!((mv0, ref0, mv1), ([0, 0], 0, [0, 0]));
     }
 
@@ -2358,17 +2529,25 @@ mod tests {
     /// anywhere in the current picture's RefPicList0.
     #[test]
     fn temporal_direct_unmatched_poc_falls_back_to_ref_zero() {
-        let current_list0_poc = [10i64, 20];
+        let current_list0_poc = [(10i64, 10i64), (20, 20)];
         let ctx = TemporalDirectCtx {
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,
             col_list0_poc: &[999], // no picture in current_list0_poc has POC 999
             col_list1_poc: &[],
+            col_pair: None,
+            current_field_parity: None,
             direct_8x8_inference_flag: true,
         };
         let col = cell([40, 0], 0);
-        let (_, ref0, _) = derive_temporal_direct(&col, &ctx);
+        let (_, ref0, _) = derive_temporal_direct(
+            &col,
+            &ctx,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            MvYConv::None,
+        );
         assert_eq!(ref0, 0);
     }
 }

@@ -2,6 +2,152 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32ce (2026-09-26, same day) — mixed frame/field temporal direct implemented (JM-transcribed); Sharp "regression" chased to a bisect artifact
+
+Implemented the #32cd NEXT item: temporal direct's field/frame conversion
+rules, transcribed from the local JM oracle (`mc_direct.c` — the reference
+that produced the ITU YUVs — rather than FFmpeg, whose `mb_y` grid
+conventions for PAFF field entries differ from ours).
+
+**Decoder changes:**
+- `TemporalDirectCtx` extended: `current_list0_poc` entries are now
+  `(own_poc, other_field_poc)` (a synthesized combined field-pair entry
+  matches either of its fields' pocs — JM's picture-identity matching);
+  new `col_pair: Option<ColPairCtx>` (co-located picture is a combined
+  field pair) and `current_field_parity: Option<bool>` (current is a field
+  whose co-located picture is a frame).
+- `apply_temporal_direct` now resolves co-located cells through JM's three
+  access branches: same-kind (unchanged), combined-pair (frame current:
+  field row = `rsd(cy>>1)`, coding field = the pair field closer to
+  `current_poc`, grid row `2k+parity`), and frame-into-field-view (field
+  current: frame 4×4 row `2·rsd(cy)+parity`, same parity as current).
+  `derive_temporal_direct` applies the vertical unit conversion
+  (`mv_y ×2` field→frame, `mv_y ÷2` frame→field) before scaling, and its
+  `td == 0` branch now copies the CONVERTED motion (JM's `mvscale == 9999`
+  branch). `rsd` is JM's `RSD` outer-corner mapping.
+- `interleave_field_pair_entry` (ref_pic.rs) now synthesizes the combined
+  pair's motion grid (row `2k+parity` = field MB row `k`) and carries
+  `pair_field_pocs`/`pair_field_lists` (the two fields' own list POCs — a
+  co-located cell's ref_idx indexes the list of the field that coded it),
+  so frame-coded B pictures in PAFF streams finally get a real co-located
+  context (was hard `mv_grid: None` → all-INTRA col → zero motion).
+
+**Measured:** `CAPA1` display frames 18/19 (field pairs whose co-located
+picture is the poc-36 P frame — the new frame→field path) went 11k/7.9k →
+23-top/335-bottom wrong samples; frames 21-29 (previously position-garbage)
+now land in position with small residuals. `CVPA1` mirrors it. `Sharp`
+10/15 and `CVFI1` 17/17 unchanged (Sharp's pairs are SPATIAL direct — the
+temporal path never runs there). Gates: 273 lib tests, 72 integration
+binaries, ITU 33/33 hard-checked, fmt/clippy/rustdoc `-D warnings` clean.
+
+**Bisect lesson (cost half the session):** an intermediate Sharp "74k
+regression" turned out to be a stale-toggle artifact — I had left a
+neutralized `current_field_parity: None` (BISECT-TEMP) in the tree while
+A/B-ing `interleave_field_pair_entry`'s grid, so "grids OFF" runs were
+actually "grids OFF + Case B OFF" and the two toggles got conflated. With
+the tree restored, `Sharp` equals its #32cd numbers exactly. In-place
+toggles must be re-enabled (or asserted) before drawing conclusions.
+
+**REMAINING (next session):**
+1. *Sharp 5/11/13 + CAPA1/CVPA1 display-7 class* — field B pairs whose
+   co-located picture is the preceding FIELD pair (same-kind path), still
+   10-33k wrong: parse verified bit-identical to JM (POC 6 MB 0), pre-deblock
+   planes byte-exact, so the residual lives in same-kind temporal-direct
+   derivation details (per-field list POC selection / dist-scale) or
+   deblocking of field pairs. Now isolated with clean toggles.
+2. *Frame-coded single B pictures* (CAPA1 display 7 = poc-10, Sharp
+   display 2): Case A path active — needs a per-MB MV/pixel diff vs JM
+   (`KINETIX_B_FIELD_MB_DBG` grids + JM `POC: 8`-style traces) to score it.
+3. CAPA1 aborts at NAL 143 (next unsupported slice); near-exact residue
+   (≤38 samples, max ≤2) on CAPA1 3/4/6/16.
+4. Still open from before: HCHP1_HHI_B (intra-4×4 DC neighbour
+   availability), CAMA1_Sony_C (CABAC MBAFF-I desync).
+
+## SESSION #32cd (2026-09-26) — PAFF B-field direct-mode context landed; CAPA1/CVPA1 go from frame-4 strict abort to whole-stream decode
+
+Baseline re-measurement at session start (post-#32cc): `CVFI1_Sony_D` 17/17
+exact, `Sharp_MP_PAFF_1r2` 8/15 exact, `CAPA1_TOSHIBA_B`/`CVPA1_TOSHIBA_B`
+aborted in strict mode at the FIRST B-field slice (NAL 24) after decoding only
+4 frames, and the harness's display frame 3 (the reference P pair, poc 6/7)
+looked "wholesale wrong".
+
+**Misdiagnosis resolved first (no code change):** the "wholesale frame-3
+failure" was a display-position artifact. Compared pre-deblock against the
+local JM TRACE oracle, our poc 6/7 P-field pair is **byte-exact** (0/50688
+samples per field; parse of poc-6 MB 0 — P_8x8, subs `[1,2,3,0]`, ref_idx
+`[1,0,0,0]`, all 9 mvds — is bit-identical to JM's trace too). The picture
+simply belongs at display position 5, *after* the two B pairs at ITU
+positions 3/4 — and those B pairs never decoded because of the real bug
+below. Similarly, CAPA1's stream structure (via JM trace + slice-header
+dumps) mixes reference field pairs, NON-REFERENCE field/frame P pictures
+(rid=0, far-future poc_lsb 28-30 that decode into display slots 1/2 — and
+decode bit-exact), and frame-coded pictures; the ITU reference order is
+IDR, non-ref pair, non-ref frame, then POC order.
+
+**Real bug 1 — B-field slices got no direct-mode context.**
+`decode_interlaced_b_field` passed `colocated_mv = None` and
+`temporal = None` into `parse_b_slice[_cabac]`, so every temporal-direct
+(`direct_spatial_mv_pred_flag=0`) B field errored with "temporal direct mode
+needs RefPicList0/1 POC context" → `Fallback` → strict abort. Now the path
+locates the co-located picture (`RefPicList1[0]`) in the DPB (matched by poc +
+field parity + field/frame-ness) and builds both the colocated MV grid and a
+`TemporalDirectCtx` from it, exactly like the progressive B paths.
+
+**Real bug 2 — field pictures never persisted motion into the DPB.**
+`finalize_field`/`finalize_field_picture` called `store_reference_picture`
+with `mv_grid = None` and empty `list0_poc`/`list1_poc`, so every
+co-located cell looked INTRA to later B fields (zero motion everywhere).
+Inter fields now store `mv_store.to_grid_vec()` plus their own reference-list
+POCs (P fields: L0 only; B fields: L0+L1; I fields: unchanged).
+
+**New debug hooks:** `KINETIX_PFIELD_MB_DBG=<idx>` now also covers the CABAC
+P-field branch (`PFIELD_MB_CABAC`/`PFIELD_MVD_CABAC` + final MV grid);
+B-field parse errors are logged under `KINETIX_PAFF_DBG` instead of being
+swallowed; `KINETIX_FIELD_BUF_OUT` also dumps the B-field pre-deblock plane
+(`*_bpre_poc<N>_bottom<B>.gray`).
+
+**Measured after the fixes** (`dbg_field_triage`, display order):
+- `CVFI1_Sony_D`: 17/17 exact (unchanged).
+- `Sharp_MP_PAFF_1r2`: 10/15 exact (frames 4 and 10 newly exact; frame 2
+  top 2658→2777 is the only small regression, bottom unchanged; 8/11/13
+  unchanged). Manifest note refreshed.
+- `CAPA1_TOSHIBA_B`: decodes to NAL 143 (was: hard stop at 24); 17/30
+  emitted frames byte-exact, frames 3/4/6/16 near-exact (7-38 samples,
+  max ≤2 — deblock-rounding class), frames 7/18/19/21-25 wrong (the class
+  below).
+- `CVPA1_TOSHIBA_B`: full 90-frame stream decodes (was 4 frames); 21/90
+  exact with the same wrong/near-exact split.
+- Gates: 273 lib tests green, all 72 integration binaries green, ITU
+  suite 33/33 hard-checked BitExact unchanged, fmt + clippy `-D warnings`
+  clean.
+
+**REMAINING (next session) — mixed frame/field temporal direct.** Both
+residual failure classes are one spec area, §8.4.1.2.3 with field/frame
+conversion (FFmpeg `pred_temp_direct_motion` + `ff_h264_direct_ref_list_init`;
+oracle copies fetched to `C:\Users\phill\h264_direct_ref.c` and
+`h264_refs_ref.c`):
+1. *Frame-coded B/P pictures in PAFF streams whose L1[0] is a synthesized
+   combined field-pair frame* (CAPA1 display 7 = the poc-10 B frame,
+   wholesale wrong): `interleave_field_pair_entry` leaves
+   `mv_grid: None` and empty list POCs (its doc comment even says "no known
+   mixed frame/field fixture exercises that combination" — CAPA1/CVPA1 now
+   are that fixture). Fix: synthesize the combined grid by interleaving the
+   two fields' grids (grid row `2k+parity` = field row k) + carry per-field
+   pocs/lists. FFmpeg selects the col FIELD via `col_parity = (|col_poc[0] −
+   cur_poc| >= |col_poc[1] − cur_poc|)` and addresses its grid at frame row
+   `(mb_y & ~1) + col_parity`.
+2. *FIELD B pairs whose L1[0] is a genuine frame picture* (CAPA1/CVPA1
+   displays 18/19 etc. — poc 32/33, 34/35 pairs with a poc-36 frame col):
+   the context is now present, but `derive_temporal_direct` lacks the
+   field/frame rules — per FFmpeg: when cur MB and col MB differ in
+   field-ness, `y_shift = 2 * !IS_INTERLACED(cur_mb)` and
+   `my_col = (mv_col[1] << y_shift) >> 1` (frame↔field vertical unit
+   conversion), with the scale computed from the field poc of the current
+   picture and the col picture's poc.
+3. Minor: CAPA1 aborts at NAL 143 (next unsupported slice after the B
+   fields — triage with `KINETIX_PAFF_DBG`); frames 3/4/6/16 near-exact
+   residue (≤38 samples, max ≤2) needs a deblock-level look once 1+2 land.
+
 ## SESSION #32cc ADDENDUM 9 (2026-09-25) — CVFI1 PAFF P-field reference-list cursor fixed; clip is bit-exact
 
 Instrumented the local JM decoder at POC 4 top MB 90 and confirmed that Kinetix

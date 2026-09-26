@@ -2467,13 +2467,37 @@ impl H264Decoder {
             .map(|g| (*g).clone());
         let current_list0_poc: Vec<i64> = ref_l0.iter().map(|e| e.pic_order_cnt).collect();
         let current_list1_poc: Vec<i64> = ref_l1.iter().map(|e| e.pic_order_cnt).collect();
-        let temporal_ctx = ref_l1.first().map(|col| crate::mv::TemporalDirectCtx {
-            current_poc,
-            current_list0_poc: &current_list0_poc,
-            col_poc: col.pic_order_cnt,
-            col_list0_poc: &col.list0_poc,
-            col_list1_poc: &col.list1_poc,
-            direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
+        let current_list0_pairs: Vec<(i64, i64)> = ref_l0
+            .iter()
+            .map(|e| match e.pair_field_pocs {
+                Some(pair) => pair,
+                None => (e.pic_order_cnt, e.pic_order_cnt),
+            })
+            .collect();
+        let temporal_ctx = ref_l1.first().map(|col| {
+            let col_pair = col.pair_field_lists.as_ref().map(|(tl0, tl1, bl0, bl1)| {
+                let (top_poc, bottom_poc) = col
+                    .pair_field_pocs
+                    .unwrap_or((col.pic_order_cnt, col.pic_order_cnt));
+                crate::mv::ColPairCtx {
+                    top_poc,
+                    bottom_poc,
+                    top_list0_poc: tl0,
+                    top_list1_poc: tl1,
+                    bottom_list0_poc: bl0,
+                    bottom_list1_poc: bl1,
+                }
+            });
+            crate::mv::TemporalDirectCtx {
+                current_poc,
+                current_list0_poc: &current_list0_pairs,
+                col_poc: col.pic_order_cnt,
+                col_list0_poc: &col.list0_poc,
+                col_list1_poc: &col.list1_poc,
+                col_pair,
+                current_field_parity: None,
+                direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
+            }
         });
 
         let acc = self
@@ -2710,6 +2734,8 @@ impl H264Decoder {
             long_term_pic_num: -1,
             mv_grid,
             mc_frame,
+            pair_field_pocs: None,
+            pair_field_lists: None,
             list0_poc,
             list1_poc,
         };
@@ -3466,14 +3492,37 @@ impl H264Decoder {
                 // picture's own RefPicList0 POCs plus the co-located
                 // picture's (RefPicList1[0]'s) own POC and its own ref-list
                 // POCs, snapshotted when that picture was itself decoded.
-                let current_list0_poc: Vec<i64> = ref_l0.iter().map(|e| e.pic_order_cnt).collect();
-                let temporal_ctx = ref_l1.first().map(|col| crate::mv::TemporalDirectCtx {
-                    current_poc,
-                    current_list0_poc: &current_list0_poc,
-                    col_poc: col.pic_order_cnt,
-                    col_list0_poc: &col.list0_poc,
-                    col_list1_poc: &col.list1_poc,
-                    direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
+                let current_list0_pairs: Vec<(i64, i64)> = ref_l0
+                    .iter()
+                    .map(|e| match e.pair_field_pocs {
+                        Some(pair) => pair,
+                        None => (e.pic_order_cnt, e.pic_order_cnt),
+                    })
+                    .collect();
+                let temporal_ctx = ref_l1.first().map(|col| {
+                    let col_pair = col.pair_field_lists.as_ref().map(|(tl0, tl1, bl0, bl1)| {
+                        let (top_poc, bottom_poc) = col
+                            .pair_field_pocs
+                            .unwrap_or((col.pic_order_cnt, col.pic_order_cnt));
+                        crate::mv::ColPairCtx {
+                            top_poc,
+                            bottom_poc,
+                            top_list0_poc: tl0,
+                            top_list1_poc: tl1,
+                            bottom_list0_poc: bl0,
+                            bottom_list1_poc: bl1,
+                        }
+                    });
+                    crate::mv::TemporalDirectCtx {
+                        current_poc,
+                        current_list0_poc: &current_list0_pairs,
+                        col_poc: col.pic_order_cnt,
+                        col_list0_poc: &col.list0_poc,
+                        col_list1_poc: &col.list1_poc,
+                        col_pair,
+                        current_field_parity: None,
+                        direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
+                    }
                 });
                 let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
                 reader.seek_to_bit(header.data_bit_offset);
