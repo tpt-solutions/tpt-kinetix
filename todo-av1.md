@@ -8281,3 +8281,103 @@ film-grain synthesis, non-uniform tiling, operating-point switching) reasons
 — those are real, sizeable features, not bugs in the already-implemented
 path, and are the actual next milestone before `pixel_exact` can honestly
 flip for anything beyond this synthetic corpus.
+## Session 2026-09-27 — non-uniform tiling: real parser/geometry rewrite; FATE `non_uniform_tiling` frame 0 from 315,925 differing bytes to 11
+
+Classification of the four unclassified official streams (per the last session's
+recommendation) started with `non_uniform_tiling.ivf` and found a **real decoder
+bug, not an unsupported feature**: `parse_tile_info()`'s non-uniform branch
+(`compute_log2_from_increments`) was a stub that (a) read the wrong syntax
+entirely — a `f(1)` "tile_start_and_end_present" bit (that field belongs to
+`tile_group_obu()`, not `tile_info()`) plus a `ns()` read, then assumed full
+coverage after one tile — and (b) collapsed the result back to a uniform
+power-of-two grid. Every frame of the stream desynced from `tile_info()` onward.
+Probe output pre-fix: `uniform=false cols=1 rows=1` for a 12x5 SB frame.
+
+### What was rewritten
+
+- **`frame.rs` — `parse_tile_info()`**: returns a new `TileLayout` struct
+  (explicit `col_start_sb[]`/`row_start_sb[]` start arrays, actual `cols`/`rows`,
+  `log2_cols`/`log2_rows`, `context_update_tile_id`, `tile_size_bytes`) for both
+  spacing modes. Non-uniform syntax follows dav1d `obu.c:884`: each column's
+  width is `1 + ns(min(sb_cols - sbx, max_tile_width_sb))` (no bits when the
+  remaining span is one SB), then rows are constrained to
+  `max_tile_area_sb / widest_tile` (frame-area shadow, `>>= min_log2_tiles + 1`
+  when set). The two trailing fields (`context_update_tile_id` sized
+  `log2_cols+log2_rows`, `tile_size_bytes = f(2)+1`) are signalled only when
+  more than one tile exists — the synthetic corpus never exercised them.
+  `FrameHeader.tile_cols/tile_rows/tile_*_log2/tile_*_in_sb` collapsed into
+  `FrameHeader.tile_layout`.
+- **`frame.rs` — `read_ns()`**: `ns(2)` consumed **zero** bits and returned 0;
+  per dav1d `getbits.c:114` (l = ulog2(2)+1 = 2, one prefix bit, no extra) it
+  reads **one bit**. Rewritten to the canonical `w = floor(log2 n)+1`,
+  `m = 2^w - n` form; round-trip test added for every (n, v) with n ≤ 32.
+- **`reconstruct/mod.rs` — tile-group splitting**: `reconstruct_av1_frame()`
+  previously treated each TileGroup OBU as one tile. New
+  `split_tile_group_payloads()` implements §5.11.1: per group,
+  `tile_start_and_end_present_flag` (only when NumTiles > 1), optional
+  `tg_start`/`tg_end` (tile-relative), then per-tile `tile_size_minus_1` size
+  fields — **little-endian bytes** (dav1d `decode.c`: `tile_sz |= *data++ << (k*8)`)
+  — for every tile but the group's last, which takes the remainder.
+- **`reconstruct/mod.rs` — per-tile geometry**: rects from
+  `col_start_sb[]`/`row_start_sb[]` (non-uniform tiles have different sizes),
+  clipped to the mi-grid extent; `decode_tile_group()` now takes the tile's
+  pixel rect instead of deriving uniform geometry from tile indices. The CDF
+  context saved for the frame comes from the `context_update_tile_id` tile (was:
+  first decoded tile).
+- **`reconstruct/partition.rs` — tile-relative partition semantics**:
+  `decode_partition()`'s `has_rows`/`has_cols`, the outside-tile leaf guards,
+  and `partition_context()`'s `avail_u`/`avail_l` compare against the tile's
+  `MiRowEnd`/`MiColEnd`/`MiRowStart`/`MiColStart` (dav1d's per-tile `f->bw`/
+  `f->bh` and tile-start availability), not the frame's. For SB-aligned tiles
+  this is provably identical for valid streams (no block can straddle an
+  interior tile boundary), but it is what the spec's `decode_partition` says
+  and removes the frame-edge assumption.
+- **`loop_filter.rs` — loop-restoration "round half up" merge**: a trailing
+  partial LR unit (`ur*unit + half > span`) is not its own unit — its
+  coefficients are never read (§5.11.57 skip) and its pixels are filtered with
+  the previous unit's filter (dav1d `lr_sbrow`: `aligned_unit_pos -= unit_size`).
+  Kinetix previously left such regions unfiltered. This is what took
+  `frames_refs_short_signaling` from 0 to **1/50 frames exact**.
+
+### Ground truth used
+
+A temporary patch to a fresh dav1d 1.5.4 clone (`KGTILING`/`KGTG`/`KGTILE`
+stderr prints in `obu.c`/`decode.c`, outside this repo) confirmed for
+`non_uniform_tiling.ivf`: `uniform=0 cols=1 rows=4 log2c=0 log2r=2 update=3
+n_bytes=2 col_start=[0,12] row_start=[0,1,2,3,5]` — matching Kinetix exactly —
+and per-tile payload sizes `560/2498/5743/8201` (sum + 3×2 size bytes =
+payload ✓). Caught along the way: the big-endian first attempt at the tile
+size fields (wrong; spec `f(n)` descriptions mislead — dav1d/libaom both use
+LE bytes), and a splitter bug where the group header reader never advanced
+over tile data so the second size field was read from tile 0's payload.
+
+### Measured effect
+
+- `non_uniform_tiling.ivf` frame 0 vs dav1d: **315,925 → 1,335 → 11 differing
+  bytes** (tiles 0-2 and most of tile 3 bit-exact; the last 11 bytes are ±1
+  noise near (600,296) in the merged LR region). All 24 frames now decode;
+  before, every frame was wholesale corruption. Inter frames (1+) still diverge
+  from tile 1's first row (`first_byte=(0,64)`) — a per-tile decode difference
+  in an inter frame (temporal-MV/refmvs scoping is the prime suspect), needing
+  a symbol-trace session (`av1_symbol_trace_diff` infra exists).
+- Official FATE aggregate: **2/195** (was 1/198; `frames_refs_short_signaling`
+  gained its first exact frame from the LR merge rule). `non_uniform_tiling`
+  remains 0/24 (inter frames), `decode_model`/`film_grain` expected-unsupported,
+  `seq_hdr_op_param_info` 0/58 — its frames with multi-tile layouts now fail
+  loudly in the splitter (`invalid tile-group range`, garbage size fields)
+  because their frame headers desync earlier (operating-point handling, the
+  known unclosed feature); previously they decoded garbage silently.
+- Synthetic corpus: 6/6 conformance entries pass (no regression); AV1 crate
+  162 lib tests green; `cargo clippy -p tpt-kinetix-av1 -p tpt-kinetix-test-utils
+  --all-targets` clean.
+
+### Next steps
+
+1. Inter-frame tile decode: symbol-trace frame 1's tile 1 vs dav1d
+   (`KINETIX_AV1_CAPTURE_TILE` + `tools/av1_oracle` or `av1_symbol_trace_diff`).
+2. `scratch` harness: `tpt-kinetix-test-utils/examples/probe_tiles.rs`
+   (`probe_tiles <ivf> [max-frames]`, diffs every frame vs dav1d) committed for
+   reuse.
+3. `switch_frame` (1/32): frame 1's mismatch begins deep in the frame
+   (`first_byte=274324`) — S-frame reference-slot semantics worth classifying
+   before reconstruction work.
