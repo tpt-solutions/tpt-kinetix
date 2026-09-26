@@ -1,5 +1,72 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 2 (2026-09-27) — pinned the second bug to a wrong stored colocated MV component, not the scale math
+
+Followed the addendum above's plan exactly (dump the derived MV, compare to
+JM) and it resolved cleanly — no further false trails this time.
+
+**Method.** Added temporary debug prints (all reverted, no diff left in the
+tree): our own `apply_temporal_direct`/`derive_temporal_direct` dumping
+`target_poc`/`ref_idx_l0`/`pic_a_poc`/`col_poc`/`mv_col` for `MB(8,0)`'s
+`q=0` (its `B_Direct_8x8` quadrant) in POC=10's slice; JM's
+`update_direct_mv_info_temporal` (`mc_direct.c`) patched the same way,
+dumping `mapped_idx`/`mv_scale`/`colocated->mv`/the field→frame-converted
+`mv_y` at the exact same computation point.
+
+**Result — the scale formula and every one of its inputs are IDENTICAL:**
+
+```
+                  ours          JM
+target/mapped_idx   0             0
+pic_a_poc            6             (implicit via mapped_idx=0 -> same L0[0])
+tb = cur-pic_a       4             4
+td = col-pic_a       6             6
+mv_scale (dist_scale_factor)  171           171   <- exact match
+mv_y (after field->frame doubling)  -8            -8    <- exact match
+col_mv (colocated MV before scale)  (-10,-4)      (-7,-4)   <- X DIFFERS, Y matches
+final mv0 (after scale)  (-7,-5)       (-5,-5)   <- differs, purely because col_mv.x differs
+```
+
+Hand-verified: plugging JM's own `col_mv=(-7,-4)` into *our* scale formula
+reproduces JM's exact `mv0=(-5,-5)` result. **The temporal-direct scale
+math (§8.4.1.2.3, `dist_scale_factor`/rounding) is fully correct and not the
+bug.** The entire remaining discrepancy is that **the stored colocated MV
+we read for this grid position has the wrong X component** — `-10` where it
+should be `-7` (Y is already correct at `-4` in both). This is a real,
+narrow, well-defined target: something in how the P-field colocated
+picture's motion grid got **populated** (not how it's *read* — the
+`corner`/`rsd()`/`grid_row` addressing arithmetic was already spot-checked
+structurally sound in the previous addendum, and Y matching exactly while
+only X differs argues against a wrong-cell/wrong-row addressing bug, which
+would typically scramble both components or grab an entirely different
+motion vector, not shift one axis by a small, plausible amount) — most
+likely in `decode_interlaced_p_field`'s motion-grid persistence
+(quarter-pel MV storage, or a stride/rounding difference specific to that
+field decoder, which was never previously cross-checked against a value
+that later feeds a *frame-coded* B picture's temporal direct — every prior
+proof of that P field's correctness was pixel-level (`KINETIX_WRITE_OUT
+idx=8`, bit-exact), which doesn't verify its **stored MV grid**, only its
+reconstructed samples.
+
+**Next session:** dump `decode_interlaced_p_field`'s own stored `mv_grid`
+for frame_num=2's top field (POC=12) at the macroblock/block position that
+`apply_temporal_direct`'s `corner`/`rsd()` addressing resolves to for
+`MB(8,0)` (worked out in the previous addendum: `grid.get(8)` then
+`.get(0)` — i.e. block 0 of MB column 8, row 0, in that field's own 4x4
+grid) — compare its raw value directly against JM's `colocated->mv[refList]`
+before any scaling, to confirm the field decoder itself is where `-10`
+diverges from `-7`. If the field decoder's own grid is *already* `-10` at
+that exact position, the bug is in P-field MV decode/storage itself
+(unexpected — P-field pixel reconstruction for this picture is proven
+bit-exact, so this would mean the stored MV and the pixels it produced are
+inconsistent, worth double-checking the pixel proof covers this exact block
+and not a skip/redundant path); if the field decoder's grid is correct and
+only the *frame-coded B picture's read* of it comes out wrong, the bug is in
+the addressing arithmetic after all, despite the previous addendum's
+structural read of it — re-derive `corner`/`rsd()` bit-for-bit against JM's
+own `RSD()` macro and `mv_info` indexing in `mc_direct.c` rather than
+trusting the earlier read.
+
 ## SESSION #32d4 ADDENDUM (2026-09-27) — triaged the second bug to `B_8x8` sub-partitions with `Bi`/small-partition sub-types, first onset at MB(8,0)
 
 Picked the "next session" item off immediately: scanned every macroblock of
