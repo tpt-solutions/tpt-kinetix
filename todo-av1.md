@@ -8381,3 +8381,74 @@ over tile data so the second size field was read from tile 0's payload.
 3. `switch_frame` (1/32): frame 1's mismatch begins deep in the frame
    (`first_byte=274324`) — S-frame reference-slot semantics worth classifying
    before reconstruction work.
+
+## Session 2026-09-27 (cont'd) — inter-frame tile bug root-caused: MC read the reference at tile-local coordinates; frame 1 from 222,098 differing bytes to 1,773
+
+The inter-frame divergence first seen last session (frames 1+ diverging from
+tile 1's first row) is now root-caused and fixed.
+
+### Diagnostic path (recorded for reuse)
+
+1. Patched the temporary dav1d 1.5.4 clone with per-symbol `Post-*` prints
+   (`DEBUG_BLOCK_INFO` in `recon.h`, retargeted to frame 1, tile 1's first SB
+   rows) and compared against Kinetix's `KINETIX_AV1_IBSUM`/`KINETIX_AV1_DBG_B0`
+   traces: **all 78 skip/intra/luma-coeff/chroma-coeff events match in order,
+   rng values identical** — the entropy decode is bit-exact; the divergence is
+   reconstruction-side.
+2. The block at mi (20,0) (16×16, mv=(0,0), all-zero-but-DC residual) differs
+   by +3 in Kinetix. Patched dav1d with a PRED dump before `itxfm_add`
+   (`DEBUG_B_PIXELS`): dav1d's prediction is the flat 118 reference copy; its
+   recon adds a **vertical-only** +0/+1 gradient (correct for ADST_DCT:
+   vertical ADST × horizontal DCT-DC). A direct unit probe of Kinetix's
+   `inverse_transform` with the same input (cf[0]=110, TX_16X16, txtp=1)
+   produced the identical vertical gradient — **the transform is correct**.
+3. That left the inter prediction itself: `recon_b_inter`'s `px_x`/`px_y` are
+   **tile-local** plane coordinates, but the `motion_compensate` /
+   `motion_compensate_prep` / OBMC-job calls used them directly as positions
+   into the **full-frame reference plane**. Tile 0 (origin tile) is unaffected;
+   every tile below/right read the reference shifted by its own tile origin —
+   tile 1's mv=(0,0) blocks copied reference rows 16..31 instead of 80..95.
+   The warp path was already correct (`block_warp_process` takes frame-global
+   `mi_col`/`mi_row`), which is why warp-heavy rows looked different from
+   translation-heavy ones.
+
+### Fix
+
+`inter_block.rs`: the three reference-read sites — single-ref
+`motion_compensate`, compound `motion_compensate_prep`, and the OBMC job MC —
+now add the tile origin (plane-subscaled: `tile_px_x0 >> ss_hor`,
+`tile_px_y0 >> ss_ver`) to the reference read position; destination writes
+stay tile-local.
+
+### Measured effect
+
+- Frame 1 (shown): 222,098 → **1,773** differing bytes; frame 2: 225,230 →
+  **1,977**. Both are now confined to one ~32×32 region at (415..447,
+  68..100) in tile 1 (magnitudes ±1..4) — a single block-level prediction
+  residual, not yet root-caused.
+- Frames 3+ still diverge from row 0 (first_byte (405,0)/(98,0), ~120-160k
+  bytes) — consistent with cascade: row-0 blocks with upward MVs referencing
+  frame 1/2's localized corrupted region. Fixing the localized source may
+  collapse the whole chain.
+- `KINETIX_AV1_NO_WARP=1` makes frame 1 *worse* (9,053 bytes) — the warp path
+  is contributing correctly; the localized region is not warp-attributable.
+- Synthetic corpus 6/6, AV1 crate 162 lib tests, clippy `-D warnings` on both
+  touched crates — no regressions.
+
+### Also this session
+
+- `build_rp_proj` (§7.10.2.6 temporal-MV projection) is now tile-scoped per
+  dav1d `load_tmvs_c`: sources from the tile's 8×8 rows and columns ± one SB
+  band, projected writes clamped inside the tile (`y_proj_start/y_proj_end`,
+  the `pos_x` window against `col_start8/col_end8`). Inert for frame 1 (its
+  keyframe reference has an empty motion field) but correct for later frames.
+- `KINETIX_AV1_IBSUM` traces widened from `mi_row < 4` to all rows; new
+  `KINETIX_AV1_CFTARGET=col,row` dumps dequantized coefficients for one block
+  (both mirroring the earlier session's oracle-tooling pattern).
+
+### Next session's starting point
+
+Frame 1's (415..447, 68..100) region: identify the block at mi ≈ (104,17)
+(`KINETIX_AV1_DBG_PX` with tile-local px, `KINETIX_AV1_DBG_OBMC` covers
+mi_row 16-22), decide whether it is OBMC-blend or MC-edge; then re-check
+frames 3+ for cascade collapse.

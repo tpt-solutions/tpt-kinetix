@@ -434,7 +434,7 @@ impl<'a> TileDecodeState<'a> {
             self.mode_cdfs.read_skip(&mut self.dec, skip_ctx) == 1
         };
         let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row < 40 && mi_col < 40;
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={}",
                 self.dec.raw_state().0
@@ -494,7 +494,7 @@ impl<'a> TileDecodeState<'a> {
                 self.dec.raw_state().0
             );
         }
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "KINTRA mi=({mi_col},{mi_row}) intra={} ictx={inter_ctx} rng={}",
                 !is_inter,
@@ -615,7 +615,7 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.raw_state().0
                 );
             }
-            if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+            if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
                 eprintln!(
                     "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=1 ymode={y_mode} skip={skip}"
                 );
@@ -1404,7 +1404,7 @@ impl<'a> TileDecodeState<'a> {
             mi_col,
             warp_model.as_ref(),
         )?;
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() && mi_row < 4 {
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=0 mv=({},{} ({},{})) ref=[{},{}] mm={motion_mode} filt=[{},{}] skip={skip}",
                 mvs[0].row,
@@ -2436,9 +2436,27 @@ impl<'a> TileDecodeState<'a> {
             let mut obmc = vec![0u8; pred_w * pred_h];
             // `filters` here is `[dir0, dir1]` (see the neighbour-job
             // construction above); dir1 is horizontal, dir0 is vertical.
+            // `px`/`py` are tile-local (the destination write below uses them
+            // that way too); the reference read position must be shifted into
+            // frame coordinates like the ordinary translational path.
+            let ss_hor = (plane != 0) as u32 & self.subsampling_x as u32;
+            let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
             motion_compensate(
-                &mut obmc, pred_w, rp, rw, rw, rh, px, py, pred_w, pred_h, mv, filters[1],
-                filters[0], hbits, vbits,
+                &mut obmc,
+                pred_w,
+                rp,
+                rw,
+                rw,
+                rh,
+                px + (self.tile_px_x0 >> ss_hor),
+                py + (self.tile_px_y0 >> ss_ver),
+                pred_w,
+                pred_h,
+                mv,
+                filters[1],
+                filters[0],
+                hbits,
+                vbits,
             );
             let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
             let dst = match plane {
@@ -2779,8 +2797,10 @@ impl<'a> TileDecodeState<'a> {
                                 && mi_row == 0
                             {
                                 let (rp, rw, rh) = rf.plane(plane);
-                                let iy = px_y as i32 + (mvs[0].row >> 3);
-                                let ix = px_x as i32 + (mvs[0].col >> 3);
+                                let iy = (px_y as i32 + (self.tile_px_y0 >> ss_ver) as i32)
+                                    + (mvs[0].row >> 3);
+                                let ix = (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32)
+                                    + (mvs[0].col >> 3);
                                 let row: Vec<i32> = (-4..(bw as i32 + 4))
                                     .map(|k| {
                                         let y = iy.clamp(0, rh as i32 - 1) as usize;
@@ -2796,9 +2816,28 @@ impl<'a> TileDecodeState<'a> {
                                     filters[0],
                                 );
                             }
+                            // The reference plane is the full frame, but
+                            // `px_x`/`px_y` are tile-local: the reference read
+                            // position must be shifted back into frame
+                            // coordinates (dav1d's `t->bx/by` are frame-global),
+                            // or every tile below/right of the origin
+                            // motion-compensates from the wrong region.
                             motion_compensate(
-                                &mut t, bw, rp, rw, rw, rh, px_x, px_y, bw, bh, mvs[0], filters[1],
-                                filters[0], hbits, vbits,
+                                &mut t,
+                                bw,
+                                rp,
+                                rw,
+                                rw,
+                                rh,
+                                px_x + (self.tile_px_x0 >> ss_hor),
+                                px_y + (self.tile_px_y0 >> ss_ver),
+                                bw,
+                                bh,
+                                mvs[0],
+                                filters[1],
+                                filters[0],
+                                hbits,
+                                vbits,
                             );
                         }
                     }
@@ -2876,8 +2915,23 @@ impl<'a> TileDecodeState<'a> {
                     let (rp, rw, rh) = rf.plane(plane);
                     // See the single-ref motion_compensate call above: `filters`
                     // is `[dir0, dir1]`; dir1 is horizontal, dir0 is vertical.
+                    // The reference read position is frame-global (see the
+                    // tile-offset shift on the single-ref path).
+                    let ss_hor = (plane != 0) as u32 & self.subsampling_x as u32;
+                    let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
                     motion_compensate_prep(
-                        rp, rw, rw, rh, px_x, px_y, bw, bh, mv, filters[1], filters[0], hbits,
+                        rp,
+                        rw,
+                        rw,
+                        rh,
+                        px_x + (self.tile_px_x0 >> ss_hor),
+                        px_y + (self.tile_px_y0 >> ss_ver),
+                        bw,
+                        bh,
+                        mv,
+                        filters[1],
+                        filters[0],
+                        hbits,
                         vbits,
                     )
                 } else {
@@ -3067,6 +3121,30 @@ impl<'a> TileDecodeState<'a> {
                         &coeffs.quant[..16.min(coeffs.quant.len())],
                         &dequant_dbg[..16.min(dequant_dbg.len())],
                     );
+                }
+                if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                    let mut it = t.split(',');
+                    if let (Some(c), Some(r)) = (it.next(), it.next()) {
+                        if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
+                            let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                            let dequant_dbg =
+                                dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                            let nz: Vec<(usize, i32)> = dequant_dbg
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, v)| **v != 0)
+                                .map(|(i, v)| (i, *v))
+                                .take(8)
+                                .collect();
+                            eprintln!(
+                                "KCFT mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} q={} dc={} nz={nz:?}",
+                                coeffs.tx_type,
+                                coeffs.eob,
+                                self.qindex_for_plane(0).0,
+                                qindex_dc,
+                            );
+                        }
+                    }
                 }
                 if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
                     eprintln!(

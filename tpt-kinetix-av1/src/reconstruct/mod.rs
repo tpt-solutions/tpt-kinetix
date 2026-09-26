@@ -538,11 +538,18 @@ pub(super) fn mv_projection(mv: Mv, num: i32, den: i32) -> Mv {
 }
 
 /// Build the projected temporal grid (dav1d `rp_proj`, refmvs.c
-/// `dav1d_refmvs_project` / `dav1d_refmvs_init_frame`). For the up-to-3 `mfmv`
-/// reference frames selected by §7.10.1.3's rules, every valid 8×8 MV of the
-/// source frame's motion field is projected onto the position it *lands on* in
-/// the current frame; the grid stores the original MV plus the poc distance
-/// from the source frame to that MV's own reference (0 = unprojected cell).
+/// `load_tmvs_c`). For the up-to-3 `mfmv` reference frames selected by
+/// §7.10.1.3's rules, every valid 8×8 MV of the source frame's motion field is
+/// projected onto the position it *lands on* in the current frame; the grid
+/// stores the original MV plus the poc distance from the source frame to that
+/// MV's own reference (0 = unprojected cell).
+///
+/// The projection is **tile-scoped** (§7.10.2.6): sources are read only from
+/// the tile's 8×8 rows `[row_start8, row_end8)` and columns extended by one
+/// 8×8 SB band on each side, and a projected MV is stored only when it lands
+/// back inside the tile (`pos` within the source-SB window ∩ the tile). A
+/// frame-wide grid without this scope feeds interior tiles candidates dav1d
+/// never produces, desyncing every inter frame tile after the first.
 /// Returns `(grid, stride, n_mfmvs)`; `n_mfmvs == 0` disables the temporal
 /// scan entirely (dav1d's `rf->use_ref_frame_mvs`).
 #[allow(clippy::too_many_arguments)]
@@ -555,6 +562,10 @@ fn build_rp_proj(
     use_ref_frame_mvs: bool,
     width: usize,
     height: usize,
+    tile_px_x0: usize,
+    tile_px_y0: usize,
+    tile_w: usize,
+    tile_h: usize,
 ) -> (Vec<(Mv, i32)>, usize, usize) {
     let w8 = (width + 7) >> 3;
     let h8 = (height + 7) >> 3;
@@ -562,6 +573,12 @@ fn build_rp_proj(
     if !use_ref_frame_mvs || order_hint_bits == 0 {
         return empty;
     }
+    // The tile's 8×8-cell bounds (dav1d `col_start8`/`col_end8`/
+    // `row_start8`/`row_end8`, row end clamped to the frame).
+    let row_start8 = tile_px_y0 >> 3;
+    let row_end8 = ((tile_px_y0 + tile_h) >> 3).min(h8);
+    let col_start8 = tile_px_x0 >> 3;
+    let col_end8 = ((tile_px_x0 + tile_w) >> 3).min(w8);
     let poc_diff = |a: i32, b: i32| -> i32 {
         let mask = 1i32 << (order_hint_bits - 1);
         let d = a - b;
@@ -609,8 +626,15 @@ fn build_rp_proj(
         // Forward refs (< 4) measure src→cur, backward ones cur→src.
         let ref2cur = if m < 4 { -diff1 } else { diff1 };
         let stride4 = src.stride;
-        for y in 0..h8 {
-            for x in 0..w8 {
+        // Sources are read only from the tile's 8×8 rows, and from columns
+        // extended one 8×8 SB band on each side (dav1d `col_start8i`/
+        // `col_end8i`); the write windows below clamp landings back inside
+        // the tile, so the extension only lets the tile's edge SBs receive
+        // projections from a source one SB outside.
+        let col_start8i = col_start8.saturating_sub(8);
+        let col_end8i = (col_end8 + 8).min(w8);
+        for y in row_start8..row_end8 {
+            for x in col_start8i..col_end8i {
                 // dav1d `save_tmvs_c` stores each 8×8 cell from the block at
                 // 4×4 column `x*2 + 1` of the cell's top 4×4 row (mi (2x+1,
                 // 2y)) — in sub-8×8 splits the leaves carry different MVs, so
@@ -656,12 +680,18 @@ fn build_rp_proj(
                 };
                 let pos_x = x as i32 + delta(offset.col);
                 let pos_y = y as i32 + delta(offset.row);
-                // Writes stay inside the source 8×8 row band and a ±8 cell
-                // window of the source 8×8 column (dav1d's sb-aligned bounds).
+                // Writes must land inside the source 8×8 row band *and* the
+                // tile's 8×8 bounds (dav1d `y_proj_start`/`y_proj_end` and the
+                // `pos_x` window against `col_start8`/`col_end8`): a source
+                // never projects across a tile boundary into a neighbour.
                 let y_align = (y as i32) & !7;
-                if pos_y >= y_align && pos_y < (y_align + 8).min(h8 as i32) {
+                let y_proj_start = y_align.max(row_start8 as i32);
+                let y_proj_end = (y_align + 8).min(row_end8 as i32);
+                if pos_y >= y_proj_start && pos_y < y_proj_end {
                     let x_align = (x as i32) & !7;
-                    if pos_x >= (x_align - 8).max(0) && pos_x < (x_align + 16).min(w8 as i32) {
+                    if pos_x >= (x_align - 8).max(col_start8 as i32)
+                        && pos_x < (x_align + 16).min(col_end8 as i32)
+                    {
                         rp[pos_y as usize * w8 + pos_x as usize] = (b_mv, diff2);
                     }
                 }
@@ -1102,6 +1132,10 @@ impl<'a> TileDecodeState<'a> {
             use_ref_frame_mvs,
             width,
             height,
+            tile_px_x0,
+            tile_px_y0,
+            tile_w,
+            tile_h,
         );
         if std::env::var("KINETIX_AV1_DBG_TILE_BYTES").is_ok() {
             let byte_off = bit_offset / 8;
