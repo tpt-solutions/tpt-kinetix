@@ -1,5 +1,56 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d3 ADDENDUM (2026-09-27) — pre-deblock dump proves the bug is MC or residual, not deblocking
+
+Followed the addendum above's own "next session" plan immediately, in the
+same session, using tooling that turned out to already exist:
+
+- `tools/build-jm-oracle.sh`'s original patch already wires
+  `JM_DUMP_DIR`/`JM_DUMP_POC` (pre/post-deblock luma `.gray` dumps) into the
+  same JM checkout the bin-level oracle above was built in — no new JM
+  patching needed, just rebuild and run with `JM_DUMP_POC=10`.
+- This codebase's own `decoder/mod.rs` **already has** a
+  `KINETIX_DUMP_PREDEBLOCK_POC` env hook (~line 1144, in the multi-slice
+  finalize path) that dumps `recon.luma` to `predeblock_poc<N>.gray` (written
+  to the crate's own working directory, `tpt-kinetix-h264/`) right before the
+  per-MB deblock loop runs. Not documented anywhere in this todo file before
+  now — worth remembering for the next reconstruction-stage investigation.
+
+**Result: `predeblock_poc10.gray` (ours) vs `jm_poc10_predeblock.gray` (JM)
+differ by `nd=67152` (of 101376 luma samples), `max_diff=216` — essentially
+the same magnitude and identical peak diff as the POST-deblock comparison
+(`nd=67536, max_diff=216`).** The corruption is already fully present
+*before* deblocking runs. **Deblocking is conclusively ruled out.** Combined
+with #32d3's proof that every CABAC-parsed value (mb_type, mv, ref_idx, cbp,
+residual coefficients) is bit-exact, the bug is now narrowed to exactly two
+candidates: **motion compensation** (sub-pel interpolation, bi-pred
+averaging/rounding, or reference-sample addressing) or **residual
+IDCT/dequant application** for this slice's macroblocks.
+
+A weak additional clue, not yet substantiated: the first 16 luma samples of
+MB(0,0) — `ours=[18,18,19,20,24,41,99,106,77,90,130,120,131,151,150,159]` vs
+`jm=[18,18,18,19,16,45,103,112,93,87,125,155,138,144,144,103]` — differ by
+small-to-moderate amounts throughout rather than being wholesale garbage,
+which reads more like a **systematically wrong prediction (MC) that's still
+"in the right neighborhood"** than a garbled/misaligned residual add. MB(0,0)
+is `B_8x8` with `sub_types=[0,0,1,0]` (quadrants 0/1/3 = `B_Direct_8x8`,
+quadrant 2 = `B_L0_8x8`) per #32d2/#32d3's tracing, so the very first samples
+(quadrant 0, temporal direct using the already-verified-correct `col_pair`
+POC 12/13) are the natural next place to inspect — but this is a hunch, not
+yet checked against a per-block predicted-only dump.
+
+**Next session:** get a **predicted-samples-only** dump (before residual
+add) from both decoders for MB(0,0) specifically — JM: instrument
+`mc_direct.c`/`mc_prediction.c` (wherever the B-slice predSamples buffer is
+finalized, before `itrans`/residual add) to dump just that MB; ours: find
+wherever `predict_inter_b_macroblock`'s output is combined with the IDCT'd
+residual in the multi-slice B reconstruct path and add an equivalent
+temporary dump gated by POC+MB address. If predicted samples already differ
+→ MC bug (check `derive_temporal_direct`'s scale math and the bi-pred
+rounding for `B_Direct_8x8` specifically, since that's the mode covering 3 of
+MB(0,0)'s 4 quadrants). If predicted samples match but final (post-residual)
+differs → residual/IDCT bug for CABAC B in this configuration.
+
 ## SESSION #32d3 (2026-09-27) — CABAC entropy decode for the wholesale-wrong B slice is PROVEN 100% bit-exact; bug is in reconstruction, not parsing
 
 Built the real bit-level CABAC oracle addendum 2 called for, and it fully
