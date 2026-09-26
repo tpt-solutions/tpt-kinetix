@@ -1,5 +1,79 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 3 (2026-09-27) — REAL FIX #2 landed: combined field-pair `mv_grid` was interleaved per-MB-index instead of per-row; a third, distinct bug now leads
+
+Followed the addendum above's own next step (dump the P-field decoder's own
+freshly-computed grid at the exact position, compare against JM's already-
+known-correct value) and it resolved immediately.
+
+**The bug.** `decode_interlaced_p_field`'s own motion grid for MB(8,0) was
+independently confirmed correct (`mv=[-7,-4]`, matching JM's `col_mv=(-7,-4)`
+exactly) — so the corruption wasn't in P-field motion decode at all, as
+addendum 2 already suspected but couldn't confirm. It was in
+`interleave_field_pair_entry` (`ref_pic.rs`), which builds the combined
+frame's synthesized `mv_grid` from the top/bottom fields' own grids. Both
+fields' grids are flat `Vec<[MvCell;16]>`, one entry per MB address in raster
+order (`mb_width` MBs per row) — but the interleave zipped them **by flat
+index** (`t[k]`/`b[k]` for `k` in `0..len`) while every *reader* of the
+combined grid (`apply_temporal_direct`'s and
+`resolve_spatial_colocated_cells`' `col_pair` branches, both in `mv.rs`)
+indexes it as **row blocks**: `grid.get(grid_row * mb_width + mb_col)`. For
+`mb_width > 1` these two conventions disagree — concretely, for
+`mb_width == 22`, flat index 8 (which the row-block reader expects to be row
+0, column 8) actually held **row 1, column 8**'s entry. Every direct-mode
+colocated lookup into a combined field-pair reference was silently reading a
+same-parity macroblock from the *wrong column* — not garbage, just a
+plausible-looking neighboring block's motion, which is exactly why this
+survived pixel-level bit-exactness proofs of the underlying field pictures
+(those only check reconstructed samples, never the persisted MV grid) and
+why the resulting corruption *looked* like real but wrong motion rather than
+noise.
+
+**Fixed** by interleaving `mb_width`-sized row chunks instead of individual
+elements (`chunks_exact(mb_width).zip(...)`, extending row-by-row) — this
+lines up exactly with the `grid_row * mb_width + mb_col` addressing every
+reader already uses.
+
+**Effect — large.** CAPA1_TOSHIBA_B/CVPA1_TOSHIBA_B's previously
+wholesale-wrong B pictures dropped 70-90% in corrupted-byte count (POC=10's
+own pre-deblock luma: `nd=67152 → 8219`, an 88% reduction; whole-frame
+diff_bytes for the clip: `408118 → 139132`). **`Sharp_MP_PAFF_1r2` — open
+since sessions #32ca-#32cf, previously stuck at 12/15 frames — is now fully
+byte-exact 15/15** and has been promoted from `Expect::KnownGap` to
+`Expect::BitExact` in `itu_conformance.rs` (the test harness itself flagged
+this on the next run: "manifest marks this a KnownGap, but the decoder is
+now byte-exact"). ITU suite: **33 → 34 hard-checked BitExact clips**, 0
+failures. `cavlc_mot_picaff0_full_B` (informational) also improved sharply
+(`max_diff` 233→4). Gates: 273/273 lib, fuzz 233k iters/0 crashes,
+clippy/fmt clean.
+
+**A third, distinct bug now leads the remaining CAPA1/CVPA1 gap.** Per-MB
+diff histogram over POC=10's predeblock luma after this fix: only 80
+macroblocks (down from 362) still differ, and the worst offenders are no
+longer `Bi_8x8`/direct — `MB(16,13)`, the single largest remaining
+contributor (`count=221, max_diff=241`), is `B_8x8 sub_types=[6,7,2,7]`
+(§Table 7-14: 6=`B_L1_8x4`, 7=`B_L1_4x8`, 2=`B_L1_8x8` — three of its four
+quadrants use **sub-8×8 partitions**, not a whole-8×8 mode). This matches
+the small-partition hypothesis flagged (but not yet investigated) two
+addenda ago: whole-16×16 and whole-8×8 single-direction modes are clean,
+sub-8×8 (`8x4`/`4x8`/`4x4`) partitions are not. Their MV prediction goes
+through `predict_mv_sub`/`predict_mv_sub_l1` (mv.rs), machinery the
+now-fixed direct-mode bug and the earlier whole-16x16 spot checks never
+exercised at all — this is genuinely unexplored territory, not a residual
+symptom of either bug fixed so far.
+
+**Next session:** apply the exact same method that found both prior bugs —
+pick one bad sub-8×8-partitioned MB (`MB(16,13)` is dumped and ready), dump
+its derived per-sub-block MV via a temporary print in `predict_mv_sub`/
+`predict_mv_sub_l1`, and cross-check against JM's equivalent
+(`readMBMotionVectors`'s sub-partition path in `macroblock.c`, or the
+neighbour-MV predictor in `mv_prediction.c`'s `GetMVPredictor`/
+`SetMotionVectorPredictor` — same JM source tree already checked out at
+`/tmp/jm-oracle`, same instrumentation pattern as this session's
+`macroblock.c`/`mc_direct.c` patches). Suspect the neighbour-availability or
+sub-partition-boundary geometry specifically, since whole-MB and whole-8×8
+neighbour lookups are already proven correct.
+
 ## SESSION #32d4 ADDENDUM 2 (2026-09-27) — pinned the second bug to a wrong stored colocated MV component, not the scale math
 
 Followed the addendum above's plan exactly (dump the derived MV, compare to
