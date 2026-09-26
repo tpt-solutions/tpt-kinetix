@@ -489,6 +489,14 @@ impl Av1Decoder {
             initial_cdfs.as_deref(),
         ) {
             Ok(Some(tuple)) => tuple,
+            // `Ok(None)` (no tile data) and parse errors both mean no
+            // reconstructed frame; errors are logged when the recon-debug gate
+            // is set so a failing tile-group split isn't silently replaced by
+            // the grey placeholder path in `decode()`.
+            Err(e) if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() => {
+                eprintln!("KIN recon error oh={}: {e}", fh.order_hint);
+                return None;
+            }
             _ => return None,
         };
         let refresh = fh.refresh_frame_flags;

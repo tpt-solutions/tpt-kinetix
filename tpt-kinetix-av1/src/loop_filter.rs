@@ -1898,10 +1898,25 @@ fn apply_loop_restoration_plane(
             (top, (top + full_h - 1).min(h - 1))
         }
     };
+    let half_unit = unit_size / 2;
+    // §7.14 "round half up" (dav1d `lr_sbrow`: `aligned_unit_pos -= unit_size`
+    // when `aligned_unit_pos + half_unit_size > h`): a trailing partial unit —
+    // one whose start sits more than half a unit above the frame edge — is not
+    // its own unit. Its coefficients are never read (§5.11.57 skips it), and
+    // its pixels are filtered with the *previous* unit's filter.
+    let effective_unit = |u: usize, span: usize| -> usize {
+        if u > 0 && u * unit_size + half_unit > span {
+            u - 1
+        } else {
+            u
+        }
+    };
 
     for ur in 0..unit_rows {
+        let eff_ur = effective_unit(ur, h);
         for uc in 0..unit_cols {
-            let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
+            let eff_uc = effective_unit(uc, w);
+            let Some(unit) = lr_units.get(&(plane_idx, eff_ur, eff_uc)) else {
                 continue;
             };
             let ux0 = uc * unit_size;

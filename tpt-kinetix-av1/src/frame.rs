@@ -113,29 +113,25 @@ fn tile_log2_calc(blk_size: u32, target: u32) -> u32 {
 /// range optionally spilling into one extra bit.
 fn read_ns(br: &mut BitReader<'_>, n: u32) -> Result<u32, KinetixError> {
     debug_assert!(n > 0);
-    // `ns(1)` has a single symbol and consumes zero bits (always decodes to 0);
-    // `n - 1` would underflow the floor(log2) computation below, so special-case
-    // it. `ns(2)` similarly has `w == 0` and always decodes to 0.
-    if n <= 2 {
+    // `ns(1)` has a single symbol and consumes zero bits (always decodes to 0).
+    // For n >= 2 the width is `w = floor(log2(n)) + 1` (so `ns(2)` reads one
+    // bit), `m = 2^w - n`, and a `w-1` bit prefix — an extra bit only when the
+    // prefix overflows the `m` short-code range (dav1d `getbits.c:114`).
+    if n == 1 {
         return Ok(0);
     }
-    let w = 32 - (n - 1).leading_zeros() - 1; // floor(log2(n - 1))
-    if w == 0 {
-        // m == 0: value is always 0, no bits consumed.
-        return Ok(0);
-    }
-    let m = (1u32 << (w + 1)) - n;
+    let w = 32 - n.leading_zeros();
+    let m = (1u32 << w) - n;
     let v = br
-        .read_bits(w as u8)
+        .read_bits((w - 1) as u8)
         .ok_or_else(|| KinetixError::Parse("ns() truncated".into()))?;
-    let mut result = v;
-    if v >= m {
-        let extra = br
-            .read_bit()
-            .ok_or_else(|| KinetixError::Parse("ns() extra truncated".into()))?;
-        result = (result << 1) - m + extra as u32;
+    if v < m {
+        return Ok(v);
     }
-    Ok(result)
+    let extra = br
+        .read_bit()
+        .ok_or_else(|| KinetixError::Parse("ns() extra truncated".into()))?;
+    Ok(((v << 1) - m) + extra as u32)
 }
 
 /// Read a delta coded value: `0` (no change) or `1` followed by `su(7)`.
@@ -250,6 +246,48 @@ const GM_ABS_TRANS_BITS: u32 = 9;
 const GM_TRANS_PREC_BITS: i32 = 7;
 const GM_ABS_TRANS_ONLY_BITS: u32 = 9;
 const GM_TRANS_ONLY_PREC_BITS: i32 = 6;
+
+/// Explicit tile layout from `tile_info()` (§5.9.15). Both spacing modes are
+/// represented as per-tile start superblocks — they differ only in how the
+/// starts are derived (increment bits vs explicit `ns()` widths). The trailing
+/// `context_update_tile_id` and `tile_size_bytes` fields are signalled only
+/// when more than one tile exists; the first selects the tile whose post-decode
+/// CDFs become the frame's saved context (§6.8.2), the second sizes the
+/// per-tile size fields inside `tile_group_obu()` (§5.11.1).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TileLayout {
+    /// Actual number of tile columns/rows (from the start-superblock walk, so
+    /// not necessarily `1 << log2_*` on degenerate frame sizes).
+    pub cols: u32,
+    pub rows: u32,
+    /// Start superblock of each tile column; `col_start_sb[cols] == sb_cols`.
+    pub col_start_sb: Vec<u32>,
+    /// Start superblock of each tile row; `row_start_sb[rows] == sb_rows`.
+    pub row_start_sb: Vec<u32>,
+    /// `TileColsLog2`/`TileRowsLog2`: widths of the tile-group `tg_start`/
+    /// `tg_end` fields and of `context_update_tile_id`.
+    pub log2_cols: u8,
+    pub log2_rows: u8,
+    pub context_update_tile_id: u32,
+    /// `tile_size_bytes_minus_1 + 1`: bytes per per-tile size field.
+    pub tile_size_bytes: u8,
+}
+
+impl TileLayout {
+    pub fn num_tiles(&self) -> usize {
+        self.cols as usize * self.rows as usize
+    }
+
+    /// Column index of tile `n` (row-major numbering, §5.11.1 `TileNum`).
+    pub fn tile_col(&self, n: usize) -> usize {
+        n % self.cols as usize
+    }
+
+    /// Row index of tile `n` (row-major numbering).
+    pub fn tile_row(&self, n: usize) -> usize {
+        n / self.cols as usize
+    }
+}
 
 /// Parsed AV1 uncompressed frame header (§5.9).
 #[derive(Debug, Clone, Default)]
@@ -371,12 +409,7 @@ pub struct FrameHeader {
     pub gm_params: [[i32; 6]; 8],
 
     // Tile info
-    pub tile_cols_log2: u8,
-    pub tile_rows_log2: u8,
-    pub tile_cols: u32,
-    pub tile_rows: u32,
-    pub tile_width_in_sb: u32,
-    pub tile_height_in_sb: u32,
+    pub tile_layout: TileLayout,
 
     // Quantizer matrix helper
     pub lossless: bool,
@@ -746,14 +779,7 @@ impl FrameHeader {
         };
 
         // --- tile_info ---
-        let (
-            tile_cols_log2,
-            tile_rows_log2,
-            tile_cols,
-            tile_rows,
-            tile_width_in_sb,
-            tile_height_in_sb,
-        ) = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
+        let tile_layout = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC tile={}", br.bits_read());
         }
@@ -1035,12 +1061,7 @@ impl FrameHeader {
                 disable_frame_end_update_cdf,
                 gm_type,
                 gm_params,
-                tile_cols_log2,
-                tile_rows_log2,
-                tile_cols,
-                tile_rows,
-                tile_width_in_sb,
-                tile_height_in_sb,
+                tile_layout,
                 lossless: coded_lossless,
                 buffer_removal_time_present,
                 enable_intra_edge_filter,
@@ -1950,7 +1971,7 @@ fn parse_tile_info(
     width: &u32,
     height: &u32,
     use_128: bool,
-) -> Result<(u8, u8, u32, u32, u32, u32), KinetixError> {
+) -> Result<TileLayout, KinetixError> {
     // §5.9.15 `MiCols`/`MiRows`: mode-info units are 4×4 pixels, but the
     // count is rounded up to an even number (`2 * ceil(dim / 8)`), not a
     // plain `ceil(dim / 4)` — an 8-pixel, not 4-pixel, unit divisor.
@@ -1960,21 +1981,20 @@ fn parse_tile_info(
     let sb_cols = mi_cols.div_ceil(1 << sb_mi_shift);
     let sb_rows = mi_rows.div_ceil(1 << sb_mi_shift);
 
-    const MAX_TILE_WIDTH: u32 = 4096;
-    const MAX_TILE_AREA: u32 = 4096 * 2304;
     const MAX_TILE_COLS: u32 = 64;
     const MAX_TILE_ROWS: u32 = 64;
     let sb_size_log2 = if use_128 { 7 } else { 6 }; // log2(128) / log2(64) pixels
-    let max_tile_width_sb = MAX_TILE_WIDTH >> sb_size_log2;
-    let max_tile_area_sb = MAX_TILE_AREA >> (2 * sb_size_log2);
+    let max_tile_width_sb = 4096u32 >> sb_size_log2;
+    let max_frame_tile_area_sb = (4096u32 * 2304) >> (2 * sb_size_log2);
     let min_log2_tile_cols = tile_log2_calc(max_tile_width_sb, sb_cols);
     let max_log2_tile_cols = tile_log2_calc(1, sb_cols.min(MAX_TILE_COLS));
     let max_log2_tile_rows = tile_log2_calc(1, sb_rows.min(MAX_TILE_ROWS));
     let min_log2_tiles =
-        min_log2_tile_cols.max(tile_log2_calc(max_tile_area_sb, sb_rows * sb_cols));
+        min_log2_tile_cols.max(tile_log2_calc(max_frame_tile_area_sb, sb_rows * sb_cols));
 
+    let mut layout = TileLayout::default();
     let uniform_tile_spacing = read_flag(br)?;
-    let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing {
+    if uniform_tile_spacing {
         // §5.9.15: `TileColsLog2`/`TileRowsLog2` start at their spec-mandated
         // minimum and only read an `increment_tile_*_log2` bit while still
         // below the maximum — reading unconditionally until a `0` bit (the
@@ -1982,70 +2002,108 @@ fn parse_tile_info(
         // the maximum is already reached (e.g. any frame with `sb_cols <= 1`),
         // desyncing every field parsed after it.
         let mut cols_log2 = min_log2_tile_cols;
-        while cols_log2 < max_log2_tile_cols {
-            if read_flag(br)? {
-                cols_log2 += 1;
-            } else {
-                break;
-            }
+        while cols_log2 < max_log2_tile_cols && read_flag(br)? {
+            cols_log2 += 1;
         }
+        // Every tile column is `ceil(sb_cols / 2^log2)` SBs wide; walk the
+        // starts so the actual count stays correct on narrow frames where the
+        // walk yields fewer columns than `1 << log2`.
+        let tile_w_sb = sb_cols.div_ceil(1u32 << cols_log2);
+        let mut sbx = 0;
+        while sbx < sb_cols {
+            layout.col_start_sb.push(sbx);
+            sbx += tile_w_sb;
+        }
+        layout.cols = layout.col_start_sb.len() as u32;
+        layout.log2_cols = cols_log2 as u8;
+
         let min_log2_tile_rows = min_log2_tiles.saturating_sub(cols_log2);
         let mut rows_log2 = min_log2_tile_rows;
-        while rows_log2 < max_log2_tile_rows {
-            if read_flag(br)? {
-                rows_log2 += 1;
-            } else {
-                break;
-            }
+        while rows_log2 < max_log2_tile_rows && read_flag(br)? {
+            rows_log2 += 1;
         }
-        (cols_log2 as u8, rows_log2 as u8)
+        let tile_h_sb = sb_rows.div_ceil(1u32 << rows_log2);
+        let mut sby = 0;
+        while sby < sb_rows {
+            layout.row_start_sb.push(sby);
+            sby += tile_h_sb;
+        }
+        layout.rows = layout.row_start_sb.len() as u32;
+        layout.log2_rows = rows_log2 as u8;
     } else {
-        // Non-uniform tile widths: explicit increments read until sb_cols.
-        // We compute log2 of the count for the common uniform-equivalent case.
-        let cols = compute_log2_from_increments(br, sb_cols)? as u8;
-        let rows = compute_log2_from_increments(br, sb_rows)? as u8;
-        (cols, rows)
-    };
+        // Non-uniform spacing: each column's width in SBs is
+        // `1 + ns(min(sb_cols - sbx, max_tile_width_sb))` (no bits when the
+        // remaining span is a single SB), then rows are constrained to the
+        // per-frame max tile area divided by the widest column.
+        let mut sbx = 0u32;
+        let mut widest_tile = 0u32;
+        while sbx < sb_cols && layout.cols < MAX_TILE_COLS {
+            let tile_width_sb = (sb_cols - sbx).min(max_tile_width_sb);
+            let tile_w = if tile_width_sb > 1 {
+                1 + read_ns(br, tile_width_sb)?
+            } else {
+                1
+            };
+            layout.col_start_sb.push(sbx);
+            sbx += tile_w;
+            widest_tile = widest_tile.max(tile_w);
+            layout.cols += 1;
+        }
+        layout.log2_cols = tile_log2_calc(1, layout.cols) as u8;
 
-    let tile_cols = 1u32 << tile_cols_log2;
-    let tile_rows = 1u32 << tile_rows_log2;
-    let tile_width_in_sb = sb_cols.div_ceil(tile_cols);
-    let tile_height_in_sb = sb_rows.div_ceil(tile_rows);
+        let mut max_tile_area_sb = sb_cols * sb_rows;
+        if min_log2_tiles > 0 {
+            max_tile_area_sb >>= min_log2_tiles + 1;
+        }
+        let max_tile_height_sb = (max_tile_area_sb / widest_tile.max(1)).max(1);
+        let mut sby = 0u32;
+        while sby < sb_rows && layout.rows < MAX_TILE_ROWS {
+            let tile_height_sb = (sb_rows - sby).min(max_tile_height_sb);
+            let tile_h = if tile_height_sb > 1 {
+                1 + read_ns(br, tile_height_sb)?
+            } else {
+                1
+            };
+            layout.row_start_sb.push(sby);
+            sby += tile_h;
+            layout.rows += 1;
+        }
+        layout.log2_rows = tile_log2_calc(1, layout.rows) as u8;
+    }
+    layout.col_start_sb.push(sb_cols);
+    layout.row_start_sb.push(sb_rows);
+
+    // The context-update tile id and per-tile size-field width only exist for
+    // multi-tile frames — dav1d `obu.c:678` gates both on `log2_cols ||
+    // log2_rows` (single-tile frames read neither, matching libaom's
+    // `cols * rows > 1`).
+    if layout.log2_cols > 0 || layout.log2_rows > 0 {
+        layout.context_update_tile_id = read_f(br, layout.log2_cols + layout.log2_rows)?;
+        if layout.context_update_tile_id >= layout.cols * layout.rows {
+            return Err(KinetixError::Parse(format!(
+                "context_update_tile_id {} >= cols*rows {}",
+                layout.context_update_tile_id,
+                layout.cols * layout.rows
+            )));
+        }
+        layout.tile_size_bytes = read_f8(br, 2)? + 1;
+    }
 
     if std::env::var("KINETIX_AV1_DBG_TILEINFO").is_ok() {
         eprintln!(
-            "DBG tile_info sb_cols={sb_cols} sb_rows={sb_rows} min_log2_tile_cols={min_log2_tile_cols} max_log2_tile_cols={max_log2_tile_cols} uniform_tile_spacing={uniform_tile_spacing} tile_cols_log2={tile_cols_log2} tile_rows_log2={tile_rows_log2} tile_cols={tile_cols} tile_rows={tile_rows}"
+            "DBG tile_info sb_cols={sb_cols} sb_rows={sb_rows} min_log2_tile_cols={min_log2_tile_cols} max_log2_tile_cols={max_log2_tile_cols} uniform={uniform_tile_spacing} cols={} rows={} log2_cols={} log2_rows={} col_start_sb={:?} row_start_sb={:?} ctx_update={} size_bytes={}",
+            layout.cols,
+            layout.rows,
+            layout.log2_cols,
+            layout.log2_rows,
+            layout.col_start_sb,
+            layout.row_start_sb,
+            layout.context_update_tile_id,
+            layout.tile_size_bytes,
         );
     }
 
-    Ok((
-        tile_cols_log2,
-        tile_rows_log2,
-        tile_cols,
-        tile_rows,
-        tile_width_in_sb,
-        tile_height_in_sb,
-    ))
-}
-
-/// Read the increment-coded tile counts (non-uniform path) and return log2.
-fn compute_log2_from_increments(
-    br: &mut BitReader<'_>,
-    sb_total: u32,
-) -> Result<u32, KinetixError> {
-    let mut start_sb = 0u32;
-    let mut tile_count = 0u32;
-    while start_sb < sb_total && tile_count < 64 {
-        let _ = read_f(br, 1)?; // tile_start_and_end_present
-        let _ = read_ns(br, sb_total - start_sb)?;
-        start_sb = sb_total; // simplified: assumes full coverage
-        tile_count += 1;
-    }
-    Ok(if tile_count == 0 {
-        0
-    } else {
-        32 - (tile_count).leading_zeros() - 1
-    })
+    Ok(layout)
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,16 +2221,16 @@ mod tests {
         /// Encode an `ns(n)` non-symmetric unsigned value (mirrors [`read_ns`]).
         #[allow(dead_code)]
         fn ns(&mut self, v: u32, n: u32) {
-            let w = 32 - (n - 1).leading_zeros() - 1;
-            if w == 0 {
+            assert!(v < n, "ns({n}) value {v} out of range");
+            if n == 1 {
                 return;
             }
-            let m = (1u32 << (w + 1)) - n;
+            let w = 32 - n.leading_zeros();
+            let m = (1u32 << w) - n;
             if v < m {
-                self.bits(v, w as u8);
+                self.bits(v, (w - 1) as u8);
             } else {
-                self.bits((v + m) >> 1, w as u8);
-                self.bit(((v + m) & 1) as u8);
+                self.bits(v + m, w as u8);
             }
         }
         fn finish(mut self) -> Vec<u8> {
@@ -2202,6 +2260,98 @@ mod tests {
             let v = read_ns(&mut br, n).unwrap();
             assert!(v < n, "ns({n}) out of range: {v}");
         }
+    }
+
+    #[test]
+    fn read_ns_round_trips_every_value_including_n_two() {
+        // ns(2) must read exactly one bit (dav1d `getbits.c:114`: `l = ulog2(2)+1
+        // = 2`, one prefix bit, no extra) — an earlier version here returned 0
+        // consuming nothing, which would desync the non-uniform tile widths on
+        // any two-superblock column span.
+        for n in 1..=32u32 {
+            for v in 0..n {
+                let mut bw = BitWriter::new();
+                bw.ns(v, n);
+                let bits = bw.finish();
+                let mut br = BitReader::new(&bits);
+                let got = read_ns(&mut br, n).unwrap();
+                assert_eq!(got, v, "ns({n}) round-trip {v}");
+                if n > 1 {
+                    assert!(br.bit_position() > 0, "ns({n}) must consume bits");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_tile_info_single_tile_consumes_only_the_spacing_flag() {
+        // 16x16, 64x64 superblocks → sb 1x1: uniform spacing, max log2s are
+        // both 0, no increment bits, single tile → no context_update/tile_size
+        // fields. Exactly one bit total.
+        let mut bw = BitWriter::new();
+        bw.bit(1); // uniform_tile_spacing_flag
+        let bits = bw.finish();
+        let mut br = BitReader::new(&bits);
+        let layout = parse_tile_info(&mut br, &16, &16, false).unwrap();
+        assert_eq!(layout.cols, 1);
+        assert_eq!(layout.rows, 1);
+        assert_eq!(layout.col_start_sb, vec![0, 1]);
+        assert_eq!(layout.row_start_sb, vec![0, 1]);
+        assert_eq!(layout.context_update_tile_id, 0);
+        assert_eq!(layout.tile_size_bytes, 0);
+        assert_eq!(br.bit_position(), 1);
+    }
+
+    #[test]
+    fn parse_tile_info_uniform_multi_tile_reads_context_update_and_size_bytes() {
+        // 720x300 → sb 12x5. Uniform: increment(1) → cols_log2=1 (6-SB wide
+        // columns → 2 columns), increment(0) stops; rows: increment(0) → 1 row.
+        // Multi-tile: context_update_tile_id f(1) then tile_size_bytes_minus_1 f(2).
+        let mut bw = BitWriter::new();
+        bw.bit(1); // uniform_tile_spacing_flag
+        bw.bit(1); // increment_tile_cols_log2
+        bw.bit(0);
+        bw.bit(0); // increment_tile_rows_log2
+        bw.bit(1); // context_update_tile_id = 1 (of 2 tiles)
+        bw.bits(2, 2); // tile_size_bytes_minus_1 → 3-byte size fields
+        let bits = bw.finish();
+        let mut br = BitReader::new(&bits);
+        let layout = parse_tile_info(&mut br, &720, &300, false).unwrap();
+        assert_eq!(layout.cols, 2);
+        assert_eq!(layout.rows, 1);
+        assert_eq!(layout.col_start_sb, vec![0, 6, 12]);
+        assert_eq!(layout.row_start_sb, vec![0, 5]);
+        assert_eq!(layout.log2_cols, 1);
+        assert_eq!(layout.context_update_tile_id, 1);
+        assert_eq!(layout.tile_size_bytes, 3);
+    }
+
+    #[test]
+    fn parse_tile_info_non_uniform_reads_explicit_ns_widths() {
+        // 720x300 → sb 12x5, non-uniform. Columns encoded as
+        // `1 + ns(min(remaining, 64))`: widths 4, 4, 4 (ns(12)=3 → `011`,
+        // ns(8)=3 → `011`, ns(4)=3 → `11`). Widest = 4 → max tile height =
+        // (12*5)/4 = 15 → row ns(5)=4 → one 5-SB row (`111`). Multi-tile:
+        // context_update_tile_id f(2)=0, tile_size_bytes_minus_1 f(2)=1.
+        let mut bw = BitWriter::new();
+        bw.bit(0); // uniform_tile_spacing_flag = 0
+        bw.ns(3, 12);
+        bw.ns(3, 8);
+        bw.ns(3, 4);
+        bw.ns(4, 5);
+        bw.bits(0, 2); // context_update_tile_id
+        bw.bits(1, 2); // tile_size_bytes = 2
+        let bits = bw.finish();
+        let mut br = BitReader::new(&bits);
+        let layout = parse_tile_info(&mut br, &720, &300, false).unwrap();
+        assert_eq!(layout.cols, 3);
+        assert_eq!(layout.rows, 1);
+        assert_eq!(layout.col_start_sb, vec![0, 4, 8, 12]);
+        assert_eq!(layout.row_start_sb, vec![0, 5]);
+        assert_eq!(layout.log2_cols, 2);
+        assert_eq!(layout.context_update_tile_id, 0);
+        assert_eq!(layout.tile_size_bytes, 2);
+        assert_eq!(br.bit_position(), 1 + 3 + 3 + 2 + 3 + 2 + 2);
     }
 
     #[test]
@@ -2284,8 +2434,8 @@ mod tests {
         assert_eq!(fh.width, w);
         assert_eq!(fh.height, h);
         assert_eq!(fh.base_q_idx, 100);
-        assert_eq!(fh.tile_cols, 1);
-        assert_eq!(fh.tile_rows, 1);
+        assert_eq!(fh.tile_layout.cols, 1);
+        assert_eq!(fh.tile_layout.rows, 1);
         assert!(!fh.lossless);
     }
 
@@ -2447,8 +2597,8 @@ mod tests {
         assert!(fh.show_frame);
         assert_eq!(fh.width, 128);
         assert_eq!(fh.height, 96);
-        assert_eq!(fh.tile_cols, 1);
-        assert_eq!(fh.tile_rows, 1);
+        assert_eq!(fh.tile_layout.cols, 1);
+        assert_eq!(fh.tile_layout.rows, 1);
         assert_eq!(fh.base_q_idx, 128);
         assert!(!fh.lossless);
         // tx_mode on the wire is 2 (TX_MODE_SELECT) → tx_mode_select true.

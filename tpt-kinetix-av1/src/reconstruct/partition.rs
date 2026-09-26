@@ -336,12 +336,11 @@ impl<'a> TileDecodeState<'a> {
         mi_col: usize,
         bsize: usize,
     ) -> Result<(), KinetixError> {
-        // AV1 §5.11.4: a partition block entirely outside the frame (i.e. in
-        // the superblock-padding region past the bottom/right edge) is never
-        // decoded. Without this, the recursion walks a sub-block whose top-left
-        // mi position equals `mi_rows`/`mi_cols`, indexing the neighbour-context
-        // arrays out of bounds.
-        if mi_row >= self.mi_rows || mi_col >= self.mi_cols {
+        // AV1 §5.11.4: a partition block entirely outside the *tile* is never
+        // decoded. The tile bounds (not the frame bounds) govern here — a
+        // block past an interior tile edge must not recurse into neighbour-
+        // context arrays that hold no valid data for this tile.
+        if mi_row >= self.tile_mi_rows || mi_col >= self.tile_mi_cols {
             return Ok(());
         }
         if bsize < BLOCK_8X8 {
@@ -361,11 +360,17 @@ impl<'a> TileDecodeState<'a> {
         // superblock never satisfies `hasRows`/`hasCols` for the root
         // partition, so the very first symbol read in the tile was already
         // wrong).
+        // §7.3.5.1: `has_rows`/`has_cols` compare against the TILE's end
+        // (`MiRowEnd`/`MiColEnd`), not the frame's — dav1d's `f->bw`/`f->bh`
+        // are per-tile extents. A block straddling an interior tile edge
+        // takes the constrained `split_or_*` / forced-split path below; using
+        // the frame extent there would read a full `partition` symbol the
+        // encoder never wrote.
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
         let half4x4 = bw >> 1;
-        let has_rows = mi_row + half4x4 < self.mi_rows;
-        let has_cols = mi_col + half4x4 < self.mi_cols;
+        let has_rows = mi_row + half4x4 < self.tile_mi_rows;
+        let has_cols = mi_col + half4x4 < self.tile_mi_cols;
 
         // Partition context: placeholder 0 works for edge / single-block frames
         // (neighbours are all NONE → ctx 0). Refined once general keyframes
@@ -440,7 +445,7 @@ impl<'a> TileDecodeState<'a> {
             for (idx, (sub_bsize, ro, co)) in subs.iter().enumerate() {
                 let srow = mi_row + ro;
                 let scol = mi_col + co;
-                if srow < self.mi_rows && scol < self.mi_cols {
+                if srow < self.tile_mi_rows && scol < self.tile_mi_cols {
                     if idx == 2 {
                         self.tl_filter2d = saved_tl_filter;
                     }
@@ -451,12 +456,12 @@ impl<'a> TileDecodeState<'a> {
             for (sub_bsize, ro, co) in subs {
                 let srow = mi_row + ro;
                 let scol = mi_col + co;
-                // A sub-block whose top-left falls outside the frame (e.g. the
-                // lower half of a HORZ partition on the bottom superblock row)
-                // is never decoded — the reference decoder skips it. Without
-                // this guard the neighbour-context arrays are indexed out of
-                // bounds.
-                if srow < self.mi_rows && scol < self.mi_cols {
+                // A sub-block whose top-left falls outside the *tile* (e.g.
+                // the lower half of a HORZ partition on the tile's bottom
+                // superblock row) is never decoded — the reference decoder
+                // skips it. Without this guard the neighbour-context arrays
+                // are indexed out of bounds.
+                if srow < self.tile_mi_rows && scol < self.tile_mi_cols {
                     self.decode_block(srow, scol, sub_bsize)?;
                 }
             }
@@ -474,8 +479,11 @@ impl<'a> TileDecodeState<'a> {
     #[inline]
     pub(super) fn partition_context(&self, mi_row: usize, mi_col: usize, bsize: usize) -> usize {
         let bsl = mi_width_log2(bsize);
-        let avail_u = mi_row > 0;
-        let avail_l = mi_col > 0;
+        // §8.3.2: availability is relative to the TILE start (`MiRowStart`/
+        // `MiColStart`) — a neighbour across an interior tile boundary does
+        // not exist for this tile.
+        let avail_u = mi_row > self.tile_px_y0 / MI_SIZE;
+        let avail_l = mi_col > self.tile_px_x0 / MI_SIZE;
         let stride = self.mi_cols;
         let above = avail_u
             && (mi_width_log2(self.mi_sizes[(mi_row - 1) * stride + mi_col] as usize)) < bsl;

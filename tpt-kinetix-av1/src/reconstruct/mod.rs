@@ -935,6 +935,17 @@ struct TileDecodeState<'a> {
     /// Tile-local chroma buffer dimensions (stride = `tile_cw`).
     tile_cw: usize,
     tile_ch: usize,
+    /// This tile's absolute end position in 4×4 MI units — `MiRowEnd`/
+    /// `MiColEnd` of the tile (§5.11.4 / dav1d's per-tile `f->bw`/`f->bh`).
+    /// `decode_partition`'s `has_rows`/`has_cols`, the outside-tile leaf
+    /// guards, and the partition-context availability flags must compare
+    /// against these tile bounds, not the frame's `mi_rows`/`mi_cols`: at an
+    /// interior tile edge the constrained `split_or_horz`/`split_or_vert`
+    /// symbols (or a forced split) replace the full `partition` symbol, so
+    /// using the frame extent there reads a symbol the encoder never wrote
+    /// and desyncs the rest of the tile.
+    tile_mi_cols: usize,
+    tile_mi_rows: usize,
     /// `BlockDecoded[plane]` (AV1 §7.11.2 / §5.11.34): one flag per 4×4 sample
     /// block of the *current superblock*, reset per SB by
     /// `clear_block_decoded_flags` and set as each transform block is
@@ -1078,6 +1089,10 @@ impl<'a> TileDecodeState<'a> {
         } else {
             tile_h
         };
+        // Tile end in MI units: the tile rect is SB-aligned and clipped to
+        // the mi-grid, so `*4` MI units tile the exact extent.
+        let tile_mi_cols = (tile_px_x0 + tile_w).div_ceil(MI_SIZE).min(mi_cols);
+        let tile_mi_rows = (tile_px_y0 + tile_h).div_ceil(MI_SIZE).min(mi_rows);
         let (rp_proj, rp_stride, n_mfmvs) = build_rp_proj(
             &temporal_motion_fields,
             &ref_to_slot,
@@ -1230,6 +1245,8 @@ impl<'a> TileDecodeState<'a> {
             tile_h,
             tile_cw,
             tile_ch,
+            tile_mi_cols,
+            tile_mi_rows,
             segmentation_enabled,
             seg_feature_skip,
             seg_feature_alt_q,
@@ -1495,10 +1512,10 @@ pub fn decode_tile_group(
     qindex: u8,
     delta_q: DeltaQ,
     _use_128x128_sb: bool,
-    tile_x: usize,
-    tile_y: usize,
-    _tile_cols: usize,
-    _tile_rows: usize,
+    x0: usize,
+    y0: usize,
+    tile_w: usize,
+    tile_h: usize,
     y_plane: &mut [u8],
     u_plane: &mut [u8],
     v_plane: &mut [u8],
@@ -1552,60 +1569,25 @@ pub fn decode_tile_group(
     let mi_cols = width.div_ceil(MI_SIZE);
     let mi_rows = height.div_ceil(MI_SIZE);
     let sb_bsize = if use_128 { BLOCK_128X128 } else { BLOCK_64X64 };
-
-    let tile_cols = _tile_cols.max(1);
-    let tile_rows = _tile_rows.max(1);
-    let sb_cols_mi = mi_cols.div_ceil(sb_mi);
-    let sb_rows_mi = mi_rows.div_ceil(sb_mi);
-    let tile_w_sb = sb_cols_mi.div_ceil(tile_cols);
-    let tile_h_sb = sb_rows_mi.div_ceil(tile_rows);
-    let tc = tile_x.min(tile_cols - 1);
-    let tr = tile_y.min(tile_rows - 1);
-    let sb_col_start = tc * tile_w_sb;
-    let sb_col_end = ((tc + 1) * tile_w_sb).min(sb_cols_mi);
-    let sb_row_start = tr * tile_h_sb;
-    let sb_row_end = ((tr + 1) * tile_h_sb).min(sb_rows_mi);
-    let x0 = (sb_col_start * sb_size).min(width);
-    let y0 = (sb_row_start * sb_size).min(height);
-    let x1 = (sb_col_end * sb_size).min(width);
-    let y1 = (sb_row_end * sb_size).min(height);
-    let tile_w = x1 - x0;
-    let tile_h = y1 - y0;
+    // `x0`/`y0`/`tile_w`/`tile_h` are this tile's rectangle in mi-grid pixels,
+    // derived by the caller from the frame's `TileLayout` — tiles may have
+    // different sizes under non-uniform spacing, so the caller (which splits
+    // the tile groups) owns the geometry.
 
     let uv_w = width / 2;
     let uv_h = height / 2;
 
-    // Parse TileGroup header to find the start of tile_data (AV1 spec §5.4.4).
-    // The SymbolDecoder must start at tile_data, not at the TileGroup header.
-    let tile_group_header_bits = {
-        let mut br = BitReader::new(data);
-        let tile_cols_log2 = (tile_cols as f32).log2().ceil() as u32;
-        let tile_rows_log2 = (tile_rows as f32).log2().ceil() as u32;
-        let tile_size_bits = (tile_cols_log2 + tile_rows_log2) as u8;
-
-        if tile_cols > 1 || tile_rows > 1 {
-            // tile_start_and_end_present_flag
-            br.read_bit()
-                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
-            // tile_start, tile_end
-            br.read_bits(tile_size_bits)
-                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
-            br.read_bits(tile_size_bits)
-                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?;
-        }
-        // AV1 spec §5.11.1 `tile_group_obu()`'s `tile_group_header()` has no
-        // `tile_cdf_update_flag` (or any other `frame_is_intra`-gated) field —
-        // a previous revision here fabricated one, which would have read one
-        // bit the real encoder never wrote for every inter-frame tile group
-        // and desynced the whole tile from that point on.
-        // byte_alignment()
-        br.byte_align();
-        br.bit_position()
-    };
+    // `data` is exactly this tile's `tile_data` bytes: the caller already
+    // parsed the tile-group header and any per-tile size fields (§5.11.1), so
+    // the symbol decoder starts at bit 0 of the payload below.
+    let sb_col_start = x0 / sb_size;
+    let sb_col_end = (x0 + tile_w).div_ceil(sb_size);
+    let sb_row_start = y0 / sb_size;
+    let sb_row_end = (y0 + tile_h).div_ceil(sb_size);
 
     let mut state = TileDecodeState::new(
         data,
-        tile_group_header_bits,
+        0,
         width,
         height,
         uv_w,
@@ -1740,7 +1722,7 @@ pub fn decode_tile_group(
         );
         capture_tile_trace(
             data,
-            tile_group_header_bits,
+            0,
             qindex,
             &base_mode_cdfs_json,
             &base_coeff_cdfs_json,
@@ -1753,10 +1735,8 @@ pub fn decode_tile_group(
         let final_bit = state.dec.bit_position();
         let total_data_bits = data.len() * 8;
         eprintln!(
-            "DBG BITS consumed={final_bit} data_bytes={} data_bits={total_data_bits} header_bits={tile_group_header_bits} \
-             remaining_after_header={}",
-            data.len(),
-            (total_data_bits as isize) - (tile_group_header_bits as isize)
+            "DBG BITS consumed={final_bit} data_bytes={} data_bits={total_data_bits} header_bits=0",
+            data.len()
         );
     }
     // Extract from `state` while it still borrows `meta`, then release.
@@ -1996,38 +1976,37 @@ pub fn reconstruct_av1_frame(
     let mut u_plane = vec![128u8; uv_grid_w * uv_grid_h];
     let mut v_plane = vec![128u8; uv_grid_w * uv_grid_h];
 
-    // Collect tile group payloads
-    let mut tile_payloads: Vec<Vec<u8>> = Vec::new();
-    for (obu_type, payload) in obus {
-        if *obu_type == 13 {
-            // TileGroup OBU
-            tile_payloads.push(payload.clone());
-        }
-    }
+    // Collect tile-group OBU payloads and split each one into its individual
+    // tiles (§5.11.1): a group carries tiles `tg_start..=tg_end`, every tile
+    // but the group's last prefixed with a `tile_size_bytes`-byte size field.
+    let tile_group_payloads: Vec<&[u8]> = obus
+        .iter()
+        .filter(|(obu_type, _)| *obu_type == 13)
+        .map(|(_, payload)| payload.as_slice())
+        .collect();
+    let tile_payloads: Vec<(usize, Vec<u8>)> = if tile_group_payloads.is_empty() {
+        Vec::new()
+    } else {
+        split_tile_group_payloads(&tile_group_payloads, &frame_header.tile_layout)?
+    };
     if std::env::var("KINETIX_AV1_DBG_TILES").is_ok() {
         eprintln!(
-            "DBG TILES frame tile_cols={} tile_rows={} payloads={}",
-            frame_header.tile_cols,
-            frame_header.tile_rows,
+            "DBG TILES frame layout cols={} rows={} ctx_update={} groups={} tiles={}",
+            frame_header.tile_layout.cols,
+            frame_header.tile_layout.rows,
+            frame_header.tile_layout.context_update_tile_id,
+            tile_group_payloads.len(),
             tile_payloads.len()
         );
-        let tc = frame_header.tile_cols.max(1) as usize;
-        let tr = frame_header.tile_rows.max(1) as usize;
-        for (i, p) in tile_payloads.iter().enumerate() {
-            // Peek at the first few bytes of each tile payload
+        for (n, p) in &tile_payloads {
             let preview: Vec<String> = p.iter().take(8).map(|b| format!("{b:02x}")).collect();
             eprintln!(
-                "  tile[{i}] bytes={} first8=[{}] tile_x={} tile_y={}",
+                "  tile[{n}] (x={}, y={}) bytes={} first8=[{}]",
+                frame_header.tile_layout.tile_col(*n),
+                frame_header.tile_layout.tile_row(*n),
                 p.len(),
-                preview.join(" "),
-                i % tc,
-                i / tc.max(1)
+                preview.join(" ")
             );
-            // Try to parse the tile group header bits
-            if !p.is_empty() && (tc > 1 || tr > 1) {
-                let flag = (p[0] >> 7) & 1;
-                eprintln!("    tile_start_and_end_present_flag={flag}");
-            }
         }
     }
 
@@ -2049,19 +2028,14 @@ pub fn reconstruct_av1_frame(
         )));
     }
 
-    // Compute tile layout
-    let tile_cols = frame_header.tile_cols.max(1) as usize;
-    let tile_rows = frame_header.tile_rows.max(1) as usize;
+    // Tile layout comes from the frame header (§5.9.15): explicit start
+    // superblocks per tile column/row, valid for both spacing modes.
+    let layout = &frame_header.tile_layout;
     let sb_size = if frame_header.use_128x128_superblock {
         128
     } else {
         64
     };
-    let sb_mi = sb_size / MI_SIZE;
-    let sb_cols_mi = mi_cols.div_ceil(sb_mi);
-    let sb_rows_mi = mi_rows.div_ceil(sb_mi);
-    let tile_w_sb = sb_cols_mi.div_ceil(tile_cols);
-    let tile_h_sb = sb_rows_mi.div_ceil(tile_rows);
 
     /// One tile's reconstruction, produced independently on a worker thread.
     struct DecodedTile {
@@ -2075,8 +2049,8 @@ pub fn reconstruct_av1_frame(
         /// Full-frame-sized motion field cells (only this tile's region
         /// populated; merged into the frame-level MF after all tiles finish).
         motion_field: Vec<MotionFieldCell>,
-        /// This tile's post-decode CDF state (tile 0's becomes the frame's
-        /// saved context, §6.8.2).
+        /// This tile's post-decode CDF state (the `context_update_tile_id`
+        /// tile's becomes the frame's saved context, §6.8.2).
         cdfs: Option<FrameCdfContext>,
         /// Per-block deblock / CDEF / LR metadata, tile-local coordinates.
         /// Merged into the full-frame FrameMeta after all tiles are blitted.
@@ -2086,18 +2060,15 @@ pub fn reconstruct_av1_frame(
     // Per-tile geometry, shared across the parallel worker closure. Tiles
     // cover the mi-grid extent (grid_w × grid_h), not the visible frame —
     // the last superblock row/col reconstructs into the padding too.
-    let geometry: Vec<(usize, usize, usize, usize)> = (0..tile_payloads.len())
-        .map(|i| {
-            let tc = (i % tile_cols).min(tile_cols - 1);
-            let tr = (i / tile_cols).min(tile_rows - 1);
-            let sb_col_start = tc * tile_w_sb;
-            let sb_col_end = ((tc + 1) * tile_w_sb).min(sb_cols_mi);
-            let sb_row_start = tr * tile_h_sb;
-            let sb_row_end = ((tr + 1) * tile_h_sb).min(sb_rows_mi);
-            let x0 = (sb_col_start * sb_size).min(grid_w);
-            let y0 = (sb_row_start * sb_size).min(grid_h);
-            let x1 = (sb_col_end * sb_size).min(grid_w);
-            let y1 = (sb_row_end * sb_size).min(grid_h);
+    let geometry: Vec<(usize, usize, usize, usize)> = tile_payloads
+        .iter()
+        .map(|(n, _)| {
+            let tc = layout.tile_col(*n);
+            let tr = layout.tile_row(*n);
+            let x0 = (layout.col_start_sb[tc] as usize * sb_size).min(grid_w);
+            let y0 = (layout.row_start_sb[tr] as usize * sb_size).min(grid_h);
+            let x1 = (layout.col_start_sb[tc + 1] as usize * sb_size).min(grid_w);
+            let y1 = (layout.row_start_sb[tr + 1] as usize * sb_size).min(grid_h);
             (x0, y0, x1, y1)
         })
         .collect();
@@ -2108,7 +2079,7 @@ pub fn reconstruct_av1_frame(
     let decoded: Vec<Result<DecodedTile, KinetixError>> = tile_payloads
         .par_iter()
         .enumerate()
-        .map(|(i, payload)| {
+        .map(|(i, (_, payload))| {
             let (x0, y0, x1, y1) = geometry[i];
             let tw = x1 - x0;
             let th = y1 - y0;
@@ -2132,10 +2103,10 @@ pub fn reconstruct_av1_frame(
                     v_ac: frame_header.delta_q_v_ac,
                 },
                 frame_header.use_128x128_superblock,
-                i % tile_cols,
-                i / tile_cols,
-                tile_cols,
-                tile_rows,
+                x0,
+                y0,
+                tw,
+                th,
                 &mut ty,
                 &mut tu,
                 &mut tv,
@@ -2222,11 +2193,15 @@ pub fn reconstruct_av1_frame(
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     let mut frame_cdf_context: Option<FrameCdfContext> = None;
     let mut frame_meta = FrameMeta::new(grid_w, grid_h);
-    for tile in decoded {
+    // §6.8.2: the saved context comes from the `contextUpdateTileId` tile —
+    // not necessarily tile 0 — when that tile's group was delivered.
+    let cdf_tile = tile_payloads
+        .iter()
+        .position(|(n, _)| *n as u32 == layout.context_update_tile_id)
+        .unwrap_or(0);
+    for (i, tile) in decoded.into_iter().enumerate() {
         let tile = tile?;
-        // §6.8.2: the saved context comes from the `contextUpdateTileId` tile
-        // (tile 0 in the current decoder's single-tile usage).
-        if frame_cdf_context.is_none() {
+        if i == cdf_tile {
             frame_cdf_context = tile.cdfs.clone();
         }
         let tw = tile.x1 - tile.x0;
@@ -2345,6 +2320,105 @@ pub fn reconstruct_av1_frame(
         frame_cdf_context,
         Some(padded),
     )))
+}
+
+/// Split tile-group OBU payloads into their individual `(TileNum, tile_data)`
+/// pairs (§5.11.1). A group carrying more than one of the frame's tiles reads
+/// `tile_start_and_end_present_flag`; when set, explicit `tg_start`/`tg_end`
+/// fields select the delivered range, otherwise the group carries all tiles.
+/// Every delivered tile but the group's last is prefixed with a
+/// `tile_size_bytes`-byte little-endian size field; the last tile's data runs
+/// to the end of its group payload.
+fn split_tile_group_payloads(
+    payloads: &[&[u8]],
+    layout: &crate::frame::TileLayout,
+) -> Result<Vec<(usize, Vec<u8>)>, KinetixError> {
+    let num_tiles = layout.num_tiles();
+    let id_bits = layout.log2_cols + layout.log2_rows;
+    let mut tiles = Vec::new();
+    for payload in payloads {
+        let mut br = BitReader::new(payload);
+        let (tg_start, tg_end) = if num_tiles > 1 {
+            let present = br
+                .read_bit()
+                .ok_or(KinetixError::Parse("TileGroup header truncated".into()))?
+                != 0;
+            if present {
+                let start = br
+                    .read_bits(id_bits)
+                    .ok_or(KinetixError::Parse("TileGroup tg_start truncated".into()))?
+                    as usize;
+                let end = br
+                    .read_bits(id_bits)
+                    .ok_or(KinetixError::Parse("TileGroup tg_end truncated".into()))?
+                    as usize;
+                if start >= num_tiles || end >= num_tiles || start > end {
+                    return Err(KinetixError::Parse(format!(
+                        "invalid tile-group range tg_start={start} tg_end={end} (num_tiles={num_tiles})"
+                    )));
+                }
+                (start, end)
+            } else {
+                (0, num_tiles - 1)
+            }
+        } else {
+            (0, 0)
+        };
+        // byte_alignment() before the first tile's size field / data.
+        br.byte_align();
+        let mut bit_pos = br.bit_position();
+        let dbg = std::env::var("KINETIX_AV1_DBG_TILES").is_ok();
+        if dbg {
+            let hex: Vec<String> = payload
+                .iter()
+                .take(16)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            eprintln!(
+                "DBG TG payload={} hdr_bits={bit_pos} tg=({tg_start},{tg_end}) n_bytes={} first16=[{}]",
+                payload.len(),
+                layout.tile_size_bytes,
+                hex.join(" ")
+            );
+        }
+        let end_bit = payload.len() * 8;
+        for tile_num in tg_start..=tg_end {
+            let last = tile_num == tg_end;
+            let size_bytes = if num_tiles > 1 && !last {
+                let n = layout.tile_size_bytes as usize;
+                // `br` does not advance across tile data (that is tracked by
+                // `bit_pos` alone), so reposition it at this size field.
+                let mut br = BitReader::new(&payload[bit_pos / 8..]);
+                // `tile_size_minus_1` is `tile_size_bytes` bytes, least
+                // significant byte first (dav1d `decode.c`: `tile_size_minus_1
+                // |= (unsigned)*data++ << (k * 8)`; libaom identical).
+                let mut size_minus_1 = 0usize;
+                for i in 0..n {
+                    let byte = br
+                        .read_bits(8)
+                        .ok_or(KinetixError::Parse("tile size field truncated".into()))?
+                        as usize;
+                    size_minus_1 |= byte << (8 * i);
+                }
+                bit_pos += n * 8;
+                if dbg {
+                    eprintln!("DBG TG tile {tile_num} size_field={}", size_minus_1 + 1);
+                }
+                size_minus_1 + 1
+            } else {
+                (end_bit - bit_pos).div_ceil(8)
+            };
+            let start = bit_pos / 8;
+            if start + size_bytes > payload.len() {
+                return Err(KinetixError::Parse(format!(
+                    "tile {tile_num} data ({size_bytes} bytes) exceeds group payload"
+                )));
+            }
+            tiles.push((tile_num, payload[start..start + size_bytes].to_vec()));
+            bit_pos = (start + size_bytes) * 8;
+        }
+    }
+    Ok(tiles)
 }
 
 /// Crop mi-grid-extent planes (dense, `grid_w` stride) down to the visible
