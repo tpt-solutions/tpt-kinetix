@@ -1,5 +1,65 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM (2026-09-27) — triaged the second bug to `B_8x8` sub-partitions with `Bi`/small-partition sub-types, first onset at MB(8,0)
+
+Picked the "next session" item off immediately: scanned every macroblock of
+row 0 (`predeblock_poc10.gray` vs JM's) and cross-referenced each one's mode
+from the #32d3 `KINETIX_BINTRACE` dump for this slice.
+
+```
+MB(0,0): nd= 59 md= 14   B_8x8 sub=[0,0,1,0]      (fixed by #32d4's parity fix, quad3 still tiny diff)
+MB(1,0): nd= 78 md= 16   (not yet inspected)
+MB(2,0): nd= 39 md=  1
+MB(3,0): nd=167 md= 48   B_8x8 sub=[2,0,1,5]      (has a Direct_8x8 quad + an L0_4x8 quad)
+MB(4,0): nd= 90 md= 47   b_type_raw=10 (explicit 16x8/8x16 combo)
+MB(5,0): nd=  0 md=  0   b_type_raw= 2  B_L1_16x16 — EXACT
+MB(6,0): nd=  0 md=  0   b_type_raw= 1  B_L0_16x16 — EXACT
+MB(7,0): nd= 47 md=  1   (no B-MB print → B_Skip, i.e. direct mode again)
+MB(8,0): nd=161 md= 23   B_8x8 sub=[0,3,1,3]      ← first LARGE jump, has Bi_8x8 (sub=3) x2
+MB(9,0): nd=243 md=100   B_8x8 sub=[11,0,1,4]     (L1_4x4, Direct_8x8, L0_8x8, L0_8x4)
+MB(10,0)..MB(21,0): nd 170-254, md up to 161 — every one this severely wrong from here on
+```
+
+**Reading this precisely, not just impressionistically**: the two *simple,
+single-partition, single-list* modes (`MB(5,0)` = whole-16x16 `B_L1_16x16`,
+`MB(6,0)` = whole-16x16 `B_L0_16x16`) are **perfectly bit-exact**. Every
+`B_8x8` macroblock with a sub-partition *smaller than 8×8*, or with an
+explicit **`Bi`** (both-lists) sub-type, shows real, substantial error — and
+from `MB(8,0)` onward (the first MB containing `Bi_8x8`) essentially every
+subsequent macroblock in the row is almost totally wrong. `MB(0,0)`'s own
+still-open quadrant 3 (previous entry) is itself `B_Direct_8x8`, i.e. also
+not a "plain single 16x16 partition" case — consistent with this pattern
+rather than being a separate third bug.
+
+This makes **explicit bi-predictive (`Bi`) combination** the leading
+suspect — not motion-vector derivation (already spot-checked as sane via the
+`predict_mv`/`predict_mv_l1` machinery used successfully by the exact-16x16
+cases) and not the reference pictures or CABAC parsing (both proven correct
+in #32d2/#32d3). `reconstruct.rs:303`'s plain averaging formula
+(`(pred_l0 + pred_l1 + 1) >> 1`, used when `weighted_bipred_idc == 0`, which
+is this PPS's setting) *looks* correct by inspection, but was not checked
+against a per-sample dump of `pred_l0`/`pred_l1` *before* averaging — that
+inspection is the concrete next step, not yet done this session. The smaller
+partition sizes (4x4/4x8/8x4, e.g. `MB(9,0)`'s `L1_4x4`) are the other
+remaining candidate, since those need their own neighbour-based MV
+prediction machinery (`predict_mv_sub`/`predict_mv_sub_l1`) that the
+whole-16x16 exact cases never exercise at all.
+
+**Next session:** dump `pred_l0` and `pred_l1` (pre-averaging, per-4×4-block)
+for `MB(8,0)`'s two `Bi_8x8` quadrants specifically, from wherever
+`reconstruct.rs`'s multi-slice B path calls the averaging step (~line 293-303
+and its caller). Compare each list's prediction independently against what
+JM would produce for the same `ref_idx`/MV (JM's own per-list prediction can
+be extracted by patching `mc_direct.c`'s or `mc_prediction.c`'s bi-pred call
+site the same way `biaridecod.c` was patched in #32d3 — dump `predL0[]`/
+`predL1[]` arrays before `(predL0+predL1+1)>>1`). If either list's raw
+prediction already differs from JM, the bug is upstream in that list's own
+MV/ref (re-open the MV-derivation question, this time for explicit not
+direct blocks); if both lists match individually but the average doesn't,
+the bug is squarely in the averaging/rounding step itself. If `MB(8,0)`
+turns out fine once isolated this way, broaden to the small-partition
+(`4x4`/`4x8`/`8x4`) hypothesis via `MB(9,0)` instead using the same method.
+
 ## SESSION #32d4 (2026-09-27) — REAL FIX: inverted field-parity selection in temporal-direct's field-pair lookup; a second, larger bug remains
 
 Followed the addendum above's own plan (dump the derived MV, compare to a
