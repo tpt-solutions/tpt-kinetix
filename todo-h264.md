@@ -1,5 +1,119 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 7 (2026-09-27, continuation) — field-B residue chased to the FRAME-P reference grids (poc-138 class): our stored grid for the reference P frame differs structurally from JM's while its PIXELS are display-exact; field-view RSD mapping implemented then REVERTED pending that grid fix; next-step list updated
+
+Took addendum 6's step 2 (field-coded B pictures' temporal direct) with the
+same consumption-point method.
+
+**Method.** `JM_COL` re-gated to the worst field-B pair (display 69 =
+`WRITE_OUT` poc 134/135; slices n=105/106, frame_num=8), `KCOL` re-added to
+`apply_temporal_direct` (gate `ctx.current_poc`), plus `KREFL`/`KDPB`/
+`KG138` probes in `decode_interlaced_b_field` dumping the field B's built
+RefPicLists, the DPB's short-term flags, and the colocated entry's grid
+cells.
+
+**First result was a false alarm — recorded so it isn't re-chased.** The
+first `KREFL` dump appeared to show our field-B RefPicLists shifted one pair
+down vs JM (L0 starting at 126, a stale frame-108 entry, no 138). That was
+two dumps from DIFFERENT pictures diffed against each other: the gate
+`current_poc >= 130` catches poc-130's B fields FIRST, and poc-130's lists
+are legitimately `[132,133,...]`-first (132/133 are its FUTURE references).
+With per-picture dumps: **our field-B ref lists match JM exactly** — poc-134
+top field: `L1 = [138(f),138(f),132,133,126,127,120,121,114,115]`, `L0 =
+[132,133,126,...,138(f),138(f)]`, identical to `JMREFLIST` including the
+frame-138 decomposed into its two field entries (pic_nums 15/14). Our
+field-B list construction is correct.
+
+**The real divergence.** With lists identical, the colocated reads still
+diverged structurally at poc-134 (ours: `cr0=2`, values like `(-8,0)`,
+`(16,5)`; JM: uniformly `cr0=0..1`, `(-4,0)`-class). The colocated source is
+`L1[0]` = **poc 138 — the FRAME-coded P picture** (n=104, structure=0,
+nal_ref_idc=1) that decodes immediately before this B pair. Diffing that
+picture's stored grid directly (JM `JMG` gate poc==138 vs our dpb entry's
+grid):
+
+```
+mb0 blk0:  JM m0=(0,5)     OURS mv0=(-1,0)
+mb0 blk3:  JM m0=(-5,0)    (our colocated read at q1 = (-5,0) class)
+mb0 blk15: JM m0=(-4,-1)   OURS mv0=(-3,0)
+mb1 blk0:  JM m0=(-1,2)    OURS mv0=(-3,0)
+```
+
+**Our stored grid for the poc-138 frame-P is structurally wrong — smooth
+collapsed values vs JM's real per-partition motion — while the picture's
+PIXELS are display-exact** (display 71 is not in the wrong-frame list). This
+is the same "pixel proof never verifies the persisted MV grid" trap that
+explains the P-field pairs (addendum 5), now confirmed for FRAME-coded P
+references too: every field-B picture whose colocated chain touches this
+grid inherits corrupted temporal-direct motion.
+
+**New routing knowledge (matters for any future fix here):** the frame-P at
+poc 138 NEVER reaches `finalize_picture` (a `KFINPOC <poc>` print at
+`finalize_picture`'s entry lists every finalized poc; 138 is absent while
+10/14/16/…/136/146/… all appear). `store_reference_picture`'s backtrace for
+poc 138 goes `decode_slice → store_reference_picture` with
+`grid=Some(396)`, i.e. the single-call `parse_p_slice_cabac` wrapper (whose
+`predict_slice_mvs_ex` result is stored directly by
+`try_decode_real_slice`'s non-accumulator arm) produced this grid — NOT the
+accumulator path the frame Bs use. So the poc-138 grid = the real P
+predictor's output over the real parse, yet differs from JM — meaning
+either (a) the predictor input here differs (the wrapper is invoked with
+`sps.mb_adaptive_frame_field_flag` / `header.field_pic_flag=false` for a
+frame picture inside an interlaced SPS — a combination the proven
+progressive clips never exercise), or (b) the stored grid ≠ the grid the
+reconstruction consumed (both come from `parsed.mv_store`, so (b) would
+require a mutation between reconstruct and store — none known). Note the
+pixel-exactness with a diverged grid is only possible if the diverging cells
+don't change MC output for THIS picture (e.g. all its inter blocks happen to
+sample identical reference regions) — re-verify display-71 pixel-exactness
+at 4×4 granularity before trusting it.
+
+**Field-view mapping: implemented, measured, REVERTED.** JM reads a FRAME
+reference's colocated cells through the DPB's generated field *views*
+(`dpb_split_field`'s "Generate field MVs from Frame MVs"):
+`view[RSD(y)][RSD(x)] = frame[2*RSD(y>>1)][RSD(x)]`, both parities identical
+(verified against `lib/lcommon/ifunctions.h`'s `RSD` and mbuffer.c's loop;
+our `rsd` is already a byte-exact `RSD`). Implemented that mapping in the
+temporal parity branch (`frame_row = 2*rsd(cy>>1)`, col `rsd(cx)`,
+parity-independent) and mirrored it in
+`resolve_spatial_colocated_cells`'s parity branch. Result: same 56/90 count
+but LARGER residual diffs on the field-B frames (e.g. frame 18
+nd 11325→31162, frame 48 nd 720→42487) — reverted to the committed d826697
+state. Interpretation: with the poc-138 grid itself broken, JM-faithful
+addressing of a wrong grid can easily measure worse; the mapping cannot be
+validated (nor blamed) until the underlying reference grid is byte-exact.
+The implementation is recorded here for the retry.
+
+**Next session, in order:**
+1. Fix the poc-138-class frame-P stored grid. First instrument the split:
+   dump `parsed.mv_store`'s mb0 row right after `parse_p_slice_cabac`
+   returns in the single-call arm, and JM's `JM_PRED`/`JM_MV` for the same
+   slice (JM gate `framepoc == 138`), to decide "predictor input differs"
+   vs "store ≠ consumed". The single-call wrapper's argument list
+   (`sps.mb_adaptive_frame_field_flag`, `field_pic_flag=false`,
+   `direct_8x8_inference_flag`) vs the accumulator path's for the frame Bs
+   is the prime suspect — diff the two call sites argument by argument.
+2. Check WHY the accumulator path declines this picture
+   (`try_decode_real_p_slice_cabac`'s early-return gates for interlaced-SPS
+   frame pictures) — routing the frame-P through the same path as the
+   frame Bs would remove the two-implementations split entirely.
+3. Only then re-apply the dpb_split_field field-view mapping (code in this
+   addendum) and re-measure. If field Bs remain wrong after 1+2+3, dump
+   JM's `structure` for L1[0] at poc 134 to confirm which colocated branch
+   JM actually takes (`field_pic && structure != list1[0]->structure` vs
+   same-kind).
+4. The tiny-diff frames (CAPA1 3/4/6, nd≈60-70, max=2) remain unexplained —
+   candidate: deblocking bS on field edges (the `predeblock`/`postdeblock`
+   split from addendum 6 applies).
+
+**Housekeeping:** all probes reverted (`git checkout` of mv.rs,
+decoder/mod.rs, decoder/interlaced.rs; the committed fix d826697 is the
+only h264 delta). Gates: fmt clean, `cargo test -p tpt-kinetix-h264`
+388/0. JM binaries updated in `/tmp/jm-oracle/jm`: `ldecod_col3.exe`
+(`JM_COL` gate framepoc==134), `ldecod_pred2.exe` (`JM_PRED` rows 0/5/13),
+`ldecod_grid138.exe` (`JMG` poc==138), plus `col134.log`, `grid138.log`,
+`pred_all.log` and our `/tmp/runk*.log` traces for the next session.
+
 ## SESSION #32d4 ADDENDUM 6 (2026-09-27) — REAL FIX #3 landed: combined-field-pair colocated row mapping halved the frame 4×4 row BEFORE the direct-8×8-inference rounding; L1 grid now byte-identical to JM; CAPA1/CVPA1 50/90 → 56/90 bit-exact
 
 Followed addendum 5's next step, with one improvement to the method: instead
