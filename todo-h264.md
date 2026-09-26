@@ -1,5 +1,118 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 5 (2026-09-27) — built full-picture MV-grid oracle; L1 store proven correctly persisted; real residual diff is 512 L1 cells whose dominant signature (JM x = ours − 1, 320 cells) points at the colocated field-pair grid's mv_x, i.e. the P-field decoders' stored MV grids
+
+Picked up addendum 4's next step (dump JM's left-neighbour A for
+`MB(16,13)`) and immediately pushed the method from "one MB's worth of
+`mv_info`" to a **whole-picture stored-MV-grid diff** — which restructured
+the entire investigation.
+
+**JM-side tooling (all in `/tmp/jm-oracle/jm`, binaries in `/tmp/jm-oracle/jm/`,
+rebuild = the `gcc` one-shot from `tools/build-jm-oracle.sh`'s tail):**
+- `ldecod_mv3.exe` — the addendum-4 `JM_MV` per-4×4 dump, filter extended to
+  `mb.x ∈ {15,16} && mb.y == 13 && framepoc == 10` (env
+  `KINETIX_DBG_JM_MV`). Run from `/tmp/jm_bin`:
+  `KINETIX_DBG_JM_MV=1 /tmp/jm-oracle/jm/ldecod_mv3.exe -p InputFile=in.264 -p OutputFile=out.yuv`
+  (`in.264` verified byte-identical to the CAPA1_TOSHIBA_B fixture).
+- `ldecod_pred.exe` — NEW `JM_PRED` dump inside `readMBMotionVectors`'s
+  sub-partition branch (env `KINETIX_DBG_JM_PRED`): per sub-block
+  `pred`/`mvd`/`final` for both lists — this is the missing half of the
+  predictor oracle (JM_MV only shows finals, so predictors had to be backed
+  out via `final − mvd`).
+- `ldecod_grid.exe` — NEW `JMG` full-picture dump in `exit_picture`'s
+  pre-deblock branch (image.c, env `KINETIX_DBG_JM_GRID`): every 4×4 cell's
+  `r0/r1/m0/m1` of the picture's `mv_info` at `poc == 10`, 6336 lines
+  (352·288 / 16). End-of-picture placement matters: the per-MB
+  `ref_pic`-linking loop runs BEFORE direct-mode MVs are computed, so a
+  per-MB dump would show stale (0,0,−1) cells for every direct MB.
+- **OURS side: `KINETIX_DUMP_MVGRID_POC=<poc>` in `finalize_picture`**
+  (temporary, REVERTED before this commit — re-add when needed): dumps every
+  committed cell's `mv1/ref1` (`KGRID poc=… mb=… blk=…`), diffable against
+  `JMG` cell-for-cell (`mb = (j4/4)·22 + i4/4`, `blk = (j4%4)·4 + i4%4`).
+
+**Killed a wrong suspect first — and it matters.** Addendum 4 left the
+store's L1 persistence unproven; the first grid diff appeared to show our
+entire L1 grid empty (`ref1 = −1` everywhere, "4656 differing cells"), which
+looked like direct-mode derived L1 never being committed. That was a probe
+artifact chain, each link verified along the way: (a) `MvStore` lives
+INLINE inside `PictureAccumulator` (not boxed), so every move of the
+accumulator — including `pending_picture.take()` into `finalize_picture` —
+relocates it; address-based identity probes therefore "proved" a store swap
+that never happened; (b) several env-gated probes silently never fired
+because heredoc-transmitted probe/env names arrived mangled; (c) one
+companion session was concurrently rebuilding `tpt-kinetix-av1`, so
+workspace builds flapped. With heap-pointer identity (`macroblocks.as_ptr()`)
+and unconditional (frame_num-gated) probes: **post-`predict_b_slice_mvs` and
+finalize drain the SAME accumulator with the SAME store, and that store's
+`KGRID` output carries JM-exact L1 values** (e.g. `MB(0,0) blk0
+mv1=(0,−8)/ref0` — matching `JMG` exactly; 4656 of 6336 cells have real L1).
+The L1 store is conclusively correctly populated and persisted, including
+direct-mode derived L1 (`apply_temporal_direct` commits `mv1` with
+`ref_idx_l1 = 0`, and `commit` writes the whole 16-cell grid). Also
+re-verified: decoder output is deterministic across repeated runs.
+
+**The real residual diff, quantified for the first time.** Diffing the full
+stored L1 grids: **512 differing cells** (6336 total). Distribution by
+derived-vector delta (`JM − ours`, refs equal in essentially all):
+- `(x: −1, y: 0)` — **320 cells**. The dominant signature by far.
+- `(x: −4, y: −3..−5)`-family — ~83 cells (e.g. `MB(15,12)` blk8-15:
+  JM `(0,−4,·)` vs ours `(0,0,·)`).
+- assorted single-cell clusters (`(0,+1)`, `(0,−2)`, `(6,3)`, …).
+
+**What this means.** For temporal direct, `mv_l1 = mv_l0 − colocated` in
+BOTH decoders (re-read JM's `mc_direct.c` verbatim: L1.x = L0.x −
+`colocated->mv[refList].mv_x`, L1.y = L0.y − the field-converted `mv_y`;
+our `derive_temporal_direct` line-for-line identical, and addendum 2 already
+proved the scale math). Our L0 grid matches JM's (spot-verified e.g.
+`MB(0,0) blk0` L0 = `(−1,16)/0` on both sides). Therefore a `−1` in L1.x
+with matching L0.x means **our colocated cell's `mv_x` is +1 versus JM's**
+— and the colocated source for this frame-coded B picture is the
+**synthesized combined field-pair grid** (`interleave_field_pair_entry`,
+poc 12/13) built from the two P-fields' own committed MV grids. The ~83-cell
+`(−4,·)` family are cells where our stored L1 came out a completely
+different vector (consistent with an otherwise-plausible wrong colocated
+cell — the same "internally plausible wrong motion" pattern as the #32d4
+interleave fix), and the scattered rest are the propagated predictor
+corruption this grid feeds (addendum 4's `MB(16,13) B_L1_8x4` case is one of
+them: its A-neighbour `MB(15,13)` cell reads `(0,4)/0` from us vs
+`(-4,−1)/0` from JM — that MB's own wrong input came from this same chain).
+
+**The third bug is therefore now pinned to: the P-field decoders' persisted
+MV grids carry `mv_x` values off by one (and locally worse) relative to JM's
+field grids.** This is fully consistent with every earlier proof: the
+P-fields' *pixel* correctness was verified via `KINETIX_WRITE_OUT` byte
+comparisons, which never look at the stored MV grid — and the frame-coded B
+pictures' pixel corruption then follows from temporal direct consuming the
+wrong colocated motion.
+
+**Next session (concrete):** diff the FIELD grids themselves.
+- JM: extend `JMG`'s gate to `(poc == 12 || poc == 13)` — JM decodes each
+  field as its own picture, so `exit_picture`'s `dec_picture->mv_info` IS
+  the field grid.
+- Ours: the field finalize path (`finalize_field`/its drain in
+  `decoder/interlaced.rs`) needs the same `KINETIX_DUMP_MVGRID_POC` hook as
+  `finalize_picture` (the hook added this session only covers the
+  progressive/accumulator path).
+- Then walk the first diverging field cell back to its MB: suspect the
+  P-field's MV **x**-component specifically — field-picture prediction
+  differs from the proven progressive path only in vertical scaling
+  (`scale_field_mv_y`, which touches y only) and in what the neighbours'
+  stored units are, so an x-only off-by-one suggests a predictor-input
+  mismatch (e.g. a field-aware neighbour conversion applied to x, or an
+  mvd-prediction rounding difference in `predict_mv`/`predict_mv_sub` under
+  field addressing), NOT `scale_field_mv_y` itself.
+- The `JM_PRED` oracle stays available for the field path too (gate is
+  `framepoc == 10 && mb.y == 13` today — widen `framepoc`/`mb.y` to the
+  field picture's values when re-targeting).
+
+**Housekeeping:** all temporary probes in `tpt-kinetix-h264` were reverted
+before this entry (`git checkout` of `mv.rs`, `decoder/mod.rs`,
+`slice_data/cabac_b.rs`, `decoder/interlaced.rs`); `cargo fmt --check`,
+`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings`, full
+`cargo test -p tpt-kinetix-h264` (388/0) and `--test itu_conformance` all
+pass on the clean tree. The JM tooling above is left in place per the
+session-tooling convention.
+
 ## SESSION #32d4 ADDENDUM 4 (2026-09-27) — third bug traced to the single-matching-ref shortcut's input, not the shortcut logic itself; needs one more upstream hop
 
 Continued the addendum-3 investigation on `MB(16,13)`'s `B_L1_8x4` quadrant
