@@ -62,10 +62,20 @@ pub struct DpbEntry {
     /// instead of `frame` (which is cropped to display size). `None` when coded
     /// and display dimensions are equal.
     pub mc_frame: Option<VideoFrame>,
-    /// For a synthesized combined field-pair entry (see
-    /// `combine_field_pairs_into_frames`): the pair's `(top_poc, bottom_poc)`,
-    /// so a co-located FIELD-level reference poc can match either half of the
-    /// pair (JM matches by picture identity). `None` for real decoded entries.
+    /// `(TopFieldOrderCnt, BottomFieldOrderCnt)` (§8.2.1) whenever they can
+    /// differ from the single `pic_order_cnt` above: for a synthesized
+    /// combined field-pair entry (see `combine_field_pairs_into_frames`) this
+    /// is the pair's own two fields' pocs, so a co-located FIELD-level
+    /// reference poc can match either half (JM matches by picture identity);
+    /// for a genuinely FRAME-coded picture (`field_pic_flag == false`) this
+    /// is `(TopFieldOrderCnt, BottomFieldOrderCnt)` from `derive_pic_order_cnt`
+    /// — `pic_order_cnt` above only ever holds `TopFieldOrderCnt` for a frame
+    /// picture (see its own doc comment), so anything that needs the true
+    /// per-field poc of a frame picture's BOTTOM field (field ref-list
+    /// ordering/weights, temporal-direct `col_poc`) must go through
+    /// [`DpbEntry::field_poc`], not `pic_order_cnt` directly. `None` only for
+    /// a genuine FIELD-coded entry (its single parity's poc is already exact
+    /// in `pic_order_cnt`).
     pub pair_field_pocs: Option<(i64, i64)>,
     /// For a synthesized combined field-pair entry: the two fields' OWN
     /// reference-list pocs `(top_list0, top_list1, bottom_list0, bottom_list1)`
@@ -78,6 +88,25 @@ impl DpbEntry {
     /// Whether this picture is still marked as a reference.
     pub fn is_reference(&self) -> bool {
         self.is_short_term || self.is_long_term
+    }
+
+    /// The true per-field `PicOrderCnt` (§8.2.1) of this entry's `bottom`
+    /// parity: `pic_order_cnt` alone is only exact for a genuine field-coded
+    /// entry or a frame entry's TOP field — a frame entry's bottom field can
+    /// differ (`delta_pic_order_cnt_bottom`/`offset_for_top_to_bottom_field`),
+    /// and `pair_field_pocs` (set for both synthesized field-pair entries and
+    /// genuine frame entries — see its doc comment) is where that's recorded.
+    pub fn field_poc(&self, bottom: bool) -> i64 {
+        match self.pair_field_pocs {
+            Some((top, bot)) => {
+                if bottom {
+                    bot
+                } else {
+                    top
+                }
+            }
+            None => self.pic_order_cnt,
+        }
     }
 
     /// `PicNum` for this short-term reference picture (§8.2.4.1 / §8.2.4.2.5).
@@ -415,6 +444,30 @@ fn derive_poc_type1(
 
 /// §8.2.1.1 — `pic_order_cnt_type == 0` (frame and field).
 #[allow(clippy::too_many_arguments)]
+/// `BottomFieldOrderCnt` of a FRAME-coded picture (§8.2.1) given its own
+/// `TopFieldOrderCnt` (`derive_pic_order_cnt`'s return for that picture).
+/// Frame pictures need this alongside the single `TopFieldOrderCnt` any time
+/// they're addressed at field granularity (a field ref-list entry, or a
+/// temporal-direct `col_poc`) — unlike `derive_pic_order_cnt`, which only
+/// ever returns `TopFieldOrderCnt` for a frame picture (see its own doc
+/// comment) and discards this. Only meaningful for `pic_order_cnt_type` 0/1;
+/// type 2 has no per-field distinction (`Top == Bottom` always).
+pub fn frame_bottom_field_order_cnt(
+    sps: &SeqParameterSet,
+    top_poc: i64,
+    delta_pic_order_cnt_bottom: Option<i64>,
+) -> i64 {
+    match sps.pic_order_cnt_type {
+        0 => top_poc + delta_pic_order_cnt_bottom.unwrap_or(0),
+        1 => {
+            top_poc
+                + sps.offset_for_top_to_bottom_field as i64
+                + delta_pic_order_cnt_bottom.unwrap_or(0)
+        }
+        _ => top_poc,
+    }
+}
+
 fn derive_poc_type0(
     sps: &SeqParameterSet,
     is_idr: bool,
@@ -1463,36 +1516,44 @@ impl FieldRef {
     }
 }
 
+/// Split one DPB entry into its candidate `FieldRef`s: a genuine field-coded
+/// entry contributes itself, a frame-coded entry contributes its (top,
+/// bottom) field pair — each with its own true per-field `PicOrderCnt` via
+/// [`DpbEntry::field_poc`], not the single frame-level `pic_order_cnt`
+/// (§8.2.4.2.5's field lists address individual fields; FFmpeg's
+/// `split_field_copy`).
+fn split_field_copy(e: &DpbEntry) -> Vec<FieldRef> {
+    if e.field_pic_flag {
+        vec![FieldRef {
+            frame: e.frame.clone(),
+            is_frame: false,
+            bottom: e.bottom_field_flag,
+            pic_order_cnt: e.pic_order_cnt,
+        }]
+    } else {
+        vec![
+            FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: false,
+                pic_order_cnt: e.field_poc(false),
+            },
+            FieldRef {
+                frame: e.frame.clone(),
+                is_frame: true,
+                bottom: true,
+                pic_order_cnt: e.field_poc(true),
+            },
+        ]
+    }
+}
+
 /// Expand the DPB into candidate `FieldRef`s — one entry per stored field
 /// picture, two entries (top and bottom) per stored frame picture (§8.2.4.2.5:
 /// field lists address individual fields, and a stored frame contributes its
 /// complementary field pair).
 fn expand_dpb_fields(dpb: &Dpb) -> Vec<FieldRef> {
-    let mut fields: Vec<FieldRef> = Vec::new();
-    for e in dpb.iter() {
-        if e.field_pic_flag {
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: false,
-                bottom: e.bottom_field_flag,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-        } else {
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: true,
-                bottom: false,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-            fields.push(FieldRef {
-                frame: e.frame.clone(),
-                is_frame: true,
-                bottom: true,
-                pic_order_cnt: e.pic_order_cnt,
-            });
-        }
-    }
-    fields
+    dpb.iter().flat_map(split_field_copy).collect()
 }
 
 /// `(is_short_term, is_long_term)` of the DPB entry backing a candidate field.
@@ -1500,7 +1561,7 @@ fn field_short_long(f: &FieldRef, dpb: &Dpb) -> (bool, bool) {
     let matching = |e: &&DpbEntry| {
         e.field_pic_flag == f.is_field()
             && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-            && e.pic_order_cnt == f.pic_order_cnt
+            && e.field_poc(f.bottom) == f.pic_order_cnt
     };
     let is_short = dpb.iter().filter(matching).any(|e| e.is_short_term);
     let is_long = dpb.iter().filter(matching).any(|e| e.is_long_term);
@@ -1513,7 +1574,7 @@ fn field_long_num(f: &FieldRef, dpb: &Dpb) -> i64 {
         .find(|e| {
             e.field_pic_flag == f.is_field()
                 && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-                && e.pic_order_cnt == f.pic_order_cnt
+                && e.field_poc(f.bottom) == f.pic_order_cnt
         })
         .map(|e| e.long_term_pic_num as i64)
         .unwrap_or(0)
@@ -1603,70 +1664,16 @@ fn initial_b_field_list(
         past.into_iter().chain(future).collect()
     };
 
-    // Split each sorted entry into its field references: genuine fields
-    // contribute themselves, frames contribute (top, bottom) —
-    // `split_field_copy` semantics.
-    let expanded: Vec<FieldRef> = sorted
-        .iter()
-        .flat_map(|e| {
-            if e.field_pic_flag {
-                vec![FieldRef {
-                    frame: e.frame.clone(),
-                    is_frame: false,
-                    bottom: e.bottom_field_flag,
-                    pic_order_cnt: e.pic_order_cnt,
-                }]
-            } else {
-                vec![
-                    FieldRef {
-                        frame: e.frame.clone(),
-                        is_frame: true,
-                        bottom: false,
-                        pic_order_cnt: e.pic_order_cnt,
-                    },
-                    FieldRef {
-                        frame: e.frame.clone(),
-                        is_frame: true,
-                        bottom: true,
-                        pic_order_cnt: e.pic_order_cnt,
-                    },
-                ]
-            }
-        })
-        .collect();
+    // Split each sorted entry into its field references (`split_field_copy`:
+    // genuine fields contribute themselves, frames contribute (top, bottom)
+    // with each field's own true per-field poc).
+    let expanded: Vec<FieldRef> = sorted.iter().copied().flat_map(split_field_copy).collect();
     let mut ordered: Vec<FieldRef> = interleave_field_parities(&expanded, current_bottom);
 
     // Long-term entries: ascending LongTermPicNum, same parity interleave.
     let mut longs: Vec<&DpbEntry> = dpb.iter().filter(|e| e.is_long_term).collect();
     longs.sort_by_key(|e| e.long_term_pic_num);
-    let longs_expanded: Vec<FieldRef> = longs
-        .iter()
-        .flat_map(|e| {
-            if e.field_pic_flag {
-                vec![FieldRef {
-                    frame: e.frame.clone(),
-                    is_frame: false,
-                    bottom: e.bottom_field_flag,
-                    pic_order_cnt: e.pic_order_cnt,
-                }]
-            } else {
-                vec![
-                    FieldRef {
-                        frame: e.frame.clone(),
-                        is_frame: true,
-                        bottom: false,
-                        pic_order_cnt: e.pic_order_cnt,
-                    },
-                    FieldRef {
-                        frame: e.frame.clone(),
-                        is_frame: true,
-                        bottom: true,
-                        pic_order_cnt: e.pic_order_cnt,
-                    },
-                ]
-            }
-        })
-        .collect();
+    let longs_expanded: Vec<FieldRef> = longs.iter().copied().flat_map(split_field_copy).collect();
     let longs_interleaved = interleave_field_parities(&longs_expanded, current_bottom);
     ordered.extend(longs_interleaved);
 
@@ -1882,7 +1889,7 @@ fn frame_num_wrap_of(f: &FieldRef, dpb: &Dpb, ctx: PicNumContext) -> i64 {
     let found = dpb.iter().find(|e| {
         e.field_pic_flag == f.is_field()
             && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
-            && e.pic_order_cnt == f.pic_order_cnt
+            && e.field_poc(f.bottom) == f.pic_order_cnt
     });
     match found {
         Some(e) => {

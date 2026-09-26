@@ -2166,8 +2166,8 @@ impl H264Decoder {
         // progressive B paths in `decoder/mod.rs`.
         let col_entry = ref_l1.first().and_then(|f| {
             self.dpb().iter().find(|e| {
-                e.pic_order_cnt == f.pic_order_cnt
-                    && e.field_pic_flag != f.is_frame
+                e.field_pic_flag != f.is_frame
+                    && e.field_poc(f.bottom) == f.pic_order_cnt
                     && (!e.field_pic_flag || e.bottom_field_flag == f.bottom)
             })
         });
@@ -2185,10 +2185,19 @@ impl H264Decoder {
         let current_field_parity = col_entry
             .filter(|col| !col.field_pic_flag)
             .map(|_| header.bottom_field_flag);
+        // `col_poc` is the specific FIELD's own poc (§8.4.1.2.3 note: when
+        // current is a field and colPic is a frame, colPic is that frame's
+        // field of the SAME parity as current) — `f.pic_order_cnt` (the
+        // FieldRef actually selected as L1[0]), not `col.pic_order_cnt`
+        // (which for a frame-coded `col` is only its TOP field's poc).
+        let col_poc = ref_l1
+            .first()
+            .map(|f| f.pic_order_cnt)
+            .unwrap_or(current_poc);
         let temporal_ctx = col_entry.map(|col| crate::mv::TemporalDirectCtx {
             current_poc,
             current_list0_poc: &current_list0_poc,
-            col_poc: col.pic_order_cnt,
+            col_poc,
             col_list0_poc: &col.list0_poc,
             col_list1_poc: &col.list1_poc,
             col_pair: None,

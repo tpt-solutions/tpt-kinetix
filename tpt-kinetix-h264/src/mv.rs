@@ -1424,6 +1424,55 @@ fn derive_spatial_direct(
 /// motion and apply the colocated zero-MV rule (`col_zero_flag`), which needs
 /// the co-located picture's per-block motion grid (list-1 reference 0).
 #[allow(clippy::too_many_arguments)]
+/// Resolve the co-located macroblock's own 16 4×4 cells for spatial direct's
+/// `col_zero_flag` check (§8.4.1.2.2), in the CURRENT macroblock's own local
+/// `by*4+bx` layout — same frame/field view conversion
+/// [`apply_temporal_direct`]'s `colocated_cell` closure applies for temporal
+/// direct's `current_field_parity`/`col_pair` cases, minus the outer-corner
+/// (`rsd`) correction: that corner selection happens in the CALLER on the
+/// array this returns, so every raw cell must be resolved here, not just the
+/// corner one temporal direct's per-quadrant call needs.
+fn resolve_spatial_colocated_cells(
+    colocated: &[[MvCell; 16]],
+    mb_row: usize,
+    mb_col: usize,
+    mb_width: usize,
+    ctx: Option<&TemporalDirectCtx>,
+) -> Option<[MvCell; 16]> {
+    if let Some(parity) = ctx.and_then(|c| c.current_field_parity) {
+        // Current is a FIELD, co-located picture is a FRAME: local row `by`
+        // (this MB's own field-relative row) maps to frame row
+        // `2*(4*mb_row+by) + parity` (JM `mc_direct.c`; mirrors
+        // `apply_temporal_direct`'s `current_field_parity` branch).
+        let mut out = [MvCell::INTRA; 16];
+        for by in 0..4usize {
+            let frame4 = 2 * (4 * mb_row + by) + parity as usize;
+            let src = colocated.get((frame4 / 4) * mb_width + mb_col)?;
+            for bx in 0..4usize {
+                out[by * 4 + bx] = src[(frame4 % 4) * 4 + bx];
+            }
+        }
+        return Some(out);
+    }
+    if let Some(pair) = ctx.and_then(|c| c.col_pair.as_ref()) {
+        // Current is a FRAME, co-located picture is a synthesized combined
+        // field pair: mirrors `apply_temporal_direct`'s `col_pair` branch.
+        let current_poc = ctx.map(|c| c.current_poc).unwrap_or(0);
+        let bottom = (current_poc - pair.bottom_poc).abs() >= (current_poc - pair.top_poc).abs();
+        let mut out = [MvCell::INTRA; 16];
+        for by in 0..4usize {
+            let f = (4 * mb_row + by) >> 1;
+            let grid_row = 2 * (f / 4) + bottom as usize;
+            let src = colocated.get(grid_row * mb_width + mb_col)?;
+            for bx in 0..4usize {
+                out[by * 4 + bx] = src[(f % 4) * 4 + bx];
+            }
+        }
+        return Some(out);
+    }
+    colocated.get(mb_row * mb_width + mb_col).copied()
+}
+
 fn apply_spatial_direct(
     store: &MvStore,
     cur: &mut [MvCell; 16],
@@ -1433,6 +1482,7 @@ fn apply_spatial_direct(
     quads: &[usize],
     colocated: Option<&[[MvCell; 16]]>,
     direct_8x8_inference_flag: bool,
+    temporal: Option<&TemporalDirectCtx>,
 ) {
     let (refs, mvs, used) = derive_spatial_direct(store, cur, mb_idx, mb_width, slice_id);
     let fill = |cur: &mut [MvCell; 16], bx: usize, by: usize| {
@@ -1461,7 +1511,10 @@ fn apply_spatial_direct(
     }
     // col_zero_flag: zero each list's MV where refIdx is 0 and the colocated
     // block's corresponding MV is (near-)zero.
-    if let Some(cells) = colocated.and_then(|g| g.get(mb_idx)) {
+    if let Some(cells) = colocated.and_then(|g| {
+        resolve_spatial_colocated_cells(g, mb_idx / mb_width, mb_idx % mb_width, mb_width, temporal)
+    }) {
+        let cells = &cells;
         let coloc_intra = cells.iter().all(|c| c.ref_idx < 0 && c.ref_idx_l1 < 0);
         if !coloc_intra {
             let is_col_zero = |cc: &MvCell| {
@@ -1804,6 +1857,7 @@ pub(crate) fn predict_inter_b_macroblock(
                 &[0, 1, 2, 3],
                 colocated,
                 direct_8x8_inference_flag,
+                temporal,
             );
             Ok(())
         }
@@ -1984,6 +2038,7 @@ pub(crate) fn predict_inter_b_macroblock(
                         &[part],
                         colocated,
                         direct_8x8_inference_flag,
+                        temporal,
                     );
                     continue;
                 }

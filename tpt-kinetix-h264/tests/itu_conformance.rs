@@ -245,10 +245,12 @@ const MANIFEST: &[(&str, Expect)] = &[
     (
         "Sharp_MP_PAFF_1r2",
         Expect::KnownGap(
-            "real PAFF 720x480 — 10/15 frames byte-exact (sessions #32ca-#32cd: \
-             display-order buffer, B-field ref lists, direct-mode context). \
-             Remaining mid-stream field pairs carry localized diffs — \
-             see todo-h264.md #32cb/#32cd",
+            "real PAFF 720x480 — 12/15 frames byte-exact (sessions #32ca-#32cf: \
+             display-order buffer, B-field ref lists, direct-mode context, \
+             apply_spatial_direct's colocated-motion lookup given the same \
+             frame/field row remap apply_temporal_direct already had). \
+             Remaining mid-stream field pairs (display index 5/11/13) carry \
+             localized diffs — see todo-h264.md #32cf",
         ),
     ),
     // IPB stream, multi-slice, mixes P/B slices per picture. Was blocked on

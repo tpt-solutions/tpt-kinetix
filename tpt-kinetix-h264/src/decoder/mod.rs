@@ -2723,6 +2723,25 @@ impl H264Decoder {
             .dec_ref_pic_marking
             .clone()
             .unwrap_or(DecRefPicMarking::SlidingWindow);
+        // A genuinely FRAME-coded picture's `poc` above is only
+        // `TopFieldOrderCnt` (see `derive_pic_order_cnt`'s doc comment) — its
+        // own `BottomFieldOrderCnt` can differ and is otherwise lost, but
+        // anything addressing this entry at field granularity later (a field
+        // ref-list split, or a B-field's temporal-direct `col_poc`) needs it;
+        // `pair_field_pocs` already carries exactly this `(top, bottom)`
+        // shape for synthesized field-pair entries, so populate it here too.
+        let pair_field_pocs = if !header.field_pic_flag {
+            Some((
+                poc,
+                crate::ref_pic::frame_bottom_field_order_cnt(
+                    sps,
+                    poc,
+                    header.delta_pic_order_cnt_bottom,
+                ),
+            ))
+        } else {
+            None
+        };
         let entry = DpbEntry {
             frame: frame.clone(),
             frame_num: header.frame_num,
@@ -2734,7 +2753,7 @@ impl H264Decoder {
             long_term_pic_num: -1,
             mv_grid,
             mc_frame,
-            pair_field_pocs: None,
+            pair_field_pocs,
             pair_field_lists: None,
             list0_poc,
             list1_poc,

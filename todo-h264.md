@@ -2,6 +2,168 @@
 
 > Active work. See [todo.md](todo.md) for the project index.
 
+## SESSION #32cf ADDENDUM (2026-09-26, later still) — `apply_spatial_direct`'s missing frame/field colocated remap FIXED; Sharp 10/15 → 12/15
+
+Implemented the "next session" item this same session's earlier entry
+flagged: `apply_spatial_direct` (`mv.rs`) read `colocated_mv` via a flat
+`grid.get(mb_idx)` with no frame↔field conversion, unlike
+`apply_temporal_direct`'s `current_field_parity`/`col_pair` branches. Added
+`resolve_spatial_colocated_cells`, mirroring `apply_temporal_direct`'s two
+conversion branches (current FIELD / col FRAME, and current FRAME / col
+combined field pair) minus the outer-corner (`rsd`) correction — spatial
+direct's own corner/sub-block selection happens in the caller, on the full
+16-cell array this function now resolves correctly first. Threaded the
+already-available `temporal: Option<&TemporalDirectCtx>` (previously only
+passed to `apply_temporal_direct`) into both `apply_spatial_direct` call
+sites in `predict_inter_b_macroblock`, since it already carries exactly the
+addressing fields (`col_pair`, `current_field_parity`) needed — no new
+context plumbing required.
+
+**Measured**: `Sharp_MP_PAFF_1r2` (`dbg_field_triage`, `FIELD_DISPLAY_ORDER=1`)
+went from 10/15 to **12/15 frames byte-exact** — display frames 2 and 8
+(previously 2777/5400 and 1165/17517 luma diffs respectively) are now exact,
+with zero regressions on the 10 already-exact frames. Frames 5/11/13 remain
+wrong (magnitudes shifted but still nonzero) — these are the "field B pairs
+whose col is ANOTHER field pair" class (#32ce's item 1), a separate bug from
+this one. Gates: 273/273 lib tests, ITU suite still 33/33 hard-checked
+BitExact (0 regressions), clippy `-D warnings` clean, fmt clean.
+
+**Retried the `BottomFieldOrderCnt`/`field_poc` fix (same session, right
+after the above) — this time it's a clean win, no regression.** Found the
+actual mechanism behind the earlier regression while re-auditing every
+`e.pic_order_cnt == f.pic_order_cnt`-style comparison in `ref_pic.rs`:
+`frame_num_wrap_of` (feeds `PicNum` for P-field reference-list ordering) and
+`field_short_long` (is this candidate field still short/long-term?) both had
+the exact same stale-comparison bug as the `col_entry` lookup this session's
+earlier attempt fixed — but I'd missed them the first time. With the old
+single shared poc, these always matched (both parities compared equal by
+construction); once `FieldRef::pic_order_cnt` started reporting the true
+per-parity value, the bottom parity's lookup started failing, and
+`frame_num_wrap_of`'s `None => 0` fallback silently zeroed `PicNum` for
+every P-field reference derived from that frame-coded picture's bottom
+field — corrupting P-field reference-list ordering project-wide, which is
+what actually produced the earlier "regression" (not the col_pair/temporal
+plumbing, which was fine all along). Fixed both call sites too (also
+`field_poc`-based now), re-applied the rest of the earlier fix unchanged
+(`DpbEntry::field_poc`, `split_field_copy`, `frame_bottom_field_order_cnt`,
+`store_reference_picture`'s `pair_field_pocs` population,
+`decode_interlaced_b_field`'s `col_entry`/`col_poc`).
+
+**Measured**: `Sharp_MP_PAFF_1r2` unchanged at 12/15 (this fix doesn't touch
+Sharp's remaining failure class, as expected — confirms it's neutral there,
+not regressive). **`CAPA1_TOSHIBA_B`/`CVPA1_TOSHIBA_B`** (the mixed
+frame/field temporal-direct clips this fix actually targets): frames that
+were wholesale wrong under #32ce (display 18/19/21/22/24/25/28 — the "field
+B pair whose col is a genuine frame" class) now show only small residuals
+(tens to low thousands of samples, vs tens of thousands before) — real,
+substantial improvement, though not yet bit-exact. Frame 7 (CAPA1) / 30+
+(CVPA1, the frame-coded B picture / Case A class, #32ce item 2) is
+untouched by this fix, as expected — still wholesale wrong, unrelated bug.
+Gates: 273/273 lib tests, ITU suite still 33/33 hard-checked BitExact (0
+regressions), clippy `-D warnings` clean, fmt clean, full `cargo build
+--workspace` clean.
+
+**Next session**: (1) CAPA1/CVPA1's Case A (frame-coded B pictures, still
+wholesale wrong) — needs its own per-MB trace vs JM; (2) the residual small
+diffs now visible on 18/19/21/22/24/25/28 (post this fix) — likely a
+deblock-rounding-class gap like frames 3/4/6/16, or a smaller remaining
+addressing detail; (3) Sharp's frames 5/11/13 (same-kind field-pair col,
+per #32ce item 1) still need their own trace — this session's fixes were
+both neutral there by design, not yet a fix for that class.
+
+## SESSION #32cf (2026-09-26, later) — real DpbEntry gap found (frame pictures lose BottomFieldOrderCnt); fix attempted and REVERTED (net regression on Sharp, root cause of the regression not pinned)
+
+Investigated item 1 from #32ce's remaining list ("field B pairs whose
+co-located picture is another field pair — same-kind path"). That specific
+framing turned out to be wrong for `Sharp_MP_PAFF_1r2`: it has only 4 B-field
+pairs total (`frame_num` 2-5), all with `direct_spatial_mv_pred_flag=true`
+(spatial direct, confirmed via `KINETIX_B_FIELD_MB_DBG`), so temporal-direct
+code never executes for it at all — the frames further into the stream that
+are wrong (display index 8, 11, 13, ...) are P-field pictures, not B.
+
+**Real, confirmed structural gap found along the way (still real, not
+reverted-because-wrong):** `DpbEntry::pic_order_cnt` for a genuinely
+FRAME-coded picture (`field_pic_flag == false`) only ever holds
+`TopFieldOrderCnt` — `derive_pic_order_cnt`'s own doc comment says so, and
+`derive_poc_type0`/`derive_poc_type1`'s frame branches compute
+`BottomFieldOrderCnt` internally (for updating `state.prev_bottom_field_
+order_cnt`) and then discard it. Confirmed via `KINETIX_FRAME_POC_DBG`: Sharp
+has a genuine frame-coded P picture at `frame_num=1`, `TopFieldOrderCnt=6`;
+its SPS is `pic_order_cnt_type=1` with `offset_for_top_to_bottom_field=1`
+(cross-checked plausible against the I picture's own field pair, poc 0/1 —
+same spacing), so its real `BottomFieldOrderCnt` is legitimately `7`, not
+`6`. Every place that later addresses this entry at FIELD granularity — the
+field ref-list split in `ref_pic.rs` (`expand_dpb_fields` and the two
+duplicated flat_maps in `initial_b_field_list`, all three construct BOTH the
+top and bottom `FieldRef` with the SAME `e.pic_order_cnt`), and
+`decode_interlaced_b_field`'s `col_poc: col.pic_order_cnt` (`interlaced.rs`)
+— silently uses `6` for both parities. This is real and still unfixed.
+
+**Attempted fix (implemented, tested, then reverted this session):** added
+`DpbEntry::field_poc(bottom)` reading a widened `pair_field_pocs` (already
+existed for synthesized field-pair entries; extended to genuine frame
+pictures too, populated in `store_reference_picture` via a new
+`ref_pic::frame_bottom_field_order_cnt` helper), refactored the 3 duplicate
+`FieldRef`-split sites into one `split_field_copy` helper using it, and fixed
+`decode_interlaced_b_field`'s `col_entry` search + `col_poc` to key off the
+correct per-parity poc. Build clean, but **`Sharp_MP_PAFF_1r2` regressed
+hard**: previously-exact display frames (3,4,6,7,9,10,12,14) became wrong
+(20-100k luma samples each), confirmed via `dbg_field_triage`
+`FIELD_DISPLAY_ORDER=1`. Bisected with a `KINETIX_FRAME_POC_FORCE_EQUAL` env
+toggle (forces `pair_field_pocs = Some((poc, poc))`, i.e. old behavior data-
+wise but through the new code path): **forcing bottom==top exactly restores
+the original baseline**, proving the regression is caused by the POC VALUE
+itself (7 vs 6) reaching some consumer, not by the refactor structure.
+
+**Root cause of the REGRESSION not found.** Reasoned (but could not confirm)
+that none of the "obvious" consumers should be affected for Sharp:
+`weighted_bipred_idc` is confirmed `0` (`KINETIX_WBIPRED_DBG`) so
+`WeightedPred::Implicit`'s poc-based weights are dead code here;
+`TemporalDirectCtx`/`col_poc` are unused (spatial direct only, confirmed
+above); `apply_spatial_direct`'s `colocated_mv` lookup keys off DPB-entry
+IDENTITY (found via the SAME `field_poc`-based match on both sides of the
+old vs new code, so it resolves to the same entry either way) not the poc
+VALUE. Grepped the whole crate for `.pic_order_cnt` consumers — only
+`decoder/mod.rs`, `decoder/interlaced.rs`, `ref_pic.rs` touch it at all, and
+none of the remaining call sites (P-field `list0_poc`/`list1_poc` storage
+for later temporal-direct use, which Sharp's own downstream B slices don't
+reach either since there are only 4 and they're all spatial) explain a
+same-session, same-picture pixel change. **The mechanism connecting a
+correct-per-spec poc delta to a same-frame pixel regression is still
+unexplained** — either there's a consumer this search missed, or the
+"regression" is actually correcting one bug while the corrected value now
+trips a SECOND, independent bug (e.g. the field-vs-frame `mv_grid` mb_idx
+addressing mismatch noted below) that the old wrong-shared-poc happened to
+sidestep by accident.
+
+**Also found (separate, NOT fixed, NOT the regression cause but likely a
+real bug in its own right):** `apply_spatial_direct` (`mv.rs`) reads
+`colocated: Option<&[[MvCell; 16]]>` via plain `grid.get(mb_idx)` with no
+field/frame conversion at all — unlike `apply_temporal_direct`, which has a
+whole `current_field_parity`/`col_pair` branch precisely because a FRAME
+col picture's `mv_grid` is indexed over the FULL frame's macroblock rows
+(`mb_width * mb_rows_FULL`, recorded by the progressive path), while a
+FIELD B slice's `mb_idx` only ranges over `mb_width * mb_rows_FIELD` (half).
+`grid.get(mb_idx)` for a field slice referencing a frame-coded col picture
+therefore reads the WRONG macroblock (frame row `field_row`, not `2*
+field_row + parity`) — same bug class as temporal direct's frame-into-
+field-view case, just never given the same fix for spatial direct's
+`col_zero_flag`. Confirmed the addressing mismatch exists by inspection
+(`MvStore::to_grid_vec`'s size matches the picture it was recorded for); did
+NOT confirm whether it's actually reachable/wrong here or whether Sharp's B
+slices' `col_zero_flag` happens not to fire on the frame-coded col picture's
+region.
+
+**Next session:** (1) instrument `apply_spatial_direct`'s colocated read with
+a frame/field row-remap identical to `apply_temporal_direct`'s
+`current_field_parity` branch, verify against JM on Sharp's frame_num=2 pair
+(whose L1[0] is the poc6/7 frame); (2) re-attempt the field-poc fix ON TOP
+of that, since the two may be entangled (a corrected poc feeding an already-
+wrong mb_idx read could plausibly make things worse, matching what was
+observed); (3) only then move to CAPA1/CVPA1's temporal-direct same-kind
+class from #32ce. Do not re-apply the field-poc fix alone without also
+fixing (1) — this session's data says that combination is net negative.
+
 ## SESSION #32ce (2026-09-26, same day) — mixed frame/field temporal direct implemented (JM-transcribed); Sharp "regression" chased to a bisect artifact
 
 Implemented the #32cd NEXT item: temporal direct's field/frame conversion
