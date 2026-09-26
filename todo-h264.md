@@ -1,5 +1,100 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d3 (2026-09-27) — CABAC entropy decode for the wholesale-wrong B slice is PROVEN 100% bit-exact; bug is in reconstruction, not parsing
+
+Built the real bit-level CABAC oracle addendum 2 called for, and it fully
+resolves the question addendum 2 left open — with a correction of its own
+methodology along the way.
+
+**The oracle.** Patched JM's `biari_decode_symbol`/`_eq_prob`/`_final`
+(`biaridecod.c`) to `fprintf` `(call_id, pre_range, pre_state, pre_mps, rLPS)`
+on entry and `(call_id, bit, post_range, post_state)` on every return path,
+gated by a global flag flipped on/off around the target slice via the
+`KINETIX_SLICE` counter instrumentation from #32d2. Compared against this
+codebase's own existing `KINETIX_BINTRACE=1` per-bin dump (already built into
+`entropy.rs`'s `trace_bin`, nothing new needed on our side).
+
+**First attempt was wrong — a self-inflicted instrumentation bug, not a real
+divergence.** The initial JM patch put the `fprintf` for a decoded bin *after*
+the whole MPS/LPS if/else block — but `biari_decode_symbol`'s MPS branch has
+an early `return` (`if (*range >= QUARTER) return (bit);`) that skips
+everything after it. That early return is the *fast, common* path, so the
+first version of this patch silently dropped a large fraction of real bin
+decodes from the trace (58964 logged vs. our ~96113 actual — a ~40% miss
+rate). The missing bins made JM's *logged* sequence appear to diverge from
+ours around the 6th bin, which led an earlier pass of this same session (see
+the now-superseded addenda below) into a long, wrong detour: hand-decoding
+JM's B `mb_type` binarization tree from `readMB_typeInfo_CABAC_b_slice`
+(`cabac.c`), reverse-engineering its `act_sym` numbering against FFmpeg's
+`ff_h264_decode_mb_cabac`'s equivalent (`h264_cabac.c`, fetched fresh via
+`raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/h264_cabac.c` —
+**this fetch is a generically useful reference for future CABAC context/
+binarization questions**: it has the authoritative, line-by-line ctxIdx
+assignment for every mb_type/sub_mb_type tree, e.g. B mb_type at line ~1969),
+concluding JM's *true* decode was `mb_type=12` versus our `22` (B_8x8) — a
+plausible-looking but entirely artifact-driven conclusion.
+
+**Fix: moved the trace print into every return path** (there are three: the
+MPS-early-return, the MPS-with-renorm fallthrough, and the LPS fallthrough —
+all funnel through one shared print in the original code, so only the
+early-return branch needed a duplicate). After the fix, JM logs 96112 bins
+for this slice — matching our own count almost exactly (off by 1, an
+end-of-slice-flag bookkeeping difference, not investigated further since it
+doesn't touch macroblock data).
+
+**Diffing the corrected sequences: all 96112 bins are IDENTICAL.**
+`diff ours_bins.txt jm_bins2.txt` shows exactly one line of difference — a
+single trailing extra bin in ours at the very end of the slice (past all
+macroblock data, almost certainly an end-of-slice-flag/terminate-bin
+convention difference). **Every context-coded and bypass bin for all ~396
+macroblocks of this slice — mb_skip_flag, mb_type, sub_mb_type, ref_idx,
+mvd, cbp, mb_qp_delta, every residual coefficient — matches JM bit-for-bit.**
+This includes re-confirming MB(0,0)'s `mb_type` bins directly (now with
+verified-complete data): `0,1,1,1,1,1,1` → `bits=15` → **`mb_type=22`
+(B_8x8) is correct for both decoders** — addendum 2's own conclusion
+(disproving the *original* `mb_skip_flag` lead) stands, but the *later*
+`act_sym`/`mb_type=12` re-analysis earlier in today's session is now
+retracted; it was chasing the instrumentation artifact, not a real second
+divergence.
+
+**This changes where the bug must be, decisively.** The CABAC entropy
+decoder — contexts, binarization trees, engine arithmetic, everything this
+session spent hours suspecting — is exonerated for this slice. Also
+independently confirmed: the reference picture this slice's `RefPicList1[0]`
+resolves to (`POC=12`, JM `structure=1`+`2`, i.e. the genuine P-field pair at
+`frame_num=2`) is *itself* bit-exact — it's `KINETIX_WRITE_OUT idx=8` in the
+write-out log, `top_poc=12 bot_poc=13`, and that display frame has `nd=0` in
+the earlier frame-by-frame diff. So the reference pixels are correct, the
+reference-list construction is correct (previously verified in #32d2), and
+now the entropy-parsed mb_type/mv/residual/cbp for every macroblock is
+correct too. **The remaining candidates are all in reconstruction, not
+parsing**: motion compensation (sub-pixel interpolation, bi-pred averaging,
+weighted prediction — none of which this session touched), residual
+IDCT/dequant application, or deblocking — specifically whatever code path
+is unique to *this multi-slice CABAC B accumulator finalizing a frame-coded
+picture in an interlaced SPS*, since that finalize path (`finalize_picture`
+called from `try_decode_real_b_slice_cabac`) may never have run before with
+a DPB containing `combine_field_pairs_into_frames`-synthesized entries — the
+exact same "never-before-exercised combination" pattern that explained the
+#32d2 routing bug, just one stage further downstream now that parsing is
+cleared.
+
+**Next session:** stop looking at CABAC entirely. Instrument the
+*reconstruction* side instead — dump per-MB predicted samples (pre-residual)
+and post-residual samples for MB(0,0)-onward of this exact slice, compare
+against JM's own pixel-level dump hooks (`tools/build-jm-oracle.sh`'s
+`JM_DUMP_DIR`/`JM_DUMP_POC` env vars from the *original*, deblock-focused JM
+patch — already built and proven working for the H.264 CABAC/FRExt work
+referenced in `[[project_jm_oracle_built]]`), for POC 10 specifically. If
+predicted (pre-residual) samples already differ, the bug is in MC; if they
+match but post-residual differs, it's in residual/IDCT; if both match but
+final output differs, it's deblocking. `/tmp/jm_bin/{bin_stderr5.log,
+ldecod_bin.exe-equivalent source at /tmp/jm-oracle/jm/source/app/ldecod/
+{biaridecod.c,image.c}}` and `/tmp/{ours_bins.txt,jm_bins2.txt}` are left for
+the next session; the now-fixed JM bin-trace patch is a reusable tool for any
+*future* CABAC-parsing suspicion (won't need re-discovering the early-return
+instrumentation bug).
+
 ## SESSION #32d2 ADDENDUM 2 (2026-09-26, later still) — the `mb_skip_flag` lead was a false trail; our MB(0,0) decode is provably correct
 
 The addendum below this one ends with "next session: print the actual byte
