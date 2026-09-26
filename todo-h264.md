@@ -1,5 +1,61 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d3 ADDENDUM 2 (2026-09-27) — narrowed to MC itself: block0 (zero residual, `cbf=false`) already shows a small but real, growing error
+
+Went one step further on the addendum above's own suggestion: MB(0,0)'s
+first luma 4×4 block (`blk=0`, pixels (0..4, y=0..4)) has `cbf=false` per
+the earlier CABAC trace — i.e. **zero residual, so its pre-deblock pixels
+are the raw motion-compensated prediction with nothing else applied.** Any
+diff there can only be an MC bug, not residual/IDCT. Compared it directly
+(re-used the existing `predeblock_poc10.gray` dumps from the addendum
+above):
+
+```
+row0: ours=[18,18,19,20] jm=[18,18,18,19] diff=[ 0, 0, 1, 1]
+row1: ours=[18,18,19,17] jm=[18,18,18,19] diff=[ 0, 0, 1,-2]
+row2: ours=[18,18,19,17] jm=[18,18,18,18] diff=[ 0, 0, 1,-1]
+row3: ours=[18,18,20,15] jm=[18,18,18,19] diff=[ 0, 0, 2,-4]
+```
+
+**Residual is conclusively out of the picture for this block — the
+discrepancy is 100% in motion compensation.** The pattern itself is telling:
+columns 0-1 are exact, column 2 is off by a small constant amount (+1/+1/+1/+2),
+and column 3 grows increasingly wrong down the rows (+1,-2,-1,-4) — i.e. the
+error **grows toward the bottom-right corner of the block**, which reads like
+a fractional-pel interpolation or edge/rounding effect, not a wholesale wrong
+reference or a flipped sign. Block 1 (`blk=1`, `cbf=true`, columns 4-7) shows
+much larger diffs (up to 14) — consistent with the *same* underlying MC bug
+compounding with that block's own (possibly larger/different) motion vector,
+plus its residual correctly added on top of an already-wrong prediction base;
+not itself evidence of an independent residual bug.
+
+Both blocks 0 and 1 are within MB(0,0)'s **quadrant 0**, which #32d2/#32d3
+established is `B_Direct_8x8` (temporal direct) — so the prime suspect is now
+specifically **temporal-direct's actual sample-fetch/interpolation path**,
+i.e. whatever code turns `derive_temporal_direct`'s already-verified-correct
+`(mv_l0, ref_idx, mv_l1)` output into fetched, bi-predicted, rounded pixels —
+not the MV *derivation* math (proven correct via the col_pair/CABAC checks in
+#32d2/#32d3), but the *consumption* of that MV: sub-pel luma interpolation
+(§8.4.2.2.1) and/or the L0+L1 bi-predictive averaging/rounding
+(§8.4.2.3.2: `(predL0 + predL1 + 1) >> 1`).
+
+**Next session:** dump the *actual MV* (and `ref_idx`) our decoder derived
+for quadrant 0 / block 0 of MB(0,0) — cross-check it against JM's own MV
+(printable via JM's `-DTRACE=1` build's ordinary syntax trace won't show
+derived direct-mode MVs since they're not coded bins, so either add one more
+targeted `fprintf` into JM's `mc_direct.c` where it computes/uses the
+direct-mode MV for this exact macroblock, or reuse the col_pair math from
+#32d2/#32d3 to hand-recompute the expected MV and compare against ours). If
+the MV itself is already wrong despite `derive_temporal_direct`'s inputs
+being verified correct, look for a scale/rounding bug in the function itself
+(`mv.rs`, the `dist_scale_factor`/`mv_l0`/`mv_l1` arithmetic around line
+1708-1715 — this file was read carefully earlier in this session but only
+for its *input* plumbing, never re-verified arithmetically against spec
+§8.4.1.2.3 end to end). If the MV matches, the bug is downstream in the
+actual pixel fetch/interpolation for a bi-predicted 8×8 direct block —
+compare against `predict_inter_b_macroblock`'s luma sampling and the
+6-tap/bilinear interpolation filters it calls.
+
 ## SESSION #32d3 ADDENDUM (2026-09-27) — pre-deblock dump proves the bug is MC or residual, not deblocking
 
 Followed the addendum above's own "next session" plan immediately, in the
