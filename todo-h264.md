@@ -1,5 +1,63 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 4 (2026-09-27) — third bug traced to the single-matching-ref shortcut's input, not the shortcut logic itself; needs one more upstream hop
+
+Continued the addendum-3 investigation on `MB(16,13)`'s `B_L1_8x4` quadrant
+0, sub-block 0 (`spx=0,spy=0,spw=8,sph=4`, `ref_idx_l1=0`), whose predictor
+was wrong (`[0,4]` vs JM's implied `(-4,-1)`, backed out via `final − mvd`
+using the already-proven-bit-exact parsed `mvd`).
+
+**Ruled out precisely, with real dumps, not guesses:**
+- **The cross-MB-row "above" neighbour address/read is correct.** Added a
+  temporary print (reverted) inside `neighbor_cell`'s `y_n < 0` branch for
+  `mb_idx == 302`. For this exact slice/macroblock, both the straight-above
+  (`U`) and above-right (`UR`) L1 candidates from `above_mb=280` (MB(16,12))
+  come back as `ref_idx=-1, mv=[0,0]` — i.e. **genuinely unavailable for
+  list 1** (that block of MB(16,12) has no L1 motion at all), not a
+  misaddressed read returning the wrong cell. The `mb_idx - mb_width`
+  arithmetic and `store.cell_l1` lookup are doing exactly what they should.
+- **`median_pred`'s single-matching-candidate shortcut (§8.4.1.3.1) is
+  implemented correctly.** Read `mv.rs:796-828` line by line against spec:
+  count neighbours whose `ref_idx` equals the target; if exactly one
+  matches, return that neighbour's raw `mv` (no full median) — matches spec
+  exactly, and matches JM's structurally equivalent logic.
+
+**What this leaves.** With B (`above`) and C (`above-right`) both
+`ref_idx=-1` (unmatched) and the target `ref_idx_l1=0`, the shortcut engages
+on **A (left neighbour)** alone if — and only if — A's own `ref_idx_l1`
+equals 0. Our result (`[0,4]`) is consistent with a correct shortcut
+application over an **A value that is itself wrong** — i.e. `MB(15,13)`'s
+own stored right-column L1 motion is suspect, not `MB(16,13)`'s neighbour
+*lookup* logic. This could be a fresh, fourth bug at `MB(15,13)`, or another
+hop of upstream propagation from something earlier in raster order (the same
+propagation pattern addendum 3 already found within `MB(16,13)` itself,
+where quadrants 2/3 inherited quadrant 0/1's error via ordinary
+within-MB neighbour reads).
+
+**Not yet done, and the obvious next step:** get JM's actual `A` (left
+neighbour) L1 value for this exact position (extend the already-built
+`macroblock.c` `JM_MV` patch — currently filtered to `mb.x==16 && mb.y==13`
+verbatim reusable, just also dump `mb.x==15` — the same `-p InputFile=in.264`
+run at `/tmp/jm_bin` works) and our own equivalent (reuse the reverted
+`KINETIX_DBG_ABOVE`-style print, adapted for `neighbor_left_l1` instead of
+the above-branch). If `MB(15,13)`'s value already disagrees with JM there,
+the propagation chain extends at least one more MB to the left and the same
+method applies again; if it agrees, the bug is somewhere subtler in this
+exact block's own ref-idx/mv storage that hasn't been considered yet
+(worth re-examining whether `ref_idx_l1` itself — not just `mv_l1` — was
+stored correctly for `MB(15,13)`'s relevant sub-block, since a match/no-match
+misclassification would be invisible in a raw `mv` diff but would completely
+change which shortcut path fires).
+
+**Session tooling left in place for next time:** `/tmp/jm_bin/ldecod_mv2.exe`
+(JM patched to dump `mv_info` for a `getenv`-selected `mb.x`/`mb.y`/
+`framepoc`, currently pointed at `(16,13)` — trivial one-line edit + rebuild
+to retarget), `/tmp/jm-oracle/jm/source/app/ldecod/macroblock.c`'s `JM_MV`
+patch and `mc_direct.c`'s `JM_SCALE` patch (from addendum 2, unrelated to
+this specific block but same technique), and the by-now-proven overall
+method: BINTRACE for ground-truth `mvd`, `final = JM_mv_info`,
+`JM_predictor = final − mvd`, compare against our own dumped predictor.
+
 ## SESSION #32d4 ADDENDUM 3 (2026-09-27) — REAL FIX #2 landed: combined field-pair `mv_grid` was interleaved per-MB-index instead of per-row; a third, distinct bug now leads
 
 Followed the addendum above's own next step (dump the P-field decoder's own
