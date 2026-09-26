@@ -48,10 +48,35 @@ fn main() {
     let n = kframes.len().min(ref_frames.len());
     let mut exact = 0;
     for i in 0..n {
-        let ok = within_tolerance(&kframes[i], &ref_frames[i], 0);
-        if ok {
+        let kf = &kframes[i];
+        let rf = &ref_frames[i];
+        if within_tolerance(kf, rf, 0) {
             exact += 1;
+            continue;
         }
+        let diff: usize = kf
+            .data
+            .iter()
+            .zip(rf.data.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        let ysz = (kf.width as usize) * (kf.height as usize);
+        let first = kf.data.iter().zip(rf.data.iter()).position(|(a, b)| a != b);
+        let (comp, x, y) = match first {
+            Some(o) if o < ysz => ("Y", o % kf.width as usize, o / kf.width as usize),
+            Some(o) if o < ysz + ysz / 4 => (
+                "U",
+                (o - ysz) % (kf.width as usize / 2),
+                (o - ysz) / (kf.width as usize / 2),
+            ),
+            Some(o) => (
+                "V",
+                (o - ysz - ysz / 4) % (kf.width as usize / 2),
+                (o - ysz - ysz / 4) / (kf.width as usize / 2),
+            ),
+            None => ("?", 0, 0),
+        };
+        println!("frame {i}: MISMATCH {diff} bytes, first at {comp} ({x},{y})");
     }
     println!("{exact}/{n} frames exact vs dav1d");
 }
