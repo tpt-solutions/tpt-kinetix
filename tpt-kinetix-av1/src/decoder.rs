@@ -451,8 +451,15 @@ impl Av1Decoder {
         fh: &FrameHeader,
         pairs: &[(u8, Vec<u8>)],
     ) -> Option<VideoFrame> {
+        // The frame label is read by the `KINETIX_AV1_DBG_*` trace gates
+        // scattered through reconstruction and the loop filters, which must
+        // agree on which frame they are describing. Bumping it only under
+        // `KINETIX_AV1_DBG_SEQ` made `current()` report a stale label for
+        // every other trace env var, so a per-frame probe silently described
+        // the wrong frame. The counter is a relaxed atomic increment — always
+        // on, and negligible next to a tile decode.
+        let n = crate::debug_frame_seq::next();
         if std::env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
-            let n = crate::debug_frame_seq::next();
             eprintln!(
                 "DBGSEQ n={n} order_hint={} show_frame={} frame_type={:?}",
                 fh.order_hint, fh.show_frame, fh.frame_type

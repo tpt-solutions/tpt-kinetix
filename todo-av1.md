@@ -8897,6 +8897,86 @@ list from scratch rather than keep walking the old suspect list: dump every
 symbol Kinetix reads for that one leaf (including the ones already matched)
 and diff the full sequence against dav1d, so the *first* differing read is
 identified by position rather than by elimination. `av1_symbol_trace_diff` /
+
+## Session 2026-09-27 (cont'd 9) — the frame-1 residual is pre-filter, not a filter bug; and the frame counter used by every `KINETIX_AV1_DBG_*` gate was stale
+
+Chased cont'd 8's finding that frame 1's residual was 124 edge-only blocks
+with no interior differences, which looked like a post-filter issue. **It is
+not** — and getting there required fixing a diagnostic bug that had been
+misleading the trace for several sessions.
+
+### The frame counter only advanced under one env var
+
+`decoder.rs` bumped `debug_frame_seq` *inside* the
+`if std::env::var("KINETIX_AV1_DBG_SEQ")` block, even though that function's
+own doc comment says the label is "stable for the whole duration of that
+frame's processing" and is what the other `KINETIX_AV1_DBG_*` gates read. So
+with any other trace var set, `current()` reported a **stale** frame number.
+A `KINETIX_AV1_DBG_PXY` trace run without `DBG_SEQ` silently described an
+earlier frame.
+
+This produced a concrete false result: tracing pixel (65,62) reported a
+consistent `41` at pre-filter/post-deblock/post-cdef/post-lr, which reads as
+"the filters are all no-ops here". It was in fact the *keyframe's* value.
+The bump is now unconditional (a relaxed atomic, negligible against a tile
+decode), and `KINETIX_AV1_DBG_PXY_FRAME=n` was added to scope the pixel trace
+to one frame.
+
+### The real frame-1 pixel is wrong *before* any filter runs
+
+With the counter fixed, the frame that `probe_tiles` labels "frame 1" is
+`debug_frame_seq` frame **4** (the harness decodes more frames than its `max`
+argument reports, so the labels are offset — noted so the next session does
+not chase it again). For that frame, pixel (65,62):
+
+- Kinetix `228`, dav1d `41`, i.e. `|d| = 187`, matching the reported maximum.
+- pre-filter `228`, post-deblock `228`, post-cdef `228`, post-lr `228`.
+
+So the error is present **before** the loop filters and none of them touch it.
+It is a **reconstruction** (prediction / transform / residual) bug, not a
+deblock or CDEF bug.
+
+### Why the BLOCKMAP classification misled
+
+The 8×8 edge/interior map is a map of where the difference *survives*, not
+where it *originates*. A bad prediction in one block gets spread by deblock
+and CDEF into its neighbours' edge samples, so a single reconstruction fault
+can present as many edge-only blocks. `probe_tiles`' doc comment now says
+this explicitly and points at the per-pixel stage trace as the thing that
+actually separates the two classes. This corrects cont'd 8's conclusion, which
+over-read the all-`e` map.
+
+### Ruled out along the way
+
+- `NOFILTER` (8155), `NODEBLOCK` (7474), `NOCDEF` (8243) vs full (7390): no
+  single filter toggle explains the residual, consistent with the error
+  preceding all of them.
+- The deblock edge at that location *is* processed (`lvl=4`, `fs=8`,
+  `edge_left=true`), so it is not a missing-edge-flag bug either.
+- `KINETIX_AV1_NO_WARP=1` gives 7264 vs 7390 — only marginal. 10 of frame 4's
+  79 blocks use `mm=2` (WARP) with large MVs (`-43,-15`, `-53,-15`), so warp
+  is present in the neighbourhood but is **not** the dominant cause. (This
+  also supersedes the older note that NO_WARP made frame 1 *worse*; post-fix it
+  makes it slightly better.)
+
+### Next session's starting point
+
+Pixel (65,62) in frame 4 of the `testsrc2` 128×96 corpus is wrong by 187
+**pre-filter**. The owning block is mi (16,15) — a `PARTITION` leaf near
+mi (14..18, 12..18), where the neighbouring `IBSUM` lines show
+`mv=(-43,-15)`/`(-53,-15)` `ref=[2,0]` and a mix of `mm=0`/`mm=1`/`mm=2` and
+`skip=true/false`. Next step is the `KINETIX_AV1_DBG_PRED`-style pre/post
+residual snapshot for that specific block to split prediction vs residual-add,
+now that the frame gate is trustworthy. Use `KINETIX_AV1_DBG_PXY_FRAME` to
+scope any stage trace — do not trust an unscoped one.
+
+Scratch probes added while chasing this (`VPROBE` in the vertical deblock
+loop, a one-off `GRIDCHK` in `reconstruct/mod.rs`) were removed; the reusable
+pieces kept are the unconditional frame counter, `DBG_PXY_FRAME`, the `fr=`
+field on `KINETIX_AV1_IBSUM`, and `PXYDUMP`/the corrected doc in
+`probe_tiles`. No behaviour change: frame 1 stays at 7390, 163 AV1 lib tests
+plus the full `tpt-kinetix-test-utils` suite pass, fmt and clippy clean.
+
 `av1_trace_capture` (`tpt-kinetix-test-utils/examples`) exist for this and do
 not need the broken dav1d build. Note the `interp_filter` read is still the
 last *matched* anchor, and `read_vartx_tree` sits between it and the

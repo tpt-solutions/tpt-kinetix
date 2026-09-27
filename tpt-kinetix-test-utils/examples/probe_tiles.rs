@@ -6,8 +6,15 @@
 //! sample lies within 4px of an 8x8 boundary, i.e. deblock/CDEF can reach it)
 //! or `X` (has a differing *interior* sample that deblock/CDEF provably cannot
 //! touch, meaning a genuine prediction/transform/residual bug), plus a summary
-//! with the max per-sample difference. An all-`e` map means the residual is a
-//! post-filter issue and not a reconstruction one; any `X` rules that out.
+//! with the max per-sample difference. **Caveat:** this classifies where the
+//! difference *survives*, not where it *originated* — a reconstruction bug in
+//! one block is spread by the loop filters into its neighbours' edge samples,
+//! so an all-`e` map does not by itself prove the cause is a post-filter one.
+//! `KINETIX_AV1_DBG_PXY=x,y` plus `KINETIX_AV1_DBG_PXY_FRAME=n` traces one
+//! pixel across pre-filter/post-deblock/post-cdef/post-lr and is what actually
+//! separates the two (a value that is already wrong pre-filter is a
+//! reconstruction bug; one that only becomes wrong later is a filter bug).
+//! `PXYDUMP=x,y` prints that pixel's final Kinetix and dav1d values.
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 use tpt_kinetix_test_utils::{
@@ -93,6 +100,20 @@ fn main() {
         // transform / residual bug). A frame that is all-EDGE points at the
         // post-filters; any INTERIOR block does not.
         if std::env::var("BLOCKMAP").is_ok() {
+            if let Ok(spec) = std::env::var("PXYDUMP") {
+                let (x, y) = spec.split_once(',').unwrap();
+                let (x, y): (usize, usize) = (x.trim().parse().unwrap(), y.trim().parse().unwrap());
+                let w = kf.width as usize;
+                let o = y * w + x;
+                println!(
+                    "  PIXEL ({x},{y}) frame {i}: kinetix={} dav1d={} w={w} h={} kinelen={} reflen={}",
+                    kf.data[o],
+                    rf.data[o],
+                    kf.height,
+                    kf.data.len(),
+                    rf.data.len()
+                );
+            }
             let w = kf.width as usize;
             let h = kf.height as usize;
             let mut edge = 0usize;

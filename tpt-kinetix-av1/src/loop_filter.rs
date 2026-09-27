@@ -1062,6 +1062,20 @@ fn deblock_plane(
                 } else {
                     None
                 };
+                if std::env::var("KINETIX_AV1_DBG_VPROBE").is_ok() && plane_index == 0 {
+                    let lfx = bx << lf_shift;
+                    let lfy = by << lf_shift;
+                    let li2 = lfy * lf_grid_w + lfx;
+                    eprintln!(
+                        "VPROBE bx={bx} by={by} edge_left={} lvl={lvl} fs={filter_size} \
+                         ltx={left_tx} rtx={right_tx} dlf={dlf_i}:{delta_lf} \
+                         ref={} mode={} frame_lv={:?}",
+                        edge_left_grid[by * grid_w + bx],
+                        lf_ref_grid[li2] as usize,
+                        lf_mode_grid[li2] as usize,
+                        fh.loop_filter_level,
+                    );
+                }
                 if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
                     && plane_index == 0
                     && edge == 28
@@ -2009,14 +2023,23 @@ pub fn apply_post_filters(
     };
     // `KINETIX_AV1_DBG_PXY=x,y` traces one luma pixel's value across each
     // post-filter stage (pre-filter/post-deblock/post-cdef/post-lr), to
-    // separate reconstruction bugs from loop-filter bugs.
-    let dbg_pxy = std::env::var("KINETIX_AV1_DBG_PXY").ok().and_then(|s| {
-        let (a, b) = s.split_once(',')?;
-        Some((
-            a.trim().parse::<usize>().ok()?,
-            b.trim().parse::<usize>().ok()?,
-        ))
-    });
+    // separate reconstruction bugs from loop-filter bugs. The optional
+    // `KINETIX_AV1_DBG_PXY_FRAME=n` restricts the trace to one frame —
+    // without it the dump fires for every frame and the values from an
+    // earlier frame get mistaken for the one under investigation.
+    let dbg_pxy_frame = std::env::var("KINETIX_AV1_DBG_PXY_FRAME")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let dbg_pxy = dbg_pxy_frame
+        .filter(|f| crate::debug_frame_seq::current() == *f)
+        .and_then(|_| std::env::var("KINETIX_AV1_DBG_PXY").ok())
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
     let dump_pxy = |label: &str, plane: &[u8]| {
         if let Some((x, y)) = dbg_pxy {
             if x < width && y < height {

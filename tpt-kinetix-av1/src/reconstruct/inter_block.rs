@@ -1422,7 +1422,9 @@ impl<'a> TileDecodeState<'a> {
         )?;
         if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
-                "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=0 mv=({},{} ({},{})) ref=[{},{}] mm={motion_mode} filt=[{},{}] skip={skip}",
+                "IBSUM fr={} mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=0 \
+                 mv=({},{} ({},{})) ref=[{},{}] mm={motion_mode} filt=[{},{}] skip={skip}",
+                crate::debug_frame_seq::current(),
                 mvs[0].row,
                 mvs[0].col,
                 mvs[1].row,
