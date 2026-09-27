@@ -128,6 +128,81 @@ impl TraceCapture {
     }
 }
 
+/// Incremental builder for a [`TraceCapture`].
+///
+/// Diagnostics that are not driven by [`MapTracer`] (hand-transcribed oracle
+/// walks, QP sweeps, twin-compare tables) can accumulate ad-hoc keyed rows here
+/// and dump the same JSON shape as the tracer-backed path, so a single
+/// `trace_diff` run can compare any two diagnostics.
+#[derive(Debug, Default, Clone)]
+pub struct TraceCaptureBuilder {
+    capture: TraceCapture,
+}
+
+impl TraceCaptureBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a row of integer observations (bins, coefficients, samples).
+    pub fn ints<K: Into<String>>(mut self, key: K, values: impl IntoIterator<Item = i32>) -> Self {
+        self.capture.entries.insert(
+            key.into(),
+            TraceValue::Integers(values.into_iter().collect()),
+        );
+        self
+    }
+
+    /// Record a single integer observation.
+    pub fn int<K: Into<String>>(self, key: K, value: i32) -> Self {
+        self.ints(key, [value])
+    }
+
+    /// Record a free-form textual observation (mb types, error messages, ...).
+    pub fn text<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
+        self.capture
+            .entries
+            .insert(key.into(), TraceValue::Text(value.into()));
+        self
+    }
+
+    pub fn build(self) -> TraceCapture {
+        self.capture
+    }
+}
+
+impl TraceCapture {
+    pub fn builder() -> TraceCaptureBuilder {
+        TraceCaptureBuilder::new()
+    }
+
+    /// Serialize the capture to `path` as pretty JSON.
+    pub fn write_json(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let json = to_json(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
+    }
+
+    /// Write the capture to `$env_var` when that variable is set, otherwise do
+    /// nothing. Lets a diagnostic emit a machine-readable trace on demand
+    /// without changing its default (quiet) behaviour.
+    pub fn dump_to_env(&self, env_var: &str) -> std::io::Result<()> {
+        let Some(path) = std::env::var_os(env_var) else {
+            return Ok(());
+        };
+        if path.is_empty() {
+            return Ok(());
+        }
+        self.write_json(std::path::Path::new(&path))?;
+        eprintln!(
+            "wrote {} ({} entries) to {}",
+            env_var,
+            self.entries.len(),
+            path.to_string_lossy()
+        );
+        Ok(())
+    }
+}
+
 pub fn to_json(capture: &TraceCapture) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(capture)
 }
@@ -205,6 +280,28 @@ mod tests {
             entries: BTreeMap::from([("a".into(), TraceValue::Integers(vec![2]))]),
         };
         assert_eq!(first_divergence(&left, &right).unwrap().0, "a");
+    }
+
+    #[test]
+    fn builder_records_ad_hoc_rows() {
+        let capture = TraceCapture::builder()
+            .int("oracle:MB0.skip", 1)
+            .ints("oracle:MB1.cbp", [2, 0, 0, 0])
+            .text("oracle:MB1.mb_type", "I_4x4")
+            .build();
+        assert_eq!(
+            capture.entries.get("oracle:MB1.mb_type"),
+            Some(&TraceValue::Text("I_4x4".to_string()))
+        );
+        assert!(capture.entries.contains_key("oracle:MB0.skip"));
+    }
+
+    #[test]
+    fn dump_to_env_is_a_no_op_without_the_variable() {
+        let capture = TraceCapture::builder().int("a", 1).build();
+        capture
+            .dump_to_env("KINETIX_TEST_ABSENT_TRACE_PATH")
+            .unwrap();
     }
 
     #[test]

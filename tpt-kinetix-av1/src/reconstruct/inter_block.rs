@@ -35,6 +35,28 @@ fn dav1d_ref(k: u8) -> i32 {
     }
 }
 
+/// Target window `(x, y, reach)` for the `KINETIX_AV1_DBG_PRED*` prediction
+/// dumps, from `KINETIX_AV1_DBG_PRED_X` / `_Y` / `_R`.
+///
+/// The defaults (64, 64, 32) reproduce the probe's original hardcoded window
+/// so existing invocations behave the same. Reaching for the env vars on every
+/// block is fine: these probes are debug-only and the whole block body is
+/// already gated behind them.
+#[inline]
+fn dbg_pred_target() -> (i64, i64, i64) {
+    let get = |k: &str, d: i64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(d)
+    };
+    (
+        get("KINETIX_AV1_DBG_PRED_X", 64),
+        get("KINETIX_AV1_DBG_PRED_Y", 64),
+        get("KINETIX_AV1_DBG_PRED_R", 32),
+    )
+}
+
 /// `interintra_allowed_mask` (dav1d `tables.h`): single-ref block sizes that
 /// may carry an inter-intra flag — {8x8, 8x16, 16x8, 16x16, 16x32, 32x16,
 /// 32x32} in spec `BlockSize` indices.
@@ -1649,24 +1671,44 @@ impl<'a> TileDecodeState<'a> {
         // is mutually exclusive with `MM_WARP` at the syntax level).
 
         // Debug: dump base MC prediction BEFORE OBMC for blocks in error region.
-        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
+        // `KINETIX_AV1_DBG_PRED` dumps a hardcoded historical window;
+        // `KINETIX_AV1_DBG_PRED_X/Y` retarget it at the pixel under
+        // investigation (defaults keep the old window when unset), and
+        // `KINETIX_AV1_DBG_PRED_R` sets the half-width/half-height reach. A
+        // window that does not move is how a probe ends up "confirming" a
+        // block nobody is looking at any more.
+        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+            || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+        {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
-            if px_end_y > 56 && px_y0 < 96 && px_x0 < 128
-                || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
-            {
+            let (tgt_x, tgt_y, reach) = dbg_pred_target();
+            let (r0, r1, c0, c1) = (tgt_y - reach, tgt_y + reach, tgt_x - reach, tgt_x + reach);
+            let in_window = (px_y0 as i64) < r1
+                && (px_end_y as i64) > r0
+                && (px_x0 as i64) < c1
+                && (px_end_x as i64) > c0;
+            if in_window || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
                 eprintln!(
                     "PRED-BASE mi=({mi_col},{mi_row}) bw={bw} bh={bh} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
-                for row in px_y0..px_end_y.min(96) {
-                    if row < 56 && std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_err() {
+                for row in px_y0..px_end_y {
+                    if (row as i64) < r0 || (row as i64) >= r1 {
                         continue;
                     }
-                    let vals: Vec<u8> = (px_x0..px_end_x.min(128))
+                    let vals: Vec<u8> = (px_x0..px_end_x)
+                        .filter(|c| (*c as i64) >= c0 && (*c as i64) < c1)
                         .map(|c| self.y_plane[row * self.y_stride + c])
                         .collect();
-                    eprintln!("  y={row}: {vals:?}");
+                    if vals.is_empty() {
+                        continue;
+                    }
+                    eprintln!(
+                        "  y={row} x={}..{}: {vals:?}",
+                        px_x0.max(c0.max(0) as usize),
+                        px_end_x.min(c1.max(0) as usize)
+                    );
                 }
                 // For the specific divergent block mi(4,18), also dump reference
                 // frame pixels to diagnose whether the error is in our reference frame
@@ -1736,24 +1778,38 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Debug: dump pre-residual prediction (post-OBMC) for error-region blocks.
-        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok() {
+        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+            || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+        {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
-            if px_end_y > 56 && px_y0 < 96 && px_x0 < 128
-                || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
-            {
+            let (tgt_x, tgt_y, reach) = dbg_pred_target();
+            let (r0, r1, c0, c1) = (tgt_y - reach, tgt_y + reach, tgt_x - reach, tgt_x + reach);
+            let in_window = (px_y0 as i64) < r1
+                && (px_end_y as i64) > r0
+                && (px_x0 as i64) < c1
+                && (px_end_x as i64) > c0;
+            if in_window || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
                 eprintln!(
                     "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
-                for row in px_y0..px_end_y.min(96) {
-                    if row < 56 && std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_err() {
+                for row in px_y0..px_end_y {
+                    if (row as i64) < r0 || (row as i64) >= r1 {
                         continue;
                     }
-                    let vals: Vec<u8> = (px_x0..px_end_x.min(128))
+                    let vals: Vec<u8> = (px_x0..px_end_x)
+                        .filter(|c| (*c as i64) >= c0 && (*c as i64) < c1)
                         .map(|c| self.y_plane[row * self.y_stride + c])
                         .collect();
-                    eprintln!("  y={row}: {vals:?}");
+                    if vals.is_empty() {
+                        continue;
+                    }
+                    eprintln!(
+                        "  y={row} x={}..{}: {vals:?}",
+                        px_x0.max(c0.max(0) as usize),
+                        px_end_x.min(c1.max(0) as usize)
+                    );
                 }
             }
         }
@@ -3307,6 +3363,27 @@ impl<'a> TileDecodeState<'a> {
                         }
                     }
                 }
+                if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                    && std::env::var("KINETIX_AV1_DBG_PRED_COEFF").is_ok()
+                    && {
+                        let (tx0, ty0, reach) = dbg_pred_target();
+                        (px_x as i64) < tx0 + reach
+                            && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
+                            && (px_y as i64) < ty0 + reach
+                            && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
+                    }
+                {
+                    let (qdc, qac) = self.qindex_for_plane(0);
+                    eprintln!(
+                        "COEFF mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} qdc={qdc} qac={qac}",
+                        coeffs.tx_type, coeffs.eob,
+                    );
+                    for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
+                        if q != 0 {
+                            eprintln!("  quant[{i}]={q}");
+                        }
+                    }
+                }
                 // Coeffs are always *read* (entropy sync). The residual is
                 // applied at every tx size: `inverse_transform` handles the
                 // adjusted-size (≤32-side) dequant stride and the 32/64-family
@@ -3333,6 +3410,44 @@ impl<'a> TileDecodeState<'a> {
                         self.lossless,
                         &mut residual,
                     );
+                    // Dump the post-ITX residual for leaves overlapping the
+                    // `KINETIX_AV1_DBG_PRED_X/Y` target: prediction can be
+                    // pixel-exact and the output still wrong, which localises
+                    // the fault to dequant/ITX/residual-add rather than MC.
+                    if std::env::var("KINETIX_AV1_DBG_PRED_RESID").is_ok() {
+                        let (tx0, ty0, reach) = dbg_pred_target();
+                        if (px_x as i64) < tx0 + reach
+                            && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
+                            && (px_y as i64) < ty0 + reach
+                            && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
+                        {
+                            eprintln!(
+                                "RESID mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tx={leaf_tx}x{leaf_tx_h} txtp={} eob={}",
+                                coeffs.tx_type, coeffs.eob,
+                            );
+                            for r in 0..leaf_tx_h.min(8) {
+                                eprintln!(
+                                    "  r{r}: {:?}",
+                                    &residual[r * leaf_tx_w..(r + 1) * leaf_tx_w]
+                                );
+                            }
+                        }
+                    }
+                    // Flag a dequantized coefficient large enough that the
+                    // inverse transform's fixed `col_shift = 4` leaves a
+                    // residual big enough to saturate an 8-bit sample. A
+                    // correct decode at any qindex stays far below this, so a
+                    // hit means the *coefficient* is wrong (a lost/desynced
+                    // entropy read), not that the transform overshot.
+                    if std::env::var("KINETIX_AV1_DBG_BIGCOEF").is_ok() {
+                        let peak = dequant.iter().fold(0i32, |a, &b| a.max(b.abs()));
+                        if peak > (1 << 13) {
+                            eprintln!(
+                                "BIGCOEF mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tx={leaf_tx} txtp={} eob={} peak_dq={peak} qdc={qindex_dc} qac={qindex_ac}",
+                                coeffs.tx_type, coeffs.eob,
+                            );
+                        }
+                    }
                     if std::env::var("KINETIX_AV1_DBG_ITX").is_ok()
                         && (leaf_tx == 12 || leaf_tx == 4)
                     {

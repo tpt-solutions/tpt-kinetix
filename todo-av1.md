@@ -9105,3 +9105,91 @@ last *matched* anchor, and `read_vartx_tree` sits between it and the
 coefficients (dav1d `decode.c:1874`) — worth confirming the trace includes
 the per-transform-block `txfm_split` reads, not just the first leaf's tx size.
 
+
+---
+
+## Session 2026-09-27 (ffmpeg IS available in this environment)
+
+**The blocker in every prior session note is gone.** `ffmpeg` is on PATH
+(`E:\FFMPEG\...\bin\ffmpeg.exe`, full build with libdav1d), so the
+`av1_*_when_available` / dav1d-diff harnesses actually RUN here instead of
+silently skipping. All PSNR/residual numbers quoted in older notes below were
+taken on trust; the ones below are measured.
+
+### The old frame-1 diff numbers were measured on a REORDERED stream
+
+`av1_multiframe_obu`/hand-rolled libaom encodes default to a **B-pyramid**
+(alt-refs). On such a clip the encoder's `order_hint` sequence runs
+`0, 28, 14, 7, 3, 1, 2, ...` — i.e. frames are CODED out of presentation
+order. Any harness that pairs "our Nth emitted frame" with "dav1d's Nth output
+frame" then compares two different pictures, so every per-frame diff computed
+that way (including the 7390-byte frame-1 residual quoted in earlier notes) is
+meaningless. Reproduce with `-lag-in-frames 0` (verified: `order_hint` then
+runs 0,1,2,3,...). **`probe_tiles`/any per-frame AV1 diff must disable
+reordering, or explicitly map frames, before its numbers mean anything.**
+
+`av1_output_order` (new example) surfaces this: it ranks dav1d's output frames
+against each frame we emit by best-match sample count.
+
+### Real state of inter decode (measured, non-reordered testsrc2 320x180)
+
+- keyframe: **bit-exact** (`phase_c_conformance` PSNR `inf`).
+- inter: frame 1 differs by **34638** samples, `max|d|=214`; only 1/8 frames
+  exact. Far worse than the 7390 previously recorded.
+
+### Attribution (all measured with the existing env switches)
+
+- `KINETIX_AV1_NODEBLOCK` and `..._NOCDEF` barely move the number
+  (34638 -> 33910 / 35022), and `BLOCKMAP` reports **0 blocks with interior
+  diffs** on every frame. So the broad error is *not* the loop filters.
+- Prediction at the worst luma pixel (181,38) is **41 — exactly dav1d's value**
+  — while the emitted pixel is 255. So **MC and the reference frame are
+  correct**; the damage is entirely in the coefficient path. The post-ITX
+  residual there is 1146, which saturates 8-bit.
+- `eob=182` on that leaf is *legal* (tx index 2 is 16x16, 256 coeffs) — an
+  earlier guess that it was out of range was wrong.
+- `KINETIX_AV1_DBG_BIGCOEF` (new) flags only ~2 saturating leaves per frame
+  against 34638 differing samples, so the huge coefficients are a *symptom*,
+  not the main bug. Most of the error is a subtler residual error.
+
+### ROOT CAUSE FOUND: the intra keyframe is not exact, and inter inherits it
+
+On a 64x64 `testsrc2` clip the **keyframe itself** mismatches by 98 samples,
+`max|d|=1`, 0 interior diffs, first at (8,3). Error grows 98 -> 230 -> 3692 ->
+4405 then plateaus (~6000), which is a single small keyframe defect
+propagating through the reference chain — not progressive desync, and not a
+per-frame inter bug.
+
+Critically, `KINETIX_AV1_NOFILTER=1` leaves the mismatch at **exactly 98**:
+the ±1 is present in the **pre-filter intra reconstruction**, so deblock/CDEF
+are exonerated. This is a small (1-LSB) intra reconstruction/rounding bug at
+block edges that the 128x96 `phase_c_conformance` corpus (PSNR `inf`) happens
+not to expose.
+
+That reframes the whole AV1 inter effort: the priority-1 "pixel-reconstruction
+bug behind testsrc2" should be attacked as an **intra ±1 edge bug on a 64x64
+corpus**, which is far cheaper to bisect than the inter path, and fixing it
+likely fixes most of the inter gap with it.
+
+**Next step:** reproduce at 64x64 intra-only, dump pre-filter luma around
+(8,3), and compare against dav1d's unfiltered output. `av1_interior_diff`
+exists for intra but uses a fixed corpus — extend it (or add a 64x64 entry)
+so the ±1 is visible. Do NOT re-measure inter PSNR until this is fixed.
+
+### Instrumentation added this session (debug-only, no behaviour change)
+
+- `KINETIX_AV1_DBG_PRED_X/_Y/_R` — the `KINETIX_AV1_DBG_PRED` probe was
+  **hardcoded to a stale window** (`y 56..96, x<128`), which is why older notes
+  keep describing a `mi(4,18)` block unrelated to the current corpus. Now
+  targetable; defaults preserve the old window.
+- `KINETIX_AV1_DBG_PRED_COEFF` / `..._PRED_RESID` — quantised levels and
+  post-ITX residual for leaves overlapping the target.
+- `KINETIX_AV1_DBG_BIGCOEF` — flags a dequantised coefficient large enough to
+  saturate 8-bit (a lost/desynced entropy read, not a transform overshoot).
+- `av1_output_order` example — best-match frames against dav1d (the reorder
+  confound).
+- Note `KINETIX_AV1_DBG_MVSCAN` takes `by:bx`, colon-separated (it silently
+  matches nothing if you pass a comma).
+
+Verified: 163 AV1 lib tests pass, `phase_c_conformance` still `inf`, fmt +
+clippy clean.
