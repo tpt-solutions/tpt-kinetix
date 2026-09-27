@@ -49,7 +49,10 @@ fn main() {
         match dec.decode(&pk) {
             Ok(Some(f)) => {
                 if let Some(fh) = dec.last_frame_header() {
-                    println!("FH oh={} disable_cdf_update={} primary_ref={}", fh.order_hint, fh.disable_cdf_update, fh.primary_ref_frame);
+                    println!(
+                        "FH oh={} disable_cdf_update={} primary_ref={}",
+                        fh.order_hint, fh.disable_cdf_update, fh.primary_ref_frame
+                    );
                 }
                 kframes.push(f);
             }

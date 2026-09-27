@@ -10540,3 +10540,48 @@ the keyframe, so every CDEF unit is frame 0's.)
    collapsing frame 0's 11 bytes, frames 1-3's bottom-row residues, and
    likely most of the frames 4+ cascade (their MC reads the
    now-identical reference bottom rows).
+
+## Session cont'd 21 (final) — CDEF full-extent fix landed: frame 0 is PIXEL-EXACT vs dav1d; non_uniform_tiling 1/24
+
+The direction divergence's true root: Kinetix's CDEF luma call passed
+`vis_luma_h` (the visible frame height) as the block-walk/clamp height,
+so the bottom 8×8 CDEF units at frame rows 296-303 were clipped to 4
+rows — their direction search saw replicated rows (dir=2 instead of
+dav1d's dir=0 computed over the real grid rows 300-303) and their
+filtered output never landed. The fix passes the mi-grid extent height
+(`height`, 304 for this frame) to `cdef_plane_luma`, matching dav1d's
+in-place processing over the full sbrow extent.
+
+`cdef_direction`'s math itself was verified correct: the new probe unit
+test feeds the dumped 8×8 through `cdef_direction` and the independent
+spec formula — both give costs [347944419, 347896430, …] and dir=0,
+matching dav1d's C-path dump exactly (the earlier "dir=2 in decode" was
+the clamped input, and the earlier "costs differ" observation compared
+dav1d's raw-count domain against Kinetix's cumulative domain).
+
+### Results
+
+- non_uniform_tiling frame 0: **0 diffs vs dav1d** (was 315,925 at
+  session start, 11 before this fix). Official FATE:
+  **3/195 frames bit-exact** (was 1/198 at session start, 2/195
+  mid-session) — non_uniform_tiling 1/24 and switch_frame 1/32 both
+  exact-frame holders now.
+- Frames 1-2 improved further (130→98, 192→156 bytes at rows 295-299);
+  their remaining bottom-row diffs and the frames 3+ cascade are the
+  next targets (the bottom mi-row padding rows 300-303 now CDEF-filtered
+  by both; the residual ±1s trace to the deblock/CDEF arithmetic on
+  those rows or the frames' own OBMC/interintra reads of them).
+- Gates: 164 lib tests, corpus 6/6 bit-exact, clippy clean, fmt clean.
+
+### Next session's starting point
+
+1. Frames 1-2's rows 295-299 (98/156 bytes): with CDEF now covering the
+   padding rows in both decoders, re-run the stage bisection
+   (deblock-only / cdef-only / LR-only) for frame 1 — the LR-only and
+   full-filter diffs converged (100 vs 98), so the remaining delta is
+   small and localized.
+2. Frames 3+ cascade: re-check after 1-2 settle; the OBMC/interintra
+   reads of the reference's now-correct bottom rows may collapse the
+   cascade without further changes.
+3. K's probe test `probe_cdef_direction_diverging_unit` pins the
+   direction-search behavior on the captured test vector — keep it.

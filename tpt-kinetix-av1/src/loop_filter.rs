@@ -1414,6 +1414,9 @@ fn cdef_direction(
         }
     }
     let var = (best_cost - cost[(y_dir + 4) & 7]) >> 10;
+    if std::env::var("KINETIX_AV1_DBG_CDEFDIR").is_ok() && x0 == 600 && y0 == 296 {
+        eprintln!("KCDEFDIR x0={x0} y0={y0} costs={:?} y_dir={y_dir}", cost);
+    }
     (y_dir, var)
 }
 
@@ -2218,7 +2221,7 @@ pub fn apply_post_filters(
         // MI-aligned padding rows up to tile_h/tile_ch) so that inter-frame MC
         // in subsequent frames reads CDEF-filtered values rather than raw intra
         // values — dav1d does NOT clip CDEF writes to the visible frame.
-        let vis_luma_h = vis_height;
+        let _vis_luma_h = vis_height;
         // dav1d's CDEF writes to ALL reconstructed rows (including MI-aligned padding
         // rows up to tile_ch) and uses the full tile luma height for direction
         // derivation (no clamping to vis_height). Using vis_height for direction
@@ -2239,11 +2242,18 @@ pub fn apply_post_filters(
                 let damping = fh.cdef_damping as i32;
                 let uh = 64.min(height - uy);
                 let uw = 64.min(width - ux);
+                // dav1d's CDEF processes the full 8×8 units over the whole
+                // mi-grid extent (direction search AND writes): the bottom
+                // units at frame rows 296-303 read the real grid rows
+                // 300-303 for their direction search, and their filtered
+                // output covers the padding rows too. Clipping to the
+                // visible height left those units unfiltered/clamped,
+                // diverging from dav1d at the frame bottom.
                 cdef_plane_luma(
                     y_plane,
                     &src_y,
                     width,
-                    vis_luma_h,
+                    height,
                     pri,
                     sec,
                     damping,
@@ -2482,11 +2492,18 @@ fn cdef_plane_luma(
                 0
             };
             let dir = if pri_str == 0 { 0 } else { yd };
-            if std::env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 80 && y0 == 64 {
-                eprintln!(
-                    "CDEFPX x0={x0} y0=64 pri_str={pri_str} sec_str={sec_str} damping={damping} yd={yd} var={var} adj_pri={p} dir={dir} pre={:?}",
-                    (0..8).map(|r| src[(y0 + r) * width + x0]).collect::<Vec<_>>()
-                );
+            if let Ok(t) = std::env::var("KINETIX_AV1_DBG_CDEFPX") {
+                let mut it = t.split(',');
+                if let (Some(cx), Some(cr)) = (it.next(), it.next()) {
+                    if x0 == cx.trim().parse::<usize>().unwrap_or(usize::MAX)
+                        && y0 == cr.trim().parse::<usize>().unwrap_or(usize::MAX)
+                    {
+                        eprintln!(
+                            "KCDEF x0={x0} y0={y0} pri_str={pri_str} sec_str={sec_str} damping={damping} yd={yd} var={var} adj_pri={p} dir={dir} pre={:?}",
+                            (0..8).map(|r| src[(y0 + r) * width + x0]).collect::<Vec<_>>()
+                        );
+                    }
+                }
             }
             cdef_filter_block(
                 plane,
@@ -2504,6 +2521,14 @@ fn cdef_plane_luma(
                 damping,
                 dir,
             );
+            if std::env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 600 && y0 == 296 {
+                eprintln!(
+                    "KCDEFPOST post_rows={:?}",
+                    (0..8)
+                        .map(|r| plane[(y0 + r) * width + x0])
+                        .collect::<Vec<_>>()
+                );
+            }
         }
     }
 }
@@ -3218,6 +3243,87 @@ mod tests {
         assert_eq!(
             plane, orig,
             "a fully-skipped 8x8 block must be left untouched by CDEF"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cdef_dir_probe {
+    use super::*;
+
+    /// The 8×8 block captured from frame 0 of non_uniform_tiling.ivf at
+    /// pixel (600,296) — the unit where Kinetix (y_dir=2) and dav1d
+    /// (best_dir=3 C-path / dir=0 SIMD-path) disagree on the direction.
+    #[test]
+    fn probe_cdef_direction_diverging_unit() {
+        let blk: Vec<u8> = vec![
+            38, 43, 44, 43, 44, 44, 43, 42, //
+            39, 44, 45, 45, 44, 45, 45, 44, //
+            43, 46, 46, 46, 46, 47, 47, 47, //
+            48, 50, 49, 48, 50, 51, 52, 52, //
+            48, 49, 48, 47, 49, 52, 53, 53, //
+            46, 48, 46, 46, 48, 51, 53, 53, //
+            47, 48, 47, 47, 49, 52, 54, 54, //
+            46, 49, 48, 47, 49, 52, 54, 54, //
+        ];
+        let (y_dir, var) = cdef_direction(&blk, 8, 8, 8, 0, 0);
+        let y_dir = y_dir as i32;
+        eprintln!("PROBE y_dir={y_dir} var={var}");
+        // The spec formula, computed independently (dav1d cdef_find_dir_c).
+        let mut diag0 = [0i32; 15];
+        let mut diag1 = [0i32; 15];
+        let mut hv0 = [0i32; 8];
+        let mut hv1 = [0i32; 8];
+        let mut alt = [[0i32; 11]; 4];
+        for y in 0..8i32 {
+            for x in 0..8i32 {
+                let px = i32::from(blk[(y * 8 + x) as usize]) - 128;
+                diag0[(y + x) as usize] += px;
+                alt[0][(y + (x >> 1)) as usize] += px;
+                hv0[y as usize] += px;
+                alt[1][(3 + y - (x >> 1)) as usize] += px;
+                diag1[(7 + y - x) as usize] += px;
+                alt[2][(3 - (y >> 1) + x) as usize] += px;
+                hv1[x as usize] += px;
+                alt[3][((y >> 1) + x) as usize] += px;
+            }
+        }
+        let div = [840i32, 420, 280, 210, 168, 140, 120];
+        let mut cost = [0i32; 8];
+        for n in 0..8usize {
+            cost[2] += hv0[n] * hv0[n];
+            cost[6] += hv1[n] * hv1[n];
+        }
+        cost[2] *= 105;
+        cost[6] *= 105;
+        for n in 0..7usize {
+            cost[0] += (diag0[n] * diag0[n] + diag0[14 - n] * diag0[14 - n]) * div[n];
+            cost[4] += (diag1[n] * diag1[n] + diag1[14 - n] * diag1[14 - n]) * div[n];
+        }
+        cost[0] += diag0[7] * diag0[7] * 105;
+        cost[4] += diag1[7] * diag1[7] * 105;
+        for k in 0..4usize {
+            for m in 0..5usize {
+                cost[k * 2 + 1] += alt[k][3 + m] * alt[k][3 + m];
+            }
+            cost[k * 2 + 1] *= 105;
+            for m in 0..3usize {
+                cost[k * 2 + 1] +=
+                    (alt[k][m] * alt[k][m] + alt[k][10 - m] * alt[k][10 - m]) * div[2 * m + 1];
+            }
+        }
+        let mut best_dir = 0usize;
+        let mut best_cost = cost[0];
+        for (i, &c) in cost.iter().enumerate() {
+            if c > best_cost {
+                best_cost = c;
+                best_dir = i;
+            }
+        }
+        eprintln!("SPEC costs={cost:?} best_dir={best_dir}");
+        assert_eq!(
+            y_dir, best_dir as i32,
+            "K cdef_direction must match the spec formula"
         );
     }
 }
