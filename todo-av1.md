@@ -10322,3 +10322,38 @@ or a post-CDEF difference on rows 293-302. Each needs the same
 dav1d-vs-K pixel dump technique at the pre-LR stage (dav1d PRED dumps
 exist for this; K's KINETIX_AV1_DBG_PRED covers inter blocks only — an
 intra-path pre-LR dump is the missing tool).
+
+### Session cont'd 16 — DECISIVE: frame 0 unfiltered is pixel-perfect; the residue is the bottom mi-row padding content
+
+dav1d's `--inloopfilters none` + Kinetix's `KINETIX_AV1_NOFILTER=1`
+compared (both fully unfiltered, frames 0-7):
+
+- **Frame 0: 0 differing bytes.** The entire decode chain (entropy →
+  partition walk → modes → MC/residual → recon) is bit-exact for the
+  keyframe. Every filter-stage hypothesis for the frame-0 residue is
+  dead: the 11 filtered bytes at (600-607, 296-299) are produced inside
+  Kinetix's deblock/CDEF/LR stages from inputs that match dav1d's — the
+  divergence is in a filter stage's arithmetic at the frame bottom (the
+  deblock/CDEF/LR bottom-edge handling), not upstream.
+- Frames 1-3 unfiltered: 95/74/127 diffs — **all confined to mi row 74**
+  (the bottom mi row, pixel rows 296-299), cols 128-718, deltas ±1.
+  These are fractional-MV blocks whose subpel filter reads the
+  reference's mi-grid padding rows 300-303 (the 8-tap's +4 vertical
+  reach below the block); the reference's padding-row content differs
+  between the decoders.
+
+### Next session's starting point (two precise threads)
+
+1. **Bottom mi-row padding content**: dump frame 0's grid rows 295-310
+   from both decoders (K: the assembled grid plane pre-crop; dav1d: patch
+   its lr/cdef tail to fwrite rows 290-310). The blocks covering rows
+   300-319 reconstruct identically in principle (entropy in sync); find
+   which padding row/column first diverges — likely a prediction-write
+   clamp or a residual-application clamp at mi_rows (76) in one decoder.
+2. **Frame-0's 11 filtered bytes**: with the unfiltered frames proven
+   identical, bisect the filter stages: dav1d `--inloopfilters
+   deblock`/`cdef`/`restoration` individually against Kinetix
+   (K needs per-stage env gates — `KINETIX_AV1_NOFILTER` is all-or-nothing
+   today; add `KINETIX_AV1_NO_DEBLOCK`/`NO_CDEF`/`NO_LR` one-liners).
+   The 11 bytes sit at rows 296-299 = the LR bottom stripe region — LR
+   restoration first suspect (per cont'd 14's analysis), then CDEF.
