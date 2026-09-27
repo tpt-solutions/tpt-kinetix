@@ -1,5 +1,89 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 9 (2026-09-28, continuation) — the bottom-field B residue root-causes to THREE coupled field-poc semantics in temporal direct; a full implementation was built and measured (fixes 18/36/69 to near-exact, but its same-kind interactions regress 3/4/6/84/87) — REVERTED pending the mvscale-table dump; complete mechanism and numbers recorded
+
+Continued at addendum 8's step 1 (bottom-field consumption-point diff).
+
+**Validated first:** with the committed code, the poc-135 (bottom field)
+colocated reads now match `JM_COL` cell-for-cell (`JM_COL` gained `mby`;
+gate `framepoc == 135`; binary `ldecod_col5.exe`) — the parity fix is
+confirmed at the consumption point for both fields. The remaining
+display-18/36/69 error is ~99.7% in the BOTTOM field (top field: 9-23
+samples), pre-deblock (poc-33 `KINETIX_FIELD_BUF_OUT` pre-dump vs JM
+`jm_poc33_predeblock.gray`: nd=8710, max=118 — deblock exonerated again;
+the `KINETIX_FIELD_BUF_OUT` pre/post hook from earlier sessions still
+works, though only the pre file fired for this slice).
+
+**Consumption-point diff at poc-33 (display 18's bottom field)** with the
+colocated-cell VALUES matching JM exactly exposed a new divergence class:
+the DERIVED mv0/mv1 differ by small scale-dependent amounts — e.g. JM
+mv0=(-4,0)/mv1=(6,0) vs ours (-5,0)/(5,0) for col=(-10,-1). `JM_SCALE`
+re-gated to poc 33 shows **JM's mvscale = 102** where ours computes 128.
+
+**Root cause, three coupled semantics:**
+1. **col poc = the colocated frame's SAME-PARITY FIELD poc.** JM's td for
+   the poc-33 bottom field is measured against poc **37** (frame-36's
+   bottom field), not the frame poc 36 our `col_poc` carries. Evidence:
+   MB(2,0)'s colocated cell (target 30, cr0=0) derives JM mv0.x = -11,
+   which requires scale ≈ 110 = (tb 3, td 7) = pocs (33-30, 37-30); MB(0,7)
+   shows scale 102 = (tb 2, td 5) = (33-31, 36-31) — DIFFERENT L0 entries
+   pair with DIFFERENT col pocs, consistent only if td uses
+   `colocated frame's same-parity field poc` and tb uses the matched L0
+   entry's own field poc.
+2. **MapColToList0 matches by picture identity, then scales with the
+   matched entry's OWN poc.** JM: `listX[iref]->{top_field,bottom_field,
+   frame} == colocated->ref_pic[refList]` (pointer identity), and
+   `mvscale[LIST_0 + list_offset][mapped_idx]` is a PRECOMPUTED PER-ENTRY
+   table — `mvscale[LIST_0 + list_offset]` differs between the TOP-field
+   and BOTTOM-field slice views (list_offset 2 vs 4). For target 30 the
+   matched entry is the pair-mate whose view pointer equals the colocated
+   cell's ref_pic — i.e. which of (30, 31) is "the" match depends on the
+   slice's field parity and the ref_pic identity, NOT on literal poc
+   equality.
+3. **mv_y conversion is per-CELL** (`colocated->ref_pic[refList]-
+   >structure == FRAME → mv_y /= 2`, else unchanged) — cells referencing
+   FIELD pictures are NOT halved. Our uniform `MvYConv` per colocated
+   picture cannot express this.
+
+**What was built and measured.** A full implementation: field-B
+`current_list0_poc` tuples extended to `(pair frame poc, own field poc)`
+(frame poc recovered from the dpb by pairing entries on frame_num);
+MapColToList0 made branch- and priority-dependent (frame colocated: match
+frame poc first; field colocated: match own poc first); pic_a = the
+matched entry's own poc for field-current. Numbers: the frame-referencing
+bottom Bs went **near-exact** (display 18 nd 11259→69, 36 16206→64, 69
+16624→89!!) — but the field-colocated class regressed badly (displays
+3/4/6 nd 59-70 → 10.5k-12k, 84 137→19.4k, 87 109→41k); total wrong
+52.7k → 118k. A branch/priority variant ("match own first for field
+colocated, frame poc first for frame colocated") still totaled 165k.
+Both variants REVERTED — the identity matching needs the colocated cells'
+per-cell ref structure (or equivalent), which our grid does not carry.
+
+**The refined next step (replaces addendum 8's list item 1):** dump JM's
+actual per-entry mvscale tables for BOTH list_offsets (patch
+`init_ref_pic_list`'s mvscale computation to print
+`list_offset, iref, L0[iref]->poc, tb, td, mvscale` for frame_num≥7),
+plus `ref_idx` in `JM_COL`. With that table the correct semantics can be
+transcribed as data (per current-parity, per-L0-entry scale) rather than
+re-derived — the target implementation is: colocated view reads (done ✓)
++ identity-based MapColToList0 (mechanism known) + per-entry mvscale
+lookup (dump first) + per-cell mv_y conversion keyed on the ref
+structure, which our grids must learn to carry (one bit per cell, or
+derived from col_l0/col_l1 poc membership at ctx build time).
+
+**Also note:** the tiny-diff frames 3/4/6 (nd 59-70 pre-this-session) and
+the big ones share the same root cause per the analysis above — the
+"tiny" ones are simply the pairs whose colocated refs are all
+parity-symmetric, so the old formula was already near-right.
+
+**Housekeeping:** all uncommitted changes reverted (tree = f30796f +
+ac71a40, cargo check clean). JM tooling: `ldecod_col6.exe` (JM_COL
+framepoc==33), `ldecod_scale33.exe` (JM_SCALE poc 33 MB(0,7)), traces
+`col135.log`, `col33.log`, `scale33.log`, `/tmp/runk3*.log`,
+`/tmp/fb_bpre_poc33_bottomtrue.gray` +
+`/tmp/jm_bin/jm_poc33_{pre,post}deblock.gray` (pre-deblock comparison
+fixtures).
+
 ## SESSION #32d4 ADDENDUM 8 (2026-09-28) — REAL FIX #4 landed: field-B colocated reads of a FRAME reference must ignore parity (JM's dpb_split_field fills both field views identically); field-pair residual diffs drop ~40-90%; addendum 7's "poc-138 grid structurally wrong" retracted as another cross-coordinate misread
 
 Continued addendum 7 with the consumption-point comparison done RIGHT this
