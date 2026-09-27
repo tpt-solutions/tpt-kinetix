@@ -1,5 +1,46 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 10 (2026-09-28, continuation) — addendum 9's per-entry mvscale theory refined by a new contradiction: JM shows two different scales for poc-33 cells with the SAME ref_idx — the two temporal passes in mc_direct.c must read different colocated views; dump needs the view identity per pass
+
+Chased the 102-vs-110 scale contradiction from addendum 9 to its sharpest
+form: at poc-33's bottom field, `JM_COL` shows MB(0,7) q3 (col=(-10,-1),
+ref_idx 0) deriving mv0=(-4,0)/mv1=(6,0) — which requires scale ≈ 110
+(= tb 3, td 7 = pocs 33-30 / 37-30: entry poc 30, col = the BOTTOM field
+poc of the colocated frame-36) — while the `JM_SCALE` dump for the SAME
+MB's q2 (col=(0,-1), ref_idx 0, mapped_idx=0) prints mv_scale = **102**
+(= tb 2, td 5 = 33-31 / 36-31: entry poc 31, col = frame/TOP poc 36).
+Same slice, same ref_idx, two scales, and the two cells' col values
+differ ((0,-1) vs (-10,-1)) even though both should be RSD views of
+frame-36 cells with ref_idx 0 pointing at ONE listX entry.
+
+Implication: `mc_direct.c` contains TWO temporal-direct code paths (a
+pre-pass and the mv-application pass — the JM_SCALE and JM_COL probes sit
+in different functions), and they read DIFFERENT colocated views (or apply
+different mapped_idx resolution) for the same cells. Which pass's values
+actually reach the pixels is the open question; the pixel comparison says
+the committed code (f30796f) is closer for the frame-colocated class
+(display 3/4/6) while the field-colocated class follows... something else.
+
+**Decision:** stopped here rather than guess; tree stays at f30796f (all
+probes reverted, cargo check clean, 388/0).
+
+**Next session (single focused step):** in `mc_direct.c`, print the
+ENCLOSING FUNCTION (hardcode a tag per site) plus `colocated`'s view
+identity (`top_field->poc` / `bottom_field->poc` / `frame->poc` if
+non-NULL) and `list_offset` in BOTH the JM_SCALE and JM_COL dumps, run
+poc 33, and establish which pass produces the pixel-reachable values.
+Then transcribe THAT pass end-to-end (col poc = same-parity field poc 37
+per addendum 9; MapColToList0 identity matching; per-entry mvscale;
+per-cell mv_y by ref structure — all four mechanisms are already
+identified, they just need to be attributed to the right pass).
+
+**Tooling added this round:** `ldecod_col6.exe` (JM_COL framepoc==33),
+`ldecod_scale33.exe` (JM_SCALE poc 33 MB(0,7)); traces `col33.log`,
+`scale33.log`, `/tmp/runk3*.log`; fixtures
+`/tmp/fb_bpre_poc33_bottomtrue.gray` and
+`/tmp/jm_bin/jm_poc33_{pre,post}deblock.gray` (pre-deblock comparison
+pair for the poc-33 bottom field).
+
 ## SESSION #32d4 ADDENDUM 9 (2026-09-28, continuation) — the bottom-field B residue root-causes to THREE coupled field-poc semantics in temporal direct; a full implementation was built and measured (fixes 18/36/69 to near-exact, but its same-kind interactions regress 3/4/6/84/87) — REVERTED pending the mvscale-table dump; complete mechanism and numbers recorded
 
 Continued at addendum 8's step 1 (bottom-field consumption-point diff).
