@@ -10503,3 +10503,40 @@ subpel filter reads the reference's grid-padding rows 300-303 — the
 padding rows' content differs because frame 0's CDEF divergence
 propagates into the reference; fixing (a)/(b) should collapse these
 too), and frame-0's 11 filtered bytes at the same unit.
+
+### Session cont'd 21 — 8×8 test vector captured; C-path vs SIMD discrepancy noted
+
+dav1d's find_dir input for the diverging unit (matched by column
+fingerprint [38,39,43] at x=600):
+
+```
+38 43 44 43 44 44 43 42
+39 44 45 45 44 45 45 44
+43 46 46 46 46 47 47 47
+48 50 49 48 50 51 52 52
+48 49 48 47 49 52 53 53
+46 48 46 46 48 51 53 53
+47 48 47 47 49 52 54 54
+46 49 48 47 49 52 54 54
+```
+
+dav1d's C path (forced via `--cpumask none`) computes best_dir=3 for
+this block; Kinetix computes y_dir=2 on the same fingerprint. (A
+separate dav1d run without cpumask restriction showed dir=0 from the
+SIMD path for the gated (150,74) read — the SIMD/C comparison needs
+care because the column fingerprint may match multiple units across
+frames; align by decoding frame 0 ONLY: `probe_tiles 1` decodes just
+the keyframe, so every CDEF unit is frame 0's.)
+
+### Next session's entry point (pure unit-test work)
+
+1. Feed the 8×8 block above through Kinetix's `cdef_direction`
+   (unit test in loop_filter.rs) → confirm y_dir=2 and dump cost[8].
+2. Hand-compute the spec partial sums (§7.15.2) for this block and
+   compare against both the K cost[8] and a hand-rolled dav1d-formula
+   port. The mismatched cost entry pinpoints the transcription bug.
+3. Fix `cdef_direction`, then re-run `probe_tiles` on
+   non_uniform_tiling.ivf: the CDEF-only stage should go to 0 diffs,
+   collapsing frame 0's 11 bytes, frames 1-3's bottom-row residues, and
+   likely most of the frames 4+ cascade (their MC reads the
+   now-identical reference bottom rows).
