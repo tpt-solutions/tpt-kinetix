@@ -4534,6 +4534,28 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32d4 ADDENDUM 25 (2026-09-28, continuation) - JMT per-MB quadrant-mode probe built; comparison pending; exact resumption state
+
+The syntax-value comparison probe (addendum 23 plan) is built:
+- mc_direct.c update_direct_mv_info_temporal carries a JMT print
+  (per-MB b8mode[4]/b8pdir[4], gate framepoc==119), inserted after
+  the Boolean has_direct statement, compiled into ldecod_jmt.exe.
+- Ours: the equivalent per-quad data is in /tmp/runk61.log (KCOL119,
+  66 quads: MBs (2,8),(4,4),(4,5),(5,5),... with colocated reads from
+  poc 121).
+
+PENDING: the JMT print built but fired 0 times in its first run -
+verify the rebuilt binary runs (ldecod_jmt.exe exists; re-run
+KINETIX_DBG_JMT=1 and confirm JMT lines appear), then diff JM b8mode
+per MB against our parsed mb_type/sub_mb_type_b (add a gated print in
+cabac_b.rs MB loop, current_poc == 119) for the diverging MBs
+(2,8 / 4,4 / 4,5 / 5,5 / ...): JM b8mode != 0 (explicit) vs ours
+direct-class = the Table 9-13/9-14 value-mapping bug.
+
+TREE: clean at 222bc92 + 32ade30 + 9d8115f (all landed fixes); the
+mc_direct.c JMT probe lives outside the repo (preserved in /tmp).
+Everything else from addendum 24 stands.
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
