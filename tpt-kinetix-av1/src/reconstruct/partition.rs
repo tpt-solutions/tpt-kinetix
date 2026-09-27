@@ -426,14 +426,16 @@ impl<'a> TileDecodeState<'a> {
             );
         }
 
-        if mi_row < 8 && mi_col < 8 && std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+        if std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
             eprintln!(
-                "DBG partition mi=({mi_row},{mi_col}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}"
+                "DBG partition fr={} mi=({mi_col},{mi_row}) bsize={bsize} bw={bw} bh={bh} hw={half4x4} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}",
+                crate::debug_frame_seq::current()
             );
         }
         if std::env::var("KINETIX_AV1_DBG_PARTALL").is_ok() {
             eprintln!(
-                "DBG partition mi=({mi_col},{mi_row}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition}"
+                "DBG partition fr={} mi=({mi_col},{mi_row}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition}",
+                crate::debug_frame_seq::current()
             );
         }
 

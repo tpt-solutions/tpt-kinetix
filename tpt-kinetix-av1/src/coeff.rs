@@ -579,6 +579,32 @@ pub fn read_coeffs(
         })?;
 
         eob = read_eob(dec, cdfs, tx_size, tx_sz_ctx, ptype, tx_type)?;
+        // `KINETIX_AV1_DBG_EOB` traces one block, mirroring dav1d's
+        // `KINETIX_DBG_COEFF_BLK=plane,bx4,by4` (note: that dav1d selector
+        // originally mis-parsed its third field from the first comma, so
+        // "by4" silently traced block (N, N); it now takes the second comma).
+        // Both sides must agree on the block identity before any of their
+        // entropy reads can be diffed line-for-line. `tx_type` is printed
+        // because dav1d's `is_1d` flag is derived from it via
+        // `dav1d_tx_type_class`, and the corrected trace shows `is_1d=1`
+        // on the target block.
+        if std::env::var("KINETIX_AV1_DBG_EOB").is_ok()
+            && blk.x4 == dbg_x4()
+            && blk.y4 == dbg_y4()
+            && usize::from(blk.plane > 0) == dbg_plane()
+        {
+            eprintln!(
+                "KEOB fr={} plane={} mi=({},{}) tx={tx_size} tx_type={tx_type} \
+                 intra_dir={} eob={eob} tx_sz_ctx={tx_sz_ctx} ptype={ptype} is_1d={} rng={}",
+                crate::debug_frame_seq::current(),
+                blk.plane,
+                blk.x4,
+                blk.y4,
+                blk.intra_dir,
+                usize::from(get_tx_class(tx_type) != TX_CLASS_2D),
+                dec.raw_state().0
+            );
+        }
         if eob > seg_eob || eob > scan.len() {
             return Err(KinetixError::Parse(format!(
                 "AV1 coeffs: decoded eob {eob} exceeds segment limit {} \
@@ -771,6 +797,39 @@ fn compute_tx_type(blk: &TxBlockCtx, tx_size: usize, luma_tx_type: usize) -> usi
     }
 }
 
+/// Parse the single `KINETIX_AV1_DBG_EOB` selector, `plane,bx4,by4`.
+///
+/// This deliberately uses `split(',')` rather than the `strchr`-style
+/// first-comma scan: the equivalent dav1d probe had that bug and silently
+/// traced the wrong block, which invalidated a whole debugging round. An
+/// absent or malformed value yields `None`, which callers treat as "no
+/// target" rather than as block 0,0,0.
+///
+/// The frame is deliberately NOT part of the selector. It is taken from
+/// `debug_frame_seq::current()` at the print site instead, because a
+/// caller-supplied frame number is only an echo of what was asked for and
+/// silently mis-attributes hits when the probe fires in several frames.
+fn dbg_target() -> Option<(usize, usize, usize)> {
+    let v = std::env::var("KINETIX_AV1_DBG_EOB").ok()?;
+    let mut it = v.split(',');
+    let plane = it.next()?.trim().parse().ok()?;
+    let x4 = it.next()?.trim().parse().ok()?;
+    let y4 = it.next()?.trim().parse().ok()?;
+    Some((plane, x4, y4))
+}
+
+fn dbg_plane() -> usize {
+    dbg_target().map_or(0, |t| t.0)
+}
+
+fn dbg_x4() -> usize {
+    dbg_target().map_or(usize::MAX, |t| t.1)
+}
+
+fn dbg_y4() -> usize {
+    dbg_target().map_or(usize::MAX, |t| t.2)
+}
+
 /// The `eob_pt_*` / `eob_extra` / `eob_extra_bit` block of `coeffs()`.
 fn read_eob(
     dec: &mut SymbolDecoder,
@@ -792,6 +851,17 @@ fn read_eob(
         5 => dec.read_symbol(&mut cdfs.eob_pt_512[ptype]),
         _ => dec.read_symbol(&mut cdfs.eob_pt_1024[ptype]),
     };
+    // `eob_pt_raw` is the RAW symbol as read from the CDF, before the `+ 1`.
+    // dav1d's `KCOEF-EOBBIN` trace names this same raw value `eob` (it is the
+    // variable its own `if (eob > 1)` extension tests), so printing it lets
+    // that line be diffed symbol-for-symbol against this one. The `+ 1` and
+    // the `(1 << (eob_pt - 2)) + 1` base are the spec's and are CORRECT - two
+    // separate experiments removing them both broke the intra keyframe
+    // (2/3 -> 0/3 frames exact), so the frame-2 mismatch is NOT in this
+    // mapping. The per-block trace is emitted at the `read_eob` call site,
+    // which knows the block's mi coordinates.
+    let eob_pt_raw = eob_pt - 1;
+    let _ = eob_pt_raw;
 
     let mut eob = if eob_pt < 2 {
         eob_pt

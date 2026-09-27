@@ -223,6 +223,45 @@ pub(super) fn reconstruct_tx_block(
         );
     }
     let mut pred = vec![0i32; num_coeffs];
+    // Targeted intra prediction dump: `KINETIX_AV1_DBG_TXB=x,y` brackets the
+    // block covering that luma pixel and prints the decoded mode, the borders
+    // actually sampled, and the resulting prediction. The `dbg`/`dbg_px` gates
+    // above are hardcoded to a stale region, so a wrong prediction elsewhere
+    // prints nothing at all.
+    let txb_target = std::env::var("KINETIX_AV1_DBG_TXB").ok().and_then(|s| {
+        s.split_once(',').and_then(|(a, b)| {
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        })
+    });
+    let txb_hit = match txb_target {
+        Some((tx, ty)) => {
+            blk.plane == 0
+                && (px_x as i64) <= tx as i64
+                && (tx as i64) < (px_x + tx_w) as i64
+                && (px_y as i64) <= ty as i64
+                && (ty as i64) < (px_y + tx_h) as i64
+        }
+        None => false,
+    };
+    if txb_hit {
+        eprintln!(
+            "TXB fr={} px=({px_x},{px_y}) tx={tx_w}x{tx_h} mode={pred_mode} ai={angle_delta} ftype={filter_type} eif={enable_intra_edge_filter} har={} hbl={} har_len={} hbl_len={} tl={}",
+            crate::debug_frame_seq::current(),
+            bd.have_above_right(),
+            bd.have_below_left(),
+            borders.top.len(),
+            borders.left.len(),
+            borders.tl,
+        );
+        eprintln!("  top[:12]={:?}", &borders.top[..borders.top.len().min(12)]);
+        eprintln!(
+            "  left[:12]={:?}",
+            &borders.left[..borders.left.len().min(12)]
+        );
+    }
     // AV1 spec §7.11.2.1's top-level dispatch: palette (§7.11.4) takes
     // priority over everything else (filter-intra, CFL, ordinary modes) when
     // `PaletteSize{Y,UV} > 0` for this plane.

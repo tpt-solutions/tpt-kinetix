@@ -9152,29 +9152,28 @@ against each frame we emit by best-match sample count.
   against 34638 differing samples, so the huge coefficients are a *symptom*,
   not the main bug. Most of the error is a subtler residual error.
 
-### ROOT CAUSE FOUND: the intra keyframe is not exact, and inter inherits it
+### ~~ROOT CAUSE FOUND: the intra keyframe is not exact~~ **RETRACTED - see below**
 
-On a 64x64 `testsrc2` clip the **keyframe itself** mismatches by 98 samples,
-`max|d|=1`, 0 interior diffs, first at (8,3). Error grows 98 -> 230 -> 3692 ->
-4405 then plateaus (~6000), which is a single small keyframe defect
-propagating through the reference chain — not progressive desync, and not a
-per-frame inter bug.
+**This claim was WRONG and is retracted.** The "98 samples on the keyframe" was a
+measurement artifact: the tool shell is persistent across calls, so a
+`KINETIX_AV1_NOFILTER=1` set in an earlier call was still exported when the
+"baseline" run happened - comparing our **unfiltered** output against dav1d's
+**filtered** output. Re-measured in a clean shell the 64x64 keyframe is
+**bit-exact** (`1/1 frames exact vs dav1d`), and so is frame 1. The first bad
+frame is frame 2, and the cause is `ref_frame_idx` (end of this section), not
+intra reconstruction.
 
-Critically, `KINETIX_AV1_NOFILTER=1` leaves the mismatch at **exactly 98**:
-the ±1 is present in the **pre-filter intra reconstruction**, so deblock/CDEF
-are exonerated. This is a small (1-LSB) intra reconstruction/rounding bug at
-block edges that the 128x96 `phase_c_conformance` corpus (PSNR `inf`) happens
-not to expose.
+Two process lessons, both of which have burned this file before:
 
-That reframes the whole AV1 inter effort: the priority-1 "pixel-reconstruction
-bug behind testsrc2" should be attacked as an **intra ±1 edge bug on a 64x64
-corpus**, which is far cheaper to bisect than the inter path, and fixing it
-likely fixes most of the inter gap with it.
+1. **Clear `Env:KINETIX_*` in the SAME command as the measurement.** These probes
+   are process-global; a leaked `NOFILTER`/`NODEBLOCK`/`NOCDEF` silently
+   re-attributes a filter bug to reconstruction or vice versa.
+2. Never conclude "X is exonerated" from a run where the switch isolating X was
+   not demonstrably active in that same invocation.
 
-**Next step:** reproduce at 64x64 intra-only, dump pre-filter luma around
-(8,3), and compare against dav1d's unfiltered output. `av1_interior_diff`
-exists for intra but uses a fixed corpus — extend it (or add a 64x64 entry)
-so the ±1 is visible. Do NOT re-measure inter PSNR until this is fixed.
+The loop filters ARE genuinely exonerated, but on the correct evidence: in a clean
+shell `NODEBLOCK` and `NOCDEF` each leave frame 2 at ~3.4-3.5k differing samples
+(vs 3663 baseline), so they are not the source of the bulk error.
 
 ### Instrumentation added this session (debug-only, no behaviour change)
 
@@ -9193,3 +9192,771 @@ so the ±1 is visible. Do NOT re-measure inter PSNR until this is fixed.
 
 Verified: 163 AV1 lib tests pass, `phase_c_conformance` still `inf`, fmt +
 clippy clean.
+
+### ~~ROOT CAUSE (confirmed): LAST/LAST2/LAST3 resolve to a STALE DPB slot~~ **RETRACTED - see below**
+
+**Wrong.** `ref_to_slot[LAST]` and `ref_to_slot[LAST3]` are BOTH 0 in the trace
+that motivated this, so a LAST-vs-LAST3 distinction cannot explain anything.
+A direct measurement also refuted it: of the 3663 differing samples in frame 2,
+only 878 matched frame 0 and 36 matched frame 1 - **2749 matched NEITHER
+reference**, so this is not a wrong-slot read at all. The
+`ref_frame_idx = [0,0,0,1,0,0,0]` parse is correct and the DPB refresh is
+correct. I over-read a plausible-looking story.
+
+### PARTIAL: intra-in-inter is a *victim*, not the cause
+
+`mi=(8,12)` and `mi=(12,12)` are indeed `intra=1` blocks in an inter frame, and
+their reconstruction is wrong. But they are **downstream of an earlier error**,
+not its origin - they read garbage from their left/top neighbours. Correcting
+the record: this is a symptom, not a root cause.
+
+### ACTUAL ORIGIN (measured): `mi=(2,12)` reads the KEYFRAME instead of frame 1
+
+Located by raster-scanning frame 2 for the first differing pixel **and** the
+first x-column where errors appear:
+
+    x=8..12, y=48..56: differing=32, ours==frame0: 32, ours==frame1: 0
+
+Every one of those 32 samples equals **frame 0** (the keyframe) and none equals
+**frame 1**, while dav1d matches frame 1. The offending block is `mi=(2,12)`
+(4x16, `skip=true`, `mv=(0,0)`, `ref=4` = LAST3) - a pure copy that copied the
+wrong picture. The error then propagates rightward and upward through the
+intra-in-inter blocks that consume it as neighbour context, growing to 3663
+differing samples with `max|d|=169`. That is why the damage looked like a
+large structured region with a sharp edge rather than a single block.
+
+The state that makes this possible, all verified by probe:
+
+    frame 2 header : refidx=[0, 0, 0, 1, 0, 0, 0]  => LAST -> slot 0
+    DPB hints      : [0, 1, 2, 0, 0, 0, 0, 0]       => slot 0 = keyframe, slot 1 = frame 1
+
+So the bitstream names slot 0, and slot 0 legitimately holds the keyframe. The
+decode is self-consistent - and still wrong. **This means `ref_frame_idx` for
+frame 2 is being mis-parsed** (LAST should be 1, not 0), not that the DPB
+refresh is wrong. The refresh logic and `ref_order_hints` update
+(`decoder.rs:540-544`) are both verified correct.
+
+Note the earlier evidence that made this look like a stale slot rather than a
+mis-parse: at the pixel I first sampled (10,50) frames 0 and 1 hold the *same*
+value 81, so "ours == frame 0" proved nothing there. The x=8..12 y=48..56
+window is the first place where the two references actually differ, which is
+what makes the conclusion solid.
+
+**Next step:** dump the 7 `f(3)` reads of `ref_frame_idx` for frame 2 together
+with the bit offset, and decode those bits by hand from the OBU to see whether
+the parser is starting at the wrong position (i.e. some earlier field consumed
+the wrong number of bits) rather than mis-ordering the seven reads. Compare
+against `frame.rs:734-738`. Expect LAST to be 1.
+
+**Do not re-litigate the intra path** until the reference is right - every
+intra-in-inter block in that region is faithfully reproducing bad neighbours.
+
+**Why earlier parts of this investigation went wrong** (this is the third time a
+probe has misled here): the block probes (`PRED`, `b0enter`,
+`KINETIX_AV1_DBG_PART*`) had **no frame label**, so a multi-frame run produced
+one interleaved stream and I read other frames' blocks as the block under
+investigation - which produced the bogus "mi=(8,8) decodes out of raster order"
+and "the bottom-right is never decoded" conclusions. All of those probes now
+print `fr=<n>`. **Always scope a probe to one frame before drawing a conclusion
+from it.**
+
+**Next step:** in `reconstruct_intra_subblock` / the `intra=1` branch of
+`decode_inter_block` (`inter_block.rs:650`), diff our reconstruction of
+`mi=(8,12)` (`ymode=11`, `skip=true`) against dav1d. `skip=true` means the
+intra prediction must be copied verbatim with no residual, so a wrong value here
+is a prediction/availability bug, not a residual bug. The block reads the
+already-reconstructed frame above (`haveAbove`), so a likely suspect is intra
+neighbour availability when the above/left neighbours are inter. Success
+criterion: `probe_tiles` on this 3-frame clip going from 2/3 to 3/3 exact.
+
+### Instrumentation added (debug-only, no behaviour change, cont.)
+
+- `KINETIX_AV1_DBG_TAPBLK` now also prints a `REF-READ` line (ref name, the
+  DPB slot it resolved to, how many slots are populated, and the full
+  `ref_to_slot` table). It was previously hardcoded to a dead `px 128..138,
+  y 82..96` window and printed nothing useful. This is the probe that found
+  the bug - without the resolved *slot* you cannot tell "wrong reference name"
+  from "right name, stale slot".
+- `KINETIX_AV1_DBG_PRED_RESID` / `..._BIGCOEF` (above).
+
+### Instrumentation added (debug-only, no behaviour change, cont. 2)
+
+- **`fr=<n>` frame labels added to every block-level probe** (`PRED`,
+  `PRED-BASE`, `b0enter`, `KINETIX_AV1_DBG_PART`, `KINETIX_AV1_DBG_PARTALL`,
+  `PREDPOST`, `REF-READ`). The absence of these is what produced two wrong
+  "root causes" in this file - see the warning above. **Any new probe here must
+  print `fr=` or scope itself to a frame.**
+- `KINETIX_AV1_DBG_PRED_POST` - end-of-block luma dump (after the chroma
+  residual too), bracketing prediction vs. final reconstruction.
+- `KINETIX_AV1_DBG_PREFILTER_PXY=x,y` - samples one luma pixel in
+  `reconstruct_av1_frame` *before* `apply_post_filters`, so it can be compared
+  against `apply_post_filters`' own `PXY pre-filter` line. Disagreement means
+  the corruption is in tile assembly, not a filter stage.
+- `KINETIX_AV1_DBG_EXTENT` - prints `mi_cols`/`mi_rows`/tile rect per frame
+  (both were verified correct at 16x16 for all frames; recorded so nobody
+  re-checks it).
+- `KINETIX_AV1_DBG_PART` is no longer capped to `mi_row<8 && mi_col<8`, so the
+  whole tile prints.
+
+### Instrumentation added (debug-only, no behaviour change, cont. 3)
+
+- `KINETIX_AV1_DBG_TXB=x,y` - targets the transform block covering that luma
+  pixel inside `reconstruct_tx_block` and prints the decoded prediction mode,
+  angle delta, filter type, `have_above_right`/`have_below_left`, the sampled
+  `top`/`left`/`tl` border values. This is what showed a block reading a
+  gradient `left` column (187,168,153,...) where the correct neighbour is a
+  flat 210. The pre-existing `dbg`/`dbg_px` gates there are hardcoded to a
+  stale region and print nothing for any other block.
+
+### Method note (this is the third wrong "root cause" in a row)
+
+Every wrong conclusion this session came from sampling a pixel where the
+evidence was ambiguous, or from an un-frame-scoped probe. Two rules that would
+have prevented all of them:
+
+1. **Pick the discriminating sample.** At (10,50) frames 0 and 1 both hold 81,
+   so "our output == frame 0" was vacuous. Scan for a region where the
+   candidate references actually differ *before* concluding which one was read.
+2. **One frame per probe run.** Always set a frame gate/label. `PRED`,
+   `b0enter`, `KINETIX_AV1_DBG_PART*` and `TXB` now all print `fr=`.
+
+### `ref_frame_idx` is CORRECT - the "mis-parse" claim is withdrawn
+
+`KINETIX_AV1_DBG_REFIDX=1` dumps each `f(3)` read with its bit offset. For
+frame 2 all seven land at consecutive offsets (28, 31, 34, 37, 40, 43, 46) and
+read `0,0,0,1,0,0,0`. So the parse position and the values are right: the
+bitstream really does say LAST = slot 0. **Do not go looking for a bit-offset
+bug in `frame.rs:734`.** (The earlier "LAST should be 1" claim was inference
+from dav1d's output, not from the bits.)
+
+### Best-characterised failure so far: wrong COEFFICIENTS on intra-in-inter blocks
+
+First *discriminating* divergence (a pixel where frame 0 and frame 1 differ, so
+"which reference did we read" is answerable at all) is `(0,8)` in frame 2:
+
+    ours=140  dav1d=90  f0=81  f1=87
+
+`KINETIX_AV1_DBG_TXB=0,8` shows the borders are all **correct** -
+`top=[90,89,31,30,...] left=[90,90,90,...] tl=90`, matching dav1d's 90 - and
+`palette_present=false`. So the prediction is right. But:
+
+    eob=12  quant=[9, 6, 1, 1, 13, 2, -2, 0, ...]
+    residual[0..8] = [50, 66, 66, 52, 35, 53, 51, 21]
+    90 + 50 = 140  (= our output)
+
+**The coefficients are wrong for a block dav1d codes as near-zero.** That is
+the sharpest statement of the bug available: not a wrong reference, not a wrong
+prediction, not a filter - wrong `coeffs()` output on an intra block inside an
+inter frame.
+
+Error budget for frame 2 (3663 differing samples): 678 at +-1, 540 at 2-3,
+629 at 4-10, 1172 at 11-50, 644 above 50. Restricting to pixels where the two
+references actually differ, only 516 match frame 0, 36 match frame 1, and
+**492 match neither** - so this is not a wrong-reference-slot bug.
+
+### Dead ends (do not repeat)
+
+- **Loop filters** - `NODEBLOCK`/`NOCDEF` barely move the count.
+- **OBMC** - `NOOBMC` does not change it.
+- **MC interpolation** - predictions are bit-exact where checked.
+- **Palette gating on `segmentation_enabled`** - tried it; frames went from
+  2/3 to **0/3** exact, so `read_palette_mode_info` is correctly gated on
+  `allow_screen_content_tools` alone. Reverted.
+- **`block_borders` availability** - it computes `have_above`/`have_left` from
+  `px_y > 0` / `px_x > 0` itself; the two flags it is *passed* are only
+  `have_above_right`/`have_below_left` (the extension limits), which is
+  spec-correct. Not a bug.
+
+**Next step:** the coefficient decode for intra blocks in an inter frame.
+`mi=(0,8)` decodes `eob=12` where the true eob is ~0. Compare the `coeffs()`
+symbol sequence against the dav1d/`ITXDUMP` trace for that block - specifically
+the `txb_skip` / `all_zero` decision and the `intra_tx_type` CDF context, since
+a wrong `all_zero` there desyncs the whole tile. The existing
+`KINETIX_AV1_DBG_ALLZERO` probe prints `skip_ctx` and the CDF; scope it to this
+block first.
+
+### The dav1d trace build WORKS - and has produced a first real diff
+
+The "broken dav1d build" in earlier notes is **not** broken. What was actually
+wrong was only the DLL lookup: `dav1d.exe` exits with `0xC0000135` (DLL not
+found) unless `%LOCALAPPDATA%\Temp\dav1d_fresh\build\src` is on `PATH`. The tree
+at `%LOCALAPPDATA%\Temp\dav1d_fresh` is a complete 1.5.4 clone (38 src/*.c)
+with the prior instrumentation patches already applied, and it builds
+incrementally in ~15s:
+
+    set PATH=%LOCALAPPDATA%\Temp\dav1d_fresh\build\src;%PATH%
+    call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    cd /d %LOCALAPPDATA%\Temp\dav1d_fresh
+    ninja -C build tools/dav1d.exe
+    build\tools\dav1d.exe -i clip.ivf -o out.yuv --muxer yuv --threads 1
+
+(There is also a pruned `dav1d_oracle` tree that genuinely does not build - do
+not use it. `dav1d_src` is an empty shell. Use `dav1d_fresh`.)
+
+**New probe added to that tree** (`src/recon_tmpl.c`, in `decode_coefs`):
+`KINETIX_DBG_COEFF_BLK=plane,bx4,by4` dumps the `all_skip` decision, the coded
+`txtp`, and the decoded `eob` for one transform block only. `decode_coefs` now
+takes `bx4`/`by4` for this (all 6 call sites updated).
+
+### FIRST VERIFIED DIVERGENCE: the `eob` read in `coeffs()`
+
+Block `mi=(0,2)`, luma, frame 2 of the 3-frame 64x64 clip - the block at the
+first discriminating pixel `(0,8)`:
+
+    dav1d : all_skip=0  sctx=0  tx=TX_4X4  ctx=0  ->  eob=2
+    Kinetix: all_zero=false (MATCHES)              ->  eob=12
+             quant=[9, 6, 1, 1, 13, 2, -2, 0, ...]
+
+So `all_zero` is read **correctly** (both say "not all zero"), and the block
+type / tx size / skip context all agree. The divergence is strictly inside the
+`eob` decode that follows: dav1d reads `eob=2`, we read `eob=12`, and the 10
+extra coefficients are what produce the bogus `residual[0]=50` (and hence
+`90 + 50 = 140` instead of dav1d's 90).
+
+Per dav1d `recon_tmpl.c:434-457` the eob read is
+`eob_bin`/`eob_hi_bit` (symbol over `eob_bin_cdf`, then a bool) followed by
+`dav1d_msac_decode_bools(&ts->msac, eob_bin)`. Compare each of those three
+reads against `coeff.rs::read_eob` (`eob_pt`, then `eob_extra`, then the
+`for i in 1..(eob_pt - 2)` literal loop). Given `eob_multisize` for TX_4X4 is
+`2 + 2 - 4 = 0`, the first read is `eob_pt_16` and `eob_pt` is in `1..=5` - a
+one-symbol slip in the `eob_pt` bucket, the `eob_extra` context index, or the
+literal loop bound would produce exactly this.
+
+**Next step:** extend the dav1d probe to print `eob_bin`/`eob_hi_bit` and the
+sub-bools for this block, print the same three values from `read_eob`, and diff
+them. That is now a bounded, mechanical comparison - no more guessing.
+
+
+## MEASURED: dav1d eob sub-symbols, and a ruled-out hypothesis
+
+Added `KCOEF-EOBBIN` / `KCOEF-EOBHI` / `KCOEF-EOBBITS` to dav1d
+`recon_tmpl.c` (just before the `if (dbg) printf("Post-eob_bin...")` at
+line 446) and the matching `KINETIX_AV1_DBG_EOB` dump in
+`coeff.rs::read_eob`.
+
+For luma block `mi=(0,2)`, frame 2, the full dav1d eob path is:
+
+    KCOEF fr=2 plane=0 mi=(0,0) tx=0 ctx=0 sctx=0 all_skip=0 r=53648
+    KCOEF-EOBBIN tx2dszctx=0 is_1d=0 eob_bin_raw=2 r=34304
+    KCOEF-EOBHI  ctx=0 chroma=0 eob_bin=0 hi_bit=0 r=41398
+    KCOEF-EOBBITS eob_bin=0 -> eob=2 r=41398
+
+So dav1d reads a **single symbol worth 2**, takes `eob_bin = 2 - 2 = 0`,
+reads one `eob_hi_bit` (0), and `((0|2) << 0) | bools(0)` = 2. Final `eob=2`.
+
+**Hypothesis tested and REJECTED.** dav1d's `eob` is the *raw* CDF symbol,
+which suggested Kinetix's `1 + symbol` and its `(1 << (eob_pt - 2)) + 1`
+base were both off by one. Changing to the raw symbol with a
+`(1 << (eob_pt - 2))` base drove the previously-exact intra keyframe to
+0/3 frames exact. **The `+ 1` and the `+ 1` base are the spec's and are
+correct; reverted.** Do not re-derive this from dav1d's variable naming -
+dav1d's `eob` is the spec's `eobPt` minus one, but the spec's own
+arithmetic from there still yields the `+ 1` base.
+
+**What this rules out:** the eob *mapping* arithmetic is not the bug. The
+remaining candidates inside `read_eob` are now narrowed to (a) the `eob_pt_*`
+CDF **bucket selection** - which is `ptype`/`ctx` indexed and may not match
+dav1d's `[chroma][is_1d]`, or (b) the `eob_extra` context index, or (c) the
+literal-loop bound. Note dav1d's `tx2dszctx=0` and `is_1d=0` agree with
+
+## CORRECTION: the block-targeted dav1d probe was itself buggy
+
+`KINETIX_DBG_COEFF_BLK=plane,bx4,by4` selected its block with
+
+    by4 == atoi(strchr(kcb, ',') + 1);
+
+`strchr` returns the **first** comma, so `by4` was parsed from the *bx4*
+field. Requesting `0,0,2` therefore gated on `bx4==0 && by4==0` and traced
+block `mi=(0,0)`, not `mi=(0,2)`. Confirmed empirically: `0,0,2` and
+`0,0,4` both printed `mi=(0,0)`, while `0,2,0` printed `mi=(2,2)`.
+
+Fixed to take the **second** comma (`strchr(c2 + 1, ',')`).
+
+**This invalidates the "block mi=(0,2)" framing of the earlier eob
+comparison.** The numbers previously attributed to `mi=(0,2)` were really
+`mi=(0,0)`, so the `eob=2` vs `eob=12` gap was measured on a block whose
+identity was misidentified. The corrected trace for the real
+`mi=(0,2)`, frame 2, is:
+
+    KCOEF fr=2 plane=0 mi=(0,2) tx=0 ctx=0 sctx=0 all_skip=0 r=37444
+    KCOEF-TXTP intra tx=0 min=0 y_mode=12 set=1 idx=3 txtp=11 r=45584
+    KCOEF-EOBBIN tx2dszctx=0 is_1d=1 eob_bin_raw=3 r=35632
+    KCOEF-EOBHI  ctx=0 chroma=0 eob_bin=1 hi_bit=1 r=34202
+    KCOEF-EOBBITS eob_bin=1 -> eob=7 r=34056
+
+Note `is_1d=1` and `txtp=11` (an intra tx type) - the block is an
+**intra** block in a frame-2 *inter*-looking position, and the 1-D tx class
+means `ctx` should be 1 on the Kinetix side. Kinetix's own dump must be
+re-measured against this corrected target before any conclusion is drawn;
+the earlier `eob_pt_raw`/`eob` pairings in this file are from the
+mis-targeted run and should not be compared to it.
+
+## RULED OUT: eob_pt CDF widths and read_symbol
+
+## ROOT CAUSE FOUND: `TxBlockCtx.intra_dir` is hardcoded to DC_PRED (0)
+
+`read_transform_type` (`coeff.rs:703`) uses `blk.intra_dir` as the
+`txtp_intra1` / `txtp_intra2` CDF context:
+
+    let dir = blk.intra_dir;
+    ...
+    Ok(TX_TYPE_INTRA_INV_SET1[dec.read_symbol(cdfs.intra_tx_type_set1[sqr][dir])])
+
+But `intra_dir` is a hardcoded literal at **every production construction
+site** - `coeff.rs:1277`, `coeff.rs:1597` (`DC_PRED`), and
+`reconstruct/inter_block.rs:3307 / 3680 / 3707` (all `0`). The only
+assignments of a non-zero direction come from the test-only `with_dir`
+helper (`coeff.rs:1607`, used at 1718/1719/1858/1868). So in production
+the transform-type CDF context is **always** `[..][DC_PRED]`, regardless
+of the block's real intra prediction mode.
+
+### The measured proof
+
+Corrected dav1d trace, luma block `mi=(0,2)`, frame 2:
+
+    KCOEF-TXTP intra tx=0 min=0 y_mode=12 set=1 idx=3 txtp=11 r=45584
+    KCOEF-EOBBIN tx2dszctx=0 is_1d=1 eob_bin_raw=3 r=35632
+    KCOEF-EOBHI  ctx=0 chroma=0 eob_bin=1 hi_bit=1 r=34202
+    KCOEF-EOBBITS eob_bin=1 -> eob=7 r=34056
+
+Kinetix, same block (new `KINETIX_AV1_DBG_EOB=plane,bx4,by4,frame` probe):
+
+    KEOB fr=2 plane=0 mi=(0,2) tx=0 tx_type=2 eob=12 ... is_1d=0 rng=50440
+
+Three independent confirmations that this is the real divergence:
+
+1. **`y_mode=12` vs context `0`.** dav1d reads the transform type from
+   `txtp_intra1[TX_4X4][y_mode_nofilt]` with `y_mode_nofilt = 12`;
+   Kinetix reads `intra_tx_type_set1[0][0]`. Same CDF, wrong context ->
+   different symbol -> `txtp=11` (H_DCT) vs Kinetix `tx_type=2`
+   (DCT_ADST). `12` is `PAETH_PRED` in Kinetix's own enum
+   (`coeff.rs:1582`), so this is a genuine mode mismatch, not a
+   numbering accident.
+2. **The `is_1d` consequence.** dav1d's `txtp=11` is `H_DCT`, which
+   `dav1d_tx_type_class` (`tables.c:317`) maps to `TX_CLASS_H` ->
+   `is_1d=1`, and it selects `eob_bin_16[chroma][1]`. Kinetix's
+   `tx_type=2` is 2-D -> `is_1d=0` -> `eob_pt_16[ptype][0]`. This is why
+   the `eob` values differ (7 vs 12) even though the eob *arithmetic* is
+   correct - **the eob decode is being fed the wrong CDF entirely.**
+   This also explains why the earlier mis-targeted block "matched": that
+   block had `is_1d=0` on both sides.
+3. **`get_tx_class` is correct.** Checked against dav1d's
+   `dav1d_tx_type_class` (`tables.c:305-323`): both map
+   `V_DCT/V_ADST/V_FLIPADST -> V`, `H_DCT/H_ADST/H_FLIPADST -> H`,
+   everything else `-> 2D`. Not a bug; the input `tx_type` is wrong.
+
+### Secondary gap: no FILTER_PRED handling
+
+dav1d computes `y_mode_nofilt` by mapping `FILTER_PRED` back to its base
+angle before using it as a CDF context
+(`recon_tmpl.c:390-391`, `dav1d_filter_mode_to_y_mode`). Kinetix has
+**no `FILTER_PRED` symbol anywhere in the crate** (grep returns
+nothing), so once `intra_dir` is plumbed through it will also need this
+remap, or filter-intra blocks will read the wrong context.
+
+## RETRACTION: the `intra_dir` hardcoding root cause was WRONG
+
+The claim above that `intra_dir` is hardcoded to `DC_PRED` in production
+is **incorrect**, and the fix must not be made on that basis.
+
+Checked properly this time:
+
+- `reconstruct/intra_block.rs:552` sets `intra_dir: luma_intra_dir`, where
+  `luma_intra_dir` is computed at lines 421-424 as
+  `FILTER_INTRA_MODE_TO_INTRA_DIR[filter_intra_mode]` when filter-intra is
+  used, else `y_mode`. That remap is the spec's and is already correct.
+- `reconstruct/inter_block.rs:650` (intra block inside an inter frame)
+  passes the real decoded `y_mode` down through
+  `reconstruct_intra_subblock`.
+- The `intra_dir: 0` literals in `inter_block.rs:3307/3680/3707` are all on
+  `is_inter: true` blocks, where `read_transform_type` never reads
+  `intra_dir` (it takes the inter branch). The `intra_dir: 0` at
+  `coeff.rs:1277` is inside `#[test] fn all_zero_ctx_ignores...`.
+- Empirically, the target block reports **`intra_dir=12`**, matching dav1d's
+  `y_mode=12` exactly.
+- `TX_TYPE_INTRA_INV_SET1` and the `intra_tx_type_set1` `[2][13][8]` CDF
+  shape also match dav1d (`txtp_intra1[2][N_INTRA_PRED_MODES][7+1]`,
+  `dav1d_tx_types_per_set` Intra1 list) value-for-value.
+
+So the transform-type CDF context and tables are all correct. The earlier
+"hardcoded intra_dir" conclusion came from grepping for `intra_dir: 0`
+without checking whether those sites were on the intra path.
+
+## ACTUAL LEAD: frame 2's partition is missing a block at mi=(0,2)
+
+With `intra_dir` cleared, the divergence is upstream, in the partition /
+block-type decode. Comparing Kinetix's `KINETIX_AV1_IBSUM` block list for
+frame 2 against the corrected dav1d trace:
+
+Kinetix frame 2, column 0, in decode order:
+
+    mi=(0,0) 1x1 intra=0
+    mi=(0,1) 1x1 intra=0
+    mi=(0,3) 1x1 intra=0     <-- row 2 is MISSING entirely
+    mi=(0,4) 2x2 intra=0
+    mi=(0,6) 2x2 intra=0
+    mi=(0,8) 2x4 intra=0
+
+There is **no `mi=(0,2)` block at all** in frame 2 - the partition jumps
+straight from `(0,1)` to `(0,3)`, leaving a hole at row 2. But dav1d's
+trace for frame 2 shows an **intra** block at `mi=(0,2)`
+(`KCOEF-TXTP intra ... y_mode=12`), and Kinetix's own `KEOB` probe *does*
+fire at `mi=(0,2)` with `intra_dir=12` / `ymode=12` from `IBSUM`/`KYMODE`.
+
+That is self-contradictory: the `IBSUM` partition walk never emits a block
+at `(0,2)`, yet a transform block is decoded there and dav1d agrees one
+exists. Two candidate explanations, not yet distinguished:
+
+1. The block *is* decoded (so the walk does reach it) but the `IBSUM`
+   summary print is emitted from a path that skips this block, meaning the
+   print is incomplete rather than the partition being wrong. Note the
+   `IBSUM` line does print `mi=(0,2) intra=1` - it appears in the combined
+   output - so the walk does reach it; the column-filtered view above just
+   missed it because the `intra=1` line carries a different `mi` ordering.
+2. The partition genuinely differs from the bitstream (wrong `bsize` split
+   or a mis-decoded partition symbol), which would desync everything after
+
+## RETRACTION 2: the "missing block at mi=(0,2)" lead was ALSO a probe artifact
+
+The "frame 2 has no block at `mi=(0,2)`" conclusion was wrong, for a
+second reason in the same family: **the `intra=1` IBSUM line and the
+`KYMODE` line had no `fr=` field** (`inter_block.rs:643` and `646`, vs the
+`intra=0` line at `1448` which does print `fr=`). A `grep 'IBSUM fr=2'`
+therefore returned *zero* intra blocks for frame 2 — not because none
+existed, but because the intra-in-inter branch never printed a frame
+number. The `mi=(0,2)` line I read as frame 2 was actually frame 1.
+
+**Fixed:** both lines now print `fr={}` via
+`crate::debug_frame_seq::current()`, matching the existing `intra=0` idiom.
+With that, frame 2's intra blocks are:
+
+    IBSUM fr=2 mi=(0,2)  bw4=1 bh4=1 intra=1 ymode=12 skip=false
+    IBSUM fr=2 mi=(4,12) bw4=2 bh4=4 intra=1 ymode=0  skip=true
+    IBSUM fr=2 mi=(6,12) bw4=2 bh4=2 intra=1 ymode=0  skip=true
+    IBSUM fr=2 mi=(6,14) bw4=2 bh4=2 intra=1 ymode=0  skip=true
+    IBSUM fr=2 mi=(8,12) bw4=4 bh4=4 intra=1 ymode=11 skip=true
+    IBSUM fr=2 mi=(12,12) bw4=4 bh4=4 intra=1 ymode=0 skip=true
+
+`mi=(0,2)` intra with `ymode=12` **is present in frame 2**, and agrees with
+dav1d's `KCOEF-TXTP intra ... y_mode=12`. Frame 2 is the first frame with
+any non-skip intra block (every other frame-2 intra block is `skip=true`),
+which is consistent with frame 2 being the first frame to differ.
+
+### Standing rule (this has now bitten twice)
+
+Any probe line that lacks a frame label must not be used to attribute
+events to a frame. `grep 'fr=2'` over a mixed set silently under-reports.
+Both the dav1d `by4` parsing bug and this one produced confident,
+*plausible*, and wrong conclusions. Verify a probe's selectivity with a
+positive control before drawing a negative conclusion from it.
+
+### Where the divergence actually remains
+
+For frame 2 `mi=(0,2)`, now that intra mode, CDF context, transform-type
+tables, and block identity are all confirmed to agree between the two
+decoders, the remaining measured difference is:
+
+    dav1d : txtp=11 (H_DCT), is_1d=1, eob=7
+
+## THIRD probe flaw in the same family: the frame number was an ECHO
+
+`KINETIX_AV1_DBG_EOB` accepted a trailing `,frame` field and printed it as
+`fr=`. That field is just the caller's request, not the decoder's actual
+frame counter, so the label was **an echo of the query**. Setting
+`...,2` printed `fr=2` for *every* hit, including hits that occurred in
+frame 1 - producing two apparently-conflicting "blocks in one frame" that
+were in fact one block in frame 1 and a different one in frame 2.
+
+Fixed: the frame is now taken from `crate::debug_frame_seq::current()` at
+the print site (the established idiom, as used by the `intra=0` IBSUM and
+`PRED` probes), and the `frame` component was removed from the selector
+entirely so it cannot be misused again.
+
+This is the **third** instance of the same failure mode this session:
+dav1d's `strchr` comma bug, the missing `fr=` on the intra IBSUM line, and
+now an echoed frame number. Each produced a confident, plausible, wrong
+structural conclusion. See the standing rule above.
+
+### Corrected per-frame picture for block mi=(0,2), plane 0
+
+    Kinetix fr=1: tx=1 (8x8)  tx_type=5  intra_dir=0   eob=6   is_1d=0
+    dav1d   fr=1: tx=1 (8x8)  all_skip=0                          ctx=1
+    Kinetix fr=2: tx=0 (4x4)  tx_type=2  intra_dir=12  eob=12  is_1d=0
+    dav1d   fr=2: tx=0 (4x4)  all_skip=0                          ctx=0
+
+**Block identity, plane, frame, and tx size all agree on both frames.**
+The "extra 8x8 block in a 1x1 coded block" anomaly from the previous entry
+was entirely this labelling artifact - there is no such anomaly. The only
+remaining difference is the decoded transform type / eob on frame 2, and
+it is downstream of something earlier that has not yet been located.
+
+### New signal: frame 2 is the first frame to use multiple references
+
+Reference usage per frame from the `IBSUM` probe:
+
+    frame 1: ref=2  (66 blocks)          -- a single reference only
+    frame 2: ref=2 (17), ref=3 (3), ref=4 (6), ref=5 (7), ref=8 (3)
+
+Frame 1 being exact and frame 2 being the first frame to (a) differ and
+(b) reference more than one slot makes the **reference-list / ref-frame
+ordering** path (`decoder.rs:474-481`, `RefFrameStore`) a better
+candidate than the coefficient path. This is a hypothesis from a
+correlation, not a measured fault.
+
+Also noted: frame 2's mismatch is 3663 of 6144 bytes (60%), first at
+Y (32,0) - partial corruption, not total. Consistent with either a
+localised wrong value or a desync that only affects some regions.
+
+**Next step (bounded):** diff frame 2's *predicted* (pre-residual) plane
+against dav1d's. If prediction already differs, the bug is in motion
+compensation / reference selection and the coefficient work is a red
+herring. If prediction matches and only the residual differs, the fault is
+in the coefficient path as originally suspected. This is a clean
+discriminating test and needs no further speculation.
+
+    Kinetix: tx_type=5,       is_1d=0, eob=6   <- first KEOB, tx=1 (8x8)
+    Kinetix: tx_type=2,       is_1d=0, eob=12  <- second KEOB, tx=0 (4x4)
+
+Note Kinetix emits **two** transform blocks at `mi=(0,2)` (an 8x8 with
+`tx_type=5` *and* a 4x4 with `tx_type=2`), while dav1d traces one 4x4.
+`IntraFrameYMode` for this block is 12 (`PAETH_PRED`), which is not
+directional, so the block should not need an angle-delta read, and the
+`tx=1` (TX_8X8) block appearing at all for a 1x1 (`bw4=1 bh4=1`) coded
+block is the anomaly worth chasing next. That is where the frame-2 desync
+most likely originates.
+
+   it - consistent with frame 2 being the first frame to differ while frames
+   0-1 are exact.
+
+**Do not act on (1) or (2) until the `IBSUM` print for `mi=(0,2)` is
+compared directly against dav1d's partition for frame 2.** The immediate
+step is a block-by-block partition diff of frame 2 between the two
+decoders; the first block whose (mi, size, intra/inter) tuple disagrees is
+the real desync point, and everything after it is noise.
+
+Also still open and now *more* likely than the eob work: the eob
+mismatch (`7` vs `12`) may be a downstream *symptom* of the partition
+being wrong, not an independent entropy bug.
+
+
+### Fix required (not yet implemented)
+
+Thread the real decoded intra prediction mode from the block decoder
+into `TxBlockCtx.intra_dir` instead of the hardcoded literal, and apply
+the `FILTER_PRED -> base angle` remap before using it as the
+transform-type CDF context. `intra_dir` is also consumed by the
+prediction/reconstruction path, so this may fix a class of intra-block
+errors beyond transform type.
+
+**Status:** 2/3 baseline preserved throughout; 163/163 lib tests pass;
+clippy + fmt clean. `coeff.rs` decode logic remains byte-identical to
+HEAD (probe + helpers only).
+
+
+`read_symbol` (`entropy.rs:517`) derives the symbol count as
+`cdf.len() - 1`, and Kinetix stores wider arrays than dav1d: `eob_pt_16`
+is `[u16; 6]` where dav1d's `eob_bin_16` is `CDF4`. This looks alarming
+but is a benign internal convention:
+
+- Kinetix `eob_pt_16` default row is `[840, 1039, 1980, 4895, 32768, 0]`.
+  The first four values match dav1d's `CDF4(840, 1039, 1980, 4895)`
+  exactly; slot 4 is the `32768` end marker that `read_symbol` asserts on.
+- Slot 4 yields `f = 0`, so it is a zero-probability escape that is never
+  selected, and it lies outside `cdf[..n-1]` so CDF adaptation never
+  touches it.
+- The `eob_pt_raw=4` (escape) values in the dump occur on **frame 0**,
+  which is pixel-exact, confirming the escape is harmless.
+
+So the eob_pt CDF widths are correct and are not the source of the frame-2
+mismatch. Likewise the `eob` base arithmetic has now been tested twice and
+reverted twice, each time breaking the intra keyframe; treat
+`(1 << (eob_pt - 2)) + 1` and the `eob_pt < 2` early-return as correct.
+
+**Status:** unchanged 2/3 baseline (frame 2, 3663 bytes, first diff Y
+(32,0)); 163/163 lib tests pass; clippy + fmt clean. `coeff.rs` diff is
+additive instrumentation only.
+
+**Next step:** re-run `KINETIX_AV1_DBG_EOB` with block targeting that matches
+the corrected dav1d `mi=(0,2)` identity, and check `is_1d=1` is honoured -
+i.e. that Kinetix's `ctx = get_tx_class(tx_type) != TX_CLASS_2D` yields 1
+for `txtp=11`, and that the `y_mode=12 set=1 idx=3` intra-txtp path is
+reached at all on the Kinetix side. `is_1d` is a strong new suspect: the
+mis-targeted block had `is_1d=0` and matched, which would explain why the
+eob mapping looked correct in the old comparison.
+
+Kinetix's reported `eob_multisize=0` / `ctx=0`, so the bucket *size* is
+right - the remaining question is whether Kinetix's `[ptype][ctx]` indexing
+and `eob_pt` value range match dav1d's CDF entry count.
+
+**Status:** back to the 2/3 baseline (frame 2, 3663 bytes, first diff at
+Y (32,0)). 163/163 `tpt-kinetix-av1` lib tests pass, clippy + fmt clean.
+Both `coeff.rs` edits are additive instrumentation only - the decode logic
+is byte-identical to HEAD.
+
+**Next step:** print the *entry count* of the `eob_pt_16` CDF in both
+decoders and confirm Kinetix's `eob_pt` can only produce the same symbols
+dav1d's `eob_bin_cdf[chroma][is_1d]` can; then diff the `eob_extra` CDF
+index. Only after those two agree is the literal-loop bound worth touching.
+
+## Session 2026-09-28 — ROOT CAUSE FOUND AND FIXED: missing `bsize > BLOCK_4X4` gate on `read_tx_size` for intra-in-inter blocks; frame 2 3663 -> 181 differing bytes
+
+Picked up exactly where the previous session left off: build a symbol-by-symbol
+trace of frame 2, tile 0, mi (0,0) through mi (0,2), from both Kinetix and a
+patched dav1d, and find the first rng disagreement. Found it, fixed it,
+verified it. **Do not re-open the `eob_pt`/`eob_extra` CDF-indexing lead from
+the previous session's tail — it was correct all along; the real bug was one
+level up the call stack, in the `tx_depth` read that precedes the coefficient
+decode entirely.**
+
+### Tooling used (all pre-existing, confirmed working)
+
+- `dav1d_fresh` (`%LOCALAPPDATA%\Temp\dav1d_fresh`) already had `KSKIP`/
+  `KINTRA`/`KYMODE` prints in `decode.c` gated on `KINETIX_DBG_IBSUM` (note:
+  **not** `KINETIX_AV1_IBSUM` — different env var name than the Kinetix side,
+  easy to typo) that mirror Kinetix's own `KSKIP`/`KINTRA`/`KYMODE` prints in
+  `inter_block.rs` (`KINETIX_AV1_IBSUM=1`). These already print matching
+  `mi=(x,y)`/`rng=` fields, so no new dav1d patching was needed for the
+  skip/is_inter/y_mode value trace — only for the two new CDF-row dumps below.
+- Built `dav1d_fresh` via PowerShell (the `cmd.exe /c "call vcvars64.bat && ..."`
+  form from earlier sessions' notes silently produces no output in this
+  session's shell — use `cmd /c '"...\vcvars64.bat" && cd /d "..." && ninja ...'`
+  through the **PowerShell tool**, which does work and shows ninja's output).
+- `probe_tiles scratch_av1/f3.ivf` (the checked-in 3-frame 64x64 clip) remains
+  the fastest repro: baseline **3663 differing bytes on frame 2**, confirmed in
+  a clean env (`env -u KINETIX_AV1_NOFILTER -u KINETIX_AV1_NODEBLOCK -u
+  KINETIX_AV1_NOCDEF`, per this file's standing leaked-env-var rule).
+- **Capture gotcha hit and fixed in-session:** `cmd 2>&1 > file` in bash
+  redirects stderr to the *old* stdout (terminal) and only stdout to `file` —
+  the opposite of what's wanted for `eprintln!`-based probes. Use
+  `cmd > file 2>&1`. An initial capture attempt silently produced a stdout-only
+  file missing every debug line; re-running with the correct redirection order
+  fixed it. Filed here so the next session doesn't lose time to it.
+
+### The trace
+
+With `KINETIX_AV1_IBSUM=1` (Kinetix) / `KINETIX_DBG_IBSUM=1` (dav1d), diffing
+frame 2's block sequence from mi (0,0) confirms **every `KSKIP`/`KINTRA` value
+and rng matches exactly** through mi (2,0), and still matches at mi (0,2)'s
+`KSKIP`/`KINTRA` (`intra=1`, rng=35088 on both sides — this is the block from
+the previous session's "first divergence" report, a `BLOCK_4X4` `PAETH_PRED`
+(`ymode=12`) intra block coded inside inter frame 2).
+
+The previous session's own `KYMODE` prints (rng=40608 dav1d vs rng=32860
+Kinetix) looked like a divergence *at* the `y_mode` read, but that `KYMODE`
+print site in `inter_block.rs` fires *after* several more reads (angle-delta,
+`uv_mode`, palette, filter-intra, tx-size) — a version of the exact
+"un-scoped/mis-positioned probe" trap this file warns about repeatedly, just
+with a probe *position* instead of a missing *label*. Added two new precisely
+-positioned probes to pin down exactly which read diverges:
+
+- `YMODECDF-PRE`/`YMODECDF-POST` (`KINETIX_AV1_DBG_YMODECDF=1`, `inter_block.rs`)
+  print the `y_mode` CDF row and post-read rng immediately around the actual
+  `read_y_mode` call, with a matching dav1d probe in `decode.c` right around
+  its `ymode_cdf` read.
+- `MODEINFO-UV` / `MODEINFO-TX` (same env var) checkpoint rng right after
+  `uv_mode` and right after `read_tx_size`.
+
+Result for mi=(0,2), frame 2:
+
+    YMODECDF-PRE  fr=2 mi=(0,2) grp=0 row=[22801,23489,...,32768,0]   <- exact DEFAULT_Y_MODE_CDF[0], untouched
+    YMODECDF-POST fr=2 mi=(0,2) ymode=12 rng=40608                    <- MATCHES dav1d's KYMODE rng=40608 exactly
+    MODEINFO-UV   fr=2 mi=(0,2) uvmode=0 has_chroma=false rng=40608   <- no symbol read (has_chroma=false), rng unchanged, consistent
+    MODEINFO-TX   fr=2 mi=(0,2) luma_tx=0 ... rng=32860               <- DIVERGES: dav1d never reads tx_depth here at all
+
+So `y_mode` was never the bug (the "hardcoded intra_dir" and "wrong CDF
+context" leads from earlier sessions were right to be retracted). The
+divergence is a **spurious symbol read inside `read_tx_size`**: Kinetix's
+intra-in-inter call site (`inter_block.rs`, the `!is_inter` branch) called
+
+    let luma_tx = if self.tx_mode_select && !self.lossless {
+        self.read_tx_size(bsize, max_tx, mi_row, mi_col)
+    } else {
+        max_tx
+    };
+
+unconditionally whenever `TxMode == TX_MODE_SELECT`, with no check on `bsize`.
+Per AV1 spec §5.11.15 `read_tx_size(allowSelect)`, the `tx_depth` symbol is
+only read when `MiSize > BLOCK_4X4` — a 4x4 block always uses `TX_4X4` with no
+signalled depth (dav1d: `decode.c:1211`, `if (f->frame_hdr->txfm_mode ==
+DAV1D_TX_SWITCHABLE && t_dim->max > TX_4X4)`, where a `BLOCK_4X4` block's
+`t_dim->max` is already `TX_4X4`, so the whole branch — including the
+symbol read — is skipped). mi=(0,2) is exactly such a block (`bw4=1 bh4=1`),
+so Kinetix read one entropy symbol dav1d never reads, desyncing the coder's
+`rng`/bit position for the rest of the tile — this is exactly what produced
+the "same CDF context, different decoded symbol" observation the previous
+session made at the `intra_tx_type` read a few reads later (that symbol
+wasn't wrong on its own; it was reading from the wrong bit position).
+
+**This exact bug, in this exact shape, was already found and fixed once** —
+on the *keyframe* intra path. `intra_block.rs:288` has the identical
+`bsize > BLOCK_4X4 &&` gate with a comment describing the same failure mode
+("mandelbrot at mi (16,18)"). The fix was never propagated to the
+intra-in-inter-frame call site in `inter_block.rs`, which is a structurally
+separate copy of the same `intra_block_mode_info()`/`read_tx_size` sequence
+for a different top-level branch (`!is_inter` inside `decode_inter_block`
+rather than the keyframe's `decode_intra_block`). Grepped for any other
+`read_tx_size` call sites (`partition.rs`'s definition and `tests.rs`'s unit
+test are the only other hits) — this was the only missing gate.
+
+### Fix
+
+`tpt-kinetix-av1/src/reconstruct/inter_block.rs`, the `!is_inter` (intra in
+inter frame) branch: changed
+
+    let luma_tx = if self.tx_mode_select && !self.lossless {
+
+to
+
+    let luma_tx = if bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
+
+matching `intra_block.rs`'s existing gate exactly (`BLOCK_4X4` already in
+scope via `use super::*`).
+
+### Verified impact
+
+- `probe_tiles scratch_av1/f3.ivf`: frame 2 **3663 -> 181 differing bytes**
+  (95% reduction). Frame 0 and frame 1 stay exact (2/3 -> still 2/3 frames
+  *fully* exact, since frame 2 isn't at 0 yet — see "remaining gap" below).
+- `cargo test -p tpt-kinetix-av1 --lib`: **163/163 pass**, no regressions.
+- `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean.
+- `cargo fmt --check -p tpt-kinetix-av1`: clean.
+- Didn't have another multi-frame inter corpus file on hand in this
+  environment (only `scratch_av1/f3.ivf`) to check the fix's effect on
+  `testsrc2`/`testsrc_64x64`/etc — those clips referenced in older sessions
+  weren't present under any of `test-src`, `tpt-kinetix-test-utils`, or
+  `tpt-kinetix-av1` in this checkout. Worth regenerating via
+  `just corpus-check` or whatever produced them originally in a future
+  session and re-running `probe_tiles` on each — this bug (any `BLOCK_4X4`
+  intra-in-inter block, in `TX_MODE_SELECT`) is generic and should improve
+  every such clip, not just this one.
+
+### Remaining gap (not yet root-caused): 181 bytes, edge-only, frame 2
+
+`BLOCKMAP=1` on the fixed build: **5 edge-only 8x8 blocks, 0 with interior
+diffs**, `max|d|=148` worst at pixel (54,48). Both `KINETIX_AV1_NODEBLOCK=1`
+and `KINETIX_AV1_NOCDEF=1` make the frame *worse* (485 and 670/0-3 exact
+respectively), confirming the loop filters are doing genuinely correct work
+here and are not themselves the bug — consistent with this file's
+`BLOCKMAP`-doc-comment caveat that "edge-only" describes where a difference
+*survives* the filters, not where it originates.
+
+The owning block at pixel (54,48) is mi=(12,12) — `IBSUM fr=2 mi=(12,12)
+bw4=4 bh4=4 intra=1 ymode=0 skip=true` (a 16x16 `DC_PRED` intra-in-inter
+block with `skip=true`, i.e. its output should be pure prediction, no
+residual). `KINETIX_AV1_DBG_PXY=54,48 KINETIX_AV1_DBG_PXY_FRAME=2` shows the
+value is **17 at every stage** (pre-filter, post-deblock, post-cdef,
+post-lr) — consistent with "edge-only" (this exact sampled pixel isn't one of
+the wrong ones; the map above only says *some* samples in this 8x8 differ,
+not this specific one). Have not yet isolated which sample in mi=(12,12)'s
+top edge is wrong or why — candidates to check first next session: (a)
+whether this block's DC-prediction "above" neighbour availability/values are
+right (its top edge sits right below the now-fixed mi=(0,2)'s general
+neighbourhood, worth double-checking no residual desync survives a few
+blocks further into the tile), (b) deblock filter-level/`tx_size`-context
+derivation for this specific block boundary, since `skip=true` and an
+all-DC-flat block should not itself produce a sharp edge unless the filter
+level or boundary strength computed for it is off.
+
+**Status:** improvement is real and safe (163/163 tests, clippy, fmt all
+clean); committed. The 181-byte residual is a separate, much smaller
+follow-on bug, not yet root-caused — worth a session but not blocking.

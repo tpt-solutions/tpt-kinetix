@@ -1134,6 +1134,12 @@ impl<'a> TileDecodeState<'a> {
         // the mi-grid, so `*4` MI units tile the exact extent.
         let tile_mi_cols = (tile_px_x0 + tile_w).div_ceil(MI_SIZE).min(mi_cols);
         let tile_mi_rows = (tile_px_y0 + tile_h).div_ceil(MI_SIZE).min(mi_rows);
+        if std::env::var("KINETIX_AV1_DBG_EXTENT").is_ok() {
+            eprintln!(
+                "EXTENT fr={} mi_cols={mi_cols} mi_rows={mi_rows} tile_px=({tile_px_x0},{tile_px_y0}) tile=({tile_w},{tile_h}) tile_mi=({tile_mi_cols},{tile_mi_rows})",
+                crate::debug_frame_seq::current()
+            );
+        }
         let (rp_proj, rp_stride, n_mfmvs) = build_rp_proj(
             &temporal_motion_fields,
             &ref_to_slot,
@@ -2361,6 +2367,20 @@ pub fn reconstruct_av1_frame(
         }
         for (k, v) in &tile.meta.lr_units {
             frame_meta.lr_units.insert(*k, v.clone());
+        }
+    }
+
+    // Pre-filter snapshot of one pixel, emitted *before* `apply_post_filters`
+    // so it can be compared against that function's own `PXY pre-filter` line.
+    // The two are taken at different points in the pipeline; if they disagree
+    // the corruption happened in tile assembly rather than in a filter stage.
+    if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_PREFILTER_PXY") {
+        if let Some((a, b)) = spec.split_once(',') {
+            if let (Ok(px), Ok(py)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+                if px < grid_w && py < height {
+                    eprintln!("PREFILTER-PXY ({px},{py}) = {}", y_plane[py * grid_w + px]);
+                }
+            }
         }
     }
 

@@ -733,7 +733,20 @@ impl FrameHeader {
             }
             for idx in ref_frame_idx.iter_mut() {
                 if !frame_refs_short_signaling {
+                    // Bit offset + value of each `ref_frame_idx` `f(3)` read.
+                    // LAST should resolve to the slot holding the *most recent*
+                    // reference; a value of 0 here (when the DPB's slot 0 still
+                    // holds an older picture) is the signature of this parse
+                    // starting at the wrong bit position - dump the offset so
+                    // the preceding fields can be re-checked against the spec.
+                    let off = br.bits_read();
                     *idx = read_f8(&mut br, 3)?;
+                    if std::env::var("KINETIX_AV1_DBG_REFIDX").is_ok() {
+                        eprintln!(
+                            "REFIDX [{idx}] = {v} @bit {off} (oh={order_hint} primref={primary_ref_frame} srs={frame_refs_short_signaling})",
+                            v = *idx
+                        );
+                    }
                 }
             }
             let override_now = frame_size_override_flag && !error_resilient_mode;

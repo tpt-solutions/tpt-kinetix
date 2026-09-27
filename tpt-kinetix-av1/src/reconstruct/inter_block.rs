@@ -407,7 +407,8 @@ impl<'a> TileDecodeState<'a> {
         }
         if std::env::var("KINETIX_AV1_DBG_B0ENTER").is_ok() {
             eprintln!(
-                "DBG b0enter mi=({mi_col},{mi_row}) bsize={bsize} rng={}",
+                "DBG b0enter fr={} mi=({mi_col},{mi_row}) bsize={bsize} rng={}",
+                crate::debug_frame_seq::current(),
                 self.dec.raw_state().0
             );
         }
@@ -537,7 +538,22 @@ impl<'a> TileDecodeState<'a> {
             // producing an invalid symbol, but adapts the wrong CDF entries
             // under the wrong context, diverging the coder's `rng` from the
             // very first intra-in-inter-frame block onward.
+            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+                eprintln!(
+                    "YMODECDF-PRE fr={} mi=({mi_col},{mi_row}) grp={} row={:?}",
+                    crate::debug_frame_seq::current(),
+                    SIZE_GROUP[bsize],
+                    &self.mode_cdfs.y_mode[SIZE_GROUP[bsize].min(3)][..]
+                );
+            }
             let y_mode = self.mode_cdfs.read_y_mode(&mut self.dec, SIZE_GROUP[bsize]);
+            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+                eprintln!(
+                    "YMODECDF-POST fr={} mi=({mi_col},{mi_row}) ymode={y_mode} rng={}",
+                    crate::debug_frame_seq::current(),
+                    self.dec.raw_state().0
+                );
+            }
             if dbg_b0 {
                 eprintln!("DBG b0 ymode={y_mode} rng={}", self.dec.raw_state().0);
             }
@@ -567,6 +583,13 @@ impl<'a> TileDecodeState<'a> {
             if dbg_b0 {
                 eprintln!(
                     "DBG b0 uvmode={uv_mode} has_chroma={has_chroma} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
+            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+                eprintln!(
+                    "MODEINFO-UV fr={} mi=({mi_col},{mi_row}) uvmode={uv_mode} has_chroma={has_chroma} rng={}",
+                    crate::debug_frame_seq::current(),
                     self.dec.raw_state().0
                 );
             }
@@ -625,12 +648,39 @@ impl<'a> TileDecodeState<'a> {
             // true here (`is_inter` is false on this branch), so `skip`
             // does not gate this read for an intra block — only for a true
             // inter block (see the other `read_tx_size` call site below).
+            // AV1 §5.11.15 `read_tx_size`: the `tx_depth` symbol is read only
+            // when `MiSize > BLOCK_4X4` — a 4x4 block always uses `TX_4X4`
+            // with no signalled depth. This gate was already applied to the
+            // keyframe intra path (`intra_block.rs`'s `read_tx_size` call,
+            // see its comment for the same bug class) but was missing here,
+            // on the intra-in-inter-frame path: every BLOCK_4X4 intra block
+            // coded inside an inter frame consumed a spurious `tx_depth`
+            // symbol whenever `TxMode == TX_MODE_SELECT`, desyncing the tile
+            // from that block onward. Root-caused via a symbol-by-symbol
+            // trace against a patched dav1d on the 3-frame 64x64 corpus:
+            // block mi=(0,2), frame 2 (a BLOCK_4X4 `PAETH_PRED` intra block)
+            // — both decoders agreed through the `y_mode`/`uv_mode` reads
+            // (rng=40608) but diverged immediately after Kinetix's extra
+            // `tx_depth` read (rng dropped to 32860 with no dav1d
+            // counterpart), which then corrupted every subsequent symbol in
+            // the tile, including the `intra_tx_type`/`eob` reads for this
+            // same block that earlier sessions chased as a separate bug.
             let max_tx = max_tx_size_for_bsize(bsize);
-            let luma_tx = if self.tx_mode_select && !self.lossless {
+            let luma_tx = if bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
                 self.read_tx_size(bsize, max_tx, mi_row, mi_col)
             } else {
                 max_tx
             };
+            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+                eprintln!(
+                    "MODEINFO-TX fr={} mi=({mi_col},{mi_row}) luma_tx={luma_tx} filter_intra={:?} \
+                     colors_y={} rng={}",
+                    crate::debug_frame_seq::current(),
+                    filter_intra_mode,
+                    palette.colors_y.len(),
+                    self.dec.raw_state().0,
+                );
+            }
             if dbg_b0 {
                 eprintln!(
                     "DBG b0 intra-in-inter tx={luma_tx} skip={skip} rng={}",
@@ -639,10 +689,12 @@ impl<'a> TileDecodeState<'a> {
             }
             if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
                 eprintln!(
-                    "IBSUM mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=1 ymode={y_mode} skip={skip}"
+                    "IBSUM fr={} mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=1 ymode={y_mode} skip={skip}",
+                    crate::debug_frame_seq::current()
                 );
                 eprintln!(
-                    "KYMODE mi=({mi_col},{mi_row}) ymode={y_mode} rng={}",
+                    "KYMODE fr={} mi=({mi_col},{mi_row}) ymode={y_mode} rng={}",
+                    crate::debug_frame_seq::current(),
                     self.dec.raw_state().0
                 );
             }
@@ -1710,27 +1762,49 @@ impl<'a> TileDecodeState<'a> {
                         px_end_x.min(c1.max(0) as usize)
                     );
                 }
-                // For the specific divergent block mi(4,18), also dump reference
-                // frame pixels to diagnose whether the error is in our reference frame
-                // or in the filter computation itself.
-                if mi_col == 4 && mi_row == 18 {
-                    let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
-                    if let Some(rf) = self.ref_slots.slots[slot0] {
-                        let (rp, rw, rh) = rf.plane(0);
-                        let ix = mvs[0].col >> 3;
-                        let iy = mvs[0].row >> 3;
-                        let base_x = px_x0 as i32 + ix;
-                        let base_y = px_y0 as i32 + iy;
-                        eprintln!("  REF-PIXELS base=({base_x},{base_y}) rw={rw} rh={rh}:");
-                        for ty in 0..(bh_px + 7) {
-                            let ry = (base_y + ty as i32 - 3).clamp(0, rh as i32 - 1) as usize;
-                            let vals: Vec<u8> = (0..bw_px)
-                                .map(|x| {
-                                    let rx = (base_x + x as i32).clamp(0, rw as i32 - 1) as usize;
-                                    rp[ry * rw + rx]
-                                })
-                                .collect();
-                            eprintln!("    ref_row={ry}: {vals:?}");
+                // Dump the reference plane this block actually reads, to
+                // separate "the block chose the wrong reference slot" from
+                // "the block chose the right slot but the slot holds a stale
+                // frame". Targetable via KINETIX_AV1_DBG_PRED_X/Y (defaults
+                // reproduce the original mi(4,18) window).
+                {
+                    let (tgt_x, tgt_y, _reach) = dbg_pred_target();
+                    let hit = if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+                        (px_x0 as i64) <= tgt_x
+                            && tgt_x < (px_x0 + bw_px) as i64
+                            && (px_y0 as i64) <= tgt_y
+                            && tgt_y < (px_y0 + bh_px) as i64
+                    } else {
+                        mi_col == 4 && mi_row == 18
+                    };
+                    if hit {
+                        let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
+                        let n_slots = self.ref_slots.slots.iter().filter(|s| s.is_some()).count();
+                        eprintln!(
+                            "REF-READ mi=({mi_col},{mi_row}) ref_name={} slot={slot0} populated={n_slots} ref_to_slot={:?}",
+                            ref_names[0], self.ref_to_slot,
+                        );
+                    }
+                    if hit {
+                        let slot0 = self.ref_to_slot[ref_names[0] as usize] as usize;
+                        if let Some(rf) = self.ref_slots.slots[slot0] {
+                            let (rp, rw, rh) = rf.plane(0);
+                            let ix = mvs[0].col >> 3;
+                            let iy = mvs[0].row >> 3;
+                            let base_x = px_x0 as i32 + ix;
+                            let base_y = px_y0 as i32 + iy;
+                            eprintln!("  REF-PIXELS base=({base_x},{base_y}) rw={rw} rh={rh}:");
+                            for ty in 0..(bh_px + 7) {
+                                let ry = (base_y + ty as i32 - 3).clamp(0, rh as i32 - 1) as usize;
+                                let vals: Vec<u8> = (0..bw_px)
+                                    .map(|x| {
+                                        let rx =
+                                            (base_x + x as i32).clamp(0, rw as i32 - 1) as usize;
+                                        rp[ry * rw + rx]
+                                    })
+                                    .collect();
+                                eprintln!("    ref_row={ry}: {vals:?}");
+                            }
                         }
                     }
                 }
@@ -1791,7 +1865,8 @@ impl<'a> TileDecodeState<'a> {
                 && (px_end_x as i64) > c0;
             if in_window || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
                 eprintln!(
-                    "PRED mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
+                    "PRED fr={} mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
+                    crate::debug_frame_seq::current(),
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
                 );
                 for row in px_y0..px_end_y {
@@ -3294,12 +3369,27 @@ impl<'a> TileDecodeState<'a> {
                 // neighbour context (see `clear_coeff_context`).
                 clear_coeff_context(&mut self.coeff_ctxs, &blk, leaf_tx_w / 4, leaf_tx_h / 4);
             } else {
-                let coeffs = read_coeffs(
+                let mut coeffs = read_coeffs(
                     &mut self.dec,
                     &mut self.coeff_cdfs,
                     &mut self.coeff_ctxs,
                     &blk,
                 )?;
+                // `KINETIX_AV1_NO_RESID` decodes the coefficients exactly as
+                // normal (so the entropy decoder stays in sync and this run
+                // still validates it) but then discards them, leaving
+                // prediction only. Paired with the same switch in dav1d it is
+                // a clean discriminator between "motion compensation /
+                // reference selection is wrong" and "the coefficient path is
+                // wrong": if the two prediction-only planes match, every
+                // divergence lives in the coefficient path; if they differ,
+                // the eob work is a red herring. Zeroing `quant` (rather than
+                // skipping the dequant/inverse-transform entirely) keeps the
+                // reconstructed block's shape and code path identical to a
+                // normal run apart from the sample values.
+                if std::env::var("KINETIX_AV1_NO_RESID").is_ok() {
+                    coeffs.quant.iter_mut().for_each(|q| *q = 0);
+                }
                 if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant_dbg =
@@ -3521,6 +3611,14 @@ impl<'a> TileDecodeState<'a> {
             (blk_px_y + bh * MI_SIZE).div_ceil(4),
             self.delta_lf,
         );
+
+        // Post-residual bracket probe: `PREDPOST` dumps the block's luma
+        // AFTER the residual has been added. Comparing it against the earlier
+        // `PRED` dump is what localises a wrong output pixel to the residual
+        // stage vs. something later - a skip block must be identical in both.
+        // Deliberately placed at the very END of the block, after the chroma
+        // residual too: a chroma transform block whose bounds are wrong can
+        // scribble into the luma plane, and only an end-of-block dump sees it.
 
         // Chroma residual. Inter chroma uses one uniform transform size
         // (`get_tx_size(get_plane_residual_size)`, §5.11.37) tiling the whole
@@ -3774,6 +3872,34 @@ impl<'a> TileDecodeState<'a> {
         for by in by0..by1.min(self.meta.h8) {
             for bx in bx0..bx1.min(self.meta.w8) {
                 self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+            }
+        }
+        // End-of-block luma snapshot (see the note at the top of this probe).
+        if std::env::var("KINETIX_AV1_DBG_PRED_POST").is_ok() {
+            let (tgt_x, tgt_y, reach) = dbg_pred_target();
+            let (bpx, bpy) = (blk_px_x as i64, blk_px_y as i64);
+            let (bwid, bhei) = (bw * MI_SIZE, bh * MI_SIZE);
+            if bpx < tgt_x + reach
+                && bpx + bwid as i64 > tgt_x - reach
+                && bpy < tgt_y + reach
+                && bpy + bhei as i64 > tgt_y - reach
+            {
+                eprintln!(
+                    "PREDPOST fr={} mi=({mi_col},{mi_row}) px=({blk_px_x},{blk_px_y}) bw={bwid} bh={bhei} skip={skip}",
+                    crate::debug_frame_seq::current()
+                );
+                for row in blk_px_y..(blk_px_y + bhei) {
+                    if (row as i64) < tgt_y - reach || (row as i64) >= tgt_y + reach {
+                        continue;
+                    }
+                    let vals: Vec<u8> = (blk_px_x..(blk_px_x + bwid))
+                        .filter(|c| (*c as i64) >= tgt_x - reach && (*c as i64) < tgt_x + reach)
+                        .map(|c| self.y_plane[row * self.y_stride + c])
+                        .collect();
+                    if !vals.is_empty() {
+                        eprintln!("  y={row}: {vals:?}");
+                    }
+                }
             }
         }
         Ok(())
