@@ -384,6 +384,17 @@ impl<'a> TileDecodeState<'a> {
             );
         }
         let partition = if has_rows && has_cols {
+            if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bsize == BLOCK_64X64 && ctx == 2
+            {
+                eprintln!(
+                    "KGPART seq={} mi=({},{}) pre={} cdf={:?}",
+                    crate::debug_frame_seq::current(),
+                    mi_col,
+                    mi_row,
+                    self.dec.raw_state().0,
+                    self.mode_cdfs.base_partition_cdf(bucket, ctx),
+                );
+            }
             self.mode_cdfs.read_partition(&mut self.dec, bucket, ctx) as u8
         } else if has_cols {
             if self

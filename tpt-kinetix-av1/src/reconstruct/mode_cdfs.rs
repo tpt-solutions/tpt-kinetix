@@ -643,7 +643,7 @@ impl ModeCdfs {
             3 => &mut self.partition_w64[ctx],
             _ => &mut self.partition_w128[ctx],
         };
-        if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bucket == 2 && ctx == 2 {
+        if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bucket == 3 && ctx == 2 {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static PC: AtomicUsize = AtomicUsize::new(0);
             eprintln!(

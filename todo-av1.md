@@ -8518,3 +8518,45 @@ the wiener bottom-border tap handling at the visible/padding boundary
 (rows 300-303) or the pre-CDEF boundary-row substitution for the final
 stripe. The hidden alt-ref's wholesale diff (rows 0+ from col 25) is its
 own investigation once shown frames 0-2 are clean.
+
+## Session 2026-09-27 (cont'd 4) — hidden frames decoded: frame 4's tile-1 entropy diverges at a 32×16 H-split leaf walk
+
+Using dav1d's `--outputinvisible 1` (all 26 decoded frames, vs 24 shown),
+every frame now compares 1:1 in decode order: shown frames 0-3 carry only
+11/150/123/184 diffs (all at the frame bottom edge, rows 295-299, propagating
+from frame 0's 11-byte LR residue); **shown frame 4 (oh=3) is the first
+wholesale-diverging frame** (91,255 diffs from (384,64) = tile 1's first
+block of its second SB); tiles 2/3 accumulate 22k/55k.
+
+Block-level diff mapping of frame 4: tile 0 zero diffs; tile 1's first SB
+(mi row 16, cols 64-95) pixel-exact; diffs begin at mi (96,16) — dav1d's
+64×64 NONE WARP block.
+
+Entropy comparison for frame 4's tile-1 top SB row (patched-dav1d
+`Post-*` trace vs Kinetix `KSKIP`/`KINTRA`, frame-aligned via `DBGSEQ`
+delimiters): partitions and leaves match through SB (16,80)'s four 32×32
+leaves — 64×64 SPLIT at (16,80) ctx=0 ✓, 32×32 NONEs at (16,80)/(16,88)/
+(24,80)/(24,88) with bp NONE/NONE/NONE/H ✓ (dav1d (24,88) is `bp=1` H) —
+all post-read rng values identical (…58324 → 61072 ✓). The divergence is
+inside the (24,88) 32×16 H-split leaves: dav1d decodes two 32×16 leaves
+(skip=0 leaf reads NEWMV+OBMC); Kinetix's trace shows FOUR 8-wide KSKIP
+events at mi cols 88/90/92/94 — the sub-leaf walk differs after the
+matching `bp=1` partition read. (Earlier frame-4 "entropy mismatch at
+(16,64)" was a frame-misalignment artifact; frame-aligned, rng 33479
+matches exactly.)
+
+Also confirmed this session: `motion_mode`'s 3-way CDF gate is driven by
+dav1d's `find_matching_ref` mask (matching-ref edge neighbours) while
+Kinetix gates on its `find_num_warp_samples` count — these scans differ
+in edge geometry and must not be conflated when debugging motion-mode
+symbol choices.
+
+### Next session's starting point
+
+Frame 4, tile 1, the (24,88) 32×16 H-split: compare Kinetix's sub-leaf
+partition walk (`decode_partition` recursion below bl=3 for a 32×16 H
+pair) against dav1d's decode_sb `PARTITION_H` branch (two 32×16 leaves,
+no further recursion). The four 8-wide KSKIP events suggest Kinetix's
+walker splits 32×16 leaves into 8×16 sub-blocks where dav1d keeps them
+whole — likely in the bsize sub-block table for H/V partitions at
+32×16, or the bl=3 → bl=4 recursion gate.
