@@ -10204,3 +10204,24 @@ read; inspect that read's symbol value and rate. If the slot history
 matches perfectly, repeat for a 3-symbol CDF slot (the rate-formula bug
 (c) above is a live candidate: any 3-symbol CDF in frames 0-3 adapts
 with a 1-lower rate in Kinetix than dav1d).
+
+### Session cont'd 11 — IMPORTANT NEGATIVE RESULT: the literal dav1d rate formula is WRONG for Kinetix; the empirical formula is pinned
+
+Tested the "obvious" fix suggested by dav1d's `update_cdf` source
+(`rate = 4 + (count >> 4) + (n_symbols > 2)`, replacing Kinetix's
+`3 + (count > 15) + (count > 31) + min(log2(n), 2)` — the two differ
+only for 3-symbol CDFs): it made EVERY frame explode to ~313k differing
+bytes from (32,0), including previously-clean frames 0-3. Reverted.
+
+Conclusion: Kinetix's empirical formula matches dav1d's *decoded-bit
+behaviour* — dav1d's per-call-site `n_symbols` arguments (e.g. the
+filter read passes `DAV1D_N_SWITCHABLE_FILTERS - 1`) mean the effective
+rate for the streams' actual reads follows Kinetix's formula. The
+formula is now annotated in `entropy.rs` with a do-not-"fix" warning.
+The frame-4 desync hunt therefore moves back to: WHICH symbol's bit
+consumption first diverges at leaf (24,88) after the matching subpel
+read (63940) — the coefficient-read internals (all_zero consumed
+different bits despite the same outcome, or the DC-coefficient bits
+diverged) — with the leaf's post-y-cf states 63102 (K) vs 37474 (D) as
+the fingerprint. A per-bit trace of that one leaf's coefficient read
+against dav1d's `KINETIX_DBG_CFSUM`-style dump is the next step.

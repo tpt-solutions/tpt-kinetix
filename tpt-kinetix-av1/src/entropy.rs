@@ -549,6 +549,16 @@ impl<'a> SymbolDecoder<'a> {
 
         // CDF adaptation/update (§6.8.2 `disable_cdf_update`: skipped entirely
         // when the frame header suppresses it — dav1d `msac.allow_update_cdf`).
+        //
+        // NOTE: this rate is *empirically* pinned to dav1d's decoded-bit
+        // behaviour, not to dav1d's literal `update_cdf` source formula
+        // (`4 + (count >> 4) + (n_symbols > 2)`): dav1d passes adjusted
+        // `n_symbols` arguments at call sites (e.g. the filter read passes
+        // `DAV1D_N_SWITCHABLE_FILTERS - 1`), so the effective per-CDF rate
+        // for n=3 lands at `4 + (c >> 4)` — matching this formula. An
+        // earlier "correction" to the literal source formula made every
+        // frame explode to ~313k differing bytes; do not "fix" this without
+        // a frame-aligned dav1d symbol-trace comparison.
         if self.allow_update_cdf {
             let count = cdf[n] as u32;
             let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
