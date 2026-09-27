@@ -10041,3 +10041,64 @@ the exact arithmetic bug.
 
 Also unchanged: frame 0's 11 bottom-edge bytes (merged-LR wiener bottom
 border, rows 295-299), which shown frames 1-3 inherit at rows 295-299.
+
+## Session 2026-09-27 (cont'd 8) — the smoking gun: CDF adaptation COUNT diverges (dav1d 1, Kinetix 0) at leaf (24,88)
+
+Extended the dav1d `KCOEF` oracle with the CDF words and re-ran the
+frame-4 coefficient anchor:
+
+| | dav1d | Kinetix |
+|---|---|---|
+| pre-rng | 63940 | 63940 ✓ |
+| CDF slot | coef.skip[3][0] | txb_skip[3][0] ✓ |
+| CDF words | **[1968, count=1]** | **[31671, 32768, count=0]** |
+| outcome | all_skip=0 | all_zero=0 ✓ |
+
+The adaptation **count** differs: dav1d has performed one adaptation of
+this CDF in frame 4 (count=1, inherited from the restored context or
+applied during frame 4), Kinetix has performed zero (count=0). The CDF
+values are in different domains (dav1d raw counts / Kinetix cumulative)
+but the effective probabilities disagree (dav1d ≈ 6% for the all_skip=1
+branch vs Kinetix ≈ 3.3%), so the same msac rng consumes different bits
+→ post-read rng diverges (59952/62200-chain vs 63102) → frame 4's
+wholesale corruption.
+
+Two candidate root causes, both in Kinetix's CDF bookkeeping:
+
+1. **Save/restore drops or zeroes the adaptation counts**: dav1d's
+   `dav1d_cdf_thread_copy` copies the count slots as part of the CDF
+   context; if Kinetix's `FrameCdfContext` save/restore round-trips the
+   `txb_skip[*][*]` count words incorrectly (or `TileCdfs::new` /
+   the restore path rezeros them), every restored CDF starts with
+   count=0 instead of the carried count — changing the adaptation rate
+   (`4 + (count >> 4) + …`) for every subsequent read even when the
+   values themselves are restored correctly.
+2. **A missed adaptation earlier in frame 4**: if frame 4's
+   `disable_cdf_update` is 0 (adaptation on), dav1d's count=1 means one
+   prior [3][0]-class read adapted in dav1d but not in Kinetix — i.e.
+   Kinetix's `allow_update_cdf` gate misfired for exactly one block.
+
+Frame 0's keyframe read shows count=15 (adaptation visibly ON for
+frames 0-3, counts growing 15→16→17→18 across frames 0-3 at this
+position), so adaptation is enabled in general; frame 4's count dropping
+to 0 in Kinetix (vs 1 in dav1d) is the anomaly. Note the counts ARE
+stored in K's CDF arrays (the `[31671, 32768, 0]` triple's third word),
+so the data path exists — the divergence is in what the frame-4 restore
+put there.
+
+### Next session's starting point (mechanical)
+
+1. Print the count word of `txb_skip[3][0]` at every read for frames
+   0-4 in Kinetix (the `DBG allzero` print already includes it) and the
+   equivalent `cdf.coef.skip[3][0][2]` in dav1d (extend KCOEF to dump
+   the count word `…[sctx][2]`); find the first frame/read where the
+   counts diverge.
+2. If it diverges at a frame boundary: audit `FrameCdfContext`'s
+   save/restore for the count words (they must round-trip like dav1d's
+   `dav1d_cdf_thread_copy`, which memcpy's the whole CDF struct).
+3. If it diverges mid-frame: audit K's `allow_update_cdf` gate against
+   frame 4's `disable_cdf_update` header bit.
+4. After the fix, shown frames 0-3's bottom-edge residues (11/130/192/
+   184 bytes at rows 295-299) and frames 4+ wholesale corruption should
+   all collapse together — they are the same drift surfacing at
+   different boundary values.
