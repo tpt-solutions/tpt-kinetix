@@ -10164,3 +10164,43 @@ differently.
    adaptation): the restored CDF VALUES differ and the hunt moves to the
    frame-4 initial CDF load (default tables vs restored context) with
    the 2099/31671 pair as the fingerprint.
+
+### Session cont'd 10 — drift quantified: same entry, same outcome, diverged distribution
+
+Corrected the count reading once more with the pre-read KAZ3 dump:
+**both decoders enter the leaf (24,88) all_zero read with count=0**
+(dav1d's earlier "count=1" was its post-update value from the KCOEF
+print; K's print is also pre-update). Kinetix parses frame 4's
+`disable_cdf_update=false` (adaptation on), matching dav1d's behaviour
+(count incremented by this very read on both sides).
+
+The divergence is the accumulated **CDF value**: at the same read with
+the same entering rng 63940 and the same outcome, dav1d's
+`coef.skip[3][0]` word is 2099 (P(all_zero) ≈ 6.4%) while Kinetix's
+`txb_skip[3][0][0]` is 31671 (P(all_zero) ≈ 3.35%). The two update
+schemes are exact complements in their respective layouts (verified:
+`word -= word>>rate` vs `cdf[0] += (32768-cdf[0])>>rate` keep
+`dav1d_word == 32768 - K_cdf0` invariant for identical histories), so
+equal histories would give dav1d_word = 32768 − 31671 = 1097. Observed
+2099 ≠ 1097 → the adaptation **history** (rate or count evolution, or a
+prior read's value flip) diverged somewhere in frames 0-4.
+
+The 2-symbol rate formulas match exactly (K: 3+[c>15]+[c>31]+
+floor_log2(2)=4+…; dav1d bool: 4+(c>>4); identical for all count
+values 0-32). So the remaining suspects: (a) the count EVOLUTION
+differs (K's count slots vs dav1d's — e.g. which reads increment which
+slot), or (b) a 3+-symbol CDF read somewhere in frames 0-3 (where K's
+rate formula DOES diverge: for 3-symbol CDFs K gives
+3+[c>15]+[c>31]+1 vs dav1d symbol 4+(c>>4)+1 — one lower at every
+count) subtly changing that CDF's bit consumption and cascading.
+
+### Next session's starting point (mechanical bisection)
+
+Dump the full (pre_rng, word/cdf, count) evolution of ONE well-hit
+CDF slot across frames 0-4 on both sides — txb_skip[3][0] is ideal
+(the ALLZERO/KAZ3 hooks already exist). The first read where
+K's post-value stops being 32768−dav1d's post-word marks the diverging
+read; inspect that read's symbol value and rate. If the slot history
+matches perfectly, repeat for a 3-symbol CDF slot (the rate-formula bug
+(c) above is a live candidate: any 3-symbol CDF in frames 0-3 adapts
+with a 1-lower rate in Kinetix than dav1d).
