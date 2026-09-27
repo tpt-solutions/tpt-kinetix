@@ -52,6 +52,53 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 16 (2026-09-28, continuation) — poc-5 MB(1,7) q2 fully instrumented on both sides; JM maps target 0 to mapped_idx=1 (poc 0) while our pair-granular match lands on L0[0] (poc 1); the remaining question is one identity-loop detail; all data recorded
+
+`KDER5` (ours): target=0, idx=0, tuple=(0,1), pic_a=1 (field_slice ✓),
+tb=4, td=6 (colPoc 7), dsf=171 → mv0=(-9,3). `JM_SCALE` + new `JML0` dump
+(same cell): JM L0 pocs = **[1, 0, 7, 6]** (identical to ours!), L1v0 = 7,
+mapped_idx = **1**, mv_scale = **183**, mv_y_conv = 5 (unconverted ✓).
+
+Scale 183 = iTRb 5 × prescale 2341 (iTRp 7): iTRb = 5 − 0 (pic_a = poc 0
+= L0[1] = the TOP field of pair 0/1); iTRp = 7 − 0. So JM maps target 0
+to **L0[1]** (the exact top-0 field) while our pair-granular entry-major
+match lands on **L0[0]** (bottom-1, via its frame_poc 0 == target).
+Naively identity-matching L0[0] via `top_field == top-0` should have made
+JM stop at L0[0] too — it did not, so JM's L0[0] entry's view pointers
+must not alias the way ours do (JM's L0[0] is the bottom-1 FIELD
+StorablePicture whose top_field points at the generated top VIEW of the
+frame store, and the colocated ref_pic is the ORIGINAL decoded top field
+picture — distinct objects when the pair was coded as two fields; the
+pointer identity then only matches the entry that was itself referenced).
+
+**Implication for our data model:** our tuples collapse the pair to
+(frame_poc, own_poc) and cannot distinguish "referenced the pair" from
+"referenced exactly this field". The clean fix is to carry the reference
+at field granularity end-to-end: the colocated picture's stored
+`list0_poc` should record the EXACT field poc each ref_idx used (which
+JM's slice lists do), and the B-slice matching should compare target ==
+own_poc exactly (no frame_poc fallback for field slices). Whether our
+P-field slices' stored L0 pocs are field-exact depends on the P-field
+ref-list construction (build_field_ref_list_l0) — that check is step 1.
+
+**Next session:**
+1. Print our poc-7 P-field's stored `list0_poc` (the col.list0_poc the
+   probe already prints as col=(...) — add col_l0 to the KCOL5 print) and
+   compare against JM's poc-7 slice L0 (JMREFLIST gate or the JML0 dump
+   re-gated to framepoc==7). If ours stores frame pocs where JM stores
+   field pocs (or vice versa), that IS the bug.
+2. Then set the matching to exact own_poc for field slices (drop the
+   frame_poc fallback) if step 1 shows field-exact pocs on both sides.
+3. Re-measure displays 3/4/6/61/82 (bottom-field class) — expect the
+   single-quadrant remnants (MB(1,7) q2 class) to close; the 44 exact
+   fields and 18/36/69 are unaffected (frame-colocated path untouched).
+
+**Housekeeping:** KDER5 probe still present in mv.rs (remove before
+commit); JM tooling: `ldecod_l0.exe` (JML0 list dump, gate framepoc==5
+MB(1,7)), `ldecod_scale5.exe`; traces `scale5b.log`, `l0.log`,
+`/tmp/runk4*.log`, `/tmp/runk5*.log`. Tree otherwise = 222bc92 clean,
+388/0, ITU green.
+
 ## SESSION #32d4 ADDENDUM 15 (2026-09-28, continuation) — the poc-5 divergence fully instrumented: ours matches L0[0]=(0,1)→dsf 171; JM matches mapped_idx=1→mvscale 183 (mv_y unconverted); JM's entry implies colPoc − pic_a = 12 with pic_a = −4 (the fn-1 P top field) — JM's L0 ordering/identity for the field slice differs from ours; next probe = print JM's L0 poc list
 
 `KDER5` (ours, poc-5 MB(1,7) q2, col=(-14,5)): target=0, idx=0,
