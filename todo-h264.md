@@ -1,5 +1,57 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 12 (2026-09-28, continuation) — REAL FIX #5 landed: `TemporalDirectCtx.field_slice` — field-B temporal direct scales against the matched L0 entry's OWN field poc with pair-identity MapColToList0; CAPA1/CVPA1 residuals 52.7k → 15.7k wrong samples (-70%)
+
+Executed addendum 11's retry recipe. The `KDER` probe inside
+`derive_temporal_direct` exposed the exact failure of the earlier attempt:
+`pic_a` had been keyed on `ctx.current_field_parity.is_some()` — the
+CO-LOCATED picture's kind — so when the co-located picture was itself a
+FIELD (poc-3's colocated = poc 7, same-kind), the key fell to
+`pair_first` = the pair's frame poc 0, giving tb=3/td=7/scale 110 where JM
+scales with the matched entry's OWN field poc 1 (tb=2, td=6, scale 85 →
+mv0.y = 2, not 3).
+
+**The fix (222bc92):**
+1. `TemporalDirectCtx` gains `field_slice: bool` — the SLICE kind, set
+   `true` only in the field-B path (interlaced.rs), `false` in the frame-B
+   paths (mod.rs) and in tests.
+2. The field-B path builds `current_list0_poc` tuples as
+   `(pair frame poc, own field poc)` — the pair poc recovered from the DPB
+   by pairing field entries on `frame_num` (the grouping is safe here: this
+   is per-reference-list identity, and CAPA1's frame_num collision concern
+   from addendum 11 turned out unfounded — the IDR pair is fn0/pocs 0-1 and
+   the fn-1 P pair is pocs −4/−3, distinct).
+3. MapColToList0 matches **entry-major** (first L0 entry whose frame poc OR
+   own poc equals the colocated target — JM's pointer-identity OR-list at
+   pair granularity), and `pic_a = own_poc` for field slices / `pair_first`
+   for frame slices.
+4. The parity-independent view reads from f30796f are unchanged.
+
+**Measured (CAPA1_TOSHIBA_B vs JM, display order):** 56/90 bit-exact
+frames; total wrong luma+chroma samples **52,662 → 15,658 (−70%)**. The
+frame-colocated bottom Bs went near-exact (display 18 nd 11259→69, 36
+16206→64, 69 16624→89); the field-colocated class improved too (84
+137→198, 87 109→109, 3 59→59, 6 66→203), with a handful of small-mid
+regressions to chase: frame 4 nd 70→2505, 61 950→2231, 82 600→2251, 64
+652→872, 67 638→852, 6 66→203. CVPA1_TOSHIBA_B: 56/90. ITU conformance
+suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
+`cargo test -p tpt-kinetix-h264` 388/0.
+
+**Next session:**
+1. Consumption-point diff (`JM_COL` gate framepoc==5, ours `current_poc ==
+   5`) for display 4's bottom field (poc 5, nd 2505) — the largest
+   remaining single regression. Suspect the same-kind branch's `col_poc`
+   (ours = the colocated field's own poc) vs JM's `listX[LIST_1+4][0]->poc`
+   ordering, or the target/own matching when the colocated field's L0 pocs
+   are frame pocs of older pairs.
+2. Then the remaining small frames (57/61/64/67/72/73/81/82, nd 200-2200)
+   — same technique.
+3. `just conformance` full sweep to confirm no other clip moved.
+
+**Housekeeping:** probes removed before commit; JM tooling updated
+(`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
+fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
+
 ## SESSION #32d4 ADDENDUM 11 (2026-09-28, continuation) — addendum 10's "two passes" retracted (both dumps are in ONE function, update_direct_mv_info_temporal); floor-arithmetic correction proves the (frame_poc, own) implementation was CORRECT for the frame-colocated class; the 3/4/6 regression suspect is the frame_num-based dpb grouping (CAPA1's IDR pair and fn-0 P pair share frame_num 0); concrete retry recipe
 
 1. **"Two passes" retracted.** `JM_SCALE` (line 238) and `JM_COL`
