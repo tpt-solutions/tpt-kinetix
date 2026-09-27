@@ -1439,17 +1439,19 @@ fn resolve_spatial_colocated_cells(
     mb_width: usize,
     ctx: Option<&TemporalDirectCtx>,
 ) -> Option<[MvCell; 16]> {
-    if let Some(parity) = ctx.and_then(|c| c.current_field_parity) {
-        // Current is a FIELD, co-located picture is a FRAME: local row `by`
-        // (this MB's own field-relative row) maps to frame row
-        // `2*(4*mb_row+by) + parity` (JM `mc_direct.c`; mirrors
-        // `apply_temporal_direct`'s `current_field_parity` branch).
+    if ctx.and_then(|c| c.current_field_parity).is_some() {
+        // Current is a FIELD, co-located picture is a FRAME: read through the
+        // frame's generated field view exactly like
+        // `apply_temporal_direct`'s `current_field_parity` branch — JM's
+        // `dpb_split_field` fills both parities' views identically, so the
+        // frame cell is `frame[2*RSD(y)][x]` with no parity term.
         let mut out = [MvCell::INTRA; 16];
         for by in 0..4usize {
-            let frame4 = 2 * (4 * mb_row + by) + parity as usize;
+            let y = 4 * mb_row + by;
+            let frame4 = 2 * rsd(y);
             let src = colocated.get((frame4 / 4) * mb_width + mb_col)?;
             for bx in 0..4usize {
-                out[by * 4 + bx] = src[(frame4 % 4) * 4 + bx];
+                out[by * 4 + bx] = src[(frame4 % 4) * 4 + rsd(bx)];
             }
         }
         return Some(out);
@@ -1795,10 +1797,17 @@ fn apply_temporal_direct(
                     MvYConv::FieldToFrame,
                 ));
             }
-            if let Some(parity) = ctx.current_field_parity {
-                // Current FIELD, co-located picture is a frame: read the
-                // SAME-parity field view — frame 4×4 row = 2·(field 4×4 row) +
-                // parity; col motion is in frame units.
+            if ctx.current_field_parity.is_some() {
+                // Current FIELD, co-located picture is a frame: read through
+                // the frame's generated field view. JM's `dpb_split_field`
+                // fills BOTH field views of a stored frame with the same
+                // RSD-resampled content (`fs_top->mv_info[j][i] =
+                // fs_btm->mv_info[j][i] = frame->mv_info[2*RSD(j)][RSD(i)]`),
+                // and the colocated read applies RSD again (idempotent), so
+                // the frame cell is `frame[2*RSD(y)][RSD(x)]` INDEPENDENT of
+                // the current field's parity — the parity term previously
+                // shifted every bottom-field read one 4×4 row down. Col
+                // motion is in frame units.
                 let v = if ctx.direct_8x8_inference_flag {
                     rsd(cy)
                 } else {
@@ -1809,7 +1818,7 @@ fn apply_temporal_direct(
                 } else {
                     cx
                 };
-                let frame4 = 2 * v + parity as usize;
+                let frame4 = 2 * v;
                 let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
                 return Some((
                     cell.get((frame4 % 4) * 4 + (vx % 4))?,
