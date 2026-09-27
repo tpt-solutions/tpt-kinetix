@@ -10357,3 +10357,40 @@ compared (both fully unfiltered, frames 0-7):
    today; add `KINETIX_AV1_NO_DEBLOCK`/`NO_CDEF`/`NO_LR` one-liners).
    The 11 bytes sit at rows 296-299 = the LR bottom stripe region — LR
    restoration first suspect (per cont'd 14's analysis), then CDEF.
+
+### Session cont'd 17 — COMPLETE STAGE BISECTION: the frame-0 residue is 100% in the CDEF stage
+
+Per-stage comparison using dav1d's `--inloopfilters {deblock,cdef,
+restoration}` and Kinetix's `NODEBLOCK`/`NOCDEF`/`NOLR` gates, frame 0:
+
+| stage | dav1d vs Kinetix |
+|---|---|
+| deblock only | **0 diffs** (bit-exact) |
+| cdef only | **11 diffs** at (600-607, 296-299) |
+| restoration only | **0 diffs** (bit-exact) |
+
+The entire residue is one CDEF 8×8 unit: CDEF-unit col 75, row 37
+(pixels 600-607 × 296-303, visible rows 296-299), ±1 on 11 of the 32
+visible samples. Deblock and LR are proven bit-exact for this frame.
+
+The CDEF unit's divergence: the filter reads grid rows 294-301 (all
+decoded, in both decoders — mi rows 74-75 exist), direction/strength
+entropy matched. Candidates: the direction search's gradient
+computation at the frame-bottom partial SB, the constrain arithmetic
+for specific tap patterns, or the primary/secondary tap selection for
+this unit's direction. The dump tool: `KINETIX_AV1_DBG_WPX`-style
+per-unit CDEF dumps exist in K's cdef path (check
+`KINETIX_AV1_DBG_CDEF`); dav1d's `cdef_apply_tmpl.c` accepts a targeted
+dump the same way.
+
+### Next session's starting point
+
+Dump the CDEF inputs for CDEF-unit (col 75, row 37) of frame 0 from
+both decoders: the 8×8 pre-CDEF pixel block, the computed direction,
+the damping/strength, and the per-tap constrain outputs. The first
+mismatched tap identifies the exact arithmetic difference. Given the
+unit is at the frame's bottom edge (rows 296-303, with rows 300-303 in
+the grid padding), check the bottom-edge direction-sample handling
+first — dav1d's `cdef_find_dir` and `constrain` use the full 8×8
+including padding rows; Kinetix's direction search may exclude or
+handle the padding rows differently.
