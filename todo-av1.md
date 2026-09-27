@@ -9027,6 +9027,68 @@ mi (14..18, 12..18), where the neighbouring `IBSUM` lines show
 `mv=(-43,-15)`/`(-53,-15)` `ref=[2,0]` and a mix of `mm=0`/`mm=1`/`mm=2` and
 `skip=true/false`. Next step is the `KINETIX_AV1_DBG_PRED`-style pre/post
 residual snapshot for that specific block to split prediction vs residual-add,
+
+## Session 2026-09-27 (cont'd 11) — the whole WARP path audited end-to-end against dav1d and found correct; residual still unfixed
+
+Continued cont'd 10's localisation of the frame-1 residual to mi (16,14)
+(8x8, `skip=true`, `ref=2`, `mv=(-43,-15)`, `mm=2`). Since the block is
+`skip`, its output is pure motion compensation, so the entire WARP path is the
+place to look. It was audited piece by piece against dav1d 1.5.4 and **every
+part matches**:
+
+- `find_matching_ref` (`decode.c:191-262`) vs `find_num_warp_samples`: the
+  top-edge first-cell test, the `aw4 >= bw4` "large neighbour" branch with its
+  `off`/`have_topleft`/`have_topright` adjustments, the `else` step loop, the
+  left-edge equivalents, top-left, and the `imax(bw4,bh4) < 32` guard on
+  top-right. Kinetix's `num_scanned` cap of 8 corresponds to dav1d's
+  `if (++count >= 8) return`, and both count only *ref-matching* neighbours.
+- `derive_warpmv`'s `add_sample` point encoding
+  (`pts[np][0] = 16*(2*dx + sx*bs) - 8`, `pts[np][1] = pts[np][0] + mv`) vs
+  Kinetix's `src_x = 16 * (2*px_dx + sx*nb_w4) - 8` / `dst = src + cell.mv` —
+  identical, including using the *neighbour's* block size.
+- `select_warp_samples` and `get_shear_params` (cont'd 10, re-confirmed).
+- `dav1d_find_affine_int` (`warpmv.c:149-205`) vs `find_affine_int`,
+  including the `abs(sx-dx) < 256 && abs(sy-dy) < 256` per-sample gate, the
+  `a`/`bx`/`by` accumulator forms, the `det = a00*a11 - a01*a01` (dav1d's
+  own `a[0][1]*a[0][1]`, not `a[1][0]`), and the `resolve_divisor_64` /
+  `get_mult_shift_{diag,ndiag}` least-squares solve.
+- `warp_affine` (`recon_tmpl.c:1115-1174`) vs `block_warp_process`: the 8x8
+  tiling, `src_y = by*4 + ((y+4)<<ss_ver)`, the `>> ss_hor`/`>> ss_ver` on
+  `mvx`/`mvy`, `dx = (mvx>>16) - 4`, and the
+  `mx = ((mvx & 0xffff) - alpha*4 - beta*7) & ~0x3f` /
+  `my = ((mvy & 0xffff) - gamma*4 - delta*4) & ~0x3f` phase derivation.
+- The `warp_eligible = bw > 4 && bh > 4` gate: verified this is the correct
+  pixel-unit restatement of dav1d's `imin(bw4,bh4) > 1`. The block is
+  `bw4=2 bh4=2` = 8x8 px, so `bw = 8` in the log and the gate passes exactly
+  as dav1d's would. (Initially misread `bw=8` as evidence the block was 8x8
+  *mi*; it is 8x8 *pixels* — no bug.)
+
+### Two hypotheses raised and discarded this session
+
+1. That `warp.rs`'s `find_affine_int(...)? ; get_shear_params(...)?` chain
+   differed from dav1d's `!f() && !g()`. It does not — see cont'd 10.
+2. That the `warp_eligible` gate used the wrong unit (mi vs px, or 4x4 vs
+   px). It does not — traced above.
+
+### Status: still not fixed
+
+No code change landed this session (the only diff was already committed as
+`f25f900`). The residual is **unchanged at 7390 bytes**, and with
+`KINETIX_AV1_NO_WARP=1` still 7264 — so the base translational MC or the
+reference this block reads is wrong *independently* of warp, and the whole
+warp path has now been cleared as the cause.
+
+That points the next session away from `warp.rs` entirely and at the
+**reference resolution** for this frame: mi (16,14) reads `ref=2`, and the
+blocks in this frame use ref `2` (69 blocks) and ref `7` (10). The concrete
+next step is to dump, for this one block, the *actual reference plane bytes*
+at the sampled positions (`motion_compensate`'s `px_x + tile_px_x0`,
+`mvs[0]`, filter pair) and compare them against the same coordinates in the
+frame that `ref 2` resolves to — i.e. verify that `ref_to_slot[2]` names the
+plane the encoder intended, and that the stored reference frame is the
+post-filter frame (a stale pre-filter reference would produce exactly this
+kind of large, spatially-localised, MC-shaped error).
+
 now that the frame gate is trustworthy. Use `KINETIX_AV1_DBG_PXY_FRAME` to
 scope any stage trace — do not trust an unscoped one.
 
