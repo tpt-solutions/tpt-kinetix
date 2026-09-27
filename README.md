@@ -22,6 +22,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | --- | --- | --- |
 | MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
 | MKV / WebM demux | 🟡 Basic | EBML parsing; subset of elements |
+| MPEG-TS demux | ✅ Works | ⚖️ Royalty-free. PAT/PMT parsing, PES depacketization with PTS/DTS, PCR tracking; unlocks HLS/broadcast input. H.264 comes out Annex-B framed; round-trips through the HLS `TsMuxer` and matches `ffprobe` on real clips (`tpt-kinetix-demux`) |
 | MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 26 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, real PAFF pixels, 4:2:2/4:4:4) are tracked, not yet fixed |
 | AV1 decode | 🟡 Not pixel-exact | Intra and inter reconstruction, transforms, deblock/CDEF/restoration, reference management, and temporal MV reconstruction are implemented. The local synthetic intra corpus is 6/6 byte-exact vs dav1d and the synthetic inter corpus is 4/5 entries exact, but the official FFmpeg FATE AV1 set currently passes only 1/198 comparable frames (its closest keyframe reaches ~67 dB luma PSNR vs dav1d after the CDEF strength-table read-order fix); `pixel_exact` remains false pending official-vector closure (`todo-av1.md`). |
@@ -30,7 +31,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities. `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path, H.264 input the `codec-h264` path. `stream` is still a stub. |
+| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path, H.264 input the `codec-h264` path. `stream` is still a stub. |
 
 > ⚠️ **Decode correctness:** The H.264 and VP9 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
@@ -84,7 +85,7 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-core        — shared types: Frame, Packet, Timestamp, PixelFormat, Error
 │
-├── tpt-kinetix-demux       — container demuxers (MP4 first; MKV / TS planned)
+├── tpt-kinetix-demux       — container demuxers (MP4, MKV/WebM, MPEG-TS)
 │
 ├── tpt-kinetix-mux         — container muxers (progressive MP4 for H.264)
 │

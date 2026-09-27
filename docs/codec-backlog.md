@@ -24,8 +24,12 @@ Tracked candidates in priority order:
 
 Not a codec but adjacent and high-leverage: an **MPEG-TS demuxer** in
 `tpt-kinetix-demux` unlocks broadcast and HLS *input* (HLS is output-only today).
+**Shipped 2026-09-27** (`tpt-kinetix-demux/src/ts.rs`): PAT/PMT, PES
+depacketization, PCR, key-frame indicators.
 
-Done: AAC-LC decode (see `codec-evaluations/aac.md`). Dropped: HEVC/H.265
+Done: AAC-LC decode (see `codec-evaluations/aac.md`; audio codecs now live in
+the `tpt-cadence` repo), VP9 decode (`todo-vp9.md`), MPEG-TS demuxer. Dropped:
+HEVC/H.265
 (see `codec-evaluations/hevc.md` for the technical evaluation, retained for reference).
 
 Add new candidates here as they are prioritized.

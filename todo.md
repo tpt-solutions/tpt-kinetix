@@ -145,7 +145,8 @@ Everything below is independent of the H.264 decoder effort:
 - **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
   Kinetix-vs-TMC13 comparison blocked on coding-tool alignment; decoder still
   reports `pixel_exact: false`.
-- **Royalty-free codec expansion — VP9 done; audio codecs moved out.**
+- **Royalty-free codec expansion — VP9 done; audio codecs moved out; MPEG-TS
+  demuxer done.**
   Direction set 2026-09-03: **VP9 decode → Opus decode → MP3 decode**, plus
   an **MPEG-TS demuxer**. **VP9 shipped 2026-09-26** (see todo-vp9.md):
   13-clip ffmpeg/libvpx corpus byte-exact, `pixel_exact: true`, wired into
@@ -153,11 +154,10 @@ Everything below is independent of the H.264 decoder effort:
   repo's work** (2026-09-26): all audio codecs (AAC, Opus, MP3) live in the
   separate `tpt-cadence` repo
   (`D:\Programming\1PRODUCTION\Open Source\tpt-cadence`) — don't re-add a
-  `tpt-kinetix-opus`/`tpt-kinetix-mp3` crate here. **The MPEG-TS demuxer is
-  now the only remaining item on tpt-kinetix's own royalty-free roadmap**
-  (it's a container/demux concern, not an audio codec). HEVC/H.265 stays
-  **dropped**. Full task list in Phase 9 RF below; see
-  `docs/codec-backlog.md`.
+  `tpt-kinetix-opus`/`tpt-kinetix-mp3` crate here. **The MPEG-TS demuxer
+  shipped 2026-09-27** (`tpt-kinetix-demux/src/ts.rs`; see the Phase 9 RF
+  item below) — **the royalty-free roadmap is now fully closed.**
+  HEVC/H.265 stays **dropped**. See `docs/codec-backlog.md`.
 - ~~**CLI `transcode` / `stream` subcommands are stubs.**~~ Stale as of
   2026-09-03 reconciliation: `transcode` (MP4→IVF/AV1 via the real pipeline)
   and `stream` (RTMP ingest → HLS output) are both implemented in
@@ -1930,10 +1930,15 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
       moved to the separate `tpt-cadence` audio-codec repo**
       (`D:\Programming\1PRODUCTION\Open Source\tpt-cadence`), alongside AAC
       and Opus. Don't add a `tpt-kinetix-mp3` crate here.
-- [ ] **MPEG-TS demuxer (adjacent, high-leverage)** — not a codec: add TS
-      demux to `tpt-kinetix-demux` (PAT/PMT, PES depacketization, PCR). Unlocks
-      broadcast + HLS *input* (HLS is output-only today). Smaller than any codec
-      above; multiplies the usefulness of the decoders already done.
+- [x] **MPEG-TS demuxer (adjacent, high-leverage)** — **shipped 2026-09-27**:
+      `tpt-kinetix-demux/src/ts.rs` implements PAT/PMT (incl. multi-packet PSI
+      sections and registration-descriptor codec identification), PES
+      depacketization with PTS/DTS recovery, PCR tracking, adaptation-field
+      random-access indicators for key frames, and sync re-acquisition. CLI
+      `probe` sniffs `.ts` input; roundtrip-tested against the HLS `TsMuxer`
+      and against real ffmpeg clips (packet count + first PTS match `ffprobe`).
+      Fuzzed (`fuzz_ts`) + propestested. This closes the last item on the
+      royalty-free roadmap.
 
 ## Phase 10 — Platform Review Follow-ups (2026-07-18)
 

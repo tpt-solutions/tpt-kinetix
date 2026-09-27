@@ -3,18 +3,21 @@
 //! Supported formats:
 //! - [`mp4`] — ISO BMFF / MP4
 //! - [`mkv`] — basic Matroska / WebM (EBML)
+//! - [`ts`] — MPEG-TS / MPEG-2 Transport Stream (broadcast + HLS segments)
 //!
 //! All demuxers implement the [`Demuxer`] trait, allowing them to be used
 //! interchangeably in the pipeline.
 
 pub mod mkv;
 pub mod mp4;
+pub mod ts;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use mkv::MkvDemuxer;
 pub use mp4::Mp4Demuxer;
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};
+pub use ts::TsDemuxer;
 
 /// Common interface implemented by all container demuxers.
 pub trait Demuxer {

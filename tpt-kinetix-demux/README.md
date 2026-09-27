@@ -7,6 +7,11 @@ trait.
   sample-table timing, packet extraction.
 - **Matroska / WebM** (`mkv`) — basic EBML reader: track enumeration and
   SimpleBlock/Block frame extraction (no seeking index or advanced lacing yet).
+- **MPEG-TS** (`ts`) — 188-byte packet sync/re-sync, PAT/PMT parsing
+  (including multi-packet PSI sections), PES depacketization with PTS/DTS
+  recovery, PCR tracking, and adaptation-field random-access indicators for
+  key-frame detection. Covers broadcast and HLS `.ts` segment input; H.264
+  packets come out Annex-B framed, ready for the H.264 decoder.
 
 ## WebAssembly
 

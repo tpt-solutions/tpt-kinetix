@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tpt_kinetix_demux::Demuxer as _;
 use tpt_kinetix_vision::{VisionDecoder, VisionDecoderImpl};
 
 #[derive(Parser)]
@@ -23,7 +24,7 @@ struct Cli {
 enum Commands {
     /// Inspect a media container and print its tracks (demux-only, runnable today).
     Probe {
-        /// Input file path (MP4/ISO-BMFF).
+        /// Input file path (MP4/ISO-BMFF or MPEG-TS).
         input: PathBuf,
     },
     /// Transcode a media file (e.g. H.264 MP4 → AV1).
@@ -135,13 +136,18 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Inspect an MP4/ISO-BMFF container and print a summary of its tracks.
+/// Inspect a media container and print a summary of its tracks.
 ///
 /// This exercises only the demux/identification path, which is fully
-/// implemented today (unlike `transcode`/`stream`).
+/// implemented today (unlike `transcode`/`stream`). The container format is
+/// sniffed: MPEG-TS (0x47 sync at the 188-byte packet pitch) or MP4.
 fn probe(input: &std::path::Path) -> Result<()> {
     let data = std::fs::read(input)
         .with_context(|| format!("failed to read input file: {}", input.display()))?;
+
+    if looks_like_mpeg_ts(&data) {
+        return probe_ts(input, data);
+    }
 
     let demuxer = tpt_kinetix_demux::Mp4Demuxer::new(data)
         .with_context(|| format!("failed to parse MP4 container: {}", input.display()))?;
@@ -180,6 +186,89 @@ fn probe(input: &std::path::Path) -> Result<()> {
             };
             println!("    decoder: {status} — {}", caps.notes);
         }
+    }
+
+    Ok(())
+}
+
+/// Heuristic container sniff: 0x47 sync byte at offset 0, confirmed by the
+/// next packet's sync byte when the file is longer than two packets.
+fn looks_like_mpeg_ts(data: &[u8]) -> bool {
+    data.len() >= 188 && data[0] == 0x47 && (data.len() < 376 || data[188] == 0x47)
+}
+
+/// Inspect an MPEG-TS stream and print its programs, streams, and a
+/// per-PID packet summary.
+fn probe_ts(input: &std::path::Path, data: Vec<u8>) -> Result<()> {
+    let mut demuxer = tpt_kinetix_demux::TsDemuxer::new(data)
+        .with_context(|| format!("failed to parse MPEG-TS stream: {}", input.display()))?;
+
+    println!("File: {}", input.display());
+    println!("Format: MPEG-TS");
+    for program in demuxer.programs() {
+        println!(
+            "  program #{num}: PMT PID {pmt:#06x}, PCR PID {pcr}",
+            num = program.program_number,
+            pmt = program.pmt_pid,
+            pcr = program
+                .pcr_pid
+                .map(|p| format!("{p:#06x}"))
+                .unwrap_or_else(|| "none".into()),
+        );
+    }
+    println!("Streams: {}", demuxer.streams().len());
+    for stream in demuxer.streams() {
+        let codec = stream
+            .codec
+            .map(|c| c.name().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "  pid {pid:#06x} [{media:?}] codec={codec} stream_type={st:#04x}{}",
+            if stream.is_pcr { " [PCR]" } else { "" },
+            pid = stream.pid,
+            media = stream.media_type,
+            st = stream.stream_type,
+        );
+        if let Some(caps) = decoder_capabilities_for(stream.codec) {
+            let status = if caps.pixel_exact {
+                "pixel-exact"
+            } else {
+                "NOT pixel-exact (placeholder output)"
+            };
+            println!("    decoder: {status} — {}", caps.notes);
+        }
+    }
+
+    // Walk the packets for a per-PID summary (count, PTS range, key frames).
+    #[derive(Default)]
+    struct Summary {
+        packets: usize,
+        key_frames: usize,
+        first_pts_ms: Option<i64>,
+        last_pts_ms: Option<i64>,
+    }
+    let mut summaries: std::collections::BTreeMap<u32, Summary> = Default::default();
+    while let Some(pkt) = demuxer.read_packet()? {
+        let s = summaries.entry(pkt.stream_index).or_default();
+        s.packets += 1;
+        if pkt.is_key_frame {
+            s.key_frames += 1;
+        }
+        if let Some(ms) = pkt.pts.as_millis() {
+            s.first_pts_ms.get_or_insert(ms);
+            s.last_pts_ms = Some(ms);
+        }
+    }
+    for (pid, s) in summaries {
+        let range = match (s.first_pts_ms, s.last_pts_ms) {
+            (Some(first), Some(last)) => format!("pts {first}..{last} ms"),
+            _ => "pts unknown".to_string(),
+        };
+        println!(
+            "  pid {pid:#06x}: {n} packets, {range}, {keys} key frames",
+            n = s.packets,
+            keys = s.key_frames,
+        );
     }
 
     Ok(())
