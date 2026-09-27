@@ -10102,3 +10102,26 @@ put there.
    184 bytes at rows 295-299) and frames 4+ wholesale corruption should
    all collapse together — they are the same drift surfacing at
    different boundary values.
+
+### Session cont'd 8 addendum — the count anomaly is at RESTORE, not mid-frame
+
+Static trace of dav1d's decode order for frame 4 (per-tile-row sbrow
+interleave): tile 1's sbrow 0 blocks before (24,88) are ALL skip
+(no coefficient reads), and tiles have independent CDF copies seeded
+from `f->in_cdf` at `setup_tile`. Therefore dav1d's count=1 at (24,88)
+is the value **restored from frame 4's initial CDF context** — the
+`cdf_thread_update` zeroing notwithstanding. Either frame 4's
+primary_ref context was saved by a path that preserves counts, or the
+stream never refreshed a context and dav1d's *default* tables carry
+non-zero count words for coef slots (the `CDF1(x)` macro only
+initialises the value word; the count word's default needs one dump at
+frame-0 start to settle — frame 0's first masked read already showed
+count=24 after 24 in-frame adaptations, so the pre-frame value is
+masked; a dump at frame 0's FIRST coef read of each slot settles it).
+
+Kinetix's restored count is 0 where dav1d's is 1: with adaptation
+enabled the rate differs (`count >> 4` term), the CDFs drift, and the
+bit consumption eventually flips — frame 4's cascade. The fix will
+either round-trip counts through Kinetix's `FrameCdfContext` exactly as
+dav1d's restore does, or (if dav1d's defaults genuinely carry counts)
+seed Kinetix's default coef-CDF counts to match.
