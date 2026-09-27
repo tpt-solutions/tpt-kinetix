@@ -10307,3 +10307,18 @@ bottom stripe or by substituting the replicated edge row into `seg_src`
 Then re-check: frame 0 → 0 bytes expected; frames 1-3 residues should
 collapse; later frames' remaining diffs are independent (frame 4's
 OBMC/interintra investigation continues per cont'd 5-6).
+
+### Session cont'd 15 — bottom-clamp experiment: negative; current behavior is closest
+
+Tested extending the LR vertical sample clamp into the mi-grid padding
+rows (ph 300→304): frame 0 got slightly WORSE (11→14 bytes). Reverted —
+Kinetix's current edge-replication at the visible bottom is the closer
+match to dav1d. The ±1 residue at (600-607, 295-299) is therefore NOT
+the bottom tap reach; remaining candidates for the final 11 bytes:
+the wiener vertical-pass rounding at the last stripe's partial rows
+(rows 297-299 taps), the seg_src boundary substitution content
+(boundary_src = pre-CDEF rows vs dav1d's lpf lines at the LAST sbrow),
+or a post-CDEF difference on rows 293-302. Each needs the same
+dav1d-vs-K pixel dump technique at the pre-LR stage (dav1d PRED dumps
+exist for this; K's KINETIX_AV1_DBG_PRED covers inter blocks only — an
+intra-path pre-LR dump is the missing tool).
