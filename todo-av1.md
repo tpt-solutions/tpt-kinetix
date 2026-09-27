@@ -10276,3 +10276,34 @@ primary suspect for the whole cascade — it desyncs from frame 1's first
 leaf while producing nearly-identical pixels (the sub-blocks reconstruct
 the same content), which explains every "tiny residue, wholesale late
 corruption" symptom in this stream.
+
+### Session cont'd 14 — frame-0 entropy proven in sync; the residue is the LR bottom-stripe vertical pass
+
+Clean single-frame capture (max=1 packet → all events are frame 0's, no
+attribution ambiguity) with all hooks resolved the earlier confusion:
+the "four all_zero reads at (0,0)" were parallel-tile events interleaved
+in the trace — tile 0's own first leaf matches dav1d perfectly:
+
+- PART (0,0) 64×64 SPLIT, PART (0,0) 32×32 NONE — post-rng 34459 ✓
+- K's leaf modes end at rng 55066 = dav1d's Post-filterintramode 55066 ✓
+- K's all_zero: txc3, pre 55066, **cdf word 30669 = 32768 − dav1d's 2099**
+  — the two CDF domains are exact complements; the states MATCH.
+
+Frame 0's entropy decode is bit-accurate; the 11-byte residue at
+(600-607, 296-299) is a **loop-restoration bottom-stripe arithmetic
+difference**: the last stripe (rows 256-299, the merged trailing unit)
+applies its vertical wiener taps at rows 297-299 by clamping into the
+grid rows 300-302 (which hold real mi-grid padding reconstruction),
+while dav1d treats the frame bottom as no-LR_HAVE_BOTTOM (the
+out-of-stripe rows replicate/clamp at the last visible row). The visible
+result is ±1 luma on smooth content — frames 1-3's rows 295-299 residues
+inherit it through inter prediction.
+
+Next session: make the vertical sample fetch in the final stripe clamp
+at the last visible row (row 299) instead of reading mi-grid padding
+rows — either by clamping `src_at`'s y at `h - 4`-equivalent for the
+bottom stripe or by substituting the replicated edge row into `seg_src`
+(the same mechanism already used for inter-stripe top/bottom borders).
+Then re-check: frame 0 → 0 bytes expected; frames 1-3 residues should
+collapse; later frames' remaining diffs are independent (frame 4's
+OBMC/interintra investigation continues per cont'd 5-6).
