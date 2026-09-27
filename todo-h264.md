@@ -1,5 +1,79 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 8 (2026-09-28) — REAL FIX #4 landed: field-B colocated reads of a FRAME reference must ignore parity (JM's dpb_split_field fills both field views identically); field-pair residual diffs drop ~40-90%; addendum 7's "poc-138 grid structurally wrong" retracted as another cross-coordinate misread
+
+Continued addendum 7 with the consumption-point comparison done RIGHT this
+time: `JM_COL` gained `mby` (the un-gated dump had been mixing every MB
+row's `mbx` into one undistinguishable stream — the root of BOTH addendum
+7's false alarm and this session's first false trail), and `KCOL` was
+re-added to `apply_temporal_direct` gated `current_poc == 134 && mb_row
+== 0`.
+
+**Two addendum-7 conclusions retracted:**
+1. *"Our stored poc-138 grid is structurally wrong"* — WRONG. The `KG138`
+   cells had been read with (mb, blk) indexing while `JMG` prints ABSOLUTE
+   4×4 coordinates `(j4, i4)`; `mb1 blk0` is `JMG(0,16)`, not `JMG(1,0)`.
+   Re-compared in absolute coordinates, the stored grid matches JM exactly
+   (`KST138` at store time: mb0 blk0 `(0,5)`, blk3 `(-5,0)` = `JMG(0,0)` /
+   `JMG(0,3)`). The predictor probes (`PSUB` vs `JM_PRED`, framepoc 138)
+   also agree prediction-for-prediction and mvd-for-mvd on every sub-block
+   of MB0/MB2. The single-call `parse_p_slice_cabac` path produces the
+   correct grid; there is no poc-138 grid bug.
+2. *"Colocated reads at poc-134 diverge structurally"* — also a comparison
+   artifact (JM's side mixed all MB rows). With `mby` on both sides, the
+   TOP field's reads match JM exactly under the committed code.
+
+**The real bug was one line: the parity term.** JM's `dpb_split_field`
+("Generate field MVs from Frame MVs") fills BOTH field views of a stored
+frame with the IDENTICAL RSD-resampled content:
+`fs_top->mv_info[j][i] = fs_btm->mv_info[j][i] = frame->mv_info[2*RSD(j)][RSD(i)]`
+— and since the colocated read applies RSD again (idempotent on RSD's
+image), the effective frame cell for a field-B direct read is
+`frame[2*RSD(y)][RSD(x)]` INDEPENDENT of the current field's parity. Our
+`current_field_parity` branch computed `2*rsd(y) + parity` — correct for
+every TOP field and one 4×4 row off for every BOTTOM field. (This also
+explains why the field-pair clips were "almost exact": top field right,
+bottom field subtly wrong.) The `dpb_split_field`-based mapping attempted
+in addendum 7 was the same conclusion derived through the wrong evidence;
+its regression came from ALSO changing the row formula to `2*RSD(y>>1)`
+(a `dpb_split_field` loop-variable reading that conflates the view's row
+index with the 8×8 row) — the correct formula keeps `2*RSD(y)`.
+
+**Fixed** in `apply_temporal_direct`'s `current_field_parity` branch
+(`frame4 = 2*rsd(cy)`, no parity term) and mirrored in
+`resolve_spatial_colocated_cells`' parity branch (same view semantics for
+spatial's colZero grid copy).
+
+**Effect — measured.** CAPA1_TOSHIBA_B: still 56/90 bit-exact frames, but
+the field-pair frames' wrong-sample counts dropped sharply — frame 42
+2391→87, frame 24 2165→341, frame 28 2329→393, frame 21 1972→282, frame 48
+720→105, frame 69 39864→16624, frame 79 173→26; total wrong luma samples
+~87.0k → ~52.7k (-40%), no frame regressed. CVPA1_TOSHIBA_B likewise 56/90.
+ITU conformance suite passes; gates on the clean tree: fmt, clippy
+`-D warnings`, `cargo test -p tpt-kinetix-h264` 388/0.
+
+**Next session:**
+1. The large field-pair frames (CAPA1 18: nd≈11.3k, 36: ≈16.2k, 69: ≈16.6k)
+   still dominate the residue. With the frame-reference reads now proven
+   correct at poc-134, apply the same consumption-point diff to a
+   bottom-field B slice (`JM_COL` gate `framepoc == 135`, ours
+   `current_poc == 135`) — the parity fix changed exactly those reads, so
+   any leftover divergence there is now isolated and fresh.
+2. The frame-B pictures (poc 136 class) and the tiny-diff frames
+   (3/4/6, nd≈60, max=2 — deblock-bS-on-field-edges suspect) remain.
+3. `resolve_spatial_colocated_cells`' colZero mapping got the matching
+   parity fix but is untested by CAPA1 (spatial-direct is off); a
+   spatial-direct field clip (e.g. CVFI1/CFHHP3 class) should be
+   re-measured before trusting it.
+
+**Housekeeping:** probes removed (one PSUB probe briefly leaked into the
+fix commit and was amended away — final `dae9174` contains only the two
+parity-branch fixes); gates as above. JM tooling: `ldecod_col4.exe`
+(`JM_COL` with mby, gate framepoc==134), `ldecod_pred138.exe`
+(`JM_PRED` framepoc==138 row 0), `ldecod_grid138.exe` (`JMG` poc==138);
+traces in `/tmp/jm_bin/{col134c,grid138,pred138}.log` and
+`/tmp/runk2[4-9].log`.
+
 ## SESSION #32d4 ADDENDUM 7 (2026-09-27, continuation) — field-B residue chased to the FRAME-P reference grids (poc-138 class): our stored grid for the reference P frame differs structurally from JM's while its PIXELS are display-exact; field-view RSD mapping implemented then REVERTED pending that grid fix; next-step list updated
 
 Took addendum 6's step 2 (field-coded B pictures' temporal direct) with the
