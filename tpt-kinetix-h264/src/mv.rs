@@ -1698,11 +1698,32 @@ fn derive_temporal_direct(
     // bottom_field or frame picture is the co-located cell's reference): for
     // each entry in list order, the target matches either the pair's frame
     // poc or the entry's own field poc.
-    let ref_idx_l0 = ctx
-        .current_list0_poc
-        .iter()
-        .position(|&(frame_poc, own_poc)| target_poc == frame_poc || target_poc == own_poc)
-        .unwrap_or(0);
+    // Match priority follows the CO-LOCATED picture's kind: a frame co-located
+    // picture references pairs/frames, so its targets are pair pocs (match
+    // the pair first); a field co-located picture references exact fields,
+    // so its targets are field pocs (match the field first). Both then scale
+    // against the matched entry's OWN field poc for field slices.
+    let ref_idx_l0 = if ctx.current_field_parity.is_some() {
+        ctx.current_list0_poc
+            .iter()
+            .position(|&(pair, _)| target_poc == pair)
+            .or_else(|| {
+                ctx.current_list0_poc
+                    .iter()
+                    .position(|&(_, own)| target_poc == own)
+            })
+            .unwrap_or(0)
+    } else {
+        ctx.current_list0_poc
+            .iter()
+            .position(|&(_, own)| target_poc == own)
+            .or_else(|| {
+                ctx.current_list0_poc
+                    .iter()
+                    .position(|&(pair, _)| target_poc == pair)
+            })
+            .unwrap_or(0)
+    };
     let Some(&(pair_first, own_poc)) = ctx.current_list0_poc.get(ref_idx_l0) else {
         return (mv_col, ref_idx_l0 as i32, [0, 0]);
     };
