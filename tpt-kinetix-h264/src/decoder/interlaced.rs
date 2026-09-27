@@ -2370,6 +2370,17 @@ impl H264Decoder {
             .unwrap();
         }
         Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+        #[cfg(debug_assertions)]
+        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            std::fs::write(
+                format!(
+                    "{path}_bpost_poc{current_poc}_bottom{}.gray",
+                    header.bottom_field_flag
+                ),
+                &recon.luma,
+            )
+            .unwrap();
+        }
         let field_pocs_l0: Vec<i64> = ref_l0.iter().map(|f| f.pic_order_cnt).collect();
         let field_pocs_l1: Vec<i64> = ref_l1.iter().map(|f| f.pic_order_cnt).collect();
         self.finalize_field(
