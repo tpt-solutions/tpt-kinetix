@@ -10434,3 +10434,36 @@ reference's padding rows 300-303, which differ for the same reason.
 2. Fix the deblock bottom edge → the CDEF direction, frame 0's 11
    bytes, frames 1-3's bottom-row residues, and probably most of the
    frames 4+ cascade collapse together.
+
+### Session cont'd 19 — the divergence is the CDEF DIRECTION SEARCH (dir 0 vs 2, same input)
+
+Stage isolation completed with single-stage comparisons on frame 0:
+- deblock-only (both decoders): 0 diffs
+- cdef-only (both decoders): **11 diffs at (600-607, 296-299)** — the
+  exact full-filter residue
+- LR-only (both decoders): 0 diffs — K's LR matches dav1d's LR exactly,
+  INCLUDING the bottom stripe (the cont'd-14 bottom-clamp concern is
+  settled: K's LR bottom handling is correct)
+
+So: identical CDEF input (the unfiltered recon, proven identical), and
+the per-unit dump shows strengths/damping match (pri 2, adj 1, sec 1,
+damping 4) but the **direction differs: dav1d dir=0, Kinetix dir=2**.
+
+The direction search reads the 8×8 pre-CDEF block at (600,296) — an
+identical input in both decoders. Two remaining candidates:
+(a) K's `cdef_direction` cost/partial-sum construction has a
+transcription bug that flips the argmax for this content pattern
+(compare the full cost[8] arrays), or
+(b) K's direction→tap-offset mapping (CDEF_DIRECTIONS table indexing)
+differs from dav1d's (the same spec direction number maps to different
+neighbour offsets).
+
+### Next session's starting point (mechanical)
+
+Dump the 8×8 input block and the full cost[8] array for this unit from
+both decoders (dav1d: `dav1d_cdef_find_dir_c` in cdef_tmpl.c — add a
+cost print gated on a pixel fingerprint; K: `cdef_direction` in
+loop_filter.rs — add the same). If the costs match and only the argmax
+differs → mapping bug (b). If the costs differ → partial-sum
+transcription bug (a). Then verify K's dir→CDEF_DIRECTIONS offset table
+against dav1d's `cdef_dirs` for the winning direction.
