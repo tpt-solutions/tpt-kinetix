@@ -433,7 +433,7 @@ impl<'a> TileDecodeState<'a> {
         } else {
             self.mode_cdfs.read_skip(&mut self.dec, skip_ctx) == 1
         };
-        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok() && mi_row < 40 && mi_col < 40;
+        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok();
         if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={}",
@@ -1268,7 +1268,7 @@ impl<'a> TileDecodeState<'a> {
                 }
                 if dbg_b0 {
                     eprintln!(
-                        "DBG b0 motion_mode={motion_mode} warp_allowed={allow_warp} rng={}",
+                        "DBG b0 motion_mode={motion_mode} warp_allowed={allow_warp} mi=({mi_col},{mi_row}) rng={}",
                         self.dec.raw_state().0
                     );
                 }

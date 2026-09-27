@@ -8560,3 +8560,40 @@ no further recursion). The four 8-wide KSKIP events suggest Kinetix's
 walker splits 32×16 leaves into 8×16 sub-blocks where dav1d keeps them
 whole — likely in the bsize sub-block table for H/V partitions at
 32×16, or the bl=3 → bl=4 recursion gate.
+
+## Session 2026-09-27 (cont'd 5) — frame-4 entropy desync narrowed to one symbol slot: the interpolation-filter read of a 32×16 OBMC leaf
+
+Continuing from the frame-4 tile-1 divergence: with frame-aligned traces
+(`DBGSEQ` delimiters + `DBG_B0` position tag added to the motion_mode print,
+b0 position clamp removed), frame 4's tile-1 leaf (24,88) — 32×16 H-split
+leaf, skip=0, NEWMV mv=(12,0), motion_mode=OBMC — matches dav1d on every
+anchored symbol: skip rng 47768 ✓, intra 47155 ✓, motion_mode 64960 ✓, yet
+the luma coefficient read lands at rng **63102 vs dav1d's 37474** while
+decoding the *same* visible result (tx 32×16, one DC coefficient, pixels
+exact). The only unanchored symbol between the matched anchors is the
+**interpolation-filter read** (dav1d `Post-subpel_filter[0,ctx=0]:
+r=63940`; both decoders select filter 0/REGULAR, so the pixel output is
+unaffected — but the bit consumption differs, permanently desyncing the
+entropy decoder from this leaf onward and producing frame 4's 91k-diff
+cascade and every later frame's corruption).
+
+Working hypothesis: the filter symbol's *context derivation* (Kinetix
+`filter_left`/`filter_above` ref-match + `add` folding vs dav1d's
+`nctx` accumulation over `a->filter[bx4]`/`l->filter[by4]`) picks a
+different CDF for this block — the selected symbol coincides, the
+consumed bits do not. dav1d's ctx here is 0 (`Post-subpel_filter[0,ctx=0]`).
+
+### Next session's starting point
+
+Leaf (24,88) frame 4 (32×16, OBMC, NEWMV): print Kinetix's filter `ctx`
+and pre/post rng at the `interp_filter[ctx]` read (the existing
+`DBG b0 filter{dir}` print inside the switchable branch covers this —
+it did not fire in the capture because `frame_filter != INTERP_SWITCHABLE`
+for the anchor blocks checked; confirm which branch frame 4's leaf takes),
+and compare the ctx derivation against dav1d's `filter` context semantics
+(neighbour filter value only when the neighbour is inter AND shares the
+reference; 3 = none). The `DBG_B0` position clamp is already removed.
+
+Also remaining (unchanged): frame 0's 11 bottom-edge bytes (merged-LR
+wiener bottom border) and the shown-frames 1-2 bottom rows propagating
+from it.
