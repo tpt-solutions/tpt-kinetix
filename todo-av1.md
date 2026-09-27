@@ -8952,6 +8952,66 @@ over-read the all-`e` map.
   single filter toggle explains the residual, consistent with the error
   preceding all of them.
 - The deblock edge at that location *is* processed (`lvl=4`, `fs=8`,
+
+## Session 2026-09-27 (cont'd 10) — frame-1 residual localised to a WARP skip block; warp model derivation audited and found correct
+
+Continued cont'd 9's finding that pixel (65,62) is wrong by 187 *pre-filter*.
+
+### Localisation
+
+- The owning block is mi **(16,14)** — 16x16, `ref=[2,0]`, `mv=(-43,-15)`,
+  `skip=true`, `mm=2` (**WARP**). `skip=true` means no residual, so the final
+  value *is* the motion-compensated prediction: this is squarely an MC/OBMC
+  question, not a coefficient one.
+- Its warp model is strongly non-translational:
+  `matrix=[321462, -23757, 66117, -8191, 2310, 57345]`,
+  `alpha=576, beta=-8192, gamma=2304, delta=-7936`, fitted from 3 raw samples
+  of which only 1 survives the mv-difference threshold.
+- 10 of frame 4's 79 blocks use `mm=2`.
+
+### Tooling added
+
+`KINETIX_AV1_DBG_PRED` is no longer hardcoded to mi (4,18): it now takes
+`<mi_col>,<mi_row>`, and `KINETIX_AV1_DBG_PRED_FRAME=n` scopes it to one
+frame. The `RESID` dump prints `fr=`, the real mi and the bsize. This is the
+probe that splits "prediction is wrong" from "prediction is right and the
+residual breaks it".
+
+### Audited and found correct
+
+- `select_warp_samples`: the `thresh = 4 * clamp(max(bw4,bh4), 4, 28)`
+  threshold, the `mvd[i] = -1` rejection, the `ret == 0 -> 1` clamp, and the
+  `i`/`j` tail-compaction loop all match dav1d `derive_warpmv`
+  (`decode.c:308-329`).
+- `get_shear_params` matches `dav1d_get_shear_params` (`warpmv.c:80-100`),
+  including the `mat[2] <= 0` early-out and the
+  `4|alpha| + 7|beta| >= 0x10000 || 4|gamma| + 4|delta| >= 0x10000` reject.
+- **A hypothesis I had to discard:** dav1d ends `derive_warpmv` with
+  `if (!dav1d_find_affine_int(...) && !dav1d_get_shear_params(wmp)) AFFINE else
+  IDENTITY`, which reads as "identity only when *both* fail". It is in fact
+  the same as Kinetix's `find_affine_int(...)?` then `get_shear_params(...)?`,
+  because C's `!f() && !g()` is true only when **both** return 0 (success) —
+  the same all-must-succeed condition the `?` chain encodes. No bug.
+
+### Not yet root-caused
+
+`KINETIX_AV1_NO_WARP=1` moves the pixel 228 -> 192 and the frame total
+7390 -> 7264, so WARP contributes but is not the whole story: the value is
+still badly wrong with warp disabled, so the base translational MC for this
+block (or the reference it reads) is also off. Frame 4's blocks reference
+ref `2` (69 blocks) and ref `7` (10 blocks).
+
+Next step: with `DBG_PRED` now able to target the block, dump the prediction
+for mi (16,14) with warp both on and off, and compare the sampled reference
+positions against the plane that ref 2 / ref 7 actually resolve to — the
+remaining suspects are the reference-slot resolution for this frame and the
+`block_warp_process` sample-addressing (the 16x*(2*dx + sx*bs) form in
+dav1d's `add_sample` is worth re-deriving against `find_num_warp_samples`).
+
+Debug-only change this session; decode behaviour unchanged (frame 1 still
+7390), 163 AV1 lib tests plus the full test-utils suite pass, fmt and clippy
+clean.
+
   `edge_left=true`), so it is not a missing-edge-flag bug either.
 - `KINETIX_AV1_NO_WARP=1` gives 7264 vs 7390 — only marginal. 10 of frame 4's
   79 blocks use `mm=2` (WARP) with large MVs (`-43,-15`, `-53,-15`), so warp

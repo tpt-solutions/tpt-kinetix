@@ -1783,29 +1783,50 @@ impl<'a> TileDecodeState<'a> {
                 leaves,
             );
         }
-        // Capture pre-residual snapshot for the specific failing block to compare
-        // prediction vs final output at the row-specific error positions.
-        let pred_snap: Vec<u8> = if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-            && mi_col == 4
-            && mi_row == 18
-            && !skip
-        {
-            let stride = self.y_stride;
-            let mut snap = Vec::with_capacity(bw_px * bh_px);
-            for y in px_y0..px_y0 + bh_px {
-                for x in px_x0..px_x0 + bw_px {
-                    snap.push(self.y_plane[y * stride + x]);
+        // Capture a pre-residual snapshot of one block so the reconstruction can
+        // be split into "prediction" and "prediction + residual". A wrong value
+        // already present pre-residual is a motion-compensation / OBMC bug; a
+        // correct one that goes wrong after is a coefficient/inverse-transform
+        // bug.
+        //
+        // `KINETIX_AV1_DBG_PRED=<mi_col>,<mi_row>` selects the block (the
+        // original hardcoded mi (4,18) probe, which was the only way to reach
+        // this before). `KINETIX_AV1_DBG_PRED_FRAME=n` restricts it to one
+        // frame; without that the dump fires for every frame containing the
+        // block and the values from an earlier frame get conflated.
+        let pred_target = std::env::var("KINETIX_AV1_DBG_PRED").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
+        let pred_frame = std::env::var("KINETIX_AV1_DBG_PRED_FRAME")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let pred_snap: Vec<u8> = match pred_target {
+            Some((tc, tr))
+                if (tc, tr) == (mi_col, mi_row)
+                    && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
+                    && !skip =>
+            {
+                let stride = self.y_stride;
+                let mut snap = Vec::with_capacity(bw_px * bh_px);
+                for y in px_y0..px_y0 + bh_px {
+                    for x in px_x0..px_x0 + bw_px {
+                        snap.push(self.y_plane[y * stride + x]);
+                    }
                 }
+                snap
             }
-            snap
-        } else {
-            Vec::new()
+            _ => Vec::new(),
         };
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
-        // Debug: show how residual changed prediction at block mi(4,18).
+        // Show how the residual changed the prediction, row by row.
         if !pred_snap.is_empty() {
             eprintln!(
-                "RESID mi=(4,18) leaves={} tx0={}",
+                "RESID fr={} mi=({mi_col},{mi_row}) bsize={bsize} leaves={} tx0={}",
+                crate::debug_frame_seq::current(),
                 leaves.len(),
                 leaves.first().map(|l| l.2).unwrap_or(0)
             );
