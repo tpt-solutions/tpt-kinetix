@@ -52,6 +52,53 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 22 (2026-09-28, continuation) — the divergence is SEMANTIC from bin 0: our field-B parse reads the first MB's syntax from the WRONG CONTEXT FAMILY (ctx 32 = mb_type-B suffix region appears at OUR bins 0-2, where JM reads seven mb_skip_flag bins) — the field-B slice's skip-context selection is the bug; the exact trace evidence
+
+Bit sequences for the poc-119 bottom field slice (first divergence at bin
+7): JM = 1,1,1,0,1,0,1,1... (read as seven mb_skip_flag=1 bins = seven
+skipped MBs, per JM's skip context); ours = 1,1,1,1,1,1,1,0... — and the
+critical detail: OUR trace shows bins 0-2 in **ctx 32 with st 4→5→6**
+(a context family that lives in the mb_type-B I-suffix region, 32..=35)
+and bin 7 in **ctx 36 st 9 mps 1 decoding LPS 0** — i.e. our parse was
+already inside the mb_type tree for the FIRST macroblock while JM was
+still reading skip flags. The identical bit VALUES for 7 bins are
+coincidence of the init states (both contexts emit MPS 1s early); the
+SEMANTICS diverged from bin 0.
+
+**This localizes the bug to the field-B slice's mb_skip_flag CONTEXT
+SELECTION**: our parse never consults the skip context for the first MB(s)
+— it goes straight to mb_type — OR the skip decode is indexed into the
+wrong context family for `field_pic_flag=1` B slices. Prime suspects in
+`slice_data/cabac_b.rs` + `entropy.rs` (`MbSkipContext::new_b_slice` —
+`init_pb_ctx(MB_SKIP_FLAG_B_CTX + i, cabac_init_idc, qp)`,
+`MB_SKIP_FLAG_B_CTX = 24`, spec ctxIdx 24..=26 with the FFmpeg-style +13
+offset note) vs JM's `init_Contexts` for B field slices
+(`init_ctx_skip`/spec Table for B mb_skip = ctxIdx 24..=26, init (18,64)
+class — our PB0 table asserts (18,64) at 24).
+
+**Also observed:** our ctx-36's state at bin 7 is 9 — implausibly low for
+a freshly-initialised skip context at slice QP (init (18,64) at QP~33
+gives st 37) — consistent with ctx 36 being a NON-skip context (mb_type
+suffix) that our parse entered directly, reinforcing the
+wrong-syntax-element conclusion over an init-value bug.
+
+**Next session (mechanical):**
+1. In `cabac_b.rs`, trace `ctxs.mb_skip`'s construction + decode call for
+   the poc-119 bottom field slice (gate `current_poc == 119`), printing
+   the ctx family/id and the skip_neighbors per MB — confirm whether the
+   skip flags are read at all for the first MBs.
+2. Compare against JM's per-bin syntax-element trace for slice 91
+   (the bin trace's syntax context — JM's `biaridecod` trace lacks the
+   syntax element name; use JM's ordinary syntax TRACE build (TRACE=1,
+   `ldecod_trace`-style) for slice 91 to list the syntax elements per
+   bin).
+3. Fix the selection; the 3/4/6/61/64/67/73/81/82/84/87 field-pair
+   residues (all bottom-field concentrated) should collapse.
+
+**Housekeeping:** probes removed (tree = 222bc92 clean); traces
+`jmbin91.log`, `runk62.log` preserved; JM tooling `ldecod_bin91.exe`
+(bin trace gate slice 91/92).
+
 ## SESSION #32d4 ADDENDUM 21 (2026-09-28, continuation) — BIN-LEVEL DIVERGENCE PINPOINTED: poc-119 bottom field slice, bin 7 (0-based), ctx 36 (mb_skip_run family): ours decodes LPS 0, JM decodes MPS 1 — the field-B `mb_skip_run` context derivation is the bug; first 7 bins match
 
 The #32d3 bin-level method applied to the poc-119 bottom field slice
