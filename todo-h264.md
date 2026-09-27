@@ -52,6 +52,58 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 19 (2026-09-28, continuation) — the poc-119 class traces UPSTREAM again: our poc-121 P-field grid has available/MV cells where JM's has INTRA (colocated-unavailable) — the divergence is in the P-FIELD picture's stored grid; probe plan recorded
+
+Consumption-point diff at poc-119 (`JM_COL` gate framepoc==119 →
+`ldecod_col9.exe`/`col119.log`; `KCOL119` probe gated current_poc==119):
+JM's direct-quadrant set is a **strict subset** of ours — 30 quads vs our
+66; ours-only quads are entire MBs (MB(2,8), MB(4,4), MB(4,5), MB(5,5),
+all four quadrants each) where OUR colocated reads return available cells
+(e.g. cr0=0, col=(-3,0), colpoc=121) but JM has **no colocated reads at
+all**. JM's `update_direct_mv_info_temporal` prints in the
+available-colocated branch and silently writes zero MVs in the
+colocated-INTRA branch — so JM's MB(2,8) either isn't direct, or its
+colocated cells read INTRA where ours read available.
+
+Disambiguation (why it's the colocated grid, not the parse): the poc-121
+picture (the colocated, a P bottom field) has pixel-exact display output
+(display 62 = poc 120/121 is NOT in the wrong list), and our direct reads
+of its grid return real MVs (cr0=0, mv=(-3,0)) — if the parse had
+diverged structurally at MB(2,8), the pixel error would be wholesale, not
+556 samples. So both parses agree MB(2,8) is direct; the difference is
+**the colocated cell CONTENT: our poc-121 grid holds an available
+ref-0 cell where JM's holds intra/unavailable** — i.e. our P-FIELD
+picture's stored grid marks cells available that JM's marks intra, OR
+JM's poc-121 grid legitimately has intra there and OUR poc-121 grid was
+built from a different (wrong) source region.
+
+This is the recurring theme again (P-field pixels proven, grids never
+cell-verified), now for P-field pictures (the pair grids were covered by
+the earlier fixes; lone P-field frames like poc 121's pair (120/121) were
+not — display 62 = poc 120/121 is exact, so again pixels-only).
+
+**Next session (concrete):**
+1. Dump both poc-121 grids: ours = the dpb entry for poc 121
+   (`mv_grid` of the field pair (120,121) — or the lone-field entry;
+   check `pair_field_pocs` for the (120,121) entry), JM = `JMG`-style
+   dump gated to poc 121's dec_picture (the colall binary already dumps
+   ALL pocs → `/tmp/jmall/jm_poc121_predeblock.gray` is pixels; the GRID
+   needs the JMG-style mv dump — reuse `ldecod_grid138.exe`'s dump with
+   the gate widened, or `ldecod_colall` + a grid patch).
+2. Diff the grids at the MB(2,8)-class cells; the diverging cells'
+   (mb, blk) identify which P-field MB coded them → then diff that MB's
+   parse/predictor (KDER-style probe in the P-field path — note the
+   P-field path uses `predict_slice_mvs_ex`, the P predictor, not the B
+   path).
+3. Thesuspect class: P-field cells that are INTRA in JM but
+   motion-coded in ours (or ref -1 vs ref 0) — check the P-field slice's
+   intra MB handling in the grid commit (our `MvCell::INTRA` vs JM's
+   `mv_info` init for intra MBs in field pictures).
+
+**Housekeeping:** KCOL119 probe removed (tree = 222bc92 clean, check
+passed); JM tooling: `ldecod_col9.exe` (JM_COL framepoc==119) +
+`col119.log`; ours traces `/tmp/runk6*.log`.
+
 ## SESSION #32d4 ADDENDUM 18 (2026-09-28, continuation) — fresh census post-fix: total field-level residual 4,615 luma samples; 50/68 fields reconstruction-EXACT; the concentrated remnant is one single-quadrant scale class (largest: poc 119, 556 samples, max 135)
 
 Fresh per-field census on the current tree (fix 222bc92 + 32ade30 + our
