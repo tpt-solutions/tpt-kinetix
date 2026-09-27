@@ -2532,6 +2532,7 @@ impl H264Decoder {
                 }
             });
             crate::mv::TemporalDirectCtx {
+                field_slice: false,
                 current_poc,
                 current_list0_poc: &current_list0_pairs,
                 col_poc: col.pic_order_cnt,
@@ -3576,6 +3577,7 @@ impl H264Decoder {
                         }
                     });
                     crate::mv::TemporalDirectCtx {
+                        field_slice: false,
                         current_poc,
                         current_list0_poc: &current_list0_pairs,
                         col_poc: col.pic_order_cnt,

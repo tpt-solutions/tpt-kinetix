@@ -1595,6 +1595,10 @@ pub struct ColPairCtx<'a> {
 
 pub struct TemporalDirectCtx<'a> {
     pub current_poc: i64,
+    /// `true` when the CURRENT picture is a field (interlaced field-B path):
+    /// JM's per-entry `mvscale` table then scales against the matched L0
+    /// entry's OWN field poc, not the pair/frame poc.
+    pub field_slice: bool,
     /// Current L0 entries as `(own_poc, other_field_poc)`: `other_field_poc ==
     /// own_poc` for plain entries; a synthesized combined field-pair entry
     /// carries `(top_poc, bottom_poc)` so a co-located FIELD-level poc can
@@ -1690,14 +1694,22 @@ fn derive_temporal_direct(
     // combined field-pair entry matches either of its fields' pocs) in the
     // current picture's own RefPicList0; falls back to 0 (spec-permitted
     // default) when no match exists.
+    // Entry-major identity matching (JM: first L0 entry whose top_field,
+    // bottom_field or frame picture is the co-located cell's reference): for
+    // each entry in list order, the target matches either the pair's frame
+    // poc or the entry's own field poc.
     let ref_idx_l0 = ctx
         .current_list0_poc
         .iter()
-        .position(|&(own, other)| target_poc == own || target_poc == other)
+        .position(|&(frame_poc, own_poc)| target_poc == frame_poc || target_poc == own_poc)
         .unwrap_or(0);
-    let Some(&(pic_a_poc, _)) = ctx.current_list0_poc.get(ref_idx_l0) else {
+    let Some(&(pair_first, own_poc)) = ctx.current_list0_poc.get(ref_idx_l0) else {
         return (mv_col, ref_idx_l0 as i32, [0, 0]);
     };
+    // JM's per-entry mvscale table scales against the matched entry's OWN
+    // field poc for field pictures, and against the pair/frame poc
+    // otherwise.
+    let pic_a_poc = if ctx.field_slice { own_poc } else { pair_first };
     // Vertical field↔frame unit conversion BEFORE scaling (JM lines 228-234).
     let mv_y = match yconv {
         MvYConv::None => mv_col[1],
@@ -2543,6 +2555,7 @@ mod tests {
     fn temporal_direct_halfway_b_picture_halves_the_colocated_mv() {
         let current_list0_poc = [(0i64, 0i64), (-4, -4)];
         let ctx = TemporalDirectCtx {
+            field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,
@@ -2573,6 +2586,7 @@ mod tests {
     fn temporal_direct_prefers_available_list0_falls_back_to_list1() {
         let current_list0_poc = [(0i64, 0i64)];
         let ctx = TemporalDirectCtx {
+            field_slice: false,
             current_poc: 2,
             current_list0_poc: &current_list0_poc,
             col_poc: 4,
@@ -2605,6 +2619,7 @@ mod tests {
     fn temporal_direct_intra_colocated_block_is_zero_motion() {
         let current_list0_poc = [(0i64, 0i64)];
         let ctx = TemporalDirectCtx {
+            field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,
@@ -2632,6 +2647,7 @@ mod tests {
     fn temporal_direct_unmatched_poc_falls_back_to_ref_zero() {
         let current_list0_poc = [(10i64, 10i64), (20, 20)];
         let ctx = TemporalDirectCtx {
+            field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
             col_poc: 8,

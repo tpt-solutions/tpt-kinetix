@@ -2176,7 +2176,27 @@ impl H264Decoder {
             .map(|g| (*g).clone());
         let current_list0_poc: Vec<(i64, i64)> = ref_l0
             .iter()
-            .map(|f| (f.pic_order_cnt, f.pic_order_cnt))
+            .map(|f| {
+                if f.is_frame {
+                    (f.pic_order_cnt, f.pic_order_cnt)
+                } else {
+                    let own = f.pic_order_cnt;
+                    let frame_poc = self
+                        .dpb()
+                        .iter()
+                        .find(|e| e.field_pic_flag && e.field_poc(f.bottom) == own)
+                        .map(|e| e.frame_num)
+                        .and_then(|fn_| {
+                            self.dpb()
+                                .iter()
+                                .filter(|e| e.field_pic_flag && e.frame_num == fn_)
+                                .map(|e| e.pic_order_cnt)
+                                .min()
+                        })
+                        .unwrap_or(own);
+                    (frame_poc, own)
+                }
+            })
             .collect();
         // The current FIELD decoding against a co-located FRAME picture reads
         // that frame's same-parity field view with frame→field motion-unit
@@ -2195,6 +2215,7 @@ impl H264Decoder {
             .map(|f| f.pic_order_cnt)
             .unwrap_or(current_poc);
         let temporal_ctx = col_entry.map(|col| crate::mv::TemporalDirectCtx {
+            field_slice: true,
             current_poc,
             current_list0_poc: &current_list0_poc,
             col_poc,
