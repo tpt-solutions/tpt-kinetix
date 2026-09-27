@@ -10467,3 +10467,39 @@ loop_filter.rs — add the same). If the costs match and only the argmax
 differs → mapping bug (b). If the costs differ → partial-sum
 transcription bug (a). Then verify K's dir→CDEF_DIRECTIONS offset table
 against dav1d's `cdef_dirs` for the winning direction.
+
+## Session cont'd 20 — CONFIRMED: the CDEF cost arrays differ on identical input; transcription bug in Kinetix's cdef_direction
+
+For frame 0's unit at pixel (600,296) (the first diverging CDEF unit),
+with the 8×8 input pixels PROVEN identical (frame 0 unfiltered is
+bit-exact):
+
+- dav1d `cdef_find_dir`: costs=[347944419, 347896430, 347859225,
+  347652095, 347523436, 347591615, 347620875, 347895660] → argmax 0
+  (dir=0)
+- Kinetix `cdef_direction`: costs=[346085539, 346129175, 346146570,
+  345920225, 345777267, 345778300, 345775920, 346005835] → argmax 2
+  (dir=2)
+
+The magnitudes are close (±0.5%) but the argmax flips — a partial-sum
+or DIV_TABLE-indexing transcription bug in Kinetix's `cdef_direction`
+(loop_filter.rs:1357) that only flips the winning direction on
+near-tie content. Note: dav1d's find_dir C fallback requires
+`--cpumask none` on the CLI to be exercised (SIMD otherwise).
+
+### Next session's starting point (pure code inspection — no decoder runs needed)
+
+Compare Kinetix's `cdef_direction` (loop_filter.rs:1357, including the
+`partial[8][16]` construction, the cost accumulations, and every
+DIV_TABLE index) line-by-line against dav1d's `cdef_find_dir_c`
+(cdef_tmpl.c, the same patched clone at
+%TEMP%/dav1d_fresh). The 8×8 input is the test vector: write a unit
+test feeding the dumped 8×8 (available via the KCDEF pre print + the
+full block from a KINETIX_DBG_COEFF-era dump or a fresh targeted dump)
+through both formulas and diff the partials.
+
+Also unchanged: frames 1-3's mi-row-74 unfiltered residue (the MC
+subpel filter reads the reference's grid-padding rows 300-303 — the
+padding rows' content differs because frame 0's CDEF divergence
+propagates into the reference; fixing (a)/(b) should collapse these
+too), and frame-0's 11 filtered bytes at the same unit.
