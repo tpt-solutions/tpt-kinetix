@@ -10247,3 +10247,32 @@ K's sizes map to 3 vs 2 needs the exact K table dump. Align frame 0's
 reads positionally (both captures have position+pre_rng, no ctx filter
 needed on the K side) to find frame 0's first word divergence; the
 existing captures are sufficient — no re-decode needed.
+
+### Session cont'd 13 — frame attribution correction; the drift is visible from frame 1's first coefficient read
+
+Caught a frame-attribution bug in the dav1d-side comparison: frame
+headers parse AHEAD of tile decodes (KGTILING lines for frames 0 AND 1
+appear before frame 0's first coefficient read), so the fr counter built
+from KGTILING lines mislabels events by one frame. Corrected reading of
+the existing captures:
+
+- dav1d's first KAZ3 (bx=0, by=0, w=2099, count=0, pre_rng=55066) is
+  FRAME 0's read (the keyframe) — not frame 1's.
+- Kinetix's frame-0 events at (0,0): tx_sz_ctx=2 pre=31901, tx_sz_ctx=1
+  pre=31782, tx_sz_ctx=2 pre=31901 — multiple sub-tx reads, none with
+  pre_rng 55066 and none with tx_sz_ctx=3.
+
+Two co-located discrepancies at frame 0's very first coefficient read:
+(a) the tx_sz_ctx differs (dav1d 3 vs K 2/1) — the same physical tx
+block is being classified into different CDF slots, and (b) the
+entering rng differs (55066 vs 31901) — Kinetix consumed different bits
+in the leaf's MODE reads before the coefficient read (or the tx-size
+walk differs, changing which sub-blocks exist: dav1d has ONE ctx=3 read
+at (0,0); K has three reads with ctx 2/1/2 — different tx-size trees
+for the same first leaf).
+
+The tx-size tree / tx_sz_ctx classification divergence is now the
+primary suspect for the whole cascade — it desyncs from frame 1's first
+leaf while producing nearly-identical pixels (the sub-blocks reconstruct
+the same content), which explains every "tiny residue, wholesale late
+corruption" symptom in this stream.
