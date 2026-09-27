@@ -819,6 +819,13 @@ impl ModeCdfs {
         cat: usize,
         ctx: usize,
     ) -> bool {
+        if std::env::var("KINETIX_AV1_DBG_TXSPLIT").is_ok() {
+            eprintln!(
+                "KGTXSPLIT cat={cat} ctx={ctx} cdf={:?} pre={}",
+                &self.txfm_split[cat * 3 + ctx][..3],
+                dec.raw_state().0
+            );
+        }
         dec.read_symbol(&mut self.txfm_split[cat * 3 + ctx]) == 1
     }
 

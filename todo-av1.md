@@ -9960,3 +9960,46 @@ level or boundary strength computed for it is off.
 **Status:** improvement is real and safe (163/163 tests, clippy, fmt all
 clean); committed. The 181-byte residual is a separate, much smaller
 follow-on bug, not yet root-caused — worth a session but not blocking.
+
+## Session 2026-09-27 (cont'd 6) — filter hypothesis dead; frame-4 desync narrowed INSIDE the coefficient read of leaf (24,88)
+
+Anchoring the interpolation-filter read killed the previous hypothesis:
+Kinetix's filter read for leaf (24,88) matches dav1d **exactly** (value 0,
+ctx 0, post-rng 63940 both — verified with a position-tagged
+`DBG b0 frame_filter mi=(88,24)` print). Chain status for the leaf
+(32×16, skip=0, NEWMV mv=(12,0), OBMC), all frame-aligned:
+
+| anchor | dav1d | Kinetix |
+|---|---|---|
+| skip | 47768 | 47768 ✓ |
+| intra | 47155 | 47155 ✓ |
+| motion_mode (OBMC) | 64960 | 64960 ✓ |
+| subpel filter | 63940 | 63940 ✓ |
+| y-cf post | 37474 | **63102 ✗** |
+
+Also disproven this session: the "wrong tx syntax model for inter blocks"
+theory. Frame 4's `txfm_mode` is **not** TX_MODE_SELECT (both decoders'
+var-tx paths are silent: dav1d's patched `read_tx_tree` hook and Kinetix's
+`read_txfm_split` hook fire zero times across all 6 packets), so there are
+no tx symbols to diverge on — `read_block_tx_size_ibc`'s no-symbol branch
+matches dav1d's `read_vartx_tree` branch 2.
+
+The desync is therefore **inside the coefficient read itself**: the
+`all_zero` bool's CDF context (derived from above/left `lcoef` state) or
+the DC-coefficient bit decode of this leaf. Since the visible outcome
+matches (one DC coefficient, pixels exact), the divergence is in bits
+consumed, not values decoded — consistent with a coefficient-context
+(lcoef/acoef bookkeeping) difference accumulated from earlier blocks, or
+an all_zero/ctx derivation difference specific to this 32×16 OBMC leaf.
+
+### Next session's starting point
+
+Leaf (24,88), frame 4: print the `all_zero` bool's CDF index and pre-rng
+on both sides (dav1d `recon_tmpl.c:356` `all_skip` read; Kinetix
+`read_coeffs`' all_zero read), plus the above/left `lcoef` arrays feeding
+it. If they match, anchor the DC coefficient bits (golomb/EOB position)
+next. Everything upstream (partition walk, modes, MVs, filter) is proven
+identical for this leaf.
+
+Also unchanged: frame 0's 11 bottom-edge bytes (merged-LR wiener bottom
+border, rows 295-299), which shown frames 1-3 inherit at rows 295-299.

@@ -1365,7 +1365,7 @@ impl<'a> TileDecodeState<'a> {
         let comp = usize::from(ref_names[1] != NONE_FRAME);
         if dbg_b0 {
             eprintln!(
-                "DBG b0 frame_filter={frame_filter} dual={}",
+                "DBG b0 frame_filter={frame_filter} dual={} mi=({mi_col},{mi_row}) has_subpel={has_subpel_filter}",
                 self.enable_dual_filter
             );
         }
