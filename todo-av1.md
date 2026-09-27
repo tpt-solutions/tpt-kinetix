@@ -10585,3 +10585,19 @@ dav1d's raw-count domain against Kinetix's cumulative domain).
    cascade without further changes.
 3. K's probe test `probe_cdef_direction_diverging_unit` pins the
    direction-search behavior on the captured test vector — keep it.
+
+### Session cont'd 21 addendum — frames 1-3 residue precisely localized
+
+Single-stage per-frame comparison (deblock/cdef/restoration variants):
+frames 1-3's divergence is stage-INDEPENDENT — ~74-136 samples at rows
+297-299, deltas ±1, identical across deblock-only/cdef-only/restoration-
+only variants (frames 1-3 have deblock levels 0 and no LR; frame 1-2
+CDEF strength 0 = no-op). So the residue is in the base reconstruction
+at the bottom mi row: fractional-MV blocks whose subpel filter reads
+the reference's grid-padding rows 300-303 (the 8-tap's +4 reach).
+K's MC clamps those reads at some bound; dav1d reads its buffer's
+padding rows. The padding content (or the clamp bound) differs by ±1.
+
+Next: dump frame 0's grid rows 295-310 (post-everything, the reference
+plane K stores) and the equivalent from dav1d, find the differing
+padding row, and align K's MC clamp bound with dav1d's buffer semantics.
