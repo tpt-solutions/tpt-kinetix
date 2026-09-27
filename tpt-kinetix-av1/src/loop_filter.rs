@@ -2110,6 +2110,15 @@ pub fn apply_post_filters(
         );
     }
     let sub_x = subsampling_x as usize;
+    if std::env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
+        let mut fp = std::fs::File::create("k_postdeb.bin").ok();
+        if let Some(fp) = fp.as_mut() {
+            use std::io::Write;
+            for yy in 280..320usize {
+                let _ = fp.write_all(&y_plane[yy * width..yy * width + width]);
+            }
+        }
+    }
     let sub_y = subsampling_y as usize;
     if !skip_deblock {
         deblock_plane(
