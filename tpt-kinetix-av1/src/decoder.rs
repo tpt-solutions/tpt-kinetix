@@ -131,6 +131,16 @@ impl RefFrameStore {
         // Build the motion field cells once; clone into each slot.
         let mf_cells_opt: Option<&[crate::inter::MotionFieldCell]> =
             motion_field.map(|mf| mf.cells.as_slice());
+        if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() && to_refresh.contains(&0) {
+            let mut fp = std::fs::File::create("k_grid0.bin").ok();
+            if let Some(fp) = fp.as_mut() {
+                use std::io::Write;
+                for yy in 0..320usize {
+                    let start = yy * planes.stride;
+                    let _ = fp.write_all(&y[start..start + 720]);
+                }
+            }
+        }
         if std::env::var("KINETIX_AV1_DBG_REFRESH").is_ok() {
             let stride = planes.stride;
             if stride > 80 && y.len() > 66 * stride + 80 {
