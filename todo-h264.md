@@ -1,5 +1,45 @@
 # TPT Kinetix — H.264 Decoder Todo
 
+## SESSION #32d4 ADDENDUM 11 (2026-09-28, continuation) — addendum 10's "two passes" retracted (both dumps are in ONE function, update_direct_mv_info_temporal); floor-arithmetic correction proves the (frame_poc, own) implementation was CORRECT for the frame-colocated class; the 3/4/6 regression suspect is the frame_num-based dpb grouping (CAPA1's IDR pair and fn-0 P pair share frame_num 0); concrete retry recipe
+
+1. **"Two passes" retracted.** `JM_SCALE` (line 238) and `JM_COL`
+   (line 264) are both inside `update_direct_mv_info_temporal`
+   (mc_direct.c:25) — one pass, and `JM_COL`'s printed `ref_idx` is
+   literally `mapped_idx` (`mv_info->ref_idx[LIST_0] = (char) mapped_idx`),
+   so the dumps are self-consistent after all.
+2. **Floor-arithmetic correction — the key one.** I previously wrote that
+   scale 102 applied to col (-10,-1) gives mv0.x = -3 (mismatching JM's
+   -4). WRONG: `(102*-10 + 128) >> 8` = `-892 >> 8` = **floor(-3.48) =
+   -4** ✓. Re-checked every sampled cell with correct floor semantics:
+   scale 102 (= iTRb 2 = 33-31, iTRp 5 = 36-31, i.e. matched entry = the
+   BOTTOM field 31, col poc = the colocated view's own poc 36) reproduces
+   ALL of JM's poc-33 derived MVs — MB(0,7) q2 (0,0), q3 (-4,0)/(6,0),
+   MB(1,1) (-4,-2)/(7,2), MB(2,0) (-11,1)/(16,-1) (col (-27,4):
+   (-2754+128)>>8 = -11 ✓). **The (frame_poc, own-poc) implementation
+   built this session was mechanically correct for the frame-colocated
+   class** — its display 18/36/69 near-exactness was real, not luck.
+3. **The 3/4/6/84/87 regression suspect, concretely.** The implementation's
+   `frame_poc` recovery grouped dpb entries by `frame_num`
+   (`filter(field_pic_flag && frame_num == matched.frame_num)` + min poc).
+   CAPA1's IDR field pair (pocs -4/-3) and the fn-0 P pair (pocs 0/1) BOTH
+   carry frame_num 0, so the grouping merges them and computes
+   frame_poc = -4 for the poc-0 entry — polluting matching/pic_a for every
+   early-reference target. Fix on retry: recover the pair poc at STORE time
+   instead (populate `pair_field_pocs` for field pictures too —
+   `store_reference_picture` already has the sibling poc via
+   `frame_bottom_field_order_cnt`-style derivation, or match the
+   complementary field by adjacency in the same access unit), and group
+   by that, never by frame_num.
+4. **Retry recipe (unchanged otherwise):** re-apply the three edits from
+   this session (interlaced.rs tuples (frame_poc, own); mv.rs
+   branch-matched MapColToList0 with pic_a = own for field-current; keep
+   f30796f's parity-independent view reads), with the store-time pair-poc
+   fix from (3). Expected: 18/36/69 stay near-exact AND 3/4/6/84/87
+   improve; then re-measure the ITU suite (the spatial parity mirror +
+   this change touch field-B paths broadly).
+
+**Housekeeping:** probes reverted; tree = f30796f clean; 388/0.
+
 ## SESSION #32d4 ADDENDUM 10 (2026-09-28, continuation) — addendum 9's per-entry mvscale theory refined by a new contradiction: JM shows two different scales for poc-33 cells with the SAME ref_idx — the two temporal passes in mc_direct.c must read different colocated views; dump needs the view identity per pass
 
 Chased the 102-vs-110 scale contradiction from addendum 9 to its sharpest
