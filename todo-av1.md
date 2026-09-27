@@ -10125,3 +10125,42 @@ bit consumption eventually flips — frame 4's cascade. The fix will
 either round-trip counts through Kinetix's `FrameCdfContext` exactly as
 dav1d's restore does, or (if dav1d's defaults genuinely carry counts)
 seed Kinetix's default coef-CDF counts to match.
+
+### Session cont'd 9 — quantified: K's txb_skip[3][0] sits at 31671 where dav1d's equivalent state is 2099; adaptation-enable mismatch is the prime suspect
+
+Corrected count reading: dav1d's KCOEF print fires AFTER the read+update
+([1968, 1] = post-update); the fresh KAZ3 pre-read dump shows dav1d's
+true entering state for the leaf (24,88) all_zero read: **word=2099,
+count=0, rng=63940** — and Kinetix's entering state: **cdf[0]=31671,
+count=0, rng=63940**. Both then decode the same outcome (has-coeffs, one
+DC coefficient) — but from drifted distributions: dav1d's
+P(all_zero) = 2099/32768 ≈ 6.4%, Kinetix's = (32768−31671)/32768 ≈ 3.35%.
+
+The recurrence check: dav1d's update on "has-coeffs" (`word -= word>>rate`)
+and Kinetix's (`cdf[0] += (32768−cdf[0])>>rate`, in Kinetix's ascending
+layout) are exact complements — identical symbol sequences from identical
+initial values would keep the two states in exact complement
+(dav1d_word == 32768 − K_cdf0). They are not (2099 vs 1097), so either
+the **initial (default or restored) values differ**, or the **adaptation
+rate** differed at some prior read.
+
+Prime suspect: frame 4's `disable_cdf_update`. If Kinetix has adaptation
+DISABLED for frame 4 (its cdf[0] frozen at the restored 31671 and count
+frozen at 0) while dav1d has it ENABLED (word drifting per read, count
+incrementing), every observed number falls out: dav1d's count grew 0→1,
+its word drifted 2099≠restored, K's stayed frozen. The `allow_update_cdf`
+gate (`dec.set_allow_update_cdf(!disable_cdf_update)` in
+`TileDecodeState::new`) vs dav1d's `msac.allow_update_cdf = ...
+!frame_hdr->disable_cdf_update` needs a header-value cross-check for
+frame 4 specifically — one header bit, parsed differently or gated
+differently.
+
+### Next session's starting point (one bit!)
+
+1. Print frame 4's `disable_cdf_update` in both decoders (K: the parsed
+   `FrameHeader.disable_cdf_update`; dav1d:
+   `f->frame_hdr->disable_cdf_update`).
+2. If they differ: fix K's parse/gate. If they match (both 1 = no
+   adaptation): the restored CDF VALUES differ and the hunt moves to the
+   frame-4 initial CDF load (default tables vs restored context) with
+   the 2099/31671 pair as the fingerprint.
