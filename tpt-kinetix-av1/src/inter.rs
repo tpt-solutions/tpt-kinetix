@@ -163,11 +163,11 @@ pub fn ref_plane_offset(_ref: u8) -> usize {
 /// 64): a luma phase `m`/8 addresses the odd row `2m-1` (dav1d doubles
 /// `mx = mvx & 7` before indexing, because the same 15 rows serve chroma's
 /// 1/16-pel phases); a chroma phase addresses row `frac-1` directly.
-/// `small` selects the 4x4-specific set dav1d uses for 4-wide/4-tall
-/// blocks: the horizontal axis picks `[3+(kind&1)]` (smooth -> 4x4-smooth,
-/// regular/sharp -> 4x4-regular) and the vertical axis `[3]` (dav1d's
-/// `filter_type >> 2 & 1` is 0 for every switchable kind). Fraction 0 is
-/// the full-pel identity (64 at the centre tap).
+/// `small` selects the 4x4-specific set dav1d uses for narrow/short blocks:
+/// the horizontal axis picks `[3+(kind&1)]` (smooth -> 4x4-smooth,
+/// regular/sharp -> 4x4-regular), and the vertical axis picks its own kind's
+/// bit 0 the same way. Fraction 0 is the full-pel identity (64 at the centre
+/// tap).
 fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
     if frac == 0 {
         return [0, 0, 0, 64, 0, 0, 0, 0];
@@ -181,6 +181,14 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
     let mask = (1i32 << bits) - 1;
     let frac = frac & mask;
     let pos = if bits == 3 { 2 * frac - 1 } else { frac - 1 };
+    // dav1d's `GET_H_FILTER` / `GET_V_FILTER` (`mc_tmpl.c`) take the two axis
+    // kinds from a single packed `filter_type = type_h | (type_v << 2)`, and
+    // each independently selects the 4x4 set when its own axis is narrow/short:
+    // horizontal `3 + (filter_type & 1)`, vertical `3 + ((filter_type >> 2) & 1)`.
+    // `type_h`/`type_v` are 2-bit EIGHTTAP_* indices, so the packed horizontal
+    // bit is `type_h`'s own bit 0 and the packed vertical bit is `type_v`'s own
+    // bit 0 — i.e. each axis uses *its own* kind, never the other's. `kind` is
+    // already the per-axis kind here, so `f & 1` is correct for both.
     let set = if small { 3 + (f & 1) } else { f };
     defaults::SUBPEL_FILTERS[set][pos as usize]
 }

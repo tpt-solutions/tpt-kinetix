@@ -2827,6 +2827,21 @@ impl<'a> TileDecodeState<'a> {
             );
         }
 
+        // `KINETIX_AV1_MCSUM` dumps the reference-plane row a block actually
+        // samples, so a wrong MC output can be attributed to the reference
+        // content versus the sampling. It takes an optional target block
+        // `KINETIX_AV1_MCSUM_BLOCK=<mi_col>,<mi_row>`; without one it falls
+        // back to the historical hardcoded mi (4,0).
+        let mcsum_target = std::env::var("KINETIX_AV1_MCSUM_BLOCK")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
+            })
+            .unwrap_or((4, 0));
         // Single reference: motion-compensate into a local temp (so we don't hold
         // both the reference slice and the output plane borrow at once), then blit.
         if !use_compound {
@@ -2845,6 +2860,42 @@ impl<'a> TileDecodeState<'a> {
                 let mut t = vec![0u8; bw * bh];
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, rh) = rf.plane(plane);
+                    // Dump the reference-plane row this block samples, before
+                    // the warp/translation branch, so it reports the same
+                    // reference content either way — the point is to attribute
+                    // a wrong MC output to the reference *content* versus the
+                    // sampling. Placed here rather than in the translational
+                    // arm so a WARP block is covered too.
+                    if std::env::var("KINETIX_AV1_MCSUM").is_ok()
+                        && plane == 0
+                        && mi_col == mcsum_target.0
+                        && mi_row == mcsum_target.1
+                    {
+                        let iy =
+                            (px_y as i32 + (self.tile_px_y0 >> ss_ver) as i32) + (mvs[0].row >> 3);
+                        let ix =
+                            (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32) + (mvs[0].col >> 3);
+                        let row: Vec<i32> = (-4..(bw as i32 + 4))
+                            .map(|k| {
+                                let y = iy.clamp(0, rh as i32 - 1) as usize;
+                                let x = (ix + k).clamp(0, rw as i32 - 1) as usize;
+                                rp[y * rw + x] as i32
+                            })
+                            .collect();
+                        eprintln!(
+                            "KINMCSUM fr={} mi=({mi_col},{mi_row}) px=({px_x},{px_y}) \
+                             tile_org=({},{}) slot={slot0} ref0={} bw={bw} bh={bh} \
+                             dx={ix} dy={iy} mx={} my={} f2d=(h={},v={}) refrow={row:?}",
+                            crate::debug_frame_seq::current(),
+                            self.tile_px_x0,
+                            self.tile_px_y0,
+                            ref_names[0],
+                            (mvs[0].col & 7) << 1,
+                            (mvs[0].row & 7) << 1,
+                            filters[1],
+                            filters[0],
+                        );
+                    }
                     // `KINETIX_AV1_NO_WARP` is a bisection escape hatch (not
                     // spec behaviour): forces every WARP block back to plain
                     // translational MC, for isolating how much of a given
@@ -2889,31 +2940,6 @@ impl<'a> TileDecodeState<'a> {
                             // here is still `[dir0, dir1]` (kept that way for
                             // the neighbour-context storage below), so swap
                             // at the point of use.
-                            if std::env::var("KINETIX_AV1_MCSUM").is_ok()
-                                && plane == 0
-                                && mi_col == 4
-                                && mi_row == 0
-                            {
-                                let (rp, rw, rh) = rf.plane(plane);
-                                let iy = (px_y as i32 + (self.tile_px_y0 >> ss_ver) as i32)
-                                    + (mvs[0].row >> 3);
-                                let ix = (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32)
-                                    + (mvs[0].col >> 3);
-                                let row: Vec<i32> = (-4..(bw as i32 + 4))
-                                    .map(|k| {
-                                        let y = iy.clamp(0, rh as i32 - 1) as usize;
-                                        let x = (ix + k).clamp(0, rw as i32 - 1) as usize;
-                                        rp[y * rw + x] as i32
-                                    })
-                                    .collect();
-                                eprintln!(
-                                    "KINMCSUM mi=(4,0) bw={bw} bh={bh} dx={ix} dy={iy} mx={} my={} f2d=(h={},v={}) refrow0={row:?}",
-                                    (mvs[0].col & 7) << 1,
-                                    (mvs[0].row & 7) << 1,
-                                    filters[1],
-                                    filters[0],
-                                );
-                            }
                             // The reference plane is the full frame, but
                             // `px_x`/`px_y` are tile-local: the reference read
                             // position must be shifted back into frame
@@ -2944,12 +2970,22 @@ impl<'a> TileDecodeState<'a> {
             };
             if std::env::var("KINETIX_AV1_MCSUM").is_ok()
                 && plane == 0
-                && mi_col == 4
-                && mi_row == 0
+                && mi_col == mcsum_target.0
+                && mi_row == mcsum_target.1
             {
-                let col15: Vec<i32> = (0..bh).map(|r| tmp[r * bw + 15] as i32).collect();
+                // Column `min(15, bw-1)`: the probe's original hardcoded index
+                // 15 panicked with an out-of-bounds on any block narrower than
+                // 16 px (every 4x4/8x8 leaf), aborting the whole decode under
+                // MCSUM rather than just printing. Sample the last column that
+                // actually exists.
+                let probe_c = bw.min(16) - 1;
+                let col_last: Vec<i32> = (0..bh).map(|r| tmp[r * bw + probe_c] as i32).collect();
                 let row0: Vec<i32> = (0..bw).map(|c| tmp[c] as i32).collect();
-                eprintln!("KINMCOUT row0={row0:?} col15={col15:?}");
+                eprintln!(
+                    "KINMCOUT fr={} mi=({mi_col},{mi_row}) bw={bw} bh={bh} col{probe_c} \
+                     row0={row0:?} col_last={col_last:?}",
+                    crate::debug_frame_seq::current(),
+                );
             }
             if std::env::var("KINETIX_AV1_DBG_PREDUMP").is_ok() && plane == 1 {
                 eprintln!(
