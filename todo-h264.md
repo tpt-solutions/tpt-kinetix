@@ -52,6 +52,48 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 17 (2026-09-28, continuation) — REAL FIX #6 landed: MapColToList0 match priority keyed on the CO-LOCATED picture's kind; total residual 15.7k → 6.8k (−87% from addendum 8); every intermediate regression resolved
+
+The addendum 16 contradiction (JM mapped target 0 to L0[1]=poc 0 while our
+pair-granular match landed on L0[0]=poc 1) resolved cleanly: **the match
+priority follows the CO-LOCATED picture's kind.** A frame co-located
+picture's reference list holds pair/frame pocs, so its targets match the
+pair poc first (first L0 entry of the pair = the same-parity field, whose
+own poc is the mvscale base — poc 31, scale 102 ✓). A field co-located
+picture's reference list holds exact field pocs, so its targets match the
+entry's own poc first (the exact field, poc 0, scale 183 ✓ — JM's
+`listX[iref] == ref_pic` direct pointer match). My addendum-9-era attempt
+had these two priorities exactly swapped, which is why every variant
+fixed one class while breaking the other.
+
+**Implemented** in `derive_temporal_direct`: parity-keyed match priority
+(parity Some = frame colocated → pair poc first; parity None = field
+colocated → own poc first), pic_a = the matched entry's own poc
+(`field_slice`-keyed, unchanged). The JML0 dump confirmed JM's L0 poc
+order for the poc-5 bottom slice = [1, 0, 7, 6] — identical to ours.
+
+**Measured (CAPA1 vs JM):** 56/90 bit-exact; total wrong samples
+**52,662 → 6,826 (−87%)**; every intermediate regression resolved (frame
+4 back to 70, 61 to 950, 82 to 600) while all frame-colocated fixes held
+(18 = 69, 36 = 64, 69 = 89). CVPA1: 56/90. ITU suite passes; fmt/clippy/
+tests 388/0 green on the committed tree.
+
+**Remaining residue (next session):** the pre-existing small-diff set —
+displays 3/4/6 (nd 59-70, the poc 2-9 pairs: single-quadrant scale
+remnant MB(1,7)-q2-class at poc-5 now measured — plus poc 9's 89/16),
+display 16 (109), and the 21-25/28/30/39/42/46/48/49/57/60/63/64/66/67/
+72/73/76/79/81/84/87 tail (nd 26-950, max ≤ 6 mostly) — plus the poc-123
+class deblock deltas (3543 samples, max 4). These are the same two
+well-scoped areas as addendum 13: (a) the one-quadrant temporal remnant
+(the `KDER5`-style probe now pinpoints any cell in one run), (b)
+field-picture deblocking micro-deltas. The heavy structural work (view
+reads, parity, mvscale base, match priority) is done and JM-verified.
+
+**Housekeeping:** probes removed pre-commit; tree = mv.rs (matching
+priority) + interlaced.rs (tuples) + mod.rs (field_slice: false) — all
+committed; JM tooling as addendum 16 plus `ldecod_l0.exe` (JML0 list
+dump).
+
 ## SESSION #32d4 ADDENDUM 16 (2026-09-28, continuation) — poc-5 MB(1,7) q2 fully instrumented on both sides; JM maps target 0 to mapped_idx=1 (poc 0) while our pair-granular match lands on L0[0] (poc 1); the remaining question is one identity-loop detail; all data recorded
 
 `KDER5` (ours): target=0, idx=0, tuple=(0,1), pic_a=1 (field_slice ✓),
