@@ -911,14 +911,28 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
         }
+        // dav1d's intra context update (`decode.c`'s `set_ctx`) writes **both**
+        // `edge->tx_intra` and `edge->tx` with the block's `t_dim->lw`/`lh`
+        // (this block's own transform extent) over `lw`/`lh` entries. So a
+        // pure-intra block must refresh the var-tx array too, not just the
+        // `tx_intra` one — otherwise a later IBC/inter block's `read_tx_tree`
+        // reads a stale `ctx->tx` and picks the wrong `txfm_split` CDF.
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            let h = av1::TX_HEIGHT[luma_tx] as u8;
             if let Some(slot) = self.tx_left.get_mut(r) {
-                *slot = av1::TX_HEIGHT[luma_tx] as u8;
+                *slot = h;
+            }
+            if let Some(slot) = self.txv_left.get_mut(r) {
+                *slot = h;
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            let w = av1::TX_WIDTH[luma_tx] as u8;
             if let Some(slot) = self.tx_above.get_mut(c) {
-                *slot = av1::TX_WIDTH[luma_tx] as u8;
+                *slot = w;
+            }
+            if let Some(slot) = self.txv_above.get_mut(c) {
+                *slot = w;
             }
         }
         let skip_byte = skip as u8;
@@ -1866,6 +1880,14 @@ impl<'a> TileDecodeState<'a> {
         // `nearest_match`, snapshotted before the top-left probe; the probe
         // and the secondary scans feed `total_matches` =
         // dav1d's `ref_match_count`).
+        // dav1d `refmvs.c:485-498`. `have_newmv` is accumulated as
+        // `*have_newmv_match |= b->mf >> 1` (`refmvs.c:56`/`:80`). Although
+        // that reads like a 2-bit field, `mf` packs GLOBALMV (bit0) and NEWMV
+        // (bit1) and a block's `inter_mode` is *either* GLOBALMV *or* NEWMV,
+        // never both — so `mf` is only ever 0, 1 or 2, `mf >> 1` is only ever 0
+        // or 1, and the OR-accumulation cannot exceed 1. Treating it as a
+        // boolean here (and clamping with `.min(1)` below) is therefore
+        // equivalent, not a divergence.
         let (newmv_ctx, refmv_ctx) = match close_matches {
             0 => (i32::from(total_matches > 0), total_matches.min(2)),
             1 => (3 - num_new.min(1), (total_matches * 3).min(4)),
@@ -2430,15 +2452,16 @@ impl<'a> TileDecodeState<'a> {
             if let Some(s) = self.uv_left.get_mut(r) {
                 *s = DC_PRED;
             }
-            // `tx_left`/`tx_above` (below) are *not* touched here: unlike
-            // the single-transform-size intra path, `read_block_tx_size_
-            // ibc`/`read_tx_tree` already wrote the correct per-leaf values
-            // into these arrays while parsing the var-tx tree above —
-            // overwriting them with one block-wide size here (the previous
-            // behaviour, from when this block always used a single `TxSize`)
-            // would stamp over that real per-leaf context with a single
-            // wrong value, desyncing the very next block's own `txfm_split`
-            // context read.
+            // dav1d's intrabc context update (`decode.c`, the `splat_intrabc_mv`
+            // block) writes `edge->tx_intra` with **`b_dim[2+i]`** — the coded
+            // block's width/height — over the block's mi extent. It is a
+            // *separate* array from the var-tx `edge->tx` that
+            // `read_block_tx_size_ibc`/`read_tx_tree` wrote above, so writing
+            // it here does not disturb that per-transform context; omitting it
+            // instead left a stale intra `tx_depth` value for the next block.
+            if let Some(s) = self.tx_left.get_mut(r) {
+                *s = (bh * MI_SIZE) as u8;
+            }
             if let Some(s) = self.skip_left.get_mut(r) {
                 *s = skip as u8;
             }
@@ -2480,6 +2503,9 @@ impl<'a> TileDecodeState<'a> {
                 *s = DC_PRED;
             }
             // See the `tx_left` comment above.
+            if let Some(s) = self.tx_above.get_mut(c) {
+                *s = (bw * MI_SIZE) as u8;
+            }
             if let Some(s) = self.skip_above.get_mut(c) {
                 *s = skip as u8;
             }

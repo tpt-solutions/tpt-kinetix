@@ -8597,3 +8597,309 @@ reference; 3 = none). The `DBG_B0` position clamp is already removed.
 Also remaining (unchanged): frame 0's 11 bottom-edge bytes (merged-LR
 wiener bottom border) and the shown-frames 1-2 bottom rows propagating
 from it.
+
+## Session 2026-09-27 (cont'd 6) — `interp_filter` ctx audited against dav1d's `get_filter_ctx`; real left-context bug found and fixed
+
+Picked up cont'd 5's open item: is Kinetix's interpolation-filter context
+derivation right? Compared line-by-line against the authoritative dav1d
+implementation (fetched `src/env.h` — the function is `get_filter_ctx`, **not**
+in `ctx.c`/`ctx.h` as earlier sessions assumed):
+
+```c
+static inline int get_filter_ctx(const BlockContext *const a,
+                                 const BlockContext *const l,
+                                 const int comp, const int dir, const int ref,
+                                 const int yb4, const int xb4)
+{
+    const int a_filter = (a->ref[0][xb4] == ref || a->ref[1][xb4] == ref) ?
+                         a->filter[dir][xb4] : DAV1D_N_SWITCHABLE_FILTERS;
+    const int l_filter = (l->ref[0][yb4] == ref || l->ref[1][yb4] == ref) ?
+                         l->filter[dir][yb4] : DAV1D_N_SWITCHABLE_FILTERS;
+    if (a_filter == l_filter)         return comp * 4 + a_filter;
+    else if (a_filter == N_SWITCHABLE) return comp * 4 + l_filter;
+    else if (l_filter == N_SWITCHABLE) return comp * 4 + a_filter;
+    else                               return comp * 4 + N_SWITCHABLE;
+}
+```
+
+This **confirms Kinetix's arithmetic is correct**: `comp * 4 + add` here plus
+dav1d's separate `filter[dir][...]` CDF-table index is identical to the spec's
+flat `ctx = ((dir & 1) * 2 + (RefFrame[1] > INTRA_FRAME)) * 4; ctx += add`
+(verified against `av1-spec/09.parsing.process.md`, the *interp_filter* CDF
+selection block) and to Kinetix's `base = ((dir & 1) * 2 + comp) * 4` +
+`ctx = (base + add).min(15)`. The `comp` term also agrees: dav1d's
+`comp = (b->comp_type != COMP_INTER_NONE)` and Kinetix's
+`comp = (ref_names[1] != NONE_FRAME)` are equal for every block class,
+*including* inter-intra (single-ref, `comp_type` stays `COMP_INTER_NONE`, and
+Kinetix's inter-intra path requires `!compound && ref_names[1] == NONE_FRAME`).
+So cont'd 5's "different CDF ⇒ different ctx" hypothesis is **ruled out** — the
+ctx derivation is not the bug.
+
+### The real bug found: `clear_left_context` reset only the coefficient context
+
+Reading `get_filter_ctx`'s inputs back to where dav1d *initialises* them
+exposed a genuine gap. dav1d calls, once per **superblock row**:
+
+```c
+reset_context(&t->l, IS_KEY_OR_INTRA(f->frame_hdr), t->frame_thread.pass);
+```
+
+and `reset_context` does (among others):
+
+```c
+memset(ctx->ref, -1, sizeof(ctx->ref));
+memset(ctx->filter, DAV1D_N_SWITCHABLE_FILTERS, sizeof(ctx->filter));
+memset(ctx->comp_type, 0, sizeof(ctx->comp_type));
+memset(ctx->mode, NEARESTMV, sizeof(ctx->mode));
+memset(ctx->skip_mode, 0, sizeof(ctx->skip_mode));
+```
+
+Kinetix's superblock-row loop only did the coefficient half
+(`state.coeff_ctxs.clear_left()`), leaving the previous superblock row's
+`ref_left` / `filter_left` / `comp_type_left` / `skip_mode_left` /
+`ymode_left` / `mv_left` in place. That is exactly the state
+`get_filter_ctx` reads, so a block in the **first superblock column** of a row
+could match a stale `ref_left` entry and take a different `add` — i.e. a
+different `interp_filter` CDF than dav1d, consuming a different number of bits
+while very often decoding the same filter value. That is the exact failure
+signature cont'd 5 hypothesised, one level up: not a wrong ctx formula but
+wrong ctx *inputs*.
+
+**Fix** — new `TileDecodeState::clear_left_context()` in
+`reconstruct/mod.rs` resetting all of the above, called from the superblock-row
+loop in `decode_tile_group` in place of the bare `coeff_ctxs.clear_left()`.
+(`ymode_left`/`uv_left` reset to `DC_PRED`, which is how this decoder
+represents dav1d's `NEARESTMV` "inter neighbour has no intra mode" convention.)
+
+Also added a `KINETIX_AV1_DBG_FILTER` gate in `inter_block.rs` dumping the full
+ctx derivation (`dir`, `comp`, `ref0`, both neighbour ref pairs and filter
+values, `left_t`/`above_t`/`add`/`ctx`, the decoded symbol, post-read `rng`) —
+the diagnostic cont'd 5 asked for, so the next session does not have to
+re-add it.
+
+### Measured effect
+
+**No change on this corpus.** `non_uniform_tiling.ivf` frames 0-2 are
+byte-identical before and after (91.06 / 80.17 / 78.13 dB Y), and frames 3+
+are unchanged. Frames 0-2 of this stream are already essentially bit-exact, so
+there is no first-superblock-column inter block whose left context was stale —
+the bug is real but latent here, and it will fire on any stream with a
+superblock-row-spanning inter tile. The other four FATE streams
+(`frames_refs_short_signaling` frame 0, `switch_frame` frame 0) remain
+bit-exact; `decode_model` / `film_grain` / `seq_hdr_op_param_info` are
+unchanged (they were already failing for unrelated reasons). All 162 crate
+tests pass; `cargo fmt` + `clippy -D warnings` clean.
+
+**Conclusion: the cont'd 5 hypothesis is disproven.** The `interp_filter`
+context derivation is correct. The frame-4 tile-1 desync has some *other*
+unanchored symbol between the matched `motion_mode` anchor and the luma
+coefficient read — the remaining candidates are the per-block `cdef` /
+`delta_q` / `delta_lf` reads, the vartx partition walk, or the `ref_frame_mvs`
+`load_tmvs` temporal-MV projections feeding `find_mv_stack`.
+
+### Also: dav1d oracle rebuild is broken in this working tree
+
+Worth recording so the next session does not repeat the detour. The
+`%TEMP%/tpt-kinetix-dav1d` oracle cannot be rebuilt as-is:
+
+- Its source tree had been pruned to 10 files (only the ones prior sessions
+  edited). All missing `src/**` files were restored from the 1.5.4 tarball.
+- `meson.build` is missing its `config_h_target` block, so the generated
+  `build/config.h` does not exist; a hand-written stand-in was added at
+  `dav1d/build/config.h` (x86_64 / MSVC / Windows values).
+- With those fixed, `src/libdav1d_bitdepth_8.a` builds, but the `dav1d.dll`
+  link still fails: `ninja: error: unknown target` for every `libdav1d_x86_*`
+  static lib, i.e. this build directory was configured **without** ASM, so
+  `msac_init_x86` is unresolved. Rebuilding the DLL needs a fresh
+  `meson setup` with ASM enabled — not worth doing inside the repo's temp dir.
+- The prebuilt `build/tools/dav1d.exe` (2026-09-18) is stale and predates all
+  of the above.
+
+The `KINETIX_DBG_FILTER` instrumentation added to that tree's `src/decode.c`
+compiles cleanly at the `libdav1d_bitdepth_8.a` stage, so it will be picked up
+by whatever build finally succeeds.
+
+
+## Session 2026-09-27 (cont'd 7) — frame-4 desync root-caused: `ctx->tx` and `ctx->tx_intra` were one shared array; a wrong *value* in the inter path's `tx_intra` write
+
+Continued from cont'd 5/6, which had narrowed frame 4's tile-1 desync to "some
+unanchored symbol between `motion_mode` and the luma coefficient read" and
+eliminated the `interp_filter` context. The listed suspects were cdef/delta_q/
+delta_lf, the vartx partition walk, and ref_frame_mvs/load_tmvs.
+
+**The dav1d oracle was not needed for this one** — the bug is visible by reading
+`BlockContext`. dav1d keeps **two separate transform-context arrays**
+(`src/env.h`), and this decoder had collapsed them into one `tx_above`/`tx_left`
+pair serving both consumers:
+
+| dav1d | reset fill | written by | read by | comparison |
+|---|---|---|---|---|
+| `ctx->tx_intra` | `-1` | *every* block's `set_ctx` (intra) / `case_set` (inter) | `get_tx_ctx` (intra `tx_depth`) | `>= max_tx->lw` |
+| `ctx->tx` | `TX_64X64` | `read_vartx_tree`/`read_tx_tree` only, at **transform-block** granularity | `read_tx_tree` (`txfm_split`) | `< txw` |
+
+`reset_context` (`decode.c:2405-2406`) fills them with *different* sentinels
+because the two comparisons run in *opposite* directions — further proof they
+are not interchangeable.
+
+### The two real defects
+
+1. **Wrong value in the inter path's `tx_intra` write.** dav1d's non-intra
+   `case_set` (`decode.c:1919`) and intrabc `set_ctx` (`decode.c:1366`) both
+   write `edge->tx_intra` with **`b_dim[2+i]` — the coded block's width/height**.
+   Kinetix wrote `av1::TX_WIDTH[luma_tx]` / `TX_HEIGHT[luma_tx]` — the **first
+   var-tx leaf's transform size**. These differ whenever `Max_Tx_Size_Rect` is
+   smaller than the block, so the *next* block's `get_tx_ctx` compared against
+   the wrong `aboveW`/`leftH`, selected a different `tx_depth`/`txfm_split`
+   CDF, and decoded the same symbol value while consuming a different number of
+   bits — the exact desync signature cont'd 5 was chasing.
+2. **Shared array, so the two contexts aliased.** The intra path's block-wide
+   write and the var-tx tree's per-transform writes hit the same slots.
+   `intra_block.rs` even carried a comment asserting the write was deliberately
+   omitted "because `read_block_tx_size_ibc` already wrote the correct per-leaf
+   values" — true of `ctx->tx`, false of `ctx->tx_intra`, which that same
+   function never touches.
+
+### Fix
+
+- New `txv_above`/`txv_left` arrays model dav1d's `ctx->tx`; `set_tx_ctx_range`
+  and `read_tx_tree` now read/write those. `tx_above`/`tx_left` remain the
+  `ctx->tx_intra` model.
+- `inter_block.rs` (ordinary inter **and** skip-mode) and `intra_block.rs`
+  (IBC) now write `tx_above`/`tx_left` with the **block extent**
+  (`bw * MI_SIZE` / `bh * MI_SIZE`), matching `b_dim`.
+- The pure-intra `set_ctx` equivalent now writes **both** arrays, as dav1d's
+  intra `set_ctx` does (`edge->tx_intra` *and* `edge->tx`, `decode.c:1236-1237`).
+- `clear_left_context` resets `txv_left` alongside `tx_left`.
+- `luma_tx` is still used by the intra path; the now-dead bindings in the two
+  inter paths were removed.
+
+### Measured effect
+
+- **Intra corpus back to 6/6.** An intermediate attempt (dropping the inter
+  `tx_above`/`tx_left` writes entirely, on the reading that dav1d's inter path
+  never touches them) regressed `testsrc2_big` 320x180 to 18.78 dB — which is
+  what proved the write is required, just with the *block* value rather than
+  the *transform* value. Adding the intra-side `txv_*` write recovered 6/6.
+- Multi-frame inter corpus (ffmpeg/libaom `testsrc2` 128x96, 15 frames, fresh
+  `meson`-free reference: `probe_tiles` vs dav1d): frame 1 **12600 → 7390**
+  differing bytes, and frames 2-14 all improve or hold. Still 1/15 exact — this
+  stream has additional unresolved inter bugs, but none of them is this one.
+- Regression test `var_tx_context_is_independent_of_the_intra_tx_context`
+  added in `reconstruct/tests.rs`, asserting the two arrays are independent and
+  that a skipped block's var-tx write uses the block extent.
+- 163 AV1 lib tests + full `tpt-kinetix-test-utils` suite green; intra
+  conformance 6/6; `cargo fmt --check` and `clippy -D warnings` clean on both
+  crates.
+
+### Next session's starting point
+
+Frame 1's residual 7390 bytes on the 15-frame `testsrc2` corpus (regenerate
+with the ffmpeg command recorded above). The var-tx/`txfm_split` context is now
+provably correct, so the next unanchored symbol between `motion_mode` and the
+coefficients narrows to the `cdef` / `delta_q` / `delta_lf` per-block reads or
+`load_tmvs`' `ref_frame_mvs` projection into `find_mv_stack` — the two
+remaining cont'd 5 suspects, now with the vartx walk eliminated. `av1_symbol_trace_diff`
+/ `KINETIX_AV1_IBSUM` infra is in place for that; it does **not** need the
+broken dav1d build (ffmpeg's libdav1d-backed `decode_av1_with_dav1d` reference
+is enough for pixel diffs, and the existing trace-capture tooling covers the
+symbol side).
+
+Also still open, unchanged: the single wiener bottom-border/stripe-boundary
+rounding case in frames 0-3, and the broken `%TEMP%/tpt-kinetix-dav1d` oracle
+(not needed for the fix above).
+
+
+## Session 2026-09-27 (cont'd 8) — cont'd 5's three remaining suspects audited against dav1d: all three are correct; one false lead found and reverted
+
+Picked up cont'd 7's "next session" item and audited the three symbols left
+between the `motion_mode` anchor and the coefficient read: the per-block
+`cdef`/`delta_q`/`delta_lf` reads, the vartx partition walk (already fixed in
+cont'd 7), and `ref_frame_mvs`/`load_tmvs` into `find_mv_stack`. Method: pull
+`decode.c` / `refmvs.c` / `env.h` for dav1d 1.5.4 into `%TEMP%\dav1d-1.5.4-src`
+and compare line-by-line (`code.videolan.org` is behind an Anubis bot wall;
+`raw.githubusercontent.com/videolan/dav1d/1.5.4/...` works). **No dav1d build
+needed** — these are all pure syntax/context questions.
+
+### `cdef` / `delta_q` / `delta_lf` — correct, no change
+
+Checked against `decode.c:944-1011`:
+
+- `read_cdef` is gated on `!skip` only. Kinetix additionally gates on
+  `lossless` / `!enable_cdef` / `allow_intrabc`, but those are all **inert**:
+  dav1d sets `cdef.n_bits = 0` unless `!all_lossless && seqhdr->cdef &&
+  !allow_intrabc` (`obu.c:879-881`), and `read_literal(0)` consumes zero bits,
+  so Kinetix's extra conditions can only skip a read that was already a
+  no-op. The per-64x64-unit dedup (`cdef_idx` / `cur_sb_cdef_idx_ptr`) matches,
+  including the `bw4 > 16` / `bh4 > 16` / `bw4 == 32 && bh4 == 32` fill pattern.
+- `read_delta_qindex` / `read_delta_lf` match, **including** the non-obvious
+  nesting: dav1d reads the `delta_lf` symbols *inside* the `if (have_delta_q)`
+  block (`decode.c:987`), so a stream with `delta_lf_present` but
+  `!delta_q_present` reads nothing. Kinetix reaches the same result because
+  `parse_delta_lf_params` only sets `delta_lf_present` when `delta_q_present`
+  is already true (`frame.rs:1337`), and `ReadDeltas = delta_q_present`
+  (`partition.rs:112`). The `3`-escape (`n_bits = 1 + bools(3)`, then
+  `bools(n_bits) + 1 + (1 << n_bits)`), the equi-probability sign bit, the
+  `<<= res_log2` and the `clip` bounds all agree.
+
+### `ref_frame_mvs` / `load_tmvs` / `find_mv_stack` — correct, no change
+
+Compared `inter_mv_stack` against `dav1d_refmvs_find` + `scan_row`/`scan_col`/
+`add_spatial_candidate` (`refmvs.c:41-95`, `:97-173`, `:430-520`). The
+`w4 = min(min(bw4,16), tile_end - bx4)` clamp, the `weight = bw4 == 1 ? 2 :
+max(2, min(2*max_rows, cand_h4))` formula, the `len = max(step, min(bw4,
+cand_bw4))` stepping, the 8-entry cap, the nearest-then-secondary weight
+sorting with the `REF_CAT_LEVEL` sentinel, the top-left probe that feeds
+`ref_match_count` but *not* `have_newmv` (`refmvs.c:457-460` passes a dummy
+flag — Kinetix models this with a separate `dummy` accumulator, correct), and
+the whole `nearest_match` -> `refmv_ctx`/`newmv_ctx` switch (`refmvs.c:485-498`)
+all match. The `mv_projection` `div_mult` reciprocal table and the
+`fix_mv_precision` truncation-toward-zero bias (the `- (v >> 31)` term) are
+also right. The cont'd 5 note that `find_matching_ref`'s mask and
+`find_num_warp_samples` "differ in edge geometry and must not be conflated"
+remains a live subtlety for the `motion_mode` gate, not a bug.
+
+### A false lead: `have_newmv` is a boolean after all (reverted)
+
+Worth recording so it is not re-derived. dav1d accumulates
+`*have_newmv_match |= b->mf >> 1` (`refmvs.c:56`/`:80`), and Kinetix wrote
+`*have_newmv |= (cand.mf >> 1) & 1` and then used `num_new.min(1)` in the
+`3 - have_newmv` / `5 - have_newmv` contexts. That *looks* like a bug: `mf`
+packs two bits (bit0 GLOBALMV, bit1 NEWMV), so `mf >> 1` reads like a 2-bit
+field whose OR-accumulation could reach 2 or 3, and clamping to 1 would pin
+`newmv_ctx` at 2/4 for every multi-candidate block.
+
+**It is not a bug.** `mf` is only ever 0, 1 or 2, because a block's
+`inter_mode` is *either* GLOBALMV *or* NEWMV, never both
+(`decode.c:525`, `:557` — `(mode == GLOBALMV && ...) | (mode == NEWMV) * 2`).
+So `mf >> 1` is only ever 0 or 1 and the OR cannot exceed 1. `.min(1)` is
+exactly equivalent.
+
+I made the change anyway, and the pixel-diff was **byte-identical** on the
+15-frame inter corpus (7390/15441/... unchanged) — which is what proved the
+original code was already right. Reverted the code; kept a corrected comment
+recording why `.min(1)` is safe. Had I not measured, this would have shipped
+as a plausible-sounding "fix" plus a confidently wrong comment.
+
+### Net effect this session
+
+No behavioural change (as intended — this was an audit). `git diff` on
+`intra_block.rs` is comments only. 163 AV1 lib tests + full
+`tpt-kinetix-test-utils` suite green, intra conformance 6/6, `fmt --check` and
+`clippy -D warnings` clean. Frame 1 of the inter corpus remains 7390 bytes.
+
+### Next session's starting point
+
+All three of cont'd 5's suspects are now **eliminated** (var-tx in cont'd 7;
+cdef/delta_q/delta_lf and refmvs/load_tmvs this session). The unanchored
+symbol between `motion_mode` and the luma coefficients on the frame-4 leaf is
+therefore *not* any of them, and the next step is to re-derive the anchor
+list from scratch rather than keep walking the old suspect list: dump every
+symbol Kinetix reads for that one leaf (including the ones already matched)
+and diff the full sequence against dav1d, so the *first* differing read is
+identified by position rather than by elimination. `av1_symbol_trace_diff` /
+`av1_trace_capture` (`tpt-kinetix-test-utils/examples`) exist for this and do
+not need the broken dav1d build. Note the `interp_filter` read is still the
+last *matched* anchor, and `read_vartx_tree` sits between it and the
+coefficients (dav1d `decode.c:1874`) — worth confirming the trace includes
+the per-transform-block `txfm_split` reads, not just the first leaf's tx size.
+

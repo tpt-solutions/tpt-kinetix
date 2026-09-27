@@ -1462,6 +1462,191 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
 }
 
 #[test]
+fn var_tx_context_is_independent_of_the_intra_tx_context() {
+    // Regression: the intra `read_tx_size` CDF context (dav1d `ctx->tx_intra`)
+    // and the inter var-tx `read_tx_tree` CDF context (dav1d `ctx->tx`) are
+    // *separate* `BlockContext` arrays in dav1d, with different reset fills
+    // (`-1` vs `TX_64X64`) and opposite comparison directions
+    // (`>= max_tx->lw` vs `< txw`). This crate previously shared one
+    // `tx_above`/`tx_left` pair between them, so an intra block's block-wide
+    // `TX_WIDTH[luma_tx]` write became the above/left `a`/`l` inputs of the
+    // *next inter block's* var-tx tree, selecting a different `txfm_split` CDF
+    // — decoding the same split bit value while consuming a different number
+    // of bits, permanently desyncing the tile.
+    //
+    // Asserts the structural invariant: a write to one array is not observable
+    // through the other, and `read_block_tx_size_ibc` writes the var-tx array
+    // at per-transform-block granularity rather than one block-wide value.
+    let data = vec![0xA5u8; 64];
+    let mut y = vec![0u8; 64 * 64];
+    let mut u = vec![0u8; 32 * 32];
+    let mut v = vec![0u8; 32 * 32];
+    let mut meta = FrameMeta::new(64, 64);
+    let mut state = TileDecodeState::new(
+        &data,
+        0,
+        64,
+        64,
+        32,
+        32,
+        &mut y,
+        &mut u,
+        &mut v,
+        64,
+        32,
+        128,
+        DeltaQ::default(),
+        true,
+        false,
+        false,
+        false,
+        0,
+        0,
+        64,
+        64,
+        true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        LrDecodeParams::default(),
+        CdefDeltaParams::default(),
+        false,
+        false,
+        // use_ref_frame_mvs
+        false,
+        false,
+        false,
+        false,
+        [2, 2],
+        INTERP_SWITCHABLE,
+        [0u8; 8],
+        [[0; 6]; 8],
+        false,
+        // disable_cdf_update
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        0,
+        0,
+        [0u8; 8],
+        [0u8; 9],
+        RefFrames::empty(),
+        [None; 8],
+        &mut meta,
+        None,
+    );
+
+    // Poison the *intra* context only. A var-tx read must not see it.
+    for v in state.tx_above.iter_mut() {
+        *v = 64;
+    }
+    for v in state.tx_left.iter_mut() {
+        *v = 64;
+    }
+    assert!(
+        state.txv_above.iter().all(|&w| w == 0) && state.txv_left.iter().all(|&h| h == 0),
+        "var-tx context must start independent of the intra tx context"
+    );
+
+    // A 32x32 inter block's var-tx tree writes only the var-tx array.
+    let leaves = state.read_block_tx_size_ibc(0, 0, BLOCK_32X32, false);
+    assert!(!leaves.is_empty());
+    assert!(
+        state.tx_above.iter().all(|&w| w == 64) && state.tx_left.iter().all(|&h| h == 64),
+        "read_block_tx_size_ibc must not write the intra tx context"
+    );
+
+    // And the per-transform-block granularity: a skipped block takes
+    // `read_vartx_tree`'s no-read branch, which fills the *block's* extent
+    // (32x32 samples here), not a single transform's width.
+    let mut state2 = TileDecodeState::new(
+        &data,
+        0,
+        64,
+        64,
+        32,
+        32,
+        &mut y,
+        &mut u,
+        &mut v,
+        64,
+        32,
+        128,
+        DeltaQ::default(),
+        true,
+        false,
+        false,
+        false,
+        0,
+        0,
+        64,
+        64,
+        true,
+        [0u8; 4], /* lf_levels */
+        [0i8; 8], /* lf_ref_deltas */
+        [0i8; 2], /* lf_mode_deltas */
+        false,    /* lf_delta_enabled */
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        LrDecodeParams::default(),
+        CdefDeltaParams::default(),
+        false,
+        false,
+        // use_ref_frame_mvs
+        false,
+        false,
+        false,
+        false,
+        [2, 2],
+        INTERP_SWITCHABLE,
+        [0u8; 8],
+        [[0; 6]; 8],
+        false,
+        // disable_cdf_update
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        0,
+        0,
+        [0u8; 8],
+        [0u8; 9],
+        RefFrames::empty(),
+        [None; 8],
+        &mut meta,
+        None,
+    );
+    state2.read_block_tx_size_ibc(0, 0, BLOCK_32X32, true);
+    assert!(
+        state2.txv_above[0] == 32 && state2.txv_left[0] == 32,
+        "skipped 32x32 block must fill the var-tx context with the block extent \
+         (32x32 samples), got {}x{}",
+        state2.txv_above[0],
+        state2.txv_left[0]
+    );
+}
+
+#[test]
 fn max_tx_size_for_bsize_matches_spec_rect_table() {
     // Spot-check against AV1 spec `Max_Tx_Size_Rect[BLOCK_SIZES]`
     // (fetched from the spec PDF, see coeff_tables.rs's

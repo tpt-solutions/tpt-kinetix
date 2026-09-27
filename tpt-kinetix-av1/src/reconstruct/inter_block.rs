@@ -1334,6 +1334,22 @@ impl<'a> TileDecodeState<'a> {
                     };
                     let ctx = (base + add).min(15);
                     *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
+                    if std::env::var("KINETIX_AV1_DBG_FILTER").is_ok() {
+                        eprintln!(
+                            "DBGFILT dir={dir} comp={comp} mi=({mi_col},{mi_row}) ref0={} \
+                             left_inter={left_inter} left_ref={:?} left_f={} \
+                             above_inter={above_inter} above_ref={:?} above_f={} \
+                             left_t={left_t} above_t={above_t} add={add} ctx={ctx} \
+                             sym={} rng={}",
+                            ref_names[0],
+                            self.ref_left[mi_row],
+                            self.filter_left[dir][mi_row],
+                            self.ref_above[mi_col],
+                            self.filter_above[dir][mi_col],
+                            *fout,
+                            self.dec.raw_state().0
+                        );
+                    }
                     if dbg_b0 {
                         eprintln!(
                             "DBG b0 filter{dir}={} ctx={ctx} rng={}",
@@ -1745,7 +1761,8 @@ impl<'a> TileDecodeState<'a> {
         // single-ternary `read_tx_size` used for real intra blocks — the wrong
         // syntax model desynced the entropy decoder from the first non-skip
         // inter block (dav1d `Post-vartxtree`). It also updates the shared
-        // `tx_above`/`tx_left` neighbour context internally.
+        // It also updates the var-tx neighbour context (`txv_above`/`txv_left`)
+        // internally, at transform-block granularity.
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_row < 4 {
@@ -1858,8 +1875,21 @@ impl<'a> TileDecodeState<'a> {
 
         // Update inter neighbour state.
         let skip_byte = skip as u8;
-        let luma_tx_w_byte = av1::TX_WIDTH[luma_tx] as u8;
-        let luma_tx_h_byte = av1::TX_HEIGHT[luma_tx] as u8;
+        // dav1d's non-intra context update (`decode.c`, the `case_set` block
+        // after `recon_b_inter`) writes `edge->tx_intra` with **`b_dim[2+i]`**
+        // — the *block's* width/height — and does **not** touch `edge->tx`
+        // (the var-tx array) at all. So:
+        //   * this write belongs to the intra `tx_intra` context
+        //     (`tx_above`/`tx_left`), not to the var-tx one, and
+        //   * its value is the block extent, not the first leaf's transform
+        //     size. Writing `TX_WIDTH[luma_tx]` here stamped the *transform*
+        //     width into a slot dav1d fills with the *block* width; whenever
+        //     `Max_Tx_Size_Rect` is smaller than the block those differ, and
+        //     the next block's `get_tx_ctx` (>= max_tx->lw) then selected a
+        //     different `tx_depth` CDF — same symbol, different bit count,
+        //     permanent tile desync.
+        let luma_tx_w_byte = (bw * MI_SIZE) as u8;
+        let luma_tx_h_byte = (bh * MI_SIZE) as u8;
         // dav1d `BlockContext::comp_type` (from `read_compound_type`).
         let comp_type_byte = block_comp_type;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
@@ -2119,7 +2149,6 @@ impl<'a> TileDecodeState<'a> {
         // Skip-mode blocks are always `skip = 1`: `read_block_tx_size` takes
         // its no-entropy-read branch (uniform max transform).
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, true);
-        let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         self.add_inter_residual(mi_row, mi_col, bsize, true, &leaves)?;
         // §7.14.4 deblock-level inputs (see the identical call in the ordinary
         // inter-block path above): a skip-mode block never went through that
@@ -2196,8 +2225,13 @@ impl<'a> TileDecodeState<'a> {
             self.delta_lf,
         );
 
-        let luma_tx_w = av1::TX_WIDTH[luma_tx] as u8;
-        let luma_tx_h = av1::TX_HEIGHT[luma_tx] as u8;
+        // dav1d's intrabc context update writes `edge->tx_intra` with
+        // `b_dim[2+i]` (the block extent) and leaves `edge->tx` alone, exactly
+        // as the ordinary non-intra path above. Using the first leaf's
+        // transform width here was wrong for any block wider than its
+        // `Max_Tx_Size_Rect`.
+        let luma_tx_w = (bw * MI_SIZE) as u8;
+        let luma_tx_h = (bh * MI_SIZE) as u8;
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;

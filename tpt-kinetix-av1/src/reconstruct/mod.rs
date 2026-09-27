@@ -777,6 +777,17 @@ struct TileDecodeState<'a> {
     /// for a rectangular neighbour.
     tx_above: Vec<u8>,
     tx_left: Vec<u8>,
+    /// intra block that covered that `mi` row. Separate from
+    /// [`Self::tx_above`]/[`Self::tx_left`] because dav1d keeps the
+    /// corresponding `BlockContext` fields separate: `ctx->tx_intra` (filled
+    /// with `-1` at each tile / SB-row reset) feeds `get_tx_ctx`'s
+    /// `>= max_tx->lw` comparison for **intra** blocks, while `ctx->tx`
+    /// (filled with `TX_64X64`) feeds `read_tx_tree`'s `< txw` comparison for
+    /// **inter** blocks. Sharing one array makes an intra block's block-wide
+    /// write visible to the next inter block's var-tx `a`/`l` bits, and vice
+    /// versa, which picks a different `txfm_split` CDF and desyncs the tile.
+    txv_above: Vec<u8>,
+    txv_left: Vec<u8>,
     // ── §5.11.7/§5.11.19 `read_cdef`/`read_delta_qindex`/`read_delta_lf`
     // state ─────────────────────────────────────────────────────────────
     /// `use_128x128_superblock` — needed here (not just for the superblock
@@ -1194,6 +1205,15 @@ impl<'a> TileDecodeState<'a> {
             // that block onward.
             tx_above: vec![0u8; mi_cols],
             tx_left: vec![0u8; mi_rows],
+            // dav1d `reset_context` fills the *var-tx* context (`ctx->tx`, not
+            // `ctx->tx_intra`) with `TX_64X64` at each tile / SB-row boundary,
+            // so an unavailable neighbour compares as the *largest* size and
+            // contributes 0 to `read_tx_tree`'s `a`/`l` bits. The same `0`
+            // sentinel `tx_above`/`tx_left` use works here, provided
+            // `read_tx_tree` keeps treating `0` as "unavailable" rather than
+            // as a real width (it does).
+            txv_above: vec![0u8; mi_cols],
+            txv_left: vec![0u8; mi_rows],
             use_128x128_superblock,
             enable_cdef: cdef_delta.enable_cdef,
             cdef_bits: cdef_delta.cdef_bits,
@@ -1311,6 +1331,72 @@ impl<'a> TileDecodeState<'a> {
         } else {
             16
         }
+    }
+
+    /// AV1 §7.3 `clear_left_context()` / dav1d `reset_context(&t->l, ...)`:
+    /// called once per **superblock row** (the outer loop of
+    /// [`decode_tile_group`], not per superblock) to drop every piece of
+    /// *left* neighbour context, because the previous superblock row's blocks
+    /// are not neighbours of this row's.
+    ///
+    /// dav1d resets the whole `BlockContext` here — among the fields this
+    /// decoder models, the ones that matter for the divergence fixed in
+    /// `inter_block.rs`'s interpolation-filter context are `ref` (reset to
+    /// `-1`, i.e. "no reference") and `filter` (reset to
+    /// `DAV1D_N_SWITCHABLE_FILTERS` = 3, i.e. "no filter"). Leaving the
+    /// previous superblock row's `ref_left`/`filter_left` in place made a
+    /// block in the first superblock column of a row derive its
+    /// `interp_filter` CDF from a stale reference match, selecting a
+    /// different CDF than dav1d: the decoded filter value could coincide
+    /// while the number of consumed bits differed, permanently desyncing the
+    /// tile's arithmetic decoder from that block onward.
+    ///
+    /// `skip_mode_left` is reset too (dav1d memsets `ctx->skip_mode` to 0);
+    /// `ymode_left`/`uv_left` reset to `DC_PRED` to match dav1d's
+    /// `memset(ctx->mode, NEARESTMV, ...)` for inter frames, which this
+    /// decoder represents as `DC_PRED` (the value AV1 assumes for an
+    /// inter-coded block's intra-mode neighbour, see `inter_block.rs`).
+    fn clear_left_context(&mut self) {
+        for s in self.is_inter_left.iter_mut() {
+            *s = 0;
+        }
+        for slot in self.ref_left.iter_mut() {
+            *slot = [NONE_FRAME; 2];
+        }
+        for arr in self.filter_left.iter_mut() {
+            arr.fill(3);
+        }
+        for s in self.comp_type_left.iter_mut() {
+            *s = 0;
+        }
+        for slot in self.mv_left.iter_mut() {
+            *slot = [Mv::default(); 2];
+        }
+        for s in self.ymode_left.iter_mut() {
+            *s = DC_PRED;
+        }
+        for s in self.uv_left.iter_mut() {
+            *s = DC_PRED;
+        }
+        for s in self.skip_left.iter_mut() {
+            *s = 0;
+        }
+        for s in self.skip_mode_left.iter_mut() {
+            *s = 0;
+        }
+        for s in self.tx_left.iter_mut() {
+            *s = 0;
+        }
+        for s in self.txv_left.iter_mut() {
+            *s = 0;
+        }
+        for s in self.palette_y_colors_left.iter_mut() {
+            s.clear();
+        }
+        for s in self.palette_u_colors_left.iter_mut() {
+            s.clear();
+        }
+        self.coeff_ctxs.clear_left();
     }
 
     /// `clear_block_decoded_flags(r, c, sbSize4)` (AV1 §5.11.34). Marks the row
@@ -1724,9 +1810,15 @@ pub fn decode_tile_group(
         // from one superblock column to the next within the same row —
         // corrupting `all_zero_ctx`/`coeff_base_ctx`/`coeff_br_ctx` for
         // every block whose left neighbour lay in a different superblock
-        // column. Frames with a single superblock column (width ≤ 64 px)
-        // were unaffected; any wider frame produced noise-level PSNR.
-        state.coeff_ctxs.clear_left();
+        // superblock column. Frames with a single superblock column (width ≤
+        // 64 px) were unaffected; any wider frame produced noise-level PSNR.
+        //
+        // The reset is not coefficient-only: dav1d's `reset_context(&t->l, ...)`
+        // clears the *entire* `BlockContext`, including `ref` (-> -1) and
+        // `filter` (-> `DAV1D_N_SWITCHABLE_FILTERS`). See
+        // [`TileDecodeState::clear_left_context`] for why the stale
+        // `ref_left`/`filter_left` desynced the `interp_filter` CDF.
+        state.clear_left_context();
         for mi_col in (sb_col_start * sb_mi..sb_col_end * sb_mi).step_by(sb_mi) {
             if let Err(e) = state.decode_superblock(mi_row, mi_col, sb_bsize) {
                 out = Err(e);

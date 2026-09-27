@@ -637,10 +637,10 @@ impl<'a> TileDecodeState<'a> {
         h_samples: usize,
     ) {
         for c in mi_col..(mi_col + bw4).min(self.mi_cols) {
-            self.tx_above[c] = w_samples as u8;
+            self.txv_above[c] = w_samples as u8;
         }
         for r in mi_row..(mi_row + bh4).min(self.mi_rows) {
-            self.tx_left[r] = h_samples as u8;
+            self.txv_left[r] = h_samples as u8;
         }
     }
 
@@ -766,10 +766,12 @@ impl<'a> TileDecodeState<'a> {
             // (`ctx->tx`, distinct from the intra `ctx->tx_intra` which it
             // fills with -1) with `TX_64X64` at each tile / SB-row boundary,
             // so an unavailable neighbour compares as the *largest* size and
-            // contributes 0 to `a`/`l` — not the *smallest*, which Kinetix's
-            // shared `0` sentinel would give (`0 < txw` is always true).
-            let above_tx = self.tx_above[mi_col] as usize;
-            let left_tx = self.tx_left[mi_row] as usize;
+            // contributes 0 to `a`/`l` — not the *smallest*, which a shared
+            // `0` sentinel would give (`0 < txw` is always true). `0` is used
+            // as the sentinel and explicitly excluded from the comparison,
+            // which is equivalent.
+            let above_tx = self.txv_above[mi_col] as usize;
+            let left_tx = self.txv_left[mi_row] as usize;
             let a = above_tx != 0 && above_tx < txw;
             let l = left_tx != 0 && left_tx < txh;
             self.mode_cdfs
