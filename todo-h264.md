@@ -52,6 +52,41 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 15 (2026-09-28, continuation) — the poc-5 divergence fully instrumented: ours matches L0[0]=(0,1)→dsf 171; JM matches mapped_idx=1→mvscale 183 (mv_y unconverted); JM's entry implies colPoc − pic_a = 12 with pic_a = −4 (the fn-1 P top field) — JM's L0 ordering/identity for the field slice differs from ours; next probe = print JM's L0 poc list
+
+`KDER5` (ours, poc-5 MB(1,7) q2, col=(-14,5)): target=0, idx=0,
+tuple=(0,1), pic_a=1, tb=4, td=6, dsf=171 → mv0=(-9,3). `JM_SCALE` (same
+cell, gate framepoc==5 && MB(1,7)): mapped_idx=1, mv_scale=183,
+mv_y_conv=5 (no ÷2 — the cell's ref is a FIELD picture) → mv0=(-10,4),
+mv1=(4,-1). Scale 183 = iTRb 9 × prescale 1489 (iTRp 11): iTRb = 5 −
+pic_a → pic_a = **−4** (the fn-1 P TOP field); iTRp = colPoc − (−4) = 12
+→ **colPoc = 8**. So JM's L0[1] for this slice is an entry with own poc −4
+and its L1+4[0] (the colocated view) has poc 8 — NEITHER matches our
+L0[1]=(0,0) nor our col_poc. Our L0 tuples for the slice:
+[(0,1),(0,0),(6,7),(6,6)] (pairs 0/1 and 6/7), col_poc=6/7-class.
+
+Conclusion: JM's L0 for this field-B slice is built from a DIFFERENT
+entry set/ordering than ours at this point (entries with pocs −4 and
+colPoc 8 exist in JM's view of the list, absent from ours), i.e. the
+divergence is in the REFERENCE LIST CONTENT/ORDERING for field-B slices
+(already re-verified as matching for poc-134/135 — so this is specific to
+pictures whose references include the fn-1 P fields), not in the scaling
+formula. The mv_y_conv=5 also confirms same-kind reads must NOT halve
+(our MvYConv::None ✓ consistent).
+
+**Next session (single step):** extend the JM_SCALE print to dump the
+whole `listX[LIST_0 + list_offset][0..n] -> poc` list and
+`listX[LIST_1 + list_offset][0]->poc` for this slice (plus our
+equivalent), diff the two L0 poc lists for the poc-5 bottom field, and
+align `build_field_ref_list_l0_b/l1_b`'s ordering/entry set to JM's.
+Then the existing (frame_poc, own) + own-poc-scaling implementation
+should land identical scales. The MB(1,7) q2 pixel contribution is 4
+cells — this is the LAST temporal remnant class.
+
+**Housekeeping:** KDER5 probe still in mv.rs (gated, poc-5 only — remove
+before commit); JM tooling: `ldecod_scale5.exe` (JM_SCALE poc-5
+MB(1,7)), `scale5b.log`. Tree otherwise = 222bc92.
+
 ## SESSION #32d4 ADDENDUM 14 (2026-09-28, continuation) — full residual census: 44/66 fields pre-deblock EXACT; the entire remaining reconstruction error is one class — single-quadrant mvscale mismatches (JM scale ≈ 190-210 vs ours ≈ 174-192 on the MB(1,7)-q2 pattern); fix = extend the field-poc scaling to cover the far-IDR-reference case
 
 Dumped JM's pre/post-deblock for EVERY field picture (image.c dump gates
