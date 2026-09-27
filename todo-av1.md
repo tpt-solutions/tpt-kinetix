@@ -10225,3 +10225,25 @@ different bits despite the same outcome, or the DC-coefficient bits
 diverged) — with the leaf's post-y-cf states 63102 (K) vs 37474 (D) as
 the fingerprint. A per-bit trace of that one leaf's coefficient read
 against dav1d's `KINETIX_DBG_CFSUM`-style dump is the next step.
+
+### Session cont'd 12 — comparison infrastructure complete; captures saved
+
+Both decoders now dump every `txb_skip[3][0]`-class all_zero read:
+- dav1d: `KAZ3 bx by w c r` on stderr (patched decode_coefs, ungated),
+  captured at `%TEMP%/d_kaz_all.txt` (200 events).
+- Kinetix: `DBG allzero plane=0 x4 y4 tx_sz_ctx skip_ctx cdf rng val`
+  via `KINETIX_AV1_DBG_ALLZERO`, captured at `%TEMP%/kin_kaz_all.txt`
+  (with DBGSEQ frame delimiters; ~9400 allzero events total, 6893 with
+  tx_sz_ctx=3+skip_ctx=0).
+
+Aligned comparison (frame + position + pre_rng) shows frame 4's leaf
+(24,88) divergence with dav1d w=2099 vs K cdf0-implied 1097 — but the
+per-frame event counts expose a ctx-mapping mismatch in the FILTERS
+themselves: dav1d's `t_dim->ctx == 3` matches 200 reads (frame 0: zero!)
+while Kinetix's `tx_sz_ctx == 3` matches 653+68=721 (frame 0: 68). The
+ctx formulas (dav1d tables.c `.ctx` vs K's `(SQR+SQR_UP+1)>>1`) disagree
+on which sizes map to slot 3 — e.g. dav1d's 32×32 ctx=3 ✓ but which of
+K's sizes map to 3 vs 2 needs the exact K table dump. Align frame 0's
+reads positionally (both captures have position+pre_rng, no ctx filter
+needed on the K side) to find frame 0's first word divergence; the
+existing captures are sufficient — no re-decode needed.
