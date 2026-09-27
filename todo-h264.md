@@ -4556,6 +4556,29 @@ TREE: clean at 222bc92 + 32ade30 + 9d8115f (all landed fixes); the
 mc_direct.c JMT probe lives outside the repo (preserved in /tmp).
 Everything else from addendum 24 stands.
 
+## SESSION #32d4 ADDENDUM 26 (2026-09-28, continuation) - clean re-extract CONFIRMS bin 7 divergence; refinement: it is MB(1,0) mb_skip_flag with a skip-variant STATE divergence
+
+A clean re-extraction (proper NAL-91 span) confirms addendum 21: bins
+0-6 identical (bits 0,1,1,1,1,1,1; ranges 510-class), bin 7 diverges:
+JM bit=1 range=480 state=13(post) vs ours bit=0 range=376 st=10(post).
+Semantics: bin 0 = MB(0,0) mb_skip_flag=0 (explicit, both sides agree;
+JM b8mode for MB(0,0) = 4,4,0,0 - explicit quads + direct), bins 1-6 =
+MB(0,0) mb_type bins (both sides), bin 7 = MB(1,0) mb_skip_flag.
+At bin 7 the SKIP VARIANT CONTEXT state differs: JM post=13, ours
+post=10 - the skip variant-1 context state/history diverges. MB(1,0)
+left neighbour = MB(0,0) (explicit, not skipped), top unavailable -
+so the ctxIdxInc/variant selection for MB(1,0) is the same condition
+on both sides; the differing state means either the variant-1 INIT
+value differs (our CABAC_CTX_INIT_PB? entry for skip variant 1 vs JM
+context_ini.c B table) or the variant INDEX differs (our
+ctx_idx_inc counts NOT-skipped where JM counts SKIPPED, or vice
+versa - note our MbSkipNeighbors::ctx_idx_inc counts !left_skipped).
+Everything downstream in the slice follows this one divergence.
+
+NEXT SESSION: dump JM context_ini.c B-table skip variant init values,
+diff our init_pb_ctx(MB_SKIP_FLAG_B_CTX + 1, ...) result at the slice
+QP; check the ctx_idx_inc polarity against JM cabac.c mb_skip INC.
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
