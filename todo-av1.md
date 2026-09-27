@@ -10394,3 +10394,43 @@ the grid padding), check the bottom-edge direction-sample handling
 first — dav1d's `cdef_find_dir` and `constrain` use the full 8×8
 including padding rows; Kinetix's direction search may exclude or
 handle the padding rows differently.
+
+## Session cont'd 18 — SMOKING GUN: CDEF direction diverges (dav1d dir=0, Kinetix dir=2) at the frame-bottom unit
+
+dav1d's per-unit CDEF dump (KDCDEF) captured for the diverging unit
+(frame 0, pixels 600-607 × 296-303):
+
+| param | dav1d | Kinetix |
+|---|---|---|
+| primary (raw) | 2 | 2 ✓ |
+| adjusted | 1 | 1 ✓ |
+| secondary | 1 | 1 ✓ |
+| damping | 4 | 4 ✓ |
+| **direction** | **0** | **2 ✗** |
+
+Strengths and damping match; **the direction search disagrees**. The
+direction search reads the full 8×8 block INCLUDING grid-padding rows
+300-303 (mi rows 75-79 beyond the visible frame are still in the mi
+grid: mi_rows = 2*ceil(300/8) = 76 → mi rows 74-75 = visible bottom,
+76-79 = padding within the SB extent). Kinetix's and dav1d's DEBLOCKED
+content in those padding rows has never been compared (all pixel
+comparisons crop at row 299) — a deblock difference there changes the
+direction search's partial sums → a different dir → different CDEF tap
+pattern → the ±1 diffs at rows 296-299.
+
+This also converges with the frames 1-3 finding: their unfiltered diffs
+sit exactly at mi row 74 — fractional-MV blocks whose MC reads the
+reference's padding rows 300-303, which differ for the same reason.
+
+### Next session's starting point (decisive)
+
+1. Dump frame 0's post-DEBLOCK rows 290-310 (the CDEF input) from both
+   decoders (dav1d: patch its deblock tail to fwrite those rows; K:
+   dump the plane between deblock and CDEF — e.g. a temporary print in
+   apply_post_filters before the CDEF call). The first divergent
+   padding row/column is the deblock bug site (likely the bottom-edge
+   handling for mi rows 75-79 or the loop filter's vertical
+   at-frame-bottom mask).
+2. Fix the deblock bottom edge → the CDEF direction, frame 0's 11
+   bytes, frames 1-3's bottom-row residues, and probably most of the
+   frames 4+ cascade collapse together.
