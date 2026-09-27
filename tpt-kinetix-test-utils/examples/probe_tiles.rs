@@ -1,5 +1,13 @@
 //! Scratch: decode an IVF frame-by-frame with Kinetix and diff every frame
 //! against dav1d. Usage: probe_tiles <ivf-path> [max-frames]
+//!
+//! Set `BLOCKMAP=1` to also print a per-8x8-block luma residual map for each
+//! mismatching frame, classifying each block as `e` (edge-only: every differing
+//! sample lies within 4px of an 8x8 boundary, i.e. deblock/CDEF can reach it)
+//! or `X` (has a differing *interior* sample that deblock/CDEF provably cannot
+//! touch, meaning a genuine prediction/transform/residual bug), plus a summary
+//! with the max per-sample difference. An all-`e` map means the residual is a
+//! post-filter issue and not a reconstruction one; any `X` rules that out.
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 use tpt_kinetix_test_utils::{
@@ -77,6 +85,61 @@ fn main() {
             None => ("?", 0, 0),
         };
         println!("frame {i}: MISMATCH {diff} bytes, first at {comp} ({x},{y})");
+
+        // Per-8x8-block luma residual map for the frame of interest. Classifies
+        // each block as EDGE (every differing sample within 4px of an 8x8
+        // boundary, i.e. deblock/CDEF-reachable) or INTERIOR (a differing
+        // sample deblock/CDEF cannot touch => a genuine prediction /
+        // transform / residual bug). A frame that is all-EDGE points at the
+        // post-filters; any INTERIOR block does not.
+        if std::env::var("BLOCKMAP").is_ok() {
+            let w = kf.width as usize;
+            let h = kf.height as usize;
+            let mut edge = 0usize;
+            let mut interior = 0usize;
+            let mut maxmag = 0i32;
+            let mut worst: Option<(usize, usize)> = None;
+            for by in 0..h.div_ceil(8) {
+                let row: String = (0..w.div_ceil(8))
+                    .map(|bx| {
+                        let (mut n_diff, mut n_int) = (0usize, 0usize);
+                        for y in (by * 8)..((by + 1) * 8).min(h) {
+                            for x in (bx * 8)..((bx + 1) * 8).min(w) {
+                                let o = y * w + x;
+                                if kf.data[o] == rf.data[o] {
+                                    continue;
+                                }
+                                n_diff += 1;
+                                let d = (kf.data[o] as i32 - rf.data[o] as i32).abs();
+                                if d > maxmag {
+                                    maxmag = d;
+                                    worst = Some((x, y));
+                                }
+                                let dx = (x % 8).min(7 - (x % 8));
+                                let dy = (y % 8).min(7 - (y % 8));
+                                if dx >= 4 && dy >= 4 {
+                                    n_int += 1;
+                                }
+                            }
+                        }
+                        if n_diff == 0 {
+                            '.'
+                        } else if n_int > 0 {
+                            interior += 1;
+                            'X'
+                        } else {
+                            edge += 1;
+                            'e'
+                        }
+                    })
+                    .collect();
+                println!("  by{by:02} {row}");
+            }
+            println!(
+                "  frame {i}: luma blocks -> {edge} edge-only, {interior} with interior diffs, \
+                 max|d|={maxmag} worst at {worst:?}"
+            );
+        }
     }
     println!("{exact}/{n} frames exact vs dav1d");
 }
