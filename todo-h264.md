@@ -52,6 +52,40 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 18 (2026-09-28, continuation) — fresh census post-fix: total field-level residual 4,615 luma samples; 50/68 fields reconstruction-EXACT; the concentrated remnant is one single-quadrant scale class (largest: poc 119, 556 samples, max 135)
+
+Fresh per-field census on the current tree (fix 222bc92 + 32ade30 + our
+uncommitted KCOL5/KDER probes removed): total field-level residual
+**4,615 luma samples post-deblock** (pre-deblock reconstruction portion:
+2,224). **50 of 68 wrong fields are reconstruction-EXACT** (pre nd=0) —
+their post diffs are 3-83 samples, max ≤ 3 = deblocking micro-noise.
+
+**The concentrated reconstruction remnant (all one class — single-quadrant
+mvscale mismatches, max 33-135 on a handful of cells per field):** poc 119
+(556/135, display 61 bottom), poc 131 (251/95), poc 124/125 (248/101,
+84/77), poc 161 (217/57), poc 117 (187/71), poc 110 (161/50), poc 143
+(117/43), poc 130 (77/48), poc 29 (37/41), poc 165 (37/21), poc 171
+(37/17), poc 160 (100/33), poc 142/140 (41/56, tiny max), poc 158 (15/6),
+poc 170 (3/1), poc 9 (89/16). These are the later-picture field Bs whose
+colocated references span the frame-P/field-P mix — the same
+frame_poc-recovery gap addendum 11 item 3 identified, now bounded to
+~2.2k samples total.
+
+**Next session:** the consumption-point diff (JM_COL + KCOL + KDER, all
+proven tooling) re-gated to poc 119 — the largest single field. The KDER
+probe prints target/idx/tuple/pic_a/tb/td/dsf in one run; JM_SCALE prints
+JM's mapped_idx/mv_scale/L0[mapped_idx]->poc for the same cell. The
+frame_poc recovery for the mismatched pairing then falls out of the
+(target, own, JM-entry) triple directly.
+
+**Also worth noting:** the deblock micro-noise (post-only fields, ~2.4k
+samples total, max ≤ 3) is now the SECOND residue class — the field
+deblocking work from addendum 13's plan applies to all of them at once.
+
+**Housekeeping:** probes currently in the tree (KCOL5 gated poc 5 —
+stale, re-gate to 119; KDER5 removed already? — check). Tree otherwise =
+32ade30 clean; fmt/clippy/tests/ITU all green pre-probe.
+
 ## SESSION #32d4 ADDENDUM 17 (2026-09-28, continuation) — REAL FIX #6 landed: MapColToList0 match priority keyed on the CO-LOCATED picture's kind; total residual 15.7k → 6.8k (−87% from addendum 8); every intermediate regression resolved
 
 The addendum 16 contradiction (JM mapped target 0 to L0[1]=poc 0 while our
