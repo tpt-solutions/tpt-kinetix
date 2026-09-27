@@ -10003,3 +10003,41 @@ identical for this leaf.
 
 Also unchanged: frame 0's 11 bottom-edge bytes (merged-LR wiener bottom
 border, rows 295-299), which shown frames 1-3 inherit at rows 295-299.
+
+## Session 2026-09-27 (cont'd 7) — the desync is CDF adaptation drift, narrowed to the txb_skip CDF of leaf (24,88)
+
+Anchored the coefficient read of frame 4's leaf (24,88) (32×16 OBMC NEWMV):
+
+| anchor | dav1d | Kinetix |
+|---|---|---|
+| post-subpel | 63940 | 63940 ✓ |
+| all_zero CDF index | skip[3][0] | txb_skip[3][0] ✓ |
+| all_zero outcome | 0 (has coeffs) | 0 ✓ |
+| post-y-cf | 37474 | **63102 ✗** |
+
+Same entering rng, same CDF slot, same decoded outcome — yet different
+post-read rng. The only remaining explanation: **the CDF VALUES have
+drifted**. Kinetix's `txb_skip[3][0]` at this read is
+`[31671, 32768]` cumulative with adaptation count 0→… (dav1d's
+`cdf.coef.skip[3][0]` raw counts were not captured). With a drifted
+distribution, the same msac rng can decode to the same symbol while
+consuming a different number of bits — the desync then becomes visible
+downstream (frame 4's 91k-diff cascade) even though every *decoded
+value* so far matched. This also explains how the synthetic corpus stays
+bit-exact: drift only flips a decode when a value sits near a CDF
+boundary, which short clips with few symbols never hit.
+
+### Next session's starting point (well-defined)
+
+Diff the CDF **adaptation arithmetic**: Kinetix's per-symbol CDF update
+(`SymbolDecoder::read_symbol`'s CDF adjustment — the `32768 → 1/16`
+count-domain move and the adaptation-rate enable bit) against dav1d's
+`od_ec_encode?? msac` update in `msac.c` (`update_cdf`: `count`,
+`rate`, and the `fast-unsigned` arithmetic). Capture
+`cdf.coef.skip[3][0]` on dav1d's side (extend the KCOEF print with the
+three CDF words) and compare against Kinetix's `txb_skip[3][0]` after
+the same symbol sequence; the first read where the tables diverge marks
+the exact arithmetic bug.
+
+Also unchanged: frame 0's 11 bottom-edge bytes (merged-LR wiener bottom
+border, rows 295-299), which shown frames 1-3 inherit at rows 295-299.
