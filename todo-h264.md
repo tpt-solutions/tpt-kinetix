@@ -52,6 +52,41 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 20 (2026-09-28, continuation) — poc-121 grid is BYTE-EXACT (0/3168) — the poc-119 class narrows to a FIELD-B SLICE PARSE divergence: MBs 2,8/4,4/4,5/5,5 are direct in our parse but have NO direct quadrants in JM's; field-B slice CABAC parse was never bit-exact-proven
+
+With the poc-121 colocated grid dumped on both sides (ours `KG121` via the
+col_entry's `mv_grid`; JM `JMG` re-gated to poc 121, field picture, 3168
+cells): **0 differing cells** — the reference grid content is identical
+including the MB(2,8)-class cells our direct reads consume.
+
+Therefore the poc-119 consumption-point difference (our 66 direct
+quadrants vs JM's 30, ours-only = all four quadrants of MBs 2,8/4,4/4,5/
+5,5 with no JM colocated reads at all) is a **mb_type/sub_mb_type parse
+divergence at specific MBs of the field-B slice**: those MBs are
+B_8x8-direct-class in our parse but explicit (or differently-typed) in
+JM's. The pre-deblock pixel error for poc 119 (556/135) is consistent
+with a handful of mis-typed MBs, not a wholesale parse break.
+
+**Why it was never caught:** the CABAC bit-exactness proof (#32d3) covered
+the poc-10 FRAME-coded B slice only. Field-coded B slices (PAFF
+`field_pic_flag=1`) go through the same `parse_b_slice_cabac` wrapper but
+with `field_pic_flag=true` — and their MB-layer syntax
+(`mb_skip_run`/mb_type/sub_mb_type context derivation differs per
+§8.3.3/9.3.3 for fields — e.g. `ctxIdx` offsets and the field-aware
+`mb_skip_run` entropy) has never been diffed bin-for-bin against JM.
+
+**Next session (single focused step):** the proven #32d3 bin-level method
+applied to the poc-119 bottom field slice: `KINETIX_BINTRACE=1` (our
+per-bin dump) vs JM's `biaridecod` trace (the existing JM bin-trace patch
+from #32d3, `ldecod_bin.exe`-style binary in /tmp/jm-oracle/jm) for this
+slice; find the first diverging bin → the diverging MB → the
+field-specific context/derivation bug. The slice is small (one field,
+few hundred MBs) so the trace diff is quick.
+
+**Housekeeping:** KG121 probe removed (interlaced.rs restored = 222bc92
+clean); JM tooling: `ldecod_grid121.exe` (JMG poc 121) + `grid121.log` +
+`kg121.txt` preserved.
+
 ## SESSION #32d4 ADDENDUM 19 (2026-09-28, continuation) — the poc-119 class traces UPSTREAM again: our poc-121 P-field grid has available/MV cells where JM's has INTRA (colocated-unavailable) — the divergence is in the P-FIELD picture's stored grid; probe plan recorded
 
 Consumption-point diff at poc-119 (`JM_COL` gate framepoc==119 →
