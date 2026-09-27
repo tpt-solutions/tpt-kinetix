@@ -52,6 +52,48 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 21 (2026-09-28, continuation) — BIN-LEVEL DIVERGENCE PINPOINTED: poc-119 bottom field slice, bin 7 (0-based), ctx 36 (mb_skip_run family): ours decodes LPS 0, JM decodes MPS 1 — the field-B `mb_skip_run` context derivation is the bug; first 7 bins match
+
+The #32d3 bin-level method applied to the poc-119 bottom field slice
+(JM's bin trace re-gated to slice n=91 — the gate in image.c was
+hardcoded to slice 15, now 91/92; binary `ldecod_bin91.exe`, trace
+`jmbin91.log`; ours `KINETIX_BINTRACE=1` run `runk62.log`, 653 MB log):
+
+- JM: 33,340 decoded bits for the slice; ours: 48,195 bins total in the
+  NAL-91 span (our tracer logs more per line, so counts aren't directly
+  comparable — the BIT sequences are).
+- **Bits 0-6 identical. Bit 7 (0-based) diverges: ours = 0 (LPS, ctx 36,
+  st 9→10, mps 1), JM = 1 (MPS).** Context 36 = the `mb_skip_run`
+  family. With identical arithmetic-engine state (7 matching bins), the
+  divergence is the CONTEXT MODEL: selection or state for the
+  `mb_skip_run` syntax at the field-slice start.
+- Note: our st at bin 7 is already 9 despite the ctx having (apparently)
+  just been entered — check our context INITIALIZATION for the field-B
+  slice's skip contexts (JM re-inits contexts per slice per
+  `init_Contexts`/`QP`-dependent tables — field slices may init
+  differently, or our ctx numbering for the field-slice skip run maps to
+  a different JM ctxIdx).
+
+**This confirms addendum 20's narrowing and localizes it:** the field-B
+slice's `mb_skip_run` decoding diverges at the very first MB region —
+every subsequent MB (and the 66-vs-30 direct-quadrant count, the 556
+pixel errors) follows from this one context bug.
+
+**Next session (mechanical):**
+1. Print our `mb_skip_run` ctx selection + init for field slices vs JM's
+   (JM `cabac.c`'s `init_Contexts` + the `MB_SKIP_RUN` context mapping
+   for B field slices — JM ctxIdx for B-slice skip; compare our ctx 36's
+   init/state transition table).
+2. The likely bug: our context INIT values for the field-B skip contexts
+   (JM re-inits per slice with slice_type-dependent tables; the field-B
+   init may use the wrong slice_type class), or a missing
+   `mb_skip_run`-specific state carry.
+
+**Housekeeping:** KCOL119 probe removed (tree = 222bc92 clean); traces
+preserved: `/tmp/jm_bin/jmbin91.log` (JM slice-91 bins),
+`/tmp/runk62.log` (our full 653 MB bin trace — NAL-91 span = after
+'NAL 90:' / before 'NAL 91:').
+
 ## SESSION #32d4 ADDENDUM 20 (2026-09-28, continuation) — poc-121 grid is BYTE-EXACT (0/3168) — the poc-119 class narrows to a FIELD-B SLICE PARSE divergence: MBs 2,8/4,4/4,5/5,5 are direct in our parse but have NO direct quadrants in JM's; field-B slice CABAC parse was never bit-exact-proven
 
 With the poc-121 colocated grid dumped on both sides (ours `KG121` via the
