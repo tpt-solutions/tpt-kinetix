@@ -52,6 +52,46 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 13 (2026-09-28, continuation) — the remaining bottom-field residue is DEBLOCKING: poc-123 bottom field is byte-identical to JM pre-deblock (nd=0); temporal direct for field pictures is now fully correct
+
+With 222bc92 landed, re-examined the remaining wrong frames' structure:
+the residual is ~99% bottom-field on every wrong display pair (displays
+4/61/82: top 23-141 samples, bottom 1.8-1.9k). Ran the pre-deblock
+comparison for the poc-123 bottom field (display 61's bottom, one of the
+worst):
+
+```
+ours_pre  vs jm_pre : nd=0     max=0    <- RECONSTRUCTION BYTE-EXACT
+jm_pre   vs jm_post : nd=3543  max=4    <- JM's deblock changes these
+```
+
+**The poc-123 bottom field's reconstruction (MV + residual, pre-deblock)
+is byte-identical to JM.** Every remaining wrong sample in these frames is
+introduced by our FIELD-PICTURE DEBLOCKING failing to reproduce JM's
+(small, max=4 smoothing deltas — 3543 samples on this field). The temporal
+direct work for field pictures is functionally complete: colocated view
+reads, parity independence, MapColToList0 identity matching, and the
+per-entry mvscale base are all JM-verified at the consumption point
+(poc-135: exact; poc-33: exact post-fix; poc-5: 59/60 quadrants exact, one
+single-quadrant scale mismatch at MB(1,7) q2 = the only temporal remnant,
+contributing the MB-rows-6-8 concentration seen on display 4).
+
+**Next session (well-scoped):** field-picture deblocking. Compare our
+`deblock_field` bS/edge decisions against JM's for the poc-123 bottom
+field using the existing fixtures (`/tmp/fb_bpre_poc123_bottomtrue.gray`,
+`/tmp/jm_bin/jm_poc123_{pre,post}deblock.gray`): apply JM's deblock deltas
+(jm_post − jm_pre = exactly the 3543-sample diff, max 4) as a worklist,
+and diff our `deblock_field`'s bS derivation (the field `field: true` flag
+path in `DeblockMbInfo`, §8.7.2.1 field rules — note JM's DEBLOCK
+`list_offset`-driven MV thresholds and the 4:2:0 chroma edge handling for
+fields) against the worklist. Also fix the `KINETIX_FIELD_BUF_OUT` post
+dump (only the pre file fired for this slice — the post site is in the
+other decode path).
+
+**Status:** CAPA1/CVPA1 56/90 bit-exact; total residual 15.7k wrong
+samples (was 52.7k at addendum 8, 86.9k+ before this fix chain started at
+addendum 7). Tree = 222bc92 clean; fmt/clippy/tests 388/0/ITU all green.
+
 ## SESSION #32d4 ADDENDUM 11 (2026-09-28, continuation) — addendum 10's "two passes" retracted (both dumps are in ONE function, update_direct_mv_info_temporal); floor-arithmetic correction proves the (frame_poc, own) implementation was CORRECT for the frame-colocated class; the 3/4/6 regression suspect is the frame_num-based dpb grouping (CAPA1's IDR pair and fn-0 P pair share frame_num 0); concrete retry recipe
 
 1. **"Two passes" retracted.** `JM_SCALE` (line 238) and `JM_COL`
