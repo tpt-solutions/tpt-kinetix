@@ -52,6 +52,48 @@ suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
 (`ldecod_col7.exe` gate framepoc==3, `ldecod_pred138.exe`, `ldecod_grid138.exe`);
 fixtures/traces preserved under `/tmp/jm_bin` and `/tmp/runk*.log`.
 
+## SESSION #32d4 ADDENDUM 14 (2026-09-28, continuation) — full residual census: 44/66 fields pre-deblock EXACT; the entire remaining reconstruction error is one class — single-quadrant mvscale mismatches (JM scale ≈ 190-210 vs ours ≈ 174-192 on the MB(1,7)-q2 pattern); fix = extend the field-poc scaling to cover the far-IDR-reference case
+
+Dumped JM's pre/post-deblock for EVERY field picture (image.c dump gates
+widened to all pocs, filenames fixed to the actual picture poc; tooling
+`ldecod_colall.exe`, dumps in `/tmp/jmall/`, ours in `/tmp/fb5_*`) and
+categorized all 66 wrong fields:
+
+- **44 fields: pre-deblock EXACT (nd=0)** — their post-deblock diffs are
+  4-83 samples, max ≤ 3 (deblocking micro-noise, one edge/bS each).
+- **22 fields with pre-deblock (reconstruction) remnants**, ALL the same
+  signature: a single-quadrant mvscale mismatch, max_diff 16-135. Samples:
+  poc 5 (1781/132), 29 (1507/117), 119 (1732/135), 110 (161/50), 117
+  (194/71), 124/125 (248/255, max 84/77), 130/131 (77/374, 48/95),
+  142/143 (41/413, 4/94), 158/159 (15/230, 6/69), 160/161 (100/1484,
+  33/67), 165 (37/21), 170/171 (3/37), 9 (89/16). Pre-deblock total
+  8855; deblock adds ~2500 small-sample diffs on top (total 11362).
+
+**The class, precisely (poc-5 MB(1,7) q2, col=(-14,5), cr0=2):** JM
+mv0=(-10,4)/mv1=(4,-1) requires mvscale ≈ 190-208; ours mv0=(-9,3)/
+mv1=(5,-2) requires ≈ 174-192. The colocated cell's target maps to an L0
+entry whose tb/td JM measures differently — the pattern fits the target
+being an entry whose OWN poc differs from its pair's frame poc (a
+bottom/top field of a pair where our `(frame_poc, own_poc)` tuple's
+frame_poc recovery picked the wrong mate), i.e. the remaining
+frame-poc-recovery gap called out in addendum 11 item 3 — now confined to
+quadrants whose colocated reference is a field of the FAR IDR/early pair.
+
+**Next session (mechanical):** dump the poc-5 quadrant's `target_poc`,
+matched `own_poc`, and JM's `mvscale[4][mapped_idx]` + `L0[mapped_idx]->
+poc` for the same cell (JM_SCALE gate framepoc==5 && that MB) — the
+(KDER-style) probe already exists, just re-gate. Then correct the
+frame_poc recovery for that pairing case, re-run the full-grid + pixel
+diffs (the entry-major implementation is otherwise proven), gates, and
+the field-deblocking micro-noise (44 fields, ≤83 samples each, max 3)
+becomes the final residue.
+
+**Housekeeping:** all probes reverted; tree = 222bc92 clean; fmt/clippy/
+tests 388/0/ITU green earlier this session. JM tooling: `ldecod_colall.exe`
+(all-poc pre/post field dumps → `/tmp/jmall/`), plus the earlier
+`ldecod_col5/6/7/8.exe`, `ldecod_pred138.exe`, `ldecod_grid138.exe`,
+`ldecod_scale33.exe`.
+
 ## SESSION #32d4 ADDENDUM 13 (2026-09-28, continuation) — the remaining bottom-field residue is DEBLOCKING: poc-123 bottom field is byte-identical to JM pre-deblock (nd=0); temporal direct for field pictures is now fully correct
 
 With 222bc92 landed, re-examined the remaining wrong frames' structure:
