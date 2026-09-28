@@ -13346,3 +13346,53 @@ bl=1/2/3 nodes) vs K's KTRACE PART lines — the first node in dav's
 sequence ABSENT from K's (or vice versa) is the structural divergence.
 The bp values at shared nodes all matched, so the divergence is purely
 in WHICH nodes are visited — an edge-condition difference.
+
+## Session 2026-09-28 (cont'd 19) — refined: the FIRST structural
+## divergence is the PARTITION read at (112,56) itself: dav1d bp=0 (NONE),
+## K bp=2 (VERT). The (120,48) mode-cascade divergence (cont'd 13) happens
+## BETWEEN (120,48)'s KSKIP anchor and (112,56)'s partition read — i.e.
+## inside (120,48)'s post-skip syntax — and is the same EC-window
+## divergence seen at the partition read. Everything in tile row 3 after
+## (112,56) is cascade; tile rows 0-2 trees match exactly (LCS=full, 0
+## events on all three groups).
+
+Full event list for tile row 3 (group 3, mi 48-63): 40 events starting
+with the (112,56) partition (DAV NONE vs K VERT), then (120,56) DAV NONE
+vs K SPLIT+VERT cascade, then (128,48)/(144,48) DAV NONE vs K SPLIT
+cascades — K's tree descends into deep splits where dav1d leaf-stops on
+NONE, exactly matching the 934-vs-828 read counts and the pixel blockmap
+(the diverging region spreads right/down from (112,56)).
+
+The pre-divergence EC state matched at (120,48)'s KSKIP (4376 both) —
+so the divergence is at ONE of the reads between (120,48)'s skip read
+and (112,56)'s partition read: (120,48)'s intra (37415 ✔), ref (55492 ✔),
+then the FOUR mode bools (K: 41044/39444/61664/unprinted-drl vs dav:
+post-intermode 49180), then (120,48)'s interintra (K 37000 vs dav
+46680), motion mode, filter reads, then (112,56)'s partition.
+
+The mode-bool reads' CDF cells (newmv_mode[3], globalmv_mode[0],
+refmv_mode[3], drl_bit[drl_ctx]) are adapted by every earlier NEAR/NEWMV
+block in the frame — including tile rows 0-2's blocks, which all matched.
+BUT the skip=1 blocks (which are MOST of tile row 2) read NO mode bools,
+so their extra... no — the cont'd-16 finding stands: K's 106 extra
+tile-row-2 reads (all partition reads, call site mode_cdfs.rs:657) are
+zero-bit reads whose CDF adaptation drifts the PARTITION cells — and
+mode-bool cells are NOT partition cells...
+
+Resolution attempt that failed: the (120,48) mode-bool CDF drift cannot
+come from partition-read adaptation (different CDF tables). The mode
+bools' cells adapt from earlier blocks' mode reads — tile rows 0-2's
+NEWMV/NEARMV blocks — which all matched (their mvs/modes pixel-verified).
+BUT tile row 2's SKIP=0 blocks (e.g. (104,52) skip=0? the trace showed
+(112,52) skip=1, (116,52) skip=1...) — a skip=0 block's mode reads WERE
+compared at (116,44)?(oh=3 rows 176-191)... not in tile row 2.
+
+The genuinely open question is now ONE READ: which of the four mode
+bools at (120,48) first diverges, and why (CDF cell value vs EC window).
+The capture setup from cont'd 13 (dav1d per-bool prints — needs the
+escape-safe patching approach; K's chain states 41044/39444/61664
+already captured) completes this. THEN: the (112,56) partition read's
+CDF cell (partition 32x32/ctx1 both sides — print its value both sides
+at the read: dav1d `cdf.m.partition[bl][ctx]` complement vs K
+`partition_w32[?]` spec domain) settles whether the CDF drift or the EC
+window is the carrier.
