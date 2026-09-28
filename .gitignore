@@ -64,6 +64,10 @@ tpt-kinetix-h264/1.fn*
 av1_capture.json
 # AV1 Phase G.0 full-tile symbol-trace capture (written by KINETIX_AV1_CAPTURE_TILE)
 av1_tile_trace.json
+# AV1 debug-plane dumps (written by KINETIX_AV1_DUMP_GRID / KINETIX_AV1_DUMP_FRAMES)
+k_grid*.bin
+kfr_*.yuv
+dav1d_grid*.dump
 
 # Claude Code agent worktree scratch space (not repo content)
 /.claude/

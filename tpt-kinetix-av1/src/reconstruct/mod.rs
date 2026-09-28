@@ -1989,6 +1989,8 @@ fn build_ref_frames(ref_store: Option<&RefFrameStore>) -> RefFrames<'_> {
                     v: &f.v,
                     width: f.width,
                     height: f.height,
+                    real_width: f.real_width,
+                    real_height: f.real_height,
                 });
             }
         }

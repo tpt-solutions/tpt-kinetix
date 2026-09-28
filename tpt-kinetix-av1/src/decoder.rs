@@ -38,10 +38,14 @@ type ObuPairs = Vec<(u8, Vec<u8>)>;
 ///
 /// The planes are stored at the **mi-grid extent** (`MiCols*4 × MiRows*4`,
 /// e.g. 160×92 for a 160×90 frame): blocks of the last superblock row
-/// reconstruct into the padding rows too, and motion compensation for
-/// bottom-edge blocks reads them — matching dav1d's padded references. The
-/// visible `real_width × real_height` crop is only applied when the frame is
-/// output (`to_video_frame`).
+/// reconstruct into the padding rows too, and CDEF/loop restoration process
+/// the full sbrow extent — matching dav1d. Inter motion compensation,
+/// however, clamps reference reads at the **visible** dims (`real_width` ×
+/// `real_height`, subsampled for chroma) — dav1d's `mc()`/`warp_affine()`
+/// use `p.p.w/p.p.h` as the `emu_edge` bounds, so bottom/right-edge blocks
+/// replicate the edge sample rather than reading the padding rows; only
+/// intrabc reads within the grid extent. The visible crop is applied when
+/// the frame is output (`to_video_frame`).
 pub struct StoredFrame {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -135,9 +139,13 @@ impl RefFrameStore {
             let mut fp = std::fs::File::create("k_grid0.bin").ok();
             if let Some(fp) = fp.as_mut() {
                 use std::io::Write;
-                for yy in 0..320usize {
-                    let start = yy * planes.stride;
-                    let _ = fp.write_all(&y[start..start + 720]);
+                // Row width equals the plane stride; iterate the actual grid
+                // rows (this hook previously hardcoded 320 rows and panicked
+                // on shorter grids).
+                let stride = planes.stride;
+                for start in (0..y.len()).step_by(stride.max(1)) {
+                    let end = (start + stride).min(y.len());
+                    let _ = fp.write_all(&y[start..end]);
                 }
             }
         }

@@ -458,6 +458,7 @@ fn warp_affine_8x8(
     dest_x: usize,
     dest_y: usize,
     refp: &[u8],
+    ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
     dx: i32,
@@ -472,7 +473,7 @@ fn warp_affine_8x8(
     let sample = |ix: i32, iy: i32| -> i32 {
         let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
         let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
-        refp[cy * ref_w + cx] as i32
+        refp[cy * ref_stride + cx] as i32
     };
     let filter_row = |phase: i32| -> &'static [i8; 8] {
         let idx = (64 + ((phase + 512) >> 10)).clamp(0, 192);
@@ -547,12 +548,15 @@ fn warp_affine_8x8(
 /// the caller blends/blits it the same way. `bx4`/`by4` are the block's
 /// frame-absolute position in 4-pixel (mi) units; `ss_hor`/`ss_ver` the
 /// plane's subsampling (0 for luma, and for chroma per the sequence's
-/// `PIXEL_LAYOUT`).
+/// `PIXEL_LAYOUT`). `ref_stride` indexes the reference plane; `ref_w`/`ref_h`
+/// are the visible-dims clamp bounds (dav1d `warp_affine` emu_edge bounds),
+/// which may be smaller than the plane's grid extent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn block_warp_process(
     dest: &mut [u8],
     dest_stride: usize,
     refp: &[u8],
+    ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
     model: &WarpModel,
@@ -588,6 +592,7 @@ pub(super) fn block_warp_process(
                 x as usize,
                 y as usize,
                 refp,
+                ref_stride,
                 ref_w,
                 ref_h,
                 dx,
@@ -754,6 +759,67 @@ mod tests {
         let selected = select_warp_samples(&raw, bw4, bh4, mv);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].dst, [5000, 5000]);
+    }
+
+    /// `block_warp_process` must index the reference plane with its **stride**
+    /// while clamping coordinates at the **visible** width/height. The two
+    /// differ whenever the plane is stored at the mi-grid extent (padded
+    /// right/bottom columns and rows) but the warp filter's edge clamp uses
+    /// the frame's real dims — dav1d's `warp_affine` emu_edge bounds. A
+    /// single-column stride offset is enough to catch a regression that uses
+    /// the visible width as the stride.
+    #[test]
+    fn block_warp_process_uses_stride_for_addressing_and_visible_dims_for_clamping() {
+        const VIS_W: usize = 24;
+        const VIS_H: usize = 16;
+        const STRIDE: usize = VIS_W + 8; // padded columns, as the mi grid gives
+        const PLANE_H: usize = VIS_H + 8; // padded rows
+                                          // Reference rows are a horizontal ramp `10 + y`, so a read that uses
+                                          // the wrong row base is trivially visible in the output.
+        let mut plane = vec![0u8; STRIDE * PLANE_H];
+        for y in 0..PLANE_H {
+            for x in 0..STRIDE {
+                plane[y * STRIDE + x] = (10 + y) as u8;
+            }
+        }
+        // Pure translation (identity linear part), so the model degenerates to
+        // a plain shifted copy of the reference.
+        let mv = Mv::new(0, 0);
+        let raw = [
+            WarpSample {
+                src: [-8, -8],
+                dst: [-8 + mv.col, -8 + mv.row],
+            },
+            WarpSample {
+                src: [120, -8],
+                dst: [120 + mv.col, -8 + mv.row],
+            },
+            WarpSample {
+                src: [-8, 120],
+                dst: [-8 + mv.col, 120 + mv.row],
+            },
+            WarpSample {
+                src: [120, 120],
+                dst: [120 + mv.col, 120 + mv.row],
+            },
+        ];
+        let model = derive_warp_model(&raw, 4, 4, mv, 10, 6).expect("model should be valid");
+        // 8x8 block at the top-left of the frame, fully inside the visible
+        // area, so no clamping occurs and the output must equal the
+        // reference's top-left 8x8 exactly.
+        let mut dest = vec![0u8; 8 * 8];
+        block_warp_process(
+            &mut dest, 8, &plane, STRIDE, VIS_W, VIS_H, &model, 0, 0, 8, 8, 0, 0,
+        );
+        for y in 0..8usize {
+            for x in 0..8usize {
+                assert_eq!(
+                    dest[y * 8 + x],
+                    plane[y * STRIDE + x],
+                    "sample ({x},{y}) read the wrong reference row/column"
+                );
+            }
+        }
     }
 
     /// The warp filter bank is a real 8-tap kernel: every row must sum to

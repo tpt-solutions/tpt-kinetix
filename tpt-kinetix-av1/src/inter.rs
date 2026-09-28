@@ -112,6 +112,14 @@ pub struct RefSlot<'a> {
     pub v: &'a [u8],
     pub width: usize,
     pub height: usize,
+    /// Visible frame dims (≤ `width`/`height`). Motion compensation clamps
+    /// reference reads at these — dav1d's `mc()`/`warp_affine()` use
+    /// `p.p.w/p.p.h` (not the mi-grid extent) as the `emu_edge` bounds for
+    /// every reference read except intrabc — so bottom/right-edge blocks
+    /// replicate the edge sample instead of reading the reconstructed
+    /// grid-padding rows.
+    pub real_width: usize,
+    pub real_height: usize,
 }
 
 impl<'a> RefSlot<'a> {

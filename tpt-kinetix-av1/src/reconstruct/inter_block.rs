@@ -2627,22 +2627,26 @@ impl<'a> TileDecodeState<'a> {
                 }
                 continue;
             };
-            let (rp, rw, rh) = rf.plane(plane);
+            let (rp, rw, _) = rf.plane(plane);
             let mut obmc = vec![0u8; pred_w * pred_h];
             // `filters` here is `[dir0, dir1]` (see the neighbour-job
             // construction above); dir1 is horizontal, dir0 is vertical.
             // `px`/`py` are tile-local (the destination write below uses them
             // that way too); the reference read position must be shifted into
-            // frame coordinates like the ordinary translational path.
+            // frame coordinates like the ordinary translational path, and the
+            // clamp bounds are the reference's visible dims (dav1d `mc()`
+            // bounds), not the grid extent.
             let ss_hor = (plane != 0) as u32 & self.subsampling_x as u32;
             let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
+            let vis_w = (rf.real_width + ss_hor as usize) >> ss_hor;
+            let vis_h = (rf.real_height + ss_ver as usize) >> ss_ver;
             motion_compensate(
                 &mut obmc,
                 pred_w,
                 rp,
                 rw,
-                rw,
-                rh,
+                vis_w,
+                vis_h,
                 px + (self.tile_px_x0 >> ss_hor),
                 py + (self.tile_px_y0 >> ss_ver),
                 pred_w,
@@ -2990,7 +2994,17 @@ impl<'a> TileDecodeState<'a> {
             let tmp = {
                 let mut t = vec![0u8; bw * bh];
                 if let Some(rf) = self.ref_slots.slots[slot0] {
-                    let (rp, rw, rh) = rf.plane(plane);
+                    let (rp, rw, _) = rf.plane(plane);
+                    // dav1d's mc()/warp_affine() clamp reference reads at the
+                    // reference's *visible* dims (`p.p.w/p.p.h`, subsampled
+                    // for chroma) — never at the mi-grid extent — so
+                    // bottom/right-edge blocks replicate the edge sample
+                    // instead of reading the reconstructed grid-padding
+                    // rows. (dav1d uses grid dims only for intrabc, which is
+                    // handled in intra_block.rs.) `rw`/`rh` remain the
+                    // plane's stride/extent; the clamps below use `vis_*`.
+                    let vis_w = (rf.real_width + ss_hor as usize) >> ss_hor;
+                    let vis_h = (rf.real_height + ss_ver as usize) >> ss_ver;
                     // Dump the reference-plane row this block samples, before
                     // the warp/translation branch, so it reports the same
                     // reference content either way — the point is to attribute
@@ -3008,8 +3022,8 @@ impl<'a> TileDecodeState<'a> {
                             (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32) + (mvs[0].col >> 3);
                         let row: Vec<i32> = (-4..(bw as i32 + 4))
                             .map(|k| {
-                                let y = iy.clamp(0, rh as i32 - 1) as usize;
-                                let x = (ix + k).clamp(0, rw as i32 - 1) as usize;
+                                let y = iy.clamp(0, vis_h as i32 - 1) as usize;
+                                let x = (ix + k).clamp(0, vis_w as i32 - 1) as usize;
                                 rp[y * rw + x] as i32
                             })
                             .collect();
@@ -3048,7 +3062,8 @@ impl<'a> TileDecodeState<'a> {
                                 bw,
                                 rp,
                                 rw,
-                                rh,
+                                vis_w,
+                                vis_h,
                                 model,
                                 mi_col as i32,
                                 mi_row as i32,
@@ -3082,8 +3097,8 @@ impl<'a> TileDecodeState<'a> {
                                 bw,
                                 rp,
                                 rw,
-                                rw,
-                                rh,
+                                vis_w,
+                                vis_h,
                                 px_x + (self.tile_px_x0 >> ss_hor),
                                 px_y + (self.tile_px_y0 >> ss_ver),
                                 bw,
@@ -3177,18 +3192,22 @@ impl<'a> TileDecodeState<'a> {
         let combined = {
             let prep = |slot: usize, mv: Mv| -> Vec<i32> {
                 if let Some(rf) = self.ref_slots.slots[slot] {
-                    let (rp, rw, rh) = rf.plane(plane);
+                    let (rp, rw, _) = rf.plane(plane);
                     // See the single-ref motion_compensate call above: `filters`
                     // is `[dir0, dir1]`; dir1 is horizontal, dir0 is vertical.
                     // The reference read position is frame-global (see the
-                    // tile-offset shift on the single-ref path).
+                    // tile-offset shift on the single-ref path), and the clamp
+                    // bounds are the reference's visible dims, not the grid
+                    // extent.
                     let ss_hor = (plane != 0) as u32 & self.subsampling_x as u32;
                     let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
+                    let vis_w = (rf.real_width + ss_hor as usize) >> ss_hor;
+                    let vis_h = (rf.real_height + ss_ver as usize) >> ss_ver;
                     motion_compensate_prep(
                         rp,
                         rw,
-                        rw,
-                        rh,
+                        vis_w,
+                        vis_h,
                         px_x + (self.tile_px_x0 >> ss_hor),
                         px_y + (self.tile_px_y0 >> ss_ver),
                         bw,

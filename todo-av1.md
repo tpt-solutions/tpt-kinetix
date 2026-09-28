@@ -10601,3 +10601,55 @@ padding rows. The padding content (or the clamp bound) differs by ±1.
 Next: dump frame 0's grid rows 295-310 (post-everything, the reference
 plane K stores) and the equivalent from dav1d, find the differing
 padding row, and align K's MC clamp bound with dav1d's buffer semantics.
+
+### Session cont'd 22 — MC reference clamp moved to the VISIBLE dims: the frames 1-3 bottom-row residue class is GONE
+
+The cont'd-21 addendum's proposed cause (MC reading the reference's grid-padding
+rows 300-303, where the padding content differs by +/-1) was **backwards**. The
+padding content is not the divergence: dav1d never reads those rows for inter
+prediction in the first place. dav1d's `mc()` / `warp_affine()` take
+`p.p.w` / `p.p.h` (the *visible* frame dims) as their `emu_edge` bounds, so a
+bottom-edge fractional-MV block **replicates row 299** instead of reading
+reconstructed padding row 300. Kinetix was clamping at the mi-grid extent
+(160x304 for a 160x90 frame), so it read the padding rows and got different
+samples. The stage-independence observed in the addendum is consistent with
+this: the difference is in the base reconstruction, not in any filter.
+
+The fix threads the reference's visible dims (`StoredFrame::real_width`/
+`real_height`, already stored, via new `RefSlot::real_width`/`real_height`)
+into every inter read: the single-ref translational path, the two-ref
+`motion_compensate_prep` path, the OBMC per-direction path, and the warp
+path. `warp.rs` additionally had a latent bug exposed by this: `warp_affine_8x8`
+addressed the reference as `refp[cy * ref_w + cx]`, i.e. it used the clamp
+bound as the stride. `block_warp_process` now takes an explicit `ref_stride`
+(stride for addressing, `ref_w`/`ref_h` for clamping). **Note this only
+matters when the grid stride exceeds the visible width** - a bug the previous
+code could not exhibit only because the two happened to be the wrong value in
+the same direction.
+
+Intrabc is deliberately unaffected (it reads within the grid extent and is
+handled in `intra_block.rs`), and CDEF/deblock/LR keep using the full mi-grid
+extent (cont'd 21's fix, which is still required and still correct).
+
+### Results
+
+- Conformance corpus: **all 6/6 intra entries and 24/24 inter frames bit-exact
+  vs dav1d** across the four inter clips. Before this change,
+  `testsrc_160x90` frame 7 was the sole non-exact case (V PSNR 83.69 dB) - now
+  7/7. Verified by A/B: stashing the change reproduces the frame-7 failure
+  exactly, so this is a real fix, not a corpus that already passed.
+- Gates: 165 lib tests, clippy clean, fmt clean.
+
+### Next session's starting point
+
+1. The remaining `- [ ]` items in this file are unchanged and still open:
+   the symbol-level oracle (line ~209), the corpus pixel-exactness gap
+   (line ~359), and the `pixel_exact` capability flip (lines ~385-388).
+   `capabilities().pixel_exact` still reports `false` - correct, because the
+   official FATE run is far from frame-exact and the corpus is a small
+   synthetic set.
+2. Next measurable target is still the official FATE samples
+   (`KINETIX_AV1_FATE_DIR`), where `non_uniform_tiling` was 1/24 exact at
+   cont'd 21 and the frames 1-2 residues were the open item. With the MC clamp
+   corrected, re-run `av1_fate_real_samples_vs_dav1d_when_available` to see
+   whether the frames 1-2 bottom-row residue class collapsed with it.
