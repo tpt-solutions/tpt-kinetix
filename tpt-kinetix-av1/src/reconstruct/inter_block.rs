@@ -1284,7 +1284,7 @@ impl<'a> TileDecodeState<'a> {
         // neighbour also exists (dav1d `find_matching_ref` mask nonzero) and
         // warped motion is enabled the 3-way `motion_mode` symbol is read,
         // otherwise the `use_obmc` bool.
-        let mut motion_mode = 0u8; // SIMPLE
+        let mut motion_mode = 0u8; // SIMPLE (dav1d MotionMode: 1 = OBMC, 2 = WARP)
                                    // §7.13.3/§7.13.4 local warp model, derived only when `motion_mode ==
                                    // WARP` (2) is actually selected below. `None` covers both "not a
                                    // WARP block" and dav1d's own translation-only fallback (LS system
@@ -1318,6 +1318,12 @@ impl<'a> TileDecodeState<'a> {
                         .read_symbol(&mut self.mode_cdfs.use_obmc[bsize.min(21)])
                         as u8;
                 }
+                // Symbol-value semantics (dav1d `levels.h` MotionMode): the
+                // `motion_mode`/`use_obmc` reads produce 0 = SIMPLE,
+                // **1 = OBMC, 2 = WARP** — verified per-block against dav1d's
+                // `Post-motionmode` trace; a previous session's note claiming
+                // the values were swapped was a misreading of a truncated
+                // trace window.
                 if motion_mode == 2 {
                     let bw4 = bw as i32;
                     let bh4 = bh as i32;
@@ -1349,7 +1355,8 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         // A WARP block reads no interpolation-filter symbol (dav1d sets
-        // `has_subpel_filter = 0`).
+        // `has_subpel_filter = 0`, so both kernels resolve to EIGHTTAP_REGULAR
+        // via the `!has_subpel_filter` fallback inside the switchable branch).
         let frame_filter = if motion_mode == 2 {
             INTERP_EIGHTTAP_REGULAR
         } else {

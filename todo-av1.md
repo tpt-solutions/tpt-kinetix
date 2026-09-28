@@ -11984,3 +11984,491 @@ own measurement can tell, closed.
    anything - use a real output filename (e.g. `-o out.y4m`) instead, or
    the run will look successful (`EXIT: 0`) while producing zero trace
    output, which cost real time this session before being caught.
+
+## Session 2026-09-28 — returned to the tile/frame-4 thread (cont'd 4-22, a
+## different bug class than the just-closed t2.ivf chroma fix): the old
+## "interp_filter desync at frame 4" framing is STALE — cont'd 7 already
+## fixed that specific desync via the `tx`/`tx_intra` split. Current real
+## divergence starts one block into tile 1's first superblock row; formed
+## and tested a concrete cross-tile spatial-MV hypothesis; it REGRESSES the
+## corpus and was reverted, not committed
+
+Picked this up expecting to find frame 4 still desyncing at the
+`interp_filter` read per an out-of-date memory summary. **That framing no
+longer matches the code**: cont'd 5/6 hypothesised and then disproved an
+`interp_filter`-context bug, and cont'd 7 (same day, further down this
+file) root-caused and fixed the *actual* frame-4 desync — a `ctx->tx` /
+`ctx->tx_intra` array collision — before this session ever started.
+Re-verified from scratch rather than trusting either memory or the todo
+file's prose:
+
+- Baseline before any change (`KINETIX_AV1_FATE_DIR=/tmp/fate_av1`,
+  `cargo test -p tpt-kinetix-test-utils --test conformance --release`):
+  intra corpus 6/6, inter corpus 5/5×4 clips all bit-exact, feature corpus
+  **7/13** (matches the task's stated post-4c40dd6 baseline exactly), FATE
+  aggregate **5/195**, `non_uniform_tiling` **3/24** (frames 0-2 exact,
+  frame 3 the first divergent one).
+- Commit `4c40dd6` (the just-landed t2.ivf chroma fix) touches
+  `co_located_luma_type`/coefficient bookkeeping only — confirmed
+  unrelated to this stream by inspection; `non_uniform_tiling`'s own
+  history (cont'd 21/22) already accounts for its current 3/24 via the
+  CDEF full-extent and MC-visible-dims fixes, not this commit.
+
+### Re-localised frame 3's divergence with the current code
+
+`probe_tiles --example` (already committed) + `BLOCKMAP=1` +
+`KINETIX_AV1_DBG_PXY`/`KINETIX_AV1_DBG_PRED`/`KINETIX_AV1_DBG_B0` +
+`KINETIX_AV1_DBG_SEQ` (the frame-counter fix from cont'd 9 makes this
+reliable now): frame 3 (dav1d order_hint=3, the first hidden alt-ref
+having already been decoded as internal frame 1) first diverges at Y
+(384,64) — mi (96,16) — by exactly 2 (Kinetix 162, dav1d 164),
+**pre-filter** (deblock/CDEF/LR are all confirmed no-ops at this exact
+pixel this frame — same "value already wrong before any filter runs"
+signature cont'd 9 established as the reconstruction-bug tell). mi_row 16
+is tile row 1's mi_row 0 (`row_start_sb=[0,1,2,3,5]` ⇒ tile row 1 starts
+at pixel y=64) — i.e. the very first superblock row of the *second* tile
+in this 1-col×4-row layout, one block in from the tile's own left edge
+(the first SB of that row, mi_col 64-95, is already pixel-exact; the
+divergence starts at mi_col 96). `mi=(96,16) bsize=9 skip=true` (all-zero
+residual — a pure-MC divergence, not a coefficient one) `ref=8 mm=0
+filter0=0` (matching cont'd 5/6/7's now-closed leaf's general shape, but
+this is a *different* specific block/stream position than the one those
+sessions traced — not a re-open of the same bug).
+
+### Hypothesis: `find_mv_stack`'s top-left "corner" candidate probe reads
+### across a tile-row boundary, and Kinetix's per-tile-fresh spatial grid
+### can never match dav1d there
+
+Read dav1d 1.5.4's real `refmvs.c` (`raw.githubusercontent.com`, both the
+`add_spatial_candidate` gate and `dav1d_refmvs_tile_sbrow_init`) via
+WebFetch. Findings, cross-checked against Kinetix's
+`inter_mv_stack`/`intra_block.rs`:
+
+- The regular above/left scans (`scan_row`/`scan_col`) are correctly
+  gated by `by4 > row_start` / `bx4 > col_start` (tile-relative, not
+  frame-relative) in Kinetix — confirmed no bug there, matches dav1d and
+  matches cont'd 8's prior audit.
+- The one **top-left diagonal "corner" probe** (`add_spatial_candidate`
+  at `(by4-1, bx4-1)`, weight 4, feeding a *dummy* have-newmv accumulator
+  per cont'd 8) is gated only by `(n_rows|n_cols) != sentinel` in both
+  dav1d and Kinetix — **not** independently bounded by `row_start`. For a
+  block at a tile's very first row with an available left neighbour
+  (exactly mi=(96,16)'s situation: `col_start=0`, `bx4=96>0` so the left
+  scan runs and sets `n_cols`), this probe reads one row *above* the
+  tile's start — i.e. into the tile above.
+- Confirmed via `dav1d_refmvs_tile_sbrow_init`'s real source that dav1d's
+  single-threaded path (`n_tile_threads==1` forces `tile_row_idx=0`) does
+  **not** clear or border-fill that row between tiles — the buffer is a
+  persistent, frame-wide circular window, so a single-threaded dav1d
+  decode genuinely can see the tile-above's real last-row content there.
+- Kinetix's `refmv_grid` (`TileDecodeState::new`, `mod.rs`) is allocated
+  **fresh per tile** (`vec![RefMvCell::default(); mi_cols*mi_rows]`,
+  frame-sized but blank), and tiles decode via `par_iter` in parallel —
+  so this exact corner-probe read can *only* ever see a blank/no-match
+  cell in Kinetix, never the real neighbour dav1d might have. A wrong
+  `have_row`/`newmv_ctx` bit here changes which CDF a following symbol
+  read uses without changing the decoded value, cascading into a
+  permanent per-tile entropy desync from that point on — the identical
+  failure signature this whole cont'd 4-22 thread has been chasing.
+
+### The fix built and measured — REGRESSES, reverted
+
+Implemented: `TileDecodeState::new` gained a `prior_tile_refmv:
+Option<&[MotionFieldCell]>` parameter seeding `refmv_grid` (mv/refs only;
+w4/h4/mf are irrelevant to the corner probe per the dummy-accumulator/
+fixed-weight-4 analysis above) for every cell outside the tile's own rows
+(cells the tile owns get overwritten as it decodes its own blocks
+regardless). `reconstruct_av1_frame`'s tile-decode loop was restructured
+from one flat `tile_payloads.par_iter()` into a sequential loop over tile
+**rows** (still `par_iter` *within* a row, so same-row tiles remain fully
+parallel/independent), threading a running frame-sized `Vec<
+MotionFieldCell>` forward: after each row, every tile's own already-
+computed `motion_field` output (this mechanism already existed, for the
+*next frame's* temporal projection — reused as-is) is merged into the
+seed passed to the next row.
+
+Compiled clean, all 165 AV1 lib tests + `proptest_coeffs`/`proptest_obu`
++ doc-tests pass (two internal-test call sites needed a trailing `None`
+for the new parameter: `reconstruct/tests.rs`'s 9 direct
+`TileDecodeState::new` calls plus `tests/proptest_coeffs.rs`'s
+`decode_tile_group` call — mechanical, no behavioural intent).
+
+**Measured effect is a regression, not a fix**:
+
+| metric | before | after |
+|---|---|---|
+| `non_uniform_tiling` FATE | 3/24 (frames 0-2 exact) | **1/24** (only frame 0 exact — frame 1 now *also* diverges, where it didn't before) |
+| FATE aggregate | 5/195 | **3/195** |
+| `tiles_2x2` feature-corpus worst PSNR | 17.51 dB | **15.56 dB** (worse) |
+| intra/inter synthetic corpus, other 5 feature-corpus exact entries | unaffected | unaffected |
+
+Reverted in full (`git checkout` on `reconstruct/mod.rs`,
+`reconstruct/tests.rs`, `tests/proptest_coeffs.rs`) and re-confirmed the
+exact pre-change baseline (7/13 feature corpus, 165 lib tests, 3/24
+`non_uniform_tiling`) is restored. **Not committed** — per this crate's
+rule, a plausible-by-source-reading fix that regresses on measurement
+does not ship.
+
+### Why it's wrong, and what's still open
+
+The corner-probe *mechanism* (dav1d reads real cross-tile-row content
+there, Kinetix reads blank) is confirmed real from the source alone — but
+either (a) that mismatch isn't actually what causes mi=(96,16)'s
+divergence (some other, still-unidentified symbol/context differs
+instead, and this session's fix just introduced a *new* wrong bit
+somewhere it didn't belong — e.g. `tiles_2x2`'s regression suggests the
+seeding fires somewhere it shouldn't for a *different* stream entirely),
+or (b) the mechanism is real but this session's approximation of dav1d's
+actual stored value at that cell (the tile-above's *own final* written
+content, taken from its own decode's exact same output data used for
+next-frame temporal projection) is not what dav1d's real circular-buffer
+addressing (`off = (sbsz*sby) & 16`, the `EXCHANGE`-based double-buffer
+swap) actually holds at that exact row when `find_mv_stack` reads it —
+dav1d's addressing is 2-row circular per superblock-row parity, not a
+simple "whatever the tile above finished with", and this session did not
+model that precisely. (a) and (b) are not mutually exclusive and neither
+was distinguished this session.
+
+**Next session's starting point:**
+
+1. Do not re-attempt this exact seeding approach without first getting a
+   *real* dav1d-side trace of what value `find_mv_stack`'s corner probe
+   actually reads at mi=(95,15) [`by4-1,bx4-1` for mi=(96,16)] when
+   decoding this exact frame/tile — the working oracle from cont'd
+   29/30 (`%LOCALAPPDATA%\Temp\dav1d_oracle`, `bld2/` subdir,
+   `ninja -C bld2 tools/dav1d.exe`, retarget `DEBUG_BLOCK_INFO` in
+   `src/recon.h`) should be used for this instead of reasoning from the
+   C source's static structure alone, which is what led this session's
+   plausible-looking fix to still be wrong.
+2. If the oracle shows the corner-probe cell really is blank/no-match in
+   dav1d too for this specific leaf, the corner-probe hypothesis is fully
+   dead for this bug and the next unanchored-symbol suspect list from
+   cont'd 5/8 (already-eliminated: var-tx, cdef/delta_q/delta_lf,
+   ref_frame_mvs/load_tmvs, interp_filter ctx) needs a genuinely new
+   entry — re-derive from a fresh full symbol-sequence dump at mi=(96,16)
+   rather than assumption.
+3. If the oracle instead confirms real cross-tile content is read, the
+   fix needs dav1d's actual double-buffer/parity addressing modelled
+   precisely (not "last row the tile above wrote"), and the `tiles_2x2`
+   regression needs its own root-cause before landing anything — that
+   stream has a *different* pre-existing gap (1/4 exact per the feature
+   corpus) that this session's change made numerically worse, which
+   needs explaining even if the tile-boundary theory itself is sound for
+   `non_uniform_tiling`.
+4. Baseline to protect: feature corpus 7/13, FATE aggregate 5/195,
+   `non_uniform_tiling` 3/24, intra 6/6, inter corpus 5/5×4 clips, 165 AV1
+   lib tests — all unchanged and reconfirmed after this session's revert.
+
+### Session 2026-09-28 cont'd 2 — corner-probe hypothesis DEFINITIVELY
+### DISPROVEN via a live dav1d oracle trace (not just source-reading); found
+### a real but currently-dormant Kinetix bug in the same gate (OR should be
+### AND) and, while chasing why it measured as a no-op, found the ACTUAL
+### divergence: at the exact target frame, Kinetix decodes a 32×32
+### partition where dav1d decodes 64×64 at the same position — a
+### partition-tree divergence, not an mv-stack bug. No fix landed (the
+### OR/AND fix is zero-effect everywhere and was reverted); this is a
+### precise handoff to the real bug class for the next session.
+
+Picked up exactly where the prior entry (same day) left off: its corner-
+probe/cross-tile-row hypothesis for `non_uniform_tiling`'s frame-3
+divergence at mi=(96,16) had a plausible C-source reading but a regressing
+fix, and its own writeup said not to re-attempt the fix without a *live*
+dav1d trace of the actual corner-probe read. Reused the already-working
+`dav1d_oracle` (`%LOCALAPPDATA%\Temp\dav1d_oracle`, `bld2/`,
+`ninja -C bld2 tools/dav1d.exe`) rather than rebuilding anything.
+
+**Step 1 — live-traced the corner-probe gate itself and found the prior
+session's mechanism can't be what's happening.** Instrumented
+`dav1d_refmvs_find` (`src/refmvs.c`) to print `n_rows`/`n_cols`/whether the
+top-left corner probe (`refmvs.c` line ~457, `if ((n_rows | n_cols) !=
+~0U)`) actually fires, filtered to `by4==16 && bx4==96`. Ran the real
+`non_uniform_tiling.ivf` through the instrumented `tools/dav1d.exe
+--threads 1`. Result: **`corner_fires=0` on every single occurrence across
+the whole clip (24+ lines, every frame this mi position is inter-coded)**,
+because `n_rows` is `0xffffffff` (sentinel) every time — this mi position
+is tile row 1's own first row (`by4==tile_row.start`), so the top scan's
+`if (by4 > rt->tile_row.start)` never runs, and the corner-probe gate
+`(n_rows | n_cols) != ~0U` is bitwise-OR against an all-ones sentinel:
+ORing anything with `~0U` always yields `~0U`, so the gate can only be
+true when **both** `n_rows` and `n_cols` are non-sentinel, never just one.
+dav1d's corner probe is *structurally incapable* of firing at a tile's own
+first mi-row here, regardless of what the tile above contains — the prior
+session's whole "dav1d reads real cross-tile content, Kinetix reads blank"
+mechanism does not occur for this specific block. This is proven from live
+execution, not just re-reading the C source (the prior session's own
+mistake mode).
+
+**Step 2 — found a real, independent bug in Kinetix's copy of this same
+gate, but it turned out to be a dormant no-op.** Re-reading Kinetix's own
+`inter_mv_stack` (`tpt-kinetix-av1/src/reconstruct/intra_block.rs`) against
+this same gate: Kinetix has **two** copies of the equivalent check (one in
+a simpler single-ref mv-stack helper around line 1188, one in the full
+`inter_mv_stack` around line 1519), and **both use `n_rows != -1 ||
+n_cols != -1`** (logical OR — fires if *either* scan ran) where dav1d's
+real semantics (via the bitwise-OR-with-sentinel trick proven in step 1)
+require **both** to have run. This is a genuine, provable divergence from
+the spec/dav1d — for exactly the "tile's first mi-row, left neighbour
+available" case, Kinetix's corner probe fires when it shouldn't.
+
+Fixed both call sites (`||` → `&&`), rebuilt, and used Kinetix's own
+`KINETIX_AV1_DBG_MVSCAN="16:96"` trace (`probe_tiles` example in
+`tpt-kinetix-test-utils/examples/probe_tiles.rs`) to confirm the change
+took effect: pre-fix, the trace showed an extra `add_s` line for the
+corner-probe cell (`r=15 c=95 mv=(0,0) ref=(0,0)`); post-fix, that line is
+gone. **But the final candidate stack (`cnt=2`, weights 688/36) was
+byte-identical before and after** — the wrongly-firing pre-fix probe read
+a cell whose `ref=(0,0)` didn't match this block's `want=(8,0)`, and
+Kinetix's `add()` closure is a complete no-op on a ref mismatch (confirmed
+by reading it directly — it only mutates `stack`/`have_match`/`have_newmv`
+inside the `if cand.refs[n] == want_refs[0]` branch, nothing happens
+otherwise). Full-suite measurement after the fix: **zero change anywhere**
+— `non_uniform_tiling` still 3/24, FATE aggregate still 5/195, feature
+corpus still 7/13, intra 6/6 and inter corpus untouched. The fix is real
+and dav1d-exact (verified against live execution, not just source), but is
+apparently a coincidence-gated dead branch across the entire current test
+corpus. Per this crate's explicit measure-before-committing rule, this was
+**not committed** — reverted cleanly (`git checkout --
+tpt-kinetix-av1/src/reconstruct/intra_block.rs`, confirmed empty `git
+status` on the crate afterward).
+
+**Step 3 — while cross-checking *why* the fix was a no-op, found the real
+bug.** Extended the dav1d oracle to print the actual `mvstack` contents
+dav1d derives at this block (hooked `decode_b`'s `dav1d_refmvs_find` call
+site in `src/decode.c` around line 1664 — the single-ref, non-sub8x8 path
+— printing `n_mvs`/`ctx`/each candidate's mv+weight) and separately printed
+`bs`/`bw4`/`bh4` at the top of `decode_b` itself (`src/recon.h`'s
+`DEBUG_BLOCK_INFO` retargeted to `t->by==16 && t->bx==96`). Cross-referenced
+against Kinetix's own `KINETIX_AV1_DBG_SEQ=1` trace (prints `order_hint`/
+`show_frame`/`frame_type` per internally-decoded frame, `decoder.rs`) to
+unambiguously align the two decoders' frame sequences — `non_uniform_
+tiling` has a hidden alt-ref frame decoded before its own order_hint's
+"real" shown frame, which shifts dav1d's raw decode-call sequence by one
+relative to a naive count, and this shift is *why* an earlier alignment
+attempt in this same session (matching by call-position, not by
+order_hint) briefly looked ambiguous before this step nailed it down
+properly. With the alignment fixed by `order_hint` instead of call
+position: **the FATE conformance test's "frame 3" is exactly Kinetix's
+internal `order_hint=3` shown frame** (frame 0 is the key frame, hidden
+alt-ref carries `order_hint=1` and is never shown, so shown order_hints
+0,1,2,3,... map 1:1 to display frame indices 0,1,2,3,...).
+
+At that exact frame (order_hint=3), for the exact target mi position:
+- **Kinetix** (`KINETIX_AV1_DBG_MVSCAN="16:96"` + `KINETIX_AV1_DBG_SEQ=1`,
+  `probe_tiles` example): `MVSCAN find by=16 bx=96 bsize=9 want=(8,0)` —
+  `bsize=9` is `BLOCK_32X32` in Kinetix's own `BLOCK_WIDTH`/`BLOCK_HEIGHT`
+  tables (`reconstruct/mod.rs`) — a **32×32** leaf.
+- **dav1d** (live oracle, same frame by `order_hint` alignment):
+  `KINETIX_DECODE_B by=16 bx=96 bs=3 bw4=16 bh4=16 ... frame_offset=3` —
+  `bw4=16, bh4=16` directly from `dav1d_block_dimensions[bs]`, i.e. a
+  **64×64** leaf, at the exact same mi position.
+
+**This is the real bug: Kinetix's partition tree splits this superblock
+into (at least) a 32×32 leaf where dav1d's real partition decode keeps it
+as a single, unsplit 64×64 `PARTITION_NONE` block.** Every downstream
+symptom this whole cont'd-4-through-22 thread and this session's earlier
+steps chased — the mv-stack candidate-weight mismatch (dav1d's real
+`cand[1]` weight is 32, Kinetix's is 36, because the temporal-candidate
+scan's grid/step bounds are a function of `bw4`/`bh4`, which differ
+precisely because the block sizes differ), the "one block into tile row
+1's first SB row" symptom, all of it — is downstream of this one wrong
+partition-size decode, not an independent mv-stack or corner-probe bug.
+The corner-probe/tile-row-boundary theory from earlier today was chasing a
+real *effect* (this position sits right at a tile-row start) with the
+wrong *mechanism* (mv-stack neighbour availability) — the actual
+tile-boundary-adjacent thing that's wrong is the **partition symbol
+decode** for the superblock straddling tile row 1's start, not any
+mv-stack scan.
+
+**Why this matters for the tile-boundary framing:** `partition_context()`
+(`tpt-kinetix-av1/src/reconstruct/partition.rs` line ~493) already gates
+`avail_u`/`avail_l` tile-relative (`mi_row > tile_px_y0/MI_SIZE`), matching
+dav1d's `have_top`/`have_left` exactly — and for this specific SB,
+`avail_u` is `false` on both sides (it's tile row 1's own first row, same
+tile-relative gate, same result both implementations), so the *partition
+context* itself should not differ here. That means either (a) the actual
+CDF/probability state feeding this partition-symbol read is already
+desynced from an earlier point in this tile's own bitstream (the classic
+"real bug is upstream, this is just where it becomes visible" pattern —
+consistent with the block immediately to this one's *left* in the same SB
+row being pixel-exact, i.e. the desync's own trigger is very local, right
+around this SB boundary), or (b) some other input to the partition symbol
+read (CDF table content, `bsl` computation, a different context term
+entirely) is wrong specifically for this block-level/size combination.
+Neither was distinguished this session — this is a clean, oracle-verified
+handoff point, not a finished diagnosis.
+
+**Not committed — no code change landed.** The only repo change this
+session made (the `||`→`&&` gate fix) was proven correctness-neutral
+across the entire test corpus and reverted per the explicit
+measure-before-committing rule for this bug hunt. `git status` on
+`tpt-kinetix-av1/` is clean; `cargo test -p tpt-kinetix-av1 --release`
+(all lib/integration/proptest/doctests) and the full conformance suite
+were reconfirmed byte-identical to this morning's baseline: intra 6/6,
+inter sequence 8/8 + inter corpus 5/5×4 clips, feature corpus 7/13, FATE
+aggregate 5/195, `non_uniform_tiling` 3/24.
+
+#### Next session's starting point
+
+1. **The bug is in partition-tree decoding, not mv-stack/corner-probe
+   candidate derivation.** Do not re-open the corner-probe hypothesis for
+   `non_uniform_tiling` without new evidence — it is now disproven by live
+   oracle trace (step 1 above), not just re-derived from source.
+2. Target precisely: `non_uniform_tiling.ivf`, internal `order_hint=3`
+   (the FATE conformance test's "frame 3"), the 64×64 superblock whose
+   top-left mi is `(mi_row=16, mi_col=96)` — tile row 1's first SB row,
+   second SB from the tile's own left edge. dav1d decodes `PARTITION_NONE`
+   (stays 64×64); Kinetix decodes something that produces (at least) a
+   32×32 leaf at the same top-left mi. Get the actual `PARTITION_*` symbol
+   Kinetix reads for this SB (add a debug hook in `partition.rs`'s
+   `decode_partition`-equivalent, or reuse `KINETIX_AV1_DBG_SEQ`-style
+   tracing) and cross-check against dav1d's own partition-symbol read at
+   the same node (`decode.c`'s partition-read call site, guarded by the
+   same `DEBUG_BLOCK_INFO` macro already retargeted to `t->by==16 &&
+   t->bx==96` this session — that macro edit is scratch state in
+   `%LOCALAPPDATA%\Temp\dav1d_oracle` and was NOT reverted, reuse it).
+3. Given `partition_context()`'s tile-relative gating already matches
+   dav1d exactly for this node (both `avail_u=false` here), the likely next
+   suspects are (a) an entropy desync *earlier* in this same tile/SB-row's
+   bitstream that only becomes visible at this partition read (check the
+   handful of symbols read for the SB immediately to the left — the one
+   that IS pixel-exact — for anything read but not fully verified bit-for-
+   bit, not just pixel-matched), or (b) the partition CDF table content or
+   `bsl`/context-index formula itself for this specific block-size/context
+   combination. Do not re-check `partition_context()`'s tile gating itself
+   — it's correct, per this session's read.
+4. The `dav1d_oracle` build now has three live instrumentation additions
+   from this session, all still in place (not reverted, it's scratch):
+   `refmvs.c`'s corner-probe/`KINETIX_TRACE` and temporal-loop/
+   `KINETIX_TCOUNT` prints (both gated `by4==16 && bx4==96`), and
+   `decode.c`'s `KINETIX_DECODE_B`/`KINETIX_MVSTACK` prints in `decode_b`
+   (gated by the retargeted `DEBUG_BLOCK_INFO` macro in `recon.h`,
+   currently `t->by==16 && t->bx==96`). Rebuild with
+   `ninja -C bld2 tools/dav1d.exe` (seconds, incremental) and add a
+   partition-symbol print next to these rather than re-deriving the setup.
+5. `KINETIX_AV1_DBG_SEQ=1` (prints `order_hint`/`show_frame`/`frame_type`
+   per internally-decoded frame) combined with `KINETIX_AV1_DBG_MVSCAN=
+   "row:col"` on the `probe_tiles` example
+   (`tpt-kinetix-test-utils/examples/probe_tiles.rs`) is the reliable way
+   to align Kinetix's internal frame sequence with a specific `order_hint`
+   — do not assume `probe_tiles`' own `kframes`/loop-index `i` equals
+   `order_hint` directly; this stream's hidden alt-ref (`order_hint=1`,
+   `show_frame=false`, decoded before `order_hint=1`'s real shown frame)
+   makes that assumption silently correct here by coincidence (both happen
+   to run 0,1,2,3.. in lockstep since there's exactly one hidden frame
+   before the run of shown ones) but do not rely on it holding for other
+   FATE streams without re-checking via `KINETIX_AV1_DBG_SEQ`.
+6. Baseline to protect, reconfirmed clean at the end of this session:
+   feature corpus 7/13, FATE aggregate 5/195, `non_uniform_tiling` 3/24,
+   intra 6/6, inter sequence 8/8, inter corpus 5/5×4 clips, all AV1 lib/
+   integration/proptest/doctests passing, `git status` clean on
+   `tpt-kinetix-av1/`.
+
+## Session 2026-09-28 (later) — two root causes fixed on top of cont'd 4-22's
+## open thread: (1) inter MC clamps at the reference's VISIBLE dims, not the
+## mi-grid extent; (2) refreshed DPB slots must ALWAYS receive the frame's CDF
+## context (adapted when refresh_context, otherwise the frame's *initial*
+## context). non_uniform_tiling 1/24 → 6/24; official FATE aggregate 3/195 →
+## 9/195
+
+Picks up cont'd 4-22's "next session's starting point" (the order_hint=3
+`(mi_row=16, mi_col=96)` PARTITION_NONE-vs-split divergence) and closes it:
+its suspect (a) — "an entropy desync earlier in this same tile/SB-row" — is
+the right shape, but the desync is not *within* the tile; it is a wrong
+**initial CDF context for the whole frame**, which only becomes visible at
+that partition read because every earlier read's CDF happened to agree.
+
+### Fix 1 — MC reference reads clamp at visible dims (commit 0e9740d)
+
+dav1d's `mc()` (recon_tmpl.c:1006-1029) clamps reference reads at
+`(f->cur.p.w/h + ss) >> ss` — the **visible** frame dims — for every
+reference read except intrabc (which uses `f->bw*4 × f->bh*4`), and
+`warp_affine()` does the same with `refp->p.p.w/h`. `p.p.w/h` are the
+header dims (`dav1d_thread_picture_alloc` passes
+`frame_hdr->width[1]/height`), NOT the aligned/grid extent. Kinetix passed
+the grid dims (grid_w×grid_h) as clamp bounds everywhere, so bottom-row
+blocks with fractional MVs read the reconstructed-but-invisible grid
+padding rows (300-303 for 720×300) where dav1d replicates the edge row —
+exactly the stage-independent ±1 residue frames 1-2 carried at rows
+297-299. Fix: `RefSlot` gained `real_width/real_height` (populated from
+`StoredFrame`), translational/compound-prep/OBMC/warp call sites pass
+visible dims as clamp bounds while keeping the grid stride, and the
+stale "matching dav1d's padded references" doc comment on `StoredFrame`
+was corrected (it documented the wrong assumption this fix removed).
+
+Results: frames 1-2's residues vanished (98/156 bytes → 0);
+`non_uniform_tiling` 3/24; frame 3's 117,605-byte diff at (384,64) proved
+**pre-existing** (identical before/after the fix via git stash A/B), i.e.
+an independent second root — fix 2 below.
+
+### Fix 2 — refreshed CDF slots always receive the frame's context
+
+Evidence chain (all in frame order_hint=3, tile 1): KSKIP/KINTRA rng
+sequences matched dav1d line-for-line through `KINTRA mi=(88,24)
+rng=47155`, then the very next block's skip read diverged. The block
+between them — (88,24), a 32×16 NEWMV OBMC block — turned out to be in
+**sync through its filter read** (both `Post-subpel_filter[0,ctx=0]
+r=63940`; an earlier "K read an extra filter symbol for WARP blocks"
+conclusion was a misreading caused by a truncated trace window — do NOT
+re-litigate the motion_mode mapping, K's 1=OBMC/2=WARP matches dav1d's
+`levels.h` MM_OBMC=1/MM_WARP=2 and a swap REGRESSES frames 1-2, verified
+and reverted). The real divergence: dav1d's `txb_skip[3][0]` entered that
+read pre-adapted at spec value 30669 (= the **qcat-2** default table
+value, `default_coef_cdf[2].skip[3][0]`), while K read from the **qcat-3**
+default (31671) — frame order_hint=3 has base_q_idx=139 (qcat 3) on both
+decoders (dav1d's quant parse verified via a new KGQUANT print at
+obu.c:698), so dav1d's coefficient CDFs came from a **restored context**,
+not from this frame's own qcat.
+
+Mechanism (dav1d decode.c:3528-3531 + 3721-3727): frame start restores
+`c->cdf[refidx[primary_ref_frame]]` wholesale (coefficient CDFs included,
+whatever qcat they were saved under); frame end stores into every
+refreshed slot the **adapted** context when `refresh_context` is set,
+else the frame's **initial** context (`f->in_cdf`). The keyframe (base 80
+→ qcat 2, refresh_context=0) therefore still hands its qcat-2 default
+tables to every slot, and order_hint=3 (primary_ref=0) legitimately starts
+coefficient decoding from those — the spec allows cross-qcat restore.
+Kinetix only ever saved adapted contexts (`if !disable_frame_end_update_cdf
+{ if adapted { save } }`), so slots stayed empty (`KIN CDFLOAD have=false`
+on every frame) and the restoring frame fell back to its own-qcat
+defaults. Fix: `FrameCdfContext::default_for_qindex()` helper + the
+decoder's frame-end path now populates every refreshed slot with the
+adapted context when refresh_context is set, else the frame's initial
+context (`initial_cdfs` if restored, `default_for_qindex(base_q_idx)` if
+not).
+
+Results: frame 3's first diff moved from (384,64) to (468,190) and shrank
+117,605 → 39,152 bytes; frames 9-11 now decode exactly; frame 4 is down
+to 1,052 bytes; the frames 4+ cascade collapsed.
+
+### Results
+
+- `non_uniform_tiling` **6/24** (was 1/24 at session start, 3/24 after
+  fix 1); `switch_frame` **2/32** (was 1/32); official FATE aggregate
+  **9/195** (was 3/195). frames_refs_short_signaling unchanged at 1/50.
+- Gates: 165 av1 lib tests pass, clippy clean, fmt clean. Also fixed a
+  latent panic: the `KINETIX_AV1_DUMP_GRID` hook in `decoder.rs`
+  hardcoded 320 grid rows and panicked on shorter grids (now iterates the
+  real extent).
+
+### Next session's starting points
+
+1. Frame 3's next root: first diff at Y (468,190), 39,152 bytes. Frames
+   5-7 cluster at (286-287, 159-160); frames 14+ cluster at y≈123-128 —
+   suspiciously near the tile-row 2→3 boundary (y=128) — same class of
+   investigation as this session's (KSKIP/KINTRA rng diff, then
+   coefficient-level via `KINETIX_DBG_COEFF_BLK`, which now takes
+   **unmasked** `t->bx`/`t->by` after this session's patch).
+2. Debug infra state (all in `/tmp/dav1d_fresh`, scratch, not reverted):
+   `DEBUG_BLOCK_INFO` = `frame_offset==3` whole-frame (recon.h);
+   KSKIP/KINTRA hooks gated `KINETIX_DBG_IBSUM` + frame 3 + by∈[16,32)
+   (decode.c); `KINETIX_DBG_MCSUM` at bx==96,by==16 (recon_tmpl.c);
+   KGQUANT after the quant parse (obu.c:699); KCOEF gate takes unmasked
+   mi coords (recon_tmpl.c). Pair them with K's `KINETIX_AV1_IBSUM`,
+   `KINETIX_AV1_DBG_B0`, `KINETIX_AV1_DBG_ALLZERO`, `KINETIX_AV1_DBG_EOB`,
+   `KINETIX_AV1_CFTARGET`, and segment K's stderr per frame with
+   `KINETIX_AV1_DBG_SEQ=1` (the four tiles braid in the stream; filter by
+   position, never by line adjacency).
+3. `film_grain` (0/10) and `decode_model` (0/21) remain
+   expected-unsupported; `seq_hdr_op_param_info` (0/58) and the rest of
+   `frames_refs_short_signaling` (1/50) are untouched separate feature
+   work.

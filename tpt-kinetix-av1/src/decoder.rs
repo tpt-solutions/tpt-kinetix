@@ -17,7 +17,7 @@ use crate::{
     frame::FrameHeader,
     inter::MotionField,
     obu::{parse_obu_sequence, ObuType, SequenceHeaderObu},
-    reconstruct::reconstruct_av1_frame,
+    reconstruct::{reconstruct_av1_frame, FrameCdfContext},
 };
 
 /// Parsed tile group data: tile index and raw payload bytes.
@@ -542,6 +542,27 @@ impl Av1Decoder {
                     if refresh & (1u8 << i) != 0 {
                         self.ref_cdf_contexts[i] = Some(arc.clone());
                     }
+                }
+            }
+        } else {
+            // §6.8.2 / §7.20: refreshed slots ALWAYS receive the frame's CDF
+            // context — the adapted one when `refresh_context` is set,
+            // otherwise the context this frame *started* from (dav1d
+            // `decode.c`:3721-3727 stores `f->in_cdf` into every refreshed
+            // slot when `refresh_context` is 0). Streams chain later frames'
+            // `primary_ref_frame` restores onto these; dropping them left
+            // `ref_cdf_contexts` empty, and a restoring frame whose own
+            // `base_q_idx` falls in a different qcat than the frame whose
+            // slot it restores from then started from the wrong
+            // coefficient-CDF table entirely.
+            let initial = match initial_cdfs.as_deref() {
+                Some(c) => c.clone(),
+                None => FrameCdfContext::default_for_qindex(fh.base_q_idx),
+            };
+            let arc = std::sync::Arc::new(initial);
+            for i in 0..8 {
+                if refresh & (1u8 << i) != 0 {
+                    self.ref_cdf_contexts[i] = Some(arc.clone());
                 }
             }
         }

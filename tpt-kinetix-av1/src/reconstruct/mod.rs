@@ -1040,6 +1040,14 @@ impl FrameCdfContext {
             coeff_cdfs,
         }
     }
+
+    /// The default (non-adapted) frame context a
+    /// `primary_ref_frame == PRIMARY_REF_NONE` frame starts from: mode CDFs
+    /// from the static defaults, coefficient CDFs seeded by this frame's own
+    /// `base_q_idx` qcat (§ `init_coeff_cdfs`).
+    pub(crate) fn default_for_qindex(base_q_idx: u8) -> Self {
+        Self::from_parts(InterCdfs::new(), ModeCdfs::new(), TileCdfs::new(base_q_idx))
+    }
 }
 
 impl<'a> TileDecodeState<'a> {
