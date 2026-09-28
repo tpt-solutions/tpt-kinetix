@@ -13044,3 +13044,38 @@ K formula against dav1d's `av1_get_ref_N_ctx` (in dav1d's ref_mvs.h —
 the spec's weighted-count contexts, §7.10.1.10) and fix K's to match.
 Then re-verify: (116,48) ref == LAST2, stack[0] == (−1,−1), (120,48) mv
 == (−1,−1), tile-2 cascade collapses, FATE aggregate moves.
+
+## Session 2026-09-28 (cont'd 12) — the ref-tree gate CONTEXTS verified
+## equal; the divergence is in the value window, not the context tables
+
+Pure code comparison of the gate contexts (dav1d env.h's
+`av1_get_ref_ctx`/`av1_get_fwd_ref_ctx`/`av1_get_fwd_ref_1_ctx`/
+`av1_get_fwd_ref_2_ctx`/`av1_get_bwd_ref_1_ctx` vs K's `rcc(count pairs)`
+in `read_single_ref_name`): all five gate formulas match one-for-one
+(bwd-vs-fwd includes ALTREF on both sides; p3 = LAST+LAST2 vs
+LAST3+GOLDEN with GOLDEN counted in the second summand; p4 = LAST vs
+LAST2; same ==→1 / <→0 / >→2 mapping). The neighbour inputs at
+(116,48) also match (left = LAST2, above unavailable → same ctx), so
+the same CDF cells are traversed.
+
+Additionally: K's split computation is identical to dav1d's at every
+probed read (K `cur = ((r>>8)*(f>>6))>>1 + 4*(n-symbol-1)` == dav
+`v = ((r>>8)*(f>>6)>>1) + 4` for bools, same f in complement), and K's
+post-read EC states match dav1d's `dif_hi` exactly at matching anchors
+(K symbol_value=4376 == dav dif_hi=4376 at the (120,48) KSKIP). The two
+decoders' value windows are the SAME quantity, not mirrored views.
+
+Therefore the (112,56) skip divergence (K skip=0/value≥cur vs dav
+skip=1/dif<v) and the (116,48) ref divergence (K LAST vs dav LAST2) mean
+K's symbol_value was ALREADY larger than dav1d's dif_hi by the time
+those reads ran — i.e. the windows desynced EARLIER, at a read whose
+decoded value matched but whose renorm/refill consumed different bits
+(differing `bits` shift or refill count), or at a read only one decoder
+performs (an extra/missing read that happens to decode the same value
+for a while). The next comparison must walk EVERY read in tile row 2
+from the tile start — including reads K prints but dav1d doesn't
+(IBC flag, ref_mv, drl) — tracking (range, value) continuously; the
+first read where either the decoded value OR the post-read (range,
+value) pair differs is the bug. All the hooks for this exist as of
+this session (K: IBSUM/B0/TRACE/SEQ; dav1d: KSKIP/KINTRA with cdf+dif,
+KCOEF with KGT_OH frame gate).
