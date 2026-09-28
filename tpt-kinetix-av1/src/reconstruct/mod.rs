@@ -2231,7 +2231,10 @@ pub fn reconstruct_av1_frame(
             let mut meta = FrameMeta::new(tw, th);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
-            let decoded_cdfs = decode_tile_group(
+                        if std::env::var("KINETIX_AV1_SEQWALK").is_ok() {
+                eprintln!("KSEQTILE r={} c={}", y0 / 64, x0 / 64);
+            }
+let decoded_cdfs = decode_tile_group(
                 payload,
                 grid_w,
                 grid_h,

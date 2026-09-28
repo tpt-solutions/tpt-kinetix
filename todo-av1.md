@@ -13196,3 +13196,52 @@ the drl bool uses different CDF cells → post-rng diverges THERE.
    scan accepts its LAST2 spatial candidates, then re-verify the whole
    chain: (116,48) mv == (-1,-1)-class, (120,48) NEARMV mv == (-1,-1),
    tile-2 cascade collapses, frames 5-23 residues shrink, FATE moves.
+
+## Session 2026-09-28 (cont'd 16) — THE desync mechanism, finally exact:
+## Kinetix performs EXTRA entropy reads that dav1d does not perform. At
+## tile row 2 of frame oh=3: K has 2 extra reads at the tile start
+## (post-rng 51744, 58370 before dav1d's first read 62144), and one extra
+## read mid-stream (post-rng 59072 at read index 9) that consumes ZERO EC
+## bits — the windows realign immediately after it (K 49868, 49680 ==
+## dav 49868, 49680). dav1d's tile-2 sbrow = 828 reads; K's tile 2 = 934
+
+The alignment test that nailed it: for skip offsets 0-7 of K's tile-2
+read sequence against dav1d's r=2 sbrow sequence, the best common prefix
+is at skip=2 (7 reads), and at the divergence K has an EXTRA value
+(59072) inserted — after which the sequences REALIGN exactly (K's next
+values == dav's next values). A zero-bit read = a symbol read whose
+split `cur` is 0 (fully-converged CDF cell → no renorm, no bit
+consumption) — the EC state is untouched, but the CDF CELL the read
+adapts is K's cell, not dav1d's (dav1d never reads it), so the two
+decoders' CDF adaptation histories diverge on that cell — and when a
+LATER read uses that cell with a non-degenerate CDF, the decoded symbol
+flips. This is the (112,56) skip flip: its sctx=2 skip CDF cell had been
+adapted by K's extra reads somewhere earlier in the tile.
+
+The 2 extra tile-start reads + the zero-cost mid-tile read are LR
+reads (read_lr per SB/plane) or skip_mode/segment_id reads that K
+performs unconditionally where dav1d's bitstream state skips them —
+e.g. K's read_lr reads restoration_type symbols for planes with
+frame_restoration_type != 0 even when dav1d's per-SB LR gating
+(`f->lf.restore_planes` + the lr_read in decode_sb) skips them, OR K
+reads the segment_id/sg_id symbols where dav1d's segmentation_enabled=0
+skips them.
+
+### Next session's entry point (final mile, mechanical)
+
+1. Add the caller location to K's KSEQ print (the symbol trace's
+   `#[track_caller]` location — `Location::caller()` is already captured
+   in SymbolTraceEntry; print `location` in the KSEQWALK branch). Rerun.
+   The extra reads' CALL SITES identify exactly which syntax element
+   performs them.
+2. Compare K's read_lr gating for frame oh=3 tile row 2 against dav1d's
+   decode_sb LR gating (`f->lf.restore_planes != 0` per plane + the
+   `dav1d_msac_decode_bool_adapt(lr_x)` calls) — the 2 extra tile-start
+   reads are almost certainly restoration_type reads for planes whose
+   dav1d gate is closed (e.g. K reads U/V restoration types when
+   `lr_uv_type == 0` restores nothing, or reads Y when only U/V
+   restore).
+3. Fix the gating to match dav1d's per-plane restore_planes logic, then
+   re-run the walk: the sequences must align 1:1 for the whole tile,
+   the (112,56) skip flip disappears, and the tile-2/3 cascade plus
+   frames 5-23 residues should collapse. FATE aggregate then re-runs.
