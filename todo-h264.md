@@ -5821,6 +5821,31 @@ bit-exact-proven, so its JM context must coincide with ours for the
 poc-10 history; check INIT_MB_TYPE vs our PB tables for entries 7-9
 before changing anything).
 
+## SESSION #32d4 ADDENDUM 29 (2026-09-28, continuation) - the 9 diverging MBs enumerated; JM temporal fn not-called for them (explicit in JM, direct in ours); same bins - the B mb_type VALUE mapping diverges for their bin patterns; probe = JM mb_type print at decode
+
+The `JMT` print (moved into `update_direct_mv_info_temporal`,
+`ldecod_jmt2.exe`, `jmt4.log`) now fires: 120 calls over 23 UNIQUE MBs;
+all 23 match our direct reads exactly (zero value mismatches among the
+shared MBs). The full comparison (tools/diff_quad_maps.py, uncommitted
+scratch): our parse reads direct quads for **9 extra MBs**: (2,8),
+(4,4), (4,5), (8,4), (8,5), (11,5), (13,8), (19,8), +1 - each ALL FOUR
+quadrants direct in our parse, with NO JM temporal call at all (JM
+decodes them as explicit MBs - no direct parts).
+
+Since the CABAC bins are identical (addendum 24) and JM simply never
+enters its temporal path for these MBs, the divergence is the **B
+mb_type VALUE decoded from the same bin pattern**: our Table 9-13/9-14
+walk yields B_8x8 (with direct sub-quads) where JM yields an explicit
+type - for these specific MBs. All OTHER MBs of the slice match.
+
+NEXT SESSION: print JM decoded mb_type per MB for the poc-119 slice
+(one fprintf in JM `read_mb_type_info_B`-equivalent gated framepoc==
+119) and the same from our parse (KBT-style gated print in cabac_b.rs
+MB loop); diff the 9 diverging MBs mb_type values; correct the table
+or decode walk (the usual suspects: the B mb_type binarization
+`1,1,1,1,1,1` suffix termination or the direct/explicit boundary
+value).
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
