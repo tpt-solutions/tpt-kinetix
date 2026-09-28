@@ -12944,3 +12944,59 @@ mvstack dump (KGT_OH-gated, currently bx=120 by=48, single-ref call at
 decode.c:1686); the tile2_probe example under tpt-kinetix-av1/examples/
 decodes K-side without the test-utils dependency chain (usable while
 the concurrent h264 session's in-flight edits break that graph).
+
+## Session 2026-09-28 (cont'd 10) — the desync mechanism fully exposed:
+## K's MV scan for (116,48) rejects the spatial candidates on a REF-NAME
+## MISMATCH (block wants ref 2, neighbours' grid cells carry ref 3), so
+## only the temporal (0,0) survives; dav1d's same block accepts (−1,−1).
+## Same decoded bits (post-rng 55492 identical) — the symbol→ref-name
+## mapping differs by one between K and dav1d
+
+The `KINETIX_AV1_DBG_MVSCAN="48:116"` trace of K's inter_mv_stack for
+the block (116,48) (two finds — the 4×4 block, bsize=2, and a second
+pass, bsize=16):
+
+    find bsize=2:  adds r48c115 mv=(1,−1) ref=(2,0) w=2;
+                   r49c113 (1,−1) w=4; r49c111 (4,−4) mf=2 w=4
+                   → final [ (1,−1) w646, (4,−4) w4 ]
+    find bsize=16: adds r48c115 mv=(−1,−1) ref=(3,0) w=4;
+                   r50c115 (0,−4) ref=(3,0) w=4;
+                   r47c115 ref=(0,0) [tile-above cell, properly
+                   invalidated — skipped];
+                   + add_t (0,0) ×2
+                   → final [ (0,0) w4 ]  ← ONLY the temporal survives
+
+The bsize=16 pass is the poisoned one: the spatial candidates carry
+ref=(3,0) while `want_refs[0]=2`, so `cand.refs[n] == want_refs[0]`
+fails and they're all dropped. dav1d's stack for the same block:
+s0=(0,0), s1=(−1,−1), s2=(0,−4) — it ACCEPTED (−1,−1) and (0,−4).
+dav1d's refpair for the block = b->ref[0]+1 = 2; its neighbours'
+recorded refs match that. K's block read ref name 2 and its neighbours'
+cells carry ref name 3 — with the ref READ itself matching dav1d
+bit-for-bit (post-rng 55492 identical) — so the two decoders map the
+same decoded ref symbol to DIFFERENT ref names (off by one in the
+single-ref name table or in the name recorded into refmv_grid cells).
+
+Note the (−1,−1) candidate's ref=(3,0): dav1d's corresponding candidate
+has refpair ref=2. So K's neighbour cells say "3" where dav1d's say "2"
+for what should be the same decoded reference — the off-by-one is in
+the RECORDING (the ref name written into refmv_grid at block decode
+time) or in the WANT (read_single_ref_name's mapping), and the two
+offsets cancel for most blocks (which is why frames 0-2 and most of
+tile rows 0-1 decode exactly: single-ref streams whose ref name happens
+to be symmetric around the off-by-one) but not here.
+
+### Next session's entry point (small and decisive)
+
+1. Print, at the (116,48) block: K's `want_refs[0]` (=2), the ref NAME
+   K's `read_single_ref_name` returned, and the `refs` recorded into
+   `refmv_grid` for the left neighbours (112,48)/(112,50) — all three
+   already exist as prints or one-liners.
+2. Compare with dav1d: Post-ref[1] (b->ref[0]=1, refpair ref=2) and the
+   neighbours' `refpair` in dav1d's grid (mvstack print's rbref for the
+   same cells, or dav1d's own MVSCAN equivalent).
+3. Whichever side is off by one — K's `read_single_ref_name` symbol→name
+   table or K's refmv_grid ref recording — fix, and the (116,48) stack
+   becomes [ (−1,−1), (0,−4), (0,0)t ], the (120,48) NEARMV picks
+   (−1,−1), and the entire tile-2 cascade (~34k bytes of frame 3,
+   likely most of frames 5-23) collapses.
