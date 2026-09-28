@@ -1414,7 +1414,7 @@ fn cdef_direction(
         }
     }
     let var = (best_cost - cost[(y_dir + 4) & 7]) >> 10;
-    if std::env::var("KINETIX_AV1_DBG_CDEFDIR").is_ok() && x0 == 600 && y0 == 296 {
+    if std::env::var("KINETIX_AV1_DBG_CDEFDIR").is_ok() && x0 == 464 && y0 == 184 {
         eprintln!("KCDEFDIR x0={x0} y0={y0} costs={:?} y_dir={y_dir}", cost);
     }
     (y_dir, var)

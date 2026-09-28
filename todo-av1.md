@@ -12536,3 +12536,64 @@ Side findings this session (do not re-chase):
   post-desync adaptation still differs); expect it to collapse when this
   inverse-transform fix lands. Frames 5-7's (287,159) cluster and the
   frames 14+ y≈128 cluster start downstream of the same tile-row boundary.
+
+## Session 2026-09-28 (cont'd 2) — the (116,44) WARP block's entire
+## reconstruction chain verified byte-identical to dav1d; the frame-3 root
+## is now CDEF secondary filtering at units (464,184) and (476,184)
+
+Picked up the documented handoff (dequant/inverse-transform suspect) and
+DISPROVED it, then walked the whole chain with per-stage dumps:
+
+1. **Dequant/ITX correct.** dav1d's targeted KCOEF dump for the block
+   (frame-gated via the new `KGT_OH` env on the coefficient prints) reads
+   tx=2 (16×16), all_skip=0, eob=5, txtp=10 (V_DCT), coefficients −211 at
+   raster (4,0) and (5,0) — identical to Kinetix's (K's eob=6 is its
+   count-vs-last-index convention, +1). K's `KINETIX_AV1_DBG_PRED_RESID`
+   dump of the post-ITX residual: **[−7,−7] flat at columns 4-5, all 16
+   rows — byte-identical to dav1d's (recon − pred)**. The earlier
+   "dequant/ITX" suspicion is closed.
+2. **Warp prediction correct.** K's per-tap WARPPX dump (retargetable via
+   the new `KINETIX_AV1_DBG_WARPPX_BLOCK=dx,dy`; plus a `WARPBLK`
+   first-sub-block trace under `KINETIX_AV1_DBG_WARPPX_ALL`) shows K's
+   runtime sub-block params (dx=463 dy=176 mx0=33536 my0=33984) and
+   per-column phases/idx identical to an independent Python port of
+   dav1d's warp_affine_8x8_c (which reproduces dav1d's y-pred 0/256). K's
+   own v-pass outputs equal it too. An earlier panic-level suspicion that
+   K "used the wrong matrix indexing" came from misreading mat[2] — the
+   runtime `WARPBLK` trace settles it.
+3. **Residual add correct.** A temporary `POSTADD` dump (CFTARGET-gated,
+   after the leaf's add loop in `inter_block.rs`) shows the plane right
+   after the add == dav1d's `recon` hex dump for the block, byte for byte.
+4. **The final diffs are CDEF.** Full-pipeline K vs dav1d final at this
+   block: only 4 samples: (468,190) K151/dav150, (470,191) 125/126,
+   (471,191) 127/126, (476,191) 123/122 — all ±1, all in two 8×8 CDEF
+   units at (464,184) (bx=116,by=46) and (476,184) (bx=119). Pre-CDEF
+   recon identical ⇒ the divergence is CDEF's filter output on those
+   units. dav1d's per-unit dump for (116,46) — `KDCDEF2` (new: the
+   secondary-only `else if` branch in cdef_apply_tmpl.c, frame-gated by
+   `KGT_OH`): **pri=0, sec=4, dir=1(computed)/0(passed to the filter),
+   damping=5**. Kinetix's `dir = if pri_str == 0 { 0 }` at
+   loop_filter.rs:2503 already matches dav1d's hardcoded dir=0 for
+   secondary-only units, and pri/sec/damping derive from the same syntax.
+
+### Next session's entry point (per-tap CDEF comparison)
+
+With prediction, coefficients, ITX and the add all proven equal, feed the
+captured pre-CDEF 8×8 (dav1d's KDCDEF-side state; also printable via
+K's `KINETIX_AV1_DBG_CDEFPX=464,184`) through both
+`cdef_filter_block`(K) and dav1d's `cdef_filter_fb` (dir=0, pri=0,
+sec=4, damping=5, the unit's real top/bot/edges) and diff tap by tap —
+the first differing `constrain()` contribution or the ±{1,2} secondary
+offset table pins the remaining ±1s. The (476,184) unit needs its own
+KDCDEF2 print (change bx==116 to 119) — likely the same single fix.
+Watch for: damping=5 vs 4 selection (derived from quantizer), the
+secondary tap distance-1/distance-2 ordering, and `constrain()`'s
+diff-threshold arithmetic — the three places a ±1 can hide.
+
+Side notes:
+- `KINETIX_AV1_CFTARGET` now also prints `POSTADD` plane rows after each
+  target leaf's residual add (pre/post-prediction dumps bracket the add;
+  this closes the gap).
+- The remaining frames 5-23 diffs all start downstream of these CDEF
+  units' tile row; fixing CDEF here is expected to collapse most of the
+  rest, as the previous CDEF fixes did.

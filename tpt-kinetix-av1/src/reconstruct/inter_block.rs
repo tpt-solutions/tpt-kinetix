@@ -3645,6 +3645,25 @@ impl<'a> TileDecodeState<'a> {
                     }
                 }
             }
+            // Temporary: post-add plane rows for the CFTARGET leaf (the
+            // pre/post-prediction dumps bracket this point but not the add).
+            if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                let mut it = t.split(',');
+                if let (Some(c), Some(r)) = (it.next(), it.next()) {
+                    if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
+                        for dy in 0..leaf_tx_h.min(16) {
+                            let sy = px_y + dy;
+                            let row: Vec<u8> = (0..leaf_tx_w.min(16))
+                                .map(|dx| self.y_plane[(sy) * self.y_stride + px_x + dx])
+                                .collect();
+                            eprintln!(
+                                "POSTADD fr={} r{dy}: {row:?}",
+                                crate::debug_frame_seq::current()
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Fixed 8×8-luma-grid loop-filter metadata (mirrors the intra
