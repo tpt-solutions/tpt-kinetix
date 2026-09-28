@@ -12705,3 +12705,40 @@ bottom bands — expect a large collapse) and the official FATE.
 If the top-down/in-place formulation mismatches on the TOP taps at
 sbrow starts, dump dav1d's `top` the same way (the print already sits
 next to the bot fetch) and adjust — the same buffer family serves both.
+
+## Session 2026-09-28 (cont'd 5) — the simple bottom-up formulation TRIED
+## AND REVERTED; dav1d's sbrow-bottom taps are NOT uniformly
+## post-filter. The remaining unknown is the lr_lpf_line ring mapping
+
+Implemented the cont'd-4 "fix formulation" (process 64-px bands bottom-up,
+per-band snapshots so below-band rows are the already-filtered live
+values). Result: REGRESSION — frames 0-2 (previously pixel-exact) gained
+~200-byte diffs at row 62, i.e. tile row 0's bottom band: at that
+boundary dav1d's bottom taps are the RAW rows 64-65 (the old top-down
+snapshot matched dav1d there), while at the (116,46) unit they are the
+FILTERED row 192 (proven byte-for-byte). Reverted; 6/24 restored.
+
+So the same `by + 2 >= by_end` arm reads different content at different
+boundaries. The distinguishing variable is the buffer line index
+`line = sby * (4 << sb128) + 4 * sb128 + 2` (cdef_apply_tmpl.c): our two
+sites hit sby=3 (line 14 → filtered rows) vs sby=1 (line 6 → raw rows) —
+the lr_lpf_line ring holds different pipeline-stage snapshots per slot
+depending on fill timing across the sbrow/tile pipeline.
+
+### Next session's entry point (empirical ring mapping — bounded)
+
+Make the KDCDEF2/KDBOT5 print fire for EVERY sbrow-end unit of frame
+oh=3 (drop the bx/by gate; keep the KGT_OH frame gate; KDBOT5 currently
+sits before the `goto skip_uv` and needs `(bx, by)` — remember bx/by are
+8×8-unit top-left MI coords, so bx is even). For each dump, also print
+the raw and final rows below (K's NOFILTER grid and dav1d's final frame
+give both). ~40 units × (bot vs raw vs final) collapses the ring into a
+lookup rule — likely "slot holds raw rows for early sbrows, filtered for
+later ones" or "line N maps to frame row (something - k*4)" — which
+`cdef_plane_luma` can then implement directly as a row-source
+substitution for `by + 2 >= by_end` units. Verify on the 4 known samples
+first ((468,190)→150, (470,191)→126, (471,191)→126, (476,191)→122), then
+frames 0-2 must stay exact, then the FATE aggregate.
+
+Current state: 6/24 on non_uniform_tiling, official FATE 9/195, all
+gates green, tree clean of the reverted experiment.
