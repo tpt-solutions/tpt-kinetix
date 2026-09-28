@@ -459,8 +459,9 @@ impl<'a> TileDecodeState<'a> {
         let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok();
         if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
-                "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={}",
-                self.dec.raw_state().0
+                "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={} cdf=[{:?}]",
+                self.dec.raw_state().0,
+                &self.mode_cdfs.skip[skip_ctx]
             );
         }
         if dbg_b0 {

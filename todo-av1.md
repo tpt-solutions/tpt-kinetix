@@ -12742,3 +12742,60 @@ frames 0-2 must stay exact, then the FATE aggregate.
 
 Current state: 6/24 on non_uniform_tiling, official FATE 9/195, all
 gates green, tree clean of the reverted experiment.
+
+## Session 2026-09-28 (cont'd 6) — THE deepest root yet: a single-bit
+## arithmetic-decoder divergence. Frame oh=3, tile row 2, block (112,56):
+## same EC state (rng=37415, skip-CDF v0=4381 count=14), dav1d decodes
+## skip=1, Kinetix decodes skip=0. Everything downstream in tile 2
+## (~34k of frame 3's 39k diff bytes) cascades from this one read
+
+The CDEF line-buffer investigation surfaced that frame 3's real residue
+body starts at block (464,192) and spreads right/down — the shape of a
+symbol desync, not CDEF. KSKIP/KINTRA tracing into tile row 2 (mi rows
+48-63; dav1d's IBSUM gate now retargetable via `KGT_OH` + by range) found
+the exact read: block (112,56), the first sctx=2 skip read after 14
+matching ones.
+
+Evidence (all captured with `KINETIX_DBG_IBSUM` + `KGT_OH=3`):
+- Reads 1-14 of the tile-2 skip-CDF sctx=2 cell match dav1d exactly:
+  same values (skip sequence), same per-step adaptation (K's spec-domain
+  v0 == 32768 − dav1d's complement c0 at every step), same rng.
+- At read 15: pre-state rng=37415 (both), cdf v0=4381 (K) ==
+  32768−28387 (dav) ✔, count 14→15 (both). dav1d decodes skip=1, K
+  decodes skip=0.
+- Hand-run of dav1d's decode_bool on the captured state (rng=37415,
+  f=28387, dif_hi=4376): v = ((r>>8)*(f>>6)>>1)+4 = 32343, dif_hi−v =
+  −27967 → ret=false → skip=1, with a huge margin. This is NOT a
+  boundary-rounding case: K's decoder computes a different split or its
+  (range, value) state has already diverged invisibly (the two decoders'
+  value representations may track each other only until some earlier
+  renormalization corner case).
+
+Debug-state additions: dav1d's KSKIP print now carries `cdf=[c0 count]`
+and `dif_hi` (dif >> 48); K's KSKIP print carries `cdf=[v0 32768 count]`;
+KINTRA carries `dif_hi`.
+
+### Next session's entry point (surgical EC comparison)
+
+1. Print K's full `raw_state()` (symbol_range, symbol_value,
+   symbol_max_bits, bit_pos) at the (112,56) KSKIP, and dav1d's
+   (rng, dif, cnt) — then port both bool-decode paths (dav1d
+   `decode_bool` + `ctx_norm` from msac.c; K's read_symbol from
+   entropy.rs) to Python and step them from the SAME captured state.
+   dav1d's side is already solved: v=32343, dif_hi=4376 → skip=1,
+   then `dif -= 0`, `ctx_norm(dif, v)`: new rng = v = 32343 (no
+   renorm shift needed since v >= 0x8000? check `ctx_norm`'s shift
+   loop), dif stays.
+2. The likely fault lines in K: (a) the f-scaling rounding (K uses the
+   spec's §8.5 division-based split vs dav1d's EC_PROB_SHIFT
+   approximation — these agree on most states but maybe not all),
+   (b) the renormalization window/threshold, (c) the value-window
+   width (K's symbol_max_bits vs dav1d's EC_WIN_SIZE=64 dif window).
+3. Once the divergent step is found, fix K's decoder to match dav1d
+   bit-for-bit (dav1d is the od_ec reference that aomenc encodes to),
+   then re-run: frame 3's tile-2 cascade (~34k bytes) should collapse;
+   frames 5-23's tile-2/3 residues likely too; then the FATE aggregate.
+
+Note: K's read path already proved itself on the whole corpus, so the
+bug is a genuine corner case — expect the fix to be small (one rounding
+or window-size constant) but to need care not to regress the corpus.
