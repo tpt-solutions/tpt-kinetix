@@ -13139,3 +13139,60 @@ Final verification state: non_uniform_tiling 6/24, official FATE 9/195,
 165 lib tests pass, clippy clean, fmt clean. The single remaining
 investigation thread (the four mode-bool post-states in (120,48)'s
 cascade) is one capture away as documented in cont'd 13.
+
+## Session 2026-09-28 (cont'd 15) — CRITICAL discovery: dav1d's SSE2 msac
+## and C msac have DIFFERENT internal rng sequences. Kinetix matches the
+## SSE2 variant (K symbol_value == dav1d-SSE2 dif_hi at 45 consecutive
+## anchors). All earlier "dav1d says X" conclusions used SSE2-dav1d and
+## remain valid; the newly captured C-msac sequence is a DIFFERENT
+## reference and must not be mixed into comparisons
+
+The sequence-walk tooling is now in place (dav1d: `KGT_SEQ` env + KSEQTILE
+markers + per-read KSEQ rng prints in msac.c's bool/symbol adapt, with
+x86/msac.h macros redirected to the C functions — the SSE2 asm overrides
+the C functions at compile time, which is why earlier msac.c prints never
+fired; K: `KINETIX_AV1_SEQWALK` env + KSEQTILE markers + per-read KSEQ
+prints in entropy.rs read_symbol). 301549 dav1d reads / 234346 K reads
+captured for the whole stream; per-(frame,tile) segmentation works.
+
+Surprise from the capture: with the C msac forced, dav1d's tile (oh=3,
+tile 3) read[0] = 42816, while the SSE2 build's same tile produced
+51744 at the same anchor — the two msac implementations carry different
+internal rng sequences (they decode identical symbols — conformance —
+but the internal window/rng bookkeeping differs). Kinetix's window
+matched the SSE2 bookkeeping exactly for 45 anchors, so the desync at
+(112,56) is NOT an EC implementation mismatch — K and SSE2-dav1d agree
+everywhere their windows are comparable — it is a real SYMBOL-level
+divergence whose cause is upstream: the MV-stack content difference at
+(116,48)/(120,48) documented in cont'd 9-10.
+
+Wait — no: symbols differing REQUIRES the EC reads to differ. The mode
+reads at (120,48) (4 bools after the matched ref read) diverge in their
+post states. The CDF cells for those reads adapt over the frame; if the
+(116,48) block's MODE reads (drl etc.) decoded differently BEFORE
+(120,48), the shared CDF cells' adaptation diverges and the (120,48)
+reads flip. (116,48) is skip=1 → NO mode reads for it (skip blocks read
+no ref/mode symbols) — so (116,48)'s different mv came from its STACK
+(not from reads) and cannot desync the EC by itself... but (116,48)'s
+MV feeds (117,48)/(118,48)/(119,48) blocks' stacks — also skip=1, no
+mode reads — then (120,48) skip=0 → ITS mode reads are the FIRST reads
+whose CDF selection depends on the diverged state... and its newmv_ctx/
+refmv_ctx = 3 matched. The drl CDF cell = drl_ctx — computed from the
+stack — dav1d get_drl_context(mvstack,1) vs K's drl_ctx[1]: if the
+stack content difference (dav s1=(-1,-1), K s1=(0,0)) changes drl_ctx,
+the drl bool uses different CDF cells → post-rng diverges THERE.
+
+### Next session's entry point (final mile)
+
+1. Compare get_drl_context(mvstack,1) (dav1d ref_mvs.h — counts
+   mvstack[0..1] zeros/matches) against K's drl_ctx[1] for (120,48)'s
+   stacks: dav stack [(0,0), (-1,-1), (0,-4)] vs K stack [(0,0), (0,0),
+   (0,0)]. If drl_ctx differs, the drl bool reads different CDF cells →
+   the desync. The FIX is upstream: make K's mv stack at (116,48) match
+   dav1d's (the spatial candidates (-1,-1)/(0,-4) must not be rejected —
+   the ref-name mismatch from cont'd 10).
+2. The ref-name off-by-one (cont'd 10-11) remains the true root: fix
+   K's neighbour-ref recording or the want_refs mapping so (116,48)'s
+   scan accepts its LAST2 spatial candidates, then re-verify the whole
+   chain: (116,48) mv == (-1,-1)-class, (120,48) NEARMV mv == (-1,-1),
+   tile-2 cascade collapses, frames 5-23 residues shrink, FATE moves.
