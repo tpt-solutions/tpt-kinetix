@@ -4579,6 +4579,1208 @@ NEXT SESSION: dump JM context_ini.c B-table skip variant init values,
 diff our init_pb_ctx(MB_SKIP_FLAG_B_CTX + 1, ...) result at the slice
 QP; check the ctx_idx_inc polarity against JM cabac.c mb_skip INC.
 
+## SESSION #32d4 ADDENDUM 27 (2026-09-28, continuation) — BOTH of
+addendum 26's remaining hypotheses are DISPROVEN against the vendored
+FFmpeg source, and the CAPA1 residual is now split into two populations with
+a strong bottom-field bias; no code change landed (tree stays at
+222bc92 + 32ade30 + 9d8115f)
+
+**1. The CABAC context-INIT values are byte-exact — addendum 26's "variant-1
+init differs" hypothesis is dead.** Script-compared all four Rust tables
+against the vendored `ff_h264_cabac.c` at the repo root (parse both, diff
+element-by-element):
+
+| table | entries | mismatches |
+|---|---|---|
+| `CABAC_CTX_INIT_I` | 1024 | 0 |
+| `CABAC_CTX_INIT_PB0` | 1024 | 0 |
+| `CABAC_CTX_INIT_PB1` | 1024 | 0 |
+| `CABAC_CTX_INIT_PB2` | 1024 | 0 |
+
+`MB_SKIP_FLAG_B_CTX + 0..2` = ctxIdx 24..=26 read (18,64)/(9,43)/(29,0) for
+idc 0, matching `cabac_context_init_PB[0]` exactly. Combined with the probe
+below (QP 25, idc 0 on every CAPA1 B slice) there is no init-side
+divergence left to find.
+
+**2. The `ctxIdxInc` polarity is correct — the other half of addendum 26's
+hypothesis is dead too.** Vendored `ff_h264_cabac.c:1363-1370`
+(`decode_cabac_mb_skip`):
+
+```c
+if( h->slice_table[mba_xy] == sl->slice_num && !IS_SKIP(h->cur_pic.mb_type[mba_xy]) ) ctx++;
+if( h->slice_table[mbb_xy] == sl->slice_num && !IS_SKIP(h->cur_pic.mb_type[mbb_xy]) ) ctx++;
+if (sl->slice_type_nos == AV_PICTURE_TYPE_B) ctx += 13;
+return get_cabac_noinline( &sl->cabac, &sl->cabac_state[11+ctx] );
+```
+
+i.e. FFmpeg counts *same-slice AND not-skipped* — exactly what
+`entropy::MbSkipNeighbors::ctx_idx_inc` does (`cond_a = available &&
+!left_skipped`). The +13 gives 24..=26, matching `MB_SKIP_FLAG_B_CTX`. No
+change needed; do not "fix" this polarity.
+
+**3. The `mb_skip_flag` parse is NOT systematically wrong — addendum 22's
+"JM reads seven skip bins where we read mb_type" reading is unsupported.**
+A temporary probe in `parse_b_slice_cabac_range` + `MbSkipFlagContext`
+(`KINETIX_SKIPPROBE=1`, since removed) over the whole of CAPA1_TOSHIBA_B
+gives, per B slice: `slice_qp=25 idc=0` on every slice, `cols=22 rows=9` for
+the field pictures (198 MBs) and `rows=18` for the frame pictures (396 MBs),
+and every slice decodes exactly `mb_cols*mb_rows` macroblocks (no early
+return / desync). The skip counts per slice are:
+
+```
+field slices (198 MBs): 2, 1, 2, 0, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1 ...  (~1% skips)
+frame slices (396 MBs): 5, 5, 3, 5, 5, 5, 6                        (~1.4% skips)
+```
+
+A ~1% skip rate in a B slice looks alarming, so it was cross-checked against
+an independent decoder: `ffmpeg -v debug -debug mb_type` on the same clip
+prints its per-macroblock type map with `S` for skip, and the field rows show
+the *same* density — e.g. `>+ >+ ... >+  S  S  >+ >+ ...` (2 skips in a
+22-MB field row), and many rows with none. So the low skip rate is a
+property of this Toshiba test vector (it encodes B macroblocks explicitly
+almost everywhere), not a mis-parse. Cross-checked also that the per-MB
+context-state ramp is sane: MB(0,0) uses variant 0 (state 28, mps 1), every
+later MB in a row uses variant 1 and its state advances by exactly 1 per
+bin (6, 7, 8, 9, ...), as expected for a run of LPS bins.
+
+**4. The CAPA1 residual is TWO populations, and the split is by field
+parity, not by magnitude** (ours vs `CAPA1_TOSHIBA_B_dec.yuv`, display
+order, 90 frames, `FIELD_DISPLAY_ORDER=1` + `FIELD_DUMP_OUT`; per-frame
+luma diffs split by even/odd `y` into the frame's top/bottom field).
+**34 of 90 frames are non-exact — 56/90 exact, which matches addendum 12's
+recorded "56/90" exactly, so there is no regression.** (A first pass at
+this number read `dbg_field_triage`'s output as "73/90"; that was taken
+from a truncated console capture and is WRONG — the figure is 56/90.
+Re-derive residual lists from the dumped YUV, not from the triage log.)
+
+- **Population A — "small": 23 frames, every one with luma max |d| <= 3 and
+  ZERO samples at |d| > 3.** Frames 3, 4, 6, 18, 19, 21, 22, 24, 25, 28,
+  30, 36, 39, 42, 46, 48, 49, 63, 66, 69, 76, 79, 84. 20–130 wrong luma
+  samples each. The wrong pixels are **uniformly distributed over `x%4`
+  and `y%4`** (frame 63: x%4 = 16/16/17/25, y%4 = 19/10/31/14) and the
+  deltas are symmetric (`63: -1×32 +1×31`). An ASCII diff map of frame 79
+  shows genuinely isolated single pixels — `-` at (232,181), `+` at
+  (232,183), `-` at (232,185), `-` at (281,203). This rules OUT the
+  deblocking filter (it can only touch samples on 4-px edge lines, so the
+  histogram would be spiky at one residue) and rules OUT a wrong residual
+  coefficient (block-shaped, not scattered ±1). **No field parity bias**:
+  top and bottom fields are affected about equally (e.g. 63: 50/24,
+  66: 40/69, 79: 4/20, 84: 41/34). So this is a *field-agnostic* defect,
+  consistent with an interpolation/rounding difference in MC rather than
+  with anything field-specific.
+- **Population B — "large": 11 frames, all with samples at |d| > 3.** Frames
+  16, 57, 60, 61, 64, 67, 72, 73, 81, 82, 87. 94–690 wrong luma samples,
+  max 41–135. **This population is strongly BOTTOM-FIELD dominant**: 8 of
+  the 11 have bottom-field max far above top-field max —
+
+  ```
+  frame  top(n/max)  bot(n/max)
+    16     17/  1      38/ 41
+    57    253/ 50      98/  3
+    60      5/  1     344/ 71
+    61     29/  2     661/135
+    64    314/ 84     152/ 77
+    67    123/ 48     339/ 95
+    72    108/  5       3/  1     <- the one TOP-field frame
+    73    112/  4     148/ 43
+    81     37/  6      57/  1
+    82    141/ 33     272/ 57
+    87     18/  1      70/ 17
+  ```
+
+  That bottom-field concentration is the strongest structural signal found
+  this session, and it is exactly the population the whole #32d4 chain has
+  been chasing (addenda 12, 13, 14, 15, 16, 17, 19, 21, 22, 26 are all
+  "bottom field" notes). Frame 72 is the sole top-field-dominated member
+  and is the one useful exception to probe.
+
+The finer per-field census of addendum 18 (50/68 fields reconstruction-exact)
+was not re-measured this session.
+
+**NEXT SESSION (revised — addendum 26's two items are closed, and the work
+now splits by population):**
+
+0. **Unblock the tooling first, and do it without JM.** The JM binaries the
+   earlier addenda rely on (`ldecod_jmt.exe`, `ldecod_col7.exe`,
+   `ldecod_bin91.exe`, `biaridecod`) live outside the repo in `%TMP%` on a
+   machine set up for those sessions, and are not available from a clean
+   container. ffmpeg IS on `PATH` and is a sufficient oracle for the next
+   step, at the granularity that actually matters here:
+   `ffmpeg -i <clip> -pix_fmt yuv420p -f rawvideo ref.yuv` gives a
+   reference, and `ffmpeg -v debug -debug mb_type` gives a per-macroblock
+   type map. Splitting both the reference and our `FIELD_DUMP_OUT` dump into
+   top/bottom fields (even/odd `y`) turns the frame-level diff into a
+   **(poc, parity)-level** diff, which is exactly the granularity the last
+   ten addenda have been reconstructing by hand from JM traces. Do that
+   census first; it costs one script and removes the JM dependency for
+   Population B entirely.
+1. Do NOT re-check init values or `ctxIdxInc` polarity — items 1 and 2
+   above close them permanently. `ff_h264_cabac.c` at the repo root is the
+   authority; cite it in any further write-up.
+2. **Population B (11 frames, bottom-field dominant) is the priority** —
+   it carries essentially all of the large-magnitude error, and it is the
+   population the entire #32d4 chain has been chasing. Instrument
+   `mv.rs`'s `derive_temporal_direct` to dump, per 4x4 quadrant, the
+   computed `mvScale` / `tb` / `td` and the `colZeroFlag` /
+   co-located-availability decision, for one bottom field from this set
+   (frame 61, bot 661 samples @ max 135, is the single cleanest target).
+   Check those against §8.4.1.2.2 and JM `mc_direct.c`. Frame 72 is the
+   one top-field-dominated member — use it as the control case to confirm
+   the hypothesis is bottom-field-specific rather than generic.
+3. **Population A (23 frames, field-agnostic, all |d| <= 3)** is the larger
+   bucket by frame count but tiny by sample count. It is a *different*
+   defect from Population B and should not be conflated with it. Since the
+   wrong pixels are spatially uniform and deblock-free, the first thing to
+   test is whether it survives pre-deblock (`KINETIX_DUMP_PREDEBLOCK`): if
+   the pre-deblock dump is already ±1-wrong at those same pixels it is an
+   MC interpolation/rounding difference; if pre-deblock is exact it is a
+   deblocking-parameter derivation difference after all. That single test
+   splits Population A in half and is much cheaper than a quadrant dump.
+4. Only after both populations are closed does the Phase-H `pixel_exact`
+   flip or the G.5 PAFF/MBAFF corpus work become reachable. Do not start
+   G.5 while 34/90 frames of CAPA1 are still non-exact.
+## SESSION #32d4 ADDENDUM 28 (2026-09-28, continuation) — the
+(poc, parity)-level oracle is BUILT and needs no JM: all 68 B-field pictures
+are non-exact (the 56 exact frames are exactly the ones with no B field),
+deblocking is EXONERATED for the large population, and the frame-level
+"bottom-field dominance" from addendum 27 is corrected to 2:1
+
+**Tooling (step 0 of addendum 27's plan) — done, and it does not need JM.**
+`KINETIX_FIELD_BUF_OUT=<prefix>` (already in `decoder/interlaced.rs:655`,
+`:1712`, `:2362`) writes per-`(poc, bottom_field_flag)` luma planes both
+pre- and post-deblock, ungated, for every coded field. Combined with
+`ffmpeg -i <clip> -pix_fmt yuv420p -f rawvideo` and a SAD match against the
+reference frames split by even/odd `y`, that yields a per-field diff with no
+JM binary at all. New scratch tool: `tools/capa1_field_census.py`
+(68 B fields, matched, tabulated, plus per-MB maps and MB row/col
+aggregates). Reproduce with:
+
+```
+$env:KINETIX_FIELD_BUF_OUT="$env:TEMP\capa1f\f"
+$env:FIELD_CLIP='CAPA1_TOSHIBA_B'
+cargo test -p tpt-kinetix-h264 --test dbg_field_triage -- --nocapture
+python tools/capa1_field_census.py
+```
+
+(Two bugs of my own, recorded so they are not repeated: a coded field is
+FULL width / HALF height, so `(FW, FH)` must be `(W, H//2)` — using
+`(W//2, H//2)` silently compares the left half of our field against a
+half-width slice and makes *every* field look ~50% wrong. And do NOT treat
+a pre-deblock dump vs the reference as a correctness test: the reference
+YUV is POST-deblock, so a pre-deblock dump is *expected* to differ from it
+by roughly what deblocking changes — here ~4000 samples at max <= 6. The
+tool prints that column with a warning for exactly this reason.)
+
+**1. Every B-field picture is non-exact; nothing else is.** All 68 coded
+B fields have >= 3 wrong luma samples. Cross-check: the 34 non-exact frames
+from addendum 27 are *exactly* the 34 frames that contain a B field (poc
+pairs 2/3, 4/5, 8/9, 28/29, ... map 1:1 onto reference frames 3, 4, 6, 16,
+...). So the 56 bit-exact frames are the I / P / frame-coded ones. The
+crisp statement is "**B field pictures are never bit-exact**", not "some B
+fields are off by a few samples". This reframes the small population: it is
+a *systematic, 100%-present* defect, not a rare tail.
+
+**2. Deblocking is EXONERATED for the large population.** The census also
+diffs our own pre-deblock against our own post-deblock dump — our
+deblocking step's own footprint. It is `max <= 6` on every one of the 68
+fields (4-6 typically, ~2500-4600 samples touched, which is the right order
+for a 352x144 field). Meanwhile the large errors are present in our
+PRE-deblock reconstruction at their full magnitude (poc 119 BOT: pre max
+135, post max 135, our_deblock max 4). So deblocking neither creates nor
+**3. CORRECTION to addendum 27: the bottom-field dominance is 2:1, not
+near-total.** At field granularity the 12 fields with `post max > 10` are:
+
+```
+poc  29 BOT  ndiff=38  max=41    poc 124 TOP ndiff=314 max=84
+poc 110 TOP  ndiff=253 max=50    poc 125 BOT ndiff=152 max=77
+poc 117 BOT  ndiff=344 max=71    poc 130 TOP ndiff=123 max=48
+poc 119 BOT  ndiff=661 max=135   poc 131 BOT ndiff=339 max=95
+poc 143 BOT  ndiff=148 max=43    poc 160 TOP ndiff=141 max=33
+poc 161 BOT  ndiff=272 max=57    poc 171 BOT ndiff=70  max=17
+```
+
+8 BOT / 4 TOP. Addendum 27's frame-level table *looked* like 8-of-11
+bottom-dominant because it conflated the two fields of a frame; per field
+the bias is real but modest. Frame 72's "top-field" member is explained:
+it is poc 140 TOP (max 5), which is in the small population.
+
+**4. The small population's spatial signature** (aggregate over all 68
+fields, 13464 field-MBs): **620 MBs (4.6%)** carry at least one wrong
+sample, ~9 MBs per field, 1-19 wrong samples per affected MB out of 256.
+There is a clear lower-half bias and a mild right-edge bias, but no
+hotspot:
+
+```
+MB row : fields_touched/68      MB col : fields_touched/68
+  0: 17   1: 20   2: 15   3: 23     0: 24   8: 19   9: 25
+  4: 29   5: 40   6: 53   7: 44    19: 29  20: 32  21: 33
+  8: 38
+```
+
+Rows 5-8 are touched in 38-53 of 68 fields versus 15-23 for rows 0-3, i.e.
+roughly 2x. Columns are close to uniform apart from col 0 and cols 19-21.
+So the small errors are spread over isolated macroblocks — consistent with
+a per-partition motion-vector error (each wrong MV dirties only part of one
+MB) rather than with a filter, a QP, or a whole-row addressing fault.
+
+**WHERE THIS LEAVES THE SEARCH.** The two populations are now separated
+cleanly and both are reconstruction-side, not parse-side and not
+deblock-side:
+
+- **Small (100% of B fields, 4.6% of MBs, max |d| <= 3).** Something that
+  is wrong in a few partitions of a few macroblocks in every B field. The
+  lower-half bias points at references into the other field / the far end
+  of the field, i.e. exactly the temporal-direct colocated-read path that
+  addenda 12-17 were already fixing. Note this is the population that
+  actually blocks "B fields are bit-exact"; it is also the one that was
+  being under-weighted as a "small tail".
+- **Large (12 fields, max up to 135).** A different, rarer fault on top.
+
+**NEXT SESSION (concrete, and no longer blocked on tooling):**
+1. Per-partition MV diff for the small population. Add an env-gated dump in
+   `mv.rs`/`motion_comp.rs` of the final (mv, ref_idx, list, pred_flag) per
+   4x4 partition for one B field, e.g. poc 2 TOP (7 wrong samples, ONE
+   affected MB at col 0 row 1 — the single cleanest target in the clip),
+   then hand-check that one MB's MVs against §8.4.1.2.2. Start with a
+   one-MB target rather than a whole-field target; the MB maps make the
+   target explicit and the check becomes tractable by hand.
+2. The lower-half bias suggests checking the **field vertical-extension /
+   out-of-bounds sample fetch** rules (§8.4.2.2.2) for a field reference,
+   and whether MVs pointing past the field's last row are handled the same
+   way as for a frame reference. This is a code-reading task in
+   `motion_comp.rs` that needs no oracle at all — do it first, it is free.
+3. Large population (poc 119 BOT, 661 samples @ 135) stays the
+   highest-magnitude target but is the *second* priority: closing the small
+   population is what makes B fields bit-exact at all.
+4. Still not reachable until both are closed: G.5 corpus, Phase-H
+   `pixel_exact` flip.
+
+**Housekeeping:** no decoder source change this session. Added
+`tools/capa1_field_census.py` (new scratch analysis tool, committed as
+such). `KINETIX_FIELD_BUF_OUT`/`FIELD_CLIP` env vars unset; no probe left
+in the tree; `cargo fmt --all --check` clean. Full output preserved at
+`%TEMP%\census4.txt`, field dumps at `%TEMP%\capa1f\`.
+
+
+amplifies them: they are pure reconstruction errors. **This kills the
+step-3 "deblocking-parameter derivation" hypothesis from addendum 27 for
+Population B** — do not re-open it.
+## SESSION #32d4 ADDENDUM 29 (2026-09-28, continuation) — THE SEARCH IS
+NOW CLOSED DOWN TO ONE FUNCTION: all 25 P-field pictures are bit-exact and
+all 68 B-field pictures are not, so the defect is provably confined to
+field-B temporal direct; the two "populations" are one bug at two magnitudes,
+and the signature is a fractional-pel MV error
+
+This is the most useful result of the whole #32d4 chain. Everything shared
+between P and B pictures is now *proven* correct by a control group, rather
+than merely untested.
+
+**1. The control group: P fields are perfect, B fields never are.**
+`tools/capa1_field_census.py` now also matches the `f_post_*` dumps (the
+P-field pictures from `decoder/interlaced.rs:658/759`):
+
+```
+P-FIELD pictures (f_post_ dumps): 25 exact, 0 non-exact
+B-FIELD pictures (f_bpost_ dumps): 0 exact, 68 non-exact
+```
+
+Every P-field picture in the clip is bit-exact. Every B-field picture is
+not. Together with addendum 28's finding that the 56 bit-exact *frames* are
+exactly the ones with no B field in them (which also covers the frame-coded
+B slices the `KINETIX_SKIPPROBE` run showed at `field=false, rows=18`),
+this means the following are **proven correct**, because P-field pictures
+exercise all of them and come out exact:
+
+- entropy/CABAC parse
+- residual parse + inverse quant/transform + intra prediction
+- MC interpolation (`motion_comp.rs`)
+- deblocking
+- DPB, POC, ref-list marking, picture assembly
+
+**So the bug is in code that ONLY a field B picture executes.** The
+candidates shrink to exactly three, all in the field-B path:
+`build_field_ref_list_l0_b` / `build_field_ref_list_l1_b` (ref_pic.rs),
+`TemporalDirectCtx { field_slice: true }` construction
+(decoder/interlaced.rs:2217), and `derive_temporal_direct` in `mv.rs`.
+Frame-coded B slices are exact and they use temporal direct too — so it is
+**2. The signature is a FRACTIONAL-PEL MV error, which unifies the two
+populations.** Per-sample localisation of the small errors (added to the
+census) shows the wrong samples are **isolated single pixels at arbitrary
+sub-block positions, straddling 4x4 boundaries**:
+
+```
+poc 2 TOP, MB(col=0,row=1), 2 wrong samples:
+   (7,7)-1  (7,8)+1
+poc 2 TOP, MB(col=20,row=4), 4 wrong:
+   (13,7)-1 (13,8)+1 (14,8)+1 (13,9)+1
+poc 3 BOT, MB(col=15,row=6), 10 wrong:
+   (14,6)-1 (12,7)+2 (13,7)+1 (15,7)-1 (12,8)-2 (13,8)-1 (15,9)-1
+   (14,10)-1 (14,12)-1 (15,14)-1
+```
+
+The `x` values (0,1,2,6,7,9,11,12,13,14,15) and `y` values (0,1,4,5,6,7,8,9,
+10,12,14,15) are NOT multiples of 4. That is conclusive on its own:
+
+- **not deblocking** — only touches samples on 4-px edge lines;
+- **not a wrong residual coefficient** — would be block-shaped and larger;
+- **not a wrong integer MV** — would dirty a whole partition, not 1-2
+  interior pixels;
+- **it IS a fractional-pel MV error.** An MV off by (say) 1/4 pel changes
+  the interpolated block slightly *everywhere*, but after the 6-tap + clip
+  rounding most samples round to the identical value and a small minority
+  land on the other side of a rounding boundary. That produces exactly
+  isolated ±1 pixels at arbitrary positions, with symmetric +1/-1 counts
+  (poc 2 TOP: one -1 and one +1; poc 3 BOT: -1x5, +1x2, -2x2, +2x1).
+
+Chroma is affected in the same fields (frame 84: cb_diff 42, cr_diff 20),
+which is also what an MV error predicts and what a luma-only residual
+error would not.
+
+**This collapses addendum 28's two populations into ONE bug at two
+magnitudes**: `mvScale` slightly wrong gives the ±1 isolated class in
+essentially every B field; more wrong gives the 12 fields with max up to
+135. There is no second defect to find. (The field/BOT 2:1 skew is then just
+a consequence of how often the scale error is large enough to cross a
+rounding boundary, not a separate bottom-field fault.)
+
+**3. Free check that came back negative (recorded so it is not repeated).**
+Addendum 28's step 2 suggested auditing the field vertical-extension /
+out-of-bounds fetch rules (§8.4.2.2.2). Audited, and it is CORRECT:
+`motion_comp::get` edge-clamps to `[0, ph-1]`, and the field call site
+(`reconstruct.rs:2109-2115`) passes `h = luma_ref.len() / stride` — the
+FIELD height — with `fy0` in field coordinates. Field references are
+addressed in field space and clamped to the field's own extent, which is
+the correct JM behaviour. Do not re-open this.
+
+**NEXT SESSION — this is now a single-function investigation:**
+1. `mv.rs::derive_temporal_direct`, field instantiation only. For one
+   field-B MB, dump `(tb, td, mvScale, colocated mv, resulting mv)` and
+   compare against JM `mc_direct.c::update_direct_mv_info_temporal`.
+   §8.4.1.2.7: `mvScale = 1 / (tb/td)` with `td = PicOrderCnt(curr) -
+   PicOrderCnt(col)`, `tb = PicOrderCnt(col) - PicOrderCnt(ref)`, and
+   `Clip3(-128,127, (mvCol * mvScale + 2^(mvdScale-1)) >> mvdScale)` with
+## SESSION #32d4 ADDENDUM 30 (2026-09-28, continuation) — the temporal
+direct SCALE arithmetic is verified CORRECT by hand-computation, which
+localises the residual to the field POC bookkeeping feeding tb/td; the
+`dsf=85` quantisation is exactly why a 1-unit POC error shows up as isolated
++-1 pixels
+
+**1. JM's `update_direct_mv_info_temporal` is NOT available locally.** The
+vendored reference files at the repo root (`h264_slice_ref.c`,
+`h264dec_ref.h`, `h264_mb_ref.c`, `ff_h264_cabac.c`, ...) do not contain it
+— the only `dist_scale_factor` hit is FFmpeg's *implicit bi-pred weight*
+code (`h264_slice_ref.c:738`), which is a different formula. **Do not try to
+settle a rounding constant from those files; they cannot settle it.** Either
+get the JM `mc_direct.c` binary back or rely on the self-checking oracle
+below.
+
+**2. The scale arithmetic in `mv.rs:1746-1751` is CORRECT.** A gated probe
+(`KINETIX_TDUMP=<poc>`, since removed) on poc 2 TOP printed, for every
+temporal-direct 4x4 cell:
+
+```
+cur_poc=2 col_poc=6 pic_a=0 pair_first=0 own=0 tb=2 td=6 tx=2731 dsf=85
+mv_col=[-14,-3] -> mv_l0=[-5,-1]  ref_idx_l0=0 target_poc=0
+mv_col=[-7,0]   -> mv_l0=[-2,0]   ref_idx_l0=0 target_poc=0
+mv_col=[-8,0]   -> mv_l0=[-3,0]   ref_idx_l0=0 target_poc=0
+... (all cells, field_slice=true, field_parity=None, yconv=none)
+```
+
+Hand-checked against the physics of temporal direct: the current picture
+(poc 2) predicts from ref poc 0, the co-located picture is poc 6, so the
+motion must be scaled by `(cur-ref)/(col-ref) = 2/6 = 0.3333`, i.e.
+`256 * 2/6 = 85.3 -> 85`. **Our `dsf = 85` is exactly right.** The two
+candidate rounding idioms (`(x+128)>>8` vs JM's `(x + 127 + (x<0))>>8`) were
+then compared for every `mv_col` magnitude present in that picture and
+**agree on all of them**. So neither the `tx` table nor the final
+`(dsf*mv + 128) >> 8` rounding is the bug, and addendum 29's "check the
+`2^(mvdScale-1)` rounding term first" advice is **withdrawn** — it was a
+reasonable guess that the evidence does not support.
+
+(Also worth recording so nobody re-derives it wrongly: the code's variable
+names are transposed relative to §8.4.1.2.7 — the code's `tb` is the
+spec's `td` and vice versa. The *product* is right; only the labels are
+confusing. Do not "fix" the names' arithmetic.)
+
+**3. What this leaves: the POC inputs, and a mechanism that explains the
+signature exactly.** `dsf` is derived from POC differences, and for field
+pictures those come from `pic_a_poc` (the `own_poc` vs `pair_first` choice
+at `mv.rs:1733`) and `col_poc` — precisely the bookkeeping addenda 11-17
+churned through and never fully settled. For poc 2 the two agree
+(`pic_a = pair_first = own = 0`) so that picture is unambiguous; other pocs
+will not be.
+
+The mechanism matters, because it shows how small the input error can be.
+With `dsf/256 = 0.332`, each quarter-pel of co-located motion contributes
+only 0.33 quarter-pels of result, so the temporal-direct MV is **heavily
+## SESSION #32d4 ADDENDUM 31 (2026-09-28, continuation) — TEMPORAL
+DIRECT IS EXONERATED as the cause: instrumenting every `derive_temporal_direct`
+call and intersecting with the dirty-MB list shows the dirty macroblocks are
+NOT the temporal-direct ones. This RETRACTS addendum 29's "one bug" unification
+and re-opens the search
+
+This is an uncomfortable result but a valuable one: it kills the hypothesis
+that addendum 29 was built on, before anyone spends a session implementing it.
+
+**Method.** Added a temporary thread-local trace (`TdTrace` +
+`take_td_trace()`, since removed) so every `derive_temporal_direct` call
+reports `mb=(col,row) q= c4=(x,y) cur_poc col_poc pic_a own pair tb td dsf
+mv_col yc yconv -> mv0 ref0`, printed from `apply_temporal_direct` so the
+macroblock coordinates are attached. Gated with `KINETIX_TDUMP=<poc>`.
+Coverage was checked and is COMPLETE: `derive_temporal_direct` has no
+production callers outside `apply_temporal_direct` (the other four call sites
+are unit tests), and the spatial-direct path
+(`apply_spatial_direct` -> `resolve_spatial_colocated_cells`) resolves only
+the co-located *cells* — it never touches `dsf`/`mvScale`. So every
+temporal-direct derivation in a field is in the dump.
+
+**1. poc 2 TOP (small population): temporal direct is NOT implicated at all.**
+
+```
+34 MBs use temporal direct; 3 MBs are dirty; 0 of the 3 are temporal-direct
+```
+
+Thirty-four macroblocks went through the temporal-direct scale and every one
+of them is pixel-exact, while all three dirty macroblocks reached their
+motion some other way. The base rate of dirtiness (4.6% of MBs, addendum 28)
+is *not* enriched among temporal-direct MBs. This directly contradicts
+addendum 29's claim that the ±1 signature "is a fractional-pel MV error" from
+temporal direct.
+
+**2. poc 119 BOT (largest field, 661 wrong samples): also mostly NOT temporal
+direct.**
+
+```
+32 MBs use temporal direct; 20 MBs are dirty; 6 of the 20 are temporal-direct
+```
+
+6/20 (30%) against a 32/198 (16%) base rate is weak enrichment at n=20. More
+tellingly, the four *worst* macroblocks are **not** temporal-direct:
+
+```
+(17,2) 127 wrong    (17,3) 126 wrong
+(16,2) 125 wrong    (16,3)  64 wrong     <- 442 of the field's 661 samples
+```
+
+Those four form a **contiguous 2x2 macroblock cluster** (a 32x32 pixel
+region). Addendum 30's theory — a per-block `mvScale` perturbation producing
+scattered ±1s — cannot produce a 2x2 MB cluster carrying two thirds of the
+error. A spatially contiguous wrong region points at a *reference-side*
+fault: a wrong reference entry, a wrong position within a reference picture,
+or a wrong address/stride, affecting everything that reads from it — not at a
+per-block motion scale.
+
+**3. The `own != pair_first` cases do exist and are still worth a look.**
+The dump does contain live field-poc choices, e.g. in poc 119 BOT:
+
+```
+mb=(0,0) q=2  own=114 pair=114  tb=5 td=7 dsf=183
+mb=(0,0) q=3  own=115 pair=114  tb=4 td=6 dsf=171
+mb=(5,0) q=3  own=108 pair=108  tb=11 td=13 dsf=217
+```
+
+The `own=115 pair=114` rows are exactly the "1-unit POC difference amplified
+by `dsf` quantisation" mechanism addendum 30 described, and three dirty MBs
+((5,0), (3,5), (4,6)) use them. So the field-poc choice is *a* real bug
+candidate — it is just not the main one. Fixing it would be expected to
+improve ~3 of 20 dirty MBs in that field, not to close the field.
+
+**RETRACTIONS — please read before acting on 29/30:**
+- Addendum 29's "**This collapses the two populations into ONE bug**" is
+  **retracted.** The data does not support it. The two populations may still
+  share a cause, but that cause is not temporal direct.
+- Addendum 29's "**it IS a fractional-pel MV error**" is **downgraded** to
+  "consistent with a sub-block motion error of some kind" — the dirty-MB vs
+  temporal-direct intersection refutes the specific attribution.
+- Addendum 30's advice to start with `derive_temporal_direct`'s inputs is
+  **superseded**: those inputs are measurably *not* where most of the error
+  is. Do not start there.
+
+**WHAT SURVIVES, and what the shape now demands:**
+- Still solid: the defect is field-B-only (25/25 P fields exact, 0/68 B
+  fields exact); the shared parse/residual/MC/deblock machinery is proven
+  correct; the wrong pixels are isolated ±1s at non-4-aligned positions in
+  the small population.
+- New, and the strongest lead yet: **the large errors are spatially
+  contiguous** (2x2 MB = 32x32 in poc 119 BOT). A contiguous wrong region
+  that tracks a *region* rather than a block mode is the signature of a
+  reference-picture addressing or content fault.
+- Therefore the next probe should be **reference-side, not motion-side**:
+  for poc 119 BOT, dump for every dirty MB which reference entry, list and
+  position its prediction reads from, and check whether the dirty MBs all
+  read from ONE reference picture (or one region of one) that the dirty
+  neighbour does not. A wrong L0/L1 entry or a wrong parity in the field
+  reference (`build_field_ref_list_l0_b`/`l1_b`, `ref_pic.rs`) fits the
+  contiguous-cluster evidence better than anything in `mv.rs`.
+
+**Method note for the next session:** the intersection test
+(instrument every derivation path, emit coordinates, cross-reference against
+## SESSION #32d4 ADDENDUM 32 (2026-09-28, continuation) — three more
+hypotheses eliminated cheaply: the silent reference-list fallback never fires,
+and the large-field errors are NOT inherited from an upstream field. The
+remaining dirty macroblocks in poc 119 BOT are explicit B16x8 / BB8x8 motion,
+not direct
+
+Continuing the "instrument, then intersect" method from addendum 31. Three
+more candidates killed, none of them by reasoning but by measurement.
+
+**1. The silent reference-list fallback NEVER FIRES.** `reconstruct.rs` has
+four sites of the form
+
+```rust
+ref_frames_l0.get(ref_idx0).or_else(|| ref_frames_l0.first())
+```
+
+(`reconstruct.rs:2109`, `:2245`, `:2600`, `:2624` and the
+`field_planes…last()` variants at `:2109`/`:2245`). A silently substituted
+reference picture would produce exactly the contiguous-wrong-region signature
+addendum 31 identified, so this was worth checking. Added a probe that fires
+whenever `ref_idx0 >= ref_frames_l0.len()` (or the L1 equivalent) and ran the
+whole of CAPA1_TOSHIBA_B:
+
+```
+fallback events: 0
+```
+
+**Zero, across all 68 B fields and 25 P fields.** The fallback is dead code
+on this clip and the hypothesis is eliminated. (Keep the probe idea — it is
+one `if` and it is a real hazard for other clips, but it is not this bug.)
+
+**2. The large-field error is NOT inherited from an upstream field.** The
+temporal-direct dump for poc 119 BOT shows its dirty macroblocks reading from
+`pic_a` values 102, 108, 114 and 115. Cross-referencing the census's B-field
+poc list (2,3,4,5,8,9,28,29,…,116,117,118,119,122,…), **none of 102/108/114/115
+is a B field** — all four are P fields, and P fields are 25/25 bit-exact
+(addendum 29). So the references poc 119 BOT reads from are themselves
+pixel-perfect, and the 661 wrong samples in that field are **generated in that
+field, not propagated into it**.
+
+This is a useful negative: it means there is no "first bad field upstream"
+to go find for the large population, and the error-repair strategy of
+chasing an earlier field is a dead end. (It also means the 2x2 MB cluster at
+(16,2)/(17,2)/(16,3)/(17,3) is wrong in its own right.)
+
+**3. The dirty macroblocks are explicit inter partitions, not direct.**
+`KINETIX_MBDUMP` over those MBs (temporary probe, since removed) shows for
+poc 119 BOT's dirty set:
+
+```
+mb=(16,2) type=B16x8  qp=25 cbp=f   mb=(17,2) type=BB8x8  qp=25 cbp=2f
+mb=(16,3) type=B16x8  qp=25 cbp=2f  mb=(17,3) type=BB8x8  qp=25 cbp=f
+mb=(11,0) type=BB8x8  qp=25 cbp=2e
+```
+
+So they are `B16x8` / `BB8x8` — explicit L0/L1/Bi motion with signalled MVDs,
+`transform_size_8x8 = false`, active ref lists of length 3-4. Combined with
+addendum 31 (not temporal-direct) and item 2 (references are exact), the
+remaining possibilities for these macroblocks narrow to:
+
+- the **MVD decode** for these partitions (a parse-level value, which would
+  show up as a wrong MV rather than a wrong reference), or
+- the **B16x8 partition MV-predictor** (§8.4.1.3) — note the cluster is
+  `B16x8` and `BB8x8` side by side, i.e. *horizontally* partitioned
+  partitions, which is a distinct predictor path from the 16x16 and 8x8 ones,
+- the **bi-prediction combine** for these blocks.
+
+**A 2x2 MB cluster of horizontally-partitioned inter blocks is a strong hint
+toward the B16x8 predictor**, which has been the least-exercised of the B
+partition paths in this whole investigation (every prior session focused on
+direct mode). Worth an explicit check next session: for MB (16,2) and (16,3),
+hand-verify the partition-0 and partition-1 predictors and MVDs against
+§8.4.1.3 from the already-parsed neighbour MVs.
+
+**4. The B-partition predictor core is sound (negative result).** Before
+attacking the `B16x8`/`BB8x8` predictors, the shared machinery they sit on was
+audited, because a bug there would be a much better explanation than a
+partition-specific one:
+
+- `predict_mv` (`mv.rs:825`) applies the §8.4.1.3.1 directional shortcuts with
+  the correct geometry: `py_off = part_idx * 8` for 16×8 and
+  `px_off = part_idx * 8` for 8×16, so partition 1's A/B/C are resolved at the
+  correct offset; 16×8 partition 0 short-circuits on **B**, partition 1 on
+  **A**, and 8×16 partition 0 on **A**, partition 1 on **C** — matching the
+  spec's four cases.
+- The spec's "the neighbouring partition is **not intra**" condition is not
+  written explicitly, but is satisfied implicitly: `neighbor_cell` returns
+  `Some` for in-MB cells regardless of intra-ness, however `MvCell::INTRA`
+  carries `ref_idx = LIST_NOT_USED` and `mv = [0, 0]`, so an intra neighbour
+  can never satisfy `n.ref_idx == ref_idx` (a valid index is >= 0) and always
+  falls through to `median_pred`, where it contributes 0 to the median as
+  §8.4.1.3.1 requires. This is fragile-looking but correct.
+- `median_pred` (`mv.rs:786`) implements `match_count == 1` -> copy that
+  neighbour, the A-when-B-and-C-unavailable rule, then the median with zero
+  substitution. Correct.
+
+So the partition predictors are only suspect in their *partition-specific*
+neighbour geometry, not in the shared median/shortcut logic.
+
+**STATE OF THE SEARCH — honest summary.** Confirmed: field-B-only; shared
+parse/residual/MC/deblock proven correct by the P-field control; errors are
+isolated ±1s in ~4.6% of MBs plus 12 spatially-contiguous large clusters;
+not temporal-direct; not a reference-index fallback; not inherited from an
+upstream field. Eliminated this session and the last: CABAC init tables,
+`ctxIdxInc` polarity, the `mb_skip_flag` parse, deblocking parameters,
+field vertical-extension rules, the temporal-direct scale arithmetic and
+rounding, the reference-list fallback, and error propagation.
+
+Not yet eliminated, in rough priority order: the **B16x8 / BB8x8 partition
+predictors**, the **MVD decode**, and the **bi-prediction combine**. The
+minimal repro remains **poc 2 TOP** (7 samples, 3 MBs) for the small
+population and **poc 119 BOT** (661 samples, 2x2 cluster) for the large.
+
+**Process note (worth more than the findings).** Four of this session's
+conclusions were wrong on arrival — the deblocking hypothesis, the
+"one bug" unification, the fractional-pel-MV attribution, and the
+reference-fallback idea. Every single one was killed in under ten minutes by
+adding an `if` and printing a counter, after hours of reasoning had been
+spent on it. The instrument-then-intersect loop is cheap; the reasoning is
+not. Run the cheap experiment first, always.
+
+**Housekeeping:** all probes removed (`reconstruct.rs`, `mv.rs` reverted via
+`git checkout`). No decoder source change. Only `todo-h264.md` modified plus
+`tools/capa1_field_census.py`. `cargo fmt --all --check` clean.
+
+
+`tools/capa1_field_census.py`'s dirty-MB map) is cheap, took one probe, and
+immediately falsified a hypothesis that a dozen addenda of reasoning had
+built toward. Reach for it earlier next time. The probe's exact output format
+is quoted above; the census tool prints the dirty-MB map it must be joined
+against.
+
+**Housekeeping:** probe removed (`git checkout -- tpt-kinetix-h264/src/mv.rs`);
+no decoder source change in this session or the previous one. Only
+`todo-h264.md` modified plus `tools/capa1_field_census.py`. Env vars unset.
+
+quantised**: a **single unit** of error in `dsf` (85 vs 86) shifts the final
+MV by 1 quarter-pel for most blocks. A quarter-pel is a quarter-pel — the
+prediction changes slightly everywhere, most samples round the same, and a
+few land either side of a rounding boundary. That is *precisely* the
+isolated +-1-pixel signature addendum 29 measured. And because `dsf` is
+`(tb*tx + 32) >> 6`, a **1- or 2-unit POC error** is easily enough to flip it.
+
+So the residual is a **one-or-two-unit POC discrepancy in the field-B
+temporal-direct inputs** — not a structural rewrite.
+
+**NEXT SESSION (small, well-bounded, self-checking):**
+1. Re-add the probe (exact code in this addendum's sibling commit history, or
+   reconstruct from the `TDUMP` format string above) gated on
+   `KINETIX_TDUMP=<poc>`, but ALSO print the macroblock/4x4 coordinates, so
+   the dump can be intersected with the census's dirty-MB list. The first
+   target is **poc 2 TOP, MB(col=0,row=1)** — 7 wrong samples in one MB, the
+   only single-MB target in the clip.
+2. For that MB, list every 4x4 cell's `tb`, `td`, `dsf`, `mv_col`, `mv_l0`,
+   `ref_idx_l0`, and `pic_a` (`own` vs `pair_first` vs `target_poc`). The
+   dirty 4x4 blocks from the census are the ones to focus on. A cell whose
+   `own != pair_first` is a cell where the field-poc choice is live — that is
+   the first thing to check.
+3. The pass/fail gate needs no external tool: a candidate fix is real only if
+   `python tools/capa1_field_census.py` moves the
+   `B-FIELD pictures: N exact` count off 0. Nothing else counts as evidence.
+4. Only after B fields start going exact should the 12 large-magnitude fields
+   be re-examined; per addendum 29 they are probably the same bug with a
+   bigger POC error, not a second bug.
+
+**Housekeeping:** probe removed (`git checkout -- tpt-kinetix-h264/src/mv.rs`);
+no decoder source change. Only `todo-h264.md` modified plus the
+`tools/capa1_field_census.py` analysis tool. `cargo fmt --all --check` clean,
+`cargo test -p tpt-kinetix-h264 --lib` 273/273.
+
+
+   `mvdScale = 6`. **Check the `(2^(mvdScale-1)) >> mvdScale` rounding term
+## SESSION #32d4 ADDENDUM 33 (2026-09-28, continuation) — **THE JM ORACLE
+WAS NEVER UNAVAILABLE**: the blocker was SPACES IN THE INPUT PATH, JM's `-p`
+parser split on whitespace and the decoder died with an access violation.
+Restored, verified, and it immediately contradicts addendum 26
+
+This is a correction to addenda 30 and 32, both of which asserted that "JM is
+unavailable here" and planned around it. **That was wrong**, and the cause was
+trivial and had never been checked — I carried the claim forward from the
+addendum notes instead of testing it, which is exactly the failure mode I
+criticised those addenda for.
+
+**Root cause: spaces in the fixture path.**
+`D:\Programming\1PRODUCTION\Open Source\tpt-kinetix\...\CAPA1_TOSHIBA_B.264`
+contains spaces. JM is invoked as
+
+```
+ldecod.exe -d decoder.cfg -p InputFile='<path>' -p OutputFile=...
+```
+
+and its command-line parser splits the `-p` argument on whitespace, so the
+path was truncated. The decoder then crashed with `0xC0000005` (access
+violation) **before decoding a single macroblock** — 0-byte output, empty
+stdout. That crash was misread as "the tool isn't available here".
+
+**Proof and fix — copy the bitstream to a space-free path first:**
+
+```
+cd %TEMP%\jmrun
+copy "...\fixtures\itu\CAPA1_TOSHIBA_B\CAPA1_TOSHIBA_B.264" capa1.264
+"C:\Users\phill\AppData\Local\Temp\jm-oracle\jm\ldecod.exe" -d decoder.cfg ^
+    -p InputFile=capa1.264 -p OutputFile=jm_capa1.yuv
+-> 90 frm, 138 fields, jm_capa1.yuv = 13685760 bytes   (exit 0)
+```
+
+The oracle tree is at `C:\Users\phill\AppData\Local\Temp\jm-oracle\jm\` and
+holds ~32 prebuilt instrumented `ldecod*.exe` variants plus `cfg/decoder.cfg`.
+The full `ldecod` *library* source (mc_direct.c etc.) is **not** present —
+**What the restored oracle says about the poc-119 bottom field.**
+`ldecod_bin91.exe` is gated to slice **n=91**, and the slice table confirms
+`KINETIX_SLICE n=91 … bottompoc=119 framepoc=119` — i.e. exactly the slice
+addenda 21/22/26 were chasing. Its bin trace for that slice, from bin 0:
+
+```
+KPRE pre_range=510 pre_state=28 pre_mps=1  -> KBIN bit=0 range=448 state=22
+KPRE pre_range=448 pre_state=43 pre_mps=1  -> KBIN bit=1 range=423 state=44
+KPRE pre_range=423 pre_state=8  pre_mps=0  -> KBIN bit=1 range=274 state=6
+KPRE pre_range=274 pre_state=8  pre_mps=1  -> KBIN bit=1 range=358 state=9
+KPRE pre_range=358 pre_state=4  pre_mps=1  -> KBIN bit=1 range=432 state=5
+KPRE pre_range=432 pre_state=5  pre_mps=1  -> KBIN bit=1 range=272 state=6
+KPRE pre_range=272 pre_state=6  pre_mps=1  -> KBIN bit=1 range=334 state=7
+KPRE pre_range=334 pre_state=12 pre_mps=1  -> KBIN bit=1 range=480 state=13   <-- bin 7
+KPRE pre_range=480 pre_state=4  pre_mps=1  -> KBIN bit=0 range=390 state=2
+```
+
+This **reproduces addendum 26's recorded JM values exactly** (bits
+`0,1,1,1,1,1,1` for bins 0-6; bin 7 = bit 1, range 480, state 13). So the
+prior session's JM capture was sound, and the bin-7 divergence is real.
+
+**And it yields a NEW observation that addendum 26 missed.** A freshly
+initialised B-slice `mb_skip_flag` variant-1 context (ctxIdx 25,
+`cabac_init_idc` 0, QP 25) is `(m, n) = (9, 43)` -> `preCtxState = 57` ->
+**`state = 6, mps = 0`**. But JM's bin-7 context is **`state = 12, mps = 1`**.
+So the context JM is decoding at bin 7 is **not** a fresh ctxIdx 25. Either:
+
+- JM had already consumed several bins on that context earlier in the slice
+  (i.e. **JM's parse read more syntax before bin 7 than ours did** — which is
+  addendum 22's "JM reads seven `mb_skip_flag` bins where we read `mb_type`",
+  a claim addendum 26 retracted and this evidence supports again), or
+- the context index JM selects for that `mb_skip_flag` is not 25.
+
+**This is the first *positive* evidence in many sessions, and it is the thing
+the whole #32d4 chain has been circling without being able to test.** With
+the oracle working, this is now a one-command check on both sides:
+`KINETIX_BINTRACE=1` for our bins of the poc-119 field, diffed against the
+`KPRE`/`KBIN` lines above.
+
+**NEXT SESSION — do this first, it is now cheap:**
+1. Reproduce the comparison: run our decoder with `KINETIX_BINTRACE=1` and
+   `FIELD_CLIP=CAPA1_TOSHIBA_B`, extract the bins of the poc-119 bottom field,
+   and diff bit/range/state against the `KPRE`/`KBIN` table above. Then walk
+   *backwards* from bin 7: which context is JM at bin 7, and how many times
+   has it been touched? That single question distinguishes "JM consumed more
+   bins before bin 7" from "JM picks a different ctxIdxInc", and it is the
+   fork addenda 22 and 26 disagreed about.
+2. `ldecod_bin91.exe` is gated to n=91 only. For other fields, the gate is
+   compiled in and cannot be changed (no library source), so restrict
+   cross-checks to slice 91/92 — i.e. **poc 119 and 121**, which is enough:
+   addendum 20 found poc-121 is already byte-exact, so poc 119 is the
+   divergence and the pair brackets it tightly.
+3. Re-open addendum 22's "wrong context family at the slice start" reading
+   with real data. It was retracted in favour of addendum 26's
+   "skip-variant state" reading, which is now in doubt.
+4. Everything in addenda 28-32 that was derived *without* the oracle should
+   be treated as unconfirmed reasoning, not as established fact. The P-field
+**Two process lessons, both now in the log:**
+- A tool being *unavailable* and a tool *failing* look identical if you only
+  read the exit code. `0xC0000005` on a path with spaces is a usage error
+  wearing a crash's clothes. Always test the tool on a known-good input
+  before concluding it is missing — `ldecod.exe` on `in.264` decoded 17
+  frames cleanly, which is what exposed this in one command.
+- Three addenda (30, 32, and this one's predecessor) asserted an
+  environmental limitation on the strength of a note in a document. Verify
+  the environment; do not inherit claims about it.
+
+**Housekeeping:** no decoder source change. Probes still reverted.
+`cargo fmt --all --check` clean, `cargo clippy -p tpt-kinetix-h264
+--all-targets -- -D warnings` clean, `cargo test -p tpt-kinetix-h264 --lib`
+## SESSION #32d4 ADDENDUM 34 (2026-09-28, continuation) — WITH THE ORACLE
+RESTORED, THE WHOLE "BIN 7" MYSTERY IS GONE: our poc-119 bottom-field parse is
+bin-identical to JM for all 33,340 of JM's decision bins. Addenda 21/22/26 were
+chasing a bug that intervening work already fixed
+
+**The comparison, run properly.** Added two temporary probes (since reverted): a
+`bin_seq()` accessor for the `KINETIX_BINTRACE` per-bin counter, and an
+`OURS_SLICE_START poc=… binseq=…` marker at the top of
+`decode_interlaced_b_field`, so the poc-119 bottom field's bin range could be
+located in the 550 MB trace. Then diffed against JM's `ldecod_bin91.exe`
+`KBIN` lines on (bit, range, post-state).
+
+**Result: NO DIVERGENCE across JM's entire 33,340-bin trace.** The first bins
+line up exactly, including the bin the old addenda called the divergence point:
+
+```
+bin  ours ctx  st  mps bit  R     JM pre_state  JM bit  JM R   JM post
+ 0    24     22  1   0    448    28            0      448    22
+ 1    27     44  1   1    423    43            1      423    44
+ ...
+ 6    32      7  1   1    334     6            1      334     7
+ 7    36     13  1   1    480    12            1      480    13   <-- old "divergence"
+ 8    37      2  1   0    390     4            0      390     2
+```
+
+Bin 7 is **not** a divergence: our ctxIdx 36 (`SUB_MB_TYPE_B_CTX`), state 13,
+bit 1, range 480 match JM's pre_state 12 / mps 1 / bit 1 / range 480 /
+post-state 13 exactly. Bins 0-8, and then every one of JM's 33,340 decision
+bins, match.
+
+**So addendum 26's recorded "ours bit=0 range=376 st=10" is stale.** Those
+figures were captured against an older tree (the notes reference 222bc92 /
+32ade30 / 9d8115f; HEAD is now ca082cd). Intervening work fixed it. The entire
+"bin 7 / wrong context family / skip-variant state" investigation
+(addenda 21, 22, 26) was, at HEAD, chasing a phantom. **Retire that thread.**
+
+**The one genuinely open question this raises.** Our slice runs from bin
+7,598,076 to 7,745,298 — about **126,484 decision bins**, where JM emits
+**33,340**. The first 33,340 are identical, then we keep decoding for another
+~93,000 bins that JM does not. Two readings, and they are NOT yet
+distinguished:
+
+- **(a) A real over-read**: we fail to terminate the macroblock layer where JM
+  does, and grind on past the end of the slice. If true this is a genuine bug
+  and a much better candidate for the residuals than anything in addenda 28-32.
+  It would be consistent with the decoder looping to a fixed `mb_cols*mb_rows`
+  bound rather than detecting slice end. (Note 126,484/198 MBs = 638 decision
+  bins per macroblock, which is implausibly high; 33,340/198 = 168/MB is
+  normal.)
+- **(b) A truncated JM trace**: `ldecod_bin91.exe`'s instrumentation may simply
+  stop early. The closing `KINETIX_BIN_TRACE_OFF n=92` marker *suggests*
+  completeness, but it is emitted when the trace turns off for the next slice,
+  which is not proof that it ran to the slice's end.
+
+**Do not report (a) or (b) as settled.** The discriminator is cheap: check
+whether our macroblock loop for this slice stops at the same point JM does —
+i.e. compare our `decoded_mb_count` / end-of-slice condition against the
+number of macroblocks JM actually coded in slice 91. JM's per-MB count for
+that slice is available from the `ldecod_dump.exe` `KINETIX_SLICE` /
+write-out lines, or by counting MBs in a build with per-MB tracing. If we code
+198 MBs and JM codes ~80, (a) is confirmed immediately.
+
+**STATUS CHANGE — this materially re-ranks the search:**
+- The **field-B parse is no longer a suspect** for the poc-119 slice: it is
+  bit-identical to JM for JM's full trace. Addenda 28-32's reconstruction-side
+  suspects (`derive_temporal_direct`, partition predictors, ref-list
+  fallback, deblocking) are back on top, and they are now checkable against
+  JM rather than only against our own output.
+- Because the parse is clean, the "we consume 4x the bins" observation, *if*
+  it is real, is itself a high-value target: it is the only parse-adjacent
+  anomaly left, and it would explain a slice that produces mostly-right output
+  (661/50,688 samples wrong) yet is structurally off.
+- Still outstanding from 28-32, unchanged: the 2×2 MB cluster at
+  (16,2)/(17,2)/(16,3)/(17,3) and the scattered ±1s, both unexplained by
+  anything measured so far.
+
+**NEXT SESSION (now genuinely oracle-backed, do these in order):**
+1. Settle (a) vs (b) — the MB-count comparison above. One command.
+2. If (a): the fix is in the macroblock-layer termination for CABAC field-B
+   slices, not in any motion or residual code.
+3. If (b): the parse is done; go straight back to the reconstruction
+   candidates from addendum 32 (`B16x8`/`BB8x8` partition geometry, MVD
+   decode, bi-pred combine) and check them against JM now that a working
+   oracle exists.
+4. Whatever the answer, **add a regression gate** so this can never be
+   re-investigated blind again: a test that runs `ldecod_bin91.exe` (or any
+   `ldecod_*.exe`) against `KINETIX_BINTRACE` output for a known field slice
+   and asserts bit/range/state equality for the common prefix. The `KINETIX_*`
+   binaries are in `%TEMP%` and will not survive a clean machine, so gate the
+   test on the oracle's presence and skip cleanly when it is absent — the
+   pattern `AGENTS.md` already requires for `ffmpeg`-gated tests.
+
+**Method note:** the reason this took until addendum 34 to learn is that
+addenda 21-32 reasoned about a stale capture instead of re-running it. The
+bin-level diff against a live oracle takes about five minutes and settles
+questions that twenty addenda of inference could not.
+
+**Housekeeping:** both probes reverted (`entropy.rs`,
+`decoder/interlaced.rs`). No decoder source change. Extracted traces kept at
+`%TEMP%\ours119.txt` (126,484 lines) and `%TEMP%\jm119.txt` (33,340 lines) for
+re-analysis without re-running. `cargo fmt --all --check` clean, `cargo clippy
+-p tpt-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
+tpt-kinetix-h264 --lib` 273/273.
+
+
+273/273. JM artifacts under `%TEMP%\jmrun\` (`capa1.264`, `bin91.txt`,
+`jm_capa1.yuv`, `probe_ldecod_dump.exe.txt`).
+
+
+   control group and the census themselves are unaffected (they used our own
+   output plus the shipped reference YUV, not JM).
+
+
+only `source/app/*` wrappers — so JM cannot be rebuilt, but every
+pre-instrumented binary works. `%TEMP%\jmrun\` also still holds the entire
+prior investigation's evidence (`jm_s*.txt`, `kx_*.txt`, `kdbg*.log`,
+`field_mbs.txt`, `trunc.exe`, …).
+
+
+   specifically** — a missing or wrong rounding offset there produces
+   precisely a sub-pel-scale error, which is the observed signature. This
+   is the single most likely line of code in the entire decoder for this
+   bug.
+2. The `field_slice: true` branch in `derive_temporal_direct` is the one to
+   read first; `col_pair: None` is also passed from the field-B path
+   (interlaced.rs:2224) and may be the wrong input for a field colocated
+   picture.
+## SESSION #32d4 ADDENDUM 35 (2026-09-28, continuation) — RESOLVED: there is
+no over-read. Addendum 34's "4x the bins" was MY OWN measurement artifact —
+the per-slice markers were only emitted for B-field slices, so each "span"
+absorbed the intervening non-B pictures. The poc-119 parse is bit-exact with JM
+for the ENTIRE slice
+
+**The (a)/(b) fork from addendum 34 is closed, and the answer is "neither".**
+
+What addendum 34 measured: our poc-119 "slice" spanned 147,223 bins / 126,484
+decision bins, against JM's slice-91 figure of 33,340, and I flagged it as
+either a real over-read or a truncated JM trace.
+
+What was actually wrong: **the `OURS_SLICE_START` probe was only installed in
+`decode_interlaced_b_field`**, so the trace only marks B-field slice starts.
+Computing a slice's length as `next_marker - this_marker` therefore silently
+absorbs every non-B slice in between. The B-field poc sequence makes this
+obvious in hindsight:
+
+```
+B-field pocs in decode order:
+  2, 3, 4, 5, 8, 9, 28, 29, 32, 33, ... 116, 117, 118, 119, 122, 123, ...
+
+118 -> 119   gap 1   (adjacent, span trustworthy)
+119 -> 122   gap 3   (absorbs pocs 120 AND 121)
+```
+
+So poc 119's 147,223-bin "span" is poc 119 **plus pocs 120 and 121**. The
+~93,000 "extra" decision bins are simply two other pictures' parsing. And JM's
+slice 91 is exactly 33,340 decision bins, all of which matched our first
+33,340 **exactly** (bit, range, post-state).
+
+**Therefore: our parse of the poc-119 bottom field is bit-identical to JM's for
+the whole slice.** There is no over-read, no truncated trace, and no
+macroblock-layer termination bug. The parse is clean.
+
+The same artifact inflated every other span in the bins/MB table from addendum
+34 — the scary 5709/MB for poc 9 is just the 18 intervening pictures (poc 10
+through 27) being charged to it. The apparently wild bottom-field skew was
+this same effect, not a real parity asymmetry. **That also independently
+corroborates addendum 31's correction** of the frame-level "bottom-field
+dominance" to 2:1 — the stronger version was an artifact of the same kind.
+
+**WHERE THE SEARCH NOW STANDS — this is as narrow as it has ever been:**
+
+| Layer | Status |
+|---|---|
+| CABAC engine + init tables | proven correct (byte-exact vs FFmpeg, all 4096 entries) |
+| Field-B **parse** | **proven bit-exact vs JM** for the poc-119 slice, in full |
+| MC interpolation, deblock, residual, intra | proven correct (25/25 P fields bit-exact) |
+| Everything P/frame/field-coded except field-B recon | proven correct (56/90 frames bit-exact) |
+| **Field-B reconstruction** | **the only remaining suspect** |
+
+The unexplained evidence is unchanged and small: poc 119 BOT has 661 wrong
+samples of 50,688 (1.3%), 442 of them in the contiguous 2x2 MB cluster at
+(16,2)/(17,2)/(16,3)/(17,3); and ~4.6% of MBs across all 68 B fields carry
+1-19 wrong samples at non-4-aligned positions, max |d| <= 3.
+
+**NEXT SESSION — reconstruction only, and now oracle-backed:**
+1. Target the 2x2 cluster in poc 119 BOT. Those MBs are `B16x8` / `BB8x8`
+   (addendum 32) reading from exact P-field references (addendum 32), not
+   temporal-direct, with no ref-list fallback. So the remaining candidates are
+   **the B16x8/BB8x8 partition predictors and the MVD decode**. Hand-verify
+   partition 0/1 predictors + MVDs for MB (16,2) against §8.4.1.3, using the
+   parsed neighbour MVs, now that the parse is *known* correct — which means
+   the inputs to that check are trustworthy, which they never were before.
+2. If a per-MB JM MV dump is wanted, note the `KDBGMV`/`KDBGMVP` logs in
+## SESSION #32d4 ADDENDUM 36 (2026-09-28, continuation) — the "2×2 MB cluster"
+lead from addenda 31/32 is OVERTURNED: the error is NOT semantically clustered.
+Neither the parsed motion nor the CBP distinguishes dirty from clean
+macroblocks. The 32×16 boundary is a content boundary, not a syntax boundary
+
+**1. The exact error geometry in poc 119 BOT.** Delta maps of the four macroblocks
+(ASCII, `.` = exact, `+`/`-` = wrong sign):
+
+```
+MB(16,2)  x256-271 y32-47   rows y32-39: EXACT   |  y40-47: all wrong
+MB(17,2)  x272-287 y32-47   rows y32-39: EXACT   |  y40-47: all wrong
+MB(16,3)  x256-271 y48-63   rows y48-55: wrong   |  y56-63: EXACT
+MB(17,3)  x272-287 y48-63   rows y48-55: wrong   |  y56-63: EXACT
+```
+
+So the wrong region is exactly the contiguous rectangle **x=256..287,
+y=40..55** — 32×16 — and the remainder of all four macroblocks is *bit-exact*.
+That is a sharp boundary, which is why addendum 31 read it as a structural
+cluster and addendum 32 elevated the 2×2 MBs to the top target.
+
+**2. But the motion data says it is not semantic.** A `KINETIX_MBDUMP` probe
+(gated on poc + MB list, since reverted) dumped the full 4×4 motion grid of the
+four dirty macroblocks and their clean neighbours. The dirty/clean split is
+**not** explained by anything in the parsed motion:
+
+```
+clean MB(15,2)  8x8(0,0): r5 mv0=(-7,-5)      DIRTY MB(16,2)  8x8(0,8): r4 mv0=(-6,-4)
+clean MB(15,2)  8x8(8,0): r5 mv0=(-6,-4)      DIRTY MB(16,3)  8x8(0,0): r5 mv0=(-6,-4)
+clean MB(18,2)  8x8(0,0): r5 mv0=(-3,-3)      DIRTY MB(17,2)  8x8(0,8): r5 mv0=(1,0)
+clean MB(18,3)  B16x8, r5 mv0=(-3,-4)         DIRTY MB(17,3)  8x8(0,0): r5 mv0=(1,0)
+```
+
+- **The identical motion vector `(-6,-4)` appears in a CLEAN macroblock
+  (MB(15,2), 8x8) and in a DIRTY one (MB(16,3), 8x8).** Same MV, same
+  ref-family — opposite pixel outcome.
+- Clean MB(15,2) and dirty MB(16,2) are both `BB8x8` at `qp=25`,
+  `t8x8=false`.
+- **CBP does not separate them either:** dirty MB(17,2) has `cbp=0x2f` and
+  clean MB(18,2) also has `cbp=0x2f`. Dirty MB(17,3) has `cbp=0xf` and clean
+  MB(15,3) has `cbp=0xf`.
+- All macroblocks in the neighbourhood draw from the same 10-entry L0/L1
+  lists (`list_len=(10,10)`); the dirty region is not distinguished by any
+  ref_idx value (r3, r4, r5, r8 all appear on both sides).
+
+**3. Conclusion — retract the cluster lead.** If identical motion produces
+correct output in one macroblock and wrong output in another, the fault
+cannot be in the motion derivation, and it is not keyed on CBP, MB type, or
+ref_idx. Combined with addendum 35 (the parse is bit-exact with JM), the
+motion and syntax layers are cleared for this field.
+
+**What the 32×16 rectangle actually is:** most likely a *content* boundary.
+If there is a small, roughly uniform sub-unit error being applied across the
+whole field, it will only push a sample across a rounding threshold where the
+source is detailed — producing a sharply-bounded but semantically arbitrary
+region of large deltas, sitting on top of the ±1 scatter seen everywhere else
+(addendum 28: 4.6% of MBs, 1-19 samples, max |d| <= 3). **The 32×16 "cluster"
+and the scattered ±1s are most likely the same defect at two amplitudes, not
+two defects** — the "cluster" being simply where the content amplifies a
+sub-pel error past the rounding threshold.
+
+That points the finger back at a **sub-pel interpolation or bi-prediction
+rounding** difference that is *field-B-specific in effect but not in code path*
+— i.e. something whose inputs differ for a field reference even though the
+same function serves frames. Since P-field references are 25/25 bit-exact and
+frame B is exact, the remaining candidate is the code that converts a frame
+reference into the field views that field-B macroblocks read
+(`FieldRef::planes` / `ref_pic.rs`), or the vertical unit conversion applied
+on field reads.
+
+**NEXT SESSION (revised again — this supersedes addendum 32's ordering):**
+1. `ref_pic.rs::FieldRef::planes` — the frame→field view generation. This is
+   now the prime suspect: it is the only field-specific data transform left,
+   it feeds every field-B prediction, and it is not covered by the P-field or
+   frame-B controls (which never read a frame's field view). Check the
+   vertical resampling/parity of the generated view against §8.4.2.2.2 and
+   JM's `dpb_split_field`.
+2. A cheap first probe: dump the field view our code generates for one of the
+   exact P-field references that poc 119 reads (`pic_a` 102/108/114/115) and
+   compare it against the corresponding field of the P-field dump we already
+   have in `%TEMP%\capa1f`. If the generated view differs from the true field
+   by a sub-pel-shifted or half-line offset, that is the bug, and it would
+   explain a small error in essentially every field-B macroblock.
+3. Only after that, the B16x8/BB8x8 partition geometry — now a distant third,
+   since identical MVs already give correct output in clean macroblocks.
+
+**Method note:** addenda 31 and 32 both promoted the 2×2 cluster to the top
+target on the strength of its *shape*, and two sessions were spent reasoning
+from that. One dump of the motion grid would have shown immediately that the
+shape is not semantic. The recurring lesson across this whole investigation
+(now four times over) stands: look at the data before promoting a shape to a
+cause.
+
+**Housekeeping:** probe reverted; no decoder source change. `cargo fmt --all
+--check` clean, `cargo test -p tpt-kinetix-h264 --lib` 273/273. Capture at
+`%TEMP%\mbdetail.txt`.
+
+
+   `%TEMP%\jmrun\` came from an older build; none of the 32 current binaries
+   emits per-MB MVs (verified by probing all of them). Do not assume they do.
+3. **Fix the instrumentation trap for the future**: if per-slice bin ranges are
+   needed again, emit the marker in *every* slice path (P, B, field and frame),
+   not just `decode_interlaced_b_field`. That single omission is what produced
+   a phantom 4x discrepancy and cost a session's worth of suspicion.
+
+**Housekeeping:** no decoder source change this session (analysis only, on
+already-captured traces). `cargo fmt --all --check` clean, `cargo clippy -p
+tpt-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
+tpt-kinetix-h264 --lib` 273/273. Inputs: `%TEMP%\ourslices.txt`,
+`%TEMP%\ours119.txt`, `%TEMP%\jm119.txt`, `%TEMP%\orbbins.log`.
+
+
+3. JM is still unavailable here, so the oracle for step 1 is: does the fix
+   make poc 2 TOP (7 samples, one MB) and then the other small fields go
+   exact? That is a fast, self-checking loop with no external tool needed —
+   `python tools/capa1_field_census.py` is the pass/fail gate. A candidate
+   fix is only real if the "B-FIELD pictures: N exact" count moves.
+
+**Housekeeping:** no decoder source change this session;
+`tools/capa1_field_census.py` extended (P-field control group + per-sample
+localisation). `cargo fmt --all --check` clean, `cargo test -p
+tpt-kinetix-h264 --lib` 273/273. Full output at `%TEMP%\census6.txt`.
+
+
+specifically the *field* instantiation that is wrong, not temporal direct
+in general. That also retires the whole "bi-prediction averaging" family of
+guesses: frame-coded B slices exercise it and come out exact.
+
+
+
+
+
+**Housekeeping:** no source change landed this session. All probes (the
+`KINETIX_SKIPPROBE` header dump in `cabac_b.rs`, `MbSkipFlagContext::
+debug_states`, `entropy::init_pb_ctx_public`) were reverted — `git status`
+shows `tpt-kinetix-h264/` clean. Gates re-run on the clean tree:
+`cargo fmt --all --check` clean, `cargo clippy -p tpt-kinetix-h264
+--all-targets -- -D warnings` clean, `cargo test -p tpt-kinetix-h264` all
+suites pass (0 failures). Analysis inputs are preserved in
+`%TEMP%\capa1_ours.yuv`, `%TEMP%\capa1_ff.yuv`, `%TEMP%\mbtype.log`,
+`%TEMP%\skipprobe.log`.
+
+
+
+`entropy::MbSkipNeighbors::ctx_idx_inc` does (`cond_a = available &&
+!left_skipped`). The +13 gives 24..=26, matching `MB_SKIP_FLAG_B_CTX`. No
+change needed; do not "fix" this polarity.
+
+
+## SESSION #32d4 ADDENDUM 27 (2026-09-28, continuation) - ROOT CAUSE FOUND (verbatim JM code): field-B slices read mb_skip_flag from mb_type_contexts[2][7+a+b] - the BOTTOM-VIEW mb_type family - NOT a dedicated skip context; our MbSkipContext (PB 24-26) is the wrong family; fix design recorded
+
+JM cabac.c `read_skip_flag_CABAC_b_slice` (verbatim):
+```c
+  int a = (currMB->mb_left != NULL) ? (currMB->mb_left->skip_flag == 0) : 0;
+  int b = (currMB->mb_up   != NULL) ? (currMB->mb_up  ->skip_flag == 0) : 0;
+  BiContextType *mbc = &currMB->p_Slice->mot_ctx->mb_type_contexts[2][7 + a + b];
+  se->value1 = se->value2 = (biari_decode_symbol (dep_dp, mbc) != 1);
+```
+
+KEY FACTS:
+1. The B-slice skip flag context = mb_type_contexts[VIEW][7 + a + b] where
+   VIEW = 2 for the poc-119 BOTTOM field slice (JM keeps THREE mb_type
+   views: [0] frame, [1] top field, [2] bottom field), and a/b count
+   NOT-skipped neighbours (skip_flag == 0 -> contributes 1 - same
+   polarity as our ctx_idx_inc).
+2. OUR field-B parse reads the same flag from our MbSkipContext
+   (init_pb_ctx(MB_SKIP_FLAG_B_CTX + i, ...) = PB-table ctx 24-26) - a
+   COMPLETELY DIFFERENT context family with different init/history -
+   hence the state mismatch (JM post 13 vs ours 10) at MB(1,0) and the
+   entire poc-119/61/82/64/67/73 class.
+3. The mb_type divergence follows: once the skip flag decodes
+   differently, the MB diverges (direct vs explicit), and the same-class
+   MBs (2,8 / 4,4 / 4,5 / 5,5 / ...) accumulate.
+
+FIX DESIGN (next session):
+- Extend our PB/B context set with per-view mb_type contexts
+  (3 views x NUM_MB_TYPE_CTX, initialized from INIT_MB_TYPE - JM
+  `IBIARI/PBIARI_CTX_INIT2 (3, NUM_MB_TYPE_CTX, mc->mb_type_contexts,
+  INIT_MB_TYPE, ...)` - our entropy.rs already has MbTypeBContext but
+  only ONE family; add view 1 (top) and 2 (bottom) copies).
+- Field slices select the view by parity (bottom = [2], top = [1]);
+  frame slices use [0].
+- The B mb_skip_flag decode uses mb_type_contexts[view][7 + ctx_idx_inc]
+  (our ctx_idx_inc polarity already matches: counts NOT-skipped).
+- The B mb_type (non-skip) decode also reads from the same view family
+  (JM reads mb_type from mb_type_contexts[view][...] too - the whole
+  family is view-split), which explains the 66-vs-30 direct-quad
+  classification difference end-to-end.
+- Mirror-check: the P-field paths (parse_p_slice_cabac) use the same
+  view split in JM (list_offset-driven) - verify our P-field contexts
+  for the same view split while touching this.
+
+This is the root cause of the entire poc-119/61/82/64/67/73 field-B
+residue class (the ~2.2k-sample pre-deblock reconstruction remnant).
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
