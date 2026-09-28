@@ -3011,15 +3011,30 @@ impl<'a> TileDecodeState<'a> {
                     // a wrong MC output to the reference *content* versus the
                     // sampling. Placed here rather than in the translational
                     // arm so a WARP block is covered too.
+                    // Originally gated to `plane == 0` only; widened so a
+                    // chroma-only bug (e.g. the t2.ivf inter-chroma
+                    // divergence, see todo-av1.md) can dump the exact
+                    // post-clamp reference row a chroma MC call reads too.
+                    // `mi_col`/`mi_row` are always luma mi units regardless
+                    // of `plane`, so the target match is plane-independent;
+                    // the `ix`/`iy` shift below now uses `hbits`/`vbits`
+                    // (fixed from a hardcoded `>> 3`, which under-shifted a
+                    // chroma mv by one bit and pointed the dump at the wrong
+                    // reference column/row).
                     if std::env::var("KINETIX_AV1_MCSUM").is_ok()
-                        && plane == 0
                         && mi_col == mcsum_target.0
                         && mi_row == mcsum_target.1
                     {
-                        let iy =
-                            (px_y as i32 + (self.tile_px_y0 >> ss_ver) as i32) + (mvs[0].row >> 3);
-                        let ix =
-                            (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32) + (mvs[0].col >> 3);
+                        // NOTE: must shift by `vbits`/`hbits` (3 for luma,
+                        // 3+subsampling for chroma), not a hardcoded `>> 3` —
+                        // the mv is always in 1/8-luma-pel units, and a
+                        // chroma axis's integer displacement in *chroma*
+                        // pixels is `mv >> (3 + ss)`, matching
+                        // `motion_compensate`'s own `ix`/`iy` exactly.
+                        let iy = (px_y as i32 + (self.tile_px_y0 >> ss_ver) as i32)
+                            + (mvs[0].row >> vbits);
+                        let ix = (px_x as i32 + (self.tile_px_x0 >> ss_hor) as i32)
+                            + (mvs[0].col >> hbits);
                         let row: Vec<i32> = (-4..(bw as i32 + 4))
                             .map(|k| {
                                 let y = iy.clamp(0, vis_h as i32 - 1) as usize;
@@ -3028,9 +3043,9 @@ impl<'a> TileDecodeState<'a> {
                             })
                             .collect();
                         eprintln!(
-                            "KINMCSUM fr={} mi=({mi_col},{mi_row}) px=({px_x},{px_y}) \
+                            "KINMCSUM fr={} pl={plane} mi=({mi_col},{mi_row}) px=({px_x},{px_y}) \
                              tile_org=({},{}) slot={slot0} ref0={} bw={bw} bh={bh} \
-                             dx={ix} dy={iy} mx={} my={} f2d=(h={},v={}) refrow={row:?}",
+                             dx={ix} dy={iy} vis=({vis_w},{vis_h}) mx={} my={} f2d=(h={},v={}) refrow={row:?}",
                             crate::debug_frame_seq::current(),
                             self.tile_px_x0,
                             self.tile_px_y0,
@@ -3115,7 +3130,6 @@ impl<'a> TileDecodeState<'a> {
                 t
             };
             if std::env::var("KINETIX_AV1_MCSUM").is_ok()
-                && plane == 0
                 && mi_col == mcsum_target.0
                 && mi_row == mcsum_target.1
             {
@@ -3128,7 +3142,7 @@ impl<'a> TileDecodeState<'a> {
                 let col_last: Vec<i32> = (0..bh).map(|r| tmp[r * bw + probe_c] as i32).collect();
                 let row0: Vec<i32> = (0..bw).map(|c| tmp[c] as i32).collect();
                 eprintln!(
-                    "KINMCOUT fr={} mi=({mi_col},{mi_row}) bw={bw} bh={bh} col{probe_c} \
+                    "KINMCOUT fr={} pl={plane} mi=({mi_col},{mi_row}) bw={bw} bh={bh} col{probe_c} \
                      row0={row0:?} col_last={col_last:?}",
                     crate::debug_frame_seq::current(),
                 );
@@ -3680,6 +3694,11 @@ impl<'a> TileDecodeState<'a> {
         let co_located_luma_type = |clpx_x: usize, clpx_y: usize| -> usize {
             let lx = clpx_x << sub_x;
             let ly = clpx_y << sub_y;
+            if std::env::var("KINETIX_AV1_DBG_COLOC").is_ok() {
+                eprintln!(
+                    "COLOC mi=({mi_col},{mi_row}) clpx=({clpx_x},{clpx_y}) lx={lx} ly={ly} leaves={luma_leaf_types:?} own={own_luma_tx_type}"
+                );
+            }
             for &(lx0, ly0, w, _h, t) in &luma_leaf_types {
                 if lx >= lx0 && lx < lx0 + w && ly >= ly0 && ly < ly0 + _h {
                     return t;

@@ -10777,3 +10777,310 @@ is exactly why this class of bug was invisible: a luma-only map reports
    MC base position / sub-8x8 quadrant scheme against dav1d.
 2. `capabilities().pixel_exact` still `false` - correct, and further from true
    than cont'd 22 suggested: the feature corpus is 1/13.
+
+### Session cont'd 24 — found a real filter-direction bug in the sub-8x8 quadrant
+### borrow branches, but it's a no-op on the t2.ivf repro; the traced block
+### itself turns out to take the non-quadrant path and is full-pel
+
+Repro confirmed unchanged from cont'd 23: `ffmpeg -f lavfi -i testsrc2=size=
+128x96:rate=15:duration=2 -frames:v 2 -pix_fmt yuv420p -g 10 -c:v av1 -f ivf
+t2.ivf`, decoded with the real `dav1d` binary (not the ad-hoc patched build,
+which was stale and wouldn't rebuild this session - the VS dev-shell
+(`Launch-VsDevShell.ps1`) picked up a broken `vswhere`-less environment and
+the MSVC C11-atomics headers failed to compile; `dav1d_fresh` at
+`%LOCALAPPDATA%\Temp\dav1d_fresh` still builds cleanly but its
+`DEBUG_BLOCK_INFO` gate is hardcoded to `frame_offset == 3`, useless for this
+2-frame clip, and editing/rebuilding it wasn't reached this session). Frame 1:
+Y diff 0/12288, U diff 14, V diff 59 - unchanged from cont'd 23, confirming
+the bug is still live. A throwaway harness
+(`tpt-kinetix-test-utils/tests/dbg_av1_t2_repro.rs`, NOT committed - see
+below) reproduces this in ~2s via `cargo test` instead of the manual
+ffmpeg+dav1d dance, if a future session wants to recreate it.
+
+**Real bug found (via a side-by-side of `inter_block.rs`'s sub-8x8 quadrant
+code against the actual `dav1d` source, checked out at
+`%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d\dav1d\src\{recon_tmpl.c,decode.c}` -
+finally reading the real C instead of re-deriving from memory/comments):
+`inter_predict_plane`'s own doc comment says its `filters` parameter is raw
+`[dir0, dir1]` and the function swaps internally at its one call into
+`motion_compensate` (matching dav1d's `dav1d_filter_2d[filter[1]][filter[0]]`
+packing) - every other call site in `reconstruct_inter_luma_chroma` (the Y
+plane, the plain chroma path, the sub-8x8 "own quadrant" calls) passes the
+raw `filter`/`f` pair unswapped, consistent with that contract. But the three
+sub-8x8 *borrowed-neighbour* quadrant branches (TL-diagonal using
+`tl_filter2d`, BL using `filter_left`, TR using `filter_above`) each built
+`[f.1, f.0]` before passing it in - an extra, wrong swap on top of the one
+`inter_predict_plane` already does internally, so those three quadrants' MC
+calls used the neighbour's vertical kernel horizontally and vice versa
+whenever the neighbour's `dir0 != dir1` (a real per-axis dual-filter split).
+Fixed to `[f.0, f.1]` at all three sites (matching every other call in the
+function).
+
+**This fix produced *zero* byte movement on the t2.ivf repro** (still 73
+diff bytes, breakdown unchanged) for two compounding reasons, confirmed with
+a temporary `KINETIX_AV1_DBG_SUB8` trace (removed before finishing):
+1. Every sub-8x8 block in this specific clip has `own_filter=[0,0]` (REGULAR
+   on both axes) - `enable_dual_filter` is on, but nothing in this content
+   picks a non-degenerate per-axis split, so `f.0 == f.1` everywhere and the
+   swap is a no-op by construction, in *this* stream.
+2. More importantly, the specific traced block `mi=(16,11) bw=2 bh=1` (the
+   one covering the patch-1 V diff) has `gate=false` in Kinetix's own
+   `sub8x8_leaf` code - i.e. its above-neighbour cell is not inter-coded, so
+   it takes the *plain* fallback path (one MC over the whole parent 8x8's
+   chroma with its own mv/filter), never touching the quadrant-borrow
+   branches at all. The three-branch fix can only matter for a *different*
+   class of block than the one previously attributed to this diff.
+
+The fix was reverted (not committed) since it has no measured effect here -
+per this crate's own "don't commit without a measured improvement" rule. It
+is still believed correct per the dav1d source and is a candidate for a
+future PR *if* a stream with a real per-axis dual-filter split on a
+sub-8x8-with-inter-neighbour block is found to regress without it; note that
+down for whoever picks this up next.
+
+**Re-audited the plain-fallback path taken by `mi=(16,11)` itself** (sizes,
+base position, OBMC eligibility - all against the actual dav1d source, not
+prior sessions' notes):
+- Position/size: `base_x/base_y` (floor to the parent 8x8's chroma origin)
+  and the `pw = cbw_px << (bw==1)`, `ph = cbh_px << (bh==1)` write-size
+  algebra are both provably equivalent to dav1d's `t->bx & ~ss_hor` /
+  `bw4 << (bw4 == ss_hor)` formulas once you expand `cbw_px = bw4 * h_mul`
+  (verified by hand, not just "looks plausible") - no bug here.
+- OBMC: re-checked `dav1d_block_dimensions`'s actual layout (`{bw4, bh4,
+  log2(bw4), log2(bh4)}` - confirmed from `tables.c`) against
+  `apply_obmc`'s `n_limit = 4.min(trailing_zeros(bw4/bh4))`. This *is* the
+  right formula (dav1d's own `b_dim[2]`/`b_dim[3]` fields it compares against
+  are the log2 fields, not raw `bw4`/`bh4` - a plausible-looking misreading
+  that would have sent this in circles). For `bh4 == 1`, `log2(1) == 0`, so
+  the left-pass OBMC blend count is correctly 0 in both decoders - chroma
+  OBMC contributes nothing to this specific block in either implementation,
+  so it's not the source of this particular diff (though it's still
+  load-bearing elsewhere, per cont'd 23's A/B test).
+- The block's own mv `(32,-16)` in Kinetix's `Mv{row,col}` 1/8-luma-pel
+  convention, read at chroma sub-pel precision (`hbits=vbits=4`), is an
+  **exact multiple of 16 on both axes** - `dx = mv.col & 15 == 0`,
+  `dy = mv.row & 15 == 0` - i.e. this specific MC call is full-pel
+  (`ix = -1, iy = 2` chroma pixels), not a subpel/kernel case at all. That
+  rules out `subpel_kernel`/rounding bugs for this particular block.
+
+**Still unexplained, and the most concrete next lead:** the row-20 sample
+sequence from cont'd 23 (K: `18 20 26 36 46 55 59 64 72 80` vs D:
+`18 17 20 24 35 46 56 64 72 80`, x=30..39) is not a clean integer pixel shift
+of one sequence relative to the other (tried both +1 and -1 shifts by hand -
+neither lines up), which is odd for a full-pel MC block: a pure position bug
+should look like exactly that. This suggests either (a) the reference read
+position is still off by something that isn't a plain integer shift (e.g. an
+edge-clamp difference at the reference's actual boundary - this block's
+`ix=-1` reads one chroma column to the *left* of its base, and depending on
+where that lands relative to `vis_w`/tile edges it might clamp differently
+between the two decoders), or (b) some later stage (a different block's own
+`has_chroma` write, or its OBMC, spilling into this parent 8x8's chroma
+region after `mi=(16,11)` already wrote it) is the actual last writer here,
+not `mi=(16,11)` itself - the `KINETIX_AV1_DBG_PRED` block-coverage
+attribution only shows which block's *own* write region overlaps the diff
+pixels, not which block wrote *last* to them.
+
+#### Next session's starting point
+
+1. Build a chroma-plane equivalent of the existing `KINETIX_AV1_MCSUM`
+   hook (currently `plane == 0`-gated only) so the *exact* reference row this
+   block reads (post-clamp) can be dumped and hand-checked against frame 0's
+   already-bit-exact reconstruction, to settle lead (a) above directly.
+2. Alternatively, fix `dav1d_fresh`'s `DEBUG_BLOCK_INFO` gate
+   (`src/recon.h:34`, currently `frame_offset == 3`) to target
+   `frame_offset == 1 && t->bx == 16 && t->by == 11`, rebuild with `ninja -C
+   build` (this copy's toolchain built cleanly as of this session, unlike
+   `tpt-kinetix-dav1d`'s), and get a real per-pixel dav1d-side trace instead
+   of hand-deriving expected values from formulas.
+3. The filter-swap bug described above is real but unlanded (reverted, not
+   committed) - worth revisiting once a repro that actually exercises a
+   non-degenerate dual-filter sub-8x8-with-inter-neighbour block exists.
+4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13
+   (unchanged this session - confirmed via a full re-run, no regressions).
+
+### Session cont'd 25 — lead (a) conclusively closed (reference read is
+### bit-exact); the real dav1d oracle build segfaults on any
+### `DEBUG_BLOCK_INFO` trigger; new evidence narrows the bug to the chroma
+### *entropy-decoded coefficient values* for this exact tx block, not MC,
+### not the co-located-luma-type lookup, and not the inverse transform math
+
+Repro unchanged: `ffmpeg -f lavfi -i testsrc2=size=128x96:rate=15:duration=2
+-frames:v 2 -pix_fmt yuv420p -g 10 -c:v av1 -f ivf t2.ivf`, still 73 diff
+bytes on frame 1 (U 14, V 59, Y 0). A fresh throwaway harness reproduces this
+via `av1_feature_obu`/manual ffmpeg+ivf (not committed, see below).
+
+**Step 1 done (widened `KINETIX_AV1_MCSUM`).** `plane == 0` gates removed
+from both `KINMCSUM`/`KINMCOUT` prints in `inter_block.rs`
+(`reconstruct/inter_block.rs`, around the `!use_compound` translational MC
+arm) so they fire for whichever plane's block matches
+`KINETIX_AV1_MCSUM_BLOCK=<mi_col>,<mi_row>`, luma or chroma. While doing this
+also found and fixed a real bug **in the debug dump itself** (not production
+code): the `ix`/`iy` computation hardcoded `>> 3` (luma sub-pel shift) instead
+of `>> hbits`/`>> vbits`, so a chroma MCSUM dump was reading the reference at
+the *luma*-scaled offset instead of the chroma one - silently reporting the
+wrong reference row for any chroma target. Fixed to use `hbits`/`vbits`
+(already computed earlier in the same function). Also corrected a
+sign/axis mix-up from cont'd 24's notes: `mvs[0]` prints as `(col, row)`
+everywhere in this codebase's debug output (see the `PRED`/`PRED-BASE`
+`eprintln!`s), so mi=(16,11)'s `mv=(32,-16)` is `col=32, row=-16`, **not**
+`row=32, col=-16` as cont'd 23/24 assumed. That flips which axis is full-pel
+and changes `ix`/`iy` from the previously-stated `(-1, 2)` to the *real*
+values `(ix=2, iy=-1)` in chroma pixels - cosmetic for the "full-pel" fact
+(still true) but the previous session's stated integer offsets were wrong.
+
+**Lead (a) - reference-read correctness - is now conclusively CLOSED.** With
+the fixed dump, `KINETIX_AV1_MCSUM_BLOCK=16,11 KINETIX_AV1_MCSUM=1` on the
+V plane reports the post-clamp reference row Kinetix's chroma MC actually
+reads: `[18, 19, 17, 23, 33, 41, 51, 61, 70, 77, 86, 97]` at chroma
+`y=19, x=30..41`. A new throwaway test independently pulled *both*
+decoders' own frame-0 V-plane values at that exact row and byte-compared
+them: dav1d's frame-0 V row 19 x=26..41 and Kinetix's frame-0 V row 19
+x=26..41 are **identical to each other and to the MCSUM dump**
+(`[146,146,146,146, 18,19,17,23,33,41,51,61,70,77,86,97]`, both decoders).
+The chroma reference sample this block reads is exactly correct in both
+position and content. Every remaining divergence is downstream of MC.
+
+**OBMC/motion_mode ruled out for this specific block too:** the `PRED`
+trace (`KINETIX_AV1_DBG_PRED_ALL=1` with `_X/_Y/_R` retargeted over the
+diff region) shows mi=(16,11) has `mm=0` (`MM_SIMPLE`), so no OBMC blend
+applies here regardless of the chroma-OBMC A/B test from cont'd 23.
+
+**The filter-bleed part of lead (b) is resolved, not by "another block
+overwrites this one" but by ordinary loop-filter smear.** The extra 1-2
+rows of U/V diff beyond mi=(16,11)'s own 4x4 chroma write footprint
+(chroma y=24-25) belong to the immediately-adjacent **skip** block
+`mi=(16,12) bw=4 bh=4 skip=true mv=(0,0)`, whose own MC copy is a verified
+bit-exact passthrough of frame 0 (no residual, no OBMC). The extra diff
+rows there are consistent with deblock/CDEF spreading mi=(16,11)'s own
+wrong reconstruction across the shared MB edge, not a genuine second wrong
+write. So the whole bug is still fully attributable to mi=(16,11)'s own
+chroma reconstruction.
+
+**Residual/coefficient path is the new prime suspect, narrowed hard this
+session:**
+
+- `KINETIX_AV1_DBG_CPXY=32,20` (V plane) shows Kinetix's own **pre-deblock**
+  value at that pixel is `28` for frame 1, moving only `28 -> 27 -> 26 -> 26`
+  through deblock/CDEF/LR. dav1d's real final value there is `20`. Since the
+  reference sample is proven correct (`33`, lead a) and the raw residual
+  Kinetix computed there is `-5` (see `KINETIX_AV1_DBG_RESDUMP`,
+  `33 + (-5) = 28`, matching the CPXY pre-deblock value exactly - the
+  addition/clamp arithmetic is internally consistent), the ~6-8 unit gap to
+  dav1d's *post-filter* final value must originate at or before the residual
+  add, and Kinetix's own filters can only account for ~2 of it. (Caveat,
+  same one cont'd 23 already flagged: dav1d's final value is *post-filter*,
+  so this comparison is not a clean apples-to-apples isolation of the
+  residual alone - see the dav1d-oracle paragraph below for why a clean
+  pre-filter dav1d value isn't available this session either.)
+- The co-located-luma-tx-type lookup (`co_located_luma_type` /
+  `own_luma_tx_type` in `inter_block.rs`, used to pick the chroma transform
+  type per §7.12.3) was audited end-to-end with a new `KINETIX_AV1_DBG_COLOC`
+  hook (kept, gated, in `inter_block.rs`) and is **not** the bug here, though
+  only by a coincidence worth flagging for whoever touches this next: this
+  block has two luma TX_4X4 leaves at mi=(16,11) (`(64,44)` eob=0/DCT_DCT
+  default, `(68,44)` eob=3/FLIPADST_DCT), but only the *second* gets pushed
+  into `luma_leaf_types` (the push is gated on `eob > 0`, skipping the
+  eob=0 leaf entirely). The chroma TX block's spatial position
+  (`lx=64, ly=40`) doesn't actually land inside *either* leaf's footprint
+  (both are at `ly0=44`; `ly=40` is the sibling mi_row=10 half's territory,
+  a separate coded block processed earlier) - so the lookup always misses
+  and falls through to `own_luma_tx_type = luma_leaf_types.first()`. With
+  only one (eob>0) leaf in the vec, `first()` happens to equal dav1d's real
+  semantics ("chroma uses whatever `b->txtp` last held after the block's own
+  luma leaves" - i.e. the *last* decoded leaf, not necessarily the first).
+  If a future sub-8x8 block ever has *two* eob>0 leaves with *different*
+  tx_types, `first()` vs "last decoded" will diverge for real - worth
+  fixing to `.last()` pre-emptively even though it's a no-op on this repro.
+- Confirmed **mathematically**, by hand-expanding the 2-D separable inverse
+  transform for FLIPADST_DCT (row=DCT, col=ADST+flip per this codebase's
+  `row_axis_transform`/`col_axis_transform`) against the actual decoded
+  coefficients (`dequant = [-280, 0,0,0, -176, 0,0,0, ...]`, i.e. only DC and
+  one row-1 AC term nonzero): a flat-per-row, varying-per-row residual (which
+  is exactly what Kinetix produced,
+  `[-5]*4, [-10]*4, [-14]*4, [-10]*4`) is the *correct* output for those
+  specific coefficient values under that tx_type - so **if there is a bug
+  here it is not in `inverse_transform`'s math**, it's in what coefficient
+  values/positions got entropy-decoded in the first place (wrong EOB, wrong
+  scan-order mapping, or a stale/wrong coefficient-context leading the
+  range decoder to a different-but-plausible symbol at one bin). This is
+  now the single most concrete remaining lead.
+
+**Attempted to get a real dav1d pre-filter oracle trace (session's step 2)
+and hit a new, previously-undocumented blocker: `dav1d_fresh`'s
+`DEBUG_BLOCK_INFO` instrumentation segfaults on every trigger, not just this
+one.** Retargeted `src/recon.h`'s macro from `frame_offset == 3` to
+`f->frame_hdr->frame_type != DAV1D_FRAME_TYPE_KEY && t->by == 11 &&
+t->bx == 16` (also tried it completely unconditional, `1`, to rule out a
+targeting mistake) and rebuilt clean both times (`ninja -C build
+tools/dav1d.exe` - note: the *first* `ninja -C build` invocation after
+editing `recon.h` does the real recompile; a bare re-run of `ninja` looks
+like it stops after step 1/20 "Generating vcs_version.h", which is just
+ninja's restat optimization on the DLL export-symbol list correctly
+concluding nothing further needs relinking, **not** a build failure - don't
+mistake that short output for a broken build, `tools/dav1d.exe` doesn't need
+relinking for a `.dll`-internal change on Windows). Every run since
+segfaults inside `dav1d_submit_frame` (backtrace: `memmove`/`fwrite` deep in
+ucrtbase, called from `dav1d_submit_frame`, i.e. *before* any per-block
+recon even starts) - this crash reproduces even with `DEBUG_BLOCK_INFO`
+fully unconditional, so it is unrelated to the specific gate condition.
+`git status`/`git diff --stat` inside `dav1d_fresh` shows this fork already
+carries substantial uncommitted custom instrumentation from earlier sessions
+(`cdef_apply_tmpl.c`, `cdef_tmpl.c`, `decode.c`, `obu.c`, `recon_tmpl.c`,
+plus an untracked `dav1d_grid.dump` file and custom `KGTILING`/`KGTG` startup
+prints not part of upstream dav1d) - the crash is most likely in that
+pre-existing custom code (a grid-dump `fwrite` with a bad size, going by the
+backtrace), not in anything this session touched. **Conclusion for future
+sessions: `dav1d_fresh`'s block-level trace is not currently usable at all,
+contradicting cont'd 24's optimistic note that "this copy's toolchain builds
+cleanly" - it builds cleanly but crashes at runtime once `DEBUG_BLOCK_INFO`
+is enabled for anything.** Debugging *that* crash (likely in the grid-dump
+code some earlier session added to `decode.c`/`obu.c`) is probably a
+prerequisite for ever getting a real per-block dav1d trace out of this
+checkout again, and wasn't pursued further this session (out of scope: it's
+debugging inherited instrumentation, not the actual AV1 bug).
+
+**Files changed and committed:** `inter_block.rs`'s `KINETIX_AV1_MCSUM`
+widened to all planes + its `ix`/`iy` bug fixed, and a new
+`KINETIX_AV1_DBG_COLOC` hook added (both real, permanent debug
+infrastructure, not a production-path change - no behavioural change to the
+decoder itself, verified via `cargo test -p tpt-kinetix-av1` (all pass) and
+`tpt-kinetix-test-utils`'s `conformance`/`av1_feature_coverage_vs_dav1d_
+when_available` tests (identical results to cont'd 24: intra 6/6, inter
+corpora 5/5 (x4 clips) all bit-exact, feature corpus still 1/13, same
+per-tool PSNR numbers). **No fix was found or committed for the actual bug**
+- per this crate's rule, nothing without a measured improvement gets
+committed as a fix, and none of this session's leads reached a coded fix.
+A throwaway test harness, `tpt-kinetix-test-utils/tests/dbg_av1_t2_repro.rs`
+(NOT committed, matching cont'd 24's own harness which also didn't survive
+between sessions), reproduces the whole clip + both decoders' frame 0/1 in
+~2s via `av1_feature_obu`/manual ffmpeg+dav1d-cli, if a future session wants
+to recreate it quickly instead of redoing the ffmpeg+dav1d dance.
+
+#### Next session's starting point
+
+1. **Best lead:** dump the exact entropy-decoded `coeffs.quant`/eob/scan
+   position for mi=(16,11)'s V-plane TX_4X4 block (already partially visible
+   via `KINETIX_AV1_DBG_RESDUMP`'s `COEFFDUMP` line - `eob=3`,
+   `dequant=[-280,0,0,0,-176,0,0,0,...]`) and cross-check the *scan table*
+   used (`get_scan`/`DEFAULT_SCAN_4X4` for tx_type FLIPADST_DCT, which is a
+   2-D class so should use the default zig-zag, not `get_mrow_scan`/
+   `get_mcol_scan`) against the spec table by hand, one entry at a time, for
+   scan positions 0/1/2 (the ones EOB=3 actually visits). Also worth
+   checking the coefficient-context (`all_zero_ctx`, DC-sign, base-range,
+   golomb) derivation for this specific `(tx_size, tx_type, plane, is_inter)`
+   combination against the spec/dav1d source directly - this session ruled
+   out the *transform type selection* and the *inverse transform math* but
+   never got to auditing the coefficient *entropy* read itself bin-by-bin.
+2. Fix `co_located_luma_type`'s fallback to use `.last()` instead of
+   `.first()` in `luma_leaf_types` - confirmed currently harmless (no
+   measured effect on this repro, not committed) but is a real latent bug
+   per dav1d's own semantics (chroma uses the block's *last*-decoded luma
+   txtp, not its first) that will matter the moment a sub-8x8 block has two
+   eob>0 luma leaves with genuinely different tx_types.
+3. If a dav1d-side oracle trace is still wanted, someone needs to first fix
+   the `dav1d_fresh` submit-frame segfault (likely the grid-dump `fwrite` in
+   the previously-added `decode.c`/`obu.c` instrumentation) before
+   `DEBUG_BLOCK_INFO` can be used again in that checkout at all.
+4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13
+   (re-confirmed this session, byte-identical per-tool PSNR numbers to
+   cont'd 24 - no regressions).
