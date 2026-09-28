@@ -5922,6 +5922,44 @@ clean; JM tooling preserved (`ldecod_jbt.exe`, `ldecod_jmt2.exe`,
 `ldecod_col9.exe`, `ldecod_grid121.exe`, `ldecod_bin91.exe`,
 `ldecod_colall.exe`); traces in /tmp/jm_bin.
 
+## SESSION #32d4 ADDENDUM 32 (2026-09-28, continuation) - addendum 30 refined: the 9 MBs are B_Direct_16x16 in JM (type=0, pdir 2,2,2,2), NOT mb_pred_skip (that is P-slice skip only - JSKIP probe 0 fires); the residue = temporal-direct DERIVATION differences for these MBs (the addendum-14 MB(1,7)-q2 class, still open)
+
+The `JSKIP` probe (in `mb_pred_skip`, gate framepoc==119) fires 0 times:
+`mb_pred_skip` (plain LIST_0 16x16 MC) is the P-slice skip path only.
+The `JBT` probe shows the 9 diverging MBs decode as `type=0` with
+`b8mode=0,0,0,0 pdir=2,2,2,2` = B_Direct_16x16 (bidirectional direct) in
+JM - the SAME classification as ours (our parse also treats them as
+direct, our KCOL119 reads fire for them).
+
+So: both sides decode these MBs as B_Direct_16x16; the remaining
+difference is INSIDE the temporal-direct derivation for these specific
+MBs - the MB(1,7)-q2-class single-quadrant scale mismatch from
+addendum 14 (JM scale ~190-210 vs ours ~174-192 on col=(-14,5)-class
+cells), which applies to all 16 fields in the census list (poc 5, 29,
+110, 117, 119, 124, 125, 130, 131, 142, 143, 158, 160, 161, 165, 170/171).
+
+These fields colocated references (per the KCOL119/poc-33 data) are
+P-pair FIELDS (poc 121, 7, etc.) whose L0 holds FIELD pocs (1, 0, -3,
+-4, ...) - i.e. the MapColToList0 target poc is a FIELD poc of a
+P-pair, and the matched entry differs between us and JM by ONE PAIR
+(the frame_poc vs own_poc recovery gap). The per-cell `KDER`-style
+probe at poc-5 already captured ours; the missing side is JM mvscale
+for the same cell (JM_SCALE gate needs the right MB, or per-entry
+mvscale table dump from `compute_colocated`/`init_Contexts`).
+
+NEXT SESSION: (1) JM_SCALE gate framepoc==5 MB(1,7) is already in
+`ldecod_scale5.exe` - it printed mv_scale=183 mapped_idx=1; rerun ours
+KDER5 (still in mv.rs? - it was reverted; re-add the one KDER print
+gated current_poc==5 && mv_col==[-14,5]) and compare the full
+(target, idx, pic_a, tb, td, dsf) tuples; (2) the delta will show
+which of pic_a/td differs - then fix the tuple construction
+(frame_poc recovery) accordingly; (3) re-measure the full census.
+
+Housekeeping: all probes reverted; tree = 222bc92 + 32ade30 + 9d8115f
+clean; JM tooling: `ldecod_jbt.exe` (per-MB types poc 119),
+`ldecod_jskip.exe`, `ldecod_scale5.exe`, `ldecod_l0.exe`,
+`ldecod_colall.exe` (all-poc field pixel dumps); traces in /tmp/jm_bin.
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
