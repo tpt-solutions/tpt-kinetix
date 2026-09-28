@@ -11084,3 +11084,106 @@ to recreate it quickly instead of redoing the ffmpeg+dav1d dance.
 4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13
    (re-confirmed this session, byte-identical per-tool PSNR numbers to
    cont'd 24 - no regressions).
+
+### Session cont'd 26 — two concrete next-session hypotheses TESTED and
+### DISPROVEN by measurement (both caused real entropy desyncs, not fixes);
+### `.first()` is confirmed load-bearing, not a latent bug; bug still open
+
+Picked up exactly where cont'd 25 left off: the two items in its "next
+session's starting point" list. Both were implemented and measured against
+the `t2.ivf` repro (`tpt-kinetix-test-utils/tests/dbg_av1_t2_repro.rs`,
+recreated from cont'd 25's description since it wasn't committed - still not
+committed after this session either, same convention).
+
+**Baseline re-confirmed exactly:** frame 1 diff = U 14 / V 59 / Y 0 (73 total
+bytes), matching cont'd 23-25 precisely.
+
+**Hypothesis A (this session's own idea, not in cont'd 25's list): implement
+a real persistent tile-wide `TxTypes[y][x]` grid**, matching the AV1 spec's
+literal `compute_tx_type` pseudocode (`return TxTypes[ y4 ][ x4 ]` for the
+inter-chroma branch, a frame/tile-global array — NOT anything scoped to the
+current coded block). The reasoning: `co_located_luma_type` in
+`inter_block.rs` only ever searches `luma_leaf_types`, a `Vec` built fresh
+inside the current coded block's own function call — it structurally cannot
+see a luma leaf decoded by an *earlier, different* coded block, which is
+exactly what's needed for a sub-8x8 chroma block (owned by the odd-parity
+half of a partitioned pair per §7.3.1) whose chroma footprint spans a
+sibling block's luma area. Implemented as a new `Vec<u8>` field
+`luma_tx_type_grid` on `TileDecodeState` (tile-relative 4×4-cell grid,
+written by every luma leaf with `eob > 0` in both `inter_block.rs` and
+`intra_block.rs`'s IBC path, read by `co_located_luma_type` in place of the
+local-list scan). **Result: measurably WORSE — frame 1 Y-plane diff went
+from 0 to 77641 (V-plane samples-differing 59 -> 943).** This is a real
+entropy desync (a wrong tx_type changes `read_eob`'s `is_1d` CDF-context
+bit, which changes how many bits the *next* symbols consume), not a
+cosmetic regression. **Conclusion: the spec's literal global-grid semantics
+do NOT match what real encoders/dav1d actually produce/expect here** — the
+existing code comment directly above this fallback ("dav1d uses the block's
+own luma tx type for every chroma tx block it codes, `b->txtp`") is the
+correct model after all. Reverted in full (`mod.rs`'s field +
+initialization, both write sites, the read-site rewrite) — verified via
+`git diff --stat` that `mod.rs`/`intra_block.rs` are byte-identical to HEAD
+again.
+
+**Hypothesis B (cont'd 25's explicit suggestion #2): switch the
+`co_located_luma_type` lookup-miss fallback from `.first()` to `.last()`.**
+cont'd 25 called this "confirmed currently harmless (no measured effect on
+this repro)" reasoning from the fact that `luma_leaf_types` only had one
+`eob > 0` entry for the one block it inspected by hand. That reasoning was
+correct for *that one block* but wrong as a blanket claim about the repro:
+**measured, this single-character change (`.first()` -> `.last()`) also
+regresses the corpus — frame 1 Y-plane diff 0 -> 33493.** So somewhere else
+in this same 2-frame clip there IS a coded block with >=2 `eob > 0` luma
+leaves whose types genuinely differ, and dav1d's real chroma-txtp derivation
+for it depends on getting the FIRST one, not the last. **This directly
+contradicts cont'd 25's framing of `.first()` as a "real latent bug per
+dav1d's own semantics" — it is not a latent bug on this codebase's current
+model, it is load-bearing, and must not be changed without a full-corpus
+measurement.** Reverted; `.first()` is unchanged. A code comment was added
+at the site (and left committed - documentation only, no behavioural
+change, `cargo test -p tpt-kinetix-av1` all-pass and
+`av1_intra_corpus_vs_dav1d_when_available` / `av1_inter_corpus_vs_dav1d_
+when_available` / `av1_feature_coverage_vs_dav1d_when_available` all
+byte-identical to cont'd 25's numbers verified) recording both disproven
+results so a future session doesn't re-attempt either without re-deriving
+this from scratch.
+
+**What this leaves for the actual bug, still unsolved:** the coefficient-
+entropy audit cont'd 25 handed off (EOB derivation / scan table / context
+derivation for the specific diverging TU) was NOT completed this session —
+time went to testing the two co-located-luma-type hypotheses above instead,
+since they looked like the more concrete, already-scoped lead. They turned
+out to be a dead end (or at least: not *this* bug, even though the
+underlying local-vs-global scoping concern about `co_located_luma_type` may
+still be spec-inaccurate in the abstract - it just isn't what's making
+`mi=(16,11)`'s chroma wrong). The coefficient-entropy read itself
+(`coeff_base_ctx`/`coeff_br_ctx`/`all_zero_ctx`/`read_eob` in `coeff.rs`) was
+inspected by eye this session and no transcription bug was spotted against
+the spec text cross-referenced inline in the code's own comments, but this
+was NOT a rigorous bin-by-bin trace against an independent oracle - the
+`dav1d_fresh` block-trace blocker cont'd 25 hit (segfault in
+`dav1d_submit_frame` from inherited grid-dump instrumentation) was not
+revisited and is very likely still blocking that approach.
+
+#### Next session's starting point
+
+1. **Do not re-attempt Hypothesis A or B above** without a full-corpus
+   measurement first - both looked correct by spec/comment reading alone and
+   both were wrong in practice. This is now the second and third time in
+   this bug hunt that a plausible-by-inspection fix regressed the corpus;
+   treat every candidate fix here as untrusted until `dbg_av1_t2_repro`'s
+   Y-plane-diff number (must stay 0) and the conformance suite are both
+   checked.
+2. The coefficient-entropy audit cont'd 25 scoped (dump
+   `coeffs.quant`/eob/scan position for mi=(16,11)'s V-plane TX_4X4 block,
+   cross-check the exact scan positions 0/1/2 and the `coeff_base`/
+   `coeff_br`/`all_zero` context derivation bin-by-bin against the spec
+   text, not code comments) is still the most-concrete open lead and was
+   NOT done this session - do it before trying another structural theory.
+3. Fixing the `dav1d_fresh` `DEBUG_BLOCK_INFO` segfault (in the inherited,
+   uncommitted grid-dump instrumentation in `decode.c`/`obu.c` per cont'd
+   25's notes) would unblock a real independent oracle trace and is
+   probably worth the detour now that two structural guesses have both
+   burned a session each without one.
+4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
+   `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged.

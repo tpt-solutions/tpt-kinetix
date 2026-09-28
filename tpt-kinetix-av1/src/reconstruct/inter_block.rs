@@ -3687,6 +3687,14 @@ impl<'a> TileDecodeState<'a> {
         // instead of DCT_DCT — a DCT_DCT fallback read the chroma tx type
         // with the wrong CDF context (txtp differs from the bitstream's) and
         // desynced the tile at the very first chroma read of such a block.
+        // NOTE (session cont'd 26): both a persistent tile-wide `TxTypes[y][x]`
+        // grid AND switching this fallback to `.last()` were tried and
+        // BOTH measurably regressed the corpus (t2.ivf frame 1 Y-plane diff
+        // went from 0 to 77641 and 33493 respectively — real entropy
+        // desyncs, not cosmetic pixel differences). `.first()` is therefore
+        // NOT a latent bug on this repro as cont'd 25 suspected — it is
+        // load-bearing. Do not change this fallback without a passing
+        // measurement across the full corpus.
         let own_luma_tx_type = luma_leaf_types
             .first()
             .map(|&(_, _, _, _, t)| t)
