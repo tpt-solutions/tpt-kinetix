@@ -615,6 +615,56 @@ fn av1_obu_spans(data: &[u8]) -> Vec<(u8, usize, usize)> {
     out
 }
 
+/// Split a low-overhead AV1 OBU stream into the byte slices to feed
+/// [`tpt_kinetix_av1::Av1Decoder`] one *temporal unit* at a time.
+///
+/// A temporal-delimiter OBU (type 2) opens a new TU, and each TU displays
+/// exactly one frame in display order, so one packet per TU keeps Kinetix's
+/// output aligned with dav1d's display-ordered decode even for hierarchical
+/// GOPs (an ALTREF decoded early, shown later via `show_existing_frame`). The
+/// sequence-header OBU is prepended to every packet because a fresh decoder
+/// instance (or a per-frame one) needs it to parse the frame header at all.
+/// Streams with no delimiters fall back to one packet per Frame OBU.
+fn av1_tu_packets(data: &[u8]) -> Vec<Vec<u8>> {
+    let spans = av1_obu_spans(data);
+    let seq_span: Option<(usize, usize)> = spans.iter().find(|s| s.0 == 1).map(|s| (s.1, s.2));
+
+    let mut tu_spans: Vec<(usize, usize)> = Vec::new();
+    let mut cur: Option<usize> = None;
+    for (t, s, _e) in &spans {
+        if *t == 2 {
+            if let Some(cs) = cur.take() {
+                tu_spans.push((cs, *s));
+            }
+            cur = Some(*s);
+        }
+    }
+    if let Some(cs) = cur {
+        tu_spans.push((cs, data.len()));
+    }
+    if tu_spans.is_empty() {
+        tu_spans = spans
+            .iter()
+            .filter(|s| s.0 == 6)
+            .map(|s| (s.1, s.2))
+            .collect();
+    }
+
+    tu_spans
+        .into_iter()
+        .map(|(start, end)| {
+            let mut bytes = Vec::new();
+            if let Some((ss, se)) = seq_span {
+                if !(start <= ss && ss < end) {
+                    bytes.extend_from_slice(&data[ss..se]);
+                }
+            }
+            bytes.extend_from_slice(&data[start..end]);
+            bytes
+        })
+        .collect()
+}
+
 /// AV1 Phase E inter-prediction conformance: decode a short synthesized AV1
 /// **inter** clip (keyframe + motion-predicted frames) frame-by-frame with both
 /// the Kinetix [`tpt_kinetix_av1::Av1Decoder`] (which builds up its reference
@@ -650,40 +700,12 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
     }
 
     for entry in &corpus {
-        let spans = av1_obu_spans(&entry.obu);
-        let seq_span: Option<(usize, usize)> = spans.iter().find(|s| s.0 == 1).map(|s| (s.1, s.2));
-
-        // Group the OBU stream into temporal units — a temporal-delimiter OBU
-        // (type 2) opens a new TU. Each TU displays exactly one frame (in
-        // display order), so feeding one packet per TU keeps Kinetix's outputs
-        // aligned with dav1d's display-ordered decode even for hierarchical
-        // GOPs (ALTREF decoded early, shown later via show_existing_frame).
-        let mut tu_spans: Vec<(usize, usize)> = Vec::new();
-        let mut cur: Option<usize> = None;
-        for (t, s, _e) in &spans {
-            if *t == 2 {
-                if let Some(cs) = cur.take() {
-                    tu_spans.push((cs, *s));
-                }
-                cur = Some(*s);
-            }
-        }
-        if let Some(cs) = cur {
-            tu_spans.push((cs, entry.obu.len()));
-        }
-        // Fall back to per-frame-OBU packets if the stream has no delimiters.
-        if tu_spans.is_empty() {
-            tu_spans = spans
-                .iter()
-                .filter(|s| s.0 == 6)
-                .map(|s| (s.1, s.2))
-                .collect();
-        }
-        if tu_spans.len() < 2 {
+        let tu_packets = av1_tu_packets(&entry.obu);
+        if tu_packets.len() < 2 {
             eprintln!(
                 "[{}] only {} TU(s) present, skipping",
                 entry.label,
-                tu_spans.len()
+                tu_packets.len()
             );
             continue;
         }
@@ -698,18 +720,11 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
 
         let mut dec = Av1Decoder::new();
         let mut kframes = Vec::new();
-        for (i, (start, end)) in tu_spans.iter().enumerate() {
-            let mut data = Vec::new();
-            if let Some((ss, se)) = seq_span {
-                if !(*start <= ss && ss < *end) {
-                    data.extend_from_slice(&entry.obu[ss..se]);
-                }
-            }
-            data.extend_from_slice(&entry.obu[*start..*end]);
+        for (i, data) in tu_packets.iter().enumerate() {
             let packet = Packet {
                 pts: Timestamp::new(i as i64, (1, 90_000)),
                 dts: Timestamp::new(i as i64, (1, 90_000)),
-                data,
+                data: data.clone(),
                 stream_index: 0,
                 is_key_frame: i == 0,
             };
@@ -774,6 +789,163 @@ fn av1_inter_corpus_vs_dav1d_when_available() {
             exact.saturating_sub(if n > 0 { 1 } else { 0 }),
             n.saturating_sub(if n > 0 { 1 } else { 0 }),
             n
+        );
+    }
+}
+
+/// Per-coding-tool AV1 coverage measurement: for each entry in
+/// [`tpt_kinetix_test_utils::synthetic::av1_feature_corpus`] (one entry per
+/// deliberately-enabled coding tool), decode every temporal unit with the
+/// Kinetix decoder and compare against `dav1d`.
+///
+/// The other AV1 corpora all use ffmpeg's *default* AV1 encoder settings, so
+/// they can all be bit-exact while the decoder has no support at all for
+/// intrabc, palette, loop restoration, filter-intra, angle-delta, CFL, tiles or
+/// 64-point transforms — those tools simply never get exercised. This test
+/// turns each one on and reports exactly which tools are bit-exact, which are
+/// close, and which are unsupported, so `capabilities().pixel_exact` and the
+/// remaining roadmap are driven by measurement rather than assumption.
+///
+/// This test **reports, it does not assert** exactness: the per-tool gaps are
+/// the roadmap, and a hard assertion would just make this permanently red for
+/// tools that are known-incomplete. It does assert that the harness itself
+/// works (at least one entry compared, and every entry decoded to the right
+/// frame count), so a silently-broken measurement can't be mistaken for
+/// coverage. Skips when neither `dav1d` nor `ffmpeg` is available, or when the
+/// corpus could not be synthesized.
+#[test]
+fn av1_feature_coverage_vs_dav1d_when_available() {
+    use tpt_kinetix_av1::Av1Decoder;
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_test_utils::{
+        pixel_diff::*,
+        reference::{dav1d_available, decode_av1_obu_with_dav1d},
+        synthetic::av1_feature_corpus,
+    };
+
+    if !dav1d_available() {
+        eprintln!("skipping: dav1d not available (neither standalone binary nor ffmpeg+libdav1d)");
+        return;
+    }
+
+    let corpus = av1_feature_corpus();
+    if corpus.is_empty() {
+        eprintln!("skipping: could not synthesize an AV1 per-tool corpus with ffmpeg");
+        return;
+    }
+
+    let mut compared_entries = 0usize;
+    let mut tools_exact = 0usize;
+    let mut report: Vec<(String, String, bool, String)> = Vec::new();
+
+    for entry in &corpus {
+        let ref_frames = match decode_av1_obu_with_dav1d(&entry.obu, entry.width, entry.height) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[{}] dav1d decode returned: {e}", entry.label);
+                report.push((
+                    entry.label.to_string(),
+                    entry.tools.to_string(),
+                    false,
+                    "dav1d could not decode".into(),
+                ));
+                continue;
+            }
+        };
+
+        let mut dec = Av1Decoder::new();
+        let mut kframes = Vec::new();
+        let mut errored: Option<String> = None;
+        for (i, data) in av1_tu_packets(&entry.obu).iter().enumerate() {
+            let packet = Packet {
+                pts: Timestamp::new(i as i64, (1, 90_000)),
+                dts: Timestamp::new(i as i64, (1, 90_000)),
+                data: data.clone(),
+                stream_index: 0,
+                is_key_frame: i == 0,
+            };
+            match dec.decode(&packet) {
+                Ok(Some(f)) => kframes.push(f),
+                Ok(None) => break,
+                Err(e) => {
+                    errored = Some(format!("TU {i}: {e}"));
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = errored {
+            eprintln!("[{}] Kinetix decode errored: {e}", entry.label);
+            report.push((
+                entry.label.to_string(),
+                entry.tools.to_string(),
+                false,
+                format!("Kinetix error ({e})"),
+            ));
+            continue;
+        }
+        // The harness itself must be trustworthy: a frame-count mismatch means
+        // the TU splitting or the decoder's output accounting is broken, which
+        // would make every per-tool verdict below meaningless.
+        assert_eq!(
+            kframes.len(),
+            ref_frames.len(),
+            "[{}] frame count mismatch: Kinetix produced {} frames, dav1d produced {}",
+            entry.label,
+            kframes.len(),
+            ref_frames.len()
+        );
+
+        compared_entries += 1;
+        let mut exact_frames = 0usize;
+        let mut worst_psnr = f64::INFINITY;
+        for (k, r) in kframes.iter().zip(ref_frames.iter()) {
+            if within_tolerance(k, r, 0) {
+                exact_frames += 1;
+            }
+            let (p_y, p_u, p_v) = psnr_yuv420p(k, r).unwrap_or((0.0, 0.0, 0.0));
+            worst_psnr = worst_psnr.min(p_y).min(p_u).min(p_v);
+        }
+        let all_exact = exact_frames == kframes.len();
+        if all_exact {
+            tools_exact += 1;
+        }
+        let verdict = if all_exact {
+            format!("{exact_frames}/{} exact", kframes.len())
+        } else {
+            format!(
+                "{exact_frames}/{} exact, worst plane PSNR {worst_psnr:.2} dB",
+                kframes.len()
+            )
+        };
+        eprintln!(
+            "[{}] {} ({}x{}, {} frame(s)): {verdict}",
+            entry.label,
+            entry.tools,
+            entry.width,
+            entry.height,
+            kframes.len()
+        );
+        report.push((
+            entry.label.to_string(),
+            entry.tools.to_string(),
+            all_exact,
+            verdict,
+        ));
+    }
+
+    assert!(
+        compared_entries > 0,
+        "no feature-corpus entries produced a comparable Kinetix/dav1d frame pair"
+    );
+    eprintln!("AV1 per-tool coverage: {tools_exact}/{compared_entries} tools bit-exact");
+    eprintln!("--- per-tool summary ---");
+    for (label, tools, exact, verdict) in &report {
+        eprintln!(
+            "  {:<18} {:<28} {}  {verdict}",
+            label,
+            tools,
+            if *exact { "EXACT" } else { "gap  " }
         );
     }
 }

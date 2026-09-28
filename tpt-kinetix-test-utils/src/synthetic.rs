@@ -341,6 +341,69 @@ pub fn av1_multiframe_obu(width: u32, height: u32, frames: u32) -> Option<Vec<u8
     }
 }
 
+/// One entry in [`av1_feature_corpus`]: a label, declared frame geometry, the
+/// OBU bytes of the clip, and a human-readable description of the AV1 coding
+/// tools the encoder was told to exercise for that entry.
+pub struct Av1FeatureCorpusEntry {
+    pub label: &'static str,
+    /// The coding tools this entry is meant to exercise (for reporting).
+    pub tools: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub obu: Vec<u8>,
+    /// Number of frame OBUs in the clip (keyframe + inter).
+    pub frames: usize,
+}
+
+/// Count the frame OBUs (type 6) in a low-overhead bitstream, stopping at the
+/// first temporal delimiter / sequence header boundary. Shared by
+/// [`av1_inter_corpus`] and [`av1_feature_corpus`].
+fn count_frame_obus(obu: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut pos = 0usize;
+    while pos < obu.len() {
+        if obu[pos] & 0x80 != 0 {
+            break;
+        }
+        let header = obu[pos];
+        let obu_type = (header >> 3) & 0x0f;
+        let ext = header & 0x07 == 0x04;
+        let has_size = header & 0x02 != 0;
+        let mut off = pos + 1 + usize::from(ext);
+        if off >= obu.len() {
+            break;
+        }
+        let payload_len = if has_size {
+            let mut i = 0usize;
+            let mut size = 0usize;
+            loop {
+                if off + i >= obu.len() {
+                    break;
+                }
+                let b = obu[off + i];
+                size |= ((b & 0x7f) as usize) << (i * 7);
+                i += 1;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            off += i;
+            size
+        } else {
+            obu.len() - off
+        };
+        if obu_type == 6 {
+            count += 1;
+        }
+        let end = off + payload_len;
+        if end <= pos {
+            break;
+        }
+        pos = end;
+    }
+    count
+}
+
 /// Generate a small corpus of short AV1 inter clips (keyframe + motion-predicted
 /// frames) covering a few resolutions, for validating inter-prediction decode
 /// (AV1 Phase E) against a reference decoder. Entries whose encode fails (e.g.
@@ -362,52 +425,8 @@ pub fn av1_inter_corpus() -> Vec<Av1InterCorpusEntry> {
         .iter()
         .filter_map(|&(label, width, height, frames)| {
             let obu = av1_multiframe_obu(width, height, frames)?;
-            let frames = {
-                // Count Frame OBUs in the produced stream for the harness.
-                let mut count = 0usize;
-                let mut pos = 0usize;
-                while pos < obu.len() {
-                    if obu[pos] & 0x80 != 0 {
-                        break;
-                    }
-                    let obu_type = (obu[pos] >> 3) & 0x0F;
-                    let ext = (obu[pos] >> 2) & 1 != 0;
-                    let has_size = (obu[pos] >> 1) & 1 != 0;
-                    let mut off = pos + 1;
-                    if ext {
-                        off += 1;
-                    }
-                    let mut payload_len = 0usize;
-                    let mut shift = 0u32;
-                    let mut i = 0;
-                    if has_size {
-                        loop {
-                            if off + i >= obu.len() {
-                                break;
-                            }
-                            let b = obu[off + i];
-                            payload_len |= ((b & 0x7F) as usize) << shift;
-                            shift += 7;
-                            if b & 0x80 == 0 {
-                                break;
-                            }
-                            i += 1;
-                        }
-                        off += i + 1;
-                    } else {
-                        payload_len = obu.len() - off;
-                    }
-                    let end = off + payload_len;
-                    if obu_type == 6 {
-                        count += 1;
-                    }
-                    if end <= pos {
-                        break;
-                    }
-                    pos = end;
-                }
-                count
-            };
+            // Count Frame OBUs in the produced stream for the harness.
+            let frames = count_frame_obus(&obu);
             if frames < 2 {
                 return None;
             }
@@ -417,6 +436,252 @@ pub fn av1_inter_corpus() -> Vec<Av1InterCorpusEntry> {
                 height,
                 obu,
                 frames,
+            })
+        })
+        .collect()
+}
+
+/// Encode a short AV1 clip with an explicit `lavfi` source and an extra set of
+/// encoder arguments, returning the raw OBU bytes.
+///
+/// This is the parameterised form of [`av1_multiframe_obu`]: the existing
+/// corpus generators all use ffmpeg's *default* AV1 encoder settings, which
+/// means every entry exercises the same (conservative) subset of coding tools.
+/// [`av1_feature_corpus`] uses this to deliberately turn individual tools on
+/// (tiles, lossless, intrabc, restoration, angle delta, CFL, filter intra,
+/// palette, extended/64-point transforms, ...) so the decoder's coverage of
+/// each tool is measured rather than assumed.
+///
+/// Returns `None` if `ffmpeg` is unavailable or the encode fails (which is how
+/// a tool the local libaom build refuses is handled — the entry is then simply
+/// dropped from the corpus).
+pub fn av1_feature_obu(
+    lavfi_filter: &str,
+    width: u32,
+    height: u32,
+    frames: u32,
+    encoder_args: &[&str],
+) -> Option<Vec<u8>> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+    };
+
+    let src = format!("{lavfi_filter}=size={width}x{height}:rate=15:duration={frames}");
+    let frames_str = frames.to_string();
+    let mut args: Vec<String> = vec![
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        src,
+        "-frames:v".into(),
+        frames_str,
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+    ];
+    args.extend(encoder_args.iter().map(|s| (*s).to_string()));
+    args.extend([
+        "-c:v".to_string(),
+        "av1".to_string(),
+        "-f".to_string(),
+        "obu".to_string(),
+        "-".to_string(),
+    ]);
+
+    let mut child = Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.read_to_end(&mut out).is_ok();
+    let _ = child.wait();
+    if !read || out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// One row of the [`av1_feature_corpus`] table: label, the coding tools it
+/// exercises, the encoder arguments that enable them, and the clip geometry.
+/// A named type keeps the table's tuple readable (and keeps clippy's
+/// `type_complexity` lint satisfied).
+type Av1FeatureSpec = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    u32,
+    u32,
+    u32,
+);
+
+/// Generate a corpus of short AV1 clips that each deliberately exercise a
+/// specific AV1 coding tool, so the decoder's per-tool coverage is measured
+/// rather than assumed.
+///
+/// Every entry in [`av1_inter_corpus`] is encoded with ffmpeg's default AV1
+/// encoder settings, so a decoder can pass that whole corpus while still having
+/// no intrabc, restoration, palette, filter-intra, angle-delta, CFL, tiled or
+/// extended-transform support at all — the tools simply never get used. This
+/// corpus turns each of them on explicitly.
+///
+/// Entries whose encode fails (tool unavailable in the local libaom build, or
+/// `ffmpeg` missing) are silently omitted; callers should treat an empty corpus
+/// as "skip this test".
+pub fn av1_feature_corpus() -> Vec<Av1FeatureCorpusEntry> {
+    // `testsrc2` is the richest synthetic source (sharp glyph-like edges and
+    // gradients) and is what makes the encoder's RD decisions actually pick
+    // angle-delta / CFL / filter-intra / palette over plain DC.
+    //
+    // NOTE: several of these flags are *already* on by default in libaom
+    // (angle-delta, CFL, filter-intra, 1:4 and rectangular partitions, idtx,
+    // tx64, global motion all encode to byte-identical output with and without
+    // the flag). That is fine and in fact useful: it means those entries are
+    // byte-identical to a default-settings encode, so a gap reported for them
+    // is a real default-path bug rather than an exotic-tool gap. The entries
+    // that *do* change the bitstream are the ones that genuinely exercise a
+    // distinct code path (tiles, lossless, intrabc, restoration, CDEF off).
+    const SOURCES: &[Av1FeatureSpec] = &[
+        (
+            "tiles_2x2",
+            "tiles",
+            &["-tile-columns", "1", "-tile-rows", "1"],
+            160,
+            96,
+            4,
+        ),
+        (
+            "lossless",
+            "lossless",
+            &["-crf", "0", "-lossless", "1"],
+            96,
+            64,
+            3,
+        ),
+        (
+            "intrabc",
+            "intra block copy",
+            &["-enable-intrabc", "1", "-usage", "allintra"],
+            320,
+            180,
+            2,
+        ),
+        (
+            "restoration",
+            "loop restoration",
+            &["-enable-restoration", "1"],
+            128,
+            128,
+            3,
+        ),
+        (
+            "angle_delta",
+            "angle delta intra",
+            &["-enable-angle-delta", "1"],
+            128,
+            96,
+            2,
+        ),
+        (
+            "cfl_intra",
+            "chroma-from-luma",
+            &["-enable-cfl-intra", "1"],
+            128,
+            96,
+            2,
+        ),
+        (
+            "filter_intra",
+            "filter intra",
+            &["-enable-filter-intra", "1"],
+            128,
+            96,
+            2,
+        ),
+        ("palette", "palette", &["-enable-palette", "1"], 64, 64, 2),
+        (
+            "flip_idtx",
+            "extended transform type",
+            &["-enable-flip-idtx", "1"],
+            128,
+            96,
+            2,
+        ),
+        (
+            "tx64",
+            "64-point transform",
+            &["-enable-tx64", "1"],
+            128,
+            128,
+            2,
+        ),
+        (
+            "rect_partitions",
+            "rectangular / 1:4 partitions",
+            &[
+                "-enable-rect-partitions",
+                "1",
+                "-enable-1to4-partitions",
+                "1",
+            ],
+            128,
+            96,
+            2,
+        ),
+        (
+            "cdef_off",
+            "CDEF disabled",
+            &["-enable-cdef", "0", "-crf", "40"],
+            128,
+            96,
+            2,
+        ),
+        (
+            "global_motion",
+            "global motion / warp",
+            &["-enable-global-motion", "1", "-cpu-used", "0"],
+            128,
+            96,
+            4,
+        ),
+        (
+            "ref_frame_mvs",
+            "temporal MV prediction",
+            &[
+                "-enable-ref-frame-mvs",
+                "1",
+                "-lag-in-frames",
+                "2",
+                "-cpu-used",
+                "0",
+            ],
+            128,
+            96,
+            5,
+        ),
+    ];
+
+    SOURCES
+        .iter()
+        .filter_map(|&(label, tools, enc, width, height, frames)| {
+            let obu = av1_feature_obu("testsrc2", width, height, frames, enc)?;
+            let count = count_frame_obus(&obu);
+            if count < 1 {
+                return None;
+            }
+            Some(Av1FeatureCorpusEntry {
+                label,
+                tools,
+                width,
+                height,
+                obu,
+                frames: count,
             })
         })
         .collect()

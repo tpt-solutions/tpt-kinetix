@@ -29,6 +29,9 @@
 *.av1
 *.264
 *.jsv
+# AV1/IVF scratch bitstreams from decoder bring-up (scratch_av1/)
+*.obu
+*.ivf
 
 # ITU-T H.264.1 conformance fixtures (fetched with `just fetch-h264-conformance`,
 # ~hundreds of MB of bitstreams + reference YUV — never committed)

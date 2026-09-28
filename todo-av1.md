@@ -10653,3 +10653,84 @@ extent (cont'd 21's fix, which is still required and still correct).
    cont'd 21 and the frames 1-2 residues were the open item. With the MC clamp
    corrected, re-run `av1_fate_real_samples_vs_dav1d_when_available` to see
    whether the frames 1-2 bottom-row residue class collapsed with it.
+
+### Session cont'd 23 — per-tool coverage corpus: the default settings never exercised most AV1 tools, and a NEW chroma-only inter bug falls out
+
+Added `synthetic::av1_feature_corpus()` + the `av1_feature_coverage_vs_dav1d_
+when_available` test. Motivation: every pre-existing AV1 corpus entry is encoded
+with ffmpeg's **default** AV1 encoder settings, so a decoder can be bit-exact on
+all of them while having *no* support for intrabc, palette, loop restoration,
+filter-intra, angle-delta, CFL, tiles or 64-point transforms - the tools simply
+never get selected by the encoder's RD decisions. The new corpus turns each on
+explicitly and reports per-tool exactness (it reports rather than asserts: the
+gaps are the roadmap, and a hard assert would be permanently red for
+known-incomplete tools; it does assert the harness itself works).
+
+**Important measurement caveat, verified this session:** most of those flags are
+already on by default in libaom. `-enable-angle-delta 1`, `-enable-filter-intra 1`,
+`-enable-cfl-intra 1`, rect/1to4 partitions, `-enable-flip-idtx 1`,
+`-enable-tx64 1` and `-enable-global-motion 1` all encode to a **byte-identical**
+bitstream with and without the flag (confirmed by MD5-ing the OBUs). So the
+several entries reporting an identical 42.29 dB gap are not per-tool gaps at all
+- they are the **same default-path bug**, measured five times. Only tiles,
+lossless, restoration, intrabc and CDEF-off actually change the bitstream. The
+corpus is still worth having (it pins the defaults as a regression baseline and
+does genuinely cover the tools that do change the stream), but read its "per-tool"
+verdicts with that in mind. Documented in the function's doc comment.
+
+Current baseline: **1/13 entries bit-exact** (palette only, 2/2 frames).
+
+#### The bug this surfaced: chroma-only inter divergence (NOT filter-related)
+
+Minimal repro (default settings, no exotic tools at all):
+
+```
+ffmpeg -f lavfi -i testsrc2=size=128x96:rate=15:duration=2 -frames:v 2 \
+       -pix_fmt yuv420p -g 10 -c:v av1 -f ivf t2.ivf
+```
+
+Frame 0 is exact; frame 1 has **73 differing bytes, luma 0/12288** - every
+difference is chroma (U 14 samples, deltas +-1..3; V 59 samples, deltas up to
+**-64**). Stage bisection:
+
+- `KINETIX_AV1_NOFILTER=1` makes it *worse* (3654 bytes) and the blockmap is
+  **all edge-only `e`, zero interior `X` on every plane** - i.e. the
+  pre-filter reconstruction is correct and the divergence is introduced by the
+  post-filters, not by prediction/transform/residual.
+- With filters on, luma is **byte-exact** and only chroma diverges. CDEF's
+  chroma pass is legitimate (§7.15.3 filters chroma with `CdefDamping - 1`), so
+  the "post-cdef changes the V value" observation from the `CPXY` tracer is not
+  itself a bug - what matters is that the *final* value disagrees with dav1d.
+- So: **luma deblock + CDEF are exact; chroma deblock is not.** That is the
+  narrow statement the evidence supports.
+
+Diff geometry (chroma coords, `cpx`): U diverges in one 4x4-aligned patch at
+cpx x=32..35, y=20..25 (luma 64..71, 40..51). V diverges in two patches:
+cpx x=32..37, y=20..24 and cpx x=43..51, y=27..36. The V deltas are large
+enough (-64, -31, -28, -21) that this is wrong *content* in a localised region,
+not ±1 filter rounding: reading Kinetix vs dav1d across cpx row 20, x=30..39
+shows Kinetix's values lagging dav1d's by roughly one sample horizontally
+(K 18 20 26 36 46 55 59 64 72 80 / D 18 17 20 24 35 46 56 64 72 80) - the
+signature of a **displaced chroma prediction**, not a level/strength error.
+Since luma at the identical luma coordinates is exact, the block's luma MV and
+residual are right, so the suspect is the chroma-side MV/position derivation:
+`inter_block.rs`'s sub-8x8 chroma path (lines ~1520-1690, the `sub8x8_leaf`
+quadrant scheme and its `base_x/base_y` "parent 8x8 chroma origin" floor) or
+the `hbits/vbits = 3 + subsampling` chroma phase in `motion_compensate`
+(`inter.rs:246`). Both are already heavily commented as dav1d-derived, so this
+needs a fresh dav1d-side check of the chroma MC position, not a re-derivation.
+
+`probe_tiles`'s `BLOCKMAP=1` mode now also prints **chroma** block maps (U/V,
+4x4 chroma cells, 2-sample interior margin) - the old map was luma-only, which
+is exactly why this class of bug was invisible: a luma-only map reports
+"0 interior diffs" and looks healthy while chroma is badly wrong.
+
+#### Next session's starting point
+
+1. The chroma bug above is the highest-value target: it is the only *default-
+   path* regression currently known, it is 2 frames / 73 bytes, and it is
+   already reduced to "chroma deblock or chroma MC position, luma exact".
+   Start from the V patch at cpx x=32..37, y=20..24 and check the chroma MC
+   base position for sub-8x8 inter blocks against dav1d.
+2. `capabilities().pixel_exact` still `false` - correct, and further from true
+   than cont'd 22 suggested: the feature corpus is 1/13.

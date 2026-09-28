@@ -168,6 +168,58 @@ fn main() {
                 "  frame {i}: luma blocks -> {edge} edge-only, {interior} with interior diffs, \
                  max|d|={maxmag} worst at {worst:?}"
             );
+
+            // Chroma block map. Chroma is 4:2:0, so each 8x8 *luma* block is a
+            // 4x4 chroma block and the deblock/CDEF reach in chroma is half as
+            // far (2 samples from a 4x4 boundary). A chroma 'X' therefore means
+            // a sample no post-filter can touch — the same conclusion the luma
+            // map draws, but for the plane where chroma-only prediction bugs
+            // (CFL, chroma MC, chroma deblock) actually show up. Luma being
+            // clean while chroma diverges is a very common signature, and this
+            // map is what makes that legible instead of just a byte count.
+            let cw = w.div_ceil(2);
+            let ch = h.div_ceil(2);
+            for (plane_name, base) in [("U", ysz), ("V", ysz + cw * ch)] {
+                let mut any = false;
+                for cy in 0..ch.div_ceil(4) {
+                    let row: String = (0..cw.div_ceil(4))
+                        .map(|cx| {
+                            let (mut n_diff, mut n_int) = (0usize, 0usize);
+                            for y in (cy * 4)..((cy + 1) * 4).min(ch) {
+                                for x in (cx * 4)..((cx + 1) * 4).min(cw) {
+                                    let o = base + y * cw + x;
+                                    if o >= kf.data.len() || o >= rf.data.len() {
+                                        continue;
+                                    }
+                                    if kf.data[o] == rf.data[o] {
+                                        continue;
+                                    }
+                                    n_diff += 1;
+                                    let dx = (x % 4).min(3 - (x % 4));
+                                    let dy = (y % 4).min(3 - (y % 4));
+                                    if dx >= 2 && dy >= 2 {
+                                        n_int += 1;
+                                    }
+                                }
+                            }
+                            if n_diff == 0 {
+                                '.'
+                            } else if n_int > 0 {
+                                'X'
+                            } else {
+                                'e'
+                            }
+                        })
+                        .collect();
+                    if row.chars().any(|c| c != '.') {
+                        any = true;
+                    }
+                    println!("  {plane_name}by{cy:02} {row}");
+                }
+                if !any {
+                    println!("  {plane_name} (all blocks exact)");
+                }
+            }
         }
     }
     println!("{exact}/{n} frames exact vs dav1d");
