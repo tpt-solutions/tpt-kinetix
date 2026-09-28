@@ -11831,3 +11831,156 @@ scratch:**
    consecutive session confirming the exact same numbers (this session's
    only code changes were reverted before finishing, so the working tree
    is unchanged from cont'd 28).
+
+### Session cont'd 30 - THE t2.ivf CHROMA BUG IS FIXED (73 diff bytes -> 0,
+### measured). Root cause was the opposite of every prior session's working
+### theory: not a cross-block/sibling lookup at all - a single eob>0 gate on
+### `co_located_luma_type`'s OWN local list, dropping a leaf from the SAME
+### coded block it needed. Feature corpus 1/13 -> 7/13. No regressions.
+
+Started from cont'd 29's exact handoff: use the (now-working) `dav1d_oracle`
+build to trace a few chroma blocks OTHER than mi=(16,11) before attempting
+another grid-based fix, since two prior sessions' full-replacement grids
+both regressed the corpus by ~77641 Y-plane diff bytes despite looking
+correct by inspection.
+
+**Step 1 - implemented cont'd 29's own suggested middle path first (local
+list primary, frame-wide grid only as a fallback on a local-scan miss).**
+Added a persistent `luma_tx_type_grid: Vec<u8>` (`mi_rows*mi_cols`, `0xFF`
+sentinel) on `TileDecodeState`, written at every luma leaf's frame-absolute
+mi coordinates (unconditionally, matching dav1d's real per-leaf write) from
+both `inter_block.rs`'s main leaf loop, consulted by `co_located_luma_type`
+ONLY when its existing local-list scan already misses (i.e. `own_luma_tx_
+type`'s old fallback path). This is narrower than either of cont'd 26/29's
+full-replacement attempts and left every block whose local list already
+covers its own chroma footprint byte-for-byte untouched.
+
+**Measured result: still regressed, same magnitude as before (Y-plane diff
+0 -> 78755).** `KINETIX_AV1_DBG_COLOC` showed the fallback only fires for
+TWO positions in the whole frame (mi=(4,3) and mi=(23,0)), and mi=(16,11) -
+the actual target TU - was never even reached again once the entropy stream
+desynced at whichever of those two comes first in decode order. This
+directly disproves the "the local scan is already correct everywhere it
+doesn't miss" assumption cont'd 29's plan rested on: at least one of those
+two miss-positions' grid answer was wrong, meaning a real block IS relying
+on the pre-existing (wrong-by-grid-standards) `own_luma_tx_type` fallback
+for correctness. Reverted this attempt in full before proceeding (confirmed
+`git diff --stat` clean on `tpt-kinetix-av1/` again).
+
+**Step 2 - traced the actual C source of `t->scratch.txtp_map`'s write/read
+sites in the working `dav1d_oracle` checkout (`src/recon_tmpl.c`) instead of
+trusting cont'd 29's characterization of it from memory, and this is what
+actually cracked it.** `bx4`/`by4` in the real single-tile reconstruction
+function (`recon_b_inter`'s chroma loop, ~line 1970-1997) are computed
+**once, at the top of the whole coded-block's own reconstruction call**
+(`t->bx & 31`, `t->by & 31` - THIS block's own top-left mi cell, not a
+sibling's), and the chroma read's index is `(by4 + (y<<ss_ver))*32 + bx4 +
+(x<<ss_hor)` with `y=x=0` for the block's first (and here, only) chroma tx
+tile - i.e. **the lookup for mi=(16,11)'s chroma TU resolves to mi=(16,11)'s
+OWN top-left luma mi cell, not mi=(16,10)'s**, contradicting cont'd 29's
+"belongs to the sibling mi_row=10" conclusion. Rebuilt `dav1d_oracle` with
+`DEBUG_BLOCK_INFO` retargeted to `t->by==11 && t->bx==16` (and briefly
+`==10` too, to rule the sibling all the way out) and a new printf on the
+luma leaf write site (`Post-y-cf-blk`, `recon_tmpl.c` ~line 818) showing
+`WRITEby4`/`bx4`: got `WRITEby4=11 bx4=16 t->bx=16 t->by=11 txh=1 txw=1
+eob=-1 txtp=0` - **this block's own FIRST luma leaf** (at mi_col=16, an
+all-zero/skip TU that never calls `transform_type()` so defaults to
+`DCT_DCT`), immediately followed in the trace by `Post-uv-cf-blk[pl=0,
+txtp=0,eob=0]` and `Post-uv-cf-blk[pl=1,txtp=0,eob=2]` (the exact target
+TU) - both read `txtp=0` straight from that same first leaf's write, since
+the chroma read's `x=0` index lands exactly on `bx4=16`, not the second
+leaf at `bx4=17` (the real nonzero `eob=3` `FLIPADST_DCT` leaf cont'd 25/27
+already characterized). The full oracle trace (a "poc=1,y=10,x=16,bl=4,
+bp=1" partition print at the very top) also confirms mi_row=10 is a
+genuinely separate, **intra**-coded sibling block (`Post-intra[1]`) entirely
+unrelated to this lookup - cont'd 29's misattribution likely came from an
+adjacent trace line being misread, not from a real cross-block dependency.
+
+**Root cause, finally precise: `inter_block.rs`'s `luma_leaf_types.push(...)`
+call was gated inside `if coeffs.eob > 0 { ... }` (confirmed by re-reading
+the brace structure carefully - a claim cont'd 25 stated correctly but which
+this session almost mis-transcribed too on a first pass).** This drops any
+all-zero (`eob == 0`, `txb_skip` true) leaf from the block's own local scan
+entirely, even though dav1d's real `read_coef_tree` writes `txtp_map`
+**unconditionally** after every leaf, all-zero or not (the all-zero leaf's
+`txtp` still defaults to `DCT_DCT`, matching what `coeffs.tx_type` already
+holds for that case in this codebase too - no separate default-handling
+needed). For mi=(16,11), the local list this omission produced was
+`[(68,44,4,4,FLIPADST_DCT)]` (only the second, nonzero leaf) - so any
+chroma query that should have landed on the first leaf's position
+(`px=64..68`) missed the scan and fell through to `own_luma_tx_type =
+.first()`, which returned the wrong (only remaining) leaf's type
+(`FLIPADST_DCT`) instead of the correct `DCT_DCT` sitting right there in
+the same block, just never added to the list.
+
+**The fix: move `luma_leaf_types.push(...)` outside the `if coeffs.eob > 0`
+block, so it runs unconditionally for every leaf this coded block reads**
+(still gated on the outer per-block `!skip`, unchanged - a block-level-skip
+block still has no leaves at all here, matching dav1d). No new state, no
+frame-wide grid, no cross-block reasoning required - a strictly local,
+single-block fix.
+
+**Measured: `t2.ivf` frame 1 diff 73 bytes (U 14, V 59, Y 0) -> 0 bytes,
+exactly.** `cargo test -p tpt-kinetix-av1`: 165 lib tests pass (same as
+baseline) plus every integration/proptest/doctest binary, zero failures.
+`cargo test -p tpt-kinetix-test-utils --test conformance`: intra corpus
+still 6/6 bit-exact, inter corpus still 5/5 x 4 clips bit-exact (zero
+regression on either), and **feature corpus jumped from 1/13 to 7/13**
+(`angle_delta`, `cfl_intra`, `filter_intra`, `palette`, `flip_idtx`, `tx64`,
+`rect_partitions` all now exact - only `tiles_2x2`, `lossless`,
+`restoration`, `cdef_off`, `global_motion`, `ref_frame_mvs` remain gapped,
+all pre-existing, unrelated feature gaps). This is the single largest
+feature-corpus jump this bug hunt has recorded.
+
+**Committed to master** (plain message, no co-author trailer per repo
+convention) - `inter_block.rs`'s one-statement move plus its doc comment.
+`dbg_av1_t2_repro.rs` NOT committed, per the established "no unlanded
+throwaway harness" convention (recreate from cont'd 23's description if a
+future session needs it again - unchanged since cont'd 26).
+
+**What this means for the bug hunt overall:** every session from cont'd
+23 through 29 (co-located-luma-type hypotheses A/B, the coefficient-entropy
+bin-by-bin audit, the static default-CDF table audit, the dequantization
+audit, and the first working dav1d oracle trace) was real, valid,
+necessary elimination work - none of it was wasted, and the oracle
+infrastructure cont'd 29 built is what let this session read the *actual*
+C source carefully enough to catch its own mis-framing before recreating
+cont'd 29's regression a third time. The actual bug was hiding in plain
+sight in a comment cont'd 25 wrote about this exact leaf five sessions ago
+("only the second gets pushed... push is gated on eob > 0") - stated as an
+observation, correctly, but never connected to being the fix.
+
+**`capabilities().pixel_exact` is still hard-coded `false`** in
+`decoder.rs` regardless of any corpus number (it is a policy gate, not
+derived from test results) - this session did not touch that, and there
+are still real, separate gaps (`tiles_2x2`/`lossless`/`restoration`/
+`cdef_off`/`global_motion`/`ref_frame_mvs`) before that would even be
+worth reconsidering. The t2.ivf-specific default-encoder-path regression
+this whole 6-session (now 7) hunt was chasing is, as far as this session's
+own measurement can tell, closed.
+
+#### Next session's starting point
+
+1. The t2.ivf chroma bug is fixed - do not reopen it without a new failing
+   repro. If one appears, check `luma_leaf_types` population first (now
+   unconditional on `eob`) before assuming a new class of bug.
+2. Feature corpus is 7/13. The 6 remaining gaps (`tiles_2x2`, `lossless`,
+   `restoration`, `cdef_off`, `global_motion`, `ref_frame_mvs`) are
+   unrelated to this session's fix and each look like their own standalone
+   investigation - pick one and start fresh rather than assuming any
+   shared root cause with the txtp bug just closed.
+3. The working `dav1d_oracle` checkout (`%LOCALAPPDATA%\Temp\dav1d_oracle`,
+   `bld2/` subdir, `tools/dav1d.exe`, needs `bld2/src` on `PATH` for the
+   DLL) is a reusable, real asset for whichever of those 6 gaps gets picked
+   up next - this session further confirmed it can be retargeted
+   (`DEBUG_BLOCK_INFO` in `src/recon.h`) and rebuilt in seconds
+   (`ninja -C bld2 tools/dav1d.exe`) for arbitrary `t->by`/`t->bx`
+   coordinates, and that reading the actual C source structure (not just
+   its printf output) matters - this session's first attempt at using the
+   oracle still mis-identified which coded block a lookup belonged to
+   until the source itself was read line-by-line.
+4. On Windows, remember `-o /dev/null` silently fails dav1d.exe's own arg
+   parser ("No extension found for file nul") and exits without decoding
+   anything - use a real output filename (e.g. `-o out.y4m`) instead, or
+   the run will look successful (`EXIT: 0`) while producing zero trace
+   output, which cost real time this session before being caught.

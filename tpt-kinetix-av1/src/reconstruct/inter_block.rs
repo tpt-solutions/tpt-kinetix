@@ -3601,8 +3601,26 @@ impl<'a> TileDecodeState<'a> {
                             );
                         }
                     }
-                    luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
                 }
+                // Session cont'd 30: this MUST be pushed for every leaf this
+                // block reads, not just ones with `eob > 0` — a dav1d oracle
+                // trace (see `todo-av1.md`'s cont'd 30 entry) proved that for
+                // the long-standing t2.ivf chroma mismatch, the real
+                // co-located luma leaf dav1d's `txtp_map` read resolves to is
+                // THIS block's own FIRST (all-zero/`eob=-1`) leaf, at the
+                // same mi_row, a few mi_cols to the left of the actual
+                // nonzero leaf — not a sibling block's row at all, as five
+                // prior sessions (cont'd 25-29) assumed. dav1d's own
+                // `read_coef_tree` writes `txtp_map` unconditionally after
+                // *every* leaf's `decode_coefs` call, skip or not (an
+                // all-zero leaf's `txtp` defaults to `DCT_DCT`, same as this
+                // codebase's `coeffs.tx_type` for that case) — gating this
+                // push on `eob > 0` silently dropped exactly those leaves
+                // from the local scan, forcing a lookup miss that fell
+                // through to `own_luma_tx_type` (`.first()` of the
+                // *remaining*, eob>0-only leaves) instead of the correct
+                // answer already sitting in this same block's own list.
+                luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
             }
             for dy in 0..leaf_tx_h {
                 let sy = px_y + dy;
