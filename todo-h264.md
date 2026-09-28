@@ -5781,6 +5781,46 @@ FIX DESIGN (next session):
 This is the root cause of the entire poc-119/61/82/64/67/73 field-B
 residue class (the ~2.2k-sample pre-deblock reconstruction remnant).
 
+## SESSION #32d4 ADDENDUM 28 (2026-09-28, continuation) - addendum 27 CONFIRMED with the real function (not the lookahead): JM B-slice skip flag = mb_type_contexts[2][7+a+b], polarity bin!=1 -> skipped (bin 0 = SKIPPED); ours bin 1 = skipped (INVERTED) + different family
+
+Verified the extracted `read_skip_flag_CABAC_b_slice` IS the main per-MB
+decode (only one definition in cabac.c; no copy/restore scaffolding -
+the scaffolding seen earlier belongs to its caller
+`check_next_mb_and_get_field_mode_CABAC_b_slice`, the PAFF lookahead).
+
+JM (verbatim, main decode):
+```c
+  int a = (currMB->mb_left != NULL) ? (currMB->mb_left->skip_flag == 0) : 0;
+  int b = (currMB->mb_up   != NULL) ? (currMB->mb_up  ->skip_flag == 0) : 0;
+  BiContextType *mbc = &currMB->p_Slice->mot_ctx->mb_type_contexts[2][7 + a + b];
+  se->value1 = se->value2 = (biari_decode_symbol (dep_dp, mbc) != 1);
+```
+
+1. CONTEXT FAMILY: mb_type_contexts[2][7+a+b] - the BOTTOM-VIEW
+   mb_type family at index 7+inc (JM keeps 3 views [0]frame/[1]top/[2]
+   bottom; INIT from INIT_MB_TYPE). Our parse uses the dedicated
+   MbSkipContext family (PB tables 24-26, INIT (18,64)/(9,43)/(29,0)) -
+   a different model entirely.
+2. POLARITY: `value1 = (bin != 1)` -> bin 0 = SKIPPED, bin 1 = NOT
+   skipped. OURS: bin 1 = skipped, bin 0 = not (INVERTED).
+3. The mb_type (non-skip) bins ALSO read from the same view family
+   (mb_type_contexts[view][...]), so once the skip flag diverges,
+   everything in the MB follows.
+
+This explains the poc-119/61/82/64/67/73 class end-to-end AND why the
+frame-B class (poc-10/136) still decodes correctly under some
+conditions while diverging under others: both the family and the
+polarity differ from ours, with matching bins by state coincidence.
+
+FIX (next session): field-B slices read mb_skip_flag from
+mb_type-B-context[bottom view][7 + inc] with JM polarity (bin 0 =
+skipped), and the whole B mb_type family becomes view-split (3 views).
+The frame-B path keeps the current contexts (JM uses the same [2]
+family for frame slices too - VERIFY: the frame-B path is
+bit-exact-proven, so its JM context must coincide with ours for the
+poc-10 history; check INIT_MB_TYPE vs our PB tables for entries 7-9
+before changing anything).
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
