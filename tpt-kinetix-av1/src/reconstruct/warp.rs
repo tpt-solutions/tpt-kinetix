@@ -482,7 +482,24 @@ fn warp_affine_8x8(
 
     // Horizontal pass: 15 source rows (dy-3 ..= dy+11), 8 columns each,
     // giving the vertical pass its full 8-tap support (3 above / 4 below).
-    let dbg_px = std::env::var("KINETIX_AV1_DBG_WARPPX").is_ok() && dx == 26 && dy == 48;
+    // `KINETIX_AV1_DBG_WARPPX_BLOCK=dx,dy` retargets the per-tap dump (the
+    // historical default matches a long-gone investigation target).
+    let dbg_target = std::env::var("KINETIX_AV1_DBG_WARPPX_BLOCK")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.trim().parse::<i32>().ok()?, b.trim().parse::<i32>().ok()?))
+        })
+        .unwrap_or((26, 48));
+    let dbg_px = std::env::var("KINETIX_AV1_DBG_WARPPX").is_ok()
+        && ((dx == dbg_target.0 && dy == dbg_target.1)
+            || (dest_x == 0 && dest_y == 0 && dx < -10000));
+    if std::env::var("KINETIX_AV1_DBG_WARPPX_ALL").is_ok() && dest_x == 0 && dest_y == 0 {
+        eprintln!(
+            "WARPBLK n={} dx={dx} dy={dy} mx0={mx0} my0={my0}",
+            crate::debug_frame_seq::current()
+        );
+    }
     let dbg_n = crate::debug_frame_seq::current();
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;

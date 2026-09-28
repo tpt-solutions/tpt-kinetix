@@ -12472,3 +12472,67 @@ to 1,052 bytes; the frames 4+ cascade collapsed.
    expected-unsupported; `seq_hdr_op_param_info` (0/58) and the rest of
    `frames_refs_short_signaling` (1/50) are untouched separate feature
    work.
+
+## Session 2026-09-28 (cont'd) — frame 3's next root narrowed to the
+## dequant/inverse-transform of the (116,44) 16×16 txtp=10 WARP block:
+## prediction, model, filter table, phases, intermediates, coefficients and
+## rng all verified EQUAL to dav1d; the residual ±1-2s at (468,190) are all
+## that's left
+
+Chased the post-CDF-fix residue (frame 3 = oh=3/n=4, 39,152 bytes, first
+diff Y(468,190)) to its containing block: mi (116,44), a 16×16 skip=0
+NEWMV (mv y:6,x:-4) WARP block (mm=2, ref LAST2), pixel (468,190).
+
+Verified byte/step-equal against dav1d for this block:
+1. Syntax: KSKIP/KINTRA rng sequences match through the whole tile row
+   (134 lines); Post-motionmode[2] r=34588 == K's motion_mode rng; NO
+   filter symbol read on either side (frame_filter != SWITCHABLE here —
+   unlike (88,24), which did read one; per-block, not per-frame).
+2. Warp model: derive prints match dav1d's matrix dump EXACTLY — note
+   dav1d's `alpha=-80` prints are HEX (`%c%x`): -0x80 = -128 decimal.
+   matrix [17158, -1406706, 65430, 0, 3694, 63984],
+   alpha=-128 beta=0 gamma=3712 delta=-1536, num_samples=1.
+3. Warp filter: K's `WARPED_FILTERS` == dav1d's `dav1d_mc_warp_filter`
+   for ALL 193 rows (an earlier "one-row shift" reading was a regex
+   parsing artifact — dav1d's C writes `- 1` with a space; normalize
+   before diffing). Phases/idx per column match; the v-pass starting at
+   mid row yy (dav1d's `mid_ptr = &mid[3*8]` + FILTER_WARP_RND's -3 tap
+   offset cancel out) is correct.
+4. Warp output: K's own per-tap WARPPX dump yields out row0 =
+   [153,154,154,167,192,184,142,125] == dav1d's y-pred row 0 == an
+   independent Python port of dav1d's warp_affine_8x8_c fed K's exact
+   runtime params (dx=463 dy=176 mx0=33536 my0=33984). The warp pipeline
+   is CORRECT. (The `WARPBLK`/`KINETIX_AV1_DBG_WARPPX_BLOCK` hooks added
+   this session make these dumps retargetable; the historical hardcoded
+   dx==26&&dy==48 gate no longer matches anything.)
+5. Coefficients: dav1d KCOEF (now frame-gatable via `KGT_OH` env, and
+   taking UNMASKED t->bx/t->by) for this TX: tx=2 all_skip=0 eob=5
+   txtp=10, post-eob r=44552; K: eob=6 same rng — **K's eob = dav1d's
+   eob + 1 by convention** (count vs last-index; see also (88,24):
+   dav1d 0 ↔ K 1). Tile-row-2 KSKIP/KINTRA fully matching afterwards
+   proves the coefficient reads consumed identically. dav1d's dq dump
+   shows -211 at raster 0 and 16 (top-left column); K's KCFT nz prints
+   SCAN positions (4,5) — the nz print enumerates the scan-order quant
+   array; do not read it as raster.
+
+What remains: the DEQUANT + inverse transform of this 16×16 txtp=10
+(ADSTM-family) block. The observed ±1-2 pixel diffs across the block are
+consistent with a last-digit rounding difference in the inverse
+transform, not with any syntax/CDF/prediction issue. Next session: feed
+the captured coefficients (two -211 DC-column coefficients, tx=2 txtp=10,
+q=139/dc=139) through K's `dequantize_coeffs`+`inverse_transform` and
+dav1d's inv_txfm for txtp=10 and diff the residual blocks directly; the
+mismatched output sample pinpoints the stage.
+
+Side findings this session (do not re-chase):
+- `KINETIX_AV1_DBG_PRED`'s pixel dump indexes `y_plane` with TILE-LOCAL
+  rows — broken for tiled frames; use DUMP_GRID instead.
+- `KINETIX_AV1_NO_RESID` zeroes only the vartx luma path's quant (chroma
+  at inter_block.rs:3858 and any non-vartx luma site are NOT zeroed) —
+  prediction-only grids built with it still contain residuals.
+- oh=4 (frame 4 shown, 1,052 bytes @ (541,188)): its KSKIP diff at
+  (100,32) — same rng, different skip value — is consistent with frame 3's
+  adapted-CDF carryover (frame 4 restores a slot written by frame 3, whose
+  post-desync adaptation still differs); expect it to collapse when this
+  inverse-transform fix lands. Frames 5-7's (287,159) cluster and the
+  frames 14+ y≈128 cluster start downstream of the same tile-row boundary.
