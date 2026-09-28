@@ -13300,3 +13300,49 @@ residues should collapse; the FATE aggregate re-runs.
 The same read_lr mis-gating explains the earlier per-SB "read_lr" debug
 prints at empty ranges (sb=(16,0) rows=1..1) and the frame-level LR
 unit desyncs seen on other streams.
+
+## Session 2026-09-28 (cont'd 18) — the first STRUCTURAL divergence found:
+## the partition tree at mi (0,64) — tile row 3's mid-tile. dav1d bp=0
+## (NONE → 64x64 leaf), K bp=6 (VERT_A → descends). Same ctx=1, same CDF
+## cell (partition 64x64/ctx1). Tile rows 0-2's partition trees match
+## completely (all 148+ positions compared after normalizing dav1d's
+## bl→pixel-size and K's bsize→pixel-size enums); everything at y >= 64
+## diverges
+
+The normalized per-position partition comparison (dav1d poc lines bl 1/2/
+3/4 = 64/32/16/8 px; K bsize 12/9/6/3 = 64/32/16/8 px; dav bp and K bp
+share the spec 0-9 numbering): 284 positions, 148 differing — ALL at
+mi y >= 64 (tile row 3). The first: (0,64) K bp=6 VERT_A vs dav bp=0
+NONE. K's VERT_A descends into 2 sub-partitions, reading the extra
+partition symbols observed in cont'd 16-17 (106 extras in tile row 2 +
+more here), and the mv/skip flips (NEWMV mv=(0,0) vs NEARMV mv=(-1,-1))
+are downstream of the tree shape difference.
+
+Why K's (0,64) read decodes VERT_A from the same CDF cell dav1d decodes
+NONE from: the 106 extra reads K performed in tile row 2 (each a
+partition symbol read — call site mode_cdfs.rs:657) ADAPTED K's
+partition CDF cells; the drifted cell for 64x64/ctx1 flipped this
+boundary read. (The extras themselves were zero-bit — the shared reads
+matched — but their adaptation drifts the cells.)
+
+### THE actionable question (much narrower than before)
+
+Where do the 106 extra PARTITION reads in tile row 2 come from? dav1d's
+tile-2 sbrow decode visits a strict subset of K's partition-tree nodes —
+K descends deeper somewhere in tile row 2 (mi rows 32-47), reading
+partition symbols at nodes dav1d never visits. The MVSCAN/IBSUM data
+shows tile row 2's blocks decode with matching modes/mvs until (120,48)
+— so the EXTRA nodes are probably at positions dav1d's tree SKIPS via
+the `have_h_split && have_v_split` edge gating (tile-relative
+`by + 2 >= by_end` etc.): K's decode_partition's has_rows/has_cols
+tile-edge gating may allow descents dav1d's `have_h_split`/`have_v_split`
+computation skips (or vice versa at the TILE's right edge, x=176: the
+tile spans mi cols 0-179, the last SB col at mi 176-179 straddles the
+frame edge → edge-split paths!).
+
+Compare the partition-tree NODE LIST (position+size) of tile row 2
+between the decoders: dav1d's poc lines in dav_full_trace.txt (the
+bl=1/2/3 nodes) vs K's KTRACE PART lines — the first node in dav's
+sequence ABSENT from K's (or vice versa) is the structural divergence.
+The bp values at shared nodes all matched, so the divergence is purely
+in WHICH nodes are visited — an edge-condition difference.
