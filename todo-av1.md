@@ -12597,3 +12597,57 @@ Side notes:
 - The remaining frames 5-23 diffs all start downstream of these CDEF
   units' tile row; fixing CDEF here is expected to collapse most of the
   rest, as the previous CDEF fixes did.
+
+## Session 2026-09-28 (cont'd 3) — the CDEF divergence itself pinned:
+## sbrow-boundary BOTTOM taps. dav1d reads `bot` from `lr_lpf_line` for
+## units whose taps cross the sbrow end; Kinetix reads the global pre-CDEF
+## snapshot. Same params, same input, ±1 out — on the last two rows of
+## every SB row band where a sec-only unit is active
+
+Chased the 4-sample CDEF diff at (468,190)/(470,191)/(471,191)/(476,191)
+through every layer, all of which are now PROVEN equal for the unit
+(464,184) (bx=116,by=46):
+
+- Direction tables: K's `CDEF_DIRECTIONS[8][2][2]` ≡ dav1d's
+  `dav1d_cdef_directions` (the packed `dy*12+dx` entries unpack to the
+  same (dy,dx) pairs, and dav1d's `cdef_dirs[4]`/`[0]` linear indexing
+  into the 12-row padded table is exactly K's `(dir±2) & 7`).
+- Tap weights/order: sec-only = 8 taps, weights [2,2,2,2,1,1,1,1] both.
+- Parameters: K's `KINETIX_AV1_DBG_CDEFPX=464,184` dump — pri_str=0
+  sec_str=4 damping=5 dir=0 — matches dav1d's `KDCDEF2` (the new print in
+  cdef_apply_tmpl.c's secondary-only branch, frame-gated by `KGT_OH`):
+  pri=0 sec=4 dir=1(computed)/0(passed) damping=5. K's
+  `dir = if pri_str == 0 { 0 }` already mirrors dav1d's hardcoded dir=0.
+- Edge skipping is equivalent here: every tap of this mid-frame unit is
+  in-plane, so K's OOB-skip vs dav1d's replicated padding never differs
+  for it.
+
+The divergence: all four differing samples are at rows 190-191 — the last
+two rows of SB row 2 (rows 128-191). dav1d's cdef_apply for a unit with
+`by + 2 >= by_end` fetches bottom taps from `f->lf.lr_lpf_line[pl]` at
+`line = sby * (4 << sb128) + 4 * sb128 + 2` (cdef_apply_tmpl.c, the
+`!sbrow_start && by + 2 >= by_end` arm) — a saved line buffer whose
+content is NOT byte-identical to the plain pre-CDEF snapshot row that
+Kinetix's `cdef_plane_luma` snapshot provides. Proof by output: K's
+result at (468,190) IS the snapshot semantics (150 unchanged would need
+dav1d's value; K emitted 151 from snapshot taps), dav1d emitted 150.
+
+### Next session's entry point
+
+Determine exactly what dav1d's `lr_lpf_line`/`cdef_lpf_line` hold for the
+bottom taps of an sbrow-end unit (deblock is 0 on this frame, so
+post-deblock == raw; the question is WHICH rows the `line` index selects
+and whether they were saved pre- or post-CDEF — read
+`dav1d_cdef_brow`'s line-save code and `lf_{cdef,lr}_line` fill sites,
+then either replicate the buffer semantics in `cdef_plane_luma` for
+`by + 2 >= by_end` units or prove the buffers equal the snapshot and
+re-open elsewhere). The (476,184) unit (bx=119) has its own sample
+((476,191)) and needs the same treatment — set the KDCDEF2 gate's bx to
+119 to dump it. Expected payoff: the frames 5-23 residues all start at
+rows ≈123-128/159-160/190-191 — SB-row bottom bands — so this fix should
+collapse most of the remaining non_uniform_tiling diff.
+
+Debug-state additions this session: `KDCDEF2` (cdef_apply_tmpl.c
+secondary-only branch, `KGT_OH`-gated, currently bx==116 by∈{46,47});
+`KINETIX_AV1_DBG_CDEFPX` verified working for arbitrary units;
+`POSTADD` plane dump under `KINETIX_AV1_CFTARGET` (committed cont'd 2).
