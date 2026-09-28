@@ -13079,3 +13079,43 @@ first read where either the decoded value OR the post-read (range,
 value) pair differs is the bug. All the hooks for this exist as of
 this session (K: IBSUM/B0/TRACE/SEQ; dav1d: KSKIP/KINTRA with cdf+dif,
 KCOEF with KGT_OH frame gate).
+
+## Session 2026-09-28 (cont'd 13) — the divergence pinpointed to the
+## MV-mode cascade of block (120,48): between the matched ref read
+## (post 55492 both) and the interintra read (K 37000 vs dav 46680),
+## across the four mode bools (newmv_mode / globalmv_mode / refmv_mode /
+## drl) — same CDF contexts (ctx=0x33 both sides), same count (n_mvs=3),
+## same read count
+
+The continuous (range,value) walk across all 48 tile-row-2 KSKIP anchors
+matched dav1d's dif_hi EXACTLY (value == dif_hi, confirming K's
+symbol_value and dav1d's dif_hi are the same window quantity) from the
+tile start through (120,48) — then diverged at (112,56). Pre-read states
+at (112,56) captured (K: range=63080 value=62823 f=[4381..]; dav:
+rng=33668 dif_hi=2971 f=[28387..] — complements, counts 14 both): the
+windows were already different when those reads ran, so the fault is
+EARLIER — inside (120,48)'s mode cascade.
+
+Everything before the cascade matches: skip (37860), intra (37415), the
+ref read (55492). The cascade reads: dav1d Post-intermode[1,drl=1,
+mv=y:−1,x:−1] post 49180; K's chain new_mv not=true 41044, zero_mv
+near=true 39444, ref_mv=1 ctx=3 61664, then the unprinted drl read, then
+interintra 37000 vs dav 46680. Both sides read exactly 4 bools
+(n_mvs=3: newmv, globalmv, refmv, one drl — the second drl is gated on
+n_mvs>3 on both sides, verified in source).
+
+### Next session's entry point (one capture away)
+
+Patch dav1d to print the post-read rng after EACH of the four mode bools
+for the gated block (newmv_mode / globalmv_mode / refmv_mode / drl in
+decode.c's single-ref near path ~1704-1720), rerun, and lay the four
+states against K's (41044 / 39444 / 61664 / drl-unprinted). The first
+mismatched state identifies the read whose CDF cell or arithmetic
+differs. Then compare that read's CDF cell values both sides (dav1d
+`cdf.m.newmv_mode[ctx&7]` etc. complement domain vs K's
+`map_inter_cdfs.new_mv[ctx]` spec domain) — given the frame's tile-2
+CDFs were restored from the same saved context, a cell mismatch here
+would indicate the earlier CDF-save/load divergence the cont'd-6/7
+analysis suspected (frame oh=3 restores tile CDFs from slot 0's saved
+context; a subtly different saved context would desync ONLY frames
+whose reads walk that specific cell — matching everything observed).

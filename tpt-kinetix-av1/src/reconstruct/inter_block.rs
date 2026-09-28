@@ -451,6 +451,13 @@ impl<'a> TileDecodeState<'a> {
         // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
         // syntax order.
         let skip_ctx = (above_skip + left_skip).min(2);
+        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+            let (r0, v0, mb0, bp0) = self.dec.raw_state();
+            eprintln!(
+                "KSKIPPRE mi=({mi_col},{mi_row}) sctx={skip_ctx} pre=(range={r0}, value={v0}, max_bits={mb0}, bit_pos={bp0}) f={:?}",
+                &self.mode_cdfs.skip[skip_ctx]
+            );
+        }
         let skip = if self.seg_feature_skip {
             true
         } else {
