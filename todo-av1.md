@@ -12651,3 +12651,57 @@ Debug-state additions this session: `KDCDEF2` (cdef_apply_tmpl.c
 secondary-only branch, `KGT_OH`-gated, currently bx==116 by∈{46,47});
 `KINETIX_AV1_DBG_CDEFPX` verified working for arbitrary units;
 `POSTADD` plane dump under `KINETIX_AV1_CFTARGET` (committed cont'd 2).
+
+## Session 2026-09-28 (cont'd 4) — ROOT PROVEN WITH BYTES: dav1d's
+## sbrow-end CDEF bottom taps are the POST-FILTER row below
+## (lr_lpf_line == final row values); Kinetix feeds the pre-CDEF snapshot
+## row. The fix is to replicate the line-buffer semantics
+
+Instrumented dav1d's secondary-only CDEF branch to dump `bot[0..8]` for
+the diverging unit (116,46) of frame oh=3:
+
+    KDCDEF2 pri=0 sec=4 dir=0 damping=5 sby=3 by_end=48
+    bot0_7=[182 189 188 189 150 124 128 126]
+
+Comparing three versions of frame row 192 (cols 464-471):
+
+    dav1d bot        [182, 189, 188, 189, 150, 124, 128, 126]
+    dav1d FINAL row  [182, 189, 188, 189, 150, 124, 128, 126]   <- EXACT
+    raw (pre-CDEF)   [182, 188, 187, 189, 156, 125, 126, 126]
+
+dav1d's CDEF bottom taps for the unit are the **already-filtered** row
+below — the `lr_lpf_line` saved line — NOT the pre-CDEF snapshot row.
+Kinetix's `cdef_plane_luma` filters from a whole-frame pre-CDEF snapshot,
+so its bottom taps carry raw values (156/125/126 where dav1d uses
+150/124/128), producing the ±1s at rows 190-191. `KGT_OH`-gated
+`KDCDEF2` now also dumps `sby`/`by_end`/`bot0_7` for exactly this class
+of investigation.
+
+Mechanism (dav1d source): `dav1d_copy_lpf` (lf_apply_tmpl.c) saves rows
+around each sbrow boundary into `lr_lpf_line` AFTER that sbrow's
+loop-filter stage has run — so by the time unit rows reach the sbrow end,
+the line below is post-filter. The `!sbrow_start && by + 2 >= by_end`
+arm of cdef_apply_tmpl.c then hands those saved lines to the filter as
+`bot`/`top`. (The buffer addressing — negative-pointer base, per-sbrow
+4-line slots, `line = sby*4 + 2 + sb128` — is in lf_apply_tmpl.c's
+`backup_lpf`.)
+
+### The fix (next session)
+
+In `cdef_plane_luma`, replace the snapshot's raw rows with the saved-line
+semantics for bottom taps: process SB rows bottom-up is NOT what dav1d
+does — it processes top-down but each sbrow's bottom taps read the line
+saved when the stage below ran; the equivalent whole-frame formulation
+is: **run CDEF per SB row top-down, and for units whose bottom taps
+cross the SB row's end (by+2 >= by_end), read the below rows from the
+already-filtered output rows below (the in-place plane), while reading
+everything else from the pre-CDEF snapshot.** I.e. dav1d's effective
+semantics = snapshot for the unit's own rows/top, in-place filtered for
+the sbrow-bottom lines. Verify with the captured unit: pixels
+(468,190)→150, (470,191)→126, (471,191)→126, (476,191)→122 must come out
+exactly; then re-run probe_tiles (frames 3-23 residues all sit on SB-row
+bottom bands — expect a large collapse) and the official FATE.
+
+If the top-down/in-place formulation mismatches on the TOP taps at
+sbrow starts, dump dav1d's `top` the same way (the print already sits
+next to the bot fetch) and adjust — the same buffer family serves both.
