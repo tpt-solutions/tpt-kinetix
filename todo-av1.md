@@ -12847,3 +12847,42 @@ tile-2 payload slice (84 bytes, `KINETIX_AV1_DBG_TILE_BYTES` hex)
 against dav1d's tile-2 bytes (patch a dump of `ts->tile` in
 cdef/decode or read the IVF packet bytes directly: frame 3's tile 2
 starts at group offset 1(hdr)+1+10+1+30+1 = 44, length 84).
+
+## Session 2026-09-28 (cont'd 8) — self-correction: the "identical
+## pre-state" claim at (112,56) was premature. The KSKIP anchors only
+## bracket the reads; everything between them (UV modes, filters,
+## COEFFICIENTS) was never compared, and the coefficients are the prime
+## suspect (skip=0 blocks carry residual syntax; the divergence block
+## (120,48) is skip=0 and its coefficients were never traced)
+
+What holds (verified): the KSKIP/KINTRA *sequences* (mi, skip value,
+sctx, intra value) match through tile 2 up to (112,56), where K reads
+skip=0 and dav1d skip=1 — but those prints sample only two of the many
+reads per block. The EC state between anchors was never compared, so the
+desync's true location is somewhere in (120,48)'s or (118,52)'s
+remaining syntax — most likely the coefficient reads of the skip=0
+blocks (K's per-TX hooks: KINETIX_AV1_DBG_ALLZERO / _EOB / CFTARGET;
+dav1d's: KINETIX_DBG_COEFF_BLK=plane,bx,by with the KGT_OH frame gate —
+both sides' prints now carry cdf cells and EC state).
+
+Also verified this round (dismissed for good):
+- Frame oh=3's tile group payload is ~210 bytes in BOTH decoders
+  (tiles 10/30/84/86, n_bytes=1); K's split parses it correctly. The
+  "1098-byte group" was an earlier frame's print.
+- K's tile-2 payload slice = the full 84 bytes (DBG_TILE_BYTES hex),
+  NOT truncated; bit_pos=511 at the divergence is mid-buffer (672-bit
+  payload). The max_bits==bit_pos coincidence is the init arithmetic
+  (max_bits = 672−15−renorm_bits), not a refill ceiling.
+- dav1d's `bot` for the catch-band unit is literally the in-place
+  picture row (botrow=192 probed) — the "lr_lpf_line post-filter"
+  interpretation was tracking the desync's cascade, not a CDEF rule.
+
+### Next session's entry point (unchanged target, honest method)
+
+Per-read comparison of tile row 2 from its FIRST block: walk K's
+KTRACE/KSKIP/ALLZERO/EOB prints against dav1d's KSKIP/KINTRA/KCOEF
+family (frame-gated via KGT_OH=3), position-filtered to mi rows 48-63.
+The first EC-state mismatch — now defined as "the first read whose
+post-read rng differs at the same position" — is the buggy read. Given
+the block at (120,48)/(118,52) are skip=0, expect it in coefficient
+reading (the ALLZERO/eob/base-token path) within the first two blocks.
