@@ -10694,15 +10694,56 @@ difference is chroma (U 14 samples, deltas +-1..3; V 59 samples, deltas up to
 **-64**). Stage bisection:
 
 - `KINETIX_AV1_NOFILTER=1` makes it *worse* (3654 bytes) and the blockmap is
-  **all edge-only `e`, zero interior `X` on every plane** - i.e. the
-  pre-filter reconstruction is correct and the divergence is introduced by the
-  post-filters, not by prediction/transform/residual.
+  all edge-only `e`, zero interior `X`. **This does NOT show the pre-filter
+  recon is correct** - see the correction below; the comparison is unfiltered-
+  Kinetix vs *filtered* dav1d, so it is confounded.
 - With filters on, luma is **byte-exact** and only chroma diverges. CDEF's
   chroma pass is legitimate (§7.15.3 filters chroma with `CdefDamping - 1`), so
   the "post-cdef changes the V value" observation from the `CPXY` tracer is not
   itself a bug - what matters is that the *final* value disagrees with dav1d.
-- So: **luma deblock + CDEF are exact; chroma deblock is not.** That is the
-  narrow statement the evidence supports.
+
+**CORRECTION (next session, same repro).** This note's conclusion - "chroma
+deblock is not exact, pre-filter recon is correct" - is **wrong**, and two
+things above misled it:
+
+1. The `NOFILTER` run compares *unfiltered* Kinetix against *filtered* dav1d.
+   It can only ever show differences where filters act, so "all edge-only" is
+   what a correct reconstruction looks like **and** what a wrong one that
+   happens to differ only near edges looks like. It is not evidence of a
+   correct pre-filter recon. A proper check needs a filtered Kinetix vs
+   unfiltered dav1d pair, and `-skip_loop_filter` is **not supported by this
+   environment's libdav1d build** ("Codec AVOption skip_loop_filter is not an
+   encoding option"), so that comparison is not available here.
+2. Tracing the actual diverging pixels with `KINETIX_AV1_DBG_CPXY` shows the
+   value is **already wrong before deblock**, by far more than any filter
+   could account for:
+
+   | pixel (V) | Kinetix pre-deblock | Kinetix post-filters | dav1d final |
+   |---|---|---|---|
+   | (32,20) | 28 | 26 | 20 |
+   | (33,22) | 96 | 97 | 105 |
+   | (44,29) | 190 | 191 | 222 |
+
+   Deblock+CDEF move these by at most 1-2, but they miss dav1d by 8-32. So the
+   divergence is in **chroma reconstruction/prediction, before the filters**,
+   not in chroma deblocking. (The `d.yuv` reference here is the *whole* 2-frame
+   raw dump - the second frame starts at byte 18432; comparing against offset 0
+   is an easy way to get nonsense V values.)
+
+Also tested and **ruled out**: AV1 OBMC being applied to chroma. §7.11.3.9 reads
+as luma-only, and `inter_block.rs:1830` does loop `for plane in 0..3`, so this
+looked like a real bug - but restricting it to `plane == 0` made the repro
+*worse* (73 -> 131 differing bytes) and `KINETIX_AV1_NOOBMC=1` is worse still
+(241 bytes, luma broken). Chroma OBMC is load-bearing here, so the loop is
+correct as written and was left alone.
+
+Block coverage of the two V patches (from `KINETIX_AV1_DBG_PRED`): patch 1
+(cpx 32..37, 20..24 = luma ~64..75, 40..49) is covered by `mi=(16,11)
+bw=2 bh=1 skip=false mv=(32,-16)` - a 8x4 sub-8x8 inter leaf. Patch 2 (cpx
+43..51, 27..36) is near `mi=(22,18) bw=2 bh=2 dir1_h=1 mv=(-8,10)`. Both are
+sub-8x8 / subpel-chroma cases, so the sub-8x8 chroma path and the
+`hbits/vbits = 3 + subsampling` chroma phase remain the suspects - but the
+evidence now points at chroma **MC position**, not at the filters.
 
 Diff geometry (chroma coords, `cpx`): U diverges in one 4x4-aligned patch at
 cpx x=32..35, y=20..25 (luma 64..71, 40..51). V diverges in two patches:
@@ -10729,8 +10770,10 @@ is exactly why this class of bug was invisible: a luma-only map reports
 
 1. The chroma bug above is the highest-value target: it is the only *default-
    path* regression currently known, it is 2 frames / 73 bytes, and it is
-   already reduced to "chroma deblock or chroma MC position, luma exact".
-   Start from the V patch at cpx x=32..37, y=20..24 and check the chroma MC
-   base position for sub-8x8 inter blocks against dav1d.
+   reduced to **chroma MC position (pre-filter), luma byte-exact** - see the
+   CORRECTION paragraph, which supersedes the earlier "chroma deblock" claim.
+   Start from the V patch at cpx x=32..37, y=20..24, whose block is
+   `mi=(16,11) bw=2 bh=1` (an 8x4 sub-8x8 leaf, mv=(32,-16)) - check the chroma
+   MC base position / sub-8x8 quadrant scheme against dav1d.
 2. `capabilities().pixel_exact` still `false` - correct, and further from true
    than cont'd 22 suggested: the feature corpus is 1/13.
