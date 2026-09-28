@@ -11187,3 +11187,183 @@ revisited and is very likely still blocking that approach.
    burned a session each without one.
 4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
    `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged.
+
+### Session cont'd 27 — the bin-by-bin coefficient-entropy audit cont'd 25/26
+### scoped was actually done this time; it found NO discrepancy anywhere in
+### the coefficient-decode syntax/context/CDF-adaptation logic for the target
+### TU. Bug still open; the remaining suspects are now narrowed to two very
+### specific, previously-unaudited things: static default-CDF table
+### transcription errors, and the `dav1d_fresh` oracle being unusable
+
+Baseline re-confirmed exactly: `t2.ivf` frame 1 = U 14 / V 59 / Y 0 (73 total
+diff bytes), byte-identical breakdown to cont'd 23-26. Re-created
+`tpt-kinetix-test-utils/tests/dbg_av1_t2_repro.rs` from cont'd 26's
+description (still not committed, same "no unlanded throwaway harness"
+convention as every prior session).
+
+**Did the actual thing cont'd 25 scoped and cont'd 26 skipped**: added a new
+temporary, gated trace (`KINETIX_AV1_DBG_C27`, in `coeff.rs`'s `read_coeffs`,
+hardcoded to fire only for `blk.plane == 2 && blk.x4 == 8 && blk.y4 == 5` —
+the V-plane TX_4X4 block at chroma cpx=(32,20), confirmed via
+`KINETIX_AV1_DBG_RESDUMP` to be exactly `mi=(16,11)`'s block, `eob=3`,
+`dequant=[-280,0,0,0,-176,...]`, matching every prior session's numbers
+exactly) that dumps, for every scan position visited: the `is_eob`/
+`coeff_base` context value, the raw symbol read, the resulting level, every
+`coeff_br` extension step, the final signed `quant[pos]`, and the range
+decoder's `rng` after each read. Also traced `read_eob` (added a
+`C27 pre-eob`/`C27 post-eob` pair printing `tx_size`, `tx_type`,
+`tx_sz_ctx`, `ptype`, `tx_class`, and the resolved `scan` table).
+
+**Hand-derived the expected value at every one of those steps directly from
+the AV1 spec's `coeffs()`/`get_coeff_base_ctx()`/`get_coeff_br_ctx()`
+pseudocode (not from code comments, which this bug hunt has repeatedly
+found to be subtly wrong) and compared bin-by-bin. Every single value
+matched:**
+
+- `tx_type=4` (`FLIPADST_DCT`), `tx_class=TX_CLASS_2D` (confirmed: neither
+  `V_*` nor `H_*`, so it falls into the `_ => TX_CLASS_2D` arm of
+  `get_tx_class`) — correct per spec, `get_scan` therefore returns
+  `DEFAULT_SCAN_4X4 = [0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15]`, independently
+  checked against the spec's `Default_Scan_4x4` table value-for-value —
+  matches.
+- `eob=3` → scan positions visited are raster positions `{0, 1, 4}`
+  (`scan[0..3]`), processed in **reverse** scan order per spec (`c=2,1,0` →
+  `pos=4,1,0`), exactly as coded.
+- `c=2` (the last/EOB position, `pos=4`, `row=1,col=0`): `is_eob` branch —
+  hand-computed `height=4`, `bwl=2`, `(height<<bwl)/8 = 2`, `c=2 <= 2` →
+  spec ctx `1` (of `0..4`) — **matches the trace's `ctx=1` exactly**.
+  `coeff_base_eob` symbol `0` → `level=1`. `1 <= NUM_BASE_LEVELS` so no
+  `coeff_br` extension. `quant[4]=1` — matches `dequant[4]=-176` once you
+  apply the sign read later (`176 * 1 = 176`, sign flips it negative — see
+  below).
+- `c=1` (`pos=1`, `row=0,col=1`, not EOB): hand-walked
+  `SIG_REF_DIFF_OFFSET[TX_CLASS_2D] = [[0,1],[1,0],[1,1],[0,2],[2,0]]` from
+  `(row=0,col=1)` — every one of the 5 neighbour cells (`quant[2]`,
+  `quant[5]`, `quant[6]`, `quant[3]`, `quant[9]`) is still `0` at this point
+  in the reverse walk (only `quant[4]` has been set so far, and none of the
+  5 offsets land on position 4) → `mag=0` → `ctx_computed=0` →
+  `+ COEFF_BASE_CTX_OFFSET[TX_4X4][0][1] = 1` → **spec ctx `1`, matches the
+  trace exactly**. Symbol `0` → `level=0` → `quant[1]=0` — matches
+  `dequant[1]=0`.
+- `c=0` (`pos=0`, DC, `row=0,col=0`): spec's `TX_CLASS_2D` special case
+  (`row==0 && col==0` → `ctx=0` unconditionally, no neighbour scan) —
+  **matches the trace's `ctx=0` exactly**. Symbol `2` → `level=2` (still
+  `<= NUM_BASE_LEVELS`, no `coeff_br`) → `quant[0]=2` — matches
+  `dequant[0]=-280` once signed (`140 * 2 = 280`).
+- Sign pass, forward scan order (`pos=0,1,4`): `pos=0 == scan[0]` → uses
+  `dc_sign_ctx` (the one context-coded sign) → `sign=true` → `quant[0]=-2`.
+  `pos=1`: `quant[1]==0` so the spec's `if (quant[pos] != 0)` guard means
+  **no sign bit is read at all** — confirmed in the trace: `rng` is
+  unchanged across that line, i.e. zero bits consumed, exactly as spec
+  requires. `pos=4`: nonzero, not the DC position, so a plain
+  `read_literal(1)` sign bit (not the context-coded one) — `sign=true` →
+  `quant[4]=-1`. Every one of these branches matches spec's syntax
+  structure exactly, including the easy-to-get-wrong "zero coefficients
+  consume no sign bit" case.
+- Independently re-derived, from **dav1d's real (ICDF-inverted) `msac.c`
+  `update_cdf`** rather than from a possibly-misremembered spec paraphrase
+  (a first attempt at recalling the spec's `update_cdf` pseudocode from
+  memory got the `tmp` initial-value/flip-point backwards; converting
+  dav1d's actual ICDF-domain update back to Kinetix's non-inverted CDF
+  convention resolved the ambiguity independently rather than trusting
+  memory): Kinetix's `entropy.rs::read_symbol` adaptation loop (`tmp` starts
+  at `0`, flips to `32768` at `i == symbol` and stays there) is the
+  **correct** direction for a non-inverted, increasing-CDF representation —
+  confirmed by hand-tracing a concrete example (`symbol=2` in a 4-symbol
+  alphabet: `cdf[0]`/`cdf[1]` should decrease toward 0 since `X=2 > 0,1`,
+  and `cdf[2]` should increase toward 32768 since `X<=2` — exactly what the
+  code does). **Not a bug.** (This re-confirms, independently, the same
+  conclusion the 2026-08-27 CDF-rate-formula session already reached from a
+  different angle — see `todo-av1.md`'s "AV1 CDF rate formula regression"
+  memory — but this session verified the adaptation *direction*, a
+  different part of the same function, not just the *rate*.)
+
+**Net result: every syntax element, every context-index formula, the scan
+table, the tx_type derivation, the sign/Golomb path, and the CDF adaptation
+direction for this exact TU are all independently confirmed spec-correct,
+given whatever entropy-decoder state (`rng`/`val` and the live, adapted CDF
+tables) existed at the moment this block's `coeffs()` call began.** This is
+a strictly narrower and more useful negative result than cont'd 26's
+"inspected by eye, no bug spotted" — every value was independently
+hand-derived from spec pseudocode first, then compared against the trace,
+not the other way around.
+
+**What this rules the bug out of, precisely:** the `coeffs()` syntax
+structure itself, `get_coeff_base_ctx`/`get_coeff_br_ctx`'s formulas, the
+`DEFAULT_SCAN_4X4` table contents, `get_tx_class`'s dispatch, the
+inter-chroma `compute_tx_type`/`get_uv_inter_txtp` passthrough (already
+independently re-derived this session from dav1d's real
+"per-coded-block `b->txtp`, only updated by non-skipped luma leaves"
+semantics applied to *this specific block's own two leaves* — leaf 1
+`(64,44)` is skipped (`eob=0`, doesn't call `transform_type()`, doesn't
+update `b->txtp`), leaf 2 `(68,44)` is non-skip and sets `b->txtp =
+FLIPADST_DCT`; chroma is read after both, so it correctly inherits
+`FLIPADST_DCT` — this is NOT a coincidental one-entry-list artifact as
+cont'd 25 worried, it is the actually-intended value for this block by
+dav1d's own model), and `read_symbol`'s CDF-update direction.
+
+**What is NOT yet ruled out, and is now the most concrete remaining lead:**
+the **static default CDF initialization tables** themselves
+(`entropy_cdf.rs`'s `DEFAULT_TXB_SKIP_CDF`, `DEFAULT_COEFF_BASE_EOB_CDF`,
+and the sibling `DEFAULT_COEFF_BASE_CDF`/`DEFAULT_COEFF_BR_CDF` tables) for
+the specific `[qctx][tx_sz_ctx=TX_4X4][ptype=1 (chroma)]` slice. These are
+large, mechanically-transcribed multi-dimensional tables (`DEFAULT_TXB_SKIP_
+CDF: [[[[u16;3];13];5];4]`, `DEFAULT_COEFF_BASE_EOB_CDF:
+[[[[[u16;4];4];2];5];4]`, i.e. thousands of individual constants) that this
+session's context-index audit cannot catch: getting the *index formula*
+right (which this session verified) says nothing about whether the actual
+*probability values* stored in the chroma slice of these tables are
+byte-for-byte what the spec's default-CDF appendix specifies. A single
+transposed or mistyped entry in the *chroma-only* slice of one of these
+tables would be invisible to every non-chroma test (explaining why Y is
+perfectly exact and only isolated chroma blocks are wrong), would survive
+this session's context-formula audit entirely, and — since it's a *default
+init* value that then gets adaptively nudged frame over frame — would be
+very hard to spot from final adapted CDF values alone. Nobody in this bug
+hunt has yet byte-compared these specific tables' chroma rows against the
+spec's actual default-CDF appendix numbers; this session ran out of budget
+to attempt it (these tables are large enough that eyeballing them without
+an automated cross-reference against a machine-readable copy of the spec
+appendix risks exactly the kind of memory-based transcription error this
+bug hunt has been burned by before — see the `update_cdf` tmp/direction
+near-miss above, caught only because it was cross-derived from dav1d source
+instead of trusted from memory).
+
+**Files changed and committed:** `coeff.rs`'s `KINETIX_AV1_DBG_C27` trace
+hook (new, permanent debug infrastructure, gated behind an env var, zero
+behavioural change to the decoder — verified via `cargo test -p
+tpt-kinetix-av1` (all pass, same as baseline) and
+`tpt-kinetix-test-utils`'s `conformance` test (byte-identical to cont'd
+25/26: intra 6/6, inter corpora 5/5 × 4 clips all bit-exact, feature corpus
+still 1/13, identical per-tool PSNR numbers)). **No fix was found or
+committed** — per this crate's rule, nothing without a measured improvement
+gets committed as a behavioural change, and this session's exhaustive audit
+came up empty on the TU itself. The throwaway `dbg_av1_t2_repro.rs` harness
+was recreated and used but, per convention, not committed.
+
+#### Next session's starting point
+
+1. **Best lead now:** cross-reference `entropy_cdf.rs`'s `DEFAULT_TXB_SKIP_
+   CDF`, `DEFAULT_COEFF_BASE_EOB_CDF`, `DEFAULT_COEFF_BASE_CDF`, and
+   `DEFAULT_COEFF_BR_CDF` tables' **chroma (`ptype=1`) rows at `tx_sz_ctx=0`
+   (`TX_4X4`)** against the AV1 spec's actual default-CDF appendix values
+   (fetchable from `raw.githubusercontent.com/AOMediaCodec/av1-spec`,
+   confirmed reachable — see the 2026-08-23 "AV1 spec WebFetch available"
+   memory) — ideally with a small script that pulls both into comparable
+   arrays rather than eyeballing, since these tables are too large to
+   safely hand-check without a mechanical diff. This is the one input to
+   this exact TU's decode that this session's audit did NOT (and
+   structurally could not, via context-formula reasoning alone) verify.
+2. Do not re-attempt Hypothesis A (persistent frame-global `TxTypes` grid)
+   or Hypothesis B (`.first()` → `.last()` in `co_located_luma_type`) from
+   cont'd 26 — both are proven regressions, and this session's independent
+   re-derivation of dav1d's real per-block `b->txtp` semantics reconfirms
+   `.first()` (on this block's one-entry list) is the actually-correct
+   value, not a lucky coincidence.
+3. Fixing `dav1d_fresh`'s `DEBUG_BLOCK_INFO` segfault (inherited grid-dump
+   instrumentation in `decode.c`/`obu.c`, per cont'd 25) remains the other
+   viable path to a real independent oracle trace, still not attempted by
+   any session so far.
+4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
+   `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged — fourth
+   consecutive session confirming the exact same numbers, no regression.

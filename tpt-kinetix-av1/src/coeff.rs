@@ -578,7 +578,31 @@ pub fn read_coeffs(
             ))
         })?;
 
+        let dbg_c27 = std::env::var("KINETIX_AV1_DBG_C27").is_ok()
+            && blk.plane == 2
+            && blk.x4 == 8
+            && blk.y4 == 5;
+        if dbg_c27 {
+            eprintln!(
+                "C27 pre-eob plane={} x4={} y4={} tx_size={tx_size} tx_type={tx_type} \
+                 tx_sz_ctx={tx_sz_ctx} ptype={ptype} tx_class={} rng={} val={}",
+                blk.plane,
+                blk.x4,
+                blk.y4,
+                get_tx_class(tx_type),
+                dec.raw_state().0,
+                dec.raw_state().1
+            );
+        }
         eob = read_eob(dec, cdfs, tx_size, tx_sz_ctx, ptype, tx_type)?;
+        if dbg_c27 {
+            eprintln!(
+                "C27 post-eob eob={eob} scan={:?} rng={} val={}",
+                scan,
+                dec.raw_state().0,
+                dec.raw_state().1
+            );
+        }
         // `KINETIX_AV1_DBG_EOB` traces one block, mirroring dav1d's
         // `KINETIX_DBG_COEFF_BLK=plane,bx4,by4` (note: that dav1d selector
         // originally mis-parsed its third field from the first comma, so
@@ -639,6 +663,20 @@ pub fn read_coeffs(
                 dec.read_symbol(&mut cdfs.coeff_base[tx_sz_ctx][ptype][ctx]) as u32
             };
 
+            if dbg_c27 {
+                let ctx_dbg = if c == eob - 1 {
+                    coeff_base_ctx(tx_size, tx_type, &quant, pos, c, true) + SIG_COEF_CONTEXTS_EOB
+                        - SIG_COEF_CONTEXTS
+                } else {
+                    coeff_base_ctx(tx_size, tx_type, &quant, pos, c, false)
+                };
+                eprintln!(
+                    "C27 mag c={c} pos={pos} is_eob={} ctx={ctx_dbg} level_pre_br={level} rng={}",
+                    c == eob - 1,
+                    dec.raw_state().0
+                );
+            }
+
             if level > NUM_BASE_LEVELS {
                 let br_ctx = coeff_br_ctx(tx_size, tx_type, &quant, pos);
                 let br_tx_ctx = tx_sz_ctx.min(TX_32X32);
@@ -646,12 +684,21 @@ pub fn read_coeffs(
                     let coeff_br =
                         dec.read_symbol(&mut cdfs.coeff_br[br_tx_ctx][ptype][br_ctx]) as u32;
                     level += coeff_br;
+                    if dbg_c27 {
+                        eprintln!(
+                            "C27 br c={c} pos={pos} br_ctx={br_ctx} coeff_br={coeff_br} level_now={level} rng={}",
+                            dec.raw_state().0
+                        );
+                    }
                     if coeff_br < BR_CDF_SIZE - 1 {
                         break;
                     }
                 }
             }
             quant[pos] = level as i32;
+            if dbg_c27 {
+                eprintln!("C27 quant[{pos}]={} rng={}", quant[pos], dec.raw_state().0);
+            }
         }
 
         // Signs and the Exp-Golomb tail, in forward scan order.
@@ -678,6 +725,13 @@ pub fn read_coeffs(
             cul_level += quant[pos] as u32;
             if sign {
                 quant[pos] = -quant[pos];
+            }
+            if dbg_c27 {
+                eprintln!(
+                    "C27 sign pos={pos} sign={sign} final_quant={} rng={}",
+                    quant[pos],
+                    dec.raw_state().0
+                );
             }
         }
         cul_level = cul_level.min(63);
