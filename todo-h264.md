@@ -5846,6 +5846,48 @@ or decode walk (the usual suspects: the B mb_type binarization
 `1,1,1,1,1,1` suffix termination or the direct/explicit boundary
 value).
 
+## SESSION #32d4 ADDENDUM 30 (2026-09-28, continuation) - the 9 diverging MBs are B_Skip (mb_type 0) in JM; JM computes B_Skip MVs OUTSIDE update_direct_mv_info_temporal (no JMT/JM_COL for them); ours routes B_Skip through apply_temporal_direct + colocated reads - the paths must be reconciled
+
+`JBT` probe (JM decode_one_macroblock, gate framepoc==119,
+`ldecod_jbt.exe`/`jbt.log`): the 9 ours-only MBs - (2,8), (4,4), (4,5),
+(8,4), (8,5), (11,5), (13,8), (19,8), (+1) - ALL decode as
+`type=0 m=0,0,0,0 p=2,2,2,2` in JM = **B_Skip macroblocks**.
+
+JM never called `update_direct_mv_info_temporal` for them (no JMT/JM_COL
+lines): JM computes B_Skip MVs in `mb_pred_skip`/the skip-specific path
+(`read_skip_flag_CABAC_b_slice` sets mb_type 0 and the MVs are derived
+elsewhere - find JM B_Skip MV derivation: `mb_pred_skip` in
+`mb_prediction.c` + the `update_direct...` call graph for mb_type==0).
+OURS: the KCOL119 probe fires inside `apply_temporal_direct` for these
+MBs (our B_Skip arm routes through apply_temporal_direct + the poc-121
+colocated reads) - our B_Skip MVs = temporal-direct-scaled from the
+poc-121 grid reads (e.g. mv0=(-2,0) at MB(2,8)).
+
+JM B_Skip MVs for comparison: patch `mb_pred_skip`-adjacent code with a
+gate framepoc==119 print of the skip MVs per MB (or read them from
+`/tmp/jmall/jm_poc119_postdeblock.gray`-style grid dumps - JM JMG for
+poc 119 shows the final per-cell MVs including skip MBs: diff JMG(119)
+vs ours to enumerate the skip-MV differences directly).
+
+THE CLASS: all-4-quadrant-direct MBs at scattered positions concentrated
+in field-MB rows 6-8 - matching the 556-sample poc-119 error and the
+bottom-field concentration of every wrong frame. The pre-deblock
+reconstruction for poc-119 was 556/135 - exactly these MBs.
+
+NEXT SESSION: (1) diff JM JMG(119) per-cell MVs vs our stored poc-119
+grid (KGRID-style dump of our poc-119 mv_store - the dump hook exists:
+KINETIX_DUMP_MVGRID_POC) to enumerate the per-MB skip-MV diffs; (2)
+diff JM `mb_pred_skip` B_Skip MV derivation vs ours for the field-B
+path (our field-B BSkip arm: apply_temporal_direct over the colocated
+poc-121 reads vs JM skip path - find where JM computes B_Skip MVs for
+direct_spatial==0 field slices); (3) fix our field-B B_Skip to match.
+
+Housekeeping: probes removed (tree = 222bc92 + 32ade30 + 9d8115f +
+previous commits, clean); JM tooling: `ldecod_jbt.exe` (JBT per-MB
+types, gate framepoc==119), `ldecod_col9.exe`, `ldecod_jmt2.exe`,
+`ldecod_grid121.exe`, `ldecod_bin91.exe`, `ldecod_colall.exe` - traces
+in /tmp/jm_bin.
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
