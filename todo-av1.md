@@ -13119,3 +13119,23 @@ would indicate the earlier CDF-save/load divergence the cont'd-6/7
 analysis suspected (frame oh=3 restores tile CDFs from slot 0's saved
 context; a subtly different saved context would desync ONLY frames
 whose reads walk that specific cell — matching everything observed).
+
+## Session 2026-09-28 (cont'd 14) — closing state
+
+The per-bool print insertion inside dav1d's NEAR path was attempted and
+REVERTED (the multi-line fprintf escaping through the bash heredoc
+corrupts the C string — same failure mode as the earlier KDCDEF2/KGTG
+escapes; a future attempt should write the patch via a Python file with
+the `\n` escape written as `+ chr(92) + 'n'` concatenation, or patch a
+single-line fprintf). dav1d scratch tree builds clean; its accumulated
+session hooks: KGMVS mvstack dump (single-ref call, `KGT_OH` + by==48 &&
+(bx&15)==8 gate — note the widened gate covers (120,48)=(bx 120: 120&15=8
+✔)), KSKIP with cdf+dif_hi, KINTRA with dif_hi, KSKIPPRE, KDBOT5/KDCDEF2
+(cdef), KGT_OH-gated KCOEF with unmasked mi, KGQUANT, KGPCDF, KGTILING/
+KGTG/KGTILE, retargetable DEBUG_BLOCK_INFO (frame_offset from recon.h)
+and DEBUG_B_PIXELS.
+
+Final verification state: non_uniform_tiling 6/24, official FATE 9/195,
+165 lib tests pass, clippy clean, fmt clean. The single remaining
+investigation thread (the four mode-bool post-states in (120,48)'s
+cascade) is one capture away as documented in cont'd 13.
