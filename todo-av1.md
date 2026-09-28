@@ -13245,3 +13245,58 @@ skips them.
    re-run the walk: the sequences must align 1:1 for the whole tile,
    the (112,56) skip flip disappears, and the tile-2/3 cascade plus
    frames 5-23 residues should collapse. FATE aggregate then re-runs.
+
+## Session 2026-09-28 (cont'd 17) — THE ROOT CAUSE, DEFINITIVE:
+## dav1d's tile-2 sbrow sequence (828 reads) is a strict SUBSEQUENCE of
+## K's (934 reads) — LCS = 828 = dav's full length. K performs 106 extra
+## entropy reads that dav1d never performs; all 828 shared reads match
+## byte-for-byte. The extra reads are LR restoration symbols read at
+## wrong SB positions, and their CDF adaptation drifts K's cells until a
+## shared read (the (112,56) skip) flips
+
+The sequence walk (cont'd 15's tooling) with correct per-sbrow
+segmentation on dav1d's side (KSEQSBROW markers — note: dav1d's
+setup_tile markers print at frame INIT for all tiles, useless for
+segmentation; the marker now lives at decode_tile_sbrow top) and
+per-tile on K's side, LCS-aligned:
+
+    dav (f3, sbrow r2): 828 reads — a strict subsequence of K's
+    K   (n4, tile 2):   934 reads — 106 K-ONLY events, 0 DAV-ONLY
+
+The 106 extra reads (K idx 0, 1, 9, 14, 20, 31, 43, 54, 55, 64, 70, 82,
+94, 105, ... ≈ 1 per block + 2 at the tile start) are zero-cost to the
+EC window (each extra read's post state leaves the window untouched —
+proven: after every extra read the shared sequences realign exactly),
+but each one ADAPTS its CDF cell. Over the tile, K's CDF cells drift
+from dav1d's, and when a shared read uses a drifted cell near a decision
+boundary it decodes a different symbol — the (112,56) skip flip.
+
+The extra reads are LR restoration symbols: K's `read_lr`
+(reconstruct/partition.rs:132) reads LR restoration-type/coeff symbols
+per SB whenever the SB's mi-row range OVERLAPS an LR unit row range,
+while dav1d (decode.c read_restoration_info call sites, ~2669-2716) reads
+them only when: the plane's restore_planes bit is set, the SB's pixel
+row `y = by*4` is UNIT-ALIGNED (`y & (unit_size-1) == 0`), the
+frame-bottom check passes (`y == 0 || y + half_unit <= h`), and per
+column `x & mask == 0` / `x == 0 || x + half_unit <= w`. K lacks the
+alignment/boundary skips, so K reads LR symbols at SBs dav1d skips (and
+ vice versa), accumulating 106 extra reads in this tile.
+
+### THE FIX (next session, mechanical)
+
+Rewrite K's `read_lr` SB-position gating to dav1d's exactly:
+1. Per SB: for p in 0..3, skip plane if `!restore_planes[p]`.
+2. `y = mi_row * 4 >> ss_ver`; `unit_size = lr_unit_size[p]`;
+   skip the plane for this SB if `y & (unit_size - 1) != 0`.
+3. Skip if `y != 0 && y + unit_size/2 > frame_h` (round-half-up).
+4. Per unit column x: skip if `x & (unit_size-1) != 0`; skip if
+   `x != 0 && x + unit_size/2 > frame_w`.
+5. The unit indices come from the aligned position (not from div_ceil
+   overlap ranges).
+Then re-run the sequence walk: tile-2's 934 vs 828 must become equal
+length with zero events; frame 3's tile-2/3 cascade and frames 4+
+residues should collapse; the FATE aggregate re-runs.
+
+The same read_lr mis-gating explains the earlier per-SB "read_lr" debug
+prints at empty ranges (sb=(16,0) rows=1..1) and the frame-level LR
+unit desyncs seen on other streams.
