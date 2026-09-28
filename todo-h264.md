@@ -4579,6 +4579,37 @@ locate the true error concentration.
 
 JM tooling: `ldecod_grid119.exe` + `grid119.log` (JMG poc 119).
 
+## SESSION #32d4 ADDENDUM 34 (2026-09-28, continuation) - poc-119 per-MB pixel diff: TWO error classes — (A) bottom MB row 8, nd~200/MB, max 8-10 (edge effect); (B) column 16-17 rows 2-3, max 38-135 (real MV/pred error); the 9 B_Skip MBs are NOT hotspots
+
+Per-MB pre-deblock pixel diff of poc-119 bottom field (ours
+`fb5_bpre_poc119_bottomtrue.gray` vs JM `jm_poc119_predeblock.gray`):
+total 1732 luma samples wrong, 17 of 198 MBs. TWO spatial classes:
+
+CLASS A — bottom MB row 8 (the LAST field MB row): MB(9,8) nd=219,
+MB(11,8) nd=225, MB(10,8) nd=211, MB(12,8) nd=207 — max only 8-10.
+Low-magnitude systematic error at the bottom edge. NOT the B_Skip MBs
+(the B_Skip MBs from addendum 30 are at rows 4-8 cols 2-19 but do NOT
+appear as pixel hotspots). Candidate: MC reference-edge handling at the
+bottom of the field (padding/boundary extension difference), or the
+bottom-row deblocking-adjacent reconstruction.
+
+CLASS B — column 16-17, rows 2-3: MB(17,2) nd=128 max=135, MB(17,3)
+nd=126 max=64, MB(16,2) nd=125 max=96, MB(16,3) nd=64 max=38. HIGH max
+= real prediction/MV error at a specific location. The colocated
+poc-121 grid at these MBs should be probed (KCOL-style gated
+current_poc==119 && mbx∈{16,17} && mby∈{2,3}).
+
+Plus scattered: MB(9,7)/(10,7) nd 79-90, MB(11,0) nd=52 max=42,
+MB(7,2) nd=42 max=41, MB(8,6)/(9,6) nd 45-48.
+
+NEXT SESSION: (1) for class A, check our field MC bottom-edge handling
+(the reference picture bottom boundary for field MC — our field path
+may extend/reference one row short at the bottom); (2) for class B,
+probe the colocated poc-121 grid cells at MB(16-17, 2-3) and the mv0
+values — the high max suggests a wrong reference or wrong MV, possibly
+the B_Skip→direct conversion for a NEIGHBOURING B_Skip MB affecting
+the MV predictor for these explicit MBs.
+
 ## SESSION #32d4 ADDENDUM 26 (2026-09-28, continuation) - clean re-extract CONFIRMS bin 7 divergence; refinement: it is MB(1,0) mb_skip_flag with a skip-variant STATE divergence
 
 A clean re-extraction (proper NAL-91 span) confirms addendum 21: bins
