@@ -5888,6 +5888,40 @@ types, gate framepoc==119), `ldecod_col9.exe`, `ldecod_jmt2.exe`,
 `ldecod_grid121.exe`, `ldecod_bin91.exe`, `ldecod_colall.exe` - traces
 in /tmp/jm_bin.
 
+## SESSION #32d4 ADDENDUM 31 (2026-09-28, continuation) - JM B_Skip MV path found: mb_pred_skip does plain LIST_0 16x16 MC (set_chroma_vector + perform_mc) with NO colocated/direct/temporal reads - our field-B B_Skip routes through apply_temporal_direct + colocated reads instead
+
+`mb_pred_skip` (mb_prediction.c, verbatim core): set_chroma_vector;
+perform_mc(currMB, plane, dec_picture, LIST_0, 0, 0, MB_BLOCK_SIZE,
+MB_BLOCK_SIZE); copy_image_data_16x16(...). For B_Skip, JM motion-
+compensates a 16x16 block from LIST_0 with the skip MV - the skip MV is
+computed EARLIER in the read path (JM 19.1 B slice: read_skip_flag_
+CABAC_b_slice -> currMB->mb_type = 0 -> the direct MVs are derived by
+`update_direct_mv_info_temporal` at READ time ONLY for non-skip
+parts?? - no: the observed behavior is the temporal fn is never called
+for the 9 B_Skip MBs, so their MVs come from `currMB->mvd`-style
+defaults or the LAST decoded MB state - the exact skip-MV source needs
+one trace round: JM syntax TRACE build (TRACE=1) printing mvd/L0 ref for
+slice 91, or perform_mc gated framepoc==119 printing the MV per MB).
+
+OURS: the field-B B_Skip arm routes through apply_temporal_direct with
+the poc-121 colocated reads (KCOL119 lines: e.g. MB(2,8) mv0=(-2,0)) -
+a completely different derivation. The 556-sample poc-119 pre-deblock
+error = these 9 B_Skip MBs.
+
+NEXT SESSION: (1) JM side: gate `perform_mc` or `mb_pred_skip` with
+framepoc==119 and print the L0 MV+ref per B_Skip MB (one fprintf);
+(2) diff vs our B_Skip MVs (KCOL119 shows ours: e.g. MB(2,8)
+mv0=(-2,0)/mv1=(1,0)); (3) reconcile our field-B B_Skip derivation
+(likely: JM B_Skip uses the colocated-poc grid differently, or a
+different colocated picture entirely, or zero-MV defaults when the
+colocated cell is intra - matching the observed JM behavior of never
+calling the temporal fn for these MBs).
+
+Housekeeping: probes reverted; tree = 222bc92 + 32ade30 + 9d8115f
+clean; JM tooling preserved (`ldecod_jbt.exe`, `ldecod_jmt2.exe`,
+`ldecod_col9.exe`, `ldecod_grid121.exe`, `ldecod_bin91.exe`,
+`ldecod_colall.exe`); traces in /tmp/jm_bin.
+
 ## SESSION #32bx ADDENDUM 24 (same continuation) — HCHP2_HHI_A RESOLVED:
 **RefPicList1 swap-if-identical special case (§8.2.4.2.3 Note 2) was
 comparing the lists AFTER truncating to `num_ref_idx_active`. FIXED. All
