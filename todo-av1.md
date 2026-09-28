@@ -13000,3 +13000,47 @@ to be symmetric around the off-by-one) but not here.
    becomes [ (−1,−1), (0,−4), (0,0)t ], the (120,48) NEARMV picks
    (−1,−1), and the entire tile-2 cascade (~34k bytes of frame 3,
    likely most of frames 5-23) collapses.
+
+## Session 2026-09-28 (cont'd 11) — the ref-name off-by-one sharpened:
+## dav1d decoded LAST2, Kinetix decoded LAST for the (116,48) ref read —
+## with identical post-read rng (55492). The divergence is inside the
+## single-ref name tree (gate contexts or a polarity), not the EC
+
+dav1d's internal ref numbering pinned from usage: `a_r->ref.ref[0] - 1`
+indexes `f->refp[]` (the 7 slots LAST..ALTREF), so the single-ref read's
+`b->ref[0]` ∈ 0..6 is 0=LAST, 1=LAST2, 2=LAST3, 3=GOLDEN, 4=BWDREF,
+5=ALTREF2, 6=ALTREF, and the refmvs refpair = internal+1 (1=LAST..).
+
+So for block (116,48):
+- dav1d `Post-ref[1]` = internal 1 = **LAST2**; refpair = 2 — and the
+  left-neighbour grid cells carry refpair 2 as well (the MVSCAN
+  candidates' ref=(3,0) in K = K's LAST2=3 — SAME reference!).
+- K `ref=2` = K's LAST_FRAME (K constants INTRA=1, LAST=2, LAST2=3…).
+
+K's neighbours are LAST2, the block is LAST — the ref-name mismatch in
+the MV scan is REAL (not a notation artifact): dav1d's block is LAST2
+and matches its LAST2 neighbours; K's block is LAST and cannot match its
+LAST2-recorded neighbours.
+
+Since the ref tree's post-read rng is byte-identical (55492) and the
+same CDF cells were traversed, the decoded tree SYMBOL should be
+identical — the name difference must come from the tree's structure:
+either (a) one of the gate CONTEXT derivations differs (K's
+`rcc(count(LAST), count(LAST2))`-style pairs vs dav1d's
+`av1_get_ref_{3,4,5,6}_ctx` — which weight neighbour counts by reference
+distance per the spec, not by raw category counts), causing a different
+gate to be taken on a later re-read, or (b) a polarity inversion in one
+tree's final bool mapping (dav1d `decode_bool` returns !ret against
+f=cdf[0]=P(bit=1); K `read_symbol==1` against the spec-domain CDF).
+
+### Next session's entry point (pure code comparison, no runs needed)
+
+Print the intermediate rng after EACH bool of the ref tree on both sides
+(dav1d: add prints inside the single-ref tree in decode.c ~1655-1685;
+K: inside `read_single_ref_name` in inter.rs:733-767), rerun, and walk
+the two trees gate by gate for block (116,48). The first rng divergence
+identifies the gate whose CONTEXT formula differs; compare that gate's
+K formula against dav1d's `av1_get_ref_N_ctx` (in dav1d's ref_mvs.h —
+the spec's weighted-count contexts, §7.10.1.10) and fix K's to match.
+Then re-verify: (116,48) ref == LAST2, stack[0] == (−1,−1), (120,48) mv
+== (−1,−1), tile-2 cascade collapses, FATE aggregate moves.
