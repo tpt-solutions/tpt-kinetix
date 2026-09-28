@@ -12799,3 +12799,51 @@ KINTRA carries `dif_hi`.
 Note: K's read path already proved itself on the whole corpus, so the
 bug is a genuine corner case — expect the fix to be small (one rounding
 or window-size constant) but to need care not to regress the corpus.
+
+## Session 2026-09-28 (cont'd 7) — CORRECTION of cont'd 3-5: the CDEF
+## line-buffer theory was a red herring. The row-192 "post-filter" values
+## were the EC desync's cascade. True chain: tile row 2's ENTIRE recon
+## diverges from its first row (K raw row 192 col 468 = 156 vs dav1d's
+## pre-CDEF 151 — recon-level, no CDEF involved), because of the single
+## EC read divergence at block (112,56) documented in cont'd 6
+
+Facts established this round (all verifiable from the captured dumps):
+1. Frame oh=3's tile group is ~210 bytes in BOTH decoders — tiles
+   [10, 30, 84, 86], n_bytes=1, K's split parses it correctly
+   (KINETIX_AV1_DBG_TILES output). The earlier "dav1d group = 1098
+   bytes" reading was an EARLIER frame's KGTILE print — disregard.
+2. K's tile-2 entropy decoder exhausts its view of the tile buffer at
+   block (112,56): post-read state `symbol_max_bits=511, bit_pos=511`,
+   value=33320 ≥ cur=32343 → skip=0, while dav1d decodes skip=1 from
+   the same nominal EC state (its `botrow`-style probe confirms its bot
+   pointer is simply the in-place picture row — the CDEF "line buffer"
+   detour was tracking desynced data, not a CDEF bug).
+3. K's split computation at that read is IDENTICAL to dav1d's v
+   (32343 = ((r>>8)*(f>>6)>>1)+4 with r=37415, f=28387). The divergence
+   is in the VALUE side: K's symbol_value ≥ 32343 where dav1d's
+   dif-position = 4376. Since value and dif-position are supposed to be
+   mirrored views of the same bitstream bits, either K's value window
+   desynced earlier (a renorm/refill corner case) or K's comparison
+   convention anchors at the wrong end for this specific state.
+4. Recon-level proof: dav1d run with `--inloopfilters none` still
+   differs from K's NOFILTER grid at row 192 (K 156 vs dav 151 at
+   col 468, 185 diffs in the row) — the divergence is in
+   RECONSTRUCTION (entropy → prediction/residual), not any loop filter.
+
+### Next session's entry point (unchanged in substance, sharpened)
+
+Print K's full pre-read raw_state() at the (112,56) KSKIP (the state=
+extension now in the KSKIP print gives post-read; add a pre-read print
+or reconstruct pre from post + the read's consumption), then port both
+EC decoders to Python from the captured state and step until the value
+windows diverge. Check FIRST whether K's `symbol_max_bits` bookkeeping
+(511 at the divergence — suspiciously equal to bit_pos) has already hit
+its refill ceiling: if K's tile buffer slice is shorter than the real
+tile data (an off-by-N in `split_tile_group_payloads`'s last-tile
+handling or the OBU payload slice), K's refills pad zeros from that
+point while dav1d keeps reading real bits — that would explain a desync
+that appears mid-tile without any prior symbol mismatch. Compare K's
+tile-2 payload slice (84 bytes, `KINETIX_AV1_DBG_TILE_BYTES` hex)
+against dav1d's tile-2 bytes (patch a dump of `ts->tile` in
+cdef/decode or read the IVF packet bytes directly: frame 3's tile 2
+starts at group offset 1(hdr)+1+10+1+30+1 = 44, length 84).
