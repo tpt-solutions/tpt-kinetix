@@ -4556,6 +4556,29 @@ TREE: clean at 222bc92 + 32ade30 + 9d8115f (all landed fixes); the
 mc_direct.c JMT probe lives outside the repo (preserved in /tmp).
 Everything else from addendum 24 stands.
 
+## SESSION #32d4 ADDENDUM 33 (2026-09-28, continuation) - the 9 B_Skip MBs stored MVs MATCH ours (JM mv0=(-2,0)/mv1=(1,0) at MB(2,8) = our temporal-direct output from col=(-3,0)); NOT the source of poc-119 556-sample error - the real source is still open
+
+JM JMG(119) final grid for the 9 ours-only B_Skip MBs: MB(2,8) =
+mv0=(-2,0)/mv1=(1,0) — IDENTICAL to our temporal-direct output from the
+colocated read col=(-3,0) (KCOL119: mv0=(-2,0) mv1=(1,0)). MB(8,4)/(8,5)/
+(11,5)/(13,8)/(19,8) show the same small-mv pattern. MB(4,4) has a
+different ref (r0=2) but the mv1 is still (1,0).
+
+CONCLUSION: the 9 B_Skip MBs MVs MATCH between us and JM. The poc-119
+556-sample error (max 135) must come from elsewhere — the remaining
+candidates: the mixed MBs (partial direct + explicit quads), the
+inter-frame prediction for the non-skip explicit MBs, or the chroma.
+The MB(4,4) r0=2 ref is notable: JM uses ref_idx 2 for its B_Skip
+derived MVs at that MB — our KCOL119 also showed cr0=2 ✓ matches.
+
+The per-field pre-deblock remnant census (addendum 18, now stale after
+the fixes) should be REDONE: the poc-119 remnant was attributed to the
+9 B_Skip MBs but their MVs match; the actual source requires a fresh
+per-MB pixel diff for poc-119 (ours_bpre vs jm_pre, per-MB nd) to
+locate the true error concentration.
+
+JM tooling: `ldecod_grid119.exe` + `grid119.log` (JMG poc 119).
+
 ## SESSION #32d4 ADDENDUM 26 (2026-09-28, continuation) - clean re-extract CONFIRMS bin 7 divergence; refinement: it is MB(1,0) mb_skip_flag with a skip-variant STATE divergence
 
 A clean re-extraction (proper NAL-91 span) confirms addendum 21: bins
