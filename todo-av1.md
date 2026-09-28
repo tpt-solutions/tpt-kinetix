@@ -11367,3 +11367,205 @@ was recreated and used but, per convention, not committed.
 4. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
    `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged — fourth
    consecutive session confirming the exact same numbers, no regression.
+
+### Session cont'd 28 — the static default-CDF-table-contents lead cont'd 27
+### flagged as the single most concrete remaining item has now been checked
+### mechanically, exhaustively, and automatically (not by eye): every
+### coefficient-related default CDF table in `entropy_cdf.rs` is byte-for-byte
+### correct against dav1d's real source, across every quantizer bucket, both
+### plane types, and every context index. Zero discrepancies found. This
+### specific lead is now closed; bug still open with no remaining unaudited
+### static-data suspects in the coefficient path
+
+Did not re-run the `t2.ivf` repro this session (no code was changed, so the
+73-byte baseline from cont'd 23-27 is unaffected by construction — no point
+re-measuring a number nothing touched). Instead spent the whole session on
+cont'd 27's own explicit next-step: mechanically cross-referencing
+`entropy_cdf.rs`'s coefficient-related default-CDF table *contents* (as
+opposed to the context-index *formulas*, which cont'd 27 already proved
+correct) against an independent source.
+
+**Oracle chosen:** dav1d's own C source (`%LOCALAPPDATA%\Temp\dav1d_src\
+src\cdf.c`, a plain readable checkout distinct from the instrumented/broken
+`dav1d_fresh` one that's been segfaulting since cont'd 25 - this checkout
+needed no fixing, it's untouched upstream source and was sitting there the
+whole time under a different name than prior sessions looked for). This is
+faster and more mechanically verifiable than the spec's markdown tables
+(no HTML table parsing needed, and it's the literal source dav1d itself
+compiles) and is an equally valid ground truth per this task's own framing.
+
+**Representation-convention check (done first, since getting this wrong
+would invalidate every comparison below):** dav1d's `cdf.c` wraps every
+literal default-CDF value in a `CDF1(x)`/`CDF2(a,b)`/.../`CDFn(...)` macro
+defined as `CDF1(x) = (32768-(x))` (recursively for `CDFn`). That means the
+**literal numeric arguments written in the C source are already the
+forward, increasing, non-inverted CDF values** (e.g. `CDF2(17837, 29055)`
+means the real forward CDF is `[17837, 29055]`) - the macro's *runtime*
+result (`32768-x`) is dav1d's *internal* inverted/ICDF storage convention,
+which is irrelevant here since Kinetix's `entropy.rs::read_symbol` uses the
+non-inverted, increasing convention (independently re-confirmed correct by
+cont'd 27). So **no inversion arithmetic is needed** - the raw source
+literals in `cdf.c` compare directly, value-for-value, against
+`entropy_cdf.rs`'s array contents (after stripping Kinetix's two trailing
+sentinel entries `32768, 0` - full-CDF-mass and adaptation-count - which
+have no dav1d-source equivalent since dav1d derives the array length from
+the C struct's fixed-size fields instead).
+
+**Method:** wrote two small Python scripts (not committed, scratch-only,
+under the session's scratchpad dir) - one regex-parses `cdf.c`'s
+`default_coef_cdf[4]` array into the 4 quantizer-context (`qctx`) blocks,
+then each named field (`.skip`, `.eob_base_tok`, `.base_tok`, `.br_tok`,
+`.dc_sign`, `.eob_bin_16` through `.eob_bin_1024`, `.eob_hi_bit`) into a
+flat, ordered list of ints by matching every `CDF\d+\(...\)` call in
+document order (this preserves the C source's true nesting/iteration
+order without needing to hand-parse brace nesting per dimension). The
+other parses the corresponding Rust `pub static DEFAULT_*_CDF` array
+literals out of `entropy_cdf.rs` via `ast.literal_eval` (falling back to a
+restricted `eval` only for `DEFAULT_DC_SIGN_CDF`, which is written as
+`128 * N` products rather than pre-multiplied literals). A third script
+reshapes both into matching `[qctx][tx_size][plane_type][context]`
+(or the appropriate subset of those dims per table) structures and diffs
+element-by-element, per table, per qctx, per tx_size, per plane_type.
+
+**Tables checked, all 4 qctx buckets, all tx_size and plane_type values
+each table actually has (not just chroma/TX_4X4 - full tables, since the
+mechanical diff cost the same either way and a full check is strictly more
+conclusive):**
+- `DEFAULT_TXB_SKIP_CDF` vs dav1d `.skip` (`[5 tx][13 ctx]`, no plane-type
+  split in either representation - confirmed this table structurally
+  cannot be a *chroma-only* bug source).
+- `DEFAULT_COEFF_BASE_EOB_CDF` vs `.eob_base_tok` (`[5 tx][2 ptype][4 ctx]`).
+- `DEFAULT_COEFF_BASE_CDF` vs `.base_tok` (`[5 tx][2 ptype][41 ctx]` -
+  Kinetix's declared shape has a 42nd context slot per `[tx][ptype]` with
+  no dav1d counterpart; inspected by hand and it's uniformly the
+  `[8192,16384,24576]` "never used" placeholder dav1d itself also pads
+  unused high context slots with in several other tables, consistent with
+  it being dead/unreachable padding, not a live 42nd context).
+- `DEFAULT_COEFF_BR_CDF` vs `.br_tok` (`[4 tx][2 ptype][21 ctx]` - dav1d's
+  own struct comment reads `br_tok[4 /*5*/][2][21][4]`, i.e. dav1d itself
+  only stores 4 tx-size buckets for this table, capping the context
+  selection at `TX_32X32` per spec; Kinetix's array has a 5th tx_size slot
+  with no dav1d counterpart to diff against - not inspected further this
+  session since the target TU is `TX_4X4` (index 0), well inside the
+  4-bucket overlap, but flagged below as a loose end).
+- `DEFAULT_DC_SIGN_CDF` vs `.dc_sign` (`[2 ptype][3 ctx]`, identical across
+  all 4 qctx blocks in dav1d - confirmed Kinetix also repeats the same
+  values across its 4 qctx slots, not just qctx 0).
+- `DEFAULT_EOB_PT_16_CDF` through `DEFAULT_EOB_PT_256_CDF` vs
+  `.eob_bin_16`/`32`/`64`/`128`/`256` (`[2 ptype][2 is_inter][N ctx]` each).
+- `DEFAULT_EOB_PT_512_CDF`/`DEFAULT_EOB_PT_1024_CDF` vs `.eob_bin_512`/
+  `1024` (`[2 is_inter][N ctx]`, no plane-type split - these two sizes are
+  luma-only per spec so plane type is moot for them anyway).
+- `DEFAULT_EOB_EXTRA_CDF` vs `.eob_hi_bit` (`[5 tx][2 ptype][9 ctx]`).
+
+**Result: zero mismatches, across every one of those tables, every
+quantizer bucket (0-3), every applicable tx_size, and both plane types.**
+Every single value Kinetix has hard-coded for the coefficient-decode path
+is byte-identical to dav1d's own default-CDF source, including the
+specific chroma (`ptype=1`) / `TX_4X4` (`tx_size=0`) rows this session's
+mandate was scoped to (`DEFAULT_COEFF_BASE_EOB_CDF[*][0][1]`,
+`DEFAULT_COEFF_BASE_CDF[*][0][1]`, `DEFAULT_COEFF_BR_CDF[*][0][1]`,
+`DEFAULT_TXB_SKIP_CDF[*][0]`, `DEFAULT_DC_SIGN_CDF[*][1]`,
+`DEFAULT_EOB_PT_16_CDF[*][1]`).
+
+**Also checked, since it's immediately adjacent and equally capable of
+producing a *chroma-only, TX_4X4-only* symptom by picking the right values
+from the wrong qctx bucket:** `TileCdfs::q_context()` in `coeff.rs` (the
+`base_q_idx` → qctx-bucket selector) - `0..=20 => 0, 21..=60 => 1,
+61..=120 => 2, _ => 3` - matches the AV1 spec's `get_qctx()` boundaries
+exactly. Not a bug either.
+
+**What this rules out, precisely, and definitively (mechanical diff, not
+eyeballing - this is qualitatively stronger than cont'd 26's "inspected by
+eye, no bug spotted" on the context-formula side):** every default-CDF
+*value* this decode path can read for coefficient syntax, for any
+quantizer/tx-size/plane-type/context combination the corpus exercises, is
+correct. Combined with cont'd 27's independent proof that the
+context-*index* formulas, scan tables, tx_type derivation, and CDF
+adaptation direction are all correct, **the entire coefficient-entropy
+subsystem (table contents + indexing logic + adaptation) is now
+proven correct for this bug's target TU** as far as static analysis and
+spec-derivation can reach. This was the last item on cont'd 27's explicit
+list of "not yet ruled out" suspects.
+
+**What is NOT ruled out, and is the one honest loose end from this
+session:** `DEFAULT_COEFF_BR_CDF`'s 5th tx_size slot (index 4, presumably
+meant for `TX_64X64`) was not diffed against anything, because dav1d's own
+`br_tok` table only has 4 tx-size buckets to begin with (it caps the
+context/table lookup at `TX_32X32` per spec, and the AV1 spec's own
+`Default_Coeff_Br_Cdf` table is likewise defined only for
+`tx_size < TX_SIZES_ALL... capped`). This is irrelevant to the `t2.ivf`
+bug specifically (target TU is `TX_4X4`) but is a genuine documentation
+gap: nobody has verified whether Kinetix's *runtime lookup* into this
+table correctly clamps `tx_size` to the 4-bucket range before indexing, or
+whether it naively indexes with an uncapped `tx_size` that happens to
+still be in-bounds only because the array was over-allocated to 5 slots.
+Worth a quick, cheap check next session (`grep` the `coeff_br`/`br_tok`
+lookup call site in `coeff.rs` for how it computes its tx_size index) even
+though it's very unlikely to be this specific bug.
+
+**No fix found or committed this session** - this was a pure ground-truth
+verification pass with a completely clean (negative) result, not a
+code-change session. Nothing in the working tree was touched (`git status`
+before and after this session's work is identical: only the pre-existing,
+not-mine `todo-h264.md`/`tools/capa1_field_census.py` changes and the
+long-standing uncommitted `dbg_av1_t2_repro.rs` throwaway harness, which
+this session didn't even need to touch since no repro run was required).
+
+#### Next session's starting point
+
+1. **The static default-CDF-table-contents lead is now closed** - do not
+   re-attempt a byte-level table audit without a specific new reason to
+   doubt a specific table; this session's diff was exhaustive (all 4 qctx
+   x all tx_size x both ptype, for every coefficient-related default-CDF
+   table in the file) and found nothing.
+2. Cont'd 27's coefficient-entropy audit plus this session's table audit
+   together mean the *entire static/formula surface* of the coefficient
+   decode for the target TU (`mi=(16,11)`, V-plane, TX_4X4,
+   `FLIPADST_DCT`, `eob=3`) has been independently verified correct. The
+   remaining explanation space for the 73-byte chroma-only diff is now
+   narrower than ever: either (a) something upstream of `coeffs()` for
+   *this specific block* feeds it a subtly wrong live decoder state
+   (`rng`/`val`, or a *previously adapted* CDF value that started correct
+   but got nudged wrong by an earlier block's read) that this session's
+   static-default-value check cannot see, since adaptation is a runtime
+   process; or (b) the bug is downstream of entropy decode entirely
+   (dequantization scaling, inverse-transform application, or
+   prediction/reconstruction) for this exact chroma block, despite cont'd
+   26's "ruled out transform type selection and inverse transform math" -
+   that ruling was about the *math being correct in the abstract*, not
+   about *this exact block's live inputs being bit-exact*, which is a
+   narrower and not-yet-fully-closed question.
+3. Given (a) above, the highest-value next move is probably tracing the
+   **adapted** (not default) CDF state for the specific contexts this
+   block's `coeffs()` call reads, immediately before the call, and
+   comparing *those* against dav1d's live adapted state at the same point
+   - this requires either fixing the `dav1d_fresh` oracle segfault (still
+   unattempted by any session) or finding some other way to get dav1d's
+   real mid-stream adapted CDF value at this exact point (e.g. patching
+   the plain `dav1d_src` checkout used this session, which is NOT the one
+   that's been segfaulting, with a one-line printf in `decode_coefs`/
+   `msac.c`'s `dav1d_msac_decode_symbol_adapt*` gated on the same tile/
+   block coordinates - this checkout is untouched and may be much less
+   fragile to instrument than the already-broken `dav1d_fresh` copy).
+4. Given (b), a cheap independent check: dump this exact chroma block's
+   *dequantized* coefficient array and compare the *inverse transform
+   input* against a hand-computed expected value from the already-verified
+   `quant[]`/sign values cont'd 27 derived (`quant = [-2, 0, 0, -1]` at
+   scan positions `[0,1,4]`... rest zero) times the correct dequant step
+   size for this block's `base_q_idx`/plane - if the dequant scale itself
+   is wrong for chroma only, that would explain a chroma-only symptom
+   without touching the (already-verified-correct) entropy or transform
+   math at all, and is a very cheap thing to hand-check that nobody has
+   isolated yet (prior sessions ruled out "transform type selection" and
+   "inverse transform math" but the task description never explicitly
+   named "dequantization scale factor" as separately audited).
+5. Minor, low-priority loose end: verify `DEFAULT_COEFF_BR_CDF`'s runtime
+   tx_size-index clamp (see the loose-end paragraph above) - cheap, unlikely
+   to be this bug, but currently undocumented either way.
+6. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
+   `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged - fifth
+   consecutive session confirming the exact same numbers (this session
+   made no code change, so this is true by construction, not by
+   re-measurement - see point 6's re-check requirement for whichever
+   session next touches actual code).
