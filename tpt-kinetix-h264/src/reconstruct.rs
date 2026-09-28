@@ -1444,6 +1444,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                 is_frame: true,
                 bottom: false,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             let bottom = crate::ref_pic::FieldRef {
@@ -1451,6 +1452,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                 is_frame: true,
                 bottom: true,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             field_planes.push(vec![top, bottom]);
@@ -2358,6 +2360,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                 is_frame: true,
                 bottom: false,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             let bottom = crate::ref_pic::FieldRef {
@@ -2365,6 +2368,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                 is_frame: true,
                 bottom: true,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             field_planes_l0.push(vec![top, bottom]);
@@ -2375,6 +2379,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                 is_frame: true,
                 bottom: false,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             let bottom = crate::ref_pic::FieldRef {
@@ -2382,6 +2387,7 @@ pub fn reconstruct_b_frame_mbaff<T: DecodeTracer>(
                 is_frame: true,
                 bottom: true,
                 pic_order_cnt: 0,
+                frame_num: 0,
             }
             .planes();
             field_planes_l1.push(vec![top, bottom]);
@@ -5163,6 +5169,7 @@ mod tests {
             is_frame: true,
             bottom: false,
             pic_order_cnt: 0,
+            frame_num: 0,
         }
         .planes();
         let (bot_l, bot_cb, bot_cr) = crate::ref_pic::FieldRef {
@@ -5170,6 +5177,7 @@ mod tests {
             is_frame: true,
             bottom: true,
             pic_order_cnt: 0,
+            frame_num: 0,
         }
         .planes();
         let field_planes = vec![vec![(top_l, top_cb, top_cr), (bot_l, bot_cb, bot_cr)]];
@@ -5344,6 +5352,7 @@ mod tests {
             is_frame: false,
             bottom: false,
             pic_order_cnt: 0,
+            frame_num: 0,
         };
         let (l, cb, _cr) = fr.planes();
         assert_eq!(l.len(), 16 * 8);
@@ -5361,6 +5370,7 @@ mod tests {
             is_frame: true,
             bottom: false,
             pic_order_cnt: 0,
+            frame_num: 0,
         };
         let (tl, _, _) = top.planes();
         assert_eq!(tl.len(), 16 * 8);
@@ -5372,6 +5382,7 @@ mod tests {
             is_frame: true,
             bottom: true,
             pic_order_cnt: 0,
+            frame_num: 0,
         };
         let (bl, _, _) = bot.planes();
         // bottom field row 0 == frame row 1.
@@ -5394,6 +5405,7 @@ mod tests {
             is_frame: false,
             bottom: false,
             pic_order_cnt: 0,
+            frame_num: 0,
         };
 
         let mut mb = Macroblock::new_skip();

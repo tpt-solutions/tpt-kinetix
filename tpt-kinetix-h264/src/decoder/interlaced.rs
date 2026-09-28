@@ -369,7 +369,7 @@ impl H264Decoder {
                 &header,
                 packet,
                 None,
-                (Vec::new(), Vec::new()),
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             );
         }
 
@@ -468,6 +468,7 @@ impl H264Decoder {
                 chroma_qp_index_offset,
             });
         acc.ref_poc_per_slice.push((Vec::new(), Vec::new()));
+        acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
         let field_total = (mb_cols * mb_rows_field) as usize;
         let end_mb = match crate::slice_data::parse_i_slice(
@@ -573,6 +574,7 @@ impl H264Decoder {
             reconstructed,
             mv_store,
             ref_poc_per_slice,
+            ref_id_per_slice,
             is_idr,
             poc,
             ..
@@ -820,6 +822,10 @@ impl H264Decoder {
             .first()
             .cloned()
             .unwrap_or((Vec::new(), Vec::new()));
+        let (l0_ids, l1_ids) = ref_id_per_slice
+            .first()
+            .cloned()
+            .unwrap_or((Vec::new(), Vec::new()));
         self.store_reference_picture(
             &synth_nal,
             &sps,
@@ -829,6 +835,8 @@ impl H264Decoder {
             None,
             l0_pocs,
             l1_pocs,
+            (!l0_ids.is_empty()).then_some(l0_ids),
+            (!l1_ids.is_empty()).then_some(l1_ids),
         );
         paff_dbg!("FIELD-ACC STORE: dpb_after={}", self.dpb().len());
 
@@ -1278,6 +1286,8 @@ impl H264Decoder {
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
+                None,
             );
 
             if std::env::var("KINETIX_BINTRACE").is_ok() {
@@ -1372,7 +1382,18 @@ impl H264Decoder {
             pixel_format: PixelFormat::Yuv420p,
             is_key_frame: matches!(nal.nal_unit_type, NalUnitType::IdrSlice),
         };
-        self.store_reference_picture(nal, sps, header, &frame, None, None, Vec::new(), Vec::new());
+        self.store_reference_picture(
+            nal,
+            sps,
+            header,
+            &frame,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        );
 
         Ok(InterlacedOutcome::Frame(frame))
     }
@@ -1744,6 +1765,8 @@ impl H264Decoder {
                 .unwrap();
             }
             let field_pocs: Vec<i64> = ref_list.iter().map(|f| f.pic_order_cnt).collect();
+            let field_ids: Vec<(u32, bool)> =
+                ref_list.iter().map(|f| (f.frame_num, f.bottom)).collect();
             return self.finalize_field(
                 recon,
                 nal,
@@ -1751,7 +1774,7 @@ impl H264Decoder {
                 header,
                 packet,
                 Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
-                (field_pocs, Vec::new()),
+                (field_pocs, Vec::new(), field_ids, Vec::new()),
             );
         }
 
@@ -1848,6 +1871,10 @@ impl H264Decoder {
             });
         acc.ref_poc_per_slice.push((
             ref_list.iter().map(|f| f.pic_order_cnt).collect(),
+            Vec::new(),
+        ));
+        acc.ref_id_per_slice.push((
+            ref_list.iter().map(|f| (f.frame_num, f.bottom)).collect(),
             Vec::new(),
         ));
 
@@ -2214,13 +2241,18 @@ impl H264Decoder {
             .first()
             .map(|f| f.pic_order_cnt)
             .unwrap_or(current_poc);
+        let current_list0_id: Vec<(u32, bool)> =
+            ref_l0.iter().map(|f| (f.frame_num, f.bottom)).collect();
         let temporal_ctx = col_entry.map(|col| crate::mv::TemporalDirectCtx {
             field_slice: true,
             current_poc,
             current_list0_poc: &current_list0_poc,
+            current_list0_id: &current_list0_id,
             col_poc,
             col_list0_poc: &col.list0_poc,
             col_list1_poc: &col.list1_poc,
+            col_list0_id: col.list0_ids.as_deref().unwrap_or(&[]),
+            col_list1_id: col.list1_ids.as_deref().unwrap_or(&[]),
             col_pair: None,
             current_field_parity,
             direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
@@ -2383,6 +2415,10 @@ impl H264Decoder {
         }
         let field_pocs_l0: Vec<i64> = ref_l0.iter().map(|f| f.pic_order_cnt).collect();
         let field_pocs_l1: Vec<i64> = ref_l1.iter().map(|f| f.pic_order_cnt).collect();
+        let field_ids_l0: Vec<(u32, bool)> =
+            ref_l0.iter().map(|f| (f.frame_num, f.bottom)).collect();
+        let field_ids_l1: Vec<(u32, bool)> =
+            ref_l1.iter().map(|f| (f.frame_num, f.bottom)).collect();
         self.finalize_field(
             recon,
             nal,
@@ -2390,7 +2426,7 @@ impl H264Decoder {
             header,
             packet,
             Some(std::sync::Arc::new(parsed.mv_store.to_grid_vec())),
-            (field_pocs_l0, field_pocs_l1),
+            (field_pocs_l0, field_pocs_l1, field_ids_l0, field_ids_l1),
         )
     }
 
@@ -2481,7 +2517,7 @@ impl H264Decoder {
         header: &crate::slice::SliceHeader,
         packet: &Packet,
         mv_grid: Option<std::sync::Arc<Vec<[crate::mv::MvCell; 16]>>>,
-        ref_pocs: (Vec<i64>, Vec<i64>),
+        ref_pocs: (Vec<i64>, Vec<i64>, Vec<(u32, bool)>, Vec<(u32, bool)>),
     ) -> Result<InterlacedOutcome, KinetixError> {
         let field_height = (recon.luma.len() / recon.luma_stride) as u32;
         let mut data = recon.luma;
@@ -2512,6 +2548,8 @@ impl H264Decoder {
             None,
             ref_pocs.0,
             ref_pocs.1,
+            (!ref_pocs.2.is_empty()).then_some(ref_pocs.2),
+            (!ref_pocs.3.is_empty()).then_some(ref_pocs.3),
         );
 
         // Buffer the field and emit the interleaved frame once the pair is complete.

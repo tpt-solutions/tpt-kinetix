@@ -82,6 +82,17 @@ pub struct DpbEntry {
     /// — a co-located cell's `ref_idx` indexes the list of the field that
     /// coded it. `None` for real decoded entries.
     pub pair_field_lists: Option<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>)>,
+    /// Per-entry field identities `(frame_num, bottom)` of the reference lists
+    /// this picture was decoded against, parallel to `list0_poc`/`list1_poc`.
+    /// POCs alone are ambiguous for frame pictures coded without
+    /// `delta_pic_order_cnt_bottom` (both fields share one POC), and
+    /// temporal-direct `MapColToList0` must match the colocated cell's target
+    /// *by picture identity* (JM's pointer comparison), so a colocated
+    /// picture's cell `ref_idx` can only be mapped correctly when these
+    /// identities were persisted. `None` when unknown (callers fall back to
+    /// POC-only matching).
+    pub list0_ids: Option<Vec<(u32, bool)>>,
+    pub list1_ids: Option<Vec<(u32, bool)>>,
 }
 
 impl DpbEntry {
@@ -1427,6 +1438,12 @@ fn interleave_field_pair_entry(top: &DpbEntry, bottom: &DpbEntry) -> DpbEntry {
             bottom.list0_poc.clone(),
             bottom.list1_poc.clone(),
         )),
+        // The pair's per-field identity lists are derivable from its halves,
+        // but the same-kind identity mapping never consults a pair entry (a
+        // field-B slice's same-kind colocated picture is always a genuine
+        // field entry), so `None` (POC-fallback) is sufficient here.
+        list0_ids: None,
+        list1_ids: None,
     }
 }
 
@@ -1453,6 +1470,14 @@ pub struct FieldRef {
     /// `PicOrderCnt` of the underlying picture (used for weighted / temporal
     /// direct-mode derivation).
     pub pic_order_cnt: i64,
+    /// `frame_num` of the underlying picture. Together with [`FieldRef::bottom`]
+    /// this identifies the reference FIELD uniquely — which `pic_order_cnt`
+    /// alone cannot do for a frame picture coded without
+    /// `delta_pic_order_cnt_bottom` (both of its fields then share one POC,
+    /// §8.2.1.1), and temporal-direct `MapColToList0` (§8.4.1.2.3) must match
+    /// the colocated cell's target *by picture identity*, exactly as JM's
+    /// pointer comparison does.
+    pub frame_num: u32,
 }
 
 impl FieldRef {
@@ -1542,6 +1567,7 @@ fn split_field_copy(e: &DpbEntry) -> Vec<FieldRef> {
             is_frame: false,
             bottom: e.bottom_field_flag,
             pic_order_cnt: e.pic_order_cnt,
+            frame_num: e.frame_num,
         }]
     } else {
         vec![
@@ -1550,12 +1576,14 @@ fn split_field_copy(e: &DpbEntry) -> Vec<FieldRef> {
                 is_frame: true,
                 bottom: false,
                 pic_order_cnt: e.field_poc(false),
+                frame_num: e.frame_num,
             },
             FieldRef {
                 frame: e.frame.clone(),
                 is_frame: true,
                 bottom: true,
                 pic_order_cnt: e.field_poc(true),
+                frame_num: e.frame_num,
             },
         ]
     }
@@ -2158,6 +2186,8 @@ mod tests {
             pair_field_lists: None,
             list0_poc: Vec::new(),
             list1_poc: Vec::new(),
+            list0_ids: None,
+            list1_ids: None,
         }
     }
 

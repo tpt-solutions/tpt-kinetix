@@ -181,6 +181,15 @@ struct PictureAccumulator {
     /// reference pictures used", not raw list positions. Empty per-list
     /// `Vec` for an I-type slice (no motion).
     ref_poc_per_slice: Vec<(Vec<i64>, Vec<i64>)>,
+    /// Per-entry field identities `(frame_num, bottom)` parallel to
+    /// `ref_poc_per_slice`, captured by the interlaced (PAFF) decode paths.
+    /// A POC alone cannot distinguish the two fields of a frame picture coded
+    /// without `delta_pic_order_cnt_bottom` (§8.2.1.1: both fields share the
+    /// frame's `TopFieldOrderCnt`), so temporal-direct `MapColToList0`
+    /// (§8.4.1.2.3) needs the identity to match a colocated cell's target the
+    /// way JM's pointer comparison does. Empty for progressive slices (the
+    /// progressive temporal paths match by POC and are pixel-exact as-is).
+    ref_id_per_slice: Vec<(Vec<(u32, bool)>, Vec<(u32, bool)>)>,
     next_slice_id: u16,
     mb_cols: u32,
     mb_rows: u32,
@@ -246,6 +255,7 @@ impl PictureAccumulator {
             list1_poc: Vec::new(),
             deblock_params_per_slice: Vec::new(),
             ref_poc_per_slice: Vec::new(),
+            ref_id_per_slice: Vec::new(),
             next_slice_id: 0,
             mb_cols,
             mb_rows,
@@ -1261,6 +1271,8 @@ impl H264Decoder {
             mc_frame,
             list0_poc,
             list1_poc,
+            None,
+            None,
         );
 
         Ok(frame)
@@ -1562,6 +1574,7 @@ impl H264Decoder {
                     chroma_qp_index_offset,
                 });
             acc.ref_poc_per_slice.push((Vec::new(), Vec::new()));
+            acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
             let end_mb = match crate::slice_data::parse_i_slice_cabac(
                 cabac_data,
@@ -1734,6 +1747,7 @@ impl H264Decoder {
                 chroma_qp_index_offset,
             });
         acc.ref_poc_per_slice.push((Vec::new(), Vec::new()));
+        acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
         let end_mb = match crate::slice_data::parse_i_slice(
             &mut reader,
@@ -1937,6 +1951,7 @@ impl H264Decoder {
                 chroma_qp_index_offset,
             });
         acc.ref_poc_per_slice.push((list0_poc.clone(), Vec::new()));
+        acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
         let end_mb = match crate::slice_data::parse_p_slice_cabac_range(
             cabac_data,
@@ -2202,6 +2217,7 @@ impl H264Decoder {
                 chroma_qp_index_offset,
             });
         acc.ref_poc_per_slice.push((list0_poc.clone(), Vec::new()));
+        acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
         let end_mb = match crate::slice_data::parse_p_slice_range(
             reader,
@@ -2535,9 +2551,12 @@ impl H264Decoder {
                 field_slice: false,
                 current_poc,
                 current_list0_poc: &current_list0_pairs,
+                current_list0_id: &[],
                 col_poc: col.pic_order_cnt,
                 col_list0_poc: &col.list0_poc,
                 col_list1_poc: &col.list1_poc,
+                col_list0_id: &[],
+                col_list1_id: &[],
                 col_pair,
                 current_field_parity: None,
                 direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
@@ -2559,6 +2578,7 @@ impl H264Decoder {
             });
         acc.ref_poc_per_slice
             .push((current_list0_poc.clone(), current_list1_poc.clone()));
+        acc.ref_id_per_slice.push((Vec::new(), Vec::new()));
 
         let end_mb = match crate::slice_data::parse_b_slice_cabac_range(
             cabac_data,
@@ -2741,6 +2761,8 @@ impl H264Decoder {
         mc_frame: Option<VideoFrame>,
         list0_poc: Vec<i64>,
         list1_poc: Vec<i64>,
+        list0_id: Option<Vec<(u32, bool)>>,
+        list1_id: Option<Vec<(u32, bool)>>,
     ) {
         use crate::slice::DecRefPicMarking;
 
@@ -2801,6 +2823,8 @@ impl H264Decoder {
             pair_field_lists: None,
             list0_poc,
             list1_poc,
+            list0_ids: list0_id,
+            list1_ids: list1_id,
         };
         let ctx = crate::ref_pic::PicNumContext::new(
             sps,
@@ -3426,6 +3450,8 @@ impl H264Decoder {
                             mc_frame_p,
                             ref_list.iter().map(|e| e.pic_order_cnt).collect(),
                             Vec::new(),
+                            None,
+                            None,
                         );
                         return Ok(frame);
                     }
@@ -3580,9 +3606,12 @@ impl H264Decoder {
                         field_slice: false,
                         current_poc,
                         current_list0_poc: &current_list0_pairs,
+                        current_list0_id: &[],
                         col_poc: col.pic_order_cnt,
                         col_list0_poc: &col.list0_poc,
                         col_list1_poc: &col.list1_poc,
+                        col_list0_id: &[],
+                        col_list1_id: &[],
                         col_pair,
                         current_field_parity: None,
                         direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
@@ -3877,6 +3906,8 @@ impl H264Decoder {
                             mc_frame_b,
                             ref_l0.iter().map(|e| e.pic_order_cnt).collect(),
                             ref_l1.iter().map(|e| e.pic_order_cnt).collect(),
+                            None,
+                            None,
                         );
                         return Ok(frame);
                     }

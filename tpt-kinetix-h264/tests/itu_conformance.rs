@@ -561,7 +561,16 @@ fn itu_h264_conformance_suite() {
     let mut failures: Vec<String> = Vec::new();
     let mut checked_bitexact = 0usize;
 
+    // Debug convenience: ITU_CLIP=<name> restricts the run to a single clip.
+    let only = std::env::var("ITU_CLIP").ok();
+
     for dir in &dirs {
+        if only
+            .as_deref()
+            .is_some_and(|o| Some(o) != dir.file_name().and_then(|s| s.to_str()))
+        {
+            continue;
+        }
         let res = run_clip(dir);
         let expect = MANIFEST
             .iter()

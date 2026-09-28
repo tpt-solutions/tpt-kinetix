@@ -151,6 +151,8 @@ fn dpb_with_four_refs() -> Dpb {
                 pair_field_lists: None,
                 list0_poc: Vec::new(),
                 list1_poc: Vec::new(),
+                list0_ids: None,
+                list1_ids: None,
             },
             PicNumContext {
                 curr_frame_num: frame_num,

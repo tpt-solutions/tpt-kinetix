@@ -4534,6 +4534,117 @@ chroma analogue landed at +4 chroma plane rows; the luma analogue would be
 flip. The 7 wrong MBs: (0,6) 13, (0,7) 46, (28,14) 20, (29,14) 108,
 (30,14) 29, (29,15) 27, (30,15) 127 samples.
 
+## SESSION #32d4 ADDENDUM 37 (2026-09-29) - CLASS-B ROOT CAUSE FOUND AND FIXED:
+temporal-direct MapColToList0 matched by POC only; a frame picture coded without
+delta_pic_order_cnt_bottom puts TWO distinct fields (top and bottom) at the SAME
+poc, so the match landed on the pair's top where JM (picture-identity match)
+found the bottom. Fixed by persisting per-entry field identities
+(frame_num, bottom) alongside the reference-list POCs and matching by identity
+first. The whole large-delta class is gone: CAPA1 B fields 0/68 -> 1/68 exact,
+worst field error 135 -> 3.
+
+**How it was found (oracle at last, in the right order).** Addendum 36's plan
+started with `FieldRef::planes` as prime suspect. New probe
+(KINETIX_DUMP_FIELD_VIEWS, temporary): dump every extracted field view the
+field-B slice consumes, then match each against the ITU reference fields.
+Result: **916/916 views byte-identical to the correct reference field** -
+`planes()` is exact, and the poc labels are spec-correct too (a "mislabeled"
+268-view set turned out to be my probe's assumption that bottom poc = top poc
++ 1; this stream's PPS has `bottom_field_pic_order_in_frame_present_flag = 0`,
+so per SS8.2.1.1 a FRAME picture's two fields legitimately share one POC - the
+very fact that makes the list mapping ambiguous). `FieldRef::planes` is
+CLEARED, not fixed.
+
+**The JM motion-grid diff found the bug in one shot.** `ldecod_grid119.exe`'s
+JMG dump (full 4x4 motion grid of the poc-119 field, pre-deblock) vs our
+KINETIX_MBDUMP grids: clean MBs (15,2)/(18,2)/(15,3)/(18,3) match cell for
+cell; the dirty MBs differ in exactly two ways, both downstream of ONE cell:
+MB(16,2) quad2 - a `B_Direct_8x8` sub-partition (sub_mb_types [3,2,0,1] =
+Bi_8x8/L1_8x8/**Direct**/L0_8x8; ffmpeg's `decode_cabac_b_mb_sub_type`
+enumeration, NOT the Table 9-16 layout an earlier session note claims) -
+committed L0 refIdx **4** where JM's grid holds **5**. Every wrong cell is
+that wrong refIdx cascading through SS8.4.1.3.1 candidate matching:
+MB(16,2) quad3's A-candidate (the Direct quad, mv (-6,-4)) was rejected on
+`ri=4 != 5`, so its predictor fell back to (0,0) and final mv = mvd(1,0);
+MB(17,2)/(16,3)/(17,3) inherit the same rejection chain. Our colocated READ
+is exact (TDIRCELL probe: col_ri=7, col_mv=(-7,-4) - byte-for-byte JM_COL's
+cr0=7/col=(-7,-4)), and the temporal SCALING is exact (committed mv0/mv1
+match JM). ONLY the mapped index differs.
+
+**Why the index differed.** TDIRECT probe (lists at the moment of mapping):
+current L0 = [(114,115),(114,114),(108,108),(108,108),(102,102),(102,102),
+(96,96),(96,96),(120,121),(120,120)] - the poc-108/102/96 pairs each appear
+TWICE, top and bottom, because those P pictures decode as FRAMES (session
+#32d0's frame-coded path) and their stored pair_field_pocs is (top, top+0)
+per SS8.2.1.1 with the absent delta. Colocated cell ref_idx=7 ->
+colL0[7] = poc 102 -> a POC-only scan of our L0 hits index 4 (the pair's TOP)
+where the colocated cell actually referenced the pair's BOTTOM field (JM
+matches `listX[LIST_0+list_offset][iref] == colocated->ref_pic[refList]` -
+pointer identity). Downstream everything (MVP candidates, and by the same
+mechanism part of the all-field scatter and the bS inputs) saw a refIdx one
+field off. NOTE: the `ldecod_col*` binaries' JM_COL runs report a mapped
+refIdx of 7 for this cell - those probes come from an older mid-experiment
+JM build and disagree with the authoritative grid119 binary (stored 5);
+do not mix col-series logs with grid-series logs when they conflict.
+
+**The fix (identity-based MapColToList0, JM semantics):**
+- `FieldRef` gains `frame_num`; `(frame_num, bottom)` identifies a reference
+  FIELD uniquely, which poc alone cannot for poc-collapsed frame pairs.
+- `DpbEntry` gains `list0_ids`/`list1_ids: Option<Vec<(u32, bool)>>`,
+  persisted by `store_reference_picture` from the decode-time FieldRef lists;
+  the field paths thread them via a parallel
+  `PictureAccumulator::ref_id_per_slice` and an extended `finalize_field`
+  ref tuple. Progressive paths persist `None` and are unchanged.
+- `TemporalDirectCtx` gains `current_list0_id`/`col_list0_id`/`col_list1_id`;
+  `derive_temporal_direct`'s same-kind branch (the only one under test here;
+  the mixed frame/field branches were bit-exact before and are untouched)
+  now matches by identity first - validated by a poc-consistency check so a
+  frame_num wrap can never alias across eras - and falls back to the old
+  poc-only match when identities are absent.
+- A pleasant side effect: for genuine (poc-distinct) complementary pairs the
+  identity match also fixes the SCALING anchor - `own_poc` of the matched
+  entry is now the actual referenced field's poc rather than whichever half
+  the poc scan happened to hit first.
+
+**Measurements (tools/capa1_field_census.py, pre/post):** poc 29 BOT now
+EXACT (was 38/41); poc 110 TOP 253/50 -> 78/2; 117 BOT 344/71 -> 132/2;
+119 BOT 661/135 -> 99/2; 124 TOP 314/84 -> 54/2; 125 BOT 152/77 -> 47/2;
+130 TOP 123/48 -> 40/3; 131 BOT 339/95 -> 88/2. `fields with post max > 10:
+0` (was 8). P-field control group unchanged at 25/25 exact. Gates: `cargo
+test -p tpt-kinetix-h264` all suites 388 passed / 0 failed (full 33-clip ITU
+conformance suite included - no regression anywhere), lib 273/273, `cargo
+fmt -p tpt-kinetix-h264 --check` clean, `cargo clippy -p tpt-kinetix-h264
+--all-targets` clean (the workspace-wide clippy run currently trips on the
+CONCURRENT session's in-flight tpt-kinetix-av1 edits, not on h264).
+
+**WHAT REMAINS (the field-B residue is now a single, small, homogeneous
+class):** every B field still carries 3-99 wrong samples, max |d| <= 3, and
+the three-way analysis (tools/capa1_threeway.py: ours vs ITU vs
+ffmpeg-skip_loop_filter) shows they sit ON block/MB edges as paired +-1/+-2
+signatures - a deblocking-flavored decision difference (B-specific bS
+clauses: two-list MV comparison, direct-quad edges), NOT an MC/rounding
+error (and the ffmpeg-nolf comparison is itself invalid as an oracle: its
+unfiltered references cascade; only its per-field max PATTERN coincidentally
+mirrors ours). NEXT SESSION: instrument `deblock_field`'s bS derivation for
+one small field (poc 2 TOP: 7 wrong samples at (7,7)/(7,8) and
+(13,7..9)/(14,8) of MB(20,4)) against ffmpeg's check_mv transcription, and
+check whether the direct-quad refIdx fix also shrank the bS error surface.
+Also worth re-running after the deblock pass: whether `ITU_CLIP` +
+`KINETIX_B_FIELD_MB_DBG`-style probes should be re-added permanently for
+field slices (the instrumentation trap from addendum 35's item 3 still
+stands - slice markers only in the B-field path).
+
+**Probe hygiene:** all temporary probes removed
+(KINETIX_DUMP_FIELD_VIEWS, B8x8-SUBTYPES/RI0/MVD0/MVD1, TDIRECT, TDIRCELL,
+B8x8-COMMIT). KEPT permanently: `ITU_CLIP=<name>` env filter in
+`tests/itu_conformance.rs` (skips the decode loop entirely, matching the
+test's existing ITU_PER_FRAME env convention). New untracked analysis
+tools: tools/capa1_view_check.py (field-view oracle), tools/capa1_threeway.py
+(three-way sample classification), tools/capa1_predeblock_cmp.py,
+tools/capa1_header_scan.py (bitstream header walker). Captures kept in
+%TEMP%: jm_bin/grid119.log (JM JMG poc-119 grid), mbdetail.txt (our grids),
+capa1_bt4.txt (last full bintrace), capa1f_old/ (pre-fix field dumps).
+
 ## SESSION #32d4 ADDENDUM 25 (2026-09-28, continuation) - JMT per-MB quadrant-mode probe built; comparison pending; exact resumption state
 
 The syntax-value comparison probe (addendum 23 plan) is built:

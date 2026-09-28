@@ -1605,9 +1605,19 @@ pub struct TemporalDirectCtx<'a> {
     /// match either half (JM matches by picture identity — `mc_direct.c`
     /// `list0[iref]->top_field == colocated->ref_pic || ...`).
     pub current_list0_poc: &'a [(i64, i64)],
+    /// Per-entry field identities `(frame_num, bottom)` parallel to
+    /// `current_list0_poc`, when the decode path captured them (interlaced
+    /// field paths). POCs alone cannot distinguish the two fields of a frame
+    /// picture coded without `delta_pic_order_cnt_bottom` (both share one
+    /// POC, §8.2.1.1), so `MapColToList0` matches by identity first and only
+    /// falls back to POC when identities are absent. Empty slice = unknown.
+    pub current_list0_id: &'a [(u32, bool)],
     pub col_poc: i64,
     pub col_list0_poc: &'a [i64],
     pub col_list1_poc: &'a [i64],
+    /// Identities parallel to `col_list0_poc`/`col_list1_poc` (same caveat).
+    pub col_list0_id: &'a [(u32, bool)],
+    pub col_list1_id: &'a [(u32, bool)],
     /// Co-located picture is a synthesized combined field pair: its grid row
     /// `2k + parity` holds field MB row `k` coded by that parity's field, the
     /// coding field is the pair field closer to `current_poc`, and cell motion
@@ -1672,6 +1682,8 @@ fn derive_temporal_direct(
     col_poc: i64,
     col_list0_poc: &[i64],
     col_list1_poc: &[i64],
+    col_list0_id: &[(u32, bool)],
+    col_list1_id: &[(u32, bool)],
     yconv: MvYConv,
 ) -> ([i32; 2], i32, [i32; 2]) {
     if col.ref_idx < 0 && col.ref_idx_l1 < 0 {
@@ -1703,26 +1715,61 @@ fn derive_temporal_direct(
     // the pair first); a field co-located picture references exact fields,
     // so its targets are field pocs (match the field first). Both then scale
     // against the matched entry's OWN field poc for field slices.
-    let ref_idx_l0 = if ctx.current_field_parity.is_some() {
-        ctx.current_list0_poc
+    //
+    // When per-entry identities are available on BOTH sides (same-kind field
+    // branch only — the mixed frame/field cases were validated POC-exact
+    // before identities existed), match the colocated cell's target by FIELD
+    // IDENTITY `(frame_num, bottom)` first: a frame picture coded without
+    // `delta_pic_order_cnt_bottom` puts two DISTINCT fields (its top and its
+    // bottom) at the SAME poc, and a poc-only match then cannot tell which
+    // one the colocated cell referenced — it can pick the pair's top where
+    // the true target is the bottom (JM matches by picture identity), which
+    // shifts every downstream neighbour's refIdx-dependent MVP candidate
+    // matching (session #32d4 addendum 37).
+    let poc_match = |target_poc: i64| -> usize {
+        if ctx.current_field_parity.is_some() {
+            ctx.current_list0_poc
+                .iter()
+                .position(|&(pair, _)| target_poc == pair)
+                .or_else(|| {
+                    ctx.current_list0_poc
+                        .iter()
+                        .position(|&(_, own)| target_poc == own)
+                })
+                .unwrap_or(0)
+        } else {
+            ctx.current_list0_poc
+                .iter()
+                .position(|&(_, own)| target_poc == own)
+                .or_else(|| {
+                    ctx.current_list0_poc
+                        .iter()
+                        .position(|&(pair, _)| target_poc == pair)
+                })
+                .unwrap_or(0)
+        }
+    };
+    let id_match = |target_id: Option<(u32, bool)>| -> Option<usize> {
+        let id = target_id?;
+        if ctx.current_list0_id.len() != ctx.current_list0_poc.len() {
+            return None;
+        }
+        // Identity is authoritative; require the poc to agree as well so a
+        // frame_num wrap/reuse can never silently alias two eras of a list.
+        ctx.current_list0_id
             .iter()
-            .position(|&(pair, _)| target_poc == pair)
-            .or_else(|| {
-                ctx.current_list0_poc
-                    .iter()
-                    .position(|&(_, own)| target_poc == own)
+            .position(|&e| e == id)
+            .filter(|&i| {
+                let (pair, own) = ctx.current_list0_poc[i];
+                own == target_poc || pair == target_poc
             })
-            .unwrap_or(0)
+    };
+    let ref_idx_l0 = if ctx.col_pair.is_none() && ctx.current_field_parity.is_none() {
+        id_match(col_list0_id.get(col.ref_idx.max(0) as usize).copied())
+            .or_else(|| id_match(col_list1_id.get(col.ref_idx_l1.max(0) as usize).copied()))
+            .unwrap_or_else(|| poc_match(target_poc))
     } else {
-        ctx.current_list0_poc
-            .iter()
-            .position(|&(_, own)| target_poc == own)
-            .or_else(|| {
-                ctx.current_list0_poc
-                    .iter()
-                    .position(|&(pair, _)| target_poc == pair)
-            })
-            .unwrap_or(0)
+        poc_match(target_poc)
     };
     let Some(&(pair_first, own_poc)) = ctx.current_list0_poc.get(ref_idx_l0) else {
         return (mv_col, ref_idx_l0 as i32, [0, 0]);
@@ -1776,108 +1823,123 @@ fn apply_temporal_direct(
     // coordinate, returning it with the coding field's list pocs and the
     // vertical unit conversion — JM `mc_direct.c`'s three co-located access
     // branches (same-kind / combined field pair / frame-into-field view).
-    let colocated_cell =
-        |cy: usize, cx: usize| -> Option<(&MvCell, i64, &[i64], &[i64], MvYConv)> {
-            let grid = colocated?;
-            if let Some(pair) = &ctx.col_pair {
-                // Current FRAME, co-located picture is a combined field pair:
-                // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
-                // inference), coding field = the pair field closer to the current
-                // poc; the pair's grid row `2k + parity` holds field MB row `k`.
-                // Field 4×4 row: apply the direct-8×8-inference rounding to the
-                // FRAME 4×4 row FIRST (JM `RSD(block_y + j0) >> 1`), THEN halve
-                // to the field view. Halving before rounding (`rsd(cy >> 1)`)
-                // put every bottom-half quadrant of an even MB row one field
-                // row too high — RSD(4r+3)>>1 = 2r+1, while rsd(2r+1) = 2r for
-                // even r — reading the co-located 8×8 directly above the one
-                // JM reads.
-                let f = if ctx.direct_8x8_inference_flag {
-                    rsd(cy) >> 1
-                } else {
-                    cy >> 1
-                };
-                let fx = if ctx.direct_8x8_inference_flag {
-                    rsd(cx)
-                } else {
-                    cx
-                };
-                // JM `mc_direct.c`'s `update_direct_mv_info_temporal`: pick TOP
-                // only when BOTTOM is *strictly farther* from the current POC
-                // (`iabs(poc - bottom) > iabs(poc - top)`); ties, and every
-                // other case, pick BOTTOM. i.e. `bottom` is true whenever
-                // bottom is the closer-or-tied field, which is `<=`, not `>=`
-                // (a flipped comparison previously selected the FARTHER field
-                // as the co-located source — see todo-h264.md session #32d4).
-                let bottom = (ctx.current_poc - pair.bottom_poc).abs()
-                    <= (ctx.current_poc - pair.top_poc).abs();
-                let (l0, l1) = if bottom {
-                    (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
-                } else {
-                    (&pair.top_list0_poc, &pair.top_list1_poc)
-                };
-                let grid_row = 2 * (f / 4) + bottom as usize;
-                let cell = grid.get(grid_row * mb_width + mb_col)?;
-                let col_poc = if bottom {
-                    pair.bottom_poc
-                } else {
-                    pair.top_poc
-                };
-                return Some((
-                    cell.get((f % 4) * 4 + (fx % 4))?,
-                    col_poc,
-                    l0,
-                    l1,
-                    MvYConv::FieldToFrame,
-                ));
-            }
-            if ctx.current_field_parity.is_some() {
-                // Current FIELD, co-located picture is a frame: read through
-                // the frame's generated field view. JM's `dpb_split_field`
-                // fills BOTH field views of a stored frame with the same
-                // RSD-resampled content (`fs_top->mv_info[j][i] =
-                // fs_btm->mv_info[j][i] = frame->mv_info[2*RSD(j)][RSD(i)]`),
-                // and the colocated read applies RSD again (idempotent), so
-                // the frame cell is `frame[2*RSD(y)][RSD(x)]` INDEPENDENT of
-                // the current field's parity — the parity term previously
-                // shifted every bottom-field read one 4×4 row down. Col
-                // motion is in frame units.
-                let v = if ctx.direct_8x8_inference_flag {
-                    rsd(cy)
-                } else {
-                    cy
-                };
-                let vx = if ctx.direct_8x8_inference_flag {
-                    rsd(cx)
-                } else {
-                    cx
-                };
-                let frame4 = 2 * v;
-                let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
-                return Some((
-                    cell.get((frame4 % 4) * 4 + (vx % 4))?,
-                    ctx.col_poc,
-                    ctx.col_list0_poc,
-                    ctx.col_list1_poc,
-                    MvYConv::FrameToField,
-                ));
-            }
-            // Same picture kind: the current MB's own co-located MB.
-            let cell = grid.get(mb_idx)?;
-            Some((
-                cell.get((cy % 4) * 4 + (cx % 4))?,
+    let colocated_cell = |cy: usize,
+                          cx: usize|
+     -> Option<(
+        &MvCell,
+        i64,
+        &[i64],
+        &[i64],
+        &[(u32, bool)],
+        &[(u32, bool)],
+        MvYConv,
+    )> {
+        let grid = colocated?;
+        if let Some(pair) = &ctx.col_pair {
+            // Current FRAME, co-located picture is a combined field pair:
+            // field 4×4 row = current 4×4 row ÷ 2 (RSD-corrected under
+            // inference), coding field = the pair field closer to the current
+            // poc; the pair's grid row `2k + parity` holds field MB row `k`.
+            // Field 4×4 row: apply the direct-8×8-inference rounding to the
+            // FRAME 4×4 row FIRST (JM `RSD(block_y + j0) >> 1`), THEN halve
+            // to the field view. Halving before rounding (`rsd(cy >> 1)`)
+            // put every bottom-half quadrant of an even MB row one field
+            // row too high — RSD(4r+3)>>1 = 2r+1, while rsd(2r+1) = 2r for
+            // even r — reading the co-located 8×8 directly above the one
+            // JM reads.
+            let f = if ctx.direct_8x8_inference_flag {
+                rsd(cy) >> 1
+            } else {
+                cy >> 1
+            };
+            let fx = if ctx.direct_8x8_inference_flag {
+                rsd(cx)
+            } else {
+                cx
+            };
+            // JM `mc_direct.c`'s `update_direct_mv_info_temporal`: pick TOP
+            // only when BOTTOM is *strictly farther* from the current POC
+            // (`iabs(poc - bottom) > iabs(poc - top)`); ties, and every
+            // other case, pick BOTTOM. i.e. `bottom` is true whenever
+            // bottom is the closer-or-tied field, which is `<=`, not `>=`
+            // (a flipped comparison previously selected the FARTHER field
+            // as the co-located source — see todo-h264.md session #32d4).
+            let bottom =
+                (ctx.current_poc - pair.bottom_poc).abs() <= (ctx.current_poc - pair.top_poc).abs();
+            let (l0, l1) = if bottom {
+                (&pair.bottom_list0_poc, &pair.bottom_list1_poc)
+            } else {
+                (&pair.top_list0_poc, &pair.top_list1_poc)
+            };
+            let grid_row = 2 * (f / 4) + bottom as usize;
+            let cell = grid.get(grid_row * mb_width + mb_col)?;
+            let col_poc = if bottom {
+                pair.bottom_poc
+            } else {
+                pair.top_poc
+            };
+            return Some((
+                cell.get((f % 4) * 4 + (fx % 4))?,
+                col_poc,
+                l0,
+                l1,
+                &[],
+                &[],
+                MvYConv::FieldToFrame,
+            ));
+        }
+        if ctx.current_field_parity.is_some() {
+            // Current FIELD, co-located picture is a frame: read through
+            // the frame's generated field view. JM's `dpb_split_field`
+            // fills BOTH field views of a stored frame with the same
+            // RSD-resampled content (`fs_top->mv_info[j][i] =
+            // fs_btm->mv_info[j][i] = frame->mv_info[2*RSD(j)][RSD(i)]`),
+            // and the colocated read applies RSD again (idempotent), so
+            // the frame cell is `frame[2*RSD(y)][RSD(x)]` INDEPENDENT of
+            // the current field's parity — the parity term previously
+            // shifted every bottom-field read one 4×4 row down. Col
+            // motion is in frame units.
+            let v = if ctx.direct_8x8_inference_flag {
+                rsd(cy)
+            } else {
+                cy
+            };
+            let vx = if ctx.direct_8x8_inference_flag {
+                rsd(cx)
+            } else {
+                cx
+            };
+            let frame4 = 2 * v;
+            let cell = grid.get((frame4 / 4) * mb_width + mb_col)?;
+            return Some((
+                cell.get((frame4 % 4) * 4 + (vx % 4))?,
                 ctx.col_poc,
                 ctx.col_list0_poc,
                 ctx.col_list1_poc,
-                MvYConv::None,
-            ))
-        };
+                ctx.col_list0_id,
+                ctx.col_list1_id,
+                MvYConv::FrameToField,
+            ));
+        }
+        // Same picture kind: the current MB's own co-located MB.
+        let cell = grid.get(mb_idx)?;
+        Some((
+            cell.get((cy % 4) * 4 + (cx % 4))?,
+            ctx.col_poc,
+            ctx.col_list0_poc,
+            ctx.col_list1_poc,
+            ctx.col_list0_id,
+            ctx.col_list1_id,
+            MvYConv::None,
+        ))
+    };
     for &q in quads {
         if ctx.direct_8x8_inference_flag {
             let corner = 12 * (q / 2) + 3 * (q % 2);
             let (cy, cx) = (4 * mb_row + corner / 4, 4 * mb_col + corner % 4);
             let derived = match colocated_cell(cy, cx) {
-                Some((col, col_poc, l0, l1, yconv)) => {
-                    derive_temporal_direct(col, ctx, col_poc, l0, l1, yconv)
+                Some((col, col_poc, l0, l1, l0id, l1id, yconv)) => {
+                    derive_temporal_direct(col, ctx, col_poc, l0, l1, l0id, l1id, yconv)
                 }
                 None => ([0, 0], 0, [0, 0]),
             };
@@ -1889,8 +1951,8 @@ fn apply_temporal_direct(
                 let bx = 2 * (q % 2) + sub % 2;
                 let (cy, cx) = (4 * mb_row + by, 4 * mb_col + bx);
                 let derived = match colocated_cell(cy, cx) {
-                    Some((col, col_poc, l0, l1, yconv)) => {
-                        derive_temporal_direct(col, ctx, col_poc, l0, l1, yconv)
+                    Some((col, col_poc, l0, l1, l0id, l1id, yconv)) => {
+                        derive_temporal_direct(col, ctx, col_poc, l0, l1, l0id, l1id, yconv)
                     }
                     None => ([0, 0], 0, [0, 0]),
                 };
@@ -2579,9 +2641,12 @@ mod tests {
             field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
+            current_list0_id: &[],
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            col_list0_id: &[],
+            col_list1_id: &[],
             col_pair: None,
             current_field_parity: None,
             direct_8x8_inference_flag: true,
@@ -2593,6 +2658,8 @@ mod tests {
             ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
+            ctx.col_list0_id,
+            ctx.col_list1_id,
             MvYConv::None,
         );
         // tb = 4-0 = 4, td = 8-0 = 8 -> half distance -> mv scaled by ~1/2.
@@ -2610,9 +2677,12 @@ mod tests {
             field_slice: false,
             current_poc: 2,
             current_list0_poc: &current_list0_poc,
+            current_list0_id: &[],
             col_poc: 4,
             col_list0_poc: &[],
             col_list1_poc: &[0],
+            col_list0_id: &[],
+            col_list1_id: &[],
             col_pair: None,
             current_field_parity: None,
             direct_8x8_inference_flag: true,
@@ -2626,6 +2696,8 @@ mod tests {
             ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
+            ctx.col_list0_id,
+            ctx.col_list1_id,
             MvYConv::None,
         );
         // tb = 2-0 = 2, td = 4-0 = 4 -> half distance again.
@@ -2643,9 +2715,12 @@ mod tests {
             field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
+            current_list0_id: &[],
             col_poc: 8,
             col_list0_poc: &[0],
             col_list1_poc: &[],
+            col_list0_id: &[],
+            col_list1_id: &[],
             col_pair: None,
             current_field_parity: None,
             direct_8x8_inference_flag: true,
@@ -2656,6 +2731,8 @@ mod tests {
             ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
+            ctx.col_list0_id,
+            ctx.col_list1_id,
             MvYConv::None,
         );
         assert_eq!((mv0, ref0, mv1), ([0, 0], 0, [0, 0]));
@@ -2671,9 +2748,12 @@ mod tests {
             field_slice: false,
             current_poc: 4,
             current_list0_poc: &current_list0_poc,
+            current_list0_id: &[],
             col_poc: 8,
             col_list0_poc: &[999], // no picture in current_list0_poc has POC 999
             col_list1_poc: &[],
+            col_list0_id: &[],
+            col_list1_id: &[],
             col_pair: None,
             current_field_parity: None,
             direct_8x8_inference_flag: true,
@@ -2685,6 +2765,8 @@ mod tests {
             ctx.col_poc,
             ctx.col_list0_poc,
             ctx.col_list1_poc,
+            ctx.col_list0_id,
+            ctx.col_list1_id,
             MvYConv::None,
         );
         assert_eq!(ref0, 0);

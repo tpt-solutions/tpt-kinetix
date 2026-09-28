@@ -187,6 +187,8 @@ fn decoded_picture(frame_num: u32) -> DpbEntry {
         pair_field_lists: None,
         list0_poc: Vec::new(),
         list1_poc: Vec::new(),
+        list0_ids: None,
+        list1_ids: None,
     }
 }
 
