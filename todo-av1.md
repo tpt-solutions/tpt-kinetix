@@ -13396,3 +13396,34 @@ CDF cell (partition 32x32/ctx1 both sides — print its value both sides
 at the read: dav1d `cdf.m.partition[bl][ctx]` complement vs K
 `partition_w32[?]` spec domain) settles whether the CDF drift or the EC
 window is the carrier.
+
+## Session 2026-09-28 (cont'd 20) — dav1d scratch tree restored to working
+## state; the full KSEQ capture pipeline verified (301549 reads, 104
+## KSEQTILE markers). All decode.c hooks from earlier sessions (KAZ3,
+## KSKIP, KINTRA, KGTILE, KGTG, DEBUG_BLOCK_INFO=frame_offset gate,
+## KGT_OH-gated KCOEF, KGMVS, KSKIPPRE, KPARTCDF-in-progress) are in the
+## INDEX copy of decode.c, not HEAD — `git checkout src/decode.c`
+## restores THAT version (the accumulated session hooks), not pristine
+## upstream; `git diff HEAD src/decode.c` shows the delta.
+
+The investigation state: tile rows 0-2's partition trees match dav1d
+exactly (56/24/56 nodes, LCS=full, 0 events). The first divergence is
+tile row 3's partition read at (112,56): dav bp=0 NONE vs K bp=2 VERT
+(same ctx=1, same CDF cell family). Everything after cascades. The two
+candidate carriers: (a) the CDF cell drift from the 106 zero-cost extra
+reads K performs in tile row 2 — but those were PARTITION reads whose
+cells don't overlap the mode-bool cells that diverge at (120,48)...
+unless the CDF drift came from tile row 2's SKIP=0 blocks' mode reads —
+but those matched pixel-wise...; (b) the tile-2 sbrow's EC window vs
+K's: matched at (120,48) KSKIP (4376 both), diverged inside (120,48)'s
+mode cascade (cont'd 13). The next capture: dav1d's post-newmv/
+post-globalmv/post-refmv states for (120,48) vs K's 41044/39444/61664 —
+the KPARTCDF-style single-line prints applied to the near path's four
+bools (the prints must be placed at the TOP of each branch body, not
+inside the if conditions — the multi-line condition spanning makes
+mid-condition prints unreadable).
+
+The dav1d escape-patching lesson: the Bash tool's inline heredoc mangles
+backslash escapes (`\n` becomes a real newline); the Write-tool-created
+patch scripts with byte-level replacements (b'...\n...' via chr(92)
+concatenation where needed) work reliably — see patch_dec_final.py.
