@@ -12886,3 +12886,61 @@ The first EC-state mismatch — now defined as "the first read whose
 post-read rng differs at the same position" — is the buggy read. Given
 the block at (120,48)/(118,52) are skip=0, expect it in coefficient
 reading (the ALLZERO/eob/base-token path) within the first two blocks.
+
+## Session 2026-09-28 (cont'd 9) — the tile-2 desync root FOUND: the MV
+## STACK of block (116,48) diverges. K's stack[0] carries mv=(4,−8) —
+## neither of its in-tile left candidates (−1,−1)/(0,−4) — while dav1d's
+## stack leads with the left neighbour (−1,−1). The (4,−8) is a temporal
+## candidate or an above-tile leak; it poisons the chain
+
+Per-block MV comparison of tile row 2's first SB row (dav1d
+Post-intermode vs K's IBSUM prints, both already captured):
+
+    (112,48): dav (−1,−1)  K (−1,−1)   ✔
+    (112,52): dav (−1,−1)  K (−1,−1)   ✔
+    (116,48): dav n/a      K (4,−8)    ✗ THE ORIGIN
+    (116,52): dav (−1,−1)  K (−1,−1)   ✔
+    (120,48): dav (−1,−1)  K (0,0)     ✗ poisoned by the chain
+    (112,50): K (0,−4) (skip block, mv = its stack[0])
+
+(116,48) is at the TILE TOP (mi_row 48, tile row 2 starts here): its
+above neighbours must be unavailable, its left candidates are
+(112,48)=(−1,−1) and (112,50)=(0,−4), yet K's stack[0]=(4,−8) —
+matching NEITHER left candidate. Two candidate explanations, both
+checkable with K's existing mvstack print (KINETIX_AV1_IBSUM run):
+(a) K's temporal-MV projection (rp_proj) contributes (4,−8) and ranks it
+    above the spatial candidates — dav1d ranks spatial candidates first
+    (spec §7.10.1.10: spatial scan BEFORE temporal), or K emits the
+    temporal candidate even when spatial candidates exist for a 4×4;
+(b) K's above-row scan leaks tile row 1's MVs across the tile top
+    (the above availability check at the tile boundary). (4,−8) vs tile
+    row 1's blocks at mi (116,44-47): the (116,44) WARP block's mv is
+    (row 6, col −4) — no obvious sign flip, so (a) is likelier.
+
+The poisoned stack then cascades: (117)-(119,48) read their stacks,
+(120,48)'s stack gets s1=(0,0) where dav1d has (−1,−1), its NEARMV/drl
+reads decode differently (K NEWMV-adjacent path vs dav1d NEARMV drl=1),
+and every subsequent symbol read in tile row 2 desyncs (~34k bytes).
+
+### Next session's entry point (mechanical)
+
+1. Dump K's mvstack for (116,48) (the mvstack print already exists —
+   gate KINETIX_AV1_IBSUM and filter mi=(116,48)) and dav1d's (the
+   KGMVS print in decode.c's single-ref refmvs_find, `KGT_OH`-gated,
+   currently gated bx==120 by==48 — change to 116/48).
+2. Identify (4,−8)'s origin in K's `inter_mv_stack` for this block:
+   temporal candidate rank/order (§7.10.1.10: the temporal candidate is
+   appended AFTER the spatial scan, and only if spatial < N... verify
+   against the spec's ordering) or the above-tile leak.
+3. Fix, verify (116,48)'s mv == dav1d's, then the chain (120,48) mv ==
+   (−1,−1), then the tile-2 cascade (~34k bytes of frame 3), then
+   frames 5-23 and the FATE aggregate — the same MV-stack divergence
+   class likely explains the other tiles/frames' residues (they all
+   start at tile rows' first decoded blocks after skip runs).
+
+Debug-state additions this session: K's b0 prints now carry mi=(col,row)
+(previously positionless and unusable under tile braid); dav1d's KGMVS
+mvstack dump (KGT_OH-gated, currently bx=120 by=48, single-ref call at
+decode.c:1686); the tile2_probe example under tpt-kinetix-av1/examples/
+decodes K-side without the test-utils dependency chain (usable while
+the concurrent h264 session's in-flight edits break that graph).

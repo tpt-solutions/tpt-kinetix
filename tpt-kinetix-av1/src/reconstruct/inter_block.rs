@@ -921,7 +921,7 @@ impl<'a> TileDecodeState<'a> {
                 left_refs,
             );
             if dbg_b0 {
-                eprintln!("DBG b0 ref={} rng={}", ref_names[0], self.dec.raw_state().0);
+                eprintln!("DBG b0 mi=({mi_col},{mi_row}) ref={} rng={}", ref_names[0], self.dec.raw_state().0);
             }
         }
 
@@ -973,7 +973,7 @@ impl<'a> TileDecodeState<'a> {
                 == 1;
             if dbg_b0 {
                 eprintln!(
-                    "DBG b0 new_mv not={not_newmv} rng={}",
+                    "DBG b0 mi=({mi_col},{mi_row}) new_mv not={not_newmv} rng={}",
                     self.dec.raw_state().0
                 );
             }
@@ -987,7 +987,7 @@ impl<'a> TileDecodeState<'a> {
                     == 1;
                 if dbg_b0 {
                     eprintln!(
-                        "DBG b0 zero_mv near={near_path} rng={}",
+                        "DBG b0 mi=({mi_col},{mi_row}) zero_mv near={near_path} rng={}",
                         self.dec.raw_state().0
                     );
                 }
@@ -1001,7 +1001,7 @@ impl<'a> TileDecodeState<'a> {
                         .read_symbol(&mut self.map_inter_cdfs.ref_mv[refmv_ctx.min(5)]);
                     if dbg_b0 {
                         eprintln!(
-                            "DBG b0 ref_mv={rm} ctx={refmv_ctx} rng={}",
+                            "DBG b0 mi=({mi_col},{mi_row}) ref_mv={rm} ctx={refmv_ctx} rng={}",
                             self.dec.raw_state().0
                         );
                     }
@@ -1275,7 +1275,7 @@ impl<'a> TileDecodeState<'a> {
             }
             if dbg_b0 {
                 eprintln!(
-                    "DBG b0 interintra type={interintra_type} rng={}",
+                    "DBG b0 mi=({mi_col},{mi_row}) interintra type={interintra_type} rng={}",
                     self.dec.raw_state().0
                 );
             }
@@ -2036,7 +2036,7 @@ impl<'a> TileDecodeState<'a> {
             lv as u8,
         );
         if dbg_b0 {
-            eprintln!("DBG b0 post-residual rng={}", self.dec.raw_state().0);
+            eprintln!("DBG b0 mi=({mi_col},{mi_row}) post-residual rng={}", self.dec.raw_state().0);
         }
 
         // Update inter neighbour state.
