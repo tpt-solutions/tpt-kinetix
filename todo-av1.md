@@ -11569,3 +11569,265 @@ this session didn't even need to touch since no repro run was required).
    made no code change, so this is true by construction, not by
    re-measurement - see point 6's re-check requirement for whichever
    session next touches actual code).
+
+### Session cont'd 29 - Lead 1 (dequantization) mechanically CLOSED, clean;
+### Lead 2 got a real, working live-CDF dav1d oracle for the first time in
+### this bug hunt and it immediately found a genuine, measured txtp
+### mismatch for the exact target TU (dav1d: DCT_DCT, Kinetix: FLIPADST_DCT)
+### - but the obvious fix (a real frame-wide persistent TxTypes grid,
+### written unconditionally incl. skip leaves, i.e. cont'd 26's Hypothesis A
+### with its eob>0-gating bug fixed) STILL regresses the corpus by almost
+### exactly the same magnitude cont'd 26 saw. Reverted, not committed. Bug
+### still open, but the search space has narrowed hard and asymmetrically:
+### the remaining unexplained piece is no longer "is dav1d's txtp really
+### different here" (yes, proven) but "why does fixing that one lookup
+### desync something else entirely, elsewhere in the same frame"
+
+Baseline re-confirmed exactly: `t2.ivf` frame 1 = U 14 / V 59 / Y 0 (73 total
+diff bytes), byte-identical to cont'd 23-28. Re-created
+`tpt-kinetix-test-utils/tests/dbg_av1_t2_repro.rs` from cont'd 28's
+description (still not committed).
+
+**Lead 1 (dequantization scale factor) - executed exactly as scoped, and
+is now conclusively CLOSED, clean, no bug found.** Confirmed via the
+existing `KINETIX_AV1_DBG_RESDUMP` hook that mi=(16,11)'s V-plane TU is
+decoded at runtime with `qindex_dc=qindex_ac=128` (both planes; `qindex_
+for_plane` gave the same value for DC and AC here because this frame's
+`delta_q_present=false` and every `delta_q_{y,u,v}_{dc,ac}` is 0 - confirmed
+via a `KINETIX_AV1_DBG=1` dump of the real frame header: `base_q_idx=128`,
+`using_qmatrix=false`, `qm_{y,u,v}=0`). `DC_QLOOKUP_8[128]=140`,
+`AC_QLOOKUP_8[128]=176` reproduce the already-known `dequant=[-280,0,0,0,
+-176,...]` exactly (`quant=[-2,0,0,0,-1,...]` times those steps, `dq_denom
+(TX_4X4)=1`, no qmatrix). Then went one step further than "internally
+consistent": mechanically diffed **every entry** of Kinetix's
+`DC_QLOOKUP_8`/`AC_QLOOKUP_8` (256 entries each, both tables, `palette.rs`)
+against dav1d's real `dav1d_dq_tbl[3][QINDEX_RANGE][2]` 8bpc block, parsed
+programmatically out of `%LOCALAPPDATA%\Temp\dav1d_src\dequant_tables.c`
+(a plain, unmodified upstream file - not the same file cont'd 28 diffed,
+which was the CDF tables in `cdf.c`) with a small Node script. **Zero
+mismatches across all 256 DC entries and all 256 AC entries.** Combined
+with the already-tested `dq_denom`/clip-range unit tests
+(`tests.rs::dq_denom_matches_spec_for_large_square_transforms`, TX_4X4 -> 1)
+and the confirmed-in-this-session live `qindex_for_plane`/frame-header
+values, **the entire dequantization step - table contents, qindex
+selection, denom, clip range - is now proven correct for this exact TU**,
+closing the one item cont'd 28 explicitly flagged as never separately
+audited. No code change; nothing to measure or commit for this lead.
+
+**Lead 2 (dav1d live adapted-CDF oracle) - got much further than any prior
+session, including a real, working, instrumented build, and a genuine new
+finding, but the obvious fix built on that finding regresses the corpus.**
+
+Found a THIRD dav1d checkout on this machine nobody had used yet:
+`%LOCALAPPDATA%\Temp\dav1d_oracle` - a clean, meson-configured-but-never-
+built 1.5.4 source tree (distinct from both the segfaulting `dav1d_fresh`
+cont'd 25 gave up on, and the plain `dav1d_src`/`dav1d-1.5.4-src` text-only
+checkouts cont'd 28 used for the static CDF-table diff). Its original
+`meson setup` had stalled on a `checkasm` test-subproject dependency
+resolution failure; re-running `meson setup bld2 -Denable_tests=false
+-Denable_tools=true` skipped that entirely and configured cleanly. Building
+(`ninja tools/dav1d.exe`) hit one real, pre-existing compile error inherited
+from an EARLIER session's uncommitted instrumentation left in this same
+checkout's `src/decode.c` (a `KINETIX_DBG_FILTER` env-var-gated debug
+`fprintf` using `t->l->ref[...]` where `t->l` is a `BlockContext` **value**
+field, not a pointer - `BlockContext l, *a;` in `internal.h` - so it needs
+`t->l.ref[...]`, not `->`). Fixed that one line (trivial, unrelated to this
+session's own work) and the build succeeded. Running the resulting
+`tools/dav1d.exe` needed `libdav1d.dll`'s directory added to `PATH` (Windows
+DLL search, not an `rpath` issue) - once done, it decodes the corpus's
+`t2.ivf` correctly (frame counts/timing match ffmpeg's libdav1d output).
+
+Instrumented `src/recon.h`'s `DEBUG_BLOCK_INFO` macro (previously
+hardcoded `0 && ...` = permanently disabled, confirmed genuine stock
+upstream dav1d debug scaffolding, not something a prior session broke) to
+`f->frame_hdr->frame_type != DAV1D_FRAME_TYPE_KEY && t->by == 11 && t->bx
+== 16` and `src/recon_tmpl.c`'s `decode_coefs`'s `dbg` local from `DEBUG_
+BLOCK_INFO && plane && 0` (also permanently-disabled stock code) to
+`DEBUG_BLOCK_INFO && plane == 2` (chroma V only). This unlocked the
+function's own extensive **pre-existing** `if (dbg) printf(...)` bin-by-bin
+trace lines (`Post-non-zero`, `Post-eob_bin_*`, `Post-eob_hi_bit`, `Post-
+eob`, `Post-lo_tok`, `Post-hi_tok`, `Post-dc_lo_tok`/`Post-dc_hi_tok`) that
+were already in the source, just never reachable, plus a new `KDBG` block
+added this session dumping the raw CDF array contents (`ts->cdf.coef.
+{skip,eob_base_tok,base_tok,br_tok,dc_sign}`) at entry to `decode_coefs` for
+this exact block.
+
+Ran the instrumented `dav1d.exe` on the exact same `t2.ivf` (regenerated via
+the same `ffmpeg testsrc2` command the corpus test uses) and got a full,
+real, live trace for mi=(bx=16,by=11)'s V-plane TX_4X4 block - the FIRST
+real dav1d block-level trace this entire bug hunt has ever obtained (every
+prior attempt, cont'd 25 included, hit the `dav1d_fresh` segfault first).
+**Cross-checked hard against cont'd 27's independently-hand-derived
+bin-by-bin spec trace for this same TU, and every syntax element matches
+exactly**: `sctx=7` (`Post-non-zero[0][7][0]`), raw `eob=2` (dav1d's
+internal convention: a 0-based *last scan-position index*, not a count -
+`for i = eob-1 downto 1` plus the eob token itself plus a separate DC term
+gives `eob+1 = 3` total coefficients read, matching Kinetix's own
+count-convention `eob=3` exactly, not a discrepancy), `eob_hi_bit=0`,
+`scan[2]=1` (dav1d's own `scan_4x4` table storage order is the **transpose**
+of the row-major `Default_Scan_4x4` listing most easily found in spec
+prose - `{0,4,1,2,5,8,12,9,6,3,7,10,13,14,11,15}` vs `{0,1,4,8,5,2,3,6,9,12,
+13,10,7,11,14,15}` - verified by hand-transposing every entry of the
+row-major list and getting dav1d's exact sequence back; this is a genuine,
+confirmed internal storage-convention difference between the two
+codebases, not a bug in either one, since both ultimately address the same
+2-D (row,col) positions through their own consistent x/y computation), and
+the two token reads (`Post-lo_tok`/`Post-dc_lo_tok`) giving tokens 1 and 2
+matching `quant=[-2,0,0,0,-1,...]` (unsigned magnitudes 2 and 1) exactly.
+**Every bit consumed by this block, per this real oracle trace, is
+identical to what Kinetix consumes** - this is now proven twice over (once
+by cont'd 27's from-spec hand derivation, now again by a live oracle), not
+just "no bug spotted."
+
+**The one place the two decoders provably diverge: transform type.** The
+trace's final line is `Post-uv-cf-blk[pl=1,tx=0,txtp=0,eob=2]` - dav1d
+computed **`txtp=0` (`DCT_DCT`)** for this exact TU, where Kinetix computes
+**`txtp=4` (`FLIPADST_DCT`)** (confirmed identical `TxfmType` enum ordering
+in both codebases - `DCT_DCT=0`, ..., `FLIPADST_DCT=4` - by reading dav1d's
+own `levels.h`). Since both types are `TX_CLASS_2D` (so the entropy
+context/scan-table derivation - already proven identical above - doesn't
+distinguish them at all), this single difference is invisible to every
+context-formula/CDF-table audit any prior session ran, and only shows up in
+the INVERSE TRANSFORM applied to otherwise-byte-identical decoded
+coefficients - exactly matching the "locally-consistent-looking reads that
+are nonetheless wrong" symptom cont'd 28 predicted for an upstream-state
+bug. Traced *why* dav1d gets `DCT_DCT` here: its `decode_b`/`read_coef_tree`
+machinery threads a real per-4x4-cell array, `t->scratch.txtp_map` (spec
+§7.12.3's literal `TxTypes[y4][x4]`), written **unconditionally** after
+every luma leaf's `decode_coefs` call (dav1d's `set_ctx` macro in
+`recon_tmpl.c`, including the `eob == -1` all-skip case, which still writes
+`DCT_DCT`/`WHT_WHT`) and read for chroma via `txtp = t->scratch.txtp_map[
+(by4 + (y<<ss_ver))*32 + bx4 + (x<<ss_hor)]`. For this specific TU the
+co-located luma cell belongs to `mi_row=10` (confirmed: `ly=40` -> luma 4x4
+row 10), a *different, earlier-decoded sibling coded block* - structurally
+outside what Kinetix's per-call-local `luma_leaf_types` Vec can ever see,
+exactly the scoping gap cont'd 25/26 already suspected.
+
+**Reattempted cont'd 26's Hypothesis A (a real persistent frame-wide grid)
+with what looked like the one concrete bug fixed**: added a `Vec<u8>`
+`luma_tx_types` field on `TileDecodeState` (frame-wide, `mi_rows*mi_cols`,
+zero-initialized - `DCT_DCT` is 0, so an un-written cell already matches
+dav1d's un-touched-`txtp_map`-cell default with no special-casing needed),
+written via a new `record_luma_tx_type`/inlined-equivalent call **moved
+outside the `if coeffs.eob > 0` gate** (cont'd 26's Hypothesis A wrote only
+when `eob > 0`, which cont'd 26 blamed for the regression) so every luma
+leaf - skip or not - updates the grid, from both `inter_block.rs`'s main
+leaf loop and `intra_block.rs`'s IBC path (`reconstruct_ibc_block`, which is
+real inter-coded per spec, `IsInter=1`). Rewired `co_located_luma_type` to
+read this grid exclusively (converting the closure's tile-relative `lx`/
+`ly` back to frame-absolute mi coordinates via `+ self.tile_px_x0/y0`, then
+`/MI_SIZE`), dropping the local-list scan as the *lookup* (kept only for an
+unreachable-in-practice out-of-bounds fallback). Had to restructure the
+closure to capture only `&self.luma_tx_types` + a few `Copy` scalars
+directly, not `self` as a whole, to avoid disjoint-borrow conflicts with
+the later `&mut self.{u,v}_plane`/`self.dec`/`self.coeff_cdfs`/`self.
+coeff_ctxs` borrows in the same function (a real, mechanical Rust borrow-
+checker fix, not a design choice). Verified the target TU's grid lookup
+now genuinely differs from before (`KINETIX_AV1_DBG_COLOC`: `frame_mi=(16,
+10) grid=0`, i.e. `DCT_DCT`, matching dav1d) and that this is populated
+from the correct sibling block's own leaf write.
+
+**Measured result: regresses the corpus almost exactly as hard as cont'd
+26's original (buggy) Hypothesis A did.** `t2.ivf` frame 1: Y-plane total
+`|diff|` 0 -> **77641** (U differing samples 14 -> 907, V 59 -> 943) -
+compare cont'd 26's own reported number for its `eob > 0`-gated version,
+**also 77641, exactly**. Re-running `KINETIX_AV1_DBG_RESDUMP` after this
+change showed the *entropy stream itself* had desynced well before reaching
+this TU: the block that used to be reported as `mi=(16,11)` at
+`cpx=(32,20)` is now `mi=(16,10)` at the same `cpx` - i.e. an earlier wrong
+grid lookup somewhere upstream changed a `read_eob`/`is_1d` context bit,
+consumed a different number of bits, and cascaded the entire partition
+tree's decode order downstream of that point, not a contained, local
+mis-render. This means cont'd 26's own diagnosis ("the regression was
+specifically the `eob > 0` gating") was **incomplete at best**: this
+session's write path has no such gate (confirmed by re-reading the diff
+before reverting) and gets an almost identical-magnitude regression anyway,
+strongly suggesting the *grid concept itself*, as both sessions have now
+implemented it, has a second, independent bug - most likely something in
+either (a) the tile-relative-to-frame-absolute coordinate conversion used
+on the *read* side (the closure's `(lx + tile_px_x0)/MI_SIZE` math, algebra-
+checked by hand this session against `px_x`'s own tile-relative convention
+and believed correct, but not independently oracle-verified for any block
+OTHER than the one target TU), or (b) a genuinely different, currently
+unidentified EARLIER block in frame 1 where the correct chroma txtp
+depends on the *local, own-leaves-only* `.first()` semantics cont'd 26's
+Hypothesis B already proved is load-bearing for at least one block - i.e.
+dav1d's real per-block model may not be a *pure* global-grid lookup at all
+for every case, and Kinetix's pre-existing local-scan/`.first()` fallback
+may already be accidentally correct for whichever block(s) that grid
+lookup now breaks, while being wrong only for the one sibling-block case
+this session traced. **Reverted in full** (`git checkout` on all 4 touched
+files: `mod.rs`, `partition.rs`, `inter_block.rs`, `intra_block.rs` -
+confirmed byte-identical to HEAD via `git status`/`git diff --stat` showing
+zero changes in `tpt-kinetix-av1/` afterward). Nothing committed - per this
+crate's rule, no fix without a measured improvement.
+
+**Re-confirmed baseline after revert:** `cargo test -p tpt-kinetix-av1`
+165+ tests all pass (lib) plus every integration/proptest/doctest binary,
+zero failures. `cargo test -p tpt-kinetix-test-utils --test conformance`:
+intra 6/6, inter 5/5 x4 clips, feature corpus 1/13 - byte-identical to
+cont'd 23-28's numbers. `t2.ivf` frame 1: U 14 / V 59 / Y 0 (73 bytes),
+unchanged.
+
+**What this session adds that's genuinely new and should NOT be redone from
+scratch:**
+- A **working**, buildable, instrumentable dav1d oracle
+  (`%LOCALAPPDATA%\Temp\dav1d_oracle`, `bld2/` subdir configured with
+  `-Denable_tests=false -Denable_tools=true`) - the segfault/build blockers
+  that stopped cont'd 25 onward are gone for THIS checkout specifically
+  (distinct from the still-presumably-broken `dav1d_fresh`). Remember to
+  add `dav1d_oracle/bld2/src` to `PATH` before running `tools/dav1d.exe`
+  (DLL search path, not an rpath/build issue). The one-line `t->l->ref` ->
+  `t->l.ref` fix in `src/decode.c` (inherited breakage, not this session's)
+  is still needed if this checkout hasn't been rebuilt since.
+- **Definitive proof (not a hypothesis) that Kinetix's `co_located_luma_
+  type` is wrong for at least the mi=(16,11)/V-plane/`t2.ivf` TU
+  specifically** - dav1d's real, live `txtp_map` says `DCT_DCT`, Kinetix's
+  local-scan heuristic says `FLIPADST_DCT`, and every other input to this
+  TU's decode (entropy bits consumed, dequant, table contents) is proven
+  bit-exact both ways. This is the actual root cause of at least this one
+  TU's wrongness - just not, on its own, a safe global fix.
+- **A second, independent data point that "replace the local scan with a
+  real persistent grid" is not sufficient on its own** - two different
+  sessions, two different concrete implementations (one gated on `eob > 0`,
+  one not), both regress the corpus by close to the same amount. Whatever
+  the real fix is, it is more surgical than "always trust the grid."
+
+#### Next session's starting point
+
+1. **Do not re-attempt a blanket persistent-grid replacement of `co_located_
+   luma_type` again without first finding the SPECIFIC earlier block where
+   it diverges from the correct answer** - use the now-working `dav1d_
+   oracle` (see above) to trace `txtp_map`/`decode_coefs` for a handful of
+   EARLIER chroma blocks in this same frame (in decode order, before
+   mi=(16,11)) and diff each one's dav1d `txtp` against Kinetix's own
+   `KINETIX_AV1_DBG_COLOC` output, one at a time, to find the actual first
+   point of divergence - rather than swapping the whole mechanism and
+   measuring only the aggregate frame diff.
+2. A promising middle path, not yet tried: keep `co_located_luma_type`'s
+   existing local-list-plus-`.first()` behavior as the primary answer
+   (proven load-bearing by cont'd 26's Hypothesis B), and ONLY fall back to
+   the frame-wide grid when the local list is completely empty for the
+   queried chroma position (i.e. genuinely reaching outside this call's own
+   `leaves` - the exact mi=(16,11) case this session traced). This is
+   narrower than either full-replacement attempt so far and directly
+   targets the one proven-wrong case without touching the (apparently
+   correct) local-scan path for every other block.
+3. If pursuing (1) or (2), the `dav1d_oracle` build from this session is
+   ready to reuse - just re-add `KINETIX_AV1_DBG_COLOC`-equivalent tracing
+   at each candidate block and compare against a `DEBUG_BLOCK_INFO`-gated
+   dav1d run with the target `t->by`/`t->bx` retargeted per block (the
+   `recon.h`/`recon_tmpl.c` edits from this session were reverted along
+   with everything else in `dav1d_oracle` being scratch space, not a repo
+   file - re-apply the same two edits described above, `ninja tools/dav1d.
+   exe` rebuilds incrementally in seconds).
+4. **Lead 1 (dequantization) is now closed for good** - do not re-audit the
+   quantizer tables/dq_denom/clip range without a specific new reason;
+   this session's diff was exhaustive (all 256 DC + 256 AC entries against
+   dav1d's real `dequant_tables.c`) and the live runtime values for the
+   target TU were independently cross-checked against the frame header.
+5. `capabilities().pixel_exact` still `false`; feature corpus still 1/13;
+   `t2.ivf` frame 1 still 73 diff bytes, all chroma, unchanged - sixth
+   consecutive session confirming the exact same numbers (this session's
+   only code changes were reverted before finishing, so the working tree
+   is unchanged from cont'd 28).
