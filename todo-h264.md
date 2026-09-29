@@ -15280,3 +15280,27 @@ outside `tests/fixtures/`, or delete them before re-running.
 - `cargo test -p tpt-kinetix-h264 --lib` is still blocked: `tpt-kinetix-av1`
   (concurrent process, uncommitted edits) fails to compile. H.264 lib clippy
   `-D warnings` is clean.
+
+### Session 2026-09-30 (b) — chroma trace done; session (e)'s chroma table does NOT reproduce
+
+Added `KINETIX_DBG_CHROMA_MB="x,y"` (prints `CTOP pic=<tag> ...` bS/QP plus the
+8 Cb column samples p1/p0/q0/q1 at that MB's top chroma edge) and
+`KINETIX_FORCE_BS_C_NTH=n` (override only the n-th matching call, to isolate one
+of the many pictures sharing coordinates).
+
+Findings, re-measured with the harness (baseline `y_bad=123 c_bad=55`):
+- `h MB(35,11) idx0` forced to 0 -> c_bad **55** (unchanged, NOT 1); forced to 1
+  or 2 -> **61**. No single-call override (n = 0..40) changes anything. The
+  derived bS there is fine; most calls are on flat 126-valued chroma where no
+  bS can change a sample.
+- `36,12 h/v` forced to 1/2 -> 63/59 (not 7/6); `37,12 h` forced to 1 -> 68,
+  to 0 -> 79. All WORSE than baseline.
+- So the entire (e) table ("c_bad drops to 1-7") is **invalid** and the
+  "chroma bS=0 edge is being filtered" claim is refuted. Probable cause: the
+  scratch-`.yuv`-in-fixtures gotcha above corrupting the reference during (e).
+  Do not act on the (e) numbers.
+- Net: the current chroma bS derivation is a local optimum at every implicated
+  edge; the chroma residual is not bS-driven. Remaining suspects are the
+  filter arithmetic / tC0 for chroma or luma QP-derived indices (session c
+  audited the math), or something outside deblocking that ITU-byte-identical
+  pre-deblock comparison cannot see.

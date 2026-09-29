@@ -1020,6 +1020,18 @@ pub fn deblock_chroma_mb(
     let forced_c = |x: usize, y: usize, dir_v: usize, ei: usize, bs: &mut [u8; 4]| {
         if let Some(p) = &force_bs_c {
             if p[0] == x && p[1] == y && p[2] == dir_v && p[3] == ei {
+                // Optional `KINETIX_FORCE_BS_C_NTH=n`: only the n-th (0-based)
+                // matching call is overridden, isolating one of several
+                // pictures that share coordinates.
+                static CALLS: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let nth = std::env::var("KINETIX_FORCE_BS_C_NTH")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                if nth.is_some_and(|n| n != call) {
+                    return;
+                }
                 for (seg, b) in bs.iter_mut().enumerate() {
                     *b = if p.len() == 5 {
                         p[4] as u8
@@ -1082,6 +1094,31 @@ pub fn deblock_chroma_mb(
         field_horiz_boundary_clamp(&mut bs, cur.field);
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
         forced_c(mb_x, mb_y, 1, 0, &mut bs);
+        if let Ok(v) = std::env::var("KINETIX_DBG_CHROMA_MB") {
+            if v.trim() == format!("{mb_x},{mb_y}") {
+                eprintln!(
+                    "CTOP pic={} MB({mb_x},{mb_y}) bs={bs:?} qp={}/{} qpc={qpc} fld={}/{}",
+                    pic_tag(),
+                    cur.qp,
+                    t.qp,
+                    cur.field,
+                    t.field
+                );
+                let y = mb_y * 8;
+                if y >= 2 {
+                    for dx in 0..8usize {
+                        let x = mb_x * 8 + dx;
+                        eprintln!(
+                            "CTOPS dx={dx} cb p1={} p0={} q0={} q1={}",
+                            cb[(y - 2) * stride + x],
+                            cb[(y - 1) * stride + x],
+                            cb[y * stride + x],
+                            cb[(y + 1) * stride + x]
+                        );
+                    }
+                }
+            }
+        }
         deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
     }
