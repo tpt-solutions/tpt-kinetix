@@ -315,15 +315,31 @@ impl FrameMeta {
 
     /// 4×4-luma-cell counterpart of [`mark_luma_edges`](Self::mark_luma_edges).
     pub fn mark_luma_edges4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        self.mark_luma_edges4_sel(bx0, by0, bx1, by1, true, true);
+    }
+
+    /// [`mark_luma_edges4`](Self::mark_luma_edges4) restricted to the left
+    /// and/or top edge. A skipped inter block only has block-boundary edges:
+    /// its interior transform boundaries (possible only inside 128-wide/tall
+    /// blocks, which are coded as several 64x64 transforms) are not filtered.
+    pub fn mark_luma_edges4_sel(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        left: bool,
+        top: bool,
+    ) {
         let by1c = by1.min(self.h4);
         let bx1c = bx1.min(self.w4);
-        if bx0 < self.w4 {
+        if left && bx0 < self.w4 {
             for by in by0..by1c {
                 let i = self.idx4(bx0, by);
                 self.luma_edge_left4[i] = true;
             }
         }
-        if by0 < self.h4 {
+        if top && by0 < self.h4 {
             for bx in bx0..bx1c {
                 let i = self.idx4(bx, by0);
                 self.luma_edge_top4[i] = true;
@@ -384,15 +400,29 @@ impl FrameMeta {
     /// `record_luma` calls. OR-combines so a real edge established by any
     /// tile/call sticks (matches `record_luma`'s own merge-safe `max`/`&&`).
     pub fn mark_luma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        self.mark_luma_edges_sel(bx0, by0, bx1, by1, true, true);
+    }
+
+    /// [`mark_luma_edges`](Self::mark_luma_edges) restricted to the left
+    /// and/or top edge (see [`mark_luma_edges4_sel`](Self::mark_luma_edges4_sel)).
+    pub fn mark_luma_edges_sel(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        left: bool,
+        top: bool,
+    ) {
         let by1c = by1.min(self.h8);
         let bx1c = bx1.min(self.w8);
-        if bx0 < self.w8 {
+        if left && bx0 < self.w8 {
             for by in by0..by1c {
                 let i = self.idx(bx0, by);
                 self.luma_edge_left[i] = true;
             }
         }
-        if by0 < self.h8 {
+        if top && by0 < self.h8 {
             for bx in bx0..bx1c {
                 let i = self.idx(bx, by0);
                 self.luma_edge_top[i] = true;
@@ -405,6 +435,20 @@ impl FrameMeta {
     /// transform's `record_chroma` calls cover (chroma is stored at the
     /// luma-grid resolution, per `FrameMeta`'s own doc comment).
     pub fn mark_chroma_edges(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize) {
+        self.mark_chroma_edges_sel(bx0, by0, bx1, by1, true, true);
+    }
+
+    /// [`mark_chroma_edges`](Self::mark_chroma_edges) restricted to the left
+    /// and/or top edge.
+    pub fn mark_chroma_edges_sel(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        left: bool,
+        top: bool,
+    ) {
         let by1c = by1.min(self.h8);
         let bx1c = bx1.min(self.w8);
         if std::env::var("KINETIX_AV1_DBG_CHROMA_EDGE_MARK").is_ok()
@@ -416,13 +460,13 @@ impl FrameMeta {
                 "mark_chroma_edges bx0={bx0} by0={by0} bx1={bx1} by1={by1} bx1c={bx1c} by1c={by1c}"
             );
         }
-        if bx0 < self.w8 {
+        if left && bx0 < self.w8 {
             for by in by0..by1c {
                 let i = self.idx(bx0, by);
                 self.chroma_edge_left[i] = true;
             }
         }
-        if by0 < self.h8 {
+        if top && by0 < self.h8 {
             for bx in bx0..bx1c {
                 let i = self.idx(bx, by0);
                 self.chroma_edge_top[i] = true;

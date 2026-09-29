@@ -3744,17 +3744,30 @@ impl<'a> TileDecodeState<'a> {
             let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
             let px_x = leaf_mi_col * MI_SIZE - self.tile_px_x0;
             let px_y = leaf_mi_row * MI_SIZE - self.tile_px_y0;
-            self.meta.mark_luma_edges(
+            // A skipped inter block filters only its own block boundary: the
+            // interior transform boundaries of a 128-wide/tall block (coded as
+            // several 64x64 transforms) are not edges (spec 7.14.2
+            // `applyFilter = isBlockEdge || !skip`; dav1d `mask_edges_inter`).
+            let (edge_l, edge_t) = if skip {
+                (leaf_mi_col == mi_col, leaf_mi_row == mi_row)
+            } else {
+                (true, true)
+            };
+            self.meta.mark_luma_edges_sel(
                 px_x / 8,
                 px_y / 8,
                 (px_x + leaf_tx_w).div_ceil(8),
                 (px_y + leaf_tx_h).div_ceil(8),
+                edge_l,
+                edge_t,
             );
-            self.meta.mark_luma_edges4(
+            self.meta.mark_luma_edges4_sel(
                 px_x / 4,
                 px_y / 4,
                 (px_x + leaf_tx_w).div_ceil(4),
                 (px_y + leaf_tx_h).div_ceil(4),
+                edge_l,
+                edge_t,
             );
             self.meta.record_luma4(
                 px_x / 4,
@@ -4164,11 +4177,13 @@ impl<'a> TileDecodeState<'a> {
                 // samples (has_chroma). A block at even (mi_col, mi_row) with
                 // 4×4 luma size has_chroma=false but still creates a real
                 // luma-grid boundary that the chroma deblock must filter.
-                self.meta.mark_chroma_edges(
+                self.meta.mark_chroma_edges_sel(
                     cpx_x / 4,
                     cpx_y / 4,
                     (cpx_x + cw).div_ceil(4),
                     (cpx_y + ch).div_ceil(4),
+                    !skip || tx == 0,
+                    !skip || ty == 0,
                 );
                 if !has_chroma {
                     // No chroma of its own (§7.3.1): skip coefficient reading
