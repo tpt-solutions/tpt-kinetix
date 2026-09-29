@@ -54,5 +54,10 @@ pub mod loop_filter;
 pub mod obu;
 pub mod reconstruct;
 
+/// One decoded sample. 16 bits wide so a single reconstruction path serves 8-,
+/// 10- and 12-bit streams; 8-bit output is narrowed back to bytes at the frame
+/// boundary.
+pub type Px = u16;
+
 pub use decoder::{Av1Decoder, TileData};
 pub use encoder::{Av1Encoder, Av1EncoderConfig};

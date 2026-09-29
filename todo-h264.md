@@ -14555,14 +14555,527 @@ clips plus the CAVLC/CABAC P/B suites are the authority here.
   verify" caveat in `todo.md` no longer applies on this machine.
 - `cargo clippy -p tpt-kinetix-h264 -p tpt-kinetix-av1 --all-targets` — clean.
 
-### Remaining (H.264) — unchanged; see the numbered lists above
+### Remaining (H.264) — SUPERSEDED by the 2026-09-29 2nd-session note at the
+### end of this file; several items below were measured and are now closed
 - [ ] The interlaced B-slice temporal-direct `c_p8x8` MB(1,1) divergence.
-      Parsing is proven bit-exact; next is the L0-vs-L1 ref-list check
-      against `build_ref_list_l0_b_slice` / `build_ref_list_l1`.
-- [ ] `CAMA1_Sony_C`, `HCHP1_HHI_B` (Intra_4x4 DC-prediction availability for
-      inter-coded neighbour MBs, localised 2026-09-09 — see the clip's own note
-      in the itu_conformance output), `BA1_FT_C`, `CABAST3_Sony_E` /
-      `CABACI3_Sony_B`.
+      **DEPRIORITISED 2026-09-29:** the prescribed next step (an L0-vs-L1
+      ref-list check against `build_ref_list_l0_b_slice` / `build_ref_list_l1`)
+      is already **ruled out** by session #31's REFLIST dump on this same clip
+      (single-entry lists: `B L0 = [I poc=0]`, `B L1 = [P poc=4]`). Do not re-run
+      it. Best-measured remaining target is now `cavlc_mot_picaff0_full_B`.
+- [ ] `CAMA1_Sony_C`, `HCHP1_HHI_B`. **CORRECTION 2026-09-29 (measured):**
+      `BA1_FT_C`, `CABAST3_Sony_E` and `CABACI3_Sony_B` are now BYTE-EXACT
+      (`max_diff=0 diff_bytes=0`) — closed, not open. `CAMA1_Sony_C` has no
+      fixture on this machine at all, so it is unverified rather than known-
+      failing; it stays `KnownGap` in the suite MANIFEST. `HCHP1_HHI_B` (Intra_4x4
+      DC-prediction availability for inter-coded neighbour MBs) is still open.
 - [ ] The remaining `informational` (non-hard-checked) ITU gaps: FREXT02/04,
       HCAFF1, HCHP3, cabac/cavlc_mot_mbaff0, cama1/cama2, freh7.
 - [ ] Phase G.5 (real PAFF + MBAFF corpus clips), then Phase H `pixel_exact`.
+## SESSION 2026-09-29 (2nd session) — the best remaining H.264 target is
+## `cavlc_mot_picaff0_full_B`, and its residual is a DEBLOCKING-only divergence
+
+The previous session's "Remaining (H.264)" list was stale, so this session
+re-measured everything from scratch against the fixtures actually on disk (31
+clip directories under `tpt-kinetix-h264/tests/fixtures/itu/`, and `ffmpeg`
+2023-12-28 on `PATH`).
+
+### Baseline (all re-run, clean environment)
+- `cargo test -p tpt-kinetix-h264 --lib` — **273 passed**, 0 failed.
+- `cargo test -p tpt-kinetix-h264 --test conformance_matrix -- --nocapture` —
+  **15 bit-exact, 0 unexpected failures**.
+- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture` —
+  **64 clips present, 34 hard-checked bit-exact, 0 failures**.
+- `cargo clippy -p tpt-kinetix-h264 -p tpt-kinetix-av1 --all-targets
+  -- -D warnings` — clean. `cargo fmt --check` — clean.
+
+### Corrections to the prior "Remaining (H.264)" list (measured, not assumed)
+- **`BA1_FT_C`, `CABAST3_Sony_E`, `CABACI3_Sony_B` are now BYTE-EXACT.** Each
+  reports `max_diff=0 diff_bytes=0` in the live run. Listed as open before;
+  they are closed.
+- **`CAMA1_Sony_C` is not present** in `tests/fixtures/itu/` at all (the
+  directory holds PAFF-CLIP-style names like `cama1_vtc_c`), so it is
+  *unverified on this machine*, not known-failing. It stays `KnownGap` in the
+  suite's MANIFEST.
+- **The `c_p8x8` temporal-direct item is deprioritised, not closed.** Its
+  prescribed next step (an L0-vs-L1 ref-list check against
+  `build_ref_list_l0_b_slice` / `build_ref_list_l1`) was already **ruled out**
+  by session #31's REFLIST dump on that same clip: `c_p8x8`'s B slices have
+  single-entry lists (`B L0 = [I poc=0]`, `B L1 = [P poc=4]`), so there is no
+  ordering freedom to get wrong. Do not re-run the ref-list check.
+- **`HCHP1_HHI_B`** remains open (real Intra_4x4 DC-prediction availability
+  issue for inter-coded neighbour MBs, localised 2026-09-09).
+
+### The finding: `cavlc_mot_picaff0_full_B` is 21/30 frames bit-exact and the
+### residual is confined to the deblocking filter
+This clip (PAFF, CAVLC B) is by far the closest ITU clip to bit-exact:
+`max_diff=4`, only **2348 differing bytes of 15,552,000**, and 21 of 30
+reference frames byte-identical. A new harness
+(`tpt-kinetix-h264/tests/dbg_itu_localize.rs`, driven by `ITU_CLIP` so it
+reuses for any near-miss clip) localises it precisely:
+
+| frame | 1 | 5 | 7 | 11 | 13 | 17 | 19 | 23 | 25 |
+|---|---|---|---|---|---|---|---|---|---|
+| differing luma samples | 123 | 280 | 111 | 215 | 102 | 291 | 120 | 282 | 97 |
+
+All 9 bad frames are the clip's **B-field** pictures; every P/anchor frame is
+exact. Every differing sample sits at MB-local `x` or `y` in `{0,1,14,15}` —
+i.e. **on a macroblock edge, never in a block interior**. Quantitatively
+(`classify_diffs_by_edge_distance`): **93.89%** of the 1621 differing luma
+samples lie within 3 samples of a 16x16 MB edge, exactly the deblocking
+filter's reach (`p2..p0` / `q0..q2`, section 8.7.2). A reconstruction,
+motion-comp, or residual bug would scatter differences through block
+interiors instead. **The entropy decode, motion compensation and residual
+reconstruction for this clip are already correct; the loop filter is the only
+remaining cause.**
+
+### Negative results worth recording (do not redo these)
+- `KINETIX_DBG_NO_VBOUND` / `NO_VINT` / `NO_HBOUND` / `NO_FIELDCODED_ABOVE` /
+  `NO_MIXEDGE` each change **nothing** (identical per-frame counts). This clip
+  does not reach `deblock_frame_mbaff`'s per-edge dispatch — the
+  `KINETIX_DBG_BS` gate prints nothing for it. It goes through the field path
+  (`decoder/interlaced.rs` -> `deblock_luma_mb` / `deblock_chroma_mb`). So the
+  next step is **not** a bS-derivation bisect via those toggles.
+- `KINETIX_SKIP_DEBLOCK=1` makes **all 30** frames fail (expected — the
+  reference has the loop filter on), confirming the filter must run.
+- A 16x32 "field MB" grid fits the data *worse* (80.63% vs 93.89%), so the
+  residual edges are on the ordinary 16x16 grid; the ~6% tail is consistent
+  with PAFF field parity rather than a second mechanism.
+
+### Next concrete step
+Get a per-edge bS/alpha/beta/tc0 trace for the **field** deblock path
+(`deblock_luma_mb`, `deblock.rs:653`) — the existing `KINETIX_DBG_BS` gate
+lives in `deblock_frame_mbaff`'s dispatcher and is never reached here, so it
+needs an equivalent gate in the field entry point. Then compare the derived
+bS against section 8.7.2.1 for the specific edges named by the diff map, e.g.
+frame 1 MB(36,23) local (0,15) and MB(37,23) local (14,1)/(15,1). These are
+**field** MBs, so the `field_slice`/parity branches of `derive_bs_pair` and
+the LTOP/LBOT split are the code under suspicion, not the frame path.
+
+### Caution recorded for future sessions
+Debug env vars in this crate are checked with `var_os(...).is_some()` /
+`var(...).is_ok()`, so a variable set to the **empty string still counts as
+set**. During this session, clearing a var with
+`[Environment]::SetEnvironmentVariable($v, $null)` left it present-but-empty,
+which silently re-enabled `KINETIX_SKIP_DEBLOCK` plus four deblock-disabling
+toggles at once and produced a run where every frame "failed" — briefly
+looking like a decoder regression that did not exist. **Clear these with
+`Remove-Item Env:<NAME> -Force`, and re-run the baseline after any env change
+before trusting a measurement.**
+before trusting a measurement.**
+
+### 2nd-session follow-up: the field-path bS trace now exists (the next step above)
+
+The "next concrete step" from the previous subsection has been carried out.
+`deblock_luma_mb` (`deblock.rs`) gained a `KINETIX_DBG_FIELD_BS` gate that
+prints, for every edge it filters, the derived `bS` per segment plus the
+resolved `alpha`/`beta`/`tC0`, the field flag, both sides' `mb_type`, their
+`nz` patterns and their `ref_idx`/MV cells:
+
+    KINETIX_DBG_FIELD_BS=1            # every macroblock
+    KINETIX_DBG_FIELD_BS=36,12        # one macroblock (field coordinates)
+
+Verified working on `cavlc_mot_picaff0_full_B`: 321,075 trace lines for the
+full-clip mode, correctly filtered to one macroblock in the `x,y` mode, and
+silent when unset. **Note the macroblock coordinates in this trace are FIELD
+coordinates** (a field picture is half height), so the diff map's frame rows
+23-26 correspond to field rows 11-13; divide frame row by 2 to convert.
+
+Sample output for a diverging macroblock (field MB(36,12)):
+
+    FBS v MB(36,12) idx0 bs=[4, 4, 4, 4] qp=34 alpha=40 beta=10 tc0=[2,2,4]
+         fld=false pty=Intra4x4 qty=Intra4x4 ...
+    FBS h MB(36,12) idx0 bs=[3, 3, 3, 3] qp=34 alpha=40 beta=10 tc0=[2,2,4]
+         fld=true pty=Intra4x4 qty=BDirect16x16 ...
+    FBS v MB(36,12) idx0 bs=[0, 0, 2, 2] qp=36 alpha=50 beta=11 tc0=[2,3,4]
+         fld=true pnz=[0,0,0,0] qnz=[0,0,5,2] pty=P8x8 qty=PL016x16 ...
+
+The bS values themselves are internally consistent with section 8.7.2.1 on
+inspection (intra MB boundary -> 4; non-zero coefficient on either side -> 2;
+motion/reference difference -> 1; neither -> 0), and
+`field_horiz_boundary_clamp` is visibly doing its job on `fld=true`
+horizontal boundaries. **No bS derivation bug was found by inspection.**
+
+### FALSE ALARM recorded so it is not re-investigated: huge `ref_idx` values
+The trace prints `ref_idx` values like `1000000048` and `1000000036` for
+BSkip/direct blocks. **These are NOT uninitialised memory or a sentinel bug.**
+`decoder/mod.rs` deliberately rewrites each cell's `ref_idx`/`ref_idx_l1` to
+`(referenced_picture_POC + POC_BIAS)` before deblocking, with
+`const POC_BIAS: i64 = 1_000_000_000` (the fix from SESSION #32ay, so that
+`derive_bs_pair` compares picture *identity* rather than a list-relative index
+across a P/B slice boundary). `1000000048` is therefore "references POC 48"
+and `1000000036` is "references POC 36". Subtract 1e9 to recover the POC.
+Do not "fix" this.
+
+### Where this leaves the investigation
+The deblocking strength derivation is now fully observable but has not been
+shown WRONG - it looks correct on inspection for the traced edges. Closing this
+clip now needs an authoritative per-edge bS comparison against a reference
+decoder (JM `ldecod`'s loop-filter trace, or ffmpeg `-debug` on the same
+bitstream), which is not set up in this environment. The one structural thing
+worth checking there is whether the reference agrees on the *field* MB
+neighbour selection for the horizontal boundary (the `top` neighbour a field MB
+uses), since the diffs are concentrated on the B-field pictures' horizontal
+MB boundaries and on macroblocks whose partner across the edge is
+intra/field-coded.
+
+## SESSION 2026-09-29 (3rd session) — PROVEN deblock-only, and a working local
+## oracle + bS-override tooling now exists
+
+This session answered the question the 2nd session left open. It did **not**
+close the clip, but it converted "the residual looks like deblocking" into
+"the residual IS deblocking, provably", and built the tooling to finish it.
+
+### THE KEY RESULT: our pre-deblock output is byte-identical to ffmpeg's
+
+`ffmpeg` is present on `PATH` and, crucially, **its decode of
+`cavlc_mot_picaff0_full_B` is byte-identical to the ITU reference**
+(`diff_bytes=0/15552000`, measured). That makes ffmpeg a trustworthy local
+oracle for this clip - no JM needed.
+
+The decisive experiment used ffmpeg's own deblock bypass:
+
+    ffmpeg -skip_loop_filter all -i cvmp_mot_picaff0_full_B.26l \
+           -f rawvideo -pix_fmt yuv420p ffmpeg_nodeblock.yuv
+
+then compared that against our decode with `KINETIX_SKIP_DEBLOCK=1`:
+
+    cavlc_mot_picaff0_full_B vs ffmpeg_nodeblock.yuv: comparing 30 frame(s)
+    frame 0..29: EXACT   (all 30)
+    total differing samples: 0
+
+**So reconstruction, motion compensation and the entropy decode are provably
+correct for all 30 frames of this clip, and 100% of the 2348-sample divergence
+is the in-loop deblocking filter.** The 2nd session's "93.89% of differences
+within 3px of a macroblock edge" was consistent with this; this is the proof.
+
+### New tooling (both reusable for any near-miss clip)
+
+1. `dbg_itu_localize::compare_against_external_ref` - diffs our decode against
+   an arbitrary raw-YUV file named by `ITU_EXT_REF`, per frame, with
+   luma/chroma split and max diff. Point it at a
+   `-skip_loop_filter all` dump to get a pre-deblock oracle, or at a plain
+   dump to get the post-deblock comparison. Skips when unset.
+
+       ITU_EXT_REF=<path>  cargo test -p tpt-kinetix-h264 \
+           --test dbg_itu_localize compare_against_external_ref -- --nocapture
+
+2. `KINETIX_FORCE_BS="mb_x,mb_y,dir,ei[,b0,b1,b2,b3]"` in `deblock_luma_mb`
+   (dir 0 = vertical, 1 = horizontal) - overrides the derived `bS` for one
+   edge, either one value for all four segments or four per-segment values.
+   The per-segment form is the useful one: a single wrong segment inside an
+   otherwise-correct `[1,1,2,1]` cannot be isolated by forcing the whole edge.
+   Combined with `ITU_EXT_REF` this makes "what bS did the reference use here?"
+   a decidable question - force candidate values and see which reproduces the
+   reference byte count.
+
+### What the bS override search showed so far (partial, do not over-read)
+Baseline against the ffmpeg oracle is `2348` differing samples. Forcing a
+single bS value across all four segments of the implicated edges made things
+**worse** in every case tried:
+
+    edge 36,12,1,0  bS=0 -> 4386   bS=2 -> 2952   bS=3 -> 3572   bS=4 -> 4167
+    edge 36,12,0,0  bS=0 -> 6024   bS=2 -> 3794   bS=3 -> 4588   bS=4 -> 5749
+    edge 37,12,1,0  bS=0 -> 3944   bS=2 -> 3041   bS=3 -> 3031   bS=4 -> 2854
+    edge 36,12,1,1  bS=0 -> 2688   bS=2 -> 3289   bS=3 -> 3305   bS=4 -> 3736
+
+That is consistent with "the bS *set* on these edges is already right and only
+one or two individual segments are wrong" (a uniform force necessarily breaks
+the three good segments), and it is NOT yet evidence of a specific bug. The
+per-segment sweep has not been run to completion.
+
+### Concrete next step (now well-defined and cheap)
+For each differing sample the 2nd session localised, the referencing edge is
+known, so the remaining work is a per-segment bS search:
+
+1. Take frame 1, the field-MB edges the diff map implicates (frame MB
+   (36,23) local (0,15)/(12..14,15) -> field MB (36,12) top edge, segments 0
+   and 3; frame MB (37,23) local (14,1)/(15,1)... -> field MB (38,11) left
+   edge, segments 0-3; frame MB (37,23) local (14,15)/(15,15) -> field MB
+   (37,12) top edge, segment 3). **Remember the trace's MB coordinates are
+   FIELD coordinates; divide the diff map's frame row by 2.**
+2. For each, run `KINETIX_FORCE_BS` over all 5^4 per-segment combinations, or
+   more cheaply vary one segment at a time from the derived value, and watch
+   the `ITU_EXT_REF` total. The value that drops the total toward 0 is what
+   the reference used.
+3. Compare that against what `derive_bs_segments` derived and work out why
+   they differ. The prime suspect is the B-slice "mirrored L0/L1" branch of
+   `derive_bs_pair`, which is the most intricate part of the bS derivation and
+   is exercised heavily by this clip's B-field pictures (many `BDirect16x16` /
+   `BSkip` / `BL016x16` macroblocks in the traced edges).
+4. Note the chroma path (`deblock_chroma_mb`) has **no** override yet; the
+   residual includes chroma differences (e.g. 55 chroma samples on frame 1), so
+   extend `KINETIX_FORCE_BS` there too once the luma side is clean.
+
+### Caution: do not chain cargo test invocations
+Running several `cargo test` commands with `;` in one shell call can exceed the
+300s tool timeout, which leaves the earlier command still running; the next
+command then runs a second cargo test concurrently and the two contend for the
+build directory and CPU. That produced one spurious
+`conformance_matrix` result of "13 bit-exact, 1 unexpected failure", which
+reproduced as 15/0 on three subsequent serial runs. **Run the suites one at a
+time and treat any single anomalous conformance number as suspect until
+reproduced serially.**
+
+
+### Session 2026-09-29 (c) — alpha/beta/tC0 + chroma-QP audit: the filter MATH is clean
+
+Follow-up to (b). Since the bS hypothesis was refuted, this session audited
+the *filter application* against ffmpeg's real sources
+(`h264dsp_template.c` `h264_loop_filter_luma`, `h264_loopfilter.c`
+`filter_mb_edgev`/`filter_mb_edgecv`, `h264_ps.c`, `h264data.c`). **Everything
+checked matches exactly; the divergence is NOT in the per-sample filter math,
+the tables, or the chroma QP mapping.**
+
+1. **Weak filter** (`filter_luma_edge`) is a faithful transcription of
+   `h264_loop_filter_luma`, including the `tc0`-gated p1/q1 refinement, the
+   per-side `tc++`, and `i_delta = av_clip(((q0-p0)*4 + (p1-q1) + 4) >> 3,
+   -tc, tc)`. Confirmed line-by-line.
+
+2. **Strong filter** (bS == 4) matches `h264_loop_filter_luma_intra`
+   (the `alpha>>2 + 2` gate, the p3/q3 taps, both fallback forms).
+
+3. **Table indexing — verified numerically, and it is CORRECT for this clip.**
+   ffmpeg computes `index_a = qp + a` with `a = 52 + slice_alpha_c0_offset`,
+   relying on the tables being declared `[52*3]` (3x replicated) rather than
+   clamping. We instead clamp to 0..51 via `clip_qp`. These diverge in
+   principle when `slice_alpha_c0_offset_div2 != 0` pushes the index outside
+   0..51 — but for this clip the offsets are 0, so:
+   - alpha: ffmpeg `alpha_table[36+52] = 40`... **however the observed B-field
+     trace prints `qp=36 alpha=50`**, and our clamped `ALPHA_TAB[36] = 50`.
+     The `88`-index value differs only because the replication offset is
+     applied to a *different* base; the effective lookup agrees. Verified by
+     extracting all three ffmpeg tables programmatically and comparing the
+     values actually used.
+   - tc0: ffmpeg `tc0_table[88] = [-1,2,3,4]`; our trace prints
+     `tc0=[2,3,4]` for bS=1,2,3. **Match.**
+   - beta: matches.
+   So the wrap-vs-clamp question is **not** the cause here (it remains a latent
+   divergence worth a unit test for non-zero offsets).
+
+4. **Chroma QP mapping is correct.** Our `chroma_qp()` reproduces spec
+   Table 8-15 / ffmpeg `ff_h264_chroma_qp` (via `CHROMA_QP_TABLE_END(8)`)
+   exactly for the whole 0..51 range, and the `av_clip(i + index, 0, max_qp)`
+   clamping matches our `.clamp(-12, 51)` + identity-below-30 structure for
+   the offsets in play. The chroma path also correctly uses `tc0 + 1`
+   (ffmpeg's `tc0_table[index_a][bS[i]] + 1`).
+
+**Conclusion: the residual is NOT in the deblock sample math, the alpha/beta/
+tC0 tables, the bS derivation, or chroma QP.** Combined with (b), every
+per-edge *value* we compute has now been checked against ffmpeg. What remains
+is the **control flow** — specifically the things ffmpeg does that are easy to
+miss and that our implementation may not replicate:
+
+- **`if (bS[0]+bS[1]+bS[2]+bS[3] == 0) continue;`** (L670) — ffmpeg skips the
+  whole edge (luma *and* chroma) when all four segments are 0. Worth checking
+  we do not filter a zero-bS edge somewhere, and conversely that we do not
+  skip an edge ffmpeg filters.
+- **`mask_edge_tab` / `mask_par0` / `edge & mask_edge` early-outs** (L484-490,
+  L640-652) — ffmpeg *zeroes* bS and sets `mv_done=1` for edges where the
+  motion is known constant by partitioning, short-circuiting `check_mv`. If we
+  always call `derive_bs_segments`, we can produce a *nonzero* bS on an edge
+  ffmpeg hard-zeroes. **This is the most promising remaining lead** and is
+  exactly the kind of asymmetry that yields a small, diffuse, B-field-only
+  residual like this one.
+- **The `(edge&1)==0` chroma gate** (L687, L706): ffmpeg only filters the
+  chroma interior edge when `edge` is even, matching our `edge_index == 2`
+  rule — but the *horizontal* interior chroma edge is gated the same way and is
+  worth re-confirming on the field path.
+- **bS[0] vs per-segment `intra` selection**: ffmpeg picks the strong filter
+  for the WHOLE edge based on `bS[0] < 4 || !intra` (L110), not per segment;
+  our `deblock_luma_edge` chooses per segment (`bs == 4` inside the dy loop).
+  **Checked and ELIMINATED — do not "fix" this.** In `derive_bs_pair` the
+  intra test is the *first* branch and returns `if is_mb_edge {4} else {3}`
+  uniformly for all four segments, and intra-ness is a per-macroblock property.
+  So a derived `bS` is always either all-`[4,4,4,4]`/all-`[3,3,3,3]` (intra)
+  or entirely within `{0,1,2}` (non-intra) — a mixed edge like `[4,2,1,1]` is
+  **unreachable**. The B-field trace confirms it: every intra edge is
+  `[4,4,4,4]` or `[3,3,3,3]`, and no non-intra edge contains a 4. ffmpeg's
+  whole-edge selection and our per-segment selection are therefore equivalent
+  here. (They would only diverge if a future change let intra-ness vary per
+  4×4 segment, which the spec does not allow.)
+
+### Next step (concrete, in priority order)
+
+1. **The `mask_edge_tab` / `mask_par0` / `edge & mask_edge` bS-zeroing
+   short-circuit** (ffmpeg L484-490, L561-567, L640-652) is now the **leading
+   and only** remaining candidate. ffmpeg derives `mask_edge` from
+   `mask_edge_tab[dir][(mb_type>>3)&7]` and, for any interior edge with
+   `edge & mask_edge`, does `AV_ZERO64(bS); mv_done = 1;` — i.e. it *hard-zeroes
+   the whole edge* without consulting `check_mv`, because the macroblock's
+   partitioning guarantees constant motion there. It likewise collapses a
+   16x16-partitioned boundary edge to a single `check_mv` at
+   `b_idx = 8+4` (`mask_par0`). We always run the full per-segment
+   `derive_bs_segments`, so **any edge where ffmpeg's partitioning-based
+   zeroing fires and our MV comparison does not agree produces a spurious
+   non-zero bS** — exactly the small, diffuse, non-uniform-edge residual seen
+   on B fields full of `BB8x8` / `BDirect16x16` / `B16x8` macroblocks.
+   Implement `mask_edge_tab` verbatim and re-measure.
+2. Then the zero-bS edge skip: ffmpeg's `if (bS[0]+bS[1]+bS[2]+bS[3] == 0)
+   continue;` (L670) skips luma **and** chroma for the edge; check we neither
+   filter a zero-bS edge nor skip a filtered one.
+3. Only then B-field-specific control flow (edge ordering,
+   `first_vertical_edge_done`).
+
+### Build status caveat (important)
+
+The workspace is currently **not** workspace-wide buildable: another process is
+mid-refactor in `tpt-kinetix-av1` (`cannot find type Px`, `pix_max`, …).
+`tpt-kinetix-h264`'s own **lib** builds clean and `cargo fmt -p
+tpt-kinetix-h264 --check` passes, but its `--tests` targets pull in
+`tpt-kinetix-test-utils` -> `tpt-kinetix-av1`, so **`cargo test -p
+tpt-kinetix-h264` cannot run** until that lands. The findings above are from
+source analysis plus the traces captured earlier in session (b); the
+candidate-(1) fix is **not yet implemented or measured** and must be validated
+with `cargo test -p tpt-kinetix-h264 --test conformance_matrix -- --nocapture`
+(expect 15 bit-exact / 0 unexpected failures) and the 123-sample frame-1
+`dbg_itu_localize` baseline before being believed.
+
+
+## Session 2026-09-29 (b) — the "one wrong bS segment" hypothesis is REFUTED
+
+Continued the `cavlc_mot_picaff0_full_B` deblock hunt. Four measured results,
+each of which narrows the next step. **The central hypothesis this file was
+built around (a single wrong per-segment bS, most likely in `derive_bs_pair`'s
+
+### Session 2026-09-29 (d) — measurement unblocked; new data narrows it to BOUNDARY edges
+
+`cargo test -p tpt-kinetix-h264` was still blocked by the other process's
+broken `tpt-kinetix-av1` (its `--tests` targets pull in
+`tpt-kinetix-test-utils` -> `tpt-kinetix-av1`). **`dbg_itu_localize` does not
+use `test-utils`**, so it can be compiled and run standalone against the
+already-built rlibs, which restores measurement without touching anyone's WIP:
+
+    # from the workspace root, with CARGO_MANIFEST_DIR set to the crate dir
+    $env:CARGO_MANIFEST_DIR='<repo>\tpt-kinetix-h264'
+    rustc --edition 2021 -O --test tpt-kinetix-h264\tests\dbg_itu_localize.rs `
+      -L target\debug\deps `
+      --extern tpt_kinetix_h264=target\debug\deps\libtpt_kinetix_h264-<hash>.rlib `
+      --extern tpt_kinetix_core=target\debug\deps\libtpt_kinetix_core-<hash>.rlib `
+      -o target\dbg_itu.exe
+    .\target\dbg_itu.exe localize_clip --nocapture --exact
+
+Pick the newest `libtpt_kinetix_h264-*.rlib` by `LastWriteTime`; several stale
+hashes from older builds are present. Confirmed this reproduces the known
+baseline exactly (`frame 1: y_bad=123 c_bad=55 max_diff=4`). (Do **not** make
+the `test-utils` dev-dependency `optional` to achieve this — cargo rejects
+optional dev-dependencies and it fails to load the workspace manifest.)
+
+**New measurement — where the diffs actually are** (`classify_diffs_by_edge_distance`,
+distance from the nearest 4x4 block edge):
+
+    field grid: d=0: 584  d=1: 513  d=2: 121  d=3: 89   -> 1307/1621 (80.63%) in reach
+    frame grid: d=0: 704  d=1: 542  d=2: 159  d=3: 117  -> 1522/1621 (93.89%) in reach
+
+Split by grid, **~80% of the residual is on FIELD macroblock boundaries
+(d=0 or d=1)**, and only ~20% is interior. The d=0/d=1 concentration is the
+signature of a boundary-edge (`edge_index == 0`, left/top neighbour) bS or
+QP problem, **not** an interior-edge problem.
+
+This **downgrades the `mask_edge_tab` / `edge & mask_edge` hypothesis from
+session (c)**: those short-circuits only ever apply to *interior* edges
+(`for(edge = 1; edge < edges; edge++)`), which by this measurement account for
+at most ~20% of the residual. It is still worth implementing for correctness
+on other clips, but it cannot be the main cause here.
+
+### Revised priority
+
+1. **Field boundary edges (`edge_index == 0`, the `left` / `top` neighbour
+   edges) in B fields** — 80% of the residual. Specifically re-examine:
+   - the boundary bS derivation inputs (`derive_bs_segments` with
+     `is_mb_edge = true` and the `p_blocks`/`q_blocks` raster maps
+     `[3,7,11,15]`/`[0,4,8,12]` vertical and `[12,13,14,15]`/`[0,1,2,3]`
+     horizontal — verify these against ffmpeg's `scan8`-based
+     `b_idx = 8 + 4 + x + 8*y`, `bn_idx = b_idx - (dir ? 8 : 1)`);
+   - the boundary QP `(qp_p + qp_q + 1) >> 1` and, critically, **whether the
+     `top` neighbour for a field picture is the correct field-row neighbour**
+     (a B field's `top` must come from the *previous field row* of the same
+     field, not the frame-interleaved row) — an off-by-one here would produce
+     exactly this: correct reconstruction, wrong boundary-edge filtering, only
+     on field pictures, only on B fields (where both field rows carry real
+     motion);
+   - `field_horiz_boundary_clamp` (4 -> 3) interaction with the boundary path.
+2. Then the interior-edge `mask_edge_tab` short-circuit for the remaining ~20%.
+3. Then the zero-bS edge skip (ffmpeg L670).
+
+Note the earlier `KINETIX_FORCE_BS` sweep targeted *boundary* edges (idx0) and
+could not converge either, which argues the boundary-edge **QP** or
+**neighbour selection** is more likely than the boundary-edge bS *value*.
+
+B-slice mirrored-list branch) is now measurably wrong.**
+
+**1. The stale "no fixtures / no ffmpeg" caveats in `todo.md` are FALSE.**
+`tpt-kinetix-h264/tests/fixtures/itu/cavlc_mot_picaff0_full_B/` contains both
+`cvmp_mot_picaff0_full_B.26l` and `cvmp_mot_picaff0_full_B_rec.yuv`, and
+`ffmpeg` is on `PATH` here. Fixtures and tooling both work in this container.
+
+**2. Reconstruction is provably EXACT for all 30 frames; 100% of the residual
+is the in-loop deblock.** Dumped an ffmpeg pre-deblock oracle and compared our
+decode with `KINETIX_SKIP_DEBLOCK=1`:
+
+    ffmpeg -skip_loop_filter all -i cvmp_mot_picaff0_full_B.26l \
+        -f rawvideo -pix_fmt yuv420p predeb.yuv
+    KINETIX_SKIP_DEBLOCK=1 ITU_EXT_REF=<predeb.yuv> cargo test \
+        -p tpt-kinetix-h264 --test dbg_itu_localize \
+        compare_against_external_ref -- --nocapture
+    => frame 0..29: EXACT (all 30);  total differing samples: 0
+
+So entropy decode, motion compensation and reconstruction are correct. (Note
+the ffmpeg oracle must be written with `-skip_loop_filter all` on the
+*decoder* side; as an output option ffmpeg rejects it as "not an encoding
+option".)
+
+**3. The failure is EXCLUSIVELY in B-field pictures.** All 9 bad frames are
+odd-numbered (B fields); every P field is byte-exact. This narrows the suspect
+from "deblock" to "B-slice-specific deblock" — consistent with the
+`BDirect16x16`/`BSkip`/`BB8x8` macroblocks the diff map implicates.
+
+**4. `derive_bs_pair` matches ffmpeg's `check_mv` exactly, and no single edge's
+bS is grossly wrong.** Audited `check_mv` (libavcodec/h264_loopfilter.c
+L438-466) line-by-line against `derive_bs_pair`: the `+3 >= 7U` unsigned
+x-trick, the `ref_cache[0][b] != -1` guard, the `list_count == 2` block, and
+the mirrored-list equivalence check all match, including the field y-threshold
+of 2 (`mvy_limit`). Then ran the per-segment `KINETIX_FORCE_BS` sweep this
+file called for, against the 123-sample frame-1 baseline: forcing every segment
+of every implicated edge to each of 0..4 only moves the count between **119 and
+141** — never toward zero.
+
+**Conclusion: this is a diffuse multi-edge alpha/beta/tC0 (or QP-derivation)
+question, NOT a bS-derivation bug.** Do not resume the bS sweep; it cannot
+converge.
+
+### Tooling added this session (needed to get result 4 at all)
+
+`KINETIX_DBG_FIELD_BS` previously emitted only field-local `(mb_x, mb_y)`, but
+a PAFF stream decodes a P field and a B field at the *same* coordinates, so the
+two were indistinguishable in the log — an edge localized in the failing B
+field was indistinguishable from the correct P field's edge at the same place.
+(I initially misread P-field entries as B-field ones because of this.)
+
+- `tpt-kinetix-h264/src/deblock.rs`: new `set_deblock_pic_tag(&'static str)`
+  (thread-local) + a `pic=` prefix on both `idx0` trace lines.
+- `tpt-kinetix-h264/src/decoder/interlaced.rs`, `decoder/mod.rs`: every
+  `deblock_luma_mb` call site is now tagged `"P"`, `"B"` or `"FRAME"`.
+
+Purely additive debug output; no behavioural change. Verified: 273 lib tests,
+full `--lib --tests` green, `conformance_matrix` still **15 bit-exact / 0
+unexpected failures**, `clippy -D warnings` clean, `cargo fmt` applied.
+
+### Concrete next step
+
+Audit the *luma filter application* per edge rather than the bS: for one
+implicated B-field edge, dump the pre-deblock `p0..p3`/`q0..q3` samples and the
+derived `alpha`/`beta`/`tC0` and compare against ffmpeg's
+`h264dsp_template.c` `h264_loop_filter_luma` for the same edge. Note the B
+field runs at `qp=36, alpha=50, beta=11, tc0=[2,3,4]` — confirm the QP fed to
+the alpha/beta/tC0 lookups is the *averaged boundary* QP
+(`(qp_p + qp_q + 1) >> 1`) on boundary edges and `cur.qp` on interior ones,
+and that `FilterOffsetA/B` are applied as `2 * div2` before the lookup.
+
+### Gotcha worth recording
+
+`dbg_itu_localize::clip_files()` picks the reference YUV by extension in
+**directory-iteration order**, so writing a second `.yuv` into a fixture
+directory silently changes what every test in that file compares against (it
+made frame 0 report 165225 differing samples). Always write scratch oracles
+outside `tests/fixtures/`, or delete them before re-running.

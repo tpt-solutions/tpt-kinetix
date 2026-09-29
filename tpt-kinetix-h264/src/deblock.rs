@@ -34,6 +34,32 @@
 use crate::macroblock::MbType;
 use crate::mv::MvCell;
 
+// Debug label identifying the picture currently being deblocked, printed as
+// a `pic=` prefix on every `KINETIX_DBG_FIELD_BS` line.
+//
+// The field trace is emitted per macroblock with only field-local `(mb_x,
+// mb_y)` coordinates, and a PAFF stream decodes a P field and a B field at the
+// *same* coordinates. Without a picture tag the two are indistinguishable in
+// the log, so an edge localized in a failing B field cannot be told apart from
+// the (correct) P field's edge at the same location. The decoder sets this via
+// [`set_deblock_pic_tag`] before each picture's deblock pass; it is
+// thread-local because the parse is single-threaded per picture.
+thread_local! {
+    static PIC_TAG: std::cell::Cell<&'static str> = const { std::cell::Cell::new("?") };
+}
+
+// Tag the picture currently being deblocked, for `KINETIX_DBG_FIELD_BS` output.
+//
+// `tag` must be a `&'static str` (the decoder passes a fixed label). Passing
+// an empty string restores the default `"?"`.
+pub fn set_deblock_pic_tag(tag: &'static str) {
+    PIC_TAG.with(|t| t.set(if tag.is_empty() { "?" } else { tag }));
+}
+
+fn pic_tag() -> &'static str {
+    PIC_TAG.with(|t| t.get())
+}
+
 /// Luma QP offset range guard.
 fn clip_qp(qp: i32) -> i32 {
     qp.clamp(0, 51)
@@ -661,6 +687,93 @@ pub fn deblock_luma_mb(
     p: DeblockParams,
 ) {
     let trace = std::env::var("KINETIX_BINTRACE").is_ok();
+    // Field-path bS/alpha/beta/tc0 trace. The `KINETIX_DBG_BS` gate used by
+    // `deblock_frame_mbaff`'s dispatcher is never reached by a plain PAFF/PAFF
+    // field picture, which deblocks through this function instead, so a
+    // near-miss field clip (e.g. `cavlc_mot_picaff0_full_B`) had no way to see
+    // the derived strengths. `KINETIX_DBG_FIELD_BS=1` (or any value without a
+    // comma) prints every edge of every macroblock; set it to `"mb_x,mb_y"` to
+    // restrict to one macroblock.
+    let fbs_trace = std::env::var("KINETIX_DBG_FIELD_BS").ok().and_then(|s| {
+        let (a, b) = s.trim().split_once(',')?;
+        Some((
+            a.trim().parse().unwrap_or(usize::MAX),
+            b.trim().parse().unwrap_or(usize::MAX),
+        ))
+    });
+    // `fbs_trace == None` with the variable SET means "every macroblock";
+    // `Some((x, y))` restricts the trace to that one macroblock. With the
+    // variable UNSET `fbs_on` is false and nothing is printed.
+    let fbs_on = std::env::var("KINETIX_DBG_FIELD_BS").is_ok();
+    let want = |x: usize, y: usize| {
+        fbs_on
+            && match fbs_trace {
+                None => true,
+                Some((a, b)) => a == x && b == y,
+            }
+    };
+    // Debug override: force a specific bS for one edge, as
+    // `KINETIX_FORCE_BS="mb_x,mb_y,dir,ei,bs"` (dir 0 = vertical, 1 =
+    // horizontal), to search for the boundary strength a reference decoder
+    // actually used. The `bs` may be a single value applied to all four
+    // segments, or four comma-separated per-segment values
+    // (`...,b0,b1,b2,b3`) — the per-segment form is the useful one, because a
+    // single wrong segment in an otherwise-correct `[1,1,2,1]` cannot be
+    // isolated by forcing the whole edge. Combined with an external byte-exact
+    // oracle (`ITU_EXT_REF`) this makes "our bS derivation is suspect" a
+    // decidable question: force candidate values and see which reproduces the
+    // reference. `dir`/`ei` match the `deblock_luma_edge` arguments.
+    let force_bs = std::env::var("KINETIX_FORCE_BS").ok().and_then(|s| {
+        let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        // 5 = one shared value, 8 = four per-segment values.
+        if parts.len() == 5 || parts.len() == 8 {
+            Some(parts)
+        } else {
+            None
+        }
+    });
+    // Debug override for the edge QP itself (session 2026-09-29 d).
+    // `KINETIX_FORCE_QP="mb_x,mb_y,dir,ei,qp"` forces the QP fed to the
+    // alpha/beta/tC0 lookups for one edge, on top of whatever was derived
+    // (the boundary average `(qp_p + qp_q + 1) >> 1`, or `cur.qp` for
+    // interior edges). Motivated by the d=0/d=1 diff concentration on field
+    // boundary edges: a wrong boundary *QP* produces a small, diffuse residual
+    // that a per-segment bS sweep cannot converge on (forcing bS only ever
+    // moves tC within its table row). Sweeping this distinguishes "wrong QP"
+    // from "wrong bS" definitively.
+    let force_qp = std::env::var("KINETIX_FORCE_QP").ok().and_then(|s| {
+        let parts: Vec<i32> = s
+            .split(',')
+            .filter_map(|v| v.trim().parse::<i32>().ok())
+            .collect();
+        if parts.len() == 5 {
+            Some(parts)
+        } else {
+            None
+        }
+    });
+    let qp_override =
+        |x: usize, y: usize, dir_v: usize, ei: usize, qp: &mut i32| {
+            if let Some(p) = &force_qp {
+                if p[0] == x as i32 && p[1] == y as i32 && p[2] == dir_v as i32 && p[3] == ei as i32
+                {
+                    *qp = p[4];
+                }
+            }
+        };
+    let forced = |x: usize, y: usize, dir_v: usize, ei: usize, bs: &mut [u8; 4]| {
+        if let Some(p) = &force_bs {
+            if p[0] == x && p[1] == y && p[2] == dir_v && p[3] == ei {
+                for (seg, b) in bs.iter_mut().enumerate() {
+                    *b = if p.len() == 5 {
+                        p[4] as u8
+                    } else {
+                        p[4 + seg] as u8
+                    };
+                }
+            }
+        }
+    };
     // Debug override (session #27+): skip filtering entirely so the caller can
     // compare pre-deblock reconstruction against `ffmpeg -skip_loop_filter all`.
     if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
@@ -686,6 +799,8 @@ pub fn deblock_luma_mb(
             [0, 4, 8, 12],
             crate::deblock::mvy_limit(cur.field),
         );
+        let mut bs = bs;
+        forced(mb_x, mb_y, 0, 0, &mut bs);
         if trace {
             eprintln!(
                 "DEBLOCK L v-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?}",
@@ -693,7 +808,30 @@ pub fn deblock_luma_mb(
                 [cur.nz[0], cur.nz[4], cur.nz[8], cur.nz[12]]
             );
         }
-        let qp = (cur.qp + l.qp + 1) >> 1;
+        let mut qp = (cur.qp + l.qp + 1) >> 1;
+        qp_override(mb_x, mb_y, 0, 0, &mut qp);
+        if want(mb_x, mb_y) {
+            let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+            let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
+            eprintln!(
+                "FBS pic={} v MB({mb_x},{mb_y}) idx0 bs={bs:?} qp={qp} alpha={} beta={} tc0={:?} fld={} pnz={:?} qnz={:?} pty={:?} qty={:?} prf={:?} qrf={:?}",
+                pic_tag(),
+                ALPHA_TAB[qpi as usize],
+                BETA_TAB[qpb as usize],
+                [
+                    TC0_TAB[0][qpi as usize],
+                    TC0_TAB[1][qpi as usize],
+                    TC0_TAB[2][qpi as usize]
+                ],
+                cur.field,
+                [l.nz[3], l.nz[7], l.nz[11], l.nz[15]],
+                [cur.nz[0], cur.nz[4], cur.nz[8], cur.nz[12]],
+                l.mb_type,
+                cur.mb_type,
+                l.cells[3].ref_idx,
+                cur.cells[0].ref_idx,
+            );
+        }
         deblock_luma_edge(plane, stride, mb_x, mb_y, true, 0, bs, p, qp);
     }
     // Interior vertical edges (edge_index 1,2,3) — always within the same MB;
@@ -706,7 +844,7 @@ pub fn deblock_luma_mb(
         }
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             cur,
             cur,
             false,
@@ -714,10 +852,27 @@ pub fn deblock_luma_mb(
             q_blocks,
             crate::deblock::mvy_limit(cur.field),
         );
+        forced(mb_x, mb_y, 0, ei, &mut bs);
         if trace {
             eprintln!("DEBLOCK L v-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
         }
-        deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, cur.qp);
+        if want(mb_x, mb_y) {
+            eprintln!(
+                "FBS v MB({mb_x},{mb_y}) idx{ei} bs={bs:?} qp={} fld={} nz_p={:?} nz_q={:?}",
+                cur.qp,
+                cur.field,
+                [
+                    cur.nz[ei - 1],
+                    cur.nz[3 + ei],
+                    cur.nz[7 + ei],
+                    cur.nz[11 + ei]
+                ],
+                [cur.nz[ei], cur.nz[4 + ei], cur.nz[8 + ei], cur.nz[12 + ei]],
+            );
+        }
+        let mut qp = cur.qp;
+        qp_override(mb_x, mb_y, 0, ei, &mut qp);
+        deblock_luma_edge(plane, stride, mb_x, mb_y, true, ei, bs, p, qp);
     }
     // Block-boundary (inter-MB) horizontal edge at edge_index = 0. Segments
     // grouped by raster COLUMN; p-side block is the top MB's bottom row
@@ -732,6 +887,9 @@ pub fn deblock_luma_mb(
             crate::deblock::mvy_limit(cur.field),
         );
         field_horiz_boundary_clamp(&mut bs, cur.field);
+        forced(mb_x, mb_y, 1, 0, &mut bs);
+        let mut qp = (cur.qp + t.qp + 1) >> 1;
+        qp_override(mb_x, mb_y, 1, 0, &mut qp);
         if trace {
             eprintln!(
                 "DEBLOCK L h-edge MB({mb_x},{mb_y}) idx0 bs={bs:?} pnz={:?} qnz={:?} pty={:?} qty={:?}",
@@ -741,7 +899,28 @@ pub fn deblock_luma_mb(
                 cur.mb_type
             );
         }
-        let qp = (cur.qp + t.qp + 1) >> 1;
+        if want(mb_x, mb_y) {
+            let qpi = clip_qp(qp + 2 * p.alpha_offset_div2);
+            let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
+            eprintln!(
+                "FBS pic={} h MB({mb_x},{mb_y}) idx0 bs={bs:?} qp={qp} alpha={} beta={} tc0={:?} fld={} pty={:?} qty={:?} pnz={:?} qnz={:?} pcell={:?} qcell={:?}",
+                pic_tag(),
+                ALPHA_TAB[qpi as usize],
+                BETA_TAB[qpb as usize],
+                [
+                    TC0_TAB[0][qpi as usize],
+                    TC0_TAB[1][qpi as usize],
+                    TC0_TAB[2][qpi as usize]
+                ],
+                cur.field,
+                t.mb_type,
+                cur.mb_type,
+                [t.nz[12], t.nz[13], t.nz[14], t.nz[15]],
+                [cur.nz[0], cur.nz[1], cur.nz[2], cur.nz[3]],
+                (t.cells[12].ref_idx, t.cells[12].mv),
+                (cur.cells[0].ref_idx, cur.cells[0].mv),
+            );
+        }
         deblock_luma_edge(plane, stride, mb_x, mb_y, false, 0, bs, p, qp);
     }
     // Interior horizontal edges; segments grouped by column, p-side row
@@ -758,7 +937,7 @@ pub fn deblock_luma_mb(
             (ei - 1) * 4 + 3,
         ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             cur,
             cur,
             false,
@@ -766,10 +945,19 @@ pub fn deblock_luma_mb(
             q_blocks,
             crate::deblock::mvy_limit(cur.field),
         );
+        forced(mb_x, mb_y, 1, ei, &mut bs);
         if trace {
             eprintln!("DEBLOCK L h-edge MB({mb_x},{mb_y}) idx{ei} bs={bs:?}");
         }
-        deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, cur.qp);
+        if want(mb_x, mb_y) {
+            eprintln!(
+                "FBS h MB({mb_x},{mb_y}) idx{ei} bs={bs:?} qp={} fld={}",
+                cur.qp, cur.field,
+            );
+        }
+        let mut qp = cur.qp;
+        qp_override(mb_x, mb_y, 1, ei, &mut qp);
+        deblock_luma_edge(plane, stride, mb_x, mb_y, false, ei, bs, p, qp);
     }
 }
 

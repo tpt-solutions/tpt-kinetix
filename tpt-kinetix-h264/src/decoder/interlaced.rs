@@ -361,6 +361,9 @@ impl H264Decoder {
                 beta_offset_div2: header.slice_beta_offset_div2,
                 chroma_qp_index_offset,
             };
+            // See the B-field site for why the picture role is tagged.
+            crate::deblock::set_deblock_pic_tag("P");
+
             Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
             return self.finalize_field(
                 recon,
@@ -698,6 +701,10 @@ impl H264Decoder {
                     .collect()
             })
             .collect();
+        // See the B-field site in `decode_interlaced_b_field` for why the
+        // picture role is tagged.
+        crate::deblock::set_deblock_pic_tag("P");
+
         // Triage (#32bz): KINETIX_NO_DEBLOCK skips the field deblock pass so
         // pre-deblock recon can be compared against the reference directly.
         if std::env::var_os("KINETIX_NO_DEBLOCK").is_none() {
@@ -1737,6 +1744,9 @@ impl H264Decoder {
                 )
                 .unwrap();
             }
+            // See the B-field site for why the picture role is tagged.
+            crate::deblock::set_deblock_pic_tag("P");
+
             Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
             if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
                 let poc = {
@@ -2401,6 +2411,12 @@ impl H264Decoder {
             )
             .unwrap();
         }
+        // A PAFF stream decodes a P field and a B field at identical field-local
+        // macroblock coordinates, so tag the deblock trace with the picture role:
+        // without it an edge localized in the (failing) B field cannot be told
+        // apart from the correct P field's edge at the same location.
+        crate::deblock::set_deblock_pic_tag("B");
+
         Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
         #[cfg(debug_assertions)]
         if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {

@@ -29,6 +29,14 @@ use tpt_kinetix_core::error::KinetixError;
 
 use crate::cdf_tables_gen as defaults;
 use crate::entropy::SymbolDecoder;
+use crate::Px;
+
+/// `intermediate_bits` of the MC pipeline (dav1d `get_intermediate_bits`):
+/// `14 - BitDepth`, capped at 4 (8- and 10-bit use 4, 12-bit uses 2).
+#[inline]
+pub fn intermediate_bits(bit_depth: u32) -> u32 {
+    14u32.saturating_sub(bit_depth).min(4)
+}
 
 // --- Reference frame name enumeration (§7.3 / §6.8.2) ----------------------
 /// No reference frame (INTRA / skip).
@@ -107,9 +115,9 @@ pub struct MotionField {
 /// maps to a slot via the frame header's `ref_frame_idx`.
 #[derive(Clone, Copy)]
 pub struct RefSlot<'a> {
-    pub y: &'a [u8],
-    pub u: &'a [u8],
-    pub v: &'a [u8],
+    pub y: &'a [Px],
+    pub u: &'a [Px],
+    pub v: &'a [Px],
     pub width: usize,
     pub height: usize,
     /// Visible frame dims (≤ `width`/`height`). Motion compensation clamps
@@ -123,7 +131,7 @@ pub struct RefSlot<'a> {
 }
 
 impl<'a> RefSlot<'a> {
-    pub fn plane(&self, plane: usize) -> (&'a [u8], usize, usize) {
+    pub fn plane(&self, plane: usize) -> (&'a [Px], usize, usize) {
         match plane {
             1 => (self.u, self.width / 2, self.height / 2),
             2 => (self.v, self.width / 2, self.height / 2),
@@ -212,9 +220,9 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
 /// clamp to `[0, 255]`.
 #[allow(clippy::too_many_arguments)]
 pub fn motion_compensate(
-    dest: &mut [u8],
+    dest: &mut [Px],
     dest_stride: usize,
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -246,7 +254,10 @@ pub fn motion_compensate(
     // subsampled chroma axis (dav1d `mvx & (15 >> !ss_hor)` / `>> (3 + ss_hor)`).
     hbits: u32,
     vbits: u32,
+    bit_depth: u32,
 ) {
+    let ib = intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     let dx = mv.col & ((1 << hbits) - 1);
     let dy = mv.row & ((1 << vbits) - 1);
     let ix = mv.col >> hbits;
@@ -287,21 +298,28 @@ pub fn motion_compensate(
                         let s11 = refp[(ry as usize + 1).min(ref_h - 1) * ref_stride
                             + (rx + 1).clamp(0, ref_w as i32 - 1) as usize]
                             as i32;
-                        let mid = 16 * s00 + mx16 * (s01 - s00);
-                        let mid01 = 16 * s10 + mx16 * (s11 - s10);
-                        (16 * mid + my16 * (mid01 - mid) + 128) >> 8
+                        let hr = |a: i32, b: i32| {
+                            let s = 16 * a + mx16 * (b - a);
+                            (s + ((1 << (4 - ib)) >> 1)) >> (4 - ib)
+                        };
+                        let mid = hr(s00, s01);
+                        let mid01 = hr(s10, s11);
+                        let sh = 4 + ib;
+                        (16 * mid + my16 * (mid01 - mid) + ((1 << sh) >> 1)) >> sh
                     } else {
-                        (16 * s00 + mx16 * (s01 - s00) + 8) >> 4
+                        let px = ((16 * s00 + mx16 * (s01 - s00)) + ((1 << (4 - ib)) >> 1))
+                            >> (4 - ib);
+                        (px + ((1 << ib) >> 1)) >> ib
                     };
-                    dest[y * dest_stride + x] = v.clamp(0, 255) as u8;
+                    dest[y * dest_stride + x] = v.clamp(0, pix_max) as Px;
                 } else if v_subpel {
                     let s10 = refp[(ry as usize + 1).min(ref_h - 1) * ref_stride
                         + rx.clamp(0, ref_w as i32 - 1) as usize]
                         as i32;
                     let v = (16 * s00 + my16 * (s10 - s00) + 8) >> 4;
-                    dest[y * dest_stride + x] = v.clamp(0, 255) as u8;
+                    dest[y * dest_stride + x] = v.clamp(0, pix_max) as Px;
                 } else {
-                    dest[y * dest_stride + x] = s00 as u8;
+                    dest[y * dest_stride + x] = s00 as Px;
                 }
             }
         }
@@ -311,7 +329,9 @@ pub fn motion_compensate(
     let kh = subpel_kernel(filter_v, dy, vbits, bh <= 4);
 
     if h_subpel && !v_subpel {
-        // Horizontal-only: dav1d put_8tap_c fh-only branch, (sum + 34) >> 6.
+        // Horizontal-only: dav1d put_8tap_c fh-only branch,
+        // (sum + intermediate_rnd) >> 6 with intermediate_rnd = 32 + ((1 << (6 - ib)) >> 1).
+        let h_only_rnd = 32 + ((1i32 << (6 - ib)) >> 1);
         for y in 0..bh {
             let ry = (base_y + y as i32).clamp(0, ref_h as i32 - 1);
             let row = ry as usize * ref_stride;
@@ -322,7 +342,7 @@ pub fn motion_compensate(
                     let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
                     s += refp[row + sx as usize] as i32 * kw[k as usize];
                 }
-                dest[y * dest_stride + x] = ((s + 34) >> 6).clamp(0, 255) as u8;
+                dest[y * dest_stride + x] = ((s + h_only_rnd) >> 6).clamp(0, pix_max) as Px;
             }
         }
         return;
@@ -337,7 +357,7 @@ pub fn motion_compensate(
                     let sx = (base_x + x as i32).clamp(0, ref_w as i32 - 1);
                     s += refp[ry as usize * ref_stride + sx as usize] as i32 * kh[k as usize];
                 }
-                dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, 255) as u8;
+                dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, pix_max) as Px;
             }
         }
         return;
@@ -364,7 +384,7 @@ pub fn motion_compensate(
                 let sx = (rx + koff).clamp(0, ref_w as i32 - 1);
                 s += refp[row + sx as usize] as i32 * kw[k as usize];
             }
-            tmp[ty * bw + x] = (s + 2) >> 2;
+            tmp[ty * bw + x] = (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib);
         }
     }
 
@@ -376,7 +396,7 @@ pub fn motion_compensate(
             for (k, &c) in kh.iter().enumerate() {
                 s += tmp[(y + k) * bw + x] * c;
             }
-            let v = ((s + 512) >> 10).clamp(0, 255) as u8;
+            let v = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
             dest[y * dest_stride + x] = v;
         }
     }
@@ -389,7 +409,7 @@ pub fn motion_compensate(
 /// (`avg` / `w_avg` / mask). Returns a `bw * bh` buffer of intermediate values.
 #[allow(clippy::too_many_arguments)]
 pub fn motion_compensate_prep(
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -402,7 +422,9 @@ pub fn motion_compensate_prep(
     filter_v: u8,
     hbits: u32,
     vbits: u32,
+    bit_depth: u32,
 ) -> Vec<i32> {
+    let ib = intermediate_bits(bit_depth);
     let dx = mv.col & ((1 << hbits) - 1);
     let dy = mv.row & ((1 << vbits) - 1);
     let base_x = dst_x as i32 + (mv.col >> hbits);
@@ -422,7 +444,7 @@ pub fn motion_compensate_prep(
                 let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
                 s += refp[row + sx as usize] as i32 * c;
             }
-            tmp[ty * bw + x] = (s + 2) >> 2;
+            tmp[ty * bw + x] = (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib);
         }
     }
 
@@ -483,7 +505,7 @@ fn scaled_pos(dst: usize, mv: i32, bits: u32, scale: i32) -> i32 {
 /// the final 8-bit one (`>> 10`, clamped).
 #[allow(clippy::too_many_arguments)]
 fn scaled_predict(
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -498,7 +520,10 @@ fn scaled_predict(
     vbits: u32,
     sc: &RefScale,
     prep: bool,
+    bit_depth: u32,
 ) -> Vec<i32> {
+    let ib = intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     let pos_x = scaled_pos(dst_x, mv.col, hbits, sc.x);
     let pos_y = scaled_pos(dst_y, mv.row, vbits, sc.y);
     let left = pos_x >> 10;
@@ -524,7 +549,7 @@ fn scaled_predict(
                     let sx = (left + off + t as i32 - 3).clamp(0, ref_w as i32 - 1);
                     s += refp[ry + sx as usize] as i32 * c;
                 }
-                (s + 2) >> 2
+                (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib)
             })
             .collect()
     };
@@ -547,7 +572,7 @@ fn scaled_predict(
             out[y * bw + x] = if prep {
                 (s + 32) >> 6
             } else {
-                ((s + 512) >> 10).clamp(0, 255)
+                ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max)
             };
         }
         my += sc.ystep;
@@ -560,9 +585,9 @@ fn scaled_predict(
 /// unscaled routine.
 #[allow(clippy::too_many_arguments)]
 pub fn motion_compensate_scaled(
-    dest: &mut [u8],
+    dest: &mut [Px],
     dest_stride: usize,
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -576,14 +601,15 @@ pub fn motion_compensate_scaled(
     hbits: u32,
     vbits: u32,
     sc: &RefScale,
+    bit_depth: u32,
 ) {
     let out = scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
-        vbits, sc, false,
+        vbits, sc, false, bit_depth,
     );
     for y in 0..bh {
         for x in 0..bw {
-            dest[y * dest_stride + x] = out[y * bw + x] as u8;
+            dest[y * dest_stride + x] = out[y * bw + x] as Px;
         }
     }
 }
@@ -591,7 +617,7 @@ pub fn motion_compensate_scaled(
 /// Scaled-reference variant of [`motion_compensate_prep`].
 #[allow(clippy::too_many_arguments)]
 pub fn motion_compensate_prep_scaled(
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -605,27 +631,30 @@ pub fn motion_compensate_prep_scaled(
     hbits: u32,
     vbits: u32,
     sc: &RefScale,
+    bit_depth: u32,
 ) -> Vec<i32> {
     scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
-        vbits, sc, true,
+        vbits, sc, true, bit_depth,
     )
 }
 
 /// Blend two compound "prep" predictions (§7.11.3.1). `weight` is the
-/// `jnt_weight` in sixteenths for `preds[0]` (`8` = plain average). 8-bit:
-/// `InterPostRound = 4`, so `avg` is `Round2(sum, 5)` and `w_avg` is
-/// `Round2(p0*w + p1*(16-w), 8)`.
-pub fn compound_blend(p0: &[i32], p1: &[i32], weight: i32) -> Vec<u8> {
+/// `jnt_weight` in sixteenths for `preds[0]` (`8` = plain average). With
+/// `ib = intermediate_bits(bit_depth)` (4 for 8-/10-bit): `avg` is
+/// `Round2(sum, ib + 1)` and `w_avg` is `Round2(p0*w + p1*(16-w), ib + 4)`.
+pub fn compound_blend(p0: &[i32], p1: &[i32], weight: i32, bit_depth: u32) -> Vec<Px> {
+    let ib = intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     p0.iter()
         .zip(p1)
         .map(|(&a, &b)| {
             let v = if weight == 8 {
-                (a + b + 16) >> 5
+                (a + b + (1 << ib)) >> (ib + 1)
             } else {
-                (a * weight + b * (16 - weight) + 128) >> 8
+                (a * weight + b * (16 - weight) + (8 << ib)) >> (ib + 4)
             };
-            v.clamp(0, 255) as u8
+            v.clamp(0, pix_max) as Px
         })
         .collect()
 }

@@ -598,6 +598,7 @@ impl<'a> TileDecodeState<'a> {
                             overhang: Some(&mut self.luma_overhang),
                         }
                     },
+                    self.bit_depth,
                 )?;
             }
         }
@@ -884,6 +885,7 @@ impl<'a> TileDecodeState<'a> {
                                 overhang: None,
                             }
                         },
+                        self.bit_depth,
                     )?;
                     reconstruct_tx_block(
                         &mut self.dec,
@@ -918,6 +920,7 @@ impl<'a> TileDecodeState<'a> {
                                 overhang: None,
                             }
                         },
+                        self.bit_depth,
                     )?;
                 }
             }
@@ -2065,6 +2068,7 @@ impl<'a> TileDecodeState<'a> {
         skip: bool,
         mv: crate::inter::Mv,
     ) -> Result<(), KinetixError> {
+        let pix_max = (1i32 << self.bit_depth) - 1;
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
@@ -2259,12 +2263,19 @@ impl<'a> TileDecodeState<'a> {
                 }
                 if coeffs.eob > 0 {
                     let dequant =
-                        dequantize_coeffs(&coeffs.quant, leaf_tx, y_qindex_dc, y_qindex_ac);
+                        dequantize_coeffs(
+                            &coeffs.quant,
+                            leaf_tx,
+                            y_qindex_dc,
+                            y_qindex_ac,
+                            self.bit_depth,
+                        );
                     inverse_transform(
                         &dequant,
                         coeffs.tx_type,
                         leaf_tx,
                         self.lossless,
+                        self.bit_depth,
                         &mut residual,
                     );
                 }
@@ -2290,9 +2301,9 @@ impl<'a> TileDecodeState<'a> {
                     let src_val = y_plane
                         .get((src_y + dy) * y_stride + (src_x + dx))
                         .copied()
-                        .unwrap_or(128) as i32;
+                        .unwrap_or(mid_sample(self.bit_depth) as Px) as i32;
                     if let Some(slot) = y_plane.get_mut(wy * y_stride + wx) {
-                        *slot = (src_val + residual[dy * leaf_tx_w + dx]).clamp(0, 255) as u8;
+                        *slot = (src_val + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max) as Px;
                     }
                 }
             }
@@ -2438,8 +2449,21 @@ impl<'a> TileDecodeState<'a> {
                             &blk_u,
                         )?;
                         if cu.eob > 0 {
-                            let dq = dequantize_coeffs(&cu.quant, c_tx, u_qindex_dc, u_qindex_ac);
-                            inverse_transform(&dq, cu.tx_type, c_tx, self.lossless, &mut res_u);
+                            let dq = dequantize_coeffs(
+                                &cu.quant,
+                                c_tx,
+                                u_qindex_dc,
+                                u_qindex_ac,
+                                self.bit_depth,
+                            );
+                            inverse_transform(
+                                &dq,
+                                cu.tx_type,
+                                c_tx,
+                                self.lossless,
+                                self.bit_depth,
+                                &mut res_u,
+                            );
                         }
                         if std::env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
                             eprintln!(
@@ -2459,8 +2483,21 @@ impl<'a> TileDecodeState<'a> {
                             &blk_v,
                         )?;
                         if cv.eob > 0 {
-                            let dq = dequantize_coeffs(&cv.quant, c_tx, v_qindex_dc, v_qindex_ac);
-                            inverse_transform(&dq, cv.tx_type, c_tx, self.lossless, &mut res_v);
+                            let dq = dequantize_coeffs(
+                                &cv.quant,
+                                c_tx,
+                                v_qindex_dc,
+                                v_qindex_ac,
+                                self.bit_depth,
+                            );
+                            inverse_transform(
+                                &dq,
+                                cv.tx_type,
+                                c_tx,
+                                self.lossless,
+                                self.bit_depth,
+                                &mut res_v,
+                            );
                         }
                     } else {
                         // See the luma branch above / `clear_coeff_context`'s
@@ -2471,8 +2508,8 @@ impl<'a> TileDecodeState<'a> {
 
                     // Bilinear sub-pel IBC prediction (dav1d intrabc chroma
                     // path) into per-plane block buffers, then add residual.
-                    let mut pred_u = vec![0u8; cw * ch];
-                    let mut pred_v = vec![0u8; cw * ch];
+                    let mut pred_u = vec![0 as Px; cw * ch];
+                    let mut pred_v = vec![0 as Px; cw * ch];
                     crate::inter::motion_compensate(
                         &mut pred_u,
                         cw,
@@ -2489,6 +2526,7 @@ impl<'a> TileDecodeState<'a> {
                         crate::inter::INTERP_BILINEAR,
                         3,
                         3,
+                        self.bit_depth,
                     );
                     crate::inter::motion_compensate(
                         &mut pred_v,
@@ -2506,6 +2544,7 @@ impl<'a> TileDecodeState<'a> {
                         crate::inter::INTERP_BILINEAR,
                         3,
                         3,
+                        self.bit_depth,
                     );
                     for dy in 0..ch {
                         let wy = cpx_y + dy;
@@ -2519,11 +2558,11 @@ impl<'a> TileDecodeState<'a> {
                             }
                             if let Some(slot) = u_plane.get_mut(wy * uv_stride + wx) {
                                 *slot = (pred_u[dy * cw + dx] as i32 + res_u[dy * cw + dx])
-                                    .clamp(0, 255) as u8;
+                                    .clamp(0, pix_max) as Px;
                             }
                             if let Some(slot) = v_plane.get_mut(wy * uv_stride + wx) {
                                 *slot = (pred_v[dy * cw + dx] as i32 + res_v[dy * cw + dx])
-                                    .clamp(0, 255) as u8;
+                                    .clamp(0, pix_max) as Px;
                             }
                         }
                     }

@@ -467,11 +467,11 @@ const WARPED_FILTERS: [[i8; 8]; 193] = [
 /// equivalent to dav1d's `emu_edge` padded-buffer copy.
 #[allow(clippy::too_many_arguments)]
 fn warp_affine_8x8(
-    dest: &mut [u8],
+    dest: &mut [Px],
     dest_stride: usize,
     dest_x: usize,
     dest_y: usize,
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -483,7 +483,10 @@ fn warp_affine_8x8(
     delta: i32,
     mx0: i32,
     my0: i32,
+    bit_depth: u32,
 ) {
+    let ib = crate::inter::intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     let sample = |ix: i32, iy: i32| -> i32 {
         let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
         let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
@@ -536,8 +539,8 @@ fn warp_affine_8x8(
             for (k, &c) in filter.iter().enumerate() {
                 s += c as i32 * sample(sx + k as i32 - 3, sy);
             }
-            // sh = 7 - intermediate_bits(4) = 3, 8-bit path.
-            *out = (s + 4) >> 3;
+            // sh = 7 - intermediate_bits.
+            *out = (s + ((1 << (7 - ib)) >> 1)) >> (7 - ib);
             tmx += alpha;
         }
         if dbg_px {
@@ -559,8 +562,8 @@ fn warp_affine_8x8(
             for (k, &c) in filter.iter().enumerate() {
                 s += c as i32 * mid[yy + k][xx];
             }
-            // sh = 7 + intermediate_bits(4) = 11, then clip to pixel range.
-            let v = ((s + 1024) >> 11).clamp(0, 255) as u8;
+            // sh = 7 + intermediate_bits, then clip to pixel range.
+            let v = ((s + ((1 << (7 + ib)) >> 1)) >> (7 + ib)).clamp(0, pix_max) as Px;
             if dbg_px && yy == 0 {
                 eprintln!("WARPPX n={dbg_n} out yy=0 xx={xx} v={v}");
             }
@@ -584,9 +587,9 @@ fn warp_affine_8x8(
 /// which may be smaller than the plane's grid extent.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn block_warp_process(
-    dest: &mut [u8],
+    dest: &mut [Px],
     dest_stride: usize,
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -597,6 +600,7 @@ pub(super) fn block_warp_process(
     bh_px: usize,
     ss_hor: u32,
     ss_ver: u32,
+    bit_depth: u32,
 ) {
     let mat = &model.matrix;
     let mut y = 0i32;
@@ -634,6 +638,7 @@ pub(super) fn block_warp_process(
                 model.delta,
                 mx,
                 my,
+                bit_depth,
             );
             x += 8;
         }
@@ -651,7 +656,7 @@ fn warp_affine_8x8_prep(
     dest_stride: usize,
     dest_x: usize,
     dest_y: usize,
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -663,7 +668,10 @@ fn warp_affine_8x8_prep(
     delta: i32,
     mx0: i32,
     my0: i32,
+    bit_depth: u32,
 ) {
+    let ib = crate::inter::intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     let sample = |ix: i32, iy: i32| -> i32 {
         let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
         let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
@@ -685,7 +693,7 @@ fn warp_affine_8x8_prep(
             for (k, &c) in filter.iter().enumerate() {
                 s += c as i32 * sample(sx + k as i32 - 3, sy);
             }
-            *out = (s + 4) >> 3;
+            *out = (s + ((1 << (7 - ib)) >> 1)) >> (7 - ib);
             tmx += alpha;
         }
         mx_row += beta;
@@ -711,7 +719,7 @@ fn warp_affine_8x8_prep(
 /// compound blend consumes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn block_warp_prep(
-    refp: &[u8],
+    refp: &[Px],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -722,6 +730,7 @@ pub(super) fn block_warp_prep(
     bh_px: usize,
     ss_hor: u32,
     ss_ver: u32,
+    bit_depth: u32,
 ) -> Vec<i32> {
     let mut dest = vec![0i32; bw_px * bh_px];
     let mat = &model.matrix;
@@ -741,7 +750,7 @@ pub(super) fn block_warp_prep(
             let my = (((mvy as i32) & 0xffff) - model.gamma * 4 - model.delta * 4) & !0x3f;
             warp_affine_8x8_prep(
                 &mut dest, bw_px, x as usize, y as usize, refp, ref_stride, ref_w, ref_h, dx, dy,
-                model.alpha, model.beta, model.gamma, model.delta, mx, my,
+                model.alpha, model.beta, model.gamma, model.delta, mx, my, bit_depth,
             );
             x += 8;
         }
@@ -916,10 +925,10 @@ mod tests {
         const PLANE_H: usize = VIS_H + 8; // padded rows
                                           // Reference rows are a horizontal ramp `10 + y`, so a read that uses
                                           // the wrong row base is trivially visible in the output.
-        let mut plane = vec![0u8; STRIDE * PLANE_H];
+        let mut plane = vec![0 as Px; STRIDE * PLANE_H];
         for y in 0..PLANE_H {
             for x in 0..STRIDE {
-                plane[y * STRIDE + x] = (10 + y) as u8;
+                plane[y * STRIDE + x] = (10 + y) as Px;
             }
         }
         // Pure translation (identity linear part), so the model degenerates to
@@ -947,9 +956,9 @@ mod tests {
         // 8x8 block at the top-left of the frame, fully inside the visible
         // area, so no clamping occurs and the output must equal the
         // reference's top-left 8x8 exactly.
-        let mut dest = vec![0u8; 8 * 8];
+        let mut dest = vec![0 as Px; 8 * 8];
         block_warp_process(
-            &mut dest, 8, &plane, STRIDE, VIS_W, VIS_H, &model, 0, 0, 8, 8, 0, 0,
+            &mut dest, 8, &plane, STRIDE, VIS_W, VIS_H, &model, 0, 0, 8, 8, 0, 0, 8,
         );
         for y in 0..8usize {
             for x in 0..8usize {

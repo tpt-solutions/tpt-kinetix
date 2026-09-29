@@ -25,6 +25,7 @@ mod mode_cdfs;
 mod palette;
 mod partition;
 mod predict;
+mod qlookup_hbd;
 mod reconstruct_block;
 mod transform;
 mod warp;
@@ -58,6 +59,7 @@ use crate::{
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
+    Px,
 };
 
 use rayon::prelude::*;
@@ -965,9 +967,9 @@ struct TileDecodeState<'a> {
     refmv_grid: Vec<RefMvCell>,
     refmv_stride: usize,
     // Output plane buffers (borrowed for the lifetime of the tile decode).
-    y_plane: &'a mut [u8],
-    u_plane: &'a mut [u8],
-    v_plane: &'a mut [u8],
+    y_plane: &'a mut [Px],
+    u_plane: &'a mut [Px],
+    v_plane: &'a mut [Px],
     y_stride: usize,
     uv_stride: usize,
     #[allow(dead_code)]
@@ -1027,11 +1029,13 @@ struct TileDecodeState<'a> {
     /// frame edge, as `(x, y, value)` in tile-local pixels. Chroma-from-luma
     /// (spec 7.11.5 / dav1d `cfl_ac`) averages over the whole last luma
     /// transform block, including these samples. Cleared per intra block.
-    luma_overhang: Vec<(usize, usize, u8)>,
+    luma_overhang: Vec<(usize, usize, Px)>,
     /// Per-reference global-motion warp models of the current compound
     /// GLOBAL_GLOBALMV block (dav1d `gmv_warp_allowed`); `[None, None]` for
     /// every other block.
     comp_warp: [Option<warp::WarpModel>; 2],
+    /// Sequence `BitDepth` (8, 10 or 12).
+    bit_depth: u32,
 }
 
 /// Row stride of `block_decoded`: `-1 ..= 32` plus slack (128×128 SB = 32 luma
@@ -1095,9 +1099,9 @@ impl<'a> TileDecodeState<'a> {
         height: usize,
         uv_w: usize,
         uv_h: usize,
-        y_plane: &'a mut [u8],
-        u_plane: &'a mut [u8],
-        v_plane: &'a mut [u8],
+        y_plane: &'a mut [Px],
+        u_plane: &'a mut [Px],
+        v_plane: &'a mut [Px],
         y_stride: usize,
         uv_stride: usize,
         qindex: u8,
@@ -1376,6 +1380,7 @@ impl<'a> TileDecodeState<'a> {
             ],
             luma_overhang: Vec::new(),
             comp_warp: [None, None],
+            bit_depth: 8,
         }
     }
 
@@ -1684,7 +1689,7 @@ pub fn decode_tile_group(
     data: &[u8],
     width: usize,
     height: usize,
-    _bit_depth: u8,
+    bit_depth: u8,
     qindex: u8,
     delta_q: DeltaQ,
     _use_128x128_sb: bool,
@@ -1692,9 +1697,9 @@ pub fn decode_tile_group(
     y0: usize,
     tile_w: usize,
     tile_h: usize,
-    y_plane: &mut [u8],
-    u_plane: &mut [u8],
-    v_plane: &mut [u8],
+    y_plane: &mut [Px],
+    u_plane: &mut [Px],
+    v_plane: &mut [Px],
     y_stride: usize,
     uv_stride: usize,
     tx_mode_select: bool,
@@ -1824,6 +1829,7 @@ pub fn decode_tile_group(
         meta,
         cdf_context,
     );
+    state.bit_depth = u32::from(bit_depth);
 
     // Full-tile symbol-trace capture for the independent Part 1 oracle
     // (`tools/av1_oracle/intra_decode.py`): when `KINETIX_AV1_CAPTURE_TILE` is
@@ -2096,9 +2102,9 @@ pub type ReconstructOutput = (
 /// compensation for bottom-edge blocks reads them (dav1d's references are
 /// padded the same way). The visible crop is `real_width × real_height`.
 pub struct PaddedPlanes {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    pub y: Vec<Px>,
+    pub u: Vec<Px>,
+    pub v: Vec<Px>,
     /// Plane stride = `grid_width` (planes are dense).
     pub stride: usize,
     pub grid_width: usize,
@@ -2156,9 +2162,11 @@ pub fn reconstruct_av1_frame(
     let uv_grid_w = grid_w / 2;
     let uv_grid_h = grid_h / 2;
 
-    let mut y_plane = vec![128u8; grid_w * grid_h];
-    let mut u_plane = vec![128u8; uv_grid_w * uv_grid_h];
-    let mut v_plane = vec![128u8; uv_grid_w * uv_grid_h];
+    let bit_depth = frame_header.bit_depth as u32;
+    let mid = 1 << (bit_depth - 1);
+    let mut y_plane: Vec<Px> = vec![mid; grid_w * grid_h];
+    let mut u_plane: Vec<Px> = vec![mid; uv_grid_w * uv_grid_h];
+    let mut v_plane: Vec<Px> = vec![mid; uv_grid_w * uv_grid_h];
 
     // Collect tile-group OBU payloads and split each one into its individual
     // tiles (§5.11.1): a group carries tiles `tg_start..=tg_end`, every tile
@@ -2195,7 +2203,7 @@ pub fn reconstruct_av1_frame(
     }
 
     if tile_payloads.is_empty() {
-        let cropped = crop_planes(&y_plane, &u_plane, &v_plane, grid_w, width, height);
+        let cropped = crop_planes(&y_plane, &u_plane, &v_plane, grid_w, width, height, bit_depth);
         return Ok(Some((
             VideoFrame {
                 pts: Timestamp::NONE,
@@ -2203,7 +2211,7 @@ pub fn reconstruct_av1_frame(
                 data: cropped,
                 width: frame_header.width,
                 height: frame_header.height,
-                pixel_format: PixelFormat::Yuv420p,
+                pixel_format: pixel_format_for(bit_depth),
                 is_key_frame: true,
             },
             None,
@@ -2227,9 +2235,9 @@ pub fn reconstruct_av1_frame(
         y0: usize,
         x1: usize,
         y1: usize,
-        y: Vec<u8>,
-        u: Vec<u8>,
-        v: Vec<u8>,
+        y: Vec<Px>,
+        u: Vec<Px>,
+        v: Vec<Px>,
         /// Full-frame-sized motion field cells (only this tile's region
         /// populated; merged into the frame-level MF after all tiles finish).
         motion_field: Vec<MotionFieldCell>,
@@ -2267,9 +2275,9 @@ pub fn reconstruct_av1_frame(
             let (x0, y0, x1, y1) = geometry[i];
             let tw = x1 - x0;
             let th = y1 - y0;
-            let mut ty = vec![128u8; tw * th];
-            let mut tu = vec![128u8; (tw / 2) * (th / 2)];
-            let mut tv = vec![128u8; (tw / 2) * (th / 2)];
+            let mut ty: Vec<Px> = vec![mid; tw * th];
+            let mut tu: Vec<Px> = vec![mid; (tw / 2) * (th / 2)];
+            let mut tv: Vec<Px> = vec![mid; (tw / 2) * (th / 2)];
             let mut meta = FrameMeta::new(tw, th);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
@@ -2505,7 +2513,9 @@ pub fn reconstruct_av1_frame(
         let _ = std::fs::write(&path, &blob);
         eprintln!("dumped {path} ({} bytes)", blob.len());
     }
-    let data = crop_planes(&padded.y, &padded.u, &padded.v, grid_w, width, height);
+    let data = crop_planes(
+        &padded.y, &padded.u, &padded.v, grid_w, width, height, bit_depth,
+    );
 
     Ok(Some((
         VideoFrame {
@@ -2514,7 +2524,7 @@ pub fn reconstruct_av1_frame(
             data,
             width: frame_header.width,
             height: frame_header.height,
-            pixel_format: PixelFormat::Yuv420p,
+            pixel_format: pixel_format_for(bit_depth),
             is_key_frame: true,
         },
         motion_field,
@@ -2624,24 +2634,43 @@ fn split_tile_group_payloads(
 
 /// Crop mi-grid-extent planes (dense, `grid_w` stride) down to the visible
 /// `width × height` frame, packed Y then U then V.
-fn crop_planes(
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
+pub(crate) fn crop_planes(
+    y: &[Px],
+    u: &[Px],
+    v: &[Px],
     grid_w: usize,
     width: usize,
     height: usize,
+    bit_depth: u32,
 ) -> Vec<u8> {
     let mut data = Vec::with_capacity(width * height * 3 / 2);
+    let mut put = |row: &[Px]| {
+        if bit_depth == 8 {
+            data.extend(row.iter().map(|&p| p as u8));
+        } else {
+            for &p in row {
+                data.extend_from_slice(&p.to_le_bytes());
+            }
+        }
+    };
     for row in 0..height {
-        data.extend_from_slice(&y[row * grid_w..row * grid_w + width]);
+        put(&y[row * grid_w..row * grid_w + width]);
     }
     let uw = grid_w / 2;
     for row in 0..height.div_ceil(2) {
-        data.extend_from_slice(&u[row * uw..row * uw + width / 2]);
+        put(&u[row * uw..row * uw + width / 2]);
     }
     for row in 0..height.div_ceil(2) {
-        data.extend_from_slice(&v[row * uw..row * uw + width / 2]);
+        put(&v[row * uw..row * uw + width / 2]);
     }
     data
+}
+
+/// Output pixel format for a given `BitDepth`.
+pub(crate) fn pixel_format_for(bit_depth: u32) -> PixelFormat {
+    match bit_depth {
+        8 => PixelFormat::Yuv420p,
+        10 => PixelFormat::Yuv420p10le,
+        _ => PixelFormat::Yuv420p12le,
+    }
 }

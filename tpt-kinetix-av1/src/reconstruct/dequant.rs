@@ -6,35 +6,37 @@ use super::*;
 /// coefficient is the table value directly (no ×2/×4 multiplier — that factor
 /// belongs to VP9, not AV1; libaom's `av1_build_quantizer` stores
 /// `dequant[q][0] = dc_qlookup[q]` and `dequant[q][1] = ac_qlookup[q]` and
-/// `decodetxb.c`'s `get_dqv` reads `dequant[!!coeff_idx]`). Only 8-bit is
-/// transcribed today; 10-/12-bit frames fall back to the 8-bit table
-/// (TODO: add `dc_qlookup_10/12` / `ac_qlookup_10/12`).
+/// `decodetxb.c`'s `get_dqv` reads `dequant[!!coeff_idx]`). `bit_depth`
+/// selects the 8-, 10- or 12-bit table.
 #[inline]
-fn quant_step(qindex: u8, is_dc: bool) -> i32 {
+fn quant_step(qindex: u8, is_dc: bool, bit_depth: u32) -> i32 {
     let qi = qindex as usize;
-    if is_dc {
-        DC_QLOOKUP_8[qi]
-    } else {
-        AC_QLOOKUP_8[qi]
+    match (bit_depth, is_dc) {
+        (8, true) => DC_QLOOKUP_8[qi],
+        (8, false) => AC_QLOOKUP_8[qi],
+        (10, true) => qlookup_hbd::DC_QLOOKUP_10[qi],
+        (10, false) => qlookup_hbd::AC_QLOOKUP_10[qi],
+        (_, true) => qlookup_hbd::DC_QLOOKUP_12[qi],
+        (_, false) => qlookup_hbd::AC_QLOOKUP_12[qi],
     }
 }
 
 /// AC dequantization step.
 #[inline]
-fn ac_dequant(qindex: u8) -> i32 {
-    quant_step(qindex, false)
+fn ac_dequant(qindex: u8, bit_depth: u32) -> i32 {
+    quant_step(qindex, false, bit_depth)
 }
 
 /// DC dequantization step.
 #[inline]
-fn dc_dequant(qindex: u8) -> i32 {
-    quant_step(qindex, true)
+fn dc_dequant(qindex: u8, bit_depth: u32) -> i32 {
+    quant_step(qindex, true, bit_depth)
 }
 
 /// Dequantize a coefficient array per AV1 spec §7.12.3's `reconstruct`
 /// process: `dq = Quant[pos] * q`, `dq2 = sign(dq) * (|dq| & 0xFFFFFF) /
 /// dqDenom`, clipped to `[-(1 << (7+BitDepth)), (1 << (7+BitDepth)) - 1]`
-/// (BitDepth fixed at 8 here). `dqDenom` (see [`dq_denom`]) is 2 for
+/// . `dqDenom` (see [`dq_denom`]) is 2 for
 /// `TX_32X32` and 4 for `TX_64X64` — omitting it (as earlier code did)
 /// overscales every non-trivial coefficient in the two largest transform
 /// sizes by that same factor.
@@ -50,12 +52,13 @@ pub(super) fn dequantize_coeffs(
     tx_size: usize,
     qindex_dc: u8,
     qindex_ac: u8,
+    bit_depth: u32,
 ) -> Vec<i32> {
-    let dc = dc_dequant(qindex_dc) as i64;
-    let ac = ac_dequant(qindex_ac) as i64;
+    let dc = dc_dequant(qindex_dc, bit_depth) as i64;
+    let ac = ac_dequant(qindex_ac, bit_depth) as i64;
     let denom = dq_denom(tx_size) as i64;
-    const CLIP_LO: i64 = -(1i64 << 15);
-    const CLIP_HI: i64 = (1i64 << 15) - 1;
+    let clip_lo: i64 = -(1i64 << (7 + bit_depth));
+    let clip_hi: i64 = (1i64 << (7 + bit_depth)) - 1;
     quant
         .iter()
         .enumerate()
@@ -64,7 +67,7 @@ pub(super) fn dequantize_coeffs(
             let dq = c as i64 * q;
             let sign: i64 = if dq < 0 { -1 } else { 1 };
             let dq2 = sign * ((dq.abs() & 0xFFFFFF) / denom);
-            dq2.clamp(CLIP_LO, CLIP_HI) as i32
+            dq2.clamp(clip_lo, clip_hi) as i32
         })
         .collect()
 }
@@ -112,7 +115,7 @@ mod dequant_tests {
         // used the same single `qindex`, silently ignoring any per-plane
         // `delta_q_{y,u,v}_dc` adjustment.
         let quant = vec![2, 3, 0, 0];
-        let dequant = dequantize_coeffs(&quant, TX_4X4, 100, 150);
+        let dequant = dequantize_coeffs(&quant, TX_4X4, 100, 150, 8);
         assert_eq!(dequant[0], 2 * DC_QLOOKUP_8[100]);
         assert_eq!(dequant[1], 3 * AC_QLOOKUP_8[150]);
         assert_eq!(dequant[2], 0);

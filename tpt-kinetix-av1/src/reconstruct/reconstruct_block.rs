@@ -13,7 +13,7 @@ pub(super) struct BlockDecodedCtx<'a> {
     pub(super) step_y: usize,
     /// When set (luma of an intra block), receives the reconstructed samples
     /// that fall outside `plane_w`/`plane_h` so CFL can average over them.
-    pub(super) overhang: Option<&'a mut Vec<(usize, usize, u8)>>,
+    pub(super) overhang: Option<&'a mut Vec<(usize, usize, Px)>>,
 }
 
 impl BlockDecodedCtx<'_> {
@@ -51,7 +51,7 @@ pub(super) fn reconstruct_tx_block(
     cdfs: &mut TileCdfs,
     ctxs: &mut CoeffContexts,
     blk: &TxBlockCtx,
-    samples: &mut [u8],
+    samples: &mut [Px],
     stride: usize,
     plane_w: usize,
     plane_h: usize,
@@ -72,6 +72,7 @@ pub(super) fn reconstruct_tx_block(
     angle_delta: i32,
     palette: Option<PaletteBlockInfo>,
     mut bd: BlockDecodedCtx<'_>,
+    bit_depth: u32,
 ) -> Result<(), KinetixError> {
     let pred_mode = pred_mode as u8;
     let tx_w = av1::TX_WIDTH[internal_tx_size];
@@ -162,7 +163,13 @@ pub(super) fn reconstruct_tx_block(
                 );
         }
         if coeffs.eob > 0 {
-            let dequant = dequantize_coeffs(&coeffs.quant, internal_tx_size, qindex_dc, qindex_ac);
+            let dequant = dequantize_coeffs(
+                &coeffs.quant,
+                internal_tx_size,
+                qindex_dc,
+                qindex_ac,
+                bit_depth,
+            );
             if dbg {
                 eprintln!(
                     "DBG dequant qindex_dc={qindex_dc} qindex_ac={qindex_ac} dequant={:?}",
@@ -174,6 +181,7 @@ pub(super) fn reconstruct_tx_block(
                 coeffs.tx_type,
                 internal_tx_size,
                 blk.lossless,
+                bit_depth,
                 &mut residual,
             );
             if dbg {
@@ -214,6 +222,7 @@ pub(super) fn reconstruct_tx_block(
         px_y,
         bd.have_above_right(),
         bd.have_below_left(),
+        bit_depth,
     );
     if dbg {
         eprintln!(
@@ -272,7 +281,7 @@ pub(super) fn reconstruct_tx_block(
         eprintln!("DBG palette_present={}", palette.is_some());
     }
     match &palette {
-        Some(p) => predict_palette(p, tx_w, tx_h, &mut pred),
+        Some(p) => predict_palette(p, tx_w, tx_h, bit_depth, &mut pred),
         None => match filter_intra_mode {
             Some(fi_mode) if blk.plane == 0 => {
                 predict_filter_intra(
@@ -282,6 +291,7 @@ pub(super) fn reconstruct_tx_block(
                     borders.tl,
                     tx_w,
                     tx_h,
+                    bit_depth,
                     &mut pred,
                 );
             }
@@ -296,13 +306,14 @@ pub(super) fn reconstruct_tx_block(
                 angle_delta,
                 plane_w.saturating_sub(px_x),
                 plane_h.saturating_sub(px_y),
+                bit_depth,
             ),
         },
     }
     // `predict_chroma_from_luma` (AV1 spec §7.11.5): applied to the DC
     // prediction just computed above, before the residual is added.
     if let Some(cfl) = &cfl {
-        apply_cfl_prediction(&mut pred, tx_w, tx_h, px_x, px_y, cfl);
+        apply_cfl_prediction(&mut pred, tx_w, tx_h, px_x, px_y, cfl, bit_depth);
     }
     if dbg {
         eprintln!("DBG pred[0..8]={:?}", &pred[..pred.len().min(8)]);
@@ -324,11 +335,12 @@ pub(super) fn reconstruct_tx_block(
         }
     }
 
+    let pix_max = (1i32 << bit_depth) - 1;
     for dy in 0..tx_h {
         let sy = px_y + dy;
         for dx in 0..tx_w {
             let sx = px_x + dx;
-            let val = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, 255) as u8;
+            let val = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, pix_max) as Px;
             if sy >= plane_h || sx >= plane_w {
                 if let Some(over) = bd.overhang.as_deref_mut() {
                     over.push((sx, sy, val));

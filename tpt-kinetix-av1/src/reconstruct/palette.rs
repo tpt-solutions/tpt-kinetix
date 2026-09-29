@@ -143,8 +143,18 @@ pub(super) struct PaletteBlockInfo<'a> {
 /// notes elsewhere in this module) chroma tile-block extent; the two are not
 /// proven to always agree at that specific small-block edge case, and an
 /// out-of-bounds index there should degrade gracefully, not panic.
-pub(super) fn predict_palette(info: &PaletteBlockInfo, tx_w: usize, tx_h: usize, out: &mut [i32]) {
-    let fallback = info.colors.first().copied().unwrap_or(MID_SAMPLE);
+pub(super) fn predict_palette(
+    info: &PaletteBlockInfo,
+    tx_w: usize,
+    tx_h: usize,
+    bit_depth: u32,
+    out: &mut [i32],
+) {
+    let fallback = info
+        .colors
+        .first()
+        .copied()
+        .unwrap_or(mid_sample(bit_depth));
     for i in 0..tx_h {
         for j in 0..tx_w {
             let idx = info
@@ -163,7 +173,7 @@ pub(super) fn predict_palette(info: &PaletteBlockInfo, tx_w: usize, tx_h: usize,
 /// one chroma transform block.
 pub(super) struct CflParams<'a> {
     /// Already-reconstructed luma plane (tile-local), read-only here.
-    pub(super) luma: &'a [u8],
+    pub(super) luma: &'a [Px],
     pub(super) luma_stride: usize,
     pub(super) sub_x: bool,
     pub(super) sub_y: bool,
@@ -176,7 +186,7 @@ pub(super) struct CflParams<'a> {
     pub(super) luma_w: usize,
     pub(super) luma_h: usize,
     /// `(x, y, value)` luma samples reconstructed past the plane extent.
-    pub(super) overhang: &'a [(usize, usize, u8)],
+    pub(super) overhang: &'a [(usize, usize, Px)],
     /// `CflAlphaU` or `CflAlphaV`, already sign-applied.
     pub(super) alpha: i32,
 }
@@ -193,6 +203,7 @@ pub(super) fn apply_cfl_prediction(
     cpx_x: usize,
     cpx_y: usize,
     cfl: &CflParams,
+    bit_depth: u32,
 ) {
     let sub_x = usize::from(cfl.sub_x);
     let sub_y = usize::from(cfl.sub_y);
@@ -234,7 +245,7 @@ pub(super) fn apply_cfl_prediction(
             let dc = pred[i * tx_w + j];
             let diff = i64::from(cfl.alpha) * i64::from(l[i * tx_w + j] - luma_avg);
             let scaled_luma = round2_signed(diff, 6) as i32;
-            pred[i * tx_w + j] = clip1(dc + scaled_luma);
+            pred[i * tx_w + j] = clip1(dc + scaled_luma, bit_depth);
         }
     }
 }
@@ -333,7 +344,7 @@ impl<'a> TileDecodeState<'a> {
             i += 1;
         }
         if idx < size {
-            let lit = self.dec.read_literal(BIT_DEPTH) as i32;
+            let lit = self.dec.read_literal(self.bit_depth) as i32;
             if dbg {
                 eprintln!(
                     "  PAL_TRACE literal={lit} bit_pos={}",
@@ -345,7 +356,7 @@ impl<'a> TileDecodeState<'a> {
         }
         let mut palette_bits = 0u32;
         if idx < size {
-            let min_bits = BIT_DEPTH - 3;
+            let min_bits = self.bit_depth - 3;
             let extra = self.dec.read_literal(2);
             palette_bits = min_bits + extra;
             if dbg {
@@ -360,13 +371,13 @@ impl<'a> TileDecodeState<'a> {
             let delta_bias = if is_u { 0 } else { 1 };
             let raw = self.dec.read_literal(palette_bits) as i32;
             let delta = raw + delta_bias;
-            let val = clip1(colors[idx - 1] + delta);
+            let val = clip1(colors[idx - 1] + delta, self.bit_depth);
             if dbg {
                 eprintln!("  PAL_TRACE delta raw={raw} bias={delta_bias} delta={delta} val={val} bit_pos={}", self.dec.bit_position());
             }
             colors.push(val);
             let sub = if is_u { 0 } else { 1 };
-            let range = ((1i32 << BIT_DEPTH) - val - sub).max(0) as u32;
+            let range = ((1i32 << self.bit_depth) - val - sub).max(0) as u32;
             palette_bits = palette_bits.min(ceil_log2(range));
             idx += 1;
         }
@@ -382,11 +393,11 @@ impl<'a> TileDecodeState<'a> {
         let mut colors = vec![0i32; size];
         let delta_encode = self.dec.read_literal(1) == 1;
         if delta_encode {
-            let min_bits = BIT_DEPTH - 4;
-            let max_val = 1i32 << BIT_DEPTH;
+            let min_bits = self.bit_depth - 4;
+            let max_val = 1i32 << self.bit_depth;
             let extra = self.dec.read_literal(2);
             let palette_bits = min_bits + extra;
-            colors[0] = self.dec.read_literal(BIT_DEPTH) as i32;
+            colors[0] = self.dec.read_literal(self.bit_depth) as i32;
             for idx in 1..size {
                 let mut delta = self.dec.read_literal(palette_bits) as i32;
                 if delta != 0 && self.dec.read_literal(1) == 1 {
@@ -399,11 +410,11 @@ impl<'a> TileDecodeState<'a> {
                 if val >= max_val {
                     val -= max_val;
                 }
-                colors[idx] = clip1(val);
+                colors[idx] = clip1(val, self.bit_depth);
             }
         } else {
             for slot in &mut colors {
-                *slot = self.dec.read_literal(BIT_DEPTH) as i32;
+                *slot = self.dec.read_literal(self.bit_depth) as i32;
             }
         }
         colors

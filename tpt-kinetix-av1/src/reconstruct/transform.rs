@@ -518,6 +518,7 @@ pub(super) fn inverse_transform(
     av1_tx_type: usize,
     tx_size: usize,
     lossless: bool,
+    bit_depth: u32,
     dst: &mut [i32],
 ) {
     if lossless && tx_size == TX_4X4 {
@@ -538,11 +539,9 @@ pub(super) fn inverse_transform(
     let (col_kind, col_flip) = col_axis_transform(av1_tx_type);
     let row_shift = av1::TRANSFORM_ROW_SHIFT[tx_size];
     let col_shift = 4u32;
-    // BitDepth is fixed at 8 in this crate (only 8-bit dequant tables are
-    // transcribed so far); rowClampRange = BitDepth + 8, colClampRange =
-    // max(BitDepth + 6, 16).
-    let row_clamp_range = 16u32;
-    let col_clamp_range = 16u32;
+    // rowClampRange = BitDepth + 8, colClampRange = max(BitDepth + 6, 16).
+    let row_clamp_range = bit_depth + 8;
+    let col_clamp_range = (bit_depth + 6).max(16);
 
     // AV1 spec §7.13.3 / §7.12.3 "adjusted transform size": a transform with
     // either side `> 32` only ever has its low-frequency `<= 32`-side corner
@@ -683,7 +682,7 @@ mod large_tx_tests {
         let mut dq = vec![0i32; 32 * 32];
         dq[1] = 200;
         let mut dst = vec![0i32; 64 * 32];
-        inverse_transform(&dq, crate::coeff_tables::DCT_DCT, 12, false, &mut dst);
+        inverse_transform(&dq, crate::coeff_tables::DCT_DCT, 12, false, 8, &mut dst);
         let row0: Vec<i32> = dst[..64].to_vec();
         for w in row0.windows(2) {
             assert!(

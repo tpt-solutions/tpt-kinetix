@@ -1905,7 +1905,7 @@ impl<'a> TileDecodeState<'a> {
                     if (row as i64) < r0 || (row as i64) >= r1 {
                         continue;
                     }
-                    let vals: Vec<u8> = (px_x0..px_end_x)
+                    let vals: Vec<Px> = (px_x0..px_end_x)
                         .filter(|c| (*c as i64) >= c0 && (*c as i64) < c1)
                         .map(|c| self.y_plane[row * self.y_stride + c])
                         .collect();
@@ -1952,7 +1952,7 @@ impl<'a> TileDecodeState<'a> {
                             eprintln!("  REF-PIXELS base=({base_x},{base_y}) rw={rw} rh={rh}:");
                             for ty in 0..(bh_px + 7) {
                                 let ry = (base_y + ty as i32 - 3).clamp(0, rh as i32 - 1) as usize;
-                                let vals: Vec<u8> = (0..bw_px)
+                                let vals: Vec<Px> = (0..bw_px)
                                     .map(|x| {
                                         let rx =
                                             (base_x + x as i32).clamp(0, rw as i32 - 1) as usize;
@@ -2029,7 +2029,7 @@ impl<'a> TileDecodeState<'a> {
                     if (row as i64) < r0 || (row as i64) >= r1 {
                         continue;
                     }
-                    let vals: Vec<u8> = (px_x0..px_end_x)
+                    let vals: Vec<Px> = (px_x0..px_end_x)
                         .filter(|c| (*c as i64) >= c0 && (*c as i64) < c1)
                         .map(|c| self.y_plane[row * self.y_stride + c])
                         .collect();
@@ -2091,7 +2091,7 @@ impl<'a> TileDecodeState<'a> {
         let pred_frame = std::env::var("KINETIX_AV1_DBG_PRED_FRAME")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        let pred_snap: Vec<u8> = match pred_target {
+        let pred_snap: Vec<Px> = match pred_target {
             Some((tc, tr))
                 if (tc, tr) == (mi_col, mi_row)
                     && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
@@ -2129,7 +2129,7 @@ impl<'a> TileDecodeState<'a> {
         let chroma_xy_hit = chroma_xy_target.is_some_and(|(tx, ty)| {
             tx >= cpx_x0 && tx < cpx_x0 + cbw_px && ty >= cpx_y0 && ty < cpx_y0 + cbh_px
         }) && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f);
-        let chroma_snap: Vec<(usize, Vec<u8>)> = if (pred_target.is_some_and(|(tc, tr)| {
+        let chroma_snap: Vec<(usize, Vec<Px>)> = if (pred_target.is_some_and(|(tc, tr)| {
             (tc, tr) == (mi_col, mi_row)
                 && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
         }) || chroma_xy_hit)
@@ -2176,7 +2176,7 @@ impl<'a> TileDecodeState<'a> {
                             - pred_snap[row * bw_px + col] as i32
                     })
                     .collect();
-                let post: Vec<u8> = (0..bw_px)
+                let post: Vec<Px> = (0..bw_px)
                     .map(|col| {
                         let x = px_x0 + col;
                         self.y_plane[y * self.y_stride + x]
@@ -2211,8 +2211,8 @@ impl<'a> TileDecodeState<'a> {
             );
             for row in 0..cbh_px {
                 let y = cpx_y0 + row;
-                let pre: &[u8] = &snap[row * cbw_px..(row + 1) * cbw_px];
-                let post: Vec<u8> = (0..cbw_px)
+                let pre: &[Px] = &snap[row * cbw_px..(row + 1) * cbw_px];
+                let post: Vec<Px> = (0..cbw_px)
                     .map(|col| {
                         if *idx == 0 {
                             self.u_plane[y * self.uv_stride + cpx_x0 + col]
@@ -2795,6 +2795,7 @@ impl<'a> TileDecodeState<'a> {
     /// from the above and left neighbours' motion vectors, using the raised-cosine
     /// `Obmc_Mask_*` weights (decaying away from the shared edge).
     fn apply_obmc(&mut self, mi_row: usize, mi_col: usize, bsize: usize, plane: usize) {
+        let pix_max = (1i32 << self.bit_depth) - 1;
         let (subx, suby) = if plane == 0 {
             (0usize, 0usize)
         } else {
@@ -2981,7 +2982,7 @@ impl<'a> TileDecodeState<'a> {
                 continue;
             };
             let (rp, rw, _) = rf.plane(plane);
-            let mut obmc = vec![0u8; pred_w * pred_h];
+            let mut obmc = vec![0 as Px; pred_w * pred_h];
             // `filters` here is `[dir0, dir1]` (see the neighbour-job
             // construction above); dir1 is horizontal, dir0 is vertical.
             // `px`/`py` are tile-local (the destination write below uses them
@@ -3013,6 +3014,7 @@ impl<'a> TileDecodeState<'a> {
                     hbits,
                     vbits,
                     &sc,
+                    self.bit_depth,
                 );
             } else {
                 motion_compensate(
@@ -3031,6 +3033,7 @@ impl<'a> TileDecodeState<'a> {
                     filters[0],
                     hbits,
                     vbits,
+                    self.bit_depth,
                 );
             }
             let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
@@ -3040,7 +3043,7 @@ impl<'a> TileDecodeState<'a> {
                 _ => &mut self.y_plane,
             };
             let mut any_diff = false;
-            let mut before: Vec<u8> = Vec::new();
+            let mut before: Vec<Px> = Vec::new();
             for i in 0..pred_h {
                 let sy = py + i;
                 if sy >= ph {
@@ -3062,7 +3065,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     // §7.11.3.9: mask weights the *neighbour's* prediction; (64-m) weights current.
                     dst[sy * pstride + sx] =
-                        (((m * o + (64 - m) * cur) + 32) >> 6).clamp(0, 255) as u8;
+                        (((m * o + (64 - m) * cur) + 32) >> 6).clamp(0, pix_max) as Px;
                 }
             }
             if dbg_obmc {
@@ -3079,11 +3082,11 @@ impl<'a> TileDecodeState<'a> {
                     if sy >= ph {
                         break;
                     }
-                    let nbr_row: Vec<u8> = (0..pred_w).map(|j| obmc[i * pred_w + j]).collect();
-                    let bef_row: Vec<u8> = (0..pred_w)
+                    let nbr_row: Vec<Px> = (0..pred_w).map(|j| obmc[i * pred_w + j]).collect();
+                    let bef_row: Vec<Px> = (0..pred_w)
                         .map(|j| before.get(i * pred_w + j).copied().unwrap_or(0))
                         .collect();
-                    let dst_row: Vec<u8> = (0..pred_w)
+                    let dst_row: Vec<Px> = (0..pred_w)
                         .map(|j| {
                             let sx = px + j;
                             if sx < pw {
@@ -3114,6 +3117,7 @@ impl<'a> TileDecodeState<'a> {
         ii_mode: u8,
         wedge_index: usize,
     ) {
+        let pix_max = (1i32 << self.bit_depth) - 1;
         let bw_px = BLOCK_WIDTH[bsize];
         let bh_px = BLOCK_HEIGHT[bsize];
         // §7.11.3.6: a WEDGE block uses the (sign-0) wedge mask; a plain
@@ -3199,6 +3203,7 @@ impl<'a> TileDecodeState<'a> {
                 py,
                 py > 0,
                 px > 0,
+                self.bit_depth,
             );
             let mut tmp = vec![0i32; pw * ph];
             crate::reconstruct::predict::predict_intra_block(
@@ -3212,6 +3217,7 @@ impl<'a> TileDecodeState<'a> {
                 0,
                 tile_w.saturating_sub(px),
                 tile_h.saturating_sub(py),
+                self.bit_depth,
             );
             if std::env::var("KINETIX_AV1_DBG_IIDUMP").is_ok() && mi_col == 4 && mi_row == 20 {
                 eprintln!(
@@ -3251,7 +3257,7 @@ impl<'a> TileDecodeState<'a> {
                     let idx = sy * pstride + sx;
                     let d = dst[idx] as i32;
                     let t = tmp[y * pw + x];
-                    dst[idx] = ((d * (64 - m) + t * m + 32) >> 6).clamp(0, 255) as u8;
+                    dst[idx] = ((d * (64 - m) + t * m + 32) >> 6).clamp(0, pix_max) as Px;
                 }
             }
         }
@@ -3368,7 +3374,7 @@ impl<'a> TileDecodeState<'a> {
                 (self.subsampling_x as u32, self.subsampling_y as u32)
             };
             let tmp = {
-                let mut t = vec![0u8; bw * bh];
+                let mut t = vec![0 as Px; bw * bh];
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, _) = rf.plane(plane);
                     // dav1d's mc()/warp_affine() clamp reference reads at the
@@ -3472,6 +3478,7 @@ impl<'a> TileDecodeState<'a> {
                                 bh,
                                 ss_hor,
                                 ss_ver,
+                                self.bit_depth,
                             );
                         }
                         _ => {
@@ -3516,6 +3523,7 @@ impl<'a> TileDecodeState<'a> {
                                     hbits,
                                     vbits,
                                     &sc,
+                                    self.bit_depth,
                                 );
                             } else {
                                 motion_compensate(
@@ -3534,6 +3542,7 @@ impl<'a> TileDecodeState<'a> {
                                     filters[0],
                                     hbits,
                                     vbits,
+                                    self.bit_depth,
                                 );
                             }
                         }
@@ -3579,14 +3588,14 @@ impl<'a> TileDecodeState<'a> {
                     mvs[0].row, mvs[0].col, filters[0], filters[1],
                 );
                 for row in 12..16 {
-                    let vals: Vec<u8> = (0..4).map(|c| tmp[row * bw + c]).collect();
+                    let vals: Vec<Px> = (0..4).map(|c| tmp[row * bw + c]).collect();
                     eprintln!("  PREDUMP2 row{row}: {vals:?}");
                 }
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, rh) = rf.plane(plane);
                     eprintln!("  PREDUMP2 ref rw={rw} rh={rh}");
                     for row in 44..48 {
-                        let vals: Vec<u8> = (0..4).map(|c| rp[row * rw + 64 + c]).collect();
+                        let vals: Vec<Px> = (0..4).map(|c| rp[row * rw + 64 + c]).collect();
                         eprintln!("  PREDUMP2 ref row{row}: {vals:?}");
                     }
                 }
@@ -3634,6 +3643,7 @@ impl<'a> TileDecodeState<'a> {
                             bh,
                             ss_hor,
                             ss_ver,
+                            self.bit_depth,
                         );
                     }
                     // See the single-ref motion_compensate call above: `filters`
@@ -3664,6 +3674,7 @@ impl<'a> TileDecodeState<'a> {
                             hbits,
                             vbits,
                             &sc,
+                            self.bit_depth,
                         )
                     } else {
                         motion_compensate_prep(
@@ -3680,6 +3691,7 @@ impl<'a> TileDecodeState<'a> {
                             filters[0],
                             hbits,
                             vbits,
+                            self.bit_depth,
                         )
                     }
                 } else {
@@ -3716,7 +3728,14 @@ impl<'a> TileDecodeState<'a> {
                             mask.wedge_index,
                         )
                     } else {
-                        crate::reconstruct::wedge::diffwtd_mask(mask.mask_sign, &t0, &t1, bw, bh)
+                        crate::reconstruct::wedge::diffwtd_mask(
+                            mask.mask_sign,
+                            &t0,
+                            &t1,
+                            bw,
+                            bh,
+                            self.bit_depth,
+                        )
                     };
                     if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
                         && (mi_row == 12 || mi_row == 14)
@@ -3738,9 +3757,10 @@ impl<'a> TileDecodeState<'a> {
                     &t1,
                     bw,
                     bh,
+                    self.bit_depth,
                 )
             } else {
-                compound_blend(&t0, &t1, blend_weight)
+                compound_blend(&t0, &t1, blend_weight, self.bit_depth)
             }
         };
         for dy in 0..bh {
@@ -3775,6 +3795,7 @@ impl<'a> TileDecodeState<'a> {
         skip: bool,
         leaves: &[(usize, usize, usize)],
     ) -> Result<(), KinetixError> {
+        let pix_max = (1i32 << self.bit_depth) - 1;
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
         // Uniform-grid fallback size for the (common) non-split case, used for
@@ -3889,7 +3910,13 @@ impl<'a> TileDecodeState<'a> {
                 if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant_dbg =
-                        dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                        dequantize_coeffs(
+                            &coeffs.quant,
+                            leaf_tx,
+                            qindex_dc,
+                            qindex_ac,
+                            self.bit_depth,
+                        );
                     eprintln!(
                         "KINCFS tx={leaf_tx} txtp={} eob={} quant[..16]={:?} dequant[..16]={:?}",
                         coeffs.tx_type,
@@ -3904,7 +3931,13 @@ impl<'a> TileDecodeState<'a> {
                         if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
                             let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                             let dequant_dbg =
-                                dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                                dequantize_coeffs(
+                            &coeffs.quant,
+                            leaf_tx,
+                            qindex_dc,
+                            qindex_ac,
+                            self.bit_depth,
+                        );
                             let nz: Vec<(usize, i32)> = dequant_dbg
                                 .iter()
                                 .enumerate()
@@ -3976,7 +4009,13 @@ impl<'a> TileDecodeState<'a> {
                 // shifts generically.
                 if coeffs.eob > 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                    let dequant = dequantize_coeffs(&coeffs.quant, leaf_tx, qindex_dc, qindex_ac);
+                    let dequant = dequantize_coeffs(
+                            &coeffs.quant,
+                            leaf_tx,
+                            qindex_dc,
+                            qindex_ac,
+                            self.bit_depth,
+                        );
                     if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
                         && mi_col == 4
                         && mi_row == 18
@@ -3994,6 +4033,7 @@ impl<'a> TileDecodeState<'a> {
                         coeffs.tx_type,
                         leaf_tx,
                         self.lossless,
+                        self.bit_depth,
                         &mut residual,
                     );
                     // Dump the post-ITX residual for leaves overlapping the
@@ -4097,7 +4137,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
                         *slot =
-                            ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, 255)) as u8;
+                            ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max)) as Px;
                     }
                 }
             }
@@ -4109,7 +4149,7 @@ impl<'a> TileDecodeState<'a> {
                     if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
                         for dy in 0..leaf_tx_h.min(16) {
                             let sy = px_y + dy;
-                            let row: Vec<u8> = (0..leaf_tx_w.min(16))
+                            let row: Vec<Px> = (0..leaf_tx_w.min(16))
                                 .map(|dx| self.y_plane[(sy) * self.y_stride + px_x + dx])
                                 .collect();
                             eprintln!(
@@ -4354,12 +4394,19 @@ impl<'a> TileDecodeState<'a> {
                                 (v_qindex_dc, v_qindex_ac)
                             };
                             let dequant =
-                                dequantize_coeffs(&coeffs.quant, c_tx, qindex_dc, qindex_ac);
+                                dequantize_coeffs(
+                                &coeffs.quant,
+                                c_tx,
+                                qindex_dc,
+                                qindex_ac,
+                                self.bit_depth,
+                            );
                             inverse_transform(
                                 &dequant,
                                 coeffs.tx_type,
                                 c_tx,
                                 self.lossless,
+                                self.bit_depth,
                                 &mut residual,
                             );
                             if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
@@ -4388,7 +4435,7 @@ impl<'a> TileDecodeState<'a> {
                             }
                             if let Some(slot) = dst.get_mut(sy * stride + sx) {
                                 *slot =
-                                    ((*slot as i32 + residual[dy * cw + dx]).clamp(0, 255)) as u8;
+                                    ((*slot as i32 + residual[dy * cw + dx]).clamp(0, pix_max)) as Px;
                             }
                         }
                     }
@@ -4405,9 +4452,9 @@ impl<'a> TileDecodeState<'a> {
                                 .map(|r| {
                                     (0..8)
                                         .map(|c| dst[(40 + r) * stride + 8 + c])
-                                        .collect::<Vec<u8>>()
+                                        .collect::<Vec<Px>>()
                                 })
-                                .collect::<Vec<Vec<u8>>>()
+                                .collect::<Vec<Vec<Px>>>()
                         );
                     }
                 }
@@ -4440,7 +4487,7 @@ impl<'a> TileDecodeState<'a> {
                     if (row as i64) < tgt_y - reach || (row as i64) >= tgt_y + reach {
                         continue;
                     }
-                    let vals: Vec<u8> = (blk_px_x..(blk_px_x + bwid))
+                    let vals: Vec<Px> = (blk_px_x..(blk_px_x + bwid))
                         .filter(|c| (*c as i64) >= tgt_x - reach && (*c as i64) < tgt_x + reach)
                         .map(|c| self.y_plane[row * self.y_stride + c])
                         .collect();

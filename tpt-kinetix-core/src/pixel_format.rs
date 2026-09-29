@@ -13,13 +13,21 @@ pub enum PixelFormat {
     Rgb24,
     /// 24-bit packed BGR (B, G, R byte order).
     Bgr24,
+    /// 4:2:0 planar YUV, 10 bits per sample stored as little-endian 16-bit words.
+    Yuv420p10le,
+    /// 4:2:0 planar YUV, 12 bits per sample stored as little-endian 16-bit words.
+    Yuv420p12le,
 }
 
 impl PixelFormat {
     /// Returns the number of planes for this format.
     pub fn num_planes(self) -> usize {
         match self {
-            PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p => 3,
+            PixelFormat::Yuv420p
+            | PixelFormat::Yuv422p
+            | PixelFormat::Yuv444p
+            | PixelFormat::Yuv420p10le
+            | PixelFormat::Yuv420p12le => 3,
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => 1,
         }
     }
@@ -38,6 +46,8 @@ impl PixelFormat {
             PixelFormat::Yuv422p => 16,
             PixelFormat::Yuv444p => 24,
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => 24,
+            // 16-bit storage per sample, 4:2:0: 1.5 samples per pixel.
+            PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => 24,
         }
     }
 }
@@ -50,6 +60,8 @@ impl std::fmt::Display for PixelFormat {
             PixelFormat::Yuv444p => "yuv444p",
             PixelFormat::Rgb24 => "rgb24",
             PixelFormat::Bgr24 => "bgr24",
+            PixelFormat::Yuv420p10le => "yuv420p10le",
+            PixelFormat::Yuv420p12le => "yuv420p12le",
         };
         f.write_str(s)
     }

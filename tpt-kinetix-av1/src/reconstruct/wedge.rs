@@ -7,17 +7,17 @@
 //! * [`mask_blend`] — combine two intermediate-domain "prep" predictions
 //!   through a luma-domain mask, sub-sampling for chroma (§7.11.3.14).
 //!
-//! 8-bit only: `InterPostRound = 2 * FILTER_BITS - (InterRound0 + InterRound1)
-//! = 14 - (3 + 7) = 4`, so the final mask-blend shift is `6 + 4 = 10` and the
-//! diffwtd difference is rounded by `(BitDepth - 8) + InterPostRound = 4`.
+//! `InterPostRound` equals dav1d's `intermediate_bits` (4 for 8-/10-bit, 2 for
+//! 12-bit), so the final mask-blend shift is `6 + InterPostRound` and the
+//! diffwtd difference is rounded by `(BitDepth - 8) + InterPostRound`.
 
 use std::sync::OnceLock;
 
 use super::{BLOCK_HEIGHT, BLOCK_SIZES, BLOCK_WIDTH};
+use crate::{inter::intermediate_bits, Px};
 
 const MASK_MASTER_SIZE: usize = 64;
 const WEDGE_TYPES: usize = 16;
-const INTER_POST_ROUND: u32 = 4;
 
 // Wedge direction indices into `MasterMask`.
 const WEDGE_HORIZONTAL: usize = 0;
@@ -265,11 +265,19 @@ pub(super) fn wedge_mask_420(bsize: usize, wedge_sign: bool, wedge_index: usize)
 
 /// Difference-weighted mask (§7.11.3.12) from the two intermediate-domain
 /// predictions. `mask_type == true` inverts (`DIFFWTD_38_INV`).
-pub(super) fn diffwtd_mask(mask_type: bool, p0: &[i32], p1: &[i32], w: usize, h: usize) -> Vec<u8> {
+pub(super) fn diffwtd_mask(
+    mask_type: bool,
+    p0: &[i32],
+    p1: &[i32],
+    w: usize,
+    h: usize,
+    bit_depth: u32,
+) -> Vec<u8> {
+    let round = (bit_depth - 8) + intermediate_bits(bit_depth);
     let mut out = vec![0u8; w * h];
     for i in 0..w * h {
         let diff = (p0[i] - p1[i]).abs();
-        let diff = round2(diff, INTER_POST_ROUND);
+        let diff = round2(diff, round);
         let m = clip3(0, 64, 38 + diff / 16);
         out[i] = if mask_type { (64 - m) as u8 } else { m as u8 };
     }
@@ -296,13 +304,16 @@ pub(super) fn mask_blend(
     p1: &[i32],
     w: usize,
     h: usize,
-) -> Vec<u8> {
+    bit_depth: u32,
+) -> Vec<Px> {
+    let post_round = intermediate_bits(bit_depth);
+    let pix_max = (1i32 << bit_depth) - 1;
     let Some((mvec, mw, mh)) = mask else {
         // No mask recorded (e.g. plane-0 call failed to store one); average.
         return p0
             .iter()
             .zip(p1)
-            .map(|(&a, &b)| round2(a + b, 1 + INTER_POST_ROUND).clamp(0, 255) as u8)
+            .map(|(&a, &b)| round2(a + b, 1 + post_round).clamp(0, pix_max) as Px)
             .collect();
     };
     let mw = *mw;
@@ -312,7 +323,7 @@ pub(super) fn mask_blend(
         let xx = x.min(mw - 1);
         mvec[yy * mw + xx] as i32
     };
-    let mut out = vec![0u8; w * h];
+    let mut out = vec![0 as Px; w * h];
     for y in 0..h {
         for x in 0..w {
             let m = if subx == 0 && suby == 0 {
@@ -330,9 +341,9 @@ pub(super) fn mask_blend(
             };
             let v = round2(
                 m * p0[y * w + x] + (64 - m) * p1[y * w + x],
-                6 + INTER_POST_ROUND,
+                6 + post_round,
             );
-            out[y * w + x] = v.clamp(0, 255) as u8;
+            out[y * w + x] = v.clamp(0, pix_max) as Px;
         }
     }
     out
@@ -397,18 +408,18 @@ mod tests {
     fn diffwtd_basic() {
         // Equal predictions ⇒ diff 0 ⇒ m = 38.
         let p = vec![100i32; 16];
-        let m = diffwtd_mask(false, &p, &p, 4, 4);
+        let m = diffwtd_mask(false, &p, &p, 4, 4, 8);
         assert!(m.iter().all(|&v| v == 38));
-        let mi = diffwtd_mask(true, &p, &p, 4, 4);
+        let mi = diffwtd_mask(true, &p, &p, 4, 4, 8);
         assert!(mi.iter().all(|&v| v == 64 - 38));
         // diff 4000 ⇒ Round2(4000, 4) = 250 ⇒ m = 38 + 250/16 = 53.
         let a = vec![4000i32; 4];
         let b = vec![0i32; 4];
-        let m = diffwtd_mask(false, &a, &b, 2, 2);
+        let m = diffwtd_mask(false, &a, &b, 2, 2, 8);
         assert!(m.iter().all(|&v| v == 53));
         // Very large difference saturates to 64.
         let a = vec![7000i32; 4];
-        let m = diffwtd_mask(false, &a, &b, 2, 2);
+        let m = diffwtd_mask(false, &a, &b, 2, 2, 8);
         assert!(m.iter().all(|&v| v == 64));
     }
 
@@ -418,8 +429,8 @@ mod tests {
         let p1 = vec![40i32; 4];
         // m = 64 everywhere ⇒ output = Round2(64*p0, 10) = p0>>4 rounded.
         let mask = (vec![64u8; 4], 2, 2);
-        let out = mask_blend(Some(&mask), 0, 0, &p0, &p1, 2, 2);
-        let want = round2(64 * 200, 10).clamp(0, 255) as u8;
+        let out = mask_blend(Some(&mask), 0, 0, &p0, &p1, 2, 2, 8);
+        let want = round2(64 * 200, 10).clamp(0, 255) as Px;
         assert!(out.iter().all(|&v| v == want));
     }
 }

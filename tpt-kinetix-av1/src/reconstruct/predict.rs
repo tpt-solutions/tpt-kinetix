@@ -24,6 +24,7 @@ pub(super) fn predict_dc(
     h: usize,
     have_above: bool,
     have_left: bool,
+    bit_depth: u32,
     out: &mut [i32],
 ) {
     if w == 0 || h == 0 {
@@ -36,13 +37,13 @@ pub(super) fn predict_dc(
         }
         (true, false) => {
             let sum: i32 = left[..h].iter().sum();
-            clip1((sum + (h as i32 >> 1)) >> h.trailing_zeros())
+            clip1((sum + (h as i32 >> 1)) >> h.trailing_zeros(), bit_depth)
         }
         (false, true) => {
             let sum: i32 = top[..w].iter().sum();
-            clip1((sum + (w as i32 >> 1)) >> w.trailing_zeros())
+            clip1((sum + (w as i32 >> 1)) >> w.trailing_zeros(), bit_depth)
         }
-        (false, false) => MID_SAMPLE,
+        (false, false) => mid_sample(bit_depth),
     };
     for y in 0..h {
         for x in 0..w {
@@ -86,7 +87,7 @@ fn predict_paeth(top: &[i32], left: &[i32], tl: i32, w: usize, h: usize, out: &m
             } else {
                 tl
             };
-            out[y * w + x] = pr.clamp(0, 255);
+            out[y * w + x] = pr;
         }
     }
 }
@@ -161,7 +162,7 @@ pub(super) fn predict_smooth_v(
         let wgt = smooth_weight(h, y);
         for x in 0..w {
             let p = wgt * top[x] + (256 - wgt) * below_pred;
-            out[y * w + x] = round2_shift(p, 8).clamp(0, 255);
+            out[y * w + x] = round2_shift(p, 8);
         }
     }
 }
@@ -187,7 +188,7 @@ pub(super) fn predict_smooth_h(
         for x in 0..w {
             let wgt = smooth_weight(w, x);
             let p = wgt * l + (256 - wgt) * right_pred;
-            out[y * w + x] = round2_shift(p, 8).clamp(0, 255);
+            out[y * w + x] = round2_shift(p, 8);
         }
     }
 }
@@ -218,7 +219,7 @@ pub(super) fn predict_smooth(
             let wgt_w = smooth_weight(w, x);
             let p =
                 wgt_h * top[x] + wgt_h_comp * below_pred + wgt_w * l + (256 - wgt_w) * right_pred;
-            out[y * w + x] = round2_shift(p, 9).clamp(0, 255);
+            out[y * w + x] = round2_shift(p, 9);
         }
     }
 }
@@ -376,7 +377,7 @@ fn filter_intra_edge(buf: &mut [i32], off: usize, n_px: usize, strength: i32) {
             s += edge[k] * kj;
         }
         let s = (s + 8) >> 4;
-        buf[off - 1 + i] = s.clamp(0, 255);
+        buf[off - 1 + i] = s;
     }
 }
 
@@ -393,7 +394,13 @@ fn filter_intra_edge_corner(above: &mut [i32], left: &mut [i32], off: usize) {
 /// `av1_upsample_intra_edge` (AV1 spec / libaom): 2× interpolation of the
 /// reference edge via a 4-tap `{-1, 9, 9, -1}` filter. Returns a fresh buffer
 /// with the same layout (doubled samples at the even logical positions).
-fn upsample_intra_edge(buf: &[i32], off: usize, n_px: usize, corner: i32) -> Vec<i32> {
+fn upsample_intra_edge(
+    buf: &[i32],
+    off: usize,
+    n_px: usize,
+    corner: i32,
+    pix_max: i32,
+) -> Vec<i32> {
     let mut in_buf = vec![0i32; n_px + 3];
     in_buf[0] = corner;
     in_buf[1] = corner;
@@ -403,7 +410,7 @@ fn upsample_intra_edge(buf: &[i32], off: usize, n_px: usize, corner: i32) -> Vec
     out[off - 2] = in_buf[0];
     for i in 0..n_px {
         let s = -in_buf[i] + 9 * in_buf[i + 1] + 9 * in_buf[i + 2] - in_buf[i + 3];
-        let s = ((s + 8) >> 4).clamp(0, 255);
+        let s = ((s + 8) >> 4).clamp(0, pix_max);
         out[off + 2 * i - 1] = s;
         out[off + 2 * i] = in_buf[i + 2];
     }
@@ -434,7 +441,7 @@ fn dr_z1(above: &[i32], off: usize, upsample: bool, dx: i32, w: usize, h: usize,
             if base < max_base_x {
                 let bi = (off as i32 + base) as usize;
                 let val = above[bi] * (32 - shift) + above[bi + 1] * shift;
-                out[r * w + c] = ((val + 16) >> 5).clamp(0, 255);
+                out[r * w + c] = (val + 16) >> 5;
             } else {
                 out[r * w + c] = above[(off as i32 + max_base_x) as usize];
             }
@@ -485,7 +492,7 @@ fn dr_z2(
                 let v = left[bi] * (32 - shift) + left[bi + 1] * shift;
                 (v + 16) >> 5
             };
-            out[r * w + c] = val.clamp(0, 255);
+            out[r * w + c] = val;
         }
     }
 }
@@ -506,7 +513,7 @@ fn dr_z3(left: &[i32], off: usize, upsample: bool, dy: i32, w: usize, h: usize, 
             if base < max_base_y {
                 let bi = (off as i32 + base) as usize;
                 let val = left[bi] * (32 - shift) + left[bi + 1] * shift;
-                out[r * w + c] = ((val + 16) >> 5).clamp(0, 255);
+                out[r * w + c] = (val + 16) >> 5;
             } else {
                 for rr in r..h {
                     out[rr * w + c] = left[(off as i32 + max_base_y) as usize];
@@ -549,7 +556,9 @@ fn predict_directional(
     have_left: bool,
     avail_w: usize,
     avail_h: usize,
+    bit_depth: u32,
 ) {
+    let pix_max = (1i32 << bit_depth) - 1;
     let nominal_angle = match mode {
         V_PRED => 90,
         H_PRED => 180,
@@ -639,13 +648,13 @@ fn predict_directional(
             need_above && use_intra_edge_upsample(w as i32, h as i32, p_angle - 90, filter_type);
         if upsample_above {
             let n_px = w + if need_right { h } else { 0 };
-            above = upsample_intra_edge(&above, DIR_OFF, n_px, tl);
+            above = upsample_intra_edge(&above, DIR_OFF, n_px, tl, pix_max);
         }
         upsample_left =
             need_left && use_intra_edge_upsample(h as i32, w as i32, p_angle - 180, filter_type);
         if upsample_left {
             let n_px = h + if need_bottom { w } else { 0 };
-            lcol = upsample_intra_edge(&lcol, DIR_OFF, n_px, tl);
+            lcol = upsample_intra_edge(&lcol, DIR_OFF, n_px, tl, pix_max);
         }
     }
 
@@ -691,6 +700,7 @@ pub(super) fn predict_intra_block(
     angle_delta: i32,
     avail_w: usize,
     avail_h: usize,
+    bit_depth: u32,
 ) {
     let BlockBorders {
         top,
@@ -701,7 +711,7 @@ pub(super) fn predict_intra_block(
     } = borders;
     let (top, left, tl) = (top.as_slice(), left.as_slice(), *tl);
     match mode {
-        DC_PRED => predict_dc(top, left, w, h, *have_above, *have_left, out),
+        DC_PRED => predict_dc(top, left, w, h, *have_above, *have_left, bit_depth, out),
         V_PRED if angle_delta == 0 => predict_vertical(top, w, h, out),
         H_PRED if angle_delta == 0 => predict_horizontal(left, w, h, out),
         PAETH => predict_paeth(top, left, tl, w, h, out),
@@ -724,9 +734,10 @@ pub(super) fn predict_intra_block(
                 *have_left,
                 avail_w,
                 avail_h,
+                bit_depth,
             )
         }
-        _ => predict_dc(top, left, w, h, *have_above, *have_left, out),
+        _ => predict_dc(top, left, w, h, *have_above, *have_left, bit_depth, out),
     }
 }
 
@@ -826,8 +837,10 @@ pub(super) fn predict_filter_intra(
     tl: i32,
     w: usize,
     h: usize,
+    bit_depth: u32,
     out: &mut [i32],
 ) {
+    let pix_max = (1i64 << bit_depth) - 1;
     let above_row = |i: isize| -> i32 {
         if i < 0 {
             tl
@@ -871,7 +884,7 @@ pub(super) fn predict_filter_intra(
                         .zip(p.iter())
                         .map(|(&t, &v)| t as i64 * v as i64)
                         .sum();
-                    let val = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, 255) as i32;
+                    let val = round2_signed(pr, INTRA_FILTER_SCALE_BITS).clamp(0, pix_max) as i32;
                     out[(i2 * 2 + i1) * w + (j4 * 4 + j1)] = val;
                 }
             }
@@ -895,21 +908,18 @@ const LUMA_TX_PX: usize = 8;
 #[allow(dead_code)]
 const CHROMA_TX_PX: usize = 4;
 
-/// Bit depth this crate reconstructs at. AV1's `BitDepth` also drives the
-/// neighbour-array substitute values in [`block_borders`] and the DC
-/// predictor's "no neighbours at all" case, so they are expressed in terms
-/// of it rather than the literal 8-bit constants.
-pub(super) const BIT_DEPTH: u32 = 8;
-
-/// `1 << (BitDepth - 1)` — the mid-grey value AV1 uses for `AboveRow[-1]`
+/// `1 << (BitDepth - 1)`: the mid-grey value AV1 uses for `AboveRow[-1]`
 /// and for `DC_PRED` when neither neighbour side exists.
-pub(super) const MID_SAMPLE: i32 = 1 << (BIT_DEPTH - 1);
+#[inline]
+pub(super) const fn mid_sample(bit_depth: u32) -> i32 {
+    1 << (bit_depth - 1)
+}
 
 /// `Clip1(x)` (AV1 spec common definitions): clamp to the valid sample range
-/// for the current bit depth.
+/// for the given bit depth.
 #[inline]
-pub(super) fn clip1(x: i32) -> i32 {
-    x.clamp(0, (1 << BIT_DEPTH) - 1)
+pub(super) fn clip1(x: i32, bit_depth: u32) -> i32 {
+    x.clamp(0, (1 << bit_depth) - 1)
 }
 
 /// `AboveRow` / `LeftCol` (AV1 spec §7.11.2.1) for one transform block, plus
@@ -981,7 +991,7 @@ pub(super) struct BlockBorders {
 /// dimensions, where the two agree exactly.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn block_borders(
-    plane: &[u8],
+    plane: &[Px],
     stride: usize,
     width: usize,
     height: usize,
@@ -991,13 +1001,15 @@ pub(super) fn block_borders(
     px_y: usize,
     have_above_right: bool,
     have_below_left: bool,
+    bit_depth: u32,
 ) -> BlockBorders {
+    let mid = mid_sample(bit_depth);
     let sample = |x: usize, y: usize| -> i32 {
         plane
             .get(y * stride + x)
             .copied()
             .map(i32::from)
-            .unwrap_or(MID_SAMPLE)
+            .unwrap_or(mid)
     };
 
     let have_above = px_y > 0;
@@ -1018,7 +1030,7 @@ pub(super) fn block_borders(
     let top: Vec<i32> = if !have_above && have_left {
         vec![sample(px_x - 1, px_y); ext]
     } else if !have_above {
-        vec![MID_SAMPLE - 1; ext]
+        vec![mid - 1; ext]
     } else {
         (0..ext)
             .map(|i| sample(above_limit.min(px_x + i), px_y - 1))
@@ -1029,7 +1041,7 @@ pub(super) fn block_borders(
     let left: Vec<i32> = if !have_left && have_above {
         vec![sample(px_x, px_y - 1); ext]
     } else if !have_left {
-        vec![MID_SAMPLE + 1; ext]
+        vec![mid + 1; ext]
     } else {
         (0..ext)
             .map(|i| sample(px_x - 1, left_limit.min(px_y + i)))
@@ -1041,7 +1053,7 @@ pub(super) fn block_borders(
         (true, true) => sample(px_x - 1, px_y - 1),
         (true, false) => sample(px_x, px_y - 1),
         (false, true) => sample(px_x - 1, px_y),
-        (false, false) => MID_SAMPLE,
+        (false, false) => mid,
     };
 
     BlockBorders {

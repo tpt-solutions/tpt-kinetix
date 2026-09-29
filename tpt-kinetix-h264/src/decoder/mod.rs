@@ -1151,6 +1151,9 @@ impl H264Decoder {
                     .collect()
             })
             .collect();
+        // Frame-coded picture: tag the deblock trace so it is distinguishable
+        // from the field pictures' `P`/`B` tags (see `set_deblock_pic_tag`).
+        crate::deblock::set_deblock_pic_tag("FRAME");
         if let Ok(want) = std::env::var("KINETIX_DUMP_PREDEBLOCK_POC") {
             if want.parse::<i64>().ok() == Some(_poc) {
                 let p = format!("predeblock_poc{_poc}.gray");
