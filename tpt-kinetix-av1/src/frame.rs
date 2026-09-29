@@ -241,11 +241,11 @@ pub const GM_AFFINE: u8 = 3;
 // Global motion parameter precision (§5.9.25 / §7.11.3).
 const WARPEDMODEL_PREC_BITS: i32 = 16;
 const GM_ABS_ALPHA_BITS: u32 = 12;
-const GM_ALPHA_PREC_BITS: i32 = 10;
-const GM_ABS_TRANS_BITS: u32 = 9;
-const GM_TRANS_PREC_BITS: i32 = 7;
+const GM_ALPHA_PREC_BITS: i32 = 15;
+const GM_ABS_TRANS_BITS: u32 = 12;
+const GM_TRANS_PREC_BITS: i32 = 6;
 const GM_ABS_TRANS_ONLY_BITS: u32 = 9;
-const GM_TRANS_ONLY_PREC_BITS: i32 = 6;
+const GM_TRANS_ONLY_PREC_BITS: i32 = 3;
 
 /// Explicit tile layout from `tile_info()` (§5.9.15). Both spacing modes are
 /// represented as per-tile start superblocks — they differ only in how the
@@ -481,6 +481,7 @@ impl FrameHeader {
             ref_order_hint_dpb,
             ref_frame_dims_dpb,
             &[LoopFilterDeltas::default(); 8],
+            &[default_gm_params(); 8],
         )
     }
 
@@ -494,6 +495,7 @@ impl FrameHeader {
         ref_order_hint_dpb: &[u8; 8],
         ref_frame_dims_dpb: &[(u32, u32); 8],
         ref_lf_deltas_dpb: &[LoopFilterDeltas; 8],
+        ref_gm_params_dpb: &[[[i32; 6]; 8]; 8],
     ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
@@ -1028,6 +1030,11 @@ impl FrameHeader {
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC cdef={}", br.bits_read());
         }
+        if std::env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
+            eprintln!(
+                "CDEFHDR oh={order_hint} damping={cdef_damping} bits={cdef_bits} y={cdef_y_strength:?} uv={cdef_uv_strength:?}"
+            );
+        }
 
         // --- lr_params ---
         let lr_params = parse_lr(
@@ -1085,7 +1092,18 @@ impl FrameHeader {
 
         // --- global_motion_params ---
         let (gm_type, gm_params) =
-            parse_global_motion(&mut br, frame_is_intra, allow_high_precision_mv)?;
+            parse_global_motion(
+                &mut br,
+                frame_is_intra,
+                allow_high_precision_mv,
+                // PrevGmParams (§7.20 load_previous): the primary reference's
+                // saved parameters, or the identity defaults.
+                &if primary_ref_frame == 7 {
+                    default_gm_params()
+                } else {
+                    ref_gm_params_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
+                },
+            )?;
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC gm={}", br.bits_read());
         }
@@ -1755,16 +1773,25 @@ fn parse_skip_mode(
 }
 
 /// `global_motion_params()` (§5.9.25).
+/// Identity global-motion parameters for every reference (`gm_params[ref][2]
+/// == gm_params[ref][5] == 1 << WARPEDMODEL_PREC_BITS`, the rest zero).
+pub fn default_gm_params() -> [[i32; 6]; 8] {
+    let mut p = [[0i32; 6]; 8];
+    for row in p.iter_mut() {
+        row[2] = 1 << WARPEDMODEL_PREC_BITS;
+        row[5] = 1 << WARPEDMODEL_PREC_BITS;
+    }
+    p
+}
+
 fn parse_global_motion(
     br: &mut BitReader<'_>,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
+    prev_gm_params: &[[i32; 6]; 8],
 ) -> Result<([u8; 8], [[i32; 6]; 8]), KinetixError> {
     let mut gm_type = [GM_IDENTITY; 8];
-    let mut gm_params: [[i32; 6]; 8] = [[0; 6]; 8];
-    for p in gm_params.iter_mut() {
-        p[2] = 1 << WARPEDMODEL_PREC_BITS;
-    }
+    let mut gm_params: [[i32; 6]; 8] = default_gm_params();
     if frame_is_intra {
         return Ok((gm_type, gm_params));
     }
@@ -1785,6 +1812,9 @@ fn parse_global_motion(
             }
         }
         gm_type[ref_idx] = type_;
+        if std::env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
+            eprintln!("GMBITS ref={ref_idx} type={type_} bit={}", br.bits_read());
+        }
         if type_ >= GM_ROTZOOM {
             read_global_param(
                 br,
@@ -1793,6 +1823,7 @@ fn parse_global_motion(
                 2,
                 type_,
                 allow_high_precision_mv,
+                prev_gm_params,
             )?;
             read_global_param(
                 br,
@@ -1801,6 +1832,7 @@ fn parse_global_motion(
                 3,
                 type_,
                 allow_high_precision_mv,
+                prev_gm_params,
             )?;
             if type_ == GM_AFFINE {
                 read_global_param(
@@ -1810,6 +1842,7 @@ fn parse_global_motion(
                     4,
                     type_,
                     allow_high_precision_mv,
+                    prev_gm_params,
                 )?;
                 read_global_param(
                     br,
@@ -1818,6 +1851,7 @@ fn parse_global_motion(
                     5,
                     type_,
                     allow_high_precision_mv,
+                    prev_gm_params,
                 )?;
             } else {
                 gm_params[ref_idx][4] = -gm_params[ref_idx][3];
@@ -1832,6 +1866,7 @@ fn parse_global_motion(
                 0,
                 type_,
                 allow_high_precision_mv,
+                prev_gm_params,
             )?;
             read_global_param(
                 br,
@@ -1840,6 +1875,7 @@ fn parse_global_motion(
                 1,
                 type_,
                 allow_high_precision_mv,
+                prev_gm_params,
             )?;
         }
     }
@@ -1854,6 +1890,7 @@ fn read_global_param(
     idx: usize,
     type_: u8,
     allow_high_precision_mv: bool,
+    prev_gm_params: &[[i32; 6]; 8],
 ) -> Result<(), KinetixError> {
     let mut abs_bits = GM_ABS_ALPHA_BITS;
     let mut prec_bits = GM_ALPHA_PREC_BITS;
@@ -1878,7 +1915,7 @@ fn read_global_param(
     };
     let sub = if (idx % 3) == 2 { 1 << prec_bits } else { 0 };
     let mx = 1u32 << abs_bits;
-    let r = (gm[ref_idx][idx] >> prec_diff) - sub;
+    let r = (prev_gm_params[ref_idx][idx] >> prec_diff) - sub;
     let val = decode_signed_subexp_with_ref(br, -(mx as i32), (mx + 1) as i32, r)?;
     gm[ref_idx][idx] = (val << prec_diff) + round;
     Ok(())
