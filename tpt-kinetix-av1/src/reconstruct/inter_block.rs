@@ -1564,7 +1564,24 @@ impl<'a> TileDecodeState<'a> {
         // the bottom-right 4x4 of a quad) owns the parent 8x8's chroma at all.
         let has_chroma = (bw > 1 || (mi_col & 1) == 1) && (bh > 1 || (mi_row & 1) == 1);
         let sub8x8_leaf = is_420 && (bw == 1 || bh == 1) && has_chroma;
-        if sub8x8_leaf {
+        // dav1d `recon_tmpl.c`: `if (!has_chroma) goto skip_inter_chroma_pred;`
+        // runs BEFORE the `is_sub8x8` branch — a `has_chroma == false` leaf
+        // (the TL/TR/BL leaves of a split-8x8, or any other narrow leaf that
+        // doesn't own the parent 8x8's chroma) does ZERO chroma MC, full
+        // stop. The previous `if sub8x8_leaf {...} else {...}` structure
+        // folded `has_chroma` into `sub8x8_leaf` only, so a narrow leaf with
+        // `has_chroma == false` fell into the `else` (normal single-predict)
+        // arm below and wrongly ran an extra, spurious chroma MC at its own
+        // tiny origin — later overwritten by the true owning leaf's writes
+        // in some cases, but in others (e.g. when the owning leaf's
+        // `is_sub8x8` gate itself later reads a stale/instrumented value)
+        // left stray incorrect pixels. Traced against dav1d on
+        // `switch_frame.ivf` frame 2 mi(12,22)/(13,22)/(12,23) (chroma
+        // (24,44)-(27,45)): all three are `has_chroma == false` narrow
+        // leaves that Kinetix predicted chroma for anyway.
+        if !has_chroma {
+            // Skip inter chroma prediction entirely for this leaf.
+        } else if sub8x8_leaf {
             // All sub-8x8 chroma MCs are based at the PARENT 8x8's chroma
             // origin (dav1d's `uvdstoff` floors `t->bx/by >> ss_hor/ver`).
             let base_x = ((mi_col & !1) * MI_SIZE - self.tile_px_x0) / 2;
@@ -1593,6 +1610,15 @@ impl<'a> TileDecodeState<'a> {
                     // running `tl_filter2d` (dav1d `t->tl_4x4_filter`).
                     let cell = self.refmv_cell(mi_row - 1, mi_col - 1);
                     let f = self.tl_filter2d.unwrap_or((0, 0));
+                    // dav1d reads this quadrant's own ref (`r[-1][bx-1].ref.ref[0]`),
+                    // not the current (BR) block's — a neighbour coded against a
+                    // different reference frame than BR must MC against ITS OWN
+                    // reference, not BR's. Passing `ref_names` (BR's own) here was
+                    // the bug: traced against dav1d on `switch_frame.ivf` frame 2
+                    // mi(13,23), this quadrant's true neighbour (mi(12,22)) used
+                    // LAST_FRAME while BR used ALTREF_FRAME — Kinetix read the
+                    // right MV against the wrong reference picture entirely.
+                    let cell_refs = [cell.refs[0], crate::inter::NONE_FRAME];
                     for plane in 1..=2usize {
                         self.inter_predict_plane(
                             plane,
@@ -1600,9 +1626,21 @@ impl<'a> TileDecodeState<'a> {
                             base_y,
                             cbw_px,
                             cbh_px,
-                            &ref_names,
+                            &cell_refs,
                             &[cell.mv[0], Mv::default()],
-                            [f.1, f.0],
+                            // `inter_predict_plane` expects `[dir0, dir1]` and
+                            // does its own dir->h/v swap internally (see the
+                            // comment at its `motion_compensate` call site) —
+                            // `f` is already `(dir0, dir1)` from the neighbour's
+                            // saved filter pair, so pass it unswapped. The
+                            // previous `[f.1, f.0]` pre-swapped it, which
+                            // canceled out whenever dir0 == dir1 (hence BL/
+                            // BR-own, both REGULAR/REGULAR here, looked fine)
+                            // but reversed h/v whenever they differed — traced
+                            // against dav1d on `switch_frame.ivf` frame 2
+                            // mi(13,23)'s TL-diagonal/TR quadrants (REGULAR/
+                            // SMOOTH, dav1d filter2d=6), which this reverses.
+                            [f.0, f.1],
                             blend_weight,
                             mask_desc,
                             mi_row,
@@ -1618,6 +1656,9 @@ impl<'a> TileDecodeState<'a> {
                     // (4x8), with the left cell's filters.
                     let cell = self.refmv_cell(mi_row, mi_col - 1);
                     let f = (self.filter_left[0][mi_row], self.filter_left[1][mi_row]);
+                    // Same fix as the TL-diagonal quadrant above: use this
+                    // neighbour's own reference, not BR's.
+                    let cell_refs = [cell.refs[0], crate::inter::NONE_FRAME];
                     for plane in 1..=2usize {
                         self.inter_predict_plane(
                             plane,
@@ -1625,9 +1666,11 @@ impl<'a> TileDecodeState<'a> {
                             base_y + v_off,
                             cbw_px,
                             cbh_px,
-                            &ref_names,
+                            &cell_refs,
                             &[cell.mv[0], Mv::default()],
-                            [f.1, f.0],
+                            // Same fix as the TL-diagonal quadrant above: `f`
+                            // is already `(dir0, dir1)`, pass unswapped.
+                            [f.0, f.1],
                             blend_weight,
                             mask_desc,
                             mi_row,
@@ -1642,6 +1685,9 @@ impl<'a> TileDecodeState<'a> {
                     // filters.
                     let cell = self.refmv_cell(mi_row - 1, mi_col);
                     let f = (self.filter_above[0][mi_col], self.filter_above[1][mi_col]);
+                    // Same fix as the TL-diagonal quadrant above: use this
+                    // neighbour's own reference, not BR's.
+                    let cell_refs = [cell.refs[0], crate::inter::NONE_FRAME];
                     for plane in 1..=2usize {
                         self.inter_predict_plane(
                             plane,
@@ -1649,9 +1695,11 @@ impl<'a> TileDecodeState<'a> {
                             base_y,
                             cbw_px,
                             cbh_px,
-                            &ref_names,
+                            &cell_refs,
                             &[cell.mv[0], Mv::default()],
-                            [f.1, f.0],
+                            // Same fix as the TL-diagonal quadrant above: `f`
+                            // is already `(dir0, dir1)`, pass unswapped.
+                            [f.0, f.1],
                             blend_weight,
                             mask_desc,
                             mi_row,
@@ -1990,11 +2038,25 @@ impl<'a> TileDecodeState<'a> {
         // extent halved, so a chroma-only divergence is attributable to MC
         // (wrong pre-residual prediction) or to the residual/transform
         // (correct pre-residual, wrong post) exactly as the luma probe is.
+        // `KINETIX_AV1_DBG_CHROMA_XY=<x>,<y>` locates the block whose chroma
+        // bbox covers a specific chroma pixel without needing to know its mi
+        // origin ahead of time — used to find which block owns a divergent
+        // pixel reported by `av1_frame_locate`.
+        let chroma_xy_target = std::env::var("KINETIX_AV1_DBG_CHROMA_XY")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+            });
+        let chroma_xy_hit = chroma_xy_target.is_some_and(|(tx, ty)| {
+            tx >= cpx_x0 && tx < cpx_x0 + cbw_px && ty >= cpx_y0 && ty < cpx_y0 + cbh_px
+        }) && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f);
         let chroma_snap: Vec<(usize, Vec<u8>)> =
-            if pred_target.is_some_and(|(tc, tr)| {
+            if (pred_target.is_some_and(|(tc, tr)| {
                 (tc, tr) == (mi_col, mi_row)
                     && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
-            }) && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
+            }) || chroma_xy_hit)
+                && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
             {
                 let cx0 = cpx_x0;
                 let cy0 = cpx_y0;

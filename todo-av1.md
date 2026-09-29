@@ -13878,3 +13878,104 @@ window in `recon.h` and rerun `ninja -C bld2 tools/dav1d.exe`.
 - [ ] `pixel_exact` stays `false` (FATE: 9/195 frames exact, unchanged by
       this fix — it closes a real per-pixel bug without yet flipping any
       whole-frame comparison to exact).
+## Session 2026-09-29 (FIXED) — `switch_frame` frame 2 is now BIT-EXACT (0 diff,
+## was 105): two more real bugs in the split-8x8 sub-8x8 chroma quadrant scheme
+
+Picked up the previous session's exact next step: localized the remaining
+105-byte residual with `KINETIX_AV1_LOC_*` (a new `av1_frame_locate` example,
+committed this session, replacing ad-hoc one-off diff scripts) and a new
+`KINETIX_AV1_DBG_CHROMA_XY=<x>,<y>` probe (finds which block owns a given
+chroma pixel without knowing its mi origin ahead of time — added to
+`inter_block.rs` alongside the existing `KINETIX_AV1_DBG_PRED_CHROMA`
+machinery). Picked the worst cluster: V(24-27,44) delta up to **-12**,
+V(24-27,45) up to **+6** — far bigger than the ±1-3 "rounding noise" pattern
+of the rest of the 105, and therefore the best lead.
+
+### Bug 1 — narrow leaves with `has_chroma == false` wrongly ran chroma MC
+Traced the owning mi group: a `PARTITION_SPLIT` `BLOCK_8X8` at mi(12,22),
+leaves TL=(12,22) TR=(13,22) BL=(12,23) BR=(13,23). dav1d's `recon_tmpl.c`
+does `if (!has_chroma) goto skip_inter_chroma_pred;` **before** the
+`is_sub8x8` branch — a `has_chroma == false` leaf does ZERO chroma MC, full
+stop. Kinetix's `if sub8x8_leaf {...} else {...}` folded `has_chroma` into
+`sub8x8_leaf` only, so TL/TR/BL (all `has_chroma == false` here, confirmed
+via a temporary debug print) fell into the `else` (normal single-predict)
+arm and each ran a spurious extra chroma MC at their own tiny origin.
+Restructured to `if !has_chroma { skip } else if sub8x8_leaf {...} else
+{...}`, matching dav1d's gate exactly. **This fix alone was a no-op for the
+FATE corpus count** (BR's later quadrant writes always overwrite the same
+pixels the spurious writes touched, in this case) but is a genuine
+correctness fix per spec, verified via a targeted `HASCHROMA` debug print
+against expectation (`has_chroma=false` for TL/TR/BL, `true` for BR) — kept.
+
+### Bug 2 (the real fix) — neighbour quadrant MCs used the CURRENT block's
+### reference, not the neighbour's
+Extended the patched-dav1d oracle (`%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`)
+with a wider `DEBUG_BLOCK_INFO` gate (`by>=22<=23 && bx>=12<=13`) to dump
+`KINETIX_DECODE_B`/`KINETIX_MCCALL`/`KINETIX_REFPIX` for the whole 8x8 group.
+dav1d's 4 chroma-quadrant `mc()` calls for BR(13,23) showed **two different
+references**: TL-diagonal and TR quadrants used `refidx=0` (LAST_FRAME,
+order_hint 1), while BL and BR-own used `refidx=6` (ALTREF_FRAME, order_hint
+0) — because the TL/TR neighbour leaves were themselves coded against
+LAST_FRAME while BR/BL used ALTREF_FRAME. Kinetix's `KINETIX_AV1_MCSUM_BLOCK`
+dump for the same 4 calls showed **all four using slot=6/ref0=8 (ALTREF)** —
+the TL-diagonal/BL/TR quadrant code correctly fetched the neighbour's **MV**
+via `refmv_cell` but passed `&ref_names` (the **current/BR block's own**
+reference names) instead of `&cell.refs` (the neighbour's own). Fixed all
+three sites in `inter_block.rs` to build `let cell_refs = [cell.refs[0],
+NONE_FRAME]` and pass that instead. Verified via `KINMCSUM`: after the fix,
+TL-diag/TR now read slot=2/ref0=2 (LAST_FRAME), and the dumped reference-row
+content is byte-identical to dav1d's own `KINETIX_REFPIX` dump for the same
+`(dx,dy)`.
+
+### Bug 3 (the pixel-level fix) — neighbour quadrant filters were passed
+### pre-swapped, canceling `inter_predict_plane`'s own dir->h/v swap
+After bug 2's fix, the reference content matched dav1d exactly, but the
+FINAL pixel values (`ours=106,106,106,107` at U row 44) were **still
+unchanged** from before either fix — proven with `QUAD-POSTMC`/
+`QUAD-POSTRESID` raw-buffer dumps bracketing the MC call and the residual
+add (both showed the same wrong value, so it wasn't the residual either).
+Root cause: `inter_predict_plane`'s own code already does a documented
+dir0/dir1 -> h/v swap at its `motion_compensate` call site (`filters` is
+always `[dir0, dir1]` in, swapped internally). The TL-diagonal/BL/TR
+quadrant call sites additionally pre-swapped with `[f.1, f.0]` before
+passing `f = (dir0, dir1)` in — a **double swap** that only matters when
+`dir0 != dir1`. BL/BR-own (both REGULAR/REGULAR, dav1d `filter2d=0`) never
+showed the bug because swapping `[0,0]` is a no-op; TL-diag/TR (REGULAR/
+SMOOTH, dav1d `filter2d=6`) did. Changed all three call sites from `[f.1,
+f.0]` to `[f.0, f.1]` (pass through un-swapped, matching how BR-own already
+passes its own `filter` unswapped).
+
+**Result: `switch_frame.ivf` frame 2 differing-sample count 105 -> 0 —
+bit-exact.** `switch_frame` FATE score **3/32** (was 2/32); FATE aggregate
+**10/195** (was 9/195). Verified no regression anywhere else in the corpus
+(`decode_model` 0/21, `film_grain` 0/10, `frames_refs_short_signaling`
+1/50, `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58 — all
+unchanged). `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass. `cargo
+clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean.
+
+### Frame 3 (20204 -> 19205 bytes; not fixed, but newly localized)
+Frame 3's divergence is **not frame-wide** — `av1_frame_locate` on frame 3
+shows every differing sample confined to ONE spatial region, present in
+both luma and chroma at consistent (subsampling-scaled) coordinates:
+- Y: 14079 differing samples, bbox x[640..851] y[384..479] (maxabs up to 54)
+- U: 2840 differing samples, bbox x[320..425] y[192..239]
+- V: 2286 differing samples, bbox x[320..425] y[192..239]
+
+`640 = 10*64`, `384 = 6*64` — the bbox starts exactly at a superblock-grid
+boundary. The frame is 852x480, so `ceil(852/64)=14` SB columns and
+`ceil(480/64)=8` SB rows — this is the **last (partial) SB column/row**, a
+strong lead for an edge/boundary-handling bug specific to a non-64-multiple
+frame size, not yet confirmed as tile-column-related or SB-edge-clamp-
+related. Not yet investigated further this session (budget). Frame 4
+explodes to 370917 differing bytes at maxabs=255 (full desync/garbage,
+likely cascading from frame 3's error feeding forward as a reference) —
+still not investigated.
+
+### Remaining (AV1)
+- [ ] Frame 3: confirm whether the last-SB-column/row divergence is a tile
+      boundary (check `switch_frame`'s actual tile grid) or a genuine
+      edge-clamping/partial-SB bug; `KINETIX_AV1_LOC_FRAME=3` on
+      `switch_frame.ivf`/`switch_frame_ivf.yuv` reproduces it directly.
+- [ ] Frame 4 onward (370917+ diff, maxabs=255) is likely a downstream
+      desync from frame 3, not yet confirmed or investigated.
+- [ ] `pixel_exact` stays `false` (FATE: 10/195 frames exact).
