@@ -331,9 +331,18 @@ impl Av1Decoder {
                         continue;
                     };
                     produced_any = true;
-                    let Ok((fh, header_bits)) =
-                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints)
-                    else {
+                    let parsed =
+                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints);
+                    if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                        eprintln!(
+                            "KIN ObuType::Frame parse_with_dpb ok={}",
+                            parsed.is_ok()
+                        );
+                        if let Err(e) = &parsed {
+                            eprintln!("KIN   err={e}");
+                        }
+                    }
+                    let Ok((fh, header_bits)) = parsed else {
                         continue;
                     };
                     if let Some(f) = self.finish_frame(&seq, &fh, &obu.payload, header_bits) {
@@ -345,9 +354,18 @@ impl Av1Decoder {
                         continue;
                     };
                     produced_any = true;
-                    if let Ok((fh, _)) =
-                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints)
-                    {
+                    let parsed =
+                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints);
+                    if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                        eprintln!(
+                            "KIN ObuType::FrameHeader parse_with_dpb ok={}",
+                            parsed.is_ok()
+                        );
+                        if let Err(e) = &parsed {
+                            eprintln!("KIN   err={e}");
+                        }
+                    }
+                    if let Ok((fh, _)) = parsed {
                         if fh.show_existing_frame {
                             if let Some(f) = self.finish_frame(&seq, &fh, &obu.payload, 0) {
                                 shown = Some(f);
@@ -439,6 +457,13 @@ impl Av1Decoder {
                 .ref_frames
                 .get(idx as usize)
                 .map(|s| s.to_video_frame());
+            if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                eprintln!(
+                    "KIN show_existing_frame idx={idx} slot_present={} order_hint={}",
+                    f.is_some(),
+                    fh.order_hint,
+                );
+            }
             if f.is_some() {
                 self.frame_count += 1;
             }
@@ -515,14 +540,19 @@ impl Av1Decoder {
         ) {
             Ok(Some(tuple)) => tuple,
             // `Ok(None)` (no tile data) and parse errors both mean no
-            // reconstructed frame; errors are logged when the recon-debug gate
+            // reconstructed frame; both are logged when the recon-debug gate
             // is set so a failing tile-group split isn't silently replaced by
             // the grey placeholder path in `decode()`.
-            Err(e) if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() => {
-                eprintln!("KIN recon error oh={}: {e}", fh.order_hint);
+            other => {
+                if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                    match &other {
+                        Err(e) => eprintln!("KIN recon error oh={}: {e}", fh.order_hint),
+                        Ok(None) => eprintln!("KIN recon ok(none) oh={}", fh.order_hint),
+                        Ok(Some(_)) => unreachable!("matched above"),
+                    }
+                }
                 return None;
             }
-            _ => return None,
         };
         let refresh = fh.refresh_frame_flags;
         // After a `refresh_context` frame, its adapted CDFs are saved into

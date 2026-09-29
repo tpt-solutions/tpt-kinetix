@@ -662,6 +662,14 @@ impl FrameHeader {
                 }
             }
         }
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!(
+                "FHSEC brtime={} dmip={decoder_model_info_present} brtp={buffer_removal_time_present} opcnt={} brtl={}",
+                br.bits_read(),
+                seq.operating_points_cnt_minus_1,
+                seq.buffer_removal_time_length_minus_1,
+            );
+        }
 
         // --- refresh_frame_flags ---
         let refresh_frame_flags = if frame_type == FrameType::SwitchFrame
@@ -685,6 +693,12 @@ impl FrameHeader {
                     0
                 };
             }
+        }
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!(
+                "FHSEC refoh={} order_hint_bits={order_hint_bits} err_res={error_resilient_mode} enable_oh={enable_order_hint}",
+                br.bits_read()
+            );
         }
 
         // --- frame size / render / intrabc OR inter reference signalling ---
@@ -749,11 +763,40 @@ impl FrameHeader {
                     }
                 }
             }
-            let override_now = frame_size_override_flag && !error_resilient_mode;
+            // §5.9.2: `frame_size_override_flag && !error_resilient_mode` only
+            // selects *which frame-size syntax function* runs —
+            // `frame_size_with_refs()` (§5.9.8, tries to copy a reference's
+            // dimensions via a per-ref `found_ref` search) vs. the plain
+            // `frame_size()` + `render_size()` pair. `frame_size()` itself
+            // (§5.9.9) still gates its own explicit width/height read on the
+            // RAW `frame_size_override_flag`, unconditionally — dav1d's
+            // `read_frame_size()` checks `hdr->frame_size_override` for that
+            // read regardless of the `use_ref` parameter it was called with.
+            // Passing the AND'd `override_now` here instead of the raw flag
+            // meant an error-resilient frame with `frame_size_override_flag`
+            // forced true (every `SWITCH_FRAME`, per §5.9.2) silently skipped
+            // its two explicit width/height fields entirely, under-consuming
+            // bits and desyncing the rest of the header (`trailing_bits()`
+            // then failed on the first non-zero pad bit). Traced on
+            // `switch_frame.ivf` order_hint=30 against a patched dav1d oracle
+            // (`obu.c`'s `DEBUG_FRAME_HDR` per-field bit-offset dump): dav1d's
+            // `frametype-specific-bits` checkpoint landed at bit 114 from a
+            // shared bit-13 anchor (post-`primary_ref_frame`), 19 bits ahead
+            // of Kinetix's equivalent checkpoint at 95 — exactly the
+            // `width_n_bits + height_n_bits` this frame's `frame_size()`
+            // should have read.
+            //
+            // The `frame_size_with_refs()` found-ref search loop itself
+            // (taken when `frame_size_override_flag && !error_resilient_mode`)
+            // is still not implemented — no stream in the current corpus
+            // exercises it (this stream's other resizeable-inter frames are
+            // all `!frame_size_override_flag`), so it silently falls through
+            // to the plain `frame_size()` path below. That's a separate,
+            // still-open gap; flagging it here rather than papering over it.
             let (w, h, uw, rw, rh) = parse_frame_size(
                 &mut br,
                 seq,
-                override_now,
+                frame_size_override_flag,
                 seq.frame_width(),
                 seq.frame_height(),
                 seq.enable_superres,
@@ -782,6 +825,12 @@ impl FrameHeader {
             } else {
                 use_ref_frame_mvs = read_flag(&mut br)?;
             }
+        }
+        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+            eprintln!(
+                "FHSEC framesize={} refidx={ref_frame_idx:?} srs={frame_refs_short_signaling}",
+                br.bits_read()
+            );
         }
 
         // --- disable_frame_end_update_cdf ---
@@ -1932,20 +1981,30 @@ const SUPERRES_DENOM_BITS: u8 = 3;
 /// `render_and_frame_size_different` for a reduced-still-picture keyframe).
 fn parse_frame_size(
     br: &mut BitReader<'_>,
-    _seq: &crate::obu::SequenceHeaderObu,
+    seq: &crate::obu::SequenceHeaderObu,
     frame_size_override: bool,
     max_w: u32,
     max_h: u32,
     enable_superres: bool,
 ) -> Result<(u32, u32, u32, u32, u32), KinetixError> {
-    // §5.9.9 `frame_size()`: the width/height are only read as `ns` values
-    // when `frame_size_override_flag == 1`. (A keyframe forces that flag to 0,
-    // so it uses the sequence-header maximums directly.) The old code also read
-    // `ns` for keyframes, which consumed stray bits and drifted every field
-    // after it (e.g. decoding width = 5 instead of 128).
+    // §5.9.9 `frame_size()`: when `frame_size_override_flag == 1`, width/height
+    // are plain FIXED-width `f(n)` reads — `n = frame_width_bits_minus_1 + 1`
+    // (from the sequence header) — not a variable-length `ns(max_w)` decode.
+    // `ns()` is the right primitive for e.g. tile-size fields, but not here:
+    // `dav1d_get_bits(gb, seqhdr->width_n_bits)` (a fixed-width read) is what
+    // dav1d's `read_frame_size()` does. Reading `ns(max_w)` instead silently
+    // decoded a plausible-looking but wrong width/height for the first frame
+    // in the corpus that both set `frame_size_override_flag` AND used a
+    // genuinely different size than the sequence header max (a `SWITCH_FRAME`
+    // resolution change, `switch_frame.ivf` order_hint=30/31: real size
+    // 426x240, half of the sequence max 852x480 — `ns(852)`/`ns(480)`
+    // decoded 254/208 and (after the resulting bit-desync) 839/457 instead).
+    // (A keyframe forces `frame_size_override_flag` to 0, so it always uses
+    // the sequence-header maximums directly — an even older version of this
+    // code read `ns` unconditionally, drifting every field after it.)
     let (mut w, h) = if frame_size_override {
-        let w = read_ns(br, max_w)? + 1;
-        let h = read_ns(br, max_h)? + 1;
+        let w = read_f(br, seq.frame_width_bits_minus_1 + 1)? + 1;
+        let h = read_f(br, seq.frame_height_bits_minus_1 + 1)? + 1;
         (w, h)
     } else {
         (max_w, max_h)
