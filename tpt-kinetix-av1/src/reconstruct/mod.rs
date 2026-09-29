@@ -617,6 +617,7 @@ fn build_rp_proj(
     }
 
     let mut rp = vec![(Mv::default(), 0i32); w8 * h8];
+    let sv_dump = std::env::var("KINETIX_AV1_DBG_SVDUMP").is_ok();
     for &m in &mfmv_refs {
         let Some(src) = rp_ref(m) else { continue };
         let rpoc = ref_poc(m);
@@ -637,10 +638,12 @@ fn build_rp_proj(
         for y in row_start8..row_end8 {
             for x in col_start8i..col_end8i {
                 // dav1d `save_tmvs_c` stores each 8×8 cell from the block at
-                // 4×4 column `x*2 + 1` of the cell's top 4×4 row (mi (2x+1,
-                // 2y)) — in sub-8×8 splits the leaves carry different MVs, so
-                // the odd column is the cell's identity.
-                let cell = &src.cells[(2 * y) * stride4 + (2 * x + 1)];
+                // 4×4 column `x*2 + 1` of the cell's *bottom* 4×4 row: it is
+                // called with `rt->r + 6` while `rt->r[5 + i]` is block row
+                // `i`, so `rr[(y & 15) * 2]` is block row `2y + 1`. In sub-8×8
+                // splits the leaves carry different MVs, so the bottom-right
+                // 4×4 is the cell's identity.
+                let cell = &src.cells[(2 * y + 1) * stride4 + (2 * x + 1)];
                 // `save_tmvs` filter: compound blocks save their *second*
                 // reference's MV, single-ref blocks the first; the reference
                 // must be in the source frame's past (`mfmv_sign`) and the MV
@@ -662,6 +665,14 @@ fn build_rp_proj(
                 } else {
                     continue;
                 };
+                if sv_dump {
+                    eprintln!(
+                        "SV y={y} x={x} mv=({},{}) ref={}",
+                        b_mv.row,
+                        b_mv.col,
+                        b_ref as i32 - 1
+                    );
+                }
                 let rrpoc = src.dpb_order_hints[src.ref_to_slot[b_ref as usize] as usize] as i32;
                 let diff2 = poc_diff(rpoc, rrpoc);
                 // dav1d's unsigned compare also maps negatives to 0.
@@ -695,6 +706,16 @@ fn build_rp_proj(
                     {
                         rp[pos_y as usize * w8 + pos_x as usize] = (b_mv, diff2);
                     }
+                }
+            }
+        }
+    }
+    if std::env::var("KINETIX_AV1_DBG_RPPROJ").is_ok() {
+        for y in row_start8..row_end8 {
+            for x in col_start8..col_end8 {
+                let (mv, r) = rp[y * w8 + x];
+                if r != 0 {
+                    eprintln!("RP y={y} x={x} mv=({},{}) ref={r}", mv.row, mv.col);
                 }
             }
         }
