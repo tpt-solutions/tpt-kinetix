@@ -1008,8 +1008,8 @@ fn deblock_plane(
                     // cell ABOVE (`l[0][2] ? l[0][2] : l[-b4_stride][2]` in
                     // dav1d's `loop_filter_v_sb128uv_c`).
                     let mut lv = lf_level_cache[by * lf_cache_stride + bx] as i32;
-                    if lv == 0 && by > 0 {
-                        lv = lf_level_cache[(by - 1) * lf_cache_stride + bx] as i32;
+                    if lv == 0 && bx > 0 {
+                        lv = lf_level_cache[by * lf_cache_stride + bx - 1] as i32;
                     }
                     (0, 0, lv)
                 } else {
@@ -1186,8 +1186,8 @@ fn deblock_plane(
                     // (`l[0][2] ? l[0][2] : l[-1][2]` in dav1d's
                     // `loop_filter_h_sb128uv_c`).
                     let mut lv = lf_level_cache[by * lf_cache_stride + bx] as i32;
-                    if lv == 0 && bx > 0 {
-                        lv = lf_level_cache[by * lf_cache_stride + bx - 1] as i32;
+                    if lv == 0 && by > 0 {
+                        lv = lf_level_cache[(by - 1) * lf_cache_stride + bx] as i32;
                     }
                     (1, 0, lv)
                 } else {
