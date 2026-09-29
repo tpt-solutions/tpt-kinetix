@@ -460,17 +460,20 @@ impl FrameHeader {
         data: &[u8],
         seq: &crate::obu::SequenceHeaderObu,
     ) -> Result<(Self, usize), KinetixError> {
-        Self::parse_with_dpb(data, seq, &[0u8; 8])
+        Self::parse_with_dpb(data, seq, &[0u8; 8], &[(0u32, 0u32); 8])
     }
 
     /// Like [`FrameHeader::parse`] but with the reference slots' stored
     /// `OrderHint` values (`RefOrderHint[0..8]`) — needed to compute
     /// `skip_mode_params()` (§6.8.2), which reads a bit only when skip mode is
-    /// actually allowed by the DPB order hints.
+    /// actually allowed by the DPB order hints — and each slot's stored
+    /// `(UpscaledWidth, FrameHeight)` (`RefUpscaledWidth`/`RefFrameHeight`),
+    /// needed by `frame_size_with_refs()` (§5.9.8).
     pub fn parse_with_dpb(
         data: &[u8],
         seq: &crate::obu::SequenceHeaderObu,
         ref_order_hint_dpb: &[u8; 8],
+        ref_frame_dims_dpb: &[(u32, u32); 8],
     ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
@@ -786,26 +789,70 @@ impl FrameHeader {
             // `width_n_bits + height_n_bits` this frame's `frame_size()`
             // should have read.
             //
-            // The `frame_size_with_refs()` found-ref search loop itself
-            // (taken when `frame_size_override_flag && !error_resilient_mode`)
-            // is still not implemented — no stream in the current corpus
-            // exercises it (this stream's other resizeable-inter frames are
-            // all `!frame_size_override_flag`), so it silently falls through
-            // to the plain `frame_size()` path below. That's a separate,
-            // still-open gap; flagging it here rather than papering over it.
-            let (w, h, uw, rw, rh) = parse_frame_size(
-                &mut br,
-                seq,
-                frame_size_override_flag,
-                seq.frame_width(),
-                seq.frame_height(),
-                seq.enable_superres,
-            )?;
+            // The `frame_size_with_refs()` found-ref search loop itself is
+            // implemented below (was previously an open gap; see its comment).
+            // §5.9.8 `frame_size_with_refs()`: when the frame is BOTH
+            // override-signalled AND non-error-resilient, the encoder does
+            // NOT write explicit width/height fields at all — instead it
+            // writes up to `REFS_PER_FRAME` `found_ref` f(1) bits, and the
+            // first `found_ref==1` copies `UpscaledWidth`/`FrameHeight`
+            // (and render size) straight from that reference slot's stored
+            // dimensions. Only `superres_params()` + `compute_image_size()`
+            // are read after a hit; `frame_size()`'s own width/height read
+            // runs only when NO ref matched. Previously this call
+            // unconditionally treated `frame_size_override_flag` as "read
+            // explicit f(n) width/height", so this specific combination
+            // (every ordinary inter frame right after a `SWITCH_FRAME`
+            // resolution change can hit it) desynced onto the `found_ref`
+            // bits themselves, decoding garbage width/height (traced on
+            // `switch_frame.ivf` order_hint=31: came out `w=1011 h=489`
+            // instead of the true `426x240` inherited from order_hint=30 in
+            // ref slot `ref_frame_idx[0]`), which then corrupted tile-info's
+            // `MiCols`/`MiRows` and made tile-group parsing fail with "tile
+            // 0 data exceeds group payload" (a real tile-size-in-bytes
+            // computed from the wrong grid).
+            let use_ref_search = frame_size_override_flag && !error_resilient_mode;
+            let mut found_ref_dims: Option<(u32, u32, u32, u32)> = None;
+            if use_ref_search {
+                for &slot_idx in ref_frame_idx.iter() {
+                    let found_ref = read_flag(&mut br)?;
+                    if found_ref {
+                        let (ruw, rh) = ref_frame_dims_dpb[slot_idx as usize];
+                        found_ref_dims = Some((ruw, rh, ruw, rh));
+                        break;
+                    }
+                }
+            }
+            let (w, h, uw, rw, rh) = if let Some((fuw, fh, frw, frh)) = found_ref_dims {
+                let use_superres = seq.enable_superres && read_flag(&mut br)?;
+                let superres_denom = if use_superres {
+                    read_f8(&mut br, SUPERRES_DENOM_BITS)? as u32 + SUPERRES_DENOM_MIN
+                } else {
+                    SUPERRES_NUM
+                };
+                let w = (fuw * SUPERRES_NUM + (superres_denom / 2)) / superres_denom;
+                (w, fh, fuw, frw, frh)
+            } else {
+                parse_frame_size(
+                    &mut br,
+                    seq,
+                    frame_size_override_flag,
+                    seq.frame_width(),
+                    seq.frame_height(),
+                    seq.enable_superres,
+                )?
+            };
             width = w;
             height = h;
             upscaled_width = uw;
             render_width = rw;
             render_height = rh;
+            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+                eprintln!(
+                    "DBG frame_size_with_refs oh={order_hint} use_ref_search={use_ref_search} \
+                     found={found_ref_dims:?} w={width} h={height} uw={upscaled_width}"
+                );
+            }
             if force_integer_mv {
                 allow_high_precision_mv = false;
             } else {

@@ -207,6 +207,14 @@ pub struct Av1Decoder {
     /// `RefOrderHint[0..8]` — the `order_hint` of the frame stored in each DPB
     /// slot, updated by `refresh_frame_flags`. Needed by `skip_mode_params()`.
     ref_order_hints: [u8; 8],
+    /// Per-slot `(UpscaledWidth, FrameHeight)` of the frame stored in each DPB
+    /// slot, updated alongside `ref_order_hints` whenever `refresh_frame_flags`
+    /// refreshes a slot. Needed by `frame_size_with_refs()` (§5.9.8), which
+    /// resolves `frame_size_override_flag` + `found_ref` to the referenced
+    /// slot's stored dimensions instead of reading explicit f(n) width/height.
+    /// Without the real stored dims a post-`SWITCH_FRAME` inter frame decodes
+    /// garbage geometry and its tile-group parse then fails.
+    ref_frame_dims: [(u32, u32); 8],
     /// Per-slot saved CDF contexts (§6.8.2 context update): a frame with
     /// `primary_ref_frame != PRIMARY_REF_NONE` starts from the named slot's
     /// adapted CDFs; a `refresh_context` frame saves its adapted CDFs into the
@@ -224,6 +232,7 @@ impl Av1Decoder {
             tile_data: Vec::new(),
             ref_frames: RefFrameStore::new(),
             ref_order_hints: [0u8; 8],
+            ref_frame_dims: [(0u32, 0u32); 8],
             ref_cdf_contexts: [None, None, None, None, None, None, None, None],
         }
     }
@@ -331,8 +340,12 @@ impl Av1Decoder {
                         continue;
                     };
                     produced_any = true;
-                    let parsed =
-                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints);
+                    let parsed = FrameHeader::parse_with_dpb(
+                        &obu.payload,
+                        &seq,
+                        &self.ref_order_hints,
+                        &self.ref_frame_dims,
+                    );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!(
                             "KIN ObuType::Frame parse_with_dpb ok={}",
@@ -354,8 +367,12 @@ impl Av1Decoder {
                         continue;
                     };
                     produced_any = true;
-                    let parsed =
-                        FrameHeader::parse_with_dpb(&obu.payload, &seq, &self.ref_order_hints);
+                    let parsed = FrameHeader::parse_with_dpb(
+                        &obu.payload,
+                        &seq,
+                        &self.ref_order_hints,
+                        &self.ref_frame_dims,
+                    );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!(
                             "KIN ObuType::FrameHeader parse_with_dpb ok={}",
@@ -597,6 +614,11 @@ impl Av1Decoder {
             }
         }
         let order_hint = fh.order_hint as u8;
+        // The geometry stored for a slot is the frame's own upscaled width and
+        // height (not the post-superres render width) — exactly what
+        // `frame_size_with_refs()`'s `RefUpscaledWidth`/`RefFrameHeight` (§5.9.8)
+        // denote. Recorded in the same pass that refreshes `ref_order_hints`.
+        let stored_dims = (fh.upscaled_width, fh.height);
         if let Some(planes) = &padded {
             self.ref_frames
                 .refresh(refresh, planes, motion_field.as_ref());
@@ -609,6 +631,7 @@ impl Av1Decoder {
         for i in 0..8 {
             if refresh & (1u8 << i) != 0 {
                 self.ref_order_hints[i] = order_hint;
+                self.ref_frame_dims[i] = stored_dims;
             }
         }
         if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {

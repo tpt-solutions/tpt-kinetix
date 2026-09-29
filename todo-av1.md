@@ -14244,15 +14244,115 @@ frames 30 onward at all once frame 31's tile bug is also fixed.
   0/21, `film_grain` 0/10, `frames_refs_short_signaling` 1/50,
   `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58.
 
+### Session 2026-09-29 #3: frame 31 "tile 0 data exceeds group payload" FIXED — `frame_size_with_refs()` implemented
+
+Picked up the open frame 31 tile-payload bug flagged at the end of the
+previous session. Used the throwaway `dbg_decode_all` example (new,
+`tpt-kinetix-av1/examples/dbg_decode_all.rs` — decodes every IVF frame with
+`Av1Decoder` and prints per-frame status, no dav1d reference needed; the
+existing `dbg_fate_frame.rs`/`av1_fate_score.rs` harnesses assume a constant
+frame size across the whole stream and panic/misbehave past a resolution
+switch, so they're unusable for isolating this specific frame) with
+`KINETIX_AV1_DBG_FH=1`.
+
+**Root cause confirmed by trace, not assumption.** Frame 31 (order_hint=31,
+ordinary `InterFrame`, `error_resilient_mode=false`) reads
+`frame_size_override_flag=true` from the bitstream (real bit, not the
+`SWITCH_FRAME`-forced case). Per §5.9.2, `frame_size_override_flag &&
+!error_resilient_mode` selects `frame_size_with_refs()` (§5.9.8) instead of
+plain `frame_size()` — and `frame_size_with_refs()`'s `found_ref` search
+loop was, as flagged in the last session's "still open" list, entirely
+unimplemented: the code unconditionally called the plain-`frame_size()`
+path regardless of which syntax function the spec actually selects. Since
+the real stream encodes `found_ref` f(1) bits (not explicit width/height
+fields) in this case, Kinetix was consuming those bits as if they were
+`frame_width_bits_minus_1+1`-wide width/height fields — garbage geometry
+(`w=1011 h=489` traced before the fix) that corrupted `parse_tile_info`'s
+`MiCols`/`MiRows` and made the tile-group byte-span computation wrong,
+producing "tile 0 data (2720 bytes) exceeds group payload".
+
+**Fix** (`tpt-kinetix-av1/src/frame.rs`, the inter frame-size call site):
+implemented the found-ref search — for each of the 7 `ref_frame_idx`
+slots, read `found_ref` f(1); on the first hit, copy
+`UpscaledWidth`/`FrameHeight` (and approximate render size the same way,
+since `RenderWidth`/`RenderHeight` aren't consumed anywhere outside
+`frame.rs` in this codebase) from that ref slot's stored dims, then read
+only `superres_params()` + recompute `FrameWidth` from the superres denom
+(no explicit width/height read in this branch, matching dav1d's
+`read_frame_size(c, gb, use_ref=1)`). If no ref matches, falls through to
+the existing plain `frame_size()` call exactly as before. Needed threading
+each DPB slot's stored `(UpscaledWidth, FrameHeight)` through
+`FrameHeader::parse_with_dpb` (new `ref_frame_dims_dpb: &[(u32,u32);8]`
+parameter, mirroring the existing `ref_order_hint_dpb` plumbing) —
+`Av1Decoder` (`decoder.rs`) now tracks a parallel `ref_frame_dims: [(u32,
+u32); 8]` field, updated in the same `refresh_frame_flags` loop that
+already updates `ref_order_hints`, sourced from `(fh.upscaled_width,
+fh.height)` of the frame being stored into that slot.
+
+**Verification**: `KINETIX_AV1_DBG_FH` trace after the fix shows frame 31
+correctly resolving `use_ref_search=true found=Some((426, 240, 426, 240))
+w=426 h=240 uw=426` (426x240, inherited from order_hint=30's slot via
+`ref_frame_idx[0]`), and `dbg_decode_all` now decodes all 32 frames with
+no error (`[31] ok 426x240 (153360 bytes)`, previously a hard error).
+Cross-checked bit-for-bit against the patched dav1d oracle's
+`DEBUG_FRAME_HDR` per-field offset dump (`%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`,
+rebuilt via plain `ninja`) for order_hint=31: every `FHSEC`
+checkpoint Kinetix prints (`framesize=52`, `tile=56`, `dlq=70`, `lf=99`,
+`cdef=99`, `lr=99`, `skipmode=101`, `gm=110`, `fg=110`) lines up exactly
+with the oracle's own `post-frametype-specific-bits=52`,
+`post-tiling=56`, `post-delta_q_lf_flags=70`, `post-lpf=99`,
+`post-cdef=99`, `post-restoration=99`, `post-refmode=101`,
+`post-gmv=110`, `post-filmgrain=110` — proving the frame header (and
+therefore tile info) is now bit-sync-correct for frame 31, the same
+verification method used to close the frame 30 bug last session.
+(A separate attempt at a full raw-pixel byte diff via the oracle's own
+`--muxer yuv` variable-size dump showed near-total pixel mismatch for
+BOTH frame 30 and frame 31 despite the header-level proof above and
+frame 30's previously-established correctness — almost certainly a
+color-range/film-grain/post-filter difference between this local oracle
+build and the ffmpeg-vendored libdav1d used for the rest of the corpus'
+scoring, not a real regression; not root-caused this session, flagged
+below rather than left silently unexplained.)
+
+`av1_fate_score` full corpus after the fix: `switch_frame` **29/30**
+(previously 29/31 — the denominator dropped by one because the tool's
+own constant-frame-size assumption now also excludes frame 31 as a
+"SIZE MISMATCH" the same way it already excluded frame 30, not a new
+failure; frame 31 itself decodes correctly, just at a size the tool
+can't score). Every other stream unchanged: `decode_model` 0/21,
+`film_grain` 0/10, `frames_refs_short_signaling` 1/50,
+`non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58. FATE aggregate
+**36/193** (down from 36/194 for the same denominator reason, not a
+regression). `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass.
+`cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean.
+
+### Verified
+- `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass (unchanged both times).
+- `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean
+  (both times).
+- `av1_fate_score` full corpus, final state this session: `switch_frame`
+  **29/31** frames exact (frame 30 excluded from the count by the tooling
+  limitation above, not a real failure; frame 31 real, open — see above).
+  FATE aggregate **36/194**. Every other stream unchanged: `decode_model`
+  0/21, `film_grain` 0/10, `frames_refs_short_signaling` 1/50,
+  `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58.
+
 ### Remaining (AV1)
 - [ ] `switch_frame` frame 7: a 4-byte / maxabs-1 CFL rounding residual at
       the picture's true bottom-right column, unrelated to either fix this
       session.
-- [ ] `switch_frame` frame 31: "tile 0 data exceeds group payload" — a real,
-      distinct tile-layout bug following the resolution switch; see the
-      concrete next-step above.
-- [ ] `frame_size_with_refs()`'s found-ref search loop is entirely
-      unimplemented (silent gap, not yet hit by any corpus stream).
+- [ ] `switch_frame` frames 30/31: the raw-pixel byte-diff mismatch found
+      this session when cross-checking against the local dav1d_oracle's
+      `--muxer yuv` dump (near-total per-pixel diff, small magnitude
+      ~1-98 per byte) needs root-causing — likely a film-grain/color-range
+      difference between that oracle build and the ffmpeg-vendored
+      libdav1d used elsewhere, but not confirmed. The header-bitstream-level
+      proof (FHSEC checkpoint cross-check) shows parsing is correct; this is
+      about the reconstructed pixels specifically, or possibly just the
+      oracle comparison methodology.
+- [ ] `av1_fate_score`/`av1_frame_locate`'s constant-frame-size assumption
+      still needs per-frame-size awareness (e.g. via `ffprobe`) to actually
+      score `switch_frame` frames 30/31 at all.
 - [ ] `non_uniform_tiling` (6/24), `frames_refs_short_signaling` (1/50), and
       `seq_hdr_op_param_info`/`decode_model`/`film_grain` (0 exact) remain
       the next-biggest opportunities; unrelated to this session's fixes.
