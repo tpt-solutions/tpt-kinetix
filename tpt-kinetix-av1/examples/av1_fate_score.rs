@@ -45,7 +45,12 @@ fn split_ivf_frames(ivf: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Decode with ffmpeg's vendored libdav1d, returning whole frames of YUV420p.
-fn reference_frames(ivf: &[u8], width: usize, height: usize) -> Option<Vec<Vec<u8>>> {
+///
+/// `-noautoscale` keeps every frame at its native size (streams such as
+/// `switch_frame` change resolution mid-stream), so the result is one raw
+/// buffer that the caller slices frame by frame using each decoded frame's
+/// own dimensions.
+fn reference_frames(ivf: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
     let mut child = Command::new("ffmpeg")
         .args([
@@ -55,6 +60,7 @@ fn reference_frames(ivf: &[u8], width: usize, height: usize) -> Option<Vec<Vec<u
             "pipe:0",
             "-pix_fmt",
             "yuv420p",
+            "-noautoscale",
             "-f",
             "rawvideo",
             "pipe:1",
@@ -76,8 +82,7 @@ fn reference_frames(ivf: &[u8], width: usize, height: usize) -> Option<Vec<Vec<u
     let mut raw = Vec::new();
     child.stdout.take()?.read_to_end(&mut raw).ok()?;
     child.wait().ok()?;
-    let frame_size = width * height + 2 * (width.div_ceil(2) * height.div_ceil(2));
-    Some(raw.chunks_exact(frame_size).map(|f| f.to_vec()).collect())
+    Some(raw)
 }
 
 /// Count differing bytes between two equally-sized frames.
@@ -143,7 +148,7 @@ fn main() {
             continue;
         };
         let ivf = std::fs::read(path).expect("read ivf");
-        let Some(refs) = reference_frames(&ivf, w, h) else {
+        let Some(refs) = reference_frames(&ivf) else {
             eprintln!("{}: SKIP (libdav1d failed)", path.display());
             continue;
         };
@@ -160,9 +165,9 @@ fn main() {
         let mut dec = Av1Decoder::new();
         let mut exact = 0usize;
         let mut counted = 0usize;
+        let mut ref_off = 0usize;
         let mut rows = String::new();
         for (i, payload) in payloads.iter().enumerate() {
-            let Some(ref_frame) = refs.get(i) else { break };
             let packet = Packet {
                 pts: Timestamp::NONE,
                 dts: Timestamp::NONE,
@@ -182,14 +187,13 @@ fn main() {
                     break;
                 }
             };
-            if frame.data.len() != ref_frame.len() {
-                rows.push_str(&format!(
-                    "  frame {i:>3}: SIZE MISMATCH {} vs {}\n",
-                    frame.data.len(),
-                    ref_frame.len()
-                ));
-                continue;
+            let n = frame.data.len();
+            if ref_off + n > refs.len() {
+                rows.push_str(&format!("  frame {i:>3}: NO REFERENCE FRAME\n"));
+                break;
             }
+            let ref_frame = &refs[ref_off..ref_off + n];
+            ref_off += n;
             let (diff, max) = diff_bytes(&frame.data, ref_frame);
             counted += 1;
             if diff == 0 {
