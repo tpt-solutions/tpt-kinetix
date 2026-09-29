@@ -17,6 +17,7 @@ use super::*;
 /// averaged its real above row together with `w` synthesized samples. For a
 /// 32×32 block that pulls the DC halfway toward the substitute value, which
 /// then propagates into every block predicted from it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn predict_dc(
     top: &[i32],
     left: &[i32],
@@ -830,6 +831,7 @@ const INTRA_FILTER_TAPS: [[[i32; 7]; 8]; 5] = [
 /// `h2 = h >> 1`, so it generalizes to any rectangular `w`/`h` (every AV1
 /// transform width/height is a multiple of 4, so both shifts stay exact).
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn predict_filter_intra(
     filter_intra_mode: usize,
     top: &[i32],

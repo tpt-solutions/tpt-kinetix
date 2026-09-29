@@ -296,6 +296,7 @@ fn round2(x: i32, n: u32) -> i32 {
 /// Mask blend (§7.11.3.14) of two intermediate-domain "prep" predictions
 /// `p0`/`p1` (each `w * h`) through `mask` (luma-domain `(weights, mw, mh)`).
 /// `subx`/`suby` select the plane sub-sampling for the mask fetch.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn mask_blend(
     mask: Option<&(Vec<u8>, usize, usize)>,
     subx: usize,
@@ -339,10 +340,7 @@ pub(super) fn mask_blend(
                     2,
                 )
             };
-            let v = round2(
-                m * p0[y * w + x] + (64 - m) * p1[y * w + x],
-                6 + post_round,
-            );
+            let v = round2(m * p0[y * w + x] + (64 - m) * p1[y * w + x], 6 + post_round);
             out[y * w + x] = v.clamp(0, pix_max) as Px;
         }
     }

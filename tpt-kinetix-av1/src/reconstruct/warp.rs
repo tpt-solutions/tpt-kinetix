@@ -18,6 +18,8 @@
 //! decision) since it needs `TileDecodeState`'s ref-mv grid; this module is
 //! the pure math that consumes the resulting sample list.
 
+use crate::Px;
+
 /// One `find_warp_samples` candidate (§7.10.4 `add_sample`, dav1d
 /// `derive_warpmv`'s `pts[i]`): `src`/`dst` are `[x, y]` in 1/8-luma-pel
 /// units, relative to the current block's top-left corner. `dst - src` is
@@ -671,7 +673,10 @@ fn warp_affine_8x8_prep(
     bit_depth: u32,
 ) {
     let ib = crate::inter::intermediate_bits(bit_depth);
-    let pix_max = (1i32 << bit_depth) - 1;
+    // No `pix_max` clamp here: this is the *prep* (compound intermediate)
+    // domain, whose values are `pixel << 4` and legitimately exceed the
+    // stream's max sample. The final round + clamp to `Px` happens in the
+    // compound blend.
     let sample = |ix: i32, iy: i32| -> i32 {
         let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
         let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
@@ -707,6 +712,10 @@ fn warp_affine_8x8_prep(
             for (k, &c) in filter.iter().enumerate() {
                 s += c as i32 * mid[yy + k][xx];
             }
+            // NOTE: this is the *prep* (compound intermediate) domain — the
+            // result is `pixel << 4` and is deliberately NOT clamped to
+            // `pix_max`; the final rounding to `Px` happens in the compound
+            // blend, which applies the clamp.
             dest[(dest_y + yy) * dest_stride + (dest_x + xx)] = (s + 64) >> 7;
             tmy += gamma;
         }
@@ -749,8 +758,23 @@ pub(super) fn block_warp_prep(
             let dy = ((mvy >> 16) as i32) - 4;
             let my = (((mvy as i32) & 0xffff) - model.gamma * 4 - model.delta * 4) & !0x3f;
             warp_affine_8x8_prep(
-                &mut dest, bw_px, x as usize, y as usize, refp, ref_stride, ref_w, ref_h, dx, dy,
-                model.alpha, model.beta, model.gamma, model.delta, mx, my, bit_depth,
+                &mut dest,
+                bw_px,
+                x as usize,
+                y as usize,
+                refp,
+                ref_stride,
+                ref_w,
+                ref_h,
+                dx,
+                dy,
+                model.alpha,
+                model.beta,
+                model.gamma,
+                model.delta,
+                mx,
+                my,
+                bit_depth,
             );
             x += 8;
         }

@@ -46,10 +46,10 @@ fn directional_prediction_filter_type_changes_sub_pel_output() {
     let mut a = vec![0i32; size * size];
     let mut b = vec![0i32; size * size];
     predict_intra_block(
-        D67_PRED, &borders, size, size, &mut a, true, 0, 0, size, size,
+        D67_PRED, &borders, size, size, &mut a, true, 0, 0, size, size, 8,
     );
     predict_intra_block(
-        D67_PRED, &borders, size, size, &mut b, true, 1, 0, size, size,
+        D67_PRED, &borders, size, size, &mut b, true, 1, 0, size, size, 8,
     );
     assert_ne!(
         a, b,
@@ -64,14 +64,14 @@ fn ramp(len: usize, mul: usize, add: usize) -> Vec<u8> {
     (0..len).map(|i| ((i * mul + add) & 0xFF) as u8).collect()
 }
 
-type DecodeResult = Result<(Vec<u8>, Vec<u8>, Vec<u8>), KinetixError>;
+type DecodeResult = Result<(Vec<Px>, Vec<Px>, Vec<Px>), KinetixError>;
 
 fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult {
     let uv_w = width / 2;
     let uv_h = height / 2;
-    let mut y = vec![128u8; width * height];
-    let mut u = vec![128u8; uv_w * uv_h];
-    let mut v = vec![128u8; uv_w * uv_h];
+    let mut y = vec![128u16; width * height];
+    let mut u = vec![128u16; uv_w * uv_h];
+    let mut v = vec![128u16; uv_w * uv_h];
     let mut meta = FrameMeta::new(width, height);
     decode_tile_group(
         data,
@@ -175,7 +175,9 @@ fn directional_prediction_covers_all_modes_without_panicking() {
                 have_above: true,
                 have_left: true,
             };
-            predict_intra_block(mode, &borders, size, size, &mut out, true, 0, 0, size, size);
+            predict_intra_block(
+                mode, &borders, size, size, &mut out, true, 0, 0, size, size, 8,
+            );
             assert!(
                 out.iter().all(|&v| (0..=255).contains(&v)),
                 "mode {mode} size {size} produced an out-of-range sample"
@@ -232,6 +234,7 @@ fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
         0,
         size,
         size,
+        8,
     );
     let mut pred_unfiltered = vec![0i32; size * size];
     predict_intra_block(
@@ -245,6 +248,7 @@ fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
         0,
         size,
         size,
+        8,
     );
     assert_eq!(
         pred_filtered, pred_unfiltered,
@@ -314,7 +318,7 @@ fn cfl_prediction_matches_hand_computed_values_no_subsampling() {
     //  90 100 110 120
     // 130 140 150 160
     // sum = 1360, L-sum = 10880, lumaAvg = (10880 + 8) >> 4 = 680.
-    let luma: Vec<u8> = vec![
+    let luma: Vec<Px> = vec![
         10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
     ];
     let cfl = CflParams {
@@ -330,7 +334,7 @@ fn cfl_prediction_matches_hand_computed_values_no_subsampling() {
         alpha: 4,
     };
     let mut pred = vec![50i32; 16];
-    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl, 8);
     // pixel=10 (top-left): L=80, diff=4*(80-680)=-2400, scaled=-((2400+32)>>6)=-38.
     assert_eq!(pred[0], 50 - 38);
     // pixel=60 (row1,col1): L=480, diff=4*(480-680)=-800, scaled=-((800+32)>>6)=-13.
@@ -343,7 +347,7 @@ fn cfl_prediction_matches_hand_computed_values_no_subsampling() {
 fn cfl_prediction_is_a_no_op_on_flat_luma() {
     // A constant luma plane has L[i][j] == lumaAvg everywhere, so the CFL
     // adjustment must be exactly zero regardless of alpha.
-    let luma = vec![77u8; 64];
+    let luma = vec![77u16; 64];
     let cfl = CflParams {
         luma: &luma,
         luma_stride: 8,
@@ -357,7 +361,7 @@ fn cfl_prediction_is_a_no_op_on_flat_luma() {
         alpha: -7,
     };
     let mut pred = vec![42i32; 16];
-    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl, 8);
     assert!(pred.iter().all(|&v| v == 42), "got {pred:?}");
 }
 
@@ -366,9 +370,9 @@ fn cfl_prediction_reads_luma_samples_past_the_plane_edge_from_the_overhang() {
     // A 4x4 luma block whose bottom two rows lie past the plane (plane is
     // 4 wide, 2 tall): rows 2 and 3 come from the overhang list, not from a
     // replicate of row 1. Flat 100 in-plane rows, 200 in the overhang rows.
-    let luma: Vec<u8> = vec![100u8; 8];
-    let overhang: Vec<(usize, usize, u8)> = (2..4)
-        .flat_map(|y| (0..4).map(move |x| (x, y, 200u8)))
+    let luma: Vec<Px> = vec![100u16; 8];
+    let overhang: Vec<(usize, usize, Px)> = (2..4)
+        .flat_map(|y| (0..4).map(move |x| (x, y, 200u16)))
         .collect();
     let cfl = CflParams {
         luma: &luma,
@@ -383,7 +387,7 @@ fn cfl_prediction_reads_luma_samples_past_the_plane_edge_from_the_overhang() {
         alpha: 64,
     };
     let mut pred = vec![50i32; 16];
-    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl, 8);
     // L rows: 800 (top two rows), 1600 (bottom two); avg 1200; alpha 64 gives
     // scaled = diff, so top rows drop by 400 (clipped to 0) and bottom rise.
     assert_eq!(pred[0], 0);
@@ -437,14 +441,14 @@ fn lossless_blocks_select_the_walsh_hadamard_transform() {
     let mut coeffs = vec![0i32; 16];
     coeffs[0] = 64;
     let mut wht = vec![0i32; 16];
-    inverse_transform(&coeffs, av1::DCT_DCT, TX_4X4, true, &mut wht);
+    inverse_transform(&coeffs, av1::DCT_DCT, TX_4X4, true, 8, &mut wht);
     let mut dct = vec![0i32; 16];
-    inverse_transform(&coeffs, av1::DCT_DCT, TX_4X4, false, &mut dct);
+    inverse_transform(&coeffs, av1::DCT_DCT, TX_4X4, false, 8, &mut dct);
     assert_ne!(wht, dct, "the WHT must not be aliased onto the DCT");
 
     // `lossless` takes priority over whatever `TxType` `coeffs()` reported.
     let mut wht_via_idtx = vec![0i32; 16];
-    inverse_transform(&coeffs, av1::IDTX, TX_4X4, true, &mut wht_via_idtx);
+    inverse_transform(&coeffs, av1::IDTX, TX_4X4, true, 8, &mut wht_via_idtx);
     assert_eq!(wht, wht_via_idtx);
 }
 
@@ -492,7 +496,7 @@ fn dc_only_inverse_dct_4x4_matches_hand_computed_value() {
     let mut dequant = vec![0i32; 16];
     dequant[0] = 4096;
     let mut residual = vec![0i32; 16];
-    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual);
+    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, 8, &mut residual);
     assert_eq!(residual, vec![128; 16]);
 }
 
@@ -557,7 +561,7 @@ fn dc_only_inverse_dct_is_flat_at_every_square_size() {
         let mut dequant = vec![0i32; n * n];
         dequant[0] = -1000;
         let mut residual = vec![0i32; n * n];
-        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, &mut residual);
+        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, 8, &mut residual);
         let first = residual[0];
         assert!(
             residual.iter().all(|&v| v == first),
@@ -609,9 +613,9 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
     // AV1 spec §8.3.2: ctx = left*2 + above, each gated on the neighbour
     // existing (AvailU/AvailL) and only set when the neighbour's mi
     // width/height log2 is strictly smaller than the current node's.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let mut state = TileDecodeState::new(
         &[0u8; 8],
@@ -701,9 +705,9 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
     // the 2026-08-24 fix: `dequantize_coeffs` previously always used the
     // plain frame `qindex` for every plane's DC term, silently ignoring
     // these (parsed but unused) frame-header fields.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let state = TileDecodeState::new(
         &[0u8; 8],
@@ -800,9 +804,9 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
 /// 8x8-frame placeholder.
 #[allow(clippy::too_many_arguments)]
 fn make_cdef_delta_state<'a>(
-    y: &'a mut [u8],
-    u: &'a mut [u8],
-    v: &'a mut [u8],
+    y: &'a mut [Px],
+    u: &'a mut [Px],
+    v: &'a mut [Px],
     meta: &'a mut FrameMeta,
     qindex: u8,
     cdef_delta: CdefDeltaParams,
@@ -890,9 +894,9 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
     // rather than predict absolute values, feed the SAME bytes to the Y and U
     // paths and assert the only difference is the +1 luma bias on the delta.
     let data = [0x40u8, 0b0000_0001, 0b0000_0000];
-    let mut yb = vec![0u8; 64];
-    let mut ub = vec![0u8; 16];
-    let mut vb = vec![0u8; 16];
+    let mut yb = vec![0u16; 64];
+    let mut ub = vec![0u16; 16];
+    let mut vb = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
 
     let mut state = TileDecodeState::new(
@@ -1045,9 +1049,9 @@ fn read_cdef_marks_the_64x64_slot_set_even_at_cdef_bits_zero_and_reads_only_once
     // exercises — but the spec still requires the `cdef_idx[r][c]` slot to
     // be marked "signalled" so a second block in the same 64x64 unit of the
     // same superblock does not read (or derive) a value again.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let mut state = make_cdef_delta_state(
         &mut y,
@@ -1079,9 +1083,9 @@ fn read_cdef_marks_the_64x64_slot_set_even_at_cdef_bits_zero_and_reads_only_once
 fn read_cdef_is_a_true_noop_when_any_gate_condition_holds() {
     // §5.11.56: `skip || CodedLossless || !enable_cdef || allow_intrabc`
     // all return immediately without touching `cdef_idx` or the bitstream.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     // enable_cdef = false.
     let mut state = make_cdef_delta_state(
@@ -1111,9 +1115,9 @@ fn read_delta_qindex_is_a_true_noop_when_delta_q_not_present() {
     // delta_q_present`), so a stream with `delta_q_present == false` never
     // reads a delta_q_abs symbol at all — confirmed here by checking the
     // bitstream position is untouched.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let mut state = make_cdef_delta_state(
         &mut y,
@@ -1135,9 +1139,9 @@ fn read_delta_qindex_is_a_true_noop_when_delta_q_not_present() {
 fn read_delta_qindex_skips_at_superblock_size_when_skip_is_set() {
     // §5.11.19: `if ( MiSize == sbSize && skip ) return` fires before the
     // `ReadDeltas` check, even when `delta_q_present` is on.
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let mut state = make_cdef_delta_state(
         &mut y,
@@ -1161,9 +1165,9 @@ fn read_delta_qindex_skips_at_superblock_size_when_skip_is_set() {
 
 #[test]
 fn read_delta_lf_is_a_true_noop_when_delta_lf_not_present() {
-    let mut y = vec![0u8; 64];
-    let mut u = vec![0u8; 16];
-    let mut v = vec![0u8; 16];
+    let mut y = vec![0u16; 64];
+    let mut u = vec![0u16; 16];
+    let mut v = vec![0u16; 16];
     let mut meta = FrameMeta::new(2, 2);
     let mut state = make_cdef_delta_state(
         &mut y,
@@ -1189,9 +1193,9 @@ fn read_delta_lf_is_a_true_noop_when_delta_lf_not_present() {
 fn decode_superblock_resets_read_deltas_from_delta_q_present_and_clears_cdef() {
     // `decode_superblock` mirrors `decode_tile()`'s per-superblock prelude:
     // `ReadDeltas = delta_q_present`, `clear_cdef(r, c)`.
-    let mut y = vec![128u8; 64 * 64];
-    let mut u = vec![128u8; 32 * 32];
-    let mut v = vec![128u8; 32 * 32];
+    let mut y = vec![128u16; 64 * 64];
+    let mut u = vec![128u16; 32 * 32];
+    let mut v = vec![128u16; 32 * 32];
     let mut meta = FrameMeta::new(64, 64);
     let mut state = make_cdef_delta_state(
         &mut y,
@@ -1278,9 +1282,9 @@ fn read_tx_size_never_panics_and_stays_in_range() {
     // via the `saturating_sub` — a regression guard for the rewrite from
     // the old per-depth-loop model to the single-ternary-symbol model.
     let data = vec![0xA5u8; 32];
-    let mut y = vec![0u8; 64 * 64];
-    let mut u = vec![0u8; 32 * 32];
-    let mut v = vec![0u8; 32 * 32];
+    let mut y = vec![0u16; 64 * 64];
+    let mut u = vec![0u16; 32 * 32];
+    let mut v = vec![0u16; 32 * 32];
     let mut meta = FrameMeta::new(64, 64);
     let mut state = TileDecodeState::new(
         &data,
@@ -1384,9 +1388,9 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
             for &skip in &[true, false] {
                 for &qindex in &[0u8, 128] {
                     let data = vec![0xA5u8; 64];
-                    let mut y = vec![0u8; 64 * 64];
-                    let mut u = vec![0u8; 32 * 32];
-                    let mut v = vec![0u8; 32 * 32];
+                    let mut y = vec![0u16; 64 * 64];
+                    let mut u = vec![0u16; 32 * 32];
+                    let mut v = vec![0u16; 32 * 32];
                     let mut meta = FrameMeta::new(64, 64);
                     let mut state = TileDecodeState::new(
                         &data,
@@ -1513,9 +1517,9 @@ fn var_tx_context_is_independent_of_the_intra_tx_context() {
     // through the other, and `read_block_tx_size_ibc` writes the var-tx array
     // at per-transform-block granularity rather than one block-wide value.
     let data = vec![0xA5u8; 64];
-    let mut y = vec![0u8; 64 * 64];
-    let mut u = vec![0u8; 32 * 32];
-    let mut v = vec![0u8; 32 * 32];
+    let mut y = vec![0u16; 64 * 64];
+    let mut u = vec![0u16; 32 * 32];
+    let mut v = vec![0u16; 32 * 32];
     let mut meta = FrameMeta::new(64, 64);
     let mut state = TileDecodeState::new(
         &data,
@@ -1769,7 +1773,7 @@ fn inverse_transform_dc_only_is_flat_at_rectangular_sizes() {
         let mut dequant = vec![0i32; adj_w * adj_h];
         dequant[0] = -1000;
         let mut residual = vec![0i32; w * h];
-        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, &mut residual);
+        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, 8, &mut residual);
         assert_eq!(residual.len(), w * h);
         let first = residual[0];
         assert!(
@@ -1812,7 +1816,7 @@ fn predict_dc_matches_spec_combined_average_for_rectangular_block() {
     let top = vec![100i32; 8];
     let left = vec![50i32; 4];
     let mut out = vec![0i32; 8 * 4];
-    predict_dc(&top, &left, 8, 4, true, true, &mut out);
+    predict_dc(&top, &left, 8, 4, true, true, 8, &mut out);
     assert!(out.iter().all(|&v| v == 83), "got {out:?}");
 }
 
@@ -1829,24 +1833,24 @@ fn predict_dc_asymmetric_cases_average_only_the_available_side() {
     // haveLeft = 1, haveAbove = 0:
     //   leftAvg = Clip1((172 + (4 >> 1)) >> log2(4)) = (172 + 2) >> 2 = 43.
     let mut out = vec![0i32; 8 * 4];
-    predict_dc(&top, &left, 8, 4, false, true, &mut out);
+    predict_dc(&top, &left, 8, 4, false, true, 8, &mut out);
     assert!(out.iter().all(|&v| v == 43), "left-only: got {out:?}");
 
     // haveLeft = 0, haveAbove = 1:
     //   aboveAvg = Clip1((828 + (8 >> 1)) >> log2(8)) = (828 + 4) >> 3 = 104.
     let mut out = vec![0i32; 8 * 4];
-    predict_dc(&top, &left, 8, 4, true, false, &mut out);
+    predict_dc(&top, &left, 8, 4, true, false, 8, &mut out);
     assert!(out.iter().all(|&v| v == 104), "above-only: got {out:?}");
 
     // Neither: 1 << (BitDepth - 1).
     let mut out = vec![0i32; 8 * 4];
-    predict_dc(&top, &left, 8, 4, false, false, &mut out);
+    predict_dc(&top, &left, 8, 4, false, false, 8, &mut out);
     assert!(out.iter().all(|&v| v == 128), "neither: got {out:?}");
 
     // Sanity: the both-available branch is a genuinely different value,
     // so the assertions above cannot pass by accident.
     let mut both = vec![0i32; 8 * 4];
-    predict_dc(&top, &left, 8, 4, true, true, &mut both);
+    predict_dc(&top, &left, 8, 4, true, true, 8, &mut both);
     assert_eq!(both[0], (828 + 172 + 6) / 12);
     assert!(both[0] != 43 && both[0] != 104 && both[0] != 128);
 }
@@ -1857,13 +1861,13 @@ fn predict_dc_left_only_rounds_like_round2_not_truncation() {
     // truncating `sum / h` would give 10 here instead of 11.
     let left = vec![10i32, 11, 11, 11]; // sum 43; (43 + 2) >> 2 = 11
     let mut out = vec![0i32; 4 * 4];
-    predict_dc(&[], &left, 4, 4, false, true, &mut out);
+    predict_dc(&[], &left, 4, 4, false, true, 8, &mut out);
     assert!(out.iter().all(|&v| v == 11), "got {out:?}");
 }
 
 /// One-plane fixture: a `w`×`h` ramp so every sample is distinguishable.
-fn borders_fixture(w: usize, h: usize) -> Vec<u8> {
-    (0..w * h).map(|i| (i % 251) as u8).collect()
+fn borders_fixture(w: usize, h: usize) -> Vec<Px> {
+    (0..w * h).map(|i| (i % 251) as Px).collect()
 }
 
 #[test]
@@ -1876,8 +1880,8 @@ fn block_borders_extends_left_col_into_real_below_left_samples_when_available() 
     let (w, h) = (16usize, 16usize);
     let plane = borders_fixture(w, h);
     // 4×4 tx block at (4, 4): left column is x=3, rows 4..; ext = 8.
-    let with_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, true);
-    let without_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false);
+    let with_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, true, 8);
+    let without_bl = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false, 8);
     // First `h` (4) entries identical (real left column of the block).
     assert_eq!(with_bl.left[..4], without_bl.left[..4]);
     // Beyond that: `with_bl` keeps reading down column 3 (rows 8..11);
@@ -1900,16 +1904,16 @@ fn block_borders_tracks_availability_from_tile_local_position() {
 
     // Tile-local origin: neither side available (spec §5.11.35's
     // `haveLeft = AvailL || x > 0` is false at x == 0 within a tile).
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false, 8);
     assert!(!b.have_above && !b.have_left);
     // Top row / left column both away from the tile edge: both available.
-    let b = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 4, 4, false, false, 8);
     assert!(b.have_above && b.have_left);
     // Left edge, second row: above only.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 4, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 4, false, false, 8);
     assert!(b.have_above && !b.have_left);
     // Top row, second column: left only.
-    let b = block_borders(&plane, w, w, h, 4, 4, 4, 0, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 4, 0, false, false, 8);
     assert!(!b.have_above && b.have_left);
 }
 
@@ -1922,14 +1926,14 @@ fn block_borders_substitute_values_match_spec_7_11_2_1() {
     // LeftCol = (1 << (BitDepth-1)) + 1 = 129, AboveRow[-1] = 128. The
     // ±1 asymmetry is normative (it keeps PAETH_PRED's ties
     // deterministic) — a single shared 128 fill is what this replaced.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 0, false, false, 8);
     assert_eq!(b.top, vec![127; 8]);
     assert_eq!(b.left, vec![129; 8]);
     assert_eq!(b.tl, 128);
 
     // Above unavailable, left available: AboveRow[i] = CurrFrame[y][x-1]
     // (replicated), AboveRow[-1] = the same sample.
-    let b = block_borders(&plane, w, w, h, 4, 4, 8, 0, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 8, 0, false, false, 8);
     let expected = i32::from(plane[7]); // (x-1, y) = (7, 0)
     assert_eq!(b.top, vec![expected; 8]);
     assert_eq!(b.tl, expected);
@@ -1943,7 +1947,7 @@ fn block_borders_substitute_values_match_spec_7_11_2_1() {
 
     // Left unavailable, above available: LeftCol[i] = CurrFrame[y-1][x]
     // (replicated), AboveRow[-1] = the same sample.
-    let b = block_borders(&plane, w, w, h, 4, 4, 0, 8, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 0, 8, false, false, 8);
     let expected = i32::from(plane[7 * w]); // (x, y-1) = (0, 7)
     assert_eq!(b.left, vec![expected; 8]);
     assert_eq!(b.tl, expected);
@@ -1955,7 +1959,7 @@ fn block_borders_substitute_values_match_spec_7_11_2_1() {
     );
 
     // Both available: the corner is the real diagonal neighbour.
-    let b = block_borders(&plane, w, w, h, 4, 4, 8, 8, false, false);
+    let b = block_borders(&plane, w, w, h, 4, 4, 8, 8, false, false, 8);
     assert_eq!(b.tl, i32::from(plane[7 * w + 7]));
 }
 
@@ -1970,7 +1974,7 @@ fn block_borders_replicate_the_last_sample_past_the_frame_edge() {
     let (w, h) = (12usize, 12usize);
     let plane = borders_fixture(w, h);
 
-    let b = block_borders(&plane, w, w, h, 8, 8, 8, 8, false, false);
+    let b = block_borders(&plane, w, w, h, 8, 8, 8, 8, false, false, 8);
     // Above row: x = 8..15 clamped to maxX = 11 -> samples 8,9,10,11 then
     // 11 repeated.
     let above_row = 7 * w;
@@ -2003,7 +2007,7 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8, 8);
     assert!(out.iter().all(|&v| v == 200), "got {out:?}");
 
     // And with neither side real, the mode dispatch must reach the
@@ -2017,7 +2021,7 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
         have_left: false,
     };
     let mut out = vec![0i32; 8 * 8];
-    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8);
+    predict_intra_block(DC_PRED, &borders, 8, 8, &mut out, true, 0, 0, 8, 8, 8);
     assert!(out.iter().all(|&v| v == 128), "got {out:?}");
 }
 
@@ -2033,7 +2037,7 @@ fn inverse_transform_2d_dct_round_trip_with_ac_coefficients() {
     dequant[4] = -100; // first AC (vertical frequency)
     dequant[5] = 50; // diagonal AC
     let mut residual = vec![0i32; 16];
-    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual);
+    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, 8, &mut residual);
     // Not flat: AC coefficients must produce spatial variation.
     let first = residual[0];
     assert!(
@@ -2047,7 +2051,7 @@ fn inverse_transform_2d_dct_round_trip_with_ac_coefficients() {
     );
     // Deterministic: same input → same output.
     let mut residual2 = vec![0i32; 16];
-    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, &mut residual2);
+    inverse_transform(&dequant, av1::DCT_DCT, TX_4X4, false, 8, &mut residual2);
     assert_eq!(residual, residual2);
 }
 
@@ -2062,7 +2066,7 @@ fn inverse_transform_adst_4x4_produces_spatial_output() {
         dequant[3] = 150;
         dequant[7] = -80;
         let mut residual = vec![0i32; 16];
-        inverse_transform(&dequant, tx_type, TX_4X4, false, &mut residual);
+        inverse_transform(&dequant, tx_type, TX_4X4, false, 8, &mut residual);
         assert!(
             residual.iter().any(|&v| v != residual[0]),
             "tx_type {tx_type}: ADST must produce spatial variation"
@@ -2096,7 +2100,7 @@ fn inverse_transform_rectangular_rescale_path() {
             dequant[adj_w] = -100;
         }
         let mut residual = vec![0i32; w * h];
-        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, &mut residual);
+        inverse_transform(&dequant, av1::DCT_DCT, tx_size, false, 8, &mut residual);
         assert_eq!(residual.len(), w * h);
         assert!(
             residual.iter().all(|&v| (-1024..=1024).contains(&v)),
@@ -2108,7 +2112,7 @@ fn inverse_transform_rectangular_rescale_path() {
         let mut dc_only = vec![0i32; adj_w * adj_h];
         dc_only[0] = 800;
         let mut dc_residual = vec![0i32; w * h];
-        inverse_transform(&dc_only, av1::DCT_DCT, tx_size, false, &mut dc_residual);
+        inverse_transform(&dc_only, av1::DCT_DCT, tx_size, false, 8, &mut dc_residual);
         let first = dc_residual[0];
         assert!(
             dc_residual.iter().all(|&v| v == first),
@@ -2128,7 +2132,7 @@ fn inverse_transform_tx8x8_with_ac_matches_expected_scale() {
     let mut dequant = vec![0i32; 64];
     dequant[0] = 8192;
     let mut residual = vec![0i32; 64];
-    inverse_transform(&dequant, av1::DCT_DCT, TX_8X8, false, &mut residual);
+    inverse_transform(&dequant, av1::DCT_DCT, TX_8X8, false, 8, &mut residual);
     assert!(
         residual.iter().all(|&v| v == residual[0]),
         "DC-only 8×8 must be flat, got {residual:?}"
@@ -2161,7 +2165,7 @@ fn filter_intra_prediction_matches_hand_computed_values() {
     let top = vec![100i32; 8];
     let left = vec![200i32; 8];
     let mut out = vec![0i32; 64];
-    predict_filter_intra(0, &top, &left, 128, 8, 8, &mut out);
+    predict_filter_intra(0, &top, &left, 128, 8, 8, 8, &mut out);
     // First sample of the first sub-block: i2=0, j4=0, i1=0, j1=0.
     assert_eq!(
         out[0], 165,
@@ -2187,7 +2191,7 @@ fn filter_intra_mode2_horizontal_matches_hand_computed() {
     let top = vec![100i32; 8];
     let left = vec![200i32; 8];
     let mut out = vec![0i32; 64];
-    predict_filter_intra(2, &top, &left, 128, 8, 8, &mut out);
+    predict_filter_intra(2, &top, &left, 128, 8, 8, 8, &mut out);
     assert_eq!(
         out[0], 186,
         "filter-intra H mode first sample, got {}",
@@ -2210,7 +2214,7 @@ fn inverse_transform_v_dct_8x8_only_col0_nonzero() {
     dequant[0] = 400; // DC
     dequant[8] = 200; // vertical-frequency coefficient (row 1, col 0)
     let mut residual = vec![0i32; 64];
-    inverse_transform(&dequant, av1::V_DCT, TX_8X8, false, &mut residual);
+    inverse_transform(&dequant, av1::V_DCT, TX_8X8, false, 8, &mut residual);
     // Column 0 must have variation (vertical frequency present).
     let col0_val = residual[0];
     assert!(
@@ -2239,7 +2243,7 @@ fn inverse_transform_h_dct_8x8_only_row0_nonzero() {
     dequant[0] = 400; // DC
     dequant[1] = 200; // horizontal-frequency coefficient
     let mut residual = vec![0i32; 64];
-    inverse_transform(&dequant, av1::H_DCT, TX_8X8, false, &mut residual);
+    inverse_transform(&dequant, av1::H_DCT, TX_8X8, false, 8, &mut residual);
     // Row 0 must have variation (horizontal frequency present).
     let row0_val = residual[0];
     assert!(
@@ -2310,7 +2314,7 @@ fn inverse_transform_16x16_dc_only_is_flat() {
     let mut dequant = vec![0i32; 256];
     dequant[0] = 16000;
     let mut residual = vec![0i32; 256];
-    inverse_transform(&dequant, av1::DCT_DCT, TX_16X16, false, &mut residual);
+    inverse_transform(&dequant, av1::DCT_DCT, TX_16X16, false, 8, &mut residual);
     let first = residual[0];
     assert!(
         residual.iter().all(|&v| v == first),
@@ -2334,7 +2338,7 @@ fn palette_prediction_maps_color_indices_correctly() {
         off_y: 0,
     };
     let mut out = vec![0i32; 16];
-    predict_palette(&info, 4, 4, &mut out);
+    predict_palette(&info, 4, 4, 8, &mut out);
     assert_eq!(out[0], 10); // map[0] = 0 → colors[0]
     assert_eq!(out[1], 50); // map[1] = 1 → colors[1]
     assert_eq!(out[2], 100); // map[2] = 2 → colors[2]
@@ -2370,7 +2374,7 @@ fn palette_prediction_with_sub_block_offset() {
     // out[6] = map[(0+3)*4 + 2+0] = map[14] = 2 → colors[2] = 100
     // out[7] = map[(0+3)*4 + 2+1] = map[15] = 2 → colors[2] = 100
     let mut out = vec![0i32; 8];
-    predict_palette(&info, 2, 4, &mut out);
+    predict_palette(&info, 2, 4, 8, &mut out);
     assert_eq!(out[0], 50);
     assert_eq!(out[1], 50);
     assert_eq!(out[2], 100);

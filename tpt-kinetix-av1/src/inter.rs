@@ -307,8 +307,8 @@ pub fn motion_compensate(
                         let sh = 4 + ib;
                         (16 * mid + my16 * (mid01 - mid) + ((1 << sh) >> 1)) >> sh
                     } else {
-                        let px = ((16 * s00 + mx16 * (s01 - s00)) + ((1 << (4 - ib)) >> 1))
-                            >> (4 - ib);
+                        let px =
+                            ((16 * s00 + mx16 * (s01 - s00)) + ((1 << (4 - ib)) >> 1)) >> (4 - ib);
                         (px + ((1 << ib) >> 1)) >> ib
                     };
                     dest[y * dest_stride + x] = v.clamp(0, pix_max) as Px;
@@ -604,8 +604,8 @@ pub fn motion_compensate_scaled(
     bit_depth: u32,
 ) {
     let out = scaled_predict(
-        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
-        vbits, sc, false, bit_depth,
+        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
+        sc, false, bit_depth,
     );
     for y in 0..bh {
         for x in 0..bw {
@@ -634,8 +634,8 @@ pub fn motion_compensate_prep_scaled(
     bit_depth: u32,
 ) -> Vec<i32> {
     scaled_predict(
-        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
-        vbits, sc, true, bit_depth,
+        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
+        sc, true, bit_depth,
     )
 }
 
@@ -1181,8 +1181,8 @@ mod tests {
     fn motion_compensate_integer_shift_copies_reference() {
         // With a zero MV and the identity (frac-0) kernel, the destination must
         // equal the reference contents at the same offset.
-        let refp: Vec<u8> = (0u8..=255).cycle().take(64 * 64).collect();
-        let mut dest = vec![0u8; 32 * 32];
+        let refp: Vec<Px> = (0u16..=255).cycle().take(64 * 64).collect();
+        let mut dest = vec![0u16; 32 * 32];
         motion_compensate(
             &mut dest,
             32,
@@ -1199,6 +1199,7 @@ mod tests {
             INTERP_EIGHTTAP_REGULAR,
             3,
             3,
+            8,
         );
         for y in 0..16 {
             for x in 0..16 {
@@ -1209,8 +1210,8 @@ mod tests {
 
     #[test]
     fn motion_compensate_clamps_to_border() {
-        let refp = vec![200u8; 64 * 64];
-        let mut dest = vec![0u8; 8 * 8];
+        let refp = vec![200u16; 64 * 64];
+        let mut dest = vec![0u16; 8 * 8];
         // MV pointing well outside the frame: output must stay in valid range.
         motion_compensate(
             &mut dest,
@@ -1228,6 +1229,7 @@ mod tests {
             INTERP_EIGHTTAP_REGULAR,
             3,
             3,
+            8,
         );
         assert!(dest.iter().all(|&v| v == 200));
     }
@@ -1239,8 +1241,8 @@ mod tests {
         // `Round2` rounds a .5 up, so the value at x + 0.5 is `x + 1`.
         // (§7.11.3.3: 128-scale filter, InterRound0 = 3, InterRound1 = 11.)
         let stride = 64;
-        let refp: Vec<u8> = (0..64 * 64).map(|i| (i % 64) as u8).collect();
-        let mut dest = vec![0u8; 8 * 8];
+        let refp: Vec<Px> = (0..64 * 64).map(|i| (i % 64) as Px).collect();
+        let mut dest = vec![0u16; 8 * 8];
         motion_compensate(
             &mut dest,
             8,
@@ -1257,10 +1259,11 @@ mod tests {
             INTERP_BILINEAR,
             3,
             3,
+            8,
         );
         for y in 0..8 {
             for x in 0..8 {
-                assert_eq!(dest[y * 8 + x], (8 + x + 1) as u8, "y={y} x={x}");
+                assert_eq!(dest[y * 8 + x], (8 + x + 1) as Px, "y={y} x={x}");
             }
         }
     }

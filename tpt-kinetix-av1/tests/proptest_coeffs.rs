@@ -38,9 +38,9 @@ fn decode_with(
 ) -> bool {
     let uv_w = width / 2;
     let uv_h = height / 2;
-    let mut y = vec![128u8; width * height];
-    let mut u = vec![128u8; uv_w * uv_h];
-    let mut v = vec![128u8; uv_w * uv_h];
+    let mut y = vec![128u16; width * height];
+    let mut u = vec![128u16; uv_w * uv_h];
+    let mut v = vec![128u16; uv_w * uv_h];
     let mut meta = tpt_kinetix_av1::loop_filter::FrameMeta::new(width, height);
     decode_tile_group(
         data,

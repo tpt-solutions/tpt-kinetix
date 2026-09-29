@@ -1349,12 +1349,25 @@ impl<'a> TileDecodeState<'a> {
                     self.find_num_warp_samples(mi_row, mi_col, bsize, ref_names[0], mvs[0]);
                 // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate;
                 // dav1d `allow_warp = !svc[ref][0].scale && ...`).
-                let ref0_scaled = self.ref_to_slot.get(ref_names[0] as usize).is_some_and(|&s| {
-                    self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
-                        RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
-                            .is_some()
-                    })
-                });
+                let ref0_scaled = self
+                    .ref_to_slot
+                    .get(ref_names[0] as usize)
+                    .is_some_and(|&s| {
+                        self.ref_slots
+                            .slots
+                            .get(s as usize)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|rf| {
+                                RefScale::new(
+                                    rf.real_width,
+                                    rf.real_height,
+                                    self.frame_w,
+                                    self.frame_h,
+                                )
+                                .is_some()
+                            })
+                    });
                 let allow_warp = self.allow_warped_motion
                     && !force_integer_mv
                     && num_samples > 0
@@ -1414,15 +1427,22 @@ impl<'a> TileDecodeState<'a> {
             && self.gm_type[(ref_names[0] - 1) as usize] > crate::frame::GM_TRANSLATION
             && !force_integer_mv
         {
-            let ref0_scaled = self.ref_to_slot.get(ref_names[0] as usize).is_some_and(|&s| {
-                self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
-                    RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
-                        .is_some()
-                })
-            });
+            let ref0_scaled = self
+                .ref_to_slot
+                .get(ref_names[0] as usize)
+                .is_some_and(|&s| {
+                    self.ref_slots
+                        .slots
+                        .get(s as usize)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|rf| {
+                            RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                                .is_some()
+                        })
+                });
             if !ref0_scaled {
-                warp_model =
-                    warp::global_warp_model(&self.gm_params[(ref_names[0] - 1) as usize]);
+                warp_model = warp::global_warp_model(&self.gm_params[(ref_names[0] - 1) as usize]);
             }
         }
         // A WARP block reads no interpolation-filter symbol (dav1d sets
@@ -1555,10 +1575,20 @@ impl<'a> TileDecodeState<'a> {
                 let gi = (rn - 1) as usize;
                 if self.gm_type[gi] > crate::frame::GM_TRANSLATION {
                     let scaled = self.ref_to_slot.get(rn as usize).is_some_and(|&s| {
-                        self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
-                            RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                        self.ref_slots
+                            .slots
+                            .get(s as usize)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|rf| {
+                                RefScale::new(
+                                    rf.real_width,
+                                    rf.real_height,
+                                    self.frame_w,
+                                    self.frame_h,
+                                )
                                 .is_some()
-                        })
+                            })
                     });
                     if !scaled {
                         self.comp_warp[i] = warp::global_warp_model(&self.gm_params[gi]);
@@ -2482,7 +2512,14 @@ impl<'a> TileDecodeState<'a> {
         }
     }
 
-    pub(super) fn get_gmv_2d(&self, ref_name: u8, mi_col: usize, mi_row: usize, bw: usize, bh: usize) -> Mv {
+    pub(super) fn get_gmv_2d(
+        &self,
+        ref_name: u8,
+        mi_col: usize,
+        mi_row: usize,
+        bw: usize,
+        bh: usize,
+    ) -> Mv {
         let idx = ref_name as usize - 1;
         if std::env::var("KINETIX_AV1_DBG_GMV").is_ok() {
             eprintln!(
@@ -3909,14 +3946,13 @@ impl<'a> TileDecodeState<'a> {
                 }
                 if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                    let dequant_dbg =
-                        dequantize_coeffs(
-                            &coeffs.quant,
-                            leaf_tx,
-                            qindex_dc,
-                            qindex_ac,
-                            self.bit_depth,
-                        );
+                    let dequant_dbg = dequantize_coeffs(
+                        &coeffs.quant,
+                        leaf_tx,
+                        qindex_dc,
+                        qindex_ac,
+                        self.bit_depth,
+                    );
                     eprintln!(
                         "KINCFS tx={leaf_tx} txtp={} eob={} quant[..16]={:?} dequant[..16]={:?}",
                         coeffs.tx_type,
@@ -3930,14 +3966,13 @@ impl<'a> TileDecodeState<'a> {
                     if let (Some(c), Some(r)) = (it.next(), it.next()) {
                         if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
                             let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                            let dequant_dbg =
-                                dequantize_coeffs(
-                            &coeffs.quant,
-                            leaf_tx,
-                            qindex_dc,
-                            qindex_ac,
-                            self.bit_depth,
-                        );
+                            let dequant_dbg = dequantize_coeffs(
+                                &coeffs.quant,
+                                leaf_tx,
+                                qindex_dc,
+                                qindex_ac,
+                                self.bit_depth,
+                            );
                             let nz: Vec<(usize, i32)> = dequant_dbg
                                 .iter()
                                 .enumerate()
@@ -4010,12 +4045,12 @@ impl<'a> TileDecodeState<'a> {
                 if coeffs.eob > 0 {
                     let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                     let dequant = dequantize_coeffs(
-                            &coeffs.quant,
-                            leaf_tx,
-                            qindex_dc,
-                            qindex_ac,
-                            self.bit_depth,
-                        );
+                        &coeffs.quant,
+                        leaf_tx,
+                        qindex_dc,
+                        qindex_ac,
+                        self.bit_depth,
+                    );
                     if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
                         && mi_col == 4
                         && mi_row == 18
@@ -4136,8 +4171,8 @@ impl<'a> TileDecodeState<'a> {
                         break;
                     }
                     if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
-                        *slot =
-                            ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max)) as Px;
+                        *slot = ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max))
+                            as Px;
                     }
                 }
             }
@@ -4393,8 +4428,7 @@ impl<'a> TileDecodeState<'a> {
                             } else {
                                 (v_qindex_dc, v_qindex_ac)
                             };
-                            let dequant =
-                                dequantize_coeffs(
+                            let dequant = dequantize_coeffs(
                                 &coeffs.quant,
                                 c_tx,
                                 qindex_dc,
@@ -4434,8 +4468,8 @@ impl<'a> TileDecodeState<'a> {
                                 break;
                             }
                             if let Some(slot) = dst.get_mut(sy * stride + sx) {
-                                *slot =
-                                    ((*slot as i32 + residual[dy * cw + dx]).clamp(0, pix_max)) as Px;
+                                *slot = ((*slot as i32 + residual[dy * cw + dx]).clamp(0, pix_max))
+                                    as Px;
                             }
                         }
                     }

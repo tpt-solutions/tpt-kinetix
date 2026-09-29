@@ -47,9 +47,12 @@ type ObuPairs = Vec<(u8, Vec<u8>)>;
 /// intrabc reads within the grid extent. The visible crop is applied when
 /// the frame is output (`to_video_frame`).
 pub struct StoredFrame {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    /// Reference planes. `Px`-wide (see `crate::Px`) so a 10/12-bit reference
+    /// round-trips without truncation; `to_video_frame` narrows to `u8` at the
+    /// output boundary.
+    pub y: Vec<crate::Px>,
+    pub u: Vec<crate::Px>,
+    pub v: Vec<crate::Px>,
     /// Grid width (= plane stride; planes are dense).
     pub width: usize,
     /// Grid height (mi rows × 4).
@@ -70,15 +73,23 @@ impl StoredFrame {
         let uv_stride = self.width / 2;
         for row in 0..self.real_height {
             let off = row * self.width;
-            data.extend_from_slice(&self.y[off..off + self.real_width]);
+            data.extend(self.y[off..off + self.real_width].iter().map(|&s| s as u8));
         }
         for row in 0..self.real_height.div_ceil(2) {
             let off = row * uv_stride;
-            data.extend_from_slice(&self.u[off..off + self.real_width / 2]);
+            data.extend(
+                self.u[off..off + self.real_width / 2]
+                    .iter()
+                    .map(|&s| s as u8),
+            );
         }
         for row in 0..self.real_height.div_ceil(2) {
             let off = row * uv_stride;
-            data.extend_from_slice(&self.v[off..off + self.real_width / 2]);
+            data.extend(
+                self.v[off..off + self.real_width / 2]
+                    .iter()
+                    .map(|&s| s as u8),
+            );
         }
         VideoFrame {
             pts: Timestamp::NONE,
@@ -143,9 +154,12 @@ impl RefFrameStore {
                 // rows (this hook previously hardcoded 320 rows and panicked
                 // on shorter grids).
                 let stride = planes.stride;
+                // `y` is `Px`-wide; narrow to bytes for this raw debug dump
+                // (it is a hook, not the output path).
                 for start in (0..y.len()).step_by(stride.max(1)) {
                     let end = (start + stride).min(y.len());
-                    let _ = fp.write_all(&y[start..end]);
+                    let row: Vec<u8> = y[start..end].iter().map(|&s| s as u8).collect();
+                    let _ = fp.write_all(&row);
                 }
             }
         }

@@ -53,9 +53,8 @@ use crate::{
     inter::{
         compound_blend, motion_compensate, motion_compensate_prep, motion_compensate_prep_scaled,
         motion_compensate_scaled, read_mv, read_single_ref_name, InterCdfs, MotionField,
-        MotionFieldCell, Mv, RefFrames, RefScale, RefSlot, ALTREF_FRAME,
-        INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
-        NONE_FRAME, ZEROMV,
+        MotionFieldCell, Mv, RefFrames, RefScale, RefSlot, ALTREF_FRAME, INTERP_EIGHTTAP_REGULAR,
+        INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, ZEROMV,
     },
     loop_filter::{apply_post_filters, FrameMeta, LrUnitData},
     obu::{BitReader, SequenceHeaderObu},
@@ -1345,8 +1344,16 @@ impl<'a> TileDecodeState<'a> {
             luma_max_y4: height.div_ceil(4),
             // Visible frame size (the scale-factor denominators of
             // §7.11.3.3); `width`/`height` are the 8-aligned grid extent.
-            frame_w: if lr.upscaled_width > 0 { lr.upscaled_width } else { width },
-            frame_h: if lr.frame_height > 0 { lr.frame_height } else { height },
+            frame_w: if lr.upscaled_width > 0 {
+                lr.upscaled_width
+            } else {
+                width
+            },
+            frame_h: if lr.frame_height > 0 {
+                lr.frame_height
+            } else {
+                height
+            },
             uv_max_x4: uv_w.div_ceil(4),
             uv_max_y4: uv_h.div_ceil(4),
             monochrome,
@@ -2203,7 +2210,9 @@ pub fn reconstruct_av1_frame(
     }
 
     if tile_payloads.is_empty() {
-        let cropped = crop_planes(&y_plane, &u_plane, &v_plane, grid_w, width, height, bit_depth);
+        let cropped = crop_planes(
+            &y_plane, &u_plane, &v_plane, grid_w, width, height, bit_depth,
+        );
         return Ok(Some((
             VideoFrame {
                 pts: Timestamp::NONE,
@@ -2498,13 +2507,17 @@ pub fn reconstruct_av1_frame(
         let nm = std::env::var("KINETIX_AV1_DUMP_GRID").unwrap_or_default();
         let mut blob = Vec::with_capacity(grid_w * grid_h * 3 / 2);
         for r in 0..grid_h {
-            blob.extend_from_slice(&padded.y[r * grid_w..r * grid_w + grid_w]);
+            blob.extend(
+                padded.y[r * grid_w..r * grid_w + grid_w]
+                    .iter()
+                    .map(|&s| s as u8),
+            );
         }
         let uv_w = grid_w / 2;
         let uv_h = grid_h / 2;
         for pl in [&padded.u, &padded.v] {
             for r in 0..uv_h {
-                blob.extend_from_slice(&pl[r * uv_w..r * uv_w + uv_w]);
+                blob.extend(pl[r * uv_w..r * uv_w + uv_w].iter().map(|&s| s as u8));
             }
         }
         static GRID_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

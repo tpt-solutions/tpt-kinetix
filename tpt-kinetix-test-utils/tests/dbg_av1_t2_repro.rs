@@ -148,23 +148,23 @@ fn dbg_t2_chroma_diff() {
         // (base_y=19, base_x=34, straight full-pel copy per KINMCSUM/
         // KINMCOUT): pred[r][c] = frame0[19+r][34+c].
         let mut pred = [[0i32; 4]; 4];
-        for r in 0..4 {
-            for c in 0..4 {
-                pred[r][c] = f0.data[v_off0 + (19 + r) * uv_w + (34 + c)] as i32;
+        for (r, row) in pred.iter_mut().enumerate() {
+            for (c, cell) in row.iter_mut().enumerate() {
+                *cell = f0.data[v_off0 + (19 + r) * uv_w + (34 + c)] as i32;
             }
         }
         eprintln!("pred 4x4 (from frame0, base=(34,19)) = {pred:?}");
         let frame1 = &kin_frames[1];
         let ref1 = &ref_frames[1];
-        for r in 0..4 {
+        for (r, pred_row) in pred.iter().enumerate() {
             let kin_row: Vec<i32> = (0..4)
                 .map(|c| frame1.data[v_off + (20 + r) * uv_w + (32 + c)] as i32)
                 .collect();
             let dav_row: Vec<i32> = (0..4)
                 .map(|c| ref1.data[v_off + (20 + r) * uv_w + (32 + c)] as i32)
                 .collect();
-            let kin_resid: Vec<i32> = (0..4).map(|c| kin_row[c] - pred[r][c]).collect();
-            let dav_resid_implied: Vec<i32> = (0..4).map(|c| dav_row[c] - pred[r][c]).collect();
+            let kin_resid: Vec<i32> = (0..4).map(|c| kin_row[c] - pred_row[c]).collect();
+            let dav_resid_implied: Vec<i32> = (0..4).map(|c| dav_row[c] - pred_row[c]).collect();
             eprintln!(
                 "row y={} kin_final={kin_row:?} dav1d_final={dav_row:?} kin_resid={kin_resid:?} dav1d_resid_implied={dav_resid_implied:?}",
                 20 + r

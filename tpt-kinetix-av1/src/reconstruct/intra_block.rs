@@ -683,18 +683,10 @@ impl<'a> TileDecodeState<'a> {
                     (start + (limit.saturating_sub(start)).div_ceil(tx) * tx).min(block_end)
                 }
             };
-            let max_luma_w = round_up_to_tx(
-                blk_px_x,
-                self.tile_w,
-                blk_px_x + bw * MI_SIZE,
-                luma_tx_w,
-            );
-            let max_luma_h = round_up_to_tx(
-                blk_px_y,
-                self.tile_h,
-                blk_px_y + bh * MI_SIZE,
-                luma_tx_h,
-            );
+            let max_luma_w =
+                round_up_to_tx(blk_px_x, self.tile_w, blk_px_x + bw * MI_SIZE, luma_tx_w);
+            let max_luma_h =
+                round_up_to_tx(blk_px_y, self.tile_h, blk_px_y + bh * MI_SIZE, luma_tx_h);
             // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
             // transform size is derived from the *whole coded block's* size
             // (`bsize`), not from the luma transform size directly, via
@@ -1446,10 +1438,7 @@ impl<'a> TileDecodeState<'a> {
                 }
             } else if cand.refs == want_refs {
                 let mv = if cand.mf & 1 != 0 {
-                    [
-                        gmv[0].unwrap_or(cand.mv[0]),
-                        gmv[1].unwrap_or(cand.mv[1]),
-                    ]
+                    [gmv[0].unwrap_or(cand.mv[0]), gmv[1].unwrap_or(cand.mv[1])]
                 } else {
                     [cand.mv[0], cand.mv[1]]
                 };
@@ -1613,7 +1602,6 @@ impl<'a> TileDecodeState<'a> {
         for e in stack.iter_mut().take(nearest_cnt) {
             e.1 += REF_CAT_LEVEL;
         }
-
 
         // Temporal candidate scan (§7.10.2.4/§7.10.2.6, dav1d's `rp_proj`
         // model): sample the projected grid inside the block, then the three
@@ -2262,14 +2250,13 @@ impl<'a> TileDecodeState<'a> {
                     }
                 }
                 if coeffs.eob > 0 {
-                    let dequant =
-                        dequantize_coeffs(
-                            &coeffs.quant,
-                            leaf_tx,
-                            y_qindex_dc,
-                            y_qindex_ac,
-                            self.bit_depth,
-                        );
+                    let dequant = dequantize_coeffs(
+                        &coeffs.quant,
+                        leaf_tx,
+                        y_qindex_dc,
+                        y_qindex_ac,
+                        self.bit_depth,
+                    );
                     inverse_transform(
                         &dequant,
                         coeffs.tx_type,
@@ -2301,7 +2288,8 @@ impl<'a> TileDecodeState<'a> {
                     let src_val = y_plane
                         .get((src_y + dy) * y_stride + (src_x + dx))
                         .copied()
-                        .unwrap_or(mid_sample(self.bit_depth) as Px) as i32;
+                        .unwrap_or(mid_sample(self.bit_depth) as Px)
+                        as i32;
                     if let Some(slot) = y_plane.get_mut(wy * y_stride + wx) {
                         *slot = (src_val + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max) as Px;
                     }
@@ -2558,11 +2546,13 @@ impl<'a> TileDecodeState<'a> {
                             }
                             if let Some(slot) = u_plane.get_mut(wy * uv_stride + wx) {
                                 *slot = (pred_u[dy * cw + dx] as i32 + res_u[dy * cw + dx])
-                                    .clamp(0, pix_max) as Px;
+                                    .clamp(0, pix_max)
+                                    as Px;
                             }
                             if let Some(slot) = v_plane.get_mut(wy * uv_stride + wx) {
                                 *slot = (pred_v[dy * cw + dx] as i32 + res_v[dy * cw + dx])
-                                    .clamp(0, pix_max) as Px;
+                                    .clamp(0, pix_max)
+                                    as Px;
                             }
                         }
                     }

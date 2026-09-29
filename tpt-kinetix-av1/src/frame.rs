@@ -1091,19 +1091,18 @@ impl FrameHeader {
         let reduced_tx_set = read_flag(&mut br)?;
 
         // --- global_motion_params ---
-        let (gm_type, gm_params) =
-            parse_global_motion(
-                &mut br,
-                frame_is_intra,
-                allow_high_precision_mv,
-                // PrevGmParams (§7.20 load_previous): the primary reference's
-                // saved parameters, or the identity defaults.
-                &if primary_ref_frame == 7 {
-                    default_gm_params()
-                } else {
-                    ref_gm_params_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
-                },
-            )?;
+        let (gm_type, gm_params) = parse_global_motion(
+            &mut br,
+            frame_is_intra,
+            allow_high_precision_mv,
+            // PrevGmParams (§7.20 load_previous): the primary reference's
+            // saved parameters, or the identity defaults.
+            &if primary_ref_frame == 7 {
+                default_gm_params()
+            } else {
+                ref_gm_params_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
+            },
+        )?;
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC gm={}", br.bits_read());
         }
@@ -1882,7 +1881,10 @@ fn parse_global_motion(
     if std::env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
         for r in 1..=7 {
             if gm_type[r] != GM_IDENTITY {
-                eprintln!("GMPARAMS ref={r} type={} params={:?}", gm_type[r], gm_params[r]);
+                eprintln!(
+                    "GMPARAMS ref={r} type={} params={:?}",
+                    gm_type[r], gm_params[r]
+                );
             }
         }
     }

@@ -364,7 +364,14 @@ impl H264Decoder {
             // See the B-field site for why the picture role is tagged.
             crate::deblock::set_deblock_pic_tag("P");
 
-            Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+            Self::deblock_field(
+                &mut recon,
+                &parsed,
+                mb_cols,
+                mb_rows_field,
+                deblock_params,
+                None,
+            );
             return self.finalize_field(
                 recon,
                 nal,
@@ -1747,7 +1754,14 @@ impl H264Decoder {
             // See the B-field site for why the picture role is tagged.
             crate::deblock::set_deblock_pic_tag("P");
 
-            Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+            Self::deblock_field(
+                &mut recon,
+                &parsed,
+                mb_cols,
+                mb_rows_field,
+                deblock_params,
+                None,
+            );
             if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
                 let poc = {
                     let mut scratch = self.poc_state.clone();
@@ -2417,7 +2431,21 @@ impl H264Decoder {
         // apart from the correct P field's edge at the same location.
         crate::deblock::set_deblock_pic_tag("B");
 
-        Self::deblock_field(&mut recon, &parsed, mb_cols, mb_rows_field, deblock_params);
+        // ffmpeg's `ref2frm`: bS compares reference PICTURES, not list indices.
+        let pic_ids = |l: &[crate::ref_pic::FieldRef]| -> Vec<i32> {
+            l.iter()
+                .map(|f| ((f.pic_order_cnt << 1) | f.bottom as i64) as i32)
+                .collect()
+        };
+        let bs_ref_ids = Some((pic_ids(&ref_l0), pic_ids(&ref_l1)));
+        Self::deblock_field(
+            &mut recon,
+            &parsed,
+            mb_cols,
+            mb_rows_field,
+            deblock_params,
+            bs_ref_ids,
+        );
         #[cfg(debug_assertions)]
         if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
             std::fs::write(
@@ -2456,7 +2484,15 @@ impl H264Decoder {
         mb_cols: u32,
         _mb_rows_field: u32,
         params: crate::deblock::DeblockParams,
+        ref_ids: Option<(Vec<i32>, Vec<i32>)>,
     ) {
+        let remap = |idx: i32, ids: &[i32]| -> i32 {
+            if idx >= 0 {
+                ids.get(idx as usize).copied().unwrap_or(idx)
+            } else {
+                idx
+            }
+        };
         let mb_info: Vec<Vec<crate::deblock::DeblockMbInfo>> = parsed
             .macroblocks
             .chunks(mb_cols as usize)
@@ -2467,10 +2503,16 @@ impl H264Decoder {
                     .map(|(col_idx, mb)| {
                         let idx = row_idx * mb_cols as usize + col_idx;
                         let nz = parsed.nz[idx].luma;
-                        let cells = parsed
+                        let mut cells = parsed
                             .mv_store
                             .cells_of(idx)
                             .unwrap_or([crate::mv::MvCell::INTRA; 16]);
+                        if let Some((l0, l1)) = &ref_ids {
+                            for c in cells.iter_mut() {
+                                c.ref_idx = remap(c.ref_idx, l0);
+                                c.ref_idx_l1 = remap(c.ref_idx_l1, l1);
+                            }
+                        }
                         // PAFF field picture: every MB is field-coded, so the
                         // §8.7.2.1 field rules apply — horizontal MB-boundary
                         // edge stays bS=3 in the intra case, and the bS=1 motion

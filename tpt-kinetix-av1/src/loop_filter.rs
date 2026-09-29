@@ -19,6 +19,7 @@ use tpt_kinetix_core::error::KinetixError;
 
 use crate::frame::{FrameHeader, LoopFilterDeltas};
 use crate::obu::SequenceHeaderObu;
+use crate::Px;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -947,7 +948,7 @@ fn filter_line_1d(
 /// `tx_grid` / `skip_grid` are the `FrameMeta` sub-grids for this plane.
 #[allow(clippy::too_many_arguments)]
 fn deblock_plane(
-    plane: &mut [u8],
+    plane: &mut [Px],
     stride: usize,
     width: usize,
     height: usize,
@@ -1108,7 +1109,7 @@ fn deblock_plane(
                         (y0..y0 + bh)
                             .map(|y| {
                                 (edge.saturating_sub(6)..(edge + 2).min(width))
-                                    .map(|x| plane[y * stride + x])
+                                    .map(|x| plane[y * stride + x] as u8)
                                     .collect::<Vec<u8>>()
                             })
                             .collect::<Vec<Vec<u8>>>(),
@@ -1143,7 +1144,7 @@ fn deblock_plane(
                     lp.blimit,
                     lp.thresh,
                     (edge.saturating_sub(6)..(edge + 6).min(width))
-                        .map(|x| plane[71 * stride + x])
+                        .map(|x| plane[71 * stride + x] as u8)
                         .collect::<Vec<u8>>()
                 );
                 }
@@ -1175,14 +1176,14 @@ fn deblock_plane(
                         plane_index == 0,
                     );
                     for x in 0..width {
-                        plane[y * stride + x] = filtered[x] as u8;
+                        plane[y * stride + x] = filtered[x] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre {
                     let post: Vec<Vec<u8>> = (y0..y0 + bh)
                         .map(|y| {
                             (edge.saturating_sub(6)..(edge + 2).min(width))
-                                .map(|x| plane[y * stride + x])
+                                .map(|x| plane[y * stride + x] as u8)
                                 .collect::<Vec<u8>>()
                         })
                         .collect();
@@ -1286,7 +1287,7 @@ fn deblock_plane(
                         (x0..x0 + bw)
                             .map(|x| {
                                 (edge.saturating_sub(6)..(edge + 2).min(height))
-                                    .map(|y| plane[y * stride + x])
+                                    .map(|y| plane[y * stride + x] as u8)
                                     .collect::<Vec<u8>>()
                             })
                             .collect::<Vec<Vec<u8>>>(),
@@ -1325,7 +1326,7 @@ fn deblock_plane(
                     lp.blimit,
                     lp.thresh,
                     (edge.saturating_sub(6)..(edge + 6).min(height))
-                        .map(|y| plane[y * stride + 28])
+                        .map(|y| plane[y * stride + 28] as u8)
                         .collect::<Vec<u8>>()
                 );
                 }
@@ -1358,14 +1359,14 @@ fn deblock_plane(
                         plane_index == 0,
                     );
                     for y in 0..height {
-                        plane[y * stride + x] = filtered[y] as u8;
+                        plane[y * stride + x] = filtered[y] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre_h {
                     let post: Vec<Vec<u8>> = (x0..x0 + bw)
                         .map(|x| {
                             (edge.saturating_sub(6)..(edge + 6).min(height))
-                                .map(|y| plane[y * stride + x])
+                                .map(|y| plane[y * stride + x] as u8)
                                 .collect::<Vec<u8>>()
                         })
                         .collect();
@@ -1441,7 +1442,7 @@ fn cdef_constrain(diff: i32, threshold: i32, damping: i32) -> i32 {
 /// plane are clamped to the nearest valid (edge) sample, matching the boundary
 /// extension the reference decoder uses for `cdef_direction`.
 fn cdef_direction(
-    src: &[u8],
+    src: &[Px],
     stride: usize,
     width: usize,
     height: usize,
@@ -1509,9 +1510,9 @@ fn cdef_direction(
 /// Apply the CDEF filter to a single 8×8 (luma) or 4×4 (chroma) block.
 #[allow(clippy::too_many_arguments)]
 fn cdef_filter_block(
-    dst: &mut [u8],
+    dst: &mut [Px],
     dst_stride: usize,
-    src: &[u8],
+    src: &[Px],
     src_stride: usize,
     x0: usize,
     y0: usize,
@@ -1523,11 +1524,22 @@ fn cdef_filter_block(
     sec_str: i32,
     damping: i32,
     dir: usize,
+    bit_depth: u32,
 ) {
-    let coeff_shift = 0; // 8-bit
-                         // dav1d cdef_tmpl.c: pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1)
-                         // which selects CDEF_PRI_TAPS row 0 ([4,2]) when pri_strength is even,
-                         // row 1 ([3,3]) when odd. No XOR with direction.
+    // Maximum representable sample for this stream (255 at 8-bit, 1023 at
+    // 10-bit, 4095 at 12-bit). The filtered value is clamped to the 3x3
+    // min/max neighbourhood (`clip3(val, min, max)` below), which is
+    // inherently within the source samples' range, so no separate
+    // `pix_max` clamp is needed here.
+    let _pix_max: i32 = (1i32 << bit_depth) - 1;
+    // NOTE: `cdef_constrain`'s threshold table is still in 8-bit sample
+    // units and is NOT rescaled for high bit depth here, so CDEF output is
+    // only fully correct at 8-bit. Wiring that up is part of the outstanding
+    // high-bit-depth work, not part of this build fix.
+    let coeff_shift = bit_depth.saturating_sub(8);
+    // dav1d cdef_tmpl.c: pri_tap = 4 - ((pri_strength >> bitdepth_min_8) & 1)
+    // which selects CDEF_PRI_TAPS row 0 ([4,2]) when pri_strength is even,
+    // row 1 ([3,3]) when odd. No XOR with direction.
     let taps = ((pri_str >> coeff_shift) & 1) as usize;
     let src_rows = src.len().div_ceil(src_stride);
     let dbg_cdef = std::env::var("KINETIX_AV1_DBG_CDEF67_44").is_ok();
@@ -1586,7 +1598,7 @@ fn cdef_filter_block(
                 }
             }
             let val = x + ((8 + sum - (if sum < 0 { 1 } else { 0 })) >> 4);
-            let out = clip3(val, min, max) as u8;
+            let out = clip3(val, min, max) as Px;
             if dbg_cdef && abs_y == 44 && (abs_x == 67 || abs_x == 73) {
                 eprintln!("CDEF{abs_x}_44 x={x} sum={sum} val={val} min={min} max={max} out={out} dir={dir} pri={pri_str} sec={sec_str} damp={damping}");
             }
@@ -1690,8 +1702,8 @@ const SGR_PARAMS: [[i32; 4]; 16] = [
 /// stripe seam.
 #[allow(clippy::too_many_arguments)]
 fn wiener_filter_plane(
-    plane: &mut [u8],
-    full_src: &[u8],
+    plane: &mut [Px],
+    full_src: &[Px],
     pw: usize,
     ph: usize,
     ux0: usize,
@@ -1700,6 +1712,7 @@ fn wiener_filter_plane(
     uh: usize,
     half_h: [i32; 3],
     half_v: [i32; 3],
+    pix_max: i32,
 ) {
     let build_filter = |half: [i32; 3]| -> [i32; 7] {
         let c = 128 - 2 * (half[0] + half[1] + half[2]);
@@ -1751,7 +1764,7 @@ fn wiener_filter_plane(
                 let iy = y + i; // (y + i - 3) offset by the +3 padding above
                 sum += fi * inter[iy * uw + x];
             }
-            plane[(uy0 + y) * pw + (ux0 + x)] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
+            plane[(uy0 + y) * pw + (ux0 + x)] = ((sum + 1024) >> 11).clamp(0, pix_max) as Px;
         }
     }
 }
@@ -1767,8 +1780,8 @@ fn wiener_filter_plane(
 /// unit-local-clamping bug.
 #[allow(clippy::too_many_arguments)]
 fn sgrproj_filter_plane(
-    plane: &mut [u8],
-    full_src: &[u8],
+    plane: &mut [Px],
+    full_src: &[Px],
     pw: usize,
     ph: usize,
     ux0: usize,
@@ -1777,6 +1790,7 @@ fn sgrproj_filter_plane(
     uh: usize,
     set: usize,
     xqd: [i32; 2],
+    pix_max: i32,
 ) {
     let src_at = |x: isize, y: isize| -> i32 {
         let xi = x.clamp(0, pw as isize - 1) as usize;
@@ -1935,7 +1949,7 @@ fn sgrproj_filter_plane(
                     t1[y * uw + x]
                 );
             }
-            plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, 255) as u8;
+            plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, pix_max) as Px;
         }
     }
 }
@@ -1951,14 +1965,15 @@ fn sgrproj_filter_plane(
 /// except at the true frame edge where the post-CDEF edge row is replicated.
 #[allow(clippy::too_many_arguments)]
 fn apply_loop_restoration_plane(
-    plane: &mut [u8],
+    plane: &mut [Px],
     w: usize,
     h: usize,
     plane_idx: usize,
     fh: &crate::frame::FrameHeader,
     lr_units: &std::collections::HashMap<(usize, usize, usize), LrUnitData>,
-    boundary_src: &[u8],
+    boundary_src: &[Px],
     ssv: usize,
+    pix_max: i32,
 ) {
     if fh.frame_restoration_type[plane_idx] == 0 {
         return;
@@ -2066,11 +2081,13 @@ fn apply_loop_restoration_plane(
 
                 match unit {
                     LrUnitData::Wiener { h: hf, v: vf } => {
-                        wiener_filter_plane(plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *hf, *vf);
+                        wiener_filter_plane(
+                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *hf, *vf, pix_max,
+                        );
                     }
                     LrUnitData::Sgrproj { set, xqd } => {
                         sgrproj_filter_plane(
-                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *set, *xqd,
+                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *set, *xqd, pix_max,
                         );
                     }
                 }
@@ -2088,9 +2105,9 @@ fn apply_loop_restoration_plane(
 /// on the three reconstructed planes, in place.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_post_filters(
-    y_plane: &mut [u8],
-    u_plane: &mut [u8],
-    v_plane: &mut [u8],
+    y_plane: &mut [Px],
+    u_plane: &mut [Px],
+    v_plane: &mut [Px],
     width: usize,
     height: usize,
     vis_height: usize,
@@ -2103,11 +2120,14 @@ pub fn apply_post_filters(
     tile_y0: usize,
 ) -> Result<(), KinetixError> {
     let cdef_idx = &meta.cdef_idx;
+    // Stream bit depth drives every filter's output clamp (`pix_max`).
+    let bit_depth = fh.bit_depth as u32;
+    let pix_max: i32 = (1i32 << bit_depth) - 1;
     let dbg = std::env::var("KINETIX_AV1_DBG").is_ok() && width == 64 && height == 64;
     let skip_deblock = std::env::var("KINETIX_AV1_NODEBLOCK").is_ok();
     let skip_cdef = std::env::var("KINETIX_AV1_NOCDEF").is_ok();
-    let dump_row = |label: &str, plane: &[u8], y: usize| {
-        let row: Vec<u8> = (32..64).map(|x| plane[y * width + x]).collect();
+    let dump_row = |label: &str, plane: &[Px], y: usize| {
+        let row: Vec<u8> = (32..64).map(|x| plane[y * width + x] as u8).collect();
         eprintln!("{label} y={y}: {row:?}");
     };
     // `KINETIX_AV1_DBG_PXY=x,y` traces one luma pixel's value across each
@@ -2129,7 +2149,7 @@ pub fn apply_post_filters(
                 b.trim().parse::<usize>().ok()?,
             ))
         });
-    let dump_pxy = |label: &str, plane: &[u8]| {
+    let dump_pxy = |label: &str, plane: &[Px]| {
         if let Some((x, y)) = dbg_pxy {
             if x < width && y < height {
                 eprintln!("PXY {label} ({x},{y}) = {}", plane[y * width + x]);
@@ -2201,7 +2221,12 @@ pub fn apply_post_filters(
         if let Some(fp) = fp.as_mut() {
             use std::io::Write;
             for yy in 280..320usize {
-                let _ = fp.write_all(&y_plane[yy * width..yy * width + width]);
+                let _ = fp.write_all(
+                    &y_plane[yy * width..yy * width + width]
+                        .iter()
+                        .map(|&s| s as u8)
+                        .collect::<Vec<u8>>(),
+                );
             }
         }
     }
@@ -2238,7 +2263,7 @@ pub fn apply_post_filters(
             b.trim().parse::<usize>().ok()?,
         ))
     });
-    let dump_cpxy = |label: &str, plane: &[u8], stride: usize| {
+    let dump_cpxy = |label: &str, plane: &[Px], stride: usize| {
         if let Some((x, y)) = dbg_cpxy {
             if x < stride && y * stride + x < plane.len() {
                 eprintln!("CPXY {label} ({x},{y}) = {}", plane[y * stride + x]);
@@ -2358,6 +2383,7 @@ pub fn apply_post_filters(
                     uw,
                     &meta.luma_skip,
                     meta.w8,
+                    bit_depth,
                 );
                 ux += 64;
             }
@@ -2404,6 +2430,7 @@ pub fn apply_post_filters(
                     fh.order_hint,
                     fh.show_frame,
                     'U',
+                    bit_depth,
                 );
                 ux += uv_step_x;
             }
@@ -2448,6 +2475,7 @@ pub fn apply_post_filters(
                     fh.order_hint,
                     fh.show_frame,
                     'V',
+                    bit_depth,
                 );
                 ux += uv_step_x;
             }
@@ -2499,7 +2527,17 @@ pub fn apply_post_filters(
         // context (dav1d's `lr_lpf_line` holds unrestored padding rows).
         let vis_h = fh.height as usize;
         let vis_ch = vis_h.div_ceil(2);
-        apply_loop_restoration_plane(y_plane, width, vis_h, 0, fh, &meta.lr_units, &lr_pre_y, 0);
+        apply_loop_restoration_plane(
+            y_plane,
+            width,
+            vis_h,
+            0,
+            fh,
+            &meta.lr_units,
+            &lr_pre_y,
+            0,
+            pix_max,
+        );
         apply_loop_restoration_plane(
             u_plane,
             uv_w,
@@ -2509,6 +2547,7 @@ pub fn apply_post_filters(
             &meta.lr_units,
             &lr_pre_u,
             sub_y,
+            pix_max,
         );
         apply_loop_restoration_plane(
             v_plane,
@@ -2519,6 +2558,7 @@ pub fn apply_post_filters(
             &meta.lr_units,
             &lr_pre_v,
             sub_y,
+            pix_max,
         );
     }
     dump_cpxy("post-lr-V", v_plane, uv_w);
@@ -2536,8 +2576,8 @@ pub fn apply_post_filters(
 /// 64×64 CDEF unit (the caller selects the unit's `cdef_idx` strength entry).
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_luma(
-    plane: &mut [u8],
-    src: &[u8],
+    plane: &mut [Px],
+    src: &[Px],
     width: usize,
     height: usize,
     pri_str: i32,
@@ -2555,6 +2595,7 @@ fn cdef_plane_luma(
     // untouched by CDEF even when its neighbours are filtered.
     luma_skip: &[bool],
     w8: usize,
+    bit_depth: u32,
 ) {
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
@@ -2615,6 +2656,7 @@ fn cdef_plane_luma(
                 sec_str,
                 damping,
                 dir,
+                bit_depth,
             );
             if std::env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 600 && y0 == 296 {
                 eprintln!(
@@ -2636,11 +2678,11 @@ fn cdef_plane_luma(
 /// `y0_unit`/`x0_unit`/`unit_h`/`unit_w` to a single CDEF unit.
 #[allow(clippy::too_many_arguments)]
 fn cdef_plane_chroma(
-    plane: &mut [u8],
-    src: &[u8],
+    plane: &mut [Px],
+    src: &[Px],
     width: usize,
     height: usize,
-    luma_src: &[u8],
+    luma_src: &[Px],
     luma_w: usize,
     luma_h: usize,
     sub_x: usize,
@@ -2660,6 +2702,7 @@ fn cdef_plane_chroma(
     order_hint: u32,
     shown: bool,
     plane_label: char,
+    bit_depth: u32,
 ) {
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
@@ -2714,7 +2757,7 @@ fn cdef_plane_chroma(
                 eprintln!(
                     "CDEFUV kin oh={order_hint} shown={shown} pl={plane_label} x0={x0} y0={y0} luma_dir={yd} dir={dir} uv_pri={p} uv_sec={sec_str} damp={damping}"
                 );
-                let dump44 = |buf: &[u8]| {
+                let dump44 = |buf: &[Px]| {
                     (0..4)
                         .map(|yy| {
                             (0..4)
@@ -2741,6 +2784,7 @@ fn cdef_plane_chroma(
                     sec_str,
                     damping,
                     dir,
+                    bit_depth,
                 );
                 eprintln!("CDEFUV post (4x4 chroma): {}", dump44(plane));
                 continue;
@@ -2776,6 +2820,7 @@ fn cdef_plane_chroma(
             }
             cdef_filter_block(
                 plane, width, src, width, x0, y0, ww, hh, sub_x, sub_y, p, sec_str, damping, dir,
+                bit_depth,
             );
             if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && plane_label == 'V' {
                 if x0 <= 67 && x0 + ww > 67 && y0 <= 46 && y0 + hh > 46 {
@@ -2958,9 +3003,9 @@ mod tests {
         // for both cases would be byte-identical).
         let pw = 8usize;
         let ph = 4usize;
-        let mut plane_a = vec![100u8; pw * ph];
+        let mut plane_a = vec![100u16; pw * ph];
         let mut plane_b = plane_a.clone();
-        let src_a = vec![100u8; pw * ph];
+        let src_a = vec![100u16; pw * ph];
         let mut src_b = src_a.clone();
         // Column 4 is just past the unit's [0,4) right edge; make it a
         // sharp step in `b` only.
@@ -2970,8 +3015,32 @@ mod tests {
         // A non-identity (real smoothing) horizontal kernel.
         let half = [1, 2, 3];
         let identity_v = [0, 0, 0];
-        wiener_filter_plane(&mut plane_a, &src_a, pw, ph, 0, 0, 4, ph, half, identity_v);
-        wiener_filter_plane(&mut plane_b, &src_b, pw, ph, 0, 0, 4, ph, half, identity_v);
+        wiener_filter_plane(
+            &mut plane_a,
+            &src_a,
+            pw,
+            ph,
+            0,
+            0,
+            4,
+            ph,
+            half,
+            identity_v,
+            255,
+        );
+        wiener_filter_plane(
+            &mut plane_b,
+            &src_b,
+            pw,
+            ph,
+            0,
+            0,
+            4,
+            ph,
+            half,
+            identity_v,
+            255,
+        );
         assert_ne!(
             plane_a[3], plane_b[3],
             "the rightmost column of the unit must be affected by the real \
@@ -2999,14 +3068,14 @@ mod tests {
         let ph = 8usize;
         // A block with real local variance (not perfectly flat), so the
         // guided filter's `t` term is genuinely nonzero somewhere.
-        let src: Vec<u8> = (0..pw * ph)
+        let src: Vec<Px> = (0..pw * ph)
             .map(|i| {
                 let (x, y) = (i % pw, i / pw);
-                (100 + (x * 7 + y * 13) % 40) as u8
+                (100 + (x * 7 + y * 13) % 40) as Px
             })
             .collect();
         let mut plane = src.clone();
-        sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2]);
+        sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2], 255);
         assert_ne!(
             plane, src,
             "a real xqd=[0,2] SgrProj unit (set 10) must actually change \
@@ -3210,13 +3279,13 @@ mod tests {
     #[test]
     fn cdef_passthrough_when_strength_zero() {
         // Random-ish block; with zero strength CDEF must not change samples.
-        let mut plane = vec![0u8; 64];
+        let mut plane = vec![0u16; 64];
         for (i, v) in plane.iter_mut().enumerate() {
-            *v = ((i * 37) % 256) as u8;
+            *v = ((i * 37) % 256) as u16;
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1);
+        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1, 8);
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
     }
 
@@ -3261,7 +3330,7 @@ mod tests {
         // ceiling for any `pri_str`, so for `pri_str = 12` the filtered
         // output can move by at most that much, not by an arbitrarily large
         // amount driven by an unclamped `var_str`.
-        let mut plane = vec![0u8; 64];
+        let mut plane = vec![0u16; 64];
         for y in 0..8 {
             for x in 0..8 {
                 plane[y * 8 + x] = if x < 4 { 40 } else { 220 };
@@ -3269,7 +3338,7 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &[false], 1);
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &[false], 1, 8);
         // With a correctly-capped `var_str`, CDEF must not blend the two
         // halves into a single intermediate value that erases the edge —
         // the two sides should stay clearly separated at every row.
@@ -3292,9 +3361,9 @@ mod tests {
         // A 16×16 plane holds four 8×8 blocks. Filter only the top-left 8×8 unit
         // with a non-zero strength; the other three must stay untouched (the
         // per-64×64-unit loop passes a region, not the whole plane).
-        let mut plane = vec![0u8; 16 * 16];
+        let mut plane = vec![0u16; 16 * 16];
         for (i, v) in plane.iter_mut().enumerate() {
-            *v = ((i * 53) % 256) as u8;
+            *v = ((i * 53) % 256) as u16;
         }
         let src = plane.clone();
         cdef_plane_luma(
@@ -3311,6 +3380,7 @@ mod tests {
             8,
             &[false; 4],
             2,
+            8,
         );
         for y in 8..16 {
             for x in 0..16 {
@@ -3333,7 +3403,7 @@ mod tests {
         // with a strong, edge-triggering strength that would otherwise change
         // it. Before this fix `cdef_plane_luma` had no skip awareness at all
         // and filtered every 8×8 in the unit unconditionally.
-        let mut plane = vec![0u8; 8 * 8];
+        let mut plane = vec![0u16; 8 * 8];
         for y in 0..8 {
             for x in 0..8 {
                 // A hard step edge: exactly the kind of content CDEF's
@@ -3343,7 +3413,7 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 2, 4, 0, 0, 8, 8, &[true], 1);
+        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 2, 4, 0, 0, 8, 8, &[true], 1, 8);
         assert_eq!(
             plane, orig,
             "a fully-skipped 8x8 block must be left untouched by CDEF"
@@ -3360,7 +3430,7 @@ mod cdef_dir_probe {
     /// (best_dir=3 C-path / dir=0 SIMD-path) disagree on the direction.
     #[test]
     fn probe_cdef_direction_diverging_unit() {
-        let blk: Vec<u8> = vec![
+        let blk: Vec<Px> = vec![
             38, 43, 44, 43, 44, 44, 43, 42, //
             39, 44, 45, 45, 44, 45, 45, 44, //
             43, 46, 46, 46, 46, 47, 47, 47, //
