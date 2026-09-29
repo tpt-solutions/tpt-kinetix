@@ -217,6 +217,8 @@ pub struct Av1Decoder {
     ref_frame_dims: [(u32, u32); 8],
     /// Per-slot saved loop-filter ref/mode deltas (`save_loop_filter_params`).
     ref_lf_deltas: [crate::frame::LoopFilterDeltas; 8],
+    /// Per-slot saved global-motion parameters (`PrevGmParams` source).
+    ref_gm_params: [[[i32; 6]; 8]; 8],
     /// Per-slot saved CDF contexts (§6.8.2 context update): a frame with
     /// `primary_ref_frame != PRIMARY_REF_NONE` starts from the named slot's
     /// adapted CDFs; a `refresh_context` frame saves its adapted CDFs into the
@@ -236,6 +238,7 @@ impl Av1Decoder {
             ref_order_hints: [0u8; 8],
             ref_frame_dims: [(0u32, 0u32); 8],
             ref_lf_deltas: [crate::frame::LoopFilterDeltas::default(); 8],
+            ref_gm_params: [crate::frame::default_gm_params(); 8],
             ref_cdf_contexts: [None, None, None, None, None, None, None, None],
         }
     }
@@ -349,6 +352,7 @@ impl Av1Decoder {
                         &self.ref_order_hints,
                         &self.ref_frame_dims,
                         &self.ref_lf_deltas,
+                        &self.ref_gm_params,
                     );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!("KIN ObuType::Frame parse_with_dpb ok={}", parsed.is_ok());
@@ -374,6 +378,7 @@ impl Av1Decoder {
                         &self.ref_order_hints,
                         &self.ref_frame_dims,
                         &self.ref_lf_deltas,
+                        &self.ref_gm_params,
                     );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!(
@@ -635,6 +640,7 @@ impl Av1Decoder {
                 self.ref_order_hints[i] = order_hint;
                 self.ref_frame_dims[i] = stored_dims;
                 self.ref_lf_deltas[i] = fh.loop_filter_deltas;
+                self.ref_gm_params[i] = fh.gm_params;
             }
         }
         if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
