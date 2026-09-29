@@ -155,15 +155,7 @@ impl VisionDecoder for VisionDecoderImpl {
                 "vision: original codec; pixel_exact is false".to_string(),
             ));
         }
-        let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
-        let frame_header = FrameHeader::parse(&mut reader, sequence)?;
-        let header_bytes = frame_header.to_bytes();
-        if packet.data.len() < header_bytes.len() {
-            return Err(KinetixError::Parse(
-                "vision: packet too short for frame header".into(),
-            ));
-        }
-        let payload = &packet.data[header_bytes.len()..];
+        let (frame_header, payload) = split_packet(sequence, packet)?;
         Ok(Some(decode_tensor(sequence, &frame_header, payload)?))
     }
 
@@ -178,15 +170,7 @@ impl VisionDecoder for VisionDecoderImpl {
                 "vision: original codec; pixel_exact is false".to_string(),
             ));
         }
-        let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
-        let frame_header = FrameHeader::parse(&mut reader, sequence)?;
-        let header_bytes = frame_header.to_bytes();
-        if packet.data.len() < header_bytes.len() {
-            return Err(KinetixError::Parse(
-                "vision: packet too short for frame header".into(),
-            ));
-        }
-        let payload = &packet.data[header_bytes.len()..];
+        let (frame_header, payload) = split_packet(sequence, packet)?;
         let reference = self.dpb.last();
         let fb = decode_frame_payload(sequence, &frame_header, reference, payload)?;
         let is_key = frame_header.frame_type == FrameType::Key;
@@ -200,6 +184,30 @@ impl VisionDecoder for VisionDecoderImpl {
     }
 }
 
+/// Parse a packet into its frame header and exactly `payload_len` bytes of
+/// rANS payload. Trailing bytes beyond `payload_len` (muxer padding) are
+/// ignored; a packet whose payload is shorter than declared is a parse error.
+fn split_packet<'a>(
+    sequence: &SequenceHeader,
+    packet: &'a Packet,
+) -> Result<(FrameHeader, &'a [u8]), KinetixError> {
+    let mut reader = tpt_kinetix_bitstream::BitReader::new(&packet.data);
+    let frame_header = FrameHeader::parse(&mut reader, sequence)?;
+    let header_len = frame_header.to_bytes().len();
+    let payload_all = packet
+        .data
+        .get(header_len..)
+        .ok_or_else(|| KinetixError::Parse("vision: packet too short for frame header".into()))?;
+    let payload_len = frame_header.payload_len as usize;
+    if payload_all.len() < payload_len {
+        return Err(KinetixError::Parse(format!(
+            "vision: packet carries {} payload bytes, frame header declares {payload_len}",
+            payload_all.len()
+        )));
+    }
+    Ok((frame_header, &payload_all[..payload_len]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +218,7 @@ mod tests {
             version: 1,
             max_width: 1920,
             max_height: 1080,
-            chroma_present: false,
+            chroma_present: true,
             bit_depth: 8,
             qp_precision: 0,
             max_ref_frames: 2,
@@ -222,6 +230,8 @@ mod tests {
     }
 
     fn make_packet(frame: &FrameHeader, payload: &[u8]) -> Packet {
+        let mut frame = frame.clone();
+        frame.payload_len = payload.len() as u32;
         let header_bytes = frame.to_bytes();
         let mut data = Vec::with_capacity(header_bytes.len() + payload.len());
         data.extend_from_slice(&header_bytes);
@@ -307,5 +317,99 @@ mod tests {
         let decoded = dec.decode_pixels(&packet).unwrap().unwrap();
         assert_eq!(decoded.width, 16);
         assert_eq!(decoded.height, 16);
+    }
+
+    #[test]
+    fn tensor_path_round_trips_through_decoder() {
+        let seq = sample_sequence();
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 0,
+            payload_len: 0,
+        };
+        let luma = vec![96u8; 16 * 16];
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let payload = encode_frame(&seq, &frame, &src, None).unwrap();
+        let packet = make_packet(&frame, &payload);
+        let mut dec = VisionDecoderImpl::new();
+        dec.set_sequence_header(seq);
+        let tensor = dec.decode_tensor(&packet).unwrap().unwrap();
+        assert_eq!(tensor.shape, [1, 1, 1]);
+        assert_eq!(tensor.stride, 16);
+        assert_eq!(tensor.data.len(), 1);
+    }
+
+    #[test]
+    fn inter_frame_follows_key_frame_through_dpb() {
+        let seq = sample_sequence();
+        let key = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
+        let inter = FrameHeader {
+            frame_type: FrameType::Inter,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 1,
+            output_mode: 2,
+            payload_len: 0,
+        };
+        let luma: Vec<u8> = (0..256).map(|i| (i * 5) as u8).collect();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma, vec![128u8; 8 * 8], vec![128u8; 8 * 8]).unwrap();
+        let key_payload = encode_frame(&seq, &key, &src, None).unwrap();
+        let inter_payload = encode_frame(&seq, &inter, &src, Some(&src)).unwrap();
+        let mut dec = VisionDecoderImpl::new();
+        dec.set_sequence_header(seq);
+        let key_frame_out = dec
+            .decode_pixels(&make_packet(&key, &key_payload))
+            .unwrap()
+            .unwrap();
+        assert!(key_frame_out.is_key_frame);
+        let inter_frame_out = dec
+            .decode_pixels(&make_packet(&inter, &inter_payload))
+            .unwrap()
+            .unwrap();
+        assert!(!inter_frame_out.is_key_frame);
+    }
+
+    #[test]
+    fn truncated_payload_is_an_error_not_a_panic() {
+        let seq = sample_sequence();
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
+        let src = FrameBuffer::from_yuv420(
+            16,
+            16,
+            vec![64u8; 256],
+            vec![128u8; 8 * 8],
+            vec![128u8; 8 * 8],
+        )
+        .unwrap();
+        let payload = encode_frame(&seq, &frame, &src, None).unwrap();
+        let mut packet = make_packet(&frame, &payload);
+        packet.data.truncate(15 + payload.len() / 2);
+        let mut dec = VisionDecoderImpl::new();
+        dec.set_sequence_header(seq);
+        assert!(dec.decode_pixels(&packet).is_err());
+        assert!(dec.decode_tensor(&packet).is_err());
     }
 }

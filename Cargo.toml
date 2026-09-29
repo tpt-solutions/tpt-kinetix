@@ -21,7 +21,7 @@ members = [
   "tpt-kinetix-cli",
   "tpt-kinetix-test-utils",
 ]
-exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
 
 [workspace.package]
 edition = "2021"

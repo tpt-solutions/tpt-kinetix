@@ -82,11 +82,12 @@
 > actually decided on. Do not start implementation on any of these without
 > first writing its own Phase-13-style design section here.
 
-- [~] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
+- [x] `tpt-kinetix-vision` — video-for-machines: optimize for detector/
       classifier accuracy per bit rather than human perceptual quality;
       chroma-optional, model-matched bit depth, tensor-output decode path
-      (see `docs/codec-backlog.md` for design notes) — design phase started,
-      see Phase 15
+      (see `docs/codec-backlog.md` for design notes) — design (Phase 15) and
+      dual-path decode implementation complete; decode shell hardened
+      2026-09-29 (see the Phase 15 Implementation section)
 
 > Expanded 2026-08-06: the five items below were each a single line standing
 > in for an entire future effort the size of Phase 13/15 (design doc →
@@ -339,6 +340,57 @@
       trait (dual-path `decode_tensor` + `decode_pixels`) implemented as
       scaffold with the honesty contract (`pixel_exact: false`, strict mode
       returns `NotPixelExact`)
+
+### Implementation — decode shell (2026-08-29, hardened 2026-09-29)
+- [x] Implement the reconstruction stack (`src/headers.rs`, `src/prediction.rs`,
+      `src/quant.rs`, `src/transform.rs`, `src/deblock.rs`,
+      `src/reconstruct.rs`; commits `e041ed3` + overhaul `fd77230`): byte-aligned
+      `VISN` sequence/frame headers with validation, 14-mode intra +
+      unidirectional-P inter prediction (same math as lean), integer
+      Walsh–Hadamard transform bank, ML-weighted quant matrices
+      (aggressive/balanced/conservative, DC-preserving/HF-coarsening),
+      single-stage deblocking, 4:2:0 chroma, DPB-managed `VisionDecoderImpl`
+- [x] Dual-path decode end-to-end: `decode_tensor()` (entropy + dequant +
+      stride-16 pooling, no pixel reconstruction) and `decode_pixels()`
+      (full reconstruction); wired into the CLI `vision` subcommand
+      (file framing + `--demo` round-trip + `--tensor`) and the
+      `codec_status` conformance report
+- [x] Honor `chroma_present = 0` (DECISION 3's luma-only default): the
+      encoder emits no chroma blocks and the decoder reconstructs neutral-128
+      chroma planes
+- [x] Decode-shell honesty hardening (2026-09-29): declared-but-unimplemented
+      header features now reject with `KinetixError::Unsupported` instead of
+      silently mis-decoding — `version != 1`, `bit_depth = 10` (8-bit-only
+      decode path), `qp_precision != 0`, `num_rans_streams != 1`, embedded
+      quant matrix (`quant_matrix_id = 3`); block sizes bounded to the design
+      range 8x8..64x64 (`block_size_log2` 3..=6); degenerate 0-width/0-height
+      frames and `output_mode > 2` rejected at parse
+- [x] Panic-free decode on malformed input: exact block-count contract
+      (truncated/over-long rANS payloads are `Parse` errors, previously an
+      index panic on the luma path) and `payload_len` framing enforcement in
+      `VisionDecoderImpl` (trailing muxer padding sliced off)
+- [x] Quantization-matrix folding for non-8x8 blocks (`quant::matrix_pos`):
+      coefficients of 4x4 (chroma)/16x16/32x32/64x64 blocks fold onto the
+      fixed 8x8 matrices by frequency — previously any block size other than
+      8x8 indexed the matrix out of bounds and panicked
+- [x] Add `fuzz/` target `fuzz_vision_parser` (sequence header → frame
+      headers → full tensor + pixel decode, panic-free on any input),
+      excluded from the workspace like every other fuzz crate
+- [x] 32 tests pass (header round-trips + rejections, qp=0 keyframe/inter
+      round-trips, luma-only neutral chroma, 16x16 blocks, truncation
+      no-panic, strict-mode `NotPixelExact`, decoder-level DPB/tensor paths);
+      clippy-clean
+
+### Remaining (post-decode-shell)
+- [ ] mAP-vs-bitrate validation harness (DECISION 6: COCO-val + YOLOv8-n,
+      `vision-bench` feature in `tpt-kinetix-test-utils`)
+- [ ] 10-bit decode path (header accepts 8 only today; 10 rejects with
+      `Unsupported`)
+- [ ] Stream-embedded quantization matrices (id 3)
+- [ ] Multi-size partitioning (`max_block_size_log2` is validated but the
+      v1 coder uses a single block size per sequence)
+- `output_mode` is validated (0-2) but advisory in v1: payloads always carry
+  the full block layer, so both decode paths work on any frame
 
 ## Phase 16 — Granular Next Steps (2026-08-06)
 

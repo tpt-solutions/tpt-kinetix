@@ -580,7 +580,8 @@ impl<'a> SymbolDecoder<'a> {
         }
 
         if std::env::var("KINETIX_AV1_SEQWALK").is_ok() {
-            eprintln!("KSEQ {}", self.symbol_range);
+            let loc = Location::caller();
+            eprintln!("KSEQ {} {}", self.symbol_range, loc);
         }
         if symbol_trace_enabled() {
             let bit_pos_after = self.bit_pos;

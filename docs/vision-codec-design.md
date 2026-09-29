@@ -1,7 +1,14 @@
-# `tpt-kinetix-vision` — Design Draft
+# `tpt-kinetix-vision` — Design
 
-> **Status:** Draft with decision points flagged. Nothing is implemented yet.
-> Every `DECISION:` block below lists the alternatives and a recommendation.
+> **Status:** all `DECISION:` blocks resolved; the **decode shell is
+> implemented** (see Phase 15 in `todo-codecs.md` for what exists). Working
+> today: dual-path tensor/pixel decode, 8-bit 4:2:0 or luma-only
+> (`chroma_present = 0`), 8x8..64x64 block sizes, the three built-in quant
+> matrices, and the honesty contract (`pixel_exact: false`, `Unsupported`
+> rejections for declared-but-unimplemented features). Not yet implemented:
+> the mAP-vs-bitrate harness (DECISION 6), 10-bit decode, stream-embedded
+> quant matrices (id 3), and multi-size partitioning.
+> Every `DECISION:` block below lists the alternatives and the resolution.
 > Resolve all of them before scaffolding begins.
 
 ## Goal

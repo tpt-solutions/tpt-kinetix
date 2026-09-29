@@ -142,11 +142,25 @@ Everything below is independent of the H.264 decoder effort:
   gaps in `al06`/`al07`/`al22`/`am00`/`am05` multi-element/PCE/96kHz parsing)
   is retained here only as a record of work done before the move — don't
   resume it in this repo, and don't re-add a `tpt-kinetix-aac` crate.
-- **`tpt-kinetix-vision` — reconstruction not implemented.** Design + scaffold
-  done (Phase 15); crate is a decode shell only, `[~]` in todo-codecs.md.
+- **`tpt-kinetix-vision` — dual-path decode implemented (the old
+  "reconstruction not implemented" note here was stale).** The committed crate
+  (`e041ed3`/`fd77230`, 2026-08-29) already carries full reconstruction:
+  14-mode intra + unidirectional-P inter, Walsh–Hadamard transform, deblocking,
+  4:2:0 chroma, and the dual-path contract (`decode_tensor` fast path +
+  `decode_pixels`). 2026-09-29 session hardened the decode shell: honest
+  `Unsupported` rejections for declared-but-unimplemented features (version≠1,
+  bit_depth 10, qp_precision≠0, num_rans_streams≠1, embedded quant matrix id 3),
+  block-size range bound (8x8..64x64), panic-free truncated/over-long payload
+  handling (exact block-count contract + `payload_len` enforcement),
+  `chroma_present=0` luma-only honored end-to-end (neutral chroma), quant-matrix
+  folding fix for >8x8 blocks (was an OOB panic), and a `fuzz_vision_parser`
+  target. Remaining: mAP-vs-bitrate harness (DECISION 6), 10-bit, embedded
+  quant matrices, multi-size partitioning. `pixel_exact` stays `false`
+  (original codec, no external oracle).
 - **`tpt-kinetix-volumetric` — bit-exact cross-check pending.** Direct
   Kinetix-vs-TMC13 comparison blocked on coding-tool alignment; decoder still
-  reports `pixel_exact: false`.
+  reports `pixel_exact: false`. (The lattice-geometry cross-check landed in
+  `e1ffbf4` and passes whenever `tmc3` is installed.)
 - **Royalty-free codec expansion — VP9 done; audio codecs moved out; MPEG-TS
   demuxer done.**
   Direction set 2026-09-03: **VP9 decode → Opus decode → MP3 decode**, plus

@@ -124,17 +124,24 @@ impl<'a> TileDecodeState<'a> {
         self.decode_partition(mi_row, mi_col, sb_bsize)
     }
 
-    /// `read_lr(r, c, bSize)` (AV1 spec §5.11.57). `sb_mi` is
-    /// `Num_4x4_Blocks_Wide[sbSize]` (= `Num_4x4_Blocks_High`, superblocks are
-    /// square). The decoded Wiener / SGR coefficients are consumed for
-    /// bitstream sync but not yet applied (loop restoration stays a
-    /// passthrough — Phase D).
+    /// `read_lr(r, c, bSize)` (AV1 spec §5.11.57).
+    ///
+    /// Gating matches dav1d's `decode_sb` LR loop (decode.c ~2669): per
+    /// plane with LR enabled, the SB reads its restoration unit's symbols
+    /// only when the SB's pixel position is **unit-aligned** and inside the
+    /// frame's round-half-up boundary — `y & (unit_size-1) == 0`,
+    /// `y == 0 || y + unit_size/2 <= h`, same for `x`/`w`. Units larger
+    /// than an SB are therefore read only at the unit's top-left SB, and
+    /// units straddling the frame edge are read at the boundary SB.
+    /// (The previous overlap-range loop read LR symbols at SBs dav1d
+    /// skips — and skipped reads dav1d performs — desyncing the EC: the
+    /// extra reads' CDF adaptation flipped later shared reads, e.g. the
+    /// non_uniform_tiling oh=3 tile-2 skip flip at (112,56).)
     pub(super) fn read_lr(&mut self, r: usize, c: usize, sb_mi: usize) {
         if self.allow_intrabc || !self.lr.uses_lr {
             return;
         }
-        let w = sb_mi;
-        let h = sb_mi;
+        let _ = sb_mi;
         for plane in 0..self.lr.num_planes {
             if self.lr.frame_restoration_type[plane] == 0 {
                 continue;
@@ -150,27 +157,35 @@ impl<'a> TileDecodeState<'a> {
                 self.subsampling_y as usize
             };
             let unit_size = self.lr.lr_unit_size[plane].max(1) as usize;
-            let unit_rows = count_units_in_frame(unit_size, round2(self.lr.frame_height, sub_y));
-            let unit_cols = count_units_in_frame(unit_size, round2(self.lr.upscaled_width, sub_x));
-            let mi_step_y = MI_SIZE >> sub_y;
-            let mi_step_x = MI_SIZE >> sub_x;
-            let unit_row_start = (r * mi_step_y).div_ceil(unit_size);
-            let unit_row_end = unit_rows.min(((r + h) * mi_step_y).div_ceil(unit_size));
-            // No superres (this crate does not decode superres frames yet).
-            let unit_col_start = (c * mi_step_x).div_ceil(unit_size);
-            let unit_col_end = unit_cols.min(((c + w) * mi_step_x).div_ceil(unit_size));
+            let mask = unit_size - 1;
+            let half_unit = unit_size >> 1;
+            // SB pixel position (chroma-subsampled for planes 1/2).
+            let y = (r * MI_SIZE) >> sub_y;
+            let x = (c * MI_SIZE) >> sub_x;
+            let h = round2(self.lr.frame_height, sub_y);
+            let w = round2(self.lr.upscaled_width, sub_x);
+            if y & mask != 0 {
+                continue;
+            }
+            if y != 0 && y + half_unit > h {
+                continue;
+            }
+            if x & mask != 0 {
+                continue;
+            }
+            if x != 0 && x + half_unit > w {
+                continue;
+            }
+            let unit_row = y / unit_size;
+            let unit_col = x / unit_size;
             if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
                 eprintln!(
-                    "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} rows={unit_row_start}..{unit_row_end} cols={unit_col_start}..{unit_col_end} bit={}",
+                    "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} unit=({unit_row},{unit_col}) bit={}",
                     self.lr.frame_restoration_type[plane],
                     self.dec.bit_position()
                 );
             }
-            for unit_row in unit_row_start..unit_row_end {
-                for unit_col in unit_col_start..unit_col_end {
-                    self.read_lr_unit(plane, unit_row, unit_col);
-                }
-            }
+            self.read_lr_unit(plane, unit_row, unit_col);
         }
     }
 

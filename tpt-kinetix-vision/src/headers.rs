@@ -85,6 +85,11 @@ impl SequenceHeader {
         let block_size_log2 = read_u8(reader, "block_size_log2")?;
         let quant_matrix_id = read_u8(reader, "quant_matrix_id")?;
 
+        if version != 1 {
+            return Err(KinetixError::Unsupported(format!(
+                "vision stream version {version} (this decoder implements version 1)"
+            )));
+        }
         let min_block_size_log2 = block_size_log2 >> 4;
         let max_block_size_log2 = block_size_log2 & 0x0F;
         if min_block_size_log2 > max_block_size_log2 {
@@ -92,15 +97,53 @@ impl SequenceHeader {
                 "sequence header: min_block_size_log2 ({min_block_size_log2}) > max_block_size_log2 ({max_block_size_log2})"
             )));
         }
-        if bit_depth != 8 && bit_depth != 10 {
+        // The design range is 8x8..64x64; larger block_size_log2 values would
+        // also make the Hadamard bank unbounded, so reject them at parse.
+        if min_block_size_log2 < 3 || max_block_size_log2 > 6 {
             return Err(KinetixError::Parse(format!(
-                "sequence header: unsupported bit_depth {bit_depth}"
+                "sequence header: block_size_log2 range {min_block_size_log2}..{max_block_size_log2} outside 3..=6 (8x8..64x64)"
             )));
         }
-        if quant_matrix_id > 3 {
-            return Err(KinetixError::Parse(format!(
-                "sequence header: quant_matrix_id {quant_matrix_id} > 3"
+        match bit_depth {
+            8 => {}
+            10 => {
+                return Err(KinetixError::Unsupported(
+                    "vision bit_depth 10 is reserved by the design but the v1 decode path is 8-bit only".into(),
+                ));
+            }
+            other => {
+                return Err(KinetixError::Parse(format!(
+                    "sequence header: invalid bit_depth {other} (must be 8 or 10)"
+                )));
+            }
+        }
+        if qp_precision != 0 {
+            return Err(KinetixError::Unsupported(format!(
+                "vision qp_precision {qp_precision} (this decoder implements integer-only qp)"
             )));
+        }
+        if max_ref_frames > 4 {
+            return Err(KinetixError::Parse(format!(
+                "sequence header: max_ref_frames {max_ref_frames} > 4"
+            )));
+        }
+        if num_rans_streams != 1 {
+            return Err(KinetixError::Unsupported(format!(
+                "vision num_rans_streams {num_rans_streams} (this decoder implements a single entropy stream)"
+            )));
+        }
+        match quant_matrix_id {
+            0..=2 => {}
+            3 => {
+                return Err(KinetixError::Unsupported(
+                    "vision quant_matrix_id 3 (stream-embedded matrix) is reserved by the design but not implemented".into(),
+                ));
+            }
+            other => {
+                return Err(KinetixError::Parse(format!(
+                    "sequence header: quant_matrix_id {other} > 3"
+                )));
+            }
         }
 
         Ok(Self {
@@ -162,10 +205,20 @@ impl FrameHeader {
             .read_u32_be()
             .ok_or_else(|| KinetixError::Parse("frame header: truncated payload_len".into()))?;
 
+        if width == 0 || height == 0 {
+            return Err(KinetixError::Parse(format!(
+                "frame header: degenerate {width}x{height} frame"
+            )));
+        }
         if width > sequence.max_width || height > sequence.max_height {
             return Err(KinetixError::Parse(format!(
                 "frame header: {width}x{height} exceeds sequence ceiling {}x{}",
                 sequence.max_width, sequence.max_height
+            )));
+        }
+        if output_mode > 2 {
+            return Err(KinetixError::Parse(format!(
+                "frame header: invalid output_mode {output_mode} (must be 0, 1 or 2)"
             )));
         }
         if ref_frame_count > sequence.max_ref_frames {
@@ -286,6 +339,117 @@ mod tests {
             base_qp: 20,
             ref_frame_count: 1,
             output_mode: 0,
+            payload_len: 0,
+        };
+        let bytes = frame.to_bytes();
+        let mut reader = BitReader::new(&bytes);
+        assert!(FrameHeader::parse(&mut reader, &seq).is_err());
+    }
+
+    fn parse_sequence(seq: SequenceHeader) -> Result<SequenceHeader, KinetixError> {
+        let bytes = seq.to_bytes();
+        let mut reader = BitReader::new(&bytes);
+        SequenceHeader::parse(&mut reader)
+    }
+
+    #[test]
+    fn sequence_header_rejects_unknown_version() {
+        let mut seq = sample_sequence();
+        seq.version = 2;
+        assert!(matches!(
+            parse_sequence(seq),
+            Err(KinetixError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn sequence_header_rejects_10bit_as_unimplemented() {
+        let mut seq = sample_sequence();
+        seq.bit_depth = 10;
+        assert!(matches!(
+            parse_sequence(seq),
+            Err(KinetixError::Unsupported(_))
+        ));
+        seq.bit_depth = 12;
+        assert!(matches!(parse_sequence(seq), Err(KinetixError::Parse(_))));
+    }
+
+    #[test]
+    fn sequence_header_rejects_fractional_qp_precision() {
+        let mut seq = sample_sequence();
+        seq.qp_precision = 1;
+        assert!(matches!(
+            parse_sequence(seq),
+            Err(KinetixError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn sequence_header_rejects_multi_stream_and_ref_ceiling() {
+        let mut seq = sample_sequence();
+        seq.num_rans_streams = 2;
+        assert!(matches!(
+            parse_sequence(seq),
+            Err(KinetixError::Unsupported(_))
+        ));
+        let mut seq = sample_sequence();
+        seq.max_ref_frames = 5;
+        assert!(matches!(parse_sequence(seq), Err(KinetixError::Parse(_))));
+    }
+
+    #[test]
+    fn sequence_header_rejects_block_size_outside_design_range() {
+        let mut seq = sample_sequence();
+        seq.min_block_size_log2 = 2;
+        seq.max_block_size_log2 = 3;
+        assert!(parse_sequence(seq).is_err());
+        let mut seq = sample_sequence();
+        seq.min_block_size_log2 = 3;
+        seq.max_block_size_log2 = 7;
+        assert!(parse_sequence(seq).is_err());
+        // Valid boundaries still parse.
+        let mut seq = sample_sequence();
+        seq.min_block_size_log2 = 3;
+        seq.max_block_size_log2 = 6;
+        assert!(parse_sequence(seq).is_ok());
+    }
+
+    #[test]
+    fn sequence_header_rejects_embedded_quant_matrix_as_unimplemented() {
+        let mut seq = sample_sequence();
+        seq.quant_matrix_id = 3;
+        assert!(matches!(
+            parse_sequence(seq),
+            Err(KinetixError::Unsupported(_))
+        ));
+        seq.quant_matrix_id = 4;
+        assert!(matches!(parse_sequence(seq), Err(KinetixError::Parse(_))));
+    }
+
+    #[test]
+    fn frame_header_rejects_degenerate_and_bad_output_mode() {
+        let seq = sample_sequence();
+        for (w, h) in [(0u16, 16u16), (16, 0)] {
+            let frame = FrameHeader {
+                frame_type: FrameType::Key,
+                width: w,
+                height: h,
+                base_qp: 0,
+                ref_frame_count: 0,
+                output_mode: 2,
+                payload_len: 0,
+            };
+            let bytes = frame.to_bytes();
+            let mut reader = BitReader::new(&bytes);
+            assert!(FrameHeader::parse(&mut reader, &seq).is_err());
+        }
+        let frame = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 3,
             payload_len: 0,
         };
         let bytes = frame.to_bytes();

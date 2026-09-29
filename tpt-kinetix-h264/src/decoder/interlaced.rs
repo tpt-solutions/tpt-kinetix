@@ -2317,7 +2317,7 @@ impl H264Decoder {
         };
 
         if std::env::var_os("KINETIX_B_FIELD_MB_DBG").is_some() {
-            let n = parsed.macroblocks.len().min(8);
+            let n = parsed.macroblocks.len().min(45);
             for (idx, mb) in parsed.macroblocks.iter().enumerate().take(n) {
                 let cells = parsed
                     .mv_store

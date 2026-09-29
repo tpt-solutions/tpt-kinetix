@@ -10,7 +10,7 @@ use tpt_kinetix_core::{
 use crate::deblock::{deblock_chroma, deblock_luma, DeblockBlock};
 use crate::headers::{ChromaFormat, FrameHeader, FrameType, SequenceHeader};
 use crate::prediction::{predict_inter_luma, predict_intra_block, IntraMode, MotionVector};
-use crate::quant::{dequantize, quant_matrix, quantize};
+use crate::quant::{dequantize, matrix_pos, quant_matrix, quantize};
 use crate::transform::{inverse_2d, transform_2d};
 use crate::Tensor;
 
@@ -51,8 +51,10 @@ impl FrameBuffer {
             height: h,
             format: ChromaFormat::Yuv420,
             luma: vec![0u8; w * h],
-            cb: vec![0u8; cw * ch],
-            cr: vec![0u8; cw * ch],
+            // Neutral mid-gray so luma-only streams (chroma_present == false)
+            // reconstruct to a valid all-neutral chroma plane.
+            cb: vec![128u8; cw * ch],
+            cr: vec![128u8; cw * ch],
             chroma_w: cw,
             chroma_h: ch,
         }
@@ -264,12 +266,22 @@ pub fn reconstruct_frame(
     let cgh = fb.chroma_h.div_ceil(chroma_b);
     let luma_total = gw * gh;
     let chroma_total = cgw * cgh;
+    let chroma_coded = seq.chroma_present;
     let qp = frame.base_qp as i32;
     let is_inter = frame.frame_type == FrameType::Inter;
     if is_inter && reference.is_none() {
         return Err(KinetixError::Parse(
             "vision inter frame without reference".into(),
         ));
+    }
+    // Exact block-count contract: a truncated or over-long block list is a
+    // parse error, never an index panic (checked before any block access).
+    let expected = luma_total + if chroma_coded { 2 * chroma_total } else { 0 };
+    if blocks.len() != expected {
+        return Err(KinetixError::Parse(format!(
+            "vision payload has {} blocks, expected {expected}",
+            blocks.len()
+        )));
     }
 
     let matrix = quant_matrix(seq.quant_matrix_id);
@@ -291,51 +303,64 @@ pub fn reconstruct_frame(
             is_inter,
         )?;
     }
-    let chroma_offset = luma_total;
-    for plane_idx in 0..2usize {
-        for (bi, db) in chroma_db.iter_mut().enumerate().take(chroma_total) {
-            let sx = bi % cgw;
-            let sy = bi / cgw;
-            let idx = chroma_offset + plane_idx * chroma_total + bi;
-            let block = blocks
-                .get(idx)
-                .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
-            *db = reconstruct_chroma_block(
-                &mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, matrix, is_inter,
-            )?;
+    if chroma_coded {
+        let chroma_offset = luma_total;
+        for plane_idx in 0..2usize {
+            for (bi, db) in chroma_db.iter_mut().enumerate().take(chroma_total) {
+                let sx = bi % cgw;
+                let sy = bi / cgw;
+                let idx = chroma_offset + plane_idx * chroma_total + bi;
+                let block = blocks
+                    .get(idx)
+                    .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
+                *db = reconstruct_chroma_block(
+                    &mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, matrix, is_inter,
+                )?;
+            }
         }
-    }
 
-    deblock_luma(
-        &mut fb.luma,
-        fb.width,
-        fb.width,
-        fb.height,
-        gw,
-        gh,
-        luma_b,
-        &luma_db,
-    );
-    deblock_chroma(
-        &mut fb.cb,
-        fb.chroma_w,
-        fb.chroma_w,
-        fb.chroma_h,
-        cgw,
-        cgh,
-        chroma_b,
-        &chroma_db,
-    );
-    deblock_chroma(
-        &mut fb.cr,
-        fb.chroma_w,
-        fb.chroma_w,
-        fb.chroma_h,
-        cgw,
-        cgh,
-        chroma_b,
-        &chroma_db,
-    );
+        deblock_luma(
+            &mut fb.luma,
+            fb.width,
+            fb.width,
+            fb.height,
+            gw,
+            gh,
+            luma_b,
+            &luma_db,
+        );
+        deblock_chroma(
+            &mut fb.cb,
+            fb.chroma_w,
+            fb.chroma_w,
+            fb.chroma_h,
+            cgw,
+            cgh,
+            chroma_b,
+            &chroma_db,
+        );
+        deblock_chroma(
+            &mut fb.cr,
+            fb.chroma_w,
+            fb.chroma_w,
+            fb.chroma_h,
+            cgw,
+            cgh,
+            chroma_b,
+            &chroma_db,
+        );
+    } else {
+        deblock_luma(
+            &mut fb.luma,
+            fb.width,
+            fb.width,
+            fb.height,
+            gw,
+            gh,
+            luma_b,
+            &luma_db,
+        );
+    }
     Ok(fb)
 }
 
@@ -471,7 +496,8 @@ fn add_residual(
         if k >= coeffs.len() {
             break;
         }
-        coeffs[k] = dequantize(c, matrix, k / 8, k % 8, qp as u8);
+        let (mr, mc) = matrix_pos(k, n);
+        coeffs[k] = dequantize(c, matrix, mr, mc, qp as u8);
     }
     let mut residual = vec![0i32; n * n];
     inverse_2d(&coeffs, n, &mut residual);
@@ -555,13 +581,51 @@ pub fn decode_frame_payload(
     reference: Option<&FrameBuffer>,
     payload: &[u8],
 ) -> Result<FrameBuffer, KinetixError> {
+    let blocks = parse_blocks(seq, frame, payload)?;
+    reconstruct_frame(seq, frame, reference, &blocks)
+}
+
+/// Parse the rANS payload into the block syntax list, enforcing the exact
+/// expected block count (luma blocks, then cb/cr when the sequence declares
+/// `chroma_present`). A truncated or over-long list is a parse error rather
+/// than an index panic downstream.
+fn parse_blocks(
+    seq: &SequenceHeader,
+    frame: &FrameHeader,
+    payload: &[u8],
+) -> Result<Vec<BlockSyntax>, KinetixError> {
     let raw = decode_frame_bytes(payload)?;
     let mut r = raw.as_slice();
     let mut blocks = Vec::new();
     while !r.is_empty() {
         blocks.push(read_block(&mut r)?);
     }
-    reconstruct_frame(seq, frame, reference, &blocks)
+    let (luma_b, _) = block_sizes(seq);
+    let luma_total =
+        (frame.width as usize).div_ceil(luma_b) * (frame.height as usize).div_ceil(luma_b);
+    let expected = luma_total
+        + if seq.chroma_present {
+            2 * chroma_block_total(seq, frame)
+        } else {
+            0
+        };
+    if blocks.len() != expected {
+        return Err(KinetixError::Parse(format!(
+            "vision payload has {} blocks, expected {expected}",
+            blocks.len()
+        )));
+    }
+    Ok(blocks)
+}
+
+fn chroma_block_total(seq: &SequenceHeader, frame: &FrameHeader) -> usize {
+    let (_, chroma_b) = block_sizes(seq);
+    let (cw, ch) = chroma_dims(
+        ChromaFormat::Yuv420,
+        frame.width as usize,
+        frame.height as usize,
+    );
+    cw.div_ceil(chroma_b) * ch.div_ceil(chroma_b)
 }
 
 /// Encode a frame into a single rANS payload.
@@ -596,44 +660,48 @@ pub fn encode_frame(
             is_inter,
         )?);
     }
-    let mut cb_syntax = Vec::with_capacity(chroma_total);
-    let mut cr_syntax = Vec::with_capacity(chroma_total);
-    for bi in 0..chroma_total {
-        let sx = bi % cgw;
-        let sy = bi / cgw;
-        cb_syntax.push(encode_chroma_block(
-            src,
-            reference,
-            0,
-            sx,
-            sy,
-            chroma_b,
-            frame.base_qp,
-            matrix,
-            is_inter,
-        )?);
-        cr_syntax.push(encode_chroma_block(
-            src,
-            reference,
-            1,
-            sx,
-            sy,
-            chroma_b,
-            frame.base_qp,
-            matrix,
-            is_inter,
-        )?);
+    let mut cb_syntax = Vec::new();
+    let mut cr_syntax = Vec::new();
+    if seq.chroma_present {
+        for bi in 0..chroma_total {
+            let sx = bi % cgw;
+            let sy = bi / cgw;
+            cb_syntax.push(encode_chroma_block(
+                src,
+                reference,
+                0,
+                sx,
+                sy,
+                chroma_b,
+                frame.base_qp,
+                matrix,
+                is_inter,
+            )?);
+            cr_syntax.push(encode_chroma_block(
+                src,
+                reference,
+                1,
+                sx,
+                sy,
+                chroma_b,
+                frame.base_qp,
+                matrix,
+                is_inter,
+            )?);
+        }
     }
 
     let mut raw = Vec::new();
     for b in &luma_syntax {
         write_block(&mut raw, b);
     }
-    for b in &cb_syntax {
-        write_block(&mut raw, b);
-    }
-    for b in &cr_syntax {
-        write_block(&mut raw, b);
+    if seq.chroma_present {
+        for b in &cb_syntax {
+            write_block(&mut raw, b);
+        }
+        for b in &cr_syntax {
+            write_block(&mut raw, b);
+        }
     }
     Ok(encode_frame_bytes(&raw))
 }
@@ -790,7 +858,8 @@ fn encode_residual(
     let mut coeffs = Vec::with_capacity(n);
     let mut last = 0;
     for (i, &t) in transformed.iter().enumerate() {
-        let q = quantize(t, matrix, i / 8, i % 8, qp);
+        let (mr, mc) = matrix_pos(i, b);
+        let q = quantize(t, matrix, mr, mc, qp);
         coeffs.push(q);
         if q != 0 {
             last = i + 1;
@@ -813,7 +882,8 @@ fn apply_reconstruct(
         if k >= n {
             break;
         }
-        full[k] = dequantize(c, matrix, k / 8, k % 8, qp);
+        let (mr, mc) = matrix_pos(k, b);
+        full[k] = dequantize(c, matrix, mr, mc, qp);
     }
     let mut residual = vec![0i32; n];
     inverse_2d(&full, b, &mut residual);
@@ -846,12 +916,7 @@ pub fn decode_tensor(
     frame: &FrameHeader,
     payload: &[u8],
 ) -> Result<Tensor, KinetixError> {
-    let raw = decode_frame_bytes(payload)?;
-    let mut r = raw.as_slice();
-    let mut blocks = Vec::new();
-    while !r.is_empty() {
-        blocks.push(read_block(&mut r)?);
-    }
+    let blocks = parse_blocks(seq, frame, payload)?;
 
     let (luma_b, _) = block_sizes(seq);
     let gw = frame.width as usize / luma_b;
@@ -876,7 +941,8 @@ pub fn decode_tensor(
             if k >= n {
                 break;
             }
-            full[k] = dequantize(c, matrix, k / 8, k % 8, frame.base_qp);
+            let (mr, mc) = matrix_pos(k, luma_b);
+            full[k] = dequantize(c, matrix, mr, mc, frame.base_qp);
         }
         // Downsample: average each stride×stride region of the dequantized block.
         let tx = bx * luma_b / stride;
@@ -908,7 +974,7 @@ mod tests {
             version: 1,
             max_width: 1920,
             max_height: 1080,
-            chroma_present: false,
+            chroma_present: true,
             bit_depth: 8,
             qp_precision: 0,
             max_ref_frames: 2,
@@ -993,5 +1059,126 @@ mod tests {
         let tensor = decode_tensor(&s, &f, &payload).unwrap();
         assert!(!tensor.data.is_empty());
         assert_eq!(tensor.stride, 16);
+    }
+
+    #[test]
+    fn luma_only_stream_reconstructs_neutral_chroma() {
+        // chroma_present == false is the default for detection encodes: the
+        // payload carries no chroma blocks and the decoder emits neutral 4:2:0.
+        let mut s = seq();
+        s.chroma_present = false;
+        let f = key_frame();
+        let mut luma = vec![0u8; 16 * 16];
+        for y in 0..16 {
+            for x in 0..16 {
+                luma[y * 16 + x] = ((x + y) * 8) as u8;
+            }
+        }
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma.clone(), vec![128; 64], vec![128; 64]).unwrap();
+        let payload = encode_frame(&s, &f, &src, None).unwrap();
+        let decoded = decode_frame_payload(&s, &f, None, &payload).unwrap();
+        for y in 0..16 {
+            for x in 0..16 {
+                let diff = luma[y * 16 + x].abs_diff(decoded.luma[y * 16 + x]);
+                assert!(diff <= 8, "luma mismatch at ({x},{y}): {diff}");
+            }
+        }
+        assert!(decoded.cb.iter().all(|&v| v == 128));
+        assert!(decoded.cr.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn sixteen_by_sixteen_blocks_round_trip() {
+        // The header allows block sizes up to 64x64; exercise 16x16 to guard
+        // the quantization-matrix folding for non-8 blocks (previously an
+        // out-of-bounds panic).
+        let mut s = seq();
+        s.min_block_size_log2 = 4;
+        s.max_block_size_log2 = 4;
+        let f = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 0,
+            output_mode: 2,
+            payload_len: 0,
+        };
+        let mut luma = vec![0u8; 16 * 16];
+        for y in 0..16 {
+            for x in 0..16 {
+                luma[y * 16 + x] = ((x * 11 + y * 5) & 0xFF) as u8;
+            }
+        }
+        let src =
+            FrameBuffer::from_yuv420(16, 16, luma.clone(), vec![128u8; 8 * 8], vec![128u8; 8 * 8])
+                .unwrap();
+        let payload = encode_frame(&s, &f, &src, None).unwrap();
+        let decoded = decode_frame_payload(&s, &f, None, &payload).unwrap();
+        for y in 0..16 {
+            for x in 0..16 {
+                let diff = luma[y * 16 + x].abs_diff(decoded.luma[y * 16 + x]);
+                assert!(diff <= 12, "luma mismatch at ({x},{y}): {diff}");
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_block_list_is_an_error_not_a_panic() {
+        let s = seq();
+        let f = key_frame();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, vec![64u8; 256], vec![128u8; 64], vec![128u8; 64])
+                .unwrap();
+        let payload = encode_frame(&s, &f, &src, None).unwrap();
+        // rANS payloads decode back-to-front, so truncating the tail cuts the
+        // last-coded (first-decoded) blocks: the count check must reject this.
+        let truncated = &payload[..payload.len() / 2];
+        assert!(decode_frame_payload(&s, &f, None, truncated).is_err());
+    }
+
+    #[test]
+    fn extra_payload_bytes_are_rejected() {
+        // The rANS payload must decode to exactly the expected block list.
+        // (Muxer padding never reaches this layer: `VisionDecoder` and the
+        // CLI both slice the packet to the header's `payload_len` first.)
+        let s = seq();
+        let f = key_frame();
+        let src =
+            FrameBuffer::from_yuv420(16, 16, vec![64u8; 256], vec![128u8; 64], vec![128u8; 64])
+                .unwrap();
+        let payload = encode_frame(&s, &f, &src, None).unwrap();
+        let mut padded = payload.clone();
+        padded.extend_from_slice(&[0u8; 7]);
+        assert!(decode_frame_payload(&s, &f, None, &padded).is_err());
+    }
+
+    #[test]
+    fn inter_frame_round_trips_against_key_reference() {
+        let s = seq();
+        let key = key_frame();
+        let inter = FrameHeader {
+            frame_type: FrameType::Inter,
+            width: 16,
+            height: 16,
+            base_qp: 0,
+            ref_frame_count: 1,
+            output_mode: 2,
+            payload_len: 0,
+        };
+        let luma: Vec<u8> = (0..256).map(|i| (i * 3) as u8).collect();
+        let src = FrameBuffer::from_yuv420(16, 16, luma.clone(), vec![128u8; 64], vec![128u8; 64])
+            .unwrap();
+        let key_payload = encode_frame(&s, &key, &src, None).unwrap();
+        let reference = decode_frame_payload(&s, &key, None, &key_payload).unwrap();
+        let inter_payload = encode_frame(&s, &inter, &src, Some(&reference)).unwrap();
+        let decoded = decode_frame_payload(&s, &inter, Some(&reference), &inter_payload).unwrap();
+        for y in 0..16 {
+            for x in 0..16 {
+                let diff = luma[y * 16 + x].abs_diff(decoded.luma[y * 16 + x]);
+                assert!(diff <= 8, "inter luma mismatch at ({x},{y}): {diff}");
+            }
+        }
     }
 }

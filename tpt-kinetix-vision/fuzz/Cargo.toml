@@ -1,0 +1,26 @@
+[package]
+name = "tpt-kinetix-vision-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-vision = { path = ".." }
+tpt-kinetix-bitstream = { path = "../../tpt-kinetix-bitstream" }
+tpt-kinetix-core = { path = "../../tpt-kinetix-core" }
+
+[[bin]]
+name = "fuzz_vision_parser"
+path = "fuzz_targets/fuzz_vision_parser.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1

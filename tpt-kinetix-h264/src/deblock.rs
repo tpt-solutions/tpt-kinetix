@@ -222,15 +222,28 @@ fn derive_bs_pair(
     if v {
         // Mirrored-list equivalence: an L0-only block next to an L1-only (or
         // bi-predicted) block whose lists/MVs are swapped is NOT a difference.
+        // Table 8-16's floor is still bS = 1 here: every real block boundary
+        // between two non-intra blocks filters at least weakly (bS = 0 exists
+        // only outside this derivation — non-edges and `disable_idc`-disabled
+        // slice boundaries). A bS of 0 returned here silently skipped the
+        // weak filter on exactly the "flat but not identical" edges where the
+        // reference (JM *and* ffmpeg both derive a minimum of 1) still moves
+        // samples — invisible on flat skip-to-skip edges (`dif` rounds to 0),
+        // which is why 33 exact conformance clips never caught it.
         if p_cell.ref_idx != q_cell.ref_idx_l1 || p_cell.ref_idx_l1 != q_cell.ref_idx {
             return 1;
         }
-        return (mv_ge4_x(p_cell.mv[0], q_cell.mv_l1[0])
+        return if mv_ge4_x(p_cell.mv[0], q_cell.mv_l1[0])
             || mv_ge4_y_limit(p_cell.mv[1], q_cell.mv_l1[1], mvy_limit)
             || mv_ge4_x(p_cell.mv_l1[0], q_cell.mv[0])
-            || mv_ge4_y_limit(p_cell.mv_l1[1], q_cell.mv[1], mvy_limit)) as u8;
+            || mv_ge4_y_limit(p_cell.mv_l1[1], q_cell.mv[1], mvy_limit)
+        {
+            2
+        } else {
+            1
+        };
     }
-    0
+    1
 }
 
 /// Boundary strengths for the four 4-sample segments of a luma edge, given
@@ -2093,10 +2106,16 @@ mod tests {
     }
 
     #[test]
-    fn bs_skip_edge_is_zero() {
+    fn bs_skip_edge_is_one() {
+        // Table 8-16's floor for two non-intra blocks with identical motion
+        // and no coefficients is bS = 1, not 0: every real block boundary
+        // between inter blocks filters at least weakly (bS = 0 exists only
+        // for non-edges / `disable_idc`-disabled slice boundaries). On flat
+        // skip-to-skip edges the weak filter's `dif` rounds to 0 either way,
+        // which is why this read as 0 for so long without failing a clip.
         let a = info(MbType::PSkip, false);
         let b = info(MbType::PSkip, false);
-        assert_eq!(bs_boundary(&a, &b), 0);
+        assert_eq!(bs_boundary(&a, &b), 1);
     }
 
     #[test]
@@ -2157,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn bs_small_mv_difference_without_coeffs_is_zero() {
+    fn bs_small_mv_difference_without_coeffs_is_one() {
         let mut a = info(MbType::PL016x16, false);
         let mut b = info(MbType::PL016x16, false);
         a.cells = [MvCell {
@@ -2172,7 +2191,10 @@ mod tests {
             mv_l1: [0, 0],
             ref_idx_l1: -1,
         }; 16];
-        assert_eq!(bs_boundary(&a, &b), 0);
+        // |dmv| = 3 < 4 and no coefficients: below the bS = 2 motion
+        // condition, so the Table 8-16 floor of bS = 1 applies (the edge is
+        // still weakly filtered).
+        assert_eq!(bs_boundary(&a, &b), 1);
     }
 
     #[test]
@@ -2303,9 +2325,10 @@ mod tests {
                 b.cells[0],
                 mvy_limit(false)
             ),
-            0
+            1
         );
-        // The x threshold is NOT halved: Δmv_x = 2 stays bS = 0 for fields.
+        // The x threshold is NOT halved: Δmv_x = 2 stays below the bS = 2
+        // motion condition for fields (floor bS = 1).
         b.cells = [cell([2, 0]); 16];
         assert_eq!(
             derive_bs_pair(
@@ -2318,7 +2341,7 @@ mod tests {
                 b.cells[0],
                 mvy_limit(true)
             ),
-            0
+            1
         );
     }
 
