@@ -14474,3 +14474,76 @@ Remaining item); those two were verified with dbg_dump_frame vs sf_ref.yuv.
 Scaled MC is only entered when ref dims != current dims.
 Not covered: scaled refs combined with superres (dav1d uses width[0]), and
 scaled local-warp/OBMC paths beyond what this stream exercises.
+
+## Session 2026-09-29 #6 -- FATE corpus 36/193 -> 194/204 (scorer fix + 12 decoder fixes)
+
+Result (av1_fate_score, ffmpeg+libdav1d reference, frames bit-exact):
+decode_model 0/21 -> 24/24, non_uniform_tiling 6/24 -> 24/24,
+seq_hdr_op_param_info 0/58 -> 64/64, frames_refs_short_signaling 1/50 -> 50/50,
+switch_frame 29/30 -> 32/32, film_grain 0/10 -> 0/10 (not attempted, see below).
+Aggregate 194/204. The denominators changed because of fixes 1 and 2.
+
+Method: the patched dav1d oracle (%LOCALAPPDATA%\Temp\dav1d_oracle\bld2) gained
+env-gated hooks (all read only when set): DAV1D_DBG_N=<decode-order frame> (per
+frame instead of frame_offset==30; the counter matches Kinetix's DBGSEQ n),
+DAV1D_DUMP_DIR (dump every decoded frame's planes), DAV1D_NODEBLOCK /
+DAV1D_NOCDEF_Y / DAV1D_NOCDEF_UV / DAV1D_NOLR (stage isolation; use --cpumask 0
+so the C load_tmvs/loop filters run), plus OLF (deblock segment params + pixel
+position), OCDEF (chroma CDEF params), KT/RP/SV (temporal candidate, projected
+grid, saved tmvs), CMVSTACK, OGM. Kinetix side: KINETIX_AV1_DBG_OLF=<n> (KLF),
+DBG_OCDEF=<n>, DBG_RPPROJ, DBG_SVDUMP, DBG_LFHDR (LFHDR/CDEFHDR), DBG_GMBITS,
+and KINETIX_AV1_DUMP_FRAMES now names files by decode-order number. Stage
+comparisons must run BOTH decoders with the same filters disabled for ALL
+frames (references differ otherwise); a full-mode run needs a full-mode
+comparison (that trap cost time on frames_refs_short_signaling n=19).
+
+Fixes (each its own commit):
+1. av1_fate_score: ffmpeg -noautoscale, reference sliced per decoded frame size
+   (switch_frame 30/31 are 426x240). 29/30 -> 31/32.
+2. frame header: temporal_point_info() (show_frame and show_existing_frame),
+   current_frame_id, delta_frame_id_minus_1 were not parsed. decode_model and
+   seq_hdr_op_param_info had decoder_model_info_present: frame 0 was flat grey.
+3. find_mv_stack: temporal candidates must be added BEFORE the corner/secondary
+   spatial scans (dav1d and spec order). Affects tie order and the 8-entry cap.
+4. motion field save: dav1d save_tmvs reads rt->r+6, i.e. the BOTTOM-right 4x4 of
+   each 8x8 cell (block row 2y+1), not the top row. non_uniform_tiling 6 -> 24.
+5. deblock: a chroma plane whose frame loop_filter_level[plane+1] is 0 is not
+   filtered at all (ref/mode deltas must not lift it above 0).
+6. inter blocks now write DC_PRED into the chroma-mode neighbour context
+   (uv_above/uv_left), so get_filter_type does not see a stale SMOOTH chroma mode.
+7. inter blocks now mark their cells in the BlockDecoded grid, so later intra
+   blocks get correct haveAboveRight/haveBelowLeft.
+8. chroma deblock zero-level fallback: vertical edges read the LEFT cell,
+   horizontal edges the ABOVE cell (was swapped). seq_hdr_op_param_info 28 -> 64.
+9. skipped inter blocks mark only block-boundary deblock edges; the interior
+   64x64 transform boundary of a 128-wide/tall block is not an edge
+   (frames_refs_short_signaling 12 -> 33).
+10. CFL: luma transform blocks straddling the mi-grid edge are reconstructed in
+    full; CFL averages over those overhang samples (kept in luma_overhang), and
+    MaxLuma rounds up to the luma transform size (dav1d furthest_r/furthest_b).
+    Also closes the old switch_frame frame 7 residual.
+11. global motion: constants were wrong (GM_ALPHA_PREC 15, GM_ABS_TRANS 12,
+    GM_TRANS_PREC 6, GM_TRANS_ONLY_PREC 3 -- the header desynced on the first
+    non-identity model); inverse_recenter returned deltas; PrevGmParams now come
+    from the primary reference slot (saved per slot).
+12. find_mv_stack global motion: GLOBALMV neighbours use the block's own gmv,
+    tgmv fills missing slots and the temporal globalmv ctx, stack MVs are clamped
+    (dav1d refmvs.c). Global-model prediction: single-ref GLOBALMV and compound
+    GLOBAL_GLOBALMV warp with the frame model (gmv_warp_allowed); GLOBALMV with a
+    non-translational model reads no motion_mode.
+Also persisted (spec load_previous, no corpus change): loop_filter ref/mode
+deltas are saved per reference slot and restored via primary_ref_frame.
+
+Ruled out: entropy desync in every remaining stream (rng matches per block for
+all decode-order frames); CDEF direction/damping/strength code (verified against
+cdef_find_dir_c and the chroma damping-1 rule).
+
+Unresolved / next steps:
+- film_grain.ivf is yuv420p10le (10-bit). The decoder's sample pipeline is u8
+  end to end (planes, MC, transforms, filters, ref slots), so this stream needs
+  high-bit-depth support first (large, cross-cutting), THEN film grain synthesis
+  (parse_film_grain currently discards the parameters; libdav1d in ffmpeg
+  applies grain, so the reference includes it; dav1d --filmgrain 0 gives the
+  grain-free output for the intermediate milestone). Not started: too large.
+- Not covered: scaled references combined with superres; scaled OBMC/warp.
+- pixel_exact stays false (10-bit, film grain, no long-run coverage beyond FATE).
