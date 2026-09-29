@@ -621,7 +621,7 @@ impl Av1Decoder {
                 .refresh(refresh, planes, motion_field.as_ref());
         }
         if std::env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
-            let nm = format!("kfr_{:02}.yuv", self.frame_count);
+            let nm = format!("kfr_{:02}.yuv", crate::debug_frame_seq::current());
             let _ = std::fs::write(&nm, &frame.data);
             eprintln!("dumped {nm} ({} bytes) oh={}", frame.data.len(), order_hint);
         }
