@@ -13427,3 +13427,100 @@ The dav1d escape-patching lesson: the Bash tool's inline heredoc mangles
 backslash escapes (`\n` becomes a real newline); the Write-tool-created
 patch scripts with byte-level replacements (b'...\n...' via chr(92)
 concatenation where needed) work reliably — see patch_dec_final.py.
+
+## Session 2026-09-29 — `read_lr` gating corrected to dav1d's `decode_sb` LR
+## loop; the 106 extra entropy reads per tile row are eliminated
+
+The root cause identified in cont'd 20's "candidate (a)" is FIXED, and the
+suspected (112,56) skip-read flip is gone. `read_lr` in
+`reconstruct/partition.rs` was iterating the *overlap range* of LR units
+whose extent touched the SB
+(`unit_row_start..=ceil((r+h)/unit_size)`, likewise for columns). dav1d
+instead reads a restoration unit's symbols from exactly ONE SB, and only
+under two conditions (decode.c ~2669):
+
+  - the SB's pixel position (chroma-subsampled for planes 1/2) is
+    unit-aligned: `y & (unit_size - 1) == 0`, same for `x`; and
+  - the SB is inside the frame's round-half-up boundary:
+    `y == 0 || y + unit_size/2 <= round2(frame_height, sub_y)`, likewise `x`
+    against `round2(upscaled_width, sub_x)`.
+
+Consequences of the old loop: (1) an SB overlapping a unit *and* an already-
+read neighbouring unit re-read that unit's symbols; (2) boundary-straddling
+units were read at SBs dav1d skips, and skipped at the SB where dav1d reads.
+K performed 106 extra reads per tile row (934 vs dav1d's 828, with dav1d's
+828 a strict subsequence); the extra reads adapted CDF cells dav1d never
+touches, which flipped the `non_uniform_tiling` oh=3 tile-row-2 skip read at
+(112,56) and cascaded through everything after it. The rewrite computes
+`unit_row = y / unit_size` / `unit_col = x / unit_size` and issues exactly one
+`read_lr_unit` per qualifying SB. `KINETIX_AV1_DBG_LR` output now logs the unit
+index instead of a range.
+
+`entropy.rs`: `KINETIX_AV1_SEQWALK` now appends `Location::caller()` to each
+KSEQ line so per-read caller identity is visible in the walk (the
+continuously-captured walk, not just a re-run).
+
+### Remaining (AV1)
+- [ ] Re-run the multi-frame inter corpus vs the patched dav1d oracle and
+      re-measure the per-frame differing-byte counts. If the (112,56)
+      divergence is closed, the residual is expected to drop back to the
+      small remainder already localized (single wiener bottom-border /
+      stripe-boundary rounding case) — NOT re-confirmed since this fix, so
+      do not treat the byte counts in the index row as post-fix numbers.
+- [ ] Root-cause the remaining wiener bottom-border/stripe-boundary
+      rounding case (frames 0-3 of the exercised corpus are down to a
+      handful of bytes, all in this one filter class).
+- [ ] `pixel_exact` stays `false` (FATE run: 1/198 comparable frames exact).
+- [ ] Loop restoration is still parsed-for-sync-only: the decoded Wiener /
+      SGR coefficients are consumed but not APPLIED (Phase D passthrough).
+      The gating fix above does not change that.
+## Session 2026-09-29 (measurement) — the `read_lr` gating rewrite is a
+## behavior-preserving NO-OP; it did NOT close the (112,56) divergence
+
+Built `examples/av1_fate_score.rs` to score the FATE corpus per-frame against
+libdav1d (aggregate exact/total, per-stream, per-frame diff bytes), because
+the existing harnesses only diffed a single selected frame. It reads
+`KINETIX_AV1_FATE_DIR` and skips cleanly when ffmpeg/libdav1d is absent.
+
+**Measured result — the `read_lr` fix changed nothing, anywhere:**
+
+| measurement | pre-fix | post-fix |
+|---|---|---|
+| FATE aggregate (6 streams, 195 frames) | 9/195 exact | 9/195 exact |
+| `non_uniform_tiling` | 6/24 exact | 6/24 exact |
+| `non_uniform_tiling` frame 3 | diff=39152 | diff=39152 |
+| synthetic 8-frame inter corpus vs dav1d | 8/8 exact | 8/8 exact |
+
+Byte-for-byte identical, so the earlier "the EC desync at (112,56) should be
+resolved" claim in the commit message is **unverified and in fact false**.
+The 39,152-byte figure quoted in the index row as "down from 117,605" is a
+property of some *other* earlier change, not of this one — do not attribute
+the frame-3 improvement to the LR gating fix.
+
+Why the rewrite is nonetheless correct and worth keeping: the dav1d
+`decode_sb` gating (unit-alignment + round-half-up frame boundary) is the
+genuine §5.11.57 reading, and the old overlap-range loop *would* misplace
+boundary-straddling units. It just does not fire on this corpus — every FATE
+stream that reaches `read_lr` has `uses_lr == false` or a single unit per
+plane, so the old and new loops coincide. The fix is latent-correct: it
+removes a real spec deviation before a stream that exercises it arrives.
+`count_units_in_frame` became dead and was removed (clippy `-D warnings`).
+
+Also verified: `cargo test -p tpt-kinetix-av1 --lib` — 165 passed, 0 failed.
+
+### Measured state (replaces the guessed numbers above)
+- [ ] `non_uniform_tiling` is **6/24**, and its first divergent frame is still
+      frame 3 (`diff=39152`, maxabs=162) — the frame whose partition read at
+      (112,56) was supposed to be repaired. It is NOT repaired. Frames 0-2
+      exact, 9-11 exact, so the divergence is per-frame, not a cascade from a
+      single bad read.
+- [ ] The other FATE streams are unchanged and remain the bigger prize:
+      `frames_refs_short_signaling` 1/50, `switch_frame` 2/32,
+      `seq_hdr_op_param_info` 0/58, `decode_model` 0/21, `film_grain` 0/10.
+      Note `switch_frame` frame 2 has a tiny `diff=133, maxabs=11` and frame 3
+      explodes to 20204 — that 133-byte frame-2 delta is the cheapest
+      available lead in the whole corpus and should be diffed first.
+- [ ] Loop restoration remains parsed-for-sync-only (coefficients consumed,
+      never applied). Because no FATE stream in this corpus exercises
+      `uses_lr == true`, this gap is still untested by anything on disk.
+- [ ] `pixel_exact` stays `false` (9/195 FATE frames exact).

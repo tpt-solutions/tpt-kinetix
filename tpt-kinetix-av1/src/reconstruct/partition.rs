@@ -1,10 +1,5 @@
 use super::*;
 
-/// `count_units_in_frame` (AV1 spec §5.11.57).
-fn count_units_in_frame(unit_size: usize, frame_size: usize) -> usize {
-    ((frame_size + (unit_size >> 1)) / unit_size).max(1)
-}
-
 /// `Round2(x, n)` (AV1 spec §4.7).
 fn round2(x: usize, n: usize) -> usize {
     if n == 0 {

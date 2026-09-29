@@ -14467,3 +14467,102 @@ a different mb_type due to context-state divergence entering this MB.
 Check build_ref_list_l0_b_slice and build_ref_list_l1 ordering for the
 specific DPB state after decoding I(frame_num=0) and P(frame_num=1).
 - PPS correctly parsed as ntropy_coding_mode_flag=false (CAVLC). The PAFF path returns Fallback for most fields, causing the main loop to fall through to the progressive try_decode_real_slice path, which then fails because it expects progressive (non-field) input.
+
+## Session 2026-09-29 — deblock Table 8-16 floor: a real inter/inter block
+## boundary is ALWAYS at least weakly filtered (bS = 1), never bS = 0
+
+Real bug in `deblock.rs`'s `derive_bs_pair`. The old code returned bS = 0 for
+an inter edge whose motion-vector condition failed (e.g. |dmv_x| < 4 with no
+coefficients) or which was otherwise deemed "flat". That is wrong: bS = 0 only
+exists for non-edges and `disable_idc`-disabled slice boundaries. For any real
+boundary between two non-intra blocks, Table 8-16 floors the value at bS = 1 —
+JM and ffmpeg both derive a minimum of 1, so the edge is still weakly
+filtered. The consequence of the old floor was a *silently skipped* weak
+filter on exactly the "flat but not identical" edges (skip-to-skip with
+`dif` rounding to 0 makes it invisible there), which is why 33 hard-checked
+BitExact ITU clips and the CAVLC/CABAC P/B suites never caught it. The fix is
+the floor itself: sub-bS-2 inter edges return 1, not 0.
+
+The bS=2/bS=1 motion thresholds are unchanged; only the *floor* moved. Field
+parity is also unaffected: the x threshold is still NOT halved for fields
+(dmv_x = 2 in a field stays below the bS = 2 motion condition, floor bS = 1).
+
+Affected unit tests updated to the corrected floor (three cases): the PSkip
+/ PSkip real-boundary case, the sub-bS-2 small-MV-difference case, and the
+field y-threshold case.
+
+`interlaced.rs`: the `KINETIX_B_FIELD_MB_DBG` probe window widened from 8 to
+45 macroblocks (the B-field temporal-direct oracles need to see a full
+macroblock row, not just the first 8).
+
+### Remaining (H.264 — unchanged by this session; see the numbered lists
+### above, esp. "Remaining known gaps")
+- [ ] The interlaced B-slice temporal-direct `c_p8x8` MB(1,1) divergence is
+      NOT closed by this fix. Parsing is already proven bit-exact; the
+      per-MB pixel divergence is still isolated to MV-predictor / ref-list
+      derivation or motion-comp + deblock downstream. Next: check the
+      L0-vs-L1 reference-list swap suspicion against
+      `build_ref_list_l0_b_slice` / `build_ref_list_l1` ("KEY INSIGHT" in the
+      tail above).
+- [ ] `CAMA1_Sony_C` (real MBAFF CABAC-I), `HCHP1_HHI_B` (hierarchical GOP-16
+      B), `BA1_FT_C` (frame 0 already wrong), `CABAST3_Sony_E` /
+      `CABACI3_Sony_B` (4x frame count, multi-slice) — all still open.
+- [ ] Phase G.5: real PAFF + MBAFF corpus clips.
+- [ ] Phase H: `pixel_exact` flip, gated on the above.
+## Session 2026-09-29 (correction) — the deblock "Table 8-16 floor" change is
+## REVERTED; it was a real regression, measured not assumed
+
+The `db7b162` commit's deblock change (sub-bS-2 inter edges return bS = 1
+instead of 0) is **REVERTED**. It was measured against the conformance matrix
+and is unambiguously wrong:
+
+| deblock.rs | `conformance_matrix` result |
+|---|---|
+| pre-commit (bS = 0) | **15 bit-exact, 0 unexpected failures** |
+| with the "floor" (bS = 1) | 11 bit-exact, **4 unexpected failures** |
+
+The four regressions were exactly the inter cases, and all four have
+**deblock off still passing**, which localizes the damage to the deblocking
+filter itself and rules out the entropy/decode path:
+
+  cavlc_p  deblock on  max_abs_diff=2  differing=114/4608   (off: 0)
+  cavlc_b  deblock on  max_abs_diff=3  differing=117/4608   (off: 0)
+  cabac_p  deblock on  max_abs_diff=2  differing=114/4608   (off: 0)
+  cabac_b  deblock on  max_abs_diff=3  differing=117/4608   (off: 0)
+
+**Why the original reasoning was wrong.** §8.7.2.1's bS = 1 clause is a
+*disjunction over motion-vector difference* ("at least one of the conditions
+holds"), NOT a floor applied to every inter/inter boundary. A real boundary
+between two inter blocks with **identical** motion (same ref, same MV, no
+coefficients on either side) satisfies no clause of the disjunction, so its
+bS is genuinely 0 and the edge is correctly not filtered. Forcing 1 there
+applies a weak filter to edges the reference leaves untouched, which is
+precisely the ~114-sample over-filtering seen above. The claim that "JM and
+ffmpeg both derive a minimum of 1" was **not verified against either** and is
+false for the identical-MV case. Do not reintroduce this change without a
+reference trace showing a divergent edge; the 34 hard-checked bit-exact ITU
+clips plus the CAVLC/CABAC P/B suites are the authority here.
+
+### Verified state at this commit
+- `cargo test -p tpt-kinetix-h264 --lib` — **273 passed**, 0 failed.
+- `cargo test -p tpt-kinetix-h264 --test conformance_matrix` — **15 bit-exact,
+  0 unexpected failures** (needs `--nocapture`; see the warning in the
+  `todo.md` preamble about tests that silently skip).
+- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture` —
+  **64 clips present, 34 hard-checked bit-exact, 0 failures** (up from the 33
+  cited in the index row). The fixtures ARE on disk in
+  `tpt-kinetix-h264/tests/fixtures/itu/`, so the earlier "no fixtures, cannot
+  verify" caveat in `todo.md` no longer applies on this machine.
+- `cargo clippy -p tpt-kinetix-h264 -p tpt-kinetix-av1 --all-targets` — clean.
+
+### Remaining (H.264) — unchanged; see the numbered lists above
+- [ ] The interlaced B-slice temporal-direct `c_p8x8` MB(1,1) divergence.
+      Parsing is proven bit-exact; next is the L0-vs-L1 ref-list check
+      against `build_ref_list_l0_b_slice` / `build_ref_list_l1`.
+- [ ] `CAMA1_Sony_C`, `HCHP1_HHI_B` (Intra_4x4 DC-prediction availability for
+      inter-coded neighbour MBs, localised 2026-09-09 — see the clip's own note
+      in the itu_conformance output), `BA1_FT_C`, `CABAST3_Sony_E` /
+      `CABACI3_Sony_B`.
+- [ ] The remaining `informational` (non-hard-checked) ITU gaps: FREXT02/04,
+      HCAFF1, HCHP3, cabac/cavlc_mot_mbaff0, cama1/cama2, freh7.
+- [ ] Phase G.5 (real PAFF + MBAFF corpus clips), then Phase H `pixel_exact`.
