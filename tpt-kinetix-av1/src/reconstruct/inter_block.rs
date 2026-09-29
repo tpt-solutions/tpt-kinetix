@@ -2252,6 +2252,7 @@ impl<'a> TileDecodeState<'a> {
         let luma_tx_h_byte = (bh * MI_SIZE) as u8;
         // dav1d `BlockContext::comp_type` (from `read_compound_type`).
         let comp_type_byte = block_comp_type;
+        self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
@@ -2355,6 +2356,41 @@ impl<'a> TileDecodeState<'a> {
     /// all — it warps with the full model (`gmv_warp_allowed`). This centre MV
     /// is only the fallback there; no corpus clip exercises global rotation
     /// yet.
+    /// Inter blocks store `DC_PRED` in the chroma-mode neighbour context
+    /// (dav1d `decode.c`: `if (has_chroma) uvmode = DC_PRED`) so that
+    /// `get_filter_type` (§7.11.2.9) does not see a stale SMOOTH* chroma mode
+    /// from an earlier intra block. Written only when the block carries
+    /// chroma, over the chroma-grid-aligned extent.
+    fn set_uv_ctx_dc(&mut self, mi_row: usize, mi_col: usize, bsize: usize, bw: usize, bh: usize) {
+        if self.monochrome
+            || !has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            )
+        {
+            return;
+        }
+        let sx = self.subsampling_x as usize;
+        let sy = self.subsampling_y as usize;
+        let c0 = mi_col & !sx;
+        let r0 = mi_row & !sy;
+        let cw = bw.max(1 << sx);
+        let ch = bh.max(1 << sy);
+        for r in r0..(r0 + ch).min(self.mi_rows) {
+            if let Some(slot) = self.uv_left.get_mut(r) {
+                *slot = DC_PRED;
+            }
+        }
+        for c in c0..(c0 + cw).min(self.mi_cols) {
+            if let Some(slot) = self.uv_above.get_mut(c) {
+                *slot = DC_PRED;
+            }
+        }
+    }
+
     fn get_gmv_2d(&self, ref_name: u8, mi_col: usize, mi_row: usize, bw: usize, bh: usize) -> Mv {
         let idx = ref_name as usize - 1;
         if std::env::var("KINETIX_AV1_DBG_GMV").is_ok() {
@@ -2592,6 +2628,7 @@ impl<'a> TileDecodeState<'a> {
         // `Max_Tx_Size_Rect`.
         let luma_tx_w = (bw * MI_SIZE) as u8;
         let luma_tx_h = (bh * MI_SIZE) as u8;
+        self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
