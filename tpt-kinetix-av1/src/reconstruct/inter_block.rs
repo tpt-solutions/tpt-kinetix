@@ -2253,6 +2253,7 @@ impl<'a> TileDecodeState<'a> {
         // dav1d `BlockContext::comp_type` (from `read_compound_type`).
         let comp_type_byte = block_comp_type;
         self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
+        self.mark_inter_block_decoded(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
@@ -2387,6 +2388,52 @@ impl<'a> TileDecodeState<'a> {
         for c in c0..(c0 + cw).min(self.mi_cols) {
             if let Some(slot) = self.uv_above.get_mut(c) {
                 *slot = DC_PRED;
+            }
+        }
+    }
+
+    /// `BlockDecoded` marking for an inter block (AV1 spec `transform_block`,
+    /// which also runs for inter and skipped blocks): every 4x4 cell the block
+    /// covers in each plane becomes available to later intra blocks'
+    /// `haveAboveRight` / `haveBelowLeft` checks. Chroma cells are only marked
+    /// for blocks that carry chroma.
+    fn mark_inter_block_decoded(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: usize,
+        bw: usize,
+        bh: usize,
+    ) {
+        let mask = self.sb_size4() - 1;
+        let has_c = !self.monochrome
+            && has_chroma(
+                bsize,
+                mi_row,
+                mi_col,
+                self.subsampling_x,
+                self.subsampling_y,
+            );
+        let (ssx, ssy) = (self.subsampling_x as usize, self.subsampling_y as usize);
+        for plane in 0..(self.num_planes as usize).min(3) {
+            let (sx, sy) = if plane > 0 { (ssx, ssy) } else { (0, 0) };
+            if plane > 0 && !has_c {
+                continue;
+            }
+            let sr = (mi_row & mask) >> sy;
+            let sc = (mi_col & mask) >> sx;
+            let ch = (bh >> sy).max(1);
+            let cw = (bw >> sx).max(1);
+            let grid = &mut self.block_decoded[plane];
+            for r in sr..sr + ch {
+                for c in sc..sc + cw {
+                    let idx = (r + 1) * BD_STRIDE + (c + 1);
+                    if c + 1 < BD_STRIDE {
+                        if let Some(cell) = grid.get_mut(idx) {
+                            *cell = 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -2629,6 +2676,7 @@ impl<'a> TileDecodeState<'a> {
         let luma_tx_w = (bw * MI_SIZE) as u8;
         let luma_tx_h = (bh * MI_SIZE) as u8;
         self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
+        self.mark_inter_block_decoded(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
