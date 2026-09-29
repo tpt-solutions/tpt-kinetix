@@ -15037,6 +15037,194 @@ x-trick, the `ref_cache[0][b] != -1` guard, the `list_count == 2` block, and
 the mirrored-list equivalence check all match, including the field y-threshold
 of 2 (`mvy_limit`). Then ran the per-segment `KINETIX_FORCE_BS` sweep this
 file called for, against the 123-sample frame-1 baseline: forcing every segment
+
+### Session 2026-09-29 (d2) — boundary-QP hypothesis also REFUTED
+
+Added `KINETIX_FORCE_QP="mb_x,mb_y,dir,ei,qp"` (same shape as
+`KINETIX_FORCE_BS`) which overrides the QP fed to the alpha/beta/tC0 lookups
+for one edge, on top of the derived value. Wired into all six
+`deblock_luma_edge` call sites in `deblock_luma_mb` (v/h boundary `idx0` and
+interior `ei` 1..=3). Purely additive debug tooling; the derived QP is used
+whenever the env var is unset, so the default path is unchanged.
+
+Purpose: `KINETIX_FORCE_BS` can only move tC *within* its table row, so a wrong
+boundary **QP** is invisible to a bS sweep — exactly the kind of hypothesis that
+produces a small diffuse residual which no bS value can fix. This is the
+discriminating experiment between "wrong QP" and "wrong bS".
+
+Swept QP 30..44 on the implicated field boundary edge `h MB(36,12) idx0`,
+against the 123-sample frame-1 baseline:
+
+    qp=30..31 -> 139 (max_diff 9)      qp=32    -> 137
+    qp=33..35 -> 128                    qp=36    -> 123  <-- DERIVED VALUE, minimum
+    qp=37..39 -> 125                    qp=40..44 -> 135..140 (max_diff 24)
+
+**The derived QP (36) is already the global minimum of the sweep.** The
+boundary QP is correct; a wrong-QP explanation is refuted for this edge, and
+the QP-averaging `(qp_p + qp_q + 1) >> 1` plus the `FilterOffsetA/B = 2*div2`
+handling are confirmed good.
+
+Note `c_bad` is **exactly 55 in every single run** across both the bS sweep and
+this QP sweep. Chroma bS/QP are derived independently in `deblock_chroma_mb`,
+which has no force override — so chroma was never perturbed, and its invariance
+is expected rather than informative. **Chroma is still genuinely unexamined**
+and is now the largest single unexplained component (55 of the 178 total
+frame-1 differing samples, ~31%).
+
+### Running tally of refuted hypotheses (do not re-litigate these)
+
+| Hypothesis | Verdict | How refuted |
+|---|---|---|
+| One wrong per-segment bS | REFUTED | force sweep: 119-141 vs 123 baseline, never converges |
+| `derive_bs_pair` != ffmpeg `check_mv` | REFUTED | line-by-line audit, identical incl. `+3>=7U`, `list_count==2`, mirror check |
+| Weak/strong filter math | REFUTED | line-by-line vs `h264_loop_filter_luma{,_intra}` |
+| alpha/beta/tC0 table values or wrap-vs-clamp | REFUTED | tables extracted from ffmpeg and compared; values match for this clip (offsets are 0) |
+| Chroma QP mapping (Table 8-15) | REFUTED | `chroma_qp()` matches `ff_h264_chroma_qp` over 0..51 |
+| Whole-edge vs per-segment strong filter | REFUTED (unreachable) | mixed `[4,x,y,z]` cannot be derived; intra is per-MB, first branch, uniform |
+| Boundary QP wrong | REFUTED (this session) | QP sweep: derived 36 is the minimum |
+
+Every per-edge *value* we compute is now verified correct. The residual must be
+in **control flow**: which edges get filtered at all, in what order, and with
+which neighbour — not in any computed bS/QP/alpha/beta/tC0.
+
+### Session 2026-09-29 (e) — CHROMA is a confirmed, large, previously-invisible contributor
+
+Chroma was the single biggest blind spot: `c_bad` stayed pinned at **exactly
+55** through *every* luma experiment (all `KINETIX_FORCE_BS` and
+`KINETIX_FORCE_QP` runs), because `deblock_chroma_mb` had no force override and
+derives its own bS independently of the luma path. 55 of frame 1's 178
+differing samples is **~31% of the residual**, entirely untested.
+
+Added `KINETIX_FORCE_BS_C="mb_x,mb_y,dir,ei[,b0,b1,b2,b3]"` to
+`deblock_chroma_mb` — the chroma counterpart of `KINETIX_FORCE_BS`, wired into
+all four chroma edge sites (v/h boundary `idx0`, v/h interior `ei=2`). Default
+path unchanged (verified: baseline still `y_bad=123 c_bad=55 max_diff=4`).
+
+**The override works and the chroma residual IS bS-driven.** Uniform-bS sweep
+on implicated chroma edges, `c_bad` for frame 1 (baseline **55**):
+
+| chroma edge | bS=0 | bS=1 | bS=2 | bS=3 | bS=4 |
+|---|---|---|---|---|---|
+| `h MB(36,12) idx0` (derived `[1,2,2,1]`) | 93 | **7** | **7** | 78 | 75 |
+| `v MB(36,12) idx0` (derived `[0,0,2,2]`) | 28 | **6** | 10 | - | - |
+| `h MB(37,12) idx0` (derived `[1,1,1,1]`) | 19 | **7** | **7** | - | - |
+| `h MB(35,11) idx0` (derived `[3,3,3,3]`) | **1** | 1 | 1 | - | - |
+| `h MB(38,11) idx0` | 55 | 55 | 55 | - | - |
+
+Two things fall out of this, and they point in different directions:
+
+1. **`h MB(35,11) idx0`: forcing bS=0 takes `c_bad` from 55 to 1.** The derived
+   bS there is `[3,3,3,3]` (q-side is `Intra4x4`, field horizontal clamp 4->3),
+   and the luma-side bS=3 is *correct*. But the reference does **not** filter
+   that chroma edge. So the chroma path is filtering an edge the reference
+   leaves alone — a **bS=0 edge is being filtered**, i.e. a control-flow /
+   gating bug, not a value bug.
+
+2. **No single uniform value is right everywhere**: 0 wins at `35,11`, 1 wins at
+   `36,12 v` and `37,12`, 1-or-2 tie at `36,12 h`. Combined with (1), this rules
+   out "our chroma bS is off by a constant" and points at a **per-edge
+   derivation/gating** difference.
+
+`h MB(38,11) idx0` is completely insensitive to bS — that edge's chroma already
+matches, so it can be excluded from further work.
+
+**This is the most actionable result so far**, because unlike every luma-side
+hypothesis it is a *measured* chroma-specific defect rather than an inferred
+one, and (1) names a concrete, falsifiable claim: at least one chroma edge with
+a non-zero derived bS must not be filtered at all.
+
+### Session 2026-09-29 (e2) — `alpha==0 || beta==0` early-out added (correct, no-op here)
+
+Implemented the cheapest candidate from (e): ffmpeg's `filter_mb_edgev` and
+`filter_mb_edgecv` both begin with
+
+    if (alpha == 0 || beta == 0) return;      // h264_loopfilter.c L108, L130
+
+We had **no such whole-edge early-out** in either `deblock_luma_edge` or
+`deblock_chroma_edge`. This is not merely redundant with the per-sample
+`|p0-q0| < alpha` test: ffmpeg skips the edge *entirely*, whereas we would
+still run the weak filter per segment (with a possibly non-zero `tc` derived
+from a zero `alpha`). Added to both functions, matching ffmpeg exactly.
+
+**Measured effect on `cavlc_mot_picaff0_full_B`: NONE.** Baseline is bit-for-bit
+unchanged (`frame 1: y_bad=123 c_bad=55 max_diff=4`, same per-MB diff map), which
+is expected: at this clip's QPs (luma 36, chroma ~34) `alpha`/`beta` are 50/11
+and non-zero, so the branch never fires. It is kept as a **correctness fix for
+low-QP content** (a QP below ~16 gives `alpha == 0` for the whole edge), where
+it is currently a real, untested divergence. Do not expect it to move this
+clip's numbers.
+
+`cargo clippy -p tpt-kinetix-h264 --lib -- -D warnings` clean.
+
+### Next step (chroma-first, then back to luma control flow)
+
+1. For `h MB(35,11) idx0` specifically: determine why the reference skips that
+   chroma edge. Candidates, in order:
+   - ~~**Missing `alpha==0 || beta==0` early-out**~~ — **DONE in (e2), and it is
+     NOT the cause** (the branch does not fire at this clip's QPs).
+   - **The chroma edge SET.** ffmpeg calls `filter_mb_edgecv` for the boundary
+     edge unconditionally, but for an *interior* edge only when `(edge&1) == 0`
+     (L687 vertical, L706 horizontal). Our `deblock_chroma_mb` filters exactly
+     one interior chroma edge at `edge_index == 2` — check that the
+     **horizontal** interior chroma edge is gated the same way ffmpeg gates it
+     (`filter_mb_edgech` at L697 is called *unconditionally* for `dir == 1`,
+     unlike the `edgecv` `(edge&1)==0` gate at L706 — confirm which applies to
+     the horizontal case and whether we match).
+   - **Chroma bS source blocks.** ffmpeg derives chroma bS from the *same*
+     luma `bS[]` array it computed for that edge (it passes `bS` straight into
+     `filter_mb_edgecv`), whereas we re-derive with chroma-specific raster maps
+     (`[1,5,9,13]`/`[2,6,10,14]` vertical interior,
+     `[4,5,6,7]`/`[8,9,10,11]` horizontal interior). Verify those maps against
+     ffmpeg's `scan8`-relative chroma block indices — a wrong map would give a
+     per-edge bS that is right on average but wrong on specific edges, exactly
+     matching the "no single uniform value wins" observation in (e).
+2. Re-run the luma `mask_par0` boundary-collapse experiment (session d) for
+   the ~80% boundary share.
+3. Interior `mask_edge_tab` for the ~20% interior share.
+
+**Do not accept any deblock change without the full gate**: `conformance_matrix`
+must stay 15 bit-exact / 0 unexpected failures AND the frame-1 `dbg_itu_localize`
+baseline must stay 123 (it is a *known-gap* clip, not a conformance clip, so a
+green `conformance_matrix` alone does not prove no regression here).
+
+### Measurement harness — use this while `tpt-kinetix-av1` is broken
+
+`cargo test -p tpt-kinetix-h264` cannot run while av1 fails to compile (its
+`--tests` targets need `tpt-kinetix-test-utils` -> `tpt-kinetix-av1`).
+`dbg_itu_localize` does **not** use test-utils, so compile it directly:
+
+    cd <workspace root>
+    $env:CARGO_MANIFEST_DIR='<root>\tpt-kinetix-h264'      # env!() needs this
+    $h = (Get-ChildItem target\debug\deps -Filter 'libtpt_kinetix_h264-*.rlib' |
+          Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+    $c = (Get-ChildItem target\debug\deps -Filter 'libtpt_kinetix_core-*.rlib' |
+          Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+    rustc --edition 2021 -O --test tpt-kinetix-h264\tests\dbg_itu_localize.rs `
+      -L target\debug\deps --extern "tpt_kinetix_h264=target\debug\deps\$h" `
+      --extern "tpt_kinetix_core=target\debug\deps\$c" -o target\dbg_itu.exe
+    .\target\dbg_itu.exe localize_clip --nocapture --exact
+    # env overrides still work: $env:KINETIX_FORCE_QP="36,12,1,0,36"
+    Remove-Item target\dbg_itu.exe
+
+Always pick the **newest** rlib by `LastWriteTime` — many stale hashes from
+older builds sit in `target/debug/deps`. Verified this reproduces the known
+baseline exactly (`frame 1: y_bad=123 c_bad=55 max_diff=4`).
+Do **not** try to make the `test-utils` dev-dependency `optional`; cargo rejects
+optional dev-dependencies and then fails to load the workspace manifest.
+
+### Note on the shared working tree (2026-09-29 ~00:55)
+
+Another process was editing `tpt-kinetix-av1` concurrently and **committed this
+session's H.264 work into `8d52549`** along with its own. Confirmed present in
+that commit: `set_deblock_pic_tag` + the `pic=` trace prefix, the
+`KINETIX_FORCE_QP` override, and `dbg_itu_localize.rs`. **However av1 still does
+not compile at that commit** (`cannot find type Px` in
+`tpt-kinetix-av1/src/reconstruct/*`), so the workspace is still not fully
+buildable and `--tests` are still blocked. H.264's own **lib** builds clean and
+is `clippy -D warnings` clean. When working in this tree, expect concurrent
+commits; re-check `git log`/`git status` before assuming your uncommitted work
+is still uncommitted.
+
 of every implicated edge to each of 0..4 only moves the count between **119 and
 141** — never toward zero.
 
@@ -15079,3 +15267,16 @@ and that `FilterOffsetA/B` are applied as `2 * div2` before the lookup.
 directory silently changes what every test in that file compares against (it
 made frame 0 report 165225 differing samples). Always write scratch oracles
 outside `tests/fixtures/`, or delete them before re-running.
+
+### Session 2026-09-30 — no progress on the B-field deblock residual; state recorded
+
+- Committed the pending `alpha == 0 || beta == 0` whole-edge early-out (luma +
+  chroma) and `KINETIX_FORCE_BS_C`. Correct per ffmpeg, no-op on this clip.
+- Re-checked the chroma top edge (`h MB(35,11) idx0`): cur/top QP are equal
+  (36/36, chroma 34/34) in every picture, so a boundary-QP mismatch is NOT the
+  reason the reference skips that edge. The unfiltered trace of all pictures is
+  too noisy to attribute to frame 1's B field; a per-picture tag on the chroma
+  trace (like `set_deblock_pic_tag` for luma) is needed before it is useful.
+- `cargo test -p tpt-kinetix-h264 --lib` is still blocked: `tpt-kinetix-av1`
+  (concurrent process, uncommitted edits) fails to compile. H.264 lib clippy
+  `-D warnings` is clean.

@@ -485,6 +485,11 @@ pub fn deblock_luma_edge(
             TC0_TAB[b as usize - 1][qpi as usize]
         }
     };
+    // Whole-edge early-out, matching ffmpeg's `filter_mb_edgev` (L108). See
+    // the identical note in `deblock_chroma_edge`.
+    if alpha == 0 || beta == 0 {
+        return;
+    }
 
     if vertical {
         // Vertical edge: filter samples along the column boundary at
@@ -602,6 +607,16 @@ pub fn deblock_chroma_edge(
     let qpb = clip_qp(qp + 2 * p.beta_offset_div2);
     let alpha = ALPHA_TAB[qpi as usize];
     let beta = BETA_TAB[qpb as usize];
+    // ffmpeg's `filter_mb_edgev`/`filter_mb_edgecv` return immediately when
+    // either threshold is zero (h264_loopfilter.c L108, L130):
+    // `if (alpha == 0 || beta == 0) return;`. That is a *whole-edge* early-out
+    // which fires before any per-segment work, and it is NOT merely redundant
+    // with the per-sample `|p0-q0| < alpha` test: with `alpha == 0` the weak
+    // filter's `tc` can still be non-zero, and ffmpeg skips the edge entirely
+    // rather than filtering with a zero alpha. Match it exactly.
+    if alpha == 0 || beta == 0 {
+        return;
+    }
     let height = plane.len() / stride.max(1);
     let filter_at = |pp: &mut [i32; 2], qq: &mut [i32; 2], bseg: u8| {
         if bseg == 4 {
@@ -752,15 +767,13 @@ pub fn deblock_luma_mb(
             None
         }
     });
-    let qp_override =
-        |x: usize, y: usize, dir_v: usize, ei: usize, qp: &mut i32| {
-            if let Some(p) = &force_qp {
-                if p[0] == x as i32 && p[1] == y as i32 && p[2] == dir_v as i32 && p[3] == ei as i32
-                {
-                    *qp = p[4];
-                }
+    let qp_override = |x: usize, y: usize, dir_v: usize, ei: usize, qp: &mut i32| {
+        if let Some(p) = &force_qp {
+            if p[0] == x as i32 && p[1] == y as i32 && p[2] == dir_v as i32 && p[3] == ei as i32 {
+                *qp = p[4];
             }
-        };
+        }
+    };
     let forced = |x: usize, y: usize, dir_v: usize, ei: usize, bs: &mut [u8; 4]| {
         if let Some(p) = &force_bs {
             if p[0] == x && p[1] == y && p[2] == dir_v && p[3] == ei {
@@ -985,6 +998,38 @@ pub fn deblock_chroma_mb(
         return;
     }
 
+    // Debug override for the CHROMA path (session 2026-09-29 e). This is the
+    // chroma counterpart of `KINETIX_FORCE_BS` in `deblock_luma_mb`, same
+    // `"mb_x,mb_y,dir,ei[,b0,b1,b2,b3]"` shape (dir 0 = vertical, 1 =
+    // horizontal; ei 0 = macroblock boundary, 2 = the interior 4x4 chroma
+    // edge). It exists because chroma is ~31% of the `cavlc_mot_picaff0_full_B`
+    // frame-1 residual (55 of 178 differing samples) and had NO way to be
+    // perturbed: the luma `KINETIX_FORCE_BS` sweep cannot move it, and
+    // `c_bad` stayed pinned at exactly 55 through every luma experiment.
+    // Until this existed, chroma was the single largest *unexamined* component
+    // of a residual whose every luma-side value has since been verified
+    // correct against ffmpeg.
+    let force_bs_c = std::env::var("KINETIX_FORCE_BS_C").ok().and_then(|s| {
+        let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if parts.len() == 5 || parts.len() == 8 {
+            Some(parts)
+        } else {
+            None
+        }
+    });
+    let forced_c = |x: usize, y: usize, dir_v: usize, ei: usize, bs: &mut [u8; 4]| {
+        if let Some(p) = &force_bs_c {
+            if p[0] == x && p[1] == y && p[2] == dir_v && p[3] == ei {
+                for (seg, b) in bs.iter_mut().enumerate() {
+                    *b = if p.len() == 5 {
+                        p[4] as u8
+                    } else {
+                        p[4 + seg] as u8
+                    };
+                }
+            }
+        }
+    };
     // See the identical `disable_deblocking_filter_idc == 2` note in
     // `deblock_luma_mb`.
     let cross_slice_disabled = |other: &DeblockMbInfo| -> bool {
@@ -994,7 +1039,7 @@ pub fn deblock_chroma_mb(
     // Chroma reuses the co-located luma blocks' bS (§8.7.2.1); see
     // `deblock_luma_mb` for the same raster-block mappings.
     if let Some(l) = left.filter(|l| !cross_slice_disabled(l)) {
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             l,
             cur,
             true,
@@ -1003,13 +1048,14 @@ pub fn deblock_chroma_mb(
             crate::deblock::mvy_limit(cur.field),
         );
         let qpc = (cqp(cur.qp) + cqp(l.qp) + 1) >> 1;
+        forced_c(mb_x, mb_y, 0, 0, &mut bs);
         deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, true, 0, bs, p, qpc);
     }
     // Interior chroma vertical edge (chroma offset 4) sits at the luma
     // column-1/column-2 boundary.
     {
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             cur,
             cur,
             false,
@@ -1017,6 +1063,7 @@ pub fn deblock_chroma_mb(
             [2, 6, 10, 14],
             crate::deblock::mvy_limit(cur.field),
         );
+        forced_c(mb_x, mb_y, 0, 2, &mut bs);
         if bs.iter().any(|&b| b != 0) {
             let qpc = cqp(cur.qp);
             deblock_chroma_edge(cb, stride, mb_x, mb_y, true, 2, bs, p, qpc);
@@ -1034,13 +1081,14 @@ pub fn deblock_chroma_mb(
         );
         field_horiz_boundary_clamp(&mut bs, cur.field);
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
+        forced_c(mb_x, mb_y, 1, 0, &mut bs);
         deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 0, bs, p, qpc);
         deblock_chroma_edge(cr, stride, mb_x, mb_y, false, 0, bs, p, qpc);
     }
     // Interior chroma horizontal edge (chroma offset 4) sits at the luma
     // row-1/row-2 boundary.
     {
-        let bs = derive_bs_segments(
+        let mut bs = derive_bs_segments(
             cur,
             cur,
             false,
@@ -1048,6 +1096,7 @@ pub fn deblock_chroma_mb(
             [8, 9, 10, 11],
             crate::deblock::mvy_limit(cur.field),
         );
+        forced_c(mb_x, mb_y, 1, 2, &mut bs);
         if bs.iter().any(|&b| b != 0) {
             let qpc = cqp(cur.qp);
             deblock_chroma_edge(cb, stride, mb_x, mb_y, false, 2, bs, p, qpc);
