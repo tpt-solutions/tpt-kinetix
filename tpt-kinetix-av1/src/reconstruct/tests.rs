@@ -324,6 +324,9 @@ fn cfl_prediction_matches_hand_computed_values_no_subsampling() {
         sub_y: false,
         max_luma_w: 4,
         max_luma_h: 4,
+        luma_w: 4,
+        luma_h: 4,
+        overhang: &[],
         alpha: 4,
     };
     let mut pred = vec![50i32; 16];
@@ -348,11 +351,43 @@ fn cfl_prediction_is_a_no_op_on_flat_luma() {
         sub_y: true,
         max_luma_w: 8,
         max_luma_h: 8,
+        luma_w: 8,
+        luma_h: 8,
+        overhang: &[],
         alpha: -7,
     };
     let mut pred = vec![42i32; 16];
     apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
     assert!(pred.iter().all(|&v| v == 42), "got {pred:?}");
+}
+
+#[test]
+fn cfl_prediction_reads_luma_samples_past_the_plane_edge_from_the_overhang() {
+    // A 4x4 luma block whose bottom two rows lie past the plane (plane is
+    // 4 wide, 2 tall): rows 2 and 3 come from the overhang list, not from a
+    // replicate of row 1. Flat 100 in-plane rows, 200 in the overhang rows.
+    let luma: Vec<u8> = vec![100u8; 8];
+    let overhang: Vec<(usize, usize, u8)> = (2..4)
+        .flat_map(|y| (0..4).map(move |x| (x, y, 200u8)))
+        .collect();
+    let cfl = CflParams {
+        luma: &luma,
+        luma_stride: 4,
+        sub_x: false,
+        sub_y: false,
+        max_luma_w: 4,
+        max_luma_h: 4,
+        luma_w: 4,
+        luma_h: 2,
+        overhang: &overhang,
+        alpha: 64,
+    };
+    let mut pred = vec![50i32; 16];
+    apply_cfl_prediction(&mut pred, 4, 4, 0, 0, &cfl);
+    // L rows: 800 (top two rows), 1600 (bottom two); avg 1200; alpha 64 gives
+    // scaled = diff, so top rows drop by 400 (clipped to 0) and bottom rise.
+    assert_eq!(pred[0], 0);
+    assert_eq!(pred[8], 255);
 }
 
 #[test]

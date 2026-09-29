@@ -172,6 +172,11 @@ pub(super) struct CflParams<'a> {
     /// right/bottom edge rather than the plane's.
     pub(super) max_luma_w: usize,
     pub(super) max_luma_h: usize,
+    /// Luma plane extent; samples past it come from `overhang`.
+    pub(super) luma_w: usize,
+    pub(super) luma_h: usize,
+    /// `(x, y, value)` luma samples reconstructed past the plane extent.
+    pub(super) overhang: &'a [(usize, usize, u8)],
     /// `CflAlphaU` or `CflAlphaV`, already sign-applied.
     pub(super) alpha: i32,
 }
@@ -200,12 +205,21 @@ pub(super) fn apply_cfl_prediction(
             let mut t = 0i32;
             for dy in 0..=sub_y {
                 for dx in 0..=sub_x {
-                    t += cfl
-                        .luma
-                        .get((luma_y + dy) * cfl.luma_stride + (luma_x + dx))
-                        .copied()
-                        .map(i32::from)
-                        .unwrap_or(0);
+                    let (yy, xx) = (luma_y + dy, luma_x + dx);
+                    t += if yy < cfl.luma_h && xx < cfl.luma_w {
+                        cfl.luma
+                            .get(yy * cfl.luma_stride + xx)
+                            .copied()
+                            .map(i32::from)
+                            .unwrap_or(0)
+                    } else {
+                        cfl.overhang
+                            .iter()
+                            .rev()
+                            .find(|&&(ox, oy, _)| ox == xx && oy == yy)
+                            .map(|&(_, _, v)| i32::from(v))
+                            .unwrap_or(0)
+                    };
                 }
             }
             let v = t << (3 - sub_x - sub_y);

@@ -1148,18 +1148,20 @@ fn deblock_plane(
                 );
                 }
                 if olf_dbg && edge >= 2 && edge + 2 <= width {
-                    let px = |x: usize| plane[y0 * stride + x];
-                    eprintln!(
-                        "KLF pl={plane_index} v x={edge} y={y0} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
-                        filter_size,
-                        lp.blimit,
-                        lp.limit,
-                        lp.thresh,
-                        px(edge - 2),
-                        px(edge - 1),
-                        px(edge),
-                        px(edge + 1)
-                    );
+                    for yy in y0..y0 + bh {
+                        let px = |x: usize| plane[yy * stride + x];
+                        eprintln!(
+                            "KLF pl={plane_index} v x={edge} y={yy} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
+                            filter_size,
+                            lp.blimit,
+                            lp.limit,
+                            lp.thresh,
+                            px(edge - 2),
+                            px(edge - 1),
+                            px(edge),
+                            px(edge + 1)
+                        );
+                    }
                 }
                 for y in y0..y0 + bh {
                     let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
@@ -1328,18 +1330,20 @@ fn deblock_plane(
                 );
                 }
                 if olf_dbg && edge >= 2 && edge + 2 <= height {
-                    let px = |y: usize| plane[y * stride + x0];
-                    eprintln!(
-                        "KLF pl={plane_index} h x={x0} y={edge} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
-                        filter_size,
-                        lp.blimit,
-                        lp.limit,
-                        lp.thresh,
-                        px(edge - 2),
-                        px(edge - 1),
-                        px(edge),
-                        px(edge + 1)
-                    );
+                    for xx in x0..x0 + bw {
+                        let px = |y: usize| plane[y * stride + xx];
+                        eprintln!(
+                            "KLF pl={plane_index} h x={xx} y={edge} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
+                            filter_size,
+                            lp.blimit,
+                            lp.limit,
+                            lp.thresh,
+                            px(edge - 2),
+                            px(edge - 1),
+                            px(edge),
+                            px(edge + 1)
+                        );
+                    }
                 }
                 for x in x0..x0 + bw {
                     let line: Vec<i32> =
@@ -2761,6 +2765,15 @@ fn cdef_plane_chroma(
             }
             let ww = w_block.min(width - x0);
             let hh = h_block.min(height - y0);
+            if std::env::var("KINETIX_AV1_DBG_OCDEF")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                == Some(crate::debug_frame_seq::current())
+            {
+                eprintln!(
+                    "KCDEF pl={plane_label} cx={x0} cy={y0} pri={p} sec={sec_str} dir={dir} ldir={yd} damp={damping}"
+                );
+            }
             cdef_filter_block(
                 plane, width, src, width, x0, y0, ww, hh, sub_x, sub_y, p, sec_str, damping, dir,
             );

@@ -444,6 +444,7 @@ impl<'a> TileDecodeState<'a> {
             ((row & bd_sb_mask) >> sy, (col & bd_sb_mask) >> sx)
         };
 
+        self.luma_overhang.clear();
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
@@ -594,6 +595,7 @@ impl<'a> TileDecodeState<'a> {
                             sub_c: sc,
                             step_x: luma_tx_w >> 2,
                             step_y: luma_tx_h >> 2,
+                            overhang: Some(&mut self.luma_overhang),
                         }
                     },
                 )?;
@@ -667,8 +669,31 @@ impl<'a> TileDecodeState<'a> {
             // buffer (the frame is 852 wide, mi-grid-padded to 856; the SB
             // partition tree still produced a 32-wide block starting at
             // mi_col 208, straddling the mi-grid edge by 8px/2mi).
-            let max_luma_w = (blk_px_x + bw * MI_SIZE).min(self.tile_w);
-            let max_luma_h = (blk_px_y + bh * MI_SIZE).min(self.tile_h);
+            // Refinement (spec `MaxLumaW`/`MaxLumaH` = end of the last luma
+            // transform block that *starts* inside the frame; dav1d
+            // `furthest_r`/`furthest_b`): a luma transform straddling the
+            // mi-grid edge is reconstructed in full, so CFL averages over its
+            // samples past the edge (kept in `luma_overhang`) rather than
+            // replicating the last in-frame row/column.
+            let round_up_to_tx = |start: usize, limit: usize, block_end: usize, tx: usize| {
+                if block_end <= limit {
+                    block_end
+                } else {
+                    (start + (limit.saturating_sub(start)).div_ceil(tx) * tx).min(block_end)
+                }
+            };
+            let max_luma_w = round_up_to_tx(
+                blk_px_x,
+                self.tile_w,
+                blk_px_x + bw * MI_SIZE,
+                luma_tx_w,
+            );
+            let max_luma_h = round_up_to_tx(
+                blk_px_y,
+                self.tile_h,
+                blk_px_y + bh * MI_SIZE,
+                luma_tx_h,
+            );
             // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
             // transform size is derived from the *whole coded block's* size
             // (`bsize`), not from the luma transform size directly, via
@@ -795,6 +820,9 @@ impl<'a> TileDecodeState<'a> {
                         sub_y: self.subsampling_y,
                         max_luma_w,
                         max_luma_h,
+                        luma_w: self.tile_w,
+                        luma_h: self.tile_h,
+                        overhang: &self.luma_overhang,
                         alpha: au,
                     });
                     let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
@@ -804,6 +832,9 @@ impl<'a> TileDecodeState<'a> {
                         sub_y: self.subsampling_y,
                         max_luma_w,
                         max_luma_h,
+                        luma_w: self.tile_w,
+                        luma_h: self.tile_h,
+                        overhang: &self.luma_overhang,
                         alpha: av,
                     });
                     let palette_u = (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
@@ -850,6 +881,7 @@ impl<'a> TileDecodeState<'a> {
                                 sub_c: sc,
                                 step_x: cw >> 2,
                                 step_y: ch >> 2,
+                                overhang: None,
                             }
                         },
                     )?;
@@ -883,6 +915,7 @@ impl<'a> TileDecodeState<'a> {
                                 sub_c: sc,
                                 step_x: cw >> 2,
                                 step_y: ch >> 2,
+                                overhang: None,
                             }
                         },
                     )?;
@@ -2227,6 +2260,7 @@ impl<'a> TileDecodeState<'a> {
                 sub_c: sc,
                 step_x: leaf_tx_w >> 2,
                 step_y: leaf_tx_h >> 2,
+                overhang: None,
             }
             .mark();
         }
@@ -2459,6 +2493,7 @@ impl<'a> TileDecodeState<'a> {
                         sub_c: sc,
                         step_x: step_c,
                         step_y: step_r,
+                        overhang: None,
                     }
                     .mark();
                     BlockDecodedCtx {
@@ -2467,6 +2502,7 @@ impl<'a> TileDecodeState<'a> {
                         sub_c: sc,
                         step_x: step_c,
                         step_y: step_r,
+                        overhang: None,
                     }
                     .mark();
                 }

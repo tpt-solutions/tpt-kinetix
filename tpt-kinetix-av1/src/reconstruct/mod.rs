@@ -1022,6 +1022,12 @@ struct TileDecodeState<'a> {
     /// or replicate the last one). Indexed `[(sr + 1) * BD_STRIDE + (sc + 1)]`
     /// where `sr`/`sc` are SB-relative 4×4 indices in `-1 ..= sbSize4>>sub`.
     block_decoded: [Vec<u8>; 3],
+    /// Luma samples reconstructed *past* the tile's mi-grid extent by the
+    /// current intra block's transform blocks that straddle the right/bottom
+    /// frame edge, as `(x, y, value)` in tile-local pixels. Chroma-from-luma
+    /// (spec 7.11.5 / dav1d `cfl_ac`) averages over the whole last luma
+    /// transform block, including these samples. Cleared per intra block.
+    luma_overhang: Vec<(usize, usize, u8)>,
 }
 
 /// Row stride of `block_decoded`: `-1 ..= 32` plus slack (128×128 SB = 32 luma
@@ -1364,6 +1370,7 @@ impl<'a> TileDecodeState<'a> {
                 vec![0u8; BD_STRIDE * BD_STRIDE],
                 vec![0u8; BD_STRIDE * BD_STRIDE],
             ],
+            luma_overhang: Vec::new(),
         }
     }
 

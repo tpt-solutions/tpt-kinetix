@@ -11,6 +11,9 @@ pub(super) struct BlockDecodedCtx<'a> {
     pub(super) sub_c: usize,
     pub(super) step_x: usize,
     pub(super) step_y: usize,
+    /// When set (luma of an intra block), receives the reconstructed samples
+    /// that fall outside `plane_w`/`plane_h` so CFL can average over them.
+    pub(super) overhang: Option<&'a mut Vec<(usize, usize, u8)>>,
 }
 
 impl BlockDecodedCtx<'_> {
@@ -323,16 +326,17 @@ pub(super) fn reconstruct_tx_block(
 
     for dy in 0..tx_h {
         let sy = px_y + dy;
-        if sy >= plane_h {
-            break;
-        }
         for dx in 0..tx_w {
             let sx = px_x + dx;
-            if sx >= plane_w {
-                break;
+            let val = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, 255) as u8;
+            if sy >= plane_h || sx >= plane_w {
+                if let Some(over) = bd.overhang.as_deref_mut() {
+                    over.push((sx, sy, val));
+                }
+                continue;
             }
             if let Some(slot) = samples.get_mut(sy * stride + sx) {
-                *slot = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, 255) as u8;
+                *slot = val;
             }
         }
     }
