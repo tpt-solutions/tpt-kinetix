@@ -650,9 +650,25 @@ impl<'a> TileDecodeState<'a> {
             // 0`): the pixel extent of the coded block's just-reconstructed
             // luma region, used by CFL (§7.11.5) to clamp its luma-sample
             // lookups at the block's own right/bottom edge rather than the
-            // frame's.
-            let max_luma_w = blk_px_x + bw * MI_SIZE;
-            let max_luma_h = blk_px_y + bh * MI_SIZE;
+            // frame's. dav1d (`recon_tmpl.c`) derives this from
+            // `w4 = imin(bw4, f->bw - t->bx)` — the block's own nominal
+            // extent additionally clamped to the FRAME's mi-grid edge — not
+            // the unclamped nominal extent alone. A block whose partition
+            // legally straddles the frame's right/bottom mi-grid boundary
+            // (allowed: partitioning only requires the block's *origin* to
+            // be inside the grid, not its full nominal extent) previously
+            // computed a `max_luma_w`/`_h` past the actual reconstructed
+            // buffer width/height (`tile_w`/`tile_h`), so the CFL
+            // luma-average read `.get(...)` on an out-of-range index quietly
+            // wrapped into the next row instead of clamping to the block's
+            // last real column/row — corrupting `lumaAvg` and every `L[i][j]`
+            // sample. Traced on `switch_frame.ivf` frame 7, mi=(208,112)
+            // bsize=BLOCK_32X32: `max_luma_w=864` against a `tile_w=856`
+            // buffer (the frame is 852 wide, mi-grid-padded to 856; the SB
+            // partition tree still produced a 32-wide block starting at
+            // mi_col 208, straddling the mi-grid edge by 8px/2mi).
+            let max_luma_w = (blk_px_x + bw * MI_SIZE).min(self.tile_w);
+            let max_luma_h = (blk_px_y + bh * MI_SIZE).min(self.tile_h);
             // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
             // transform size is derived from the *whole coded block's* size
             // (`bsize`), not from the luma transform size directly, via
@@ -710,6 +726,28 @@ impl<'a> TileDecodeState<'a> {
                 for tx in (0..chroma_bw).step_by(cw) {
                     let cpx_x = base_cpx_x + tx;
                     let cpx_y = base_cpx_y + ty;
+                    if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
+                        if let Some((sx, sy)) = spec.split_once(',') {
+                            if let (Ok(tx_), Ok(ty_)) =
+                                (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
+                            {
+                                if tx_ >= cpx_x
+                                    && tx_ < cpx_x + cw
+                                    && ty_ >= cpx_y
+                                    && ty_ < cpx_y + ch
+                                {
+                                    eprintln!(
+                                        "INTRACXY fr={} mi=({mi_col},{mi_row}) bsize={bsize} cpx=({cpx_x},{cpx_y}) cw={cw} ch={ch} max_luma=({max_luma_w},{max_luma_h}) uv_mode={uv_mode} cfl_alpha={:?} tile_cw={} tile_ch={} y_stride={}",
+                                        crate::debug_frame_seq::current(),
+                                        cfl_alpha,
+                                        self.tile_cw,
+                                        self.tile_ch,
+                                        self.y_stride,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
                     }
