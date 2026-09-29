@@ -13760,3 +13760,121 @@ crosses a frame edge, and it is worth aligning.
       mapping for this block against dav1d rather than the filter path again.
 - [ ] Optional cleanup: align the border handling with dav1d's conditional
       `emu_edge` instead of unconditional per-sample clamping.
+## Session 2026-09-29 (FIXED) — `switch_frame` frame 2 chroma: MV/refidx were
+## already correct; the real bug was a wrong interpolation filter fed to the
+## sub-8x8 chroma "diagonal quadrant" (`tl_filter2d` tracking, §7.11.3.4)
+
+Followed the previous session's exact next step (verify the MV predictor and
+`CurFrame`/`refidx` mapping for mi(148,20) against dav1d) using a rebuilt
+patched-dav1d oracle (`%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`, GCC/ninja
+toolchain — the MSVC tree at `tpt-kinetix-dav1d` is currently broken, see
+tooling note below) with new trace hooks in `decode.c`/`recon_tmpl.c`
+printing the resolved ref/MV/refidx/refpoc, the mv-candidate stack, and the
+actual reference-plane pixel window each `mc()` call reads.
+
+**Both were already correct, and this closes that hypothesis with evidence:**
+- MV: dav1d's own NEARESTMV candidate-0 for mi(148,20)/(149,21), want_ref=LAST,
+  is `mv=(5,-7)`, weight 652 — byte-identical to Kinetix's `mvs[0]`.
+- refidx/content: dav1d resolves `LAST_FRAME` to DPB slot 2, order_hint 1,
+  852x480 (no super-res). Kinetix's `ref_to_slot`/`slot0` resolve to the same
+  slot, and a byte-for-byte dump of the reference row `dav1d` samples at
+  `(dx=295..299, dy=40)` for both U and V is **identical** to Kinetix's own
+  `KINMCSUM` dump at the same coordinates.
+
+**The actual bug:** mi(148,20)/(149,21) is a `PARTITION_SPLIT` at
+`BLOCK_8X8` — a 2x2 group of 4x4 luma leaves that share one 8x8 chroma
+block via dav1d's `is_sub8x8` scheme (§7.11.3.4): the BR leaf (odd,odd —
+here mi(149,21)) is the only one with `has_chroma == true`, and it predicts
+FOUR chroma quadrants using four DIFFERENT interpolation filters: its own
+(BR), the left sibling's (BL), the above sibling's (TR), and — critically —
+the **top-left diagonal sibling's**, via a small piece of persistent state
+dav1d calls `t->tl_4x4_filter`. dav1d's real semantics (`decode.c`'s
+`BS_4X4`/`PARTITION_SPLIT` walk): `t->tl_4x4_filter = filter_2d;` runs
+**unconditionally at the end of every inter block's reconstruction**
+(`recon_tmpl.c:1827`, reached even via `goto skip_inter_chroma_pred` when
+`has_chroma` is false), and the 4-leaf walk explicitly saves it right after
+the TL leaf decodes and restores that saved value right before the BR leaf
+decodes (so TR/BL can freely clobber the running value in between without
+affecting what BR's diagonal quadrant sees).
+
+Kinetix's `tl_filter2d` tracking (`inter_block.rs`) had **two independent
+bugs**, found by tracing dav1d's `KINETIX_MCCALL` filter2d per quadrant
+(`(148,20)=0, (148,21)=7, (149,20)=0, (149,21)=0`) against Kinetix's own
+`KINMCSUM` `f2d` field:
+1. `self.tl_filter2d = Some(...)` was written only inside the
+   `sub8x8_leaf` (i.e. `has_chroma`) arm — so a `has_chroma == false` leaf
+   (TL, TR, BL of every split-8x8 quad) **never updated it at all**, unlike
+   dav1d's unconditional write. `tl_filter2d` was therefore whatever an
+   unrelated, much earlier chroma-owning block had left behind, not TL's own
+   filter.
+2. `partition.rs`'s split-8x8 save/restore snapshotted `tl_filter2d`
+   *before* the TL leaf even decoded (should snapshot *after* TL, per
+   dav1d's `tl_filter = t->tl_4x4_filter;` line, which runs right after
+   `decode_b(TL)`), and restored it before the **BL** leaf (`subs` index 2)
+   instead of before **BR** (index 3) — an off-by-one against dav1d's own
+   `PARTITION_SPLIT`/`BS_8X8` C code, where TR and BL both run (and may
+   overwrite the running value) between the save and the restore.
+
+Fixed both: moved the `tl_filter2d` write out of the `if sub8x8_leaf {}`
+arm so it runs for every inter leaf (`inter_block.rs`), and changed the
+save point to right after decoding the TL leaf (`idx == 0`) and the
+restore point to right before BR (`idx == 3`) in `partition.rs`.
+
+**Verified fix, byte-for-byte:**
+- Before: `KINMCSUM` for mi(149,21)'s TL diagonal quadrant showed
+  `f2d=(h=1,v=0)` (a stale SMOOTH/REGULAR pair carried over from the
+  previous chroma-owning block several partitions back); dav1d's own trace
+  for the same diagonal cell said `filter2d=0` (REGULAR/REGULAR). After the
+  fix, Kinetix's dump reads `f2d=(h=0,v=0)`, matching dav1d exactly, and the
+  BL/TR/BR quadrants (already correct before) are unchanged.
+- `switch_frame.ivf` frame 2 (852x480) differing-sample count: **133 → 105**
+  bytes (both U+V; the two other target pixels U(296,40)/U(297,40) that the
+  previous session hand-verified are now bit-exact — 114→115=ref,
+  113→112=ref). The remaining ~105-byte residual is provably a *different*
+  8x8 chroma group one column to the left (U(295,40)/U(295,41), delta
+  +1/+2) — a still-open, separate instance of a similar class of bug, not
+  yet localized.
+- FATE aggregate unchanged at **9/195** exact (this fix does not flip any
+  whole-frame comparison to exact, since frame 2 still has ~105 other diffs
+  from unrelated causes) — but every per-stream count (`non_uniform_tiling`
+  6/24, `frames_refs_short_signaling` 1/50, `switch_frame` 2/32, etc.) is
+  identical before/after, confirming **no regression** anywhere in the
+  corpus. `cargo test -p tpt-kinetix-av1 --lib`: 165 passed, 0 failed
+  (unchanged).
+- Committed as a real bug fix (not a no-op), unlike the read_lr session
+  above.
+
+### Tooling note
+The MSVC-toolchain patched-dav1d tree at
+`%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d\dav1d` (built by
+`scripts/build-patched-dav1d.ps1`) is currently broken on this machine — a
+plain `ninja -C build` inside a fresh `Launch-VsDevShell.ps1` session fails
+with C11 `_Atomic`/`stdatomic.h` syntax errors from `vcruntime_c11_stdatomic.h`
+before even reaching this crate's own code, and `vswhere.exe` is reported
+missing during the dev-shell launch — something about the VS/SDK toolset
+selection has drifted since that tree was last built. **Workaround used this
+session:** a second, independently-built patched-dav1d tree already existed
+at `%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`, built with a **GCC** toolchain
+(meson `intro-compilers.json` confirms `"id": "gcc"`, `.o`/`.dll` artifacts,
+not MSVC `.obj`/`.lib`) — `ninja -C bld2 tools/dav1d.exe` rebuilds cleanly
+there in seconds after editing `src/recon.h`/`src/decode.c`/
+`src/recon_tmpl.c`, and running `tools/dav1d.exe` needs
+`PATH=.../bld2/src:$PATH` (for `libdav1d.dll`) plus a real output file
+(`-o out.yuv`, not `NUL`/`/dev/null`, which the CLI rejects for extension
+sniffing). Left the added trace hooks in that tree's `recon.h`/`decode.c`/
+`recon_tmpl.c` (all narrowed to `frame_offset==2 && by==21 && bx==149`) for
+whichever session picks up the next chroma group's bug — flip the `by`/`bx`
+window in `recon.h` and rerun `ninja -C bld2 tools/dav1d.exe`.
+
+### Remaining (AV1)
+- [ ] Localize the next differing 8x8 chroma group in `switch_frame` frame 2
+      (U/V around luma mi (146-147, ~40)) — same bug CLASS is plausible
+      (another `tl_4x4_filter`-adjacent mistake, or the analogous left/above
+      filter-tracking arrays) but not yet confirmed; use the same
+      `KINETIX_AV1_MCSUM_BLOCK`/dav1d-oracle diff method above.
+- [ ] Frame 3's 20128-byte divergence (unchanged by this fix) is a separate,
+      much larger issue — likely unrelated to this specific bug class; not
+      yet investigated this session.
+- [ ] `pixel_exact` stays `false` (FATE: 9/195 frames exact, unchanged by
+      this fix — it closes a real per-pixel bug without yet flipping any
+      whole-frame comparison to exact).

@@ -1704,8 +1704,6 @@ impl<'a> TileDecodeState<'a> {
                     )?;
                 }
             }
-            // dav1d `skip_inter_chroma_pred: t->tl_4x4_filter = filter_2d`.
-            self.tl_filter2d = Some((filter[0], filter[1]));
         } else {
             self.inter_predict_plane(
                 1,
@@ -1738,6 +1736,18 @@ impl<'a> TileDecodeState<'a> {
                 warp_model.as_ref(),
             )?;
         }
+        // dav1d `skip_inter_chroma_pred: {} t->tl_4x4_filter = filter_2d;` —
+        // this label is reached (and the assignment runs) for EVERY inter
+        // block, including ones with `has_chroma == false` (the `goto`
+        // above jumps straight past the chroma MC to this same statement).
+        // The previous code only updated `tl_filter2d` inside the
+        // `sub8x8_leaf` arm, i.e. only for the block that actually owned
+        // the parent 8x8's chroma (the BR leaf of a split-8x8 quad) — so a
+        // TL/TR/BL leaf's own filter2d was never recorded, and the next
+        // BR's "diagonal quadrant" read whatever an unrelated, much earlier
+        // block had left in `tl_filter2d`. Moving this outside the if/else
+        // makes every inter leaf update it, matching dav1d exactly.
+        self.tl_filter2d = Some((filter[0], filter[1]));
 
         // Overlapped motion compensation (§7.11.3.9) — blend the base
         // prediction with predictions from the above / left neighbours'

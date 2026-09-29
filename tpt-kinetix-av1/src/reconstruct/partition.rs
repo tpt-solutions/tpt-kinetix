@@ -459,20 +459,38 @@ impl<'a> TileDecodeState<'a> {
             }
         } else if partition == PARTITION_SPLIT && bsize == BLOCK_8X8 {
             // The four 4x4 leaves of a split 8x8: dav1d saves
-            // `t->tl_4x4_filter` before the top-left leaf and restores it
-            // before the bottom-left leaf (decode.c's BS_4X4 SPLIT walk), so
-            // the diagonal-quadrant filter of the §7.11.3.4 sub-8x8 chroma
-            // scheme sees the pre-quad value for TL and BL and the
-            // previously-decoded sibling's own filter for TR and BR.
-            let saved_tl_filter = self.tl_filter2d;
+            // `t->tl_4x4_filter` right after the top-left leaf (`tl_filter =
+            // t->tl_4x4_filter;` follows the TL `decode_b`, capturing TL's
+            // *own* just-set filter2d) and restores it right before the
+            // bottom-right leaf (`t->tl_4x4_filter = tl_filter;` precedes
+            // the BR `decode_b`). TR and BL run in between with the
+            // *running* value, each overwriting it with its own filter2d,
+            // so only BR's §7.11.3.4 sub-8x8 chroma "diagonal quadrant" ever
+            // reads the true TL neighbour's filter; BL reads whatever TR
+            // left behind, matching dav1d exactly.
+            //
+            // `subs` order is TL=0, TR=1, BL=2, BR=3. The previous code got
+            // this wrong twice over: it snapshotted `tl_filter2d` *before*
+            // TL even decoded (capturing whatever the block before this
+            // whole 8x8 left behind, not TL's own filter), and restored it
+            // before BL (idx 2) instead of BR (idx 3). Both bugs happened to
+            // cancel out in some cases but not this one: verified against a
+            // patched dav1d trace on `switch_frame.ivf` frame 2, mi block
+            // (149,21) — dav1d's TL-diagonal quadrant call used filter2d=0
+            // (TL's own REGULAR/REGULAR) while Kinetix fed it a stale
+            // (1,0) SMOOTH/REGULAR pair.
+            let mut saved_tl_filter = None;
             for (idx, (sub_bsize, ro, co)) in subs.iter().enumerate() {
                 let srow = mi_row + ro;
                 let scol = mi_col + co;
                 if srow < self.tile_mi_rows && scol < self.tile_mi_cols {
-                    if idx == 2 {
+                    if idx == 3 {
                         self.tl_filter2d = saved_tl_filter;
                     }
                     self.decode_block(srow, scol, *sub_bsize)?;
+                    if idx == 0 {
+                        saved_tl_filter = self.tl_filter2d;
+                    }
                 }
             }
         } else {
