@@ -1551,46 +1551,6 @@ impl<'a> TileDecodeState<'a> {
             e.1 += REF_CAT_LEVEL;
         }
 
-        // dav1d feeds this probe a dummy newmv flag (refmvs.c:468-471), so it
-        // counts toward ref_match_count but not toward have_newmv.
-        let mut dummy = 0i32;
-        if n_rows != -1 || n_cols != -1 {
-            add(
-                &mut stack,
-                &mut dummy,
-                &mut have_row,
-                (by4 - 1, bx4 - 1),
-                cell(by4 - 1, bx4 - 1),
-                4,
-            );
-        }
-        let mut n_rows_run = n_rows.max(0);
-        let mut n_cols_run = n_cols.max(0);
-        for n in 2..=3i32 {
-            if n > n_rows_run && n <= max_rows {
-                n_rows_run += scan_row(
-                    &mut stack,
-                    &mut dummy,
-                    &mut have_row,
-                    (by4 - 2 * n + 1) | 1,
-                    1 + max_rows - n,
-                    if bw4 >= 16 { 4 } else { 2 },
-                    bx4 | 1,
-                );
-            }
-            if n > n_cols_run && n <= max_cols {
-                n_cols_run += scan_col(
-                    &mut stack,
-                    &mut dummy,
-                    &mut have_col,
-                    by4 | 1,
-                    (bx4 - 2 * n + 1) | 1,
-                    1 + max_cols - n,
-                    if bh4 >= 16 { 4 } else { 2 },
-                );
-            }
-        }
-        let total_matches = have_row + have_col;
 
         // Temporal candidate scan (§7.10.2.4/§7.10.2.6, dav1d's `rp_proj`
         // model): sample the projected grid inside the block, then the three
@@ -1716,6 +1676,47 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
         }
+
+        // dav1d feeds this probe a dummy newmv flag (refmvs.c:468-471), so it
+        // counts toward ref_match_count but not toward have_newmv.
+        let mut dummy = 0i32;
+        if n_rows != -1 || n_cols != -1 {
+            add(
+                &mut stack,
+                &mut dummy,
+                &mut have_row,
+                (by4 - 1, bx4 - 1),
+                cell(by4 - 1, bx4 - 1),
+                4,
+            );
+        }
+        let mut n_rows_run = n_rows.max(0);
+        let mut n_cols_run = n_cols.max(0);
+        for n in 2..=3i32 {
+            if n > n_rows_run && n <= max_rows {
+                n_rows_run += scan_row(
+                    &mut stack,
+                    &mut dummy,
+                    &mut have_row,
+                    (by4 - 2 * n + 1) | 1,
+                    1 + max_rows - n,
+                    if bw4 >= 16 { 4 } else { 2 },
+                    bx4 | 1,
+                );
+            }
+            if n > n_cols_run && n <= max_cols {
+                n_cols_run += scan_col(
+                    &mut stack,
+                    &mut dummy,
+                    &mut have_col,
+                    by4 | 1,
+                    (bx4 - 2 * n + 1) | 1,
+                    1 + max_cols - n,
+                    if bh4 >= 16 { 4 } else { 2 },
+                );
+            }
+        }
+        let total_matches = have_row + have_col;
 
         // Weight sort: nearest set, then secondary set (stable).
         let mut tail = stack.split_off(nearest_cnt.min(stack.len()));
