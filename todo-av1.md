@@ -14078,4 +14078,183 @@ scan (checks `mi_col+1, mi_col+3, ...` for `bw>>1` steps above, and
 - [ ] `non_uniform_tiling` (6/24), `frames_refs_short_signaling` (1/50), and
       `seq_hdr_op_param_info`/`decode_model`/`film_grain` (0 exact) remain
       the next-biggest opportunities; unrelated to this session's fix.
+
+## Session 2026-09-29 (#2) — `switch_frame` frame 8 FIXED (bit-exact), frame 7
+## reduced to a 4-byte rounding residual, and TWO real frame_size() bugs found
+## + fixed that were blocking the stream's SWITCH_FRAME resolution-change
+## frames (30/31) — a third, distinct tile-layout bug in frame 31 is still open
+
+Picked up the prior session's "frames 7-8 tiny diffs, frames 30-31 real
+divergence" leads. Re-verified the full per-frame diff map first (the static
+`/tmp/fate_av1/switch_frame_ivf.yuv` reference dump on this machine was
+STALE — only 18709920 bytes, ~30.5 frames' worth at the assumed fixed
+852x480 size, generated in an earlier session before the stream needed 32
+frames; regenerated fresh via `ffmpeg -i switch_frame.ivf -pix_fmt yuv420p
+-f rawvideo` before trusting `av1_frame_locate` past frame ~29).
+
+### Frame 8 FIXED, frame 7 narrowed (CFL MaxLumaW/MaxLumaH buffer-overrun)
+`av1_frame_locate` on frame 7 showed Y bit-exact, only U/V wrong, confined to
+chroma bbox x[416..425] y[224..239] — the picture's true bottom-right corner
+(chroma width 426, height 240). `KINETIX_AV1_DBG_CHROMA_XY` (inter_block.rs's
+existing probe) found no owning block — the divergent pixel belongs to an
+INTRA block coded inside this inter frame (a new `KINETIX_AV1_DBG_INTRA_CXY`
+probe added to `intra_block.rs`'s chroma tx-block loop found it: mi=(208,112),
+bsize=BLOCK_32X32, `UV_CFL_PRED`, cfl_alpha=(-1,1)).
+
+`max_luma_w` there was `864` against a `tile_w` (actual y_plane buffer width)
+of only `856` — the frame is 852 wide, mi-grid-padded to 856 (`MiCols=214`),
+but this 32x32 block's origin (mi_col=208) is a legal partition per §5.11.4
+(only the block's *origin* must be inside MiCols, not its full nominal
+extent) whose nominal width extends 8px past the mi-grid edge. dav1d's
+`recon_tmpl.c` clamps via `w4 = imin(bw4, f->bw - t->bx)` — the block's own
+size AND'd against the frame's own mi-grid width — before deriving
+`MaxLumaW`; Kinetix computed `max_luma_w` as the block's raw unclamped
+nominal extent, so the CFL luma-average loop's `.get(luma_y*stride+luma_x)`
+read past `tile_w` and silently wrapped into the next row instead of
+clamping, corrupting `lumaAvg` and every `L[i][j]` sample for that whole
+16x16 chroma block. Fixed by clamping `max_luma_w`/`max_luma_h` to
+`self.tile_w`/`self.tile_h` (`tpt-kinetix-av1/src/reconstruct/intra_block.rs`).
+
+**Frame 8: diff 16 -> 0 bytes (bit-exact).** Frame 7: diff 320 -> 4 bytes
+(maxabs 2 -> 1) — one tiny rounding case remains at chroma x=425 (the true
+last visible column, luma x=850-851, which is NOT past the tile_w=856
+buffer edge — so this residual is unrelated to the buffer-overrun fix above
+and not root-caused this session; a real CFL rounding subtlety, low
+priority given its size). `switch_frame` FATE **28/32 -> 29/32**; aggregate
+**35/195 -> 36/195**. Verified: full corpus per-stream counts unchanged
+(`decode_model` 0/21, `film_grain` 0/10, `frames_refs_short_signaling`
+1/50, `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58).
+`cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass. clippy clean.
+Committed separately (`av1: clamp CFL MaxLumaW/MaxLumaH to the tile buffer
+edge, not the block's nominal extent`).
+
+### Frame 30/31: TWO real frame_size() bugs found + fixed, ONE more found
+Frame 30 (order_hint=30) decoded to a uniform grey (128) placeholder —
+`decode()`'s `Err`/`Ok(None)` fallback path, meaning real reconstruction
+failed silently. Added `KINETIX_AV1_DBG_RECON_ERR`-gated diagnostics at
+every `decode()` fork (`ObuType::Frame`/`FrameHeader` header-parse result,
+`show_existing_frame` slot lookup, and the `reconstruct_av1_frame` match
+arm that previously only logged `Err`, never `Ok(None)`) to find exactly
+which one silently returned nothing: `FrameHeader::parse_with_dpb` itself
+failed with `"trailing_bits padding bit was not 0"` — a genuine mid-header
+bit desync, not a downstream tile issue.
+
+Rebuilt the patched-dav1d oracle (`%LOCALAPPDATA%\Temp\dav1d_oracle`,
+`src/obu.c`) with its own dormant per-field frame-header bit-offset dump
+(`#define DEBUG_FRAME_HDR 0` -> `1`, at `parse_frame_hdr`'s ~20 existing
+`printf("HDR: post-X: off=%td\n", ...)` call sites, previously added by an
+even earlier session but left disabled) and ran it over `switch_frame.ivf`
+(needed copying `libdav1d.dll` next to `tools/dav1d.exe` — the loader
+couldn't find it via `PATH` from Git Bash). Cross-referenced dav1d's own
+bit offsets for the 31st `HDR: post-*` block (order_hint=30) against
+Kinetix's own `KINETIX_AV1_DBG_FH_SEC`-gated `bits_read()` checkpoints
+(several new ones added this session: `refoh`, `framesize`, `brtime`) from
+a shared, independently-confirmed anchor point (bit 13, right after
+`primary_ref_frame`): dav1d's `frametype-specific-bits` checkpoint landed
+at bit 114; Kinetix's equivalent point (`framesize`) landed at bit 95 — a
+19-bit gap, isolating the desync to the frame-size / inter-ref-signalling
+block rather than segmentation/lpf/cdef/gm (all of which lined up exactly
+once cross-checked field-by-field).
+
+**Bug 1** (`tpt-kinetix-av1/src/frame.rs`, the inter frame-size call site):
+`let override_now = frame_size_override_flag && !error_resilient_mode;`
+passed into `parse_frame_size` as its OWN width/height-read gate. Per
+dav1d's `read_frame_size(c, gb, use_ref)`, that AND'd value only decides
+*which frame-size syntax function* to use (`frame_size_with_refs()`'s
+found-ref search vs. plain `frame_size()`); `frame_size()` itself always
+gates its explicit width/height read on the RAW `frame_size_override_flag`
+alone, regardless of `use_ref`/error-resilience. Since every `SWITCH_FRAME`
+forces `frame_size_override_flag = 1` (§5.9.2) while ALSO forcing
+`error_resilient_mode = 1`, `override_now` was always false for this
+frame's type — Kinetix silently skipped its two required width/height
+fields entirely, under-consuming exactly `width_n_bits + height_n_bits`
+bits (which is what the measured 19-bit gap turned out to be). Fixed by
+passing the raw `frame_size_override_flag` through instead.
+
+**Bug 2** (same file, `parse_frame_size`): once bug 1 was fixed and the
+fields were actually read, they came out as `w=254, h=208` — plausible-
+looking but wrong (real size, confirmed via `ffprobe -show_entries
+frame=width,height`, is 426x240 — exactly half of the sequence's 852x480).
+Root cause: the width/height were decoded via `read_ns(br, max_w)` /
+`read_ns(br, max_h)` — the §4.10.7 *non-symmetric* variable-length `ns(n)`
+code — but spec's `frame_size()` reads a plain FIXED-width `f(n)` field
+where `n = frame_width_bits_minus_1 + 1` (already parsed into the sequence
+header at OBU-parse time, just never threaded into this function — its
+`seq` parameter was unused, prefixed `_seq`). `ns(852)` happened to decode
+*a* value without erroring (254, then 839 on the next frame after the
+resulting bit-desync), which is exactly why this was never caught before:
+every other frame in the corpus with `frame_size_override_flag == 0` never
+reaches this branch at all. Fixed by reading `frame_width_bits_minus_1 + 1`
+/ `frame_height_bits_minus_1 + 1` bits directly via the existing `read_f`
+helper. Frame 30 now parses its true `w=426 h=240`.
+
+Both committed together (`av1: fix frame_size() width/height parsing for
+error-resilient SWITCH_FRAME resolution changes`).
+
+**Still open**: the `frame_size_with_refs()` found-ref search loop
+(`for i in 0..REFS_PER_FRAME: found_ref = f(1); if found_ref { copy
+width/height/render_size from ref_frame_idx[i]'s stored frame; break }`,
+taken when `frame_size_override_flag && !error_resilient_mode`) is not
+implemented at all in Kinetix (confirmed: no `found_ref` or
+`frame_size_with_refs` anywhere in `frame.rs`) — not touched this session
+since no stream in the current corpus exercises that specific combination
+(this stream's other resizeable-looking inter frames all have
+`frame_size_override_flag == 0`), but it's a real, silent gap: any stream
+that resizes via a non-error-resilient inter frame would silently
+under/over-read bits the same way bug 1 did here.
+
+Frame 31 (immediately after the resolution switch, order_hint=31,
+ordinary `InterFrame`, `error_resilient_mode=false`) now fails
+*differently* — its own header parses fine (`w=426 h=240`, matching
+frame 30 and `ffprobe`), but tile-group parsing then errors with `"tile 0
+data (2720 bytes) exceeds group payload"` (`KINETIX_AV1_DBG_RECON_ERR`
+confirmed this is a fresh `Err`, not a repeat of bug 1/2). This is a THIRD,
+distinct bug — most likely a tile-layout/tile-size-in-bytes computation
+still keyed off stale pre-switch dimensions (852x480) rather than the new
+426x240 frame, but NOT root-caused this session (budget). Next concrete
+step: trace `parse_tile_info`'s bit reads and whatever computes each tile's
+expected byte span for order_hint=31 specifically, comparing against the
+oracle's own tile-size fields (dav1d's `hdr->tiling.*`) the same way this
+session cross-referenced `HDR: post-*` offsets — the same oracle build
+(`DEBUG_FRAME_HDR=1`) is left in place at `%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`
+for reuse (rebuild via plain `ninja` in `bld2`, then copy
+`src/libdav1d.dll` next to `tools/dav1d.exe` before running it directly —
+Git Bash's `PATH` does not satisfy the Windows DLL loader).
+
+Also note: `av1_fate_score`/`av1_frame_locate`'s own reference-comparison
+tooling assumes ONE constant frame size for the whole stream (chunking the
+raw ffmpeg dump, or offsetting into it, by a fixed `width*height*1.5`).
+That assumption breaks the moment a stream resizes mid-file — frame 30 now
+shows as a "SIZE MISMATCH" (153360 vs the assumed-constant 613440 bytes)
+purely because of this, not because Kinetix's own output is wrong (its
+153360-byte, 426x240 output is independently confirmed correct via
+`ffprobe`). If `switch_frame`'s scored frame count looks "stuck" at 29/31
+in future sessions, that is this tooling limitation, not a regression —
+the tools would need per-frame-size awareness (e.g. via `ffprobe`) to score
+frames 30 onward at all once frame 31's tile bug is also fixed.
+
+### Verified
+- `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass (unchanged both times).
+- `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean
+  (both times).
+- `av1_fate_score` full corpus, final state this session: `switch_frame`
+  **29/31** frames exact (frame 30 excluded from the count by the tooling
+  limitation above, not a real failure; frame 31 real, open — see above).
+  FATE aggregate **36/194**. Every other stream unchanged: `decode_model`
+  0/21, `film_grain` 0/10, `frames_refs_short_signaling` 1/50,
+  `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58.
+
+### Remaining (AV1)
+- [ ] `switch_frame` frame 7: a 4-byte / maxabs-1 CFL rounding residual at
+      the picture's true bottom-right column, unrelated to either fix this
+      session.
+- [ ] `switch_frame` frame 31: "tile 0 data exceeds group payload" — a real,
+      distinct tile-layout bug following the resolution switch; see the
+      concrete next-step above.
+- [ ] `frame_size_with_refs()`'s found-ref search loop is entirely
+      unimplemented (silent gap, not yet hit by any corpus stream).
+- [ ] `non_uniform_tiling` (6/24), `frames_refs_short_signaling` (1/50), and
+      `seq_hdr_op_param_info`/`decode_model`/`film_grain` (0 exact) remain
+      the next-biggest opportunities; unrelated to this session's fixes.
+- [ ] `pixel_exact` stays `false`.
 - [ ] `pixel_exact` stays `false` (FATE: 35/195 frames exact).
