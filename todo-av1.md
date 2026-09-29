@@ -13576,3 +13576,56 @@ remaining surface roughly in half and is a much better starting point than
 - [ ] Once frame 2 is fixed, re-run `av1_fate_score`: frame 3's 20204 is
       likely a downstream consequence and may close with it, which would
       make `switch_frame` 3/32 rather than 2/32.
+## Session 2026-09-29 (hypothesis tested and DISPROVED) — the horizontal-only
+## 8-tap rounding constant 34 is CORRECT; do not "fix" it to 33
+
+Investigated the frame-2 chroma residual as a rounding error in
+`inter::motion_compensate`, since the deltas are symmetric (70 positive / 63
+negative, signed sum +12) and maxabs 11 — the shape of a tie-breaking
+difference, not a structural error.
+
+Read dav1d's own source (`src/mc_tmpl.c`) for the constant. For 8-bit,
+`get_intermediate_bits` is 4, so
+`intermediate_rnd = 32 + ((1 << (6 - 4)) >> 1)`:
+
+    1 << 2 = 4;  4 >> 1 = 2;  32 + 2 = 34
+
+The existing `(s + 34) >> 6` in the fh-only branch is therefore already
+correct. I initially mis-evaluated `((1 << (6-4)) >> 1)` as 1 and "fixed"
+the constant to 33; the corpus immediately refuted it:
+
+| constant | FATE aggregate | `non_uniform_tiling` |
+|---|---|---|
+| `(s + 34) >> 6` (correct) | **9/195** | 6/24 |
+| `(s + 33) >> 6` (my edit) | 4/195 | **1/24** |
+
+Reverted; tree is clean and 165 lib tests pass. Recorded here because the
+"obvious" reading of that macro invites the same mistake twice, and because
+the AV1 index row's history shows a prior session making a plausible-looking
+but unverified change to exactly this function.
+
+For the record, dav1d's three 8-bit topologies are:
+- 2-D (`fh` and `fv`): horizontal `>> 2` then vertical `>> 10` — matches ours.
+- fh-only: `DAV1D_FILTER_8TAP_CLIP2(..., intermediate_rnd=34, 6)`.
+- fv-only: plain `DAV1D_FILTER_8TAP_CLIP(..., 6)`, i.e. `+32`, **not**
+  `intermediate_rnd` — ours already uses 32 here, which is the asymmetry that
+  makes the fh-only constant look like a typo.
+
+### Frame 2 status: unchanged, still 133
+- [x] Rule out in-loop filters (`NODEBLOCK`, `NOCDEF`, both) — ruled out.
+- [x] Rule out intra chroma (frames 0/1 exact) — ruled out.
+- [x] Rule out OBMC as the *cause* (`KINETIX_AV1_NOOBMC=1` makes it far worse,
+      133 -> 24390, so OBMC is load-bearing here, not broken).
+- [x] Rule out the single-axis 8-tap rounding constant — ruled out (above).
+- [ ] Remaining live suspects, in order: (1) the 2-D chroma path's
+      `tmp` intermediate buffer being narrower than dav1d's fixed `128` stride
+      — dav1d writes `mid_ptr` at stride 128 while our `tmp` uses stride `bw`,
+      which is equivalent only if `bw <= 128`, so probably not it, but worth
+      an explicit check on a 852-wide frame; (2) compound (`motion_compensate_prep`)
+      blend, which has its own `(s + 2) >> 2` / `(s + 32) >> 6` pair; (3) the
+      sub-8x8 chroma quadrant scheme's `h_off`/`v_off` sequencing.
+- [ ] Decisive next experiment: dump a pre-residual chroma prediction for one
+      affected 4x4 block (e.g. U block 74/21) and compare against the same
+      block's final pixels. If the prediction already matches, the fault is in
+      the residual/transform; if it differs, the fault is in MC. That single
+      split is what the todos have been missing.

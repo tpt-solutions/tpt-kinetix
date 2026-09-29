@@ -455,7 +455,7 @@ impl<'a> TileDecodeState<'a> {
             let (r0, v0, mb0, bp0) = self.dec.raw_state();
             eprintln!(
                 "KSKIPPRE mi=({mi_col},{mi_row}) sctx={skip_ctx} pre=(range={r0}, value={v0}, max_bits={mb0}, bit_pos={bp0}) f={:?}",
-                &self.mode_cdfs.skip[skip_ctx]
+                self.mode_cdfs.skip[skip_ctx]
             );
         }
         let skip = if self.seg_feature_skip {
@@ -468,7 +468,7 @@ impl<'a> TileDecodeState<'a> {
             eprintln!(
                 "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={} cdf=[{:?}] state=({},{},{},{})",
                 self.dec.raw_state().0,
-                &self.mode_cdfs.skip[skip_ctx],
+                self.mode_cdfs.skip[skip_ctx],
                 self.dec.raw_state().1,
                 self.dec.raw_state().2,
                 self.dec.raw_state().3,
@@ -928,7 +928,11 @@ impl<'a> TileDecodeState<'a> {
                 left_refs,
             );
             if dbg_b0 {
-                eprintln!("DBG b0 mi=({mi_col},{mi_row}) ref={} rng={}", ref_names[0], self.dec.raw_state().0);
+                eprintln!(
+                    "DBG b0 mi=({mi_col},{mi_row}) ref={} rng={}",
+                    ref_names[0],
+                    self.dec.raw_state().0
+                );
             }
         }
 
@@ -2043,7 +2047,10 @@ impl<'a> TileDecodeState<'a> {
             lv as u8,
         );
         if dbg_b0 {
-            eprintln!("DBG b0 mi=({mi_col},{mi_row}) post-residual rng={}", self.dec.raw_state().0);
+            eprintln!(
+                "DBG b0 mi=({mi_col},{mi_row}) post-residual rng={}",
+                self.dec.raw_state().0
+            );
         }
 
         // Update inter neighbour state.

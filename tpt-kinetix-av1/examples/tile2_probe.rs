@@ -9,10 +9,15 @@ use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: tile2_probe <ivf> [max]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: tile2_probe <ivf> [max]");
     let max: Option<usize> = std::env::args().nth(2).and_then(|s| s.parse().ok());
     let mut bytes = Vec::new();
-    std::fs::File::open(&path).unwrap().read_to_end(&mut bytes).unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
 
     // split IVF frames: 32-byte header, then 12-byte frame headers
     let mut pos = 32usize;
