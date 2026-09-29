@@ -2438,7 +2438,7 @@ impl<'a> TileDecodeState<'a> {
         }
     }
 
-    fn get_gmv_2d(&self, ref_name: u8, mi_col: usize, mi_row: usize, bw: usize, bh: usize) -> Mv {
+    pub(super) fn get_gmv_2d(&self, ref_name: u8, mi_col: usize, mi_row: usize, bw: usize, bh: usize) -> Mv {
         let idx = ref_name as usize - 1;
         if std::env::var("KINETIX_AV1_DBG_GMV").is_ok() {
             eprintln!(

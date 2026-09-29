@@ -1379,6 +1379,21 @@ impl<'a> TileDecodeState<'a> {
             );
         }
 
+        // dav1d `dav1d_refmvs_find`: `tgmv[i]` is the block's global motion
+        // vector for reference `i` (zero for an identity model); `gmv[i]` is
+        // only set for models above TRANSLATION and is what a GLOBALMV
+        // neighbour's stored MV is replaced by (`(b->mf & 1) ? gmv : b->mv`).
+        let mut tgmv = [Mv::default(); 2];
+        let mut gmv: [Option<Mv>; 2] = [None, None];
+        for i in 0..2 {
+            if want_refs[i] >= LAST_FRAME && want_refs[i] != crate::inter::NONE_FRAME {
+                tgmv[i] = self.get_gmv_2d(want_refs[i], mi_col, mi_row, bw4 as usize, bh4 as usize);
+                if self.gm_type[(want_refs[i] - 1) as usize] > crate::frame::GM_TRANSLATION {
+                    gmv[i] = Some(tgmv[i]);
+                }
+            }
+        }
+
         // dav1d `add_spatial_candidate`.
         let add = |stack: &mut Vec<([Mv; 2], i64)>,
                    have_newmv: &mut i32,
@@ -1406,7 +1421,12 @@ impl<'a> TileDecodeState<'a> {
             if !is_compound {
                 for n in 0..2 {
                     if cand.refs[n] == want_refs[0] {
-                        let mv = [cand.mv[n], Mv::default()];
+                        let cmv = if cand.mf & 1 != 0 {
+                            gmv[0].unwrap_or(cand.mv[n])
+                        } else {
+                            cand.mv[n]
+                        };
+                        let mv = [cmv, Mv::default()];
                         *have_match = 1;
                         *have_newmv |= i32::from((cand.mf >> 1) & 1);
                         for e in stack.iter_mut() {
@@ -1422,7 +1442,14 @@ impl<'a> TileDecodeState<'a> {
                     }
                 }
             } else if cand.refs == want_refs {
-                let mv = [cand.mv[0], cand.mv[1]];
+                let mv = if cand.mf & 1 != 0 {
+                    [
+                        gmv[0].unwrap_or(cand.mv[0]),
+                        gmv[1].unwrap_or(cand.mv[1]),
+                    ]
+                } else {
+                    [cand.mv[0], cand.mv[1]]
+                };
                 *have_match = 1;
                 *have_newmv |= i32::from((cand.mf >> 1) & 1);
                 for e in stack.iter_mut() {
@@ -1646,7 +1673,9 @@ impl<'a> TileDecodeState<'a> {
                     }
                     if first {
                         // dav1d: `globalmv_ctx = dist(projected mv, gmv) >= 16`.
-                        globalmv_ctx = i32::from((mv.col.abs() | mv.row.abs()) >= 16);
+                        globalmv_ctx = i32::from(
+                            ((mv.col - tgmv[0].col).abs() | (mv.row - tgmv[0].row).abs()) >= 16,
+                        );
                     }
                     if let Some(e) = stack.iter_mut().find(|e| e.0[0] == mv) {
                         e.1 += 2;
@@ -1898,7 +1927,7 @@ impl<'a> TileDecodeState<'a> {
                         }
                     }
                     while m < 2 {
-                        same[m][n] = Mv::default();
+                        same[m][n] = tgmv[n];
                         m += 1;
                     }
                 }
@@ -2002,8 +2031,23 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        let out: Vec<[Mv; 2]> = stack.iter().map(|e| e.0).collect();
-        let n_found = out.len();
+        // dav1d "clamping": the first MV of each entry is clamped to the
+        // frame plus a 4-mi border; then missing entries up to two are filled
+        // with the block's global MV (`tgmv[0]`) without changing the count.
+        let n_found = stack.len();
+        {
+            let left = -(bx4 + bw4 + 4) * 4 * 8;
+            let right = (mi_cols - bx4 + 4) * 4 * 8;
+            let top = -(by4 + bh4 + 4) * 4 * 8;
+            let bottom = (mi_rows - by4 + 4) * 4 * 8;
+            for e in stack.iter_mut() {
+                e.0[0] = Mv::new(e.0[0].row.clamp(top, bottom), e.0[0].col.clamp(left, right));
+            }
+        }
+        let mut out: Vec<[Mv; 2]> = stack.iter().map(|e| e.0).collect();
+        while out.len() < 2 {
+            out.push([tgmv[0], Mv::default()]);
+        }
         (out, packed, n_found, drl_ctx, comp_ctx)
     }
 
