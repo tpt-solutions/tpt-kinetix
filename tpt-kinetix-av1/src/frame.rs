@@ -534,14 +534,12 @@ impl FrameHeader {
             // neither applies to the streams handled here.
             let idx = read_f8(&mut br, 3)?;
             if decoder_model_info_present && !seq.equal_picture_interval {
-                return Err(KinetixError::Unsupported(
-                    "AV1 show_existing_frame with decoder-model temporal_point_info".into(),
-                ));
+                // temporal_point_info() (§5.9.31): frame_presentation_time.
+                let _ = read_f(&mut br, seq.frame_presentation_time_length_minus_1 + 1)?;
             }
             if seq.frame_id_numbers_present_flag {
-                return Err(KinetixError::Unsupported(
-                    "AV1 show_existing_frame with frame_id_numbers_present".into(),
-                ));
+                // display_frame_id f(idLen)
+                let _ = read_f(&mut br, seq.frame_id_len())?;
             }
             let bits = br.bits_read();
             return Ok((
@@ -578,6 +576,10 @@ impl FrameHeader {
         } else {
             read_flag(&mut br)?
         };
+        if show_frame && decoder_model_info_present && !seq.equal_picture_interval {
+            // temporal_point_info() (§5.9.31): frame_presentation_time.
+            let _ = read_f(&mut br, seq.frame_presentation_time_length_minus_1 + 1)?;
+        }
         let showable_frame = if !reduced_still && !show_frame && frame_type != FrameType::KeyFrame {
             read_flag(&mut br)?
         } else {
@@ -617,6 +619,11 @@ impl FrameHeader {
         };
         if frame_is_intra {
             force_integer_mv = true;
+        }
+
+        // --- current_frame_id (§5.9.2) ---
+        if seq.frame_id_numbers_present_flag {
+            let _ = read_f(&mut br, seq.frame_id_len())?;
         }
 
         // --- frame_size_override_flag ---
@@ -764,6 +771,10 @@ impl FrameHeader {
                             v = *idx
                         );
                     }
+                }
+                if seq.frame_id_numbers_present_flag {
+                    // delta_frame_id_minus_1 f(delta_frame_id_length_minus_2 + 2)
+                    let _ = read_f(&mut br, seq.delta_frame_id_length_minus_2 + 2)?;
                 }
             }
             // §5.9.2: `frame_size_override_flag && !error_resilient_mode` only
