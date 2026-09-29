@@ -1879,6 +1879,13 @@ fn parse_global_motion(
             )?;
         }
     }
+    if std::env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
+        for r in 1..=7 {
+            if gm_type[r] != GM_IDENTITY {
+                eprintln!("GMPARAMS ref={r} type={} params={:?}", gm_type[r], gm_params[r]);
+            }
+        }
+    }
     Ok((gm_type, gm_params))
 }
 
@@ -2013,12 +2020,13 @@ fn parse_film_grain(
 
 /// `inverse_recenter()` (§6.8.2).
 fn inverse_recenter(r: i32, v: i32) -> i32 {
+    // Spec 5.9.28 / dav1d `inv_recenter`.
     if v > 2 * r {
-        v - r
+        v
     } else if (v & 1) != 0 {
-        (v + 1) / 2
+        r - ((v + 1) >> 1)
     } else {
-        -(v / 2)
+        r + (v >> 1)
     }
 }
 
