@@ -13979,3 +13979,103 @@ still not investigated.
 - [ ] Frame 4 onward (370917+ diff, maxabs=255) is likely a downstream
       desync from frame 3, not yet confirmed or investigated.
 - [ ] `pixel_exact` stays `false` (FATE: 10/195 frames exact).
+
+## Session 2026-09-29 (FIXED) — `switch_frame` frame 3 root-caused and fixed: a
+## real `has_overlappable_candidates` bug (wrong OBMC-eligibility scan), NOT a
+## tile/SB-edge issue. FATE 10/195 -> 35/195 (switch_frame 2/32 -> 28/32)
+
+Picked up the previous session's frame-3 lead (Y bbox x[640..851] y[384..479],
+"looks like a partial-SB-edge issue"). First disproved the tile-boundary half
+of that hypothesis: `KINETIX_AV1_DBG_TILEINFO=1` on this stream shows
+`cols=1 rows=1` (single tile) — never a candidate. Also corrected a unit
+mistake from the prior session: `KINETIX_AV1_DBG_TILEINFO`'s own
+`sb_cols=7 sb_rows=4` proves this stream uses **128x128 superblocks** (not
+64x64 as previously assumed), so the bbox's "last SB column/row" framing was
+off by a factor of 2 — the true picture is the bbox spans the last TWO SB
+columns (5 and 6) of the last (partial-height) SB row, not one partial edge
+cell.
+
+### Localizing the actual first divergence
+Extended the patched-dav1d oracle (`%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`,
+GCC toolchain — the MSVC tree is still broken, see prior sessions) with a
+wider `DEBUG_BLOCK_INFO` gate and added `setvbuf(stdout, NULL, _IONBF, 0);`
+at the top of `tools/dav1d.c`'s `main()` — the existing `printf`-based
+per-block debug lines (`Post-skip`/`Post-ref`/`Post-intermode`/etc.) were
+fully stdio-buffered and only flushed at process exit, making them
+impossible to interleave with the `fprintf(stderr, ...)` lines by inspection;
+unbuffering stdout was necessary to read them in real decode order at all.
+Also added `fr={}` (via `debug_frame_seq::current()`) to the existing
+`KTRACE PART_PRE`/`PART` partition trace in `partition.rs` so per-frame
+partition-read `rng` sequences could be isolated and diffed frame-by-frame
+(previously ambiguous across the 4 frames the harness decodes).
+
+Walked the partition-read `pre_rng` sequence for mi row 96+ (the last SB row)
+column-by-column against the oracle's own `KINETIX_PARTCDF` dump: **every**
+partition read matched exactly (context, alphabet size, and raw `rng`)
+through mi(186,96)/(184,98) — including a full independent recheck of the
+mi(160,96) 32x32 leaf's 4-job OBMC blend (job MVs, filters, and destination
+pixel positions all matched dav1d bit-for-bit) — until the very next
+partition read at mi(186,98): dav1d `pre_rng=55047`, Kinetix `pre_rng=45009`.
+That pinpoints the discrepancy to the immediately-preceding block,
+mi(184,98) (an ordinary 8x8 inter leaf, not a sub-8x8 split-chroma special
+case).
+
+### The bug
+Widened the oracle gate to just `by==98 && bx==184` and got its full
+per-symbol trace: `skip=1`, `is_inter`, `ref[0]=6` (ALTREF, referencing the
+keyframe), `NEARESTMV` (mv=(0,0)), `interintra` read (type stays NONE), two
+subpel-filter reads — and **no `Post-motionmode` line at all**, meaning dav1d
+did not read a `motion_mode`/`use_obmc` symbol for this block (the "has
+overlappable neighbours" gate in §5.11.23 was false).
+
+Kinetix's own `KINETIX_AV1_DBG_B0` trace for the same block showed it DID
+read `motion_mode=1` (OBMC) — an extra symbol dav1d never read, which is
+exactly the rng desync (both sides agree the value doesn't matter once
+you're off the rails: what matters is the extra *read*).
+
+Root cause: `has_overlappable_candidates()` in `inter_block.rs` scanned every
+mi column/row the block spans (`for c in mi_col..mi_col+bw`) looking for ANY
+inter neighbour in the above/left context arrays. dav1d's real gate
+(`decode.c`'s `findoddzero(&t->a->intra[bx4+1], w4>>1)` /
+`findoddzero(&t->l.intra[by4+1], h4>>1)`) is much narrower: it only samples
+the ODD-offset 4x4 units starting one unit in from the block's own edge,
+stepping by 2, for `w4>>1`/`h4>>1` iterations — for an 8x8 block that's a
+**single** probe position (`mi_col+1`), not the whole 2-mi span. Kinetix's
+broad scan found an inter neighbour at mi_col+0 (this block's own left-edge
+column, adjacent to a different, inter-coded neighbour) that dav1d's
+narrower single-position probe never looks at, so Kinetix spuriously decided
+this block was OBMC-eligible and read a symbol the bitstream never
+contained — a real, silent entropy desync (both `rng` and CDF-adaptation
+state diverge from here on, though earlier debug output happened to still
+"look" locally consistent because the corrupted state didn't immediately
+produce an invalid partition symbol until further downstream).
+
+Fixed `has_overlappable_candidates()` to mirror dav1d's exact odd-stride
+scan (checks `mi_col+1, mi_col+3, ...` for `bw>>1` steps above, and
+`mi_row+1, mi_row+3, ...` for `bh>>1` steps to the left, matching
+`findoddzero`'s `buf[n*2]` indexing into a pointer already offset by 1).
+
+### Verified
+- `switch_frame.ivf` frames 0-5 (`av1_frame_locate`, all individually): all
+  **0 differing samples** — frame 3 went 19205 -> 0, and frame 4 (previously
+  370917 diff bytes, "explodes") is now also 0, confirming frame 4's blowup
+  was entirely a downstream cascade from frame 3's entropy desync, not a
+  separate bug.
+- `av1_fate_score` full corpus: `switch_frame` **2/32 -> 28/32** frames exact
+  (remaining 4: frames 7-8 tiny diffs of 320/16 bytes maxabs 1-2, and frames
+  30-31 a real ~600k-byte divergence, both unrelated to this fix and not
+  investigated this session). FATE aggregate **10/195 -> 35/195**. Every
+  other stream's per-frame count is byte-for-byte unchanged (`decode_model`
+  0/21, `film_grain` 0/10, `frames_refs_short_signaling` 1/50,
+  `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58) — no regressions.
+- `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass (unchanged).
+- `cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean.
+
+### Remaining (AV1)
+- [ ] `switch_frame` frames 7-8 (diff 320/16 bytes, maxabs 1-2) and frames
+      30-31 (diff ~602k bytes, maxabs 128 — a real desync/blowup) are new,
+      unexamined leads, now that frames 0-6 and 9-29 are clean.
+- [ ] `non_uniform_tiling` (6/24), `frames_refs_short_signaling` (1/50), and
+      `seq_hdr_op_param_info`/`decode_model`/`film_grain` (0 exact) remain
+      the next-biggest opportunities; unrelated to this session's fix.
+- [ ] `pixel_exact` stays `false` (FATE: 35/195 frames exact).

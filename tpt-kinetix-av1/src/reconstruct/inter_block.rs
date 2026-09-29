@@ -159,6 +159,19 @@ impl<'a> TileDecodeState<'a> {
     /// `has_overlappable_candidates()` (§5.11.23): true when the block has an
     /// inter-coded neighbour directly above or to the left (within the tile),
     /// which is the gate for the `motion_mode` / `use_obmc` read.
+    // dav1d `findoddzero(buf, len)` (decode.c): for n in 0..len, tests
+    // `buf[n*2]` — i.e. only the ODD-offset 4x4 units within the block's own
+    // top/left edge (`&t->a->intra[bx4 + 1]` / `&t->l.intra[by4 + 1]`, so the
+    // scan starts one unit in from the block's own origin and steps by 2),
+    // for `len = w4 >> 1` (top) / `h4 >> 1` (left) iterations — NOT every mi
+    // column/row the block spans. The previous version here scanned every
+    // column/row in `[mi_col, mi_col+bw)` / `[mi_row, mi_row+bh)`
+    // unconditionally, which is a strictly wider (wrong) query: it can find
+    // an inter neighbour dav1d's narrower odd-stride probe misses, spuriously
+    // reading a `motion_mode`/`use_obmc` symbol the encoder never wrote and
+    // desyncing the entropy decoder for the rest of the tile (found via a
+    // patched-dav1d trace on `switch_frame.ivf` frame 3, mi(184,98): dav1d
+    // reads no `Post-motionmode` line for this 8x8 block, Kinetix did).
     fn has_overlappable_candidates(
         &self,
         mi_row: usize,
@@ -169,15 +182,19 @@ impl<'a> TileDecodeState<'a> {
         let row_start = self.tile_px_y0 / MI_SIZE;
         let col_start = self.tile_px_x0 / MI_SIZE;
         if mi_row > row_start {
-            for c in mi_col..(mi_col + bw).min(self.mi_cols) {
-                if self.is_inter_above[c] != 0 {
+            let len = bw >> 1;
+            for n in 0..len {
+                let c = mi_col + 1 + n * 2;
+                if self.is_inter_above.get(c).copied().unwrap_or(0) != 0 {
                     return true;
                 }
             }
         }
         if mi_col > col_start {
-            for r in mi_row..(mi_row + bh).min(self.mi_rows) {
-                if self.is_inter_left[r] != 0 {
+            let len = bh >> 1;
+            for n in 0..len {
+                let r = mi_row + 1 + n * 2;
+                if self.is_inter_left.get(r).copied().unwrap_or(0) != 0 {
                     return true;
                 }
             }
@@ -2756,11 +2773,27 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        // `KINETIX_AV1_DBG_OBMC_XY=<mi_col>,<mi_row>` overrides the default
+        // hardcoded probe block; `KINETIX_AV1_DBG_OBMC_PLANE` overrides the
+        // default plane (1 = U).
+        let obmc_xy_target = std::env::var("KINETIX_AV1_DBG_OBMC_XY")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+            });
+        let obmc_plane = std::env::var("KINETIX_AV1_DBG_OBMC_PLANE")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1);
         let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok()
-            && plane == 1
-            && (16..=22).contains(&mi_row);
+            && plane == obmc_plane
+            && obmc_xy_target.is_none_or(|(tc, tr)| mi_col == tc && mi_row == tr)
+            && (obmc_xy_target.is_some() || (16..=22).contains(&mi_row));
         // Detailed per-sample trace for the specific divergent block.
-        let dbg_obmc_deep = dbg_obmc && mi_col == 4 && mi_row == 20;
+        let dbg_obmc_deep = dbg_obmc
+            && obmc_xy_target.is_none_or(|(tc, tr)| mi_col == tc && mi_row == tr)
+            && (obmc_xy_target.is_some() || (mi_col == 4 && mi_row == 20));
         if dbg_obmc {
             eprintln!(
                 "OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}",

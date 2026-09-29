@@ -389,7 +389,8 @@ impl<'a> TileDecodeState<'a> {
         let bucket = PARTITION_CDF_LOOKUP[bsize];
         if std::env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
-                "KTRACE PART_PRE y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} r={}",
+                "KTRACE PART_PRE fr={} y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} r={}",
+                crate::debug_frame_seq::current(),
                 self.dec.raw_state().0
             );
         }
