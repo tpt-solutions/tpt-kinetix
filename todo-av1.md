@@ -14337,19 +14337,101 @@ regression). `cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass.
   0/21, `film_grain` 0/10, `frames_refs_short_signaling` 1/50,
   `non_uniform_tiling` 6/24, `seq_hdr_op_param_info` 0/58.
 
+### Session 2026-09-29 #4: frame 30/31 pixel mismatch — film-grain hypothesis REFUTED, real root cause found (reference-frame scaling, unimplemented)
+
+Picked up the "switch_frame frames 30/31 raw-pixel byte-diff" item flagged
+at the end of the previous session, whose leading hypothesis was a
+film-grain/color-range difference between the local `dav1d_oracle` build and
+the ffmpeg-vendored libdav1d used for the rest of the corpus.
+
+**Hypothesis killed first, with evidence, not assumed.** `ffprobe
+-show_entries stream=color_range,color_space,...` on `switch_frame.ivf`
+reports `color_range=tv` (default), all other color fields `unknown`
+(defaults) for every frame. The previous session's own FHSEC checkpoint
+trace already showed `fg=110` immediately after `gm=110` for frame 31 —
+i.e. zero bits consumed between the gm and fg checkpoints, meaning
+`film_grain_params_present` reads as false and no film-grain syntax is
+present at all in this stream. Both signals agree: no film grain, no
+non-default color params. That rules out the prior session's hypothesis
+outright.
+
+**Real bug found by direct visual/byte inspection**, using two new
+one-off debug examples (`tpt-kinetix-av1/examples/dbg_dump_frame.rs`,
+dumps one decoded frame's raw YUV420p to a file — `dbg_decode_all.rs`
+only ever printed per-frame status, never the pixels): dumped Kinetix's
+own frame 29 (last pre-switch, 852x480), 30, and 31 (both post-switch,
+426x240) and rendered all three to PNG via `ffmpeg -f rawvideo`. Frame 29
+is clean (matches the FATE sample's own `fr_030.png` reference dump
+scene-for-scene). Frames 30 and 31 are **visibly, severely corrupted** —
+blocky/scrambled garbage across most of the frame, with only a narrow
+left-edge column (containing on-screen HUD icons) looking intact. This is
+a real, visually-obvious decode bug, not a comparison artifact (also
+separately confirmed the previous session's own "near-total mismatch vs
+oracle `--muxer yuv`" number was itself measured against a bad reference:
+`ffmpeg -f rawvideo` demuxing `switch_frame.ivf` silently upscales/pads
+every frame back to a constant 852x480 — verified via output byte count,
+exactly `32 * 613440`, and via the FATE dir's pre-existing `fr_*.png`
+dumps, which show 852x480 even for order_hint 30/31 — so any naive
+constant-stride slice into that dump for frames 30/31 was comparing
+against the wrong geometry entirely, compounding but not causing this).
+
+**Root cause, confirmed by code inspection, not guessed**: no reference-
+frame-scaling / motion-vector-scaling process (AV1 spec §7.11.3.3, the
+`xScale`/`yScale` machinery keyed on a reference frame's `RefUpscaledWidth`/
+`RefFrameHeight` differing from the current frame's) exists anywhere in
+`tpt-kinetix-av1` — `grep -rn "x_scale\|y_scale\|is_scaled"` across
+`reconstruct/*.rs` and `src/*.rs` returns nothing but a code comment
+mentioning the gate. `inter_block.rs::inter_predict_plane` calls
+`inter.rs::motion_compensate`/`motion_compensate_prep` with `vis_w`/`vis_h`
+taken straight from the **reference slot's own stored `real_width`/
+`real_height`** (852x480 for the slot holding frame 29) while `dst_x`/
+`dst_y` are the **current** frame's tile-local pixel coordinates (0..426,
+0..240 for frame 30) — the two are silently treated as the same coordinate
+system with a flat 1:1 mv-to-pixel mapping and no scale factor at all. For
+`switch_frame.ivf` frame 30 (`SWITCH_FRAME`, resolution 852x480→426x240,
+exactly a 2x downscale) every inter block sources motion compensation from
+completely the wrong region of the 852x480 reference buffer, which exactly
+explains the observed corruption pattern (garbage everywhere except blocks
+whose small integer mv keeps them accidentally near the shared (0,0)
+origin). Frame 31 inherits the same corruption because it's an ordinary
+inter frame referencing frame 30's already-broken reconstruction.
+
+**Not fixed this session** — real reference-scaled motion compensation is
+a full, separate spec process (§7.11.3.3's scaled `block_inter_predict`
+variant uses a materially different per-row/per-column 1024-scale stepped
+sampling loop and its own filter-selection rules, not a small delta on the
+existing unscaled `motion_compensate`/`motion_compensate_prep` in
+`inter.rs`) — comparable in scope to this codebase's existing `warp.rs`/
+`wedge.rs` features, and implementing it without a bin-level oracle trace
+to validate against risked shipping a plausible-but-wrong version, so it
+was deliberately left as a precisely root-caused, unfixed item rather than
+rushed. Next concrete step for whoever picks this up: implement
+`xScale`/`yScale` per §7.11.3.3 (compare against `RefUpscaledWidth`/
+`RefFrameHeight`, which are already tracked per-slot as `ref_frame_dims` —
+see the previous session's `frame_size_with_refs()` work — so the scale
+factors are cheap to compute), then the scaled sampling loop in a new
+function alongside `motion_compensate` in `inter.rs`, gated on
+`xScale != REF_NO_SCALE || yScale != REF_NO_SCALE` at the
+`inter_predict_plane` call site in `inter_block.rs`. Validate against the
+patched `dav1d_oracle` (`%LOCALAPPDATA%\Temp\dav1d_oracle\bld2`) the same
+way `warp.rs` was validated.
+
+`cargo test -p tpt-kinetix-av1 --lib`: 165/165 pass (no functional code
+changed, only the new debug example added).
+`cargo clippy -p tpt-kinetix-av1 --all-targets -- -D warnings`: clean.
+
 ### Remaining (AV1)
 - [ ] `switch_frame` frame 7: a 4-byte / maxabs-1 CFL rounding residual at
       the picture's true bottom-right column, unrelated to either fix this
       session.
-- [ ] `switch_frame` frames 30/31: the raw-pixel byte-diff mismatch found
-      this session when cross-checking against the local dav1d_oracle's
-      `--muxer yuv` dump (near-total per-pixel diff, small magnitude
-      ~1-98 per byte) needs root-causing — likely a film-grain/color-range
-      difference between that oracle build and the ffmpeg-vendored
-      libdav1d used elsewhere, but not confirmed. The header-bitstream-level
-      proof (FHSEC checkpoint cross-check) shows parsing is correct; this is
-      about the reconstructed pixels specifically, or possibly just the
-      oracle comparison methodology.
+- [ ] `switch_frame` frames 30/31: **root cause confirmed 2026-09-29 #4**
+      — no reference-frame-scaling/motion-vector-scaling process (§7.11.3.3)
+      is implemented; `inter_predict_plane`/`motion_compensate` treat a
+      differently-sized reference frame's pixel grid as if it shared the
+      current frame's coordinate system. Real, visually-severe corruption
+      (not a comparison artifact — the film-grain/color-range hypothesis
+      from the prior session is refuted, see above). Needs a genuine
+      §7.11.3.3 scaled-MC implementation; not a quick fix.
 - [ ] `av1_fate_score`/`av1_frame_locate`'s constant-frame-size assumption
       still needs per-frame-size awareness (e.g. via `ffprobe`) to actually
       score `switch_frame` frames 30/31 at all.
