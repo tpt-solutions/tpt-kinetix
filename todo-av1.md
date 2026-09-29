@@ -13629,3 +13629,66 @@ For the record, dav1d's three 8-bit topologies are:
       block's final pixels. If the prediction already matches, the fault is in
       the residual/transform; if it differs, the fault is in MC. That single
       split is what the todos have been missing.
+## Session 2026-09-29 (ATTRIBUTION) — frame 2's chroma error is INTER CHROMA
+## MC, proven with a pre-residual split; it is NOT the residual/transform
+
+Extended the existing `KINETIX_AV1_DBG_PRED` pre-residual probe (which only
+snapshotted luma) to the two chroma planes, gated on
+`KINETIX_AV1_DBG_PRED_CHROMA`, and had it print the block's MV / refs /
+filters / motion_mode / compound flag alongside the pre- and post-residual
+chroma samples. The dump honours the same `KINETIX_AV1_DBG_PRED=<col>,<row>`
+and `KINETIX_AV1_DBG_PRED_FRAME=n` selectors as the luma probe.
+
+### The experiment
+Dense U-plane mi clusters were computed from the localized bbox: the worst is
+mi(148,20) with 5 differing samples, then mi(148,42), mi(148,44), mi(14,4),
+mi(194,4), mi(6,14). Running the split on the worst one:
+
+    RESID-CHROMA fr=2 mi=(148,20) bsize=0 plane=U origin=(296,40) size=2x2
+      mvs=[Mv{row:5, col:-7}, Mv{0,0}] refs=[2,0] filters=[0,0]
+      motion_mode=0 compound=false
+      cy=40 pred=[115,112]  post=[115,112]  delta=[0,0]
+      cy=41 pred=[113,112]  post=[113,112]  delta=[0,0]
+
+**pred == post: this block carries ZERO chroma residual**, yet the final
+buffer is wrong there — the reference has U(295,40)=113, U(296,40)=115,
+U(297,40)=112 where we produce 114, 114, 113.
+
+### What that rules in / out
+- **The residual, the dequant and the inverse chroma transform are NOT the
+  cause.** They contribute exactly zero to this block, yet it is wrong.
+- **Motion compensation IS the cause.** Same block, wrong before any residual
+  is applied.
+- The block is `bsize=0` (4x4 luma), `motion_mode=0` (SIMPLE_TRANSLATION),
+  `compound=false`, both filters 0 (REGULAR), single ref 2 (GOLD_FRAME), and
+  its `refmv_cell` is empty (`[0,0]`, refs `[0,0]`) so the MV is not
+  neighbour-inherited here. That rules out the compound blend, the OBMC
+  window, the WARP path, and the `filter_left`/`filter_above` neighbour
+  filters — every one of the suspects listed in the previous session note.
+- The MV is `col=-7, row=5` in 1/8-pel luma units. Reinterpreted for 4:2:0
+  chroma at `hbits = vbits = 4`: `dx = -7 & 15 = 9` (9/16), `dy = 5 & 15 = 5`
+  (5/16), `ix = -1`, `iy = 0` — so this is a **genuinely sub-pel chroma MC on
+  both axes**, i.e. the 2-D 8-tap path, not full-pel copy. Note the negative
+  x fraction: `-7 & 15 == 9`, and `>> 4` gives `-1`, so the sign handling
+  around the `&`/`>>` split is a live suspect for the ±1/±2 error, as is the
+  2-D chroma `tmp` buffer's `>> 2` intermediate rounding.
+
+### Frame 2 status
+- [x] in-loop filters (deblock, CDEF) — ruled out by measurement
+- [x] intra chroma (frames 0/1 exact) — ruled out
+- [x] OBMC as cause (`NOOBMC` -> 24390, so load-bearing, not broken) — ruled out
+- [x] single-axis 8-tap rounding constant 34 — ruled out (previous session)
+- [x] compound blend, WARP, neighbour filter arrays, `refmv_cell` — ruled out
+      by this block's own properties
+- [x] **residual / dequant / inverse chroma transform — ruled out (zero
+      residual, still wrong)**
+- [ ] **The 2-D sub-pel chroma MC path itself.** Confirmed the fault is there.
+      Next: for mi(148,20), dump the 8 chroma reference samples
+      `src[-3..+4] x [-3..+4]` and the chosen `kw`/`kh` 8-tap kernels, and
+      compare the intermediate `>> 2` values against dav1d's `PUT8TAP` trace
+      (the oracle tree already has a `kinetix_dbg_mcpx_active` hook that
+      prints `sum`, `rnd`, `dst` and `src[-3..4]` for a chosen x/h). That
+      gives a value-by-value comparison instead of a final-pixel one.
+      Pay attention to the negative-MV fraction sign handling and to whether
+      dav1d's fixed 128-wide `mid` stride vs our `bw`-wide `tmp` matters for
+      a 2-wide chroma block.

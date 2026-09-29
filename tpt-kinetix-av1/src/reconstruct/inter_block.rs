@@ -1975,6 +1975,40 @@ impl<'a> TileDecodeState<'a> {
             }
             _ => Vec::new(),
         };
+        // Same split for the two chroma planes. The chroma origin is the
+        // luma origin halved (§7.11.3.4 4:2:0) and the extent is the luma
+        // extent halved, so a chroma-only divergence is attributable to MC
+        // (wrong pre-residual prediction) or to the residual/transform
+        // (correct pre-residual, wrong post) exactly as the luma probe is.
+        let chroma_snap: Vec<(usize, Vec<u8>)> =
+            if pred_target.is_some_and(|(tc, tr)| {
+                (tc, tr) == (mi_col, mi_row)
+                    && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
+            }) && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
+            {
+                let cx0 = cpx_x0;
+                let cy0 = cpx_y0;
+                let cbw = cbw_px;
+                let cbh = cbh_px;
+                let mut out = Vec::new();
+                for idx in 0..2usize {
+                    let mut s = Vec::with_capacity(cbw * cbh);
+                    for y in cy0..cy0 + cbh {
+                        for x in cx0..cx0 + cbw {
+                            let v = if idx == 0 {
+                                self.u_plane[y * self.uv_stride + x]
+                            } else {
+                                self.v_plane[y * self.uv_stride + x]
+                            };
+                            s.push(v);
+                        }
+                    }
+                    out.push((idx, s));
+                }
+                out
+            } else {
+                Vec::new()
+            };
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
         // Show how the residual changed the prediction, row by row.
         if !pred_snap.is_empty() {
@@ -2004,6 +2038,47 @@ impl<'a> TileDecodeState<'a> {
                     &pred_snap[row * bw_px..(row + 1) * bw_px]
                 );
                 eprintln!("       post={post:?}  delta={deltas:?}");
+            }
+        }
+        // Chroma counterpart of the `RESID` dump above: prints the pre-residual
+        // chroma prediction and the post-residual value for the same block, so
+        // a chroma-only divergence can be attributed to MC vs residual.
+        for (idx, snap) in &chroma_snap {
+            let name = if *idx == 0 { 'U' } else { 'V' };
+            let cell = self.refmv_cell(mi_row, mi_col);
+            eprintln!(
+                "RESID-CHROMA fr={} mi=({mi_col},{mi_row}) bsize={bsize} plane={name} \
+                     origin=({cpx_x0},{cpx_y0}) size={}x{} mvs={:?} refs={:?} filters={:?} \
+                     motion_mode={motion_mode} compound={} cell_mvs={:?} cell_refs={:?}",
+                crate::debug_frame_seq::current(),
+                cbw_px,
+                cbh_px,
+                mvs,
+                ref_names,
+                filter,
+                mvs[1] != Mv::default(),
+                cell.mv,
+                cell.refs,
+            );
+            for row in 0..cbh_px {
+                let y = cpx_y0 + row;
+                let pre: &[u8] = &snap[row * cbw_px..(row + 1) * cbw_px];
+                let post: Vec<u8> = (0..cbw_px)
+                    .map(|col| {
+                        if *idx == 0 {
+                            self.u_plane[y * self.uv_stride + cpx_x0 + col]
+                        } else {
+                            self.v_plane[y * self.uv_stride + cpx_x0 + col]
+                        }
+                    })
+                    .collect();
+                let deltas: Vec<i32> = post
+                    .iter()
+                    .zip(pre)
+                    .map(|(a, b)| *a as i32 - *b as i32)
+                    .collect();
+                eprintln!("  cy={y} pred={pre:?}");
+                eprintln!("         post={post:?}  delta={deltas:?}");
             }
         }
         // §7.14.4 deblock-level inputs: this block's primary reference (spec
