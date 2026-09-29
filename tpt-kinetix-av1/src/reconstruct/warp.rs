@@ -164,6 +164,20 @@ fn get_shear_params(mat: &[i32; 6]) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// Warp model for a GLOBALMV block from the frame's global-motion parameters
+/// (dav1d `gmv_warp_allowed` + `dav1d_get_shear_params`): `None` when the
+/// shear is out of range (the block then uses plain translational MC).
+pub(super) fn global_warp_model(gm: &[i32; 6]) -> Option<WarpModel> {
+    let (alpha, beta, gamma, delta) = get_shear_params(gm)?;
+    Some(WarpModel {
+        matrix: *gm,
+        alpha,
+        beta,
+        gamma,
+        delta,
+    })
+}
+
 /// `dav1d_find_affine_int` (§7.13.4 `WarpEstimation`): fit the 6-parameter
 /// affine model to up to 8 `(src, dst)` sample pairs by integer least
 /// squares. `bw4`/`bh4` are the block size in 4-pixel units, `mv` the
@@ -625,6 +639,115 @@ pub(super) fn block_warp_process(
         }
         y += 8;
     }
+}
+
+/// One 8x8 warp block in the compound "prep" domain (dav1d
+/// `warp_affine_8x8t_c`): same two-pass filtering as [`warp_affine_8x8`], but
+/// the vertical pass keeps 16x precision (`(sum + 64) >> 7`, i.e. pixel << 4
+/// before dav1d's PREP_BIAS) instead of rounding to a pixel.
+#[allow(clippy::too_many_arguments)]
+fn warp_affine_8x8_prep(
+    dest: &mut [i32],
+    dest_stride: usize,
+    dest_x: usize,
+    dest_y: usize,
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dx: i32,
+    dy: i32,
+    alpha: i32,
+    beta: i32,
+    gamma: i32,
+    delta: i32,
+    mx0: i32,
+    my0: i32,
+) {
+    let sample = |ix: i32, iy: i32| -> i32 {
+        let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
+        let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
+        refp[cy * ref_stride + cx] as i32
+    };
+    let filter_row = |phase: i32| -> &'static [i8; 8] {
+        let idx = (64 + ((phase + 512) >> 10)).clamp(0, 192);
+        &WARPED_FILTERS[idx as usize]
+    };
+    let mut mid = [[0i32; 8]; 15];
+    let mut mx_row = mx0;
+    for (yy, row) in mid.iter_mut().enumerate() {
+        let sy = dy + yy as i32 - 3;
+        let mut tmx = mx_row;
+        for (xx, out) in row.iter_mut().enumerate() {
+            let filter = filter_row(tmx);
+            let sx = dx + xx as i32;
+            let mut s = 0i32;
+            for (k, &c) in filter.iter().enumerate() {
+                s += c as i32 * sample(sx + k as i32 - 3, sy);
+            }
+            *out = (s + 4) >> 3;
+            tmx += alpha;
+        }
+        mx_row += beta;
+    }
+    let mut my_row = my0;
+    for yy in 0..8usize {
+        let mut tmy = my_row;
+        for xx in 0..8usize {
+            let filter = filter_row(tmy);
+            let mut s = 0i32;
+            for (k, &c) in filter.iter().enumerate() {
+                s += c as i32 * mid[yy + k][xx];
+            }
+            dest[(dest_y + yy) * dest_stride + (dest_x + xx)] = (s + 64) >> 7;
+            tmy += gamma;
+        }
+        my_row += delta;
+    }
+}
+
+/// Compound counterpart of [`block_warp_process`]: returns the
+/// `bw_px * bh_px` intermediate-domain prediction (pixel << 4) that the
+/// compound blend consumes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn block_warp_prep(
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    model: &WarpModel,
+    bx4: i32,
+    by4: i32,
+    bw_px: usize,
+    bh_px: usize,
+    ss_hor: u32,
+    ss_ver: u32,
+) -> Vec<i32> {
+    let mut dest = vec![0i32; bw_px * bh_px];
+    let mat = &model.matrix;
+    let mut y = 0i32;
+    while y < bh_px as i32 {
+        let src_y = by4 * 4 + ((y + 4) << ss_ver);
+        let mat3_y = (mat[3] as i64) * (src_y as i64) + mat[0] as i64;
+        let mat5_y = (mat[5] as i64) * (src_y as i64) + mat[1] as i64;
+        let mut x = 0i32;
+        while x < bw_px as i32 {
+            let src_x = bx4 * 4 + ((x + 4) << ss_hor);
+            let mvx = ((mat[2] as i64) * (src_x as i64) + mat3_y) >> ss_hor;
+            let mvy = ((mat[4] as i64) * (src_x as i64) + mat5_y) >> ss_ver;
+            let dx = ((mvx >> 16) as i32) - 4;
+            let mx = (((mvx as i32) & 0xffff) - model.alpha * 4 - model.beta * 7) & !0x3f;
+            let dy = ((mvy >> 16) as i32) - 4;
+            let my = (((mvy as i32) & 0xffff) - model.gamma * 4 - model.delta * 4) & !0x3f;
+            warp_affine_8x8_prep(
+                &mut dest, bw_px, x as usize, y as usize, refp, ref_stride, ref_w, ref_h, dx, dy,
+                model.alpha, model.beta, model.gamma, model.delta, mx, my,
+            );
+            x += 8;
+        }
+        y += 8;
+    }
+    dest
 }
 
 #[cfg(test)]

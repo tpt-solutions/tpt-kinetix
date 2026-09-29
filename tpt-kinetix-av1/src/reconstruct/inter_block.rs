@@ -1332,8 +1332,13 @@ impl<'a> TileDecodeState<'a> {
         let mut warp_model: Option<warp::WarpModel> = None;
         {
             let min_dim = BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]);
-            let _ = single_mode; // GLOBALMV modelled translation-only: GmType never > TRANSLATION
+            // GLOBALMV with a non-translational global model reads no
+            // motion_mode (it always warps with the global model, below).
+            let global_warp_block = !compound
+                && single_mode == ZEROMV
+                && self.gm_type[(ref_names[0] - 1) as usize] > crate::frame::GM_TRANSLATION;
             let eligible = !compound
+                && !global_warp_block
                 && self.is_motion_mode_switchable
                 && min_dim >= 8
                 && ref_names[1] == NONE_FRAME
@@ -1399,6 +1404,25 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.raw_state().0
                     );
                 }
+            }
+        }
+        // dav1d `gmv_warp_allowed`: a single-ref GLOBALMV block predicts with
+        // the frame's global model when it is non-translational, integer-mv is
+        // off, the shear is valid and the reference is not scaled.
+        if !compound
+            && single_mode == ZEROMV
+            && self.gm_type[(ref_names[0] - 1) as usize] > crate::frame::GM_TRANSLATION
+            && !force_integer_mv
+        {
+            let ref0_scaled = self.ref_to_slot.get(ref_names[0] as usize).is_some_and(|&s| {
+                self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
+                    RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                        .is_some()
+                })
+            });
+            if !ref0_scaled {
+                warp_model =
+                    warp::global_warp_model(&self.gm_params[(ref_names[0] - 1) as usize]);
             }
         }
         // A WARP block reads no interpolation-filter symbol (dav1d sets
@@ -1522,6 +1546,26 @@ impl<'a> TileDecodeState<'a> {
         } else {
             8
         };
+
+        // Compound GLOBAL_GLOBALMV: each reference is predicted with the
+        // frame's global warp model when `gmv_warp_allowed` (dav1d).
+        self.comp_warp = [None, None];
+        if compound && new_mf == 1 && !force_integer_mv {
+            for (i, &rn) in ref_names.iter().enumerate() {
+                let gi = (rn - 1) as usize;
+                if self.gm_type[gi] > crate::frame::GM_TRANSLATION {
+                    let scaled = self.ref_to_slot.get(rn as usize).is_some_and(|&s| {
+                        self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
+                            RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                                .is_some()
+                        })
+                    });
+                    if !scaled {
+                        self.comp_warp[i] = warp::global_warp_model(&self.gm_params[gi]);
+                    }
+                }
+            }
+        }
 
         // Masked-compound descriptor passed to every plane: the luma-domain
         // mask is generated on the plane-0 call and sub-sampled for chroma.
@@ -2498,6 +2542,7 @@ impl<'a> TileDecodeState<'a> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
+        self.comp_warp = [None, None];
         // §5.11.18: cdef / delta_q / delta_lf still follow, with skip = 1.
         self.read_cdef(mi_row, mi_col, bsize, true);
         self.read_delta_qindex(bsize, true);
@@ -3571,9 +3616,26 @@ impl<'a> TileDecodeState<'a> {
         // intermediate domain (§7.11.3.1 `avg` / `w_avg`, or the §7.11.3.14
         // mask blend for COMPOUND_WEDGE / COMPOUND_DIFFWTD).
         let combined = {
-            let prep = |slot: usize, mv: Mv| -> Vec<i32> {
+            let prep = |slot: usize, mv: Mv, which: usize| -> Vec<i32> {
                 if let Some(rf) = self.ref_slots.slots[slot] {
                     let (rp, rw, _) = rf.plane(plane);
+                    if let (Some(model), true) = (&self.comp_warp[which], bw > 4 && bh > 4) {
+                        let ss_hor = (plane != 0) as u32 & self.subsampling_x as u32;
+                        let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
+                        return warp::block_warp_prep(
+                            rp,
+                            rw,
+                            (rf.real_width + ss_hor as usize) >> ss_hor,
+                            (rf.real_height + ss_ver as usize) >> ss_ver,
+                            model,
+                            mi_col as i32,
+                            mi_row as i32,
+                            bw,
+                            bh,
+                            ss_hor,
+                            ss_ver,
+                        );
+                    }
                     // See the single-ref motion_compensate call above: `filters`
                     // is `[dir0, dir1]`; dir1 is horizontal, dir0 is vertical.
                     // The reference read position is frame-global (see the
@@ -3624,8 +3686,8 @@ impl<'a> TileDecodeState<'a> {
                     vec![0i32; bw * bh]
                 }
             };
-            let t0 = prep(slot0, mvs[0]);
-            let t1 = prep(slot1, mvs[1]);
+            let t0 = prep(slot0, mvs[0], 0);
+            let t1 = prep(slot1, mvs[1], 1);
             if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
                 && plane == 0
                 && (mi_row == 12 || mi_row == 14)

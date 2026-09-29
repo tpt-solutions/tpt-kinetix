@@ -1028,6 +1028,10 @@ struct TileDecodeState<'a> {
     /// (spec 7.11.5 / dav1d `cfl_ac`) averages over the whole last luma
     /// transform block, including these samples. Cleared per intra block.
     luma_overhang: Vec<(usize, usize, u8)>,
+    /// Per-reference global-motion warp models of the current compound
+    /// GLOBAL_GLOBALMV block (dav1d `gmv_warp_allowed`); `[None, None]` for
+    /// every other block.
+    comp_warp: [Option<warp::WarpModel>; 2],
 }
 
 /// Row stride of `block_decoded`: `-1 ..= 32` plus slack (128×128 SB = 32 luma
@@ -1371,6 +1375,7 @@ impl<'a> TileDecodeState<'a> {
                 vec![0u8; BD_STRIDE * BD_STRIDE],
             ],
             luma_overhang: Vec::new(),
+            comp_warp: [None, None],
         }
     }
 
