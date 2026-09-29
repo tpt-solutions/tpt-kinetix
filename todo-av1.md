@@ -13692,3 +13692,71 @@ U(297,40)=112 where we produce 114, 114, 113.
       Pay attention to the negative-MV fraction sign handling and to whether
       dav1d's fixed 128-wide `mid` stride vs our `bw`-wide `tmp` matters for
       a 2-wide chroma block.
+## Session 2026-09-29 (audited) — the 2-D sub-pel chroma MC arithmetic is
+## VERIFIED CORRECT against dav1d; the table-error hypothesis is disproved
+
+Followed the previous session's next step and audited the whole 2-D sub-pel
+chroma MC path for mi(148,20) against dav1d's `src/recon_tmpl.c` +
+`src/tables.c` + `src/mc_tmpl.c`. Every element checks out. **The hypothesis
+that the sub-pel filter table was wrong is DISPROVED — all 90 rows (6 sets x
+15 phases) of `SUBPEL_FILTERS` are byte-identical to
+`dav1d_mc_subpel_filters`, and every row sums to 64.**
+
+### What was verified, element by element
+1. **Chroma MV decomposition.** dav1d `recon_tmpl.c:952`:
+   `mx = mvx & (15 >> !ss_hor)`; for 4:2:0 `ss_hor = 1` so the mask is a plain
+   15. Our `inter.rs` uses `dx = mv.col & ((1 << hbits) - 1)` with
+   `hbits = 3 + subsampling_x = 4`, i.e. mask 15. **Identical.**
+2. **Integer part.** dav1d `:962`: `dx = bx * h_mul + (mvx >> (3 + ss_hor))`
+   — an arithmetic shift on the RAW mvx. Ours: `ix = mv.col >> hbits`, then
+   `base_x = dst_x + ix`. For our block's `mvx = -7`: dav1d `-7 >> 4 = -1`,
+   ours `-7 >> 4 = -1`. **Identical**, including the negative-MV case that
+   the previous session flagged as the live suspect.
+3. **Kernel phase index.** dav1d passes `mx << !ss_hor` to the 8-tap
+   (`:990`), i.e. `9 << 0 = 9` for chroma, and `GET_H_FILTER` then indexes
+   `[(mx) - 1]` = `[8]`. Our `subpel_kernel` computes
+   `pos = frac - 1 = 9 - 1 = 8` for `bits == 4` (and `2*frac - 1` for
+   `bits == 3`, which is the luma doubling). **Identical.**
+4. **Narrow-block filter-set selection.** dav1d `GET_H_FILTER`:
+   `w > 4 ? full-set : 3 + (filter_type & 1)`, where `w = bw4 * h_mul` is the
+   **chroma** width; `GET_V_FILTER` symmetric on `h`. Ours:
+   `subpel_kernel(filter_h, dx, hbits, bw <= 4)` with `bw = cbw_px`, also the
+   chroma width. For this block (`bw4 = bh4 = 1` -> chroma 2x2) both select
+   the 4x4 set in both implementations. **Identical.**
+5. **Filter tables.** Full 6x15 diff against `dav1d_mc_subpel_filters`:
+   **0 mismatches / 90 rows**, all summing to 64. (An earlier suspicion that
+   set 3 row 13 read `[0,0,-2,9,61,-5,...]` was a line-offset artifact of the
+   grep, not a real table error.)
+6. **Rounding constants.** `put_8tap_c` for 8-bit: 2-D chain is
+   `>> (6 - 4) == >> 2` horizontally then `>> (6 + 4) == >> 10` vertically,
+   matching our `(s + 2) >> 2` and `(s + 512) >> 10`; the fh-only and fv-only
+   constants were already settled in the previous session.
+
+### The one remaining structural difference (NOT yet acted on)
+dav1d branches to `emu_edge` **only** when the block is near a border
+(`recon_tmpl.c:972`: `dx < !!mx*3 || dy < !!my*3 ||
+dx + bw4*h_mul + !!mx*4 > w || dy + bh4*v_mul + !!my*4 > h`); interior blocks
+point straight into the reference plane with **no** per-sample clamping. Our
+`motion_compensate` clamps every sample with `.clamp(0, ref_w - 1)` in every
+branch, unconditionally. For this specific block that clamp is provably a
+no-op (chroma base (295,40), 8-tap support x 292..299 / y 37..44, all interior
+in a 426x240 chroma plane), so it is not this block's cause — but it is a
+real deviation from dav1d that would show up on any block whose tap support
+crosses a frame edge, and it is worth aligning.
+
+### Frame 2 status: the fault is NOT in the MC arithmetic
+- [x] residual / dequant / inverse chroma transform (zero residual, still wrong)
+- [x] in-loop filters, intra chroma, OBMC, compound, WARP, neighbour filters
+- [x] single-axis 8-tap rounding constant
+- [x] **chroma MV decomposition (frac mask + arithmetic shift), kernel phase
+      index, narrow-block set selection, all 90 filter-table rows, 2-D
+      rounding constants** — all verified byte-identical to dav1d
+- [ ] Since the block is provably interior and the arithmetic is verified,
+      the remaining explanation is that **the MV itself, or the reference
+      plane it reads, differs from dav1d's** — i.e. the error is upstream of
+      MC, in MV derivation/derivation-mode or in reference-frame content/stride.
+      Note `refmv_cell` for this block was empty, so its MV is not
+      neighbour-inherited; verify the MV predictor and `CurFrame`/`refidx`
+      mapping for this block against dav1d rather than the filter path again.
+- [ ] Optional cleanup: align the border handling with dav1d's conditional
+      `emu_edge` instead of unconditional per-sample clamping.
