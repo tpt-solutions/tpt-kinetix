@@ -475,6 +475,26 @@ impl FrameHeader {
         ref_order_hint_dpb: &[u8; 8],
         ref_frame_dims_dpb: &[(u32, u32); 8],
     ) -> Result<(Self, usize), KinetixError> {
+        Self::parse_with_dpb_lf(
+            data,
+            seq,
+            ref_order_hint_dpb,
+            ref_frame_dims_dpb,
+            &[LoopFilterDeltas::default(); 8],
+        )
+    }
+
+    /// [`FrameHeader::parse_with_dpb`] plus each reference slot's saved
+    /// `loop_filter_ref_deltas` / `loop_filter_mode_deltas` (§7.20
+    /// `save_loop_filter_params`), which `load_previous()` (§7.21) restores
+    /// as the starting values when `primary_ref_frame` names a reference.
+    pub fn parse_with_dpb_lf(
+        data: &[u8],
+        seq: &crate::obu::SequenceHeaderObu,
+        ref_order_hint_dpb: &[u8; 8],
+        ref_frame_dims_dpb: &[(u32, u32); 8],
+        ref_lf_deltas_dpb: &[LoopFilterDeltas; 8],
+    ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
         let reduced_still = seq.reduced_still_picture_header;
@@ -976,9 +996,25 @@ impl FrameHeader {
             loop_filter_sharpness,
             loop_filter_delta_enabled,
             loop_filter_deltas,
-        ) = parse_loop_filter(&mut br, coded_lossless, allow_intrabc, num_planes)?;
+        ) = parse_loop_filter(
+            &mut br,
+            coded_lossless,
+            allow_intrabc,
+            num_planes,
+            if primary_ref_frame == 7 {
+                LoopFilterDeltas::default()
+            } else {
+                ref_lf_deltas_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
+            },
+        )?;
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC lf={}", br.bits_read());
+        }
+        if std::env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
+            eprintln!(
+                "LFHDR oh={order_hint} levels={loop_filter_level:?} sharp={loop_filter_sharpness} enabled={loop_filter_delta_enabled} ref_deltas={:?} mode_deltas={:?}",
+                loop_filter_deltas.loop_filter_ref_deltas, loop_filter_deltas.loop_filter_mode_deltas
+            );
         }
 
         // --- cdef_params ---
@@ -1472,6 +1508,7 @@ fn parse_loop_filter(
     coded_lossless: bool,
     allow_intrabc: bool,
     num_planes: u32,
+    prev_deltas: LoopFilterDeltas,
 ) -> Result<([u8; 4], u8, bool, LoopFilterDeltas), KinetixError> {
     if coded_lossless || allow_intrabc {
         return Ok(([0; 4], 0, false, LoopFilterDeltas::default()));
@@ -1485,7 +1522,7 @@ fn parse_loop_filter(
     }
     let sharpness = read_f8(br, 3)?;
     let delta_enabled = read_flag(br)?;
-    let mut deltas = LoopFilterDeltas::default();
+    let mut deltas = prev_deltas;
     if delta_enabled {
         let delta_update = read_flag(br)?;
         if delta_update {
