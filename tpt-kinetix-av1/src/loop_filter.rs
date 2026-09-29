@@ -939,6 +939,16 @@ fn deblock_plane(
     // edge, which `have_top` gates on band > 0).
     // Luma grid: 4×4-luma-cell resolution; 1 SB row = 16 cells (64×64 SB) or 32 (128×128).
     // Chroma grid: 8×8-luma-cell = 4×4-chroma-cell resolution; 1 SB row = half as many cells.
+    // §7.14.1 / dav1d `calc_lf_value_chroma`: a chroma plane whose frame-level
+    // `loop_filter_level[plane + 1]` is zero is not filtered at all -- the
+    // ref/mode deltas must not lift its edge levels above zero.
+    if plane_index > 0 && fh.loop_filter_level[plane_index + 1] == 0 {
+        return;
+    }
+    let olf_dbg = std::env::var("KINETIX_AV1_DBG_OLF")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        == Some(crate::debug_frame_seq::current());
     let luma_sb_step4 = if fh.use_128x128_superblock { 32 } else { 16 };
     let sb_step4 = if plane_index == 0 {
         luma_sb_step4
@@ -1092,6 +1102,20 @@ fn deblock_plane(
                         .map(|x| plane[71 * stride + x])
                         .collect::<Vec<u8>>()
                 );
+                }
+                if olf_dbg && edge >= 2 && edge + 2 <= width {
+                    let px = |x: usize| plane[y0 * stride + x];
+                    eprintln!(
+                        "KLF pl={plane_index} v x={edge} y={y0} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
+                        filter_size,
+                        lp.blimit,
+                        lp.limit,
+                        lp.thresh,
+                        px(edge - 2),
+                        px(edge - 1),
+                        px(edge),
+                        px(edge + 1)
+                    );
                 }
                 for y in y0..y0 + bh {
                     let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
@@ -1258,6 +1282,20 @@ fn deblock_plane(
                         .map(|y| plane[y * stride + 28])
                         .collect::<Vec<u8>>()
                 );
+                }
+                if olf_dbg && edge >= 2 && edge + 2 <= height {
+                    let px = |y: usize| plane[y * stride + x0];
+                    eprintln!(
+                        "KLF pl={plane_index} h x={x0} y={edge} wd={} E={} I={} H={} p1={} p0={} q0={} q1={}",
+                        filter_size,
+                        lp.blimit,
+                        lp.limit,
+                        lp.thresh,
+                        px(edge - 2),
+                        px(edge - 1),
+                        px(edge),
+                        px(edge + 1)
+                    );
                 }
                 for x in x0..x0 + bw {
                     let line: Vec<i32> =
