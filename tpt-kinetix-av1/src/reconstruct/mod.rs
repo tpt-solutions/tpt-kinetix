@@ -50,8 +50,9 @@ use crate::{
     entropy::SymbolDecoder,
     frame::FrameHeader,
     inter::{
-        compound_blend, motion_compensate, motion_compensate_prep, read_mv, read_single_ref_name,
-        InterCdfs, MotionField, MotionFieldCell, Mv, RefFrames, RefSlot, ALTREF_FRAME,
+        compound_blend, motion_compensate, motion_compensate_prep, motion_compensate_prep_scaled,
+        motion_compensate_scaled, read_mv, read_single_ref_name, InterCdfs, MotionField,
+        MotionFieldCell, Mv, RefFrames, RefScale, RefSlot, ALTREF_FRAME,
         INTERP_EIGHTTAP_REGULAR, INTERP_SWITCHABLE, LAST_FRAME, NEARESTMV, NEARMV, NEWMV,
         NONE_FRAME, ZEROMV,
     },
@@ -958,6 +959,10 @@ struct TileDecodeState<'a> {
     uv_h: usize,
     luma_max_x4: usize,
     luma_max_y4: usize,
+    /// Current frame's visible luma dims; compared with a reference's dims to
+    /// derive the §7.11.3.3 scale factors.
+    frame_w: usize,
+    frame_h: usize,
     uv_max_x4: usize,
     uv_max_y4: usize,
     monochrome: bool,
@@ -1303,6 +1308,10 @@ impl<'a> TileDecodeState<'a> {
             uv_h,
             luma_max_x4: width.div_ceil(4),
             luma_max_y4: height.div_ceil(4),
+            // Visible frame size (the scale-factor denominators of
+            // §7.11.3.3); `width`/`height` are the 8-aligned grid extent.
+            frame_w: if lr.upscaled_width > 0 { lr.upscaled_width } else { width },
+            frame_h: if lr.frame_height > 0 { lr.frame_height } else { height },
             uv_max_x4: uv_w.div_ceil(4),
             uv_max_y4: uv_h.div_ceil(4),
             monochrome,

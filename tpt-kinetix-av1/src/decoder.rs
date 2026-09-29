@@ -347,10 +347,7 @@ impl Av1Decoder {
                         &self.ref_frame_dims,
                     );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
-                        eprintln!(
-                            "KIN ObuType::Frame parse_with_dpb ok={}",
-                            parsed.is_ok()
-                        );
+                        eprintln!("KIN ObuType::Frame parse_with_dpb ok={}", parsed.is_ok());
                         if let Err(e) = &parsed {
                             eprintln!("KIN   err={e}");
                         }

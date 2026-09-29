@@ -14440,3 +14440,37 @@ changed, only the new debug example added).
       the next-biggest opportunities; unrelated to this session's fixes.
 - [ ] `pixel_exact` stays `false`.
 - [ ] `pixel_exact` stays `false` (FATE: 35/195 frames exact).
+## Session 2026-09-29 #5 -- switch_frame frames 30/31 now bit-exact (entropy + scaled MC)
+
+Aligned the patched-dav1d `Post-skip[..]: r=` sequence for frame 30 (1942
+entries) against Kinetix's `DBG b0 ... skip= rng=` sequence with a small
+script; first mismatch moved 203 -> 1710 -> none (1942/1942 match).
+
+Root causes (both entropy-side, neither related to RefSignBias/ref_order_hint):
+1. `find_mv_stack` compound extended-candidate search (intra_block.rs): the
+   `same[]`/`diff[]` arrays were WRITTEN as `[component][count]` but the merge
+   step and dav1d (`same[cnt++].mv.mv[n]`) use `[candidate][component]`. Only
+   visible when a compound block's stack had <2 entries and the neighbours were
+   populated; produced wrong mv0/mv1 at mi(row 28,col 2) of frame 30
+   (Kinetix mv0=(0,0) mv1=(19,-4) vs dav1d mv0=(0,22) mv1=(19,18)). Fixed.
+2. Intra blocks inside inter frames never cleared `skip_mode_above/left`
+   (dav1d decode.c memsets edge->skip_mode = 0 for them), so a later block's
+   skip_mode ctx read a stale 1 (mi(56,56): ctx 1 vs 0). Fixed in the
+   intra-in-inter context update in inter_block.rs.
+3. `TileDecodeState.frame_w/h` (scale-factor denominators) were the 8-aligned
+   grid extent (428 wide); now the visible size from `lr.upscaled_width` /
+   `lr.frame_height`. With that, the scaled-MC port (RefScale,
+   motion_compensate_scaled / _prep_scaled, put/prep_8tap_scaled_c) needed no
+   changes: 852x480 -> 426x240 SWITCH_FRAME frames 30 and 31 are byte-identical
+   to `dav1d --muxer yuv` (0 diff bytes each, was ~148.8k/150.1k of 153360;
+   Y PSNR was 11.5 dB).
+
+Regression: `cargo test -p tpt-kinetix-av1 --lib` 165/165; clippy -D warnings
+clean; av1_fate_score unchanged (decode_model 0/21, film_grain 0/10,
+frames_refs_short_signaling 1/50, non_uniform_tiling 6/24,
+seq_hdr_op_param_info 0/58, switch_frame 29/30, aggregate 36/193). The scorer
+still assumes a constant frame size so it cannot see frames 30/31 (see earlier
+Remaining item); those two were verified with dbg_dump_frame vs sf_ref.yuv.
+Scaled MC is only entered when ref dims != current dims.
+Not covered: scaled refs combined with superres (dav1d uses width[0]), and
+scaled local-warp/OBMC paths beyond what this stream exercises.

@@ -439,6 +439,179 @@ pub fn motion_compensate_prep(
     out
 }
 
+/// Reference-frame scale factors (§7.11.3.3): Q14 `xScale`/`yScale` plus the
+/// per-sample 1/1024 stepping derived from them (dav1d `f->svc[refidx]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefScale {
+    pub x: i32,
+    pub y: i32,
+    pub xstep: i32,
+    pub ystep: i32,
+}
+
+impl RefScale {
+    /// `None` when the reference has the same dimensions as the current frame
+    /// (the unscaled fast path applies).
+    pub fn new(ref_w: usize, ref_h: usize, cur_w: usize, cur_h: usize) -> Option<Self> {
+        if ref_w == cur_w && ref_h == cur_h {
+            return None;
+        }
+        let fac = |r: usize, c: usize| ((((r as i64) << 14) + (c as i64 >> 1)) / c as i64) as i32;
+        let x = fac(ref_w, cur_w);
+        let y = fac(ref_h, cur_h);
+        Some(RefScale {
+            x,
+            y,
+            xstep: (x + 8) >> 4,
+            ystep: (y + 8) >> 4,
+        })
+    }
+}
+
+/// Scaled block position in 1/1024-sample units (dav1d `scale_mv`).
+fn scaled_pos(dst: usize, mv: i32, bits: u32, scale: i32) -> i32 {
+    let val = ((dst as i64) << 4) + (mv as i64) * (1i64 << (4 - bits));
+    let s = scale as i64;
+    let tmp = val * s + (s - 0x4000) * 8;
+    let mag = ((tmp.abs() + 128) >> 8) as i32;
+    (if tmp < 0 { -mag } else { mag }) + 32
+}
+
+/// Shared core of the scaled 8-tap paths (dav1d `put_8tap_scaled_c` /
+/// `prep_8tap_scaled_c`). Returns the vertically filtered block; `prep`
+/// selects the compound intermediate rounding (`>> 6`, no clamp) instead of
+/// the final 8-bit one (`>> 10`, clamped).
+#[allow(clippy::too_many_arguments)]
+fn scaled_predict(
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dst_x: usize,
+    dst_y: usize,
+    bw: usize,
+    bh: usize,
+    mv: Mv,
+    filter_h: u8,
+    filter_v: u8,
+    hbits: u32,
+    vbits: u32,
+    sc: &RefScale,
+    prep: bool,
+) -> Vec<i32> {
+    let pos_x = scaled_pos(dst_x, mv.col, hbits, sc.x);
+    let pos_y = scaled_pos(dst_y, mv.row, vbits, sc.y);
+    let left = pos_x >> 10;
+    let top = pos_y >> 10;
+
+    // Per output column: source offset from `left` and its horizontal kernel.
+    let mut cols: Vec<(i32, [i32; 8])> = Vec::with_capacity(bw);
+    let mut imx = pos_x & 0x3ff;
+    let mut ioff = 0i32;
+    for _ in 0..bw {
+        cols.push((ioff, subpel_kernel(filter_h, imx >> 6, 4, bw <= 4)));
+        imx += sc.xstep;
+        ioff += imx >> 10;
+        imx &= 0x3ff;
+    }
+
+    let mid_row = |r_abs: i32| -> Vec<i32> {
+        let ry = r_abs.clamp(0, ref_h as i32 - 1) as usize * ref_stride;
+        cols.iter()
+            .map(|(off, k)| {
+                let mut s = 0i32;
+                for (t, &c) in k.iter().enumerate() {
+                    let sx = (left + off + t as i32 - 3).clamp(0, ref_w as i32 - 1);
+                    s += refp[ry + sx as usize] as i32 * c;
+                }
+                (s + 2) >> 2
+            })
+            .collect()
+    };
+
+    let mut cache: std::collections::HashMap<i32, Vec<i32>> = std::collections::HashMap::new();
+    let mut out = vec![0i32; bw * bh];
+    let mut my = pos_y & 0x3ff;
+    for y in 0..bh {
+        let src_y = my >> 10;
+        let kv = subpel_kernel(filter_v, (my & 0x3ff) >> 6, 4, bh <= 4);
+        let rows: Vec<i32> = (0..8).map(|k| top + src_y - 3 + k).collect();
+        for &r in &rows {
+            cache.entry(r).or_insert_with(|| mid_row(r));
+        }
+        for x in 0..bw {
+            let mut s = 0i32;
+            for (k, &c) in kv.iter().enumerate() {
+                s += cache[&rows[k]][x] * c;
+            }
+            out[y * bw + x] = if prep {
+                (s + 32) >> 6
+            } else {
+                ((s + 512) >> 10).clamp(0, 255)
+            };
+        }
+        my += sc.ystep;
+    }
+    out
+}
+
+/// Scaled-reference variant of [`motion_compensate`] (§7.11.3.3). `dst_x`/
+/// `dst_y` are frame-global plane coordinates and `mv` the luma MV, as for the
+/// unscaled routine.
+#[allow(clippy::too_many_arguments)]
+pub fn motion_compensate_scaled(
+    dest: &mut [u8],
+    dest_stride: usize,
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dst_x: usize,
+    dst_y: usize,
+    bw: usize,
+    bh: usize,
+    mv: Mv,
+    filter_h: u8,
+    filter_v: u8,
+    hbits: u32,
+    vbits: u32,
+    sc: &RefScale,
+) {
+    let out = scaled_predict(
+        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
+        vbits, sc, false,
+    );
+    for y in 0..bh {
+        for x in 0..bw {
+            dest[y * dest_stride + x] = out[y * bw + x] as u8;
+        }
+    }
+}
+
+/// Scaled-reference variant of [`motion_compensate_prep`].
+#[allow(clippy::too_many_arguments)]
+pub fn motion_compensate_prep_scaled(
+    refp: &[u8],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dst_x: usize,
+    dst_y: usize,
+    bw: usize,
+    bh: usize,
+    mv: Mv,
+    filter_h: u8,
+    filter_v: u8,
+    hbits: u32,
+    vbits: u32,
+    sc: &RefScale,
+) -> Vec<i32> {
+    scaled_predict(
+        refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits,
+        vbits, sc, true,
+    )
+}
+
 /// Blend two compound "prep" predictions (§7.11.3.1). `weight` is the
 /// `jnt_weight` in sixteenths for `preds[0]` (`8` = plain average). 8-bit:
 /// `InterPostRound = 4`, so `avg` is `Round2(sum, 5)` and `w_avg` is

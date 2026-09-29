@@ -23,7 +23,9 @@ fn split_ivf_frames(ivf: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: dbg_decode_all <ivf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: dbg_decode_all <ivf>");
     let bytes = std::fs::read(&path).expect("read ivf");
     let packets = split_ivf_frames(&bytes);
     let mut dec = Av1Decoder::new();

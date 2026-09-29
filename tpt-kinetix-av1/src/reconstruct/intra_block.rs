@@ -1767,7 +1767,8 @@ impl<'a> TileDecodeState<'a> {
                 let sign0 = sign_bias(want_refs[0]);
                 let sign1 = sign_bias(want_refs[1]);
                 // `same[i][n]`: component `n` of pair candidate `i`;
-                // `diff[k][n]`: component `n` of opposite-ref candidate `k`.
+                // `diff[k][n]`: component `n` of opposite-ref candidate `k`
+                // (index order matches dav1d's `same[cnt++].mv.mv[n]`).
                 let mut same = [[Mv::default(); 2]; 2];
                 let mut same_cnt = [0usize; 2];
                 let mut diff = [[Mv::default(); 2]; 2];
@@ -1781,11 +1782,11 @@ impl<'a> TileDecodeState<'a> {
                         let cand_mv = cand.mv[n];
                         if cand_ref == want_refs[0] {
                             if same_cnt[0] < 2 {
-                                same[0][same_cnt[0]] = cand_mv;
+                                same[same_cnt[0]][0] = cand_mv;
                                 same_cnt[0] += 1;
                             }
                             if diff_cnt[1] < 2 {
-                                diff[1][diff_cnt[1]] = if sign1 ^ sign_bias(cand_ref) {
+                                diff[diff_cnt[1]][1] = if sign1 ^ sign_bias(cand_ref) {
                                     Mv::new(-cand_mv.row, -cand_mv.col)
                                 } else {
                                     cand_mv
@@ -1794,11 +1795,11 @@ impl<'a> TileDecodeState<'a> {
                             }
                         } else if cand_ref == want_refs[1] {
                             if same_cnt[1] < 2 {
-                                same[1][same_cnt[1]] = cand_mv;
+                                same[same_cnt[1]][1] = cand_mv;
                                 same_cnt[1] += 1;
                             }
                             if diff_cnt[0] < 2 {
-                                diff[0][diff_cnt[0]] = if sign0 ^ sign_bias(cand_ref) {
+                                diff[diff_cnt[0]][0] = if sign0 ^ sign_bias(cand_ref) {
                                     Mv::new(-cand_mv.row, -cand_mv.col)
                                 } else {
                                     cand_mv
@@ -1808,7 +1809,7 @@ impl<'a> TileDecodeState<'a> {
                         } else {
                             let inv = Mv::new(-cand_mv.row, -cand_mv.col);
                             if diff_cnt[0] < 2 {
-                                diff[0][diff_cnt[0]] = if sign0 ^ sign_bias(cand_ref) {
+                                diff[diff_cnt[0]][0] = if sign0 ^ sign_bias(cand_ref) {
                                     inv
                                 } else {
                                     cand_mv
@@ -1816,7 +1817,7 @@ impl<'a> TileDecodeState<'a> {
                                 diff_cnt[0] += 1;
                             }
                             if diff_cnt[1] < 2 {
-                                diff[1][diff_cnt[1]] = if sign1 ^ sign_bias(cand_ref) {
+                                diff[diff_cnt[1]][1] = if sign1 ^ sign_bias(cand_ref) {
                                     inv
                                 } else {
                                     cand_mv

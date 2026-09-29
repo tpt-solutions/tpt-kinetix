@@ -753,6 +753,9 @@ impl<'a> TileDecodeState<'a> {
             // scan skips them); leaving the previous inter block's ref/MV
             // here made OBMC blend with phantom neighbours.
             for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+                if let Some(s) = self.skip_mode_left.get_mut(r) {
+                    *s = 0;
+                }
                 if let Some(s) = self.is_inter_left.get_mut(r) {
                     *s = 0;
                 }
@@ -769,6 +772,9 @@ impl<'a> TileDecodeState<'a> {
                 }
             }
             for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+                if let Some(s) = self.skip_mode_above.get_mut(c) {
+                    *s = 0;
+                }
                 if let Some(s) = self.is_inter_above.get_mut(c) {
                     *s = 0;
                 }
@@ -1336,10 +1342,18 @@ impl<'a> TileDecodeState<'a> {
             if eligible {
                 let (num_samples, raw_samples) =
                     self.find_num_warp_samples(mi_row, mi_col, bsize, ref_names[0], mvs[0]);
-                // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate) is
-                // not modelled — none of the corpus streams use reference
-                // scaling, so it is always treated as false.
-                let allow_warp = self.allow_warped_motion && !force_integer_mv && num_samples > 0;
+                // `is_scaled(RefFrame[0])` (spec's fourth `use_obmc` gate;
+                // dav1d `allow_warp = !svc[ref][0].scale && ...`).
+                let ref0_scaled = self.ref_to_slot.get(ref_names[0] as usize).is_some_and(|&s| {
+                    self.ref_slots.slots.get(s as usize).copied().flatten().is_some_and(|rf| {
+                        RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                            .is_some()
+                    })
+                });
+                let allow_warp = self.allow_warped_motion
+                    && !force_integer_mv
+                    && num_samples > 0
+                    && !ref0_scaled;
                 if allow_warp {
                     motion_mode = self
                         .dec
@@ -2063,41 +2077,43 @@ impl<'a> TileDecodeState<'a> {
             .ok()
             .and_then(|s| {
                 let (a, b) = s.split_once(',')?;
-                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
             });
         let chroma_xy_hit = chroma_xy_target.is_some_and(|(tx, ty)| {
             tx >= cpx_x0 && tx < cpx_x0 + cbw_px && ty >= cpx_y0 && ty < cpx_y0 + cbh_px
         }) && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f);
-        let chroma_snap: Vec<(usize, Vec<u8>)> =
-            if (pred_target.is_some_and(|(tc, tr)| {
-                (tc, tr) == (mi_col, mi_row)
-                    && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
-            }) || chroma_xy_hit)
-                && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
-            {
-                let cx0 = cpx_x0;
-                let cy0 = cpx_y0;
-                let cbw = cbw_px;
-                let cbh = cbh_px;
-                let mut out = Vec::new();
-                for idx in 0..2usize {
-                    let mut s = Vec::with_capacity(cbw * cbh);
-                    for y in cy0..cy0 + cbh {
-                        for x in cx0..cx0 + cbw {
-                            let v = if idx == 0 {
-                                self.u_plane[y * self.uv_stride + x]
-                            } else {
-                                self.v_plane[y * self.uv_stride + x]
-                            };
-                            s.push(v);
-                        }
+        let chroma_snap: Vec<(usize, Vec<u8>)> = if (pred_target.is_some_and(|(tc, tr)| {
+            (tc, tr) == (mi_col, mi_row)
+                && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
+        }) || chroma_xy_hit)
+            && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
+        {
+            let cx0 = cpx_x0;
+            let cy0 = cpx_y0;
+            let cbw = cbw_px;
+            let cbh = cbh_px;
+            let mut out = Vec::new();
+            for idx in 0..2usize {
+                let mut s = Vec::with_capacity(cbw * cbh);
+                for y in cy0..cy0 + cbh {
+                    for x in cx0..cx0 + cbw {
+                        let v = if idx == 0 {
+                            self.u_plane[y * self.uv_stride + x]
+                        } else {
+                            self.v_plane[y * self.uv_stride + x]
+                        };
+                        s.push(v);
                     }
-                    out.push((idx, s));
                 }
-                out
-            } else {
-                Vec::new()
-            };
+                out.push((idx, s));
+            }
+            out
+        } else {
+            Vec::new()
+        };
         self.add_inter_residual(mi_row, mi_col, bsize, skip, &leaves)?;
         // Show how the residual changed the prediction, row by row.
         if !pred_snap.is_empty() {
@@ -2776,12 +2792,13 @@ impl<'a> TileDecodeState<'a> {
         // `KINETIX_AV1_DBG_OBMC_XY=<mi_col>,<mi_row>` overrides the default
         // hardcoded probe block; `KINETIX_AV1_DBG_OBMC_PLANE` overrides the
         // default plane (1 = U).
-        let obmc_xy_target = std::env::var("KINETIX_AV1_DBG_OBMC_XY")
-            .ok()
-            .and_then(|s| {
-                let (a, b) = s.split_once(',')?;
-                Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
-            });
+        let obmc_xy_target = std::env::var("KINETIX_AV1_DBG_OBMC_XY").ok().and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
         let obmc_plane = std::env::var("KINETIX_AV1_DBG_OBMC_PLANE")
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
@@ -2846,23 +2863,46 @@ impl<'a> TileDecodeState<'a> {
             let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
             let vis_w = (rf.real_width + ss_hor as usize) >> ss_hor;
             let vis_h = (rf.real_height + ss_ver as usize) >> ss_ver;
-            motion_compensate(
-                &mut obmc,
-                pred_w,
-                rp,
-                rw,
-                vis_w,
-                vis_h,
-                px + (self.tile_px_x0 >> ss_hor),
-                py + (self.tile_px_y0 >> ss_ver),
-                pred_w,
-                pred_h,
-                mv,
-                filters[1],
-                filters[0],
-                hbits,
-                vbits,
-            );
+            if let Some(sc) =
+                RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+            {
+                motion_compensate_scaled(
+                    &mut obmc,
+                    pred_w,
+                    rp,
+                    rw,
+                    vis_w,
+                    vis_h,
+                    px + (self.tile_px_x0 >> ss_hor),
+                    py + (self.tile_px_y0 >> ss_ver),
+                    pred_w,
+                    pred_h,
+                    mv,
+                    filters[1],
+                    filters[0],
+                    hbits,
+                    vbits,
+                    &sc,
+                );
+            } else {
+                motion_compensate(
+                    &mut obmc,
+                    pred_w,
+                    rp,
+                    rw,
+                    vis_w,
+                    vis_h,
+                    px + (self.tile_px_x0 >> ss_hor),
+                    py + (self.tile_px_y0 >> ss_ver),
+                    pred_w,
+                    pred_h,
+                    mv,
+                    filters[1],
+                    filters[0],
+                    hbits,
+                    vbits,
+                );
+            }
             let mask = obmc_mask(if pass == 0 { pred_h } else { pred_w });
             let dst = match plane {
                 1 => &mut self.u_plane,
@@ -3272,7 +3312,17 @@ impl<'a> TileDecodeState<'a> {
                     // still not pixel-exact and future sessions will want it.
                     let warp_forced_off = std::env::var("KINETIX_AV1_NO_WARP").is_ok();
                     match warp_model {
-                        Some(model) if warp_eligible && !warp_forced_off => {
+                        Some(model)
+                            if warp_eligible
+                                && !warp_forced_off
+                                && RefScale::new(
+                                    rf.real_width,
+                                    rf.real_height,
+                                    self.frame_w,
+                                    self.frame_h,
+                                )
+                                .is_none() =>
+                        {
                             if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                                 eprintln!(
                                     "DBG warp APPLY plane={plane} mi=({mi_col},{mi_row}) bw={bw} bh={bh} model={model:?}"
@@ -3313,23 +3363,49 @@ impl<'a> TileDecodeState<'a> {
                             // coordinates (dav1d's `t->bx/by` are frame-global),
                             // or every tile below/right of the origin
                             // motion-compensates from the wrong region.
-                            motion_compensate(
-                                &mut t,
-                                bw,
-                                rp,
-                                rw,
-                                vis_w,
-                                vis_h,
-                                px_x + (self.tile_px_x0 >> ss_hor),
-                                px_y + (self.tile_px_y0 >> ss_ver),
-                                bw,
-                                bh,
-                                mvs[0],
-                                filters[1],
-                                filters[0],
-                                hbits,
-                                vbits,
-                            );
+                            if let Some(sc) = RefScale::new(
+                                rf.real_width,
+                                rf.real_height,
+                                self.frame_w,
+                                self.frame_h,
+                            ) {
+                                motion_compensate_scaled(
+                                    &mut t,
+                                    bw,
+                                    rp,
+                                    rw,
+                                    vis_w,
+                                    vis_h,
+                                    px_x + (self.tile_px_x0 >> ss_hor),
+                                    px_y + (self.tile_px_y0 >> ss_ver),
+                                    bw,
+                                    bh,
+                                    mvs[0],
+                                    filters[1],
+                                    filters[0],
+                                    hbits,
+                                    vbits,
+                                    &sc,
+                                );
+                            } else {
+                                motion_compensate(
+                                    &mut t,
+                                    bw,
+                                    rp,
+                                    rw,
+                                    vis_w,
+                                    vis_h,
+                                    px_x + (self.tile_px_x0 >> ss_hor),
+                                    px_y + (self.tile_px_y0 >> ss_ver),
+                                    bw,
+                                    bh,
+                                    mvs[0],
+                                    filters[1],
+                                    filters[0],
+                                    hbits,
+                                    vbits,
+                                );
+                            }
                         }
                     }
                 }
@@ -3423,21 +3499,42 @@ impl<'a> TileDecodeState<'a> {
                     let ss_ver = (plane != 0) as u32 & self.subsampling_y as u32;
                     let vis_w = (rf.real_width + ss_hor as usize) >> ss_hor;
                     let vis_h = (rf.real_height + ss_ver as usize) >> ss_ver;
-                    motion_compensate_prep(
-                        rp,
-                        rw,
-                        vis_w,
-                        vis_h,
-                        px_x + (self.tile_px_x0 >> ss_hor),
-                        px_y + (self.tile_px_y0 >> ss_ver),
-                        bw,
-                        bh,
-                        mv,
-                        filters[1],
-                        filters[0],
-                        hbits,
-                        vbits,
-                    )
+                    if let Some(sc) =
+                        RefScale::new(rf.real_width, rf.real_height, self.frame_w, self.frame_h)
+                    {
+                        motion_compensate_prep_scaled(
+                            rp,
+                            rw,
+                            vis_w,
+                            vis_h,
+                            px_x + (self.tile_px_x0 >> ss_hor),
+                            px_y + (self.tile_px_y0 >> ss_ver),
+                            bw,
+                            bh,
+                            mv,
+                            filters[1],
+                            filters[0],
+                            hbits,
+                            vbits,
+                            &sc,
+                        )
+                    } else {
+                        motion_compensate_prep(
+                            rp,
+                            rw,
+                            vis_w,
+                            vis_h,
+                            px_x + (self.tile_px_x0 >> ss_hor),
+                            px_y + (self.tile_px_y0 >> ss_ver),
+                            bw,
+                            bh,
+                            mv,
+                            filters[1],
+                            filters[0],
+                            hbits,
+                            vbits,
+                        )
+                    }
                 } else {
                     vec![0i32; bw * bh]
                 }
