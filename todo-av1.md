@@ -13524,3 +13524,55 @@ Also verified: `cargo test -p tpt-kinetix-av1 --lib` — 165 passed, 0 failed.
       never applied). Because no FATE stream in this corpus exercises
       `uses_lr == true`, this gap is still untested by anything on disk.
 - [ ] `pixel_exact` stays `false` (9/195 FATE frames exact).
+## Session 2026-09-29 (localization) — `switch_frame` frame 2 is a CHROMA-ONLY
+## inter-prediction bug, upstream of both the deblock and CDEF stages
+
+Added `examples/av1_frame_locate.rs` (env: `KINETIX_AV1_LOC_IVF` / `_REF` /
+`_FRAME` / `_MAX`) which decodes to a chosen frame and reports every differing
+sample as (plane, x, y, ours, ref, delta) with a per-plane bounding box. It
+made this lead tractable; the previous harnesses only diffed a selected frame
+against a fresh decode and could not attribute the delta.
+
+### What frame 2 actually is (852x480, `switch_frame`)
+| | differing samples |
+|---|---|
+| plane Y (luma) | **0 — bit-exact** |
+| plane U | 85, bbox x[9..415] y[8..205] |
+| plane V | 48, bbox x[9..415] y[8..205] |
+| total | 133, maxabs=11 |
+
+Deltas are overwhelmingly ±1 with a few outliers (V(26,44) = -11,
+V(26,45) = +4/+6), scattered frame-wide rather than clustered in one block —
+the signature of a per-block rounding/quantization difference, not a
+mis-decoded or missing block.
+
+### The decisive bisect (this is the useful part)
+`KINETIX_AV1_NODEBLOCK=1` (deblocking off) and `KINETIX_AV1_NOCDEF=1`, alone
+and **combined**, all leave the count at exactly **133**, identical bbox,
+identical per-sample deltas. So neither the deblock pass nor CDEF introduces
+or masks the divergence — **the chroma error is already present in the
+reconstructed pixel buffer before any in-loop filter runs.**
+
+Frames 0 and 1 are **0 differing** (both intra). Frame 0 being exact also
+rules out the reference dump being misaligned or the 4:2:0 plane geometry
+being wrong, and rules out intra chroma reconstruction as the culprit.
+
+**Conclusion: intra chroma reconstruction is correct; inter chroma
+prediction and/or inter chroma residual is wrong.** That splits the
+remaining surface roughly in half and is a much better starting point than
+"frame 3 has 20204 differing bytes".
+
+### Next step (do these first)
+- [ ] Diff one affected chroma block's *prediction* (pre-residual) against
+      dav1d, not the final pixel. `inter_predict_plane` already takes the
+      subsampling-aware `(3 + subsampling_x, 3 + subsampling_y)` sub-pel
+      bits; the prime suspects are (a) chroma MV scaling for the 4:2:0
+      `hbits`/`vbits` derivation, (b) the compound/mask path's `uv_stride` /
+      `tile_cw` / `tile_ch` handling, (c) the OBMC/warp path, which per this
+      file's own comments is translation-only outside a derived local warp
+      model.
+- [ ] Check whether the affected blocks are OBMC or compound — if the
+      differing set is exactly the OBMC blocks, that collapses the search.
+- [ ] Once frame 2 is fixed, re-run `av1_fate_score`: frame 3's 20204 is
+      likely a downstream consequence and may close with it, which would
+      make `switch_frame` 3/32 rather than 2/32.
