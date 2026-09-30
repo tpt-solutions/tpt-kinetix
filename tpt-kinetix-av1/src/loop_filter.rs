@@ -2330,6 +2330,12 @@ pub fn apply_post_filters(
         }
     }
     let sub_y = subsampling_y as usize;
+    // dav1d builds its loop-filter masks over the visible frame's 4-sample
+    // units (`f->w4`/`f->h4`), rounded up to whole chroma cells; edges at or
+    // beyond that are never filtered. Only 4:2:0 makes this equal the padded
+    // chroma grid, so bound the passes explicitly.
+    let chroma_lf_cols = (((fh.width as usize).div_ceil(4) + sub_x) >> sub_x).min(meta.cw4);
+    let chroma_lf_rows = (((fh.height as usize).div_ceil(4) + sub_y) >> sub_y).min(meta.ch4);
     if !skip_deblock {
         deblock_plane(
             u_plane,
@@ -2349,8 +2355,8 @@ pub fn apply_post_filters(
             meta.w4,
             1,
             meta.cw4,
-            meta.ch4,
-            meta.cw4,
+            chroma_lf_rows,
+            chroma_lf_cols,
             fh,
             &meta.lf_level_u4,
             meta.cw4,
@@ -2391,8 +2397,8 @@ pub fn apply_post_filters(
             meta.w4,
             1,
             meta.cw4,
-            meta.ch4,
-            meta.cw4,
+            chroma_lf_rows,
+            chroma_lf_cols,
             fh,
             &meta.lf_level_v4,
             meta.cw4,
